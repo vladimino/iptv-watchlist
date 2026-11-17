@@ -511,7 +511,7 @@ assert.equal(DISCOVERY_EPG_PRIORITY_POLL_MS,60000);
  for(const name of ['importSegment','writeContinuation','writeWorkflow'])assert.equal(classes[name],'priority',name+' carries the predicate');
  for(const name of ['loadingFence','beginLedgerSeal'])assert.equal(classes[name],'holder',name+' is the lease holder\'s');
  // Every acquireLease call outside the authority is `epg` or goes through the Discovery default.
- for(const file of ['src/worker.js','src/epg-diagnostic-run.js','src/discovery.js','src/discovery-workflow.js','src/monitor.js','src/mcp.js','src/d1-enrichment.js','src/admin/discovery-recovery.js']){
+ for(const file of ['src/worker.js','src/discovery.js','src/discovery-workflow.js','src/monitor.js','src/mcp.js','src/d1-enrichment.js','src/admin/discovery-recovery.js']){
   const text=fs.readFileSync(file,'utf8');
   for(const match of text.matchAll(/DiscoveryAuthority\.acquireLease\(([^;]*);/g)){
    const argument=match[1];

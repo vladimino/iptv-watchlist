@@ -85,6 +85,7 @@ export const ACTION_ISSUE_REASON_COPY = Object.freeze({
   metadata_missing: 'метаданных нет совсем',
   eligible_work_without_runs: 'есть готовая работа, но обработка не запускалась',
   all_deferred_by_retry: 'вся работа отложена до повторных попыток',
+  prediction_retry_exhausted: 'десять ошибок прогноза исчерпали автоматический повтор',
   continuation_running_stale: 'продолжение обработки давно не отвечает',
   continuation_not_advanced: 'продолжение обработки не продвинулось',
   poster_missing: 'нет постера',

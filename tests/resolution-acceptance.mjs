@@ -240,4 +240,88 @@ const cheburashka=score(observe('чебурашка 2|2025','Чебурашка 
 assert.equal(cheburashka.reason,'accepted_unique_evidence');
 assert.equal(bound(cheburashka,{observation:{normalizedTitle:'чебурашка 2',year:2025,durations:[103]},tmdbDetail:{authority:'tmdb_detail',tmdbId:'1228477',evidence:{movie:{id:'1228477',title:'Чебурашка 2',original:'Cheburashka',aliases:[],year:2026,runtime:103}}}}).outcome,'detail_verified');
 
+function policyDetail(id,title,year,runtime,genres,extra={}){
+ return {authority:'tmdb_detail',tmdbId:String(id),evidence:{movie:{id:String(id),title,original:extra.original||title,aliases:extra.aliases||[],year,runtime,overview:extra.overview??'',genres,genreIds:extra.genreIds}}};
+}
+function policyBound(key,title,year,runtime,id,genres,extra={}){
+ const scored=score(observe(key,title,year,runtime),[film(String(id),title,year,runtime)]);
+ return bound(scored,{observation:{normalizedTitle:title.toLowerCase(),year,durations:[runtime],categories:extra.categories||[]},tmdbDetail:policyDetail(id,extra.original||title,year,runtime,genres,extra),confirmation:extra.confirmation||null,film:extra.film||null,appliedObservationKeys:extra.appliedObservationKeys||[]});
+}
+const robbieScore=score(observe('robbie williams live at the apple music festival|2016','Robbie Williams: Live at the Apple Music Festival',2016,82),[film('1326142','Robbie Williams: Live at the Apple Music Festival',2016,82)]);
+const robbieDetail=policyDetail('1326142','Robbie Williams: Live at the Apple Music Festival',2016,82,['Музыка']);
+const robbieObservation={normalizedTitle:'robbie williams live at the apple music festival',year:2016,durations:[82],categories:['Концерт']};
+const robbieHold=bound(robbieScore,{observation:robbieObservation,tmdbDetail:robbieDetail});
+assert.equal(robbieHold.outcome,'candidate_decision');
+assert.equal(robbieHold.reason,'concert_recording');
+assert.equal(robbieHold.candidateDecision.status,'no_confident_match');
+assert.equal(robbieHold.transition,null);
+assert.equal(robbieHold.filmChange,null);
+assert.equal(bound(robbieScore,{observation:{...robbieObservation,categories:[]},tmdbDetail:robbieDetail}).reason,'concert_recording');
+const robbieOwner={authority:'owner',tmdbId:'1326142',evidence:{authority:'owner',reviewed:true,tmdbId:'1326142'}};
+assert.equal(bound(robbieScore,{observation:robbieObservation,tmdbDetail:robbieDetail,confirmation:robbieOwner}).reason,'concert_recording');
+assert.equal(bound(robbieScore,{observation:robbieObservation,tmdbDetail:robbieDetail,confirmation:robbieOwner,film:{id:'tmdb_1326142',canonicalIdentity:'tmdb:1326142',externalIds:[{scheme:'tmdb',value:'1326142',trusted:true,conflicting:false}]},appliedObservationKeys:['robbie williams live at the apple music festival|2016']}).outcome,'already_applied');
+const tvMovieScore=score(observe('made for tv|1999','Made For Tv',1999,96),[film('7001','Made For Tv',1999,96)]);
+assert.equal(bound(tvMovieScore,{observation:{normalizedTitle:'made for tv',year:1999,durations:[96],categories:['Концерт']},tmdbDetail:policyDetail('7001','Made For Tv',1999,96,[{id:10770,name:'TV Movie'}],{genreIds:[10770]})}).outcome,'detail_verified');
+const tvConcert=policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7102',[{id:10770,name:'TV Movie'}],{categories:['Концерт'],overview:'A filmed live performance of the tour.',genreIds:[10770]});
+assert.equal(tvConcert.outcome,'candidate_decision');
+assert.equal(tvConcert.reason,'concert_recording');
+assert.equal(tvConcert.transition,null);
+const tvConcertOwner={authority:'owner',tmdbId:'7102',evidence:{authority:'owner',reviewed:true,tmdbId:'7102'}};
+assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7102',[{id:10770,name:'TV Movie'}],{categories:['Концерт'],overview:'A filmed live performance of the tour.',genreIds:[10770],confirmation:tvConcertOwner}).reason,'concert_recording');
+assert.equal(policyBound('television feature|1999','Television Feature',1999,96,'7103',[{id:10770,name:'TV Movie'}],{categories:['Концерт'],overview:'A filmed live performance.',genreIds:[10770]}).reason,'concert_recording');
+for(const categories of [['Фильм'],[]]){
+ assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7104',[{id:10770,name:'TV Movie'}],{categories,overview:'A filmed live performance of the tour.',genreIds:[10770]}).reason,'concert_recording',JSON.stringify(categories));
+}
+assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7108',[],{categories:['Фильм'],overview:'A filmed live performance of the tour.'}).reason,'concert_recording');
+assert.equal(policyBound('telefilm live at the hall|1998','Telefilm Live at the Hall',1998,90,'7105',['телефильм'],{categories:['Концерт'],overview:'A synopsis.'}).reason,'concert_recording');
+assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7109',[{id:10770,name:'TV Movie'}],{categories:['Фильм'],overview:'A synopsis.',genreIds:[10770]}).outcome,'detail_verified');
+assert.equal(policyBound('arena night|1998','Arena Night',1998,90,'7110',[{id:10770,name:'TV Movie'}],{categories:['Фильм'],overview:'A filmed live performance of the tour.',genreIds:[10770]}).outcome,'detail_verified');
+for(const [label,genres,categories,overview] of [
+ ['documentary only',[{id:99,name:'Documentary'}],['Фильм'],'A feature about climbing.'],
+ ['documentary only, no category',[{id:99,name:'Documentary'}],[],''],
+ ['documentary and crime',[{id:99,name:'Documentary'},{id:80,name:'Crime'}],['Фильм'],''],
+ ['documentary and history',[{id:99,name:'Documentary'},{id:36,name:'History'}],[],''],
+ ['documentary and music',[{id:99,name:'Documentary'},{id:10402,name:'Music'}],['Концерт'],'A concert film.'],
+ ['documentary and drama',[{id:99,name:'Documentary'},{id:18,name:'Drama'}],['Фильм'],''],
+ ['documentary and tv movie',[{id:99,name:'Documentary'},{id:10770,name:'TV Movie'}],[],''],
+ ['documentary name fallback',['документальный'],['Фильм'],''],
+ ['documentary id list',[],[],'']
+]){
+ const extra=label==='documentary id list'?{genreIds:[99]}:{};
+ const held=policyBound(label+'|1990',label,1990,90,'900',genres,{categories,overview,...extra});
+ assert.equal(held.reason,'documentary_excluded',label);
+ assert.equal(held.candidateDecision.status,'no_confident_match',label);
+ assert.equal(held.transition,null,label);
+}
+const docOwner={authority:'owner',tmdbId:'841',evidence:{authority:'owner',reviewed:true,tmdbId:'841'}};
+assert.equal(policyBound('stop making sense|1984','Stop Making Sense',1984,88,'841',[{id:99,name:'Documentary'},{id:10402,name:'Music'}],{categories:['Фильм'],confirmation:docOwner}).reason,'documentary_excluded');
+assert.equal(policyBound('mislabeled documentary|1990','Mislabeled Documentary',1990,100,'901',[{id:18,name:'Documentary'}]).outcome,'detail_verified');
+const pompeiiGenres=[{id:10402,name:'Music'}];
+for(const categories of [[],['Фильм'],['Концерт','Фильм'],['Music','Кино'],['Концерт']]){
+ const held=policyBound('pink floyd live at pompeii|1972','Pink Floyd Live at Pompeii',1972,85,'19204',pompeiiGenres,{categories,original:'Pink Floyd: Live at Pompeii',genreIds:[10402]});
+ assert.equal(held.reason,'concert_recording',JSON.stringify(categories));
+ assert.equal(held.transition,null);
+}
+const pompeiiOwner={authority:'owner',tmdbId:'19204',evidence:{authority:'owner',reviewed:true,tmdbId:'19204'}};
+assert.equal(policyBound('pink floyd live at pompeii|1972','Pink Floyd Live at Pompeii',1972,85,'19204',pompeiiGenres,{categories:['Фильм'],confirmation:pompeiiOwner,genreIds:[10402]}).reason,'concert_recording');
+assert.equal(policyBound('concert film|1984','Concert Film',1984,88,'841',[{id:10402,name:'Music'}],{genreIds:[10402],overview:'A concert recording of a band.'}).reason,'concert_recording');
+const concertHold=policyBound('the concert|2009','The Concert',2009,119,'19406',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'A synopsis.',genreIds:[10402]});
+assert.equal(concertHold.outcome,'needs_verification');
+assert.equal(concertHold.reason,'concert_recording_ambiguous');
+assert.equal(concertHold.transition,null);
+assert.equal(concertHold.filmChange,null);
+const concertOwner={authority:'owner',tmdbId:'19406',evidence:{authority:'owner',reviewed:true,tmdbId:'19406'}};
+assert.equal(policyBound('the concert|2009','The Concert',2009,119,'19406',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'A synopsis.',genreIds:[10402],confirmation:concertOwner}).outcome,'detail_verified');
+const bohemianOverview='The story of Freddie Mercury and Queen, including their Live Aid concert.';
+for(const categories of [['Фильм'],[],['Концерт'],['Music']]){
+ assert.equal(policyBound('bohemian rhapsody|2018','Bohemian Rhapsody',2018,134,'424694',[{id:18,name:'Drama'},{id:10402,name:'Music'}],{categories,overview:bohemianOverview,genreIds:[18,10402]}).outcome,'detail_verified',JSON.stringify(categories));
+}
+assert.equal(policyBound('live by night|2016','Live by Night',2016,129,'259693',[{id:80,name:'Crime'},{id:18,name:'Drama'}],{overview:'A crime story.'}).outcome,'detail_verified');
+assert.equal(policyBound('the concert|2009','The Concert',2009,119,'19407',[{id:35,name:'Comedy'},{id:18,name:'Drama'}],{categories:['Фильм'],overview:'A drama about musicians who missed a concert.'}).outcome,'detail_verified');
+assert.equal(policyBound('rhythm of the road|2011','Rhythm of the Road',2011,100,'88001',[{id:10402,name:'Music'}],{overview:'A fictional band spends a summer writing songs.',genreIds:[10402]}).outcome,'detail_verified');
+assert.equal(policyBound('summer notes|2014','Summer Notes',2014,102,'88011',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'Two musicians live in Paris and form a band.',genreIds:[10402]}).outcome,'detail_verified');
+assert.equal(policyBound('quiet days|2014','Quiet Days',2014,102,'88012',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'The singers live above the club and write songs.',genreIds:[10402]}).outcome,'detail_verified');
+assert.equal(policyBound('band live in paris|2012','Band Live in Paris',2012,100,'88013',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'Two musicians live in Paris and form a band.',genreIds:[10402]}).reason,'concert_recording');
+assert.equal(policyBound('ordinary film|1995','Ordinary Film',1995,170,'949',[{id:18,name:'Drama'},{id:80,name:'Crime'}]).outcome,'detail_verified');
+
 console.log('Scored identity acceptance passed.');

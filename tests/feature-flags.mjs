@@ -30,7 +30,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
   if(href.startsWith('https://query.wikidata.org/sparql'))return Response.json({results:{bindings:[]}});
   throw new Error('Unexpected network access '+href);
  }});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/prediction-diagnostics.js','src/d1-enrichment.js','src/feature-flags.js','src/mcp.js','src/continuation.js','src/worker.js']){
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/d1-enrichment.js','src/feature-flags.js','src/mcp.js','src/continuation.js','src/worker.js']){
  vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 }
 const encode=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -105,8 +105,8 @@ const fingerprintRule=l('PREDICTION_FINGERPRINT_COMPATIBILITY');
 assert.deepEqual([fingerprintRule.state,fingerprintRule.raw,fingerprintRule.retired,fingerprintRule.valid,fingerprintRule.issue,fingerprintRule.effective],['set','selective',true,false,'retired',null],'the retired fingerprint rule switch is inert and the production selective is visible (ADR 0047)');
 const fingerprintWriter=l('FINGERPRINT_VERSION_OBJECTS');
 assert.deepEqual([fingerprintWriter.state,fingerprintWriter.raw,fingerprintWriter.retired,fingerprintWriter.valid,fingerprintWriter.issue,fingerprintWriter.effective],['set','on',true,false,'retired',null],'the retired fingerprint writer switch is inert and the production on is visible (ADR 0046)');
-assert.equal(l('DISCOVERY_LEDGER_MODE').effective,'bounded');
-assert.match(l('DISCOVERY_LEDGER_MODE').note,/does not read storage/);
+assert.deepEqual([l('DISCOVERY_LEDGER_MODE').state,l('DISCOVERY_LEDGER_MODE').raw,l('DISCOVERY_LEDGER_MODE').retired,l('DISCOVERY_LEDGER_MODE').valid,l('DISCOVERY_LEDGER_MODE').issue,l('DISCOVERY_LEDGER_MODE').effective],['set','bounded',true,false,'retired',null],'the retired ledger-mode switch is inert and a leftover bounded is visible (ADR 0156)');
+assert.match(l('DISCOVERY_LEDGER_MODE').note,/inert/);
 const mark=l('FINDS_WATCHED_MARK');
 assert.deepEqual([mark.state,mark.raw,mark.retired,mark.valid,mark.issue,mark.effective],['set','on',true,false,'retired',null],'the retired watched-mark switch is inert and the production on is visible (ADR 0042)');
 const localization=l('LIFECYCLE_LOCALIZATION');
@@ -123,22 +123,32 @@ const posters=l('CATALOG_POSTER_HYDRATION');
 assert.deepEqual([posters.state,posters.raw,posters.retired,posters.valid,posters.issue,posters.effective],['set','off',true,false,'retired',null],'the retired poster hydration switch is inert and the production off is visible (ADR 0048)');
 const facts=l('LETTERBOXD_FACTS');
 assert.deepEqual([facts.state,facts.raw,facts.retired,facts.valid,facts.issue,facts.effective],['set','on',true,false,'retired',null],'the retired facts switch is inert and the production on is visible (ADR 0054)');
-assert.deepEqual(live.report.summary,{registered:REGISTERED.length,set:12,absent:REGISTERED.length-12,invalid:11,redacted:0});
+assert.deepEqual(live.report.summary,{registered:REGISTERED.length,set:12,absent:REGISTERED.length-12,invalid:12,redacted:0});
 
 // 3. No leakage: a value outside the known tokens is reported by shape only.
 const leaky=await flags({D1_ENRICHMENT_WRITE:'sk-'+SECRET,LETTERBOXD_FACTS:'On',LETTERBOXD_DIARY_HISTORY:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',REMOVAL_RATING_LOOKUP:'on'.repeat(150)});
 assert.doesNotMatch(leaky.text,new RegExp(SECRET),'a value outside the known tokens never leaves the Worker');
 const k=name=>entry(leaky.report,name);
-assert.deepEqual([k('D1_ENRICHMENT_WRITE').raw,k('D1_ENRICHMENT_WRITE').redacted,k('D1_ENRICHMENT_WRITE').shape,k('D1_ENRICHMENT_WRITE').issue,k('D1_ENRICHMENT_WRITE').effective],[null,true,{type:'string',length:('sk-'+SECRET).length},'unrecognized','off']);
+assert.deepEqual([k('D1_ENRICHMENT_WRITE').raw,k('D1_ENRICHMENT_WRITE').redacted,k('D1_ENRICHMENT_WRITE').shape,k('D1_ENRICHMENT_WRITE').issue,k('D1_ENRICHMENT_WRITE').effective,k('D1_ENRICHMENT_WRITE').retired],[null,true,{type:'string',length:('sk-'+SECRET).length},'retired',null,true]);
 assert.deepEqual([k('LETTERBOXD_FACTS').raw,k('LETTERBOXD_FACTS').redacted,k('LETTERBOXD_FACTS').issue,k('LETTERBOXD_FACTS').effective],[null,true,'retired',null],'a near miss of a retired switch is redacted, not echoed');
 assert.deepEqual([k('LETTERBOXD_DIARY_HISTORY').raw,k('LETTERBOXD_DIARY_HISTORY').shape,k('LETTERBOXD_DIARY_HISTORY').issue,k('LETTERBOXD_DIARY_HISTORY').effective,k('LETTERBOXD_DIARY_HISTORY').retired],[null,{type:'object'},'retired',null,true],'a non-string on the retired diary switch is redacted and inert');
 assert.deepEqual([k('LIFECYCLE_LOCALIZATION').raw,k('LIFECYCLE_LOCALIZATION').issue,k('LIFECYCLE_LOCALIZATION').effective],[null,'unrecognized_tokens','on'],'an unknown token redacts the whole list; the recognized token still decides');
-assert.deepEqual([k('DISCOVERY_LEDGER_MODE').raw,k('DISCOVERY_LEDGER_MODE').issue,k('DISCOVERY_LEDGER_MODE').effective],['bounded ','case_or_whitespace','full'],'a padded known token is shown, and it is invalid where the code does not trim');
+assert.deepEqual([k('DISCOVERY_LEDGER_MODE').raw,k('DISCOVERY_LEDGER_MODE').issue,k('DISCOVERY_LEDGER_MODE').effective,k('DISCOVERY_LEDGER_MODE').retired],['bounded ','retired',null,true],'a leftover padded token is shown and inert');
 assert.deepEqual([k('REMOVAL_RATING_LOOKUP').raw,k('REMOVAL_RATING_LOOKUP').shape,k('REMOVAL_RATING_LOOKUP').issue,k('REMOVAL_RATING_LOOKUP').effective,k('REMOVAL_RATING_LOOKUP').retired],[null,{type:'string',length:300},'retired',null,true],'an over-long value on the retired lookup switch is shape only and inert');
 assert.equal(leaky.report.summary.redacted,5);
 // No registered flag trims. A padded on is shown and is not the effective mode.
 const padded=entry((await flags({D1_ENRICHMENT_WRITE:' on '})).report,'D1_ENRICHMENT_WRITE');
-assert.deepEqual([padded.raw,padded.valid,padded.issue,padded.effective],[' on ',false,'case_or_whitespace','off']);
+assert.deepEqual([padded.raw,padded.valid,padded.issue,padded.effective,padded.retired],[' on ',false,'retired',null,true]);
+const kept=entry((await flags({D1_ENRICHMENT_WRITE:'on'})).report,'D1_ENRICHMENT_WRITE');
+assert.deepEqual([kept.raw,kept.valid,kept.issue,kept.effective],['on',false,'retired',null],'a leftover on does not select a mode');
+for(const name of ['D1_ENRICHMENT_WINDOW','D1_ENRICHMENT_BULK']){
+ const absent=entry(empty.report,name);
+ assert.deepEqual([absent.state,absent.valid,absent.issue,absent.effective,absent.default,absent.modes,absent.retired],['absent',true,null,null,null,[],true],name+' is inert when absent');
+ const set=entry((await flags({[name]:'on'})).report,name);
+ assert.deepEqual([set.state,set.raw,set.valid,set.issue,set.effective,set.default,set.modes,set.retired],['set','on',false,'retired',null,null,[],true],name+' is visibly set but cannot select a production path');
+ const malformed=entry((await flags({[name]:'enabled'})).report,name);
+ assert.deepEqual([malformed.state,malformed.raw,malformed.redacted,malformed.valid,malformed.issue,malformed.effective,malformed.retired],['set',null,true,false,'retired',null,true],name+' redacts an unknown value and stays inert');
+}
 
 // AIR-366: MONITOR is a permanent on/off gate. The retired dry token is not a mode: it is reported invalid and the effective mode is off.
 {
@@ -160,7 +170,6 @@ assert.deepEqual(unmet.report.flags.filter(item=>item.requires).map(item=>item.n
 // 5. Parity: the effective mode is what each consumer computes, for every value shape.
 const consumer={
  LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',
- DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',
 };
 const samples=[undefined,'',' ','on','inline','separate',' separate','separate ','Separate','SEPARATE',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','external','workflow','Workflow','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
 const reportOf=vm.runInContext('featureFlagReport',context);
@@ -182,12 +191,13 @@ for(const value of samples){const item=entry(reportOf({LETTERBOXD_FACTS:value}),
 for(const value of samples){const item=entry(reportOf({RATINGS_PIPELINE:value}),'RATINGS_PIPELINE');assert.equal(item.effective,null);assert.equal(item.retired,true);}
 for(const value of samples){const item=entry(reportOf({LETTERBOXD_DIARY_HISTORY:value}),'LETTERBOXD_DIARY_HISTORY');assert.equal(item.effective,null);assert.equal(item.retired,true);assert.equal(item.valid,value===undefined);assert.equal(item.issue,value===undefined?null:'retired');}
 for(const value of samples){const item=entry(reportOf({REMOVAL_RATING_LOOKUP:value}),'REMOVAL_RATING_LOOKUP');assert.equal(item.effective,null);assert.equal(item.retired,true);assert.equal(item.valid,value===undefined);assert.equal(item.issue,value===undefined?null:'retired');}
+for(const value of samples){const item=entry(reportOf({DISCOVERY_LEDGER_MODE:value}),'DISCOVERY_LEDGER_MODE');assert.equal(item.effective,null);assert.equal(item.retired,true);assert.equal(item.valid,value===undefined);assert.equal(item.issue,value===undefined?null:'retired');}
 
 // 6. Registry parity with the maintained reference and the governance checker.
 const reference=fs.readFileSync('docs/reference/feature-flags.md','utf8');
 const contract=reference.slice(reference.indexOf('## Configuration contract'),reference.indexOf('### Interactions'));
 const documented=[...contract.matchAll(/^\| `([A-Z0-9_]+)` \|/gm)].map(match=>match[1]);
-const RETIRED=['REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
+const RETIRED=['DISCOVERY_LEDGER_MODE','REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
 assert.deepEqual(documented,REGISTERED.filter(name=>!RETIRED.includes(name)),'every active registered flag is in the contract table, in order');
 for(const name of RETIRED)assert.match(reference,new RegExp('`'+name+'`[^\\n]*retired'),name+' is documented as retired');
 assert.match(reference,/`feature_flags`/,'the reference names the readout tool');
@@ -205,4 +215,4 @@ const bare=await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD,LETTERBOXD
 assert.equal(entry(bare.body.result.structuredContent,'LETTERBOXD_FACTS').state,'set','answers without a bucket binding');
 assert.doesNotMatch(fs.readFileSync('src/feature-flags.js','utf8'),/Object\.(keys|entries|getOwnPropertyNames)\(env|for\s*\(\s*const\s+\w+\s+in\s+env/,'the readout never enumerates env');
 
-console.log('Feature flags (ADR 0039): feature_flags lists the registered flags absent and set, literal values only for known tokens, shape-only reports for secrets, near misses, objects and over-long values, retired tokens and the retired switch, unmet requirements, effective modes equal to every consumer, registry parity with the reference and the checker, no storage, no env enumeration, arguments refused and the Access JWT required passed');
+console.log('Feature flags (ADR 0039): feature_flags lists the registered flags absent and set, literal values only for known tokens, shape-only reports for secrets, near misses, objects and over-long values, retired tokens and selectors including the inert enrichment window and bulk selectors, unmet requirements, effective modes equal to every active consumer, registry parity with the reference and the checker, no storage, no env enumeration, arguments refused and the Access JWT required passed');

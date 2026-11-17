@@ -148,9 +148,6 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
  bucket.hooks.beforePut=null;
  const q=bucket.value(QUEUE);
  assert.equal(q.schemaVersion,2);eq(q.films.inflight.legacy,true,'the in-flight version 1 entry is migrated, not lost');
- // Inline code on migrated storage keeps the version 2 rules: references are stored, the cursor is merged.
- const eventAt=at(T0);
- await g(ctx,'lookupRemovalRatings')({...env,REMOVAL_RATING_LOOKUP:'on'},[],T0,{eventKey:eventKeyOf(eventAt,'run-9-watchlist'),sourceRunId:'run-9',at:eventAt});
  assert.equal(bucket.value(QUEUE).schemaVersion,2);
 }
 {

@@ -6,6 +6,31 @@
 // discovery snapshot or an enrichment object, writes, starts work or calls another service. The contract is
 // docs/reference/api/admin.md; the read model is docs/reference/domain/admin-read-contract.md.
 const ADMIN_TITLES_KEY='titles.json',ADMIN_PEOPLE_KEY='people.json';
+const ADMIN_FILM_PERSON_REFUSALS=['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'];
+const adminStorageRefusal=error=>ADMIN_FILM_PERSON_REFUSALS.includes(error?.code)?json({error:'storage_unavailable',reason:error.code},503):null;
+function adminProgrammePeople(programme){
+ const ids=[];
+ const add=person=>{if(typeof person?.id==='string'&&person.id)ids.push(person.id);};
+ for(const person of [...(programme?.people?.directors||[]),...(programme?.people?.actors||[])])add(person);
+ for(const film of Array.isArray(programme?.films)?programme.films:[]){for(const person of [...(film?.directors||[]),...(film?.actors||[])])add(person);}
+ return ids;
+}
+async function adminFinish(env,gate,response){
+ if(gate&&typeof CanonicalCatalogReader!=='undefined')await CanonicalCatalogReader.catalogReaderStill(env,gate);
+ return response;
+}
+async function adminLoadDictionaries(env,bucket,programme,cache,gate){
+ if(gate?.mode==='d1'){
+  const films=Array.isArray(programme.body?.films)?programme.body.films:[];
+  const titlesBody=await CanonicalCatalogReader.catalogTitlesFromD1(env,films,gate);
+  const peopleBody=await CanonicalCatalogReader.catalogPeopleFromD1(env,adminProgrammePeople(programme.body),gate);
+  const version='d1:'+gate.generation;
+  return {titles:{present:true,version,etag:version,uploaded:null,body:titlesBody},people:{present:true,version,etag:version,uploaded:null,body:peopleBody}};
+ }
+ const titles=await adminReadObject(bucket,ADMIN_TITLES_KEY,cache?.titles||null);
+ const people=await adminReadObject(bucket,ADMIN_PEOPLE_KEY,cache?.people||null);
+ return {titles,people};
+}
 const ADMIN_LIMIT_DEFAULT=25,ADMIN_QUERY_MAX=200,ADMIN_CURSOR_MAX=4000,ADMIN_PIN_MAX=2000,ADMIN_ID_MAX=200;
 const ADMIN_RUN_ID=/^[A-Za-z0-9_-]{1,80}$/;
 const ADMIN_FILM_QUEUES=['localization-missing','localization-provisional','localization-conflict','identity-unresolved','identity-ambiguous','identity-rejected','metadata-missing','metadata-stale','metadata-failed','external-id-conflict'];
@@ -185,7 +210,9 @@ function adminPersonRecord(person,people,clock,reviews){
  const roleId=typeof person?.id==='string'?person.id:'';
  if(!roleId)return null;
  const cache=people?.[roleId]&&typeof people[roleId]==='object'?people[roleId]:null;
- const view=personView({roleId,original:person.original||cache?.original||null,dictionary:REVIEWED_PEOPLE[roleId]||null,cacheName:cache?.name||null,now:clock});
+ const reviewedCache=cache?.status==='reviewed'&&cache.name;
+ const dictionary=REVIEWED_PEOPLE[roleId]||(reviewedCache?{name:cache.name,status:'verified',source:cache.authority||'d1'}:null);
+ const view=personView({roleId,original:person.original||cache?.original||null,dictionary,cacheName:reviewedCache?null:(cache?.name||null),now:clock});
  const stored=reviews?.[view?.id]||null;
  const subject=adminPersonSubject(view,stored,clock);
  if(!subject)return null;
@@ -222,7 +249,8 @@ function adminProjection(programme,titles,people,clock,reviews){
 }
 // While the published EPG marker is d1, the pointer and the programme body come from D1.
 // A missing document or a failed read does not fall through to another R2 generation.
-// Dictionaries and the review overlay stay R2. PublishedEpg is absent in tests that load this file alone.
+// Dictionaries: Film/Person legacy/r2/prepared keep R2 titles.json/people.json; at open they come from bounded D1.
+// PublishedEpg is absent in tests that load this file alone.
 async function adminD1Programme(env){
  if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.currentGeneration!=='function')return null;
  const live=await PublishedEpg.currentGeneration(env);
@@ -243,8 +271,9 @@ async function adminD1Programme(env){
 }
 // The snapshot read in the order the contract fixes: pointer, generation programme, pointer again, dictionaries. One retry
 // when the pointer moved between the two reads; a second move is a failure, not a page of mixed generations.
-async function adminLoadSnapshot(env,hasPin){
+async function adminLoadSnapshot(env,hasPin,passedGate){
  const bucket=env.BUCKET,cache=ADMIN_SNAPSHOT_CACHE;
+ const filmPersonGate=passedGate!==undefined?passedGate:(typeof CanonicalCatalogReader==='undefined'?null:await CanonicalCatalogReader.catalogReaderGate(env));
  for(let attempt=1;attempt<=2;attempt++){
   const d1=await adminD1Programme(env);
   let pointer,run,programme;
@@ -264,8 +293,8 @@ async function adminLoadSnapshot(env,hasPin){
     return {error:hasPin?'stale_pin':'programme_unavailable'};
    }
   }
-  const titles=await adminReadObject(bucket,ADMIN_TITLES_KEY,cache?.titles||null);
-  const people=await adminReadObject(bucket,ADMIN_PEOPLE_KEY,cache?.people||null);
+  const dictionaries=await adminLoadDictionaries(env,bucket,programme,cache,filmPersonGate);
+  const titles=dictionaries.titles,people=dictionaries.people;
   let reviews=null;
   if(typeof OwnerReview!=='undefined'&&typeof OwnerReview.loadSnapshotReviews==='function')reviews=await OwnerReview.loadSnapshotReviews(env,cache?.reviews||null);
   if(!reviews)reviews=await adminReadObject(bucket,'admin/owner-reviews.json',cache?.reviews||null);
@@ -274,12 +303,12 @@ async function adminLoadSnapshot(env,hasPin){
   const programmeUpdatedAt=typeof programme.body.updatedAt==='string'&&programme.body.updatedAt?programme.body.updatedAt:programme.uploaded||(typeof pointer.body.publishedAt==='string'?pointer.body.publishedAt:null);
   const titlesUpdatedAt=titles.present?(typeof titles.body?.updatedAt==='string'&&titles.body.updatedAt?titles.body.updatedAt:titles.uploaded):null;
   const peopleUpdatedAt=people.present?(typeof people.body?.updatedAt==='string'&&people.body.updatedAt?people.body.updatedAt:people.uploaded):null;
-  const skewReasons=adminSkew(programmeUpdatedAt,titles,titlesUpdatedAt,people,peopleUpdatedAt);
+  const skewReasons=filmPersonGate?.mode==='d1'?[]:adminSkew(programmeUpdatedAt,titles,titlesUpdatedAt,people,peopleUpdatedAt);
   const clockMs=adminClock(programmeUpdatedAt),clock=clockMs===null?null:new Date(clockMs).toISOString();
   const reviewBody=reviews.present&&reviews.body&&typeof reviews.body==='object'&&!Array.isArray(reviews.body)?reviews.body:{};
   const records=adminProjection(programme.body,titles.present&&titles.body&&typeof titles.body==='object'?titles.body:{},people.present&&people.body&&typeof people.body==='object'?people.body:{},clock,reviewBody);
   const snapshot={
-   tuple,reviewEtag:reviews.etag||null,reviewCache:reviews.present?{version:reviews.version,body:reviews.body}:null,pointer:{version:pointer.version,body:pointer.body,...(pointer.authority?{authority:pointer.authority}:{})},programme:{version:programme.version,body:programme.body},titles:{version:titles.version,body:titles.body},people:{version:people.version,body:people.body},reviews:{version:reviews.version,body:reviews.present?reviews.body:null,present:reviews.present},records,
+   tuple,filmPersonGate,reviewEtag:reviews.etag||null,reviewCache:reviews.present?{version:reviews.version,body:reviews.body}:null,pointer:{version:pointer.version,body:pointer.body,...(pointer.authority?{authority:pointer.authority}:{})},programme:{version:programme.version,body:programme.body},titles:{version:titles.version,body:titles.body},people:{version:people.version,body:people.body},reviews:{version:reviews.version,body:reviews.present?reviews.body:null,present:reviews.present},records,
    info:{programmeRunId:run,programmeUpdatedAt,titlesUpdatedAt,peopleUpdatedAt,skew:skewReasons.length>0,skewReasons,films:records.films.length,people:records.people.length},
   };
   ADMIN_SNAPSHOT_CACHE=snapshot;
@@ -319,37 +348,40 @@ async function adminReadRoute(request,env,url){
  }
  let snapshot;
  try{snapshot=await adminLoadSnapshot(env,pin!==null);}
- catch(error){if(error?.code==='owner_review_unavailable')return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);return adminError('storage_unavailable',503);}
+ catch(error){const refused=adminStorageRefusal(error);if(refused)return refused;if(error?.code==='owner_review_unavailable')return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);return adminError('storage_unavailable',503);}
  if(snapshot.error)return adminError(snapshot.error,snapshot.error==='stale_pin'?409:503);
  if(pin&&!adminSameTuple(pin,snapshot.tuple))return adminError('stale_pin',409);
- const base={pin:adminEncodePin(snapshot.tuple),snapshot:snapshot.info};
- const {films,people}=snapshot.records;
- if(overview){
-  const filmCounts=AdminQuery.filmQueueCounts(films),personCounts=AdminQuery.personQueueCounts(people);
-  const queues=[...ADMIN_FILM_QUEUES.map(code=>({code,kind:'film',count:filmCounts[code]})),...ADMIN_PERSON_QUEUES.map(code=>({code,kind:'person',count:personCounts[code]}))];
-  return json({...base,counts:{films:films.length,people:people.length},queues,unavailableQueues:ADMIN_UNAVAILABLE_QUEUES});
- }
- if(id!==null){
-  const item=kind==='film'?AdminQuery.getFilm(films,id):AdminQuery.getPerson(people,id);
-  if(!item)return json({...base,error:'not_found'},404);
-  if(kind==='film')return json({...base,kind,item:{...item,titleReview:adminTitleReview(item)}});
-  if(kind==='person'&&typeof personNameState==='function'){
-   const subjects=snapshot.records.personSubjects||{};
-   const subject=subjects[item.id]||item;
-   return json({...base,kind,item:{...item,nameReview:personNameState(subject,Object.values(subjects))}});
+ const finish=async(body,status)=>adminFinish(env,snapshot.filmPersonGate,json(body,status));
+ try{
+  const base={pin:adminEncodePin(snapshot.tuple),snapshot:snapshot.info};
+  const {films,people}=snapshot.records;
+  if(overview){
+   const filmCounts=AdminQuery.filmQueueCounts(films),personCounts=AdminQuery.personQueueCounts(people);
+   const queues=[...ADMIN_FILM_QUEUES.map(code=>({code,kind:'film',count:filmCounts[code]})),...ADMIN_PERSON_QUEUES.map(code=>({code,kind:'person',count:personCounts[code]}))];
+   return await finish({...base,counts:{films:films.length,people:people.length},queues,unavailableQueues:ADMIN_UNAVAILABLE_QUEUES});
   }
-  return json({...base,kind,item});
- }
- let records=kind==='film'?films:people,result;
- const options={limit};
- if(cursor!==null){const inner=adminDecodeCursor(cursor,snapshot.tuple);if(!inner)return adminError('stale_cursor',400);options.cursor=inner;}
- if(query!==null){
-  if(queue!==null){
-   records=kind==='film'?AdminQuery.filmQueueRecords(records,queue):AdminQuery.personQueueRecords(records,queue);
-   if(records.error)return adminError(records.error,400);
+  if(id!==null){
+   const item=kind==='film'?AdminQuery.getFilm(films,id):AdminQuery.getPerson(people,id);
+   if(!item)return await finish({...base,error:'not_found'},404);
+   if(kind==='film')return await finish({...base,kind,item:{...item,titleReview:adminTitleReview(item)}});
+   if(kind==='person'&&typeof personNameState==='function'){
+    const subjects=snapshot.records.personSubjects||{};
+    const subject=subjects[item.id]||item;
+    return await finish({...base,kind,item:{...item,nameReview:personNameState(subject,Object.values(subjects))}});
+   }
+   return await finish({...base,kind,item});
   }
-  result=kind==='film'?AdminQuery.searchFilms(records,{...options,query}):AdminQuery.searchPeople(records,{...options,query});
- }else result=kind==='film'?AdminQuery.filmQueue(records,{...options,queue}):AdminQuery.personQueue(records,{...options,queue});
- if(result.error)return adminError(result.error,400);
- return json({...base,kind,query,queue,limit,items:result.items,nextCursor:result.nextCursor?adminEncodeCursor(snapshot.tuple,result.nextCursor):null});
+  let records=kind==='film'?films:people,result;
+  const options={limit};
+  if(cursor!==null){const inner=adminDecodeCursor(cursor,snapshot.tuple);if(!inner)return adminError('stale_cursor',400);options.cursor=inner;}
+  if(query!==null){
+   if(queue!==null){
+    records=kind==='film'?AdminQuery.filmQueueRecords(records,queue):AdminQuery.personQueueRecords(records,queue);
+    if(records.error)return adminError(records.error,400);
+   }
+   result=kind==='film'?AdminQuery.searchFilms(records,{...options,query}):AdminQuery.searchPeople(records,{...options,query});
+  }else result=kind==='film'?AdminQuery.filmQueue(records,{...options,queue}):AdminQuery.personQueue(records,{...options,queue});
+  if(result.error)return adminError(result.error,400);
+  return await finish({...base,kind,query,queue,limit,items:result.items,nextCursor:result.nextCursor?adminEncodeCursor(snapshot.tuple,result.nextCursor):null});
+ }catch(error){const refused=adminStorageRefusal(error);if(refused)return refused;throw error;}
 }

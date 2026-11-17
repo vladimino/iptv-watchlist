@@ -85,7 +85,7 @@ async function adminHealthRoute(request,env,url){
  if(url.searchParams.has('pin')){pin=adminDecodePin(url.searchParams.get('pin'));if(!pin)return adminError('invalid_pin',400);}
  let snapshot;
  try{snapshot=await adminLoadSnapshot(env,pin!==null);}
- catch{return adminError('storage_unavailable',503);}
+ catch(error){const refused=adminStorageRefusal(error);if(refused)return refused;return adminError('storage_unavailable',503);}
  if(snapshot.error)return adminError(snapshot.error,snapshot.error==='stale_pin'?409:503);
  if(pin&&!adminSameTuple(pin,snapshot.tuple))return adminError('stale_pin',409);
  const run=snapshot.tuple.programmeRunId,bucket=env.BUCKET,reads=[];
@@ -107,6 +107,8 @@ async function adminHealthRoute(request,env,url){
  const index=adminHealthPresent(viewIndex),profileBody=adminHealthPresent(profile);
  let freshness=null;
  if(index&&profileBody){try{freshness=await predictionFreshness(env,profileBody);}catch{freshness=null;}}
+ try{if(snapshot.filmPersonGate)await CanonicalCatalogReader.catalogReaderStill(env,snapshot.filmPersonGate);}
+ catch(error){const refused=adminStorageRefusal(error);if(refused)return refused;throw error;}
  const byStored=new Map();
  for(const film of Array.isArray(programme?.films)?programme.films:[])if(film&&film.id!=null&&!byStored.has(String(film.id)))byStored.set(String(film.id),film);
  const recordIdByStored=new Map(snapshot.records.films.map(record=>[record.storedId,record.id]));
@@ -146,6 +148,6 @@ async function adminHealthRoute(request,env,url){
    observations:{evidence:'not_supplied',reason:ADMIN_HEALTH_UNBOUNDED.observations},
    letterboxd:{evidence:'not_supplied',reason:ADMIN_HEALTH_UNBOUNDED.letterboxd},
   },
-  reads:[...(d1?['published_epg_authority','published_epg_document']: [EPG_GENERATION_KEY,epgGenerationKey(run,'programme.json'),EPG_GENERATION_KEY]),'titles.json','people.json','admin/owner-reviews.json',...reads],
+  reads:[...(d1?['published_epg_authority','published_epg_document']: [EPG_GENERATION_KEY,epgGenerationKey(run,'programme.json'),EPG_GENERATION_KEY]),...(snapshot.filmPersonGate?.mode==='d1'?['film_dimension','person_dimension']:['titles.json','people.json']),'admin/owner-reviews.json',...reads],
  });
 }

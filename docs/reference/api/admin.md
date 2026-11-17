@@ -15,12 +15,12 @@ Exactly these objects, in this order, on every request. There is no `BUCKET.list
 | 1 | `epg/published-generation.json` | Must be `phase: published` with a `programmeRunId` of letters, digits, `_` or `-` (at most 80). Otherwise 503 `programme_unavailable`. The etag is kept |
 | 2 | `epg/generations/<programmeRunId>/programme.json` | Must exist and carry `runId` equal to the pointer's run. Otherwise 503 `programme_unavailable`; the root `programme.json` is **not** read instead |
 | 3 | `epg/published-generation.json` again | If the etag or the run differs from step 1, the programme body is discarded and the read starts over once. A second move is 503 `programme_unavailable` without a client pin and 409 `stale_pin` with one |
-| 4 | `titles.json`, `people.json` | The provisional title cache and the cached person names. A missing dictionary is an empty map and a `null` version, not an error |
+| 4 | `titles.json`, `people.json` | While Film/Person is `legacy`/`r2`/`prepared`: the provisional title cache and the cached person names. A missing dictionary is an empty map and a `null` version, not an error. At Film/Person `open` those objects are frozen and are not read; the same facts come from bounded D1 (`catalogTitlesFromD1` / `catalogPeopleFromD1`, chunks of 1500 ids). `titlesVersion` / `peopleVersion` are then `d1:<generation>`. `held`, an unreadable marker or a generation move is `503` `storage_unavailable` with a typed `reason` and does not fall back to R2 |
 | 5 | `admin/owner-reviews.json`, or `owner_review_entry` when that marker is `d1` | The owner-review overlay for Film titles and Person names ([ADR 0072](../../adr/0072-owner-reviewed-localization-overlay.md)). While `owner_review_authority` is absent or `mode` is `r2`, a missing object is an empty document and a `null` version, not an error. Its etag is `reviewsVersion`. The body is not written by this read. When `mode` is `d1` ([ADR 0081](../../adr/0081-d1-authoritative-owner-reviews.md), Accepted), this step reads the rows. `reviewsVersion` is `d1:<generation>`. The read does not write the rows and does not repair the R2 mirror. A pin from the other mode does not match. Version 9 without the tables, or an invalid marker, is 503 `storage_unavailable` and does not fall back to the object. Migration `0009` is applied and the marker is `d1` at generation 1, so production reads the rows. `reviewsVersion` is `d1:1` ([activation record](../../evidence/d1-migration/air-314-owner-review-activate-2026-11-03.md)) |
 
 Each object's version is its R2 etag; when the object exists and the etag is empty, the version is the SHA-256 of the loaded bytes. A missing etag is never "unchanged". `updatedAt` is not a match key.
 
-While `published_epg_authority.mode` is `d1` ([ADR 0079](../../adr/0079-d1-authoritative-published-epg.md)), steps 1 and 3 are one read of that D1 pointer and step 2 is `published_epg_document` for the same run. The generation etag in the pin is the D1 fence token, and the programme etag is the SHA-256 of the D1 document. The root `programme.json` is still not read. A failed D1 read is `503`, not a fallthrough to another R2 generation. Dictionaries stay R2. Owner reviews follow `owner_review_authority`; production is `d1`, so that overlay is the rows and the object is the mirror ([activation record](../../evidence/d1-migration/air-314-owner-review-activate-2026-11-03.md)). The poster and discovery-index reads use the same D1 run and still load their R2 generation copies. This is the current production path: the published-EPG marker is `d1/open`, and the independent owner-review marker is `d1`. The former R2 published-EPG path applies only while that marker remains `r2` or its migration is absent.
+While `published_epg_authority.mode` is `d1` ([ADR 0079](../../adr/0079-d1-authoritative-published-epg.md)), steps 1 and 3 are one read of that D1 pointer and step 2 is `published_epg_document` for the same run. The generation etag in the pin is the D1 fence token, and the programme etag is the SHA-256 of the D1 document. The root `programme.json` is still not read. A failed D1 read is `503`, not a fallthrough to another R2 generation. Dictionaries follow the Film/Person marker (R2 until `open`, then D1 as in step 4). Owner reviews follow `owner_review_authority`; production is `d1`, so that overlay is the rows and the object is the mirror ([activation record](../../evidence/d1-migration/air-314-owner-review-activate-2026-11-03.md)). The poster and discovery-index reads use the same D1 run and still load their R2 generation copies. This is the current production path: the published-EPG marker is `d1/open`, and the independent owner-review marker is `d1`. The former R2 published-EPG path applies only while that marker remains `r2` or its migration is absent.
 
 A failure of R2 itself (an exception from the binding) is 503 `storage_unavailable`. No retry reaches a writer and nothing is repaired.
 
@@ -90,7 +90,7 @@ Parameters are validated before the snapshot is read, so a bad `limit`, `q`, `qu
 | 405 | `method_not_allowed` | not a GET |
 | 409 | `stale_pin` | the pin is not the tuple just read, or the pointer moved twice during a pinned read |
 | 503 | `programme_unavailable` | no published pointer, a run id that is unsafe, a missing generation programme object or one of another run, or the pointer moved twice during an unpinned read |
-| 503 | `storage_unavailable` | the R2 binding threw |
+| 503 | `storage_unavailable` | the R2 binding threw, or Film/Person is `held` / unreadable / generation-moved (`reason` is the typed code; no R2 dictionary fallback) |
 
 ## Data health: `GET /api/admin/health`
 
@@ -262,7 +262,7 @@ The pin is a digest of every key read with its R2 etag (`absent` when missing, `
 
 ### Answer
 
-`{pin, evaluatedAt, atomic: false, assessment, snapshot, sources}`. `atomic: false` because the objects are read one by one. `snapshot` carries `consistent` and `reasons` (the diagnostic's disagreement codes), the queue's `status`, `refreshedAt`, `programmeRunId` and `lastActivityAt` (the later of `lastCheckAt` and `lastBatch.finishedAt`), the profile `status` and `version`, the programme and published generation run ids, `runnerLease` and `latestRun` read statuses and `nominalNextRunAt` (the nominal hourly trigger, an estimate). `sources` lists the keys read.
+`{pin, evaluatedAt, atomic: false, assessment, snapshot, sources}`. `atomic: false` because the objects are read one by one. `snapshot` carries `consistent` and `reasons` (the diagnostic's disagreement codes), the queue's `status`, `refreshedAt`, `programmeRunId` and `lastActivityAt` (the later of `lastCheckAt` and `lastBatch.finishedAt`), the profile `status` and `version`, the programme and published generation run ids, `runnerLease` and `latestRun` read statuses and `nominalNextRunAt` (always `null`: the Worker does not know the next ChatGPT Task time). `sources` lists the keys read.
 
 `assessment` is `{version, filmId, status, cause, work, nextExpected: {kind, at}, targetedAction: {available: false, capability: null, reason}, writer: {exists: false, decision: "no_go"}, missingPrerequisites, evidence: {completeness, missing}, facts, runner}`. `facts` holds the fingerprint (presence, current, usable, reason, migration), the prediction (presence, current, `profileCompatible`, cause, reason, required work), the queue lane and eligibility, the retry (classification, scope, attempts, `failedAt`, `retryAt`, `lastRunId`, validation stage and issue count) and the index agreement. `runner` is `{live, runId, leaseExpiresAt, filmSelected}`, with `null` where the lease or run could not be read.
 
@@ -280,7 +280,7 @@ The pin is a digest of every key read with its R2 etag (`absent` when missing, `
 | 8 | `not_in_catalog` — read programme and catalog, the film is in neither | `investigate` | `owner_investigation` | `other_subsystem` |
 | 9 | `queue_refresh_pending` — not current and not queued | `wait` | `queue_refresh` | `queue_derived` |
 | 10 | `retry_backoff` — a future `retryAt`; `repeated_failures` from 5 attempts | `wait` / `investigate` | `retry_at` / `owner_investigation` | `backoff_respected` / by failure kind (below) |
-| 11 | ready now: `repeated_failures` from 5 attempts, `run_active` under a live lease, `ready_no_runs` when the queue's last activity is older than 24 hours (`investigate`, `check_scheduled_tasks`), otherwise `queued_ready` (`wait`, `scheduled_run` at `nominalNextRunAt`) | | | |
+| 11 | ready now: `repeated_failures` from 5 attempts, `run_active` under a live lease, `ready_no_runs` when the queue's last activity is older than 24 hours (`investigate`, `check_scheduled_tasks`), otherwise `queued_ready` (`wait`, `scheduled_run` with `at` null) | | | |
 | 12 | `waiting_behind_hot` — cold film while hot work remains | `wait` | `hot_drain` | `ordinary_schedule` |
 | 13 | `queue_state_unknown` — anything else | `unknown` | `reread` | `evidence_incomplete` |
 
@@ -307,6 +307,8 @@ Source: [`src/admin/discovery-recovery.js`](../../../src/admin/discovery-recover
 | `POST /api/admin/discovery-recovery/identity-confirm` | Issues one assign or reject; changes no decision |
 | `POST /api/admin/discovery-recovery/identity-correct` | Executes one issued identity correction |
 | `GET /api/admin/discovery-recovery/identity-receipt?idempotencyKey=<key>` | Returns the stored identity record; read-only |
+| `GET /api/admin/discovery-recovery/policy-exclude?filmId=tmdb_<id>` | Read-only ADR 0150 preview of one current admission |
+| `POST /api/admin/discovery-recovery/policy-exclude` | Executes `catalog_policy_exclude@1` for that film |
 
 Any other method is 405 `method_not_allowed`, and an unknown path under `/api/admin/discovery-recovery/` is 404.
 
@@ -412,7 +414,7 @@ Both POSTs need the same Access assertion, same-origin `Origin` and `Content-Typ
 
 An assign sets `status: verified`, `tmdbId`, `filmId: tmdb_<id>`, `canonicalIdentity: tmdb:<id>`, `identitySource: owner`, clears `terminalReason` and `retryAt`, and drops that id from `rejectedTmdbIds`. A reject sets `needs_verification` when the status was `verified`, otherwise leaves the status, clears `tmdbId` only when it is the rejected id, clears `terminalReason` and `retryAt`, and appends the id to `rejectedTmdbIds` (at most eight). It does not block a similar title. The next ordinary chunk may search for a different id and does not fetch the rejected movie.
 
-The answer adds `application` and `reason` beside the receipt. `application.shows` is `next_ordinary_chunk`, `after_series_wait` or `next_series` when the assigned film is already canonical; `awaiting_catalog_film` when the confirmed id has no catalogue object; `not_this_action` for a reject. The route does not start the chunk and does not write `programme.json` or a historical generation. If `index.refreshed` is false, the list may still show the row until the next chunk.
+The answer adds `application` and `reason` beside the receipt. `application.shows` is `next_ordinary_chunk`, `after_series_wait` or `next_series` when the assigned film is already canonical; `awaiting_catalog_film` when the confirmed id has no catalogue object; `cleared_assigned_rows` for a D1 reject whose previous decision was a verified movie assignment (current-generation discovery shows of that observation key only); `not_this_action` for a reject on the R2 path or a D1 reject of a non-verified hypothesis. The route does not start the chunk and does not write `programme.json` or a historical generation. If `index.refreshed` is false, the list may still show the row until the next chunk.
 
 **Action record.** `admin/actions/discovery_identity_correct/v1/<idempotencyKey>.json`:
 
@@ -424,6 +426,16 @@ The answer adds `application` and `reason` beside the receipt. `application.show
 ```
 
 `command` is `{effect, tmdbId, basis}`. The receipt route is read-only and returns the same `{idempotencyKey, state, record}` shape as reconsideration.
+
+### Policy exclusion: `GET /api/admin/discovery-recovery/policy-exclude`
+
+`catalog_policy_exclude@1` ([ADR 0153](../../adr/0153-catalog-policy-exclusion.md); [capability](admin-actions.md#policy-exclusion-catalog_policy_exclude1)). The owner excludes one current Discovery movie admission that ADR 0150 classifies as a Documentary, a concert recording, or a Music-only `ambiguous` Live/Concert token. GET is read-only. POST needs the Access assertion, same-origin `Origin`, `Content-Type: application/json` and `X-IPTV-Admin-Action: catalog_policy_exclude`.
+
+**Preview.** `GET …/policy-exclude?filmId=tmdb_<id>`. The id matches `^tmdb_[1-9]\d{0,11}$`. The answer names `available`, `policy`, related observation keys, admission `state` and the generation pin. Classification uses the same ADR 0150 `admissionPolicy` as `GET /api/programme`, including stored `synopsis` when `overview` is empty. Discovery must be D1 `open`; otherwise 409 `unknown_authority`.
+
+**Execute.** The body is `{filmId, idempotencyKey}`. The Worker takes the resolver lease, re-reads the admission, and runs `ownerPolicyExclude`. A drama is 409 `not_eligible`. A current admission on another film_id among the same TMDB decisions is 409 `not_eligible` (`linked_admission`). More than 12 related decisions (`floor((STATEMENT_CAP-4)/3)`) is 409 `budget_exceeded`. Reusing an idempotency key that already stored a receipt for another film is 409 `idempotency_conflict`. A already superseded admission retries only the queue reconcile (`already_applied`). Success supersedes the admission, rejects the related movie decisions, clears current-generation discovery-basis shows of those keys (the completed-programme overlay; sealed `title_year` / `title_unique` / `title_duration` rows stay with the generation), settles the film out of the prediction queue and rebuilds it. A queue that still holds the film, conflicts or cannot be read is 409 `queue_unreconciled` even if Discovery already wrote. It does not rewrite the published EPG generation, ratings, fingerprints or prediction bodies.
+
+This deploy does not run the writer against production.
 
 ### The observation recovery panel
 
@@ -528,6 +540,7 @@ Only `watched.csv`, `ratings.csv`, `watchlist.csv` and `diary.csv` at the top le
 | 422 | `archive_invalid` with `code` and `file` | the ZIP reader refused: `not_zip`, `archive_too_large`, `zip64_unsupported`, `multi_disk_unsupported`, `too_many_entries`, `central_directory_invalid`, `entry_name_invalid`, `duplicate_entry`, `encrypted_entry`, `unsupported_method`, `local_header_invalid`, `entry_truncated`, `entry_overlap`, `entry_too_large`, `total_too_large`, `ratio_exceeded`, `entry_size_mismatch`, `inflate_failed`, `checksum_failed`, `invalid_utf8`, `too_many_rows`, `time_budget`, `aborted` |
 | 422 | `csv_invalid` with `file` and `record` | a CSV file the parser cannot read |
 | 422 | `missing_watched` | the archive has no `watched.csv` |
+| 503 | `storage_unavailable` | Film/Person `held`, unreadable marker or generation move while comparing; typed `reason`, no R2 fallback for the frozen mirrors |
 | 500 | `preview_failed` | anything else; no detail is returned |
 
 **One archive request per isolate.** A worst-case preview needs about half of the isolate's 128 MB, so the handler holds one slot per isolate and answers 429 to a second concurrent preview or apply on the same isolate. The slot is the start time of the running request and is taken over after 60 s, because a request the runtime cancels never reaches its `finally`. Length and content type are checked before the slot is taken.
@@ -539,7 +552,7 @@ Through a bucket wrapper that exposes only `get`; no key is listed:
 | Read | Use |
 | --- | --- |
 | The admin snapshot (six reads above) | The published programme for the matcher; failure leaves matching `partial` |
-| `metadata.json` | Catalog metadata for the matcher |
+| `metadata.json` | While Film/Person is `legacy`/`r2`/`prepared`: catalog metadata for the matcher. At `open` the frozen object is not read; the same fields come from bounded D1 (`catalogMetadataFromD1` of the ZIP and programme ids). `held` / unreadable / generation move refuse the preview with `503` `storage_unavailable` |
 | `enrichment/ratings/published.json`, then its generation when `projected: true` | The ratings the matcher uses as evidence |
 | `letterboxd/facts/links.json` | The link index: which films already have a fact record and under which key |
 | `letterboxd/facts/scans/films-list.json`, `letterboxd/facts/scans/watchlist.json` | The scan summaries, the floor of every observation ([ADR 0024](../../adr/0024-letterboxd-scan-summary.md)) |

@@ -463,8 +463,9 @@ for(const stage of ['legacy','r2','prepared']){
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!==self&&/canonical-person-mutation-producer/.test(fs.readFileSync(full,'utf8')))importers.push(full);}};
  walk('src');
  // AIR-374 S4-4: the dormant driver also imports it (for the digest of a person_mutation unit); it is itself unimported and unbundled.
- assert.deepEqual(importers,['src/canonical-epg-person-producer.js','src/canonical-producer-driver.js']);
- for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!/canonical-person-mutation-producer/.test(fs.readFileSync(file,'utf8')),file+' does not bundle it');
+ assert.deepEqual(importers.sort(),['src/canonical-epg-person-producer.js','src/canonical-producer-driver.js','src/canonical-producers.js','src/film-person-open-handoff.js']);
+ for(const file of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!/canonical-person-mutation-producer/.test(fs.readFileSync(file,'utf8')),file+' does not name it');
+ assert.ok(/canonical-person-mutation-producer/.test(fs.readFileSync('build.mjs','utf8')),'AIR-497 bundles the person mutation producer');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-person-mutation-producer'));
  const body=fs.readFileSync(path.join(SRC,'canonical-person-mutation-producer.js'),'utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\b(fetch|setTimeout|setInterval|scheduled|R2|BUCKET|waitUntil)\b/.test(body),'no network, timer, cron or R2 reference');
@@ -472,10 +473,10 @@ for(const stage of ['legacy','r2','prepared']){
  assert.ok(/mutatePerson\(/.test(body)&&/receiptMark/.test(body)&&/presence/.test(body));
  assert.deepEqual([...body.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-mutations.js','./canonical-person-adapters.js','./canonical-producer-adapters.js','./canonical-receipts.js','./canonical-writer-route.js','./film-person-authority.js']);
  await assert.rejects(()=>mutatePerson(envOf(database('open')),{id:PID(1),expectedRevision:0,at:T,presence:'maybe',person:{roleId:'director/1',contractVersion:1}}),code('film_person_invalid'));
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation'],'only the Discovery admission operation (AIR-374 P3c) is registered');
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
  const epgWiring=PRODUCER_WIRING.find(item=>item.name==='epg_commit');
- assert.ok(epgWiring.requires.includes('person_mutation')&&epgWiring.requires.some(kind=>!PRODUCER_OPERATIONS.has(kind)));
+ assert.ok(epgWiring.requires.includes('person_mutation')&&epgWiring.requires.every(kind=>PRODUCER_OPERATIONS.has(kind)));
  const readiness=await handoffReadiness(envOf(database('prepared')),{now:T});
- assert.ok(readiness.blockers.includes('producer_not_wired:epg_commit')&&readiness.ready===false);
+ assert.ok(!readiness.blockers.includes('producer_not_wired:epg_commit')&&!readiness.blockers.includes('producer_not_wired:metadata_sync')&&!readiness.blockers.includes('producer_not_wired:rated_admission_retention')&&readiness.ready===false);
 }
 console.log('canonical-person-mutation-producer: ok');

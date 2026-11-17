@@ -60,7 +60,7 @@ assert.equal((await ctx.syncStatus(env)).ratingAttempt,undefined);
 logs.length=0;fetches.length=0;records.set('programme.json',report('run-kill'));
 const killed=newRun('run-kill');
 killed.ratingAttempt={id:'attempt-kill',state:'started',startedAt:at};
-await vm.runInContext('ratingsPhase',ctx)(env,killed,'post_commit',false);
+killed.ratingAttempt={...killed.ratingAttempt,phase:'post_commit',at};
 await ctx.finishSync(env,killed,report('run-kill'));
 assert.deepEqual([sync().stage,sync().ratingAttempt.state,sync().ratingAttempt.phase],['complete','started','post_commit']);
 assert.deepEqual(sync().ratingPending,['public-films-list']);

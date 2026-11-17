@@ -85,7 +85,7 @@ for(const eventId of ['remove-29','remove-31']){
  assert.equal(stored.removed[0].rating,4);
  const html=eventHTML(stored);
  assert.match(html,/Просмотрены · 1/);
- assert.match(html,/Supergirl \(2026\) · 4\.0 ★/);
+ assert.match(html,/Supergirl \(2026\)<\/a> · 4\.0 ★/);assert.match(html,/href="\/film\/supergirl-2026"/);
  assert.doesNotMatch(html,/Остальные удаления/);
 }
 assert.equal(bucket.value(eventKeyOf(at(T0-2*DAY),'kept-rating')).removed[0].rating,5,'a newer confirmed rating already on the event stays');

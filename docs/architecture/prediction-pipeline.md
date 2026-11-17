@@ -25,8 +25,7 @@ sequenceDiagram
     else New run
         MCP->>Queue: Acquire lease
         MCP->>R2: Persist interrupted state for the recovered lease holder only
-        Note over MCP,D1: Historic diagnostic settlement is prediction_complete, at most 10 keys, cursor enrichment/run-diagnostics-settle.json. A live runner lease holder is not interrupted from a stale diagnostic timestamp. GET status/runs and MCP enrichment_status project expiry and write nothing. Event delivery is on prediction_start under the writer lease; GET /api/events writes nothing.
-        loop While eligible items remain
+        loop eligible items remain
             Client->>MCP: prediction_next (one film)
             MCP->>Queue: Select hot first and cold only after hot drained
             Queue-->>MCP: Film and current artifact facts
@@ -41,7 +40,10 @@ sequenceDiagram
                 MCP->>D1: Commit the pointer and the queue
                 Note over MCP,D1: The written film leaves the stored queue, no catalog read
             else Isolated invalid output
-                MCP->>Queue: Record per-film failure and retryAt (conditional write)
+                MCP->>Queue: Record per-film failure and retryAt, conditional write
+                alt Ten saved per-film attempts
+                    Queue->>Queue: Keep the exhausted retry record and drop the film from pending lanes
+                end
             end
             opt Long model call
                 Client->>MCP: prediction_heartbeat
@@ -50,13 +52,13 @@ sequenceDiagram
         end
         Client->>MCP: prediction_complete when required
         MCP->>Queue: Record completion in a conditional write of the stored queue, release lease
-        MCP->>R2: Settle at most 10 expired diagnostic rows; skip the live lease holder
+        MCP->>R2: Settle at most 10 expired diagnostic rows, skip the live lease holder
     end
 ```
 
 Migration `0007` is applied and the production prediction marker is `d1`. In the historical `r2` mode, the persist step writes the mutable objects in R2. The contract starts at schema version 7 when this domain is installed. A later contract with none of the prediction tables stays on the objects. A partial set of those tables fails the step and does not read the objects. After the marker is `d1` the same step writes the immutable body in R2, checks it, and commits the pointer and the queue in D1 ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)). The `d1` branch is now live; the `r2` branch remains the compatibility/rollback contract.
 
-The fingerprint schema/hash tracks the film independently from a personal prediction, which also requires the current profile version/hash and prompt version. A profile change makes predictions stale without forcing a fingerprint regeneration; EPG showtimes do not invalidate either. The persist step writes the immutable content body and generation record first and then `fingerprint.json` as a pointer with provenance ([fingerprint compatibility](../reference/domain/fingerprint-compatibility.md#storage)); a declared fingerprint schema or prompt transition re-queues only the films it reaches, bounded within each batch, under the transition rule ([ADR-0035](../adr/0035-selective-fingerprint-transition-compatibility.md); no switch since [ADR 0047](../adr/0047-retire-fingerprint-compatibility-switch.md)), and a run ends when the Worker's versions change under it. One malformed film output is deferred with exponential backoff rather than discarding successes. This diagram is a conceptual view of the runner protocol, not an assertion that every branch occurs on each invocation.
+The fingerprint schema/hash tracks the film independently from a personal prediction, which also requires the current profile version/hash and prompt version. A profile change makes predictions stale without forcing a fingerprint regeneration; EPG showtimes do not invalidate either. An unfinished EPG seal does not decide whether a trusted film may be scored ([ADR 0154](../adr/0154-prediction-eligibility-independent-of-epg.md)): the stored queue stays runnable, and showtimes change only hot/cold order when they come from a completed programme snapshot (or from last-known completed priority no older than 36 hours). The persist step writes the immutable content body and generation record first and then `fingerprint.json` as a pointer with provenance ([fingerprint compatibility](../reference/domain/fingerprint-compatibility.md#storage)); a declared fingerprint schema or prompt transition re-queues only the films it reaches, bounded within each batch, under the transition rule ([ADR-0035](../adr/0035-selective-fingerprint-transition-compatibility.md); no switch since [ADR 0047](../adr/0047-retire-fingerprint-compatibility-switch.md)), and a run ends when the Worker's versions change under it. One malformed film output is deferred with exponential backoff rather than discarding successes. After ten saved per-film retryable failures the identity stays in `retries` and leaves automatic selection ([ADR 0152](../adr/0152-prediction-retry-attempt-budget.md)); it is not marked predicted and is not a catalog exclusion. This diagram is a conceptual view of the runner protocol, not an assertion that every branch occurs on each invocation.
 
 The "Read schema" step and the "Isolated invalid output" branch share [one validation contract](../reference/api/enrichment.md#submit-validation-contract): the schema the client reads carries the exact rules the Worker validates with, and a rejected submit returns the violated field and code from that closed vocabulary alongside the per-film failure and `retryAt`. The Worker remains the only validator and the only writer; the client's preflight is a convenience that cannot admit a payload the Worker would reject.
 
@@ -90,12 +92,13 @@ sequenceDiagram
                 end
             end
             MCP->>Queue: Acquire the one runner lease
-            MCP->>Queue: Revalidate queue generation, selection and the exact answer
+            MCP->>Queue: Revalidate queue generation, select ready films with staged ids excluded from the hot/cold lane, exact answer
             alt Changed, or over the limit with real values
                 MCP->>Queue: Release the lease
                 MCP-->>Client: queue_changed or manifest_too_large, acquire and release only
             else Unchanged
-                MCP-->>Client: Manifest: profile, contract, films with metadata and plan, epoch, manifestSize, filmsSelected
+                MCP->>Store: Drain transferable stage onto this run (commit fresh, drop stale)
+                MCP-->>Client: Manifest of new films, drained counts, profile, contract, epoch
                 loop Until every selected manifest film is settled
                     opt Model call may be long
                         Client->>MCP: prediction_heartbeat, before the call and at least every 10 minutes
@@ -109,7 +112,13 @@ sequenceDiagram
                         opt A candidate has issues
                             Client->>Client: Correct only what real knowledge supports, at most one re-preflight, otherwise a failure item
                         end
-                        Client->>MCP: prediction_batch_submit, buffer items (1 to submitBatchSize), runId and epoch
+                        Client->>MCP: prediction_batch_hold, same valid items, runId and epoch (write auth only)
+                        MCP->>Store: CAS-merge transferable stage by item digest (origin runId is provenance)
+                        alt This run still owns the lease
+                            Client->>MCP: prediction_batch_submit with useHeld true, or buffer items
+                        else This Task terminated
+                            Note over Client,Store: Stage outlives the run, the next batch_start drains it
+                        end
                         MCP->>Queue: Set the submit gate, an overlapping call gets submit_in_flight
                         MCP->>MCP: Validate each film, compare profile impact
                         loop Each valid film in order
@@ -125,10 +134,10 @@ sequenceDiagram
                     Client->>MCP: prediction_complete with reason manifest_spent
                     MCP-->>Client: 409 Profile or Contract changed — fenced, not a false normal complete
                     Client->>MCP: prediction_complete with systemic reason profile_changed or runner_aborted
-                    MCP->>Queue: Partial stop Event, release lease
+                    MCP->>Queue: One terminal Event (presentation batch_v2_terminal), release lease
                 else Manifest spent with matching profile and contract
                     Client->>MCP: prediction_complete with reason manifest_spent
-                    MCP->>Queue: Normal complete Event once, release lease — global queue may still have ready films
+                    MCP->>Queue: One terminal Event (no start or progress Event), release lease — global queue may still have ready films
                     MCP->>Store: Settle at most 10 expired diagnostic rows, resume cursor, do not fail the complete
                 end
             end
@@ -137,7 +146,7 @@ sequenceDiagram
     Note over Client,Store: A dry run with dryRun true ignores the lease, reads and validates the same way and writes nothing: no lease, run, queue or storage write
 ```
 
-The accepted `prediction_batch_validate` preflight ([ADR 0131 (Accepted)](../adr/0131-batch-candidate-preflight-tool.md)) is a pure read of the contract validators: it touches no storage, run, lease, queue or profile and does not replace the validation of `batch_submit`, which stays authoritative and also checks the manifest, `inputHash` and live profile. The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A `batch_submit` is a sequence of per-film commits and one queue settlement, not an atomic unit; replaying the same body recovers a crash. A v2 run that ends with `manifest_spent` ([ADR 0136](../adr/0136-prediction-batch-manifest-size-and-spent-complete.md)) releases the lease as a normal complete while unsubmitted films of a failed short run stay in the queue for the next `batch_start`. A hot film that arrives mid-run waits for that start. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
+The accepted `prediction_batch_validate` preflight ([ADR 0131 (Accepted)](../adr/0131-batch-candidate-preflight-tool.md)) is a pure read of the contract validators: it touches no storage, run, lease, queue or profile and does not replace the validation of `batch_submit`, which stays authoritative and also checks the manifest, `inputHash` and live profile. [ADR 0157](../adr/0157-batch-candidate-hold-and-honest-complete.md) stores submit-ready items in a **transferable** stage (`enrichment/batch-stage.json`). The generating run's lease authorizes the write; the next `prediction_batch_start` drains fresh items onto the new run and drops stale ones. `external_termination` still releases the lease. `useHeld` remains for same-run recovery. The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A `batch_submit` is a sequence of per-film commits and one queue settlement, not an atomic unit; replaying the same body recovers a crash. A v2 run that ends with `manifest_spent` ([ADR 0136](../adr/0136-prediction-batch-manifest-size-and-spent-complete.md)) releases the lease as a normal complete while unsubmitted films of a failed short run stay in the queue for the next `batch_start`. The Events Log receives one terminal `enrichment-<runId>` with `presentation: batch_v2_terminal` and no start or progress item ([ADR 0146](../adr/0146-batch-v2-single-terminal-prediction-event.md)). A hot film that arrives mid-run waits for that start. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
 
 The optional per-film assessment ([ADR 0132](../adr/0132-prediction-assessment-artifact.md), [contract](../reference/api/prediction-assessment.md)) travels only on the batch runner v2 items. Its own immutable R2 object `enrichment/films/<filmId>/predictions/assessments/<predictionSha256>.json` is written after the version object and before the guarded D1 commit, so a committed prediction has its assessment when one was sent and a failure before the commit leaves only unreferenced objects. It is a diagnostic: no rule, queue, freshness verdict, D1 row, bundle, view index entry, Event or public response reads or carries it, and the v5 path and `prediction_validate` take none.
 
@@ -160,7 +169,7 @@ flowchart TD
     read["Read the queue<br/>and its etag"]
     kind{"Rebuild, or<br/>record one change?"}
     inputs["Read profile, view index,<br/>catalogue; published programme<br/>if the queue's generation differs"]
-    build["Rebuild membership;<br/>carry retries, last batch<br/>and counters from the queue read"]
+    build["Rebuild membership;<br/>carry retries including exhausted holds,<br/>last batch and counters from the queue read"]
     amend["Apply the run's<br/>bookkeeping, if any"]
     change["Apply the change to<br/>the queue read; retry records<br/>only grow; written films<br/>leave the queue"]
     fence["Renew the caller's lease,<br/>if it holds one"]

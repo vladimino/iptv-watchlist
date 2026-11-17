@@ -255,7 +255,7 @@ export async function writeFilmFacts(env,input){
  const id=fenced.filmId(input?.id),expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at);
  fenced.text(input.requestId);
  const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});
- const gate=assertWritable(await readAuthority(env));
+ const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
  const snapshot=await readFilmSnapshot(env,id);
  const plan=planFilmFacts(snapshot,input);
  // `requireExisting: true` (AIR-374 P3a, ADR 0127): a producer that must NEVER create a Film. Checked here against the read AND again inside the fenced batch below, so a Film deleted after this read fails the whole batch (receipt tail

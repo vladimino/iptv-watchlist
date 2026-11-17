@@ -128,11 +128,12 @@ for(const [label,day] of DAYS){
 const worker=fs.readFileSync('src/worker.js','utf8');
 const handler=worker.slice(worker.indexOf('async scheduled('),worker.indexOf('async fetch('));
 assert.match(handler,/Promise\.allSettled\(\[/);
-for(const member of ['runD1EnrichmentProjection(','RatingsOrchestration.ensure(','EpgOrchestration.ensure(','reconcileDiscoveryWorkflow(','Monitor.run(']){
+for(const member of ['RatingsOrchestration.ensure(','EpgOrchestration.ensure(','reconcileDiscoveryWorkflow(','Monitor.run(']){
  assert.ok(handler.includes(member),member+' is a member of the tick');
 }
+assert.doesNotMatch(handler,/runD1EnrichmentProjection/,'AIR-308: the tick does not start the enrichment projector');
 // AIR-482: the Discovery reconcile and its hourly report start alone and the other members start when it settles or after a bounded head start, as a best-effort mitigation (a close still pending at the deadline overlaps the others and is not isolated); a rejected reconcile never blocks the others.
-assert.ok(handler.indexOf('reconcileDiscoveryWorkflow(')<handler.indexOf('runD1EnrichmentProjection('),'reconcile starts before the projector');
+assert.ok(handler.indexOf('reconcileDiscoveryWorkflow(')<handler.indexOf('RatingsOrchestration.ensure('),'reconcile starts before ratings');
 assert.match(handler,/SCHEDULED_RECONCILE_HEAD_MS/);
 assert.doesNotMatch(handler,/lease|acquire/i,'no shared lease between the members');
 
@@ -150,22 +151,22 @@ for(const dir of ['src','scripts']){
  const body=handler.slice(0,handler.lastIndexOf('}')+1).replace(/^async scheduled/,'return async function scheduled');
  const run=async(reconcileImpl,{advance=false}={})=>{
   const starts=[];let waited=null,cleared=0;
-  const makeFn=new Function('reconcileDiscoveryWorkflow','runD1EnrichmentProjection','RatingsOrchestration','EpgOrchestration','Monitor','SCHEDULED_RECONCILE_HEAD_MS','setTimeout','clearTimeout',body.replace(/,\s*$/,'')+'');
+  const makeFn=new Function('reconcileDiscoveryWorkflow','RatingsOrchestration','EpgOrchestration','Monitor','SCHEDULED_RECONCILE_HEAD_MS','setTimeout','clearTimeout',body.replace(/,\s*$/,'')+'');
   const rec=name=>()=>{starts.push(name);return Promise.resolve();};
   const timers=[];
   const fake=(fn,ms)=>{timers.push({fn,ms});return timers.length;};
-  const h=makeFn(()=>{starts.push('reconcile');return reconcileImpl();},rec('projector'),{ensure:rec('ratings')},{ensure:rec('epg')},{run:rec('monitor')},45000,fake,()=>{cleared++;});
+  const h=makeFn(()=>{starts.push('reconcile');return reconcileImpl();},{ensure:rec('ratings')},{ensure:rec('epg')},{run:rec('monitor')},45000,fake,()=>{cleared++;});
   await h({scheduledTime:1},{},{waitUntil:p=>{waited=p;}});
   return {starts,waited,timers,get cleared(){return cleared;}};
  };
  let r=await run(()=>Promise.resolve());
- await r.waited;assert.deepEqual(r.starts,['reconcile','projector','ratings','epg','monitor'],'fast success: reconcile first, each member exactly once');assert.equal(r.cleared,1,'the unused head-start timer is cancelled');
+ await r.waited;assert.deepEqual(r.starts,['reconcile','ratings','epg','monitor'],'fast success: reconcile first, each member exactly once');assert.equal(r.cleared,1,'the unused head-start timer is cancelled');
  r=await run(()=>Promise.reject(new Error('boom')));
- await r.waited;assert.equal(r.starts.length,5,'rejection never blocks the others');assert.equal(r.starts.filter(x=>x==='projector').length,1);
+ await r.waited;assert.equal(r.starts.length,4,'rejection never blocks the others');assert.equal(r.starts.filter(x=>x==='projector').length,0);
  let release;r=await run(()=>new Promise(res=>{release=res;}));
  await new Promise(res=>setImmediate(res));assert.deepEqual(r.starts,['reconcile'],'others wait while reconcile is pending');
  assert.equal(r.timers[0].ms,45000,'bounded head start');r.timers[0].fn();
- await new Promise(res=>setImmediate(res));assert.equal(r.starts.length,5,'after the deadline the others start exactly once while reconcile is still pending');
- release();await r.waited;assert.equal(r.starts.length,5,'waitUntil settles after reconcile finishes, no restart');
+ await new Promise(res=>setImmediate(res));assert.equal(r.starts.length,4,'after the deadline the others start exactly once while reconcile is still pending');
+ release();await r.waited;assert.equal(r.starts.length,4,'waitUntil settles after reconcile finishes, no restart');
 }
 console.log('cron-schedule-simulation: ok (configured cron '+current+', compared with the former 37 * * * *)');

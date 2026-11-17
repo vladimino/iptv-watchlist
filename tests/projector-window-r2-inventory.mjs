@@ -46,7 +46,7 @@ function closure(entries){
  }
  return found;
 }
-const WRITE=/(\bBUCKET\.(?:put|delete)|\bbucket\.(?:put|delete)|\bsaveJSON|\bmergeStoredJSON|\.saveMutable|\.routeWrite|\bputJSON)\(/;
+const WRITE=/(\bBUCKET\.(?:put|delete)|\bbucket\.(?:put|delete)|\bsaveJSON|\bputStoredJson|\bmergeStoredJSON|\.saveMutable|\.routeWrite|\bputJSON)\(/;
 const writers=set=>[...set.keys()].filter(key=>WRITE.test(set.get(key).d.body)).sort();
 
 // The entry points. Chunk: the resolver chunk, the Workflow's chunk and the two admin routes that take the Discovery lease.
@@ -59,7 +59,7 @@ const chunk=closure(CHUNK),publication=closure(PUBLICATION);
 const consts=new Map();
 for(const [,text] of texts)for(const m of text.matchAll(/(?:^|\n)\s*(?:export\s+)?const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*('[^'\n]*'|`[^`\n]*`)/g))if(!consts.has(m[1]))consts.set(m[1],m[2]);
 const NOT_DISCOVERY=['metadata.json','titles.json','people.json','watchlist.json','letterboxd/diary/history.json','view-index.json','letterboxd/admissions/verified-films.json','owner-reviews.json'];
-const PRIMITIVE=/((?:env\.)?\bBUCKET\.(?:put|delete|createMultipartUpload|resumeMultipartUpload)|\bbucket\.(?:put|delete|createMultipartUpload|resumeMultipartUpload)|\bsaveJSON|\bmergeStoredJSON|\.saveMutable|\.routeWrite|\bputStable|\bputKnownLength)\(/g;
+const PRIMITIVE=/((?:env\.)?\bBUCKET\.(?:put|delete|createMultipartUpload|resumeMultipartUpload)|\bbucket\.(?:put|delete|createMultipartUpload|resumeMultipartUpload)|\bsaveJSON|\bsaveCanonicalMirror|\bmergeStoredJSON|\.saveMutable|\.routeWrite|\bputStable|\bputKnownLength)\(/g;
 const perFile=new Map(),inputSites=new Map();let siteCount=0;
 function argsOf(text,from){let depth=0,i=from,start=from;const args=[];for(;i<text.length;i++){const c=text[i];if('([{'.includes(c))depth++;else if(')]}'.includes(c)){if(depth===0)break;depth--;}else if(c===','&&depth===0){args.push(text.slice(start,i));start=i+1;if(args.length>=2)break;}}args.push(text.slice(start,i));return args;}
 for(const [file,text] of texts){
@@ -79,7 +79,7 @@ for(const [file,text] of texts){
 // receiver fails, so a write that the primitive list cannot see by name cannot arrive silently.
 // AIR-402: index, group, sequence and merged are the in-memory lookups of the view build (src/domain/film-person-reader.js, orderedFilmIndex and its caller): Maps built from the view, never storage.
 // AIR-442: scope.values is the Map of one prediction request's own scope (src/enrichment.js, createRequestScope): what the step itself read or wrote, never storage.
-const IN_MEMORY=new Set(['films','wanted','store.inflight','stillMissing','rows','reentryGroups.groups','map','latestGroups.groups','byTmdb','byLid','also','index','group','sequence','merged','scope.values','EPG_PHASE_SINKS','EPG_TRACE','skipUntil','matched','discovery']);   // AIR-455: EPG_PHASE_SINKS; AIR-374 P3c: skipUntil is the per-binding WeakMap of the cached projector-route skip (src/canonical-discovery-admission-producer.js), never storage is the Map of the diagnostic canary's own run markers (src/worker.js), never storage // AIR-480 stage 1: matched and discovery are the local Maps of scanEPG, pruned after the stream when a slot has two owners.
+const IN_MEMORY=new Set(['films','wanted','store.inflight','stillMissing','rows','reentryGroups.groups','map','latestGroups.groups','byTmdb','byLid','also','index','group','sequence','merged','scope.values','EPG_PHASE_SINKS','EPG_TRACE','skipUntil','matched','discovery','deferredKeys']);   // AIR-455: EPG_PHASE_SINKS; AIR-374 P3c: skipUntil is the per-binding WeakMap of the cached projector-route skip (src/canonical-discovery-admission-producer.js), never storage is the Map of the diagnostic canary's own run markers (src/worker.js), never storage // AIR-480 stage 1: matched and discovery are the local Maps of scanEPG, pruned after the stream when a slot has two owners. // AIR-492: deferredKeys is the in-memory set of this hop's fairness fences.
 const receivers=new Map();
 for(const [file,text] of texts)for(const m of text.matchAll(/([A-Za-z_$][A-Za-z0-9_$.]*)\.(put|delete|createMultipartUpload|resumeMultipartUpload)\(/g)){
  const who=m[1],method=m[2];
@@ -88,12 +88,10 @@ for(const [file,text] of texts)for(const m of text.matchAll(/([A-Za-z_$][A-Za-z0
  else assert.ok(r2||IN_MEMORY.has(who),file+': .delete( on a receiver that is neither the R2 binding nor a known Map or Set: '+who);
 }
 const FILE_SITES={
- 'src/admin/discovery-recovery.js':{r2:10,wrapper:0,dynamic:8},
+ 'src/admin/discovery-recovery.js':{r2:11,wrapper:0,dynamic:9},
  'src/admin/film-title-route.js':{r2:1,wrapper:0,dynamic:0},
  'src/admin/letterboxd-archive-apply.js':{r2:3,wrapper:0,dynamic:1},
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
- 'src/epg-diagnostic.js':{r2:3,wrapper:0,dynamic:2},   // AIR-453 (ADR 0121): the guarded put and delete of the DIAGNOSTIC bucket and the identity put of `provision`; inert (no caller), a separate bucket, never a projector input
- 'src/epg-diagnostic-run.js':{r2:4,wrapper:0,dynamic:1},   // AIR-455 (ADR 0121): the baseline writes and the cleanup of the DIAGNOSTIC bucket through the allowlisted context, the run document and the consumption marker; behind owner-only routes, inert without the diagnostic bindings, never a projector input
  'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0118: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)
  'src/discovery.js':{r2:8,wrapper:15,dynamic:3},
  // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
@@ -102,7 +100,7 @@ const FILE_SITES={
  // of the run's films) and the interrupted record of a recovered earlier run (`enrichment/runs/<runId>.json`). Neither is a projector input or on a Discovery, admin-recovery or publication path.
  // Batch runner v2 batch_submit: +1 r2 site, +1 wrapper site and +1 dynamic key, all of the shape the v5 runner already writes: `runnerLeaseEdit` puts the runner lease object (the same key `runnerLease` puts, in the object
  // mode) and the per-film `enrichment/films/<id>/predictions.json` bundle (the key the v5 submit writes). Neither is a projector input or on a Discovery, admin-recovery or publication path.
- 'src/enrichment.js':{r2:13,wrapper:47,dynamic:33}, // ADR 0132: +1 create-only put of the prediction assessment sidecar; it is no projector input (the projector reads film state, the bundle and the view index, never predictions/assessments/)
+ 'src/enrichment.js':{r2:15,wrapper:48,dynamic:34}, // AIR-510: batch-manifest persist plus transferable batch-stage drain/hold; not a projector input. AIR-79: -3 wrapper and -3 dynamic, the three mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,...) writes of the removed lookupRemovalRatings (the removal queue, not a projector input; the Ratings step keeps its own)
  'src/filter-presets.js':{r2:1,wrapper:0,dynamic:0},
  'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
  'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},
@@ -117,7 +115,7 @@ const FILE_SITES={
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
  // ADR 0145: +1 r2 put of `epg/seal/<runId>/publication.json` in `stageSealedGeneration` and +1 dynamic delete of that key in `sealQueueStep`
  // (the leftover `payload.json` delete stays). Neither object is a projector input; both sit on the publication path that already takes the lease.
- 'src/worker.js':{r2:17,wrapper:47,dynamic:19},
+ 'src/worker.js':{r2:16,wrapper:57,dynamic:19}, // AIR-513: flushWatchlistEvent (including the failed-put mark) and the seal completion flush save sync.json, not a projector input. AIR-79: -1 wrapper, the saveJSON(env,'sync.json',run) of the removed ratingsPhase
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
 assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');
@@ -128,8 +126,8 @@ const INPUT_WRITERS={
  "src/metadata-cache.js|bucket.put|MIRROR_KEY":{count:1,owner:'metadata cache R2 mirror, its own domain'},
  "src/owner-review-d1.js|bucket.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
  "src/owner-review-d1.js|env.BUCKET.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
- "src/worker.js|saveJSON|'people.json'":{count:2,owner:'metadata sync steps (Persons)'},
- "src/worker.js|saveJSON|'titles.json'":{count:2,owner:'metadata sync steps (titles)'},
+ "src/worker.js|saveCanonicalMirror|'people.json'":{count:2,owner:'metadata and EPG sync Persons, re-gated at put'},
+ "src/worker.js|saveCanonicalMirror|'titles.json'":{count:2,owner:'metadata and EPG sync titles, re-gated at put'},
  "src/worker.js|saveJSON|'watchlist.json'":{count:3,owner:'EPG publication and watchlist persistence, under the publication lease'},
 };
 assert.deepEqual(Object.fromEntries([...inputSites].sort()),Object.fromEntries(Object.entries(INPUT_WRITERS).sort().map(([k,v])=>[k,v.count])),'the sites that write a non-Discovery projector input changed: classify the new one');
@@ -161,8 +159,10 @@ const classes={
  'drActionWrite@src/admin/discovery-recovery.js':'admin recovery action receipt (not a projector input)',
  'drExecute@src/admin/discovery-recovery.js':'admin recovery, after renewDiscoveryLease',
  'drRefreshIndex@src/admin/discovery-recovery.js':'admin recovery observation index (not a projector input)',
+ 'peExecute@src/admin/discovery-recovery.js':'admin recovery policy-exclude receipt (not a projector input)',
  // The generic writers: the key comes from the caller, which is classified above; an owned key is D1-routed.
  'saveJSON@src/worker.js':'generic writer: DiscoveryAuthority.routeWrite for an owned key, else R2 (callers classified)',
+ 'putStoredJson@src/worker.js':'generic writer: titles.json/people.json freeze at BUCKET.put, else R2',
  // State that is not a projector input at all: the prediction queue, its D1 mirror, the removal queue.
  'writeQueue@src/prediction-d1.js':'prediction queue (not a projector input)',
  'mirror@src/prediction-d1.js':'prediction R2 mirror (not a projector input)',
@@ -182,8 +182,10 @@ const classes={
  'sealPublishStep@src/worker.js':'under the sealStep lease',
  'sealQueueStep@src/worker.js':'under the sealStep lease',
  'flushEpgEvent@src/worker.js':'EPG event log and the run record (sync.json), not projector inputs; under the sealStep lease, finishSync or the complete-run continuation',
+ 'flushWatchlistEvent@src/worker.js':'watchlist event log and the run record (sync.json), not projector inputs; under the sealStep lease, finishSync or the complete-run continuation',
  'copyEpgGeneration@src/worker.js':'under the publication lease',
  'persistWatchlist@src/worker.js':'under the publication lease',
+ 'persistScan@src/worker.js':'publication scan: Letterboxd facts plus D1 retention cursor on sync.json; under the lease; not a projector input',
  'planDiscoveryLedger@src/worker.js':'under the publication lease',
  'storePlannedDiscovery@src/worker.js':'under the publication lease',
  'writeLedgerSegment@src/worker.js':'under the publication lease',
@@ -209,9 +211,12 @@ for(const name of notDiscovery)assert.ok(inputs.has(name),'the projector reads '
 const naming=set=>[...set.keys()].filter(key=>notDiscovery.some(name=>set.get(key).d.body.includes("'"+name+"'"))).sort();
 const NAMING={
  'loadJSON@src/worker.js':'a read of published documents and other JSON; it does not write',
+ 'putStoredJson@src/worker.js':'frozen titles.json/people.json put after epgStepGuard; other keys are ordinary R2 JSON',
  'writeMirrors@src/published-epg.js':'writes those mirrors from the D1 document, idempotently',
  'persistWatchlist@src/worker.js':'publication path, under the lease',
+ 'persistScan@src/worker.js':'publication scan path; reads view-index to plan watchlist false retention, writes no frozen mirror',
  'sealPublishStep@src/worker.js':'publication path, under the sealStep lease',
+ 'buildPredictionQueue@src/enrichment.js':'reads watchlist.json only while the programme snapshot is unsealed, for membership; it writes neither watchlist nor a projector input',
 };
 const seen=new Set([...naming(chunk),...naming(publication)]);
 for(const key of seen)assert.ok(NAMING[key],'a reachable function names a projector input and is not classified: '+key);

@@ -43,6 +43,27 @@ The hourly cron's Discovery reconcile (`reconcileDiscoveryWorkflow`) is independ
 
 **Two Discovery status levels ([ADR 0115](../adr/0115-discovery-operational-status-view.md)).** The detailed pipeline status walks the whole ledger under a snapshot fence of the Discovery authority generation, so while Discovery commits it can answer `discovery_fence`; that is the expected outcome of an expensive read, not a Workflow failure. The operational view (`view=operational`) is the health read: one batch of single-row SELECTs (authority row, transfer, status, continuation, workflow, lease, projector window), one consistent snapshot, no ledger, decision or catalog read, no TMDB, no write. It reports the phase, next action, executor and lease liveness and the last checkpoint's stored backlog with its own time and `known | stale | unknown`; an unreadable record is named in `unavailable`, a held cutover is `authority.state: held`, and an unavailable authority is a typed answer with no invented records.
 
+**User catalog versus the generation fence ([ADR 0147](../adr/0147-discovery-user-read-snapshot-fence.md)).** `GET /api/catalog/available` and `GET /api/enrichment/view` read the catalog as one admission snapshot. They do not fail because continuation or status writers moved `discovery_authority.generation`. A real pin change, a non-seal `loading` transfer, a held cutover or an unreadable authority is HTTP 503 with `code` and `Retry-After: 1`, logged only if it still escapes as an unhandled route error. A 502 `discovery_fence` on those two paths is a defect, not an expected wait.
+
+```mermaid
+%%{init: {"flowchart": {"htmlLabels": true, "wrappingWidth": 220, "nodeSpacing": 28, "rankSpacing": 36}}}%%
+flowchart TD
+    userGet["User catalog<br/>GET"]
+    snapshot["One admission<br/>SELECT"]
+    paged["Paged ledger<br/>walk"]
+    genBump["Continuation<br/>bumps generation"]
+    pin["Pin or transfer<br/>epoch"]
+    ok["200 catalog"]
+    wait["503 Retry-After"]
+    userGet --> snapshot
+    snapshot --> pin
+    pin -->|stable| ok
+    pin -->|moved / loading / held| wait
+    genBump -.-> snapshot
+    genBump -.-> paged
+    paged -->|generation moved| wait
+```
+
 A committed taste-profile publication records one `taste_profile` event after the current pointer moves ([Events](../reference/domain/events.md)). The pointer and the event are not one transaction. A failed event put leaves the committed profile in place and says so on the publication response. The recovery is a replay of that same publication request: it does not move current again and creates the missing event once, and only when the immutable version body is marked `tasteProfileEventExpected`. A version without that marker is left without an event. It does not scan older versions and it does not run from a schedule. `GET /api/events` is unchanged and is still not a safe production read.
 
 ## Proposed shared orchestration read model

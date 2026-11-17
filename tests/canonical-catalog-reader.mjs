@@ -55,6 +55,44 @@ if(ONLY!=='route')for(const state of STATES){
  else await assert.rejects(()=>reader.catalogReaderGate(env),code(refusal(state)),state);
 }
 if(ONLY!=='route')assert.equal((await canonicalReaderMode({DB:d1Standin(database('open'))})).mode,'d1','the bulk read model shares the one gate');
+if(ONLY!=='route'){
+ for(const state of ['legacy','r2','prepared'])assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database(state),state)}),true,state);
+ assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database('open'),'open')}),false,'open');
+ for(const state of ['held','unknown-row','unknown-table','unknown-read'])assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database(state),state)}),false,state);
+ const file=database('prepared'),env={DB:d1Standin(file)};
+ const stored={titles:1,people:1};
+ const write=async(key)=>{if(!(await reader.canonicalMirrorsWritable(env)))return false;stored[key]=(stored[key]||0)+1;return true;};
+ assert.equal(await write('titles'),true,'prepared still writes');
+ sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1");
+ assert.equal(await write('titles'),false,'flip between localize and write skips titles.json');
+ assert.equal(await write('people'),false,'flip between localize and write skips people.json');
+ assert.deepEqual(stored,{titles:2,people:1});
+ sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");
+ assert.equal(await write('titles'),false,'held skips');
+ const cutover=database('prepared'),cutoverEnv={DB:d1Standin(cutover)};
+ assert.equal(await reader.canonicalMirrorsWritable(cutoverEnv),true);
+ sqlite(cutover,"UPDATE projector_window SET state='held',owner='air-499',requested_at="+(Date.now()-1000)+",expires_at="+(Date.now()+60000)+" WHERE id=1");
+ assert.equal(await reader.canonicalMirrorsWritable(cutoverEnv),false,'exclusive window held refuses frozen mirror puts');
+ const inner=d1Standin(database('prepared'));
+ const windowFail={prepare(sql){if(/FROM projector_window/.test(sql))throw new Error('D1 timeout');return inner.prepare(sql);}};
+ assert.equal(await reader.canonicalMirrorsWritable({DB:windowFail}),false,'unreadable projector_window is not permission to write');
+ {
+  const worker=fs.readFileSync('src/worker.js','utf8');
+  const freeze=worker.slice(worker.indexOf('async function frozenCanonicalMirrorsLocked'),worker.indexOf('async function localizedTitleStore'));
+  const save=worker.slice(worker.indexOf('async function epgStepGuard'),worker.indexOf('function confirmedHalfStar'));
+  const puts=[];
+  const env={
+   epgStep:true,
+   DB:windowFail,
+   BUCKET:{put:async(name)=>{puts.push(name);return {etag:'e'};}},
+  };
+  const context=vm.createContext({env,CanonicalCatalogReader:{canonicalMirrorsWritable:reader.canonicalMirrorsWritable},EpgOrchestration:{assertStep:async()=>{}},JSON,undefined});
+  vm.runInContext(freeze+'\n'+save+'\nthis.saveJSON=saveJSON;',context);
+  const result=await vm.runInContext('saveJSON(env,"titles.json",{ok:true})',context);
+  assert.equal(result.skipped,'canonical_mirror_frozen');
+  assert.deepEqual(puts,[],'unreadable exclusive window: zero BUCKET.put');
+ }
+}
 
 // 2. The D1 fallback reader: only at open; every other state refuses before a catalog statement. There is no R2 handle in this environment at all.
 if(ONLY!=='route'){
@@ -66,13 +104,15 @@ INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenanc
 INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:tmdb:300','300','sc300','${SHA}','D1 title',2001,'${RK}','tmdb_300','2026-11-01T09:00:00.000Z','r','${T}'),('film:tmdb:301','301','sc301','${SHA}',NULL,NULL,'${RK}','tmdb_301','2026-11-01T09:00:00.000Z','r','${T}'),('film:tmdb:306','307','sc307','${SHA}',NULL,NULL,'${RK}','tmdb_307','2026-11-01T09:00:00.000Z','r','${T}');
 INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:303','film:tmdb:300','${T}');`;
  const file=database('open');sqlite(file,seed);
+ sqlite(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:other-308',1,'tmdb:999','Other','${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:other-308','tmdb','308',1,0,NULL);`);
  const env={DB:d1Standin(file)};
- const ask=(tmdb,e=env)=>reader.catalogAdmittedFilmFromD1(e,tmdb);
+ const ask=(tmdb,e=env)=>reader.catalogCanonicalFilmFromD1(e,tmdb);
  let r=await ask('300');assert.equal(r.state,'found');assert.deepEqual([r.film.id,r.film.title,r.film.year,r.film.shows.length],['tmdb_300','D1 title',2001,0]);
- r=await ask('301');assert.deepEqual([r.state,r.film.title,r.film.year],['found',null,null],'a title-less admission is still a Film');
+ r=await ask('301');assert.deepEqual([r.state,r.film.title,r.film.year],['found','Orig',null],'a title-less admission is still a Film, titled by the canonical original title');
  assert.equal((await ask('999')).state,'conflict','a conflicting claim of the typed id holds the identity');
- assert.equal((await ask('302')).state,'absent','a Film without an admission row is not admitted by D1');
+ r=await ask('302');assert.deepEqual([r.state,r.film.id,r.film.title,r.film.original,r.film.year,r.film.shows.length],['found','tmdb_302','Orig','Orig',null,0],'AIR-475: a retained canonical Film with no admission row is a Film');
  assert.equal((await ask('12345')).state,'absent','no Film at all');
+ assert.equal((await ask('308')).state,'conflict','AIR-475: a Film recording another canonical identity than its claim is never served');
  assert.equal((await ask('304')).state,'conflict','an untrusted claim is not the owner');
  assert.equal((await ask('305')).state,'conflict','a trusted but conflicting claim is not the owner');
  await assert.rejects(()=>ask('306'),code('canonical_read_unavailable'),'an admission row that names another tmdb id fails closed');
@@ -190,9 +230,10 @@ assert.equal(body('open','persons').authoritative,undefined,'a view that never c
 if(!ONLY){
  const build=fs.readFileSync('build.mjs','utf8');
  assert.match(build,/scopedReplacing\('src\/canonical-catalog-reader\.js','CanonicalCatalogReader'/,'build.mjs bundles the reader');
- for(const unbundled of ['canonical-producers','canonical-read-model','film-admission','tmdb-retirement-decisions','film-person-baseline'])assert.ok(!build.includes('src/'+unbundled+'.js'),unbundled+' stays out of the bundle');
+ for(const unbundled of ['canonical-producers','canonical-read-model','tmdb-retirement-decisions','film-person-baseline'])assert.ok(!build.includes('src/'+unbundled+'.js'),unbundled+' stays out of the bundle');
+ assert.ok(build.includes("scopedImports('src/film-admission.js','CanonicalFilmAdmission'"),'AIR-499 bundles film-admission for rated_admission_retention');
  const importers=needle=>{const out=[];const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes(needle))out.push(full);}};walk('src');return out.sort();};
- assert.deepEqual(importers("from './canonical-catalog-reader.js'"),['src/canonical-producers.js','src/canonical-read-model.js','src/film-admission.js'],'the explicit allowlist of the reader\'s importers');
+ assert.deepEqual(importers("from './canonical-catalog-reader.js'"),['src/canonical-producers.js','src/canonical-read-model.js','src/film-admission.js','src/film-person-open-handoff.js'],'the explicit allowlist of the reader\'s importers');
  assert.deepEqual(importers('canonical-read-model'),[],'nothing in src imports the bulk read model, which is not bundled');
  const text=fs.readFileSync(READER_FILE,'utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\b(INSERT|UPDATE|DELETE|REPLACE)\b\s+(INTO|FROM)?\s*\w/.test(text)&&!/R2|BUCKET|fetch\(/.test(text),'the reader has no write statement and no R2 or network access');

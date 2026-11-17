@@ -35,10 +35,20 @@ function predictionDiagnosticOutstanding(queue){
  for(const id of [...queue.hotPending,...queue.coldPending]){if(seen.has(id))continue;seen.add(id);ids.push(id);}
  return ids;
 }
+function predictionDiagnosticRetryExhausted(record){
+ return Number.isInteger(record?.attempts)&&record.attempts>=10;
+}
+function predictionDiagnosticLaneIds(queue){
+ const hot=(queue.hotPending||[]).filter(id=>!predictionDiagnosticRetryExhausted(queue.retries?.[id]));
+ if(hot.length)return hot;
+ return (queue.coldPending||queue.pending||[]).filter(id=>!predictionDiagnosticRetryExhausted(queue.retries?.[id]));
+}
 function predictionDiagnosticReadyIds(queue,now){
  if(!queue)return [];
- const ids=queue.priorityCount?queue.hotPending:queue.coldPending;
- return (ids||queue.pending||[]).filter(id=>!(queue.retries?.[id]?.retryAt>now));
+ return predictionDiagnosticLaneIds(queue).filter(id=>!(queue.retries?.[id]?.retryAt>now));
+}
+function predictionDiagnosticExhaustedIds(queue){
+ return Object.entries(queue?.retries||{}).filter(([,record])=>predictionDiagnosticRetryExhausted(record)).map(([id])=>id);
 }
 function predictionDiagnosticRetryAt(value){
  const ms=typeof value==='number'?value:typeof value==='string'?Date.parse(value):NaN;
@@ -93,6 +103,7 @@ function predictionDiagnosticLane(queue,filmId){
  return 'none';
 }
 function predictionDiagnosticEligibility(queue,filmId,now){
+ if(predictionDiagnosticRetryExhausted(queue?.retries?.[filmId]))return {eligibleNow:false,cause:'prediction_retry_exhausted'};
  const lane=predictionDiagnosticLane(queue,filmId);
  if(lane==='unknown')return {eligibleNow:null,cause:'unknown'};
  if(lane==='none')return {eligibleNow:false,cause:'not_in_queue'};
@@ -222,18 +233,21 @@ function predictionQueueOverview(snapshot,now){
  const outstanding=predictionDiagnosticOutstanding(snapshot.queue);
  const reasons=predictionDiagnosticReasons(snapshot,outstanding);
  const ready=snapshot.queue?predictionDiagnosticReadyIds(snapshot.queue,now):[];
- const deferred=Array.isArray(outstanding)?outstanding.filter(id=>snapshot.queue.retries?.[id]?.retryAt>now):[];
+ const exhausted=snapshot.queue?predictionDiagnosticExhaustedIds(snapshot.queue):[];
+ const active=Array.isArray(outstanding)?outstanding.filter(id=>!predictionDiagnosticRetryExhausted(snapshot.queue.retries?.[id])):[];
+ const deferred=active.filter(id=>snapshot.queue.retries?.[id]?.retryAt>now);
  const nextMs=deferred.map(id=>snapshot.queue.retries[id].retryAt).filter(value=>typeof value==='number').sort((a,b)=>a-b)[0];
  let state='unavailable',cause='queue_not_recorded';
  if(snapshot.queueStatus==='unavailable')cause='queue_unavailable';
  else if(snapshot.queueStatus==='recorded'&&!Array.isArray(outstanding))cause='queue_shape_unknown';
- else if(snapshot.queueStatus==='recorded'&&outstanding.length===0){state='drained';cause='drained';}
+ else if(snapshot.queueStatus==='recorded'&&active.length===0&&exhausted.length===0){state='drained';cause='drained';}
+ else if(snapshot.queueStatus==='recorded'&&active.length===0){state='temporarily_ineligible';cause='prediction_retry_exhausted';}
  else if(snapshot.queueStatus==='recorded'&&ready.length===0){state='temporarily_ineligible';cause=deferred.length?'retry_backoff':'waiting_behind_hot';}
  else if(snapshot.queueStatus==='recorded'){state='eligible';cause='ready';}
  return {
   atomic:false,state,cause,
   snapshot:{...predictionDiagnosticSnapshotId(snapshot.queue),profileVersion:snapshot.profile?.version??snapshot.queue?.profileVersion??null,consistent:reasons.length===0,partial:reasons.length>0,reasons,sources:predictionDiagnosticSources(snapshot),fingerprint:predictionDiagnosticFingerprintSummary(snapshot)},
-  pending:{total:Array.isArray(outstanding)?outstanding.length:null,hot:Array.isArray(snapshot.queue?.hotPending)?snapshot.queue.hotPending.length:null,cold:Array.isArray(snapshot.queue?.coldPending)?snapshot.queue.coldPending.length:null,eligibleNow:snapshot.queueStatus==='recorded'&&Array.isArray(outstanding)?ready.length:null,deferredByRetry:Array.isArray(outstanding)?deferred.length:null,nextRetryAt:Number.isFinite(nextMs)?new Date(nextMs).toISOString():null},
+  pending:{total:Array.isArray(outstanding)?active.length:null,hot:Array.isArray(snapshot.queue?.hotPending)?snapshot.queue.hotPending.filter(id=>!predictionDiagnosticRetryExhausted(snapshot.queue.retries?.[id])).length:null,cold:Array.isArray(snapshot.queue?.coldPending)?snapshot.queue.coldPending.filter(id=>!predictionDiagnosticRetryExhausted(snapshot.queue.retries?.[id])).length:null,eligibleNow:snapshot.queueStatus==='recorded'&&Array.isArray(outstanding)?ready.length:null,deferredByRetry:Array.isArray(outstanding)?deferred.length:null,retryExhausted:snapshot.queueStatus==='recorded'?exhausted.length:null,nextRetryAt:Number.isFinite(nextMs)?new Date(nextMs).toISOString():null},
   coverage:predictionDiagnosticCoverage(snapshot,now),
  };
 }
@@ -265,7 +279,7 @@ function predictionDiagnosticEncodeCursor(value){
 }
 function predictionPendingQuery(query){
  const filter=query.filter||'all';
- if(filter!=='all'&&filter!=='eligible'&&filter!=='deferred')return {error:'"filter" must be all, eligible or deferred.'};
+ if(filter!=='all'&&filter!=='eligible'&&filter!=='deferred'&&filter!=='exhausted')return {error:'"filter" must be all, eligible, deferred or exhausted.'};
  if(!Number.isInteger(query.limit)||query.limit<1||query.limit>PREDICTION_DIAGNOSTIC_PAGE_MAX)return {error:'"limit" must be an integer from 1 to 20.'};
  if(query.cursor!==undefined&&!predictionDiagnosticDecodeCursor(query.cursor))return {error:'"cursor" does not match this queue page.'};
  return {filter,limit:query.limit,cursor:query.cursor};
@@ -281,11 +295,13 @@ function predictionPendingPage(snapshot,query,now){
  const cursor=parsed.cursor?predictionDiagnosticDecodeCursor(parsed.cursor):{offset:0,refreshedAt:identity.refreshedAt,programmeRunId:identity.programmeRunId};
  if(cursor.refreshedAt!==identity.refreshedAt||cursor.programmeRunId!==identity.programmeRunId)return {atomic:false,status:'snapshot_changed',cause:'snapshot_changed',filter:parsed.filter,snapshot:identity,items:[],nextCursor:null};
  const ready=new Set(predictionDiagnosticReadyIds(snapshot.queue,now));
- const rows=predictionDiagnosticOutstanding(snapshot.queue).map(filmId=>{
+ const exhausted=new Set(predictionDiagnosticExhaustedIds(snapshot.queue));
+ const sourceIds=parsed.filter==='exhausted'?[...exhausted]:predictionDiagnosticOutstanding(snapshot.queue).filter(id=>!exhausted.has(id));
+ const rows=sourceIds.map(filmId=>{
   const eligibility=predictionDiagnosticEligibility(snapshot.queue,filmId,now);
   const retry=predictionDiagnosticRetry(snapshot.queue,filmId);
-  return {filmId,lane:predictionDiagnosticLane(snapshot.queue,filmId),eligibleNow:eligibility.eligibleNow,cause:eligibility.cause,retryAt:retry.retryAt,classification:retry.classification};
- }).filter(row=>parsed.filter==='all'||(parsed.filter==='eligible'?ready.has(row.filmId):!ready.has(row.filmId)));
+  return {filmId,lane:predictionDiagnosticLane(snapshot.queue,filmId),eligibleNow:eligibility.eligibleNow,cause:eligibility.cause,retryAt:retry.retryAt,classification:retry.classification,attempts:retry.attempts,lastRunId:retry.lastRunId};
+ }).filter(row=>parsed.filter==='all'||parsed.filter==='exhausted'||(parsed.filter==='eligible'?ready.has(row.filmId):!ready.has(row.filmId)));
  const items=rows.slice(cursor.offset,cursor.offset+parsed.limit);
  const nextCursor=cursor.offset+items.length<rows.length?predictionDiagnosticEncodeCursor({...identity,offset:cursor.offset+items.length}):null;
  return {atomic:false,status:'recorded',filter:parsed.filter,snapshot:identity,items,nextCursor};

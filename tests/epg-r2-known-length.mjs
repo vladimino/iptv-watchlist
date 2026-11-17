@@ -54,6 +54,8 @@ async function seedLedger(env,pad,archive){
  return length;
 }
 async function publishSynthetic(env){
+ env.offlineLedgerFixture={domain:'offline-fixture'};
+ env.DISCOVERY_LEDGER_MODE='frozen';
  const reentry=reentryRow();
  const segment=ledgerArchiveSegment(reentry.key),segmentKey=ledgerArchiveSegmentKey(segment,'write-1'),manifestId='manifest-known-length';
  const archive={version:'v1',manifestId,segments:64,items:ARCHIVED,bytes:10,alsoArchived:[],uniqueArchivedItems:ARCHIVED};
@@ -158,7 +160,6 @@ const mf=new Miniflare({
    env:{
     BUCKET:{type:'r2',name:'epg-known-length'},
     DB:{type:'d1',name:'epg-known-length'},
-    DISCOVERY_LEDGER_MODE:{type:'text',value:'frozen'},
     LETTERBOXD_USERNAME:{type:'text',value:'fixture'},
     EPG_XML_URL:{type:'text',value:'https://epg.invalid/guide.xml'}
    }

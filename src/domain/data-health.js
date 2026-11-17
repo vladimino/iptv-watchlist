@@ -19,7 +19,7 @@ export const DATA_HEALTH_REASONS = [
   'projection_generation_differs', 'identity_conflict', 'identity_ambiguous', 'localization_conflict', 'queue_disagreement',
   'retry_waiting', 'retry_due', 'retry_overdue', 'backoff_beyond_policy', 'no_progress', 'terminal_without_resolution',
   'progress_unknown', 'work_pending', 'work_queued', 'repeated_failures', 'metadata_stale', 'metadata_partial', 'metadata_missing',
-  'eligible_work_without_runs', 'all_deferred_by_retry', 'continuation_running_stale', 'continuation_not_advanced',
+  'eligible_work_without_runs', 'all_deferred_by_retry', 'prediction_retry_exhausted', 'continuation_running_stale', 'continuation_not_advanced',
   'poster_missing', 'posters_missing', 'baseline_missing', 'baseline_age_unknown', 'baseline_stale', 'clock_skew',
 ];
 export const DATA_HEALTH_ELIGIBILITY_REASONS = [
@@ -550,10 +550,22 @@ function queueIssues(context) {
     }));
   }
   const outstanding = [...queue.outstanding];
+  const exhausted = Object.keys(queue.retries).filter(id => Number.isInteger(queue.retries[id]?.attempts) && queue.retries[id].attempts >= 10);
+  if (exhausted.length) {
+    issues.push(issue({
+      subsystem: 'prediction_queue', category: 'incomplete', severity: 'info', reason: 'prediction_retry_exhausted',
+      subject: {kind: 'queue', id: 'prediction_retry_exhausted'}, evidence, observedAt: iso(observed.ms), lastProgressAt: iso(clock.latest(queue.raw.lastCheckAt, queue.raw.lastBatch?.finishedAt).ms),
+      provenance: {source: 'predictionQueue', programmeRunId: queue.programmeRunId, rule: 'queue.retry_exhausted', exhausted: exhausted.length},
+      affected: {count: exhausted.length, sample: sample(exhausted, thresholds)},
+      action: action('wait', 'manual_review', false, 'manual_review_required'),
+    }));
+  }
   if (!outstanding.length) return issues;
+  const active = outstanding.filter(id => !exhausted.includes(id));
+  if (!active.length) return issues;
   const retryOf = id => clock.future(queue.retries[id]?.retryAt);
-  const deferred = outstanding.filter(id => {const retry = retryOf(id); return retry.ms !== null && retry.ms > clock.nowMs;});
-  const eligible = outstanding.filter(id => !deferred.includes(id));
+  const deferred = active.filter(id => {const retry = retryOf(id); return retry.ms !== null && retry.ms > clock.nowMs;});
+  const eligible = active.filter(id => !deferred.includes(id));
   const last = clock.latest(queue.raw.lastCheckAt, queue.raw.lastBatch?.finishedAt, queue.raw.lastBatch?.startedAt);
   const progress = progressOf({lastProgressAt: last.ms === null ? null : iso(last.ms)}, clock, {...thresholds, stalledMs: thresholds.queueStalledMs}, thresholds.predictionMaxBackoffMs);
   if (eligible.length) {

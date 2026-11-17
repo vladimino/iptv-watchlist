@@ -22,6 +22,7 @@ assert.equal(pkg.devDependencies.wrangler,'4.151.1');
 execFileSync(process.execPath,['build.mjs'],{stdio:'inherit'});
 assert.equal(fs.existsSync('dist/server/workflow-entry.js'),true);
 assert.match(fs.readFileSync('dist/server/workflow-entry.js','utf8'),/export class DiscoveryWorkflow extends WorkflowEntrypoint/);
+assert.match(fs.readFileSync('dist/server/index.js','utf8'),/message==='wall_budget'/);
 assert.doesNotMatch(fs.readFileSync('dist/server/index.js','utf8'),/cloudflare:workers/);
 const wrangler=JSON.parse(fs.readFileSync('wrangler.jsonc','utf8'));
 assert.equal(wrangler.workflows[0].schedules,undefined);

@@ -52,8 +52,8 @@ const MUTANTS=[
  ['recordLocalizationConflicts drops the tail','canonical-person-state.js',"statements.push([fenced.BUMP,[kind,id,at]]);\n await fenced.commit(env,gate,statements,entities,tail);","statements.push([fenced.BUMP,[kind,id,at]]);\n await fenced.commit(env,gate,statements,entities);"],
  ['recordLocalizationSources drops the tail','localization-sources.js',COMMIT,PLAIN],
  ['recordLocalizationSources checks the wrong kind','localization-sources.js',"fenced.receiptTail(input.receiptMark,{kind:spec.entity,id})","fenced.receiptTail(input.receiptMark,{kind:input.receiptMark?.target?.kind,id})"],
- ['admitRatedFilm drops the tail','film-admission.js',"try{await fenced.commit(env,gate,statements,entities,tail);}","try{await fenced.commit(env,gate,statements,entities);}"],
- ['retainFilm drops the tail','film-admission.js',"await fenced.commit(env,gate,statements,entities,tail);\n return {id,revision:expected+1,retained:true,written:true};","await fenced.commit(env,gate,statements,entities);\n return {id,revision:expected+1,retained:true,written:true};"],
+ ['admitRatedFilm drops the tail','film-admission.js',"try{await writeFenced(env,gate,statements,entities,tail);}","try{await writeFenced(env,gate,statements,entities);}"],
+ ['retainFilm drops the tail','film-admission.js',"await writeFenced(env,gate,statements,entities,tail);\n return {id,revision:expected+1,retained:true,written:true};","await writeFenced(env,gate,statements,entities);\n return {id,revision:expected+1,retained:true,written:true};"],
  ['recordRetirementDecision drops the tail','tmdb-retirement-decisions.js',"try{await fenced.commit(env,gate,statements,entities,tail);}","try{await fenced.commit(env,gate,statements,entities);}"],
  ['recordRetirementDecision checks no entity','tmdb-retirement-decisions.js',"fenced.receiptTail(input.receiptMark,{kind:'film',id:decision.filmId})","fenced.receiptTail(input.receiptMark,{kind:'film',id:input.receiptMark?.target?.id})"],
 ];

@@ -210,7 +210,7 @@ async function adminLimboRoute(request,env,url){
  if(params.has('cursor')){cursor=params.get('cursor');if(!cursor||cursor.length>ADMIN_CURSOR_MAX)return adminError('stale_cursor',400);}
  let snapshot;
  try{snapshot=await adminLimboLoad(env,pin!==null);}
- catch{return adminError('storage_unavailable',503);}
+ catch(error){const refused=adminStorageRefusal(error);if(refused)return refused;return adminError('storage_unavailable',503);}
  if(snapshot.error)return adminError(snapshot.error,snapshot.error==='stale_pin'?409:503);
  if(pin&&!limboSameTuple(pin,snapshot.tuple))return adminError('stale_pin',409);
  let nowMs=Date.now(),inner=null;
@@ -227,6 +227,8 @@ async function adminLimboRoute(request,env,url){
  const counts=LimboInventory.limboCounts(all);
  counts.actionNow=attentionView.now;counts.actionNowByCause=attentionView.byCause;
  const filmStates={...LimboInventory.limboFilmStates(all),programmeRunId:snapshot.tuple.programmeRunId};
+ try{if(snapshot.base?.filmPersonGate)await CanonicalCatalogReader.catalogReaderStill(env,snapshot.base.filmPersonGate);}
+ catch(error){const refused=adminStorageRefusal(error);if(refused)return refused;throw error;}
  return json({
   pin:limboEncodePin(snapshot.tuple),
   snapshot:{...snapshot.info,evaluatedAt:health.now,sources:LIMBO_SOURCES,clock:health.clock},

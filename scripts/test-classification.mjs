@@ -99,6 +99,9 @@ export const FILES={
  "air-99-detail.mjs": {
   "suite": "core"
  },
+ "alias-provenance.mjs": {
+  "suite": "core"
+ },
  "candidate-discovery.mjs": {
   "suite": "core"
  },
@@ -117,6 +120,18 @@ export const FILES={
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
  },
  "canonical-catalog-titles.mjs": {
+  "suite": "core"
+ },
+ "canonical-catalog-metadata.mjs": {
+  "suite": "core"
+ },
+ "canonical-admin-dictionaries.mjs": {
+  "suite": "core"
+ },
+ "canonical-footer-export.mjs": {
+  "suite": "core"
+ },
+ "canonical-mirror-put.mjs": {
   "suite": "core"
  },
  "canonical-dictionary-producer-mutation.mjs": {
@@ -177,6 +192,12 @@ export const FILES={
  "canonical-handoff-readiness.mjs": {
   "suite": "core"
  },
+ "canonical-metadata-sync-producer.mjs": {
+  "suite": "core"
+ },
+ "canonical-rated-admission-producer.mjs": {
+  "suite": "core"
+ },
  "canonical-person-mutation-producer-mutation.mjs": {
   "suite": "non-functional",
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
@@ -199,6 +220,9 @@ export const FILES={
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
  },
  "canonical-producer-adapters.mjs": {
+  "suite": "core"
+ },
+ "canonical-producer-chain.mjs": {
   "suite": "core"
  },
  "canonical-producer-driver-mutation-b.mjs": {
@@ -297,6 +321,9 @@ export const FILES={
  "channel-finds.mjs": {
   "suite": "core"
  },
+ "concert-broadcast-admission.mjs": {
+  "suite": "core"
+ },
  "confidence-assessment-ui.mjs": {
   "suite": "core"
  },
@@ -387,6 +414,10 @@ export const FILES={
  },
  "discovery-bounded-d1-rehearsal.mjs": {
   "suite": "core"
+ },
+ "discovery-bundle-slot-scan.mjs": {
+  "suite": "core",
+  "note": "The built Worker bundle must resolve slotScanConfirmation inside assignObservationSlots. A direct module import does not load that scope."
  },
  "discovery-bounded-drain.mjs": {
   "suite": "core"
@@ -483,6 +514,10 @@ export const FILES={
   "suite": "core",
   "note": "Operational status must not follow ledger size in statement count. Milliseconds are only logged."
  },
+ "discovery-user-read-fence.mjs": {
+  "suite": "split",
+  "note": "Fence, HTTP 503 and R2-fallback refusals are core. The delayed-catalog wait is gated nonFunctional."
+ },
  "discovery-workflow-bundle.mjs": {
   "suite": "core"
  },
@@ -509,15 +544,6 @@ export const FILES={
   "note": "The commit must fold a large ledger without holding it. That is a memory bound required for a safe deploy, not a latency target."
  },
  "epg-diagnostic-bindings-ready.mjs": {
-  "suite": "core"
- },
- "epg-diagnostic-context.mjs": {
-  "suite": "core"
- },
- "epg-diagnostic-provision.mjs": {
-  "suite": "core"
- },
- "epg-diagnostic-run.mjs": {
   "suite": "core"
  },
  "epg-event-publication-d1.mjs": {
@@ -585,9 +611,6 @@ export const FILES={
  "epg-ratings-attempt.mjs": {
   "suite": "core"
  },
- "epg-replay-dataset.mjs": {
-  "suite": "core"
- },
  "epg-repository.mjs": {
   "suite": "core"
  },
@@ -595,6 +618,9 @@ export const FILES={
   "suite": "core"
  },
  "epg-status-ledger-mode.mjs": {
+  "suite": "core"
+ },
+ "epg-title-collision.mjs": {
   "suite": "core"
  },
  "epg-trace-boundaries.mjs": {
@@ -696,6 +722,9 @@ export const FILES={
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
  },
  "film-person-cutover-minimum.mjs": {
+  "suite": "core"
+ },
+ "film-person-open-handoff.mjs": {
   "suite": "core"
  },
  "film-person-cutover-record-mutation.mjs": {
@@ -916,6 +945,10 @@ export const FILES={
  "lifecycle-parity.mjs": {
   "suite": "core"
  },
+ "ledger-mode-fixture.mjs": {
+  "suite": "support",
+  "note": "Helper that marks an offline env as isolated so full/frozen ledger modes can be exercised without the retired production binding."
+ },
  "limbo-inventory.mjs": {
   "suite": "core"
  },
@@ -959,6 +992,9 @@ export const FILES={
   "suite": "core"
  },
  "metadata-cache.mjs": {
+  "suite": "core"
+ },
+ "migration-export-route-absent.mjs": {
   "suite": "core"
  },
  "migration-export.mjs": {
@@ -1079,6 +1115,13 @@ export const FILES={
  "prediction-dry-run-isolation.mjs": {
   "suite": "core"
  },
+ "prediction-epg-independence.mjs": {
+  "suite": "core",
+  "note": "EPG seal does not block batch selection, submit or manifest_spent. Airtime does not change fingerprint freshness."
+ },
+ "prediction-event-details.mjs": {
+  "suite": "core"
+ },
  "prediction-manifest-size.mjs": {
   "suite": "core"
  },
@@ -1113,6 +1156,12 @@ export const FILES={
   "suite": "core"
  },
  "prediction-recovery.mjs": {
+  "suite": "core"
+ },
+ "prediction-footer-health.mjs": {
+  "suite": "core"
+ },
+ "prediction-retry-exhausted.mjs": {
   "suite": "core"
  },
  "prediction-repository.mjs": {
@@ -1150,6 +1199,9 @@ export const FILES={
   "suite": "core"
  },
  "programme-freshness.mjs": {
+  "suite": "core"
+ },
+ "programme-policy-projection.mjs": {
   "suite": "core"
  },
  "projector-bulk-spike.mjs": {
@@ -1298,6 +1350,9 @@ export const FILES={
  "similar-films.mjs": {
   "suite": "core"
  },
+ "slot-duration-classes.mjs": {
+  "suite": "core"
+ },
  "snapshot.mjs": {
   "suite": "core"
  },
@@ -1390,6 +1445,9 @@ export const FILES={
   "suite": "core"
  },
  "watchlist-event-ratings.mjs": {
+  "suite": "core"
+ },
+ "xmltv-categories-observation.mjs": {
   "suite": "core"
  }
 };

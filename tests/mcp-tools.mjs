@@ -27,7 +27,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
   if(href.startsWith('https://query.wikidata.org/sparql'))return Response.json({results:{bindings:[]}});
   throw new Error('Unexpected network access '+href);
  }});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);vm.runInContext(scoped('src/metadata-cache.js','MetadataCache'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/prediction-diagnostics.js','src/mcp.js','src/continuation.js','src/worker.js']){
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);vm.runInContext(scoped('src/metadata-cache.js','MetadataCache'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/mcp.js','src/continuation.js','src/worker.js']){
  vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 }
 const encode=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -129,6 +129,9 @@ const forbidden=[
  ['prediction_pending',{limit:100}],
  ['prediction_pending',{limit:1,cursor:'not-a-cursor'}],
  ['prediction_pending',{limit:1,prefix:'enrichment/'}],
+ ['prediction_batch_manifest',{runId:'../secret'}],
+ ['prediction_batch_manifest',{runId:'run-1',part:'all'}],
+ ['prediction_batch_manifest',{prefix:'enrichment/'}],
  ['prediction_validate',{}],
  ['prediction_validate',{fingerprint:{},key:'enrichment/x'}],
  ['prediction_validate',{fingerprint:'text'}],
@@ -181,14 +184,16 @@ for(const tool of tools){
  if(tool.name==='prediction_batch_submit'){assert.ok(properties.includes(PREFLIGHT_ISSUE_SHAPE),'the claimed issue shape is published, a validation path and code and nothing else');assert.equal((properties.match(/"path"/g)||[]).length,2,'the only "path" in the schema is the preflight issue shape (properties and required)');assert.ok(JSON.stringify(tool.inputSchema).includes('"required":["kind","reason"]'),'batch v2 failure.reason is required in the MCP schema');}
 }
 assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readOnlyHint,true);
-for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_batch_validate','prediction_pending']){
+for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_batch_validate','prediction_pending','prediction_batch_manifest']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,true,name);
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
 }
-for(const name of ['epg_sync_start','epg_sync_step','prediction_start','prediction_batch_start','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete']){
+for(const name of ['epg_sync_start','epg_sync_step','prediction_start','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete','film_person_open_handoff']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,false,name);
 }
+assert.deepEqual(tools.find(item=>item.name==='film_person_open_handoff').inputSchema.properties.mode.enum,['dry_run','apply']);
+assert.equal(tools.find(item=>item.name==='film_person_open_handoff').inputSchema.properties.expectedReference.maxLength,96);
 assert.equal(tools.find(item=>item.name==='epg_sync_step').annotations.openWorldHint,true);
 const faultSchema=tools.find(item=>item.name==='prediction_complete').inputSchema.properties.fault;
 assert.equal(faultSchema.type,'object');
@@ -422,6 +427,7 @@ assert.equal(diagnosticOverview.body.result.structuredContent.pending.eligibleNo
 assert.equal(diagnosticOverview.body.result.structuredContent.pending.hot,5);
 assert.equal(diagnosticOverview.body.result.structuredContent.pending.cold,0);
 assert.equal(diagnosticOverview.body.result.structuredContent.pending.deferredByRetry,5);
+assert.equal(diagnosticOverview.body.result.structuredContent.pending.retryExhausted,0);
 assert.equal(diagnosticOverview.body.result.structuredContent.atomic,false);
 assert.notEqual(diagnosticOverview.body.result.structuredContent.state,'drained');
 assert.ok(diagnosticGets.length>0&&diagnosticGets.length<=12,diagnosticGets.join(','));

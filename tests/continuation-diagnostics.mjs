@@ -48,7 +48,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
  }});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 vm.runInContext(scoped('src/metadata-cache.js','MetadataCache'),context);
-for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/prediction-diagnostics.js','src/mcp.js','src/continuation.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
+for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/mcp.js','src/continuation.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 const worker=context.worker,entrypoint=vm.runInContext('DiscoveryContinuation',context),profileKey=vm.runInContext('profileKey',context),continuationUrl=vm.runInContext('DISCOVERY_CONTINUATION_URL',context);
 const execution={waitUntil(){},exports:{DiscoveryContinuation:{async fetch(){return Response.json({ok:true});}}}};
 const baseEnv=()=>({BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:TOKEN,TMDB_REQUEST_INTERVAL_MS:0,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD});
@@ -228,6 +228,8 @@ assert.equal(vm.runInContext('diagnosticErrorCode(new Error("EPG generation chan
 assert.equal(vm.runInContext('diagnosticErrorCode(new Error("Hot Film is not a secret"))',context),'unknown');
 assert.equal(vm.runInContext('diagnosticErrorCode(Object.assign(new Error("discovery_conflict"),{code:"discovery_conflict"}))',context),'discovery_conflict');
 assert.equal(vm.runInContext('diagnosticErrorCode(Object.assign(new Error("discovery_fence"),{code:"discovery_fence"}))',context),'discovery_fence');
+assert.equal(vm.runInContext('diagnosticErrorCode({message:"wall_budget"})',context),'wall_budget');
+assert.equal(vm.runInContext('diagnosticErrorCode(new Error("wall_budget"))',context),'wall_budget');
 assert.equal(JSON.stringify(vm.runInContext('diagnosticError(Object.assign(new Error("x"),{name:"Горячий фильм"}))',context)),'{"code":"unknown","name":"Error"}','an unlisted error name is not echoed');
 
 // 7. The diagnostics write itself fails: the step still runs and answers; both log lines are still emitted and

@@ -10,6 +10,7 @@ import {nonFunctional} from './suite-gate.mjs';
 const SCENARIOS={
  'catalog-d1-identity-read-latency':{file:'catalog-d1.mjs',marker:'elapsed<5000'},
  'discovery-chunk-budget-concurrent-walk':{file:'discovery-chunk-budget.mjs',marker:'concurrentMs<sequentialMs*0.7'},
+ 'discovery-user-read-fence-slow-catalog':{file:'discovery-user-read-fence.mjs',marker:'Date.now()-started>=80'},
  'film-person-reader-completed-slots-index':{file:'film-person-reader.mjs',marker:'Date.now()-at<8000'},
  'footer-resilience-hung-freshness':{file:'footer-resilience.mjs',marker:'Date.now()-started<3000'},
  'footer-resilience-silent-source':{file:'footer-resilience.mjs',marker:'took<3000'},

@@ -1,4 +1,5 @@
-import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto,createHash} from 'node:crypto';
+import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto,createHash} from 'node:crypto';
+import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-session.mjs';import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
 
 // GET /api/enrichment/history: one film's predictions and rating events, read-only, ordered, paged, honest about gaps.
 const records=new Map(),etags=new Map();let revision=0,puts=[],fetches=[];
@@ -11,10 +12,11 @@ const set=(key,value)=>{records.set(key,typeof value==='string'?value:JSON.strin
 const ctx=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,
  ASSETS:{'/':{body:'<!doctype html>',type:'text/html'}},INITIAL_PERSONAL_RATINGS:{},fetch:async input=>{fetches.push(String(input));return new Response('no',{status:599});}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
-for(const file of ['src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/prediction-diagnostics.js','src/mcp.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);vm.runInContext(scoped('src/prediction-d1.js','PredictionD1'),ctx);vm.runInContext(scoped('src/ratings-d1.js','RatingsD1'),ctx);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);
+for(const file of ['src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/mcp.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const env={BUCKET:bucket,EPG_XML_URL:'https://epg.test/guide.xml',LETTERBOXD_USERNAME:'tester'};
 const sha=text=>createHash('sha256').update(text).digest('hex');
-async function history(query){puts=[];fetches=[];const response=await ctx.worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/enrichment/history?'+query),env,{waitUntil(){throw new Error('no background work');}});const data=await response.json();assert.deepEqual(puts,[],'no write on '+query);assert.deepEqual(fetches,[],'no outbound request on '+query);return {status:response.status,data:JSON.parse(JSON.stringify(data))};}
+async function history(query,environment=env){puts=[];fetches=[];const response=await ctx.worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/enrichment/history?'+query),environment,{waitUntil(){throw new Error('no background work');}});const data=await response.json();assert.deepEqual(puts,[],'no write on '+query);assert.deepEqual(fetches,[],'no outbound request on '+query);return {status:response.status,data:JSON.parse(JSON.stringify(data))};}
 
 // Validation.
 assert.equal((await history('')).status,400);
@@ -224,4 +226,140 @@ const full=await history('filmId=alien');
 // Prediction quality orders the same events and is unchanged by the Diary sort key: its own events carry instants only.
 assert.equal(ctx.compareHistoryEvents({type:'rating',at:'2026-09-20T23:59:59.999Z',identity:'a'},{type:'diary_viewing',at:'2026-09-20',atPrecision:'day',identity:'b'}),-1);
 assert.equal(ctx.compareHistoryEvents({type:'diary_viewing',at:'2026-09-20',atPrecision:'day',identity:'b'},{type:'prediction',at:'2026-09-21T00:00:00.000Z',identity:'a'}),-1);
+
+// AIR-475: the history of a retained canonical Film asked with its permanent tmdb_<n> id while the versions lie under its trusted Letterboxd lid. The bridge is the D1 identity (open
+// marker only): never a title, year or slug; a conflict, a redirect, a held marker and a missing claim each say what they are. Local stand-ins only; nothing here writes.
+{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-film-history-'));
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
+ const base=path.join(root,'base.sqlite');sqlite(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
+ const MARKER={prepared:VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;"};
+ MARKER.open=MARKER.prepared+"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";MARKER.held=MARKER.open+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;";
+ let n=0;const T='2026-11-01T00:00:00.000Z';
+ const film=(id,tmdb)=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('${id}',1,${tmdb?`'tmdb:${tmdb}'`:'NULL'},'Orig ${id}','${T}');`;
+ const claim=(filmId,scheme,value,trusted=1,conflicting=0)=>`INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('${filmId}','${scheme}','${value}',${trusted},${conflicting});`;
+ // film:tmdb:348 owns tmdb 348 and the lid `alien`; film:tmdb:4600 owns tmdb 600 and lid `lone4600`; tmdb 4700 is claimed twice (a conflict); tmdb 800 is a redirect source; 900 has no lid.
+ const SEED=film('film:tmdb:348',348)+claim('film:tmdb:348','tmdb','348')+claim('film:tmdb:348','letterboxd','alien')
+  +film('film:tmdb:4600',4600)+claim('film:tmdb:4600','tmdb','4600')+claim('film:tmdb:4600','letterboxd','lone4600')
+  +film('film:tmdb:4700',4700)+film('film:other',null)+claim('film:tmdb:4700','tmdb','4700')+claim('film:other','tmdb','4700',0,0)+claim('film:tmdb:4700','letterboxd','lid4700')
+  +film('film:tmdb:4800',4800)+claim('film:tmdb:4800','tmdb','4800')+claim('film:tmdb:4800','letterboxd','lid4800')+film('film:tmdb:4801',4801)+`INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:4800','film:tmdb:4801','${T}');`
+  +film('film:tmdb:4900',4900)+claim('film:tmdb:4900','tmdb','4900')
+  +film('film:solo4990',null)+claim('film:solo4990','letterboxd','solo4990')
+  +film('film:tmdb:4950',4950)+claim('film:tmdb:4950','tmdb','4950')+claim('film:tmdb:4950','letterboxd','lid4950')+claim('film:tmdb:4950','letterboxd','lid4951',0,0);
+ const database=(state='open',extra='')=>{const file=path.join(root,'h-'+(n++)+'.sqlite');fs.copyFileSync(base,file);sqlite(file,SEED+(MARKER[state]||'')+extra);return file;};
+ const seen=[];
+ const envFor=(state,extra,onQuery)=>({...env,DB:d1Standin(database(state,extra),{onQuery:async text=>{seen.push(text);if(onQuery)await onQuery(text);}})});
+ const stored=(id,gen,rating)=>{const record={filmId:id,predictedRating:rating,probability4Plus:.6,confidence:'high',matchSignals:['s'],mainRisk:'r',moodLabels:['m','n'],generatedAt:gen,tasteProfileVersion:2,tasteProfileHash:'p2',fingerprintHash:'f',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1,runId:'run-'+id+gen,trigger:'scheduled'};const digest=sha(body(record));return {...record,r2Key:versionKey(id,digest),contentSha256:digest};};
+ // lid `lone4600`: a historical version (linked object) and a current one; tmdb_4600 holds a second historical version of its own; a bundle under `slug-4600` (not bridged) holds a decoy.
+ const h1=stored('lone4600','2026-10-01T10:00:00.000Z',3),c1=stored('lone4600','2026-10-20T10:00:00.000Z',4.5),h2=stored('tmdb_4600','2026-10-10T10:00:00.000Z',3.5);
+ set(h1.r2Key,body(h1));set(c1.r2Key,body(c1));set(h2.r2Key,body(h2));
+ set('enrichment/films/lone4600/predictions.json',{current:c1,history:[{...h1,replacedAt:'2026-10-20T10:00:00.000Z'}]});
+ set('enrichment/films/tmdb_4600/predictions.json',{current:null,history:[{...h2,replacedAt:'2026-10-12T10:00:00.000Z'}]});
+ set('enrichment/films/slug-4600/predictions.json',{current:{filmId:'slug-4600',predictedRating:1,generatedAt:'2026-10-30T10:00:00.000Z'},history:[]});
+ set('enrichment/films/lid4700/predictions.json',{current:{filmId:'lid4700',predictedRating:2,generatedAt:'2026-10-30T10:00:00.000Z'},history:[]});
+ set('enrichment/films/lid4800/predictions.json',{current:{filmId:'lid4800',predictedRating:2,generatedAt:'2026-10-30T10:00:00.000Z'},history:[]});
+ const kinds=data=>data.events.filter(e=>e.type==='prediction').map(e=>[e.identity,e.storageId??null,e.version.status]);
+ const EXPECTED=[['lone4600|prediction|history|0','lone4600','linked'],['prediction|history|0',null,'linked'],['lone4600|prediction|current|0','lone4600','linked']];
+ // 1. The permanent tmdb id reaches the versions stored under the trusted lid, every version is checked against the id it lies under, nothing is written.
+ for(const key of ['letterboxd/diary/history.json','letterboxd/diary/state.json']){records.delete(key);etags.delete(key);}
+ let e=envFor('open');seen.length=0;
+ let {status,data}=await history('filmId=tmdb_4600',e);
+ assert.equal(status,200);assert.deepEqual(kinds(data),EXPECTED,'one chronology over both storage ids, once each');
+ assert.deepEqual(data.snapshot.identity,{state:'ok',storageIds:['lone4600']},'the bridge is said');assert.deepEqual(data.snapshot.sources.predictions,{status:'recorded',bridged:[{id:'lone4600',status:'recorded'}]});
+ assert.equal(data.current.prediction.storageId,'lone4600');assert.equal(data.current.prediction.contentSha256,c1.contentSha256,'the current prediction is the stored one');assert.equal(data.partial,false);
+ assert.equal(data.events.filter(e=>e.type==='prediction').some(e=>/slug|lid4700|lid4800/.test(e.identity)),false,'no title, slug or foreign lid is matched');
+ assert.ok(seen.length>0&&seen.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1');assert.ok(seen.length>0,'D1 was read');/* the prediction authority reads its marker in one read-only batch: the SELECT-only assertion above covers every statement of it */
+ // 2. The same Film through its lid reaches the tmdb_<n> bundle; it is the same chronology.
+ ({status,data}=await history('filmId=lone4600',envFor('open')));assert.equal(status,200);
+ assert.deepEqual(kinds(data).map(([id,,v])=>[id.replace(/^lone4600\|/,'').replace(/^tmdb_4600\|/,'t|'),v]),[['prediction|history|0','linked'],['t|prediction|history|0','linked'],['prediction|current|0','linked']],'the lid keeps its own identities, the tmdb bundle joins prefixed');
+ assert.deepEqual(data.snapshot.identity,{state:'ok',storageIds:['tmdb_4600']});assert.equal(data.current.prediction.storageId,undefined,'the requested id holds the current prediction');
+ // 3. A bridged version that does not verify says so and makes the answer partial.
+ set(c1.r2Key,'{"tampered":true}');({data}=await history('filmId=tmdb_4600',envFor('open')));assert.equal(data.events.find(x=>x.storageId==='lone4600'&&x.position==='current').version.status,'mismatch');assert.equal(data.partial,true);set(c1.r2Key,body(c1));
+ // 4. No claim, no bridge: absent says nothing more, a conflict or a redirect says so, the requested id is read alone.
+ ({status,data}=await history('filmId=tmdb_4900',envFor('open')));assert.equal(status,200);assert.deepEqual([data.snapshot.identity.state,data.snapshot.identity.storageIds,data.events],['ok',[],[]],'a Film with only a tmdb claim has nothing to bridge');
+ ({data}=await history('filmId=tmdb_4999',envFor('open')));assert.deepEqual([data.snapshot.identity.state,data.events],['absent',[]],'no claim at all');
+ ({data}=await history('filmId=tmdb_4700',envFor('open')));assert.equal(data.snapshot.identity.state,'conflict');assert.ok(data.notes.includes('identity_bridge_conflict'));assert.deepEqual(data.events,[],'a contested identity bridges nothing');
+ ({data}=await history('filmId=lid4700',envFor('open')));assert.equal(data.snapshot.identity.state,'conflict','the contested tmdb claim of the Film also holds its lid');
+ ({data}=await history('filmId=tmdb_4800',envFor('open')));assert.equal(data.snapshot.identity.state,'retired');assert.ok(data.notes.includes('identity_bridge_retired'));assert.deepEqual(data.events,[]);
+ ({data}=await history('filmId=tmdb_4950',envFor('open')));assert.equal(data.snapshot.identity.state,'conflict','an untrusted second lid holds the bridge');
+ // 5. Before open the route keeps today\'s answer byte for byte (no identity block, requested id only); held and unreadable fail closed where the bridge is needed.
+ ({status,data}=await history('filmId=tmdb_4600',envFor('prepared')));assert.equal(status,200);assert.equal(Object.hasOwn(data.snapshot,'identity'),false);assert.deepEqual(kinds(data),[['prediction|history|0',null,'linked']],'prepared: only the requested id');
+ ({status,data}=await history('filmId=tmdb_4600',envFor('held')));assert.deepEqual([status,data.error,data.reason],[503,'identity_unavailable','film_person_held'],'held fails closed for a canonical permalink');
+ ({status,data}=await history('filmId=lone4600',envFor('held')));assert.equal(status,200,'a lid request still reads its own bundle');assert.equal(data.partial,true);assert.ok(data.notes.includes('identity_bridge_unavailable'));assert.deepEqual(kinds(data).map(x=>x[1]),[null,null],'only its own versions');
+ ({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(database('open'),{rewrite:sql=>/FROM film_external_id/.test(sql)?'SELECT nope FROM nowhere':sql})}));assert.deepEqual([status,data.reason],[503,'canonical_read_unavailable'],'a failed identity read is unavailable, never an empty history');
+ // 6. A marker that moves during the bridge read refuses the answer.
+ {let moved=false;const moving=database('open');({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(moving,{onQuery:async text=>{if(!moved&&/FROM film_external_id/.test(text)){moved=true;sqlite(moving,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");}}})}));assert.deepEqual([status,data.reason],[503,'film_person_generation_moved']);}
+ // 7. Paging over the merged list stays consistent and the cursor digest covers the bridged bundle.
+ {const one=await history('filmId=tmdb_4600&limit=2',envFor('open'));assert.equal(one.data.page.total,3);assert.match(one.data.page.nextCursor,/^2\.[0-9a-f]{16}$/);const two=await history('filmId=tmdb_4600&limit=2&cursor='+one.data.page.nextCursor,envFor('open'));assert.deepEqual([...one.data.events,...two.data.events].map(x=>x.identity),EXPECTED.map(x=>x[0]));
+  set('enrichment/films/lone4600/predictions.json',{current:c1,history:[]});assert.equal((await history('filmId=tmdb_4600&limit=2&cursor='+one.data.page.nextCursor,envFor('open'))).status,409,'a change of the bridged bundle refuses the old cursor');}
+
+ // 8. (review P1-2) The identity fence reaches the end of the response: a marker that moves AFTER the bridge, while the bundles, facts, Diary and immutable objects are read, refuses a canonical
+ // permalink and any answer that joined bridged ids; a lid answer that joined nothing keeps its partial policy.
+ {
+  const trapped=(when,query)=>{let moved=false;const file=database('open');const db=d1Standin(file);
+   return {...env,DB:db,BUCKET:{...bucket,async get(key){if(!moved&&when(key)){moved=true;sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");}return bucket.get(key);}}};};
+  const diary=key=>key==='letterboxd/diary/state.json'||key==='enrichment/diagnostics/rating-observations.json';
+  ({status,data}=await history('filmId=tmdb_4600',trapped(diary)));assert.deepEqual([status,data.error,data.reason],[503,'identity_unavailable','film_person_generation_moved'],'a permalink whose marker moved after the bridge fails closed');
+  ({status,data}=await history('filmId=lone4600',trapped(diary)));assert.deepEqual([status,data.error],[503,'identity_unavailable'],'a lid answer that joined bridged ids is refused too');
+  ({status,data}=await history('filmId=solo4990',trapped(diary)));assert.equal(status,200,'a lid answer that joined nothing keeps its partial policy');assert.deepEqual([data.partial,data.snapshot.identity.state,data.events],[true,'unavailable',[]]);assert.ok(data.notes.includes('identity_bridge_unavailable'));
+  ({status,data}=await history('filmId=solo4990',envFor('open')));assert.deepEqual([status,data.snapshot.identity,data.partial],[200,{state:'ok',storageIds:[]},false],'unmoved: the lid-only Film has nothing to bridge and is complete');
+ }
+ // 9. (review P1-1) With prediction_domain_authority d1 the mutable bundles come from the D1 pointer and lineage, never from the best-effort R2 mirror: a newer D1 current that the mirror
+ // lacks is returned, a mirror-only version is not invented, and an unreadable D1 domain is a 503, not a fall back.
+ {
+  const c2=stored('lone4600','2026-11-01T10:00:00.000Z',5);set(c2.r2Key,body(c2));
+  const display=record=>JSON.stringify(record);
+  const rows=`UPDATE prediction_domain_authority SET mode='d1' WHERE id=1;
+INSERT INTO prediction_pointer (film_id,taste_profile_version,taste_profile_hash,fingerprint_hash,fingerprint_schema_version,prediction_prompt_version,predicted_rating,r2_key,content_sha256,updated_at,display_json) VALUES ('lone4600',2,'p2','f',1,1,5,'${c2.r2Key}','${c2.contentSha256}','2026-11-01T10:00:00.000Z','${display(c2)}');
+INSERT INTO prediction_lineage (film_id,replaced_at,predicted_rating,taste_profile_version,fingerprint_hash,r2_key,content_sha256,display_json) VALUES ('lone4600','2026-10-20T10:00:00.000Z',3,2,'f','${h1.r2Key}','${h1.contentSha256}','${display(h1)}'),('lone4600','2026-11-01T10:00:00.000Z',4.5,2,'f','${c1.r2Key}','${c1.contentSha256}','${display(c1)}'),('tmdb_4600','2026-10-12T10:00:00.000Z',3.5,2,'f','${h2.r2Key}','${h2.contentSha256}','${display(h2)}');`;
+  // The R2 mirror of lone4600 is stale: it still says c1 is current.
+  const mirror=records.get('enrichment/films/lone4600/predictions.json');
+  const d1env=()=>{const file=database('open',rows);return {...env,DB:d1Standin(file)};};
+  ({status,data}=await history('filmId=tmdb_4600',d1env()));assert.equal(status,200);
+  const ids=data.events.filter(e=>e.type==='prediction').map(e=>[e.storageId??'own',e.position,e.predictedRating]);
+  assert.deepEqual(ids,[['lone4600','history',3],['own','history',3.5],['lone4600','history',4.5],['lone4600','current',5]],'the D1 lineage and the newer D1 current, in order, not the stale mirror');
+  assert.equal(data.current.prediction.storageId,'lone4600');assert.equal(data.current.prediction.contentSha256,c2.contentSha256);assert.equal(data.partial,false);
+  assert.ok(data.snapshot.sources.predictions.bridged[0].status==='recorded');
+  ({status,data}=await history('filmId=lone4600',d1env()));assert.equal(status,200);assert.equal(data.events.filter(e=>e.type==='prediction').length,4,'the lid asks the same D1 domain');
+  // A Film whose D1 pointer and lineage are empty is missing, even if a stale mirror object exists.
+  ({data}=await history('filmId=slug-4600',d1env()));assert.deepEqual([data.snapshot.sources.predictions.status,data.events.filter(e=>e.type==='prediction').length],['missing',0],'D1 is authoritative: a mirror-only bundle is not read');
+  // An unreadable D1 prediction domain fails closed.
+  {const file=database('open',rows);sqlite(file,'DROP TABLE prediction_lineage;');({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(file)}));assert.deepEqual([status,data.error,data.reason],[503,'prediction_unavailable','prediction_domain_unavailable']);}
+  assert.ok(mirror,'the mirror object stayed untouched');
+ }
+
+ // 10. (production acceptance) The facts and the Diary are RatingsD1 documents: with ratings_domain_authority d1/open their D1 versions are the source, whatever stale R2 copies say. The film below has
+ // its current rating, one rating change and three Diary viewings only in D1; R2 holds the frozen early versions (older Diary, no fact record). A held ratings domain is a refusal, never a stale R2 answer.
+ {
+  const d=(day,h=10)=>'2026-11-'+String(day).padStart(2,'0')+'T'+String(h).padStart(2,'0')+':00:00.000Z';
+  const text=value=>JSON.stringify(value);
+  const doc=(key,value)=>{const body=text(value),etag=sha(body);return `INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('${key}',0,'${body.replace(/'/g,"''")}','${etag}','${d(16)}');`;};
+  const entry=(key,fields)=>({key,source:'letterboxd_diary',identity:{type:'letterboxd_lid',value:'lone4600'},aliases:[],firstObservedAt:d(10),observedAt:d(16),page:1,changes:[],...fields});
+  const fact={schemaVersion:1,factKey:'tmdb-4600',links:{letterboxd:'lone4600',tmdb:'4600'},redirectTo:null,migrating:null,watched:true,rating:{value:4.5,observedAt:d(12),source:'owner',sourceRef:null,observationId:'d1-o2'},ratingHistory:[{kind:'first_observed',recordedAt:d(10),value:4,observedAt:d(10),source:'letterboxd_export',sourceRef:'x',observationId:'d1-o1',previous:null},{kind:'changed',recordedAt:d(12),value:4.5,observedAt:d(12),source:'owner',sourceRef:null,observationId:'d1-o2',previous:{value:4,observedAt:d(10),source:'letterboxd_export',observationId:'d1-o1'}}]};
+  const entries={'viewing:9001':entry('viewing:9001',{keyBasis:'viewing_id',viewingId:'9001',watchedDate:'2026-11-10',viewings:1,viewingsCertain:true,ratingAtEntry:4,ratingsAtEntry:[4],rewatch:false}),'viewing:9002':entry('viewing:9002',{keyBasis:'viewing_id',viewingId:'9002',watchedDate:'2026-11-12',viewings:1,viewingsCertain:true,ratingAtEntry:4.5,ratingsAtEntry:[4.5],rewatch:true}),'viewing:9003':entry('viewing:9003',{keyBasis:'viewing_id',viewingId:'9003',watchedDate:'2026-11-15',viewings:1,viewingsCertain:true,ratingAtEntry:null,ratingsAtEntry:[null],rewatch:true})};
+  const ratingsRows=`UPDATE ratings_domain_authority SET mode='d1',cutover='open' WHERE id=1;`+doc('letterboxd/facts/links.json',{'tmdb:4600':'tmdb-4600','letterboxd:lone4600':'tmdb-4600'})+doc('letterboxd/facts/films/tmdb-4600.json',fact)+doc('letterboxd/diary/history.json',{schemaVersion:1,entries})+doc('letterboxd/diary/state.json',{schemaVersion:1,lastOutcome:'complete',lastSuccessAt:d(16),coverage:{newestWatchedDate:'2026-11-15',oldestWatchedDate:'2010-01-01',reachedEnd:true},resumePage:null});
+  // The frozen R2 copies: an early Diary with one old viewing of this lid and a diary state of 3 Nov; no fact record, no links entry for 4600.
+  set('letterboxd/diary/history.json',{schemaVersion:1,entries:{'viewing:1':entry('viewing:1',{keyBasis:'viewing_id',viewingId:'1',watchedDate:'2026-10-01',viewings:1,viewingsCertain:true,ratingAtEntry:null,ratingsAtEntry:[null],rewatch:false})}});
+  set('letterboxd/diary/state.json',{schemaVersion:1,lastOutcome:'complete',lastSuccessAt:'2026-11-03T16:33:55.000Z',coverage:{newestWatchedDate:'2026-11-01',oldestWatchedDate:'2010-01-01',reachedEnd:true},resumePage:null});
+  const ratingsEnv=()=>({...env,DB:d1Standin(database('open',ratingsRows))});
+  ({status,data}=await history('filmId=tmdb_4600',ratingsEnv()));assert.equal(status,200);
+  assert.deepEqual(data.events.filter(e=>e.type==='diary_viewing').map(e=>e.watchedDate),['2026-11-10','2026-11-12','2026-11-15'],'the three viewings of the D1 Diary, not the frozen R2 one');
+  assert.deepEqual(data.events.filter(e=>e.type==='rating').map(e=>[e.kind,e.value]),[['first_observed',4],['changed',4.5]],'the rating observations of the D1 fact record');
+  assert.deepEqual([data.current.rating.value,data.current.diary.viewingCount,data.snapshot.sources.diary.state.lastSuccessAt],[4.5,3,d(16)],'current rating, viewing count and the Diary run state come from D1');
+  assert.equal(data.snapshot.sources.diary.link.lid,'lone4600');assert.equal(data.partial,false);assert.ok(!data.notes.includes('diary_coverage_partial'));
+  // The digest of a D1 read is its document etag: a changed D1 document refuses the old cursor.
+  {const one=await history('filmId=tmdb_4600&limit=2',ratingsEnv());assert.match(one.data.page.nextCursor,/^2\.[0-9a-f]{16}$/);
+   const changed=database('open',ratingsRows+`UPDATE ratings_document SET etag='${'0'.repeat(64)}' WHERE key='letterboxd/diary/state.json';`);
+   assert.notEqual((await history('filmId=tmdb_4600&limit=2',{...env,DB:d1Standin(changed)})).data?.page?.nextCursor??'x',one.data.page.nextCursor);}
+  // The same film asked by its lid reads the same D1 documents.
+  ({data}=await history('filmId=lone4600',ratingsEnv()));assert.equal(data.events.filter(e=>e.type==='diary_viewing').length,3);
+  // A held ratings domain refuses; an unreadable one is a typed 503; neither falls back to the stale R2 Diary.
+  {const file=database('open',ratingsRows+"UPDATE ratings_domain_authority SET cutover='held' WHERE id=1;");({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(file)}));assert.deepEqual([status,data.error,data.reason],[503,'ratings_unavailable','ratings_domain_not_authoritative']);}
+  {const file=database('open',ratingsRows+"DROP TABLE ratings_view;");({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(file)}));assert.deepEqual([status,data.error],[503,'ratings_unavailable'],'a half-installed ratings domain fails closed');}
+  // Where the domain is not d1 (here the default r2 marker), the R2 objects are read exactly as before.
+  ({data}=await history('filmId=lone4600',envFor('open')));assert.deepEqual(data.events.filter(e=>e.type==='diary_viewing').map(e=>e.watchedDate),['2026-10-01'],'ratings domain on r2: the R2 Diary is the source');
+ }
+}
 console.log('Film history: validation, empty film, chronology, lineage gaps, version links, rationale per version, legacy log by both ids, no account URL, watchedAt unknown, rollback and re-apply, idempotent reads, paging and change refusal, ties, redirect, unreadable bundle, convergence overlay, Diary viewings by lid only (never slug), day-only ordering, day counts, lower bounds, unknown re-watch, undated entries, identity disagreement, Diary paging and change refusal, coverage and unreadable Diary passed');

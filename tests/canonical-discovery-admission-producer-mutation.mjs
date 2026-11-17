@@ -41,7 +41,7 @@ const MUTANTS=[
  ["the replan ignores the current admission", "canonical-discovery-admission-producer.js", "AND state='current'\",[String(tmdbId)]", "\",[String(tmdbId)]"],
  ["the call site is not guarded", "discovery-authority.js", "if(typeof CanonicalDiscoveryAdmission!=='undefined'){\n  const budget", "if(true){\n  const budget"],
  ["the call site is not called", "discovery-authority.js", "await CanonicalDiscoveryAdmission.admitDiscoveryFilms(env,{films:", "await (async()=>0)(env,{films:"],
- ["the operation is not registered", "canonical-producers.js", "operationRegistry([discoveryAdmissionOperation({replan:async()=>null})])", "operationRegistry([])"],
+ ["the operation is not registered", "canonical-producers.js", " discoveryAdmissionOperation({replan:async()=>null}),\n", ""],
  ["the route module never routes to the projector", "canonical-writer-route.js", "if(gate.r2Allowed===true)return {writer:'projector'", "if(false)return {writer:'projector'"],
  ["the hook is gated on written keys", "discovery-authority.js", "if(typeof CanonicalDiscoveryAdmission!=='undefined'){\n  const budget", "if(written.length&&typeof CanonicalDiscoveryAdmission!=='undefined'){\n  const budget"],
  ["the caller's budget never reaches the unit", "discovery-authority.js", "const budget=Number.isFinite(context.canonicalDeadline)?context.canonicalDeadline:Number.isFinite(context.deadline)?context.deadline:null;", "const budget=null;"],

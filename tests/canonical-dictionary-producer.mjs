@@ -551,8 +551,9 @@ if(section('11')){
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!==self&&fs.readFileSync(full,'utf8').includes('canonical-dictionary-producer'))importers.push(full);}};
  walk('src');
  // AIR-374 S4-4: the dormant driver (src/canonical-producer-driver.js) composes it; it is itself unimported and unbundled (tests/canonical-producer-driver.mjs).
- assert.deepEqual(importers,['src/canonical-producer-driver.js'],'only the dormant driver imports it');
- for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-dictionary-producer'),file+' does not bundle it');
+ assert.deepEqual(importers,['src/canonical-producer-driver.js'],'only the driver imports it');
+ for(const file of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-dictionary-producer'),file+' does not name it');
+ assert.ok(fs.readFileSync('build.mjs','utf8').includes('canonical-dictionary-producer'),'AIR-497 bundles the dictionary producer');
  const text=fs.readFileSync(path.join(SRC,'canonical-dictionary-producer.js'),'utf8');
  const code_=text.replace(/\/\/.*$/gm,'');
  assert.deepEqual([...text.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-producer-adapters.js','./film-person-authority.js']);
@@ -560,7 +561,7 @@ if(section('11')){
  assert.ok(!/\b(INSERT|UPDATE|DELETE)\b\s+(INTO|FROM)?\s*\w/.test(code_),'the module holds no SQL of its own');
  assert.ok(!/\b(writeFilmFacts|planFilmFacts|fenced|receiptedWrite)\b/.test(code_),'the writer is reached only through the receipt adapter');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-dictionary-producer'),'the Worker does not name it');
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation'],'only the Discovery admission operation (AIR-374 P3c) is registered; this change registers nothing');
- assert.ok(PRODUCER_WIRING.find(item=>item.name==='epg_commit').requires.some(kind=>!PRODUCER_OPERATIONS.has(kind)),'epg_commit stays unwired');
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
+ assert.ok(PRODUCER_WIRING.find(item=>item.name==='epg_commit').requires.every(kind=>PRODUCER_OPERATIONS.has(kind)),'epg_commit is wired to the Producer Workflow units');
 }
 console.log('canonical-dictionary-producer: ok');

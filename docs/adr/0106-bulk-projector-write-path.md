@@ -8,6 +8,8 @@
 **Supersedes:** None. It changes the budget part of decision 7 of ADR 0056 (bounded runs) only; no fence of ADR 0056 or ADR 0103 and not the 300 s bound of ADR 0103.  
 **Superseded by:** None
 
+**Lifecycle note (2026-11-16):** [AIR-512](https://trello.com/c/w0m6VfaL) retires the production `D1_ENRICHMENT_BULK` selector after the projector itself was retired by [ADR 0155](0155-retire-enrichment-projector-cron.md). The grouped path remains as historical offline regression coverage and cannot be selected by the production Worker.
+
 ## Context
 
 After the fairness fix of AIR-388 the projector writes Films again, but only 8 to 9 in a slow hourly run, against a backlog of 4,730 changed Films that Discovery refills at about 55 an hour. The owner's target is a sustained 500 or more changed Films an hour, investigated up to 1,000, with Persons progressing and no harm to other consumers. AIR-391 originally asked for non-stop, resumable backfill; the owner has revised that literal requirement (decision 7): the goal is to drain the backlog sustainably and keep pace with incoming changes, and one bounded window per hourly cron is acceptable if the measured throughput and backlog reduction are sufficient.

@@ -103,7 +103,7 @@ const FrozenDate = class extends Date {constructor(...args) {super(...(args.leng
 const context = vm.createContext({Response, Request, Headers, URL, URLSearchParams, AbortSignal, Date: FrozenDate, Intl, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, crypto: webcrypto, console: {log() {}, error() {}, warn() {}}, setTimeout, structuredClone, encodeURIComponent, decodeURIComponent,
   fetch: async url => {tmdbCalls++; tmdbUrls.push(String(url)); return new Response(JSON.stringify(String(url).includes('/search/') ? {total_pages: 1, results: []} : {id: 11, title: 'Тихий', original_title: 'Quiet', release_date: '2001-01-01', runtime: 95}));}});
 vm.runInContext(scoped('src/domain/discovery-observation-index.js', 'DiscoveryIndex'), context);
-for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/domain/profile-impact.js', 'src/domain/prediction-compatibility.js', 'src/domain/fingerprint-compatibility.js', 'src/domain/scored-resolution.js', 'src/domain/resolution-acceptance.js', 'src/sources.js', 'src/ratings-seed.js', 'src/discovery.js', 'src/letterboxd-facts.js', 'src/domain/prediction-confidence.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/migration-export.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), context);
+for (const file of ['src/domain/film-person.js', 'src/domain/prediction-versions.js', 'src/domain/film-history.js', 'src/domain/prediction-quality.js', 'src/domain/profile-impact.js', 'src/domain/prediction-compatibility.js', 'src/domain/fingerprint-compatibility.js', 'src/domain/scored-resolution.js', 'src/domain/resolution-acceptance.js', 'src/sources.js', 'src/ratings-seed.js', 'src/discovery.js', 'src/letterboxd-facts.js', 'src/domain/prediction-confidence.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/filter-presets.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), context);
 vm.runInContext(scoped('src/domain/admin-query.js', 'AdminQuery'), context);
 vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), context);
@@ -221,6 +221,10 @@ assert.equal(rejectedIssue.issued.status, 200, JSON.stringify(rejectedIssue.issu
 const rejectedRun = await post('identity-correct', {confirmation: rejectedIssue.issued.body.confirmation});
 assert.equal(rejectedRun.body.state, 'succeeded', JSON.stringify(rejectedRun.body));
 assert.equal(rejectedRun.body.application.shows, 'not_this_action');
+assert.equal(Identity.identityApplication('reject', {authority: 'r2'}, {}).shows, 'not_this_action');
+assert.equal(Identity.identityApplication('reject', {authority: 'd1'}, {}).shows, 'not_this_action');
+assert.equal(Identity.identityApplication('reject', {authority: 'd1', current: {status: 'needs_verification', tmdbId: '11'}}, {tmdbId: '11'}).shows, 'not_this_action', 'a D1 reject of a non-verified hypothesis does not claim show deletion');
+assert.equal(Identity.identityApplication('reject', {authority: 'd1', current: {status: 'verified', tmdbId: '9278'}}, {tmdbId: '9278'}).shows, 'cleared_assigned_rows');
 const blocked = (await json(MAP))[KEY];
 assert.deepEqual(blocked.rejectedTmdbIds, ['11']);
 assert.notEqual(blocked.status, 'verified');

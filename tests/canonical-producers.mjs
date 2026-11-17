@@ -357,8 +357,10 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  assert.ok(!GAPS.some(item=>/projector revision/.test(item)),'AIR-374 P1 / ADR 0117 (owner decision 1): the projector revision bump is not a readiness blocker; the unconditional marker fence replaces it');
  assert.equal(GAPS.length,7,'the other producer gaps are unchanged');
  assert.ok(!ready.blockers.some(item=>item.startsWith('gap:')||item.startsWith('marker_')||item.startsWith('baseline_')||item.startsWith('schema_')),'a prepared marker, a verified baseline and the schema leave only the computed handoff blockers: '+ready.blockers);
- for(const expected of ['producer_not_wired:epg_commit','reader_not_moved:admin read titles.json and people.json','empty_class_not_loaded:ratedAdmission:0/708'])assert.ok(ready.blockers.includes(expected),'today this blocker remains: '+expected);
- assert.ok(!ready.blockers.includes('receipts_protocol_unregistered')&&!ready.blockers.includes('producer_not_wired:discovery_admission'),'AIR-374 P3c: the Discovery admission operation is registered');
+ for(const expected of ['empty_class_not_loaded:ratedAdmission:0/708'])assert.ok(ready.blockers.includes(expected),'today this blocker remains: '+expected);
+ assert.ok(!ready.blockers.includes('producer_not_wired:rated_admission_retention'));
+ assert.ok(!ready.blockers.some(item=>item.startsWith('reader_not_moved:')),'every freeze reader is moved');
+ assert.ok(!ready.blockers.includes('receipts_protocol_unregistered')&&!ready.blockers.includes('producer_not_wired:discovery_admission')&&!ready.blockers.includes('producer_not_wired:epg_commit')&&!ready.blockers.includes('producer_not_wired:metadata_sync'),'Discovery admission, EPG Producer Workflow and metadata_sync operations are registered');
  assert.equal(env.DB.calls.batches,batches);assert.equal(tables(file),before);
  const r2=await handoffReadiness(state(database('r2')),{now:AT});
  assert.ok(r2.blockers.includes('marker_not_prepared:r2'));
@@ -377,7 +379,7 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('canonical-producers'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers,[],'AIR-374 P3c: nothing imports the readiness registry any more (the adapters and units take writerRoute from src/canonical-writer-route.js, which the Worker bundle can carry without an import cycle)');
+ assert.deepEqual(importers,[],'AIR-499: the open-handoff operator no longer imports the dormant producers module (wiring and H1 counts are copied and asserted equal)');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producers'),file+' does not bundle it');
  const text=fs.readFileSync('src/canonical-producers.js','utf8');
  assert.ok(!/\bR2\b|fetch\(|env\.[A-Z_]+_BUCKET|\.get\(['"]/.test(text.replace(/\/\/.*$/gm,'')),'the module reads no R2 and calls no network');

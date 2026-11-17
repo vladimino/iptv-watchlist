@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {DEFAULT_WEIGHT, FIRST_SHARD_HEAVY_CREDIT, FIRST_SHARD_OFFSET, HEAVY_MIN_WEIGHT, HEAVY_MUTATION_PRESSURE, WEIGHTS, capture, HEAD_LIMIT, TAIL_LIMIT, parseShard, planTests} from '../scripts/run-tests.mjs';
+import {CORE_FIRST_SHARD_HEAVY_CREDIT, CORE_WEIGHTS, DEFAULT_WEIGHT, FIRST_SHARD_HEAVY_CREDIT, FIRST_SHARD_OFFSET, HEAVY_MIN_WEIGHT, HEAVY_MUTATION_PRESSURE, WEIGHTS, capture, HEAD_LIMIT, TAIL_LIMIT, parseShard, planTests} from '../scripts/run-tests.mjs';
 
 const runner = path.resolve('scripts/run-tests.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'air378-runner-'));
@@ -307,6 +307,33 @@ fs.unlinkSync(me);`;
       assert.deepEqual(planTests({directory: 'tests', suite: 'all', shard: {index: count, count}}), parts[count - 1], 'the split does not depend on who asks');
     }
     assert.deepEqual(whole.parallel.slice(0, 3), Object.entries(WEIGHTS).sort((a, b) => b[1] - a[1]).slice(0, 3).map(entry => entry[0]), 'the whole plan starts with the heaviest files');
+    // AIR-494: the required jobs plan `--suite core` with CORE_WEIGHTS and CORE_FIRST_SHARD_HEAVY_CREDIT. The nightly map above is unchanged. Every core file still runs once; the two serial-only files stay apart; shard 1 stays lighter by FIRST_SHARD_OFFSET.
+    {
+      const coreWhole = planTests({directory: 'tests', suite: 'core'});
+      const coreWeight = file => CORE_WEIGHTS[file] ?? DEFAULT_WEIGHT;
+      const coreLightest = Math.min(...Object.values(CORE_WEIGHTS));
+      const coreParts = [1, 2, 3].map(index => planTests({directory: 'tests', suite: 'core', shard: {index, count: 3}}));
+      const coreFiles = part => [...part.parallel, ...part.serial];
+      assert.deepEqual(coreParts.flatMap(coreFiles).sort(), [...coreWhole.parallel, ...coreWhole.serial].sort(), 'the three core shards are the core suite, once');
+      const coreLoad = coreParts.map(part => coreFiles(part).reduce((sum, file) => sum + coreWeight(file), 0));
+      const coreOffsetLoad = coreLoad.map((value, index) => index === 0 ? value + FIRST_SHARD_OFFSET : value);
+      assert.ok(Math.max(...coreOffsetLoad) - Math.min(...coreOffsetLoad) <= coreLightest, `core shards carry the same weight, shard 1 less by the offset: ${coreLoad.join(' vs ')} (offset ${FIRST_SHARD_OFFSET})`);
+      assert.ok(Math.min(...coreLoad.slice(1)) - coreLoad[0] >= FIRST_SHARD_OFFSET - coreLightest, `core shard 1 carries less weight than the others: ${coreLoad.join(' vs ')}`);
+      const coreSerial = ['local-dev-smoke.mjs', 'sqlite-session-semantics.mjs'].map(file => coreParts.findIndex(part => part.serial.includes(file)));
+      assert.ok(coreSerial.every(owner => owner >= 0), 'every serial-only file is in a core shard');
+      assert.notEqual(coreSerial[0], coreSerial[1], 'the two serial-only files are in different core shards');
+      assert.ok(coreParts.every(part => !coreFiles(part).some(file => /-mutation\.mjs$/.test(file))), 'core shards contain no mutant-kill files');
+      const coreCohort = part => coreFiles(part).filter(file => !serialFiles.includes(file) && coreWeight(file) >= HEAVY_MIN_WEIGHT);
+      const corePressure = coreParts.map(part => coreCohort(part).reduce((sum, file) => sum + coreWeight(file), 0));
+      const coreCredited = corePressure.map((value, index) => index === 0 ? value - CORE_FIRST_SHARD_HEAVY_CREDIT : value);
+      // AIR-521: deleting the canary suites (the 22-unit epg-diagnostic-run was a heavy-cohort file) left 11 heavy files, so the greedy deal is discrete-limited to 124/113/97 (about 15%); 0.08 was reachable only with that file. Scheduling heuristic only: real shard time is gated by CI.
+      const coreMeanPressure = corePressure.reduce((a, b) => a + b, 0) / 3;
+      assert.ok(Math.max(...coreCredited) - Math.min(...coreCredited) <= 0.16 * coreMeanPressure, `core heavy-file pressure is spread once shard 1's core credit is counted: ${corePressure.join(' vs ')} (credit ${CORE_FIRST_SHARD_HEAVY_CREDIT})`);
+      assert.deepEqual(planTests({directory: 'tests', suite: 'core', shard: {index: 2, count: 3}}), coreParts[1], 'the core split does not depend on who asks');
+      const nightly = planTests({directory: 'tests', suite: 'non-functional', shard: {index: 1, count: 3}});
+      const nightlyOld = planTests({directory: 'tests', suite: 'non-functional', shard: {index: 1, count: 3}, weights: WEIGHTS, heavyCredit: FIRST_SHARD_HEAVY_CREDIT});
+      assert.deepEqual(nightly, nightlyOld, 'the non-functional shard plan still uses WEIGHTS and FIRST_SHARD_HEAVY_CREDIT');
+    }
     assert.deepEqual(parseShard('2/3'), {index: 2, count: 3});
     assert.equal(parseShard(undefined), null);
     assert.equal(parseShard(''), null);

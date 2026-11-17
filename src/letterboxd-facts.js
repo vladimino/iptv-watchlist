@@ -576,11 +576,32 @@ function recordRatingChange(record,incoming,effective){
   return withdrawn;
  }
 
+ async function applyCanonicalInferredAdmissions(env,event,origin,items){
+  if(typeof CanonicalRatedAdmission==='undefined')return;
+  const {value:doc}=await readJSON(env,ADMISSIONS_KEY);
+  const admissions=[];
+  for(const item of items||[]){
+   if(!item?.admit||!item.tmdb)continue;
+   const key='tmdb_'+item.tmdb;
+   const stored=doc?.films?.[key];
+   if(stored&&stored.archiveSha256===origin.archiveSha256&&stored.sourceCode===item.lid)admissions.push({receiptKey:key,receipt:stored});
+  }
+  const cap=CanonicalRatedAdmission.UNIT_CAP||12;
+  for(let at=0;at<admissions.length;at+=cap){
+   const canonical=await CanonicalRatedAdmission.applyRatedAdmissionRetention(env,{event:event+':'+at,admissions:admissions.slice(at,at+cap)});
+   CanonicalRatedAdmission.assertRatedAdmissionAccepted(canonical);
+  }
+ }
+
  // Commit: intent (with the projection's before-image) before any write, idempotent fact writes, receipt after read-back.
  async function commitBaselineChunk(env,body){
   const {origin,chunk,items}=validateBaselineRequest(body),hash=await itemsHash(items),sha=origin.archiveSha256;
   const {value:receipt}=await readJSON(env,importKey(sha,chunk,'receipt'));
-  if(receipt){if(receipt.itemsHash!==hash)throw new FactsError('chunk_conflict','This chunk was committed with other items');return {...receipt,replay:true};}
+  if(receipt){
+   if(receipt.itemsHash!==hash)throw new FactsError('chunk_conflict','This chunk was committed with other items');
+   await applyCanonicalInferredAdmissions(env,'inferred:'+sha+':'+chunk,origin,items);
+   return {...receipt,replay:true};
+  }
   const {value:view}=await readJSON(env,FACTS_KEYS.viewIndex);
   const before={};for(const item of items)for(const id of projectionIds({letterboxd:item.lid,tmdb:item.tmdb})){const entry=view?.[id]||{};before[id]=Object.fromEntries(Object.values(VIEW_FIELDS).filter(field=>Object.hasOwn(entry,field)).map(field=>[field,entry[field]]));}
   let intent=null;
@@ -604,6 +625,15 @@ function recordRatingChange(record,incoming,effective){
     // A writer linked the code between the check and the link: the entry this commit just created is withdrawn, never one it found.
     if(admitted==='admitted')await withdrawInferredAdmission(env,item,origin);
     conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;
+   }
+   if((admitted==='admitted'||admitted==='present')&&typeof CanonicalRatedAdmission!=='undefined'){
+    const key='tmdb_'+item.tmdb;
+    const {value:doc}=await readJSON(env,ADMISSIONS_KEY);
+    const stored=doc?.films?.[key];
+    if(stored&&stored.archiveSha256===origin.archiveSha256&&stored.sourceCode===item.lid){
+     const canonical=await CanonicalRatedAdmission.applyRatedAdmissionRetention(env,{event:'inferred:'+origin.archiveSha256+':'+item.lid,admissions:[{receiptKey:key,receipt:stored}]});
+     CanonicalRatedAdmission.assertRatedAdmissionAccepted(canonical);
+    }
    }
    const observations=await exportObservations(factKey,item,origin),result=await recordObservations(env,factKey,links,observations,{floors:await floorsFor(env,item.lid,factKey),identity:item.identity==='inferred'?{kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:origin.archiveSha256}:null});
    tally(counts,result.outcomes);records.push(result.record);

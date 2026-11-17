@@ -33,7 +33,16 @@ const DI_CAPABILITY=AdminActions.defineCapability({
  compensation:{kind:'manual',guidance:'No automatic undo. The action record keeps the before-image of the one decision. Restoring it is a separate owner-approved write. A rejection blocks only that movie id on this observation.'},
  confirmTtlMs:10*60000,
 });
-const DR_REGISTRY=AdminActions.createRegistry([DR_CAPABILITY,DI_CAPABILITY]);
+const PE_CAPABILITY=AdminActions.defineCapability({
+ id:'catalog_policy_exclude',version:1,title:'Exclude one Documentary or concert-recording Film from Discovery admission',
+ subjectKinds:['film'],healthActionCode:'catalog_policy_exclude',
+ budget:{maxRecords:12,maxWritesPerRecord:3,externalCallsPerRecord:0},retry:{maxAttempts:1,backoffMs:0},
+ compensation:{kind:'manual',guidance:'No automatic undo. The action record names the superseded admission and rejected observation keys. Restoring them is a separate owner-approved write. Ratings, fingerprints and immutable predictions are not deleted.'},
+ confirmTtlMs:10*60000,
+});
+const DR_REGISTRY=AdminActions.createRegistry([DR_CAPABILITY,DI_CAPABILITY,PE_CAPABILITY]);
+const PE_ACTION_PREFIX='admin/actions/catalog_policy_exclude/v1/';
+const PE_FILM_ID=/^tmdb_[1-9]\d{0,11}$/;
 
 // A bucket with `get` and `head` only. Every key it serves is recorded with the version it showed, except the resolver
 // lease: the lease is judged on its own (a live writer refuses the action), and the executor's own lease must not make
@@ -812,6 +821,92 @@ async function diReceipt(env,url){
  return json({idempotencyKey,state,record});
 }
 
+function pePrincipal(request,url){
+ const assertion=request.headers.get('Cf-Access-Jwt-Assertion');
+ const type=(request.headers.get('Content-Type')||'').split(';')[0].trim().toLowerCase();
+ return {owner:typeof assertion==='string'&&assertion.length>0&&assertion.length<=8192&&request.headers.get('Origin')===url.origin&&request.headers.get('X-IPTV-Admin-Action')==='catalog_policy_exclude'&&(request.method==='GET'||type==='application/json')};
+}
+function peActionKey(idempotencyKey){return PE_ACTION_PREFIX+idempotencyKey+'.json';}
+function peQueuePresent(queue,filmId){
+ const id=String(filmId);
+ return !!(queue&&((queue.pending||[]).includes(id)||(queue.hotPending||[]).includes(id)||(queue.coldPending||[]).includes(id)||queue.priority?.[id]||queue.work?.[id]||queue.retries?.[id]));
+}
+async function peReconcileQueue(env,filmId){
+ const id=String(filmId);
+ let head=null;
+ try{head=await readQueueHead(env);}catch{return {outcome:'unknown'};}
+ if(!head?.current)return {outcome:'absent'};
+ try{
+  await mutatePredictionQueue(env,current=>{
+   const next=settleQueueFilms(current,[id]);
+   if(next)next.trigger='catalog_policy_exclude';
+   return next;
+  },'catalog_policy_exclude');
+ }catch(error){
+  return {outcome:error?.name==='PredictionQueueConflictError'?'conflict':'unknown'};
+ }
+ try{
+  const report=await loadJSON(env,'programme.json');
+  if(report)await refreshPredictionQueue(env,report,'catalog_policy_exclude');
+ }catch{}
+ try{head=await readQueueHead(env);}catch{return {outcome:'unknown'};}
+ if(!head?.current)return {outcome:'unknown'};
+ return {outcome:peQueuePresent(head.current,id)?'present':'removed'};
+}
+async function peFinishExclude(env,filmId,payload){
+ const queue=await peReconcileQueue(env,filmId);
+ if(queue.outcome==='present'||queue.outcome==='conflict'||queue.outcome==='unknown'){
+  return drRefused('queue_unreconciled',409,{durable:true,filmId,queue:queue.outcome,outcome:payload.outcome});
+ }
+ return json({...payload,queue:queue.outcome});
+}
+async function pePreview(request,env,url){
+ const filmId=url.searchParams.get('filmId');
+ if(!filmId||!PE_FILM_ID.test(filmId))return adminError('invalid_request',400);
+ if(typeof DiscoveryAuthority==='undefined')return drRefused('unknown_authority',409);
+ const gate=await DiscoveryAuthority.readAuthority(env);
+ if(gate.held)return drRefused('unknown_authority',409);
+ if(!gate.ready)return drRefused('unknown_authority',409);
+ const preview=await DiscoveryAuthority.readPolicyExcludePreview(env,filmId);
+ return json({capability:PE_CAPABILITY.id,version:PE_CAPABILITY.version,...preview,consumers:['discovery_admission','resolution_decision','published_epg_show','prediction_queue']});
+}
+async function peExecute(request,env,url){
+ if(!pePrincipal(request,url).owner)return drRefused('access_denied',403);
+ const body=await drBody(request);
+ const filmId=typeof body?.filmId==='string'?body.filmId:'';
+ const idempotencyKey=typeof body?.idempotencyKey==='string'?body.idempotencyKey:'';
+ if(!PE_FILM_ID.test(filmId)||!DR_IDEMPOTENCY.test(idempotencyKey))return drRefused('invalid_request',400);
+ if(typeof DiscoveryAuthority==='undefined')return drRefused('unknown_authority',409);
+ const gate=await DiscoveryAuthority.readAuthority(env);
+ if(gate.held||!gate.ready)return drRefused('unknown_authority',409);
+ const preview=await DiscoveryAuthority.readPolicyExcludePreview(env,filmId);
+ if(preview.reason==='already_applied'){
+  return peFinishExclude(env,filmId,{replayed:true,durable:true,state:'applied',outcome:'already_applied',filmId,policy:preview.policy,observations:(preview.observations||[]).map(row=>row.key)});
+ }
+ if(!preview.available)return drRefused('not_eligible',409,{reason:preview.reason});
+ const stored=await env.BUCKET.get(peActionKey(idempotencyKey));
+ if(stored){
+  const record=await stored.json();
+  if(record?.receipt){
+   if(record.filmId!==filmId||record.receipt.filmId!==filmId||record.kind!=='catalog_policy_exclude_action'||record.receipt.capability!=='catalog_policy_exclude')return drRefused('idempotency_conflict',409);
+   return peFinishExclude(env,filmId,{replayed:true,durable:true,state:'applied',...record.receipt});
+  }
+ }
+ const lease=await acquireDiscoveryLease(env);
+ if(!lease)return drRefused('lease_held',409);
+ try{
+  const result=await DiscoveryAuthority.ownerPolicyExclude(env,{filmId,policy:preview.policy,lease,writer:'catalog_policy_exclude',receipt:{state:'applied',capability:'catalog_policy_exclude',filmId,policy:preview.policy}});
+  if(result.outcome==='written'||result.outcome==='already_applied'){
+   const receipt=result.receipt||{state:'applied',capability:'catalog_policy_exclude',filmId,policy:result.policy,outcome:result.outcome};
+   try{await env.BUCKET.put(peActionKey(idempotencyKey),JSON.stringify({schemaVersion:1,kind:'catalog_policy_exclude_action',idempotencyKey,state:'applied',filmId,receipt,finishedAt:new Date().toISOString()}));}catch{}
+   return await peFinishExclude(env,filmId,{replayed:result.outcome==='already_applied',durable:true,state:'applied',outcome:result.outcome,filmId,policy:result.policy,observations:result.observations||[],receipt});
+  }
+  if(result.outcome==='unknown')return drRefused('in_progress',409,{state:'unknown'});
+  if(result.outcome==='lease')return drRefused('lease_held',409);
+  if(result.outcome==='bounded')return drRefused('budget_exceeded',409);
+  return drRefused('not_eligible',409,{reason:result.reason||result.outcome});
+ }finally{await releaseDiscoveryLease(env,lease);}
+}
 async function adminDiscoveryReconsiderRoute(request,env,url){
  const action=url.pathname.slice('/api/admin/discovery-recovery/'.length);
  if(action==='receipt')return request.method==='GET'?await drReceipt(env,url):adminError('method_not_allowed',405);
@@ -819,6 +914,12 @@ async function adminDiscoveryReconsiderRoute(request,env,url){
  if(action==='identity-confirm'||action==='identity-correct'){
   if(request.method!=='POST')return adminError('method_not_allowed',405);
   try{return action==='identity-confirm'?await diConfirm(request,env,url):await diExecute(request,env,url);}
+  catch{return drRefused('storage_unavailable',503);}
+ }
+ if(action==='policy-exclude'){
+  if(request.method==='GET')return await pePreview(request,env,url);
+  if(request.method!=='POST')return adminError('method_not_allowed',405);
+  try{return await peExecute(request,env,url);}
   catch{return drRefused('storage_unavailable',503);}
  }
  if(action!=='confirm'&&action!=='reconsider')return adminError('not_found',404);

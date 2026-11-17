@@ -10,6 +10,7 @@ import vm from 'node:vm';
 import {manifestFor} from '../scripts/migration-export.mjs';
 import {loadWorker,overlayStore,snapshotBase} from '../scripts/discovery-ledger-offline.mjs';
 import {SplitError,applySplit,loadPlan,plan,rehearse} from '../scripts/discovery-ledger-split.mjs';
+import {withLedgerMode} from './ledger-mode-fixture.mjs';
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-ledger-split-'));
@@ -91,7 +92,7 @@ try{
  // A commit that lands between the archive pointer and the active ledger: the split stops, nothing is lost.
  const raced=overlayStore(snapshotBase(snapshot,JSON.parse(fs.readFileSync(path.join(snapshot,'manifest.json'),'utf8'))),path.join(root,'race'));
  await assert.rejects(applySplit({BUCKET:raced},planned,{context,failAfter:planned.writes.length-2}),error=>error.exitCode===9);
- const S=run(10),env={BUCKET:raced,DISCOVERY_LEDGER_MODE:'full'};
+ const S=run(10),env=withLedgerMode({BUCKET:raced},'full');
  await raced.put('sync.json',JSON.stringify({runId:S,stage:'epg'}));
  await vm.runInContext('publishGenerationWithLedger',context)(env,S,scan(10),{programmeRunId:S},{'programme.json':{runId:S,films:[]}});
  await raced.put('sync.json',JSON.stringify({runId:S,stage:'complete'}));

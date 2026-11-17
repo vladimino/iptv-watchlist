@@ -24,12 +24,12 @@ assert(orderOf('id="movies"')<orderOf('id="empty"'),'the grid comes before its e
 assert(orderOf('id="empty"')<orderOf('id="finds"'),'the finds section follows the grid and its empty state');
 assert(orderOf('id="finds"')<orderOf('class="status-footer"'),'the finds section stays inside the results column above the footer');
 assert.match(html.slice(orderOf('id="finds"'),orderOf('class="status-footer"')),/<\/section>\s*<\/section>\s*<section id="film-screen"/,'the finds section is the last block of the results column (the film and events columns follow it in the workspace)');
-assert.equal((app.match(/fetch\('\/api\/catalog\/available'\)/g)||[]).length,1,'the section reads the catalog route once');
+assert.equal((app.match(/fetchUserRead\('\/api\/catalog\/available'\)/g)||[]).length,1,'the section reads the catalog route once');
 assert.match(app,/loadEnrichment\(\{quiet:true\}\),\n\s+loadCatalog\(\),/,'the catalog refreshes with the other live loaders');
 assert.doesNotMatch(app,/finds-card[^`]*film-open/,'a find never opens the watchlist film route');
 
 const nodes={'#finds':{hidden:true},'#finds-cards':{innerHTML:''},'#finds-caption':{textContent:''}};
-const ui=vm.createContext({Date,Intl,Set,Map,console,document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[]}});
+const ui=vm.createContext({Date,Intl,Set,Map,console,setTimeout,clearTimeout,document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[]}});
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ui);
 vm.runInContext(app.replace(/init\(\);\s*$/,''),ui);
 vm.runInContext(`viewClock=${now}`,ui);
@@ -106,6 +106,17 @@ assert.equal(run('findsAiring(input,now).kind',film('tmdb_64',64,'Приорит
 const rich=film('tmdb_71',71,'Богатый',4.7,.82,'high',[show(-1,'Первый')],{original:'Rich Film',poster:'https://img.example/p.jpg',mechanics:['heist','investigation'],moods:['tense','dark'],genres:['Триллер','Драма']});
 const card=run('findsCard(input,now)',rich);
 assert.match(card,/^<article class="finds-card" data-finds-film="tmdb_71">/);
+assert.doesNotMatch(card,/score-actual|score-none|МОЯ ОЦЕНКА|—|Нет оценки|has-both-scores/,'AIR-517: no own rating means no own-rating badge at all, no placeholder');
+assert.equal((card.match(/class="score-badge/g)||[]).length,1,'AIR-517: one fact is one badge');
+assert.doesNotMatch(card,/МОЯ ОЦЕНКА<\/span><strong>[0-9]/);
+// AIR-517: a verified own rating next to the forecast gives two badges in the fixed order and the two-badge layout class; the rating alone never replaces the forecast.
+vm.runInContext("enrichment={profile:null,films:{tmdb_71:{actualRating:4.5}}};",ui);
+const both=run('findsCard(input,now)',rich);
+assert.match(both,/^<article class="finds-card has-both-scores"/);
+assert.match(both,/<span>МОЯ ОЦЕНКА<\/span><strong>4\.5<\/strong>[\s\S]*<span>ПРОГНОЗ<\/span><strong>4\.7<\/strong>/);
+vm.runInContext("enrichment={profile:null,films:{tmdb_71:{actualRating:0}}};",ui);
+assert.doesNotMatch(run('findsCard(input,now)',rich),/МОЯ ОЦЕНКА|has-both-scores/,'AIR-517: 0 is not a rating');
+vm.runInContext("enrichment={profile:null,films:{}};",ui);
 assert.match(card,/<div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW<\/span>(?:<span class="soon-badge"[^>]*>[\s\S]*?<\/span>)?<img class="poster" src="https:\/\/img.example\/p.jpg"/);
 assert.match(card,/score-predicted[^>]*><span>ПРОГНОЗ<\/span><strong>4\.7<\/strong><small>82% на 4\.0\+<\/small>/);
 assert.match(card,/<h3><a class="film-open" href="\/film\/tmdb_71" data-film-id="tmdb_71">Богатый<\/a><a class="letterboxd-link"/,'AIR-387: the title opens the internal film page, then the icon');
@@ -240,6 +251,25 @@ vm.runInContext("findsSource={...findsSource,programmeRunId:'G3'};report={films:
 assert.equal(nodes['#finds'].hidden,true,'a programme without a run id cannot vouch for the catalog');
 vm.runInContext("report={runId:'G3',films:[]};renderFinds(now)",ui);
 assert.equal(nodes['#finds'].hidden,false);
+// A first load that fails is an unavailable catalog, not an empty Finds list.
+vm.runInContext("findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false};report={runId:'G1',films:[]};",ui);
+queue.length=0;queue.push({ok:false,status:503});
+assert.equal(await run('loadCatalog()',null),false);
+assert.equal(nodes['#finds'].hidden,false,'an unavailable catalog is shown, not hidden as empty');
+assert.match(nodes['#finds-cards'].innerHTML,/Каталог сейчас недоступен/);
+assert.equal(shown(),0);
+// One Retry-After on 503 is retried once; a later 200 is success.
+let userReads=0;
+const retryFetch=async()=>{
+ userReads++;
+ if(userReads===1)return {ok:false,status:503,headers:{get:name=>name==='Retry-After'?'0':null},json:async()=>({error:'fence',code:'discovery_fence'})};
+ const ok=answer('G1',ranked);return {ok:true,status:200,json:async()=>ok.body};
+};
+ui.fetch=retryFetch;
+vm.runInContext('findsLoading=false;findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false};report={runId:\'G1\',films:[]};',ui);
+assert.equal(await run('loadCatalog()',null),true);
+assert.equal(userReads,2,'one bounded retry');
+assert.equal(shown(),5);
 assert.match(app,/else updateSourceInfo\(\);\n\s+renderFinds\(\);/,'every programme refresh re-evaluates the section');
 assert.match(app,/findsSource=\{\.\.\.findsSource,error:true\};\n\s+renderFinds\(\);/,'a failed catalog refresh re-evaluates the section');
 console.log('Finds: thresholds, window, watchlist and watched exclusions, ranking, limit, no filler, dedupe, franchise, airing, NEW card, hidden empty section and generation freshness passed');

@@ -13,8 +13,8 @@ const FILE='src/canonical-person-state.js';
 const source=fs.readFileSync(FILE,'utf8');
 const MUTANTS=[
  // the fence and the gate
- ['the marker gate is skipped (person state)',"const gate=assertWritable(await readAuthority(env));\n const db=database(env);\n if(!(await one(db,'SELECT 1 AS x FROM person WHERE id=?',[id])))","const gate=await readAuthority(env);\n const db=database(env);\n if(!(await one(db,'SELECT 1 AS x FROM person WHERE id=?',[id])))"],
- ['the marker gate is skipped (conflicts)',"const gate=assertWritable(await readAuthority(env));\n const db=database(env);\n if(kind==='film'","const gate=await readAuthority(env);\n const db=database(env);\n if(kind==='film'"],
+ ['the marker gate is skipped (person state)',"const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));\n const db=database(env);\n if(!(await one(db,'SELECT 1 AS x FROM person WHERE id=?',[id])))","const gate=fenced.bindProducerFence(env,await readAuthority(env));\n const db=database(env);\n if(!(await one(db,'SELECT 1 AS x FROM person WHERE id=?',[id])))"],
+ ['the marker gate is skipped (conflicts)',"const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));\n const db=database(env);\n if(kind==='film'","const gate=fenced.bindProducerFence(env,await readAuthority(env));\n const db=database(env);\n if(kind==='film'"],
  ['the person-state batch carries no fence head',"const statements=fenced.head(gate,entities);\n for(const item of plan.statements)","const statements=[];\n for(const item of plan.statements)"],
  ['the conflict batch carries no fence head',"const statements=fenced.head(gate,entities);\n statements.push(kind==='film'","const statements=[];\n statements.push(kind==='film'"],
  ['the person-state write bumps no revision',"statements.push([fenced.BUMP,['person',id,at]]);","void 0;"],

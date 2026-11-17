@@ -25,6 +25,7 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {REPO,layeredBase,loadWorker,overlayStore,snapshotBase} from './discovery-ledger-offline.mjs';
 import {verifyProductionSnapshot} from './r2-snapshot-export.mjs';
+import {withLedgerMode} from '../tests/ledger-mode-fixture.mjs';
 
 export class SplitError extends Error{constructor(message,exitCode=1){super(message);this.name='SplitError';this.exitCode=exitCode;}}
 const ROOT_LEDGER='epg/discovery-latest.json',SOURCE_COPIES='epg/discovery-archive/v1/sources/',POINTER='epg/published-generation.json',RESOLUTION='epg/discovery-resolution.json';
@@ -301,15 +302,15 @@ export async function rehearse({snapshot,output,heap=false}){
  const scan=nextScan(split,snap.manifest.finishedAt),S=runIdNext(planned),full=overlay('next-full');
  fs.writeFileSync(path.join(work,'scan.json'),JSON.stringify(scan.items));
  const boundedStore=overlayStore(layeredBase(path.join(work,'installed'),snap.base),path.join(work,'next-bounded'));
- await commit({BUCKET:full.store,DISCOVERY_LEDGER_MODE:'full'},context,S,scan.items);sampleMemory();
- await commit({BUCKET:boundedStore,DISCOVERY_LEDGER_MODE:'bounded'},context,S,scan.items);sampleMemory();
+ await commit(withLedgerMode({BUCKET:full.store},'full'),context,S,scan.items);sampleMemory();
+ await commit({BUCKET:boundedStore},context,S,scan.items);sampleMemory();
  const fullLedger=await vm.runInContext('loadJSON',context)({BUCKET:full.store},ROOT_LEDGER),after=await readSplit(boundedStore,context),scanKeys=new Set(scan.items.map(item=>vm.runInContext('canonicalDiscoveryCandidate',context)(item).key));
  const afterCounts=vm.runInContext('ledgerCounts',context)(after.active,decisions,Date.now()),activeKeysAfter=new Set(after.active.items.map(item=>item.key));
  checks.nextCommit={scanItems:scan.items.length,leaving:scan.leaving,returning:scan.returning,activeItems:after.active.items.length,boundaryExact:after.active.items.length===scanKeys.size&&after.active.items.every(item=>scanKeys.has(item.key)),parity:parity(fullLedger.items,after.active.items,after.archived),alsoArchived:after.active.archive?.alsoArchived?.length??null,ledgerTotal:afterCounts.ledgerTotal,fullLedgerItems:fullLedger.items.length,countsExact:afterCounts.ledgerTotal===fullLedger.items.length,reentered:scan.returningKeys.filter(key=>activeKeysAfter.has(key)).length,decisionsUntouched:await resolutionNow(boundedStore)===resolutionSha,archiveManifests:(await boundedStore.list({prefix:'epg/discovery-archive/v1/manifests/'})).objects.length};
  // 5b. The same commit with the flag unset (the state right after a production split, before `bounded` is set): a Worker
  // that meets the archive pointer acts as frozen. It must read only the active ledger, archive nothing and lose nothing.
  const frozenStore=overlayStore(layeredBase(path.join(work,'installed'),snap.base),path.join(work,'next-frozen'));
- await commit({BUCKET:frozenStore,DISCOVERY_LEDGER_MODE:'full'},context,S,scan.items);sampleMemory();
+ await commit(withLedgerMode({BUCKET:frozenStore},'full'),context,S,scan.items);sampleMemory();
  const frozen=await readSplit(frozenStore,context),frozenCounts=vm.runInContext('ledgerCounts',context)(frozen.active,decisions,Date.now());
  checks.frozenCommit={ledgerMode:frozen.active.ledgerMode||null,activeItems:frozen.active.items.length,parity:parity(fullLedger.items,frozen.active.items,frozen.archived),ledgerTotal:frozenCounts.ledgerTotal,countsExact:frozenCounts.ledgerTotal===fullLedger.items.length,readSourceCopy:frozenStore.reads.includes(planned.writes[0].key),archiveWrites:frozenStore.writes.filter(key=>key.startsWith('epg/discovery-archive/')).length,decisionsUntouched:await resolutionNow(frozenStore)===resolutionSha};
  fullLedger.items=null;
@@ -365,10 +366,10 @@ async function child(scenario,snapshot,work,runId){
  try{
   if(step==='commit'){
    const layer=mode==='full'?base:layeredBase(path.join(work,'installed'),base),store=overlayStore(layer,dir);
-   await commit({BUCKET:store,DISCOVERY_LEDGER_MODE:mode==='bounded'?'bounded':'full'},context,runId,JSON.parse(fs.readFileSync(path.join(work,'scan.json'),'utf8')));
+   await commit(withLedgerMode({BUCKET:store},mode==='bounded'?'bounded':'full'),context,runId,JSON.parse(fs.readFileSync(path.join(work,'scan.json'),'utf8')));
   }else{
    const layer=mode==='full'?layeredBase(path.join(work,'next-full'),base):layeredBase(path.join(work,'next-'+mode),layeredBase(path.join(work,'installed'),base));
-   if(await chunk({BUCKET:overlayStore(layer,dir),DISCOVERY_LEDGER_MODE:mode==='bounded'?'bounded':'full'},context,runId)!==200)throw new Error('chunk failed');
+   if(await chunk(withLedgerMode({BUCKET:overlayStore(layer,dir)},mode==='bounded'?'bounded':'full'),context,runId)!==200)throw new Error('chunk failed');
   }
  }finally{fs.rmSync(dir,{recursive:true,force:true});}
 }

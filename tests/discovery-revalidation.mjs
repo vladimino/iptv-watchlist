@@ -43,33 +43,38 @@ const migrated=()=>{
 };
 const sql=(file,text)=>{const result=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(result.stderr);const out=result.stdout.trim();return out?JSON.parse(out):[];};
 const RUN='run-reval',MIN=60000,START=Date.now()+3600000;
+// A controllable clock for the chunk's own code: the stub below can move it forward when TMDB answers, to cross the persist limit between the read and the writes.
+const clock={offset:0},advance={ms:0};
+class SteppedDate extends Date{static now(){return super.now()+clock.offset;}}
 
-async function world({durations,decision,movieRuntime=96,failFetch=false,fillers=0,cachedRuntime=90}){
+async function world({durations,decision,movieRuntime=96,failFetch=false,fillers=0,cachedRuntime=90,observed={title:'Film R',normalized:'film r'},catalog=null,movieTitles={translations:[],alternatives:[]},authority=Authority}){
+ clock.offset=0;advance.ms=0;
  const file=migrated();
  sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
  const setup={DB:d1Standin(file),BUCKET:new MemoryBucket(),discoveryLease:null};
  const taken=await Authority.acquireLease(setup,{programmeRunId:null});
  setup.discoveryLease=taken.lease;
- const item={key:'film r|2001',title:'Film R',normalizedTitle:'film r',year:2001,durations:[...durations],duration:durations[0],shows:durations.map((minutes,index)=>({channelId:'c'+index,channel:'C'+index,start:START+index*4*3600000,end:START+index*4*3600000+minutes*MIN})),seenInLatestSnapshot:true,lastAiring:START};
+ const item={key:observed.normalized+'|2001',title:observed.title,normalizedTitle:observed.normalized,year:2001,durations:[...durations],duration:durations[0],shows:durations.map((minutes,index)=>({channelId:'c'+index,channel:'C'+index,start:START+index*4*3600000,end:START+index*4*3600000+minutes*MIN})),seenInLatestSnapshot:true,lastAiring:START};
  await Authority.ingestLedger(setup,{programmeRunId:RUN,handoff:true,lease:taken.lease,items:(async function*(){yield item;for(let index=0;index<fillers;index++)yield {key:'filler '+index+'|2005',title:'Filler '+index,normalizedTitle:'filler '+index,year:2005,durations:[100],duration:100,shows:[{channelId:'f',channel:'F',start:START+index*1000,end:START+index*1000+100*MIN}],seenInLatestSnapshot:true,lastAiring:START+index*1000+1};})()});
  sql(file,`INSERT INTO published_epg_generation (programme_run_id, phase, published_at, payload_sha256, created_at) VALUES ('${RUN}','published','2026-11-15T10:00:00Z','x','2026-11-15T10:00:00Z')`);
  sql(file,`INSERT INTO published_epg_member (programme_run_id, kind, ordinal, film_id) VALUES ('${RUN}','programme',0,'member-1')`);
  sql(file,`INSERT INTO published_epg_document (programme_run_id, kind, ordinal, payload_json) VALUES ('${RUN}','programme',0,'${JSON.stringify({runId:RUN,films:[{id:'member-1',tmdbId:'101',shows:[]}]})}')`);
  sql(file,`UPDATE published_epg_authority SET mode='d1', cutover='open', programme_run_id='${RUN}', generation=7`);
- const stored={...decision,evidenceKey:sql(file,"SELECT evidence_key FROM discovery_observation WHERE observation_key='film r|2001'")[0].evidence_key};
+ const stored={...decision,evidenceKey:sql(file,`SELECT evidence_key FROM discovery_observation WHERE observation_key='${item.key}'`)[0].evidence_key};
  const wrote=await Authority.writeDecisionDelta(setup,{[item.key]:{previous:null,next:stored}},{lease:taken.lease});
  assert.deepEqual(wrote.written,[item.key],JSON.stringify(wrote));
+ if(catalog){const seeded=await Authority.upsertAdmissions(setup,{[catalog.id]:catalog},{lease:taken.lease});assert.deepEqual(seeded.written,[catalog.id],JSON.stringify(seeded));}
  await Authority.releaseLease(setup,taken.lease);
  const env={DB:d1Standin(file),BUCKET:new MemoryBucket(),discoveryLease:null,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0};
  const fetched=[];
- const movie={id:101,title:'Film R',original_title:'Film R',release_date:'2001-05-01',runtime:movieRuntime,genres:[],credits:{crew:[],cast:[]},translations:{translations:[]},alternative_titles:{titles:[]}};
- const context=vm.createContext({console,Date,Promise,URL,URLSearchParams,AbortSignal,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
-  fetch(url){const parsed=new URL(url);fetched.push(parsed.pathname);if(failFetch.value)return Promise.resolve(new Response('{}',{status:429,headers:{'Retry-After':'30'}}));return Promise.resolve(new Response(JSON.stringify(parsed.pathname.includes('/movie/')?movie:{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
-  DiscoveryAuthority:Authority,pinEpg:async value=>value,refreshPredictionQueue:async()=>{},
+ const movie={id:101,title:'Film R',original_title:'Film R',release_date:'2001-05-01',runtime:movieRuntime,genres:[],credits:{crew:[],cast:[]},translations:{translations:movieTitles.translations},alternative_titles:{titles:movieTitles.alternatives}};
+ const context=vm.createContext({console,Date:SteppedDate,Promise,URL,URLSearchParams,AbortSignal,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
+  fetch(url){const parsed=new URL(url);fetched.push(parsed.pathname);if(parsed.pathname.includes('/movie/'))clock.offset+=advance.ms;if(failFetch.value)return Promise.resolve(new Response('{}',{status:429,headers:{'Retry-After':'30'}}));return Promise.resolve(new Response(JSON.stringify(parsed.pathname.includes('/movie/')?movie:{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
+  DiscoveryAuthority:authority,pinEpg:async value=>value,refreshPredictionQueue:async()=>{},
   loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
  for(const name of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(name,'utf8'),context);
- const report={films:[{id:'member-1',tmdbId:'101',title:'Film R',original:'Film R',year:2001,runtime:cachedRuntime,canonicalIdentity:'tmdb:101',shows:[]}]};
+ const report={films:catalog?[]:[{id:'member-1',tmdbId:'101',title:'Film R',original:'Film R',year:2001,runtime:cachedRuntime,canonicalIdentity:'tmdb:101',shows:[]}]};
  const chunk=async()=>{
   const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
   try{
@@ -79,7 +84,8 @@ async function world({durations,decision,movieRuntime=96,failFetch=false,fillers
  };
  return {file,env,chunk,fetched,item};
 }
-const decisionOf=file=>JSON.parse(sql(file,"SELECT payload_json FROM discovery_decision WHERE observation_key='film r|2001'")[0].payload_json);
+const decisionOf=(file,key='film r|2001')=>JSON.parse(sql(file,`SELECT payload_json FROM discovery_decision WHERE observation_key='${key}'`)[0].payload_json);
+const admissionOf=(file,id)=>JSON.parse(sql(file,`SELECT payload_json FROM discovery_admission WHERE film_id='${id}'`)[0].payload_json);
 const rowsOf=file=>sql(file,"SELECT channel_id, start_ms, end_ms, basis FROM published_epg_show ORDER BY start_ms");
 const movieCalls=fetched=>fetched.filter(pathname=>pathname.includes('/movie/')).length;
 
@@ -184,6 +190,84 @@ const movieCalls=fetched=>fetched.filter(pathname=>pathname.includes('/movie/'))
  assert.equal(movieCalls(fetched),calls,'no automatic call after the twelfth failure');
  assert.equal(later.revalidation.revalidation_exhausted,1);
  assert.deepEqual(decisionOf(file).failedDurations,[...eleven,150]);
+}
+
+// J. AIR-503 / ADR 0158: a catalog-only Film whose stored decision came from an alias. TMDB lists the observed title (a Ukrainian translation), so the
+// drifted duration is reconfirmed alone, becomes an anchor, and the movie's own titles are recorded as the Film's provenance by one fenced admission write.
+const unanchored=extra=>{const value=verified(extra);delete value.anchor;return value;};
+const legacyCatalog=extra=>({id:'tmdb_101',tmdbId:'101',title:'Film R',original:'Film R',year:2001,runtime:96,canonicalIdentity:'tmdb:101',aliases:['Film R','Фільм Р','Series R'],...extra});
+{
+ const {file,chunk}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Фільм Р',normalized:'фільм р'},catalog:legacyCatalog(),
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}},{iso_639_1:'de',data:{title:'Film R DE'}}],alternatives:[{iso_3166_1:'US',title:'Film R: The Movie'},{iso_3166_1:'FR',title:'Film R FR'}]}});
+ assert.equal(admissionOf(file,'tmdb_101').movieTitles,undefined,'a legacy record starts without provenance');
+ const result=await chunk();
+ assert.equal(result.revalidation.revalidated,1,JSON.stringify(result.revalidation));
+ const decision=decisionOf(file,'фільм р|2001');
+ assert.deepEqual(decision.anchor,[96]);assert.equal(decision.identitySource,'tmdb_detail');
+ const stored=admissionOf(file,'tmdb_101');
+ assert.deepEqual(stored.movieTitles,['Film R','Фільм Р','Film R: The Movie'],'only what TMDB lists for this movie (ru/uk/en translations, RU/UA/US/GB alternatives)');
+ assert.equal(stored.aliases.includes('Series R'),true,'existing aliases are kept');
+ assert.equal(stored.aliases.includes('Film R DE'),false,'a translation outside ru/uk/en is not recorded');
+ const again=await chunk();
+ assert.equal(again.revalidation.revalidated,0);
+ assert.deepEqual(admissionOf(file,'tmdb_101').movieTitles,stored.movieTitles,'a later chunk writes nothing more');
+}
+// K. The alias is not a title of the movie. The stored alias `Series R` matches the observation and the scorer accepts it, but TMDB does not list it: the movie-detail
+// gate requires the observed title among the titles of the fetched detail (`detail_title_mismatch`), so the duration fails, no anchor is stored, no provenance is written
+// and the aliases are unchanged. A stored alias never reconfirms a duration on its own.
+{
+ const {file,chunk}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Series R',normalized:'series r'},catalog:legacyCatalog(),
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}}],alternatives:[]}});
+ const result=await chunk();
+ assert.equal(result.revalidation.revalidation_failed,1,JSON.stringify(result.revalidation));assert.equal(result.revalidation.revalidated,0);
+ const decision=decisionOf(file,'series r|2001');
+ assert.equal(decision.anchor===undefined||decision.anchor.length===0,true,'no anchor from an alias');assert.deepEqual(decision.failedDurations,[96]);
+ assert.equal(decision.tmdbId,'101');assert.equal(decision.status,'verified','the decision is not deleted or rejected');
+ const record=admissionOf(file,'tmdb_101');
+ assert.equal(record.movieTitles,undefined,'no provenance is written for an alias that TMDB does not list');
+ assert.deepEqual(record.aliases,['Film R','Фільм Р','Series R'],'the stored aliases are not rewritten');
+ assert.equal(rowsOf(file).length,0,'the 96 minute slot under the alias key stays a broadcast');
+}
+
+// L. AIR-503 retryability. The provenance is written before the decision that makes the duration an anchor. When the admission write does not land (the Film is not in `written`),
+// nothing durable has changed: no anchor, no failed duration, no provenance, so the drift persists and the next chunk evaluates the duration again and completes both.
+{
+ const skip={value:true};
+ const wrapped={...Authority,upsertAdmissions:(target,films,context)=>skip.value&&Object.values(films).some(film=>(film.movieTitles||[]).includes('Фільм Р'))?Promise.resolve({written:[],refused:[],skipped:[]}):Authority.upsertAdmissions(target,films,context)};
+ const {file,chunk,fetched}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Фільм Р',normalized:'фільм р'},catalog:legacyCatalog(),authority:wrapped,
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}}],alternatives:[]}});
+ const before=JSON.stringify(decisionOf(file,'фільм р|2001'));
+ const first=await chunk();
+ assert.equal(first.revalidation.revalidated,0,JSON.stringify(first.revalidation));assert.equal(first.revalidation.deferred,1,'the skipped write is a deferral, not a verdict');
+ assert.equal(JSON.stringify(decisionOf(file,'фільм р|2001')),before,'the decision is byte-identical: no anchor, no failed duration');
+ assert.equal(admissionOf(file,'tmdb_101').movieTitles,undefined);
+ const calls=movieCalls(fetched);
+ skip.value=false;
+ const second=await chunk();
+ assert.equal(movieCalls(fetched)>calls,true,'the duration was still drifted work and is evaluated again');
+ assert.equal(second.revalidation.revalidated,1,JSON.stringify(second.revalidation));
+ assert.deepEqual(decisionOf(file,'фільм р|2001').anchor,[96]);
+ assert.deepEqual(admissionOf(file,'tmdb_101').movieTitles,['Film R','Фільм Р'],'both the anchor and the provenance are stored after the retry');
+}
+
+// M. AIR-503 time-budget boundary. TMDB answers inside the budget, then the persist limit is crossed before the writes: the provenance and the decision both wait. Nothing durable
+// changes (no anchor, no provenance, no failed duration), the observation counts as deferred, and a later chunk with time completes both.
+{
+ const {file,chunk,fetched}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Фільм Р',normalized:'фільм р'},catalog:legacyCatalog(),
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}}],alternatives:[]}});
+ const before=JSON.stringify(decisionOf(file,'фільм р|2001'));
+ advance.ms=33000;
+ const late=await chunk();
+ assert.equal(late.revalidation.deferred,1,JSON.stringify(late.revalidation));assert.equal(late.revalidation.revalidated,0);
+ assert.equal(JSON.stringify(decisionOf(file,'фільм р|2001')),before,'the decision is untouched: no anchor, so the drift stays');
+ assert.equal(admissionOf(file,'tmdb_101').movieTitles,undefined,'and no provenance was written');
+ const calls=movieCalls(fetched);
+ advance.ms=0;clock.offset=0;
+ const next=await chunk();
+ assert.equal(movieCalls(fetched)>calls,true);
+ assert.equal(next.revalidation.revalidated,1,JSON.stringify(next.revalidation));
+ assert.deepEqual(decisionOf(file,'фільм р|2001').anchor,[96]);
+ assert.deepEqual(admissionOf(file,'tmdb_101').movieTitles,['Film R','Фільм Р']);
 }
 
 console.log('discovery revalidation ok');

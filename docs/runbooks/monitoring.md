@@ -25,6 +25,7 @@ Read `GET /api/monitor/status` first (a pure read), then the domain's own status
 | (no alert) EPG `health: late` | MCP `epg_status`: `orchestration.seal` (`cursorItems` of `itemTotal`, `updatedAt`) and `orchestration.publication.overdueMs` | The publication is more than 15 min past due and not waiting or cooling down. A cursor that moves between two reads is a slow seal, not a stopped one: read the `epg_phase` exit events (`writeMs / batches` is the D1 round trip) before anything else, and do not step or retry the run by hand. See the [AIR-420 evidence](../evidence/d1-migration/air-420-seal-ledger-round-trips-2026-11-10.md) |
 | `epg_authority` | the published EPG authority marker | Held or unreadable: owner |
 | `discovery_stalled`, `discovery_executor_stalled`, `discovery_generation_mismatch` | `epg_pipeline_status` with `view: "operational"` (the detailed view can answer `discovery_fence` while Discovery commits) | A backlog without allowed progress. Check the executor mode and the Workflow before any resolver call |
+| User site 502 on `/api/catalog/available` or `/api/enrichment/view` with `route_error` `discovery_fence` | those two GETs plus operational Discovery status | Unexpected: those user reads must not use the ledger generation fence. A 503 with `code` on the same paths is a held, loading or pin-change refusal; it is not an empty collection |
 | `discovery_quarantined` | the Workflow readout | The retry budget is exhausted: owner (`discovery_executor_invalid` was removed with the selector, AIR-325) |
 | `ratings_stalled`, `ratings_quarantined`, `ratings_failed_permanent`, `ratings_switch_open` | `ratings_sync_status` (`orchestration`) | See the Ratings integration reference; clearing a quarantine is an owner action |
 | `predictions_stale`, `predictions_backlog_growing` | `prediction_queue_overview` | Pending predictions and no real model progress (empty scheduled batches do not count): the hourly ChatGPT task, its quota or the model |
@@ -52,7 +53,7 @@ A growing `outbox` with a `lastDeliveryFailure` means alerts are not reaching th
 
 ## D1 projector grouped write path
 
-With `D1_ENRICHMENT_BULK=on` ([ADR 0106](../adr/0106-bulk-projector-write-path.md), [reference](../reference/data/d1-schema.md)) the projector run summary (the `d1_enrichment_projection` log line, `projection_run.summary_json`, `GET /api/d1/status` `projector.lastRun.summary`) carries a `bulk` object. With the flag off, `bulk` is absent and the summary is what it was. The fields are whole numbers, fixed names and one short error sample: no payload, id, key or SQL.
+This section describes historical projector summaries that can still exist in `projection_run` and be returned by `GET /api/d1/status`. The production projector and its `D1_ENRICHMENT_BULK` selector are retired ([ADR 0155](../adr/0155-retire-enrichment-projector-cron.md), AIR-512), so the live Worker cannot create a new grouped run. In the offline historical harness, a grouped run carries a `bulk` object; a per-entity run does not. The fields are whole numbers, fixed names and one short error sample: no payload, id, key or SQL.
 
 | Field | Meaning |
 | --- | --- |
@@ -121,3 +122,11 @@ Use when an EPG Workflow invocation ends `exceededMemory` or a step disappears, 
 3. Take the `epg_phase` and `epg_memory_boundary` lines with that `attemptTraceId` in time order. The last one is the last confirmed point; the paired boundary or phase whose `enter` has no matching `exit` or `error` is where the attempt was when logging stopped. Milestones (`*_begin`, `seal_ledger_batches`, `seal_stage_archive_segments`) are one-sided by design and never an unmatched enter or exit: use only the pairs listed in the [pairing rule](../reference/orchestration-reliability.md#epg-correlation-and-memory-boundary-markers-air-462). An `epg_act` `error` means the action rejected (the Workflow then slept `act_failed`); it carries no error text.
 4. Interpret with care. The trace id is local, not Cloudflare's. The last line is not the instruction that killed the attempt: a line written just before death can be lost, and a long synchronous `JSON.parse` or `JSON.stringify` shows as a gap after an `enter`. Byte counts are allocation proxies, not heap figures. Logs are kept about 7 days and may be truncated: if an `act-N` has the platform attempt but no `epg_act` line, say so and stop; do not infer a position.
 5. Record several natural daily runs as dated evidence with observed, inferred and unknown, exact UTC and Madrid times and the deployed SHA. One run without `exceededMemory` does not close AIR-420 or show a memory fix.
+
+## EPG seal hand-off stuck in `starting` (AIR-520)
+
+Symptom in `epg_status`: `stage=seal`, `phase=starting`, `handoff.successorPending=true`, `owner.liveness=absent`, `published=null`. Since AIR-520 the replayed old instance creates the claimed successor by itself, and the hourly `ensure` remains the fallback; a read-only check is enough:
+
+1. Read `epg_status` twice, at least one cron period apart. `failure.code=create_uncertain` with a `cooldownUntil` means a recorded, bounded retry; no failure and no progress across two ticks is a new defect to report.
+2. Compare with the Workflow GET of `epg_<day>_<series>` (read only). Do not create, terminate or retry an instance and do not run EPG steps by hand without a separate operation-specific GO.
+3. Evidence and mechanism: [AIR-520](../evidence/orchestration/air-520-orphan-handoff-claim-rca-2026-11-17.md).

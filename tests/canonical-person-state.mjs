@@ -317,8 +317,9 @@ if(on(8)){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!=='src/canonical-person-state.js'&&fs.readFileSync(full,'utf8').includes('canonical-person-state'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers.sort(),['src/canonical-person-adapters.js','src/canonical-producers.js'],'only the routing module registers it and the dormant Person receipt adapter (ADR 0126) reads its pre-plan');
- for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-person-state'),file+' does not bundle it');
+ assert.deepEqual(importers.sort(),['src/canonical-metadata-sync-producer.js','src/canonical-person-adapters.js','src/canonical-producers.js'],'only the routing module, the dormant Person receipt adapter (ADR 0126) and metadata_sync import it');
+ for(const file of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-person-state'),file+' does not name it');
+ assert.ok(fs.readFileSync('build.mjs','utf8').includes("scopedImports('src/canonical-person-state.js','CanonicalPersonState'"),'AIR-497 keeps the Person-state scope in the Worker bundle');
  const text=fs.readFileSync('src/canonical-person-state.js','utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\bR2\b|fetch\(|BUCKET|\.get\(['"]/.test(text),'no R2 and no network');
  const written=new Set([...text.matchAll(/(?:INSERT INTO|DELETE FROM|UPDATE)\s+([a-z_]+)/g)].map(match=>match[1]));

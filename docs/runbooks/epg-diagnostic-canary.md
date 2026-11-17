@@ -1,6 +1,10 @@
 # EPG diagnostic canary: operating, retention, cleanup and rollback
 
-Contract: [orchestration reliability](../reference/orchestration-reliability.md#epg-diagnostic-canary-the-run-and-its-receipt-air-455-adr-0124). Decisions: [ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](../adr/0124-epg-diagnostic-canary-run-contract.md). This page authorizes nothing: provisioning, applying the diagnostic migrations, copying a dataset, activating the diagnostic markers and every launch, stop and cleanup each need an operation-specific owner GO. A passing canary is not AIR-444 acceptance and is not permission to set `DISCOVERY_LEDGER_MODE=bounded`.
+> **NON-EXECUTABLE, HISTORICAL (AIR-521, [ADR 0160](../adr/0160-delete-epg-diagnostic-canary-code.md)).** The canary code, operator script, routes and diagnostic resources no longer exist; none of the commands below can run. Kept only as the record of what was once designed.
+
+**Retirement (AIR-457, [ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md); code deleted by AIR-521, [ADR 0160](../adr/0160-delete-epg-diagnostic-canary-code.md)): the Worker carries no diagnostic bindings, routes or Workflow class, and the modules, operator script and diagnostic migrations no longer exist in the repository. Every launch, stop, cleanup, provisioning and rollback section below is history only and is **not an executable instruction**: reverting a pull request does not restore it, and a revival would need a new owner-approved design (ADR), a new implementation and newly provisioned resources. Deleted resources are never recreated by a code rollback. Deprovisioning order, identifiers and readbacks: [retirement evidence](../evidence/orchestration/epg-diagnostic-retirement-air-457-2026-11-17.md). Permanent D1/R2 API tokens and the shared `R2_SNAPSHOT_*` are out of scope and are not revoked.**
+
+Historical design and contracts (no longer a contract of any code): [ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](../adr/0124-epg-diagnostic-canary-run-contract.md), [ADR 0139](../adr/0139-epg-diagnostic-chunked-replay-dataset.md). This page authorizes nothing.
 
 ## State machine of a run
 
@@ -57,4 +61,4 @@ Receipts are kept (they are the record of what was run); the report is inside th
 
 ## Rollback
 
-A code revert removes the routes and the Workflow class; it does not delete provisioned diagnostic resources, receipts or a running instance. Order: (1) `stop` an active canary; (2) revert; (3) clean the diagnostic domain and, if the owner decides, delete the diagnostic bucket and database (an owner operation). The production EPG schedule, the Cloudflare mode and `DISCOVERY_LEDGER_MODE` are never touched by this feature.
+A code revert removes the routes and the Workflow class; it does not delete provisioned diagnostic resources, receipts or a running instance. Order: (1) `stop` an active canary; (2) revert; (3) clean the diagnostic domain and, if the owner decides, delete the diagnostic bucket and database (an owner operation). The production EPG schedule, the Cloudflare executor mode and leftover `DISCOVERY_LEDGER_MODE` binding are never touched by this feature.

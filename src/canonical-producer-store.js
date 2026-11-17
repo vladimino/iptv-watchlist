@@ -17,6 +17,8 @@ import {database,failed,many,one,readAuthority} from './film-person-authority.js
 import {fenced} from './canonical-mutations.js';
 import {writerRoute} from './canonical-writer-route.js';
 import {LIVE_STATES,NO_STRIKE,ORIGINS,PRODUCER_PLAN_VERSION,TERMINAL_STATES,canTransition,keyOfRow,mintDictionaryVersion,resumeDecision} from './canonical-producer-run.js';
+import {fenceStatements} from './canonical-producer-fence.js';
+import {completeChainStatements,leaseRenewStatements,readChain} from './canonical-producer-chain.js';
 
 export const SLICE_STATEMENT_CAP=48;
 export const DUE_LIMIT_MAX=50;
@@ -29,6 +31,38 @@ const RESULT_COLUMNS='origin,run_key,pass_no,kind,unit_id,fingerprint,unit_diges
 const casRun=(run)=>[assertSql('EXISTS (SELECT 1 FROM canonical_producer_run WHERE origin=? AND run_key=? AND revision=?)'),[run.origin,run.run_key,run.revision]];
 const changesOne=()=>[assertSql('changes()=1'),[]];
 const fence=gate=>[FENCE,[gate.generation]];
+function producerExtras(env,gate,{at,renew=false,complete=false,ownerOnly=false}={}){
+ const f=env?.producerFence||gate?.producerFence;
+ if(!f)return [];
+ const out=fenceStatements(f,{ownerOnly});
+ let bump=0;
+ if(renew&&f.kind==='chain'&&Number.isInteger(f.revision)){
+  out.push(...leaseRenewStatements(f,at,undefined,f.revision+bump));
+  bump+=1;
+ }
+ if(complete&&f.kind==='chain'&&Number.isInteger(f.revision)){
+  out.push(...completeChainStatements(f,at,f.revision+bump));
+  bump+=1;
+ }
+ f._pendingBump=bump;
+ return out;
+}
+function confirmFence(env){
+ const f=env?.producerFence;
+ const n=Number(f?._pendingBump||0);
+ if(f&&n&&Number.isInteger(f.revision))f.revision+=n;
+ if(f)f._pendingBump=0;
+}
+async function restoreFence(env){
+ const f=env?.producerFence;
+ if(!f)return;
+ f._pendingBump=0;
+ if(f.kind!=='chain'||typeof f.programmeRunId!=='string')return;
+ try{
+  const row=await readChain(env,f.programmeRunId);
+  if(row&&Number.isInteger(Number(row.revision)))f.revision=Number(row.revision);
+ }catch{/* keep the pre-batch revision */}
+}
 
 // The marker route, once. Returns {open:false} below `open` (the caller returns `skipped`), otherwise the generation the batches are fenced with.
 async function routeOf(env){
@@ -60,8 +94,13 @@ async function commit(env,gate,statements,cause,run){
  const db=database(env);
  if(!db||typeof db.batch!=='function')throw failed('producer_transport');
  if(statements.length>SLICE_STATEMENT_CAP)throw failed('film_person_bounded');
- try{await db.batch(statements.map(([sql,params])=>db.prepare(sql).bind(...params)));}
- catch(error){throw await refuse(env,gate,error,cause,run);}
+ try{
+  await db.batch(statements.map(([sql,params])=>db.prepare(sql).bind(...params)));
+  confirmFence(env);
+ }catch(error){
+  await restoreFence(env);
+  throw await refuse(env,gate,error,cause,run);
+ }
 }
 
 // ---- reads ----
@@ -132,7 +171,7 @@ export async function openEpgRun(env,{runKey,sourceGeneration,planVersion=PRODUC
  if(typeof runKey!=='string'||!runKey||runKey.length>160||typeof sourceGeneration!=='string'||!sourceGeneration||sourceGeneration.length>200||!DIGEST.test(fingerprint||'')||!Array.isArray(units)||typeof at!=='string'||!Number.isInteger(planVersion)||planVersion<1)throw invalid();
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
- await commit(env,gate,[fence(gate),[INSERT_EPG,[runKey,sourceGeneration,planVersion,fingerprint,units.length,gate.generation,at,at]]],'cas');
+ await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at}),[INSERT_EPG,[runKey,sourceGeneration,planVersion,fingerprint,units.length,gate.generation,at,at]]],'cas');
  const stored=await readRun(env,{origin:'epg',runKey});
  if(!stored)throw failed('producer_run_unreadable');
  // The source generation is part of the run identity (ADR 0128): an existing run of this event that was planned for another generation is never resumed or replayed (the claim written at pass completion would name the wrong generation).
@@ -142,7 +181,7 @@ export async function openEpgRun(env,{runKey,sourceGeneration,planVersion=PRODUC
  if(decision.action==='resume')return {state:created?'created':'resume',run:stored,startIndex:decision.startIndex};
  if(stored.applied_generation!==null)throw failed('producer_cas_lost');
  await commit(env,gate,[
-  fence(gate),casRun(stored),
+  fence(gate),...producerExtras(env,gate,{at}),casRun(stored),
   ["UPDATE canonical_producer_run SET pass_no=?,fingerprint=?,plan_version=?,unit_count=?,cursor_kind=NULL,cursor_id=NULL,strike_kind=NULL,strike_id=NULL,strike_digest=NULL,strike_class=NULL,strike_count=0,pass_state='passing',stopped_by=NULL,revision=revision+1,updated_at=? WHERE origin='epg' AND run_key=? AND revision=?",[decision.pass_no,fingerprint,planVersion,units.length,at,runKey,stored.revision]],
   changesOne(),
  ],'cas',stored);
@@ -181,7 +220,7 @@ export async function commitStrike(env,{run,next,at}={}){
  if(!plain(run)||!plain(next)||!Number.isInteger(next.strike_count)||next.strike_count<1||next.strike_count>2||typeof at!=='string')throw invalid();
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
- await commit(env,gate,[fence(gate),casRun(run),
+ await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at,renew:true}),casRun(run),
   ['UPDATE canonical_producer_run SET '+STRIKE_SET+',revision=revision+1,updated_at=? WHERE origin=? AND run_key=? AND revision=?',[...strikeParams(next),at,run.origin,run.run_key,run.revision]],changesOne()],'strike',run);
  return {state:'committed',run:await readRun(env,{origin:run.origin,runKey:run.run_key})};
 }
@@ -208,7 +247,7 @@ export async function commitSlice(env,{run,next,writes=[],counts={},at}={}){
  for(const value of Object.values(delta))if(!Number.isInteger(value)||value<0)throw invalid();
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
- const statements=[fence(gate),casRun(run)];
+ const statements=[fence(gate),...producerExtras(env,gate,{at,renew:true}),casRun(run)];
  for(const write of writes){
   if(!plain(write))throw invalid();
   for(const statement of resultStatements(write))statements.push(statement);
@@ -221,11 +260,12 @@ export async function commitSlice(env,{run,next,writes=[],counts={},at}={}){
 }
 
 // The pass-complete commit: the ONLY writer of `applied_generation` (an EPG run: equal to its `source_generation`) with `pass_state='passed'`, `open_at_completion` (the number of live membership-affecting results) and the completion time.
+// With a chain GATE this is the SAME batch as owner_state='complete' (ADR 0141 I-11).
 export async function commitPassComplete(env,{run,openAtCompletion,at}={}){
  if(!plain(run)||run.origin!=='epg'||typeof run.source_generation!=='string'||!Number.isInteger(openAtCompletion)||openAtCompletion<0||typeof at!=='string')throw invalid();
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
- await commit(env,gate,[fence(gate),casRun(run),
+ await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at,renew:true,complete:true}),casRun(run),
   ["UPDATE canonical_producer_run SET pass_state='passed',applied_generation=source_generation,open_at_completion=?,completed_at=?,stopped_by=NULL,revision=revision+1,updated_at=? WHERE origin=? AND run_key=? AND revision=?",[openAtCompletion,at,at,run.origin,run.run_key,run.revision]],changesOne()],'slice',run);
  return {state:'committed',run:await readRun(env,{origin:run.origin,runKey:run.run_key})};
 }
@@ -235,7 +275,7 @@ export async function commitStop(env,{run,stoppedBy,at}={}){
  if(!plain(run)||typeof stoppedBy!=='string'||!/^[a-z][a-z_0-9]{0,79}$/.test(stoppedBy)||typeof at!=='string')throw invalid();
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
- await commit(env,gate,[fence(gate),casRun(run),
+ await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at,ownerOnly:true}),casRun(run),
   ["UPDATE canonical_producer_run SET pass_state='stopped',stopped_by=?,revision=revision+1,updated_at=? WHERE origin=? AND run_key=? AND revision=?",[stoppedBy,at,run.origin,run.run_key,run.revision]],changesOne()],'slice',run);
  return {state:'committed',run:await readRun(env,{origin:run.origin,runKey:run.run_key})};
 }
@@ -247,7 +287,7 @@ export async function settleResult(env,{row,state,settledBy,at}={}){
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
  const key=keyOfRow(row);
- await commit(env,gate,[fence(gate),
+ await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at}),
   ["UPDATE canonical_producer_unit_result SET state=?,settled_by=?,settled_at=?,updated_at=?,next_attempt_at=NULL WHERE origin=? AND run_key=? AND pass_no=? AND kind=? AND unit_id=? AND state=? AND attempts=?",[state,settledBy,at,at,key.origin,key.run_key,key.pass_no,key.kind,key.unit_id,row.state,row.attempts]],changesOne()],'cas');
  return {state:'committed'};
 }
@@ -262,7 +302,7 @@ export async function updateResult(env,{row,patch,at}={}){
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
  const key=keyOfRow(row);
- await commit(env,gate,[fence(gate),
+ await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at}),
   ['UPDATE canonical_producer_unit_result SET state=?,code=?,attempts=?,prereq_stamp=?,next_attempt_at=?,updated_at=? WHERE origin=? AND run_key=? AND pass_no=? AND kind=? AND unit_id=? AND attempts=? AND state=?',
    [next.state,next.code,next.attempts,next.prereq_stamp??null,next.next_attempt_at??null,patch.updated_at??at,key.origin,key.run_key,key.pass_no,key.kind,key.unit_id,row.attempts,row.state]],changesOne()],'cas');
  return {state:'committed'};
@@ -274,7 +314,7 @@ export async function commitResume(env,{run,at}={}){
  if(!plain(run)||run.pass_state!=='stopped'||typeof at!=='string')throw invalid();
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
- await commit(env,gate,[fence(gate),casRun(run),
+ await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at}),casRun(run),
   ["UPDATE canonical_producer_run SET pass_state='passing',stopped_by=NULL,revision=revision+1,updated_at=? WHERE origin=? AND run_key=? AND revision=? AND pass_state='stopped'",[at,run.origin,run.run_key,run.revision]],changesOne()],'slice',run);
  return {state:'committed',run:await readRun(env,{origin:run.origin,runKey:run.run_key})};
 }

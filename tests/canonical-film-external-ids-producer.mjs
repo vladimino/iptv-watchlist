@@ -354,7 +354,8 @@ for(const stage of ['legacy','r2','prepared']){
  for(const word of ['fetch(','setTimeout','setInterval','env.BUCKET','R2','cron','waitUntil'])assert.ok(!code_.includes(word),word);
  for(const file of fs.readdirSync('src').filter(name=>name.endsWith('.js')&&name!=='canonical-film-external-ids-producer.js'))assert.ok(!fs.readFileSync('src/'+file,'utf8').includes('canonical-film-external-ids-producer'),file+' does not import the unit');
  assert.ok(!fs.readFileSync('build.mjs','utf8').includes('canonical-film-external-ids-producer'),'not bundled');
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation'],'film_external_ids is not registered: only the Discovery admission operation is (AIR-374 P3c), readiness stays truthful');
+ assert.ok(!PRODUCER_OPERATIONS.has('film_external_ids'));
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
  assert.ok(PRODUCER_WIRING.every(item=>!item.requires.includes('film_external_ids')),'PRODUCER_WIRING is unchanged: wiring belongs to the producer wiring PR');
 }
 console.log('canonical-film-external-ids-producer ok');

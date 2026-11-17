@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+if ! git diff --cached --name-only --diff-filter=ACMR |
+  grep -Eq '^(src/|scripts/|tests/|migrations/|build\.mjs$|package(-lock)?\.json$|\.github/workflows/|\.githooks/)'; then
+  exit 0
+fi
+echo '[AIR-514] pre-commit: checking mutation source anchors'
+npm run check:mutation-targets

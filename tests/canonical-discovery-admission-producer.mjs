@@ -438,11 +438,11 @@ for(const stage of ['legacy','r2','prepared']){
  }finally{if(previous===undefined)delete globalThis.CanonicalDiscoveryAdmission;else globalThis.CanonicalDiscoveryAdmission=previous;}
 }
 
-// 12. The real Discovery call sites (src/discovery.js): both `upsertAdmissions` calls hand the chunk's budget to the unit, and the chunk's end runs the catch-up once (the one path every Discovery hop takes).
+// 12. The real Discovery call sites (src/discovery.js): every `upsertAdmissions` call hands the chunk's budget to the unit, and the chunk's end runs the catch-up once (the one path every Discovery hop takes).
 {
  const text=fs.readFileSync(path.join(SRC,'discovery.js'),'utf8');
  const calls=[...text.matchAll(/DiscoveryAuthority\.upsertAdmissions\([^\n]*\)/g)].map(match=>match[0]);
- assert.equal(calls.length,2,'two production call sites in the paged chunk');
+ assert.equal(calls.length,3,'three production call sites in the paged chunk: cheap pass, candidate and revalidation (AIR-503 records movie provenance)');
  for(const call of calls)assert.ok(/\{lease,canonicalDeadline:canonicalLimit\(\)\}/.test(call),'a call site without the canonical budget: '+call);
  assert.ok(/const canonicalLimit=\(\)=>persistLimit\(\)-writeEstimate\(3\);/.test(text),'the budget is the persist limit minus a write reserve');
  assert.equal(text.split('CanonicalDiscoveryAdmission.admitDiscoveryFilms').length-1,1,'one catch-up call in the chunk');
@@ -455,12 +455,13 @@ for(const stage of ['legacy','r2','prepared']){
 
 // 9. Registry and readiness: the atomic `film_mutation` spec is registered, exactly its dependent producer flips, the other kinds are unchanged, and nothing else registers.
 {
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation']);
+ assert.ok(PRODUCER_OPERATIONS.has('film_mutation'));
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
  const spec=PRODUCER_OPERATIONS.get('film_mutation');
  assert.equal(spec.atomic,true);assert.equal(spec.operation,'film_mutation');
  for(const hook of ['readback','replay','revalidate'])assert.equal(typeof spec[hook],'function');
  const flipped=PRODUCER_WIRING.filter(item=>item.requires.every(kind=>[...PRODUCER_OPERATIONS.values()].some(op=>op.operation===kind&&op.atomic===true))).map(item=>item.name);
- assert.deepEqual(flipped,['discovery_admission']);
+ assert.deepEqual(flipped,['epg_commit','metadata_sync','discovery_admission','rated_admission_retention']);
  assert.throws(()=>discoveryAdmissionOperation({}),code('film_person_invalid'));
 }
 

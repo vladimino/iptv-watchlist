@@ -296,7 +296,7 @@ const LetterboxdRatings=(()=>{
  async function labelledChanges(env,groups){
   const ids=CHANGE_GROUPS.flatMap(group=>(groups[group]||[]).map(item=>item.id));
   let labels=new Map();
-  if(ids.length&&typeof ratingsFilmLabels==='function')try{labels=await ratingsFilmLabels(env,ids);}catch{}
+  if(ids.length&&typeof ratingsFilmLabels==='function')try{labels=await ratingsFilmLabels(env,ids);}catch(error){if(['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'].includes(error?.code))throw error;}
   const out={};
   for(const group of CHANGE_GROUPS){
    out[group]=[];

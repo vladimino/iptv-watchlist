@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {withLedgerMode} from './ledger-mode-fixture.mjs';
 
 const records=new Map(),etags=new Map();let revision=0,puts=[];
 const bucket={
@@ -165,7 +166,11 @@ await drain();assert.deepEqual(puts,[]);assert.equal(hops.length,0);assert.deepE
 assert.equal((await call('/api/enrichment/discovery/resolve',{limit:1,chunks:0},{headers:{...browserHeaders,Origin:origin}})).status,200);
 
 // Scan reads the configured XMLTV source and starts the chain through the loopback.
+// Production always seals bounded, so the rewrite route answers 409 unless an isolated full env is used (ADR 0156).
 seed(5);
+response=await call('/api/enrichment/discovery/scan',{});
+assert.equal(response.status,409);assert.deepEqual(fetches,[]);
+Object.assign(env,withLedgerMode(env,'full'));
 response=await call('/api/enrichment/discovery/scan',{});
 assert.equal(response.status,502);assert.equal((await response.json()).error,'EPG HTTP 503');assert.deepEqual(fetches,['https://epg.test/guide.xml']);
 const xmltv=t=>new Date(t).toISOString().replace(/[-:T]/g,'').slice(0,14)+' +0000';
@@ -178,6 +183,7 @@ assert.deepEqual(scanHops,[]);assert.equal(continuation().reason,'scan_committed
 const epgUrl=env.EPG_XML_URL;delete env.EPG_XML_URL;
 response=await call('/api/enrichment/discovery/scan',{});assert.equal(response.status,502);assert.match((await response.json()).error,/EPG_XML_URL is not configured/);
 env.EPG_XML_URL=epgUrl;
+delete env.offlineLedgerFixture;delete env.DISCOVERY_LEDGER_MODE;
 
 // A committed EPG sync queues discovery. The next step runs one chunk and does not retry ratings.
 seed(5);records.set('sync.json',{runId:'sync-1',stage:'epg',updatedAt:new Date().toISOString()});

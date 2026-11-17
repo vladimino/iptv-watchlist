@@ -684,6 +684,20 @@ async function overlayRows(db,sql,wanted){
   after=page[page.length-1].filmId;
  }
 }
+// One index entry with the D1 forecast and fingerprint of the film laid over it (the entry's own prediction facts are dropped first: D1 is the only source at d1).
+function overlayedItem(entry,owned,moodFacet){
+  const item={...(entry||{})};
+  delete item.prediction;delete item.fingerprint;delete item.fingerprintHash;delete item.impactFeatures;delete item.moodFacet;
+  if(owned?.features){
+   const features=owned.features;
+   item.fingerprintHash=features.fingerprintHash;
+   item.fingerprint={plotMechanics:features.plotMechanics,moodLabels:features.moodLabels,execution:features.execution,fingerprintHash:features.fingerprintHash};
+   item.impactFeatures={fingerprintHash:features.fingerprintHash,fingerprintSchemaVersion:features.fingerprintSchemaVersion??null,fingerprintPromptVersion:features.fingerprintPromptVersion??null,invalidatedAt:features.invalidatedAt||null,plotMechanics:features.plotMechanics,execution:features.execution};
+  }
+  if(owned?.display)item.prediction=owned.display;
+  if(typeof moodFacet==='function'&&(item.fingerprint||item.prediction))item.moodFacet=moodFacet(item.fingerprint,item.prediction);
+  return item;
+}
 export async function overlayIndex(env,index,moodFacet){
  const direct=!!env&&typeof env.prepare==='function'&&env.BUCKET==null;
  const db=direct?env:(env?.DB??null);
@@ -704,20 +718,29 @@ export async function overlayIndex(env,index,moodFacet){
   let display;try{display=JSON.parse(row.display);}catch{throw failed('prediction_domain_unavailable');}
   byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),display});
  }
- for(const filmId of ids){
-  const item={...(next[filmId]||{})};
-  delete item.prediction;delete item.fingerprint;delete item.fingerprintHash;delete item.impactFeatures;delete item.moodFacet;
-  const owned=byFilm.get(filmId);
-  if(owned?.features){
-   const features=owned.features;
-   item.fingerprintHash=features.fingerprintHash;
-   item.fingerprint={plotMechanics:features.plotMechanics,moodLabels:features.moodLabels,execution:features.execution,fingerprintHash:features.fingerprintHash};
-   item.impactFeatures={fingerprintHash:features.fingerprintHash,fingerprintSchemaVersion:features.fingerprintSchemaVersion??null,fingerprintPromptVersion:features.fingerprintPromptVersion??null,invalidatedAt:features.invalidatedAt||null,plotMechanics:features.plotMechanics,execution:features.execution};
-  }
-  if(owned?.display)item.prediction=owned.display;
-  if(typeof moodFacet==='function'&&(item.fingerprint||item.prediction))item.moodFacet=moodFacet(item.fingerprint,item.prediction);
-  next[filmId]=item;
- }
+ for(const filmId of ids)next[filmId]=overlayedItem(next[filmId],byFilm.get(filmId),moodFacet);
+ return next;
+}
+
+// AIR-475 (review of the production acceptance fix): the forecast and fingerprint of ONE film (or two spellings of it) from the D1 pointer and fingerprint rows, with no dependence on the R2 view index
+// holding the key. `base` is {id: entry} for exactly `ids` (an entry may be empty); the answer is the same shape with the D1 facts laid over each, or `base` unchanged while the domain is not d1. Two
+// indexed statements, no scan; nothing is written. A film with no D1 row simply has no forecast: it is never filled from a mirror or from another id.
+export async function projectItems(env,ids,base,moodFacet){
+ const direct=!!env&&typeof env.prepare==='function'&&env.BUCKET==null;
+ const db=direct?env:(env?.DB??null);
+ const authority=await readPredictionAuthority(db,direct?undefined:env);
+ if(authority.mode!=='d1')return base;
+ const list=[...new Set(ids)].filter(id=>typeof id==='string'&&id);
+ if(!list.length)return base;
+ const marks=list.map(()=>'?').join(',');
+ let fingerprints,pointers;
+ try{[fingerprints,pointers]=await Promise.all([many(db,'SELECT film_id AS filmId, features_json AS features FROM prediction_fingerprint WHERE film_id IN ('+marks+')',list),many(db,'SELECT film_id AS filmId, display_json AS display FROM prediction_pointer WHERE film_id IN ('+marks+')',list)]);}
+ catch(error){throw failed('prediction_domain_unavailable',error);}
+ const byFilm=new Map();
+ for(const row of fingerprints){let features;try{features=JSON.parse(row.features);}catch{throw failed('prediction_domain_unavailable');}byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),features});}
+ for(const row of pointers){let display;try{display=JSON.parse(row.display);}catch{throw failed('prediction_domain_unavailable');}byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),display});}
+ const next={...(base||{})};
+ for(const id of list)next[id]=overlayedItem(next[id],byFilm.get(id),moodFacet);
  return next;
 }
 

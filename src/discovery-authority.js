@@ -7,7 +7,7 @@
 // or a failed read fails closed and does not serve the R2 ledger.
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 import {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
-import {slotEligibility,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';
+import {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';
 export const planRevalidation=revalidationPlan;
 export const REVALIDATION_LIMIT=SLOT_REVALIDATION_LIMIT;
 export const decisionAfterRevalidation=revalidatedDecision;
@@ -32,6 +32,50 @@ export const INDEX_CAP=3000;
 const READ_CAP=20000;
 export const LEDGER_PAGE=500;
 export const BIND_CAP=100;
+export const POLICY_EXCLUDE_OVERHEAD=4;
+export const POLICY_EXCLUDE_STATEMENTS_PER=3;
+export const POLICY_EXCLUDE_CAP=Math.floor((STATEMENT_CAP-POLICY_EXCLUDE_OVERHEAD)/POLICY_EXCLUDE_STATEMENTS_PER);
+function policyExcludeStatementCount(n){return POLICY_EXCLUDE_OVERHEAD+POLICY_EXCLUDE_STATEMENTS_PER*n;}
+const POLICY_DECISIONS_SQL="SELECT observation_key, status, tmdb_id, film_id, decision_hash, payload_json FROM discovery_decision WHERE media_kind='movie' AND tmdb_id=? ORDER BY observation_key";
+const POLICY_FILM_ID=/^tmdb_[1-9]\d{0,11}$/;
+function storedOverview(film){
+ return typeof film?.overview==='string'&&film.overview?film.overview:(typeof film?.synopsis==='string'?film.synopsis:'');
+}
+function catalogPolicyKind(film,observation){
+ if(!film||typeof film!=='object')return null;
+ if(typeof filmAdmissionInput==='function'&&typeof admissionPolicy==='function'){
+  const mapped=filmAdmissionInput(film);
+  return mapped.movie?admissionPolicy(mapped.movie,observation||mapped.observation):null;
+ }
+ if(typeof admissionPolicy==='function')return admissionPolicy({...film,overview:storedOverview(film)},observation);
+ const names=[...(film?.genres||[])].map(value=>String(typeof value==='string'?value:(value&&value.name)||'').normalize('NFKC').toLowerCase());
+ const ids=new Set([...(film?.genreIds||[])].map(Number).filter(id=>id>0));
+ for(const value of film?.genres||[]){const id=typeof value==='number'?value:value&&typeof value==='object'?Number(value.id):NaN;if(id>0)ids.add(id);}
+ if(ids.has(99)||names.some(name=>name==='documentary'||name==='документальный'||name==='документальний'))return 'documentary';
+ const titles=String([observation?.normalizedTitle,observation?.title,film?.title,film?.original,...(film?.aliases||[])].filter(Boolean).join(' ')).normalize('NFKC').toLowerCase();
+ const overview=String(storedOverview(film)).normalize('NFKC').toLowerCase();
+ const music=ids.has(10402)||names.some(name=>name==='music'||name==='музыка'||name==='музыкальный'||name==='музика');
+ const strong=/\blive at\b|\blive from\b|\bin concert\b|concert film|concert recording|filmed live|live performance|recorded live|performing live|запись концерта|запись выступления|живой концерт|концертн/.test(titles+' '+overview)||/\blive in\b/.test(titles);
+ if(music&&strong)return 'concert';
+ if(music&&/\blive\b|\bconcert\b|\bконцерт\b/.test(titles))return 'ambiguous';
+ return null;
+}
+function rejectedPolicyDecision(previous,tmdbId){
+ const prior=previous&&typeof previous==='object'?previous:{};
+ const id=String(tmdbId);
+ const priorIds=[...new Set((Array.isArray(prior.rejectedTmdbIds)?prior.rejectedTmdbIds:[]).map(String).filter(value=>value&&value!==id))];
+ const rejected=[id,...priorIds].slice(0,8);
+ const clears=prior.tmdbId==null?false:String(prior.tmdbId)===id;
+ return {
+  ...prior,
+  status:prior.status==='verified'||typeof prior.status!=='string'||!prior.status?'needs_verification':prior.status,
+  tmdbId:clears?null:prior.tmdbId??null,
+  filmId:clears?null:prior.filmId??null,
+  canonicalIdentity:clears?null:prior.canonicalIdentity??null,
+  identitySource:clears?null:prior.identitySource??null,
+  terminalReason:null,retryAt:null,rejectedTmdbIds:rejected,
+ };
+}
 const GENERATION_KEY=/^epg\/generations\/([^/]+)\/(discovery-latest|discovered-films)\.json$/;
 function generationRequest(key){
  const match=GENERATION_KEY.exec(key);
@@ -89,7 +133,7 @@ async function digest(text){
  const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));
  return [...bytes].map(byte=>byte.toString(16).padStart(2,'0')).join('');
 }
-function closed(){return {ready:false,held:false,tables:false,windowTable:false,priorityTable:false,mode:'r2',cutover:null,version:null,generation:0,programmeRunId:null,publishedProgrammeRunId:null,transfer:'idle'};}
+function closed(){return {ready:false,held:false,tables:false,windowTable:false,priorityTable:false,mode:'r2',cutover:null,version:null,generation:0,programmeRunId:null,publishedProgrammeRunId:null,transfer:'idle',transferBatches:0};}
 // AIR-387. One catalog film by TMDB movie id, for the permanent film page. A bounded read-only lookup: one indexed row
 // (media_kind, tmdb_id), no catalog scan, no write. It answers every state of that identity, so the caller can tell a film
 // that was never admitted from one that was superseded, and it fails closed like `routeRead`: a held cutover, a catalog or
@@ -107,8 +151,7 @@ export async function readFilmAdmission(env,tmdbId){
  }
  const rows=await many(database(env),"SELECT film_id, payload_json, canonical_identity, tmdb_id, state FROM discovery_admission WHERE media_kind='movie' AND tmdb_id=? ORDER BY film_id",[id]);
  const closedGate=await readAuthority(env);
- if(sealing){if(!closedGate.ready||closedGate.programmeRunId!==opened.programmeRunId||closedGate.transfer!=='loading')throw failed('discovery_fence');}
- else if(!closedGate.ready||closedGate.generation!==opened.generation||closedGate.programmeRunId!==opened.programmeRunId||closedGate.transfer==='loading')throw failed('discovery_fence');
+ closeReadFence(opened,closedGate,{sealing,generationFence:false});
  const records=[];
  for(const row of rows){
   let film;try{film=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
@@ -267,12 +310,12 @@ export async function readAuthority(env){
  let row,transfer;
  try{
   row=await one(db,'SELECT mode, cutover, programme_run_id AS programmeRunId, generation, published_programme_run_id AS publishedProgrammeRunId FROM discovery_authority WHERE id=1');
-  transfer=await one(db,'SELECT state FROM discovery_transfer WHERE id=1');
+  transfer=await one(db,'SELECT state, batches FROM discovery_transfer WHERE id=1');
  }catch(error){throw failed('discovery_unavailable',error);}
  if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.cutover!=='open'&&row.cutover!=='held'))throw failed('discovery_unavailable');
  if(!transfer||!['idle','loading','committed'].includes(transfer.state))throw failed('discovery_unavailable');
  const ready=row.mode==='d1'&&row.cutover==='open',held=row.mode==='d1'&&row.cutover==='held';
- return {ready,held,tables:true,windowTable:names.includes('projector_window'),priorityTable:names.includes(PRIORITY_TABLE),mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state};
+ return {ready,held,tables:true,windowTable:names.includes('projector_window'),priorityTable:names.includes(PRIORITY_TABLE),mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state,transferBatches:Number(transfer.batches)||0};
 }
 
 function assertOpen(gate){
@@ -287,6 +330,26 @@ function assertOpen(gate){
 // says so. Every other owned key, every write and every ledger-dependent read stays closed.
 const SEAL_SAFE_KEYS=new Set(['epg/discovered-films.json','epg/discovery-status.json','epg/resolver-continuation.json']);
 function sealSafeKey(key){return SEAL_SAFE_KEYS.has(key)||(generationRequest(key)!==null&&key.endsWith('discovered-films.json'));}
+// Multi-statement ledger/decision/score walks can mix pages if a writer lands between them. Those keys keep the global
+// authority generation fence. Single-statement catalog and payload reads are one SQLite snapshot: continuation, status and
+// Workflow writes still bump `discovery_authority.generation` but do not tear those rows, so fencing them on generation
+// turns a live Discovery Workflow into a user-facing 502. Catalog replacement does bump `discovery_transfer.batches`
+// (loading and committed), so snapshot reads compare that epoch and refuse an ABA empty catalog. Held cutover, a
+// loading transfer that is not a ledger seal, a programme-run change and a lost D1 authority still fail closed.
+function generationFencedKey(key){
+ if(key==='epg/discovery-resolution.json'||key==='epg/discovery-latest.json'||key==='epg/discovery-score-preview.json')return true;
+ const requested=generationRequest(key);
+ return !!(requested&&key.endsWith('discovery-latest.json'));
+}
+function closeReadFence(opened,closed,{sealing=false,generationFence=true}={}){
+ const epochMoved=closed.transferBatches!==opened.transferBatches;
+ if(sealing){
+  if(!closed.ready||closed.programmeRunId!==opened.programmeRunId||closed.transfer!=='loading'||epochMoved)throw failed('discovery_fence');
+  return;
+ }
+ if(!closed.ready||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading'||epochMoved)throw failed('discovery_fence');
+ if(generationFence&&closed.generation!==opened.generation)throw failed('discovery_fence');
+}
 // `loading` is a ledger seal, and not a catalog, decision or segment load in progress, only when the ledger is mid-handoff
 // (retiring rows, or a transfer for another programme) and no admission is pending.
 async function loadingIsLedgerSeal(env){
@@ -310,10 +373,11 @@ export async function routeRead(env,key){
  // A seal moves the generation with every batch; that does not touch these keys, so a sealing read is stable while the
  // authority, the programme and the loading state hold, and a finished or restarted seal fails the read.
  if(sealing){
-  if(!closedGate.ready||closedGate.programmeRunId!==opened.programmeRunId||closedGate.transfer!=='loading'||!await loadingIsLedgerSeal(env))throw failed('discovery_fence');
+  closeReadFence(opened,closedGate,{sealing:true});
+  if(!await loadingIsLedgerSeal(env))throw failed('discovery_fence');
   return {handled:true,value,transfer:'loading'};
  }
- if(!closedGate.ready||closedGate.generation!==opened.generation||closedGate.programmeRunId!==opened.programmeRunId||closedGate.transfer==='loading')throw failed('discovery_fence');
+ closeReadFence(opened,closedGate,{generationFence:generationFencedKey(key)});
  return {handled:true,value};
 }
 async function readKey(env,key,gate){
@@ -465,6 +529,8 @@ async function readScores(env,gate){
  for(const row of rows){const parsed=JSON.parse(row.payload_json);if(parsed?.observationKey)items[parsed.observationKey]=parsed;}
  return {schemaVersion:1,mode:'on',programmeRunId:gate.programmeRunId,items};
 }
+// The table is the last-chunk preview of the current programme. PK is observation_key, so a
+// previous run's leftover row collides on the same key if we only DELETE the current run.
 async function writeScores(env,value,gate,context){
  const lease=context.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
@@ -481,7 +547,7 @@ async function writeScores(env,value,gate,context){
  const opening=[
   fence(current,lease,' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1)'),
   [FENCE_SQL,[]],
-  ['DELETE FROM discovery_score WHERE programme_run_id IS ?',[current.programmeRunId]],
+  ['DELETE FROM discovery_score',[]],
  ];
  if(opening.length+inserts.length<=STATEMENT_CAP){await commit(db,[...opening,...inserts]);return;}
  await commit(db,[...opening,['UPDATE discovery_transfer SET state=\'loading\', batches=batches+1 WHERE id=1',[]]]);
@@ -814,6 +880,21 @@ WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND 
  AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND s.start_ms>=? AND s.start_ms<?)`;
 export const ACTIONABLE_COUNT_SQL='SELECT COUNT(*) AS n '+ACTIONABLE_FROM;
 export const ACTIONABLE_PAGE_SQL='SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json '+ACTIONABLE_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?';
+// Current-window unresolved rows that SQL would treat as actionable except a future retry_at with
+// deferReason=wall_budget. Completing a generation requires this count to be zero, not only the eligible-now COUNT.
+// Ordinary uncertain-match retry_at does not keep a generation open.
+const WAITING_RETRY_FROM=`FROM discovery_observation o
+JOIN discovery_decision d ON d.observation_key=o.observation_key
+WHERE o.source_key='active' AND o.residence='active'
+ AND o.seen_in_latest=1
+ AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND s.start_ms>=? AND s.start_ms<?)
+ AND IFNULL(d.status,'')<>'verified'
+ AND ${ACTIONABLE_SAME}
+ AND IFNULL(d.status,'')<>'excluded_nonfilm'
+ AND (d.terminal_reason IS NULL OR d.terminal_reason='')
+ AND d.retry_at IS NOT NULL AND d.retry_at>?
+ AND json_extract(d.payload_json,'$.deferReason')='wall_budget'`;
+export const WAITING_RETRY_SQL='SELECT COUNT(*) AS n, MIN(d.retry_at) AS next_retry '+WAITING_RETRY_FROM;
 export const TOUCH_PAGE_SQL='SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json '+TOUCH_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?';
 export const SELECT_PAGE=80;
 export const SELECT_QUERIES=6;
@@ -838,6 +919,10 @@ export async function selectActionableObservations(env,options={}){
  if(options.beforeQuery)await options.beforeQuery({query:0,after:startAfter,phase:'count'});
  const counted=await one(db,ACTIONABLE_COUNT_SQL,windowParams);
  const remaining=Number(counted?.n||0);
+ if(options.beforeQuery)await options.beforeQuery({query:0,after:startAfter,phase:'waiting_retry'});
+ const waitingRow=await one(db,WAITING_RETRY_SQL,windowParams);
+ const waitingRetry=Number(waitingRow?.n||0);
+ const nextRetryAt=typeof waitingRow?.next_retry==='string'&&waitingRow.next_retry?waitingRow.next_retry:null;
  const items=[];
  let cursor=startAfter,wrapped=false,queries=0,complete=false;
  while(items.length<pageSize&&queries<maxQueries){
@@ -885,7 +970,7 @@ export async function selectActionableObservations(env,options={}){
  }
  const closed=await readAuthority(env);
  if(closed.held||!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
- return {programmeRunId:opened.programmeRunId,items,touches,after:cursor,touchAfter:touchCursor,wrapped,touchWrapped,queries,remaining,complete};
+ return {programmeRunId:opened.programmeRunId,items,touches,after:cursor,touchAfter:touchCursor,wrapped,touchWrapped,queries,remaining,waitingRetry,nextRetryAt,complete};
 }
 
 // ADR 0092. The ledger seal is a resumable job instead of one request. `discovery_seal` (schema 12) holds its identity
@@ -1215,7 +1300,7 @@ export async function assignObservationSlots(env,spec,context={}){
  let decision=null;
  try{decision=row?JSON.parse(row.payload_json):null;}catch{decision=null;}
  if(!row||!decision||row.status!=='verified'||row.media_kind!=='movie'||!row.film_id||!row.tmdb_id){outcomes.decision_changed++;return stop('decision_changed');}
- const observation=await one(db,"SELECT confirmed_tmdb_id, programme_run_id, seen_in_latest FROM discovery_observation WHERE source_key='active' AND residence='active' AND observation_key=?",[key]);
+ const observation=await one(db,"SELECT confirmed_tmdb_id, payload_json, programme_run_id, seen_in_latest FROM discovery_observation WHERE source_key='active' AND residence='active' AND observation_key=?",[key]);
  if(!observation||observation.seen_in_latest!==1){outcomes.observation_inactive++;return stop('observation_inactive');}
  if(observation.programme_run_id!==run){outcomes.stale_run++;return stop('stale_run');}
  const film=String(row.film_id),tmdb=String(row.tmdb_id);
@@ -1223,12 +1308,14 @@ export async function assignObservationSlots(env,spec,context={}){
  let filmPresent;
  if(member)filmPresent=(await sealedMemberTmdb(db,run)).get(film)===tmdb;
  else filmPresent=!!await one(db,"SELECT 1 AS present FROM discovery_admission WHERE film_id=? AND media_kind='movie' AND tmdb_id=? AND state='current' AND ?=('tmdb_'||?)",[film,tmdb,film,tmdb]);
+ let payload=null;try{payload=observation.payload_json?JSON.parse(observation.payload_json):null;}catch{payload=null;}
+ const confirmation=payload&&Array.isArray(payload.confirmedSlots)?payload:{confirmedTmdbId:observation.confirmed_tmdb_id};
  const slots=(await many(db,"SELECT channel_id, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key=? ORDER BY ordinal",[key])).map(item=>({channelId:item.channel_id,startMs:item.start_ms,endMs:item.end_ms}));
  const held=new Map((await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=?",[run,key])).map(item=>[item.channel_id+':'+item.start_ms,item.film_id]));
  const pending=[];
  for(const slot of slots){
   if(held.get(slot.channelId+':'+slot.startMs)===film){outcomes.present++;continue;}
-  if(!slotEligibility(decision,{start:slot.startMs,end:slot.endMs},observation.confirmed_tmdb_id).eligible){outcomes.evidence_drift++;result.skipped.push({channelId:slot.channelId,startMs:slot.startMs,reason:'evidence_drift',minutes:slotMinutes(slot.startMs,slot.endMs)});continue;}
+  if(!slotEligibility(decision,{start:slot.startMs,end:slot.endMs},slotScanConfirmation(confirmation,{channelId:slot.channelId,start:slot.startMs})).eligible){outcomes.evidence_drift++;result.skipped.push({channelId:slot.channelId,startMs:slot.startMs,reason:'evidence_drift',minutes:slotMinutes(slot.startMs,slot.endMs)});continue;}
   pending.push(slot);
  }
  if(!pending.length)return result;
@@ -1805,6 +1892,84 @@ export async function ownerDecision(env,spec){
  catch{return {outcome:'unknown'};}
  const after=await readIntent(env,spec.idempotencyKey);
  return {outcome:'written',receipt:after.intent?.receipt||spec.receipt||null};
+}
+async function policyExcludePlan(env,filmId){
+ const gate=await readAuthority(env);
+ if(!gate.ready)return {handled:false};
+ if(gate.held)return {handled:true,available:false,reason:'held',gate};
+ const id=typeof filmId==='string'?filmId:'';
+ if(!POLICY_FILM_ID.test(id))return {handled:true,available:false,reason:'invalid',gate};
+ const tmdbId=id.slice(5);
+ const row=await one(database(env),'SELECT film_id, tmdb_id, media_kind, state, payload_json FROM discovery_admission WHERE film_id=?',[id]);
+ if(!row)return {handled:true,available:false,reason:'missing',filmId:id,gate};
+ if(row.media_kind!=='movie'||String(row.tmdb_id)!==tmdbId)return {handled:true,available:false,reason:'not_movie_admission',filmId:id,gate};
+ let film=null;try{film=row.payload_json?JSON.parse(row.payload_json):null;}catch{return {handled:true,available:false,reason:'malformed',filmId:id,gate};}
+ const policy=film?catalogPolicyKind(film,null):null;
+ const decisions=await many(database(env),POLICY_DECISIONS_SQL,[tmdbId]);
+ const linked=[];
+ for(const decision of decisions){
+  const other=decision.film_id&&decision.film_id!==id?decision.film_id:null;
+  if(!other)continue;
+  const admission=await one(database(env),"SELECT film_id, tmdb_id, state FROM discovery_admission WHERE film_id=?",[other]);
+  if(admission&&admission.state==='current'&&String(admission.tmdb_id)!==tmdbId)linked.push(other);
+ }
+ const statements=policyExcludeStatementCount(decisions.length);
+ let reason='eligible';
+ if(row.state!=='current')reason='already_applied';
+ else if(policy!=='documentary'&&policy!=='concert'&&policy!=='ambiguous')reason='not_policy_excluded';
+ else if(linked.length)reason='linked_admission';
+ else if(statements>STATEMENT_CAP||decisions.length>POLICY_EXCLUDE_CAP)reason='bounded';
+ return {
+  handled:true,available:reason==='eligible',reason,gate,film,row,policy,tmdbId,filmId:id,
+  decisions,linked,statements,cap:POLICY_EXCLUDE_CAP,
+  observations:decisions.map(decision=>({key:decision.observation_key,status:decision.status,filmId:decision.film_id,decisionHash:decision.decision_hash})),
+ };
+}
+export async function readPolicyExcludePreview(env,filmId){
+ const plan=await policyExcludePlan(env,filmId);
+ if(!plan.handled)return {handled:false};
+ return {
+  handled:true,available:plan.available,reason:plan.reason,filmId:plan.filmId,tmdbId:plan.tmdbId,state:plan.row?.state??null,
+  policy:plan.policy??null,generation:plan.gate?.generation??null,programmeRunId:plan.gate?.programmeRunId??null,
+  title:typeof plan.film?.title==='string'?plan.film.title:null,year:plan.film?.year??null,genres:Array.isArray(plan.film?.genres)?plan.film.genres:[],
+  observations:plan.observations||[],linkedAdmissions:plan.linked||[],statementCount:plan.statements??null,cap:plan.cap??POLICY_EXCLUDE_CAP,
+ };
+}
+export async function ownerPolicyExclude(env,spec={}){
+ const gate=await readAuthority(env);
+ assertOpen(gate);
+ const lease=spec.lease||leaseOf(env);
+ if(!lease)return {outcome:'lease'};
+ const plan=await policyExcludePlan(env,spec.filmId);
+ if(!plan.handled)return {outcome:'missing'};
+ if(plan.reason==='missing')return {outcome:'missing'};
+ if(plan.reason==='invalid')return {outcome:'invalid'};
+ if(plan.reason==='malformed')return {outcome:'malformed'};
+ if(plan.reason==='already_applied')return {outcome:'already_applied',filmId:plan.filmId,policy:plan.policy||null};
+ if(!plan.available)return {outcome:plan.reason==='bounded'?'bounded':'not_eligible',reason:plan.reason};
+ if(spec.policy&&spec.policy!==plan.policy)return {outcome:'conflict'};
+ const filmId=plan.filmId,tmdbId=plan.tmdbId,decisions=plan.decisions;
+ const prepared=[];
+ for(const decision of decisions){
+  let previous;try{previous=JSON.parse(decision.payload_json);}catch{return {outcome:'malformed'};}
+  const next=rejectedPolicyDecision(previous,tmdbId);
+  prepared.push({key:decision.observation_key,previous,next,expectedHash:decision.decision_hash,nextHash:await decisionHash(next)});
+ }
+ const at=new Date().toISOString();
+ const statements=[fence(gate,lease),[FENCE_SQL,[]]];
+ for(const item of prepared){
+  statements.push(['INSERT INTO discovery_decision_history (observation_key, revision, generation, written_at, writer, payload_json) SELECT ?, COALESCE((SELECT MAX(revision)+1 FROM discovery_decision_history WHERE observation_key=?),1), ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',[item.key,item.key,gate.generation,at,spec.writer||'catalog_policy_exclude',JSON.stringify(item.next),item.key,item.expectedHash]]);
+  statements.push(['UPDATE discovery_decision SET programme_run_id=?, generation=?, status=?, attempts=?, evidence_key=?, terminal_reason=?, retry_at=?, tmdb_id=?, media_kind=?, film_id=?, decision_hash=?, payload_json=? WHERE observation_key=? AND decision_hash=?',[gate.programmeRunId,gate.generation+1,item.next.status??null,Number.isInteger(item.next.attempts)?item.next.attempts:null,item.next.evidenceKey??null,item.next.terminalReason??null,item.next.retryAt??null,item.next.tmdbId==null?null:String(item.next.tmdbId),item.next.tmdbId==null?null:mediaKind(item.next),item.next.filmId??null,item.nextHash,JSON.stringify(item.next),item.key,item.expectedHash]]);
+  statements.push(...assignedRowsDelete(item.key,item.previous,item.next));
+ }
+ statements.push(['UPDATE discovery_admission SET state=\'superseded\', generation=? WHERE film_id=? AND state=\'current\'',[gate.generation+1,filmId]]);
+ statements.push([FENCE_SQL,[]]);
+ if(statements.length>STATEMENT_CAP)return {outcome:'bounded'};
+ try{await commit(database(env),statements);}
+ catch{return {outcome:'unknown'};}
+ const after=await one(database(env),'SELECT state FROM discovery_admission WHERE film_id=?',[filmId]);
+ if(after?.state!=='superseded')return {outcome:'unknown'};
+ return {outcome:'written',filmId,policy:plan.policy,observations:prepared.map(item=>item.key),receipt:spec.receipt||{state:'applied',capability:'catalog_policy_exclude',filmId,policy:plan.policy,observations:prepared.map(item=>item.key)}};
 }
 async function commitOwnerWrite(env,spec,previous){
  const gate=await readAuthority(env);

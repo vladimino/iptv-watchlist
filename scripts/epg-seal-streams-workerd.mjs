@@ -75,7 +75,7 @@ async function scenario(name,route,seed){
  const script=path.join(work,'harness.mjs');fs.writeFileSync(script,harnessScript());
  const mf=new Miniflare(Object.assign(convertV4MiniflareOptions({
   modules:true,scriptPath:script,modulesRoot:work,compatibilityDate:'2026-10-18',compatibilityFlags:['nodejs_compat'],
-  d1Databases:{DB:'db'},r2Buckets:{BUCKET:'bucket'},bindings:{DISCOVERY_LEDGER_MODE:'bounded'},
+  d1Databases:{DB:'db'},r2Buckets:{BUCKET:'bucket'},
  }),{resourcePersistencePath:path.join(work,'persist')}));
  try{
   const bucket=await mf.getR2Bucket('BUCKET');

@@ -1,5 +1,7 @@
 # Historical export from the old Sites-managed R2
 
+> **The Worker built from this repository no longer carries the export route** described below: the route required the old Site's origin and answered only 404 on the Worker host, so it was removed from the bundle and kept as a test double for the exporter tests (`tests/support/legacy-migration-export-route.js`).
+
 > **Archived historical procedure, not a current production runbook.** Any live invocation, Sites publication, R2 import or Task change requires specific owner approval.
 
 The 19 October 2026 export is the historical source of the Cloudflare production store. Cloudflare R2 bucket `iptv` is now authoritative. The legacy Site remains a temporary reserve. Do not run sync, prediction, or other writers there, and do not import this snapshot over production R2 again. The completed restore is recorded in [docs/r2-import.md](../legacy-r2/r2-import.md).

@@ -1,58 +1,68 @@
-# Film/Person `open` handoff, `held` drill and forward fix (design only)
+# Film/Person `open` handoff operator
 
-**This runbook authorizes nothing. Nothing in it has been executed. It is a DESIGN of one concrete activation plan; the plan must be separately approved by the owner (L3 staged plan) before anything runs, and no approval is implied by this page, by a merge, or by a green CI.** Decisions: [ADR 0117](../adr/0117-film-person-d1-handoff-owner-decisions.md) (and [ADR 0099](../adr/0099-canonical-film-person-d1-authority.md), [ADR 0103](../adr/0103-projector-exclusive-window.md)). Card: [AIR-374](https://trello.com/c/ha7ais3w).
+**Live production (16 Nov 2026 UTC):** `film_person_authority` is `mode=d1`, `cutover=open`, generation **2** after an owner L3 MCP `apply` ([evidence](../evidence/d1-migration/air-499-film-person-open-2026-11-16.md)). Do **not** repeat `mode: apply` with `expectedGeneration: 1`. Merging code, CI, or a `dry_run` is still not a GO for any later `held` recovery or reverse move. Decisions: [ADR 0117](../adr/0117-film-person-d1-handoff-owner-decisions.md), [ADR 0099](../adr/0099-canonical-film-person-d1-authority.md), [ADR 0103](../adr/0103-projector-exclusive-window.md). Card: [AIR-499](https://trello.com/c/8ifHCioP); parent design [AIR-374](https://trello.com/c/ha7ais3w).
 
 Counts and digests only in any evidence; no ids, titles, payloads or credentials.
 
-## Preflight checklist (read-only; each item is evidence, not permission)
+## What exists
 
-1. Marker is `prepared`/`open` at generation G; fence row ok; baseline `verified` with the recorded reference ([AIR-373 evidence](../evidence/d1-migration/air-373-baseline-prepared-2026-11-11.md)).
-2. Schema version at least 16; migrations 0013 to 0016 triggers present.
-3. The projector fence of [ADR 0116](../adr/0116-projector-marker-and-generation-fence-on-every-batch.md) / PR #524 (marker and generation in every real projector batch, unconditional) is implemented; confirm it is the deployed code on the exact commit before activation.
-4. The bounded loader for the three empty classes (1,110 rows) has run with its own GO ([loader runbook](film-person-prepared-loader.md)); receipts and readback match.
-5. Every canonical producer is wired (P2/P3) but dormant at `prepared`; readers fail closed (P4); `handoffReadiness` is computed and ready (P6; today `GAPS` makes it never ready).
-6. The frozen-mirror classification (ADR 0117 decision 3) is recorded object by object.
-7. Receipts for cross-domain operations exist (ADR 0117 decision 4, [ADR 0119](../adr/0119-durable-canonical-write-receipts.md)): written atomically with each mutation, the activation baseline recorded and verified, `readUnreceipted` clean, and no pending, failed, unknown or abandoned receipt left (`listAttention` empty).
-8. No live projector lease; `projector_window` idle; no EPG, Ratings or Discovery run in flight; the quiet window is agreed in Madrid time.
-9. The `held` drill below passed on a safe copy.
+- `src/film-person-open-handoff.js` (bundled for MCP only): `activationReadiness`, `activateOpen`, `flipOpen`, `handleOpenHandoffTool`.
+- MCP tool `film_person_open_handoff` on `/mcp` (Cloudflare Access JWT, owner-only). `mode: dry_run` writes nothing. `mode: apply` with `confirmGo: true` uses Worker `env.DB.batch()`. No public HTTP write, cron or Scheduled Task calls it.
+- `scripts/film-person-open-handoff.mjs`: REST dry-run (SELECTs). `--apply` is refused (`transport_not_worker_batch`).
+- Offline coverage: `tests/film-person-open-handoff.mjs`.
 
-## The `held` drill on a SAFE COPY (procedure and acceptance only)
+`handoffReadiness` in `src/canonical-producers.js` is **not** the activation gate and is not rewritten. `activationReadiness` is the operational gate **and** it promotes every `activationAudit()` residual to a blocker. Residuals are derived live: freeze-unmoved catalog consumers (ADR 0117 decision 4), unwired natural producers, and a `filmFactsOf` probe that requires `film_metadata` / `film_dimension` / `film_sync_state`. Five ADR 0117 exceptions (including the metadata-cache mirror) stay exceptions and are not residuals. **`--apply` STOPs while any residual remains.** The Producer Workflow `filmFactsOf` plans `film_metadata` and `film_sync_state` from real sealed clocks (`metadataAt` / synopsis / people clocks) and copies `film_dimension` only when the sealed Film already carries a lifecycle row with provenance; a lone `updatedAt` invents nothing. `epg_commit` is wired to the existing `film_facts` / `person_mutation` / `person_state` / `film_credits` operations. `metadataSync` / `epgSync` write frozen `titles.json` / `people.json` only through `saveJSON` → `putStoredJson`, which re-reads `canonicalMirrorsWritable` immediately before `BUCKET.put` (after `epgStepGuard` and any routing await). An exclusive `projector_window` in `held` also refuses those puts; a timeout or other failed window read is STOP (only a genuine missing `projector_window` table is treated as no window). A prepared→open flip during the guard cannot land a canonical R2 put. `GET /api/catalog/film/<id>`, `GET /api/catalog/available` and `ratingsFilmLabels` at `open` read bounded D1 facts (`catalogMetadataFromD1`: poster, year, Letterboxd URL, localization title, trusted TMDB claim) and never frozen `metadata.json` / `titles.json`; `legacy`/`r2`/`prepared` keep R2; `held` / unreadable / generation move are typed STOP. Footer `metadata.json` and `GET /api/enrichment/diagnostics/export?group=global` follow the same gate (bounded D1 of named ids at `open`, no frozen-key GET). Freeze residuals are 0. `metadata_sync` is wired (`src/canonical-metadata-sync-producer.js`, call site `metadataSync`: typed identity claims, durable `metadataSyncIntent` only for the unsettled current batch, cursor held until `metadataSyncSettled`). `rated_admission_retention` is wired (`src/canonical-rated-admission-producer.js`, call sites `commitVerified` / `commitBaselineChunk` after a successful link / `persistScan`). `persistScan` captures pre-scan watchlist membership only while the Film/Person writer route is `open`; at `prepared` it is the existing R2 facts scan with no cursor. At `open` it applies the facts scan once, then walks listed+departed Films with `UNIT_CAP` and a durable cursor. An unfinished successful slice answers seal `continue` (not an error). After the 16 Nov 2026 UTC apply, a further `dry_run` against generation 1 is expected to STOP (`marker_not_prepared`). This page authorizes no second apply and no `held` recovery.
 
-A safe copy is a local sqlite file built from the repository migrations plus a bounded, count-only copy; it is never production D1 and never a Cloudflare database. The drill is not run by this page.
+The flip is one guarded `UPDATE` plus readback. SQL asserts schema ≥ 23, Discovery `d1`/`open`, verified `film_person_baseline.reference`, and this owner's unexpired window and leases against the **database clock**. Exclusive ownership is re-checked before and after `recordBaseline`.
 
-Procedure: (a) put the copy at `prepared`, run the handoff batch to `open`; (b) write at least one D1-only canonical change through a fenced writer; (c) move `open` to `held`; (d) confirm readers answer the fail-closed error and writers refuse; (e) apply the forward fix and move `held` to `open`; (f) readback.
+## Dry-run (read-only)
 
-Acceptance criteria: generation rises by exactly one per move; every writer attempt at `held` is refused with no row changed; no reader names R2 at `held`; the D1-only change from (b) survives unchanged; after the forward fix the writer route is `canonical` and one fenced write succeeds; the migration trigger refuses `d1` to `r2`; a stale-generation batch fails whole.
+```
+node scripts/film-person-open-handoff.mjs --expected-generation=1 --expected-reference=<exact film_person_baseline.reference>
+```
 
-## Operator sequence at `open` (DESIGN: ONE owner-approved activation plan, nothing executes)
+Needs D1 operator credentials (`D1_BACKFILL_*`). It writes nothing. `outcome: dry_run` plus `readiness.blockers` is evidence, not permission. `expectedReference` is the exact verified `film_person_baseline.reference` (a path-prefixed digest such as `cutover_accepted/v2:` plus 64 hex, 84 characters). The MCP argument cap is 96; a 64-hex digest alone does not match the recorded reference.
 
-Once the owner approves this single plan, its bounded preflight reads, the lease and exclusive window, the final empty-plan projector pass, the readback, the catch-up and the release are executed within it and need no separate approval each. The **holdpoints** are explicit owner GOs: (H1) the P5 live load of the three empty classes, (H2) the batch `prepared` to `open`, (H3) any live write probe, (H4) `held`, recovery or rollback and any repair.
+## Apply (executed 16 Nov 2026 UTC; do not repeat)
 
-1. Bounded fenced preflight reads (counts only), including the read-only `SELECT COUNT(*), MAX(revision) FROM canonical_revision` before the receipt baseline is recorded ([ADR 0119](../adr/0119-durable-canonical-write-receipts.md)): expected 0, refuse above the 5,000 cap.
-2. Lease and exclusive window ([ADR 0103](../adr/0103-projector-exclusive-window.md)); stop if not granted. Producers are parked while it is held; cross-domain operations queue as durable receipts.
-3. Final projector pass with an empty plan; stop if any write is planned.
-4. **Holdpoint H2, the single batch:** assert lease held and unexpired, assert marker `prepared`/`open`/G, assert baseline `verified` with the expected reference, guarded `UPDATE` to `d1`/`open`/G+1, CAS fence. All or nothing.
-5. Readback: marker `d1`/`open`/G+1, writer route `canonical`, projector compare-only.
-6. Bounded catch-up canonical reconcile (not atomic with the marker); settle pending and unknown receipts by readback and same-request-id replay.
-7. Release the window and the lease.
-8. Mirror freeze and consumer verification (reads only).
+Production apply is the owner-only MCP tool on the deployed Worker (Access JWT). It never uses the REST `/query` adapter:
+
+```
+film_person_open_handoff
+  mode: apply
+  confirmGo: true
+  expectedGeneration: 1
+  expectedReference: <exact film_person_baseline.reference>
+```
+
+`confirmGo` false or omitted is refused. `expectedGeneration` and `expectedReference` are required. The production apply of 16 Nov 2026 UTC used generation 1 and the verified `cutover_accepted/v2:` reference ([evidence](../evidence/d1-migration/air-499-film-person-open-2026-11-16.md)). A second apply with those operands is refused. While `activationReadiness.ready` is false, apply STOPs at preflight and takes no lease. The REST CLI remains dry-run only:
+
+```
+node scripts/film-person-open-handoff.mjs --expected-generation=1 --expected-reference=<exact film_person_baseline.reference>
+```
+
+The sequence once those blockers are gone:
+
+1. `activationReadiness` (H1 class counts 708 / 398 / 4, marker `prepared` at the expected generation, verified baseline reference, idle leases and window, Discovery `d1`/`open`, schema ≥ 23, writer route `projector`).
+2. Take the enrichment projector lease as this owner only; STOP on a competing live lease.
+3. `requestProjectorWindow` then `grantProjectorWindow` (ADR 0103, 300 s cap); STOP if not granted; Discovery lease moves onto this owner.
+4. **One guarded UPDATE** plus readback, then grant/`recordBaseline` through **Worker `D1Database.batch()`** (Cloudflare-documented rollback). The REST `/query` CLI adapter is not that API: explicit `BEGIN`/`COMMIT` is unsupported on D1, and REST `{batch:[...]}` is not documented as transactional, so **`scripts/film-person-open-handoff.mjs --apply` STOPs with `transport_not_worker_batch`** and takes no lease. Dry-run stays REST SELECTs. The MCP `apply` path is the Worker binding. A lost read after a committed UPDATE is `unknown` (keep the exclusive window). Apply still requires the expected generation and baseline reference.
+5. Re-check exclusive ownership on the database clock, then `recordBaseline` / `verifyBaseline` / `readUnreceipted` / `listAttention`. If the window or lease has expired, STOP and keep them. No producer write is allowed between flip and seal (`receipt_baseline_missing`). A Worker tick cannot use the projector: `projectorExpectation` is null at `d1`.
+6. Readback: generation G+1, writer `canonical`, projector not writable, sealed/verified receipts, no unreceipted or attention rows.
+7. Release **only** this owner's lease and window.
 
 ## STOP conditions
 
-Any failed or ambiguous assertion; batch outcome unknown (read the marker, do not retry blindly); a live lease or window not ours; marker not `prepared`/`open`/G; baseline not `verified` or reference differs; a planned projector write in step 3; a pending receipt; a reader or consumer still on a frozen mirror; budget or time window exceeded. On STOP leave the marker where it is and hand the evidence to the owner.
+Any failed or unreadable preflight assertion; competing lease or window; stale generation or wrong baseline reference; flip batch that does not change the marker; **unknown** batch outcome (read the marker; if it is already `d1`/`open`/G+1 do **not** retry; if it is still `prepared`/G do not blind-retry either — hand the evidence to the owner); seal or readback failure (keep this owner's lease and window; do not release). On STOP leave the marker where it is.
+
+## `held` drill on a SAFE COPY
+
+Unchanged from the design: a local sqlite copy, never production D1. Procedure: (a) `activateOpen` on the copy; (b) one D1-only canonical change; (c) `open` to `held`; (d) readers and writers fail closed; (e) forward fix `held` to `open`; (f) readback. Not run by this page.
 
 ## After `open`
 
-Recovery is `open` to `held`, then the forward fix `held` to `open`; both are holdpoint H4 and need an explicit owner GO, and only with the drill passed. **Once D1-only writes exist, setting `r2` or a git revert is not a rollback.** The reverse reconciler is deferred.
-
-## Dated note, 11 Nov 2026 (P6, offline): `handoffReadiness` is computed
-
-Preflight item 5 is now checkable by code. `handoffReadiness` (read-only, unbundled) lists a blocker for each of: a former producer gap without a registered fenced writer and a differential entry; a named projector-versus-canonical difference not accepted by the owner (`exception_not_accepted:<id>`); the receipt blockers (ADR 0117 decision 5, [ADR 0119](../adr/0119-durable-canonical-write-receipts.md)): migration 0019 now exists in the repository but is NOT applied in production (schema 18), so `receipts_schema_missing` stays until the database says otherwise; after the flip `receipts_baseline_missing`, `receipts_baseline_unverified`, `unreceipted_changes` and `receipts_attention_open` are read from the receipt tables; `receipts_protocol_unregistered` and `producer_not_wired:<name>` (EPG commit, metadata sync, Discovery admission, rated admission/retention) are derived from the atomic operations registered in the receipts registry, of which there are none today; `reader_not_moved:<name>` derived from `CANONICAL_READER_REGISTRY` (P4b) for every `freeze` entry not yet moved; `empty_class_not_loaded:<class>:<found>/<expected>` (708, 398, 4; retention was 401 until the 12 Nov 2026 snapshot decision); a live projector lease; a window that is not idle; and, only on a read error, `schema_unreadable`, `projector_lease_unreadable`, `projector_window_unreadable`, `receipts_unreadable`, `empty_class_unreadable:<class>` (a read error is never read as free, idle or zero); and the marker and baseline. It does not replace the owner's holdpoints and authorizes nothing. With the repository at the time of this note it is NOT ready. The registries are data; the PRs that wire a producer register its atomic operations and the PRs that move a reader update their entry, and the owner accepting a named difference changes its `status` in its list. This note adds to the design above and rewrites no accepted text.
+Recovery is `open` to `held`, then the forward fix; both need an explicit owner GO. **Once D1-only writes exist, setting `r2` or a git revert is not a rollback.**
 
 ## Cross-links
 
-What the owner signs at each holdpoint, and which blockers precede it: [the holdpoint decision pack](film-person-holdpoint-decision-pack.md). The exact procedure for applying migration 0019: [the 0019 apply procedure](film-person-0019-apply.md). Both pages describe prepared future GOs (H0, H1) and blocked holdpoints (H2 to H4); the 12 Nov 2026 owner decisions are in [the decision pack](film-person-holdpoint-decision-pack.md#owner-decisions-of-12-november-2026).
-
-## Not covered
-
-The offline tool that emits the preflight reads, the batch and the readback is a follow-up (not shipped). Not verified: production state at the time of the GO.
+[Holdpoint decision pack](film-person-holdpoint-decision-pack.md). Migration 0023 is already applied ([procedure](film-person-0023-apply.md), [evidence](../evidence/d1-migration/air-499-0023-apply-2026-11-16.md)); that apply is not this flip.

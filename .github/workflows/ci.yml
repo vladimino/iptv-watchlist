@@ -40,6 +40,18 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      - name: Validate local hook syntax
+        run: |
+          bash -n .githooks/pre-commit .githooks/pre-push
+          node --check scripts/check-mutation-targets.mjs
+          node --check scripts/install-git-hooks.mjs
+
+      # AIR-514: exact-text source-anchor checks; no mutant workloads in required CI.
+      - name: Check mutation target anchors
+        run: |
+          node scripts/check-mutation-targets.mjs --self-test
+          npm run check:mutation-targets
+
       - name: Check documentation governance
         if: github.event_name == 'pull_request'
         run: node scripts/check-documentation-governance.mjs

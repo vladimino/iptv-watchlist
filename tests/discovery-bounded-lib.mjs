@@ -10,6 +10,7 @@ import * as Authority from '../src/discovery-authority.js';
 import {loadWorker} from '../scripts/discovery-ledger-offline.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {withLedgerMode} from './ledger-mode-fixture.mjs';
 
 export const context=loadWorker();
 context.DiscoveryAuthority=Authority;
@@ -74,7 +75,7 @@ export function world(){
  };
  return state;
 }
-export const envOf=(state,mode)=>({DB:d1Standin(state.file,{maxBinds:100}),BUCKET:state.bkt,discoveryLease:null,...(mode?{DISCOVERY_LEDGER_MODE:mode}:{})});
+export const envOf=(state,mode)=>withLedgerMode({DB:d1Standin(state.file,{maxBinds:100}),BUCKET:state.bkt,discoveryLease:null},mode);
 export async function takeLease(env,file){sql(file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1');const lease=await call('acquireDiscoveryLease')(env,'epg');assert.ok(lease,'a lease');return lease;}
 
 // The first generation is installed the way a cutover leaves it: one full ledger in the R2 generation copy and the same rows in D1.
@@ -89,7 +90,7 @@ export async function bootstrap(state,day,latest=scan(day)){
  await Authority.releaseLease(env,taken.lease);
  state.published={programmeRunId:id,fence:'g'+(++state.generation)};
 }
-// One EPG commit and its ledger seal, by the Worker's own functions. `mode` is the flag (undefined: unset).
+// One EPG commit and its ledger seal, by the Worker's own functions. `mode` is the isolated fixture mode (undefined: production bounded).
 export async function commit(state,day,mode,{latest=scan(day),sealSteps=Infinity,expectThrow=false}={}){
  const id=runId(day),at=new Date(BASE+day*DAY).toISOString();
  const env=(state.envFactory||envOf)(state,mode);

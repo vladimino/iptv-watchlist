@@ -327,6 +327,12 @@ async function runSlices(env,ctx){
    if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending',detail:sweep.reason,supersededEarlier:sweep.superseded,leftPlan:sweep.leftPlan};
    if(expired())return {...base(),state:'partial',reason:'deadline',supersededEarlier:sweep.superseded};
    const open=await liveMembershipCount(env);
+   if(typeof params.beforePassComplete==='function'){
+    let gate;
+    try{gate=await params.beforePassComplete({run,openAtCompletion:open});}
+    catch(error){return await stop(codeOf(error)||'receipt_state_conflict');}
+    if(gate&&gate.stop===true)return await stop(gate.code||'receipt_state_conflict');
+   }
    const answer=await commitPassComplete(env,{run,openAtCompletion:open,at:now()});
    if(answer.state==='skipped')throw fail('film_person_not_open');
    run=answer.run;
