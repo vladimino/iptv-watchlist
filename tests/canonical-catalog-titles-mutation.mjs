@@ -8,20 +8,20 @@ import os from 'node:os';
 import path from 'node:path';
 
 const READER=[
- ['the helper needs an open gate',"if(gate?.mode!=='d1')throw failed('canonical_read_not_authoritative');",''],
- ['the id list is chunked',"at+=TITLE_READ_CHUNK){","at+=TITLE_READ_CHUNK*100){"],
- ['a chunk asks for its own size of rows',"[JSON.stringify(chunk),chunk.length]","[JSON.stringify(chunk),1]"],
+ ['the helper needs an open gate',"export async function catalogTitlesFromD1(env,films,gate){\n if(gate?.mode!=='d1')throw failed('canonical_read_not_authoritative');\n","export async function catalogTitlesFromD1(env,films,gate){\n"],
+ ['the id list is chunked',"for(let at=0;at<keys.length;at+=TITLE_READ_CHUNK){\n   const chunk=keys.slice(at,at+TITLE_READ_CHUNK);\n   try{rows.push(...await many(db,TITLE_SQL,","for(let at=0;at<keys.length;at+=TITLE_READ_CHUNK*100){\n   const chunk=keys.slice(at,at+TITLE_READ_CHUNK);\n   try{rows.push(...await many(db,TITLE_SQL,"],
+ ['a chunk asks for its own size of rows',"await many(db,TITLE_SQL,[JSON.stringify(chunk),chunk.length])","await many(db,TITLE_SQL,[JSON.stringify(chunk),1])"],
  ['the film count is capped',"if(byId.size>TITLE_READ_MAX_FILMS)throw failed('canonical_read_unavailable');",''],
  ['the tmdb spelling of an id is asked for',"if(tmdb!==own&&!wanted.has(tmdb))wanted.set(tmdb,id);","void tmdb;"],
  ['the id own spelling wins',"(out[id]&&row.film_id!=='film:'+id)","false"],
- ['only the localization dimension',"WHERE d.dimension='localization' AND d.status","WHERE d.status"],
+ ['only the localization dimension',"FROM film_dimension d WHERE d.dimension='localization' AND d.status","FROM film_dimension d WHERE d.status"],
  ['only provisional rows',"AND d.status='provisional'","AND d.status IN ('provisional','reviewed')"],
  ['the tmdb claim is trusted',"AND e.trusted=1 AND e.conflicting=0 ORDER","AND e.conflicting=0 ORDER"],
  ['the tmdb claim is not conflicting',"AND e.trusted=1 AND e.conflicting=0 ORDER","AND e.trusted=1 ORDER"],
  ['the tmdb id is typed like the document',"typeof byId.get(id).tmdbId==='number'?Number(row.tmdb):String(row.tmdb)","String(row.tmdb)"],
- ['the marker is re-read after the read',"await catalogReaderStill(env,gate);\n return out;","return out;"],
+ ['the marker is re-read after the read',"out[id]={title:row.value,tmdbId:tmdb,status:'provisional',sources};\n  }\n }\n await catalogReaderStill(env,gate);\n return out;","out[id]={title:row.value,tmdbId:tmdb,status:'provisional',sources};\n  }\n }\n return out;"],
  ['the re-read compares the generation',"||again.generation!==gate.generation)throw failed('film_person_generation_moved');\n}\n\n// films:","){throw failed('film_person_generation_moved');}\n}\n\n// films:"],
- ['a failing read is typed and closed',"catch(error){throw failed('canonical_read_unavailable',error);}\n","catch(error){throw error;}\n"],
+ ['a failing read is typed and closed',"try{rows.push(...await many(db,TITLE_SQL,[JSON.stringify(chunk),chunk.length]));}\n   catch(error){throw failed('canonical_read_unavailable',error);}\n","try{rows.push(...await many(db,TITLE_SQL,[JSON.stringify(chunk),chunk.length]));}\n   catch(error){throw error;}\n"],
  ['an unreadable provenance is closed',"catch{throw failed('canonical_read_unavailable');}\n   const tmdb","catch{}\n   const tmdb"],
 ];
 const WORKER=[
