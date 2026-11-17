@@ -96,6 +96,10 @@ What a domain does when its marker is not open is per domain, not universal. Can
 
 The baseline that the move to `prepared` needs can be recorded on one of three explicit paths (strict, `cutover_minimum` v1, `cutover_accepted` v2; v1 is superseded by the [11 Nov 2026 amendment](../adr/0110-film-person-operator-copy-and-accepted-discrepancies.md#amendment-2026-11-11)). The third ([ADR 0110](../adr/0110-film-person-operator-copy-and-accepted-discrepancies.md), Accepted; [runbook](../runbooks/film-person-baseline.md#connector-path-offline-code-nothing-executed)) accepts unexplained missing or extra rows up to the exact counts measured on 11 Nov 2026 (total 1,605) and a D1 side that is an operator copy made through the Cloudflare API connector. It is offline tooling outside the Worker bundle: it adds no store, writer, marker or schedule, and the diagrams on this page are unchanged. At `prepared` R2 remains the authority and the projector the only writer.
 
+## Diary identity pending document (AIR-489)
+
+`letterboxd/facts/scans/diary-identity.json` holds the bounded pending state of unresolved Diary ids. It sits inside the existing D1-owned ratings prefix `letterboxd/facts/scans/`, so no key set, migration or authority changes. Diagrams unchanged.
+
 ## Projector window (schema 18)
 
 Migration `0018` ([migration index](../../migrations/README.md)) adds `projector_window`, one seeded `idle` row (`state` `idle`, `requested` or `held`, an `owner`, and one absolute `expires_at`). It follows a complete version 17, writes nothing else, and was applied to production on 2026-11-08 ([apply record](../evidence/d1-migration/air-383-0018-apply-2026-11-08.md)); the code treats an absent table as no window ([ADR 0103](../adr/0103-projector-exclusive-window.md)), and the flag that requests a window is off. The row is a mutual-exclusion flag with an expiry and is never compared to data. The projector writes it (request, grant and release) and moves the existing `discovery_lease` row with it in one batch; no Film, Person or Discovery document changes owner. Applying it and switching `D1_ENRICHMENT_WINDOW` are separate owner decisions.
