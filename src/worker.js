@@ -423,7 +423,8 @@ function catalogFilmState(records,tmdbId){
  if(verified.length&&verified.every(record=>record.state==='superseded'))return {state:'retired'};
  return {state:'conflict'};
 }
-// AIR-409: a canonical Film admitted by a verified rated archive (letterboxd/admissions/verified-films.json) that Discovery never admitted.
+// AIR-409: a canonical Film admitted by a verified rated archive (letterboxd/admissions/verified-films.json) that Discovery never admitted. At `open` (AIR-475) the fallback is
+// the D1 canonical Film itself (catalogCanonicalFilmFromD1), whatever admissions it has; the R2 receipt below is only the pre-open reader.
 // Read only, only when Discovery says "absent" and only while the Film/Person authority names R2 (legacy, r2, prepared; ADR 0099): `held`, `open` and an
 // unreadable marker fail closed and never fall back to R2. The receipt is the R2 identity decision, so it is bounded by the owner's R2 retirements
 // object and by D1 contradictions (a conflicting or second trusted TMDB id, a redirected Film); a Film whose projection is still pending is found. The entry must verify exactly as the rated-archive admission rules require (key tmdb_<n>, tmdb equal to the key,
@@ -444,7 +445,7 @@ async function catalogArchiveFallback(env,tmdbId){
  const gate=await FilmPersonAuthority.readAuthority(env);
  // AIR-374 P4 (owner decision 4): at `open` the R2 receipt and the R2 retirements object are frozen compatibility copies and are never read; the verified admission,
  // the identity claims and the retirement ledger come from D1. held and an unreadable marker fail closed (503) and never reach R2.
- if(gate.state==='open')return CanonicalCatalogReader.catalogAdmittedFilmFromD1(env,tmdbId);
+ if(gate.state==='open')return CanonicalCatalogReader.catalogCanonicalFilmFromD1(env,tmdbId);
  if(!gate.r2Allowed){const error=new Error(gate.state==='held'?'film_person_held':'film_person_not_open_read');error.code=error.message;throw error;}
  const result=await catalogArchiveFallbackR2(env,tmdbId,gate);
  // The marker is read again after the R2 and D1 reads: an answer read under one state and generation is never returned after the marker moved (r2 to prepared, prepared to open, held).
@@ -482,21 +483,35 @@ async function catalogArchiveFallbackR2(env,tmdbId,gate){
  }
  return {state:'found',film};
 }
+// AIR-475 review: Discovery is an independent domain. These are the ways its reader can refuse; while the Film/Person marker is open a refusal never hides a canonical Film.
+const CATALOG_DISCOVERY_FAULTS=['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative'];
 async function catalogFilmRoute(env,tmdbId){
  if(!CATALOG_FILM_TMDB.test(tmdbId))return json({status:'invalid',error:'A TMDB movie id is a positive integer'},400);
  const now=Date.now();
- let found;
+ let found,discoveryFault=null;
  try{
-  const admission=typeof DiscoveryAuthority!=='undefined'?await DiscoveryAuthority.readFilmAdmission(env,tmdbId):{handled:false};
-  if(admission.handled)found=catalogFilmState(admission.records,tmdbId);
-  else{
-   // Discovery still on R2: the one shared catalog object, filtered by identity (no D1 here, nothing is superseded).
-   const shared=await loadJSON(env,'epg/discovered-films.json');
-   // A missing or malformed catalog object is a source that cannot be read, not proof that the film was never admitted.
-   if(!shared||typeof shared!=='object'||Array.isArray(shared)){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
-   found=catalogFilmState(Object.entries(shared||{}).filter(([,film])=>film&&String(film.tmdbId)===tmdbId).map(([filmId,film])=>({filmId,state:'current',canonicalIdentity:film.canonicalIdentity,tmdbId:String(film.tmdbId),film})),tmdbId);
+  try{
+   const admission=typeof DiscoveryAuthority!=='undefined'?await DiscoveryAuthority.readFilmAdmission(env,tmdbId):{handled:false};
+   if(admission.handled)found=catalogFilmState(admission.records,tmdbId);
+   else{
+    // Discovery still on R2: the one shared catalog object, filtered by identity (no D1 here, nothing is superseded).
+    const shared=await loadJSON(env,'epg/discovered-films.json');
+    // A missing or malformed catalog object is a source that cannot be read, not proof that the film was never admitted.
+    if(!shared||typeof shared!=='object'||Array.isArray(shared)){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
+    found=catalogFilmState(Object.entries(shared||{}).filter(([,film])=>film&&String(film.tmdbId)===tmdbId).map(([filmId,film])=>({filmId,state:'current',canonicalIdentity:film.canonicalIdentity,tmdbId:String(film.tmdbId),film})),tmdbId);
+   }
+  }catch(error){
+   if(!CATALOG_DISCOVERY_FAULTS.includes(error?.code))throw error;
+   discoveryFault=error;
   }
- if(found.state==='absent')found=await catalogArchiveFallback(env,tmdbId);
+  if(discoveryFault){
+   // Discovery cannot answer (held, loading, unreadable). Only an open Film/Person marker lets the canonical Film answer for it; anything else keeps the Discovery refusal.
+   if((await FilmPersonAuthority.readAuthority(env)).state!=='open')throw discoveryFault;
+   found=await catalogArchiveFallback(env,tmdbId);
+   // A canonical absence says nothing about a catalog that could not be read: the Discovery refusal stands.
+   if(found.state==='absent')throw discoveryFault;
+  }
+  else if(found.state==='absent')found=await catalogArchiveFallback(env,tmdbId);
  }catch(error){
   const code=error?.code||'';
   if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read','film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative'].includes(code))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);

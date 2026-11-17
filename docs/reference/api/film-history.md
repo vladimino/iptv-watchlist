@@ -1,6 +1,6 @@
 # Film history — read-only per-film API
 
-`GET /api/enrichment/history?filmId=<id>[&limit=<n>][&cursor=<cursor>]` returns one film's predictions, rating events and Letterboxd Diary viewings as one chronological list. It is owner-only like every Worker path (Cloudflare Access protects the whole Worker; the route adds no bypass and is not exposed through MCP). It only reads R2 and never writes, calls a model, requests Letterboxd, refreshes ratings, takes a lease or schedules work; `tests/get-side-effects.mjs` and `tests/film-history.mjs` check that.
+`GET /api/enrichment/history?filmId=<id>[&limit=<n>][&cursor=<cursor>]` returns one film's predictions, rating events and Letterboxd Diary viewings as one chronological list. It is owner-only like every Worker path (Cloudflare Access protects the whole Worker; the route adds no bypass and is not exposed through MCP). It reads R2 and D1 (the sources are listed below) and never writes, calls a model, requests Letterboxd, refreshes ratings, takes a lease or schedules work; `tests/get-side-effects.mjs` and `tests/film-history.mjs` check that.
 
 Implementation: `filmHistoryRoute` in `src/enrichment.js` (reads), `buildFilmHistory` and `diaryLink` in `src/domain/film-history.js` (linking, ordering and shape, pure). The [prediction quality API](prediction-quality.md) evaluates these events.
 
@@ -30,7 +30,7 @@ An invalid id, an error status or an unreadable answer stays inside the section;
 
 | Source | Key | Used for |
 | --- | --- | --- |
-| Prediction bundle | `enrichment/films/<filmId>/predictions.json` | `current` and every replaced record in `history` |
+| Prediction bundle | the mutable key `enrichment/films/<id>/predictions.json`, read **through the prediction authority**: with `prediction_domain_authority.mode = d1` the D1 pointer and lineage (`PredictionD1.routeRead`, the same read as every other prediction reader), otherwise the R2 object | `current` and every replaced record in `history`. At `d1` the R2 object is only a best-effort mirror that may lag or be missing and is **never** read; an unreadable D1 domain answers `503 {"error":"prediction_unavailable","reason":<code>}`, not a fall back to the mirror. The immutable version bodies (`r2Key`) are always R2 |
 | Immutable prediction versions | the `r2Key` of a record on the returned page | `version.status` of that record (one read per prediction event on the page) |
 | Letterboxd fact record | `letterboxd/facts/links.json` (`letterboxd:<lid>` or `tmdb:<n>`), then `letterboxd/facts/films/<factKey>.json` | current rating and `ratingHistory` ([user facts](../integrations/letterboxd-user-facts.md)); a `redirectTo` is followed once; during a convergence (`migrating`) the overlay of source and target is read |
 | Legacy rating log | `enrichment/diagnostics/rating-observations.json` | entries for any id of the film (the requested id, the record's `lid` and `tmdb_<n>`), written before the facts gate |
@@ -38,7 +38,13 @@ An invalid id, an error status or an unreadable answer stays inside the section;
 | Diary viewing history | `letterboxd/diary/history.json` | `diary_viewing` events and `current.diary` of the linked lid ([Diary contract](../integrations/letterboxd-diary-history.md)) |
 | Diary run state | `letterboxd/diary/state.json` | `snapshot.sources.diary.state` (coverage of the stored history) |
 
-Predictions are stored under the queue's film id; asking by the other id of the same film returns its rating and Diary events but not those predictions.
+Predictions are stored under the queue's film id, which may be the Letterboxd `lid` while the canonical permalink asks with `tmdb_<n>` (AIR-475). While the Film/Person marker is `open`, the route therefore resolves **verified storage ids** from the D1 identity claims (`catalogFilmIdentityBridge`, `src/canonical-catalog-reader.js`) and reads `enrichment/films/<id>/predictions.json` for the requested id and for every bridged id. The bridge is strict: the typed claim (`tmdb` for `tmdb_<n>`, `letterboxd` for a lid) must be one owner Film's trusted, non-conflicting row; that Film must not be a redirect source and must hold at most one trusted TMDB and one trusted Letterboxd value, with no untrusted or conflicting claim, and no other Film may claim those values in any form. A title, year or slug is never matched. The lid also joins the Diary link candidates (`via: d1_identity`).
+
+Bridged versions join the one chronology as prediction events with `identity: "<storageId>|<identity>"` and `storageId`; the requested id's own events keep their identities. Each version object is checked against the id it lies under. `current.prediction` is the newest `current` among the bundles (`storageId` names a bridged holder; the note `prediction_current_in_several_storage_ids` says when more than one exists). Nothing is regenerated and nothing is written. Before `open` (legacy, `r2`, `prepared`) the route reads the requested id alone, as before.
+
+`snapshot.identity` is `{ state, storageIds }` when the marker is `open` (`ok`, `absent`, `conflict` or `retired`; a contested or merged identity bridges nothing and adds the note `identity_bridge_conflict` or `identity_bridge_retired`); `snapshot.sources.predictions.bridged` lists the bridged bundles read. A held or unreadable marker answers `503 {"error":"identity_unavailable","reason":<code>}` for a `tmdb_<n>` id (an empty history would read as "nothing recorded"); for a lid the route answers from its own bundle with `partial: true` and the note `identity_bridge_unavailable`. The cursor digest covers the bridged bundles (for a D1 read, a digest of what was read), so a change of any of them is `409 history_changed`.
+
+**Identity fence to the end of the response.** The marker generation the bridge verified is read again immediately before the answer, after every bundle, fact, Diary, legacy-log and immutable-object read. If the state or generation moved, a `tmdb_<n>` request and any answer that joined bridged ids are refused with `503 identity_unavailable` (`reason: film_person_generation_moved`); a lid answer that joined nothing is returned `partial: true` with `snapshot.identity.state: unavailable` and the note `identity_bridge_unavailable`.
 
 ### Diary link
 

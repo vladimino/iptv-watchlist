@@ -265,7 +265,7 @@ const base={
  const ADM='letterboxd/admissions/verified-films.json',RET='identity/tmdb-retirements.json',sha='b'.repeat(64);
  const receipt=tmdb=>({schemaVersion:1,films:{['tmdb_'+tmdb]:{tmdb:String(tmdb),sourceCode:'sc'+tmdb,archiveSha256:sha,verifiedAt:'2026-11-09T10:00:00.000Z',title:'Receipt '+tmdb,year:2001}}});
  // A D1 that answers the authority reads and the two guards; anything else is empty. `broken` names a statement that fails.
- const fake=({version=16,marker={mode:'r2',cutover:'open',generation:0},external=[],redirects=[],broken=null,tables=true,retired=false,admissions=[],drift=null}={})=>({
+ const fake=({version=16,marker={mode:'r2',cutover:'open',generation:0},external=[],redirects=[],broken=null,tables=true,retired=false,admissions=[],drift=null,filmRow=null,credits=[]}={})=>({
   prepare(sql){
    const run=kind=>{
     if(broken&&broken.test(sql))throw new Error('d1 down');
@@ -276,6 +276,8 @@ const base={
     if(/FROM film_person_baseline/.test(sql))return {state:'verified',reference:null};
     if(/FROM tmdb_retirement_decision/.test(sql))return kind==='first'?(retired?{hit:1}:null):{results:[]};
     if(/FROM film_rated_admission/.test(sql))return {results:admissions};
+    if(/FROM film f LEFT JOIN film_metadata/.test(sql))return kind==='first'?filmRow:{results:filmRow?[filmRow]:[]};
+    if(/FROM film_person_credit/.test(sql))return {results:credits};
     if(/FROM film_external_id/.test(sql))return {results:external};
     if(/FROM film_redirect/.test(sql))return redirects.length?{hit:1}:null;
     return kind==='first'?null:{results:[]};
@@ -302,16 +304,27 @@ const base={
  const OPEN={mode:'d1',cutover:'open',generation:2},adm={film_id:'film:tmdb:300',tmdb:'300',source_code:'sc300',archive_sha256:sha,title:'D1 300',year:2001,receipt_key:ADM,receipt_film_key:'tmdb_300',verified_at:'2026-11-09T10:00:00.000Z'},own=[{film_id:'film:tmdb:300',trusted:1,conflicting:0}];
  reads.length=0;
  r=await ask(fake({marker:OPEN}));assert.deepEqual([r.status,r.body.status],[404,'absent'],'open: no D1 Film is absent, the R2 receipt does not admit it');
- r=await ask(fake({marker:OPEN,external:own}));assert.deepEqual([r.status,r.body.status],[404,'absent'],'open: a Film without an admission row is absent');
- r=await ask(fake({marker:OPEN,external:own,admissions:[adm]}));assert.equal(r.status,200,'open: found from film_rated_admission');assert.deepEqual([r.body.film.id,r.body.film.title,r.body.film.year],['tmdb_300','D1 300',2001]);
- r=await ask(fake({marker:OPEN,external:own,admissions:[{...adm,tmdb:'301'}]}));assert.deepEqual([r.status,r.body.reason],[503,'canonical_read_unavailable'],'open: an admission row whose tmdb differs from the typed id fails closed');
- r=await ask(fake({marker:OPEN,external:own,admissions:[adm],retired:true}));assert.deepEqual([r.status,r.body.status],[410,'retired'],'open: the D1 retirement ledger');
- r=await ask(fake({marker:OPEN,external:own,admissions:[adm],redirects:['film:tmdb:300']}));assert.equal(r.status,410,'open: a redirect source is retired');
+ const canon={canonical_identity:'tmdb:300',original_title:'Original 300',year:1998,runtime:96,poster:'https://image.tmdb.org/t/p/w342/300.jpg',url:'https://www.themoviedb.org/movie/300',genres_json:'["Драма"]',title:'Каноническое 300'};
+ r=await ask(fake({marker:OPEN,external:own}));assert.deepEqual([r.status,r.body.reason],[503,'canonical_read_unavailable'],'open: a trusted claim without its Film row is an inconsistent store, never absent');
+ // AIR-475: a retained canonical Film is a Film with no Discovery record and no admission row; D1 metadata, localization and credits fill the page.
+ r=await ask(fake({marker:OPEN,external:own,filmRow:canon,credits:[{role:'actor',role_id:'tmdb_actor/2',name:'Актёр'},{role:'director',role_id:'tmdb_director/1',name:'Режиссёр'},{role:'actor',role_id:'tmdb_actor/3',name:null}]}));
+ assert.equal(r.status,200,'open: found from the canonical Film alone');
+ assert.deepEqual([r.body.film.id,r.body.film.title,r.body.film.original,r.body.film.year,r.body.film.runtime,r.body.film.genres,r.body.film.poster],['tmdb_300','Каноническое 300','Original 300',1998,96,['Драма'],'https://image.tmdb.org/t/p/w342/300.jpg']);
+ assert.deepEqual([r.body.film.directors,r.body.film.actors,r.body.film.shows,r.body.film.availableNow],[[{id:'tmdb_director/1',name:'Режиссёр'}],[{id:'tmdb_actor/2',name:'Актёр'}],[],false],'credits without a resolved name are omitted; no shows, no EPG');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:{...canon,canonical_identity:'tmdb:301'}}));assert.equal(r.status,409,'open: a Film recording another canonical identity is a conflict');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:{...canon,genres_json:'not json'}}));assert.deepEqual([r.status,r.body.reason],[503,'canonical_read_unavailable'],'open: unreadable stored genres fail closed');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:{...canon,title:null,original_title:null,year:null,runtime:null,poster:null,url:null,genres_json:'[]'}}));assert.deepEqual([r.status,r.body.film.title,r.body.film.year,r.body.film.genres],[200,null,null,[]],'open: a bare canonical Film is still a Film');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:{...canon,title:null,year:null},admissions:[adm]}));assert.deepEqual([r.status,r.body.film.title,r.body.film.year],[200,'D1 300',2001],'open: a rated admission only fills a missing title or year');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:canon,admissions:[adm]}));assert.deepEqual([r.status,r.body.film.title,r.body.film.year],[200,'Каноническое 300',1998],'open: canonical localization and metadata win over the admission row');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:canon,credits:Array.from({length:201},(_,i)=>({role:'actor',role_id:'tmdb_actor/'+i,name:'A'+i}))}));assert.deepEqual([r.status,r.body.reason],[503,'canonical_read_unavailable'],'open: credits above the bound fail closed');
+r=await ask(fake({marker:OPEN,external:own,admissions:[{...adm,tmdb:'301'}]}));assert.deepEqual([r.status,r.body.reason],[503,'canonical_read_unavailable'],'open: an admission row whose tmdb differs from the typed id fails closed');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:canon,admissions:[adm],retired:true}));assert.deepEqual([r.status,r.body.status],[410,'retired'],'open: the D1 retirement ledger');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:canon,admissions:[adm],redirects:['film:tmdb:300']}));assert.equal(r.status,410,'open: a redirect source is retired');
  r=await ask(fake({marker:OPEN,external:[...own,{film_id:'film:b',trusted:0,conflicting:0}],admissions:[adm]}));assert.equal(r.status,409,'open: a foreign claim is a conflict');
- r=await ask(fake({marker:OPEN,external:own,admissions:[adm],broken:/film_rated_admission/}));assert.deepEqual([r.status,r.body.reason],[503,'admission_unavailable'],'open: a failed admission read fails closed');
- r=await ask(fake({marker:OPEN,external:own,admissions:[adm],broken:/tmdb_retirement_decision/}));assert.deepEqual([r.status,r.body.reason],[503,'canonical_read_unavailable'],'open: a failed ledger read fails closed');
- r=await ask(fake({marker:OPEN,external:own,admissions:[adm],drift:{after:3,marker:{mode:'d1',cutover:'open',generation:3}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'open: a marker that moves during the read refuses the answer');
- r=await ask(fake({marker:OPEN,external:own,admissions:[adm],drift:{after:3,marker:{mode:'d1',cutover:'held',generation:3}}}));assert.equal(r.status,503,'open then held mid-read');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:canon,admissions:[adm],broken:/film_rated_admission/}));assert.deepEqual([r.status,r.body.reason],[503,'admission_unavailable'],'open: a failed admission read fails closed');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:canon,admissions:[adm],broken:/tmdb_retirement_decision/}));assert.deepEqual([r.status,r.body.reason],[503,'canonical_read_unavailable'],'open: a failed ledger read fails closed');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:canon,admissions:[adm],drift:{after:3,marker:{mode:'d1',cutover:'open',generation:3}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'open: a marker that moves during the read refuses the answer');
+ r=await ask(fake({marker:OPEN,external:own,filmRow:canon,admissions:[adm],drift:{after:3,marker:{mode:'d1',cutover:'held',generation:3}}}));assert.equal(r.status,503,'open then held mid-read');
  assert.ok(!reads.includes(ADM)&&!reads.includes(RET),'no silent R2 fallback: neither the receipt object nor the retirements object is read at open (reads: '+[...new Set(reads)].join(',')+')');
  r=await ask(fake({marker:null}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],'a missing marker row');
  r=await ask(fake({marker:{mode:'bogus',cutover:'open',generation:0}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],'a malformed marker');
@@ -337,6 +350,91 @@ const base={
  r=await ask(fake({broken:/film_external_id/}));assert.deepEqual([r.status,r.body.reason],[503,'discovery_unavailable'],'a failed canonical guard is unavailable, never found');
  r=await ask(fake({broken:/film_redirect/,external:[{film_id:'film:a',trusted:1,conflicting:0}]}));assert.equal(r.status,503);
  assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+}
+
+// ---- 3f. AIR-475: a retained canonical Film opens by its permanent TMDB id at d1/open, with no Discovery record, no rated admission, no programme and no watchlist ----
+{
+ vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
+ const base=path.join(root,'retained-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
+ const OPEN=VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";
+ const HELD=OPEN+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;";
+ const T='2026-11-14T00:00:00.000Z',q=value=>"'"+String(value).replace(/'/g,"''")+"'";
+ // The five production examples of the card (14 Nov 2026): three retained films nobody lists any more, two controls Discovery holds. Every Film has a trusted, non-conflicting claim and a film_retention row; none has a rated admission.
+ const FILMS={1423191:['Обитель зла','Resident Evil',2026,106],22004:['Чужая территория','Alien Territory',1992,98],1272837:['28 лет спустя: Храм костей','28 Years Later: The Bone Temple',2026,109],10750:['Игрушечные солдатики','Toy Soldiers',1991,112],1100988:['28 лет спустя','28 Years Later',2025,115]};
+ const seedFilm=(id,[title,original,year,runtime],{credits=true}={})=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${id}',1,'tmdb:${id}',${q(original)},'${T}');
+INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:tmdb:${id}','tmdb','${id}',1,0);
+INSERT INTO film_metadata (film_id,schema_version,year,runtime,poster,url,genres_json,payload_json,updated_at) VALUES ('film:tmdb:${id}',1,${year},${runtime},'https://image.tmdb.org/t/p/w342/${id}.jpg','https://www.themoviedb.org/movie/${id}','["Ужасы"]','{}','${T}');
+INSERT INTO film_dimension (film_id,dimension,status,value,updated_at) VALUES ('film:tmdb:${id}','localization','provisional',${q(title)},'${T}');
+INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) VALUES ('film:tmdb:${id}','watchlist_fact',0,'{}','r${id}','${T}','${T}');
+${credits?`INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:director/d${id}','director/d${id}',1,'${T}'),('person:actor/a${id}','actor/a${id}',1,'${T}'),('person:actor/n${id}','actor/n${id}',1,'${T}');
+INSERT INTO person_dimension (person_id,dimension,status,value,updated_at) VALUES ('person:director/d${id}','localization','provisional','Режиссёр ${id}','${T}'),('person:actor/a${id}','localization','reviewed','Актёр ${id}','${T}');
+INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('film:tmdb:${id}','person:director/d${id}','director',0),('film:tmdb:${id}','person:actor/a${id}','actor',0),('film:tmdb:${id}','person:actor/n${id}','actor',1);`:''}`;
+ const SEED=Object.entries(FILMS).map(([id,row])=>seedFilm(id,row)).join('\n');
+ let counter=0;const statements=[];
+ const mount=(marker,extra='')=>{const file=path.join(root,'retained-'+(counter++)+'.sqlite');fs.copyFileSync(base,file);sql(file,SEED+extra+marker);return {file,db:d1Standin(file,{onQuery:async text=>{statements.push(text);}})};};
+ const ask=async(db,id)=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/'+id),{BUCKET:bucket,DB:db},{waitUntil(){}});return {status:r.status,body:await r.json()};};
+ // Discovery (the R2 shared catalog here) holds only the two controls; the three retained films are in no Discovery object, no programme, no watchlist.
+ seed({tmdb_10750:catalogFilm('tmdb_10750',10750,{title:'Игрушечные солдатики'}),tmdb_1100988:catalogFilm('tmdb_1100988',1100988,{title:'28 лет спустя'})});
+ {
+  const {db,file}=mount(OPEN);statements.length=0;
+  for(const id of [1423191,22004,1272837]){
+   const r=await ask(db,String(id)),[title,original,year,runtime]=FILMS[id];
+   assert.equal(r.status,200,'retained film '+id+' opens: '+JSON.stringify(r.body));assert.equal(r.body.status,'found');
+   assert.deepEqual([r.body.film.id,r.body.film.tmdbId,r.body.film.canonicalIdentity,r.body.film.title,r.body.film.original,r.body.film.year,r.body.film.runtime,r.body.film.genres],['tmdb_'+id,String(id),'tmdb:'+id,title,original,year,runtime,['Ужасы']]);
+   assert.deepEqual([r.body.film.directors,r.body.film.actors],[[{id:'director/d'+id,name:'Режиссёр '+id}],[{id:'actor/a'+id,name:'Актёр '+id}]],'credits with a resolved name, the nameless one omitted');
+   assert.deepEqual([r.body.film.shows,r.body.film.availableNow,r.body.film.nextStart,r.body.film.prediction],[[],false,null,null],'no current showing is normal; no prediction is invented');
+   assert.equal(r.body.film.poster,'https://image.tmdb.org/t/p/w342/'+id+'.jpg');assert.match(r.body.film.url,/themoviedb\.org\/movie\//);
+  }
+  for(const id of [10750,1100988]){const r=await ask(db,String(id));assert.equal(r.status,200,'control '+id);assert.equal(r.body.film.id,'tmdb_'+id,'a Film Discovery holds still opens (Discovery wins; no duplicate)');assert.deepEqual(r.body.film.shows.length,0);}
+  assert.ok(statements.length>0&&statements.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1: '+statements.filter(text=>!/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)).join(' | '));
+  assert.equal(db.calls.batches,0,'no D1 batch');
+  // The film is not added to the watchlist, the programme or Finds, and no film row changes: the catalog GET writes nothing.
+  assert.equal(sqliteSync(['-json',file,'SELECT (SELECT COUNT(*) FROM watchlist_film) w,(SELECT COUNT(*) FROM film) f'],{encoding:'utf8'}).stdout.replace(/\s/g,''),'[{"w":0,"f":5}]');
+  assert.deepEqual([puts,fetches],[[],[]],'no R2 write, no provider request');
+  // True absence, a missing frozen R2 object is not consulted, and an unknown id stays 404.
+  assert.deepEqual([(await ask(db,'999999')).status,(await ask(db,'999999')).body.status],[404,'absent']);
+ }
+ {
+  // Re-add: the same Film later enters the watchlist and the programme again; one canonical Film, one permalink, no duplicate row.
+  const {db,file}=mount(OPEN,`INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:tmdb:22004','${T}');`);
+  const r=await ask(db,'22004');assert.equal(r.status,200,'a re-added Film is the same permalink');assert.equal(r.body.film.id,'tmdb_22004');
+  assert.equal(sqliteSync(['-json',file,"SELECT COUNT(*) c FROM film WHERE id='film:tmdb:22004'"],{encoding:'utf8'}).stdout.replace(/\s/g,''),'[{"c":1}]');
+ }
+ {
+  // The states stay what they are: conflict 409, redirect and retirement 410, held 503, an inconsistent claim 503.
+  const extra=`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:rival',1,NULL,'Rival','${T}');
+INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:rival','tmdb','22004',0,0);
+INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','film:tmdb:1423191','${T}');
+INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id,evidence_json,confirmation_json,origin,input_sha256,supersedes_seq,payload_json,recorded_at) VALUES ('ret1','film:tmdb:1423191','retire','abc','1423191','555','{}','{"by":"owner","at":"${T}","source":"t"}','owner_request',NULL,NULL,'{}','${T}');`;
+  const {db}=mount(OPEN,extra);
+  assert.deepEqual([(await ask(db,'22004')).status,(await ask(db,'1272837')).status,(await ask(db,'1423191')).status,(await ask(db,'1100988')).status],[409,410,410,200],'untrusted rival claim, redirect source, owner retirement, an untouched film');
+  const held=mount(HELD);const r=await ask(held.db,'22004');assert.deepEqual([r.status,r.body.reason],[503,'film_person_held'],'held fails closed with no R2 fallback');
+ }
+ {
+  // Review P1-3: the permalink of a canonical Film does not depend on Discovery's health. A Discovery reader that is held, loading, unreadable or not authoritative leaves the
+  // answer to D1 while Film/Person is open; verified conflicts and retirements stay 409/410; a canonical absence, or a Film/Person marker that is not open, keeps the Discovery 503.
+  const extra=`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:rival',1,NULL,'Rival','${T}');
+INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:rival','tmdb','22004',0,0);
+INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','film:tmdb:1423191','${T}');`;
+  const open=mount(OPEN,extra),held=mount(HELD),prepared=mount(VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;");
+  const fault=code=>{vm.runInContext('globalThis.DiscoveryAuthority={ownsKey:()=>false,readAuthority:async()=>({held:false,ready:false}),routeRead:async()=>({handled:false}),readFilmAdmission:async()=>__stub()}',ctx);ctx.__stub=async()=>{const error=new Error(code);error.code=code;throw error;};};
+  for(const code of ['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative']){
+   fault(code);statements.length=0;
+   let r=await ask(open.db,'10750');assert.deepEqual([r.status,r.body.status,r.body.film?.id,r.body.film?.title],[200,'found','tmdb_10750','Игрушечные солдатики'],code+': a retained Film opens while Discovery cannot answer');
+   assert.deepEqual([r.body.film.shows,r.body.film.availableNow],[[],false],'no shows are taken from Discovery');
+   assert.deepEqual([(await ask(open.db,'22004')).status,(await ask(open.db,'1272837')).status],[409,410],code+': a verified conflict and a redirect stay 409 and 410');
+   r=await ask(open.db,'999999');assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable',code],code+': a canonical absence does not turn an unreadable Discovery into absent');
+   r=await ask(held.db,'10750');assert.deepEqual([r.status,r.body.reason],[503,code],code+': a held Film/Person marker keeps the Discovery refusal, never R2');
+   r=await ask(prepared.db,'10750');assert.deepEqual([r.status,r.body.reason],[503,code],code+': below open the Discovery refusal stands');
+   assert.ok(statements.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),code+': only reads');
+  }
+  vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
+  ctx.__stub=undefined;
+ }
+ assert.deepEqual([puts,fetches],[[],[]]);
 }
 
 // ---- 4. Method and routing guards ----

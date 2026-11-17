@@ -5,8 +5,8 @@
 //   marker -> throws film_person_held / film_person_unavailable. It never answers "go back to R2" for held or unknown.
 // - catalogTitlesFromD1 (slice 2, P4b): the provisional localized titles behind GET /api/programme and GET /api/watchlist, bounded SELECTs (chunks of one JSON id list), in the shape of
 //   a titles.json row; catalogReaderStill re-checks the marker after any read, so a move between the gate and the answer (prepared -> open, held) is refused.
-// - catalogAdmittedFilmFromD1: the film route's rated-archive fallback at `open`, from film_rated_admission (readAdmissions), the D1 identity claims, the redirect
-//   table and the tmdb_retirement_decision ledger. The marker generation is read again after the reads, so a move mid-read is refused.
+// - catalogCanonicalFilmFromD1 (AIR-475): the film route's canonical fallback at `open` when Discovery holds no record: the typed TMDB claim, the redirect table, the
+//   tmdb_retirement_decision ledger and the Film's own metadata, localization and credits; film_rated_admission (readAdmissions) only fills a missing title or year. The marker generation is read again after the reads, so a move mid-read is refused.
 import {database,failed,many,one,readAuthority,readSource} from './film-person-authority.js';
 
 export const ADMISSION_READ_CHUNK=80;
@@ -58,10 +58,11 @@ export async function readAdmissions(env,ids){
 }
 
 const MOVIE_ID=/^[1-9]\d{0,11}$/;
-// The Film a verified rated-archive admission made, answered from D1 only: {state:'absent'|'retired'|'conflict'|'found',film?}. Nothing is written or scanned:
-// one typed id, one Film. The reduced page (title and year, the facts the admission row stores; no people, genres or runtime) is the contract until the
-// canonical film view reads them from D1 (follow-up). Called only when the marker is open; any other state throws before a statement.
-export async function catalogAdmittedFilmFromD1(env,tmdbId){
+// AIR-475. The canonical Film behind one typed TMDB movie id, answered from D1 only: {state:'absent'|'retired'|'conflict'|'found',film?}. The film route calls it at `open`
+// when Discovery holds no record: a retained Film (programme, watchlist, rated archive or none of them any more) is a Film because D1 holds it, never because Discovery or
+// a rated-archive admission names it. Nothing is written or scanned: one typed id, one trusted claim, one Film, its metadata and credits. The rated-archive admission, when
+// it exists, only fills the title and year the canonical rows leave empty. Called only when the marker is open; any other state throws before a statement.
+export async function catalogCanonicalFilmFromD1(env,tmdbId){
  const gate=await readAuthority(env);
  if(gate.state!=='open'){readSource(gate);throw failed('canonical_read_not_authoritative');}
  if(typeof tmdbId!=='string'||!MOVIE_ID.test(tmdbId))throw failed('canonical_read_invalid');
@@ -78,12 +79,7 @@ export async function catalogAdmittedFilmFromD1(env,tmdbId){
    if(rows.some(row=>!(isOwn(row)&&row.film_id===owner)))result={state:'conflict'};
    else if(owner===null)result={state:'absent'};
    else if(await one(db,'SELECT 1 AS hit FROM film_redirect WHERE from_id=? LIMIT 1',[owner]))result={state:'retired'};
-   else{
-    const admission=(await readAdmissions(env,[owner])).get(owner)?.ratedAdmission??null;
-    if(!admission)result={state:'absent'};
-    else if(String(admission.tmdb)!==tmdbId)throw failed('canonical_read_unavailable');
-    else result={state:'found',film:{id:'tmdb_'+tmdbId,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,title:typeof admission.title==='string'&&admission.title?admission.title:null,original:null,year:Number.isInteger(admission.year)?admission.year:null,runtime:null,genres:[],url:null,directors:[],actors:[],shows:[]}};
-   }
+   else result=await canonicalFilmPage(env,db,owner,tmdbId);
   }
  }catch(error){
   if(error?.code)throw error;
@@ -92,6 +88,70 @@ export async function catalogAdmittedFilmFromD1(env,tmdbId){
  const again=await readAuthority(env);
  if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');
  return result;
+}
+
+const CREDIT_READ_CAP=200;
+const PAGE_FILM_SQL=`SELECT f.canonical_identity AS canonical_identity,f.original_title AS original_title,m.year AS year,m.runtime AS runtime,m.poster AS poster,m.url AS url,m.genres_json AS genres_json,(SELECT d.value FROM film_dimension d WHERE d.film_id=f.id AND d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' ORDER BY CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT 1) AS title FROM film f LEFT JOIN film_metadata m ON m.film_id=f.id WHERE f.id=?`;
+const PAGE_CREDIT_SQL=`SELECT c.role AS role,p.role_id AS role_id,(SELECT d.value FROM person_dimension d WHERE d.person_id=p.id AND d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' ORDER BY CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT 1) AS name FROM film_person_credit c INNER JOIN person p ON p.id=c.person_id WHERE c.film_id=? ORDER BY c.role,c.ordinal LIMIT ?`;
+// The full catalog entry of one owner Film (the shape of a Discovery film payload, no shows: the Worker adds shows only from the pinned EPG generation).
+async function canonicalFilmPage(env,db,owner,tmdbId){
+ const identity='tmdb:'+tmdbId;
+ const row=await one(db,PAGE_FILM_SQL,[owner]);
+ // A claim without its Film row cannot be: the foreign key forbids it. If it is read, the store is inconsistent, not absent.
+ if(!row)throw failed('canonical_read_unavailable');
+ // A Film that records another canonical identity than the trusted claim it was found by is a disagreement, never silently served.
+ if(row.canonical_identity!=null&&row.canonical_identity!==identity)return {state:'conflict'};
+ const admission=(await readAdmissions(env,[owner])).get(owner)?.ratedAdmission??null;
+ if(admission&&String(admission.tmdb)!==tmdbId)throw failed('canonical_read_unavailable');
+ const credits=await many(db,PAGE_CREDIT_SQL,[owner,CREDIT_READ_CAP+1]);
+ if(credits.length>CREDIT_READ_CAP)throw failed('canonical_read_unavailable');
+ let genres=[];
+ try{const parsed=JSON.parse(row.genres_json||'[]');if(Array.isArray(parsed))genres=parsed.filter(genre=>typeof genre==='string'&&genre);}catch{throw failed('canonical_read_unavailable');}
+ const text=value=>typeof value==='string'&&value?value:null,integer=value=>Number.isInteger(value)?value:null;
+ // A stored person without a resolved name is omitted (the client lists names); the order is the stored ordinal.
+ const people=role=>credits.filter(item=>item.role===role&&text(item.name)).map(item=>({id:String(item.role_id),name:item.name}));
+ const original=text(row.original_title);
+ return {state:'found',film:{id:'tmdb_'+tmdbId,tmdbId,canonicalIdentity:identity,title:text(row.title)??text(admission?.title)??original,original,year:integer(row.year)??integer(admission?.year),runtime:integer(row.runtime),genres,poster:text(row.poster),url:typeof row.url==='string'&&row.url.startsWith('https://')?row.url:null,directors:people('director'),actors:people('actor'),shows:[]}};
+}
+
+// AIR-475. The verified identity bridge behind the film history: one stored spelling of a Film (a Letterboxd lid or tmdb_<n>) -> the storage ids its predictions can lie under.
+// Only D1 identity claims decide: the typed claim must be the one owner's trusted, non-conflicting row, the owner must not be a redirect source, and its own tmdb and letterboxd
+// claims must be one trusted value each with no other Film claiming that value in any form. Never a title, a year or a slug. Called only when the marker is open (the
+// caller reads the gate); another state throws before a statement. {state:'ok',filmId,tmdb,lid}|{state:'absent'|'conflict'|'retired'}.
+const LID=/^[A-Za-z0-9_-]{1,80}$/;
+export async function catalogFilmIdentityBridge(env,id){
+ const gate=await readAuthority(env);
+ if(gate.state!=='open'){readSource(gate);throw failed('canonical_read_not_authoritative');}
+ const tmdb=typeof id==='string'?/^tmdb_([1-9]\d{0,11})$/.exec(id):null;
+ if(typeof id!=='string'||!(tmdb||LID.test(id)))throw failed('canonical_read_invalid');
+ const scheme=tmdb?'tmdb':'letterboxd',value=tmdb?tmdb[1]:id,db=database(env);
+ let found;
+ try{
+  const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0;
+  const claims=await many(db,'SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme=? AND value=?',[scheme,value]);
+  const owner=claims.find(isOwn)?.film_id??null;
+  if(claims.some(row=>!(isOwn(row)&&row.film_id===owner)))found={state:'conflict'};
+  else if(owner===null)found={state:'absent'};
+  else if(await one(db,'SELECT 1 AS hit FROM film_redirect WHERE from_id=? LIMIT 1',[owner]))found={state:'retired'};
+  else{
+   const own=await many(db,"SELECT scheme,value,trusted,conflicting FROM film_external_id WHERE film_id=? AND scheme IN ('tmdb','letterboxd')",[owner]);
+   const trusted=name=>own.filter(row=>row.scheme===name&&isOwn(row)).map(row=>String(row.value));
+   const tmdbIds=trusted('tmdb'),lids=trusted('letterboxd');
+   // Any claim of the Film that is not its one trusted value of the scheme (an untrusted or conflicting row, a second trusted value) holds the bridge.
+   if(own.some(row=>!isOwn(row))||tmdbIds.length>1||lids.length>1)found={state:'conflict'};
+   else{
+    const other=lids.length||tmdbIds.length?await many(db,"SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE (scheme='tmdb' AND value=?) OR (scheme='letterboxd' AND value=?)",[tmdbIds[0]??'',lids[0]??'']):[];
+    if(other.some(row=>row.film_id!==owner||!isOwn(row)))found={state:'conflict'};
+    else found={state:'ok',filmId:owner,tmdb:tmdbIds[0]??null,lid:lids[0]&&LID.test(lids[0])?lids[0]:null};
+   }
+  }
+ }catch(error){
+  if(error?.code)throw error;
+  throw failed('canonical_read_unavailable',error);
+ }
+ const again=await readAuthority(env);
+ if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');
+ return found;
 }
 
 // Slice 2 (P4b): the titles.json consumers of the programme and watchlist routes. titles.json is a former mutable canonical mirror (frozen at `open`, owner decision 4); the
@@ -180,7 +240,7 @@ export async function catalogPeopleFromD1(env,ids,gate){
 const META_SQL=`SELECT f.id AS film_id,f.original_title AS original_title,m.year AS year,m.poster AS poster,m.url AS url,(SELECT d.value FROM film_dimension d WHERE d.film_id=f.id AND d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' ORDER BY CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT 1) AS title FROM film f LEFT JOIN film_metadata m ON m.film_id=f.id WHERE f.id IN (SELECT value FROM json_each(?)) LIMIT ?`;
 const EXT_FILM_SQL=`SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme IN ('tmdb','letterboxd') AND film_id IN (SELECT value FROM json_each(?))`;
 const EXT_VALUE_SQL=`SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme IN ('tmdb','letterboxd') AND value IN (SELECT value FROM json_each(?))`;
-// Same rule as catalogAdmittedFilmFromD1: ALL claims of the scheme (and of the typed value when given) are
+// Same rule as catalogCanonicalFilmFromD1: ALL claims of the scheme (and of the typed value when given) are
 // assessed; any claim that is not the one owner's trusted, non-conflicting row is a conflict. Untrusted or
 // conflicting rows are not ignored.
 function identityClaim(rows,scheme,value){
@@ -288,7 +348,7 @@ export async function catalogMetadataFromD1(env,ids,gate){
 // (stays as it is: an independent mirror, an input artifact, an immutable source or receipt, view-index prediction retention). Plain data, no imports: the computed handoff readiness
 // (P6) consumes it. `moved:true` means the reader is marker-gated and reads D1 at open (proved by tests/canonical-catalog-titles.mjs, tests/canonical-catalog-metadata.mjs, tests/canonical-admin-dictionaries.mjs, tests/canonical-footer-export.mjs or tests/catalog-film.mjs).
 export const CANONICAL_READER_REGISTRY=[
- {name:'catalog film route rated-archive fallback (retirements, receipt)',file:'src/worker.js',class:'freeze',moved:true},
+ {name:'catalog film route canonical fallback (identity claim, retirements, metadata, credits)',file:'src/worker.js',class:'freeze',moved:true},
  {name:'/api/d1/* catalog routes',file:'src/catalog-d1.js',class:'freeze',moved:true},
  {name:'GET /api/programme titles.json',file:'src/worker.js',class:'freeze',moved:true},
  {name:'GET /api/watchlist titles.json',file:'src/worker.js',class:'freeze',moved:true},

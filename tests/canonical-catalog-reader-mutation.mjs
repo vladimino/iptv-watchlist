@@ -14,8 +14,8 @@ const READER=[
  ['gate names d1 only for an open source',"mode:source==='d1'?'d1':'existing'","mode:'existing'"],
  ['gate consults readSource (held/unknown refuse)',"const source=readSource(gate);\n return {mode","const source=gate.state==='open'?'d1':'r2';\n return {mode"],
  ['readAdmissions needs the d1 source',"if(readSource(await readAuthority(env))!=='d1')throw failed('admission_not_authoritative');",''],
- ['fallback needs an open marker',"if(gate.state!=='open'){readSource(gate);throw failed('canonical_read_not_authoritative');}",''],
- ['held refusal carries its own code',"{readSource(gate);throw failed('canonical_read_not_authoritative');}","{throw failed('canonical_read_not_authoritative');}"],
+ ['fallback needs an open marker',"if(gate.state!=='open'){readSource(gate);throw failed('canonical_read_not_authoritative');}\n if(typeof tmdbId!=='string'||!MOVIE_ID.test(tmdbId))throw failed('canonical_read_invalid');","if(typeof tmdbId!=='string'||!MOVIE_ID.test(tmdbId))throw failed('canonical_read_invalid');"],
+ ['held refusal carries its own code',"{readSource(gate);throw failed('canonical_read_not_authoritative');}\n if(typeof tmdbId!=='string'||!MOVIE_ID.test(tmdbId))","{throw failed('canonical_read_not_authoritative');}\n if(typeof tmdbId!=='string'||!MOVIE_ID.test(tmdbId))"],
  ['typed movie id only',"if(typeof tmdbId!=='string'||!MOVIE_ID.test(tmdbId))throw failed('canonical_read_invalid');",''],
  ['retirement ledger decides',"if(retired)result={state:'retired'};","if(false)result={state:'retired'};"],
  ['a restore lifts a retire',"AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s WHERE s.supersedes_seq=r.seq)",''],
@@ -24,12 +24,12 @@ const READER=[
  ['a trusted claim is the owner',"const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0,owner=rows.find(isOwn)?.film_id??null;","const isOwn=row=>Number(row.conflicting)===0,owner=rows.find(isOwn)?.film_id??null;"],
  ['a non-conflicting claim is the owner',"const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0,owner=rows.find(isOwn)?.film_id??null;","const isOwn=row=>Number(row.trusted)===1,owner=rows.find(isOwn)?.film_id??null;"],
  ['a redirect source is retired',"else if(await one(db,'SELECT 1 AS hit FROM film_redirect WHERE from_id=? LIMIT 1',[owner]))result={state:'retired'};",''],
- ['no admission row, no Film',"if(!admission)result={state:'absent'};","if(!admission)result={state:'found',film:{id:'tmdb_'+tmdbId,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,title:null,original:null,year:null,runtime:null,genres:[],url:null,directors:[],actors:[],shows:[]}};"],
- ['the admission names the typed id',"else if(String(admission.tmdb)!==tmdbId)throw failed('canonical_read_unavailable');",''],
- ['the marker is re-read after the reads',"if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');",''],
+ ['a Film recording another identity is a conflict',"if(row.canonical_identity!=null&&row.canonical_identity!==identity)return {state:'conflict'};",''],
+ ['the admission names the typed id',"if(admission&&String(admission.tmdb)!==tmdbId)throw failed('canonical_read_unavailable');",''],
+ ['the marker is re-read after the reads',"if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');\n return result;","return result;"],
  ['the generation is compared',"||again.generation!==gate.generation)throw failed('film_person_generation_moved');\n return result;",")throw failed('film_person_generation_moved');\n return result;"],
- ['a typed read error keeps its code',"if(error?.code)throw error;",''],
- ['an untyped read error fails closed',"throw failed('canonical_read_unavailable',error);\n }\n const again","throw error;\n }\n const again"],
+ ['a typed read error keeps its code',"if(error?.code)throw error;\n  throw failed('canonical_read_unavailable',error);\n }\n const again=await readAuthority(env);\n if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');\n return result;","throw failed('canonical_read_unavailable',error);\n }\n const again=await readAuthority(env);\n if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');\n return result;"],
+ ['an untyped read error fails closed',"throw failed('canonical_read_unavailable',error);\n }\n const again=await readAuthority(env);\n if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');\n return result;","throw error;\n }\n const again=await readAuthority(env);\n if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');\n return result;"],
 ];
 const CATALOG_D1=[
  ['only GET is gated, and GET is gated',"if(request.method==='GET'){","if(false){"],
@@ -50,7 +50,7 @@ const CATALOG_D1=[
  ['the re-read follows the overlay',"response=await OwnerReview.overlayCatalogResponse(env,response);\n if(first){","response=await OwnerReview.overlayCatalogResponse(env,response);\n if(first&&false){"],
 ];
 const WORKER=[
- ['open reads D1, not R2',"if(gate.state==='open')return CanonicalCatalogReader.catalogAdmittedFilmFromD1(env,tmdbId);",''],
+ ['open reads D1, not R2',"if(gate.state==='open')return CanonicalCatalogReader.catalogCanonicalFilmFromD1(env,tmdbId);",''],
  ['held and unknown never reach R2',"if(!gate.r2Allowed){const error","if(false){const error"],
  ['the new refusal codes are a 503',"'film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative']","]"],
  ['the R2 answer is re-checked against the marker',"const again=await FilmPersonAuthority.readAuthority(env);\n if(again.state!==gate.state||again.generation!==gate.generation){","const again=gate;\n if(again.state!==gate.state||again.generation!==gate.generation){"],

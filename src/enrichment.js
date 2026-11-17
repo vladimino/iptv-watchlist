@@ -3647,13 +3647,45 @@ async function predictionQualityRoute(env,url){
 // prediction bundle, the film's Letterboxd fact record through the link index, the legacy rating log, the profile, the
 // Diary history and its run state, plus one read per immutable version object on the requested page. Never a write, a
 // model call, a Letterboxd request, a refresh or a lease.
+// AIR-475: the storage ids a Film's predictions can lie under besides the requested spelling (a canonical /film/tmdb_<n> page asks with tmdb_<n>, the versions may be stored under
+// the trusted Letterboxd lid and the other way round). Only while the Film/Person marker is open, only through the D1 identity claims (src/canonical-catalog-reader.js), never a
+// title, year or slug. An unreadable or held marker is {state:'unavailable'}; before open the route keeps reading the requested id alone ({state:'not_open'}).
+async function filmHistoryBridge(env,filmId){
+ const reader=typeof CanonicalCatalogReader==='undefined'?null:CanonicalCatalogReader;
+ if(!reader)return {state:'not_open',ids:[],lid:null};
+ try{
+  const gate=await reader.catalogReaderGate(env);
+  if(gate.mode!=='d1')return {state:'not_open',ids:[],lid:null};
+  const found=await reader.catalogFilmIdentityBridge(env,filmId);
+  if(found.state!=='ok')return {state:found.state,ids:[],lid:null,gate};
+  return {state:'ok',gate,ids:[...new Set([...(found.lid?[found.lid]:[]),...(found.tmdb?['tmdb_'+found.tmdb]:[])])].filter(id=>id!==filmId),lid:found.lid};
+ }catch(error){return {state:'unavailable',ids:[],lid:null,reason:error?.code||'identity_unavailable'};}
+}
+// AIR-475 review: the mutable prediction bundle of one stored id is read through the prediction authority (D1 pointer and lineage while `prediction_domain_authority` is d1; the R2
+// predictions.json is then only a best-effort mirror that may lag or be missing), and from R2 only where that authority is not d1. The immutable version bodies stay in R2.
+// An unreadable D1 domain throws a `prediction_*` code (503), never a silent fall back to the mirror. The etag of a D1 read is a digest of what was read.
+async function readFilmPredictionBundle(env,id,readR2){
+ const key=filmKey(id)+'predictions.json';
+ if(typeof PredictionD1!=='undefined'){
+  const routed=await PredictionD1.routeRead(env,key);
+  if(routed.handled)return routed.value?{status:'recorded',etag:'d1:'+await textSha256(JSON.stringify(routed.value)),value:routed.value}:{status:'missing',etag:null,value:null};
+ }
+ return readR2(key);
+}
 async function filmHistoryRoute(env,url){
  const filmId=url.searchParams.get('filmId');
  if(typeof filmId!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(filmId))return json({error:'filmId must be 1–80 letters, digits, "_" or "-"'},400);
  const page=filmHistoryPageRequest(url.searchParams);if(page.error)return json({error:page.error},400);
  const read=async key=>{const object=await env.BUCKET.get(key);if(!object)return {status:'missing',etag:null,value:null};try{return {status:'recorded',etag:object.etag,value:await object.json()};}catch{return {status:'unreadable',etag:object.etag,value:null};}};
- const bundle=await read(filmKey(filmId)+'predictions.json');
+ const predictionUnavailable=error=>String(error?.code||'').startsWith('prediction_')?json({error:'prediction_unavailable',reason:error.code},503):null;
+ let bundle;
+ try{bundle=await readFilmPredictionBundle(env,filmId,read);}catch(error){const refused=predictionUnavailable(error);if(refused)return refused;throw error;}
  const tmdb=/^tmdb_([1-9]\d{0,11})$/.exec(filmId),alias=tmdb?'tmdb:'+tmdb[1]:'letterboxd:'+filmId;
+ // A canonical tmdb_<n> permalink cannot be answered from the requested id alone while the identity cannot be verified: 503, never an empty history that reads as "nothing recorded".
+ const bridge=await filmHistoryBridge(env,filmId);
+ if(tmdb&&bridge.state==='unavailable')return json({error:'identity_unavailable',reason:bridge.reason},503);
+ const extra=[];
+ try{for(const id of bridge.ids)extra.push({id,bundle:await readFilmPredictionBundle(env,id,read)});}catch(error){const refused=predictionUnavailable(error);if(refused)return refused;throw error;}
  const links=await read(LetterboxdFacts.FACTS_KEYS.links);
  let factKey=links.value?.[alias]||null,fact={status:'missing',etag:null,value:null};
  // Diary lid candidates: the requested id when it is a lid, and the lid of every fact record read (both sides of a convergence).
@@ -3663,11 +3695,12 @@ async function filmHistoryRoute(env,url){
   if(fact.value?.redirectTo){factKey=fact.value.redirectTo;fact=await read(LetterboxdFacts.recordKey(factKey));}
   else if(fact.value?.migrating?.to){const target=await read(LetterboxdFacts.recordKey(fact.value.migrating.to));lidCandidates.push({lid:fact.value.links?.letterboxd,via:'fact_record'});fact={status:fact.status,etag:fact.etag+'+'+target.etag,value:LetterboxdFacts.overlay(fact.value,target.value)};}
  }
- const factLinks=fact.value?.links||{},filmIds=[...new Set([filmId,...(factLinks.letterboxd?[String(factLinks.letterboxd)]:[]),...(factLinks.tmdb?['tmdb_'+factLinks.tmdb]:[])])];
+ const factLinks=fact.value?.links||{},filmIds=[...new Set([filmId,...bridge.ids,...(factLinks.letterboxd?[String(factLinks.letterboxd)]:[]),...(factLinks.tmdb?['tmdb_'+factLinks.tmdb]:[])])];
  if(factLinks.letterboxd)lidCandidates.push({lid:String(factLinks.letterboxd),via:'fact_record'});
+ if(bridge.lid)lidCandidates.push({lid:bridge.lid,via:'d1_identity'});
  const [legacy,profile,diaryHistory,diaryState]=await Promise.all([read(ratingObservationsKey),read(profileKey),read(LetterboxdDiary.KEYS.history),read(LetterboxdDiary.KEYS.state)]);
  // The Diary history joins the digest only once it exists, so cursors of a film without one keep their earlier form.
- const digest=(await textSha256([bundle.etag,fact.etag,legacy.etag,...(diaryHistory.status==='missing'?[]:[diaryHistory.etag])].map(value=>value||'-').join('|'))).slice(0,16);
+ const digest=(await textSha256([bundle.etag,...extra.map(item=>item.bundle.etag),fact.etag,legacy.etag,...(diaryHistory.status==='missing'?[]:[diaryHistory.etag])].map(value=>value||'-').join('|'))).slice(0,16);
  if(page.digest&&page.digest!==digest)return json({error:'history_changed',detail:'The stored history changed since this cursor was issued; start again without a cursor.'},409);
  const link=diaryLink(lidCandidates);
  const built=buildFilmHistory({filmId,filmIds,bundle:bundle.value,factRecord:fact.value,legacyLog:legacy.value,profile:profile.value,diary:{history:diaryHistory.value,link}});
@@ -3676,24 +3709,53 @@ async function filmHistoryRoute(env,url){
  if(diaryHistory.status==='recorded'&&!diaryComplete)built.notes.push('diary_coverage_partial');
  const diaryEntries=Object.values(diaryHistory.value?.entries||{});
  built.current.diary=link.status==='linked'&&diaryHistory.status==='recorded'?{lid:link.lid,...(LetterboxdDiary.summarize({entries:diaryEntries.filter(entry=>entry?.identity?.type==='letterboxd_lid'&&entry.identity.value===link.lid)})[link.lid]||{viewingCount:0,viewingCountExact:true,lastWatchedAt:null,rewatches:0,rewatchesExact:true})}:null;
+ // The versions of the bridged storage ids join as prediction events of their own, identity-prefixed by the storage id so two bundles never collide; every version is checked against
+ // the id it lies under. No version is regenerated, merged by content or matched by title.
+ const records=new Map([...(Array.isArray(bundle.value?.history)?bundle.value.history:[]).map((record,i)=>['prediction|history|'+i,{record,holder:filmId}]),...(bundle.value?.current?[['prediction|current|0',{record:bundle.value.current,holder:filmId}]]:[])]);
+ const currents=[{holder:filmId,prediction:built.current.prediction}];
+ for(const {id,bundle:other} of extra){
+  const part=buildFilmHistory({filmId:id,bundle:other.value,profile:profile.value});
+  for(const event of part.events){const identity=id+'|'+event.identity;built.events.push({...event,identity,storageId:id});}
+  for(const [identity,record] of [...(Array.isArray(other.value?.history)?other.value.history:[]).map((record,i)=>['prediction|history|'+i,record]),...(other.value?.current?[['prediction|current|0',other.value.current]]:[])])records.set(id+'|'+identity,{record,holder:id});
+  for(const note of part.notes)if(!built.notes.includes(note))built.notes.push(note);
+  if(part.current.prediction)currents.push({holder:id,prediction:part.current.prediction});
+ }
+ if(extra.length){
+  built.events.sort(compareHistoryEvents);
+  const live=currents.filter(item=>item.prediction),latest=live.reduce((best,item)=>!best||String(item.prediction.generatedAt||'')>String(best.prediction.generatedAt||'')?item:best,null);
+  if(live.length>1)built.notes.push('prediction_current_in_several_storage_ids');
+  built.current.prediction=latest?(latest.holder===filmId?latest.prediction:{...latest.prediction,storageId:latest.holder}):null;
+ }
+ if(bridge.state==='conflict'||bridge.state==='retired'||bridge.state==='unavailable')built.notes.push('identity_bridge_'+bridge.state);
  const slice=built.events.slice(page.offset,page.offset+page.limit);
- const records=new Map([...(Array.isArray(bundle.value?.history)?bundle.value.history:[]).map((record,i)=>['prediction|history|'+i,record]),...(bundle.value?.current?[['prediction|current|0',bundle.value.current]]:[])]);
  for(const event of slice){
   if(event.type!=='prediction')continue;
-  const record=records.get(event.identity);
+  const held=records.get(event.identity),record=held?.record;
   if(!record?.r2Key&&!record?.contentSha256)continue;
-  if(!predictionVersionLinked(record,filmId)){event.version={status:'invalid',r2Key:historyValue(record,'r2Key'),contentSha256:historyValue(record,'contentSha256')};continue;}
+  if(!predictionVersionLinked(record,held.holder)){event.version={status:'invalid',r2Key:historyValue(record,'r2Key'),contentSha256:historyValue(record,'contentSha256')};continue;}
   const object=await env.BUCKET.get(record.r2Key);
   const status=!object?'missing':await textSha256(await object.text())===record.contentSha256?'linked':'mismatch';
   event.version={status,r2Key:record.r2Key,contentSha256:record.contentSha256};
  }
- const partial=[bundle,fact,legacy,diaryHistory].some(source=>source.status==='unreadable')||slice.some(event=>event.type==='prediction'&&['missing','mismatch','invalid'].includes(event.version.status));
+ const partial=[bundle,...extra.map(item=>item.bundle),fact,legacy,diaryHistory].some(source=>source.status==='unreadable')||bridge.state==='unavailable'||slice.some(event=>event.type==='prediction'&&['missing','mismatch','invalid'].includes(event.version.status));
  const next=page.offset+page.limit<built.events.length?String(page.offset+page.limit)+'.'+digest:null;
+ // AIR-475 review: the identity the bridge verified must still hold when the answer leaves. Every read above (bundles, facts, Diary, legacy log, immutable objects) ran after the bridge,
+ // so the marker is read again: a canonical permalink or any answer that joined bridged ids is refused (503) if the state or generation moved; a lid answer that joined nothing keeps its partial policy.
+ let identityMoved=false;
+ if(bridge.gate){
+  let moved=null;
+  try{await CanonicalCatalogReader.catalogReaderStill(env,bridge.gate);}catch(error){moved=error;}
+  if(moved){
+   if(tmdb||bridge.ids.length)return json({error:'identity_unavailable',reason:moved.code||'film_person_generation_moved'},503);
+   built.notes.push('identity_bridge_unavailable');
+   identityMoved=true;
+  }
+ }
  return json({schemaVersion:FILM_HISTORY_SCHEMA_VERSION,filmId,readAt:new Date().toISOString(),
-  snapshot:{profile:profile.value?{version:profile.value.version??null,profileHash:profile.value.profileHash??null}:null,sources:{predictions:{status:bundle.status},facts:{status:factKey?fact.status:'missing',factKey},legacyRatingLog:{status:legacy.status},
+  snapshot:{profile:profile.value?{version:profile.value.version??null,profileHash:profile.value.profileHash??null}:null,...(bridge.state==='not_open'?{}:{identity:identityMoved?{state:'unavailable',storageIds:[]}:{state:bridge.state,storageIds:bridge.ids}}),sources:{predictions:{status:bundle.status,...(extra.length?{bridged:extra.map(item=>({id:item.id,status:item.bundle.status}))}:{})},facts:{status:factKey?fact.status:'missing',factKey},legacyRatingLog:{status:legacy.status},
    diary:{status:diaryHistory.status,link,unresolvedEntries:diaryEntries.filter(entry=>!entry?.identity).length,
     state:diaryState.value?{lastOutcome:diaryState.value.lastOutcome??null,lastSuccessAt:diaryState.value.lastSuccessAt??null,coverage,resumePage:diaryState.value.resumePage??null}:null}}},
-  current:built.current,partial,notes:built.notes,events:slice,page:{limit:page.limit,offset:page.offset,total:built.events.length,nextCursor:next}});
+  current:built.current,partial:partial||identityMoved,notes:built.notes,events:slice,page:{limit:page.limit,offset:page.offset,total:built.events.length,nextCursor:next}});
 }
 async function enrichmentRoute(request,env,url,execution){const path=url.pathname,requestId=predictionRequestId(request);let body=null;
  // Retired before any body parsing, read or write: no Letterboxd request, no lease, no stored object touched (ADR 0040).
