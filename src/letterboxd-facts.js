@@ -593,7 +593,7 @@ function recordRatingChange(record,incoming,effective){
   }
  }
 
- // AIR-489 / ADR 0160 (option A). The Film bridge of a rated-only Diary id, written only after a verified source check
+ // AIR-489 / ADR 0162 (option A). The Film bridge of a rated-only Diary id, written only after a verified source check
  // (src/letterboxd-diary-identity.js). Reuses the receipt pattern of ADR 0105 and the alias protocol of linkFilm; nothing is merged.
  const DIARY_IDENTITY_KEY=FACTS_PREFIX+'scans/diary-identity.json',DIARY_IDENTITY_CAP=200;
  // The movie id each lid's record already carries, from the link index and the record (one read of the index, one per lid).
@@ -624,6 +624,16 @@ function recordRatingChange(record,incoming,effective){
   if(String(record?.links?.tmdb)!==String(tmdb))return {state:'conflict'};
   await projectRecords(env,[record]);
   return {state:'linked',factKey};
+ }
+ // Repairs the projection of an id whose alias and record link are already committed (a bridge that failed after them): reads the committed record and projects it
+ // again, idempotently. It writes no alias, record fact, admission or Film. {state:'projected'|'absent'|'conflict'}.
+ async function reprojectDiaryFilm(env,lid){
+  const own=(await diaryLinks(env,[lid])).get(lid);
+  if(!own?.factKey||!own.tmdb)return {state:'absent'};
+  const {value:record}=await readJSON(env,recordKey(own.factKey));
+  if(!record||String(record.links?.tmdb)!==own.tmdb||record.links?.letterboxd!==lid)return {state:'conflict'};
+  await projectRecords(env,[record]);
+  return {state:'projected'};
  }
  // The receipt entry of a verified Diary identity. An entry that already holds the movie is kept; a code bound to another movie is a conflict.
  async function admitDiaryFilm(env,item){
@@ -833,5 +843,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {FACTS_KEYS,DIARY_IDENTITY_KEY,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,DIARY_IDENTITY_KEY,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();

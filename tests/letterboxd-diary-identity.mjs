@@ -1,4 +1,4 @@
-// AIR-489 / ADR 0160 (option A): the bounded same-run Film bridge of a rated-only Diary id. Synthetic pages, a stub D1 canonical writer and an in-memory
+// AIR-489 / ADR 0162 (option A): the bounded same-run Film bridge of a rated-only Diary id. Synthetic pages, a stub D1 canonical writer and an in-memory
 // ratings store; nothing here calls Letterboxd, TMDB or a production store. Fixtures mirror `vMEO` (3.5) and `Aj8u` (4.0) as ids only: their movie is NOT assumed.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -6,10 +6,11 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
 
-const records = new Map(), etags = new Map(); let rev = 0;
+const records = new Map(), etags = new Map(); let rev = 0; const fail = {view: 0};
 const bucket = {
   async get(key) {return records.has(key) ? {etag: etags.get(key), json: async () => structuredClone(records.get(key))} : null;},
   async put(key, value, options = {}) {
+    if (fail.view && key === 'enrichment/view-index.json') {fail.view--; throw new Error('projection unavailable');}
     const c = options.onlyIf;
     if (c?.etagDoesNotMatch === '*' && records.has(key) || c?.etagMatches && c.etagMatches !== etags.get(key)) return null;
     records.set(key, JSON.parse(value)); etags.set(key, String(++rev)); return {etag: etags.get(key)};
@@ -229,6 +230,32 @@ for (const variant of ['backoff', 'held gate']) {
   out = await Identity.resolve(env, items(['Other8', 'other-8']), opts({clock: () => NOW + 13 * 3600000}));
   assert.equal(out.counts.verified, 1, variant + ': off-page retry once due'); assert.equal(recordOf('Slg1').links.tmdb, '900090', variant); assert.equal(pending().Slg1, undefined, variant);
 }
+
+// 15. review of PR #720 (fourth), P1: a bridge that failed after the alias and the record link were committed (the projection threw once) leaves a pending entry on an already-linked id.
+// A later ordinary step on a DIFFERENT page repairs the projection (no request, no second admission, no new fact) and clears the entry only then.
+reset(); fail.view = 0; await seed('Prj1', 3.5); add('Prj1', 'fixture-prj-2008', '900110', 'Fixture Prj', 2008); fail.view = 1;
+out = await Identity.resolve(env, items(['Prj1', 'fixture-prj-2008']), opts());
+assert.equal(pending().Prj1.reason, 'link_failed'); assert.equal(recordOf('Prj1').links.tmdb, '900110', 'the alias and the record link are committed'); assert.equal(canonical.applied.length, 1);
+assert.equal(records.get('enrichment/view-index.json').tmdb_900110, undefined, 'the projection did not happen');
+const factsBefore = JSON.stringify(recordOf('Prj1')), receiptBefore = JSON.stringify(records.get('letterboxd/admissions/verified-films.json')), prjCalls = net.calls.filter(url => url.includes('Prj1') || url.includes('fixture-prj')).length;
+out = await Identity.resolve(env, items(['Other7', 'other-7']), opts({clock: () => NOW + 1000}));
+assert.equal(out.counts.repaired, 1); assert.equal(pending().Prj1, undefined, 'cleared only after the repair');
+assert.equal(records.get('enrichment/view-index.json').tmdb_900110.watched, true); assert.equal(records.get('enrichment/view-index.json').tmdb_900110.actualRating, 3.5);
+assert.equal(net.calls.filter(url => url.includes('Prj1') || url.includes('fixture-prj')).length, prjCalls, 'no outbound request for the repair'); assert.equal(canonical.applied.length, 1, 'no second admission');
+assert.equal(JSON.stringify(recordOf('Prj1')), factsBefore, 'no new fact'); assert.equal(JSON.stringify(records.get('letterboxd/admissions/verified-films.json')), receiptBefore, 'no second receipt');
+// a repair that fails again keeps the entry (nothing is cleared on a failed reproject).
+reset(); fail.view = 0; await seed('Prj2', 3); add('Prj2', 'fixture-prj2-2007', '900111', 'Fixture Prj2', 2007); fail.view = 2;
+await Identity.resolve(env, items(['Prj2', 'fixture-prj2-2007']), opts()); out = await Identity.resolve(env, [], opts({clock: () => NOW + 1000}));
+assert.equal(out.counts.repaired, 0); assert.equal(pending().Prj2.reason, 'link_failed', 'the entry survives a failed repair'); fail.view = 0;
+out = await Identity.resolve(env, [], opts({clock: () => NOW + 2000})); assert.equal(out.counts.repaired, 1); assert.equal(pending().Prj2, undefined);
+
+// 16. review of PR #720 (fourth), P2: a due on-page entry with earlier attempts that is deferred behind the step cap keeps its attempts and backoff state.
+reset(); fail.view = 0; for (const lid of ['Frs1', 'Frs2', 'Frs3', 'Old1']) await seed(lid, 3);
+for (const [i, lid] of ['Frs1', 'Frs2', 'Frs3'].entries()) add(lid, 'fixture-frs' + (i + 1) + '-2006', String(900120 + i), 'Fixture ' + lid, 2006);
+const oldEntry = {reason: 'forbidden', slug: 'old-one', attempts: 5, lastAttemptAt: '2026-11-17T10:00:00.000Z', nextAttemptAt: '2026-11-17T12:00:00.000Z'};
+records.set(Facts.DIARY_IDENTITY_KEY, {schemaVersion: 1, films: {Old1: oldEntry}});
+out = await Identity.resolve(env, items(['Frs1', 'fixture-frs1-2006'], ['Frs2', 'fixture-frs2-2006'], ['Frs3', 'fixture-frs3-2006'], ['Old1', 'old-one']), opts());
+assert.equal(out.counts.verified, 3); assert.equal(out.counts.deferred, 1); assert.deepEqual(pending().Old1, oldEntry, 'attempts, reason and backoff are not reset by a deferral');
 
 // 9. the pending retry spacing is monotone and bounded; transport backs off less than a review.
 assert.ok(Identity.delayMs('forbidden', 1) < Identity.delayMs('slug_mismatch', 1)); assert.ok(Identity.delayMs('forbidden', 9) <= 48 * 3600000);

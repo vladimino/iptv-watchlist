@@ -33,6 +33,9 @@ const MUTANTS = [
   ['a held bridge read drops the id', "includes(error?.code)){defer(item,prior);continue;}bridge=null;}", "includes(error?.code)){counts.skipped++;continue;}bridge=null;}"],
   ['a link throw on a consumed bridge drops the id', "    }catch{defer(item,prior);continue;}\n   }\n   if(bridge&&", "    }catch{counts.skipped++;continue;}\n   }\n   if(bridge&&"],
   ['a newly seen slug is not saved on the pending entry', "if(prior&&item.onPage&&item.slug&&prior.slug!==item.slug)set[lid]={...prior,slug:item.slug};", ''],
+  ['a linked id with a pending entry is cleared without a repair', "if(!prior){clear.push(lid);continue;}", "{clear.push(lid);continue;}"],
+  ['a failed repair clears the entry', "if(repaired.state==='projected'){counts.repaired++;clear.push(lid);}else{counts.skipped++;}", "counts.repaired++;clear.push(lid);"],
+  ['a step-cap deferral resets the entry', "remaining()<STEP_BUDGET_MS){defer(item,prior);continue;}", "remaining()<STEP_BUDGET_MS){defer(item,null);continue;}"],
   ['a deferred id is dropped', "if(item.onPage&&!prior&&item.slug)set[item.lid]={reason:'deferred',slug:item.slug||null,attempts:0,lastAttemptAt:null,nextAttemptAt:iso(now)};", ''],
   ['the slug is not kept for the retry', "slug:item.slug||null,attempts,lastAttemptAt:iso(now)", "slug:null,attempts,lastAttemptAt:iso(now)"],
 ];

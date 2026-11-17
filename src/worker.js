@@ -827,7 +827,7 @@ async function writeDiscoveryEvent(env,event){
  const replaced=await env.BUCKET.put(key,JSON.stringify(event),{httpMetadata,onlyIf:{etagMatches:current.etag}});
  return replaced!==null?'written':'failed';
 }
-// AIR-489 / ADR 0160: read-side presentation only. A stored ratings event whose film has no title is shown with the label of the TMDB movie its Letterboxd id has
+// AIR-489 / ADR 0162: read-side presentation only. A stored ratings event whose film has no title is shown with the label of the TMDB movie its Letterboxd id has
 // been bridged to since (a verified source check), from the facts link and the catalog / rated admission. The stored event is never rewritten; an unbridged id stays unlabelled.
 async function presentRatingsEvents(env,events){
  try{

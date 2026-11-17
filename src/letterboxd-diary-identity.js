@@ -1,4 +1,4 @@
-// AIR-489 / ADR 0160 (option A). The bounded same-run Film bridge of a rated-only Diary id.
+// AIR-489 / ADR 0162 (option A). The bounded same-run Film bridge of a rated-only Diary id.
 // A Diary row carries a Letterboxd id (poster) and the film slug of the same row. When the id has no TMDB link yet, one ordinary Ratings step may
 // check the SOURCE for at most STEP_LIMIT ids, after the watched/rating facts are durable: an existing trusted D1 bridge is consumed first
 // (catalogFilmIdentityBridge, read only); otherwise `boxd.it/<lid>` must land on `/film/<slug>/` of the same Diary row, the page must carry one movie
@@ -92,12 +92,12 @@ const LetterboxdDiaryIdentity=(()=>{
  // items: [{lid,slug}] of one Diary page in page order (facts already durable). Pending entries that left the page (they keep the same-row slug) and ids
  // deferred by an earlier step are serviced here too, after the page's own ids, inside the same three-check budget. Returns {labels,counts}.
  async function resolve(env,items,{clock=()=>Date.now(),remaining=()=>Infinity,fetchImpl=fetch}={}){
-  const counts={considered:0,bridged:0,verified:0,pending:0,deferred:0,skipped:0},labels=new Map();
+  const counts={considered:0,bridged:0,verified:0,repaired:0,pending:0,deferred:0,skipped:0},labels=new Map();
   const page=[...new Map((items||[]).filter(item=>item&&LID.test(String(item.lid||''))).map(item=>[item.lid,{lid:item.lid,slug:typeof item.slug==='string'&&SLUG.test(item.slug)?item.slug:null,onPage:true}])).values()];
   let stored;
   try{stored=await LetterboxdFacts.readDiaryIdentity(env);}catch{return {labels,counts:{...counts,skipped:page.length}};}
   const now=clock(),onPage=new Set(page.map(item=>item.lid));
-  const due=Object.entries(stored.films).filter(([lid,entry])=>!onPage.has(lid)&&entry&&typeof entry.slug==='string'&&SLUG.test(entry.slug)&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now)
+  const due=Object.entries(stored.films).filter(([lid,entry])=>!onPage.has(lid)&&entry&&typeof entry.slug==='string'&&SLUG.test(entry.slug)&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&(Date.parse(entry.nextAttemptAt)<=now||entry.reason==='link_failed'))
    .sort(([,x],[,y])=>String(x.nextAttemptAt)<String(y.nextAttemptAt)?-1:1).slice(0,STEP_LIMIT*2).map(([lid,entry])=>({lid,slug:entry.slug,onPage:false}));
   const wanted=[...page,...due];
   if(!wanted.length)return {labels,counts};
@@ -111,10 +111,16 @@ const LetterboxdDiaryIdentity=(()=>{
   const defer=(item,prior)=>{counts.deferred++;if(item.onPage&&!prior&&item.slug)set[item.lid]={reason:'deferred',slug:item.slug||null,attempts:0,lastAttemptAt:null,nextAttemptAt:iso(now)};};
   for(const item of wanted){
    const lid=item.lid,own=links.get(lid)||{};
-   if(own.tmdb){clear.push(lid);continue;}
+   const prior=stored.films[lid]||null,attempts=Number(prior?.attempts)||0;
+   // Already linked: nothing to check. A pending entry on a linked id is a bridge that failed after the alias and the record link were committed (review of PR #720):
+   // the committed projection is repaired (no outbound request, no admission, no new fact) and the entry is cleared only when that succeeded.
+   if(own.tmdb){
+    if(!prior){clear.push(lid);continue;}
+    try{const repaired=await LetterboxdFacts.reprojectDiaryFilm(env,lid);if(repaired.state==='projected'){counts.repaired++;clear.push(lid);}else{counts.skipped++;}}catch{counts.skipped++;}
+    continue;
+   }
    if(!own.factKey){counts.skipped++;continue;}
    counts.considered++;
-   const prior=stored.films[lid]||null,attempts=Number(prior?.attempts)||0;
    // Better same-row evidence keeps the retry alive: a newly seen usable slug is saved on the existing pending entry first (attempts and backoff unchanged), whatever follows.
    if(prior&&item.onPage&&item.slug&&prior.slug!==item.slug)set[lid]={...prior,slug:item.slug};
    if(!open){defer(item,prior);continue;}
@@ -132,7 +138,7 @@ const LetterboxdDiaryIdentity=(()=>{
    // 2. A bounded source check, only for an id that is due and only while the lease leaves room.
    if(prior&&(attempts>=MAX_ATTEMPTS||Date.parse(prior.nextAttemptAt)>now)){counts.deferred++;continue;}
    if(!item.slug){set[lid]=entry(item,'slug_missing',attempts+1,now+delayMs('review',attempts+1));counts.pending++;continue;}
-   if(stopped||fetched>=STEP_LIMIT||remaining()<STEP_BUDGET_MS){defer(item,null);continue;}
+   if(stopped||fetched>=STEP_LIMIT||remaining()<STEP_BUDGET_MS){defer(item,prior);continue;}
    fetched++;
    let outcome;
    try{outcome=await checkOne(env,item,{clock,fetchImpl,remaining});}catch(error){outcome={state:'pending',reason:'check_failed'};}

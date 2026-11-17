@@ -362,7 +362,7 @@ const LetterboxdRatings=(()=>{
    }
    const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
    for(const key of ['films','written','unchanged','older','skipped','conflicts'])facts[key]+=result[key];
-   // AIR-489 / ADR 0160: the facts above are durable; only now is the source of a still unbridged id checked (bounded, never fatal, never before the facts).
+   // AIR-489 / ADR 0162: the facts above are durable; only now is the source of a still unbridged id checked (bounded, never fatal, never before the facts).
    let identityLabels=new Map();
    if(typeof LetterboxdDiaryIdentity!=='undefined'){
     try{
