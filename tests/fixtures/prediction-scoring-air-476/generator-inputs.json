@@ -1,0 +1,123 @@
+{
+  "fixtureVersion": 1,
+  "purpose": "Blind generator input for the offline evidence-aware scoring regression. Synthetic films, synthetic reviews and a sanitized synthetic Taste Profile. No real owner rating, stored prediction, real fingerprint or production payload. The generator receives ONLY this file; the grader rubric is a separate file and must not be shown to the generator.",
+  "researchMode": "closed_corpus",
+  "researchRules": "Treat researchCorpus as the complete result of the two allowed web searches for that film. An entry with access search_snippet was not opened. Do not use any other URL. An empty corpus means the searches returned nothing usable.",
+  "profile": {
+    "version": "synthetic-1",
+    "body": "Synthetic sanitized profile for offline tests. Likes a strong plot engine: heist/scam, investigation/mystery, chase/escape, escort/rescue, siege/survival, ticking clock, plan versus counterplan. Values competent protagonists and opponents, decision quality, causality, chemistry, pace, escalation and an earned payoff. Evaluates premise -> execution -> decision logic -> payoff. Minuses: professionals acting stupidly, an absurd plan, a weak ending, unreadable action, gross-out or slapstick, musicals, technical implausibility, patriotic pathos, empty slowness. Horror: values clear and stable threat rules, competent characters under siege, survival logic and dread built by causality; minuses are gore as a substitute for tension, characters splitting up without reason and threat rules that change for convenience. Scale: 5 favourite, 4.5 very strong, 4 would rewatch, 3.5 moderately liked, 3 rather disappointed, <=2.5 negative."
+  },
+  "films": [
+    {
+      "caseId": "s1",
+      "plan": "fingerprint_and_prediction",
+      "modelMetadata": {
+        "title": "Quiet Ledger",
+        "year": 2019,
+        "genres": ["Crime", "Thriller"],
+        "runtimeMinutes": 108,
+        "credits": {"directors": ["Synthetic Director One"]},
+        "synopsis": "A disgraced bank auditor recruits a forger and a night-shift guard to empty a private vault during a city-wide blackout, while an insurance investigator closes in."
+      },
+      "researchCorpus": [
+        {
+          "url": "https://reviews.example.org/quiet-ledger-partial",
+          "author": "Synthetic Critic A",
+          "access": "partial_text",
+          "text": "The first hour lays the vault plan out with unusual clarity: we see the blackout window, the forger's duplicate ledger and the guard's shift change before the job begins. The insurance investigator is no fool; her counter-move with the duplicate ledger forces the crew to improvise and the improvisation follows from what we were shown. (The rest of the review could not be read.)"
+        }
+      ]
+    },
+    {
+      "caseId": "s2",
+      "plan": "prediction_only",
+      "modelMetadata": {
+        "title": "Hollow Signal",
+        "year": 2026,
+        "genres": ["Horror", "Action"],
+        "runtimeMinutes": 101,
+        "credits": {"directors": ["Synthetic Director Two"]},
+        "synopsis": "Survivors of an outbreak barricade themselves in a broadcast tower while infected crowds gather below."
+      },
+      "fingerprint": {
+        "fingerprintSchemaVersion": 1,
+        "plotMechanics": ["siege_survival"],
+        "execution": {
+          "plot_engine": "siege_survival",
+          "pace": "unknown",
+          "stakes": "unknown",
+          "decision_logic": "unknown",
+          "protagonist_competence": "unknown",
+          "opposition_competence": "unknown",
+          "problem_solving": "unknown",
+          "plan_counterplan_strength": "unknown",
+          "multi_party_goals": "unknown",
+          "chemistry": "unknown",
+          "payoff": "unknown",
+          "ending_quality": "unknown",
+          "technical_plausibility": "unknown"
+        }
+      },
+      "researchCorpus": [
+        {
+          "url": "https://search.example.org/hollow-signal-snippet",
+          "author": null,
+          "access": "search_snippet",
+          "text": "Hollow Signal (2026) review: 2/5 - a noisy creature feature that ..."
+        }
+      ]
+    },
+    {
+      "caseId": "s3",
+      "plan": "fingerprint_and_prediction",
+      "modelMetadata": {
+        "title": "The Glasshouse Inquest",
+        "year": 2021,
+        "genres": ["Mystery", "Crime"],
+        "runtimeMinutes": 124,
+        "credits": {"directors": ["Synthetic Director Three"]},
+        "synopsis": "A retired coroner investigates a death inside a locked botanical glasshouse during a family reunion."
+      },
+      "researchCorpus": [
+        {
+          "url": "https://reviews.example.org/glasshouse-inquest-1",
+          "author": "Synthetic Critic B",
+          "access": "full_text",
+          "text": "Every clue the coroner uses is shown to the audience first: the condensation pattern on the panes, the watering schedule and the mislabeled seed packets. Her deductions follow from them, and the culprit's alibi is a genuine counter-plan that she dismantles step by step. The final reveal recontextualises the first scene without cheating."
+        },
+        {
+          "url": "https://reviews.example.org/glasshouse-inquest-2",
+          "author": "Synthetic Critic C",
+          "access": "full_text",
+          "text": "The family members each pursue a different inheritance goal, which keeps the middle act moving. The pacing in the second act is deliberate but never empty, because each interview removes a suspect for a stated reason. The ending pays off the coroner's own regret introduced in the opening."
+        }
+      ]
+    },
+    {
+      "caseId": "s4",
+      "plan": "fingerprint_and_prediction",
+      "modelMetadata": {
+        "title": "Below Deck Nine",
+        "year": 2023,
+        "genres": ["Horror", "Science Fiction"],
+        "runtimeMinutes": 97,
+        "credits": {"directors": ["Synthetic Director Four"]},
+        "synopsis": "A squad of veteran security contractors must seal a research ship's lower deck after a lab creature escapes."
+      },
+      "researchCorpus": [
+        {
+          "url": "https://reviews.example.org/below-deck-nine-1",
+          "author": "Synthetic Critic D",
+          "access": "full_text",
+          "text": "The film introduces the ventilation shafts in its first scene and then has the veteran squad plan the seal of deck nine as if they did not exist; the creature uses them twice. The squad splits up three times without any stated reason, each time after agreeing to stay together. The creature is blind in one scene and tracks the captain by sight in the next."
+        },
+        {
+          "url": "https://reviews.example.org/below-deck-nine-2",
+          "author": "Synthetic Critic E",
+          "access": "full_text",
+          "text": "The climax is resolved by a rescue team that arrives off-screen and was never set up. Long stretches substitute gore close-ups for tension; the action in the dark engine room is cut so fast that the geography of the fight cannot be followed."
+        }
+      ]
+    }
+  ]
+}

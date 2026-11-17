@@ -142,7 +142,7 @@ On supported storage, the `letterboxd_ratings` source of the integration footer 
 
 `lastSuccessAt` and `lastFailureAt` come from the run and the ten recent runs. On unsupported storage the source is `degraded` / `ratings_storage_unsupported` with `pipeline: blocked`, and old `sync.json` rating fields are not used.
 
-## Rated-only Diary ids: bounded same-run Film bridge (AIR-489, [ADR 0162](../../adr/0162-diary-rated-only-identity-bridge.md))
+## Rated-only Diary ids: bounded same-run Film bridge (AIR-489, [ADR 0166](../../adr/0166-diary-rated-only-identity-bridge.md))
 
 The Diary phase stores `watched` and the rating first (unchanged, `lb-<lid>`, never waiting for anything below). Then, in the same step and only for ids whose record has no TMDB link, `LetterboxdDiaryIdentity.resolve` runs (`src/letterboxd-diary-identity.js`):
 

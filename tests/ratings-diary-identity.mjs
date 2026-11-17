@@ -1,4 +1,4 @@
-// AIR-489 / ADR 0162: the Ratings run with the bounded same-run identity check. Fixtures use the ids `vMEO` (3.5) and `Aj8u` (4.0) only; their movie is NOT assumed.
+// AIR-489 / ADR 0166: the Ratings run with the bounded same-run identity check. Fixtures use the ids `vMEO` (3.5) and `Aj8u` (4.0) only; their movie is NOT assumed.
 // Synthetic pages and a stub D1 canonical writer; nothing here calls Letterboxd, TMDB or a production store.
 import fs from 'node:fs';
 import vm from 'node:vm';

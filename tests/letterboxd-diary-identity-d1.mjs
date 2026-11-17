@@ -1,4 +1,4 @@
-// AIR-489 / ADR 0162, review of PR #720 (fifth): the partial-commit recovery on the REAL ratings D1 path (RatingsD1 over a sqlite D1 stand-in, marker d1/open).
+// AIR-489 / ADR 0166, review of PR #720 (fifth): the partial-commit recovery on the REAL ratings D1 path (RatingsD1 over a sqlite D1 stand-in, marker d1/open).
 // The facts, the alias index, the pending document and ratings_view are D1 documents/rows; faults are injected into D1 batches. Synthetic pages, stub canonical writer.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

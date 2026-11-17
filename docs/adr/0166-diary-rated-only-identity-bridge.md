@@ -1,4 +1,4 @@
-# ADR 0162: A rated-only Diary Letterboxd id gets its Film bridge from a bounded same-run source check, written by the existing admission writer
+# ADR 0166: A rated-only Diary Letterboxd id gets its Film bridge from a bounded same-run source check, written by the existing admission writer
 
 **Status:** Accepted
 **Original decision date:** 2026-11-17

@@ -153,7 +153,7 @@ This section adds no diagram. [ADR 0087](../adr/0087-rated-archive-film-admissio
 
 Storage note (AIR-374 P2a, [ADR 0120](../adr/0120-canonical-film-writers-identity-metadata-membership.md)): **Current at `open`:** the lifecycle rows above (identity, metadata and the effective localization) and the Film's identity title, metadata body, sync clocks and watchlist membership are written by one fenced batch per Film (`writeFilmFacts`, `src/canonical-film-writers.js`), reached from the wired producers. It never lets an automatic value replace a reviewed or owner one and it materialises the effective localization in the same batch as an automatic source. **Historical:** until `open` the projector was the only writer; the diagrams here still describe the domain contract.
 
-## Rated-only Diary admission (AIR-489, [ADR 0162](../adr/0162-diary-rated-only-identity-bridge.md))
+## Rated-only Diary admission (AIR-489, [ADR 0166](../adr/0166-diary-rated-only-identity-bridge.md))
 
 A Film behind a rated-only Diary id is admitted by the existing `applyRatedAdmissionRetention` (receipt `identity: "diary_page"`), exactly like a rated-archive Film, after a verified Letterboxd page and TMDB movie check. The admission writes the trusted `tmdb` claim and the `letterboxd_short_code` alias; it still writes no trusted `letterboxd` claim, so `catalogFilmIdentityBridge` stays `absent` for these Films and the bridge lives in the ratings facts alias (`tmdb:<n>`). A later card may add the claim. Diagrams unchanged.
 

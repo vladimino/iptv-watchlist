@@ -26,6 +26,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [TMDB credits for watchlist Films in D1 (owner approval required)](tmdb-watchlist-credits.md)
 - [TMDB TV identity correction for four retired movie ids: offline plan and production steps (owner approval required)](tmdb-tv-identity-correction.md)
 - [EPG diagnostic canary: operating, retention, cleanup and rollback (historical, non-executable: code deleted by AIR-521)](epg-diagnostic-canary.md)
+- [Controlled Discovery Workflow rollover onto the deployed version: preflight, apply, unknown outcomes and recovery (owner approval required to apply)](discovery-workflow-rollover.md)
 - [Bounded discovery ledger: modes, verification and rollback (owner approval required)](discovery-ledger.md); also [one stuck observation](discovery-ledger.md#one-stuck-observation): the owner page read and the guarded reconsideration
 - [Letterboxd export reconciliation, offline (complete matching needs an approved R2 snapshot), and identity from film pages (network run needs owner approval)](letterboxd-export-reconciliation.md)
 - [Film/Person `open` handoff operator](film-person-open-handoff.md) (live marker `d1`/`open` generation 2; do not repeat apply)

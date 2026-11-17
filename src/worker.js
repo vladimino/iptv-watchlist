@@ -827,7 +827,7 @@ async function writeDiscoveryEvent(env,event){
  const replaced=await env.BUCKET.put(key,JSON.stringify(event),{httpMetadata,onlyIf:{etagMatches:current.etag}});
  return replaced!==null?'written':'failed';
 }
-// AIR-489 / ADR 0162: read-side presentation only. A stored ratings event whose film has no title is shown with the label of the TMDB movie its Letterboxd id has
+// AIR-489 / ADR 0166: read-side presentation only. A stored ratings event whose film has no title is shown with the label of the TMDB movie its Letterboxd id has
 // been bridged to since (a verified source check), from the facts link and the catalog / rated admission. The stored event is never rewritten; an unbridged id stays unlabelled.
 async function presentRatingsEvents(env,events){
  try{
@@ -881,7 +881,7 @@ async function beginSync(env){
  const gate=await ratingsGate(env);
  if(gate.active&&current)await flushRemovalHandover(env,current);
  const carried=!gate.active&&current?{...(current.removalRefs?{removalRefs:current.removalRefs}:{}),...(current.removalLookups?{removalLookups:current.removalLookups}:{})}:{};
- const lastEpgPublishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(current,null):null;
+ const lastEpgPublishedAt=typeof epgCarriedPublishedAt==='function'?epgCarriedPublishedAt(current):null;
  const startedNow=new Date();const run={runId:crypto.randomUUID(),startedAt:startedNow.toISOString(),...(typeof OrchestrationPolicy!=='undefined'&&pausePresent?{runKey:OrchestrationPolicy.madridDayKey(startedNow.getTime())}:{}),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...carried,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{}),...(lastEpgPublishedAt?{lastEpgPublishedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
  }catch(e){const previous=await loadJSON(env,'sync.json'),ingest=await loadJSON(env,'watchlist-ingest.json'),lastSuccessAt=previous?.stage==='complete'&&!previous.error?previous.updatedAt:ingest?.lastSuccessAt||null;await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});throw e;}
 }

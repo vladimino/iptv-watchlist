@@ -1,4 +1,4 @@
-// AIR-489 / ADR 0162 (option A). The bounded same-run Film bridge of a rated-only Diary id.
+// AIR-489 / ADR 0166 (option A). The bounded same-run Film bridge of a rated-only Diary id.
 // A Diary row carries a Letterboxd id (poster) and the film slug of the same row. When the id has no TMDB link yet, one ordinary Ratings step may
 // check the SOURCE for at most STEP_LIMIT ids, after the watched/rating facts are durable: an existing trusted D1 bridge is consumed first
 // (catalogFilmIdentityBridge, read only); otherwise `boxd.it/<lid>` must land on `/film/<slug>/` of the same Diary row, the page must carry one movie

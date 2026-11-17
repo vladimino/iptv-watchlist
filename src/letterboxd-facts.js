@@ -593,7 +593,7 @@ function recordRatingChange(record,incoming,effective){
   }
  }
 
- // AIR-489 / ADR 0162 (option A). The Film bridge of a rated-only Diary id, written only after a verified source check
+ // AIR-489 / ADR 0166 (option A). The Film bridge of a rated-only Diary id, written only after a verified source check
  // (src/letterboxd-diary-identity.js). Reuses the receipt pattern of ADR 0105 and the alias protocol of linkFilm; nothing is merged.
  const DIARY_IDENTITY_KEY=FACTS_PREFIX+'scans/diary-identity.json',DIARY_IDENTITY_CAP=200;
  // The movie id each lid's record already carries, from the link index and the record (one read of the index, one per lid).
