@@ -176,8 +176,8 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  assert.equal(drive.watchlist.value,false,'added by the resumed w3, then removed by w4');assert.equal(drive.watchlist.replaced.observedAt,at(2));
 }
 
-// The EPG films scan always writes through the facts (LETTERBOXD_FACTS retired, ADR 0055): absence never clears a rating,
-// and no value of the stale binding (absent, off, on, a near miss, an object) brings back the legacy path.
+// The facts are the only writer (LETTERBOXD_FACTS retired, ADR 0055): no value of the stale binding (absent, off, on, a near
+// miss, an object) brings back a legacy path. Absence never clearing a rating is proved by the films-list cases above.
 for(const stale of [undefined,'on','off','On',{token:'x'}]){
  const b=bucket(),records=b.records,film=id=>({id,url:'https://letterboxd.com/film/'+id+'/',title:id,original:id,year:2020,genres:[],shows:[]});
  const listing='<h1 title="1&nbsp;films">Watched</h1><li class="griditem"><div data-postered-identifier=\'{&quot;lid&quot;:&quot;seen&quot;}\'></div></li>';
@@ -188,11 +188,6 @@ for(const stale of [undefined,'on','off','On',{token:'x'}]){
  ctx2.env={LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://example.test/epg.xml',BUCKET:b,...(stale===undefined?{}:{LETTERBOXD_FACTS:stale})};
  ctx2.report={runId:'r1',films:[film('kept'),film('seen')]};
  const label='binding '+JSON.stringify(stale);
- const scan=await vm.runInContext('refreshRatingsFromFilms(env,report)',ctx2);
- assert.equal(records.get('enrichment/view-index.json').kept.actualRating,4,'absence does not clear a rating, '+label);
- assert.equal(records.get('enrichment/view-index.json').seen.watched,true,label);assert.equal(scan.facts.written,1,label);
- assert.equal(records.get('letterboxd/facts/scans/films-list.json').total,1,label);
- assert.equal(records.has('enrichment/diagnostics/rating-observations.json'),false,'the legacy observation log is not written, '+label);
  // A complete watchlist is one observation of every listed film, whatever the stale binding holds.
  ctx2.run={runId:'r1',stage:'epg',watchlistObservedAt:new Date().toISOString(),events:[]};
  ctx2.full={runId:'r1',updatedAt:new Date().toISOString(),watchlistCount:2,films:[{...film('kept'),tmdbId:'901'},{...film('seen'),tmdbId:'902'}],stats:{}};

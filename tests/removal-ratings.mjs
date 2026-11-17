@@ -33,6 +33,13 @@ vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const env={LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://epg.test/guide.xml',BUCKET:bucket,LETTERBOXD_DIARY_HISTORY:'on'};
 ctx.env=env;
+// The Worker no longer carries the helper that applied a looked-up rating to the removal event of a run. It was a thin wrapper over withRemovalRatings and writeEvent, which are what this file keeps proving.
+const rate=async(source,ratings,observedAt)=>{
+ const index=(source?.events||[]).findIndex(item=>item?.type==='watchlist'&&item.removed?.length);if(index<0)return;
+ const stored=await vm.runInContext('loadJSON',ctx)(env,ctx.removalEventKey(source.events[index]));if(!stored)return;
+ const next=ctx.withRemovalRatings(stored,ratings,observedAt);if(!next)return;
+ await ctx.writeEvent(env,next);source.events[index]=next;
+};
 const at='2026-10-23T10:00:00.000Z';
 const removed=[{id:'gone',title:'Gone',year:2019},{id:'missing',title:'Missing',year:2018}];
 const added=[{id:'stay',title:'Stay',year:2021}];
@@ -50,7 +57,7 @@ const completed=await ctx.completeWithRatings(env,run,report);
 assert.equal(completed.stage,'complete');
 assert.equal(completed.ratingsPipeline,'blocked');
 assert.equal(fetches.filter(url=>url.includes('letterboxd.com')).length,0,'the commit requests nothing');
-await ctx.enrichKnownRemovalEvent(env,run,{gone:4.5},'2026-10-23T10:05:00.000Z');
+await rate(run,{gone:4.5},'2026-10-23T10:05:00.000Z');
 const stored=records.get([...records.keys()].find(key=>key.endsWith('run-1-watchlist.json')));
 const gone=stored.removed.find(film=>film.id==='gone'),missing=stored.removed.find(film=>film.id==='missing');
 assert.equal(gone.rating,4.5);
@@ -65,7 +72,7 @@ const replayed=records.get([...records.keys()].find(key=>key.endsWith('run-1-wat
 assert.equal(replayed.removed.find(film=>film.id==='gone').rating,4.5);
 assert.equal(replayed.removed.find(film=>film.id==='gone').ratingObservedAt,gone.ratingObservedAt);
 ctx.stale={events:[{...event,removed:[{...removed[0],rating:3,ratingObservedAt:'2026-10-23T11:00:00.000Z'},removed[1]]}]};
-await ctx.enrichKnownRemovalEvent(env,ctx.stale,{gone:3},'2026-10-23T11:00:00.000Z');
+await rate(ctx.stale,{gone:3},'2026-10-23T11:00:00.000Z');
 assert.equal(records.get([...records.keys()].find(key=>key.endsWith('run-1-watchlist.json'))).removed.find(film=>film.id==='gone').rating,4.5);
 const listed=await ctx.eventPage(env);
 const listedGone=listed.events.find(item=>item.id==='run-1-watchlist').removed.find(film=>film.id==='gone');
@@ -121,7 +128,7 @@ const undecorated=records.get([...records.keys()].find(key=>key.endsWith('run-5-
 assert.equal(undecorated.removed[0].rating,undefined);
 assert.equal([...records.keys()].filter(key=>key.endsWith('run-5-watchlist.json')).length,1);
 bucket.failRatedEvent=false;
-await ctx.enrichKnownRemovalEvent(env,decorateRun,{gone:4.5},'2026-10-23T17:05:00.000Z');
+await rate(decorateRun,{gone:4.5},'2026-10-23T17:05:00.000Z');
 const decoratedStored=records.get([...records.keys()].find(key=>key.endsWith('run-5-watchlist.json')));
 assert.equal(decoratedStored.removed[0].rating,4.5);
 assert.equal(decoratedStored.removed[0].ratingObservedAt,'2026-10-23T17:05:00.000Z');

@@ -20,7 +20,7 @@ The integration footer does not use this document for current ratings health; th
 - The per-film lookup and the owner `PUT /api/enrichment/actual-ratings` write single ratings through the fact records ([user facts contract](letterboxd-user-facts.md)); no switch selects a legacy writer ([ADR 0055](../../adr/0055-retire-letterboxd-facts-switch.md)).
 - A watchlist removal event still receives a half-star rating when the per-film lookup records one.
 - A historical removal event receives an already stored half-star when a ratings removal step links a rated legacy entry of that exact film id ([ADR 0071](../../adr/0071-legacy-removal-event-link.md)). The removal is not itself a viewing, and a missing rating is not invented.
-- The films-list scan (`refreshRatingsFromFilms`) and the diary and baseline repairs stay in the code but are not part of the EPG commit. A stored films-list summary remains the floor of later observations.
+- The Worker does not scan the public films list and has no diary or baseline repair path; the EPG commit requests nothing from Letterboxd. A stored films-list summary remains the floor of later observations.
 
 ## Ratings attempt
 
