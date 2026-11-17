@@ -1,12 +1,18 @@
-// AIR-456 H1 guard. The diagnostic D1 binding in wrangler.jsonc must name the REAL database the owner created (GO-1). While `database_id` is the all-zero placeholder this test fails on
-// purpose: a deploy of this configuration would fail (or bind nothing), so the pull request must not merge. Replace the placeholder with the uuid read back from the created database.
+// AIR-457 retirement guard (replaces the AIR-456 H1 "binding names a real database" guard). The Worker `iptv` carries NO diagnostic binding, var, Workflow or route:
+// the diagnostic D1 / EU R2 / Workflow can be deprovisioned without an orphan reference. The inert modules, ADR 0121/0124 and the dated evidence stay.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-const config=JSON.parse(fs.readFileSync('wrangler.jsonc','utf8').replace(/^\s*\/\/.*$/gm,''));
-const entry=config.d1_databases.find(item=>item.binding==='EPG_DIAGNOSTIC_DB');
-assert.ok(entry,'the diagnostic D1 binding is declared');
-assert.match(entry.database_id,/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,'database_id is a uuid');
-assert.notEqual(entry.database_id,'00000000-0000-0000-0000-000000000000','database_id is still the placeholder: create the diagnostic database (GO-1) and put its uuid here');
-assert.notEqual(entry.database_id,config.d1_databases.find(item=>item.binding==='DB').database_id,'the diagnostic database id is not the production one');
-console.log('EPG diagnostic bindings: the diagnostic D1 binding names a real, non-production database passed');
+const raw=fs.readFileSync('wrangler.jsonc','utf8');
+const config=JSON.parse(raw.replace(/^\s*\/\/.*$/gm,''));
+assert.doesNotMatch(raw,/EPG_DIAGNOSTIC|EpgDiagnosticWorkflow|iptv-epg-diagnostic|38033d5e-9460-4d24-95d1-ff4a0af56b20/,'wrangler.jsonc names no diagnostic resource');
+assert.deepEqual(config.d1_databases.map(item=>item.binding),['DB'],'only the production D1 binding');
+assert.deepEqual(config.r2_buckets.map(item=>item.binding),['BUCKET'],'only the production R2 binding');
+assert.deepEqual(config.workflows.map(item=>item.binding),['DISCOVERY_WORKFLOW','RATINGS_WORKFLOW','EPG_WORKFLOW','PRODUCER_WORKFLOW'],'production Workflows unchanged');
+assert.equal(config.d1_databases[0].database_id,'3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb','production D1 id unchanged');
+assert.deepEqual(config.triggers.crons,['0 * * * *'],'single hourly cron unchanged');
+assert.equal(config.keep_vars,true,'keep_vars unchanged');
+const worker=fs.readFileSync('src/worker.js','utf8'),build=fs.readFileSync('build.mjs','utf8');
+assert.doesNotMatch(worker,/api\/epg\/diagnostic|EpgDiagnosticRun\.route/,'the Worker does not route the diagnostic API');
+assert.doesNotMatch(build,/export class EpgDiagnosticWorkflow/,'the bundle entry does not export the diagnostic Workflow class');
+console.log('EPG diagnostic retirement: no diagnostic binding, var, Workflow class or route remains; production bindings unchanged passed');

@@ -395,18 +395,37 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
 // for the current profile and fingerprint, shows only when the record's shows were written by the pinned generation (zero shows is a valid
 // answer), a Letterboxd link only when stored records prove it. No write, no fetch.
 const CATALOG_FILM_TMDB=/^[1-9]\d{0,11}$/;
-function catalogFilmPage({film:stored,programmeRunId,completedOnly=false,index,profile,metadata,watchlist,programme,freshness,now}){
+// AIR-475 (production acceptance): the owner's facts and the stored forecast of a retained Film live under its Letterboxd lid in the view index, while the permanent page is asked by `tmdb_<n>`.
+// `alias` is the index entry of the lid the D1 identity bridge verified (never a title, year or slug match); the two entries are merged field by field: the entry that holds a prediction supplies
+// it with its fingerprint, a rating known on both and different is unknown, a watched mark on either counts. Nothing is invented: no entry, no field.
+const catalogKnownRating=value=>value!=null&&value!==''&&Number.isFinite(Number(value))?Number(value):null;
+function catalogMergedItem(primary,alias){
+ const a=primary&&typeof primary==='object'?primary:null,b=alias&&typeof alias==='object'?alias:null;
+ if(!a||!b)return a||b||undefined;
+ const holder=a.prediction?a:b.prediction?b:a,item={...b,...a,...(holder.prediction?{prediction:holder.prediction,fingerprint:holder.fingerprint,fingerprintHash:holder.fingerprintHash,impactFeatures:holder.impactFeatures}:{})};
+ const ra=catalogKnownRating(a.actualRating),rb=catalogKnownRating(b.actualRating);
+ if(ra!==null&&rb!==null&&ra!==rb)delete item.actualRating;else if(ra===null&&rb!==null)item.actualRating=rb;else if(ra!==null)item.actualRating=ra;
+ item.watched=a.watched===true||b.watched===true;
+ return item;
+}
+function catalogFilmPage({film:stored,programmeRunId,completedOnly=false,index,alias=null,profile,metadata,watchlist,programme,freshness,now}){
  const film=withCompletedShows(stored,completedOnly&&programme?.runId===programmeRunId?completedShowsByTmdb(programme):new Map(),programmeRunId,completedOnly);
- const id=String(film.id),tmdbId=String(film.tmdbId),item=index?.[id],artwork=catalogPosters(metadata)(film);
+ const id=String(film.id),tmdbId=String(film.tmdbId),item=catalogMergedItem(index?.[id],alias?index?.[alias]:null),artwork=catalogPosters(metadata)(film);
  const letterboxdUrl=catalogLetterboxdUrls({metadata,watchlist,programme,catalog:{[id]:film}})(film);
+ // The compatibility evaluator decides (ADR 0031: `current` and `compatible` are both a usable forecast, only a real `stale` verdict is not): never a comparison of version numbers. A stale forecast
+ // is still shown, marked with the evaluator's own reason; the stored fingerprint is shown whatever the forecast's freshness, because it is the film's own stored facts.
+ const stored_=profile&&item?.prediction?item.prediction:null,verdict=stored_?freshness.verdictOf?.(item,film)??null:null;
  const current=!!(profile&&item?.prediction&&freshness.indexed(item,film));
- const prediction=current?item.prediction:null,fingerprint=current&&item.fingerprint&&item.fingerprint.fingerprintHash===item.fingerprintHash?item.fingerprint:null,facet=prediction?canonicalMoodFacet(fingerprint,prediction):null;
+ const prediction=stored_?{...stored_,...(current?{}:{stale:true,staleReason:verdict?.reason||'stale'}),...(verdict?.outcome==='compatible'||verdict?.outcome==='current'?{compatibility:verdict.outcome}:{})}:null;
+ const fingerprint=item?.fingerprint&&typeof item.fingerprint==='object'&&item.fingerprint.fingerprintHash===item.fingerprintHash?item.fingerprint:null,facet=fingerprint||prediction?canonicalMoodFacet(fingerprint,prediction):null,rating=catalogKnownRating(item?.actualRating);
  const shows=programmeRunId&&film.showsProgrammeRunId===programmeRunId&&Array.isArray(film.shows)?dedupeShows(film.shows).sort((a,b)=>Number(a.start)-Number(b.start)||String(a.channelId||'').localeCompare(String(b.channelId||''),'en')):[];
  const future=shows.filter(show=>Number(show.start)>now);
  return {id,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:artwork.poster,url:film.url||null,...(letterboxdUrl?{letterboxdUrl}:{}),
   directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
   ...catalogLifecycle(shows,film.runtime,now),nextStart:future.length?Number(future[0].start):null,
-  prediction:prediction?{predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus??null,confidence:prediction.confidence??null,...(Object.hasOwn(prediction,'confidenceAssessment')?{confidenceAssessment:prediction.confidenceAssessment,fingerprintHash:prediction.fingerprintHash??null}:{}),matchSignals:Array.isArray(prediction.matchSignals)?prediction.matchSignals:[],mainRisk:prediction.mainRisk??null,moodIds:facet.moodIds}:null,
+  // The owner's own facts (ratings domain): the known Letterboxd rating and the watched mark, shown for any retained Film whether or not it is on the watchlist; a watched film without a rating has none.
+  actualRating:rating,watched:item?.watched===true,
+  prediction:prediction?{predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus??null,confidence:prediction.confidence??null,...(Object.hasOwn(prediction,'confidenceAssessment')?{confidenceAssessment:prediction.confidenceAssessment,fingerprintHash:prediction.fingerprintHash??null}:{}),matchSignals:Array.isArray(prediction.matchSignals)?prediction.matchSignals:[],mainRisk:prediction.mainRisk??null,moodIds:facet.moodIds,tasteProfileVersion:Number.isInteger(prediction.tasteProfileVersion)?prediction.tasteProfileVersion:null,...(prediction.compatibility?{compatibility:prediction.compatibility}:{}),...(prediction.stale?{stale:true,staleReason:prediction.staleReason}:{})}:null,
   fingerprint:fingerprint?{plotMechanics:fingerprint.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(fingerprint.execution)}:null};
 }
 // The state of one TMDB movie identity among the catalog records read for it. Only a record whose identity is exactly `tmdb:<n>` is a film here;
@@ -544,7 +563,27 @@ async function catalogFilmRoute(env,tmdbId){
  const runId=programme?.runId&&programme.runId===pinnedRunId?pinnedRunId:null;
  if(pinnedRunId&&!runId&&!degraded.includes('programme'))degraded.push('programme');
  const freshness=profile?await optional('freshness',()=>predictionFreshness(env,profile)):null;
- const page=catalogFilmPage({film:found.film,programmeRunId:runId,completedOnly:publication?.authority==='d1'&&!!pinnedRunId,index:index||{},profile:freshness?profile:null,metadata,watchlist,programme,freshness:freshness||{indexed:()=>false},now});
+ // The Letterboxd lid the D1 identity bridge verified for this TMDB id (open marker only): the owner's facts and the stored forecast are indexed under it. A contested or unreadable identity is degraded, never guessed.
+ const alias=await optional('identity',async()=>{
+  if((await CanonicalCatalogReader.catalogReaderGate(env)).mode!=='d1')return null;
+  const bridge=await CanonicalCatalogReader.catalogFilmIdentityBridge(env,'tmdb_'+tmdbId);
+  if(bridge.state==='conflict'||bridge.state==='retired')degraded.push('identity');
+  return bridge.state==='ok'&&bridge.lid?bridge.lid:null;
+ });
+ // The forecast, the fingerprint and the owner's facts of exactly the two verified spellings come from the D1 domains that own them while those are d1 and open, whether or not the R2 view index holds the
+ // keys (the index is only the seed and the fallback of a domain that is not d1). Two bounded reads per domain, nothing written; an unreadable domain is a 503, never a stale mirror.
+ let facts;
+ try{
+  const keys=[...new Set(['tmdb_'+tmdbId,alias].filter(Boolean))];
+  facts=Object.fromEntries(keys.map(key=>[key,index?.[key]||{}]));
+  if(typeof PredictionD1!=='undefined')facts=await PredictionD1.projectItems(env,keys,facts,canonicalMoodFacet);
+  if(typeof RatingsD1!=='undefined')facts=await RatingsD1.viewItems(env,keys,facts);
+ }catch(error){
+  const code=String(error?.code||'');
+  if(code.startsWith('prediction_')||code.startsWith('ratings_'))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);
+  throw error;
+ }
+ const page=catalogFilmPage({film:found.film,alias,programmeRunId:runId,completedOnly:publication?.authority==='d1'&&!!pinnedRunId,index:facts,profile:freshness?profile:null,metadata,watchlist,programme,freshness:freshness||{indexed:()=>false},now});
  try{await catalogMetadataFinish(env,metaGate);}
  catch(error){const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
  return json({status:'found',programmeRunId:runId,generatedAt:new Date(now).toISOString(),...(degraded.length?{degraded}:{}),film:page});
@@ -2055,7 +2094,6 @@ async fetch(request,env,execution){
  if(url.pathname.startsWith('/api/')){
   if(!env.BUCKET)return json({error:'Storage unavailable'},503);
   if(['POST','PUT'].includes(request.method)&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
-  if(url.pathname.startsWith('/api/epg/diagnostic/'))return await EpgDiagnosticRun.route(request,env,url);
   if(url.pathname.startsWith('/api/enrichment/'))return await enrichmentRoute(request,env,url,execution);
   if(url.pathname.startsWith('/api/d1/'))return await catalogD1Route(request,env,url);
   if(url.pathname==='/api/admin/health')return await adminHealthRoute(request,env,url);

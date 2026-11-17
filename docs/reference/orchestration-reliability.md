@@ -290,7 +290,7 @@ Parity with production code: committed through the real `stageSealedGeneration`,
 
 ## EPG diagnostic canary: the run and its receipt (AIR-455, ADR 0124)
 
-Owner-only, inert until the diagnostic resources are provisioned and bound (AIR-456 H1: `EPG_DIAGNOSTIC_DB`, `EPG_DIAGNOSTIC_BUCKET`, `EPG_DIAGNOSTIC_RESOURCE_ID`). Authorization is Cloudflare Access at the edge (no in-Worker JWT validator or second audience; the edge policy is verified at AIR-456 provisioning); without the diagnostic bindings every route then answers `503 diagnostic_bindings_absent`, no Workflow instance is created and nothing is written.
+**Detached from the deployed Worker by AIR-457 ([ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md)): no route, binding or Workflow class; the module `src/epg-diagnostic-run.js` stays as inert code and its tests drive it directly. The text below is the contract of that module.** Owner-only, inert until the diagnostic resources are provisioned and bound (AIR-456 H1: `EPG_DIAGNOSTIC_DB`, `EPG_DIAGNOSTIC_BUCKET`, `EPG_DIAGNOSTIC_RESOURCE_ID`). Authorization is Cloudflare Access at the edge (no in-Worker JWT validator or second audience; the edge policy is verified at AIR-456 provisioning); without the diagnostic bindings every route then answers `503 diagnostic_bindings_absent`, no Workflow instance is created and nothing is written.
 
 | Route | Kind | Contract |
 |---|---|---|

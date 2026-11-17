@@ -76,6 +76,30 @@ assert.deepEqual(JSON.parse(JSON.stringify(queue.compatibility)),{mode:'selectiv
 const view=(await api('enrichment/view')).data.films;
 for(const id of ['film000','film001','film002'])assert.equal(queue.pending.includes(id),view[id].prediction.stale===true,id);
 
+// AIR-475 (production acceptance of the permanent film page): the page reads the stored forecast through the SAME evaluator. A forecast made under profile v1 whose change does not touch the film is
+// `compatible` and is shown, with v1 as its provenance; only a real `stale` verdict marks it, with the evaluator's own reason. The stored fingerprint shows whatever the forecast's freshness. The entry is
+// indexed under the film's Letterboxd id and reached only through the verified alias the route passes; without the alias the TMDB entry has nothing to show.
+{
+ ctx.pageEnv=env;ctx.pageIndex=read('enrichment/view-index.json');ctx.pageProfile=read('enrichment/profile/current.json');
+ const page=async(tmdb,genres,alias,index=ctx.pageIndex)=>{ctx.pageArgs={tmdb,genres,alias,index};return JSON.parse(JSON.stringify(await vm.runInContext("(async()=>{const a=pageArgs,freshness=await predictionFreshness(pageEnv,pageProfile);return catalogFilmPage({film:{id:'tmdb_'+a.tmdb,tmdbId:a.tmdb,title:'T',genres:a.genres,shows:[]},programmeRunId:null,index:a.index,alias:a.alias,profile:pageProfile,metadata:null,watchlist:null,programme:null,freshness,now:Date.now()});})()",ctx)));};
+ const withTmdb=(tmdb,entry)=>({...ctx.pageIndex,['tmdb_'+tmdb]:entry});
+ // film000: a drama predicted under v1, unaffected by the v2 horror edit.
+ let f=await page('100',['Драма'],'film000',withTmdb(100,{watched:true}));
+ assert.deepEqual([f.prediction.compatibility,f.prediction.tasteProfileVersion,f.prediction.stale],['compatible',1,undefined],'a v1 forecast the evaluator calls compatible is shown as usable with v1 as its provenance');
+ assert.deepEqual([f.watched,f.actualRating],[true,null],'a watched film without a rating has none');assert.ok(f.fingerprint&&f.fingerprint.plotMechanics.length,'the stored fingerprint is shown');
+ // film001: a horror film under the v2 horror edit: a real stale verdict, with its reason, still showing the stored facts.
+ f=await page('101',['Ужасы'],'film001',withTmdb(101,{}));
+ assert.deepEqual([f.prediction.stale,f.prediction.staleReason,f.prediction.compatibility],[true,'profile_impacted',undefined],'a really stale forecast says why');assert.ok(f.fingerprint,'the fingerprint is shown although the forecast is stale');
+ // film002: no impact features stored: the evaluator has no fingerprint record to judge and says so with its own reason.
+ f=await page('102',['Драма'],'film002',withTmdb(102,{}));assert.deepEqual([f.prediction.stale,f.prediction.staleReason],[true,'fingerprint_not_current']);
+ // Without the verified alias the TMDB entry (watchlist facts only) has no forecast: the very defect of the production acceptance.
+ f=await page('100',['Драма'],null,withTmdb(100,{watched:true}));assert.deepEqual([f.prediction,f.fingerprint,f.watched],[null,null,true]);
+ // The merged rating: known on the alias, known on both and different is unknown, a rating is not a watched mark.
+ const rated=(tmdb,own,aliased)=>({...ctx.pageIndex,['tmdb_'+tmdb]:own,film000:{...ctx.pageIndex.film000,...aliased}});
+ f=await page('100',['Драма'],'film000',rated(100,{},{actualRating:4.5,watched:true}));assert.deepEqual([f.actualRating,f.watched],[4.5,true]);
+ f=await page('100',['Драма'],'film000',rated(100,{actualRating:3},{actualRating:4.5}));assert.deepEqual([f.actualRating,f.watched],[null,false],'two different known ratings are unknown, never picked');
+ f=await page('100',['Драма'],'film000',rated(100,{actualRating:4},{actualRating:4}));assert.deepEqual([f.actualRating,f.watched],[4,false],'a rating alone does not mark a film watched');
+}
 // The unaffected drama keeps its prediction (no recomputation), the horror film and the film without impact features are
 // pending, the film without a prediction stays pending. A stale binding of any value changes nothing.
 for(const value of ['strict','selective','Selective',' strict',true]){env.PREDICTION_PROFILE_COMPATIBILITY=value;queue=await reconcile();assert.equal(queue.compatibility.mode,'selective',String(value));assert.deepEqual(pending(queue),['film001','film002','film003'],'binding '+String(value));}

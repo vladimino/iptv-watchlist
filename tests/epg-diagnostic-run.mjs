@@ -92,7 +92,7 @@ async function domain({discovery='real',realPublished=false,provision=true,datas
   receipts:()=>sql(diagFile,'SELECT idempotency_key, status, slot FROM epg_diagnostic_receipt ORDER BY idempotency_key'),
   async call(method,pathname,body,extraHeaders){
    const init={method,headers:{'content-type':'application/json',...(extraHeaders||{})}};if(extraHeaders&&extraHeaders['Cf-Access-Jwt-Assertion']===null)delete init.headers['Cf-Access-Jwt-Assertion'];if(body!==undefined)init.body=JSON.stringify(body);
-   const response=await context.worker.fetch(new Request('http://worker.test'+pathname,init),env);
+   const request=new Request('http://worker.test'+pathname,init);const response=await Run.route(request,env,new URL(request.url));// AIR-457: the Worker no longer routes /api/epg/diagnostic/*, so the inert run module is driven directly
    return {status:response.status,body:await response.json()};
   },
   // The Workflow body, driven directly with a step that runs each function once, as the engine does on a first attempt.
@@ -123,8 +123,8 @@ const sealDiag=SOURCES;void sealDiag;
  assert.doesNotMatch(fs.readFileSync('src/mcp.js','utf8'),/mcpVerifyAccessWith|ownerEmail/,'the MCP verifier is unchanged');
  // routing: methods and unknown paths
  assert.equal((await d.call('GET','/api/epg/diagnostic/launch')).status,405);assert.equal((await d.call('POST','/api/epg/diagnostic/preflight',{})).status,405);assert.equal((await d.call('GET','/api/epg/diagnostic/nothing')).status,404);
- const crossOrigin=await d.context.worker.fetch(new Request('http://worker.test/api/epg/diagnostic/launch',{method:'POST',headers:{Origin:'http://elsewhere.test','content-type':'application/json'},body:JSON.stringify(launchBody(KEY1))}),d.env);
- assert.equal(crossOrigin.status,403,'a cross-origin POST is refused by the existing origin rule before the route');
+ const detached=await d.context.worker.fetch(new Request('http://worker.test/api/epg/diagnostic/launch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(launchBody(KEY1))}),d.env);
+ assert.notEqual(detached.status,202,'AIR-457: the Worker no longer routes the diagnostic launch');assert.notEqual(detached.status,200);
  assert.equal(d.calls.create.length,0);
 }
 // ================================ 2. preflight, gates and launch ================================
@@ -343,10 +343,10 @@ const failedWith=async(label,{prepare,expect,statusExpect='failed'})=>{
 // static wiring
 {
  const wrangler=fs.readFileSync('wrangler.jsonc','utf8'),build=fs.readFileSync('build.mjs','utf8'),workerSource=fs.readFileSync('src/worker.js','utf8');
- assert.match(wrangler,/"binding": "EPG_DIAGNOSTIC_WORKFLOW"[\s\S]*"class_name": "EpgDiagnosticWorkflow"/);
+ assert.doesNotMatch(wrangler,/EPG_DIAGNOSTIC|EpgDiagnosticWorkflow|iptv-epg-diagnostic/,'AIR-457: no diagnostic binding, var or Workflow in wrangler.jsonc');
  assert.doesNotMatch(wrangler,/"crons": \[[^\]]*,/,'still the single hourly cron (the diagnostic storage bindings are asserted in epg-diagnostic-context.mjs)');
  assert.match(wrangler,/"crons": \["0 \* \* \* \*"\]/);
- assert.match(build,/EpgDiagnosticWorkflow extends WorkflowEntrypoint/);assert.match(build,/runEpgDiagnosticWorkflow/);
+ assert.doesNotMatch(build,/EpgDiagnosticWorkflow extends WorkflowEntrypoint/,'AIR-457: the Workflow class is no longer exported from the bundle entry');assert.match(build,/runEpgDiagnosticWorkflow/,'the inert run function stays in the bundle');assert.doesNotMatch(workerSource,/EpgDiagnosticRun\.route|api\/epg\/diagnostic/,'AIR-457: the Worker no longer routes the diagnostic API');
  assert.doesNotMatch(workerSource,/EPG_DIAGNOSTIC_WORKFLOW|\.create\(\{id/,'the Worker entry creates no diagnostic instance itself; only the owner-only launch does');
  assert.doesNotMatch(SOURCES.run,/\bfetch\(|scheduled\(|setInterval|setTimeout|crons?\b/i,'no network, no timer, no cron in the run module');
  assert.equal((SOURCES.run.match(/\.create\(\{/g)||[]).length,1,'one create call, in the launch reconcile');
