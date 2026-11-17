@@ -10,7 +10,7 @@ Bounded audit of R2 runtime branches for domains that are D1-authoritative: cano
 
 ## Verdict
 
-**No code was removed.** Every remaining legacy-looking R2 branch is one of: a marker-gated arm that tests, the cutover scripts or the revert toolchain still exercise; the held-reader contract; a local or test stand-in; an intentional compatibility mirror or immutable source. Removing the large groups depends on one owner decision that this card cannot take (see [D-1](#deferred-items)). Two paths are **still authoritative on R2 in code** and are the real findings ([F-1](#findings), [F-2](#findings)).
+**No code was removed.** Every remaining legacy-looking R2 branch is one of: a marker-gated arm that tests, the cutover scripts or the revert toolchain still exercise; the held-reader contract; a local or test stand-in; an intentional compatibility mirror or immutable source. Removing the large groups depends on one owner decision that this card cannot take (see [D-1](#deferred-items)). Two findings remain: **one mutable R2 poster writer path** that is still authoritative in code ([F-1](#findings)) and **one stale R2 metadata reader** ([F-2](#findings)), which is not a second R2 authority for canonical Film metadata.
 
 Three candidates that the passes proposed as removable were checked and are **kept**:
 
