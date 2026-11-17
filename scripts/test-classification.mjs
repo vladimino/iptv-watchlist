@@ -1162,6 +1162,9 @@ export const FILES={
  "prediction-recovery.mjs": {
   "suite": "core"
  },
+ "prediction-recovery-intent.mjs": {
+  "suite": "core"
+ },
  "prediction-footer-health.mjs": {
   "suite": "core"
  },

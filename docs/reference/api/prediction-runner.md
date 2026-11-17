@@ -17,6 +17,9 @@ Four observations are kept apart. **Run completion** is `status: complete` (or `
 
 ## Queue writes
 
+A confirmed [scoped recovery intent](admin-actions.md#scoped-prediction-recovery-intent) ([ADR 0165](../../adr/0165-scoped-prediction-recovery-intent.md), Proposed) is not a queue writer. The freshness rule reads the active intents once per request and treats a film's exact denied version as not current; the rebuild stamps `recoveryRevision` (and `recovery {revision, activeIntents, denied}`), and the advance gate of `start` and of the batch v2 preflight answers `recovery_changed` when the revision moved, so the next start rebuilds the queue the ordinary way. Denied films carry `work.reason = recovery_intent`. Without migration `0024` nothing of this applies and the queue carries no stamp.
+
+
 `enrichment/prediction-queue.json` has several writers ([ADR 0064](../../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31):
 
 - the runner routes (`start`, `next`, `submit`, `complete`);
