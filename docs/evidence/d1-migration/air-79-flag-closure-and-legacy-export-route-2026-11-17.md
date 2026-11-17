@@ -8,7 +8,7 @@ The flag closure audit asked for in the card: compare the registry in `src/featu
 
 **Live observations** were two reads of owner-only MCP tools that are documented as non-writing (`feature_flags` never touches storage, and `ratings_sync_status` takes no lease and requests nothing). They were made by the author at 13:44:57 UTC. **Code reading** used one scan of `src/` for names read as `env.NAME`, `source.NAME` and similar forms, then a lookup of each name in the flag reference and in all maintained documentation outside ADRs, evidence and the archive.
 
-**Not done:** the Cloudflare binding inventory was not read by the author; the independent reviewer of the first audit reported 23 Worker bindings and the absence of the three retired projector selectors, and that is the only binding-level observation cited here. No binding, flag, secret, marker, schedule or stored object was changed.
+**Binding inventory:** not read when this audit was first written; it was read afterwards and is recorded in [Binding inventory](#binding-inventory). No binding, flag, secret, marker, schedule or stored object was changed by either read.
 
 ## Live readout
 
@@ -40,12 +40,36 @@ The registry and the flag reference agree: all 23 registered names are documente
 
 **Effect on the Worker.** A request to those paths now reaches the dispatcher's common `404 {"error":"Not found"}`, the same status as before. The only difference is for a `POST` or `PUT` that carries a foreign `Origin` header: it now meets the dispatcher's origin check first and gets `403` instead of `404`. Both are refusals; neither reads R2. The surface that reads an arbitrary R2 key by request is gone from the production bundle.
 
-**Bindings.** Whether Cloudflare holds variables or secrets named `MIGRATION_EXPORT_*` for this Worker was not observed. If they exist they are now inert. Removing a Cloudflare binding is an owner-controlled settings operation and is not part of this change; a separate card is needed only if the binding inventory shows them. The `feature_flags` tool does not list these names, so it cannot answer this.
+**Bindings.** The binding inventory read afterwards shows no `MIGRATION_EXPORT_*` binding on the Worker (see [Binding inventory](#binding-inventory)), so no binding removal is needed. The three names remain in the deny list of the isolated EPG diagnostic environment (`src/epg-diagnostic.js`) on purpose: they must never be copied into that environment, and that list is not the route.
+
+**Regression protection.** `tests/migration-export-route-absent.mjs` builds the Worker and runs the built bundle with the exporter's former origin, flags and key. It requires the route's path, handler, key header and legacy site id to be absent from the bundle, `404` on GET, HEAD, POST and PUT for every retired path, `403` for a foreign `Origin` on POST and PUT, and no call at all on the bucket.
+
+## Binding inventory
+
+**Read:** 17 November 2026, after the change above was merged, by the author through the Cloudflare API connector: one `GET` of the Worker script settings of `iptv`. Only binding names and types were kept; no value was returned, printed or stored, and nothing was written.
+
+| Type | Count | Names |
+| --- | --- | --- |
+| `r2_bucket` | 1 | `BUCKET` |
+| `d1` | 1 | `DB` |
+| `workflow` | 4 | `DISCOVERY_WORKFLOW`, `EPG_WORKFLOW`, `PRODUCER_WORKFLOW`, `RATINGS_WORKFLOW` |
+| `plain_text` | 9 | `EPG_XML_URL`, `LETTERBOXD_USERNAME`, `MCP_ACCESS_AUD`, `MCP_ACCESS_TEAM_DOMAIN`, `MONITOR`, `MONITOR_TELEGRAM_CHAT_ID`, `MONITOR_TRANSPORT`, `PREDICTION_DB_REQUIRED`, `RATINGS_DB_REQUIRED` |
+| `secret_text` | 3 | `MONITOR_HEARTBEAT_URL`, `MONITOR_TELEGRAM_BOT_TOKEN`, `TMDB_API_READ_ACCESS_TOKEN` |
+
+Checks against the code and the registry:
+
+- `MIGRATION_EXPORT_ENABLED`, `MIGRATION_EXPORT_KEY` and `MIGRATION_EXPORT_SITE_ID` are **not bound**. Neither are `OWNER_REVIEW_DB_OPTIONAL` and `PUBLISHED_EPG_DB_OPTIONAL` (the local stand-ins), nor any retired selector: `D1_ENRICHMENT_WRITE`, `D1_ENRICHMENT_WINDOW`, `D1_ENRICHMENT_BULK`, `DISCOVERY_EXECUTOR`, `DISCOVERY_LEDGER_MODE` and `RATINGS_PIPELINE` are all absent.
+- Every bound name has at least one reader in `src/`, so there is no binding without a consumer. The bindings of the detached EPG diagnostic runtime (`EPG_DIAGNOSTIC_WORKFLOW`, `EPG_DIAGNOSTIC_RESOURCE_ID`) are not present either.
+- Names the code reads without a binding are optional settings with a default or a transport that is not selected (`MONITOR_WEBHOOK_URL` is used only by the webhook transport, and `MONITOR_TRANSPORT` is `telegram`; `TMDB_REQUEST_INTERVAL_MS` and `FOOTER_SOURCE_TIMEOUT_MS` have defaults).
+
+The independent review of the first audit reported 23 Worker bindings. This read returned 18 entries. The difference is not explained here; the table is what the API returned, and the number 23 also matches the count of registered flags, which are a different set.
 
 ## Result
 
-No further migration orphan flag exists in the registry, and all retired selectors are absent from the live Worker. One legacy route with its three settings was removed from the bundle, and one undocumented stand-in setting is now documented. The binding inventory check for `MIGRATION_EXPORT_*` remains open and read-only.
+No further migration orphan flag exists in the registry, and all retired selectors are absent from the live Worker. One legacy route with its three settings was removed from the bundle, and one undocumented stand-in setting is now documented. The binding inventory check for `MIGRATION_EXPORT_*` is done and shows no such binding; no removal card is needed.
 
 ## Verification
 
 Local, on the final checkout of this change after a fresh `npm ci`: `npm run test:all` passed with the core suite at 420 of 420 files and the non-functional suite at 40 of 40; `npm run build` and `git diff --check` were clean; the mutation-anchor preflight passed (137 anchors, 2 harnesses); the documentation governance and timeless-documentation checks passed with no errors. The affected tests were also run on their own first: `migration-export`, `migration-import`, `get-write-audit` and `get-side-effects`. `get-side-effects` initially failed with `ENOENT` because it loads the Worker from its own file list, which named the moved file; the entry was dropped from that list and from the other 30 test lists that carried it. CI results of the pull request and the independent review are recorded on the card and the pull request, not here.
+
+**Follow-up (binding inventory and regression test).** On the checkout that adds `tests/migration-export-route-absent.mjs`, after a fresh `npm ci`: `npm run test:all` passed with the core suite at 421 of 421 files and the non-functional suite at 40 of 40; the new test ran in 0.4 s; `npm run build` and `git diff --check` were clean; the mutation-anchor preflight passed (137 anchors, 2 harnesses); `tests/test-classification.mjs` and `tests/run-tests-runner.mjs` pass with the new entry. The test first failed on a bundle needle that was too broad: `MIGRATION_EXPORT_ENABLED`, `_KEY` and `_SITE_ID` also appear in the isolated diagnostic environment's deny list, which is a guard and not the route, so the needles were narrowed to the route's path, handler, key header and legacy site id.
