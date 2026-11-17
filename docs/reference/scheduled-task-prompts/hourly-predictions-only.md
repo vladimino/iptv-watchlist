@@ -1,5 +1,7 @@
 # Hourly prompt — Stage B Predictions only
 
+**Retired, historical only.** This is the prompt of the retired one-film v5 runner. It calls `prediction_start`, `prediction_next`, `prediction_submit` and `prediction_validate`, which the Worker no longer exposes ([ADR 0162](../../adr/0162-retire-prediction-runner-v5.md)), so it is neither a producer nor a working rollback path. It is kept as history; do not install it.
+
 **Status:** the exact text proposed for the owner-approved registry edit of [AIR-324](https://trello.com/c/kNtaEbm8) (Hourly Predictions). This file is **not** the live ChatGPT Scheduled Task. Merging it does not change the registry, enable the task, or authorize a production run.
 
 **Construction:** the live prompt as captured in the AIR-324 rollback snapshot (19454 characters, SHA-256 `4a8868b2b8cccc13edd90abde5d009be602e7bca1a56bb015a976ac345b8d600`) with only these edits: the header names one duty (Predictions) and adds a forbidden list for `epg_sync_start`, `epg_sync_step`, discovery resolve, TMDB, ratings and lease reset; the whole Stage A (discovery catch-up) section is removed; in Stage B the one sentence about a stopped discovery becomes "К discovery не обращайся." Every other Stage B clause is byte-identical to the baseline.

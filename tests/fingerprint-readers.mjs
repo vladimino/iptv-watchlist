@@ -8,6 +8,7 @@ import {createHash,webcrypto} from 'node:crypto';
 // Worker releases run over one bucket, as in tests/fingerprint-migration-queue.mjs: release 1 is the live code, release 2
 // has schema 2 and a declared split of chase_escape. The transition rule always decides (ADR 0047) and explains with reasons;
 // a stale PREDICTION_FINGERPRINT_COMPATIBILITY binding of any value is inert.
+// Since ADR 0162 the only runner is batch runner v2 (D1 mode only); this R2 bucket is seeded through the shared writers a submit uses (`T.seedFilm`).
 const records=new Map(),etags=new Map();let revision=0;
 const store={
  async get(key){if(!records.has(key))return null;const text=records.get(key);return {etag:etags.get(key),text:async()=>text,json:async()=>JSON.parse(text)};},
@@ -28,7 +29,16 @@ function release(patch){
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,encodeURIComponent,decodeURIComponent,crypto:webcrypto,console});
  vm.runInContext(domain,ctx);
  for(const file of ['src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext((file==='src/enrichment.js'?patch(enrichmentSource):fs.readFileSync(file,'utf8')).replace('export default','globalThis.worker='),ctx);
- vm.runInContext('globalThis.T={loadPredictionDiagnosticSnapshot,predictionFilmDiagnostic,predictionQueueOverview,GENERAL_EXECUTION,EXECUTION};',ctx);
+ vm.runInContext(`globalThis.seedFilm=async(env,id,input,prediction)=>{
+  const state=await readFilmState(env,id),profile=await loadJSON(env,profileKey);let fingerprint=state.fingerprint;
+  if(input)fingerprint=await writeFingerprint(env,id,input,fingerprint,'generated',undefined,FINGERPRINT_PROMPT_VERSION,false);
+  const old=state.predictions?.current||null,at=new Date().toISOString();
+  const generated={...pickPrediction(prediction),filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:'seed',trigger:'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})};
+  const stored={...generated,...(await writePredictionVersion(env,id,generated))},history=[...(state.predictions?.history||[])];if(old)history.push({...old,replacedAt:at});
+  await saveJSON(env,filmKey(id)+'predictions.json',{current:stored,history});
+  await updateViewIndex(env,id,{prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});
+  return old?'recalculated':'created';};`,ctx);
+ vm.runInContext('globalThis.T={seedFilm,loadPredictionDiagnosticSnapshot,predictionFilmDiagnostic,predictionQueueOverview,GENERAL_EXECUTION,EXECUTION};',ctx);
  const api=async(path,method='GET',body,flags={})=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),{...baseEnv,...flags});return {status:response.status,data:await response.json()};};
  const diagnostics=async(id,flags={})=>plain(ctx.T.predictionFilmDiagnostic(await ctx.T.loadPredictionDiagnosticSnapshot({...baseEnv,...flags},id),id,Date.now()));
  const overview=async(flags={})=>plain(ctx.T.predictionQueueOverview(await ctx.T.loadPredictionDiagnosticSnapshot({...baseEnv,...flags}),Date.now()));
@@ -50,11 +60,7 @@ const execution=Object.fromEntries(R1.T.GENERAL_EXECUTION.map(key=>[key,R1.T.EXE
 const fingerprintOf=mechanics=>({fingerprintSchemaVersion:1,plotMechanics:mechanics,execution,moodLabels:['напряжённый','мрачный'],strengths:['Good'],risks:[],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']});
 const prediction={predictedRating:4,probability4Plus:.72,confidence:'medium',matchSignals:['Strong puzzle'],mainRisk:'Pace may lag',moodLabels:['напряжённый','мрачный']};
 const mechanicsOf={A:['heist'],B:['chase_escape','rescue'],C:['heist'],E:['chase_escape']};
-{
- const runId=(await R1.api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'})).data.runId;
- for(const id of ['A','B','C','E'])assert.equal((await R1.api('enrichment/submit','POST',{runId,items:[{filmId:id,fingerprint:fingerprintOf(mechanicsOf[id]),prediction}]},OBJECTS)).data.results[0].status,'created',id);
- await R1.api('enrichment/complete','POST',{runId,reason:'model_error'});
-}
+for(const id of ['A','B','C','E'])assert.equal(await R1.T.seedFilm({...baseEnv,...OBJECTS},id,fingerprintOf(mechanicsOf[id]),prediction),'created',id);
 const reconcile=async(R,flags={})=>{assert.equal((await R.api('enrichment/queue/reconcile','POST',{},flags)).status,200);return read('enrichment/prediction-queue.json');};
 const view=async(R,flags={})=>(await R.api('enrichment/view','GET',undefined,flags)).data;
 const historyOf=id=>JSON.stringify(read('enrichment/films/'+id+'/predictions.json').history);
@@ -183,9 +189,7 @@ assert.deepEqual(queue.pending,['D','B','E']);
  // Regenerate every prediction under version 3 at prompt 1 (release 1 code), so only the prompt axis differs afterwards.
  const R1v3=release(source=>source);
  await reconcile(R1v3);
- const runId=(await R1v3.api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'})).data.runId;
- for(const id of ['A','B','C','E'])assert.equal((await R1v3.api('enrichment/submit','POST',{runId,items:[{filmId:id,prediction}]})).data.results[0].status,'recalculated',id);
- await R1v3.api('enrichment/complete','POST',{runId,reason:'model_error'});
+ for(const id of ['A','B','C','E'])assert.equal(await R1v3.T.seedFilm(baseEnv,id,null,prediction),'recalculated',id);
  // The one deliberate write of this test; every read below must leave the history as it is now.
  for(const id of ['A','B','C','E'])historyBefore[id]=historyOf(id);
  queue=await reconcile(R3,SELECTIVE);

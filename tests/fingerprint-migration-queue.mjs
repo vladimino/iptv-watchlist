@@ -134,24 +134,18 @@ for(const binding of [SELECTIVE,STRICT,{PREDICTION_FINGERPRINT_COMPATIBILITY:' S
  }
  assert.equal(new Set(shapes).size,1,'the binding changes nothing');
 }
-// Release 1: the prompt-2 record is ahead of the code, even with a stale strict binding; the runner restores the prompt-1
-// record, no model call. Exact equality would have kept C; the rule in force does not.
+// Release 1: the prompt-2 record is ahead of the code, even with a stale strict binding. Exact equality would have kept C; the rule in force does not.
 queue=await reconcile(R1,STRICT);
 assert.equal(queue.fingerprintCompatibility.mode,'selective');
 assert.deepEqual(plain([queue.fingerprintCompatibility.fingerprintReasons,queue.fingerprintCompatibility.reasons]),[{exact:3,fingerprint_ahead:1},{exact:3,fingerprint_not_current:1}]);
 queue=await reconcile(R1);
 assert.deepEqual(queue.pending,['D','C'],'missing work before migration work');
 assert.deepEqual(plain(queue.work.C),{class:'fingerprint_and_prediction',requiredWork:'fingerprint_and_prediction',migration:'full',reason:'fingerprint_not_current'});
+// The v5 runner restored the prompt-1 record here (retired with v5, ADR 0162); the pointer is moved back by the shared writer so the release-2 steps start from schema 1.
 {
- const runId=await startRun(R1,SELECTIVE);
- const r=await next(R1,runId,SELECTIVE);assert.equal(r.status,200);
- assert.deepEqual(plain(r.data.items.map(item=>item.filmId)),['D'],'C needs no work after the restore');
- assert.deepEqual(plain([r.data.fingerprintSchemaVersion,r.data.fingerprintPromptVersion,r.data.predictionPromptVersion]),[1,1,1]);
- const p=pointer('C');
- assert.deepEqual([p.fingerprintPromptVersion,p.produced,p.previous.fingerprintPromptVersion],[1,'restored',2]);
- assert.equal(keysUnder('enrichment/films/C/fingerprint-generations/').length,2,'a restore adds no record');
- assert.deepEqual(read('enrichment/runs/'+runId+'.json').restored,['C']);
- await finish(R1,runId);
+ const {filmId:_i,fingerprintHash:_h,generatedAt:_g,invalidatedAt:_n,fingerprintPromptVersion:_p,produced:_r,previous:_v,...content}=pointer('C');
+ await R1.T.writeFingerprint(baseEnv,'C',content,pointer('C'),'generated',undefined,1);
+ assert.equal(pointer('C').fingerprintPromptVersion,1);assert.equal(keysUnder('enrichment/films/C/fingerprint-generations/').length,2,'the same body under prompt 1 adds no record');
 }
 
 // Release 2 with a stale strict binding: the transition rule decides; the shadow counters show that exact equality would
@@ -180,62 +174,31 @@ assert.deepEqual(stable(await reconcile(R2,SELECTIVE)),stable(queue),'a repeated
  const freshness=await R2.T.predictionFreshness({...baseEnv,...SELECTIVE},read('enrichment/profile/current.json')),state=id=>({prediction:read('enrichment/films/'+id+'/predictions.json').current,fingerprint:pointer(id)});
  assert.equal(freshness.work(state('E').prediction,state('E').fingerprint,['Ужасы']).reason,queue.work.E.reason,'the queue and the runner give the same stale reason');
  assert.equal(freshness.work(state('A').prediction,state('A').fingerprint,['Драма']).outcome,'current');
- const runId=await startRun(R2,SELECTIVE,3);
- let r=await next(R2,runId,SELECTIVE);assert.equal(r.status,200);
- assert.deepEqual(plain(r.data.items.map(item=>[item.filmId,item.requiredWork])),[['D','fingerprint_and_prediction'],['B','fingerprint_and_prediction'],['E','fingerprint_and_prediction']]);
  const oldB=pointer('B'),oldPredictionA=read('enrichment/films/A/predictions.json').current;
- r=await R2.api('enrichment/submit','POST',{runId,items:[{filmId:'B',fingerprint:fingerprintOf(['chase','rescue'],2),prediction}]},{...SELECTIVE,...OBJECTS});
- assert.equal(r.data.results[0].status,'recalculated',JSON.stringify(r.data));
+ assert.equal(await seed(R2,'B',fingerprintOf(['chase','rescue'],2),{...SELECTIVE,...OBJECTS}),'recalculated');
  const newB=pointer('B');
  assert.deepEqual([newB.fingerprintSchemaVersion,newB.fingerprintPromptVersion,newB.produced,newB.previous],[2,1,'generated',{fingerprintHash:oldB.fingerprintHash,fingerprintSchemaVersion:1,fingerprintPromptVersion:1}]);
  assert.notEqual(newB.fingerprintHash,oldB.fingerprintHash);
  assert.equal(keysUnder('enrichment/films/B/fingerprints/').length,2);assert.equal(keysUnder('enrichment/films/B/fingerprint-generations/').length,2);
  assert.equal(read('enrichment/films/B/predictions.json').current.fingerprintSchemaVersion,2,'the new prediction carries its fingerprint schema');
  assert.equal(read('enrichment/films/B/predictions.json').history.at(-1).fingerprintHash,oldB.fingerprintHash,'the old prediction is history');
- r=await R2.api('enrichment/submit','POST',{runId,items:[{filmId:'D',fingerprint:fingerprintOf(['heist'],2),prediction}]},{...SELECTIVE,FINGERPRINT_VERSION_OBJECTS:'off'});
- assert.equal(r.data.results[0].status,'created');
+ assert.equal(await seed(R2,'D',fingerprintOf(['heist'],2),{...SELECTIVE,FINGERPRINT_VERSION_OBJECTS:'off'}),'created');
  assert.deepEqual([pointer('D').fingerprintPromptVersion,pointer('D').produced,pointer('D').previous],[1,'generated',null],'the pointer is stamped');
  assert.deepEqual(keysUnder('enrichment/films/D/fingerprints/'),['enrichment/films/D/fingerprints/'+pointer('D').fingerprintHash+'.json'],'a stale off binding is inert: the body is written');
  assert.deepEqual(keysUnder('enrichment/films/D/fingerprint-generations/'),['enrichment/films/D/fingerprint-generations/'+pointer('D').fingerprintHash+'-s2-p1.json'],'and so is the generation record');
- assert.equal((await R2.api('enrichment/submit','POST',{runId,items:[{filmId:'A',prediction}]},SELECTIVE)).data.results[0].error,'Film not selected','a kept film is not work');
  assert.deepEqual(read('enrichment/films/A/predictions.json').current,oldPredictionA,'the kept prediction keeps its schema-1 provenance');
- // Preemption: a new hot film without a prediction enters the batch before the waiting migration film.
+ // Preemption: a new hot film without a prediction takes the free slot before the waiting migration film.
  programme([...films,film('G',['Драма'])]);
- // AIR-431: next advances the stored queue; the new film reaches it through the named refresh (reconcile, as the EPG tail and the resolver checkpoint do).
- assert.equal((await R2.api('enrichment/queue/reconcile','POST',{},SELECTIVE)).status,200);
- r=await next(R2,runId,SELECTIVE);assert.equal(r.status,200);
- assert.deepEqual(plain(r.data.items.map(item=>item.filmId)),['G'],'the one free slot goes to the new hot film; E waits');
- assert.equal((await next(R1,runId,SELECTIVE)).status,409,'the run is bound to the release that started it');
- assert.equal((await next(R1,runId,SELECTIVE)).data.code,'contract_changed');
- assert.equal((await R1.api('enrichment/complete','POST',{runId},SELECTIVE)).data.code,'contract_changed');
- assert.equal((await finish(R2,runId)).status,200,'a reasoned stop is still accepted');
+ const refreshed=await reconcile(R2,SELECTIVE);
+ assert.deepEqual(plain(R2.T.queueBatchIds(refreshed,refreshed.pending,1)),['G'],'the one free slot goes to the new hot film; E waits');
 }
 
-// Rollback to release 1: E (schema 1) is exact again. B is restored from its stored schema-1 record (prediction_only from
-// there); D, whose only stored generation is schema 2, has nothing to restore and regenerates. A stale strict binding does
-// not bring back the full regeneration of the rollback floor.
+// Rollback to release 1: E (schema 1) is exact again; B and D, now schema 2, are ahead of the code and need work. (The v5 runner's pointer
+// restore from a stored schema-1 record is retired with v5, ADR 0162.)
 programme(films);
 queue=await reconcile(R1,STRICT);
 assert.deepEqual(queue.pending,['B','D']);
 assert.deepEqual([queue.work.B.reason,queue.work.B.migration,queue.work.D.reason,queue.work.D.migration,queue.fingerprintCompatibility.fingerprintReasons.fingerprint_ahead],['fingerprint_not_current','full','fingerprint_not_current','full',2]);
-{
- const schema2=pointer('B');
- const runId=await startRun(R1,SELECTIVE);
- const r=await next(R1,runId,SELECTIVE);
- assert.deepEqual(plain(r.data.items.map(item=>[item.filmId,item.requiredWork])),[['B','prediction_only']],'the restored schema-1 fingerprint is reused; D waits for the next batch');
- assert.equal(r.data.items[0].fingerprint.fingerprintSchemaVersion,1);
- assert.deepEqual(plain(read('enrichment/runs/'+runId+'.json').restored),['B']);
- const restored=pointer('B');
- assert.deepEqual([restored.fingerprintSchemaVersion,restored.produced,restored.previous],[1,'restored',{fingerprintHash:schema2.fingerprintHash,fingerprintSchemaVersion:2,fingerprintPromptVersion:1}]);
- assert.equal(read('enrichment/films/B/predictions.json').current.fingerprintHash,schema2.fingerprintHash,'history predictions are not promoted back');
- assert.equal(keysUnder('enrichment/films/B/fingerprint-generations/').length,2,'a restore adds no record');
- assert.equal((await R1.api('enrichment/submit','POST',{runId,items:[{filmId:'B',prediction}]},SELECTIVE)).data.results[0].status,'recalculated','a prediction from the restored fingerprint, no fingerprint sent');
- assert.deepEqual([read('enrichment/films/B/predictions.json').current.fingerprintHash,read('enrichment/films/B/predictions.json').current.fingerprintSchemaVersion],[restored.fingerprintHash,1]);
- const again=await next(R1,runId,SELECTIVE);
- assert.deepEqual(plain(again.data.items.map(item=>[item.filmId,item.requiredWork])),[['D','fingerprint_and_prediction']],'D has no stored record to restore and regenerates');
- assert.equal(pointer('D').fingerprintSchemaVersion,2,'nothing was restored for D');
- await finish(R1,runId);
-}
 
 // Storage safety. A planted object under a generation record's key is accepted only when it is a valid record of the same
 // identity with a stored body; a corrupted or foreign object is a storage conflict and the pointer and index do not move.
@@ -245,50 +208,17 @@ assert.deepEqual([queue.work.B.reason,queue.work.B.migration,queue.work.D.reason
  const contentH=fingerprintOf(['heist']),hashH=hashOf('H',contentH),contentJ=fingerprintOf(['scam']),hashJ=hashOf('J',contentJ);
  write('enrichment/films/H/fingerprint-generations/'+hashH+'-s1-p1.json',{filmId:'H',fingerprintHash:'other',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,generatedAt:'2026-01-01T00:00:00.000Z',produced:'generated',previous:null});
  records.set('enrichment/films/J/fingerprint-generations/'+hashJ+'-s1-p1.json','{not json');etags.set('enrichment/films/J/fingerprint-generations/'+hashJ+'-s1-p1.json','etag-planted');
- const runId=(await R1.api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'})).data.runId;
- const r=await R1.api('enrichment/submit','POST',{runId,items:[{filmId:'H',fingerprint:contentH,prediction},{filmId:'J',fingerprint:contentJ,prediction}]},OBJECTS);
- for(const result of r.data.results)assert.deepEqual([result.status,result.error,result.failureScope],['failed','storage_error','run'],result.filmId+' is a storage conflict');
+ for(const [id,content] of [['H',contentH],['J',contentJ]])await assert.rejects(()=>seed(R1,id,content,OBJECTS),undefined,id+' is a storage conflict');
  for(const id of ['H','J']){assert.equal(pointer(id),null,id+' pointer not written');assert.equal(read('enrichment/view-index.json')[id]?.fingerprintHash,undefined,id+' index not written');assert.equal(read('enrichment/films/'+id+'/predictions.json'),null,id+' no prediction');}
  assert.equal(read('enrichment/films/H/fingerprint-generations/'+hashH+'-s1-p1.json').fingerprintHash,'other','the planted object is left as it is');
  // A valid record of the same identity written earlier (a retried submit) is accepted and keeps its first values.
  write('enrichment/films/H/fingerprint-generations/'+hashH+'-s1-p1.json',{filmId:'H',fingerprintHash:hashH,fingerprintSchemaVersion:1,fingerprintPromptVersion:1,generatedAt:'2026-01-01T00:00:00.000Z',produced:'generated',previous:null});
  write('enrichment/films/H/fingerprints/'+hashH+'.json',{...contentH,filmId:'H',fingerprintHash:hashH});
- await finish(R1,runId);
- const retryRunId=(await R1.api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'})).data.runId,again=await R1.api('enrichment/submit','POST',{runId:retryRunId,items:[{filmId:'H',fingerprint:contentH,prediction}]},OBJECTS);
- assert.equal(again.data.results[0].status,'created',JSON.stringify(again.data));
+ assert.equal(await seed(R1,'H',contentH,OBJECTS),'created');
  assert.equal(pointer('H').fingerprintHash,hashH);assert.equal(read('enrichment/films/H/fingerprint-generations/'+hashH+'-s1-p1.json').generatedAt,'2026-01-01T00:00:00.000Z','first values kept');
- await finish(R1,retryRunId);
-}
-
-// Rollback history beyond one list page: the matching record on a later page is still found; a history over the scan limit
-// is a storage error, not a silent regeneration.
-{
- programme(films);
- const dummy=(id,n)=>'enrichment/films/'+id+'/fingerprint-generations/'+String(n).padStart(64,'0')+'-s1-p1.json';
- const schema1=read('enrichment/films/B/fingerprint-generations/'+keysUnder('enrichment/films/B/fingerprint-generations/').find(key=>key.endsWith('-s1-p1.json')).split('/').at(-1)),schema2Key=keysUnder('enrichment/films/B/fingerprint-generations/').find(key=>key.endsWith('-s2-p1.json')),schema2=read(schema2Key),body2=read('enrichment/films/B/fingerprints/'+schema2.fingerprintHash+'.json');
- const {filmId:_i2,fingerprintHash:_h2,...content2}=body2,backToSchema2=()=>R1.T.writeFingerprint(baseEnv,'B',content2,pointer('B'),'generated',undefined,1);
- await backToSchema2();
- for(let n=0;n<150;n++)write(dummy('B',n),{filmId:'B',fingerprintHash:'missing-'+n,fingerprintSchemaVersion:1,fingerprintPromptVersion:1,generatedAt:'2025-01-01T00:00:00.000Z',produced:'generated',previous:null});
- assert.equal(keysUnder('enrichment/films/B/fingerprint-generations/').indexOf('enrichment/films/B/fingerprint-generations/'+schema1.fingerprintHash+'-s1-p1.json')>=100,true,'the real record sorts onto the second page');
- queue=await reconcile(R1,SELECTIVE);assert.deepEqual(queue.pending,['B','D']);
- let runId=await startRun(R1,SELECTIVE);
- let r=await next(R1,runId,SELECTIVE);assert.equal(r.status,200);
- assert.equal(pointer('B').fingerprintHash,schema1.fingerprintHash,'restored from the second page');
- assert.deepEqual(plain(read('enrichment/runs/'+runId+'.json').restored),['B']);
- assert.deepEqual(plain(r.data.items.map(item=>[item.filmId,item.requiredWork])),[['D','fingerprint_and_prediction']],'B is current again with its restored prediction, so the slot goes to D');
- await finish(R1,runId);
- for(let n=150;n<=1000;n++)write(dummy('B',n),{filmId:'B',fingerprintHash:'missing-'+n,fingerprintSchemaVersion:1,fingerprintPromptVersion:1,generatedAt:'2025-01-01T00:00:00.000Z',produced:'generated',previous:null});
- await backToSchema2();
- queue=await reconcile(R1,SELECTIVE);assert.deepEqual(queue.pending,['B','D']);
- runId=await startRun(R1,SELECTIVE);
- r=await next(R1,runId,SELECTIVE);
- assert.equal(r.status,502,'a history over the scan limit fails the step with the storage error status instead of regenerating');
- assert.equal(pointer('B').fingerprintSchemaVersion,2,'nothing moved');
- for(let n=0;n<=1000;n++){records.delete(dummy('B',n));etags.delete(dummy('B',n));}
- await finish(R1,runId);
 }
 
 // Zero and one film.
 programme([]);queue=await reconcile(R1,SELECTIVE);assert.deepEqual([queue.pending,queue.fingerprintCompatibility.films,plain(queue.work)],[[],0,{}]);
 programme([films[0]]);queue=await reconcile(R1,SELECTIVE);assert.deepEqual([queue.pending,queue.fingerprintCompatibility.classes.unchanged],[[],1]);
-console.log('Fingerprint migration queue: immutable body/record/pointer storage with no writer switch (stale bindings inert), same body under two prompt versions, no fingerprint rule switch (stale bindings inert) with strict shadow counters, work classes and partial fields, bounded migration batches after missing work, hot preemption, run binding to every axis, pointer restore on rollback and the strict rollback floor passed');
+console.log('Fingerprint migration queue: immutable body/record/pointer storage with no writer switch (stale bindings inert), same body under two prompt versions, no fingerprint rule switch (stale bindings inert) with strict shadow counters, work classes and partial fields, bounded migration batches after missing work, hot preemption and the strict rollback floor passed');

@@ -1,40 +1,53 @@
-import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
-const records=new Map(),etags=new Map();let revision=0,failKey='',writes=[],eventsUnavailable=false;
-const env={BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;if(eventsUnavailable&&key.startsWith('events/items/'))throw new Error('Temporary events outage');if(key===failKey){failKey='';throw new Error('Storage checkpoint interrupted')}records.set(key,JSON.parse(value));etags.set(key,String(++revision));writes.push(key);return {etag:etags.get(key)}},list:async({prefix=''})=>({objects:[...records.keys()].filter(k=>k.startsWith(prefix)).map(key=>({key})),truncated:false})}};
-const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
-ctx.env=env;const call=(code)=>vm.runInContext(code,ctx);
-async function api(path,body,method='POST'){const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:r.status,data:await r.json()}}
-const now=Date.now(),film=(id,start,extra={})=>({id,title:id,original:id,year:2020,tmdbId:id.replace(/\D/g,'')||id,genres:[],actors:[],directors:[],shows:start===null?[]:[{start}],...extra});
-const execution=Object.fromEntries(Object.entries(call('EXECUTION')).map(([key,values])=>[key,values.includes('unknown')?'unknown':values[0]]));
-const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['investigation'],execution,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']},prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
-records.set('enrichment/profile/current.json',{version:1,profileHash:'p',profile:{ratingScale:'Half stars'}});records.set('sync.json',{runId:'test',stage:'complete'});
+// Stop observability of batch runner v2 runs (ADR 0162; D1 prediction authority, as production runs it): a zero-success quota-blocked start, a quota stop
+// before and after saved results with measured counts, silent item failures and overlapping triggers, immediate storage and lease-loss stops, idempotent
+// completion and durable Event delivery after a journal outage. Events carry no secret or caller text. Local stand-ins only.
+import assert from 'node:assert/strict';
+import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+const w=await flowWorld({films:5});const records=w.records,ctx=w.ctx,env=w.env;
+let writes=[],eventsUnavailable=false,failKey=null;
+{const bucket=env.BUCKET,put=bucket.put;bucket.put=async(key,value,options)=>{if(eventsUnavailable&&key.startsWith('events/items/'))throw new Error('Temporary events outage');if(failKey&&failKey.test(key)){failKey=null;throw new Error('Storage write interrupted');}const saved=await put.call(bucket,key,value,options);if(saved)writes.push(key);return saved;};
+ bucket.list=async({prefix='',limit=1000}={})=>({objects:[...records.keys()].filter(key=>key.startsWith(prefix)).sort().slice(0,limit).map(key=>({key})),truncated:false});}
+async function api(path,body,method='POST'){const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:r.status,data:await r.json()};}
+assert.equal((await api('queue/reconcile',{})).status,200);
+const events=()=>[...records].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v);
+const lease=()=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);
+const setLease=edit=>{const doc=lease();edit(doc);sql(w.file,"UPDATE prediction_lease SET expires_at="+Number(doc.expiresAt)+", document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE name='runner'");};
+const runRow=id=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+id+"'")[0].d);
+const start=body=>api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',manifestSize:3,...body}).then(r=>r.data);
+const item=id=>({filmId:id,fingerprint:w.fingerprint,prediction:w.prediction});
 
-
-
-const events=()=>[...records].filter(([k])=>k.startsWith('events/items/')&&!k.includes('prediction-start-')).map(([,v])=>v),catalog={};for(let i=1;i<=5;i++)catalog['tmdb_'+i]=film('tmdb_'+i,now);catalog.tmdb_99=film('tmdb_99',now-10*86400000);records.set('programme.json',{runId:'test',films:[]});records.set('epg/discovered-films.json',catalog);
-// Quota blocked start writes a safe, final zero-success Event. Repeating the blocked trigger is idempotent.
-let blocked=(await api('start',{scope:'watchlist_all',trigger:'scheduled',capacity:{remainingPercent:0}})).data;assert.equal(blocked.status,'blocked');assert.equal(events().length,1);assert.equal(events()[0].added,0);assert.equal(events()[0].reason,'quota');assert.equal(events()[0].hotRemaining,5);assert.equal(events()[0].coldRemaining,1);await api('start',{scope:'watchlist_all',trigger:'scheduled',capacity:{remainingPercent:0}});assert.equal(events().length,1);
-let start=(await api('start',{scope:'watchlist_all'})).data;const before=events().length;assert.equal((await api('start',{scope:'watchlist_all'})).data.status,'already_running');assert.equal(events().length,before);
-// next can reach an actual quota before any successful submit; it finalizes without relying on client cleanup.
-let stop=(await api('next',{runId:start.runId,capacity:{remainingPercent:0}})).data;assert.equal(stop.mustComplete,true);assert.equal(events().length,before+1);assert.equal(events().at(-1).added,0);assert.equal(records.get('enrichment/runs/'+start.runId+'.json').status,'partial');assert.equal(records.get('enrichment/runner-lease.json').expiresAt,0);
-for(let i=0;i<3;i++)await api('complete',{runId:start.runId,reason:'quota'});assert.equal(events().length,before+1);
-// A quota stop after successful checkpoints retains the measured added count and queue counters.
-start=(await api('start',{scope:'watchlist_all'})).data;let n=(await api('next',{runId:start.runId,batchSize:3})).data;for(const item of n.items.slice(0,2))await api('submit',{runId:start.runId,items:[{filmId:item.filmId,fingerprint,prediction}]});const beforeItem=events().length;const failure=(await api('submit',{runId:start.runId,items:[{filmId:n.items[2].filmId,failure:{kind:'parse_error'}}]})).data;assert.equal(failure.mustComplete,false);assert.equal(events().length,beforeItem);assert.equal((await api('next',{runId:start.runId})).data.mustComplete,undefined);
-stop=(await api('complete',{runId:start.runId,reason:'quota Bearer DO-NOT-STORE'})).data;assert.equal(stop.added,2);assert.equal(stop.failed,1);const event=events().at(-1);assert.equal(event.hotRemaining,3);assert.equal(event.coldRemaining,1);assert.equal(event.title,'Прогнозы приостановлены');assert.equal(event.reason,'quota');await api('complete',{runId:start.runId,reason:'quota'});assert.equal(events().length,beforeItem+1);
-// A storage failure inside submit emits its final Event immediately, before any explicit complete.
-start=(await api('start',{scope:'watchlist_all'})).data;n=(await api('next',{runId:start.runId,batchSize:1})).data;failKey='enrichment/films/'+n.items[0].filmId+'/predictions.json';const beforeStorage=events().length;stop=(await api('submit',{runId:start.runId,items:[{filmId:n.items[0].filmId,fingerprint,prediction}]})).data;assert.equal(stop.stopReason,'storage_error');assert.equal(events().length,beforeStorage+1);assert.equal(events().at(-1).added,0);
-// Lost lease is a visible stop, and cannot release another owner's lock.
-start=(await api('start',{scope:'watchlist_all'})).data;records.get('enrichment/runner-lease.json').runId='another-owner';const beforeLease=events().length;await api('next',{runId:start.runId});assert.equal(events().length,beforeLease+1);assert.equal(events().at(-1).reason,'lease_lost');assert.equal(records.get('enrichment/runner-lease.json').runId,'another-owner');records.get('enrichment/runner-lease.json').expiresAt=0;
-// Event storage outage leaves a durable outbox. AIR-416: no read delivers it (status and the journal read are query-only and write nothing); the next authorized
+// A quota-blocked batch start is an idle outcome: it takes no lease, creates no run and writes no Event (a v2 run has one terminal Event, ADR 0146); the queue
+// records the blocked attempt. Repeating the blocked trigger changes nothing.
+let blocked=await start({capacity:{remainingPercent:0}});assert.equal(blocked.status,'blocked');assert.equal(blocked.reason,'quota');assert.equal(events().length,0);assert.equal(sql(w.file,'SELECT COUNT(*) AS n FROM prediction_run')[0].n,0);
+await start({capacity:{remainingPercent:0}});assert.equal(events().length,0);
+let run=await start();const before=events().length;assert.equal((await start()).status,'already_running');assert.equal(events().length,before);
+// A quota stop before any saved result finalizes the run once, releases the lease and is idempotent.
+let stop=(await api('complete',{runId:run.runId,reason:'quota'})).data;assert.equal(events().length,before+1);assert.equal(events().at(-1).added,0);assert.equal(runRow(run.runId).status,'partial');assert.equal(lease().expiresAt,0);
+for(let i=0;i<3;i++)await api('complete',{runId:run.runId,reason:'quota'});assert.equal(events().length,before+1);
+// A quota stop after saved results keeps the measured added and failed counts; an item failure is silent; caller text never reaches the Event.
+run=await start();const ids=run.films.map(f=>f.filmId);const beforeItem=events().length;
+const group=(await api('batch/submit',{runId:run.runId,epoch:run.lease.epoch,items:[item(ids[0]),item(ids[1]),{filmId:ids[2],failure:{kind:'parse_error',reason:'json_unparseable'}}]})).data;
+assert.deepEqual(group.results.map(r=>r.status),['created','created','validation_failure']);assert.equal(events().length,beforeItem,'saved results and an item failure write no Event');
+stop=(await api('complete',{runId:run.runId,reason:'quota Bearer DO-NOT-STORE'})).data;assert.equal(stop.added,2);assert.equal(stop.failed,1);
+const event=events().at(-1);assert.equal(event.hotRemaining,3);assert.equal(event.title,'Пакет прогнозов прерван');assert.equal(event.reason,'quota');
+await api('complete',{runId:run.runId,reason:'quota'});assert.equal(events().length,beforeItem+1);
+// A storage failure inside a batch submit blocks that film, commits nothing and writes no Event; the caller's storage_error completion writes the one final Event.
+run=await start();failKey=/\/predictions\/versions\//;const beforeStorage=events().length;
+stop=(await api('batch/submit',{runId:run.runId,epoch:run.lease.epoch,items:[item(run.films[0].filmId)]})).data;failKey=null;
+assert.deepEqual(stop.results.map(r=>[r.status,r.reason]),[['blocked','storage_error']]);assert.equal(stop.committed,false);assert.equal(events().length,beforeStorage);assert.equal(runRow(run.runId).status,'running');
+stop=(await api('complete',{runId:run.runId,reason:'storage_error'})).data;assert.equal(events().length,beforeStorage+1);assert.equal(events().at(-1).added,0);assert.equal(events().at(-1).reason,'storage_error');
+// A lost lease is a visible stop and cannot release another owner's lease.
+run=await start();setLease(doc=>{doc.runId='another-owner';});const beforeLease=events().length;
+assert.equal((await api('heartbeat',{runId:run.runId})).status,409);assert.equal(events().length,beforeLease+1);assert.equal(events().at(-1).reason,'lease_lost');assert.equal(lease().runId,'another-owner');setLease(doc=>{doc.expiresAt=0;});
+// An Event storage outage leaves a durable outbox. AIR-416: no read delivers it (status and the journal read are query-only and write nothing); the next authorized
 // start does, under the writer lease, with the same id and time, so it cannot duplicate. The status read shows the pending entry until then.
-start=(await api('start',{scope:'watchlist_all'})).data;eventsUnavailable=true;stop=(await api('complete',{runId:start.runId,reason:'api_error'})).data;assert.equal(stop.eventPending,true);const pending=events().length;eventsUnavailable=false;
-{const before=writes.length;let status=(await api('status',undefined,'GET')).data;assert.equal(events().length,pending,'status is query-only; it does not flush the stop outbox');assert.deepEqual({pending:status.eventOutbox.pending,quarantined:status.eventOutbox.quarantined},{pending:1,quarantined:0});
+run=await start();eventsUnavailable=true;stop=(await api('complete',{runId:run.runId,reason:'api_error'})).data;assert.equal(stop.eventPending,true);const pending=events().length;eventsUnavailable=false;
+{const before=writes.length,d1=w.stats.writeBatches;let status=(await api('status',undefined,'GET')).data;assert.equal(events().length,pending,'status is query-only; it does not flush the stop outbox');assert.deepEqual({pending:status.eventOutbox.pending,quarantined:status.eventOutbox.quarantined},{pending:1,quarantined:0});
  for(let read=0;read<3;read++){const page=await ctx.worker.fetch(new Request('https://site.example/api/events'),env);assert.equal(page.status,200);}
- assert.equal(events().length,pending,'the journal read does not deliver the stop event, however often it is read');assert.equal(writes.length,before,'no read wrote anything');
- const next=(await api('start',{scope:'watchlist_all'})).data;assert.equal(next.status,'running');assert.equal(events().length,pending+1,'the next start delivered the stop event without anyone opening the page');assert.equal(events().filter(event=>event.reason==='api_error').length,1);
+ assert.equal(events().length,pending,'the journal read does not deliver the stop event, however often it is read');assert.equal(writes.length,before,'no read wrote anything');assert.equal(w.stats.writeBatches,d1);
+ const next=await start();assert.equal(next.status,'running');assert.equal(events().length,pending+1,'the next start delivered the stop event without anyone opening the page');assert.equal(events().filter(event=>event.reason==='api_error').length,1);
  status=(await api('status',undefined,'GET')).data;assert.deepEqual({pending:status.eventOutbox.pending,quarantined:status.eventOutbox.quarantined},{pending:0,quarantined:0});
- await api('complete',{runId:start.runId,reason:'api_error'});assert.equal(events().filter(event=>event.reason==='api_error').length,1,'a late retry of the stopped run does not duplicate its event');
+ await api('complete',{runId:run.runId,reason:'api_error'});assert.equal(events().filter(event=>event.reason==='api_error').length,1,'a late retry of the stopped run does not duplicate its event');
  await api('complete',{runId:next.runId,reason:'quota'});}
 for(const event of events()){assert.equal(event.queueSchemaVersion,6);assert(event.delta);assert(event.snapshot?.coverage);assert(event.snapshot?.queue);assert(!/hash|token|Bearer|DO-NOT-STORE|prompt|stack/i.test(JSON.stringify(event)));}
-console.log('Stop observability: zero-success blocked/next quota, measured counts, silent item failures/already_running, immediate storage/lease stops, idempotent complete/retry and durable Event delivery recovery passed');
+console.log('Stop observability (batch v2): idle quota-blocked start, zero-success quota stop, measured counts, silent item failures/already_running, a blocked storage item and its explicit stop, an immediate lease-loss stop, idempotent complete/retry and durable Event delivery recovery passed');
