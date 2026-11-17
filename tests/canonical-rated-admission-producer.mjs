@@ -263,7 +263,7 @@ function seedFilm(file,id,tmdb,lid){
 function loadScanWorker(env,LetterboxdFacts){
  const workerCtx=vm.createContext({env,Response,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,console,CanonicalRatedAdmission:M,LetterboxdFacts,fetch:async()=>{throw new Error('unexpected fetch');}});
  vm.runInContext(scoped('src/metadata-cache.js','MetadataCache')+'\n'+fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8')+'\n'+fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),workerCtx);
- workerCtx.ratingsGate=async()=>({active:false,migration:'none'});
+ workerCtx.ratingsGate=async()=>({active:false,storage:'unsupported'});
  workerCtx.persistWatchlist=async()=>{};
  workerCtx.persistEvents=async()=>{};
  return workerCtx;

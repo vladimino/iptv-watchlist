@@ -170,7 +170,7 @@ const LetterboxdDiary=(()=>{
  const outcomeOf=status=>status===403?'blocked':status===429?'rate_limited':'failed';
 
  // The Diary cursor (`state.json`). Version 1 (no `writer`) is written as before, last writer wins. The merge form
- // (ADR 0060 decision 6, `schemaVersion: 2` with `writer`) exists only once ratings_storage_migrate has converted it:
+ // (ADR 0060 decision 6, `schemaVersion: 2` with `writer`) is the only form the ratings pipeline accepts (ADR 0161):
  // its progress part is a join (newest = later, oldest = earlier, reachedEnd = either, resumePage = the larger, null
  // once reachedEnd; an absent page counts as page 2) and its diagnostic part (lastOutcome, stopReason, counts, writer)
  // is one record, last writer wins by (lastAttemptAt, writer.runId, writer.step, content). Serialization is canonical,
@@ -198,8 +198,6 @@ const LetterboxdDiary=(()=>{
   return sorted({schemaVersion:2,...joinProgress(stored,incoming),lastAttemptAt:later(stored?.lastAttemptAt??null,incoming?.lastAttemptAt??null),lastSuccessAt:later(stored?.lastSuccessAt??null,incoming?.lastSuccessAt??null),lastFailureAt:later(stored?.lastFailureAt??null,incoming?.lastFailureAt??null),
    lastOutcome:winner?.lastOutcome??null,stopReason:winner?.stopReason??null,counts:winner?.counts??null,writer:winner?.writer||stored?.writer||incoming?.writer||null});
  }
- // ratings_storage_migrate: the merge form of the current cursor, its progress and diagnostics unchanged.
- const migrateCursor=(state,writer)=>sorted({...emptyState(),...(state||{}),schemaVersion:2,writer});
  async function readCursor(env){
   if(typeof RatingsD1!=='undefined'){const owned=await RatingsD1.readOwned(env,KEYS.state);if(owned.owned)return {object:owned.etag?{etag:owned.etag}:null,state:owned.value};}
   const object=await env.BUCKET.get(KEYS.state);return {object,state:object?await object.json():null};
@@ -312,5 +310,5 @@ const LetterboxdDiary=(()=>{
   return body;
  }
  return {KEYS,enabled,pageUrl,parsePage,keyRows,mergeRows,summarize,ratingEvidence,syncHistory,readHistory,loadHistory:env=>loadJSON(env,KEYS.history),
-  cursorMigrated,joinProgress,mergeCursor,migrateCursor,readCursor,putCursor,emptyState};
+  cursorMigrated,joinProgress,mergeCursor,readCursor,putCursor,emptyState};
 })();

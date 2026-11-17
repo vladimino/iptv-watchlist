@@ -134,7 +134,8 @@ assert.match(fs.readFileSync('src/discovery.js','utf8'),/assignSlots\(key,'reval
 const wrapped=new Proxy(Authority,{
  get(target,prop,receiver){
   const value=Reflect.get(target,prop,receiver);
-  if(prop!=='assignObservationSlots'||typeof value!=='function')return value;
+  // The batched replay that opens every paged chunk and the per-observation call share the one allowlisted phase name `replay_assignment`.
+  if(!['assignObservationSlots','replayUnassignedSlots'].includes(prop)||typeof value!=='function')return value;
   return async()=>{throw uniqueErr();};
  }
 });
@@ -162,8 +163,9 @@ try{
  assert.equal(JSON.stringify(traced).includes('Hot Film')||JSON.stringify(traced).includes('UNIQUE constraint failed'),false);
  assert.equal(outcome.discovery?.reason,'discovery_conflict');
  const storedStatus=(await wrapped.routeRead(env2,'epg/discovery-status.json')).value;
- assert.equal(storedStatus.checkpoint,'cheap_pass');
- assert.equal(storedStatus.error,null);
+ // The batched replay opens the chunk, so a conflict there precedes the chunk's own cheap_pass status: nothing is stored, and never an error status.
+ assert.equal(storedStatus?.error??null,null);
+ assert.notEqual(storedStatus?.stage,'error');
  const storedCont=(await wrapped.routeRead(env2,'epg/resolver-continuation.json')).value;
  assert.equal(storedCont.reason,'discovery_conflict');
  assert.equal(storedCont.failedAt,'replay_assignment');
@@ -173,8 +175,7 @@ try{
  assert.equal(op.lastCheckpoint.failedAt,'replay_assignment');
  assert.equal(op.lastCheckpoint.failureKind,'unique_constraint');
  assert.equal(op.lastCheckpoint.failureConstraint,'unique.published_epg_show');
- assert.equal(op.lastChunk.stage,'partial');
- assert.notEqual(op.lastChunk.stage,'error');
+ assert.notEqual(op.lastChunk?.stage,'error');
 }finally{
  const row=sql2('SELECT lease_id FROM discovery_lease WHERE id=1')[0];
  if(row?.lease_id)await wrapped.releaseLease(env2,{id:row.lease_id,expiresAt:Date.now()+60000});

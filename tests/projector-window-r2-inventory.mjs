@@ -105,7 +105,7 @@ const FILE_SITES={
  'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
  'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},
  'src/letterboxd-rated-candidates.js':{r2:1,wrapper:0,dynamic:0},
- 'src/letterboxd-ratings.js':{r2:1,wrapper:5,dynamic:5},
+ 'src/letterboxd-ratings.js':{r2:1,wrapper:4,dynamic:4}, // AIR-79 D-3: -1 wrapper and -1 dynamic, the migration witness write of the removed migrate(); the ratings queue and cursor writers are not projector inputs
  'src/metadata-cache.js':{r2:1,wrapper:0,dynamic:0},
  'src/monitor.js':{r2:1,wrapper:0,dynamic:0},
  'src/owner-review-d1.js':{r2:2,wrapper:0,dynamic:0},
