@@ -1,0 +1,45 @@
+# ADR 0157: An EPG title is not a Film alias, and an alias confirms a catalog Film only with movie provenance
+
+**Status:** **Accepted** (2026-11-17; the Product Owner decided that a TV series or franchise title must not become a trusted alias of a feature film, and accepted both rules below, including the provenance refinement of the second rule, with no feature flag and no separate rollout phase. Recorded in the owner comments on [AIR-503](https://trello.com/c/t9fZCHLQ) of 17 November 2026 and in the working session that delivered this record. Not permission to rewrite any stored alias, decision or show, or to run EPG, Discovery or TMDB.)  
+**Original decision date:** 2026-11-17  
+**Recorded at:** 2026-11-17  
+**Approval source:** Owner comments on [AIR-503](https://trello.com/c/t9fZCHLQ), 17 November 2026 (Europe/Madrid)  
+**Related work:** [AIR-503](https://trello.com/c/t9fZCHLQ); [PR #707](https://github.com/vladimino/iptv-watchlist/pull/707) (RCA of the 33 conflicts); [AIR-488](https://trello.com/c/p5PCEB0c) / [ADR 0151](0151-epg-known-film-title-collision.md); [ADR 0142](0142-epg-owned-generation-addressed-discovery-slots.md)  
+**Supersedes:** None. Narrows decision 3 of ADR 0151 ("a `catalogOnly` match confirms that TMDB id on that slot") and replaces the unconditional alias learning of `touchCanonicalFilm`.  
+**Superseded by:** None
+
+## Context
+
+The catalog dictionary (`epg/discovered-films.json`, the D1 catalog under `discovery_authority`) keeps `aliases` as plain strings. `touchCanonicalFilm` appended the title and every raw title of an observation to the aliases of the Film it touched. `scanEPG` indexed every alias and, for a `catalogOnly` Film, recorded that TMDB id on the slot and the cheap pass then wrote a `known_epg_alias` decision with no movie check.
+
+[AIR-503](https://trello.com/c/t9fZCHLQ) found the effect on `tmdb_400160` (`Губка Боб в бегах`, 95 minutes). Its aliases contain the series title `Губка Боб квадратные штаны`, and one 87 minute slot under that title is a current show. The stored aliases carry no provenance, so the origin of the key is not proven (the key was already present as another spelling before the EPG spellings). The owner decided that the site is not about series: a series or franchise title must not become a trusted alias of a feature film, while the feature film of a series stays a legitimate Film. Identity of such a film must not be confirmed by the series title, a duration or a franchise alone.
+
+A measurement of production D1 on 17 November 2026: of 3 790 current `known_epg_alias` decisions, 3 568 rest on a key equal to the Film's title or original title and 222 rest on another alias key (translations, synonyms, Ukrainian titles and the SpongeBob series title). See [the impact record](../evidence/discovery/air-503-alias-provenance-impact-2026-11-17.md).
+
+## Decision
+
+1. **Learning.** `touchCanonicalFilm` adds a title to `aliases` only when its normalized key is already a key of the Film (a cosmetic spelling: `х/ф …`, a trailing dot, a year) or when the observation's identity was confirmed independently: a TMDB detail read (`tmdb_detail`) or the owner (`owner`). It never writes `movieTitles`. A `known_epg_alias` observation, which exists only because an alias already matched, therefore cannot teach a new title key.
+2. **Provenance.** A catalog Film carries `movieTitles`, the titles the movie authority gave it: `catalogFilmFromDetail` records the TMDB title, original title, the `ru`/`uk`/`en` translations and the `RU`/`UA`/`US`/`GB` alternative titles of that movie, and nothing from the EPG. `aliases` stays the union that the index and Finds read. `mergeCatalogIdentity` keeps the union of `movieTitles` from both sides and adds no empty list to a legacy record.
+3. **Confirmation.** In `scanEPG`, a single `catalogOnly` Film confirms a slot only when the normalized title key of the slot is a key of the Film's title, original title or `movieTitles`. Otherwise the slot stays an ordinary discovery observation with the uncertain reason `alias_without_movie_provenance`, `confirmedTmdbId` stays null and no `confirmedSlots` entry is written. Collision detection is unchanged: an alias without provenance still counts as a competitor in `knownSlotDecision`, so it can block a watchlist Film but never confirm a catalog one. A watchlist Film (the owner's) keeps matching on every alias it has.
+4. **Legacy records.** A catalog record without `movieTitles` counts only its title and original title. This is the conservative reading of unknown provenance, and it is why the 222 decisions above lose the scan confirmation of their slots. No stored alias, decision or show is rewritten.
+
+Not decided: removing the series-title alias from `tmdb_400160`, retiring its 87 minute show, or any other stored correction. Those are separate, owner-approved, addressed operations.
+
+## Alternatives considered
+
+- **Learning rule only.** No recall loss, but a stored alias such as the SpongeBob series title would keep confirming slots. The owner rejected stopping there.
+- **A blacklist of franchise or series words.** Rejected by the owner: it names no mechanism, catches nothing it was not told about, and blocks real films.
+- **A TMDB call per slot.** Rejected by the owner and by ADR 0151: the scan stays offline.
+- **A runtime or duration veto.** Rejected: identity is not decided by length alone, and [AIR-503](../evidence/discovery/air-503-same-title-runtime-conflicts-rca-2026-11-17.md) showed that fragments and marathons are already withheld per slot.
+- **Match against title and original only.** Rejected by the owner's refinement: it ignores real translations and alternative titles that the movie authority supplies, and says nothing about where a title came from.
+- **A feature flag and a staged rollout.** Not adopted at the owner's direction; deterministic regressions, the measured impact and the ordinary post-deploy check are the verification.
+
+## Consequences
+
+A series title, a foreign-language title or an EPG synonym can no longer confirm a catalog Film on a slot by itself. It reaches the resolver as an ordinary observation, where the movie-detail check can verify it, and `catalogFilmFromDetail` then records the movie's own titles. A film whose EPG title differs from its TMDB titles loses the cheap confirmation until that happens, so recall on those titles is lower for a while and is bounded: 222 current decisions, which own 99 current shows of generation 511 (58 keys, 56 Films), about 0.6% of the 16 864 shows that AIR-500 counted in generation 510. Those shows are expected to return through the ordinary bounded revalidation of ADR 0142 decision 6 (a drifted duration is reconfirmed by one detail read and joins the anchor), not through this ADR. No new cost per slot, no new request, no new writer.
+
+Existing decisions stay `verified`. A decision does not lend its Film to a slot that the scan did not confirm and the anchor does not cover, so the slots under those keys are withheld until revalidation.
+
+## Recovery and migration boundary
+
+Code revert restores the previous scan and learning rules. It does not remove `movieTitles` from stored records (an unknown field is preserved and ignored by the previous code) and does not restore aliases that were never learned. A stored alias or decision is corrected only by a separate owner-approved operation. This ADR authorizes no production write, no flag, no Scheduled Task and no EPG, Discovery or TMDB run; the next natural publication applies the new scan rule.

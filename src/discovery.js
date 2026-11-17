@@ -313,10 +313,18 @@ function catalogFilmFromDetail(movie,candidate,old,programmeRunId,id,writeAvaila
  const people=(entries,prefix)=>(entries||[]).slice(0,10).map(person=>({id:prefix+'/'+person.id,name:person.name,original:person.name}));
  const localized=(movie.translations?.translations||[]).filter(item=>['ru','uk','en'].includes(item.iso_639_1)).map(item=>item.data?.title);
  const alternates=(movie.alternative_titles?.titles||[]).filter(item=>['RU','UA','US','GB'].includes(item.iso_3166_1)).map(item=>item.title);
- return touchCanonicalFilm({...(old||{}),discoveredAt:old?.discoveredAt||new Date().toISOString(),id,tmdbId:String(movie.id),url:'https://www.themoviedb.org/movie/'+movie.id,title:movie.title||candidate.title,original:movie.original_title||candidate.title,aliases:[...new Set([...(old?.aliases||[]),movie.title,movie.original_title,...localized,...alternates].filter(Boolean))],year:Number(movie.release_date?.slice(0,4))||candidate.year,genres:(movie.genres||[]).map(genre=>genre.name),synopsis:movie.overview||candidate.description||null,runtime:movie.runtime,poster:movie.poster_path?'https://image.tmdb.org/t/p/w342'+movie.poster_path:null,directors:people((movie.credits?.crew||[]).filter(person=>person.job==='Director'),'tmdb_director'),actors:people(movie.credits?.cast,'tmdb_actor')},candidate,programmeRunId,writeAvailability);
+ return touchCanonicalFilm({...(old||{}),discoveredAt:old?.discoveredAt||new Date().toISOString(),id,tmdbId:String(movie.id),url:'https://www.themoviedb.org/movie/'+movie.id,title:movie.title||candidate.title,original:movie.original_title||candidate.title,aliases:[...new Set([...(old?.aliases||[]),movie.title,movie.original_title,...localized,...alternates].filter(Boolean))],movieTitles:[...new Set([...(old?.movieTitles||[]),movie.title,movie.original_title,...localized,...alternates].filter(Boolean))],year:Number(movie.release_date?.slice(0,4))||candidate.year,genres:(movie.genres||[]).map(genre=>genre.name),synopsis:movie.overview||candidate.description||null,runtime:movie.runtime,poster:movie.poster_path?'https://image.tmdb.org/t/p/w342'+movie.poster_path:null,directors:people((movie.credits?.crew||[]).filter(person=>person.job==='Director'),'tmdb_director'),actors:people(movie.credits?.cast,'tmdb_actor')},candidate,programmeRunId,writeAvailability,true);
 }
-function touchCanonicalFilm(film,candidate,programmeRunId,writeAvailability=true){
- const aliases=[...new Set([...(film.aliases||[]),candidate.title,...(candidate.rawTitles||[])].filter(Boolean))];
+// AIR-503: an EPG title is evidence of an airing, not a title of the Film. A new normalized title key joins the aliases only when the
+// identity of the observation was confirmed independently (`tmdb_detail`, `owner`). A spelling of a key the Film already has is cosmetic and
+// is kept. `movieTitles` (movie-authority provenance) is never written here.
+const INDEPENDENT_TITLE_SOURCES=new Set(['tmdb_detail','owner']);
+const independentTitleEvidence=decision=>INDEPENDENT_TITLE_SOURCES.has(decision?.identitySource);
+const aliasTitleKey=value=>value?epgTitleParts(value).normalizedTitle:'';
+function touchCanonicalFilm(film,candidate,programmeRunId,writeAvailability=true,learnEpgTitles=false){
+ const known=new Set([film.title,film.original,...(film.aliases||[])].map(aliasTitleKey).filter(Boolean));
+ const observed=[candidate.title,...(candidate.rawTitles||[])].filter(Boolean).filter(title=>learnEpgTitles||known.has(aliasTitleKey(title)));
+ const aliases=[...new Set([...(film.aliases||[]),...observed])];
  if(writeAvailability===false)return stripCatalogAvailability({...film,canonicalIdentity:'tmdb:'+film.tmdbId,aliases});
  const explicit=Array.isArray(candidate.shows),incoming=explicit?dedupeShows(candidate.shows):null,same=!!programmeRunId&&film.showsProgrammeRunId===programmeRunId;
  const shows=incoming===null?film.shows||[]:same?dedupeShows([...(film.shows||[]),...incoming]):incoming;
@@ -643,7 +651,7 @@ async function attachWatchlistShowing(env,seenRunId,filmId,candidate,fence=null)
  if(!report?.films||(report.runId&&seenRunId&&report.runId!==seenRunId))return false;
  const index=report.films.findIndex(film=>String(film.id)===String(filmId));
  if(index<0)return false;
- const current=report.films[index],next=touchCanonicalFilm(current,candidate,seenRunId);
+ const current=report.films[index],next=touchCanonicalFilm(current,candidate,seenRunId,true,true);
  next.title=current.title;
  if(!Object.hasOwn(current,'canonicalIdentity'))delete next.canonicalIdentity;
  report.films[index]=next;
@@ -736,7 +744,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     const filmKey='tmdb_'+decision.tmdbId,film=films[filmKey];
     if(film&&candidateIsHot(candidate,nowSelect)){
      if(!cheap.before.has(filmKey))cheap.before.set(filmKey,JSON.stringify(film));
-     films[filmKey]=touchCanonicalFilm(film,candidate,source.programmeRunId,writeAvailability);
+     films[filmKey]=touchCanonicalFilm(film,candidate,source.programmeRunId,writeAvailability,independentTitleEvidence(decision));
      cheap.films.add(filmKey);
     }
    }
@@ -1099,7 +1107,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
  // Cheap pass updates availability for known identities even though no new lookup is needed.
  for(const candidate of source.items){const decision=decisions[candidate.key],reason=screenedNonfilmReason(candidate,decision);if(reason){if(decision?.status!=='excluded_nonfilm'){decisions[candidate.key]={status:'excluded_nonfilm',reason,checkedAt:startedAt};screenedOut++;}continue;}
   if(candidate.confirmedTmdbId&&(!decision||decision.status==='excluded_nonfilm')&&!ownerRejected(decision,candidate.confirmedTmdbId)){decisions[candidate.key]={status:'verified',filmId:knownTmdb.get(candidate.confirmedTmdbId)||'tmdb_'+candidate.confirmedTmdbId,tmdbId:candidate.confirmedTmdbId,identitySource:'known_epg_alias',checkedAt:startedAt};knownAliases++;}
-  const verified=decisions[candidate.key];if(verified?.status==='verified'){const key='tmdb_'+verified.tmdbId,film=films[key];if(film&&candidateIsHot(candidate)){films[key]=touchCanonicalFilm(film,candidate,source.programmeRunId,writeAvailability);indexFilm(films[key]);touched++;}}
+  const verified=decisions[candidate.key];if(verified?.status==='verified'){const key='tmdb_'+verified.tmdbId,film=films[key];if(film&&candidateIsHot(candidate)){films[key]=touchCanonicalFilm(film,candidate,source.programmeRunId,writeAvailability,independentTitleEvidence(verified));indexFilm(films[key]);touched++;}}
  }
  if(touched||migrated){if(!await saveDiscoveredFilms(env,films,source.programmeRunId,fence))return {schemaVersion:2,stage:'programme_changed',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,currentProgrammeRunId:null};}if(screenedOut||knownAliases){await fence();await saveJSON(env,'epg/discovery-resolution.json',decisions);}
  await fence();await saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'});

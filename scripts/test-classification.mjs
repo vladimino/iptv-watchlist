@@ -99,6 +99,9 @@ export const FILES={
  "air-99-detail.mjs": {
   "suite": "core"
  },
+ "alias-provenance.mjs": {
+  "suite": "core"
+ },
  "candidate-discovery.mjs": {
   "suite": "core"
  },
