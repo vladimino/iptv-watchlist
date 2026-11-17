@@ -215,6 +215,21 @@ assert.equal(pending().Tmp2.reason, 'bridge_conflict'); assert.equal(pending().T
 reset(); await seed('Tmp3', 3); canonical.bridge.Tmp3 = {state: 'ok', filmId: 'film:tmdb:x', tmdb: 'not-a-number', lid: 'Tmp3'};
 out = await Identity.resolve(env, items(['Tmp3', 'fixture-tmp3-2010']), opts()); assert.equal(pending().Tmp3.reason, 'deferred'); assert.equal(recordOf('Tmp3').links.tmdb, null);
 
+// 14. review of PR #720 (third), P1: an existing pending entry without a slug is upgraded when a later same-row Diary item supplies one, before the backoff and the authority
+// deferral, keeping attempts and backoff; the entry is then retried off-page once due and the gate is open.
+for (const variant of ['backoff', 'held gate']) {
+  reset(); await seed('Slg1', 3); add('Slg1', 'fixture-slg-2009', '900090', 'Fixture Slg', 2009);
+  await Identity.resolve(env, items(['Slg1', null]), opts()); const first = {...pending().Slg1};
+  assert.deepEqual([first.reason, first.slug, first.attempts], ['slug_missing', null, 1], variant); assert.equal(net.calls.length, 0);
+  if (variant === 'held gate') canonical.gate = {mode: 'existing', state: 'held', generation: 2};
+  await Identity.resolve(env, items(['Slg1', 'fixture-slg-2009']), opts({clock: () => NOW + 60000}));
+  const upgraded = pending().Slg1; assert.equal(upgraded.slug, 'fixture-slg-2009', variant + ': the new same-row slug is saved'); assert.equal(upgraded.attempts, 1, variant + ': no attempt consumed'); assert.equal(upgraded.nextAttemptAt, first.nextAttemptAt, variant + ': backoff unchanged'); assert.equal(upgraded.reason, 'slug_missing', variant);
+  assert.equal(net.calls.length, 0, variant + ': no outbound check in the backoff or while the authority is held');
+  canonical.gate = {mode: 'd1', state: 'open', generation: 2};
+  out = await Identity.resolve(env, items(['Other8', 'other-8']), opts({clock: () => NOW + 13 * 3600000}));
+  assert.equal(out.counts.verified, 1, variant + ': off-page retry once due'); assert.equal(recordOf('Slg1').links.tmdb, '900090', variant); assert.equal(pending().Slg1, undefined, variant);
+}
+
 // 9. the pending retry spacing is monotone and bounded; transport backs off less than a review.
 assert.ok(Identity.delayMs('forbidden', 1) < Identity.delayMs('slug_mismatch', 1)); assert.ok(Identity.delayMs('forbidden', 9) <= 48 * 3600000);
 console.log('letterboxd-diary-identity: ok');

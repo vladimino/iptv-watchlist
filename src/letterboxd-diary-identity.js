@@ -115,6 +115,8 @@ const LetterboxdDiaryIdentity=(()=>{
    if(!own.factKey){counts.skipped++;continue;}
    counts.considered++;
    const prior=stored.films[lid]||null,attempts=Number(prior?.attempts)||0;
+   // Better same-row evidence keeps the retry alive: a newly seen usable slug is saved on the existing pending entry first (attempts and backoff unchanged), whatever follows.
+   if(prior&&item.onPage&&item.slug&&prior.slug!==item.slug)set[lid]={...prior,slug:item.slug};
    if(!open){defer(item,prior);continue;}
    // 1. An existing trusted D1 bridge is consumed, never re-proved or re-registered.
    let bridge=null;

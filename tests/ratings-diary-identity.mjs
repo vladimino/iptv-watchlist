@@ -86,4 +86,19 @@ const page=(...rows)=>diaryPage(rows);
  assert.deepEqual([shown.title,shown.tmdb],['Fixture Beta','900002'],'historical event presented through the verified bridge');
  assert.equal(JSON.stringify(bucket.records.get(key)),stored,'the stored event is not rewritten');
 }
+
+// 4. A full Ratings-run off-page regression (review of PR #720): a 403 id that has left Diary page 1 is retried and resolved by a later ordinary run whose page holds other ids.
+{
+ const {clock,net,bucket,env,add,web,R}=setup();migrated(bucket,{films:{}});
+ web.set('Aj8u',{slug:'aj8u',status:403});
+ net.diary.set(1,page(diaryRow('Aj8u',8,'2026-11-17','1600000001')));
+ let {reply}=await runOnce(R,env,clock);assert.equal(reply.state,'finished',JSON.stringify(reply));
+ assert.equal(bucket.value('letterboxd/facts/scans/diary-identity.json').films.Aj8u.slug,'aj8u');
+ add('Aj8u','aj8u','900002','Fixture Beta',2024);add('Zed1','zed1','900003','Fixture Zed',2022);
+ net.diary.set(1,page(diaryRow('Zed1',6,'2026-11-18','1600000002')));
+ clock.now+=3*3600000;
+ ({reply}=await runOnce(R,env,clock));assert.equal(reply.state,'finished',JSON.stringify(reply));
+ assert.equal(bucket.value('letterboxd/facts/films/lb-Aj8u.json').links.tmdb,'900002','the id that left page 1 is resolved by the later run');
+ assert.equal(bucket.value('letterboxd/facts/scans/diary-identity.json').films.Aj8u,undefined);assert.equal(bucket.value('letterboxd/facts/films/lb-Zed1.json').links.tmdb,'900003');
+}
 console.log('ratings-diary-identity: ok');
