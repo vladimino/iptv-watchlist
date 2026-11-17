@@ -454,11 +454,11 @@ async function refreshPersonalRating(env,film){
  const rating=parsePersonalRating(await response.text(),film.url,username);if(rating===null)return {filmId:id,status:'not_rated'};
  const facts=await LetterboxdFacts.recordFilmFacts(env,id,{watched:true,rating},{observedAt:requestedAt,source:'letterboxd_film_page',sourceRef:sourceUrl});if(facts.conflict)return {filmId:id,status:'identity_conflict'};const saved=facts.outcomes.some(o=>o.outcome==='new'||o.outcome==='replaces');if(saved&&facts.record.rating?.value===rating)await saveActualMirror(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',sourceUrl,updatedAt:requestedAt});await enrichRecentRemovalRatings(env,{[id]:rating},requestedAt);return {filmId:id,status:saved?'saved':'unchanged',rating};
 }
-// AIR-268: films removed from the watchlist are looked up one by one on their own member page, so a removal event gets
-// its rating without the 31-page films list. REMOVAL_RATING_LOOKUP is retired and unread (ADR 0077): this lookup is
-// the permanent bounded fallback. The queue is bounded, each attempt is recorded before its request (a killed request
-// cannot loop), a 403 or 429 stops the batch, and a film is retried at most REMOVAL_LOOKUP_MAX_ATTEMPTS times.
-// No rating found never means watched.
+// The removal rating queue (ADR 0060, ADR 0077). A film removed from the watchlist waits here until the Ratings step in
+// src/letterboxd-ratings.js rates it from its own member page, so a removal event gets its rating without the 31-page films
+// list. The EPG commit only hands removed films over and never looks them up (ADR 0074). The queue is bounded, each attempt
+// is recorded before its request (a killed request cannot loop), a 403 or 429 stops the batch, and a film is retried at
+// most REMOVAL_LOOKUP_MAX_ATTEMPTS times. No rating found never means watched. REMOVAL_RATING_LOOKUP is retired and unread.
 const REMOVAL_LOOKUP_KEY=ENRICHMENT_KEY+'removal-rating-lookups.json';
 const REMOVAL_LOOKUP_BATCH=5,REMOVAL_FACT_BATCH=5,REMOVAL_LOOKUP_MAX_ATTEMPTS=3,REMOVAL_LOOKUP_CAP=100,REMOVAL_LOOKUP_KEEP_MS=14*86400000;
 const REMOVAL_LOOKUP_RETRY_MS={claimed:3600000,failed:3600000,blocked:6*3600000,rate_limited:6*3600000,not_rated:24*3600000};
