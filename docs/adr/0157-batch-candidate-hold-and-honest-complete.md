@@ -18,11 +18,9 @@ The 16–17 Nov 2026 natural A/B/C/D series (prompts already carrying `predictio
 2. **`prediction_batch_hold` is a separate writer.** After a valid preflight, the lease holder may persist 1–10 already generated items on `enrichment/batch-hold/<runId>.json` (epoch and `manifestHash` bound). Not a submit. Invalid extra keys refused. Films must be in `selectedIds`.
 3. **`prediction_batch_submit({useHeld:true})`** loads that hold, re-validates authoritatively, and commits. `items` must be omitted. Dry-run is refused. Replay of the same held body remains the existing submit identity.
 4. **Readback.** `prediction_batch_manifest` `part=hold` lists held filmIds; `part=item` returns one held object. Envelope/profile/contract/film parts are unchanged.
-5. **Honest complete.** For a running `batch_v2` run, `reason: external_termination` is **409**:
-   - `held_unsubmitted` when a hold still has unsubmitted films;
-   - `client_state_lost` when `firstSubmitAt` is null and selected films remain.
-   The caller may then recover, or complete with **`client_state_lost`** or **`manifest_unusable`**. Fault `failedStep` may be `validate`, `manifest` or `hold`.
-6. **Tool discovery.** MCP `initialize` advertises `tools.listChanged: true` and server version `0.4.0`. Instructions name the batch v2 tool set at the front. A cached ChatGPT/Task catalog is still a client issue; this does not mutate Scheduled Tasks.
+5. **Honest complete, compatible with the installed A/B/C/D prompt (review P1-A).** `reason: external_termination` is **409 `held_unsubmitted`** only when `enrichment/batch-hold/<runId>.json` still has films that this run has not settled. Without a hold, the same reason remains **HTTP 200** and **releases the runner lease**, so the next 15-minute slot is not `already_running`. After a prompt GO that actually calls hold, recover with `prediction_batch_submit({useHeld:true})`, or complete with **`client_state_lost`** / **`manifest_unusable`**. Fault `failedStep` may be `validate`, `manifest` or `hold`.
+6. **Hold identity (review P1-B).** `prediction_batch_hold` CAS-merges via `mergeStoredJSON`. Per-film identity is `batchItemDigest`. An exact replay writes nothing. A different digest for the same `filmId` is **409 `hold_conflict`**. Disjoint concurrent holds merge. Merged item count and JSON bytes stay at the submit caps (`submitMaxItems`, 56 KiB). Exhausted CAS is **409 `hold_contention`**.
+7. **Tool discovery.** MCP `initialize` advertises `tools.listChanged: true` and server version `0.4.0`. Instructions name the batch v2 tool set at the front. A cached ChatGPT/Task catalog is still a client issue; this does not mutate Scheduled Tasks.
 
 Not authorized: Task prompt edits, live `prediction_batch_start`, lease reset, flags, R2/D1 operators, or production hold/submit.
 
@@ -30,11 +28,12 @@ Not authorized: Task prompt edits, live `prediction_batch_start`, lease reset, f
 
 - **Make `prediction_batch_validate` write the hold when `runId` is present.** Rejected: it would falsify `readOnlyHint` and ADR 0131.
 - **Auto-submit the hold from `prediction_complete`.** Rejected: complete must not become a writer of predictions.
-- **Keep accepting `external_termination` for lost buffers.** Rejected: it hid recoverable owned state as a Worker/external stop (AIR-510 FAIL).
+- **409 every `external_termination` while selected films remain, including `client_state_lost`.** Rejected after independent review P1-A: the live prompt never calls hold and would keep the lease (`already_running` on the next slot). 409 is reserved for an actual hold.
+- **Last-writer-wins hold replace.** Rejected after P1-B: concurrent groups and a second hold of different bytes must not silently drop the first.
 
 ## Consequences
 
-A later owner-approved prompt can call hold after validate and `useHeld` after a lost buffer. Until that GO, a Task that only calls the old five tools still cannot persist items; complete will 409 instead of recording a false spent/external stop, so the lease remains until `client_state_lost` or expiry. One more write tool and one R2 object per run.
+A later owner-approved prompt can call hold after validate and `useHeld` after a lost buffer. Until that GO, a Task that only calls the old five tools still completes lost context with `external_termination` (lease released). After a hold, that reason is refused until `useHeld` or an honest `client_state_lost`. One more write tool and one R2 object per run.
 
 ## Recovery and migration boundary
 

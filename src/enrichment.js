@@ -2869,8 +2869,11 @@ async function batchSubmit(env,body,requestId){
  const run=await checkedRun(env,body.runId);if(!run)return json({error:'Unknown run'},404);
  if(body.useHeld===true){
   const held=await loadJSON(env,ENRICHMENT_KEY+'batch-hold/'+body.runId+'.json');
-  if(!held||held.epoch!==body.epoch||held.runId!==body.runId||!Array.isArray(held.items)||!held.items.length)return json({error:'No held items for this run',code:'hold_unavailable',runId:body.runId},409);
-  body={...body,items:held.items};delete body.useHeld;
+  if(!held||held.epoch!==body.epoch||held.runId!==body.runId||held.manifestHash!==run.manifestHash||!Array.isArray(held.items)||!held.items.length)return json({error:'No held items for this run',code:'hold_unavailable',runId:body.runId},409);
+  const items=held.items.map(heldItemBody);
+  const bytes=new TextEncoder().encode(JSON.stringify(items)).length;
+  if(bytes>BATCH_RUNNER.submitMaxBodyBytes)return json({error:'Held items are '+bytes+' bytes, over the '+BATCH_RUNNER.submitMaxBodyBytes+' byte submit limit',code:'hold_too_large'},409);
+  body={...body,items};delete body.useHeld;
   const filled=validateBatchSubmitBody(body);if(filled)return filled;
  }
  if(run.protocol!==BATCH_PROTOCOL)return wrongProtocolResponse();
@@ -3085,9 +3088,9 @@ function heldItemBody(item){return batchPick(item,BATCH_ITEM_KEYS);}
 async function ownedBatchHoldPart(env,runId,part,filmId){
  const held=await loadJSON(env,batchHoldKey(runId));
  if(part==='hold')return {kind:'hold',runId,epoch:held?.epoch||null,manifestHash:held?.manifestHash||null,filmIds:Array.isArray(held?.items)?held.items.map(item=>item.filmId):[]};
- const item=(Array.isArray(held?.items)?held.items:[]).find(row=>row.filmId===filmId);
- if(!item)return null;
- return {kind:'item',runId,manifestHash:held.manifestHash,filmId,item};
+ const row=(Array.isArray(held?.items)?held.items:[]).find(item=>item.filmId===filmId);
+ if(!row)return null;
+ return {kind:'item',runId,epoch:held.epoch,manifestHash:held.manifestHash,filmId,itemDigest:row.itemDigest||null,item:heldItemBody(row)};
 }
 async function batchHold(env,body){
  if(!isObject(body)||!isText(body.runId,100)||!Number.isInteger(body.epoch)||body.epoch<1)return json({error:'Invalid runId or epoch'},400);
@@ -3106,13 +3109,39 @@ async function batchHold(env,body){
  const selected=new Set(run.selectedIds||[]);
  const missing=body.items.map(item=>item.filmId).filter(id=>!selected.has(id));
  if(missing.length)return json({error:'Film not in manifest',code:'not_in_manifest',filmIds:missing},409);
- const stored=await loadJSON(env,batchHoldKey(run.runId))||{runId:run.runId,epoch:body.epoch,manifestHash:run.manifestHash,items:[]};
- const byId=new Map((Array.isArray(stored.items)?stored.items:[]).map(item=>[item.filmId,item]));
- for(const item of body.items)byId.set(item.filmId,heldItemBody(item));
- const next={runId:run.runId,epoch:body.epoch,manifestHash:run.manifestHash,heldAt:new Date().toISOString(),items:[...byId.values()]};
- if(next.items.length>BATCH_RUNNER.submitMaxItems)return json({error:'Hold would exceed '+BATCH_RUNNER.submitMaxItems+' items'},400);
- await saveJSON(env,batchHoldKey(run.runId),next);
- return json({status:'held',runId:run.runId,epoch:body.epoch,manifestHash:run.manifestHash,filmIds:next.items.map(item=>item.filmId),counts:{held:next.items.length}});
+ const incoming=[];
+ for(const item of body.items){const stored=heldItemBody(item);incoming.push({...stored,itemDigest:await batchItemDigest(item.filmId,stored)});}
+ let refuse=null,replayed=[],added=[];
+ let next;
+ try{
+  next=await mergeStoredJSON(env,batchHoldKey(run.runId),{runId:run.runId,epoch:body.epoch,manifestHash:run.manifestHash,items:[]},current=>{
+   if(current.runId&&current.runId!==run.runId){refuse={error:'Hold belongs to another run',code:'hold_conflict'};return null;}
+   if(current.epoch&&current.epoch!==body.epoch){refuse={error:'Epoch does not match this hold',code:'epoch_mismatch',runId:run.runId};return null;}
+   if(current.manifestHash&&current.manifestHash!==run.manifestHash){refuse={error:'Manifest hash does not match this hold',code:'hold_conflict',runId:run.runId};return null;}
+   const byId=new Map((Array.isArray(current.items)?current.items:[]).map(item=>[item.filmId,item]));
+   replayed=[];added=[];
+   for(const item of incoming){
+    const prev=byId.get(item.filmId);
+    if(prev){
+     if(prev.itemDigest===item.itemDigest){replayed.push(item.filmId);continue;}
+     refuse={error:'Held item digest conflict',code:'hold_conflict',runId:run.runId,filmId:item.filmId};return null;
+    }
+    byId.set(item.filmId,item);added.push(item.filmId);
+   }
+   if(!added.length)return null;
+   const items=[...byId.values()];
+   if(items.length>BATCH_RUNNER.submitMaxItems){refuse={error:'Hold would exceed '+BATCH_RUNNER.submitMaxItems+' items',code:'hold_too_large'};return null;}
+   const heldBytes=new TextEncoder().encode(JSON.stringify(items.map(heldItemBody))).length;
+   if(heldBytes>BATCH_RUNNER.submitMaxBodyBytes){refuse={error:'Held items are '+heldBytes+' bytes, over the '+BATCH_RUNNER.submitMaxBodyBytes+' byte submit limit',code:'hold_too_large'};return null;}
+   return {runId:run.runId,epoch:body.epoch,manifestHash:run.manifestHash,heldAt:new Date().toISOString(),items};
+  });
+ }catch(error){
+  if(String(error.message)==='Stored JSON changed during write')return json({error:'Hold write contention',code:'hold_contention',runId:run.runId},409);
+  throw error;
+ }
+ if(refuse)return json(refuse,409);
+ const filmIds=(next.items||[]).map(item=>item.filmId);
+ return json({status:'held',runId:run.runId,epoch:body.epoch,manifestHash:run.manifestHash,filmIds,replayed,added,counts:{held:filmIds.length,added:added.length,replayed:replayed.length}});
 }
 function assembleOwnedBatchManifest(envelope,profilePart,contractPart,filmParts){
  if(!isObject(envelope)||envelope.kind!=='envelope'||!Array.isArray(envelope.parts))return {ok:false,code:'incomplete_manifest'};
@@ -3260,12 +3289,12 @@ async function enrichmentComplete(env,body,requestId){
  if(fault.value&&!FAULT_REASONS.includes(faultReason))return json({error:'Fault requires an external stop reason'},400);
  const attributed=externalAttribution(faultReason,fault.value);if(attributed)run.callerFault=attributed;
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
+ // Installed A/B/C/D prompts still complete lost context with external_termination and have no hold tool (AIR-510 P1-A).
+ // Only refuse that reason when this run actually stored submit-ready items that would otherwise be dropped.
  if(isBatchV2Run(run)&&body.reason==='external_termination'){
   const held=await loadJSON(env,ENRICHMENT_KEY+'batch-hold/'+run.runId+'.json');
   const heldIds=(Array.isArray(held?.items)?held.items:[]).map(item=>item.filmId).filter(id=>id&&!SETTLED_STATUSES.includes(run.results?.[id])&&!run.failures?.[id]);
   if(heldIds.length)return json({error:'Held submit-ready items remain; submit them with useHeld',code:'held_unsubmitted',runId:run.runId,epoch:run.epoch,filmIds:heldIds,recover:{tool:'prediction_batch_submit',useHeld:true}},409);
-  const progressed=!!run.firstSubmitAt||Object.keys(run.results||{}).length>0||Object.keys(run.failures||{}).length>0;
-  if(!progressed&&Array.isArray(run.selectedIds)&&run.selectedIds.length)return json({error:'Owned run still has unsubmitted films; recover parts or complete with client_state_lost',code:'client_state_lost',runId:run.runId,epoch:run.epoch,manifestHash:run.manifestHash||null,filmIds:run.selectedIds,recover:{tools:['prediction_batch_manifest','prediction_batch_hold']}},409);
  }
  if(body.reason&&!NORMAL_COMPLETE.includes(body.reason)){const stopped=await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null});await settleExpiredDiagnostics(env);return json(stopped);}
  // ADR 0136: spending every selected manifest film is a normal complete for batch_v2 even when the global queue still has ready films. Unsubmitted / deferred_budget slots fail closed; profile/contract/lease stops stay as they are.

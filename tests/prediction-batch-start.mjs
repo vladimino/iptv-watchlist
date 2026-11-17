@@ -499,28 +499,51 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const second=await batch(w,{manifestSize:5});assert.equal(second.data.status,'already_running','readback is not a second start');
 }
 
-// AIR-510: interrupt before validate (lost contract) refuses a blanket external_termination; interrupt after validate
-// recovers byte-identical held items without regenerating.
+// AIR-510 P1-A: installed A/B/C/D prompts still complete lost context with external_termination
+// and must release the lease so the next 15-minute slot is not already_running.
 {
  const w=await ready(5);await reconcile(w);
  const started=await batch(w,{manifestSize:5});assert.equal(started.status,200);
  const lost=await w.api('complete',{runId:started.data.runId,reason:'external_termination'});
- assert.equal(lost.status,409);assert.equal(lost.data.code,'client_state_lost');
- assert.equal(lost.data.filmIds.length,5);assert.equal(started.data.manifestHash,lost.data.manifestHash);
- const honest=await w.api('complete',{runId:started.data.runId,reason:'client_state_lost'});
- assert.equal(honest.status,200,JSON.stringify(honest.data).slice(0,200));
+ assert.equal(lost.status,200,JSON.stringify(lost.data).slice(0,240));
+ const lease=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);
+ assert.equal(lease.expiresAt,0,'the live-prompt stop releases the runner lease');
+ const next=await batch(w,{manifestSize:5});
+ assert.equal(next.status,200,JSON.stringify(next.data).slice(0,200));
+ assert.equal(next.data.status,'running');assert.notEqual(next.data.runId,started.data.runId);
 }
+
+// AIR-510: validate → hold (CAS merge) → drop client items → useHeld submit. Replay is identity; a different digest is conflict.
 {
  const w=await ready(5);await reconcile(w);
  const started=await batch(w,{manifestSize:5});assert.equal(started.status,200);
  const items=started.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
- const held=await w.api('batch/hold',{runId:started.data.runId,epoch:started.data.lease.epoch,items});
- assert.equal(held.status,200,JSON.stringify(held.data).slice(0,240));
- assert.equal(held.data.status,'held');assert.equal(held.data.filmIds.length,5);
+ vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
+ w.ctx.__env=w.env;
+ w.ctx.__items=items;
+ const pre=await vm.runInContext('mcpCallTool({name:"prediction_batch_validate",arguments:{items:__items}},"2025-06-18",__env,{waitUntil(){}})',w.ctx);
+ const preBody=JSON.parse(pre.result.content[0].text);
+ assert.equal(preBody.valid,true,pre.result.content[0].text.slice(0,240));
+ assert.equal(preBody.storage,'not_accessed');
+ const left=items.slice(0,2),right=items.slice(2);
+ const [a,b]=await Promise.all([
+  w.api('batch/hold',{runId:started.data.runId,epoch:started.data.lease.epoch,items:left}),
+  w.api('batch/hold',{runId:started.data.runId,epoch:started.data.lease.epoch,items:right})
+ ]);
+ assert.equal(a.status,200,JSON.stringify(a.data).slice(0,240));
+ assert.equal(b.status,200,JSON.stringify(b.data).slice(0,240));
+ const replay=await w.api('batch/hold',{runId:started.data.runId,epoch:started.data.lease.epoch,items:left});
+ assert.equal(replay.status,200,JSON.stringify(replay.data).slice(0,240));
+ assert.equal(replay.data.added.length,0);assert.equal(replay.data.replayed.length,2);
+ const conflictPred={...w.prediction,predictedRating:w.prediction.predictedRating===3.5?4:3.5};
+ const conflict=await w.api('batch/hold',{runId:started.data.runId,epoch:started.data.lease.epoch,items:[{...left[0],prediction:conflictPred}]});
+ assert.equal(conflict.status,409);assert.equal(conflict.data.code,'hold_conflict');
+ w.ctx.__a={name:'prediction_batch_manifest',args:{runId:started.data.runId,part:'hold'}};
+ const holdPart=JSON.parse((await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result.content[0].text);
+ assert.equal(holdPart.kind,'hold');assert.equal(holdPart.epoch,started.data.lease.epoch);assert.equal(holdPart.manifestHash,started.data.manifestHash);
+ assert.equal(holdPart.filmIds.length,5);
  const blocked=await w.api('complete',{runId:started.data.runId,reason:'external_termination'});
  assert.equal(blocked.status,409);assert.equal(blocked.data.code,'held_unsubmitted');
- assert.deepEqual(blocked.data.filmIds.slice().sort(),held.data.filmIds.slice().sort());
- const dropped=null;void dropped;
  const submitted=await w.api('batch/submit',{runId:started.data.runId,epoch:started.data.lease.epoch,useHeld:true});
  assert.equal(submitted.status,200,JSON.stringify(submitted.data).slice(0,300));
  assert.equal(submitted.data.results.length,5);

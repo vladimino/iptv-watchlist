@@ -10,10 +10,8 @@ Controller L0 D1 window 16 Nov 23:40–17 Nov 08:07 Europe/Madrid: 34 owned `bat
 
 ## Offline checks (`tests/prediction-batch-start.mjs`)
 
-1. **Interrupt before validate.** Five-film start, drop the client copy of the contract, `prediction_complete({reason:'external_termination'})` → **409 `client_state_lost`** with the five `filmIds` and `manifestHash`. Completing with **`client_state_lost`** is HTTP 200 (honest stop).
-2. **Interrupt after validate.** Same start, `POST /api/enrichment/batch/hold` of the five generated items, drop the client items, `external_termination` → **409 `held_unsubmitted`**. `batch/submit` with **`useHeld: true`** (no items) creates the five predictions; `manifest_spent` succeeds. Evidence is not regenerated.
-
-`prediction_batch_validate` is not called in these fixtures (it remains I/O-free per ADR 0131). Hold stores the same objects a passing preflight would have accepted.
+1. **Interrupt before validate (live-prompt compatible, review P1-A).** Five-film start, drop the client copy of the contract, `prediction_complete({reason:'external_termination'})` → **HTTP 200**, runner lease `expiresAt=0`, the next `batch_start` is a **new** `runId` (not `already_running`).
+2. **Interrupt after validate (P1-B).** Same start, MCP `prediction_batch_validate` (`storage: not_accessed`), concurrent disjoint `POST /api/enrichment/batch/hold` CAS-merge, exact replay is a no-write identity, a different `predictedRating` is **409 `hold_conflict`**. Drop the client items, `external_termination` → **409 `held_unsubmitted`**. `batch/submit` with **`useHeld: true`** (no items) creates the five predictions; `manifest_spent` succeeds. Evidence is not regenerated. Merged hold stays at the 56 KiB submit bound.
 
 ## Not proven
 
