@@ -1808,10 +1808,10 @@ function integrationTime(value){const ms=Date.parse(value);return Number.isFinit
 const EPG_RUNNING_STAGES=['metadata','epg','seal'];
 function epgErrorCode(message){const text=String(message||'');return /HTTP/i.test(text)?'epg_http':/cover the current window/i.test(text)?'epg_window':/parse|xml|unexpected/i.test(text)?'epg_parse':'epg_failed';}
 // The completion receipt: a valid `completedAt`, or, only for a record written before AIR-390 (no `completedAt` field at all),
-// a complete `updatedAt` without an error. A present but malformed `completedAt` is never replaced by `updatedAt`.
+// a complete `updatedAt` without an error. A present but invalid `completedAt` (null included) is never replaced by `updatedAt`.
 function epgCompletionReceipt(sync){
  if(sync?.stage!=='complete')return null;
- if(sync.completedAt!==undefined&&sync.completedAt!==null)return integrationTime(sync.completedAt);
+ if(Object.prototype.hasOwnProperty.call(sync,'completedAt'))return integrationTime(sync.completedAt);
  return sync.error?null:integrationTime(sync.updatedAt);
 }
 // The published-generation contract of every UI surface: success needs the receipt AND both runIds, non-empty and equal

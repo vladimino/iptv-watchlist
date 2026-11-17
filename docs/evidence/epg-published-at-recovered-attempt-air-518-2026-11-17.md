@@ -29,7 +29,7 @@ The routine EPG run of 16 November 2026 (`runId` `47663279-3e6b-423d-b696-b22edf
 | recovered record, published programme unreadable | previous completion | `unknown` / `epg_unproven` |
 | clean complete record, published programme unreadable | previous completion | `unknown` / `epg_unproven` |
 | no `sync.runId`, or a published programme without `runId` | previous completion | `unknown` / `epg_unproven` |
-| malformed `completedAt` beside a valid `updatedAt` | previous completion | `unknown` / `epg_unproven` |
+| malformed or `null` `completedAt` beside a valid `updatedAt` | previous completion | `unknown` / `epg_unproven` |
 | pre-AIR-390 record (no `completedAt` field), same runId | its complete `updatedAt` | `healthy` |
 | error and no completion receipt, or an invalid `completedAt` | previous completion | not a success |
 | feed ended, publication fresh | — | header «Будущей программы нет», not «Данные устарели» |

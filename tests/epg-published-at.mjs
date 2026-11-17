@@ -184,6 +184,11 @@ records.set('sync.json',{runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE,compl
 assert.equal((await programme()).publishedAt,OLD,'a malformed completedAt is not replaced by a valid updatedAt');
 assert.equal(source(await footer(),'epg').state,'unknown');
 assert.equal(context.epgCarriedPublishedAt({runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE,completedAt:'invalid',lastEpgPublishedAt:OLD}),OLD);
+records.set('sync.json',{runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE,completedAt:null,lastEpgPublishedAt:OLD});
+assert.equal((await programme()).publishedAt,OLD,'an explicit completedAt: null is not a receipt');
+assert.equal(source(await footer(),'epg').state,'unknown');
+assert.equal(source(await footer(),'epg').code,'epg_unproven');
+assert.equal(context.epgPublicationState({runId:'r1',stage:'complete',completedAt:null,updatedAt:NEW_DONE},{runId:'r1'}).binding,'none');
 // A record written before AIR-390 (no completedAt field) bound to the published run still reads its complete updatedAt.
 records.set('sync.json',{runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE});
 assert.equal((await programme()).publishedAt,NEW_DONE);
