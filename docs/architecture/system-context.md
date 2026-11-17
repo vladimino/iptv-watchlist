@@ -1,6 +1,6 @@
 # System context
 
-**Scope:** the deployed IPTV Watchlist system and external actors. This is a context diagram, not a deployment authorization. Verified against the [deployment runbook](../runbooks/deployment.md), [Worker/R2 decision](../adr/0002-cloudflare-worker-r2-authority.md) and [MCP contract](../reference/api/mcp.md).
+**Scope:** the deployed IPTV Watchlist system and external actors. This is a context diagram, not a deployment authorization. Verified against the [deployment runbook](../runbooks/deployment.md), the [authority per domain](persistence-and-migration.md#authority-per-domain), the original [Worker/R2 decision](../adr/0002-cloudflare-worker-r2-authority.md) and the [MCP contract](../reference/api/mcp.md).
 
 ```mermaid
 flowchart LR
@@ -9,7 +9,8 @@ flowchart LR
     accessWeb["Cloudflare Access: All Workers"]
     accessMcp["Cloudflare Access: IPTV MCP, owner only"]
     worker["Cloudflare Worker: iptv"]
-    r2[("Cloudflare R2: iptv, authoritative")]
+    d1[("Cloudflare D1: iptv, authoritative per domain")]
+    r2[("Cloudflare R2: iptv, blobs, inputs and mirrors")]
     lb["Letterboxd"]
     epg["Configured EPG source"]
     tmdb["TMDB"]
@@ -17,6 +18,7 @@ flowchart LR
     legacy["Legacy ChatGPT Site: reserve only"]
     viewer --> accessWeb --> worker
     agent --> accessMcp --> worker
+    worker <--> d1
     worker <--> r2
     worker -->|authorized sync requests| lb
     worker -->|authorized EPG requests| epg
@@ -31,6 +33,6 @@ flowchart LR
 
 All browser and MCP HTTP routes use **one Worker**, but the exact `/mcp` path has its own Access application and in-Worker JWT verification. The normal site remains covered by `All Workers`. External Tasks are not Worker cron triggers; invocation and authorization are separate from deploying code. Source reads happen when an approved sync or discovery operation invokes the corresponding path, not on deployment.
 
-The dotted legacy line signifies *historical transfer provenance*, **not** an active data replication process or an operational path. The historical Site remains a separate reserve and must not be used as a writer. R2 is authoritative; prospective D1 adapters do not participate in this production context.
+The dotted legacy line signifies *historical transfer provenance*, **not** an active data replication process or an operational path. The historical Site remains a separate reserve and must not be used as a writer. Authority is per domain: D1 `iptv` is authoritative for canonical Film/Person, the metadata cache, mutable predictions, published EPG and watchlist, Discovery, ratings documents and owner reviews, and R2 holds immutable bodies, raw inputs, archive segments and compatibility mirrors. See [authority per domain](persistence-and-migration.md#authority-per-domain).
 
 See [MCP security ADR](../adr/0004-mcp-access-boundary.md), [external tasks ADR](../adr/0005-external-chatgpt-tasks.md) and [migration boundary](../adr/0017-staged-d1-migration.md).
