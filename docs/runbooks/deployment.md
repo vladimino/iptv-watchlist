@@ -126,6 +126,8 @@ This is the operator sequence of the shared reliability contract ([ADR 0089](../
 
 The canary's bindings, route and Workflow class were removed by AIR-457 ([ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md)) and its code, operator script, diagnostic migrations and tests by AIR-521 ([ADR 0160](../adr/0160-delete-epg-diagnostic-canary-code.md)). `wrangler.jsonc` carries only the production `DB`, `BUCKET` and the four production Workflows; guarded by `tests/epg-diagnostic-bindings-ready.mjs`, which also checks the built bundle. `keep_vars: true` may keep a leftover live var: read the deployed bindings back and treat any leftover as a separate owner-approved settings change. Code rollback restores no deleted resource ([retirement evidence](../evidence/orchestration/epg-diagnostic-retirement-air-457-2026-11-17.md)).
 
+## Troubleshooting and recovery
+
 - [Cloudflare deployment metadata HTTP 403](recovery/deploy-metadata-403.md) — token policy diagnostics; do not widen permissions without a specific failed check.
 - [Cloudflare Worker rollback](recovery/cloudflare-worker-rollback.md) — code recovery only, not data or schedule rollback; changes require owner approval.
 - [Historical legacy Sites publication and rollback](../archive/legacy-sites/site-release.md) — archived evidence and steps, **not** the current production deployment flow.
