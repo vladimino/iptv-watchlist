@@ -102,6 +102,9 @@ export const FILES={
  "alias-provenance.mjs": {
   "suite": "core"
  },
+ "build-atomic-dist.mjs": {
+  "suite": "core"
+ },
  "candidate-discovery.mjs": {
   "suite": "core"
  },
