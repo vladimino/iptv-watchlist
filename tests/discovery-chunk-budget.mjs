@@ -897,4 +897,56 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.ok(second.result.timings.totalMs<=40000,'second hop inside the wall: '+second.result.timings.totalMs);
 }
 
+// 23. AIR-523 17 Nov 2026: a NEW programme generation holds thousands of already verified identities and no assigned row. The batched replay runs first in the
+// chunk, owns its own slice of the budget, restores real assignments from the new run's observation rows on the first hop, and still leaves candidate time:
+// unresolved work neither displaces it nor is displaced by it. With a fast D1 the whole set is restored in one hop and the cursor wraps to the start.
+{
+ const decided=[],decisions={},catalog={};
+ for(let index=0;index<90;index++){
+  const key='rep'+String(index).padStart(2,'0');
+  const tmdb=String(5000+index);
+  decided.push(key);
+  decisions[key]={status:'verified',filmId:'tmdb_'+tmdb,tmdbId:tmdb,identitySource:'owner'};
+  catalog['tmdb_'+tmdb]={id:'tmdb_'+tmdb,tmdbId:tmdb,canonicalIdentity:'tmdb:'+tmdb,title:'Film '+key,original:'Film '+key,year:2005};
+ }
+ const {file,env}=await fixture({decided,decisions,catalog,extraHot:30});
+ sql(file,`INSERT INTO published_epg_generation (programme_run_id, phase, published_at, payload_sha256, created_at) VALUES ('${RUN}','published','2026-11-17T10:00:00Z','x','2026-11-17T10:00:00Z')`);
+ sql(file,`UPDATE published_epg_authority SET mode='d1', cutover='open', programme_run_id='${RUN}', generation=7`);
+ const assignedRows=()=>Number(sql(file,"SELECT COUNT(*) AS n FROM published_epg_show WHERE basis='discovery'")[0].n);
+ const publishedBefore=sql(file,'SELECT generation, watchlist_generation, programme_run_id FROM published_epg_authority')[0];
+ const runHop=async({slowMs=0}={})=>{
+  const clock={offset:0};
+  const {context,searched}=chunkContext({clock,respond:()=>({results:[]})});
+  const hopEnv={...env,DB:d1Standin(file,{onBatch(){clock.offset+=slowMs;}})};
+  const lease=await Authority.acquireLease(hopEnv,{programmeRunId:RUN});hopEnv.discoveryLease=lease.lease;
+  const result=await context.resolveDiscoveryChunk(hopEnv,{films:[]},24,lease.lease);
+  await Authority.releaseLease(hopEnv,lease.lease);
+  return {result,searched};
+ };
+ assert.equal(assignedRows(),0);
+ // Slow D1 (2.8 s per write batch): real, bounded progress on the first hop, candidates still start, the wall holds, nothing but Discovery state moves.
+ const slow=await runHop({slowMs:2800});
+ const afterSlow=assignedRows();
+ assert.ok(afterSlow>=20,'the first hop restores real assignments despite 30 unresolved candidates and a slow D1: '+afterSlow);
+ assert.ok(slow.result.assignment.bulkObservations>0&&slow.result.assignment.assigned>=afterSlow-slow.result.assignment.replayed,'the summary reports the batched replay');
+ assert.ok(slow.searched.length>0,'candidate work still starts: '+slow.searched.length);
+ assert.notEqual(slow.result.error,'wall_budget');
+ assert.ok(slow.result.timings.totalMs<=40000,'inside the wall: '+slow.result.timings.totalMs);
+ assert.ok(slow.result.timings.replayMs<=10000+2800,'the replay keeps to its own slice of the budget: '+slow.result.timings.replayMs);
+ assert.equal(slow.result.assignment.bulkComplete,false,'a slow hop leaves the cursor mid-circle');
+ assert.equal(slow.result.stage,'partial','unfinished replay keeps the series going');
+ assert.ok(JSON.parse(statusPayload(file)).replayAfter,'the replay cursor is stored with the status');
+ assert.deepEqual(sql(file,'SELECT generation, watchlist_generation, programme_run_id FROM published_epg_authority')[0],publishedBefore,'only the EPG sync moves the published generation');
+ // Uniqueness and provenance: one Film per slot, every row a Discovery row of this run.
+ assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM (SELECT channel_id, start_ms FROM published_epg_show WHERE programme_run_id='"+RUN+"' GROUP BY channel_id, start_ms HAVING COUNT(*)>1)")[0].n),0);
+ // The next natural hops finish the circle; with a fast D1 that is one hop.
+ let hops=0,last;
+ do{last=await runHop();hops++;}while(last.result.assignment.bulkComplete===false&&hops<5);
+ assert.equal(last.result.assignment.bulkComplete,true,'the circle completes');
+ assert.equal(assignedRows(),90,'every verified observation of the new run has its slot');
+ const again=await runHop();
+ assert.equal(again.result.assignment.bulkObservations,0,'a finished replay finds nothing to do and costs one select');
+ assert.equal(assignedRows(),90);
+}
+
 console.log('discovery chunk budget ok');

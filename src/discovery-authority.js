@@ -1341,6 +1341,91 @@ export async function assignObservationSlots(env,spec,context={}){
  }
  return result;
 }
+// AIR-523. Batched replay of the assigned rows of a NEW programme generation. `assignObservationSlots` costs about ten sequential D1 round trips for one
+// observation, so the replay that rode on the 38-key `touches` page restored a few dozen observations per chunk while a new run holds thousands of
+// verified ones (17 Nov 2026: 8 531 verified, 3 assigned). This function selects only observations that still have a slot no row holds, reads the
+// page's decisions, shows, members and admissions in a handful of queries, decides eligibility with the same pure rule, and writes the rows through the
+// SAME guarded statement (`slotInsert`) in fenced batches of `SLOT_BATCH`. Every guard of decision 4 is still evaluated inside each statement; the
+// JavaScript side is only a prefilter, so a stale read can cost a skipped row, never a wrong one. Slot coordinates are copied from the current run's
+// observation rows, never from an earlier run. `after` is a key cursor that wraps; `complete` means the circle of keys was covered.
+export const REPLAY_PAGE=40;
+const REPLAY_SELECT_SQL="SELECT o.observation_key, o.confirmed_tmdb_id, o.payload_json AS observation_json, d.payload_json AS decision_json, d.decision_hash, d.tmdb_id, d.film_id FROM discovery_observation o JOIN discovery_decision d ON d.observation_key=o.observation_key WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND o.programme_run_id=? AND d.status='verified' AND d.media_kind='movie' AND d.film_id IS NOT NULL AND d.tmdb_id IS NOT NULL AND o.observation_key>? AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND NOT EXISTS (SELECT 1 FROM published_epg_show p WHERE p.programme_run_id=? AND p.channel_id=s.channel_id AND p.start_ms=s.start_ms)) ORDER BY o.observation_key LIMIT ?";
+const marks=count=>Array.from({length:count},()=>'?').join(',');
+export async function replayUnassignedSlots(env,spec={},context={}){
+ const lease=context.lease||leaseOf(env);
+ if(!lease)throw failed('discovery_lease');
+ const db=database(env);
+ const limit=Math.max(1,Math.min(REPLAY_PAGE,Number.isInteger(spec.limit)&&spec.limit>0?spec.limit:REPLAY_PAGE));
+ const startAfter=typeof spec.after==='string'?spec.after:'';
+ const stop=typeof spec.shouldStop==='function'?spec.shouldStop:()=>false;
+ const timed=typeof spec.timedCommit==='function'?spec.timedCommit:write=>write();
+ const outcomes={assigned:0,present:0,evidence_drift:0,film_absent:0,guard_skipped:0};
+ const result={observations:0,pages:0,after:startAfter,complete:false,stale:false,outcomes,drifts:[]};
+ let gate=await readAuthority(env);
+ assertOpen(gate);
+ const published=await one(db,"SELECT programme_run_id FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open'");
+ const run=published?.programme_run_id??null;
+ if(!run||(spec.programmeRunId&&spec.programmeRunId!==run)){result.stale=true;result.complete=true;return result;}
+ let cursor=startAfter,wrapped=false;
+ while(!stop()){
+  if(typeof spec.beforePage==='function')await spec.beforePage({page:result.pages,after:cursor});
+  const rows=await many(db,REPLAY_SELECT_SQL,[run,cursor,run,limit]);
+  result.pages++;
+  if(!rows.length){
+   if(cursor&&!wrapped){cursor='';wrapped=true;continue;}
+   cursor='';result.complete=true;break;
+  }
+  const keys=rows.map(row=>row.observation_key);
+  const slotRows=await many(db,"SELECT s.observation_key, s.channel_id, s.start_ms, s.end_ms FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key IN ("+marks(keys.length)+") AND NOT EXISTS (SELECT 1 FROM published_epg_show p WHERE p.programme_run_id=? AND p.channel_id=s.channel_id AND p.start_ms=s.start_ms) ORDER BY s.observation_key, s.ordinal",[...keys,run]);
+  const freeSlots=new Map();
+  for(const item of slotRows){const list=freeSlots.get(item.observation_key)||[];list.push({channelId:item.channel_id,startMs:item.start_ms,endMs:item.end_ms});freeSlots.set(item.observation_key,list);}
+  const films=[...new Set(rows.map(row=>String(row.film_id)))];
+  const members=new Set((await many(db,"SELECT film_id FROM published_epg_member WHERE programme_run_id=? AND kind='programme' AND film_id IN ("+marks(films.length)+")",[run,...films])).map(item=>String(item.film_id)));
+  const admitted=new Map((await many(db,"SELECT film_id, tmdb_id FROM discovery_admission WHERE media_kind='movie' AND state='current' AND film_id IN ("+marks(films.length)+")",films)).map(item=>[String(item.film_id),String(item.tmdb_id)]));
+  const sealed=members.size?await sealedMemberTmdb(db,run):null;
+  const statements=[];
+  for(const row of rows){
+   result.observations++;
+   const film=String(row.film_id),tmdb=String(row.tmdb_id),key=row.observation_key;
+   let decision=null;try{decision=JSON.parse(row.decision_json);}catch{decision=null;}
+   if(!decision)continue;
+   const filmPresent=members.has(film)?sealed.get(film)===tmdb:(admitted.get(film)===tmdb&&film==='tmdb_'+tmdb);
+   let payload=null;try{payload=row.observation_json?JSON.parse(row.observation_json):null;}catch{payload=null;}
+   const confirmation=payload&&Array.isArray(payload.confirmedSlots)?payload:{confirmedTmdbId:row.confirmed_tmdb_id};
+   const free=freeSlots.get(key)||[];
+   for(const slot of free){
+    if(!slotEligibility(decision,{start:slot.startMs,end:slot.endMs},slotScanConfirmation(confirmation,{channelId:slot.channelId,start:slot.startMs})).eligible){outcomes.evidence_drift++;if(result.drifts.length<500&&Number.isFinite(slotMinutes(slot.startMs,slot.endMs)))result.drifts.push({key,minutes:slotMinutes(slot.startMs,slot.endMs)});continue;}
+    if(!filmPresent){outcomes.film_absent++;continue;}
+    statements.push(slotInsert(run,film,key,tmdb,row.decision_hash,slot));
+   }
+  }
+  // Rows the statements actually wrote are counted from the table, not from the statements sent: a guard inside a statement may skip it.
+  const heldSql="SELECT COUNT(*) AS n FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason IN ("+marks(keys.length)+")";
+  const heldBefore=statements.length?Number((await one(db,heldSql,[run,...keys]))?.n||0):0;
+  let stopped=false,sent=0;
+  for(let index=0;index<statements.length;index+=SLOT_BATCH){
+   if(index>0&&stop()){stopped=true;break;}
+   const group=statements.slice(index,index+SLOT_BATCH);
+   await timed(()=>commit(db,[fence(gate,lease,' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1)'),[FENCE_SQL,[]],...group]));
+   gate={...gate,generation:gate.generation+1};
+   sent+=group.length;
+  }
+  if(sent){
+   const written=Math.max(0,Number((await one(db,heldSql,[run,...keys]))?.n||0)-heldBefore);
+   outcomes.assigned+=Math.min(written,sent);outcomes.guard_skipped+=Math.max(0,sent-written);
+  }
+  if(stopped)break;
+  cursor=keys[keys.length-1];
+  if(rows.length<limit){
+   // The end of the key space. A pass that began after a cursor still owes the keys before it, one wrap.
+   if(startAfter&&!wrapped){cursor='';wrapped=true;continue;}
+   cursor='';result.complete=true;break;
+  }
+  if(wrapped&&startAfter&&cursor>=startAfter){result.complete=true;break;}
+ }
+ result.after=cursor;
+ return result;
+}
 // Admissions the chunk made or touched, in batches. Each batch is behind the lease and generation fence; a film whose
 // identity (media kind and TMDB id) already belongs to another film id is refused, never merged. A refusal leaves the
 // rows that landed before it in place and names the film ids that did not.

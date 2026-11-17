@@ -415,6 +415,10 @@ export const FILES={
  "discovery-bounded-d1-rehearsal.mjs": {
   "suite": "core"
  },
+ "discovery-bulk-replay.mjs": {
+  "suite": "core",
+  "note": "AIR-523 batched replay of a new generation's assigned rows. Round-trip and statement counts are asserted, wall time is not."
+ },
  "discovery-bundle-slot-scan.mjs": {
   "suite": "core",
   "note": "The built Worker bundle must resolve slotScanConfirmation inside assignObservationSlots. A direct module import does not load that scope."

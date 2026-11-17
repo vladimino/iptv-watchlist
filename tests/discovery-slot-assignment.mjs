@@ -300,7 +300,7 @@ async function chunkAgainst(file,{authority=Authority,movieId=101,title='Film a'
  assert.equal(rows(file).length,0,'the decision write does not insert');
  await Authority.releaseLease(env,env.discoveryLease);
  const replay=await chunkAgainst(file,{title:'Film crash'});
- assert.ok(replay.assigns.includes('crash'));
+ assert.equal(replay.status.assignment.bulkObservations,1,'AIR-523: the batched replay, not a per-observation call, restores the slots');
  assert.equal(rows(file).length,2,'both eligible slots of the observation are assigned');
  assert.deepEqual(rows(file).map(row=>row.channel_id).sort(),['c','d']);
 }
