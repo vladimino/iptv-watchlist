@@ -1,4 +1,4 @@
-// AIR-449: the proposed Predictions batch runner v2 Scheduled Task prompt, its dry-run prompt and the A/B contract. The files are documentation only (no live Task exists), so this test keeps honest:
+// AIR-449/AIR-451: the installed Predictions batch v2 Scheduled Task snapshot, its unchanged frozen dry-run prompt and the A/B contract. This offline test does not invoke the live registry or a model.
 // the stated lengths and SHA-256, the tool names the texts mention, the generation steps shared byte for byte by both prompts, the exact MCP calls (through the real MCP tool handler, offline),
 // the sample/result schema, the dry-run write freeze over group sizes 1 to 10, and the real partial-stop semantics of the bounded run. No model, network, production or Scheduled Task operation is involved.
 import fs from 'node:fs';
@@ -33,7 +33,8 @@ const step3b=text=>text.split('\n').filter(l=>l.startsWith('3б. '));
 assert.equal(step3b(prompt).length,1);assert.equal(step3b(dry).length,0,'the frozen A/B procedure does not inherit a new production-only research gate');
 for(const needle of ['ОБЯЗАТЕЛЬНО сделай ВТОРОЙ','OPEN — НЕ READ','concreteExecutionFinding','gateStatus=limited','gateStatus=blocked','временного аудита','НЕ поля fingerprint','search_snippet'])assert.ok(step3b(prompt)[0].includes(needle),'S5-C quality gate: '+needle);
 for(const needle of ['РУЧНУЮ проверку','rules.execution.fields','opposition_competence','НЕ strong','research.attempts','МАССИВ','sources[].usedFor','1–120 Unicode','prediction_batch_validate','Buffer, TextEncoder','НЕ заменяет','не прекращай весь run'])assert.ok(prompt.includes(needle),'production manual closed-schema guard: '+needle);
-for(const [name,value] of [['production',prompt],['A/B dry-run',dry]])assert.ok(!/\b(?:AIR-\d+|ADR[ -]?\d+|S5-C)\b/.test(value),name+' executable prompt must be free of historical ticket/decision IDs');
+const promptWithoutApprovedDecisionRef=prompt.replace('7а. DURABLE HOLD (ADR 0157, AIR-510).','7а. DURABLE HOLD.');
+for(const [name,value] of [['production',promptWithoutApprovedDecisionRef],['A/B dry-run',dry]])assert.ok(!/\b(?:AIR-\d+|ADR[ -]?\d+|S5-C)\b/.test(value),name+' executable prompt must not inherit unrelated historical ticket/decision IDs');
 assert.ok(/Для операций с IPTV используй ТОЛЬКО/.test(prompt)&&/для исследования фильмов используй доступные web search/i.test(prompt),'IPTV MCP boundary must allow independent film research');
 assert.ok(/не второй поисковый проход/i.test(prompt),'research gate must not duplicate the search budget');
 assert.ok(/search_snippet допустим БЕЗ прочтения страницы/.test(prompt)&&/source с access=search_snippet, даже если сама статья не открыта/.test(prompt),'a search snippet is a valid used source without a readable article, but does not count as read content');
@@ -46,6 +47,12 @@ assert.ok(prompt.includes("prediction_batch_manifest({runId,part:'envelope'})")&
 assert.ok(prompt.includes("неизвестен runId")||prompt.includes("отсутствии достоверного runId"),'fallback fails closed if run identity is lost');
 assert.ok(!/runId:['"]dry-run['"]|dryRun:true|\{\{FROZEN_MANIFEST\}\}/.test(prompt),'production never invokes dry-run transport or synthetic S5-C runId');
 assert.ok(/prediction_batch_submit\(\{runId,epoch,items\}\)/.test(prompt),'production submit uses the owned live runId and epoch');
+// AIR-510 / ADR 0157: stage is durable and transferable, but hold is not itself commit.
+const holdInstruction=prompt.split('\n').find(line=>line.startsWith('7а. DURABLE HOLD (ADR 0157, AIR-510).'));
+assert.ok(holdInstruction,'the installed durable hold section is kept byte for byte');
+for(const needle of ['prediction_batch_hold({runId,epoch,items})',"status:'held'",'prediction_batch_submit({runId,epoch,useHeld:true})','failure-items никогда не передавай в hold','новый штатный prediction_batch_start автоматически сохранит','ДО успешного hold'])assert.ok(holdInstruction.includes(needle),'durable hold contract: '+needle);
+assert.ok(prompt.indexOf('prediction_batch_validate({items})')<prompt.indexOf('prediction_batch_hold({runId,epoch,items})')&&prompt.indexOf('prediction_batch_hold({runId,epoch,items})')<prompt.indexOf('ПОТОМ prediction_batch_submit({runId,epoch,items})'),'validate -> hold -> submit ordering');
+assert.ok(!dry.includes('prediction_batch_hold'),'frozen dry-run remains unchanged');
 assert.ok(/prediction_batch_submit\(\{runId:'dry-run',epoch:1,dryRun:true/.test(dry),'separate A/B template retains frozen dry-run submit');
 for(const needle of ['НЕ БОЛЕЕ 2 web search запросов','НЕ БОЛЕЕ 3 независимо написанных источников','Guardian, Letterboxd, Slant','3000 байт','research.status=not_attempted','search_snippet','attempted_found','НЕ внутри него'])assert.ok(step3a(prompt)[0].includes(needle),needle);
 for(const key of ['assessmentVersion','ratingBasis','probability4PlusBasis','tasteSignals','risks','uncertainties','research','sources','conflicts','model','usedFor','access','handling','stance','anchor','severity'])assert.ok(step3a(prompt)[0].includes(key),'step 3а names '+key);
@@ -78,7 +85,7 @@ const mcp=fs.readFileSync('src/mcp.js','utf8');
 const tools=new Set([...mcp.matchAll(/\{name:'([a-z_]+)',title:/g)].map(x=>x[1]));
 const calls=text=>new Set([...text.matchAll(/\b((?:prediction|enrichment|epg|ratings)_[a-z_]+)\(/g)].map(x=>x[1]));
 const forbiddenOf=text=>text.split('\n').find(l=>l.startsWith('ЗАПРЕЩЕНО:'));
-const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_manifest','prediction_batch_validate','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_validate','prediction_batch_submit']);
+const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_manifest','prediction_batch_validate','prediction_batch_hold','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_validate','prediction_batch_submit']);
 for(const [text,allowed,forbidden] of [[prompt,SCHEDULED_ALLOWED,['prediction_start','prediction_next','prediction_submit','prediction_validate','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']],[dry,DRY_ALLOWED,['prediction_batch_start','prediction_start','prediction_next','prediction_submit','prediction_validate','prediction_heartbeat','prediction_complete','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']]]){
  const line=forbiddenOf(text);assert.ok(line,'forbidden list present');
  for(const t of forbidden){assert.ok(tools.has(t),t+' is a real tool');assert.ok(line.includes(t),t+' is forbidden');}

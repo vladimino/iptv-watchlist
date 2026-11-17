@@ -6,6 +6,8 @@
 
 
 
+**Current A/B/C/D prompt (17 November 2026 UTC).** The four enabled Tasks share the same byte-identical 38,211-character canonical snapshot ([source](../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md)). After Worker preflight, a valid submit-ready group is first sent through `prediction_batch_hold({runId,epoch,items})`, then normal submit. This is a transferable stage, not an accepted prediction: if the Task terminates after a confirmed hold, the next natural start can commit it while selecting fresh work; if termination precedes hold, the candidate remains in the normal queue. Failure items go to submit, never hold. On a hold error with an owned live lease and intact payload the normal submit remains the fallback; no extra `batch_start`, manual run, lease reset or scheduler modification is authorized for recovery. The previous 16 November prompt is retained in dated evidence.
+
 ## Research depth and full-text fallback diagnostics
 
 The Predictions Task's recurring schedule is a target, not a Worker Cron or an exact trigger guarantee. Read the live Scheduled Tasks registry to determine which task is enabled, its actual recurrence, `last_run` timestamps and saved report. Do not launch a manual run or reset leases to populate diagnostics. The [maintained prompt](../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md) defines the per-film research audit and full-text fallback behavior.
