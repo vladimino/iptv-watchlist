@@ -98,7 +98,7 @@ sequenceDiagram
                 MCP-->>Client: queue_changed or manifest_too_large, acquire and release only
             else Unchanged
                 MCP->>Store: Drain transferable stage onto this run (commit fresh, drop stale)
-                MCP-->>Client: Manifest of new films; drained counts; profile, contract, epoch
+                MCP-->>Client: Manifest of new films, drained counts, profile, contract, epoch
                 loop Until every selected manifest film is settled
                     opt Model call may be long
                         Client->>MCP: prediction_heartbeat, before the call and at least every 10 minutes
@@ -117,7 +117,7 @@ sequenceDiagram
                         alt This run still owns the lease
                             Client->>MCP: prediction_batch_submit with useHeld true, or buffer items
                         else This Task terminated
-                            Note over Client,Store: Stage outlives the run; the next batch_start drains it
+                            Note over Client,Store: Stage outlives the run, the next batch_start drains it
                         end
                         MCP->>Queue: Set the submit gate, an overlapping call gets submit_in_flight
                         MCP->>MCP: Validate each film, compare profile impact
