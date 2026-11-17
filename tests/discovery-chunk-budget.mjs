@@ -956,4 +956,49 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.equal(assignedRows(),90);
 }
 
+// 24. The replay of a new generation is not paced by the series backoff. On a D1 so slow that no TMDB request fits after the replay, a chunk whose replay wrote assigned rows
+// and has more to restore stores no `wall_budget` and no retry time, so the next chunk follows at once; a chunk that restored nothing (or finished the lap) still backs off.
+{
+ const decided=[],decisions={},catalog={};
+ for(let index=0;index<120;index++){
+  const key='rep'+String(index).padStart(3,'0');
+  const tmdb=String(7000+index);
+  decided.push(key);
+  decisions[key]={status:'verified',filmId:'tmdb_'+tmdb,tmdbId:tmdb,identitySource:'owner'};
+  catalog['tmdb_'+tmdb]={id:'tmdb_'+tmdb,tmdbId:tmdb,canonicalIdentity:'tmdb:'+tmdb,title:'Film '+key,original:'Film '+key,year:2005};
+ }
+ const {file,env}=await fixture({decided,decisions,catalog,extraHot:30});
+ sql(file,`INSERT INTO published_epg_generation (programme_run_id, phase, published_at, payload_sha256, created_at) VALUES ('${RUN}','published','2026-11-17T10:00:00Z','x','2026-11-17T10:00:00Z')`);
+ sql(file,`UPDATE published_epg_authority SET mode='d1', cutover='open', programme_run_id='${RUN}', generation=7`);
+ const assignedRows=()=>Number(sql(file,"SELECT COUNT(*) AS n FROM published_epg_show WHERE basis='discovery'")[0].n);
+ const runHop=async slowMs=>{
+  const clock={offset:0};
+  const {context,searched}=chunkContext({clock,respond:()=>({results:[]})});
+  const hopEnv={...env,DB:d1Standin(file,{onBatch(){clock.offset+=slowMs;}})};
+  const lease=await Authority.acquireLease(hopEnv,{programmeRunId:RUN});hopEnv.discoveryLease=lease.lease;
+  const result=await context.resolveDiscoveryChunk(hopEnv,{films:[]},24,lease.lease);
+  await Authority.releaseLease(hopEnv,lease.lease);
+  return {result,searched};
+ };
+ // 9 s per write batch: the replay writes, and no TMDB request fits afterwards.
+ const first=await runHop(9000);
+ assert.ok(first.result.assignment.assigned>0&&first.result.assignment.bulkComplete===false,'the replay restored rows and has more to do');
+ assert.equal(first.searched.length,0,'the premise: no TMDB request fit after the replay');
+ assert.equal(first.result.error,null,'no wall_budget while the replay makes progress');
+ assert.equal(first.result.retryAt,null,'no series backoff while the replay makes progress');
+ assert.equal(first.result.stage,'partial');
+ // The next chunk continues the circle at once.
+ const before=assignedRows();
+ const second=await runHop(9000);
+ assert.ok(assignedRows()>before&&second.result.retryAt==null);
+ // Nothing left to restore: with candidates waiting and no TMDB started, the series backs off as before.
+ let guard=0;while(guard++<40&&assignedRows()<120){await runHop(0);}
+ assert.equal(assignedRows(),120);
+ const idle=await runHop(9000);
+ assert.equal(idle.result.assignment.assigned,0);
+ assert.equal(idle.searched.length,0);
+ assert.equal(idle.result.error,'wall_budget','without replay progress the five-minute backoff still protects a slow D1');
+ assert.ok(idle.result.retryAt);
+}
+
 console.log('discovery chunk budget ok');

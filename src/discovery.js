@@ -1042,7 +1042,10 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const waitingWake=waitingRetry>0?(selected.nextRetryAt&&Date.parse(selected.nextRetryAt)>Date.now()?selected.nextRetryAt:new Date(Date.now()+PAGED_BUDGET_BACKOFF_MS).toISOString()):null;
  // Candidates waiting, none stored, and no per-candidate defer: the whole hop backs off.
  // Series backoff only when nothing started TMDB and no per-key fence landed. A late TMDB after a pre-fence is fairness, not this.
- if(!error&&pending.length&&checked===0&&deferred===0&&tmdbCalls===0){error='wall_budget';retryAt=new Date(Date.now()+PAGED_BUDGET_BACKOFF_MS).toISOString();}
+ // A chunk whose batched replay wrote assigned rows and has more to restore made real progress: backing it off for five minutes would limit the recovery of a new generation to one
+ // replay slice per backoff. Without that progress, or once the lap is complete, the series backs off as before.
+ const replayProgress=replayRun.complete===false&&replayRun.outcomes.assigned>0;
+ if(!error&&pending.length&&checked===0&&deferred===0&&tmdbCalls===0&&!replayProgress){error='wall_budget';retryAt=new Date(Date.now()+PAGED_BUDGET_BACKOFF_MS).toISOString();}
  timings.tmdbMs=Date.now()-tmdbStarted;
  // AIR-374 P3c: the catch-up of the canonical Discovery admission, once per completed paged chunk (the one path every Discovery hop runs, with or without a new admission): the origin's own due receipts and the sweep of current movie admissions without a
  // trusted canonical Film. One cached marker read below the marker `open`; bounded and never throws at `open`; skipped when the chunk has no time left for it.
