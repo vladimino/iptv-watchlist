@@ -1068,10 +1068,6 @@ export const FILES={
  "prediction-authority-scope.mjs": {
   "suite": "core"
  },
- "prediction-batch-profile.mjs": {
-  "suite": "core",
-  "note": "The profile asserts storage-call counts and byte sizes. It does not assert wall-clock speed."
- },
  "prediction-batch-start-budget.mjs": {
   "suite": "core"
  },

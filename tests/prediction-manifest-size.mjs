@@ -152,10 +152,13 @@ for(const [size,films,expected] of [[undefined,40,40],[1,40,1],[5,40,5],[10,40,1
  assert.equal(stop.status,200);assert.equal(stop.data.status,'partial');assert.equal(stop.data.stopReason,'time_budget');assert.equal(stop.data.title,'Пакет прогнозов прерван');assert.equal(stop.data.presentation,'batch_v2_terminal');
 }
 {
- // manifest_spent on a v5 run is refused.
+ // manifest_spent on a stored legacy v5 run is refused (ADR 0162: no v5 route is left, so the record is planted from a fresh v2 run).
  const w=await ready(3);await reconcile(w);
- const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.status,200);
- const pair=await w.pair(v5.data.runId);assert.equal(pair.submit.status,200);
+ const v5=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled'});assert.equal(v5.status,200);
+ const edit=doc=>{const out={...doc};delete out.protocol;out.pipelineVersion=5;return out;};
+ const row=sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+v5.data.runId+"'")[0];
+ sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify(edit(JSON.parse(row.d))).replace(/'/g,"''")+"' WHERE run_id='"+v5.data.runId+"'");
+ for(const key of ['enrichment/runs/'+v5.data.runId+'.json','enrichment/latest-run.json'])if(w.records.has(key)&&w.records.get(key).runId===v5.data.runId)w.records.set(key,edit(w.records.get(key)));
  const bad=await w.api('complete',{runId:v5.data.runId,reason:'manifest_spent'});
  assert.equal(bad.status,400);assert.match(JSON.stringify(bad.data),/batch_v2/);
 }

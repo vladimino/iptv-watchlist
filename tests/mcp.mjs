@@ -66,6 +66,8 @@ assert.equal(body.result.protocolVersion,'2025-11-25');
 assert.deepEqual(body.result.capabilities,{tools:{listChanged:true}});
 assert.equal(body.result.serverInfo.name,'iptv-watchlist-probe');
 assert.match(body.result.instructions,/probe_read and probe_echo/);
+assert.match(body.result.instructions,/legacy one-film runner v5 \(prediction_start, prediction_next, prediction_submit, prediction_validate\) is retired \(ADR 0162\)/,'the instructions name the retired tools only as retired');
+assert.doesNotMatch(body.result.instructions,/prediction_next returns|then prediction_submit|prediction_start uses/,'no v5 call instruction remains');
 assert.equal((await result(rpc(2,'initialize',{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'c',version:'1'}}))).protocolVersion,'2025-06-18');
 assert.equal((await result(rpc(3,'initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'c',version:'1'}}))).protocolVersion,'2025-11-25');
 assert.equal((await result(rpc(4,'initialize',{protocolVersion:'2025-11-25'}),{headers:{'MCP-Protocol-Version':'2026-07-28'}})).protocolVersion,'2025-11-25');
@@ -76,7 +78,7 @@ assert.deepEqual(await result(rpc(6,'ping')),{});
 
 // Tool discovery keeps the two probes read-only. Domain tools are covered in tests/mcp-tools.mjs.
 const {tools}=await result(rpc(7,'tools/list'));
-assert.deepEqual(tools.map(tool=>tool.name),['probe_read','probe_echo','feature_flags','epg_status','epg_pipeline_status','enrichment_schema','enrichment_profile','enrichment_runner','enrichment_queue','enrichment_status','prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_batch_validate','prediction_pending','prediction_batch_manifest','epg_sync_start','epg_sync_step','ratings_sync_status','ratings_sync_start','ratings_sync_step','prediction_start','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete','film_person_open_handoff']);
+assert.deepEqual(tools.map(tool=>tool.name),['probe_read','probe_echo','feature_flags','epg_status','epg_pipeline_status','enrichment_schema','enrichment_profile','enrichment_runner','enrichment_queue','enrichment_status','prediction_queue_overview','prediction_film_diagnostics','prediction_batch_validate','prediction_pending','prediction_batch_manifest','epg_sync_start','epg_sync_step','ratings_sync_status','ratings_sync_start','ratings_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','film_person_open_handoff']);
 const probes=tools.filter(tool=>tool.name.startsWith('probe_'));
 for(const tool of probes){
  assert.equal(tool.inputSchema.type,'object');assert.equal(tool.inputSchema.additionalProperties,false);

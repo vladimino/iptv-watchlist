@@ -10,7 +10,7 @@ The site is personal. Cloudflare Access Zero Trust is the only authentication bo
 
 - Keep the existing Access application in front of the Worker hostname. Do not add an Access bypass, a service token for the browser, or a public `/admin` route.
 - A static `/admin` page is covered by that same application. Shipping the page does not by itself authorize a new API.
-- `/mcp` stays the separate Access application `IPTV MCP` from [ADR 0004](../../adr/0004-mcp-access-boundary.md). Admin search must not call MCP write tools (`epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, `prediction_complete`).
+- `/mcp` stays the separate Access application `IPTV MCP` from [ADR 0004](../../adr/0004-mcp-access-boundary.md). Admin search must not call MCP write tools (`epg_sync_start`, `epg_sync_step`, `prediction_batch_start`, `prediction_batch_hold`, `prediction_batch_submit`, `prediction_heartbeat`, `prediction_complete`).
 - Do not put an admin token, a Letterboxd URL, or an R2 key in the page or in fixtures.
 
 ## What can be read without a model or a recompute
@@ -84,7 +84,7 @@ One admin response must name its pin, and that pin must cover every object the p
 
 The authoritative inventory is [GET and HEAD read side effects](../api/read-side-effects.md), checked by `tests/get-write-audit.mjs` against R2 and D1 in eight scenarios ([ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md), Accepted; [ADR 0108](../../adr/0108-epg-mirror-reconciliation-writer.md)). Programme, watchlist, catalog availability and Admin reads of the published generation are query-only; they do not repair R2 compatibility mirrors. The remaining writer named by `tests/get-side-effects.mjs` is:
 
-No GET route writes storage since [AIR-416](https://trello.com/c/f7FX4Elk): `GET /api/events` reads the journal page and no longer delivers a stop event (the Predictions writer does, on `prediction_start`).
+No GET route writes storage since [AIR-416](https://trello.com/c/f7FX4Elk): `GET /api/events` reads the journal page and no longer delivers a stop event (the Predictions writer does, on `prediction_batch_start`).
 
 `GET /api/enrichment/status` and `GET /api/enrichment/runs` no longer write ([AIR-415](https://trello.com/c/NHyIKM6z)). MCP `enrichment_status` is the same body as status.
 

@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
+import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const TEAM='https://probe-team.cloudflareaccess.com';
 const AUD='a1'.repeat(32);
@@ -91,8 +93,6 @@ const forbidden=[
  ['epg_status',{key:'programme.json'}],
  ['epg_sync_start',{url:'https://evil.example/guide.xml'}],
  ['epg_sync_step',{runId:'run-1',chunks:12}],
- ['prediction_start',{trigger:'scheduled',scope:'watchlist_all',mode:'queued'}],
- ['prediction_start',{trigger:'scheduled',batchSize:20}],
  ['prediction_batch_start',{trigger:'scheduled',scope:'watchlist_all',mode:'queued'}],
  ['prediction_batch_start',{trigger:'scheduled',batchSize:100}],
  ['prediction_batch_start',{trigger:'scheduled',key:'enrichment/x'}],
@@ -119,10 +119,8 @@ const forbidden=[
  ['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'film-1'}],path:'/api/enrichment/batch/submit'}],
  // a group over the byte limit of one call (56 KiB, below the 64 KiB transport limit) is refused whole, with nothing submitted
  ['prediction_batch_submit',{runId:'run-1',epoch:1,items:Array.from({length:10},(_,i)=>({filmId:'film-'+i,fingerprint:{strengths:Array.from({length:8},()=>'s'.repeat(380)),risks:Array.from({length:8},()=>'r'.repeat(380))},prediction:{}}))}],
- ['prediction_next',{runId:'run-1',batchSize:20}],
- ['prediction_submit',{runId:'run-1',items:[{filmId:'film-1',fingerprint:{},key:'enrichment/x'}]}],
- ['prediction_submit',{runId:'run-1',items:[{filmId:'../secret'},{filmId:'film-2'}]}],
  ['prediction_complete',{runId:'run-1',path:'/api/enrichment/complete'}],
+ ['prediction_heartbeat',{runId:'../secret'}],
  ['prediction_queue_overview',{key:'enrichment/prediction-queue.json'}],
  ['prediction_film_diagnostics',{filmId:'../secret'}],
  ['prediction_film_diagnostics',{filmId:'film-zz-1',path:'enrichment/films'}],
@@ -132,10 +130,6 @@ const forbidden=[
  ['prediction_batch_manifest',{runId:'../secret'}],
  ['prediction_batch_manifest',{runId:'run-1',part:'all'}],
  ['prediction_batch_manifest',{prefix:'enrichment/'}],
- ['prediction_validate',{}],
- ['prediction_validate',{fingerprint:{},key:'enrichment/x'}],
- ['prediction_validate',{fingerprint:'text'}],
- ['prediction_validate',{prediction:[]}],
  ['prediction_batch_validate',{}],
  ['prediction_batch_validate',{items:[]}],
  ['prediction_batch_validate',{items:'text'}],
@@ -151,6 +145,28 @@ for(const [name,args] of forbidden){
  assert.equal(environment.BUCKET.objects.size,0,name);
  assert.deepEqual(fetches.filter(url=>url!==TEAM+'/cdn-cgi/access/certs'),[],name);
 }
+// AIR-452 (ADR 0162): the retired one-film v5 tools are unknown tools. A call is a JSON-RPC error, not a tool result, and reads or writes nothing, with or without arguments.
+const RETIRED_TOOLS=[['prediction_start',{trigger:'scheduled'}],['prediction_next',{runId:'run-1'}],['prediction_submit',{runId:'run-1',items:[{filmId:'film-1',failure:{kind:'parse_error'}}]}],['prediction_validate',{prediction:{}}]];
+for(const [name,args] of RETIRED_TOOLS){
+ const touched=[],environment={BUCKET:{async get(key){touched.push('get '+key);return null;},async put(key){touched.push('put '+key);return {etag:'1'};},async head(key){touched.push('head '+key);return null;},async list(){touched.push('list');return {objects:[],truncated:false};},async delete(key){touched.push('delete '+key);}},MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
+ for(const given of [args,{}]){
+  fetches.length=0;
+  const outcome=await tool(environment,name,given);
+  assert.equal(outcome.response.status,200,name);assert.equal(outcome.body.result,undefined,name);
+  assert.deepEqual(outcome.body.error,{code:-32602,message:'Unknown tool'},name);
+  assert.deepEqual(fetches.filter(url=>url!==TEAM+'/cdn-cgi/access/certs'),[],name);
+ }
+ assert.deepEqual(touched,[],name+' touches no storage');
+ assert.equal((await tool(environment,name,args,{assertion:null})).response.status,403,name+' is still behind the Access JWT');
+}
+// The retired HTTP routes are gone: 404, and nothing is read or written.
+for(const route of ['start','next','submit']){
+ const touched=[],environment={BUCKET:{async get(key){touched.push('get '+key);return null;},async put(key){touched.push('put '+key);return {etag:'1'};},async head(key){touched.push('head '+key);return null;},async list(){touched.push('list');return {objects:[],truncated:false};},async delete(key){touched.push('delete '+key);}}};
+ const body=route==='start'?{scope:'watchlist_all',mode:'queued',trigger:'scheduled'}:route==='next'?{runId:'run-1',batchSize:1}:{runId:'run-1',items:[{filmId:'film-1',failure:{kind:'parse_error'}}]};
+ const answer=await http(environment,'/api/enrichment/'+route,'POST',body);
+ assert.deepEqual(answer,{status:404,body:{error:'Not found'}},route);
+ assert.deepEqual(touched,[],route+' touches no storage');
+}
 
 {
  const big=Array.from({length:10},(_,i)=>({filmId:'film-'+i,fingerprint:{strengths:Array.from({length:8},()=>'s'.repeat(380)),risks:Array.from({length:8},()=>'r'.repeat(380))},prediction:{}}));
@@ -161,16 +177,18 @@ for(const [name,args] of forbidden){
 const mismatch=await tool(env(),'epg_sync_step',{runId:'missing-run'});
 assert.deepEqual(domain(mismatch.body.result),{status:409,body:{error:'Run id mismatch'}});
 assert.equal(mismatch.body.result.isError,true);
-const unknown=await tool(env(),'prediction_next',{runId:'missing-run'});
+const unknown=await tool(env(),'prediction_complete',{runId:'missing-run'});
 assert.equal(unknown.body.result.structuredContent.httpStatus,404);
 assert.equal(unknown.body.result.isError,true);
-const started=await tool(env(),'prediction_start',{trigger:'scheduled',capacity:{remainingPercent:40}});
-assert.equal(started.body.result.structuredContent.httpStatus,409);
+// A batch start without the D1 prediction authority (this R2-only environment) refuses and writes nothing: v2 is the only runner (ADR 0162).
+{const environment=env(),started=await tool(environment,'prediction_batch_start',{trigger:'scheduled',capacity:{remainingPercent:40}});
 assert.equal(started.body.result.isError,true);
-assert.match(JSON.stringify(started.body.result.structuredContent),/Taste profile is not configured/);
-assert.equal((await tool(env(),'prediction_start',{trigger:'hourly'})).body.result.isError,true);
+assert.equal(JSON.parse(started.body.result.content[0].text).httpStatus,409);
+assert.match(started.body.result.content[0].text,/batch_runner_requires_d1/);
+assert.equal(environment.BUCKET.objects.size,0);}
+assert.equal((await tool(env(),'prediction_batch_start',{trigger:'hourly'})).body.result.isError,true);
 
-const anonymous=await tool(env(),'prediction_start',{trigger:'scheduled'},{assertion:null});
+const anonymous=await tool(env(),'prediction_batch_start',{trigger:'scheduled'},{assertion:null});
 assert.equal(anonymous.response.status,403);
 assert.equal(anonymous.body.error.code,-32001);
 
@@ -184,12 +202,17 @@ for(const tool of tools){
  if(tool.name==='prediction_batch_submit'){assert.ok(properties.includes(PREFLIGHT_ISSUE_SHAPE),'the claimed issue shape is published, a validation path and code and nothing else');assert.equal((properties.match(/"path"/g)||[]).length,2,'the only "path" in the schema is the preflight issue shape (properties and required)');assert.ok(JSON.stringify(tool.inputSchema).includes('"required":["kind","reason"]'),'batch v2 failure.reason is required in the MCP schema');}
 }
 assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readOnlyHint,true);
-for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_batch_validate','prediction_pending','prediction_batch_manifest']){
+// AIR-452: the retired v5 tools are not listed; every batch v2 tool and the shared heartbeat and completion stay.
+const toolNames=tools.map(item=>item.name);
+for(const name of ['prediction_start','prediction_next','prediction_submit','prediction_validate'])assert.ok(!toolNames.includes(name),name+' is retired');
+for(const name of ['prediction_batch_start','prediction_batch_manifest','prediction_batch_validate','prediction_batch_hold','prediction_batch_submit','prediction_heartbeat','prediction_complete','enrichment_schema','enrichment_runner','enrichment_status','prediction_queue_overview','prediction_film_diagnostics','prediction_pending'])assert.ok(toolNames.includes(name),name+' stays');
+assert.equal(new Set(toolNames).size,toolNames.length,'each tool is listed once');
+for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_batch_validate','prediction_pending','prediction_batch_manifest']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,true,name);
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
 }
-for(const name of ['epg_sync_start','epg_sync_step','prediction_start','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete','film_person_open_handoff']){
+for(const name of ['epg_sync_start','epg_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','film_person_open_handoff']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,false,name);
 }
 assert.deepEqual(tools.find(item=>item.name==='film_person_open_handoff').inputSchema.properties.mode.enum,['dry_run','apply']);
@@ -248,154 +271,103 @@ assert.equal(background.length,0);
 const predictionFields=Object.fromEntries(Object.entries(vm.runInContext('EXECUTION',context)).map(([key,values])=>[key,values.includes('unknown')?'unknown':values[0]]));
 const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['investigation'],execution:predictionFields,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']};
 const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
-const now=Date.now();
-const happy=store();
-happy.records.set('enrichment/profile/current.json',{version:1,schemaVersion:1,profileHash:'profile-hash',profile:{ratingScale:'Half stars'}});
-happy.records.set('programme.json',{runId:'programme-1',updatedAt:new Date(now).toISOString(),films:[{id:'film1',title:'Heat',original:'Heat',year:1995,tmdbId:'1656',genres:[],directors:[],actors:[],shows:[{start:now}]}],watchlistCount:1});
-happy.records.set('sync.json',{runId:'programme-1',stage:'complete'});
-const happyEnv={BUCKET:happy.bucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
-const happyStart=await tool(happyEnv,'prediction_start',{trigger:'scheduled'});
-assert.equal(happyStart.body.result.isError,undefined,JSON.stringify(happyStart.body));
-assert.equal(happyStart.body.result.structuredContent.status,'running');
-const happyRunId=happyStart.body.result.structuredContent.runId;
-const happyNext=await tool(happyEnv,'prediction_next',{runId:happyRunId});
-assert.equal(happyNext.body.result.structuredContent.items.length,1);
-assert.equal(happyNext.body.result.structuredContent.items[0].filmId,'film1');
-const happySubmit=await tool(happyEnv,'prediction_submit',{runId:happyRunId,items:[{filmId:'film1',fingerprint,prediction}]});
-assert.equal(happySubmit.body.result.isError,undefined,JSON.stringify(happySubmit.body));
-assert.equal(happySubmit.body.result.structuredContent.results[0].status,'created');
-assert.equal(happy.records.get('enrichment/films/film1/predictions.json').current.predictedRating,3.5);
-const happyDone=await tool(happyEnv,'prediction_complete',{runId:happyRunId});
-assert.equal(happyDone.body.result.isError,undefined,JSON.stringify(happyDone.body));
-assert.equal(happyDone.body.result.structuredContent.status,'complete');
-assert.equal((await tool(happyEnv,'prediction_complete',{runId:happyRunId})).body.result.structuredContent.status,'complete');
-assert.ok([...happy.records.keys()].some(key=>key.startsWith('events/items/')&&key.includes('enrichment')));
+// AIR-452 (ADR 0162): the prediction lifecycle runs on batch runner v2 only, through the real MCP handler, in D1 mode as production runs it
+// (sqlite D1 stand-in, in-memory R2; no model, network, Cloudflare or production). The Access JWT of these tools is asserted above over HTTP.
+const dumpDb=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
+async function mcpFlow(films){
+ const w=await flowWorld({films});assert.equal((await w.api('queue/reconcile',{})).status,200);
+ vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
+ const call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);assert.equal(r.error,undefined,name);const res=r.result;return {isError:res.isError,data:JSON.parse(res.content[0].text)};};
+ return {w,call};
+}
+const happyFlow=await mcpFlow(1);
+const happyStart=await happyFlow.call('prediction_batch_start',{trigger:'scheduled'});
+assert.equal(happyStart.isError,undefined,JSON.stringify(happyStart.data).slice(0,300));
+assert.equal(happyStart.data.status,'running');assert.equal(happyStart.data.protocol,'batch_v2');
+const happyRunId=happyStart.data.runId,happyEpoch=happyStart.data.lease.epoch,happyFilm=happyStart.data.films[0].filmId;
+assert.equal(happyStart.data.films.length,1);
+const happySubmit=await happyFlow.call('prediction_batch_submit',{runId:happyRunId,epoch:happyEpoch,items:[{filmId:happyFilm,fingerprint,prediction}]});
+assert.equal(happySubmit.isError,undefined,JSON.stringify(happySubmit.data));
+assert.equal(happySubmit.data.results[0].status,'created');
+assert.deepEqual(sql(happyFlow.w.file,'SELECT film_id FROM prediction_pointer').map(row=>row.film_id),[happyFilm]);
+assert.equal((await happyFlow.call('prediction_heartbeat',{runId:happyRunId})).isError,undefined,'the shared heartbeat renews a v2 lease');
+const happyDone=await happyFlow.call('prediction_complete',{runId:happyRunId});
+assert.equal(happyDone.isError,undefined,JSON.stringify(happyDone.data));
+assert.equal(happyDone.data.stage,'complete');
+assert.equal((await happyFlow.call('prediction_complete',{runId:happyRunId})).isError,undefined,'repeating a finished completion is a replay');
+assert.equal([...happyFlow.w.records.keys()].filter(key=>key.startsWith('events/items/')&&key.includes('enrichment-'+happyRunId)).length,1,'one terminal Event');
 
 // AIR-152: a schema rejection names the field through the MCP result; the contract is published by enrichment_schema.
-const schemaTool=await tool(happyEnv,'enrichment_schema',{});
+const schemaTool=await tool(env(),'enrichment_schema',{});
 assert.equal(schemaTool.body.result.structuredContent.contract.version,1);
 assert.deepEqual(schemaTool.body.result.structuredContent.contract.fingerprint.rules.execution.fields.payoff,['weak','mixed','strong','unknown']);
 assert.ok(schemaTool.body.result.structuredContent.contract.issueCodes.includes('invalid_enum'));
-const invalid=store();
-invalid.records.set('enrichment/profile/current.json',{version:1,schemaVersion:1,profileHash:'profile-hash',profile:{ratingScale:'Half stars'}});
-invalid.records.set('programme.json',{runId:'programme-1',updatedAt:new Date(now).toISOString(),films:[{id:'film2',title:'Heat TITLE-CANARY',original:'Heat',year:1995,tmdbId:'1657',genres:[],directors:[],actors:[],shows:[{start:now}]}],watchlistCount:1});
-invalid.records.set('sync.json',{runId:'programme-1',stage:'complete'});
-const invalidEnv={BUCKET:invalid.bucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
-const invalidRunId=(await tool(invalidEnv,'prediction_start',{trigger:'manual'})).body.result.structuredContent.runId;
-await tool(invalidEnv,'prediction_next',{runId:invalidRunId});
+assert.doesNotMatch(JSON.stringify(schemaTool.body.result.structuredContent),/prediction_validate|prediction_submit\b|prediction_next|prediction_start\b/,'the schema names no retired tool');
+// The runner contract names batch v2 only.
+const runnerTool=domain((await tool(env(),'enrichment_runner',{})).body.result).body;
+assert.equal(runnerTool.protocol,'batch_v2');assert.deepEqual(runnerTool.retiredProtocols,['v5']);assert.equal(runnerTool.batchRunner.start,'/api/enrichment/batch/start');
+assert.doesNotMatch(JSON.stringify(runnerTool),/enrichment\/(?:start|next|submit)\b|next\/submit|maxBatchFilms|modelBatching/,'no retired route or v5 field');
+const invalidFlow=await mcpFlow(1);
+const invalidStart=(await invalidFlow.call('prediction_batch_start',{trigger:'manual'})).data;
 const {moodLabels:_noMood,...fingerprintWithoutMood}=fingerprint;
-const rejected=await tool(invalidEnv,'prediction_submit',{runId:invalidRunId,items:[{filmId:'film2',fingerprint:{...fingerprintWithoutMood,execution:{...predictionFields,payoff:'medium'},strengths:['PAYLOAD-CANARY']},prediction}]});
-assert.equal(rejected.body.result.isError,undefined,JSON.stringify(rejected.body));
-assert.equal(rejected.body.result.structuredContent.httpStatus,200);
-const rejectedItem=rejected.body.result.structuredContent.results[0];
-assert.equal(rejectedItem.status,'retryable_failure');assert.equal(rejectedItem.error,'parse_error');assert.equal(rejectedItem.failureScope,'item');
+const badFingerprint={...fingerprintWithoutMood,execution:{...predictionFields,payoff:'medium'},strengths:['PAYLOAD-CANARY']};
+const rejected=await invalidFlow.call('prediction_batch_submit',{runId:invalidStart.runId,epoch:invalidStart.lease.epoch,items:[{filmId:invalidStart.films[0].filmId,fingerprint:badFingerprint,prediction}]});
+assert.equal(rejected.isError,undefined,JSON.stringify(rejected.data));
+assert.equal(rejected.data.httpStatus,200);
+const rejectedItem=rejected.data.results[0];
+assert.equal(rejectedItem.status,'validation_failure');assert.equal(rejectedItem.error,'parse_error');assert.equal(rejectedItem.retryable,true);
 assert.deepEqual(rejectedItem.validation,{stage:'fingerprint_schema',reportedBy:'worker',issues:[{path:'fingerprint.execution.payoff',code:'invalid_enum'},{path:'fingerprint.moodLabels',code:'required'}]});
-assert.equal(invalid.records.has('enrichment/films/film2/fingerprint.json'),false);
-assert.doesNotMatch(JSON.stringify(rejected.body),/PAYLOAD-CANARY|TITLE-CANARY|Invalid fingerprint/);
-assert.doesNotMatch(JSON.stringify([...invalid.records]),/PAYLOAD-CANARY|Invalid fingerprint/);
-assert.deepEqual(invalid.records.get('enrichment/prediction-queue.json').retries.film2.validation.issues.map(issue=>issue.path),['fingerprint.execution.payoff','fingerprint.moodLabels']);
+assert.deepEqual(sql(invalidFlow.w.file,'SELECT film_id FROM prediction_fingerprint'),[],'nothing was written for the film');
+assert.doesNotMatch(JSON.stringify(rejected.data),/PAYLOAD-CANARY|Invalid fingerprint/);
+assert.doesNotMatch(JSON.stringify([...invalidFlow.w.records])+dumpDb(invalidFlow.w.file),/PAYLOAD-CANARY|Invalid fingerprint/);
 
-// prediction_validate is the executable preflight: same contract, no storage, no run, not a failure.
+// prediction_batch_validate over the real HTTP/Access path: the same verdicts for a group, bound to filmId and index, no storage, behind the Access JWT, answers without a bucket.
 const validateDenied=[];
 const validateSealed={BUCKET:{async get(){validateDenied.push('get');},async put(){validateDenied.push('put');},async list(){validateDenied.push('list');}},MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
 fetches.length=0;
-const preflightBad=await tool(validateSealed,'prediction_validate',{fingerprint:{...fingerprintWithoutMood,execution:{...predictionFields,payoff:'medium'},strengths:['PAYLOAD-CANARY']},prediction:{...prediction,predictedRating:4.2}});
-assert.equal(preflightBad.body.result.isError,undefined,JSON.stringify(preflightBad.body));
-assert.deepEqual(preflightBad.body.result.structuredContent,{success:false,valid:false,contractVersion:1,fingerprint:{checked:true,issues:[{path:'fingerprint.execution.payoff',code:'invalid_enum'},{path:'fingerprint.moodLabels',code:'required'}]},prediction:{checked:true,issues:[{path:'prediction.predictedRating',code:'invalid_step'}]},storage:'not_accessed',sideEffects:'none'});
-assert.doesNotMatch(JSON.stringify(preflightBad.body),/PAYLOAD-CANARY/);
-const preflightGood=await tool(validateSealed,'prediction_validate',{fingerprint,prediction});
-assert.deepEqual(preflightGood.body.result.structuredContent,{success:true,valid:true,contractVersion:1,fingerprint:{checked:true,issues:[]},prediction:{checked:true,issues:[]},storage:'not_accessed',sideEffects:'none'});
 const evidenced={...fingerprint,plotMechanics:['heist'],evidence:{plotMechanics:{heist:[{basis:'metadata',refs:['metadata:synopsis'],confidence:'medium'}]}},sourceBasis:'metadata',sourceRefs:['metadata:synopsis']};
-const preflightMetaMissing=await tool(validateSealed,'prediction_validate',{fingerprint:evidenced});
-assert.equal(preflightMetaMissing.body.result.structuredContent.valid,false);
-assert.deepEqual(preflightMetaMissing.body.result.structuredContent.fingerprint.issues,[{path:'fingerprint.evidence.plotMechanics.heist',code:'invalid_ref'}]);
-const preflightMeta=await tool(validateSealed,'prediction_validate',{fingerprint:evidenced,metadata:{synopsis:'A crew plans a robbery.'}});
-assert.deepEqual(preflightMeta.body.result.structuredContent,{success:true,valid:true,contractVersion:1,fingerprint:{checked:true,issues:[]},prediction:{checked:false,issues:[]},storage:'not_accessed',sideEffects:'none'});
-const preflightMetaType=await tool(validateSealed,'prediction_validate',{fingerprint:evidenced,metadata:'text'});
-assert.equal(preflightMetaType.body.result.isError,true);
-assert.equal(preflightMetaType.body.result.structuredContent,undefined);
-const preflightOne=await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'prediction_validate',{prediction});
-assert.deepEqual(preflightOne.body.result.structuredContent.fingerprint,{checked:false,issues:[]});assert.equal(preflightOne.body.result.structuredContent.valid,true,'answers without a bucket binding');
-assert.deepEqual(validateDenied,[]);
-assert.deepEqual(fetches.filter(url=>url!==TEAM+'/cdn-cgi/access/certs'),[]);
-assert.equal((await tool(validateSealed,'prediction_validate',{fingerprint},{assertion:null})).response.status,403,'preflight stays behind the Access JWT');
-assert.deepEqual(validateDenied,[]);
-// prediction_batch_validate over the real HTTP/Access path: the same verdicts for a group, bound to filmId and index, no storage, behind the Access JWT, answers without a bucket.
-const batchGood=await tool(validateSealed,'prediction_batch_validate',{items:[{filmId:'f1',fingerprint,prediction},{filmId:'f2',prediction},{filmId:'f3',fingerprint:evidenced,metadata:{synopsis:'A crew plans a robbery.'}},{filmId:'f4',fingerprint:evidenced}]});
+const batchGood=await tool(validateSealed,'prediction_batch_validate',{items:[{filmId:'f1',fingerprint,prediction},{filmId:'f2',prediction},{filmId:'f3',fingerprint:evidenced,metadata:{synopsis:'A crew plans a robbery.'}},{filmId:'f4',fingerprint:evidenced},{filmId:'f5',fingerprint:badFingerprint,prediction:{...prediction,predictedRating:4.2}}]});
 assert.equal(batchGood.body.result.isError,undefined,JSON.stringify(batchGood.body));
 const batchOut=batchGood.body.result.structuredContent;
-assert.equal(batchOut.success,false);assert.equal(batchOut.contractVersion,1);assert.deepEqual(batchOut.counts,{items:4,valid:3,invalid:1});assert.equal(batchOut.storage,'not_accessed');assert.equal(batchOut.sideEffects,'none');
-assert.deepEqual(batchOut.results.map(r=>[r.index,r.filmId,r.valid]),[[0,'f1',true],[1,'f2',true],[2,'f3',true],[3,'f4',false]]);
-assert.deepEqual(batchOut.results[3].fingerprint.issues,[{path:'fingerprint.evidence.plotMechanics.heist',code:'invalid_ref'}],'the same issue prediction_validate gives for the same payload');
-assert.deepEqual(batchOut.results[0].fingerprint,preflightGood.body.result.structuredContent.fingerprint);
+assert.equal(batchOut.success,false);assert.equal(batchOut.contractVersion,1);assert.deepEqual(batchOut.counts,{items:5,valid:3,invalid:2});assert.equal(batchOut.storage,'not_accessed');assert.equal(batchOut.sideEffects,'none');
+assert.deepEqual(batchOut.results.map(r=>[r.index,r.filmId,r.valid]),[[0,'f1',true],[1,'f2',true],[2,'f3',true],[3,'f4',false],[4,'f5',false]]);
+assert.deepEqual(batchOut.results[0].fingerprint,{checked:true,issues:[]});assert.deepEqual(batchOut.results[1].fingerprint,{checked:false,issues:[]},'a prediction_only candidate leaves the fingerprint unchecked');
+assert.deepEqual(batchOut.results[3].fingerprint.issues,[{path:'fingerprint.evidence.plotMechanics.heist',code:'invalid_ref'}],'a metadata ref without the metadata is invalid_ref');
+assert.deepEqual(batchOut.results[4].prediction.issues,[{path:'prediction.predictedRating',code:'invalid_step'}]);
+assert.doesNotMatch(JSON.stringify(batchGood.body),/PAYLOAD-CANARY/);
+// The preflight verdict and the submit verdict agree on the same payload.
+assert.deepEqual(batchOut.results[4].fingerprint.issues,rejectedItem.validation.issues);
+// The caller contract reads success: it names the same verdict as valid, in structuredContent and in the text content alike.
+assert.equal(batchOut.success,batchOut.valid);assert.deepEqual(JSON.parse(batchGood.body.result.content[0].text),batchOut,'text content carries the same report');
 assert.equal((await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'prediction_batch_validate',{items:[{filmId:'f1',prediction}]})).body.result.structuredContent.valid,true,'answers without a bucket binding');
 assert.equal((await tool(validateSealed,'prediction_batch_validate',{items:[{filmId:'f1',prediction}]},{assertion:null})).response.status,403,'stays behind the Access JWT');
 assert.deepEqual(validateDenied,[]);
-// The preflight verdict and the submit verdict agree on the same payload.
-assert.deepEqual(preflightBad.body.result.structuredContent.fingerprint.issues,rejectedItem.validation.issues);
-// The caller contract reads success: it names the same verdict as valid, in structuredContent and in the
-// text content alike, and it is true only when every supplied object was checked without an issue.
-for(const outcome of [preflightBad,preflightGood,preflightOne]){
- const report=outcome.body.result.structuredContent,text=JSON.parse(outcome.body.result.content[0].text);
- assert.equal(typeof report.success,'boolean');
- assert.equal(report.success,report.valid);
- assert.equal(report.success,!report.fingerprint.issues.length&&!report.prediction.issues.length);
- assert.deepEqual(text,report,'text content carries the same report');
- assert.equal(report.contractVersion,1);
-}
-assert.equal(preflightOne.body.result.structuredContent.success,true,'prediction_only preflight succeeds with the fingerprint unchecked');
-// A real schema violation still fails the preflight: success false, valid false, the issue named, no error flag.
-const preflightOneBad=await tool(validateSealed,'prediction_validate',{prediction:{...prediction,predictedRating:4.2}});
-assert.equal(preflightOneBad.body.result.isError,undefined);
-assert.deepEqual(preflightOneBad.body.result.structuredContent,{success:false,valid:false,contractVersion:1,fingerprint:{checked:false,issues:[]},prediction:{checked:true,issues:[{path:'prediction.predictedRating',code:'invalid_step'}]},storage:'not_accessed',sideEffects:'none'});
-const preflightFingerprintBad=await tool(validateSealed,'prediction_validate',{fingerprint:{...fingerprint,execution:{...fingerprint.execution,payoff:'medium'}},prediction});
-assert.equal(preflightFingerprintBad.body.result.structuredContent.success,false,'one invalid object fails the whole preflight');
-assert.equal(preflightFingerprintBad.body.result.structuredContent.valid,false);
-assert.deepEqual(preflightFingerprintBad.body.result.structuredContent.prediction,{checked:true,issues:[]});
-assert.deepEqual(preflightFingerprintBad.body.result.structuredContent.fingerprint.issues,[{path:'fingerprint.execution.payoff',code:'invalid_enum'}]);
-// A malformed call is a tool error without a report: neither success nor valid is present, nothing is stored.
-const preflightMalformed=await tool(validateSealed,'prediction_validate',{fingerprint:'text'});
-assert.equal(preflightMalformed.body.result.isError,true);
-assert.equal(preflightMalformed.body.result.structuredContent,undefined);
-assert.deepEqual(validateDenied,[]);
+assert.deepEqual(fetches.filter(url=>url!==TEAM+'/cdn-cgi/access/certs'),[]);
 
-const conflicts=store();
-conflicts.records.set('enrichment/profile/current.json',{version:1,schemaVersion:1,profileHash:'profile-hash',profile:{ratingScale:'Half stars'}});
-conflicts.records.set('programme.json',structuredClone(happy.records.get('programme.json')));
-conflicts.records.set('sync.json',{runId:'programme-1',stage:'complete'});
-conflicts.records.set('enrichment/writer-lease.json',{id:'held',expiresAt:Date.now()+60000});
-const conflictEnv={BUCKET:conflicts.bucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
-const busy=await tool(conflictEnv,'prediction_start',{trigger:'manual'});
-assert.equal(busy.body.result.isError,true);
-assert.equal(busy.body.result.structuredContent.httpStatus,409);
-assert.equal(busy.body.result.structuredContent.status,'busy');
-conflicts.records.delete('enrichment/writer-lease.json');
-const conflictStart=await tool(conflictEnv,'prediction_start',{trigger:'manual'});
-assert.equal(conflictStart.body.result.structuredContent.status,'running');
-const conflictRunId=conflictStart.body.result.structuredContent.runId;
-const adopted=await tool(conflictEnv,'prediction_start',{trigger:'manual'});
-assert.equal(adopted.body.result.isError,undefined);
-assert.equal(adopted.body.result.structuredContent.httpStatus,200);
-assert.equal(adopted.body.result.structuredContent.status,'already_running');
-assert.equal(adopted.body.result.structuredContent.runId,conflictRunId);
-const queued=await tool(conflictEnv,'prediction_complete',{runId:conflictRunId});
-assert.equal(queued.body.result.isError,true);
-assert.equal(queued.body.result.structuredContent.httpStatus,409);
-assert.match(queued.body.result.structuredContent.error,/Queue not empty/);
-conflicts.records.get('enrichment/runner-lease.json').expiresAt=0;
-const lost=await tool(conflictEnv,'prediction_heartbeat',{runId:conflictRunId});
-assert.equal(lost.body.result.isError,true);
-assert.equal(lost.body.result.structuredContent.httpStatus,409);
-assert.match(JSON.stringify(lost.body.result.structuredContent),/lease_lost/);
-const restarted=await tool(conflictEnv,'prediction_start',{trigger:'manual'});
-assert.equal(restarted.body.result.structuredContent.status,'running',JSON.stringify(restarted.body.result.structuredContent));
-const restartedId=restarted.body.result.structuredContent.runId;
-await tool(conflictEnv,'prediction_next',{runId:restartedId});
-conflicts.records.get('enrichment/profile/current.json').profileHash='changed';
-const changed=await tool(conflictEnv,'prediction_next',{runId:restartedId});
-assert.equal(changed.body.result.isError,true);
-assert.equal(changed.body.result.structuredContent.httpStatus,409);
-assert.match(JSON.stringify(changed.body.result.structuredContent),/Profile changed/);
+// Overlap, an early completion and a lost lease, on batch v2.
+const conflictFlow=await mcpFlow(2);
+const conflictStart=(await conflictFlow.call('prediction_batch_start',{trigger:'manual'})).data;
+assert.equal(conflictStart.status,'running');
+const conflictRunId=conflictStart.runId;
+const adopted=await conflictFlow.call('prediction_batch_start',{trigger:'manual'});
+assert.equal(adopted.isError,undefined);
+assert.equal(adopted.data.httpStatus,200);
+assert.equal(adopted.data.status,'already_running');
+assert.equal(adopted.data.runId,conflictRunId);
+const queued=await conflictFlow.call('prediction_complete',{runId:conflictRunId});
+assert.equal(queued.isError,true);
+assert.equal(queued.data.httpStatus,409);
+assert.match(queued.data.error,/Queue not empty/);
+{const row=sql(conflictFlow.w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0],doc=JSON.parse(row.d);doc.expiresAt=0;sql(conflictFlow.w.file,"UPDATE prediction_lease SET expires_at=0, document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE name='runner'");}
+const lost=await conflictFlow.call('prediction_heartbeat',{runId:conflictRunId});
+assert.equal(lost.isError,true);
+assert.equal(lost.data.httpStatus,409);
+assert.match(JSON.stringify(lost.data),/lease_lost/);
+const restarted=await conflictFlow.call('prediction_batch_start',{trigger:'manual'});
+assert.equal(restarted.data.status,'running',JSON.stringify(restarted.data).slice(0,300));
+assert.notEqual(restarted.data.runId,conflictRunId);assert.ok(restarted.data.lease.epoch>conflictStart.lease.epoch,'a takeover raises the epoch');
+{const expired=JSON.parse(sql(conflictFlow.w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+conflictRunId+"'")[0].d);
+assert.notEqual(expired.status,'running','the run whose lease expired is not left running');assert.equal(expired.stopReason,'lease_lost',JSON.stringify({status:expired.status,stopReason:expired.stopReason}));}
 
 const diagnosticNow=Date.now();
 const diagnosticIds=['film-zz-1','film-zz-2','film-zz-3','film-zz-4','film-zz-5'];
@@ -462,22 +434,17 @@ assert.ok(diagnosticGets.every(key=>/^(enrichment\/prediction-queue\.json|enrich
 
 const rejectedFault=await tool(env(),'prediction_complete',{runId:'run-1',fault:{url:'https://evil.example'}});
 assert.equal(rejectedFault.body.result.isError,true);
-const faultStore=store();
-faultStore.records.set('enrichment/profile/current.json',{version:1,schemaVersion:1,profileHash:'profile-hash',profile:{ratingScale:'Half stars'}});
-faultStore.records.set('programme.json',{runId:'programme-1',updatedAt:new Date().toISOString(),films:[{id:'film-zz-9',title:'Fixture',original:'Fixture',year:1995,tmdbId:'8809',genres:[],directors:[],actors:[],shows:[{start:Date.now()}]}],watchlistCount:1});
-faultStore.records.set('sync.json',{runId:'programme-1',stage:'complete'});
-const faultEnvironment={BUCKET:faultStore.bucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
-const faultStart=await tool(faultEnvironment,'prediction_start',{trigger:'manual'});
-assert.equal(faultStart.body.result.isError,undefined,JSON.stringify(faultStart.body));
-const faultRunId=faultStart.body.result.structuredContent.runId;
-const faultNext=await tool(faultEnvironment,'prediction_next',{runId:faultRunId});
-assert.equal(faultNext.body.result.structuredContent.items.length,1);
-const faultDone=await tool(faultEnvironment,'prediction_complete',{runId:faultRunId,reason:'api_error',fault:{origin:'model_provider',failedStep:'next',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:faultNext.body.result.structuredContent.requestId}});
-assert.equal(faultDone.body.result.isError,undefined,JSON.stringify(faultDone.body));
-assert.equal(faultDone.body.result.structuredContent.stopReason,'api_error');
-const faultRow=[...faultStore.records.values()].find(value=>value?.runId===faultRunId&&Array.isArray(value.steps));
+const faultFlow=await mcpFlow(1);
+const faultStart=await faultFlow.call('prediction_batch_start',{trigger:'manual'});
+assert.equal(faultStart.isError,undefined,JSON.stringify(faultStart.data).slice(0,300));
+const faultRunId=faultStart.data.runId;
+const faultDone=await faultFlow.call('prediction_complete',{runId:faultRunId,reason:'api_error',fault:{origin:'model_provider',failedStep:'submit',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:faultStart.data.requestId}});
+assert.equal(faultDone.isError,undefined,JSON.stringify(faultDone.data));
+assert.equal(faultDone.data.stopReason,'api_error');
+const faultRow=[...faultFlow.w.records.values()].find(value=>value?.runId===faultRunId&&Array.isArray(value.steps));
 assert.equal(faultRow.callerFault.reportedBy,'caller');
 assert.equal(faultRow.callerFault.origin,'model_provider');
+assert.equal(faultRow.callerFault.failedStep,'submit');
 assert.equal(faultRow.serverFault,null);
 
-console.log('MCP tools: read tools match the HTTP contracts, rejected arguments do not write or fetch, write tools stay behind the Access JWT, and local EPG and prediction lifecycles pass');
+console.log('MCP tools: read tools match the HTTP contracts, rejected arguments do not write or fetch, the retired v5 tools and routes are unknown and touch nothing, write tools stay behind the Access JWT, and local EPG and batch v2 prediction lifecycles pass');

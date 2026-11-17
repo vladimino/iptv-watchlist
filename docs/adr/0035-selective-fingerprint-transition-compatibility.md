@@ -10,7 +10,7 @@
 - the prediction's fingerprint check becomes equality of the fingerprint **hash** alone, plus a declared transition rule for the prediction prompt.
 
 Independent fingerprint and prediction freshness, prediction history and every profile rule of ADR-0031 stay as decided there.  
-**Superseded by:** [ADR-0047](0047-retire-fingerprint-compatibility-switch.md) (Accepted 2026-10-29) in part: the mode switch and the feature rollback of section 7; the transition rule, the registry, storage, migration scheduling, the code rollback floor and the schema or prompt rollback stay
+**Superseded by:** [ADR-0047](0047-retire-fingerprint-compatibility-switch.md) (Accepted 2026-10-29) in part: the mode switch and the feature rollback of section 7; the transition rule, the registry, storage, migration scheduling, the code rollback floor and the schema or prompt rollback stay. Also [ADR 0162](0162-retire-prediction-runner-v5.md) (proposed) in part: no runner restores the pointer after a schema or prompt rollback any more; the pure restore rule stays as specification.
 
 ## Context
 

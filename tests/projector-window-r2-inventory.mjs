@@ -78,8 +78,7 @@ for(const [file,text] of texts){
 // Every receiver of `.put(` is the R2 binding; every `.delete(` receiver is the R2 binding or a known in-memory Map or Set. An alias or a new
 // receiver fails, so a write that the primitive list cannot see by name cannot arrive silently.
 // AIR-402: index, group, sequence and merged are the in-memory lookups of the view build (src/domain/film-person-reader.js, orderedFilmIndex and its caller): Maps built from the view, never storage.
-// AIR-442: scope.values is the Map of one prediction request's own scope (src/enrichment.js, createRequestScope): what the step itself read or wrote, never storage.
-const IN_MEMORY=new Set(['films','wanted','store.inflight','stillMissing','rows','reentryGroups.groups','map','latestGroups.groups','byTmdb','byLid','also','index','group','sequence','merged','scope.values','EPG_PHASE_SINKS','EPG_TRACE','skipUntil','matched','discovery','deferredKeys']);   // AIR-455: EPG_PHASE_SINKS; AIR-374 P3c: skipUntil is the per-binding WeakMap of the cached projector-route skip (src/canonical-discovery-admission-producer.js), never storage is the Map of the diagnostic canary's own run markers (src/worker.js), never storage // AIR-480 stage 1: matched and discovery are the local Maps of scanEPG, pruned after the stream when a slot has two owners. // AIR-492: deferredKeys is the in-memory set of this hop's fairness fences.
+const IN_MEMORY=new Set(['films','wanted','store.inflight','stillMissing','rows','reentryGroups.groups','map','latestGroups.groups','byTmdb','byLid','also','index','group','sequence','merged','EPG_PHASE_SINKS','EPG_TRACE','skipUntil','matched','discovery','deferredKeys']);   // AIR-455: EPG_PHASE_SINKS; AIR-374 P3c: skipUntil is the per-binding WeakMap of the cached projector-route skip (src/canonical-discovery-admission-producer.js), never storage is the Map of the diagnostic canary's own run markers (src/worker.js), never storage // AIR-480 stage 1: matched and discovery are the local Maps of scanEPG, pruned after the stream when a slot has two owners. // AIR-492: deferredKeys is the in-memory set of this hop's fairness fences.
 const receivers=new Map();
 for(const [file,text] of texts)for(const m of text.matchAll(/([A-Za-z_$][A-Za-z0-9_$.]*)\.(put|delete|createMultipartUpload|resumeMultipartUpload)\(/g)){
  const who=m[1],method=m[2];
@@ -100,7 +99,7 @@ const FILE_SITES={
  // of the run's films) and the interrupted record of a recovered earlier run (`enrichment/runs/<runId>.json`). Neither is a projector input or on a Discovery, admin-recovery or publication path.
  // Batch runner v2 batch_submit: +1 r2 site, +1 wrapper site and +1 dynamic key, all of the shape the v5 runner already writes: `runnerLeaseEdit` puts the runner lease object (the same key `runnerLease` puts, in the object
  // mode) and the per-film `enrichment/films/<id>/predictions.json` bundle (the key the v5 submit writes). Neither is a projector input or on a Discovery, admin-recovery or publication path.
- 'src/enrichment.js':{r2:15,wrapper:48,dynamic:34}, // AIR-510: batch-manifest persist plus transferable batch-stage drain/hold; not a projector input. AIR-79: -3 wrapper and -3 dynamic, the three mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,...) writes of the removed lookupRemovalRatings (the removal queue, not a projector input; the Ratings step keeps its own)
+ 'src/enrichment.js':{r2:15,wrapper:43,dynamic:31}, // AIR-452: -5 wrapper and -3 dynamic, the retired v5 start/next/submit and the request object scope only they created (ADR 0162); none was a projector input. AIR-510: batch-manifest persist plus transferable batch-stage drain/hold; not a projector input. AIR-79: -3 wrapper and -3 dynamic, the three mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,...) writes of the removed lookupRemovalRatings (the removal queue, not a projector input; the Ratings step keeps its own)
  'src/filter-presets.js':{r2:1,wrapper:0,dynamic:0},
  'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
  'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},
@@ -122,7 +121,7 @@ assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: lo
 // The complete list of sites that name a key of a projector input that is not Discovery's. Each belongs to a path of its own domain.
 const INPUT_WRITERS={
  "src/admin/film-title-route.js|env.BUCKET.put|OWNER_REVIEWS_KEY":{count:1,owner:'admin Film title route (owner review), its own route'},
- "src/enrichment.js|mergeStoredJSON|ENRICHMENT_KEY+'view-index.json'":{count:4,owner:'ratings and removal view-index maintenance, its own paths'},
+ "src/enrichment.js|mergeStoredJSON|ENRICHMENT_KEY+'view-index.json'":{count:3,owner:'ratings and removal view-index maintenance, its own paths (AIR-452: -1, the retired v5 next index repair)'},
  "src/metadata-cache.js|bucket.put|MIRROR_KEY":{count:1,owner:'metadata cache R2 mirror, its own domain'},
  "src/owner-review-d1.js|bucket.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
  "src/owner-review-d1.js|env.BUCKET.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},

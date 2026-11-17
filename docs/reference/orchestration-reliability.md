@@ -104,7 +104,7 @@ A fenced call answers `external_writer_fenced` and writes nothing. While the mod
 
 ### Predictions
 
-Outside this contract. The hourly ChatGPT task keeps the leased queue, `prediction_validate` and `prediction_submit`. A model quota of zero leaves items pending; no Cloudflare executor generates predictions.
+Outside this contract. The hourly ChatGPT Tasks keep the leased queue, `prediction_batch_validate` and `prediction_batch_submit`. A model quota of zero leaves items pending; no Cloudflare executor generates predictions.
 
 ## Mode switch and write fencing
 

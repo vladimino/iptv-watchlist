@@ -8,6 +8,9 @@ import {createHash,webcrypto} from 'node:crypto';
 // FINGERPRINT_SCHEMA_VERSION 2, a declared split of chase_escape and the matching MECHANICS. The shared transition verdict
 // always decides (ADR 0047); the strict outcome is only counted beside it, and a stale PREDICTION_FINGERPRINT_COMPATIBILITY
 // binding of any value is inert.
+// Since ADR 0162 the only runner is batch runner v2, which runs in D1 mode only; this file keeps the R2 objects and seeds stored films through the shared
+// writers (`T.seed`: writeFingerprint, the immutable prediction version and the view index, the writes a submit makes) instead of a one-film v5 run.
+// The v5-only behaviour (one-film next, its run binding and the pointer restore on rollback) is gone with that runner.
 const records=new Map(),etags=new Map();let revision=0;
 const store={
  async get(key){if(!records.has(key))return null;const text=records.get(key);return {etag:etags.get(key),text:async()=>text,json:async()=>JSON.parse(text)};},
@@ -32,7 +35,16 @@ function release(patch){
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
  vm.runInContext(domain,ctx);
  for(const file of ['src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext((file==='src/enrichment.js'?patch(enrichmentSource):fs.readFileSync(file,'utf8')).replace('export default','globalThis.worker='),ctx);
- vm.runInContext('globalThis.T={writeFingerprint,predictionFreshness,queueBatchIds,fingerprintSchemaVocabulary,FINGERPRINT_SCHEMA_BASE,FINGERPRINT_TRANSITIONS,FINGERPRINT_SCHEMA_VERSION,MECHANICS,EXECUTION,GENERAL_EXECUTION,PROFILE_GENRE_DOMAINS,PROFILE_GENRE_ALIASES};',ctx);
+ vm.runInContext(`globalThis.seedFilm=async(env,id,input,prediction)=>{
+  const state=await readFilmState(env,id),profile=await loadJSON(env,profileKey);let fingerprint=state.fingerprint;
+  if(input)fingerprint=await writeFingerprint(env,id,input,fingerprint,'generated',undefined,FINGERPRINT_PROMPT_VERSION,false);
+  const old=state.predictions?.current||null,at=new Date().toISOString();
+  const generated={...pickPrediction(prediction),filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:'seed',trigger:'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})};
+  const stored={...generated,...(await writePredictionVersion(env,id,generated))},history=[...(state.predictions?.history||[])];if(old)history.push({...old,replacedAt:at});
+  await saveJSON(env,filmKey(id)+'predictions.json',{current:stored,history});
+  await updateViewIndex(env,id,{prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});
+  return old?'recalculated':'created';};`,ctx);
+ vm.runInContext('globalThis.T={seedFilm,writeFingerprint,predictionFreshness,queueBatchIds,fingerprintSchemaVocabulary,FINGERPRINT_SCHEMA_BASE,FINGERPRINT_TRANSITIONS,FINGERPRINT_SCHEMA_VERSION,MECHANICS,EXECUTION,GENERAL_EXECUTION,PROFILE_GENRE_DOMAINS,PROFILE_GENRE_ALIASES};',ctx);
  const api=async(path,method='GET',body,flags={})=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),{...baseEnv,...flags});return {status:response.status,data:await response.json()};};
  return {ctx,T:ctx.T,api};
 }
@@ -70,16 +82,10 @@ const mechanicsOf={A:['heist'],B:['chase_escape','rescue'],C:['heist'],E:['chase
 const reconcile=async(R,flags={})=>{const r=await R.api('enrichment/queue/reconcile','POST',{},flags);assert.equal(r.status,200);return read('enrichment/prediction-queue.json');};
 // Everything but the clock: refreshedAt and the milliseconds-to-deadline of each priority entry.
 const stable=queue=>{const {refreshedAt,priority,...rest}=plain(queue);return {...rest,priority:Object.fromEntries(Object.entries(priority).map(([id,p])=>{const {expiresInMs,...fixed}=p;return [id,fixed];}))};};
-const startRun=async(R,flags={},batchSize)=>{const r=await R.api('enrichment/start','POST',{scope:'watchlist_all',mode:'queued',...(batchSize?{batchSize}:{})},flags);assert.equal(r.status,200,JSON.stringify(r.data));return r.data.runId;};
-const next=async(R,runId,flags={})=>{const r=await R.api('enrichment/next','POST',{runId},flags);return r;};
-const finish=(R,runId)=>R.api('enrichment/complete','POST',{runId,reason:'model_error'});
+const seed=(R,id,input,flags={})=>R.T.seedFilm({...baseEnv,...flags},id,input,prediction);
 
 // Release 1: fingerprints and predictions for A, B, C, E with version objects on; D stays missing.
-{
- const runId=(await R1.api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'})).data.runId;
- for(const id of ['A','B','C','E'])assert.equal((await R1.api('enrichment/submit','POST',{runId,items:[{filmId:id,fingerprint:fingerprintOf(mechanicsOf[id]),prediction}]},OBJECTS)).data.results[0].status,'created',id);
- await finish(R1,runId);
-}
+for(const id of ['A','B','C','E'])assert.equal(await seed(R1,id,fingerprintOf(mechanicsOf[id]),OBJECTS),'created',id);
 const pointer=id=>read('enrichment/films/'+id+'/fingerprint.json');
 for(const id of ['A','B','C','E']){
  const p=pointer(id);

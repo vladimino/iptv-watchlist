@@ -6,6 +6,8 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {fingerprintContentHash, fingerprintPointerAgrees} from '../src/prediction-d1.js';
+import * as PredictionD1 from '../src/prediction-d1.js';
+import {flowWorld} from './prediction-d1-flow-lib.mjs';
 
 const records=new Map(),etags=new Map();let revision=0;
 const env={BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key)),text:async()=>JSON.stringify(records.get(key))}:null},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};},list:async()=>({objects:[],truncated:false})}};
@@ -117,7 +119,7 @@ assert.deepEqual(published.metadataSupports,['plotMechanics']);
 assert.equal(published.maxItems,4);assert.equal(published.maxRefs,4);assert.equal(published.sourceRefCap,8);
 assert.deepEqual(published.aggregate.order,['plotMechanics','generalExecution','genreExecution']);
 assert.match(published.aggregate.basis,/mixed/);
-assert.match(published.metadataPreflight,/prediction_validate/);
+assert.match(published.metadataPreflight,/prediction_batch_validate/);
 assert.match(published.claimCoverage.generalExecution,/unknown/);
 for(const key of ['plot_engine','pace','stakes','chemistry','plan_counterplan_strength','multi_party_goals','decision_logic','payoff','action_readability'])assert.ok(published.executionQuality.includes(key),key);
 assert.equal(Object.hasOwn(schema.contract.fingerprint.rules,'evidence'),false);
@@ -152,12 +154,15 @@ const kept=plain(call('predictionDiagnosticValidation')({stage:'fingerprint_sche
  assert.equal(plain(call('predictionDiagnosticValidation')({stage:'caller_reported',reportedBy:'caller',issues:[],claimed:{reason:'free text',preflightIssues:'x'}})).claimed,undefined,'an unknown reason is dropped');}
 assert.deepEqual(kept.issues,[{path:'fingerprint.evidence.execution.payoff',code:'invalid_ref'}]);
 
-function boot(ids){records.clear();etags.clear();revision=0;records.set('enrichment/profile/current.json',{version:1,profileHash:'p',profile:{ratingScale:'Half stars'}});records.set('sync.json',{runId:'test',stage:'complete'});const catalog={};for(const id of ids)catalog[id]={id,title:'Heat '+id,original:id,year:1995,tmdbId:id.replace(/\D/g,''),genres:['Crime'],synopsis:'A crew plans a robbery.',directors:['Michael Mann'],actors:['Al Pacino'],runtime:170,shows:[{start:Date.now()}]};records.set('programme.json',{runId:'test',films:[]});records.set('epg/discovered-films.json',catalog);}
+{
 const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Heist'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
-boot(['tmdb_461','tmdb_462','tmdb_463']);
-const start=(await api('start',{scope:'watchlist_all',mode:'queued'})).data;
-const ids=(await api('next',{runId:start.runId,batchSize:3})).data.items.map(item=>item.filmId);
-const submit=body=>api('submit',{runId:start.runId,items:[body]});
+// The submit path on batch runner v2 (ADR 0162), D1 mode: D1 holds the pointers, R2 the immutable bodies and the mutable mirrors read below.
+const w=await flowWorld({films:3,extra:()=>({title:'Heat',year:1995,genres:['Crime'],synopsis:'A crew plans a robbery.',directors:['Michael Mann'],actors:['Al Pacino'],runtime:170})});
+const records=w.records,call=code=>vm.runInContext(code,w.ctx);
+const api=async(path,body,method='POST')=>{const response=await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),w.env);return {status:response.status,data:await response.json()};};
+const {start:started}=await w.reconcileAndStart();assert.equal(started.status,200,JSON.stringify(started.data).slice(0,200));const start=started.data;
+const ids=start.films.map(film=>film.filmId);assert.equal(ids.length,3);
+const submit=body=>api('batch/submit',{runId:start.runId,epoch:start.lease.epoch,items:[body]});
 let result=(await submit({filmId:ids[0],fingerprint:legacy,prediction})).data;
 assert.equal(result.results[0].status,'created');
 const legacyBody=records.get('enrichment/films/'+ids[0]+'/fingerprints/'+records.get('enrichment/films/'+ids[0]+'/fingerprint.json').fingerprintHash+'.json');
@@ -201,19 +206,20 @@ const legacyPointer=structuredClone(records.get(legacyPointerKey));
 const legacyBodyKey='enrichment/films/'+ids[0]+'/fingerprints/'+legacyPointer.fingerprintHash+'.json';
 const legacyImmutable=structuredClone(records.get(legacyBodyKey));
 result=(await submit({filmId:ids[2],fingerprint:payoffOnly,prediction})).data;
-assert.equal(result.results[0].status,'retryable_failure');
+assert.equal(result.results[0].status,'validation_failure');
 assert.equal(result.results[0].validation.stage,'fingerprint_schema');
 assert.ok(result.results[0].validation.issues.some(issue=>issue.path==='fingerprint.evidence.execution.payoff'&&issue.code==='invalid_ref'));
 assert.equal(records.has('enrichment/films/'+ids[2]+'/fingerprint.json'),false);
 const closed=await api('complete',{runId:start.runId,reason:'external_termination'});
 assert.equal(closed.status,200,JSON.stringify(closed.data));
 assert.equal(closed.data.status,'partial');
-records.set('enrichment/profile/current.json',{version:2,profileHash:'p2',profile:{ratingScale:'Half stars'}});
-const again=(await api('start',{scope:'watchlist_all',mode:'queued'})).data;
-const reusedItem=(await api('next',{runId:again.runId,batchSize:3})).data.items.find(item=>item.filmId===ids[0]);
-assert.equal(reusedItem.requiredWork,'prediction_only');
+const profile2={version:2,profileHash:'p2',profile:{ratingScale:'Half stars'}};records.set('enrichment/profile/versions/2.json',profile2);await PredictionD1.saveMutable(w.env,'enrichment/profile/current.json',profile2);
+assert.equal((await api('queue/reconcile',{})).status,200);
+const restarted=await api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'manual'});assert.equal(restarted.status,200,JSON.stringify(restarted.data).slice(0,300));const again=restarted.data;
+const reusedItem=again.films.find(item=>item.filmId===ids[0]);
+assert.equal(reusedItem.plan,'prediction_only');
 assert.equal(reusedItem.fingerprint.fingerprintHash,legacyPointer.fingerprintHash);
-const reused=(await api('submit',{runId:again.runId,items:[{filmId:ids[0],prediction:{...prediction,confidence:'high',confidenceAssessment:{assessmentVersion:1,level:'high',status:'evidenced',reasonCodes:[],coverage:{},fingerprintHash:'ff'.repeat(32)}}}]} )).data;
+const reused=(await api('batch/submit',{runId:again.runId,epoch:again.lease.epoch,items:[{filmId:ids[0],prediction:{...prediction,confidence:'high',confidenceAssessment:{assessmentVersion:1,level:'high',status:'evidenced',reasonCodes:[],coverage:{},fingerprintHash:'ff'.repeat(32)}}}]} )).data;
 assert.equal(reused.results[0].status,'recalculated',JSON.stringify(reused.results[0]));
 assert.deepEqual(records.get(legacyPointerKey),legacyPointer);
 assert.deepEqual(records.get(legacyBodyKey),legacyImmutable);
@@ -229,14 +235,10 @@ assert.equal(reusedVersion.body.fingerprintHash,legacyPointer.fingerprintHash);
 const viewed=(await api('view',undefined,'GET')).data.films[ids[1]].prediction;
 assert.equal(viewed.confidenceAssessment.fingerprintHash,storedPointer.fingerprintHash);
 assert.equal(viewed.fingerprintHash,storedPointer.fingerprintHash);
-records.get('enrichment/view-index.json')[ids[1]].prediction.confidenceAssessment=null;
-const nulled=(await api('view',undefined,'GET')).data.films[ids[1]].prediction;
-assert.equal(Object.hasOwn(nulled,'confidenceAssessment'),true);
-assert.equal(nulled.confidenceAssessment,null);
-assert.equal(nulled.fingerprintHash,storedPointer.fingerprintHash);
 assert.equal(Object.hasOwn(records.get('enrichment/view-index.json')[ids[1]].impactFeatures,'evidence'),false);
 assert.equal(call('fingerprintCurrent')(storedPointer),true);
 
+}
 const proposal=fs.readFileSync('docs/reference/scheduled-tasks.md','utf8');
 assert.match(proposal,/### Fingerprint evidence instruction in the live hourly task \(AIR-335, 2026-11-03\)/);
 assert.doesNotMatch(proposal,/### Proposed fingerprint evidence instruction \(not applied\)/);

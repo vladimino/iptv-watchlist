@@ -1,5 +1,5 @@
 // AIR-450: prediction_batch_validate, the read-only preflight of 1 to 10 candidates of a batch runner v2 group, on the real MCP handler and the real Worker validators (no model, no network, no production).
-// It must give exactly the verdicts prediction_validate and the dry-run of prediction_batch_submit give, bind every result to the index and filmId sent, never let one item fail the others, touch no storage,
+// It must give exactly the verdicts of the shared pure validators (mcpCandidateReport, what the retired single-film prediction_validate ran) and the dry-run of prediction_batch_submit give, bind every result to the index and filmId sent, never let one item fail the others, touch no storage,
 // and stay light: the measured latency and sizes are printed for the evidence page.
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -111,7 +111,7 @@ const ids=n=>Array.from({length:n},(_,i)=>'tmdb_'+(i+1));
  assert.match(text,/over the 57344 byte limit/);assert.match(text,/split the group/);assert.ok(text.length<400,'the refusal does not echo the payload');
 }
 
-// 6. Parity with prediction_validate and with the dry run of prediction_batch_submit, on the same candidates.
+// 6. Parity with the shared single-candidate validator and with the dry run of prediction_batch_submit, on the same candidates.
 {
  const manifest=(await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',dryRun:true})).data;
  const film=manifest.films.slice(0,10).map(f=>f.filmId);
@@ -120,8 +120,8 @@ const ids=n=>Array.from({length:n},(_,i)=>'tmdb_'+(i+1));
  const items=film.map((id,i)=>({filmId:id,fingerprint:variants[i],prediction:preds[i],metadata:manifest.films[i].modelMetadata}));
  const batch=(await call('prediction_batch_validate',{items})).data;
  for(const [i,it] of items.entries()){
-  const single=(await call('prediction_validate',{fingerprint:it.fingerprint,prediction:it.prediction,metadata:it.metadata})).data;
-  assert.deepEqual(batch.results[i].fingerprint,single.fingerprint,'fingerprint parity with prediction_validate, item '+i);assert.deepEqual(batch.results[i].prediction,single.prediction,'prediction parity, item '+i);assert.equal(batch.results[i].valid,single.valid);
+  w.ctx.__it=it;const single=plain(vm.runInContext('mcpCandidateReport(__it.fingerprint,__it.prediction,__it.metadata)',w.ctx));
+  assert.deepEqual(batch.results[i].fingerprint,single.fingerprint,'fingerprint parity with the shared single-candidate validator, item '+i);assert.deepEqual(batch.results[i].prediction,single.prediction,'prediction parity, item '+i);assert.equal(batch.results[i].valid,single.valid);
  }
  // the dry run answers per film at the first failing stage with the same issues, and would_write exactly when the preflight is valid
  const dry=(await w.api('batch/submit',{runId:'dry-run',epoch:1,dryRun:true,manifestHash:manifest.manifestHash,items:items.map((it,i)=>({filmId:it.filmId,fingerprint:it.fingerprint,prediction:it.prediction,inputHash:manifest.films[i].inputHash}))})).data;

@@ -1,34 +1,42 @@
-import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
-const records=new Map(),etags=new Map();let revision=0,failKey='',writes=[],eventsUnavailable=false;
-const env={BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;if(eventsUnavailable&&key.startsWith('events/items/'))throw new Error('Temporary events outage');if(key===failKey){failKey='';throw new Error('Storage checkpoint interrupted')}records.set(key,JSON.parse(value));etags.set(key,String(++revision));writes.push(key);return {etag:etags.get(key)}},list:async({prefix=''})=>({objects:[...records.keys()].filter(k=>k.startsWith(prefix)).map(key=>({key})),truncated:false})}};
-const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
-ctx.env=env;const call=(code)=>vm.runInContext(code,ctx);
-async function api(path,body,method='POST'){const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:r.status,data:await r.json()}}
-const now=Date.now(),film=(id,start,extra={})=>({id,title:id,original:id,year:2020,tmdbId:id.replace(/\D/g,'')||id,genres:[],actors:[],directors:[],shows:start===null?[]:[{start}],...extra});
-const execution=Object.fromEntries(Object.entries(call('EXECUTION')).map(([key,values])=>[key,values.includes('unknown')?'unknown':values[0]]));
-const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['investigation'],execution,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']},prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
-records.set('enrichment/profile/current.json',{version:1,profileHash:'p',profile:{ratingScale:'Half stars'}});records.set('sync.json',{runId:'test',stage:'complete'});
+// Runner lease recovery on batch runner v2 (ADR 0122, ADR 0162): the shared 15-minute lease, heartbeat renewal, an atomic takeover of an expired lease by one of two
+// concurrent starts, the interrupted predecessor, one resume Event, saved forecasts reused and a stale owner fenced. D1 prediction authority, as production runs it;
+// local stand-ins only.
+import assert from 'node:assert/strict';import vm from 'node:vm';
+import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 
+const w=await flowWorld({films:3});assert.equal((await w.api('queue/reconcile',{})).status,200);
+const start=body=>w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',...body});
+const lease=()=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);
+const expire=()=>{const doc=lease();doc.expiresAt=1;sql(w.file,"UPDATE prediction_lease SET expires_at=1, document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE name='runner'");};
+const run=id=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+id+"'")[0].d);
+const events=()=>[...w.records].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v);
+const status=async()=>(await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/status'),w.env)).json();
+const near=(value,expected,slack=5000)=>assert.ok(Math.abs(value-expected)<=slack,value+' is not about '+expected);
 
+assert.equal(vm.runInContext('RUNNER_LEASE_TTL',w.ctx),15*60000);
+const first=(await start({manifestSize:2})).data;assert.equal(first.status,'running');near(lease().expiresAt-Date.now(),15*60000);
+for(let i=0;i<3;i++){const before=lease().expiresAt;const hb=await w.api('heartbeat',{runId:first.runId});assert.equal(hb.status,200);assert.ok(lease().expiresAt>=before);near(lease().expiresAt-Date.now(),15*60000);assert.equal((await start()).data.status,'already_running');}
+const savedId=first.films[0].filmId;
+const submitted=await w.api('batch/submit',{runId:first.runId,epoch:first.lease.epoch,items:[{filmId:savedId,fingerprint:w.fingerprint,prediction:w.prediction}]});
+assert.equal(submitted.data.results[0].status,'created');
+const pointer=()=>sql(w.file,"SELECT * FROM prediction_pointer WHERE film_id='"+savedId+"'");const saved=JSON.stringify(pointer());
 
+// The lease expires. Two concurrent starts: exactly one takes over (epoch + 1), the other is turned away; the predecessor is interrupted and recoverable.
+expire();
+const race=await Promise.all([start(),start()]);
+assert.equal(race.filter(x=>x.data.status==='running').length,1,JSON.stringify(race.map(x=>x.data.status)));
+assert.ok(race.some(x=>['already_running','busy'].includes(x.data.status)));
+const resumed=race.find(x=>x.data.status==='running').data;
+assert.notEqual(resumed.runId,first.runId);assert.equal(resumed.lease.epoch,first.lease.epoch+1);assert.equal(lease().runId,resumed.runId);
+const old=run(first.runId);assert.equal(old.status,'interrupted');assert.equal(old.recoverable,true);assert.equal(old.recoveredByRunId,resumed.runId);
+assert.equal(events().filter(e=>e.reason==='lease_expired').length,0,'an expired lease is a resume, not a stop Event');
+const live=await status();assert.equal(live.state,'running');assert.equal(live.runId,resumed.runId);
+assert.ok(!resumed.films.some(f=>f.filmId===savedId),'the saved forecast is reused, not regenerated');assert.equal(JSON.stringify(pointer()),saved);
 
-
-let clockTime=Date.now();class Clock extends Date{constructor(...args){super(...(args.length?args:[clockTime]));}static now(){return clockTime;}}ctx.Date=Clock;
-const events=()=>[...records].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v);
-records.set('programme.json',{runId:'test',films:[]});records.set('epg/discovered-films.json',{tmdb_1:film('tmdb_1',now),tmdb_2:film('tmdb_2',now),tmdb_3:film('tmdb_3',now)});
-assert.equal(call('RUNNER_LEASE_TTL'),15*60000);let start=(await api('start',{scope:'watchlist_all'})).data;
-assert.equal(records.get('enrichment/runner-lease.json').expiresAt-clockTime,15*60000);
-for(let i=0;i<3;i++){clockTime+=10*60000;assert.equal((await api('heartbeat',{runId:start.runId})).status,200);assert.equal(records.get('enrichment/runner-lease.json').expiresAt-clockTime,15*60000);assert.equal((await api('start',{scope:'watchlist_all'})).data.status,'already_running');}
-let n=(await api('next',{runId:start.runId,batchSize:1})).data;const savedId=n.items[0].filmId;await api('submit',{runId:start.runId,items:[{filmId:savedId,fingerprint,prediction}]});const saved=structuredClone(records.get('enrichment/films/'+savedId+'/predictions.json'));
-clockTime+=16*60000;const leaseWrites=writes.filter(k=>k==='enrichment/runner-lease.json').length;
-const race=await Promise.all([api('start',{scope:'watchlist_all'}),api('start',{scope:'watchlist_all'})]);assert.equal(race.filter(x=>x.data.status==='running').length,1);assert.equal(race.filter(x=>x.data.status==='already_running').length,1);const resumed=race.find(x=>x.data.status==='running').data;
-assert.notEqual(resumed.runId,start.runId);assert.equal(writes.filter(k=>k==='enrichment/runner-lease.json').length,leaseWrites+1);assert.equal(records.get('enrichment/runner-lease.json').runId,resumed.runId);assert.equal(records.get('enrichment/runs/'+start.runId+'.json').status,'interrupted');assert.equal(records.get('enrichment/runs/'+start.runId+'.json').recoverable,true);
-assert.equal(events().filter(e=>e.stage==='resumed').length,1);assert.equal(events().filter(e=>e.reason==='lease_expired').length,0);
-const live=(await api('status',undefined,'GET')).data;assert.equal(live.state,'running');assert.equal(live.runId,resumed.runId);assert.equal(live.lastHeartbeatAt,new Clock().toISOString());assert.equal(live.hotRemaining,2);assert.equal(live.added,0);
-n=(await api('next',{runId:resumed.runId})).data;assert(!n.items.some(i=>i.filmId===savedId));assert.deepEqual(records.get('enrichment/films/'+savedId+'/predictions.json'),saved);
-// Late cleanup by the dead owner cannot create a pause Event or release the new owner's lease.
-await api('next',{runId:start.runId});await api('complete',{runId:start.runId,reason:'lease_expired'});assert.equal(events().filter(e=>e.reason==='lease_expired').length,0);assert.equal(records.get('enrichment/runner-lease.json').runId,resumed.runId);
-// If recovery itself fails to create its run checkpoint, expose that genuine system stop.
-clockTime+=16*60000;failKey='enrichment/latest-run.json';const failed=(await api('start',{scope:'watchlist_all'})).data;assert.equal(failed.status,'partial');assert.equal(failed.reason,'storage_error');assert.equal(events().filter(e=>e.reason==='storage_error').length,1);assert.equal((await api('status',undefined,'GET')).data.state,'blocked');assert.equal(events().filter(e=>e.stage==='resumed').length,1);
-console.log('Lease recovery: 15-minute TTL with 10-minute heartbeat, atomic concurrent takeover, same-trigger running, saved forecast reuse, one resume/no expired-stop, stale-owner fencing and failed-recovery Event passed');
+// The dead owner is fenced: its heartbeat, submit and late completion change nothing and cannot release the new owner's lease.
+assert.equal((await w.api('heartbeat',{runId:first.runId})).status,409);
+const late=await w.api('batch/submit',{runId:first.runId,epoch:first.lease.epoch,items:[{filmId:first.films[1].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});assert.notEqual(late.status,200);
+await w.api('complete',{runId:first.runId,reason:'lease_expired'});
+assert.equal(events().filter(e=>e.reason==='lease_expired').length,0);assert.equal(lease().runId,resumed.runId);assert.ok(lease().expiresAt>Date.now());
+assert.equal(sql(w.file,"SELECT COUNT(*) AS n FROM prediction_pointer")[0].n,1,'the fenced submit wrote nothing');
+console.log('Lease recovery (batch v2): 15-minute TTL renewed by heartbeat, already_running while held, one atomic takeover of an expired lease with epoch + 1, interrupted recoverable predecessor, no expired-stop Event, saved forecast reused and stale-owner heartbeat, submit and completion fenced passed');

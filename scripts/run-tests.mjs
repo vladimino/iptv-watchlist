@@ -302,7 +302,6 @@ export const CORE_WEIGHTS={
  'letterboxd-rated-candidates.mjs':2,
  'lifecycle-diagnostics.mjs':2,
  'metadata-cache-production.mjs':2,
- 'prediction-batch-profile.mjs':2,
  'prediction-caller-failure-claim.mjs':2,
  'projector-window-epg.mjs':2,
  'ratings-cursor-merge.mjs':2,
