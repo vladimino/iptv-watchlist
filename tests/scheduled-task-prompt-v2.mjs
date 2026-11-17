@@ -146,7 +146,7 @@ assert.ok(/observedProfileHash/.test(dry)&&/profile_moved/.test(dry)&&/not_submi
 assert.ok(!/trello\.com\/c\/XDyt4qIH\)\s*'s scope/.test(fs.readFileSync('docs/runbooks/prediction-batch-v2-dry-run-ab.md','utf8')),'AIR-450 is not linked to the AIR-449 card');
 assert.ok(fs.readFileSync('docs/runbooks/prediction-batch-v2-dry-run-ab.md','utf8').includes('[AIR-450](https://trello.com/c/VPd21Y9d)'));
 const enrich=fs.readFileSync('src/enrichment.js','utf8');
-for(const reason of ['profile_changed','runner_aborted','quota','model_unavailable','model_error','api_error','storage_error','external_termination','time_budget'])assert.ok(enrich.includes("'"+reason+"'"),reason+' is a Worker stop reason');
+for(const reason of ['profile_changed','runner_aborted','quota','model_unavailable','model_error','api_error','storage_error','external_termination','time_budget','client_state_lost','manifest_unusable'])assert.ok(enrich.includes("'"+reason+"'"),reason+' is a Worker stop reason');
 const live=fs.readFileSync('docs/reference/scheduled-task-prompts/hourly-predictions-only.md','utf8').match(/---BEGIN PROMPT---\n([\s\S]*)\n---END PROMPT---/)[1];
 assert.equal(sha(live),'fc0b4c1772f33398b4cb4e2eafda6e71b89c260befbee363e299acae4a388d44','the live hourly prompt text is unchanged');
 assert.ok(!/trello\.com\/c\/[\s;)]/.test(doc),'no empty Trello link');
@@ -164,7 +164,7 @@ const validSample=x=>check(schema.$defs.sample,x),validResult=x=>check(schema.$d
 async function world(films){
  const w=await flowWorld({films});assert.equal((await w.api('queue/reconcile',{})).status,200);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- w.call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text)};};
+ w.call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text),structured:res.structuredContent,textBytes:new TextEncoder().encode(res.content[0].text).length};};
  return w;
 }
 const hex=h=>/^[0-9a-f]{8,64}$/.test(String(h))?String(h):sha(String(h)).slice(0,16); // the flow world's stand-in profile hash is 'p'; production hashes are hex
@@ -224,6 +224,11 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  const w=await world(130);
  const start=await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5});assert.ok(!start.isError,JSON.stringify(start.data).slice(0,200));
  const manifest=start.data;assert.equal(manifest.films.length,5,'the template selects five films');assert.equal(manifest.manifestSize,5);assert.equal(manifest.filmsSelected,5);
+ assert.equal(start.structured,undefined,'the MCP result carries the manifest once, as text');
+ assert.ok(manifest.profile.body&&manifest.contract.schema.contract.fingerprint.evidence&&manifest.films.every(f=>f.modelMetadata&&f.filmId),'profile, schema contract and every film input are in that one text');
+ const startText=JSON.stringify(manifest);
+ assert.ok(startText.indexOf('"films":')<startText.indexOf('"contract":'),'films are retained if the tool text is cut from the end');
+ assert.ok(start.textBytes<48*1024,'a five-film manifest text stays inside the client-visible budget');
  const runId=manifest.runId;let epoch=manifest.lease.epoch;
  assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5})).data.status,'already_running','a second start never adopts the run');
  const ids=manifest.films.map(f=>f.filmId),badParse=ids[1],badContent=ids[3];
@@ -248,7 +253,7 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  const refused=await w.call('prediction_complete',{runId});assert.equal(refused.isError,true);assert.match(JSON.stringify(refused.data),/Queue not empty/,'a reasonless complete is refused while ready films remain');
  const done=await w.call('prediction_complete',{runId,reason:'manifest_spent'});assert.ok(!done.isError,JSON.stringify(done.data).slice(0,300));
  // AIR-463 / ADR 0136: spending the selected manifest is a normal complete, not a partial time_budget stop.
- assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'manifest_spent');assert.ok(done.data.title!=='Прогнозы приостановлены');
+ assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'manifest_spent');assert.equal(done.data.title,'Пакет прогнозов обработан с ошибками');assert.equal(done.data.presentation,'batch_v2_terminal');assert.ok(done.data.failed>0);
  assert.ok((done.data.hotRemaining||0)+(done.data.coldRemaining||0)>0,'global outstanding remains after a short run');
  const eventKeys=()=>[...w.records.entries()].filter(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+runId);
  assert.equal(eventKeys().length,1,'exactly one persisted completion Event');
