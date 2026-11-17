@@ -454,9 +454,9 @@ function frozenDay(run){
    }
    const actStep=name('act');
    const result=await step.do(actStep,callback=>tracedAct(env,ctx,actStep,hooks,callback?.attempt));
-   // AIR-522: the callback's own `exit` line proves only that it returned. This line is written after `step.do` itself returned, so it is the
-   // platform's acknowledgement that the step output was stored; an `exit` with no such line before the next `enter` of the same step is a
-   // returned callback whose attempt the platform failed.
+   // AIR-522: the callback's own `exit` line proves only that it returned. This line is written outside `step.do`, after it resolved to this
+   // Workflow execution. A present line proves that much and nothing more; it can repeat when the engine replays the Workflow, and an absent line
+   // is inconclusive on its own (log delivery can be lost). Conclude nothing about persistence without the attempt history and a read of durable state.
    storedLog(ctx,actStep,result);
    if(result.kind==='stop'){
     await step.do(name('stopped'),()=>stopInstance(env,ctx,result.reason));
@@ -507,7 +507,7 @@ function frozenDay(run){
    return result;
   }catch(error){log('error',{elapsedMs:Date.now()-began});throw error;}
  }
- // AIR-522: one line per `act-N` whose output the platform acknowledged. A closed set of fields; best effort, never throws.
+ // AIR-522: a best-effort marker written outside `step.do` after it resolved; it may repeat on replay and is not a receipt. A closed set of fields; never throws.
  function storedLog(ctx,actStep,result){
   try{console.log(JSON.stringify({event:'epg_act_stored',at:new Date().toISOString(),runKey:/^\d{4}-\d{2}-\d{2}$/.test(String(ctx.runKey))?ctx.runKey:null,instanceId:ctx.id,actStep,kind:['continue','sleep','stop','handoff'].includes(result?.kind)?result.kind:null}));}catch{}
  }
