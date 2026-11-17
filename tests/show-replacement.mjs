@@ -36,7 +36,7 @@ const again=run(`mergeDiscoveryCandidates([alpha],[
 ],{replaceShows:true})`);
 assert.equal(again[0].confirmedTmdbId,'99');
 assert.deepEqual(JSON.parse(JSON.stringify(again[0].shows.map(show=>show.start))),[oldShow.start]);
-const touched=run(`touchCanonicalFilm({tmdbId:'99',aliases:['Old'],shows:[oldShow],epgLastAiring:${now}-86400000,fingerprint:{ok:true}},{title:'Alpha',rawTitles:['Alpha'],lastAiring:${now}+3600000,shows:[nextShow]})`);
+const touched=run(`touchCanonicalFilm({tmdbId:'99',aliases:['Old'],shows:[oldShow],epgLastAiring:${now}-86400000,fingerprint:{ok:true}},{title:'Alpha',rawTitles:['Alpha'],lastAiring:${now}+3600000,shows:[nextShow]},undefined,true,true)`);
 assert.equal(touched.tmdbId,'99');
 assert.equal(touched.fingerprint.ok,true);
 assert.deepEqual(JSON.parse(JSON.stringify(touched.shows.map(show=>show.channelId))),['y']);

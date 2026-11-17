@@ -27,7 +27,7 @@ assert.equal(r2.changed,true);
 assert.equal(r2.catalog.tmdb_99.shows[0].channelId,'y');
 assert.equal(r2.catalog.tmdb_99.showsProgrammeRunId,'run-b');
 
-const identity=run(`touchCanonicalFilm({tmdbId:'99',aliases:['Old'],shows:[oldShow],hotEnteredAt:'was',epgLastAiring:1,showsProgrammeRunId:'run-a'},{title:'Alpha',rawTitles:['Alpha'],lastAiring:${now}+3600000,shows:[nextShow]},'run-b',false)`);
+const identity=run(`touchCanonicalFilm({tmdbId:'99',aliases:['Old'],shows:[oldShow],hotEnteredAt:'was',epgLastAiring:1,showsProgrammeRunId:'run-a'},{title:'Alpha',rawTitles:['Alpha'],lastAiring:${now}+3600000,shows:[nextShow]},'run-b',false,true)`);
 assert.ok(identity.aliases.includes('Old')&&identity.aliases.includes('Alpha'));
 assert.equal(identity.canonicalIdentity,'tmdb:99');
 assert.equal(identity.shows,undefined);

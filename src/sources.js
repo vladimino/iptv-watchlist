@@ -218,7 +218,7 @@ function catalogIdentityDigest(film){
  if(!body||typeof body!=='object')return JSON.stringify(body);
  const ordered={};
  for(const key of Object.keys(body).sort()){
-  ordered[key]=key==='aliases'&&Array.isArray(body[key])?[...body[key]].sort():body[key];
+  ordered[key]=(key==='aliases'||key==='movieTitles')&&Array.isArray(body[key])?[...body[key]].sort():body[key];
  }
  return JSON.stringify(ordered);
 }
@@ -231,7 +231,8 @@ function mergeCatalogIdentity(incoming,live,programmeRunId,options={}){
   liveKeys.add(key);
   const staged=next[key];
   if(!staged){next[key]=writeAvailability?{...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null}:film;continue;}
-  const merged={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
+  const movieTitles=[...new Set([...(staged.movieTitles||[]),...(film.movieTitles||[])])];
+  const merged={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],...(movieTitles.length?{movieTitles}:{}),fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
   if(writeAvailability===false){
    next[key]=catalogIdentityDigest(merged)===catalogIdentityDigest(film)?film:stripCatalogAvailability(merged);
    continue;
@@ -340,8 +341,12 @@ function applySlotConfirmation(candidate,metas){
  candidate.confirmedTmdbId=ids.length&&ids.every(id=>id&&id===ids[0])?ids[0]:null;
  candidate.confirmedSlots=candidate.shows.flatMap((show,index)=>ids[index]?[{channelId:show.channelId,start:show.start,tmdbId:ids[index]}]:[]);
 }
+// AIR-503: a catalog-only Film is confirmed on a slot by the title of that slot only when the movie authority gave the Film that title
+// (its title, its original title or `movieTitles`, which a TMDB detail read records). An alias without that provenance still counts as a
+// competitor in `knownSlotDecision`, but it never confirms: the slot stays an ordinary discovery observation for the resolver.
+function movieTitleKeys(film){return new Set([film?.title,film?.original,...(film?.movieTitles||[])].map(value=>value?epgTitleParts(value).normalizedTitle:'').filter(Boolean));}
 async function scanEPG(stream,watchlist,now){
- const index=new Map();for(const film of watchlist){for(const title of new Set((film.aliases||[film.original]).map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}
+ const index=new Map();for(const film of watchlist){for(const title of new Set([...(film.catalogOnly?[film.title,film.original]:[]),...(film.aliases||[film.original]),...(film.movieTitles||[])].map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}
  const rawDiscovery=new Set(),filteredNonMovies=new Set();const channels=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map(),slotOwners=new Map(),conflictedSlots=new Map(),showMeta=new WeakMap();let scanned=0,min=Infinity,max=-Infinity,kept=0,identityCollision=0,buffer='',complete=false,bytes=0;
  const reader=stream.getReader(),decoder=new TextDecoder();
  // ADR 0142 decision 1: one owner per (channel, start). The same owner again is ignored; a second owner discards both records after the stream.
@@ -354,7 +359,9 @@ async function scanEPG(stream,watchlist,now){
  // reliable non-catalog watchlist film. Discovery, uncertain matches and the raw candidate counts never see them.
  if(startAt<now-72*3600000||startAt>=now+EPG_RETAIN_FUTURE_MS)continue;
  const title=field(xml,'title'),parts=epgTitleParts(title),titleYear=parts.year,key=parts.normalizedTitle,candidates=index.get(key)||[];const duration=(endAt-startAt)/60000;
- const decision=knownSlotDecision(candidates,titleYear,duration),valid=decision.films;
+ let decision=knownSlotDecision(candidates,titleYear,duration);
+ if(decision.films.length===1&&decision.films[0].catalogOnly&&!movieTitleKeys(decision.films[0]).has(key))decision={films:[],reason:'alias_without_movie_provenance'};
+ const valid=decision.films;
  if(startAt>=now+EPG_HOT_FUTURE_MS&&(valid.length!==1||valid[0]?.catalogOnly))continue;kept++;
  // A single reliable watchlist/catalog match is a known Film and is never screened out by its title.
  if(startAt<now+EPG_HOT_FUTURE_MS&&duration>=55&&duration<=300)rawDiscovery.add(key+'|'+(titleYear||''));if(valid.length!==1&&nonFilmEPGReason(title,xml)){if(duration>=55&&duration<=300)filteredNonMovies.add(key+'|'+(titleYear||''));continue;}

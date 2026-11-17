@@ -10,7 +10,7 @@ The route does not change `GET /api/programme` or `GET /api/watchlist`, which ke
 | --- | --- |
 | `epg/published-generation.json` | The generation pin. When the pointer names a published generation, the programme and the catalog are read **only** from that generation's copies (`epg/generations/<runId>/…`); an absent copy fails closed with `409` instead of falling back to the shared public keys, even when those keys already carry the new run id |
 | `programme.json` | The watchlist films of that generation (exclusion by id and TMDB identity) and the run id the response is pinned to |
-| `epg/discovered-films.json` | The catalog records: identity, display fields, credits, the shows of the generation that last confirmed them |
+| `epg/discovered-films.json` | The catalog records: identity, display fields, credits, `aliases` and `movieTitles` (the titles TMDB gave the movie; absent on a record that no detail read has rewritten, see [ADR 0158](../../adr/0158-epg-title-alias-provenance.md)), the shows of the generation that last confirmed them |
 | `watchlist.json` | Further watchlist ids and TMDB identities to exclude, including films without a programme show |
 | `enrichment/view-index.json` | The stored current prediction and fingerprint facet, the owner's `watched` and `actualRating` per id (see [Watched and rated films](#watched-and-rated-films)), and a `watchlist` boolean when a fact recorded one (see [Watchlist facts](#watchlist-facts)) |
 | `enrichment/profile/current.json` | The profile version and hash a prediction must match to be current |
