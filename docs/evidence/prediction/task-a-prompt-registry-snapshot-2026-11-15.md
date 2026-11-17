@@ -7,7 +7,7 @@ Read-only registry capture via the connected Automations peek action of Task `6a
 ## Observed state
 
 - Enabled: `true`. Timezone: `Europe/Madrid`. Nominal hourly trigger: `:00`.
-- Current installed prompt: **34056 JavaScript characters**, SHA-256 `4662facc4d25d405ff3bc73ff6bdbede028a63e013502e334a5821dfdbd30247`. The exact text is the `PROMPT` block of the [batch v2 snapshot](../../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md) (markers and separator newlines excluded).
+- Prompt installed at the historical 15 November capture: **34056 JavaScript characters**, SHA-256 `4662facc4d25d405ff3bc73ff6bdbede028a63e013502e334a5821dfdbd30247`. The text matched the then-current repository snapshot; the [maintained batch v2 canonical prompt](../../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md) now holds the later installed 39,274-character version (markers and separator newlines excluded).
 - Previous GitHub snapshot: 31761 characters, SHA-256 `97e1c54f1eed3a3ba8e40f060b7d135081155fdedfaac19cf5d3d61f00a700ac`.
 - Installed instructions include Production Task A source-selection/full-text fallback (variant D), research audit, required `failure.reason`, and the `deferred_budget` rule to preserve a previously accepted submit item or revalidate the actual changed item.
 - The frozen A/B dry-run prompt is a separate, non-production experiment and remains **15071 characters**, SHA-256 `a9b28e5a69efe963234243714ed3270924727d11311f0f82fb42539a30caf72d`.
