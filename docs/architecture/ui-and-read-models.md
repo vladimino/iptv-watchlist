@@ -4,7 +4,7 @@ This diagram describes **current R2-backed projections**, not a new canonical Fi
 
 ```mermaid
 flowchart LR
-    subgraph Storage["Authoritative R2 objects"]
+    subgraph Storage["R2 objects and mirrors (D1 is authoritative per domain)"]
         programme["Published programme generation"]
         watchlist["Watchlist and metadata"]
         enrichment["Fingerprints, predictions and actual ratings"]
@@ -96,4 +96,4 @@ On an admin page the events link opens `/events`. On the programme page and the 
 
 **Important side-effect boundary:** do not assume all HTTP GET requests are pure reads. Some existing view/event handlers can initialize or recover persisted state; consult the [deployment runbook](../runbooks/deployment.md) and [GET side-effect tests](../../tests/get-side-effects.mjs) before operational probing.
 
-**Not depicted as production:** D1 canonical repositories and a future read cutover. The [D1 migration ADR](../adr/0017-staged-d1-migration.md) requires separately approved steps before replacing R2 readers.
+**Authority:** the read cutovers are done per domain; which store each reader uses is in [authority per domain](persistence-and-migration.md#authority-per-domain). The diagram above shows the R2 objects and compatibility mirrors that the pages still read; it does not depict the D1 readers.

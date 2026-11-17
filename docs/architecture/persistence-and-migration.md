@@ -16,9 +16,6 @@ flowchart TD
     reload["Offline executor build, loaded by D1 Import API"]
     d1[("D1 iptv: cache, predictions, EPG, owner reviews, ratings, discovery, canonical Film/Person")]
     projector["Enrichment projector: compare-only for Film/Person at open"]
-    flipWrite["Future write flips, per domain"]
-    flipRead["Future page reads on SQL"]
-    retire["Future cleanup: R2 keeps blobs only"]
     worker <--> r2
     worker -->|read-only /api/d1| d1
     archive --> importer --> local
@@ -32,11 +29,9 @@ flowchart TD
     worker -.->|current ratings facts, diary and the removal queue: schema v10 marker d1/open| d1
     worker -.->|current discovery ledger, decisions and admission: schema v11 marker d1/open| d1
     worker -.->|current canonical Film/Person: marker d1/open generation 2, fenced adapters| d1
-    gate -.-> flipWrite -.->|future: Worker writes D1| d1
-    flipWrite --> flipRead --> retire
     classDef future fill:#fff3de,stroke:#a56c2b,color:#42300e
     classDef gated fill:#fff3de,stroke:#a56c2b,color:#42300e,stroke-dasharray:4 3
-    class gate,flipWrite,flipRead,retire future
+    class gate future
     class projector gated
 ```
 
@@ -81,7 +76,21 @@ The D1 data came through a one-off path, not a live flow: a fenced read-only sna
 
 `GET /api/d1/persons/<role>/<key>/identity` is a read-only D1 catalog read. It loads one person's neighborhood and calls the derived Person reference ([ADR 0062](../adr/0062-d1-person-identity-read.md)). The Finds actor and director filter is the one page reader of that GET ([ADR 0065](../adr/0065-finds-person-filter-d1-read.md)): it requests only a selected person, and it keeps a film only from an unbounded verified coCredit whose `film:tmdb:<n>` is the published catalog row's typed movie id. The watchlist grid still matches the stored role id. At `open` D1 is the canonical Film/Person store; this GET is still a read of one neighborhood, not a second writer. This changes no extra node beyond the Film/Person authority labels above.
 
-**Not deployed:** a general write flip and a general page cutover onto SQL. The metadata cache, mutable predictions, published EPG, owner reviews, ratings and discovery are activated D1 domains. The cache marker is `d1`, so `beginSync` and `metadataSync` treat that cache as the working set and `metadata.json` as the mirror. The prediction marker is also `d1`, and the runner persists mutable state in D1 with immutable bodies in R2. Canonical Films and Persons are D1-authoritative at `open` (generation 2); a natural Producer Workflow pass at that marker is still unproven. The discovery arrow is that authority while the marker is `d1` / `open`. The published EPG arrow now documents the active D1 marker; its first actual post-cutover generation was successfully published by manual continuation of a scheduled run, while raw D1/R2 and consumer acceptance are still gated. GET of programme and watchlist does not write the R2 compatibility mirrors; the hourly EPG `ensure` and the publication tail do. Owner reviews are a separate activated domain: the marker is `d1` at generation 1. The Finds person filter above is a reader of one GET, not that cutover. The remaining steps are the phases of [AIR-275](https://trello.com/c/4x7hH0gI): per-domain write flips (D1 becomes the truth, the R2 JSON stays a cache for pages not yet moved), page reads on SQL, then a cleanup that leaves R2 holding blobs only. The earlier shadow-write and shadow-read stages were dropped by the owner as disproportionate for this project. Each orange node is a planned step, not a claim that it is done or an instruction to perform it.
+## Authority per domain
+
+Authority is per domain, not per database. A domain is D1-authoritative only while its own marker says so; an installed table, imported rows or an R2 mirror alone prove nothing. Read the markers live before acting.
+
+| Domain | Marker | Authoritative store | R2 still holds |
+| --- | --- | --- | --- |
+| Canonical Film/Person | `film_person_authority` `d1`/`open` | D1, fenced adapters (the projector is compare-only) | Immutable sources, frozen `titles.json` / `people.json` mirrors (not a fallback) |
+| Metadata cache | `metadata_cache_authority` `d1` | D1 working set | `metadata.json` mirror |
+| Mutable predictions | `prediction_domain_authority` `d1` | D1 queue, lease, profile and current/history pointers | Immutable fingerprint, prediction and profile version bodies |
+| Published EPG and watchlist | `published_epg_authority` `d1`/`open` | D1 generation | Compatibility mirrors, raw XMLTV inputs, seal payloads and receipts |
+| Discovery | discovery marker `d1`/`open` | D1 ledger, decisions, admission, continuation and lease | Immutable observation segments, archive and R2 ledger copies |
+| Ratings documents | `ratings_domain_authority` `d1`/`open` | D1 documents | Ratings and removal events, raw Letterboxd inputs |
+| Owner reviews | `owner_review_authority` `d1` | D1 rows | `admin/owner-reviews.json` mirror |
+
+A marker that is not open or not readable fails closed (`held`, unavailable) and never falls back to R2. The R2 branches that remain in code for these domains are the cutover and revert toolchain, local and test stand-ins, and the held-reader contract; the [retirement audit](../evidence/d1-migration/air-79-legacy-r2-runtime-audit-2026-11-17.md) classifies each one. Two R2 paths are still authoritative in code and are recorded there as open findings: catalog poster hydration of the discovered-films catalog and the started-film event lookup. GET of programme and watchlist does not write the R2 compatibility mirrors; the hourly EPG `ensure` and the publication tail do. The Finds person filter above is a reader of one GET, not a cutover. Recovery boundaries are in the [D1 authority and recovery runbook](../runbooks/recovery/d1-authority-and-time-travel.md); a code rollback reverts none of this.
 
 ## Canonical Film/Person marker (ADR 0099, `d1`/`open` generation 2 since 16 Nov 2026)
 
