@@ -64,7 +64,7 @@ See [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP security contract]
 
 ## EPG diagnostic canary (retired)
 
-No diagnostic binding, route or Workflow class exists: removed by AIR-457 ([ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md)), code deleted by AIR-521 ([ADR 0160](../adr/0160-delete-epg-diagnostic-canary-code.md)). The Worker keeps the production D1 `DB`, R2 `BUCKET` and the Discovery, Ratings, EPG and Producer Workflows.
+No diagnostic binding, route or Workflow class exists: removed by AIR-457 ([ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md)), code deleted by AIR-521 ([ADR 0161](../adr/0160-delete-epg-diagnostic-canary-code.md)). The Worker keeps the production D1 `DB`, R2 `BUCKET` and the Discovery, Ratings, EPG and Producer Workflows.
 
 ## Ratings Workflow binding (AIR-347)
 

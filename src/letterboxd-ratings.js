@@ -2,9 +2,10 @@
 // with a leased, checkpointed run record, driven by ratings_sync_start / ratings_sync_step. Only the run record is owned
 // (compare-and-swap while `lease.step` is the step's own id); the Diary cursor, history, facts, queue and events change
 // by their monotone merges, so a step that outlived its lease can add real progress and never move anything back.
-// The pipeline is permanently separate (ADR 0074). It acts once ratings_storage_migrate has migrated the queue and the
-// Diary cursor; until then start and step answer not_migrated and write nothing. The RATINGS_PIPELINE binding is ignored.
-// LETTERBOXD_DIARY_HISTORY is retired and unread (ADR 0075). A migrated run always starts in the Diary phase.
+// The pipeline is permanently separate (ADR 0074). It works only on version 2 storage: the removal queue at schema version 2 and
+// the Diary cursor in its merge form. Any other stored state is refused by start and step (`storage_unsupported`) and nothing
+// is written, converted or read through R2 (ADR 0161). The RATINGS_PIPELINE binding is ignored.
+// LETTERBOXD_DIARY_HISTORY is retired and unread (ADR 0075). A run always starts in the Diary phase.
 // REMOVAL_RATING_LOOKUP is retired and unread (ADR 0077). A film the Diary did not rate stays eligible for the
 // bounded member-page lookup unless a stored fact already holds a confirmed rating and the current Diary page did
 // not list that film. A film the page lists without a rating is still looked up. The binding does not skip the
@@ -14,11 +15,10 @@
 // ratings_sync_status is a read and never writes. Contract: docs/reference/integrations/letterboxd-ratings.md.
 // Concatenated into the Worker like the other server modules: one global, no exports.
 const LetterboxdRatings=(()=>{
- const KEYS={run:'letterboxd/ratings/run.json',migration:'letterboxd/ratings/migration.json'};
+ const KEYS={run:'letterboxd/ratings/run.json'};
  const CONTRACT_VERSION=1,RUN_SCHEMA_VERSION=1;
  const LEASE_MS=3*60000,LEASE_MARGIN_MS=45000,ABANDONED_MS=30*60000;
  const STEP_LOOKUPS=5,SETTLE_PER_STEP=100,RECENT=10;
- const MIGRATION_WRITER={runId:'ratings-storage-migrate',step:'migrate'};
  const DIARY_ERRORS=['failed','blocked','rate_limited'];
  const MIN_MS=60000;
  const iso=ms=>new Date(ms).toISOString();
@@ -39,18 +39,29 @@ const LetterboxdRatings=(()=>{
   return env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
  };
 
- // Migration state from the two objects and the durable witness `letterboxd/ratings/migration.json`, which
- // ratings_storage_migrate writes after each object it has converted. A witnessed object found back at version 1 is
- // `regressed`, even after a restart, without the status writing anything.
- async function migrationState(env){
-  const [queue,cursor,witness]=await Promise.all([read(env,REMOVAL_LOOKUP_KEY),read(env,LetterboxdDiary.KEYS.state),read(env,KEYS.migration)]);
-  const queueV2=removalQueueV2(queue.value),cursorV2=LetterboxdDiary.cursorMigrated(cursor.value),w=witness.value;
-  const regressed=[...(w?.queue?.migratedAt&&!queueV2?['queue']:[]),...(w?.cursor?.migratedAt&&!cursorV2?['cursor']:[])];
-  const migration=regressed.length?'regressed':queueV2&&cursorV2?'complete':queueV2||cursorV2?'partial':'none';
-  return {migration,regressed,queueV2,cursorV2,queue:queue.value,cursor:cursor.value,witness:w};
+ // The storage schema guard (ADR 0161). The queue must be at schema version 2 and the Diary cursor in its merge form. This is a
+ // read of the two objects and writes nothing. A version 1 object, an absent object or any other shape is unsupported: the
+ // pipeline neither converts it nor falls back to another store, and no code in the Worker can convert it.
+ // The D1 authority is checked first. A held marker (a D1 domain that is not the writer) or an unreadable one is never read as
+ // permission to use the R2 copies of the two keys: they are stale, and the writers would fall through to them. Only an open marker
+ // or a store without Ratings D1 tables (local development, the test harness) has a readable authoritative copy.
+ async function authorityState(env){
+  if(typeof RatingsD1==='undefined')return 'open';
+  try{
+   const db=env?.DB??(typeof env?.prepare==='function'?env:null);
+   const authority=await RatingsD1.readRatingsAuthority(db,env);
+   return authority.tables&&authority.cutover==='held'?'held':'open';
+  }catch{return 'unavailable';}
  }
- const pipelineOf=(migration,run)=>migration!=='complete'?'blocked':run?.isolation?'isolated':run?.state==='running'?'running':'idle';
- async function separateActive(env){return (await migrationState(env)).migration==='complete';}
+ async function storageState(env){
+  const authority=await authorityState(env);
+  if(authority!=='open')return {supported:false,authority,queueV2:false,cursorV2:false,queue:null,cursor:null};
+  const [queue,cursor]=await Promise.all([read(env,REMOVAL_LOOKUP_KEY),read(env,LetterboxdDiary.KEYS.state)]);
+  const queueV2=removalQueueV2(queue.value),cursorV2=LetterboxdDiary.cursorMigrated(cursor.value);
+  return {supported:queueV2&&cursorV2,authority,queueV2,cursorV2,queue:queue.value,cursor:cursor.value};
+ }
+ const storageOf=state=>({supported:state.supported,authority:state.authority,queueV2:state.queueV2,cursorV2:state.cursorV2});
+ const pipelineOf=(supported,run)=>!supported?'blocked':run?.isolation?'isolated':run?.state==='running'?'running':'idle';
 
  const leaseLive=(run,now)=>!!run?.lease?.step&&Date.parse(run.lease.expiresAt)>now;
  // A running record is stale when an active step's lease has expired (`interrupted`) or no step has begun or ended for
@@ -169,8 +180,8 @@ const LetterboxdRatings=(()=>{
  // ratings_sync_start. `busy` never hands out the running id; a stale record is closed first.
  async function start(env,{trigger,clearIsolation=false}={},now=Date.now()){
   const reply=(runId,created,nextAction,reason,extra={})=>({runId,created,nextAction,reason,...extra});
-  const state=await migrationState(env);
-  if(state.migration!=='complete')return reply(null,false,'stop','not_migrated',{migration:state.migration});
+  const state=await storageState(env);
+  if(!state.supported)return reply(null,false,'stop','storage_unsupported',{storage:storageOf(state)});
   let pointer=null;
   if(typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.currentGeneration==='function'){
    const live=await PublishedEpg.currentGeneration(env);
@@ -201,8 +212,8 @@ const LetterboxdRatings=(()=>{
  // drive it); `now` is the time the step begins.
  async function step(env,{runId}={},{now=Date.now(),clock=()=>Date.now()}={}){
   const reply=(run,nextAction,reason,extra={})=>({runId:run?.runId??null,state:run?.state??null,phase:run?.phase??null,nextAction,reason,nextCatchUpAt:null,step:null,summary:null,...extra});
-  const migration=(await migrationState(env)).migration;
-  if(migration!=='complete')return reply(null,'stop','not_migrated',{migration});
+  const storage=await storageState(env);
+  if(!storage.supported)return reply(null,'stop','storage_unsupported',{storage:storageOf(storage)});
   const stepId=crypto.randomUUID();
   let owned=null;
   for(let attempt=0;attempt<5&&!owned;attempt++){
@@ -439,7 +450,7 @@ const LetterboxdRatings=(()=>{
   const budget=STEP_LOOKUPS;
   const started=clock();
   let queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
-  if(!removalQueueV2(queue)){lookup.stoppedBy='queue_not_migrated';return finish({settled,lookup,more});}
+  if(!removalQueueV2(queue)){lookup.stoppedBy='queue_unsupported';return finish({settled,lookup,more});}
   if(queue.pausedUntil&&Date.parse(queue.pausedUntil)>started){lookup.stoppedBy=queue.pausedBy||'blocked';lookup.pausedUntil=queue.pausedUntil;return finish({settled,lookup,more});}
   const facts=await resolveDueRemovalFacts(env,started,{skip:run.diary?.unratedLids||[],limit:REMOVAL_FACT_BATCH,getBudget:budget,beforeEach:()=>remaining()>LEASE_MARGIN_MS});
   queue=facts.queue||queue;
@@ -464,39 +475,6 @@ const LetterboxdRatings=(()=>{
   return finish({settled,lookup,more});
  }
 
- // ratings_storage_migrate. `dry_run` writes nothing. `apply` converts the queue by one compare-and-swap, records it in
- // the witness, then gives the cursor its merge form by a second one and records that. Idempotent: an object already
- // migrated is reported `already`. Refused while a ratings run is running and not stale. No Letterboxd request.
- async function migrate(env,{mode}={},now=Date.now()){
-  const at=iso(now),run=(await read(env,KEYS.run)).value;
-  if(run?.state==='running'&&!staleness(run,now))return {mode,refused:'run_running',migration:(await migrationState(env)).migration};
-  const sync=await loadJSON(env,'sync.json'),handover=syncHandover(sync);
-  const queueReport=queue=>({entries:Object.keys(queue?.films||{}).length,legacy:Object.values(queue?.films||{}).filter(entry=>entry.legacy===true).length,refs:Object.values(queue?.films||{}).reduce((n,entry)=>n+(entry.refs||[]).length,0),unresolved:Object.values(queue?.films||{}).reduce((n,entry)=>n+removalUnresolvedRefs(entry),0)});
-  const cursorReport=cursor=>({coverage:cursor?.coverage||null,resumePage:cursor?.resumePage??null,lastAttemptAt:cursor?.lastAttemptAt??null});
-  const handoverReport={films:handover.reduce((n,item)=>n+item.films.length,0),withEvent:handover.filter(item=>item.ref).reduce((n,item)=>n+item.films.length,0)};
-  if(mode==='dry_run'){
-   const state=await migrationState(env);
-   return {mode,migration:state.migration,queue:{result:state.queueV2?'already':'would_migrate',...queueReport(state.queueV2?state.queue:migrateRemovalQueue(state.queue,handover,at)),before:{schemaVersion:state.queue?.schemaVersion??null,entries:Object.keys(state.queue?.films||{}).length},handover:handoverReport},cursor:{result:state.cursorV2?'already':'would_migrate',...cursorReport(state.cursor)},writes:0};
-  }
-  const witness=part=>mergeStoredJSON(env,KEYS.migration,{schemaVersion:1},current=>{if(current[part]?.migratedAt)return null;current[part]={migratedAt:at};return current;});
-  const convert=async(key,isMigrated,next)=>{
-   try{
-    for(let attempt=0;attempt<5;attempt++){
-     const {object,value}=await read(env,key);
-     if(isMigrated(value))return {result:'already',value};
-     const converted=next(value);
-     if(await put(env,key,object,converted)!==null)return {result:'migrated',value:converted};
-    }
-    return {result:'failed',error:'changed during migration'};
-   }catch(e){return {result:'failed',error:String(e.message).slice(0,160)};}
-  };
-  const queue=await convert(REMOVAL_LOOKUP_KEY,removalQueueV2,value=>migrateRemovalQueue(value,handover,at));
-  if(queue.result!=='failed')await witness('queue');
-  const cursor=queue.result==='failed'?{result:'failed',error:'queue not migrated'}:await convert(LetterboxdDiary.KEYS.state,LetterboxdDiary.cursorMigrated,value=>LetterboxdDiary.migrateCursor(value,MIGRATION_WRITER));
-  if(cursor.result!=='failed')await witness('cursor');
-  const state=await migrationState(env);
-  return {mode,migration:state.migration,queue:{result:queue.result,...(queue.error?{error:queue.error}:queueReport(queue.value)),handover:handoverReport},cursor:{result:cursor.result,...(cursor.error?{error:cursor.error}:cursorReport(cursor.value))}};
- }
  // A version 1 hand-over still in sync.json (`removalLookups`): films the saved watchlist event removed get that event
  // as their reference; any other film becomes a legacy entry.
  function syncHandover(sync){
@@ -520,11 +498,11 @@ const LetterboxdRatings=(()=>{
   return {lastFinishedAt:latest(runs.filter(item=>['finished','error'].includes(item.state))),lastSuccessAt:latest(runs.filter(item=>item.state==='finished'))};
  }
  async function status(env,now=Date.now()){
-  const [state,{value:run}]=await Promise.all([migrationState(env),read(env,KEYS.run)]);
+  const [state,{value:run}]=await Promise.all([storageState(env),read(env,KEYS.run)]);
   const queue=state.queue,entries=Object.values(queue?.films||{}),cursor=state.cursor;
-  return {contractVersion:CONTRACT_VERSION,switch:'separate',pipeline:pipelineOf(state.migration,run),migration:state.migration,...(state.regressed.length?{regressedObjects:state.regressed}:{}),
+  return {contractVersion:CONTRACT_VERSION,switch:'separate',pipeline:pipelineOf(state.supported,run),storage:storageOf(state),
    run:presentRun(run,now),
-   diary:{enabled:LetterboxdDiary.enabled(env),migrated:state.cursorV2,lastOutcome:cursor?.lastOutcome??null,stopReason:cursor?.stopReason??null,coverage:cursor?.coverage||null,historicalCoverage:cursor?.coverage?.window==='recent'?'incomplete':'unknown',overflowSuspected:cursor?.counts?.overflowSuspected===true,resumePage:cursor?.resumePage??null,lastAttemptAt:cursor?.lastAttemptAt??null,lastSuccessAt:cursor?.lastSuccessAt??null},
+   diary:{enabled:LetterboxdDiary.enabled(env),lastOutcome:cursor?.lastOutcome??null,stopReason:cursor?.stopReason??null,coverage:cursor?.coverage||null,historicalCoverage:cursor?.coverage?.window==='recent'?'incomplete':'unknown',overflowSuspected:cursor?.counts?.overflowSuspected===true,resumePage:cursor?.resumePage??null,lastAttemptAt:cursor?.lastAttemptAt??null,lastSuccessAt:cursor?.lastSuccessAt??null},
    removal:{schemaVersion:queue?.schemaVersion??null,lookupEnabled:true,entries:entries.length,pending:entries.filter(entry=>entry.state==='pending').length,unresolved:entries.reduce((n,entry)=>n+removalUnresolvedRefs(entry),0),unresolvedEntries:entries.filter(entry=>removalUnresolvedRefs(entry)>0).length,
     refIssues:Object.fromEntries(REMOVAL_REF_ISSUES.map(issue=>[issue,entries.reduce((n,entry)=>n+(entry.refs||[]).filter(ref=>ref.resolved!==true&&ref.issue===issue).length,0)])),
     legacy:entries.filter(entry=>entry.legacy===true).length,expired:entries.filter(entry=>entry.state==='expired').length,droppedRefs:queue?.droppedRefs||0,pausedUntil:queue?.pausedUntil&&Date.parse(queue.pausedUntil)>now?queue.pausedUntil:null},
@@ -547,8 +525,8 @@ const LetterboxdRatings=(()=>{
   return {...base,state:'ok',code:'ok'};
  }
  // The request contract shared by the HTTP routes and the MCP tools: a JSON object with only the listed fields.
- const FIELDS={start:{trigger:value=>value==='scheduled'||value==='manual',clearIsolation:value=>typeof value==='boolean'},step:{runId:value=>typeof value==='string'&&/^[A-Za-z0-9-]{1,80}$/.test(value)},migrate:{mode:value=>value==='dry_run'||value==='apply'}};
- const REQUIRED={start:['trigger'],step:['runId'],migrate:['mode']};
+ const FIELDS={start:{trigger:value=>value==='scheduled'||value==='manual',clearIsolation:value=>typeof value==='boolean'},step:{runId:value=>typeof value==='string'&&/^[A-Za-z0-9-]{1,80}$/.test(value)}};
+ const REQUIRED={start:['trigger'],step:['runId']};
  function validate(action,body){
   const fields=FIELDS[action];if(!fields)return 'Unknown action';
   if(!body||typeof body!=='object'||Array.isArray(body))return 'Invalid request';
@@ -559,12 +537,11 @@ const LetterboxdRatings=(()=>{
   return null;
  }
  // AIR-347: once the owner has closed admission or switched the domain to Cloudflare, the external writer path answers
- // `switch_in_progress` or `external_writer_fenced` and writes nothing (ADR 0089 decision 2). Reads and migrate are not gated.
+ // `switch_in_progress` or `external_writer_fenced` and writes nothing (ADR 0089 decision 2). Reads are not gated.
  async function fencedReply(env,action,body){
   const gate=typeof RatingsOrchestration==='undefined'?{reason:null,etag:null}:await RatingsOrchestration.externalGate(env,action,body);
   if(!gate.reason)return {fenceEnv:gate.fence?{...env,ratingsFence:gate.fence}:env};
   const reason=gate.reason;
-  if(action==='migrate')return {reply:{mode:body.mode,refused:reason,nextAction:'stop',reason}};
   return {reply:action==='start'?{runId:null,created:false,nextAction:'stop',reason}:{runId:body.runId,state:null,phase:null,nextAction:'stop',reason,nextCatchUpAt:null,step:null,summary:null}};
  }
  // The external writer's commits carry a soft epoch fence: the mode document's etag as read at admission. In D1 every commit
@@ -574,7 +551,7 @@ const LetterboxdRatings=(()=>{
   const error=validate(action,body);if(error)return {status:400,body:{error}};
   const gated=await fencedReply(env,action,body);if(gated.reply)return {status:200,body:gated.reply};
   const fe=gated.fenceEnv;
-  return {status:200,body:await (action==='start'?start(fe,body):action==='step'?step(fe,body):migrate(fe,body))};
+  return {status:200,body:await (action==='start'?start(fe,body):step(fe,body))};
  }
- return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,ratingsEventOf,reconcileEvent,mergeChanges,detailsOf,removalChangeFields,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
+ return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,ratingsEventOf,reconcileEvent,mergeChanges,detailsOf,removalChangeFields,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,storageState,staleness,start,step,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
 })();

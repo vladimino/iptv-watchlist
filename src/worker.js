@@ -1860,7 +1860,7 @@ async function sealFinalizeStep(env,run,deadline=Infinity){
   {name:'handover',phase:'finalize_handover',work:async()=>{
    const gate=await ratingsGate(env);
    if(gate.active){await flushRemovalHandover(env,run);delete run.ratingPending;run.ratingsPipeline='separate';}
-   else{delete run.ratingPending;run.ratingsPipeline='blocked';run.ratingsMigration=gate.migration;}
+   else{delete run.ratingPending;run.ratingsPipeline='blocked';run.ratingsStorage=gate.storage;}
    return 'ok';
   }},
   {name:'watchlist',phase:'finalize_watchlist',work:async()=>{await persistWatchlist(env,run,report);return 'ok';}},
@@ -1887,7 +1887,7 @@ async function sealQueueStep(env,run,deadline=Infinity){
  if(run.ratingsPipeline==='separate'&&run.removalRefs&&await watchlistEventStored(env,run)&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
  try{await env.BUCKET.delete(sealPayloadKey(run.runId));}catch{}
  try{await env.BUCKET.delete(sealPublicationKey(run.runId));}catch{}
- return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsMigration:run.ratingsMigration}:{}),...(run.sealDegraded?.length?{degraded:run.sealDegraded}:{})};
+ return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsStorage:run.ratingsStorage}:{}),...(run.sealDegraded?.length?{degraded:run.sealDegraded}:{})};
 }
 // One bounded step of the staged publication. It starts no unit of work after SEAL_REQUEST_BUDGET_MS from the request's entry and answers
 // `nextAction: continue` until the run is complete.
@@ -1924,18 +1924,18 @@ async function sealStep(env,run,entryAt=Date.now()){
   throw new Error('seal_phase_unknown');
  }finally{await releaseDiscoveryLease(env,lease);}
 }
-// ADR 0074: the ratings pipeline is permanently separate. It acts once ratings_storage_migrate has migrated the
-// queue and the Diary cursor. The EPG commit then hands the films its watchlist diff removed to the queue as
-// references to the removal event, durably and before it publishes, and does no ratings work: no Diary read, no fact
-// write, no lookup. The RATINGS_PIPELINE binding is ignored. While migration is none, partial or regressed the commit
-// still publishes and fails closed: it does not read Diary, look up films, enqueue or run the migration. It does record
-// `removalRefs` for the removal event it writes. A later blocked commit keeps every earlier reference and appends its
-// own, so watchlist advancement cannot drop them. Once migration is complete, the next step on the run and the next
-// sync start flush that list before sync.json is replaced. A version 1 `removalLookups` hand-over is flushed the same way.
+// ADR 0074, ADR 0161: the ratings pipeline is permanently separate. It works only on version 2 storage, the removal queue at
+// schema version 2 and the Diary cursor in its merge form. The EPG commit then hands the films its watchlist diff removed to the
+// queue as references to the removal event, durably and before it publishes, and does no ratings work: no Diary read, no fact
+// write, no lookup. The RATINGS_PIPELINE binding is ignored. On any other stored state the commit still publishes and fails
+// closed: it does not read Diary, look up films, enqueue or convert anything. It does record `removalRefs` for the removal event it
+// writes. A later blocked commit keeps every earlier reference and appends its own, so watchlist advancement cannot drop them.
+// Once the storage is supported, the next step on the run and the next sync start flush that list before sync.json is replaced.
+// A version 1 `removalLookups` hand-over is flushed the same way.
 async function ratingsGate(env){
- if(typeof LetterboxdRatings==='undefined')return {active:false,migration:'none'};
- const state=await LetterboxdRatings.migrationState(env);
- return {active:state.migration==='complete',migration:state.migration};
+ if(typeof LetterboxdRatings==='undefined')return {active:false,storage:'unsupported'};
+ const state=await LetterboxdRatings.storageState(env);
+ return {active:state.supported,storage:state.supported?'supported':state.authority&&state.authority!=='open'?'authority_'+state.authority:'unsupported'};
 }
 function removalHandoverRef(run){const event=(run?.events||[]).find(item=>item?.type==='watchlist');return event?.id&&Number.isFinite(Date.parse(event.at))?{eventKey:removalEventKey(event),sourceRunId:run.runId,at:event.at}:null;}
 // One saved hand-over is `{ref, films}`. Consecutive blocked commits store a list of those, one entry per removal event.
@@ -2005,8 +2005,8 @@ async function closeInterruptedRatings(env,run,now=Date.now()){
  run.ratingError=`Ratings step interrupted during ${phase}; no outcome recorded`;run.ratingError=run.ratingError.slice(0,300);delete run.ratingPending;
  await saveJSON(env,'sync.json',run);return run.ratingAttempt;
 }
-// ADR 0074: the EPG commit never reads Diary and never looks up films. Migrated storage enqueues removal references.
-// Any other migration state publishes the programme, keeps the removal references on the sync run and does not enqueue.
+// ADR 0074, ADR 0161: the EPG commit never reads Diary and never looks up films. Supported storage enqueues removal references.
+// Any other stored state publishes the programme, keeps the removal references on the sync run and does not enqueue.
 async function completeWithRatings(env,run,report){
  const gate=await ratingsGate(env);
  if(gate.active){
@@ -2015,9 +2015,9 @@ async function completeWithRatings(env,run,report){
   if(run.removalRefs&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
   return {...result,ratingsPipeline:'separate'};
  }
- delete run.ratingPending;run.ratingsPipeline='blocked';run.ratingsMigration=gate.migration;
+ delete run.ratingPending;run.ratingsPipeline='blocked';run.ratingsStorage=gate.storage;
  const result=await tracedPhase(run.runId,'finish_sync',()=>finishSync(env,run,report),()=>({films:report.films?.length??0}));
- return {...result,ratingsPipeline:'blocked',ratingsMigration:gate.migration};
+ return {...result,ratingsPipeline:'blocked',ratingsStorage:gate.storage};
 }
 async function epgOrchestrationOf(env){
  // AIR-348: the executor's read model. A pure read; an unreadable record is reported, never repaired.
@@ -2136,7 +2136,7 @@ async fetch(request,env,execution){
   if(url.pathname==='/api/monitor/test'&&request.method==='POST')return json(await Monitor.test(env));
   if(url.pathname==='/api/epg/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await EpgOrchestration.handle(env,body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/letterboxd/ratings/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await RatingsOrchestration.handle(env,body);return json(reply.body,reply.status);}
-  if(['/api/letterboxd/ratings/start','/api/letterboxd/ratings/step','/api/letterboxd/ratings/migrate'].includes(url.pathname)&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdRatings.handle(env,url.pathname.slice('/api/letterboxd/ratings/'.length),body);return json(reply.body,reply.status);}
+  if(['/api/letterboxd/ratings/start','/api/letterboxd/ratings/step'].includes(url.pathname)&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdRatings.handle(env,url.pathname.slice('/api/letterboxd/ratings/'.length),body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/events'&&request.method==='GET'){const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});

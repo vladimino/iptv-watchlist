@@ -8,17 +8,20 @@ sequenceDiagram
     actor Owner
     participant Sync as Worker sync pipeline
     participant LB as Letterboxd
-    participant R2 as Authoritative R2
+    participant D1 as Ratings D1 (queue and Diary cursor)
+    participant R2 as R2 (removal events, mirrors)
     participant Retired as Retired ratings refresh route
     Owner->>Sync: Authorized EPG/watchlist sync
     Sync->>LB: Fetch watchlist
     LB-->>Sync: Complete watchlist
-    alt Migration complete
-        Sync->>R2: Removal references, then the EPG generation, watchlist and events
+    Sync->>D1: Read the Ratings authority marker, the removal queue and the Diary cursor
+    alt Marker open (or no Ratings D1) and queue and cursor at schema version 2
+        Sync->>R2: Removal event
+        Sync->>D1: Removal references enqueued in the queue (compare-and-swap)
         Note over Sync,LB: No Diary read and no member-page lookup on this commit
-    else Migration none, partial or regressed
-        Sync->>R2: EPG generation, watchlist and events, ratings marked blocked
-        Note over Sync,R2: Fail closed: no Diary, no lookup, no enqueue, no migration
+    else Marker held or unreadable, or the queue or cursor is not at version 2
+        Sync->>R2: Removal event, ratings marked blocked, references kept on the sync run
+        Note over Sync,D1: Fail closed: no Diary, no lookup, no enqueue, no conversion, no read of stale R2 copies
     end
     Note over Sync,LB: Diary page 1 and member lookups belong to the ratings run
     Note over Sync,R2: A ratings failure is not an EPG failure
@@ -27,9 +30,9 @@ sequenceDiagram
     Note over Retired,R2: No Letterboxd request, no R2 read or write
 ```
 
-The EPG commit does not read Diary and does not look up films ([ADR 0074](../adr/0074-retire-ratings-pipeline-switch.md), Accepted 2026-11-01). When the ratings storage migration is complete it enqueues the removed films as references to their removal event and publishes. When migration is `none`, `partial` or `regressed` it still publishes, writes the removal event and keeps `removalRefs` on the sync run, including references from earlier blocked commits. It does not enqueue, and it does not run the migration. `RATINGS_PIPELINE` is ignored. Before the removal event is written, the commit reads the confirmed ratings the fact store already holds for the removed films (a bounded read of stored facts, [evidence](../evidence/watchlist-removal-ratings-air-379-2026-11-10.md)) so a film rated earlier shows its rating at the first display; it still makes no Diary or Letterboxd request and never waits for the Ratings run.
+The EPG commit does not read Diary and does not look up films ([ADR 0074](../adr/0074-retire-ratings-pipeline-switch.md), Accepted 2026-11-01). On supported storage (the removal queue at schema version 2 and the Diary cursor in its merge form, [ADR 0161](../adr/0161-retire-ratings-storage-migration.md)) it enqueues the removed films as references to their removal event and publishes. When the Ratings D1 authority marker is held or unreadable, or the stored state is not that form, it still publishes, writes the removal event and keeps `removalRefs` on the sync run, including references from earlier blocked commits. It does not enqueue, and nothing in the Worker converts the storage. `RATINGS_PIPELINE` is ignored. Before the removal event is written, the commit reads the confirmed ratings the fact store already holds for the removed films (a bounded read of stored facts, [evidence](../evidence/watchlist-removal-ratings-air-379-2026-11-10.md)) so a film rated earlier shows its rating at the first display; it still makes no Diary or Letterboxd request and never waits for the Ratings run.
 
-Diary page 1 and the member-page lookups run on the separate ratings run ([scheduling](scheduling-and-orchestration.md#the-separate-ratings-pipeline), [contract](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline)). The Diary phase is the viewing history of [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md). On a migrated run it always reads the first diary page only ([ADR 0067](../adr/0067-diary-recent-window.md)); `LETTERBOXD_DIARY_HISTORY` is retired and unread ([ADR 0075](../adr/0075-retire-letterboxd-diary-history-switch.md), Accepted 2026-11-01). Every film on that page becomes a watched fact, and a rating fact where the page shows a rating. The removal lookup of [ADR 0043](../adr/0043-removal-rating-lookup-queue.md) runs on that same run for films the Diary did not rate. A confirmed stored rating for a film the current Diary page did not list is not requested again, including after a new removal reference reopens the entry. A film that page lists without a rating is still looked up. A null or absent rating is not watched. `REMOVAL_RATING_LOOKUP` is retired and unread ([ADR 0077](../adr/0077-retire-removal-rating-lookup-switch.md), Proposed 2026-11-01). A rated legacy entry is linked to existing removal events of the same film id by that run, one page of `events/items/` per removal step ([ADR 0071](../adr/0071-legacy-removal-event-link.md), Accepted 2026-10-31). The EPG commit does not list those events. The 31-page public films list is not scanned.
+Diary page 1 and the member-page lookups run on the separate ratings run ([scheduling](scheduling-and-orchestration.md#the-separate-ratings-pipeline), [contract](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline)). The Diary phase is the viewing history of [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md). On a run it always reads the first diary page only ([ADR 0067](../adr/0067-diary-recent-window.md)); `LETTERBOXD_DIARY_HISTORY` is retired and unread ([ADR 0075](../adr/0075-retire-letterboxd-diary-history-switch.md), Accepted 2026-11-01). Every film on that page becomes a watched fact, and a rating fact where the page shows a rating. The removal lookup of [ADR 0043](../adr/0043-removal-rating-lookup-queue.md) runs on that same run for films the Diary did not rate. A confirmed stored rating for a film the current Diary page did not list is not requested again, including after a new removal reference reopens the entry. A film that page lists without a rating is still looked up. A null or absent rating is not watched. `REMOVAL_RATING_LOOKUP` is retired and unread ([ADR 0077](../adr/0077-retire-removal-rating-lookup-switch.md), Proposed 2026-11-01). A rated legacy entry is linked to existing removal events of the same film id by that run, one page of `events/items/` per removal step ([ADR 0071](../adr/0071-legacy-removal-event-link.md), Accepted 2026-10-31). The EPG commit does not list those events. The 31-page public films list is not scanned.
 
 The owner-triggered `POST /api/enrichment/ratings/refresh` of AIR-64 is **retired** ([ADR 0040](../adr/0040-retire-ratings-only-refresh.md)): it answers `410 Gone` before it parses the body, so no value of `RATINGS_REFRESH` opens it, and it neither calls Letterboxd nor touches R2. Ratings reach the view index through the EPG commit shown above, the per-film lookup and the owner edit. The objects the refresh wrote under `enrichment/ratings/` stay in R2 untouched, and `GET /api/enrichment/ratings/status` still reads them; `enabled` is always `false`. Writers of `enrichment/view-index.json` keep their ETag retries.
 

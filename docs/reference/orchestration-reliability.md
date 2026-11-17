@@ -261,7 +261,7 @@ Each domain moves alone: inert code with mode `external`; an owner-approved thre
 
 ## EPG diagnostic canary (retired)
 
-The canary modules, routes, receipt table and replay datasets described here before AIR-521 no longer exist: [ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md) detached the runtime and [ADR 0160](../adr/0160-delete-epg-diagnostic-canary-code.md) deleted the code. The historical contracts remain in [ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](../adr/0124-epg-diagnostic-canary-run-contract.md), [ADR 0139](../adr/0139-epg-diagnostic-chunked-replay-dataset.md) and the dated [evidence](../evidence/orchestration/epg-diagnostic-retirement-air-457-2026-11-17.md); they are not a runtime contract.
+The canary modules, routes, receipt table and replay datasets described here before AIR-521 no longer exist: [ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md) detached the runtime and [ADR 0161](../adr/0160-delete-epg-diagnostic-canary-code.md) deleted the code. The historical contracts remain in [ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](../adr/0124-epg-diagnostic-canary-run-contract.md), [ADR 0139](../adr/0139-epg-diagnostic-chunked-replay-dataset.md) and the dated [evidence](../evidence/orchestration/epg-diagnostic-retirement-air-457-2026-11-17.md); they are not a runtime contract.
 
 ## Ratings implementation status (AIR-347)
 

@@ -1,6 +1,6 @@
 # ADR 0139: EPG diagnostic replay dataset as a chunked manifest with content-addressed parts
 
-**Status:** Accepted, **historical since 2026-11-17: the canary was abandoned and its code deleted ([ADR 0160](0160-delete-epg-diagnostic-canary-code.md)); the design is no longer a contract of any code** (original: architecture only; explicit owner approval on [AIR-470](https://trello.com/c/jSOVQGBH), 2026-11-14; Path A feasibility remains unproven; no runtime or production GO)  
+**Status:** Accepted, **historical since 2026-11-17: the canary was abandoned and its code deleted ([ADR 0161](0160-delete-epg-diagnostic-canary-code.md)); the design is no longer a contract of any code** (original: architecture only; explicit owner approval on [AIR-470](https://trello.com/c/jSOVQGBH), 2026-11-14; Path A feasibility remains unproven; no runtime or production GO)  
 **Original decision date:** 2026-11-14  
 **Recorded at:** 2026-11-14  
 **Approval source:** [AIR-470](https://trello.com/c/jSOVQGBH), explicit owner approval recorded on 2026-11-14 after architectural walkthrough and exact-HEAD review of [PR #613](https://github.com/vladimino/iptv-watchlist/pull/613).  
