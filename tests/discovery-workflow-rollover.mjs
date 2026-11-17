@@ -1,4 +1,4 @@
-// AIR-524 / ADR 0162: the controlled Discovery Workflow rollover onto the deployed Worker version. The preflight writes nothing; an apply swaps
+// AIR-524 / ADR 0164: the controlled Discovery Workflow rollover onto the deployed Worker version. The preflight writes nothing; an apply swaps
 // the executor record by compare-and-swap only while the owner is provably asleep, creates exactly one deterministic successor of the same
 // generation, carries the report, the outbox and the continuation untouched, and reads back. Concurrent operator calls, the cron reconcile, the
 // old instance's own natural rollover and a woken old instance all resolve through the existing owner gate and CAS. No production binding is used.
@@ -44,17 +44,27 @@ const instance=(series,run=GENERATION)=>`discovery_${run.replace(/-/g,'')}_${ser
 const OLD=instance(0),NEXT=instance(1);
 const STATE='epg/discovery-workflow.json',CONT='epg/resolver-continuation.json',LEASE='epg/resolver-lease.json',STATUS='epg/discovery-status.json';
 
-let gates,authority,published,writeFault=null;
+let gates,authority,published,writeFault=null,swapCalls=0;
 function armAuthority(){
  context.DiscoveryAuthority={
   ownsKey:()=>false,
   readAuthority:async()=>authority,
   readWorkflow:async()=>({handled:false}),
-  writeWorkflow:async()=>{if(writeFault){const fault=writeFault;writeFault=null;throw fault;}return {handled:false,saved:false};},
+  // Routine record writes take the R2 path of the in-memory store. The rollover swap passes the generation pin and is routed like the D1 writer:
+  // the pin is checked against the CURRENT authority and published pointer in the same step as the revision compare-and-swap.
+  writeWorkflow:async(_env,record,etag,options)=>{
+   if(writeFault){const fault=writeFault;writeFault=null;throw fault;}
+   if(options?.expectedProgrammeRunId===undefined)return {handled:false,saved:false};
+   swapCalls++;
+   const pin=options.expectedProgrammeRunId;
+   if(authority.programmeRunId!==pin||authority.publishedProgrammeRunId!==pin||published!==pin)return {handled:true,saved:false,stale:true};
+   const saved=await bucket.put(STATE,JSON.stringify(record),{onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'}});
+   return {handled:true,saved:saved!==null};
+  },
   routeRead:async()=>({handled:false}),routeWrite:async()=>({handled:false}),
   readContinuation:async()=>({handled:false}),writeContinuation:async()=>({handled:false}),
   readLease:async()=>({handled:false}),releaseLease:async()=>({handled:false}),
-  readDiscoveryGates:async()=>structuredClone(gates),
+  readDiscoveryGates:async()=>({...structuredClone(gates),programmeRunId:authority.programmeRunId,publishedProgrammeRunId:authority.publishedProgrammeRunId}),
  };
  context.PublishedEpg={currentGeneration:async()=>published?{authority:'d1',programmeRunId:published,phase:'published',generation:7}:null};
 }
@@ -269,6 +279,34 @@ seed();
 const names=[];
 await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},{async do(name,fn){names.push(name);if(name.startsWith('owner'))throw new Error('halt');return fn();},async sleepUntil(){}}),/halt/);
 assert.deepEqual(names,['version','owner-0']);
+
+// AIR-524 review P1: a publication between the preflight and the swap. The executor record and its revision are untouched, so the revision CAS alone
+// would pass; the generation pin inside the same write refuses it. No swap, no create, report and continuation unchanged.
+for(const move of [
+ ()=>{published=OTHER;authority={...authority,programmeRunId:OTHER,publishedProgrammeRunId:OTHER};},
+ ()=>{published=OTHER;},
+ ()=>{authority={...authority,publishedProgrammeRunId:OTHER};},
+]){
+ seed();
+ const recordBefore=snapshot(),stateEtag=etags.get(STATE);
+ call('discoveryRolloverFacts=async(env)=>{const facts=await globalThis.__realFacts(env);globalThis.__publish();return facts;}');
+ context.__publish=move;
+ try{reply=await tool(pins());}finally{call('discoveryRolloverFacts=globalThis.__realFacts');}
+ assert.equal(reply.body.ok,false);assert.equal(reply.body.reason,'stale_generation',JSON.stringify(reply.body));assert.equal(reply.body.writes,0);
+ assert.equal(snapshot(),recordBefore,'no ownership swap, report or continuation change');assert.equal(etags.get(STATE),stateEtag);assert.equal(creates.length,0);
+ // After that publication the ordinary reconcile resolves to the current generation: a new series-0 instance of the new run, never the old run's successor.
+ published=OTHER;authority={...authority,programmeRunId:OTHER,publishedProgrammeRunId:OTHER};
+ reconciled=await call('reconcileDiscoveryWorkflow')(env,{});
+ assert.ok(!creates.some(item=>item.id===NEXT),'no successor of the old run');
+ assert.deepEqual(creates.map(item=>item.id),[instance(0,OTHER)],JSON.stringify(reconciled));assert.equal(records.get(STATE).programmeRunId,OTHER);
+}
+// The swap never falls back to the R2 executor object: an authority that stops routing it refuses.
+seed();before=snapshot();
+context.DiscoveryAuthority.writeWorkflow=async()=>({handled:false,saved:false});
+reply=await tool(pins());assert.equal(reply.body.reason,'authority_not_ready');assert.equal(snapshot(),before);assert.equal(creates.length,0);
+// A Discovery programme that differs from the published pin is a handoff in progress: unsafe in the preflight.
+seed();authority={...authority,programmeRunId:OTHER};
+reply=await tool({mode:'dry_run'});assert.equal(reply.body.decision,'unsafe');assert.ok(reply.body.blockers.includes('generation_handoff'));
 
 // 13. A swap whose answer is lost but which was stored is this request's own swap (an uncertain write): it proceeds to the one create.
 seed();

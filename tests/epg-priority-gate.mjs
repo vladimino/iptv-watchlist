@@ -535,9 +535,10 @@ assert.equal(DISCOVERY_EPG_PRIORITY_POLL_MS,60000);
 }
 
 Date.now=realNow;
-// AIR-524 (ADR 0162). `readDiscoveryGates`, the read-only gate picture of the controlled Workflow rollover preflight, judges the pause and the window
+// AIR-524 (ADR 0164). `readDiscoveryGates`, the read-only gate picture of the controlled Workflow rollover preflight, judges the pause and the window
 // exactly as the writers would, and writes nothing: no generation move, no row change.
 {
+ Date.now=()=>clock;
  const {db}=armed();
  const env=envFor(db);
  at(D2,10,0);
@@ -561,4 +562,40 @@ Date.now=realNow;
  assert.equal(inert.priority.present,false);assert.equal(inert.priority.paused,false);assert.equal(inert.priority.reason,'inert');
 }
 
+// AIR-524 review P1 (ADR 0164). The controlled rollover's swap pins the generation inside the same batch as the executor-record compare-and-swap. A publication
+// between the operator's read and its write moves the Discovery pin and the published pointer but not the executor row: the revision CAS alone would pass, the
+// pin refuses it. Nothing is written (row, revision, authority generation), and routine writes without the option are unchanged.
+{
+ Date.now=()=>clock;
+ const {db}=armed();
+ const env=envFor(db);
+ at(D2,10,0);
+ assert.equal((await Authority.writeWorkflow(env,{schemaVersion:1,instanceId:'discovery_run1_0',programmeRunId:'run-1',series:0,phase:'waiting'},undefined)).saved,true);
+ const read=await Authority.readWorkflow(env);
+ const workflowRow=()=>({...db.sql('SELECT revision, instance_id AS instanceId, programme_run_id AS programmeRunId, series, payload_json AS payload FROM discovery_workflow WHERE id=1')[0]});
+ const swap={schemaVersion:1,instanceId:'discovery_run1_1',programmeRunId:'run-1',series:1,phase:'starting'};
+ for(const publish of [
+  ()=>setPointer(db,'run-2',D2),
+  ()=>db.sql("UPDATE published_epg_authority SET programme_run_id='run-2' WHERE id=1"),
+  ()=>db.sql("UPDATE discovery_authority SET published_programme_run_id='run-2' WHERE id=1"),
+  ()=>db.sql("UPDATE discovery_authority SET programme_run_id='run-2' WHERE id=1"),
+ ]){
+  setPointer(db,'run-1',D1);
+  const rowBefore=workflowRow(),generationBefore=generation(db);
+  publish();
+  // Refused either by the generation pin (`stale`) or, where the move leaves a publication not handed off, by the pause itself inside the same
+  // statement (a typed `discovery_epg_priority`): both are zero-write refusals of the swap.
+  let answer;try{answer=await Authority.writeWorkflow(env,swap,read.etag,{expectedProgrammeRunId:'run-1'});}catch(error){assert.equal(error.code,'discovery_epg_priority');answer={saved:false,stale:true,priority:true};}
+  assert.deepEqual({saved:answer.saved,stale:answer.stale},{saved:false,stale:true});
+  assert.deepEqual(workflowRow(),rowBefore,'no ownership swap');assert.equal(generation(db),generationBefore,'no generation move');
+ }
+ setPointer(db,'run-1',D1);
+ assert.equal((await Authority.writeWorkflow(env,swap,'d1:workflow:999',{expectedProgrammeRunId:'run-1'})).stale,undefined,'a lost revision CAS with the generation in place is not stale');
+ assert.equal((await Authority.writeWorkflow(env,swap,read.etag,{expectedProgrammeRunId:''})).stale,true,'an empty pin never writes');
+ const pinned=await Authority.writeWorkflow(env,swap,read.etag,{expectedProgrammeRunId:'run-1'});
+ assert.equal(pinned.saved,true);assert.equal(workflowRow().instanceId,'discovery_run1_1');
+ // A routine write passes no option, so its statement carries no pin and is byte-for-byte the earlier one (covered by every other block here).
+}
+
+Date.now=realNow;
 console.log('epg priority gate ok');

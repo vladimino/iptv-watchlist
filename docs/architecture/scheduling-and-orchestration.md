@@ -384,7 +384,7 @@ The hourly cron calls `RatingsOrchestration.ensure` in the same `allSettled` as 
 
 A Discovery Workflow instance hands over to a successor at 20 chunks or when the D1 statements it has issued reach 6,000, whichever comes first, so no instance runs into the level at which two instances failed on 6 November 2026. The durable steps, the owner fence and the recovery are those of [ADR 0083](../adr/0083-inert-discovery-workflow.md); no diagram changes.
 
-## Controlled Discovery Workflow rollover ([ADR 0162](../adr/0162-controlled-discovery-workflow-rollover.md), Proposed)
+## Controlled Discovery Workflow rollover ([ADR 0164](../adr/0164-controlled-discovery-workflow-rollover.md), Accepted)
 
 An instance keeps the Worker version it was created on until its own handover. The owner can move Discovery onto the deployed version earlier with the owner-only MCP tool `discovery_workflow_rollover` ([runbook](../runbooks/discovery-workflow-rollover.md)). It is never called by the cron, a Workflow schedule or a Scheduled Task. The only ownership change is one compare-and-swap of the executor record, admitted only while the owner sleeps durably; the old instance then fails its own owner gate when it wakes. A create that cannot be confirmed is recovered by the hourly reconcile under the same deterministic id.
 
@@ -406,10 +406,10 @@ sequenceDiagram
     Note over Op,D1: dry_run writes nothing
     Owner->>Op: apply with confirmGo, requestId and the expect pins
     Op->>D1: Same reads again, pins and eligibility re-checked
-    alt Not eligible, stale pin or refused write
+    alt Not eligible, stale pin, generation moved or refused write
         Op-->>Owner: Refusal, writes 0
     else Eligible
-        Op->>D1: One CAS on the record revision: successor named, phase starting, report, outbox and receipt carried
+        Op->>D1: One CAS on the record revision, pinned to the published generation: successor named, phase starting, report, outbox and receipt carried
         Op->>CF: Create discovery_generation_series+1
         alt Created or already exists
             Op->>D1: Settle running while still starting for that id

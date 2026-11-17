@@ -353,7 +353,7 @@ function workflowStepRecoverable(error,hint){
 function logWorkflowFailure(step,error,meter,total){
  try{console.error(JSON.stringify({event:'discovery_workflow_step_failed',step:String(step).replace(/[^a-z-]/g,'').slice(0,24),code:workflowFailureCode(error),name:workflowFailureName(error),class:workflowFailureClass(error),causeName:workflowFailureName(error?.cause),causeClass:workflowFailureClass(error?.cause),statements:meter?.statements??null,batches:meter?.batches??null,instanceStatements:Number.isFinite(total)?total:null}));}catch{}
 }
-// AIR-524 (ADR 0162). The Worker version this code runs as, from the version metadata binding; null when the binding is absent. Inside a Workflow
+// AIR-524 (ADR 0164). The Worker version this code runs as, from the version metadata binding; null when the binding is absent. Inside a Workflow
 // instance it is the version that instance runs on, which is what a controlled rollover compares with the deployed version.
 function discoveryWorkerVersion(env){
  try{const id=env?.CF_VERSION_METADATA?.id;return typeof id==='string'&&/^[0-9A-Za-z-]{1,64}$/.test(id)?id:null;}catch{return null;}
@@ -734,7 +734,7 @@ async function armStepFailureRecovery(env,ownId,series,pinned,chunks){
  }
  return {armed:false,reason:'write_conflict'};
 }
-// AIR-524 (ADR 0162). Controlled rollover of the Discovery Workflow onto the deployed Worker version. An existing instance keeps running the
+// AIR-524 (ADR 0164). Controlled rollover of the Discovery Workflow onto the deployed Worker version. An existing instance keeps running the
 // version it was created on until its own natural rollover (instance_limit, invocation_budget). This owner-only operator, reached only through the
 // MCP tool `discovery_workflow_rollover` (Cloudflare Access JWT on /mcp), hands the executor record to the deterministic successor (series + 1) of
 // the SAME generation, using the record's own compare-and-swap, the only place ownership lives. It is admitted only while the owner is provably
@@ -752,6 +752,22 @@ const DISCOVERY_ROLLOVER_UNKNOWN_ADMISSION=new Set(['d1_unavailable','workflow_u
 const rolloverString=(value,max=80)=>typeof value==='string'&&value?value.slice(0,max):null;
 const rolloverRevision=etag=>{const text=String(etag??'').replace(/^d1:(workflow:)?/,'');return /^\d+$/.test(text)?Number(text):null;};
 // Every fact the decision needs, read only. Nothing here writes; an unreadable source is named in `unreadable` and never guessed.
+// The swap itself. Only through the D1 executor record, never the R2 fallback, and always with the generation pin: the statement that commits the
+// compare-and-swap also requires the Discovery programme, the Discovery pin and the published EPG pointer to name `programmeRunId` (ADR 0164).
+async function writeRolloverSwap(env,record,etag,programmeRunId){
+ if(typeof DiscoveryAuthority==='undefined'||typeof DiscoveryAuthority.writeWorkflow!=='function')return {saved:false,reason:'authority_not_ready'};
+ try{
+  const routed=await DiscoveryAuthority.writeWorkflow(env,record,etag,{expectedProgrammeRunId:programmeRunId});
+  if(!routed?.handled)return {saved:false,reason:'authority_not_ready'};
+  if(routed.saved===true)return {saved:true,reason:null};
+  return {saved:false,reason:routed.stale===true?'stale_generation':'write_conflict'};
+ }catch(error){
+  if(error?.code==='discovery_window')return {saved:false,reason:'projector_window',windowUntil:error.window?.expiresAt??null};
+  if(error?.code==='discovery_epg_priority')return {saved:false,reason:'epg_priority',windowUntil:priorityWindow(error).expiresAt};
+  if(error?.code==='discovery_fence')return {saved:false,reason:'authority_held'};
+  throw error;
+ }
+}
 async function discoveryRolloverFacts(env,now=Date.now()){
  const facts={now,deployedVersionId:discoveryWorkerVersion(env),unreadable:[],state:null,record:null,continuation:null,continuationEtag:null,status:null,lease:null,gates:null,published:null,liveness:null};
  let admitted;
@@ -807,6 +823,7 @@ function discoveryRolloverDecision(facts){
  if(gates){
   if(gates.window?.active===null||gates.window?.state==='unknown')unknowns.push('projector_window_unreadable');
   else if(gates.window?.active===true)blockers.push('projector_window');
+  if(facts.programmeRunId&&(gates.programmeRunId!==undefined||gates.publishedProgrammeRunId!==undefined)&&(gates.programmeRunId!==facts.programmeRunId||gates.publishedProgrammeRunId!==facts.programmeRunId))blockers.push('generation_handoff');
   if(gates.priority?.paused===null||gates.priority?.unreadable===true)unknowns.push('epg_priority_unreadable');
   else if(gates.priority?.paused===true)blockers.push('epg_priority');
  }
@@ -912,9 +929,8 @@ async function discoveryWorkflowRollover(env,args={}){
  const receipt={requestId,programmeRunId:pinned,fromInstanceId:record.instanceId,fromSeries:record.series,fromVersionId:record.versionId||null,toInstanceId,toSeries:series,deployedVersionId:facts.deployedVersionId,requestedAt:at,checkpoint:{etag:facts.continuationEtag??null,revision:rolloverRevision(facts.continuationEtag),hopId:facts.continuation?.hopId??null}};
  const next={schemaVersion:1,...(record.report?{report:record.report}:{}),...(Array.isArray(record.outbox)?{outbox:record.outbox}:{}),rollover:receipt,programmeRunId:pinned,series,instanceId:toInstanceId,phase:'starting',updatedAt:at,waitingUntil:null,reason:'rollover',chunksThisInstance:0,lastProgress:null,recovery:null,versionId:null,createdVersionId:facts.deployedVersionId};
  // The swap: one compare-and-swap of the executor record against the exact revision the decision was made on.
- const written=await writeWorkflowStateSoft(env,next,facts.state.etag);
- if(written.windowBusy)return refuse(409,'projector_window',{windowUntil:written.window?.expiresAt??null});
- if(written.priorityBusy)return refuse(409,'epg_priority',{windowUntil:written.window?.expiresAt??null});
+ const written=await writeRolloverSwap(env,next,facts.state.etag,pinned);
+ if(['projector_window','epg_priority','stale_generation','authority_not_ready','authority_held'].includes(written.reason))return refuse(409,written.reason,written.windowUntil!==undefined?{windowUntil:written.windowUntil}:{});
  if(!written.saved){
   let after=null;try{after=(await readWorkflowState(env)).record;}catch{}
   // A swap that reports a refusal but is found stored (an uncertain answer) is this request's swap; anything else changed the record first.
@@ -1024,7 +1040,7 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
   }
   return {stopped:true,reason:'recovery_waiting',chunks,instanceId:ownId};
  };
- // AIR-524 (ADR 0162). The instance records the Worker version it runs on, once, as soon as it owns the record, so a controlled rollover's readback can
+ // AIR-524 (ADR 0164). The instance records the Worker version it runs on, once, as soon as it owns the record, so a controlled rollover's readback can
  // prove the successor runs the deployed version without waiting for its first checkpoint. Best effort: a refused or lost write changes nothing, and every
  // later checkpoint carries the same field. It never takes ownership: it writes only while the record already names this instance and series.
  const ownVersion=discoveryWorkerVersion(rawEnv)?{versionId:discoveryWorkerVersion(rawEnv)}:{};
