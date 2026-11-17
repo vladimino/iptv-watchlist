@@ -29,16 +29,16 @@ function setup(extra={}){
  };
  return {clock,net,bucket,ctx,env,http,mcp,R:g(ctx,'LetterboxdRatings')};
 }
-const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/start',STEP='/api/letterboxd/ratings/step',MIGRATE='/api/letterboxd/ratings/migrate';
+const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/start',STEP='/api/letterboxd/ratings/step',RETIRED='/api/letterboxd/ratings/migrate';
 
-// 1. HTTP with the binding absent, inline, invalid or separate, and storage unmigrated: the status reads switch
-// separate and pipeline blocked; start and step answer not_migrated and write nothing.
+// 1. HTTP with the binding absent, inline, invalid or separate, and unsupported storage: the status reads switch
+// separate and pipeline blocked; start and step answer storage_unsupported and write nothing.
 for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'},{RATINGS_PIPELINE:'separate'}]){
  const {bucket,http,net}=setup(extra);
  const status=await http(STATUS,'GET');
- assert.equal(status.status,200);eq([status.body.switch,status.body.pipeline,status.body.migration,status.body.sideEffects],['separate','blocked','none','none'],JSON.stringify(extra));
- eq((await http(START,'POST',{trigger:'manual'})).body,{runId:null,created:false,nextAction:'stop',reason:'not_migrated',migration:'none'});
- assert.equal((await http(STEP,'POST',{runId:'00000000-0000-4000-8000-000000000001'})).body.reason,'not_migrated');
+ assert.equal(status.status,200);eq([status.body.switch,status.body.pipeline,status.body.storage,status.body.sideEffects],['separate','blocked',{supported:false,authority:'open',queueV2:false,cursorV2:false},'none'],JSON.stringify(extra));
+ eq((await http(START,'POST',{trigger:'manual'})).body,{runId:null,created:false,nextAction:'stop',reason:'storage_unsupported',storage:{supported:false,authority:'open',queueV2:false,cursorV2:false}});
+ assert.equal((await http(STEP,'POST',{runId:'00000000-0000-4000-8000-000000000001'})).body.reason,'storage_unsupported');
  assert.equal(bucket.writes().length,0);assert.equal(net.fetches.length,0);
 }
 
@@ -46,15 +46,17 @@ for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'}
 {
  const {bucket,http}=setup(SEPARATE);
  const bad=[[START,'{'],[START,[]],[START,'null'],[START,{}],[START,{trigger:'cron'}],[START,{trigger:'manual',clearIsolation:'yes'}],[START,{trigger:'scheduled',clearIsolation:true}],[START,{trigger:'manual',runId:'x'}],
-  [STEP,{}],[STEP,{runId:'../sync.json'}],[STEP,{runId:'a'.repeat(81)}],[STEP,{runId:1}],[STEP,{runId:'x',limit:5}],[MIGRATE,{}],[MIGRATE,{mode:'force'}],[MIGRATE,{mode:'apply',key:'x'}]];
+  [STEP,{}],[STEP,{runId:'../sync.json'}],[STEP,{runId:'a'.repeat(81)}],[STEP,{runId:1}],[STEP,{runId:'x',limit:5}]];
  for(const [path,body] of bad){const reply=await http(path,'POST',body);assert.equal(reply.status,400,path+' '+JSON.stringify(body));assert.equal(typeof reply.body.error,'string');}
  assert.equal(bucket.log.length,0,'a malformed request reads and writes nothing');
  assert.equal((await http(START,'POST',{trigger:'manual'},{Origin:'https://evil.example'})).status,403);
  assert.equal((await http(START,'GET')).status,404);assert.equal((await http(STATUS,'POST',{})).status,404);
+ // The retired conversion route is gone (ADR 0161): the dispatcher answers its common 404 and reads or writes nothing.
+ for(const body of [{mode:'apply'},{mode:'dry_run'},{}])assert.equal((await http(RETIRED,'POST',body)).status,404,RETIRED+JSON.stringify(body));
  assert.equal(bucket.writes().length,0);
 }
 
-// 3. HTTP under separate with migrated storage: a run, a mismatched run, a GET status that writes nothing even with a
+// 3. HTTP under separate with supported storage: a run, a mismatched run, a GET status that writes nothing even with a
 // stale run in storage, and a second scheduled start immediately after a finished one.
 {
  const {bucket,http,net,clock,R,env}=setup(SEPARATE);
@@ -70,18 +72,15 @@ for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'}
  const writes=bucket.writes().length,fetches=net.fetches.length;
  for(let i=0;i<3;i++){const status=await http(STATUS,'GET');assert.equal(status.body.run.stale,'interrupted');assert.equal(status.body.pipeline,'running');}
  assert.equal(bucket.writes().length,writes,'GET status writes nothing');assert.equal(net.fetches.length,fetches,'and requests nothing');
- const dry=await http(MIGRATE,'POST',{mode:'dry_run'});
- eq([dry.status,dry.body.queue.result,dry.body.cursor.result],[200,'already','already']);
- assert.equal(bucket.writes().length,writes,'dry_run writes nothing');
 }
 
-// 4. MCP: four tools with their annotations and closed schemas; owner-only through the signed Access JWT; the same
+// 4. MCP: three tools with their annotations and closed schemas; owner-only through the signed Access JWT; the same
 // bodies as HTTP; argument errors are tool errors that write nothing.
 {
  const {bucket,mcp,http}=setup(SEPARATE);
  const list=(await mcp('tools/list')).body.result.tools;
  const tools=Object.fromEntries(list.filter(tool=>tool.name.startsWith('ratings_')).map(tool=>[tool.name,tool]));
- eq(Object.keys(tools),['ratings_sync_status','ratings_sync_start','ratings_sync_step','ratings_storage_migrate']);
+ eq(Object.keys(tools),['ratings_sync_status','ratings_sync_start','ratings_sync_step']);
  eq(tools.ratings_sync_status.annotations,{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false});
  eq([tools.ratings_sync_start.annotations.readOnlyHint,tools.ratings_sync_start.annotations.openWorldHint],[false,false]);
  eq([tools.ratings_sync_step.annotations.readOnlyHint,tools.ratings_sync_step.annotations.openWorldHint],[false,true]);
@@ -91,27 +90,25 @@ for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'}
  assert.match(tools.ratings_sync_step.description,/does not list events on a step with nothing left to link/);
  assert.doesNotMatch(tools.ratings_sync_step.description,/3 Diary pages|9 per run/);
  assert.doesNotMatch(tools.ratings_sync_start.description,/too_soon|nextStartAt/);
- eq([tools.ratings_storage_migrate.annotations.readOnlyHint,tools.ratings_storage_migrate.annotations.destructiveHint],[false,false]);
  for(const tool of Object.values(tools)){assert.equal(tool.inputSchema.additionalProperties,false);assert.doesNotMatch(JSON.stringify(tool.inputSchema.properties),/"url"|"key"|"path"|"prefix"|"bucket"|"limit"|"page"/,tool.name);}
- eq(tools.ratings_storage_migrate.inputSchema.properties.mode.enum,['dry_run','apply']);
  // Without a valid Access JWT nothing is read or written.
  for(const assertion of [null,'not-a-jwt',token.slice(0,-4)+'AAAA']){
   const reply=await mcp('ratings_sync_status',{},assertion);
   assert.ok(reply.status===401||reply.status===403,'rejected without a valid JWT');
-  assert.equal((await mcp('ratings_storage_migrate',{mode:'apply'},assertion)).status>=401,true);
  }
  assert.equal(bucket.log.length,0,'a rejected MCP call touches no storage');
  const status=(await mcp('ratings_sync_status',{})).body.result.structuredContent;
  const {httpStatus,...body}=status;
  assert.equal(httpStatus,200);eq({...body,readAt:null},{...(await http(STATUS,'GET')).body,readAt:null},'the same body as GET');
- for(const [name,args] of [['ratings_sync_start',{trigger:'manual',extra:1}],['ratings_sync_start',{}],['ratings_sync_step',{runId:'x/y'}],['ratings_storage_migrate',{mode:'apply',bucket:'iptv'}],['ratings_sync_status',{x:1}]]){
+ for(const [name,args] of [['ratings_sync_start',{trigger:'manual',extra:1}],['ratings_sync_start',{}],['ratings_sync_step',{runId:'x/y'}],['ratings_sync_status',{x:1}]]){
   const reply=(await mcp(name,args)).body.result;assert.equal(reply.isError,true,name+' '+JSON.stringify(args));
  }
  assert.equal(bucket.writes().length,0);
- eq((await mcp('ratings_sync_start',{trigger:'manual'})).body.result.structuredContent.reason,'not_migrated');
- const dry=(await mcp('ratings_storage_migrate',{mode:'dry_run'})).body.result.structuredContent;
- eq([dry.queue.result,dry.cursor.result,dry.writes],['would_migrate','would_migrate',0]);
- assert.equal(bucket.writes().length,0,'dry_run over MCP writes nothing');
+ eq((await mcp('ratings_sync_start',{trigger:'manual'})).body.result.structuredContent.reason,'storage_unsupported');
+ // The retired tool is not a tool any more: it is not listed, and calling it by name is refused without a write.
+ const retired=(await mcp('ratings_storage_migrate',{mode:'apply'})).body;
+ assert.equal(Boolean(retired.error)||retired.result?.isError===true,true,'the retired tool is refused');
+ assert.equal(bucket.writes().length,0,'the retired tool writes nothing');
 }
 
-console.log('Ratings API (ADR 0060, ADR 0069, ADR 0074): HTTP not_migrated for every binding while unmigrated, malformed input refused before any read, foreign Origin refused, a run with run_mismatch and a second scheduled start with no minimum interval, GET status side-effect free with a stale run, dry_run writes nothing, and MCP tools with closed schemas and annotations behind the signed Access JWT with the HTTP bodies passed');
+console.log('Ratings API (ADR 0060, ADR 0069, ADR 0074): HTTP storage_unsupported for every binding on unsupported storage, the retired conversion route and tool refused without a write, malformed input refused before any read, foreign Origin refused, a run with run_mismatch and a second scheduled start with no minimum interval, GET status side-effect free with a stale run, dry_run writes nothing, and MCP tools with closed schemas and annotations behind the signed Access JWT with the HTTP bodies passed');
