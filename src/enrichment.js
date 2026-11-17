@@ -505,15 +505,6 @@ function applyRemovalEnqueue(queue,films,ref,at){
  for(const film of films)if(addRemovalRef(queue,film,reference?{...reference}:null,at))changed=true;
  return changed;
 }
-// The version 1 to version 2 conversion of ratings_storage_migrate. Version 1 entries carry no event key: they become
-// `refs: []` with `legacy: true`. A hand-over still in sync.json gets its references from its saved watchlist event.
-function migrateRemovalQueue(queue,handover,at){
- const next={schemaVersion:2,films:{},droppedRefs:0,migratedAt:at};
- if(queue?.pausedUntil){next.pausedUntil=queue.pausedUntil;next.pausedBy=queue.pausedBy||null;}
- for(const [id,entry] of Object.entries(queue?.films||{}))next.films[id]={...entry,claim:null,refs:[],legacy:true};
- if(handover)for(const item of handover)applyRemovalEnqueue(next,item.films,item.ref,at);
- return next;
-}
 // The claim before a request. Version 2 also stores a random claim token: only the outcome carrying it is accepted.
 function claimRemovalEntry(queue,id,now,at,token){
  const entry=queue.films[id];if(!entry||entry.state!=='pending'||Date.parse(entry.nextAttemptAt)>now)return false;
@@ -1898,7 +1889,7 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
   const pendingSince=integrationTime(sync?.updatedAt);
   // Under the permanent separate pipeline (ADR 0074) the ratings run record decides once migration is complete.
   // An incomplete migration is fail-closed: the EPG commit's old rating fields do not stand in for a Diary read.
-  if(ratingsBlocked)return entry('degraded','ratings_migration_blocked',null,null,{pipeline:'blocked',migration:ratingsBlocked.migration});
+  if(ratingsBlocked)return entry('degraded','ratings_storage_unsupported',null,null,{pipeline:'blocked',storage:ratingsBlocked.storage});
   if(ratingsRun)return ratingsRun.state==='ok'?entry(fresh(ratingsRun.lastSuccessAt),freshCode(ratingsRun.lastSuccessAt),ratingsRun.lastSuccessAt,ratingsRun.lastFailureAt,{pipeline:'separate'}):entry(ratingsRun.state,ratingsRun.code,ratingsRun.lastSuccessAt,ratingsRun.lastFailureAt,{pipeline:'separate'});
   if(ratingPending&&(!latestRating||latestRating.ok&&(!pendingSince||Date.parse(latestRating.at)<=Date.parse(pendingSince))))return entry('degraded','ratings_pending',ratingSuccess,ratingFailureAt,{pendingSince});
   if(!latestRating)return entry('unknown','no_data',null,null);
@@ -2018,7 +2009,7 @@ async function footerStatus(env){
  const degraded=[],guard=footerGuard(env,degraded);
  const filmPersonGate=typeof CanonicalCatalogReader==='undefined'?null:await CanonicalCatalogReader.catalogReaderGate(env);
  const pinned=await guard('publication',()=>pinEpg(env))||env;
- const ratingsState=typeof LetterboxdRatings!=='undefined'?await guard('ratings',async()=>{const state=await LetterboxdRatings.migrationState(env);return state.migration==='complete'?{run:LetterboxdRatings.health(await LetterboxdRatings.readRun(env),Date.now())}:{blocked:{migration:state.migration}};}):null;
+ const ratingsState=typeof LetterboxdRatings!=='undefined'?await guard('ratings',async()=>{const state=await LetterboxdRatings.storageState(env);return state.supported?{run:LetterboxdRatings.health(await LetterboxdRatings.readRun(env),Date.now())}:{blocked:{storage:'unsupported'}};}):null;
  const ratingsRun=ratingsState?.run??null,ratingsBlocked=ratingsState?.blocked??null;
  // AIR-344: the ledger is streamed and counted once, without keeping its items, before the other records are read.
  const authority=typeof DiscoveryAuthority!=='undefined'?await guard('discovery_authority',()=>DiscoveryAuthority.readAuthority(env)):null;

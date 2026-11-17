@@ -14,7 +14,7 @@ function setup({pages=12,extra={}}={}){
 }
 const at=ms=>new Date(ms).toISOString();
 async function drain(R,env,runId,limit=20){const replies=[];for(let i=0;i<limit;i++){const reply=plain(await R.step(env,{runId}));replies.push(reply);if(reply.nextAction!=='continue')break;}return replies;}
-// A migrated run always reads Diary page 1 first (ADR 0075). Removal sections publish one unrelated row so that page succeeds.
+// A run always reads Diary page 1 first (ADR 0075). Removal sections publish one unrelated row so that page succeeds.
 function quietDiary(net){net.diary.set(1,diaryPage([diaryRow('diary-only',8,'2026-10-29','99001')],false));}
 async function finishDiary(R,env,runId){
  const step=plain(await R.step(env,{runId}));
@@ -23,22 +23,22 @@ async function finishDiary(R,env,runId){
  return step;
 }
 
-// 1. An absent, inline, invalid or separate binding on unmigrated storage: start and step answer not_migrated and
+// 1. An absent, inline, invalid or separate binding on unsupported storage: start and step answer storage_unsupported and
 // write nothing. The status reads pipeline blocked and switch separate. The binding is not consulted.
 {
  const {bucket,env,R,net}=setup();
  for(const sample of [env,{...env,RATINGS_PIPELINE:undefined},{...env,RATINGS_PIPELINE:'inline'},{...env,RATINGS_PIPELINE:'Separate'}]){
   const pending=plain(await R.start(sample,{trigger:'manual'}));
-  assert.equal(pending.reason,'not_migrated');assert.equal(pending.migration,'none');
-  assert.equal((await R.step(sample,{runId:'x'})).reason,'not_migrated');
+  assert.equal(pending.reason,'storage_unsupported');assert.deepEqual(plain(pending.storage),{supported:false,queueV2:false,cursorV2:false});
+  assert.equal((await R.step(sample,{runId:'x'})).reason,'storage_unsupported');
   const status=plain(await R.status(sample));
   assert.equal(status.pipeline,'blocked');assert.equal(status.switch,'separate');assert.equal(status.sideEffects,'none');
  }
  assert.equal(bucket.writes().length,0,'nothing written');assert.equal(net.fetches.length,0,'nothing requested');
  for(const value of [undefined,'off','on','garbage']){
-  assert.equal(plain(await R.start({...env,LETTERBOXD_DIARY_HISTORY:value},{trigger:'manual'})).reason,'not_migrated',String(value));
+  assert.equal(plain(await R.start({...env,LETTERBOXD_DIARY_HISTORY:value},{trigger:'manual'})).reason,'storage_unsupported',String(value));
  }
- assert.equal(net.fetches.length,0,'an unmigrated start still requests nothing');
+ assert.equal(net.fetches.length,0,'an unsupported start still requests nothing');
 }
 
 // 2. A run reads Diary page 1 once, even when it links a next page and the cursor still says resumePage 2, then the
@@ -158,7 +158,7 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  migrated(bucket,{films});quietDiary(net);
  net.members.set('a',4);net.members.set('b','none');net.members.set('c',404);net.members.set('d',3.5);net.members.set('e',403);
  const {runId}=plain(await R.start(env,{trigger:'manual'}));
- assert.equal(bucket.value(RUN).phase,'diary','a migrated run starts in the Diary phase');
+ assert.equal(bucket.value(RUN).phase,'diary','a run starts in the Diary phase');
  await finishDiary(R,env,runId);
  const reply=plain(await R.step(env,{runId}));
  assert.equal(reply.reason,'finished');assert.equal(reply.step.lookups,5);
@@ -643,4 +643,4 @@ for(const [status,outcome,code,state] of [[403,'blocked','ratings_blocked','degr
  assert.equal(net.diaryFetches().length,2);
 }
 
-console.log('Ratings run (ADR 0060, ADR 0067, ADR 0069): disabled and not_migrated write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause, the retired binding still looks up an unrated film and skips one the Diary rated, a stored fact rates a reopened entry without a member-page GET, fact probes stay within five films a step and yield on a short lease, Diary-resolved queue entries, a rating revised days later replaces the fact and the removal event, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, scheduled starts with no minimum interval, busy while a run is live, a stale compare-and-swap leaving the newer run, and a run without EPG passed');
+console.log('Ratings run (ADR 0060, ADR 0067, ADR 0069): disabled and storage_unsupported write nothing, one Diary page per run even with a stored resume page, step_budget retries that same page, Diary blocked/rate-limited/failed and a recent window, five lookups with a 403 pause, the retired binding still looks up an unrated film and skips one the Diary rated, a stored fact rates a reopened entry without a member-page GET, fact probes stay within five films a step and yield on a short lease, Diary-resolved queue entries, a rating revised days later replaces the fact and the removal event, racing starts, a leased step, lost responses, run_mismatch, interrupted and abandoned runs closed as unknown, isolation and its manual clearing, lease_lost keeping progress, scheduled starts with no minimum interval, busy while a run is live, a stale compare-and-swap leaving the newer run, and a run without EPG passed');

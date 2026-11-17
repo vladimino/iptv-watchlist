@@ -8,6 +8,10 @@ const {clock,FakeDate,crypto}=makeClock(T0),net=makeNetwork(),bucket=makeBucket(
 const ctx=loadContext({net,clock,FakeDate,crypto});
 const D=g(ctx,'LetterboxdDiary'),env=baseEnv(bucket);
 const bytes=value=>JSON.stringify(value);
+// The Worker has no code that converts a version 1 cursor (ADR 0160). The writers below must still follow the version they find at their
+// own compare-and-swap, so the tests build the merge form themselves, as any other writer of that form would.
+const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
+const toMergeForm=(state,writer)=>canonical({...D.emptyState(),...(state||{}),schemaVersion:2,writer});
 const random=seeded(294);
 const pick=list=>list[Math.floor(random()*list.length)];
 const DATES=[null,'2019-01-01','2021-06-15','2024-02-29','2026-10-30'];
@@ -56,18 +60,18 @@ assert.equal(merge(tie,other).lastOutcome,'failed');assert.equal(merge(other,tie
 const sameWriter={...tie,lastOutcome:'complete'};
 assert.equal(bytes(merge(tie,sameWriter)),bytes(merge(sameWriter,tie)));
 
-// 4. Migration keeps progress and diagnostics and adds the writer; canonical key order.
+// 4. The merge form keeps progress and diagnostics and adds the writer; canonical key order.
 const v1={schemaVersion:1,lastAttemptAt:TIMES[1],lastSuccessAt:TIMES[1],lastFailureAt:null,lastOutcome:'partial',stopReason:'page_budget',counts:{pages:3},coverage:{newestWatchedDate:'2026-10-30',oldestWatchedDate:'2026-01-01',reachedEnd:false},resumePage:4};
-const migrated=D.migrateCursor(v1,{runId:'ratings-storage-migrate',step:'migrate'});
+const migrated=toMergeForm(v1,{runId:'earlier-writer',step:'diary'});
 assert.equal(D.cursorMigrated(migrated),true);assert.equal(D.cursorMigrated(v1),false);
 assert.deepEqual(plain({...migrated,schemaVersion:1,writer:undefined}),plain(v1));
 assert.deepEqual(Object.keys(migrated),[...Object.keys(migrated)].sort());
 
 // 5. Concurrent writers on the stored cursor: every write is a compare-and-swap that follows the version it finds.
-// a) A version 1 cursor read before a migration: the stale write loses, re-reads the merge form and merges into it.
+// a) A version 1 cursor read before another writer gave it the merge form: the stale write loses, re-reads the merge form and merges into it.
 bucket.set(CURSOR,v1);
 let interleaved=false;
-bucket.hooks.beforePut=key=>{if(key===CURSOR&&!interleaved){interleaved=true;bucket.set(CURSOR,D.migrateCursor(bucket.value(CURSOR),{runId:'ratings-storage-migrate',step:'migrate'}));}};
+bucket.hooks.beforePut=key=>{if(key===CURSOR&&!interleaved){interleaved=true;bucket.set(CURSOR,toMergeForm(bucket.value(CURSOR),{runId:'earlier-writer',step:'diary'}));}};
 await D.syncHistory({...env,LETTERBOXD_DIARY_HISTORY:'on'},{now:T0,maxPages:0});
 bucket.hooks.beforePut=null;
 assert.equal(bucket.value(CURSOR).schemaVersion,2,'a version 1 writer never turns the merge form back');

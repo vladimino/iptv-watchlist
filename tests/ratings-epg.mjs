@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPage,diaryRow,migrated,QUEUE,CURSOR,RUN,SEPARATE,H,eventKeyOf,plain,g} from './ratings-harness.mjs';
 
-// ADR 0074: the EPG commit never reads Diary. Unmigrated storage fails closed for every binding value. After the
-// migration the commit only enqueues removal references, durably, at completion (AIR-513), whatever the retired
+// ADR 0074, ADR 0160: the EPG commit never reads Diary. Unsupported storage fails closed for every binding value. On supported
+// storage the commit only enqueues removal references, durably, at completion (AIR-513), whatever the retired
 // RATINGS_PIPELINE binding holds, and requests nothing from Letterboxd for ratings.
 const T0=Date.parse('2026-10-31T08:00:00.000Z');
 const eq=(actual,expected,message)=>assert.deepEqual(plain(actual),plain(expected),message);
@@ -31,7 +31,7 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
  return {bucket,net,ctx,env,replies,snapshot:bucket.snapshot(),post,runId};
 }
 
-// 1. Unmigrated storage fails closed for an absent binding, an explicit `inline`, a malformed value and `separate`.
+// 1. Unsupported storage fails closed for an absent binding, an explicit `inline`, a malformed value and `separate`.
 // The commit publishes and requests nothing for ratings. It does not enqueue onto a version 1 queue or read Diary.
 {
  const baselines=[];
@@ -39,12 +39,12 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
   const {snapshot,replies,net,bucket,runId}=await lifecycle({extra});
   const label=JSON.stringify(extra);
   assert.equal(replies.at(-1).body.stage,'complete',label);
-  eq([replies.at(-1).body.ratingsPipeline,replies.at(-1).body.ratingsMigration],['blocked','none'],label);
+  eq([replies.at(-1).body.ratingsPipeline,replies.at(-1).body.ratingsStorage],['blocked','unsupported'],label);
   eq([net.diaryFetches(),net.memberFetches()],[[],[]],label+': no Diary page, no member page');
   assert.equal(snapshot[QUEUE],undefined,label+': no queue write');
   assert.equal(snapshot[CURSOR],undefined,label+': the cursor is untouched');
   const sync=bucket.value('sync.json');
-  eq([sync.ratingsPipeline,sync.ratingsMigration,sync.ratingPending,sync.removalLookups,sync.diaryHistory],[ 'blocked','none',undefined,undefined,undefined],label);
+  eq([sync.ratingsPipeline,sync.ratingsStorage,sync.ratingPending,sync.removalLookups,sync.diaryHistory],[ 'blocked','unsupported',undefined,undefined,undefined],label);
   eq(sync.removalRefs.films.map(item=>item.id).sort(),['film2','film3'],label+': the removal event is kept as a hand-over');
   assert.equal(sync.removalRefs.ref.sourceRunId,runId,label);
   assert.ok(bucket.value(sync.removalRefs.ref.eventKey),label+': the removal event is written');
@@ -54,7 +54,7 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
 }
 
 // 1b. Consecutive blocked commits keep every removal reference. Advancing the watchlist does not drop the earlier
-// event, nothing is written to the queue, and the next start after migration enqueues both events.
+// event, nothing is written to the queue, and the next start on supported storage enqueues both events.
 {
  const first=await lifecycle({});
  const earlier=first.bucket.value('sync.json').removalRefs;
@@ -181,4 +181,4 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
  eq([footer.state,footer.code],['healthy','ok']);
 }
 
-console.log('Ratings at the EPG commit (ADR 0060, ADR 0074): unmigrated storage fails closed for every binding; migrated storage enqueues references before the publish without Diary or member requests for an absent, inline, invalid or separate binding, survives a kill between the enqueue and sync.json, flushes a left hand-over at the next start, is not blocked by a live ratings run or a failing Letterboxd, and the footer follows the ratings run passed');
+console.log('Ratings at the EPG commit (ADR 0060, ADR 0074): unsupported storage fails closed for every binding; supported storage enqueues references before the publish without Diary or member requests for an absent, inline, invalid or separate binding, survives a kill between the enqueue and sync.json, flushes a left hand-over at the next start, is not blocked by a live ratings run or a failing Letterboxd, and the footer follows the ratings run passed');

@@ -70,7 +70,7 @@ for(const [status,cause] of [[403,'blocked'],[429,'rate_limited']]){
 {
  const {bucket,env,R,clock}=setup();
  const bad=baseEnv(bucket,{...SEPARATE});bucket.records.delete('enrichment/removal-rating-lookups.json');
- assert.equal(plain(await R.start(bad,{trigger:'scheduled'})).reason,'not_migrated');
+ assert.equal(plain(await R.start(bad,{trigger:'scheduled'})).reason,'storage_unsupported');
  assert.equal(ratings(bucket).length,0,'no run started, no event');
 }
 

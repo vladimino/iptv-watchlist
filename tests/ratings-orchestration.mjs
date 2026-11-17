@@ -551,7 +551,7 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
   w.bucket.set(MODE,{schemaVersion:1,mode:'external',epoch:0,target:null,drain:null});
   w.bucket.set(RUN,{schemaVersion:1,runId:'stale-r2-run',state:'finished',phase:'done',lease:{step:null,expiresAt:null}});
   const before=JSON.stringify(w.bucket.snapshot());w.db.sql(sql);
-  for(const [action,body] of [['start',{trigger:'scheduled'}],['step',{runId:'stale-r2-run'}],['migrate',{mode:'apply'}]]){
+  for(const [action,body] of [['start',{trigger:'scheduled'}],['step',{runId:'stale-r2-run'}]]){
    const attempt=await w.R.handle(w.env,action,body).then(reply=>({reply:plain(reply)}),error=>({error}));
    assert.ok(!attempt.error,label+' '+action+': refused with a reply, not thrown');
    eq([attempt.reply.body.nextAction,attempt.reply.body.reason??attempt.reply.body.refused],['stop','evidence_unreadable'],label+' '+action);
@@ -561,21 +561,18 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
   const status=plain(await w.R.status(w.env));assert.notEqual(status.orchestration?.mode,'external',label);assert.equal(status.orchestration.health,'unknown');
   assert.notEqual(plain(await w.RO.ensure(w.env,{now:w.clock.now})).started,true);assert.equal(w.workflow.creates.length,0);
  }
- // 16c. Blocker 3: ratings_storage_migrate apply is gated like start and step; dry_run stays a read. Both entry paths use `handle`.
+ // 16c. The retired migrate action has no entry path (ADR 0160). The dispatchers route start and step through `handle` only, and
+ // `handle` answers 400 for any other action, fenced or not, without a write.
  {
   const w=setup();
-  assert.equal(plain(await w.R.handle(w.env,'migrate',{mode:'dry_run'})).body.refused,undefined);
   await w.RO.switchMode(w.env,{action:'close_admission',target:'cloudflare'},w.clock.now);
   const before=JSON.stringify(w.bucket.snapshot());
-  const applying=plain(await w.R.handle(w.env,'migrate',{mode:'apply'}));eq([applying.body.refused,applying.body.nextAction],['switch_in_progress','stop']);
-  assert.equal(plain(await w.R.handle(w.env,'migrate',{mode:'dry_run'})).body.refused,undefined,'dry_run stays open');
-  await w.RO.switchMode(w.env,{action:'complete'},w.clock.now);
-  assert.equal(plain(await w.R.handle(w.env,'migrate',{mode:'apply'})).body.refused,'external_writer_fenced');
-  assert.equal(JSON.stringify(w.bucket.snapshot()).includes('migratedAt'),JSON.stringify(JSON.parse(before)).includes('migratedAt'));
+  eq(plain(await w.R.handle(w.env,'migrate',{mode:'apply'})),{status:400,body:{error:'Unknown action'}});
+  assert.equal(JSON.stringify(w.bucket.snapshot()),before,'a retired action writes nothing');
   const worker=fs.readFileSync('src/worker.js','utf8'),mcp=fs.readFileSync('src/mcp.js','utf8');
-  assert.match(worker,/\/api\/letterboxd\/ratings\/migrate'\]\.includes\(url\.pathname\)/);assert.match(worker,/LetterboxdRatings\.handle\(env,/);
-  assert.match(mcp,/LetterboxdRatings\.handle\(env,params\.name==='ratings_sync_start'\?'start':params\.name==='ratings_sync_step'\?'step':'migrate'/);
-  assert.doesNotMatch(worker+mcp,/LetterboxdRatings\.migrate\(/,'no entry path calls migrate around the gate');
+  assert.match(worker,/\['\/api\/letterboxd\/ratings\/start','\/api\/letterboxd\/ratings\/step'\]\.includes\(url\.pathname\)/);assert.match(worker,/LetterboxdRatings\.handle\(env,/);
+  assert.match(mcp,/LetterboxdRatings\.handle\(env,params\.name==='ratings_sync_start'\?'start':'step',args\)/);
+  assert.doesNotMatch(worker+mcp,/ratings\/migrate|ratings_storage_migrate|LetterboxdRatings\.migrate\(/,'no entry path reaches a conversion');
  }
 }
 

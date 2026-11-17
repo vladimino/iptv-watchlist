@@ -1296,7 +1296,7 @@ export const FILES={
  "ratings-legacy-link.mjs": {
   "suite": "core"
  },
- "ratings-migration.mjs": {
+ "ratings-storage-schema.mjs": {
   "suite": "core"
  },
  "ratings-orchestration.mjs": {
