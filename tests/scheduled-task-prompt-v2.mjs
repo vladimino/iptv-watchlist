@@ -30,7 +30,7 @@ const step11=prompt.slice(prompt.indexOf('11. После prediction_complete'));
 assert.ok(step11.includes('Секции и порядок ниже одинаковы'),'readable report section order must be constrained');
 for(let i=0;i<reportHeadings.length;i++)assert.ok(step11.indexOf(reportHeadings[i])>=0&&(i===0||step11.indexOf(reportHeadings[i])>step11.indexOf(reportHeadings[i-1])),'ordered report heading: '+reportHeadings[i]);
 for(const field of ['**Статус:**','**Выбрано/обработано:**','**Создано:**','**Пересчитано:**','**Ошибок:**','**Hot:**','**Cold:**','**Ожидают retry:**','**Исчерпали попытки:**','**Вывод:**','**Источники:**','**Поиск:**','**Причина gate:**','**Full-text fallback:**','**F/P/S:**'])assert.ok(step11.includes(field),'human-readable report field: '+field);
-assert.ok(!step11.includes('### Research audit')&&!step11.includes('readOriginalSources: <URL')&&!step11.includes(' | '),'no pipe-separated audit rows');
+assert.ok(!step11.includes('### Research audit')&&!step11.includes('readOriginalSources: <URL')&&step11.includes('Не используй таблицы, длинные audit-строки'),'no pipe-separated audit rows in rendered report');
 assert.ok(step11.includes('### Название (год)')&&step11.includes('[короткое имя](точный URL)'),'short source links in distinct film blocks');
 assert.ok(prompt.includes('отдельный визуальный audit-блок'),'audit keeps per-film provenance without single-line log output');
 assert.ok(step11.includes('ТОЛЬКО «## Итог»'),'noop report is compact');
