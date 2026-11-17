@@ -38,7 +38,7 @@ html=card({actualRating:4.5,prediction:null});assert.doesNotMatch(html,/на 4\.
 
 // Finds uses the same helper and wording.
 const finds=fs.readFileSync('public/app.js','utf8').match(/function findsCard[^]*?\n}/)[0];
-assert.match(finds,/chance=chance4Plus\(p\)/);assert.match(finds,/\$\{chance\}% на 4\.0\+/);
+assert.match(finds,/chance=chance4Plus\(p\)/);assert.match(finds,/scoreBadgesHTML\(ownRatingOf\(film\),p\.predictedRating,chance\)/);
 
 // Compact badge next to an actual rating keeps room for the extra line.
 const css=fs.readFileSync('public/styles.css','utf8');assert.ok(css.includes('.score-badge small{'));
