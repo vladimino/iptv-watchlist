@@ -1,6 +1,6 @@
 # UI and read-model projections
 
-This diagram describes **current R2-backed projections**, not a new canonical Film database. The browser reads views assembled by the Worker from published programme data and enrichment records. Sources: [Film/Person read contract](../reference/domain/film-person.md), [enrichment API](../reference/api/enrichment.md), [prediction diagnostics](../reference/api/prediction-diagnostics.md), and [fingerprint/prediction ADR](../adr/0014-fingerprint-prediction-lifecycle.md).
+This diagram describes the **current read projections** over D1 (authoritative per domain) and R2 (mirrors and immutable bodies), not a new canonical Film database. The browser reads views assembled by the Worker from published programme data and enrichment records. Sources: [Film/Person read contract](../reference/domain/film-person.md), [enrichment API](../reference/api/enrichment.md), [prediction diagnostics](../reference/api/prediction-diagnostics.md), and [fingerprint/prediction ADR](../adr/0014-fingerprint-prediction-lifecycle.md).
 
 ```mermaid
 flowchart LR
@@ -9,6 +9,9 @@ flowchart LR
         watchlist["Watchlist and metadata"]
         enrichment["Fingerprints, predictions and actual ratings"]
         index["Derived view index and prediction queue"]
+    end
+    subgraph Authority["D1 iptv, authoritative per domain"]
+        d1read["Published EPG and watchlist, canonical Film/Person, mutable predictions, ratings, owner reviews"]
     end
     subgraph Server["Cloudflare Worker read paths"]
         api["Programme and enrichment API"]
@@ -20,6 +23,8 @@ flowchart LR
         details["Film detail page"]
         ratings["Predicted rating and actual rating"]
     end
+    d1read --> api
+    d1read --> ready
     programme --> api
     watchlist --> api
     enrichment --> ready

@@ -1,6 +1,6 @@
 # System context
 
-**Scope:** the deployed IPTV Watchlist system and external actors. This is a context diagram, not a deployment authorization. Verified against the [deployment runbook](../runbooks/deployment.md), [Worker/R2 decision](../adr/0002-cloudflare-worker-r2-authority.md) and [MCP contract](../reference/api/mcp.md).
+**Scope:** the deployed IPTV Watchlist system and external actors. This is a context diagram, not a deployment authorization. Verified against the [deployment runbook](../runbooks/deployment.md), the [authority per domain](persistence-and-migration.md#authority-per-domain), the original [Worker/R2 decision](../adr/0002-cloudflare-worker-r2-authority.md) and the [MCP contract](../reference/api/mcp.md).
 
 ```mermaid
 flowchart LR
@@ -9,6 +9,7 @@ flowchart LR
     accessWeb["Cloudflare Access: All Workers"]
     accessMcp["Cloudflare Access: IPTV MCP, owner only"]
     worker["Cloudflare Worker: iptv"]
+    d1[("Cloudflare D1: iptv, authoritative per domain")]
     r2[("Cloudflare R2: iptv, blobs, inputs and mirrors")]
     lb["Letterboxd"]
     epg["Configured EPG source"]
@@ -17,6 +18,7 @@ flowchart LR
     legacy["Legacy ChatGPT Site: reserve only"]
     viewer --> accessWeb --> worker
     agent --> accessMcp --> worker
+    worker <--> d1
     worker <--> r2
     worker -->|authorized sync requests| lb
     worker -->|authorized EPG requests| epg
