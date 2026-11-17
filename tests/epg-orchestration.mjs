@@ -1456,4 +1456,120 @@ for(const stage of ['epg','seal']){
   assert.equal(h.wf.creates.length,2,'series 0 by ensure, series 1 by the recovery');
  }
 }
+// 7k. AIR-525: a recovered complete run (`stage: complete`, a valid `completedAt`, the D1 pointer at its runId) that still carries the
+// `run.error` of an earlier attempt of the same runId, with no control `doneAt` (the platform lost the action's result or the control
+// CAS). It is today's success: no second /api/sync/start, the generation is not touched, the control finishes on the same runId, the read
+// model counts it done and the prior attempt's error stays readable as history. Anything that is not proven fails closed instead.
+{
+ const due=Date.parse('2026-11-07T16:00:00Z'),day='2026-11-07',prior='seal_finalize/finalize_scan: Worker exceeded memory limit';
+ const recovered=extra=>({runId:'rec',stage:'complete',runKey:day,startedAt:at(due),completedAt:at(due+5*MIN),updatedAt:at(due+5*MIN),error:prior,...extra});
+ const setup=({sync,authority={ready:true,programmeRunId:'rec'},pipe={metadataSteps:0}}={})=>{
+  const h=cloudflare({pipeline:pipeline(pipe),authority});
+  h.state.sync=sync;
+  return h;
+ };
+ const starts=h=>h.state.calls.filter(c=>c.pathname==='/api/sync/start').length;
+ {// the proven bug path: red on the code before AIR-525 (it started a second run and the read model said not done)
+  const h=setup({sync:recovered()});
+  const r=runner(h,{startAt:due+30*MIN});
+  await h.epg.ensure(h.env,{now:due+30*MIN});
+  const before=plain(await h.epg.readModel(h.env,due+30*MIN));
+  assert.equal(before.health,'healthy','a proven complete run of today is done without a control doneAt');
+  assert.equal(before.publication.overdueMs,null);
+  assert.equal(before.syncRun.priorAttemptError,true,'the prior attempt error stays visible as history');
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(outcome.reason,'complete');
+  assert.equal(starts(h),0,'no second /api/sync/start for a recovered complete run');
+  assert.equal(h.state.calls.length,0,'nothing is stepped: no event or hand-over is owed');
+  assert.equal(h.state.authority.programmeRunId,'rec','the published generation is not changed');
+  const c=await control(h);
+  assert.ok(c.doneAt);assert.equal(c.publishedRunId,'rec');assert.equal(c.runId,'rec');assert.equal(c.failure,null);assert.equal(c.lastStep.note,'recovered_complete');
+  assert.equal(h.state.sync.error,prior,'the history is not erased');
+  const after=plain(await h.epg.readModel(h.env,r.clock()));
+  assert.equal(after.health,'healthy');assert.equal(after.published,'rec');
+  // A repeated action of the same date stops on the control record; it starts nothing.
+  const again=await follow(h.epg,h.env,r,day);
+  assert.equal(again.reason,'complete');assert.equal(starts(h),0);
+ }
+ {// a pending epg event and watchlist hand-over: drained through the same run, idempotently, then finished
+  const h=setup({sync:recovered({epgEventPending:{id:'rec-epg',type:'epg',at:at(due+5*MIN)},watchlistEventPending:true})});
+  const r=runner(h,{startAt:due+30*MIN});
+  await h.epg.ensure(h.env,{now:due+30*MIN});
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(outcome.reason,'complete');
+  assert.equal(starts(h),0);
+  const steps=h.state.calls.filter(c=>c.pathname==='/api/sync/epg');
+  assert.equal(steps.length,1,'one drain step');assert.ok(steps.every(c=>c.body.runId==='rec'),'the drain names the same runId');
+  assert.equal(h.state.sync.epgEventPending,undefined);assert.equal(h.state.sync.watchlistEventPending,undefined);
+  assert.equal((await control(h)).publishedRunId,'rec');
+ }
+ {// a lost control CAS on the finishing action: the next action reads the same run again and finishes it; still no second start
+  const h=setup({sync:recovered()});
+  const r=runner(h,{startAt:due+30*MIN});
+  await h.epg.ensure(h.env,{now:due+30*MIN});
+  const prepare=h.db.prepare.bind(h.db);let lost=0;
+  h.db.prepare=sql=>{
+   const statement=prepare(sql);
+   if(!/^UPDATE epg_orchestration_document/.test(sql))return statement;
+   return {bind:(...args)=>{const bound=statement.bind(...args);if(!lost&&String(args[0]).includes('"doneAt":"')){lost++;return {run:async()=>{throw new Error('lost');}};}return bound;}};
+  };
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(lost,1,'the finishing control write was lost once');
+  assert.equal(outcome.reason,'complete');assert.equal(starts(h),0);
+  const c=await control(h);assert.ok(c.doneAt);assert.equal(c.publishedRunId,'rec');
+ }
+ for(const [label,sync,authority] of [
+  ['the D1 pointer names another run',recovered(),{ready:true,programmeRunId:'other'}],
+  ['the D1 pointer names no run',recovered(),{ready:true,programmeRunId:null}],
+  ['no completion receipt',recovered({completedAt:undefined}),{ready:true,programmeRunId:'rec'}],
+  ['a malformed completion receipt',recovered({completedAt:'not-a-date'}),{ready:true,programmeRunId:'rec'}],
+ ]){// unproven: not a success and not a reason to start; fail closed as contradictory evidence
+  const h=setup({sync,authority});
+  const r=runner(h,{startAt:due+30*MIN});
+  await h.epg.ensure(h.env,{now:due+30*MIN});
+  assert.notEqual((await h.epg.readModel(h.env,due+30*MIN)).health,'healthy',label+': the read model does not count it done');
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(starts(h),0,label+': no second run');
+  assert.equal(outcome.reason,'evidence_contradictory',label);
+  const c=await control(h);assert.equal(c.doneAt,null,label);assert.equal(c.failure.code,'evidence_contradictory',label);
+ }
+ {// the D1 authority read throws inside the action (it was readable at admission): transient, retried, never a start
+  const h=setup({sync:recovered()});
+  const r=runner(h,{startAt:due+30*MIN});
+  await h.epg.ensure(h.env,{now:due+30*MIN});
+  const read=h.context.PublishedEpg.readAuthority;let calls=0;
+  h.context.PublishedEpg.readAuthority=async env=>{calls++;if(calls===2)throw new Error('unavailable');return read(env);};
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(outcome.reason,'complete','the next action proves it once the read works');
+  assert.equal(starts(h),0);
+  const c=await control(h);assert.ok(c.doneAt);assert.equal(c.publishedRunId,'rec');
+  assert.ok(r.log.some(n=>n.startsWith('sleep')),'the unreadable read slept a cooldown');
+ }
+ {// an error of a run still in its seal is a current failure: not done, and the seal is continued, not replaced
+  const h=setup({sync:{runId:'rec',stage:'seal',runKey:day,startedAt:at(due),updatedAt:at(due+5*MIN),seal:{phase:'finalize'},error:prior}});
+  await h.epg.ensure(h.env,{now:due+30*MIN});
+  const model=plain(await h.epg.readModel(h.env,due+30*MIN));
+  assert.notEqual(model.health,'healthy');assert.equal(model.syncRun.priorAttemptError,false);
+  const r=runner(h,{startAt:due+30*MIN});
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(outcome.reason,'complete');assert.equal(starts(h),0,'the seal is continued under its runId');
+ }
+ {// a complete run with an error of another Madrid day is not today's success: today's run starts once, as before
+  const h=setup({sync:recovered({runKey:'2026-11-06',startedAt:at(due-24*H),completedAt:at(due-23*H),updatedAt:at(due-23*H)})});
+  const r=runner(h,{startAt:due});
+  await h.epg.ensure(h.env,{now:due});
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(outcome.reason,'complete');assert.equal(starts(h),1);
+  assert.equal((await control(h)).publishedRunId,'run-1');
+ }
+ {// the healthy path does not regress: no error, no authority read needed
+  const h=setup({sync:recovered({error:undefined}),authority:{ready:true,programmeRunId:'other'}});
+  const r=runner(h,{startAt:due+30*MIN});
+  await h.epg.ensure(h.env,{now:due+30*MIN});
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(outcome.reason,'complete');assert.equal(starts(h),0);
+  const c=await control(h);assert.equal(c.publishedRunId,'rec');assert.equal(c.lastStep.note,null);
+ }
+}
+
 console.log('epg-orchestration: ok');
