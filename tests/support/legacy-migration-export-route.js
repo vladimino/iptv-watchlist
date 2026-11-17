@@ -1,4 +1,6 @@
-// Read-only source-R2 bridge. Disabled unless explicitly enabled for the old Site.
+// Test double only. This is the read-only source-R2 bridge that the retired Site served to the snapshot exporter
+// (scripts/migration-export.mjs, docs/archive/legacy-sites/migration-export.md). The Worker does not carry this route: its guard
+// requires the old Site's origin, so on the Worker host it could only answer 404. The exporter tests load this file as the server side.
 const MIGRATION_SOURCE_SITE_ID='appgprj_6abfed826e148191903dec4175166ff7';
 const migrationJson=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 const migrationMetadata=object=>({key:object.key,size:object.size,etag:object.etag,version:object.version||null,uploaded:object.uploaded?.toISOString?.()||null,httpMetadata:object.httpMetadata||{},customMetadata:object.customMetadata||{},storageClass:object.storageClass||null});

@@ -21,7 +21,6 @@ export const PREFIX_ROUTES={
  '/api/d1/':['/api/d1/status','/api/d1/persons','/api/d1/persons/review','/api/d1/films/w1','/api/d1/persons/actor/one','/api/d1/persons/actor/one/identity'],
  '/api/enrichment/':[],
  '/api/letterboxd/baseline/':['/api/letterboxd/baseline/validate'],
- '/api/migration-export/':['/api/migration-export/manifest'],
  '/api/ui/filter-presets/':['/api/ui/filter-presets/abc'],
 };
 // Reads the dispatcher serves through a pattern, not a prefix: the permanent catalog film lookup (AIR-387), and the operational Discovery status view (AIR-430), a query variant of two audited routes.

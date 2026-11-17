@@ -25,7 +25,7 @@ async function snapshot(values){
  const {readFile:read}=await import('node:fs/promises');
  const vm=await import('node:vm');
  const context=vm.createContext({Response,Request,URL,JSON,Date,crypto:(await import('node:crypto')).webcrypto});
- vm.runInContext(await read('src/migration-export.js','utf8')+'\nglobalThis.handleMigrationExport=migrationExportRoute;',context);
+ vm.runInContext(await read('tests/support/legacy-migration-export-route.js','utf8')+'\nglobalThis.handleMigrationExport=migrationExportRoute;',context);
  const fetchImpl=async(input,options={})=>{const request=new Request(input,options);return context.handleMigrationExport(request,env,new URL(request.url));};
  await exportSnapshot({directory,headers:{'X-Migration-Export-Key':'test-export-key'},fetchImpl});
  assert.equal(store.calls.put+store.calls.delete,0);
