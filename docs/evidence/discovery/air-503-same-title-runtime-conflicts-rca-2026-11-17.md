@@ -33,6 +33,8 @@ Result in production: for the 11 keys that have a current show, every current `p
 
 Eleven of the 33 keys carry `identitySource=known_epg_alias`. Their `discovery_decision_history` has one revision each: eight written by `import` on 2026-11-04T21:02:58Z and three by `resolver_chunk` on 2026-11-08 (19:18–19:58Z). All predate the 16 November acceptance of ADR 0151. ADR 0151 records that before it, one catalog-confirmed slot could verify the **whole observation** through the cheap pass; this record infers that route from the dates and the null ids and does not have the pre-0151 observations to prove it. ADR 0151 now sets the observation id only when every retained slot confirms the same id. The cheap pass creates a decision only when none exists (`discovery.js`, `!decision`), so a stored alias decision is never reopened; the current observation of all eleven has `confirmed_tmdb_id` null. That is consistent with the rule change and with no re-evaluation. It is a documented ADR 0151 consequence ("No stored showing is rewritten by this change"), not a new defect: the per-slot rule above still withholds every slot that is not confirmed or anchored.
 
+Lifecycle, stated precisely: new per-slot evidence changes which slots are assigned. It does not correct the historical Film decision. The cheap pass only writes a decision when none exists, so a stored `verified` decision (and its `identitySource`) is not reconsidered when the observation's confirmed id or slot confirmations change. This record did not trace any other writer that would replace one of these eleven decisions. A natural resolver chunk therefore does not promise re-resolution, and nothing here predicts that the eleven decisions will change.
+
 ## Named cases
 
 - **`губка боб квадратные штаны|` (`tmdb_400160`, 95 min).** Stored durations `[87, 84, 240, 115, 60, 270]`. `tmdb_400160` has the series title (`Губка Боб квадратные штаны`, with dash variants) among its aliases, and the catalog holds three other SpongeBob films (`tmdb_228165` 93 min, `tmdb_281649` 94 min, `tmdb_991494` 96 min). One slot (channel `ch2341`, 2026-11-15 15:33:33Z, 87 minutes) was confirmed on this key and is the only current show. 87 against 95 is `near`. The 240 and 270 minute marathons and the 60 and 115 minute slots are not shows. Whether the 87 minute slot is `Губка Боб в бегах` or another programme under the series title cannot be decided from stored fields. This record does not read TMDB and does not name another film. Disposition `insufficient evidence`. The alias list does not show whether TMDB or an EPG title added the series title, so this record does not claim an alias feedback loop. `touchCanonicalFilm` does add raw titles of a touched observation to the Film aliases; that is documented and unchanged.
@@ -81,9 +83,92 @@ Columns: the Film, the exact observation key, residence of its rows (`active`, `
 | `tmdb_512412` | `точка возврата\|` | active | 135 | [87, 92, 140, 135] | 87 | 0 (near) | known_epg_alias | none | explainable valid. A stored duration fits; the other slots are fragments, parts, marathons or cuts that no stored rule makes a show |
 | `tmdb_556694` | `три тысячи лет желаний\|2022` | active | 60 | [101, 108, 60] | 108 | 0 (near) | tmdb_detail | 108, 108, 108, 108, 108, 108, 108 | explainable valid. A stored duration fits; the other slots are fragments, parts, marathons or cuts that no stored rule makes a show |
 
-Totals: `confirmed wrong` 0, `explainable valid` 28, `insufficient evidence` 5. 11 keys have current shows; 22 have none (4 of them are archive only). Show minutes of the 11: 87 (`губка боб квадратные штаны|`), 80, 70, 178 ×3, 138 ×2, 136 ×2, 121 ×7, 115 and 124, 114, 107 and 105, 108 ×7. All fit their runtime within the scan's `max(8 min, 12%)` band. Two need a note: the 87 minute SpongeBob slot carries the series-title alias, and the 70 minute `прямой эфир|` slot matches a generic title. A fitting duration does not settle either identity.
+Totals: `confirmed wrong` 0, `explainable valid` 28, `insufficient evidence` 5. 11 **keys** have current shows and those 11 keys own **29 current `published_epg_show` rows** in total (the per-slot table in the reproduction section lists all 29). 22 keys have none (4 of them are archive only). Show minutes of the 11: 87 (`губка боб квадратные штаны|`), 80, 70, 178 ×3, 138 ×2, 136 ×2, 121 ×7, 115 and 124, 114, 107 and 105, 108 ×7. All fit their runtime within the scan's `max(8 min, 12%)` band. Two need a note: the 87 minute SpongeBob slot carries the series-title alias, and the 70 minute `прямой эфир|` slot matches a generic title. A fitting duration does not settle either identity.
 
 `explainable valid` means the duration evidence does not contradict the stored identity. It does not re-prove the identity. The identity source is the stored decision (`tmdb_detail` or `known_epg_alias`); this record neither re-verifies nor changes it.
+
+## Reproduction (read-only)
+
+Every query below is a `SELECT`. Nothing here writes, calls the Worker, TMDB or R2, or needs a run. The figures in this record come from exactly these statements against production D1 `iptv` (`database_id` `3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb`), pinned to published run `47663279-3e6b-423d-b696-b22edfcead91` (EPG generation 511, `published_epg_authority` `d1` / `open`). A later publication has another run id and gives other rows.
+
+**1. The cohort and the stored evidence, per key.** The 33 `(observation key, Film)` pairs are the AIR-500 cohort, pinned as a literal list so a later sample cannot replace it. `durations` is the stored list; `duration` is the first slot that AIR-500 used. The correlated lookups by `observation_key` scan `discovery_observation` (about 7.9 million rows read, a few seconds on 17 November). Run it once. Do not loop it, and do not run it during a heavy producer run.
+
+```sql
+WITH k(key,film) AS (VALUES
+ ('губка боб квадратные штаны|','tmdb_400160'),('любовь с риском для жизни|','tmdb_53010'),('новые похождения кота в сапогах|','tmdb_14486'),
+ ('счастливый билетик|','tmdb_1364113'),('прямой эфир|','tmdb_808960'),('аватар|2009','tmdb_19995'),('двойная петля|','tmdb_653851'),
+ ('замерзший мир|2011','tmdb_59722'),('а зори здесь тихие|','tmdb_49106'),('лучше не бывает|','tmdb_2898'),('двенадцать месяцев|','tmdb_72201'),
+ ('проданный смех|1981','tmdb_63532'),('основано на реальных событиях|','tmdb_416051'),('август|2025','tmdb_586387'),('лицо со шрамом|','tmdb_111'),
+ ('зеленый фургон|','tmdb_325821'),('власть|2018','tmdb_429197'),('турецкий гамбит|','tmdb_53129'),('солярис|','tmdb_2103'),
+ ('необыкновенные приключения карика и вали|1987','tmdb_206867'),('подлинная история банды келли|2020','tmdb_501395'),('пророк|','tmdb_21575'),
+ ('дом который построил свифт|','tmdb_27939'),('стажер|2015','tmdb_257211'),('опасные связи|','tmdb_859'),('эпидемия|','tmdb_6950'),
+ ('крид 3|2023','tmdb_677179'),('иллюзия обмана|2013','tmdb_75656'),('эра выживания|2022','tmdb_976720'),('шестое чувство|','tmdb_745'),
+ ('преодоление|','tmdb_11652'),('точка возврата|','tmdb_512412'),('три тысячи лет желаний|2022','tmdb_556694'))
+SELECT k.key, k.film,
+ (SELECT group_concat(o.residence) FROM discovery_observation o WHERE o.observation_key=k.key) AS residence,
+ (SELECT json_extract(o.payload_json,'$.durations') FROM discovery_observation o WHERE o.observation_key=k.key ORDER BY (o.residence='active') DESC LIMIT 1) AS durations,
+ (SELECT json_extract(o.payload_json,'$.duration') FROM discovery_observation o WHERE o.observation_key=k.key ORDER BY (o.residence='active') DESC LIMIT 1) AS first_slot,
+ (SELECT json_extract(o.payload_json,'$.airings') FROM discovery_observation o WHERE o.observation_key=k.key ORDER BY (o.residence='active') DESC LIMIT 1) AS airings,
+ (SELECT json_extract(a.payload_json,'$.runtime') FROM discovery_admission a WHERE a.film_id=k.film) AS runtime,
+ (SELECT json_extract(d.payload_json,'$.identitySource') FROM discovery_decision d WHERE d.observation_key=k.key) AS identity_source,
+ (SELECT group_concat((s.end_ms-s.start_ms)/60000) FROM published_epg_show s
+   WHERE s.programme_run_id='47663279-3e6b-423d-b696-b22edfcead91' AND s.film_id=k.film AND s.match_reason=k.key) AS show_minutes
+FROM k;
+```
+
+The band of each key is computed outside SQL with the scorer's rule: minimum of `abs(duration − runtime)` over `durations`, `near` ≤ max(8 min, 8%), `mid` ≤ max(25 min, 20%), `far` ≤ max(45 min, 40%), otherwise `conflict`. Result: 32 `near`, 1 `conflict`.
+
+**2. Slot ownership of the 11 current-show keys.** One row per `published_epg_show` of the pinned run whose `match_reason` equals one of the 11 observation keys and whose `film_id` is that key's Film. It is an indexed read (97 rows read on 17 November).
+
+```sql
+SELECT film_id, channel_id, start_ms, end_ms, (end_ms-start_ms)/60000 AS mins, basis, match_reason
+FROM published_epg_show
+WHERE programme_run_id='47663279-3e6b-423d-b696-b22edfcead91'
+  AND match_reason IN ('губка боб квадратные штаны|','новые похождения кота в сапогах|','прямой эфир|','аватар|2009','август|2025',
+                       'дом который построил свифт|','стажер|2015','иллюзия обмана|2013','эра выживания|2022','шестое чувство|',
+                       'три тысячи лет желаний|2022')
+  AND film_id IN ('tmdb_400160','tmdb_14486','tmdb_808960','tmdb_19995','tmdb_586387','tmdb_27939','tmdb_257211','tmdb_75656',
+                  'tmdb_976720','tmdb_745','tmdb_556694')
+ORDER BY match_reason, start_ms, channel_id;
+```
+
+**3. Decision history of the eleven `known_epg_alias` keys.** `SELECT observation_key, MIN(written_at), MAX(written_at), COUNT(*), MIN(writer) FROM discovery_decision_history WHERE observation_key IN (<the eleven keys>) GROUP BY observation_key`.
+
+**Current-show keys versus shows.** 11 keys own 29 shows. The table lists every one of the 29 (`basis` is `discovery` for all; `epg_title` is null on these rows and is not shown). `channel_id` and the millisecond bounds are the ownership key with `film_id`; the channel name is not needed to reproduce the result. The 87 minute SpongeBob row (`ch2341`, `start_ms` 1794756813000) is the slot with the stored `confirmedSlots` entry.
+
+| film | `match_reason` (observation key) | `channel_id` | `start_ms` | `end_ms` | start UTC | minutes | `basis` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `tmdb_400160` | `губка боб квадратные штаны\|` | `ch2341` | 1794756813000 | 1794762043000 | 2026-11-15T15:33:33Z | 87 | `discovery` |
+| `tmdb_14486` | `новые похождения кота в сапогах\|` | `ch139` | 1794875400000 | 1794880200000 | 2026-11-17T00:30:00Z | 80 | `discovery` |
+| `tmdb_808960` | `прямой эфир\|` | `ch382` | 1794707400000 | 1794711600000 | 2026-11-15T01:50:00Z | 70 | `discovery` |
+| `tmdb_19995` | `аватар\|2009` | `ch4073` | 1794693955000 | 1794704644000 | 2026-11-14T22:05:55Z | 178 | `discovery` |
+| `tmdb_19995` | `аватар\|2009` | `ch2840` | 1794705660000 | 1794716340000 | 2026-11-15T01:21:00Z | 178 | `discovery` |
+| `tmdb_19995` | `аватар\|2009` | `ch4074` | 1794893541000 | 1794904230000 | 2026-11-17T05:32:21Z | 178 | `discovery` |
+| `tmdb_586387` | `август\|2025` | `ch3242` | 1794747940000 | 1794756223000 | 2026-11-15T13:05:40Z | 138 | `discovery` |
+| `tmdb_586387` | `август\|2025` | `ch3286` | 1794803228000 | 1794811511000 | 2026-11-16T04:27:08Z | 138 | `discovery` |
+| `tmdb_27939` | `дом который построил свифт\|` | `ch1224` | 1794603122000 | 1794611322000 | 2026-11-13T20:52:02Z | 137 | `discovery` |
+| `tmdb_27939` | `дом который построил свифт\|` | `ch2926` | 1794769980000 | 1794778140000 | 2026-11-15T19:13:00Z | 136 | `discovery` |
+| `tmdb_257211` | `стажер\|2015` | `ch2676` | 1794640028000 | 1794647319000 | 2026-11-14T07:07:08Z | 122 | `discovery` |
+| `tmdb_257211` | `стажер\|2015` | `ch1581` | 1794653816000 | 1794661106000 | 2026-11-14T10:56:56Z | 122 | `discovery` |
+| `tmdb_257211` | `стажер\|2015` | `ch1316` | 1794792752000 | 1794800036000 | 2026-11-16T01:32:32Z | 121 | `discovery` |
+| `tmdb_257211` | `стажер\|2015` | `ch1545` | 1794828312000 | 1794835580000 | 2026-11-16T11:25:12Z | 121 | `discovery` |
+| `tmdb_257211` | `стажер\|2015` | `ch779` | 1794828312000 | 1794835580000 | 2026-11-16T11:25:12Z | 121 | `discovery` |
+| `tmdb_257211` | `стажер\|2015` | `ch1581` | 1794851327000 | 1794858617000 | 2026-11-16T17:48:47Z | 122 | `discovery` |
+| `tmdb_257211` | `стажер\|2015` | `ch1307` | 1794922207000 | 1794929492000 | 2026-11-17T13:30:07Z | 121 | `discovery` |
+| `tmdb_75656` | `иллюзия обмана\|2013` | `ch1308` | 1794823324000 | 1794830238000 | 2026-11-16T10:02:04Z | 115 | `discovery` |
+| `tmdb_75656` | `иллюзия обмана\|2013` | `ch827` | 1794837344000 | 1794844792000 | 2026-11-16T13:55:44Z | 124 | `discovery` |
+| `tmdb_976720` | `эра выживания\|2022` | `ch4073` | 1794672467000 | 1794679312000 | 2026-11-14T16:07:47Z | 114 | `discovery` |
+| `tmdb_745` | `шестое чувство\|` | `ch1734` | 1794803761000 | 1794810203000 | 2026-11-16T04:36:01Z | 107 | `discovery` |
+| `tmdb_745` | `шестое чувство\|` | `ch835` | 1794856860000 | 1794863160000 | 2026-11-16T19:21:00Z | 105 | `discovery` |
+| `tmdb_556694` | `три тысячи лет желаний\|2022` | `ch2676` | 1794665166000 | 1794671669000 | 2026-11-14T14:06:06Z | 108 | `discovery` |
+| `tmdb_556694` | `три тысячи лет желаний\|2022` | `ch1545` | 1794678360000 | 1794684840000 | 2026-11-14T17:46:00Z | 108 | `discovery` |
+| `tmdb_556694` | `три тысячи лет желаний\|2022` | `ch779` | 1794678360000 | 1794684840000 | 2026-11-14T17:46:00Z | 108 | `discovery` |
+| `tmdb_556694` | `три тысячи лет желаний\|2022` | `ch1443` | 1794756019000 | 1794762522000 | 2026-11-15T15:20:19Z | 108 | `discovery` |
+| `tmdb_556694` | `три тысячи лет желаний\|2022` | `ch1545` | 1794816176000 | 1794822664000 | 2026-11-16T08:02:56Z | 108 | `discovery` |
+| `tmdb_556694` | `три тысячи лет желаний\|2022` | `ch779` | 1794816176000 | 1794822664000 | 2026-11-16T08:02:56Z | 108 | `discovery` |
+| `tmdb_556694` | `три тысячи лет желаний\|2022` | `ch789` | 1794894728000 | 1794901216000 | 2026-11-17T05:52:08Z | 108 | `discovery` |
+
+**Slots that are not retained.** The 11 keys store 29 current shows, but their observations record more airings than that (for example `аватар|2009` has 10 airings and three current shows). Slots outside the published window, or older than the retained generation, are not stored per slot. They are not reconstructed here: their lengths exist only as the up-to-twelve `durations` values, and their channels and starts are unavailable. The same holds for the 22 keys without a current show and for the archived observations of the four archive-only keys.
 
 ## User impact
 
@@ -114,7 +199,7 @@ A slot that does not fit a known Film stays a discovery observation. The existin
 
 - Code: none. A guard for the series-title alias would need a rule that rejects a real alias, which ADR 0151 declined (Films absent from the index are not visible, and 87 against 95 is inside the accepted band). No ADR change.
 - Data: none now. If the owner wants the 87 minute SpongeBob show or the `tmdb_400160` series-title alias removed, that is a separate, scoped correction with its own write set and readback, and needs an owner decision. It is not part of this record and does not republish the EPG.
-- The 11 `known_epg_alias` decisions are historical. They stay until the next natural resolver chunk or an owner decision; nothing is rewritten here.
+- The 11 `known_epg_alias` decisions are historical and are not expected to change by themselves (see the lifecycle note above). Replacing one is a separate owner decision with its own write set and readback; nothing is rewritten here.
 
 ## Limits
 
