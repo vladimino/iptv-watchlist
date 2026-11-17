@@ -54,7 +54,7 @@ async function seedLedger(env,pad,archive){
  return length;
 }
 async function publishSynthetic(env){
- env.epgDiagnostic={domain:'offline-fixture',resourceId:'offline-fixture'};
+ env.offlineLedgerFixture={domain:'offline-fixture'};
  env.DISCOVERY_LEDGER_MODE='frozen';
  const reentry=reentryRow();
  const segment=ledgerArchiveSegment(reentry.key),segmentKey=ledgerArchiveSegmentKey(segment,'write-1'),manifestId='manifest-known-length';

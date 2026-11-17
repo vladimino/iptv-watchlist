@@ -1,5 +1,5 @@
-// AIR-457 retirement guard (replaces the AIR-456 H1 "binding names a real database" guard). The Worker `iptv` carries NO diagnostic binding, var, Workflow or route:
-// the diagnostic D1 / EU R2 / Workflow can be deprovisioned without an orphan reference. The inert modules, ADR 0121/0124 and the dated evidence stay.
+// AIR-457 / AIR-521 retirement guard (ADR 0160). The Worker `iptv` carries NO diagnostic binding, var, Workflow or route (AIR-457), and since AIR-521 the retired canary
+// modules, provisioning script and diagnostic migrations are gone from the tree and from the BUILT bundle. ADR 0121/0124/0139 and the dated evidence stay as history.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
@@ -15,4 +15,19 @@ assert.equal(config.keep_vars,true,'keep_vars unchanged');
 const worker=fs.readFileSync('src/worker.js','utf8'),build=fs.readFileSync('build.mjs','utf8');
 assert.doesNotMatch(worker,/api\/epg\/diagnostic|EpgDiagnosticRun\.route/,'the Worker does not route the diagnostic API');
 assert.doesNotMatch(build,/export class EpgDiagnosticWorkflow/,'the bundle entry does not export the diagnostic Workflow class');
-console.log('EPG diagnostic retirement: no diagnostic binding, var, Workflow class or route remains; production bindings unchanged passed');
+// AIR-521: the canary code is not merely unrouted, it does not exist.
+for(const gone of ['src/epg-diagnostic.js','src/epg-diagnostic-run.js','src/epg-replay.js','scripts/epg-diagnostic-provision.mjs','diagnostic-migrations'])assert.equal(fs.existsSync(gone),false,gone+' is retired and must not return');
+assert.doesNotMatch(build,/epg-diagnostic|epg-replay|runEpgDiagnosticWorkflow/,'build.mjs concatenates and exports no canary module');
+const entry=build.slice(build.indexOf("fs.writeFileSync('dist/server/workflow-entry.js'"));
+assert.deepEqual([...entry.matchAll(/export class (\w+)/g)].map(match=>match[1]),['DiscoveryWorkflow','RatingsWorkflow','EpgWorkflow','ProducerWorkflow'],'only the production Workflow classes are exported');
+// (scripts/test-classification.mjs legitimately names this guard file, so it is the one exclusion.) The marker the canary used to share is now an offline-fixture-only name; no source may mention the canary identifiers again.
+const CANARY=/EpgDiagnostic|EpgReplay|epgDiagnostic|epg-diagnostic|EPG_DIAGNOSTIC|iptv-epg-diagnostic|epg_diagnostic/;
+for(const dir of ['src','scripts','public'])for(const file of fs.readdirSync(dir,{recursive:true,withFileTypes:true}))if(file.isFile()&&/\.(m?js|json|sql)$/.test(file.name)&&file.name!=='test-classification.mjs'){
+ const path=(file.parentPath||file.path)+'/'+file.name;assert.doesNotMatch(fs.readFileSync(path,'utf8'),CANARY,path+' references the retired EPG diagnostic canary');
+}
+// The deployed artifact, not only the sources: `npm run build` must have produced a bundle without the canary.
+for(const artifact of ['dist/server/index.js','dist/server/workflow-entry.js']){
+ assert.equal(fs.existsSync(artifact),true,artifact+' is built before the tests');
+ assert.doesNotMatch(fs.readFileSync(artifact,'utf8'),CANARY,artifact+' carries no retired canary code');
+}
+console.log('EPG diagnostic retirement: no diagnostic binding, var, Workflow class, route, module or bundle code remains; production bindings unchanged passed');
