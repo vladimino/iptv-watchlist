@@ -977,7 +977,7 @@ function adaptivePredictionBatch(queue,capacity={}){
  return {batchSize:size,reason:known?'backlog_and_usage':'backlog_usage_unknown_conservative_cap_12',usageKnown:known,remainingPercent:remaining,};
 }
 function safePredictionReason(value){
- const text=String(value||'');if(['external_termination','retry_backoff','format_error_storm','model_unavailable','api_error','lease_lost'].includes(text))return text;if(/quota|usage|limit/i.test(text))return 'quota';if(/time|deadline/i.test(text))return 'time_budget';if(/parse|json/i.test(text))return 'parse_error';if(/profile/i.test(text))return 'profile_changed';if(/lease|interrupt/i.test(text))return 'lease_expired';if(/storage|persist|checkpoint/i.test(text))return 'storage_error';if(/supersed|priority/i.test(text))return 'priority_changed';return text?'model_error':null;
+ const text=String(value||'');if(['external_termination','retry_backoff','format_error_storm','model_unavailable','api_error','lease_lost','client_state_lost','manifest_unusable'].includes(text))return text;if(/quota|usage|limit/i.test(text))return 'quota';if(/time|deadline/i.test(text))return 'time_budget';if(/parse|json/i.test(text))return 'parse_error';if(/profile/i.test(text))return 'profile_changed';if(/lease|interrupt/i.test(text))return 'lease_expired';if(/storage|persist|checkpoint/i.test(text))return 'storage_error';if(/supersed|priority/i.test(text))return 'priority_changed';return text?'model_error':null;
 }
 const RUNNER_LEASE_KEY=ENRICHMENT_KEY+'runner-lease.json';
 const RUNNER_LEASE_TTL=15*60000;
@@ -1041,7 +1041,7 @@ async function runnerStarted(env,run,resumed,queue,inputs=null){
 }
 const STOP_EVENT_PREFIX=ENRICHMENT_KEY+'stop-events/';
 function systemicReason(reason){
- const text=String(reason||'');if(['quota','model_unavailable','api_error','storage_error','lease_lost','format_error_storm','profile_changed','lease_expired','external_termination','model_error','runner_aborted','time_budget','priority_changed'].includes(text))return text;
+ const text=String(reason||'');if(['quota','model_unavailable','api_error','storage_error','lease_lost','format_error_storm','profile_changed','lease_expired','external_termination','model_error','runner_aborted','time_budget','priority_changed','client_state_lost','manifest_unusable'].includes(text))return text;
  if(/quota|usage|limit/i.test(text))return 'quota';if(/lease/i.test(text))return 'lease_lost';if(/profile|model/i.test(text))return 'model_unavailable';return 'storage_error';
 }
 async function flushStopEvent(env,record,key){
@@ -1154,11 +1154,11 @@ async function eventOutboxStatus(env){
   return {pending:entries.filter(([,entry])=>!entry?.quarantined).length,quarantined:entries.filter(([,entry])=>entry?.quarantined).length,oldestSince:since,maxAttempts:EVENT_OUTBOX_ATTEMPTS};
  }catch{return {pending:null,quarantined:null,oldestSince:null,maxAttempts:EVENT_OUTBOX_ATTEMPTS};}
 }
-const PREDICTION_STEP_NAMES=['start','next','submit','heartbeat','complete'];
+const PREDICTION_STEP_NAMES=['start','next','submit','heartbeat','complete','validate','manifest','hold'];
 const CALLER_FAULT_ORIGINS=['worker_http','transport','model_provider','orchestrator','unknown'];
-const EXTERNAL_STOPS=['api_error','model_unavailable','model_error','external_termination'];
+const EXTERNAL_STOPS=['api_error','model_unavailable','model_error','external_termination','client_state_lost','manifest_unusable'];
 const NORMAL_COMPLETE=['queue_empty','eligible_queue_empty','parse_error','retry_backoff','manifest_spent'];
-const FAULT_REASONS=['quota','model_unavailable','api_error','storage_error','lease_lost','format_error_storm','profile_changed','lease_expired','external_termination','model_error','runner_aborted','time_budget','priority_changed'];
+const FAULT_REASONS=['quota','model_unavailable','api_error','storage_error','lease_lost','format_error_storm','profile_changed','lease_expired','external_termination','model_error','runner_aborted','time_budget','priority_changed','client_state_lost','manifest_unusable'];
 function safeRequestId(value){return typeof value==='string'&&/^[A-Za-z0-9_-]{1,80}$/.test(value)?value:null;}
 function predictionRequestId(request){return safeRequestId(request?.headers?.get?.('X-Request-Id'))||crypto.randomUUID();}
 function predictionStep(partial){
@@ -2660,6 +2660,11 @@ async function batchItemDigest(id,item){
 }
 function validateBatchSubmitBody(body){
  if(!isObject(body)||!isText(body.runId,100)||!Number.isInteger(body.epoch)||body.epoch<1)return json({error:'Invalid runId or epoch'},400);
+ if(body.useHeld===true){
+  if(body.items!==undefined)return json({error:'useHeld cannot be combined with items'},400);
+  if(body.dryRun===true)return json({error:'useHeld is not accepted with dryRun'},400);
+  return null;
+ }
  if(!Array.isArray(body.items)||!body.items.length||body.items.length>BATCH_RUNNER.submitMaxItems)return json({error:'Expected 1–'+BATCH_RUNNER.submitMaxItems+' items'},400);
  {const unknown=unknownItemKeyIssues(body.items,BATCH_ITEM_KEYS);if(unknown.length)return json({error:'Invalid item',issues:unknown},400);}
  for(const item of body.items)if(!isObject(item)||!isText(item.filmId,100)||item.fingerprint!==undefined&&!isObject(item.fingerprint)||item.prediction!==undefined&&!isObject(item.prediction)||item.failure!==undefined&&!isObject(item.failure)||item.assessment!==undefined&&!isObject(item.assessment))return json({error:'Invalid item'},400);
@@ -2862,6 +2867,12 @@ async function batchSubmit(env,body,requestId){
  const notD1=await batchRequiresD1(env);if(notD1)return notD1;
  if(body.dryRun===true)return batchSubmitDryRun(env,body);
  const run=await checkedRun(env,body.runId);if(!run)return json({error:'Unknown run'},404);
+ if(body.useHeld===true){
+  const held=await loadJSON(env,ENRICHMENT_KEY+'batch-hold/'+body.runId+'.json');
+  if(!held||held.epoch!==body.epoch||held.runId!==body.runId||!Array.isArray(held.items)||!held.items.length)return json({error:'No held items for this run',code:'hold_unavailable',runId:body.runId},409);
+  body={...body,items:held.items};delete body.useHeld;
+  const filled=validateBatchSubmitBody(body);if(filled)return filled;
+ }
  if(run.protocol!==BATCH_PROTOCOL)return wrongProtocolResponse();
  if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);
  // A caller's wrong epoch is the caller's error, not a loss of ownership: it must not stop the real owner's run, so it is not answered `lease_lost` (which records a stop).
@@ -3069,6 +3080,40 @@ function batchManifestPartBody(stored,part,filmId){
  }
  return undefined;
 }
+function batchHoldKey(runId){return ENRICHMENT_KEY+'batch-hold/'+runId+'.json';}
+function heldItemBody(item){return batchPick(item,BATCH_ITEM_KEYS);}
+async function ownedBatchHoldPart(env,runId,part,filmId){
+ const held=await loadJSON(env,batchHoldKey(runId));
+ if(part==='hold')return {kind:'hold',runId,epoch:held?.epoch||null,manifestHash:held?.manifestHash||null,filmIds:Array.isArray(held?.items)?held.items.map(item=>item.filmId):[]};
+ const item=(Array.isArray(held?.items)?held.items:[]).find(row=>row.filmId===filmId);
+ if(!item)return null;
+ return {kind:'item',runId,manifestHash:held.manifestHash,filmId,item};
+}
+async function batchHold(env,body){
+ if(!isObject(body)||!isText(body.runId,100)||!Number.isInteger(body.epoch)||body.epoch<1)return json({error:'Invalid runId or epoch'},400);
+ if(!Array.isArray(body.items)||!body.items.length||body.items.length>BATCH_RUNNER.submitMaxItems)return json({error:'Expected 1–'+BATCH_RUNNER.submitMaxItems+' items'},400);
+ {const unknown=unknownItemKeyIssues(body.items,BATCH_ITEM_KEYS);if(unknown.length)return json({error:'Invalid item',issues:unknown},400);}
+ for(const item of body.items)if(!isObject(item)||!isText(item.filmId,100)||item.fingerprint!==undefined&&!isObject(item.fingerprint)||item.prediction!==undefined&&!isObject(item.prediction)||item.failure!==undefined&&!isObject(item.failure)||item.assessment!==undefined&&!isObject(item.assessment))return json({error:'Invalid item'},400);
+ if(new Set(body.items.map(item=>String(item.filmId))).size!==body.items.length)return json({error:'Duplicate filmId'},400);
+ const bytes=new TextEncoder().encode(JSON.stringify(body.items)).length;
+ if(bytes>BATCH_RUNNER.submitMaxBodyBytes)return json({error:'This group is '+bytes+' bytes, over the '+BATCH_RUNNER.submitMaxBodyBytes+' byte hold limit'},400);
+ const notD1=await batchRequiresD1(env);if(notD1)return notD1;
+ const run=await checkedRun(env,body.runId);if(!run)return json({error:'Unknown run'},404);
+ if(run.protocol!==BATCH_PROTOCOL)return wrongProtocolResponse();
+ if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null},409);
+ if(Number.isInteger(run.epoch)&&run.epoch!==body.epoch)return json({error:'Epoch does not match this run',code:'epoch_mismatch',runId:run.runId},409);
+ const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);
+ const selected=new Set(run.selectedIds||[]);
+ const missing=body.items.map(item=>item.filmId).filter(id=>!selected.has(id));
+ if(missing.length)return json({error:'Film not in manifest',code:'not_in_manifest',filmIds:missing},409);
+ const stored=await loadJSON(env,batchHoldKey(run.runId))||{runId:run.runId,epoch:body.epoch,manifestHash:run.manifestHash,items:[]};
+ const byId=new Map((Array.isArray(stored.items)?stored.items:[]).map(item=>[item.filmId,item]));
+ for(const item of body.items)byId.set(item.filmId,heldItemBody(item));
+ const next={runId:run.runId,epoch:body.epoch,manifestHash:run.manifestHash,heldAt:new Date().toISOString(),items:[...byId.values()]};
+ if(next.items.length>BATCH_RUNNER.submitMaxItems)return json({error:'Hold would exceed '+BATCH_RUNNER.submitMaxItems+' items'},400);
+ await saveJSON(env,batchHoldKey(run.runId),next);
+ return json({status:'held',runId:run.runId,epoch:body.epoch,manifestHash:run.manifestHash,filmIds:next.items.map(item=>item.filmId),counts:{held:next.items.length}});
+}
 function assembleOwnedBatchManifest(envelope,profilePart,contractPart,filmParts){
  if(!isObject(envelope)||envelope.kind!=='envelope'||!Array.isArray(envelope.parts))return {ok:false,code:'incomplete_manifest'};
  if(!isObject(profilePart)||profilePart.kind!=='profile'||profilePart.manifestHash!==envelope.manifestHash)return {ok:false,code:'incomplete_manifest'};
@@ -3084,14 +3129,19 @@ function assembleOwnedBatchManifest(envelope,profilePart,contractPart,filmParts)
 }
 async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
  if(!isText(runId,100))return {status:400,body:{error:'Invalid runId',code:'invalid_run_id'}};
- if(!['envelope','profile','contract','film'].includes(part))return {status:400,body:{error:'Invalid part',code:'invalid_part'}};
- if(part==='film'&&(typeof filmId!=='string'||!filmId))return {status:400,body:{error:'filmId required',code:'invalid_film_id'}};
+ if(!['envelope','profile','contract','film','hold','item'].includes(part))return {status:400,body:{error:'Invalid part',code:'invalid_part'}};
+ if((part==='film'||part==='item')&&(typeof filmId!=='string'||!filmId))return {status:400,body:{error:'filmId required',code:'invalid_film_id'}};
  const run=await checkedRun(env,runId);
  if(!run)return {status:404,body:{error:'Unknown run',code:'unknown_run'}};
  const lease=await loadJSON(env,RUNNER_LEASE_KEY);
  if(!(lease?.runId===runId&&Number(lease.expiresAt)>Date.now()))return {status:409,body:{error:'lease_lost',code:'lease_lost'}};
  if(run.protocol!==BATCH_PROTOCOL)return {status:409,body:{error:'wrong_protocol',code:'wrong_protocol'}};
  if(run.status!=='running')return {status:409,body:{error:'Run already complete',code:'run_not_running'}};
+ if(part==='hold'||part==='item'){
+  const held=await ownedBatchHoldPart(env,runId,part,filmId);
+  if(held==null)return {status:404,body:{error:'Unknown held film',code:'unknown_film'}};
+  return {status:200,body:held};
+ }
  const stored=await loadJSON(env,ENRICHMENT_KEY+'batch-manifest/'+runId+'.json');
  if(!usableBatchManifest(stored))return {status:409,body:{error:'manifest_unavailable',code:'manifest_unavailable'}};
  const body=batchManifestPartBody(stored,part,filmId);
@@ -3210,6 +3260,13 @@ async function enrichmentComplete(env,body,requestId){
  if(fault.value&&!FAULT_REASONS.includes(faultReason))return json({error:'Fault requires an external stop reason'},400);
  const attributed=externalAttribution(faultReason,fault.value);if(attributed)run.callerFault=attributed;
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
+ if(isBatchV2Run(run)&&body.reason==='external_termination'){
+  const held=await loadJSON(env,ENRICHMENT_KEY+'batch-hold/'+run.runId+'.json');
+  const heldIds=(Array.isArray(held?.items)?held.items:[]).map(item=>item.filmId).filter(id=>id&&!SETTLED_STATUSES.includes(run.results?.[id])&&!run.failures?.[id]);
+  if(heldIds.length)return json({error:'Held submit-ready items remain; submit them with useHeld',code:'held_unsubmitted',runId:run.runId,epoch:run.epoch,filmIds:heldIds,recover:{tool:'prediction_batch_submit',useHeld:true}},409);
+  const progressed=!!run.firstSubmitAt||Object.keys(run.results||{}).length>0||Object.keys(run.failures||{}).length>0;
+  if(!progressed&&Array.isArray(run.selectedIds)&&run.selectedIds.length)return json({error:'Owned run still has unsubmitted films; recover parts or complete with client_state_lost',code:'client_state_lost',runId:run.runId,epoch:run.epoch,manifestHash:run.manifestHash||null,filmIds:run.selectedIds,recover:{tools:['prediction_batch_manifest','prediction_batch_hold']}},409);
+ }
  if(body.reason&&!NORMAL_COMPLETE.includes(body.reason)){const stopped=await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null});await settleExpiredDiagnostics(env);return json(stopped);}
  // ADR 0136: spending every selected manifest film is a normal complete for batch_v2 even when the global queue still has ready films. Unsubmitted / deferred_budget slots fail closed; profile/contract/lease stops stay as they are.
  if(body.reason==='manifest_spent'){
@@ -3586,6 +3643,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/start'&&request.method==='POST')return diagnosedStart(env,body,requestId);
  // batchSubmit takes the gate, then the step recorder and the writer lease, for a real call; a dry run takes none of them and writes nothing at all.
  if(path==='/api/enrichment/batch/submit'&&request.method==='POST')return timedBatchStep(env,'batch_submit',body,requestId,timed=>batchSubmit(timed,body,requestId));
+ if(path==='/api/enrichment/batch/hold'&&request.method==='POST')return timedBatchStep(env,'batch_hold',body,requestId,timed=>batchHold(timed,body));
  if(path==='/api/enrichment/batch/start'&&request.method==='POST')return timedBatchStep(env,'batch_start',body,requestId,timed=>batchStartRoute(timed,body,requestId));
  if(path==='/api/enrichment/runs'&&request.method==='GET'){const text=url.searchParams.get('limit')||'10';if(!/^\d+$/.test(text)||Number(text)<1||Number(text)>100)return json({error:'Invalid limit (1–100)'},400);return json(await diagnosticHistory(env,Number(text)));}
  if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');let queue;try{queue=await refreshPredictionQueue(env,report,'manual_reconcile');}catch(e){if(e?.name==='PredictionQueueConflictError')return json({error:'Prediction queue changed during write; read it again',code:e.code},409);throw e;}return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}

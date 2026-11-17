@@ -76,7 +76,7 @@ for(const [films,expected] of [[1,1],[100,100],[130,100]]){
  const w=await ready(1);await reconcile(w);
  const first=await batch(w);assert.equal(first.status,200);
  // the only film is written through v5 steps of another run after this one stops; a later start finds nothing eligible
- const stop=await w.api('complete',{runId:first.data.runId,reason:'external_termination'});assert.equal(stop.status,200);
+ const stop=await w.api('complete',{runId:first.data.runId,reason:'client_state_lost'});assert.equal(stop.status,200);
  const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.status,200);
  const step=await w.api('next',{runId:v5.data.runId,batchSize:1});
  const sub=await w.api('submit',{runId:v5.data.runId,items:[{filmId:step.data.items[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});assert.equal(sub.status,200);
@@ -221,7 +221,7 @@ for(const [films,expected] of [[1,1],[100,100],[130,100]]){
  const old=await w.api('heartbeat',{runId:first.data.runId});assert.notEqual(old.status,200,'the old run cannot be renewed');
  const hb3=await w.api('heartbeat',{runId:second.data.runId});assert.equal(hb3.data.epoch,2);
  // a release keeps the epoch, so the next acquire increments it
- const done=await w.api('complete',{runId:second.data.runId,reason:'external_termination'});assert.equal(done.status,200);
+ const done=await w.api('complete',{runId:second.data.runId,reason:'client_state_lost'});assert.equal(done.status,200);
  assert.equal(JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d).epoch,2,'a release keeps the epoch');
  const third=await batch(w);assert.equal(third.data.lease.epoch,3);
 }
@@ -396,7 +396,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const queue=JSON.parse(sql(w.file,'SELECT chunk_text FROM prediction_queue ORDER BY seq').map(r=>r.chunk_text).join(''));assert.equal(queue.lastBatch.reason,'quota','the queue keeps its lastBatch bookkeeping');assert.equal(queue.lastBatch.runId,null);
  assert.ok([...d.added,...d.changed].some(k=>k.startsWith('enrichment/run-diagnostics')),'the attempt is recorded as a start attempt');
  // an empty queue is a noop with the same absence of run history
- const one=await ready(1);await reconcile(one);const first=await batch(one);await one.api('complete',{runId:first.data.runId,reason:'external_termination'});
+ const one=await ready(1);await reconcile(one);const first=await batch(one);await one.api('complete',{runId:first.data.runId,reason:'client_state_lost'});
  const v5=await one.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});const step=await one.api('next',{runId:v5.data.runId,batchSize:1});
  await one.api('submit',{runId:v5.data.runId,items:[{filmId:step.data.items[0].filmId,fingerprint:one.fingerprint,prediction:one.prediction}]});await one.api('complete',{runId:v5.data.runId});
  const b=r2Snapshot(one),n0=runs(one),leaseN=leaseRow(one),noop=await batch(one);
@@ -497,5 +497,35 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  for(const film of recovered.films){assert.ok(film.modelMetadata?.synopsis);assert.ok(r.data.films.some(f=>f.filmId===film.filmId));}
  assert.equal(w.ctx.assembleOwnedBatchManifest(envelope,profile,contract,films.slice(0,4)).ok,false,'an incomplete film set is not usable');
  const second=await batch(w,{manifestSize:5});assert.equal(second.data.status,'already_running','readback is not a second start');
+}
+
+// AIR-510: interrupt before validate (lost contract) refuses a blanket external_termination; interrupt after validate
+// recovers byte-identical held items without regenerating.
+{
+ const w=await ready(5);await reconcile(w);
+ const started=await batch(w,{manifestSize:5});assert.equal(started.status,200);
+ const lost=await w.api('complete',{runId:started.data.runId,reason:'external_termination'});
+ assert.equal(lost.status,409);assert.equal(lost.data.code,'client_state_lost');
+ assert.equal(lost.data.filmIds.length,5);assert.equal(started.data.manifestHash,lost.data.manifestHash);
+ const honest=await w.api('complete',{runId:started.data.runId,reason:'client_state_lost'});
+ assert.equal(honest.status,200,JSON.stringify(honest.data).slice(0,200));
+}
+{
+ const w=await ready(5);await reconcile(w);
+ const started=await batch(w,{manifestSize:5});assert.equal(started.status,200);
+ const items=started.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
+ const held=await w.api('batch/hold',{runId:started.data.runId,epoch:started.data.lease.epoch,items});
+ assert.equal(held.status,200,JSON.stringify(held.data).slice(0,240));
+ assert.equal(held.data.status,'held');assert.equal(held.data.filmIds.length,5);
+ const blocked=await w.api('complete',{runId:started.data.runId,reason:'external_termination'});
+ assert.equal(blocked.status,409);assert.equal(blocked.data.code,'held_unsubmitted');
+ assert.deepEqual(blocked.data.filmIds.slice().sort(),held.data.filmIds.slice().sort());
+ const dropped=null;void dropped;
+ const submitted=await w.api('batch/submit',{runId:started.data.runId,epoch:started.data.lease.epoch,useHeld:true});
+ assert.equal(submitted.status,200,JSON.stringify(submitted.data).slice(0,300));
+ assert.equal(submitted.data.results.length,5);
+ assert.ok(submitted.data.results.every(r=>r.status==='created'||r.status==='already_current'));
+ const spent=await w.api('complete',{runId:started.data.runId,reason:'manifest_spent'});
+ assert.equal(spent.status,200,JSON.stringify(spent.data).slice(0,200));
 }
 console.log('prediction-batch-start: ok');

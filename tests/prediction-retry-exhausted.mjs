@@ -7,6 +7,7 @@ const ready=async n=>{const w=await flowWorld({films:n});assert.equal((await w.a
 const start=async w=>{const r=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled'});assert.equal(r.status,200,JSON.stringify(r.data).slice(0,240));return r.data;};
 const submit=(w,m,items)=>w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items});
 const stop=(w,m)=>w.api('complete',{runId:m.runId,reason:'external_termination'});
+const abort=(w,m)=>w.api('complete',{runId:m.runId,reason:'client_state_lost'});
 const queue=w=>JSON.parse(sql(w.file,'SELECT chunk_text FROM prediction_queue ORDER BY seq').map(r=>r.chunk_text).join(''));
 const ids=m=>m.films.map(f=>f.filmId);
 const storedRun=(w,m)=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+m.runId+"'")[0].d);
@@ -45,7 +46,7 @@ async function failFilm(w,filmId){
  const next=await start(w);
  assert.ok(!ids(next).includes(target),'v2 start does not select an exhausted film');
  assert.ok(ids(next).length>0,'neighbours remain eligible');
- await stop(w,next);
+ await abort(w,next);
  const rebuilt=await w.api('queue/reconcile',{});
  assert.equal(rebuilt.status,200);
  const after=queue(w);
@@ -53,7 +54,7 @@ async function failFilm(w,filmId){
  assert.ok(!after.hotPending.includes(target)&&!after.coldPending.includes(target));
  const again=await start(w);
  assert.ok(!ids(again).includes(target));
- await stop(w,again);
+ await abort(w,again);
 }
 
 {

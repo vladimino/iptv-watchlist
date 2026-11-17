@@ -108,7 +108,7 @@ sequenceDiagram
         loop Until every selected film is settled
             Task->>Task: Research and predict one film into the buffer
             opt Buffer holds 5 items, next item would pass 56 KiB, or end of manifest
-                Task->>MCP: prediction_batch_validate then prediction_batch_submit
+                Task->>MCP: prediction_batch_validate, prediction_batch_hold, then prediction_batch_submit (useHeld if the buffer was lost)
                 MCP->>D1: Commit per film, settle queue, renew lease
                 MCP-->>Task: Per-film results, replay same body after a lost answer
             end
