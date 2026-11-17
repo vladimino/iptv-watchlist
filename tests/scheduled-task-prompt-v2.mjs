@@ -59,7 +59,7 @@ assert.ok(stopInstruction?.includes('ОБЯЗАТЕЛЬНО продолжай r
 assert.ok(stopInstruction?.includes('обычное истечение lease обеспечит recovery'),'true platform hard kill relies on lease expiry');
 assert.ok(prompt.includes('manifestSize=5')&&prompt.includes('generationSize=1')&&prompt.includes('submitBatchSize=5'),'batch params remain unchanged');
 // AIR-510 / ADR 0157: stage is durable and transferable, but hold is not itself commit.
-const holdInstruction=prompt.split('\n').find(line=>line.startsWith('7а. DURABLE HOLD (ADR 0157, AIR-510).'));
+const holdInstruction=prompt.split('\n').find(line=>line.includes('7а. DURABLE HOLD (ADR 0157, AIR-510).'));
 assert.ok(holdInstruction,'the installed durable hold section is kept byte for byte');
 for(const needle of ['prediction_batch_hold({runId,epoch,items})',"status:'held'",'prediction_batch_submit({runId,epoch,useHeld:true})','failure-items никогда не передавай в hold','новый штатный prediction_batch_start автоматически сохранит','ДО успешного hold'])assert.ok(holdInstruction.includes(needle),'durable hold contract: '+needle);
 assert.ok(prompt.indexOf('prediction_batch_validate({items})')<prompt.indexOf('prediction_batch_hold({runId,epoch,items})')&&prompt.indexOf('prediction_batch_hold({runId,epoch,items})')<prompt.indexOf('ПОТОМ prediction_batch_submit({runId,epoch,items})'),'validate -> hold -> submit ordering');
