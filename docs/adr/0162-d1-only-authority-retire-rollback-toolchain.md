@@ -1,9 +1,9 @@
 # ADR 0162: D1 is the only authority; retire the R2 rollback and cutover toolchain
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-17  
 **Recorded at:** 2026-11-17  
-**Approval source:** owner decision of 2026-11-17 in the AIR-79 executor session ("D1 stays, no rollback to R2 is planned, no insurance for that case, clean everything"; the single rule, the residual risk and the marker read were each confirmed), to be recorded on [AIR-79](https://trello.com/c/485tlGLA) and accepted by the owner on this ADR  
+**Approval source:** owner decision of 2026-11-17 in the AIR-79 executor session ("D1 stays, no rollback to R2 is planned, no insurance for that case, clean everything"; the single rule, the residual risk and the marker read were each confirmed), recorded on [AIR-79](https://trello.com/c/485tlGLA) on 2026-11-17; accepted as written in the independent review of [PR #728](https://github.com/vladimino/iptv-watchlist/pull/728)  
 **Related work:** [AIR-79](https://trello.com/c/485tlGLA); decision brief in [AIR-79 D-2 inventory, closeout ledger and D-1 preparation](../evidence/d1-migration/air-79-d2-closeout-and-d1-preparation-2026-11-17.md)  
 **Supersedes:** in part [ADR 0073](0073-metadata-cache-d1-authority.md), [ADR 0078](0078-d1-authoritative-prediction-domain.md), [ADR 0079](0079-d1-authoritative-published-epg.md), [ADR 0081](0081-d1-authoritative-owner-reviews.md), [ADR 0084](0084-d1-authoritative-ratings.md) and [ADR 0085](0085-d1-authoritative-discovery.md): their import, hold, activate, seal, release and revert procedures only. Their schema, fence and per-domain authority decisions stay.  
 **Superseded by:** None
@@ -21,7 +21,7 @@ The Worker never calls any import, activate, seal, release or revert function; o
 1. **One rule for every domain:** the Worker serves a domain only when its marker says D1 is the authority (`mode` `d1`, and `cutover` `open` where the domain has a cutover column). For mutable predictions the `writes` column is the import fence of the `r2` mode and is not part of this rule: `activatePredictionDomain` moves `mode` to `d1` and leaves `writes` `held`, which is the normal state after activation. Any other marker value, a missing database binding, a missing `schema_contract` or missing domain tables is an explicit refusal. Nothing falls back to R2 as an authority.
 2. **Retire the whole toolchain:** the import, hold, activate, seal, release, revert and reset commands of the six migrated domains, their operator scripts and their tests, and the Worker arms that exist only for the `r2`, `prepared`, `legacy` and cutover-`held` states. Film/Person follows the same rule: its `legacy`, `r2` and `prepared` arms go once the tests that load the Worker without the reader have a shared loader.
 3. **Local development and the harness** keep explicit, opt-in stand-ins (such as `PUBLISHED_EPG_DB_OPTIONAL=standin`, `OWNER_REVIEW_DB_OPTIONAL=standin`); an implicit `legacy` answer for a missing binding is not kept. Production asserts the stand-ins are absent.
-4. **Kept, because they are not rollback:** CAS and fenced batches, generation fences, `*_DB_REQUIRED`, the R2 compatibility mirrors and their writers, immutable prediction and fingerprint bodies, raw inputs and archives, receipts and immutable Discovery segments, the Discovery `projector_window` fence, and the schema CHECK constraints that still allow the value `r2` (changing them is a migration with no benefit).
+4. **Kept, because they are not rollback:** CAS and fenced batches, the owner-review writer fence (`commit` in `src/owner-review-d1.js` refuses unless `writes` is `open`, in every mode; unlike the predictions import fence it stays, with its fail-closed tests), generation fences, `*_DB_REQUIRED`, the R2 compatibility mirrors and their writers, immutable prediction and fingerprint bodies, raw inputs and archives, receipts and immutable Discovery segments, the Discovery `projector_window` fence, and the schema CHECK constraints that still allow the value `r2` (changing them is a migration with no benefit).
 5. **Order:** one domain per change, smallest coupling first: owner reviews, metadata cache (which also gains the missing-binding refusal it lacks today), ratings documents, mutable predictions, published EPG, Discovery, then Film/Person after the shared test loader.
 
 Not decided here: [AIR-515](https://trello.com/c/FMWcvvWI) (poster hydration through `epg/discovered-films.json`) and [AIR-516](https://trello.com/c/03h5WhiT) (frozen metadata) stay separate.
@@ -45,7 +45,7 @@ Recovery after this decision is a forward-fix through the fenced adapters, or an
 
 ## Evidence
 
-- **Original decision:** owner, AIR-79 executor session, 2026-11-17; to be recorded on [AIR-79](https://trello.com/c/485tlGLA).
+- **Original decision:** owner, AIR-79 executor session, 2026-11-17; recorded on [AIR-79](https://trello.com/c/485tlGLA) the same day.
 - **Implementation:** not started; one pull request per domain as listed above.
 - **Dated verification:** [production markers read on 17 November](../evidence/d1-migration/air-79-d2-closeout-and-d1-preparation-2026-11-17.md#production-markers-read-on-17-november).
 - **Uncertainty:** the length of the D1 Time Travel window on the account plan, the live `*_DB_REQUIRED` bindings, and the content of ADRs 0017, 0051, 0076, 0108, 0141 and 0142 were not read; each code slice checks the documents it touches.
