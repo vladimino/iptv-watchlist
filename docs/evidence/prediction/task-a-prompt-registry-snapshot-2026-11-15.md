@@ -7,7 +7,7 @@ Read-only registry capture via the connected Automations peek action of Task `6a
 ## Observed state
 
 - Enabled: `true`. Timezone: `Europe/Madrid`. Nominal hourly trigger: `:00`.
-- Prompt installed at the historical 15 November capture: **34056 JavaScript characters**, SHA-256 `4662facc4d25d405ff3bc73ff6bdbede028a63e013502e334a5821dfdbd30247`. The text matched the then-current repository snapshot; the [maintained batch v2 canonical prompt](../../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md) now holds the later installed 39,274-character version (markers and separator newlines excluded).
+- Prompt installed at the historical 15 November capture: **34056 JavaScript characters**, SHA-256 `4662facc4d25d405ff3bc73ff6bdbede028a63e013502e334a5821dfdbd30247`. The text matched the then-current repository snapshot; the [maintained batch v2 canonical prompt](../../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md) now holds the later installed 41,243-character version (markers and separator newlines excluded).
 - Previous GitHub snapshot: 31761 characters, SHA-256 `97e1c54f1eed3a3ba8e40f060b7d135081155fdedfaac19cf5d3d61f00a700ac`.
 - Installed instructions include Production Task A source-selection/full-text fallback (variant D), research audit, required `failure.reason`, and the `deferred_budget` rule to preserve a previously accepted submit item or revalidate the actual changed item.
 - The frozen A/B dry-run prompt is a separate, non-production experiment and remains **15071 characters**, SHA-256 `a9b28e5a69efe963234243714ed3270924727d11311f0f82fb42539a30caf72d`.
@@ -84,6 +84,24 @@ Saved natural Task B/C/D reports around 17:11–17:52 UTC recorded **10/15 subst
 **Latest separate interruption:** a new owned scheduled run `64a77af9-3502-4be2-852a-56943e72ca7c` acquired a lease at 18:00:59 UTC (19:00 Madrid), returned Worker `batch_start` HTTP 200 and made no heartbeat, hold, submit or complete. Its lease expired at 18:15:59 UTC, and read-only runner status projected `lease_expired` (0 predictions). The 19:00 Task A and 19:15 Task B recorded `already_running` rather than adopting the run. The Worker recorded no server fault and no caller attribution; it is **not proven** which invocation owned the original start or why the caller failed to continue. This is not another caller-reported `external_termination`, but it defeats any blanket statement that no interruptions occurred after 16:29 Madrid. Recovery should be observed on a later **natural** run, without manual lease resets or model retries.
 
 The historical AIR-510 manifest/research hardening was accepted after observed successful recovery. This newer `lease_expired` is an unresolved reliability observation for AIR-451 stabilization and should not be silently declared fixed. The canonical documentation PR remains gated by independent exact-HEAD review and CI; no Worker or external Task configuration changed in this evidence update.
+
+## AIR-451 uniform Saved Task report and minute-named registry (17 November 2026 UTC)
+
+**Approval and scope.** The owner explicitly approved normalizing the current A/B/C/D Saved Task reports, removing Task A-specific research headings, renaming those four Tasks by their nominal hourly minutes and recording the final text and titles in [PR #661](https://github.com/vladimino/iptv-watchlist/pull/661). This was a Task prompt/title-only operation in the external Scheduled Tasks registry; no run_now, manual model execution, Worker, D1/R2, Cloudflare flag or scheduler changes.
+
+**Readback.** The four existing Task IDs below were read immediately before the update, updated only in their `prompt` and `title` fields, and read independently afterwards. All returned enabled=true, `exact_schedule`, their original hourly `DTSTART` and `RRULE:FREQ=HOURLY;INTERVAL=1`, and a prompt equal to the same installed string. The pre-change 39,274-character prompt was exactly equal across the four and to the previous repository snapshot.
+
+| Installed title after owner-approved change | Exact existing Task ID | Nominal minute | Unchanged DTSTART Europe/Madrid |
+| --- | --- | --- | --- |
+| `IPTV Predictions v2 00` | `6af7a2d8369081918b79bb2892bac0fe` | `:00` | `20261114T020000` |
+| `IPTV Predictions v2 15` | `6afaf2b2aed8819198eaff652f1fcb55` | `:15` | `20261116T131500` |
+| `IPTV Predictions v2 30` | `Automation_c8e5b4cc89d08191b47e979b726a60a3` | `:30` | `20261116T223000` |
+| `IPTV Predictions v2 45` | `Automation_d9436aec7d108191a3822a244e382592` | `:45` | `20261116T224500` |
+
+- Final installed **41243 JavaScript characters / 61643 UTF-8 bytes**, SHA-256 **`1602dabdcd7791cfb296623d692ab5a8be90c5db6a3785ba3d76a1fbd2fe2e33`** for all four Tasks. [Canonical executable PROMPT block](../../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md).
+- Delta only: neutral `3в. RESEARCH AUDIT ДЛЯ ВСЕХ BATCH V2 TASKS` and generic `3г` heading; strict step-11 Saved Task report with `### Итог`, `### Прогнозы`, `### Ошибки`, `### Очередь`, `### Research audit`, fixed fields, one audit record per film and a minimal noop template.
+- No change to manifestSize=5, generationSize=1, submitBatchSize=5, retry and termination logic, search limits, evidence rules, `prediction_batch_hold` or `prediction_batch_submit`. No change to the frozen AIR-450 dry-run text.
+- This is **installation/readback evidence, not evidence that four future natural runs follow the new formatting**. A later natural invocation is the appropriate formatting acceptance check. The task owner retains AIR-451 product acceptance; PR #661 remains unmerged pending independent review and exact-HEAD CI.
 
 ## Limits and verification
 

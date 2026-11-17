@@ -21,6 +21,22 @@ const sha=text=>createHash('sha256').update(text).digest('hex');
 const stated=doc.match(/\*\*Text below:\*\* (\d+) characters, SHA-256 `([0-9a-f]{64})`/),statedDry=doc.match(/\*\*Dry run text\*\*[^\n]*?: (\d+) characters, SHA-256 `([0-9a-f]{64})`/);
 assert.ok(stated&&statedDry,'headers state length and hash');
 assert.equal(prompt.length,Number(stated[1]));assert.equal(sha(prompt),stated[2]);
+// AIR-451: uniform installed Saved Task reports and human-readable minute-based registry titles.
+assert.equal(Buffer.byteLength(prompt,'utf8'),61643,'installed prompt UTF-8 byte count');
+assert.ok(!/RESEARCH AUDIT ДЛЯ PRODUCTION TASK A|для Production Task A/.test(prompt),'shared production research instructions must not depend on canary name');
+assert.ok(prompt.includes('3в. RESEARCH AUDIT ДЛЯ ВСЕХ BATCH V2 TASKS.')&&prompt.includes('3г. SOURCE SELECTION GATE / FULL-TEXT FALLBACK (для каждой batch v2 Task'),'all slots use identical research rules');
+const reportHeadings=['### Итог','### Прогнозы','### Ошибки','### Очередь','### Research audit'];
+const step11=prompt.slice(prompt.indexOf('11. После prediction_complete'));
+assert.ok(step11.includes('одинаковые заголовки, порядок, имена полей'),'report output layout must be constrained');
+for(let i=0;i<reportHeadings.length;i++)assert.ok(step11.indexOf(reportHeadings[i])>=0&&(i===0||step11.indexOf(reportHeadings[i])>step11.indexOf(reportHeadings[i-1])),'ordered report heading: '+reportHeadings[i]);
+for(const field of ['runId:','selected:','processed:','created:','recalculated:','failed:','hot:','cold:','deferredByRetry:','retryExhausted:','searchQueries:','openedUrls/outcome:','readOriginalSources:','F/P/S:','executionFinding:','gateStatus:','gateReason:','fullTextFallback:'])assert.ok(step11.includes(field),'mandatory report field: '+field);
+assert.ok(step11.includes('ТОЛЬКО «### Итог»'),'noop report is compact');
+const operationalRef=fs.readFileSync('docs/reference/scheduled-tasks.md','utf8');
+assert.ok(operationalRef.includes('IPTV Predictions v2 00')&&operationalRef.includes('6af7a2d8369081918b79bb2892bac0fe'),'exact live registry title/id for minute 00');
+assert.ok(operationalRef.includes('IPTV Predictions v2 15')&&operationalRef.includes('6afaf2b2aed8819198eaff652f1fcb55'),'exact live registry title/id for minute 15');
+assert.ok(operationalRef.includes('IPTV Predictions v2 30')&&operationalRef.includes('Automation_c8e5b4cc89d08191b47e979b726a60a3'),'exact live registry title/id for minute 30');
+assert.ok(operationalRef.includes('IPTV Predictions v2 45')&&operationalRef.includes('Automation_d9436aec7d108191a3822a244e382592'),'exact live registry title/id for minute 45');
+
 assert.equal(dry.length,Number(statedDry[1]));assert.equal(sha(dry),statedDry[2]);
 
 // 2. The generation steps 4, 5 and 6 are byte-identical in both prompts: an A/B changes grouping only.
