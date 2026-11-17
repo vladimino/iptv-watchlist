@@ -423,7 +423,8 @@ function catalogFilmState(records,tmdbId){
  if(verified.length&&verified.every(record=>record.state==='superseded'))return {state:'retired'};
  return {state:'conflict'};
 }
-// AIR-409: a canonical Film admitted by a verified rated archive (letterboxd/admissions/verified-films.json) that Discovery never admitted.
+// AIR-409: a canonical Film admitted by a verified rated archive (letterboxd/admissions/verified-films.json) that Discovery never admitted. At `open` (AIR-475) the fallback is
+// the D1 canonical Film itself (catalogCanonicalFilmFromD1), whatever admissions it has; the R2 receipt below is only the pre-open reader.
 // Read only, only when Discovery says "absent" and only while the Film/Person authority names R2 (legacy, r2, prepared; ADR 0099): `held`, `open` and an
 // unreadable marker fail closed and never fall back to R2. The receipt is the R2 identity decision, so it is bounded by the owner's R2 retirements
 // object and by D1 contradictions (a conflicting or second trusted TMDB id, a redirected Film); a Film whose projection is still pending is found. The entry must verify exactly as the rated-archive admission rules require (key tmdb_<n>, tmdb equal to the key,
@@ -444,7 +445,7 @@ async function catalogArchiveFallback(env,tmdbId){
  const gate=await FilmPersonAuthority.readAuthority(env);
  // AIR-374 P4 (owner decision 4): at `open` the R2 receipt and the R2 retirements object are frozen compatibility copies and are never read; the verified admission,
  // the identity claims and the retirement ledger come from D1. held and an unreadable marker fail closed (503) and never reach R2.
- if(gate.state==='open')return CanonicalCatalogReader.catalogAdmittedFilmFromD1(env,tmdbId);
+ if(gate.state==='open')return CanonicalCatalogReader.catalogCanonicalFilmFromD1(env,tmdbId);
  if(!gate.r2Allowed){const error=new Error(gate.state==='held'?'film_person_held':'film_person_not_open_read');error.code=error.message;throw error;}
  const result=await catalogArchiveFallbackR2(env,tmdbId,gate);
  // The marker is read again after the R2 and D1 reads: an answer read under one state and generation is never returned after the marker moved (r2 to prepared, prepared to open, held).

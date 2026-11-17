@@ -105,11 +105,11 @@ INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,
 INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:303','film:tmdb:300','${T}');`;
  const file=database('open');sqlite(file,seed);
  const env={DB:d1Standin(file)};
- const ask=(tmdb,e=env)=>reader.catalogAdmittedFilmFromD1(e,tmdb);
+ const ask=(tmdb,e=env)=>reader.catalogCanonicalFilmFromD1(e,tmdb);
  let r=await ask('300');assert.equal(r.state,'found');assert.deepEqual([r.film.id,r.film.title,r.film.year,r.film.shows.length],['tmdb_300','D1 title',2001,0]);
- r=await ask('301');assert.deepEqual([r.state,r.film.title,r.film.year],['found',null,null],'a title-less admission is still a Film');
+ r=await ask('301');assert.deepEqual([r.state,r.film.title,r.film.year],['found','Orig',null],'a title-less admission is still a Film, titled by the canonical original title');
  assert.equal((await ask('999')).state,'conflict','a conflicting claim of the typed id holds the identity');
- assert.equal((await ask('302')).state,'absent','a Film without an admission row is not admitted by D1');
+ r=await ask('302');assert.deepEqual([r.state,r.film.id,r.film.title,r.film.original,r.film.year,r.film.shows.length],['found','tmdb_302','Orig','Orig',null,0],'AIR-475: a retained canonical Film with no admission row is a Film');
  assert.equal((await ask('12345')).state,'absent','no Film at all');
  assert.equal((await ask('304')).state,'conflict','an untrusted claim is not the owner');
  assert.equal((await ask('305')).state,'conflict','a trusted but conflicting claim is not the owner');

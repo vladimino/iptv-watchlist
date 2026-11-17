@@ -50,7 +50,7 @@ const CATALOG_D1=[
  ['the re-read follows the overlay',"response=await OwnerReview.overlayCatalogResponse(env,response);\n if(first){","response=await OwnerReview.overlayCatalogResponse(env,response);\n if(first&&false){"],
 ];
 const WORKER=[
- ['open reads D1, not R2',"if(gate.state==='open')return CanonicalCatalogReader.catalogAdmittedFilmFromD1(env,tmdbId);",''],
+ ['open reads D1, not R2',"if(gate.state==='open')return CanonicalCatalogReader.catalogCanonicalFilmFromD1(env,tmdbId);",''],
  ['held and unknown never reach R2',"if(!gate.r2Allowed){const error","if(false){const error"],
  ['the new refusal codes are a 503',"'film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative']","]"],
  ['the R2 answer is re-checked against the marker',"const again=await FilmPersonAuthority.readAuthority(env);\n if(again.state!==gate.state||again.generation!==gate.generation){","const again=gate;\n if(again.state!==gate.state||again.generation!==gate.generation){"],
