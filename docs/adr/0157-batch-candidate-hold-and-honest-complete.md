@@ -1,51 +1,50 @@
-# ADR 0157: Persist validated batch items separately from the read-only preflight; refuse a blanket external_termination
+# ADR 0157: Transferable staged batch items drained by the next run
 
-**Status:** Proposed (code delivery; Product Owner architectural acceptance pending independent review)
+**Status:** Proposed (code delivery; Product Owner architectural acceptance pending independent review of this revision)
 **Original decision date:** 2026-11-17
 **Recorded at:** 2026-11-17
-**Approval source:** Implementation under [AIR-510](https://trello.com/c/01JAM4TP) after the 17 Nov 2026 08:07 Europe/Madrid production FAIL; this record is not a production GO
+**Approval source:** Owner BLOCK on PR #704 HEAD `b12b5bd2` (issue comment, 17 Nov 2026 ~10:06 Europe/Madrid). The earlier run-scoped hold recovery is **not** accepted.
 **Related work:** [AIR-510](https://trello.com/c/01JAM4TP); [ADR 0131](0131-batch-candidate-preflight-tool.md); [ADR 0136](0136-prediction-batch-manifest-size-and-spent-complete.md)
-**Supersedes:** None. Qualifies ADR 0131: `prediction_batch_validate` stays a pure preflight. Qualifies ADR 0136: `external_termination` is not a truthful complete for an owned five-film `batch_v2` run that has not submitted and still has recoverable state.
+**Supersedes:** None. Qualifies ADR 0131: `prediction_batch_validate` stays a pure preflight. Replaces the run-scoped hold recovery proposed earlier on this card.
 **Superseded by:** None
 
 ## Context
 
-The 16–17 Nov 2026 natural A/B/C/D series (prompts already carrying `prediction_batch_manifest`, Worker #703 at 100%) still lost 9 of 34 owned runs as `external_termination` with `firstSubmitAt=null`. Task B (`946948a1…`) validated all five films then lost the submit-ready objects. Task A (`fb56603c…`) lost the schema contract before preflight. The same `manifestHash` later succeeded on another slot. Connected MCP catalogs (including this session) still omitted `prediction_batch_manifest` after Worker deploy. ADR 0131 forbids I/O on `prediction_batch_validate`. Reinstalling the same Task texts is not a fix.
+The 16–17 Nov 2026 natural A/B/C/D series lost owned `batch_v2` runs as `external_termination` with `firstSubmitAt=null` after a passing preflight. A completed or terminated Task must not strand already validated, durably staged predictions. Recovery must happen on the **next normally scheduled run**, without Task A's `runId`, epoch or lease, and without owner-operated retry. The live A/B/C/D prompts do not call hold until a separate GO.
 
 ## Decision
 
-1. **`prediction_batch_validate` stays read-only.** No runId, lease, hold or storage. ADR 0131 is unchanged.
-2. **`prediction_batch_hold` is a separate writer.** After a valid preflight, the lease holder may persist 1–10 already generated items on `enrichment/batch-hold/<runId>.json` (epoch and `manifestHash` bound). Not a submit. Invalid extra keys refused. Films must be in `selectedIds`.
-3. **`prediction_batch_submit({useHeld:true})`** loads that hold, re-validates authoritatively, and commits. `items` must be omitted. Dry-run is refused. Replay of the same held body remains the existing submit identity.
-4. **Readback.** `prediction_batch_manifest` `part=hold` lists held filmIds; `part=item` returns one held object. Envelope/profile/contract/film parts are unchanged.
-5. **Honest complete, compatible with the installed A/B/C/D prompt (review P1-A).** `reason: external_termination` is **409 `held_unsubmitted`** only when `enrichment/batch-hold/<runId>.json` still has films that this run has not settled. Without a hold, the same reason remains **HTTP 200** and **releases the runner lease**, so the next 15-minute slot is not `already_running`. After a prompt GO that actually calls hold, recover with `prediction_batch_submit({useHeld:true})`, or complete with **`client_state_lost`** / **`manifest_unusable`**. Fault `failedStep` may be `validate`, `manifest` or `hold`.
-6. **Hold identity (review P1-B).** `prediction_batch_hold` CAS-merges via `mergeStoredJSON`. Per-film identity is `batchItemDigest`. An exact replay writes nothing. A different digest for the same `filmId` is **409 `hold_conflict`**. Disjoint concurrent holds merge. Merged item count and JSON bytes stay at the submit caps (`submitMaxItems`, 56 KiB). Exhausted CAS is **409 `hold_contention`**.
-7. **Tool discovery.** MCP `initialize` advertises `tools.listChanged: true` and server version `0.4.0`. Instructions name the batch v2 tool set at the front. A cached ChatGPT/Task catalog is still a client issue; this does not mutate Scheduled Tasks.
+1. **`prediction_batch_validate` stays read-only.** ADR 0131 is unchanged.
+2. **`prediction_batch_hold` is a lease-authorized writer of a transferable stage.** Write requires the generating run's live lease and epoch and that the films are in that run's `selectedIds`. The object is `enrichment/batch-stage.json` (not `batch-hold/<runId>`). `origin.runId` (and origin profile/contract identities) is provenance only, not recovery authorization.
+3. **Identity.** CAS-merge via `mergeStoredJSON`. Per-film `batchItemDigest`. Exact replay is identity; a different digest is `409 hold_conflict`. Caps: 10 items / 56 KiB.
+4. **Next `prediction_batch_start` drains the stage** after it takes the new runner lease and before it returns the new manifest. Fresh staged items are committed on the **new** run with the existing authoritative submit validators (profile, prompt, film input, contract). Stale or conflicting items get a bounded drop (`stale_profile`, `stale_contract`, or the submit outcome) and are removed from the stage. Drops do not prevent selection of the next `manifestSize` eligible films. The start answer includes `drained`. Dry run does not drain. `already_running` does not drain.
+5. **Manifest of B is the new films only.** Drained film ids are on the new run's `selectedIds` so `manifest_spent` includes them; they are not repeated in `films[]`.
+6. **`prediction_complete({reason:'external_termination'})` remains HTTP 200** and releases the lease (live A/B/C/D compatible). The stage outlives that run. A's terminal Event does not count uncommitted staged films as created. B's Event counts B's commits (drained + newly submitted).
+7. **`prediction_batch_submit({useHeld:true})`** remains for same-run recovery while the generating lease is still held. It loads the transferable stage filtered to this run's unspent `selectedIds`.
+8. **MCP** `listChanged: true`, server `0.4.0`. No Task registry mutation.
 
-Not authorized: Task prompt edits, live `prediction_batch_start`, lease reset, flags, R2/D1 operators, or production hold/submit.
+Not authorized: Task prompt edits, live `prediction_batch_start` in production, lease reset, flags, R2/D1 operators.
+
+## Required scenario
+
+Task A validates and stages five submit-ready films, then terminates before submit. Task B's ordinary start commits those five without A's runId/epoch/lease, then delivers five **new** eligible films. After B submits those five: ten unique committed predictions, no stuck lease, no repeat of the first five, no double-counted terminal Event.
 
 ## Alternatives considered
 
-- **Make `prediction_batch_validate` write the hold when `runId` is present.** Rejected: it would falsify `readOnlyHint` and ADR 0131.
-- **Auto-submit the hold from `prediction_complete`.** Rejected: complete must not become a writer of predictions.
-- **409 every `external_termination` while selected films remain, including `client_state_lost`.** Rejected after independent review P1-A: the live prompt never calls hold and would keep the lease (`already_running` on the next slot). 409 is reserved for an actual hold.
-- **Last-writer-wins hold replace.** Rejected after P1-B: concurrent groups and a second hold of different bytes must not silently drop the first.
+- **Run-scoped hold keyed by runId/epoch; 409 until the same lease submits.** Rejected by the owner: a terminated Task would strand validated work.
+- **Make `prediction_batch_validate` write.** Rejected: ADR 0131.
+- **Auto-submit from `prediction_complete`.** Rejected: complete must not become a prediction writer.
 
 ## Consequences
 
-A later owner-approved prompt can call hold after validate and `useHeld` after a lost buffer. Until that GO, a Task that only calls the old five tools still completes lost context with `external_termination` (lease released). After a hold, that reason is refused until `useHeld` or an honest `client_state_lost`. One more write tool and one R2 object per run.
+Until a prompt GO, live Tasks never stage, so start is unchanged. After a caller stages, the next start drains automatically. One transferable R2 object.
 
 ## Recovery and migration boundary
 
-Code and docs only. Reverting removes the hold object writes; leftover `enrichment/batch-hold/` keys are unused. No schema migration. Deploy authorizes no Task change and no prediction run.
+Code and docs only. Leftover `enrichment/batch-hold/<runId>.json` keys from the unmerged earlier design are unused. No schema migration. Deploy authorizes no Task change.
 
 ## Evidence
 
-- **Original decision:** [AIR-510 FAIL comment](https://trello.com/c/01JAM4TP)
-- **Implementation:** this PR
-- **Dated verification:** [offline interruption tests](../evidence/prediction/air-510-hold-recovery-2026-11-17.md)
-- **Uncertainty:** live Task tool discovery after `listChanged: true` is unproven until a natural slot
-
-## Follow-ups
-
-Owner GO to add `prediction_batch_hold` and `useHeld` to the live A/B/C/D prompts. Natural-series acceptance remains on AIR-510.
+- **Original FAIL:** [AIR-510](https://trello.com/c/01JAM4TP)
+- **Owner BLOCK of run-scoped recovery:** GitHub PR #704 comment, 17 Nov 2026
+- **Dated verification:** [offline tests](../evidence/prediction/air-510-hold-recovery-2026-11-17.md)

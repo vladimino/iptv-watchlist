@@ -513,42 +513,90 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  assert.equal(next.data.status,'running');assert.notEqual(next.data.runId,started.data.runId);
 }
 
-// AIR-510: validate → hold (CAS merge) → drop client items → useHeld submit. Replay is identity; a different digest is conflict.
+// AIR-510: transferable stage. Task A validates and holds five, then terminates. Task B's start
+// commits those five without A's runId and selects five new films. Ten unique predictions.
 {
- const w=await ready(5);await reconcile(w);
- const started=await batch(w,{manifestSize:5});assert.equal(started.status,200);
- const items=started.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
+ const w=await ready(12);await reconcile(w);
+ const a=await batch(w,{manifestSize:5});assert.equal(a.status,200);
+ const items=a.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- w.ctx.__env=w.env;
- w.ctx.__items=items;
+ w.ctx.__env=w.env;w.ctx.__items=items;
  const pre=await vm.runInContext('mcpCallTool({name:"prediction_batch_validate",arguments:{items:__items}},"2025-06-18",__env,{waitUntil(){}})',w.ctx);
  const preBody=JSON.parse(pre.result.content[0].text);
  assert.equal(preBody.valid,true,pre.result.content[0].text.slice(0,240));
  assert.equal(preBody.storage,'not_accessed');
  const left=items.slice(0,2),right=items.slice(2);
- const [a,b]=await Promise.all([
-  w.api('batch/hold',{runId:started.data.runId,epoch:started.data.lease.epoch,items:left}),
-  w.api('batch/hold',{runId:started.data.runId,epoch:started.data.lease.epoch,items:right})
+ const [h1,h2]=await Promise.all([
+  w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items:left}),
+  w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items:right})
  ]);
- assert.equal(a.status,200,JSON.stringify(a.data).slice(0,240));
- assert.equal(b.status,200,JSON.stringify(b.data).slice(0,240));
- const replay=await w.api('batch/hold',{runId:started.data.runId,epoch:started.data.lease.epoch,items:left});
- assert.equal(replay.status,200,JSON.stringify(replay.data).slice(0,240));
- assert.equal(replay.data.added.length,0);assert.equal(replay.data.replayed.length,2);
+ assert.equal(h1.status,200,JSON.stringify(h1.data).slice(0,240));
+ assert.equal(h2.status,200,JSON.stringify(h2.data).slice(0,240));
+ const replay=await w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items:left});
+ assert.equal(replay.status,200);assert.equal(replay.data.added.length,0);assert.equal(replay.data.replayed.length,2);
  const conflictPred={...w.prediction,predictedRating:w.prediction.predictedRating===3.5?4:3.5};
- const conflict=await w.api('batch/hold',{runId:started.data.runId,epoch:started.data.lease.epoch,items:[{...left[0],prediction:conflictPred}]});
+ const conflict=await w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items:[{...left[0],prediction:conflictPred}]});
  assert.equal(conflict.status,409);assert.equal(conflict.data.code,'hold_conflict');
- w.ctx.__a={name:'prediction_batch_manifest',args:{runId:started.data.runId,part:'hold'}};
+ w.ctx.__a={name:'prediction_batch_manifest',args:{runId:a.data.runId,part:'hold'}};
  const holdPart=JSON.parse((await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result.content[0].text);
- assert.equal(holdPart.kind,'hold');assert.equal(holdPart.epoch,started.data.lease.epoch);assert.equal(holdPart.manifestHash,started.data.manifestHash);
- assert.equal(holdPart.filmIds.length,5);
- const blocked=await w.api('complete',{runId:started.data.runId,reason:'external_termination'});
- assert.equal(blocked.status,409);assert.equal(blocked.data.code,'held_unsubmitted');
- const submitted=await w.api('batch/submit',{runId:started.data.runId,epoch:started.data.lease.epoch,useHeld:true});
+ assert.equal(holdPart.kind,'hold');assert.equal(holdPart.filmIds.length,5);
+ const lost=await w.api('complete',{runId:a.data.runId,reason:'external_termination'});
+ assert.equal(lost.status,200,JSON.stringify(lost.data).slice(0,240));
+ const aEvent=sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+a.data.runId+"'");
+ const aDoc=JSON.parse(aEvent[0].d);
+ assert.equal(Object.keys(aDoc.results||{}).length,0,'A did not count the staged films as committed');
+ const b=await batch(w,{manifestSize:5});
+ assert.equal(b.status,200,JSON.stringify(b.data).slice(0,300));
+ assert.notEqual(b.data.runId,a.data.runId);
+ assert.equal(b.data.drained.committed,5,JSON.stringify(b.data.drained));
+ assert.equal(b.data.films.length,5);
+ const overlap=b.data.films.filter(f=>items.some(i=>i.filmId===f.filmId));
+ assert.equal(overlap.length,0,'B generates five new films, not the staged five');
+ const bItems=b.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
+ const submitted=await w.api('batch/submit',{runId:b.data.runId,epoch:b.data.lease.epoch,items:bItems});
  assert.equal(submitted.status,200,JSON.stringify(submitted.data).slice(0,300));
- assert.equal(submitted.data.results.length,5);
- assert.ok(submitted.data.results.every(r=>r.status==='created'||r.status==='already_current'));
- const spent=await w.api('complete',{runId:started.data.runId,reason:'manifest_spent'});
- assert.equal(spent.status,200,JSON.stringify(spent.data).slice(0,200));
+ const spent=await w.api('complete',{runId:b.data.runId,reason:'manifest_spent'});
+ assert.equal(spent.status,200,JSON.stringify(spent.data).slice(0,240));
+ const bDoc=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+b.data.runId+"'")[0].d);
+ const settled=Object.entries(bDoc.results||{}).filter(([,s])=>['created','recalculated','already_current'].includes(s)).map(([id])=>id);
+ assert.equal(settled.length,10,'ten unique committed predictions '+JSON.stringify(bDoc.results));
+ assert.equal(new Set(settled).size,10);
+ const replayStart=await batch(w,{manifestSize:5});
+ assert.equal(replayStart.status,200,JSON.stringify(replayStart.data).slice(0,200));
+ assert.equal(replayStart.data.drained?.committed||0,0,'a second start does not re-drain');
+ await w.api('complete',{runId:replayStart.data.runId,reason:'external_termination'});
+}
+
+// AIR-510: stale staged items are dropped and do not block the next five; lease expiry still drains.
+{
+ const w=await ready(12);await reconcile(w);
+ const a=await batch(w,{manifestSize:5});
+ const items=a.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
+ const held=await w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items});
+ assert.equal(held.status,200,JSON.stringify(held.data).slice(0,200));
+ const profile={version:2,profileHash:'p2',profile:{ratingScale:'Whole stars'}};
+ w.records.set('enrichment/profile/versions/2.json',profile);
+ await (await import('../src/prediction-d1.js')).saveMutable(w.env,'enrichment/profile/current.json',profile);
+ const stop=await w.api('complete',{runId:a.data.runId,reason:'external_termination'});
+ assert.equal(stop.status,200);
+ const b=await batch(w,{manifestSize:5});
+ assert.equal(b.status,200,JSON.stringify(b.data).slice(0,240));
+ assert.equal(b.data.drained.committed,0);
+ assert.equal(b.data.drained.dropped,5);
+ assert.equal(b.data.films.length,5);
+ await w.api('complete',{runId:b.data.runId,reason:'external_termination'});
+}
+{
+ const w=await ready(12);await reconcile(w);
+ const a=await batch(w,{manifestSize:5});
+ const items=a.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
+ assert.equal((await w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items})).status,200);
+ const doc=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);doc.expiresAt=1;
+ sql(w.file,"UPDATE prediction_lease SET expires_at=1, document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE name='runner'");
+ const b=await batch(w,{manifestSize:5});
+ assert.equal(b.status,200,JSON.stringify(b.data).slice(0,300));
+ assert.equal(b.data.drained.committed,5,'lease expiry of A still lets B drain');
+ assert.equal(b.data.films.length,5);
+ await w.api('complete',{runId:b.data.runId,reason:'external_termination'});
 }
 console.log('prediction-batch-start: ok');
