@@ -62,9 +62,9 @@ Runtime mode and configured Cloudflare Access policies must be rechecked for liv
 
 See [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP security contract](../reference/api/mcp.md) and [D1 schema boundary](../reference/data/d1-schema.md).
 
-## EPG diagnostic canary (ADR 0121 and ADR 0124)
+## EPG diagnostic canary (retired)
 
-**Retired from the Worker by AIR-457 ([ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md)): the bindings, var, route and Workflow class below are removed from `wrangler.jsonc`, `src/worker.js` and the bundle entry; the paragraph is the superseded state.** The `iptv` Worker declared one more Workflow binding, `EPG_DIAGNOSTIC_WORKFLOW` (class `EpgDiagnosticWorkflow`); a deploy creates the Workflow definition and no instance. The diagnostic D1 (`EPG_DIAGNOSTIC_DB`), bucket (`EPG_DIAGNOSTIC_BUCKET`) and resource id (`EPG_DIAGNOSTIC_RESOURCE_ID`) are bound by the AIR-456 H1 change, merged only after the owner created them and wrote their identity; before that the canary cannot run and its routes answer `diagnostic_bindings_absent`. The bindings are separate resources; the production `DB` and `BUCKET` are unchanged and the isolation stays application-enforced. The flow and the isolation boundary (application-enforced, not platform-enforced) are in [scheduling and orchestration](scheduling-and-orchestration.md#epg-diagnostic-canary-adr-0121-adr-0124-air-455) and the [reference](../reference/orchestration-reliability.md#epg-diagnostic-canary-the-run-and-its-receipt-air-455-adr-0124).
+No diagnostic binding, route or Workflow class exists: removed by AIR-457 ([ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md)), code deleted by AIR-521 ([ADR 0160](../adr/0160-delete-epg-diagnostic-canary-code.md)). The Worker keeps the production D1 `DB`, R2 `BUCKET` and the Discovery, Ratings, EPG and Producer Workflows.
 
 ## Ratings Workflow binding (AIR-347)
 
