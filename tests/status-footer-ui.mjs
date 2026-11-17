@@ -217,7 +217,7 @@ for(const name of ['filmWord','madridStamp','madridDay']){
   const line=source=>source.slice(source.indexOf(marker), source.indexOf('\n', source.indexOf(marker)));
   assert.equal(line(adminFooterJs), line(app), name);
 }
-assert.deepEqual([...adminFooterJs.matchAll(/fetch\((['"])(.*?)\1\)/g)].map(match=>match[2]), ['/api/enrichment/footer/status']);
+assert.deepEqual([...adminFooterJs.matchAll(/fetch\((['"])(.*?)\1[,)]/g)].map(match=>match[2]), ['/api/enrichment/footer/status']);
 assert.doesNotMatch(adminFooterJs, /\/api\/events|\/api\/enrichment\/view|src="\/app\.js"/);
 assert.match(adminFooterJs, /querySelector\('main\.admin-shell'\)/);
 assert.match(adminFooterJs, /insertAdjacentHTML\('beforeend'/);

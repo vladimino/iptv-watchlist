@@ -1741,22 +1741,27 @@ function footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshn
  }
  return {state:'ok',rating40to44,rating45plus};
 }
+// AIR-519: under the completed-only rule a film's showings are those of the completed programme for its TMDB id (withCompletedShows), so whether it airs
+// in the window is decided from that list directly. The film is not copied with its showings (that copied the whole catalogue on every footer read); the
+// answer is the one the overlaid copy gave: the copy kept every field but `shows`, and filmIsHot reads only `shows` of a film that has the array.
 function canonicalCoverageSummary(report,catalog,index,profile,now=Date.now(),freshness=strictFreshness(profile),completedOnly=false){
  const groups=new Map();
  const completed=completedOnly&&typeof withCompletedShows==='function'&&typeof completedShowsByTmdb==='function'?completedShowsByTmdb(report):null;
- const overlay=film=>{
-  if(!completedOnly||typeof withCompletedShows!=='function'||completed==null)return film;
-  return withCompletedShows(film,completed,report?.runId,true);
+ const hot=film=>{
+  if(!completedOnly||typeof withCompletedShows!=='function'||completed==null||!film||typeof film!=='object')return filmIsHot(film,now);
+  return filmIsHot({shows:film.tmdbId==null?[]:completed.get(String(film.tmdbId))||[]},now);
  };
- for(const film of [...(report?.films||[]),...Object.values(catalog||{})].map(overlay)){
-  const tmdbId=String(film?.tmdbId||'').trim();if(!tmdbId)continue;
-  const identity='tmdb:'+tmdbId,group=groups.get(identity)||{ids:new Set(),films:[]};
-  group.ids.add(String(film.id));group.films.push(film);group.byId=group.byId||new Map();if(!group.byId.has(String(film.id)))group.byId.set(String(film.id),film);groups.set(identity,group);
- }
+ const add=film=>{
+  const tmdbId=String(film?.tmdbId||'').trim();if(!tmdbId)return;
+  const identity='tmdb:'+tmdbId,group=groups.get(identity)||{ids:new Set(),hot:false,byId:new Map()};
+  group.ids.add(String(film.id));if(!group.hot&&hot(film))group.hot=true;if(!group.byId.has(String(film.id)))group.byId.set(String(film.id),film);groups.set(identity,group);
+ };
+ for(const film of report?.films||[])add(film);
+ for(const film of Object.values(catalog||{}))add(film);
  let currentPredictionsTotal=0,windowFilmsTotal=0,windowCurrentPredictions=0,cacheOffWindowTotal=0,pendingOffWindowTotal=0;
  for(const group of groups.values()){
   const current=[...group.ids].some(id=>freshness.indexed(index?.[id],group.byId.get(id)));
-  const inWindow=group.films.some(film=>filmIsHot(film,now));
+  const inWindow=group.hot;
   if(current)currentPredictionsTotal++;
   if(inWindow){windowFilmsTotal++;if(current)windowCurrentPredictions++;}
   else{cacheOffWindowTotal++;if(!current)pendingOffWindowTotal++;}
@@ -2005,6 +2010,62 @@ function canonicalIdentityIds(values){
  }
  return [...ids];
 }
+// AIR-519. The footer reads the four large documents (view index, catalog, programme, watchlist) one after another and keeps of each only the fields its
+// blocks read, so at most one of them is held whole at a time. Read together and kept whole they were about 60 MB of heap per request; overlapping
+// requests of the same isolate then exceeded the Worker memory limit. A projection keeps every value it copies unchanged: the counts are the same.
+const FOOTER_INDEX_FIELDS=['id','watched','actualRating','watchlist','prediction','fingerprintHash','impactFeatures'];
+const FOOTER_FILM_FIELDS=['id','tmdbId','canonicalIdentity','catalogOnly','genres','epgLastAiring'];
+function footerPick(value,fields){
+ if(!value||typeof value!=='object'||Array.isArray(value))return value;
+ const out={};
+ for(const field of fields)if(Object.hasOwn(value,field))out[field]=value[field];
+ return out;
+}
+// The view index: the facts and the prediction the collection, recommendation and coverage blocks read (fingerprint text, mood facets and the like are not).
+function footerIndexProjection(index){
+ if(!footerPlainObject(index))return index;
+ const out={};
+ for(const [id,item] of Object.entries(index))out[id]=footerPick(item,FOOTER_INDEX_FIELDS);
+ return out;
+}
+// A catalog or programme film: identity, the genres the freshness rule reads and its showings. Under the completed-only rule (an authoritative D1 run)
+// the coverage takes the showings of a catalog film from the programme, never from the record, so the record's own showings are not kept.
+function footerFilmProjection(film,keepShows){
+ const out=footerPick(film,FOOTER_FILM_FIELDS);
+ if(out&&typeof out==='object'&&keepShows&&Object.hasOwn(film,'shows'))out.shows=film.shows;
+ return out;
+}
+function footerCatalogProjection(catalog,keepShows){
+ if(!footerPlainObject(catalog))return catalog;
+ const out={};
+ for(const [id,film] of Object.entries(catalog))out[id]=footerFilmProjection(film,keepShows);
+ return out;
+}
+// The programme: its counters and stats, member films with their showings and non-member showings (completedShowsByTmdb). Titles, people and posters are not read.
+function footerProgrammeProjection(report){
+ if(!footerPlainObject(report))return report;
+ const out={...report};
+ if(Array.isArray(report.films))out.films=report.films.map(film=>footerFilmProjection(film,true));
+ if(Array.isArray(report.catalogFilms))out.catalogFilms=report.catalogFilms.map(film=>footerPick(film,['id','tmdbId','shows']));
+ return out;
+}
+function footerWatchlistProjection(watchlist){
+ if(!footerPlainObject(watchlist)||!Array.isArray(watchlist.films))return watchlist;
+ return {...watchlist,films:watchlist.films.map(film=>footerPick(film,['id','tmdbId']))};
+}
+// D1 metadata: the footer bridges a Letterboxd id to a TMDB id and honours a blocked identity (catalogLidTmdb); posters, titles and urls are not read.
+function footerMetadataProjection(metadata){
+ if(!footerPlainObject(metadata))return metadata;
+ const out={};
+ for(const [id,record] of Object.entries(metadata))out[id]=footerPick(record,['id','tmdbId','identityBlocked']);
+ return out;
+}
+// A block computed from sources that were read: a malformed stored record (a queue without `pending`, a run without `selectedIds`) leaves that block
+// unknown and names it in `degraded`; it does not turn the whole footer into a 502.
+function footerCompute(degraded,name,compute,fallback){
+ try{return compute();}
+ catch{if(!degraded.includes(name))degraded.push(name);return fallback;}
+}
 async function footerStatus(env){
  const degraded=[],guard=footerGuard(env,degraded);
  const filmPersonGate=typeof CanonicalCatalogReader==='undefined'?null:await CanonicalCatalogReader.catalogReaderGate(env);
@@ -2015,17 +2076,23 @@ async function footerStatus(env){
  const authority=typeof DiscoveryAuthority!=='undefined'?await guard('discovery_authority',()=>DiscoveryAuthority.readAuthority(env)):null;
  const decisions=authority?.ready?{}:await guard('decisions',()=>loadJSON(env,'epg/discovery-resolution.json'));
  const ledger=await guard('ledger',()=>ledgerStatusAggregates(pinned,decisions||{},Date.now()));
- const [profile,index,report,catalog,storedQueue,run,lease,sync,ratings,discoveryStatus,continuation,watchlistIngest,resolverLease,watchlist,metadataR2,predictionRuns]=await Promise.all([
-  guard('profile',()=>loadJSON(env,profileKey)),guard('index',()=>loadJSON(env,ENRICHMENT_KEY+'view-index.json')),guard('programme',()=>footerPublishedDocument(pinned,'programme.json')),guard('catalog',()=>loadJSON(pinned,'epg/discovered-films.json')),
+ // The small records are read together; the four large documents are then read one at a time and projected as each arrives (AIR-519).
+ const [profile,storedQueue,run,lease,sync,ratings,discoveryStatus,continuation,watchlistIngest,resolverLease,metadataR2,predictionRuns]=await Promise.all([
+  guard('profile',()=>loadJSON(env,profileKey)),
   guard('queue',()=>loadJSON(env,predictionQueueKey)),guard('run',()=>loadJSON(env,ENRICHMENT_KEY+'latest-run.json')),guard('lease',()=>loadJSON(env,RUNNER_LEASE_KEY)),guard('sync',()=>loadJSON(env,'sync.json')),guard('ratings_status',()=>loadJSON(env,RATINGS_STATUS_KEY)),
   guard('discovery_status',()=>loadJSON(env,'epg/discovery-status.json')),guard('continuation',()=>loadJSON(env,'epg/resolver-continuation.json')),guard('watchlist_ingest',()=>loadJSON(env,'watchlist-ingest.json')),guard('resolver_lease',()=>loadJSON(env,'epg/resolver-lease.json')),
-  // AIR-389 / AIR-499: watchlist is still one published object; metadata.json is frozen at open, so D1 replaces it after these reads name the ids.
-  guard('watchlist',()=>footerPublishedDocument(pinned,'watchlist.json')),
-  filmPersonGate?.mode==='d1'?Promise.resolve(undefined):guard('metadata',()=>loadJSON(env,'metadata.json')),
+  // AIR-389 / AIR-499: metadata.json is frozen at open, so D1 replaces it after the large reads name the ids.
+  filmPersonGate?.mode==='d1'?Promise.resolve(undefined):guard('metadata',async()=>footerMetadataProjection(await loadJSON(env,'metadata.json'))),
   guard('prediction_runs',async()=>(await diagnosticHistory(env,8)).runs)
  ]);
+ const completedOnly=pinned?.epgPin?.authority==='d1';
+ const index=await guard('index',async()=>footerIndexProjection(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
+ const catalog=await guard('catalog',async()=>footerCatalogProjection(await loadJSON(pinned,'epg/discovered-films.json'),!completedOnly));
+ const report=await guard('programme',async()=>footerProgrammeProjection(await footerPublishedDocument(pinned,'programme.json')));
+ // AIR-389 / AIR-499: the watchlist is still one published object.
+ const watchlist=await guard('watchlist',async()=>footerWatchlistProjection(await footerPublishedDocument(pinned,'watchlist.json')));
  let metadata=metadataR2;
- if(filmPersonGate?.mode==='d1')metadata=await CanonicalCatalogReader.catalogMetadataFromD1(env,canonicalIdentityIds([report,catalog,watchlist,index]),filmPersonGate);
+ if(filmPersonGate?.mode==='d1')metadata=footerMetadataProjection(await CanonicalCatalogReader.catalogMetadataFromD1(env,canonicalIdentityIds([report,catalog,watchlist,index]),filmPersonGate));
  const freshness=await guard('freshness',()=>predictionFreshness(env,profile));
  if(filmPersonGate)await CanonicalCatalogReader.catalogReaderStill(env,filmPersonGate);
  // Coverage needs the programme, the catalog, the view index and the freshness rule. If any of them could not be read the numbers are unknown, not zero or 100%.
@@ -2036,16 +2103,19 @@ async function footerStatus(env){
  if(!footerPlainObject(index)&&!degraded.includes('index'))degraded.push('index_missing');
  if(!footerPlainObject(profile)&&!degraded.includes('profile'))degraded.push('profile_missing');
  const coverageReadable=!['programme','catalog','index','profile','freshness','programme_missing','catalog_missing','index_missing','profile_missing'].some(name=>degraded.includes(name))&&!!freshness;
- const coverage=coverageReadable?canonicalCoverageSummary(report,catalog,index,profile,Date.now(),freshness,pinned?.epgPin?.authority==='d1'):{confirmedFilmsTotal:null,currentPredictionsTotal:null,windowFilmsTotal:null,windowCurrentPredictions:null,cacheOffWindowTotal:null,pendingOffWindowTotal:null};
- const queue=queueStatusView(storedQueue),slices=predictionQueueSlices(storedQueue);
- const collection=footerCollection({report,catalog,watchlist,index,metadata}),newUnseen=footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshness});
+ const unknownCoverage={confirmedFilmsTotal:null,currentPredictionsTotal:null,windowFilmsTotal:null,windowCurrentPredictions:null,cacheOffWindowTotal:null,pendingOffWindowTotal:null};
+ const coverage=coverageReadable?footerCompute(degraded,'coverage',()=>canonicalCoverageSummary(report,catalog,index,profile,Date.now(),freshness,completedOnly),null)||unknownCoverage:unknownCoverage;
+ const coverageKnown=coverage!==unknownCoverage;
+ const queue=footerCompute(degraded,'queue_view',()=>queueStatusView(storedQueue),null),slices=footerCompute(degraded,'queue_view',()=>predictionQueueSlices(storedQueue),predictionQueueSlices(null));
+ const collection=footerCompute(degraded,'collection',()=>footerCollection({report,catalog,watchlist,index,metadata}),{state:'unknown',total:null,watched:null,rated:null,watchlist:null});
+ const newUnseen=footerCompute(degraded,'recommendations',()=>footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshness}),{state:'unknown',rating40to44:null,rating45plus:null});
  const recognized=ledger?.recognized??null,counts=ledger?.counts??null;
  const pendingRecognition=counts?counts.currentUnresolved:null,historicalUnresolved=counts?counts.historicalUnresolved+counts.expiredInactive:null;
  const difference=(total,current)=>Number.isInteger(total)&&Number.isInteger(current)?total-current:null;
- const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
+ const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?footerCompute(degraded,'run',()=>runSummary(run),null):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageReadable?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease,recentRuns:predictionRuns,queue:storedQueue}),...(degraded.length?{degraded:[...degraded]}:{})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageKnown?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:footerCompute(degraded,'integrations',()=>integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease,recentRuns:predictionRuns,queue:storedQueue}),{aggregate:'unknown',attentionCount:null,failedCount:null,sources:[]}),...(degraded.length?{degraded:[...degraded]}:{})};
 }
 function queueLaneIds(queue,exclude=new Set()){
  const skip=id=>exclude.has(id)||retryBudgetExhausted(queue.retries?.[id]);
