@@ -400,7 +400,7 @@ sequenceDiagram
     participant Cron as Hourly reconcile
 
     Owner->>Op: dry_run
-    Op->>D1: Read authority, published pin, record, continuation, lease, window, pause
+    Op->>D1: Read authority, pin, record, checkpoint, lease, gates
     Op->>CF: Read owner instance status
     Op-->>Owner: eligible, already_current, unsafe or unknown, with expect pins
     Note over Op,D1: dry_run writes nothing
@@ -409,7 +409,8 @@ sequenceDiagram
     alt Not eligible, stale pin, generation moved or refused write
         Op-->>Owner: Refusal, writes 0
     else Eligible
-        Op->>D1: One CAS on the record revision, pinned to the published generation: successor named, phase starting, report, outbox and receipt carried
+        Op->>D1: Pinned CAS: successor named, starting
+        Note over Op,D1: Same statement checks the generation. Report, outbox, receipt carried
         Op->>CF: Create discovery_generation_series+1
         alt Created or already exists
             Op->>D1: Settle running while still starting for that id
