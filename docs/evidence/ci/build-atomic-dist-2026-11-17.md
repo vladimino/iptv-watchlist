@@ -16,7 +16,7 @@ The suite runs files in parallel (`scripts/run-tests.mjs`, up to six jobs), and 
 
 ## Regression test
 
-`tests/build-atomic-dist.mjs` (core suite) starts three builds at once and reads both outputs in a loop while they run; every read must return the complete expected bytes. It also checks that every build succeeds, that no temporary file is left and that a stale file or directory in `dist` is removed. Before the change it failed in three runs of three (`read workflow-entry.js during a build: ENOENT`); after the change it passed five runs of five, with 60 to 94 reads overlapping the builds.
+`tests/build-atomic-dist.mjs` (core suite) starts three builds at once and reads both outputs in a loop while they run; every read must return the complete expected bytes. It also checks that every build succeeds, that none of its own builds left a temporary file and that a stale file or directory in `dist` is removed. Other tests build into the same `dist/` in parallel, so the checks on the directory are scoped to this test's own build processes (temporary files carry the builder's process id) and to the stale entries the test creates; the review of the first head found that a whole-directory check could fail on another test's legitimate in-flight temporary file. With a loop of 40 unrelated builds running alongside, the scoped test passed four runs of four, and it still failed two runs of two against the previous `build.mjs`. Before the change it failed in three runs of three (`read workflow-entry.js during a build: ENOENT`); after the change it passed five runs of five, with 60 to 94 reads overlapping the builds.
 
 ## Verification
 
