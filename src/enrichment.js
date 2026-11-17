@@ -743,99 +743,6 @@ async function settleRemovalRefs(env,{ids=null,limit=20,now=Date.now(),checkedBe
  }
  return summary;
 }
-// `ref` names the removal event of this hand-over; a version 1 queue ignores it, a version 2 queue stores it.
-async function lookupRemovalRatings(env,incoming=[],now=Date.now(),ref=null){
- const at=new Date(now).toISOString(),summary={checked:0,rated:0,notRated:0,failed:0,stoppedBy:null,pending:0,expired:0,queued:0};
- try{
-  const films=(Array.isArray(incoming)?incoming:[]).map(removalLookupFilm).filter(Boolean);
-  let queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{
-   const changed=applyRemovalEnqueue(q,films,ref,at);
-   return pruneRemovalQueue(q,now)||changed?q:null;
-  });
-  // A 403 or 429 is about the source, not the film: the whole queue waits until the backoff ends. No fact probe and no GET.
-  if(queue.pausedUntil&&Date.parse(queue.pausedUntil)>now){summary.stoppedBy=queue.pausedBy||'blocked';summary.pausedUntil=queue.pausedUntil;}
-  const facts=summary.stoppedBy?{gettable:[]}:await resolveDueRemovalFacts(env,now,{limit:REMOVAL_FACT_BATCH,getBudget:REMOVAL_LOOKUP_BATCH});
-  if(facts.queue)queue=facts.queue;
-  const due=summary.stoppedBy?[]:facts.gettable;
-  for(const id of due){
-   // Claim first: a request killed mid-lookup leaves a counted attempt and a later retry time, never a free retry.
-   let token=null;
-   queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{if(removalQueueV2(q)&&!token)token=crypto.randomUUID();return claimRemovalEntry(q,id,now,at,token)?q:null;});
-   if(!removalClaimHeld(queue,id,at,token))continue;
-   const claimed=queue.films[id];
-   let result=null,error=null;try{result=await refreshPersonalRating(env,{id,url:claimed.url});}catch(e){error=String(e.message);}
-   queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>applyRemovalOutcome(q,id,result,error,at,now,token)?q:null);
-   if(removalQueueV2(queue)&&queue.films[id]?.state==='rated')await settleRemovalRefs(env,{ids:[id]});
-   const entry=queue.films[id];summary.checked++;
-   if(entry?.state==='rated')summary.rated++;else if(entry?.lastResult==='not_rated')summary.notRated++;else if(error)summary.failed++;
-   if(entry?.lastResult==='blocked'||entry?.lastResult==='rate_limited'){summary.stoppedBy=entry.lastResult;summary.pausedUntil=queue.pausedUntil;break;}
-  }
-  summary.queued=Object.keys(queue.films).length;summary.pending=Object.values(queue.films).filter(entry=>entry.state==='pending').length;summary.expired=Object.values(queue.films).filter(entry=>entry.state==='expired').length;
-  return {...summary,at};
- }catch(e){return {...summary,at,error:String(e.message).slice(0,160)};}
-}
-function parsePublicFilmsPage(html,username){
- const count=html.match(/title="([\d,]+)&nbsp;films"/i),total=count?Number(count[1].replaceAll(',','')):null;
- const entries=[];
- for(const item of html.matchAll(/<li\b[^>]*class="[^"]*\bgriditem\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi)){
-  const id=item[1].match(/data-postered-identifier='[^']*?&quot;lid&quot;:&quot;([a-zA-Z0-9_-]+)&quot;/),stars=item[1].match(/\brated-(10|[1-9])\b/);
-  if(id)entries.push({id:id[1],rating:stars?Number(stars[1])/2:null});
- }
- const next=html.match(new RegExp('<a\\b[^>]*class="next"[^>]*href="(/'+username+'/films/page/\\d+/)"','i'))?.[1]||null;
- if(!Number.isInteger(total)||!entries.length)throw new Error('Incomplete Letterboxd films page');
- return {total,entries,next};
-}
-async function refreshRatingsFromFilms(env,report,extraIds=[]){
- const username=sourceConfig(env).letterboxdUsername,scanStartedAt=new Date().toISOString();let url=`https://letterboxd.com/${username}/films/`,total=null,pages=0;const seen=new Map();
- while(url){
-  let response;for(let attempt=0;attempt<3;attempt++){response=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(15000)});if(response.status!==403||attempt===2)break;await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));}
-  if(!response.ok){const body=await response.text(),challenge=/cloudflare|just a moment|attention required|captcha|bot detection/i.test(body);throw new Error('Letterboxd films HTTP '+response.status+' on page '+(pages+1)+(challenge?' (anti-bot challenge)':''));}
-  const page=parsePublicFilmsPage(await response.text(),username);pages++;
-  if(pages>60||total!==null&&page.total!==total)throw new Error('Letterboxd films pagination changed');
-  total=page.total;
-  for(const item of page.entries){if(seen.has(item.id))throw new Error('Duplicate Letterboxd film');seen.set(item.id,item.rating);}
-  url=page.next?'https://letterboxd.com'+page.next:null;
- }
- if(seen.size!==total)throw new Error('Incomplete Letterboxd films: '+seen.size+'/'+total);
- const watchlistIds=new Set((report.films||[]).map(f=>String(f.id))),extra=new Set((extraIds||[]).map(id=>String(id)).filter(id=>/^[a-zA-Z0-9_-]{1,80}$/.test(id)));
- let rated=0;for(const id of watchlistIds)if(seen.get(id)!=null)rated++;
- const observedAt=new Date().toISOString(),removedRatings={};
- for(const id of extra){if(!seen.has(id))continue;const rating=confirmedHalfStar(seen.get(id));if(rating!=null)removedRatings[id]=rating;}
- // The scan is one summary observation (ADR-0024): absence never clears a rating. Since LETTERBOXD_FACTS was retired
- // (ADR 0055) the fact records are the only writer of the films list.
- const facts=await LetterboxdFacts.applyFilmsListScan(env,{scanId:'films-list-'+(report.runId||crypto.randomUUID()),observedAt:scanStartedAt,films:Object.fromEntries(seen),total},{watchlistFilms:report.films||[]});return {pages,watched:total,watchlistRated:rated,changed:facts.written,removedRatings,observedAt,facts:{written:facts.written,carried:facts.carried,conflicts:facts.conflicts,outcomes:facts.outcomes}};
-}
-async function repairRemovedBaselineRatings(env,report){
- const baseline=await loadJSON(env,diagnosticSnapshotKey);if(!baseline)return {attempted:0,saved:0,errors:[]};
- const current=new Set((report.films||[]).map(f=>String(f.id))),index=await ensureInitialRatings(env);
- const candidates=baseline.films.filter(f=>!current.has(f.filmId)&&f.actualAtFreeze===null&&index[f.filmId]?.actualRating==null&&/^https:\/\/letterboxd\.com\/film\/[a-z0-9-]+\/$/.test(f.letterboxdUri)).slice(0,10);
- const results=[];for(const f of candidates){try{results.push(await refreshPersonalRating(env,{id:f.filmId,url:f.letterboxdUri}));}catch(e){results.push({filmId:f.filmId,error:String(e.message).slice(0,160)});}}
- return {attempted:results.length,saved:results.filter(r=>r.status==='saved').length,errors:results.filter(r=>r.error)};
-}
-// The diary repair after a failed films list. It reads the rated rows through the one diary parser
-// (LetterboxdDiary.parsePage); when the diary history stage already read page 1 in this run, it reuses those rows
-// instead of a second request. Each changed rating is confirmed on the film's own page before it is written.
-function diaryRatedEntries(rows){
- const entries=rows.filter(row=>row.lid&&row.ratingAtEntry!=null).map(row=>({id:row.lid,rating:row.ratingAtEntry}));
- if(!entries.length)throw new Error('Incomplete Letterboxd diary page');
- return entries;
-}
-async function repairRecentDiaryRatings(env,report,firstPageRows=null){
- // null: the history stage did not run, so the repair reads page 1 itself. An array: the stage ran this commit; its rows
- // are used as they are and nothing is requested again, even when the stage could not read the page.
- let rows=firstPageRows;
- if(rows!=null&&!rows.length)throw new Error('Letterboxd diary page 1 was not read in this run');
- if(rows==null){
-  const response=await fetch(LetterboxdDiary.pageUrl(sourceConfig(env).letterboxdUsername,1),{headers:{'User-Agent':'Mozilla/5.0 (compatible; WatchlistAirtime/1.0)','Accept':'text/html','Accept-Language':'en-US,en;q=0.9'},signal:AbortSignal.timeout(15000)});
-  if(!response.ok)throw new Error('Letterboxd diary HTTP '+response.status);
-  rows=LetterboxdDiary.parsePage(await response.text()).rows;
- }
- const entries=diaryRatedEntries(rows),baseline=await loadJSON(env,diagnosticSnapshotKey),index=await ensureInitialRatings(env);
- const films=new Map([...(report.films||[]).map(f=>[String(f.id),{id:String(f.id),url:f.url}]),...(baseline?.films||[]).map(f=>[f.filmId,{id:f.filmId,url:f.letterboxdUri}])]);
- const changed=new Map(entries.filter(e=>films.has(e.id)&&index[e.id]?.actualRating!==e.rating).map(e=>[e.id,e]));
- const results=[];for(const id of changed.keys()){try{results.push(await refreshPersonalRating(env,films.get(id)));}catch(e){results.push({filmId:id,error:String(e.message).slice(0,160)});}}
- return {diaryEntries:entries.length,reused:firstPageRows!=null,attempted:results.length,saved:results.filter(r=>r.status==='saved').length,errors:results.filter(r=>r.error)};
-}
 async function freezeDiagnosticSnapshot(env){
  const existing=await loadJSON(env,diagnosticSnapshotKey);if(existing)return {snapshot:existing,created:false};
  const [programme,index,profile]=await Promise.all([loadJSON(env,'programme.json'),ensureInitialRatings(env),loadJSON(env,profileKey)]);
@@ -1274,7 +1181,6 @@ function stepKeyClass(key){
  return 'other';
 }
 function stepSqlClass(sql){const m=typeof sql==='string'?STEP_TABLE.exec(sql):null;return m?m[1].toLowerCase():'other';}
-function stepSizeClass(bytes){return !(bytes>=0)?'unknown':bytes<1024?'lt1k':bytes<65536?'lt64k':bytes<1048576?'lt1m':'ge1m';}
 function createStepTimer(now=Date.now){
  const started=now(),ops=[],classes=new Map(),notes={},total={r2:{n:0,ms:0,bytesIn:0,bytesOut:0},d1:{n:0,ms:0,statements:0,batches:0,rowsRead:0,rowsWritten:0}};
  let truncated=false;const stages=[];

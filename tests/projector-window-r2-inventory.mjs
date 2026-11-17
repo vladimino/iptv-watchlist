@@ -102,7 +102,7 @@ const FILE_SITES={
  // of the run's films) and the interrupted record of a recovered earlier run (`enrichment/runs/<runId>.json`). Neither is a projector input or on a Discovery, admin-recovery or publication path.
  // Batch runner v2 batch_submit: +1 r2 site, +1 wrapper site and +1 dynamic key, all of the shape the v5 runner already writes: `runnerLeaseEdit` puts the runner lease object (the same key `runnerLease` puts, in the object
  // mode) and the per-film `enrichment/films/<id>/predictions.json` bundle (the key the v5 submit writes). Neither is a projector input or on a Discovery, admin-recovery or publication path.
- 'src/enrichment.js':{r2:15,wrapper:51,dynamic:37}, // AIR-510: batch-manifest persist plus transferable batch-stage drain/hold; not a projector input
+ 'src/enrichment.js':{r2:15,wrapper:48,dynamic:34}, // AIR-510: batch-manifest persist plus transferable batch-stage drain/hold; not a projector input. AIR-79: -3 wrapper and -3 dynamic, the three mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,...) writes of the removed lookupRemovalRatings (the removal queue, not a projector input; the Ratings step keeps its own)
  'src/filter-presets.js':{r2:1,wrapper:0,dynamic:0},
  'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
  'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},
@@ -117,7 +117,7 @@ const FILE_SITES={
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
  // ADR 0145: +1 r2 put of `epg/seal/<runId>/publication.json` in `stageSealedGeneration` and +1 dynamic delete of that key in `sealQueueStep`
  // (the leftover `payload.json` delete stays). Neither object is a projector input; both sit on the publication path that already takes the lease.
- 'src/worker.js':{r2:16,wrapper:58,dynamic:19}, // AIR-513: flushWatchlistEvent (including the failed-put mark) and the seal completion flush save sync.json, not a projector input
+ 'src/worker.js':{r2:16,wrapper:57,dynamic:19}, // AIR-513: flushWatchlistEvent (including the failed-put mark) and the seal completion flush save sync.json, not a projector input. AIR-79: -1 wrapper, the saveJSON(env,'sync.json',run) of the removed ratingsPhase
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
 assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');

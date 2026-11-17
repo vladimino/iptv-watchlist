@@ -745,14 +745,6 @@ function withRemovalRatings(event,ratings,observedAt){
  const removed=event.removed.map(film=>{if(removalRating(film))return eventRemovedFilm(film);const rating=confirmedHalfStar(source[String(film.id)]);if(rating==null)return eventRemovedFilm(film);changed=true;const stamp=typeof observedAt==='string'&&Number.isFinite(Date.parse(observedAt))?observedAt:null;return eventRemovedFilm({...film,rating,...(stamp?{ratingObservedAt:stamp}:{})});});
  return changed?{...event,added:(event.added||[]).map(film=>eventFilm(film)),removed}:null;
 }
-async function enrichKnownRemovalEvent(env,run,ratings,observedAt){
- try{
-  const index=(run?.events||[]).findIndex(item=>item?.type==='watchlist'&&item.removed?.length);if(index<0)return;
-  const stored=await loadJSON(env,removalEventKey(run.events[index]));if(!stored)return;
-  const next=withRemovalRatings(stored,ratings,observedAt);if(!next)return;
-  await writeEvent(env,next);run.events[index]=next;
- }catch{}
-}
 async function enrichRecentRemovalRatings(env,ratings,observedAt){
  try{
   if(typeof env.BUCKET.list!=='function')return;
@@ -1942,11 +1934,6 @@ async function tracedPhase(runId,phase,work,summary=null){
  let result;try{result=await work();}catch(e){epgPhase(runId,phase,'error',{elapsedMs:Date.now()-started});throw e;}
  let fields={};try{fields=summary?summary(result)||{}:{};}catch{}
  epgPhase(runId,phase,'exit',{elapsedMs:Date.now()-started,...fields});return result;
-}
-async function ratingsPhase(env,run,phase,save=true){
- const at=new Date().toISOString();run.ratingAttempt={...run.ratingAttempt,phase,at};
- console.log(JSON.stringify({event:'epg_ratings_phase',runId:run.runId,attemptId:run.ratingAttempt.id,phase,at}));
- if(save)await saveJSON(env,'sync.json',run);
 }
 async function closeInterruptedRatings(env,run,now=Date.now()){
  if(run.stage!=='complete'||!run.ratingPending?.length)return null;
