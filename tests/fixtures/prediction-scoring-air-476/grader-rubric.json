@@ -9,12 +9,14 @@
       "confirmedPlus": ["plan clarity", "competent investigator counter-move", "causal improvisation"],
       "confirmedMinus": [],
       "keyUnknown": ["payoff", "ending_quality", "chemistry"],
+      "keyUnknownPattern": "payoff|финал|развязк|концовк|ending|chemistry|химия",
       "expect": {"confidenceNot": ["high"], "minUncertainties": 1, "forbidUngroundedNegatives": true}
     },
     "s2": {
       "label": "a_sparse_legacy_horror_no_evidence",
       "confirmedPlus": [],
       "confirmedMinus": [],
+      "keyUnknownPattern": "payoff|финал|развязк|концовк|ending|решени|decision|компетент|competen|темп|pace|правдоподоб|plausib|страшн|scary|напряж|tension",
       "keyUnknown": ["pace", "stakes", "decision_logic", "protagonist_competence", "opposition_competence", "problem_solving", "plan_counterplan_strength", "multi_party_goals", "chemistry", "payoff", "ending_quality", "technical_plausibility"],
       "expect": {"confidenceNot": ["high", "medium"], "minUncertainties": 1, "forbidUngroundedNegatives": true, "forbidFullTextClaims": true, "noFingerprint": true}
     },

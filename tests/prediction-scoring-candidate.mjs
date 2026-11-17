@@ -88,8 +88,8 @@ const pred=(over={})=>({predictedRating:3.5,probability4Plus:0.4,confidence:'low
 const good=[
  {caseId:'s1',fingerprint:{evidence:{execution:{plan_counterplan_strength:[{basis:'web_research',refs:['https://reviews.example.org/quiet-ledger-partial'],confidence:'medium'}]}}},prediction:pred({predictedRating:4,probability4Plus:0.6,confidence:'medium'}),assessment:assess({research:{status:'attempted_found'},sources:[{kind:'web_research',ref:'https://reviews.example.org/quiet-ledger-partial',usedFor:'plan',access:'partial_text'}],tasteSignals:[{direction:'supports',signal:'ясный план и компетентный следователь'}],uncertainties:['payoff и финал не подтверждены']})},
  {caseId:'s2',prediction:pred({predictedRating:3,probability4Plus:0.3}),assessment:assess({research:{status:'attempted_found'},sources:[{kind:'web_research',ref:snip,usedFor:'snippet only',access:'search_snippet'}],uncertainties:['исполнение осады не подтверждено']})},
- {caseId:'s3',prediction:pred({predictedRating:4.5,probability4Plus:0.75,confidence:'high'}),assessment:assess({tasteSignals:[{direction:'supports',signal:'честные улики и заработанный финал'}]})},
- {caseId:'s4',prediction:pred({predictedRating:2,probability4Plus:0.05,confidence:'high',mainRisk:'команда расходится без причины'}),assessment:assess({tasteSignals:[{direction:'against',signal:'игнорируют вентиляцию из первой сцены'}],risks:[{risk:'правила существа меняются',severity:'high'}]})},
+ {caseId:'s3',prediction:pred({predictedRating:4.5,probability4Plus:0.75,confidence:'high'}),assessment:assess({research:{status:'attempted_found'},sources:[{kind:'web_research',ref:'https://reviews.example.org/glasshouse-inquest-1',usedFor:'clues',access:'full_text'}],tasteSignals:[{direction:'supports',signal:'честные улики и заработанный финал'}]})},
+ {caseId:'s4',prediction:pred({predictedRating:2,probability4Plus:0.05,confidence:'high',mainRisk:'команда расходится без причины'}),assessment:assess({research:{status:'attempted_found'},sources:[{kind:'web_research',ref:'https://reviews.example.org/below-deck-nine-1',usedFor:'defects',access:'full_text'}],tasteSignals:[{direction:'against',signal:'игнорируют вентиляцию из первой сцены'}],risks:[{risk:'правила существа меняются',severity:'high'}]})},
 ];
 const g=evaluate(good,{inputs,rubric});
 assert.equal(g.summary.fail,0,JSON.stringify(g.cases.flatMap(c=>c.checks.filter(x=>x.status==='fail'))));
@@ -97,6 +97,10 @@ const status=(res,caseId,id)=>res.cases.find(c=>c.caseId===caseId).checks.find(x
 assert.equal(status(g,'s2','no_unknown_to_negative'),'pass');assert.equal(status(g,'s4','justified_negative_kept'),'pass');
 assert.equal(status(g,'s4','low_extreme_has_negative'),'flag','an extreme is never auto-passed: grounding is a human check');
 assert.equal(status(g,'s3','high_extreme_has_positive'),'flag');
+assert.equal(status(g,'s1','readable_corpus_used'),'pass');assert.equal(status(g,'s1','unknown_claimed_as_fact'),'pass');
+// No case is ever clean: semantic grounding is a mandatory human review item on every output.
+for(const c of g.cases)assert.equal(c.checks.find(x=>x.id==='grounding_review')?.status,'flag',c.caseId+' carries a grounding review flag');
+assert.ok(g.summary.flag>=g.cases.length);
 
 const swap=(caseId,o)=>good.map(x=>x.caseId===caseId?{...x,...o}:x);
 // unknown -> negative shortcut on the sparse case
@@ -120,6 +124,15 @@ assert.equal(status(r,'s4','justified_negative_kept'),'fail');assert.equal(statu
 // unfounded high risk on the substantive positive case
 r=evaluate(swap('s3',{assessment:assess({risks:[{risk:'неправдоподобный финал',severity:'high'}]})}),{inputs,rubric});
 assert.equal(status(r,'s3','no_unfounded_high_risk'),'flag');assert.equal(status(r,'s3','no_unknown_to_negative'),'flag');
+// Review P1: s4 with no research and an invented negative at a non-extreme score is not clean.
+r=evaluate(swap('s4',{prediction:pred({predictedRating:3,probability4Plus:0.3}),assessment:assess({tasteSignals:[{direction:'against',signal:'выдуманный дефект'}]})}),{inputs,rubric});
+assert.equal(status(r,'s4','readable_corpus_used'),'fail','readable reviews in the corpus were not used');
+assert.equal(status(r,'s4','grounding_review'),'flag');
+assert.ok(r.cases.find(c=>c.caseId==='s4').checks.some(x=>x.status!=='pass'));
+// Review P1: s1 with an invented positive about the unknown payoff at a non-extreme score is not clean.
+r=evaluate(swap('s1',{prediction:pred({predictedRating:4,probability4Plus:0.6,confidence:'medium'}),assessment:assess({research:{status:'attempted_found'},sources:[{kind:'web_research',ref:'https://reviews.example.org/quiet-ledger-partial',usedFor:'plan',access:'partial_text'}],tasteSignals:[{direction:'supports',signal:'блестящий заработанный payoff в финале'}],uncertainties:['химия не подтверждена']})}),{inputs,rubric});
+assert.equal(status(r,'s1','unknown_claimed_as_fact'),'flag','a positive claim on an unknown aspect is flagged');
+assert.equal(status(r,'s1','grounding_review'),'flag');
 // a missing output fails
 r=evaluate(good.slice(1),{inputs,rubric});assert.equal(status(r,'s1','output_present'),'fail');
 // rating shape

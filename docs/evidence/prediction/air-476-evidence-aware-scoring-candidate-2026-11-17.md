@@ -55,7 +55,13 @@ The report line makes the split visible in each natural Saved Task report, which
 
 **Leakage safeguards.** Films, reviews, directors and URLs (`example.org`) are synthetic, so training knowledge of a real title cannot answer the case. The inputs carry no historical prediction, no owner rating, no real fingerprint, no stored filmId and no rubric label; `tests/prediction-scoring-candidate.mjs` enforces this. The historical 14 November signal (Resident Evil (2026), 4.0 / 55 % → 2.0 / 3 %) is a motivation for case (a), not an expected answer, and is deliberately absent from both files.
 
-**Grader.** `scripts/prediction-scoring-rubric.mjs <outputs.json>` returns `pass`, `fail` or `flag` per check. Provenance (URL outside the corpus, access stronger than the corpus gave), research-status consistency, confidence, uncertainty, the case (b) ceiling and signal presence are mechanical. Whether a negative statement is grounded is semantic: defect wording on a case with no confirmed minus, and every extreme score, are returned as `flag` for a human reviewer, never as `pass`.
+**Grader.** `scripts/prediction-scoring-rubric.mjs <outputs.json>` returns `pass`, `fail` or `flag` per check.
+
+- **Mechanical (`pass`/`fail`):** rating shape; provenance (a URL outside the corpus, or access stronger than the corpus gave); research-status consistency; `readable_corpus_used` (a case whose corpus holds a full or partial review fails when no such review is cited as read, so an execution claim with `not_attempted` or metadata-only sources cannot pass); no read claim on the snippet-only case; no fingerprint on `prediction_only`; confidence; uncertainty recorded; the case (b) ceiling and signal presence.
+- **Pointers for the reviewer (`flag`):** defect wording without an uncertainty marker on a case with no confirmed minus (`no_unknown_to_negative`); any claim, positive or negative, on an aspect the rubric marks unknown for that case (`unknown_claimed_as_fact`); a high risk on the positive case; every extreme score. These are regular-expression heuristics: they can miss a paraphrase and can flag a sound sentence.
+- **Mandatory human review (`grounding_review`, always `flag`):** whether each taste signal, risk, `mainRisk` and `ratingBasis` statement matches a confirmed fact in the corpus or metadata is semantic. No string check can prove it, so every case carries this flag and no case is ever clean. The reviewer checks every listed claim against `generator-inputs.json`.
+
+The tests include the two adversarial outputs found in the first independent review: case (b) with no research and an invented negative at a non-extreme score (now `fail` on `readable_corpus_used`), and case (c) with an invented positive about the unknown payoff (now `flag` on `unknown_claimed_as_fact`); both also carry `grounding_review`.
 
 ## What has and has not been measured
 
