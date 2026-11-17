@@ -438,11 +438,11 @@ for(const stage of ['legacy','r2','prepared']){
  }finally{if(previous===undefined)delete globalThis.CanonicalDiscoveryAdmission;else globalThis.CanonicalDiscoveryAdmission=previous;}
 }
 
-// 12. The real Discovery call sites (src/discovery.js): both `upsertAdmissions` calls hand the chunk's budget to the unit, and the chunk's end runs the catch-up once (the one path every Discovery hop takes).
+// 12. The real Discovery call sites (src/discovery.js): every `upsertAdmissions` call hands the chunk's budget to the unit, and the chunk's end runs the catch-up once (the one path every Discovery hop takes).
 {
  const text=fs.readFileSync(path.join(SRC,'discovery.js'),'utf8');
  const calls=[...text.matchAll(/DiscoveryAuthority\.upsertAdmissions\([^\n]*\)/g)].map(match=>match[0]);
- assert.equal(calls.length,2,'two production call sites in the paged chunk');
+ assert.equal(calls.length,3,'three production call sites in the paged chunk: cheap pass, candidate and revalidation (AIR-503 records movie provenance)');
  for(const call of calls)assert.ok(/\{lease,canonicalDeadline:canonicalLimit\(\)\}/.test(call),'a call site without the canonical budget: '+call);
  assert.ok(/const canonicalLimit=\(\)=>persistLimit\(\)-writeEstimate\(3\);/.test(text),'the budget is the persist limit minus a write reserve');
  assert.equal(text.split('CanonicalDiscoveryAdmission.admitDiscoveryFilms').length-1,1,'one catch-up call in the chunk');
