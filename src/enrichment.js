@@ -1792,10 +1792,43 @@ function integrationTime(value){const ms=Date.parse(value);return Number.isFinit
 // `updatedAt`), the same instant the `epg` event stores as `at`. Not scan `report.updatedAt`, not `startedAt`/`dueAt`,
 // not D1 `published_epg_generation.published_at` (that column still copies the scan clock at pointer switch). An
 // in-flight or failed later run keeps `lastEpgPublishedAt` from the last complete record. Missing or invalid → null.
-function epgUxPublishedAt(sync,report){
- if(sync?.stage==='complete'&&!sync.error&&(!report?.runId||!sync.runId||sync.runId===report.runId))return integrationTime(sync.completedAt||sync.updatedAt);
- return integrationTime(sync?.lastEpgPublishedAt);
+//
+// AIR-518: the one read model of the published EPG generation, shared by `/api/programme` `publishedAt`, the header, the
+// footer EPG health and the next run's carried `lastEpgPublishedAt`. Publication and the last attempt are separate facts:
+// - the completion receipt is `stage: complete` with a valid `completedAt` (set by `prepareEpgCompletion` only once the run
+//   has passed its pointer switch and every seal phase), or, for a record written before AIR-390, a complete `updatedAt`
+//   without an error;
+// - the receipt counts for the published generation only when its runId is that generation's runId (`report` is the
+//   pinned published programme). A different runId, a missing receipt or an unreadable time never becomes a success;
+// - an `error` kept on a complete record is a failed earlier attempt of the same run that a retry recovered (the seal
+//   step stores the error and the successful retry does not clear it). It is reported as `attempt.outcome: recovered`
+//   and never makes the published generation failed. Without a readable generation (`generationRequired` and no
+//   `report`) such a record is not proven and stays unknown.
+const EPG_RUNNING_STAGES=['metadata','epg','seal'];
+function epgErrorCode(message){const text=String(message||'');return /HTTP/i.test(text)?'epg_http':/cover the current window/i.test(text)?'epg_window':/parse|xml|unexpected/i.test(text)?'epg_parse':'epg_failed';}
+function epgCompletionReceipt(sync){
+ if(sync?.stage!=='complete')return null;
+ const completedAt=integrationTime(sync.completedAt);
+ if(completedAt)return completedAt;
+ return sync.error?null:integrationTime(sync.updatedAt);
 }
+function epgPublicationState(sync,report,{generationRequired=false}={}){
+ const receipt=epgCompletionReceipt(sync),reportRunId=report?.runId||null,runId=sync?.runId||null,error=typeof sync?.error==='string'&&sync.error?sync.error:sync?.error?String(sync.error):null;
+ const mismatch=!!(reportRunId&&runId&&reportRunId!==runId);
+ const unproven=!reportRunId&&!!error&&generationRequired;
+ const bound=!!receipt&&!mismatch&&!unproven;
+ const carried=integrationTime(sync?.lastEpgPublishedAt);
+ const publishedAt=bound?receipt:carried;
+ let attempt;
+ if(bound)attempt=error?{outcome:'recovered',code:epgErrorCode(error),at:null}:{outcome:'complete',code:null,at:receipt};
+ else if(receipt&&error)attempt={outcome:'unproven',code:epgErrorCode(error),at:null};
+ else if(error)attempt={outcome:'failed',code:epgErrorCode(error),at:integrationTime(sync.updatedAt)};
+ else if(sync&&EPG_RUNNING_STAGES.includes(sync.stage))attempt={outcome:'running',code:null,at:integrationTime(sync.updatedAt)};
+ else if(sync?.stage==='complete')attempt={outcome:'unproven',code:null,at:null};
+ else attempt={outcome:'unknown',code:null,at:null};
+ return {publishedAt,runId:bound?(runId||reportRunId):reportRunId,binding:bound?'run':publishedAt?'carried':'none',attempt};
+}
+function epgUxPublishedAt(sync,report){return epgPublicationState(sync,report).publishedAt;}
 function integrationEntry(id,role,state,code,lastSuccessAt,lastFailureAt){return {id,role,state,code,lastSuccessAt:lastSuccessAt||null,lastFailureAt:lastFailureAt||null};}
 function ratingsFailureCode(kind){if(kind==='blocked'||kind==='anti_bot')return 'ratings_blocked';if(kind==='http_429')return 'ratings_rate_limit';if(kind==='degraded'||kind==='incomplete')return 'ratings_incomplete';if(kind==='lookup_failed'||kind==='publish_failed'||kind==='failed')return 'ratings_failed';return null;}
 function ratingsMessageCode(message){if(/403|anti-bot/i.test(message))return 'ratings_blocked';if(/429/.test(message))return 'ratings_rate_limit';if(/incomplete|pagination changed|duplicate letterboxd/i.test(message))return 'ratings_incomplete';return 'ratings_failed';}
@@ -1896,12 +1929,15 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
   if(!latestRating.ok)return entry(latestRating.code==='ratings_failed'?'failed':'degraded',latestRating.code,ratingSuccess,ratingFailureAt);
   return entry(fresh(ratingSuccess),freshCode(ratingSuccess),ratingSuccess,ratingFailureAt);
  })();
- const epgFailure=sync?.error?integrationTime(sync.updatedAt):null,epgSuccess=epgUxPublishedAt(sync,report);
+ const epgPublication=epgPublicationState(sync,report,{generationRequired:true}),epgSuccess=epgPublication.publishedAt,epgAttempt=epgPublication.attempt;
  const epg=(()=>{
-  if(sync?.error){const code=/HTTP/i.test(sync.error)?'epg_http':/cover the current window/i.test(sync.error)?'epg_window':/parse|xml|unexpected/i.test(sync.error)?'epg_parse':'epg_failed';return integrationEntry('epg','source','failed',code,epgSuccess,epgFailure);}
-  if(sync?.stage==='complete')return integrationEntry('epg','source',fresh(epgSuccess),freshCode(epgSuccess),epgSuccess,null);
-  if(sync&&['metadata','epg','seal'].includes(sync.stage)){const elapsed=age(sync.updatedAt);return elapsed!=null&&elapsed<15*60000?integrationEntry('epg','source','running','running',epgSuccess,null):integrationEntry('epg','source','degraded','epg_failed',epgSuccess,integrationTime(sync.updatedAt));}
-  return integrationEntry('epg','source','unknown','no_data',epgSuccess,null);
+  const entry=(...args)=>({...integrationEntry('epg','source',...args),runId:epgPublication.runId});
+  if(epgAttempt.outcome==='complete')return entry(fresh(epgSuccess),freshCode(epgSuccess),epgSuccess,null);
+  if(epgAttempt.outcome==='recovered')return {...entry(fresh(epgSuccess),freshCode(epgSuccess),epgSuccess,null),lastAttempt:{outcome:'recovered',code:epgAttempt.code}};
+  if(epgAttempt.outcome==='failed')return entry('failed',epgAttempt.code,epgSuccess,epgAttempt.at);
+  if(epgAttempt.outcome==='running'){const elapsed=age(sync.updatedAt);return elapsed!=null&&elapsed<15*60000?entry('running','running',epgSuccess,null):entry('degraded','epg_failed',epgSuccess,integrationTime(sync.updatedAt));}
+  if(epgAttempt.outcome==='unproven')return entry('unknown','epg_unproven',epgSuccess,null);
+  return entry('unknown','no_data',epgSuccess,null);
  })();
  const reportRunId=report?.runId||null,resolverConfirmed=[];
  if(discoveryStatus?.stage==='complete'&&!discoveryStatus.error){const at=integrationTime(discoveryStatus.finishedAt||discoveryStatus.at);if(at)resolverConfirmed.push({at,current:resolverMatches(discoveryStatus.programmeRunId,reportRunId)});}
@@ -1925,7 +1961,7 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
   if(continuation?.retryAt&&Date.parse(continuation.retryAt)>now)return integrationEntry('resolver','source','degraded','resolver_backoff',success,checkpoint);
   if(skewed(checkpointMs)||skewed(batchMs))return entry('unknown','no_data');
   if(continuation?.remainingChunks>0)return resolverProgress();
-  const epgSettled=sync?.stage==='complete'&&!sync.error,exhausted=continuation?.remainingChunks===0;
+  const epgSettled=['complete','recovered'].includes(epgAttempt.outcome),exhausted=continuation?.remainingChunks===0;
   if(!sameGeneration||!epgSettled||!exhausted||!Number.isFinite(gateMs))return entry('waiting','resolver_waiting');
   if(gateMs>now)return entry('waiting','resolver_waiting',{gateAt:gate});
   const graceEnd=resolverProgressGraceEnd(gateMs);

@@ -93,6 +93,80 @@ assert.equal(source(await footer(),'epg').lastSuccessAt,null);
 assert.equal(ux({stage:'complete',updatedAt:'2026-11-10T17:36:16.213Z',runId:RUN},{runId:RUN,updatedAt:SCAN}),DONE.replace('.213Z','.213Z'));
 assert.equal(context.epgUxPublishedAt({stage:'complete',completedAt:DONE,updatedAt:SCAN,runId:RUN},{runId:RUN,updatedAt:SCAN}),DONE);
 
+// AIR-518. A seal step failed after the pointer switch (rated_admission_incomplete in finalize_scan) and a retry of the same run reached
+// `complete`; the error stays on sync.json. The published generation is this run, so its completion is the published date.
+const OLD='2026-11-08T16:08:00.000Z';
+const NEW_RUN='47663279-3e6b-423d-b696-b22edfcead91';
+const NEW_SCAN='2026-11-16T15:00:00.000Z';
+const NEW_DONE='2026-11-16T19:17:00.000Z';
+now=Date.parse('2026-11-17T09:00:00Z');
+const recovered={runId:NEW_RUN,stage:'complete',startedAt:'2026-11-16T15:00:00.000Z',updatedAt:NEW_DONE,completedAt:NEW_DONE,error:'rated_admission_incomplete',lastEpgPublishedAt:OLD};
+function seedGeneration(runId){seed();records.set('programme.json',{...records.get('programme.json'),runId,updatedAt:NEW_SCAN});}
+seedGeneration(NEW_RUN);
+records.set('sync.json',structuredClone(recovered));
+const recoveredProgramme=await programme();
+const recoveredFooter=await footer();
+assert.equal(recoveredProgramme.publishedAt,NEW_DONE,'a recovered error does not hide the publication of this run');
+assert.equal(source(recoveredFooter,'epg').lastSuccessAt,NEW_DONE);
+assert.equal(source(recoveredFooter,'epg').state,'healthy');
+assert.equal(source(recoveredFooter,'epg').code,'ok');
+assert.equal(source(recoveredFooter,'epg').lastFailureAt,null);
+assert.equal(source(recoveredFooter,'epg').runId,NEW_RUN);
+assert.deepEqual({...source(recoveredFooter,'epg').lastAttempt},{outcome:'recovered',code:'epg_failed'},'the earlier failed attempt stays visible as diagnostics');
+assert.notEqual(recoveredFooter.integrations.aggregate,'failed');
+const recoveredState=context.epgPublicationState(recovered,{runId:NEW_RUN});
+assert.equal(recoveredState.binding,'run');
+assert.equal(recoveredState.attempt.outcome,'recovered');
+assert.equal(ux(recovered,null),NEW_DONE,'the next run carries the recovered completion as lastEpgPublishedAt');
+assert.equal(records.get('sync.json').error,'rated_admission_incomplete','reads never rewrite sync.json');
+
+// Freshness follows the published completion: 37 h later the same publication is stale, not failed.
+now=Date.parse(NEW_DONE)+37*3600000;
+const staleFooter=await footer();
+assert.equal(source(staleFooter,'epg').state,'healthy','48 h integration threshold is not reached at 37 h');
+now=Date.parse(NEW_DONE)+49*3600000;
+assert.equal(source(await footer(),'epg').state,'stale');
+now=Date.parse('2026-11-17T09:00:00Z');
+
+// A failure before the pointer switch stays failed with the previous date.
+records.set('programme.json',{...records.get('programme.json'),runId:RUN});
+records.set('sync.json',{runId:NEW_RUN,stage:'seal',startedAt:'2026-11-16T15:00:00.000Z',updatedAt:'2026-11-16T16:00:00.000Z',error:'EPG generation changed during publish',lastEpgPublishedAt:OLD,seal:{phase:'publish'}});
+let before=await footer();
+assert.equal(source(before,'epg').state,'failed');
+assert.equal(source(before,'epg').lastSuccessAt,OLD);
+assert.equal(source(before,'epg').lastFailureAt,'2026-11-16T16:00:00.000Z');
+assert.equal((await programme()).publishedAt,OLD);
+
+// A seal in flight keeps the last proven date and reads as running, not as a new success.
+records.set('sync.json',{runId:NEW_RUN,stage:'seal',startedAt:'2026-11-17T08:00:00.000Z',updatedAt:'2026-11-17T08:55:00.000Z',lastEpgPublishedAt:OLD,seal:{phase:'finalize'}});
+assert.equal((await programme()).publishedAt,OLD);
+assert.equal(source(await footer(),'epg').state,'running');
+
+// The published generation (or a stale R2 mirror read as it) names another run: the complete record is not its receipt.
+records.set('sync.json',structuredClone(recovered));
+const mismatchProgramme=await programme();
+const mismatchFooter=await footer();
+assert.equal(mismatchProgramme.publishedAt,OLD,'only the last proven date is shown');
+assert.equal(source(mismatchFooter,'epg').state,'unknown');
+assert.equal(source(mismatchFooter,'epg').code,'epg_unproven');
+assert.equal(source(mismatchFooter,'epg').runId,RUN);
+records.set('sync.json',{...recovered,error:undefined});
+assert.equal(source(await footer(),'epg').state,'unknown','a clean complete record of another run is not green either');
+
+// No readable generation (a held or missing publication): a recovered record is not proven, and is not called failed.
+records.delete('programme.json');
+records.set('sync.json',structuredClone(recovered));
+const heldFooter=await footer();
+assert.equal(source(heldFooter,'epg').state,'unknown');
+assert.equal(source(heldFooter,'epg').code,'epg_unproven');
+assert.equal(source(heldFooter,'epg').lastSuccessAt,OLD);
+
+// A record with an error and no completion receipt (written before AIR-390) proves nothing new.
+assert.equal(ux({runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE,error:'rated_admission_incomplete',lastEpgPublishedAt:OLD},{runId:NEW_RUN}),OLD);
+assert.equal(ux({runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE,completedAt:'garbage',error:'x',lastEpgPublishedAt:OLD},{runId:NEW_RUN}),OLD);
+assert.equal(context.epgPublicationState({runId:NEW_RUN,stage:'complete',completedAt:'garbage',updatedAt:'garbage'},{runId:NEW_RUN}).binding,'none');
+now=Date.parse('2026-11-10T17:40:00Z');
+
 const ui=vm.createContext({Date,Intl,URL,URLSearchParams,Set,Map,JSON,console,document:{querySelector(){return null;},querySelectorAll(){return [];},documentElement:{classList:{toggle(){}}}},window:{history:{state:null,pushState(){},replaceState(){}},location:{href:'https://iptv.example/'}}});
 vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ui);
 const stamp=iso=>ui.madridStamp(Date.parse(iso));
@@ -116,5 +190,23 @@ assert.equal(node.textContent,'Обновлено — нет данных');
 const footerUi=ui.footerStatusText({integrations:{sources:[{id:'epg',state:'healthy',code:'ok',lastSuccessAt:DONE}]},epgTmdb:{}});
 assert.equal(footerUi.epgUpdated,stamp(DONE));
 assert.equal(footerUi.epgSummary,stamp(DONE));
+
+// AIR-518 header: age comes from the published completion, the window from the clock and the feed's real shows; they are separate states.
+const H=3600000,clock=Date.parse('2026-11-17T09:00:00Z');
+const headerStatus=(publishedAt,epgEnd)=>{vm.runInContext(`report={updatedAt:${JSON.stringify(NEW_SCAN)},publishedAt:${JSON.stringify(publishedAt)},window:{from:${clock-72*H},to:${clock+24*H}},stats:{epgEnd:${epgEnd}}};`,ui);return ui.programmeStatus(ui.effectiveWindow(ui.report??vm.runInContext('report',ui),clock));};
+assert.equal(headerStatus(new Date(clock-35*H).toISOString(),clock+20*H).badge,'Программа актуальна');
+assert.equal(headerStatus(new Date(clock-37*H).toISOString(),clock+20*H).badge,'Данные устарели','36 h threshold from the published completion');
+assert.equal(headerStatus(NEW_DONE,clock+20*H).badge,'Программа актуальна','recovered publication of 16.11 is fresh on 17.11');
+assert.equal(headerStatus(OLD,clock+20*H).badge,'Данные устарели');
+assert.equal(headerStatus(NEW_DONE,clock-H).badge,'Будущей программы нет','an ended feed is not an old snapshot');
+assert.doesNotMatch(headerStatus(NEW_DONE,clock-H).coverage,/устарел/);
+// DST: 25 Oct 2026 Madrid falls back at 03:00 CEST → 02:00 CET.
+assert.equal(ui.madridStamp(Date.parse('2026-10-24T22:30:00Z')),'25 окт., 00:30');
+assert.equal(ui.madridStamp(Date.parse('2026-10-25T02:30:00Z')),'25 окт., 03:30');
+const recoveredUi=ui.footerStatusText({integrations:{sources:[{id:'epg',state:'healthy',code:'ok',lastSuccessAt:NEW_DONE,lastFailureAt:null,lastAttempt:{outcome:'recovered',code:'epg_failed'}}]},epgTmdb:{}});
+assert.equal(recoveredUi.epgSummary,ui.madridStamp(Date.parse(NEW_DONE)));
+assert.equal(ui.madridStamp(Date.parse(NEW_DONE)),'16 нояб., 20:17','16.11 publication in Madrid time');
+const unprovenUi=ui.footerStatusText({integrations:{sources:[{id:'epg',state:'unknown',code:'epg_unproven',lastSuccessAt:OLD}]},epgTmdb:{}});
+assert.match(unprovenUi.integrations.epg,/не подтверждена/);
 
 console.log('EPG publishedAt UX clock: header, footer and events share completion time; scan/start are not shown');

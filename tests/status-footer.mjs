@@ -265,7 +265,9 @@ assert.equal(sourceOf(started,'letterboxd_watchlist').state,'failed');
 assert.equal(sourceOf(started,'letterboxd_watchlist').code,'watchlist_failed');
 assert.equal(sourceOf(started,'letterboxd_watchlist').lastSuccessAt,'2026-10-13T09:00:00.000Z');
 assert.equal(sourceOf(started,'letterboxd_watchlist').lastFailureAt,new Date(now).toISOString());
-assert.equal(sourceOf(started,'epg').state,'healthy');
+// AIR-518: sync.json names another run than the published generation and carries no proven date, so EPG is unknown, never green.
+assert.equal(sourceOf(started,'epg').state,'unknown');
+assert.equal(sourceOf(started,'epg').code,'epg_unproven');
 assert.equal(sourceOf(started,'predictions').state,'healthy');
 assert.equal(writes.length,writesBeforeStart+1,'a failed watchlist start records one sanitized ingest and the footer stays read-only');
 
