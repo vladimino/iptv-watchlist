@@ -1346,15 +1346,17 @@ for(const stage of ['epg','seal']){
   const out=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
   assert.equal(out.reason,'not_owner');assert.equal(h.wf.creates.filter(c=>c.id===succ).length,0,'nothing is created while the status is unknown');
   const rec=await control(h);assert.equal(rec.failure.code,'create_uncertain');assert.ok(rec.cooldownUntil,'a cooldown bounds the retry');assert.equal(rec.phase,'starting');
-  const model=plain(await h.epg.readModel(h.env,r.clock()));assert.equal(model.failure.code,'create_uncertain');assert.equal(model.handoff.successorPending,true);
+  const model=plain(await h.epg.readModel(h.env,r.clock()));assert.equal(model.failure.code,'create_uncertain');assert.equal(model.handoff.successorPending,false,'an unreadable status does not prove an absent child');assert.equal(model.owner.liveness,'unknown');
+  assert.equal(rec.stopReason,'status_unknown','aligned with the ensure cooldown guard');
+  const spent=(await control(h)).budget,until=Date.parse(rec.cooldownUntil);
+  for(const offset of [60000,10*60000]){// repeated ensures inside an active cooldown change no budget and write nothing
+   const again=await h.epg.ensure(h.env,{now:until-offset,random:()=>0.5});
+   assert.equal(again.reason,'cooldown');
+   const after=await control(h);eq(after.budget,spent);assert.equal(after.cooldownUntil,rec.cooldownUntil);assert.equal(after.quarantine,null);
+  }
   delete h.wf.get;h.wf.get=async id=>{if(!h.wf.instances.has(id))throw new Error('instance not found');return {status:async()=>({status:h.wf.instances.get(id)})};};
   const healed=await h.epg.ensure(h.env,{now:nextDue,random:()=>0.5});
   assert.equal(healed.started,true);assert.equal(healed.instanceId,succ);assert.equal(h.wf.creates.filter(c=>c.id===succ).length,1);
- }
- {// the replay is inside the cooldown of an earlier uncertain: no create, no further budget spend by the old instance
-  const {h,r,out}=await orphan();
-  const rec=await control(h);
-  assert.equal(out.successor,succ);assert.equal(rec.failure,null);
  }
  {// fail-closed predicates: epoch moved, authority held, done, quarantined and a foreign day write or create nothing
   const base=async mutate=>{const h=cloudflare({pipeline:pipeline({metadataSteps:1})});const r=runner(h,{startAt:due0});await h.epg.ensure(h.env,{now:due0});
@@ -1387,6 +1389,31 @@ for(const stage of ['epg','seal']){
   assert.equal(plain(await h.epg.readModel(h.env,r.clock())).handoff.successorPending,false,'a live child is not pending');
   h.wf.instances.delete(succ);
   const m=plain(await h.epg.readModel(h.env,r.clock()));assert.equal(m.handoff.successorPending,true);assert.equal(m.owner.liveness,'absent');
+ }
+ {// successorPending only for a verified absence; alive, unknown and finished stay distinct
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  const pending=async()=>{const m=plain(await h.epg.readModel(h.env,r.clock()));return [m.handoff.successorPending,m.owner.liveness];};
+  eq(await pending(),[false,'alive']);
+  h.wf.instances.set(succ,'complete');eq(await pending(),[false,'finished']);
+  const get=h.wf.get.bind(h.wf);h.wf.get=async()=>{throw new Error('platform unavailable');};eq(await pending(),[false,'unknown']);
+  h.wf.get=get;h.wf.instances.delete(succ);eq(await pending(),[true,'absent']);
+ }
+ {// create unproven with the child absent: create_uncertain with a cooldown, and repeated ensures inside it spend nothing
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  h.wf.create=async({id,params})=>{h.wf.creates.push({id,params});if(id===succ)throw new Error('create failed');h.wf.instances.set(id,'running');};
+  const out=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(out.reason,'seal_handoff');
+  const rec=await control(h);assert.equal(rec.failure.code,'create_uncertain');assert.equal(rec.stopReason,'create_uncertain');
+  const spent=rec.budget,until=Date.parse(rec.cooldownUntil);
+  for(const offset of [60000,10*60000]){
+   assert.equal((await h.epg.ensure(h.env,{now:until-offset,random:()=>0.5})).reason,'cooldown');
+   const after=await control(h);eq(after.budget,spent);assert.equal(after.quarantine,null);
+  }
  }
  {// recovery cost: the replay adds one control read, one status read and one create (no extra publication calls)
   const {h}=await orphan();
