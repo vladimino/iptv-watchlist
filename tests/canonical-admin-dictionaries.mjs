@@ -65,7 +65,7 @@ vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
 vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);
 vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader',IMPORT),ctx);
 vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),ctx);
-for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js','src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),ctx);
+for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js','src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/filter-presets.js'])vm.runInContext(fs.readFileSync(file,'utf8'),ctx);
 vm.runInContext(scoped('src/domain/admin-query.js','AdminQuery'),ctx);
 vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js','utf8'),ctx);
 vm.runInContext(fs.readFileSync('src/admin/read.js','utf8'),ctx);

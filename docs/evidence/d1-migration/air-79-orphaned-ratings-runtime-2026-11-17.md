@@ -71,4 +71,9 @@ Proposed order of the next slices, smallest coupling first: owner reviews, metad
 
 ## Verification
 
-Filled in below after the full run.
+- **Local, on the final checkout of the removal PR** (commit `ae18bcb12a0b31db6052b6fdbc93f6db2b0379ad`, after a fresh `npm ci`): `npm run test:all` passed with the core suite at 419 of 419 files and the non-functional suite at 40 of 40; `npm run build` and `git diff --check` were clean; the pre-commit mutation-anchor preflight passed (137 anchors, 2 harnesses). A first full run stopped at `tests/projector-window-r2-inventory.mjs`, which counts R2 write sites per file: the removed code held three removal-queue writes and one `sync.json` write, none of them a projector input, so only the per-file counts changed (218 to 214 sites) and the table was updated with that reason.
+- **CI on the exact head** (GitHub Actions run 44084792137): `Test and build`, `Test shard 2 of 3` and `Test shard 3 of 3` succeeded; the PR deployment job was skipped, as expected.
+- **Independent review** on the same head: technical pass (review 5939416888). It confirmed that the nine functions have no caller, that `enrichRecentRemovalRatings` is correctly kept, that the Ratings step and the legacy `ratingAttempt.phase` recovery are intact, and that the write-site table accounts for exactly the removed sites.
+- **Merge:** merge commit `30896e2f74d4e47f4e1df0100ec14b3b6840b00f`. The post-merge `Test and build`, shard 2, shard 3 and `Deploy to Cloudflare` results are recorded by the delivery controller on the card, not in this document.
+
+The reviewer's two documentation notes, this section and the comment above `REMOVAL_LOOKUP_KEY` in `src/enrichment.js`, were fixed in a follow-up change.
