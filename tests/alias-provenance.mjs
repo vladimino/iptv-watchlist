@@ -117,4 +117,12 @@ assert.equal(observationOf(result,'фільм р').confirmedSlots.length,1);
 result=await scan([programme('Фільм Р',2,96)],[{...onlyProvenance,movieTitles:['Film R']}]);
 assert.equal(result.discovery.length,1,'without the recorded title the slot is a plain observation, not a collision or a match');
 assert.equal(observationOf(result,'фільм р').confirmedTmdbId,null);
+// 8. The lookup index covers the title and the original of a catalog Film even when a legacy `aliases` list is nonempty and lacks them, so the gate that trusts them is reachable.
+const legacyAliases={id:'tmdb_101',tmdbId:'101',catalogOnly:true,title:'Film R',original:'Film R Original',year:2001,runtime:96,canonicalIdentity:'tmdb:101',aliases:['Другое имя']};
+result=await scan([programme('Film R',2,96)],[legacyAliases]);
+assert.equal(observationOf(result,'film r').confirmedTmdbId,'101','the title is indexed although aliases omit it');
+result=await scan([programme('Film R Original',2,96)],[legacyAliases]);
+assert.equal(observationOf(result,'film r original').confirmedTmdbId,'101','so is the original title');
+result=await scan([programme('Другое имя',2,96)],[legacyAliases]);
+assert.equal(observationOf(result,'другое имя').confirmedTmdbId,null,'an alias without provenance is still not a confirmation');
 console.log('alias provenance: no EPG title becomes an alias without independent confirmation, no alias confirms a catalog film without movie provenance, own titles and watchlist aliases keep matching');

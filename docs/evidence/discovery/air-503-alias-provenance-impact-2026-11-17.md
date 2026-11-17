@@ -34,20 +34,21 @@ Method. All 3 790 current `known_epg_alias` decisions were read with their admis
 
 The 99 shows are about 0.6% of the 16 864 that AIR-500 counted in generation 510. The 222 also include `губка боб квадратные штаны|` (`tmdb_400160`), `крушение|` (`tmdb_37094`) and `метро|` (`tmdb_8860`), the two alias titles AIR-500 left as `needs_review`.
 
-What changes for them. A stored decision is not rewritten. A slot under such a key is no longer confirmed by the scan, and a `known_epg_alias` decision has no anchor, so the slot is withheld. A decision already has a verdict, so its observation does not re-enter the resolver as a candidate; only the bounded revalidation of [ADR 0142](../../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 6 reads it again (`catalogFilmFromDetail` is not on that path). The revalidation therefore records the movie's titles itself: after a drifted duration is reconfirmed alone by the movie-detail gate, one fenced `upsertAdmissions` stores `movieTitles`. See the next section for what that can and cannot recover.
+What changes for them. A stored decision is not rewritten. A slot under such a key is no longer confirmed by the scan, and a `known_epg_alias` decision has no anchor, so the slot is withheld. A decision already has a verdict, so its observation does not re-enter the resolver as a candidate; only the bounded revalidation of [ADR 0142](../../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 6 reads it again (`catalogFilmFromDetail` is not on that path). The revalidation therefore records the movie's titles itself: after a drifted duration is reconfirmed alone by the movie-detail gate, one fenced `upsertAdmissions` stores `movieTitles`, before the decision that makes the duration an anchor. See the next section for what that can and cannot recover.
 
 ## What the 222 can and cannot recover
 
-Verified by `tests/discovery-revalidation.mjs` scenarios J and K (a sqlite stand-in D1 and a recording TMDB stub; no production call).
+Verified by `tests/discovery-revalidation.mjs` scenarios J to M (a sqlite stand-in D1, a recording TMDB stub and a controllable clock; no production call).
 
 | Case | Result |
 | --- | --- |
 | The observed title is listed by TMDB for the stored movie (a `uk` translation, a `US` alternative title), and the drifted duration is accepted alone by the scorer and the gate | The duration joins the anchor, the decision becomes `tmdb_detail`, and the Film record gains `movieTitles` (TMDB's `ru`/`uk`/`en` translations and `RU`/`UA`/`US`/`GB` alternative titles) and the same titles in `aliases`. A later chunk writes nothing more. Slots under any of those titles are then scan-confirmed. |
 | The observed title is only a stored alias that TMDB does not list | The gate refuses with `detail_title_mismatch`. The duration goes to `failedDurations`; no anchor, no provenance, no row. The decision stays `verified`; the Film and its aliases are not rewritten. |
 | Another duration of a recovered key | Covered by the anchor only within its tolerance, `min(10, max(5, 5%))` minutes; otherwise it needs its own revalidation, up to twelve failed durations. |
+| The provenance write is skipped (the Film is not in `written`) or the chunk's time does not fit the provenance, decision and slot-assignment writes | Nothing durable changes: no anchor, no failed duration, no provenance. The observation is counted as deferred, the drift persists, and the next chunk evaluates the duration again and stores both (scenarios L and M). The provenance is written before the decision precisely so that an anchor never exists without it. |
 | A watchlist Film | Unchanged: it keeps every alias and the revalidation writes no provenance. |
 
-Costs and limits. Revalidation runs after the candidates without a decision and shares the chunk's 16 TMDB calls with them; each reconfirmed Film costs one more fenced admission write that is skipped when the chunk's time does not fit. Nothing recovers by itself in one chunk for all 222: a key whose title TMDB does not list never recovers, and for the series title of `tmdb_400160` the outcome depends on whether TMDB lists it, which this record did not read.
+Costs and limits. Revalidation runs after the candidates without a decision and shares the chunk's 16 TMDB calls with them; each reconfirmed Film costs one more fenced admission write; when the chunk's time does not fit it, the whole observation waits for the next chunk. Nothing recovers by itself in one chunk for all 222: a key whose title TMDB does not list never recovers, and for the series title of `tmdb_400160` the outcome depends on whether TMDB lists it, which this record did not read.
 
 ## Reproduction
 

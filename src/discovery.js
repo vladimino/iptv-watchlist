@@ -990,6 +990,20 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     }
     if(!reconfirmed.length&&!failed.length)continue;
     const next=DiscoveryAuthority.decisionAfterRevalidation(previous,{reconfirmed,failed,proposedTmdbId:proposed},{evidenceKey:candidateEvidence(candidate),checkedAt:new Date().toISOString(),provenance:{authority:'tmdb_detail',searchHit:false,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null}});
+    // A duration that the movie authority reconfirmed alone is independent evidence: record that movie's own titles as the Film's provenance (one fenced admission write).
+    // The provenance is written BEFORE the decision that makes the duration an anchor. The anchor ends the drift that triggers this revalidation, so a decision stored first and a
+    // provenance write that then failed or was skipped could never be retried. If the budget does not fit both writes, or the write does not land, nothing durable has changed and the
+    // next chunk evaluates the duration again (the provenance write is idempotent: it happens only while a title is missing).
+    const missingTitles=reconfirmed.length&&catalogFilm?authorityTitles.filter(title=>!(catalogFilm.movieTitles||[]).includes(title)):[];
+    if(missingTitles.length){
+     if(Date.now()+writeEstimate(3)>persistLimit()){revalidation.deferred++;break;}
+     const recorded={...catalogFilm,movieTitles:[...new Set([...(catalogFilm.movieTitles||[]),...authorityTitles])],aliases:[...new Set([...(catalogFilm.aliases||[]),...authorityTitles])]};
+     await heartbeat();
+     const stored=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,{[catalogKey]:recorded},{lease,canonicalDeadline:canonicalLimit()}))));
+     if(!stored)return programmeChanged();
+     if(!stored.written.includes(catalogKey)){revalidation.deferred++;continue;}
+     films[catalogKey]=recorded;indexFilm(recorded);
+    }
     await heartbeat();
     const wrote=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[key]:{previous,next}},{lease}))));
     if(!wrote)return programmeChanged();
@@ -997,13 +1011,6 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     decisions[key]=next;
     revalidation.revalidated+=reconfirmed.length;revalidation.revalidation_failed+=failed.length;
     if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)revalidation.revalidation_exhausted++;
-    // A duration that the movie authority reconfirmed alone is independent evidence: record that movie's own titles as the Film's provenance (one fenced admission write).
-    if(reconfirmed.length&&catalogFilm&&authorityTitles.some(title=>!(catalogFilm.movieTitles||[]).includes(title))&&Date.now()+writeEstimate(1)<=persistLimit()){
-     const recorded={...catalogFilm,movieTitles:[...new Set([...(catalogFilm.movieTitles||[]),...authorityTitles])],aliases:[...new Set([...(catalogFilm.aliases||[]),...authorityTitles])]};
-     const stored=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,{[catalogKey]:recorded},{lease,canonicalDeadline:canonicalLimit()}))));
-     if(!stored)return programmeChanged();
-     if(stored.written.includes(catalogKey)){films[catalogKey]=recorded;indexFilm(recorded);}
-    }
     if(reconfirmed.length&&Date.now()+writeEstimate(1)<=persistLimit())await assignSlots(key,'revalidation_assignment');
    }catch(e){
     if(e?.name==='BudgetExhaustedError'){revalidation.deferred++;break;}
