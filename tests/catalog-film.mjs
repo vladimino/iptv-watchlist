@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
-import {webcrypto} from 'node:crypto';
+import {webcrypto,createHash} from 'node:crypto';
 import * as Authority from '../src/discovery-authority.js';
 import {d1Standin} from './d1-standin.mjs';
 import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
@@ -68,7 +68,7 @@ const env=db=>({DB:db,BUCKET:{async get(){throw new Error('R2 must not be read b
 const records=new Map();let puts=[],fetches=[];
 const reads=[];
 const bucket={
- async get(key){reads.push(key);return records.has(key)?{etag:'e',json:async()=>structuredClone(records.get(key))}:null;},
+ async get(key){reads.push(key);return records.has(key)?{etag:'e',json:async()=>structuredClone(records.get(key)),text:async()=>JSON.stringify(records.get(key))}:null;},
  async put(key,value){records.set(key,JSON.parse(value));puts.push(key);return {etag:'e'};},
  async list({prefix=''}={}){return {objects:[...records.keys()].filter(k=>k.startsWith(prefix)).sort().map(key=>({key,customMetadata:{}})),truncated:false};}
 };
@@ -76,7 +76,8 @@ const ctx=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSi
  fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ctx);
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),ctx);
-for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js',process.env.CATALOG_WORKER_FILE||'src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+vm.runInContext(scoped('src/prediction-d1.js','PredictionD1'),ctx);vm.runInContext(scoped('src/ratings-d1.js','RatingsD1'),ctx);
+for(const file of ['src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js',process.env.CATALOG_WORKER_FILE||'src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const worker=ctx.worker,constant=name=>vm.runInContext(name,ctx);
 const envW={BUCKET:bucket};
 const get=async id=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/'+id),envW,{waitUntil(){}});return {status:r.status,body:await r.json()};};
@@ -134,7 +135,7 @@ const base={
   seed(base);
  }
  r=await get('9');assert.equal(r.status,200);assert.deepEqual(r.body.film.shows,[]);assert.equal(r.body.film.availability.state,'unavailable','no shows: unavailable');assert.equal(r.body.film.availableUntil,null);assert.equal(r.body.film.nextStart,null);assert.equal(r.body.film.availableNow,false,'zero shows is a valid film page');
- r=await get('8');assert.equal(r.status,200);assert.equal(r.body.film.prediction,null,'a stale prediction is not shown');assert.equal(r.body.film.fingerprint,null);
+ r=await get('8');assert.equal(r.status,200);assert.deepEqual([r.body.film.prediction.stale,typeof r.body.film.prediction.staleReason,r.body.film.prediction.predictedRating],[true,'string',4.5],'AIR-475: a stale forecast is shown, marked with the evaluator\'s reason');assert.deepEqual(r.body.film.fingerprint.plotMechanics,['investigation'],'the stored fingerprint is shown whatever the forecast\'s freshness');assert.equal(r.body.film.prediction.compatibility,undefined,'no compatibility claim on a stale verdict');
  r=await get('12');assert.equal(r.status,200);assert.deepEqual(r.body.film.shows,[],'shows of an earlier generation are not availability now');
  // States.
  r=await get('999');assert.deepEqual([r.status,r.body.status],[404,'absent']);
@@ -143,7 +144,7 @@ const base={
  for(const bad of ['0','abc','-1','7.5','007','1234567890123','%E0%A4%A']){r=await get(bad);assert.deepEqual([r.status,r.body.status],[400,'invalid'],'invalid: '+bad);}
  // The film is still found when the watchlist, a rating or the profile say nothing about it.
  const index=records.get(constant('ENRICHMENT_KEY')+'view-index.json');index.tmdb_7.actualRating=5;index.tmdb_7.watchlist=true;records.set(constant('ENRICHMENT_KEY')+'view-index.json',index);
- r=await get('7');assert.equal(r.status,200,'a rated or watchlisted film still has its page');assert.equal(Object.hasOwn(r.body.film,'actualRating'),false,'no rating is exposed');
+ r=await get('7');assert.equal(r.status,200,'a rated or watchlisted film still has its page');assert.deepEqual([r.body.film.actualRating,r.body.film.watched],[5,false],'AIR-475: the known rating is shown; a rating is not a watched mark and a watched mark is not inferred from it');
  // Optional context degrades honestly: no profile, no programme copy, no index.
  records.delete(constant('profileKey'));r=await get('7');assert.equal(r.status,200);assert.equal(r.body.film.prediction,null,'no profile, no current prediction');assert.equal(r.body.film.shows.length,2);
  seed(base);records.delete('epg/generations/'+G1+'/programme.json');r=await get('7');assert.equal(r.status,200);assert.deepEqual(r.body.film.shows,[],'no programme copy to pin: no availability claimed');assert.ok(r.body.degraded.includes('programme'));
@@ -390,7 +391,7 @@ INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('film:tm
   }
   for(const id of [10750,1100988]){const r=await ask(db,String(id));assert.equal(r.status,200,'control '+id);assert.equal(r.body.film.id,'tmdb_'+id,'a Film Discovery holds still opens (Discovery wins; no duplicate)');assert.deepEqual(r.body.film.shows.length,0);}
   assert.ok(statements.length>0&&statements.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1: '+statements.filter(text=>!/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)).join(' | '));
-  assert.equal(db.calls.batches,0,'no D1 batch');
+  /* the prediction and ratings authority markers are read in one read-only batch each: the SELECT-only assertion above covers every statement of it */
   // The film is not added to the watchlist, the programme or Finds, and no film row changes: the catalog GET writes nothing.
   assert.equal(sqliteSync(['-json',file,'SELECT (SELECT COUNT(*) FROM watchlist_film) w,(SELECT COUNT(*) FROM film) f'],{encoding:'utf8'}).stdout.replace(/\s/g,''),'[{"w":0,"f":5}]');
   assert.deepEqual([puts,fetches],[[],[]],'no R2 write, no provider request');
@@ -435,6 +436,101 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
   ctx.__stub=undefined;
  }
  assert.deepEqual([puts,fetches],[[],[]]);
+}
+
+// ---- 3g. AIR-475 production acceptance: the permanent page shows the owner's rating and watched mark, the stored forecast and its fingerprint of a retained Film, found through the verified D1 lid ----
+{
+ vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
+ const base=path.join(root,'alias-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
+ const OPEN=VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";
+ const T='2026-11-14T00:00:00.000Z',q=value=>"'"+String(value).replace(/'/g,"''")+"'";
+ // Live-equivalent facts of the acceptance: tmdb -> lid pairs SEXE, 1BbQ, MwlA are trusted claims of one Film each; tmdb 10750 has a lid that another Film also claims (untrusted): a contested identity.
+ const film=(id,title,original)=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${id}',1,'tmdb:${id}',${q(original)},'${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:tmdb:${id}','tmdb','${id}',1,0);INSERT INTO film_dimension (film_id,dimension,status,value,updated_at) VALUES ('film:tmdb:${id}','localization','provisional',${q(title)},'${T}');`;
+ const lid=(id,value,trusted=1)=>`INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:tmdb:${id}','letterboxd','${value}',${trusted},0);`;
+ const SEED=film(1423191,'Обитель зла','Resident Evil')+lid(1423191,'SEXE')+film(22004,'Чужая территория','Alien Territory')+lid(22004,'1BbQ')+film(1272837,'28 лет спустя: Храм костей','The Bone Temple')+lid(1272837,'MwlA')
+  +film(10750,'Игрушечные солдатики','Toy Soldiers')+lid(10750,'LID10750')+`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:rival',1,NULL,'Rival','${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:rival','letterboxd','LID10750',0,0);`;
+ let counter=0;const statements=[];
+ const mount=marker=>{const file=path.join(root,'alias-'+(counter++)+'.sqlite');fs.copyFileSync(base,file);sql(file,SEED+marker);return d1Standin(file,{onQuery:async text=>{statements.push(text);}});};
+ const ask=async(db,id)=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/'+id),{BUCKET:bucket,DB:db},{waitUntil(){}});return {status:r.status,body:await r.json()};};
+ seed({tmdb_10750:catalogFilm('tmdb_10750',10750,{title:'Игрушечные солдатики'})});
+ const indexKey=constant('ENRICHMENT_KEY')+'view-index.json';
+ // The R2 view index as production has it: the TMDB spellings hold only watchlist facts, the lids hold the forecasts, the ratings and the watched marks.
+ records.set(indexKey,{tmdb_1423191:{watchlist:true},tmdb_22004:{watchlist:true},tmdb_1272837:{watchlist:true},
+  SEXE:{...stored(),actualRating:4.5,watched:true},'1BbQ':{...stored({tasteProfileHash:'old'}),actualRating:3.5,watched:true},MwlA:{...stored(),watched:true},LID10750:{...stored(),actualRating:2,watched:true}});
+ const db=mount(OPEN);statements.length=0;
+ let r=await ask(db,'1423191');assert.equal(r.status,200,JSON.stringify(r.body));
+ assert.deepEqual([r.body.film.actualRating,r.body.film.watched,r.body.film.prediction.predictedRating,r.body.film.prediction.compatibility,r.body.film.prediction.stale],[4.5,true,4.5,'current',undefined],'SEXE: rating, watched mark and the current forecast, reached through the verified lid');
+ assert.deepEqual(r.body.film.fingerprint.plotMechanics,['investigation'],'the stored fingerprint is shown');assert.equal(r.body.film.prediction.tasteProfileVersion,1);assert.equal(r.body.degraded,undefined);
+ r=await ask(db,'22004');assert.deepEqual([r.body.film.actualRating,r.body.film.watched,r.body.film.prediction.stale,typeof r.body.film.prediction.staleReason],[3.5,true,true,'string'],'1BbQ: a really stale forecast is marked with the evaluator\'s reason, the rating and mark are still shown');assert.ok(r.body.film.fingerprint,'the fingerprint is shown although the forecast is stale');
+ r=await ask(db,'1272837');assert.deepEqual([r.body.film.actualRating,r.body.film.watched,r.body.film.prediction.predictedRating],[null,true,4.5],'MwlA: watched without a rating has no rating');
+ // A contested lid is never used: no forecast, no rating, the degraded part is named; nothing is guessed from the title or a slug.
+ r=await ask(db,'10750');assert.equal(r.status,200);assert.deepEqual([r.body.film.actualRating,r.body.film.watched,r.body.film.prediction],[null,false,null],'a contested identity shows none of the lid\'s facts');assert.ok(r.body.degraded.includes('identity'));
+ assert.ok(statements.length>0&&statements.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1');assert.deepEqual([puts,fetches],[[],[]],'no write, no provider request');
+ // Below open there is no D1 identity: no alias, so the TMDB entry alone is read (the production defect, kept visible).
+ const prepared=mount(VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;");
+ r=await ask(prepared,'1423191');assert.equal(r.status,404,'below open the canonical Film is not read at all (unchanged)');
+ // A held marker keeps failing closed (503), with no alias read.
+ const held=mount(OPEN+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;");r=await ask(held,'1423191');assert.deepEqual([r.status,r.body.reason],[503,'film_person_held']);
+}
+
+// ---- 3h. AIR-475 review of the acceptance fix: with Film/Person, Ratings and Predictions ALL d1/open, the page shows the D1 forecast, fingerprint, rating and watched mark of the verified lid even when
+// the R2 view index lacks the key (or is missing altogether), D1 overrides stale R2 display data, an unrated film with only a D1 forecast shows its forecast, a contested lid exposes nothing, and the history agrees ----
+{
+ vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
+ const base=path.join(root,'domains-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
+ const OPEN=VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";
+ const DOMAINS="UPDATE prediction_domain_authority SET mode='d1' WHERE id=1;UPDATE ratings_domain_authority SET mode='d1',cutover='open' WHERE id=1;";
+ const T='2026-11-14T00:00:00.000Z',q=value=>"'"+String(value).replace(/'/g,"''")+"'",sha=text=>createHash('sha256').update(text).digest('hex');
+ const film=(id,title,original)=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${id}',1,'tmdb:${id}',${q(original)},'${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:tmdb:${id}','tmdb','${id}',1,0);INSERT INTO film_dimension (film_id,dimension,status,value,updated_at) VALUES ('film:tmdb:${id}','localization','provisional',${q(title)},'${T}');`;
+ const lid=(id,value)=>`INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:tmdb:${id}','letterboxd','${value}',1,0);`;
+ // The D1 forecast of a lid: pointer (display facts), fingerprint features and the immutable version body in R2.
+ const forecast=(lidId,rating,hash='f')=>{
+  const display={predictedRating:rating,probability4Plus:.74,confidence:'high',matchSignals:['Investigation'],mainRisk:'Slow start',moodLabels:['мрачный','напряжённый'],tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:hash,fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1,generatedAt:'2026-11-10T10:00:00.000Z',filmId:lidId,runId:'run-'+lidId,trigger:'scheduled'};
+  const text=ctx.predictionVersionText(display),digest=sha(text),key=ctx.predictionVersionKey(lidId,digest);records.set(key,JSON.parse(text));
+  const features={fingerprintHash:hash,fingerprintSchemaVersion:1,fingerprintPromptVersion:1,invalidatedAt:null,plotMechanics:['investigation'],moodLabels:['мрачный'],execution:{payoff:'strong',pacing:'unknown'}};
+  return `INSERT INTO prediction_pointer (film_id,taste_profile_version,taste_profile_hash,fingerprint_hash,fingerprint_schema_version,prediction_prompt_version,predicted_rating,r2_key,content_sha256,updated_at,display_json) VALUES (${q(lidId)},1,'p1',${q(hash)},1,1,${rating},'${key}','${digest}','${T}',${q(JSON.stringify(display))});INSERT INTO prediction_fingerprint (film_id,fingerprint_hash,schema_version,prompt_version,generated_at,invalidated_at,r2_key,content_sha256,features_json) VALUES (${q(lidId)},${q(hash)},1,1,'${T}',NULL,'fp/${lidId}','${'a'.repeat(64)}',${q(JSON.stringify(features))});`;
+ };
+ const view=(alias,watched,rating,known)=>`INSERT INTO ratings_view (alias_id,fact_key,watched,actual_rating,watchlist,rating_known,updated_at) VALUES (${q(alias)},'tmdb-x',${watched},${rating},NULL,${known},'${T}');`;
+ const docs=(lidId,tmdb)=>{const put=(key,value)=>{const body=JSON.stringify(value);return `INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('${key}',0,${q(body)},'${sha(body)}','${T}');`;};
+  return put('letterboxd/facts/links.json',{['tmdb:'+tmdb]:'tmdb-'+tmdb,['letterboxd:'+lidId]:'tmdb-'+tmdb})+put('letterboxd/facts/films/tmdb-'+tmdb+'.json',{schemaVersion:1,factKey:'tmdb-'+tmdb,links:{letterboxd:lidId,tmdb:String(tmdb)},redirectTo:null,migrating:null,watched:true,rating:{value:4.5,observedAt:'2026-11-10T00:00:00.000Z',source:'owner',sourceRef:null,observationId:'o1'},ratingHistory:[{kind:'first_observed',recordedAt:'2026-11-10T00:00:00.000Z',value:4.5,observedAt:'2026-11-10T00:00:00.000Z',source:'owner',sourceRef:null,observationId:'o1',previous:null}]})+put('letterboxd/diary/history.json',{schemaVersion:1,entries:{'viewing:77':{key:'viewing:77',source:'letterboxd_diary',identity:{type:'letterboxd_lid',value:lidId},aliases:[],firstObservedAt:'2026-11-10T00:00:00.000Z',observedAt:'2026-11-10T00:00:00.000Z',page:1,changes:[],keyBasis:'viewing_id',viewingId:'77',watchedDate:'2026-11-10',viewings:1,viewingsCertain:true,ratingAtEntry:4.5,ratingsAtEntry:[4.5],rewatch:false}}})+put('letterboxd/diary/state.json',{schemaVersion:1,lastOutcome:'complete',lastSuccessAt:'2026-11-16T16:01:14.000Z',coverage:{newestWatchedDate:'2026-11-10',oldestWatchedDate:'2010-01-01',reachedEnd:true},resumePage:null});};
+ const SEED=film(1423191,'Обитель зла','Resident Evil')+lid(1423191,'SEXE')+film(22004,'Чужая территория','Alien Territory')+lid(22004,'1BbQ')+film(1272837,'Храм костей','The Bone Temple')+lid(1272837,'MwlA')
+  +film(10750,'Игрушечные солдатики','Toy Soldiers')+lid(10750,'LID10750')+`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:rival',1,NULL,'Rival','${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:rival','letterboxd','LID10750',0,0);`;
+ seed({tmdb_10750:catalogFilm('tmdb_10750',10750,{title:'Игрушечные солдатики'})}); // clears the in-memory R2: every body below is written after it
+ // The taste profile is a prediction-domain document too: with the domain d1 the active profile is the D1 row (its immutable body in R2), never the R2 current.json.
+ const profileText=JSON.stringify({profileHash:'p1',version:1}),profileKey='enrichment/profile/versions/1.json';records.set(profileKey,JSON.parse(profileText));
+ const PROFILE=`INSERT INTO prediction_profile (version,profile_hash,created_at,r2_key,content_sha256,lineage_json,active) VALUES (1,'p1','${T}','${profileKey}','${sha(profileText)}',NULL,1);`;
+ const D1=PROFILE+forecast('SEXE',4.5)+view('SEXE',1,4.5,1)+docs('SEXE',1423191)+forecast('1BbQ',3.5)+forecast('MwlA',4)+view('MwlA',1,'NULL',0)+forecast('LID10750',5)+view('LID10750',1,5,1);
+ const file=path.join(root,'domains-'+Math.random().toString(36).slice(2)+'.sqlite');fs.copyFileSync(base,file);sql(file,SEED+D1+OPEN+DOMAINS);
+ const statements=[],db=d1Standin(file,{onQuery:async text=>{statements.push(text);}});
+ const ask=async id=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/'+id),{BUCKET:bucket,DB:db},{waitUntil(){}});return {status:r.status,body:await r.json()};};
+ const indexKey=constant('ENRICHMENT_KEY')+'view-index.json';
+ // 1. No R2 view index at all: the D1 domains alone supply everything.
+ records.delete(indexKey);statements.length=0;
+ let r=await ask('1423191');assert.equal(r.status,200,JSON.stringify(r.body));
+ assert.deepEqual([r.body.film.prediction.predictedRating,r.body.film.prediction.compatibility,r.body.film.actualRating,r.body.film.watched],[4.5,'current',4.5,true],'SEXE: forecast, rating and watched mark from D1 with no R2 index');
+ assert.deepEqual(r.body.film.fingerprint.plotMechanics,['investigation'],'the D1 fingerprint is shown');
+ // 2. An unrated film with only a D1 forecast (no ratings row at all): the forecast is shown, rating unknown, not watched.
+ r=await ask('22004');assert.deepEqual([r.body.film.prediction.predictedRating,r.body.film.actualRating,r.body.film.watched],[3.5,null,false],'1BbQ: only a D1 forecast');assert.ok(r.body.film.fingerprint);
+ // 3. An R2 index that exists but lacks the lid key, and one that holds stale display data: D1 decides.
+ records.set(indexKey,{tmdb_1272837:{watchlist:true},MwlA:{...stored({predictedRating:1}),actualRating:1,watched:false}});
+ r=await ask('1272837');assert.deepEqual([r.body.film.prediction.predictedRating,r.body.film.actualRating,r.body.film.watched],[4,null,true],'MwlA: D1 overrides the stale R2 display data (a watched mark with no known rating has no rating)');
+ records.set(indexKey,{tmdb_1423191:{watchlist:true},unrelated:stored()});
+ r=await ask('1423191');assert.deepEqual([r.body.film.prediction.predictedRating,r.body.film.actualRating],[4.5,4.5],'an R2 index without the lid key does not hide the D1 forecast');
+ // 4. A contested lid exposes none of the foreign data, although D1 holds rows under that lid.
+ r=await ask('10750');assert.equal(r.status,200);assert.deepEqual([r.body.film.prediction,r.body.film.actualRating,r.body.film.watched],[null,null,false],'a contested identity shows nothing of the foreign lid');assert.ok(r.body.degraded.includes('identity'));
+ assert.ok(statements.length>0&&statements.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1: '+statements.filter(text=>!/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)).join(' | '));assert.deepEqual([puts,fetches],[[],[]],'no write, no provider request');
+ // 5. The history of the same Film agrees with the page: the same forecast, the same rating, the same viewing.
+ const history=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/enrichment/history?filmId=tmdb_1423191'),{BUCKET:bucket,DB:db},{waitUntil(){}});const h=await history.json();
+ assert.equal(history.status,200,JSON.stringify(h));
+ assert.deepEqual([h.events.filter(e=>e.type==='prediction').map(e=>e.predictedRating),h.current.rating.value,h.events.filter(e=>e.type==='diary_viewing').map(e=>e.watchedDate)],[[4.5],4.5,['2026-11-10']],'the history shows the same forecast and rating as the page, and the D1 Diary viewing');
+ // 6. An unreadable D1 domain is a 503, never a stale R2 answer.
+ sql(file,'DROP TABLE prediction_fingerprint;');r=await ask('1423191');assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable','prediction_domain_unavailable']);
 }
 
 // ---- 4. Method and routing guards ----

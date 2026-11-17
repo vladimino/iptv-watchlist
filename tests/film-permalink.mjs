@@ -153,6 +153,25 @@ assert.equal(fetches.length,2,'asked again after the pause');assert.equal(query(
 Date.now=realNow;
 reset();plan.set('/api/catalog/film/54',{status:404,body:{status:'absent'}});await open('tmdb_54');run('renderFilmShell()');assert.equal(fetches.length,1,'an absence is settled for the session');
 
+// AIR-475 (production acceptance): the permanent page shows the owner's rating and watched mark from the API, never from the loaded watchlist; a rating is not invented from a mark.
+reset();
+plan.set('/api/catalog/film/51',found(51,{actualRating:4.5,watched:true}));
+await open('tmdb_51');
+assert.match(html('#film-screen-score'),/Оценка Letterboxd<\/span><strong>4\.5<\/strong>/,'the known rating');assert.match(html('#film-screen-score'),/Просмотрен/,'the watched mark');
+reset();
+plan.set('/api/catalog/film/52',found(52,{actualRating:null,watched:true}));
+await open('tmdb_52');
+assert.match(html('#film-screen-score'),/Оценка Letterboxd не сохранена/,'watched without a rating says so, honestly');assert.match(html('#film-screen-score'),/Просмотрен/);
+// A forecast the evaluator calls compatible shows its profile provenance; a stale one says it awaits recalculation; the fingerprint shows either way.
+reset();
+plan.set('/api/catalog/film/53',found(53,{prediction:{predictedRating:4.1,probability4Plus:.7,confidence:'medium',matchSignals:['a'],mainRisk:'b',moodIds:[],tasteProfileVersion:1,compatibility:'compatible'}}));
+await open('tmdb_53');
+assert.match(html('#film-screen-score'),/Прогноз<\/span><strong>4\.1<\/strong>/);assert.match(html('#film-screen-score'),/по профилю v1/,'the stored forecast keeps v1 as its provenance');assert.doesNotMatch(html('#film-screen-score'),/ожидает пересчёта/);
+reset();
+plan.set('/api/catalog/film/54',found(54,{prediction:{predictedRating:3.4,probability4Plus:.4,confidence:'low',matchSignals:[],mainRisk:null,moodIds:[],tasteProfileVersion:1,stale:true,staleReason:'profile_impacted'}}));
+await open('tmdb_54');
+assert.match(html('#film-screen-score'),/ожидает пересчёта/);assert.match(html('#film-screen-fingerprint'),/Расследование|investigation|Механика/i,'the stored fingerprint shows although the forecast is stale');
+
 // ---- 4. No flicker and no second source mixed in ----
 reset({programmeReady:false});
 run('filmScreen=null;applyFilmScreen("tmdb_60")');
