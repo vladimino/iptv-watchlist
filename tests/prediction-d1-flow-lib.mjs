@@ -18,7 +18,7 @@ export function migrated(){
 }
 // `extra(n)` adds fields to film n (for example genres or a synopsis that fingerprint evidence cites).
 export async function flowWorld({scope=true,films=40,extra=null}={}){
- const hooks={write:null};
+ const hooks={write:null,query:null};
  const records=new Map(),etags=new Map();let revision=0;
  const bucket={
   async get(key){return records.has(key)?{etag:etags.get(key),size:JSON.stringify(records.get(key)).length,json:async()=>structuredClone(records.get(key)),text:async()=>JSON.stringify(records.get(key))}:null;},
@@ -31,7 +31,8 @@ export async function flowWorld({scope=true,films=40,extra=null}={}){
  sql(file,"UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
  // A D1 round trip is a statement run on its own (`queries`) or a batch (`batches`); a batch of reads is not seen by `onQuery`.
  const stats={queries:0,batches:0,writeBatches:0};
- const db=d1Standin(file,{onQuery:()=>{stats.queries++;},onBatch:statements=>{stats.batches++;if(!statements.every(item=>/^\s*SELECT/i.test(item.text))){stats.writeBatches++;if(hooks.write)hooks.write(statements,stats.writeBatches);}}});
+ // hooks.query(text) sees every statement, run on its own or inside a batch (a test can count or react to the statements it cares about).
+ const db=d1Standin(file,{onQuery:text=>{stats.queries++;if(hooks.query)hooks.query(text);},onBatch:statements=>{stats.batches++;if(hooks.query)for(const item of statements)hooks.query(item.text);if(!statements.every(item=>/^\s*SELECT/i.test(item.text))){stats.writeBatches++;if(hooks.write)hooks.write(statements,stats.writeBatches);}}});
  const env={BUCKET:bucket,DB:db,PREDICTION_DB_REQUIRED:'on'};
  const module=scope?PredictionD1:{...PredictionD1,scopeRequest:undefined};
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console:capture,setTimeout,DiscoveryAuthority:Authority,PredictionD1:module,encodeURIComponent,decodeURIComponent});

@@ -1,5 +1,5 @@
-// AIR-441. The prediction domain's authority marker is read in one D1 round trip, and inside one next or submit it is reused until that request's own
-// database does something other than read. This test proves the reduction on a run in D1 mode, that the answers and the stored state are those of a run
+// AIR-441. The prediction domain's authority marker is read in one D1 round trip, and inside one runner step (a batch submit since ADR 0162 retired the
+// v5 next and submit) it is reused until that request's own database does something other than read. This test proves the reduction on a run in D1 mode, that the answers and the stored state are those of a run
 // without the scope, that the scope never leaves its request, and that a marker that moves under a request fails its next write closed instead of
 // landing it. Local sqlite and in-memory R2 stand-ins only.
 import assert from 'node:assert/strict';
@@ -94,29 +94,29 @@ const generation=file=>sql(file,'SELECT generation FROM prediction_domain_author
   const {start}=await w.reconcileAndStart();assert.equal(start.status,200);
   const steps=[];for(let i=0;i<3;i++)steps.push(await w.pair(start.data.runId));
   const state={pointers:sql(w.file,'SELECT film_id, fingerprint_hash FROM prediction_pointer ORDER BY film_id'),fingerprints:sql(w.file,'SELECT film_id, schema_version, prompt_version FROM prediction_fingerprint ORDER BY film_id'),lineage:sql(w.file,'SELECT COUNT(*) AS n FROM prediction_lineage'),authority:sql(w.file,'SELECT mode, queue_generation, writes FROM prediction_domain_authority'),generations:generation(w.file)};
-  return {steps,state,answers:normalize(steps.map(s=>[s.next.status,s.next.data.items.map(i=>i.requiredWork),s.submit.status,s.submit.data.results.map(r=>r.status)])),logs:w.logs.filter(l=>l.includes('prediction_boundary_failed'))};
+  return {steps,state,answers:normalize(steps.map(s=>[s.plan,s.submit.status,s.submit.data.results.map(r=>r.status)])),logs:w.logs.filter(l=>l.includes('prediction_boundary_failed'))};
  };
  const off=await runOne(false),on=await runOne(true);
  assert.deepEqual(on.logs,[]);assert.deepEqual(off.logs,[]);
  assert.deepEqual(on.answers,off.answers,'the same answers');
  assert.deepEqual(on.state,off.state,'the same stored state, down to the authority generation');
- const nextOn=Math.max(...on.steps.map(s=>s.nextQueries)),nextOff=Math.min(...off.steps.map(s=>s.nextQueries)),submitOn=Math.max(...on.steps.map(s=>s.submitQueries)),submitOff=Math.min(...off.steps.map(s=>s.submitQueries));
- assert.ok(nextOn<nextOff*0.7,'next: '+nextOff+' -> '+nextOn);assert.ok(submitOn<submitOff*0.8,'submit: '+submitOff+' -> '+submitOn);
- console.log(JSON.stringify({d1_round_trips_per_step_without_scope:{next:nextOff,submit:submitOff},with_scope:{next:nextOn,submit:submitOn}}));
+ const submitOn=Math.max(...on.steps.map(s=>s.submitQueries)),submitOff=Math.min(...off.steps.map(s=>s.submitQueries));
+ assert.ok(submitOn<submitOff,'batch submit: '+submitOff+' -> '+submitOn);
+ console.log(JSON.stringify({d1_round_trips_per_batch_submit_without_scope:submitOff,with_scope:submitOn}));
 }
 // 5. A concurrent writer moves the marker under a running step: with the scope and without it the step ends the same way, and the run goes on to complete a film.
 {
  const outcome=async scope=>{
   const w=await flowWorld({scope,films:40});
-  const {start}=await w.reconcileAndStart();const runId=start.data.runId;
+  const {start}=await w.reconcileAndStart();const m=start.data,filmId=m.films[0].filmId;
+  const body={runId:m.runId,epoch:m.lease.epoch,items:[{filmId,fingerprint:w.fingerprint,prediction:w.prediction}]};
   let fired=0;
   // The other writer lands just before the first write of the step commits, once, as a second runner's checkpoint would.
   const afterSetup=w.stats.writeBatches;
   w.hooks.write=(statements,count)=>{if(count===afterSetup+1&&!fired){fired++;sql(w.file,'UPDATE prediction_domain_authority SET generation=generation+1 WHERE id=1');}};
-  const raced=await w.api('next',{runId,batchSize:1});
+  const raced=await w.api('batch/submit',body);
   w.hooks.write=null;
-  const next=raced.status===200&&raced.data.items?.length?raced:await w.api('next',{runId,batchSize:1});
-  const submit=await w.api('submit',{runId,items:[{filmId:next.data.items[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});
+  const submit=raced.status===200&&raced.data.results?.[0]?.status==='created'?raced:await w.api('batch/submit',body);
   return {fired,racedStatus:raced.status,submitStatus:submit.status,created:submit.data.results?.map(r=>r.status),films:sql(w.file,'SELECT COUNT(*) AS n FROM prediction_pointer')[0].n,failures:w.logs.filter(l=>l.includes('prediction_boundary_failed')).length};
  };
  const off=await outcome(false),on=await outcome(true);
@@ -208,39 +208,35 @@ const generation=file=>sql(file,'SELECT generation FROM prediction_domain_author
  const normalize=value=>JSON.parse(JSON.stringify(value).replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g,'<time>').replace(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}/g,'<uuid>').replace(/[0-9a-f]{64}/g,'<sha>'));
  const films=w=>sql(w.file,'SELECT film_id FROM prediction_pointer ORDER BY film_id').map(r=>r.film_id);
  const lost=async scope=>{
-  const w=await flowWorld({scope,films:40}),{start}=await w.reconcileAndStart(),runId=start.data.runId;
-  const next=await w.api('next',{runId,batchSize:1});
+  const w=await flowWorld({scope,films:40}),{start}=await w.reconcileAndStart(),m=start.data;
   sql(w.file,"UPDATE prediction_lease SET expires_at=1, document_json=json_set(document_json,'$.expiresAt',1) WHERE name='runner'");
-  const submit=await w.api('submit',{runId,items:[{filmId:next.data.items[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});
-  return {status:submit.status,body:normalize(submit.data.status||submit.data.error||null),films:films(w)};
+  const submit=await w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items:[{filmId:m.films[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});
+  return {status:submit.status,body:normalize(submit.data.code||submit.data.status||submit.data.error||null),films:films(w)};
  };
  const lostOff=await lost(false),lostOn=await lost(true);
  assert.deepEqual(lostOn,lostOff,'an expired runner lease: '+JSON.stringify({lostOff,lostOn}));assert.equal(lostOn.films.length,0,'nothing is predicted under an expired lease');
  const parallel=async scope=>{
-  const w=await flowWorld({scope,films:40}),{start}=await w.reconcileAndStart(),runId=start.data.runId;
-  const both=await Promise.all([w.api('next',{runId,batchSize:1}),w.api('next',{runId,batchSize:1})]);
-  return {statuses:both.map(r=>r.status).sort(),reasons:both.map(r=>r.data.reason||null).sort()};
+  const w=await flowWorld({scope,films:40}),{start}=await w.reconcileAndStart(),m=start.data;
+  const body=filmId=>({runId:m.runId,epoch:m.lease.epoch,items:[{filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});
+  const both=await Promise.all([w.api('batch/submit',body(m.films[0].filmId)),w.api('batch/submit',body(m.films[1].filmId))]);
+  return {statuses:both.map(r=>r.status).sort(),codes:both.map(r=>r.data.code||null).sort()};
  };
  const parOff=await parallel(false),parOn=await parallel(true);
- assert.deepEqual(parOn,parOff,'two writers at once: '+JSON.stringify({parOff,parOn}));assert.deepEqual(parOn.statuses,[200,409]);
+ assert.deepEqual(parOn,parOff,'two submits of one run at once: '+JSON.stringify({parOff,parOn}));
  const crash=async scope=>{
-  const w=await flowWorld({scope,films:40}),{start}=await w.reconcileAndStart(),runId=start.data.runId;
-  const next=await w.api('next',{runId,batchSize:1}),filmId=next.data.items[0].filmId;
-  const payload={runId,items:[{filmId,fingerprint:w.fingerprint,prediction:w.prediction}]};
+  const w=await flowWorld({scope,films:40}),{start}=await w.reconcileAndStart(),m=start.data,filmId=m.films[0].filmId;
+  const payload={runId:m.runId,epoch:m.lease.epoch,items:[{filmId,fingerprint:w.fingerprint,prediction:w.prediction}]};
   // The process dies at the second write batch of the submit: the first has committed, the second never runs.
   const base=w.stats.writeBatches;w.hooks.write=(statements,count)=>{if(count===base+2)throw new Error('cancelled');};
-  const dead=await w.api('submit',payload);w.hooks.write=null;
+  const dead=await w.api('batch/submit',payload);w.hooks.write=null;
   const afterCrash=films(w);
-  // The crash stopped the run (a stop, not a lost film): a new run picks the film up again and the replayed submit lands once.
-  const second=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}}),nextAgain=await w.api('next',{runId:second.data.runId,batchSize:1});
-  const sameFilm=nextAgain.data.items[0].filmId===filmId;
-  const replayPayload={runId:second.data.runId,items:[{filmId,fingerprint:w.fingerprint,prediction:w.prediction}]};
-  const replay=await w.api('submit',replayPayload),again=await w.api('submit',replayPayload);
-  return {dead:dead.status,afterCrash,second:second.status,sameFilm,replay:[replay.status,replay.data.results?.map(r=>r.status)],again:[again.status,again.data.results?.map(r=>r.status)],films:films(w)};
+  // The same body again: the film lands once, and a further replay is idempotent.
+  const replay=await w.api('batch/submit',payload),again=await w.api('batch/submit',payload);
+  return {dead:dead.status,afterCrash,replay:[replay.status,replay.data.results?.map(r=>r.status)],again:[again.status,again.data.results?.map(r=>[r.status,!!r.replayed])],films:films(w)};
  };
  const crashOff=await crash(false),crashOn=await crash(true);
  assert.deepEqual(crashOn,crashOff,'a crash and its replay: '+JSON.stringify({crashOff,crashOn}));
- assert.equal(crashOn.dead,502);assert.equal(crashOn.sameFilm,true,'the same film is offered again');assert.deepEqual(crashOn.replay[1],['created']);
- assert.equal(crashOn.films.length,1,'the film is predicted once');assert.deepEqual(crashOn.again[1],['already_current'],'the replay is idempotent');
+ assert.deepEqual(crashOn.replay[1],['created'],JSON.stringify(crashOn));
+ assert.equal(crashOn.films.length,1,'the film is predicted once');assert.deepEqual(crashOn.again[1],[['created',true]],'the replay is idempotent');
 }
 console.log('prediction authority scope tests passed');

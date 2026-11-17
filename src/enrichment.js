@@ -930,12 +930,10 @@ async function runnerProgress(env,run,queue,final=false){
  await savePredictionRun(env,run);
 }
 const START_EVENT_PREFIX=ENRICHMENT_KEY+'start-events/';
-async function runnerStarted(env,run,resumed,queue,inputs=null){
- const snapshot=await predictionEventSnapshot(env,queue,run.batchSize,inputs),runState=run.startResult==='recovered_stale_lease'?'recovered':resumed?'resumed':'started';
+// The batch start's checkpoint of the coverage it began from. v2 writes no start Event (ADR 0146); the start Events of the retired v5 runner stay deliverable from START_EVENT_PREFIX.
+async function runnerStarted(env,run,queue,inputs=null){
+ const snapshot=await predictionEventSnapshot(env,queue,run.batchSize,inputs);
  run.coverageStartCurrentPredictions=snapshot.coverage?.currentPredictionsTotal??null;await savePredictionRun(env,run);
- if(isBatchV2Run(run))return;
- const event={id:'prediction-start-'+run.runId,type:'enrichment',at:run.createdAt,startedAt:run.createdAt,stage:resumed?'resumed':'started',runState,title:runState==='recovered'?'Прогнозы восстановлены':resumed?'Прогнозы продолжены':'Прогнозы запущены',queueSchemaVersion:6,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:run.batchSize,delta:{added:0,updated:0,failed:0,predictionGain:0},snapshot};
- const key=START_EVENT_PREFIX+run.runId+'.json';await saveJSON(env,key,{event});if(!await flushStopEvent(env,{event},key))await noteEventOutbox(env,key);
 }
 const STOP_EVENT_PREFIX=ENRICHMENT_KEY+'stop-events/';
 function systemicReason(reason){
@@ -2079,8 +2077,8 @@ function ownedCatalogHeld(boundary,error,requestId,runId,extra={}){
  return catalogHeldResponse(error.code,{runId,leaseTtlMs:RUNNER_LEASE_TTL,...extra});
 }
 // The start finds nothing eligible: it releases the lease and records the idle check (a quota or retry-backoff stop is blocked, an empty queue is a noop).
-async function startIdle(env,{runId,body,profile,queue,plan,holdsLease=true,userEvent=holdsLease}){
- if(holdsLease)await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');if(reason==='retry_backoff'&&userEvent)await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...lastBatch,...scheduledRunFields()});return json({status:stage,...lastBatch,...scheduledRunFields()});
+async function startIdle(env,{body,profile,queue,plan}){
+ const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');return json({status:stage,...lastBatch,...scheduledRunFields()});
 }
 // ---- Batch runner v2: batch_start (ADR 0122 + ADR 0136). One request returns one self-sufficient manifest of at most the client-requested manifestSize (default and ceiling BATCH_RUNNER.maxManifestFilms). ----
 // It shares the queue, runner lease, retry records and persistence of the retired v5 runner (ADR 0162), whose stored runs it still recognizes. `batch_submit` is a separate delivery.
@@ -2345,7 +2343,7 @@ async function batchIdle(env,body,pre){
   if(Array.isArray(staged?.items)&&staged.items.length)return null;
  }
  const idle={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};idle.diagnosticStartedAt=idle.createdAt;
- const result=await predictionWriter(env,()=>startIdle(env,{runId:null,body,profile:pre.profile,queue:pre.queue,plan,holdsLease:false,userEvent:false}));
+ const result=await predictionWriter(env,()=>startIdle(env,{body,profile:pre.profile,queue:pre.queue,plan}));
  const data=await result.clone().json();
  idle.status=data.status==='noop'?'idle':data.status==='busy'?'completed':'blocked';idle.completedAt=new Date().toISOString();idle.stopReason=data.status==='blocked'?data.reason||null:null;
  await diagnosticCheckpoint(env,idle,{startResult:['blocked','noop'].includes(data.status)?data.status:'error'});
@@ -2444,7 +2442,7 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
     const sources=Object.fromEntries(selected.map(item=>[item.filmId,modelMetadata(item.film)]));
     await saveJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json',sources);
     await atStage('run_save',()=>savePredictionRun(env,run));
-    await atStage('runner_started',()=>runnerStarted(env,run,!!recovered&&recovered.recoveredByRunId===runId||!!previous&&['running','partial'].includes(previous.status)&&previous.tasteProfileHash===profile.profileHash,queue,null));
+    await atStage('runner_started',()=>runnerStarted(env,run,queue,null));
     let drained={committed:[],dropped:[]};
     if(stagedItems.length){
      const token=crypto.randomUUID();

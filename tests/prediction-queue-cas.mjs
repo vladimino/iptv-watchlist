@@ -1,6 +1,9 @@
 // AIR-298 / ADR 0064: every prediction queue writer is conditional on the etag it read. Each race below parks one writer
 // between its read and its put, lets another writer commit, then releases it; the storage stub enforces R2 conditions.
+// The races of the retired v5 runner (its submit, completion and next-start retry heal in R2 mode) are gone with it (ADR 0162); batch runner v2 runs in
+// D1 mode only, where the queue fence is the D1 queue generation (ADR 0078): the last section races its retry write against a concurrent queue writer there.
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
+import {sql} from './prediction-d1-flow-lib.mjs';
 
 const QUEUE='enrichment/prediction-queue.json',PROFILE='enrichment/profile/current.json';
 const records=new Map(),etags=new Map();let revision=0,failKey='',ambiguousKey='',hook=null,hookBusy=false;const ops={get:0,put:0,queuePuts:0,queueConflicts:0};
@@ -44,51 +47,6 @@ const programme=()=>structuredClone(records.get('programme.json'));
 const publishProfile=async version=>{seed(PROFILE,{version,profileHash:'p'+version,profile:{ratingScale:'Half stars'}});await refresh(programme(),'profile_updated');};
 const retryRecord=(attempts,runId,at=now)=>({kind:'parse_error',scope:'item',retryable:true,failedAt:new Date(at).toISOString(),attempts,retryAt:at+3600000*2**(attempts-1),lastRunId:runId});
 const putRetry=(id,record)=>mutate(q=>{q.retries={...(q.retries||{}),[id]:record};return q;},'test_retry');
-async function startRun(){const start=(await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data;assert.equal(start.status,'running',JSON.stringify(start));const next=(await api('next',{runId:start.runId,batchSize:5})).data;assert(next.items.length>0);return {runId:start.runId,items:next.items};}
-const fail=(runId,filmId)=>api('submit',{runId,items:[{filmId,failure:{kind:'parse_error'}}]});
-
-// 1. Retry write ↔ EPG commit refresh, both orders. Before ADR 0064 the refresh put its stale `retries` over the record.
-reset();await refresh(programme(),'programme_updated');
-let run=await startRun(),target=run.items[0].filmId;
-park(byTrigger('programme_updated'),async()=>{const answer=(await fail(run.runId,target)).data;assert.equal(answer.results[0].status,'retryable_failure');});
-await refresh(programme(),'programme_updated');
-assert.equal(queue().retries[target]?.attempts,1,'the EPG refresh keeps the retry written while it was parked');
-assert(queue().retries[target].retryAt>Date.now()+50*60000);
-assert(!(await api('next',{runId:run.runId,batchSize:5})).data.items.some(item=>item.filmId===target),'no premature model work for the deferred film');
-const second=run.items[1].filmId;
-park(byRetry(second),()=>refresh(programme(),'programme_updated'));
-assert.equal((await fail(run.runId,second)).data.results[0].status,'retryable_failure');
-assert.equal(queue().retries[second]?.attempts,1,'the retry write re-reads after the refresh and lands');
-assert.equal(queue().retries[target].attempts,1);
-
-// 2. Profile publication ↔ runner submit, both orders; the rebuilt queue carries the new profile and every retry.
-reset();await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;
-park(byRetry(target),()=>publishProfile(2));
-await fail(run.runId,target);
-assert.equal(queue().profileHash,'p2','a submit write cannot put the old profile back');
-assert.equal(queue().retries[target]?.attempts,1);
-reset();await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;
-// The submit passed its profile check just before the publication; its retry write lands while the rebuild is parked.
-park(byTrigger('profile_updated'),()=>putRetry(target,retryRecord(1,run.runId)));
-await publishProfile(2);
-assert.equal(queue().profileHash,'p2');assert.equal(queue().retries[target]?.attempts,1,'the profile rebuild keeps the parked retry');
-
-// 3. Discovery checkpoint ↔ runner completion, both orders; the fence renews before every attempt.
-reset(1);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;await fail(run.runId,target);
-records.get(QUEUE).retries[target].lastRunId='lost';delete records.get(QUEUE).retries[target];etags.set(QUEUE,'s'+(++revision));
-let fences=0;
-park(byTrigger('resolver_checkpoint'),async()=>{const done=(await api('complete',{runId:run.runId,reason:'eligible_queue_empty'})).data;assert.equal(done.status,'complete',JSON.stringify(done));});
-await refresh(programme(),'resolver_checkpoint',{beforeWrite:async()=>{fences++;}});
-assert.equal(fences,2,'one renewal per write attempt');
-assert.equal(queue().lastBatch?.runId,run.runId,'the checkpoint keeps the completion summary');
-assert.equal(queue().retries[target]?.attempts,1,'the completion heals the retry the submit write lost');
-const processed=queue().metrics.hotProcessedTotal;
-reset(1);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;await fail(run.runId,target);
-park(byTrigger('batch_complete'),()=>refresh(programme(),'resolver_checkpoint',{beforeWrite:async()=>{}}));
-assert.equal((await api('complete',{runId:run.runId,reason:'eligible_queue_empty'})).data.status,'complete');
-assert.equal(queue().lastBatch?.runId,run.runId,'the completion re-applies its summary to the fresh rebuild');
-assert.equal(queue().trigger,'batch_complete');assert.equal(queue().retries[target].attempts,1);
-assert.equal(processed,0);
 
 // 4. Reconcile ↔ every writer. Each refresh trigger and each direct mutation, parked against a reconcile and the reverse.
 const TRIGGERS=['profile_updated','programme_updated','epg_scan','resolver_checkpoint','manual_reconcile','scheduled','manual','next_priority','batch_progress','completion_check','batch_complete'];
@@ -104,13 +62,6 @@ for(const trigger of TRIGGERS){
  assert.equal((await api('queue/reconcile',{})).status,200);
  for(const id of ['tmdb_3','tmdb_4','tmdb_5'])assert(queue().retries[id],trigger+' / reconcile keeps '+id);
 }
-// The start's idle check against a reconcile: the summary survives the rebuild and the rebuild survives the summary.
-reset(2);await refresh(programme(),'programme_updated');
-for(const id of ['tmdb_1','tmdb_2'])await putRetry(id,{...retryRecord(1,'run-z'),retryAt:Date.now()+3600000});
-park(value=>value.lastBatch?.stage==='blocked',()=>refresh(programme(),'manual_reconcile'));
-const idle=(await api('start',{scope:'watchlist_all'})).data;assert.equal(idle.status,'blocked');assert.equal(idle.reason,'retry_backoff');
-assert.equal(queue().lastBatch?.reason,'retry_backoff');assert.equal(queue().retries.tmdb_1.attempts,1);
-
 // 5. A stale generation or profile never overwrites a newer one.
 reset();await refresh(programme(),'programme_updated');
 const oldReport=programme();seed('programme.json',{runId:'gen-2',films:[]});seed('sync.json',{runId:'gen-2',stage:'complete'});
@@ -154,21 +105,6 @@ park(anyPut,async()=>{await refresh(programme(),'programme_updated');},true);
 await assert.rejects(mutate(q=>({...q,mark:true}),'test_mutation'),error=>error.name==='PredictionQueueConflictError');hook=null;
 assert.equal(queue().mark,undefined);
 
-// 8. A repeated completion (a crash after the queue write, before the run record) counts and records once.
-reset(1);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;await fail(run.runId,target);
-const runKey='enrichment/runs/'+run.runId+'.json',saved=structuredClone(records.get(runKey)),lease=structuredClone(records.get('enrichment/runner-lease.json'));
-const first=(await api('complete',{runId:run.runId,reason:'eligible_queue_empty'})).data;assert.equal(first.status,'complete');
-const once=queue();
-seed(runKey,saved);seed('enrichment/runner-lease.json',lease);
-assert.equal((await api('complete',{runId:run.runId,reason:'eligible_queue_empty'})).data.status,'complete');
-assert.equal(queue().metrics.hotProcessedTotal,once.metrics.hotProcessedTotal,'the counter moves once per run');
-assert.deepEqual(queue().retries[target],once.retries[target],'the retry is recorded once per run');
-// A run stopped for a systemic reason records the failures its submit could not write.
-reset(1);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;await fail(run.runId,target);
-delete records.get(QUEUE).retries[target];etags.set(QUEUE,'s'+(++revision));
-await api('complete',{runId:run.runId,reason:'storage_error'});
-assert.equal(queue().retries[target]?.attempts,1,'a stopped run heals its lost retry');
-
 // 9. Retry records only grow while outstanding; the same run writes once; a film that left the queue drops its record.
 const merge=(existing,failure,runId)=>ctx.mergeRetryRecord(existing,failure,runId);
 const older=retryRecord(3,'run-0',now),fresh={kind:'parse_error',scope:'item',retryable:true,failedAt:new Date(now).toISOString(),attempts:1,retryAt:now+3600000};
@@ -190,76 +126,30 @@ assert.deepEqual(large,small,'gets and puts are independent of the queue size');
 assert.equal(large.put,1);assert.equal(contended.put,3,'own attempt, the competing write, own retry');
 assert(contended.get<=2*large.get+2,'a conflict at most doubles the reads');
 
-// 12. A retry the queue could not take is never lost. The run keeps it marked, its stop writes it again, and the next
-// start confirms it before selecting anything or starts nothing; the lease keeps naming the unsettled run meanwhile.
-const runRecord=id=>records.get('enrichment/runs/'+id+'.json'),LEASE='enrichment/runner-lease.json';
-const interfere=(times=Infinity)=>park(()=>times-->0,async()=>{await mutate(q=>({...q,noise:(q.noise||0)+1}),'test');},true);
-const begin=()=>api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});
-async function deferredAcrossNextRun(stopped,id){
- const next=await begin();assert.equal(next.data.status,'running',JSON.stringify(next.data));
- assert.equal(queue().retries[id]?.lastRunId,stopped,'the next start finds the retry in the queue');assert.equal(queue().retries[id].attempts,1);
- assert(queue().retries[id].retryAt>Date.now()+50*60000);assert.equal(runRecord(stopped).retryHeal,undefined,'the mark is cleared once settled');
- assert(!runRecord(next.data.runId).selectedIds.includes(id),'the start does not select the deferred film');
- const items=(await api('next',{runId:next.data.runId,batchSize:5})).data.items;assert(items.length>0);assert(!items.some(item=>item.filmId===id),'nor does next');
+// 13. Batch runner v2 (D1 mode, ADR 0078 fence): a retry written by a batch submit and a queue write that lands between the submit's read and its
+// write both survive. The concurrent writer commits first; the submit's guarded write conflicts on the queue generation, re-reads and applies again.
+{
+ const {flowWorld}=await import('./prediction-d1-flow-lib.mjs');
+ const w=await flowWorld({films:6});const {start}=await w.reconcileAndStart();assert.equal(start.status,200);
+ const m=start.data,[target,other]=m.films.map(f=>f.filmId);
+ const original=w.env.DB.batch.bind(w.env.DB);let fired=0;
+ w.env.DB.batch=async statements=>{
+  if(!fired&&statements.some(item=>/prediction_queue/i.test(item.text)&&!/^\s*SELECT/i.test(item.text))){
+   fired++;w.env.DB.batch=original;
+   await w.ctx.mutatePredictionQueue(w.env,q=>{q.retries={...(q.retries||{}),[other]:retryRecord(2,'run-concurrent')};return q;},'test_retry');
+  }
+  return original(statements);
+ };
+ const answer=await w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items:[{filmId:target,failure:{kind:'parse_error',reason:'json_unparseable'}}]});
+ w.env.DB.batch=original;
+ assert.equal(answer.status,200,JSON.stringify(answer.data).slice(0,300));assert.equal(answer.data.results[0].status,'validation_failure');assert.equal(fired,1,'the concurrent writer ran between the read and the write');
+ const stored=JSON.parse(sql(w.file,'SELECT chunk_text FROM prediction_queue ORDER BY seq').map(r=>r.chunk_text).join(''));
+ assert.equal(stored.retries[target]?.attempts,1,'the submit retry landed after the conflict');assert.equal(stored.retries[other]?.attempts,2,'and the concurrent write was not overwritten');
 }
-// Five conflicts at the submit route, and its stop's own write conflicting too: the next start fails closed until the
-// queue takes the retry.
-reset(4);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;
-interfere();
-const exhausted=await fail(run.runId,target);
-assert.equal(exhausted.status,502);assert.equal(exhausted.data.error,'storage_error');assert.equal(exhausted.data.retryHeal,'pending');
-assert.equal(queue().retries?.[target],undefined);assert.equal(runRecord(run.runId).status,'partial');assert.equal(runRecord(run.runId).retryHeal,'pending');
-assert.equal(runRecord(run.runId).failures[target].kind,'parse_error','the run record holds the failure');
-assert.equal(records.get(LEASE).runId,run.runId);assert.equal(records.get(LEASE).expiresAt,0,'the stopped run released its lease');
-// Repeated starts that cannot settle are fail-closed start outcomes, not stops: no lease, no run, no stop record or
-// Event, and the last run stays the last run.
-const keys=prefix=>[...records.keys()].filter(key=>key.startsWith(prefix)).sort();
-const quiet={latest:structuredClone(records.get('enrichment/latest-run.json')),lease:structuredClone(records.get(LEASE)),leaseEtag:etags.get(LEASE),runs:keys('enrichment/runs/'),stops:keys('enrichment/stop-events/'),events:keys('events/'),sources:keys('enrichment/sources/')};
-assert.equal(quiet.latest.runId,run.runId);
-for(let attempt=0;attempt<3;attempt++){
- const gated=await begin();
- assert.equal(gated.status,503);assert.equal(gated.data.status,'blocked');assert.equal(gated.data.code,'prediction_retry_heal_pending');assert.equal(gated.data.pendingRunId,run.runId);
- assert.equal(gated.data.reason,'retry_heal_pending','not turned into a storage_error stop');assert.equal(gated.data.runId,undefined);
-}
-assert.deepEqual(records.get('enrichment/latest-run.json'),quiet.latest,'latest-run.json still names the unsettled run');
-assert.deepEqual(records.get(LEASE),quiet.lease);assert.equal(etags.get(LEASE),quiet.leaseEtag,'no lease acquired or released');
-assert.deepEqual(keys('enrichment/runs/'),quiet.runs,'no run record created');assert.deepEqual(keys('enrichment/sources/'),quiet.sources,'nothing selected');
-assert.deepEqual(keys('enrichment/stop-events/'),quiet.stops,'no blocked-* stop record');assert.deepEqual(keys('events/'),quiet.events,'no stop Event');
-assert.equal(runRecord(run.runId).retryHeal,'pending');
-hook=null;await deferredAcrossNextRun(run.runId,target);
-// Five conflicts at the submit route only: the stop's write lands, and the next run defers the film.
-reset(4);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;
-interfere(5);
-const healedAtStop=await fail(run.runId,target);hook=null;
-assert.equal(healedAtStop.status,502);assert.equal(healedAtStop.data.retryHeal,undefined);
-assert.equal(queue().retries[target]?.lastRunId,run.runId,'the stop writes the retry');
-await deferredAcrossNextRun(run.runId,target);
-// An explicit systemic stop whose retry write fails: the stop is recorded, the retry stays marked, the next start waits.
-reset(4);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;await fail(run.runId,target);
-delete records.get(QUEUE).retries[target];etags.set(QUEUE,'s'+(++revision));
-interfere();
-const quota=await api('complete',{runId:run.runId,reason:'quota'});
-assert.equal(quota.data.status,'partial');assert.equal(quota.data.stopReason,'quota');assert.equal(quota.data.retryHeal,'pending');
-assert.equal(runRecord(run.runId).retryHeal,'pending');assert.equal(queue().retries?.[target],undefined);
-assert.equal((await begin()).status,503,'the next start fails closed while the queue cannot take the retry');
-hook=null;await deferredAcrossNextRun(run.runId,target);
-// An unknown outcome of the stop's retry write is not repeated blindly: the next write re-reads and finds it in place.
-reset(4);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;await fail(run.runId,target);
-delete records.get(QUEUE).retries[target];etags.set(QUEUE,'s'+(++revision));
-ambiguousKey=QUEUE;puts=ops.queuePuts;
-const unknown=await api('complete',{runId:run.runId,reason:'storage_error'});
-assert.equal(unknown.data.status,'partial');assert.equal(ops.queuePuts-puts,1,'the write with an unknown outcome is made once');
-await deferredAcrossNextRun(run.runId,target);
-// A crashed runner (no stop at all) leaves its mark on the run; the start that recovers its lease settles it first.
-reset(4);await refresh(programme(),'programme_updated');run=await startRun();target=run.items[0].filmId;
-interfere();await fail(run.runId,target);hook=null;
-seed('enrichment/runs/'+run.runId+'.json',{...runRecord(run.runId),status:'running',retryHeal:'pending'});
-seed(LEASE,{...records.get(LEASE),expiresAt:Date.now()-1});
-await deferredAcrossNextRun(run.runId,target);
 
 // 11. No writer is left that puts the queue without a condition.
 const source=fs.readFileSync('src/enrichment.js','utf8')+fs.readFileSync('src/discovery.js','utf8')+fs.readFileSync('src/worker.js','utf8');
 assert(!/saveJSON\(env,predictionQueueKey/.test(source),'no unconditional queue write');
 assert.equal((source.match(/\.put\(predictionQueueKey/g)||[]).length,1,'one conditional put');
 
-console.log('Prediction queue CAS: retry ↔ EPG, profile ↔ submit, checkpoint ↔ completion, reconcile ↔ every writer, stale generation/profile, lost lease, crash, unknown outcome, bounded conflict, idempotent completion, monotonic retries, bounded cost passed');
+console.log('Prediction queue CAS: reconcile ↔ every writer, stale generation/profile, lost lease, crash, unknown outcome, bounded conflict, monotonic retries, bounded cost and the batch v2 retry write ↔ concurrent queue writer in D1 passed');

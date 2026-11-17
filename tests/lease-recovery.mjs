@@ -1,5 +1,5 @@
 // Runner lease recovery on batch runner v2 (ADR 0122, ADR 0162): the shared 15-minute lease, heartbeat renewal, an atomic takeover of an expired lease by one of two
-// concurrent starts, the interrupted predecessor, one resume Event, saved forecasts reused and a stale owner fenced. D1 prediction authority, as production runs it;
+// concurrent starts, the interrupted predecessor, no expired-stop Event (a v2 run writes no resume Event, ADR 0146), saved forecasts reused and a stale owner fenced. D1 prediction authority, as production runs it;
 // local stand-ins only.
 import assert from 'node:assert/strict';import vm from 'node:vm';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';

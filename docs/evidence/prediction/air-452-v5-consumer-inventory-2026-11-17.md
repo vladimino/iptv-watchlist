@@ -41,9 +41,10 @@ The reference-graph pass found these declarations without a caller once the v5 f
 | `timedPredictionStep` | step timer and request scope of `next` and `submit` |
 | `MAX_PREDICTION_BATCH`, `pickBatchWithFilms`, `MISSING_ADMISSION_ROUNDS`, `queueChangedResponse`, `V5_ITEM_KEYS` | v5 selection, refusal and item-key checks |
 | `restoreFingerprint`, `fingerprintGenerations` | ADR 0035 section 7 pointer restoration, called only by `next` |
+| `startIdle` lease release and blocked Event branches, `runnerStarted` start Event | only the v5 start passed `holdsLease`/`userEvent` and created v5 runs that write a start Event; batch v2 writes no start Event (ADR 0146) |
 | `REQUEST_SCOPE`, `createRequestScope`, `requestScopeOf`, `requestScopeRead`, `requestScopeLearn`, `requestScopeForget`, `requestScopeUnchanged`, `noteQueueCounts`, the hooks in `loadJSON` and `saveJSON` | AIR-442 per-request object scope; only `next` and `submit` created a scope, so every branch was inert |
 
-Kept although close to v5: `adaptivePredictionBatch` (the batch start's idle plan), `startIdle`, `runnerStarted`, `runContractChanged`, `wrongProtocolResponse`, `PredictionD1.scopeRequest` (the authority-marker scope the batch steps use), and the pure rule `fingerprintRestoreCandidate` with its ADR 0035 specification fixtures (no runtime caller; follow-up decision in ADR 0162).
+Kept although close to v5: `adaptivePredictionBatch` (the batch start's idle plan), `startIdle` and `runnerStarted` (narrowed to their v2 paths), the non-final progress Event (a heartbeat of a stored legacy v5 run can still emit it), `START_EVENT_PREFIX` delivery of stored v5 start Events, `runContractChanged`, `wrongProtocolResponse`, `PredictionD1.scopeRequest` (the authority-marker scope the batch steps use), and the pure rule `fingerprintRestoreCandidate` with its ADR 0035 specification fixtures (no runtime caller; follow-up decision in ADR 0162).
 
 ## Consequences recorded
 
