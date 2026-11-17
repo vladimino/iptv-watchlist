@@ -1,0 +1,36 @@
+{
+  "fixtureVersion": 1,
+  "purpose": "Grader-only rubric for generator-inputs.json. Never give this file, its case labels or any historical outcome to the generator. The checks are properties of a scoring policy, not a correct rating: no case has a target rating, and the historical sparse-fingerprint signal that motivated case s2 is deliberately absent.",
+  "defectPattern": "слаб|туп|глуп|некомпетент|неправдоподоб|нелеп|нестрашн|скучн|провал|плох|затянут|пуст|weak|dumb|stupid|incompetent|implausible|absurd|boring|bad|poor|fails?",
+  "uncertaintyPattern": "не подтвержд|неизвест|нет данных|не установлен|unknown|not confirmed|unconfirmed|uncertain",
+  "cases": {
+    "s1": {
+      "label": "c_partial_evidence_non_horror",
+      "confirmedPlus": ["plan clarity", "competent investigator counter-move", "causal improvisation"],
+      "confirmedMinus": [],
+      "keyUnknown": ["payoff", "ending_quality", "chemistry"],
+      "expect": {"confidenceNot": ["high"], "minUncertainties": 1, "forbidUngroundedNegatives": true}
+    },
+    "s2": {
+      "label": "a_sparse_legacy_horror_no_evidence",
+      "confirmedPlus": [],
+      "confirmedMinus": [],
+      "keyUnknown": ["pace", "stakes", "decision_logic", "protagonist_competence", "opposition_competence", "problem_solving", "plan_counterplan_strength", "multi_party_goals", "chemistry", "payoff", "ending_quality", "technical_plausibility"],
+      "expect": {"confidenceNot": ["high", "medium"], "minUncertainties": 1, "forbidUngroundedNegatives": true, "forbidFullTextClaims": true, "noFingerprint": true}
+    },
+    "s3": {
+      "label": "d_substantive_positive_evidence",
+      "confirmedPlus": ["fair-play clues", "competent investigator", "genuine counter-plan", "earned reveal", "multi-party goals", "earned ending"],
+      "confirmedMinus": [],
+      "keyUnknown": [],
+      "expect": {"forbidUngroundedNegatives": true, "maxHighRisks": 0}
+    },
+    "s4": {
+      "label": "b_researched_horror_confirmed_defects",
+      "confirmedMinus": ["ignored ventilation shafts", "squad splits without reason", "inconsistent creature rules", "unearned off-screen rescue", "gore instead of tension", "unreadable action"],
+      "confirmedPlus": [],
+      "keyUnknown": [],
+      "expect": {"maxPredictedRating": 3.0, "minAgainstSignals": 1}
+    }
+  }
+}

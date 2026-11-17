@@ -1156,6 +1156,9 @@ export const FILES={
  "prediction-queue-hotenteredat.mjs": {
   "suite": "core"
  },
+ "prediction-scoring-candidate.mjs": {
+  "suite": "core"
+ },
  "prediction-r2-roundtrips.mjs": {
   "suite": "core"
  },
