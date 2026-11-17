@@ -12,7 +12,7 @@ const set=(key,value)=>{records.set(key,typeof value==='string'?value:JSON.strin
 const ctx=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,
  ASSETS:{'/':{body:'<!doctype html>',type:'text/html'}},INITIAL_PERSONAL_RATINGS:{},fetch:async input=>{fetches.push(String(input));return new Response('no',{status:599});}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
-vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);
+vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);vm.runInContext(scoped('src/prediction-d1.js','PredictionD1'),ctx);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);
 for(const file of ['src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/prediction-diagnostics.js','src/mcp.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const env={BUCKET:bucket,EPG_XML_URL:'https://epg.test/guide.xml',LETTERBOXD_USERNAME:'tester'};
 const sha=text=>createHash('sha256').update(text).digest('hex');
@@ -246,6 +246,7 @@ assert.equal(ctx.compareHistoryEvents({type:'diary_viewing',at:'2026-09-20',atPr
   +film('film:tmdb:4700',4700)+film('film:other',null)+claim('film:tmdb:4700','tmdb','4700')+claim('film:other','tmdb','4700',0,0)+claim('film:tmdb:4700','letterboxd','lid4700')
   +film('film:tmdb:4800',4800)+claim('film:tmdb:4800','tmdb','4800')+claim('film:tmdb:4800','letterboxd','lid4800')+film('film:tmdb:4801',4801)+`INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:4800','film:tmdb:4801','${T}');`
   +film('film:tmdb:4900',4900)+claim('film:tmdb:4900','tmdb','4900')
+  +film('film:solo4990',null)+claim('film:solo4990','letterboxd','solo4990')
   +film('film:tmdb:4950',4950)+claim('film:tmdb:4950','tmdb','4950')+claim('film:tmdb:4950','letterboxd','lid4950')+claim('film:tmdb:4950','letterboxd','lid4951',0,0);
  const database=(state='open',extra='')=>{const file=path.join(root,'h-'+(n++)+'.sqlite');fs.copyFileSync(base,file);sqlite(file,SEED+(MARKER[state]||'')+extra);return file;};
  const seen=[];
@@ -269,7 +270,7 @@ assert.equal(ctx.compareHistoryEvents({type:'diary_viewing',at:'2026-09-20',atPr
  assert.deepEqual(data.snapshot.identity,{state:'ok',storageIds:['lone4600']},'the bridge is said');assert.deepEqual(data.snapshot.sources.predictions,{status:'recorded',bridged:[{id:'lone4600',status:'recorded'}]});
  assert.equal(data.current.prediction.storageId,'lone4600');assert.equal(data.current.prediction.contentSha256,c1.contentSha256,'the current prediction is the stored one');assert.equal(data.partial,false);
  assert.equal(data.events.filter(e=>e.type==='prediction').some(e=>/slug|lid4700|lid4800/.test(e.identity)),false,'no title, slug or foreign lid is matched');
- assert.ok(seen.length>0&&seen.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1');assert.equal(e.DB.calls.batches,0,'no D1 batch');
+ assert.ok(seen.length>0&&seen.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1');assert.ok(seen.length>0,'D1 was read');/* the prediction authority reads its marker in one read-only batch: the SELECT-only assertion above covers every statement of it */
  // 2. The same Film through its lid reaches the tmdb_<n> bundle; it is the same chronology.
  ({status,data}=await history('filmId=lone4600',envFor('open')));assert.equal(status,200);
  assert.deepEqual(kinds(data).map(([id,,v])=>[id.replace(/^lone4600\|/,'').replace(/^tmdb_4600\|/,'t|'),v]),[['prediction|history|0','linked'],['t|prediction|history|0','linked'],['prediction|current|0','linked']],'the lid keeps its own identities, the tmdb bundle joins prefixed');
@@ -293,5 +294,40 @@ assert.equal(ctx.compareHistoryEvents({type:'diary_viewing',at:'2026-09-20',atPr
  // 7. Paging over the merged list stays consistent and the cursor digest covers the bridged bundle.
  {const one=await history('filmId=tmdb_4600&limit=2',envFor('open'));assert.equal(one.data.page.total,3);assert.match(one.data.page.nextCursor,/^2\.[0-9a-f]{16}$/);const two=await history('filmId=tmdb_4600&limit=2&cursor='+one.data.page.nextCursor,envFor('open'));assert.deepEqual([...one.data.events,...two.data.events].map(x=>x.identity),EXPECTED.map(x=>x[0]));
   set('enrichment/films/lone4600/predictions.json',{current:c1,history:[]});assert.equal((await history('filmId=tmdb_4600&limit=2&cursor='+one.data.page.nextCursor,envFor('open'))).status,409,'a change of the bridged bundle refuses the old cursor');}
+
+ // 8. (review P1-2) The identity fence reaches the end of the response: a marker that moves AFTER the bridge, while the bundles, facts, Diary and immutable objects are read, refuses a canonical
+ // permalink and any answer that joined bridged ids; a lid answer that joined nothing keeps its partial policy.
+ {
+  const trapped=(when,query)=>{let moved=false;const file=database('open');const db=d1Standin(file);
+   return {...env,DB:db,BUCKET:{...bucket,async get(key){if(!moved&&when(key)){moved=true;sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");}return bucket.get(key);}}};};
+  const diary=key=>key==='letterboxd/diary/state.json'||key==='enrichment/diagnostics/rating-observations.json';
+  ({status,data}=await history('filmId=tmdb_4600',trapped(diary)));assert.deepEqual([status,data.error,data.reason],[503,'identity_unavailable','film_person_generation_moved'],'a permalink whose marker moved after the bridge fails closed');
+  ({status,data}=await history('filmId=lone4600',trapped(diary)));assert.deepEqual([status,data.error],[503,'identity_unavailable'],'a lid answer that joined bridged ids is refused too');
+  ({status,data}=await history('filmId=solo4990',trapped(diary)));assert.equal(status,200,'a lid answer that joined nothing keeps its partial policy');assert.deepEqual([data.partial,data.snapshot.identity.state,data.events],[true,'unavailable',[]]);assert.ok(data.notes.includes('identity_bridge_unavailable'));
+  ({status,data}=await history('filmId=solo4990',envFor('open')));assert.deepEqual([status,data.snapshot.identity,data.partial],[200,{state:'ok',storageIds:[]},false],'unmoved: the lid-only Film has nothing to bridge and is complete');
+ }
+ // 9. (review P1-1) With prediction_domain_authority d1 the mutable bundles come from the D1 pointer and lineage, never from the best-effort R2 mirror: a newer D1 current that the mirror
+ // lacks is returned, a mirror-only version is not invented, and an unreadable D1 domain is a 503, not a fall back.
+ {
+  const c2=stored('lone4600','2026-11-01T10:00:00.000Z',5);set(c2.r2Key,body(c2));
+  const display=record=>JSON.stringify(record);
+  const rows=`UPDATE prediction_domain_authority SET mode='d1' WHERE id=1;
+INSERT INTO prediction_pointer (film_id,taste_profile_version,taste_profile_hash,fingerprint_hash,fingerprint_schema_version,prediction_prompt_version,predicted_rating,r2_key,content_sha256,updated_at,display_json) VALUES ('lone4600',2,'p2','f',1,1,5,'${c2.r2Key}','${c2.contentSha256}','2026-11-01T10:00:00.000Z','${display(c2)}');
+INSERT INTO prediction_lineage (film_id,replaced_at,predicted_rating,taste_profile_version,fingerprint_hash,r2_key,content_sha256,display_json) VALUES ('lone4600','2026-10-20T10:00:00.000Z',3,2,'f','${h1.r2Key}','${h1.contentSha256}','${display(h1)}'),('lone4600','2026-11-01T10:00:00.000Z',4.5,2,'f','${c1.r2Key}','${c1.contentSha256}','${display(c1)}'),('tmdb_4600','2026-10-12T10:00:00.000Z',3.5,2,'f','${h2.r2Key}','${h2.contentSha256}','${display(h2)}');`;
+  // The R2 mirror of lone4600 is stale: it still says c1 is current.
+  const mirror=records.get('enrichment/films/lone4600/predictions.json');
+  const d1env=()=>{const file=database('open',rows);return {...env,DB:d1Standin(file)};};
+  ({status,data}=await history('filmId=tmdb_4600',d1env()));assert.equal(status,200);
+  const ids=data.events.filter(e=>e.type==='prediction').map(e=>[e.storageId??'own',e.position,e.predictedRating]);
+  assert.deepEqual(ids,[['lone4600','history',3],['own','history',3.5],['lone4600','history',4.5],['lone4600','current',5]],'the D1 lineage and the newer D1 current, in order, not the stale mirror');
+  assert.equal(data.current.prediction.storageId,'lone4600');assert.equal(data.current.prediction.contentSha256,c2.contentSha256);assert.equal(data.partial,false);
+  assert.ok(data.snapshot.sources.predictions.bridged[0].status==='recorded');
+  ({status,data}=await history('filmId=lone4600',d1env()));assert.equal(status,200);assert.equal(data.events.filter(e=>e.type==='prediction').length,4,'the lid asks the same D1 domain');
+  // A Film whose D1 pointer and lineage are empty is missing, even if a stale mirror object exists.
+  ({data}=await history('filmId=slug-4600',d1env()));assert.deepEqual([data.snapshot.sources.predictions.status,data.events.filter(e=>e.type==='prediction').length],['missing',0],'D1 is authoritative: a mirror-only bundle is not read');
+  // An unreadable D1 prediction domain fails closed.
+  {const file=database('open',rows);sqlite(file,'DROP TABLE prediction_lineage;');({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(file)}));assert.deepEqual([status,data.error,data.reason],[503,'prediction_unavailable','prediction_domain_unavailable']);}
+  assert.ok(mirror,'the mirror object stayed untouched');
+ }
 }
 console.log('Film history: validation, empty film, chronology, lineage gaps, version links, rationale per version, legacy log by both ids, no account URL, watchedAt unknown, rollback and re-apply, idempotent reads, paging and change refusal, ties, redirect, unreadable bundle, convergence overlay, Diary viewings by lid only (never slug), day-only ordering, day counts, lower bounds, unknown re-watch, undated entries, identity disagreement, Diary paging and change refusal, coverage and unreadable Diary passed');

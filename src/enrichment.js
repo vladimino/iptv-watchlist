@@ -3654,24 +3654,38 @@ async function filmHistoryBridge(env,filmId){
  const reader=typeof CanonicalCatalogReader==='undefined'?null:CanonicalCatalogReader;
  if(!reader)return {state:'not_open',ids:[],lid:null};
  try{
-  if((await reader.catalogReaderGate(env)).mode!=='d1')return {state:'not_open',ids:[],lid:null};
+  const gate=await reader.catalogReaderGate(env);
+  if(gate.mode!=='d1')return {state:'not_open',ids:[],lid:null};
   const found=await reader.catalogFilmIdentityBridge(env,filmId);
-  if(found.state!=='ok')return {state:found.state,ids:[],lid:null};
-  return {state:'ok',ids:[...new Set([...(found.lid?[found.lid]:[]),...(found.tmdb?['tmdb_'+found.tmdb]:[])])].filter(id=>id!==filmId),lid:found.lid};
+  if(found.state!=='ok')return {state:found.state,ids:[],lid:null,gate};
+  return {state:'ok',gate,ids:[...new Set([...(found.lid?[found.lid]:[]),...(found.tmdb?['tmdb_'+found.tmdb]:[])])].filter(id=>id!==filmId),lid:found.lid};
  }catch(error){return {state:'unavailable',ids:[],lid:null,reason:error?.code||'identity_unavailable'};}
+}
+// AIR-475 review: the mutable prediction bundle of one stored id is read through the prediction authority (D1 pointer and lineage while `prediction_domain_authority` is d1; the R2
+// predictions.json is then only a best-effort mirror that may lag or be missing), and from R2 only where that authority is not d1. The immutable version bodies stay in R2.
+// An unreadable D1 domain throws a `prediction_*` code (503), never a silent fall back to the mirror. The etag of a D1 read is a digest of what was read.
+async function readFilmPredictionBundle(env,id,readR2){
+ const key=filmKey(id)+'predictions.json';
+ if(typeof PredictionD1!=='undefined'){
+  const routed=await PredictionD1.routeRead(env,key);
+  if(routed.handled)return routed.value?{status:'recorded',etag:'d1:'+await textSha256(JSON.stringify(routed.value)),value:routed.value}:{status:'missing',etag:null,value:null};
+ }
+ return readR2(key);
 }
 async function filmHistoryRoute(env,url){
  const filmId=url.searchParams.get('filmId');
  if(typeof filmId!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(filmId))return json({error:'filmId must be 1–80 letters, digits, "_" or "-"'},400);
  const page=filmHistoryPageRequest(url.searchParams);if(page.error)return json({error:page.error},400);
  const read=async key=>{const object=await env.BUCKET.get(key);if(!object)return {status:'missing',etag:null,value:null};try{return {status:'recorded',etag:object.etag,value:await object.json()};}catch{return {status:'unreadable',etag:object.etag,value:null};}};
- const bundle=await read(filmKey(filmId)+'predictions.json');
+ const predictionUnavailable=error=>String(error?.code||'').startsWith('prediction_')?json({error:'prediction_unavailable',reason:error.code},503):null;
+ let bundle;
+ try{bundle=await readFilmPredictionBundle(env,filmId,read);}catch(error){const refused=predictionUnavailable(error);if(refused)return refused;throw error;}
  const tmdb=/^tmdb_([1-9]\d{0,11})$/.exec(filmId),alias=tmdb?'tmdb:'+tmdb[1]:'letterboxd:'+filmId;
  // A canonical tmdb_<n> permalink cannot be answered from the requested id alone while the identity cannot be verified: 503, never an empty history that reads as "nothing recorded".
  const bridge=await filmHistoryBridge(env,filmId);
  if(tmdb&&bridge.state==='unavailable')return json({error:'identity_unavailable',reason:bridge.reason},503);
  const extra=[];
- for(const id of bridge.ids)extra.push({id,bundle:await read(filmKey(id)+'predictions.json')});
+ try{for(const id of bridge.ids)extra.push({id,bundle:await readFilmPredictionBundle(env,id,read)});}catch(error){const refused=predictionUnavailable(error);if(refused)return refused;throw error;}
  const links=await read(LetterboxdFacts.FACTS_KEYS.links);
  let factKey=links.value?.[alias]||null,fact={status:'missing',etag:null,value:null};
  // Diary lid candidates: the requested id when it is a lid, and the lid of every fact record read (both sides of a convergence).
@@ -3725,11 +3739,23 @@ async function filmHistoryRoute(env,url){
  }
  const partial=[bundle,...extra.map(item=>item.bundle),fact,legacy,diaryHistory].some(source=>source.status==='unreadable')||bridge.state==='unavailable'||slice.some(event=>event.type==='prediction'&&['missing','mismatch','invalid'].includes(event.version.status));
  const next=page.offset+page.limit<built.events.length?String(page.offset+page.limit)+'.'+digest:null;
+ // AIR-475 review: the identity the bridge verified must still hold when the answer leaves. Every read above (bundles, facts, Diary, legacy log, immutable objects) ran after the bridge,
+ // so the marker is read again: a canonical permalink or any answer that joined bridged ids is refused (503) if the state or generation moved; a lid answer that joined nothing keeps its partial policy.
+ let identityMoved=false;
+ if(bridge.gate){
+  let moved=null;
+  try{await CanonicalCatalogReader.catalogReaderStill(env,bridge.gate);}catch(error){moved=error;}
+  if(moved){
+   if(tmdb||bridge.ids.length)return json({error:'identity_unavailable',reason:moved.code||'film_person_generation_moved'},503);
+   built.notes.push('identity_bridge_unavailable');
+   identityMoved=true;
+  }
+ }
  return json({schemaVersion:FILM_HISTORY_SCHEMA_VERSION,filmId,readAt:new Date().toISOString(),
-  snapshot:{profile:profile.value?{version:profile.value.version??null,profileHash:profile.value.profileHash??null}:null,...(bridge.state==='not_open'?{}:{identity:{state:bridge.state,storageIds:bridge.ids}}),sources:{predictions:{status:bundle.status,...(extra.length?{bridged:extra.map(item=>({id:item.id,status:item.bundle.status}))}:{})},facts:{status:factKey?fact.status:'missing',factKey},legacyRatingLog:{status:legacy.status},
+  snapshot:{profile:profile.value?{version:profile.value.version??null,profileHash:profile.value.profileHash??null}:null,...(bridge.state==='not_open'?{}:{identity:identityMoved?{state:'unavailable',storageIds:[]}:{state:bridge.state,storageIds:bridge.ids}}),sources:{predictions:{status:bundle.status,...(extra.length?{bridged:extra.map(item=>({id:item.id,status:item.bundle.status}))}:{})},facts:{status:factKey?fact.status:'missing',factKey},legacyRatingLog:{status:legacy.status},
    diary:{status:diaryHistory.status,link,unresolvedEntries:diaryEntries.filter(entry=>!entry?.identity).length,
     state:diaryState.value?{lastOutcome:diaryState.value.lastOutcome??null,lastSuccessAt:diaryState.value.lastSuccessAt??null,coverage,resumePage:diaryState.value.resumePage??null}:null}}},
-  current:built.current,partial,notes:built.notes,events:slice,page:{limit:page.limit,offset:page.offset,total:built.events.length,nextCursor:next}});
+  current:built.current,partial:partial||identityMoved,notes:built.notes,events:slice,page:{limit:page.limit,offset:page.offset,total:built.events.length,nextCursor:next}});
 }
 async function enrichmentRoute(request,env,url,execution){const path=url.pathname,requestId=predictionRequestId(request);let body=null;
  // Retired before any body parsing, read or write: no Letterboxd request, no lease, no stored object touched (ADR 0040).

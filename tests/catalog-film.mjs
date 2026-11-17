@@ -413,6 +413,27 @@ INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id
   assert.deepEqual([(await ask(db,'22004')).status,(await ask(db,'1272837')).status,(await ask(db,'1423191')).status,(await ask(db,'1100988')).status],[409,410,410,200],'untrusted rival claim, redirect source, owner retirement, an untouched film');
   const held=mount(HELD);const r=await ask(held.db,'22004');assert.deepEqual([r.status,r.body.reason],[503,'film_person_held'],'held fails closed with no R2 fallback');
  }
+ {
+  // Review P1-3: the permalink of a canonical Film does not depend on Discovery's health. A Discovery reader that is held, loading, unreadable or not authoritative leaves the
+  // answer to D1 while Film/Person is open; verified conflicts and retirements stay 409/410; a canonical absence, or a Film/Person marker that is not open, keeps the Discovery 503.
+  const extra=`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:rival',1,NULL,'Rival','${T}');
+INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:rival','tmdb','22004',0,0);
+INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','film:tmdb:1423191','${T}');`;
+  const open=mount(OPEN,extra),held=mount(HELD),prepared=mount(VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;");
+  const fault=code=>{vm.runInContext('globalThis.DiscoveryAuthority={ownsKey:()=>false,readAuthority:async()=>({held:false,ready:false}),routeRead:async()=>({handled:false}),readFilmAdmission:async()=>__stub()}',ctx);ctx.__stub=async()=>{const error=new Error(code);error.code=code;throw error;};};
+  for(const code of ['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative']){
+   fault(code);statements.length=0;
+   let r=await ask(open.db,'10750');assert.deepEqual([r.status,r.body.status,r.body.film?.id,r.body.film?.title],[200,'found','tmdb_10750','Игрушечные солдатики'],code+': a retained Film opens while Discovery cannot answer');
+   assert.deepEqual([r.body.film.shows,r.body.film.availableNow],[[],false],'no shows are taken from Discovery');
+   assert.deepEqual([(await ask(open.db,'22004')).status,(await ask(open.db,'1272837')).status],[409,410],code+': a verified conflict and a redirect stay 409 and 410');
+   r=await ask(open.db,'999999');assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable',code],code+': a canonical absence does not turn an unreadable Discovery into absent');
+   r=await ask(held.db,'10750');assert.deepEqual([r.status,r.body.reason],[503,code],code+': a held Film/Person marker keeps the Discovery refusal, never R2');
+   r=await ask(prepared.db,'10750');assert.deepEqual([r.status,r.body.reason],[503,code],code+': below open the Discovery refusal stands');
+   assert.ok(statements.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),code+': only reads');
+  }
+  vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
+  ctx.__stub=undefined;
+ }
  assert.deepEqual([puts,fetches],[[],[]]);
 }
 
