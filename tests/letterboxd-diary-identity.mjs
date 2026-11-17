@@ -253,7 +253,7 @@ out = await Identity.resolve(env, [], opts({clock: () => NOW + 2000})); assert.e
 reset(); fail.view = 0; for (const lid of ['Frs1', 'Frs2', 'Frs3', 'Old1']) await seed(lid, 3);
 for (const [i, lid] of ['Frs1', 'Frs2', 'Frs3'].entries()) add(lid, 'fixture-frs' + (i + 1) + '-2006', String(900120 + i), 'Fixture ' + lid, 2006);
 const oldEntry = {reason: 'forbidden', slug: 'old-one', attempts: 5, lastAttemptAt: '2026-11-17T10:00:00.000Z', nextAttemptAt: '2026-11-17T12:00:00.000Z'};
-records.set(Facts.DIARY_IDENTITY_KEY, {schemaVersion: 1, films: {Old1: oldEntry}});
+await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {Old1: oldEntry}}));
 out = await Identity.resolve(env, items(['Frs1', 'fixture-frs1-2006'], ['Frs2', 'fixture-frs2-2006'], ['Frs3', 'fixture-frs3-2006'], ['Old1', 'old-one']), opts());
 assert.equal(out.counts.verified, 3); assert.equal(out.counts.deferred, 1); assert.deepEqual(pending().Old1, oldEntry, 'attempts, reason and backoff are not reset by a deferral');
 

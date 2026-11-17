@@ -163,7 +163,7 @@ const LetterboxdDiaryIdentity=(()=>{
    counts.pending++;
    set[lid]=entry(item,outcome.reason,attempts+1,now+delayMs(outcome.reason,attempts+1));
   }
-  try{await LetterboxdFacts.updateDiaryIdentity(env,{set,clear:clear.filter(lid=>stored.films[lid])});}catch{}
+  try{await LetterboxdFacts.updateDiaryIdentity(env,{set,clear:clear.filter(lid=>stored.films[lid])});}catch{counts.persistFailed=1;}
   return {labels,counts};
  }
 
