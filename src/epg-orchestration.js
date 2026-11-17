@@ -453,7 +453,11 @@ function frozenDay(run){
     return {stopped:true,reason:'step_cap',instanceId:id};
    }
    const actStep=name('act');
-   const result=await step.do(actStep,()=>tracedAct(env,ctx,actStep,hooks));
+   const result=await step.do(actStep,callback=>tracedAct(env,ctx,actStep,hooks,callback?.attempt));
+   // AIR-522: the callback's own `exit` line proves only that it returned. This line is written after `step.do` itself returned, so it is the
+   // platform's acknowledgement that the step output was stored; an `exit` with no such line before the next `enter` of the same step is a
+   // returned callback whose attempt the platform failed.
+   storedLog(ctx,actStep,result);
    if(result.kind==='stop'){
     await step.do(name('stopped'),()=>stopInstance(env,ctx,result.reason));
     return {stopped:true,reason:result.reason,instanceId:id};
@@ -488,9 +492,10 @@ function frozenDay(run){
  }
  // AIR-462: one line when an `act-N` callback starts, one when it returns or throws. A callback killed by the platform leaves the enter line alone.
  // Every execution of the callback, a retry included, mints its own `attemptTraceId`; the id is a local correlator, not Cloudflare's attempt id.
- async function tracedAct(env,ctx,actStep,hooks={}){
+ async function tracedAct(env,ctx,actStep,hooks={},attempt=undefined){
+  // AIR-522: `attempt` is the platform's own 1-based attempt number of this step (the callback context), logged only when it is a small integer.
   const trace={instanceId:ctx.id,actStep,attemptTraceId:hooks.traceId?hooks.traceId():crypto.randomUUID()};
-  const log=(edge,fields={})=>{try{console.log(JSON.stringify({event:'epg_act',edge,at:new Date().toISOString(),runKey:/^\d{4}-\d{2}-\d{2}$/.test(String(ctx.runKey))?ctx.runKey:null,...trace,...fields}));}catch{}};
+  const log=(edge,fields={})=>{try{console.log(JSON.stringify({event:'epg_act',edge,at:new Date().toISOString(),runKey:/^\d{4}-\d{2}-\d{2}$/.test(String(ctx.runKey))?ctx.runKey:null,...trace,...(Number.isSafeInteger(attempt)&&attempt>=1&&attempt<=99?{attempt}:{}),...fields}));}catch{}};
   const began=Date.now();
   log('enter');
   try{
@@ -501,6 +506,10 @@ function frozenDay(run){
    else log('exit',{elapsedMs:Date.now()-began,kind:['continue','sleep','stop'].includes(result?.kind)?result.kind:null});
    return result;
   }catch(error){log('error',{elapsedMs:Date.now()-began});throw error;}
+ }
+ // AIR-522: one line per `act-N` whose output the platform acknowledged. A closed set of fields; best effort, never throws.
+ function storedLog(ctx,actStep,result){
+  try{console.log(JSON.stringify({event:'epg_act_stored',at:new Date().toISOString(),runKey:/^\d{4}-\d{2}-\d{2}$/.test(String(ctx.runKey))?ctx.runKey:null,instanceId:ctx.id,actStep,kind:['continue','sleep','stop','handoff'].includes(result?.kind)?result.kind:null}));}catch{}
  }
  async function stopInstance(env,ctx,reason){
   try{

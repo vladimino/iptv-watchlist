@@ -481,7 +481,7 @@ for(const stage of ['epg','seal']){
  const first=acts.filter(e=>e.actStep==='act-0'&&e.instanceId==='epg_20261107_0');
  assert.deepEqual([...new Set(first.map(e=>e.attemptTraceId))],['trace-1','trace-2'],'each execution of act-0 has its own attemptTraceId');
  for(const e of acts){
-  assert.deepEqual(Object.keys(e).filter(k=>!['event','edge','at','runKey','instanceId','actStep','attemptTraceId','elapsedMs','kind'].includes(k)),[],'a closed set of fields');
+  assert.deepEqual(Object.keys(e).filter(k=>!['event','edge','at','runKey','instanceId','actStep','attemptTraceId','attempt','elapsedMs','kind'].includes(k)),[],'a closed set of fields');
   assert.ok(['epg_20261107_0','epg_20261107_1'].includes(e.instanceId));assert.equal(e.runKey,'2026-11-07');assert.ok(['enter','exit','error'].includes(e.edge));
   if(e.kind!==undefined)assert.ok([null,'continue','sleep','stop','handoff'].includes(e.kind));
  }
@@ -510,6 +510,42 @@ for(const stage of ['epg','seal']){
  assert.doesNotMatch(lines.join('\n'),/SECRET/,'no raw error text is logged');
  if(acts[1].edge==='error')assert.ok(!acts.some(e=>e.edge==='exit'&&e.actStep==='act-0'),'a rejected action has no exit');
  assert.ok(seen&&seen.kind,'the Workflow still receives a result');
+}
+
+// 7c2. AIR-522: the platform failed an attempt whose callback had already returned (the 17 Nov 2026 `WorkflowInternalError` pattern). The log tells
+// `callback returned` (`epg_act` exit) from `output acknowledged` (`epg_act_stored`): the lost attempt has an exit and no stored line, the retry has both,
+// the platform attempt number reaches the lines, and the result and the number of durable sync calls are those of an undisturbed run.
+{
+ const lines=[];const realLog=console.log;console.log=line=>{lines.push(String(line));};
+ const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ const r=runner(h,{startAt:due});
+ const attempts={};let result,lostOnce=false;
+ const lossy={...r.step,async do(name,fn){
+  for(;;){
+   const attempt=attempts[name]=(attempts[name]||0)+1;
+   try{
+    const value=await r.step.do(name,()=>fn({attempt}));
+    if(name==='act-0'&&attempt===1&&!lostOnce){lostOnce=true;throw new Error('Attempt failed due to internal workflows error');}
+    delete attempts[name];
+    return value;
+   }catch(error){if(attempt>=3)throw error;}
+  }
+ }};
+ try{
+  await h.epg.ensure(h.env,{now:due});
+  result=await follow(h.epg,h.env,{...r,step:lossy},'2026-11-07',{traceId:(()=>{let n=0;return()=>'t'+(++n);})()});
+ }finally{console.log=realLog;}
+ eq(result,{stopped:true,reason:'complete',instanceId:'epg_20261107_1'});
+ const events=lines.map(l=>{try{return JSON.parse(l);}catch{return null;}}).filter(e=>e&&['epg_act','epg_act_stored'].includes(e.event));
+ const zero=events.filter(e=>e.actStep==='act-0'&&e.instanceId==='epg_20261107_0');
+ assert.deepEqual(zero.map(e=>e.event+':'+(e.edge||'')+':'+(e.attempt??'')),['epg_act:enter:1','epg_act:exit:1','epg_act:enter:2','epg_act:exit:2','epg_act_stored::'],'a returned callback with no stored line is a lost attempt; the retry is stored once');
+ for(const e of events.filter(e=>e.event==='epg_act_stored'))assert.deepEqual(Object.keys(e).sort(),['actStep','at','event','instanceId','kind','runKey'],'a closed set of fields');
+ const acts=events.filter(e=>e.event==='epg_act');
+ assert.ok(acts.every(e=>e.attempt===undefined||(Number.isInteger(e.attempt)&&e.attempt>=1&&e.attempt<=2)),'the attempt is the platform number');
+ const stored=events.filter(e=>e.event==='epg_act_stored').length,exits=acts.filter(e=>e.edge==='exit').length;
+ assert.equal(exits-stored,1,'exactly the one lost attempt has an exit without a stored line');
+ assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/start').length,1,'the platform retry starts no second run');
 }
 
 // 7d. AIR-513: a published `stage: epg` run older than 15 minutes is stepped, not replaced by start.
