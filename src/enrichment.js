@@ -948,12 +948,14 @@ async function predictionFreshness(env,profile){
  return {mode,fingerprintMode,needsGenres:true,registryDigest:registry.registry,target:fingerprintTarget(),
   state:(prediction,fingerprint,genres)=>!!profile&&!!prediction&&predictionCompatibilityFresh(verdict(prediction,fingerprint,genres)),
   indexed:(item,film)=>!!profile&&!!item?.prediction&&predictionCompatibilityFresh(verdict(item.prediction,indexedFingerprintRecord(item),film?.genres)),
+  // The evaluator's own verdict for an indexed item ({outcome:'current'|'compatible'|'stale',reason}); the film page shows its reason, it never re-derives one from a version number.
+  verdictOf:(item,film)=>profile&&item?.prediction?verdict(item.prediction,indexedFingerprintRecord(item),film?.genres):null,
   // The stored fingerprint may be reused for a prediction when it is exact or compatible under the transition rule.
   fingerprintUsable:(fingerprint,genres)=>fingerprintCompatibilityFresh(fingerprintVerdict(fingerprint,genres)),
   work:(prediction,fingerprint,genres)=>verdict(prediction,fingerprint,genres),
   fingerprintVerdict:(fingerprint,genres)=>fingerprintVerdict(fingerprint,genres)};
 }
-const strictFreshness=profile=>({mode:'strict',fingerprintMode:'strict',needsGenres:false,registryDigest:null,target:fingerprintTarget(),state:(prediction,fingerprint)=>predictionCurrent(prediction,profile,fingerprint),indexed:item=>!!profile&&indexedPredictionCurrent(item,profile),fingerprintUsable:fingerprint=>fingerprintCurrent(fingerprint),work:()=>null,fingerprintVerdict:()=>null});
+const strictFreshness=profile=>({mode:'strict',fingerprintMode:'strict',needsGenres:false,registryDigest:null,target:fingerprintTarget(),state:(prediction,fingerprint)=>predictionCurrent(prediction,profile,fingerprint),indexed:item=>!!profile&&indexedPredictionCurrent(item,profile),verdictOf:()=>null,fingerprintUsable:fingerprint=>fingerprintCurrent(fingerprint),work:()=>null,fingerprintVerdict:()=>null});
 function indexedPredictionCurrent(item,profile){const p=item?.prediction;return !!p&&p.tasteProfileVersion===profile.version&&p.tasteProfileHash===profile.profileHash&&p.fingerprintHash===item.fingerprintHash&&p.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&p.predictionPromptVersion===PREDICTION_PROMPT_VERSION;}
 const PREDICTION_PIPELINE_VERSION=5;
 const MAX_PREDICTION_BATCH=20;
@@ -3661,31 +3663,49 @@ async function filmHistoryBridge(env,filmId){
   return {state:'ok',gate,ids:[...new Set([...(found.lid?[found.lid]:[]),...(found.tmdb?['tmdb_'+found.tmdb]:[])])].filter(id=>id!==filmId),lid:found.lid};
  }catch(error){return {state:'unavailable',ids:[],lid:null,reason:error?.code||'identity_unavailable'};}
 }
-// AIR-475 review: the mutable prediction bundle of one stored id is read through the prediction authority (D1 pointer and lineage while `prediction_domain_authority` is d1; the R2
-// predictions.json is then only a best-effort mirror that may lag or be missing), and from R2 only where that authority is not d1. The immutable version bodies stay in R2.
-// An unreadable D1 domain throws a `prediction_*` code (503), never a silent fall back to the mirror. The etag of a D1 read is a digest of what was read.
-async function readFilmPredictionBundle(env,id,readR2){
- const key=filmKey(id)+'predictions.json';
+// AIR-475 review: every MUTABLE source of the history is read through its own authority, never from a frozen R2 copy. The Letterboxd facts (`links.json`, `films/<factKey>.json`) and the Diary
+// (`history.json`, `state.json`) belong to RatingsD1 and the prediction bundles and the taste profile to PredictionD1: while that domain is d1 and open its D1 documents are the source, a held
+// d1 domain is a refusal (`ratings_domain_not_authoritative`), and an unreadable one a typed `ratings_*` / `prediction_*` error (503), never a fall back to the R2 object (a stale mirror).
+// Only where a domain is not d1 (or absent, as in local stand-ins) is the R2 object read. The etag of a D1 read is its document etag, so a cursor digest covers it. Immutable version
+// bodies and the legacy rating log are not owned by either domain and stay R2.
+async function readFilmHistorySource(env,key,readR2){
+ if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){
+  const authority=await RatingsD1.readRatingsAuthority(env?.DB,env);
+  if(authority.tables&&authority.mode==='d1'&&!authority.ready){const error=new Error('ratings_domain_not_authoritative');error.code='ratings_domain_not_authoritative';throw error;}
+  if(authority.ready){
+   const owned=await RatingsD1.readOwned(env,key);
+   return owned.value==null?{status:'missing',etag:null,value:null}:{status:'recorded',etag:'d1:'+owned.etag,value:owned.value};
+  }
+ }
  if(typeof PredictionD1!=='undefined'){
   const routed=await PredictionD1.routeRead(env,key);
   if(routed.handled)return routed.value?{status:'recorded',etag:'d1:'+await textSha256(JSON.stringify(routed.value)),value:routed.value}:{status:'missing',etag:null,value:null};
  }
  return readR2(key);
 }
+// A typed domain error is a 503, never a partial answer built from a copy the domain does not own.
 async function filmHistoryRoute(env,url){
+ try{return await filmHistoryRouteRead(env,url);}
+ catch(error){
+  const code=String(error?.code||'');
+  if(code.startsWith('prediction_'))return json({error:'prediction_unavailable',reason:code},503);
+  if(code.startsWith('ratings_'))return json({error:'ratings_unavailable',reason:code},503);
+  throw error;
+ }
+}
+async function filmHistoryRouteRead(env,url){
  const filmId=url.searchParams.get('filmId');
  if(typeof filmId!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(filmId))return json({error:'filmId must be 1–80 letters, digits, "_" or "-"'},400);
  const page=filmHistoryPageRequest(url.searchParams);if(page.error)return json({error:page.error},400);
- const read=async key=>{const object=await env.BUCKET.get(key);if(!object)return {status:'missing',etag:null,value:null};try{return {status:'recorded',etag:object.etag,value:await object.json()};}catch{return {status:'unreadable',etag:object.etag,value:null};}};
- const predictionUnavailable=error=>String(error?.code||'').startsWith('prediction_')?json({error:'prediction_unavailable',reason:error.code},503):null;
- let bundle;
- try{bundle=await readFilmPredictionBundle(env,filmId,read);}catch(error){const refused=predictionUnavailable(error);if(refused)return refused;throw error;}
+ const readR2=async key=>{const object=await env.BUCKET.get(key);if(!object)return {status:'missing',etag:null,value:null};try{return {status:'recorded',etag:object.etag,value:await object.json()};}catch{return {status:'unreadable',etag:object.etag,value:null};}};
+ const read=key=>readFilmHistorySource(env,key,readR2);
+ const bundle=await read(filmKey(filmId)+'predictions.json');
  const tmdb=/^tmdb_([1-9]\d{0,11})$/.exec(filmId),alias=tmdb?'tmdb:'+tmdb[1]:'letterboxd:'+filmId;
  // A canonical tmdb_<n> permalink cannot be answered from the requested id alone while the identity cannot be verified: 503, never an empty history that reads as "nothing recorded".
  const bridge=await filmHistoryBridge(env,filmId);
  if(tmdb&&bridge.state==='unavailable')return json({error:'identity_unavailable',reason:bridge.reason},503);
  const extra=[];
- try{for(const id of bridge.ids)extra.push({id,bundle:await readFilmPredictionBundle(env,id,read)});}catch(error){const refused=predictionUnavailable(error);if(refused)return refused;throw error;}
+ for(const id of bridge.ids)extra.push({id,bundle:await read(filmKey(id)+'predictions.json')});
  const links=await read(LetterboxdFacts.FACTS_KEYS.links);
  let factKey=links.value?.[alias]||null,fact={status:'missing',etag:null,value:null};
  // Diary lid candidates: the requested id when it is a lid, and the lid of every fact record read (both sides of a convergence).

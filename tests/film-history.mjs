@@ -12,7 +12,7 @@ const set=(key,value)=>{records.set(key,typeof value==='string'?value:JSON.strin
 const ctx=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,
  ASSETS:{'/':{body:'<!doctype html>',type:'text/html'}},INITIAL_PERSONAL_RATINGS:{},fetch:async input=>{fetches.push(String(input));return new Response('no',{status:599});}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
-vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);vm.runInContext(scoped('src/prediction-d1.js','PredictionD1'),ctx);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);
+vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);vm.runInContext(scoped('src/prediction-d1.js','PredictionD1'),ctx);vm.runInContext(scoped('src/ratings-d1.js','RatingsD1'),ctx);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);
 for(const file of ['src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/prediction-diagnostics.js','src/mcp.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const env={BUCKET:bucket,EPG_XML_URL:'https://epg.test/guide.xml',LETTERBOXD_USERNAME:'tester'};
 const sha=text=>createHash('sha256').update(text).digest('hex');
@@ -328,6 +328,38 @@ INSERT INTO prediction_lineage (film_id,replaced_at,predicted_rating,taste_profi
   // An unreadable D1 prediction domain fails closed.
   {const file=database('open',rows);sqlite(file,'DROP TABLE prediction_lineage;');({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(file)}));assert.deepEqual([status,data.error,data.reason],[503,'prediction_unavailable','prediction_domain_unavailable']);}
   assert.ok(mirror,'the mirror object stayed untouched');
+ }
+
+ // 10. (production acceptance) The facts and the Diary are RatingsD1 documents: with ratings_domain_authority d1/open their D1 versions are the source, whatever stale R2 copies say. The film below has
+ // its current rating, one rating change and three Diary viewings only in D1; R2 holds the frozen early versions (older Diary, no fact record). A held ratings domain is a refusal, never a stale R2 answer.
+ {
+  const d=(day,h=10)=>'2026-11-'+String(day).padStart(2,'0')+'T'+String(h).padStart(2,'0')+':00:00.000Z';
+  const text=value=>JSON.stringify(value);
+  const doc=(key,value)=>{const body=text(value),etag=sha(body);return `INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES ('${key}',0,'${body.replace(/'/g,"''")}','${etag}','${d(16)}');`;};
+  const entry=(key,fields)=>({key,source:'letterboxd_diary',identity:{type:'letterboxd_lid',value:'lone4600'},aliases:[],firstObservedAt:d(10),observedAt:d(16),page:1,changes:[],...fields});
+  const fact={schemaVersion:1,factKey:'tmdb-4600',links:{letterboxd:'lone4600',tmdb:'4600'},redirectTo:null,migrating:null,watched:true,rating:{value:4.5,observedAt:d(12),source:'owner',sourceRef:null,observationId:'d1-o2'},ratingHistory:[{kind:'first_observed',recordedAt:d(10),value:4,observedAt:d(10),source:'letterboxd_export',sourceRef:'x',observationId:'d1-o1',previous:null},{kind:'changed',recordedAt:d(12),value:4.5,observedAt:d(12),source:'owner',sourceRef:null,observationId:'d1-o2',previous:{value:4,observedAt:d(10),source:'letterboxd_export',observationId:'d1-o1'}}]};
+  const entries={'viewing:9001':entry('viewing:9001',{keyBasis:'viewing_id',viewingId:'9001',watchedDate:'2026-11-10',viewings:1,viewingsCertain:true,ratingAtEntry:4,ratingsAtEntry:[4],rewatch:false}),'viewing:9002':entry('viewing:9002',{keyBasis:'viewing_id',viewingId:'9002',watchedDate:'2026-11-12',viewings:1,viewingsCertain:true,ratingAtEntry:4.5,ratingsAtEntry:[4.5],rewatch:true}),'viewing:9003':entry('viewing:9003',{keyBasis:'viewing_id',viewingId:'9003',watchedDate:'2026-11-15',viewings:1,viewingsCertain:true,ratingAtEntry:null,ratingsAtEntry:[null],rewatch:true})};
+  const ratingsRows=`UPDATE ratings_domain_authority SET mode='d1',cutover='open' WHERE id=1;`+doc('letterboxd/facts/links.json',{'tmdb:4600':'tmdb-4600','letterboxd:lone4600':'tmdb-4600'})+doc('letterboxd/facts/films/tmdb-4600.json',fact)+doc('letterboxd/diary/history.json',{schemaVersion:1,entries})+doc('letterboxd/diary/state.json',{schemaVersion:1,lastOutcome:'complete',lastSuccessAt:d(16),coverage:{newestWatchedDate:'2026-11-15',oldestWatchedDate:'2010-01-01',reachedEnd:true},resumePage:null});
+  // The frozen R2 copies: an early Diary with one old viewing of this lid and a diary state of 3 Nov; no fact record, no links entry for 4600.
+  set('letterboxd/diary/history.json',{schemaVersion:1,entries:{'viewing:1':entry('viewing:1',{keyBasis:'viewing_id',viewingId:'1',watchedDate:'2026-10-01',viewings:1,viewingsCertain:true,ratingAtEntry:null,ratingsAtEntry:[null],rewatch:false})}});
+  set('letterboxd/diary/state.json',{schemaVersion:1,lastOutcome:'complete',lastSuccessAt:'2026-11-03T16:33:55.000Z',coverage:{newestWatchedDate:'2026-11-01',oldestWatchedDate:'2010-01-01',reachedEnd:true},resumePage:null});
+  const ratingsEnv=()=>({...env,DB:d1Standin(database('open',ratingsRows))});
+  ({status,data}=await history('filmId=tmdb_4600',ratingsEnv()));assert.equal(status,200);
+  assert.deepEqual(data.events.filter(e=>e.type==='diary_viewing').map(e=>e.watchedDate),['2026-11-10','2026-11-12','2026-11-15'],'the three viewings of the D1 Diary, not the frozen R2 one');
+  assert.deepEqual(data.events.filter(e=>e.type==='rating').map(e=>[e.kind,e.value]),[['first_observed',4],['changed',4.5]],'the rating observations of the D1 fact record');
+  assert.deepEqual([data.current.rating.value,data.current.diary.viewingCount,data.snapshot.sources.diary.state.lastSuccessAt],[4.5,3,d(16)],'current rating, viewing count and the Diary run state come from D1');
+  assert.equal(data.snapshot.sources.diary.link.lid,'lone4600');assert.equal(data.partial,false);assert.ok(!data.notes.includes('diary_coverage_partial'));
+  // The digest of a D1 read is its document etag: a changed D1 document refuses the old cursor.
+  {const one=await history('filmId=tmdb_4600&limit=2',ratingsEnv());assert.match(one.data.page.nextCursor,/^2\.[0-9a-f]{16}$/);
+   const changed=database('open',ratingsRows+`UPDATE ratings_document SET etag='${'0'.repeat(64)}' WHERE key='letterboxd/diary/state.json';`);
+   assert.notEqual((await history('filmId=tmdb_4600&limit=2',{...env,DB:d1Standin(changed)})).data?.page?.nextCursor??'x',one.data.page.nextCursor);}
+  // The same film asked by its lid reads the same D1 documents.
+  ({data}=await history('filmId=lone4600',ratingsEnv()));assert.equal(data.events.filter(e=>e.type==='diary_viewing').length,3);
+  // A held ratings domain refuses; an unreadable one is a typed 503; neither falls back to the stale R2 Diary.
+  {const file=database('open',ratingsRows+"UPDATE ratings_domain_authority SET cutover='held' WHERE id=1;");({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(file)}));assert.deepEqual([status,data.error,data.reason],[503,'ratings_unavailable','ratings_domain_not_authoritative']);}
+  {const file=database('open',ratingsRows+"DROP TABLE ratings_view;");({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(file)}));assert.deepEqual([status,data.error],[503,'ratings_unavailable'],'a half-installed ratings domain fails closed');}
+  // Where the domain is not d1 (here the default r2 marker), the R2 objects are read exactly as before.
+  ({data}=await history('filmId=lone4600',envFor('open')));assert.deepEqual(data.events.filter(e=>e.type==='diary_viewing').map(e=>e.watchedDate),['2026-10-01'],'ratings domain on r2: the R2 Diary is the source');
  }
 }
 console.log('Film history: validation, empty film, chronology, lineage gaps, version links, rationale per version, legacy log by both ids, no account URL, watchedAt unknown, rollback and re-apply, idempotent reads, paging and change refusal, ties, redirect, unreadable bundle, convergence overlay, Diary viewings by lid only (never slug), day-only ordering, day counts, lower bounds, unknown re-watch, undated entries, identity disagreement, Diary paging and change refusal, coverage and unreadable Diary passed');

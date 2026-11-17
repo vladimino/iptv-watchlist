@@ -134,7 +134,7 @@ const base={
   seed(base);
  }
  r=await get('9');assert.equal(r.status,200);assert.deepEqual(r.body.film.shows,[]);assert.equal(r.body.film.availability.state,'unavailable','no shows: unavailable');assert.equal(r.body.film.availableUntil,null);assert.equal(r.body.film.nextStart,null);assert.equal(r.body.film.availableNow,false,'zero shows is a valid film page');
- r=await get('8');assert.equal(r.status,200);assert.equal(r.body.film.prediction,null,'a stale prediction is not shown');assert.equal(r.body.film.fingerprint,null);
+ r=await get('8');assert.equal(r.status,200);assert.deepEqual([r.body.film.prediction.stale,typeof r.body.film.prediction.staleReason,r.body.film.prediction.predictedRating],[true,'string',4.5],'AIR-475: a stale forecast is shown, marked with the evaluator\'s reason');assert.deepEqual(r.body.film.fingerprint.plotMechanics,['investigation'],'the stored fingerprint is shown whatever the forecast\'s freshness');assert.equal(r.body.film.prediction.compatibility,undefined,'no compatibility claim on a stale verdict');
  r=await get('12');assert.equal(r.status,200);assert.deepEqual(r.body.film.shows,[],'shows of an earlier generation are not availability now');
  // States.
  r=await get('999');assert.deepEqual([r.status,r.body.status],[404,'absent']);
@@ -143,7 +143,7 @@ const base={
  for(const bad of ['0','abc','-1','7.5','007','1234567890123','%E0%A4%A']){r=await get(bad);assert.deepEqual([r.status,r.body.status],[400,'invalid'],'invalid: '+bad);}
  // The film is still found when the watchlist, a rating or the profile say nothing about it.
  const index=records.get(constant('ENRICHMENT_KEY')+'view-index.json');index.tmdb_7.actualRating=5;index.tmdb_7.watchlist=true;records.set(constant('ENRICHMENT_KEY')+'view-index.json',index);
- r=await get('7');assert.equal(r.status,200,'a rated or watchlisted film still has its page');assert.equal(Object.hasOwn(r.body.film,'actualRating'),false,'no rating is exposed');
+ r=await get('7');assert.equal(r.status,200,'a rated or watchlisted film still has its page');assert.deepEqual([r.body.film.actualRating,r.body.film.watched],[5,false],'AIR-475: the known rating is shown; a rating is not a watched mark and a watched mark is not inferred from it');
  // Optional context degrades honestly: no profile, no programme copy, no index.
  records.delete(constant('profileKey'));r=await get('7');assert.equal(r.status,200);assert.equal(r.body.film.prediction,null,'no profile, no current prediction');assert.equal(r.body.film.shows.length,2);
  seed(base);records.delete('epg/generations/'+G1+'/programme.json');r=await get('7');assert.equal(r.status,200);assert.deepEqual(r.body.film.shows,[],'no programme copy to pin: no availability claimed');assert.ok(r.body.degraded.includes('programme'));
@@ -435,6 +435,44 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
   ctx.__stub=undefined;
  }
  assert.deepEqual([puts,fetches],[[],[]]);
+}
+
+// ---- 3g. AIR-475 production acceptance: the permanent page shows the owner's rating and watched mark, the stored forecast and its fingerprint of a retained Film, found through the verified D1 lid ----
+{
+ vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
+ const base=path.join(root,'alias-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
+ const OPEN=VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";
+ const T='2026-11-14T00:00:00.000Z',q=value=>"'"+String(value).replace(/'/g,"''")+"'";
+ // Live-equivalent facts of the acceptance: tmdb -> lid pairs SEXE, 1BbQ, MwlA are trusted claims of one Film each; tmdb 10750 has a lid that another Film also claims (untrusted): a contested identity.
+ const film=(id,title,original)=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:${id}',1,'tmdb:${id}',${q(original)},'${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:tmdb:${id}','tmdb','${id}',1,0);INSERT INTO film_dimension (film_id,dimension,status,value,updated_at) VALUES ('film:tmdb:${id}','localization','provisional',${q(title)},'${T}');`;
+ const lid=(id,value,trusted=1)=>`INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:tmdb:${id}','letterboxd','${value}',${trusted},0);`;
+ const SEED=film(1423191,'Обитель зла','Resident Evil')+lid(1423191,'SEXE')+film(22004,'Чужая территория','Alien Territory')+lid(22004,'1BbQ')+film(1272837,'28 лет спустя: Храм костей','The Bone Temple')+lid(1272837,'MwlA')
+  +film(10750,'Игрушечные солдатики','Toy Soldiers')+lid(10750,'LID10750')+`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:rival',1,NULL,'Rival','${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:rival','letterboxd','LID10750',0,0);`;
+ let counter=0;const statements=[];
+ const mount=marker=>{const file=path.join(root,'alias-'+(counter++)+'.sqlite');fs.copyFileSync(base,file);sql(file,SEED+marker);return d1Standin(file,{onQuery:async text=>{statements.push(text);}});};
+ const ask=async(db,id)=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/'+id),{BUCKET:bucket,DB:db},{waitUntil(){}});return {status:r.status,body:await r.json()};};
+ seed({tmdb_10750:catalogFilm('tmdb_10750',10750,{title:'Игрушечные солдатики'})});
+ const indexKey=constant('ENRICHMENT_KEY')+'view-index.json';
+ // The R2 view index as production has it: the TMDB spellings hold only watchlist facts, the lids hold the forecasts, the ratings and the watched marks.
+ records.set(indexKey,{tmdb_1423191:{watchlist:true},tmdb_22004:{watchlist:true},tmdb_1272837:{watchlist:true},
+  SEXE:{...stored(),actualRating:4.5,watched:true},'1BbQ':{...stored({tasteProfileHash:'old'}),actualRating:3.5,watched:true},MwlA:{...stored(),watched:true},LID10750:{...stored(),actualRating:2,watched:true}});
+ const db=mount(OPEN);statements.length=0;
+ let r=await ask(db,'1423191');assert.equal(r.status,200,JSON.stringify(r.body));
+ assert.deepEqual([r.body.film.actualRating,r.body.film.watched,r.body.film.prediction.predictedRating,r.body.film.prediction.compatibility,r.body.film.prediction.stale],[4.5,true,4.5,'current',undefined],'SEXE: rating, watched mark and the current forecast, reached through the verified lid');
+ assert.deepEqual(r.body.film.fingerprint.plotMechanics,['investigation'],'the stored fingerprint is shown');assert.equal(r.body.film.prediction.tasteProfileVersion,1);assert.equal(r.body.degraded,undefined);
+ r=await ask(db,'22004');assert.deepEqual([r.body.film.actualRating,r.body.film.watched,r.body.film.prediction.stale,typeof r.body.film.prediction.staleReason],[3.5,true,true,'string'],'1BbQ: a really stale forecast is marked with the evaluator\'s reason, the rating and mark are still shown');assert.ok(r.body.film.fingerprint,'the fingerprint is shown although the forecast is stale');
+ r=await ask(db,'1272837');assert.deepEqual([r.body.film.actualRating,r.body.film.watched,r.body.film.prediction.predictedRating],[null,true,4.5],'MwlA: watched without a rating has no rating');
+ // A contested lid is never used: no forecast, no rating, the degraded part is named; nothing is guessed from the title or a slug.
+ r=await ask(db,'10750');assert.equal(r.status,200);assert.deepEqual([r.body.film.actualRating,r.body.film.watched,r.body.film.prediction],[null,false,null],'a contested identity shows none of the lid\'s facts');assert.ok(r.body.degraded.includes('identity'));
+ assert.ok(statements.length>0&&statements.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1');assert.deepEqual([puts,fetches],[[],[]],'no write, no provider request');
+ // Below open there is no D1 identity: no alias, so the TMDB entry alone is read (the production defect, kept visible).
+ const prepared=mount(VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;");
+ r=await ask(prepared,'1423191');assert.equal(r.status,404,'below open the canonical Film is not read at all (unchanged)');
+ // A held marker keeps failing closed (503), with no alias read.
+ const held=mount(OPEN+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;");r=await ask(held,'1423191');assert.deepEqual([r.status,r.body.reason],[503,'film_person_held']);
 }
 
 // ---- 4. Method and routing guards ----
