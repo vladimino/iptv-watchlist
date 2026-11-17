@@ -1,9 +1,9 @@
 # ADR 0157: Transferable staged batch items drained by the next run
 
-**Status:** Proposed (code delivery; Product Owner architectural acceptance pending independent review of this revision)
+**Status:** Accepted (Product Owner, 2026-11-17; independent technical review on PR #704 HEAD `658bf6d4`)
 **Original decision date:** 2026-11-17
 **Recorded at:** 2026-11-17
-**Approval source:** Owner BLOCK on PR #704 HEAD `b12b5bd2` (issue comment, 17 Nov 2026 ~10:06 Europe/Madrid). The earlier run-scoped hold recovery is **not** accepted.
+**Approval source:** Product Owner acceptance in the AIR-510 project conversation, 17 Nov 2026, after independent TECHNICAL PASS on [PR #704](https://github.com/vladimino/iptv-watchlist/pull/704#pullrequestreview-5935955229) HEAD `658bf6d4`. The owner explicitly accepted that a loss between read-only validation and durable hold leaves candidates in the normal queue for later regeneration. The earlier run-scoped hold recovery is **not** accepted. This decision does not approve live Scheduled Task edits or manual production runs.
 **Related work:** [AIR-510](https://trello.com/c/01JAM4TP); [ADR 0131](0131-batch-candidate-preflight-tool.md); [ADR 0136](0136-prediction-batch-manifest-size-and-spent-complete.md)
 **Supersedes:** None. Qualifies ADR 0131: `prediction_batch_validate` stays a pure preflight. Replaces the run-scoped hold recovery proposed earlier on this card.
 **Superseded by:** None
