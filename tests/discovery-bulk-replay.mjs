@@ -25,10 +25,11 @@ const obs=(key,shows,extra={})=>({key,title:'Film '+key,normalizedTitle:'film '+
 const verifiedFor=(item,filmId,tmdbId,extra={})=>({status:'verified',filmId,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,identitySource:'tmdb_detail',anchor:[90],evidenceKey:Authority.evidenceKey(item),...extra});
 
 // `members` are watchlist Films of the new run; `catalog` are `tmdb_<id>` Films with a current admission.
+const hook={fn:null};
 async function newRun(items,{members=[],catalog=[],latencyMs=0}={}){
  const file=migrated();
  sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
- const standin=d1Standin(file,{latencyMs});
+ const standin=d1Standin(file,{latencyMs,onQuery:async text=>{if(hook.fn)await hook.fn(text);}});
  const env={DB:standin,BUCKET:new MemoryBucket(),discoveryLease:null};
  const taken=await Authority.acquireLease(env,{programmeRunId:null});
  env.discoveryLease=taken.lease;
@@ -117,11 +118,11 @@ const decide=async(env,item,next)=>assert.deepEqual((await Authority.writeDecisi
  const items=[];for(let n=0;n<100;n++)items.push(obs('r'+String(n).padStart(3,'0'),slotsOf(DAY,['c'+n,1+(n%20),90])));
  const {file,env}=await newRun(items,{catalog:[...Array(100).keys()].map(n=>String(2000+n))});
  for(let n=0;n<100;n++)await decide(env,items[n],verifiedFor(items[n],'tmdb_'+(2000+n),String(2000+n)));
- // A stop inside a page (after its first insert batch) keeps what was written and does not advance the cursor: the rows already inserted are no longer selected.
- const midPage=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:'',shouldStop:(()=>{let calls=0;return()=>calls++>=1;})()});
+ // Stop checks come at the head of a page, before its counts and before every write group. A stop between the first and second group keeps what was written and does not advance the cursor: the rows already inserted are no longer selected.
+ const midPage=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:'',shouldStop:(()=>{let calls=0;return()=>calls++>=3;})()});
  assert.equal(midPage.complete,false);assert.equal(midPage.after,'');assert.equal(midPage.outcomes.assigned,38);assert.equal(rows(file).length,38);
  // A stop between pages ends with the cursor of the last finished page.
- const first=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:'',shouldStop:(()=>{let calls=0;return()=>calls++>=2;})()});
+ const first=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:'',shouldStop:(()=>{let calls=0;return()=>calls++>=4;})()});
  assert.equal(first.complete,false);
  assert.equal(first.after,'r'+String(38+Authority.REPLAY_PAGE-1).padStart(3,'0'),'the cursor is the last key of the last finished page (the first 38 are already assigned)');
  assert.equal(rows(file).length,38+first.outcomes.assigned);
@@ -138,5 +139,53 @@ const decide=async(env,item,next)=>assert.deepEqual((await Authority.writeDecisi
  const {env}=await newRun([item],{catalog:['31']});
  await decide(env,item,verifiedFor(item,'tmdb_31','31'));
  await assert.rejects(()=>Authority.replayUnassignedSlots({...env,discoveryLease:null},{programmeRunId:NEW}),error=>error?.code==='discovery_lease'||/lease/i.test(String(error?.message)));
+}
+
+// 6. Review of AIR-523: the absence probes use the existing (programme_run_id, start_ms) index, on a run that already holds thousands of assigned shows.
+const inline=(text,params)=>{let index=0;return text.replace(/\?/g,()=>{const value=params[index++];return typeof value==='number'?String(value):"'"+String(value).replace(/'/g,"''")+"'";});};
+const plan=(file,text,params)=>{const result=sqliteSync(['-bail',file],{input:'EXPLAIN QUERY PLAN '+inline(text,params)+';',encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr);return result.stdout;};
+const SLOT_INDEX=/SEARCH p USING (COVERING )?INDEX published_epg_show_by_generation \(programme_run_id=\? AND start_ms=\?\)/;
+{
+ const DENSE=6000,COUNT=60;
+ const items=[];for(let n=0;n<COUNT;n++)items.push(obs('d'+String(n).padStart(3,'0'),slotsOf(DAY,['k'+n,1+(n%20),90])));
+ const {file,env,standin}=await newRun(items,{catalog:[...Array(COUNT).keys()].map(n=>String(3000+n))});
+ for(let n=0;n<COUNT;n++)await decide(env,items[n],verifiedFor(items[n],'tmdb_'+(3000+n),String(3000+n)));
+ // A populated run: thousands of rows of other Films, none on the slots of the observations above except the first five (a slot held by another Film stays held).
+ sql(file,`INSERT INTO published_epg_member (programme_run_id, kind, ordinal, film_id) VALUES ('${NEW}','programme',0,'member-x')`);
+ sql(file,`WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<${DENSE-1}) INSERT INTO published_epg_show (programme_run_id, film_id, channel_id, start_ms, end_ms, channel, epg_title, basis, match_reason) SELECT '${NEW}','member-x','z'||i,${START+DAY}+i*60000,${START+DAY}+i*60000+5400000,'Channel','x','title_unique',NULL FROM n`);
+ for(let n=0;n<5;n++)sql(file,`INSERT INTO published_epg_show (programme_run_id, film_id, channel_id, start_ms, end_ms, channel, epg_title, basis, match_reason) VALUES ('${NEW}','member-x','k${n}',${START+DAY+(1+(n%20))*3600000},${START+DAY+(1+(n%20))*3600000+90*MIN},'Channel','x','title_unique',NULL)`);
+ // The plan, not a clock: the probe is a (programme_run_id, start_ms) index search in all three statements.
+ assert.match(plan(file,Authority.REPLAY_SELECT_SQL,[NEW,'',NEW,40]),SLOT_INDEX,'the selection probe');
+ assert.match(plan(file,Authority.replaySlotsSql(2),['a','b',NEW]),SLOT_INDEX,'the free-slot probe');
+ const insertPlan=plan(file,Authority.SLOT_INSERT_SQL,[NEW,'f','a',NEW,'a','c',1,2,NEW,'a','1','h','f',NEW,'f','f','1','f','1',NEW,'c',1]);
+ assert.match(insertPlan,/INDEX published_epg_show_by_generation \(programme_run_id=\? AND start_ms=\?\)/,'the guarded insert probe');
+ assert.doesNotMatch(insertPlan,/SEARCH published_epg_show USING (COVERING )?INDEX sqlite_autoindex_published_epg_show_1 \(programme_run_id=\?\)\s*$/m,'the guard is not a scan of the whole run');
+ const before=published(file);
+ let result,laps=0,cursor='';
+ do{result=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:cursor});cursor=result.after;assert.ok(++laps<10);}while(!result.complete);
+ const assigned=rows(file).filter(row=>row.basis==='discovery');
+ assert.equal(assigned.length,COUNT-5,'the five observations whose slot another Film holds are not assigned, all others are');
+ assert.equal(rows(file).filter(row=>row.film_id==='member-x').length,DENSE+5,"the other Film's rows are untouched");
+ assert.equal(new Set(rows(file).map(row=>row.channel_id+':'+row.start_ms)).size,rows(file).length,'one Film per slot');
+ assert.deepEqual(published(file),before);
+ const again=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:''});
+ assert.equal(again.outcomes.assigned,0);assert.equal(again.complete,true);
+}
+
+// 7. Review of AIR-523: the replay deadline is checked before every write group, the first included. Reads that use the slice up leave no batch started and the cursor where the page began.
+for(const [label,pattern] of [['after the free-slot read',/FROM discovery_observation_show s WHERE s\.source_key='active' AND s\.observation_key IN/],['at the count before the first write',/SELECT COUNT\(\*\) AS n FROM published_epg_show/]]){
+ const items=[];for(let n=0;n<10;n++)items.push(obs('e'+n,slotsOf(DAY,['c'+n,1+n,90])));
+ const {file,env,standin}=await newRun(items,{catalog:[...Array(10).keys()].map(n=>String(4000+n))});
+ for(let n=0;n<10;n++)await decide(env,items[n],verifiedFor(items[n],'tmdb_'+(4000+n),String(4000+n)));
+ let expired=false;
+ hook.fn=text=>{if(pattern.test(text))expired=true;};
+ const batches=standin.calls.batches,generation=discoveryGeneration(file);
+ const stopped=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:'',shouldStop:()=>expired});
+ hook.fn=null;
+ assert.equal(standin.calls.batches,batches,'no write batch starts once the slice is used up '+label);
+ assert.equal(rows(file).length,0);assert.equal(discoveryGeneration(file),generation);
+ assert.equal(stopped.complete,false);assert.equal(stopped.after,'','the cursor stays where the page began');
+ const resumed=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:stopped.after});
+ assert.equal(resumed.complete,true);assert.equal(rows(file).length,10,'the next call, with time, restores the page');
 }
 console.log('discovery-bulk-replay ok');

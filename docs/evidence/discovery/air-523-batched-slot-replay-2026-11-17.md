@@ -34,6 +34,14 @@ No new Task, queue, Worker, migration, flag or authority change.
 - `tests/discovery-chunk-budget.mjs` case 23 (new): 90 verified observations with no assigned rows plus 30 unresolved candidates and a D1 modelled at 2.8 s per write batch: the first hop assigns 40 rows, still starts TMDB, stays inside 40 s with no `wall_budget`, stores the cursor and the status stays `partial`; the following hops finish the lap and assign all 90.
 - `tests/discovery-slot-assignment.mjs` example 18 now asserts the batched replay restored the slots. `tests/catalog-completed-d1.mjs` and `tests/programme-catalog-d1-route.mjs` cover the reader side: a current run's assigned rows with a current prediction appear in `GET /api/catalog/available`.
 
+## Independent review corrections (exact HEAD `1ece484`)
+
+The review at that head (technical block) found three defects, all fixed and each pinned by a test that was shown to fail without the fix:
+
+- **Quadratic absence probe.** On the populated 16 Nov run the planner chose the primary key by `programme_run_id` only for the correlated slot probe (reviewer's read-only proxy: 18 681 rows read against 5 with the existing `published_epg_show_by_generation` index). The two new queries and the guard in the shared insert now name that index; no migration, ownership rule unchanged. `tests/discovery-bulk-replay.mjs` case 6 asserts the `EXPLAIN QUERY PLAN` of all three statements and replays against a run holding 6 000 assigned shows.
+- **Deadline bypass.** The first write group was exempt from the stop check, so slow reads could use the 10 s slice and a batch still started. The check now precedes the page's counts and every group, the first included; case 7 expires the slice after the free-slot read and at the count and asserts no batch starts and the cursor stays.
+- **Cursor across generations.** `replayAfter` is used only when the stored status names the same programme run (case 23 in `tests/discovery-chunk-budget.mjs`).
+
 ## Limits and verdict
 
 Sqlite stand-ins, a fake clock and a modelled write cost; no live D1 latency. The 10-second slice is sized from the 16 Nov measurement of 2.8 s as the worst observed batch; at lower latency a hop restores far more rows. **Offline GO.** Acceptance remains: after merge and deploy, a natural Discovery chunk raises the assigned-row count of the published run toward the verified count (aggregate read-only `SELECT`), and the owner accepts Finds. Deployment alone does not restore the catalog; no manual retry or lease reset is authorized.

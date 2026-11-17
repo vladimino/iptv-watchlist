@@ -723,7 +723,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  };
  const selectAfter=typeof last?.selectAfter==='string'?last.selectAfter:'';
  const touchAfter=typeof last?.touchAfter==='string'?last.touchAfter:'';
- const replayAfter=typeof last?.replayAfter==='string'?last.replayAfter:'';
+ const replayAfter=last?.programmeRunId&&last.programmeRunId===source.programmeRunId&&typeof last?.replayAfter==='string'?last.replayAfter:'';
  const watchlist=report.films||[],knownTmdb=new Map(watchlist.filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)])),aliasIndex=new Map();
  const indexFilm=film=>{if(!film?.tmdbId)return;for(const alias of new Set([film.title,film.original,...(film.aliases||[])])){const key=epgTitleParts(alias).normalizedTitle;if(!key)continue;const entries=aliasIndex.get(key)||new Map();entries.set(String(film.tmdbId),film);aliasIndex.set(key,entries);}};
  const cheap={decisions:new Map(),decisionTotal:0,films:new Set(),before:new Map()};

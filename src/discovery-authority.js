@@ -1265,7 +1265,7 @@ export async function writeDecisionDelta(env,changes,context={}){
 // has that TMDB id and the exact hash the writer read; the observation is an active, current observation of `P`; the Film has a record in `P` (a `programme` member, or the
 // catalog id `tmdb_<id>` with a current admission); and no row of any Film holds the slot. The coordinates are copied from the observation's slot row. The batch runs under the
 // Discovery lease and fence: it moves `discovery_authority.generation` and never the published generation, the document or the members.
-const SLOT_INSERT_SQL="INSERT INTO published_epg_show (programme_run_id, film_id, channel_id, start_ms, end_ms, channel, epg_title, basis, match_reason) SELECT ?, ?, s.channel_id, s.start_ms, s.end_ms, s.channel, NULL, 'discovery', ? FROM discovery_observation o JOIN discovery_observation_show s ON s.source_key=o.source_key AND s.observation_key=o.observation_key WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND o.programme_run_id=? AND o.observation_key=? AND s.channel_id=? AND s.start_ms=? AND s.end_ms IS ? AND EXISTS (SELECT 1 FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=?) AND EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND status='verified' AND media_kind='movie' AND tmdb_id=? AND decision_hash=? AND film_id=?) AND (EXISTS (SELECT 1 FROM published_epg_member WHERE programme_run_id=? AND kind='programme' AND film_id=?) OR (?=('tmdb_'||?) AND EXISTS (SELECT 1 FROM discovery_admission WHERE film_id=? AND media_kind='movie' AND tmdb_id=? AND state='current'))) AND NOT EXISTS (SELECT 1 FROM published_epg_show WHERE programme_run_id=? AND channel_id=? AND start_ms=?)";
+export const SLOT_INSERT_SQL="INSERT INTO published_epg_show (programme_run_id, film_id, channel_id, start_ms, end_ms, channel, epg_title, basis, match_reason) SELECT ?, ?, s.channel_id, s.start_ms, s.end_ms, s.channel, NULL, 'discovery', ? FROM discovery_observation o JOIN discovery_observation_show s ON s.source_key=o.source_key AND s.observation_key=o.observation_key WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND o.programme_run_id=? AND o.observation_key=? AND s.channel_id=? AND s.start_ms=? AND s.end_ms IS ? AND EXISTS (SELECT 1 FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=?) AND EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND status='verified' AND media_kind='movie' AND tmdb_id=? AND decision_hash=? AND film_id=?) AND (EXISTS (SELECT 1 FROM published_epg_member WHERE programme_run_id=? AND kind='programme' AND film_id=?) OR (?=('tmdb_'||?) AND EXISTS (SELECT 1 FROM discovery_admission WHERE film_id=? AND media_kind='movie' AND tmdb_id=? AND state='current'))) AND NOT EXISTS (SELECT 1 FROM published_epg_show INDEXED BY published_epg_show_by_generation WHERE programme_run_id=? AND channel_id=? AND start_ms=?)";
 const SLOT_BATCH=STATEMENT_CAP-2;
 function slotInsert(run,film,key,tmdb,hash,slot){
  return [SLOT_INSERT_SQL,[run,film,key,run,key,slot.channelId,slot.startMs,slot.endMs,run,key,tmdb,hash,film,run,film,film,tmdb,film,tmdb,run,slot.channelId,slot.startMs]];
@@ -1349,8 +1349,9 @@ export async function assignObservationSlots(env,spec,context={}){
 // JavaScript side is only a prefilter, so a stale read can cost a skipped row, never a wrong one. Slot coordinates are copied from the current run's
 // observation rows, never from an earlier run. `after` is a key cursor that wraps; `complete` means the circle of keys was covered.
 export const REPLAY_PAGE=40;
-const REPLAY_SELECT_SQL="SELECT o.observation_key, o.confirmed_tmdb_id, o.payload_json AS observation_json, d.payload_json AS decision_json, d.decision_hash, d.tmdb_id, d.film_id FROM discovery_observation o JOIN discovery_decision d ON d.observation_key=o.observation_key WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND o.programme_run_id=? AND d.status='verified' AND d.media_kind='movie' AND d.film_id IS NOT NULL AND d.tmdb_id IS NOT NULL AND o.observation_key>? AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND NOT EXISTS (SELECT 1 FROM published_epg_show p WHERE p.programme_run_id=? AND p.channel_id=s.channel_id AND p.start_ms=s.start_ms)) ORDER BY o.observation_key LIMIT ?";
+export const REPLAY_SELECT_SQL="SELECT o.observation_key, o.confirmed_tmdb_id, o.payload_json AS observation_json, d.payload_json AS decision_json, d.decision_hash, d.tmdb_id, d.film_id FROM discovery_observation o JOIN discovery_decision d ON d.observation_key=o.observation_key WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND o.programme_run_id=? AND d.status='verified' AND d.media_kind='movie' AND d.film_id IS NOT NULL AND d.tmdb_id IS NOT NULL AND o.observation_key>? AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND NOT EXISTS (SELECT 1 FROM published_epg_show p INDEXED BY published_epg_show_by_generation WHERE p.programme_run_id=? AND p.channel_id=s.channel_id AND p.start_ms=s.start_ms)) ORDER BY o.observation_key LIMIT ?";
 const marks=count=>Array.from({length:count},()=>'?').join(',');
+export const replaySlotsSql=count=>"SELECT s.observation_key, s.channel_id, s.start_ms, s.end_ms FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key IN ("+marks(count)+") AND NOT EXISTS (SELECT 1 FROM published_epg_show p INDEXED BY published_epg_show_by_generation WHERE p.programme_run_id=? AND p.channel_id=s.channel_id AND p.start_ms=s.start_ms) ORDER BY s.observation_key, s.ordinal";
 export async function replayUnassignedSlots(env,spec={},context={}){
  const lease=context.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
@@ -1376,7 +1377,7 @@ export async function replayUnassignedSlots(env,spec={},context={}){
    cursor='';result.complete=true;break;
   }
   const keys=rows.map(row=>row.observation_key);
-  const slotRows=await many(db,"SELECT s.observation_key, s.channel_id, s.start_ms, s.end_ms FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key IN ("+marks(keys.length)+") AND NOT EXISTS (SELECT 1 FROM published_epg_show p WHERE p.programme_run_id=? AND p.channel_id=s.channel_id AND p.start_ms=s.start_ms) ORDER BY s.observation_key, s.ordinal",[...keys,run]);
+  const slotRows=await many(db,replaySlotsSql(keys.length),[...keys,run]);
   const freeSlots=new Map();
   for(const item of slotRows){const list=freeSlots.get(item.observation_key)||[];list.push({channelId:item.channel_id,startMs:item.start_ms,endMs:item.end_ms});freeSlots.set(item.observation_key,list);}
   const films=[...new Set(rows.map(row=>String(row.film_id)))];
@@ -1399,12 +1400,14 @@ export async function replayUnassignedSlots(env,spec={},context={}){
     statements.push(slotInsert(run,film,key,tmdb,row.decision_hash,slot));
    }
   }
+  // The reads above may have used the replay slice up: a page with rows to write that has no time left writes nothing and keeps the cursor where the page began.
+  if(statements.length&&stop())break;
   // Rows the statements actually wrote are counted from the table, not from the statements sent: a guard inside a statement may skip it.
   const heldSql="SELECT COUNT(*) AS n FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason IN ("+marks(keys.length)+")";
   const heldBefore=statements.length?Number((await one(db,heldSql,[run,...keys]))?.n||0):0;
   let stopped=false,sent=0;
   for(let index=0;index<statements.length;index+=SLOT_BATCH){
-   if(index>0&&stop()){stopped=true;break;}
+   if(stop()){stopped=true;break;}
    const group=statements.slice(index,index+SLOT_BATCH);
    await timed(()=>commit(db,[fence(gate,lease,' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1)'),[FENCE_SQL,[]],...group]));
    gate={...gate,generation:gate.generation+1};

@@ -939,6 +939,13 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.deepEqual(sql(file,'SELECT generation, watchlist_generation, programme_run_id FROM published_epg_authority')[0],publishedBefore,'only the EPG sync moves the published generation');
  // Uniqueness and provenance: one Film per slot, every row a Discovery row of this run.
  assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM (SELECT channel_id, start_ms FROM published_epg_show WHERE programme_run_id='"+RUN+"' GROUP BY channel_id, start_ms HAVING COUNT(*)>1)")[0].n),0);
+ // A new EPG generation: the stored cursor belongs to the previous run and must not carry over. The new run has no assigned rows; the lowest verified key is restored first.
+ assert.ok(JSON.parse(statusPayload(file)).replayAfter);
+ sql(file,'DELETE FROM published_epg_show');
+ sql(file,"UPDATE discovery_status SET payload_json=json_set(payload_json,'$.programmeRunId','run-previous')");
+ const nextGeneration=await runHop({slowMs:2800});
+ assert.ok(nextGeneration.result.assignment.bulkObservations>0);
+ assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM published_epg_show WHERE match_reason='rep00'")[0].n)>0,true,'a cursor stored for another run is ignored: the new run starts at its first key');
  // The next natural hops finish the circle; with a fast D1 that is one hop.
  let hops=0,last;
  do{last=await runHop();hops++;}while(last.result.assignment.bulkComplete===false&&hops<5);
