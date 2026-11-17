@@ -61,7 +61,7 @@ Person queues stop at localization and external-id conflict. Do not add a dedupe
 
 ## Authority, projections, and snapshot consistency
 
-Production authority is Cloudflare R2 for Worker `iptv`, as [ADR 0002](../../adr/0002-cloudflare-worker-r2-authority.md) records. D1 adapters and the lifecycle sidecar are not that authority. ADR 0002 does not make D1 authoritative.
+Authority is per domain, as [authority per domain](../../architecture/persistence-and-migration.md#authority-per-domain) records. Canonical Film/Person is D1-authoritative while its marker is `open`, so the admin dictionaries come from the canonical catalog reader; a marker that is not readable fails closed. [ADR 0002](../../adr/0002-cloudflare-worker-r2-authority.md) is the original R2 decision; the later per-domain ADRs in the [ADR register](../../adr/README.md) move authority for those domains. The lifecycle sidecar is not an authority.
 
 | Object | Role | Consistency |
 | --- | --- | --- |
@@ -133,7 +133,7 @@ The bounded design is:
 | Point read of one prediction via MCP `prediction_film_diagnostics` | Prediction diagnosis only. Not a catalog search |
 | Limbo inventory of stuck and waiting films | Live, read-only: `GET /api/admin/limbo` reads the snapshot plus the prediction queue and the view index and evaluates the [data health model](data-health.md#limbo-inventory) ([route contract](../api/admin.md#limbo-inventory)). Films only |
 | Ledger-wide candidate queues and a publish-time admin index | Not implemented; a separate card, never a GET. The limbo inventory reports unresolved observations as unavailable until that index exists |
-| D1 `readFilm` / `readPerson` as the admin source | No. Only after the D1 cutover that makes those tables authoritative |
+| D1 `readFilm` / `readPerson` as the admin source | The admin reads dictionaries through the canonical catalog reader while the Film/Person marker is `open`; it never falls back to the frozen `titles.json` / `people.json` |
 | Reviewed-name write ([AIR-54](https://trello.com/c/yKtj1ahy)) | Live as [`POST /api/admin/people/<id>/name-review`](../api/admin.md#person-name-confirmation-post-apiadminpeopleidname-review). `effect: add_alias` stores one alias and does not replace the preferred name. `effect: promote`, and a command that omits `effect`, review the preferred name. Either way the route writes the `people` map of `admin/owner-reviews.json` and copies `films`. The catalogue GET stays a read |
 | Reviewed-title write ([AIR-53](https://trello.com/c/gkuy1awG)) | Live as [`POST /api/admin/films/<storedId>/title-review`](../api/admin.md#film-title-review-post-apiadminfilmsstoredidtitle-review). `effect: add_alias` stores one alias and does not replace the preferred title. `effect: promote`, and a command that omits `effect`, review the preferred title. Either way the route writes one `films` entry of `admin/owner-reviews.json` and copies `people`. The catalogue GET stays a read |
 

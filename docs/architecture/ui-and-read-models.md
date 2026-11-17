@@ -1,14 +1,18 @@
 # UI and read-model projections
 
-This diagram describes **current R2-backed projections**, not a new canonical Film database. The browser reads views assembled by the Worker from published programme data and enrichment records. Sources: [Film/Person read contract](../reference/domain/film-person.md), [enrichment API](../reference/api/enrichment.md), [prediction diagnostics](../reference/api/prediction-diagnostics.md), and [fingerprint/prediction ADR](../adr/0014-fingerprint-prediction-lifecycle.md).
+This diagram describes the **current read projections**: D1 is authoritative per domain, and R2 contributes only the roles drawn (the raw view index that D1 prediction and ratings state overlay, and immutable version bodies). Compatibility mirrors such as `programme.json`, `watchlist.json` and `metadata.json` are not read as authority and are not drawn. It is not a new canonical Film database. The browser reads views assembled by the Worker from published programme data and enrichment records. Sources: [Film/Person read contract](../reference/domain/film-person.md), [enrichment API](../reference/api/enrichment.md), [prediction diagnostics](../reference/api/prediction-diagnostics.md), and [fingerprint/prediction ADR](../adr/0014-fingerprint-prediction-lifecycle.md).
 
 ```mermaid
 flowchart LR
-    subgraph Storage["Authoritative R2 objects"]
-        programme["Published programme generation"]
-        watchlist["Watchlist and metadata"]
-        enrichment["Fingerprints, predictions and actual ratings"]
-        index["Derived view index and prediction queue"]
+    subgraph Authority["D1 iptv: authoritative per domain"]
+        d1pub["Published programme generation and watchlist"]
+        d1canon["Canonical Film/Person and owner reviews"]
+        d1pred["Prediction queue, lease, profile and current pointers"]
+        d1rat["Actual ratings documents and view"]
+    end
+    subgraph R2roles["R2: retained roles only"]
+        idx["Raw view index, the base that D1 predictions and ratings overlay"]
+        bodies["Immutable fingerprint and prediction version bodies"]
     end
     subgraph Server["Cloudflare Worker read paths"]
         api["Programme and enrichment API"]
@@ -20,10 +24,12 @@ flowchart LR
         details["Film detail page"]
         ratings["Predicted rating and actual rating"]
     end
-    programme --> api
-    watchlist --> api
-    enrichment --> ready
-    index --> ready
+    d1pub --> api
+    d1canon --> api
+    d1pred --> ready
+    d1rat --> ready
+    idx --> ready
+    bodies --> ready
     api --> combine
     ready --> combine
     combine --> shortlist
@@ -96,4 +102,4 @@ On an admin page the events link opens `/events`. On the programme page and the 
 
 **Important side-effect boundary:** do not assume all HTTP GET requests are pure reads. Some existing view/event handlers can initialize or recover persisted state; consult the [deployment runbook](../runbooks/deployment.md) and [GET side-effect tests](../../tests/get-side-effects.mjs) before operational probing.
 
-**Not depicted as production:** D1 canonical repositories and a future read cutover. The [D1 migration ADR](../adr/0017-staged-d1-migration.md) requires separately approved steps before replacing R2 readers.
+**Authority:** the read cutovers are done per domain; which store each reader uses is in [authority per domain](persistence-and-migration.md#authority-per-domain). The published programme and watchlist are read from D1 at the pinned generation; the R2 view index is a base that the Worker overlays with D1 predictions and ratings on read.
