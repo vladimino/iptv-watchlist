@@ -4,7 +4,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-No open proposals at this time.
+| ADR | Status | Question |
+| --- | --- | --- |
+| [0160 — A rated-only Diary Letterboxd id gets its Film bridge from a bounded same-run source check](0160-diary-rated-only-identity-bridge.md) | **Proposed** 2026-11-17 | [AIR-489](https://trello.com/c/yZigGAVc): options A (recommended), B and C await an owner decision. No code until then. |
 
 ## Accepted records
 
