@@ -103,6 +103,14 @@ The historical AIR-510 manifest/research hardening was accepted after observed s
 - No change to manifestSize=5, generationSize=1, submitBatchSize=5, retry and termination logic, search limits, evidence rules, `prediction_batch_hold` or `prediction_batch_submit`. No change to the frozen AIR-450 dry-run text.
 - This is **installation/readback evidence, not evidence that four future natural runs follow the new formatting**. A later natural invocation is the appropriate formatting acceptance check. The task owner retains AIR-451 product acceptance; PR #661 remains unmerged pending independent review and exact-HEAD CI.
 
+## AIR-451 readable Saved Task report refinement (17 November 2026 UTC)
+
+**Owner evidence and decision.** A screenshot of a naturally executed minute-`:45` result showed that the previous research report rendered headings and hyperlinks but collapsed each film's audit into a very long bulleted text row with pipe delimiters. The owner approved a better human-readable presentation for the four existing Tasks.
+
+**Installed configuration.** Prompt fields only were updated, and all four independently read back identical (42097 JavaScript characters / 63331 UTF-8 bytes; SHA-256 `1192b92c3d50a2478afd27b06b2d055972375497374e237ef212b6b6e5e2c95c`). Titles `IPTV Predictions v2 00`, `15`, `30`, and `45`, exact existing IDs, enabled state, hourly local DTSTART and exact_schedule remain as recorded above. Step 3в requires per-film audit **blocks** instead of rows; step 11 formats short user-oriented Markdown sections with one block per film, explicit findings, short clickable source links, access/read outcomes, exact queries, gate reason and full-text fallback. No researcher, model, prediction runner, Worker, Cloudflare, queue, lease or schedule was run or modified.
+
+**Limitations.** Configuration installation and four-way text identity are proven. Visual compliance of future Saved Task results is not yet confirmed, and no manual Task run was used to manufacture evidence. The archived 41,243-character previous format remains dated evidence. AIR-451 remains open and PR #661 is awaiting independent review, green CI and owner disposition.
+
 ## Limits and verification
 
 The registry prompt was read directly, then the installed text, length and SHA-256 were compared with the repository snapshot. The offline `tests/scheduled-task-prompt-v2.mjs` covers the snapshot hash, frozen A/B hash, protocol-tool boundaries, research gates and exact-item reuse instructions. PR merge only updates documentation and tests, never the external registry or Worker.

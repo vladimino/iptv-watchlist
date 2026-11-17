@@ -22,7 +22,9 @@ The bullets below are the contract of the retired Task as it ran before the cuto
 
 ## Predictions v2: four active hourly Tasks 00/15/30/45 (AIR-451)
 
-**Live registry readback, 17 November 2026 (after owner-approved uniform Saved Task reports and title normalization).** All four entries remain enabled, `exact_schedule`, hourly Europe/Madrid. Their prompts are identical (41243 JavaScript characters / 61643 UTF-8 bytes, SHA-256 `1602dabdcd7791cfb296623d692ab5a8be90c5db6a3785ba3d76a1fbd2fe2e33`). Names identify nominal minutes, not guaranteed actual start instants.
+**Latest production readback, 17 November 2026, report readability refinement.** The four Scheduled Tasks `IPTV Predictions v2 00/15/30/45` retain their titles, registry IDs, enabled state and original hourly minutes. All four installed executable prompts are identical: 42097 characters / 63331 UTF-8 bytes, SHA-256 `1192b92c3d50a2478afd27b06b2d055972375497374e237ef212b6b6e5e2c95c`. Each successful Task result now uses short Markdown sections (Итог, Прогнозы, Ошибки, Очередь, Исследование) and a separate multi-line human-readable audit block for each film, instead of a dense one-line `|`-delimited record. Evidence quality and research metadata remain unchanged; actual layout must be checked on subsequent natural runs, not via manual prediction execution. See [current prompt](scheduled-task-prompts/hourly-predictions-batch-v2.md) and [registry evidence](../evidence/prediction/task-a-prompt-registry-snapshot-2026-11-15.md#air-451-readable-saved-task-report-refinement-17-november-2026-utc).
+
+**Historical registry readback, 17 November 2026 (after owner-approved uniform Saved Task reports and title normalization).** All four entries remain enabled, `exact_schedule`, hourly Europe/Madrid. Their prompts are identical (41243 JavaScript characters / 61643 UTF-8 bytes, SHA-256 `1602dabdcd7791cfb296623d692ab5a8be90c5db6a3785ba3d76a1fbd2fe2e33`). Names identify nominal minutes, not guaranteed actual start instants.
 
 | Title (exact registry value) | Task ID | Nominal slot | DTSTART Europe/Madrid |
 | --- | --- | --- | --- |
