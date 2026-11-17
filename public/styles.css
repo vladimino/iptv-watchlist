@@ -35,6 +35,8 @@
 .score-badge strong{font-size:31px;line-height:1.15;font-weight:750;font-variant-numeric:tabular-nums;letter-spacing:-.04em}
 .score-actual{background:var(--lime);color:#1b2515}
 .score-predicted{background:var(--blue);color:#142231}
+.score-none{background:#2b3a31;color:#b9c7bd}
+.score-none strong{font-weight:600}
 .score-actual+.score-predicted{min-height:61px;width:103px;padding-top:8px;padding-bottom:7px}
 .score-actual+.score-predicted strong{font-size:24px}
 .score-badge small{font-size:9px;line-height:1.1;font-weight:600}
@@ -249,6 +251,7 @@ html.film-screen .page-heading,html.film-screen .demo-note,html.film-screen .sea
 .finds-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px}
 .finds-card{position:relative;display:flex;flex-direction:column;min-width:0;border:1px solid #3f7a52;border-radius:12px;background:#1a2d21;overflow:hidden;width:100%;max-width:440px;justify-self:start}
 .finds-card .film-head{padding:17px 118px 15px 17px;gap:15px;min-height:0}
+.finds-card.has-both-scores .film-head{min-height:166px}
 .finds-poster{position:relative;flex:none}
 .finds-badge{position:absolute;top:-6px;left:-6px;z-index:1;padding:3px 7px;border-radius:5px;background:var(--lime);color:#17241b;font-size:10px;font-weight:800;letter-spacing:.08em;box-shadow:0 2px 6px #0006}
 .poster-frame{position:relative;flex:none}
@@ -266,7 +269,7 @@ html.film-screen .page-heading,html.film-screen .demo-note,html.film-screen .sea
 .finds-notice{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0 0 12px;padding:10px 14px;border-radius:10px;background:#223a2b;color:#d7f5dc;font-size:13px}.finds-notice[hidden]{display:none}
 .finds-person-status{grid-column:1/-1;margin:0;padding:4px 2px 8px;font-size:13px;color:#cde7d1}.finds-person-status[role=alert]{color:#ffb4a8}
 @media(max-width:760px){.finds{padding:14px}.finds-cards{grid-template-columns:1fr}.finds-card{max-width:none}.finds-card .film-head{padding-right:110px}}
-@media(max-width:410px){.finds-card .film-head{padding-top:84px;padding-right:17px}}
+@media(max-width:410px){.finds-card .film-head{padding-top:156px;padding-right:17px}}
 .film-info h3,.shortlist-card h3{display:flex;align-items:flex-start;gap:8px}.shortlist-card h3 button{flex:1;min-width:0}.film-open{flex:1;min-width:0;color:inherit;text-decoration:none}.film-open:hover{color:inherit}.film-open:focus-visible{outline:2px solid var(--lime);outline-offset:3px;border-radius:2px}.film-open::after{content:"";position:absolute;inset:0}.movie-card .letterboxd-link,.movie-card .channel-filter,.movie-card .credit-link,.movie-card .started-button,.movie-card summary,.movie-card .match-hint{position:relative;z-index:1}.letterboxd-link{display:inline-flex;flex:none;align-items:center;justify-content:center;width:40px;height:24px;margin-top:1px;border-radius:6px}.letterboxd-link svg{display:block;width:32px;height:15px}.letterboxd-link:hover svg{filter:brightness(1.16)}.letterboxd-link:focus-visible{outline:2px solid var(--lime);outline-offset:3px}.channel-filter{display:inline;margin:0;padding:0;border:0;border-bottom:1px dotted #687361;border-radius:0;background:transparent;color:inherit;font:inherit;line-height:inherit;text-align:left}.channel-filter:hover{color:var(--lime);border-bottom-color:var(--lime)}
 /* AIR-393: film links inside a ratings event follow the event text, not the browser's default link colour. */
 .activity-event li a{color:#dce8d2;text-decoration:underline;text-decoration-color:#566450;text-underline-offset:2px}.activity-event li a:hover{color:var(--lime);text-decoration-color:var(--lime)}.activity-event li a:focus-visible{outline:1px solid var(--lime);outline-offset:2px;border-radius:2px}

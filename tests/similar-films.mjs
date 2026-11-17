@@ -635,11 +635,59 @@ assert.match(postedCard,/101 мин/);
 assert.match(postedCard,/Пересмотр/);
 assert.doesNotMatch(postedCard,/NEW/);
 assert.match(plainCard,/class="poster no-poster" aria-label="Постер недоступен">1999</);
-assert.doesNotMatch(plainCard,/score-badge|fetch\(/);
-assert.match(findCard,/class="film-similar-card is-catalog has-score"/);
+assert.doesNotMatch(plainCard,/fetch\(/);
+assert.match(plainCard,/score-actual score-none[^>]*><span>МОЯ ОЦЕНКА<\/span><strong>—<\/strong>/,'AIR-517: nothing known shows two neutral dashes');
+assert.match(plainCard,/score-predicted score-none[^>]*><span>ПРОГНОЗ<\/span><strong>—<\/strong>/);
+assert.doesNotMatch(plainCard,/<strong>0\.0<\/strong>/);
+assert.match(findCard,/class="film-similar-card is-catalog has-both-scores"/);
 assert.match(findCard,/class="poster no-poster"/);
 assert.match(findCard,/class="film-similar-badge is-new"/);
 assert.equal(fetches.length,0,'a poster already on the film is not fetched again');
+// AIR-517 review: a rating stored under the other VERIFIED spelling of the same Film is found; a contested, ambiguous or disagreeing one shows nothing.
+const bridged=(entries,filmsList)=>{load({films:[open,...filmsList],enrichment:{open:openStored,...entries}});return id=>run(`ownRatingOf({id:${JSON.stringify(id)}})`);};
+let ownOf=bridged({tmdb_22004:{actualRating:4,watched:true}},[watch('1BbQ',{tmdbId:'22004',canonicalIdentity:'tmdb:22004'})]);
+assert.equal(ownOf('1BbQ'),4,'AIR-517: the watchlist id finds the rating stored under its verified tmdb_<n>');
+ownOf=bridged({'1BbQ':{actualRating:3.5,watched:true}},[watch('1BbQ',{tmdbId:'22004',canonicalIdentity:'tmdb:22004'})]);
+assert.equal(ownOf('tmdb_22004'),3.5,'AIR-517: the tmdb_<n> card finds the rating stored under its verified Letterboxd id');
+ownOf=bridged({tmdb_22004:{actualRating:4},'1BbQ':{actualRating:3}},[watch('1BbQ',{tmdbId:'22004'})]);
+assert.equal(ownOf('1BbQ'),null,'AIR-517: two spellings that disagree show nothing');
+ownOf=bridged({tmdb_22004:{actualRating:4},'1BbQ':{actualRating:4}},[watch('1BbQ',{tmdbId:'22004'})]);
+assert.equal(ownOf('1BbQ'),4,'AIR-517: two spellings that agree are one fact');
+ownOf=bridged({tmdb_22004:{actualRating:4},tmdb_22005:{actualRating:2}},[watch('Dup',{tmdbId:'22004'}),watch('Dup',{tmdbId:'22005'})]);
+assert.equal(ownOf('Dup'),null,'AIR-517: a Letterboxd id with two stored TMDB ids bridges nothing');
+ownOf=bridged({tmdb_22004:{actualRating:4}},[watch('LidA',{tmdbId:'22004'}),watch('LidB',{tmdbId:'22004'})]);
+assert.equal(ownOf('tmdb_22004'),4,'AIR-517: the direct key is still its own fact');
+assert.equal(ownOf('LidA'),4);
+ownOf=bridged({LidA:{actualRating:5}},[watch('LidA',{tmdbId:'22004'}),watch('LidB',{tmdbId:'22004'})]);
+assert.equal(ownOf('tmdb_22004'),null,'AIR-517: two Letterboxd ids for one TMDB id are ambiguous, the tmdb_<n> card borrows neither');
+ownOf=bridged({tmdb_9:{actualRating:4}},[watch('Other',{tmdbId:'10'})]);
+assert.equal(ownOf('Other'),null,'AIR-517: another Film\'s entry is never borrowed');
+for(const bad of [0,'0',-1,5.5,4.2,true,'x',null])assert.equal(bridged({Z:{actualRating:bad}},[watch('Z')])('Z'),null,'AIR-517: '+JSON.stringify(bad)+' is not a rating');
+assert.equal(bridged({Z:{actualRating:0.5}},[watch('Z')])('Z'),0.5);
+
+// AIR-517: the two numbers are independent facts and each cell is its own.
+load({films:[
+ open,
+ watch('ratedonly',{title:'Только оценка'}),
+ watch('stale',{title:'Устаревший прогноз'}),
+],enrichment:{
+ open:openStored,
+ ratedonly:stored({mechanics:['heist'],actualRating:3.5}),
+ stale:stored({mechanics:['heist'],actualRating:4,prediction:{...strong(4.6,.9),stale:true}}),
+ 'lid-only-key':{actualRating:5,watched:true},
+},catalogFilms:[catalog('tmdb_88',88,{title:'Чужой алиас',original:'Alias',year:2015,mechanics:[],execution:{plot_engine:'strong'},prediction:strong(4.4,.86)})]});
+const air517=run('renderSimilar(now).map(row=>similarCard(row,now)).join("\\n")');
+const air517Slice=id=>{const at=air517.indexOf(`data-similar-id="${id}"`),start=air517.lastIndexOf('<article',at);return air517.slice(start,air517.indexOf('</article>',start));};
+const ratedOnlyCard=air517Slice('ratedonly'),staleCard=air517Slice('stale'),aliasCard=air517Slice('tmdb_88');
+assert.match(ratedOnlyCard,/<span>МОЯ ОЦЕНКА<\/span><strong>3\.5<\/strong>/,'AIR-517: rating without a forecast');
+assert.match(ratedOnlyCard,/score-predicted score-none[^>]*><span>ПРОГНОЗ<\/span><strong>—<\/strong>/,'AIR-517: a missing forecast is not turned into the rating');
+assert.match(staleCard,/<span>МОЯ ОЦЕНКА<\/span><strong>4\.0<\/strong>/);
+assert.match(staleCard,/score-predicted score-none/,'AIR-517: a stale forecast is never shown as current');
+assert.doesNotMatch(staleCard,/4\.6/);
+assert.match(aliasCard,/score-actual score-none[^>]*><span>МОЯ ОЦЕНКА<\/span><strong>—<\/strong>/,'AIR-517: another film\'s stored rating under an unrelated key is not borrowed');
+assert.match(aliasCard,/<span>ПРОГНОЗ<\/span><strong>4\.4<\/strong>/);
+assert.doesNotMatch(aliasCard,/<strong>5\.0<\/strong>/);
+
 assert.doesNotMatch(app.slice(app.indexOf('function similarPoster'),app.indexOf('function similarScoreBadges')),/fetch\(|image\.tmdb\.org\/t\/p\//,'the card does not invent a poster URL');
 
 console.log('Similar films: eligibility, ranking, limits, franchise, identity, catalog and watchlist, freshness, links, focus and no fetch passed');

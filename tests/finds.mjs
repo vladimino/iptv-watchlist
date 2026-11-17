@@ -105,7 +105,9 @@ assert.equal(run('findsAiring(input,now).kind',film('tmdb_64',64,'Приорит
 // Card markup: NEW on the poster, the usual title, year, poster, prediction, at most two labels, the airing, a TMDB link instead of the watchlist film route.
 const rich=film('tmdb_71',71,'Богатый',4.7,.82,'high',[show(-1,'Первый')],{original:'Rich Film',poster:'https://img.example/p.jpg',mechanics:['heist','investigation'],moods:['tense','dark'],genres:['Триллер','Драма']});
 const card=run('findsCard(input,now)',rich);
-assert.match(card,/^<article class="finds-card" data-finds-film="tmdb_71">/);
+assert.match(card,/^<article class="finds-card has-both-scores" data-finds-film="tmdb_71">/);
+assert.match(card,/score-actual score-none[^>]*aria-label="Моя оценка: нет"><span>МОЯ ОЦЕНКА<\/span><strong>—<\/strong>/,'AIR-517: no own rating is a neutral dash, never 0.0');
+assert.doesNotMatch(card,/МОЯ ОЦЕНКА<\/span><strong>[0-9]/);
 assert.match(card,/<div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW<\/span>(?:<span class="soon-badge"[^>]*>[\s\S]*?<\/span>)?<img class="poster" src="https:\/\/img.example\/p.jpg"/);
 assert.match(card,/score-predicted[^>]*><span>ПРОГНОЗ<\/span><strong>4\.7<\/strong><small>82% на 4\.0\+<\/small>/);
 assert.match(card,/<h3><a class="film-open" href="\/film\/tmdb_71" data-film-id="tmdb_71">Богатый<\/a><a class="letterboxd-link"/,'AIR-387: the title opens the internal film page, then the icon');
@@ -181,7 +183,7 @@ ui.catalogFilms=ranked;
 vm.runInContext('findsSource={films:catalogFilms,ready:true,error:false,programmeRunId:"run",generatedAt:null}',ui);
 assert.equal(run('renderFinds(now).length',null),5);
 assert.equal(nodes['#finds'].hidden,false);
-assert.equal((nodes['#finds-cards'].innerHTML.match(/class="finds-card"/g)||[]).length,5);
+assert.equal((nodes['#finds-cards'].innerHTML.match(/class="finds-card has-both-scores"/g)||[]).length,5);
 assert.equal(nodes['#finds-caption'].textContent,'5 фильмов вне watchlist: сильный прогноз и реальный показ');
 vm.runInContext("films=[{id:'tmdb_32',tmdbId:'32',title:'Теперь в watchlist',shows:[]}];enrichment={profile:null,films:{tmdb_31:{actualRating:4,prediction:null}}};",ui);
 assert.deepEqual(ids(run('renderFinds(now)',null)),['tmdb_34','tmdb_33','tmdb_35','tmdb_36','tmdb_37'],'a film added to the watchlist or rated disappears on the next render');
@@ -198,7 +200,7 @@ assert.equal(nodes['#finds'].hidden,true);
 const queue=[];
 ui.fetch=async()=>{const next=queue.shift();if(!next)throw new Error('no response queued');if(next.error)throw new Error('network');return {ok:next.ok,status:next.status,json:async()=>next.body};};
 const answer=(run,films)=>({ok:true,status:200,body:{programmeRunId:run,pinned:true,generatedAt:null,films}});
-const shown=()=>(nodes['#finds-cards'].innerHTML.match(/class="finds-card"/g)||[]).length;
+const shown=()=>(nodes['#finds-cards'].innerHTML.match(/class="finds-card has-both-scores"/g)||[]).length;
 vm.runInContext("films=[];enrichment={profile:null,films:{}};report={runId:'G1',films:[]};findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false};",ui);
 queue.push(answer('G1',ranked));
 assert.equal(await run('loadCatalog()',null),true);
