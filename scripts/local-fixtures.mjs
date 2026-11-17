@@ -16,7 +16,7 @@ function viewEntry(film){
 }
 export function buildLocalFixtures(catalog,now=Date.now()){
  const at=new Date(now).toISOString();
- const filmBody=film=>({id:film.id,...(film.tmdbId?{tmdbId:String(film.tmdbId)}:{}),title:film.title,original:film.original,year:film.year,runtime:film.runtime,genres:film.genres,synopsis:film.synopsis,directors:film.directors,actors:film.actors,shows:(film.shows||[]).map(show=>{const start=now+show.offsetHours*3600000;return {start,end:start+show.durationHours*3600000,channel:show.channel,channelId:show.channelId};})});
+ const filmBody=film=>({id:film.id,...(film.tmdbId?{tmdbId:String(film.tmdbId)}:{}),...(film.tmdbLink?{tmdbLink:film.tmdbLink}:{}),title:film.title,original:film.original,year:film.year,runtime:film.runtime,genres:film.genres,synopsis:film.synopsis,directors:film.directors,actors:film.actors,shows:(film.shows||[]).map(show=>{const start=now+show.offsetHours*3600000;return {start,end:start+show.durationHours*3600000,channel:show.channel,channelId:show.channelId};})});
  const films=catalog.films.map(filmBody);
  const people={directors:[],actors:[]};
  for(const film of films)for(const key of ['directors','actors'])for(const person of film[key]||[])if(!people[key].some(item=>item.id===person.id))people[key].push(person);
@@ -38,6 +38,10 @@ export function buildLocalFixtures(catalog,now=Date.now()){
   {key:'enrichment/view-index.json',json:view},
   {key:'events/items/local-fixture-epg.json',json:{id:'local-fixture-epg',type:'epg',at,films:programme.stats.uniqueFilms,archive:1,future:2,broadcasts:films.reduce((count,film)=>count+film.shows.length,0)}},
  ];
+ const eventItem=(id,ms,json)=>{objects.push({key:'events/items/'+String(9999999999999-ms).padStart(13,'0')+'-'+id+'.json',json:{...json,id,at:new Date(ms).toISOString()}});};
+ eventItem('local-fixture-watchlist',now-60000,{type:'watchlist',total:films.length,added:[{id:'movie-2',title:'Movie2',year:2018},{id:'long-title',title:'A Very Long Watchlist Title That Should Wrap Cleanly On A Narrow Phone Screen Without Horizontal Overflow',year:2021}],removed:[{id:'movie-1',title:'Movie1',year:2020,tmdb:'900001',rating:4.5},{id:'movie-3',title:'Movie3',year:2024}]});
+ eventItem('local-fixture-started',now-30000,{type:'started',film:{id:'movie-1',title:'Movie1',year:2020,tmdb:'900001'}});
+ eventItem('local-fixture-unstarted',now-15000,{type:'unstarted',film:{id:'movie-2',title:'Movie2',year:2018}});
  for(const film of catalog.films.filter(item=>item.started))objects.push({key:`started/${film.id}.json`,json:{id:film.id,started:true,startedAt:at},customMetadata:{started:'true'}});
  return objects;
 }

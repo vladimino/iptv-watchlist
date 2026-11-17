@@ -312,16 +312,35 @@ function frozenDay(run){
  return run.runKey;
 }
  async function body(response){try{return await response.json();}catch{return {};}}
+ function watchlistEventKey(event){
+  if(!event||!Number.isFinite(Date.parse(event.at)))return null;
+  return 'events/items/'+String(9999999999999-Date.parse(event.at)).padStart(13,'0')+'-'+event.id+'.json';
+ }
+ async function journalOwed(fe,run){
+  if(run?.epgEventPending||run?.watchlistEventPending)return true;
+  if(Array.isArray(run?.watchlistRemovalFilms)&&run.watchlistRemovalFilms.length)return true;
+  if(!run?.watchlistEventFixed)return false;
+  const event=(run.events||[]).find(item=>item?.type==='watchlist');
+  const key=watchlistEventKey(event);
+  if(!key)return false;
+  return !(await loadJSON(fe,key));
+ }
+ async function publishedEpgRun(fe,run){
+  if(run?.stage!=='epg')return false;
+  try{const published=await loadJSON(fe,'programme.json');return published?.runId===run.runId;}catch{return false;}
+ }
 
  // The EPG work of one action: a start, or one existing step. Returns what happened and never swallows a write it may have made.
  async function drive(fe,control,{now}){
   const runKey=control.runKey;
   let run=await loadJSON(fe,'sync.json');
   const started=frozenDay(run);
-  // Read-after-unknown: a run of this Madrid date that already completed is the success, whoever drove it.
-  if(run?.stage==='complete'&&started===runKey&&!run.error)return {finished:true,runId:run.runId,run,published:run.runId};
+  const owed=await journalOwed(fe,run);
+  // Read-after-unknown: a run of this Madrid date that already completed is the success, whoever drove it — unless an event or Ratings hand-over is still owed.
+  if(run?.stage==='complete'&&started===runKey&&!run.error&&!owed)return {finished:true,runId:run.runId,run,published:run.runId};
   if(run&&run.stage==='seal'&&started===null)return {failure:{code:'evidence_contradictory'}};
-  const usable=run&&(run.stage==='seal'||(['metadata','epg'].includes(run.stage)&&Number.isFinite(Date.parse(run.updatedAt||''))&&now-Date.parse(run.updatedAt)<EXTERNAL_FRESH_MS));
+  const fresh=run&&['metadata','epg'].includes(run.stage)&&Number.isFinite(Date.parse(run.updatedAt||''))&&now-Date.parse(run.updatedAt)<EXTERNAL_FRESH_MS;
+  const usable=run&&(run.stage==='seal'||fresh||await publishedEpgRun(fe,run)||(run.stage==='complete'&&!run.error&&owed));
   if(!usable){
    const reply=await body(await postSync(fe,null,'/api/sync/start',{},'internal'));
    if(!reply.runId)return {failure:{code:'evidence_contradictory'}};
@@ -349,6 +368,7 @@ function frozenDay(run){
    // AIR-464: a run adopted from another Madrid day (ADR 0092 resume) publishes that day, not this control's day. Its completion never
    // certifies this control; the next action finds a complete run of another day, which is not usable, and starts this day's run.
    if(started!==runKey)return {...base,note:'foreign_run_sealed'};
+   if(await journalOwed(fe,after||run))return {...base,wake:now+policy().COOLDOWNS_MS[0],note:'journal_pending'};
    return {...base,finished:true,published:after?.runId||run.runId};
   }
   return base;
