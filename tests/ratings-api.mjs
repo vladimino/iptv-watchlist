@@ -36,8 +36,8 @@ const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/sta
 for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'},{RATINGS_PIPELINE:'separate'}]){
  const {bucket,http,net}=setup(extra);
  const status=await http(STATUS,'GET');
- assert.equal(status.status,200);eq([status.body.switch,status.body.pipeline,status.body.storage,status.body.sideEffects],['separate','blocked',{supported:false,queueV2:false,cursorV2:false},'none'],JSON.stringify(extra));
- eq((await http(START,'POST',{trigger:'manual'})).body,{runId:null,created:false,nextAction:'stop',reason:'storage_unsupported',storage:{supported:false,queueV2:false,cursorV2:false}});
+ assert.equal(status.status,200);eq([status.body.switch,status.body.pipeline,status.body.storage,status.body.sideEffects],['separate','blocked',{supported:false,authority:'open',queueV2:false,cursorV2:false},'none'],JSON.stringify(extra));
+ eq((await http(START,'POST',{trigger:'manual'})).body,{runId:null,created:false,nextAction:'stop',reason:'storage_unsupported',storage:{supported:false,authority:'open',queueV2:false,cursorV2:false}});
  assert.equal((await http(STEP,'POST',{runId:'00000000-0000-4000-8000-000000000001'})).body.reason,'storage_unsupported');
  assert.equal(bucket.writes().length,0);assert.equal(net.fetches.length,0);
 }

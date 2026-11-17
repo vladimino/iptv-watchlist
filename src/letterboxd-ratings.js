@@ -42,12 +42,25 @@ const LetterboxdRatings=(()=>{
  // The storage schema guard (ADR 0160). The queue must be at schema version 2 and the Diary cursor in its merge form. This is a
  // read of the two objects and writes nothing. A version 1 object, an absent object or any other shape is unsupported: the
  // pipeline neither converts it nor falls back to another store, and no code in the Worker can convert it.
+ // The D1 authority is checked first. A held marker (a D1 domain that is not the writer) or an unreadable one is never read as
+ // permission to use the R2 copies of the two keys: they are stale, and the writers would fall through to them. Only an open marker
+ // or a store without Ratings D1 tables (local development, the test harness) has a readable authoritative copy.
+ async function authorityState(env){
+  if(typeof RatingsD1==='undefined')return 'open';
+  try{
+   const db=env?.DB??(typeof env?.prepare==='function'?env:null);
+   const authority=await RatingsD1.readRatingsAuthority(db,env);
+   return authority.tables&&authority.cutover==='held'?'held':'open';
+  }catch{return 'unavailable';}
+ }
  async function storageState(env){
+  const authority=await authorityState(env);
+  if(authority!=='open')return {supported:false,authority,queueV2:false,cursorV2:false,queue:null,cursor:null};
   const [queue,cursor]=await Promise.all([read(env,REMOVAL_LOOKUP_KEY),read(env,LetterboxdDiary.KEYS.state)]);
   const queueV2=removalQueueV2(queue.value),cursorV2=LetterboxdDiary.cursorMigrated(cursor.value);
-  return {supported:queueV2&&cursorV2,queueV2,cursorV2,queue:queue.value,cursor:cursor.value};
+  return {supported:queueV2&&cursorV2,authority,queueV2,cursorV2,queue:queue.value,cursor:cursor.value};
  }
- const storageOf=state=>({supported:state.supported,queueV2:state.queueV2,cursorV2:state.cursorV2});
+ const storageOf=state=>({supported:state.supported,authority:state.authority,queueV2:state.queueV2,cursorV2:state.cursorV2});
  const pipelineOf=(supported,run)=>!supported?'blocked':run?.isolation?'isolated':run?.state==='running'?'running':'idle';
 
  const leaseLive=(run,now)=>!!run?.lease?.step&&Date.parse(run.lease.expiresAt)>now;

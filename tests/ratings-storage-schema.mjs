@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,QUEUE,CURSOR,SEPARATE,H,film,plain,g,migrated} from './ratings-harness.mjs';
+import * as RatingsD1 from '../src/ratings-d1.js';
+import {ratingsAuthorityModule,makeBucket,makeClock,makeNetwork,loadContext,baseEnv,QUEUE,CURSOR,SEPARATE,H,film,plain,g,migrated} from './ratings-harness.mjs';
 
 // ADR 0160: the ratings pipeline works only on version 2 storage, and the Worker has no code that converts it. Start, step and the
 // status read the removal queue and the Diary cursor and refuse anything else without a write, a request, a conversion or a read
@@ -25,7 +26,7 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
  const {bucket,env,R,net}=setup();
  if(queue)bucket.set(QUEUE,queue);if(cursor)bucket.set(CURSOR,cursor);
  const before={queue:plain(bucket.value(QUEUE)??null),cursor:plain(bucket.value(CURSOR)??null)};
- const storage={supported,queueV2:qName==='v2',cursorV2:cName==='v2'};
+ const storage={supported,authority:'open',queueV2:qName==='v2',cursorV2:cName==='v2'};
  const status=plain(await R.status(env));
  eq([status.storage,status.pipeline],[storage,supported?'idle':'blocked'],label);
  assert.equal('migration' in status,false,label+': the status has no migration field');
@@ -55,13 +56,13 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
  bucket.set(QUEUE,{schemaVersion:1,films:{x:V1_ENTRY}});
  const writes=bucket.writes().length;
  const status=plain(await R.status(env));
- eq([status.storage,status.pipeline],[{supported:false,queueV2:false,cursorV2:true},'blocked']);
+ eq([status.storage,status.pipeline],[{supported:false,authority:'open',queueV2:false,cursorV2:true},'blocked']);
  const second=plain(await R.start(env,{trigger:'manual'}));
  eq([second.reason,second.created],['storage_unsupported',false]);
  assert.equal(bucket.writes().length,writes);assert.equal(net.fetches.length,0);
  assert.equal(bucket.value(QUEUE).schemaVersion,1);
  bucket.set(CURSOR,V1_CURSOR);
- eq(plain(await R.status(env)).storage,{supported:false,queueV2:false,cursorV2:false});
+ eq(plain(await R.status(env)).storage,{supported:false,authority:'open',queueV2:false,cursorV2:false});
 }
 
 // 3. There is no conversion entry point left: neither the functions nor the request action exist, and a request for the retired
@@ -81,7 +82,7 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
  const {bucket,env,R}=setup();
  migrated(bucket);
  const status=plain(await R.status(env));
- eq([status.storage,status.pipeline],[{supported:true,queueV2:true,cursorV2:true},'idle']);
+ eq([status.storage,status.pipeline],[{supported:true,authority:'open',queueV2:true,cursorV2:true},'idle']);
  eq((await R.start(env,{trigger:'manual'})).created,true);
 }
 
@@ -91,6 +92,23 @@ for(const [qName,queue] of Object.entries(QUEUES))for(const [cName,cursor] of Ob
  migrated(bucket);
  for(const [action,body] of [['start',null],['start',{}],['start',{trigger:'weekly'}],['step',{}],['step',{runId:'a b'}],['start',{trigger:'manual',extra:1}]])assert.equal((await R.handle(env,action,body)).status,400,action+JSON.stringify(body));
  assert.equal(bucket.writes().length,0);
+}
+
+// 6. The Ratings D1 authority is read before the stored shapes. A held marker, or one that cannot be read, refuses the pipeline even
+// when stale R2 copies of both objects have the version 2 form: start and step write nothing, request nothing and report the
+// authority; nothing falls through to the R2 copies.
+for(const kind of ['held','unavailable']){
+ const {bucket,env,R,net,ctx}=setup();
+ migrated(bucket);
+ ctx.RatingsD1=ratingsAuthorityModule(RatingsD1,kind);
+ const writes=bucket.writes().length;
+ const expected={supported:false,authority:kind,queueV2:false,cursorV2:false};
+ const status=plain(await R.status(env));
+ eq([status.storage,status.pipeline],[expected,'blocked'],kind);
+ eq(await R.start(env,{trigger:'manual'}),{runId:null,created:false,nextAction:'stop',reason:'storage_unsupported',storage:expected},kind);
+ const stepped=plain(await R.step(env,{runId:'00000000-0000-4000-8000-000000000001'}));
+ eq([stepped.reason,stepped.storage],['storage_unsupported',expected],kind);
+ assert.equal(bucket.writes().length,writes,kind+': nothing is written');assert.equal(net.fetches.length,0,kind+': no request');
 }
 
 console.log('Ratings storage schema (ADR 0160): only a version 2 queue with a merge-form cursor is supported; any other pair is refused by start, step and the status with no write, request or conversion; a version 1 object found after version 2 is refused the same way; no conversion entry point exists in the Worker');

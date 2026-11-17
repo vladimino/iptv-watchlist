@@ -159,7 +159,7 @@ const RatingsOrchestration=(()=>{
  // The external path's gate for ratings_sync_start and ratings_sync_step: `switch_in_progress` while admission is closed,
  // `external_writer_fenced` once the switch to Cloudflare has completed, whatever an old Task prompt sends. Reads stay open.
  async function externalGate(env,action,body={}){
-  const writes=action==='start'||action==='step'||(action==='migrate'&&body?.mode==='apply');
+  const writes=action==='start'||action==='step';
   if(!writes)return {reason:null,fence:null};
   let mode;
   try{mode=await readMode(env);}catch{return {reason:'evidence_unreadable',fence:null};}

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPage,diaryRow,migrated,QUEUE,CURSOR,RUN,SEPARATE,H,eventKeyOf,plain,g} from './ratings-harness.mjs';
+import * as RatingsD1 from '../src/ratings-d1.js';
+import {ratingsAuthorityModule,makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPage,diaryRow,migrated,QUEUE,CURSOR,RUN,SEPARATE,H,eventKeyOf,plain,g} from './ratings-harness.mjs';
 
 // ADR 0074, ADR 0160: the EPG commit never reads Diary. Unsupported storage fails closed for every binding value. On supported
 // storage the commit only enqueues removal references, durably, at completion (AIR-513), whatever the retired
@@ -51,6 +52,21 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
   baselines.push(JSON.stringify({keys:Object.keys(snapshot),ratings:replies.at(-1).body.ratingsPipeline,films:sync.removalRefs.films.map(item=>item.id).sort(),diary:net.diaryFetches()}));
  }
  assert.equal(new Set(baselines).size,1,'every binding value fails closed the same way');
+}
+
+// 1a. A held or unreadable Ratings D1 authority blocks the commit even when stale R2 copies of the queue and the cursor have the
+// version 2 shape. The commit keeps `removalRefs`, never writes the R2 removal queue and enqueues nothing; the R2 event objects it
+// is entitled to write are still written.
+for(const kind of ['held','unavailable']){
+ let stale=null;
+ const result=await lifecycle({prepare:async({bucket,env,ctx})=>{migrated(bucket);stale=bucket.value(QUEUE);ctx.RatingsD1=ratingsAuthorityModule(RatingsD1,kind);}});
+ const label=kind;
+ eq([result.replies.at(-1).body.ratingsPipeline,result.replies.at(-1).body.ratingsStorage],['blocked','authority_'+kind],label);
+ const sync=result.bucket.value('sync.json');
+ eq(sync.removalRefs.films.map(item=>item.id).sort(),['film2','film3'],label+': the references are kept');
+ assert.ok(result.bucket.value(sync.removalRefs.ref.eventKey),label+': the R2 event is written');
+ assert.equal(result.bucket.writes().some(item=>item.key===QUEUE),false,label+': the stale R2 removal queue is never written');
+ eq(result.bucket.value(QUEUE),stale,label+': the stale queue is as it was');
 }
 
 // 1b. Consecutive blocked commits keep every removal reference. Advancing the watchlist does not drop the earlier

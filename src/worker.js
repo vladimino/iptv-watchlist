@@ -1913,7 +1913,7 @@ async function sealStep(env,run,entryAt=Date.now()){
 async function ratingsGate(env){
  if(typeof LetterboxdRatings==='undefined')return {active:false,storage:'unsupported'};
  const state=await LetterboxdRatings.storageState(env);
- return {active:state.supported,storage:state.supported?'supported':'unsupported'};
+ return {active:state.supported,storage:state.supported?'supported':state.authority&&state.authority!=='open'?'authority_'+state.authority:'unsupported'};
 }
 function removalHandoverRef(run){const event=(run?.events||[]).find(item=>item?.type==='watchlist');return event?.id&&Number.isFinite(Date.parse(event.at))?{eventKey:removalEventKey(event),sourceRunId:run.runId,at:event.at}:null;}
 // One saved hand-over is `{ref, films}`. Consecutive blocked commits store a list of those, one entry per removal event.

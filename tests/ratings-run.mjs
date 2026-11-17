@@ -29,7 +29,7 @@ async function finishDiary(R,env,runId){
  const {bucket,env,R,net}=setup();
  for(const sample of [env,{...env,RATINGS_PIPELINE:undefined},{...env,RATINGS_PIPELINE:'inline'},{...env,RATINGS_PIPELINE:'Separate'}]){
   const pending=plain(await R.start(sample,{trigger:'manual'}));
-  assert.equal(pending.reason,'storage_unsupported');assert.deepEqual(plain(pending.storage),{supported:false,queueV2:false,cursorV2:false});
+  assert.equal(pending.reason,'storage_unsupported');assert.deepEqual(plain(pending.storage),{supported:false,authority:'open',queueV2:false,cursorV2:false});
   assert.equal((await R.step(sample,{runId:'x'})).reason,'storage_unsupported');
   const status=plain(await R.status(sample));
   assert.equal(status.pipeline,'blocked');assert.equal(status.switch,'separate');assert.equal(status.sideEffects,'none');

@@ -6,7 +6,7 @@
 
 Removes the owner-only MCP tool `ratings_storage_migrate`, the route `POST /api/letterboxd/ratings/migrate` and the conversion code, and replaces the `migrationState() === 'complete'` gate with a read-only storage schema guard. No production read or write was made for this change; the precondition is the earlier read-only `ratings_sync_status` readout of 13:44 UTC (migration `complete`, removal queue at schema version 2 with 0 legacy entries, cursor migrated, orchestration mode `cloudflare`). No flag, binding, marker, schedule or stored object was touched.
 
-**Equivalence.** `migration === 'complete'` meant that both stored objects were already in the new form. The guard tests exactly that (queue `schemaVersion` 2, cursor `schemaVersion` 2 with a `writer`), so behaviour on the recorded production state is unchanged.
+**Equivalence.** `migration === 'complete'` meant that both stored objects were already in the new form. The guard tests that (queue `schemaVersion` 2, cursor `schemaVersion` 2 with a `writer`) and, before it, the Ratings D1 authority marker: a `held` or unreadable marker refuses the pipeline, so stale R2 copies of the two keys are never taken as authoritative. On the recorded production state (marker `d1` / `open`, both objects at version 2) behaviour is unchanged.
 
 ## Removed
 
@@ -25,8 +25,8 @@ The witness document `letterboxd/ratings/migration.json` stays in storage as a h
 
 ## Tests
 
-`tests/ratings-migration.mjs` is renamed `tests/ratings-storage-schema.mjs` and now proves the guard: version 1 queue, unmerged cursor and missing objects are refused with no write, a supported state works, and the EPG commit blocks and keeps its references. Other ratings, MCP and API tests drop the migration setup. `tests/projector-window-r2-inventory.mjs` counts one wrapper and one dynamic write site fewer in `src/letterboxd-ratings.js` (the removed witness write; not a projector input).
+`tests/ratings-migration.mjs` is renamed `tests/ratings-storage-schema.mjs` and now proves the guard: version 1 queue, unmerged cursor and missing objects are refused with no write, a supported state works, and the EPG commit blocks and keeps its references. Other ratings, MCP and API tests drop the migration setup. The independent review of the first head found that the guard admitted stale v2-shaped R2 copies under a held marker; `tests/ratings-epg.mjs` and `tests/ratings-storage-schema.mjs` now cover a held and an unreadable marker (the EPG commit keeps `removalRefs`, never writes the R2 removal queue and enqueues nothing; start, step and the status refuse). `tests/projector-window-r2-inventory.mjs` counts one wrapper and one dynamic write site fewer in `src/letterboxd-ratings.js` (the removed witness write; not a projector input).
 
 ## Verification
 
-Local, on the final checkout: `npm run test:all` passed with the core suite at 421 of 421 files and the non-functional suite at 40 of 40; `npm run build` and `git diff --check` were clean. A first full run stopped at `projector-window-r2-inventory.mjs`, which was updated as above and then passed. CI and the independent review are recorded on the pull request and the card, not here.
+Local, on the final checkout after merging current `main` and the review fixes: `npm run test:all` passed with the core suite at 421 of 421 files and the non-functional suite at 40 of 40; the new held and unavailable cases fail when the authority read is removed from the guard; `npm run build` and `git diff --check` were clean. A first full run stopped at `projector-window-r2-inventory.mjs`, which was updated as above and then passed. CI and the independent review are recorded on the pull request and the card, not here.
