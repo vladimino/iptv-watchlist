@@ -51,12 +51,12 @@ Owner decision 13 November 2026 (AIR-463): spending the selected manifest is a *
 
 ### Historical Task A activation and four-task scale-out context
 
-The canary became Production Task A (`IPTV Predictions v2 Canary`, `6af7a2d8369081918b79bb2892bac0fe`); the live registry readback on 15 November 2026 showed it enabled on an hourly `:00` Europe/Madrid schedule. The prompt below is the exact installed text at that readback (`manifestSize=5`, `generationSize=1`, `submitBatchSize=5`). Additional B/C/D Task activation remains separately owner-authorized under [AIR-451](https://trello.com/c/NN3N6kRp). This snapshot does not edit a Task, and the live registry remains authoritative.
+The canary became Production Task A (`IPTV Predictions v2 Canary`, `6af7a2d8369081918b79bb2892bac0fe`); the live registry readback on 15 November 2026 showed it enabled on an hourly `:00` Europe/Madrid schedule. The prompt below is the **current 17 November installed text**, not the historical 15 November version; `manifestSize=5`, `generationSize=1`, `submitBatchSize=5` remained constant across those versions. B/C/D were separately owner-authorized and enabled on 16 November under [AIR-451](https://trello.com/c/NN3N6kRp). This snapshot does not edit a Task, and the live registry remains authoritative.
 
 ### Installation, activation and rollback (owner gates)
 
 - **Install or update:** Task A is already installed; this document is a point-in-time readback. Any future Task creation, prompt edit or schedule change needs the owner's operation-specific authorization. After an approved edit, verify the live prompt length and SHA-256 against this header.
-- **Scale-out (AIR-451):** further B/C/D Tasks require the separately authorized activation sequence and live registry readback. Legacy v5 must remain disabled. There is no feature flag, and the Worker does not read the registry.
+- **Scale-out (AIR-451):** B/C/D activation has been separately authorized and independently verified; any future new Task or schedule modification still requires its own operation-specific owner approval and live registry readback. Legacy v5 must remain disabled. There is no feature flag, and the Worker does not read the registry.
 - **Rollback:** restoring a previous Task prompt or switching to legacy v5 requires separate owner authorization and registry readback. Reverting this documentation does neither; previously stored runs, retries and predictions are not rolled back.
 
 ## Scheduled prompt
