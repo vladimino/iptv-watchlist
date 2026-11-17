@@ -19,3 +19,5 @@ fi
 
 cd "$CLAUDE_PROJECT_DIR"
 npm ci --ignore-scripts --no-audit --no-fund
+# Managed sessions suppress npm lifecycle scripts; configure tracked hooks explicitly.
+node scripts/install-git-hooks.mjs

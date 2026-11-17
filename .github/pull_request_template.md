@@ -7,7 +7,7 @@ Trello: [AIR-NNN — card title](https://trello.com/c/XXXXXXXX). Prerequisites: 
 
 ## Tests
 
-<!-- Which test files cover the change and what they prove. Local results: `npm ci`, `npm test` (N files), `npm run build`. For UI or Mermaid work, the written Visual QA report at desktop and mobile widths goes here; no screenshots in git. -->
+<!-- For code PRs list the local `npm ci`, `npm run test:all`, `npm run build` outcomes, test count and exact verified commit SHA. Rerun after code changes. Docs-only changes can state not applicable for the expensive suite. Local Git hooks can be bypassed; reviewers must inspect the evidence. For UI or Mermaid work, give written Visual QA for desktop and mobile; no screenshots in git. -->
 
 ## Production impact
 
