@@ -104,6 +104,7 @@ INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenanc
 INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:tmdb:300','300','sc300','${SHA}','D1 title',2001,'${RK}','tmdb_300','2026-11-01T09:00:00.000Z','r','${T}'),('film:tmdb:301','301','sc301','${SHA}',NULL,NULL,'${RK}','tmdb_301','2026-11-01T09:00:00.000Z','r','${T}'),('film:tmdb:306','307','sc307','${SHA}',NULL,NULL,'${RK}','tmdb_307','2026-11-01T09:00:00.000Z','r','${T}');
 INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:303','film:tmdb:300','${T}');`;
  const file=database('open');sqlite(file,seed);
+ sqlite(file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:other-308',1,'tmdb:999','Other','${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:other-308','tmdb','308',1,0,NULL);`);
  const env={DB:d1Standin(file)};
  const ask=(tmdb,e=env)=>reader.catalogCanonicalFilmFromD1(e,tmdb);
  let r=await ask('300');assert.equal(r.state,'found');assert.deepEqual([r.film.id,r.film.title,r.film.year,r.film.shows.length],['tmdb_300','D1 title',2001,0]);
@@ -111,6 +112,7 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:303','film:
  assert.equal((await ask('999')).state,'conflict','a conflicting claim of the typed id holds the identity');
  r=await ask('302');assert.deepEqual([r.state,r.film.id,r.film.title,r.film.original,r.film.year,r.film.shows.length],['found','tmdb_302','Orig','Orig',null,0],'AIR-475: a retained canonical Film with no admission row is a Film');
  assert.equal((await ask('12345')).state,'absent','no Film at all');
+ assert.equal((await ask('308')).state,'conflict','AIR-475: a Film recording another canonical identity than its claim is never served');
  assert.equal((await ask('304')).state,'conflict','an untrusted claim is not the owner');
  assert.equal((await ask('305')).state,'conflict','a trusted but conflicting claim is not the owner');
  await assert.rejects(()=>ask('306'),code('canonical_read_unavailable'),'an admission row that names another tmdb id fails closed');

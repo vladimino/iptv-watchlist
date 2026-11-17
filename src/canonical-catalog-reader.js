@@ -125,24 +125,24 @@ export async function catalogFilmIdentityBridge(env,id){
  const tmdb=typeof id==='string'?/^tmdb_([1-9]\d{0,11})$/.exec(id):null;
  if(typeof id!=='string'||!(tmdb||LID.test(id)))throw failed('canonical_read_invalid');
  const scheme=tmdb?'tmdb':'letterboxd',value=tmdb?tmdb[1]:id,db=database(env);
- let result;
+ let found;
  try{
   const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0;
   const claims=await many(db,'SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme=? AND value=?',[scheme,value]);
   const owner=claims.find(isOwn)?.film_id??null;
-  if(claims.some(row=>!(isOwn(row)&&row.film_id===owner)))result={state:'conflict'};
-  else if(owner===null)result={state:'absent'};
-  else if(await one(db,'SELECT 1 AS hit FROM film_redirect WHERE from_id=? LIMIT 1',[owner]))result={state:'retired'};
+  if(claims.some(row=>!(isOwn(row)&&row.film_id===owner)))found={state:'conflict'};
+  else if(owner===null)found={state:'absent'};
+  else if(await one(db,'SELECT 1 AS hit FROM film_redirect WHERE from_id=? LIMIT 1',[owner]))found={state:'retired'};
   else{
    const own=await many(db,"SELECT scheme,value,trusted,conflicting FROM film_external_id WHERE film_id=? AND scheme IN ('tmdb','letterboxd')",[owner]);
    const trusted=name=>own.filter(row=>row.scheme===name&&isOwn(row)).map(row=>String(row.value));
    const tmdbIds=trusted('tmdb'),lids=trusted('letterboxd');
    // Any claim of the Film that is not its one trusted value of the scheme (an untrusted or conflicting row, a second trusted value) holds the bridge.
-   if(own.some(row=>!isOwn(row))||tmdbIds.length>1||lids.length>1)result={state:'conflict'};
+   if(own.some(row=>!isOwn(row))||tmdbIds.length>1||lids.length>1)found={state:'conflict'};
    else{
     const other=lids.length||tmdbIds.length?await many(db,"SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE (scheme='tmdb' AND value=?) OR (scheme='letterboxd' AND value=?)",[tmdbIds[0]??'',lids[0]??'']):[];
-    if(other.some(row=>row.film_id!==owner||!isOwn(row)))result={state:'conflict'};
-    else result={state:'ok',filmId:owner,tmdb:tmdbIds[0]??null,lid:lids[0]&&LID.test(lids[0])?lids[0]:null};
+    if(other.some(row=>row.film_id!==owner||!isOwn(row)))found={state:'conflict'};
+    else found={state:'ok',filmId:owner,tmdb:tmdbIds[0]??null,lid:lids[0]&&LID.test(lids[0])?lids[0]:null};
    }
   }
  }catch(error){
@@ -151,7 +151,7 @@ export async function catalogFilmIdentityBridge(env,id){
  }
  const again=await readAuthority(env);
  if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');
- return result;
+ return found;
 }
 
 // Slice 2 (P4b): the titles.json consumers of the programme and watchlist routes. titles.json is a former mutable canonical mirror (frozen at `open`, owner decision 4); the
