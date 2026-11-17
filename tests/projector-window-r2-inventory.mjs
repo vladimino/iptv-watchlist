@@ -108,7 +108,7 @@ const FILE_SITES={
  'src/letterboxd-ratings.js':{r2:1,wrapper:4,dynamic:4}, // AIR-79 D-3: -1 wrapper and -1 dynamic, the migration witness write of the removed migrate(); the ratings queue and cursor writers are not projector inputs
  'src/metadata-cache.js':{r2:1,wrapper:0,dynamic:0},
  'src/monitor.js':{r2:1,wrapper:0,dynamic:0},
- 'src/owner-review-d1.js':{r2:2,wrapper:0,dynamic:0},
+ 'src/owner-review-d1.js':{r2:1,wrapper:0,dynamic:0}, // ADR 0162: -1 r2, the env.BUCKET.put of the retired mode-r2 commit; only the mirror put after a d1 commit remains
  'src/prediction-d1.js':{r2:5,wrapper:0,dynamic:0},
  'src/published-epg.js':{r2:2,wrapper:8,dynamic:8},
  // AIR-410: +1 for writeDiscoveryEvent, the create-only put of one `discovery` Events Log entry (events/items/..., not a projector input).
@@ -125,7 +125,6 @@ const INPUT_WRITERS={
  "src/enrichment.js|mergeStoredJSON|ENRICHMENT_KEY+'view-index.json'":{count:4,owner:'ratings and removal view-index maintenance, its own paths'},
  "src/metadata-cache.js|bucket.put|MIRROR_KEY":{count:1,owner:'metadata cache R2 mirror, its own domain'},
  "src/owner-review-d1.js|bucket.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
- "src/owner-review-d1.js|env.BUCKET.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
  "src/worker.js|saveCanonicalMirror|'people.json'":{count:2,owner:'metadata and EPG sync Persons, re-gated at put'},
  "src/worker.js|saveCanonicalMirror|'titles.json'":{count:2,owner:'metadata and EPG sync titles, re-gated at put'},
  "src/worker.js|saveJSON|'watchlist.json'":{count:3,owner:'EPG publication and watchlist persistence, under the publication lease'},
@@ -204,7 +203,8 @@ for(const line of projector.split('\n')){
  if(!/d1EnrichmentRead\(|d1EnrichmentDiscoveryRead\(/.test(line))continue;
  for(const m of line.matchAll(/'([^']+\.json)'/g))inputs.add(m[1]);
 }
-const notDiscovery=['metadata.json','titles.json','people.json','watchlist.json','letterboxd/diary/history.json','enrichment/view-index.json','letterboxd/admissions/verified-films.json','admin/owner-reviews.json'];
+// ADR 0162: admin/owner-reviews.json is no longer a projector input; the projector reads owner reviews from D1 only.
+const notDiscovery=['metadata.json','titles.json','people.json','watchlist.json','letterboxd/diary/history.json','enrichment/view-index.json','letterboxd/admissions/verified-films.json'];
 for(const name of notDiscovery)assert.ok(inputs.has(name),'the projector reads '+name);
 
 // 2. Every function in the two closures that names a projector input that is not Discovery's, and what each one is. A new one fails.

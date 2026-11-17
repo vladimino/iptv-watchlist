@@ -1,12 +1,14 @@
-// ADR 0081. Owner reviews stay on R2 until migration 0009 is applied and the marker
-// is switched. The switch is not part of this test. No production database is opened.
+// ADR 0081, ADR 0162. Owner reviews are served only while the marker says mode d1; any other
+// marker, a missing binding or missing tables is refused, and only the explicit local stand-in
+// keeps the R2 object. The marker is set directly here (the import, activate and revert tooling is
+// retired). No production database is opened.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {activateOwnerReviews,applyViewOverlay,commit,importOwnerReviews,loadForRead,loadSnapshotReviews,overlayCatalogBody,OWNER_REVIEW_MAX_STATEMENT_BYTES,OWNER_REVIEW_MAX_STATEMENTS,OWNER_REVIEWS_KEY,readAuthority,readDocument,readFenced,revertOwnerReviews,stampLocalized} from '../src/owner-review-d1.js';
+import {applyViewOverlay,commit,loadForRead,loadSnapshotReviews,overlayCatalogBody,OWNER_REVIEW_MAX_STATEMENT_BYTES,OWNER_REVIEW_MAX_STATEMENTS,OWNER_REVIEWS_KEY,readAuthority,readDocument,readFenced,stampLocalized} from '../src/owner-review-d1.js';
 import {publishGeneration} from '../src/published-epg.js';
 import {readAuthority as readCacheAuthority} from '../src/metadata-cache.js';
 import {MemoryBucket} from './memory-bucket.mjs';
@@ -27,7 +29,16 @@ const ownerLoc=(value)=>({status:'reviewed',value,provenance:{authority:'owner'}
 const filmSlice=(value,extra={})=>({filmId:'film:heat',localization:ownerLoc(value),aliases:[{kind:'title',value:'Старое'}],titleReviews:[{requestId:'req-1',version:{before:'title-review:1:a',after:'title-review:1:b'}}],localizationConflicts:[{value:'Словарь',source:'dictionary',reason:'owner_kept'}],...extra});
 const personSlice=(value)=>({localization:ownerLoc(value),aliases:[],nameReviews:[{requestId:'req-p',version:{before:'name-review:1:a',after:'name-review:1:b'}}],localizationConflicts:[],roleLinks:[{id:'person:director/ada',roleId:'director/ada'}]});
 
+// Puts a migrated database into the only served state and stores the document through the normal writer.
+async function seed(db,bucket,document){
+ db.sql("UPDATE owner_review_authority SET mode='d1' WHERE id=1");
+ const saved=await commit({DB:db,BUCKET:bucket},{expectedRevision:(await readAuthority(db)).revision,document});
+ assert.equal(saved.ok,true,JSON.stringify(saved));
+ return saved;
+}
+
 assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/owner-review-d1\.js','OwnerReview'\)/);
+assert.equal(fs.existsSync('scripts/owner-review-authority.mjs'),false,'the import, activate and revert script is retired (ADR 0162)');
 assert.match(fs.readFileSync('migrations/0009_owner_review_authority.sql','utf8'),/version >= 8 AND version < 9/);
 assert.match(fs.readFileSync('src/admin/film-title-route.js','utf8'),/owner_review_too_large[\s\S]{0,240},413\)/);
 assert.match(fs.readFileSync('src/admin/person-name-route.js','utf8'),/owner_review_too_large[\s\S]{0,240},413\)/);
@@ -54,14 +65,15 @@ function refuses(list){
  assert.equal(one(db,"SELECT mode FROM owner_review_authority"),'r2');
  assert.equal(one(db,"SELECT mode FROM prediction_domain_authority"),'r2');
  assert.equal(one(db,"SELECT mode FROM published_epg_authority"),'r2');
- assert.equal((await readAuthority(db)).mode,'r2');
+ assert.equal((await readAuthority(db)).failClosed,true,'a marker in mode r2 is refused (ADR 0162)');
  assert.equal((await readCacheAuthority(db)).mode,'r2');
  db.sql("UPDATE metadata_cache_authority SET mode='d1'");
  assert.equal((await readCacheAuthority(db)).mode,'d1','schema v9 still honours the metadata-cache marker');
  assert.throws(()=>db.sql('UPDATE schema_contract SET version=7'),/schema_contract_downgrade/);
  const v6=refuses(base);
  assert.equal(one(v6,'SELECT version FROM schema_contract'),6);
- assert.equal((await readAuthority(v6)).legacy,true);
+ assert.equal((await readAuthority(v6)).failClosed,true,'a schema below 9 without the tables is refused');
+ assert.equal((await readAuthority({DB:v6,OWNER_REVIEW_DB_OPTIONAL:'standin'})).legacy,true,'only the explicit stand-in keeps the R2 object');
  const v7=refuses([...base,'0007_prediction_authority']);
  assert.equal(one(v7,'SELECT version FROM schema_contract'),7);
  const partial=migrated([...base,'0007_prediction_authority','0008_published_epg_authority']);
@@ -84,28 +96,6 @@ function refuses(list){
 
 {
  const db=migrated();
- const bucket=new MemoryBucket();
- await assert.rejects(importOwnerReviews(db,bucket,{}),/owner_review_confirm/);
- const absent=await importOwnerReviews(db,bucket,{confirm:'load'});
- assert.equal(absent.absent,true);
- assert.equal(absent.entries,0);
- assert.equal(absent.mode,'r2');
- assert.equal(one(db,'SELECT COUNT(*) FROM film'),0);
- const bad=new MemoryBucket();
- bad.put(OWNER_REVIEWS_KEY,'{');
- await assert.rejects(importOwnerReviews(migrated(),bad,{confirm:'load'}),/owner_review_unreadable/);
- const versioned=new MemoryBucket();
- versioned.put(OWNER_REVIEWS_KEY,JSON.stringify({contractVersion:2,films:{},people:{}}));
- await assert.rejects(importOwnerReviews(migrated(),versioned,{confirm:'load'}),/owner_review_shape/);
- const partial=new MemoryBucket();
- partial.put(OWNER_REVIEWS_KEY,JSON.stringify({contractVersion:1,films:{}}));
- await assert.rejects(importOwnerReviews(migrated(),partial,{confirm:'load'}),/owner_review_shape/);
- const throwing={async get(){throw new Error('403');},async head(){throw new Error('403');},async put(){throw new Error('403');}};
- await assert.rejects(importOwnerReviews(migrated(),throwing,{confirm:'load'}),/owner_review_unreadable/);
-}
-
-{
- const db=migrated();
  db.sql("INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:heat',1,'Heat','2026-11-01T00:00:00.000Z')");
  db.sql("INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:new',1,'New','2026-11-01T00:00:00.000Z')");
  db.sql("INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:old','film:new','2026-11-01T00:00:00.000Z')");
@@ -114,11 +104,10 @@ function refuses(list){
  db.sql("INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:actor/ada','actor/ada',1,'2026-11-01T00:00:00.000Z')");
  const document={contractVersion:1,films:{heat:filmSlice('Хозяин'),old:filmSlice('Старый'),'tmdb_949':filmSlice('По номеру'),'tmdb_tv_949':filmSlice('Не телевизор'),orphan:filmSlice('Сирота')},people:{'person:actor/ada':personSlice('Ада'),'person:actor/missing':personSlice('Нет строки')}};
  const bucket=new MemoryBucket();
- bucket.put(OWNER_REVIEWS_KEY,JSON.stringify(document));
- const imported=await importOwnerReviews(db,bucket,{confirm:'load'});
- assert.equal(imported.entries,7);
- assert.equal(imported.films,2,'the import does not mint a film');
- assert.equal(imported.people,1,'the import does not mint a person');
+ await seed(db,bucket,document);
+ assert.equal(one(db,'SELECT COUNT(*) FROM owner_review_entry'),7);
+ assert.equal(one(db,'SELECT COUNT(*) FROM film'),2,'a commit does not mint a film');
+ assert.equal(one(db,'SELECT COUNT(*) FROM person'),1,'a commit does not mint a person');
  const links=db.sql('SELECT kind, source_key, identity_link, identity_state FROM owner_review_entry ORDER BY kind, source_key');
  const link=(key)=>links.find(row=>row.source_key===key);
  assert.equal(link('heat').identity_link,'film:heat');
@@ -133,50 +122,41 @@ function refuses(list){
  const round=await readDocument(db);
  assert.deepEqual(round.films.orphan.titleReviews,document.films.orphan.titleReviews);
  assert.deepEqual(round.people['person:actor/ada'].roleLinks,document.people['person:actor/ada'].roleLinks);
- assert.equal(one(db,"SELECT mode FROM owner_review_authority"),'r2');
- const moved=new MemoryBucket();
- moved.put(OWNER_REVIEWS_KEY,JSON.stringify({contractVersion:1,films:{},people:{}}));
- await assert.rejects(activateOwnerReviews(db,moved,{confirm:'activate'}),/owner_review_fence/);
- assert.equal(one(db,"SELECT mode FROM owner_review_authority"),'r2');
- const activated=await activateOwnerReviews(db,bucket,{confirm:'activate'});
- assert.equal(activated.mode,'d1');
+ assert.equal(JSON.parse(bucket.objects.get(OWNER_REVIEWS_KEY).text).films.heat.localization.value,'Хозяин','the commit writes the mirror after the rows');
  const lagging=new MemoryBucket();
  lagging.put(OWNER_REVIEWS_KEY,JSON.stringify({contractVersion:1,films:{heat:filmSlice('Зеркало')},people:{}}));
  let puts=0;
  const wrapped={async get(key){return lagging.get(key);},async head(key){return lagging.head(key);},async put(){puts++;throw new Error('mirror down');}};
- await assert.rejects(revertOwnerReviews(db,wrapped,{confirm:'r2'}),/owner_review_fence/);
- assert.equal(puts,1);
- assert.equal(one(db,"SELECT mode FROM owner_review_authority"),'d1','a failed mirror leaves the marker');
- const loaded=await loadForRead({DB:db,BUCKET:lagging});
+ const loaded=await loadForRead({DB:db,BUCKET:wrapped});
  assert.equal(loaded.mode,'d1');
- assert.equal(loaded.body.films.heat.localization.value,'Хозяин');
- assert.equal(puts,1,'a d1 read does not repair the mirror');
+ assert.equal(loaded.body.films.heat.localization.value,'Хозяин','a d1 read never takes the lagging mirror');
+ assert.equal(puts,0,'a d1 read does not repair the mirror');
 }
 
 {
  const db=migrated();
  const bucket=new MemoryBucket();
  const empty={contractVersion:1,films:{},people:{}};
- const bare=await commit({DB:migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache']),BUCKET:bucket},{expectedRevision:null,document:empty});
- assert.equal(bare,null,'schema v6 has no owner-review marker and keeps the caller on its R2 put');
- const fenced=await commit({DB:db,BUCKET:bucket},{expectedRevision:null,document:{...empty,films:{heat:filmSlice('Хозяин')},people:{'person:actor/ada':personSlice('Ада')}}});
- assert.equal(fenced.ok,true);
- assert.equal(one(db,'SELECT COUNT(*) FROM owner_review_entry'),0,'an r2 save does not write rows');
- assert.equal(JSON.parse(bucket.objects.get(OWNER_REVIEWS_KEY).text).people['person:actor/ada'].localization.value,'Ада');
- const again=await commit({DB:db,BUCKET:bucket},{expectedRevision:fenced.revision,document:{...empty,films:{heat:filmSlice('Дальше')},people:JSON.parse(bucket.objects.get(OWNER_REVIEWS_KEY).text).people}});
- assert.equal(again.ok,true);
- assert.equal(JSON.parse(bucket.objects.get(OWNER_REVIEWS_KEY).text).films.heat.localization.value,'Дальше');
- assert.equal(JSON.parse(bucket.objects.get(OWNER_REVIEWS_KEY).text).people['person:actor/ada'].roleLinks.length,1);
- const keys=[...bucket.objects.keys()];
- assert.deepEqual(keys,[OWNER_REVIEWS_KEY]);
+ const v6=()=>migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache']);
+ const bare=await commit({DB:v6(),BUCKET:bucket},{expectedRevision:null,document:empty});
+ assert.deepEqual(bare,{ok:false,reason:'owner_review_unavailable'},'schema v6 without a stand-in is refused');
+ const local=await commit({DB:v6(),OWNER_REVIEW_DB_OPTIONAL:'standin',BUCKET:bucket},{expectedRevision:null,document:empty});
+ assert.equal(local,null,'only the explicit stand-in keeps the caller on its R2 put');
+ const refused=await commit({DB:db,BUCKET:bucket},{expectedRevision:null,document:{...empty,films:{heat:filmSlice('Хозяин')},people:{'person:actor/ada':personSlice('Ада')}}});
+ assert.deepEqual(refused,{ok:false,reason:'owner_review_unavailable'},'a marker in mode r2 is refused, never an R2 write');
+ assert.equal(one(db,'SELECT COUNT(*) FROM owner_review_entry'),0);
+ assert.deepEqual([...bucket.objects.keys()],[],'nothing is written to R2');
+ db.sql("UPDATE owner_review_authority SET mode='d1' WHERE id=1");
+ db.sql("UPDATE owner_review_authority SET writes='held' WHERE id=1");
+ const held=await commit({DB:db,BUCKET:bucket},{expectedRevision:(await readAuthority(db)).revision,document:empty});
+ assert.deepEqual(held,{ok:false,reason:'writes_held'},'the owner-review writer fence stays in mode d1 (ADR 0162)');
+ assert.deepEqual([...bucket.objects.keys()],[]);
 }
 
 {
  const db=migrated();
  const bucket=new MemoryBucket();
- bucket.put(OWNER_REVIEWS_KEY,JSON.stringify({contractVersion:1,films:{heat:filmSlice('Хозяин')},people:{'person:actor/ada':personSlice('Ада')}}));
- await importOwnerReviews(db,bucket,{confirm:'load'});
- await activateOwnerReviews(db,bucket,{confirm:'activate'});
+ await seed(db,bucket,{contractVersion:1,films:{heat:filmSlice('Хозяин')},people:{'person:actor/ada':personSlice('Ада')}});
  const gate=await readAuthority(db);
  const filmEdit={contractVersion:1,films:{heat:filmSlice('Новое'),other:filmSlice('Второе')},people:(await readDocument(db)).people};
  const saved=await commit({DB:db,BUCKET:bucket},{expectedRevision:gate.revision,document:filmEdit});
@@ -221,16 +201,6 @@ function refuses(list){
  assert.equal(catalog.credits[0].localName,'Ада');
 }
 
-{
- const script=path.resolve('scripts/owner-review-authority.mjs');
- const quiet=spawnSync('node',[script],{encoding:'utf8'});
- assert.equal(quiet.status,0);
- assert.equal(JSON.parse(quiet.stdout).writes,false);
- const refused=spawnSync('node',[script,'--database','/tmp/iptv/cloud.sqlite','--reviews','/tmp/reviews.json','--load','--confirm','load'],{encoding:'utf8'});
- assert.equal(refused.status,2);
- assert.match(refused.stderr,/production/);
-}
-
 function manyFilms(count,value){
  const films={};
  for(let index=0;index<count;index++)films['k'+index]=filmSlice(value);
@@ -267,9 +237,7 @@ async function activated(){
  const db=migrated();
  const bucket=new MemoryBucket();
  const document={contractVersion:1,films:{heat:filmSlice('Хозяин')},people:{'person:director/ada':personSlice('Ада')}};
- bucket.put(OWNER_REVIEWS_KEY,JSON.stringify(document));
- await importOwnerReviews(db,bucket,{confirm:'load'});
- await activateOwnerReviews(db,bucket,{confirm:'activate'});
+ await seed(db,bucket,document);
  return {db,bucket,document};
 }
 
@@ -285,15 +253,6 @@ async function activated(){
  const wide=await commit({DB:db,BUCKET:bucket},{expectedRevision:'d1:'+generation,document:{contractVersion:1,films:{heat:filmSlice('Жирный',{note:'x'.repeat(OWNER_REVIEW_MAX_STATEMENT_BYTES)})},people:{}}});
  assert.equal(wide.reason,'owner_review_too_large');
  assert.equal((await readDocument(db)).films.heat.localization.value,'Хозяин');
- const fresh=migrated();
- const source=new MemoryBucket();
- source.put(OWNER_REVIEWS_KEY,JSON.stringify({contractVersion:1,films:{heat:filmSlice('Хозяин')},people:{}}));
- await importOwnerReviews(fresh,source,{confirm:'load'});
- const huge=new MemoryBucket();
- huge.put(OWNER_REVIEWS_KEY,JSON.stringify(manyFilms(OWNER_REVIEW_MAX_STATEMENTS,'Много')));
- await assert.rejects(importOwnerReviews(fresh,huge,{confirm:'load'}),/owner_review_too_large/);
- assert.equal(one(fresh,'SELECT COUNT(*) FROM owner_review_entry'),1);
- assert.equal((await readDocument(fresh)).films.heat.localization.value,'Хозяин');
 }
 
 {
@@ -347,13 +306,12 @@ async function activated(){
   const document={contractVersion:1,films:{heat:filmSlice('Хозяин')},people:{'person:director/ada':personSlice('Ада')}};
   bucket.put(OWNER_REVIEWS_KEY,JSON.stringify(document));
   if(reviewMode==='d1'){
-   await importOwnerReviews(db,bucket,{confirm:'load'});
-   await activateOwnerReviews(db,bucket,{confirm:'activate'});
+   await seed(db,bucket,document);
    bucket.put(OWNER_REVIEWS_KEY,JSON.stringify({contractVersion:1,films:{heat:filmSlice('Зеркало')},people:{}}));
   }
   return {db,bucket,tracked,puts};
  }
- for(const epgMode of ['r2','d1'])for(const reviewMode of ['r2','d1']){
+ for(const epgMode of ['r2','d1'])for(const reviewMode of ['d1']){
   const {db,tracked,puts}=await scene(epgMode,reviewMode);
   const env={DB:db,BUCKET:tracked};
   const response=await worker.fetch(new Request('http://127.0.0.1/api/programme'),env,ctx);
@@ -371,9 +329,10 @@ async function activated(){
   assert.equal(item.item.preferred,'Хозяин');
   assert.equal(puts.includes(OWNER_REVIEWS_KEY),false,epgMode+'/'+reviewMode);
  }
- for(const epgMode of ['r2','d1']){
+ for(const [epgMode,breakIt] of [['r2','drop'],['d1','drop'],['r2','marker'],['d1','marker']]){
   const {db,bucket,tracked,puts}=await scene(epgMode,'d1');
-  db.sql('DROP TABLE owner_review_entry');
+  if(breakIt==='drop')db.sql('DROP TABLE owner_review_entry');
+  else db.sql("UPDATE owner_review_authority SET mode='r2' WHERE id=1");
   const env={DB:db,BUCKET:tracked};
   const response=await worker.fetch(new Request('http://127.0.0.1/api/programme'),env,ctx);
   const body=await response.json();
