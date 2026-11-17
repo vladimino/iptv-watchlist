@@ -1,9 +1,9 @@
 # ADR 0160: A rated-only Diary Letterboxd id gets its Film bridge from a bounded same-run source check, written by the existing admission writer
 
-**Status:** Proposed
-**Original decision date:** unknown (awaiting owner decision)
+**Status:** Accepted
+**Original decision date:** 2026-11-17
 **Recorded at:** 2026-11-17
-**Approval source:** not documented. The [AIR-489](https://trello.com/c/yZigGAVc) card requires owner options and an owner decision before code that adds a writer, an authority, a durable document or retry semantics.
+**Approval source:** Owner chose option A in the AIR-489 working session on 17 Nov 2026 (Europe/Madrid), after the [options handoff comment](https://trello.com/c/yZigGAVc) and this record in Proposed form. Architecture only: no production run, flag, Task, migration or data write is authorized.
 **Related work:** [AIR-489](https://trello.com/c/yZigGAVc), [AIR-475](https://trello.com/c/9OniH9d9), [AIR-499](https://trello.com/c/8ifHCioP), [ADR 0087](0087-rated-archive-film-admission.md), [ADR 0090](0090-rated-identity-redirect-proof-and-retry.md), [ADR 0099](0099-canonical-film-person-d1-authority.md), [ADR 0104](0104-inferred-letterboxd-identity.md), [RCA evidence](../evidence/letterboxd/air-489-rca-2026-11-17.md)
 **Supersedes:** None
 **Superseded by:** None
@@ -26,7 +26,7 @@ In the Diary phase, after the watched/rating facts are durable, for each page li
 - write the immutable receipt entry (`identity: "diary_page"`, the same receipt pattern as ADR 0105) and call the existing `applyRatedAdmissionRetention`; no new canonical writer, no new SQL;
 - link `tmdb:<n>` to the existing record of the lid with the existing `LetterboxdFacts.linkFilm` alias protocol (`lb-<lid>` keeps its history; a second record for the same movie stays `alias_conflict`, never merged);
 - carry the label into the event before it is finalised, or, when the budget is short, leave the label honest (`unresolved`, Letterboxd link) and enrich on read.
-Anything else (no slug, redirect or slug mismatch, two ids, TV id, title/year disagreement, 403/429/challenge, timeout, held or moved authority) stays `pending` with `reason`, `lastAttemptAt` and `nextAttemptAt` in one bounded document, retried only by ordinary Ratings runs (no Task, no queue, no scheduler). Consequence to accept: a new ratings-owned key (`letterboxd/diary/identity.json`) added to the D1-owned ratings key set, and a trusted `letterboxd` claim is still **not** written (the Facts alias plus the tmdb Film are the bridge; `catalogFilmIdentityBridge` stays `absent` for these Films).
+Anything else (no slug, redirect or slug mismatch, two ids, TV id, title/year disagreement, 403/429/challenge, timeout, held or moved authority) stays `pending` with `reason`, `lastAttemptAt` and `nextAttemptAt` in one bounded document, retried only by ordinary Ratings runs (no Task, no queue, no scheduler). Consequence to accept: one new bounded document inside the existing D1-owned `letterboxd/facts/scans/` prefix, and a trusted `letterboxd` claim is still **not** written (the Facts alias plus the tmdb Film are the bridge; `catalogFilmIdentityBridge` stays `absent` for these Films).
 
 **B. A also writes the trusted `letterboxd` claim.** Extend `admitRatedFilm` (or activate `film_external_ids`) to add the trusted `letterboxd` external id in the same fenced batch, so `catalogFilmIdentityBridge` returns `ok` and every AIR-475 reader works unchanged. Consequence: changes the semantics of an accepted canonical writer; the 708 existing admissions would still lack the claim (a separate, owner-gated backfill). Larger blast radius.
 
@@ -34,7 +34,9 @@ Anything else (no slug, redirect or slug mismatch, two ids, TV id, title/year di
 
 ## Decision
 
-Not taken. Recommendation: **A**, with B left as a later, separate card if a trusted `letterboxd` claim is needed by another reader. No code for A, B or C is written until the owner decides.
+Option **A** is accepted. B stays a later, separate card if another reader needs a trusted `letterboxd` claim. C is rejected.
+
+Implementation notes that refine A (no change of the decision): the pending document is `letterboxd/facts/scans/diary-identity.json`, which the existing D1-owned key prefix `letterboxd/facts/scans/` already covers, so the ratings key set is unchanged; at most three source checks per step, only while at least 75 s of lease remain; a 403/429/challenge/timeout stops further requests in that step and backs the id off for two hours or more, a review reason for twelve hours or more, at most six attempts per id, then the id stays visible and is not requested again by a run; the read side (`GET /api/events`) presents a stored ratings event with the title of a bridged id and never rewrites the stored event.
 
 Invariants for any option: the rating fact and the Event never wait for the lookup; a title or year, a slug or the owner's statement is never identity proof (ADR 0104 stays export-only); no Film is admitted without a verified receipt; a conflict is never merged silently; no production writer, flag, Task, migration or manual run is authorized by this record.
 

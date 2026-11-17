@@ -614,5 +614,5 @@ const LetterboxdRatedCandidates = (() => {
     return {present: true, pending: counts.pending, admitting: counts.admitting, verified: counts.verified, needsReview: counts.needs_review, enrichmentPending, stopped: view.stopped, next: view.next, phase: view.phase, retryable, requeued};
   }
 
-  return {CANDIDATES, ADMISSIONS, registerCandidates, rollbackCandidates, retryCandidates, identityStep, readDoc, statusOf, PAGE_BYTES, DETAIL_BYTES};
+  return {CANDIDATES, ADMISSIONS, registerCandidates, rollbackCandidates, retryCandidates, identityStep, readDoc, statusOf, PAGE_BYTES, DETAIL_BYTES, follow, movieDetail};
 })();

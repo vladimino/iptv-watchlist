@@ -593,6 +593,65 @@ function recordRatingChange(record,incoming,effective){
   }
  }
 
+ // AIR-489 / ADR 0160 (option A). The Film bridge of a rated-only Diary id, written only after a verified source check
+ // (src/letterboxd-diary-identity.js). Reuses the receipt pattern of ADR 0105 and the alias protocol of linkFilm; nothing is merged.
+ const DIARY_IDENTITY_KEY=FACTS_PREFIX+'scans/diary-identity.json',DIARY_IDENTITY_CAP=200;
+ // The movie id each lid's record already carries, from the link index and the record (one read of the index, one per lid).
+ async function diaryLinks(env,lids){
+  const {value:index}=await readJSON(env,FACTS_KEYS.links),out=new Map();
+  for(const lid of lids||[]){
+   if(!LID.test(String(lid)))continue;
+   let key=index?.['letterboxd:'+lid]||null,tmdb=null;
+   if(key){const {value:record}=await readJSON(env,recordKey(key));tmdb=record?.links?.tmdb??null;}
+   out.set(lid,{factKey:key,tmdb:tmdb==null?null:String(tmdb)});
+  }
+  return out;
+ }
+ // The movie id of Letterboxd ids for the read side only (no write): lid -> tmdb string.
+ async function tmdbForLids(env,lids){
+  const out=new Map(),links=await diaryLinks(env,[...new Set(lids||[])]);
+  for(const [lid,item] of links)if(item.tmdb&&TMDB.test(item.tmdb))out.set(lid,item.tmdb);
+  return out;
+ }
+ // Links the movie id to the record that already holds the Letterboxd id (history kept) through the alias protocol, then projects it.
+ // A movie id already linked to another record is an alias_conflict: it is noted and nothing is joined.
+ async function bridgeDiaryFilm(env,{lid,tmdb}){
+  if(!LID.test(String(lid||''))||!TMDB.test(String(tmdb||'')))throw new FactsError('invalid_identity','Invalid Diary identity');
+  let factKey;
+  try{factKey=await linkFilm(env,{letterboxd:lid,tmdb:String(tmdb)});}
+  catch(error){if(error.code!=='alias_conflict')throw error;await noteConflict(env,{letterboxd:lid,tmdb:String(tmdb)},'alias_conflict');return {state:'conflict'};}
+  const {record}=await recordObservations(env,factKey,{letterboxd:lid,tmdb:String(tmdb)},[]);
+  if(String(record?.links?.tmdb)!==String(tmdb))return {state:'conflict'};
+  await projectRecords(env,[record]);
+  return {state:'linked',factKey};
+ }
+ // The receipt entry of a verified Diary identity. An entry that already holds the movie is kept; a code bound to another movie is a conflict.
+ async function admitDiaryFilm(env,item){
+  const key='tmdb_'+item.tmdb;let outcome='present';
+  await casJSON(env,ADMISSIONS_KEY,{schemaVersion:1,films:{}},current=>{
+   const films=current.films&&typeof current.films==='object'&&!Array.isArray(current.films)?current.films:(current.films={});
+   for(const other of Object.values(films))if(other&&other.sourceCode===item.lid&&String(other.tmdb)!==String(item.tmdb)){outcome='conflict';return null;}
+   if(films[key]){outcome=films[key].sourceCode===item.lid?'present':'other_code';return null;}
+   films[key]={tmdb:String(item.tmdb),sourceCode:item.lid,archiveSha256:item.evidenceSha256,title:item.title,year:item.year,filmPath:item.filmPath,verifiedAt:item.verifiedAt,identity:'diary_page'};
+   outcome='admitted';return current;
+  });
+  return outcome;
+ }
+ async function readAdmissionReceipts(env){return readJSON(env,ADMISSIONS_KEY);}
+ async function readDiaryIdentity(env){const {value}=await readJSON(env,DIARY_IDENTITY_KEY);return value&&value.schemaVersion===1&&value.films&&typeof value.films==='object'?value:{schemaVersion:1,films:{}};}
+ // set: {lid:{reason,attempts,lastAttemptAt,nextAttemptAt}}, clear: [lid]. Oldest attempts leave first above the cap.
+ async function updateDiaryIdentity(env,{set={},clear=[]}={}){
+  if(!Object.keys(set).length&&!clear.length)return {changed:false};
+  return casJSON(env,DIARY_IDENTITY_KEY,{schemaVersion:1,films:{}},current=>{
+   const films={...(current.films||{})};let changed=false;
+   for(const lid of clear)if(films[lid]){delete films[lid];changed=true;}
+   for(const [lid,item] of Object.entries(set)){if(!LID.test(lid))continue;if(JSON.stringify(films[lid])!==JSON.stringify(item)){films[lid]=item;changed=true;}}
+   const ids=Object.keys(films);
+   if(ids.length>DIARY_IDENTITY_CAP){ids.sort((a,b)=>String(films[a].lastAttemptAt||'')<String(films[b].lastAttemptAt||'')?-1:1);for(const id of ids.slice(0,ids.length-DIARY_IDENTITY_CAP)){delete films[id];changed=true;}}
+   return changed?{schemaVersion:1,films}:null;
+  });
+ }
+
  // Commit: intent (with the projection's before-image) before any write, idempotent fact writes, receipt after read-back.
  async function commitBaselineChunk(env,body){
   const {origin,chunk,items}=validateBaselineRequest(body),hash=await itemsHash(items),sha=origin.archiveSha256;
@@ -774,5 +833,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {FACTS_KEYS,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,DIARY_IDENTITY_KEY,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();

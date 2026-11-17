@@ -4,14 +4,13 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-| ADR | Status | Question |
-| --- | --- | --- |
-| [0160 — A rated-only Diary Letterboxd id gets its Film bridge from a bounded same-run source check](0160-diary-rated-only-identity-bridge.md) | **Proposed** 2026-11-17 | [AIR-489](https://trello.com/c/yZigGAVc): options A (recommended), B and C await an owner decision. No code until then. |
+No open proposals at this time.
 
 ## Accepted records
 
 | ADR | Status | Decision and evidence |
 | --- | --- | --- |
+| [0160 — A rated-only Diary Letterboxd id gets its Film bridge from a bounded same-run source check](0160-diary-rated-only-identity-bridge.md) | **Accepted** 2026-11-17 (owner chose option A on [AIR-489](https://trello.com/c/yZigGAVc); no production operation authorized) | After the Diary facts are durable, at most three unbridged ids per Ratings step are checked against their Letterboxd film page and TMDB movie; only a unanimous check admits the Film through the existing `applyRatedAdmissionRetention` and links `tmdb:<n>` through `linkFilm`. Unresolved ids stay pending (reason, retry time) in one bounded document, retried only by ordinary Ratings runs. No trusted `letterboxd` claim is written. |
 | [0158 — An EPG title is not a Film alias, and an alias confirms a catalog Film only with movie provenance](0158-epg-title-alias-provenance.md) | **Accepted** 2026-11-17 (owner decision on [AIR-503](https://trello.com/c/t9fZCHLQ): series titles are not trusted Film aliases; both rules accepted, no flag, no rollout phase; no stored alias, decision or show rewritten) | `touchCanonicalFilm` learns a new title key only from a `tmdb_detail` or `owner` observation; a catalog Film carries `movieTitles` from TMDB; `scanEPG` confirms a `catalogOnly` Film on a slot only by its title, original or `movieTitles`, else `alias_without_movie_provenance`. Narrows ADR 0151 decision 3 | [ADR 0151](0151-epg-known-film-title-collision.md), [ADR 0142](0142-epg-owned-generation-addressed-discovery-slots.md) |
 | [0159 — Detach the EPG diagnostic runtime from the production Worker](0159-detach-epg-diagnostic-runtime.md) | **Accepted** 2026-11-17 (owner approved [PR #714](https://github.com/vladimino/iptv-watchlist/pull/714) for merge/deploy; separate owner GO still required for resource deletion) | Removes the diagnostic bindings, var, `/api/epg/diagnostic/*` route and Workflow class from the Worker; keeps inert modules, ADR 0121/0124 and evidence; deprovisioning of the diagnostic D1, EU R2 and Workflow is a separate owner GO. Supersedes the deployment wiring of ADR 0121/0124 only. |
 | [0157 — Transferable staged batch items drained by the next run](0157-batch-candidate-hold-and-honest-complete.md) | **Accepted** 2026-11-17 ([AIR-510](https://trello.com/c/01JAM4TP); owner approved transferable recovery after independent TECHNICAL PASS on [PR #704](https://github.com/vladimino/iptv-watchlist/pull/704#pullrequestreview-5935955229)) | Validate stays pure. Hold writes a transferable stage bound to film input. Next `batch_start` drains it, filling cold work when staged hot is excluded. Live `external_termination` still releases the lease. |
