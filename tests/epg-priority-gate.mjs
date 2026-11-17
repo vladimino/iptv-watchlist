@@ -535,4 +535,30 @@ assert.equal(DISCOVERY_EPG_PRIORITY_POLL_MS,60000);
 }
 
 Date.now=realNow;
+// AIR-524 (ADR 0162). `readDiscoveryGates`, the read-only gate picture of the controlled Workflow rollover preflight, judges the pause and the window
+// exactly as the writers would, and writes nothing: no generation move, no row change.
+{
+ const {db}=armed();
+ const env=envFor(db);
+ at(D2,10,0);
+ const quiet=await Authority.readDiscoveryGates(env,clock);
+ assert.equal(quiet.priority.present,true);assert.equal(quiet.priority.paused,false);assert.equal(quiet.window.active,false);
+ at(D2,16,56);
+ const generationBefore=generation(db),rowBefore=row(db);
+ const paused=await Authority.readDiscoveryGates(env,clock);
+ assert.equal(paused.priority.paused,true);assert.equal(typeof paused.priority.nextCatchUpAt,'string');
+ assert.equal(generation(db),generationBefore,'the gate read moves no generation');assert.deepEqual(row(db),rowBefore,'the gate read writes no pause row');
+ await assert.rejects(Authority.writeWorkflow(env,{schemaVersion:1,instanceId:'i-new',programmeRunId:'run-1',series:1},undefined),error=>error.code==='discovery_epg_priority','the writer agrees with the read');
+ const {db:plain}=armed();
+ at(D2,10,0);
+ const plainEnv=envFor(plain);
+ assert.equal((await Authority.requestProjectorWindow(plainEnv,{owner:'p-gates',deadlineMs:Authority.WINDOW_DEADLINE_MS,now:clock})).outcome,'requested');
+ const held=await Authority.readDiscoveryGates(plainEnv,clock);
+ assert.equal(held.window.active,true);assert.ok(['requested','held'].includes(held.window.state));
+ const {db:absent}=migrated(21);
+ setPointer(absent,'run-1');
+ const inert=await Authority.readDiscoveryGates(envFor(absent),clock);
+ assert.equal(inert.priority.present,false);assert.equal(inert.priority.paused,false);assert.equal(inert.priority.reason,'inert');
+}
+
 console.log('epg priority gate ok');

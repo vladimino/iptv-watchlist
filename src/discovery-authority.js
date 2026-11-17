@@ -292,6 +292,25 @@ async function throwIfPriorityPaused(env,gate,error,context={}){
  throw Object.assign(priorityError(await priorityBusy(env,gate,decision,nowMs())),{cause:error});
 }
 
+// AIR-524 (ADR 0162). The two soft write gates of the controlled Workflow rollover preflight, read only: the projector window and the EPG-priority
+// pause, as the writers would judge them now. Absent tables are verified absence (`present: false`, open). It never writes and never throws a
+// window or priority refusal; an unreadable source answers `unknown`, which the preflight treats as fail-closed.
+export async function readDiscoveryGates(env,now=nowMs()){
+ const gate=await readAuthority(env);
+ const out={window:{present:gate.windowTable===true,state:'idle',active:false,expiresAt:null},priority:{present:gate.priorityTable===true,paused:false,reason:gate.priorityTable?null:'inert',nextCatchUpAt:null}};
+ if(gate.windowTable){
+  try{const window=await readProjectorWindow(env,now);out.window={present:true,state:window.state,active:window.active===true,expiresAt:window.expiresAt??null};}
+  catch{out.window={present:true,state:'unknown',active:null,expiresAt:null};}
+ }
+ if(gate.priorityTable){
+  try{
+   const decision=discoveryAdmission(await readPriorityFacts(env,now,{role:null,programmeRunId:gate.publishedProgrammeRunId??null}));
+   out.priority={present:true,paused:decision.reason==='epg_priority',reason:decision.reason,nextCatchUpAt:decision.nextCatchUpAt??null,unreadable:decision.admit!==true&&decision.reason!=='epg_priority'};
+  }catch{out.priority={present:true,paused:null,reason:'unknown',nextCatchUpAt:null};}
+ }
+ return out;
+}
+
 export async function readAuthority(env){
  const db=database(env);
  if(!db)return closed();

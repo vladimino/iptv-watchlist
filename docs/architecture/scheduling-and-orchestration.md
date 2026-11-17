@@ -384,6 +384,51 @@ The hourly cron calls `RatingsOrchestration.ensure` in the same `allSettled` as 
 
 A Discovery Workflow instance hands over to a successor at 20 chunks or when the D1 statements it has issued reach 6,000, whichever comes first, so no instance runs into the level at which two instances failed on 6 November 2026. The durable steps, the owner fence and the recovery are those of [ADR 0083](../adr/0083-inert-discovery-workflow.md); no diagram changes.
 
+## Controlled Discovery Workflow rollover ([ADR 0162](../adr/0162-controlled-discovery-workflow-rollover.md), Proposed)
+
+An instance keeps the Worker version it was created on until its own handover. The owner can move Discovery onto the deployed version earlier with the owner-only MCP tool `discovery_workflow_rollover` ([runbook](../runbooks/discovery-workflow-rollover.md)). It is never called by the cron, a Workflow schedule or a Scheduled Task. The only ownership change is one compare-and-swap of the executor record, admitted only while the owner sleeps durably; the old instance then fails its own owner gate when it wakes. A create that cannot be confirmed is recovered by the hourly reconcile under the same deterministic id.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Owner as Owner via /mcp (Access JWT)
+    participant Op as Rollover operator in the Worker
+    participant D1 as D1 executor record and gates
+    participant CF as Cloudflare Workflows
+    participant Old as Old instance (asleep)
+    participant New as Successor instance
+    participant Cron as Hourly reconcile
+
+    Owner->>Op: dry_run
+    Op->>D1: Read authority, published pin, record, continuation, lease, window, pause
+    Op->>CF: Read owner instance status
+    Op-->>Owner: eligible, already_current, unsafe or unknown, with expect pins
+    Note over Op,D1: dry_run writes nothing
+    Owner->>Op: apply with confirmGo, requestId and the expect pins
+    Op->>D1: Same reads again, pins and eligibility re-checked
+    alt Not eligible, stale pin or refused write
+        Op-->>Owner: Refusal, writes 0
+    else Eligible
+        Op->>D1: One CAS on the record revision: successor named, phase starting, report, outbox and receipt carried
+        Op->>CF: Create discovery_generation_series+1
+        alt Created or already exists
+            Op->>D1: Settle running while still starting for that id
+        else Create uncertain or failed
+            Op->>D1: Settle uncertain with the start recovery due time
+            Cron->>D1: When due, read the record
+            Cron->>CF: Create the same deterministic id
+        end
+        Op->>D1: Read back owner, checkpoint revision, recorded version
+        Op->>CF: Read back successor status
+        Op-->>Owner: Receipt: accepted, version confirmed or pending
+        New->>D1: First step records its own Worker version
+        Old->>D1: Wakes, owner gate reads another instance
+        Old-->>Old: Stops without a write
+    end
+```
+
+The sequence shows only the operator path. The natural handover, the step-failure recovery and the reconcile are unchanged. The diagram is not evidence that a live apply ran; each production `apply` needs its own owner approval.
+
 ## Discovery Workflow step-failure recovery ([ADR 0098](../adr/0098-discovery-workflow-step-failure-recovery.md), Accepted)
 
 An instance whose step fails after the platform's retries, with a recognised transient failure (the `discovery_unavailable` code or a transient class), arms the existing recovery once, sleeps durably until `recovery.dueAt` (60 s for the first failure, then 5 min, 15 min, 1 h; four, then quarantine) and, after re-checking owner, authority, pinned generation and mode, opens the deterministic successor through `ensureDiscoveryWorkflow`. The hourly cron remains the fallback and covers what this cannot: an instance killed by the platform, a failure of the arming step, and a `stopped` record without a live owner. No trigger, binding or cron changes; no diagram changes.
