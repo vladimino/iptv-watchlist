@@ -1,4 +1,4 @@
-// AIR-449: the proposed Predictions batch runner v2 Scheduled Task prompt, its dry-run prompt and the A/B contract. The files are documentation only (no live Task exists), so this test keeps honest:
+// AIR-449/AIR-451: the installed Predictions batch v2 Scheduled Task snapshot, its unchanged frozen dry-run prompt and the A/B contract. This offline test does not invoke the live registry or a model.
 // the stated lengths and SHA-256, the tool names the texts mention, the generation steps shared byte for byte by both prompts, the exact MCP calls (through the real MCP tool handler, offline),
 // the sample/result schema, the dry-run write freeze over group sizes 1 to 10, and the real partial-stop semantics of the bounded run. No model, network, production or Scheduled Task operation is involved.
 import fs from 'node:fs';
@@ -21,6 +21,25 @@ const sha=text=>createHash('sha256').update(text).digest('hex');
 const stated=doc.match(/\*\*Text below:\*\* (\d+) characters, SHA-256 `([0-9a-f]{64})`/),statedDry=doc.match(/\*\*Dry run text\*\*[^\n]*?: (\d+) characters, SHA-256 `([0-9a-f]{64})`/);
 assert.ok(stated&&statedDry,'headers state length and hash');
 assert.equal(prompt.length,Number(stated[1]));assert.equal(sha(prompt),stated[2]);
+// AIR-451: uniform installed Saved Task reports and human-readable minute-based registry titles.
+assert.equal(Buffer.byteLength(prompt,'utf8'),63331,'installed prompt UTF-8 byte count');
+assert.ok(!/RESEARCH AUDIT ДЛЯ PRODUCTION TASK A|для Production Task A/.test(prompt),'shared production research instructions must not depend on canary name');
+assert.ok(prompt.includes('3в. RESEARCH AUDIT ДЛЯ ВСЕХ BATCH V2 TASKS.')&&prompt.includes('3г. SOURCE SELECTION GATE / FULL-TEXT FALLBACK (для каждой batch v2 Task'),'all slots use identical research rules');
+const reportHeadings=['## Итог','## Прогнозы','## Ошибки','## Очередь','## Исследование'];
+const step11=prompt.slice(prompt.indexOf('11. После prediction_complete'));
+assert.ok(step11.includes('Строго соблюдай разделы и их порядок:'),'readable report section order must be constrained');
+for(let i=0;i<reportHeadings.length;i++)assert.ok(step11.indexOf(reportHeadings[i])>=0&&(i===0||step11.indexOf(reportHeadings[i])>step11.indexOf(reportHeadings[i-1])),'ordered report heading: '+reportHeadings[i]);
+for(const field of ['**Статус:**','**Выбрано/обработано:**','**Создано:**','**Пересчитано:**','**Ошибок:**','**Hot:**','**Cold:**','**Ожидают retry:**','**Исчерпали попытки:**','**Вывод:**','**Источники:**','**Поиск:**','**Причина gate:**','**Full-text fallback:**','**F/P/S:**'])assert.ok(step11.includes(field),'human-readable report field: '+field);
+assert.ok(!step11.includes('### Research audit')&&!step11.includes('readOriginalSources: <URL')&&step11.includes('Не используй таблицы, длинные audit-строки'),'no pipe-separated audit rows in rendered report');
+assert.ok(step11.includes('### Название (год)')&&step11.includes('[короткое имя](точный URL)'),'short source links in distinct film blocks');
+assert.ok(prompt.includes('отдельный визуальный audit-блок'),'audit keeps per-film provenance without single-line log output');
+assert.ok(step11.includes('ТОЛЬКО «## Итог»'),'noop report is compact');
+const operationalRef=fs.readFileSync('docs/reference/scheduled-tasks.md','utf8');
+assert.ok(operationalRef.includes('IPTV Predictions v2 00')&&operationalRef.includes('6af7a2d8369081918b79bb2892bac0fe'),'exact live registry title/id for minute 00');
+assert.ok(operationalRef.includes('IPTV Predictions v2 15')&&operationalRef.includes('6afaf2b2aed8819198eaff652f1fcb55'),'exact live registry title/id for minute 15');
+assert.ok(operationalRef.includes('IPTV Predictions v2 30')&&operationalRef.includes('Automation_c8e5b4cc89d08191b47e979b726a60a3'),'exact live registry title/id for minute 30');
+assert.ok(operationalRef.includes('IPTV Predictions v2 45')&&operationalRef.includes('Automation_d9436aec7d108191a3822a244e382592'),'exact live registry title/id for minute 45');
+
 assert.equal(dry.length,Number(statedDry[1]));assert.equal(sha(dry),statedDry[2]);
 
 // 2. The generation steps 4, 5 and 6 are byte-identical in both prompts: an A/B changes grouping only.
@@ -33,7 +52,8 @@ const step3b=text=>text.split('\n').filter(l=>l.startsWith('3б. '));
 assert.equal(step3b(prompt).length,1);assert.equal(step3b(dry).length,0,'the frozen A/B procedure does not inherit a new production-only research gate');
 for(const needle of ['ОБЯЗАТЕЛЬНО сделай ВТОРОЙ','OPEN — НЕ READ','concreteExecutionFinding','gateStatus=limited','gateStatus=blocked','временного аудита','НЕ поля fingerprint','search_snippet'])assert.ok(step3b(prompt)[0].includes(needle),'S5-C quality gate: '+needle);
 for(const needle of ['РУЧНУЮ проверку','rules.execution.fields','opposition_competence','НЕ strong','research.attempts','МАССИВ','sources[].usedFor','1–120 Unicode','prediction_batch_validate','Buffer, TextEncoder','НЕ заменяет','не прекращай весь run'])assert.ok(prompt.includes(needle),'production manual closed-schema guard: '+needle);
-for(const [name,value] of [['production',prompt],['A/B dry-run',dry]])assert.ok(!/\b(?:AIR-\d+|ADR[ -]?\d+|S5-C)\b/.test(value),name+' executable prompt must be free of historical ticket/decision IDs');
+const promptWithoutApprovedDecisionRef=prompt.replace('7а. DURABLE HOLD (ADR 0157, AIR-510).','7а. DURABLE HOLD.');
+for(const [name,value] of [['production',promptWithoutApprovedDecisionRef],['A/B dry-run',dry]])assert.ok(!/\b(?:AIR-\d+|ADR[ -]?\d+|S5-C)\b/.test(value),name+' executable prompt must not inherit unrelated historical ticket/decision IDs');
 assert.ok(/Для операций с IPTV используй ТОЛЬКО/.test(prompt)&&/для исследования фильмов используй доступные web search/i.test(prompt),'IPTV MCP boundary must allow independent film research');
 assert.ok(/не второй поисковый проход/i.test(prompt),'research gate must not duplicate the search budget');
 assert.ok(/search_snippet допустим БЕЗ прочтения страницы/.test(prompt)&&/source с access=search_snippet, даже если сама статья не открыта/.test(prompt),'a search snippet is a valid used source without a readable article, but does not count as read content');
@@ -42,8 +62,27 @@ for(const val of [prompt,dry])assert.ok(/attempted_found, но snippets сами
 assert.ok(!/другой v2 Task или ещё не выключенный legacy/.test(prompt),'scheduled prompt cannot assume historic enabled state');
 assert.ok(!/FROZEN_MANIFEST|tmdb_800815|5bd010a00102b73a9c8bd24ef67cb56ca17f86918aca7d4715de20752e5dca7e/.test(prompt),'production uses only the live batch manifest, never frozen S5-C test inputs');
 assert.ok(/prediction_batch_start\(\{trigger:'scheduled', manifestSize\}\)/.test(prompt),'production starts its own scheduled batch manifest');
+assert.ok(prompt.includes("prediction_batch_manifest({runId,part:'envelope'})")&&prompt.includes("prediction_batch_manifest({runId,part:'profile'})")&&prompt.includes("prediction_batch_manifest({runId,part:'contract'})")&&prompt.includes("prediction_batch_manifest({runId,part:'film',filmId})"),'owned-run fallback fetches individual manifest parts, not a second start');
+assert.ok(prompt.includes("неизвестен runId")||prompt.includes("отсутствии достоверного runId"),'fallback fails closed if run identity is lost');
 assert.ok(!/runId:['"]dry-run['"]|dryRun:true|\{\{FROZEN_MANIFEST\}\}/.test(prompt),'production never invokes dry-run transport or synthetic S5-C runId');
 assert.ok(/prediction_batch_submit\(\{runId,epoch,items\}\)/.test(prompt),'production submit uses the owned live runId and epoch');
+// AIR-510: observed external-termination only. A recovered manifest must proceed; an unrecoverable manifest read error is api_error.
+const reconstructionInstruction=prompt.split('\n').find(line=>line.startsWith('2а. Восстановление'));
+const stopInstruction=prompt.split('\n').find(line=>line.startsWith('10. Остановки'));
+assert.ok(reconstructionInstruction?.includes('После полного успешного восстановления ОБЯЗАТЕЛЬНО продолжай с шага 3'),'valid reconstruction cannot voluntarily stop');
+assert.ok(reconstructionInstruction?.includes("reason:'api_error'"),'owned failed readback reports an observed API failure');
+assert.ok(!reconstructionInstruction.includes("reason:'external_termination'"),'failed readback is not classified as external termination');
+assert.ok(stopInstruction?.includes('external_termination разрешён ТОЛЬКО при явном'),'external termination requires observed signal');
+assert.ok(stopInstruction?.includes('НЕЛЬЗЯ выбирать external_termination'),'voluntary early exit is forbidden');
+assert.ok(stopInstruction?.includes('ОБЯЗАТЕЛЬНО продолжай research→generation→preflight→hold→submit'),'research must continue with live owned manifest');
+assert.ok(stopInstruction?.includes('обычное истечение lease обеспечит recovery'),'true platform hard kill relies on lease expiry');
+assert.ok(prompt.includes('manifestSize=5')&&prompt.includes('generationSize=1')&&prompt.includes('submitBatchSize=5'),'batch params remain unchanged');
+// AIR-510 / ADR 0157: stage is durable and transferable, but hold is not itself commit.
+const holdInstruction=prompt.split('\n').find(line=>line.includes('7а. DURABLE HOLD (ADR 0157, AIR-510).'));
+assert.ok(holdInstruction,'the installed durable hold section is kept byte for byte');
+for(const needle of ['prediction_batch_hold({runId,epoch,items})',"status:'held'",'prediction_batch_submit({runId,epoch,useHeld:true})','failure-items никогда не передавай в hold','новый штатный prediction_batch_start автоматически сохранит','ДО успешного hold'])assert.ok(holdInstruction.includes(needle),'durable hold contract: '+needle);
+assert.ok(prompt.indexOf('prediction_batch_validate({items})')<prompt.indexOf('prediction_batch_hold({runId,epoch,items})')&&prompt.indexOf('prediction_batch_hold({runId,epoch,items})')<prompt.indexOf('ПОТОМ prediction_batch_submit({runId,epoch,items})'),'validate -> hold -> submit ordering');
+assert.ok(!dry.includes('prediction_batch_hold'),'frozen dry-run remains unchanged');
 assert.ok(/prediction_batch_submit\(\{runId:'dry-run',epoch:1,dryRun:true/.test(dry),'separate A/B template retains frozen dry-run submit');
 for(const needle of ['НЕ БОЛЕЕ 2 web search запросов','НЕ БОЛЕЕ 3 независимо написанных источников','Guardian, Letterboxd, Slant','3000 байт','research.status=not_attempted','search_snippet','attempted_found','НЕ внутри него'])assert.ok(step3a(prompt)[0].includes(needle),needle);
 for(const key of ['assessmentVersion','ratingBasis','probability4PlusBasis','tasteSignals','risks','uncertainties','research','sources','conflicts','model','usedFor','access','handling','stance','anchor','severity'])assert.ok(step3a(prompt)[0].includes(key),'step 3а names '+key);
@@ -59,6 +98,10 @@ assert.ok(prompt.includes('валидные индексы positions (повто
 assert.ok(prompt.includes('{filmId,fingerprint,prediction,assessment,metadata}')&&dry.includes('{filmId,fingerprint,prediction,assessment,metadata}'),'preflight items carry the assessment');
 for(const t of [prompt,dry])assert.ok(t.includes('assessment.sources ссылается на metadata:*')&&t.includes('prediction_only'),'a prediction_only preflight carries metadata when the assessment cites metadata tokens');
 assert.ok(/5\+5/.test(prompt)&&/5\+5/.test(dry),'both prompts split a group over 56 KiB in advance, generationSize independent of the call size');
+// The installed Task A uses the source-selection variant and preserves validated items across budget deferral.
+for(const needle of ['3г. SOURCE SELECTION GATE / FULL-TEXT FALLBACK','candidateOriginalUrls','attemptedOriginalUrls','untriedCandidates','source_duplicate','fullTextFallback=NOT_NEEDED'])assert.ok(prompt.includes(needle),'Task A research variant D: '+needle);
+for(const needle of ['После valid:true сохраняй точный submit-ready item','ИСХОДНЫЙ submit-ready item','не пересобирай заново fingerprint, prediction, assessment','Если исходный item потерян, изменён','СНАЧАЛА вызови prediction_batch_validate','Это не новый локальный валидатор'])assert.ok(prompt.includes(needle),'deferred_budget immutable item: '+needle);
+assert.ok(!prompt.includes('- deferred_budget: фильм не обработан из-за бюджета вызова; отправь его заново в следующей группе.'),'old ambiguous deferred_budget instruction removed');
 assert.ok(!/web search[^.]*доступен и подтверждён/i.test(prompt),'no confirmed Web Search availability claim');
 // Runtime batching: generationSize=1 accumulates to submitBatchSize=5; several independent v2 Tasks share the lease.
 assert.ok(/generationSize=1/.test(prompt)&&/submitBatchSize=5/.test(prompt)&&/накапливай до submitBatchSize/.test(prompt),'template accumulates generationSize=1 films to submitBatchSize');
@@ -72,7 +115,7 @@ const mcp=fs.readFileSync('src/mcp.js','utf8');
 const tools=new Set([...mcp.matchAll(/\{name:'([a-z_]+)',title:/g)].map(x=>x[1]));
 const calls=text=>new Set([...text.matchAll(/\b((?:prediction|enrichment|epg|ratings)_[a-z_]+)\(/g)].map(x=>x[1]));
 const forbiddenOf=text=>text.split('\n').find(l=>l.startsWith('ЗАПРЕЩЕНО:'));
-const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_validate','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_validate','prediction_batch_submit']);
+const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_manifest','prediction_batch_validate','prediction_batch_hold','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_validate','prediction_batch_submit']);
 for(const [text,allowed,forbidden] of [[prompt,SCHEDULED_ALLOWED,['prediction_start','prediction_next','prediction_submit','prediction_validate','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']],[dry,DRY_ALLOWED,['prediction_batch_start','prediction_start','prediction_next','prediction_submit','prediction_validate','prediction_heartbeat','prediction_complete','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']]]){
  const line=forbiddenOf(text);assert.ok(line,'forbidden list present');
  for(const t of forbidden){assert.ok(tools.has(t),t+' is a real tool');assert.ok(line.includes(t),t+' is forbidden');}
@@ -102,7 +145,7 @@ for(const [label,text] of [['scheduled',prompt],['dry run',dry]]){
  assert.ok(/failure:\{kind:'parse_error',reason,preflight\}/.test(step7)&&/preflight_validation_failed/.test(step7)&&/insufficient_evidence/.test(step7)&&/json_unparseable/.test(step7)&&/request_too_large/.test(step7)&&/максимум из 20 issues/.test(step7)&&/это твоё заявление, а не серверная телеметрия/i.test(step7),'the failure item carries the closed reason and the copied preflight issues, as a claim');
  assert.ok(!/повтори один раз как \{filmId,failure:\{kind:'parse_error'\}\}/.test(step7),'no kind-only fallback');
  assert.ok(/Не отправляй \{filmId,failure:\{kind:'parse_error'\}\} без reason/.test(step7)&&/Worker ответит 400/.test(step7),'a missing reason is a 400, not a retry as kind-only');
- assert.ok(/reason:'request_too_large'/.test(step7),'an oversized single film is reported with request_too_large');
+ assert.ok(/request_too_large \(фильм не помещается в запрос один\)/.test(step7),'an oversized single film is reported with request_too_large');
  assert.ok(!/остаются issues, отправь как/.test(prompt),'no unconditional legacy instruction remains');assert.ok(!/отправь существующий failure/.test(prompt),'3б no longer sends a legacy failure');
  assert.ok(/ОБЯЗАТЕЛЕН, даже когда первый дал казавшуюся содержательной статью/.test(step3b(prompt)[0])&&/третий поиск не разрешён/.test(step3b(prompt)[0]),'3б: second search mandatory within the two-search budget');
  assert.ok(/reason:'preflight_validation_failed'/.test(dry)&&/reason:'insufficient_evidence'/.test(dry),'the dry-run failure item carries a closed reason');
