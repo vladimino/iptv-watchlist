@@ -65,7 +65,7 @@ const PRODUCER_MUTANTS=[
  ['a non-atomic operation wires a producer',"spec.operation===kind&&spec.atomic===true","spec.operation===kind"],
  ['an unwired producer does not block',"for(const item of wiring)if(!item.requires.every(","for(const item of wiring)if(false&&!item.requires.every("],
  ['a producer is wired by one of its kinds',"item.requires.every(kind=>OPERATION_KINDS","item.requires.some(kind=>OPERATION_KINDS"],
- ['a producer no longer needs the person kind',"requires:Object.freeze(['film_mutation','person_mutation','film_metadata','film_dimension','film_sync_state','film_membership','person_state'])","requires:Object.freeze(['film_mutation','film_metadata','film_dimension','film_sync_state','film_membership','person_state'])"],
+ ['a producer no longer needs the person kind',"requires:Object.freeze(['film_facts','person_mutation','person_state','film_credits'])","requires:Object.freeze(['film_facts','person_state','film_credits'])"],
  ['the accepted class count is changed',"table:'film_rated_admission',expected:708","table:'film_rated_admission',expected:707"],
 ];
 // Each readiness mutant is first run against only the section of tests/canonical-handoff-readiness.mjs that should kill it (READINESS_ONLY). A mutant the hinted section does
