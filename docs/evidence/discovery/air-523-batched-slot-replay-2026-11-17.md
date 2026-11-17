@@ -42,6 +42,17 @@ The review at that head (technical block) found three defects, all fixed and eac
 - **Deadline bypass.** The first write group was exempt from the stop check, so slow reads could use the 10 s slice and a batch still started. The check now precedes the page's counts and every group, the first included; case 7 expires the slice after the free-slot read and at the count and asserts no batch starts and the cursor stays.
 - **Cursor across generations.** `replayAfter` is used only when the stored status names the same programme run (case 23 in `tests/discovery-chunk-budget.mjs`).
 
+## Natural-run observation after delivery (17 Nov 2026, Europe/Madrid, UTC in parentheses; read-only)
+
+The fix merged at 20:55 (19:55 UTC) and the Worker deployed at 20:57 (19:57 UTC), Workflow version `b717b626`. The Discovery instance `discovery_ae4c4209…_0` had been created before the deploy and kept running on the previous version `26dc54da` (its chunks stored no `replayMs`). At its 20th chunk it rolled over by itself: `…_1`, created 21:18:29 (20:18:29 UTC), version `b717b626`, `…_0` complete. No restart, retry, lease reset or Workflow mutation was performed.
+
+| Observation | Value |
+| --- | --- |
+| Assigned `basis='discovery'` rows, published run `ae4c4209…` | 28 at review, 482 at 21:15 (20:15 UTC), 953 at 21:27 (20:27 UTC); 8 532 verified observations |
+| Last chunk of `…_1`, finished 21:25:55 (20:25:55 UTC) | `assignment.assigned=189`, `bulkObservations=80`, `bulkPages=2`, `bulkGuardSkipped=0`, `bulkComplete=false`, `timings.replayMs=5752`, `error=wall_budget`, retry +5 min |
+
+The replay works in production and the guards skip nothing. The rate was about 39 rows a minute: a chunk restored about 190 rows and was then backed off for five minutes because no TMDB request fit after it, which would take 6 to 7 hours for about 16 600 rows. The series back-off is now skipped while the replay makes progress and has more to restore (case 24 in `tests/discovery-chunk-budget.mjs`: no `wall_budget` and no retry time with a modelled 9 s write batch; the back-off is unchanged without replay progress, shown by the same case and by mutating the condition away).
+
 ## Limits and verdict
 
 Sqlite stand-ins, a fake clock and a modelled write cost; no live D1 latency. The 10-second slice is sized from the 16 Nov measurement of 2.8 s as the worst observed batch; at lower latency a hop restores far more rows. **Offline GO.** Acceptance remains: after merge and deploy, a natural Discovery chunk raises the assigned-row count of the published run toward the verified count (aggregate read-only `SELECT`), and the owner accepts Finds. Deployment alone does not restore the catalog; no manual retry or lease reset is authorized.
