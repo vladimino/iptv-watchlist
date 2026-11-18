@@ -14,6 +14,8 @@ import * as PublishedEpgModule from '../src/published-epg.js';
 import {sqliteSync} from './sqlite-session.mjs';
 
 // ---- 1. readFilmAdmission against a real schema (sqlite stand-in) ----
+// ADR 0162: a ratings marker that is not d1/open is refused, so the full-chain fixtures serve the (empty) ratings domain from D1.
+const RATINGS_D1="\nUPDATE ratings_domain_authority SET mode='d1', cutover='open' WHERE id=1;";
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-catalog-film-'));
 let databases=0;const seen=[];
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=11).sort();
@@ -358,7 +360,7 @@ r=await ask(fake({marker:OPEN,external:own,admissions:[{...adm,tmdb:'301'}]}));a
  vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
  const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
- const base=path.join(root,'retained-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ const base=path.join(root,'retained-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+RATINGS_D1);
  const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
  const OPEN=VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";
  const HELD=OPEN+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;";
@@ -443,7 +445,7 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
  vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
  const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
- const base=path.join(root,'alias-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ const base=path.join(root,'alias-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+RATINGS_D1);
  const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
  const OPEN=VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";
  const T='2026-11-14T00:00:00.000Z',q=value=>"'"+String(value).replace(/'/g,"''")+"'";
@@ -460,7 +462,12 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
  // The R2 view index as production has it: the TMDB spellings hold only watchlist facts, the lids hold the forecasts, the ratings and the watched marks.
  records.set(indexKey,{tmdb_1423191:{watchlist:true},tmdb_22004:{watchlist:true},tmdb_1272837:{watchlist:true},
   SEXE:{...stored(),actualRating:4.5,watched:true},'1BbQ':{...stored({tasteProfileHash:'old'}),actualRating:3.5,watched:true},MwlA:{...stored(),watched:true},LID10750:{...stored(),actualRating:2,watched:true}});
- const db=mount(OPEN);statements.length=0;
+ // ADR 0162: ratings are D1 (d1/open), so the watched marks, ratings and watchlist facts of the view come from ratings_view, as in
+ // production; the R2 view index keeps only the forecasts. These rows mirror the facts above.
+ const view=(alias,fact,{watched=null,rating,watchlist=null}={})=>`INSERT INTO ratings_view (alias_id,fact_key,watched,actual_rating,watchlist,rating_known,updated_at) VALUES ('${alias}','${fact}',${watched===null?'NULL':watched?1:0},${rating===undefined?'NULL':rating},${watchlist===null?'NULL':watchlist?1:0},${rating===undefined?0:1},'${T}');`;
+ const RATINGS=view('SEXE','lb-sexe',{watched:true,rating:4.5})+view('1BbQ','lb-1bbq',{watched:true,rating:3.5})+view('MwlA','lb-mwla',{watched:true})+view('LID10750','lb-10750',{watched:true,rating:2})
+  +view('tmdb_1423191','lb-sexe',{watchlist:true})+view('tmdb_22004','lb-1bbq',{watchlist:true})+view('tmdb_1272837','lb-mwla',{watchlist:true});
+ const db=mount(OPEN+RATINGS);statements.length=0;
  let r=await ask(db,'1423191');assert.equal(r.status,200,JSON.stringify(r.body));
  assert.deepEqual([r.body.film.actualRating,r.body.film.watched,r.body.film.prediction.predictedRating,r.body.film.prediction.compatibility,r.body.film.prediction.stale],[4.5,true,4.5,'current',undefined],'SEXE: rating, watched mark and the current forecast, reached through the verified lid');
  assert.deepEqual(r.body.film.fingerprint.plotMechanics,['investigation'],'the stored fingerprint is shown');assert.equal(r.body.film.prediction.tasteProfileVersion,1);assert.equal(r.body.degraded,undefined);
@@ -474,6 +481,9 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
  r=await ask(prepared,'1423191');assert.equal(r.status,404,'below open the canonical Film is not read at all (unchanged)');
  // A held marker keeps failing closed (503), with no alias read.
  const held=mount(OPEN+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;");r=await ask(held,'1423191');assert.deepEqual([r.status,r.body.reason],[503,'film_person_held']);
+ // ADR 0162 (review of #742): a held ratings cutover is a 503, never the stale rating and watched mark of the R2 view index above.
+ const ratingsHeld=mount(OPEN+RATINGS+"UPDATE ratings_domain_authority SET cutover='held' WHERE id=1;");r=await ask(ratingsHeld,'1423191');
+ assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable','ratings_domain_not_authoritative'],'a held ratings cutover refuses the page: '+JSON.stringify(r.body));
 }
 
 // ---- 3h. AIR-475 review of the acceptance fix: with Film/Person, Ratings and Predictions ALL d1/open, the page shows the D1 forecast, fingerprint, rating and watched mark of the verified lid even when
@@ -482,7 +492,7 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
  vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
  const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
- const base=path.join(root,'domains-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ const base=path.join(root,'domains-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+RATINGS_D1);
  const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
  const OPEN=VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";
  const DOMAINS="UPDATE prediction_domain_authority SET mode='d1' WHERE id=1;UPDATE ratings_domain_authority SET mode='d1',cutover='open' WHERE id=1;";

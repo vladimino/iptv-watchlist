@@ -1,25 +1,19 @@
 #!/usr/bin/env node
-// Production entry for the ratings cutover (ADR 0084). Default is read-only.
+// Production entry for the ratings domain schema (ADR 0084). Default is read-only status.
 // --apply sends only migrations/0010_ratings_authority.sql, and only when the
 // contract is a complete version 8 or 9 and the ratings tables are absent.
-// The inserted marker stays mode r2, cutover open, and the version becomes 10.
-// Owner reviews are not required. --load copies the mutable ratings objects
-// and leaves mode r2. --activate holds mode d1 only with --producers-drained,
-// re-reads R2, and opens the cutover when the bytes still match. A mismatch
-// returns mode to r2 and does not write R2. A failed re-read leaves the hold.
-// --revert --confirm r2 copies the D1 documents back to R2 and then sets mode r2
-// only while the generation is still the copied snapshot. A D1 write in between
-// leaves the marker at d1. While mode is d1 the ratings lease is read from D1.
-// Each write needs its own --confirm and --target iptv. This script does not
-// call Time Travel restore and does not start a ratings run.
+// The inserted marker is mode r2, cutover open, and the version becomes 10.
+// The cutover and rollback commands --load, --activate, --release-hold,
+// --seal-hold and --revert are retired (ADR 0162) and refused with `retired`
+// before any request. The write needs its own --confirm and --target iptv.
+// This script does not call Time Travel restore and does not start a ratings run.
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
-import {createHash} from 'node:crypto';
-import {activateDocuments, importDocuments, listDocuments, ratingsMutableKey, ratingsRunActivity, readRatingsRun, releaseHeld, revertMarker, sealHeld} from '../src/ratings-d1.js';
+import {ratingsMutableKey, ratingsRunActivity, readRatingsRun} from '../src/ratings-d1.js';
 import {createD1Adapter, D1Error, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {ExportError} from './migration-export.mjs';
-import {createReadOnlyClient, readCredentials, rfc3986, signRequest} from './r2-snapshot-export.mjs';
+import {createReadOnlyClient, readCredentials} from './r2-snapshot-export.mjs';
 
 export const PRODUCTION_ACCOUNT_ID='8d9331889a693d328ef306692adf9d24';
 export const PRODUCTION_DATABASE_ID='3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb';
@@ -92,6 +86,7 @@ function parseArgs(argv){
  const commands=['--apply','--load','--activate','--revert','--release-hold','--seal-hold'].filter(flag=>args.includes(flag));
  if(commands.length>1)throw new OperatorStop('usage',2);
  const command=commands[0]||'status';
+ if(command!=='status'&&command!=='--apply')throw new OperatorStop('retired',2);
  const target=args.includes('--target')?args[args.indexOf('--target')+1]:undefined;
  const confirm=args.includes('--confirm')?args[args.indexOf('--confirm')+1]:undefined;
  if((args.includes('--target')&&!target)||(args.includes('--confirm')&&!confirm))throw new OperatorStop('usage',2);
@@ -129,25 +124,6 @@ async function readText(client,key){
  if(!got)return null;
  const text=Buffer.from(await new Response(got.body).arrayBuffer()).toString('utf8');
  return {key,text};
-}
-async function readDomain(client){
- const documents=[];
- for(const key of await listWanted(client)){
-  const item=await readText(client,key);
-  if(item)documents.push(item);
- }
- return documents;
-}
-async function putDocument(credentials,fetchImpl,key,text){
- if(!ratingsMutableKey(key))throw new OperatorStop('mirror_refused',3);
- if(credentials.endpoint!==PRODUCTION_R2_ENDPOINT||credentials.endpointOverride)throw new OperatorStop('endpoint_refused',3);
- const url=new URL(credentials.endpoint);
- url.pathname='/'+rfc3986(credentials.bucket)+'/'+key.split('/').map(rfc3986).join('/');
- const payloadHash=createHash('sha256').update(text).digest('hex');
- const headers=signRequest({method:'PUT',url,headers:{'content-type':'application/json'},payloadHash,credentials,now:new Date()});
- const response=await fetchImpl(url,{method:'PUT',headers,body:text,redirect:'error'});
- if(!response.ok){await response.body?.cancel();throw new OperatorStop('mirror_failed',3,{key});}
- await response.body?.cancel();
 }
 
 async function writerReport(client,binding,now,marker){
@@ -218,42 +194,7 @@ export async function runRatingsProduction({argv=process.argv,env=process.env,fe
   if(readback.schemaVersion!==10||readback.marker?.mode!=='r2'||readback.marker?.cutover!=='open'||readback.marker?.generation!==0)throw new OperatorStop('readback_mismatch',3);
   return {operation:'apply',writes:true,writeState:'committed',schemaVersion:10,mode:'r2',generation:0};
  }
- if(args.command==='--load'){
-  const documents=await readDomain(client);
-  const imported=await importDocuments(binding,documents,{confirm:'load'});
-  return {operation:'load',writes:true,writeState:'committed',mode:imported.mode,generation:imported.generation,documents:imported.documents};
- }
- if(args.command==='--activate'){
-  const documents=await readDomain(client);
-  let held;
-  try{held=await activateDocuments(binding,documents,{confirm:'activate'});}
-  catch(error){throw normalize(error);}
-  let fresh;
-  try{fresh=await readDomain(client);}catch(error){throw new OperatorStop('hold_reread_failed',4,{generation:held.generation,cause:error?.reason||error?.code||'read_failed'});}
-  const same=fresh.length===documents.length&&fresh.every(item=>documents.find(stored=>stored.key===item.key&&stored.text===item.text));
-  if(!same){await releaseHeld(binding,{confirm:'release-hold'});throw new OperatorStop('cutover_race',3);}
-  const sealed=await sealHeld(binding,{confirm:'seal-hold',generation:held.generation});
-  return {operation:'activate',writes:true,writeState:'committed',mode:sealed.mode,cutover:sealed.cutover,generation:sealed.generation};
- }
- if(args.command==='--release-hold'){
-  const released=await releaseHeld(binding,{confirm:'release-hold'});
-  return {operation:'release-hold',writes:true,writeState:'committed',mode:released.mode,cutover:released.cutover,generation:released.generation};
- }
- if(args.command==='--seal-hold'){
-  const documents=await readDomain(client);
-  const stored=await listDocuments(binding);
-  const same=stored.documents.length===documents.length&&stored.documents.every(item=>documents.find(fresh=>fresh.key===item.key&&fresh.text===item.text));
-  if(!same)throw new OperatorStop('ratings_domain_fence',3);
-  const sealed=await sealHeld(binding,{confirm:'seal-hold',generation:stored.generation});
-  return {operation:'seal-hold',writes:true,writeState:'committed',mode:sealed.mode,cutover:sealed.cutover};
- }
- const stored=await listDocuments(binding);
- if(stored.mode!=='d1'||stored.cutover!=='open')throw new OperatorStop('ratings_domain_not_authoritative',3);
- for(const item of stored.documents)await putDocument(credentials,fetchImpl,item.key,item.text);
- let reverted;
- try{reverted=await revertMarker(binding,{confirm:'r2',generation:stored.generation});}
- catch(error){throw normalize(error);}
- return {operation:'revert',writes:true,writeState:'committed',mode:reverted.mode,cutover:reverted.cutover,generation:reverted.generation,documents:stored.documents.length};
+ throw new OperatorStop('usage',2);
 }
 
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){

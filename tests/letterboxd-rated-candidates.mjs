@@ -273,7 +273,7 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   assert.equal(await one('Old1', 'Invented Alpha', 'movie', '1'), 'ledger_candidate_differs');
 }
 
-// 3. An open ratings marker is the fact the preview compares. R2 is not a fallback. A held marker stays on R2.
+// 3. An open ratings marker is the fact the preview compares. R2 is not a fallback, and a held marker is refused (ADR 0162).
 {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'iptv-air-340-'));
   const file = path.join(root, 'ratings.sqlite');
@@ -313,9 +313,11 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   resetCache(); calls = [];
   const held = await preview(bytes);
   assert.equal(held.status, 200, JSON.stringify(held.body));
-  const heldRow = held.body.details.updates.rows.find(row => row.code === 'aa') || held.body.details.adds.rows.find(row => row.code === 'aa');
-  assert.equal(heldRow.outcomes.rating, 'replaces', 'a held marker keeps the R2 fact');
-  assert.ok(calls.some(call => call === 'get:' + Facts.recordKey('tmdb-55')));
+  // ADR 0162: a held marker is not authority and is not a reason to read the stale R2 fact; the row cannot be compared.
+  const heldRow = held.body.details.unverified.rows.find(row => row.code === 'aa');
+  assert.deepEqual([heldRow.held, heldRow.outcomes.rating], ['links_unavailable', 'unverified'], 'a held marker leaves the row unverified');
+  assert.equal(calls.some(call => call === 'get:' + Facts.recordKey('tmdb-55')), false, 'a held marker does not read the R2 fact');
+  assert.ok(held.body.consistency.changed.includes('ratings_domain_unavailable'), 'a held marker is reported as an unavailable ratings domain');
 
   db.sql('DROP TABLE ratings_view');
   db.sql("UPDATE ratings_domain_authority SET mode='d1', cutover='open'");
@@ -1001,4 +1003,4 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   assert.equal(notQueued.status, 409, 'a needs_review code is not stepped by name');
 }
 
-console.log('Rated archive candidates: preview is local, a commit keeps the code, a stop waits, a verified movie is not a watchlist fact, D1 wins only while open');
+console.log('Rated archive candidates: preview is local, a commit keeps the code, a stop waits, a verified movie is not a watchlist fact, D1 wins only while open, a held marker is refused');

@@ -1,4 +1,5 @@
-// ADR 0084. D1 owns Letterboxd ratings only after its own marker is d1 and cutover open.
+// ADR 0084, ADR 0162. D1 owns Letterboxd ratings and serves them only while its marker is d1 with cutover open; a marker in
+// mode r2, a held cutover or a missing domain with RATINGS_DB_REQUIRED=on is refused, never read from R2.
 // Counts below are fixtures. Nothing here calls Cloudflare.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -7,9 +8,9 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import * as RatingsD1 from '../src/ratings-d1.js';
-import {activateDocuments, casOwned, importDocuments, listDocuments, overlayView, projectView, putOwned, readOwned, readRatingsAuthority, readRatingsRun, ratingsRunActivity, releaseHeld, revertMarker, routeRead, sealHeld} from '../src/ratings-d1.js';
+import {casOwned, listDocuments, overlayView, viewItems, projectView, putOwned, readOwned, readRatingsAuthority, readRatingsRun, ratingsRunActivity, routeRead} from '../src/ratings-d1.js';
 import {d1Standin} from './d1-standin.mjs';
-import {applyDecision, ratingsStatements} from '../scripts/ratings-domain-production.mjs';
+import {applyDecision, ratingsStatements, runRatingsProduction} from '../scripts/ratings-domain-production.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-ratings-d1-'));
 let databases=0;
@@ -70,7 +71,7 @@ assert.equal(one(after,'SELECT version FROM schema_contract'),10);
 assert.equal(one(after,"SELECT COUNT(*) FROM sqlite_master WHERE name='owner_review_authority'"),0);
 assert.equal(one(after,"SELECT mode FROM ratings_domain_authority"),'r2');
 
-assert.equal((await readRatingsAuthority(v8,{})).ready,false);
+await assert.rejects(readRatingsAuthority(v8,{}),error=>error.code==='ratings_domain_unavailable','the inserted r2 marker is refused (ADR 0162)');
 assert.equal((await readRatingsAuthority(load(chainNames),{})).mode,'r2');
 await assert.rejects(readRatingsAuthority(null,{RATINGS_DB_REQUIRED:'on'}),error=>error.code==='ratings_domain_unavailable');
 assert.equal((await readRatingsAuthority(null,{})).ready,false);
@@ -98,37 +99,53 @@ const docs=[{key:'letterboxd/facts/films/lb-abc.json',text:filmText},{key:'lette
 {
  const db=load(chainNames);
  db.sql(fs.readFileSync('migrations/0010_ratings_authority.sql','utf8'));
- const imported=await importDocuments({DB:db},docs,{confirm:'load'});
- assert.equal(imported.mode,'r2');
- assert.equal(imported.documents,3);
+ const env={DB:db};
+ // The migration inserts mode r2: refused, not an R2 fallback (ADR 0162).
+ await assert.rejects(routeRead(env,'letterboxd/facts/films/lb-abc.json'),error=>error.code==='ratings_domain_unavailable');
+ await assert.rejects(putOwned(env,'letterboxd/facts/links.json',null,{}),error=>error.code==='ratings_domain_unavailable');
+ // A held cutover is not authority for readers or writers.
+ db.sql("UPDATE ratings_domain_authority SET mode='d1', cutover='held'");
+ await assert.rejects(routeRead(env,'letterboxd/facts/films/lb-abc.json'),error=>error.code==='ratings_domain_not_authoritative');
+ await assert.rejects(casOwned(env,'letterboxd/ratings/run.json',{},()=>({schemaVersion:1})),error=>error.code==='ratings_domain_not_authoritative');
+ // Open: the documents are written by the normal writers (the import tooling is retired) and the view is projected in the same batch.
+ db.sql("UPDATE ratings_domain_authority SET cutover='open'");
+ assert.ok((await putOwned(env,'letterboxd/facts/links.json',null,JSON.parse(linksText))).saved);
+ assert.ok((await putOwned(env,'enrichment/removal-rating-lookups.json',null,JSON.parse(queueText))).saved);
+ assert.equal((await casOwned(env,'letterboxd/facts/films/lb-abc.json',{},()=>JSON.parse(filmText))).result.changed,true);
  assert.equal(one(db,"SELECT watched FROM ratings_view WHERE alias_id='abc'"),1);
  assert.equal(one(db,"SELECT actual_rating FROM ratings_view WHERE alias_id='tmdb_5'"),null);
  assert.equal(one(db,"SELECT rating_known FROM ratings_view WHERE alias_id='tmdb_5'"),1);
- assert.equal((await routeRead({DB:db},'letterboxd/facts/films/lb-abc.json')).handled,false);
- const held=await activateDocuments({DB:db},docs,{confirm:'activate'});
- assert.equal(held.mode,'d1');
- assert.equal(held.cutover,'held');
- assert.equal((await routeRead({DB:db},'letterboxd/facts/films/lb-abc.json')).handled,false);
- await assert.rejects(casOwned({DB:db},'letterboxd/ratings/run.json',{},()=>({schemaVersion:1})),error=>error.code==='ratings_domain_not_authoritative');
- const released=await releaseHeld({DB:db},{confirm:'release-hold'});
- assert.equal(released.mode,'r2');
- const again=await activateDocuments({DB:db},docs,{confirm:'activate'});
- const sealed=await sealHeld({DB:db},{confirm:'seal-hold',generation:again.generation});
- assert.equal(sealed.ready,true);
- const routed=await routeRead({DB:db},'letterboxd/facts/films/lb-abc.json');
+ const routed=await routeRead(env,'letterboxd/facts/films/lb-abc.json');
  assert.equal(routed.handled,true);
  assert.equal(routed.value.ratingHistory.length,2);
  const store=bucket();
  store.records.set('letterboxd/facts/films/lb-abc.json',{rating:{value:1}});
  const hidden=await routeRead({DB:db,BUCKET:store},'letterboxd/facts/films/lb-abc.json');
  assert.equal(hidden.value.rating.value,null);
- const overlaid=await overlayView({DB:db},{abc:{actualRating:9,watched:false,prediction:{predictedRating:3}},other:{fingerprint:{fingerprintHash:'h'}}});
+ const overlaid=await overlayView(env,{abc:{actualRating:9,watched:false,prediction:{predictedRating:3}},other:{fingerprint:{fingerprintHash:'h'}}});
  assert.equal(overlaid.abc.actualRating,null);
  assert.equal(overlaid.abc.watched,true);
  assert.equal(overlaid.abc.prediction.predictedRating,3);
  assert.equal(overlaid.other.actualRating,undefined);
  assert.equal(overlaid.tmdb_5.watched,true);
- const queue=await readOwned({DB:db},'enrichment/removal-rating-lookups.json');
+ // ADR 0162 (review of #742): the view overlays refuse a held cutover or an r2 marker instead of returning the stale R2 facts they were given.
+ const stale={abc:{actualRating:5,watched:false,watchlist:true}};
+ db.sql("UPDATE ratings_domain_authority SET cutover='held'");
+ await assert.rejects(overlayView(env,structuredClone(stale)),error=>error.code==='ratings_domain_not_authoritative','a held cutover does not serve the R2 view index');
+ await assert.rejects(viewItems(env,['abc'],structuredClone(stale)),error=>error.code==='ratings_domain_not_authoritative','a held cutover does not serve the R2 view facts');
+ db.sql("UPDATE ratings_domain_authority SET mode='r2', cutover='open'");
+ await assert.rejects(overlayView(env,structuredClone(stale)),error=>error.code==='ratings_domain_unavailable');
+ await assert.rejects(viewItems(env,['abc'],structuredClone(stale)),error=>error.code==='ratings_domain_unavailable');
+ db.sql("UPDATE ratings_domain_authority SET mode='d1', cutover='open'");
+ const served=(await viewItems(env,['abc'],structuredClone(stale))).abc;
+ assert.deepEqual([served.actualRating,served.watched],[null,true],'open: the D1 view replaces the stale R2 rating and mark');
+ // The uninstalled local domain (no binding, or no ratings tables without RATINGS_DB_REQUIRED) keeps its input; production refuses it.
+ assert.deepEqual(await overlayView({},structuredClone(stale)),stale);
+ assert.deepEqual(await viewItems({},['abc'],structuredClone(stale)),stale);
+ const bare=load(chainNames);
+ assert.deepEqual(await overlayView({DB:bare},structuredClone(stale)),stale);
+ await assert.rejects(viewItems({DB:bare,RATINGS_DB_REQUIRED:'on'},['abc'],structuredClone(stale)),error=>error.code==='ratings_domain_unavailable');
+ const queue=await readOwned(env,'enrichment/removal-rating-lookups.json');
  assert.equal(queue.value.films.abc.refs[0].resolved,false);
  assert.equal(queue.value.films.abc.watched,undefined);
 }
@@ -173,10 +190,9 @@ const docs=[{key:'letterboxd/facts/films/lb-abc.json',text:filmText},{key:'lette
  const outside=await overlayView(env,{});
  assert.equal(outside.out.watched,true);
  assert.equal(outside.out.actualRating,null);
- const open=await readRatingsAuthority(db,env);
- const reverted=await revertMarker(env,{confirm:'r2',generation:open.generation});
- assert.equal(reverted.mode,'r2');
- assert.equal((await routeRead(env,'letterboxd/ratings/run.json')).handled,false);
+ // A marker put back to r2 (for example by a restore) is refused; nothing is read from R2 (ADR 0162).
+ db.sql("UPDATE ratings_domain_authority SET mode='r2'");
+ await assert.rejects(routeRead(env,'letterboxd/ratings/run.json'),error=>error.code==='ratings_domain_unavailable');
 }
 
 {
@@ -198,7 +214,6 @@ const docs=[{key:'letterboxd/facts/films/lb-abc.json',text:filmText},{key:'lette
  assert.equal(copied.mode,'d1');
  const raced=await putOwned(env,'letterboxd/ratings/run.json',running.saved.etag,{schemaVersion:1,state:'running',lease:{step:'step-2',expiresAt},checkpoint:{diaryPagesRead:2}});
  assert.ok(raced.saved);
- await assert.rejects(revertMarker(env,{confirm:'r2',generation:copied.generation}),error=>error.code==='ratings_domain_fence');
  const still=await readRatingsAuthority(db,env);
  assert.equal(still.mode,'d1');
  assert.equal(still.cutover,'open');
@@ -252,8 +267,11 @@ const docs=[{key:'letterboxd/facts/films/lb-abc.json',text:filmText},{key:'lette
 }
 
 {
+ // With RATINGS_DB_REQUIRED=on (production) a database without the ratings tables is refused; without it the domain is not
+ // installed and callers keep the R2 objects (the local stand-in).
  const db=load(chainNames);
- db.sql(fs.readFileSync('migrations/0010_ratings_authority.sql','utf8'));
- await assert.rejects(sealHeld({DB:db},{confirm:'seal-hold',generation:0}),error=>error.code==='ratings_domain_not_ready');
- await assert.rejects(importDocuments({DB:db},docs,{}),error=>error.code==='ratings_domain_not_confirmed');
+ await assert.rejects(readOwned({DB:db,RATINGS_DB_REQUIRED:'on'},'letterboxd/facts/links.json'),error=>error.code==='ratings_domain_unavailable');
+ assert.deepEqual(await readOwned({DB:db},'letterboxd/facts/links.json'),{owned:false});
+ assert.equal(fs.existsSync('scripts/ratings-domain-production.mjs'),true,'the production entry keeps status and schema apply');
+ for(const command of ['--load','--activate','--revert','--release-hold','--seal-hold'])await assert.rejects(runRatingsProduction({argv:['node','x',command,'--target','iptv','--confirm','x'],env:{},fetchImpl(){throw new Error('called');}}),error=>error.reason==='retired',command);
 }
