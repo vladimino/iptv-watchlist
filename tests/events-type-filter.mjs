@@ -108,7 +108,7 @@ const win = {
 // The archive: a chain of pages, newest first, linked by cursors. A page is served when its gate (if any) is released; a request is aborted through its signal.
 let archive = {}, requests = [], inFlight = 0, maxInFlight = 0, failures = new Set(), gates = new Map();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const context = vm.createContext({Date, Intl, URL, URLSearchParams, Set, Map, JSON, console, document, window: win, setTimeout, AbortController,
+const context = vm.createContext({Date, Intl, URL, URLSearchParams, Set, Map, JSON, console, document, window: win, setTimeout, AbortController, IntersectionObserver: class {observe() {} unobserve() {} disconnect() {}},
   sessionStorage: {getItem: () => null, setItem() {}}, localStorage: {getItem: () => null, setItem() {}},
   fetch: (url, options = {}) => new Promise((resolve, reject) => {
     const cursor = new URL(String(url), 'https://iptv.example').searchParams.get('cursor') || 'first';
@@ -143,7 +143,7 @@ const settle = async () => {await sleep(0); for (let i = 0; i < 600 && (run('eve
 const reset = async (pages, first = 'first') => {
   run('cancelEventSearch()');
   archive = pages; requests = []; inFlight = 0; maxInFlight = 0; failures = new Set(); gates = new Map(); tick = 0;
-  run("loadedEvents.clear();eventCursor=null;eventsReady=false;eventTypeFilterId='all';activityNote='Загружаем события…'");
+  run("loadedEvents.clear();eventCursor=null;eventsReady=false;eventTypeFilterId='all';activityNote='Загружаем события…';eventPaging.error=null;eventPaging.stuck=false;eventPaging.seen.clear()");
   win.history.replaceState(null, '', 'https://iptv.example/?q=x');
   run('eventsScreen=false;applyEventsScreen(false)');
   void first;
@@ -170,7 +170,7 @@ await reset({first: {events: [ev('e1', 'epg'), ev('d1', 'discovery'), ev('r1', '
 assert.equal(await run('loadEvents(false)'), true);
 assert.equal(requests.length, 1, 'one request loads the feed');
 assert.deepEqual(shownTypes(), ['epg', 'discovery', 'ratings', 'started', 'taste_profile', 'enrichment', 'watchlist', 'unstarted', 'some_future_type'], 'the compact feed shows every event, unknown types included');
-assert.equal(more.hidden, false, 'the older-events button offers the next page');
+assert.equal(more.hidden, true, 'AIR-530: older events load by scrolling, there is no button in the successful flow');
 await onEvents();
 assert.equal(new URL(win.location.href).pathname, '/events');
 assert.equal(new URL(win.location.href).searchParams.has('type'), false, 'the default choice needs no parameter');
@@ -225,8 +225,7 @@ assert.equal(shownIds().length, 11, '1 + 0 + 0 + 4 + 0 + 6 matches');
 assert.equal(run('eventMatchCount("ratings")'), 11);
 assert.equal(run('eventSearch.state'), 'idle');
 assert.equal(status.textContent, '', 'nothing but the list once the first screen is full');
-assert.equal(more.hidden, false, 'older events stay available by hand');
-assert.equal(more.textContent, 'Более давние события');
+assert.equal(more.hidden, true, 'AIR-530: older events come by scrolling after the search, not by a button');
 assert.equal(shownTypes().every(type => type === 'ratings'), true);
 // What is loaded is reused: the same type again does not search, a type with fewer than 10 loaded continues from the same cursor.
 const loadedRequests = requests.length;
