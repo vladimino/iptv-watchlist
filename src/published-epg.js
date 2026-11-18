@@ -167,24 +167,23 @@ export async function readAuthority(db){
   if(db?.PUBLISHED_EPG_DB_OPTIONAL==='standin')return {mode:'r2',tables:false,version:null,ready:false};
   throw failed('published_epg_unavailable');
  }
- let version;
- try{version=(await one(target,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
- catch(error){
-  if(/no such table/i.test(String(error?.message||error))&&db?.PUBLISHED_EPG_DB_OPTIONAL==='standin')return {mode:'r2',tables:false,version:null,ready:false};
-  throw failed('published_epg_unavailable',error);
- }
+ // The published tables are inventoried first, so that no stand-in path below can serve R2 over a partly installed domain, whatever the contract says.
  let names;
  try{names=(await many(target,"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'published_epg%'")).map(row=>row.name);}
  catch(error){throw failed('published_epg_unavailable',error);}
  const tables=TABLES.every(name=>names.includes(name));
+ const standin=db?.PUBLISHED_EPG_DB_OPTIONAL==='standin';
+ if(!tables&&names.length>0)throw failed('published_epg_unavailable');
+ let version;
+ try{version=(await one(target,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
+ catch(error){
+  if(!tables&&/no such table/i.test(String(error?.message||error))&&standin)return {mode:'r2',tables:false,version:null,ready:false};
+  throw failed('published_epg_unavailable',error);
+ }
  if(!tables){
   const numeric=Number(version);
-  if(version==null||!Number.isFinite(numeric)){
-   if(db?.PUBLISHED_EPG_DB_OPTIONAL==='standin')return {mode:'r2',tables:false,version:null,ready:false};
-   throw failed('published_epg_unavailable');
-  }
-  // Some but not all of the nine tables is a broken install and is refused. None of them is the uninstalled domain, which only the explicit local stand-in serves.
-  if(names.length>0||db?.PUBLISHED_EPG_DB_OPTIONAL!=='standin')throw failed('published_epg_unavailable');
+  if(!standin)throw failed('published_epg_unavailable');
+  if(version==null||!Number.isFinite(numeric))return {mode:'r2',tables:false,version:null,ready:false};
   return {mode:'r2',tables:false,version:numeric,ready:false};
  }
  if(!(Number(version)>=8))throw failed('published_epg_unavailable');

@@ -99,6 +99,35 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.equal(one(v6,"SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'published_epg%' OR name='schema_contract_no_downgrade'"),0);
 }
 
+// ADR 0162 (review of #751): the explicit stand-in serves only a domain that is not installed at all. A partly installed one is refused on every path, whatever schema_contract says.
+{
+ const optIn={PUBLISHED_EPG_DB_OPTIONAL:'standin'};
+ const unavailable=error=>error.code==='published_epg_unavailable';
+ const bare=()=>d1Standin(path.join(root,'partial-'+(databases++)+'.sqlite'));
+ // Truly absent: no tables, no schema_contract at all, then a contract row, a missing id=1 row and a non-numeric version: the stand-in (opted in) and a refusal (not opted in).
+ const none=bare();
+ assert.deepEqual(await readAuthority({DB:none,...optIn}),{mode:'r2',tables:false,version:null,ready:false});
+ await assert.rejects(readAuthority({DB:none}),unavailable);
+ none.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER)');
+ assert.equal((await readAuthority({DB:none,...optIn})).tables,false,'a contract table without its row');
+ none.sql('INSERT INTO schema_contract VALUES (1,7)');
+ assert.deepEqual(await readAuthority({DB:none,...optIn}),{mode:'r2',tables:false,version:7,ready:false});
+ await assert.rejects(readAuthority({DB:none}),unavailable);
+ assert.equal(await currentGeneration({DB:none,...optIn}),null);
+ // Partly installed (one published table), with each way the contract can be unusable, opted in: refused.
+ for(const [label,setup] of [['no schema_contract',db=>{}],['no id=1 row',db=>db.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER)')],['non-numeric version',db=>db.sql("CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version TEXT); INSERT INTO schema_contract VALUES (1,'x')")],['a contract below 8',db=>db.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER); INSERT INTO schema_contract VALUES (1,7)')]]){
+  const partial=bare();
+  partial.sql('CREATE TABLE published_epg_authority (id INTEGER PRIMARY KEY)');
+  setup(partial);
+  await assert.rejects(readAuthority({DB:partial,...optIn}),unavailable,label);
+  await assert.rejects(currentGeneration({DB:partial,...optIn}),unavailable,label);
+  const store=new MemoryBucket();let puts=0;const rememberPut=store.put.bind(store);store.put=async(...args)=>{puts++;return rememberPut(...args);};
+  await assert.rejects(repairMirrors({DB:partial,BUCKET:store,...optIn}),unavailable,label);
+  await assert.rejects(writeMirrors({DB:partial,BUCKET:store,...optIn},{programmeRunId:'run-x',programme:programme('run-x',[film('film:a')]),watchlist:watch([film('film:a')]),phase:'published'}),unavailable,label);
+  assert.equal(puts,0,label+': a refusal writes no mirror');
+ }
+}
+
 {
  const chain=d1Standin(path.join(root,'chain-'+(databases++)+'.sqlite'));
  for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority'])chain.sql(fs.readFileSync('migrations/'+name+'.sql','utf8'));
