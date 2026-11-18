@@ -142,6 +142,47 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
  assert.equal(back.applied,1);assert.equal(state('film:tmdb:51').at,T4);assert.equal(state('film:tmdb:51').w,1);
 }
 
+// AIR-532: revision race, interrupted slice and a mass add/remove. No Film is written twice and no change is lost.
+{
+ const file=database('open');
+ const films=[];for(let i=61;i<=72;i++)films.push("('film:tmdb:"+i+"',1,'"+T+"')");
+ sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES "+films.join(',')+";INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES "+Array.from({length:12},(_,k)=>"('film:tmdb:"+(61+k)+"','tmdb','"+(61+k)+"',1,0,NULL),('film:tmdb:"+(61+k)+"','letterboxd','m"+(61+k)+"',1,0,NULL)").join(',')+";");
+ const item=(n,watchlist,observedAt,scanId)=>({lid:'m'+n,tmdbId:String(n),watchlist,observedAt,evidence:{scanId}});
+ const all=(watchlist,at,scanId,from=61,to=72)=>Array.from({length:to-from+1},(_,k)=>item(from+k,watchlist,at,scanId));
+ const state=id=>rows(file,"SELECT r.watchlist AS w,r.observed_at AS at,c.revision AS rev FROM film_retention r JOIN canonical_revision c ON c.kind='film' AND c.id=r.film_id WHERE r.film_id='"+id+"'")[0];
+ const T3='2026-11-16T14:00:00.000Z',T4='2026-11-16T15:00:00.000Z',T5='2026-11-16T16:00:00.000Z';
+ // mass add: one batch per Film, one receipt per Film
+ const add=await applyRatedAdmissionRetention({DB:d1Standin(file)},{event:'m:1',retentions:all(true,T,'m1'),now:()=>T});
+ assert.equal(add.applied,12);assert.equal(one(file,'SELECT COUNT(*) FROM film_retention'),12);
+ const rev=state('film:tmdb:61').rev;
+ // a concurrent writer moves the revision of one Film between the plan and the write: that unit is not written, the rest are, and the carried intent finishes it
+ let hit=0;
+ const racing={DB:d1Standin(file,{onBatch:async()=>{hit++;if(hit===1)assert.equal(sqlite(file,"UPDATE canonical_revision SET revision=revision+1 WHERE kind='film' AND id='film:tmdb:61'").status,0);}})};
+ const race=await applyRatedAdmissionRetention(racing,{event:'m:2',retentions:all(false,T3,'m2'),now:()=>T3});
+ assert.equal(race.applied+race.failed+race.unknown+race.noop,12);
+ const finished=race.state==='complete'?race:await applyRatedAdmissionRetention({DB:d1Standin(file)},{event:'m:2',intent:race.intent,retentions:[],now:()=>'2026-11-16T14:10:00.000Z'});
+ assert.equal(finished.state,'complete');
+ for(let n=61;n<=72;n++)assert.equal(state('film:tmdb:'+n).w,0,'every exit landed: film:tmdb:'+n);
+ assert.ok(state('film:tmdb:61').rev>=rev+2,'the foreign bump and our write both count');
+ assert.equal(one(file,'SELECT COUNT(*) FROM film_retention'),12,'no second row for any Film');
+ // an interrupted slice (a transient batch error) repeats the SAME request ids: no Film is written twice
+ const before=one(file,'SELECT COUNT(*) FROM canonical_write_receipt');
+ let seen=0;
+ const flaky={DB:d1Standin(file,{onBatch:async()=>{seen++;if(seen===2)throw new Error('transient');}})};
+ await assert.rejects(()=>applyRatedAdmissionRetention(flaky,{event:'m:3',retentions:all(true,T4,'m3',61,64),now:()=>T4}),error=>error.code==='film_person_unavailable','a transient write failure aborts the slice, fail closed');
+ const done=await applyRatedAdmissionRetention({DB:d1Standin(file)},{event:'m:3',retentions:all(true,T4,'m3',61,64),now:()=>'2026-11-16T15:10:00.000Z'});
+ assert.equal(done.state,'complete');
+ for(let n=61;n<=64;n++){assert.equal(state('film:tmdb:'+n).w,1);assert.equal(state('film:tmdb:'+n).at,T4);}
+ assert.equal(one(file,'SELECT COUNT(*) FROM canonical_write_receipt')-before,4,'one receipt per changed Film, none repeated');
+ // replaying the whole event after it finished writes nothing
+ const replayed=await applyRatedAdmissionRetention({DB:d1Standin(file)},{event:'m:3',retentions:all(true,T4,'m3',61,64),now:()=>T4});
+ assert.equal(replayed.applied,0);assert.equal(replayed.noop,4);
+ // a stale scan (older observedAt) never moves a Film back
+ const stale=await applyRatedAdmissionRetention({DB:d1Standin(file)},{event:'m:old',retentions:all(false,T0,'old',61,64),now:()=>T0});
+ assert.equal(stale.applied,0);for(let n=61;n<=64;n++)assert.equal(state('film:tmdb:'+n).w,1);
+ void T5;
+}
+
 {
  const file=database('open');
  const missing=await applyRatedAdmissionRetention(envOf(file),{event:'wl:miss',retentions:[{lid:'nope',watchlist:true,observedAt:T,evidence:{scanId:'s'}}],now:()=>T});
