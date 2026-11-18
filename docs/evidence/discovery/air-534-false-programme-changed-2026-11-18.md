@@ -43,7 +43,14 @@ Local Chromium through Playwright, the real `public/styles.css` and the real `ev
 - Mobile 390 px: no horizontal overflow; the `stalled` and no-progress titles wrap to two lines (card 215 px instead of 191 px); counters and notes stay readable; the list scrolls inside its container.
 - No problem found, nothing changed in the stylesheet.
 
+## Scope 3 (fast recovery cron), offline
+
+Owner decision of 18 November 2026 on the AIR-534 card, recorded as [ADR 0173](../../adr/0173-discovery-only-fast-recovery-cron.md). Second cron `1-59/2 * * * *`, dispatched on `controller.cron` to `reconcileDiscoveryRecovery`; the hourly path is unchanged.
+- Idle cost measured in the test harness: a healthy live instance is one read of the Workflow record, one platform status call, zero writes, zero creates, zero authority reads and no report. A stopped record not yet due is one read and nothing else.
+- `tests/discovery-fast-recovery.mjs` (core) covers: healthy live and unreadable status (fail closed); stopped undue; stopped due with the deterministic successor id and `recoveryDelayMs`; wait then due then success; killed, completed and errored instances armed with a backoff first; terminal stop and quarantine; refusals (authority held, authority loading, D1 unavailable, EPG priority, projector window, published run mismatch) with the incident flag past five minutes; two fast ticks plus the hourly reconcile giving one successor id and one series bump; an uncertain start; isolation (the fast entry calls none of EPG, Ratings, Monitor and writes no Event, the hourly entry still calls all three); readout `recoveryState` and `recoveryIncident`. The fast-path and the wait gates fail when mutated.
+- The three tests that pinned a single cron now pin the two entries.
+- Not proven: any production behaviour of the fast tick, the real platform scheduling delay and the 18 November `:00` interleaving. Natural recovery proof (a `discovery_recovery_tick` `state=started` with `recoveryDelayMs`, no manual writer) stays for «Верификация».
+
 ## Not done here (open on AIR-534)
 
-- Scope 3: bounded automatic successor after a recoverable stopped series (today waits for the hourly Cron). This changes orchestration; it needs an owner decision and an ADR before implementation.
 - Live proof: natural race, successor and no duplicate owners go to `Верификация`; offline tests do not replace it.

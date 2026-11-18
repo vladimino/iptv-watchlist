@@ -21,9 +21,10 @@ const at=ms=>new Date(ms).toISOString();
 const wrangler=fs.readFileSync('wrangler.jsonc','utf8');
 const configured=[...wrangler.matchAll(/"crons":\s*\[([^\]]*)\]/g)].map(m=>[...m[1].matchAll(/"([^"]+)"/g)].map(x=>x[1]));
 assert.equal(configured.length,1,'one cron block');
-assert.equal(configured[0].length,1,'one cron trigger');
+assert.equal(configured[0].length,2,'the hourly trigger and the AIR-534 Discovery-only fast trigger');
+assert.equal(configured[0][1],'1-59/2 * * * *','the fast trigger never fires at minute 0 (ADR 0173); the EPG and Ratings arithmetic below is about the hourly one only');
 const current=configured[0][0];
-assert.equal(current,'0 * * * *','the one trigger is the hourly minute-0 expression; a second trigger or another minute fails here');
+assert.equal(current,'0 * * * *','the first trigger is the hourly minute-0 expression; another minute fails here');
 const minuteOf=expression=>Number(expression.split(' ')[0]);
 
 // The ticks of an hourly cron `M * * * *` (UTC) between two instants.

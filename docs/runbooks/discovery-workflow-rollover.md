@@ -61,3 +61,13 @@ A timeout or a lost answer: repeat the **same** request. With the same `requestI
 - The swap is not reversed: the successor is the same generation's legitimate executor. A code revert removes the tool but leaves the record readable.
 - If the successor fails, the existing recovery applies (step-failure recovery, `uncertain`/`stopped` reconcile, quarantine after four attempts). Do not reset the lease, edit the record or create an instance by hand; those need their own owner-approved procedure.
 - An EPG publication after the swap makes the successor stop with `stale_generation`; the reconcile starts the new generation as usual.
+
+## Fast recovery tick: read-only checks
+
+[ADR 0173](../adr/0173-discovery-only-fast-recovery-cron.md) (AIR-534). The Worker has a second cron, `1-59/2 * * * *`, that only reconciles the Discovery Workflow. It runs no chunk and writes no report.
+
+- **Schedules.** The live schedule must list exactly `0 * * * *` and `1-59/2 * * * *` (read-only Cloudflare schedules readout). Change it only by pull request; each deploy replaces it with `wrangler.jsonc`.
+- **Status.** `epg_pipeline_status` / `GET /api/enrichment/pipeline/status` `discoveryExecutor`: `recoveryState` `waiting` is normal until `recoveryDue`; `overdue` means the due time passed with no successor; `recoveryIncident` true means more than five minutes overdue and is an operational incident.
+- **Logs.** Search Workers Logs for `event=discovery_recovery_tick`. `state=started` with `recoveryDelayMs` is the proof of a successor; `state=refused` carries the reason (`epg_priority`, `projector_window`, `authority_held`, `authority_loading`, `d1_unavailable`, `generation_unpublished`, `generation_handoff`, `write_conflict`, `intent_uncertain`, `stale_generation`, `workflow_unavailable`, `start_uncertain`). No log line means nothing was due.
+- **Do not** reset a lease, retry, roll over, run Discovery or change a flag to clear an overdue recovery; a refusal reason names the gate that has to clear on its own. Escalate an incident to the owner with the log line and the readout.
+- **Rollback** is a pull request that removes the second cron entry and the dispatch; the hourly path is unchanged.

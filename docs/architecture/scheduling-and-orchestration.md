@@ -143,6 +143,43 @@ The diagram above is the live tick. The historical R2-to-D1 projector sequence (
 
 The cron expression is `0 * * * *` (it was `37 * * * *` until AIR-348; Madrid is a whole-hour offset, so an hourly UTC cron has a tick at Madrid 17:00 in CET and CEST, and each daily `ensure` decides due itself from the Madrid date). Since AIR-482, as a best-effort mitigation only (not an isolation guarantee, the OOM allocator is unproven), the tick starts `reconcileDiscoveryWorkflow` (which closes the hourly Discovery report) first and starts Ratings `ensure`, EPG `ensure` and the monitor together when that reconcile settles or after a 45 s head start. A reconcile or report close still pending at 45 s overlaps the other members in the same invocation and stays exposed to the same memory kill. A rejected reconcile never blocks the other members. The ratings `ensure` creates one Workflow instance per Madrid date once the daily run is due. The EPG `ensure` creates the daily Workflow instance once the run is due. The Discovery reconcile acts on a missing intent or a dead instance. Each reconcile attempt is a Workers Log `discovery_workflow_reconcile`; a green cron is not a Discovery recovery. The enrichment projector is not a member of this tick ([ADR 0155](../adr/0155-retire-enrichment-projector-cron.md)). `D1_ENRICHMENT_WRITE` does not start a run. A `projector_window` row that is already held still refuses Discovery admission until it expires; this retirement does not ignore that fence.
 
+**Discovery fast recovery tick (AIR-534, [ADR 0173](../adr/0173-discovery-only-fast-recovery-cron.md), Accepted).** The Worker has a second cron trigger, `1-59/2 * * * *` (every two minutes on odd minutes, never minute 0). It calls only `reconcileDiscoveryRecovery`: no chunk, no TMDB, no EPG, Ratings or Monitor, and no hourly report. It is a fallback for a killed, completed or errored instance, a lost or uncertain wake and an overdue recovery; the EPG-publication fast start and the durable `step.sleepUntil` of a live instance ([ADR 0098](../adr/0098-discovery-workflow-step-failure-recovery.md)) stay primary.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Fast as Fast cron, every 2 min
+    participant W as reconcileDiscoveryRecovery
+    participant D1 as D1 Workflow record
+    participant CF as Cloudflare Workflows
+    participant R as Existing reconcile (CAS, fencing, admission)
+    Fast->>W: Scheduled event, no report, no chunk
+    W->>D1: Read the record once
+    alt No record, terminal stop, quarantine, or recovery not yet due
+        W-->>Fast: No-op, nothing created or written
+    else Record says an instance is alive
+        W->>CF: Read instance status
+        alt Running, waiting, queued or paused
+            W-->>Fast: No-op, in progress
+        else Complete, errored, terminated or absent
+            W->>R: Hand over
+        end
+    else Stopped and due, or start uncertain and due
+        W->>R: Hand over
+    end
+    R->>D1: Admission reads, then one CAS write
+    alt Refused (authority, priority, window, mismatch)
+        R-->>W: Typed reason, nothing created
+        W-->>Fast: recovery_refused or recovery_overdue, with the reason
+    else Accepted
+        R->>CF: Create the deterministic id for series plus one
+        R-->>W: Started or attached
+        W-->>Fast: recovery_started with recoveryDelayMs
+    end
+```
+
+The diagram shows the fast tick only; the hourly tick above is unchanged and may overlap with it. Overlap, a repeated cron and a durable wake create no second owner: the successor id is deterministic and the record write is an expected-etag CAS, both unchanged. An idle tick is one record read (plus one platform status call while an instance is alive) and no write.
+
 **Historical: pre-AIR-308 projector.** Before ADR 0155 the same tick also called the projector. When the tick granted a projector window, a scheduled reconcile that was refused as `projector_window` waited for that window's one expiry in the same invocation (at most three attempts) and then created a due successor. With the flag unset, the projector performed no R2 reads or D1 writes. With `dry`, it read the source and change keys and never wrote. With `on` and the Film/Person marker below `open`, it wrote changed Films and Persons in existing fenced batches. At `open` those canonical writes were refused as compare-only; the fenced adapters own them. At schema v5, `film_sync_state` used that same writer: sync clocks for an already-changing Film shared its batch, while a clock-only change used its own fenced batch. That schema is applied. At schema v6, the same clocks were written, and when the metadata cache marker is `d1` the metadata records came from D1. Schema v7 and v8 kept those clocks and cache reads; the projector wrote neither the prediction nor the published EPG domain. A partial prediction domain, or a complete one without a valid marker, failed the run before a write. None of the prediction tables on a later contract does not: prediction stays on the objects. `PREDICTION_DB_REQUIRED=on` makes a missing `DB` binding, or a bound database without `schema_contract`, fail the same way. The variable is not a new cron and not a new operational flag. The projector did not write R2 or the cache. A code deploy does not apply migration `0006` or `0007`. Production has applied `0006` and that marker is `d1` ([ADR 0073](../adr/0073-metadata-cache-d1-authority.md), [cutover](../evidence/d1-migration/air-313-metadata-cache-cutover-2026-11-01.md)). Production applied `0007` and activated the prediction marker on 3 November 2026 ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)).
 
 The drift monitor is a read-only automation in the same ChatGPT registry, enabled daily at 18:15 Europe/Madrid (DTSTART 2026-10-31). It reads only the live hourly Predictions Task entry (and, until AIR-406 is applied to the live Task, the retired Daily EPG entry as well) and the maintained GitHub contract, and reports confirmed drift or failed execution. It neither reads Worker/MCP status nor watches Ratings. The independent Cloudflare-native monitor owns EPG, Discovery, Ratings and Predictions progress and alerts ([monitor runbook](../runbooks/monitoring.md)). The drift audit shares the scheduler with the producers, so no notification does not prove availability.
