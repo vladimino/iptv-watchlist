@@ -1,9 +1,9 @@
 # ADR 0169: One read-only identity work inventory for the owner Limbo, as a separate versioned projection over the current owners
 
-**Status:** Proposed
-**Original decision date:** not yet decided (owner decision required before Accepted)
+**Status:** Accepted
+**Original decision date:** 2026-11-18
 **Recorded at:** 2026-11-18
-**Approval source:** not documented. The card's original GO does not cover this architecture; a new material choice needs an explicit owner decision on the pull request.
+**Approval source:** Product Owner explicitly accepted the design on 2026-11-18, recorded in [PR #753](https://github.com/vladimino/iptv-watchlist/pull/753#issuecomment-6979292553), after [independent technical review PASS](https://github.com/vladimino/iptv-watchlist/pull/753#pullrequestreview-5956830621). Approval is for the architecture only; no production operation is authorized.
 **Related work:** [AIR-343](https://trello.com/c/hCy6fLne), [AIR-332](https://trello.com/c/fls3b65Z), [AIR-340](https://trello.com/c/zWxj3laC), [AIR-369](https://trello.com/c/GlAKWxvw), [AIR-497](https://trello.com/c/xNqCjZgu), [AIR-499](https://trello.com/c/8ifHCioP), [AIR-320](https://trello.com/c/4cA5GlJn), [ADR 0085](0085-d1-authoritative-discovery.md), [ADR 0087](0087-rated-archive-film-admission.md), [ADR 0090](0090-rated-identity-redirect-proof-and-retry.md), [ADR 0099](0099-canonical-film-person-d1-authority.md), [ADR 0104](0104-inferred-letterboxd-identity.md), [ADR 0107](0107-get-head-read-side-effect-boundary.md), [ADR 0166](0166-diary-rated-only-identity-bridge.md)
 **Supersedes:** None
 **Superseded by:** None
@@ -117,11 +117,11 @@ The registry is derived and droppable: deleting it returns every archive to `uni
 
 ## Evidence
 
-- **Original decision:** pending owner decision on the pull request that carries this record.
+- **Original decision:** explicit Product Owner approval on 2026-11-18, recorded in [PR #753](https://github.com/vladimino/iptv-watchlist/pull/753#issuecomment-6979292553), after independent technical PASS; no implementation or production operation authorized.
 - **Implementation:** none. Architecture only.
 - **Dated verification:** facts above were read from `main` `3d9d81c` on 2026-11-18 (`src/admin/limbo.js`, `src/domain/limbo-inventory.js`, `src/letterboxd-rated-candidates.js`, `src/admin/letterboxd-archive-apply.js`). No production read or write was made.
 - **Uncertainty:** the real number and size of archives and candidate documents in production is not measured here; the caps in section 5 are proposals to be confirmed by a read-only measurement before the first implementation card.
 
 ## Follow-ups
 
-Atomic downstream deliverables, to be created only after this record is Accepted: (1) registry object and hooks in the existing candidate writers; (2) owner-confirmed registry backfill with an L2 contract; (3) pure domain module, read adapter, `GET /api/admin/identity-work`, audit entry and tests; (4) `/admin/limb` UI; (5) conditional: D1 candidate queue migration, only under the criteria in section 8.
+Atomic downstream deliverables, requiring separately approved cards and not authorized for implementation by this ADR acceptance: (1) registry object and hooks in the existing candidate writers; (2) owner-confirmed registry backfill with an L2 contract; (3) pure domain module, read adapter, `GET /api/admin/identity-work`, audit entry and tests; (4) `/admin/limb` UI; (5) conditional: D1 candidate queue migration, only under the criteria in section 8.
