@@ -1182,6 +1182,9 @@ export const FILES={
  "prediction-scoring-ab-harness.mjs": {
   "suite": "core"
  },
+ "prediction-scoring-candidate-v2.mjs": {
+  "suite": "core"
+ },
  "prediction-scoring-candidate.mjs": {
   "suite": "core"
  },

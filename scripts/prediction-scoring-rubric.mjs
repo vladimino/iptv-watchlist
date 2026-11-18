@@ -72,9 +72,17 @@ export function evaluateCase(caseRubric,film,output,{defectPattern,uncertaintyPa
  const allClaims=[...signals.map(s=>s?.signal),...(a.risks||[]).map(x=>x?.risk),...texts(p.mainRisk),...texts(a.ratingBasis),...texts(a.probability4PlusBasis),...(p.matchSignals||[])].filter(t=>typeof t==='string');
  if(caseRubric.keyUnknownPattern){const re=new RegExp(caseRubric.keyUnknownPattern,'i'),hits=allClaims.filter(t=>re.test(t)&&!unsure.test(t));
   add('unknown_claimed_as_fact',hits.length?'flag':'pass',hits.length?`claims on rubric-unknown aspects without an uncertainty marker: ${hits.map(t=>JSON.stringify(t.slice(0,120))).join(' | ')}`:'no claim on rubric-unknown aspects');}
+ // prediction.matchSignals: positive taste matches only. Shape is mechanical; content is a heuristic pointer for the reviewer.
+ const ms=p.matchSignals;
+ add('match_signals_shape',Array.isArray(ms)&&ms.length<=3&&ms.every(x=>typeof x==='string')?'pass':'fail',`matchSignals=${Array.isArray(ms)?ms.length+' items':typeof ms}`);
+ if(Array.isArray(ms)){
+  const premise=/premise|премис|завязк/i,suspect=caseRubric.matchSignalSuspectPattern?new RegExp(caseRubric.matchSignalSuspectPattern,'i'):null;
+  const hits=ms.filter(t=>typeof t==='string'&&!premise.test(t)&&!unsure.test(t)&&(defect.test(t)||(suspect&&suspect.test(t))));
+  add('match_signal_suspect',hits.length?'flag':'pass',hits.length?`match signals that may be negative, neutral or unconfirmed: ${hits.map(t=>JSON.stringify(t.slice(0,120))).join(' | ')}`:'no suspect match signal');
+ }
  // Whether a claim is true of the evidence is semantic. No string check can prove it, so every output with a substantive
  // claim gets a mandatory human review item and a case is never clean.
- const substantive=[...signals.map(s=>`${s?.direction}: ${s?.signal}`),...(a.risks||[]).map(x=>`risk ${x?.severity}: ${x?.risk}`),...texts(p.mainRisk).map(t=>'mainRisk: '+t),...texts(a.ratingBasis).map(t=>'ratingBasis: '+t)];
+ const substantive=[...(Array.isArray(p.matchSignals)?p.matchSignals:[]).map(t=>'matchSignal: '+t),...signals.map(s=>`${s?.direction}: ${s?.signal}`),...(a.risks||[]).map(x=>`risk ${x?.severity}: ${x?.risk}`),...texts(p.mainRisk).map(t=>'mainRisk: '+t),...texts(a.ratingBasis).map(t=>'ratingBasis: '+t)];
  add('grounding_review','flag',substantive.length?`human check: each claim must match a confirmed fact in the corpus or metadata (${substantive.length} claims)`:'human check: no substantive claim stated');
  return checks;
 }

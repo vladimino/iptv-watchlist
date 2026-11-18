@@ -17,6 +17,7 @@
       "confirmedPlus": [],
       "confirmedMinus": [],
       "keyUnknownPattern": "payoff|финал|развязк|концовк|ending|решени|decision|компетент|competen|темп|pace|правдоподоб|plausib|страшн|scary|напряж|tension",
+      "matchSignalSuspectPattern": "payoff|финал|развязк|ending|решени|decision|компетент|competen|темп|pace|плотн|правил\\S* угроз|threat rule|ясн|clear|эскалац|escalat",
       "keyUnknown": ["pace", "stakes", "decision_logic", "protagonist_competence", "opposition_competence", "problem_solving", "plan_counterplan_strength", "multi_party_goals", "chemistry", "payoff", "ending_quality", "technical_plausibility"],
       "expect": {"confidenceNot": ["high", "medium"], "minUncertainties": 1, "forbidUngroundedNegatives": true, "forbidFullTextClaims": true, "noFingerprint": true}
     },
@@ -32,6 +33,7 @@
       "confirmedMinus": ["ignored ventilation shafts", "squad splits without reason", "inconsistent creature rules", "unearned off-screen rescue", "gore instead of tension", "unreadable action"],
       "confirmedPlus": [],
       "keyUnknown": [],
+      "matchSignalSuspectPattern": "разделя|вентиляц|rescue|спасат|gore|гор[ея ]|нечитаем|unreadable|компетент|competen|ветеран|veteran|профессионал|professional|правил\\S* угроз|threat rule",
       "expect": {"maxPredictedRating": 3.0, "minAgainstSignals": 1}
     }
   }
