@@ -19,6 +19,8 @@
 | Cancel | Pending intents close; nothing is re-scored afterwards; a second cancel is `already_cancelled`; unknown cohort is 404 |
 | Expiry / identity / budget | An expired intent denies nothing; the overlay never matches another or an unnamed film; an exhausted retry budget keeps the film out of the queue |
 | Dormant schema | Without the `0024` tables the overlay is empty, the queue carries no stamp, preview says `schema.ready: false`, confirm refuses `recovery_schema_not_ready` |
+| Unreadable store (review of PR #734) | With an active intent and a saved retry record (attempts 1, future `retryAt`), a D1 fault on the intent store makes `readOverlay` throw, the forced reconcile and `batch/start` refuse, and the queue rows are byte-identical; after recovery `attempts` and `retryAt` are unchanged. A partial table set throws `recovery_schema_partial`, refuses the rebuild without a write and answers 503 on preview. With the old catch-all restored, the test fails at "the forced rebuild refuses" |
+| Identity race (review of PR #734) | A redirect, a conflicting claim, a moved claim, a second claim of the frozen id, or the Film/Person marker held, each injected after the server's last preview and before the batch: `409 recovery_cas`, no cohort, no intent, revision 0. Without the identity guard the redirect case confirms (test fails) |
 | Read side effects | `tests/get-write-audit.mjs` holds the three new GET samples to "no effect" in all eight scenarios |
 
-**Limitations:** no production timing of the preview on the real catalog; no rendered Mermaid change (the queue writer diagram is unchanged because the intent is not a queue writer).
+**Limitations:** no production timing of the preview on the real catalog. The queue diagram in `docs/architecture/prediction-pipeline.md` gained the intent store as a read-only input after review; its rendered check is recorded on the pull request.

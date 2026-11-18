@@ -116,8 +116,8 @@ export function classifyRecoveryFilm(film,mode,nowMs){
 
 // Pure. The scope the owner confirms: every requested film with its outcome, the tokens an eligible film will deny, the mode, the TTL,
 // the recovery revision and the prediction authority the preview read. Any change to one of them is another scope.
-export async function recoveryScopeHash({mode,ttlHours,revision,authority,films}){
- return digestOf({version:RECOVERY_VERSION,mode,ttlHours,revision,authority:{mode:authority?.mode??null,writes:authority?.writes??null},
+export async function recoveryScopeHash({mode,ttlHours,revision,authority,filmPerson=null,films}){
+ return digestOf({version:RECOVERY_VERSION,mode,ttlHours,revision,authority:{mode:authority?.mode??null,writes:authority?.writes??null},filmPerson:{state:filmPerson?.state??null,generation:filmPerson?.generation??null},
   films:films.map(f=>({filmId:f.filmId,outcome:f.outcome,reason:f.reason,canonicalFilmId:f.canonicalFilmId??null,tmdb:f.tmdb??null,lid:f.lid??null,predictionToken:f.predictionToken??null,fingerprintToken:f.fingerprintToken??null}))});
 }
 export async function cohortIdFor(idempotencyKey){return 'pr_'+(await digestOf({cohort:idempotencyKey})).slice(0,24);}
@@ -134,6 +134,9 @@ const EMPTY_OVERLAY=Object.freeze({ready:false,revision:null,size:0,deniesPredic
 export const emptyOverlay=()=>EMPTY_OVERLAY;
 // The active, unexpired intents and the revision, in one read. Only while the prediction domain marker is d1: the tokens name D1 pointers.
 // `deniesPrediction(filmId, prediction)` is true only for that film's exact denied version; an id-less call never matches.
+// Only migration 0024 NOT installed (none of its tables) is the empty overlay. A partial table set, an unreadable store or a malformed
+// answer throws `recovery_schema_partial` / `recovery_unavailable`: an installed store must never read as "no intents", because a
+// rebuild on that answer would treat a recovery film as current and drop its retry record (ADR 0165, review of PR #734).
 export async function readOverlay(env,nowMs=Date.now()){
  const db=database(env);
  if(!db||typeof db.prepare!=='function')return EMPTY_OVERLAY;
@@ -144,10 +147,14 @@ export async function readOverlay(env,nowMs=Date.now()){
   if(typeof db.batch==='function'){const results=await db.batch(read);revision=results[0]?.results?.[0]?.revision;rows=results[1]?.results||[];}
   else{revision=(await read[0].first())?.revision;rows=(await read[1].all()).results||[];}
  }catch(error){
-  if(missingTable(error))return EMPTY_OVERLAY;
+  if(missingTable(error)){
+   let installed;
+   try{installed=await readInstalled(db);}catch(inner){if(inner?.code)throw inner;throw failed('recovery_unavailable',inner);}
+   if(!installed)return EMPTY_OVERLAY;
+  }
   throw failed('recovery_unavailable',error);
  }
- if(!Number.isInteger(Number(revision)))throw failed('recovery_unavailable');
+ if(revision==null||!Number.isInteger(Number(revision)))throw failed('recovery_unavailable');
  if(rows.length>RECOVERY_LIMITS.maxActive)throw failed('recovery_unavailable');
  const predictions=new Map(),fingerprints=new Map(),modes=new Map();
  for(const row of rows){predictions.set(row.filmId,row.predictionToken);modes.set(row.filmId,row.mode);if(row.fingerprintToken)fingerprints.set(row.filmId,row.fingerprintToken);}
@@ -226,15 +233,38 @@ async function runBatch(db,statements){
  try{await db.batch(prepared);}catch(error){rethrow(error);}
 }
 
+// The identity decision of the preview, asserted again inside the confirmation batch (review of PR #734): the Film/Person marker is still
+// d1/open at the previewed generation, and the canonical Film still holds exactly the frozen trusted claim the bridge resolved: the stored
+// id's claim is the Film's own trusted, non-conflicting claim, no other row claims the frozen TMDB id or Letterboxd id, the Film has no
+// untrusted, conflicting or second claim of either scheme, it is not redirected (retired), and its TMDB / Letterboxd values are the frozen
+// ones. Any change between the server's last preview and the batch sets `prediction_domain_cas.ok` to 0 and fails the whole batch.
+const IDENTITY_GUARD_SQL="UPDATE prediction_domain_cas SET ok=CASE WHEN "+[
+ "EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?)",
+ "EXISTS (SELECT 1 FROM film_external_id WHERE scheme=? AND value=? AND film_id=? AND trusted=1 AND conflicting=0)",
+ "NOT EXISTS (SELECT 1 FROM film_external_id WHERE ((scheme='tmdb' AND value=?) OR (scheme='letterboxd' AND value=?)) AND NOT (film_id=? AND trusted=1 AND conflicting=0))",
+ "NOT EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme IN ('tmdb','letterboxd') AND NOT (trusted=1 AND conflicting=0))",
+ "(SELECT COUNT(*) FROM film_external_id WHERE film_id=? AND scheme='tmdb')<=1",
+ "(SELECT COUNT(*) FROM film_external_id WHERE film_id=? AND scheme='letterboxd')<=1",
+ "(SELECT value FROM film_external_id WHERE film_id=? AND scheme='tmdb') IS ?",
+ "(? IS NULL OR (SELECT value FROM film_external_id WHERE film_id=? AND scheme='letterboxd') = ?)",
+ "NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)",
+].join(' AND ')+" THEN 1 ELSE 0 END WHERE id=1";
+function identityGuard(film,generation){
+ const typed=/^tmdb_(\d+)$/.exec(film.filmId),scheme=typed?'tmdb':'letterboxd',value=typed?typed[1]:film.filmId,owner=film.canonicalFilmId;
+ return [IDENTITY_GUARD_SQL,[generation,scheme,value,owner,film.tmdb??'',film.lid??'',owner,owner,owner,owner,owner,film.tmdb,film.lid,owner,film.lid,owner]];
+}
+
 // The one write of a confirmation. `plan` = {cohortId, idempotencyKey, scopeHash, mode, ttlHours, revision, films:[eligible outcomes]}.
 // Atomic: the revision moves forward from the previewed value, the cohort row is born active, and each film's intent is inserted only
 // while D1 still holds the previewed pointer (and fingerprint) token; a film's older active intent that is expired or already
-// satisfied is settled in the same batch. Any moved token, a concurrent confirmation, a closed marker or the global active cap fails
+// satisfied is settled in the same batch, and the frozen canonical identity and Film/Person marker are asserted again (IDENTITY_GUARD_SQL).
+// Any moved token, a changed identity or marker, a concurrent confirmation, a closed marker or the global active cap fails
 // the whole batch (`recovery_cas` / `recovery_not_open`); nothing is partially written.
 export async function confirmCohort(env,plan,nowMs=Date.now()){
  const db=database(env);
  if(!db)throw failed('recovery_unavailable');
  if(!plan.films.length||plan.films.length>RECOVERY_LIMITS.maxFilms)throw failed('recovery_scope_empty');
+ if(!Number.isInteger(plan.filmPersonGeneration))throw failed('recovery_scope_invalid');
  const now=new Date(nowMs).toISOString(),expires=new Date(nowMs+plan.ttlHours*3600000).toISOString();
  const statements=[
   ['UPDATE prediction_recovery_revision SET revision=revision+1 WHERE id=1 AND revision=? AND '+OPEN_SQL,[plan.revision]],
@@ -250,6 +280,7 @@ export async function confirmCohort(env,plan,nowMs=Date.now()){
    ['INSERT INTO prediction_recovery_intent (cohort_id,film_id,canonical_film_id,tmdb,lid,mode,prediction_token,fingerprint_token,state,created_at,expires_at) SELECT ?,?,?,?,?,?,?,?,\'active\',?,? WHERE EXISTS (SELECT 1 FROM prediction_pointer WHERE film_id=? AND '+PREDICTION_TOKEN_SQL+'=?) AND (? IS NULL OR EXISTS (SELECT 1 FROM prediction_fingerprint WHERE film_id=? AND '+FINGERPRINT_TOKEN_SQL+'=?))',
     [plan.cohortId,film.filmId,film.canonicalFilmId,film.tmdb,film.lid,plan.mode,film.predictionToken,film.fingerprintToken,now,expires,film.filmId,film.predictionToken,film.fingerprintToken,film.filmId,film.fingerprintToken]],
    [FENCE_SQL,[]],
+   identityGuard(film,plan.filmPersonGeneration),
   );
  }
  statements.push(["UPDATE prediction_domain_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM prediction_recovery_intent WHERE state='active' AND expires_at>?)<=? THEN 1 ELSE 0 END WHERE id=1",[now,RECOVERY_LIMITS.maxActive]]);

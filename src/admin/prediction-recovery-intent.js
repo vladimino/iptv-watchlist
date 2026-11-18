@@ -60,7 +60,7 @@ async function predictionRecoveryIntentPreview(env,request){
  const counts=Object.fromEntries(PredictionRecoveryIntent.RECOVERY_OUTCOMES.map(name=>[name,films.filter(f=>f.outcome===name).length]));
  const eligible=films.filter(f=>f.outcome==='eligible');
  const leaseLive=lease.status==='recorded'&&Number(lease.value?.expiresAt)>nowMs;
- const scopeHash=await PredictionRecoveryIntent.recoveryScopeHash({mode:request.mode,ttlHours:request.ttlHours,revision:rows.revision,authority,films});
+ const scopeHash=await PredictionRecoveryIntent.recoveryScopeHash({mode:request.mode,ttlHours:request.ttlHours,revision:rows.revision,authority,filmPerson,films});
  const refusal=!rows.installed?'recovery_schema_not_ready':authority.mode!=='d1'?'prediction_domain_not_d1':authority.writes!=='open'?'prediction_writes_held':!eligible.length?'recovery_scope_empty':null;
  return {
   version:PredictionRecoveryIntent.RECOVERY_VERSION,evaluatedAt:new Date(nowMs).toISOString(),atomic:false,
@@ -97,7 +97,7 @@ async function predictionRecoveryIntentConfirm(env,body){
  const eligible=preview.films.filter(f=>f.outcome==='eligible');
  const cohortId=await PredictionRecoveryIntent.cohortIdFor(body.idempotencyKey);
  let written;
- try{written=await PredictionRecoveryIntent.confirmCohort(env,{cohortId,idempotencyKey:body.idempotencyKey,scopeHash:body.scopeHash,mode:request.mode,ttlHours:request.ttlHours,revision:preview.schema.revision,films:eligible});}
+ try{written=await PredictionRecoveryIntent.confirmCohort(env,{cohortId,idempotencyKey:body.idempotencyKey,scopeHash:body.scopeHash,mode:request.mode,ttlHours:request.ttlHours,revision:preview.schema.revision,filmPersonGeneration:preview.authority.filmPerson.generation,films:eligible});}
  catch(error){
   // A concurrent confirmation of the same key landed first: answer as its replay. Any other refusal wrote nothing.
   if(error?.code==='recovery_cas'){const again=await replay().catch(()=>null);if(again)return again;}

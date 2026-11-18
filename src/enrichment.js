@@ -838,14 +838,16 @@ function indexedFingerprintRecord(item){
 }
 // AIR-477 (ADR 0165, Proposed). The owner-confirmed recovery intents, read once per request (the runner's request scope keeps the answer):
 // a film's exact denied prediction (and fingerprint) version is not current for every consumer that names the film. An absent module,
-// table or binding, or an unreadable intent store, is the empty overlay: the ordinary rule alone decides, nothing extra is re-scored.
+// binding or migration 0024 is the empty overlay: the ordinary rule alone decides. An INSTALLED store that cannot be read (a fault, a
+// partial table set) fails closed: the error reaches the caller, so no rebuild treats a recovery film as current and no queue write
+// drops its retry record on that answer.
 const RECOVERY_OVERLAY=Symbol('predictionRecoveryOverlay');
 const NO_RECOVERY_OVERLAY=Object.freeze({ready:false,revision:null,size:0,deniesPrediction:()=>false,deniesFingerprint:()=>false,modeOf:()=>null});
 async function predictionRecoveryOverlay(env){
  if(typeof PredictionRecoveryIntent==='undefined')return NO_RECOVERY_OVERLAY;
  const scope=requestScopeOf(env);
  if(scope&&scope[RECOVERY_OVERLAY])return scope[RECOVERY_OVERLAY];
- const reading=PredictionRecoveryIntent.readOverlay(env,Date.now()).catch(()=>NO_RECOVERY_OVERLAY);
+ const reading=PredictionRecoveryIntent.readOverlay(env,Date.now());
  if(scope)scope[RECOVERY_OVERLAY]=reading;
  return reading;
 }
