@@ -29,11 +29,11 @@ function assignedRowsDelete(key,previous,next){
 export const LEASE_TTL_MS=90000;
 export const STATEMENT_CAP=40;
 export const INDEX_CAP=3000;
-// D1 binds at most 100 parameters to a statement.
-const SHOW_READ_CHUNK=80;
 const READ_CAP=20000;
 export const LEDGER_PAGE=500;
 export const BIND_CAP=100;
+// A statement binds at most BIND_CAP (100) parameters on D1: the shows are read BIND_CAP-20 keys at a time.
+const SHOW_READ_CHUNK=BIND_CAP-20;
 export const POLICY_EXCLUDE_OVERHEAD=4;
 export const POLICY_EXCLUDE_STATEMENTS_PER=3;
 export const POLICY_EXCLUDE_CAP=Math.floor((STATEMENT_CAP-POLICY_EXCLUDE_OVERHEAD)/POLICY_EXCLUDE_STATEMENTS_PER);
@@ -2010,7 +2010,7 @@ export async function readObservationIndex(env,options={}){
  const showsByKey=new Map();
  for(let at=0;at<wanted.length;at+=SHOW_READ_CHUNK){
   const keys=wanted.slice(at,at+SHOW_READ_CHUNK).map(row=>row.observation_key);
-  const found=await many(database(env),`SELECT observation_key, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key IN (${keys.map(()=>'?').join(',')}) ORDER BY observation_key, ordinal`,keys);
+  const found=await many(database(env),"SELECT observation_key, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key IN ("+keys.map(()=>'?').join(',')+") ORDER BY observation_key, ordinal",keys);
   for(const show of found){
    const list=showsByKey.get(show.observation_key);
    if(list)list.push(show);else showsByKey.set(show.observation_key,[show]);
