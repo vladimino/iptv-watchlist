@@ -28,7 +28,9 @@ const FENCE_SQL='UPDATE prediction_domain_cas SET ok=changes() WHERE id=1';
 // The token of a stored prediction, in JS and in SQL over prediction_pointer.display_json (the stored body without its storage fields).
 const PREDICTION_TOKEN_SQL="json_extract(display_json,'$.generatedAt')||'|'||json_extract(display_json,'$.fingerprintHash')||'|'||ifnull(json_extract(display_json,'$.tasteProfileHash'),'')";
 const FINGERPRINT_TOKEN_SQL="fingerprint_hash||'|'||ifnull(generated_at,'')";
-const OPEN_SQL="EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id=1 AND mode='d1' AND writes='open')";
+// The prediction domain is D1-authoritative. `writes` is deliberately not read: it is the r2-mode gate, and mode d1 normally carries
+// `held` after the activation (ADR 0078; the AIR-478 preflight of 18 Nov 2026 read d1/held). Every D1 writer checks mode d1 and its CAS.
+const OPEN_SQL="EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id=1 AND mode='d1')";
 
 export function failed(code,cause){const error=new Error(code);error.code=code;if(cause)error.cause=cause;return error;}
 function database(env){return env&&typeof env.prepare==='function'?env:env?.DB??null;}
@@ -115,12 +117,12 @@ export function classifyRecoveryFilm(film,mode,nowMs){
 }
 
 // Pure. The scope the owner confirms: every requested film with its outcome, the tokens an eligible film will deny, its queue lane and
-// retry record (attempts, retryAt, exhausted), the mode, the TTL, the recovery revision, the prediction authority mode/writes and the
+// retry record (attempts, retryAt, exhausted), the mode, the TTL, the recovery revision, the prediction authority mode and the
 // Film/Person state/generation the preview read. Any change to one of them is another scope (`stale_scope`). Deliberately NOT in it:
 // the queue generation, the prediction authority generation and the runner lease/run/epoch. Those move on every runner step and
 // heartbeat, confirming during a live v2 run is intended, and the intent changes none of them (ADR 0165).
 export async function recoveryScopeHash({mode,ttlHours,revision,authority,filmPerson=null,films}){
- return digestOf({version:RECOVERY_VERSION,mode,ttlHours,revision,authority:{mode:authority?.mode??null,writes:authority?.writes??null},filmPerson:{state:filmPerson?.state??null,generation:filmPerson?.generation??null},
+ return digestOf({version:RECOVERY_VERSION,mode,ttlHours,revision,authority:{mode:authority?.mode??null},filmPerson:{state:filmPerson?.state??null,generation:filmPerson?.generation??null},
   films:films.map(f=>({filmId:f.filmId,outcome:f.outcome,reason:f.reason,lane:f.lane??null,retry:f.retry?{attempts:f.retry.attempts??null,retryAt:f.retry.retryAt??null,exhausted:!!f.retry.exhausted}:null,canonicalFilmId:f.canonicalFilmId??null,tmdb:f.tmdb??null,lid:f.lid??null,predictionToken:f.predictionToken??null,fingerprintToken:f.fingerprintToken??null}))});
 }
 // The owner's normalized request (a parsed recovery request: sorted films, mode, TTL). A replay of an idempotency key must repeat it

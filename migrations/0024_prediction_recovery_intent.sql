@@ -6,7 +6,9 @@
 -- version) of ONE film is not accepted as current. The ordinary queue rebuild then admits the film through the ordinary
 -- freshness rule; the first new version the ordinary runner commits ends the intent's effect, because the denied tokens no
 -- longer match. Nothing here touches the queue, the retry records, the leases, a pointer, the history or an R2 body.
--- Writable only while the prediction domain marker is d1 and writes are open (triggers). No row is ever deleted.
+-- Writable only while the prediction domain marker is d1 (triggers), the predicate every D1 prediction writer uses. The marker's
+-- `writes` column is the r2-mode gate: the D1 activation leaves it `held` and nothing releases it in mode d1 (ADR 0078), so it is
+-- deliberately not checked here. No row is ever deleted.
 -- Identifiers, short lowercase codes, hashes and ISO-8601 UTC times only: no title, name or payload.
 -- It follows a complete version 23 and refuses anything else before a table is created: the first statement inserts a
 -- second schema_contract row and so aborts the file. The version becomes 24 and never goes down.
@@ -71,7 +73,7 @@ CREATE UNIQUE INDEX prediction_recovery_intent_one_active ON prediction_recovery
 CREATE TRIGGER prediction_recovery_cohort_insert_open
 BEFORE INSERT ON prediction_recovery_cohort
 FOR EACH ROW
-WHEN NOT EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id = 1 AND mode = 'd1' AND writes = 'open')
+WHEN NOT EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id = 1 AND mode = 'd1')
 BEGIN
  SELECT RAISE(ABORT, 'prediction_recovery_not_open');
 END;
@@ -79,7 +81,7 @@ END;
 CREATE TRIGGER prediction_recovery_cohort_update_open
 BEFORE UPDATE ON prediction_recovery_cohort
 FOR EACH ROW
-WHEN NOT EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id = 1 AND mode = 'd1' AND writes = 'open')
+WHEN NOT EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id = 1 AND mode = 'd1')
 BEGIN
  SELECT RAISE(ABORT, 'prediction_recovery_not_open');
 END;
@@ -110,7 +112,7 @@ END;
 CREATE TRIGGER prediction_recovery_intent_insert_open
 BEFORE INSERT ON prediction_recovery_intent
 FOR EACH ROW
-WHEN NOT EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id = 1 AND mode = 'd1' AND writes = 'open')
+WHEN NOT EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id = 1 AND mode = 'd1')
 BEGIN
  SELECT RAISE(ABORT, 'prediction_recovery_not_open');
 END;
@@ -118,7 +120,7 @@ END;
 CREATE TRIGGER prediction_recovery_intent_update_open
 BEFORE UPDATE ON prediction_recovery_intent
 FOR EACH ROW
-WHEN NOT EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id = 1 AND mode = 'd1' AND writes = 'open')
+WHEN NOT EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id = 1 AND mode = 'd1')
 BEGIN
  SELECT RAISE(ABORT, 'prediction_recovery_not_open');
 END;

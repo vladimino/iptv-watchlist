@@ -1,7 +1,7 @@
 // AIR-477 (ADR 0165, Proposed): the owner-only scoped prediction recovery intent. Pure rules first, then the real Worker code with the
 // prediction domain in D1 mode over the sqlite D1 stand-in and an in-memory R2: preview writes nothing; confirm writes one fenced batch of
 // intent rows and nothing else; the ordinary queue rebuild and the ordinary batch v2 runner re-score exactly the confirmed films; the
-// first new version satisfies the intent; replay, scope mismatch, stale pointers, held writes, a missing schema, a crash before the
+// first new version satisfies the intent; replay, scope mismatch, stale pointers, an r2 marker, a missing schema, a crash before the
 // batch, cancel, identity refusals and the retry budget all refuse or settle honestly. Nothing here calls a model, TMDB, Cloudflare or
 // production.
 import fs from 'node:fs';
@@ -45,7 +45,7 @@ import * as CanonicalCatalogReader from '../src/canonical-catalog-reader.js';
  assert.equal(c({activeIntent:{predictionToken:base.d1.prediction,expiresAt:'2026-11-18T00:00:00.000Z'}}).reason,'active_intent');
  assert.equal(c({activeIntent:{predictionToken:base.d1.prediction,expiresAt:'2026-11-17T11:00:00.000Z'}}).outcome,'eligible','an expired intent is settled by the next confirmation');
  assert.equal(c({activeIntent:{predictionToken:'older',expiresAt:'2026-11-18T00:00:00.000Z'}}).outcome,'eligible','a satisfied intent is settled by the next confirmation');
- const scope={mode:'prediction_only',ttlHours:72,revision:0,authority:{mode:'d1',writes:'open'},films:[c({})]};
+ const scope={mode:'prediction_only',ttlHours:72,revision:0,authority:{mode:'d1'},films:[c({})]};
  const h=await Intent.recoveryScopeHash(scope);
  assert.equal(h,await Intent.recoveryScopeHash(structuredClone(scope)),'stable');
  assert.notEqual(h,await Intent.recoveryScopeHash({...scope,revision:1}),'another revision is another scope');
@@ -64,6 +64,10 @@ async function world(films=6){
  for(const file of ['src/admin/owner-reviews.js','src/admin/read.js','src/admin/limbo.js','src/prediction-diagnostics.js','src/admin/prediction-recovery.js','src/admin/prediction-recovery-intent.js'])vm.runInContext(fs.readFileSync(file,'utf8'),w.ctx);
  // Canonical identities: tmdb_1..n trusted; the last one is retired by a redirect, the one before it carries a conflicting claim.
  sql(w.file,VERIFY);
+ // Production-faithful prediction marker (AIR-478 preflight, 18 Nov 2026): mode d1 with writes held. `writes` is the r2-mode gate; the
+ // activation leaves it held, and every D1 writer checks mode d1 and its own CAS only.
+ sql(w.file,"UPDATE prediction_domain_authority SET writes='held' WHERE id=1");
+ assert.deepEqual(sql(w.file,'SELECT mode,writes FROM prediction_domain_authority'),[{mode:'d1',writes:'held'}]);
  const ids=Array.from({length:films},(_,i)=>i+1);
  sql(w.file,'INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES '+ids.map(n=>`('film:tmdb:${n}',1,'tmdb:${n}','Orig','${T}')`).join(','));
  sql(w.file,'INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES '+ids.map(n=>`('film:tmdb:${n}','tmdb','${n}',1,0,NULL)`).join(',')+`,('film:tmdb:${films-1}','tmdb','9${films-1}',0,1,NULL)`);
@@ -199,7 +203,7 @@ const key=n=>'owner-key-'+String(n).padStart(8,'0');
  const status=await w.admin('cohort?id='+ok.data.receipt.cohortId);assert.equal(status.data.cohort.films[0].status,'satisfied');
 }
 
-// 2d. Stale pointer, held writes, the global CAS: refusals write nothing.
+// 2d. Stale pointer and the global CAS: refusals write nothing.
 {
  const w=await scoredWorld(4);
  const p=await w.admin('preview?films=tmdb_1,tmdb_2');
@@ -216,13 +220,42 @@ const key=n=>'owner-key-'+String(n).padStart(8,'0');
  // A concurrent confirmation moved the revision: the stale one fails whole.
  await assert.rejects(Intent.confirmCohort(w.env,{cohortId:await Intent.cohortIdFor(key(6)),idempotencyKey:key(6),scopeHash:fresh.data.scopeHash,mode:'prediction_only',ttlHours:72,revision:7,filmPersonGeneration:2,requestDigest:'a'.repeat(64),films:fresh.data.films}),e=>e.code==='recovery_cas');
  assert.deepEqual(intents(w),[]);
- // Held prediction writes: the preview says so and the confirm refuses; the triggers refuse a direct write too.
- sql(w.file,"UPDATE prediction_domain_authority SET writes='held' WHERE id=1");
- const held=await w.admin('preview?films=tmdb_2');assert.equal(held.data.confirmable,false);assert.equal(held.data.refusal,'prediction_writes_held');
- const refused=await w.admin('confirm',{method:'POST',body:{films:['tmdb_2'],mode:'prediction_only',ttlHours:72,scopeHash:held.data.scopeHash,idempotencyKey:key(7)}});
- assert.equal(refused.status,409);assert.equal(refused.data.refusal,'prediction_writes_held');
- await assert.rejects(Intent.confirmCohort(w.env,{cohortId:await Intent.cohortIdFor(key(7)),idempotencyKey:key(7),scopeHash:held.data.scopeHash,mode:'prediction_only',ttlHours:72,revision:0,filmPersonGeneration:2,requestDigest:'a'.repeat(64),films:held.data.films.map(f=>({...f,predictionToken:fresh.data.films[1].predictionToken,canonicalFilmId:'film:tmdb:2',tmdb:'2',lid:null,fingerprintToken:null}))}),e=>['recovery_cas','recovery_not_open'].includes(e.code));
  assert.deepEqual(intents(w),[]);
+}
+
+// 2k. P1 of 18 Nov 2026: `writes` is the r2-mode gate and is NOT a D1 write gate. The whole suite runs at the production marker d1/held
+// (world()); here the refusals: an r2 marker (open or held) in the preview, a d1 -> r2 move or an unreadable marker inside the confirm
+// batch, and the triggers against a direct write. Every refusal leaves no cohort, no intent and the revision at 0.
+const noRecoveryRows=(w,label)=>{assert.deepEqual(sql(w.file,'SELECT * FROM prediction_recovery_cohort'),[],label+': no cohort');assert.deepEqual(intents(w),[],label+': no intent');assert.equal(revision(w),0,label+': no revision');};
+for(const writes of ['open','held']){
+ const w=await scoredWorld(3);
+ const p=await w.admin('preview?films=tmdb_1');assert.equal(p.data.confirmable,true);
+ sql(w.file,`UPDATE prediction_domain_authority SET mode='r2', writes='${writes}' WHERE id=1`);
+ const r=await w.admin('confirm',{method:'POST',body:{films:['tmdb_1'],mode:'prediction_only',ttlHours:72,scopeHash:p.data.scopeHash,idempotencyKey:key(20)}});
+ assert.ok([409,503].includes(r.status),'r2/'+writes+' is refused: '+JSON.stringify(r.data));
+ noRecoveryRows(w,'r2/'+writes);
+ await assert.rejects(Intent.confirmCohort(w.env,{cohortId:await Intent.cohortIdFor(key(21)),idempotencyKey:key(21),scopeHash:p.data.scopeHash,mode:'prediction_only',ttlHours:72,revision:0,filmPersonGeneration:2,requestDigest:'a'.repeat(64),films:p.data.films}),e=>['recovery_cas','recovery_not_open'].includes(e.code),'r2/'+writes+': the module refuses');
+ noRecoveryRows(w,'r2/'+writes+' module');
+ // The triggers alone refuse a cohort row in r2 whatever writes says.
+ assert.throws(()=>sql(w.file,"INSERT INTO prediction_recovery_cohort (cohort_id,idempotency_key,scope_hash,request_digest,mode,film_count,state,created_at,expires_at) VALUES ('pr_"+'0'.repeat(24)+"','"+key(22)+"','"+'b'.repeat(64)+"','"+'c'.repeat(64)+"','prediction_only',1,'active','2026-11-18T10:00:00.000Z','2026-11-19T10:00:00.000Z')"),/prediction_recovery_not_open/,'r2/'+writes+': trigger');
+}
+for(const [label,change] of [
+ ['d1 -> r2 inside the batch',w=>sql(w.file,"UPDATE prediction_domain_authority SET mode='r2' WHERE id=1")],
+ ['marker row unreadable inside the batch',w=>sql(w.file,'DELETE FROM prediction_domain_authority')],
+]){
+ const w=await scoredWorld(4);
+ const p=await w.admin('preview?films=tmdb_1,tmdb_2');assert.equal(p.data.counts.eligible,2,label);
+ w.hooks.write=statements=>{if(statements.some(s=>/INSERT INTO prediction_recovery_cohort/.test(s.text))){w.hooks.write=null;change(w);}};
+ const r=await w.admin('confirm',{method:'POST',body:{films:['tmdb_1','tmdb_2'],mode:'prediction_only',ttlHours:72,scopeHash:p.data.scopeHash,idempotencyKey:key(23)}});
+ assert.equal(r.status,409,label+': '+JSON.stringify(r.data));
+ noRecoveryRows(w,label);
+}
+{
+ // An unreadable marker before the preview: the preview fails closed, it does not answer confirmable.
+ const w=await scoredWorld(2);
+ sql(w.file,"PRAGMA ignore_check_constraints=ON;UPDATE prediction_domain_authority SET writes='bogus' WHERE id=1");
+ const p=await w.admin('preview?films=tmdb_1');assert.equal(p.status,503,JSON.stringify(p.data));
+ noRecoveryRows(w,'unreadable marker');
 }
 
 // 2e. A crash before the batch lands, then the replay; a live run is not disturbed; cancel stops only what is pending.
