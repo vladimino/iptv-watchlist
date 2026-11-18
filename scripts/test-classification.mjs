@@ -315,6 +315,9 @@ export const FILES={
  "catalog-film.mjs": {
   "suite": "core"
  },
+ "catalog-posters-d1.mjs": {
+  "suite": "core"
+ },
  "catalog-posters.mjs": {
   "suite": "core"
  },
@@ -1185,6 +1188,9 @@ export const FILES={
   "suite": "core"
  },
  "prediction-recovery.mjs": {
+  "suite": "core"
+ },
+ "prediction-recovery-intent.mjs": {
   "suite": "core"
  },
  "prediction-footer-health.mjs": {

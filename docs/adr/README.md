@@ -4,8 +4,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-| ADR | Status | Decision |
+| ADR | Status | Decision and evidence |
 | --- | --- | --- |
+| [0165 — Owner-confirmed scoped prediction recovery intent as a denied-version overlay on the freshness rule](0165-scoped-prediction-recovery-intent.md) | **Accepted** 2026-11-18 (explicit owner approval on [AIR-477](https://trello.com/c/WhwaXRRl)) | A D1 intent (migration `0024`, not applied) denies one film's exact stored prediction (and fingerprint) version; the ordinary freshness rule and queue rebuild then re-admit the film, and the ordinary batch v2 runner re-scores it; the first new version satisfies the intent. Owner-only preview and fenced confirm; retained Films outside admission and exhausted retry budgets fail closed. No production write is authorized. |
 | [0168 — A TMDB card with no genre is unclassified and is not verified on identity alone](0168-empty-genre-card-is-unclassified.md) | **Proposed** 2026-11-18 ([AIR-501](https://trello.com/c/ShipZn0N) RCA; owner acceptance on the pull request) | An empty TMDB genre list becomes `needs_verification` / `genre_evidence_missing`; a Music-only card with `concert` in its overview is `concert_recording_ambiguous`. Owner confirmation may admit either. Refines [ADR 0150](0150-documentary-and-concert-film-exclusion.md). |
 
 ## Accepted records
