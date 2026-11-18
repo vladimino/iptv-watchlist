@@ -1464,10 +1464,6 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
   return [id,neutralPredictionPriority()];
  }));
  if(!authoritative&&priorityBasis!=='carried'){priorityBasis='neutral';priorityProgrammeRunId=previous?.programmeRunId||'priority-neutral';}
- // AIR-529: the next instant a Film of this queue changes hot/cold with the clock alone (a show start enters the [now-72h, now+24h) window at start-24h and leaves it at start+72h). The batch preflight
- // compares it with the clock, so a rolling-window transition on an unchanged generation is re-evaluated at a natural start (never per submit or complete).
- let nextWindowChange=Infinity;
- if(authoritative)for(const film of films)for(const show of film.shows||[]){const at=Number(show?.start);if(!Number.isFinite(at))continue;for(const edge of [at-PRIORITY_HOT_FUTURE_MS,at+PRIORITY_HOT_PAST_MS])if(edge>now&&edge<nextWindowChange)nextWindowChange=edge;}
  const sameCompleted=authoritative&&previous?.priorityBasis==='completed'&&previous.programmeRunId===priorityProgrammeRunId&&previous.priorityAsOf;
  const priorityAsOf=authoritative?(sameCompleted?previous.priorityAsOf:new Date(now).toISOString()):priorityBasis==='carried'?(previous?.priorityAsOf||previous?.refreshedAt||null):null;
  // The selective profile rule decides; the strict outcome is counted for every film beside it.
@@ -1518,6 +1514,11 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  missing.sort((a,b)=>{const x=priority[a.id],y=priority[b.id];return x.rank-y.rank||(x.rank===0?x.expiresInMs-y.expiresInMs:0)||Number(y.availableNow||y.availableToday)-Number(x.availableNow||x.availableToday)||Number(!!index?.[a.id]?.prediction)-Number(!!index?.[b.id]?.prediction)||Number(!!work[a.id]?.migration)-Number(!!work[b.id]?.migration)||earliestStart(a)-earliestStart(b)||(Date.parse(b.discoveredAt)||0)-(Date.parse(a.discoveredAt)||0)||String(a.id).localeCompare(String(b.id),'en');});
  const currentIds=new Set(missing.map(f=>String(f.id))),retries=boundRetryRecords(previous?.retries||{},currentIds),exhausted=id=>retryBudgetExhausted(retries[id]);
  const hotPending=missing.filter(f=>priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))];
+ // AIR-529: the first instant an OUTSTANDING Film of this queue (not retry-exhausted; a Film with a current prediction cannot change what a start selects) changes hot/cold with the clock alone. The predicate is
+ // `start >= now-72h && start < now+24h` (lower bound inclusive, upper exclusive), so a show is still cold AT start-24h and hot from start-24h+1 ms, and still hot AT start+72h and cold from start+72h+1 ms: the edges
+ // below are those first instants. The batch preflight compares the earliest with the clock, so a rolling-window transition on an unchanged generation is re-evaluated at a natural start (never per submit or complete).
+ let nextWindowChange=Infinity;
+ if(authoritative)for(const film of missing){if(exhausted(String(film.id)))continue;for(const show of film.shows||[]){const at=Number(show?.start);if(!Number.isFinite(at))continue;for(const edge of [at-PRIORITY_HOT_FUTURE_MS+1,at+PRIORITY_HOT_PAST_MS+1])if(edge>now&&edge<nextWindowChange)nextWindowChange=edge;}}
  const hotCount=films.filter(f=>priority[f.id].hot).length,missingHot=missing.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-missingHot,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&fresh.get(String(f.id))).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
  const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:priorityProgrammeRunId,priorityBasis,priorityAsOf,showsSignature:authoritative?(showsSignature.signature??null):null,priorityNextChangeAt:authoritative&&Number.isFinite(nextWindowChange)?new Date(nextWindowChange).toISOString():null,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
  if(recovery.ready){queue.recoveryRevision=recovery.revision;queue.recovery={revision:recovery.revision,activeIntents:recovery.size,denied:recoveryDenied};}
@@ -1537,15 +1538,15 @@ const queueShapeValid=queue=>!!queue&&typeof queue==='object'&&Array.isArray(que
 // Why a persisted queue cannot be advanced as it is (null: it can). The same inputs a rebuild stamps into the queue.
 // ADR 0154. A completed programme authorizes hot/cold order only. An unfinished seal, a new programmeRunId or missing shows never block scoring.
 const PRIORITY_CARRY_MS=36*3600000;
-// The hot window of `predictionPriority`: a show start in [now - 72 h, now + 24 h). A queue is re-evaluated for a clock-only transition at most this often.
-const PRIORITY_HOT_PAST_MS=72*3600000,PRIORITY_HOT_FUTURE_MS=24*3600000,PRIORITY_WINDOW_REEVAL_MS=15*60000;
-// AIR-529: the queue was ranked on a completed programme whose next hot/cold boundary (`priorityNextChangeAt`) has passed, and it has not been rebuilt within the minimum interval. A queue without the field
-// (built before this change) is not judged here; the missing shows signature already rebuilds it once.
+// The hot window of `predictionPriority`: a show start in [now - 72 h, now + 24 h).
+const PRIORITY_HOT_PAST_MS=72*3600000,PRIORITY_HOT_FUTURE_MS=24*3600000;
+// AIR-529: the queue was ranked on a completed programme whose next hot/cold edge (`priorityNextChangeAt`, the first instant the predicate changes) has been reached. There is no grace period: a start at or after the edge rebuilds before it selects,
+// so a Film that became hot is never behind a cold pick. The cost is at most one rebuild per natural start, and only while an edge of outstanding work was crossed since the last rebuild. A queue without the field (built before this change)
+// is not judged here; the missing shows signature already rebuilds it once.
 function windowTransitionCause(queue,report,now=Date.now()){
  if(!queue||queue.priorityBasis!=='completed'||queue.programmeRunId!==report?.runId||!queue.priorityNextChangeAt)return null;
- const next=Date.parse(queue.priorityNextChangeAt),built=Date.parse(queue.refreshedAt||'');
- if(!Number.isFinite(next)||next>now)return null;
- return Number.isFinite(built)&&now-built<PRIORITY_WINDOW_REEVAL_MS?null:'window_transition';
+ const next=Date.parse(queue.priorityNextChangeAt);
+ return Number.isFinite(next)&&next<=now?'window_transition':null;
 }
 function showsAuthoritative(sync,report){
  if(!report?.runId||!Array.isArray(report.films))return false;

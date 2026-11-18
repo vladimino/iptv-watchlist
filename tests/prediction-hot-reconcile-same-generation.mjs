@@ -120,45 +120,57 @@ mode='ok';
  assert.deepEqual(r.data.films.map(x=>x.filmId),['tmdb_900001'],'the new film is delivered');assert.equal((await read()).showsSignature,'e1');
 }
 
-// 4. Clock-only transitions on an UNCHANGED generation and signature: a fixed assigned show enters the hot window (start - 24 h) and later leaves it (start + 72 h). The queue is
-// re-evaluated at a natural start once its stored boundary has passed, at most every 15 minutes, never before the boundary, and never per submit or complete.
+// 4. Clock-only transitions on an UNCHANGED generation and signature. The predicate is `start >= now-72h && start < now+24h`: a show is still cold AT start-24h and hot from +1 ms; still hot AT start+72h and cold from +1 ms.
+// A rebuild exactly at an edge must keep the edge scheduled, and a start after a boundary rebuilds at once (no grace period).
 {
- const HOUR=3600000,realNow=Date.now;let clock=realNow();const T0=clock;Date.now=()=>clock;
+ // The clock is controlled for `Date.now()` AND for `new Date()` (the queue stamps `refreshedAt` with the latter), and it is installed BEFORE the world is built, which captures `Date` into its context.
+ const HOUR=3600000,RealDate=Date;let clock=RealDate.now();const T0=clock;
+ globalThis.Date=class extends RealDate{constructor(...args){if(args.length)super(...args);else super(clock);}static now(){return clock;}};
  try{
-  const c=await flowWorld({films:3});
+  const c=await flowWorld({films:4});
   c.ctx.PublishedEpg={
    currentGeneration:async()=>({authority:'d1',programmeRunId:'p1',phase:'published',fence:'d1:1:p1',generation:1}),
    readDocumentAt:async(env,run,kind)=>c.records.get(kind==='watchlist'?'watchlist.json':'programme.json')??null,
    assignedShowsSignature:async()=>'w0',
   };
-  // tmdb 1: first airing at T0+25h (cold now, hot from T0+1h, cold again after T0+97h). tmdb 2: airing at T0-71h (hot now, cold after T0+1h). tmdb 3: aired ten days ago (always cold).
+  // tmdb 1: first airing T0+25h (cold; hot from T0+1h+1ms). tmdb 2: airing T0-71h (hot; cold from T0+1h+1ms). tmdb 3: airing T0+25h+60001ms (hot from T0+1h+60002ms). tmdb 4: aired ten days ago (always cold).
   const shows=(id,start)=>({tmdbId:id,shows:[{channelId:'c',channel:'C',start,end:start+7200000,basis:'discovery'}]});
-  c.records.set('programme.json',{runId:'p1',films:[],catalogFilms:[shows('1',T0+25*HOUR),shows('2',T0-71*HOUR),shows('3',T0-240*HOUR)]});
+  const S1=T0+25*HOUR,S2=T0-71*HOUR,S3=T0+25*HOUR+60001;
+  c.records.set('programme.json',{runId:'p1',films:[],catalogFilms:[shows('1',S1),shows('2',S2),shows('3',S3),shows('4',T0-240*HOUR)]});
   const read=async()=>(await PredictionD1.openQueue(c.env)).queue;
   const cbody={scope:'watchlist_all',mode:'queued',trigger:'manual',capacity:{remainingPercent:100}};
   const release=()=>sql(c.file,"UPDATE prediction_lease SET expires_at=1, document_json=json_set(document_json,'$.expiresAt',1)");
   const start=async()=>{release();const r=await c.api('batch/start',cbody);if(r.data?.runId&&r.data.status==='running')await c.api('complete',{runId:r.data.runId,reason:'manifest_spent'});return r;};
-  const cdry=()=>c.api('batch/start',{...cbody,dryRun:true});
+  const cdry=async()=>(await c.api('batch/start',{...cbody,dryRun:true})).data;
+  const hotOf=q=>[...q.hotPending].sort();
+  const iso=ms=>new Date(ms).toISOString();
   assert.equal((await c.api('queue/reconcile',{})).status,200);
-  let q=await read();assert.deepEqual([...q.hotPending].sort(),['tmdb_2'],'at T0 only the film airing at T0-71h is hot');
-  assert.equal(q.priorityNextChangeAt,new Date(T0+HOUR).toISOString(),'the next boundary is T0+1h');
-  const built0=q.refreshedAt;
-  // Before the boundary: nothing is due.
-  clock=T0+30*60000;assert.equal((await cdry()).data.priorityCause,undefined,'before the boundary');
-  // After the boundary, cold to hot and hot to cold on the SAME generation and signature.
-  assert.equal((await cdry()).data.hotBasis,undefined,'a current basis adds nothing to the dry-run answer');
-  clock=T0+2*HOUR;{const d=(await cdry()).data;assert.equal(d.priorityCause,'window_transition','boundary passed');assert.deepEqual(d.hotBasis,{status:'degraded',cause:'window_transition',hotRemaining:1,programmeRunId:'p1',showsSignature:'w0',nextChangeAt:new Date(T0+HOUR).toISOString()});}assert.equal((await read()).refreshedAt,built0,'a dry run writes nothing');
+  let q=await read();assert.deepEqual(hotOf(q),['tmdb_2'],'at T0 only the film airing at T0-71h is hot');
+  assert.equal(q.priorityNextChangeAt,iso(T0+HOUR+1),'the first instant the predicate changes is T0+1h+1ms, not T0+1h');
+  // Before the edge, and exactly AT the old edge (the predicate has not changed yet): nothing is due.
+  clock=T0+30*60000;assert.equal((await cdry()).priorityCause,undefined,'before the edge');
+  clock=T0+HOUR;assert.equal((await cdry()).priorityCause,undefined,'at start-24h the show is still cold and at start+72h still hot: not due');
+  // A rebuild EXACTLY at the edge keeps the old classification and must keep the next edge scheduled (it was dropped when the edge was recorded as `edge > now`).
+  assert.equal((await c.api('queue/reconcile',{})).status,200);q=await read();
+  assert.deepEqual(hotOf(q),['tmdb_2'],'exactly at the edge the classification is still the old one');assert.equal(q.priorityNextChangeAt,iso(T0+HOUR+1),'the edge one millisecond later stays scheduled');
+  // +1 ms: due; the next start reconciles both directions.
+  clock=T0+HOUR+1;{const d=await cdry();assert.equal(d.priorityCause,'window_transition');assert.deepEqual(d.hotBasis,{status:'degraded',cause:'window_transition',hotRemaining:1,programmeRunId:'p1',showsSignature:'w0',nextChangeAt:iso(T0+HOUR+1)});}
   assert.equal((await start()).status,200);q=await read();
-  assert.deepEqual([...q.hotPending].sort(),['tmdb_1'],'cold to hot: tmdb_1 entered the window; hot to cold: tmdb_2 left it');
-  assert.ok(q.coldPending.includes('tmdb_2')&&q.coldPending.includes('tmdb_3'));assert.equal(q.programmeRunId,'p1');assert.equal(q.priorityNextChangeAt,new Date(T0+97*HOUR).toISOString());
-  const built1=q.refreshedAt;
-  // No loop: the next start does not rebuild, and neither does one right after another boundary inside the 15-minute minimum.
-  clock+=60000;assert.equal((await start()).status,200);assert.equal((await read()).refreshedAt,built1,'no rebuild without a passed boundary');
-  // The film leaves the window at T0+97h: cold again, re-evaluated at the next start after the interval.
-  clock=T0+98*HOUR;assert.equal((await cdry()).data.priorityCause,'window_transition');
-  assert.equal((await start()).status,200);q=await read();assert.equal(q.hotPending.length,0,'hot to cold after the show expired past 72 h');assert.equal(q.priorityNextChangeAt,null);
-  const built2=q.refreshedAt;clock+=5*60000;assert.equal((await cdry()).data.priorityCause,undefined);assert.equal((await read()).refreshedAt,built2);
- }finally{Date.now=realNow;}
+  assert.deepEqual(hotOf(q),['tmdb_1'],'cold to hot at +1ms and hot to cold at +1ms');assert.ok(q.coldPending.includes('tmdb_2'));assert.equal(q.programmeRunId,'p1');
+  assert.equal(q.priorityNextChangeAt,iso(S3-24*HOUR+1),'the next edge is the third film, one minute later');
+  // No grace period: a boundary crossed one minute after the rebuild is reflected by the very next start, before any cold pick.
+  const rebuilt=q.refreshedAt;
+  clock=S3-24*HOUR;assert.equal((await cdry()).priorityCause,undefined,'at the edge itself: not due');
+  clock=S3-24*HOUR+1;assert.equal((await cdry()).priorityCause,'window_transition','one minute after the rebuild, 1 ms past the edge: due immediately');
+  assert.equal((await start()).status,200);q=await read();assert.deepEqual(hotOf(q),['tmdb_1','tmdb_3'],'the film that became hot is not behind a cold pick');assert.notEqual(q.refreshedAt,rebuilt);
+  // No loop: with no edge crossed since the rebuild, the next start rebuilds nothing.
+  const again=q.refreshedAt;clock+=1000;assert.equal((await start()).status,200);assert.equal((await read()).refreshedAt,again,'no rebuild without a crossed edge');
+  // Hot to cold when the shows pass 72 h: exactly at start+72h still hot, 1 ms later cold.
+  clock=S1+72*HOUR;assert.equal((await cdry()).priorityCause,undefined,'exactly at start+72h the film is still hot');
+  clock=S1+72*HOUR+1;assert.equal((await cdry()).priorityCause,'window_transition');
+  assert.equal((await start()).status,200);q=await read();assert.ok(!q.hotPending.includes('tmdb_1'),'hot to cold 1 ms past start+72h');
+  clock=S3+72*HOUR+1;assert.equal((await start()).status,200);q=await read();assert.equal(q.hotPending.length,0);assert.equal(q.priorityNextChangeAt,null);
+ }finally{globalThis.Date=RealDate;}
 }
 console.log('3,200-film same-generation reconcile ok; signature reads',reads);
 console.log('prediction hot reconcile same generation ok');
