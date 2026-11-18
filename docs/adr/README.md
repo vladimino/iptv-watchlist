@@ -4,7 +4,9 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 ## Proposed records
 
-No open proposals at this time.
+| ADR | Status | Decision |
+| --- | --- | --- |
+| [0168 — A TMDB card with no genre is unclassified and is not verified on identity alone](0168-empty-genre-card-is-unclassified.md) | **Proposed** 2026-11-18 ([AIR-501](https://trello.com/c/ShipZn0N) RCA; owner acceptance on the pull request) | An empty TMDB genre list becomes `needs_verification` / `genre_evidence_missing`; a Music-only card with `concert` in its overview is `concert_recording_ambiguous`. Owner confirmation may admit either. Refines [ADR 0150](0150-documentary-and-concert-film-exclusion.md). |
 
 ## Accepted records
 

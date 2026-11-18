@@ -126,7 +126,7 @@ const plainOf = (value, drop = /"(checkedAt|startedAt|finishedAt|at|hopId|discov
 for (const key of ['epg/discovery-resolution.json', 'epg/discovered-films.json', 'epg/discovery-status.json']) assert.equal(plainOf(streamedRun.records.get(key)), plainOf(run.records.get(key)), key);
 assert.deepEqual({...streamedSummary, startedAt: 0, finishedAt: 0, at: 0, hopId: 0}, {...summary, startedAt: 0, finishedAt: 0, at: 0, hopId: 0});
 // A film whose TMDB detail has an overview needs no second read.
-const overview = harness(url => url.includes('/movie/11') ? new Response(JSON.stringify({id: 11, title: 'Дюна', original_title: 'Dune', release_date: '1984-01-01', runtime: 137, overview: 'TMDB', genres: [], credits: {crew: [], cast: []}, translations: {translations: []}, alternative_titles: {titles: []}})) : empty(), {stream: true});
+const overview = harness(url => url.includes('/movie/11') ? new Response(JSON.stringify({id: 11, title: 'Дюна', original_title: 'Dune', release_date: '1984-01-01', runtime: 137, overview: 'TMDB', genres: [{name: 'Drama'}], credits: {crew: [], cast: []}, translations: {translations: []}, alternative_titles: {titles: []}})) : empty(), {stream: true});
 overview.records.set('programme.json', {runId: 'run-1', films: []});
 overview.records.set(LEDGER, {programmeRunId: 'run-1', items: [dune, ...filler]});
 overview.records.set('epg/discovered-films.json', catalog);

@@ -84,7 +84,7 @@ assert.equal(counts.rejectedNonfilm,1);assert.equal(counts.readyNow,1);
 
 // Discovery chunk: the wrongly excluded film is recovered by the normal cycle, the true episode never reaches TMDB,
 // and a verified identity is not overwritten by screening.
-const movie={id:1895,title:'Звёздные войны: Эпизод 3 – Месть ситхов',original_title:'Star Wars: Episode III - Revenge of the Sith',release_date:'2005-05-17',runtime:140,overview:'',genres:[],credits:{crew:[],cast:[]}};
+const movie={id:1895,title:'Звёздные войны: Эпизод 3 – Месть ситхов',original_title:'Star Wars: Episode III - Revenge of the Sith',release_date:'2005-05-17',runtime:140,overview:'',genres:[{id:18,name:'Drama'}],credits:{crew:[],cast:[]}};
 const tmdb=harness(url=>new Response(JSON.stringify(url.includes('/search/movie?')?{total_pages:1,results:[movie]}:movie)));
 const verifiedEpisode=candidate('Другой пример Сезон 1 Серия 3',null);
 tmdb.records.set('programme.json',{runId:'run-1',films:[]});

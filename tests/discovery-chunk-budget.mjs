@@ -260,7 +260,7 @@ async function lostLease({failAt,mutate}){
 // 7. The TMDB call cap is enforced at the request boundary: a candidate needing a request past it stops the loop.
 // Fifteen candidates whose Film is already in the catalog need only the detail request (15 requests); the sixteenth is
 // unknown, its first search is request 16 and its second search would make 17.
-const movieFor=(id,title)=>({id,title,original_title:title,release_date:'2000-06-01',runtime:100,overview:'x',credits:{cast:[],crew:[]},translations:{translations:[]},alternative_titles:{titles:[]}});
+const movieFor=(id,title)=>({id,title,original_title:title,release_date:'2000-06-01',runtime:100,overview:'x',genres:[{id:18,name:'Drama'}],credits:{cast:[],crew:[]},translations:{translations:[]},alternative_titles:{titles:[]}});
 const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+index;return {id:'tmdb_'+tmdb,tmdbId:String(tmdb),canonicalIdentity:'tmdb:'+tmdb,title:'Film '+key,original:'Film '+key,year:2000};};
 {
  const catalog={};for(let index=0;index<15;index++){const film=knownFilm(index);catalog[film.id]=film;}
