@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {evaluate,loadFixtures} from './prediction-scoring-rubric.mjs';
+import {evaluate,loadFixtures,list} from './prediction-scoring-rubric.mjs';
 
 const root=path.join(path.dirname(fileURLToPath(import.meta.url)),'..');
 const sha=t=>createHash('sha256').update(t).digest('hex');
@@ -88,7 +88,7 @@ export function grade(manifest,rawByRun){
   const res=output?evaluate([output]):null;
   const checks=res?res.cases.find(c=>c.caseId===r.caseId).checks:[{id:'output_parsed',status:'fail',detail:rec?(parsed?.failure?'generator returned failure '+JSON.stringify(parsed.failure):'unparseable answer'):'missing answer'}];
   const p=output?.prediction||{},a=output?.assessment||{};
-  rows.push({runId:r.runId,caseId:r.caseId,variant:r.variant,replicate:r.replicate,toolUses:rec?.toolUses??null,predictedRating:p.predictedRating??null,probability4Plus:p.probability4Plus??null,confidence:p.confidence??null,researchStatus:a.research?.status??null,webSources:(a.sources||[]).filter(s=>s?.kind==='web_research').map(s=>s.access),against:(a.tasteSignals||[]).filter(s=>s?.direction==='against').length,supports:(a.tasteSignals||[]).filter(s=>s?.direction==='supports').length,highRisks:(a.risks||[]).filter(x=>x?.severity==='high').length,uncertainties:(a.uncertainties||[]).length,checks:checks.map(c=>({id:c.id,status:c.status}))});
+  rows.push({runId:r.runId,caseId:r.caseId,variant:r.variant,replicate:r.replicate,toolUses:rec?.toolUses??null,predictedRating:p.predictedRating??null,probability4Plus:p.probability4Plus??null,confidence:p.confidence??null,researchStatus:a.research?.status??null,webSources:list(a.sources).filter(s=>s?.kind==='web_research').map(s=>s.access),against:list(a.tasteSignals).filter(s=>s?.direction==='against').length,supports:list(a.tasteSignals).filter(s=>s?.direction==='supports').length,highRisks:list(a.risks).filter(x=>x?.severity==='high').length,uncertainties:list(a.uncertainties).length,checks:checks.map(c=>({id:c.id,status:c.status}))});
  }
  return rows;
 }

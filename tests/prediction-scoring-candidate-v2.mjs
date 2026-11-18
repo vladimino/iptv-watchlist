@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {evaluate,loadFixtures} from '../scripts/prediction-scoring-rubric.mjs';
-import {CANDIDATES,LATEST_CANDIDATE,plan,promptTexts} from '../scripts/prediction-scoring-ab-harness.mjs';
+import {CANDIDATES,LATEST_CANDIDATE,plan,promptTexts,grade} from '../scripts/prediction-scoring-ab-harness.mjs';
 
 const sha=t=>createHash('sha256').update(t).digest('hex');
 const block=(doc,name)=>{const m=doc.match(new RegExp('---BEGIN '+name+'---\\n([\\s\\S]*?)\\n---END '+name+'---'));assert.ok(m,name);return m[1];};
@@ -73,5 +73,25 @@ const s3={caseId:'s3',prediction:{predictedRating:4.5,probability4Plus:0.75,conf
 assert.equal(check(s3,'match_signal_suspect'),'pass','a grounded positive on s3 is not flagged');
 const review=evaluate([{...s4,prediction:{...s4.prediction,matchSignals:['Premise: осада']}}],{inputs,rubric}).cases.find(c=>c.caseId==='s4').checks.find(c=>c.id==='grounding_review');
 assert.equal(review.status,'flag');assert.ok(/claims/.test(review.detail));
+
+// 7. Preflight review 5951825430: malformed list fields from a fresh model never throw; each is graded per run.
+const malformed=[
+ ['matchSignals object',{matchSignals:{x:'y'}},{}],
+ ['matchSignals number',{matchSignals:123},{}],
+ ['matchSignals null',{matchSignals:null},{}],
+ ['tasteSignals object, risks string, sources object, uncertainties number',{matchSignals:[]},{tasteSignals:{direction:'against'},risks:'high',sources:{kind:'web_research'},uncertainties:3}],
+];
+for(const caseId of ['s1','s2','s3','s4']){
+ const run={runId:'m-'+caseId,caseId,variant:'candidate',replicate:1};
+ for(const [label,pOver,aOver] of malformed){
+  const answer=JSON.stringify({...(caseId==='s2'?{}:{fingerprint:{evidence:{execution:{payoff:{basis:'web_research'}},plotMechanics:'x'}}}),prediction:{predictedRating:3,probability4Plus:0.4,confidence:'low',mainRisk:'x',moodLabels:['a','b'],...pOver},assessment:{research:{status:'not_attempted'},...aOver}});
+  let rows;assert.doesNotThrow(()=>{rows=grade({runs:[run]},{[run.runId]:{answer}});},caseId+' '+label+' must not throw');
+  const checks=rows[0].checks;assert.ok(checks.some(c=>c.id==='grounding_review'&&c.status==='flag'),caseId+' '+label+' graded');
+  if('matchSignals' in pOver&&!Array.isArray(pOver.matchSignals))assert.equal(checks.find(c=>c.id==='match_signals_shape').status,'fail',caseId+' '+label+' is a normal shape fail');
+ }
+}
+{const run={runId:'m-all',caseId:'s4',variant:'base',replicate:1};
+ const rows=grade({runs:[run,{...run,runId:'m-ok'}]},{'m-all':{answer:JSON.stringify({prediction:{matchSignals:{x:'y'}},assessment:{}})},'m-ok':{answer:JSON.stringify({prediction:{predictedRating:2,probability4Plus:0.04,matchSignals:[]},assessment:{}})}});
+ assert.equal(rows.length,2,'one malformed answer does not abort grading of the others');}
 
 console.log('prediction-scoring-candidate-v2: v1->v2 minimal diff, base+two lines, harness reproducibility and matchSignals grader checks passed (static)');
