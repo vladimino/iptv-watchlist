@@ -492,6 +492,9 @@ export const FILES={
  "discovery-reconsider.mjs": {
   "suite": "core"
  },
+ "discovery-fence-collision.mjs": {
+  "suite": "core"
+ },
  "discovery-recovery.mjs": {
   "suite": "core"
  },

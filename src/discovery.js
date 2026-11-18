@@ -352,6 +352,13 @@ async function publishedPointer(env){
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null};
 }
+const DISCOVERY_FENCE_COLLISION_RETRIES=2,DISCOVERY_FENCE_COLLISION_DEFER_MS=30000;
+// The authority gate still names this run and is ready: a fence refusal then was a generation-counter collision, not a switch of the published run.
+async function authorityStillOwnsRun(env,runId){
+ if(typeof DiscoveryAuthority==='undefined')return true;
+ const gate=await DiscoveryAuthority.readAuthority(env);
+ return !!gate.ready&&gate.transfer!=='loading'&&(gate.programmeRunId??null)===runId;
+}
 async function publishedGenerationMatches(env,seenRunId){
  const generation=await publishedPointer(env);
  return !(generation?.phase==='published'&&seenRunId&&generation.programmeRunId!==seenRunId);
@@ -767,9 +774,21 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   timings.renewals++;if(timings.firstRenewMs==null)timings.firstRenewMs=Date.now()-t0;
  };
  // A D1 write that fails its fence is either a lost lease (the renewal throws) or a generation that moved under it.
+ // AIR-534: a discovery_fence is a CAS collision (the hourly reporting write bumps discovery_authority.generation) as often as a real generation switch. The rolled-back batch is retried a bounded
+ // number of times while the published run is still this chunk's run; only a real switch, a gate that is no longer ready for this run, or exhausted retries return null.
+ let generationCollision=false;
  const guarded=async write=>{
-  try{return await write();}
-  catch(e){if(e?.code!=='discovery_fence')throw e;try{await fence();}catch(le){throw lost(le,'write');}return null;}
+  for(let attempt=0;;attempt++){
+   try{return await write();}
+   catch(e){
+    if(e?.code!=='discovery_fence')throw e;
+    try{await fence();}catch(le){throw lost(le,'write');}
+    const sameRun=!source.programmeRunId||(await publishedGenerationMatches(env,source.programmeRunId)&&await authorityStillOwnsRun(env,source.programmeRunId));
+    if(!sameRun)return null;
+    if(attempt>=DISCOVERY_FENCE_COLLISION_RETRIES){generationCollision=true;return null;}
+    timings.fenceRetries=(timings.fenceRetries||0)+1;
+   }
+  }
  };
  const selectAfter=typeof last?.selectAfter==='string'?last.selectAfter:'';
  const touchAfter=typeof last?.touchAfter==='string'?last.touchAfter:'';
@@ -840,7 +859,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  let checked=0,added=0,tmdbCalls=0,screenedOut=0,knownAliases=0,touchedWritten=0,cheapRemaining=0,deferred=0;
  const starved=[];
  const deferredKeys=new Set();
- const programmeChanged=()=>({schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,currentProgrammeRunId:null,timings});
+ const programmeChanged=()=>generationCollision?({schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:new Date(Date.now()+DISCOVERY_FENCE_COLLISION_DEFER_MS).toISOString(),at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,generationCollision:true,timings}):({schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,currentProgrammeRunId:null,timings});
  // ADR 0142 decisions 4 and 5. Every assignment is a guarded insert behind the stored decision; the totals reach the chunk summary and the Discovery status.
  const assignment={assigned:replayRun.outcomes.assigned,present:0,evidence_drift:replayRun.outcomes.evidence_drift,slot_taken:0,film_absent:replayRun.outcomes.film_absent,stale_run:0,decision_changed:0,observation_inactive:0,slot_absent:0,refused:replayRun.refused?1:0,replayed:0,replayRemaining:0,bulkObservations:replayRun.observations,bulkPages:replayRun.pages,bulkGuardSkipped:replayRun.outcomes.guard_skipped,bulkComplete:replayRun.complete,bulkResting:!!replayRun.skipped};
  const candidateByKey=new Map(),driftSeen=new Map();
