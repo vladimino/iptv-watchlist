@@ -35,7 +35,7 @@ const bucket={
  async list({prefix=''}={}){return {objects:[...records.keys()].filter(k=>k.startsWith(prefix)).sort().map(key=>({key})),truncated:false};}
 };
 const set=(key,value)=>{records.set(key,structuredClone(value));etags.set(key,String(++revision));};
-const env={BUCKET:bucket,LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.test/guide.xml'};
+const env={BUCKET:bucket,LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.test/guide.xml',METADATA_CACHE_DB_OPTIONAL:'standin'}; // ADR 0162: no D1 binding here, so the explicit local metadata-cache stand-in
 const execution={waitUntil(){}};
 const post=async(path,body={})=>{const response=await worker.fetch(new Request('https://iptv.example'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),env,execution);return {status:response.status,data:await response.json()};};
 const read=async path=>(await worker.fetch(new Request('https://iptv.example'+path),env,execution)).json();

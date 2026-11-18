@@ -21,6 +21,8 @@ const migrated=last=>{
  const file=path.join(root,'prediction-'+(databases++)+'.sqlite');
  const db=d1Standin(file);
  for(const name of namesUntil(last))db.sql(fs.readFileSync('migrations/'+name+'.sql','utf8').replace(/;\s*$/,''));
+ // ADR 0162: a metadata-cache marker that is not d1 is refused, so the fixture serves the (empty) cache from D1.
+ if(namesUntil(last).includes('0006_metadata_cache'))db.sql("UPDATE metadata_cache_authority SET mode='d1'");
  return db;
 };
 const one=(db,sql)=>Object.values(db.sql(sql)[0]||{})[0];
@@ -239,7 +241,7 @@ const put=(bucket,key,value)=>bucket.put(key,JSON.stringify(value));
  assert.equal(status.schema,true);
  assert.equal(status.schemaVersion,7);
  assert.equal(status.predictionMode,'r2');
- assert.equal(status.cacheMode,'r2');
+ assert.equal(status.cacheMode,'d1','the fixture puts the metadata-cache marker at d1 (ADR 0162)');
  const partial=migrated('0007_prediction_authority');
  partial.sql('DROP TABLE prediction_queue');
  const blind=await projector.d1EnrichmentStatus(partial,{});

@@ -223,7 +223,7 @@ assert.equal(personSourcesOf(film(),people)[0].id,PID);
 }
 
 function workerCtx(CanonicalMetadataSync,files){
- const env={BUCKET:{get:async key=>files.has(key)?{json:async()=>structuredClone(files.get(key))}:null,put:async(key,body)=>{files.set(key,JSON.parse(body));}}};
+ const env={METADATA_CACHE_DB_OPTIONAL:'standin',BUCKET:{get:async key=>files.has(key)?{json:async()=>structuredClone(files.get(key))}:null,put:async(key,body)=>{files.set(key,JSON.parse(body));}}};
  const ctx=vm.createContext({env,Response,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,CanonicalMetadataSync,fetch:async()=>{throw new Error('unexpected fetch');}});
  vm.runInContext(scoped('src/metadata-cache.js','MetadataCache')+'\n'+fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8')+'\n'+fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),ctx);
  return ctx;

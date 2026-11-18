@@ -1,8 +1,10 @@
-// ADR 0073. The metadata.json working set used by beginSync and metadataSync.
-// Schema v5 keeps the R2 object and does not write these tables. Schema v6 or later with a missing
-// table or marker fails closed. A later contract version does not by itself drop d1 mode while
-// the cache tables and a valid marker row are present. Mode d1 reads and writes this table and
-// does not fall back to the object. This module does not import. The Worker bundle wraps it in a scope.
+// ADR 0073, ADR 0162. The metadata.json working set used by beginSync and metadataSync. D1 is the
+// only authority: the cache is served only while its marker says mode d1. A marker in any other
+// mode, a missing binding, a missing schema_contract, a contract below version 6 or missing tables
+// fails closed (metadata_cache_unavailable). Only the explicit local stand-in
+// (METADATA_CACHE_DB_OPTIONAL=standin) keeps the R2 object, for development and the test harness.
+// Mode d1 reads and writes the table and does not fall back to the object; metadata.json is the
+// mirror written after each commit. This module does not import. The Worker bundle wraps it in a scope.
 
 export const METADATA_FRESH_MS=30*86400000;
 const MIRROR_KEY='metadata.json';
@@ -44,24 +46,29 @@ function sameValue(left,right){
 }
 function payload(record){return JSON.stringify(record===undefined?null:record);}
 
-export async function readAuthority(db){
- if(!db)return {mode:'r2',tables:false,version:null,ready:false};
+function database(source){return binding(source)||typeof source?.get==='function'?source:source?.DB;}
+function standin(source){return !!source&&!binding(source)&&typeof source?.get!=='function'&&source.METADATA_CACHE_DB_OPTIONAL==='standin';}
+const STANDIN={mode:'standin',tables:false,version:null,ready:false};
+// `source` is the Worker env (its DB binding and the explicit stand-in flag) or a database itself.
+export async function readAuthority(source){
+ const db=database(source),local=standin(source);
+ if(!db){if(local)return STANDIN;throw failed('metadata_cache_unavailable');}
  let version;
  try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
  catch(error){
-  if(/no such table/i.test(String(error?.message||error)))return {mode:'r2',tables:false,version:null,ready:false};
+  if(/no such table/i.test(String(error?.message||error))&&local)return STANDIN;
   throw failed('metadata_cache_unavailable',error);
  }
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('metadata_cache','metadata_cache_authority','metadata_cache_cas')")).map(row=>row.name);}
  catch(error){throw failed('metadata_cache_unavailable',error);}
  const tables=names.includes('metadata_cache')&&names.includes('metadata_cache_authority')&&names.includes('metadata_cache_cas');
- if(!(Number(version)>=6))return {mode:'r2',tables,version,ready:false};
+ if(!(Number(version)>=6)){if(local)return {...STANDIN,tables,version};throw failed('metadata_cache_unavailable');}
  if(!tables)throw failed('metadata_cache_unavailable');
  let row;
  try{row=await one(db,'SELECT mode, cache_generation AS cacheGeneration, mirror_generation AS mirrorGeneration, mirror_etag AS mirrorEtag FROM metadata_cache_authority WHERE id=1');}
  catch(error){throw failed('metadata_cache_unavailable',error);}
- if(!row||(row.mode!=='r2'&&row.mode!=='d1'))throw failed('metadata_cache_unavailable');
+ if(!row||row.mode!=='d1')throw failed('metadata_cache_unavailable');
  return {mode:row.mode,tables:true,version,ready:row.mode==='d1',cacheGeneration:Number(row.cacheGeneration),mirrorGeneration:Number(row.mirrorGeneration),mirrorEtag:row.mirrorEtag??null};
 }
 
@@ -86,11 +93,11 @@ async function readMirror(env){
 function putMirror(bucket,text,onlyIf){
  return bucket.put(MIRROR_KEY,text,{...JSON_PUT,...(onlyIf?{onlyIf}:{})});
 }
-function owns(authority,generation,mode){
- return !!authority&&authority.mode===mode&&authority.cacheGeneration===generation;
+function owns(authority,generation){
+ return !!authority&&authority.mode==='d1'&&authority.cacheGeneration===generation;
 }
-async function rememberMirror(db,generation,etag,mode){
- await db.prepare('UPDATE metadata_cache_authority SET mirror_generation=?, mirror_etag=? WHERE id=1 AND mode=? AND cache_generation=?').bind(generation,etag,mode,generation).run();
+async function rememberMirror(db,generation,etag){
+ await db.prepare('UPDATE metadata_cache_authority SET mirror_generation=?, mirror_etag=? WHERE id=1 AND mode=\'d1\' AND cache_generation=?').bind(generation,etag,generation).run();
  return readAuthority(db);
 }
 async function sameMirror(object,records){
@@ -102,28 +109,28 @@ async function sameMirror(object,records){
 // Publishes only while this generation is still the cache generation. A newer commit
 // may replace this object. This generation must not replace a newer one.
 async function publishMirror(db,bucket,records,authority){
- const generation=authority.cacheGeneration,mode=authority.mode,text=JSON.stringify(records);
+ const generation=authority.cacheGeneration,text=JSON.stringify(records);
  let current=await readAuthority(db);
- if(!owns(current,generation,mode))return {mirrored:false,superseded:true,authority:current};
+ if(!owns(current,generation))return {mirrored:false,superseded:true,authority:current};
  let saved=current.mirrorEtag?await putMirror(bucket,text,{etagMatches:current.mirrorEtag}):null;
  if(!saved){
   current=await readAuthority(db);
-  if(!owns(current,generation,mode))return {mirrored:false,superseded:true,authority:current};
+  if(!owns(current,generation))return {mirrored:false,superseded:true,authority:current};
   const object=await bucket.get(MIRROR_KEY);
   saved=await sameMirror(object,records);
   if(!saved){
    current=await readAuthority(db);
-   if(!owns(current,generation,mode))return {mirrored:false,superseded:true,authority:current};
+   if(!owns(current,generation))return {mirrored:false,superseded:true,authority:current};
    saved=object?await putMirror(bucket,text,{etagMatches:object.etag}):await putMirror(bucket,text,{etagDoesNotMatch:'*'});
   }
  }
  if(!saved){
   current=await readAuthority(db);
-  if(!owns(current,generation,mode))return {mirrored:false,superseded:true,authority:current};
+  if(!owns(current,generation))return {mirrored:false,superseded:true,authority:current};
   saved=await sameMirror(await bucket.get(MIRROR_KEY),records);
   if(!saved)return {mirrored:false,authority:current};
  }
- const next=await rememberMirror(db,generation,saved.etag,mode);
+ const next=await rememberMirror(db,generation,saved.etag);
  return {mirrored:next.mirrorGeneration===generation&&next.mirrorEtag===saved.etag,etag:saved.etag,authority:next};
 }
 
@@ -141,8 +148,8 @@ async function readStableCache(db){
  throw failed('metadata_cache_fence');
 }
 export async function loadMetadataWorkingSet(env){
- const authority=await readAuthority(env?.DB);
- if(authority.mode!=='d1')return {mode:'r2',records:await readMirror(env),complete:true,authority};
+ const authority=await readAuthority(env);
+ if(authority.mode==='standin')return {mode:'standin',records:await readMirror(env),complete:true,authority};
  let snapshot=await readStableCache(env.DB);
  for(let attempt=0;attempt<3;attempt++){
   if(snapshot.authority.cacheGeneration===snapshot.authority.mirrorGeneration)break;
@@ -198,109 +205,14 @@ export async function commitMetadataCache(db,bucket,records,authority){
 
 export async function saveMetadataWorkingSet(env,records,working){
  if(working?.mode==='d1')return commitMetadataCache(env.DB,env.BUCKET,records,{...working.authority,complete:working.complete!==false,mode:'d1'});
- const authority=await readAuthority(env?.DB);
- if(Number(authority.version)>=6){
-  if(authority.mode!=='r2')throw failed('metadata_cache_not_authoritative');
-  const next=(authority.cacheGeneration??0)+1;
-  await fenced(env.DB,[
-   ['UPDATE metadata_cache_authority SET cache_generation=? WHERE id=1 AND mode=\'r2\' AND cache_generation=?',[next,authority.cacheGeneration]],
-   [FENCE_SQL,[]],
-  ]);
-  const saved=await putMirror(env.BUCKET,JSON.stringify(records));
-  if(!saved?.etag)throw failed('metadata_cache_fence');
-  const remembered=await rememberMirror(env.DB,next,saved.etag,'r2');
-  if(remembered.mode!=='r2'||remembered.cacheGeneration!==next||remembered.mirrorGeneration!==next)throw failed('metadata_cache_cas');
-  return {mode:'r2',cacheGeneration:next,authority:remembered};
- }
+ const authority=await readAuthority(env);
+ if(authority.mode!=='standin')throw failed('metadata_cache_not_authoritative');
  await putMirror(env.BUCKET,JSON.stringify(records));
- return {mode:'r2'};
+ return {mode:'standin'};
 }
 
-async function fencedMirror(bucket){
- const object=await bucket.get(MIRROR_KEY);
- if(!object)throw failed('metadata_cache_mirror_missing');
- const etag=object.etag??null;
- let records;
- try{records=await object.json();}catch{throw failed('metadata_cache_mirror_invalid');}
- if(!records||typeof records!=='object'||Array.isArray(records))throw failed('metadata_cache_mirror_invalid');
- const again=await bucket.head(MIRROR_KEY);
- if((again?.etag??null)!==etag)throw failed('metadata_cache_fence');
- return {records,etag};
-}
-async function prove(db,records){
- const stored=await readAllRecords(db);
- const left=Object.keys(records),right=Object.keys(stored);
- if(left.length!==right.length||left.some(key=>!Object.prototype.hasOwnProperty.call(stored,key)||!sameValue(records[key],stored[key])))throw failed('metadata_cache_loss');
- return stored;
-}
-
-export async function importMetadataCache(db,bucket,{confirm}={}){
- if(confirm!=='load')throw failed('metadata_cache_confirm');
- const authority=await readAuthority(db);
- if(!(Number(authority.version)>=6)||!authority.tables)throw failed('metadata_cache_schema');
- if(authority.mode==='d1')throw failed('metadata_cache_authoritative');
- const {records,etag}=await fencedMirror(bucket);
- const keys=Object.keys(records);
- const next=(authority.cacheGeneration??0)+1;
- await fenced(db,[
-  ['UPDATE metadata_cache_authority SET cache_generation=?, mirror_generation=?, mirror_etag=? WHERE id=1 AND mode=\'r2\' AND cache_generation=?',[next,next,etag,authority.cacheGeneration]],
-  [FENCE_SQL,[]],
-  ['DELETE FROM metadata_cache',[]],
-  ...keys.map(key=>upsert(key,records[key],next)),
- ]);
- await prove(db,records);
- const after=await readAuthority(db);
- if(after.mode!=='r2'||after.cacheGeneration!==next||after.mirrorGeneration!==next||after.mirrorEtag!==etag)throw failed('metadata_cache_loss');
- return {mode:'r2',keys:keys.length,cacheGeneration:next,mirrorGeneration:next,mirrorEtag:etag};
-}
-
-export async function activateMetadataCache(db,bucket,{confirm}={}){
- if(confirm!=='activate')throw failed('metadata_cache_confirm');
- const authority=await readAuthority(db);
- if(!(Number(authority.version)>=6)||!authority.tables)throw failed('metadata_cache_schema');
- if(authority.mode!=='r2')throw failed('metadata_cache_authoritative');
- if(authority.cacheGeneration!==authority.mirrorGeneration)throw failed('metadata_cache_fence');
- const {records,etag}=await fencedMirror(bucket);
- if(etag!==authority.mirrorEtag)throw failed('metadata_cache_fence');
- await prove(db,records);
- await fenced(db,[
-  ['UPDATE metadata_cache_authority SET mode=\'d1\' WHERE id=1 AND mode=\'r2\' AND cache_generation=? AND mirror_generation=? AND mirror_etag=? AND cache_generation=mirror_generation',[authority.cacheGeneration,authority.mirrorGeneration,authority.mirrorEtag]],
-  [FENCE_SQL,[]],
- ]);
- const after=await readAuthority(db);
- if(after.mode!=='d1'||after.cacheGeneration!==authority.cacheGeneration)throw failed('metadata_cache_cas');
- return after;
-}
-
-// Returns readers to metadata.json only when that object matches the latest cache generation.
-// A lagging mirror is published once. If it still does not verify, the mode stays d1.
-export async function revertMetadataCache(db,bucket,{confirm}={}){
- if(confirm!=='r2')throw failed('metadata_cache_confirm');
- if(!bucket||typeof bucket.get!=='function')throw failed('metadata_cache_mirror_missing');
- let authority=await readAuthority(db);
- if(!(Number(authority.version)>=6)||!authority.tables)throw failed('metadata_cache_schema');
- if(authority.mode!=='d1')throw failed('metadata_cache_not_authoritative');
- if(authority.cacheGeneration!==authority.mirrorGeneration){
-  let repaired;
-  try{repaired=await publishMirror(db,bucket,await readAllRecords(db),authority);}
-  catch(error){throw failed('metadata_cache_fence',error);}
-  authority=repaired.authority||await readAuthority(db);
-  if(!repaired.mirrored||authority.mode!=='d1'||authority.cacheGeneration!==authority.mirrorGeneration)throw failed('metadata_cache_fence');
- }
- const mirror=await fencedMirror(bucket);
- if(mirror.etag!==authority.mirrorEtag||authority.cacheGeneration!==authority.mirrorGeneration)throw failed('metadata_cache_fence');
- await prove(db,mirror.records);
- await fenced(db,[
-  ['UPDATE metadata_cache_authority SET mode=\'r2\' WHERE id=1 AND mode=\'d1\' AND cache_generation=? AND mirror_generation=? AND mirror_etag=? AND cache_generation=mirror_generation',[authority.cacheGeneration,authority.mirrorGeneration,authority.mirrorEtag]],
-  [FENCE_SQL,[]],
- ]);
- const after=await readAuthority(db);
- if(after.mode!=='r2'||after.cacheGeneration!==authority.cacheGeneration||after.mirrorGeneration!==authority.mirrorGeneration)throw failed('metadata_cache_cas');
- return after;
-}
-
-// The projector calls this with its query adapter. Mode r2 leaves the R2 object in place.
-// Mode d1 replaces store.metadata before the view is built and never writes the cache.
+// The projector calls this with its query adapter, only at contract version 6 or later. Mode d1
+// replaces store.metadata before the view is built and never writes the cache; any other marker throws.
 export async function useAuthoritativeMetadata(db,store){
  const authority=await readAuthority(db);
  if(authority.mode!=='d1')return authority;
