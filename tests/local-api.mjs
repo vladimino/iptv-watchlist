@@ -65,7 +65,7 @@ for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show
 moodDb.sql("UPDATE prediction_domain_authority SET mode='d1'");
 const features=JSON.stringify({fingerprintHash:'d1-tense',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,invalidatedAt:null,generatedAt:'2026-11-01T00:00:00.000Z',produced:null,previous:null,plotMechanics:['heist'],moodLabels:['tense'],execution:{pace:'fast'}});
 moodDb.sql("INSERT INTO prediction_fingerprint (film_id,fingerprint_hash,schema_version,prompt_version,generated_at,invalidated_at,r2_key,content_sha256,features_json) VALUES ('movie-2','d1-tense',1,1,'2026-11-01T00:00:00.000Z',NULL,'enrichment/films/movie-2/fingerprints/d1-tense.json','abc','"+features.replaceAll("'","''")+"')");
-const overlaidResponse=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:moodDb});
+const overlaidResponse=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:moodDb,PUBLISHED_EPG_DB_OPTIONAL:'standin'}); // ADR 0162: a schema below 8 is the published EPG's local stand-in only when it is opted in
 assert.equal(overlaidResponse.status,200);
 const overlaid=await overlaidResponse.json();
 assert.deepEqual(overlaid.films['movie-2'].moodIds,['tense']);

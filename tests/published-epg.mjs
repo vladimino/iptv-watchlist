@@ -7,7 +7,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import * as PublishedEpg from '../src/published-epg.js';
-import {CHUNK_BYTES,CHUNK_STATEMENTS,CLAIM_TTL_MS,MAX_STATEMENT_BYTES,activatePublished,advancedFence,currentGeneration,generationObjectKey,importPublished,patchProgramme,programmeShows,publishGeneration,readAuthority,readDocument,readDocumentAt,readMembers,readShows,releasePublished,repairMirrors,revertPublished,saveWatchlist,sealPublished,writeMirrors} from '../src/published-epg.js';
+import {CHUNK_BYTES,CHUNK_STATEMENTS,CLAIM_TTL_MS,MAX_STATEMENT_BYTES,advancedFence,currentGeneration,generationObjectKey,patchProgramme,programmeShows,publishGeneration,readAuthority,readDocument,readDocumentAt,readMembers,readShows,repairMirrors,saveWatchlist,writeMirrors} from '../src/published-epg.js';
 import {DEFAULT_CHUNK_BYTES,DEFAULT_CHUNK_STATEMENTS,MAX_ROW_STATEMENT_BYTES} from '../src/generation-stage.js';
 import {generationProjection} from '../src/epg-repository.js';
 import {readAuthority as readCache} from '../src/metadata-cache.js';
@@ -42,8 +42,11 @@ assert.match(fs.readFileSync('src/epg-orchestration.js','utf8'),/PublishedEpg\.r
 assert.match(fs.readFileSync('src/published-epg.js','utf8'),/mirrorWatchlistEtag:authority\.mirrorWatchlistEtag/);
 assert.match(fs.readFileSync('src/admin/posters.js','utf8'),/PublishedEpg\.currentGeneration\(env\)/);
 assert.match(fs.readFileSync('src/letterboxd-ratings.js','utf8'),/PublishedEpg\.currentGeneration\(env\)/);
-assert.match(fs.readFileSync('src/worker.js','utf8'),/gate\.cutover==='held'/);
-assert.match(fs.readFileSync('src/discovery.js','utf8'),/gate\.cutover==='held'/);
+// ADR 0162: no consumer branches on a held cutover any more; the reader refuses it.
+assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/gate\.cutover==='held'/);
+assert.doesNotMatch(fs.readFileSync('src/discovery.js','utf8'),/gate\.cutover==='held'/);
+for(const retired of ['importPublished','activatePublished','sealPublished','releasePublished','revertPublished'])assert.equal(typeof PublishedEpg[retired],'undefined',retired+' is retired');
+assert.equal(fs.existsSync('scripts/published-epg-authority.mjs'),false);
 assert.doesNotMatch(fs.readFileSync('src/admin/letterboxd-archive.js','utf8').replace(/\/\/.*$/gm,''),/\.put\(|\.delete\(|\.list\(|\bfetch\(|console\.|waitUntil|caches\.|\benv\.(?!BUCKET\b)\w/);
 assert.doesNotMatch(fs.readFileSync('scripts/published-epg-production.mjs','utf8'),/time_travel\/restore/);
 
@@ -78,8 +81,10 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
 
 {
  const early=open(6);
- assert.equal((await currentGeneration({DB:early})),null);
- await assert.rejects(publishGeneration({DB:early},{programmeRunId:'run-a',phase:'published',expectedProgrammeRunId:null,programme:programme('run-a',[film('film:a')]),watchlist:watch([film('film:a')])}),/published_epg_not_authoritative/);
+ // ADR 0162: a schema below 8 is the local stand-in only when it is opted in; production refuses it.
+ await assert.rejects(currentGeneration({DB:early}),error=>error.code==='published_epg_unavailable');
+ assert.equal((await currentGeneration({DB:early,PUBLISHED_EPG_DB_OPTIONAL:'standin'})),null);
+ await assert.rejects(publishGeneration({DB:early},{programmeRunId:'run-a',phase:'published',expectedProgrammeRunId:null,programme:programme('run-a',[film('film:a')]),watchlist:watch([film('film:a')])}),/published_epg_unavailable/);
  const v5=open(5);
  let refused=false;
  try{v5.sql(fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'));}catch{refused=true;}
@@ -94,6 +99,46 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.equal(one(v6,"SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'published_epg%' OR name='schema_contract_no_downgrade'"),0);
 }
 
+// ADR 0162 (review of #751): the explicit stand-in serves only a domain that is not installed at all. A partly installed one is refused on every path, whatever schema_contract says.
+{
+ const optIn={PUBLISHED_EPG_DB_OPTIONAL:'standin'};
+ const unavailable=error=>error.code==='published_epg_unavailable';
+ const bare=()=>d1Standin(path.join(root,'partial-'+(databases++)+'.sqlite'));
+ // Truly absent: no tables, no schema_contract at all, then a contract row, a missing id=1 row and a non-numeric version: the stand-in (opted in) and a refusal (not opted in).
+ const none=bare();
+ assert.deepEqual(await readAuthority({DB:none,...optIn}),{mode:'r2',tables:false,version:null,ready:false});
+ await assert.rejects(readAuthority({DB:none}),unavailable);
+ none.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER)');
+ assert.equal((await readAuthority({DB:none,...optIn})).tables,false,'a contract table without its row');
+ none.sql('INSERT INTO schema_contract VALUES (1,7)');
+ assert.deepEqual(await readAuthority({DB:none,...optIn}),{mode:'r2',tables:false,version:7,ready:false});
+ await assert.rejects(readAuthority({DB:none}),unavailable);
+ assert.equal(await currentGeneration({DB:none,...optIn}),null);
+ // A contract at 8 or later declares the domain installed: zero tables is a broken install, refused with the opt-in set and with no mirror written. Version 7 stands in.
+ for(const version of [8,23,24]){
+  const broken=bare();
+  broken.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER); INSERT INTO schema_contract VALUES (1,'+version+')');
+  await assert.rejects(readAuthority({DB:broken,...optIn}),unavailable,'v'+version);
+  await assert.rejects(currentGeneration({DB:broken,...optIn}),unavailable,'v'+version);
+  const store=new MemoryBucket();let puts=0;const rememberPut=store.put.bind(store);store.put=async(...args)=>{puts++;return rememberPut(...args);};
+  await assert.rejects(repairMirrors({DB:broken,BUCKET:store,...optIn}),unavailable,'v'+version);
+  await assert.rejects(writeMirrors({DB:broken,BUCKET:store,...optIn},{programmeRunId:'run-x',programme:programme('run-x',[film('film:a')]),watchlist:watch([film('film:a')]),phase:'published'}),unavailable,'v'+version);
+  assert.equal(puts,0,'v'+version+': a refusal writes no mirror');
+ }
+ // Partly installed (one published table), with each way the contract can be unusable, opted in: refused.
+ for(const [label,setup] of [['no schema_contract',db=>{}],['no id=1 row',db=>db.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER)')],['non-numeric version',db=>db.sql("CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version TEXT); INSERT INTO schema_contract VALUES (1,'x')")],['a contract below 8',db=>db.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER); INSERT INTO schema_contract VALUES (1,7)')]]){
+  const partial=bare();
+  partial.sql('CREATE TABLE published_epg_authority (id INTEGER PRIMARY KEY)');
+  setup(partial);
+  await assert.rejects(readAuthority({DB:partial,...optIn}),unavailable,label);
+  await assert.rejects(currentGeneration({DB:partial,...optIn}),unavailable,label);
+  const store=new MemoryBucket();let puts=0;const rememberPut=store.put.bind(store);store.put=async(...args)=>{puts++;return rememberPut(...args);};
+  await assert.rejects(repairMirrors({DB:partial,BUCKET:store,...optIn}),unavailable,label);
+  await assert.rejects(writeMirrors({DB:partial,BUCKET:store,...optIn},{programmeRunId:'run-x',programme:programme('run-x',[film('film:a')]),watchlist:watch([film('film:a')]),phase:'published'}),unavailable,label);
+  assert.equal(puts,0,label+': a refusal writes no mirror');
+ }
+}
+
 {
  const chain=d1Standin(path.join(root,'chain-'+(databases++)+'.sqlite'));
  for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority'])chain.sql(fs.readFileSync('migrations/'+name+'.sql','utf8'));
@@ -105,12 +150,12 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  // ADR 0162: the migration's r2 marker is refused, not read as the R2 objects.
  await assert.rejects(readPredictionAuthority(chain,required),error=>error.code==='prediction_domain_unavailable');
  await assert.rejects(routeRead({DB:chain,...required},'enrichment/prediction-queue.json'),error=>error.code==='prediction_domain_unavailable');
- assert.equal(await currentGeneration({DB:chain}),null);
+ await assert.rejects(currentGeneration({DB:chain}),error=>error.code==='published_epg_unavailable','the migration marker (r2) is refused');
  chain.sql("UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
  const routed=await routeRead({DB:chain,...required},'enrichment/prediction-queue.json');
  assert.equal(routed.handled,true);
  assert.equal(routed.value,null);
- assert.equal(await currentGeneration({DB:chain}),null,'published EPG stays on R2 while its own marker is r2');
+ await assert.rejects(currentGeneration({DB:chain}),error=>error.code==='published_epg_unavailable','published EPG is refused while its own marker is r2');
  chain.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
  assert.equal((await currentGeneration({DB:chain})).authority,'d1');
  assert.equal((await routeRead({DB:chain,...required},'enrichment/prediction-queue.json')).handled,true);
@@ -124,15 +169,15 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
 
 {
  const db=open();
- assert.equal((await readAuthority(db)).mode,'r2');
- assert.equal((await readAuthority(db)).version,8,'0008 moves a prepared version 7 contract to 8');
- assert.equal(await currentGeneration({DB:db}),null);
+ await assert.rejects(readAuthority(db),error=>error.code==='published_epg_unavailable','the inserted r2 marker is refused (ADR 0162)');
+ assert.equal(one(db,'SELECT version FROM schema_contract'),8,'0008 moves a prepared version 7 contract to 8');
+ await assert.rejects(currentGeneration({DB:db}),error=>error.code==='published_epg_unavailable');
  await assert.rejects(readCache(db),error=>error.code==='metadata_cache_unavailable','a metadata-cache marker in mode r2 is refused (ADR 0162)');
  db.sql("UPDATE metadata_cache_authority SET mode='d1'");
  db.sql("UPDATE prediction_domain_authority SET mode='d1'");
  assert.equal((await readCache(db)).mode,'d1','a later contract version keeps the metadata marker');
- assert.equal((await readAuthority(db)).mode,'r2');
- await assert.rejects(publishGeneration({DB:db},{programmeRunId:'run-a',phase:'published',expectedProgrammeRunId:null,programme:programme('run-a',[film('film:a')]),watchlist:watch([film('film:a')])}),/published_epg_not_authoritative/);
+ await assert.rejects(readAuthority(db),error=>error.code==='published_epg_unavailable');
+ await assert.rejects(publishGeneration({DB:db},{programmeRunId:'run-a',phase:'published',expectedProgrammeRunId:null,programme:programme('run-a',[film('film:a')]),watchlist:watch([film('film:a')])}),/published_epg_unavailable/);
 }
 
 {
@@ -223,45 +268,23 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.equal(result.mirrored,true);
  assert.equal(JSON.parse(repaired.objects.get('epg/published-generation.json').text).programmeRunId,'run-m');
  assert.equal(JSON.parse(repaired.objects.get('watchlist.json').text).films[0].id,'film:heat');
- const pointer=await repaired.get('epg/published-generation.json');
- const watchlistObject=await repaired.get('watchlist.json');
- await activatePublished({DB:db,BUCKET:repaired},{confirm:'activate',pointerEtag:pointer.etag}).catch(()=>{});
- db.sql("UPDATE published_epg_authority SET mode='r2'");
- const imported=await importPublished({DB:db},{confirm:'load',programme:body,watchlist:list,programmeRunId:'run-m',pointerEtag:pointer.etag,watchlistEtag:watchlistObject.etag});
- assert.equal(imported.mode,'r2');
- await repaired.put('watchlist.json',JSON.stringify({updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:other'}]}));
- await assert.rejects(activatePublished({DB:db,BUCKET:repaired},{confirm:'activate',pointerEtag:pointer.etag}),/published_epg_fence/);
- assert.equal((await readAuthority(db)).mode,'r2');
- await repaired.put('watchlist.json',JSON.stringify(list));
- const active=await activatePublished({DB:db,BUCKET:repaired},{confirm:'activate',pointerEtag:pointer.etag});
- assert.equal(active.mode,'d1');
- assert.equal(active.cutover,'held');
- assert.equal(await currentGeneration({DB:db}),null,'a held cutover is not a visible generation');
- const racedText=JSON.stringify({updatedAt:'2026-11-01T13:00:00.000Z',films:[{id:'film:raced'}]});
- await repaired.put('watchlist.json',racedText);
+ // ADR 0162: a held cutover or a marker in mode r2 is refused by every reader and writer, and no mirror is written. Nothing brings a marker there or back.
  let mirrorPuts=0;
  const rememberPut=repaired.put.bind(repaired);
  repaired.put=async(...args)=>{mirrorPuts++;return rememberPut(...args);};
- assert.equal((await repairMirrors({DB:db,BUCKET:repaired})).mirrored,false);
- assert.equal(await writeMirrors({DB:db,BUCKET:repaired},{programmeRunId:'run-m',programme:body,watchlist:list,phase:'published'}),false);
- assert.equal(await saveWatchlist({DB:db,BUCKET:repaired},list),false);
- await assert.rejects(publishGeneration({DB:db,BUCKET:repaired},{programmeRunId:'run-n',phase:'published',expectedProgrammeRunId:'run-m',programme:programme('run-n',[film('film:heat',{shows:[]})]),watchlist:list}),/published_epg_fence/);
+ const unavailable=error=>error.code==='published_epg_unavailable';
+ for(const marker of ["UPDATE published_epg_authority SET cutover='held'","UPDATE published_epg_authority SET mode='r2', cutover='open'"]){
+  db.sql(marker);
+  await assert.rejects(currentGeneration({DB:db}),unavailable,marker);
+  await assert.rejects(readAuthority({DB:db}),unavailable,marker);
+  await assert.rejects(repairMirrors({DB:db,BUCKET:repaired}),unavailable,marker);
+  await assert.rejects(writeMirrors({DB:db,BUCKET:repaired},{programmeRunId:'run-m',programme:body,watchlist:list,phase:'published'}),unavailable,marker);
+  await assert.rejects(saveWatchlist({DB:db,BUCKET:repaired},list),unavailable,marker);
+  await assert.rejects(publishGeneration({DB:db,BUCKET:repaired},{programmeRunId:'run-n',phase:'published',expectedProgrammeRunId:'run-m',programme:programme('run-n',[film('film:heat',{shows:[]})]),watchlist:list}),unavailable,marker);
+  db.sql("UPDATE published_epg_authority SET mode='d1', cutover='open'");
+ }
  assert.equal(mirrorPuts,0);
- assert.equal(repaired.objects.get('watchlist.json').text,racedText);
- const released=await releasePublished({DB:db});
- assert.equal(released.mode,'r2');
- assert.equal(released.cutover,'open');
- assert.equal(repaired.objects.get('watchlist.json').text,racedText);
- await repaired.put('watchlist.json',JSON.stringify(list));
- const heldAgain=await activatePublished({DB:db,BUCKET:repaired},{confirm:'activate',pointerEtag:pointer.etag});
- const sealed=await sealPublished({DB:db},heldAgain);
- assert.equal(sealed.mode,'d1');
- assert.equal(sealed.cutover,'open');
  assert.equal((await currentGeneration({DB:db})).programmeRunId,'run-m');
- await repaired.put('watchlist.json',JSON.stringify({updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:stale'}]}));
- const back=await revertPublished({DB:db,BUCKET:repaired},{confirm:'r2'});
- assert.equal(back.mode,'r2');
- assert.equal(JSON.parse(repaired.objects.get('watchlist.json').text).films[0].id,'film:heat');
  assert.equal((await readDocument(db,'run-m','programme')).runId,'run-m');
 }
 
