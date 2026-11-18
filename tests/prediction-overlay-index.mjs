@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {activatePredictionDomain,importPredictionDomain,overlayIndex,PREDICTION_OVERLAY_PAGE,PREDICTION_OVERLAY_ROWS} from '../src/prediction-d1.js';
+import {overlayIndex,saveMutable,PREDICTION_OVERLAY_PAGE,PREDICTION_OVERLAY_ROWS} from '../src/prediction-d1.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 
@@ -27,8 +27,9 @@ function fill(db,{fingerprints,pointers,from=0}){
 }
 const start=async()=>{
  const db=migrated(),bucket=new MemoryBucket();
- await importPredictionDomain(db,bucket,{queue:{schemaVersion:3,pending:[]}});
- await activatePredictionDomain(db,{generation:0,queueGeneration:0,profileGeneration:0});
+ // ADR 0162: the import and activate chain is retired; the fixture sets the marker and stores the queue through the normal writer.
+ db.sql("UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
+ await saveMutable({DB:db,BUCKET:bucket},'enrichment/prediction-queue.json',{schemaVersion:3,pending:[]});
  return {db,env:{DB:db,BUCKET:bucket}};
 };
 const moodFacet=(fingerprint,prediction)=>({m:fingerprint?.moodLabels?.length||0,p:!!prediction});
@@ -106,11 +107,15 @@ for(const [fingerprints,pointers] of [[0,0],[PREDICTION_OVERLAY_PAGE-1,PREDICTIO
  assert.equal(out[id(0)].fingerprintHash,'fp-0');
 }
 
-// 6. Outside d1 mode the index is returned as it came.
+// 6. ADR 0162: a marker that is not d1 is refused, not served as the R2 index; only a database without the domain (the local stand-in) returns the index as it came,
+// and production (PREDICTION_DB_REQUIRED on) refuses that too.
 {
  const db=migrated(),bucket=new MemoryBucket();
  const index={[id(1)]:{a:1}};
+ await assert.rejects(overlayIndex({DB:db,BUCKET:bucket},index,moodFacet),error=>error.code==='prediction_domain_unavailable');
+ db.sql(['prediction_domain_intent','prediction_run','prediction_lease','prediction_queue','prediction_lineage','prediction_pointer','prediction_fingerprint','prediction_profile','prediction_domain_cas','prediction_domain_authority'].map(name=>'DROP TABLE '+name+';').join(''));
  assert.equal(await overlayIndex({DB:db,BUCKET:bucket},index,moodFacet),index);
+ await assert.rejects(overlayIndex({DB:db,BUCKET:bucket,PREDICTION_DB_REQUIRED:'on'},index,moodFacet),error=>error.code==='prediction_domain_unavailable');
 }
 
 console.log('prediction overlay index tests passed');

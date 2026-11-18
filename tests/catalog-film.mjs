@@ -16,6 +16,9 @@ import {sqliteSync} from './sqlite-session.mjs';
 // ---- 1. readFilmAdmission against a real schema (sqlite stand-in) ----
 // ADR 0162: a ratings marker that is not d1/open is refused, so the full-chain fixtures serve the (empty) ratings domain from D1.
 const RATINGS_D1="\nUPDATE ratings_domain_authority SET mode='d1', cutover='open' WHERE id=1;";
+// The prediction domain likewise: a fixture that serves the R2 view index's forecasts (3g) stands for the uninstalled local domain, so its tables are dropped; the others serve it from D1.
+const PREDICTION_D1="\nUPDATE prediction_domain_authority SET mode='d1' WHERE id=1;";
+const PREDICTION_BARE="\n"+['prediction_domain_intent','prediction_run','prediction_lease','prediction_queue','prediction_lineage','prediction_pointer','prediction_fingerprint','prediction_profile','prediction_domain_cas','prediction_domain_authority'].map(name=>'DROP TABLE IF EXISTS '+name+';').join('\n');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-catalog-film-'));
 let databases=0;const seen=[];
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=11).sort();
@@ -360,7 +363,7 @@ r=await ask(fake({marker:OPEN,external:own,admissions:[{...adm,tmdb:'301'}]}));a
  vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
  const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
- const base=path.join(root,'retained-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+RATINGS_D1);
+ const base=path.join(root,'retained-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+RATINGS_D1+PREDICTION_D1);
  const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
  const OPEN=VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";
  const HELD=OPEN+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;";
@@ -445,7 +448,7 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
  vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
  const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
- const base=path.join(root,'alias-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+RATINGS_D1);
+ const base=path.join(root,'alias-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+RATINGS_D1+PREDICTION_BARE);
  const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
  const OPEN=VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";
  const T='2026-11-14T00:00:00.000Z',q=value=>"'"+String(value).replace(/'/g,"''")+"'";

@@ -71,8 +71,20 @@ async function adminPostersRoute(request,env,url){
    pointer=pointerObject.films;
    programmeRunId=pointer?.phase==='published'&&typeof pointer.programmeRunId==='string'&&pointer.programmeRunId?pointer.programmeRunId:null;
   }
-  live=await read(ADMIN_POSTERS_LIVE_KEY);
-  if(programmeRunId)copy=await read(epgGenerationKey(programmeRunId,'discovered-films.json'));
+  // AIR-515: with Discovery on D1 the catalog (and its posters) is the discovery_admission rows, the single copy; no R2 object is read for it.
+  const d1Gate=await catalogPosterD1Gate(env);
+  if(d1Gate.d1){
+   try{
+    const source=await catalogPosterD1Source(env,d1Gate.gate,programmeRunId);
+    live={key:source.key,present:true,version:source.etag,films:source.films};
+   }catch(error){
+    if(error?.code==='discovery_fence'&&programmeRunId&&d1Gate.gate.programmeRunId!==programmeRunId)live={key:'discovery_admission',present:true,version:null,films:null,stale:true};
+    else return adminError('storage_unavailable',503);
+   }
+  }else{
+   live=await read(ADMIN_POSTERS_LIVE_KEY);
+   if(programmeRunId)copy=await read(epgGenerationKey(programmeRunId,'discovered-films.json'));
+  }
   var negativesSource=await read(CATALOG_POSTER_NEGATIVES_KEY);
  }catch{return adminError('storage_unavailable',503);}
  // The counts are only as good as their inputs: a missing or unreadable copy, or a pointer that names no published
@@ -83,12 +95,13 @@ async function adminPostersRoute(request,env,url){
  else if(!programmeRunId)problems.push('generation_not_published');
  if(copy&&!copy.present)problems.push('generation_copy_missing');
  else if(copy&&!copy.films)problems.push('generation_copy_unreadable');
- if(!live.present)problems.push('live_copy_missing');
+ if(live.stale)problems.push('generation_changed');
+ else if(!live.present)problems.push('live_copy_missing');
  else if(!live.films)problems.push('live_copy_unreadable');
  const negatives=adminPostersNegativeEntries(negativesSource);
  if(!negatives.readable)problems.push('negatives_unreadable');
  const complete=problems.length===0;
- const counts=complete?catalogPosterMissing([live,copy]):null;
+ const counts=complete?catalogPosterMissing([live,copy].filter(Boolean)):null;
  const part=complete?catalogPosterPartition(counts.verified,negatives.entries,Date.now()):null;
  const queue=complete?part.actionable.filter(row=>!cursor||row.id.localeCompare(cursor,'en')>0):null,batch=complete?queue.slice(0,limit):[];
  const nowMs=Date.now(),now=new Date(nowMs).toISOString();

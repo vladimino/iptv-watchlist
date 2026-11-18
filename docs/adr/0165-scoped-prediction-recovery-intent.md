@@ -1,9 +1,10 @@
 # ADR 0165: Owner-confirmed scoped prediction recovery intent as a denied-version overlay on the freshness rule
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-17  
 **Recorded at:** 2026-11-17  
-**Approval source:** Owner choice of 17 Nov 2026 on [AIR-477](https://trello.com/c/WhwaXRRl) among the three options below (denied-version overlay; retained Film outside admission fails closed in v1; the retry budget is never reset). Acceptance of this ADR is the owner's decision on the pull request before merge.  
+**Accepted at:** 2026-11-18  
+**Approval source:** Explicit owner acceptance on 18 Nov 2026 recorded in [AIR-477](https://trello.com/c/WhwaXRRl), following independent technical PASS in [PR #734](https://github.com/vladimino/iptv-watchlist/pull/734#pullrequestreview-5953827742). Approval covers the ADR's code-only architecture; migration `0024` activation, cohort confirmation, canary/bulk operations, and Scheduled Task changes remain separately gated.  
 **Related work:** [AIR-477](https://trello.com/c/WhwaXRRl), [AIR-478](https://trello.com/c/IbsSCRce) (production activation), [AIR-281](https://trello.com/c/bjKa4hRj) (read-only recovery assessment), [AIR-451](https://trello.com/c/NN3N6kRp) (batch v2 runner)  
 **Supersedes:** None  
 **Superseded by:** None

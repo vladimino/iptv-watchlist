@@ -315,6 +315,9 @@ export const FILES={
  "catalog-film.mjs": {
   "suite": "core"
  },
+ "catalog-posters-d1.mjs": {
+  "suite": "core"
+ },
  "catalog-posters.mjs": {
   "suite": "core"
  },

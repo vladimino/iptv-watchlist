@@ -12,7 +12,8 @@ import {projectorContext} from './d1-enrichment-context.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 // ADR 0162: a marker that is not d1 is refused. The fixture puts the owner-review and metadata-cache markers at d1 with no rows
 // (the former r2 markers with no R2 object gave the same empty overlay and cache).
-const OWNER_D1="UPDATE owner_review_authority SET mode='d1' WHERE id=1; UPDATE metadata_cache_authority SET mode='d1' WHERE id=1;";
+// ADR 0162: the domains the projector reads are served only at d1, so the full-chain fixtures put the owner-review, metadata-cache and prediction markers there.
+const OWNER_D1="UPDATE owner_review_authority SET mode='d1' WHERE id=1; UPDATE metadata_cache_authority SET mode='d1' WHERE id=1; UPDATE prediction_domain_authority SET mode='d1' WHERE id=1;";
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-duplicate-retained-'));
 const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();

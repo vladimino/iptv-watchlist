@@ -1,8 +1,8 @@
-// ADR 0078. Mutable prediction state is owned by D1 only after its own marker is switched.
-// Schema versions before 7 keep the R2 objects and do not write these tables. Version 7 or any
-// later additive version requires these tables and a valid marker, and fails closed when either
-// is missing or the binding does not answer. Mode d1 reads and writes these tables and does not
-// fall back to the objects. Immutable bodies stay in R2 and are verified before a pointer moves.
+// ADR 0078, ADR 0162. Mutable prediction state is owned by D1 and is served only while the marker says mode d1 (the `writes` column is
+// the import fence of the retired r2 mode and is not part of that rule). A marker in mode r2, a missing binding, a missing schema contract or
+// missing tables are refused with prediction_domain_unavailable when PREDICTION_DB_REQUIRED is on (production); only without that variable
+// (local development and tests) is a database that has not installed this domain the stand-in that keeps the R2 objects. Mode d1 reads and
+// writes these tables and does not fall back to the objects. Immutable bodies stay in R2 and are verified before a pointer moves.
 // This module does not import. The Worker bundle wraps it in a scope. It does not insert a film row.
 
 export const PREDICTION_CONTRACT=7;
@@ -17,7 +17,6 @@ export const PREDICTION_INDEX_LIMIT=5000;
 export const PREDICTION_OVERLAY_PAGE=300;
 export const PREDICTION_OVERLAY_ROWS=20000;
 export const PREDICTION_BIND_LIMIT=100;
-export const PREDICTION_PRUNE_CHUNK=80;
 export const PREDICTION_STATEMENT_BYTES=100*1024;
 export const PREDICTION_QUEUE_CHUNK=40000;
 const FENCE_SQL='UPDATE prediction_domain_cas SET ok=changes() WHERE id=1';
@@ -37,7 +36,6 @@ const RUNNER_KEY='enrichment/runner-lease.json';
 const WRITER_KEY='enrichment/writer-lease.json';
 const LATEST_KEY='enrichment/latest-run.json';
 const TABLES=['prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent'];
-const PRUNE_COLUMN={prediction_fingerprint:'film_id',prediction_pointer:'film_id',prediction_lineage:'film_id',prediction_run:'run_id'};
 const encoder=new TextEncoder();
 
 // AIR-417. `guard` names which budget refused (queue_chars, index_limit, statement_bytes, bind_limit, history_limit, mirror_list).
@@ -161,20 +159,27 @@ async function readAuthorityNow(db,env){
   if(env?.PREDICTION_DB_REQUIRED==='on')throw failed('prediction_domain_unavailable');
   return idleAuthority(null,true);
  }
- if(Number(version)<PREDICTION_CONTRACT)return idleAuthority(version,true);
+ if(Number(version)<PREDICTION_CONTRACT){
+  if(env?.PREDICTION_DB_REQUIRED==='on')throw failed('prediction_domain_unavailable');
+  return idleAuthority(version,true);
+ }
  let names;
  if(together)names=together.names;
  else try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")")).map(row=>row.name);}
  catch(error){throw failed('prediction_domain_unavailable',error);}
  const present=TABLES.filter(name=>names.includes(name)).length;
- if(present===0)return idleAuthority(Number(version),true);
+ if(present===0){
+  if(env?.PREDICTION_DB_REQUIRED==='on')throw failed('prediction_domain_unavailable');
+  return idleAuthority(Number(version),true);
+ }
  if(present!==TABLES.length)throw failed('prediction_domain_unavailable');
  let row;
  if(together)row=together.row;
  else try{row=await one(db,'SELECT mode, generation, queue_generation AS queueGeneration, profile_generation AS profileGeneration, writes FROM prediction_domain_authority WHERE id=1');}
  catch(error){throw failed('prediction_domain_unavailable',error);}
- if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.writes!=='open'&&row.writes!=='held'))throw failed('prediction_domain_unavailable');
- return {mode:row.mode,tables:true,domain:'ready',version:Number(version),ready:row.mode==='d1',binding:true,generation:Number(row.generation),queueGeneration:Number(row.queueGeneration),profileGeneration:Number(row.profileGeneration),writes:row.writes};
+ // ADR 0162: only mode d1 is served; a marker left in or restored to mode r2 is refused, never read as the R2 objects.
+ if(!row||row.mode!=='d1'||(row.writes!=='open'&&row.writes!=='held'))throw failed('prediction_domain_unavailable');
+ return {mode:'d1',tables:true,domain:'ready',version:Number(version),ready:true,binding:true,generation:Number(row.generation),queueGeneration:Number(row.queueGeneration),profileGeneration:Number(row.profileGeneration),writes:row.writes};
 }
 
 // AIR-441. One request of the runner (a next or a submit) asks for the authority marker a few dozen times: every routed read and every write begins with it.
@@ -240,29 +245,6 @@ export async function readPredictionAuthority(db,env){
  reading.catch(()=>{if(scope.read===reading)scope.read=null;});
  return {...await reading};
 }
-export async function reservePredictionWrite(env,key,generation,bodyText){
- if(typeof bodyText!=='string')throw failed('prediction_domain_unavailable');
- const authority=await readPredictionAuthority(env?.DB,env);
- if(!authority.tables||authority.mode!=='r2')throw failed('prediction_domain_not_ready');
- if(authority.generation!==generation)throw failed('prediction_domain_cas');
- const token=crypto.randomUUID();
- const next=generation+1;
- await fenced(env.DB,[
-  ['UPDATE prediction_domain_authority SET generation=? WHERE id=1 AND mode=\'r2\' AND writes=\'open\' AND generation=?',[next,generation]],
-  [FENCE_SQL,[]],
-  ['INSERT INTO prediction_domain_intent (key, token, generation, body_sha256) VALUES (?,?,?,?)',[key,token,next,await sha256(bodyText)]],
- ]);
- return {token,generation:next};
-}
-export async function completePredictionWrite(env,key,token){
- if(!token)return;
- const db=env?.DB??env;
- await fenced(db,[
-  ['DELETE FROM prediction_domain_intent WHERE key=? AND token=?',[key,token]],
-  [FENCE_SQL,[]],
- ]);
-}
-
 async function objectText(bucket,key){
  const object=await bucket.get(key);
  if(!object)return null;
@@ -595,7 +577,6 @@ export async function saveMutable(env,key,value){
  const kind=predictionMutableKey(key);
  if(!kind)return {handled:false};
  const authority=await readPredictionAuthority(env?.DB,env);
- if(authority.tables&&authority.mode==='r2'){const text=JSON.stringify(value);const reserved=await reservePredictionWrite(env,key,authority.generation,text);return {handled:false,claimed:true,token:reserved.token,text};}
  if(authority.mode!=='d1')return {handled:false};
  if(kind==='fingerprint')await saveFingerprint(env,filmIdFrom(key,'fingerprint'),value,authority);
  else if(kind==='predictions')await savePredictions(env,filmIdFrom(key,'predictions'),value,authority);
@@ -614,30 +595,21 @@ export async function openQueue(env){
  const object=await env.BUCKET.get(QUEUE_KEY);
  return {mode:'r2',tables:authority.tables,version:authority.version,generation:authority.generation,object,queue:object?await object.json():null};
 }
-function r2Claim(live,head){
- // A head captured before these tables existed must not put once the domain is installed.
- // Mode d1 on either side of a mismatch returns no request. A head that already saw the
- // tables still claims the generation it captured. A head that did not claims the live one.
+// A head captured before these tables existed must not put once the domain is installed (and the reverse): mode d1 on either side of a
+// mismatch refuses. Two heads that both saw the uninstalled stand-in write the object.
+function domainOf(live,head){
  if(live.mode==='d1'||head.mode==='d1')return live.mode==='d1'&&head.mode==='d1'?'d1':'refuse';
- if(live.tables||head.tables)return head.tables?head.generation:live.generation;
- return null;
+ return 'standin';
 }
 export async function writeQueue(env,head,queue){
  const live=await readPredictionAuthority(env?.DB,env);
- const claim=r2Claim(live,head);
- if(claim==='refuse')return null;
- if(claim==='d1'){
+ const domain=domainOf(live,head);
+ if(domain==='refuse')return null;
+ if(domain==='d1'){
   try{await saveQueueDocument(env,queue,head);return {etag:'d1'};}
   catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
  }
- const text=JSON.stringify(queue);
- let token=null;
- if(claim!=null){
-  try{token=(await reservePredictionWrite(env,QUEUE_KEY,claim,text)).token;}catch(error){if(error.code==='prediction_domain_cas'||error.code==='prediction_domain_not_ready')return null;throw error;}
- }
- let settled=false;
- try{const saved=await env.BUCKET.put(QUEUE_KEY,text,{httpMetadata:{contentType:'application/json'},onlyIf:head.object?{etagMatches:head.object.etag}:{etagDoesNotMatch:'*'}});settled=true;return saved;}
- finally{if(token&&settled)await completePredictionWrite(env,QUEUE_KEY,token);}
+ return env.BUCKET.put(QUEUE_KEY,JSON.stringify(queue),{httpMetadata:{contentType:'application/json'},onlyIf:head.object?{etagMatches:head.object.etag}:{etagDoesNotMatch:'*'}});
 }
 export async function openLease(env,key){
  const name=key===WRITER_KEY?'writer':'runner';
@@ -648,21 +620,14 @@ export async function openLease(env,key){
 }
 export async function writeLease(env,head,value){
  const live=await readPredictionAuthority(env?.DB,env);
- const claim=r2Claim(live,head);
- if(claim==='refuse')return null;
- if(claim==='d1'){
+ const domain=domainOf(live,head);
+ if(domain==='refuse')return null;
+ if(domain==='d1'){
   try{const token=await saveLease(env,head.name,value,head.token,head);return {etag:token};}
   catch(error){if(error.code==='prediction_domain_cas')return null;throw error;}
  }
  const key=head.name==='writer'?WRITER_KEY:RUNNER_KEY;
- const text=JSON.stringify(value);
- let token=null;
- if(claim!=null){
-  try{token=(await reservePredictionWrite(env,key,claim,text)).token;}catch(error){if(error.code==='prediction_domain_cas'||error.code==='prediction_domain_not_ready')return null;throw error;}
- }
- let settled=false;
- try{const saved=await env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'},onlyIf:head.object?{etagMatches:head.object.etag}:{etagDoesNotMatch:'*'}});settled=true;return saved;}
- finally{if(token&&settled)await completePredictionWrite(env,key,token);}
+ return env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:head.object?{etagMatches:head.object.etag}:{etagDoesNotMatch:'*'}});
 }
 export async function openProfile(env){
  const authority=await readPredictionAuthority(env?.DB,env);
@@ -742,352 +707,4 @@ export async function projectItems(env,ids,base,moodFacet){
  const next={...(base||{})};
  for(const id of list)next[id]=overlayedItem(next[id],byFilm.get(id),moodFacet);
  return next;
-}
-
-function sameFence(authority,fence){
- return !!authority?.tables&&authority.mode==='r2'&&authority.generation===fence?.generation&&authority.queueGeneration===fence?.queueGeneration&&authority.profileGeneration===fence?.profileGeneration;
-}
-function leasesBusy(leases,now){
- return [leases?.runner,leases?.writer].some(lease=>lease&&Number(lease.expiresAt)>now);
-}
-function writerHold(fence){
- return ['UPDATE prediction_domain_authority SET writes=\'held\' WHERE id=1 AND mode=\'r2\' AND writes IN (\'open\',\'held\') AND generation=? AND queue_generation=? AND profile_generation=?',[fence.generation,fence.queueGeneration,fence.profileGeneration]];
-}
-function unitHold(fence){
- return ['UPDATE prediction_domain_authority SET generation=generation WHERE id=1 AND mode=\'r2\' AND writes=\'held\' AND generation=? AND queue_generation=? AND profile_generation=?',[fence.generation,fence.queueGeneration,fence.profileGeneration]];
-}
-async function intentCount(db){
- return Number((await one(db,'SELECT COUNT(*) AS n FROM prediction_domain_intent'))?.n||0);
-}
-async function pruneStale(db,fence,table,ids,onCommit){
- const column=PRUNE_COLUMN[table];
- if(!column)throw failed('prediction_domain_unavailable');
- const keep=new Set(ids);
- let after='';
- for(;;){
-  const page=await many(db,'SELECT '+column+' AS id FROM '+table+' WHERE '+column+' > ? ORDER BY '+column+' LIMIT '+PREDICTION_PRUNE_CHUNK,[after]);
-  if(!page.length)return;
-  after=page[page.length-1].id;
-  const stale=page.map(row=>row.id).filter(id=>!keep.has(id));
-  if(!stale.length)continue;
-  await fenced(db,[unitHold(fence),[FENCE_SQL,[]],['DELETE FROM '+table+' WHERE '+column+' IN ('+stale.map(()=>'?').join(',')+')',stale]]);
-  onCommit();
- }
-}
-async function predictionStatements(bucket,item){
- const history=Array.isArray(item.bundle?.history)?item.bundle.history:[];
- if(history.length>PREDICTION_HISTORY_LIMIT)throw failed('prediction_domain_budget',undefined,'history_limit');
- const records=[...(item.bundle?.current?[item.bundle.current]:[]),...history];
- for(const record of records){
-  if(typeof record?.contentSha256!=='string'||typeof record?.r2Key!=='string')throw failed('prediction_domain_unlinked');
-  await verified(bucket,record.r2Key,record.contentSha256);
- }
- const statements=[
-  ['DELETE FROM prediction_pointer WHERE film_id=?',[item.filmId]],
-  ['DELETE FROM prediction_lineage WHERE film_id=?',[item.filmId]],
- ];
- if(item.bundle?.current){
-  const columns=pointerColumns(item.bundle.current);
-  if(columns[8]==null)throw failed('prediction_domain_unlinked');
-  statements.push(['INSERT INTO prediction_pointer (film_id,taste_profile_version,taste_profile_hash,fingerprint_hash,fingerprint_schema_version,prediction_prompt_version,predicted_rating,r2_key,content_sha256,updated_at,display_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)',[item.filmId,...columns,JSON.stringify(displayOf(item.bundle.current))]]);
- }
- for(const record of history){
-  if(typeof record?.replacedAt!=='string'||!record.replacedAt)throw failed('prediction_domain_unlinked');
-  statements.push(['INSERT INTO prediction_lineage (film_id,replaced_at,predicted_rating,taste_profile_version,fingerprint_hash,r2_key,content_sha256,display_json) VALUES (?,?,?,?,?,?,?,?)',[item.filmId,record.replacedAt,record.predictedRating??null,record.tasteProfileVersion??null,record.fingerprintHash??null,record.r2Key,record.contentSha256,JSON.stringify({...displayOf(record),replacedAt:record.replacedAt})]]);
- }
- return statements;
-}
-export async function predictionParity(db){
- const fingerprints=await many(db,'SELECT film_id AS filmId, fingerprint_hash AS fingerprintHash FROM prediction_fingerprint ORDER BY film_id');
- const pointers=await many(db,'SELECT film_id AS filmId, content_sha256 AS contentSha256 FROM prediction_pointer ORDER BY film_id');
- const lineage=await one(db,'SELECT COUNT(*) AS n FROM prediction_lineage');
- const queue=await loadQueue(db);
- const profile=await one(db,'SELECT version, profile_hash AS profileHash FROM prediction_profile WHERE active=1');
- const latest=await one(db,'SELECT run_id AS runId FROM prediction_run WHERE latest=1');
- const runs=await one(db,'SELECT COUNT(*) AS n FROM prediction_run');
- const leases=await one(db,'SELECT COUNT(*) AS n FROM prediction_lease');
- return {
-  fingerprints:fingerprints.map(row=>row.filmId+'\n'+row.fingerprintHash),
-  pointers:pointers.map(row=>row.filmId+'\n'+row.contentSha256),
-  lineage:Number(lineage?.n||0),
-  queue:queue==null?null:JSON.stringify(queue),
-  profile:profile?profile.version+'\n'+profile.profileHash:null,
-  latestRunId:latest?.runId??null,
-  runs:Number(runs?.n||0),
-  leases:Number(leases?.n||0),
- };
-}
-export function snapshotParity(snapshot){
- return expectedParity(snapshot);
-}
-function expectedParity(snapshot){
- const fingerprints=(snapshot?.fingerprints||[]).map(item=>item.filmId+'\n'+item.record.fingerprintHash).sort();
- const pointers=(snapshot?.predictions||[]).filter(item=>item.bundle?.current).map(item=>item.filmId+'\n'+item.bundle.current.contentSha256).sort();
- const lineage=(snapshot?.predictions||[]).reduce((sum,item)=>sum+(Array.isArray(item.bundle?.history)?item.bundle.history.length:0),0);
- const profile=snapshot?.profile?snapshot.profile.version+'\n'+snapshot.profile.profileHash:null;
- return {fingerprints,pointers,lineage,queue:snapshot?.queue==null?null:JSON.stringify(snapshot.queue),profile,latestRunId:snapshot?.latestRunId??null,runs:(snapshot?.runs||[]).length,leases:0};
-}
-async function assertFingerprintBodies(bucket,snapshot){
- const items=snapshot?.fingerprints;
- if(!Array.isArray(items))return;
- for(const item of items){
-  const hash=item?.record?.fingerprintHash;
-  if(typeof hash!=='string'||!hash)throw failed('prediction_domain_body_missing');
-  const stored=await readBody(bucket,fingerprintKey(item.filmId,hash));
-  if(stored.fingerprintHash!==hash)throw failed('prediction_domain_body_mismatch');
- }
-}
-function parityAgrees(live,expected){
- const normalized=value=>({...value,fingerprints:[...value.fingerprints].sort(),pointers:[...value.pointers].sort()});
- return JSON.stringify(normalized(live))===JSON.stringify(normalized(expected));
-}
-export async function importPredictionDomain(db,bucket,snapshot,options={}){
- const authority=await readPredictionAuthority(db);
- if(!authority.tables||authority.mode!=='r2')throw failed('prediction_domain_not_ready');
- const fence={generation:options.fence?.generation??authority.generation,queueGeneration:options.fence?.queueGeneration??authority.queueGeneration,profileGeneration:options.fence?.profileGeneration??authority.profileGeneration};
- if(!sameFence(authority,fence))throw failed('prediction_domain_cas');
- const now=options.now??Date.now();
- if(leasesBusy(options.leases??snapshot?.leases,now))throw failed('prediction_domain_busy');
- // A missing immutable fingerprint body must not hold writers or copy a prefix of the rows.
- await assertFingerprintBodies(bucket,snapshot);
- let committed=0;
- let source=snapshot;
- try{
-  await fenced(db,[writerHold(fence),[FENCE_SQL,[]]]);
-  committed++;
-  if(await intentCount(db))throw failed('prediction_domain_busy');
-  const held=await readPredictionAuthority(db);
-  if(!sameFence(held,fence)||held.writes!=='held')throw failed('prediction_domain_cas');
-  if(options.afterHold){
-   source=await options.afterHold();
-   if(leasesBusy(source?.leases,now))throw failed('prediction_domain_busy');
-  }
-  const filmsBefore=await one(db,'SELECT COUNT(*) AS n FROM film');
-  const units=[];
-  if(source&&Object.hasOwn(source,'profile')){
-   if(source.profile)units.push({kind:'profile',value:source.profile});
-   else units.push({kind:'clear-profile'});
-  }else if(source?.profile)units.push({kind:'profile',value:source.profile});
-  if(Array.isArray(source?.fingerprints)){
-   for(const item of source.fingerprints)units.push({kind:'fingerprint',item});
-   units.push({kind:'prune',table:'prediction_fingerprint',ids:source.fingerprints.map(item=>item.filmId)});
-  }
-  if(Array.isArray(source?.predictions)){
-   for(const item of source.predictions)units.push({kind:'prediction',item});
-   units.push({kind:'prune',table:'prediction_pointer',ids:source.predictions.filter(item=>item.bundle?.current).map(item=>item.filmId)});
-   units.push({kind:'prune',table:'prediction_lineage',ids:[...new Set(source.predictions.map(item=>item.filmId))]});
-  }
-  if(source&&Object.hasOwn(source,'queue')){
-   if(source.queue)units.push({kind:'queue',value:source.queue});
-   else units.push({kind:'clear-queue'});
-  }else if(source?.queue)units.push({kind:'queue',value:source.queue});
-  if(Array.isArray(source?.runs)){
-   for(const run of source.runs)units.push({kind:'run',run});
-   units.push({kind:'prune',table:'prediction_run',ids:source.runs.map(run=>run.runId)});
-  }
-  if(source?.latestRunId)units.push({kind:'latest',runId:source.latestRunId});
-  units.push({kind:'leases'});
-  for(const unit of units){
-   const current=await readPredictionAuthority(db);
-   if(!sameFence(current,fence)||current.writes!=='held')throw failed('prediction_domain_cas');
-   if(unit.kind==='prune'){await pruneStale(db,fence,unit.table,unit.ids,()=>{committed++;});continue;}
-   let body=[];
-   if(unit.kind==='profile'){
-    const value=unit.value;
-    const key=profileKey(value.version);
-    const stored=await readBody(bucket,key);
-    if(stored.profileHash!==value.profileHash||stored.version!==value.version)throw failed('prediction_domain_body_mismatch');
-    body=[['UPDATE prediction_profile SET active=0 WHERE active=1',[]],['INSERT INTO prediction_profile (version,profile_hash,active,created_at,r2_key,content_sha256,lineage_json) VALUES (?,?,1,?,?,?,?) ON CONFLICT(version) DO UPDATE SET profile_hash=excluded.profile_hash,active=1,created_at=excluded.created_at,r2_key=excluded.r2_key,content_sha256=excluded.content_sha256,lineage_json=excluded.lineage_json',[value.version,value.profileHash,value.updatedAt,key,await sha256(stored),value.lineage===undefined?null:JSON.stringify(value.lineage)]]];
-   }else if(unit.kind==='fingerprint'){
-    const key=fingerprintKey(unit.item.filmId,unit.item.record.fingerprintHash);
-    const stored=await readBody(bucket,key);
-    if(stored.fingerprintHash!==unit.item.record.fingerprintHash)throw failed('prediction_domain_body_mismatch');
-    const features=featuresOf(unit.item.record);
-    body=[['INSERT INTO prediction_fingerprint (film_id,fingerprint_hash,schema_version,prompt_version,generated_at,invalidated_at,r2_key,content_sha256,features_json) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET fingerprint_hash=excluded.fingerprint_hash,schema_version=excluded.schema_version,prompt_version=excluded.prompt_version,generated_at=excluded.generated_at,invalidated_at=excluded.invalidated_at,r2_key=excluded.r2_key,content_sha256=excluded.content_sha256,features_json=excluded.features_json',[unit.item.filmId,unit.item.record.fingerprintHash,features.fingerprintSchemaVersion??0,features.fingerprintPromptVersion,features.generatedAt,features.invalidatedAt,key,await sha256(stored),JSON.stringify(features)]]];
-   }else if(unit.kind==='prediction')body=await predictionStatements(bucket,unit.item);
-   else if(unit.kind==='queue')body=queueStatements(storedQueueText(unit.value),fence.queueGeneration);
-   else if(unit.kind==='run')body=[['INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES (?,0,?,?) ON CONFLICT(run_id) DO UPDATE SET updated_at=excluded.updated_at, document_json=excluded.document_json',[unit.run.runId,unit.run.updatedAt||unit.run.createdAt,JSON.stringify(unit.run)]]];
-   else if(unit.kind==='latest')body=[['UPDATE prediction_run SET latest=CASE WHEN run_id=? THEN 1 ELSE 0 END',[unit.runId]]];
-   else if(unit.kind==='clear-profile')body=[['UPDATE prediction_profile SET active=0 WHERE active=1',[]]];
-   else if(unit.kind==='clear-queue')body=[['DELETE FROM prediction_queue',[]]];
-   else body=[['DELETE FROM prediction_lease',[]]];
-   await fenced(db,[unitHold(fence),[FENCE_SQL,[]],...body]);
-   committed++;
-  }
-  const filmsAfter=await one(db,'SELECT COUNT(*) AS n FROM film');
-  if(Number(filmsBefore?.n)!==Number(filmsAfter?.n))throw failed('prediction_domain_phantom_film');
-  const parity=await predictionParity(db);
-  if(!parityAgrees(parity,expectedParity(source)))throw failed('prediction_domain_parity');
-  const done=await readPredictionAuthority(db);
-  if(!sameFence(done,fence)||done.writes!=='held')throw failed('prediction_domain_cas');
-  return {...done,fence,parity,committedUnits:committed};
- }catch(error){
-  if(error&&error.committedUnits==null)error.committedUnits=committed;
-  throw error;
- }
-}
-export async function activatePredictionDomain(db,expected,options={}){
- const authority=await readPredictionAuthority(db);
- if(!sameFence(authority,expected))throw failed('prediction_domain_cas');
- const clock=options.now??Date.now();
- if(leasesBusy(options.leases,clock))throw failed('prediction_domain_busy');
- let committed=0;
- try{
-  await fenced(db,[writerHold(expected),[FENCE_SQL,[]]]);
-  committed++;
-  if(await intentCount(db))throw failed('prediction_domain_busy');
-  const held=await readPredictionAuthority(db);
-  if(!sameFence(held,expected)||held.writes!=='held')throw failed('prediction_domain_cas');
-  let parity=options.parity;
-  if(options.afterHold){
-   const fresh=await options.afterHold();
-   if(leasesBusy(fresh?.leases,clock))throw failed('prediction_domain_busy');
-   parity=snapshotParity(fresh);
-  }
-  if(parity&&!parityAgrees(await predictionParity(db),parity))throw failed('prediction_domain_parity');
-  await fenced(db,[
-   ['UPDATE prediction_domain_authority SET mode=\'d1\' WHERE id=1 AND mode=\'r2\' AND writes=\'held\' AND generation=? AND queue_generation=? AND profile_generation=? AND NOT EXISTS (SELECT 1 FROM prediction_domain_intent)',[expected.generation,expected.queueGeneration,expected.profileGeneration]],
-   [FENCE_SQL,[]],
-  ]);
-  const now=await readPredictionAuthority(db);
-  if(now.mode!=='d1')throw failed('prediction_domain_cas');
-  return now;
- }catch(error){
-  if(error&&error.committedUnits==null)error.committedUnits=committed;
-  throw error;
- }
-}
-export async function releasePredictionWriters(db){
- const authority=await readPredictionAuthority(db);
- if(!authority.tables||authority.mode!=='r2')throw failed('prediction_domain_not_ready');
- if(await intentCount(db))throw failed('prediction_domain_busy');
- if(authority.writes==='open')return authority;
- await fenced(db,[
-  ["UPDATE prediction_domain_authority SET writes='open' WHERE id=1 AND mode='r2' AND writes='held' AND NOT EXISTS (SELECT 1 FROM prediction_domain_intent)",[]],
-  [FENCE_SQL,[]],
- ]);
- const now=await readPredictionAuthority(db);
- if(now.writes!=='open')throw failed('prediction_domain_cas');
- return now;
-}
-export async function reconcilePredictionIntents(db,bucket){
- const authority=await readPredictionAuthority(db);
- if(!authority.tables||authority.mode!=='r2')throw failed('prediction_domain_not_ready');
- const rows=await many(db,'SELECT key, token, body_sha256 AS bodySha256 FROM prediction_domain_intent ORDER BY key');
- let committed=0;
- const pending=[];
- try{
-  for(const row of rows){
-   const text=await objectText(bucket,row.key);
-   const digest=text==null?null:await sha256(text);
-   if(digest!==row.bodySha256){pending.push(row.key);continue;}
-   await fenced(db,[
-    ['DELETE FROM prediction_domain_intent WHERE key=? AND token=?',[row.key,row.token]],
-    [FENCE_SQL,[]],
-   ]);
-   committed++;
-  }
-  if(pending.length){
-   const error=failed('prediction_domain_busy');
-   error.committedUnits=committed;
-   throw error;
-  }
-  return {cleared:committed,mode:authority.mode,writes:authority.writes};
- }catch(error){
-  if(error&&error.committedUnits==null)error.committedUnits=committed;
-  throw error;
- }
-}
-const MIRROR_LIST_LIMIT=5000;
-async function listedKeys(bucket,prefix){
- if(typeof bucket.list!=='function')throw failed('prediction_domain_parity');
- const keys=[];
- let cursor;
- do{
-  const page=await bucket.list({prefix,limit:100,...(cursor?{cursor}:{})});
-  for(const object of page?.objects||[])keys.push(object.key);
-  if(keys.length>MIRROR_LIST_LIMIT)throw failed('prediction_domain_budget',undefined,'mirror_list');
-  if(page?.truncated&&!(page.cursor||page.nextCursor))throw failed('prediction_domain_parity');
-  cursor=page?.truncated?page.cursor||page.nextCursor:null;
- }while(cursor);
- return keys;
-}
-async function deleteSent(bucket,key){
- if(typeof bucket.delete!=='function')throw failed('prediction_domain_parity');
- try{await bucket.delete(key);}catch(error){const wrapped=failed('prediction_domain_parity',error);wrapped.kind='write_uncertain';throw wrapped;}
-}
-async function putSent(bucket,key,value){
- const text=JSON.stringify(value);
- try{await bucket.put(key,text,{httpMetadata:{contentType:'application/json'}});}catch(error){const wrapped=failed('prediction_domain_parity',error);wrapped.kind='write_uncertain';throw wrapped;}
- return text;
-}
-async function readBack(bucket,key,text){
- const back=await objectText(bucket,key);
- if(back!==text)throw failed('prediction_domain_parity');
-}
-async function repairMirrors(db,bucket){
- let committed=0;
- try{
-  const env={DB:db,BUCKET:bucket};
-  const keep=new Set();
-  const put=async(key,value)=>{const text=await putSent(bucket,key,value);committed++;await readBack(bucket,key,text);keep.add(key);};
-  for(const row of await many(db,'SELECT film_id AS filmId FROM prediction_fingerprint ORDER BY film_id')){
-   const value=await loadFingerprint(env,row.filmId);
-   if(!value)throw failed('prediction_domain_parity');
-   await put('enrichment/films/'+encodeURIComponent(row.filmId)+'/fingerprint.json',value);
-  }
-  const predictionIds=new Set();
-  for(const row of await many(db,'SELECT film_id AS filmId FROM prediction_pointer ORDER BY film_id'))predictionIds.add(row.filmId);
-  for(const row of await many(db,'SELECT DISTINCT film_id AS filmId FROM prediction_lineage ORDER BY film_id'))predictionIds.add(row.filmId);
-  for(const filmId of [...predictionIds].sort()){
-   const value=await loadPredictions(env,filmId);
-   if(!value)throw failed('prediction_domain_parity');
-   await put('enrichment/films/'+encodeURIComponent(filmId)+'/predictions.json',value);
-  }
-  const queue=await loadQueue(db);
-  if(queue)await put(QUEUE_KEY,queue);
-  const profile=await loadProfile(env);
-  if(profile)await put(PROFILE_KEY,profile);
-  for(const row of await many(db,'SELECT run_id AS runId FROM prediction_run ORDER BY run_id')){
-   const value=await loadRun(db,row.runId);
-   if(!value)throw failed('prediction_domain_parity');
-   await put('enrichment/runs/'+row.runId+'.json',value);
-  }
-  const latest=await loadLatest(db);
-  if(latest)await put(LATEST_KEY,latest);
-  for(const [name,key] of [['runner',RUNNER_KEY],['writer',WRITER_KEY]]){
-   const lease=await loadLease(db,name);
-   await put(key,lease?.value??{expiresAt:0});
-  }
-  for(const key of await listedKeys(bucket,'enrichment/')){
-   if(!predictionMutableKey(key)||keep.has(key))continue;
-   await deleteSent(bucket,key);
-   committed++;
-   if(await bucket.get(key))throw failed('prediction_domain_parity');
-  }
-  return committed;
- }catch(error){
-  if(error&&error.committedUnits==null)error.committedUnits=committed;
-  throw error;
- }
-}
-export async function revertPredictionDomain(db,bucket,expected){
- const authority=await readPredictionAuthority(db);
- if(authority.mode!=='d1'||authority.generation!==expected?.generation||authority.queueGeneration!==expected?.queueGeneration||authority.profileGeneration!==expected?.profileGeneration)throw failed('prediction_domain_cas');
- let committed=0;
- try{
-  committed=await repairMirrors(db,bucket);
-  const repaired=await readPredictionAuthority(db);
-  if(repaired.mode!=='d1'||repaired.generation!==authority.generation||repaired.queueGeneration!==authority.queueGeneration||repaired.profileGeneration!==authority.profileGeneration)throw failed('prediction_domain_cas');
-  await fenced(db,[
-   ["UPDATE prediction_domain_authority SET mode='r2', writes='open' WHERE id=1 AND mode='d1' AND generation=? AND queue_generation=? AND profile_generation=? AND NOT EXISTS (SELECT 1 FROM prediction_domain_intent)",[authority.generation,authority.queueGeneration,authority.profileGeneration]],
-   [FENCE_SQL,[]],
-  ]);
-  const now=await readPredictionAuthority(db);
-  if(now.mode!=='r2')throw failed('prediction_domain_cas');
-  return now;
- }catch(error){
-  if(error&&error.committedUnits==null)error.committedUnits=committed;
-  throw error;
- }
 }

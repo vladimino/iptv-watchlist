@@ -87,7 +87,7 @@ Readiness before the handoff (AIR-374 P6, offline, dormant): `handoffReadiness` 
 
 ### Identity consumer: prediction recovery intent
 
-The owner-only prediction recovery preview and confirm ([ADR 0165](../adr/0165-scoped-prediction-recovery-intent.md), Proposed) read a film's canonical identity only through `catalogFilmIdentityBridge` at `open`: the one trusted, non-conflicting typed claim of a Film without a redirect. A stored id that is not that claim, an absent, retired or conflicting identity, or any marker state other than `open` refuses the film. A retained Film outside the queue's admission is refused in v1; it is never admitted as a side effect of a recovery read or confirm.
+The owner-only prediction recovery preview and confirm ([ADR 0165](../adr/0165-scoped-prediction-recovery-intent.md), Accepted) read a film's canonical identity only through `catalogFilmIdentityBridge` at `open`: the one trusted, non-conflicting typed claim of a Film without a redirect. A stored id that is not that claim, an absent, retired or conflicting identity, or any marker state other than `open` refuses the film. A retained Film outside the queue's admission is refused in v1; it is never admitted as a side effect of a recovery read or confirm.
 
 ## Owner name confirmation
 

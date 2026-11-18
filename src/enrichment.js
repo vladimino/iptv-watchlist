@@ -126,9 +126,7 @@ async function publishProfile(env,body){
  let routed={handled:false};
  try{if(head)routed=await PredictionD1.saveMutable(env,profileKey,value);}
  catch(error){if(error?.code==='prediction_domain_cas')return json({error:'Current profile changed during publication; read it and publish again',code:'profile_changed'},409);throw error;}
- let moved,settled=false;
- try{moved=routed.handled?{etag:'d1'}:await env.BUCKET.put(profileKey,routed.text??JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:currentEtag?{etagMatches:currentEtag}:{etagDoesNotMatch:'*'}});settled=true;}
- finally{if(routed.token&&settled)await PredictionD1.completePredictionWrite(env,profileKey,routed.token);}
+ const moved=routed.handled?{etag:'d1'}:await env.BUCKET.put(profileKey,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:currentEtag?{etagMatches:currentEtag}:{etagDoesNotMatch:'*'}});
  if(moved===null)return json({error:'Current profile changed during publication; read it and publish again',code:'profile_changed'},409);
  try{await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'profile_updated');}catch{}
  if(!tasteProfileEventExpected(value))return json(value);
@@ -836,7 +834,7 @@ function indexedFingerprintRecord(item){
  if(!item?.fingerprintHash||!impact||impact.fingerprintHash!==item.fingerprintHash)return null;
  return {fingerprintHash:impact.fingerprintHash,fingerprintSchemaVersion:impact.fingerprintSchemaVersion,fingerprintPromptVersion:impact.fingerprintPromptVersion??1,invalidatedAt:impact.invalidatedAt||null,plotMechanics:impact.plotMechanics??undefined,execution:impact.execution??undefined};
 }
-// AIR-477 (ADR 0165, Proposed). The owner-confirmed recovery intents, read at each call (one D1 batch of two SELECTs; there is no request
+// AIR-477 (ADR 0165, Accepted). The owner-confirmed recovery intents, read at each call (one D1 batch of two SELECTs; there is no request
 // cache since AIR-452 removed the request scope): a film's exact denied prediction (and fingerprint) version is not current for every
 // consumer that names the film. An absent module, binding or migration 0024 is the empty overlay: the ordinary rule alone decides. An
 // INSTALLED store that cannot be read (a fault, a partial table set) fails closed: the error reaches the caller, so no rebuild treats a

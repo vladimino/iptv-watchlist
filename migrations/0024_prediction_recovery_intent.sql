@@ -1,4 +1,4 @@
--- Schema v24: the owner-confirmed, scoped prediction recovery intent (AIR-477; ADR 0165, Proposed).
+-- Schema v24: the owner-confirmed, scoped prediction recovery intent (AIR-477; ADR 0165, Accepted).
 -- INERT: this file is in the repository and is NOT applied to any database by a deploy. Applying it to production D1 is a
 -- separate owner GO (AIR-478); nothing in the Worker applies it. While the tables are absent the capability is dormant:
 -- the freshness rule sees no intent and the confirm route refuses `recovery_schema_not_ready`.

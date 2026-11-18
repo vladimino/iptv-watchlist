@@ -83,7 +83,7 @@ const generation=file=>sql(file,'SELECT generation FROM prediction_domain_author
  const rows=sql(w.file,'SELECT COUNT(*) AS n FROM prediction_pointer')[0].n;
  await assert.rejects(()=>PredictionD1.saveMutable(request,'enrichment/runner-lease.json',{...lease,heartbeatAt:new Date().toISOString()}),error=>/prediction_domain/.test(error.code||''),'a write after the mode moved fails closed');
  assert.equal(sql(w.file,'SELECT COUNT(*) AS n FROM prediction_pointer')[0].n,rows);
- const fresh=PredictionD1.scopeRequest(w.env);assert.equal((await PredictionD1.readPredictionAuthority(fresh.DB,fresh)).mode,'r2','a new request sees the new mode at once: nothing is kept between requests');
+ const fresh=PredictionD1.scopeRequest(w.env);await assert.rejects(PredictionD1.readPredictionAuthority(fresh.DB,fresh),error=>error.code==='prediction_domain_unavailable','a new request sees the new mode at once (and refuses a marker that is no longer d1): nothing is kept between requests');
 }
 
 // 4. The same run with and without the scope: same answers, same stored state, fewer D1 round trips.

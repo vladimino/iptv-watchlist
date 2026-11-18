@@ -1,4 +1,4 @@
-// AIR-477 (ADR 0165, Proposed). The owner-only scoped prediction recovery intent behind the existing Cloudflare Access application.
+// AIR-477 (ADR 0165, Accepted). The owner-only scoped prediction recovery intent behind the existing Cloudflare Access application.
 //  GET  /api/admin/prediction-recovery-intent/preview?films=<ids>&mode=<mode>&ttlHours=<h>  read-only preview of a frozen allowlist
 //  GET  /api/admin/prediction-recovery-intent/cohort?id=<cohortId>                          read-only status of a confirmed cohort
 //  POST /api/admin/prediction-recovery-intent/confirm  {films, mode, ttlHours, scopeHash, idempotencyKey}
