@@ -231,6 +231,10 @@ for(const writes of ['open','held']){
  const w=await scoredWorld(3);
  const p=await w.admin('preview?films=tmdb_1');assert.equal(p.data.confirmable,true);
  sql(w.file,`UPDATE prediction_domain_authority SET mode='r2', writes='${writes}' WHERE id=1`);
+ // The preview itself, read after the move, is not confirmable: a d1-only refusal, or a fail-closed 503 when r2 storage is not readable.
+ const pr=await w.admin('preview?films=tmdb_1');
+ assert.ok(pr.status===503||(pr.status===200&&pr.data.confirmable===false&&pr.data.refusal==='prediction_domain_not_d1'),'r2/'+writes+': preview refuses: '+pr.status+' '+JSON.stringify(pr.data).slice(0,200));
+ noRecoveryRows(w,'r2/'+writes+' preview');
  const r=await w.admin('confirm',{method:'POST',body:{films:['tmdb_1'],mode:'prediction_only',ttlHours:72,scopeHash:p.data.scopeHash,idempotencyKey:key(20)}});
  assert.ok([409,503].includes(r.status),'r2/'+writes+' is refused: '+JSON.stringify(r.data));
  noRecoveryRows(w,'r2/'+writes);
@@ -238,6 +242,18 @@ for(const writes of ['open','held']){
  noRecoveryRows(w,'r2/'+writes+' module');
  // The triggers alone refuse a cohort row in r2 whatever writes says.
  assert.throws(()=>sql(w.file,"INSERT INTO prediction_recovery_cohort (cohort_id,idempotency_key,scope_hash,request_digest,mode,film_count,state,created_at,expires_at) VALUES ('pr_"+'0'.repeat(24)+"','"+key(22)+"','"+'b'.repeat(64)+"','"+'c'.repeat(64)+"','prediction_only',1,'active','2026-11-18T10:00:00.000Z','2026-11-19T10:00:00.000Z')"),/prediction_recovery_not_open/,'r2/'+writes+': trigger');
+}
+// Cancel shares OPEN_SQL: a cohort confirmed at d1/held cannot be cancelled once the marker is r2; the intents stay active, nothing moves.
+for(const writes of ['open','held']){
+ const w=await scoredWorld(3);
+ const p=await w.admin('preview?films=tmdb_1');
+ const ok=await w.admin('confirm',{method:'POST',body:{films:['tmdb_1'],mode:'prediction_only',ttlHours:72,scopeHash:p.data.scopeHash,idempotencyKey:key(24)}});
+ assert.equal(ok.status,201,JSON.stringify(ok.data));assert.equal(revision(w),1);
+ sql(w.file,`UPDATE prediction_domain_authority SET mode='r2', writes='${writes}' WHERE id=1`);
+ const c=await w.admin('cancel',{method:'POST',body:{cohortId:ok.data.receipt.cohortId}});
+ assert.equal(c.status,409,'r2/'+writes+' cancel: '+JSON.stringify(c.data));
+ assert.deepEqual(intents(w).map(r=>r.state),['active'],'r2/'+writes+': the intent is unchanged');
+ assert.deepEqual(sql(w.file,'SELECT state FROM prediction_recovery_cohort'),[{state:'active'}]);assert.equal(revision(w),1,'r2/'+writes+': no revision move');
 }
 for(const [label,change] of [
  ['d1 -> r2 inside the batch',w=>sql(w.file,"UPDATE prediction_domain_authority SET mode='r2' WHERE id=1")],
