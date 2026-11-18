@@ -11,7 +11,7 @@ assert.match(fs.readFileSync('src/discovery.js','utf8'),/acceptScoredIdentity/);
 assert.match(fs.readFileSync('build.mjs','utf8'),/src\/domain\/resolution-acceptance\.js/);
 assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/SCORED_RESOLUTION/);
 const ctx=vm.createContext({Map,Set,JSON});
-vm.runInContext(scorer+'\n'+gate+'\nglobalThis.api={scoreFilmResolution,acceptScoredIdentity,admissionPolicy,catalogCleanupPolicy,filmAdmissionInput};',ctx);
+vm.runInContext(scorer+'\n'+gate+'\nglobalThis.api={scoreFilmResolution,acceptScoredIdentity,admissionPolicy,catalogCleanupPolicy,filmAdmissionInput,ownerPolicyExcludedTmdb};',ctx);
 const film=(tmdbId,title,year,runtime,extra={})=>({tmdbId,title,original:title,year,runtime,...extra});
 const observe=(key,title,year,duration)=>({key,title,normalizedTitle:title.toLowerCase(),year,duration,durations:[duration]});
 function score(observation,candidates){ctx.observation=observation;ctx.candidates=candidates;return vm.runInContext('scoreFilmResolution({observation,candidates})',ctx);}
@@ -247,8 +247,8 @@ function policyBound(key,title,year,runtime,id,genres,extra={}){
  const scored=score(observe(key,title,year,runtime),[film(String(id),title,year,runtime)]);
  return bound(scored,{observation:{normalizedTitle:title.toLowerCase(),year,durations:[runtime],categories:extra.categories||[]},tmdbDetail:policyDetail(id,extra.original||title,year,runtime,genres,extra),confirmation:extra.confirmation||null,film:extra.film||null,appliedObservationKeys:extra.appliedObservationKeys||[]});
 }
-const robbieScore=score(observe('robbie williams live at the apple music festival|2016','Robbie Williams: Live at the Apple Music Festival',2016,82),[film('1326142','Robbie Williams: Live at the Apple Music Festival',2016,82)]);
-const robbieDetail=policyDetail('1326142','Robbie Williams: Live at the Apple Music Festival',2016,82,['Музыка']);
+const robbieScore=score(observe('robbie williams live at the apple music festival|2016','Robbie Williams: Live at the Apple Music Festival',2016,82),[film('9326142','Robbie Williams: Live at the Apple Music Festival',2016,82)]);
+const robbieDetail=policyDetail('9326142','Robbie Williams: Live at the Apple Music Festival',2016,82,['Музыка']);
 const robbieObservation={normalizedTitle:'robbie williams live at the apple music festival',year:2016,durations:[82],categories:['Концерт']};
 const robbieHold=bound(robbieScore,{observation:robbieObservation,tmdbDetail:robbieDetail});
 assert.equal(robbieHold.outcome,'candidate_decision');
@@ -257,9 +257,9 @@ assert.equal(robbieHold.candidateDecision.status,'no_confident_match');
 assert.equal(robbieHold.transition,null);
 assert.equal(robbieHold.filmChange,null);
 assert.equal(bound(robbieScore,{observation:{...robbieObservation,categories:[]},tmdbDetail:robbieDetail}).reason,'concert_recording');
-const robbieOwner={authority:'owner',tmdbId:'1326142',evidence:{authority:'owner',reviewed:true,tmdbId:'1326142'}};
+const robbieOwner={authority:'owner',tmdbId:'9326142',evidence:{authority:'owner',reviewed:true,tmdbId:'9326142'}};
 assert.equal(bound(robbieScore,{observation:robbieObservation,tmdbDetail:robbieDetail,confirmation:robbieOwner}).reason,'concert_recording');
-assert.equal(bound(robbieScore,{observation:robbieObservation,tmdbDetail:robbieDetail,confirmation:robbieOwner,film:{id:'tmdb_1326142',canonicalIdentity:'tmdb:1326142',externalIds:[{scheme:'tmdb',value:'1326142',trusted:true,conflicting:false}]},appliedObservationKeys:['robbie williams live at the apple music festival|2016']}).outcome,'already_applied');
+assert.equal(bound(robbieScore,{observation:robbieObservation,tmdbDetail:robbieDetail,confirmation:robbieOwner,film:{id:'tmdb_9326142',canonicalIdentity:'tmdb:9326142',externalIds:[{scheme:'tmdb',value:'9326142',trusted:true,conflicting:false}]},appliedObservationKeys:['robbie williams live at the apple music festival|2016']}).outcome,'already_applied');
 const tvMovieScore=score(observe('made for tv|1999','Made For Tv',1999,96),[film('7001','Made For Tv',1999,96)]);
 assert.equal(bound(tvMovieScore,{observation:{normalizedTitle:'made for tv',year:1999,durations:[96],categories:['Концерт']},tmdbDetail:policyDetail('7001','Made For Tv',1999,96,[{id:10770,name:'TV Movie'}],{genreIds:[10770]})}).outcome,'detail_verified');
 const tvConcert=policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7102',[{id:10770,name:'TV Movie'}],{categories:['Концерт'],overview:'A filmed live performance of the tour.',genreIds:[10770]});
@@ -319,16 +319,16 @@ for(const categories of [['Фильм'],[],['Концерт'],['Music']]){
 assert.equal(policyBound('live by night|2016','Live by Night',2016,129,'259693',[{id:80,name:'Crime'},{id:18,name:'Drama'}],{overview:'A crime story.'}).outcome,'detail_verified');
 assert.equal(policyBound('the concert|2009','The Concert',2009,119,'19407',[{id:35,name:'Comedy'},{id:18,name:'Drama'}],{categories:['Фильм'],overview:'A drama about musicians who missed a concert.'}).outcome,'detail_verified');
 // AIR-501 18 Nov RCA: a TMDB card with an empty genre list verified on title, year and runtime alone.
-const picnic=policyBound('пикник традиционный весенний концерт|2014','Пикник: Традиционный весенний концерт',2014,100,'761960',[],{overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.',genreIds:[]});
+const picnic=policyBound('пикник традиционный весенний концерт|2014','Пикник: Традиционный весенний концерт',2014,100,'9761960',[],{overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.',genreIds:[]});
 assert.equal(picnic.outcome,'needs_verification');
 assert.equal(picnic.reason,'genre_evidence_missing');
 assert.equal(picnic.transition,null);
-assert.equal(policyBound('арктика очищение|2021','Арктика. Очищение',2021,52,'1623086',[],{overview:'Экспедиция.',genreIds:[]}).reason,'genre_evidence_missing');
+assert.equal(policyBound('арктика очищение|2021','Арктика. Очищение',2021,52,'91623086',[],{overview:'Экспедиция.',genreIds:[]}).reason,'genre_evidence_missing');
 assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7120',[],{overview:'A filmed live performance of the tour.',genreIds:[]}).reason,'concert_recording');
 const emptyOwner={authority:'owner',tmdbId:'761961',evidence:{authority:'owner',reviewed:true,tmdbId:'761961'}};
 assert.equal(policyBound('тихий дом|2014','Тихий дом',2014,100,'761961',[],{overview:'Семейная история.',genreIds:[],confirmation:emptyOwner}).outcome,'detail_verified');
 assert.equal(policyBound('концерт|2009','Концерт',2009,119,'19407',[{id:18,name:'Drama'}],{overview:'Дирижёр собирает оркестр.',genreIds:[18]}).outcome,'detail_verified');
-assert.equal(policyBound('shakira tour|2007','Shakira Oral Fixation Tour',2007,120,'23710',[{id:10402,name:'Music'}],{overview:'Концерт Шакиры в Майами.',genreIds:[10402]}).reason,'concert_recording_ambiguous');
+assert.equal(policyBound('shakira tour|2007','Shakira Oral Fixation Tour',2007,120,'923710',[{id:10402,name:'Music'}],{overview:'Концерт Шакиры в Майами.',genreIds:[10402]}).reason,'concert_recording_ambiguous');
 assert.equal(policyBound('rhythm of the road|2011','Rhythm of the Road',2011,100,'88001',[{id:10402,name:'Music'}],{overview:'A fictional band spends a summer writing songs.',genreIds:[10402]}).outcome,'detail_verified');
 assert.equal(policyBound('summer notes|2014','Summer Notes',2014,102,'88011',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'Two musicians live in Paris and form a band.',genreIds:[10402]}).outcome,'detail_verified');
 assert.equal(policyBound('quiet days|2014','Quiet Days',2014,102,'88012',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'The singers live above the club and write songs.',genreIds:[10402]}).outcome,'detail_verified');
@@ -353,7 +353,7 @@ for(const [id,title,genres,synopsis,expected] of [
 ]){
  assert.equal(cleanup({id,title,genres,synopsis}),expected,id);
 }
-// Not reached: no words in the stored synopsis (empty, placeholder, or a word only in the title), non-fiction with no performance or documentary word, and fiction.
+// Not reached by the synopsis rule (these cards carry no tmdbId, year or runtime, so the owner-reviewed list below does not apply): no words in the stored synopsis (empty, placeholder, or a word only in the title), non-fiction with no performance or documentary word, and fiction.
 for(const [id,title,genres,synopsis] of [
  ['tmdb_450202','Britney Spears: Apple Music Festival',music,'Описание отсутствует'],
  ['tmdb_1126350','DJ BoBo - EVOLUT30N',music,'Описание отсутствует'],
@@ -376,3 +376,55 @@ for(const genres of [['драма','музыка'],['комедия','музык
 assert.equal(gateKind({id:'tmdb_761960',title:'Пикник: Традиционный весенний концерт',genres:[],synopsis:'7 марта 2014 года в ДК им. Ленсовета прошёл традиционный весенний концерт группы "Пикник".'}),'unclassified');
 assert.equal(gateKind({id:'tmdb_1063549',title:'Gaga Chromatica Ball',genres:music,synopsis:'Леди Гага представляет выступление.'}),null);
 assert.equal(gateKind({id:'tmdb_534012',title:'Paul Rodgers -  Free Spirit',genres:music,synopsis:"United Kingdom. The 16-song collection, 'Free Spirit', filmed in London, England returned Paul Rodgers to his roots, bringing fans an extraordinary evening celebrating the music of Free… 2018. koncert"}),null);
+// ADR 0171: the six films the owner reviewed against the TMDB card are reached by the writer only on an exact id, title, year and runtime match.
+const reviewedCards=[
+ ['450202','Britney Spears: Apple Music Festival',2016,88,music,'Описание отсутствует','concert'],
+ ['1126350','DJ BoBo - EVOLUT30N',2023,134,music,'Описание отсутствует','concert'],
+ ['1603159','TesseracT: RADAR',2025,90,music,'Tesseract - Radar','concert'],
+ ['1623086','Арктика. Очищение',2020,55,[],'Водитель и бизнесмен, студент-медик и 3D-аниматор, пивовар, слесарь – 18 мужчин разных профессий.','documentary'],
+ ['569928','Большой белый танец',null,68,[],'Лента посвящена самому древнему и загадочному хищнику океана – большой белой акуле.','documentary'],
+ ['1603299','Северный морской путь, или Русская дорога в океане',null,64,[],'Фильм рассказывает о том, из чего складывается национальная транспортная магистраль России.','documentary'],
+];
+for(const [tmdbId,title,year,runtime,genres,synopsis,expected] of reviewedCards){
+ const card={id:'tmdb_'+tmdbId,tmdbId,title,year,runtime,genres,synopsis};
+ assert.equal(cleanup(card),expected,tmdbId);
+ assert.notEqual(gateKind(card),'concert',tmdbId);
+ assert.notEqual(gateKind(card),'documentary',tmdbId);
+ assert.notEqual(cleanup({...card,tmdbId:String(Number(tmdbId)+1)}),expected,'another id is not reached '+tmdbId);
+ assert.notEqual(cleanup({...card,runtime:runtime+7}),expected,'runtime mismatch '+tmdbId);
+ assert.notEqual(cleanup({...card,year:(year??2000)+1}),expected,'year mismatch '+tmdbId);
+ assert.notEqual(cleanup({...card,title:title+' II'}),expected,'title mismatch '+tmdbId);
+ assert.notEqual(cleanup({...card,genres:[...genres,'драма']}),expected,'feature genre '+tmdbId);
+}
+// The detail gate still reads these cards as before: an empty genre list is held, Music alone verifies.
+assert.equal(gateKind({id:'tmdb_1623086',tmdbId:'1623086',title:'Арктика. Очищение',year:2020,runtime:55,genres:[],synopsis:'Экспедиция.'}),'unclassified');
+assert.equal(gateKind({id:'tmdb_450202',tmdbId:'450202',title:'Britney Spears: Apple Music Festival',year:2016,runtime:88,genres:music,synopsis:'Описание отсутствует'}),null);
+// ADR 0172: a film the owner retired cannot be admitted again by a new observation key, by an owner confirmation, or on the first pass before any detail read.
+function retired(key,year,extra={}){return policyBound(key,'Britney Spears: Apple Music Festival',year,88,'450202',['музыка'],{overview:'Описание отсутствует',genreIds:[10402],...extra});}
+for(const [key,year] of [['britney spears apple music festival|2016',2016],['britney spears apple music festival|2017',2017],['britney spears apple music festival|',null]]){
+ const out=retired(key,year);
+ assert.equal(out.outcome,'candidate_decision',key);
+ assert.equal(out.reason,'owner_policy_excluded',key);
+ assert.equal(out.candidateDecision.status,'no_confident_match',key);
+ assert.equal(out.transition,null,key);
+}
+const retiredOwner={authority:'owner',tmdbId:'450202',evidence:{authority:'owner',reviewed:true,tmdbId:'450202'}};
+assert.equal(retired('britney spears apple music festival|2016',2016,{confirmation:retiredOwner}).reason,'owner_policy_excluded');
+{ // first pass, before any detail read: a confirmation without detail is refused as well
+ const scored=score(observe('britney spears apple music festival|2016','Britney Spears: Apple Music Festival',2016,88),[film('450202','Britney Spears: Apple Music Festival',2016,88)]);
+ assert.equal(bound(scored).reason,'owner_policy_excluded');
+ assert.equal(bound(scored,{confirmation:{authority:'owner',tmdbId:'450202',evidence:{authority:'owner',reviewed:true,tmdbId:'450202'}}}).reason,'owner_policy_excluded');
+}
+// A film the catalog still holds as a current admission is not touched by the list: the writer has to retire it first.
+assert.equal(retired('britney spears apple music festival|2016',2016,{film:{tmdbId:'450202',canonicalIdentity:'tmdb:450202'}}).outcome,'detail_verified');
+// Every id the writer can still reach through the reviewed list is on the retired list; an unrelated id is not.
+for(const id of ['450202','1126350','1603159','1623086','569928','1603299','761960','24970'])assert.equal(vm.runInContext('ownerPolicyExcludedTmdb("'+id+'")',ctx),true,id);
+for(const id of ['11','42','9999999',null,''])assert.equal(ctx.api.ownerPolicyExcludedTmdb(id),false,String(id));
+// A hand-kept list: 166 valid, distinct TMDB ids (160 retired by the writer by 2026-11-18T14:30Z plus the six reviewed ids), no empty member, the six reviewed ids included.
+{
+ const retiredIds=vm.runInContext('[...OWNER_POLICY_EXCLUDED_TMDB_IDS]',ctx);
+ assert.equal(retiredIds.length,166);
+ assert.ok(retiredIds.every(id=>/^[1-9]\d{0,11}$/.test(id)),'every member is a plain TMDB id, none empty');
+ assert.equal(new Set(retiredIds).size,retiredIds.length);
+ for(const id of ['450202','1126350','1603159','1623086','569928','1603299'])assert.ok(retiredIds.includes(id),id);
+}

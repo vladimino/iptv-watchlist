@@ -33,7 +33,7 @@ function movieDetail(id,title,year,runtime,genres,overview='A synopsis'){
 function searchHit(id,title,year){
  return new Response(JSON.stringify({total_pages:1,results:[{id:Number(id),title,original_title:title,release_date:year+'-01-01'}]}));
 }
-async function resolve(item,movies){
+async function resolve(item,movies,options={}){
  const live=harness(url=>{
   for(const movie of movies){
    if(url.includes('/movie/'+movie.id+'?'))return movieDetail(movie.id,movie.title,movie.year,movie.runtime,movie.genres,movie.overview);
@@ -43,9 +43,10 @@ async function resolve(item,movies){
  });
  live.records.set('programme.json',{runId:'run-1',films:[]});
  live.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[item]});
- live.records.set('epg/discovered-films.json',{});
+ live.records.set('epg/discovered-films.json',options.catalog||{});
  live.records.set('enrichment/profile/current.json',{version:1,profileHash:'hash'});
- const result=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',live);
+ live.watchlistFilms=options.watchlist||[];
+ const result=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:watchlistFilms},4)',live);
  return {live,result,records:live.records};
 }
 
@@ -71,24 +72,24 @@ assert(scanned.has('Схватка'));
 assert.equal(scanned.get('Robbie Williams: Live at the Apple Music Festival').categories.join('|'),'Концерт');
 assert.equal(scan.stats.filteredNonMovies,0);
 
-const robbie=await resolve(candidate('Robbie Williams: Live at the Apple Music Festival',2016,82,{categories:['Концерт']}),[{id:1326142,title:'Robbie Williams: Live at the Apple Music Festival',year:2016,runtime:82,genres:[{id:10402,name:'Музыка'}]}]);
+const robbie=await resolve(candidate('Robbie Williams: Live at the Apple Music Festival',2016,82,{categories:['Концерт']}),[{id:9326142,title:'Robbie Williams: Live at the Apple Music Festival',year:2016,runtime:82,genres:[{id:10402,name:'Музыка'}]}]);
 assert.equal(robbie.records.get('epg/discovery-resolution.json')['robbie williams live at the apple music festival|2016'].status,'no_confident_match');
 assert.equal(robbie.records.get('epg/discovery-resolution.json')['robbie williams live at the apple music festival|2016'].reason,'concert_recording');
-assert.equal(robbie.records.get('epg/discovered-films.json').tmdb_1326142,undefined);
+assert.equal(robbie.records.get('epg/discovered-films.json').tmdb_9326142,undefined);
 assert.equal(robbie.records.get('epg/discovery-score-preview.json').items['robbie williams live at the apple music festival|2016'].outcome,'candidate_decision');
 assert.equal(robbie.records.get('programme.json').runId,'run-1');
 const robbieQueue=robbie.records.get('enrichment/prediction-queue.json');
-assert.ok(!robbieQueue||!(robbieQueue.hotPending||[]).includes('tmdb_1326142'));
-assert.ok(!robbieQueue||!(robbieQueue.pending||[]).includes('tmdb_1326142'));
+assert.ok(!robbieQueue||!(robbieQueue.hotPending||[]).includes('tmdb_9326142'));
+assert.ok(!robbieQueue||!(robbieQueue.pending||[]).includes('tmdb_9326142'));
 
 const rieuTitle='Rieu Royale - André Rieu Coronation Concert Live in Amsterdam';
-const rieu=await resolve(candidate(rieuTitle,2013,140,{categories:['Music']}),[{id:238858,title:rieuTitle,year:2013,runtime:140,genres:[{id:10402,name:'Music'},{id:10770,name:'TV Movie'}]}]);
+const rieu=await resolve(candidate(rieuTitle,2013,140,{categories:['Music']}),[{id:9238858,title:rieuTitle,year:2013,runtime:140,genres:[{id:10402,name:'Music'},{id:10770,name:'TV Movie'}]}]);
 const rieuKey=rieu.records.get('epg/discovery-latest.json').items[0].key;
 assert.equal(rieu.records.get('epg/discovery-resolution.json')[rieuKey].status,'no_confident_match');
 assert.equal(rieu.records.get('epg/discovery-resolution.json')[rieuKey].reason,'concert_recording');
-assert.equal(rieu.records.get('epg/discovered-films.json').tmdb_238858,undefined);
+assert.equal(rieu.records.get('epg/discovered-films.json').tmdb_9238858,undefined);
 const rieuQueue=rieu.records.get('enrichment/prediction-queue.json');
-assert.ok(!rieuQueue||!(rieuQueue.hotPending||[]).includes('tmdb_238858'));
+assert.ok(!rieuQueue||!(rieuQueue.hotPending||[]).includes('tmdb_9238858'));
 
 function withheld(records,key,id,reason){
  const decision=records.get('epg/discovery-resolution.json')[key];
@@ -147,19 +148,38 @@ for(const categories of [['Фильм'],[]]){
 const tvEmptyGenre=await resolve(candidate('Hall Live at the Arena',1998,90,{categories:['Фильм']}),[{id:7108,title:'Hall Live at the Arena',year:1998,runtime:90,genres:[],overview:'A filmed live performance of the tour.'}]);
 withheld(tvEmptyGenre.records,'hall live at the arena|1998',7108,'concert_recording');
 // ADR 0168: TMDB returns no genre at all; a bare concert word in title and overview is not proof, so the card is held with its own durable reason.
-const picnic=await resolve(candidate('Пикник: Традиционный весенний концерт',2014,100,{categories:['Фильм']}),[{id:761960,title:'Пикник: Традиционный весенний концерт',year:2014,runtime:100,genres:[],overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.'}]);
-withheld(picnic.records,'пикник традиционный весенний концерт|2014',761960,'genre_evidence_missing');
-const picnicBare=await resolve(candidate('Пикник: Традиционный весенний концерт',2014,100),[{id:761960,title:'Пикник: Традиционный весенний концерт',year:2014,runtime:100,genres:[],overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.'}]);
-withheld(picnicBare.records,'пикник традиционный весенний концерт|2014',761960,'genre_evidence_missing');
-const arctic=await resolve(candidate('Арктика. Очищение',2021,52),[{id:1623086,title:'Арктика. Очищение',year:2021,runtime:52,genres:[],overview:'Экспедиция.'}]);
-withheld(arctic.records,'арктика очищение|2021',1623086,'genre_evidence_missing');
-const shakira=await resolve(candidate('Shakira Oral Fixation Tour',2007,120),[{id:23710,title:'Shakira Oral Fixation Tour',year:2007,runtime:120,genres:[{id:10402,name:'Music'}],overview:'Концерт Шакиры в Майами.'}]);
-withheld(shakira.records,'shakira oral fixation tour|2007',23710,'concert_recording_ambiguous');
+const picnic=await resolve(candidate('Пикник: Традиционный весенний концерт',2014,100,{categories:['Фильм']}),[{id:9761960,title:'Пикник: Традиционный весенний концерт',year:2014,runtime:100,genres:[],overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.'}]);
+withheld(picnic.records,'пикник традиционный весенний концерт|2014',9761960,'genre_evidence_missing');
+const picnicBare=await resolve(candidate('Пикник: Традиционный весенний концерт',2014,100),[{id:9761960,title:'Пикник: Традиционный весенний концерт',year:2014,runtime:100,genres:[],overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.'}]);
+withheld(picnicBare.records,'пикник традиционный весенний концерт|2014',9761960,'genre_evidence_missing');
+const arctic=await resolve(candidate('Арктика. Очищение',2021,52),[{id:91623086,title:'Арктика. Очищение',year:2021,runtime:52,genres:[],overview:'Экспедиция.'}]);
+withheld(arctic.records,'арктика очищение|2021',91623086,'genre_evidence_missing');
+const shakira=await resolve(candidate('Shakira Oral Fixation Tour',2007,120),[{id:923710,title:'Shakira Oral Fixation Tour',year:2007,runtime:120,genres:[{id:10402,name:'Music'}],overview:'Концерт Шакиры в Майами.'}]);
+withheld(shakira.records,'shakira oral fixation tour|2007',923710,'concert_recording_ambiguous');
 const concertFiction=await resolve(candidate('Концерт',2009,119),[{id:19407,title:'Концерт',year:2009,runtime:119,genres:[{id:18,name:'Drama'},{id:35,name:'Comedy'}],overview:'Дирижёр собирает оркестр на концерт.'}]);
 admitted(concertFiction.records,'концерт|2009','19407');
 // A TMDB payload that omits the genre list entirely reaches the gate as an empty list through the Worker adapter, so it is held the same way (fail closed).
 const noGenreKey=await resolve(candidate('Тихий дом',2014,100),[{id:761961,title:'Тихий дом',year:2014,runtime:100,genres:undefined,overview:'Семейная история.'}]);
 withheld(noGenreKey.records,'тихий дом|2014',761961,'genre_evidence_missing');
+// ADR 0172: a film the owner retired (TMDB 450202) is not admitted again, however its observation key reads, although its card alone would verify.
+for(const [title,year,key] of [['Britney Spears: Apple Music Festival',2016,'britney spears apple music festival|2016'],['Britney Spears: Apple Music Festival',null,'britney spears apple music festival|']]){
+ const retiredFilm=await resolve(candidate(title,year,88,{categories:['Фильм']}),[{id:450202,title:'Britney Spears: Apple Music Festival',year:2016,runtime:88,genres:[{id:10402,name:'Music'}],overview:'Описание отсутствует'}]);
+ withheld(retiredFilm.records,key,450202,'owner_policy_excluded');
+}
+// The known-title shortcut (`known_epg_alias`) follows the current Discovery catalog, not the personal watchlist: a film still admitted keeps it until the owner GO,
+// and a retired film is not verified through it, with or without a watchlist entry.
+const aliasMovie=[{id:450202,title:'Britney Spears: Apple Music Festival',year:2016,runtime:88,genres:[{id:10402,name:'Music'}],overview:'Описание отсутствует'}];
+const aliasKey='britney spears apple music festival|2016';
+const stillAdmitted={tmdb_450202:{id:'tmdb_450202',tmdbId:'450202',canonicalIdentity:'tmdb:450202',title:'Britney Spears: Apple Music Festival',original:'Britney Spears: Apple Music Festival',aliases:['Britney Spears: Apple Music Festival'],year:2016,runtime:88,genres:['музыка'],shows:[]}};
+const aliasCurrent=await resolve(candidate('Britney Spears: Apple Music Festival',2016,88,{categories:['Фильм'],confirmedTmdbId:'450202'}),aliasMovie,{catalog:stillAdmitted});
+assert.equal(aliasCurrent.records.get('epg/discovery-resolution.json')[aliasKey].identitySource,'known_epg_alias','a film still admitted keeps the shortcut until the GO');
+for(const watchlist of [[],[{id:'tmdb_450202',tmdbId:'450202',title:'Britney Spears: Apple Music Festival',year:2016}]]){
+ const aliasRetired=await resolve(candidate('Britney Spears: Apple Music Festival',2016,88,{categories:['Фильм'],confirmedTmdbId:'450202'}),aliasMovie,{watchlist});
+ const decision=aliasRetired.records.get('epg/discovery-resolution.json')?.[aliasKey];
+ assert.notEqual(decision?.status,'verified','a retired film is not verified through the shortcut, watchlist '+watchlist.length);
+ assert.notEqual(decision?.identitySource,'known_epg_alias','watchlist '+watchlist.length);
+ assert.equal(aliasRetired.records.get('epg/discovered-films.json').tmdb_450202,undefined,'watchlist '+watchlist.length);
+}
 const tvTitleOnly=await resolve(candidate('Hall Live at the Arena',1998,90,{categories:['Фильм']}),[{id:7109,title:'Hall Live at the Arena',year:1998,runtime:90,genres:[{id:10770,name:'TV Movie'}],overview:'A synopsis.'}]);
 admitted(tvTitleOnly.records,'hall live at the arena|1998','7109');
 const summer=await resolve(candidate('Summer Notes',2014,102,{categories:['Фильм']}),[{id:88011,title:'Summer Notes',year:2014,runtime:102,genres:[{id:10402,name:'Music'}],overview:'Two musicians live in Paris and form a band.'}]);
@@ -180,14 +200,14 @@ admitted(quiet.records,'quiet days|2014','88012');
  const lease=(await Authority.acquireLease(env,{programmeRunId:RUN})).lease;
  env.discoveryLease=lease;
  const catalog=[
-  {id:1326142,title:'Robbie Williams: Live at the Apple Music Festival',year:2016,runtime:82,genres:[{id:10402,name:'Музыка'}],categories:['Концерт']},
+  {id:9326142,title:'Robbie Williams: Live at the Apple Music Festival',year:2016,runtime:82,genres:[{id:10402,name:'Музыка'}],categories:['Концерт']},
   {id:51497,title:'Free Solo',year:2018,runtime:100,genres:[{id:99,name:'Documentary'}],categories:['Фильм']},
   {id:18648,title:'Pink Floyd Live At Pompeii',year:1972,runtime:92,genres:[{id:10402,name:'Music'}],categories:[]},
   {id:424694,title:'Bohemian Rhapsody',year:2018,runtime:134,genres:[{id:18,name:'Drama'},{id:10402,name:'Music'}],categories:['Фильм'],overview:'The story of Freddie Mercury and Queen, including their Live Aid concert.'},
   {id:7104,title:'Hall Live at the Arena',year:1998,runtime:90,genres:[{id:10770,name:'TV Movie'}],categories:['Фильм'],overview:'A filmed live performance of the tour.'},
-  {id:7106,title:'Hall Live at the Arena',year:1997,runtime:90,genres:[{id:10770,name:'TV Movie'}],categories:[],overview:'A filmed live performance of the tour.'},
   {id:7108,title:'Hall Live at the Arena',year:1996,runtime:90,genres:[],categories:['Фильм'],overview:'A filmed live performance of the tour.'},
-  {id:761960,title:'Пикник: Традиционный весенний концерт',year:2014,runtime:100,genres:[],categories:['Фильм'],overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.'}
+  {id:450202,title:'Britney Spears: Apple Music Festival',year:2016,runtime:88,genres:[{id:10402,name:'Music'}],categories:['Фильм'],overview:'Описание отсутствует'},
+  {id:9761960,title:'Пикник: Традиционный весенний концерт',year:2014,runtime:100,genres:[],categories:['Фильм'],overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.'}
  ];
  const items=catalog.map(movie=>candidate(movie.title,movie.year,movie.runtime,{categories:movie.categories}));
  await Authority.ingestLedger(env,{programmeRunId:RUN,handoff:true,lease,items:(async function*(){for(const item of items)yield item;})()});
@@ -206,19 +226,19 @@ admitted(quiet.records,'quiet days|2014','88012');
  assert.equal(stored[items[1].key].reason,'documentary_excluded');
  assert.equal(stored[items[2].key].reason,'concert_recording');
  assert.equal(stored[items[3].key].status,'verified');
- assert.equal(admissions.tmdb_1326142,undefined);
+ assert.equal(admissions.tmdb_9326142,undefined);
  assert.equal(admissions.tmdb_51497,undefined);
  assert.equal(admissions.tmdb_18648,undefined);
  assert.equal(admissions.tmdb_424694.canonicalIdentity,'tmdb:424694');
  assert.equal(stored['hall live at the arena|1998'].reason,'concert_recording');
  assert.equal(admissions.tmdb_7104,undefined);
- assert.equal(stored['hall live at the arena|1997'].reason,'concert_recording');
- assert.equal(admissions.tmdb_7106,undefined);
  assert.equal(stored['hall live at the arena|1996'].reason,'concert_recording');
  assert.equal(admissions.tmdb_7108,undefined);
+ assert.equal(stored['britney spears apple music festival|2016'].reason,'owner_policy_excluded');
+ assert.equal(admissions.tmdb_450202,undefined);
  assert.equal(stored['пикник традиционный весенний концерт|2014'].status,'needs_verification');
  assert.equal(stored['пикник традиционный весенний концерт|2014'].reason,'genre_evidence_missing');
- assert.equal(admissions.tmdb_761960,undefined);
+ assert.equal(admissions.tmdb_9761960,undefined);
  const authority=db.sql("SELECT mode, cutover, programme_run_id FROM published_epg_authority WHERE id=1")[0];
  assert.equal(authority.mode,'r2');
  assert.equal(authority.programme_run_id,null);
