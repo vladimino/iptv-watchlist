@@ -1,17 +1,14 @@
 #!/usr/bin/env node
-// Production entry for the metadata cache cutover (ADR 0073). Default is read-only.
+// Production entry for the metadata cache schema (ADR 0073). Default is read-only status.
 // --apply sends only migrations/0006_metadata_cache.sql. The D1 token is sent only to
-// https://api.cloudflare.com/client/v4, and only for database iptv. The script does not open a
-// scratch database. --load copies the live metadata.json into D1 and leaves mode r2.
-// --activate flips the marker r2 to d1. Each write needs its own --confirm and --target iptv.
-// This script refuses --revert, never writes R2, and never calls Time Travel restore. It does
-// not replace scripts/metadata-cache-authority.mjs, which stays offline and still refuses the
-// production database.
+// https://api.cloudflare.com/client/v4, and only for database iptv. The cutover commands --load
+// and --activate are retired with --revert (ADR 0162): they are refused with `retired`. The script
+// never writes R2 and never calls Time Travel restore. It also holds the production constants and
+// helpers other operator scripts import.
 import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
-import {activateMetadataCache, importMetadataCache} from '../src/metadata-cache.js';
 import {createD1Adapter, D1Error, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {ExportError} from './migration-export.mjs';
 import {createReadOnlyClient, readCredentials} from './r2-snapshot-export.mjs';
@@ -111,7 +108,7 @@ function parseArgs(argv){
   if(!commands.includes(arg))throw new OperatorStop('usage',2);
  }
  const command=commands[0]?commands[0].slice(2):'status';
- if(command==='revert')throw new OperatorStop('revert_refused',2);
+ if(command==='revert'||command==='load'||command==='activate')throw new OperatorStop('retired',2);
  const target=args.includes('--target')?value('--target'):undefined;
  const confirm=args.includes('--confirm')?value('--confirm'):undefined;
  if(target===undefined){
@@ -120,8 +117,6 @@ function parseArgs(argv){
  }
  if(target!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_invalid',2);
  if(command==='apply'&&confirm!=='apply')throw new OperatorStop('confirm',2);
- if(command==='load'&&confirm!=='load')throw new OperatorStop('confirm',2);
- if(command==='activate'&&confirm!=='activate')throw new OperatorStop('confirm',2);
  if(command==='status'&&confirm!==undefined)throw new OperatorStop('usage',2);
  return {command, confirm};
 }
@@ -272,18 +267,6 @@ function sourceSummary(object){
  return {etag:object.etag, bytes:object.bytes, sha256:object.sha256, keys:Object.keys(value).length};
 }
 
-function mirrorBucket(client, captured){
- return {
-  async get(){
-   return {etag:captured.etag, json:async()=>parseRecord(captured.text,'metadata.json'), text:async()=>captured.text};
-  },
-  async head(){
-   const head=await client.head('metadata.json',{ifMatch:captured.etag});
-   return head?{etag:head.etag}:null;
-  },
-  async put(){throw new OperatorStop('r2_write_refused',3);},
- };
-}
 
 // A production write is unknown from the moment the request is sent until the response
 // returns. A later read-back failure does not change a returned request back to "no write".
@@ -355,13 +338,7 @@ export async function runMetadataCacheProduction({argv=process.argv, env=process
   const metadata=await readObject(client,'metadata.json');
   const source=sourceSummary(metadata);
   if(parsed.command==='apply')return {exit:0, result:await applyMigration(opened, ctx, snapshot, source)};
-  if(snapshot.schemaVersion!==6||!tablesPresent(snapshot)||!snapshot.marker)throw new OperatorStop('metadata_cache_schema',3);
-  if(snapshot.marker.mode!=='r2')throw new OperatorStop('metadata_cache_authoritative',3);
-  if(parsed.command==='activate'){
-   if(snapshot.marker.cacheGeneration!==snapshot.marker.mirrorGeneration||metadata.etag!==snapshot.marker.mirrorEtag)throw new OperatorStop('metadata_cache_fence',3);
-  }
-  if(parsed.command==='load')return {exit:0, result:await loadCache(opened.binding, client, metadata, source, ctx, snapshot)};
-  return {exit:0, result:await activateCache(opened.binding, client, metadata, source, ctx, snapshot)};
+  throw new OperatorStop('usage',2);
  }catch(error){
   return finish(normalize(error), ctx);
  }
@@ -390,33 +367,6 @@ async function applyMigration(opened, ctx, snapshot, source){
  const readback=await readSnapshot(opened.binding);
  if(readback.schemaVersion!==6||readback.marker?.mode!=='r2'||readback.marker.cacheGeneration!==0||readback.marker.mirrorGeneration!==0||readback.cacheRows!==0)throw new OperatorStop('readback_mismatch',3);
  return {operation:'apply', writes:true, writeState:'committed', bookmark:ctx.bookmark, source, schemaVersion:readback.schemaVersion, mode:readback.marker.mode, cacheGeneration:readback.marker.cacheGeneration, mirrorGeneration:readback.marker.mirrorGeneration, cacheRows:readback.cacheRows};
-}
-
-async function loadCache(binding, client, metadata, source, ctx, snapshot){
- if(snapshot.schemaVersion!==6||!tablesPresent(snapshot)||!snapshot.marker)throw new OperatorStop('metadata_cache_schema',3);
- if(snapshot.marker.mode!=='r2')throw new OperatorStop('metadata_cache_authoritative',3);
- const imported=await importMetadataCache(binding, mirrorBucket(client, metadata), {confirm:'load'});
- let head;
- try{head=await client.head('metadata.json',{ifMatch:imported.mirrorEtag});}
- catch(error){
-  if(error instanceof ExportError&&error.kind==='source_changed')throw new OperatorStop('mirror_moved',3);
-  throw error;
- }
- if(!head||head.etag!==imported.mirrorEtag)throw new OperatorStop('mirror_moved',3);
- const readback=await readSnapshot(binding);
- if(readback.marker?.mode!=='r2'||readback.marker.cacheGeneration!==imported.cacheGeneration||readback.marker.mirrorGeneration!==imported.mirrorGeneration||readback.marker.mirrorEtag!==imported.mirrorEtag||readback.cacheRows!==imported.keys)throw new OperatorStop('readback_mismatch',3);
- return {operation:'load', writes:true, writeState:'committed', bookmark:ctx.bookmark, source, mode:'r2', keys:imported.keys, cacheGeneration:imported.cacheGeneration, mirrorGeneration:imported.mirrorGeneration, mirrorEtag:imported.mirrorEtag, cacheRows:readback.cacheRows};
-}
-
-async function activateCache(binding, client, metadata, source, ctx, snapshot){
- if(snapshot.schemaVersion!==6||!tablesPresent(snapshot)||!snapshot.marker)throw new OperatorStop('metadata_cache_schema',3);
- if(snapshot.marker.mode!=='r2')throw new OperatorStop('metadata_cache_authoritative',3);
- if(snapshot.marker.cacheGeneration!==snapshot.marker.mirrorGeneration)throw new OperatorStop('metadata_cache_fence',3);
- if(metadata.etag!==snapshot.marker.mirrorEtag)throw new OperatorStop('metadata_cache_fence',3);
- const after=await activateMetadataCache(binding, mirrorBucket(client, metadata), {confirm:'activate'});
- const readback=await readSnapshot(binding);
- if(after.mode!=='d1'||readback.marker?.mode!=='d1'||readback.marker.cacheGeneration!==snapshot.marker.cacheGeneration)throw new OperatorStop('readback_mismatch',3);
- return {operation:'activate', writes:true, writeState:'committed', bookmark:ctx.bookmark, source, mode:'d1', cacheGeneration:readback.marker.cacheGeneration, mirrorGeneration:readback.marker.mirrorGeneration, cacheRows:readback.cacheRows};
 }
 
 const invoked=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;

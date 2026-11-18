@@ -203,7 +203,7 @@ assert.deepEqual(faultSchema.properties.origin.enum,['worker_http','transport','
 const background=[];
 const execution={waitUntil(work){background.push(Promise.resolve(work));},exports:{DiscoveryContinuation:{async fetch(){return Response.json({ok:true});}}}};
 const sync=store();
-const syncEnv={BUCKET:sync.bucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD,LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.test/guide.xml'};
+const syncEnv={BUCKET:sync.bucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD,LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.test/guide.xml',METADATA_CACHE_DB_OPTIONAL:'standin'}; // ADR 0162: no D1 binding here, so the explicit local metadata-cache stand-in
 const syncStart=await tool(syncEnv,'epg_sync_start',{},{execution});
 assert.equal(syncStart.body.result.isError,undefined);
 assert.equal(syncStart.body.result.structuredContent.stage,'metadata');

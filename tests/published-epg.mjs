@@ -126,7 +126,7 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.equal((await readAuthority(db)).mode,'r2');
  assert.equal((await readAuthority(db)).version,8,'0008 moves a prepared version 7 contract to 8');
  assert.equal(await currentGeneration({DB:db}),null);
- assert.equal((await readCache(db)).mode,'r2');
+ await assert.rejects(readCache(db),error=>error.code==='metadata_cache_unavailable','a metadata-cache marker in mode r2 is refused (ADR 0162)');
  db.sql("UPDATE metadata_cache_authority SET mode='d1'");
  assert.equal((await readCache(db)).mode,'d1','a later contract version keeps the metadata marker');
  assert.equal((await readAuthority(db)).mode,'r2');
@@ -265,6 +265,7 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
 
 {
  const db=arm(open());
+ db.sql("UPDATE metadata_cache_authority SET mode='d1'"); // ADR 0162: a metadata-cache marker that is not d1 is refused
  const films=[{id:'film:heat',title:'Heat',original:'Heat',year:1995,tmdbId:'949',shows:[]}];
  const body={runId:'run-d1',updatedAt:'2026-11-01T12:00:00.000Z',films};
  const list={updatedAt:'2026-11-01T12:00:00.000Z',films};

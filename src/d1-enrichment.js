@@ -205,11 +205,22 @@ async function d1EnrichmentStore(env,timer=D1_ENRICHMENT_NO_TIMER){
   runId=pointer.programmeRunId;
  }
  const authority=await timer.time('store.handoffGuard',()=>d1EnrichmentHandoffGuard(env,runId));
+ // ADR 0162: the metadata cache is served from D1 only. Its marker is read first; in mode d1 the R2 mirror metadata.json is not
+ // read at all, so a missing or broken mirror cannot stop the run. Any state other than d1 fails the run, unless the explicit local
+ // stand-in METADATA_CACHE_DB_OPTIONAL=standin keeps metadata.json (development and the test harness).
+ let metadataMode=null;
+ if(typeof MetadataCache!=='undefined'){
+  const cache=await timer.time('store.metadataAuthority',async()=>{
+   try{return await MetadataCache.readAuthority(env);}
+   catch(error){if(error?.code==='metadata_cache_unavailable')throw new D1EnrichmentInputError('metadata_cache_unavailable','metadata_cache');throw error;}
+  });
+  metadataMode=cache.mode;
+ }
  // The reads run together; `store.readBlock` is their wall time, each read's own time is `detail` (recorded by d1EnrichmentRead).
  const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,viewIndex,archiveDocument]=await timer.time('store.readBlock',()=>Promise.all([
   published?null:d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
   published?null:d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
-  d1EnrichmentRead(env,etags,'metadata.json',d1EnrichmentRecord),
+  metadataMode==='d1'?{}:d1EnrichmentRead(env,etags,'metadata.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'titles.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'people.json',d1EnrichmentRecord),
   d1EnrichmentDiscoveryRead(env,etags,epgGenerationKey(runId,'discovered-films.json'),authority,'generation_pending'),
@@ -242,6 +253,7 @@ async function d1EnrichmentStore(env,timer=D1_ENRICHMENT_NO_TIMER){
  }
  const store=timer.sync('store.build',()=>EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,watchlistAdmissions:EnrichmentProjection.watchlistAdmissionsFromIndex(viewIndex),archiveAdmissions:archiveDocument?EnrichmentProjection.archiveAdmissionsFromDocument(archiveDocument):null,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}}));
  if(ownerDocument)store.ownerReviews=ownerDocument;
+ Object.defineProperty(store,'metadataMode',{value:metadataMode,enumerable:false});
  return {store,programmeRunId:runId,discoveryGate:d1EnrichmentAuthoritySnapshot(authority)};
 }
 
@@ -527,8 +539,9 @@ async function d1EnrichmentDiff(env,db,now,summary,timer=D1_ENRICHMENT_NO_TIMER,
  summary.loadMs=Date.now()-started;
  // Schema v6 and every later version can name a D1 metadata cache. v4 and v5 keep the R2 object
  // and do not query the cache tables. Mode d1 replaces that object before the view is built.
- // Version 6 or newer without the cache tables or a valid marker fails the run before any write
- // and does not project from the R2 object. A failed cache read does the same.
+ // The metadata cache (ADR 0162): in mode d1 the store's metadata is replaced from D1 before the view is built; the marker is read
+ // again here, so a change since the store was read fails the run. Any other state already failed the run when the store was read,
+ // except the explicit local stand-in, which keeps metadata.json.
  // Version 7 or newer with this domain installed requires every prediction table and a valid marker.
  // The projector does not write that domain. A partial set of those tables fails the run before a write.
  // None of the tables means a later migration advanced the contract without this domain. Prediction stays
@@ -538,7 +551,7 @@ async function d1EnrichmentDiff(env,db,now,summary,timer=D1_ENRICHMENT_NO_TIMER,
  // and a d1 read does not use the R2 mirror.
  const version=(await timer.time('diff.schemaContract',()=>db.get('SELECT version FROM schema_contract WHERE id=1')))?.version??null;
  summary.schemaVersion=version;
- if(Number(version)>=6){
+ if(store.metadataMode==='d1'){
   try{await timer.time('diff.metadataCache',()=>MetadataCache.useAuthoritativeMetadata(db,store));}
   catch(error){if(error?.code==='metadata_cache_unavailable')throw new D1EnrichmentInputError('metadata_cache_unavailable','metadata_cache');throw error;}
  }

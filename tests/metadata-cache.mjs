@@ -1,5 +1,6 @@
-// ADR 0073. The metadata cache becomes the beginSync/metadataSync working set only when the
-// schema v6 marker is d1. Until that activation, including on schema v5, R2 stays the working set.
+// ADR 0073, ADR 0162. The metadata cache is the beginSync/metadataSync working set only while the
+// schema v6 marker is d1. Any other marker, a missing binding, schema v5 or missing tables fails closed;
+// only the explicit local stand-in (METADATA_CACHE_DB_OPTIONAL=standin) keeps the R2 object.
 // Counts below come from the fixture. A production sample is not the contract.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
@@ -7,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {SCHEMA_VERSION} from '../scripts/d1-backfill.mjs';
-import {activateMetadataCache,commitMetadataCache,importMetadataCache,loadMetadataWorkingSet,mergeWatchlistFilm,metadataCacheColumns,metadataPending,readAuthority,revertMetadataCache,saveMetadataWorkingSet,METADATA_FRESH_MS} from '../src/metadata-cache.js';
+import {commitMetadataCache,loadMetadataWorkingSet,mergeWatchlistFilm,metadataCacheColumns,metadataPending,readAuthority,saveMetadataWorkingSet,METADATA_FRESH_MS} from '../src/metadata-cache.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {projectorContext} from './d1-enrichment-context.mjs';
@@ -17,6 +18,11 @@ assert.doesNotMatch(worker,/env\.DB\b/);
 assert.doesNotMatch(worker,/film_sync_state/);
 assert.equal(SCHEMA_VERSION,4,'a reload still stops on every schema after v4');
 assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/metadata-cache\.js','MetadataCache'\)/);
+// ADR 0162: the explicit stand-in exists only for local development and the harness.
+assert.doesNotMatch(worker,/METADATA_CACHE_DB_OPTIONAL/);
+assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/METADATA_CACHE_DB_OPTIONAL/);
+assert.match(fs.readFileSync('scripts/local-dev.mjs','utf8'),/METADATA_CACHE_DB_OPTIONAL:'standin'/);
+assert.equal(fs.existsSync('scripts/metadata-cache-authority.mjs'),false,'the offline load, activate and revert operator is retired');
 assert.doesNotMatch(fs.readFileSync('src/d1-enrichment.js','utf8'),/INSERT INTO metadata_cache|UPDATE metadata_cache /);
 
 const NOW=Date.parse('2026-10-31T12:00:00.000Z');
@@ -50,31 +56,43 @@ const record=(id,extra={})=>({id,title:'Heat',original:'Heat',year:1995,metadata
 const mirrorOf=(body)=>{const bucket=new MemoryBucket();bucket.put('metadata.json',JSON.stringify(body));return bucket;};
 const authority=(db)=>db.sql('SELECT mode, cache_generation g, mirror_generation m, mirror_etag e FROM metadata_cache_authority')[0];
 const payload=(db,key)=>JSON.parse(db.sql(`SELECT payload_json p FROM metadata_cache WHERE cache_key='${key}'`)[0].p);
+// ADR 0162: the import and activate tooling is retired. A fixture sets the marker directly and stores the
+// mirror's records through the normal writer, which also writes the mirror.
+async function seed(db,bucket){
+ const object=await bucket.get('metadata.json');
+ const records=object?await object.json():{};
+ db.sql("UPDATE metadata_cache_authority SET mode='d1' WHERE id=1");
+ return commitMetadataCache(db,bucket,records,{...(await readAuthority(db)),complete:true});
+}
+const STANDIN={METADATA_CACHE_DB_OPTIONAL:'standin'};
 
-// 1. Schema v5, and schema v6 before activation, keep the R2 object. A dead binding fails closed.
+// 1. Schema v5, a schema v6 marker in mode r2 and a missing binding fail closed; only the explicit stand-in keeps the R2
+// object. A dead binding fails closed.
 {
  const v5=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state']);
  const body={heat:record('heat'),orphan:record('orphan',{synopsis:null})};
  const bucket=mirrorOf(body);
- const loaded=await loadMetadataWorkingSet({DB:v5,BUCKET:bucket});
- assert.equal(loaded.mode,'r2');
+ await assert.rejects(loadMetadataWorkingSet({DB:v5,BUCKET:bucket}),/metadata_cache_unavailable/,'schema v5 without the stand-in is refused');
+ const loaded=await loadMetadataWorkingSet({DB:v5,BUCKET:bucket,...STANDIN});
+ assert.equal(loaded.mode,'standin');
  assert.deepEqual(loaded.records,body);
- await saveMetadataWorkingSet({DB:v5,BUCKET:bucket},loaded.records,loaded);
- assert.equal(one(v5,"SELECT COUNT(*) FROM sqlite_master WHERE name='metadata_cache'"),0);
- const v6=migrated();
- assert.equal((await readAuthority(v6)).mode,'r2');
- assert.equal(one(v6,'SELECT version FROM schema_contract'),6);
- const kept=await loadMetadataWorkingSet({DB:v6,BUCKET:bucket});
- assert.equal(kept.mode,'r2');
- assert.deepEqual(kept.records.orphan.synopsis,null);
- assert.equal('synopsis' in payloadSafe(kept.records.heat),true);
- const saved=await saveMetadataWorkingSet({DB:v6,BUCKET:bucket},{...kept.records,heat:{...kept.records.heat,synopsis:'Edited'}},kept);
- assert.equal(saved.mode,'r2');
- assert.equal(saved.cacheGeneration,1,'an r2 save on schema v6 claims the generation before the put');
- assert.equal(authority(v6).mode,'r2');
- assert.equal(authority(v6).g,authority(v6).m);
- assert.equal(one(v6,'SELECT COUNT(*) FROM metadata_cache'),0);
+ assert.equal(payloadSafe(loaded.records.orphan).synopsis,null);
+ const local=await saveMetadataWorkingSet({DB:v5,BUCKET:bucket,...STANDIN},{...loaded.records,heat:{...loaded.records.heat,synopsis:'Edited'}},loaded);
+ assert.equal(local.mode,'standin');
  assert.equal(JSON.parse(bucket.objects.get('metadata.json').text).heat.synopsis,'Edited');
+ assert.equal(one(v5,"SELECT COUNT(*) FROM sqlite_master WHERE name='metadata_cache'"),0);
+ await assert.rejects(loadMetadataWorkingSet({BUCKET:bucket}),/metadata_cache_unavailable/,'a missing binding is refused');
+ assert.equal((await loadMetadataWorkingSet({BUCKET:bucket,...STANDIN})).mode,'standin');
+ const v6=migrated();
+ assert.equal(one(v6,'SELECT version FROM schema_contract'),6);
+ assert.equal(authority(v6).mode,'r2','the migration seeds mode r2');
+ await assert.rejects(readAuthority(v6),/metadata_cache_unavailable/,'a marker in mode r2 is refused (ADR 0162)');
+ await assert.rejects(readAuthority({DB:v6,...STANDIN}),/metadata_cache_unavailable/,'the stand-in does not serve a marker in mode r2');
+ const text=bucket.objects.get('metadata.json').text;
+ await assert.rejects(loadMetadataWorkingSet({DB:v6,BUCKET:bucket}),/metadata_cache_unavailable/);
+ await assert.rejects(saveMetadataWorkingSet({DB:v6,BUCKET:bucket},{heat:record('heat',{synopsis:'late'})},{mode:'standin'}),/metadata_cache_unavailable/);
+ assert.equal(bucket.objects.get('metadata.json').text,text,'a refused save writes nothing to R2');
+ assert.equal(one(v6,'SELECT COUNT(*) FROM metadata_cache'),0);
  let reads=0;
  const dead={prepare(){return {bind(){return {async first(){throw new Error('D1 down');},async all(){throw new Error('D1 down');}};}};}};
  const quiet=new MemoryBucket();
@@ -85,17 +103,15 @@ const payload=(db,key)=>JSON.parse(db.sql(`SELECT payload_json p FROM metadata_c
 
 function payloadSafe(value){return value;}
 
-// 2. Import copies every key, including an orphan and a null, and does not mint a Film. Activation refuses a mismatch.
+// 2. A commit stores every key, including an orphan and a null, and does not mint a Film.
 {
  const db=migrated();
  const orphan={id:'orphan',tmdb:'1',tmdb_tv:'1',synopsis:null,peopleNamesVersion:'2',aliases:['old-name'],actors:[{id:'actor/al-pacino',name:'Al Pacino',role:'lead'}]};
  const body={heat:record('heat'),orphan,departed:record('departed')};
  const bucket=mirrorOf(body);
- await assert.rejects(importMetadataCache(db,bucket,{}),/metadata_cache_confirm/);
- await assert.rejects(importMetadataCache(db,bucket,{confirm:'activate'}),/metadata_cache_confirm/);
- const imported=await importMetadataCache(db,bucket,{confirm:'load'});
- assert.equal(imported.mode,'r2');
- assert.equal(imported.keys,3);
+ const seeded=await seed(db,bucket);
+ assert.equal(seeded.mode,'d1');
+ assert.equal(seeded.mirrored,true);
  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,'an orphan key does not create a Film');
  assert.equal(one(db,'SELECT COUNT(*) FROM metadata_cache'),3);
  assert.deepEqual(payload(db,'orphan'),orphan);
@@ -105,15 +121,8 @@ function payloadSafe(value){return value;}
  assert.equal(one(db,"SELECT people_names_version FROM metadata_cache WHERE cache_key='orphan'"),null,'a string version is not the integer 2');
  assert.equal(one(db,"SELECT people_names_version FROM metadata_cache WHERE cache_key='heat'"),2);
  const row=authority(db);
- assert.equal(row.mode,'r2');
+ assert.equal(row.mode,'d1');
  assert.equal(row.g,row.m);
- bucket.put('metadata.json',JSON.stringify({heat:record('heat',{metadataAt:past})}));
- await assert.rejects(activateMetadataCache(db,bucket,{confirm:'activate'}),/metadata_cache_fence/);
- assert.equal(authority(db).mode,'r2');
- bucket.put('metadata.json',JSON.stringify(body));
- const active=await activateMetadataCache(db,bucket,{confirm:'activate'});
- assert.equal(active.mode,'d1');
- assert.equal(active.cacheGeneration,active.mirrorGeneration);
 }
 
 // 3. In d1 mode the working set is the table. A commit is fenced, idempotent, and keeps a key the watchlist no longer lists.
@@ -121,8 +130,7 @@ function payloadSafe(value){return value;}
  const db=migrated();
  const body={heat:record('heat'),orphan:record('orphan'),departed:record('departed')};
  const bucket=mirrorOf(body);
- await importMetadataCache(db,bucket,{confirm:'load'});
- await activateMetadataCache(db,bucket,{confirm:'activate'});
+ await seed(db,bucket);
  bucket.put('metadata.json',JSON.stringify({heat:record('heat',{metadataAt:past,synopsis:'stale'})}));
  const working=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
  assert.equal(working.mode,'d1');
@@ -151,8 +159,7 @@ function payloadSafe(value){return value;}
  const db=migrated();
  const body={heat:record('heat'),orphan:record('orphan')};
  const bucket=mirrorOf(body);
- await importMetadataCache(db,bucket,{confirm:'load'});
- await activateMetadataCache(db,bucket,{confirm:'activate'});
+ await seed(db,bucket);
  const working=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
  const updated={...working.records,heat:{...working.records.heat,metadataAt:edge}};
  let crash=false;
@@ -176,8 +183,7 @@ function payloadSafe(value){return value;}
  const db=migrated();
  const body={heat:record('heat'),orphan:record('orphan')};
  const bucket=mirrorOf(body);
- await importMetadataCache(db,bucket,{confirm:'load'});
- await activateMetadataCache(db,bucket,{confirm:'activate'});
+ await seed(db,bucket);
  const mark=authority(db);
  bucket.put('metadata.json',JSON.stringify({heat:record('heat',{synopsis:'raced'})}));
  const raced=await commitMetadataCache(db,bucket,{...body,heat:record('heat',{synopsis:'from d1'})},{mode:'d1',cacheGeneration:mark.g,mirrorGeneration:mark.m,mirrorEtag:mark.e,complete:true});
@@ -200,7 +206,7 @@ function payloadSafe(value){return value;}
  assert.equal(one(db,'SELECT COUNT(*) FROM film'),1);
 }
 
-// 6. The projector reads R2 while the marker is r2, and reads the cache once the marker is d1.
+// 6. The projector refuses a marker in mode r2, and reads the cache once the marker is d1.
 // A stale mirror does not roll a clock back. An orphan still does not become a Film.
 {
  const projector=projectorContext();
@@ -219,10 +225,9 @@ function payloadSafe(value){return value;}
  put('epg/generations/run-1/discovered-films.json',{});
  const env={DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'};
  const before=await projector.runD1EnrichmentProjection(env);
- assert.equal(before.outcome,'complete',JSON.stringify(before));
- assert.equal(before.schemaVersion,6);
- assert.deepEqual(db.sql("SELECT metadata_at a FROM film_sync_state WHERE film_id='film:heat'"),[{a:T}]);
- assert.equal(one(db,"SELECT COUNT(*) FROM film WHERE id='film:orphan'"),0);
+ assert.equal(before.outcome,'failed',JSON.stringify(before));
+ assert.equal(before.reason,'metadata_cache_unavailable','a marker in mode r2 is refused, never read from R2 (ADR 0162)');
+ assert.equal(one(db,'SELECT COUNT(*) FROM film'),0);
  const status=await projector.d1EnrichmentStatus(db,{D1_ENRICHMENT_WRITE:'on'});
  assert.equal(status.schema,true);
  assert.equal(status.schemaVersion,6);
@@ -237,8 +242,7 @@ function payloadSafe(value){return value;}
  const partial=await projector.d1EnrichmentStatus(v5,{});
  assert.deepEqual([partial.schema,partial.schemaVersion],[false,6]);
  const mirror=mirrorOf(metadata);
- await importMetadataCache(db,mirror,{confirm:'load'});
- await activateMetadataCache(db,mirror,{confirm:'activate'});
+ await seed(db,mirror);
  const newer=edge;
  db.sql(`UPDATE metadata_cache SET payload_json='${JSON.stringify(record('heat',{metadataAt:newer})).replace(/'/g,"''")}', metadata_at='${newer}', generation=${authority(db).g} WHERE cache_key='heat'`);
  put('metadata.json',{heat:record('heat',{metadataAt:past}),orphan:record('orphan')});
@@ -255,43 +259,6 @@ function payloadSafe(value){return value;}
  const replay=await projector.runD1EnrichmentProjection(env);
  assert.equal(replay.writtenFilms,0);
  assert.equal(db.calls.batches,batches,'a d1-mode replay does not write');
-}
-
-// 7. The operator script refuses a write without the matching confirm, and does not accept production.
-{
- const script=path.resolve('scripts/metadata-cache-authority.mjs');
- const run=(...argv)=>spawnSync(process.execPath,[script,...argv],{encoding:'utf8'});
- const bare=run('--load');
- assert.notEqual(bare.status,0);
- assert.match(bare.stderr,/confirm/);
- const production=run('--load','--confirm','load','--database','iptv','--metadata','metadata.json');
- assert.notEqual(production.status,0);
- assert.match(production.stderr,/production/);
- const status=run();
- assert.equal(status.status,0,status.stderr);
- assert.equal(JSON.parse(status.stdout).writes,false);
- const file=path.join(root,'script.sqlite');
- const db=d1Standin(file);
- for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache'])db.sql(fs.readFileSync('migrations/'+name+'.sql','utf8').replace(/;\s*$/,''));
- const metadata=path.join(root,'metadata.json');
- fs.writeFileSync(metadata,JSON.stringify({heat:record('heat'),orphan:record('orphan')}));
- const loaded=run('--load','--confirm','load','--database',file,'--metadata',metadata);
- assert.equal(loaded.status,0,loaded.stderr);
- assert.equal(JSON.parse(loaded.stdout).mode,'r2');
- assert.equal(one(db,'SELECT COUNT(*) FROM metadata_cache'),2);
- assert.equal(one(db,"SELECT COUNT(*) FROM film"),0);
- const flipped=run('--activate','--confirm','activate','--database',file,'--metadata',metadata);
- assert.equal(flipped.status,0,flipped.stderr);
- assert.equal(JSON.parse(flipped.stdout).mode,'d1');
- const missingFile=run('--revert','--confirm','r2','--database',file);
- assert.notEqual(missingFile.status,0);
- assert.match(missingFile.stderr,/metadata/);
- const back=run('--revert','--confirm','r2','--database',file,'--metadata',metadata);
- assert.equal(back.status,0,back.stderr);
- assert.equal(JSON.parse(back.stdout).mode,'r2');
- assert.equal(one(db,'SELECT COUNT(*) FROM metadata_cache'),2,'reverting the marker keeps the rows');
- const direct=migrated();
- await assert.rejects(revertMetadataCache(direct,mirrorOf({}),{}),/metadata_cache_confirm/);
 }
 
 function holdMetadataPuts(bucket){
@@ -328,13 +295,14 @@ function limitBinds(db,limit=100){
 // 8. A complete save of more than 100 keys stays inside D1's bound-parameter limit and still drops a departed key.
 {
  const db=migrated();
- const binds=limitBinds(db);
  const body={};
  for(let i=0;i<150;i++)body['k'+i]=record('k'+i,{synopsis:i===0?null:'kept'});
  const bucket=mirrorOf(body);
- await importMetadataCache(db,bucket,{confirm:'load'});
- await activateMetadataCache(db,bucket,{confirm:'activate'});
+ const seedBinds=limitBinds(db);
+ await seed(db,bucket);
+ assert.ok(seedBinds.max()<=100,'the seeding commit of 150 keys stays inside the limit too');
  assert.equal(one(db,'SELECT COUNT(*) FROM metadata_cache'),150);
+ const binds=limitBinds(db);
  const working=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
  delete working.records.k0;
  const committed=await commitMetadataCache(db,bucket,working.records,{...working.authority,complete:true,mode:'d1'});
@@ -352,8 +320,7 @@ function limitBinds(db,limit=100){
  const db=migrated();
  const body={heat:record('heat'),orphan:record('orphan')};
  const bucket=mirrorOf(body);
- await importMetadataCache(db,bucket,{confirm:'load'});
- await activateMetadataCache(db,bucket,{confirm:'activate'});
+ await seed(db,bucket);
  const working=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
  const olderBody={...working.records,heat:{...working.records.heat,synopsis:'older'}};
  const hold=holdMetadataPuts(bucket);
@@ -400,70 +367,7 @@ function limitBinds(db,limit=100){
  assert.equal(followed.records.heat.synopsis,'overtook');
 }
 
-// 10. Revert refuses while the mirror lags, then flips only after a verified catch-up.
-{
- const db=migrated();
- const body={heat:record('heat'),orphan:record('orphan')};
- const bucket=mirrorOf(body);
- await importMetadataCache(db,bucket,{confirm:'load'});
- await activateMetadataCache(db,bucket,{confirm:'activate'});
- const working=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
- const real=bucket.put.bind(bucket);
- const down={on:true};
- bucket.put=async(key,value,options)=>{if(down.on&&key==='metadata.json')throw new Error('mirror down');return real(key,value,options);};
- const updated={...working.records,heat:{...working.records.heat,synopsis:'committed'}};
- const committed=await commitMetadataCache(db,bucket,updated,{...working.authority,complete:true,mode:'d1'});
- assert.equal(committed.mirrored,false);
- await assert.rejects(revertMetadataCache(db,bucket,{confirm:'r2'}),/metadata_cache_fence/);
- assert.equal(authority(db).mode,'d1');
- assert.equal(payload(db,'heat').synopsis,'committed');
- assert.equal(JSON.parse(bucket.objects.get('metadata.json').text).heat.synopsis,'Synopsis');
- down.on=false;
- const reverted=await revertMetadataCache(db,bucket,{confirm:'r2'});
- assert.equal(reverted.mode,'r2');
- assert.equal(one(db,'SELECT COUNT(*) FROM metadata_cache'),2);
- assert.equal(JSON.parse(bucket.objects.get('metadata.json').text).heat.synopsis,'committed');
- assert.equal(authority(db).g,authority(db).m);
-}
-
-// 11. Activation and an in-flight r2 save cannot both become the writer.
-{
- const db=migrated();
- const body={heat:record('heat'),orphan:record('orphan')};
- const bucket=mirrorOf(body);
- await importMetadataCache(db,bucket,{confirm:'load'});
- const seen=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
- assert.equal(seen.mode,'r2');
- await activateMetadataCache(db,bucket,{confirm:'activate'});
- const text=bucket.objects.get('metadata.json').text;
- const rows=one(db,'SELECT COUNT(*) FROM metadata_cache');
- await assert.rejects(saveMetadataWorkingSet({DB:db,BUCKET:bucket},{...seen.records,heat:{...seen.records.heat,synopsis:'late'}},seen),/metadata_cache_not_authoritative/);
- assert.equal(bucket.objects.get('metadata.json').text,text);
- assert.equal(one(db,'SELECT COUNT(*) FROM metadata_cache'),rows);
- assert.equal(payload(db,'heat').synopsis,'Synopsis');
- assert.equal(authority(db).mode,'d1');
-
- const claimedDb=migrated();
- const claimedBucket=mirrorOf(body);
- await importMetadataCache(claimedDb,claimedBucket,{confirm:'load'});
- const open=await loadMetadataWorkingSet({DB:claimedDb,BUCKET:claimedBucket});
- const hold=holdMetadataPuts(claimedBucket);
- hold.hold();
- const saving=saveMetadataWorkingSet({DB:claimedDb,BUCKET:claimedBucket},{...open.records,heat:{...open.records.heat,synopsis:'claimed'}},open);
- await until(()=>hold.pending===1);
- assert.notEqual(authority(claimedDb).g,authority(claimedDb).m);
- await assert.rejects(activateMetadataCache(claimedDb,claimedBucket,{confirm:'activate'}),/metadata_cache_fence/);
- assert.equal(authority(claimedDb).mode,'r2');
- hold.release();
- const saved=await saving;
- assert.equal(saved.mode,'r2');
- assert.equal(JSON.parse(claimedBucket.objects.get('metadata.json').text).heat.synopsis,'claimed');
- await assert.rejects(activateMetadataCache(claimedDb,claimedBucket,{confirm:'activate'}),/metadata_cache_loss/);
- assert.equal(authority(claimedDb).mode,'r2');
- assert.equal(one(claimedDb,'SELECT COUNT(*) FROM metadata_cache'),2);
-}
-
-// 12. Schema v6 without the cache tables or the marker fails closed. Schema v5 and a missing binding stay on R2.
+// 12. Schema v6 without the cache tables or the marker fails closed. A missing binding is refused unless the stand-in is set.
 {
  const db=migrated();
  db.sql('DROP TABLE metadata_cache');
@@ -477,8 +381,9 @@ function limitBinds(db,limit=100){
  const marked=migrated();
  marked.sql('DELETE FROM metadata_cache_authority');
  await assert.rejects(loadMetadataWorkingSet({DB:marked,BUCKET:bucket}),/metadata_cache_unavailable/);
- const unbound=await loadMetadataWorkingSet({BUCKET:mirrorOf({heat:record('heat')})});
- assert.equal(unbound.mode,'r2');
+ await assert.rejects(loadMetadataWorkingSet({BUCKET:mirrorOf({heat:record('heat')})}),/metadata_cache_unavailable/,'a missing binding is refused');
+ const unbound=await loadMetadataWorkingSet({BUCKET:mirrorOf({heat:record('heat')}),...STANDIN});
+ assert.equal(unbound.mode,'standin');
  assert.equal(unbound.records.heat.id,'heat');
  const v5=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state']);
  v5.sql('UPDATE schema_contract SET version=6');
@@ -530,8 +435,7 @@ function pauseAuthoritySelect(db,nth){
  const db=migrated();
  const body={heat:record('heat'),orphan:record('orphan')};
  const bucket=mirrorOf(body);
- await importMetadataCache(db,bucket,{confirm:'load'});
- await activateMetadataCache(db,bucket,{confirm:'activate'});
+ await seed(db,bucket);
  const working=await loadMetadataWorkingSet({DB:db,BUCKET:bucket});
  const real=bucket.put.bind(bucket);
  const down={on:true};
@@ -562,3 +466,44 @@ function pauseAuthoritySelect(db,nth){
 }
 
 console.log('metadata cache: r2 until the marker is d1, full records including orphans, fenced commit, mirror repair, no phantom Film');
+
+// 14. ADR 0162 in the projector. In mode d1 the R2 mirror is not an input: an absent or broken metadata.json does not stop the run, the
+// metadata comes from D1, and the projector never asks R2 for the mirror. Below schema 6 the run is refused unless the explicit
+// stand-in is set, in which case metadata.json is the input.
+{
+ const projectorInputs=(bucket,films)=>{
+  const put=(key,value)=>bucket.put(key,JSON.stringify(value));
+  put('watchlist.json',{updatedAt:T,films});
+  put('titles.json',{});put('people.json',{});put('epg/discovery-resolution.json',{});
+  put('epg/published-generation.json',{phase:'published',programmeRunId:'run-1'});
+  put('epg/generations/run-1/programme.json',{updatedAt:T,films:films.map(item=>({...item,shows:[]}))});
+  put('epg/generations/run-1/discovered-films.json',{});
+ };
+ const films=[{id:'heat',title:'Heat',original:'Heat',year:1995,tmdbId:'949',url:'https://letterboxd.com/film/heat/'}];
+ for(const mirror of ['absent','broken']){
+  const db=migrated();
+  const seedBucket=mirrorOf({heat:record('heat',{metadataAt:edge})});
+  await seed(db,seedBucket);
+  const bucket=new MemoryBucket();
+  projectorInputs(bucket,films);
+  if(mirror==='broken')bucket.put('metadata.json','{');
+  const asked=[];
+  const get=bucket.get.bind(bucket);
+  bucket.get=async(key,...rest)=>{asked.push(key);return get(key,...rest);};
+  const run=await projectorContext().runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
+  assert.equal(run.outcome,'complete',mirror+' '+JSON.stringify(run));
+  assert.equal(asked.includes('metadata.json'),false,mirror+': the projector does not read the R2 mirror in mode d1');
+  assert.equal(db.sql("SELECT metadata_at a FROM film_sync_state WHERE film_id='film:heat'")[0].a,edge,mirror+': the metadata comes from D1');
+ }
+ const v5=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state']);
+ const bucket=new MemoryBucket();
+ projectorInputs(bucket,films);
+ bucket.put('metadata.json',JSON.stringify({heat:record('heat')}));
+ const refused=await projectorContext({metadataCacheStandin:false}).runD1EnrichmentProjection({DB:v5,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
+ assert.equal(refused.outcome,'failed',JSON.stringify(refused));
+ assert.equal(refused.reason,'metadata_cache_unavailable','schema 5 without the stand-in is refused, not read from R2');
+ assert.equal(one(v5,'SELECT COUNT(*) FROM film'),0);
+ const local=await projectorContext({metadataCacheStandin:false}).runD1EnrichmentProjection({DB:v5,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on',METADATA_CACHE_DB_OPTIONAL:'standin'});
+ assert.equal(local.outcome,'complete',JSON.stringify(local));
+ assert.deepEqual(v5.sql("SELECT metadata_at a FROM film_sync_state WHERE film_id='film:heat'"),[{a:T}],'the explicit stand-in projects metadata.json');
+}

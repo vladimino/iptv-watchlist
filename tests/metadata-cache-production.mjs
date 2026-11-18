@@ -142,11 +142,17 @@ assert.equal(bare.status,0,bare.stderr);
 assert.deepEqual(JSON.parse(bare.stdout),{configured:false,writes:false,writeState:'none'});
 const revert=spawnSync(process.execPath,[script,'--revert','--target','iptv'],{encoding:'utf8'});
 assert.equal(revert.status,2);
-assert.match(revert.stderr,/refuse: revert_refused/);
+assert.match(revert.stderr,/refuse: retired/);
+// ADR 0162: the cutover commands are retired with --revert.
+for(const command of [['--load','--confirm','load'],['--activate','--confirm','activate']]){
+ const retired=spawnSync(process.execPath,[script,...command,'--target','iptv'],{encoding:'utf8'});
+ assert.equal(retired.status,2,command[0]);
+ assert.match(retired.stderr,/refuse: retired/,command[0]);
+}
 const missingConfirm=spawnSync(process.execPath,[script,'--apply','--target','iptv'],{encoding:'utf8'});
 assert.equal(missingConfirm.status,2);
 assert.match(missingConfirm.stderr,/confirm/);
-const badTarget=spawnSync(process.execPath,[script,'--load','--confirm','load','--target','other'],{encoding:'utf8'});
+const badTarget=spawnSync(process.execPath,[script,'--apply','--confirm','apply','--target','other'],{encoding:'utf8'});
 assert.equal(badTarget.status,2);
 assert.match(badTarget.stderr,/target_invalid/);
 
@@ -160,7 +166,7 @@ assert.match(badTarget.stderr,/target_invalid/);
 }
 
 {
- const refused=await runMetadataCacheProduction({argv:argv(['--load','--target','iptv','--confirm','apply']),env:baseEnv(),fetchImpl(){throw new Error('called');},now:()=>NOW});
+ const refused=await runMetadataCacheProduction({argv:argv(['--apply','--target','iptv','--confirm','load']),env:baseEnv(),fetchImpl(){throw new Error('called');},now:()=>NOW});
  assert.equal(refused.exit,2);
  assert.equal(refused.result.reason,'confirm');
  const account=await runMetadataCacheProduction({argv:argv(['--target','iptv']),env:baseEnv({D1_BACKFILL_ACCOUNT_ID:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}),fetchImpl(){throw new Error('called');},now:()=>NOW});
@@ -295,111 +301,17 @@ assert.match(badTarget.stderr,/target_invalid/);
  assertQuiet(mismatch.result);
 }
 
+// ADR 0162: --load and --activate are refused before any request, whatever the database holds.
 {
- const raced=await install({schema:6,race:true});
- raced.putObject('metadata.json',metadataBody());
- const outcome=await execute(['--target','iptv','--load','--confirm','load'],raced);
- assert.equal(outcome.exit,3,JSON.stringify(outcome.result));
- assert.equal(outcome.result.reason,'source_changed');
- assert.equal(outcome.result.writeState,'none');
- assert.equal(outcome.result.writes,false);
- assert.equal(productionBatches(raced.calls).length,0);
- assert.equal(sql(raced.productionFile,'SELECT COUNT(*) AS n FROM metadata_cache;',{json:true})[0].n,0);
- const invalid=await install({schema:6});
- invalid.putObject('metadata.json','{');
- const bad=await execute(['--target','iptv','--load','--confirm','load'],invalid);
- assert.equal(bad.exit,3,JSON.stringify(bad.result));
- assert.equal(bad.result.reason,'source_invalid');
- assert.equal(productionBatches(invalid.calls).length,0);
-}
-
-{
- const installed=await install({schema:5});
- installed.putObject('metadata.json',metadataBody());
- installed.putObject('sync.json',{stage:'epg',updatedAt:new Date(NOW-16*60*1000).toISOString()});
- sql(installed.productionFile,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:heat',1,'Heat','2020-01-01T00:00:00.000Z');");
- const applied=await execute(['--target','iptv','--apply','--confirm','apply'],installed);
- assert.equal(applied.exit,0,JSON.stringify(applied.result));
- const loaded=await execute(['--target','iptv','--load','--confirm','load'],installed);
- assert.equal(loaded.exit,0,JSON.stringify(loaded.result));
- assert.equal(loaded.result.mode,'r2');
- assert.equal(loaded.result.keys,2);
- assert.equal(loaded.result.cacheGeneration,loaded.result.mirrorGeneration);
- assertQuiet(loaded.result);
- const importBatch=productionBatches(installed.calls).find(item=>/INSERT\s+INTO\s+metadata_cache\b/i.test(item.body));
- const parsed=JSON.parse(importBatch.body);
- assert.equal(parsed.batch.length,5);
- assert.equal(parsed.batch.some(item=>item.sql.includes("a;b''c")),true);
- assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM film;',{json:true})[0].n,1);
- assert.equal(sql(installed.productionFile,"SELECT COUNT(*) AS n FROM film WHERE id='film:orphan';",{json:true})[0].n,0);
- const stored=JSON.parse(sql(installed.productionFile,"SELECT payload_json FROM metadata_cache WHERE cache_key='heat';",{json:true})[0].payload_json);
- assert.deepEqual(stored,metadataBody().heat);
- assert.deepEqual(sql(installed.productionFile,'SELECT cache_key FROM metadata_cache ORDER BY cache_key;',{json:true}).map(row=>row.cache_key),['heat','orphan']);
- const beforeActivate=productionBatches(installed.calls).length;
- installed.objects.set('metadata.json',{text:JSON.stringify({heat:{metadataAt:'2021-01-01T00:00:00.000Z'}}),etag:'etag-moved'});
- const missed=await execute(['--target','iptv','--activate','--confirm','activate'],installed);
- assert.equal(missed.exit,3,JSON.stringify(missed.result));
- assert.equal(missed.result.reason,'metadata_cache_fence');
- assert.equal(productionBatches(installed.calls).length,beforeActivate);
- assert.equal(sql(installed.productionFile,"SELECT mode FROM metadata_cache_authority;",{json:true})[0].mode,'r2');
- installed.putObject('metadata.json',metadataBody());
- const moved=await install({schema:6,flipAfterImport:true});
- moved.putObject('metadata.json',metadataBody());
- const imported=await execute(['--target','iptv','--load','--confirm','load'],moved);
- assert.equal(imported.exit,3,JSON.stringify(imported.result));
- assert.equal(imported.result.reason,'mirror_moved');
- assert.equal(imported.result.writes,true);
- assert.equal(imported.result.writeState,'committed');
- assert.equal(imported.result.retry,false);
- assert.equal(imported.result.readback.marker.mode,'r2');
- assert.equal(sql(moved.productionFile,'SELECT COUNT(*) AS n FROM metadata_cache;',{json:true})[0].n,2);
- const fresh=await install({schema:6});
- fresh.putObject('metadata.json',metadataBody());
- sql(fresh.productionFile,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:heat',1,'Heat','2020-01-01T00:00:00.000Z');");
- const leftoverScratch='00000000-0000-4000-8000-000000000001';
- const ready=await execute(['--target','iptv','--load','--confirm','load'],fresh,{D1_BACKFILL_SCRATCH_DATABASE_ID:leftoverScratch});
- assert.equal(ready.exit,0,JSON.stringify(ready.result));
- assert.equal(fresh.calls.urls.some(url=>url.includes(leftoverScratch)),false);
- assertOnlyProduction(fresh.calls);
- const activated=await execute(['--target','iptv','--activate','--confirm','activate'],fresh,{D1_BACKFILL_SCRATCH_DATABASE_ID:leftoverScratch});
- assert.equal(activated.exit,0,JSON.stringify(activated.result));
- assert.equal(activated.result.mode,'d1');
- assert.equal(activated.result.cacheGeneration,activated.result.mirrorGeneration);
- assert.equal(activated.result.cacheRows,2);
- assertQuiet(activated.result);
- assert.equal(sql(fresh.productionFile,"SELECT mode FROM metadata_cache_authority;",{json:true})[0].mode,'d1');
- assert.equal(sql(fresh.productionFile,'SELECT COUNT(*) AS n FROM film;',{json:true})[0].n,1);
- assert.equal(sql(fresh.productionFile,"SELECT COUNT(*) AS n FROM metadata_cache WHERE cache_key='orphan';",{json:true})[0].n,1);
- assert.equal(activated.result.writeState,'committed');
- assert.equal(fresh.calls.urls.some(url=>url.includes(leftoverScratch)),false);
- assertOnlyProduction(fresh.calls);
- assert.equal(fresh.calls.urls.some(url=>url.includes('time_travel/restore')),false);
- const loadLie=await install({schema:6,afterWrite:'load-empty'});
- loadLie.putObject('metadata.json',metadataBody());
- const loadMismatch=await execute(['--target','iptv','--load','--confirm','load'],loadLie);
- assert.equal(loadMismatch.exit,3,JSON.stringify(loadMismatch.result));
- assert.equal(loadMismatch.result.reason,'metadata_cache_loss');
- assert.equal(loadMismatch.result.writeState,'committed');
- assert.equal(loadMismatch.result.writes,true);
- assert.notEqual(loadMismatch.result.writes,false);
- assert.equal(loadMismatch.result.retry,false);
- assert.equal(sql(loadLie.productionFile,'SELECT COUNT(*) AS n FROM metadata_cache;',{json:true})[0].n,2);
- assert.equal(loadMismatch.result.readback.cacheRows,2);
- const activateLie=await install({schema:6});
- activateLie.putObject('metadata.json',metadataBody());
- const primed=await execute(['--target','iptv','--load','--confirm','load'],activateLie);
- assert.equal(primed.exit,0,JSON.stringify(primed.result));
- activateLie.state.afterWrite='activate-stale';
- const activateMismatch=await execute(['--target','iptv','--activate','--confirm','activate'],activateLie);
- assert.equal(activateMismatch.exit,3,JSON.stringify(activateMismatch.result));
- assert.equal(activateMismatch.result.reason,'metadata_cache_cas');
- assert.equal(activateMismatch.result.writeState,'committed');
- assert.equal(activateMismatch.result.writes,true);
- assert.equal(activateMismatch.result.retry,false);
- assert.equal(sql(activateLie.productionFile,"SELECT mode FROM metadata_cache_authority;",{json:true})[0].mode,'d1');
- assertQuiet(activateMismatch.result);
- const modeSql=productionBatches(fresh.calls).map(item=>item.body).find(body=>body.includes("mode='d1'"));
- assert.equal(typeof modeSql,'string');
+ for(const command of [['--load','--confirm','load'],['--activate','--confirm','activate']]){
+  const installed=await install({schema:6});
+  installed.putObject('metadata.json',metadataBody());
+  const outcome=await execute(['--target','iptv',...command],installed);
+  assert.equal(outcome.exit,2,JSON.stringify(outcome.result));
+  assert.equal(outcome.result.reason,'retired');
+  assert.equal(installed.calls.batches.length,0);
+  assert.equal(installed.calls.urls.length,0,'nothing is requested');
+ }
 }
 
 for(const root of roots)fs.rmSync(root,{recursive:true,force:true});

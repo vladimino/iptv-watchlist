@@ -66,7 +66,7 @@ function refuses(list){
  assert.equal(one(db,"SELECT mode FROM prediction_domain_authority"),'r2');
  assert.equal(one(db,"SELECT mode FROM published_epg_authority"),'r2');
  assert.equal((await readAuthority(db)).failClosed,true,'a marker in mode r2 is refused (ADR 0162)');
- assert.equal((await readCacheAuthority(db)).mode,'r2');
+ await assert.rejects(readCacheAuthority(db),error=>error.code==='metadata_cache_unavailable','a metadata-cache marker in mode r2 is refused (ADR 0162)');
  db.sql("UPDATE metadata_cache_authority SET mode='d1'");
  assert.equal((await readCacheAuthority(db)).mode,'d1','schema v9 still honours the metadata-cache marker');
  assert.throws(()=>db.sql('UPDATE schema_contract SET version=7'),/schema_contract_downgrade/);

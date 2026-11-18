@@ -14,9 +14,9 @@ import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {projectorContext} from './d1-enrichment-context.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
-// ADR 0162: an owner-review marker that is not d1 is refused; the fixture puts it at d1 with no rows (the former r2 marker with no
-// object gave the same empty overlay).
-const OWNER_D1="UPDATE owner_review_authority SET mode='d1' WHERE id=1;";
+// ADR 0162: a marker that is not d1 is refused. The fixture puts the owner-review and metadata-cache markers at d1 with no rows
+// (the former r2 markers with no R2 object gave the same empty overlay and cache).
+const OWNER_D1="UPDATE owner_review_authority SET mode='d1' WHERE id=1; UPDATE metadata_cache_authority SET mode='d1' WHERE id=1;";
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-projector-window-'));
 const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -289,7 +289,7 @@ const setup=(opts={})=>{const {db,file}=migrated(18,opts);open(db);const bucket=
  const {db,bucket,env}=setup();
  delete env.D1_ENRICHMENT_WINDOW;
  const get=bucket.get.bind(bucket);let bumped=false;
- bucket.get=async key=>{if(!bumped&&key==='metadata.json'){bumped=true;await Authority.writeContinuation(env,{programmeRunId:'run-1',stage:'idle'},undefined);}return get(key);};
+ bucket.get=async key=>{if(!bumped&&key==='titles.json'){bumped=true; /* ADR 0162: metadata.json is no longer a projector input in mode d1 */ await Authority.writeContinuation(env,{programmeRunId:'run-1',stage:'idle'},undefined);}return get(key);};
  const summary=await projectorFor().runD1EnrichmentProjection(env,{window:{}});
  assert.equal(summary.outcome,'deferred');assert.ok(['input_changed','authority_unavailable'].includes(summary.reason),'the strict pin defers the run: '+summary.reason);
  assert.equal(summary.window,undefined,'flag off: no window record');
