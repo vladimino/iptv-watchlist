@@ -88,6 +88,8 @@ function recordingPhrase(text,phrases){return phraseHit(text,phrases)||!!text&&t
 function independentlyRecorded(titles,overview){
  return recordingPhrase(titles,PERFORMANCE_PHRASES)&&recordingPhrase(overview,OVERVIEW_PHRASES);
 }
+function genreListPresent(movie){return Array.isArray(movie?.genres)||Array.isArray(movie?.genreIds);}
+function overviewConcertToken(text){return !!text&&text.split(' ').some(token=>token==='concert'||token.startsWith('концерт'));}
 function admissionPolicy(movie,observation){
  const facts=genreFacts(movie);
  if(listedGenre(facts,TMDB_GENRE_DOCUMENTARY,DOCUMENTARY_GENRE_NAMES))return 'documentary';
@@ -98,7 +100,7 @@ function admissionPolicy(movie,observation){
  const category=concertBroadcastCategory(observation?.categories);
  if(listedGenre(facts,TMDB_GENRE_MUSIC,MUSIC_GENRE_NAMES)){
   if(category||strong)return 'concert';
-  if(titles.split(' ').some(token=>WEAK_CONCERT_TOKENS.has(token)))return 'ambiguous';
+  if(titles.split(' ').some(token=>WEAK_CONCERT_TOKENS.has(token))||overviewConcertToken(overview))return 'ambiguous';
   return null;
  }
  if(listedGenre(facts,TMDB_GENRE_TV_MOVIE,TV_MOVIE_GENRE_NAMES)){
@@ -106,6 +108,8 @@ function admissionPolicy(movie,observation){
   return null;
  }
  if(proven)return 'concert';
+ // TMDB listed no genre at all: nothing separates a Documentary or a concert recording from a feature, so title, year and runtime alone never verify it.
+ if(!facts.ids.size&&!facts.unnamed.length&&genreListPresent(movie))return 'unclassified';
  return null;
 }
 function verifyTmdbDetail(detail,tmdbId,observation,competitors,structural){
@@ -157,6 +161,7 @@ function acceptScoredIdentity(input={}){
    return {...result,outcome:'candidate_decision',reason,candidateDecision:{status:'no_confident_match',observationKey,reason,evidence:scoringEvidence(score),provenance:{...provenance,authority:'tmdb_detail'}}};
   }
   if(policy==='ambiguous'&&!confirmed)return {...result,outcome:'needs_verification',reason:'concert_recording_ambiguous'};
+  if(policy==='unclassified'&&!confirmed)return {...result,outcome:'needs_verification',reason:'genre_evidence_missing'};
   const observationYear=detailNumber(input.observation?.year),yearGap=observationYear==null||detail.releaseYear==null?null:Math.abs(observationYear-detail.releaseYear);
   if(!confirmed&&yearGap===1&&shortTitle(input.observation?.normalizedTitle||input.observation?.title)){
    const competingEditions=(input.competitors||[]).filter(film=>String(film?.tmdbId)!==tmdbId&&detailTitles(film).some(title=>detailNorm(title)===detail.matchedTitle)).map(film=>({tmdbId:String(film.tmdbId),year:detailNumber(film.year)}));

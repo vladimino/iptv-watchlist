@@ -35,6 +35,8 @@ These results do not create a canonical film:
 | TV Movie without Music or a feature genre, when that same category and an explicit performance phrase agree, or when the title fields and the overview independently each contain such a phrase | `no_confident_match` (`concert_recording`) |
 | No Music, TV Movie, Documentary or feature genre, when the title fields and the overview independently each contain such a phrase | `no_confident_match` (`concert_recording`) |
 | Music without a feature genre, and only a bare Live/Concert word in the title fields, until this observation is confirmed | `needs_verification` (`concert_recording_ambiguous`); no catalog film |
+| TMDB card with an empty genre list that no phrase rule excludes ([ADR 0168](../../adr/0168-empty-genre-card-is-unclassified.md)), until this observation is confirmed | `needs_verification` (`genre_evidence_missing`); no catalog film |
+| Music without a feature genre and `concert` or `концерт…` in the overview (ADR 0168) | `needs_verification` (`concert_recording_ambiguous`) |
 | Title does not match | `no_confident_match` |
 | Release year disagrees | `no_confident_match` |
 | Runtime missing or outside the tolerance | `duration_mismatch` |
