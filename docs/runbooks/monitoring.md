@@ -131,3 +131,11 @@ Symptom in `epg_status`: `stage=seal`, `phase=starting`, `handoff.successorPendi
 1. Read `epg_status` twice, at least one cron period apart. `failure.code=create_uncertain` with a `cooldownUntil` means a recorded, bounded retry; no failure and no progress across two ticks is a new defect to report.
 2. Compare with the Workflow GET of `epg_<day>_<series>` (read only). Do not create, terminate or retry an instance and do not run EPG steps by hand without a separate operation-specific GO.
 3. Evidence and mechanism: [AIR-520](../evidence/orchestration/air-520-orphan-handoff-claim-rca-2026-11-17.md).
+
+## EPG `complete` that still shows an `error` (AIR-525)
+
+Symptom in `epg_status`: `stage=complete` with a non-empty `error` and `priorAttemptError=true`. The error belongs to an earlier attempt of the same `runId` (or to a tail that threw after the run was saved complete); it is not the current state of the run, and it is not a reason to start EPG again. Read only:
+
+1. Today's publication is done when `orchestration.runKey` is today and `orchestration.published` names the run (control `doneAt` set), or, without a control `doneAt`, when `sync.json` has a valid completion receipt (`completedAt`) and the D1 published pointer names the same `runId`; then `orchestration.health` is `healthy`. The same proof is required with or without an `error`. The executor finishes such a control itself on its next action (`lastStep.note=recovered_complete`), after at most one `/api/sync/epg` step on the same run for an owed event or Ratings hand-over, and never with a second `/api/sync/start`.
+2. `failure.code=evidence_contradictory` on a complete run means the proof did not hold (no or malformed receipt, the pointer names another or no run, or the run's frozen day is malformed or contradicts its `startedAt`): the domain is quarantined for the owner and no run is started. `failure.code=d1_unavailable` means the authority read failed and the next action checks again after the cooldown.
+3. Do not clear the error, reset the run, start a sync or retry an instance by hand without a separate operation-specific GO. Contract: [orchestration reliability](../reference/orchestration-reliability.md) (AIR-525 paragraph); evidence: [AIR-525](../evidence/orchestration/air-525-recovered-complete-error.md).
