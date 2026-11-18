@@ -102,8 +102,9 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.equal(one(chain,"SELECT mode FROM prediction_domain_authority WHERE id=1"),'r2');
  assert.equal(one(chain,"SELECT mode FROM published_epg_authority WHERE id=1"),'r2');
  const required={PREDICTION_DB_REQUIRED:'on'};
- assert.equal((await readPredictionAuthority(chain,required)).mode,'r2');
- assert.equal((await routeRead({DB:chain,...required},'enrichment/prediction-queue.json')).handled,false);
+ // ADR 0162: the migration's r2 marker is refused, not read as the R2 objects.
+ await assert.rejects(readPredictionAuthority(chain,required),error=>error.code==='prediction_domain_unavailable');
+ await assert.rejects(routeRead({DB:chain,...required},'enrichment/prediction-queue.json'),error=>error.code==='prediction_domain_unavailable');
  assert.equal(await currentGeneration({DB:chain}),null);
  chain.sql("UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
  const routed=await routeRead({DB:chain,...required},'enrichment/prediction-queue.json');
@@ -128,6 +129,7 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.equal(await currentGeneration({DB:db}),null);
  await assert.rejects(readCache(db),error=>error.code==='metadata_cache_unavailable','a metadata-cache marker in mode r2 is refused (ADR 0162)');
  db.sql("UPDATE metadata_cache_authority SET mode='d1'");
+ db.sql("UPDATE prediction_domain_authority SET mode='d1'");
  assert.equal((await readCache(db)).mode,'d1','a later contract version keeps the metadata marker');
  assert.equal((await readAuthority(db)).mode,'r2');
  await assert.rejects(publishGeneration({DB:db},{programmeRunId:'run-a',phase:'published',expectedProgrammeRunId:null,programme:programme('run-a',[film('film:a')]),watchlist:watch([film('film:a')])}),/published_epg_not_authoritative/);
@@ -266,6 +268,7 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
 {
  const db=arm(open());
  db.sql("UPDATE metadata_cache_authority SET mode='d1'"); // ADR 0162: a metadata-cache marker that is not d1 is refused
+ db.sql("UPDATE prediction_domain_authority SET mode='d1'"); // likewise the prediction domain
  const films=[{id:'film:heat',title:'Heat',original:'Heat',year:1995,tmdbId:'949',shows:[]}];
  const body={runId:'run-d1',updatedAt:'2026-11-01T12:00:00.000Z',films};
  const list={updatedAt:'2026-11-01T12:00:00.000Z',films};

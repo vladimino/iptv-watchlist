@@ -126,9 +126,7 @@ async function publishProfile(env,body){
  let routed={handled:false};
  try{if(head)routed=await PredictionD1.saveMutable(env,profileKey,value);}
  catch(error){if(error?.code==='prediction_domain_cas')return json({error:'Current profile changed during publication; read it and publish again',code:'profile_changed'},409);throw error;}
- let moved,settled=false;
- try{moved=routed.handled?{etag:'d1'}:await env.BUCKET.put(profileKey,routed.text??JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:currentEtag?{etagMatches:currentEtag}:{etagDoesNotMatch:'*'}});settled=true;}
- finally{if(routed.token&&settled)await PredictionD1.completePredictionWrite(env,profileKey,routed.token);}
+ const moved=routed.handled?{etag:'d1'}:await env.BUCKET.put(profileKey,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:currentEtag?{etagMatches:currentEtag}:{etagDoesNotMatch:'*'}});
  if(moved===null)return json({error:'Current profile changed during publication; read it and publish again',code:'profile_changed'},409);
  try{await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'profile_updated');}catch{}
  if(!tasteProfileEventExpected(value))return json(value);

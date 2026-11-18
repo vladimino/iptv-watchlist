@@ -23,9 +23,9 @@ const versions=call('({s:FINGERPRINT_SCHEMA_VERSION,p:FINGERPRINT_PROMPT_VERSION
 
 const report={runId:'p1'},profile={profileHash:'h',version:1};
 const queueDocument=(extra={})=>({schemaVersion:3,pending:['tmdb_1','tmdb_2','tmdb_3'],hotPending:['tmdb_1','tmdb_2','tmdb_3'],coldPending:[],priority:{tmdb_1:{hot:true,rank:1},tmdb_2:{hot:true,rank:1},tmdb_3:{hot:true,rank:1}},work:{},retries:{},priorityCount:3,coldRemaining:0,urgentCount:0,coldWithoutPrediction:0,hotPredicted:0,programmeRunId:'p1',profileHash:'h',profileVersion:1,fingerprintSchemaVersion:versions.s,fingerprintPromptVersion:versions.p,predictionPromptVersion:versions.q,fingerprintCompatibility:{registryDigest:registry},metrics:{hotProcessedTotal:0},trigger:'seed',...extra});
-// Import and activate once; every scenario below writes through the adapter, as the Worker does.
-await PredictionD1.importPredictionDomain(db,bucket,{queue:queueDocument()});
-await PredictionD1.activatePredictionDomain(db,{generation:0,queueGeneration:0,profileGeneration:0});
+// ADR 0162: the import and activate chain is retired. Set the marker once and store the queue through the normal writer; every scenario below writes through the adapter, as the Worker does.
+db.sql("UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
+await PredictionD1.saveMutable(env,'enrichment/prediction-queue.json',queueDocument());
 assert.equal((await PredictionD1.openQueue(env)).mode,'d1','the queue is D1-authoritative');
 
 const settle=ids=>call('(async()=>{const context=await advanceContext(env,'+JSON.stringify(report)+','+JSON.stringify(profile)+');return guardedSettle(context,'+JSON.stringify(ids)+",'batch_progress');})()");

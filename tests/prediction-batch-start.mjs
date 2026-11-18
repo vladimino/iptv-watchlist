@@ -476,11 +476,14 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const dq=r2Diff(snap,r2Snapshot(w));assert.deepEqual([...dq.added,...dq.changed].filter(k=>/^(enrichment\/runs\/|enrichment\/latest-run|enrichment\/sources\/|events\/)/.test(k)),[]);
 }
 
-// 10. The object mode does not run v2.
+// 10. The object mode does not run v2: a marker restored to mode r2 or missing tables are refused (ADR 0162).
 {
  const w=await ready(5);await reconcile(w);
  sql(w.file,"UPDATE prediction_domain_authority SET mode='r2' WHERE id=1");
- const r=await batch(w);assert.equal(r.status,409);assert.equal(r.data.code,'batch_runner_requires_d1');
+ const r=await batch(w);assert.deepEqual([r.status,r.data.error],[502,'prediction_domain_unavailable'],'a marker in mode r2 is refused, not run on the objects');
+ const bare=await ready(5);
+ sql(bare.file,['prediction_domain_intent','prediction_run','prediction_lease','prediction_queue','prediction_lineage','prediction_pointer','prediction_fingerprint','prediction_profile','prediction_domain_cas','prediction_domain_authority'].map(name=>'DROP TABLE '+name+';').join(''));
+ const missing=await batch(bare);assert.deepEqual([missing.status,missing.data.error],[502,'prediction_domain_unavailable'],'with PREDICTION_DB_REQUIRED on (production) a database without the domain tables is refused too');
 }
 
 // 11. The runner contract is v2-only (ADR 0167): no v5 step, batch size or model batching is advertised.
