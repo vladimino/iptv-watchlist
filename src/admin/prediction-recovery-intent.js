@@ -61,7 +61,7 @@ async function predictionRecoveryIntentPreview(env,request){
  const eligible=films.filter(f=>f.outcome==='eligible');
  const leaseLive=lease.status==='recorded'&&Number(lease.value?.expiresAt)>nowMs;
  const scopeHash=await PredictionRecoveryIntent.recoveryScopeHash({mode:request.mode,ttlHours:request.ttlHours,revision:rows.revision,authority,filmPerson,films});
- const refusal=!rows.installed?'recovery_schema_not_ready':authority.mode!=='d1'?'prediction_domain_not_d1':authority.writes!=='open'?'prediction_writes_held':!eligible.length?'recovery_scope_empty':null;
+ const refusal=!rows.installed?'recovery_schema_not_ready':authority.mode!=='d1'?'prediction_domain_not_d1':!eligible.length?'recovery_scope_empty':null;
  return {
   version:PredictionRecoveryIntent.RECOVERY_VERSION,evaluatedAt:new Date(nowMs).toISOString(),atomic:false,
   mode:request.mode,ttlHours:request.ttlHours,
