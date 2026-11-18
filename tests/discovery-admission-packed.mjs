@@ -117,7 +117,7 @@ function assertCaps(seen,{single=0}={}){
  await assert.rejects(()=>Authority.upsertAdmissions(env,films,{lease,carried:{generation:g,programmeRunId:RUN}}),error=>error.code==='discovery_incomplete');
  sql(file,"UPDATE discovery_transfer SET state='idle' WHERE id=1");
  sql(file,"UPDATE discovery_authority SET cutover='held' WHERE id=1");
- await assert.rejects(()=>Authority.upsertAdmissions(env,films,{lease,carried:{generation:g,programmeRunId:RUN}}),error=>error.code==='discovery_fence');
+ await assert.rejects(()=>Authority.upsertAdmissions(env,films,{lease,carried:{generation:g,programmeRunId:RUN}}),error=>error.code==='discovery_unavailable','a held cutover is refused (ADR 0162)');
  assert.equal(Object.keys(stored(file)).length,0);assert.equal(generation(file),g);
 }
 

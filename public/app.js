@@ -201,6 +201,7 @@ function syncEventTypeButtons(){
 function syncEventTypeFromUrl(){eventTypeFilterId=eventTypeFrom(new URL(window.location.href).search);syncEventTypeButtons();startEventSearch();}
 function selectEventType(id){
  if(!EVENT_TYPE_FILTERS.some(item=>item.id===id))return;
+ resetEventPrefetch();
  eventTypeFilterId=id;syncEventTypeButtons();
  // The choice lives in the URL of this history entry (no new entry), next to the return target.
  if(eventsRequested()&&currentPathname()==='/events'){const here=new URL(window.location.href);window.history.replaceState(window.history.state,'',withEventType(here.pathname+here.search+here.hash,id));}
@@ -216,6 +217,7 @@ function applyEventsScreen(on){
  if(types)types.hidden=!eventsScreen;
  if(main)main.hidden=!eventsScreen;
  placeActivity();
+ resetEventPrefetch();
  if(eventsScreen)syncEventTypeFromUrl();else{cancelEventSearch();renderActivity();}
  syncReturnLink();
  if(typeof window.scrollTo==='function')window.scrollTo(0,eventsScreen?0:movieScrollY||0);
@@ -456,7 +458,11 @@ function restoreUrl(){
  render();urlRestoring=false;
 }
 let films = [];
-let eventCursor=null,eventLoading=false;const loadedEvents=new Map();
+let eventCursor=null,eventLoading=false,eventLoadingMore=false,activityShownCount=0;const loadedEvents=new Map();
+// AIR-530: older pages load by scrolling. `error` is null, 'first' (the first page or a refresh failed) or 'more' (an older page failed); `stuck` is a cursor that repeats or does not advance; `seen` holds the cursors already requested by the scroll.
+const eventPaging={error:null,stuck:false,seen:new Set(),run:0,paused:false};
+// AIR-530: pages that the sentinel asks for with no user scroll in between (a list too short to fill its container) are bounded; then an explicit button takes over.
+const EVENT_PREFETCH_LIMIT=3;let activityProgrammaticTop=null;
 // AIR-381: the events screen filters the loaded events by the type of event. Pure mapping: «Все события» shows every loaded event, known or not,
 // and the other buttons name the stored `type` values they stand for. A chosen type also searches older pages by itself (see startEventSearch).
 const EVENT_TYPE_FILTERS=[
@@ -491,6 +497,7 @@ let eventTypeFilterId='all',activityNote='Загружаем события…',
 const eventSearch={token:0,state:'idle',controller:null};
 function eventMatchCount(id){let count=0;for(const event of loadedEvents.values())if(eventMatchesType(event,id))count++;return count;}
 const eventPause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+function resetEventPrefetch(){eventPaging.run=0;eventPaging.paused=false;}
 function cancelEventSearch(){
  eventSearch.token++;
  if(eventSearch.controller){try{eventSearch.controller.abort();}catch{}eventSearch.controller=null;}
@@ -537,13 +544,73 @@ function activityStatusText(filter,ordered,shown){
  if(!shown.length&&ordered.length)return 'Среди загруженных событий этого типа пока нет.';
  return activityNote;
 }
-function syncActivityMore(){
- const button=$('#activity-more');
- if(!button)return;
+// The tail of the list is one of: none (nothing to say), idle (older events exist and the sentinel waits for the scroll), loading (a request is in
+// flight), error (a failed page or a cursor that does not advance, with an explicit retry) or end. «end» is told only when the server returned no next
+// cursor and something is shown: never for an error, an unfinished search, an empty filter result or the target of ten matches.
+function activityTailState(){
  const filtered=eventsScreen&&eventTypeFilterId!=='all';
- if(filtered&&eventSearch.state==='searching'){button.hidden=true;return;}
- if(filtered&&(eventSearch.state==='error'||eventSearch.state==='stuck')){button.hidden=false;button.disabled=false;button.textContent='Повторить';return;}
- if(!eventLoading&&eventsReady){button.hidden=!eventCursor;button.textContent='Более давние события';}
+ if(eventPaging.error||eventPaging.stuck||(filtered&&(eventSearch.state==='error'||eventSearch.state==='stuck')))return 'error';
+ if(!eventsReady)return 'none';
+ if(eventLoadingMore||(filtered&&eventSearch.state==='searching'))return 'loading';
+ if(eventCursor)return eventPaging.paused?'paused':'idle';
+ return activityShownCount>0?'end':'none';
+}
+let activityObserver=null,activityObserverRoot=null;
+function armActivitySentinel(tail){
+ const scroll=document.querySelector('.activity-scroll'),sentinel=$('#activity-sentinel');
+ if(!scroll||!sentinel||typeof IntersectionObserver!=='function')return;
+ if(!activityObserver||activityObserverRoot!==scroll){
+  if(activityObserver)activityObserver.disconnect();
+  activityObserverRoot=scroll;
+  activityObserver=new IntersectionObserver(entries=>{if(entries.some(entry=>entry.isIntersecting))loadOlderEvents();},{root:scroll,rootMargin:'0px 0px 240px 0px'});
+ }
+ // unobserve + observe makes the browser report the current state again: a sentinel that is still in view after a page was added asks for the next one.
+ activityObserver.unobserve(sentinel);
+ if(tail==='idle')activityObserver.observe(sentinel);
+}
+function syncActivityTail(){
+ const tail=activityTailState(),scroll=document.querySelector('.activity-scroll'),button=$('#activity-more'),loading=$('#activity-loading'),end=$('#activity-end');
+ if(scroll){if(tail==='loading')scroll.setAttribute('aria-busy','true');else scroll.removeAttribute('aria-busy');}
+ if(loading)loading.hidden=tail!=='loading';
+ if(end)end.hidden=tail!=='end';
+ if(button){
+  const noObserver=typeof IntersectionObserver!=='function';
+  button.hidden=!(tail==='error'||tail==='paused'||(tail==='idle'&&noObserver));
+  button.disabled=false;
+  button.textContent=tail==='error'?'Повторить':'Более давние события';
+ }
+ armActivitySentinel(tail);
+}
+// The scroll (or the retry) asks for the next older page. One request at a time, never the same cursor twice, nothing while an error waits for the
+// retry, and nothing while the type search of AIR-381 is still walking the pages by itself.
+function loadOlderEvents(){
+ if(!eventsReady||!eventCursor||eventLoading||eventPaging.error||eventPaging.stuck)return false;
+ if(eventsScreen&&eventTypeFilterId!=='all'&&(eventSearch.controller||eventSearch.state==='error'||eventSearch.state==='stuck'))return false;
+ if(eventPaging.seen.has(eventCursor)){eventPaging.stuck=true;activityNote='Архив событий не продвигается дальше.';renderActivity();return false;}
+ // No user scroll since the last pages and the sentinel is still in view: the list cannot scroll. After a few pages stop and offer the button.
+ if(eventPaging.run>=EVENT_PREFETCH_LIMIT){eventPaging.paused=true;syncActivityTail();return false;}
+ eventPaging.run++;
+ loadEvents(true);
+ return true;
+}
+// A real scroll, wheel, touch or key on the list is user demand: it renews the prefetch allowance and resumes a paused list. Scrolls caused by restoring the anchor are ignored.
+function onActivityDemand(event){
+ const scroll=document.querySelector('.activity-scroll');
+ if(event&&event.type==='scroll'&&scroll&&scroll.scrollTop===activityProgrammaticTop)return;
+ eventPaging.run=0;
+ if(eventPaging.paused){eventPaging.paused=false;syncActivityTail();}
+}
+function bindActivityDemand(){
+ const scroll=document.querySelector('.activity-scroll');
+ if(!scroll||typeof scroll.addEventListener!=='function')return;
+ for(const name of ['scroll','wheel','touchmove','keydown'])scroll.addEventListener(name,onActivityDemand,{passive:true});
+}
+function retryEvents(){
+ const filtered=eventsScreen&&eventTypeFilterId!=='all';
+ if(filtered&&(eventSearch.state==='error'||eventSearch.state==='stuck')){startEventSearch();return;}
+ const kind=eventPaging.error;
+ eventPaging.error=null;eventPaging.stuck=false;eventPaging.paused=false;eventPaging.run=0;
+ if(kind==='first'||!eventsReady||!eventCursor)loadEvents(false);else loadEvents(true);
 }
 let startedIds=new Set(),startedReady=false,startedLoading=false;const savingStarted=new Set();
 const peopleSources={directors:[],actors:[]};
@@ -2112,7 +2179,7 @@ function bindControls(){
  const typeGroup=$('#events-types');if(typeGroup)typeGroup.addEventListener('click',event=>{const button=event.target.closest?.('[data-event-type]');if(button)selectEventType(button.dataset.eventType);});
  const activityExpand=$('#activity-expand');if(activityExpand)activityExpand.addEventListener('click',()=>openEventsScreen(activityExpand));
  const returnLink=$('#return-home');if(returnLink)returnLink.addEventListener('click',event=>{if(!plainFilmActivation(event))return;event.preventDefault();returnHome();});
- $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',()=>{if(eventsScreen&&eventTypeFilterId!=='all'&&(eventSearch.state==='error'||eventSearch.state==='stuck'))startEventSearch();else loadEvents(true);});
+ $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',retryEvents);bindActivityDemand();
  const presetSave=$('#preset-save');if(presetSave)presetSave.addEventListener('click',()=>{presetEditor={mode:'create'};presetPrompt=null;presetStatus='';renderPresets();const input=$('#preset-name');if(input){input.value='';input.focus();}});
  const presetEditorForm=$('#preset-editor');if(presetEditorForm){
   presetEditorForm.addEventListener('submit',async event=>{
@@ -2523,19 +2590,68 @@ function restoreActivityAnchor(scroll,anchor,fallback){
 }
 // One feed, one list, one fetch. The compact feed of the programme and film pages shows every loaded event; on the events screen the same list is
 // filtered by the selected type. Only the view changes: loadedEvents and the cursor are never touched here.
+// Event groups are <details>: their open/closed state survives a re-render, keyed by event id and position.
+function rememberEventGroups(){
+ const states=new Map();
+ if(typeof document.querySelectorAll!=='function')return states;
+ for(const item of document.querySelectorAll('#activity-list [data-event-id]'))[...(item.querySelectorAll?.('details')||[])].forEach((node,index)=>states.set(item.dataset.eventId+'#'+index,!!node.open));
+ return states;
+}
+function restoreEventGroups(states){
+ if(!states.size||typeof document.querySelectorAll!=='function')return;
+ for(const item of document.querySelectorAll('#activity-list [data-event-id]'))[...(item.querySelectorAll?.('details')||[])].forEach((node,index)=>{const key=item.dataset.eventId+'#'+index;if(states.has(key))node.open=states.get(key);});
+}
 function renderActivity(){
- const scroll=document.querySelector('.activity-scroll'),anchor=rememberActivityAnchor(scroll),position=scroll?scroll.scrollTop:0;
+ const scroll=document.querySelector('.activity-scroll'),anchor=rememberActivityAnchor(scroll),position=scroll?scroll.scrollTop:0,groups=rememberEventGroups();
  const ordered=[...loadedEvents.values()].sort((a,b)=>Date.parse(b.at)-Date.parse(a.at)||a.id.localeCompare(b.id)),olderById=new Map();
  let older=null;
  for(const event of [...ordered].reverse())if(event.type==='enrichment'){olderById.set(event.id,older);older=event;}
  const filter=eventsScreen?eventTypeFilterId:'all',shown=ordered.filter(event=>eventMatchesType(event,filter));
  $('#activity-list').innerHTML=shown.map(event=>eventHTML(event,olderById.get(event.id))).join('');
+ activityShownCount=shown.length;
+ restoreEventGroups(groups);
  restoreActivityAnchor(scroll,anchor,position);
+ activityProgrammaticTop=scroll?scroll.scrollTop:null;
  const status=$('#activity-status');
  if(status)status.textContent=activityStatusText(filter,ordered,shown);
- syncActivityMore();
+ syncActivityTail();
 }
-async function loadEvents(more=false,options={}){if(eventLoading)return 'busy';eventLoading=true;const button=$('#activity-more');if(!options.auto){button.disabled=true;button.classList.toggle('is-loading',more);if(more){button.setAttribute('aria-busy','true');button.textContent='Загружаем события…';if(!options.quiet)$('#activity-status').textContent='Загружаем более давние события…';}}try{const response=await fetch('/api/events'+(more&&eventCursor?'?cursor='+encodeURIComponent(eventCursor):''),options.signal?{signal:options.signal}:undefined);if(!response.ok)throw new Error();const data=await response.json();const keepCursor=!more&&loadedEvents.size>20;for(const event of data.events)loadedEvents.set(event.id,event);if(!keepCursor)eventCursor=data.cursor;eventsReady=true;activityNote=!more&&!data.events.length?'Здесь появятся события списка.':'';button.hidden=!eventCursor;button.textContent='Более давние события';renderActivity();if(!options.auto&&eventsScreen&&eventTypeFilterId!=='all'&&!eventSearch.controller&&eventSearch.state==='idle')startEventSearch();return true;}catch{if(options.signal&&options.signal.aborted)return 'aborted';if(!options.quiet){activityNote='Не удалось загрузить события.';$('#activity-status').textContent=activityNote;button.hidden=false;button.textContent='Повторить';}return false;}finally{eventLoading=false;if(!options.auto){button.classList.remove('is-loading');button.removeAttribute('aria-busy');button.disabled=false;}}}
+async function loadEvents(more=false,options={}){
+ if(eventLoading)return 'busy';
+ eventLoading=true;
+ const cursor=more&&eventCursor?eventCursor:null;
+ if(more){eventLoadingMore=true;eventPaging.error=null;}
+ else if(eventPaging.error==='first'&&!options.quiet){eventPaging.error=null;activityNote='Загружаем события…';}
+ syncActivityTail();
+ try{
+  const response=await fetch('/api/events'+(cursor?'?cursor='+encodeURIComponent(cursor):''),options.signal?{signal:options.signal}:undefined);
+  if(!response.ok)throw new Error();
+  const data=await response.json();
+  const keepCursor=!more&&loadedEvents.size>0&&(eventPaging.seen.size>0||loadedEvents.size>20);
+  for(const event of data.events)loadedEvents.set(event.id,event);
+  if(!keepCursor){eventCursor=data.cursor;if(!more)eventPaging.seen.clear();}
+  if(more&&cursor){
+   // A cursor that was already requested, or that comes back unchanged, is not progress: the scroll stops and offers the retry. The type search keeps its own check.
+   eventPaging.seen.add(cursor);
+   if(!options.auto&&data.cursor&&eventPaging.seen.has(data.cursor))eventPaging.stuck=true;
+  }
+  eventsReady=true;
+  // Only an older page that succeeded (or the explicit retry of a first-page failure) clears an error: a background refresh keeps an older-page error until «Повторить».
+  if(more||eventPaging.error==='first')eventPaging.error=null;
+  activityNote=eventPaging.error?'Не удалось загрузить события.':eventPaging.stuck?'Архив событий не продвигается дальше.':(!more&&!data.events.length?'Здесь появятся события списка.':'');
+  eventLoadingMore=false;
+  renderActivity();
+  if(!options.auto&&eventsScreen&&eventTypeFilterId!=='all'&&!eventSearch.controller&&eventSearch.state==='idle')startEventSearch();
+  return true;
+ }catch{
+  if(options.signal&&options.signal.aborted)return 'aborted';
+  if(!options.quiet){eventPaging.error=more?'more':(eventPaging.error||'first');activityNote='Не удалось загрузить события.';const status=$('#activity-status');if(status)status.textContent=activityNote;}
+  return false;
+ }finally{
+  eventLoading=false;eventLoadingMore=false;
+  syncActivityTail();
+ }
+}
 function initFilmCompare(){
  const input=$('#film-compare-input'),list=$('#film-compare-options'),clear=$('#film-compare-clear'),root=$('#film-compare-combo');
  if(!input||!list||!clear||!root||typeof input.addEventListener!=='function')return;

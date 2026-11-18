@@ -133,9 +133,8 @@ assert.equal(footer.epgTmdb.pendingRecognition,expected.currentUnresolved);
 
 db.sql("UPDATE discovery_authority SET cutover='held' WHERE id=1");
 const held=await (await live.worker.fetch(new Request(origin+'/api/enrichment/pipeline/status'),env,{waitUntil(){}})).json();
-assert.equal(held.candidates,0);
-assert.equal(held.ledgerTotal,0);
-assert.equal(held.programmeRunId,'r2-stale');
+// ADR 0162: a held cutover is refused; the status never falls back to the R2 ledger.
+assert.deepEqual(held,{error:'discovery_unavailable'});
 
 db.sql("UPDATE discovery_authority SET cutover='open' WHERE id=1");
 db.sql("UPDATE discovery_transfer SET state='loading' WHERE id=1");

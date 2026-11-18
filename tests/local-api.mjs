@@ -8,6 +8,7 @@ import {loadLocalCatalog} from '../scripts/local-fixtures.mjs';
 import {importFixtures} from '../scripts/local-store.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
+import {standins} from './local-standins.mjs';
 
 const root=path.resolve(path.dirname(new URL(import.meta.url).pathname),'..');
 const build=spawnSync(process.execPath,[path.join(root,'build.mjs')],{cwd:root,stdio:'inherit'});
@@ -15,7 +16,7 @@ assert.equal(build.status,0);
 const worker=await import(pathToFileURL(path.join(root,'dist/server/index.js')).href);
 const bucket=new MemoryBucket();
 await importFixtures(bucket,await loadLocalCatalog());
-const env={BUCKET:bucket,PUBLISHED_EPG_DB_OPTIONAL:'standin',OWNER_REVIEW_DB_OPTIONAL:'standin'};
+const env=standins({BUCKET:bucket});
 
 async function get(pathname){
  const response=await worker.default.fetch(new Request('http://127.0.0.1'+pathname),env);
@@ -65,7 +66,7 @@ for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show
 moodDb.sql("UPDATE prediction_domain_authority SET mode='d1'");
 const features=JSON.stringify({fingerprintHash:'d1-tense',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,invalidatedAt:null,generatedAt:'2026-11-01T00:00:00.000Z',produced:null,previous:null,plotMechanics:['heist'],moodLabels:['tense'],execution:{pace:'fast'}});
 moodDb.sql("INSERT INTO prediction_fingerprint (film_id,fingerprint_hash,schema_version,prompt_version,generated_at,invalidated_at,r2_key,content_sha256,features_json) VALUES ('movie-2','d1-tense',1,1,'2026-11-01T00:00:00.000Z',NULL,'enrichment/films/movie-2/fingerprints/d1-tense.json','abc','"+features.replaceAll("'","''")+"')");
-const overlaidResponse=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:moodDb,PUBLISHED_EPG_DB_OPTIONAL:'standin'}); // ADR 0162: a schema below 8 is the published EPG's local stand-in only when it is opted in
+const overlaidResponse=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),standins({BUCKET:bucket,DB:moodDb})); // ADR 0162: a schema below 8 is the published EPG's local stand-in only when it is opted in
 assert.equal(overlaidResponse.status,200);
 const overlaid=await overlaidResponse.json();
 assert.deepEqual(overlaid.films['movie-2'].moodIds,['tense']);
@@ -93,6 +94,6 @@ assert.match(wrongBody.error,/prediction_domain_unavailable/);
 const blocked=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:emptyDb});
 assert.equal(blocked.status,502);
 assert.match((await blocked.json()).error,/published_epg_unavailable/);
-const localEmpty=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:emptyDb,PUBLISHED_EPG_DB_OPTIONAL:'standin'});
+const localEmpty=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),standins({BUCKET:bucket,DB:emptyDb}));
 assert.equal(localEmpty.status,200);
 console.log('Local API: programme, started, and enrichment view match the fixture catalog');

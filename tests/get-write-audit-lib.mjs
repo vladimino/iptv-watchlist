@@ -17,6 +17,7 @@ import {webcrypto} from 'node:crypto';
 import {d1Standin} from './d1-standin.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
 import * as PublishedEpg from '../src/published-epg.js';
+import {standins} from './local-standins.mjs';
 
 export const TEAM='https://audit-team.cloudflareaccess.com',AUD='c3'.repeat(32),SITE='https://iptv.vladimino.workers.dev';
 const RSA={name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'};
@@ -187,7 +188,7 @@ export function Probe(bundle){
    const stub={create:async()=>{effects.workflows++;return {id:'x'};},get:async()=>{effects.workflows++;return {status:async()=>({status:'running'})};}};
    const env={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',EPG_XML_URL:'https://epg.test/guide.xml',LETTERBOXD_USERNAME:'tester',MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD,DISCOVERY_WORKFLOW:stub,RATINGS_WORKFLOW:stub,EPG_WORKFLOW:stub,PRODUCER_WORKFLOW:stub};
    if(scenario.spec.d1)env.DB=db;
-   else{env.PUBLISHED_EPG_DB_OPTIONAL='standin';env.OWNER_REVIEW_DB_OPTIONAL='standin';}
+   else Object.assign(env,standins());
    const execution={waitUntil:()=>{effects.background++;},exports:{DiscoveryContinuation:{fetch:async()=>{effects.dispatches++;return new Response('{}');}}}};
    current=effects;
    // The Worker logs a route error with console.error; the audit reads it as `routeErrors` and keeps the test output clean.

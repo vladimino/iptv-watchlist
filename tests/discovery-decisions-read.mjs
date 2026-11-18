@@ -103,7 +103,7 @@ const read=db=>Authority.routeRead(env(db),'epg/discovery-resolution.json');
 {
  const {db,fill}=fresh();await fill(30);
  db.sql("UPDATE discovery_authority SET cutover='held' WHERE id=1");
- assert.deepEqual(await read(db),{handled:false});
+ await assert.rejects(()=>read(db),error=>error.code==='discovery_unavailable','a held cutover is refused (ADR 0162)');
  db.sql("UPDATE discovery_authority SET cutover='open' WHERE id=1");
  db.sql("UPDATE discovery_transfer SET state='loading' WHERE id=1");
  await assert.rejects(()=>read(db),error=>error.code==='discovery_incomplete');

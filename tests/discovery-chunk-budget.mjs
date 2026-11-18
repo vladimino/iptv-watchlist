@@ -104,7 +104,7 @@ const leaseRow=file=>sql(file,'SELECT lease_id, expires_at FROM discovery_lease 
  assert.deepEqual(concurrent.find(item=>item.key==='h-a').shows,sequential.find(item=>item.key==='h-a').shows);
  assert.equal(concurrent.find(item=>item.key==='h-a').shows.length,1);
  sql(file,"UPDATE discovery_authority SET cutover='held' WHERE id=1");
- await assert.rejects(()=>Authority.walkObservationPages(env,{onPage(){throw new Error('held walks nothing');}}),error=>error.code==='discovery_fence');
+ await assert.rejects(()=>Authority.walkObservationPages(env,{onPage(){throw new Error('held walks nothing');}}),error=>error.code==='discovery_unavailable','a held cutover is refused (ADR 0162)');
  sql(file,"UPDATE discovery_authority SET cutover='open' WHERE id=1");
  sql(file,"UPDATE discovery_transfer SET state='loading' WHERE id=1");
  await assert.rejects(()=>Authority.walkObservationPages(env,{onPage(){}}),error=>error.code==='discovery_incomplete');
@@ -588,7 +588,7 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
 {
  const {file,env}=await fixture();
  sql(file,"UPDATE discovery_authority SET cutover='held' WHERE id=1");
- await assert.rejects(()=>Authority.selectActionableObservations(env,{}),error=>error.code==='discovery_fence');
+ await assert.rejects(()=>Authority.selectActionableObservations(env,{}),error=>error.code==='discovery_unavailable');
 }
 {
  const {file,env}=await fixture({mix:2});

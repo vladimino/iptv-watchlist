@@ -134,9 +134,9 @@ assert.equal(DEADLINE,300000);assert.equal(MIN,120000);
  const loading=await Authority.grantProjectorWindow(env,{owner:'p2',now:T0+MIN+8000});
  assert.deepEqual({...loading},{outcome:'pending',reason:'transfer_loading'});
  assert.equal(windowRow(db).state,'requested');
- // A marker that is not d1 and open gets no window at all.
+ // ADR 0162: a marker that is not d1 and open is refused outright, and gets no window.
  db.sql("UPDATE discovery_transfer SET state='idle' WHERE id=1");db.sql("UPDATE discovery_authority SET mode='r2' WHERE id=1");
- assert.equal((await Authority.requestProjectorWindow(env,{owner:'p3',now:T0})).outcome,'not_applicable');
+ await assert.rejects(Authority.requestProjectorWindow(env,{owner:'p3',now:T0}),error=>error.code==='discovery_unavailable');
 }
 
 // 3b. The whole-window bound is enforced at the coordination boundary: oversized, zero, negative, fractional, non-finite, non-numeric
