@@ -14,7 +14,7 @@
 //   fenced writer is registered in CALLS and RECONCILE here and the differential registry (src/canonical-differential-registry.js, verified against the harness
 //   run by tests/canonical-differential.mjs) marks it covered; every other condition of a `prepared` to `open` handoff is a named blocker. It is information for the
 //   owner's decision, never a permission, and nothing in the Worker calls it.
-import {PROJECTOR_MARKER_CONDITION,assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
+import {PROJECTOR_MARKER_CONDITION,assertWritable,database,failed,many,one,readAuthority,readMarker} from './film-person-authority.js';
 import {writerRoute} from './canonical-writer-route.js';
 import {discoveryAdmissionOperation} from './canonical-discovery-admission-producer.js';
 import {metadataSyncOperations} from './canonical-metadata-sync-producer.js';
@@ -366,7 +366,7 @@ export async function handoffReadiness(env,{now=new Date().toISOString(),evidenc
  const coverage=evidence.coverage||DIFFERENTIAL_COVERAGE,exceptions=evidence.exceptions||[...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS],calls=evidence.calls||{CALLS,RECONCILE};
  const blockers=[];
  let gate=null;
- try{gate=await readAuthority(env);}catch(error){blockers.push('marker_unreadable:'+(error?.code||'error'));}
+ try{gate=await readMarker(env);}catch(error){blockers.push('marker_unreadable:'+(error?.code||'error'));}
  if(gate){
   if(gate.state!=='prepared')blockers.push('marker_not_prepared:'+gate.state);
   if(gate.baseline!=='verified')blockers.push('baseline_not_verified:'+String(gate.baseline));
