@@ -4,6 +4,8 @@
 
 This page describes how to operate the bounded discovery archive of [ADR 0034](../adr/0034-bounded-discovery-ledger.md) after [ADR 0156](../adr/0156-retire-discovery-ledger-mode.md) retired the production `DISCOVERY_LEDGER_MODE` switch. It does not grant permission for anything. A deploy does not delete the leftover Cloudflare binding. The production EPG seal always archives as `bounded`. `full` and `frozen` remain only on the isolated EPG diagnostic canary and in offline fixtures.
 
+**Status of the R2 ledger tools after [ADR 0162](../adr/0162-d1-only-authority-retire-rollback-toolchain.md) (retained, deferred).** The ledger and its decisions are D1-owned; the R2 ledger object is a frozen legacy copy. `scripts/discovery-ledger-split.mjs` is an offline snapshot plan and rehearsal: it writes only to a private directory and is kept as historical analysis. `scripts/discovery-ledger-install.mjs` is **not** read-only: with `--apply --approved-production-writes` and a write credential it performs real R2 `PutObject` calls and a resolver-lease write on the production bucket. It is kept for now because it is not an authority switch and because `createS3Store` in it is imported by `scripts/prediction-domain-production.mjs`, but it is classified as a legacy R2 ledger operation: it must not be run, it can neither return an authority nor recover D1, and any production apply needs its own owner GO. Removing or guarding its apply path, and moving the shared S3 client out, is a separate atomic follow-up.
+
 ## What the EPG commit writes
 
 Production always takes the **bounded** row. The other rows are historical rollback language of ADR 0034 and offline fixtures; no Worker binding selects them.

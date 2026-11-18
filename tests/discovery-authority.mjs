@@ -71,10 +71,15 @@ assert.equal(discoveryTables(ratingsOnly.db),0);
 const ratingsReady=migrated(chain.slice(0,-1));
 assert.equal(count(ratingsReady.db,'SELECT version FROM schema_contract'),10);
 assert.equal(discoveryTables(ratingsReady.db),0);
-const ratingsGate=await Authority.readAuthority({DB:ratingsReady.db});
+// ADR 0162: a domain that is not installed is refused unless the caller opts in with DISCOVERY_DB_OPTIONAL (never set by wrangler.jsonc); only then is it the R2 stand-in.
+const unavailable=error=>error.code==='discovery_unavailable';
+const standin={DISCOVERY_DB_OPTIONAL:'standin'};
+await assert.rejects(()=>Authority.readAuthority({DB:ratingsReady.db}),unavailable,'schema v10 without the tables, strict');
+const ratingsGate=await Authority.readAuthority({DB:ratingsReady.db,...standin});
 assert.equal(ratingsGate.ready,false);
 assert.equal(ratingsGate.version,10);
-assert.deepEqual(await Authority.routeRead({DB:ratingsReady.db},'epg/discovery-resolution.json'),{handled:false});
+assert.deepEqual(await Authority.routeRead({DB:ratingsReady.db,...standin},'epg/discovery-resolution.json'),{handled:false});
+await assert.rejects(()=>Authority.routeRead({DB:ratingsReady.db},'epg/discovery-resolution.json'),unavailable);
 
 const installed=migrated();
 assert.equal(count(installed.db,'SELECT version FROM schema_contract'),11);
@@ -86,14 +91,59 @@ assert.throws(()=>installed.db.sql('UPDATE schema_contract SET version=10'),/sch
 await assert.rejects(()=>Authority.readAuthority({DB:installed.db}),error=>error.code==='discovery_unavailable');
 await assert.rejects(()=>Authority.routeRead({DB:installed.db},'epg/discovery-resolution.json'),error=>error.code==='discovery_unavailable');
 
-const bare=await Authority.routeRead({},'epg/discovery-latest.json');
+await assert.rejects(()=>Authority.routeRead({},'epg/discovery-latest.json'),unavailable,'no binding, strict');
+await assert.rejects(()=>Authority.readAuthority({DB:null}),unavailable);
+const bare=await Authority.routeRead({...standin},'epg/discovery-latest.json');
 assert.equal(bare.handled,false);
 const ratingsContract=d1Standin(path.join(root,'ratings-contract.sqlite'));
 ratingsContract.sql("CREATE TABLE schema_contract (id INTEGER, version INTEGER, note TEXT); INSERT INTO schema_contract (id, version, note) VALUES (1, 10, 'ratings');");
-assert.equal((await Authority.readAuthority({DB:ratingsContract})).ready,false);
+await assert.rejects(()=>Authority.readAuthority({DB:ratingsContract}),unavailable);
+assert.equal((await Authority.readAuthority({DB:ratingsContract,...standin})).ready,false);
 const missing=d1Standin(path.join(root,'missing.sqlite'));
 missing.sql("CREATE TABLE schema_contract (id INTEGER, version INTEGER, note TEXT); INSERT INTO schema_contract (id, version, note) VALUES (1, 11, 'incomplete');");
 await assert.rejects(()=>Authority.readAuthority({DB:missing}),error=>error.code==='discovery_unavailable');
+
+// The opt-in covers only a domain that is not installed at all (review decision on #755). Every refusal happens before any R2 read or put and before any D1 write.
+{
+ const spy=()=>{const log={r2:0,writes:0};const bucket={async get(){log.r2++;throw new Error('R2 touched');},async put(){log.r2++;throw new Error('R2 touched');},async list(){log.r2++;throw new Error('R2 touched');},async head(){log.r2++;throw new Error('R2 touched');},async delete(){log.r2++;throw new Error('R2 touched');}};return {log,bucket};};
+ const fresh=(label,setup,{onBatch}={})=>{const db=d1Standin(path.join(root,'standin-'+label+'.sqlite'),{onBatch});setup(db);return db;};
+ const contract=version=>db=>db.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER); INSERT INTO schema_contract VALUES (1,'+version+')');
+ const cases=[
+  ['one table, no contract',db=>db.sql('CREATE TABLE discovery_authority (id INTEGER PRIMARY KEY)')],
+  ['one table, contract without its row',db=>{db.sql('CREATE TABLE discovery_authority (id INTEGER PRIMARY KEY)');db.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER)');}],
+  ['one table, non-numeric version',db=>{db.sql('CREATE TABLE discovery_authority (id INTEGER PRIMARY KEY)');db.sql("CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version TEXT); INSERT INTO schema_contract VALUES (1,'x')");}],
+  ['one table, contract at 10',db=>{db.sql('CREATE TABLE discovery_authority (id INTEGER PRIMARY KEY)');contract(10)(db);}],
+  ['contract at 11, zero tables',contract(11)],
+  ['contract at 24, zero tables',contract(24)],
+ ];
+ for(const [label,setup] of cases){
+  const {log,bucket}=spy();let writes=0;
+  const db=fresh(label.replace(/\W+/g,'-'),setup,{onBatch(){writes++;}});
+  const env={DB:db,BUCKET:bucket,...standin};
+  await assert.rejects(()=>Authority.readAuthority(env),unavailable,label+': readAuthority');
+  await assert.rejects(()=>Authority.routeRead(env,'epg/discovered-films.json'),unavailable,label+': routeRead');
+  await assert.rejects(()=>Authority.readAdmissionsById(env,['tmdb_1']),unavailable,label+': readAdmissionsById');
+  await assert.rejects(()=>Authority.readFilmAdmission(env,'1'),unavailable,label+': readFilmAdmission');
+  await assert.rejects(()=>Authority.routeWrite(env,'epg/discovery-status.json',{stage:'partial'}),unavailable,label+': routeWrite');
+  assert.deepEqual([log.r2,writes],[0,0],label+': no R2 access and no D1 write');
+ }
+ // Not installed, contract below 11 or none: the opt-in is allowed, strict refuses.
+ for(const [label,setup] of [['no schema_contract',()=>{}],['contract at 7',contract(7)],['contract at 10',contract(10)]]){
+  const db=fresh('absent-'+label.replace(/\W+/g,'-'),setup);
+  assert.equal((await Authority.readAuthority({DB:db,...standin})).ready,false,label+': opted in');
+  await assert.rejects(()=>Authority.readAuthority({DB:db}),unavailable,label+': strict');
+ }
+ // An installed marker that is not d1 / open is refused even with the opt-in; a D1 error is not a stand-in either (the schema's CHECK constraints keep a corrupted marker from existing).
+ for(const [label,sqlText] of [['marker r2',"UPDATE discovery_authority SET mode='r2'"],['marker held',"UPDATE discovery_authority SET mode='d1', cutover='held'"]]){
+  const inst=migrated();
+  inst.db.sql(sqlText);
+  await assert.rejects(()=>Authority.readAuthority({DB:inst.db,...standin}),unavailable,label+': opted in');
+ }
+ const broken={prepare(){throw new Error('D1 binding reset');},async batch(){throw new Error('D1 binding reset');}};
+ await assert.rejects(()=>Authority.readAuthority({DB:broken,...standin}),unavailable,'a D1 error is not a stand-in');
+ assert.match(fs.readFileSync('wrangler.jsonc','utf8').replace(/\/\/.*$/gm,''),/^(?![\s\S]*DISCOVERY_DB_OPTIONAL)/,'wrangler.jsonc never opts in');
+ assert.match(fs.readFileSync('scripts/local-dev.mjs','utf8'),/DISCOVERY_DB_OPTIONAL:'standin'/,'the local stack opts in');
+}
 
 const held=migrated();
 hold(held.db);

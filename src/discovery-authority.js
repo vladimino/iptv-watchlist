@@ -312,19 +312,34 @@ export async function readDiscoveryGates(env,now=nowMs()){
 
 export async function readAuthority(env){
  const db=database(env);
- if(!db)return closed();
- let version;
- try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
- catch(error){
-  if(/no such table/i.test(String(error?.message||error)))return closed();
-  throw failed('discovery_unavailable',error);
+ // ADR 0162: a missing binding, a missing schema_contract, a contract below 11 and a database without the tables are refused. Only the explicit local stand-in
+ // (DISCOVERY_DB_OPTIONAL set to standin, never set by wrangler.jsonc) serves the R2 objects, and only for a domain that is not installed at all.
+ const standin=env?.DISCOVERY_DB_OPTIONAL==='standin';
+ if(!db){
+  if(standin)return closed();
+  throw failed('discovery_unavailable');
  }
- const numeric=Number(version);
- if(!Number.isFinite(numeric)||numeric<11)return {...closed(),version:Number.isFinite(numeric)?numeric:null};
+ // The tables are inventoried first, so that no stand-in path below can serve R2 over a partly installed domain, whatever schema_contract says.
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'discovery\\_%' ESCAPE '\\' OR name='projector_window')")).map(row=>row.name);}
  catch(error){throw failed('discovery_unavailable',error);}
- if(!TABLES.every(name=>names.includes(name)))throw failed('discovery_unavailable');
+ const installed=TABLES.every(name=>names.includes(name));
+ if(!installed&&names.some(name=>name.startsWith('discovery_')))throw failed('discovery_unavailable');
+ let version;
+ try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
+ catch(error){
+  if(!installed&&standin&&/no such table/i.test(String(error?.message||error)))return closed();
+  throw failed('discovery_unavailable',error);
+ }
+ const numeric=Number(version);
+ if(!installed){
+  if(!standin)throw failed('discovery_unavailable');
+  if(!Number.isFinite(numeric))return {...closed(),version:null};
+  // A contract at 11 or later declares the domain installed: none of its tables is a broken install, not an uninstalled domain.
+  if(numeric>=11)throw failed('discovery_unavailable');
+  return {...closed(),version:numeric};
+ }
+ if(!Number.isFinite(numeric)||numeric<11)throw failed('discovery_unavailable');
  let row,transfer;
  try{
   row=await one(db,'SELECT mode, cutover, programme_run_id AS programmeRunId, generation, published_programme_run_id AS publishedProgrammeRunId FROM discovery_authority WHERE id=1');
