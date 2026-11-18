@@ -128,6 +128,9 @@ export async function buildScenario(name){
  const seeded=new Map();spec.seed(seeded);
  const db=d1Standin(dbFile);
  for(const migration of migrations)db.sql(fs.readFileSync('migrations/'+migration,'utf8'));
+ // ADR 0162: a ratings marker that is not d1/open is refused. These scenarios audit the published EPG, Discovery and owner-review reads,
+ // so the ratings domain is not installed (its local stand-in: no tables, RATINGS_DB_REQUIRED unset) and keeps the R2 view index.
+ db.sql('DROP TABLE ratings_view;DROP TABLE ratings_document;DROP TABLE ratings_domain_cas;DROP TABLE ratings_domain_authority;');
  if(spec.d1){
   db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
   db.sql("UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
