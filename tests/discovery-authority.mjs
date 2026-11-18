@@ -281,6 +281,15 @@ vm.runInThisContext(fs.readFileSync('src/domain/resolution-acceptance.js','utf8'
 const previewPicnic=await Authority.readPolicyExcludePreview(env,'tmdb_85');
 assert.equal(previewPicnic.policy,'concert');
 assert.equal(previewPicnic.available,true);
+const reviewedArctic={id:'tmdb_1623086',tmdbId:'1623086',canonicalIdentity:'tmdb:1623086',title:'Арктика. Очищение',year:2020,runtime:55,genres:[],synopsis:'Экспедиция.'};
+const reviewedDrift={id:'tmdb_569928',tmdbId:'569928',canonicalIdentity:'tmdb:569928',title:'Большой белый танец',year:null,runtime:70,genres:[],synopsis:'Лента о хищнике.'};
+await Authority.replaceCatalog(env,{...(await Authority.routeRead(env,'epg/discovered-films.json')).value,tmdb_1623086:reviewedArctic,tmdb_569928:reviewedDrift});
+const previewReviewed=await Authority.readPolicyExcludePreview(env,'tmdb_1623086');
+assert.equal(previewReviewed.policy,'documentary');
+assert.equal(previewReviewed.available,true);
+const previewDrift=await Authority.readPolicyExcludePreview(env,'tmdb_569928');
+assert.equal(previewDrift.available,false);
+assert.equal(previewDrift.reason,'not_policy_excluded');
 const previewFiction=await Authority.readPolicyExcludePreview(env,'tmdb_86');
 assert.equal(previewFiction.available,false);
 assert.equal(previewFiction.reason,'not_policy_excluded');

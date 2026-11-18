@@ -37,6 +37,7 @@ These results do not create a canonical film:
 | Music without a feature genre, and only a bare Live/Concert word in the title fields, until this observation is confirmed | `needs_verification` (`concert_recording_ambiguous`); no catalog film |
 | TMDB card with an empty genre list that no phrase rule excludes ([ADR 0168](../../adr/0168-empty-genre-card-is-unclassified.md)), until this observation is confirmed | `needs_verification` (`genre_evidence_missing`); no catalog film |
 | Music without a feature genre and `concert` or `концерт…` in the overview (ADR 0168) | `needs_verification` (`concert_recording_ambiguous`) |
+| The accepted TMDB id is one the owner retired on policy grounds ([ADR 0172](../../adr/0172-owner-policy-exclusion-blocks-reentry.md)) and the catalog holds no current admission of it, even with an owner confirmation | `no_confident_match` (`owner_policy_excluded`); no catalog film |
 | Title does not match | `no_confident_match` |
 | Release year disagrees | `no_confident_match` |
 | Runtime missing or outside the tolerance | `duration_mismatch` |
