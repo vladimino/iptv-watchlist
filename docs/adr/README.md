@@ -6,6 +6,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 | ADR | Status | Decision and evidence |
 | --- | --- | --- |
+| [0169 — One read-only identity work inventory for the owner Limbo, as a separate versioned projection over the current owners](0169-unified-identity-work-inventory.md) | **Proposed** 2026-11-18 | Typed lanes (EPG observation, Letterboxd rated candidate, Film) with per-lane coverage, a derived archive registry plus a bounded completeness probe, no new owner and no D1 migration of the candidate queue. Awaits an explicit owner decision; Architecture only ([AIR-343](https://trello.com/c/hCy6fLne)). |
 | [0165 — Owner-confirmed scoped prediction recovery intent as a denied-version overlay on the freshness rule](0165-scoped-prediction-recovery-intent.md) | **Accepted** 2026-11-18 (explicit owner approval on [AIR-477](https://trello.com/c/WhwaXRRl)) | A D1 intent (migration `0024`, not applied) denies one film's exact stored prediction (and fingerprint) version; the ordinary freshness rule and queue rebuild then re-admit the film, and the ordinary batch v2 runner re-scores it; the first new version satisfies the intent. Owner-only preview and fenced confirm; retained Films outside admission and exhausted retry budgets fail closed. No production write is authorized. |
 
 ## Accepted records

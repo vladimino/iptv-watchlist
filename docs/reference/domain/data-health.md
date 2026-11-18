@@ -221,5 +221,7 @@ A poster gap is an asset issue, not limbo, and is left to the health page. A Let
 
 **Filters and pages.** An unknown `kind`, `subsystem` or `cause`, or an age that is not an integer from 0 to 365, is an error, never "everything". `cause` is one cause. `causes` is a disjunction of several, sorted and de-duplicated; passing both is `conflicting_cause`, and an unknown member is `unknown_cause`. An empty `causes` array keeps nothing: an unpressed set is not every cause. `attention: 'now'` keeps only items the caller already marked `ownerAction.now === true`; omitted and `'all'` keep every item, and any other attention is `unknown_attention`. This library does not decide `ownerAction`. The key is `kind|subsystem|cause|age`. An array of causes appends `~` and those causes; `now` appends `@now`. Omitting both leaves the key `|||`. `minAgeDays` keeps items whose age is at least that many days **and** items whose age is unknown, because a missing clock never proves that something is recent. `limit` is required, an integer from 1 to 25. The cursor binds the filter key, the limit, the list length and the id at its position; a cursor from another filter, limit or list is `stale_cursor`.
 
+Limbo kinds are `film` and `observation`. A Letterboxd rated candidate before verification is not a health subject here; the proposed cross-source view is [identity work inventory](identity-work-inventory.md).
+
 Tests: `node tests/limbo-inventory.mjs`.
 
