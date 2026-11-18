@@ -1,9 +1,9 @@
 # ADR 0167: Retire the one-film prediction runner v5; batch runner v2 is the only prediction protocol
 
-**Status:** Proposed
+**Status:** Accepted
 **Original decision date:** 2026-11-17
 **Recorded at:** 2026-11-17
-**Approval source:** owner GO to implement [AIR-452](https://trello.com/c/bHuKy3eF) as a code and documentation PR (card description, 17 Nov 2026); owner answers during implementation on 17 Nov 2026: full removal of the v5 MCP tools, HTTP routes and implementation, removal of `prediction_validate`, and "D1 stays, no rollback to R2 is planned". No production operation is authorized by this ADR.
+**Approval source:** owner GO to implement [AIR-452](https://trello.com/c/bHuKy3eF) as a code and documentation PR (card description, 17 Nov 2026); owner answers during implementation on 17 Nov 2026: full removal of the v5 MCP tools, HTTP routes and implementation, removal of `prediction_validate`, and "D1 stays, no rollback to R2 is planned". Accepted on 2026-11-18 after the owner's independent technical review of [PR #733](https://github.com/vladimino/iptv-watchlist/pull/733#pullrequestreview-5951749778) (technical pass; the owner reconfirmed the retirement and directed finalizing this ADR as Accepted). No production operation is authorized by this ADR.
 **Related work:** [AIR-452](https://trello.com/c/bHuKy3eF); prerequisite [AIR-451](https://trello.com/c/NN3N6kRp) (cutover of the hourly Scheduled Tasks to batch v2); [consumer inventory](../evidence/prediction/air-452-v5-consumer-inventory-2026-11-17.md)
 **Supersedes:** [ADR 0122](0122-prediction-batch-runner-v2-dual-protocol.md) in part: the dual-protocol coexistence (v2 runs *beside* v5) and its rollback "re-enable the v5 Task". The shared queue, lease, epoch, submit gate, persistence and every v2 rule of ADR 0122 stay in force. [ADR 0035](0035-selective-fingerprint-transition-compatibility.md) section 7 in part: no runner restores a fingerprint pointer to a stored generation record any more (see Consequences).
 **Superseded by:** None

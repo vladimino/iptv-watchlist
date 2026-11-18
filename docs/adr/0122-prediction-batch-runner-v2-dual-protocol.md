@@ -6,7 +6,7 @@
 **Approval source:** [AIR-446](https://trello.com/c/ZRX7Mil7); [D7-A owner decision](https://github.com/vladimino/iptv-watchlist/pull/541#issuecomment-6819498541); final owner approval to accept the ADR on 2026-11-12. No production operation authorized.
 **Related work:** [AIR-446](https://trello.com/c/ZRX7Mil7) (this ADR and the contract); input: [AIR-438](https://trello.com/c/vs2H6LQK) ([evidence](../evidence/prediction/air-438-step-latency-and-batch-sizing-2026-11-11.md)), [AIR-441](https://trello.com/c/fiOKmCHJ), [AIR-442](https://trello.com/c/j564oeLD); next card: [AIR-447](https://trello.com/c/3jrJcvWH); [limits analysis](../evidence/prediction/air-446-batch-runner-limits-2026-11-12.md)
 **Supersedes:** None. [ADR 0113](0113-prediction-runner-advances-persisted-queue.md), [ADR 0064](0064-prediction-queue-conditional-writes.md) and [ADR 0078](0078-d1-authoritative-prediction-domain.md) stay in force; v2 reuses their queue, lease and D1/R2 persistence.
-**Superseded by:** [ADR 0167](0167-retire-prediction-runner-v5.md) in part (proposed): v5 is retired, so the dual-protocol coexistence and the rollback to the v5 Task end; every shared queue, lease, epoch, gate and persistence rule stays.
+**Superseded by:** [ADR 0167](0167-retire-prediction-runner-v5.md) (Accepted 2026-11-18) in part: v5 is retired, so the dual-protocol coexistence and the rollback to the v5 Task end; every shared queue, lease, epoch, gate and persistence rule stays.
 
 ## Context
 
