@@ -117,13 +117,32 @@ function admissionPolicy(movie,observation){
 // or a documentary in plain words. A word in the title alone is not evidence, and a card with an empty or placeholder synopsis stays out of reach of the writer.
 const CLEANUP_CONCERT_TERMS=/концерт|koncert|concert|выступлен|выступил|выступа|performance|performed|filmed live|live (at|in|from)|турне|\btour\b|festival|фестивал/;
 const CLEANUP_DOCUMENTARY_TERMS=/документальн|documentary/;
+// ADR 0170: films the owner reviewed against the TMDB card on 2026-11-18, whose stored synopsis is empty, a placeholder, or names no performance or documentary word.
+// A listed id is reached only while the stored card still has no feature genre and matches the reviewed title, year and runtime exactly.
+const OWNER_REVIEWED_POLICY_EXCLUSIONS={
+ '450202':{kind:'concert',title:'Britney Spears: Apple Music Festival',year:2016,runtime:88},
+ '1126350':{kind:'concert',title:'DJ BoBo - EVOLUT30N',year:2023,runtime:134},
+ '1603159':{kind:'concert',title:'TesseracT: RADAR',year:2025,runtime:90},
+ '1623086':{kind:'documentary',title:'Арктика. Очищение',year:2020,runtime:55},
+ '569928':{kind:'documentary',title:'Большой белый танец',year:null,runtime:68},
+ '1603299':{kind:'documentary',title:'Северный морской путь, или Русская дорога в океане',year:null,runtime:64}
+};
+function ownerReviewedPolicy(movie){
+ const entry=movie?.tmdbId==null?null:OWNER_REVIEWED_POLICY_EXCLUSIONS[String(movie.tmdbId)];
+ if(!entry)return null;
+ if(detailNorm(movie.title)!==detailNorm(entry.title))return null;
+ if((detailNumber(movie.year)??null)!==entry.year||detailNumber(movie.runtime)!==entry.runtime)return null;
+ return entry.kind;
+}
 function catalogCleanupPolicy(movie,observation){
  const base=admissionPolicy(movie,observation);
  if(base==='documentary'||base==='concert'||base==='ambiguous')return base;
  const facts=genreFacts(movie);
  if(featureGenre(facts))return base;
+ const reviewed=ownerReviewedPolicy(movie);
  const noGenre=!facts.ids.size&&!facts.unnamed.length;
  if(!noGenre&&!listedGenre(facts,TMDB_GENRE_MUSIC,MUSIC_GENRE_NAMES)&&!listedGenre(facts,TMDB_GENRE_TV_MOVIE,TV_MOVIE_GENRE_NAMES))return base;
+ if(reviewed)return reviewed;
  const text=overviewPerformanceText(movie);
  if(CLEANUP_DOCUMENTARY_TERMS.test(text))return 'documentary';
  if(CLEANUP_CONCERT_TERMS.test(text))return 'concert';
@@ -192,7 +211,7 @@ function acceptScoredIdentity(input={}){
 function filmAdmissionInput(film){
  if(!film||typeof film!=='object')return {movie:null,observation:null};
  const overview=typeof film.overview==='string'&&film.overview?film.overview:(typeof film.synopsis==='string'?film.synopsis:'');
- const movie={title:film.title,original:film.original,aliases:film.aliases,genres:film.genres,genreIds:film.genreIds,overview};
+ const movie={title:film.title,original:film.original,aliases:film.aliases,genres:film.genres,genreIds:film.genreIds,overview,tmdbId:film.tmdbId==null?null:String(film.tmdbId),year:film.year??null,runtime:film.runtime??null};
  const observation={title:film.title,normalizedTitle:film.normalizedTitle||film.title,categories:Array.isArray(film.categories)?film.categories:[]};
  return {movie,observation};
 }

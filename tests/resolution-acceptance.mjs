@@ -353,7 +353,7 @@ for(const [id,title,genres,synopsis,expected] of [
 ]){
  assert.equal(cleanup({id,title,genres,synopsis}),expected,id);
 }
-// Not reached: no words in the stored synopsis (empty, placeholder, or a word only in the title), non-fiction with no performance or documentary word, and fiction.
+// Not reached by the synopsis rule (these cards carry no tmdbId, year or runtime, so the owner-reviewed list below does not apply): no words in the stored synopsis (empty, placeholder, or a word only in the title), non-fiction with no performance or documentary word, and fiction.
 for(const [id,title,genres,synopsis] of [
  ['tmdb_450202','Britney Spears: Apple Music Festival',music,'Описание отсутствует'],
  ['tmdb_1126350','DJ BoBo - EVOLUT30N',music,'Описание отсутствует'],
@@ -376,3 +376,26 @@ for(const genres of [['драма','музыка'],['комедия','музык
 assert.equal(gateKind({id:'tmdb_761960',title:'Пикник: Традиционный весенний концерт',genres:[],synopsis:'7 марта 2014 года в ДК им. Ленсовета прошёл традиционный весенний концерт группы "Пикник".'}),'unclassified');
 assert.equal(gateKind({id:'tmdb_1063549',title:'Gaga Chromatica Ball',genres:music,synopsis:'Леди Гага представляет выступление.'}),null);
 assert.equal(gateKind({id:'tmdb_534012',title:'Paul Rodgers -  Free Spirit',genres:music,synopsis:"United Kingdom. The 16-song collection, 'Free Spirit', filmed in London, England returned Paul Rodgers to his roots, bringing fans an extraordinary evening celebrating the music of Free… 2018. koncert"}),null);
+// ADR 0170: the six films the owner reviewed against the TMDB card are reached by the writer only on an exact id, title, year and runtime match.
+const reviewedCards=[
+ ['450202','Britney Spears: Apple Music Festival',2016,88,music,'Описание отсутствует','concert'],
+ ['1126350','DJ BoBo - EVOLUT30N',2023,134,music,'Описание отсутствует','concert'],
+ ['1603159','TesseracT: RADAR',2025,90,music,'Tesseract - Radar','concert'],
+ ['1623086','Арктика. Очищение',2020,55,[],'Водитель и бизнесмен, студент-медик и 3D-аниматор, пивовар, слесарь – 18 мужчин разных профессий.','documentary'],
+ ['569928','Большой белый танец',null,68,[],'Лента посвящена самому древнему и загадочному хищнику океана – большой белой акуле.','documentary'],
+ ['1603299','Северный морской путь, или Русская дорога в океане',null,64,[],'Фильм рассказывает о том, из чего складывается национальная транспортная магистраль России.','documentary'],
+];
+for(const [tmdbId,title,year,runtime,genres,synopsis,expected] of reviewedCards){
+ const card={id:'tmdb_'+tmdbId,tmdbId,title,year,runtime,genres,synopsis};
+ assert.equal(cleanup(card),expected,tmdbId);
+ assert.notEqual(gateKind(card),'concert',tmdbId);
+ assert.notEqual(gateKind(card),'documentary',tmdbId);
+ assert.notEqual(cleanup({...card,tmdbId:String(Number(tmdbId)+1)}),expected,'another id is not reached '+tmdbId);
+ assert.notEqual(cleanup({...card,runtime:runtime+7}),expected,'runtime mismatch '+tmdbId);
+ assert.notEqual(cleanup({...card,year:(year??2000)+1}),expected,'year mismatch '+tmdbId);
+ assert.notEqual(cleanup({...card,title:title+' II'}),expected,'title mismatch '+tmdbId);
+ assert.notEqual(cleanup({...card,genres:[...genres,'драма']}),expected,'feature genre '+tmdbId);
+}
+// The detail gate still reads these cards as before: an empty genre list is held, Music alone verifies.
+assert.equal(gateKind({id:'tmdb_1623086',tmdbId:'1623086',title:'Арктика. Очищение',year:2020,runtime:55,genres:[],synopsis:'Экспедиция.'}),'unclassified');
+assert.equal(gateKind({id:'tmdb_450202',tmdbId:'450202',title:'Britney Spears: Apple Music Festival',year:2016,runtime:88,genres:music,synopsis:'Описание отсутствует'}),null);
