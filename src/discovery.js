@@ -37,6 +37,10 @@ const PAGED_CHEAP_FILMS=38;
 // AIR-523. The batched replay of the current generation's assigned rows runs FIRST in the chunk and owns this much of its budget, so the ledger count and
 // the TMDB candidates (which stop at 30 s) can no longer starve it, and it can no longer starve them: the rest of the chunk is theirs.
 const PAGED_REPLAY_BUDGET_MS=10000;
+// A completed lap of the replay rests this long for the same run. The verified observations that remain unassigned after a lap are the ones that cannot be
+// assigned now (evidence drift, a Film with no record, a slot held by another Film); scanning them in every chunk took the time the TMDB candidates need.
+// A new decision is assigned when it is written; the next lap picks up an observation that became assignable later.
+const PAGED_REPLAY_RELAP_MS=30*60*1000;
 const DISCOVERY_LEASE_RENEW_MARGIN_MS=45000;
 const budgetExhaustedError=()=>Object.assign(new Error('chunk wall budget exhausted'),{name:'BudgetExhaustedError'});
 // Fairness fence written *before* TMDB so a request that overruns persistLimit still rotates HOL.
@@ -723,7 +727,10 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  };
  const selectAfter=typeof last?.selectAfter==='string'?last.selectAfter:'';
  const touchAfter=typeof last?.touchAfter==='string'?last.touchAfter:'';
- const replayAfter=last?.programmeRunId&&last.programmeRunId===source.programmeRunId&&typeof last?.replayAfter==='string'?last.replayAfter:'';
+ const sameRun=!!last?.programmeRunId&&last.programmeRunId===source.programmeRunId;
+ const replayAfter=sameRun&&typeof last?.replayAfter==='string'?last.replayAfter:'';
+ const replayLapAt=sameRun&&typeof last?.replayLapAt==='string'&&Number.isFinite(Date.parse(last.replayLapAt))?last.replayLapAt:null;
+ const replayResting=!replayAfter&&!!replayLapAt&&Date.now()-Date.parse(replayLapAt)<PAGED_REPLAY_RELAP_MS;
  const watchlist=report.films||[],knownTmdb=new Map(watchlist.filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)])),aliasIndex=new Map();
  const indexFilm=film=>{if(!film?.tmdbId)return;for(const alias of new Set([film.title,film.original,...(film.aliases||[])])){const key=epgTitleParts(alias).normalizedTitle;if(!key)continue;const entries=aliasIndex.get(key)||new Map();entries.set(String(film.tmdbId),film);aliasIndex.set(key,entries);}};
  const cheap={decisions:new Map(),decisionTotal:0,films:new Set(),before:new Map()};
@@ -733,11 +740,12 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // a page at a time with set reads and fenced insert batches; the guarded per-slot statement of ADR 0142 decision 4 is unchanged. Time-boxed; the cursor wraps.
  const replayStarted=Date.now();
  let replayRun={observations:0,pages:0,complete:true,after:replayAfter,outcomes:{assigned:0,present:0,evidence_drift:0,film_absent:0,guard_skipped:0},refused:false};
- if(source.programmeRunId){
+ if(source.programmeRunId&&!replayResting){
   const replayStop=()=>Date.now()+Math.min(writeCostMs||PAGED_DEFAULT_WRITE_MS,3000)>=t0+PAGED_REPLAY_BUDGET_MS;
   const result=await inPhase('replay_assignment',()=>guarded(()=>DiscoveryAuthority.replayUnassignedSlots(env,{programmeRunId:source.programmeRunId,after:replayAfter,shouldStop:replayStop,beforePage:heartbeat,timedCommit:timedWrite},{lease})));
   if(result)replayRun=result;else{replayRun={...replayRun,complete:false,refused:true};}
- }
+ }else if(replayResting)replayRun={...replayRun,skipped:true};
+ const nextReplayLapAt=!replayRun.skipped&&source.programmeRunId&&replayRun.complete===true&&!replayRun.stale&&!replayRun.refused?new Date().toISOString():replayLapAt;
  timings.replayMs=Date.now()-replayStarted;
  const walkStarted=Date.now();
  const selected=await DiscoveryAuthority.selectActionableObservations(env,{after:selectAfter,touchAfter,now:Date.now(),pageSize:Math.max(limit,DiscoveryAuthority.SELECT_PAGE),touchLimit:PAGED_CHEAP_FILMS,shouldStop:()=>Date.now()>=walkDeadline,beforeQuery:heartbeat});
@@ -788,7 +796,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const deferredKeys=new Set();
  const programmeChanged=()=>({schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,currentProgrammeRunId:null,timings});
  // ADR 0142 decisions 4 and 5. Every assignment is a guarded insert behind the stored decision; the totals reach the chunk summary and the Discovery status.
- const assignment={assigned:replayRun.outcomes.assigned,present:0,evidence_drift:replayRun.outcomes.evidence_drift,slot_taken:0,film_absent:replayRun.outcomes.film_absent,stale_run:0,decision_changed:0,observation_inactive:0,slot_absent:0,refused:replayRun.refused?1:0,replayed:0,replayRemaining:0,bulkObservations:replayRun.observations,bulkPages:replayRun.pages,bulkGuardSkipped:replayRun.outcomes.guard_skipped,bulkComplete:replayRun.complete};
+ const assignment={assigned:replayRun.outcomes.assigned,present:0,evidence_drift:replayRun.outcomes.evidence_drift,slot_taken:0,film_absent:replayRun.outcomes.film_absent,stale_run:0,decision_changed:0,observation_inactive:0,slot_absent:0,refused:replayRun.refused?1:0,replayed:0,replayRemaining:0,bulkObservations:replayRun.observations,bulkPages:replayRun.pages,bulkGuardSkipped:replayRun.outcomes.guard_skipped,bulkComplete:replayRun.complete,bulkResting:!!replayRun.skipped};
  const candidateByKey=new Map(),driftSeen=new Map();
  // The drifted durations the batched replay met feed the revalidation exactly as the per-observation path did; only keys of this chunk's page are revalidated.
  for(const item of replayRun.drifts||[]){const entry=driftSeen.get(item.key)||{minutes:new Set()};entry.minutes.add(item.minutes);driftSeen.set(item.key,entry);}
@@ -1071,7 +1079,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  }
  if(!selected.items.length&&remaining===0)nextAfter=selected.after||'';
  const nextTouchAfter=selected.touches.length?selected.touchAfter||touchAfter:touchAfter;
- const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',timings};
+ const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',replayLapAt:nextReplayLapAt,timings};
  try{await fence();}catch(e){throw lost(e,'final');}
  // `preCommitMs` is what the stored status carries: the time up to its own write. The status write, the continuation
  // checkpoint and the total through that checkpoint are measured after the writes and reach only the returned
