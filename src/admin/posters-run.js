@@ -69,6 +69,7 @@ export const POSTER_EVIDENCE_COPY = Object.freeze({
   pointer_missing: 'Нет указателя опубликованного поколения программы.',
   pointer_unreadable: 'Указатель опубликованного поколения не читается.',
   generation_not_published: 'Поколение программы сейчас не опубликовано.',
+  generation_changed: 'Поколение программы сменилось; обновите страницу.',
   generation_copy_missing: 'Нет копии каталога опубликованного поколения.',
   generation_copy_unreadable: 'Копия каталога опубликованного поколения не читается.',
   live_copy_missing: 'Нет рабочей копии каталога.',
