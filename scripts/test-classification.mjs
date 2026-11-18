@@ -35,6 +35,9 @@ export const FILES={
  "admin-health-api.mjs": {
   "suite": "core"
  },
+ "admin-identity-work-api.mjs": {
+  "suite": "core"
+ },
  "admin-letterboxd-apply.mjs": {
   "suite": "core"
  },
@@ -890,6 +893,9 @@ export const FILES={
  "get-write-baseline.mjs": {
   "suite": "core"
  },
+ "identity-work-inventory.mjs": {
+  "suite": "core"
+ },
  "internal-continuation.mjs": {
   "suite": "core"
  },
@@ -933,6 +939,9 @@ export const FILES={
   "suite": "core"
  },
  "letterboxd-identity-resolve.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-import-registry.mjs": {
   "suite": "core"
  },
  "letterboxd-inferred.mjs": {
