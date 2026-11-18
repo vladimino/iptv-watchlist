@@ -1217,7 +1217,7 @@ export async function replaceCatalog(env,films,context={}){
   for(const [filmId,film] of entries){
    const kind=mediaKind(film);
    if(pending.length+3>STATEMENT_CAP)await flush();
-   pending.push(['INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES (?,?,?,?,?,?,?,\'current\',?) ON CONFLICT(film_id) DO UPDATE SET tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, canonical_identity=excluded.canonical_identity, observation_key=excluded.observation_key, programme_run_id=excluded.programme_run_id, generation=excluded.generation, state=\'current\', payload_json=excluded.payload_json WHERE discovery_admission.tmdb_id=excluded.tmdb_id AND discovery_admission.media_kind=excluded.media_kind',[filmId,String(film.tmdbId),kind,film.canonicalIdentity,film.observationKey??null,current.programmeRunId,current.generation+1,JSON.stringify(film)]]);
+   pending.push(['INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES (?,?,?,?,?,?,?,\'current\',?) ON CONFLICT(film_id) DO UPDATE SET tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, canonical_identity=excluded.canonical_identity, observation_key=excluded.observation_key, programme_run_id=excluded.programme_run_id, generation=excluded.generation, state=\'current\', payload_json=CASE WHEN json_extract(excluded.payload_json,\'$.poster\') LIKE \'https://%\' OR json_extract(discovery_admission.payload_json,\'$.poster\') IS NULL OR json_extract(discovery_admission.payload_json,\'$.poster\') NOT LIKE \'https://%\' THEN excluded.payload_json ELSE json_set(excluded.payload_json,\'$.poster\',json_extract(discovery_admission.payload_json,\'$.poster\')) END WHERE discovery_admission.tmdb_id=excluded.tmdb_id AND discovery_admission.media_kind=excluded.media_kind',[filmId,String(film.tmdbId),kind,film.canonicalIdentity,film.observationKey??null,current.programmeRunId,current.generation+1,JSON.stringify(film)]]);
   }
   await flush();
   const end=await readAuthority(env);
@@ -1462,7 +1462,7 @@ export const ADMISSION_UPSERT_BYTES=200000;
 export const ADMISSION_BATCH_BYTES=400000;
 const ADMISSION_INSERT='INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES ';
 const ADMISSION_ROW='(?,?,?,?,?,?,?,\'current\',?)';
-const ADMISSION_CONFLICT=' ON CONFLICT(film_id) DO UPDATE SET tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, canonical_identity=excluded.canonical_identity, observation_key=excluded.observation_key, programme_run_id=excluded.programme_run_id, generation=excluded.generation, state=\'current\', payload_json=excluded.payload_json WHERE discovery_admission.tmdb_id=excluded.tmdb_id AND discovery_admission.media_kind=excluded.media_kind';
+const ADMISSION_CONFLICT=' ON CONFLICT(film_id) DO UPDATE SET tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, canonical_identity=excluded.canonical_identity, observation_key=excluded.observation_key, programme_run_id=excluded.programme_run_id, generation=excluded.generation, state=\'current\', payload_json=CASE WHEN json_extract(excluded.payload_json,\'$.poster\') LIKE \'https://%\' OR json_extract(discovery_admission.payload_json,\'$.poster\') IS NULL OR json_extract(discovery_admission.payload_json,\'$.poster\') NOT LIKE \'https://%\' THEN excluded.payload_json ELSE json_set(excluded.payload_json,\'$.poster\',json_extract(discovery_admission.payload_json,\'$.poster\')) END WHERE discovery_admission.tmdb_id=excluded.tmdb_id AND discovery_admission.media_kind=excluded.media_kind';
 const ADMISSION_COUNT_FENCE='UPDATE discovery_cas SET ok=(changes()=?) WHERE id=1';
 const ADMISSION_FENCE_SQL=' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1) AND EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state<>\'loading\')';
 const ADMISSION_ENCODER=new TextEncoder();
@@ -1480,6 +1480,65 @@ function admissionGroups(entries,from){
   bytes+=size;
  }
  return {groups,next:at};
+}
+// AIR-515. The one D1 writer of a catalog poster. It sets `poster` inside the current admission payload and nothing else, behind the
+// same lease and generation fence as every Discovery writer (mode d1, cutover open, the generation read, the live lease of this
+// run, a transfer that is not loading, and the published programme the caller started from). A row is touched only while it is still
+// `current`, a movie, the same positive TMDB id and canonical identity, and still without an https poster; anything else is reported
+// per row and never overwritten. `upsertAdmissions` and `replaceCatalog` keep a stored https poster of the same identity, so a later
+// admission cannot erase it. Statuses: `written`, `present` (a poster is already stored), `changed` (absent, superseded or another identity).
+export const POSTER_ROWS_CAP=STATEMENT_CAP-2;
+const POSTER_PRESENT_SQL="json_extract(payload_json,'$.poster') LIKE 'https://%'";
+const POSTER_UPDATE_SQL="UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.poster',?) WHERE film_id=? AND state='current' AND media_kind='movie' AND tmdb_id=? AND canonical_identity=? AND json_extract(payload_json,'$.tmdbId')=? AND NOT COALESCE("+POSTER_PRESENT_SQL+",0)";
+async function posterStatuses(db,rows){
+ const status={},stored=new Map();
+ for(let at=0;at<rows.length;at+=BIND_CAP){
+  const slice=rows.slice(at,at+BIND_CAP);
+  for(const row of await many(db,"SELECT film_id, tmdb_id, media_kind, canonical_identity, json_extract(payload_json,'$.poster') AS poster FROM discovery_admission WHERE state='current' AND film_id IN ("+slice.map(()=>'?').join(',')+')',slice.map(item=>item.filmId)))stored.set(row.film_id,row);
+ }
+ for(const row of rows){
+  const current=stored.get(row.filmId);
+  if(!current||current.media_kind!=='movie'||current.tmdb_id!==row.tmdbId||current.canonical_identity!=='tmdb:'+row.tmdbId)status[row.filmId]='changed';
+  else if(typeof current.poster==='string'&&current.poster.startsWith('https://'))status[row.filmId]=current.poster===row.poster?'written':'present';
+  else status[row.filmId]='open';
+ }
+ return status;
+}
+export async function applyPosters(env,rows,context={}){
+ const lease=context.lease||leaseOf(env);
+ if(!lease)throw failed('discovery_lease');
+ if(!Array.isArray(rows)||rows.length>POSTER_ROWS_CAP)throw failed('discovery_bounded');
+ for(const row of rows){
+  if(!row||typeof row.filmId!=='string'||!/^[1-9]\d{0,11}$/.test(String(row.tmdbId))||typeof row.poster!=='string'||!row.poster.startsWith('https://'))throw failed('discovery_conflict');
+ }
+ const list=rows.map(row=>({filmId:row.filmId,tmdbId:String(row.tmdbId),poster:row.poster}));
+ const gate=await readAuthority(env);
+ assertOpen(gate);
+ if(context.programmeRunId!==undefined&&(gate.programmeRunId??null)!==(context.programmeRunId??null))throw failed('discovery_fence');
+ const db=database(env);
+ // Rows already written or no longer eligible are known before the write; only the open ones go into the batch.
+ const before=await posterStatuses(db,list);
+ const open=list.filter(row=>before[row.filmId]==='open');
+ if(!open.length)return {status:Object.fromEntries(list.map(row=>[row.filmId,before[row.filmId]==='written'?'present':before[row.filmId]])),batches:0};
+ const statements=[fence(gate,lease,ADMISSION_FENCE_SQL+' AND programme_run_id IS ?',[gate.programmeRunId]),[FENCE_SQL,[]]];
+ for(const row of open)statements.push([POSTER_UPDATE_SQL,[row.poster,row.filmId,row.tmdbId,'tmdb:'+row.tmdbId,row.tmdbId]]);
+ await commit(db,statements);
+ const after=await posterStatuses(db,open);
+ const status={};
+ for(const row of list){
+  if(before[row.filmId]!=='open')status[row.filmId]=before[row.filmId]==='written'?'present':before[row.filmId];
+  else status[row.filmId]=after[row.filmId]==='written'?'written':after[row.filmId]==='open'?'changed':after[row.filmId];
+ }
+ return {status,batches:1};
+}
+// AIR-515: the conflict clause keeps a stored https poster when the incoming same-identity film has none, so a landed admission is not byte-equal to
+// what was sent. It has landed when the stored payload is the incoming film with only that preserved poster added: any other difference is not a match.
+function admissionLanded(film,json,storedJson){
+ if(storedJson===json)return true;
+ let stored;try{stored=JSON.parse(storedJson);}catch{return false;}
+ const https=value=>typeof value==='string'&&value.startsWith('https://');
+ if(!https(stored?.poster)||https(film?.poster))return false;
+ return canonicalJson({...film,poster:stored.poster})===canonicalJson(stored);
 }
 export async function upsertAdmissions(env,films,context={}){
  const lease=context.lease||leaseOf(env);
@@ -1516,7 +1575,7 @@ export async function upsertAdmissions(env,films,context={}){
   for(let at=0;at<rows.length;at+=BIND_CAP){
    const slice=rows.slice(at,at+BIND_CAP);
    const stored=new Map((await many(db,'SELECT film_id, payload_json FROM discovery_admission WHERE state=\'current\' AND film_id IN ('+slice.map(()=>'?').join(',')+')',slice.map(row=>row[0]))).map(row=>[row.film_id,row.payload_json]));
-   if(!slice.every(row=>stored.get(row[0])===row[2]))return false;
+   if(!slice.every(row=>stored.has(row[0])&&admissionLanded(row[1],row[2],stored.get(row[0]))))return false;
   }
   return true;
  };
@@ -1526,7 +1585,7 @@ export async function upsertAdmissions(env,films,context={}){
   catch(error){
    if(error.code!=='discovery_conflict'&&error.code!=='discovery_fence')throw error.code?error:failed('discovery_unavailable',error);
    const stored=await one(db,'SELECT payload_json FROM discovery_admission WHERE film_id=? AND state=\'current\'',[row[0]]);
-   if(stored?.payload_json===row[2]){written.push(row[0]);return;}
+   if(stored&&admissionLanded(row[1],row[2],stored.payload_json)){written.push(row[0]);return;}
    const owner=await one(db,'SELECT film_id FROM discovery_admission WHERE media_kind=? AND tmdb_id=?',[mediaKind(row[1]),String(row[1].tmdbId)]);
    if(owner&&owner.film_id!==row[0]){refused.push({filmId:row[0],reason:'identity_conflict'});return;}
    throw error;
