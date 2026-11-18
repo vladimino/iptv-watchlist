@@ -107,4 +107,23 @@ const fenceError=()=>Object.assign(new Error('discovery_fence'),{code:'discovery
  assert.equal(state.calls,1,'no retry on a real switch');
  void fileRef;published.run=RUN;
 }
+// D. AIR-534 review P1: a collision that never clears in the batched replay and in a freshly verified (revalidated) slot assignment defers the chunk the same way.
+for(const [label,name] of [['bulk replay','replayUnassignedSlots'],['slot assignment','assignObservationSlots']]){
+ const state={calls:0};let fileRef=null;
+ const wrapped={...Authority,[name]:async()=>{state.calls++;sql(fileRef,"UPDATE discovery_authority SET generation=generation+1 WHERE id=1");throw fenceError();}};
+ published.run=RUN;
+ const w=await world({durations:[90,96],decision:verified({anchor:[90]}),authority:wrapped});fileRef=w.file;state.calls=0;
+ const result=await w.chunk();
+ assert.equal(result.stage,'partial',label+': '+JSON.stringify(result).slice(0,300));
+ assert.equal(result.generationCollision,true,label);assert.equal(typeof result.retryAt,'string',label);
+ assert.equal(state.calls>=1&&state.calls<=3,true,label+': bounded attempts, got '+state.calls);
+}
+// E. The same two paths with a real run switch are not turned into a deferral.
+for(const name of ['replayUnassignedSlots','assignObservationSlots']){
+ let fileRef=null;
+ const wrapped={...Authority,[name]:async()=>{sql(fileRef,"UPDATE discovery_authority SET generation=generation+1, programme_run_id='run-other' WHERE id=1");throw fenceError();}};
+ published.run=RUN;
+ const w=await world({durations:[90,96],decision:verified({anchor:[90]}),authority:wrapped});fileRef=w.file;
+ await assert.rejects(()=>w.chunk(),error=>error.name==='LeaseLostError',name);
+}
 console.log('discovery fence collision ok');

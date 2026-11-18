@@ -32,6 +32,17 @@ Status: chain (1)-(3) is established by reading and reproduced offline. That the
 - The hourly report maps a non-terminal stopped series with backlog to `stalled` (`recovery_overdue`) or `waiting` (`recovery_waiting`) instead of `idle`; terminal stops stay `idle`. The Events card says the recovery is overdue, and a `running` hour with no progress no longer reads «работает».
 - Tests: `tests/discovery-events.mjs` block 16, `tests/discovery-workflow.mjs`, `tests/activity-ui.mjs`.
 
+## Review fix (P1): every `guarded()` caller propagates an exhausted collision
+
+The first version let the batched replay and the per-slot assignment swallow an exhausted collision as an ordinary refusal. Now the chunk returns the bounded deferral (`generationCollision`, `retryAt` +30 s) right after the replay and after each of the three `assignSlots` call sites (replay, candidate, revalidation), keeping the counters of work already committed. `tests/discovery-fence-collision.mjs` blocks D and E cover persistent collisions in bulk replay and slot assignment, and a real run switch on the same paths (lost lease, no deferral); block D fails on the previous code.
+
+## Visual QA (P2), 18 November 2026
+
+Local Chromium through Playwright, the real `public/styles.css` and the real `eventHTML` output on the `events-screen` layout; no screenshots were created or saved. The full app and production data were not loaded; the owner's visual acceptance on production data stays open. Cards checked: `stalled`, `waiting`, running with no progress, and a normal found-films hour.
+- Desktop 1280 px: no horizontal overflow of the page, list or any card; the longer `stalled` title fits on one line; all four cards 191 px high, hierarchy (title, three counters, note) unchanged.
+- Mobile 390 px: no horizontal overflow; the `stalled` and no-progress titles wrap to two lines (card 215 px instead of 191 px); counters and notes stay readable; the list scrolls inside its container.
+- No problem found, nothing changed in the stylesheet.
+
 ## Not done here (open on AIR-534)
 
 - Scope 3: bounded automatic successor after a recoverable stopped series (today waits for the hourly Cron). This changes orchestration; it needs an owner decision and an ADR before implementation.

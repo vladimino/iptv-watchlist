@@ -860,6 +860,8 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const starved=[];
  const deferredKeys=new Set();
  const programmeChanged=()=>generationCollision?({schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:new Date(Date.now()+DISCOVERY_FENCE_COLLISION_DEFER_MS).toISOString(),at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,generationCollision:true,timings}):({schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,currentProgrammeRunId:null,timings});
+ // AIR-534: a collision that exhausted its retries in the batched replay defers the chunk (bounded backoff) instead of continuing as an ordinary chunk.
+ if(generationCollision)return programmeChanged();
  // ADR 0142 decisions 4 and 5. Every assignment is a guarded insert behind the stored decision; the totals reach the chunk summary and the Discovery status.
  const assignment={assigned:replayRun.outcomes.assigned,present:0,evidence_drift:replayRun.outcomes.evidence_drift,slot_taken:0,film_absent:replayRun.outcomes.film_absent,stale_run:0,decision_changed:0,observation_inactive:0,slot_absent:0,refused:replayRun.refused?1:0,replayed:0,replayRemaining:0,bulkObservations:replayRun.observations,bulkPages:replayRun.pages,bulkGuardSkipped:replayRun.outcomes.guard_skipped,bulkComplete:replayRun.complete,bulkResting:!!replayRun.skipped};
  const candidateByKey=new Map(),driftSeen=new Map();
@@ -924,6 +926,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   for(const candidate of replay){
    if(!cheapWorkFits(1)){assignment.replayRemaining++;continue;}
    if(await assignSlots(candidate.key,'replay_assignment'))assignment.replayed++;
+   if(generationCollision)return programmeChanged();
   }
  }
  timings.cheapMs=Date.now()-cheapStarted;
@@ -1020,6 +1023,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    deferredKeys.delete(candidate.key);
    checked++;
    if(decisions[candidate.key]?.status==='verified'&&Date.now()<persistLimit())await assignSlots(candidate.key,'candidate_assignment');
+   if(generationCollision)return programmeChanged();
   }catch(e){
    if(e?.name==='BudgetExhaustedError'){if(tmdbCalls>callsAtStart&&!deferredKeys.has(candidate.key)){decisions[candidate.key]=previous;starved.push({candidate,previous});}break;}
    if((e?.name==='TimeoutError'||e?.name==='AbortError')&&tmdbCalls>callsAtStart){if(!deferredKeys.has(candidate.key)){decisions[candidate.key]=previous;starved.push({candidate,previous});}break;}
@@ -1103,6 +1107,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     revalidation.revalidated+=reconfirmed.length;revalidation.revalidation_failed+=failed.length;
     if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)revalidation.revalidation_exhausted++;
     if(reconfirmed.length&&Date.now()+writeEstimate(1)<=persistLimit())await assignSlots(key,'revalidation_assignment');
+    if(generationCollision)return programmeChanged();
    }catch(e){
     if(e?.name==='BudgetExhaustedError'){revalidation.deferred++;break;}
     if(e?.name==='LeaseLostError'){e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt:'revalidation'};throw e;}
