@@ -6,13 +6,13 @@ Status: offline code change, telemetry and an offline benchmark. **No production
 
 `seal_stage` archive (`planDiscoveryLedger`, `src/worker.js`). Baseline of 18 November: archive 146.8 s of a 236.2 s stage, of which R2 puts 86.3 s, full fences 39.4 s and reads 18.9 s, 64 segments, 81.6 MB, all issued one after another.
 
-- Segment read, merge, serialization and create-only put of up to `ARCHIVE_SEGMENT_CONCURRENCY` = 3 segments now overlap. Memory bound: three segment texts and parsed objects (about 1.3 MB serialized each) in flight at once.
+- Segment read, merge, serialization and create-only put of up to `ARCHIVE_SEGMENT_CONCURRENCY` segments now overlap. PR 766 shipped 3; the owner decision of 19 November 2026 (AIR-533 card) lowered it to **2**, the value shipped now. Memory bound: two segment texts and parsed objects (about 1.3 MB serialized each) in flight at once. Windows are 2, 2, 2, 2 writes per fence of 8; nothing else of the loop changed (full fence every 8 puts, 20 s refresh, lease, `Promise.allSettled`, CAS, create-only put, replay, manifest, publication order).
 - Unchanged: every segment is a create-only object under the run's write id, the manifest names the segments in order, the archive pointer moves only after a full fence and a compare-and-swap, history, first absence, re-entry and idempotent replay are untouched, and no storage format changed.
-- Failure semantics (review of PR 766): a window is joined with `Promise.allSettled` before any error leaves `planDiscoveryLedger`, so no segment read or put is still running when the caller releases the Discovery lease. A shared `windowFailed` flag stops every sibling put that has not started, and every put re-checks, immediately before it starts, that the last full fence is younger than 20 s (one shared refresh for the window). A deterministic test blocks two sibling reads for 60 ms, fails the first, and asserts that all three reads finished, no segment put started, and the lease was released after the last archive operation; the test fails if the loop is changed back to `Promise.all`.
+- Failure semantics (review of PR 766): a window is joined with `Promise.allSettled` before any error leaves `planDiscoveryLedger`, so no segment read or put is still running when the caller releases the Discovery lease. A shared `windowFailed` flag stops every sibling put that has not started, and every put re-checks, immediately before it starts, that the last full fence is younger than 20 s (one shared refresh for the window). A deterministic test blocks the sibling read for 60 ms, fails the first, and asserts that both reads finished, no segment put started, and the lease was released after the last archive operation; the test fails if the loop is changed back to `Promise.all`.
 - Fence accounting (re-review of PR 766): a fence refreshed by the put guard inside a window restarts the count of writes since the last full fence, so the window being written is counted against the refreshed fence once (conservatively, as if all its puts followed it). A deterministic test with a 25 s simulated read followed by instant puts asserts that no more than eight segment puts begin between two full fences; with the accounting removed it observes 11.
 - Fence cadence: one `segmentFence(windowSize)` before each window counts the window's writes, so a full fence still runs after at most 8 writes or 20 s (Discovery lease 90 s). The fence now also precedes the window's reads, which is stricter than before.
 - Telemetry meaning: `readMs` and `putMs` of `seal_stage_archive` are now the summed time of the overlapping operations (identical to wall time only when nothing overlaps), so they can exceed `elapsedMs`; compare wall time through `elapsedMs`.
-- Expected effect (a model, see the benchmark below, not a production measurement): put and read wall time of the archive falls by about 65-75 s of the 105 s; fences (39.4 s) are not reduced.
+- Expected effect (a model, see the benchmark below, not a production measurement): put and read wall time of the archive falls by about 52-64 s of the 105 s at 2 in flight (about 68-73 s at 3); fences (39.4 s) are not reduced.
 
 ## Telemetry added (no behaviour change)
 
@@ -27,10 +27,12 @@ Status: offline code change, telemetry and an offline benchmark. **No production
 | Concurrency | Wall (s) | Peak heap above start (MB, Node) | Saving against 1, modelled at production scale |
 | --- | --- | --- | --- |
 | 1 (before AIR-533) | 7.10 / 7.39 | 246.9 / 243.1 | n/a |
-| 2 | 5.82 / 6.06 | 254.4 / 256.1 | about 52-64 s |
-| 3 (shipped) | 5.63 / 5.74 | 256.4 / 261.5 | about 68-73 s |
+| 2 (shipped by the follow-up) | 5.82 / 6.06 | 254.4 / 256.1 | about 52-64 s |
+| 3 (value of PR 766, replaced by 2) | 5.63 / 5.74 | 256.4 / 261.5 | about 68-73 s |
 
 Reading: overlap saves roughly two thirds of the simulated segment I/O (the model puts the segment reads and puts at about 105 s); three in flight add about 10 s over two for about 2-5 MB more heap, and 9-18 MB more than the sequential path. Node's heap is not the Workers isolate limit and `heapUsed` includes garbage not yet collected, so the heap column is a relative figure; the isolate peak of the production step is not measured. `ARCHIVE_SEGMENT_CONCURRENCY` is the single constant to lower to 2 if the owner prefers the smaller memory cost. A natural production run stays the acceptance gate.
+
+These figures were measured once, on the loop of PR 766 with each level substituted for the constant, and are kept as a historical benchmark: they were not re-run after the follow-up and are not a production baseline. Why 2: in this model three in flight add only about 10 s of saving over two for about 2-5 MB more Node heap, and the real Workers isolate peak of the production step is not measured, so the owner chose the smaller memory cost. The script keeps the shipped constant while it builds the store and substitutes each level under test (`--concurrency 1,2,3` by default), so the levels compare against the same loop.
 
 ## Deliberately left unchanged
 
