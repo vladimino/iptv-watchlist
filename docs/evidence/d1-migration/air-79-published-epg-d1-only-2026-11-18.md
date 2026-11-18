@@ -1,0 +1,25 @@
+# AIR-79 published EPG D1-only slice (ADR 0162), 18 November 2026
+
+**Trello:** [AIR-79](https://trello.com/c/485tlGLA). **Decision:** [ADR 0162](../../adr/0162-d1-only-authority-retire-rollback-toolchain.md). **Captured:** 18 November 2026 (UTC). Fifth per-domain slice of ADR 0162, after [owner reviews](air-79-owner-reviews-d1-only-2026-11-18.md), the [metadata cache](air-79-metadata-cache-d1-only-2026-11-18.md), [ratings documents](air-79-ratings-documents-d1-only-2026-11-18.md) and [mutable predictions](air-79-mutable-predictions-d1-only-2026-11-18.md). No production read or write was made for it; the production marker was read on 17 November ([marker read](air-79-d2-closeout-and-d1-preparation-2026-11-17.md#production-markers-read-on-17-november): published EPG `d1` / `open`, generation 512).
+
+## Change
+
+| Item | Verdict |
+| --- | --- |
+| `importPublished`, `activatePublished`, `sealPublished`, `releasePublished`, `revertPublished` and their helpers (`sameMembership`, `activationSnapshot`, `discoveryGeneration`, `objectJson`) in `src/published-epg.js`, and `scripts/published-epg-authority.mjs` | Removed |
+| `--load`, `--activate`, `--revert`, `--release-hold`, `--seal-hold` of `scripts/published-epg-production.mjs` | Refused with `retired` before any request. Retained: the read-only status and the schema `--apply`. The R2 write path of the revert (signed mirror PUTs, the production R2 endpoint constant) is gone with it |
+| `readAuthority` | Only `d1` with `cutover` `open` is served. A marker in mode `r2` (the migration inserts it), a held cutover, a partly installed set of the nine tables, no tables at all, a missing binding and a bound database with no `schema_contract` fail closed with `published_epg_unavailable`. Before, an `r2` marker and a held cutover were valid states (readers stayed on the R2 pointer and mirrors), and a schema below 8 without the tables silently returned the R2 stand-in. The explicit local stand-in `PUBLISHED_EPG_DB_OPTIONAL=standin` now also covers a database whose published tables are not installed at all, and nothing else |
+| The held branches of `repairMirrors`, `writeMirrors`, `saveWatchlist` and the publisher in `src/published-epg.js`, the `gate.cutover==='held'` checks in `src/worker.js` (twice) and `src/discovery.js`, and the `reason: 'held'` answer | Removed: the reader refuses the state before they could run |
+| `currentGeneration`, `readDocumentAt`, the generation pin, `authoritativeSnapshot`, the commit and the fence batch, the Discovery generation token, `repairMirrors` and the hourly mirror reconcile, the R2 compatibility mirrors, the schema CHECK values `r2` and `held` | Retained |
+
+## Behaviour change for the Worker
+
+A Worker whose database carries the published tables with a marker not at `d1` / `open`, or whose database has no published tables, now answers the programme, watchlist, catalog and Admin reads with `published_epg_unavailable` (the existing `502`/`503` mapping of that code) instead of serving the R2 pointer. Production is unaffected: the marker is `d1` / `open` and `wrangler.jsonc` sets no stand-in. Local development (`scripts/local-dev.mjs`) has no D1 binding and keeps its explicit stand-in.
+
+## Tests
+
+`tests/published-epg.mjs` keeps every publication, fence, claim, resume, wide-row, mirror and completed-read case and replaces the import/activate/seal/release/revert block with the refusal of a held cutover and of a marker in mode `r2` by `currentGeneration`, `readAuthority`, `repairMirrors`, `writeMirrors`, `saveWatchlist` and `publishGeneration`, with no mirror put. `tests/epg-mirror-reconciliation.mjs` expects the refusal for a held marker instead of `reason: 'held'`. `tests/published-epg-completed.mjs` drops the revert guard. `tests/published-epg-production.mjs` proves every retired command is refused before any request (with and without confirm and drain flags) and keeps status and the schema apply. The shared projector loader (`tests/d1-enrichment-context.mjs`) gains an explicit `publishedEpgStandin` option (default on), like the owner-review and metadata-cache ones; fixtures that serve the R2 generation do not install the nine published tables (the projector family, `tests/owner-review-d1.mjs`, `tests/tmdb-tv-runtime.mjs`, `tests/local-api.mjs`), and `tests/prediction-domain.mjs` proves the strict loader refuses a database without them and a marker in mode `r2`.
+
+## Verification
+
+Local, after a fresh `npm ci`: `npm run test:all` on the final checkout, `npm run build`, `git diff --check`; the result is in the pull request. No Mermaid block changed.

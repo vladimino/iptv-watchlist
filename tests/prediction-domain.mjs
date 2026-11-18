@@ -257,16 +257,18 @@ const unavailable=error=>error.code==='prediction_domain_unavailable';
  assert.equal(aheadStatus.schema,true);
  assert.equal(aheadStatus.schemaVersion,8);
  assert.equal(aheadStatus.predictionMode,undefined);
- const aheadRun=await projector.runD1EnrichmentProjection({DB:ahead,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on',PREDICTION_DB_REQUIRED:'on'});
+ // The loader opts in to the published-EPG stand-in; the strict one refuses a database without the published tables (ADR 0162).
+ const strict=projectorContext({publishedEpgStandin:false});
+ const aheadRun=await strict.runD1EnrichmentProjection({DB:ahead,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on',PREDICTION_DB_REQUIRED:'on'});
  assert.equal(aheadRun.outcome,'failed',JSON.stringify(aheadRun));
  assert.match(aheadRun.error,/published_epg_unavailable/);
  const chain=migrated('0007_prediction_authority');
  serve(chain);
  chain.sql(fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'));
  const chainRun=await projector.runD1EnrichmentProjection({DB:chain,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on',PREDICTION_DB_REQUIRED:'on'});
- assert.equal(chainRun.outcome,'complete',JSON.stringify(chainRun));
- assert.equal(chainRun.schemaVersion,8);
- assert.equal(chainRun.predictionMode,'d1');
+ // The published tables are installed with the migration's marker in mode r2, which is refused: the projector does not run against the R2 generation.
+ assert.equal(chainRun.outcome,'failed',JSON.stringify(chainRun));
+ assert.match(chainRun.error,/published_epg_unavailable/);
  const v6=migrated('0006_metadata_cache');
  const v6Status=await projector.d1EnrichmentStatus(v6,{});
  assert.equal(v6Status.schema,true);

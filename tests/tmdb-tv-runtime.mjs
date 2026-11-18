@@ -87,7 +87,7 @@ for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show
 // Every projector run only reads R2: no put, delete or listing, whatever the object holds.
 const run=async(mode='on',env={})=>{
  const before=counted.put+counted.delete+counted.list;
- const summary=plain(await api.runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:mode,OWNER_REVIEW_DB_OPTIONAL:'standin',METADATA_CACHE_DB_OPTIONAL:'standin',...env},{now:NOW})); // ADR 0162: schema v4 has no owner-review tables; the explicit local stand-in
+ const summary=plain(await api.runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:mode,OWNER_REVIEW_DB_OPTIONAL:'standin',METADATA_CACHE_DB_OPTIONAL:'standin',PUBLISHED_EPG_DB_OPTIONAL:'standin',...env},{now:NOW})); // ADR 0162: schema v4 has no owner-review tables; the explicit local stand-in
  assert.equal(counted.put+counted.delete+counted.list,before,'the projector writes and lists nothing in R2');
  return summary;
 };

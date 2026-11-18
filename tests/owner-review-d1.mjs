@@ -299,6 +299,8 @@ async function activated(){
    db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
    await publishGeneration({DB:db},{programmeRunId:'run-owner',phase:'published',expectedProgrammeRunId:null,programme,watchlist},{now:0});
   }else{
+   // ADR 0162: the published EPG is served only at d1 / open. The 'standin' scene is the local stand-in: the nine published tables are not installed and the request opts in.
+   db.sql(['published_epg_stage_row','published_epg_stage_chunk','published_epg_stage','published_epg_show','published_epg_member','published_epg_document','published_epg_generation','published_epg_cas','published_epg_authority'].map(name=>'DROP TABLE '+name+';').join(''));
    bucket.put('epg/published-generation.json',JSON.stringify({programmeRunId:'run-owner',phase:'published'}));
    bucket.put('epg/generations/run-owner/programme.json',JSON.stringify(programme));
    bucket.put('watchlist.json',JSON.stringify(watchlist));
@@ -311,9 +313,9 @@ async function activated(){
   }
   return {db,bucket,tracked,puts};
  }
- for(const epgMode of ['r2','d1'])for(const reviewMode of ['d1']){
+ for(const epgMode of ['standin','d1'])for(const reviewMode of ['d1']){
   const {db,tracked,puts}=await scene(epgMode,reviewMode);
-  const env={DB:db,BUCKET:tracked};
+  const env={DB:db,BUCKET:tracked,...(epgMode==='d1'?{}:{PUBLISHED_EPG_DB_OPTIONAL:'standin'})};
   const response=await worker.fetch(new Request('http://127.0.0.1/api/programme'),env,ctx);
   const body=await response.json();
   assert.equal(response.status,200,epgMode+'/'+reviewMode+' '+JSON.stringify(body));
@@ -329,11 +331,11 @@ async function activated(){
   assert.equal(item.item.preferred,'Хозяин');
   assert.equal(puts.includes(OWNER_REVIEWS_KEY),false,epgMode+'/'+reviewMode);
  }
- for(const [epgMode,breakIt] of [['r2','drop'],['d1','drop'],['r2','marker'],['d1','marker']]){
+ for(const [epgMode,breakIt] of [['standin','drop'],['d1','drop'],['standin','marker'],['d1','marker']]){
   const {db,bucket,tracked,puts}=await scene(epgMode,'d1');
   if(breakIt==='drop')db.sql('DROP TABLE owner_review_entry');
   else db.sql("UPDATE owner_review_authority SET mode='r2' WHERE id=1");
-  const env={DB:db,BUCKET:tracked};
+  const env={DB:db,BUCKET:tracked,...(epgMode==='d1'?{}:{PUBLISHED_EPG_DB_OPTIONAL:'standin'})};
   const response=await worker.fetch(new Request('http://127.0.0.1/api/programme'),env,ctx);
   const body=await response.json();
   assert.equal(response.status,503);
@@ -347,7 +349,7 @@ async function activated(){
   assert.equal(puts.includes(OWNER_REVIEWS_KEY),false);
   assert.equal(bucket.objects.get(OWNER_REVIEWS_KEY).text.includes('Зеркало'),true);
  }
- const raced=await scene('r2','d1');
+ const raced=await scene('standin','d1');
  const before=one(raced.db,'SELECT generation FROM owner_review_authority');
  const wrapped=fenceDb(raced.db,{onFence(){
   const next=JSON.stringify(filmSlice('После')).replaceAll("'","''");
@@ -355,7 +357,7 @@ async function activated(){
   raced.db.sql('UPDATE owner_review_entry SET generation=generation+1');
   raced.db.sql("UPDATE owner_review_entry SET payload_json='"+next+"' WHERE kind='film' AND source_key='heat'");
  }});
- const env={DB:wrapped,BUCKET:raced.tracked};
+ const env={DB:wrapped,BUCKET:raced.tracked,PUBLISHED_EPG_DB_OPTIONAL:'standin'};
  const response=await worker.fetch(new Request('http://127.0.0.1/api/programme'),env,ctx);
  const body=await response.json();
  assert.equal(response.status,200,JSON.stringify(body));

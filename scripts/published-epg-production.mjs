@@ -1,37 +1,16 @@
 #!/usr/bin/env node
-// Production entry for the published EPG cutover (ADR 0079). Default is read-only.
-// --apply sends only migrations/0008_published_epg_authority.sql, and only when the
-// contract version is 7, every prediction-domain table is already present, and the
-// published EPG tables are all absent. The inserted marker stays mode r2 and the
-// version becomes 8. Version 6 is refused before any statement is sent.
-// --load copies the live programme and watchlist into D1 and leaves mode r2.
-// --activate holds the marker (mode d1, cutover held) only when pointer,
-// programme and watchlist still match that load, and only after
-// --producers-drained. That flag is the operator's acknowledgment that every
-// watchlist and EPG writer stays stopped until this command exits. An idle
-// sync, resolver or projector lease is not that drain, and a deploy is not
-// that drain. While cutover is held the marker is not a visible d1: a public
-// read stays on R2 and does not repair mirrors. The command then re-reads R2.
-// A match opens the cutover. A changed watchlist returns mode to r2 and does
-// not write R2. A failed re-read leaves the hold and reports the D1 write.
-// That held marker is not retried by --activate, --load or --revert.
-// --release-hold --confirm release-hold returns it to mode r2 without reading
-// or writing a mirror. --seal-hold --confirm seal-hold --producers-drained
-// opens it only after a fresh idle check and a full R2 parity check. Neither
-// recovery repeats an uncertain D1 write. --revert --confirm r2 repairs the pointer, programme.json,
-// watchlist.json and the generation copies from D1 and flips the marker back to r2.
-// Revert writes only to https://<production-account>.r2.cloudflarestorage.com and
-// refuses R2_SNAPSHOT_ENDPOINT before any request. Each write needs its own --confirm and --target
-// iptv. This script never calls Time Travel restore. The D1 token is sent only to
-// https://api.cloudflare.com/client/v4, and only for database iptv.
-// It does not replace scripts/published-epg-authority.mjs, which stays offline and
-// still refuses the production database. A Worker batch and this REST batch are
-// different transports; this script does not prove the Worker publisher's atomicity.
+// Production entry for the published EPG (ADR 0079, ADR 0162). Default is read-only status.
+// --apply sends only migrations/0008_published_epg_authority.sql, and only when the contract version is 7, every
+// prediction-domain table is already present, and the published EPG tables are all absent. The inserted marker stays
+// mode r2, which the Worker refuses, and the version becomes 8. Version 6 is refused before any statement is sent.
+// The load, activate, release-hold, seal-hold and revert commands of the former R2 to D1 cutover are retired and
+// answer `retired` before any request: only d1 with cutover open is served, and nothing here brings a domain there
+// or back. The D1 token is sent only to https://api.cloudflare.com/client/v4, and only for database iptv. This script
+// never calls Time Travel restore. A Worker batch and this REST batch are different transports; this script does
+// not prove the Worker publisher's atomicity.
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
-import {createHash} from 'node:crypto';
-import {activatePublished, importPublished, readCompletedProgramme, readDocument, readMembers, releasePublished, revertPublished, sealPublished} from '../src/published-epg.js';
 import {createD1Adapter, D1Error, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {ExportError} from './migration-export.mjs';
 import {createReadOnlyClient, readCredentials, rfc3986, signRequest} from './r2-snapshot-export.mjs';
@@ -145,33 +124,25 @@ function parseArgs(argv){
   if(next===undefined||next.startsWith('--'))throw new OperatorStop('usage',2);
   return next;
  };
- const commands=['--apply','--load','--activate','--revert','--release-hold','--seal-hold'].filter(name=>args.includes(name));
+ if(['--load','--activate','--revert','--release-hold','--seal-hold'].some(name=>args.includes(name)))throw new OperatorStop('retired',2);
+ const commands=['--apply'].filter(name=>args.includes(name));
  if(commands.length>1)throw new OperatorStop('usage',2);
  for(let index=0;index<args.length;index++){
   const arg=args[index];
   if(arg==='--target'||arg==='--confirm'){value(arg);index++;continue;}
-  if(arg==='--producers-drained')continue;
   if(!commands.includes(arg))throw new OperatorStop('usage',2);
  }
  const command=commands[0]?commands[0].slice(2):'status';
- const producersDrained=args.includes('--producers-drained');
  const target=args.includes('--target')?value('--target'):undefined;
  const confirm=args.includes('--confirm')?value('--confirm'):undefined;
- if(producersDrained&&command!=='activate'&&command!=='seal-hold')throw new OperatorStop('usage',2);
- if((command==='activate'||command==='seal-hold')&&!producersDrained)throw new OperatorStop('producers_not_drained',2);
  if(target===undefined){
   if(command!=='status')throw new OperatorStop('target_required',2);
   return {report:{configured:false,writes:false,writeState:'none'}};
  }
  if(target!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_invalid',2);
  if(command==='apply'&&confirm!=='apply')throw new OperatorStop('confirm',2);
- if(command==='load'&&confirm!=='load')throw new OperatorStop('confirm',2);
- if(command==='activate'&&confirm!=='activate')throw new OperatorStop('confirm',2);
- if(command==='revert'&&confirm!=='r2')throw new OperatorStop('confirm',2);
- if(command==='release-hold'&&confirm!=='release-hold')throw new OperatorStop('confirm',2);
- if(command==='seal-hold'&&confirm!=='seal-hold')throw new OperatorStop('confirm',2);
  if(command==='status'&&confirm!==undefined)throw new OperatorStop('usage',2);
- return {command, confirm, producersDrained};
+ return {command, confirm};
 }
 
 function productionTarget(env){
@@ -263,11 +234,6 @@ function r2State(env){
  if(credentials.bucket!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('bucket_identity',3);
  return credentials;
 }
-const PRODUCTION_R2_ENDPOINT='https://'+PRODUCTION_ACCOUNT_ID+'.r2.cloudflarestorage.com';
-function assertWriteEndpoint(credentials){
- if(!credentials)throw new OperatorStop('source_missing',3);
- if(credentials.endpoint!==PRODUCTION_R2_ENDPOINT||credentials.endpointOverride)throw new OperatorStop('endpoint_refused',3);
-}
 
 async function readObject(client, key, {required=true}={}){
  let head;
@@ -342,9 +308,6 @@ async function openProduction(env, fetchImpl, ctx){
  return {target, adapter, binding:createPublishedBinding(adapter)};
 }
 
-function tablesPresent(snapshot){
- return TABLES.every(name=>snapshot.tables[name]);
-}
 
 function writeReport(ctx){
  const writeState=ctx.writeState==='committed'||ctx.writeState==='unknown'||ctx.writeState==='partial'?ctx.writeState:'none';
@@ -368,7 +331,6 @@ export async function runPublishedEpgProduction({argv=process.argv, env=process.
  try{
   const parsed=parseArgs(argv);
   if(parsed.report)return {exit:0, result:parsed.report};
-  if(parsed.command==='revert')assertWriteEndpoint(r2State(env));
   const opened=await openProduction(env, fetchImpl, ctx);
   ctx.binding=opened.binding;
   ctx.identified=true;
@@ -382,15 +344,7 @@ export async function runPublishedEpgProduction({argv=process.argv, env=process.
   const writers=await writerReport(client, opened.binding, clock);
   assertIdle(writers);
   if(parsed.command==='apply')return {exit:0, result:await applyMigration(opened, ctx, snapshot, writers)};
-  if(parsed.command==='revert')return {exit:0, result:await revertMarker(opened, credentials, client, ctx, fetchImpl)};
-  if(parsed.command==='release-hold')return {exit:0, result:await releaseHold(opened, client, ctx, snapshot, clock)};
-  if(parsed.command==='seal-hold')return {exit:0, result:await sealHold(opened, client, ctx, snapshot, clock)};
-  const source=await readPublished(client);
-  if(!tablesPresent(snapshot)||!(Number(snapshot.schemaVersion)>=8)||!snapshot.marker)throw new OperatorStop('published_epg_schema',3);
-  if(snapshot.marker.mode!=='r2')throw new OperatorStop('published_epg_authoritative',3);
-  if(parsed.command==='load')return {exit:0, result:await loadPublished(opened.binding, source, ctx)};
-  if(snapshot.marker.mirrorProgrammeRunId!==snapshot.marker.programmeRunId||source.pointer.etag!==snapshot.marker.mirrorEtag||source.watchlist.etag!==snapshot.marker.mirrorWatchlistEtag)throw new OperatorStop('published_epg_fence',3);
-  return {exit:0, result:await activateMarker(opened, client, ctx, snapshot, source, clock)};
+  throw new OperatorStop('usage',2);
  }catch(error){
   return finish(normalize(error), ctx);
  }
@@ -414,154 +368,6 @@ async function applyMigration(opened, ctx, snapshot, writers){
  return {operation:'apply', writes:true, writeState:'committed', bookmark:ctx.bookmark, writers, schemaVersion:readback.schemaVersion, mode:readback.marker.mode, generation:readback.marker.generation, programmeRunId:readback.marker.programmeRunId};
 }
 
-async function readPublished(client){
- const pointer=await readObject(client,'epg/published-generation.json');
- const programme=await readObject(client,'programme.json');
- const watchlist=await readObject(client,'watchlist.json');
- const pointerBody=parseRecord(pointer.text,'epg/published-generation.json');
- const programmeBody=parseRecord(programme.text,'programme.json');
- const watchlistBody=parseRecord(watchlist.text,'watchlist.json');
- if(pointerBody.phase!=='published'||typeof pointerBody.programmeRunId!=='string'||!pointerBody.programmeRunId)throw new OperatorStop('source_invalid',3);
- if(programmeBody.runId!==pointerBody.programmeRunId)throw new OperatorStop('source_invalid',3);
- return {pointer, programme, watchlist, pointerBody, programmeBody, watchlistBody};
-}
-
-async function loadPublished(binding, source, ctx){
- const imported=await importPublished(binding,{confirm:'load',programme:source.programmeBody,watchlist:source.watchlistBody,programmeRunId:source.pointerBody.programmeRunId,publishedAt:source.programmeBody.updatedAt??null,pointerEtag:source.pointer.etag,watchlistEtag:source.watchlist.etag});
- const readback=await readSnapshot(binding);
- if(readback.marker?.mode!=='r2'||readback.marker.programmeRunId!==source.pointerBody.programmeRunId||readback.marker.mirrorEtag!==source.pointer.etag)throw new OperatorStop('readback_mismatch',3);
- return {operation:'load', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'r2', programmeRunId:imported.programmeRunId, generation:imported.generation, mirrorEtag:imported.mirrorEtag};
-}
-
-function quoteEtag(etag){return /^".*"$/.test(etag)?etag:'"'+etag+'"';}
-function unquoteEtag(etag){return String(etag||'').trim().replace(/^"(.*)"$/,'$1');}
-const MIRROR_KEY=/^(?:programme\.json|watchlist\.json|epg\/published-generation\.json|epg\/generations\/[^/]+\/(?:programme|watchlist)\.json)$/;
-async function putMirror(credentials, fetchImpl, key, text, etag, ctx){
- if(credentials.endpoint!==PRODUCTION_R2_ENDPOINT||credentials.endpointOverride)throw new OperatorStop('endpoint_refused',3);
- if(!MIRROR_KEY.test(key))throw new OperatorStop('mirror_refused',3);
- const url=new URL(credentials.endpoint);
- url.pathname='/'+rfc3986(credentials.bucket)+'/'+key.split('/').map(rfc3986).join('/');
- const payloadHash=createHash('sha256').update(text).digest('hex');
- const headers=signRequest({method:'PUT',url,headers:{'content-type':'application/json',...(etag?{'if-match':quoteEtag(etag)}:{'if-none-match':'*'})},payloadHash,credentials,now:new Date()});
- ctx.writeState=ctx.mirrorCommitted?'partial':'unknown';
- let response;
- try{response=await fetchImpl(url,{method:'PUT',headers,body:text,redirect:'error'});}
- catch{ctx.writeState=ctx.mirrorCommitted?'partial':'unknown';throw new OperatorStop('network',1);}
- if(response.status===412){await response.body?.cancel();ctx.writeState=ctx.mirrorCommitted?'partial':'none';return null;}
- if(!response.ok){await response.body?.cancel();ctx.writeState=ctx.mirrorCommitted?'partial':'unknown';throw new OperatorStop('mirror_failed',3);}
- const written=unquoteEtag(response.headers.get('etag'));
- await response.body?.cancel();
- if(!written){ctx.writeState=ctx.mirrorCommitted?'partial':'unknown';throw new OperatorStop('mirror_failed',3);}
- ctx.mirrorCommitted=(ctx.mirrorCommitted||0)+1;
- ctx.writeState='partial';
- return written;
-}
-async function revertMarker(opened, credentials, client, ctx, fetchImpl){
- const snapshot=await readSnapshot(opened.binding);
- if(!tablesPresent(snapshot)||!(Number(snapshot.schemaVersion)>=8)||snapshot.marker?.mode!=='d1'||!snapshot.marker.programmeRunId)throw new OperatorStop('published_epg_not_authoritative',3);
- const bucket={
-  async get(key){
-   const object=await readObject(client,key,{required:false});
-   if(!object)return null;
-   return {etag:object.etag,json:async()=>JSON.parse(object.text),text:async()=>object.text};
-  },
-  async put(key,body,options={}){
-   const text=String(body);
-   const match=options.onlyIf?.etagMatches||null;
-   if(!match&&options.onlyIf?.etagDoesNotMatch!=='*'&&options.onlyIf)return null;
-   const written=await putMirror(credentials,fetchImpl,key,text,match,ctx);
-   return written?{etag:written}:null;
-  },
- };
- const after=await revertPublished({...opened.binding,BUCKET:bucket},{confirm:'r2'});
- const readback=await readSnapshot(opened.binding);
- const programme=await readCompletedProgramme(opened.binding,after.programmeRunId);
- const watchlist=await readDocument(opened.binding,after.programmeRunId,'watchlist');
- const fresh=await readPublished(client);
- const same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
- if(after.mode!=='r2'||readback.marker?.mode!=='r2'||readback.marker.programmeRunId!==after.programmeRunId||!same(fresh.programmeBody,programme)||!same(fresh.watchlistBody,watchlist)||fresh.pointerBody.programmeRunId!==after.programmeRunId)throw new OperatorStop('readback_mismatch',3);
- const members=await readMembers(opened.binding,after.programmeRunId,'watchlist');
- const ids=(watchlist.films||[]).map(film=>String(film.id));
- if(ids.length!==members.length||ids.some((id,index)=>id!==members[index].filmId))throw new OperatorStop('readback_mismatch',3);
- ctx.writeState='committed';
- return {operation:'revert', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'r2', programmeRunId:after.programmeRunId, generation:after.generation};
-}
-async function activateMarker(opened, client, ctx, snapshot, source, clock){
- const writers=await writerReport(client, opened.binding, clock);
- assertIdle(writers);
- const bucket={
-  async get(key){
-   const object=await readObject(client,key,{required:false});
-   if(!object)return null;
-   return {etag:object.etag,json:async()=>JSON.parse(object.text),text:async()=>object.text};
-  },
- };
- const after=await activatePublished({...opened.binding,BUCKET:bucket},{confirm:'activate',pointerEtag:source.pointer.etag,watchlistEtag:source.watchlist.etag});
- if(after.mode!=='d1'||after.cutover!=='held')throw new OperatorStop('readback_mismatch',3);
- let fresh;
- try{fresh=await readPublished(client);}
- catch(error){
-  const stop=normalize(error);
-  if(stop.reason==='source_changed'||stop.reason==='source_missing'||stop.reason==='source_invalid'){
-   await releaseHeld(opened);
-   throw new OperatorStop('cutover_race',3);
-  }
-  throw stop;
- }
- const programme=await readCompletedProgramme(opened.binding,after.programmeRunId);
- const watchlist=await readDocument(opened.binding,after.programmeRunId,'watchlist');
- const same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
- const moved=fresh.pointer.etag!==source.pointer.etag||fresh.programme.etag!==source.programme.etag||fresh.watchlist.etag!==source.watchlist.etag||fresh.pointerBody.programmeRunId!==after.programmeRunId||!same(fresh.programmeBody,programme)||!same(fresh.watchlistBody,watchlist);
- if(moved){
-  await releaseHeld(opened);
-  throw new OperatorStop('cutover_race',3);
- }
- const sealed=await sealPublished(opened.binding,{programmeRunId:after.programmeRunId,generation:after.generation});
- const readback=await readSnapshot(opened.binding);
- if(sealed.mode!=='d1'||sealed.cutover!=='open'||readback.marker?.mode!=='d1'||readback.marker?.cutover!=='open'||readback.marker.programmeRunId!==snapshot.marker.programmeRunId)throw new OperatorStop('readback_mismatch',3);
- return {operation:'activate', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'d1', cutover:'open', programmeRunId:readback.marker.programmeRunId, generation:readback.marker.generation};
-}
-async function releaseHeld(opened){
- await releasePublished(opened.binding);
- const again=await readSnapshot(opened.binding);
- if(again.marker?.mode!=='r2'||again.marker?.cutover!=='open')throw new OperatorStop('cutover_race',3);
-}
-function heldMarker(snapshot){
- const marker=snapshot.marker;
- if(!tablesPresent(snapshot)||!(Number(snapshot.schemaVersion)>=8)||!marker)throw new OperatorStop('published_epg_schema',3);
- if(marker.mode!=='d1'||marker.cutover!=='held'||!marker.programmeRunId||!Number.isFinite(marker.generation))throw new OperatorStop('published_epg_not_held',3);
- return marker;
-}
-function sameDocument(left,right){return JSON.stringify(left)===JSON.stringify(right);}
-function sameMembership(films,members){
- const ids=(Array.isArray(films)?films:[]).map(film=>String(film?.id??''));
- return ids.length===members.length&&ids.every((id,index)=>id===members[index].filmId);
-}
-async function releaseHold(opened, client, ctx, snapshot, clock){
- const writers=await writerReport(client, opened.binding, clock);
- assertIdle(writers);
- const marker=heldMarker(snapshot);
- await releasePublished(opened.binding);
- const readback=await readSnapshot(opened.binding);
- if(readback.marker?.mode!=='r2'||readback.marker?.cutover!=='open'||readback.marker.programmeRunId!==marker.programmeRunId||readback.marker.generation!==marker.generation)throw new OperatorStop('readback_mismatch',3);
- return {operation:'release-hold', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'r2', cutover:'open', programmeRunId:readback.marker.programmeRunId, generation:readback.marker.generation};
-}
-async function sealHold(opened, client, ctx, snapshot, clock){
- const writers=await writerReport(client, opened.binding, clock);
- assertIdle(writers);
- const marker=heldMarker(snapshot);
- const fresh=await readPublished(client);
- const programme=await readCompletedProgramme(opened.binding,marker.programmeRunId);
- const watchlist=await readDocument(opened.binding,marker.programmeRunId,'watchlist');
- const programmeMembers=await readMembers(opened.binding,marker.programmeRunId,'programme');
- const watchMembers=await readMembers(opened.binding,marker.programmeRunId,'watchlist');
- const matched=fresh.pointer.etag===marker.mirrorEtag&&fresh.watchlist.etag===marker.mirrorWatchlistEtag&&fresh.pointerBody.programmeRunId===marker.programmeRunId&&sameDocument(fresh.programmeBody,programme)&&sameDocument(fresh.watchlistBody,watchlist)&&sameMembership(fresh.programmeBody?.films,programmeMembers)&&sameMembership(fresh.watchlistBody?.films,watchMembers);
- if(!matched)throw new OperatorStop('cutover_mismatch',3);
- const sealed=await sealPublished(opened.binding,{programmeRunId:marker.programmeRunId,generation:marker.generation});
- const readback=await readSnapshot(opened.binding);
- if(sealed.mode!=='d1'||sealed.cutover!=='open'||readback.marker?.mode!=='d1'||readback.marker?.cutover!=='open'||readback.marker.programmeRunId!==marker.programmeRunId||readback.marker.generation!==marker.generation)throw new OperatorStop('readback_mismatch',3);
- return {operation:'seal-hold', writes:true, writeState:'committed', bookmark:ctx.bookmark, mode:'d1', cutover:'open', programmeRunId:readback.marker.programmeRunId, generation:readback.marker.generation};
-}
 
 const invoked=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;
 if(invoked){

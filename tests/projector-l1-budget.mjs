@@ -17,8 +17,10 @@ import {projectorContext} from './d1-enrichment-context.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 // ADR 0162: a marker that is not d1 is refused. The fixture puts the owner-review and metadata-cache markers at d1 with no rows
 // (the former r2 markers with no R2 object gave the same empty overlay and cache).
+// The published EPG: these fixtures serve the R2 generation, so the nine published tables are not installed (the loader's explicit stand-in); a fixture that needs them installs them at d1 / open with a published generation.
+const PUBLISHED_ABSENT="DROP TABLE IF EXISTS published_epg_stage_row; DROP TABLE IF EXISTS published_epg_stage_chunk; DROP TABLE IF EXISTS published_epg_stage; DROP TABLE IF EXISTS published_epg_show; DROP TABLE IF EXISTS published_epg_member; DROP TABLE IF EXISTS published_epg_document; DROP TABLE IF EXISTS published_epg_generation; DROP TABLE IF EXISTS published_epg_cas; DROP TABLE IF EXISTS published_epg_authority;";
 // ADR 0162: the domains the projector reads are served only at d1, so the full-chain fixtures put the owner-review, metadata-cache and prediction markers there.
-const OWNER_D1="UPDATE owner_review_authority SET mode='d1' WHERE id=1; UPDATE metadata_cache_authority SET mode='d1' WHERE id=1; UPDATE prediction_domain_authority SET mode='d1' WHERE id=1;";
+const OWNER_D1="UPDATE owner_review_authority SET mode='d1' WHERE id=1; UPDATE metadata_cache_authority SET mode='d1' WHERE id=1; UPDATE prediction_domain_authority SET mode='d1' WHERE id=1; "+PUBLISHED_ABSENT;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-l1-budget-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();

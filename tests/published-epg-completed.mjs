@@ -84,32 +84,7 @@ const assignRow=(file,film,channel,start,key='obs-1')=>sql(file,`INSERT INTO pub
  assert.equal(sql(file,'SELECT generation FROM published_epg_authority')[0].generation,7);
 }
 
-// Revert reads the completed programme and fails when a Discovery write lands between its comparison and the flip.
-{
- const {file,env}=await world();
- assignRow(file,'member-1','a',2*H);
- let reverted=await PublishedEpg.revertPublished(env,{confirm:'r2'});
- assert.equal(reverted.mode,'r2');
- const mirror=JSON.parse(await (await env.BUCKET.get('programme.json')).text());
- assert.equal(mirror.films[0].shows.length,2,'R2 holds exactly what readers saw');
- sql(file,"UPDATE published_epg_authority SET mode='d1'");
- const racing={...env,DB:d1Standin(file,{onBatch:statements=>{if(statements.some(item=>/UPDATE published_epg_authority SET mode='r2'/.test(String(item.sql??item.text??item[0]??item))))sql(file,'UPDATE discovery_authority SET generation=generation+1 WHERE id=1');}})};
- await assert.rejects(()=>PublishedEpg.revertPublished(racing,{confirm:'r2'}),error=>error.code==='published_epg_fence');
- assert.equal(sql(file,'SELECT mode FROM published_epg_authority')[0].mode,'d1','a Discovery write between the comparison and the flip leaves the mode unchanged');
- reverted=await PublishedEpg.revertPublished(env,{confirm:'r2'});
- assert.equal(reverted.mode,'r2','a retry without a concurrent write flips');
-}
+// ADR 0162: the revert, with its Discovery generation guard, is retired; there is no way to flip the marker back to r2.
+assert.equal(typeof PublishedEpg.revertPublished,'undefined');
 
-// The revert guard fails closed: an unreadable or missing Discovery generation aborts before any flip.
-{
- const {file,env}=await world();
- sql(file,"UPDATE published_epg_authority SET mode='d1'");
- const broken={...env,DB:d1Standin(file,{onQuery:text=>{if(/FROM discovery_authority/.test(String(text)))throw new Error('D1 read failed');}})};
- await assert.rejects(()=>PublishedEpg.revertPublished(broken,{confirm:'r2'}),error=>error.code==='published_epg_fence');
- assert.equal(sql(file,'SELECT mode FROM published_epg_authority')[0].mode,'d1');
- sql(file,'DELETE FROM discovery_authority');
- await assert.rejects(()=>PublishedEpg.revertPublished(env,{confirm:'r2'}),error=>error.code==='published_epg_fence');
- assert.equal(sql(file,'SELECT mode FROM published_epg_authority')[0].mode,'d1','a missing generation never disables the fence');
-}
-
-console.log('published EPG completed read: completion, mirrors and revert guard ok');
+console.log('published EPG completed read: completion and mirrors ok');

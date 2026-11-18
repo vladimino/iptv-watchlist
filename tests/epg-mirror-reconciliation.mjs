@@ -96,9 +96,8 @@ function loadOrchestration(PublishedEpg){
  await published(db,inner);
  db.sql("UPDATE published_epg_authority SET cutover='held' WHERE id=1");
  const {puts,bucket}=tracking(inner);
- const held=await repairMirrors({DB:db,BUCKET:bucket});
- assert.equal(held.mirrored,false);
- assert.equal(held.reason,'held');
+ // ADR 0162: a held cutover is not served and not repaired; it is refused before any put (it used to answer reason 'held').
+ await assert.rejects(repairMirrors({DB:db,BUCKET:bucket}),error=>error.code==='published_epg_unavailable');
  assert.deepEqual(puts,[]);
 }
 
