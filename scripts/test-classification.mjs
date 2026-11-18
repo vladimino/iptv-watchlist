@@ -994,6 +994,9 @@ export const FILES={
  "local-dev-smoke.mjs": {
   "suite": "core"
  },
+ "local-standins.mjs": {
+  "suite": "core"
+ },
  "local-fixtures.mjs": {
   "suite": "core"
  },
