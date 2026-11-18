@@ -226,7 +226,6 @@ const d1Writes=[];
 ctx.PredictionD1={
  async openProfile(){const text=records.get(currentKey);if(!text)return {mode:'d1',value:null,object:null};const mirror=JSON.parse(text),versionText=records.get(versionKey(mirror.version)),body=versionText?JSON.parse(versionText):{};return {mode:'d1',value:{...body,lineage:mirror.lineage??null},object:null};},
  async saveMutable(_env,key,value){if(key!==currentKey)return {handled:false};d1Writes.push(key);records.set(key,JSON.stringify(value));etags.set(key,'etag-d1');return {handled:true};},
- async completePredictionWrite(){},
  async routeRead(){return {handled:false};},
  async overlayIndex(_env,value){return value;}
 };

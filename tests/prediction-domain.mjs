@@ -1,11 +1,10 @@
-// ADR 0078. Mutable prediction state follows the schema v7 marker, and a later additive version keeps it.
-// Schema v6 and a missing binding stay on R2. Mode d1 does not read the mutable objects back.
+// ADR 0078, ADR 0162. Mutable prediction state is served only while the marker says mode d1; a marker in mode r2, missing tables or a binding that does not answer
+// are refused. Only without PREDICTION_DB_REQUIRED (local development) does a database without the domain stand in with the R2 objects. Mode d1 does not read the mutable objects back.
 import assert from 'node:assert/strict';
-import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {activatePredictionDomain,completePredictionWrite,importPredictionDomain,openLease,openQueue,overlayIndex,readPredictionAuthority,revertPredictionDomain,routeRead,saveMutable,writeLease,writeQueue,PREDICTION_HISTORY_LIMIT} from '../src/prediction-d1.js';
+import {openLease,openQueue,overlayIndex,readPredictionAuthority,routeRead,saveMutable,writeLease,writeQueue,PREDICTION_HISTORY_LIMIT} from '../src/prediction-d1.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {projectorContext} from './d1-enrichment-context.mjs';
@@ -31,39 +30,49 @@ const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof v
 const sha=async value=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(canonical(value)))))].map(byte=>byte.toString(16).padStart(2,'0')).join('');
 const put=(bucket,key,value)=>bucket.put(key,JSON.stringify(value));
 
-// 1. Schema v6, and schema v7 before activation, keep the R2 objects. A partial v7 fails closed.
+const serve=db=>db.sql("UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
+const unavailable=error=>error.code==='prediction_domain_unavailable';
+
+// 1. ADR 0162: a marker in mode r2 is refused, never read as the R2 objects. A database without the domain stands in only without PREDICTION_DB_REQUIRED.
 {
- const v6=migrated('0006_metadata_cache');
  const bucket=new MemoryBucket();
  await put(bucket,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['heat']});
+ // Schema v6 has no domain tables: the local stand-in keeps the objects and writes none of the tables; production (REQUIRED on) refuses it.
+ const v6=migrated('0006_metadata_cache');
  const authority=await readPredictionAuthority(v6);
- assert.equal(authority.mode,'r2');
- assert.equal(authority.version,6);
+ assert.equal(authority.mode,'r2');assert.equal(authority.version,6);assert.equal(authority.tables,false);
  assert.deepEqual(await routeRead({DB:v6,BUCKET:bucket},'enrichment/prediction-queue.json'),{handled:false});
- const saved=await saveMutable({DB:v6,BUCKET:bucket},'enrichment/prediction-queue.json',{schemaVersion:3,pending:[]});
- assert.equal(saved.handled,false);
+ assert.equal((await saveMutable({DB:v6,BUCKET:bucket},'enrichment/prediction-queue.json',{schemaVersion:3,pending:[]})).handled,false);
  assert.equal(one(v6,"SELECT COUNT(*) FROM sqlite_master WHERE name='prediction_queue'"),0);
+ await assert.rejects(readPredictionAuthority(v6,{PREDICTION_DB_REQUIRED:'on'}),unavailable);
+ // Schema v7 as the migration leaves it: the marker is r2, which is refused by every reader and writer.
  const v7=migrated('0007_prediction_authority');
- assert.equal((await readPredictionAuthority(v7)).mode,'r2');
+ assert.equal(one(v7,"SELECT mode FROM prediction_domain_authority"),'r2');
+ const env={DB:v7,BUCKET:bucket};
+ await assert.rejects(readPredictionAuthority(v7),unavailable);
+ await assert.rejects(routeRead(env,'enrichment/prediction-queue.json'),unavailable);
+ await assert.rejects(openQueue(env),unavailable);
+ await assert.rejects(openLease(env,'enrichment/runner-lease.json'),unavailable);
+ await assert.rejects(saveMutable(env,'enrichment/films/off-watchlist/fingerprint.json',{fingerprintHash:'h'}),unavailable);
+ await assert.rejects(overlayIndex(env,{heat:{}}),unavailable);
+ assert.equal(one(v7,'SELECT COUNT(*) FROM prediction_domain_intent'),0,'the retired r2 claim writes no intent');
+ serve(v7);
+ assert.equal((await readPredictionAuthority(v7)).mode,'d1');
  assert.equal(one(v7,'SELECT version FROM schema_contract'),7);
  assert.equal(one(v7,'SELECT COUNT(*) FROM film'),0);
- const head=await openQueue({DB:v7,BUCKET:bucket});
- assert.equal(head.mode,'r2');
- assert.deepEqual(head.queue.pending,['heat']);
- const claimed=await saveMutable({DB:v7,BUCKET:bucket},'enrichment/films/off-watchlist/fingerprint.json',{fingerprintHash:'h'});
- assert.equal(claimed.handled,false);
- assert.equal(claimed.claimed,true);
- assert.equal((await readPredictionAuthority(v7)).generation,1);
- assert.equal(one(v7,'SELECT COUNT(*) FROM prediction_fingerprint'),0);
- const lost=await writeQueue({DB:v7,BUCKET:bucket},{...head,generation:0}, {schemaVersion:3,pending:['stale']});
- assert.equal(lost,null);
- assert.equal(JSON.parse(bucket.objects.get('enrichment/prediction-queue.json').text).pending[0],'heat');
+ // `writes` held is the normal state of an activated domain and is served; any other value of the marker is refused.
+ v7.sql("UPDATE prediction_domain_authority SET writes='held'");
+ assert.equal((await readPredictionAuthority(v7)).writes,'held');
+ // A restored marker in mode r2 is refused again, and so is a missing table.
+ v7.sql("UPDATE prediction_domain_authority SET mode='r2', writes='open'");
+ await assert.rejects(readPredictionAuthority(v7),unavailable);
+ v7.sql("UPDATE prediction_domain_authority SET mode='d1'");
  v7.sql('DROP TABLE prediction_domain_cas');
- await assert.rejects(readPredictionAuthority(v7),error=>error.code==='prediction_domain_unavailable');
- await assert.rejects(routeRead({DB:v7,BUCKET:bucket},'enrichment/prediction-queue.json'),error=>error.code==='prediction_domain_unavailable');
+ await assert.rejects(readPredictionAuthority(v7),unavailable);
+ await assert.rejects(routeRead(env,'enrichment/prediction-queue.json'),unavailable);
 }
 
-// 2. Import keeps film ids that are not Film rows, then activation reads D1 and ignores a stale mirror.
+// 2. The writers keep film ids that are not Film rows, and a d1 marker reads D1 and ignores a stale mirror.
 {
  const db=migrated('0007_prediction_authority');
  db.sql("INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:heat',1,'Heat','2026-11-01T00:00:00.000Z')");
@@ -86,18 +95,21 @@ const put=(bucket,key,value)=>bucket.put(key,JSON.stringify(value));
  const history=[{...replacedBody,r2Key:replacedKey,contentSha256:replacedDigest,replacedAt:'2026-11-01T02:00:00.000Z'}];
  const queue={schemaVersion:3,pending:['off-watchlist'],retries:{'redirect-old':{attempts:2,retryAt:1}}};
  const run={runId:'run-1',status:'complete',updatedAt:'2026-11-01T03:00:00.000Z',selectedIds:['off-watchlist']};
- const snapshot={profile,fingerprints:[{filmId:'off-watchlist',record:fingerprint}],predictions:[{filmId:'redirect-old',bundle:{current,history}}],queue,runs:[run],latestRunId:'run-1'};
  const films=one(db,'SELECT COUNT(*) FROM film');
- const imported=await importPredictionDomain(db,bucket,snapshot);
- assert.equal(imported.mode,'r2');
- assert.equal(imported.generation,0);
+ // The import and activate chain is retired: the fixture sets the marker and stores the state through the normal writers.
+ serve(db);
+ const seeding={DB:db,BUCKET:bucket};
+ await saveMutable(seeding,'enrichment/profile/current.json',profile);
+ await saveMutable(seeding,'enrichment/films/off-watchlist/fingerprint.json',fingerprint);
+ await saveMutable(seeding,'enrichment/films/redirect-old/predictions.json',{current,history});
+ await saveMutable(seeding,'enrichment/prediction-queue.json',queue);
+ await saveMutable(seeding,'enrichment/runs/run-1.json',run);
+ await saveMutable(seeding,'enrichment/latest-run.json',run);
  assert.equal(one(db,'SELECT COUNT(*) FROM film'),films);
  assert.equal(one(db,"SELECT COUNT(*) FROM film WHERE id='film:off-watchlist'"),0);
  assert.equal(one(db,'SELECT COUNT(*) FROM prediction_fingerprint'),1);
  assert.equal(one(db,'SELECT COUNT(*) FROM prediction_pointer'),1);
  assert.equal(one(db,'SELECT COUNT(*) FROM prediction_lineage'),1);
- const activated=await activatePredictionDomain(db,{generation:0,queueGeneration:0,profileGeneration:0});
- assert.equal(activated.mode,'d1');
  await put(bucket,'enrichment/films/off-watchlist/fingerprint.json',{fingerprintHash:'stale-mirror'});
  await put(bucket,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['stale']});
  const env={DB:db,BUCKET:bucket};
@@ -140,9 +152,9 @@ const put=(bucket,key,value)=>bucket.put(key,JSON.stringify(value));
 {
  const db=migrated('0007_prediction_authority');
  const bucket=new MemoryBucket();
- await importPredictionDomain(db,bucket,{queue:{schemaVersion:3,pending:['a']}});
- await activatePredictionDomain(db,{generation:0,queueGeneration:0,profileGeneration:0});
+ serve(db);
  const env={DB:db,BUCKET:bucket};
+ await saveMutable(env,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['a']});
  const first=await openQueue(env);
  const second=await openQueue(env);
  const written=await writeQueue(env,first,{schemaVersion:3,pending:['b']});
@@ -202,23 +214,13 @@ const put=(bucket,key,value)=>bucket.put(key,JSON.stringify(value));
  await saveMutable(env,'enrichment/runs/run-8.json',older);
  assert.equal((await routeRead(env,'enrichment/latest-run.json')).value.runId,'run-9');
  assert.equal((await routeRead(env,'enrichment/runs/run-8.json')).value.status,'partial');
- bucket.objects.delete('enrichment/films/solo/fingerprints/print-restored.json');
- await assert.rejects(revertPredictionDomain(db,bucket,await readPredictionAuthority(db)),error=>error.code==='prediction_domain_body_missing');
- assert.equal((await readPredictionAuthority(db)).mode,'d1');
- await put(bucket,'enrichment/films/solo/fingerprints/print-restored.json',restoredBody);
- await put(bucket,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['stale-mirror']});
- const reverted=await revertPredictionDomain(db,bucket,await readPredictionAuthority(db));
- assert.equal(reverted.mode,'r2');
- assert.deepEqual(JSON.parse(bucket.objects.get('enrichment/prediction-queue.json').text).pending,['b']);
- assert.equal((await routeRead(env,'enrichment/profile/current.json')).handled,false);
- assert.equal(one(db,'SELECT COUNT(*) FROM prediction_profile'),1);
- await assert.rejects(activatePredictionDomain(db,{generation:0,queueGeneration:0,profileGeneration:0}),error=>error.code==='prediction_domain_cas');
 }
 
-// 4. The projector still runs on schema v7 and refuses a partial schema. The offline script does not select production.
+// 4. The projector runs on a d1 prediction marker and refuses a partial schema or a marker that is not d1. The offline import script is retired.
 {
  const projector=projectorContext();
  const db=migrated('0007_prediction_authority');
+ serve(db);
  const bucket=new MemoryBucket();
  const films=[{id:'heat',title:'Heat',original:'Heat',year:1995,tmdbId:'949',url:'https://letterboxd.com/film/heat/'}];
  const putJson=(key,value)=>bucket.put(key,JSON.stringify(value));
@@ -234,13 +236,13 @@ const put=(bucket,key,value)=>bucket.put(key,JSON.stringify(value));
  const run=await projector.runD1EnrichmentProjection(env);
  assert.equal(run.outcome,'complete',JSON.stringify(run));
  assert.equal(run.schemaVersion,7);
- assert.equal(run.predictionMode,'r2');
+ assert.equal(run.predictionMode,'d1');
  assert.equal(one(db,'SELECT COUNT(*) FROM prediction_fingerprint'),0);
  assert.equal(one(db,"SELECT COUNT(*) FROM film WHERE id='film:heat'"),1);
  const status=await projector.d1EnrichmentStatus(db,{D1_ENRICHMENT_WRITE:'on'});
  assert.equal(status.schema,true);
  assert.equal(status.schemaVersion,7);
- assert.equal(status.predictionMode,'r2');
+ assert.equal(status.predictionMode,'d1');
  assert.equal(status.cacheMode,'d1','the fixture puts the metadata-cache marker at d1 (ADR 0162)');
  const partial=migrated('0007_prediction_authority');
  partial.sql('DROP TABLE prediction_queue');
@@ -259,64 +261,45 @@ const put=(bucket,key,value)=>bucket.put(key,JSON.stringify(value));
  assert.equal(aheadRun.outcome,'failed',JSON.stringify(aheadRun));
  assert.match(aheadRun.error,/published_epg_unavailable/);
  const chain=migrated('0007_prediction_authority');
+ serve(chain);
  chain.sql(fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'));
  const chainRun=await projector.runD1EnrichmentProjection({DB:chain,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on',PREDICTION_DB_REQUIRED:'on'});
  assert.equal(chainRun.outcome,'complete',JSON.stringify(chainRun));
  assert.equal(chainRun.schemaVersion,8);
- assert.equal(chainRun.predictionMode,'r2');
+ assert.equal(chainRun.predictionMode,'d1');
  const v6=migrated('0006_metadata_cache');
  const v6Status=await projector.d1EnrichmentStatus(v6,{});
  assert.equal(v6Status.schema,true);
  assert.equal(v6Status.schemaVersion,6);
  assert.equal(v6Status.predictionMode,undefined);
- const script=path.resolve('scripts/prediction-domain-authority.mjs');
- const command=(...argv)=>spawnSync(process.execPath,[script,...argv],{encoding:'utf8'});
- const bare=command('--load');
- assert.notEqual(bare.status,0);
- assert.match(bare.stderr,/confirm/);
- const production=command('--load','--confirm','load','--database','iptv','--snapshot','snapshot.json');
- assert.notEqual(production.status,0);
- assert.match(production.stderr,/production/);
- const quiet=command();
- assert.equal(quiet.status,0,quiet.stderr);
- assert.equal(JSON.parse(quiet.stdout).writes,false);
- const file=path.join(root,'script.sqlite');
- const scriptDb=d1Standin(file);
- for(const name of namesUntil('0007_prediction_authority'))scriptDb.sql(fs.readFileSync('migrations/'+name+'.sql','utf8').replace(/;\s*$/,''));
- const snapshot={queue:{schemaVersion:3,pending:['script']},objects:{}};
- const snapshotFile=path.join(root,'snapshot.json');
- fs.writeFileSync(snapshotFile,JSON.stringify(snapshot));
- const loaded=command('--load','--confirm','load','--database',file,'--snapshot',snapshotFile);
- assert.equal(loaded.status,0,loaded.stderr);
- assert.equal(JSON.parse(loaded.stdout).mode,'r2');
- assert.equal(one(scriptDb,'SELECT COUNT(*) FROM film'),0);
- const flipped=command('--activate','--confirm','activate','--database',file);
- assert.equal(flipped.status,0,flipped.stderr);
- assert.equal(JSON.parse(flipped.stdout).mode,'d1');
- const back=command('--revert','--confirm','r2','--database',file);
- assert.equal(back.status,0,back.stderr);
- assert.equal(JSON.parse(back.stdout).mode,'r2');
+ assert.equal(fs.existsSync('scripts/prediction-domain-authority.mjs'),false,'the offline import, activate and revert script is retired (ADR 0162)');
+ // A marker that is not d1 stops the projector too: it never projects against the R2 objects.
+ const refused=migrated('0007_prediction_authority');
+ const stopped=await projector.runD1EnrichmentProjection({DB:refused,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
+ assert.equal(stopped.outcome,'failed');assert.equal(stopped.reason,'prediction_domain_unavailable');
 }
 
-// 5. A later additive schema keeps the marker. A claim does not block the import. An active lease and a stale fence do.
+// 5. A later additive schema keeps the marker. A missing binding, schema or table is refused in production and is the stand-in only locally.
 {
  const unbound=await readPredictionAuthority(undefined);
  assert.equal(unbound.binding,false);
  assert.equal(unbound.mode,'r2');
- await assert.rejects(readPredictionAuthority(null,{PREDICTION_DB_REQUIRED:'on'}),error=>error.code==='prediction_domain_unavailable');
- await assert.rejects(routeRead({PREDICTION_DB_REQUIRED:'on',BUCKET:new MemoryBucket()},'enrichment/prediction-queue.json'),error=>error.code==='prediction_domain_unavailable');
+ await assert.rejects(readPredictionAuthority(null,{PREDICTION_DB_REQUIRED:'on'}),unavailable);
+ await assert.rejects(routeRead({PREDICTION_DB_REQUIRED:'on',BUCKET:new MemoryBucket()},'enrichment/prediction-queue.json'),unavailable);
  const empty=d1Standin(path.join(root,'empty.sqlite'));
- await assert.rejects(readPredictionAuthority(empty,{PREDICTION_DB_REQUIRED:'on'}),error=>error.code==='prediction_domain_unavailable');
+ await assert.rejects(readPredictionAuthority(empty,{PREDICTION_DB_REQUIRED:'on'}),unavailable);
  const emptyBucket=new MemoryBucket();
  await put(emptyBucket,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['local']});
- await assert.rejects(routeRead({DB:empty,BUCKET:emptyBucket,PREDICTION_DB_REQUIRED:'on'},'enrichment/prediction-queue.json'),error=>error.code==='prediction_domain_unavailable');
+ await assert.rejects(routeRead({DB:empty,BUCKET:emptyBucket,PREDICTION_DB_REQUIRED:'on'},'enrichment/prediction-queue.json'),unavailable);
  assert.equal((await readPredictionAuthority(empty)).mode,'r2');
  assert.deepEqual(await routeRead({DB:empty,BUCKET:emptyBucket},'enrichment/prediction-queue.json'),{handled:false});
+ // A later additive schema without the domain tables: production refuses it (before ADR 0162 it silently stayed on the objects); the local stand-in keeps them.
  const bare=migrated('0006_metadata_cache');
  bare.sql('UPDATE schema_contract SET version=8');
  const bareBucket=new MemoryBucket();
  await put(bareBucket,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['epg-first']});
- const bareEnv={DB:bare,BUCKET:bareBucket,PREDICTION_DB_REQUIRED:'on'};
+ await assert.rejects(openQueue({DB:bare,BUCKET:bareBucket,PREDICTION_DB_REQUIRED:'on'}),unavailable);
+ const bareEnv={DB:bare,BUCKET:bareBucket};
  const bareHead=await openQueue(bareEnv);
  assert.equal(bareHead.mode,'r2');
  assert.equal(bareHead.tables,false);
@@ -328,10 +311,17 @@ const put=(bucket,key,value)=>bucket.put(key,JSON.stringify(value));
  assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"PREDICTION_DB_REQUIRED": "on"/);
  assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"binding": "DB"/);
  const broken={prepare(){return {bind(){return {async first(){throw new Error('D1 binding reset');},async all(){throw new Error('D1 binding reset');}};}};},async batch(){throw new Error('D1 binding reset');}};
- await assert.rejects(readPredictionAuthority(broken),error=>error.code==='prediction_domain_unavailable');
+ await assert.rejects(readPredictionAuthority(broken),unavailable);
+ // A head captured before the tables existed does not write once the domain is installed (the reverse too): the write is refused, nothing reaches D1 or the object.
+ const installed=migrated('0007_prediction_authority');serve(installed);
+ const lateBucket=new MemoryBucket();await put(lateBucket,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['object']});
+ const stale=await openQueue({DB:bare,BUCKET:lateBucket});
+ assert.equal(await writeQueue({DB:installed,BUCKET:lateBucket},stale,{schemaVersion:3,pending:['late']}),null);
+ assert.deepEqual(JSON.parse(lateBucket.objects.get('enrichment/prediction-queue.json').text).pending,['object']);
+ assert.equal(one(installed,'SELECT COUNT(*) FROM prediction_queue'),0);
  const v8=migrated('0007_prediction_authority');
  v8.sql('UPDATE schema_contract SET version=8');
- v8.sql("UPDATE prediction_domain_authority SET mode='d1'");
+ serve(v8);
  const bucket=new MemoryBucket();
  await put(bucket,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['r2']});
  const authority=await readPredictionAuthority(v8);
@@ -341,68 +331,18 @@ const put=(bucket,key,value)=>bucket.put(key,JSON.stringify(value));
  assert.equal(read.handled,true);
  assert.equal(read.value,null);
  v8.sql('DROP TABLE prediction_queue');
- await assert.rejects(routeRead({DB:v8,BUCKET:bucket},'enrichment/prediction-queue.json'),error=>error.code==='prediction_domain_unavailable');
+ await assert.rejects(routeRead({DB:v8,BUCKET:bucket},'enrichment/prediction-queue.json'),unavailable);
  assert.deepEqual(JSON.parse(bucket.objects.get('enrichment/prediction-queue.json').text).pending,['r2']);
  const projector=projectorContext();
  const whole=migrated('0007_prediction_authority');
  whole.sql('UPDATE schema_contract SET version=8');
+ serve(whole);
  const status=await projector.d1EnrichmentStatus(whole,{});
  assert.equal(status.schema,true);
  assert.equal(status.schemaVersion,8);
- assert.equal(status.predictionMode,'r2');
+ assert.equal(status.predictionMode,'d1');
  whole.sql('DROP TABLE prediction_fingerprint');
  assert.equal((await projector.d1EnrichmentStatus(whole,{})).schema,false);
- const claimed=migrated('0007_prediction_authority');
- const store=new MemoryBucket();
- const reserved=await saveMutable({DB:claimed,BUCKET:store},'enrichment/prediction-queue.json',{schemaVersion:3,pending:[]});
- assert.equal((await readPredictionAuthority(claimed)).generation,1);
- assert.equal(one(claimed,'SELECT COUNT(*) FROM prediction_domain_intent'),1);
- await assert.rejects(importPredictionDomain(claimed,store,{queue:{schemaVersion:3,pending:['blocked']}}),error=>error.code==='prediction_domain_busy'&&error.committedUnits>=1);
- assert.equal(one(claimed,'SELECT COUNT(*) FROM prediction_queue'),0);
- await completePredictionWrite({DB:claimed},'enrichment/prediction-queue.json',reserved.token);
- assert.equal(one(claimed,'SELECT COUNT(*) FROM prediction_domain_intent'),0);
- const caught=await importPredictionDomain(claimed,store,{queue:{schemaVersion:3,pending:['caught']}});
- assert.equal(caught.generation,1);
- assert.equal(caught.mode,'r2');
- await assert.rejects(importPredictionDomain(claimed,store,{queue:{schemaVersion:3,pending:['old']}},{fence:{generation:0,queueGeneration:0,profileGeneration:0}}),error=>error.code==='prediction_domain_cas');
- assert.match(queueText(claimed),/caught/);
- const busy=migrated('0007_prediction_authority');
- await assert.rejects(importPredictionDomain(busy,store,{queue:{schemaVersion:3,pending:['x']},leases:{runner:{expiresAt:Date.now()+60000}}}),error=>error.code==='prediction_domain_busy');
- assert.equal(one(busy,'SELECT COUNT(*) FROM prediction_queue'),0);
- const sizes=[];
- const file=path.join(root,'batches.sqlite');
- const batched=d1Standin(file,{onBatch:statements=>sizes.push(statements.length)});
- for(const name of namesUntil('0007_prediction_authority'))batched.sql(fs.readFileSync('migrations/'+name+'.sql','utf8').replace(/;\s*$/,''));
- const manyFilms={fingerprints:['one','two','three'].map(filmId=>({filmId,record:{filmId,fingerprintHash:'h-'+filmId,plotMechanics:[],moodLabels:[],execution:{},generatedAt:'2026-11-01T01:00:00.000Z',fingerprintSchemaVersion:1,fingerprintPromptVersion:1}}))};
- for(const item of manyFilms.fingerprints)await put(store,'enrichment/films/'+item.filmId+'/fingerprints/'+item.record.fingerprintHash+'.json',item.record);
- await importPredictionDomain(batched,store,manyFilms);
- assert.ok(sizes.length>=3);
- assert.ok(sizes.every(size=>size<=100));
- const absent=migrated('0007_prediction_authority');
- const absentBucket=new MemoryBucket();
- const keptBody={filmId:'kept',fingerprintHash:'print-kept',plotMechanics:[],moodLabels:[],execution:{}};
- await put(absentBucket,'enrichment/films/kept/fingerprints/print-kept.json',keptBody);
- await importPredictionDomain(absent,absentBucket,{queue:{schemaVersion:3,pending:['live']},fingerprints:[{filmId:'kept',record:{...keptBody,generatedAt:'2026-11-01T04:00:00.000Z',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,produced:'generated',previous:null}}]});
- await activatePredictionDomain(absent,await readPredictionAuthority(absent));
- absent.sql('DELETE FROM prediction_queue');
- await put(absentBucket,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['stale-object']});
- await put(absentBucket,'enrichment/films/gone/predictions.json',{current:{predictedRating:1},history:[]});
- const cleared=await revertPredictionDomain(absent,absentBucket,await readPredictionAuthority(absent));
- assert.equal(cleared.mode,'r2');
- assert.equal(absentBucket.objects.get('enrichment/prediction-queue.json'),undefined);
- assert.equal(absentBucket.objects.get('enrichment/films/gone/predictions.json'),undefined);
- assert.ok(absentBucket.objects.get('enrichment/films/kept/fingerprint.json'));
- assert.ok(absentBucket.objects.get('enrichment/films/kept/fingerprints/print-kept.json'));
- const stuckMirror=migrated('0007_prediction_authority');
- const stuckBucket=new MemoryBucket();
- await put(stuckBucket,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['keep']});
- await importPredictionDomain(stuckMirror,stuckBucket,{queue:{schemaVersion:3,pending:['keep']}});
- await activatePredictionDomain(stuckMirror,await readPredictionAuthority(stuckMirror));
- stuckMirror.sql('DELETE FROM prediction_queue');
- await put(stuckBucket,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['stale-object']});
- stuckBucket.delete=async()=>{throw new Error('uncertain delete');};
- await assert.rejects(revertPredictionDomain(stuckMirror,stuckBucket,await readPredictionAuthority(stuckMirror)),error=>error.code==='prediction_domain_parity');
- assert.equal((await readPredictionAuthority(stuckMirror)).mode,'d1');
 }
 
-console.log('prediction domain marker: v6 stays on R2, v7 r2 claims a generation, d1 owns mutable state, immutable bodies are verified first, import adds no Film, projector and offline script passed');
+console.log('prediction domain marker: a marker that is not d1, missing tables and a missing binding are refused (the local stand-in keeps the objects), d1 owns mutable state, immutable bodies are verified first, the writers add no Film, the projector passed');

@@ -237,7 +237,9 @@ assert.equal(ctx.compareHistoryEvents({type:'diary_viewing',at:'2026-09-20',atPr
  // ADR 0162: a ratings marker that is not d1/open is refused. Sections that test the history itself use a database without the ratings
  // tables (the domain's local stand-in: not installed, RATINGS_DB_REQUIRED unset), so the Diary comes from the R2 objects; a fixture that
  // names the ratings tables gets the full schema.
- const bare=path.join(root,'bare.sqlite');fs.copyFileSync(base,bare);sqlite(bare,'DROP TABLE ratings_view;DROP TABLE ratings_document;DROP TABLE ratings_domain_cas;DROP TABLE ratings_domain_authority;');
+ // ADR 0162: a ratings or prediction marker that is not d1 is refused, so a fixture that does not exercise a domain stands for it uninstalled (its tables dropped); one that does supplies its own d1 rows.
+ const DROP_RATINGS='DROP TABLE ratings_view;DROP TABLE ratings_document;DROP TABLE ratings_domain_cas;DROP TABLE ratings_domain_authority;';
+ const DROP_PREDICTION=['prediction_domain_intent','prediction_run','prediction_lease','prediction_queue','prediction_lineage','prediction_pointer','prediction_fingerprint','prediction_profile','prediction_domain_cas','prediction_domain_authority'].map(name=>'DROP TABLE '+name+';').join('');
  const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
  const MARKER={prepared:VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;"};
  MARKER.open=MARKER.prepared+"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";MARKER.held=MARKER.open+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;";
@@ -252,7 +254,7 @@ assert.equal(ctx.compareHistoryEvents({type:'diary_viewing',at:'2026-09-20',atPr
   +film('film:tmdb:4900',4900)+claim('film:tmdb:4900','tmdb','4900')
   +film('film:solo4990',null)+claim('film:solo4990','letterboxd','solo4990')
   +film('film:tmdb:4950',4950)+claim('film:tmdb:4950','tmdb','4950')+claim('film:tmdb:4950','letterboxd','lid4950')+claim('film:tmdb:4950','letterboxd','lid4951',0,0);
- const database=(state='open',extra='')=>{const file=path.join(root,'h-'+(n++)+'.sqlite');fs.copyFileSync(/ratings_/.test(extra)?base:bare,file);sqlite(file,SEED+(MARKER[state]||'')+extra);return file;};
+ const database=(state='open',extra='')=>{const file=path.join(root,'h-'+(n++)+'.sqlite');fs.copyFileSync(base,file);sqlite(file,(/ratings_/.test(extra)?'':DROP_RATINGS)+(/prediction_/.test(extra)?'':DROP_PREDICTION)+SEED+(MARKER[state]||'')+extra);return file;};
  const seen=[];
  const envFor=(state,extra,onQuery)=>({...env,DB:d1Standin(database(state,extra),{onQuery:async text=>{seen.push(text);if(onQuery)await onQuery(text);}})});
  const stored=(id,gen,rating)=>{const record={filmId:id,predictedRating:rating,probability4Plus:.6,confidence:'high',matchSignals:['s'],mainRisk:'r',moodLabels:['m','n'],generatedAt:gen,tasteProfileVersion:2,tasteProfileHash:'p2',fingerprintHash:'f',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1,runId:'run-'+id+gen,trigger:'scheduled'};const digest=sha(body(record));return {...record,r2Key:versionKey(id,digest),contentSha256:digest};};

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {activatePredictionDomain,importPredictionDomain,openQueue,routeRead,writeQueue,PREDICTION_QUEUE_CHARS,PREDICTION_STATEMENT_BYTES} from '../src/prediction-d1.js';
+import {openQueue,saveMutable,routeRead,writeQueue,PREDICTION_QUEUE_CHARS,PREDICTION_STATEMENT_BYTES} from '../src/prediction-d1.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 
@@ -45,8 +45,9 @@ function queueOf({hot,cold,offset=0,programmeRunId='run-old',numeric=false,retri
 }
 const start=async(initial)=>{
  const db=migrated(),bucket=new MemoryBucket();
- await importPredictionDomain(db,bucket,{queue:initial});
- await activatePredictionDomain(db,{generation:0,queueGeneration:0,profileGeneration:0});
+ // ADR 0162: the import and activate chain is retired; the fixture sets the marker and stores the queue through the normal writer.
+ db.sql("UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
+ await saveMutable({DB:db,BUCKET:bucket},KEY,initial);
  return {db,bucket,env:{DB:db,BUCKET:bucket}};
 };
 const read=async env=>(await routeRead(env,KEY)).value;
@@ -88,7 +89,7 @@ assert.ok(nextText.length>PREDICTION_QUEUE_CHARS,'the new generation must exceed
  for(const row of db.sql('SELECT chunk_text FROM prediction_queue'))assert.ok(new TextEncoder().encode(row.chunk_text).length+160<=PREDICTION_STATEMENT_BYTES);
  same(await read(env),next);                      // parity with the plain representation
  same((await openQueue(env)).queue,next);          // the writers' own read path sees the plain shape
- assert.deepEqual(generation(db),{generation:1,q:1});
+ assert.deepEqual(generation(db),{generation:2,q:2}); // the fixture's own seed write is the first generation
  assert.equal(bucket.objects.get(KEY).text,nextText); // the R2 mirror is the plain document, unchanged format
  // Queue semantics survive: hot/cold lists, priority, work, retries and the pending order.
  const back=await read(env);
@@ -145,7 +146,7 @@ assert.ok(nextText.length>PREDICTION_QUEUE_CHARS,'the new generation must exceed
  const lost=await writeQueue(env,second,queueOf({hot:4400,cold:1049,programmeRunId:'run-loser'}));
  assert.equal(lost,null);
  same(await read(env),next);
- assert.deepEqual(generation(db),{generation:1,q:1});
+ assert.deepEqual(generation(db),{generation:2,q:2}); // the fixture's own seed write is the first generation
  // five rebuilds that conflict in turn never write over the winner
  const stale=await openQueue(env);
  assert.equal((await writeQueue(env,await openQueue(env),{...next,trigger:'second'})).etag,'d1');
@@ -199,7 +200,7 @@ assert.ok(nextText.length>PREDICTION_QUEUE_CHARS,'the new generation must exceed
  assert.equal(landed.programmeRunId,'run-new');
  assert.equal(landed.priorityCount,4400);
  assert.equal(landed.pending[0],next.pending[0]);
- assert.equal(db.sql('SELECT queue_generation AS q FROM prediction_domain_authority')[0].q,1);
+ assert.equal(db.sql('SELECT queue_generation AS q FROM prediction_domain_authority')[0].q,2);
 }
 
 // 9. Concurrent writers (EPG tail, Discovery checkpoint, projector refresh) racing on the encoded queue: exactly one wins each round.
@@ -212,7 +213,7 @@ assert.ok(nextText.length>PREDICTION_QUEUE_CHARS,'the new generation must exceed
   assert.equal(results.filter(r=>r===null).length,2);
   assert.match((await read(env)).trigger,new RegExp('^round'+round));
  }
- assert.equal(generation(db).q,3);
+ assert.equal(generation(db).q,4);
 }
 
 console.log('prediction queue budget tests passed');

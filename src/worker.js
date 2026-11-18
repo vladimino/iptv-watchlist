@@ -708,14 +708,6 @@ const saveJSON=async(env,key,value)=>{
  if(typeof PredictionD1!=='undefined'){
   const routed=await PredictionD1.saveMutable(env,key,value);
   if(routed?.handled)return {etag:'d1'};
-  const text=routed?.text??JSON.stringify(value);
-  let settled=false;
-  try{
-   const saved=await putStoredJson(env,key,text);
-   if(saved?.skipped==='canonical_mirror_frozen')return saved;
-   settled=true;return saved;
-  }
-  finally{if(routed?.token&&settled)await PredictionD1.completePredictionWrite(env,key,routed.token);}
  }
  const saved=await putStoredJson(env,key,JSON.stringify(value));
  if(saved?.skipped==='canonical_mirror_frozen')return saved;

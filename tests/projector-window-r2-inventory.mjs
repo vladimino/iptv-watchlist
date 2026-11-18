@@ -108,7 +108,7 @@ const FILE_SITES={
  'src/metadata-cache.js':{r2:1,wrapper:0,dynamic:0},
  'src/monitor.js':{r2:1,wrapper:0,dynamic:0},
  'src/owner-review-d1.js':{r2:1,wrapper:0,dynamic:0}, // ADR 0162: -1 r2, the env.BUCKET.put of the retired mode-r2 commit; only the mirror put after a d1 commit remains
- 'src/prediction-d1.js':{r2:5,wrapper:0,dynamic:0},
+ 'src/prediction-d1.js':{r2:3,wrapper:0,dynamic:0}, // ADR 0162: -2 r2, the mirror put of the retired revert toolchain (putSent) and its repair write; the D1 mirror put and the stand-in queue and lease puts remain
  'src/published-epg.js':{r2:2,wrapper:8,dynamic:8},
  // AIR-410: +1 for writeDiscoveryEvent, the create-only put of one `discovery` Events Log entry (events/items/..., not a projector input).
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
