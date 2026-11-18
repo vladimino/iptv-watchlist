@@ -82,8 +82,9 @@ assert.equal(one(installed.db,'SELECT mode, generation FROM discovery_authority 
 assert.equal(one(installed.db,'SELECT generation FROM discovery_authority WHERE id=1').generation,0);
 assert.equal(count(installed.db,'SELECT COUNT(*) AS n FROM film'),0);
 assert.throws(()=>installed.db.sql('UPDATE schema_contract SET version=10'),/schema_contract_downgrade/);
-assert.equal((await Authority.readAuthority({DB:installed.db})).ready,false);
-assert.deepEqual(await Authority.routeRead({DB:installed.db},'epg/discovery-resolution.json'),{handled:false});
+// ADR 0162: the marker the migration inserts (mode r2) is refused, never read as the R2 objects.
+await assert.rejects(()=>Authority.readAuthority({DB:installed.db}),error=>error.code==='discovery_unavailable');
+await assert.rejects(()=>Authority.routeRead({DB:installed.db},'epg/discovery-resolution.json'),error=>error.code==='discovery_unavailable');
 
 const bare=await Authority.routeRead({},'epg/discovery-latest.json');
 assert.equal(bare.handled,false);
@@ -97,9 +98,10 @@ await assert.rejects(()=>Authority.readAuthority({DB:missing}),error=>error.code
 const held=migrated();
 hold(held.db);
 const heldEnv=envFor(held.db);
-await assert.rejects(()=>Authority.routeWrite(heldEnv,'epg/discovery-status.json',{stage:'partial'}),(error)=>error.code==='discovery_fence');
-assert.equal((await Authority.routeRead(heldEnv,'epg/discovery-status.json')).handled,false);
-await assert.rejects(()=>Authority.acquireLease(heldEnv,{}),error=>error.code==='discovery_fence');
+// A held cutover is refused by every reader and writer (ADR 0162).
+await assert.rejects(()=>Authority.routeWrite(heldEnv,'epg/discovery-status.json',{stage:'partial'}),(error)=>error.code==='discovery_unavailable');
+await assert.rejects(()=>Authority.routeRead(heldEnv,'epg/discovery-status.json'),error=>error.code==='discovery_unavailable');
+await assert.rejects(()=>Authority.acquireLease(heldEnv,{}),error=>error.code==='discovery_unavailable');
 
 const live=migrated();
 open(live.db);
@@ -508,7 +510,7 @@ assert.equal(statusWalk.itemCount,20001);
 assert.equal(walked,20001);
 assert.equal(statusWalk.archive.d1.archiveOnlyRows,0);assert.equal(statusWalk.ledgerMode,'unknown');
 hold(wide.db);
-assert.deepEqual(await Authority.streamActiveLedger(wideEnv,()=>{throw new Error('held walks nothing');}),{handled:false});
+await assert.rejects(()=>Authority.streamActiveLedger(wideEnv,()=>{throw new Error('held walks nothing');}),error=>error.code==='discovery_unavailable','a held cutover is refused (ADR 0162)');
 open(wide.db);
 wide.db.sql("UPDATE discovery_transfer SET state='loading' WHERE id=1");
 await assert.rejects(()=>Authority.streamActiveLedger(wideEnv,()=>{}),error=>error.code==='discovery_incomplete');

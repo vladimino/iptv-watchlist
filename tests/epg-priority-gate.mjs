@@ -450,7 +450,7 @@ assert.equal(DISCOVERY_EPG_PRIORITY_POLL_MS,60000);
  const {db}=armed();
  at(D2,16,56);
  db.sql("UPDATE discovery_authority SET cutover='held' WHERE id=1");
- await assert.rejects(take(envFor(db)),error=>error.code==='discovery_fence');
+ await assert.rejects(take(envFor(db)),error=>error.code==='discovery_unavailable','a held cutover is refused (ADR 0162)');
  db.sql("UPDATE discovery_authority SET cutover='open' WHERE id=1");
  const broken=migrated(22,{rewrite:sql=>/FROM discovery_epg_priority WHERE id=1$/.test(sql)?'SELECT * FROM discovery_no_such_table':sql});
  setPointer(broken.db,'run-1',D1);

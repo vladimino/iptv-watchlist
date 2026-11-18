@@ -38,8 +38,8 @@ const env=db=>({DB:db,BUCKET:{async get(){throw new Error('R2 must not be read b
 
 {
  const db=migrated();
- // Discovery still on R2: the lookup is not authoritative here and says so.
- assert.deepEqual(await Authority.readFilmAdmission(env(db),'7'),{handled:false});
+ // ADR 0162: a Discovery marker in mode r2 (the migration's value) is refused, not read as the R2 objects.
+ await assert.rejects(()=>Authority.readFilmAdmission(env(db),'7'),error=>error.code==='discovery_unavailable');
  open(db);
  admit(db,'tmdb_7',7);admit(db,'tmdb_8',8,{state:'superseded'});admit(db,'tmdb_tv_9',9,{kind:'tv',identity:'tmdb_tv:9'});admit(db,'tmdb_10',10,{state:'pending'});
  const found=await Authority.readFilmAdmission(env(db),'7');
@@ -55,9 +55,9 @@ const env=db=>({DB:db,BUCKET:{async get(){throw new Error('R2 must not be read b
  assert.match(admissionReads[0],/WHERE media_kind='movie' AND tmdb_id='7'/,'by identity');
  assert.ok(seen.every(text=>!/^\s*(INSERT|UPDATE|DELETE)/i.test(text)),'only reads');
  for(const bad of ['0','-1','1.5','007','abc','','1234567890123','7 OR 1=1'])await assert.rejects(()=>Authority.readFilmAdmission(env(db),bad),error=>error.code==='discovery_conflict','rejected: '+bad);
- // Fail closed: a held cutover, a catalog load in progress.
+ // Fail closed: a held cutover (refused outright), a catalog load in progress.
  db.sql("UPDATE discovery_authority SET cutover='held' WHERE id=1");
- await assert.rejects(()=>Authority.readFilmAdmission(env(db),'7'),error=>error.code==='discovery_fence');
+ await assert.rejects(()=>Authority.readFilmAdmission(env(db),'7'),error=>error.code==='discovery_unavailable','a held cutover is refused (ADR 0162)');
  db.sql("UPDATE discovery_authority SET cutover='open' WHERE id=1");
  db.sql("UPDATE discovery_transfer SET state='loading' WHERE id=1");
  await assert.rejects(()=>Authority.readFilmAdmission(env(db),'7'),error=>error.code==='discovery_incomplete','a transfer that is not a ledger seal is not readable');
