@@ -454,7 +454,7 @@ function run(args, installed, env){
     async put(){routePuts++;return {etag:'clobber'};},
    };
    for(const pathname of ['/api/programme','/api/watchlist']){
-    const http=await worker.fetch(new Request('http://127.0.0.1'+pathname),{DB:db,BUCKET:bucket},{waitUntil(){}});
+    const http=await worker.fetch(new Request('http://127.0.0.1'+pathname),{DB:db,BUCKET:bucket,OWNER_REVIEW_DB_OPTIONAL:'standin'},{waitUntil(){}}); // ADR 0162: this schema has no owner-review tables; the explicit local stand-in
     const payload=await http.json();
     assert.equal(http.status,200,pathname+' '+JSON.stringify(payload));
     served.push([pathname,payload.films?.[0]?.id??null]);

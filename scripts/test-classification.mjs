@@ -1171,6 +1171,9 @@ export const FILES={
  "prediction-queue-hotenteredat.mjs": {
   "suite": "core"
  },
+ "prediction-scoring-ab-harness.mjs": {
+  "suite": "core"
+ },
  "prediction-scoring-candidate.mjs": {
   "suite": "core"
  },

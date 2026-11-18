@@ -10,6 +10,9 @@ import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {projectorContext} from './d1-enrichment-context.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+// ADR 0162: an owner-review marker that is not d1 is refused; the fixture puts it at d1 with no rows (the former r2 marker with no
+// object gave the same empty overlay).
+const OWNER_D1="UPDATE owner_review_authority SET mode='d1' WHERE id=1;";
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-duplicate-retained-'));
 const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -17,7 +20,7 @@ assert.ok(chainFiles.length>=18,'the full chain');
 let databases=0;
 const migrated=()=>{
  const file=path.join(root,'d1-'+(databases++)+'.sqlite');
- const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chainFiles.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
+ const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chainFiles.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+'\n'+OWNER_D1,encoding:'utf8'});
  if(result.status!==0)throw new Error(result.stderr||'migration failed');
  return d1Standin(file);
 };
