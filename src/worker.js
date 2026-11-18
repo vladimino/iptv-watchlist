@@ -499,29 +499,34 @@ async function catalogArchiveFallbackR2(env,tmdbId,gate){
 }
 // AIR-475 review: Discovery is an independent domain. These are the ways its reader can refuse; while the Film/Person marker is open a refusal never hides a canonical Film.
 const CATALOG_DISCOVERY_FAULTS=['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative'];
-// AIR-531: HTTP status of the HTML document `/film/<id>`, in the SPA's own order (`resolveFilm`): a film of the pinned published generation by its own id (programme or watchlist
-// member, one indexed point read) is 200 whatever the catalog says; a TMDB permalink then asks the bounded catalog identity decision (no enrichment, no write, no outbound
-// request): absent 404, retired 410, conflict 409; any other id that is no member is 404. Only a definite answer sets a non-200 status: an unreadable generation or catalog
-// is never proof of absence, so the shell is 200 and the page decides. Only a 404/410/409 of the catalog reads the run's TMDB-id map (`memberTmdbOwners`, from the sealed documents,
-// kept per run) for a published film that owns the TMDB id through its trusted link: one owner is 200, several are 409, as in the page.
+// AIR-531: HTTP status of the HTML document `/film/<id>`, in the SPA's own order (`resolveFilm`): (1) a film of the pinned published generation by its own id (programme or
+// watchlist member, one indexed point read) is 200 whatever the catalog says; (2) a `tmdb_<n>` id then looks at the published films that own that TMDB id through their trusted
+// link (`memberTmdbOwners`, keyed and fenced by the publication generation): one owner is 200, several are 409, BEFORE the catalog is asked, as the page does; (3) the bounded
+// catalog identity decision (no enrichment, no write, no outbound request) gives 404 absent, 410 retired, 409 conflict. An id of another shape that is no member is 404. Only a definite
+// answer sets a non-200 status: when the generation, a member read, the owner map or the catalog cannot answer, nothing is proven absent and the shell is 200 (the page decides).
+// A catalog answer is a definite absence only when the published side was read completely. No published generation at all (no D1 binding or no pointer) has no members.
 async function filmDocumentStatus(env,id){
  const tmdb=/^tmdb_(.+)$/.exec(id);
  if(tmdb&&!CATALOG_FILM_TMDB.test(tmdb[1]))return 404;
- let member=null,live=null;
- try{
-  live=typeof PublishedEpg!=='undefined'?await PublishedEpg.currentGeneration(env):null;
-  if(live&&live.programmeRunId)member=await PublishedEpg.isMember(env,live.programmeRunId,id);
-  else live=null;
- }catch{member=null;live=null;}
- if(member===true)return 200;
- if(!tmdb)return member===false?404:200;
+ let live=null,unknown=false;
+ if(typeof PublishedEpg!=='undefined'&&PublishedEpg.hasDatabase(env)){
+  try{
+   const generation=await PublishedEpg.currentGeneration(env);
+   if(generation&&generation.programmeRunId)live=generation;
+   if(live&&await PublishedEpg.isMember(env,live.programmeRunId,id))return 200;
+  }catch{unknown=true;}
+ }
+ if(!tmdb)return live&&!unknown?404:200;
+ if(live&&!unknown){
+  try{
+   const owners=(await PublishedEpg.memberTmdbOwners(env,live.programmeRunId,live.generation)).get(tmdb[1]);
+   if(owners)return owners.size===1?200:409;
+  }catch{unknown=true;}
+ }
  const identity=await catalogFilmIdentity(env,tmdb[1]);
  if(identity.fault)return 200;
  const status={absent:404,retired:410,conflict:409}[identity.found.state]||200;
- if(status===200||!live)return status;
- // The SPA resolves a published film that owns this TMDB id through its trusted link before the catalog: one owner is that film (200), several are a conflict (409).
- try{const owners=(await PublishedEpg.memberTmdbOwners(env,live.programmeRunId)).get(tmdb[1]);if(owners)return owners.size===1?200:409;}catch{return 200;}
- return status;
+ return unknown?200:status;
 }
 // AIR-531: the identity decision of `/api/catalog/film/<tmdbId>` and nothing else: found, absent, retired, conflict or unavailable, or a typed fault. No programme, watchlist,
 // metadata, prediction or ratings read happens here, so the HTML document status can use it without the enrichment of the full answer.

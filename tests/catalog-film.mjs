@@ -274,6 +274,27 @@ const base={
    assert.equal((await doc('blablabla',method)).status,404,method+': an id that is no member is 404');
    assert.equal((await doc('tmdb_999',method)).status,404,method+': an absent TMDB permalink with no member is 404');
   }
+  // AIR-531 review 2: the sealed documents change in place within one run (`saveWatchlist`, `patchProgramme`) and advance the generation; the owner map and the status follow.
+  {
+   const PE=vm.runInContext('PublishedEpg',world),env={DB:docDb,BUCKET:docBucket};
+   const linked=(id,t)=>({...member(id),tmdbId:t,tmdbLink:{status:'resolved',link:{type:'movie',id:t}}});
+   const watch=films=>({updatedAt:new Date(now).toISOString(),films});
+   assert.equal((await doc('tmdb_777')).status,200,'warm: one owner');
+   const gen0=(await PE.currentGeneration(env)).generation;
+   const saved=await PE.saveWatchlist(env,watch([member('only-watchlist'),member('tmdb_556'),linked('twin-777','777')]),{now});
+   assert.ok(saved,'the watchlist is replaced in place');
+   assert.ok((await PE.currentGeneration(env)).generation>gen0,'a replacement in the same run advances the generation');
+   assert.equal((await doc('tmdb_777')).status,409,'same run, new owner: the cached map is not served; two owners are a conflict');
+   // The page answers a conflict of two owners before the catalog: a Film the catalog holds (tmdb_7) is 409 too.
+   await PE.saveWatchlist(env,watch([member('only-watchlist'),member('tmdb_556'),linked('twin-7a','7'),linked('twin-7b','7')]),{now});
+   assert.equal((await doc('tmdb_7')).status,409,'two owners and a catalog hit: 409, as the page');
+   assert.equal((await doc('tmdb_777')).status,200,'the removed second owner leaves one owner (the programme film): 200');
+   await PE.saveWatchlist(env,watch([member('only-watchlist'),member('tmdb_556')]),{now});
+   assert.equal((await doc('tmdb_7')).status,200,'no owner: the catalog Film is 200 again');
+   // A read that sees the generation move is unknown, never an absence.
+   const live=await PE.currentGeneration(env);
+   await assert.rejects(()=>PE.memberTmdbOwners(env,live.programmeRunId,live.generation-1),/published_epg_fence/,'a stale generation is fenced');
+  }
   assert.ok((await doc('heat-1995')).text.includes('shell'),'the shell is still served on GET');
   // A generation that cannot be read is no proof of absence: the shell is served and the page decides.
   assert.equal((await doc('blablabla','GET',{DB:{prepare(){throw new Error('d1 down');}},BUCKET:docBucket})).status,200,'an unreadable generation fails open for a programme id');
