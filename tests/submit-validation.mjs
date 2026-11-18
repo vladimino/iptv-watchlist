@@ -103,6 +103,8 @@ const v2Stored=x=>JSON.stringify(['prediction_run','prediction_queue','predictio
 const runner=(await api('runner',undefined,'GET')).data;
 assert.equal(runner.protocol,'batch_v2');assert.deepEqual(runner.retiredProtocols,['v5']);assert.equal(runner.batchRunner.start,'/api/enrichment/batch/start');
 assert.deepEqual(runner.itemFailures.validation.issueCodes,schema.contract.issueCodes);assert.match(runner.itemFailures.validation.reportedVia,/results\[\]\.validation/);
+// AIR-452 follow-up: the schema contract names the batch v2 submit, never the retired v5 /api/enrichment/submit route.
+assert.match(schema.contract.reportedVia,/^POST \/api\/enrichment\/batch\/submit .*prediction_batch_submit.*results\[\]\.validation/);assert.ok(!/\/api\/enrichment\/submit\b/.test(JSON.stringify(schema)),'schema names no retired v5 submit route');
 assert.equal(runner.itemFailures.retryable,true);assert.ok(!JSON.stringify(runner).includes('/api/enrichment/next')&&!JSON.stringify(runner).includes('/api/enrichment/submit"'),'no retired v5 route is advertised');
 
 // 5. Film diagnostics return the stored summary and drop anything outside the vocabulary (a stored queue with seeded retry records; no run is needed).
