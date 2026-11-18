@@ -68,7 +68,7 @@ async function fixture({latencyMs=0,onQuery=null,extraHot=0,mix=0,decisions={},d
 }
 
 // The discovery source as a vm context, with a controllable clock and a TMDB stub that records its queries.
-function chunkContext({clock,onFetch,respond=null,fetchStatus=null,throwTimeout=false}){
+function chunkContext({clock,onFetch,respond=null,fetchStatus=null,throwTimeout=false,sync=null,authority=Authority}){
  const queueRefreshes=[];
  const realNow=Date.now.bind(Date);
  const FakeDate=class extends Date{static now(){return realNow()+clock.offset;}};
@@ -76,9 +76,9 @@ function chunkContext({clock,onFetch,respond=null,fetchStatus=null,throwTimeout=
  const signals={timeout(ms){timeouts.push(ms);return AbortSignal.timeout(ms);}};
  const context=vm.createContext({console,Date:FakeDate,Promise,URL,URLSearchParams,AbortSignal:signals,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
   fetch(url){const parsed=new URL(url),query=parsed.searchParams.get('query');searched.push(query);if(onFetch)onFetch(query,searched.length);if(throwTimeout){const error=new Error('The operation was aborted');error.name='TimeoutError';return Promise.reject(error);}if(fetchStatus)return Promise.resolve(new Response(JSON.stringify({}),{status:fetchStatus,headers:{'Content-Type':'application/json','Retry-After':'60'}}));return Promise.resolve(new Response(JSON.stringify(respond?respond(parsed):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
-  DiscoveryAuthority:Authority,pinEpg:async value=>value,
+  DiscoveryAuthority:authority,pinEpg:async value=>value,
   refreshPredictionQueue:async(target,report,trigger)=>{queueRefreshes.push(trigger);},
-  loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
+  loadJSON:async(target,key)=>{if(key==='sync.json')return sync;if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
  for(const file of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
  return {context,searched,timeouts,queueRefreshes};
@@ -901,9 +901,9 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
 // chunk, owns its own slice of the budget, restores real assignments from the new run's observation rows on the first hop, and still leaves candidate time:
 // unresolved work neither displaces it nor is displaced by it. With a fast D1 the whole set is restored in one hop and the cursor wraps to the start.
 {
- const decided=[],decisions={},catalog={};
- for(let index=0;index<90;index++){
-  const key='rep'+String(index).padStart(2,'0');
+ const replayCount=Authority.REPLAY_PAGE+54,decided=[],decisions={},catalog={};
+ for(let index=0;index<replayCount;index++){
+  const key='rep'+String(index).padStart(3,'0');
   const tmdb=String(5000+index);
   decided.push(key);
   decisions[key]={status:'verified',filmId:'tmdb_'+tmdb,tmdbId:tmdb,identitySource:'owner'};
@@ -914,9 +914,9 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  sql(file,`UPDATE published_epg_authority SET mode='d1', cutover='open', programme_run_id='${RUN}', generation=7`);
  const assignedRows=()=>Number(sql(file,"SELECT COUNT(*) AS n FROM published_epg_show WHERE basis='discovery'")[0].n);
  const publishedBefore=sql(file,'SELECT generation, watchlist_generation, programme_run_id FROM published_epg_authority')[0];
- const runHop=async({slowMs=0}={})=>{
+ const runHop=async({slowMs=0,sync=null}={})=>{
   const clock={offset:0};
-  const {context,searched}=chunkContext({clock,respond:()=>({results:[]})});
+  const {context,searched}=chunkContext({clock,sync,respond:()=>({results:[]})});
   const hopEnv={...env,DB:d1Standin(file,{onBatch(){clock.offset+=slowMs;}})};
   const lease=await Authority.acquireLease(hopEnv,{programmeRunId:RUN});hopEnv.discoveryLease=lease.lease;
   const result=await context.resolveDiscoveryChunk(hopEnv,{films:[]},24,lease.lease);
@@ -935,25 +935,80 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.ok(slow.result.timings.replayMs<=10000+2800,'the replay keeps to its own slice of the budget: '+slow.result.timings.replayMs);
  assert.equal(slow.result.assignment.bulkComplete,false,'a slow hop leaves the cursor mid-circle');
  assert.equal(slow.result.stage,'partial','unfinished replay keeps the series going');
- assert.ok(JSON.parse(statusPayload(file)).replayAfter,'the replay cursor is stored with the status');
+ // A page of 96 rows is three write batches: at 2.8 s each it may not finish inside the slice. The cursor then stays at the page start, which is harmless because the
+ // rows already written are no longer selected; the next hop must continue from there and restore more, not rescan the same rows.
+ const stored=JSON.parse(statusPayload(file));
+ assert.ok(typeof stored.replayAfter==='string'&&stored.programmeRunId===RUN,'the replay cursor belongs to the status of this run');
+ const resumed=await runHop({slowMs:2800});
+ assert.ok(assignedRows()>afterSlow,'the next slow hop continues and restores more: '+afterSlow+' then '+assignedRows());
+ assert.ok(resumed.result.assignment.assigned>0);
+ // AIR-535 review: the clock is the generation-matched completion receipt of sync.json. D1 `published_at` (2026-11-17T10:00:00Z, the scan time) differs from the receipt on purpose.
+ const stats=JSON.parse(statusPayload(file)).replayStats;
+ assert.equal(stats.programmeRunId,RUN);
+ assert.equal(stats.epgCompletedAt,null,'no receipt was supplied: the clock is unknown, never the D1 scan time');
+ assert.equal(stats.clock,null);assert.equal(stats.firstAssignedSinceCompletedMs,null,'no interval without a clock');
+ assert.equal(stats.chunks,2,'two replay chunks so far');
+ assert.equal(stats.coverage.basis,'verified_slots_upper_bound');
+ assert.equal(stats.coverage.assigned,assignedRows(),'coverage counts every Discovery row of the run, not only this chunk');
+ assert.equal(stats.coverage.verifiedSlots,replayCount,'the denominator is the verified observations slots (an upper bound of the eligible ones)');
+ assert.ok(stats.firstAssignedAt);
+ assert.equal(Boolean(stats.lapCompletedAt),assignedRows()===replayCount,'the lap is stamped complete exactly when every verified observation has its slot');
+ // Clock cases on a fresh status each time. scan (D1) 10:00, receipt 11:15, the chunk runs at the real now: the interval is now minus the RECEIPT.
+ const receipt='2026-11-17T11:15:00.000Z',cases=[
+  ['complete',{runId:RUN,stage:'complete',completedAt:receipt,updatedAt:'2026-11-17T10:59:00.000Z'},receipt,false],
+  ['recovered run keeps its receipt',{runId:RUN,stage:'complete',completedAt:receipt,error:'seal_unit'},receipt,true],
+  ['legacy record without completedAt',{runId:RUN,stage:'complete',updatedAt:'2026-11-17T11:16:00.000Z'},'2026-11-17T11:16:00.000Z',false],
+  ['in flight',{runId:RUN,stage:'epg',updatedAt:receipt},null,null],
+  ['another run',{runId:'run-other',stage:'complete',completedAt:receipt},null,null],
+  ['complete with an error and no completedAt',{runId:RUN,stage:'complete',error:'x',updatedAt:receipt},null,null],
+  ['receipt in the future gives a negative interval, unclamped',{runId:RUN,stage:'complete',completedAt:'2099-01-01T00:00:00.000Z'},'2099-01-01T00:00:00.000Z',false]
+ ];
+ for(const [label,record,expectedAt,recovered] of cases){
+  sql(file,"UPDATE discovery_status SET payload_json=json_remove(payload_json,'$.replayStats','$.replayLapAt')");
+  await runHop({slowMs:2800,sync:record});
+  const one=JSON.parse(statusPayload(file)).replayStats;
+  assert.equal(one.epgCompletedAt,expectedAt,label);assert.equal(one.epgCompletionRecovered,recovered,label);
+  assert.equal(one.clock,expectedAt?'sync_completion_receipt':null,label);
+  const t50=one.coverageMilestones.t50;
+  assert.ok(t50&&t50.at,label+': every verified slot is already assigned, so the milestones are stamped');
+  if(expectedAt)assert.equal(t50.sinceCompletedMs,Date.parse(t50.at)-Date.parse(expectedAt),label+': measured against the receipt, not the scan time');
+  else assert.equal(t50.sinceCompletedMs,null,label+': no clock, no interval');
+  if(expectedAt==='2099-01-01T00:00:00.000Z')assert.ok(t50.sinceCompletedMs<0,'a negative interval is not clamped to zero');
+ }
+ // A hop retried under the same lease after its status was saved reads that status as prior: its chunk is counted once.
+ {
+  sql(file,"UPDATE discovery_status SET payload_json=json_remove(payload_json,'$.replayStats','$.replayLapAt')");
+  const clock={offset:0};
+  const {context}=chunkContext({clock,respond:()=>({results:[]})});
+  const hopEnv={...env,DB:d1Standin(file,{})};
+  const lease=await Authority.acquireLease(hopEnv,{programmeRunId:RUN});hopEnv.discoveryLease=lease.lease;
+  await context.resolveDiscoveryChunk(hopEnv,{films:[]},24,lease.lease);
+  const first=JSON.parse(statusPayload(file)).replayStats.chunks;
+  await context.resolveDiscoveryChunk(hopEnv,{films:[]},24,lease.lease);
+  const second=JSON.parse(statusPayload(file)).replayStats.chunks;
+  await Authority.releaseLease(hopEnv,lease.lease);
+  assert.equal(second,first,'a retried hop under the same lease is not counted twice');
+ }
  assert.deepEqual(sql(file,'SELECT generation, watchlist_generation, programme_run_id FROM published_epg_authority')[0],publishedBefore,'only the EPG sync moves the published generation');
  // Uniqueness and provenance: one Film per slot, every row a Discovery row of this run.
  assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM (SELECT channel_id, start_ms FROM published_epg_show WHERE programme_run_id='"+RUN+"' GROUP BY channel_id, start_ms HAVING COUNT(*)>1)")[0].n),0);
  // A new EPG generation: the stored cursor belongs to the previous run and must not carry over. The new run has no assigned rows; the lowest verified key is restored first.
+ // Force a mid-lap cursor (at this page size a slow hop may leave it at the page start) so the test still proves a cursor of another run is ignored.
+ sql(file,"UPDATE discovery_status SET payload_json=json_set(payload_json,'$.replayAfter','rep"+String(replayCount-1).padStart(3,'0')+"')");
  assert.ok(JSON.parse(statusPayload(file)).replayAfter);
  sql(file,'DELETE FROM published_epg_show');
  sql(file,"UPDATE discovery_status SET payload_json=json_set(payload_json,'$.programmeRunId','run-previous')");
  const nextGeneration=await runHop({slowMs:2800});
  assert.ok(nextGeneration.result.assignment.bulkObservations>0);
- assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM published_epg_show WHERE match_reason='rep00'")[0].n)>0,true,'a cursor stored for another run is ignored: the new run starts at its first key');
+ assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM published_epg_show WHERE match_reason='rep000'")[0].n)>0,true,'a cursor stored for another run is ignored: the new run starts at its first key');
  // The next natural hops finish the circle; with a fast D1 that is one hop.
  let hops=0,last;
  do{last=await runHop();hops++;}while(last.result.assignment.bulkComplete===false&&hops<5);
  assert.equal(last.result.assignment.bulkComplete,true,'the circle completes');
- assert.equal(assignedRows(),90,'every verified observation of the new run has its slot');
+ assert.equal(assignedRows(),replayCount,'every verified observation of the new run has its slot');
  const again=await runHop();
  assert.equal(again.result.assignment.bulkObservations,0,'a finished replay finds nothing to do and costs one select');
- assert.equal(assignedRows(),90);
+ assert.equal(assignedRows(),replayCount);
 }
 
 // 24. The replay of a new generation is not paced by the series backoff. On a D1 so slow that no TMDB request fits after the replay, a chunk whose replay wrote assigned rows
@@ -1057,6 +1112,45 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  sql(file,"UPDATE discovery_status SET payload_json=json_set(payload_json,'$.programmeRunId','run-previous')");
  const fresh=await runHop();
  assert.equal(fresh.result.assignment.bulkResting,false,'another run starts with a lap');
+}
+// 26. AIR-535 review: the page of the replay against the TMDB work of the SAME full 40-second hop. Both page sizes run the same mixed fixture (verified observations that need replay plus 30
+// unresolved candidates) on the same modelled D1 (a read costs `readMs`, a write batch `batchMs`, on the fake clock). Compared: TMDB requests started, candidates checked, the
+// time TMDB and the replay each took, the rows restored and the hop's wall. Modelled, not measured: it shows no displacement of TMDB work by the wider page, nothing about production latency.
+{
+ const compare=async({readMs,batchMs,page})=>{
+  const decided=[],decisions={},catalog={};
+  for(let index=0;index<Authority.REPLAY_PAGE*3;index++){
+   const key='cmp'+String(index).padStart(3,'0'),tmdb=String(9000+index);
+   decided.push(key);decisions[key]={status:'verified',filmId:'tmdb_'+tmdb,tmdbId:tmdb,identitySource:'owner'};
+   catalog['tmdb_'+tmdb]={id:'tmdb_'+tmdb,tmdbId:tmdb,canonicalIdentity:'tmdb:'+tmdb,title:'Film '+key,original:'Film '+key,year:2005};
+  }
+  const {file,env}=await fixture({decided,decisions,catalog,extraHot:30});
+  sql(file,`INSERT INTO published_epg_generation (programme_run_id, phase, published_at, payload_sha256, created_at) VALUES ('${RUN}','published','2026-11-17T10:00:00Z','x','2026-11-17T10:00:00Z')`);
+  sql(file,`UPDATE published_epg_authority SET mode='d1', cutover='open', programme_run_id='${RUN}', generation=7`);
+  const clock={offset:0};
+  const authority=new Proxy(Authority,{get:(target,prop)=>prop==='replayUnassignedSlots'?(e,spec,ctx)=>target.replayUnassignedSlots(e,{...spec,limit:page},ctx):target[prop]});
+  const {context,searched}=chunkContext({clock,authority,respond:()=>({results:[]})});
+  const hopEnv={...env,DB:d1Standin(file,{onQuery(){clock.offset+=readMs;},onBatch(){clock.offset+=batchMs;}})};
+  const lease=await Authority.acquireLease(hopEnv,{programmeRunId:RUN});hopEnv.discoveryLease=lease.lease;
+  const result=await context.resolveDiscoveryChunk(hopEnv,{films:[]},24,lease.lease);
+  await Authority.releaseLease(hopEnv,lease.lease);
+  const assigned=Number(sql(file,"SELECT COUNT(*) AS n FROM published_epg_show WHERE basis='discovery'")[0].n);
+  return {page,tmdbStarted:searched.length,checked:result.checked,tmdbCalls:result.tmdbCalls,tmdbMs:result.timings.tmdbMs,replayMs:result.timings.replayMs,totalMs:result.timings.totalMs,assigned,error:result.error};
+ };
+ const rows=[];
+ for(const [label,readMs,batchMs] of [['fast D1, 50 ms per round trip',50,50],['100 ms per round trip',100,100],['slow writes, 2.8 s per batch, 50 ms reads',50,2800]]){
+  const before=await compare({readMs,batchMs,page:40}),after=await compare({readMs,batchMs,page:Authority.REPLAY_PAGE});
+  rows.push({label,before,after});
+  if(process.env.IPTV_PRINT_TIMELINE)console.log(label,JSON.stringify({before,after}));
+  assert.ok(after.tmdbStarted>=before.tmdbStarted,label+': the wider page starts at least as many TMDB requests: '+before.tmdbStarted+' -> '+after.tmdbStarted);
+  assert.ok(after.checked>=before.checked&&after.tmdbCalls>=before.tmdbCalls,label+': checked and TMDB calls do not fall');
+  assert.ok(after.assigned>=before.assigned,label+': at least as many rows restored: '+before.assigned+' -> '+after.assigned);
+  assert.ok(after.replayMs<=10000+batchMs,label+': the replay keeps to its slice: '+after.replayMs);
+  // With 2.8 s batches the existing path already ends about 50 ms past 40 s (an in-flight batch cannot be pre-empted); the wider page must not make the hop longer.
+  assert.ok(after.totalMs<=before.totalMs+250&&after.totalMs<=41000,label+': the hop is no longer than with a page of 40: '+before.totalMs+' -> '+after.totalMs);
+  assert.ok(after.replayMs<=before.replayMs+250,label+': the same rows are not restored more slowly: '+before.replayMs+' -> '+after.replayMs);
+ }
+ if(process.env.IPTV_PRINT_TIMELINE)console.log(JSON.stringify(rows));
 }
 
 console.log('discovery chunk budget ok');

@@ -42,6 +42,14 @@ const PAGED_REPLAY_BUDGET_MS=10000;
 // A new decision is assigned when it is written; the next lap picks up an observation that became assignable later.
 const PAGED_REPLAY_RELAP_MS=30*60*1000;
 const DISCOVERY_LEASE_RENEW_MARGIN_MS=45000;
+// AIR-535: the completion receipt of the EPG run `runId`, with the contract of `epgPublicationState`: the sync record names this run, is complete, and carries `completedAt`
+// (or, for a legacy record without the field, `updatedAt` when it has no error). Anything else is no receipt.
+function epgCompletionOf(sync,runId){
+ if(!sync||typeof sync!=='object'||!runId||sync.runId!==runId||sync.stage!=='complete')return null;
+ const receipt=Object.prototype.hasOwnProperty.call(sync,'completedAt')?sync.completedAt:(sync.error?null:sync.updatedAt);
+ const ms=typeof receipt==='string'?Date.parse(receipt):NaN;
+ return Number.isFinite(ms)?{at:new Date(ms).toISOString(),recovered:!!sync.error}:null;
+}
 const budgetExhaustedError=()=>Object.assign(new Error('chunk wall budget exhausted'),{name:'BudgetExhaustedError'});
 // Fairness fence written *before* TMDB so a request that overruns persistLimit still rotates HOL.
 // Not checked/verified, not dropped, and does not pause the series while other keys are eligible.
@@ -351,6 +359,13 @@ async function publishedPointer(env){
  }
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null};
+}
+const DISCOVERY_FENCE_COLLISION_RETRIES=2,DISCOVERY_FENCE_COLLISION_DEFER_MS=30000;
+// The authority gate still names this run and is ready: a fence refusal then was a generation-counter collision, not a switch of the published run.
+async function authorityStillOwnsRun(env,runId){
+ if(typeof DiscoveryAuthority==='undefined')return true;
+ const gate=await DiscoveryAuthority.readAuthority(env);
+ return !!gate.ready&&gate.transfer!=='loading'&&(gate.programmeRunId??null)===runId;
 }
 async function publishedGenerationMatches(env,seenRunId){
  const generation=await publishedPointer(env);
@@ -767,9 +782,21 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   timings.renewals++;if(timings.firstRenewMs==null)timings.firstRenewMs=Date.now()-t0;
  };
  // A D1 write that fails its fence is either a lost lease (the renewal throws) or a generation that moved under it.
+ // AIR-534: a discovery_fence is a CAS collision (the hourly reporting write bumps discovery_authority.generation) as often as a real generation switch. The rolled-back batch is retried a bounded
+ // number of times while the published run is still this chunk's run; only a real switch, a gate that is no longer ready for this run, or exhausted retries return null.
+ let generationCollision=false;
  const guarded=async write=>{
-  try{return await write();}
-  catch(e){if(e?.code!=='discovery_fence')throw e;try{await fence();}catch(le){throw lost(le,'write');}return null;}
+  for(let attempt=0;;attempt++){
+   try{return await write();}
+   catch(e){
+    if(e?.code!=='discovery_fence')throw e;
+    try{await fence();}catch(le){throw lost(le,'write');}
+    const sameRun=!source.programmeRunId||(await publishedGenerationMatches(env,source.programmeRunId)&&await authorityStillOwnsRun(env,source.programmeRunId));
+    if(!sameRun)return null;
+    if(attempt>=DISCOVERY_FENCE_COLLISION_RETRIES){generationCollision=true;return null;}
+    timings.fenceRetries=(timings.fenceRetries||0)+1;
+   }
+  }
  };
  const selectAfter=typeof last?.selectAfter==='string'?last.selectAfter:'';
  const touchAfter=typeof last?.touchAfter==='string'?last.touchAfter:'';
@@ -793,6 +820,24 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  }else if(replayResting)replayRun={...replayRun,skipped:true};
  const nextReplayLapAt=!replayRun.skipped&&source.programmeRunId&&replayRun.complete===true&&!replayRun.stale&&!replayRun.refused?new Date().toISOString():replayLapAt;
  timings.replayMs=Date.now()-replayStarted;
+ // AIR-535: measured, per generation, carried in the status; nothing here is an estimate. The clock is the generation-matched completion receipt of `sync.json` (the contract of
+ // `epgPublicationState`), NOT `published_epg_generation.published_at`, which is the scan time (82 minutes earlier on 18 Nov). Without that receipt (run in flight, another run,
+ // an unreadable record) the clock is null and no interval is derived. An interval is never clamped: a negative one (replay before completion) is data.
+ const priorStats=sameRun&&last?.replayStats&&last.replayStats.programmeRunId===source.programmeRunId?last.replayStats:null;
+ let completion=priorStats?.epgCompletedAt?{at:priorStats.epgCompletedAt,recovered:!!priorStats.epgCompletionRecovered}:null;
+ if(!completion&&source.programmeRunId){try{completion=epgCompletionOf(await loadJSON(env,'sync.json'),source.programmeRunId);}catch{completion=null;}}
+ const nowIso=new Date().toISOString(),sinceCompleted=at=>completion&&at?Date.parse(at)-Date.parse(completion.at):null;
+ // One count statement per replaying chunk, only when the replay slice left room for it; a resting chunk carries the previous reading.
+ const coverageFits=()=>Date.now()+cappedWriteMs()<persistLimit();
+ const coverageNow=source.programmeRunId&&!replayRun.skipped&&coverageFits()?await DiscoveryAuthority.replayCoverage(env,source.programmeRunId):null;
+ const coverage=coverageNow?{...coverageNow,measuredAt:nowIso,basis:'verified_slots_upper_bound'}:priorStats?.coverage||null;
+ const milestones={...(priorStats?.coverageMilestones||{})};
+ if(coverageNow&&coverageNow.verifiedSlots>0)for(const [name,share] of [['t50',0.5],['t90',0.9],['t95',0.95],['t99',0.99]])if(!milestones[name]&&coverageNow.assigned>=Math.ceil(coverageNow.verifiedSlots*share))milestones[name]={at:nowIso,sinceCompletedMs:sinceCompleted(nowIso)};
+ const chunkAssigned=replayRun.outcomes.assigned,firstAssignedAt=priorStats?.firstAssignedAt||(chunkAssigned>0?nowIso:null);
+ // A hop retried after its status was saved but before its checkpoint reads this status as prior; counting its own hopId twice would inflate `chunks`.
+ const sameHop=!!priorStats&&priorStats.lastHopId===hopId;
+ const lapNow=nextReplayLapAt&&nextReplayLapAt!==replayLapAt?nextReplayLapAt:null;
+ const replayStats=source.programmeRunId?{programmeRunId:source.programmeRunId,epgCompletedAt:completion?.at||null,epgCompletionRecovered:completion?!!completion.recovered:null,clock:completion?'sync_completion_receipt':null,lastHopId:hopId,firstReplayChunkAt:priorStats?.firstReplayChunkAt||(replayRun.skipped?null:startedAt),firstAssignedAt,firstAssignedSinceCompletedMs:firstAssignedAt?(priorStats?.firstAssignedSinceCompletedMs??sinceCompleted(firstAssignedAt)):null,chunks:(priorStats?.chunks||0)+(replayRun.skipped||sameHop?0:1),coverage,coverageMilestones:milestones,lapCompletedAt:lapNow||priorStats?.lapCompletedAt||null,lapCompletedSinceCompletedMs:lapNow?sinceCompleted(lapNow):priorStats?.lapCompletedSinceCompletedMs??null}:null;
  const walkStarted=Date.now();
  const selected=await DiscoveryAuthority.selectActionableObservations(env,{after:selectAfter,touchAfter,now:Date.now(),pageSize:Math.max(limit,DiscoveryAuthority.SELECT_PAGE),touchLimit:PAGED_CHEAP_FILMS,shouldStop:()=>Date.now()>=walkDeadline,beforeQuery:heartbeat});
  timings.walkMs=Date.now()-walkStarted;timings.pages=selected.queries;timings.concurrency=1;
@@ -840,7 +885,9 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  let checked=0,added=0,tmdbCalls=0,screenedOut=0,knownAliases=0,touchedWritten=0,cheapRemaining=0,deferred=0;
  const starved=[];
  const deferredKeys=new Set();
- const programmeChanged=()=>({schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,currentProgrammeRunId:null,timings});
+ const programmeChanged=()=>generationCollision?({schemaVersion:2,stage:'partial',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:new Date(Date.now()+DISCOVERY_FENCE_COLLISION_DEFER_MS).toISOString(),at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,generationCollision:true,timings}):({schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,currentProgrammeRunId:null,timings});
+ // AIR-534: a collision that exhausted its retries in the batched replay defers the chunk (bounded backoff) instead of continuing as an ordinary chunk.
+ if(generationCollision)return programmeChanged();
  // ADR 0142 decisions 4 and 5. Every assignment is a guarded insert behind the stored decision; the totals reach the chunk summary and the Discovery status.
  const assignment={assigned:replayRun.outcomes.assigned,present:0,evidence_drift:replayRun.outcomes.evidence_drift,slot_taken:0,film_absent:replayRun.outcomes.film_absent,stale_run:0,decision_changed:0,observation_inactive:0,slot_absent:0,refused:replayRun.refused?1:0,replayed:0,replayRemaining:0,bulkObservations:replayRun.observations,bulkPages:replayRun.pages,bulkGuardSkipped:replayRun.outcomes.guard_skipped,bulkComplete:replayRun.complete,bulkResting:!!replayRun.skipped};
  const candidateByKey=new Map(),driftSeen=new Map();
@@ -905,6 +952,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   for(const candidate of replay){
    if(!cheapWorkFits(1)){assignment.replayRemaining++;continue;}
    if(await assignSlots(candidate.key,'replay_assignment'))assignment.replayed++;
+   if(generationCollision)return programmeChanged();
   }
  }
  timings.cheapMs=Date.now()-cheapStarted;
@@ -1001,6 +1049,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    deferredKeys.delete(candidate.key);
    checked++;
    if(decisions[candidate.key]?.status==='verified'&&Date.now()<persistLimit())await assignSlots(candidate.key,'candidate_assignment');
+   if(generationCollision)return programmeChanged();
   }catch(e){
    if(e?.name==='BudgetExhaustedError'){if(tmdbCalls>callsAtStart&&!deferredKeys.has(candidate.key)){decisions[candidate.key]=previous;starved.push({candidate,previous});}break;}
    if((e?.name==='TimeoutError'||e?.name==='AbortError')&&tmdbCalls>callsAtStart){if(!deferredKeys.has(candidate.key)){decisions[candidate.key]=previous;starved.push({candidate,previous});}break;}
@@ -1084,6 +1133,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     revalidation.revalidated+=reconfirmed.length;revalidation.revalidation_failed+=failed.length;
     if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)revalidation.revalidation_exhausted++;
     if(reconfirmed.length&&Date.now()+writeEstimate(1)<=persistLimit())await assignSlots(key,'revalidation_assignment');
+    if(generationCollision)return programmeChanged();
    }catch(e){
     if(e?.name==='BudgetExhaustedError'){revalidation.deferred++;break;}
     if(e?.name==='LeaseLostError'){e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt:'revalidation'};throw e;}
@@ -1126,7 +1176,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  }
  if(!selected.items.length&&remaining===0)nextAfter=selected.after||'';
  const nextTouchAfter=selected.touches.length?selected.touchAfter||touchAfter:touchAfter;
- const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',replayLapAt:nextReplayLapAt,timings};
+ const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',replayLapAt:nextReplayLapAt,replayStats,timings};
  try{await fence();}catch(e){throw lost(e,'final');}
  // `preCommitMs` is what the stored status carries: the time up to its own write. The status write, the continuation
  // checkpoint and the total through that checkpoint are measured after the writes and reach only the returned
@@ -1876,8 +1926,10 @@ async function discoveryExecutorReadout(env,continuation,options={}){
  else if(liveness==='unknown')owner='unknown';
  else if(facts.alive&&facts.active)owner='workflow';
  else if(facts.active&&!facts.stalled&&liveness==null)owner='workflow';
- const degraded=stored?.phase==='uncertain'||stored?.phase==='unknown'||liveness==='unknown'||!!facts.stalled||stoppedWithBacklog||!!facts.recoveryWaiting||!!facts.quarantined||!!(facts.dead&&pending);
- return {configured,owner,programmeRunId:stored?.programmeRunId||continuation?.programmeRunId||null,instanceId:stored?.instanceId||null,series:Number.isInteger(stored?.series)?stored.series:null,phase:stored?.phase||null,waitingUntil:stored?.waitingUntil||null,waitingReason:stored?.reason||null,lastProgress:stored?.lastProgress||null,chunks:Number.isInteger(stored?.chunksThisInstance)?stored.chunksThisInstance:null,recovery:stored?.recovery||null,pending,eligible:!!decision?.run||continuation?.reason==='chunk_budget',degraded,stalled:!!facts.stalled,recoveryDue:facts.recoveryDue||null,liveness,updatedAt:facts.updatedAt||null,budget:typeof discoveryWorkflowChunkLimit==='function'?{externalSeries:discoveryChunkBudget(),instanceChunkLimit:discoveryWorkflowChunkLimit()}:null};
+ // AIR-534: a stopped series whose recovery is due and nobody alive has taken over is overdue, whatever the queue says; it is never reported as healthy.
+ const recoveryOverdue=stored?.phase==='stopped'&&pending&&!terminal&&!facts.alive&&Number.isFinite(Date.parse(facts.recoveryDue||''))&&Date.parse(facts.recoveryDue)<=now;
+ const degraded=recoveryOverdue||stored?.phase==='uncertain'||stored?.phase==='unknown'||liveness==='unknown'||!!facts.stalled||stoppedWithBacklog||!!facts.recoveryWaiting||!!facts.quarantined||!!(facts.dead&&pending);
+ return {configured,owner,programmeRunId:stored?.programmeRunId||continuation?.programmeRunId||null,instanceId:stored?.instanceId||null,series:Number.isInteger(stored?.series)?stored.series:null,phase:stored?.phase||null,waitingUntil:stored?.waitingUntil||null,waitingReason:stored?.reason||null,lastProgress:stored?.lastProgress||null,chunks:Number.isInteger(stored?.chunksThisInstance)?stored.chunksThisInstance:null,recovery:stored?.recovery||null,pending,eligible:!!decision?.run||continuation?.reason==='chunk_budget',degraded,recoveryOverdue,stalled:!!facts.stalled,recoveryDue:facts.recoveryDue||null,liveness,updatedAt:facts.updatedAt||null,budget:typeof discoveryWorkflowChunkLimit==='function'?{externalSeries:discoveryChunkBudget(),instanceChunkLimit:discoveryWorkflowChunkLimit()}:null};
 }
 async function resolveDiscoveryRequest(env,execution,body,caller='http'){
  const started=Date.now(),step=continuationStep(caller,'/api/enrichment/discovery/resolve',null);
