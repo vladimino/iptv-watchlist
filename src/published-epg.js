@@ -274,6 +274,14 @@ export async function readDocumentAt(env,programmeRunId,kind,generation){
  if(!closed||closed.generation!==generation||closed.programmeRunId!==programmeRunId)throw failed('published_epg_fence');
  return document;
 }
+// AIR-529. A cheap signature of the Discovery-assigned shows of one generation: ONE indexed aggregate, no row payload. Discovery adds (and revalidation
+// deletes and re-inserts) assigned rows inside a generation whose `programmeRunId` does not move, so the id alone cannot tell the Prediction queue that
+// its hot/cold basis is old. A new row moves the count, MAX(rowid) and the sum; a delete and re-insert reuses a freed rowid (no AUTOINCREMENT), so a small content sum over start and film id tail keeps it different; a collision only delays a refresh to the next change.
+export async function assignedShowsSignature(env,programmeRunId){
+ if(!programmeRunId)return null;
+ const row=await one(database(env),"SELECT COUNT(*) AS n, COALESCE(MAX(rowid),0) AS m, COALESCE(SUM((start_ms%65521)*31+length(film_id)*7+COALESCE(unicode(substr(film_id,-1)),0)*13+COALESCE(unicode(substr(film_id,-2,1)),0)*17+COALESCE(unicode(substr(film_id,-3,1)),0)*19),0) AS h FROM published_epg_show WHERE programme_run_id=? AND basis='discovery'",[programmeRunId]);
+ return row?String(row.n)+':'+String(row.m)+':'+String(row.h):null;
+}
 export async function readShows(env,programmeRunId){
  const rows=await many(database(env),'SELECT film_id, channel_id, channel, start_ms, end_ms, epg_title, basis, match_reason FROM published_epg_show WHERE programme_run_id=? ORDER BY film_id, start_ms, channel_id',[programmeRunId]);
  return rows.map(row=>({filmId:row.film_id,channelId:row.channel_id,channel:row.channel??null,startMs:Number(row.start_ms),endMs:row.end_ms==null?null:Number(row.end_ms),epgTitle:row.epg_title??null,basis:row.basis??null,matchReason:row.match_reason??null}));

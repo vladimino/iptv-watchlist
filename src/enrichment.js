@@ -1435,6 +1435,8 @@ async function consistentQueueReport(pinned,report){
 }
 async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const pinned=await queuePin(env,report);
+ // AIR-529: read BEFORE the programme and catalog are used, so an assignment landing during the rebuild leaves the stored signature older than the data and costs one more refresh, never a missed one.
+ const showsSignature=await currentShowsSignature(pinned,report);
  const source=await consistentQueueReport(pinned,report);
  const [profile,storedIndex,catalog,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned),loadJSON(env,'sync.json')]);
  const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
@@ -1511,7 +1513,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const currentIds=new Set(missing.map(f=>String(f.id))),retries=boundRetryRecords(previous?.retries||{},currentIds),exhausted=id=>retryBudgetExhausted(retries[id]);
  const hotPending=missing.filter(f=>priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))];
  const hotCount=films.filter(f=>priority[f.id].hot).length,missingHot=missing.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-missingHot,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&fresh.get(String(f.id))).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
- const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:priorityProgrammeRunId,priorityBasis,priorityAsOf,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
+ const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:priorityProgrammeRunId,priorityBasis,priorityAsOf,showsSignature:authoritative?showsSignature:null,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
  if(recovery.ready){queue.recoveryRevision=recovery.revision;queue.recovery={revision:recovery.revision,activeIntents:recovery.size,denied:recoveryDenied};}
  return queue;
 }
@@ -1538,6 +1540,19 @@ function showsAuthoritative(sync,report){
  // An unsealed run that has not replaced the published programme leaves the previous snapshot in force.
  if(sync.runId&&sync.runId!==report.runId)return true;
  return false;
+}
+// AIR-529. The Discovery-assigned shows of the pinned D1 generation, as one cheap signature; null outside D1 authority or when it cannot be read (unknown, never a false match).
+async function currentShowsSignature(pinned,report){
+ if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.assignedShowsSignature!=='function')return null;
+ const runId=pinned?.epgPin?.authority==='d1'?pinned.epgPin.programmeRunId:null;
+ if(!runId||runId!==report?.runId)return null;
+ try{return await PublishedEpg.assignedShowsSignature(pinned,runId);}catch{return null;}
+}
+// Same generation, new Discovery assignments (AIR-529): the queue is due when it was ranked on another signature of the same run. A queue without a stored signature (built before this
+// field) is due once. An unreadable current signature is not a reason to rebuild (null), so a D1 read failure never turns every start into a refresh.
+function showsSignatureStale(queue,report,current){
+ if(!current||!queue||queue.priorityBasis!=='completed'||queue.programmeRunId!==report?.runId)return false;
+ return queue.showsSignature!==current;
 }
 function priorityRefreshDue(queue,report,sync){
  if(!queueShapeValid(queue)||!showsAuthoritative(sync,report))return false;
@@ -2455,7 +2470,12 @@ async function batchPreflight(env,body,tally=null){
  const read=await readQueueHead(env),stored=read.current,revision=read.head?.queueGeneration??null,why=queueAdvanceGate(stored,programme,profile,(await fingerprintRegistryDigests()).registry,(await predictionRecoveryOverlay(env)).revision);
  const priorityOpen=!why&&!!stored&&(stored.priorityBasis==='carried'||stored.priorityBasis==='neutral'||stored.programmeRunId!==programme.runId);
  const sync=priorityOpen?await loadJSON(env,'sync.json'):null;
- const priorityDue=priorityOpen&&priorityRefreshDue(stored,programme,sync);
+ let priorityDue=priorityOpen&&priorityRefreshDue(stored,programme,sync);
+ // AIR-529: the same generation with new Discovery assignments. One indexed aggregate per preflight, only on a queue ranked on this generation; no catalog scan.
+ if(!why&&stored&&!priorityDue&&!priorityOpen&&stored.priorityBasis==='completed'&&stored.programmeRunId===programme.runId){
+  const pinned=await queuePin(env,programme);
+  priorityDue=showsSignatureStale(stored,programme,await currentShowsSignature(pinned,programme));
+ }
  if(why)return {profile,report:programme,stale:why,priorityDue:false,revision,manifestSize};
  if(!stored)return {profile,report:programme,stale:'queue_shape',priorityDue:false,revision,manifestSize};
  try{
