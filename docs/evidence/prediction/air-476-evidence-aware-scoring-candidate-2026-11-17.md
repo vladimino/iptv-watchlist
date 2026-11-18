@@ -66,7 +66,8 @@ The tests include the two adversarial outputs found in the first independent rev
 ## What has and has not been measured
 
 - **Done:** static candidate integrity (diff, hashes, invariants, policy wording), fixture blindness, and the grader's behaviour on hand-written synthetic outputs (good and deliberately bad). These are static tests, **not** a semantic A/B.
-- **Not done:** no generator run. Running base vs candidate on the fixtures needs an external model call, which the card puts under a separate owner approval. No latency, research depth, rating change or MAE is claimed. Nothing here shows that the 14 November drop was caused by `unknown` handling.
+- **Later:** the owner-approved offline model A/B ran on 18 November 2026; see [AIR-476 offline A/B](air-476-offline-ab-2026-11-18.md).
+- **Not done here:** no generator run. Running base vs candidate on the fixtures needs an external model call, which the card puts under a separate owner approval. No latency, research depth, rating change or MAE is claimed. Nothing here shows that the 14 November drop was caused by `unknown` handling.
 
 **Comparison protocol, when approved.** Isolated runs, one fresh context per run, inputs from `generator-inputs.json` only; base and candidate with the same model, effort and profile; three repeats per variant; the closed corpus replaces web search, so the AIR-473 research budget is respected and source availability is not a confounder. Record per case the grader result, the rating, P(4+) and confidence; report flags with the reviewer's verdict. Expected signal: fewer `no_unknown_to_negative` flags and lower confidence on `s2`/`s1` with the candidate, while `s4` stays ≤3.0. Without independent ground truth this measures policy compliance, not accuracy.
 
