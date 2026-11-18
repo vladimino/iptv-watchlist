@@ -1445,6 +1445,8 @@ function archiveStopReason(error){
 }
 async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publishedRunId,kind='commit',holder=null}){
  const sourceHolder=holder||discoveryHolder(latest);
+ // AIR-533: `planClock` starts at the entry of the plan; `totalMs` of the plan log is measured from it. `elapsedMs` keeps its historical scope (from `planStarted`, after the
+ // active-ledger read and the archive pointer read) so it stays comparable with 16-18 November; the parts reconcile with `totalMs`, not with `elapsedMs`.
  const planClock={startedAt:Date.now()};const planMark=name=>{planClock[name]=Date.now();};
  const view=await readLedgerView(env);planMark('view');
  const archivePointer=await env.BUCKET.get(LEDGER_ARCHIVE_POINTER),archiveEtag=archivePointer?.etag??null,startId=archivePointer?(await archivePointer.json())?.manifestId||null:null;
@@ -1522,7 +1524,8 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   // and classify of the active ledger against the scan (`collect`), and the alsoArchived chain. Milliseconds only; a part that did not run is 0.
   let previous=planClock.startedAt;const part=name=>{if(!planClock[name])return 0;const value=planClock[name]-previous;previous=planClock[name];return value;};
   const parts={viewMs:part('view'),manifestMs:part('manifest'),reentryMs:part('reentry'),collectMs:part('collect'),alsoMs:part('merge')};
-  epgPhase(runId,'seal_stage_plan','exit',{elapsedMs:archiveStarted-planStarted,...parts,reentrySegments:wanted.size,departures:departures.length,backlog:drain?drain.backlog:0});
+  const totalMs=archiveStarted-planClock.startedAt;parts.restMs=totalMs-Object.values(parts).reduce((n,value)=>n+value,0);
+  epgPhase(runId,'seal_stage_plan','exit',{elapsedMs:archiveStarted-planStarted,totalMs,...parts,reentrySegments:wanted.size,departures:departures.length,backlog:drain?drain.backlog:0});
  }
  if(departures.length){
   try{
@@ -1537,10 +1540,11 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   const ordered=[...bySegment].sort((a,b)=>a[0]-b[0]);
   // The window is joined before any error leaves it (the caller releases the Discovery lease in its `finally`), and every put re-checks, immediately before it
   // starts, that no sibling has failed and that the last full fence is younger than ARCHIVE_SEGMENT_FENCE_MS (one shared refresh for the whole window).
-  let windowFailed=null,refreshing=null;
+  let windowFailed=null,refreshing=null,windowSize=0;
   const putGuard=async()=>{
    if(windowFailed)throw new Error('Discovery archive fence lost: window aborted');
-   if(Date.now()-lastFenceAt>=ARCHIVE_SEGMENT_FENCE_MS){refreshing=refreshing||fence().finally(()=>{refreshing=null;});await refreshing;if(windowFailed)throw new Error('Discovery archive fence lost: window aborted');}
+   if(Date.now()-lastFenceAt>=ARCHIVE_SEGMENT_FENCE_MS){// `fence()` restarts the count of writes since the last full fence; the window being written counts against the refreshed fence once (conservatively, as if all of its puts came after it), so no more than ARCHIVE_SEGMENT_FENCE_EVERY puts begin between two full fences.
+    refreshing=refreshing||fence().then(()=>{sinceFence=Math.max(sinceFence,windowSize);}).finally(()=>{refreshing=null;});await refreshing;if(windowFailed)throw new Error('Discovery archive fence lost: window aborted');}
   };
   const archiveSegment=async([segment,records])=>{
    const readAt=Date.now(),segmentItems=await readLedgerSegment(env,start,segment);tally.readMs+=Date.now()-readAt;
@@ -1554,7 +1558,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   for(let from=0;from<ordered.length;){
    const due=sinceFence>=ARCHIVE_SEGMENT_FENCE_EVERY||Date.now()-lastFenceAt>=ARCHIVE_SEGMENT_FENCE_MS;
    const size=Math.min(ARCHIVE_SEGMENT_CONCURRENCY,ordered.length-from,due?ARCHIVE_SEGMENT_CONCURRENCY:ARCHIVE_SEGMENT_FENCE_EVERY-sinceFence);
-   const windowEntries=ordered.slice(from,from+size);from+=size;
+   const windowEntries=ordered.slice(from,from+size);from+=size;windowSize=windowEntries.length;
    await segmentFence(windowEntries.length);
    const settled=await Promise.allSettled(windowEntries.map(archiveGuarded));
    const failed=settled.find(result=>result.status==='rejected');

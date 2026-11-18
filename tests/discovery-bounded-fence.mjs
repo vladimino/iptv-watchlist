@@ -49,8 +49,12 @@ function record(state){
  const [archive]=phase('seal_stage_archive');assert.ok(archive,'the archive phase is logged');
  // AIR-533: the plan is split into its parts (milliseconds and counts only), so the next natural run shows where its time goes.
  const [planParts]=phase('seal_stage_plan');assert.ok(planParts,'the plan phase is logged');
- assert.deepEqual(Object.keys(planParts).sort(),['alsoMs','at','backlog','collectMs','departures','edge','elapsedMs','event','manifestMs','phase','reentryMs','reentrySegments','runId','viewMs'].sort(),'sanitized plan parts');
- for(const field of ['alsoMs','collectMs','elapsedMs','manifestMs','reentryMs','reentrySegments','viewMs','departures'])assert.ok(Number.isFinite(planParts[field])&&planParts[field]>=0,'plan '+field);
+ assert.deepEqual(Object.keys(planParts).sort(),['alsoMs','at','backlog','collectMs','departures','edge','elapsedMs','event','manifestMs','phase','reentryMs','reentrySegments','restMs','runId','totalMs','viewMs'].sort(),'sanitized plan parts');
+ for(const field of ['alsoMs','collectMs','elapsedMs','manifestMs','reentryMs','reentrySegments','restMs','totalMs','viewMs','departures'])assert.ok(Number.isFinite(planParts[field])&&planParts[field]>=0,'plan '+field);
+ // The parts and the remainder add up to `totalMs` (measured from the entry of the plan); `elapsedMs` keeps its historical, narrower scope (from after the active-ledger read) and is never larger.
+ assert.equal(planParts.viewMs+planParts.manifestMs+planParts.reentryMs+planParts.collectMs+planParts.alsoMs+planParts.restMs,planParts.totalMs,'the plan parts reconcile with totalMs');
+ assert.ok(planParts.elapsedMs<=planParts.totalMs,'elapsedMs keeps its narrower historical scope');
+ assert.ok(planParts.restMs<=50,'the unmeasured remainder of the plan is within timer granularity: '+planParts.restMs);
  assert.equal(archive.segments,segments);assert.equal(archive.fences,fences,'the log counts the full fences');assert.equal(archive.fencesSkipped,segments-Math.ceil(segments/8),'and the skipped ones');
  assert.ok(fences<=Math.ceil(segments/8)+2,'at most one fence per 8 segment writes plus the manifest and the pointer: '+fences+' for '+segments);
  assert.ok(fences<segments+2,'fewer than the '+(segments+2)+' of one fence per write');
@@ -134,6 +138,27 @@ function record(state){
  assert.equal(clock.puts,0,'no segment put started after a sibling failed');
  assert.ok(clock.releasedAt!==null&&clock.releasedAt>=clock.lastOpAt,'the lease is released after the last archive operation');
  assert.equal(state.bkt.objects.get(POINTER)?.etag??null,null,'the pointer did not move');
+}
+
+// 2b-4. AIR-533 (re-review P1): a fence refreshed inside a window (a read or serialization that outlasts the 20 s fence age) restarts the count with the window's own writes, so no more
+// than 8 segment puts begin between two full fences, however the windows fall.
+{
+ const state=await setup();const rec=record(state);
+ const RealDate=context.Date;let skew=0;
+ context.Date=class extends RealDate{constructor(...args){super(...(args.length?args:[RealDate.now()+skew]));}static now(){return RealDate.now()+skew;}};
+ const realRead=context.readLedgerSegment;let reads=0;
+ // The first read of the run takes 25 simulated seconds; every later read and every put is instant.
+ context.readLedgerSegment=async(...args)=>{if(++reads===1)skew+=25000;return realRead(...args);};
+ logs.length=0;
+ try{await stage(state,{latest:latestFew()});}finally{context.Date=RealDate;context.readLedgerSegment=realRead;rec.restore();}
+ const segments=rec.events.filter(item=>item==='segment').length,fences=rec.events.filter(item=>item==='fence').length;
+ assert.ok(segments>=24,'many segments are rewritten: '+segments);
+ let since=0,worst=0,refreshed=false;
+ for(const item of rec.events){if(item==='fence')since=0;else if(item==='segment'){since++;worst=Math.max(worst,since);}}
+ // Two full fences in a row before the first put are the window's own fence and the refresh inside it.
+ for(let i=1;i<rec.events.length&&rec.events[i]!=='segment';i++)if(rec.events[i]==='fence'&&rec.events[i-1]==='fence')refreshed=true;
+ assert.ok(refreshed,'the slow read made the put guard refresh the fence inside the window');
+ assert.ok(worst<=8,'no more than 8 segment puts begin between two full fences, including a refresh inside a window: '+worst+' of '+segments+' over '+fences+' fences');
 }
 
 // 2c. A stop inside the archive is not silent: the error marker carries the counters so far and a closed reason, and fail-closed behaviour is unchanged.
