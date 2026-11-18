@@ -319,6 +319,8 @@ const LetterboxdRatings=(()=>{
   }
   return out;
  }
+ // AIR-489: a label the verified source check found, put on the planned films of the page before the event is finalised. Never replaces a title already known.
+ const withIdentityLabels=(plan,labels)=>{const fix=list=>(list||[]).map(item=>{const known=labels.get(item.id);if(!known)return item;return {...item,title:item.title||known.title||null,year:item.year??known.year??null,tmdb:item.tmdb||known.tmdb||null};});return {...plan,added:fix(plan.added),updated:fix(plan.updated),rated:fix(plan.rated)};};
  function addCounts(left,right){
   const out={...(left||{})};
   for(const [key,value] of Object.entries(right||{}))out[key]=typeof value==='number'?(out[key]||0)+value:value;
@@ -334,7 +336,7 @@ const LetterboxdRatings=(()=>{
   const prior=run.diary||null;
   if((cp.diaryPagesRead||0)>=1)return {pages:0,more:false,next:null,summary:prior};
   const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0};
-  let pagesRead=cp.diaryPagesRead||0,stepPages=0,leaseLost=false,resolved=0,unratedLids=[];
+  let pagesRead=cp.diaryPagesRead||0,stepPages=0,leaseLost=false,resolved=0,unratedLids=[],identityCounts={};
   // AIR-393: the films this page changes are *planned* from the view before any fact is written and saved on the run record under the page's
   // key (`diary.pageChanges[page]`, state `planned`), so a kill after the facts are written cannot lose them. A plan is an intent, not a
   // receipt: only a contribution in state `applied` reaches the event, and it is made `applied` with the page checkpoint after the facts were
@@ -360,6 +362,15 @@ const LetterboxdRatings=(()=>{
    }
    const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
    for(const key of ['films','written','unchanged','older','skipped','conflicts'])facts[key]+=result[key];
+   // AIR-489 / ADR 0166: the facts above are durable; only now is the source of a still unbridged id checked (bounded, never fatal, never before the facts).
+   let identityLabels=new Map();
+   if(typeof LetterboxdDiaryIdentity!=='undefined'){
+    try{
+     const slugs=new Map(rows.filter(row=>row.lid&&row.slug).map(row=>[row.lid,row.slug]));
+     const found=await LetterboxdDiaryIdentity.resolve(env,evidence.map(item=>({lid:item.lid,slug:slugs.get(item.lid)||null})),{clock,remaining});
+     identityLabels=found.labels;identityCounts=addCounts(identityCounts,found.counts);
+    }catch{}
+   }
    unratedLids=[...new Set(evidence.filter(item=>item.rating==null&&item.lid).map(item=>item.lid))];
    const proved=evidence.filter(item=>item.rating!=null).map(item=>({lid:item.lid,rating:result.ratings[item.lid]??item.rating}));
    let resolvedLids=new Set();
@@ -371,6 +382,7 @@ const LetterboxdRatings=(()=>{
       const shown=await LetterboxdFacts.confirmDiaryEffects(env,plan),queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
       plan={...plan,...shown,rated:plan.rated.filter(item=>removalQueueV2(queue)&&queue.films[item.id]?.state==='rated'&&queue.films[item.id]?.lastResult==='diary'&&queue.films[item.id]?.rating===item.rating)};
      }
+     if(identityLabels.size)plan=withIdentityLabels(plan,identityLabels);
      pageNow[key]={...plan,state:'applied'};
     }catch{pageNow[key]={added:[],updated:[],rated:[],resolved:[],more:{},state:'applied',incomplete:true};}
    }else if(incomplete)pageNow[key]={added:[],updated:[],rated:[],resolved:[],more:{},state:'applied',incomplete:true};
@@ -384,7 +396,7 @@ const LetterboxdRatings=(()=>{
   if(leaseLost)throw new LeaseLost();
   const failed=DIARY_ERRORS.includes(diary.lastOutcome),more=!failed&&!!diary.next;
   const summary={outcome:diary.lastOutcome,stopReason:diary.stopReason,pagesRead,historicalCoverage:'incomplete',counts:addCounts(prior?.counts,{pages:diary.counts.pages,rows:diary.counts.rows,added:diary.counts.added,updated:diary.counts.updated,conflicts:diary.counts.conflicts,overflowSuspected:diary.counts.overflowSuspected?1:0}),
-   facts:addCounts(prior?.facts,{...facts,enabled:true}),removalResolved:(prior?.removalResolved||0)+resolved,...(Object.keys({...stored,...planned,...pageNow}).length?{pageChanges:{...stored,...planned,...pageNow}}:{}),unratedLids,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
+   facts:addCounts(prior?.facts,{...facts,enabled:true}),...(Object.keys(identityCounts).length||prior?.identity?{identity:addCounts(prior?.identity,identityCounts)}:{}),removalResolved:(prior?.removalResolved||0)+resolved,...(Object.keys({...stored,...planned,...pageNow}).length?{pageChanges:{...stored,...planned,...pageNow}}:{}),unratedLids,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
   return {pages:stepPages,more,next:diary.next,summary};
  }
 
