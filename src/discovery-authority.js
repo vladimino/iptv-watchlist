@@ -45,7 +45,8 @@ function catalogPolicyKind(film,observation){
  if(!film||typeof film!=='object')return null;
  if(typeof filmAdmissionInput==='function'&&typeof admissionPolicy==='function'){
   const mapped=filmAdmissionInput(film);
-  return mapped.movie?admissionPolicy(mapped.movie,observation||mapped.observation):null;
+  const classify=typeof catalogCleanupPolicy==='function'?catalogCleanupPolicy:admissionPolicy;
+  return mapped.movie?classify(mapped.movie,observation||mapped.observation):null;
  }
  if(typeof admissionPolicy==='function')return admissionPolicy({...film,overview:storedOverview(film)},observation);
  const names=[...(film?.genres||[])].map(value=>String(typeof value==='string'?value:(value&&value.name)||'').normalize('NFKC').toLowerCase());
