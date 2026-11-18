@@ -114,6 +114,17 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.deepEqual(await readAuthority({DB:none,...optIn}),{mode:'r2',tables:false,version:7,ready:false});
  await assert.rejects(readAuthority({DB:none}),unavailable);
  assert.equal(await currentGeneration({DB:none,...optIn}),null);
+ // A contract at 8 or later declares the domain installed: zero tables is a broken install, refused with the opt-in set and with no mirror written. Version 7 stands in.
+ for(const version of [8,23,24]){
+  const broken=bare();
+  broken.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER); INSERT INTO schema_contract VALUES (1,'+version+')');
+  await assert.rejects(readAuthority({DB:broken,...optIn}),unavailable,'v'+version);
+  await assert.rejects(currentGeneration({DB:broken,...optIn}),unavailable,'v'+version);
+  const store=new MemoryBucket();let puts=0;const rememberPut=store.put.bind(store);store.put=async(...args)=>{puts++;return rememberPut(...args);};
+  await assert.rejects(repairMirrors({DB:broken,BUCKET:store,...optIn}),unavailable,'v'+version);
+  await assert.rejects(writeMirrors({DB:broken,BUCKET:store,...optIn},{programmeRunId:'run-x',programme:programme('run-x',[film('film:a')]),watchlist:watch([film('film:a')]),phase:'published'}),unavailable,'v'+version);
+  assert.equal(puts,0,'v'+version+': a refusal writes no mirror');
+ }
  // Partly installed (one published table), with each way the contract can be unusable, opted in: refused.
  for(const [label,setup] of [['no schema_contract',db=>{}],['no id=1 row',db=>db.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER)')],['non-numeric version',db=>db.sql("CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version TEXT); INSERT INTO schema_contract VALUES (1,'x')")],['a contract below 8',db=>db.sql('CREATE TABLE schema_contract (id INTEGER PRIMARY KEY, version INTEGER); INSERT INTO schema_contract VALUES (1,7)')]]){
   const partial=bare();

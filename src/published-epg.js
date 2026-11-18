@@ -6,7 +6,8 @@
 // no tables at all, a missing binding and a bound database with no schema_contract all
 // fail closed with published_epg_unavailable, never as a read of the R2 generation.
 // The explicit local stand-in is the caller setting PUBLISHED_EPG_DB_OPTIONAL to
-// standin: it serves the R2 generation when the domain is not installed at all. Mode d1 with cutover open reads and
+// standin: it serves the R2 generation when the domain is not installed at all, that is no
+// binding, no schema_contract, or a contract below 8 with none of the tables. Mode d1 with cutover open reads and
 // writes these tables and does not fall back to a different R2 generation.
 // This module does not import. The Worker bundle wraps it.
 // The publisher uses the Worker binding's batch. It does not send the offline
@@ -184,6 +185,8 @@ export async function readAuthority(db){
   const numeric=Number(version);
   if(!standin)throw failed('published_epg_unavailable');
   if(version==null||!Number.isFinite(numeric))return {mode:'r2',tables:false,version:null,ready:false};
+  // A contract at 8 or later declares the domain installed: none of its tables is a broken install, not an uninstalled domain.
+  if(numeric>=8)throw failed('published_epg_unavailable');
   return {mode:'r2',tables:false,version:numeric,ready:false};
  }
  if(!(Number(version)>=8))throw failed('published_epg_unavailable');
