@@ -38,7 +38,10 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Run non-functional tests
-        run: npm test -- --suite non-functional
+        # AIR-490: --jobs 3 instead of the default 6 on the 4 vCPU runner. Run 44310326343 (18 Nov 2026) hit the 300 s per-file
+        # limit in both canonical-producer-driver-mutation halves while six heavy mutation files ran at once. The per-file
+        # timeout and fail-fast stay as they are.
+        run: npm test -- --suite non-functional --jobs 3
         env:
           IPTV_TEST_REPORT: nonfunctional-report.json
 
