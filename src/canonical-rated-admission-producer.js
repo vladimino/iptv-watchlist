@@ -103,9 +103,10 @@ async function planRetention(env,input){
  const row=await one(db,'SELECT watchlist,evidence_json,observed_at FROM film_retention WHERE film_id=?',[content.id]);
  const revision=await revisionOf(db,content.id);
  if(row&&!(content.observedAt>row.observed_at))return {id:content.id,revision,absent:false,noop:true,stale:true};
- const evidence=JSON.stringify(content.evidence??{});
- const noop=!!(row&&Number(row.watchlist)===(content.watchlist?1:0)&&row.evidence_json===evidence&&row.observed_at===content.observedAt);
- return {id:content.id,revision,absent:false,noop};
+ // AIR-532 (ADR 0173, owner decision of 18 Nov 2026): `observed_at` is the start of the current watchlist state, not the last scan that confirmed it. A later scan that
+ // reports the SAME boolean writes nothing (no receipt, no batch, no revision bump); only a change of the boolean (an exit or a re-add) or a first observation writes.
+ const unchanged=!!(row&&Number(row.watchlist)===(content.watchlist?1:0));
+ return {id:content.id,revision,absent:false,noop:unchanged,...(unchanged?{unchanged:true}:{})};
 }
 
 function kindOperation(operation,{replan,now=()=>new Date().toISOString()}={}){

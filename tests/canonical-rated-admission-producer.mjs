@@ -118,6 +118,30 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
  assert.equal(one(file,"SELECT watchlist FROM film_retention WHERE film_id='film:tmdb:11'"),1);
 }
 
+// AIR-532 (ADR 0173): observed_at is the start of the current watchlist state. A scan that repeats the stored boolean writes nothing; an exit and a re-add do.
+{
+ const file=database('open');
+ sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:tmdb:51',1,'"+T+"'),('film:tmdb:52',1,'"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:tmdb:51','tmdb','51',1,0,NULL),('film:tmdb:51','letterboxd','s51',1,0,NULL),('film:tmdb:52','tmdb','52',1,0,NULL),('film:tmdb:52','letterboxd','s52',1,0,NULL);");
+ const env=envOf(file);
+ const item=(lid,tmdbId,watchlist,observedAt,scanId)=>({lid,tmdbId,watchlist,observedAt,evidence:{scanId}});
+ const state=id=>rows(file,"SELECT r.observed_at AS at,r.watchlist AS w,r.request_id AS rid,c.revision AS rev FROM film_retention r JOIN canonical_revision c ON c.kind='film' AND c.id=r.film_id WHERE r.film_id='"+id+"'")[0];
+ const first=await applyRatedAdmissionRetention(env,{event:'d:1',retentions:[item('s51','51',true,T,'d1'),item('s52','52',true,T,'d1')],now:()=>T});
+ assert.equal(first.applied,2);
+ const before=state('film:tmdb:51'),receipts=one(file,'SELECT COUNT(*) FROM canonical_write_receipt');
+ const quiet=await applyRatedAdmissionRetention(env,{event:'d:2',retentions:[item('s51','51',true,T2,'d2'),item('s52','52',true,T2,'d2')],now:()=>T2});
+ assert.equal(quiet.state,'complete');assert.equal(quiet.applied,0);assert.equal(quiet.noop,2);
+ assert.deepEqual(state('film:tmdb:51'),before,'an unchanged daily scan keeps observed_at, request id and revision');
+ assert.equal(one(file,'SELECT COUNT(*) FROM canonical_write_receipt'),receipts,'an unchanged scan creates no receipt');
+ const T3='2026-11-16T14:00:00.000Z',T4='2026-11-16T15:00:00.000Z';
+ const exit=await applyRatedAdmissionRetention(env,{event:'d:3',retentions:[item('s51','51',false,T3,'d3'),item('s52','52',true,T3,'d3')],now:()=>T3});
+ assert.equal(exit.applied,1);assert.equal(exit.noop,1);
+ assert.equal(state('film:tmdb:51').at,T3);assert.equal(state('film:tmdb:51').w,0);assert.equal(state('film:tmdb:52').at,T,'the Film that stayed keeps its oldest observed_at');
+ const stay=await applyRatedAdmissionRetention(env,{event:'d:4',retentions:[item('s51','51',false,T4,'d4')],now:()=>T4});
+ assert.equal(stay.noop,1);assert.equal(state('film:tmdb:51').at,T3,'a Film that stays gone keeps the time it left');
+ const back=await applyRatedAdmissionRetention(env,{event:'d:5',retentions:[item('s51','51',true,T4,'d5')],now:()=>T4});
+ assert.equal(back.applied,1);assert.equal(state('film:tmdb:51').at,T4);assert.equal(state('film:tmdb:51').w,1);
+}
+
 {
  const file=database('open');
  const missing=await applyRatedAdmissionRetention(envOf(file),{event:'wl:miss',retentions:[{lid:'nope',watchlist:true,observedAt:T,evidence:{scanId:'s'}}],now:()=>T});
