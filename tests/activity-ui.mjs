@@ -20,9 +20,10 @@ assert.match(vm.runInContext('eventHTML(partial,older)',context),/Пакет п�
  assert.match(html,/Найдено новых фильмов: 3/);assert.match(html,/<dt>Разобрано наблюдений<\/dt><dd>20<\/dd>/);assert.match(html,/<dt>Осталось в очереди<\/dt><dd>7<\/dd>/);
  assert.match(html,/Повторно использовано: 2 · отсеяно: 4 · запросов к TMDB: 10/);assert.match(html,/Период: с /);assert.match(html,/data-event-id="discovery-hour-a30f67e93a11-20261111T10"/);
  html=card({...hour,added:0});assert.match(html,/Новых фильмов не найдено/);assert.match(html,/<dt>Новых фильмов<\/dt><dd>0<\/dd>/,'a proven zero is shown');
- html=card({...hour,added:0,checked:0,chunks:0});assert.match(html,/Discovery работает, новых результатов за час нет/);
+ html=card({...hour,added:0,checked:0,chunks:0});assert.match(html,/Discovery запущен, полезного прогресса за час нет/);assert.doesNotMatch(html,/Discovery работает/,'zero work is never shown as working');
  html=card({...hour,added:0,checked:0,chunks:0,status:'empty',queueEmpty:true,remaining:0});assert.match(html,/Очередь Discovery пуста/);assert.match(html,/<dd>пуста<\/dd>/);
  html=card({...hour,added:0,checked:0,status:'idle',remaining:4});assert.match(html,/запуска не требовалось/);assert.doesNotMatch(html,/Очередь Discovery пуста/);
+ html=card({...hour,status:'stalled',reason:'recovery_overdue',added:0,checked:0,remaining:4});assert.match(html,/восстановление просрочено/);assert.doesNotMatch(html,/recovery_overdue/,'a reason code is not printed');
  html=card({...hour,status:'waiting',reason:'recovery_waiting'});assert.match(html,/Discovery ждёт повтора/);
  html=card({...hour,status:'blocked',reason:'projector_window'});assert.match(html,/временный отказ/);assert.doesNotMatch(html,/projector_window/,'a reason code is not printed');
  html=card({...hour,status:'failed',reason:'recovery_exhausted'});assert.match(html,/остановлен после повторных ошибок/);

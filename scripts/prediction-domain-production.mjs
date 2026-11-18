@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {createD1Adapter, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
-import {createS3Store, readInstallCredentials} from './discovery-ledger-install.mjs';
+import {createS3Store, readInstallCredentials} from './r2-s3-store.mjs';
 import {migrationStatements, OperatorStop, PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID, PRODUCTION_DATABASE_NAME, STATEMENT_BYTES} from './metadata-cache-production.mjs';
 import {PREDICTION_INDEX_LIMIT, fingerprintKey, fingerprintPointerAgrees, predictionMutableKey, sameCanonical} from '../src/prediction-d1.js';
 import {createReadOnlyClient, readCredentials} from './r2-snapshot-export.mjs';

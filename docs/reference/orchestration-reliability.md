@@ -190,6 +190,8 @@ Each domain's existing status route returns an `orchestration` object with these
 | `quarantined` | `quarantine` is set |
 | `failed_permanent` | A permanent failure blocks work |
 
+Discovery `recoveryOverdue` ([AIR-534](https://trello.com/c/90dyx0Ai)): a stopped series with pending work whose `recovery.dueAt` has passed while no Workflow instance is alive is `degraded` and `recoveryOverdue`, and its hourly report is `stalled`, never `idle` or running.
+
 Default stall thresholds: EPG 2 h after its due time without a published date; Ratings 2 h after its due time without a completed run; Discovery 30 min without durable progress while work is due. An external alert fires on `stalled`, `quarantined`, `failed_permanent`, or a Madrid date that ends without a successful EPG publication or Ratings run. `waiting` and `cooldown` do not alert. `late` is a read-model state ([AIR-420](https://trello.com/c/J0dit94i)): it stops a slow but moving publication from reading `healthy`; the monitor does not alert on it yet.
 
 The EPG progress count includes the ledger cursor of the seal (as a share of the item total inside the `ledger` phase), so `lastDurableProgressAt` moves while a seal writes observations and stops when it does not. A ledger step logs `batches`, `writeMs`, `items`, `archives` and `archiveMs` in its `epg_phase` exit event; `writeMs / batches` is the D1 round trip of that Workflow instance ([evidence](../evidence/d1-migration/air-420-seal-ledger-round-trips-2026-11-10.md)).

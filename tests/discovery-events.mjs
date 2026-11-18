@@ -740,5 +740,21 @@ resetAll();seed({count:3});elect();
  assert.equal(call('discoveryHourStamp')(Date.UTC(2026,10,11,10,59,59)),'20261111T10');
 }
 
+// 16. AIR-534: a stopped series with a backlog and a recovery is never idle. Overdue is `stalled`, not yet due is `waiting`; a terminal stop with a backlog stays `idle`.
+{
+ const stoppedHour=async (n,{reason,dueAt})=>{
+  resetAll();seed({stage:'paused',remaining:12,reason:'chunk_budget',count:3});
+  set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:0,instanceId:INSTANCE,phase:'stopped',reason,updatedAt:iso,waitingUntil:null,recovery:dueAt?{attempts:1,reason,at:iso,dueAt,quarantined:false}:null});
+  await closed({started:false,reason:'stopped',programmeRunId:GENERATION},n);
+  const [event]=reports();return event;
+ };
+ const overdue=await stoppedHour(20,{reason:'step_failure',dueAt:new Date(BASE+20*HOUR-60000).toISOString()});
+ assert.equal(overdue.status,'stalled');assert.equal(overdue.reason,'recovery_overdue');assert.equal(overdue.queueEmpty,false);
+ const waiting=await stoppedHour(21,{reason:'step_failure',dueAt:new Date(BASE+21*HOUR+3600000).toISOString()});
+ assert.equal(waiting.status,'waiting');assert.equal(waiting.reason,'recovery_waiting');
+ const terminal=await stoppedHour(22,{reason:'stale_generation',dueAt:new Date(BASE+22*HOUR-60000).toISOString()});
+ assert.equal(terminal.status,'idle','a terminal stop is not an overdue recovery');
+}
+
 bucket.put=realPut;
 console.log('Discovery events: hourly reports with deltas across rollovers, duplicate/late/missed crons, every state, strict empty queue, replay-safe counts, checkpoint race, outbox recovery and cap, unknown never shown as 0, DST hours, generation handoff and legacy delivery passed');
