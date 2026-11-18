@@ -29,7 +29,24 @@ A replay page costs six fixed round trips (verified-observation select, free slo
 ## Change
 
 - `REPLAY_PAGE` is now `BIND_CAP - 4` (96). The statements are unchanged: every ADR 0142 decision 4 guard still runs inside the guarded insert, batches stay at 38 statements, the cursor, lap and rest rules (AIR-523) are untouched.
-- Read-only metrics in the stored Discovery status (`replayStats`, per programme run, no new query per chunk): `publishedAt` (one row read once per generation), `firstReplayChunkAt`, `firstAssignedAt`, `firstAssignedSincePublishedMs`, `chunks`, `observations`, `assigned`, `guardSkipped`, `lapCompletedAt`, `lapCompletedSincePublishedMs`. Counts are what the chunk already held; there is no coverage count query and no heavy GET.
+- Read-only metrics in the stored Discovery status (`replayStats`, per programme run; no heavy GET). The clock is the **completion receipt** of `sync.json` for the same run (the contract of `epgPublicationState`: stage `complete`, same `runId`, `completedAt`, or `updatedAt` of a legacy record without an error), named `epgCompletedAt` with `clock: "sync_completion_receipt"`. It is not `published_epg_generation.published_at`, which is the scan time (D1 16:12:34Z against completion 17:35:09Z on 18 Nov, AIR-420). Without a receipt (run in flight, another run, unreadable record) the clock and every interval are `null`; intervals are never clamped, so a replay that starts before completion shows a negative value.
+- Coverage is read from D1 with one bounded statement per replaying chunk (`replayCoverage`): `assigned` is every Discovery row the run holds, `verifiedSlots` the slots of verified current observations. The latter is an **upper bound** of what `slotEligibility` can assign (drift, a Film with no record, a slot held by another Film stay inside it), so coverage is a lower bound; it is labelled `basis: "verified_slots_upper_bound"`. T50/T90/T95/T99 are stamped once, with `at` and `sinceCompletedMs`, the first chunk that sees the share reached. A chunk resting after a completed lap carries the previous reading.
+- `chunks` counts each hop once: a hop retried under the same lease after its status was saved reads that status as prior and does not add itself again. Running sums of assigned rows were removed; the D1 counts replace them.
+
+## Mixed replay and TMDB workload (`tests/discovery-chunk-budget.mjs` case 26)
+
+The same full 40-second hop, the same fixture (288 verified observations needing replay plus 30 unresolved candidates), page of 40 against 96, a modelled D1 on the fake clock. Modelled, not measured; it shows no displacement of TMDB work, nothing about production latency.
+
+| Modelled D1 | Page | TMDB started / checked | TMDB ms | Replay ms | Rows restored | Hop ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| 50 ms per round trip | 40 | 16 / 8 | 4 031 | 3 469 | 288 | 13 442 |
+| 50 ms per round trip | 96 | 16 / 8 | 4 025 | 1 704 | 288 | 11 664 |
+| 100 ms per round trip | 40 | 16 / 8 | 8 040 | 6 867 | 288 | 26 751 |
+| 100 ms per round trip | 96 | 16 / 8 | 8 027 | 3 362 | 288 | 23 226 |
+| 2.8 s per write batch, 50 ms reads | 40 | 2 / 1 | 6 006 | 3 361 | 38 | 40 066 |
+| 2.8 s per write batch, 50 ms reads | 96 | 2 / 1 | 6 005 | 3 360 | 38 | 40 053 |
+
+TMDB requests, checked candidates and TMDB time are unchanged; the same rows take about half the replay time at the two faster models; with 2.8 s batches nothing changes and the hop ends about 50 ms past 40 s on both (an in-flight batch cannot be pre-empted, an existing property). With 300 ms on **every** statement both pages end in `wall_budget` with no replay and no TMDB (the chunk's own pre-replay reads use the budget first, as the 10-11 s `preChunkMs` on 18 Nov also show); that model cannot separate the pages and is not used. This is not a claim that the cross-stream goal (fresh hot Films by 17:30 Madrid) is met by this PR.
 
 ## What this does not claim
 
@@ -39,4 +56,4 @@ A replay page costs six fixed round trips (verified-observation select, free slo
 
 ## Acceptance still open
 
-At the next natural EPG publication, read-only: `replayStats` in the Discovery status give `publishedAt`, the first assigned chunk and the lap completion; D1 aggregate of assigned `basis='discovery'` rows against verified observations; no duplicate slot, no generation leakage, TMDB `checked` per chunk not lower than before. If the start is blocked by AIR-534 the card records that gate and does not trigger a manual run.
+At the next natural EPG publication, read-only: `replayStats` in the Discovery status give `epgCompletedAt`, the first assigned chunk, the coverage milestones and the lap completion; D1 aggregate of assigned `basis='discovery'` rows against verified observations; no duplicate slot, no generation leakage, TMDB `checked` per chunk not lower than before. If the start is blocked by AIR-534 the card records that gate and does not trigger a manual run.
