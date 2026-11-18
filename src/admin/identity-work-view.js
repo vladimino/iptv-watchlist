@@ -68,9 +68,15 @@ function iwCandidateSummary(entry){
  const detail=[Number.isInteger(e.registered)?'в реестре '+e.registered:null,Number.isInteger(e.listed)?'в хранилище '+e.listed:null,e.unindexed?'не в реестре '+e.unindexed:null,e.registryOrphans?'в реестре без архива '+e.registryOrphans:null].filter(Boolean).join(', ');
  lines.push('<li><b>Перечисление архивов:</b> '+(e.state==='complete'?'полное (проверено только наличие префиксов)':e.state==='partial'?'частичное: '+iwEscape(IW_ENUMERATION_TEXT[e.reason]||e.reason||''):'не определено ('+iwEscape(IW_ENUMERATION_TEXT[e.reason]||e.reason||'')+')')+(detail?'; '+iwEscape(detail):'')+'.</li>');
  const c=entry.counts||{};
- if(c.byStatus){
+ const unindexed=Number.isInteger(e.unindexed)&&e.unindexed>0?e.unindexed:0;
+ if(c.state==='estimate'&&c.byStatus){
   const by=c.byStatus;
-  lines.push('<li><b>Счётчики — оценка по реестру'+(iwDate(c.summarizedAt)?' на '+iwEscape(iwDate(c.summarizedAt)):'')+', не проверены:</b> ожидают '+by.pending+', admission '+by.admitting+', нужна проверка '+by.needs_review+', проверено '+by.verified+', снято '+by.removed+'.</li>');
+  // The registry only knows the archives it summarized: the counts say nothing about the others.
+  const scope=Number.isInteger(e.registered)?' только по архивам, которые есть в реестре ('+e.registered+')':' только по архивам, которые есть в реестре';
+  const outside=unindexed?' Архивы вне реестра ('+unindexed+') в эти счётчики не входят, их содержимое неизвестно.':e.state==='complete'?'':' Перечисление архивов частичное: могут быть архивы, о которых счётчики ничего не говорят.';
+  lines.push('<li><b>Счётчики — оценка по реестру'+(iwDate(c.summarizedAt)?' на '+iwEscape(iwDate(c.summarizedAt)):'')+', не проверены,'+iwEscape(scope)+':</b> ожидают '+by.pending+', admission '+by.admitting+', нужна проверка '+by.needs_review+', проверено '+by.verified+', снято '+by.removed+'.'+iwEscape(outside)+'</li>');
+ }else if(c.state==='absent'){
+  lines.push('<li><b>Счётчики:</b> реестр архивов ещё не создан, оценки нет. Нули здесь не показываются: ни один архив не просуммирован'+(unindexed?'; архивов в хранилище, не вошедших в реестр: '+unindexed:'')+'.</li>');
  }else lines.push('<li><b>Счётчики:</b> реестр недоступен ('+iwEscape(c.state||'нет данных')+'), оценки нет.</li>');
  const p=entry.page||{};
  const pageText=IW_PAGE_TEXT[p.state]||p.state||'';

@@ -24,7 +24,8 @@ function iwPaint() {
   if (empty) iwEl('iw-empty-text').textContent = iwEmptyText(view);
   iwEl('iw-coverage-body').innerHTML = iwCoverageHtml(iwLive.coverage);
   const more = iwEl('iw-more');
-  more.hidden = !iwLive.next;
+  // No paging from a failed or stale list: the owner reloads from the first page instead.
+  more.hidden = !iwLive.next || iwLive.mode === 'error' || iwLive.mode === 'stale';
   more.disabled = iwLive.mode === 'more' || iwLive.mode === 'loading';
   more.textContent = iwLive.mode === 'more' ? 'Читаем…' : 'Показать ещё';
   iwEl('iw-include').disabled = iwEl('iw-disposition').value !== '';
@@ -40,7 +41,9 @@ async function iwLoad(more) {
   iwLive.controller = controller;
   const seq = ++iwLive.seq;
   const state = more ? iwLive.state : iwReadForm();
-  if (!more) {iwLive.state = state;}
+  // A first page starts a new query: nothing of the previous query (rows, coverage, pin, cursor) may stay on screen as current,
+  // and the previous cursor must never be sent with the new filter.
+  if (!more) {iwLive.state = state; iwLive.rows = []; iwLive.next = null; iwLive.pin = null; iwLive.coverage = {};}
   iwLive.mode = more ? 'more' : 'loading';
   iwPaint();
   const result = await loadIdentityWork(state, more ? iwLive.next : null, {pin: more ? iwLive.pin : null, signal: controller ? controller.signal : undefined});

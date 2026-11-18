@@ -63,6 +63,16 @@ const row = extra => ({key: 'lbc:' + SHA + ':Aa1', type: 'letterboxd_rated_candi
   const complete = api.iwCoverageHtml({letterboxd_rated_candidate: {enumeration: {state: 'complete', registered: 2, listed: 2, unindexed: 0}, counts: {state: 'estimate', summarizedAt: null, byStatus: {pending: 0, admitting: 0, needs_review: 0, verified: 0, removed: 0}}, page: {state: 'read_whole'}}});
   assert.match(complete, /полное \(проверено только наличие префиксов\)/); assert.doesNotMatch(complete, /нет работы|полное покрытие/);
   assert.match(api.iwCoverageHtml({letterboxd_rated_candidate: {enumeration: {state: 'partial', reason: 'registry_invalid'}, counts: {state: 'invalid', byStatus: null}, page: {state: 'not_read'}}}), /реестр недоступен \(invalid\), оценки нет/);
+  // an absent registry is no estimate: no zeros, whatever the listing holds
+  const absent = api.iwCoverageHtml({letterboxd_rated_candidate: {enumeration: {state: 'partial', reason: 'unindexed_archives', registered: 0, listed: 3, unindexed: 3}, counts: {basis: 'registry_estimate', summarizedAt: null, state: 'absent', byStatus: {pending: 0, admitting: 0, needs_review: 0, verified: 0, removed: 0}}, page: {archiveSha256: SHA, state: 'read_whole', indexed: false}}});
+  assert.match(absent, /реестр архивов ещё не создан, оценки нет/); assert.match(absent, /не вошедших в реестр: 3/);
+  assert.doesNotMatch(absent, /ожидают 0|оценка по реестру/, 'zero counts of an absent registry are never shown as an estimate');
+  // a partially indexed registry: the estimate is scoped to the registered archives and says the others are unknown
+  const partial = api.iwCoverageHtml({letterboxd_rated_candidate: {enumeration: {state: 'partial', reason: 'unindexed_archives', registered: 1, listed: 3, unindexed: 2}, counts: {basis: 'registry_estimate', summarizedAt: '2026-11-18T10:00:00.000Z', state: 'estimate', byStatus: {pending: 0, admitting: 0, needs_review: 0, verified: 0, removed: 0}}, page: {state: 'read_whole'}}});
+  assert.match(partial, /только по архивам, которые есть в реестре \(1\)/); assert.match(partial, /Архивы вне реестра \(2\) в эти счётчики не входят, их содержимое неизвестно/);
+  assert.match(api.iwCoverageHtml({letterboxd_rated_candidate: {enumeration: {state: 'partial', reason: 'listing_truncated', registered: 1, listed: 1000}, counts: {state: 'estimate', byStatus: {pending: 1, admitting: 0, needs_review: 0, verified: 0, removed: 0}}, page: {state: 'not_read'}}}), /могут быть архивы, о которых счётчики ничего не говорят/);
+  assert.doesNotMatch(complete, /вне реестра|могут быть архивы/, 'a complete enumeration adds no scope warning');
+  assert.match(complete, /только по архивам, которые есть в реестре/, 'the estimate is always scoped to the registered archives');
   assert.match(api.iwCoverageHtml({}), /Покрытие не прочитано/);
   assert.match(api.iwCoverageHtml({letterboxd_rated_candidate: {enumeration: {state: 'complete'}, counts: {state: 'absent', byStatus: {pending: 0, admitting: 0, needs_review: 0, verified: 0, removed: 0}}, page: {state: 'read_whole'}, selected: SHA}}), /Это не покрытие всех архивов/);
   assert.match(api.iwVerdict({mode: 'ready', rows: [1, 2], nextCursor: 'c', coverage}), /Показано записей: 2\. Есть следующая страница\. Покрытие частичное/);
@@ -126,6 +136,32 @@ const ok = (rows, next, pin = 'P1') => ({status: 200, body: {pin, snapshot: {}, 
   assert.match(view.nodes['iw-results'].innerHTML, /data-iw-key=/, 'rows stay, flagged by the banner');
   view.nodes['iw-reload'].listeners.click(); await view.settle();
   assert.equal(view.live.mode, 'ready'); assert.equal(view.nodes['iw-stale'].hidden, true); assert.doesNotMatch(view.calls[2], /cursor=/, 'reload starts from the first page'); assert.doesNotMatch(view.calls[2], /pin=/);
+}
+{
+  // a failed first page of a NEW query shows nothing of the previous query and pages with no old cursor
+  const view = await runController([ok([row()], 'n1'), {status: 503, body: {error: 'storage_unavailable'}}, ok([], null, 'P2')]);
+  assert.match(view.nodes['iw-results'].innerHTML, /data-iw-key=/); assert.equal(view.nodes['iw-more'].hidden, false);
+  view.nodes['iw-type'].value = 'film'; view.nodes['iw-q'].value = 'other';
+  view.nodes['iw-form'].listeners.submit({preventDefault() {}}); await view.settle();
+  assert.equal(view.live.mode, 'error'); assert.equal(view.nodes['iw-error'].hidden, false);
+  assert.doesNotMatch(view.nodes['iw-results'].innerHTML, /data-iw-key=/, 'no row of the previous query stays as current');
+  assert.match(view.nodes['iw-coverage-body'].innerHTML, /Покрытие не прочитано/, 'nor its coverage');
+  assert.equal(view.nodes['iw-more'].hidden, true, 'no paging after a failed first page');
+  assert.equal(view.nodes['iw-empty'].hidden, true, 'a failed read is not an empty list');
+  assert.match(view.nodes['iw-verdict'].textContent, /Очередь не прочитана/);
+  assert.equal(view.live.next, null); assert.equal(view.live.pin, null);
+  view.nodes['iw-retry'].listeners.click(); await view.settle();
+  assert.doesNotMatch(view.calls[2], /cursor=|pin=/, 'the retry starts from the first page');
+  assert.match(view.calls[2], /type=film/); assert.equal(view.live.mode, 'ready');
+}
+{
+  // a failed or stale "show more" hides paging; reload starts over
+  const view = await runController([ok([row()], 'n1'), {status: 503, body: {error: 'network'}}]);
+  view.nodes['iw-more'].listeners.click(); await view.settle();
+  assert.equal(view.live.mode, 'error'); assert.equal(view.nodes['iw-more'].hidden, true);
+  const stale = await runController([ok([row()], 'n1'), {status: 409, body: {error: 'stale_pin'}}]);
+  stale.nodes['iw-more'].listeners.click(); await stale.settle();
+  assert.equal(stale.live.mode, 'stale'); assert.equal(stale.nodes['iw-more'].hidden, true);
 }
 {
   const view = await runController([{status: 503, body: {error: 'storage_unavailable'}}, ok([], null)]);
