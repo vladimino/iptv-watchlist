@@ -272,6 +272,22 @@ assert.equal((await Authority.routeRead(env,'epg/discovered-films.json')).value.
 assert.equal(JSON.parse(one(live.db,"SELECT payload_json FROM discovery_decision WHERE observation_key='doc-obs'").payload_json).status,'needs_verification');
 assert.equal(count(live.db,"SELECT COUNT(*) AS n FROM published_epg_show WHERE match_reason='doc-obs' AND basis='discovery'"),0);
 assert.equal(count(live.db,"SELECT COUNT(*) AS n FROM published_epg_show WHERE match_reason='doc-obs' AND basis='title_year'"),1);
+// AIR-501 / ADR 0169: a card with no genre and a concert in its synopsis is reached by the owner writer; one with no such words is not.
+const picnicLike={id:'tmdb_85',tmdbId:'85',canonicalIdentity:'tmdb:85',title:'Весенний концерт группы',year:2014,runtime:108,genres:[],synopsis:'В марте прошёл традиционный весенний концерт группы.'};
+const fictionNoGenre={id:'tmdb_86',tmdbId:'86',canonicalIdentity:'tmdb:86',title:'Улица младшего сына',year:1962,runtime:98,genres:[],synopsis:'В приморском городе Керчь живет мальчишка Володя.'};
+await Authority.replaceCatalog(env,{...(await Authority.routeRead(env,'epg/discovered-films.json')).value,tmdb_85:picnicLike,tmdb_86:fictionNoGenre});
+// The Worker bundle carries the domain gate as globals; load it the same way for this block.
+vm.runInThisContext(fs.readFileSync('src/domain/resolution-acceptance.js','utf8')+';globalThis.admissionPolicy=admissionPolicy;globalThis.filmAdmissionInput=filmAdmissionInput;globalThis.catalogCleanupPolicy=catalogCleanupPolicy;');
+const previewPicnic=await Authority.readPolicyExcludePreview(env,'tmdb_85');
+assert.equal(previewPicnic.policy,'concert');
+assert.equal(previewPicnic.available,true);
+const previewFiction=await Authority.readPolicyExcludePreview(env,'tmdb_86');
+assert.equal(previewFiction.available,false);
+assert.equal(previewFiction.reason,'not_policy_excluded');
+const excludedPicnic=await Authority.ownerPolicyExclude(env,{filmId:'tmdb_85',lease:again.lease});
+assert.equal(excludedPicnic.outcome,'written');
+assert.equal((await Authority.ownerPolicyExclude(env,{filmId:'tmdb_86',lease:again.lease})).outcome,'not_eligible');
+globalThis.admissionPolicy=undefined;globalThis.filmAdmissionInput=undefined;globalThis.catalogCleanupPolicy=undefined;
 const sealedProgramme={films:[]};
 assert.equal(PublishedEpg.completeProgramme(sealedProgramme,[]),sealedProgramme,'completed programme overlay is a no-op without discovery rows; title_year table rows are not that overlay');
 const replayDoc=await Authority.ownerPolicyExclude(env,{filmId:'tmdb_70',lease:again.lease});

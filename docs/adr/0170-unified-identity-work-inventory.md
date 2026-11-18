@@ -1,4 +1,4 @@
-# ADR 0169: One read-only identity work inventory for the owner Limbo, as a separate versioned projection over the current owners
+# ADR 0170: One read-only identity work inventory for the owner Limbo, as a separate versioned projection over the current owners
 
 **Status:** Accepted
 **Original decision date:** 2026-11-18
