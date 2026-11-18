@@ -45,7 +45,8 @@ Object.defineProperty(list, 'innerHTML', {get: () => html_, set(value) {
     items.push({dataset: {eventId: match[1]}, offsetTop: items.length * 100, offsetHeight: 100, querySelectorAll: selector => selector === 'details' ? details : []});
   }
 }});
-const scroll = mk('.activity-scroll', {scrollTop: 0, clientHeight: 390, querySelectorAll: selector => selector === '[data-event-id]' ? items : [], querySelector: selector => { const m = selector.match(/\[data-event-id="([^"]*)"\]/); return m ? items.find(item => item.dataset.eventId === m[1]) || null : null; }});
+const handlers = new Map();
+const scroll = mk('.activity-scroll', {scrollTop: 0, clientHeight: 390, addEventListener(name, fn) {handlers.set(name, fn);}, querySelectorAll: selector => selector === '[data-event-id]' ? items : [], querySelector: selector => { const m = selector.match(/\[data-event-id="([^"]*)"\]/); return m ? items.find(item => item.dataset.eventId === m[1]) || null : null; }});
 const status = mk('#activity-status'), more = mk('#activity-more', {hidden: true, textContent: 'Повторить'}), loader = mk('#activity-loading', {hidden: true}), end = mk('#activity-end', {hidden: true}), sentinel = mk('#activity-sentinel');
 mk('.activity'); mk('#filters'); mk('#events-screen', {hidden: true}); mk('#events-types', {hidden: true}); mk('#activity-expand'); mk('#return-home', {hidden: true});
 const typeButtons = ['all', 'watchlist', 'epg', 'discovery', 'ratings', 'enrichment', 'taste_profile'].map(id => mk('[data-event-type=' + id + ']', {dataset: {eventType: id}}));
@@ -63,9 +64,10 @@ const win = {scrollY: 0, scrollTo() {}, addEventListener() {}, removeEventListen
 
 // A fake IntersectionObserver: `scrollToEnd()` reports the sentinel as visible, but only while it is observed, exactly like the browser.
 const observers = [];
+let stickyVisible = false; // a browser reports a sentinel that is already in view as soon as it is observed
 class FakeObserver {
   constructor(callback, options) {this.callback = callback; this.options = options; this.targets = new Set(); this.disconnected = false; observers.push(this);}
-  observe(target) {this.targets.add(target);}
+  observe(target) {this.targets.add(target); if (stickyVisible) queueMicrotask(() => { if (this.targets.has(target) && !this.disconnected) this.callback([{isIntersecting: true, target}]); });}
   unobserve(target) {this.targets.delete(target);}
   disconnect() {this.targets.clear(); this.disconnected = true;}
 }
@@ -94,6 +96,7 @@ const context = vm.createContext({Date, Intl, URL, URLSearchParams, Set, Map, JS
   })});
 vm.runInContext(app, context);
 const run = code => vm.runInContext(code, context);
+run('bindActivityDemand()');
 run("eventHTML=(event)=>'<li data-event-id=\"'+event.id+'\"><details open></details>'+event.type+'</li>'");
 const shownIds = () => [...html_.matchAll(/data-event-id="([^"]*)"/g)].map(match => match[1]);
 let tick = 0;
@@ -107,7 +110,7 @@ const tail = () => ({loading: !loader.hidden, end: !end.hidden, retry: !more.hid
 const reset = (pages) => {
   run('cancelEventSearch()');
   archive = pages; requests = []; inFlight = 0; maxInFlight = 0; failures = new Set(); gates = new Map(); tick = 0;
-  run("loadedEvents.clear();eventCursor=null;eventsReady=false;eventLoading=false;eventLoadingMore=false;eventTypeFilterId='all';activityNote='Загружаем события…';eventPaging.error=null;eventPaging.stuck=false;eventPaging.seen.clear()");
+  run("resetEventPrefetch();loadedEvents.clear();eventCursor=null;eventsReady=false;eventLoading=false;eventLoadingMore=false;eventTypeFilterId='all';activityNote='Загружаем события…';eventPaging.error=null;eventPaging.stuck=false;eventPaging.seen.clear()");
   win.history.replaceState(null, '', 'https://iptv.example/');
   run('eventsScreen=false;applyEventsScreen(false)');
   scroll.scrollTop = 0;
@@ -295,6 +298,61 @@ assert.equal(items[1].dataset.eventId, 'p0-1');
 assert.equal(items[1].querySelectorAll('details')[0].open, false, 'a group the user closed stays closed after the page is added');
 assert.equal(items[0].querySelectorAll('details')[0].open, true, 'and an open one stays open');
 assert.equal(scroll.scrollTop, items[1].offsetTop + anchorOffset, 'the scroll position is anchored to the same event');
+
+// 12b. AIR-530 review P2: a background refresh of the first page keeps an older-page error until the explicit retry; the failed cursor is not fetched again by itself.
+reset(chain(4));
+await run('loadEvents(false)');
+failures.add('c1');
+scrollToEnd(); await settle();
+assert.equal(run('eventPaging.error'), 'more');
+const afterFailure = requests.length;
+assert.equal(await run('loadEvents(false,{quiet:true})'), true, 'the quiet refresh succeeds');
+assert.equal(run('eventPaging.error'), 'more', 'and does not clear the older-page error');
+assert.deepEqual(tail(), {loading: false, end: false, retry: true, observed: false, busy: null}, 'the retry stays, the sentinel stays unobserved');
+assert.equal(status.textContent, 'Не удалось загрузить события.', 'the error text stays');
+stickyVisible = true;
+await run('loadEvents(false,{quiet:true})'); await sleep(30);
+scrollToEnd(); await sleep(30);
+stickyVisible = false;
+assert.deepEqual(requests.slice(afterFailure).map(request => request.cursor), ['first', 'first'], 'only the two refreshes: the failed cursor c1 is not requested again');
+failures.clear();
+run('retryEvents()'); await settle();
+assert.equal(requests.at(-1).cursor, 'c1', 'the explicit retry fetches it');
+assert.equal(run('eventPaging.error'), null);
+
+// 12c. AIR-530 review P1: a list that stays short never reads the archive without the user. After a type search found its ten, many zero-match pages are bounded, then a button takes over.
+const sparse = {first: {events: Array.from({length: 12}, (_, k) => ev('r' + k, 'ratings')), cursor: 'c1'}};
+for (let n = 1; n <= 12; n++) sparse['c' + n] = {events: [ev('x' + n + 'a'), ev('x' + n + 'b')], cursor: n < 12 ? 'c' + (n + 1) : null};
+reset(sparse);
+await run('loadEvents(false)');
+win.history.replaceState(null, '', 'https://iptv.example/events?type=ratings');
+stickyVisible = true; // the short list leaves the sentinel in view after every page
+run('eventsScreen=false;applyEventsScreen(true)');
+await settle(); await sleep(80); await settle();
+const bound = run('EVENT_PREFETCH_LIMIT');
+assert.deepEqual(requests.map(request => request.cursor), ['first', 'c1', 'c2', 'c3'].slice(0, 1 + bound), 'the first page plus a bounded number of pages, no more');
+assert.equal(run('eventPaging.paused'), true);
+assert.deepEqual(tail(), {loading: false, end: false, retry: true, observed: false, busy: null}, 'paused: the sentinel is not observed and a button is the way forward');
+assert.equal(more.textContent, 'Более давние события');
+await sleep(60);
+assert.equal(requests.length, 1 + bound, 'nothing more without the user');
+// A scroll that only restores the anchor is not user demand; a real one is.
+run('eventPaging.run=' + bound);
+scroll.scrollTop = run('activityProgrammaticTop');
+handlers.get('scroll')({type: 'scroll'});
+assert.equal(run('eventPaging.run'), bound, 'a scroll event at the position the code set is ignored');
+scroll.scrollTop = run('activityProgrammaticTop') + 40;
+handlers.get('scroll')({type: 'scroll'}); await settle(); await sleep(60); await settle();
+assert.equal(run('eventPaging.paused'), true, 'a real scroll renews the allowance, which is then used up again');
+assert.equal(requests.length, 1 + 2 * bound, 'another bounded batch, never more');
+// The button: one click, one bounded batch.
+const beforeClick = requests.length;
+more.click = undefined;
+run('retryEvents()'); await settle(); await sleep(80); await settle();
+assert.ok(requests.length - beforeClick >= 1 && requests.length - beforeClick <= 1 + bound, 'a click loads a page and at most the bounded batch after it');
+assert.equal(maxInFlight, 1);
+stickyVisible = false;
+assert.equal(end.hidden, true, 'no end marker before the cursor is exhausted');
 
 // 13. Without IntersectionObserver the explicit button is the only way, so the history stays reachable.
 context.IntersectionObserver = undefined;

@@ -201,6 +201,7 @@ function syncEventTypeButtons(){
 function syncEventTypeFromUrl(){eventTypeFilterId=eventTypeFrom(new URL(window.location.href).search);syncEventTypeButtons();startEventSearch();}
 function selectEventType(id){
  if(!EVENT_TYPE_FILTERS.some(item=>item.id===id))return;
+ resetEventPrefetch();
  eventTypeFilterId=id;syncEventTypeButtons();
  // The choice lives in the URL of this history entry (no new entry), next to the return target.
  if(eventsRequested()&&currentPathname()==='/events'){const here=new URL(window.location.href);window.history.replaceState(window.history.state,'',withEventType(here.pathname+here.search+here.hash,id));}
@@ -216,6 +217,7 @@ function applyEventsScreen(on){
  if(types)types.hidden=!eventsScreen;
  if(main)main.hidden=!eventsScreen;
  placeActivity();
+ resetEventPrefetch();
  if(eventsScreen)syncEventTypeFromUrl();else{cancelEventSearch();renderActivity();}
  syncReturnLink();
  if(typeof window.scrollTo==='function')window.scrollTo(0,eventsScreen?0:movieScrollY||0);
@@ -458,7 +460,9 @@ function restoreUrl(){
 let films = [];
 let eventCursor=null,eventLoading=false,eventLoadingMore=false,activityShownCount=0;const loadedEvents=new Map();
 // AIR-530: older pages load by scrolling. `error` is null, 'first' (the first page or a refresh failed) or 'more' (an older page failed); `stuck` is a cursor that repeats or does not advance; `seen` holds the cursors already requested by the scroll.
-const eventPaging={error:null,stuck:false,seen:new Set()};
+const eventPaging={error:null,stuck:false,seen:new Set(),run:0,paused:false};
+// AIR-530: pages that the sentinel asks for with no user scroll in between (a list too short to fill its container) are bounded; then an explicit button takes over.
+const EVENT_PREFETCH_LIMIT=3;let activityProgrammaticTop=null;
 // AIR-381: the events screen filters the loaded events by the type of event. Pure mapping: «Все события» shows every loaded event, known or not,
 // and the other buttons name the stored `type` values they stand for. A chosen type also searches older pages by itself (see startEventSearch).
 const EVENT_TYPE_FILTERS=[
@@ -493,6 +497,7 @@ let eventTypeFilterId='all',activityNote='Загружаем события…',
 const eventSearch={token:0,state:'idle',controller:null};
 function eventMatchCount(id){let count=0;for(const event of loadedEvents.values())if(eventMatchesType(event,id))count++;return count;}
 const eventPause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+function resetEventPrefetch(){eventPaging.run=0;eventPaging.paused=false;}
 function cancelEventSearch(){
  eventSearch.token++;
  if(eventSearch.controller){try{eventSearch.controller.abort();}catch{}eventSearch.controller=null;}
@@ -547,7 +552,7 @@ function activityTailState(){
  if(eventPaging.error||eventPaging.stuck||(filtered&&(eventSearch.state==='error'||eventSearch.state==='stuck')))return 'error';
  if(!eventsReady)return 'none';
  if(eventLoadingMore||(filtered&&eventSearch.state==='searching'))return 'loading';
- if(eventCursor)return 'idle';
+ if(eventCursor)return eventPaging.paused?'paused':'idle';
  return activityShownCount>0?'end':'none';
 }
 let activityObserver=null,activityObserverRoot=null;
@@ -570,7 +575,7 @@ function syncActivityTail(){
  if(end)end.hidden=tail!=='end';
  if(button){
   const noObserver=typeof IntersectionObserver!=='function';
-  button.hidden=!(tail==='error'||(tail==='idle'&&noObserver));
+  button.hidden=!(tail==='error'||tail==='paused'||(tail==='idle'&&noObserver));
   button.disabled=false;
   button.textContent=tail==='error'?'Повторить':'Более давние события';
  }
@@ -582,14 +587,29 @@ function loadOlderEvents(){
  if(!eventsReady||!eventCursor||eventLoading||eventPaging.error||eventPaging.stuck)return false;
  if(eventsScreen&&eventTypeFilterId!=='all'&&(eventSearch.controller||eventSearch.state==='error'||eventSearch.state==='stuck'))return false;
  if(eventPaging.seen.has(eventCursor)){eventPaging.stuck=true;activityNote='Архив событий не продвигается дальше.';renderActivity();return false;}
+ // No user scroll since the last pages and the sentinel is still in view: the list cannot scroll. After a few pages stop and offer the button.
+ if(eventPaging.run>=EVENT_PREFETCH_LIMIT){eventPaging.paused=true;syncActivityTail();return false;}
+ eventPaging.run++;
  loadEvents(true);
  return true;
+}
+// A real scroll, wheel, touch or key on the list is user demand: it renews the prefetch allowance and resumes a paused list. Scrolls caused by restoring the anchor are ignored.
+function onActivityDemand(event){
+ const scroll=document.querySelector('.activity-scroll');
+ if(event&&event.type==='scroll'&&scroll&&scroll.scrollTop===activityProgrammaticTop)return;
+ eventPaging.run=0;
+ if(eventPaging.paused){eventPaging.paused=false;syncActivityTail();}
+}
+function bindActivityDemand(){
+ const scroll=document.querySelector('.activity-scroll');
+ if(!scroll||typeof scroll.addEventListener!=='function')return;
+ for(const name of ['scroll','wheel','touchmove','keydown'])scroll.addEventListener(name,onActivityDemand,{passive:true});
 }
 function retryEvents(){
  const filtered=eventsScreen&&eventTypeFilterId!=='all';
  if(filtered&&(eventSearch.state==='error'||eventSearch.state==='stuck')){startEventSearch();return;}
  const kind=eventPaging.error;
- eventPaging.error=null;eventPaging.stuck=false;
+ eventPaging.error=null;eventPaging.stuck=false;eventPaging.paused=false;eventPaging.run=0;
  if(kind==='first'||!eventsReady||!eventCursor)loadEvents(false);else loadEvents(true);
 }
 let startedIds=new Set(),startedReady=false,startedLoading=false;const savingStarted=new Set();
@@ -2159,7 +2179,7 @@ function bindControls(){
  const typeGroup=$('#events-types');if(typeGroup)typeGroup.addEventListener('click',event=>{const button=event.target.closest?.('[data-event-type]');if(button)selectEventType(button.dataset.eventType);});
  const activityExpand=$('#activity-expand');if(activityExpand)activityExpand.addEventListener('click',()=>openEventsScreen(activityExpand));
  const returnLink=$('#return-home');if(returnLink)returnLink.addEventListener('click',event=>{if(!plainFilmActivation(event))return;event.preventDefault();returnHome();});
- $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',retryEvents);
+ $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',retryEvents);bindActivityDemand();
  const presetSave=$('#preset-save');if(presetSave)presetSave.addEventListener('click',()=>{presetEditor={mode:'create'};presetPrompt=null;presetStatus='';renderPresets();const input=$('#preset-name');if(input){input.value='';input.focus();}});
  const presetEditorForm=$('#preset-editor');if(presetEditorForm){
   presetEditorForm.addEventListener('submit',async event=>{
@@ -2591,6 +2611,7 @@ function renderActivity(){
  activityShownCount=shown.length;
  restoreEventGroups(groups);
  restoreActivityAnchor(scroll,anchor,position);
+ activityProgrammaticTop=scroll?scroll.scrollTop:null;
  const status=$('#activity-status');
  if(status)status.textContent=activityStatusText(filter,ordered,shown);
  syncActivityTail();
@@ -2615,15 +2636,16 @@ async function loadEvents(more=false,options={}){
    if(!options.auto&&data.cursor&&eventPaging.seen.has(data.cursor))eventPaging.stuck=true;
   }
   eventsReady=true;
-  eventPaging.error=null;
-  activityNote=eventPaging.stuck?'Архив событий не продвигается дальше.':(!more&&!data.events.length?'Здесь появятся события списка.':'');
+  // Only an older page that succeeded (or the explicit retry of a first-page failure) clears an error: a background refresh keeps an older-page error until «Повторить».
+  if(more||eventPaging.error==='first')eventPaging.error=null;
+  activityNote=eventPaging.error?'Не удалось загрузить события.':eventPaging.stuck?'Архив событий не продвигается дальше.':(!more&&!data.events.length?'Здесь появятся события списка.':'');
   eventLoadingMore=false;
   renderActivity();
   if(!options.auto&&eventsScreen&&eventTypeFilterId!=='all'&&!eventSearch.controller&&eventSearch.state==='idle')startEventSearch();
   return true;
  }catch{
   if(options.signal&&options.signal.aborted)return 'aborted';
-  if(!options.quiet){eventPaging.error=more?'more':'first';activityNote='Не удалось загрузить события.';const status=$('#activity-status');if(status)status.textContent=activityNote;}
+  if(!options.quiet){eventPaging.error=more?'more':(eventPaging.error||'first');activityNote='Не удалось загрузить события.';const status=$('#activity-status');if(status)status.textContent=activityNote;}
   return false;
  }finally{
   eventLoading=false;eventLoadingMore=false;
