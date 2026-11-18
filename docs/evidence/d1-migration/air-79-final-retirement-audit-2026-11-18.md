@@ -4,11 +4,12 @@
 
 ## Verdict
 
-**AIR-79 cannot close yet.** The seven serving-reader slices are delivered and no Film/Person, owner-review, metadata-cache, ratings, prediction, published-EPG or Discovery reader falls back to R2 when D1 refuses. What remains is not runtime authority but retained tooling and unreachable code, plus two items that still touch R2 as an authority. Each needs its own atomic, owner-approved card (proposals below); none is started here.
+**AIR-79 cannot close yet.** The seven serving-reader slices are delivered and no Film/Person, owner-review, metadata-cache, ratings, prediction, published-EPG or Discovery reader falls back to R2 when D1 refuses. What remains is not a served R2 authority but retained tooling and unreachable code, plus one obsolete install path that can write legacy Discovery authority objects in R2 without a D1 marker guard. Each needs its own atomic, owner-approved card (proposals below); none is started here.
 
 ## Corrections to earlier records
 
 - **F-2 (`setStarted` reads the frozen `metadata.json`) is already closed.** `setStarted` in `src/worker.js` reads the canonical D1 Film through `CanonicalCatalogReader.catalogStartedFilm` and refuses (`503`, no R2 write) when D1 does not serve; `tests/started.mjs` asserts it ([AIR-516](https://trello.com/c/03h5WhiT)). The "Deferred" row in the [11-17 closeout](air-79-d2-closeout-and-d1-preparation-2026-11-17.md) predates that change.
+- **F-1 (poster hydration through `epg/discovered-films.json`) is also closed:** AIR-515 is Done and delivered (PR #745); the "Deferred" row in the same 11-17 closeout predates it. The published EPG has no `held` reader contract either (PR #751). An earlier draft of this ledger repeated both stale rows and was corrected after independent review.
 - The seventh-slice evidence listed the Film/Person cutover tooling as one retained group; the import graph below separates what the production Worker still exposes (one MCP tool) from offline scripts.
 
 ## Closeout ledger
@@ -38,7 +39,7 @@
 
 | Code path | Reach | Recommendation | Risk and tests |
 | --- | --- | --- | --- |
-| `scripts/discovery-ledger-install.mjs` `--apply --approved-production-writes` | The only script that can write production R2 (`PutObject` with `If-Match`/`If-None-Match`, the resolver lease). **It never reads `discovery_authority`**, so it is fenced only by the R2 pointer, the sync stage and the R2 lease, whatever the D1 marker says. Dry-run is GET/HEAD only. | **Defer; guard or remove the apply path** in its own card with an owner GO. Never run. | Highest hazard of the remaining items. `tests/discovery-ledger-install.mjs`, the discovery ledger runbook (stage 2), ADR 0034. |
+| `scripts/discovery-ledger-install.mjs` `--apply --approved-production-writes` | The obsolete install path that can write legacy Discovery authority objects in production R2 (`PutObject` with `If-Match`/`If-None-Match`, the resolver lease); other R2 writers remain legitimately by design (immutable bodies, receipts, compatibility mirrors). **It never reads `discovery_authority`**, so it is fenced only by the R2 pointer, the sync stage and the R2 lease, whatever the D1 marker says. Dry-run is GET/HEAD only. | **Defer; guard or remove the apply path** in its own card with an owner GO. Never run. | Highest hazard of the remaining items. `tests/discovery-ledger-install.mjs`, the discovery ledger runbook (stage 2), ADR 0034. |
 | `createS3Store`, `readInstallCredentials` (defined in `discovery-ledger-install.mjs`) | Imported by `scripts/prediction-domain-production.mjs` and the install test. | **Retain**; move to a neutral module (for example `scripts/r2-s3-store.mjs`) before any removal | Deleting the install script without the move breaks prediction tooling. |
 | `discovery-ledger-split.mjs`, `-offline.mjs`, `-benchmark.mjs` | Offline overlay store; no R2, no D1, no network. | Retain (historical analysis) | Removal needs their tests and runbook sections. |
 
@@ -46,9 +47,9 @@
 
 | R2 key family | Class | Reach |
 | --- | --- | --- |
-| `epg/discovered-films.json` and its generation copy (poster hydration in `src/discovery.js`, `src/admin/posters.js`) | **Legacy authority path** | **Reachable.** Written with an etag CAS, outside `DiscoveryAuthority` for the poster path, so D1 `discovery_admission` does not receive the posters. Tracked as F-1 / [AIR-515](https://trello.com/c/FMWcvvWI) (behaviour change; needs its own card). |
+| `epg/discovered-films.json` and its generation copy (poster hydration in `src/discovery.js`, read-only `src/admin/posters.js`) | Compatibility copy | **Not a live authority.** [AIR-515](https://trello.com/c/FMWcvvWI) is Done ([PR #745](https://github.com/vladimino/iptv-watchlist/pull/745), merge `ab4d33dc`, post-merge CI and Cloudflare readback verified by the Controller): at D1 `open` poster reads go through `DiscoveryAuthority.routeRead` and the one poster write through `DiscoveryAuthority.applyPosters`; the R2 catalog branches exist only for offline stand-ins without `DiscoveryAuthority`. `src/admin/posters.js` is a read-only, D1-aware route, not a writer. Any uncompleted natural POST sweep or verification is a separate operation, not a missing code migration. |
 | `epg/resolver-lease.json`, `resolver-continuation.json`, `discovery-workflow.json`, the R2 decisions-map writers and the four admin recovery writers | Legacy authority path | Dead at `d1`/`open`; tails to retire with the Discovery rollback toolchain (D-1, owner gate). |
-| Published EPG pointer, generation documents, `programme.json`, `watchlist.json` | Compatibility mirror and held-reader contract | Read from R2 only while the published-EPG marker is `held`; reconciled hourly by the EPG ensure. Retain. |
+| Published EPG pointer, generation documents, `programme.json`, `watchlist.json` | Compatibility mirror (D1-derived) | Not a `held` fallback: `src/published-epg.js` `readAuthority` throws `published_epg_unavailable` unless mode `d1` and cutover `open` ([PR #751](https://github.com/vladimino/iptv-watchlist/pull/751) removed the held-reader contract). The hourly EPG ensure can repair the mirrors. Retain. |
 | `titles.json`, `people.json`, `metadata.json` | Frozen Film/Person legacy copy | Never served: the readers refuse non-`open` markers; only the local stand-in reads them. Retain as frozen mirrors (not a fallback or restore source). |
 | `metadata.json` cache mirror in `src/metadata-cache.js` (the `r2` arm) | Compatibility mirror | The `metadata_cache_authority` marker is not read live on that arm (F-5); verify before removal. |
 | Ratings documents, `saveActualMirror`, owner-review mirror, `monitor` state, immutable prediction/fingerprint/profile/assessment bodies, Letterboxd imports and admissions, archive receipts, observation segments | Immutable body, raw input, receipt, archive, mirror or operational state | Live and legitimate. Retain; nothing here is a legacy authority. |
@@ -73,8 +74,8 @@ The maintained references that still described `legacy`/`r2`/`prepared` as servi
 ## Proposed atomic cards (owner approval needed before any work)
 
 0. **Source-comment cleanup** (comment-only, nine files above) once `tests/catalog-film.mjs` is green on `main`.
-1. **Guard or remove the `discovery-ledger-install` apply path**, after moving `createS3Store` to a neutral module. Depends on nothing; rollback is a revert (the install has no live caller). Highest value: removes the only R2 writer that ignores the D1 marker.
-2. **AIR-515 poster hydration** to D1 (existing card; behaviour change, needs an owner decision on the poster source).
+1. **Guard or remove the `discovery-ledger-install` apply path**, after moving `createS3Store` to a neutral module. Depends on nothing; rollback is a revert (the install has no live caller). Highest value: removes the obsolete writer of legacy Discovery authority objects that ignores the D1 marker.
+2. ~~AIR-515 poster hydration~~ **Withdrawn:** already delivered (see the poster row). If a natural POST sweep or verification is still owed, track it as a separate operation, not as code work.
 3. **Remove the offline Film/Person cutover set** (baseline, cutover-accepted/minimum, connector-run, cutover-run, capture, prepared-loader, h1-verify and their tests). No Worker impact; keep `transitionAuthority` and `readMarker`.
 4. **Remove the `film_person_open_handoff` MCP tool and CLI.** Depends on card 3 for `readMarker` consumers; changes the MCP tool list.
 5. **Remove the enrichment projector write arms and tests**, keeping `d1EnrichmentStatus`, `d1EnrichmentStore` and the `projector_window` read paths; then drop the `D1_ENRICHMENT_*` code references.
