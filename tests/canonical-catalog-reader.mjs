@@ -47,35 +47,36 @@ const standin=(file,state,extra={})=>d1Standin(file,{...extra,...(state==='unkno
 const code=expected=>error=>error.code===expected;
 const refusal=state=>state==='held'?'film_person_held':'film_person_unavailable';
 
-// 1. The gate: existing runtime for legacy/r2/prepared, d1 for open, a typed refusal for held and every unknown state. Never R2.
+// 1. The gate (ADR 0162): d1 for open, a typed refusal for held and every other state (legacy, r2, prepared, unknown). Never R2. A not-installed domain is 'existing' only with the explicit stand-in.
 if(ONLY!=='route')for(const state of STATES){
  const env={DB:standin(database(state),state)};
- if(['legacy','r2','prepared'].includes(state))assert.equal((await reader.catalogReaderGate(env)).mode,'existing',state);
- else if(state==='open')assert.equal((await reader.catalogReaderGate(env)).mode,'d1',state);
+ if(state==='open')assert.equal((await reader.catalogReaderGate(env)).mode,'d1',state);
  else await assert.rejects(()=>reader.catalogReaderGate(env),code(refusal(state)),state);
+}
+if(ONLY!=='route'){
+ const local={DB:standin(database('legacy'),'legacy'),FILM_PERSON_DB_OPTIONAL:'standin'};
+ assert.equal((await reader.catalogReaderGate(local)).mode,'existing','the explicit local stand-in for a not installed domain');
+ for(const state of ['r2','prepared'])await assert.rejects(()=>reader.catalogReaderGate({DB:standin(database(state),state),FILM_PERSON_DB_OPTIONAL:'standin'}),code('film_person_unavailable'),state+' stays refused even with the opt-in');
 }
 if(ONLY!=='route')assert.equal((await canonicalReaderMode({DB:d1Standin(database('open'))})).mode,'d1','the bulk read model shares the one gate');
 if(ONLY!=='route'){
- for(const state of ['legacy','r2','prepared'])assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database(state),state)}),true,state);
+ assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database('legacy'),'legacy'),FILM_PERSON_DB_OPTIONAL:'standin'}),true,'stand-in');
+ for(const state of ['legacy','r2','prepared'])assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database(state),state)}),false,state+': frozen mirrors are never written below open');
  assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database('open'),'open')}),false,'open');
  for(const state of ['held','unknown-row','unknown-table','unknown-read'])assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database(state),state)}),false,state);
- const file=database('prepared'),env={DB:d1Standin(file)};
+ const file=database('open'),env={DB:d1Standin(file)};
  const stored={titles:1,people:1};
  const write=async(key)=>{if(!(await reader.canonicalMirrorsWritable(env)))return false;stored[key]=(stored[key]||0)+1;return true;};
- assert.equal(await write('titles'),true,'prepared still writes');
- sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1");
- assert.equal(await write('titles'),false,'flip between localize and write skips titles.json');
- assert.equal(await write('people'),false,'flip between localize and write skips people.json');
- assert.deepEqual(stored,{titles:2,people:1});
+ assert.equal(await write('titles'),false,'open skips titles.json');
+ assert.equal(await write('people'),false,'open skips people.json');
+ assert.deepEqual(stored,{titles:1,people:1});
  sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");
  assert.equal(await write('titles'),false,'held skips');
- const cutover=database('prepared'),cutoverEnv={DB:d1Standin(cutover)};
- assert.equal(await reader.canonicalMirrorsWritable(cutoverEnv),true);
- sqlite(cutover,"UPDATE projector_window SET state='held',owner='air-499',requested_at="+(Date.now()-1000)+",expires_at="+(Date.now()+60000)+" WHERE id=1");
- assert.equal(await reader.canonicalMirrorsWritable(cutoverEnv),false,'exclusive window held refuses frozen mirror puts');
- const inner=d1Standin(database('prepared'));
+ const cutover=database('legacy'),cutoverEnv={DB:d1Standin(cutover),FILM_PERSON_DB_OPTIONAL:'standin'};
+ assert.equal(await reader.canonicalMirrorsWritable(cutoverEnv),true,'the local stand-in may write the frozen mirrors');
+ const inner=d1Standin(database('legacy'));
  const windowFail={prepare(sql){if(/FROM projector_window/.test(sql))throw new Error('D1 timeout');return inner.prepare(sql);}};
- assert.equal(await reader.canonicalMirrorsWritable({DB:windowFail}),false,'unreadable projector_window is not permission to write');
+ assert.equal(await reader.canonicalMirrorsWritable({DB:windowFail,FILM_PERSON_DB_OPTIONAL:'standin'}),false,'unreadable projector_window is not permission to write');
  {
   const worker=fs.readFileSync('src/worker.js','utf8');
   const freeze=worker.slice(worker.indexOf('async function frozenCanonicalMirrorsLocked'),worker.indexOf('async function localizedTitleStore'));
@@ -125,7 +126,7 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:303','film:
  for(const bad of ['0','abc','1.5','007',301,null,'1234567890123'])await assert.rejects(()=>ask(bad),code('canonical_read_invalid'),'typed id only: '+String(bad));
  for(const state of STATES.filter(state=>state!=='open')){
   const seen=[],other={DB:standin(database(state),state,{onQuery:async text=>{seen.push(text);}})};
-  const expected=['legacy','r2','prepared'].includes(state)?'canonical_read_not_authoritative':refusal(state);
+  const expected=refusal(state);
   await assert.rejects(()=>ask('300',other),code(expected),state+' refuses');
   assert.ok(seen.every(text=>!/film_rated_admission|film_external_id|tmdb_retirement_decision|film_redirect/.test(text)),state+' reads no catalog table');
  }
@@ -153,7 +154,7 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:303','film:
   assert.ok(seen.length>0&&seen.every(text=>/^\s*SELECT/i.test(text)),'only SELECT statements');assert.equal(e.DB.calls.batches,0,'no batch');
  }
  assert.equal(readAdmissions,readerAdmissions,'film-admission re-exports the one reader');assert.equal(typeof loadAdmissionRows,'function');assert.equal(ADMISSION_READ_CHUNK,80);
- await assert.rejects(()=>reader.readAdmissions({DB:d1Standin(database('prepared'))},['film:tmdb:300']),code('admission_not_authoritative'));
+ await assert.rejects(()=>reader.readAdmissions({DB:d1Standin(database('prepared'))},['film:tmdb:300']),code('film_person_unavailable'));
  await assert.rejects(()=>readAdmissions({DB:d1Standin(database('held'))},['film:tmdb:300']),code('film_person_held'));
 }
 
@@ -175,7 +176,7 @@ for(const state of STATES){
  for(const p of PATHS)answers[state][p]=await get(p);
  answers[state].post=await get('status','POST');
  assert.equal(touched,0,state+': no R2 access');
- if(state==='open'||state==='prepared'){
+ if(state==='open'){
   // The marker moves AFTER the views' own reads: the gate at the start saw this state and generation; the answer is refused (typed 503, no stale body) because the marker is checked again
   // before it is returned. An unchanged marker answers byte-identically to the stored answer above.
   const held="UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1";
@@ -207,18 +208,18 @@ for(const state of STATES){
  assert.equal(answers[state].post.status,405,state+': a non-GET is not gated');
 }
 const body=(state,p)=>JSON.parse(answers[state][p].text);
-for(const state of ['held','unknown-row','unknown-table','unknown-read'])for(const p of PATHS){
+for(const state of ['legacy','r2','prepared','held','unknown-row','unknown-table','unknown-read'])for(const p of PATHS){
  assert.equal(answers[state][p].status,503,state+' '+p);
  assert.deepEqual(body(state,p),{error:'storage_unavailable',reason:refusal(state)},state+' '+p+': a typed 503 and no catalog data');
 }
-// The same fixture and the same contract version (r2 and prepared run the full chain): the answers are byte-identical. legacy runs an older chain, so only its flag is compared.
-for(const p of PATHS){
- assert.equal(answers.prepared[p].text,answers.r2[p].text,p+': prepared is byte-identical to r2');
- assert.equal(answers.open[p].status,answers.prepared[p].status,p);
- assert.equal(answers.open[p].text.replaceAll('"authoritative":true','"authoritative":false'),answers.prepared[p].text,p+': open differs only in authoritative');
- assert.equal(answers.legacy[p].status,answers.r2[p].status,p+': legacy answers like r2');
+// ADR 0162: legacy, r2 and prepared are refused above (503, no catalog data); only open answers.
+{
+ // The explicit local stand-in (a domain that is not installed) still answers, and says it is not authoritative.
+ const legacyFile=database('legacy');
+ const local={DB:standin(legacyFile,'legacy'),FILM_PERSON_DB_OPTIONAL:'standin',BUCKET:{}};
+ const res=await ctx.route(new Request('https://iptv.test/api/d1/status'),local,new URL('https://iptv.test/api/d1/status'));
+ assert.equal(res.status,200);assert.equal((await res.json()).authoritative,false,'stand-in: not authoritative');
 }
-for(const state of ['legacy','r2','prepared'])for(const p of ['status','persons/director/michael-mann/identity','persons/actor/solo/identity'])assert.equal(body(state,p).authoritative,false,state+' '+p);
 for(const p of ['status','persons/director/michael-mann/identity','persons/actor/solo/identity'])assert.equal(body('open',p).authoritative,true,'open '+p);
 assert.equal(body('open','persons/director/michael-mann/identity').bounded,true,'the namesake cap takes the bounded path');assert.equal(body('open','persons/actor/solo/identity').bounded,false,'a lone person takes the complete path');
 assert.equal(answers.open['films/tmdb:9'].status,404);
@@ -239,4 +240,4 @@ if(!ONLY){
  assert.ok(!/\b(INSERT|UPDATE|DELETE|REPLACE)\b\s+(INTO|FROM)?\s*\w/.test(text)&&!/R2|BUCKET|fetch\(/.test(text),'the reader has no write statement and no R2 or network access');
  if(!MODULE)assert.deepEqual([...text.matchAll(/^import\s.*from\s+'([^']+)'/gm)].map(match=>match[1]),['./film-person-authority.js'],'it imports only the marker reader');
 }
-console.log('canonical-catalog-reader: the gate keeps the existing runtime for legacy/r2/prepared, reads D1 only at open and fails closed (503, typed reason) for held and every unknown state; the D1 fallback reads admissions, identity claims, redirects and the retirement ledger with no R2 handle and refuses a marker that moves; /api/d1/* answers byte-identically before open and says authoritative:true only at open; the module is read-only and only the allowlisted importers name it');
+console.log('canonical-catalog-reader: the gate reads D1 only at open and fails closed (503, typed reason) for legacy, r2, prepared, held and every unknown state (ADR 0162; the explicit local stand-in is the only non-open answer); the D1 fallback reads admissions, identity claims, redirects and the retirement ledger with no R2 handle and refuses a marker that moves; /api/d1/* answers byte-identically before open and says authoritative:true only at open; the module is read-only and only the allowlisted importers name it');

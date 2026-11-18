@@ -76,11 +76,10 @@ const ask=async(route,env)=>{const r=await worker.fetch(new Request('https://ipt
 const getFilm=async(id,env)=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/'+id),{BUCKET:bucket,...env},{waitUntil(){}});return {status:r.status,body:await r.json()};};
 
 {
- seedCatalog();
+ seedCatalog();reads.length=0;
  const prepared=await getFilm('7',{DB:standin(database('prepared'),'prepared')});
- assert.equal(prepared.status,200);
- assert.ok(reads.includes('metadata.json'),'prepared still reads metadata.json');
- assert.equal(prepared.body.film.letterboxdUrl,'https://letterboxd.com/film/heat-1995/');
+ assert.equal(prepared.status,503,'prepared is not served (ADR 0162)');
+ assert.ok(!reads.includes('metadata.json'),'prepared never reads metadata.json');
 }
 {
  seedCatalog();
@@ -107,8 +106,7 @@ const getFilm=async(id,env)=>{const r=await worker.fetch(new Request('https://ip
 {
  seedCatalog();
  const prepared=await ask('/api/catalog/available',{DB:standin(database('prepared'),'prepared')});
- assert.equal(prepared.status,200);
- assert.ok(reads.includes('metadata.json'));
+ assert.equal(prepared.status,503,'prepared is not served (ADR 0162)');
 }
 {
  seedCatalog();
@@ -143,14 +141,6 @@ const getFilm=async(id,env)=>{const r=await worker.fetch(new Request('https://ip
  assert.equal(r.body.reason,'film_person_generation_moved');
 }
 {
- const file=database('prepared');seedCatalog();
- let gates=0;
- const env={BUCKET:bucket,DB:standin(file,'prepared',{onQuery:async text=>{if(/FROM film_person_authority/.test(text)){gates++;if(gates===2)sqlite(file,TO_OPEN);}}})};
- const r=await getFilm('7',env);
- assert.equal(r.status,503,'prepared film rechecks after predictionFreshness, not only at the metadata gate');
- assert.equal(r.body.reason,'film_person_generation_moved');
-}
-{
  const file=database('open');seedCatalog();
  let gates=0;
  const env={BUCKET:bucket,DB:standin(file,'open',{onQuery:async text=>{if(/FROM film_person_authority/.test(text)){gates++;if(gates===3)sqlite(file,TO_HELD);}}})};
@@ -174,10 +164,7 @@ const getFilm=async(id,env)=>{const r=await worker.fetch(new Request('https://ip
 {
  seedCatalog();
  const env={BUCKET:bucket,DB:standin(database('prepared'),'prepared')};
- const map=await vm.runInContext('ratingsFilmLabels',ctx)(env,['heat-1995']);
- assert.equal(map.get('heat-1995').title,'Stale');
- assert.equal(map.get('heat-1995').tmdb,'7');
- assert.ok(reads.includes('metadata.json'));
+ await assert.rejects(()=>vm.runInContext('ratingsFilmLabels',ctx)(env,['heat-1995']),error=>error.code==='film_person_unavailable','prepared is not served (ADR 0162)');
 }
 {
  seedCatalog();
@@ -186,8 +173,7 @@ const getFilm=async(id,env)=>{const r=await worker.fetch(new Request('https://ip
   'heat-dup':{id:'heat-1995',tmdbId:'8',year:1995,title:'Other'}
  });
  const env={BUCKET:bucket,DB:standin(database('prepared'),'prepared')};
- const map=await vm.runInContext('ratingsFilmLabels',ctx)(env,['heat-1995']);
- assert.equal(map.get('heat-1995').tmdb,null,'R2 labels keep catalogLidTmdb: two stored TMDB ids unbridge the lid');
+ await assert.rejects(()=>vm.runInContext('ratingsFilmLabels',ctx)(env,['heat-1995']),error=>error.code==='film_person_unavailable');
 }
 {
  seedCatalog();
@@ -220,4 +206,4 @@ INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenanc
  assert.equal(heat['heat-1995'].identityBlocked,true);
 }
 
-console.log('canonical-catalog-metadata: film/available/ratings labels keep R2 at prepared, read bounded D1 at open, and STOP on held/unreadable/generation move without metadata.json fallback');
+console.log('canonical-catalog-metadata: film/available/ratings labels refuse prepared (ADR 0162), read bounded D1 at open, and STOP on held/unreadable/generation move without metadata.json fallback');

@@ -162,11 +162,11 @@ async function seedFilm(env,confirmed,{tmdb=confirmed.movieId,trusted=true}={}){
 {
  const input=decisionFor(ODYSSEY);
  const legacy=database({apply:false});
- await assert.rejects(()=>recordRetirementDecision(state(legacy),input),code('film_person_not_open'));
+ await assert.rejects(()=>recordRetirementDecision(state(legacy),input),code('film_person_unavailable'));
  const r2=database();
- await assert.rejects(()=>recordRetirementDecision(state(r2),input),code('film_person_not_open'),'r2');
+ await assert.rejects(()=>recordRetirementDecision(state(r2),input),code('film_person_unavailable'),'r2');
  sqlite(r2,"UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1");
- await assert.rejects(()=>recordRetirementDecision(state(r2),input),code('film_person_not_open'),'prepared');
+ await assert.rejects(()=>recordRetirementDecision(state(r2),input),code('film_person_unavailable'),'prepared');
  assert.equal(one(r2,'SELECT COUNT(*) FROM tmdb_retirement_decision'),0);
  const held=database({open:true});
  sqlite(held,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");

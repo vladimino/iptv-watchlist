@@ -40,7 +40,7 @@ const bucket={
  async delete(key){puts.push('delete:'+key);records.delete(key);},
  async list({prefix='',limit=1000}={}){const keys=[...records.keys()].filter(k=>k.startsWith(prefix)).sort();return {objects:keys.slice(0,limit).map(key=>({key,customMetadata:{}})),truncated:false};}
 };
-const env={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',EPG_XML_URL:'https://epg.test/guide.xml',LETTERBOXD_USERNAME:'tester'};
+const env={FILM_PERSON_DB_OPTIONAL:'standin',BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',EPG_XML_URL:'https://epg.test/guide.xml',LETTERBOXD_USERNAME:'tester'};
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,Uint32Array,DataView,atob,btoa,crypto:webcrypto,console,setTimeout,
  ASSETS:{'/':{body:'<!doctype html>',type:'text/html'}},INITIAL_PERSONAL_RATINGS:{w1:4},
  fetch:async input=>{const url=String(input instanceof Request?input.url:input);fetches.push(url);return url.startsWith('https://api.themoviedb.org/3/movie/11')?new Response('{"id":11}'):new Response('unexpected',{status:599});}});
