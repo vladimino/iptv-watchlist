@@ -299,6 +299,8 @@ async function overlayViewRows(db){
 export async function overlayView(env,index){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
+ // ADR 0162: a held cutover refuses instead of serving the R2 view index's facts; only the uninstalled local domain keeps them.
+ if(authority.tables&&!authority.ready)throw failed('ratings_domain_not_authoritative');
  if(!authority.ready)return index;
  const rows=await overlayViewRows(db);
  const base=index&&typeof index==='object'&&!Array.isArray(index)?index:{};
@@ -323,10 +325,11 @@ export async function overlayView(env,index){
 
 // AIR-475 (review of the production acceptance fix): the owner's watched mark and rating of the given ids from D1 `ratings_view`, with no dependence on the R2 view index holding the key. `base` is
 // {id: entry} for exactly `ids`; the answer lays the D1 facts over each entry (its own watched, rating and watchlist facts are dropped first: D1 is the only source while the domain is d1 and open),
-// or is `base` unchanged otherwise. One indexed statement; nothing is written; an id with no D1 row has no rating and no mark.
+// is `base` unchanged for the uninstalled local domain, and a refusal for a held cutover or any other marker (ADR 0162). One indexed statement; nothing is written; an id with no D1 row has no rating and no mark.
 export async function viewItems(env,ids,base){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
+ if(authority.tables&&!authority.ready)throw failed('ratings_domain_not_authoritative');
  if(!authority.ready)return base;
  const list=[...new Set(ids)].filter(id=>typeof id==='string'&&id);
  if(!list.length)return base;
@@ -363,6 +366,8 @@ export function ratingsRunActivity(value,now){
  return value.state==='running'&&Date.parse(value.lease?.expiresAt)>now?'active':'idle';
 }
 
+// Read-only operator diagnostic (the production status command): it also reads the run lease of a held cutover, so an operator can see it.
+// It is not a serving path and never falls back to R2 for a domain whose tables exist.
 export async function readRatingsRun(env){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);

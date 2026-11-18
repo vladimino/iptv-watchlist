@@ -8,7 +8,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import * as RatingsD1 from '../src/ratings-d1.js';
-import {casOwned, listDocuments, overlayView, projectView, putOwned, readOwned, readRatingsAuthority, readRatingsRun, ratingsRunActivity, routeRead} from '../src/ratings-d1.js';
+import {casOwned, listDocuments, overlayView, viewItems, projectView, putOwned, readOwned, readRatingsAuthority, readRatingsRun, ratingsRunActivity, routeRead} from '../src/ratings-d1.js';
 import {d1Standin} from './d1-standin.mjs';
 import {applyDecision, ratingsStatements, runRatingsProduction} from '../scripts/ratings-domain-production.mjs';
 
@@ -128,6 +128,23 @@ const docs=[{key:'letterboxd/facts/films/lb-abc.json',text:filmText},{key:'lette
  assert.equal(overlaid.abc.prediction.predictedRating,3);
  assert.equal(overlaid.other.actualRating,undefined);
  assert.equal(overlaid.tmdb_5.watched,true);
+ // ADR 0162 (review of #742): the view overlays refuse a held cutover or an r2 marker instead of returning the stale R2 facts they were given.
+ const stale={abc:{actualRating:5,watched:false,watchlist:true}};
+ db.sql("UPDATE ratings_domain_authority SET cutover='held'");
+ await assert.rejects(overlayView(env,structuredClone(stale)),error=>error.code==='ratings_domain_not_authoritative','a held cutover does not serve the R2 view index');
+ await assert.rejects(viewItems(env,['abc'],structuredClone(stale)),error=>error.code==='ratings_domain_not_authoritative','a held cutover does not serve the R2 view facts');
+ db.sql("UPDATE ratings_domain_authority SET mode='r2', cutover='open'");
+ await assert.rejects(overlayView(env,structuredClone(stale)),error=>error.code==='ratings_domain_unavailable');
+ await assert.rejects(viewItems(env,['abc'],structuredClone(stale)),error=>error.code==='ratings_domain_unavailable');
+ db.sql("UPDATE ratings_domain_authority SET mode='d1', cutover='open'");
+ const served=(await viewItems(env,['abc'],structuredClone(stale))).abc;
+ assert.deepEqual([served.actualRating,served.watched],[null,true],'open: the D1 view replaces the stale R2 rating and mark');
+ // The uninstalled local domain (no binding, or no ratings tables without RATINGS_DB_REQUIRED) keeps its input; production refuses it.
+ assert.deepEqual(await overlayView({},structuredClone(stale)),stale);
+ assert.deepEqual(await viewItems({},['abc'],structuredClone(stale)),stale);
+ const bare=load(chainNames);
+ assert.deepEqual(await overlayView({DB:bare},structuredClone(stale)),stale);
+ await assert.rejects(viewItems({DB:bare,RATINGS_DB_REQUIRED:'on'},['abc'],structuredClone(stale)),error=>error.code==='ratings_domain_unavailable');
  const queue=await readOwned(env,'enrichment/removal-rating-lookups.json');
  assert.equal(queue.value.films.abc.refs[0].resolved,false);
  assert.equal(queue.value.films.abc.watched,undefined);

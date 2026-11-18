@@ -481,6 +481,9 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
  r=await ask(prepared,'1423191');assert.equal(r.status,404,'below open the canonical Film is not read at all (unchanged)');
  // A held marker keeps failing closed (503), with no alias read.
  const held=mount(OPEN+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;");r=await ask(held,'1423191');assert.deepEqual([r.status,r.body.reason],[503,'film_person_held']);
+ // ADR 0162 (review of #742): a held ratings cutover is a 503, never the stale rating and watched mark of the R2 view index above.
+ const ratingsHeld=mount(OPEN+RATINGS+"UPDATE ratings_domain_authority SET cutover='held' WHERE id=1;");r=await ask(ratingsHeld,'1423191');
+ assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable','ratings_domain_not_authoritative'],'a held ratings cutover refuses the page: '+JSON.stringify(r.body));
 }
 
 // ---- 3h. AIR-475 review of the acceptance fix: with Film/Person, Ratings and Predictions ALL d1/open, the page shows the D1 forecast, fingerprint, rating and watched mark of the verified lid even when
