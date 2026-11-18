@@ -1,6 +1,6 @@
-# Identity work inventory (accepted design contract)
+# Identity work inventory
 
-**Status:** accepted architecture, not implemented. No route, module or object described here exists yet. The decision is [ADR 0170](../../adr/0170-unified-identity-work-inventory.md), Accepted on 2026-11-18; this page is the design contract for separately approved implementation. The installed [Limbo inventory](data-health.md#limbo-inventory) and [`GET /api/admin/limbo`](../api/admin.md#limbo-inventory) are unchanged.
+**Status:** implemented and read-only. The route `GET /api/admin/identity-work`, the pure module and the derived archive registry exist; the owner Limbo page does not use them yet. The decision is [ADR 0170](../../adr/0170-unified-identity-work-inventory.md). The installed [Limbo inventory](data-health.md#limbo-inventory) and [`GET /api/admin/limbo`](../api/admin.md#limbo-inventory) are unchanged. Source: [`src/admin/identity-work.js`](../../../src/admin/identity-work.js) (route and storage reads), [`src/domain/identity-work-inventory.js`](../../../src/domain/identity-work-inventory.js) (pure rows, filters, cursor; bundled as `IdentityWorkInventory`), [`src/domain/letterboxd-import-registry.js`](../../../src/domain/letterboxd-import-registry.js) (pure registry rules; bundled as `LetterboxdImportRegistry`) and the registry hook in [`src/letterboxd-rated-candidates.js`](../../../src/letterboxd-rated-candidates.js). Tests: [`tests/admin-identity-work-api.mjs`](../../../tests/admin-identity-work-api.mjs), [`tests/identity-work-inventory.mjs`](../../../tests/identity-work-inventory.mjs), [`tests/letterboxd-import-registry.mjs`](../../../tests/letterboxd-import-registry.mjs); the [GET side-effect audit](../../../tests/get-write-audit.mjs) registers the route.
 
 **Role:** a read-only owner view of all identity work that has not yet become a trusted Film: EPG observations, Letterboxd rated candidates and stalled canonical Films, in typed lanes with honest per-lane coverage.
 
@@ -66,7 +66,7 @@ Lane order is `film`, `epg_observation`, `letterboxd_rated_candidate`. Inside a 
 
 **What the pin holds.** The `pin` is the tuple of the versions read at the first page: the Limbo tuple (for the first two lanes) and the **registry etag**. It does not hold any candidate document etag.
 
-**What the cursor holds.** The lane, the position, the filter key and limit, and, when the position is inside the candidate lane, the page archive's `sha` and the `documentEtag` read when the cursor was minted.
+**What the cursor holds.** The evaluation clock of the first page (`nowMs`, reused by every later page, so causes, dispositions, ages and filtered positions of the Film and observation lanes cannot move between pages while the source versions stand; a new first request evaluates at the new time), the lane, the position, the filter key and limit, and, when the position is inside the candidate lane, the page archive's `sha` and the `documentEtag` read when the cursor was minted.
 
 **What is validated on each request.** The Limbo tuple and the registry etag (`stale_pin`, 409, when either moved); the filter key and limit (`stale_cursor`, 400); and, for a cursor inside an archive, that the archive's document etag still equals the cursor's (`stale_cursor`, 400). 
 
@@ -83,6 +83,66 @@ Lane order is `film`, `epg_observation`, `letterboxd_rated_candidate`. Inside a 
 | Unverified `rated-candidates.json` | R2, compare-and-swap | Read, one archive per request |
 | `letterboxd/admissions/verified-films.json` | R2 receipt | Evidence only; never confirms a link |
 | `letterboxd/imports/registry.json` | derived R2 projection | Read; written only by the existing candidate writers and the owner-confirmed backfill |
+
+## Registry
+
+`letterboxd/imports/registry.json` is a derived, droppable projection: `{schemaVersion: 1, updatedAt, archives: {<sha>: {registeredAt, generatedAt, counts: {pending, admitting, needs_review, verified, removed}, documentEtag, revision, summarizedAt}}}`, at most 256 KiB and 500 archives. Every successful write of a candidate document (register, identity step, retry, rollback and the other mutation paths all go through one compare-and-swap helper) is followed by a bounded registry update (three attempts, its own compare-and-swap) that names the etag of the document just saved. The update never fails or undoes the primary write, never creates a second owner and never hides an older archive. Rules:
+
+- Every candidate document carries a `revision` that rises by one inside the compare-and-swap that writes it, and the registry row names the revision it summarizes. A summary whose revision is not newer than the row's (or has none) never replaces the row, so a delayed writer cannot overwrite the row of a newer document, and no clock is involved; `summarizedAt` is only a label. `registeredAt` is kept from the first registration.
+- A new archive beyond 500 archives, or a registry beyond 256 KiB, is refused and the archive stays `unindexed`.
+- A registry that is unreadable or of another schema is left untouched by writers and reported by the read (`registry_unreadable`, `registry_invalid`, `registry_oversized`); dropping the object is the recovery, and the next writer starts it again from its own archive.
+- A write that changes nothing writes nothing. An archive whose document was last written before the registry existed stays `unindexed` until its next write or an owner-confirmed backfill.
+
+## Implementation notes and limits
+
+- Archives that are present in the listing but not in the registry are paged **after** the registered ones, each labelled `indexed: false`; they are counted in `enumeration.unindexed` and are never reported as an empty queue. With no registry object at all every listed archive is paged this way, ordered by hash.
+- An archive filter accepts any 64-hex hash; an archive with no candidate document reports `page.state: absent`.
+- A page reads at most one candidate document, so a page can be shorter than `limit` (or empty) while `nextCursor` names the next archive. A caller continues until `nextCursor` is `null`.
+- A page that the Film and Discovery lanes fill exactly hands over to the candidate lane with a cursor and reads no candidate document in that request.
+- Film rows group every Limbo issue of one Film into one row (`source.issues`); the Discovery observation row carries no `film` because the Limbo reader holds no canonical movie proof for it. A `tmdb_tv` claim is never a Film link.
+- Admission proof is one `SELECT ... FROM film_rated_admission WHERE archive_sha256 = ? LIMIT 5001` per request, and only when the page archive holds a `verified` candidate. More than 5000 rows, or a failed read, makes the proof `unavailable`: such rows are `waiting` with reason `admission_unreadable`, never `resolved` and never `admission_unconfirmed`.
+- A candidate with state `pending` or `admitting` in an archive whose checkpoint is stopped is `blocked` with the stop code as `reason`; a `needs_review` row is `retryable` when its reason is one the identity step can retry, otherwise `needs_owner_review`.
+- If the Limbo evaluation cannot be loaded the Film and EPG lanes report `unavailable` with the reason and the candidate lane is still served; the pin then carries `unavailable` for that part.
+- A query for only the candidate lane does not load the Limbo snapshot; a query for only Film or EPG rows does not list or read the candidate store.
+
+## Response
+
+```json
+{
+  "pin": "I1|e%3Aabc|L2%7C...",
+  "snapshot": {"sources": ["letterboxd/imports/registry.json", "..."], "evaluatedAt": "2026-11-18T12:00:00.000Z", "scope": "per_archive"},
+  "type": null, "disposition": null, "include": null, "archive": null, "q": null, "limit": 25,
+  "rows": [{"key": "lbc:<sha>:Aa1", "type": "letterboxd_rated_candidate", "status": "needs_review", "reason": "tmdb_fetch_failed", "disposition": "retryable", "title": "Film", "year": 2001, "shortCode": "Aa1", "archiveSha256": "<sha>", "provenance": [{"source": "letterboxd_archive", "ref": "<sha>"}, {"source": "archive_chunk", "ref": "0"}], "observedAt": "...", "lastProgressAt": "...", "ageMs": 864000000, "film": null, "observedHints": [], "source": {"chunk": 0, "rating": 4, "enrichment": null, "retryOf": null, "historicalTmdb": null, "stopped": false}}],
+  "nextCursor": null,
+  "coverage": {
+    "film": {"state": "partial", "observed": 2},
+    "epg_observation": {"state": "partial", "observed": 1, "index": {"available": true}},
+    "letterboxd_rated_candidate": {
+      "enumeration": {"state": "partial", "reason": "unindexed_archives", "registered": 1, "listed": 2, "unindexed": 1, "unindexedArchives": ["<sha>"], "registryOrphans": 0, "orphanArchives": []},
+      "counts": {"basis": "registry_estimate", "summarizedAt": "...", "state": "estimate", "byStatus": {"pending": 1, "admitting": 0, "needs_review": 1, "verified": 0, "removed": 0}},
+      "page": {"archiveSha256": "<sha>", "state": "read_whole", "reason": null, "documentEtag": "...", "indexed": true, "admissions": "not_needed"},
+      "snapshot": "per_archive", "selected": null
+    }
+  },
+  "vocabulary": {"types": ["film", "epg_observation", "letterboxd_rated_candidate"], "dispositions": ["retryable", "blocked", "needs_owner_review", "waiting", "resolved"]}
+}
+```
+
+A lane that the query excluded has no `coverage` entry. `page.state` is `read_whole`, `registry_stale`, `oversized`, `unreadable`, `absent` or `not_read`. `enumeration.state` is `complete`, `partial` or `unknown` (listing unavailable). Errors: 400 `unknown_type`, `unknown_disposition`, `unknown_include`, `invalid_archive`, `invalid_query`, `invalid_limit`, `invalid_pin`, `stale_cursor`; 405 for a method other than `GET`; 409 `stale_pin`.
+
+## Performance bounds
+
+| Bound | Value |
+| --- | --- |
+| Delimiter `list` per request | 1, at most 1000 prefixes, no bodies |
+| Registry object | 1 `get`, at most 256 KiB and 500 archives |
+| Candidate document | 1 `head` and at most 1 `get`, at most 2 MiB; a larger one is judged from `head` and never read |
+| D1 | at most 1 `SELECT` of `film_rated_admission` for the page archive, `LIMIT 5001`, none without a `verified` candidate; the Limbo lanes read what the Limbo route reads |
+| Rows per page | `limit` 1 to 25 |
+| Cursor | at most 6000 characters |
+| Outbound calls, writes, ZIP access | none |
+
+Measured production sizes are in the [dated measurement](../../evidence/letterboxd/identity-work-inventory-measurement-2026-11-18.md).
 
 ## Synthetic cases the implementation must satisfy
 
