@@ -273,7 +273,12 @@ records.get('epg/discovery-workflow.json').recovery={attempts:1,reason:'no_progr
 binding.get=async()=>({status:'running'});
 creates.length=0;
 pipeline=await status();
-assert.equal(pipeline.discoveryExecutor.owner,'none');assert.equal(pipeline.discoveryExecutor.degraded,true);assert.ok(pipeline.discoveryExecutor.recoveryDue);assert.equal(creates.length,0);
+assert.equal(pipeline.discoveryExecutor.owner,'none');assert.equal(pipeline.discoveryExecutor.degraded,true);assert.ok(pipeline.discoveryExecutor.recoveryDue);assert.equal(creates.length,0);assert.equal(pipeline.discoveryExecutor.recoveryOverdue,false,'a recovery not yet due is waiting, not overdue');
+records.get('epg/discovery-workflow.json').recovery.dueAt=new Date(Date.now()-60000).toISOString();
+binding.get=async()=>({status:'complete'});
+pipeline=await status();
+assert.equal(pipeline.discoveryExecutor.recoveryOverdue,true,'a due recovery with nobody alive is overdue');assert.equal(pipeline.discoveryExecutor.degraded,true);assert.equal(creates.length,0,'reading the status starts nothing');
+records.get('epg/discovery-workflow.json').recovery.dueAt=new Date(Date.now()+60000).toISOString();
 
 // 12. A superseded series does not call TMDB or write Discovery after the successor owns the record.
 seed();

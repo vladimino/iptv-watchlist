@@ -26,8 +26,13 @@ Status: chain (1)-(3) is established by reading and reproduced offline. That the
 
 `tests/discovery-fence-collision.mjs` (core): one collision is retried and the chunk completes; collisions that never clear defer with a bounded attempt count; a real run switch is not retried and aborts on the lost lease.
 
+## Scope 4 (health and events), offline
+
+- `discoveryExecutorReadout` exposes `recoveryOverdue` and counts it in `degraded`.
+- The hourly report maps a non-terminal stopped series with backlog to `stalled` (`recovery_overdue`) or `waiting` (`recovery_waiting`) instead of `idle`; terminal stops stay `idle`. The Events card says the recovery is overdue, and a `running` hour with no progress no longer reads «работает».
+- Tests: `tests/discovery-events.mjs` block 16, `tests/discovery-workflow.mjs`, `tests/activity-ui.mjs`.
+
 ## Not done here (open on AIR-534)
 
 - Scope 3: bounded automatic successor after a recoverable stopped series (today waits for the hourly Cron). This changes orchestration; it needs an owner decision and an ADR before implementation.
-- Scope 4: health/events for stopped + overdue recovery with backlog, and zero-work vs suppressed vs failed vs progress.
 - Live proof: natural race, successor and no duplicate owners go to `Верификация`; offline tests do not replace it.

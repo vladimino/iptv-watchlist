@@ -2543,13 +2543,15 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
   const status=event.status,added=incomplete?null:event.added,checked=incomplete?null:event.checked;
   const title=incomplete?'Отчёт за час неполный'
    :status==='failed'?'Discovery остановлен после повторных ошибок'
+   :status==='stalled'?'Discovery остановлен: восстановление просрочено, очередь не разобрана'
    :status==='waiting'?'Discovery ждёт повтора'
    :status==='blocked'?'Discovery не запустился: временный отказ'
    :status==='empty'||empty?'Очередь Discovery пуста'
    :status==='idle'?'Discovery не работает: запуска не требовалось'
    :added>0?`Найдено новых фильмов: ${added}`
    :checked>0?'Новых фильмов не найдено'
-   :'Discovery работает, новых результатов за час нет';
+   :status==='running'?'Discovery запущен, полезного прогресса за час нет'
+   :'Новых результатов за час нет';
   const from=incomplete?null:stamp(event.from);
   body=`<p>${title}</p><dl><div><dt>Новых фильмов</dt><dd>${num(added)}</dd></div><div><dt>Разобрано наблюдений</dt><dd>${num(checked)}</dd></div><div><dt>Осталось в очереди</dt><dd>${queue}</dd></div></dl>`
    +(incomplete?'<p class="event-note">Данные за этот период не удалось прочитать. Найденное войдёт в следующий отчёт.</p>'
@@ -2558,7 +2560,7 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
  else if(event.type==='discovery'&&event.kind==='report_failed'){
   // ADR 0118: the REPORT of an hour could not be completed. No counters and no queue facts are drawn (none were read), and Discovery is named only when the
   // reconcile of that firing confirmed a state that needs attention; every sentence is fixed text chosen by `status`.
-  const state=event.status==='failed'?'Discovery остановлен после повторных ошибок':event.status==='waiting'?'Discovery ждёт повтора':event.status==='blocked'?'Discovery не запустился: временный отказ':null;
+  const state=event.status==='failed'?'Discovery остановлен после повторных ошибок':event.status==='stalled'?'Discovery остановлен: восстановление просрочено':event.status==='waiting'?'Discovery ждёт повтора':event.status==='blocked'?'Discovery не запустился: временный отказ':null;
   body=`<p>Отчёт за час не удалось сформировать</p><p class="event-note">Если за этот период что-то было найдено, оно войдёт в следующий успешный отчёт.</p>${state?`<p class="event-note">${state}.</p>`:''}`;
  }
  else if(event.type==='discovery'){
