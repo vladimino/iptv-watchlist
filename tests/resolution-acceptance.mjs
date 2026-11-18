@@ -420,3 +420,11 @@ assert.equal(retired('britney spears apple music festival|2016',2016,{film:{tmdb
 // Every id the writer can still reach through the reviewed list is on the retired list; an unrelated id is not.
 for(const id of ['450202','1126350','1603159','1623086','569928','1603299','761960','24970'])assert.equal(vm.runInContext('ownerPolicyExcludedTmdb("'+id+'")',ctx),true,id);
 for(const id of ['11','42','9999999',null,''])assert.equal(ctx.api.ownerPolicyExcludedTmdb(id),false,String(id));
+// A hand-kept list: 166 valid, distinct TMDB ids (160 retired by the writer by 2026-11-18T14:30Z plus the six reviewed ids), no empty member, the six reviewed ids included.
+{
+ const retiredIds=vm.runInContext('[...OWNER_POLICY_EXCLUDED_TMDB_IDS]',ctx);
+ assert.equal(retiredIds.length,166);
+ assert.ok(retiredIds.every(id=>/^[1-9]\d{0,11}$/.test(id)),'every member is a plain TMDB id, none empty');
+ assert.equal(new Set(retiredIds).size,retiredIds.length);
+ for(const id of ['450202','1126350','1603159','1623086','569928','1603299'])assert.ok(retiredIds.includes(id),id);
+}

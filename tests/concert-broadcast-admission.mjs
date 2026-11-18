@@ -33,7 +33,7 @@ function movieDetail(id,title,year,runtime,genres,overview='A synopsis'){
 function searchHit(id,title,year){
  return new Response(JSON.stringify({total_pages:1,results:[{id:Number(id),title,original_title:title,release_date:year+'-01-01'}]}));
 }
-async function resolve(item,movies){
+async function resolve(item,movies,options={}){
  const live=harness(url=>{
   for(const movie of movies){
    if(url.includes('/movie/'+movie.id+'?'))return movieDetail(movie.id,movie.title,movie.year,movie.runtime,movie.genres,movie.overview);
@@ -43,9 +43,10 @@ async function resolve(item,movies){
  });
  live.records.set('programme.json',{runId:'run-1',films:[]});
  live.records.set('epg/discovery-latest.json',{programmeRunId:'run-1',items:[item]});
- live.records.set('epg/discovered-films.json',{});
+ live.records.set('epg/discovered-films.json',options.catalog||{});
  live.records.set('enrichment/profile/current.json',{version:1,profileHash:'hash'});
- const result=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[]},4)',live);
+ live.watchlistFilms=options.watchlist||[];
+ const result=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:watchlistFilms},4)',live);
  return {live,result,records:live.records};
 }
 
@@ -164,6 +165,20 @@ withheld(noGenreKey.records,'тихий дом|2014',761961,'genre_evidence_miss
 for(const [title,year,key] of [['Britney Spears: Apple Music Festival',2016,'britney spears apple music festival|2016'],['Britney Spears: Apple Music Festival',null,'britney spears apple music festival|']]){
  const retiredFilm=await resolve(candidate(title,year,88,{categories:['Фильм']}),[{id:450202,title:'Britney Spears: Apple Music Festival',year:2016,runtime:88,genres:[{id:10402,name:'Music'}],overview:'Описание отсутствует'}]);
  withheld(retiredFilm.records,key,450202,'owner_policy_excluded');
+}
+// The known-title shortcut (`known_epg_alias`) follows the current Discovery catalog, not the personal watchlist: a film still admitted keeps it until the owner GO,
+// and a retired film is not verified through it, with or without a watchlist entry.
+const aliasMovie=[{id:450202,title:'Britney Spears: Apple Music Festival',year:2016,runtime:88,genres:[{id:10402,name:'Music'}],overview:'Описание отсутствует'}];
+const aliasKey='britney spears apple music festival|2016';
+const stillAdmitted={tmdb_450202:{id:'tmdb_450202',tmdbId:'450202',canonicalIdentity:'tmdb:450202',title:'Britney Spears: Apple Music Festival',original:'Britney Spears: Apple Music Festival',aliases:['Britney Spears: Apple Music Festival'],year:2016,runtime:88,genres:['музыка'],shows:[]}};
+const aliasCurrent=await resolve(candidate('Britney Spears: Apple Music Festival',2016,88,{categories:['Фильм'],confirmedTmdbId:'450202'}),aliasMovie,{catalog:stillAdmitted});
+assert.equal(aliasCurrent.records.get('epg/discovery-resolution.json')[aliasKey].identitySource,'known_epg_alias','a film still admitted keeps the shortcut until the GO');
+for(const watchlist of [[],[{id:'tmdb_450202',tmdbId:'450202',title:'Britney Spears: Apple Music Festival',year:2016}]]){
+ const aliasRetired=await resolve(candidate('Britney Spears: Apple Music Festival',2016,88,{categories:['Фильм'],confirmedTmdbId:'450202'}),aliasMovie,{watchlist});
+ const decision=aliasRetired.records.get('epg/discovery-resolution.json')?.[aliasKey];
+ assert.notEqual(decision?.status,'verified','a retired film is not verified through the shortcut, watchlist '+watchlist.length);
+ assert.notEqual(decision?.identitySource,'known_epg_alias','watchlist '+watchlist.length);
+ assert.equal(aliasRetired.records.get('epg/discovered-films.json').tmdb_450202,undefined,'watchlist '+watchlist.length);
 }
 const tvTitleOnly=await resolve(candidate('Hall Live at the Arena',1998,90,{categories:['Фильм']}),[{id:7109,title:'Hall Live at the Arena',year:1998,runtime:90,genres:[{id:10770,name:'TV Movie'}],overview:'A synopsis.'}]);
 admitted(tvTitleOnly.records,'hall live at the arena|1998','7109');

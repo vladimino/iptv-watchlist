@@ -16,10 +16,10 @@
 
 1. `OWNER_POLICY_EXCLUDED_TMDB_IDS` in `src/domain/resolution-acceptance.js` lists the TMDB ids the owner retired on policy grounds: the 160 distinct ids that `catalog_policy_exclude@1` had written, plus the six reviewed ids of [ADR 0171](0171-owner-reviewed-policy-exclusion-list.md) that await an owner GO.
 2. `acceptScoredIdentity` returns `candidate_decision` / `no_confident_match` / `owner_policy_excluded` for an accepted TMDB id on that list when the catalog holds no current admission of it. This applies on the first pass (before any TMDB detail read) and after it, and **an owner confirmation does not lift it**. A proven Documentary or concert recording keeps its more specific ADR 0150 reason on the detail pass.
-3. The two `known_epg_alias` shortcuts in `src/discovery.js` skip a listed id unless the film is in the personal watchlist, so a retired film is not admitted through a known-title confirmation either.
-4. A film the catalog still holds as a current admission is not touched; the writer has to retire it first (and its id is on the list already, so a later re-entry is blocked).
-5. The list changes only by a reviewed code change. **Retiring a film with the writer is followed by adding its id here in the same delivery.** A test asserts that every id the writer can reach through the ADR 0171 list is on this list.
-6. Personal data are unaffected: this gate is not consulted by the Letterboxd watchlist, ratings or the manual catalog (out of scope of AIR-501).
+3. The two `known_epg_alias` shortcuts in `src/discovery.js` (the paged and the whole-ledger cheap pass) skip a listed id unless the **current Discovery catalog** holds the film (`films['tmdb_<id>']`). Membership of the personal watchlist is **not** an exception: a listed id with no current admission is never verified through a known-title confirmation, so a retired film is not linked to a programme slot through the shortcut either. The personal watchlist, ratings and history themselves are not touched.
+4. A film the catalog still holds as a current admission is not touched, on the scored gate and on the shortcuts alike; the writer has to retire it first (and its id is on the list already, so a later re-entry is blocked).
+5. The list changes only by a reviewed code change. **Retiring a film with the writer is followed by adding its id here in the same delivery.** Tests assert that every id the writer can reach through the ADR 0171 list is on this list and that the list holds 166 valid, distinct ids with no empty member.
+6. Personal data are unaffected: this gate is not consulted by the Letterboxd import, ratings or the manual catalog (out of scope of AIR-501); the only effect on a personally watchlisted retired film is that Discovery no longer links it to a programme slot by the shortcut.
 
 Not decided: a database-backed marker that makes the list implicit.
 
