@@ -289,7 +289,7 @@ const setup=(opts={})=>{const {db,file}=migrated(18,opts);open(db);const bucket=
  const {db,bucket,env}=setup();
  delete env.D1_ENRICHMENT_WINDOW;
  const get=bucket.get.bind(bucket);let bumped=false;
- bucket.get=async key=>{if(!bumped&&key==='metadata.json'){bumped=true;await Authority.writeContinuation(env,{programmeRunId:'run-1',stage:'idle'},undefined);}return get(key);};
+ bucket.get=async key=>{if(!bumped&&key==='titles.json'){bumped=true; /* ADR 0162: metadata.json is no longer a projector input in mode d1 */ await Authority.writeContinuation(env,{programmeRunId:'run-1',stage:'idle'},undefined);}return get(key);};
  const summary=await projectorFor().runD1EnrichmentProjection(env,{window:{}});
  assert.equal(summary.outcome,'deferred');assert.ok(['input_changed','authority_unavailable'].includes(summary.reason),'the strict pin defers the run: '+summary.reason);
  assert.equal(summary.window,undefined,'flag off: no window record');

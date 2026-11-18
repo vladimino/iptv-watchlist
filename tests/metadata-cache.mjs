@@ -466,3 +466,44 @@ function pauseAuthoritySelect(db,nth){
 }
 
 console.log('metadata cache: r2 until the marker is d1, full records including orphans, fenced commit, mirror repair, no phantom Film');
+
+// 14. ADR 0162 in the projector. In mode d1 the R2 mirror is not an input: an absent or broken metadata.json does not stop the run, the
+// metadata comes from D1, and the projector never asks R2 for the mirror. Below schema 6 the run is refused unless the explicit
+// stand-in is set, in which case metadata.json is the input.
+{
+ const projectorInputs=(bucket,films)=>{
+  const put=(key,value)=>bucket.put(key,JSON.stringify(value));
+  put('watchlist.json',{updatedAt:T,films});
+  put('titles.json',{});put('people.json',{});put('epg/discovery-resolution.json',{});
+  put('epg/published-generation.json',{phase:'published',programmeRunId:'run-1'});
+  put('epg/generations/run-1/programme.json',{updatedAt:T,films:films.map(item=>({...item,shows:[]}))});
+  put('epg/generations/run-1/discovered-films.json',{});
+ };
+ const films=[{id:'heat',title:'Heat',original:'Heat',year:1995,tmdbId:'949',url:'https://letterboxd.com/film/heat/'}];
+ for(const mirror of ['absent','broken']){
+  const db=migrated();
+  const seedBucket=mirrorOf({heat:record('heat',{metadataAt:edge})});
+  await seed(db,seedBucket);
+  const bucket=new MemoryBucket();
+  projectorInputs(bucket,films);
+  if(mirror==='broken')bucket.put('metadata.json','{');
+  const asked=[];
+  const get=bucket.get.bind(bucket);
+  bucket.get=async(key,...rest)=>{asked.push(key);return get(key,...rest);};
+  const run=await projectorContext().runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
+  assert.equal(run.outcome,'complete',mirror+' '+JSON.stringify(run));
+  assert.equal(asked.includes('metadata.json'),false,mirror+': the projector does not read the R2 mirror in mode d1');
+  assert.equal(db.sql("SELECT metadata_at a FROM film_sync_state WHERE film_id='film:heat'")[0].a,edge,mirror+': the metadata comes from D1');
+ }
+ const v5=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state']);
+ const bucket=new MemoryBucket();
+ projectorInputs(bucket,films);
+ bucket.put('metadata.json',JSON.stringify({heat:record('heat')}));
+ const refused=await projectorContext({metadataCacheStandin:false}).runD1EnrichmentProjection({DB:v5,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
+ assert.equal(refused.outcome,'failed',JSON.stringify(refused));
+ assert.equal(refused.reason,'metadata_cache_unavailable','schema 5 without the stand-in is refused, not read from R2');
+ assert.equal(one(v5,'SELECT COUNT(*) FROM film'),0);
+ const local=await projectorContext({metadataCacheStandin:false}).runD1EnrichmentProjection({DB:v5,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on',METADATA_CACHE_DB_OPTIONAL:'standin'});
+ assert.equal(local.outcome,'complete',JSON.stringify(local));
+ assert.deepEqual(v5.sql("SELECT metadata_at a FROM film_sync_state WHERE film_id='film:heat'"),[{a:T}],'the explicit stand-in projects metadata.json');
+}
