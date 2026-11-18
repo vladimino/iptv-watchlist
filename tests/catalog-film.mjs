@@ -350,8 +350,8 @@ const base={
    const run=kind=>{
     if(broken&&broken.test(sql))throw new Error('d1 down');
     if(/FROM schema_contract/.test(sql))return kind==='first'?{version}:{results:[]};
-    // AIR-532: the marker is read with ONE statement (table count and the three marker rows); `drift` and `tables` keep their meaning.
-    if(/AS tables,/.test(sql)){const m=drift&&(drift.n=(drift.n||0)+1)>drift.after?drift.marker:marker;const row={tables:tables?4:0,mode:m?.mode,cutover:m?.cutover,generation:m?.generation,fence_ok:1,fence_rows:1,baseline_state:'verified',baseline_reference:null,marker_rows:m?1:0,baseline_rows:1};return kind==='first'?row:{results:[row]};}
+    // AIR-532: the three marker rows are read with ONE statement after the table inventory; `drift` keeps its meaning.
+    if(/AS marker_rows,/.test(sql)){const m=drift&&(drift.n=(drift.n||0)+1)>drift.after?drift.marker:marker;const row={mode:m?.mode,cutover:m?.cutover,generation:m?.generation,fence_ok:1,fence_rows:1,baseline_state:'verified',baseline_reference:null,marker_rows:m?1:0,baseline_rows:1};return kind==='first'?row:{results:[row]};}
     if(/sqlite_master/.test(sql))return {results:tables?['film_person_authority','film_person_cas','film_person_baseline','canonical_revision'].map(name=>({name})):[]};
     if(/FROM film_person_authority/.test(sql)){if(drift&&(drift.n=(drift.n||0)+1)>drift.after)return drift.marker;return marker;}
     if(/FROM film_person_cas/.test(sql))return {ok:1};

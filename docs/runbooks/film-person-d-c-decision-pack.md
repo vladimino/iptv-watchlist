@@ -27,7 +27,7 @@ Capture: 13 Nov 2026 (UTC), repository at `origin/main` `846c2bc`, updated 14 No
 | Whole catalog | 10,044 Films, 53,623 Persons, 107,064 credit rows, 34,936 dimension rows |
 | Film updates per day | median 254 (max 5,884); Person updates per day median 1,550 (max 18,692) |
 
-**Unit cost, offline sqlite stand-in** (`UNIT_COST` in `scripts/film-person-e6-measure.mjs`): an unchanged Film-facts unit costs 11 queries and 11 round trips; an applied one 27 queries in 2 batches, 29 round trips (14 / 36 / 38 before the AIR-532 read batching of the marker gate, 18 November 2026). This is Film-facts only. It is **not** a bound for Person or credit kinds.
+**Unit cost, offline sqlite stand-in** (`UNIT_COST` in `scripts/film-person-e6-measure.mjs`): an unchanged Film-facts unit costs 12 queries and 12 round trips; an applied one 30 queries in 2 batches, 32 round trips (14 / 36 / 38 before the AIR-532 read batching of the marker gate, 18 November 2026). This is Film-facts only. It is **not** a bound for Person or credit kinds.
 
 **Modelled plan volume, synthetic harness of 14 Nov 2026** ([evidence](../evidence/d1-migration/air-465-m2b-synthetic-scale-2026-11-14.md)): the real planner on a catalog built to the E6 totals, not a production sample. Steady: 7,240 units (397 `film_facts` including 6 departed, 6,452 `person_mutation`, 391 `film_credits`), 30,999 statements prepared. Elevated (a repeated model, not a second production generation): 14,474 units, 61,890 statements. A separate credit-cap stress observes one rest Film of 50 credits alone (52 units, 213 statements). It is not the E6 cohort. Harness `changedShare` 0 is the fixture matching itself. These figures are not the E6 counts and not a production cost. A no-op is still one unit, so the 7,240 count does not fit a ceiling of 1,000.
 
@@ -52,7 +52,7 @@ Capture: 13 Nov 2026 (UTC), repository at `origin/main` `846c2bc`, updated 14 No
 
 | Gap | Why it matters for D-C | Closed by |
 | --- | --- | --- |
-| `changedShare` (share of units that apply rather than no-op) | Moves the Film-only cost between 11 and 29 round trips per unit, a factor of 2.6 | **Not the synthetic run.** Stored units are no-ops because the fixture wrote the rows the harness reads back (harness share 0). Plausible future sources: the S5-2 differential (`epg_commit_natural`) and a later authorized observation of a real EPG commit's planned units. E6 `film_updates_by_day` (median 254) is not automatically the applied-unit share |
+| `changedShare` (share of units that apply rather than no-op) | Moves the Film-only cost between 12 and 32 round trips per unit, a factor of 2.7 | **Not the synthetic run.** Stored units are no-ops because the fixture wrote the rows the harness reads back (harness share 0). Plausible future sources: the S5-2 differential (`epg_commit_natural`) and a later authorized observation of a real EPG commit's planned units. E6 `film_updates_by_day` (median 254) is not automatically the applied-unit share |
 | Person and credit unit volume per run and their unit cost (`person_mutation`, `film_credits`) | The first pass after activation and every credit-bearing run depend on it | **Volume, on the synthetic model only.** The harness planned 6,452 `person_mutation` and 391 `film_credits` beside 397 `film_facts` (7,240 units), and 4 statements per Person or credit unit on the no-op path. The applied cost per unit still needs S5-2 or a later observation. The E6 population figures are not themselves per-run volumes |
 | `person_state` units (localized Person names) | Not built by the harness, reported unmeasured | Not the synthetic run. A future harness extension once the unit is built, or the S5-2 differential |
 | Round-trip time on the EPG path (Worker to D1) | Turns statement counts into seconds; the only way to size a slice deadline | **Not the synthetic run** (local sqlite). Plausible future sources: D1 `meta` timings on a natural EPG step, as AIR-396 did for the projector, or instrumentation shipped in a reviewed code change and observed under a separate GO |
@@ -150,9 +150,9 @@ The 7,240 column assumes nothing about unit cost and is only a scale of the popu
 | --- | --- | --- | --- |
 | Full generation-shaped plan, every unit a no-op | 7,240 | 30,999 | about 3.1 |
 | Heavier modelled cohort, every unit a no-op | 14,474 | 61,890 | about 6.2 |
-| Film-facts-only plan, unchanged / applied (stand-in unit costs 11 and 29) | 397 | 4,367 / 11,513 | about 0.44 / 1.1 |
+| Film-facts-only plan, unchanged / applied (stand-in unit costs 12 and 32) | 397 | 4,764 / 12,704 | about 0.48 / 1.3 |
 
-The Film-facts-only row above was recomputed for the AIR-532 stand-in costs (397 units × 11 / 29 round trips). The two rows above it mix Person and credit units whose cost was not re-measured, so they keep their original figures.
+The Film-facts-only row above was recomputed for the AIR-532 stand-in costs (397 units × 12 / 32 round trips). The two rows above it mix Person and credit units whose cost was not re-measured, so they keep their original figures.
 
 No first-pass figure is stated: the applied cost of a Person or credit unit is unmeasured, so no lower or upper bound for it exists in this pack. The one count that needs no assumption is the invocation count: at a ceiling of 1,000 units, 7,240 units need at least 8 invocations.
 
