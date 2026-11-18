@@ -38,6 +38,9 @@ export const FILES={
  "admin-identity-work-api.mjs": {
   "suite": "core"
  },
+ "admin-identity-work-page.mjs": {
+  "suite": "core"
+ },
  "admin-letterboxd-apply.mjs": {
   "suite": "core"
  },
