@@ -1,6 +1,6 @@
 # AIR-476: repeat offline model A/B, base vs candidate v2
 
-**Capture:** 18 November 2026, generator calls 07:01:06–07:02:02 UTC. **Card:** [AIR-476](https://trello.com/c/Z4ZP49RG). **Authorization:** owner GO of 18 November 2026 (narrow `matchSignals` fix and one repeat A/B of at most 24 generations) and the independent technical preflight GO on PR #741 exact HEAD `1a9ea317…` ([review 5952057011](https://github.com/vladimino/iptv-watchlist/pull/741#pullrequestreview-5952057011)). **Status: executed; independent semantic adjudication pending.** No Scheduled Task, IPTV MCP, Worker, D1/R2, profile or production prediction was read or changed. Neither candidate nor the canonical snapshot was changed because of these results. The [first A/B](air-476-offline-ab-2026-11-18.md) stays an unchanged historical record.
+**Capture:** 18 November 2026, generator calls 07:01:06–07:02:02 UTC. **Card:** [AIR-476](https://trello.com/c/Z4ZP49RG). **Authorization:** owner GO of 18 November 2026 (narrow `matchSignals` fix and one repeat A/B of at most 24 generations) and the independent technical preflight GO on PR #741 exact HEAD `1a9ea317…` ([review 5952057011](https://github.com/vladimino/iptv-watchlist/pull/741#pullrequestreview-5952057011)). **Status: executed and independently adjudicated: semantic PASS** for the narrow synthetic objective (evidence-aware scoring and positive-only `matchSignals`), [review 5952349269](https://github.com/vladimino/iptv-watchlist/pull/741#pullrequestreview-5952349269) on HEAD `abb46358…`, covering all 24 raw outputs. This is not a claim of accuracy, MAE, rollout approval or ChatGPT parity. No Scheduled Task, IPTV MCP, Worker, D1/R2, profile or production prediction was read or changed. Neither candidate nor the canonical snapshot was changed because of these results. The [first A/B](air-476-offline-ab-2026-11-18.md) stays an unchanged historical record.
 
 ## Question
 
@@ -15,7 +15,7 @@ Does [candidate v2](air-476-evidence-aware-scoring-candidate-v2-2026-11-18.md) k
 | Harness | `scripts/prediction-scoring-ab-harness.mjs` default (v2), seed 4762, method fingerprint `e6731f1397c624ea6cbd5291421973f526b0e1f6a9cd9459314444be25f52024` |
 | Design | 4 synthetic cases × 2 arms × 3 replicates = 24 calls, fresh context each, seeded shuffled order |
 | Generator | isolated Claude Code subagent per call; every call reported `claude-opus-5-5`; effort is the subagent default (not configurable or reported per call); same settings in both arms and as in the first A/B |
-| Isolation | each subagent made exactly one tool call (reading its own prompt file outside the repository): **24/24 verified from the transcripts** |
+| Isolation | each subagent made exactly one tool call (reading its own prompt file outside the repository). **Executor-verified:** the executor parsed all 24 full subagent transcripts in its own session and found exactly one tool call (the `Read` of that run's prompt) in each. The private bundle carries only the exported `agentTranscript` ID, `toolUses` and `tools` per run, not the full transcripts, so the independent reviewer verified the exported metadata and every raw answer, which is not the same as re-reading the transcripts. |
 | Inputs | unchanged `generator-inputs.json`; no rubric, owner rating, historical prediction or earlier raw output in any generator context |
 | Grading | `scripts/prediction-scoring-rubric.mjs`, including the new `match_signals_shape` and `match_signal_suspect` checks |
 
@@ -74,11 +74,30 @@ These figures come from re-grading the first A/B's raw outputs with this PR's gr
 
 As agreed with the owner, the raw outputs are **not** in the repository; the owner receives a private bundle for the independent reviewer. It contains `manifest.json` (SHA-256 `1bec37158e047c0583fe6730f33be9cfceac1148f067c1aec98d2a860a052bca`), `prompts/` (24 exact prompts; their SHA-256 values are in the manifest), `raw/` (24 answers with model id, timestamps and tool calls) and `graded.json` (SHA-256 `0cc88c435d3781d53a30e1f853ee26fb398a9f2783e149a91570c1c2750c8379`). To reproduce the prompts, run `node scripts/prediction-scoring-ab-harness.mjs build <dir>`; to reproduce the grading, run `… grade <dir>`.
 
+## Independent adjudication
+
+The independent reviewer, who did not take part in generation, received the private bundle from the owner and checked:
+
+- the archive, manifest and graded SHA-256 values;
+- 24/24 prompt hashes and lengths, and arm symmetry;
+- the absence of grader leakage;
+- every per-run count against `graded.json`, with no discrepancy;
+- provenance against the closed corpus;
+- all 24 `grounding_review` items.
+
+Verdict per case:
+
+- **s1:** PASS.
+- **s2:** PASS. The +0.5 is removal of unjustified negatives, not a proven accurate rating.
+- **s3:** PASS. The +0.5 is defensible on the substantive reviews; it is not proof of real-world accuracy.
+- **s4:** PASS. `matchSignals` is empty in 3/3, and every defect is kept in `against`, high risks and `mainRisk`.
+
+The s3 `match_signal_suspect` flags are confirmed lexical false positives. No hidden P1/P2 scoring-policy regression was found. See [review 5952349269](https://github.com/vladimino/iptv-watchlist/pull/741#pullrequestreview-5952349269).
+
 ## Next
 
-1. The independent reviewer adjudicates all 24 `grounding_review` items against `generator-inputs.json`, including every match signal.
-2. Exact final-head review and CI, then Controller merge.
-3. Owner decision on candidate v2. Installing it on the four Tasks is a separate operation-specific GO.
+1. Exact final-head review and CI, then Controller merge.
+2. Owner decision on candidate v2. Installing it on the four Tasks is a separate operation-specific GO.
 
 Documentation impact: this report, `docs/evidence/prediction/README.md`.
 Architecture impact: none; offline experiment evidence only.
