@@ -5,7 +5,7 @@
 import {database,failed,many,one} from './film-person-authority.js';
 import {RETRY_POLICY,defineOperation,digestOf,operationRegistry,receiptedWrite} from './canonical-receipts.js';
 import {INLINE_RECONCILE_LIMIT,SOURCE_CHANGED,producerRequestId,producerRouteOpen,reconcileOwnOrigin} from './canonical-producer-adapters.js';
-import {RATED_RECEIPT_KEY,admitRatedFilm,retainFilm,resolveAdmissionFilm,verifiedAdmission} from './film-admission.js';
+import {RATED_RECEIPT_KEY,admitRatedFilm,advanceRetentionWatermark,readRetentionWatermark,retainFilm,resolveAdmissionFilm,verifiedAdmission} from './film-admission.js';
 
 export const RATED_ADMISSION_ORIGIN='rated_admission_retention';
 export const FILM_ADMISSION_OPERATION='film_admission';
@@ -102,20 +102,27 @@ async function planAdmission(env,input){
  const noop=!!(prior&&prior.archive_sha256===content.archiveSha256&&prior.receipt_key===RATED_RECEIPT_KEY);
  return {id:target.id,revision:target.revision,noop,absent:false};
 }
-async function planRetention(env,input){
+// `watermark` is `{present, observedAt}` as read once per slice (AIR-532, ADR 0173); a caller without one (a reconcile pass, a single call) lets the plan read it.
+async function planRetention(env,input,{watermark}={}){
  const content=retentionContent(input);
  const db=database(env);
- // AIR-532: ONE statement for the redirect, the Film row, the stored retention row and the revision (was four reads), same rows and same order of checks.
- const read=await one(db,"SELECT (SELECT 1 FROM film_redirect WHERE from_id=?) AS redirected,(SELECT id FROM film WHERE id=?) AS film,(SELECT COUNT(*) FROM film_retention WHERE film_id=?) AS has_row,(SELECT watchlist FROM film_retention WHERE film_id=?) AS watchlist,(SELECT observed_at FROM film_retention WHERE film_id=?) AS observed_at,(SELECT revision FROM canonical_revision WHERE kind='film' AND id=?) AS revision",[content.id,content.id,content.id,content.id,content.id,content.id]);
+ // ONE statement for the redirect, the Film row, the stored retention row and the revision (was four reads), same rows and same order of checks.
+ const read=await one(db,"SELECT (SELECT 1 FROM film_redirect WHERE from_id=?) AS redirected,(SELECT id FROM film WHERE id=?) AS film,(SELECT COUNT(*) FROM film_retention WHERE film_id=?) AS has_row,(SELECT watchlist FROM film_retention WHERE film_id=?) AS watchlist,(SELECT evidence_json FROM film_retention WHERE film_id=?) AS evidence_json,(SELECT observed_at FROM film_retention WHERE film_id=?) AS observed_at,(SELECT revision FROM canonical_revision WHERE kind='film' AND id=?) AS revision",[content.id,content.id,content.id,content.id,content.id,content.id,content.id]);
  if(read?.redirected)throw failed('film_person_redirect');
  if(!read?.film)return {id:content.id,revision:0,absent:true,noop:false};
  const revision=Number(read.revision??0);
- const row=Number(read.has_row)>0?{watchlist:read.watchlist,observed_at:read.observed_at}:null;
+ const row=Number(read.has_row)>0?{watchlist:read.watchlist,evidence_json:read.evidence_json,observed_at:read.observed_at}:null;
  if(row&&!(content.observedAt>row.observed_at))return {id:content.id,revision,absent:false,noop:true,stale:true};
- // AIR-532 (ADR 0173, owner decision of 18 Nov 2026): `observed_at` is the start of the current watchlist state, not the last scan that confirmed it. A later scan that
- // reports the SAME boolean writes nothing (no receipt, no batch, no revision bump); only a change of the boolean (an exit or a re-add) or a first observation writes.
- const unchanged=!!(row&&Number(row.watchlist)===(content.watchlist?1:0));
- return {id:content.id,revision,absent:false,noop:unchanged,...(unchanged?{unchanged:true}:{})};
+ const wm=watermark??await readRetentionWatermark(env);
+ // An observation older than the newest admitted scan is stale for every Film: a complete scan observes every listed Film. This is what orders a late contradictory
+ // observation against a later unchanged confirmation, which `film_retention.observed_at` (the start of the state) cannot.
+ if(wm.present&&wm.observedAt&&new Date(content.observedAt).toISOString()<wm.observedAt)return {id:content.id,revision,absent:false,noop:true,stale:true,watermark:true};
+ const same=!!(row&&Number(row.watchlist)===(content.watchlist?1:0));
+ // AIR-532 (ADR 0173, owner decision of 18 Nov 2026): with the watermark present, a scan that repeats the stored boolean writes nothing (no receipt, no batch, no revision) and
+ // `observed_at` stays the start of the state. Without the watermark table (schema below 25) nothing could order a late observation, so the previous rule stays: only an
+ // identical row is a no-op and every newer scan rewrites `observed_at`.
+ const noop=wm.present?same:!!(same&&row.evidence_json===JSON.stringify(content.evidence??{})&&row.observed_at===content.observedAt);
+ return {id:content.id,revision,absent:false,noop,...(noop&&wm.present?{unchanged:true}:{})};
 }
 
 function kindOperation(operation,{replan,now=()=>new Date().toISOString()}={}){
@@ -124,7 +131,7 @@ function kindOperation(operation,{replan,now=()=>new Date().toISOString()}={}){
  const planOf=operation===FILM_ADMISSION_OPERATION?planAdmission:planRetention;
  const write=(env,input,requestId,ctx,clock)=>operation===FILM_ADMISSION_OPERATION
   ?admitRatedFilm(env,{receiptKey:input.receiptKey,receipt:input.receipt,filmId:input.filmId,expectedRevision:ctx.currentRevision,at:input.at||clock(),requestId,receiptMark:mark(ctx,clock)})
-  :retainFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at||clock(),requestId,watchlist:input.watchlist,observedAt:input.observedAt,evidence:input.evidence,receiptMark:mark(ctx,clock)});
+  :(async()=>retainFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at||clock(),requestId,watchlist:input.watchlist,observedAt:input.observedAt,evidence:input.evidence,watermark:(await readRetentionWatermark(env)).present,receiptMark:mark(ctx,clock)}))();
  const planned=async receipt=>{
   let input=null;
   try{input=await replan(receipt);}catch(error){if(READ_FAILURES.has(error?.code))throw error;input=null;}
@@ -183,11 +190,12 @@ async function applyAdmission(env,{origin,event,input,replan,now,policy=RETRY_PO
  return {...outcome,requestId,id:plan.id};
 }
 
-async function applyRetention(env,{origin,event,input,replan,now,policy=RETRY_POLICY,routeOpen=false}={}){
+async function applyRetention(env,{origin,event,input,replan,now,policy=RETRY_POLICY,routeOpen=false,watermark}={}){
  // AIR-532: a slice reads the marker ONCE (applyRatedAdmissionRetention) and passes `routeOpen`; a single call still reads it itself.
  const route=routeOpen===true||await producerRouteOpen(env);
  if(!route)return {state:'skipped',reason:'projector_is_writer',receipt:false};
- const plan=await planRetention(env,input);
+ const wm=watermark??await readRetentionWatermark(env);
+ const plan=await planRetention(env,input,{watermark:wm});
  if(plan.absent)return {state:'absent',receipt:false,requestId:null,id:plan.id};
  if(plan.noop)return {state:'noop',receipt:false,requestId:null,id:plan.id};
  const digest=await retentionDigest(input);
@@ -197,7 +205,7 @@ async function applyRetention(env,{origin,event,input,replan,now,policy=RETRY_PO
  const spec=kindOperation(FILM_RETENTION_OPERATION,{replan:replan||(async()=>input),now:clock});
  const outcome=await receiptedWrite(env,{requestId,operation:FILM_RETENTION_OPERATION,origin,target,expectedRevision:plan.revision,digest,now:clock,policy},{
   atomic:true,readback:spec.readback,revalidate:spec.revalidate,
-  run:ctx=>retainFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at||clock(),requestId,watchlist:input.watchlist,observedAt:input.observedAt,evidence:input.evidence,receiptMark:mark(ctx,clock)}),
+  run:ctx=>retainFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at||clock(),requestId,watchlist:input.watchlist,observedAt:input.observedAt,evidence:input.evidence,watermark:wm.present,receiptMark:mark(ctx,clock)}),
  });
  return {...outcome,requestId,id:input.id};
 }
@@ -311,6 +319,12 @@ export async function applyRatedAdmissionRetention(env,{event,admissions=[],rete
  const cap=Math.min(Math.max(Number(limit)||UNIT_CAP,1),UNIT_CAP);
  const retry=mergeRatedAdmissionIntent(previousIntent,[]).slice(0,cap);
  const room=Math.max(0,cap-retry.length);
+ // AIR-532 (ADR 0173): the scan watermark is read ONCE per slice. The first slice of a scan moves it forward to the scan's observation time (one fenced write per scan, not per Film);
+ // later slices find it already there and write nothing. A slice whose observations are older than the watermark (a late or replayed one) never moves it back, and its units end stale.
+ let wm=await readRetentionWatermark(env);
+ const scanTimes=(retentions||[]).map(item=>instant(item?.observedAt)).filter(Boolean).map(value=>new Date(value).toISOString());
+ const scanAt=scanTimes.length?scanTimes.reduce((a,b)=>a>b?a:b):null;
+ if(wm.present&&scanAt&&(!wm.observedAt||scanAt>wm.observedAt))wm=await advanceRetentionWatermark(env,{observedAt:scanAt,at:nowFn()});
  const planned=await planRatedAdmissionIntent(env,{event,admissions:(admissions||[]).slice(0,room),retentions:(retentions||[]).slice(0,room),now:nowFn});
  const intent=mergeRatedAdmissionIntent(retry,planned.units).slice(0,cap);
  const deferred=[];
@@ -318,7 +332,7 @@ export async function applyRatedAdmissionRetention(env,{event,admissions=[],rete
  const outcomes=[];
  const applyOf={
   [FILM_ADMISSION_OPERATION]:(input,ev)=>applyAdmission(env,{origin,event:ev,input,replan:async()=>input,now:nowFn,policy,routeOpen:true}),
-  [FILM_RETENTION_OPERATION]:(input,ev)=>applyRetention(env,{origin,event:ev,input,replan:async()=>input,now:nowFn,policy,routeOpen:true}),
+  [FILM_RETENTION_OPERATION]:(input,ev)=>applyRetention(env,{origin,event:ev,input,replan:async()=>input,now:nowFn,policy,routeOpen:true,watermark:wm}),
  };
  for(const unit of intent){
   try{

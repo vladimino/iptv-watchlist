@@ -182,6 +182,101 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
  void T5;
 }
 
+// AIR-532 review P1 (ADR 0173): the scan watermark orders a late observation against a later unchanged confirmation, which `observed_at` (the start of the state) cannot.
+{
+ const mk=()=>{
+  const file=database('open');
+  sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:tmdb:81',1,'"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:tmdb:81','tmdb','81',1,0,NULL),('film:tmdb:81','letterboxd','w81',1,0,NULL);");
+  return file;
+ };
+ const d=n=>'2026-11-'+n+'T12:00:00.000Z';
+ const unit=(watchlist,observedAt,scanId)=>({lid:'w81',tmdbId:'81',watchlist,observedAt,evidence:{scanId}});
+ const st=file=>rows(file,"SELECT r.watchlist AS w,r.observed_at AS at,r.request_id AS rid,c.revision AS rev FROM film_retention r JOIN canonical_revision c ON c.kind='film' AND c.id=r.film_id WHERE r.film_id='film:tmdb:81'")[0];
+ const wmark=file=>one(file,'SELECT observed_at FROM film_retention_scan WHERE id=1');
+ const rcpt=file=>Number(one(file,'SELECT COUNT(*) FROM canonical_write_receipt'));
+
+ // 1. true at t1, true at t3 (no-op), then a delayed false at t2 with t1 < t2 < t3: it is stale, the Film stays true, nothing is written.
+ {
+  const file=mk();
+  await applyRatedAdmissionRetention(envOf(file),{event:'p:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
+  assert.equal(wmark(file),d('10'));
+  const quiet=await applyRatedAdmissionRetention(envOf(file),{event:'p:3',retentions:[unit(true,d('18'),'s3')],now:()=>d('18')});
+  assert.equal(quiet.noop,1);assert.equal(wmark(file),d('18'),'the watermark moved to the newest scan');
+  const before=st(file),receipts=rcpt(file);
+  const late=await applyRatedAdmissionRetention(envOf(file),{event:'p:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')});
+  assert.equal(late.state,'complete');assert.equal(late.applied,0);assert.equal(late.noop,1);
+  assert.deepEqual(st(file),before,'a late contradictory observation leaves state, observed_at, request id and revision alone');
+  assert.equal(rcpt(file),receipts,'and creates no receipt');
+  assert.equal(wmark(file),d('18'),'a stale scan never moves the watermark back');
+ }
+
+ // 2. an older false receipt left pending (its write was cut) is not replayed after a newer unchanged scan confirmed true.
+ {
+  const file=mk();
+  await applyRatedAdmissionRetention(envOf(file),{event:'q:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
+  const receiptsBefore=rcpt(file),appliedBefore=Number(one(file,"SELECT COUNT(*) FROM canonical_write_receipt WHERE state='applied'"));
+  const planned=await M.planRatedAdmissionIntent(envOf(file),{event:'q:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('15')});
+  assert.equal(planned.units.length,1);
+  let seen=0;
+  const cut={DB:d1Standin(file,{onBatch:async()=>{seen++;if(seen===2)throw new Error('transient');}})};
+  await assert.rejects(()=>applyRatedAdmissionRetention(cut,{event:'q:2',intent:planned.units,retentions:[],now:()=>d('15')}),error=>error.code==='film_person_unavailable');
+  assert.equal(rcpt(file)-receiptsBefore,1,'the cut write left one pending receipt');
+  assert.equal(st(file).w,1);
+  await applyRatedAdmissionRetention(envOf(file),{event:'q:3',retentions:[unit(true,d('18'),'s3')],now:()=>d('18')});
+  assert.equal(wmark(file),d('18'));
+  // the old unit is still carried (an intent that outlived its scan) and its receipt is due: neither replays it
+  const settled=await applyRatedAdmissionRetention(envOf(file),{event:'q:4',intent:planned.units,retentions:[],now:()=>d('19')});
+  assert.equal(settled.applied,0);
+  assert.equal(st(file).w,1,'the older false is never applied after the newer confirmation');
+  assert.equal(Number(one(file,"SELECT COUNT(*) FROM canonical_write_receipt WHERE state='applied'")),appliedBefore,'the old receipt is not settled as applied');
+ }
+
+ // 3. the watermark moves between the plan and the write (batch 1 advances it, 2 records the receipt, 3 is the Film write): the batch refuses, nothing lands, the retry ends stale.
+ {
+  const file=mk();
+  await applyRatedAdmissionRetention(envOf(file),{event:'r:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
+  const before=st(file);
+  let hit=0;
+  const racing={DB:d1Standin(file,{onBatch:async()=>{hit++;if(hit===3)assert.equal(sqlite(file,"UPDATE film_retention_scan SET observed_at='"+d('18')+"' WHERE id=1").status,0);}})};
+  const out=await applyRatedAdmissionRetention(racing,{event:'r:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('15')});
+  assert.equal(out.applied,0);assert.deepEqual(st(file),before,'the guarded batch wrote nothing');
+  const retry=await applyRatedAdmissionRetention(envOf(file),{event:'r:2',intent:out.intent,retentions:[unit(false,d('15'),'s2')],now:()=>'2026-11-19T12:10:00.000Z'});
+  assert.equal(retry.state,'complete');assert.equal(st(file).w,1,'the retry is stale against the newer watermark');
+ }
+
+ // 4. normal exit and re-add under the watermark still go through the revision and receipt fences.
+ {
+  const file=mk();
+  await applyRatedAdmissionRetention(envOf(file),{event:'e:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
+  const exit=await applyRatedAdmissionRetention(envOf(file),{event:'e:2',retentions:[unit(false,d('12'),'s2')],now:()=>d('12')});
+  assert.equal(exit.applied,1);assert.equal(st(file).w,0);assert.equal(st(file).at,d('12'));
+  const back=await applyRatedAdmissionRetention(envOf(file),{event:'e:3',retentions:[unit(true,d('14'),'s3')],now:()=>d('14')});
+  assert.equal(back.applied,1);assert.equal(st(file).w,1);assert.equal(st(file).at,d('14'));
+  assert.equal(rcpt(file),3,'one receipt per real change');
+  assert.equal(wmark(file),d('14'));
+ }
+
+ // 5. the watermark row only moves forward and is never deleted (triggers), and the fenced advance never lowers it.
+ {
+  const file=mk();
+  await applyRatedAdmissionRetention(envOf(file),{event:'t:1',retentions:[unit(true,d('18'),'s1')],now:()=>d('18')});
+  assert.notEqual(sqlite(file,"UPDATE film_retention_scan SET observed_at='"+d('10')+"' WHERE id=1").status,0,'lowering is refused');
+  assert.notEqual(sqlite(file,'DELETE FROM film_retention_scan').status,0,'deleting is refused');
+  assert.equal(wmark(file),d('18'));
+ }
+
+ // 6. without the table (schema below 25) the previous behaviour stays: an unchanged scan rewrites observed_at, and a deploy before the migration is safe.
+ {
+  const file=mk();
+  assert.equal(sqlite(file,'DROP TABLE film_retention_scan').status,0);
+  await applyRatedAdmissionRetention(envOf(file),{event:'l:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
+  const again=await applyRatedAdmissionRetention(envOf(file),{event:'l:2',retentions:[unit(true,d('18'),'s2')],now:()=>d('18')});
+  assert.equal(again.applied,1);assert.equal(st(file).at,d('18'),'no watermark table: every newer scan rewrites observed_at');
+  const stale=await applyRatedAdmissionRetention(envOf(file),{event:'l:3',retentions:[unit(false,d('15'),'s3')],now:()=>d('19')});
+  assert.equal(stale.applied,0);assert.equal(st(file).w,1,'the row-level monotonic rule still refuses an older observation');
+ }
+}
+
 {
  const file=database('open');
  const missing=await applyRatedAdmissionRetention(envOf(file),{event:'wl:miss',retentions:[{lid:'nope',watchlist:true,observedAt:T,evidence:{scanId:'s'}}],now:()=>T});
