@@ -15,6 +15,27 @@ const LetterboxdRatedCandidates = (() => {
       return {value: await object.json(), etag: object.etag ?? null};
     } catch {return {value: undefined, etag: null};}
   }
+  // AIR-527 (ADR 0170): after a candidate document write succeeded, the derived archive registry is updated with its own bounded
+  // compare-and-swap. The registry is a projection and never an owner: a missing module, a refused or lost update and any storage
+  // error are swallowed, the successful primary write stands, no second owner appears and no older archive is hidden. The next
+  // writer of the archive repairs the row; a GET never writes it.
+  async function syncRegistry(env, key, doc, etag) {
+    if (typeof LetterboxdImportRegistry === 'undefined') return;
+    const sha = LetterboxdImportRegistry.archiveOfCandidateKey(key);
+    if (!sha) return;
+    try {
+      const now = new Date().toISOString();
+      const summary = LetterboxdImportRegistry.summarizeDocument(doc, {etag, now});
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const current = await readDoc(env, LetterboxdImportRegistry.REGISTRY_KEY);
+        if (current.value === undefined) return;
+        const result = LetterboxdImportRegistry.applyArchive(current.value, sha, summary, now);
+        if (!result.changed) return;
+        const saved = await env.BUCKET.put(LetterboxdImportRegistry.REGISTRY_KEY, JSON.stringify(result.registry), {httpMetadata: {contentType: 'application/json'}, onlyIf: current.etag ? {etagMatches: current.etag} : {etagDoesNotMatch: '*'}});
+        if (saved !== null) return;
+      }
+    } catch {/* derived and droppable: the primary write already succeeded */}
+  }
   async function casDoc(env, key, empty, apply) {
     for (let attempt = 0; attempt < 5; attempt++) {
       const current = await readDoc(env, key);
@@ -23,7 +44,10 @@ const LetterboxdRatedCandidates = (() => {
       const next = await apply(JSON.parse(JSON.stringify(base)));
       if (next == null) return {value: base, changed: false};
       const saved = await env.BUCKET.put(key, JSON.stringify(next), {httpMetadata: {contentType: 'application/json'}, onlyIf: current.etag ? {etagMatches: current.etag} : {etagDoesNotMatch: '*'}});
-      if (saved !== null) return {value: next, changed: true};
+      if (saved !== null) {
+        await syncRegistry(env, key, next, saved && typeof saved.etag === 'string' ? saved.etag : null);
+        return {value: next, changed: true};
+      }
     }
     throw new Error('write_contention');
   }
