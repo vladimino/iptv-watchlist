@@ -73,11 +73,16 @@ function addChunkToDiscoveryReport(report,summary,chunkKey,generation){
  return next;
 }
 // The state at the firing, from what this firing's reconcile answered. `empty` is a confirmed empty queue.
-function discoveryReportState(outcome,record,empty){
+function discoveryReportState(outcome,record,empty,now=Date.now()){
  const reason=typeof outcome?.reason==='string'?outcome.reason:null;
  if(outcome?.started===true||reason==='in_progress')return {status:'running',reason:reason==='in_progress'||reason==='started'?null:reason};
  if(reason==='recovery_exhausted')return {status:'failed',reason};
  if(reason==='recovery_waiting')return {status:'waiting',reason};
+ // AIR-534: a stopped series that is not terminal and still has a queue is not idle. Its recovery is waiting (not yet due) or overdue (due, and no successor has started): both need the owner's eyes.
+ if(reason==='stopped'&&!empty&&record?.phase==='stopped'&&!DISCOVERY_WORKFLOW_TERMINAL.has(record.reason)&&record.recovery?.dueAt){
+  const due=Date.parse(record.recovery.dueAt);
+  if(Number.isFinite(due))return due<=now?{status:'stalled',reason:'recovery_overdue'}:{status:'waiting',reason:'recovery_waiting'};
+ }
  if(reason==='stopped')return empty?{status:'empty',reason:'queue_empty'}:{status:'idle',reason:DISCOVERY_WORKFLOW_TERMINAL.has(record?.reason)?record.reason:null};
  if(reason&&DISCOVERY_REPORT_BLOCKED.has(reason))return {status:'blocked',reason};
  return {status:'blocked',reason:reason?'other':'unknown'};
@@ -169,7 +174,7 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
     const pending=(Array.isArray(record.outbox)?record.outbox.length:0);
     if(pending>=DISCOVERY_REPORT_OUTBOX_LIMIT){await deliverDiscoveryOutbox(env);incompleteReason='outbox_full';break;}
     const queue=await discoveryReportQueue(env,report,generationOf(record));
-    const {status,reason}=discoveryReportState(outcome,record,queue.empty);
+    const {status,reason}=discoveryReportState(outcome,record,queue.empty,options.now);
     const event=discoveryHourEvent({at,hourKey,generation:generationOf(record),status,reason,report,queue});
     const {tick,...rest}=record;
     const next={...rest,report:{...newDiscoveryReport(at,report.seen),lastClosedHour:hourKey},outbox:[...(Array.isArray(record.outbox)?record.outbox:[]),event]};
@@ -202,7 +207,7 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
  // straight into the journal under a stable id per generation and hour, and when the journal refuses it, it waits in a small separate ledger (its own
  // compare-and-swap) that every later scheduled firing drains.
  const generation=generationOf(record);
- const notice=discoveryReportFailedEvent({at,hourKey,generation,reason:incompleteReason,status:discoveryReportState(outcome,record,false).status});
+ const notice=discoveryReportFailedEvent({at,hourKey,generation,reason:incompleteReason,status:discoveryReportState(outcome,record,false,options.now).status});
  const delivery=await deliverDiscoveryReportFailure(env,notice);
  logDiscoveryReportClose({hourKey,reason:incompleteReason,generation,delivery});
  return {closed:false,reason:incompleteReason,hourKey,notice:delivery};
@@ -217,7 +222,7 @@ const DISCOVERY_REPORT_FAULT_KEY='events/discovery-report-faults.json';
 const DISCOVERY_REPORT_FAULT_LIMIT=8760;
 const DISCOVERY_REPORT_FAULT_DRAIN=64;
 const DISCOVERY_REPORT_FAULT_ATTEMPTS=3;
-const DISCOVERY_REPORT_FAULT_STATUSES=[null,'failed','waiting','blocked'];
+const DISCOVERY_REPORT_FAULT_STATUSES=[null,'failed','waiting','blocked','stalled'];
 const DISCOVERY_REPORT_REASON_LIST=['no_record','state_unreadable','outbox_full','projector_window','write_conflict'];
 function logDiscoveryReportClose({hourKey,reason,generation,delivery}){
  try{console.warn(JSON.stringify({event:'discovery_hour_close_failed',hourKey:String(hourKey||'').slice(0,12),reason:DISCOVERY_REPORT_CLOSE_REASONS.has(reason)?reason:'other',generation:String(generation||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||null,notice:['delivered','queued','lost'].includes(delivery)?delivery:'lost'}));}catch{}
@@ -225,10 +230,10 @@ function logDiscoveryReportClose({hourKey,reason,generation,delivery}){
 // The notice of an hour whose report could not be completed. It has the SAME identity as the report of that hour (`discovery-hour-<generation>-<UTC hour>`), so the
 // Events Log can never hold two events for one hourly firing: the notice is put create-only and never replaces anything, and a report that comes later replaces the notice
 // of its hour (see `writeDiscoveryEvent`). `status` is a Discovery state only when the reconcile of that firing confirmed one that needs the owner's eyes
-// (`failed`, `waiting`, `blocked`); `running` and `idle` say nothing about Discovery and are not stored.
+// (`failed`, `waiting`, `blocked`, `stalled`); `running` and `idle` say nothing about Discovery and are not stored.
 function discoveryReportFailedEvent({at,hourKey,generation,reason,status}){
  const compact=String(generation||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||'none';
- return {id:'discovery-hour-'+compact+'-'+hourKey,type:'discovery',kind:'report_failed',at,generation:compact.slice(0,8),reason:DISCOVERY_REPORT_CLOSE_REASONS.has(reason)?reason:'other',status:['failed','waiting','blocked'].includes(status)?status:null};
+ return {id:'discovery-hour-'+compact+'-'+hourKey,type:'discovery',kind:'report_failed',at,generation:compact.slice(0,8),reason:DISCOVERY_REPORT_CLOSE_REASONS.has(reason)?reason:'other',status:['failed','waiting','blocked','stalled'].includes(status)?status:null};
 }
 // A ledger entry is the compact tuple [generation (12), UTC hour key, reason index, status index]: the notice is rebuilt from it exactly, so nothing is lost by the encoding.
 function encodeDiscoveryReportFault(event){
