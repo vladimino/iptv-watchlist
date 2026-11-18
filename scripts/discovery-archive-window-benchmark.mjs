@@ -4,7 +4,9 @@
 // What it measures, per concurrency (1 = the sequential path before AIR-533, 3 = the shipped window):
 //   wallMs      wall time of the whole bounded commit with a SIMULATED R2 latency on the segment objects: a put costs putBaseMs + MB * putMsPerMb, a read readBaseMs + MB * readMsPerMb,
 //               both multiplied by --latency-scale (default 0.02, so a run takes seconds, not minutes). The model constants come from the natural run of 18 November 2026
-//               (AIR-420 evidence: 64 puts 86.3 s for 81.6 MB, 64 reads 18.9 s), so `wallMs / latencyScale` is the modelled production wall time of the archive I/O plus the CPU actually spent here.
+//               (AIR-420 evidence: 64 puts 86.3 s for 81.6 MB, 64 reads 18.9 s). The CPU of the commit is real and NOT scaled, so a wall time is not a production time:
+//               only the DIFFERENCE between two concurrencies is meaningful, and `modelledSavingMs` (= that difference / latencyScale, relative to the first level) is the
+//               production-scale saving of the overlapped I/O under the model.
 //   peakHeapMB  the highest `process.memoryUsage().heapUsed` sampled every 2 ms during the commit, minus the heap before it (the Worker code's own working set, relative figure:
 //               Node's heap is not the Workers isolate limit).
 //   segments, archiveMB  how many segments the commit rewrote and how much it wrote.
@@ -81,7 +83,7 @@ async function child(concurrency,dir,scale){
  const started=Date.now();
  try{await commit(store,4,'bounded',scan(seen,4,churn),concurrency);}finally{clearInterval(timer);fs.rmSync(overlay,{recursive:true,force:true});}
  const wallMs=Date.now()-started;peak=Math.max(peak,process.memoryUsage().heapUsed);
- process.stdout.write(JSON.stringify({concurrency,wallMs,modelledProductionMs:Math.round(wallMs/scale),peakHeapMB:Math.round((peak-before)/1e5)/10,segments,archiveMB:Math.round(written/1e5)/10}));
+ process.stdout.write(JSON.stringify({concurrency,wallMs,peakHeapMB:Math.round((peak-before)/1e5)/10,segments,archiveMB:Math.round(written/1e5)/10}));
 }
 
 const args=process.argv.slice(2),value=flag=>{const i=args.indexOf(flag);return i<0?null:args[i+1];};
@@ -101,5 +103,6 @@ try{
   if(out.status!==0)throw new Error('child failed: '+out.stderr.slice(0,400));
   results.push(JSON.parse(out.stdout));
  }
+ for(const result of results)result.modelledSavingMs=Math.round((results[0].wallMs-result.wallMs)/scale);
  console.log(JSON.stringify({sizes,latencyScale:scale,model:MODEL,shape,results},null,1));
 }finally{fs.rmSync(dir,{recursive:true,force:true});}
