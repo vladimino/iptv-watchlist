@@ -197,6 +197,8 @@ Film records are the snapshot's programme films ([projection](#the-projection)) 
 
 **Unresolved observations come from the observation index.** With a `fresh` or `stale` index of the published generation, its records are supplied to the model as `observations` with `coverage.observations: partial` and `observedAt` = the index's `writtenAt`. They become observation items with the index title (`item.observation`). The index holds only current observations that already have a decision, so the list is never the whole population: an observation awaiting its first lookup is counted in `awaitingFirstLookup`, not listed. Without a readable index (`missing`, `other_generation`, `malformed`, `torn`, no published generation, or a storage failure) no observation is supplied. The answer says so in `coverage.observations` (`available: false`, `reason: index_<state>`), and a `kind=observation` filter returns an empty list beside that statement, never a claim that nothing is unresolved.
 
+**D1 authority (AIR-515).** While Discovery is `d1`/`open` the page reads one catalog, the current `discovery_admission` rows (`copies` has the single entry `discovery_admission`, `reads` lists no R2 catalog object), and a published pointer that no longer matches the authority generation is the unknown-not-zero problem `generation_changed`. The negative index is still read from R2. An authority that is held, not installed or not `d1`/`open` is `503 storage_unavailable`; the page never falls back to the R2 catalog. The run stops with `storage_unavailable` (nothing written) or `write_uncertain` (a D1 batch failed and may have committed; no automatic retry).
+
 ### Parameters
 
 | Parameter | Rule |
