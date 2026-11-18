@@ -211,17 +211,17 @@ const key=n=>'owner-key-'+String(n).padStart(8,'0');
  // The SQL fence itself: a token that no longer matches D1 fails the whole batch (the second film is not written either).
  const fresh=await w.admin('preview?films=tmdb_1,tmdb_2');assert.deepEqual(fresh.data.films.map(f=>f.outcome),['eligible','eligible']);
  const films=fresh.data.films.map(f=>f.filmId==='tmdb_2'?{...f,predictionToken:'moved|x|y'}:f);
- await assert.rejects(Intent.confirmCohort(w.env,{cohortId:await Intent.cohortIdFor(key(5)),idempotencyKey:key(5),scopeHash:fresh.data.scopeHash,mode:'prediction_only',ttlHours:72,revision:0,filmPersonGeneration:2,films}),e=>e.code==='recovery_cas');
+ await assert.rejects(Intent.confirmCohort(w.env,{cohortId:await Intent.cohortIdFor(key(5)),idempotencyKey:key(5),scopeHash:fresh.data.scopeHash,mode:'prediction_only',ttlHours:72,revision:0,filmPersonGeneration:2,requestDigest:'a'.repeat(64),films}),e=>e.code==='recovery_cas');
  assert.deepEqual(intents(w),[]);assert.equal(revision(w),0);assert.deepEqual(sql(w.file,'SELECT * FROM prediction_recovery_cohort'),[]);
  // A concurrent confirmation moved the revision: the stale one fails whole.
- await assert.rejects(Intent.confirmCohort(w.env,{cohortId:await Intent.cohortIdFor(key(6)),idempotencyKey:key(6),scopeHash:fresh.data.scopeHash,mode:'prediction_only',ttlHours:72,revision:7,filmPersonGeneration:2,films:fresh.data.films}),e=>e.code==='recovery_cas');
+ await assert.rejects(Intent.confirmCohort(w.env,{cohortId:await Intent.cohortIdFor(key(6)),idempotencyKey:key(6),scopeHash:fresh.data.scopeHash,mode:'prediction_only',ttlHours:72,revision:7,filmPersonGeneration:2,requestDigest:'a'.repeat(64),films:fresh.data.films}),e=>e.code==='recovery_cas');
  assert.deepEqual(intents(w),[]);
  // Held prediction writes: the preview says so and the confirm refuses; the triggers refuse a direct write too.
  sql(w.file,"UPDATE prediction_domain_authority SET writes='held' WHERE id=1");
  const held=await w.admin('preview?films=tmdb_2');assert.equal(held.data.confirmable,false);assert.equal(held.data.refusal,'prediction_writes_held');
  const refused=await w.admin('confirm',{method:'POST',body:{films:['tmdb_2'],mode:'prediction_only',ttlHours:72,scopeHash:held.data.scopeHash,idempotencyKey:key(7)}});
  assert.equal(refused.status,409);assert.equal(refused.data.refusal,'prediction_writes_held');
- await assert.rejects(Intent.confirmCohort(w.env,{cohortId:await Intent.cohortIdFor(key(7)),idempotencyKey:key(7),scopeHash:held.data.scopeHash,mode:'prediction_only',ttlHours:72,revision:0,filmPersonGeneration:2,films:held.data.films.map(f=>({...f,predictionToken:fresh.data.films[1].predictionToken,canonicalFilmId:'film:tmdb:2',tmdb:'2',lid:null,fingerprintToken:null}))}),e=>['recovery_cas','recovery_not_open'].includes(e.code));
+ await assert.rejects(Intent.confirmCohort(w.env,{cohortId:await Intent.cohortIdFor(key(7)),idempotencyKey:key(7),scopeHash:held.data.scopeHash,mode:'prediction_only',ttlHours:72,revision:0,filmPersonGeneration:2,requestDigest:'a'.repeat(64),films:held.data.films.map(f=>({...f,predictionToken:fresh.data.films[1].predictionToken,canonicalFilmId:'film:tmdb:2',tmdb:'2',lid:null,fingerprintToken:null}))}),e=>['recovery_cas','recovery_not_open'].includes(e.code));
  assert.deepEqual(intents(w),[]);
 }
 
@@ -290,7 +290,8 @@ const key=n=>'owner-key-'+String(n).padStart(8,'0');
 }
 
 // 2h. Review of PR #734: an INSTALLED store that cannot be read fails closed. No rebuild, no queue write, the retry record survives.
-{
+// A world with one active intent (tmdb_1) whose film carries a saved retry record (attempts 1, future retryAt) and is outstanding.
+async function retryWorld(){
  const w=await scoredWorld(4);
  const p=await w.admin('preview?films=tmdb_1');
  assert.equal((await w.admin('confirm',{method:'POST',body:{films:['tmdb_1'],mode:'prediction_only',ttlHours:72,scopeHash:p.data.scopeHash,idempotencyKey:key(11)}})).status,201);
@@ -300,26 +301,71 @@ const key=n=>'owner-key-'+String(n).padStart(8,'0');
  await complete(w,m,'manifest_spent');
  const saved=queueDoc(w);assert.equal(saved.retries.tmdb_1.attempts,1);assert.ok(saved.retries.tmdb_1.retryAt>Date.now(),'the backoff is recorded');
  assert.ok([...saved.hotPending,...saved.coldPending].includes('tmdb_1'),'the recovery film is outstanding with its retry record');
- const before=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue'));
+ return {w,saved};
+}
+const queueRows=w=>JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue'));
+// Both ordinary rebuild paths refuse and leave the stored queue byte-identical.
+async function refusesWithoutWrite(w,label){
+ const before=queueRows(w);
+ assert.notEqual((await w.api('queue/reconcile',{})).status,200,label+': the forced rebuild refuses');
+ const forced=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled'});assert.notEqual(forced.data.status,'running',label+': no run starts');
+ assert.equal(queueRows(w),before,label+': no queue write');
+}
+{
+ const {w,saved}=await retryWorld();
  // A D1 fault on the intent store only: every read of it throws.
  const prepare=w.db.prepare.bind(w.db);let fault=true;
  w.db.prepare=text=>{if(fault&&/prediction_recovery_/.test(text))throw new Error('D1_ERROR: network connection lost');return prepare(text);};
  assert.equal(await Intent.readOverlay(w.env).then(()=>'read',e=>e.code),'recovery_unavailable','an installed store that cannot be read is not "no intents"');
- const reconcile=await w.api('queue/reconcile',{});assert.notEqual(reconcile.status,200,'the forced rebuild refuses');
- const forced=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled'});assert.notEqual(forced.data.status,'running','no run starts on an unreadable store');
- assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),before,'no queue write while the store is unreadable');
+ await refusesWithoutWrite(w,'read fault');
  fault=false;
  assert.equal((await w.api('queue/reconcile',{})).status,200);
  const after=queueDoc(w);
  assert.deepEqual([after.retries.tmdb_1.attempts,after.retries.tmdb_1.retryAt],[saved.retries.tmdb_1.attempts,saved.retries.tmdb_1.retryAt],'attempts and retryAt are preserved after recovery');
  assert.ok([...after.hotPending,...after.coldPending].includes('tmdb_1'));
- // A partial table set is not the absent schema: it fails closed too, for the runner and for the preview.
- sql(w.file,'DROP TABLE prediction_recovery_intent');
- assert.equal(await Intent.readOverlay(w.env).then(()=>'read',e=>e.code),'recovery_schema_partial');
- const partialBefore=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue'));
- assert.notEqual((await w.api('queue/reconcile',{})).status,200);
- assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),partialBefore);
- assert.equal((await w.admin('preview?films=tmdb_2')).status,503);
+ // Malformed contents are unreadable, not empty.
+ sql(w.file,"DROP TRIGGER prediction_recovery_intent_transition;PRAGMA ignore_check_constraints=ON;UPDATE prediction_recovery_intent SET mode='nonsense' WHERE film_id='tmdb_1'");
+ assert.equal(await Intent.readOverlay(w.env).then(()=>'read',e=>e.code),'recovery_unavailable','a malformed row fails closed');
+ await refusesWithoutWrite(w,'malformed row');
+}
+// A partial table set is not the absent schema, whichever table is missing (the cohort table is not otherwise named by the intent read).
+for(const table of ['prediction_recovery_cohort','prediction_recovery_intent','prediction_recovery_revision']){
+ const {w,saved}=await retryWorld();
+ sql(w.file,'DROP TABLE '+table);
+ assert.equal(await Intent.readOverlay(w.env).then(()=>'read',e=>e.code),'recovery_schema_partial',table+' missing');
+ await refusesWithoutWrite(w,table+' missing');
+ const kept=queueDoc(w);assert.deepEqual([kept.retries.tmdb_1.attempts,kept.retries.tmdb_1.retryAt],[saved.retries.tmdb_1.attempts,saved.retries.tmdb_1.retryAt],table+': the retry record survives');
+ assert.equal((await w.admin('preview?films=tmdb_2')).status,503,table+': preview refuses');
+}
+
+// 2j. Review of PR #734: a replay must repeat the original request, not only its scope hash; the scope hash covers the per-film retry
+// record and lane, and deliberately not the runner lease (a heartbeat between preview and confirm keeps the scope).
+{
+ const {w}=await retryWorld();
+ const first=sql(w.file,"SELECT scope_hash AS h FROM prediction_recovery_cohort")[0].h;
+ for(const [label,body] of [['other films',{films:['tmdb_2']}],['other mode',{films:['tmdb_1'],mode:'fingerprint_and_prediction'}],['other TTL',{films:['tmdb_1'],ttlHours:24}]]){
+  const r=await w.admin('confirm',{method:'POST',body:{mode:'prediction_only',ttlHours:72,...body,scopeHash:first,idempotencyKey:key(11)}});
+  assert.equal(r.status,409,label);assert.equal(r.data.refusal,'idempotency_conflict',label);
+ }
+ const same=await w.admin('confirm',{method:'POST',body:{films:['tmdb_1'],mode:'prediction_only',ttlHours:72,scopeHash:first,idempotencyKey:key(11)}});
+ assert.equal(same.data.status,'replayed','the original request still replays');
+ assert.equal(sql(w.file,'SELECT COUNT(*) AS n FROM prediction_recovery_cohort')[0].n,1);
+ // tmdb_1 (outstanding, with its retry record) shows in the preview beside an eligible film; a retry change between preview and confirm is another scope.
+ const p=await w.admin('preview?films=tmdb_1,tmdb_2');
+ assert.deepEqual(p.data.films.find(f=>f.filmId==='tmdb_1').retry.attempts,1);assert.equal(p.data.films.find(f=>f.filmId==='tmdb_2').outcome,'eligible');
+ const q=queueDoc(w);q.retries.tmdb_1.attempts=2;q.retries.tmdb_1.retryAt+=3600000;
+ sql(w.file,'DELETE FROM prediction_queue');sql(w.file,"INSERT INTO prediction_queue (seq,chunk_text,generation) VALUES (0,'"+JSON.stringify(q).replace(/'/g,"''")+"',"+sql(w.file,'SELECT queue_generation AS g FROM prediction_domain_authority')[0].g+")");
+ const stale=await w.admin('confirm',{method:'POST',body:{films:['tmdb_1','tmdb_2'],mode:'prediction_only',ttlHours:72,scopeHash:p.data.scopeHash,idempotencyKey:key(13)}});
+ assert.equal(stale.status,409);assert.equal(stale.data.refusal,'stale_scope','a changed retry record is another scope');
+ // A live run's heartbeat between preview and confirm does not change the scope. tmdb_3 is made ordinarily stale so a run has work.
+ const ghost=JSON.parse(pointers(w).find(r=>r.film_id==='tmdb_3').display_json);ghost.tasteProfileHash='old';
+ sql(w.file,"UPDATE prediction_pointer SET display_json='"+JSON.stringify(ghost).replace(/'/g,"''")+"' WHERE film_id='tmdb_3'");
+ assert.equal((await w.api('queue/reconcile',{})).status,200);
+ const live=await start(w);
+ const p2=await w.admin('preview?films=tmdb_2');assert.equal(p2.data.runner.live,true);
+ assert.equal((await w.api('heartbeat',{runId:live.runId,epoch:live.lease.epoch})).status,200);
+ const ok=await w.admin('confirm',{method:'POST',body:{films:['tmdb_2'],mode:'prediction_only',ttlHours:72,scopeHash:p2.data.scopeHash,idempotencyKey:key(14)}});
+ assert.equal(ok.status,201,JSON.stringify(ok.data));
 }
 
 // 2i. Review of PR #734: the confirmation batch asserts the previewed identity and Film/Person marker again. A change after the server's

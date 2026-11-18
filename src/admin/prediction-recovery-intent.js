@@ -81,13 +81,15 @@ async function predictionRecoveryIntentConfirm(env,body){
  if(request.error)return pricRefuse(request.error,400,request.limit?{limit:request.limit}:{});
  if(!PredictionRecoveryIntent.validIdempotencyKey(body.idempotencyKey))return pricRefuse('invalid_idempotency_key',400);
  if(!PredictionRecoveryIntent.validScopeHash(body.scopeHash))return pricRefuse('invalid_scope_hash',400);
- // A key seen before is a replay of that confirmation, or a conflict when the scope differs. Checked before any new preview: the
- // first confirmation itself moved the revision, so a fresh preview of a replay would never match.
+ // A key seen before is a replay of that confirmation only when both the scope hash and the normalized request (films, mode, TTL) are the
+ // stored ones; anything else under that key is a conflict. Checked before any new preview: the first confirmation itself moved the
+ // revision, so a fresh preview of a replay would never match.
+ const requestDigest=await PredictionRecoveryIntent.recoveryRequestDigest(request);
  const replay=async()=>{
   const known=await PredictionRecoveryIntent.readCohort(env,{idempotencyKey:body.idempotencyKey});
   if(!known.installed)return pricRefuse('recovery_schema_not_ready',409);
   if(!known.cohort)return null;
-  if(known.cohort.scopeHash!==body.scopeHash)return pricRefuse('idempotency_conflict',409,{cohortId:known.cohort.cohortId});
+  if(known.cohort.scopeHash!==body.scopeHash||known.cohort.requestDigest!==requestDigest)return pricRefuse('idempotency_conflict',409,{cohortId:known.cohort.cohortId});
   return json({status:'replayed',receipt:known.cohort});
  };
  const seen=await replay();if(seen)return seen;
@@ -97,7 +99,7 @@ async function predictionRecoveryIntentConfirm(env,body){
  const eligible=preview.films.filter(f=>f.outcome==='eligible');
  const cohortId=await PredictionRecoveryIntent.cohortIdFor(body.idempotencyKey);
  let written;
- try{written=await PredictionRecoveryIntent.confirmCohort(env,{cohortId,idempotencyKey:body.idempotencyKey,scopeHash:body.scopeHash,mode:request.mode,ttlHours:request.ttlHours,revision:preview.schema.revision,filmPersonGeneration:preview.authority.filmPerson.generation,films:eligible});}
+ try{written=await PredictionRecoveryIntent.confirmCohort(env,{cohortId,idempotencyKey:body.idempotencyKey,scopeHash:body.scopeHash,requestDigest,mode:request.mode,ttlHours:request.ttlHours,revision:preview.schema.revision,filmPersonGeneration:preview.authority.filmPerson.generation,films:eligible});}
  catch(error){
   // A concurrent confirmation of the same key landed first: answer as its replay. Any other refusal wrote nothing.
   if(error?.code==='recovery_cas'){const again=await replay().catch(()=>null);if(again)return again;}

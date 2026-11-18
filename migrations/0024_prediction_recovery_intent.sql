@@ -38,6 +38,7 @@ CREATE TABLE prediction_recovery_cohort (
  cohort_id TEXT PRIMARY KEY CHECK (length(cohort_id) = 27 AND substr(cohort_id, 1, 3) = 'pr_' AND substr(cohort_id, 4) NOT GLOB '*[^0-9a-f]*'),
  idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 16 AND 80 AND idempotency_key NOT GLOB '*[^A-Za-z0-9_-]*'),
  scope_hash TEXT NOT NULL CHECK (length(scope_hash) = 64 AND scope_hash NOT GLOB '*[^0-9a-f]*'),
+ request_digest TEXT NOT NULL CHECK (length(request_digest) = 64 AND request_digest NOT GLOB '*[^0-9a-f]*'),
  mode TEXT NOT NULL CHECK (mode IN ('prediction_only', 'fingerprint_and_prediction')),
  film_count INTEGER NOT NULL CHECK (film_count BETWEEN 1 AND 50),
  state TEXT NOT NULL CHECK (state IN ('active', 'cancelled')),
@@ -94,7 +95,7 @@ END;
 CREATE TRIGGER prediction_recovery_cohort_transition
 BEFORE UPDATE ON prediction_recovery_cohort
 FOR EACH ROW
-WHEN OLD.state <> 'active' OR NEW.cohort_id <> OLD.cohort_id OR NEW.idempotency_key <> OLD.idempotency_key OR NEW.scope_hash <> OLD.scope_hash
+WHEN OLD.state <> 'active' OR NEW.cohort_id <> OLD.cohort_id OR NEW.idempotency_key <> OLD.idempotency_key OR NEW.scope_hash <> OLD.scope_hash OR NEW.request_digest <> OLD.request_digest
  OR NEW.mode <> OLD.mode OR NEW.film_count <> OLD.film_count OR NEW.created_at <> OLD.created_at OR NEW.expires_at <> OLD.expires_at
 BEGIN
  SELECT RAISE(ABORT, 'prediction_recovery_cohort_immutable');

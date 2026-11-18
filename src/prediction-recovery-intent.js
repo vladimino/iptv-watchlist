@@ -114,12 +114,18 @@ export function classifyRecoveryFilm(film,mode,nowMs){
  return {filmId:film.filmId,outcome:'eligible',reason:'eligible',plan:mode==='fingerprint_and_prediction'?'fingerprint_and_prediction':'prediction_only',...facts,predictionToken:pToken,fingerprintToken:fToken};
 }
 
-// Pure. The scope the owner confirms: every requested film with its outcome, the tokens an eligible film will deny, the mode, the TTL,
-// the recovery revision and the prediction authority the preview read. Any change to one of them is another scope.
+// Pure. The scope the owner confirms: every requested film with its outcome, the tokens an eligible film will deny, its queue lane and
+// retry record (attempts, retryAt, exhausted), the mode, the TTL, the recovery revision, the prediction authority mode/writes and the
+// Film/Person state/generation the preview read. Any change to one of them is another scope (`stale_scope`). Deliberately NOT in it:
+// the queue generation, the prediction authority generation and the runner lease/run/epoch. Those move on every runner step and
+// heartbeat, confirming during a live v2 run is intended, and the intent changes none of them (ADR 0165).
 export async function recoveryScopeHash({mode,ttlHours,revision,authority,filmPerson=null,films}){
  return digestOf({version:RECOVERY_VERSION,mode,ttlHours,revision,authority:{mode:authority?.mode??null,writes:authority?.writes??null},filmPerson:{state:filmPerson?.state??null,generation:filmPerson?.generation??null},
-  films:films.map(f=>({filmId:f.filmId,outcome:f.outcome,reason:f.reason,canonicalFilmId:f.canonicalFilmId??null,tmdb:f.tmdb??null,lid:f.lid??null,predictionToken:f.predictionToken??null,fingerprintToken:f.fingerprintToken??null}))});
+  films:films.map(f=>({filmId:f.filmId,outcome:f.outcome,reason:f.reason,lane:f.lane??null,retry:f.retry?{attempts:f.retry.attempts??null,retryAt:f.retry.retryAt??null,exhausted:!!f.retry.exhausted}:null,canonicalFilmId:f.canonicalFilmId??null,tmdb:f.tmdb??null,lid:f.lid??null,predictionToken:f.predictionToken??null,fingerprintToken:f.fingerprintToken??null}))});
 }
+// The owner's normalized request (a parsed recovery request: sorted films, mode, TTL). A replay of an idempotency key must repeat it
+// exactly, not only the old scope hash (review of PR #734).
+export async function recoveryRequestDigest({films,mode,ttlHours}){return digestOf({version:RECOVERY_VERSION,films:[...films].sort((a,b)=>a.localeCompare(b,'en')),mode,ttlHours});}
 export async function cohortIdFor(idempotencyKey){return 'pr_'+(await digestOf({cohort:idempotencyKey})).slice(0,24);}
 
 // The tables are installed when all three exist; none of them is "not installed"; some of them fail closed.
@@ -130,6 +136,11 @@ async function readInstalled(db){
  return true;
 }
 
+// The intent read joins its cohort, so the one read batch touches all three 0024 tables: a missing table of any of them fails the
+// statement and is then classified by readInstalled (none: dormant; some: recovery_schema_partial). An intent counts only while its
+// cohort is active too.
+const OVERLAY_SQL="SELECT i.film_id AS filmId, i.mode AS mode, i.prediction_token AS predictionToken, i.fingerprint_token AS fingerprintToken FROM prediction_recovery_intent i JOIN prediction_recovery_cohort c ON c.cohort_id=i.cohort_id AND c.state='active' WHERE i.state='active' AND i.expires_at>? AND EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id=1 AND mode='d1') LIMIT ?";
+const validOverlayRow=row=>typeof row?.filmId==='string'&&FILM_ID.test(row.filmId)&&RECOVERY_MODES.includes(row.mode)&&typeof row.predictionToken==='string'&&row.predictionToken.length>=3&&(row.fingerprintToken==null||typeof row.fingerprintToken==='string'&&row.fingerprintToken.length>=2);
 const EMPTY_OVERLAY=Object.freeze({ready:false,revision:null,size:0,deniesPrediction:()=>false,deniesFingerprint:()=>false,modeOf:()=>null});
 export const emptyOverlay=()=>EMPTY_OVERLAY;
 // The active, unexpired intents and the revision, in one read. Only while the prediction domain marker is d1: the tokens name D1 pointers.
@@ -143,7 +154,7 @@ export async function readOverlay(env,nowMs=Date.now()){
  const now=new Date(nowMs).toISOString();
  let revision,rows;
  try{
-  const read=[db.prepare('SELECT revision FROM prediction_recovery_revision WHERE id=1').bind(),db.prepare("SELECT film_id AS filmId, mode, prediction_token AS predictionToken, fingerprint_token AS fingerprintToken FROM prediction_recovery_intent WHERE state='active' AND expires_at>? AND EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id=1 AND mode='d1') LIMIT ?").bind(now,RECOVERY_LIMITS.maxActive+1)];
+  const read=[db.prepare('SELECT revision FROM prediction_recovery_revision WHERE id=1').bind(),db.prepare(OVERLAY_SQL).bind(now,RECOVERY_LIMITS.maxActive+1)];
   if(typeof db.batch==='function'){const results=await db.batch(read);revision=results[0]?.results?.[0]?.revision;rows=results[1]?.results||[];}
   else{revision=(await read[0].first())?.revision;rows=(await read[1].all()).results||[];}
  }catch(error){
@@ -155,7 +166,7 @@ export async function readOverlay(env,nowMs=Date.now()){
   throw failed('recovery_unavailable',error);
  }
  if(revision==null||!Number.isInteger(Number(revision)))throw failed('recovery_unavailable');
- if(rows.length>RECOVERY_LIMITS.maxActive)throw failed('recovery_unavailable');
+ if(rows.length>RECOVERY_LIMITS.maxActive||!rows.every(validOverlayRow))throw failed('recovery_unavailable');
  const predictions=new Map(),fingerprints=new Map(),modes=new Map();
  for(const row of rows){predictions.set(row.filmId,row.predictionToken);modes.set(row.filmId,row.mode);if(row.fingerprintToken)fingerprints.set(row.filmId,row.fingerprintToken);}
  return Object.freeze({ready:true,revision:Number(revision),size:rows.length,
@@ -194,7 +205,7 @@ export async function readFilmRows(env,filmIds){
 
 function cohortView(row,intents,nowMs,tokens){
  return {
-  cohortId:row.cohort_id,idempotencyKey:row.idempotency_key,scopeHash:row.scope_hash,mode:row.mode,filmCount:row.film_count,state:row.state,
+  cohortId:row.cohort_id,idempotencyKey:row.idempotency_key,scopeHash:row.scope_hash,requestDigest:row.request_digest,mode:row.mode,filmCount:row.film_count,state:row.state,
   createdAt:row.created_at,expiresAt:row.expires_at,cancelledAt:row.cancelled_at??null,
   films:intents.map(intent=>{
    const now=tokens?.get(intent.film_id)??null;
@@ -264,12 +275,12 @@ export async function confirmCohort(env,plan,nowMs=Date.now()){
  const db=database(env);
  if(!db)throw failed('recovery_unavailable');
  if(!plan.films.length||plan.films.length>RECOVERY_LIMITS.maxFilms)throw failed('recovery_scope_empty');
- if(!Number.isInteger(plan.filmPersonGeneration))throw failed('recovery_scope_invalid');
+ if(!Number.isInteger(plan.filmPersonGeneration)||!HEX64.test(plan.requestDigest||''))throw failed('recovery_scope_invalid');
  const now=new Date(nowMs).toISOString(),expires=new Date(nowMs+plan.ttlHours*3600000).toISOString();
  const statements=[
   ['UPDATE prediction_recovery_revision SET revision=revision+1 WHERE id=1 AND revision=? AND '+OPEN_SQL,[plan.revision]],
   [FENCE_SQL,[]],
-  ['INSERT INTO prediction_recovery_cohort (cohort_id,idempotency_key,scope_hash,mode,film_count,state,created_at,expires_at) VALUES (?,?,?,?,?,\'active\',?,?)',[plan.cohortId,plan.idempotencyKey,plan.scopeHash,plan.mode,plan.films.length,now,expires]],
+  ['INSERT INTO prediction_recovery_cohort (cohort_id,idempotency_key,scope_hash,request_digest,mode,film_count,state,created_at,expires_at) VALUES (?,?,?,?,?,?,\'active\',?,?)',[plan.cohortId,plan.idempotencyKey,plan.scopeHash,plan.requestDigest,plan.mode,plan.films.length,now,expires]],
  ];
  for(const entry of plan.films){
   // Every bound value is a string or null: an absent field is never bound as undefined.
