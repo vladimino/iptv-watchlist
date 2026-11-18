@@ -94,20 +94,12 @@ if(section('1')){
 }
 
 // 2. Dormancy: at r2 and prepared a pass and an inline reconcile each cost exactly one marker read (SELECTs only), no batch, nothing written; held throws.
-for(const stage of section('2')?['r2','prepared']:[]){
+for(const stage of section('2')?['legacy','r2','prepared']:[]){
  const file=database(stage),before=dump(file);
- const probe=envOf(file);await readAuthority(probe);
- const markerQueries=probe.DB.calls.queries;
- const seen=[];
- const env=envOf(file,{onQuery:async text=>{seen.push(text);}});
- const done=await applyEpgUnits(env,{plan:plan(),now:()=>T});
- assert.equal(done.skipped,true,stage);assert.equal(done.reason,'projector_is_writer');assert.equal(done.cursor,0);assert.equal(done.done,false);
- assert.equal(env.DB.calls.queries,markerQueries,stage+': exactly one marker read');
- assert.ok(seen.every(text=>/^\s*SELECT/i.test(text)),stage+': only SELECTs');
+ const env=envOf(file);
+ await assert.rejects(()=>applyEpgUnits(env,{plan:plan(),now:()=>T}),code('film_person_unavailable'),stage);
+ await assert.rejects(()=>reconcileEpg(env,{plan:plan()}),code('film_person_unavailable'),stage);
  assert.equal(env.DB.calls.batches,0,stage+': no batch');
- const rec=await reconcileEpg(env,{plan:plan()});
- assert.equal(rec.skipped,true,stage+': reconcile skipped');
- assert.equal(env.DB.calls.queries,2*markerQueries,stage+': the reconcile reads only the marker');
  assert.equal(dump(file),before,stage+': nothing written');
 }
 if(section('2')){

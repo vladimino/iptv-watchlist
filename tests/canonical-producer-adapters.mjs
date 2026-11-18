@@ -24,7 +24,6 @@ const A=await load('canonical-producer-adapters.js');
 const R=await load('canonical-receipts.js');
 const {writeFilmFacts}=await load('canonical-film-writers.js');
 const {applyFilmFacts,reconcileOwnOrigin,filmFactsDigest,filmFactsOperation,producerRequestId,prePlanFilmFacts,INLINE_RECONCILE_LIMIT}=A;
-const {readAuthority}=await load('film-person-authority.js');
 const {listReceipts,reconcileReceipts,listAttention,operationRegistry,defineOperation,requestIdOf,normalizeRequest,OPERATION_KINDS,readReceipt}=R;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-producer-adapters-'));
@@ -70,21 +69,16 @@ const interlope=(file,input,expectedRevision)=>writeFilmFacts(envOf(file),{...in
 const raceAt=(file,index,action)=>{let seen=0;return envOf(file,{onBatch:async()=>{seen++;if(seen===index)await action();}});};
 const ops=input=>operationRegistry([filmFactsOperation({replan:async()=>input,now:()=>T})]);
 
-// 1. The route gate: at r2 and prepared exactly ONE marker read (the queries of readAuthority, all SELECTs) and no batch; held throws; nothing is written, no receipt.
+// 1. The route gate: at r2 and prepared the strict marker read refuses with film_person_unavailable (only SELECTs, no batch, no receipt, nothing written); held throws.
 for(const stage of section('1')?['r2','prepared']:[]){
  const file=database(stage),before=dump(file);
- const probe=envOf(file);await readAuthority(probe);
- const markerQueries=probe.DB.calls.queries;
  const seen=[];
  const env=envOf(file,{onQuery:async text=>{seen.push(text);}});
- const done=await apply(env);
- assert.deepEqual(done,{state:'skipped',reason:'projector_is_writer',receipt:false},stage);
- assert.equal(env.DB.calls.queries,markerQueries,stage+': exactly one marker read');
+ await assert.rejects(()=>apply(env),code('film_person_unavailable'),stage);
  assert.ok(seen.every(text=>/^\s*SELECT/i.test(text)),stage+': only SELECTs');
  assert.equal(env.DB.calls.batches,0,stage+': no batch');
- const reconciled=await reconcileOwnOrigin(env,{origin:'epg',operations:ops(facts())});
- assert.equal(reconciled.skipped,true,stage+': reconcile skipped');
- assert.equal(env.DB.calls.queries,2*markerQueries,stage+': the reconcile reads only the marker');
+ await assert.rejects(()=>reconcileOwnOrigin(env,{origin:'epg',operations:ops(facts())}),code('film_person_unavailable'),stage+': reconcile refused');
+ assert.equal(env.DB.calls.batches,0,stage+': reconcile no batch');
  assert.equal(dump(file),before,stage+': nothing written');
 }
 if(section('1')){

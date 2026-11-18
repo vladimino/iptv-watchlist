@@ -873,6 +873,8 @@ function predictionPriority(film,now=Date.now()){
  const hot=filmIsHot(film,now),availableNow=starts.some(t=>t<=now),today=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid'}).format(now),availableToday=starts.some(t=>new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid'}).format(t)===today),deadline=starts.length?Math.max(...starts)+72*3600000:null;
  return {hot,availableNow,availableToday,availableUntil:deadline?new Date(deadline).toISOString():null,rank:hot?(availableNow&&deadline-now<=24*3600000?0:1):2,expiresInMs:deadline?deadline-now:Infinity};
 }
+// The zero-quota test of `adaptivePredictionBatch`, usable on an empty queue (which answers `empty` first).
+function capacityExhausted(capacity={}){return (Number.isFinite(capacity?.remainingPercent)&&Math.max(0,Math.min(100,capacity.remainingPercent))===0)||capacity?.quotaAvailable===false;}
 function adaptivePredictionBatch(queue,capacity={}){
  const hot=queue?.priorityCount||0,cold=queue?.coldRemaining??queue?.pending?.length??0,backlog=hot||cold;
  if(!backlog)return {batchSize:0,reason:'empty',usageKnown:Number.isFinite(capacity.remainingPercent)};
@@ -1435,6 +1437,8 @@ async function consistentQueueReport(pinned,report){
 }
 async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const pinned=await queuePin(env,report);
+ // AIR-529: read BEFORE the programme and catalog are used, so an assignment landing during the rebuild leaves the stored signature older than the data and costs one more refresh, never a missed one.
+ const showsSignature=await currentShowsSignature(pinned,report);
  const source=await consistentQueueReport(pinned,report);
  const [profile,storedIndex,catalog,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned),loadJSON(env,'sync.json')]);
  const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
@@ -1510,8 +1514,13 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  missing.sort((a,b)=>{const x=priority[a.id],y=priority[b.id];return x.rank-y.rank||(x.rank===0?x.expiresInMs-y.expiresInMs:0)||Number(y.availableNow||y.availableToday)-Number(x.availableNow||x.availableToday)||Number(!!index?.[a.id]?.prediction)-Number(!!index?.[b.id]?.prediction)||Number(!!work[a.id]?.migration)-Number(!!work[b.id]?.migration)||earliestStart(a)-earliestStart(b)||(Date.parse(b.discoveredAt)||0)-(Date.parse(a.discoveredAt)||0)||String(a.id).localeCompare(String(b.id),'en');});
  const currentIds=new Set(missing.map(f=>String(f.id))),retries=boundRetryRecords(previous?.retries||{},currentIds),exhausted=id=>retryBudgetExhausted(retries[id]);
  const hotPending=missing.filter(f=>priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))];
+ // AIR-529: the first instant an OUTSTANDING Film of this queue (not retry-exhausted; a Film with a current prediction cannot change what a start selects) changes hot/cold with the clock alone. The predicate is
+ // `start >= now-72h && start < now+24h` (lower bound inclusive, upper exclusive), so a show is still cold AT start-24h and hot from start-24h+1 ms, and still hot AT start+72h and cold from start+72h+1 ms: the edges
+ // below are those first instants. The batch preflight compares the earliest with the clock, so a rolling-window transition on an unchanged generation is re-evaluated at a natural start (never per submit or complete).
+ let nextWindowChange=Infinity;
+ if(authoritative)for(const film of missing){if(exhausted(String(film.id)))continue;for(const show of film.shows||[]){const at=Number(show?.start);if(!Number.isFinite(at))continue;for(const edge of [at-PRIORITY_HOT_FUTURE_MS+1,at+PRIORITY_HOT_PAST_MS+1])if(edge>now&&edge<nextWindowChange)nextWindowChange=edge;}}
  const hotCount=films.filter(f=>priority[f.id].hot).length,missingHot=missing.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-missingHot,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&fresh.get(String(f.id))).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
- const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:priorityProgrammeRunId,priorityBasis,priorityAsOf,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
+ const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:priorityProgrammeRunId,priorityBasis,priorityAsOf,showsSignature:authoritative?(showsSignature.signature??null):null,priorityNextChangeAt:authoritative&&Number.isFinite(nextWindowChange)?new Date(nextWindowChange).toISOString():null,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
  if(recovery.ready){queue.recoveryRevision=recovery.revision;queue.recovery={revision:recovery.revision,activeIntents:recovery.size,denied:recoveryDenied};}
  return queue;
 }
@@ -1529,6 +1538,23 @@ const queueShapeValid=queue=>!!queue&&typeof queue==='object'&&Array.isArray(que
 // Why a persisted queue cannot be advanced as it is (null: it can). The same inputs a rebuild stamps into the queue.
 // ADR 0154. A completed programme authorizes hot/cold order only. An unfinished seal, a new programmeRunId or missing shows never block scoring.
 const PRIORITY_CARRY_MS=36*3600000;
+// The hot window of `predictionPriority`: a show start in [now - 72 h, now + 24 h).
+const PRIORITY_HOT_PAST_MS=72*3600000,PRIORITY_HOT_FUTURE_MS=24*3600000;
+// AIR-529, owner decision of 18 November 2026: the clock-only re-evaluation is a RATE CAP, not a freshness guarantee. A queue ranked on a completed programme is rebuilt for a hot/cold edge (`priorityNextChangeAt`, the first instant the
+// predicate changes) at most once per interval, so a start does not pay a full rebuild every time an edge of thousands of outstanding Films passes. Within the interval after a rebuild, a Film that became hot may sit behind cold picks;
+// that bound is the accepted relaxation of "hot before the next cold selection" for clock-only changes. It never applies to a changed shows signature or an unreadable one, which stay immediate. A queue without the field is not judged here.
+const PRIORITY_WINDOW_REEVAL_MS=15*60000;
+function windowEdgeReached(queue,report,now=Date.now()){
+ if(!queue||queue.priorityBasis!=='completed'||queue.programmeRunId!==report?.runId||!queue.priorityNextChangeAt)return false;
+ const next=Date.parse(queue.priorityNextChangeAt);
+ return Number.isFinite(next)&&next<=now;
+}
+// 'window_transition' when an edge was reached and the interval since the last rebuild has passed; `deferred` when it was reached but the rate cap holds it back (reported, never a verified count).
+function windowTransitionState(queue,report,now=Date.now()){
+ if(!windowEdgeReached(queue,report,now))return {cause:null,deferred:false};
+ const built=Date.parse(queue.refreshedAt||'');
+ return Number.isFinite(built)&&now-built<PRIORITY_WINDOW_REEVAL_MS?{cause:null,deferred:true}:{cause:'window_transition',deferred:false};
+}
 function showsAuthoritative(sync,report){
  if(!report?.runId||!Array.isArray(report.films))return false;
  // No sync document: the programme object is the snapshot (R2-only and offline worlds).
@@ -1538,6 +1564,22 @@ function showsAuthoritative(sync,report){
  // An unsealed run that has not replaced the published programme leaves the previous snapshot in force.
  if(sync.runId&&sync.runId!==report.runId)return true;
  return false;
+}
+// AIR-529. The Discovery-assigned shows of the pinned D1 generation, as one signature. {applicable:false}: not a D1 pin of this programme (nothing to compare). {unreadable:true}: the read failed,
+// which is unknown, never a match. {signature}: the value.
+async function currentShowsSignature(pinned,report){
+ if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.assignedShowsSignature!=='function')return {applicable:false};
+ const runId=pinned?.epgPin?.authority==='d1'?pinned.epgPin.programmeRunId:null;
+ if(!runId||runId!==report?.runId)return {applicable:false};
+ try{const signature=await PublishedEpg.assignedShowsSignature(pinned,runId);return signature?{signature}:{unreadable:true};}catch{return {unreadable:true};}
+}
+// Same generation, new Discovery assignments (AIR-529): the cause the queue is due, or null. A queue without a stored signature (built before this field, or while it was unreadable) is due. An UNREADABLE
+// current signature is due too ('shows_signature_unreadable'): the hot/cold basis cannot be verified, so a start does not select cold on it silently; it tries the rebuild, and a rebuild that cannot read
+// is the existing fail-closed or `queueStale` outcome, never a quiet cold pick.
+function showsSignatureCause(queue,report,current){
+ if(!current||current.applicable===false||!queue||queue.priorityBasis!=='completed'||queue.programmeRunId!==report?.runId)return null;
+ if(current.unreadable)return 'shows_signature_unreadable';
+ return queue.showsSignature===current.signature?null:'shows_signature_changed';
 }
 function priorityRefreshDue(queue,report,sync){
  if(!queueShapeValid(queue)||!showsAuthoritative(sync,report))return false;
@@ -2455,7 +2497,14 @@ async function batchPreflight(env,body,tally=null){
  const read=await readQueueHead(env),stored=read.current,revision=read.head?.queueGeneration??null,why=queueAdvanceGate(stored,programme,profile,(await fingerprintRegistryDigests()).registry,(await predictionRecoveryOverlay(env)).revision);
  const priorityOpen=!why&&!!stored&&(stored.priorityBasis==='carried'||stored.priorityBasis==='neutral'||stored.programmeRunId!==programme.runId);
  const sync=priorityOpen?await loadJSON(env,'sync.json'):null;
- const priorityDue=priorityOpen&&priorityRefreshDue(stored,programme,sync);
+ let priorityDue=priorityOpen&&priorityRefreshDue(stored,programme,sync),priorityCause=priorityDue?'programme':null,priorityDeferred=false;
+ // AIR-529: the same generation with new Discovery assignments. One read of the run's assigned rows per preflight, only on a queue ranked on this generation; no catalog scan.
+ if(!why&&stored&&!priorityDue&&!priorityOpen&&stored.priorityBasis==='completed'&&stored.programmeRunId===programme.runId){
+  const pinned=await queuePin(env,programme);
+  priorityCause=showsSignatureCause(stored,programme,await currentShowsSignature(pinned,programme));
+  if(!priorityCause){const edge=windowTransitionState(stored,programme);priorityCause=edge.cause;priorityDeferred=edge.deferred;}
+  priorityDue=!!priorityCause;
+ }
  if(why)return {profile,report:programme,stale:why,priorityDue:false,revision,manifestSize};
  if(!stored)return {profile,report:programme,stale:'queue_shape',priorityDue:false,revision,manifestSize};
  try{
@@ -2464,7 +2513,7 @@ async function batchPreflight(env,body,tally=null){
   const selection=await batchSelection(env,{profile,report:programme,queue:stored,pin:body.pin||null,limit:manifestSize,excludeIds});
   if(tally)tally.scannedFilms+=selection.scanned;
   const manifest=await buildBatchManifest(env,{profile,items:selection.items,runId:BATCH_PLACEHOLDER_RUN,lease:{expiresAt:Date.now()+RUNNER_LEASE_TTL,epoch:99999},dryRun});
-  return {profile,report:programme,queue:stored,revision,selection,manifest,manifestSize,priorityDue,bytes:batchBytes({...manifest.body,...batchPlaceholderExtras(selection,dryRun)})};
+  return {profile,report:programme,queue:stored,revision,selection,manifest,manifestSize,priorityDue,priorityCause,priorityDeferred,bytes:batchBytes({...manifest.body,...batchPlaceholderExtras(selection,dryRun)})};
  }catch(error){
   if(CATALOG_HELD_CODES.includes(error?.code))return {response:catalogHeldResponse(error.code)};
   throw error;
@@ -2501,6 +2550,13 @@ async function batchTurnedAway(env,body,tally=null){
 }
 // Nothing eligible, or no capacity: the ordinary idle outcome of a start (`noop`, or `blocked` for `quota` and `retry_backoff`). No lease is taken and no run exists, so it is not passed
 // through the stop recorder, which would manufacture a stopped run, a stop Event and a `latest-run` for it. The attempt is recorded and the queue's `lastBatch` is kept, as a v5 start does.
+// AIR-529: the read-only statement, in the dry-run answer, that the hot count of a start does NOT rest on a current basis: the cause is named, `hotRemaining` is the queue's own count and may be stale, never a verified 0.
+// It is present only when degraded: the dry-run answer of a current queue is unchanged (the start parity baseline pins its shape). This does NOT recompute hot outstanding independently from the catalog; that would be a second
+// implementation of the queue rules (window, Film IDs, freshness, retry, deferral) and is an owner scope decision.
+function hotBasisOf(pre){
+ const queue=pre.queue||null;
+ return {status:'degraded',cause:pre.priorityCause||'programme',hotRemaining:Number.isInteger(queue?.priorityCount)?queue.priorityCount:null,programmeRunId:queue?.programmeRunId??null,showsSignature:queue?.showsSignature??null,nextChangeAt:queue?.priorityNextChangeAt??null};
+}
 async function batchIdle(env,body,pre){
  const plan=adaptivePredictionBatch(pre.queue,body.capacity);
  if(plan.reason!=='quota'&&pre.selection.items.length)return null;
@@ -2529,7 +2585,7 @@ async function batchStartWork(env,body,requestId,tally){
  if(dryRun){
   // A dry run reads and writes nothing: it never rebuilds the queue, so a queue that fails the advance gate is refused.
   if(pre.stale)return batchBlocked('queue_stale',{cause:pre.stale,dryRun:true});
-  const answer=batchStartAnswer({...pre.manifest.body,...batchRealExtras(pre.selection,pre.queue,{queueRefreshed:false,queueSettled:0,dryRun:true}),runId:null,dryRun:true});
+  const answer=batchStartAnswer({...pre.manifest.body,...batchRealExtras(pre.selection,pre.queue,{queueRefreshed:false,queueSettled:0,dryRun:true}),runId:null,dryRun:true,...(pre.priorityDue?{priorityDue:true,priorityCause:pre.priorityCause||'programme',hotBasis:hotBasisOf(pre)}:pre.priorityDeferred?{hotBasis:hotBasisOf({...pre,priorityCause:'window_transition_deferred'})}:{})});
   if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf({...pre,bytes:batchBytes(answer)},{dryRun:true});
   noteStep(env,()=>({manifestFilms:pre.manifest.films,manifestBytes:batchBytes(answer)}));
   return json(answer);
@@ -2540,7 +2596,9 @@ async function batchStartWork(env,body,requestId,tally){
  const turned=await timedStage(env,'turned_away',()=>batchTurnedAway(env,body,tally));if(turned)return turned;
  // Nothing to deliver, or no capacity, on a current queue: the idle outcome of a start (before the size refusal, so `remainingPercent: 0` is `quota`, not a size error).
  forgetAuthority(env);
- if(!pre.stale){const idle=await timedStage(env,'idle',()=>batchIdle(env,body,pre));if(idle)return idle;}
+ // AIR-529: a known priority-due queue is reconciled before it can be idle (an empty or exhausted queue plus a new assignment in the same generation would otherwise answer `noop` on every start). A zero-quota start stays the
+ // quota outcome and writes nothing; the next start with capacity reconciles.
+ if(!pre.stale&&!(pre.priorityDue&&!capacityExhausted(body.capacity))){const idle=await timedStage(env,'idle',()=>batchIdle(env,body,pre));if(idle)return idle;}
  // Zero writes while the manifest does not fit and the stored queue is current: no lease, run, queue, Event, diagnostics row or film write.
  if(pre.manifest&&pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre);
  // The guards a start runs before it takes the lease (as the retired v5 start did): the previous run's retries, and a held catalog.

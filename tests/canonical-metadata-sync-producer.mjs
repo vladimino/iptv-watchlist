@@ -71,8 +71,7 @@ assert.equal(personSourcesOf(film(),people)[0].id,PID);
 {
  const file=database('prepared');seed(file);
  const before=one(file,'SELECT COUNT(*) FROM film_metadata');
- const out=await applyMetadataSync(envOf(file),{event:'metadata:run-1',films:[film()],titles,people,now:()=>T});
- assert.equal(out.state,'skipped');assert.equal(out.reason,'projector_is_writer');
+ await assert.rejects(()=>applyMetadataSync(envOf(file),{event:'metadata:run-1',films:[film()],titles,people,now:()=>T}),code('film_person_unavailable'));
  assert.equal(one(file,'SELECT COUNT(*) FROM film_metadata'),before);
  assert.equal(rows(file,'SELECT * FROM canonical_write_receipt').length,0);
 }

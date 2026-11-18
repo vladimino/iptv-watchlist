@@ -48,7 +48,7 @@ const ctx=vm.createContext({Response,URL,JSON,Promise,Number,String,Math,Map,Set
 vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);
 vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);
 vm.runInContext("const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8'}});\n"+fs.readFileSync('src/d1-enrichment.js','utf8')+'\n'+scopePersonIdentity(['src/domain/canonical-person.js','src/domain/person-identity-projection.js'])+'\n'+source+'\nglobalThis.route=catalogD1Route;',ctx);
-const get=async(p,env={DB},method='GET')=>{const res=await ctx.route(new Request('https://iptv.test/api/d1/'+p,{method}),env,new URL('https://iptv.test/api/d1/'+p));return {status:res.status,body:await res.json()};};
+const get=async(p,env={DB,FILM_PERSON_DB_OPTIONAL:'standin'},method='GET')=>{const res=await ctx.route(new Request('https://iptv.test/api/d1/'+p,{method}),env,new URL('https://iptv.test/api/d1/'+p));return {status:res.status,body:await res.json()};};
 
 // status
 let r=await get('status');
@@ -206,7 +206,7 @@ INSERT INTO film_external_id VALUES('film:wide:800','tmdb','1800',1,0,NULL);
 INSERT INTO film_person_credit VALUES ${wideCredits.join(',')},('film:wide:800','person:tmdb_actor/wide','actor',1);
 `);
 let watched=watchDb();
-r=await get('persons/actor/wide/identity',{DB:watched.db});
+r=await get('persons/actor/wide/identity',{DB:watched.db,FILM_PERSON_DB_OPTIONAL:'standin'});
 assert.equal(r.body.bounded,true);
 assert.ok(r.body.limitations.includes('neighborhood_bounded'));
 assert.deepEqual(r.body.reference.memberIds,['person:actor/wide']);
@@ -226,7 +226,7 @@ INSERT INTO person_alias VALUES('person:actor/crowd','name','Crowd Lead',NULL),(
 INSERT INTO film_person_credit VALUES('film:crowd','person:actor/crowd','actor',0),('film:crowd','person:tmdb_actor/9000','actor',1),${crowdCredits.join(',')};
 `);
 watched=watchDb();
-r=await get('persons/actor/crowd/identity',{DB:watched.db});
+r=await get('persons/actor/crowd/identity',{DB:watched.db,FILM_PERSON_DB_OPTIONAL:'standin'});
 assert.equal(r.body.bounded,true);
 assert.ok(r.body.limitations.includes('neighborhood_bounded'));
 assert.deepEqual(r.body.reference.memberIds,['person:actor/crowd']);
@@ -244,7 +244,7 @@ INSERT INTO person_alias VALUES('person:actor/popular','name','Popular Name',NUL
 INSERT INTO film_person_credit VALUES('film:pop','person:actor/popular','actor',0),('film:pop','person:tmdb_actor/9100','actor',1);
 `);
 watched=watchDb();
-r=await get('persons/actor/popular/identity',{DB:watched.db});
+r=await get('persons/actor/popular/identity',{DB:watched.db,FILM_PERSON_DB_OPTIONAL:'standin'});
 assert.equal(r.body.bounded,true);
 assert.deepEqual(r.body.limitations,['owner_decisions_not_stored','role_links_not_stored','namesakes_truncated','neighborhood_bounded']);
 assert.deepEqual(r.body.reference.memberIds,['person:actor/popular']);

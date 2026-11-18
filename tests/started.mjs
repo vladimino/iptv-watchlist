@@ -111,7 +111,7 @@ assert.deepEqual(reachedFrozen(),[],'no refusal reads the frozen documents');
  const held=database('held');await refused({id:'tmdb_12',started:true},503,'film_person_held',{BUCKET:bucket,DB:held.db});
  await refused({id:'two',started:false},503,'film_person_held',{BUCKET:bucket,DB:held.db});
 }
-{const prepared=database('prepared');await refused({id:'tmdb_12',started:true},503,'canonical_read_not_authoritative',{BUCKET:bucket,DB:prepared.db});}
+{const prepared=database('prepared');await refused({id:'tmdb_12',started:true},503,'film_person_unavailable',{BUCKET:bucket,DB:prepared.db});}
 {const legacy=database(null);await refused({id:'tmdb_12',started:true},503,null,{BUCKET:bucket,DB:legacy.db});}
 {
  const broken=d1Standin(open.file,{rewrite:sql=>/FROM film_external_id/.test(sql)?'SELECT * FROM missing_table':sql});

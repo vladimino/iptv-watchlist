@@ -50,7 +50,6 @@ const MUTANTS=[
  ["revalidate always proceeds", "canonical-film-external-ids-producer.js", "return plan.absent||plan.noop?'superseded':'proceed';", "return 'proceed';"],
  ["every planner error is a missing plan", "canonical-film-external-ids-producer.js", "if(FILM_EXTERNAL_IDS_REFUSALS.has(error?.code))return null;throw error;", "return null;"],
  ["an identity conflict is not a content refusal", "canonical-film-external-ids-producer.js", "'identity_collision','film_person_identity_conflict']", "'identity_collision']"],
- ["the pass gate ignores the route", "canonical-film-external-ids-producer.js", "if(route.writer!=='canonical')return {state:'skipped'", "if(false)return {state:'skipped'"],
  ["the receipt plans revision zero", "canonical-film-external-ids-producer.js", "expectedRevision:plan.revision,digest", "expectedRevision:0,digest"],
  ["the kind is not in the closed list", "canonical-receipts.js", "'person_mutation','film_external_ids','person_state',", "'person_mutation','person_state',"],
  ["the writer ignores removeExternalIds", "canonical-mutations.js", "for(const item of film.removeExternalIds||[])statements.push(", "for(const item of [])statements.push("],
