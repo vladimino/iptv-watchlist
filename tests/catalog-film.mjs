@@ -253,7 +253,7 @@ const base={
   docDb.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
   const docMem=new Map(),docBucket={async get(key){return docMem.has(key)?{etag:'e',json:async()=>structuredClone(docMem.get(key))}:null;},async put(key,value){docMem.set(key,JSON.parse(value));return {etag:'e'};},async list(){return {objects:[],truncated:false};},async head(key){return docMem.has(key)?{etag:'e'}:null;}};
   const member=id=>({id,title:'T '+id,original:'T '+id,year:2001,runtime:100,genres:[],directors:[],actors:[],shows:[]});
-  const docPublished=await PublishedEpgModule.publishGeneration({DB:docDb,BUCKET:docBucket},{programmeRunId:G1,phase:'published',expectedProgrammeRunId:null,programme:{runId:G1,updatedAt:new Date(now).toISOString(),watchlistCount:1,films:[member('heat-1995'),member('tmdb_555')]},watchlist:{updatedAt:new Date(now).toISOString(),films:[member('only-watchlist'),member('tmdb_556')]}},{now});
+  const docPublished=await PublishedEpgModule.publishGeneration({DB:docDb,BUCKET:docBucket},{programmeRunId:G1,phase:'published',expectedProgrammeRunId:null,programme:{runId:G1,updatedAt:new Date(now).toISOString(),watchlistCount:1,films:[member('heat-1995'),member('tmdb_555'),{...member('alias-777'),tmdbId:'777',tmdbLink:{status:'resolved',link:{type:'movie',id:'777'}}},{...member('twin-a'),tmdbId:'888',tmdbLink:{status:'resolved',link:{type:'movie',id:'888'}}},{...member('twin-b'),tmdbId:'888',tmdbLink:{status:'resolved',link:{type:'movie',id:'888'}}},{...member('weak-889'),tmdbId:'889',tmdbLink:{status:'pending',link:{type:'movie',id:'889'}}}]},watchlist:{updatedAt:new Date(now).toISOString(),films:[member('only-watchlist'),member('tmdb_556')]}},{now});
   assert.equal(docPublished.pointed,true);
   for(const key of ['epg/discovered-films.json','epg/generations/'+G1+'/discovered-films.json'])docMem.set(key,{tmdb_7:catalogFilm('tmdb_7',7,{shows:[]})});
   const world=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{'/':{type:'text/html',body:'<!doctype html><title>shell</title>'}},INITIAL_PERSONAL_RATINGS:{},
@@ -268,12 +268,17 @@ const base={
    assert.equal((await doc('only-watchlist',method)).status,200,method+': a watchlist member is 200');
    assert.equal((await doc('tmdb_555',method)).status,200,method+': a programme member that is a TMDB permalink is 200 although the catalog does not hold it');
    assert.equal((await doc('tmdb_556',method)).status,200,method+': a watchlist member that is a TMDB permalink is 200');
+   assert.equal((await doc('tmdb_777',method)).status,200,method+': a published film that owns the TMDB id through its trusted link is 200 although the catalog holds no such film');
+   assert.equal((await doc('tmdb_888',method)).status,409,method+': two published owners of one TMDB id are a conflict, as in the page');
+   assert.equal((await doc('tmdb_889',method)).status,404,method+': an untrusted link is no owner');
    assert.equal((await doc('blablabla',method)).status,404,method+': an id that is no member is 404');
    assert.equal((await doc('tmdb_999',method)).status,404,method+': an absent TMDB permalink with no member is 404');
   }
   assert.ok((await doc('heat-1995')).text.includes('shell'),'the shell is still served on GET');
   // A generation that cannot be read is no proof of absence: the shell is served and the page decides.
   assert.equal((await doc('blablabla','GET',{DB:{prepare(){throw new Error('d1 down');}},BUCKET:docBucket})).status,200,'an unreadable generation fails open for a programme id');
+  docSeen.length=0;assert.equal((await doc('tmdb_7')).status,200,'a catalog Film is 200');
+  assert.equal(docSeen.some(text=>/published_epg_document/.test(text)),false,'a found catalog Film never reads the sealed documents');
   assert.ok(docSeen.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1');
   const memberProbe=docSeen.filter(text=>/SELECT 1 AS hit FROM published_epg_member/.test(text));
   assert.ok(memberProbe.length>0&&memberProbe.every(text=>/kind IN/.test(text)),'the membership probe names both kinds so it follows the (run, kind, film) index');

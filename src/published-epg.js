@@ -284,6 +284,26 @@ export async function isMember(env,programmeRunId,filmId){
  const rows=await many(database(env),"SELECT 1 AS hit FROM published_epg_member WHERE programme_run_id=? AND kind IN ('programme','watchlist') AND film_id=? LIMIT 1",[programmeRunId,filmId]);
  return rows.length>0;
 }
+// AIR-531: the TMDB movie ids that members of a published run own through their trusted link, as a small map tmdbId -> set of member film ids. `published_epg_member` has no
+// TMDB column (ADR 0142 decision 4), so it is read once from the sealed programme and watchlist documents, which never change for a run, and kept for the last run read. The trust
+// rule is the page's (`trustedMovieTmdb`): `tmdbId` is a positive integer and `tmdbLink` resolves to that very movie. Read-only; a read failure throws and is never an absence.
+let memberTmdbCache={db:null,run:null,map:null};
+export async function memberTmdbOwners(env,programmeRunId){
+ const db=database(env);
+ if(memberTmdbCache.db===db&&memberTmdbCache.run===programmeRunId)return memberTmdbCache.map;
+ const map=new Map();
+ for(const kind of ['programme','watchlist']){
+  const document=await readDocument(env,programmeRunId,kind);
+  for(const film of Array.isArray(document?.films)?document.films:[]){
+   const tmdb=film?.tmdbId==null?'':String(film.tmdbId),link=film?.tmdbLink;
+   if(film?.id==null||!/^[1-9]\d{0,11}$/.test(tmdb)||link?.status!=='resolved'||link.link?.type!=='movie'||String(link.link.id)!==tmdb)continue;
+   if(!map.has(tmdb))map.set(tmdb,new Set());
+   map.get(tmdb).add(String(film.id));
+  }
+ }
+ memberTmdbCache={db,run:programmeRunId,map};
+ return map;
+}
 export async function readMembers(env,programmeRunId,kind){
  const rows=await many(database(env),'SELECT ordinal, film_id FROM published_epg_member WHERE programme_run_id=? AND kind=? ORDER BY ordinal',[programmeRunId,kind]);
  return rows.map(row=>({ordinal:Number(row.ordinal),filmId:row.film_id}));

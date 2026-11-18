@@ -502,21 +502,26 @@ const CATALOG_DISCOVERY_FAULTS=['discovery_fence','discovery_incomplete','discov
 // AIR-531: HTTP status of the HTML document `/film/<id>`, in the SPA's own order (`resolveFilm`): a film of the pinned published generation by its own id (programme or watchlist
 // member, one indexed point read) is 200 whatever the catalog says; a TMDB permalink then asks the bounded catalog identity decision (no enrichment, no write, no outbound
 // request): absent 404, retired 410, conflict 409; any other id that is no member is 404. Only a definite answer sets a non-200 status: an unreadable generation or catalog
-// is never proof of absence, so the shell is 200 and the page decides. Known gap: a published film that owns a TMDB id only through its trusted link (not its own id) is not
-// visible without reading the sealed programme document, which is not a bounded read; it gets its status from the catalog identity like any TMDB permalink.
+// is never proof of absence, so the shell is 200 and the page decides. Only a 404/410/409 of the catalog reads the run's TMDB-id map (`memberTmdbOwners`, from the sealed documents,
+// kept per run) for a published film that owns the TMDB id through its trusted link: one owner is 200, several are 409, as in the page.
 async function filmDocumentStatus(env,id){
  const tmdb=/^tmdb_(.+)$/.exec(id);
  if(tmdb&&!CATALOG_FILM_TMDB.test(tmdb[1]))return 404;
- let member=null;
+ let member=null,live=null;
  try{
-  const live=typeof PublishedEpg!=='undefined'?await PublishedEpg.currentGeneration(env):null;
+  live=typeof PublishedEpg!=='undefined'?await PublishedEpg.currentGeneration(env):null;
   if(live&&live.programmeRunId)member=await PublishedEpg.isMember(env,live.programmeRunId,id);
- }catch{member=null;}
+  else live=null;
+ }catch{member=null;live=null;}
  if(member===true)return 200;
  if(!tmdb)return member===false?404:200;
  const identity=await catalogFilmIdentity(env,tmdb[1]);
  if(identity.fault)return 200;
- return {absent:404,retired:410,conflict:409}[identity.found.state]||200;
+ const status={absent:404,retired:410,conflict:409}[identity.found.state]||200;
+ if(status===200||!live)return status;
+ // The SPA resolves a published film that owns this TMDB id through its trusted link before the catalog: one owner is that film (200), several are a conflict (409).
+ try{const owners=(await PublishedEpg.memberTmdbOwners(env,live.programmeRunId)).get(tmdb[1]);if(owners)return owners.size===1?200:409;}catch{return 200;}
+ return status;
 }
 // AIR-531: the identity decision of `/api/catalog/film/<tmdbId>` and nothing else: found, absent, retired, conflict or unavailable, or a typed fault. No programme, watchlist,
 // metadata, prediction or ratings read happens here, so the HTML document status can use it without the enrichment of the full answer.
