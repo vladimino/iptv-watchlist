@@ -1174,6 +1174,8 @@ function limboShow(view, state) {
 }
 
 function limboRead(state, pin, signal) {
+  // The unified identity list below reads the same sources: never both in flight at once (see iwIdle in admin-identity-work.js).
+  if (typeof iwIdle === 'function') return iwIdle().then(() => loadLimboLive(state, {pin: pin || null, snapshot: limboLive.snapshot, signal}));
   return loadLimboLive(state, {pin: pin || null, snapshot: limboLive.snapshot, signal});
 }
 

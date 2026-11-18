@@ -565,31 +565,4 @@ assert.equal(r.body.attention.reason,'coordination_status');
 assert.equal(r.body.attention.now,null);
 assert.deepEqual(r.body.items,[]);
 
-// The owner page asks /api/admin/limbo and /api/admin/identity-work together and both start from one load of the published programme, dictionaries, queue, index
-// and Discovery index. Requests that overlap share it, so the isolate holds one copy of those sources (a memory overrun of the isolate killed both on the live page).
-{
- seed();
- const programmeReads=()=>gets.filter(key=>key===programmeKey(G1)).length;
- const single=await call('/api/admin/limbo?limit=5');
- assert.equal(single.status,200);
- const singleReads=programmeReads(),singleGets=gets.length;
- assert.ok(singleReads>=1);
- seed();
- const [first,second,third]=await Promise.all([call('/api/admin/limbo?limit=5'),call('/api/admin/limbo?limit=5&attention=all'),call('/api/admin/limbo?limit=3&kind=film')]);
- assert.deepEqual([first.status,second.status,third.status],[200,200,200]);
- assert.equal(programmeReads(),singleReads,'three overlapping requests read the programme once, as one request does');
- assert.equal(gets.length,singleGets,'and every other source once: the shared load is not repeated per request');
- assert.deepEqual(first.body.pin,second.body.pin,'they answer from the same snapshot');
- // a load that finished is not reused by the flight: the next cold request reads again
- resetCache();gets=[];
- await call('/api/admin/limbo?limit=5');
- assert.equal(programmeReads(),singleReads);
- // a failed shared load is shared and then forgotten: the next request starts a new one
- seed({queue:true});records.delete(POINTER);resetCache();
- const failed=await Promise.all([call('/api/admin/limbo?limit=5'),call('/api/admin/limbo?limit=5')]);
- assert.deepEqual(failed.map(item=>item.status),[503,503]);
- seed();
- assert.equal((await call('/api/admin/limbo?limit=5')).status,200,'a refused load does not poison later requests');
-}
-
 console.log('Admin limbo API: reads, causes, filters, pages, stale pin, projection lag, changing generation, missing objects, warm isolate and the observation index passed');

@@ -289,11 +289,12 @@ nonFunctional('footer-memory-production-size',()=>{
  assert.ok(result.cpuMs<8*10000,'eight requests within 10 s of CPU each: '+result.cpuMs+' ms');
 });
 
-// ---- 5. the owner page: /api/admin/limbo and /api/admin/identity-work together (nightly only) ----
-// The page asks both at once. With the Discovery observation index at its cap (3,000 observations) each read took one statement per observation for the shows
-// (3,079 statements, 38-49 s of wall on the live page) and each request held its own copy of every source: the pair needed 80 MB of old space and 6,153
-// statements on the fixtures, and the live isolate ran out of memory (docs/evidence/owner-limbo-memory-air-528-2026-11-18.md). Shared load and chunked show reads:
-// 60 MB and 117 statements. 72 MB fails the old pair and leaves the bounded one about 12 MB of room.
+// ---- 5. the owner page: /api/admin/limbo and /api/admin/identity-work (nightly only) ----
+// Both routes start from the same load (programme, dictionaries, queue, view index, Discovery index). With the Discovery observation index at its cap (3,000 of
+// 9,944 candidates) each read took one statement per observation for the shows (3,079 statements, 37-49 s of wall on the live page), and the page asked both routes
+// at once: two independent loads need 82 MB of old space on the fixtures against 58 MB one after the other, and the live isolate ran out of memory
+// (docs/evidence/owner-limbo-memory-air-528-2026-11-18.md). The shows are now read in chunks (117 statements) and the page serialises the two reads, so the isolate
+// never holds two loads for the page's sake. 66 MB leaves the sequential pair about 8 MB of room and fails the concurrent pair.
 nonFunctional('owner-limbo-memory-production-size',()=>{
  const built=spawnSync(process.execPath,['build.mjs'],{encoding:'utf8'});
  assert.equal(built.status,0,built.stderr);
@@ -301,7 +302,7 @@ nonFunctional('owner-limbo-memory-production-size',()=>{
  const build=spawnSync(process.execPath,['--no-warnings',script,'--build','--fixtures',fixtures],{encoding:'utf8',maxBuffer:1<<24});
  assert.equal(build.status,0,build.stderr);
  const paths='/api/admin/limbo?limit=25&attention=now,/api/admin/identity-work?limit=25';
- const run=spawnSync(process.execPath,['--no-warnings','--max-semi-space-size=1','--max-old-space-size=72',script,'--fixtures',fixtures,'--paths',paths,'--freeze'],{encoding:'utf8',maxBuffer:1<<24,timeout:240000});
+ const run=spawnSync(process.execPath,['--no-warnings','--max-semi-space-size=1','--max-old-space-size=66',script,'--fixtures',fixtures,'--paths',paths,'--sequential','--freeze'],{encoding:'utf8',maxBuffer:1<<24,timeout:240000});
  assert.equal(run.status,0,run.stderr);
  const result=JSON.parse(run.stdout.trim().split('\n').at(-1));
  assert.deepEqual(result.statuses,[200,200]);

@@ -5,6 +5,7 @@
 // 3.2 MB; profile, queue and latest run in D1), ratings d1/open (4,487 ratings_view rows).
 //   node scripts/footer-memory-profile.mjs --build [--fixtures DIR]     build the fixtures once: R2 objects as files and the D1 database as sqlite
 //   node [--max-old-space-size=MB] scripts/footer-memory-profile.mjs [--fixtures DIR] [--concurrent C] [--requests K] [--dump body.json] [--freeze]
+//   --sequential   with --paths: one route after the other (default: all at once).
 //   --path /api/admin/limbo?limit=25&attention=now | --paths /api/admin/limbo?...,/api/admin/identity-work?limit=25   measure another route, or two routes at once.
 // Run from a checkout after `npm run build`: the deployed bundle dist/server/index.js answers, the same code workerd runs, so one set of fixtures
 // measures two versions. R2 objects are Buffers outside the V8 heap. --freeze stops the Worker's clock at the fixtures' clock. Prints one JSON line.
@@ -187,7 +188,8 @@ const PATHS = (arg('paths', null) || arg('path', '/api/enrichment/footer/status'
 const one = async (_, index = 0) => {const r = await worker.fetch(new Request('https://iptv.vladimino.workers.dev' + PATHS[index % PATHS.length]), env, {waitUntil() {}}); const body = await r.text(); sample(); return {status: r.status, body};};
 const cpu0 = process.cpuUsage(), t0 = performance.now();
 const results = [];
-for (let i = 0; i < REQUESTS; i++) results.push(...await Promise.all(Array.from({length: Math.max(CONCURRENT, arg('paths', null) ? PATHS.length : 1)}, (_, index) => one(_, index))));
+for (let i = 0; i < REQUESTS; i++) if (process.argv.includes('--sequential') && arg('paths', null)) for (let index = 0; index < PATHS.length; index++) results.push(await one(null, index));   // one route after the other, as the owner page does after the change
+  else results.push(...await Promise.all(Array.from({length: Math.max(CONCURRENT, arg('paths', null) ? PATHS.length : 1)}, (_, index) => one(_, index))));
 const wall = performance.now() - t0, cpu = process.cpuUsage(cpu0);
 clearInterval(timer);
 let body = {}; try {body = JSON.parse(results[0].body);} catch {body = {raw: results[0].body.slice(0, 200)};}

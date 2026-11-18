@@ -20,30 +20,34 @@ Production state read on 18 November: R2 `enrichment/view-index.json` 12.45 MB, 
 ## Root cause
 
 1. **One statement per observation (the trigger).** `DiscoveryAuthority.readObservationIndex` (D1 mode, unkeyed read) selected up to 3,001 observations with their decisions and then, for each, awaited a separate `SELECT` of its shows, after a SHA-256 of its decision. With 9,944 candidates the cap is always reached: **3,000 sequential D1 round trips per read**, every selected row (payload and decision JSON, then parsed) held for the whole walk. At a few milliseconds per round trip that is the 37 to 49 s of wall in the log.
-2. **The same load twice at once (the amplifier).** `/api/admin/limbo` and `/api/admin/identity-work` both start from `adminLimboLoad`. Nothing joined overlapping loads, so the isolate held two complete copies of the programme, the dictionaries, the queue, the view index and the observation index, each for tens of seconds, and made 6,000 sequential statements. The status footer the page also polls ran in the same isolate (its own request is heavy: [footer RCA](footer-status-oom-rca-2026-11-17.md)).
+2. **The same load twice at once (the amplifier).** `/api/admin/limbo` and `/api/admin/identity-work` both start from `adminLimboLoad`, and the page started both at once. Each request held its own complete copy of the programme, the dictionaries, the queue, the view index and the observation index, each for tens of seconds. The status footer the page also polls ran in the same isolate (its own request is heavy: [footer RCA](footer-status-oom-rca-2026-11-17.md)).
 
 Not proven and not claimed: that one request alone would fit. The offline numbers below say a single read fits comfortably; the live margin additionally includes data larger than the fixtures (the real programme and view index are 2x and 1.1x the fixture sizes) and the memory a workerd isolate keeps beyond the V8 heap, which a Node run does not model.
 
 ## Reproduction
 
-`scripts/footer-memory-profile.mjs --build` now also builds 3,000 observations with decisions and shows (`OBS`, default 3000) and puts the owner-review and Discovery programme markers in the production state (`d1`, run set); `--path` / `--paths` measure other routes, or several at once as the page does. Deployed bundle `dist/server/index.js`, Node, hard heap cap; smallest `--max-old-space-size` (2 MB step) at which every request answers 200, over a 21 MB baseline.
+`scripts/footer-memory-profile.mjs --build` now also builds 3,000 observations with decisions and shows (`OBS`, default 3000) and puts the owner-review and Discovery programme markers in the production state (`d1`, run set); `--path` / `--paths` measure other routes, several at once as the page did, or one after the other with `--sequential`. Deployed bundle `dist/server/index.js`, Node, hard heap cap; smallest `--max-old-space-size` (2 MB step) at which every request answers 200, over a 21 MB baseline. The in-process D1 has no round-trip latency, so the statement count is the measure of the wall time the live page lost, not the heap.
 
-| Case | Statements before | Statements after | Smallest cap before | Smallest cap after |
-| --- | --- | --- | --- | --- |
-| `/api/admin/limbo` alone | 3,079 | 117 | 53 MB | 53 MB |
-| `/api/admin/identity-work` alone | 3,074 | 112 | 53 MB | 53 MB |
-| the page's two requests together | 6,153 | 117 | 80 MB | 60 MB |
-| footer + the two requests | 6,395 | 359 | 94 MB | 75 MB |
+| Case | D1 statements | Smallest cap |
+| --- | --- | --- |
+| before: `limbo` alone | 3,079 | 53 MB |
+| before: the page's two requests at once | 6,153 | 80 MB |
+| before: footer + the two requests | 6,395 | 94 MB |
+| after: `limbo` alone | 117 | 53 MB |
+| after: the two requests at once, two independent loads | 229 | **82 MB** |
+| after: the two requests one after the other (the page now) | 229 | **58 MB** |
+| after: footer + one Limbo load | | 75 MB |
+| after: footer + the two requests at once | | 100 MB |
 
-Sampled peak heap of the pair: 124.7 MB before, 94.4 MB after. The two routes answer the same bodies as before (the same records, the same shows in `ordinal` order).
+Two readings follow. Chunking the show reads removes the round trips (3,079 to 117 for one read) but does not lower the heap: the rows were always held. The memory amplifier is two independent loads alive together (80 to 82 MB against 53 to 58 MB). An earlier version of this change joined overlapping loads in the Worker (a shared in-flight Promise) and reported 60 MB for the pair; that is withdrawn: workerd gives no guarantee that two requests receive the same `env` object, and a Promise holding R2 and D1 I/O started in one request is exposed to the cross-request I/O rules, so the offline Node harness (one `env`, no I/O context) proves nothing about it.
 
 ## Fix
 
-- `readObservationIndex` reads the shows of the listed observations in statements of 80 keys (`IN (...)`, D1 binds at most 100 parameters), grouped by observation and ordered by `ordinal`: about 38 statements for 3,000 observations instead of 3,000. The keyed read is unchanged.
-- `adminLimboLoad` shares one load among requests that overlap (one slot for an unpinned and one for a pinned read, same `env`); a finished or failed load is not kept, the warm cache keeps its tuple check.
+- `readObservationIndex` reads the shows of the listed observations in statements of `BIND_CAP-20` keys (80), grouped by observation and ordered by `ordinal`: about 38 statements for 3,000 observations instead of 3,000. The keyed read is unchanged. This removes the 37 to 49 s of wall that kept both loads alive.
+- The page no longer has the two reads in flight together. The identity list waits for the Limbo read the page started first (success or failure), and a Limbo read that starts while the list loads waits for it (`iwAfterLimbo`, `iwIdle`, `limboRead`). The Worker is unchanged in this respect and depends on no cross-request state.
 
-Tests: `tests/discovery-authority.mjs` (statement count, chunk width at most 100, show order and grouping, keyed read), `tests/admin-limbo-api.mjs` (three overlapping requests read every source once; a failed shared load does not poison the next request), and the nightly `owner-limbo-memory-production-size` in `tests/footer-memory.mjs` (the pair under a 72 MB cap and at most 400 statements; it fails on the old code and below 60 MB).
+Tests: `tests/discovery-authority.mjs` (statement count, chunk width at most 100, show order and grouping, keyed read), `tests/admin-identity-work-page.mjs` (no identity request while the Limbo read is pending, a failed Limbo read does not hold the list, `iwIdle` waits for a loading list and resolves at once otherwise, `limboRead` waits for the list) and the nightly `owner-limbo-memory-production-size` in `tests/footer-memory.mjs` (the sequential pair under a 66 MB cap and at most 400 statements; the concurrent pair fails that cap).
 
 ## Limits and open acceptance
 
-Offline figures on synthetic data in Node; they show the removed round trips and the smaller peak, not the live isolate's margin. Acceptance is a read-only look at the live page after deploy (owner Access session) and, in the Worker log, `ok` outcomes with wall time of seconds instead of tens of seconds for both routes. If the pair still exceeds memory, the next step is to bound what the load holds (the view index and the observation records), not to raise a limit. No R2 or D1 write, flag, Task or cleanup was involved; the 98-object R2 cleanup stays gated on its own owner GO.
+Offline figures on synthetic data in Node; they show the removed round trips and the memory of the page's own two reads, not the live isolate's margin: the real programme and view index are 2x and 1.1x the fixture sizes, and workerd keeps memory beyond the V8 heap. No workerd or Miniflare run was made. Two reads of these routes that overlap for another reason (two tabs, another client) are still two independent loads (82 MB on the fixtures); bounding what one load holds (the parsed view index and the observation records) is the next step if the live log still shows overruns, not a higher limit. Acceptance is a read-only look at the live page after deploy (owner Access session) and, in the Worker log, `ok` outcomes with wall time of seconds for both routes. No R2 or D1 write, flag, Task or cleanup was involved; the 98-object R2 cleanup stays gated on its own owner GO.

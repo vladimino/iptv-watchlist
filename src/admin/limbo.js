@@ -81,20 +81,7 @@ function limboFilms(base,queue,index){
  }
  return films;
 }
-// The owner page asks /api/admin/limbo and /api/admin/identity-work at the same time, and both start from this load (published programme, D1 titles and
-// people, owner reviews, the prediction queue, the view index and the Discovery observation index). Requests that arrive while one load runs share it, so the
-// isolate holds one copy of those sources, not one per request. A load that has finished is never reused here (the warm cache below does that, tuple-checked).
-const ADMIN_LIMBO_FLIGHTS={open:null,pinned:null};
-function adminLimboLoad(env,hasPin){
- const slot=hasPin?'pinned':'open';
- const running=ADMIN_LIMBO_FLIGHTS[slot];
- if(running&&running.env===env)return running.promise;
- const entry={env,promise:null};
- entry.promise=adminLimboLoadOnce(env,hasPin).finally(()=>{if(ADMIN_LIMBO_FLIGHTS[slot]===entry)ADMIN_LIMBO_FLIGHTS[slot]=null;});
- ADMIN_LIMBO_FLIGHTS[slot]=entry;
- return entry.promise;
-}
-async function adminLimboLoadOnce(env,hasPin){
+async function adminLimboLoad(env,hasPin){
  const base=await adminLoadSnapshot(env,hasPin);
  if(base.error)return base;
  const cache=ADMIN_LIMBO_CACHE;

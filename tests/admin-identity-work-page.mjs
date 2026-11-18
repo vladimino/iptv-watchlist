@@ -107,17 +107,18 @@ function node(id) {
   return {id, value: '', checked: false, hidden: false, disabled: false, textContent: '', innerHTML: '', dataset: {}, attrs: {}, listeners,
     addEventListener(type, fn) {listeners[type] = fn;}, setAttribute(name, value) {this.attrs[name] = value;}};
 }
-async function runController(responses) {
+async function runController(responses, extra = {}) {
   const ids = ['iw-section', 'iw-form', 'iw-type', 'iw-disposition', 'iw-q', 'iw-include', 'iw-reset', 'iw-refresh', 'iw-reload', 'iw-retry', 'iw-more', 'iw-loading', 'iw-error', 'iw-error-text', 'iw-stale', 'iw-verdict', 'iw-results', 'iw-empty', 'iw-empty-text', 'iw-coverage-body'];
   const nodes = Object.fromEntries(ids.map(id => [id, node(id)]));
   const calls = [];
   const context = vm.createContext({URLSearchParams, Intl, Date, encodeURIComponent, String, Number, Array, Object, JSON, Math, Promise, AbortController, setTimeout,
     document: {querySelector: selector => nodes[selector.slice(1)] || null},
-    fetch: async url => {calls.push(String(url)); const next = responses.shift(); return {ok: next.status < 400, status: next.status, json: async () => next.body};}});
+    ...extra,
+    fetch: async url => {calls.push(String(url)); const next = responses.shift(); if (next.gate) await next.gate; return {ok: next.status < 400, status: next.status, json: async () => next.body};}});
   vm.runInContext(bundleAdmin([text.client, text.iwClient, text.view, text.controller]) + '\nthis.iwLive=iwLive;', context);
   const settle = () => new Promise(resolve => setTimeout(resolve, 5));
   await settle();
-  return {nodes, calls, live: context.iwLive, settle};
+  return {nodes, calls, live: context.iwLive, settle, idle: () => vm.runInContext('iwIdle()', context)};
 }
 const ok = (rows, next, pin = 'P1') => ({status: 200, body: {pin, snapshot: {}, rows, nextCursor: next, coverage: {film: {state: 'partial'}, letterboxd_rated_candidate: {enumeration: {state: 'complete'}, counts: {state: 'estimate', summarizedAt: null, byStatus: {pending: 0, admitting: 0, needs_review: 0, verified: 0, removed: 0}}, page: {state: 'read_whole'}}}}});
 {
@@ -177,5 +178,36 @@ const ok = (rows, next, pin = 'P1') => ({status: 200, body: {pin, snapshot: {}, 
   view.nodes['iw-reset'].listeners.click(); await view.settle();
   assert.equal(view.nodes['iw-type'].value, ''); assert.equal(view.nodes['iw-q'].value, '');
   assert.ok(view.calls.every(call => call.startsWith('/api/admin/identity-work')), 'no other request');
+}
+{
+  // The page never has the Limbo read and this list in flight together: the list waits for the Limbo read the page started first (success or failure),
+  // and a Limbo read that starts while the list loads waits for it. Both routes load the same sources; at once they overran the isolate's memory.
+  let release;
+  const held = new Promise(resolve => {release = resolve;});
+  const view = await runController([ok([row()], null)], {limboLive: {pending: held}});
+  assert.equal(view.calls.length, 0, 'no identity request while the Limbo read is pending');
+  assert.equal(view.live.mode, 'loading');
+  release(); await view.settle();
+  assert.equal(view.calls.length, 1); assert.equal(view.live.mode, 'ready');
+  const failed = await runController([ok([row()], null)], {limboLive: {pending: Promise.reject(new Error('limbo read failed'))}});
+  await failed.settle();
+  assert.equal(failed.calls.length, 1, 'a failed Limbo read does not hold the list back');
+  const none = await runController([ok([row()], null)], {});
+  assert.equal(none.calls.length, 1, 'without a Limbo read nothing is awaited');
+  // the other direction: iwIdle (called by limboRead) resolves only when no identity read is in flight
+  let open;
+  const gate = new Promise(resolve => {open = resolve;});
+  const busy = await runController([{...ok([row()], null), gate}], {});
+  let idle = false;
+  busy.idle().then(() => {idle = true;});
+  await busy.settle();
+  assert.equal(idle, false, 'iwIdle waits while the identity list is loading');
+  open(); await busy.settle();
+  assert.equal(idle, true); assert.equal(busy.live.inflight, null);
+  const quiet = await runController([ok([row()], null)], {});
+  let quietIdle = false; quiet.idle().then(() => {quietIdle = true;}); await quiet.settle();
+  assert.equal(quietIdle, true, 'iwIdle resolves at once when nothing is loading');
+  assert.match(fs.readFileSync('public/admin-limbo.js', 'utf8'), /typeof iwIdle === 'function'\) return iwIdle\(\)\.then\(\(\) => loadLimboLive/, 'limboRead waits for the identity list');
+  assert.match(text.controller, /await iwAfterLimbo\(\)/);
 }
 console.log('admin-identity-work-page: ok');
