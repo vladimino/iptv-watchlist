@@ -366,6 +366,7 @@ function renderFilmShell(){
  if(title)title.textContent=film?film.title:id?text[0]:'Фильм не найден';
  if(identity)identity.textContent=filmScreen||'';
  if(status)status.textContent=film?(film.catalogOnly?'Только в каталоге':''):id?text[1]:'';
+ if(!film&&id&&resolved.status!=='loading'&&(filmCompareId||filmCompareById.has(String(id)))){filmCompareId=null;filmCompareById.delete(String(id));filmCompareFilm=null;const input=$('#film-compare-input');if(input)input.value='';}
  fillFilmPage(film);
  armSoonTick();
 }

@@ -281,7 +281,7 @@ export async function readShows(env,programmeRunId){
 // AIR-531: one indexed point read for the HTML permalink status: is this film id a member (programme or watchlist) of the pinned published generation?
 // Read-only; the caller treats any failure as "unknown", never as "absent".
 export async function isMember(env,programmeRunId,filmId){
- const rows=await many(database(env),'SELECT 1 AS hit FROM published_epg_member WHERE programme_run_id=? AND film_id=? LIMIT 1',[programmeRunId,filmId]);
+ const rows=await many(database(env),"SELECT 1 AS hit FROM published_epg_member WHERE programme_run_id=? AND kind IN ('programme','watchlist') AND film_id=? LIMIT 1",[programmeRunId,filmId]);
  return rows.length>0;
 }
 export async function readMembers(env,programmeRunId,kind){

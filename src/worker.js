@@ -499,24 +499,28 @@ async function catalogArchiveFallbackR2(env,tmdbId,gate){
 }
 // AIR-475 review: Discovery is an independent domain. These are the ways its reader can refuse; while the Film/Person marker is open a refusal never hides a canonical Film.
 const CATALOG_DISCOVERY_FAULTS=['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative'];
-// AIR-531: HTTP status of the HTML document `/film/<id>`. A TMDB permalink asks the same read-only catalog lookup as `/api/catalog/film/<id>` (one lookup, no write, no
-// outbound request); any other id is a programme/watchlist film id and is a member of the pinned published generation or it is unknown. A lookup that cannot answer
-// is never "absent": the shell is then served as 200 and the page asks for itself (an unreadable source is not proof of a missing film).
+// AIR-531: HTTP status of the HTML document `/film/<id>`, in the SPA's own order (`resolveFilm`): a film of the pinned published generation by its own id (programme or watchlist
+// member, one indexed point read) is 200 whatever the catalog says; a TMDB permalink then asks the bounded catalog identity decision (no enrichment, no write, no outbound
+// request): absent 404, retired 410, conflict 409; any other id that is no member is 404. Only a definite answer sets a non-200 status: an unreadable generation or catalog
+// is never proof of absence, so the shell is 200 and the page decides. Known gap: a published film that owns a TMDB id only through its trusted link (not its own id) is not
+// visible without reading the sealed programme document, which is not a bounded read; it gets its status from the catalog identity like any TMDB permalink.
 async function filmDocumentStatus(env,id){
  const tmdb=/^tmdb_(.+)$/.exec(id);
- if(tmdb){
-  if(!CATALOG_FILM_TMDB.test(tmdb[1]))return 404;
-  try{const answer=await catalogFilmRoute(env,tmdb[1]);return answer.status===400?404:answer.status;}catch{return 503;}
- }
+ if(tmdb&&!CATALOG_FILM_TMDB.test(tmdb[1]))return 404;
+ let member=null;
  try{
   const live=typeof PublishedEpg!=='undefined'?await PublishedEpg.currentGeneration(env):null;
-  if(!live||!live.programmeRunId)return 200;
-  return await PublishedEpg.isMember(env,live.programmeRunId,id)?200:404;
- }catch{return 200;}
+  if(live&&live.programmeRunId)member=await PublishedEpg.isMember(env,live.programmeRunId,id);
+ }catch{member=null;}
+ if(member===true)return 200;
+ if(!tmdb)return member===false?404:200;
+ const identity=await catalogFilmIdentity(env,tmdb[1]);
+ if(identity.fault)return 200;
+ return {absent:404,retired:410,conflict:409}[identity.found.state]||200;
 }
-async function catalogFilmRoute(env,tmdbId){
- if(!CATALOG_FILM_TMDB.test(tmdbId))return json({status:'invalid',error:'A TMDB movie id is a positive integer'},400);
- const now=Date.now();
+// AIR-531: the identity decision of `/api/catalog/film/<tmdbId>` and nothing else: found, absent, retired, conflict or unavailable, or a typed fault. No programme, watchlist,
+// metadata, prediction or ratings read happens here, so the HTML document status can use it without the enrichment of the full answer.
+async function catalogFilmIdentity(env,tmdbId){
  let found,discoveryFault=null;
  try{
   try{
@@ -543,9 +547,18 @@ async function catalogFilmRoute(env,tmdbId){
   else if(found.state==='absent')found=await catalogArchiveFallback(env,tmdbId);
  }catch(error){
   const code=error?.code||'';
-  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read','film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative'].includes(code))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);
-  return json({status:'error',error:'The catalog lookup failed'},500);
+  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read','film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative'].includes(code))return {fault:'unavailable',reason:code};
+  return {fault:'error'};
  }
+ return {found};
+}
+async function catalogFilmRoute(env,tmdbId){
+ if(!CATALOG_FILM_TMDB.test(tmdbId))return json({status:'invalid',error:'A TMDB movie id is a positive integer'},400);
+ const now=Date.now();
+ const identity=await catalogFilmIdentity(env,tmdbId);
+ if(identity.fault==='unavailable')return json({status:'unavailable',error:'The catalog is not readable right now',reason:identity.reason},503);
+ if(identity.fault)return json({status:'error',error:'The catalog lookup failed'},500);
+ const found=identity.found;
  if(found.state==='absent')return json({status:'absent'},404);
  if(found.state==='retired')return json({status:'retired'},410);
  if(found.state==='conflict')return json({status:'conflict'},409);
