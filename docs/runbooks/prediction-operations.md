@@ -186,3 +186,14 @@ Open `/admin/limb`, find the film among the prediction or fingerprint items and 
 Keep existing Cloudflare Access protections; don't embed auth tokens in links, logs or documentation. Do not trigger extra production sync or prediction runs just to test timestamps. The legacy Sites-specific prompt in [prediction-scheduled-prompt.md](../archive/legacy-sites/prediction-scheduled-prompt.md) is historical and must remain disabled.
 
 The Scheduled Task itself is outside this repository. Compare explicitly timezone-qualified iCalendar recurrence and `default_timezone` metadata separately: metadata disagreement is not by itself proof of an incorrect trigger. For scheduling accuracy use actual task execution history. Until that task sends `fault` and echoes `receivedRequestId`, caller-reported metadata on a production run stays unconfirmed. The Worker records the attempt and the response it formed either way. The caller change is specified in [AIR-88](../reference/api/run-diagnostics.md).
+
+## Scoped recovery of films whose prediction is current (AIR-477, dormant)
+
+This is the procedure the owner's production operation ([AIR-478](https://trello.com/c/IbsSCRce)) will use; it is **not** authorized by AIR-477. It needs migration `0024` applied (a separate owner GO), the prediction marker `d1` with writes `open`, and an explicit owner GO for the exact cohort. Contract: [scoped prediction recovery intent](../reference/api/admin-actions.md#scoped-prediction-recovery-intent).
+
+1. Read `GET /api/admin/prediction-recovery-intent/preview?films=<≤50 ids>&mode=prediction_only` (or `fingerprint_and_prediction`). It writes nothing. Check `schema.ready`, `authority`, `runner`, every film's `outcome` and `reason`, and `budget`. `unchanged` films need no intent: the ordinary rule already queues them. `blocked` and `conflict` films are not written.
+2. Confirm with the exact `scopeHash` and a fresh idempotency key (16–80 characters of `A-Za-z0-9_-`). A `stale_scope` answer means something the preview rested on moved: read the preview again; never retry with an old hash. A lost answer is safe to resend with the same key and hash: it returns `replayed` and the stored receipt.
+3. Do nothing else: no queue reconcile, no lease change, no manual run. The next ordinary start rebuilds the queue (`recovery_changed`) and the ordinary Scheduled Task runs score the films. `GET …/cohort?id=<cohortId>` shows each film `pending` until a new version is committed, then `satisfied`.
+4. To stop pending films, `POST …/cancel {cohortId}`. Already committed predictions stay; the old versions remain in `prediction_lineage` and R2.
+
+A code rollback leaves the rows in D1 and an older Worker ignores them; the intents then stop applying until the code returns. Expired intents stop applying on their own.

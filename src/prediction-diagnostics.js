@@ -158,9 +158,9 @@ function predictionDiagnosticPrediction(record,profile,freshness=strictFreshness
  const prediction=record.predictions?.current;
  if(!record.predictions||!prediction)return {presence:record.predictions?'recorded_without_current':'not_recorded',current:false,stale:'unknown',profileMatch:null,cause:'not_recorded'};
  if(!profile)return {presence:'recorded',current:false,stale:'unknown',profileMatch:null,cause:'profile_not_recorded'};
- const current=!!freshness.state(prediction,record.fingerprint,film?.genres),genres=film?.genres;
+ const filmId=film?.id==null?undefined:String(film.id),current=!!freshness.state(prediction,record.fingerprint,film?.genres,filmId),genres=film?.genres;
  const profileMatch=prediction.tasteProfileVersion===profile.version&&prediction.tasteProfileHash===profile.profileHash;
- const usable=typeof freshness.fingerprintUsable==='function'?!!freshness.fingerprintUsable(record.fingerprint,genres):fingerprintCurrent(record.fingerprint);
+ const usable=typeof freshness.fingerprintUsable==='function'?!!freshness.fingerprintUsable(record.fingerprint,genres,filmId):fingerprintCurrent(record.fingerprint);
  const verdict=typeof freshness.work==='function'?freshness.work(prediction,record.fingerprint,genres):null;
  // A prediction kept under another profile version or fingerprint version by a selective rule is 'compatible'; its record
  // keeps its own provenance. `reason` and `requiredWork` are the shared verdict's, the same the queue records.
@@ -174,7 +174,7 @@ function predictionDiagnosticIndex(snapshot,filmId,record){
  if(!item)return 'not_recorded';
  const freshness=snapshot.freshness||strictFreshness(snapshot.profile),film=snapshot.filmsById?.get(filmId)||null;
  const indexCurrent=!!freshness.indexed(item,film);
- const fileCurrent=!!freshness.state(record.predictions?.current,record.fingerprint,film?.genres);
+ const fileCurrent=!!freshness.state(record.predictions?.current,record.fingerprint,film?.genres,film?.id==null?undefined:String(film.id));
  return indexCurrent===fileCurrent?'agreed':'inconsistent';
 }
 function predictionDiagnosticSources(snapshot){
