@@ -1,6 +1,10 @@
 # AIR-476: evidence-aware scoring candidate v2 (positive-only `matchSignals`)
 
-**Capture:** 18 November 2026 (UTC). **Card:** [AIR-476](https://trello.com/c/Z4ZP49RG). **Status: latest pending candidate, NOT installed.** This document changes no Scheduled Task, calls no model and runs no production writer. The installed prompt stays the [canonical snapshot](../../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md). The [v1 candidate](air-476-evidence-aware-scoring-candidate-2026-11-17.md) and its [offline A/B](air-476-offline-ab-2026-11-18.md) are kept unchanged as historical records.
+**Capture:** 18 November 2026 (UTC). **Card:** [AIR-476](https://trello.com/c/Z4ZP49RG). **Status: accepted and installed 18 November 2026 (UTC), following independent 24/24 semantic PASS and explicit owner authorization for the four Scheduled Tasks.** This dated experiment record contains the exact text later installed in all four tasks. The [canonical current snapshot](../../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md) is now identical to the v2 candidate below; the [frozen pre-install baseline](air-476-preinstall-baseline-2026-11-17.md) holds the earlier 42097-character text used in the A/B. Editing this document does not itself edit, run or schedule a Task. The [v1 candidate](air-476-evidence-aware-scoring-candidate-2026-11-17.md) and its [offline A/B](air-476-offline-ab-2026-11-18.md) are kept unchanged as historical records.
+
+## Production rollout, subsequent to the offline experiment
+
+On 18 November 2026, after an independent semantic PASS across 24 raw A/B answers ([PR #741 review](https://github.com/vladimino/iptv-watchlist/pull/741#pullrequestreview-5952349269)) and owner acceptance, the owner explicitly authorized updating all four external Scheduled Tasks and then recording the result canonically in GitHub. Each saved Task prompt was updated without modifying its title, recurrence or enabled status; the separate registry readback of every task matched this exact v2 text (45938 JavaScript characters, 69379 UTF-8 bytes, SHA-256 `ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520`). No manual prediction run, D1/R2 mutation, lease reset or Worker change was performed. The canonical [installed snapshot](../../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md) now contains the unchanged v2 text and the unchanged historical dry-run template. The first natural scoring execution after prompt replacement is a separate production-behavior observation, not evidence inferred from prompt equality.
 
 ## Why v2
 
@@ -31,13 +35,13 @@ The research-first gate, provenance, `unknown`/uncertainty handling, negative ev
 
 The generator inputs are unchanged; the new rubric keys are grader-only and the harness test proves that no prompt contains them.
 
-## Next owner gates
+## Experiment gates (completed as dated evidence)
 
-1. Independent technical preflight of this PR's exact HEAD (minimal diff, symmetric variants, no grader leakage, ready harness) **before** the 24 model calls.
-2. Repeat offline A/B, base vs v2, under the owner's GO of 18 November 2026; separate dated report.
-3. Independent semantic adjudication on the private raw bundle; owner decision on v2; a separate operation-specific GO for the four Tasks.
+1. Technical preflight PASS before the authorized 24 offline model calls.
+2. Repeat offline A/B completed (base vs v2), preserving the distinct historical experiment and its private raw bundle.
+3. Independent semantic PASS, owner acceptance of v2, and explicit separate authorization to install the prompt on all four Tasks, followed by 4/4 saved-registry readback. Natural-run evaluation remains separate.
 
-Documentation impact: this report, `docs/evidence/prediction/README.md`, `docs/reference/scheduled-tasks.md` (pending-candidate pointer); canonical snapshot unchanged.
+Documentation impact: this historical report, `docs/evidence/prediction/README.md`, `docs/reference/scheduled-tasks.md` and the canonical prompt snapshot after owner-authorized installation; the original v1 and A/B source texts remain frozen.
 Architecture impact: none; caller-side scoring instruction candidate only.
 
 ## Candidate prompt
