@@ -18,7 +18,7 @@ After title, year and runtime succeed, `admissionPolicy` additionally treats the
 
 1. **Unclassified.** A TMDB card whose genre list is present and empty (no id and no name), and that is not already `concert_recording` by the independent title-and-overview rule, returns `needs_verification` with reason `genre_evidence_missing`. No `detail_verified`, Film, show binding, or prediction queue entry is created. An owner confirmation of the identity may admit it, because the missing genre is not a proven excluded type.
 2. **Music-only, concert word in the overview.** A Music card with no feature genre whose overview contains `concert` or a word starting `концерт` is held as `concert_recording_ambiguous` (it was already held for such a word in the title). An owner confirmation may admit it. A bare `live` in an overview is still ordinary narrative and holds nothing.
-3. A card with at least one feature genre is unchanged: fiction such as `Концерт` (2009) and a musical biography still verify. A card whose genre list is absent from the payload (not the same as empty) is unchanged.
+3. A card with at least one feature genre is unchanged: fiction such as `Концерт` (2009) and a musical biography still verify. The pure gate leaves a movie object with no genre list at all unchanged, but the Worker's `tmdbDetailFromMovie` always builds `genres: []`, so on the resolver path a TMDB payload that omits genres is held exactly like an empty list (fail closed, tested).
 
 Not decided: the disposition of Films already verified (see AIR-498 and its cleanup contract); a Music-only card with no concert word anywhere; any external catalog or LLM classifier.
 

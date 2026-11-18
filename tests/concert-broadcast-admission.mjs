@@ -27,7 +27,7 @@ const candidate=(title,year,duration,extra={})=>{
  return {key:parts.normalizedTitle+'|'+(year??''),title:parts.title,normalizedTitle:parts.normalizedTitle,year:year??parts.year,duration,durations:[duration],seenInLatestSnapshot:true,shows:[{...show,end:now+duration*60000}],lastAiring:now,airings:1,...extra};
 };
 function movieDetail(id,title,year,runtime,genres,overview='A synopsis'){
- const cards=genres.map(genre=>typeof genre==='object'?genre:{name:genre});
+ const cards=genres===undefined?undefined:genres.map(genre=>typeof genre==='object'?genre:{name:genre});
  return new Response(JSON.stringify({id:Number(id),title,original_title:title,release_date:year+'-01-01',runtime,overview,genres:cards,poster_path:'/poster.jpg',credits:{crew:[{id:1,name:'Director',job:'Director'}],cast:[{id:2,name:'Artist'}]},translations:{translations:[]},alternative_titles:{titles:[]}}));
 }
 function searchHit(id,title,year){
@@ -92,7 +92,7 @@ assert.ok(!rieuQueue||!(rieuQueue.hotPending||[]).includes('tmdb_238858'));
 
 function withheld(records,key,id,reason){
  const decision=records.get('epg/discovery-resolution.json')[key];
- assert.equal(decision.status,reason==='concert_recording_ambiguous'?'needs_verification':'no_confident_match',key);
+ assert.equal(decision.status,(reason==='concert_recording_ambiguous'||reason==='genre_evidence_missing')?'needs_verification':'no_confident_match',key);
  assert.equal(decision.reason,reason,key);
  assert.equal(records.get('epg/discovered-films.json')['tmdb_'+id],undefined,key);
  assert.equal(records.get('epg/discovery-score-preview.json').items[key].reason,reason,key);
@@ -146,6 +146,20 @@ for(const categories of [['Фильм'],[]]){
 }
 const tvEmptyGenre=await resolve(candidate('Hall Live at the Arena',1998,90,{categories:['Фильм']}),[{id:7108,title:'Hall Live at the Arena',year:1998,runtime:90,genres:[],overview:'A filmed live performance of the tour.'}]);
 withheld(tvEmptyGenre.records,'hall live at the arena|1998',7108,'concert_recording');
+// ADR 0168: TMDB returns no genre at all; a bare concert word in title and overview is not proof, so the card is held with its own durable reason.
+const picnic=await resolve(candidate('Пикник: Традиционный весенний концерт',2014,100,{categories:['Фильм']}),[{id:761960,title:'Пикник: Традиционный весенний концерт',year:2014,runtime:100,genres:[],overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.'}]);
+withheld(picnic.records,'пикник традиционный весенний концерт|2014',761960,'genre_evidence_missing');
+const picnicBare=await resolve(candidate('Пикник: Традиционный весенний концерт',2014,100),[{id:761960,title:'Пикник: Традиционный весенний концерт',year:2014,runtime:100,genres:[],overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.'}]);
+withheld(picnicBare.records,'пикник традиционный весенний концерт|2014',761960,'genre_evidence_missing');
+const arctic=await resolve(candidate('Арктика. Очищение',2021,52),[{id:1623086,title:'Арктика. Очищение',year:2021,runtime:52,genres:[],overview:'Экспедиция.'}]);
+withheld(arctic.records,'арктика очищение|2021',1623086,'genre_evidence_missing');
+const shakira=await resolve(candidate('Shakira Oral Fixation Tour',2007,120),[{id:23710,title:'Shakira Oral Fixation Tour',year:2007,runtime:120,genres:[{id:10402,name:'Music'}],overview:'Концерт Шакиры в Майами.'}]);
+withheld(shakira.records,'shakira oral fixation tour|2007',23710,'concert_recording_ambiguous');
+const concertFiction=await resolve(candidate('Концерт',2009,119),[{id:19407,title:'Концерт',year:2009,runtime:119,genres:[{id:18,name:'Drama'},{id:35,name:'Comedy'}],overview:'Дирижёр собирает оркестр на концерт.'}]);
+admitted(concertFiction.records,'концерт|2009','19407');
+// A TMDB payload that omits the genre list entirely reaches the gate as an empty list through the Worker adapter, so it is held the same way (fail closed).
+const noGenreKey=await resolve(candidate('Тихий дом',2014,100),[{id:761961,title:'Тихий дом',year:2014,runtime:100,genres:undefined,overview:'Семейная история.'}]);
+withheld(noGenreKey.records,'тихий дом|2014',761961,'genre_evidence_missing');
 const tvTitleOnly=await resolve(candidate('Hall Live at the Arena',1998,90,{categories:['Фильм']}),[{id:7109,title:'Hall Live at the Arena',year:1998,runtime:90,genres:[{id:10770,name:'TV Movie'}],overview:'A synopsis.'}]);
 admitted(tvTitleOnly.records,'hall live at the arena|1998','7109');
 const summer=await resolve(candidate('Summer Notes',2014,102,{categories:['Фильм']}),[{id:88011,title:'Summer Notes',year:2014,runtime:102,genres:[{id:10402,name:'Music'}],overview:'Two musicians live in Paris and form a band.'}]);
@@ -172,7 +186,8 @@ admitted(quiet.records,'quiet days|2014','88012');
   {id:424694,title:'Bohemian Rhapsody',year:2018,runtime:134,genres:[{id:18,name:'Drama'},{id:10402,name:'Music'}],categories:['Фильм'],overview:'The story of Freddie Mercury and Queen, including their Live Aid concert.'},
   {id:7104,title:'Hall Live at the Arena',year:1998,runtime:90,genres:[{id:10770,name:'TV Movie'}],categories:['Фильм'],overview:'A filmed live performance of the tour.'},
   {id:7106,title:'Hall Live at the Arena',year:1997,runtime:90,genres:[{id:10770,name:'TV Movie'}],categories:[],overview:'A filmed live performance of the tour.'},
-  {id:7108,title:'Hall Live at the Arena',year:1996,runtime:90,genres:[],categories:['Фильм'],overview:'A filmed live performance of the tour.'}
+  {id:7108,title:'Hall Live at the Arena',year:1996,runtime:90,genres:[],categories:['Фильм'],overview:'A filmed live performance of the tour.'},
+  {id:761960,title:'Пикник: Традиционный весенний концерт',year:2014,runtime:100,genres:[],categories:['Фильм'],overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.'}
  ];
  const items=catalog.map(movie=>candidate(movie.title,movie.year,movie.runtime,{categories:movie.categories}));
  await Authority.ingestLedger(env,{programmeRunId:RUN,handoff:true,lease,items:(async function*(){for(const item of items)yield item;})()});
@@ -182,7 +197,7 @@ admitted(quiet.records,'quiet days|2014','88012');
   loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
  for(const fileName of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(fileName,'utf8'),context);
- const result=await context.resolveDiscoveryChunk(env,{films:[]},8,lease);
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},9,lease);
  assert.equal(result.paged,true);
  assert.equal(result.error,null);
  const stored=(await Authority.routeRead(env,'epg/discovery-resolution.json')).value;
@@ -201,6 +216,9 @@ admitted(quiet.records,'quiet days|2014','88012');
  assert.equal(admissions.tmdb_7106,undefined);
  assert.equal(stored['hall live at the arena|1996'].reason,'concert_recording');
  assert.equal(admissions.tmdb_7108,undefined);
+ assert.equal(stored['пикник традиционный весенний концерт|2014'].status,'needs_verification');
+ assert.equal(stored['пикник традиционный весенний концерт|2014'].reason,'genre_evidence_missing');
+ assert.equal(admissions.tmdb_761960,undefined);
  const authority=db.sql("SELECT mode, cutover, programme_run_id FROM published_epg_authority WHERE id=1")[0];
  assert.equal(authority.mode,'r2');
  assert.equal(authority.programme_run_id,null);
