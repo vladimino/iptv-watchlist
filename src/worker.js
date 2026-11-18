@@ -862,10 +862,26 @@ async function beginSync(env){
  const startedNow=new Date();const run={runId:crypto.randomUUID(),startedAt:startedNow.toISOString(),...(typeof OrchestrationPolicy!=='undefined'&&pausePresent?{runKey:OrchestrationPolicy.madridDayKey(startedNow.getTime())}:{}),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...carried,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{}),...(lastEpgPublishedAt?{lastEpgPublishedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
  }catch(e){const previous=await loadJSON(env,'sync.json'),ingest=await loadJSON(env,'watchlist-ingest.json'),lastSuccessAt=previous?.stage==='complete'&&!previous.error?previous.updatedAt:ingest?.lastSuccessAt||null;await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});throw e;}
 }
+// AIR-533: one sanitized `metadata_sync_breakdown` per step on EVERY outcome (`ok`, `incomplete` for an unsettled canonical step, `handled_error`, `thrown`):
+// milliseconds and counts only, no Film id. It observes the step and changes none of its results, retries or exceptions.
 async function metadataSync(env,run){
- // AIR-533: the sanitized breakdown of one metadata step (milliseconds only, no film id), logged once as `metadata_sync_breakdown`.
- const marks={startedAt:Date.now()};const mark=name=>{marks[name]=Date.now();};
- const working=await MetadataCache.loadMetadataWorkingSet(env);mark('loaded');const cache=working.records;const creditsChanged=new Set();const next=run.pending.slice(run.cursor,run.cursor+24);const onlyNames=next.every(id=>cache[id]?.peopleVersion===1&&Date.now()-Date.parse(cache[id].metadataAt)<30*86400000);const ids=next.slice(0,onlyNames?24:12);
+ const marks={startedAt:Date.now()};let outcome='thrown',films=0;const errorsBefore=run.canonicalMetadataErrors||0;
+ try{
+  const result=await metadataSyncStep(env,run,marks);
+  films=marks.films||0;
+  outcome=run.canonicalMetadataErrors>errorsBefore?'handled_error':result&&result.canonicalMetadataIncomplete?'incomplete':'ok';
+  return result;
+ }finally{
+  try{
+   let previous=marks.startedAt;const part=name=>{if(!marks[name])return 0;const value=marks[name]-previous;previous=marks[name];return value;};
+   const loadMs=part('loaded'),fetchMs=part('fetched'),localizeMs=part('localized'),canonicalMs=part('canonical');
+   epgPhase(run.runId,'metadata_sync_breakdown','exit',{outcome,films:films||marks.films||0,loadMs,fetchMs,localizeMs,canonicalMs,tailMs:Date.now()-previous,totalMs:Date.now()-marks.startedAt});
+  }catch{}
+ }
+}
+async function metadataSyncStep(env,run,marks){
+ const mark=name=>{marks[name]=Date.now();};
+ const working=await MetadataCache.loadMetadataWorkingSet(env);mark('loaded');const cache=working.records;const creditsChanged=new Set();const next=run.pending.slice(run.cursor,run.cursor+24);const onlyNames=next.every(id=>cache[id]?.peopleVersion===1&&Date.now()-Date.parse(cache[id].metadataAt)<30*86400000);const ids=next.slice(0,onlyNames?24:12);marks.films=ids.length;
  for(let i=0;i<ids.length;i+=3)await Promise.all(ids.slice(i,i+3).map(async id=>{const idx=run.watchlist.findIndex(f=>f.id===id);try{const film=run.watchlist[idx],fresh=film.peopleVersion===1&&film.metadataAt&&Date.now()-Date.parse(film.metadataAt)<30*86400000;if(fresh&&film.synopsisFetchedAt){if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const html=await getHTML(film.url);if(fresh){film.synopsis=parseSynopsis(html);film.synopsisFetchedAt=new Date().toISOString();cache[id]={...cache[id],synopsis:film.synopsis,synopsisFetchedAt:film.synopsisFetchedAt};if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const result=parseFilm(html,film);cache[id]=result;run.watchlist[idx]=result;creditsChanged.add(id);}catch(e){run.failures.push({id,error:e.message});}}));
  mark('fetched');
  const freeze=await frozenCanonicalMirrorsLocked(env);
@@ -885,6 +901,7 @@ async function metadataSync(env,run){
     titles,people,failedIds:(run.failures||[]).map(item=>item.id),
     intent:run.metadataSyncIntent||[],
    });
+   mark('canonical');
    run.canonicalMetadata=CanonicalMetadataSync.metadataSyncRecord(canonical);
    const carried=CanonicalMetadataSync.carryMetadataSyncIntent(canonical);
    if(carried.length)run.metadataSyncIntent=carried;
@@ -895,6 +912,7 @@ async function metadataSync(env,run){
     return {runId:run.runId,stage:'metadata',remaining:run.pending.length-run.cursor,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length,canonicalMetadataIncomplete:true};
    }
   }catch(error){
+   mark('canonical');
    const code=error&&error.code;
    if(code==='film_person_held'||code==='film_person_unavailable'||code==='film_person_not_open'||code==='film_person_generation_moved')throw error;
    run.canonicalMetadataErrors=(run.canonicalMetadataErrors||0)+1;
@@ -903,8 +921,7 @@ async function metadataSync(env,run){
    return {runId:run.runId,stage:'metadata',remaining:run.pending.length-run.cursor,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length,canonicalMetadataIncomplete:true};
   }
  }
- mark('canonical');
- run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await MetadataCache.saveMetadataWorkingSet(env,cache,working);await saveJSON(env,'sync.json',run);epgPhase(run.runId,'metadata_sync_breakdown','exit',{films:ids.length,loadMs:marks.loaded-marks.startedAt,fetchMs:marks.fetched-marks.loaded,localizeMs:marks.localized-marks.fetched,canonicalMs:marks.canonical-marks.localized,saveMs:Date.now()-marks.canonical});return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length};
+ run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await MetadataCache.saveMetadataWorkingSet(env,cache,working);await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length};
 }
 // AIR-353: the first half of the commit tail (the watchlist, the scan observation and the events) is its own function, so
 // the staged publication can run it as a separate bounded step. It leaves the run's stage alone and is idempotent.
@@ -1390,7 +1407,8 @@ function archiveStopReason(error){
 }
 async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publishedRunId,kind='commit',holder=null}){
  const sourceHolder=holder||discoveryHolder(latest);
- const view=await readLedgerView(env);
+ const planClock={startedAt:Date.now()};const planMark=name=>{planClock[name]=Date.now();};
+ const view=await readLedgerView(env);planMark('view');
  const archivePointer=await env.BUCKET.get(LEDGER_ARCHIVE_POINTER),archiveEtag=archivePointer?.etag??null,startId=archivePointer?(await archivePointer.json())?.manifestId||null:null;
  // Without an archive, `frozen` (and `full`) is the single growing ledger. Once an archive exists, `full` acts as `frozen`:
  // the full ledger is never rebuilt inside the Worker (ADR 0034, rollback R1).
@@ -1424,17 +1442,19 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  const prevKeys=view.prevKeys;
  const start=await readLedgerManifest(env,startId);
  if(startId&&!start)throw new Error('Discovery archive manifest missing');
+ planMark('manifest');
  // Re-entry: keys of the new scan that are not in P's active ledger, read from the segments the starting manifest names.
  const reentry=[],found=new Set(),wanted=new Map();
  for(const key of latestKeys)if(!prevKeys.has(key)){const segment=ledgerArchiveSegment(key,start?.segmentCount||LEDGER_ARCHIVE_SEGMENTS);if(!wanted.has(segment))wanted.set(segment,[]);wanted.get(segment).push(key);}
  if(start)for(const [segment,keys] of wanted){const items=await readLedgerSegment(env,start,segment);for(const key of keys)if(items[key]){reentry.push(items[key].payload);found.add(key);}}
+ planMark('reentry');
  // AIR-429: a bounded active ledger is the scan plus the part of the backlog that this commit does not archive yet (see planLedgerDrain).
  const drain=effective==='bounded'?planLedgerDrain(view.backlog,latestKeys,ledgerDrainCap()):null;
  const keep=item=>effective!=='bounded'||latestKeys.has(item.key)||drain.held(item.key);
  let items=null,emit=null,departures,activeKeys,collected=null;
  if(view.kind==='stream'){
   latestList=null;
-  collected=await collectLedgerDecisions(env,view,sourceHolder,reentry,options,keep);
+  collected=await collectLedgerDecisions(env,view,sourceHolder,reentry,options,keep);planMark('collect');
   departures=collected.departures;activeKeys=collected.activeKeys;
   emit=()=>iterateLedgerItems(env,view,sourceHolder,reentry,options,keep);
  }else{
@@ -1454,11 +1474,18 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   const reached=current?current.manifestId===named:named===null&&steps<=LEDGER_ARCHIVE_CHAIN_LIMIT;
   if(!reached){also.clear();for(let segment=0;segment<start.segmentCount;segment++){const segmentItems=await readLedgerSegment(env,start,segment);for(const key of Object.keys(segmentItems))if(prevKeys.has(key))also.add(key);}}
  }
+ planMark('merge');
  for(const key of found)also.add(key);
  for(const key of [...also])if(!activeKeys.has(key))also.delete(key);
  let manifestId=startId,manifest=start;
  const archiveStarted=Date.now();
- epgPhase(runId,'seal_stage_plan','exit',{elapsedMs:archiveStarted-planStarted,departures:departures.length,backlog:drain?drain.backlog:0});
+ {
+  // AIR-533: the parts of the plan, in order: the predecessor's active ledger (`view`), the archive pointer and manifest, the re-entry segment reads, the streamed read, parse
+  // and classify of the active ledger against the scan (`collect`), and the alsoArchived chain. Milliseconds only; a part that did not run is 0.
+  let previous=planClock.startedAt;const part=name=>{if(!planClock[name])return 0;const value=planClock[name]-previous;previous=planClock[name];return value;};
+  const parts={viewMs:part('view'),manifestMs:part('manifest'),reentryMs:part('reentry'),collectMs:part('collect'),alsoMs:part('merge')};
+  epgPhase(runId,'seal_stage_plan','exit',{elapsedMs:archiveStarted-planStarted,...parts,reentrySegments:wanted.size,departures:departures.length,backlog:drain?drain.backlog:0});
+ }
  if(departures.length){
   try{
   epgBoundary(runId,'seal_stage_archive_begin','enter',{items:departures.length});
@@ -1470,21 +1497,30 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   // fence count of a window is its size, so the fence cadence of AIR-444 is unchanged), each is a create-only object under the write id that nothing
   // reads before the pointer moves, and the manifest still names the segments in order, so a failed window leaves only unreferenced objects.
   const ordered=[...bySegment].sort((a,b)=>a[0]-b[0]);
-  const noFence=async()=>{};
+  // The window is joined before any error leaves it (the caller releases the Discovery lease in its `finally`), and every put re-checks, immediately before it
+  // starts, that no sibling has failed and that the last full fence is younger than ARCHIVE_SEGMENT_FENCE_MS (one shared refresh for the whole window).
+  let windowFailed=null,refreshing=null;
+  const putGuard=async()=>{
+   if(windowFailed)throw new Error('Discovery archive fence lost: window aborted');
+   if(Date.now()-lastFenceAt>=ARCHIVE_SEGMENT_FENCE_MS){refreshing=refreshing||fence().finally(()=>{refreshing=null;});await refreshing;if(windowFailed)throw new Error('Discovery archive fence lost: window aborted');}
+  };
   const archiveSegment=async([segment,records])=>{
    const readAt=Date.now(),segmentItems=await readLedgerSegment(env,start,segment);tally.readMs+=Date.now()-readAt;
    for(const record of records){const payload=JSON.parse(record.json);if(archivedPayloadNewer(payload,segmentItems[payload.key]?.payload))segmentItems[payload.key]={payload,envelope:{archivedAt:at,archivedFromProgrammeRunId:publishedRunId,archiveWriteId:writeId}};}
-   const object=ledgerArchiveSegmentKey(segment,writeId),written=await writeLedgerSegment(env,object,{schemaVersion:1,segment,writeId,items:segmentItems},noFence,tally);
+   const object=ledgerArchiveSegmentKey(segment,writeId),written=await writeLedgerSegment(env,object,{schemaVersion:1,segment,writeId,items:segmentItems},putGuard,tally);
    tally.segments++;if(tally.segments%16===0)epgBoundary(runId,'seal_stage_archive_segments','exit',{segments:tally.segments,count:bySegment.size,elapsedMs:Date.now()-archiveStarted});tally.bytes+=written.bytes;
    segments[segment]={segment,object,sha256:written.sha256,items:Object.keys(segmentItems).length,bytes:written.bytes};
   };
+  const archiveGuarded=async entry=>{try{await archiveSegment(entry);}catch(error){windowFailed=windowFailed||error;throw error;}};
   // A window never crosses a fence boundary (3, 3, 2 writes per fence of 8), so the cadence of AIR-444 is exactly the sequential one.
   for(let from=0;from<ordered.length;){
    const due=sinceFence>=ARCHIVE_SEGMENT_FENCE_EVERY||Date.now()-lastFenceAt>=ARCHIVE_SEGMENT_FENCE_MS;
    const size=Math.min(ARCHIVE_SEGMENT_CONCURRENCY,ordered.length-from,due?ARCHIVE_SEGMENT_CONCURRENCY:ARCHIVE_SEGMENT_FENCE_EVERY-sinceFence);
    const windowEntries=ordered.slice(from,from+size);from+=size;
    await segmentFence(windowEntries.length);
-   await Promise.all(windowEntries.map(archiveSegment));
+   const settled=await Promise.allSettled(windowEntries.map(archiveGuarded));
+   const failed=settled.find(result=>result.status==='rejected');
+   if(failed)throw failed.reason;
   }
   manifestId=crypto.randomUUID();
   manifest={schemaVersion:1,manifestId,parentManifestId:startId,segmentCount:count,hash:'fnv1a32-utf8',segments,totals:{items:segments.reduce((n,entry)=>n+entry.items,0),bytes:segments.reduce((n,entry)=>n+entry.bytes,0)},upsertedKeys:departures.map(record=>record.key).sort(),writer:{runId,kind,basedOnProgrammeRunId:publishedRunId,basedOnPointerEtag:pointerEtag,leaseId:lease.id,writtenAt:at}};

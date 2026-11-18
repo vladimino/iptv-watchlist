@@ -47,6 +47,10 @@ function record(state){
  const segments=rec.events.filter(item=>item==='segment').length,fences=rec.events.filter(item=>item==='fence').length;
  assert.ok(segments>=24,'the scan leaves most of the ledger behind: '+segments+' segments are rewritten');
  const [archive]=phase('seal_stage_archive');assert.ok(archive,'the archive phase is logged');
+ // AIR-533: the plan is split into its parts (milliseconds and counts only), so the next natural run shows where its time goes.
+ const [planParts]=phase('seal_stage_plan');assert.ok(planParts,'the plan phase is logged');
+ assert.deepEqual(Object.keys(planParts).sort(),['alsoMs','at','backlog','collectMs','departures','edge','elapsedMs','event','manifestMs','phase','reentryMs','reentrySegments','runId','viewMs'].sort(),'sanitized plan parts');
+ for(const field of ['alsoMs','collectMs','elapsedMs','manifestMs','reentryMs','reentrySegments','viewMs','departures'])assert.ok(Number.isFinite(planParts[field])&&planParts[field]>=0,'plan '+field);
  assert.equal(archive.segments,segments);assert.equal(archive.fences,fences,'the log counts the full fences');assert.equal(archive.fencesSkipped,segments-Math.ceil(segments/8),'and the skipped ones');
  assert.ok(fences<=Math.ceil(segments/8)+2,'at most one fence per 8 segment writes plus the manifest and the pointer: '+fences+' for '+segments);
  assert.ok(fences<segments+2,'fewer than the '+(segments+2)+' of one fence per write');
@@ -106,6 +110,30 @@ function record(state){
  assert.ok(reads>=1&&archive,'segments were read: '+reads);
  assert.ok(archive.readMs>=reads*700-400&&archive.readMs<=reads*700*3+400,'readMs is the segment reads alone (summed time of overlapping reads): '+archive.readMs+' for '+reads);
  assert.ok(archive.fenceMs<archive.readMs,'and not part of the fences');
+}
+
+// 2b-3. AIR-533 (review P1): a failure inside a window is only reported after every sibling of the window has finished, no segment put starts once a sibling has
+// failed, and the Discovery lease is released after the last archive operation, never while a sibling read is still pending.
+{
+ const state=await setup();
+ const clock={reads:0,readsDone:0,puts:0,lastOpAt:0,releasedAt:null};
+ const realRead=context.readLedgerSegment,priorOnPut=state.bkt.onPut,realRelease=context.releaseDiscoveryLease;
+ // The first read of the window fails at once; its two siblings are still reading for 60 ms and would put after it.
+ context.readLedgerSegment=async(...args)=>{
+  const n=++clock.reads;
+  if(n===1){clock.readsDone++;clock.lastOpAt=performance.now();throw new Error('injected read failure');}
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const result=await realRead(...args);clock.readsDone++;clock.lastOpAt=performance.now();return result;
+ };
+ state.bkt.onPut=async key=>{if(key.startsWith('epg/discovery-archive/v1/segments/')){clock.puts++;clock.lastOpAt=performance.now();}if(priorOnPut)await priorOnPut(key);};
+ context.releaseDiscoveryLease=async(...args)=>{clock.releasedAt=performance.now();return realRelease(...args);};
+ try{await assert.rejects(stage(state,{latest:latestFew()}),/injected read failure/);}
+ finally{context.readLedgerSegment=realRead;state.bkt.onPut=priorOnPut;context.releaseDiscoveryLease=realRelease;}
+ assert.equal(clock.reads,3,'one window of three reads started: '+clock.reads);
+ assert.equal(clock.readsDone,3,'the siblings finished before the error left the window and the lease was released');
+ assert.equal(clock.puts,0,'no segment put started after a sibling failed');
+ assert.ok(clock.releasedAt!==null&&clock.releasedAt>=clock.lastOpAt,'the lease is released after the last archive operation');
+ assert.equal(state.bkt.objects.get(POINTER)?.etag??null,null,'the pointer did not move');
 }
 
 // 2c. A stop inside the archive is not silent: the error marker carries the counters so far and a closed reason, and fail-closed behaviour is unchanged.
