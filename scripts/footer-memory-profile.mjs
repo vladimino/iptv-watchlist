@@ -5,6 +5,7 @@
 // 3.2 MB; profile, queue and latest run in D1), ratings d1/open (4,487 ratings_view rows).
 //   node scripts/footer-memory-profile.mjs --build [--fixtures DIR]     build the fixtures once: R2 objects as files and the D1 database as sqlite
 //   node [--max-old-space-size=MB] scripts/footer-memory-profile.mjs [--fixtures DIR] [--concurrent C] [--requests K] [--dump body.json] [--freeze]
+//   --path /api/admin/limbo?limit=25&attention=now | --paths /api/admin/limbo?...,/api/admin/identity-work?limit=25   measure another route, or two routes at once.
 // Run from a checkout after `npm run build`: the deployed bundle dist/server/index.js answers, the same code workerd runs, so one set of fixtures
 // measures two versions. R2 objects are Buffers outside the V8 heap. --freeze stops the Worker's clock at the fixtures' clock. Prints one JSON line.
 // --export DIR writes the fixtures as `wrangler r2 object put --local` and D1 inputs for a workerd measurement (docs/evidence/footer-status-oom-rca-2026-11-17.md).
@@ -83,6 +84,20 @@ if (process.argv.includes('--build')) {
   for (let i = 0; i < 5; i++) sql += `INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES (${q('film:tmdb:' + tmdbOf(i * 11 + 1))},'tmdb',${q(tmdbOf(i * 11 + 2))},0,1,NULL);\n`;
   // Discovery (d1/open): the catalog is the current admissions.
   for (const [id, film] of Object.entries(catalog)) sql += `INSERT INTO discovery_admission (film_id,tmdb_id,media_kind,canonical_identity,generation,state,payload_json) VALUES (${q(id)},${q(film.tmdbId)},'movie',${q(film.canonicalIdentity)},1,'current',${q(JSON.stringify(film))});\n`;
+  // Discovery observations with a decision, as the owner Limbo reads them (GET /api/admin/limbo, /api/admin/identity-work): the cap of the D1 observation index
+  // (3,000) active observations, each with its decision and one to six shows. OBS=0 builds none.
+  {
+    const {decisionHash} = await import(pathToFileURL(path.join(cwd, 'src/discovery-authority.js')));
+    const N_OBS = Number(process.env.OBS ?? 3000);
+    for (let i = 0; i < N_OBS; i++) {
+      const key = 'obs-' + i + '|' + (1950 + i % 70), title = text(18), shows = showsFor();
+      const payload = {title, year: 1950 + i % 70, normalizedTitle: title.toLowerCase(), evidenceKey: null, lastSeenAt: T, shows: undefined, sourceTitle: text(30), overview: text(160)};
+      const decision = {key, status: i % 7 === 0 ? 'unresolved' : 'pending', attempts: i % 5, retryAt: i % 3 ? null : T, terminalReason: i % 50 === 0 ? 'no_match' : null, evidenceKey: null, programmeRunId: G1, updatedAt: T, note: text(120)};
+      sql += `INSERT INTO discovery_observation (source_key,observation_key,residence,programme_run_id,normalized_title,title,year,evidence_key,seen_in_latest,last_seen_at,last_airing,confirmed_tmdb_id,payload_json) VALUES ('active',${q(key)},'active',${q(G1)},${q(title.toLowerCase())},${q(title)},${1950 + i % 70},NULL,1,${q(T)},0,NULL,${q(JSON.stringify(payload))});\n`;
+      sql += `INSERT INTO discovery_decision (observation_key,programme_run_id,generation,status,attempts,evidence_key,terminal_reason,retry_at,tmdb_id,media_kind,film_id,decision_hash,payload_json) VALUES (${q(key)},${q(G1)},1,${q(decision.status)},${decision.attempts},NULL,${q(decision.terminalReason)},${q(decision.retryAt)},NULL,NULL,NULL,${q(await decisionHash(decision))},${q(JSON.stringify(decision))});\n`;
+      shows.forEach((show, ordinal) => {sql += `INSERT INTO discovery_observation_show (source_key,observation_key,ordinal,channel_id,channel,start_ms,end_ms) VALUES ('active',${q(key)},${ordinal},${q(show.channelId)},${q(show.channel)},${show.start},${show.end});\n`;});
+    }
+  }
   // Predictions (d1): profile, queue, latest run, pointers and fingerprints.
   sql += `INSERT INTO prediction_profile (version,profile_hash,active,created_at,r2_key,content_sha256,lineage_json) VALUES (7,'p7',1,${q(T)},${q(profileKey)},${q(sha(JSON.stringify(canonical(profile))))},NULL);\n`;
   // The queue is stored in parts, as the Worker writes it (D1 caps one statement), and read back joined in `seq` order.
@@ -100,7 +115,7 @@ if (process.argv.includes('--build')) {
   }
   sql += 'COMMIT;\n';
   sql += "UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;\n";
-  sql += "UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1;UPDATE prediction_domain_authority SET mode='d1' WHERE id=1;UPDATE ratings_domain_authority SET mode='d1',cutover='open' WHERE id=1;UPDATE published_epg_authority SET mode='d1' WHERE id=1;\n";
+  sql += "UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id='"+G1+"', published_programme_run_id='"+G1+"' WHERE id=1;UPDATE prediction_domain_authority SET mode='d1' WHERE id=1;UPDATE ratings_domain_authority SET mode='d1',cutover='open' WHERE id=1;UPDATE published_epg_authority SET mode='d1' WHERE id=1;UPDATE owner_review_authority SET mode='d1',generation=1 WHERE id=1;\n";
   sqlite(sql); sql = null;
   // The published generation, written by the EPG module itself (programme and watchlist documents in D1, R2 compatibility mirrors).
   const PublishedEpg = await import(pathToFileURL(path.join(cwd, 'src/published-epg.js')));
@@ -167,10 +182,12 @@ if (REQUESTS === 0) {quiet(JSON.stringify({statuses: [200], requests: 0, baselin
 let peak = 0; const sample = () => {const used = v8.getHeapStatistics().used_heap_size; if (used > peak) peak = used;};
 const timer = setInterval(sample, 1);
 const baseline = v8.getHeapStatistics().used_heap_size; peak = baseline;
-const one = async () => {const r = await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/enrichment/footer/status'), env, {waitUntil() {}}); const body = await r.text(); sample(); return {status: r.status, body};};
+// --path (default: the footer) names the route measured; --paths a,b runs those routes together, one request each, as the owner page does.
+const PATHS = (arg('paths', null) || arg('path', '/api/enrichment/footer/status')).split(',');
+const one = async (_, index = 0) => {const r = await worker.fetch(new Request('https://iptv.vladimino.workers.dev' + PATHS[index % PATHS.length]), env, {waitUntil() {}}); const body = await r.text(); sample(); return {status: r.status, body};};
 const cpu0 = process.cpuUsage(), t0 = performance.now();
 const results = [];
-for (let i = 0; i < REQUESTS; i++) results.push(...await Promise.all(Array.from({length: CONCURRENT}, one)));
+for (let i = 0; i < REQUESTS; i++) results.push(...await Promise.all(Array.from({length: Math.max(CONCURRENT, arg('paths', null) ? PATHS.length : 1)}, (_, index) => one(_, index))));
 const wall = performance.now() - t0, cpu = process.cpuUsage(cpu0);
 clearInterval(timer);
 let body = {}; try {body = JSON.parse(results[0].body);} catch {body = {raw: results[0].body.slice(0, 200)};}

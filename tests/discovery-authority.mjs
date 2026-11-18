@@ -501,6 +501,37 @@ const listed=await Authority.readObservationIndex({DB:indexed.db},{limit:2});
 assert.equal(listed.index.records.length,2);
 assert.equal(listed.index.records.some(row=>row.key==='k03000'),false);
 assert.equal(listed.index.manifest.coverage.complete,false);
+// The shows of the listed observations are read in chunked statements, grouped by observation and ordered by ordinal; never one statement per observation.
+{
+ const showRows=[];
+ for(let n=0;n<200;n++){const key='k'+String(n).padStart(5,'0');showRows.push(`('active','${key}',1,'c${n}b','Channel ${n}b',${2000+n},${3000+n})`,`('active','${key}',0,'c${n}a','Channel ${n}a',${1000+n},${1500+n})`);}
+ showRows.push("('active','k00007',2,'c7c','Channel 7c',7777,8888)");
+ indexed.db.sql('INSERT INTO discovery_observation_show (source_key, observation_key, ordinal, channel_id, channel, start_ms, end_ms) VALUES '+showRows.join(','));
+ // D1 binds at most 100 parameters: no statement of the read may bind more.
+ let widest=0,statements=0;
+ const guarded={calls:indexed.db.calls,prepare(sql){const inner=indexed.db.prepare(sql);return {bind(...params){widest=Math.max(widest,params.length);assert.ok(params.length<=100,'a statement bound '+params.length+' parameters');statements++;return inner.bind(...params);},first(){return inner.first();},all(){return inner.all();},run(){return inner.run();}};}};
+ const queriesBefore=indexed.db.calls.queries;
+ const chunked=await Authority.readObservationIndex({DB:guarded},{limit:200});
+ const used=indexed.db.calls.queries-queriesBefore;
+ assert.equal(chunked.index.records.length,200);
+ assert.equal(chunked.index.state,'fresh');
+ // the authority gate is read twice (a handful of statements each), one statement selects the observations, ceil(200/80)=3 select their shows. One statement per observation would be 200 more.
+ assert.ok(used<=20,'the index read used '+used+' statements');
+ assert.ok(widest>=80&&widest<=100,'the show reads are chunked at '+widest);
+ const byKey=Object.fromEntries(chunked.index.records.map(record=>[record.key,record]));
+ assert.deepEqual(byKey.k00003.shows,[{channelId:'c3a',channel:'Channel 3a',start:1003,end:1503},{channelId:'c3b',channel:'Channel 3b',start:2003,end:3003}],'shows keep their ordinal order although inserted in reverse');
+ assert.deepEqual(byKey.k00007.shows.map(show=>show.channelId),['c7a','c7b','c7c']);
+ assert.deepEqual(byKey.k00199.shows.map(show=>show.channelId),['c199a','c199b']);
+ const withoutShows=chunked.index.records.find(record=>!['k'+String(0).padStart(5,'0')].includes(record.key)&&record.shows.length===0);
+ assert.equal(withoutShows,undefined,'every one of the 200 listed observations has its shows');
+ const bare=await Authority.readObservationIndex({DB:guarded},{limit:250});
+ const unlisted=bare.index.records.filter(record=>record.shows.length===0);
+ assert.ok(unlisted.length>0&&unlisted.length<=250,'observations without show rows keep an empty list');
+ assert.ok(unlisted.every(record=>record.shows.length===0));
+ // a keyed read is unchanged: one record with its shows
+ const keyed=await Authority.readObservationIndex({DB:guarded},{key:'k00007'});
+ assert.equal(keyed.index.records[0].shows.length,3);
+}
 
 const crashed=migrated();
 open(crashed.db);

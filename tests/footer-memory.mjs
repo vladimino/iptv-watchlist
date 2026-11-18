@@ -289,5 +289,25 @@ nonFunctional('footer-memory-production-size',()=>{
  assert.ok(result.cpuMs<8*10000,'eight requests within 10 s of CPU each: '+result.cpuMs+' ms');
 });
 
+// ---- 5. the owner page: /api/admin/limbo and /api/admin/identity-work together (nightly only) ----
+// The page asks both at once. With the Discovery observation index at its cap (3,000 observations) each read took one statement per observation for the shows
+// (3,079 statements, 38-49 s of wall on the live page) and each request held its own copy of every source: the pair needed 80 MB of old space and 6,153
+// statements on the fixtures, and the live isolate ran out of memory (docs/evidence/owner-limbo-memory-air-528-2026-11-18.md). Shared load and chunked show reads:
+// 60 MB and 117 statements. 72 MB fails the old pair and leaves the bounded one about 12 MB of room.
+nonFunctional('owner-limbo-memory-production-size',()=>{
+ const built=spawnSync(process.execPath,['build.mjs'],{encoding:'utf8'});
+ assert.equal(built.status,0,built.stderr);
+ const script=path.resolve('scripts/footer-memory-profile.mjs'),fixtures=path.join(root,'limbo-fixtures');
+ const build=spawnSync(process.execPath,['--no-warnings',script,'--build','--fixtures',fixtures],{encoding:'utf8',maxBuffer:1<<24});
+ assert.equal(build.status,0,build.stderr);
+ const paths='/api/admin/limbo?limit=25&attention=now,/api/admin/identity-work?limit=25';
+ const run=spawnSync(process.execPath,['--no-warnings','--max-semi-space-size=1','--max-old-space-size=72',script,'--fixtures',fixtures,'--paths',paths,'--freeze'],{encoding:'utf8',maxBuffer:1<<24,timeout:240000});
+ assert.equal(run.status,0,run.stderr);
+ const result=JSON.parse(run.stdout.trim().split('\n').at(-1));
+ assert.deepEqual(result.statuses,[200,200]);
+ assert.equal(result.writes,0);
+ assert.ok(result.d1Queries<=400,'one statement per observation is gone: '+result.d1Queries+' statements');
+});
+
 fs.rmSync(root,{recursive:true,force:true});
 console.log('Footer memory: indexed D1 identity claims equal the full scan, copy-free coverage equals the overlay, projected footer blocks equal the whole documents, a malformed record degrades one block, no writes passed');

@@ -867,7 +867,7 @@ export const FILES={
  },
  "footer-memory.mjs": {
   "suite": "split",
-  "note": "AIR-519. Equivalence of the indexed D1 identity claims, the copy-free coverage and the projected footer blocks, and the degraded malformed record stay in core. The production-sized heap and CPU reproduction is scenario footer-memory-production-size."
+  "note": "AIR-519. Equivalence of the indexed D1 identity claims, the copy-free coverage and the projected footer blocks, and the degraded malformed record stay in core. The production-sized heap and CPU reproduction is scenario footer-memory-production-size; the owner Limbo pair under a heap cap is scenario owner-limbo-memory-production-size."
  },
  "footer-resilience.mjs": {
   "suite": "split",

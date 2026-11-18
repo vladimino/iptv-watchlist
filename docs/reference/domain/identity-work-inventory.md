@@ -142,6 +142,8 @@ A lane that the query excluded has no `coverage` entry. `page.state` is `read_wh
 
 ## Performance bounds
 
+The Film and EPG lanes read what `GET /api/admin/limbo` reads, and overlapping requests of the two routes share one load of those sources. The observation index reads at most 3,000 observations with their shows in chunks of 80 keys (about 40 statements).
+
 | Bound | Value |
 | --- | --- |
 | Delimiter `list` per request | 1, at most 1000 prefixes, no bodies |
