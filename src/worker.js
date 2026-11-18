@@ -499,6 +499,21 @@ async function catalogArchiveFallbackR2(env,tmdbId,gate){
 }
 // AIR-475 review: Discovery is an independent domain. These are the ways its reader can refuse; while the Film/Person marker is open a refusal never hides a canonical Film.
 const CATALOG_DISCOVERY_FAULTS=['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative'];
+// AIR-531: HTTP status of the HTML document `/film/<id>`. A TMDB permalink asks the same read-only catalog lookup as `/api/catalog/film/<id>` (one lookup, no write, no
+// outbound request); any other id is a programme/watchlist film id and is a member of the pinned published generation or it is unknown. A lookup that cannot answer
+// is never "absent": the shell is then served as 200 and the page asks for itself (an unreadable source is not proof of a missing film).
+async function filmDocumentStatus(env,id){
+ const tmdb=/^tmdb_(.+)$/.exec(id);
+ if(tmdb){
+  if(!CATALOG_FILM_TMDB.test(tmdb[1]))return 404;
+  try{const answer=await catalogFilmRoute(env,tmdb[1]);return answer.status===400?404:answer.status;}catch{return 503;}
+ }
+ try{
+  const live=typeof PublishedEpg!=='undefined'?await PublishedEpg.currentGeneration(env):null;
+  if(!live||!live.programmeRunId)return 200;
+  return await PublishedEpg.isMember(env,live.programmeRunId,id)?200:404;
+ }catch{return 200;}
+}
 async function catalogFilmRoute(env,tmdbId){
  if(!CATALOG_FILM_TMDB.test(tmdbId))return json({status:'invalid',error:'A TMDB movie id is a positive integer'},400);
  const now=Date.now();
@@ -2197,7 +2212,13 @@ async fetch(request,env,execution){
   return json({error:'Not found'},404);
  }
  if((request.method==='GET'||request.method==='HEAD')&&url.pathname==='/admin/limbo'){const target=new URL(request.url);target.pathname='/admin/limb';return new Response(null,{status:302,headers:{Location:target.pathname+target.search,'Cache-Control':'no-store'}});}
- const page=url.pathname==='/events'?'/':/^\/film\/[A-Za-z0-9_-]{1,80}$/.test(url.pathname)?'/':url.pathname,asset=ASSETS[page];if(asset&&(request.method==='GET'||request.method==='HEAD'))return new Response(request.method==='HEAD'?null:asset.body,{headers:{'Content-Type':asset.type+'; charset=utf-8','Cache-Control':'no-cache'}});
+ const filmDocument=/^\/film\/([A-Za-z0-9_-]{1,80})$/.exec(url.pathname);
+ const page=url.pathname==='/events'?'/':filmDocument?'/':url.pathname,asset=ASSETS[page];
+ if(asset&&(request.method==='GET'||request.method==='HEAD')){
+  // AIR-531: the HTTP status of a film permalink document follows what the page will say (404 absent, 410 retired, 409 conflict, 503/500 unavailable); the shell is the same.
+  const status=filmDocument?await filmDocumentStatus(env,filmDocument[1]):200;
+  return new Response(request.method==='HEAD'?null:asset.body,{status,headers:{'Content-Type':asset.type+'; charset=utf-8','Cache-Control':status===200?'no-cache':'no-store'}});
+ }
  return json({error:'Not found'},404);
  }catch(e){
   // The only trace of an unhandled route error, so a 502 can be read from the logs. Only values shaped like an internal code are logged (lower-case letters,

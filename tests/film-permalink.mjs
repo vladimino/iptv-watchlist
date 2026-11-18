@@ -136,8 +136,10 @@ for(const [status,body,title,text] of states){
  reset();plan.set('/api/catalog/film/51',{status,body});await open('tmdb_51');
  assert.equal(query('#film-screen-title').textContent,title,String(status));assert.match(query('#film-screen-status').textContent,text);
  assert.equal(html('#film-screen-score'),'','no film, no score');assert.equal(run('currentFilm()'),null);
+ assert.equal(query('#film-compare').hidden,true,'AIR-531: no film, no comparison ('+status+')');assert.equal(html('#film-compare-result'),'');assert.equal(query('#film-similar').hidden,true);
 }
 reset();plan.set('/api/catalog/film/51',new Error('offline'));await open('tmdb_51');
+assert.equal(query('#film-compare').hidden,true,'AIR-531: a failed load hides the comparison');
 assert.equal(query('#film-screen-title').textContent,'Не удалось загрузить фильм','a network failure is an error, not "not found"');
 reset();plan.set('/api/catalog/film/51',{status:200,body:{status:'found',film:entry(52)}});await open('tmdb_51');
 assert.equal(query('#film-screen-title').textContent,'Не удалось загрузить фильм','a film of another identity than the route is refused');

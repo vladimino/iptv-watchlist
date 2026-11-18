@@ -146,6 +146,18 @@ const base={
  r=await get('999');assert.deepEqual([r.status,r.body.status],[404,'absent']);
  r=await get('11');assert.deepEqual([r.status,r.body.status],[409,'conflict'],'a record that does not verify its identity fails closed');
  r=await get('13');assert.equal(r.status,409,'two current records of one identity are not guessed between');
+
+ // AIR-531: the HTML document `/film/<id>` carries the status the page will show. Same read-only lookup as the API, GET and HEAD alike, no write.
+ vm.runInContext("var ASSETS={'/':{type:'text/html',body:'<!doctype html><title>shell</title>'}};",ctx);
+ {
+  const doc=async(id,method='GET')=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/film/'+id,{method}),envW,{waitUntil(){}});return {status:r.status,text:await r.text(),cache:r.headers.get('Cache-Control')};};
+  for(const method of ['GET','HEAD']){
+   let d=await doc('tmdb_999',method);assert.equal(d.status,404,method+': an absent TMDB permalink is 404');assert.equal(d.text.includes('shell'),method==='GET','the shell is served on GET only');assert.equal(d.cache,'no-store');
+   d=await doc('tmdb_11',method);assert.equal(d.status,409,method+': a conflicting identity is 409');
+   d=await doc('tmdb_7',method);assert.equal(d.status,200,method+': a verified catalog Film is 200');assert.equal(d.cache,'no-cache');
+   d=await doc('tmdb_0',method);assert.equal(d.status,404,method+': a malformed TMDB permalink is 404');
+  }
+ }
  for(const bad of ['0','abc','-1','7.5','007','1234567890123','%E0%A4%A']){r=await get(bad);assert.deepEqual([r.status,r.body.status],[400,'invalid'],'invalid: '+bad);}
  // The film is still found when the watchlist, a rating or the profile say nothing about it.
  const index=records.get(constant('ENRICHMENT_KEY')+'view-index.json');index.tmdb_7.actualRating=5;index.tmdb_7.watchlist=true;records.set(constant('ENRICHMENT_KEY')+'view-index.json',index);
@@ -169,6 +181,7 @@ const base={
  answer(true,[rec('tmdb_7','current')]);let r=await get('7');assert.equal(r.status,200);assert.equal(r.body.film.id,'tmdb_7');
  answer(true,[]);r=await get('7');assert.deepEqual([r.status,r.body.status],[404,'absent']);
  answer(true,[rec('tmdb_7','superseded')]);r=await get('7');assert.deepEqual([r.status,r.body.status],[410,'retired']);
+ {const r2=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/film/tmdb_7'),envW,{waitUntil(){}});assert.equal(r2.status,410,'AIR-531: a retired Film permalink document is 410');const r3=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/film/tmdb_7',{method:'HEAD'}),envW,{waitUntil(){}});assert.equal(r3.status,410,'HEAD is 410 too');}
  answer(true,[rec('tmdb_7','superseded'),rec('tmdb_7b','current')]);r=await get('7');assert.deepEqual([r.status,r.body.film?.id],[200,'tmdb_7b'],'the current record is the film; a superseded sibling is history');
  answer(true,[{...rec('other-id','current'),film:catalogFilm('tmdb_7',7)}]);r=await get('7');assert.equal(r.status,409,'a payload whose own id is not the row id is a conflict');
  answer(true,[rec('tmdb_7','current',7,{canonicalIdentity:'tmdb:8'})]);r=await get('7');assert.equal(r.status,409,'a payload whose identity disagrees with the row');

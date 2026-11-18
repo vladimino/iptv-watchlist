@@ -278,6 +278,12 @@ export async function readShows(env,programmeRunId){
  const rows=await many(database(env),'SELECT film_id, channel_id, channel, start_ms, end_ms, epg_title, basis, match_reason FROM published_epg_show WHERE programme_run_id=? ORDER BY film_id, start_ms, channel_id',[programmeRunId]);
  return rows.map(row=>({filmId:row.film_id,channelId:row.channel_id,channel:row.channel??null,startMs:Number(row.start_ms),endMs:row.end_ms==null?null:Number(row.end_ms),epgTitle:row.epg_title??null,basis:row.basis??null,matchReason:row.match_reason??null}));
 }
+// AIR-531: one indexed point read for the HTML permalink status: is this film id a member (programme or watchlist) of the pinned published generation?
+// Read-only; the caller treats any failure as "unknown", never as "absent".
+export async function isMember(env,programmeRunId,filmId){
+ const rows=await many(database(env),'SELECT 1 AS hit FROM published_epg_member WHERE programme_run_id=? AND film_id=? LIMIT 1',[programmeRunId,filmId]);
+ return rows.length>0;
+}
 export async function readMembers(env,programmeRunId,kind){
  const rows=await many(database(env),'SELECT ordinal, film_id FROM published_epg_member WHERE programme_run_id=? AND kind=? ORDER BY ordinal',[programmeRunId,kind]);
  return rows.map(row=>({ordinal:Number(row.ordinal),filmId:row.film_id}));
