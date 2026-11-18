@@ -121,10 +121,11 @@ mode='ok';
 }
 
 // 4. Clock-only transitions on an UNCHANGED generation and signature. The predicate is `start >= now-72h && start < now+24h`: a show is still cold AT start-24h and hot from +1 ms; still hot AT start+72h and cold from +1 ms.
-// A rebuild exactly at an edge must keep the edge scheduled, and a start after a boundary rebuilds at once (no grace period).
+// Owner decision of 18 November 2026: the clock-only re-evaluation is a RATE CAP of 15 minutes between rebuilds, not a freshness guarantee. A rebuild exactly at an edge must keep the edge scheduled; an edge reached inside the cap
+// is deferred (and reported by the dry run, never a verified count) and is reflected by the first start after the cap. A changed or unreadable signature is never capped (covered above).
 {
- // The clock is controlled for `Date.now()` AND for `new Date()` (the queue stamps `refreshedAt` with the latter), and it is installed BEFORE the world is built, which captures `Date` into its context.
- const HOUR=3600000,RealDate=Date;let clock=RealDate.now();const T0=clock;
+ // The clock is controlled for `Date.now()` AND `new Date()` (the queue stamps `refreshedAt` with the latter), and it is installed BEFORE the world is built, which captures `Date` into its context.
+ const HOUR=3600000,CAP=15*60000,RealDate=Date;let clock=RealDate.now();const T0=clock;
  globalThis.Date=class extends RealDate{constructor(...args){if(args.length)super(...args);else super(clock);}static now(){return clock;}};
  try{
   const c=await flowWorld({films:4});
@@ -133,9 +134,11 @@ mode='ok';
    readDocumentAt:async(env,run,kind)=>c.records.get(kind==='watchlist'?'watchlist.json':'programme.json')??null,
    assignedShowsSignature:async()=>'w0',
   };
-  // tmdb 1: first airing T0+25h (cold; hot from T0+1h+1ms). tmdb 2: airing T0-71h (hot; cold from T0+1h+1ms). tmdb 3: airing T0+25h+60001ms (hot from T0+1h+60002ms). tmdb 4: aired ten days ago (always cold).
+  // R is the instant of the second rebuild (T0+1h, exactly at the first edge, by a reconcile). tmdb 1: first airing T0+25h (cold; hot from T0+1h+1ms). tmdb 2: airing T0-71h (hot; cold from T0+1h+1ms).
+  // tmdb 3: airing R+24h+60001ms (hot from R+60002ms, one minute after the rebuild at R+CAP-ish). tmdb 4: aired ten days ago (always cold).
+  const R=T0+HOUR;
   const shows=(id,start)=>({tmdbId:id,shows:[{channelId:'c',channel:'C',start,end:start+7200000,basis:'discovery'}]});
-  const S1=T0+25*HOUR,S2=T0-71*HOUR,S3=T0+25*HOUR+60001;
+  const S1=T0+25*HOUR,S2=T0-71*HOUR,S3=R+CAP+24*HOUR+60001;
   c.records.set('programme.json',{runId:'p1',films:[],catalogFilms:[shows('1',S1),shows('2',S2),shows('3',S3),shows('4',T0-240*HOUR)]});
   const read=async()=>(await PredictionD1.openQueue(c.env)).queue;
   const cbody={scope:'watchlist_all',mode:'queued',trigger:'manual',capacity:{remainingPercent:100}};
@@ -147,25 +150,31 @@ mode='ok';
   assert.equal((await c.api('queue/reconcile',{})).status,200);
   let q=await read();assert.deepEqual(hotOf(q),['tmdb_2'],'at T0 only the film airing at T0-71h is hot');
   assert.equal(q.priorityNextChangeAt,iso(T0+HOUR+1),'the first instant the predicate changes is T0+1h+1ms, not T0+1h');
-  // Before the edge, and exactly AT the old edge (the predicate has not changed yet): nothing is due.
-  clock=T0+30*60000;assert.equal((await cdry()).priorityCause,undefined,'before the edge');
-  clock=T0+HOUR;assert.equal((await cdry()).priorityCause,undefined,'at start-24h the show is still cold and at start+72h still hot: not due');
+  // Before the edge, and exactly AT the old edge (the predicate has not changed yet): nothing is due, nothing is deferred.
+  clock=T0+30*60000;{const d=await cdry();assert.equal(d.priorityCause,undefined,'before the edge');assert.equal(d.hotBasis,undefined);}
+  clock=R;{const d=await cdry();assert.equal(d.priorityCause,undefined,'at start-24h the show is still cold and at start+72h still hot: not due');assert.equal(d.hotBasis,undefined);}
   // A rebuild EXACTLY at the edge keeps the old classification and must keep the next edge scheduled (it was dropped when the edge was recorded as `edge > now`).
   assert.equal((await c.api('queue/reconcile',{})).status,200);q=await read();
-  assert.deepEqual(hotOf(q),['tmdb_2'],'exactly at the edge the classification is still the old one');assert.equal(q.priorityNextChangeAt,iso(T0+HOUR+1),'the edge one millisecond later stays scheduled');
-  // +1 ms: due; the next start reconciles both directions.
-  clock=T0+HOUR+1;{const d=await cdry();assert.equal(d.priorityCause,'window_transition');assert.deepEqual(d.hotBasis,{status:'degraded',cause:'window_transition',hotRemaining:1,programmeRunId:'p1',showsSignature:'w0',nextChangeAt:iso(T0+HOUR+1)});}
+  assert.deepEqual(hotOf(q),['tmdb_2'],'exactly at the edge the classification is still the old one');assert.equal(q.priorityNextChangeAt,iso(R+1),'the edge one millisecond later stays scheduled');
+  // Rate cap: 1 ms past the edge but 1 ms after the rebuild. Deferred, reported, and the start does not rebuild (the accepted lag).
+  clock=R+1;{const d=await cdry();assert.equal(d.priorityCause,undefined,'inside the cap: not due');assert.deepEqual(d.hotBasis,{status:'degraded',cause:'window_transition_deferred',hotRemaining:1,programmeRunId:'p1',showsSignature:'w0',nextChangeAt:iso(R+1)},'deferred is reported, not a verified count');}
+  const builtR=q.refreshedAt;assert.equal((await start()).status,200);assert.equal((await read()).refreshedAt,builtR,'the cap holds the rebuild back');
+  // At the end of the cap: due; the start reconciles both directions before it selects.
+  clock=R+CAP-1;assert.equal((await cdry()).priorityCause,undefined,'one millisecond before the cap ends');
+  clock=R+CAP;{const d=await cdry();assert.equal(d.priorityCause,'window_transition');assert.equal(d.hotBasis.status,'degraded');}
   assert.equal((await start()).status,200);q=await read();
-  assert.deepEqual(hotOf(q),['tmdb_1'],'cold to hot at +1ms and hot to cold at +1ms');assert.ok(q.coldPending.includes('tmdb_2'));assert.equal(q.programmeRunId,'p1');
-  assert.equal(q.priorityNextChangeAt,iso(S3-24*HOUR+1),'the next edge is the third film, one minute later');
-  // No grace period: a boundary crossed one minute after the rebuild is reflected by the very next start, before any cold pick.
-  const rebuilt=q.refreshedAt;
-  clock=S3-24*HOUR;assert.equal((await cdry()).priorityCause,undefined,'at the edge itself: not due');
-  clock=S3-24*HOUR+1;assert.equal((await cdry()).priorityCause,'window_transition','one minute after the rebuild, 1 ms past the edge: due immediately');
-  assert.equal((await start()).status,200);q=await read();assert.deepEqual(hotOf(q),['tmdb_1','tmdb_3'],'the film that became hot is not behind a cold pick');assert.notEqual(q.refreshedAt,rebuilt);
-  // No loop: with no edge crossed since the rebuild, the next start rebuilds nothing.
-  const again=q.refreshedAt;clock+=1000;assert.equal((await start()).status,200);assert.equal((await read()).refreshedAt,again,'no rebuild without a crossed edge');
-  // Hot to cold when the shows pass 72 h: exactly at start+72h still hot, 1 ms later cold.
+  assert.deepEqual(hotOf(q),['tmdb_1'],'cold to hot and hot to cold, once the cap ended');assert.ok(q.coldPending.includes('tmdb_2'));assert.equal(q.programmeRunId,'p1');
+  assert.equal(q.priorityNextChangeAt,iso(S3-24*HOUR+1),'the next edge is the third film');
+  // The third film becomes hot one millisecond past its edge: deferred while inside the cap of the rebuild at R+CAP, reflected after it.
+  const builtCap=q.refreshedAt;
+  clock=S3-24*HOUR;assert.equal((await cdry()).hotBasis,undefined,'at the edge itself: nothing');
+  clock=S3-24*HOUR+1;{const d=await cdry();assert.equal(d.priorityCause,undefined);assert.equal(d.hotBasis.cause,'window_transition_deferred');}
+  assert.equal((await start()).status,200);assert.equal((await read()).refreshedAt,builtCap,'inside the cap');
+  clock=R+2*CAP;assert.equal((await cdry()).priorityCause,'window_transition');assert.equal((await start()).status,200);q=await read();
+  assert.deepEqual(hotOf(q),['tmdb_1','tmdb_3'],'the film that became hot is reflected by the first start after the cap');
+  // No loop: with no edge reached since the rebuild, the next start rebuilds nothing.
+  const again=q.refreshedAt;clock+=60000;assert.equal((await start()).status,200);assert.equal((await read()).refreshedAt,again,'no rebuild without a reached edge');
+  // Hot to cold when the shows pass 72 h: exactly at start+72h still hot, 1 ms later cold (the cap has long passed).
   clock=S1+72*HOUR;assert.equal((await cdry()).priorityCause,undefined,'exactly at start+72h the film is still hot');
   clock=S1+72*HOUR+1;assert.equal((await cdry()).priorityCause,'window_transition');
   assert.equal((await start()).status,200);q=await read();assert.ok(!q.hotPending.includes('tmdb_1'),'hot to cold 1 ms past start+72h');

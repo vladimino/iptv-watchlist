@@ -1540,13 +1540,20 @@ const queueShapeValid=queue=>!!queue&&typeof queue==='object'&&Array.isArray(que
 const PRIORITY_CARRY_MS=36*3600000;
 // The hot window of `predictionPriority`: a show start in [now - 72 h, now + 24 h).
 const PRIORITY_HOT_PAST_MS=72*3600000,PRIORITY_HOT_FUTURE_MS=24*3600000;
-// AIR-529: the queue was ranked on a completed programme whose next hot/cold edge (`priorityNextChangeAt`, the first instant the predicate changes) has been reached. There is no grace period: a start at or after the edge rebuilds before it selects,
-// so a Film that became hot is never behind a cold pick. The cost is at most one rebuild per natural start, and only while an edge of outstanding work was crossed since the last rebuild. A queue without the field (built before this change)
-// is not judged here; the missing shows signature already rebuilds it once.
-function windowTransitionCause(queue,report,now=Date.now()){
- if(!queue||queue.priorityBasis!=='completed'||queue.programmeRunId!==report?.runId||!queue.priorityNextChangeAt)return null;
+// AIR-529, owner decision of 18 November 2026: the clock-only re-evaluation is a RATE CAP, not a freshness guarantee. A queue ranked on a completed programme is rebuilt for a hot/cold edge (`priorityNextChangeAt`, the first instant the
+// predicate changes) at most once per interval, so a start does not pay a full rebuild every time an edge of thousands of outstanding Films passes. Within the interval after a rebuild, a Film that became hot may sit behind cold picks;
+// that bound is the accepted relaxation of "hot before the next cold selection" for clock-only changes. It never applies to a changed shows signature or an unreadable one, which stay immediate. A queue without the field is not judged here.
+const PRIORITY_WINDOW_REEVAL_MS=15*60000;
+function windowEdgeReached(queue,report,now=Date.now()){
+ if(!queue||queue.priorityBasis!=='completed'||queue.programmeRunId!==report?.runId||!queue.priorityNextChangeAt)return false;
  const next=Date.parse(queue.priorityNextChangeAt);
- return Number.isFinite(next)&&next<=now?'window_transition':null;
+ return Number.isFinite(next)&&next<=now;
+}
+// 'window_transition' when an edge was reached and the interval since the last rebuild has passed; `deferred` when it was reached but the rate cap holds it back (reported, never a verified count).
+function windowTransitionState(queue,report,now=Date.now()){
+ if(!windowEdgeReached(queue,report,now))return {cause:null,deferred:false};
+ const built=Date.parse(queue.refreshedAt||'');
+ return Number.isFinite(built)&&now-built<PRIORITY_WINDOW_REEVAL_MS?{cause:null,deferred:true}:{cause:'window_transition',deferred:false};
 }
 function showsAuthoritative(sync,report){
  if(!report?.runId||!Array.isArray(report.films))return false;
@@ -2490,11 +2497,13 @@ async function batchPreflight(env,body,tally=null){
  const read=await readQueueHead(env),stored=read.current,revision=read.head?.queueGeneration??null,why=queueAdvanceGate(stored,programme,profile,(await fingerprintRegistryDigests()).registry,(await predictionRecoveryOverlay(env)).revision);
  const priorityOpen=!why&&!!stored&&(stored.priorityBasis==='carried'||stored.priorityBasis==='neutral'||stored.programmeRunId!==programme.runId);
  const sync=priorityOpen?await loadJSON(env,'sync.json'):null;
- let priorityDue=priorityOpen&&priorityRefreshDue(stored,programme,sync),priorityCause=priorityDue?'programme':null;
+ let priorityDue=priorityOpen&&priorityRefreshDue(stored,programme,sync),priorityCause=priorityDue?'programme':null,priorityDeferred=false;
  // AIR-529: the same generation with new Discovery assignments. One read of the run's assigned rows per preflight, only on a queue ranked on this generation; no catalog scan.
  if(!why&&stored&&!priorityDue&&!priorityOpen&&stored.priorityBasis==='completed'&&stored.programmeRunId===programme.runId){
   const pinned=await queuePin(env,programme);
-  priorityCause=showsSignatureCause(stored,programme,await currentShowsSignature(pinned,programme))||windowTransitionCause(stored,programme);priorityDue=!!priorityCause;
+  priorityCause=showsSignatureCause(stored,programme,await currentShowsSignature(pinned,programme));
+  if(!priorityCause){const edge=windowTransitionState(stored,programme);priorityCause=edge.cause;priorityDeferred=edge.deferred;}
+  priorityDue=!!priorityCause;
  }
  if(why)return {profile,report:programme,stale:why,priorityDue:false,revision,manifestSize};
  if(!stored)return {profile,report:programme,stale:'queue_shape',priorityDue:false,revision,manifestSize};
@@ -2504,7 +2513,7 @@ async function batchPreflight(env,body,tally=null){
   const selection=await batchSelection(env,{profile,report:programme,queue:stored,pin:body.pin||null,limit:manifestSize,excludeIds});
   if(tally)tally.scannedFilms+=selection.scanned;
   const manifest=await buildBatchManifest(env,{profile,items:selection.items,runId:BATCH_PLACEHOLDER_RUN,lease:{expiresAt:Date.now()+RUNNER_LEASE_TTL,epoch:99999},dryRun});
-  return {profile,report:programme,queue:stored,revision,selection,manifest,manifestSize,priorityDue,priorityCause,bytes:batchBytes({...manifest.body,...batchPlaceholderExtras(selection,dryRun)})};
+  return {profile,report:programme,queue:stored,revision,selection,manifest,manifestSize,priorityDue,priorityCause,priorityDeferred,bytes:batchBytes({...manifest.body,...batchPlaceholderExtras(selection,dryRun)})};
  }catch(error){
   if(CATALOG_HELD_CODES.includes(error?.code))return {response:catalogHeldResponse(error.code)};
   throw error;
@@ -2576,7 +2585,7 @@ async function batchStartWork(env,body,requestId,tally){
  if(dryRun){
   // A dry run reads and writes nothing: it never rebuilds the queue, so a queue that fails the advance gate is refused.
   if(pre.stale)return batchBlocked('queue_stale',{cause:pre.stale,dryRun:true});
-  const answer=batchStartAnswer({...pre.manifest.body,...batchRealExtras(pre.selection,pre.queue,{queueRefreshed:false,queueSettled:0,dryRun:true}),runId:null,dryRun:true,...(pre.priorityDue?{priorityDue:true,priorityCause:pre.priorityCause||'programme',hotBasis:hotBasisOf(pre)}:{})});
+  const answer=batchStartAnswer({...pre.manifest.body,...batchRealExtras(pre.selection,pre.queue,{queueRefreshed:false,queueSettled:0,dryRun:true}),runId:null,dryRun:true,...(pre.priorityDue?{priorityDue:true,priorityCause:pre.priorityCause||'programme',hotBasis:hotBasisOf(pre)}:pre.priorityDeferred?{hotBasis:hotBasisOf({...pre,priorityCause:'window_transition_deferred'})}:{})});
   if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf({...pre,bytes:batchBytes(answer)},{dryRun:true});
   noteStep(env,()=>({manifestFilms:pre.manifest.films,manifestBytes:batchBytes(answer)}));
   return json(answer);
