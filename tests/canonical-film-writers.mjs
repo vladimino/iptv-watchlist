@@ -56,9 +56,9 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 
 // 1. The marker gate: at r2, prepared, held and legacy the writer reaches the database only for the marker read, at open it writes.
 if(section('1')){
- for(const [stage,expected] of [['r2','film_person_not_open'],['prepared','film_person_not_open'],['held','film_person_held'],['legacy','film_person_not_open']]){
+ for(const [stage,expected] of [['r2','film_person_unavailable'],['prepared','film_person_unavailable'],['held','film_person_held'],['legacy','film_person_unavailable']]){
   const {file,env}=fresh(stage);
-  await assert.rejects(writeFilmFacts(env,facts()),error=>error.code===expected||(stage==='legacy'&&/film_person/.test(error.code)),stage);
+  await assert.rejects(writeFilmFacts(env,facts()),error=>error.code===expected,stage);
   assert.equal(env.DB.calls.batches,0,stage+': no batch');
   if(stage!=='legacy')assert.equal(rows(file,'SELECT COUNT(*) c FROM film')[0].c,0,stage+': no row');
  }
@@ -346,9 +346,9 @@ if(section('11')){
  assert.equal(planFilmWrite({...facts(),requestId:''}).skipped[0].reason,'invalid_input');
  for(const stage of ['r2','prepared']){
   const {env,file}=fresh(stage);
-  const out=await dispatch(env,plan);
-  assert.equal(out.executed,false);assert.equal(out.reason,'projector_is_writer');assert.equal(env.DB.calls.batches,0);assert.equal(rows(file,'SELECT COUNT(*) c FROM film')[0].c,0);
-  assert.equal((await writerRoute(env)).writer,'projector');
+  await assert.rejects(()=>dispatch(env,plan),error=>error.code==='film_person_unavailable',stage);
+  assert.equal(env.DB.calls.batches,0);assert.equal(rows(file,'SELECT COUNT(*) c FROM film')[0].c,0);
+  await assert.rejects(()=>writerRoute(env),error=>error.code==='film_person_unavailable',stage);
  }
  const {env,file}=fresh('open');
  await seed(env);

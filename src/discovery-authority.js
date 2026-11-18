@@ -1,10 +1,10 @@
 // D1 authority for discovery observations, decisions, admission, the lease and
-// the continuation (ADR 0085). The marker starts at r2. Mode d1 with cutover
-// open is the only authority. Held is not that authority: readers stay on R2
-// and writers fail closed. A missing binding, or a contract below version 11,
-// stays on R2, including schema v10 with the ratings tables and no discovery
-// tables. Version 11 without these tables, a bad marker, a loading transfer,
-// or a failed read fails closed and does not serve the R2 ledger.
+// the continuation (ADR 0085, ADR 0162). Mode d1 with cutover open is the only
+// authority. Held fails closed for readers and writers. A missing binding, a
+// missing schema, a contract below version 11, a bad marker, a loading transfer
+// or a failed read is refused; none of these serves the R2 ledger. The explicit
+// local stand-in (DISCOVERY_DB_OPTIONAL) covers only a domain that is not
+// installed at all.
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 import {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
 import {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';

@@ -105,17 +105,17 @@ const code=expected=>error=>error.code===expected;
 {
  const input={kind:'film',id:'film:tmdb:1',expectedRevision:1,at:AT,requestId:'req-1',sources:[source()]};
  const legacy=database({apply:false}); // schema 12: no marker, no table
- await assert.rejects(()=>recordLocalizationSources(state(legacy),input),code('film_person_not_open'));
+ await assert.rejects(()=>recordLocalizationSources(state(legacy),input),code('film_person_unavailable'));
  const r2=database();
- await assert.rejects(()=>recordLocalizationSources(state(r2),input),code('film_person_not_open'),'r2');
+ await assert.rejects(()=>recordLocalizationSources(state(r2),input),code('film_person_unavailable'),'r2');
  sqlite(r2,"UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1");
- await assert.rejects(()=>recordLocalizationSources(state(r2),input),code('film_person_not_open'),'prepared');
+ await assert.rejects(()=>recordLocalizationSources(state(r2),input),code('film_person_unavailable'),'prepared');
  assert.equal(one(r2,'SELECT COUNT(*) FROM film_localization_source'),0);
  const held=database({open:true});
  sqlite(held,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");
  await assert.rejects(()=>recordLocalizationSources(state(held),input),code('film_person_held'),'held');
  await assert.rejects(()=>readLocalization(state(held),'film',['film:tmdb:1']),code('film_person_held'),'held readers fail closed, never R2');
- await assert.rejects(()=>readLocalization(state(r2),'film',['film:tmdb:1']),code('localization_not_authoritative'),'prepared is not a D1 read authority');
+ await assert.rejects(()=>readLocalization(state(r2),'film',['film:tmdb:1']),code('film_person_unavailable'),'prepared is not a D1 read authority');
  // From schema 13 (table not applied yet) an open marker still cannot write: a clear unavailable, not a half write.
  const v13=database({upTo:chain.length,apply:false,open:true});
  await assert.rejects(()=>recordLocalizationSources(state(v13),input),code('localization_source_unavailable'));

@@ -9,7 +9,7 @@
 //   with counts, order-independent sha256 digests and differences classified missing / extra / differs. A difference is explained only by an explicit rule
 //   or an owner-supplied exception; the gate needs zero unexplained differences, a complete and consistent read and a verified source identity.
 // - Lists in a ledger name keys only (never a title, name or payload) and are bounded.
-import {database,failed,one,readAuthority} from './film-person-authority.js';
+import {database,failed,one,readMarker} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
 
 export const LEDGER_VERSION=1;
@@ -505,7 +505,7 @@ export function makeGate(db,{expectedGeneration,leaseId,now=()=>new Date().toISO
 // ---------- recording the baseline ----------
 const MARKER_R2=generation=>[fenced.assertSql("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='r2' AND cutover='open' AND generation=?)"),[generation]];
 async function markerR2(env,expectedGeneration){
- const gate=await readAuthority(env);
+ const gate=await readMarker(env);
  if(gate.state!=='r2'||gate.generation!==expectedGeneration)throw failed('baseline_marker_not_r2');
  return gate;
 }
@@ -514,7 +514,7 @@ async function runBatch(env,statements,expectedGeneration){
  try{await db.batch(statements.map(([sql,params])=>db.prepare(sql).bind(...params)));}
  catch(error){
   if(/CHECK constraint failed/i.test(String(error?.message||error))){
-   let again;try{again=await readAuthority(env);}catch{throw failed('film_person_unavailable',error);}
+   let again;try{again=await readMarker(env);}catch{throw failed('film_person_unavailable',error);}
    if(again.state!=='r2'||again.generation!==expectedGeneration)throw failed('baseline_marker_not_r2',error);
    throw failed('baseline_state_changed',error);
   }

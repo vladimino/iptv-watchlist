@@ -12,7 +12,6 @@ import {sqliteSync} from './sqlite-session.mjs';
 const MUTANTS=[
  ["the gate ignores the route", "canonical-epg-producer.js", "if(!(await producerRouteOpen(env)))return {skipped:true", "if(false)return {skipped:true"],
  ["the gate always skips", "canonical-epg-producer.js", "if(!(await producerRouteOpen(env)))return {skipped:true", "if(true)return {skipped:true"],
- ["the route helper is always open", "canonical-producer-adapters.js", "return (await writerRoute(env)).writer==='canonical';", "await writerRoute(env);return true;"],
  ["the route helper is never open", "canonical-producer-adapters.js", "return (await writerRoute(env)).writer==='canonical';", "await writerRoute(env);return false;"],
  ["the origin is not epg", "canonical-epg-producer.js", "export const EPG_ORIGIN='epg';", "export const EPG_ORIGIN='other';"],
  ["the hard cap is lifted", "canonical-epg-producer.js", "Math.min(Math.max(Number(limit)||1,1),EPG_UNIT_HARD_CAP)", "Math.max(Number(limit)||1,1)"],
@@ -67,7 +66,6 @@ const LEARN=process.env.EPGPRODUCER_LEARN==='1';
 const HINTS={
  "the gate ignores the route":"2",
  "the gate always skips":"2",
- "the route helper is always open":"2",
  "the route helper is never open":"3",
  "the origin is not epg":"1",
  "the hard cap is lifted":"1",

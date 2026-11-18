@@ -126,23 +126,14 @@ if(section('1')){
 }
 
 // 2. Dormancy: below open a pass and an inline reconcile each cost exactly one marker read (SELECTs only), no batch, nothing written; held throws.
-for(const stage of section('2')?['r2','prepared']:[]){
+for(const stage of section('2')?['legacy','r2','prepared']:[]){
  const file=database(stage),before=dump(file);
- const probe=envOf(file);await readAuthority(probe);
- const markerQueries=probe.DB.calls.queries;
- const seen=[];
- const env=envOf(file,{onQuery:async text=>{seen.push(text);}});
- const done=await applyEpgPersonUnits(env,{plan:plan(),now:()=>T});
- assert.equal(done.skipped,true,stage);assert.equal(done.reason,'projector_is_writer');assert.equal(done.cursor,0);assert.equal(done.done,false);
- assert.equal(env.DB.calls.queries,markerQueries,stage+': exactly one marker read');
- assert.ok(seen.every(text=>/^\s*SELECT/i.test(text)));assert.equal(env.DB.calls.batches,0);
- assert.equal((await reconcileEpgRun(env,{plan:plan()})).skipped,true);
- assert.equal(env.DB.calls.queries,2*markerQueries,stage+': the reconcile reads only the marker');
- for(const apply of [applyPersonState,applyFilmCredits]){
-  const direct=envOf(file);
-  const out=await apply(direct,{origin:'epg',event:'epg:x',input:apply===applyPersonState?{id:PID(1),at:T,person:state()}:{id:FID(1),at:T,credits:films2[1].credits}});
-  assert.deepEqual([out.state,out.receipt],['skipped',false]);assert.equal(direct.DB.calls.queries,markerQueries);
- }
+ const env=envOf(file);
+ await assert.rejects(()=>applyEpgPersonUnits(env,{plan:plan(),now:()=>T}),code('film_person_unavailable'),stage);
+ await assert.rejects(()=>reconcileEpgRun(env,{plan:plan()}),code('film_person_unavailable'),stage);
+ for(const apply of [applyPersonState,applyFilmCredits])
+  await assert.rejects(()=>apply(envOf(file),{origin:'epg',event:'epg:x',input:apply===applyPersonState?{id:PID(1),at:T,person:state()}:{id:FID(1),at:T,credits:films2[1].credits}}),code('film_person_unavailable'),stage);
+ assert.equal(env.DB.calls.batches,0,stage+': no batch');
  assert.equal(dump(file),before,stage+': nothing written');
 }
 if(section('2')){

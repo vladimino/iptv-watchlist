@@ -1123,8 +1123,9 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // AIR-374 P3c: the catch-up of the canonical Discovery admission, once per completed paged chunk (the one path every Discovery hop runs, with or without a new admission): the origin's own due receipts and the sweep of current movie admissions without a
  // trusted canonical Film. One cached marker read below the marker `open`; bounded and never throws at `open`; skipped when the chunk has no time left for it.
  if(typeof CanonicalDiscoveryAdmission!=='undefined'&&Date.now()<canonicalLimit()){try{await CanonicalDiscoveryAdmission.admitDiscoveryFilms(env,{films:{},written:[],deadline:canonicalLimit()});}catch{/* the chunk keeps its own outcome */}}
- // The prediction queue is not refreshed here: that call has no bound of its own, and the prediction runner refreshes the queue
- // from the catalog on every step, so a Film admitted by this chunk joins it on the runner's next step.
+ // The prediction queue is not refreshed here: that call has no bound of its own. The runner does NOT rebuild it on every step (AIR-431): a batch start
+ // refreshes it only when its gate or its priority basis is stale. AIR-529: new `published_epg_show` assignments inside the same programmeRunId change
+ // `PublishedEpg.assignedShowsSignature`, and the next batch preflight sees that as priority-due (or, if unreadable, degraded) and rebuilds hot/cold before it selects.
  // The preview is this chunk's scored outcomes. remaining is the SQL actionable set minus what this chunk settled, not the page.
  if((walkComplete||checked>0)&&Date.now()+writeEstimate(1)<=persistLimit()){try{await fence();await timedWrite(()=>saveScorePreview(env,source,preview));}catch(e){if(e&&typeof e==='object'&&!e.failedAt)e.failedAt='preview';throw lost(e,'preview');}}
  timings.writeMaxMs=writeCostMs;

@@ -55,15 +55,13 @@ const open=async(file,over={})=>{
  return openEpgRun(envOf(file),{runKey:'run-1',sourceGeneration:GEN,fingerprint:await fingerprintOf(units),units,at:T,...over});
 };
 
-// 1. Dormant below open: ONE marker read and nothing else; held throws and never falls back.
+// 1. Below open: refused with film_person_unavailable, nothing written; held throws and never falls back.
 for(const stage of ['legacy','r2','prepared']){
  const file=database(stage),before=dump(file),env=envOf(file);
- const probe=envOf(file);await writerRoute(probe);
- assert.deepEqual(await openEpgRun(env,{runKey:'run-1',sourceGeneration:GEN,fingerprint:await fingerprintOf(unitsOf(2)),units:unitsOf(2),at:T}),{state:'skipped',reason:'projector_is_writer'},stage);
- assert.equal(env.DB.calls.queries,probe.DB.calls.queries,'exactly the marker read ('+stage+')');
+ await assert.rejects(async()=>openEpgRun(env,{runKey:'run-1',sourceGeneration:GEN,fingerprint:await fingerprintOf(unitsOf(2)),units:unitsOf(2),at:T}),code('film_person_unavailable'),stage);
  assert.equal(env.DB.calls.batches,0);
  for(const call of [()=>mintDictionaryRun(env,{snapshotDigest:hex('a'),fingerprint:hex('b'),unitCount:0,at:T}),()=>commitStrike(env,{run:{origin:'epg',run_key:'x',revision:1},next:{strike_count:1},at:T}),()=>commitSlice(env,{run:{origin:'epg',run_key:'x',revision:1},next:{cursor_kind:'film_facts',cursor_id:'film:a'},at:T}),()=>commitPassComplete(env,{run:{origin:'epg',run_key:'x',revision:1,source_generation:GEN},openAtCompletion:0,at:T}),()=>commitStop(env,{run:{origin:'epg',run_key:'x',revision:1},stoppedBy:'film_person_unavailable',at:T}),()=>settleResult(env,{row:{state:'open',attempts:1,origin:'epg',run_key:'x',pass_no:1,kind:'film_facts',unit_id:'film:a'},state:'settled',settledBy:'applied',at:T})])
-  assert.deepEqual(await call(),{state:'skipped',reason:'projector_is_writer'},stage);
+  await assert.rejects(call,code('film_person_unavailable'),stage);
  assert.equal(dump(file),before,'nothing written at '+stage);
 }
 {

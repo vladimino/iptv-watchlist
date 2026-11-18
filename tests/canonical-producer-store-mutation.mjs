@@ -9,7 +9,7 @@ import path from 'node:path';
 import {sqliteSync} from './sqlite-session.mjs';
 
 const MUTANTS=[
- ["the route gate is ignored", "canonical-producer-store.js", "return route.writer==='canonical'?{open:true,generation:route.generation}:{open:false};", "return {open:true,generation:route.generation};"],
+ ["the route gate is ignored", "canonical-producer-store.js", "const route=await writerRoute(env);\n return route.writer==='canonical'?{open:true,generation:route.generation}:{open:false};", "const route=await writerRoute(env).catch(()=>({writer:'projector'}));\n return route.writer==='canonical'?{open:true,generation:route.generation}:{open:false};"],
  ["the create is not insert-or-ignore", "canonical-producer-store.js", "ON CONFLICT(origin,run_key) DO NOTHING", ""],
  ["an existing run of another source generation is resumed or replayed", "canonical-producer-store.js", "if(stored.source_generation!==sourceGeneration)throw failed('producer_source_generation_mismatch');", ""],
  ["an equal fingerprint is not resumed", "canonical-producer-store.js", "if(decision.action==='resume')return", "if(false)return"],

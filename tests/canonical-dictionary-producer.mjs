@@ -108,19 +108,13 @@ if(section('1')){
 }
 
 // 2. Dormancy: below open a pass and an inline reconcile each cost exactly one marker read; held throws; a malformed call reads nothing.
-for(const stage of section('2')?['r2','prepared']:[]){
+for(const stage of section('2')?['legacy','r2','prepared']:[]){
  const file=database(stage),before=dump(file);
- const probe=envOf(file);await readAuthority(probe);
- const markerQueries=probe.DB.calls.queries;
- const seen=[];
- const env=envOf(file,{onQuery:async statement=>{seen.push(statement);}});
+ const env=envOf(file);
  const p=await plan([entry(1)]);
- const done=await D.applyDictionaryUnits(env,{plan:p,now:()=>T});
- assert.deepEqual([done.skipped,done.reason,done.cursor,done.done],[true,'projector_is_writer',0,false],stage);
- assert.equal(env.DB.calls.queries,markerQueries,stage+': exactly one marker read');
- assert.ok(seen.every(statement=>/^\s*SELECT/i.test(statement)));assert.equal(env.DB.calls.batches,0);
- assert.equal((await D.reconcileDictionary(env,{plan:p})).skipped,true);
- assert.equal(env.DB.calls.queries,2*markerQueries);
+ await assert.rejects(()=>D.applyDictionaryUnits(env,{plan:p,now:()=>T}),code('film_person_unavailable'),stage);
+ await assert.rejects(()=>D.reconcileDictionary(env,{plan:p}),code('film_person_unavailable'),stage);
+ assert.equal(env.DB.calls.batches,0,stage+': no batch');
  assert.equal(dump(file),before,stage+': nothing written');
 }
 if(section('2')){
