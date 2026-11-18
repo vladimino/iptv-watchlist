@@ -13,10 +13,16 @@ Other consumers of `run.error` checked: the production monitor (`src/monitor.js`
 
 ## Change
 
-- `completion(env, run)` in `src/epg-orchestration.js`: a complete run without an error is proven by its stage (unchanged); one with an error is proven only by a valid `completedAt` and the D1 published pointer (`PublishedEpg.readAuthority`: `ready`, `programmeRunId === run.runId`). Results: `proven`, `unproven`, `unreadable`.
-- `drive`: for a complete run of the control's own day, `proven` finishes (note `recovered_complete`) or drains the owed event / Ratings hand-over through `/api/sync/epg` on the same `runId`; `unproven` is `evidence_contradictory` (unsafe); `unreadable` is `d1_unavailable` (transient). No path from a same-day complete run reaches `/api/sync/start`. Foreign-day complete runs keep the AIR-464 rule.
+- `completion(env, run)` in `src/epg-orchestration.js`: a complete run is proven only by a completion receipt (the AIR-518 rule: `completedAt` when the field exists and parses; for a legacy record without it, `updatedAt` only without an `error`) and the D1 published pointer (`PublishedEpg.readAuthority`: `ready`, `programmeRunId === run.runId`), with or without an `error`. Results: `proven`, `unproven`, `unreadable`.
+- `drive`: a `seal` or `complete` run with a malformed or contradicting frozen day is `evidence_contradictory` first. For a complete run of the control's own day, `proven` finishes (note `recovered_complete` when it carries an error) or takes one `/api/sync/epg` step on the same `runId` for an owed event or Ratings hand-over (`handoverOwed`: `removalRefs`, `removalLookups`, or `ratingPending` with an absent or `started` attempt); `unproven` is `evidence_contradictory` (unsafe); `unreadable` is `d1_unavailable` (transient). A step that reaches `complete` certifies the control only on the same proof. No path from a same-day complete run reaches `/api/sync/start`. Foreign-day complete runs keep the AIR-464 rule.
 - `readModel`: `doneToday` uses the same proof; `syncRun.priorAttemptError` reports the history. `GET /api/status` / `epg_status` add `priorAttemptError`; `error` is unchanged.
 - Writers are unchanged: the error stays on the record as evidence.
+
+### Review round 1 (independent review on `6ce37b7`, project-level BLOCK)
+
+- P1: a no-error complete run was credited on its stage alone (the first version proved only runs with an error). Now every same-day complete run needs the proof, including the step that completes it; the scripted pipeline moves the pointer in its `publish` phase and writes `completedAt` at completion, like the real seal.
+- P1: a complete run with a malformed or contradicting frozen day fell through to `/api/sync/start`. Now `evidence_contradictory`, no start.
+- P2: a Ratings-only hand-over was not owed in `drive`. Now one bounded drain step on the same `runId`.
 
 ## Red before, green after
 
@@ -27,18 +33,25 @@ The new block `7k` in `tests/epg-orchestration.mjs` was run against the previous
 
 With the change, the whole file passes (`epg-orchestration: ok`).
 
+Review round 1: the new cases below were run against `6ce37b7` (previous PR head) and each group failed there: `no error, the D1 pointer names another run: not done in the read model`, `malformed runKey: no start`, `removal references: exactly one hand-over step`. With the fix the file passes.
+
 ## Cases covered (block `7k`)
 
 | Case | Result |
 |---|---|
 | Same day, `complete`, valid `completedAt`, prior `error`, pointer at the run, control without `doneAt` | Read model `healthy`, `overdueMs: null`, `priorAttemptError: true`; no `/api/sync/start`, no step; control `doneAt`, `publishedRunId` and `runId` = the run, `lastStep.note: recovered_complete`; pointer and `error` unchanged; a repeated action stops on `complete` |
 | Same, with an owed `epg` event and watchlist hand-over | One `/api/sync/epg` drain on the same `runId`, markers cleared, finished; no start |
+| Same, with only a Ratings hand-over owed (`removalRefs` single or list, `removalLookups`, open `ratingAttempt`) and a gate that keeps it | Exactly one `/api/sync/epg` step on the same `runId`, finished, publication unchanged; a repeated action takes no further step |
+| A closed ratings attempt with `ratingPending` | History, not owed: finished with no step |
 | Same, the finishing control CAS lost once | Next action re-proves and finishes; no start |
-| Pointer at another run, pointer at no run, no `completedAt`, malformed `completedAt` | Read model not `healthy`; `evidence_contradictory`, no `doneAt`, no start |
+| With error: pointer at another run, at no run, no `completedAt`, malformed `completedAt` | Read model not `healthy`; `evidence_contradictory`, no `doneAt`, no start |
+| Without error: pointer at another run, at no run, malformed `completedAt`, no `runId` | Same: not done, `evidence_contradictory`, no step, no start |
+| Without error, receipt and pointer at the run; legacy record without `completedAt` (receipt `updatedAt`) | Finished on the same runId, no step, `note: null` |
+| Complete with error and a malformed `runKey`, a `runKey` contradicting `startedAt`, an unparseable or absent `startedAt` | `evidence_contradictory`, no step, no start, publication unchanged |
+| A seal step that reaches `complete` while the pointer still names the previous run | `evidence_contradictory`, no `doneAt`, no start |
 | Authority read throws inside the action | Transient `d1_unavailable` cooldown, then proven and finished; no start |
 | `stage: seal` with an `error` | Not done, `priorAttemptError: false`; the seal continues under its `runId` |
 | Complete with an `error` of the previous Madrid day | Today's run starts once (unchanged) |
-| Complete without an `error` (pointer elsewhere) | Finished on its stage as before; no authority proof needed, `note: null` |
 
 ## Limitations
 

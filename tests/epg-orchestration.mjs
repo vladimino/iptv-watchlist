@@ -291,8 +291,10 @@ function pipeline({metadataSteps=2,busyOnce=false,fail=null,windowBusy=null,jour
   if(state.sync.stage==='epg'){state.sync={...state.sync,stage:'seal',seal:{phase:'ledger'},updatedAt:at(state.now())};return {body:{runId:state.sync.runId,stage:'seal',seal:{phase:'ledger'}}};}
   if(busy){busy=false;return {body:{runId:state.sync.runId,stage:'seal',discovery:{state:'busy',nextAction:'wait',reason:'busy',nextCatchUpAt:at(state.now()+3*MIN)}}};}
   const order=['ledger','catalog','publish','finalize','queue'],index=order.indexOf(state.sync.seal.phase);
+  // The `publish` phase moves the D1 published pointer to the run (AIR-525 proof); the last phase writes the completion receipt.
+  if(order[index]==='publish')state.authority={...state.authority,programmeRunId:state.sync.runId};
   if(index<order.length-1){state.sync={...state.sync,seal:{phase:order[index+1]},updatedAt:at(state.now())};return {body:{runId:state.sync.runId,stage:'seal',seal:{phase:order[index+1]}}};}
-  state.sync={...state.sync,stage:'complete',updatedAt:at(state.now())};delete state.sync.seal;
+  state.sync={...state.sync,stage:'complete',completedAt:at(state.now()),updatedAt:at(state.now())};delete state.sync.seal;
   return {body:{runId:state.sync.runId,stage:'complete',discovery:{state:'paused',reason:'epg_committed'}}};
  };
 }
@@ -353,6 +355,8 @@ async function adopt({sync,startAt='2026-11-08T16:00:00Z',runKey='2026-11-08',me
  const {epg,env,state}=h;
  const due=Date.parse(startAt);
  state.sync=sync(due);
+ // A seal past its `publish` phase has already moved the D1 published pointer to its run (AIR-525 proof).
+ if(state.sync?.stage==='seal'&&['finalize','queue'].includes(state.sync.seal?.phase))state.authority={...state.authority,programmeRunId:state.sync.runId};
  const r=runner(h,{startAt:due});
  const original=r.step.do;
  r.step.do=async(name,fn)=>{const out=await original(name,fn);if(snapshots&&name.startsWith('act'))snapshots.push({name,out,control:await control(h)});return out;};
@@ -569,7 +573,7 @@ for(const stage of ['epg','seal']){
  const h=cloudflare({pipeline:pipeline({metadataSteps:0})});
  const r=runner(h,{startAt:due});
  await h.epg.ensure(h.env,{now:due});
- h.state.sync={runId:'owed',stage:'complete',runKey:'2026-11-07',startedAt:at(due),updatedAt:at(due-20*MIN),epgEventPending:{id:'owed-epg',type:'epg',at:at(due)},watchlistEventPending:true};
+ h.state.sync={runId:'owed',stage:'complete',runKey:'2026-11-07',startedAt:at(due),updatedAt:at(due-20*MIN),epgEventPending:{id:'owed-epg',type:'epg',at:at(due)},watchlistEventPending:true};h.state.authority.programmeRunId='owed';
  const outcome=await follow(h.epg,h.env,r,'2026-11-07');
  assert.equal(outcome.reason,'complete');
  assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/start').length,0);
@@ -603,7 +607,7 @@ for(const stage of ['epg','seal']){
  const h=cloudflare({pipeline:pipeline({metadataSteps:0,journalFailClearOnce:true})});
  const r=runner(h,{startAt:due});
  await h.epg.ensure(h.env,{now:due});
- h.state.sync={runId:'owed',stage:'complete',runKey:'2026-11-07',startedAt:at(due),updatedAt:at(due-20*MIN),watchlistEventPending:true,watchlistEventFixed:true,events:[event]};
+ h.state.sync={runId:'owed',stage:'complete',runKey:'2026-11-07',startedAt:at(due),updatedAt:at(due-20*MIN),watchlistEventPending:true,watchlistEventFixed:true,events:[event]};h.state.authority.programmeRunId='owed';
  const outcome=await follow(h.epg,h.env,r,'2026-11-07');
  assert.equal(outcome.reason,'complete');
  assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/epg'&&c.body.runId==='owed').length,2);
@@ -618,7 +622,7 @@ for(const stage of ['epg','seal']){
  const h=cloudflare({pipeline:pipeline({metadataSteps:0,journalKeepPending:true})});
  const r=runner(h,{startAt:due});
  await h.epg.ensure(h.env,{now:due});
- h.state.sync={runId:'stuck',stage:'complete',runKey:'2026-11-07',startedAt:at(due),updatedAt:at(due-20*MIN),watchlistEventPending:true};
+ h.state.sync={runId:'stuck',stage:'complete',runKey:'2026-11-07',startedAt:at(due),updatedAt:at(due-20*MIN),watchlistEventPending:true};h.state.authority.programmeRunId='stuck';
  let acts=0;
  const step={
   async do(name,fn){const value=await r.step.do(name,fn);if(String(name).startsWith('act-')&&++acts>=4)throw new Error('stop after four journal retries');return value;},
@@ -635,7 +639,7 @@ for(const stage of ['epg','seal']){
 // success. The executor starts nothing and publishes nothing.
 {
  const due=Date.parse('2026-11-07T16:00:00Z');
- const h=cloudflare({sync:{runId:'earlier',stage:'complete',startedAt:at(due+5*MIN),updatedAt:at(due+9*MIN)},pipeline:()=>{throw new Error('the pipeline must not be called');}});
+ const h=cloudflare({sync:{runId:'earlier',stage:'complete',startedAt:at(due+5*MIN),updatedAt:at(due+9*MIN)},authority:{ready:true,programmeRunId:'earlier'},pipeline:()=>{throw new Error('the pipeline must not be called');}});
  await h.epg.ensure(h.env,{now:due+20*MIN});
  const r=runner(h,{startAt:due+20*MIN});h.state.now=r.clock;
  const outcome=await follow(h.epg,h.env,r,'2026-11-07');
@@ -1562,14 +1566,83 @@ for(const stage of ['epg','seal']){
   assert.equal(outcome.reason,'complete');assert.equal(starts(h),1);
   assert.equal((await control(h)).publishedRunId,'run-1');
  }
- {// the healthy path does not regress: no error, no authority read needed
-  const h=setup({sync:recovered({error:undefined}),authority:{ready:true,programmeRunId:'other'}});
+ {// the healthy path does not regress: no error, a receipt and the pointer at the run finish on the same runId with no step
+  const h=setup({sync:recovered({error:undefined})});
   const r=runner(h,{startAt:due+30*MIN});
   await h.epg.ensure(h.env,{now:due+30*MIN});
   const outcome=await follow(h.epg,h.env,r,day);
-  assert.equal(outcome.reason,'complete');assert.equal(starts(h),0);
+  assert.equal(outcome.reason,'complete');assert.equal(starts(h),0);assert.equal(h.state.calls.length,0);
   const c=await control(h);assert.equal(c.publishedRunId,'rec');assert.equal(c.lastStep.note,null);
+  // A legacy no-error record without `completedAt` keeps `updatedAt` as its receipt (the AIR-518 rule).
+  const legacy=setup({sync:recovered({error:undefined,completedAt:undefined})});
+  const r2=runner(legacy,{startAt:due+30*MIN});
+  await legacy.epg.ensure(legacy.env,{now:due+30*MIN});
+  assert.equal((await follow(legacy.epg,legacy.env,r2,day)).reason,'complete');assert.equal(starts(legacy),0);
+ }
+ for(const [label,sync,authority] of [
+  ['no error, the D1 pointer names another run',recovered({error:undefined}),{ready:true,programmeRunId:'other'}],
+  ['no error, the D1 pointer names no run',recovered({error:undefined}),{ready:true,programmeRunId:null}],
+  ['no error, a malformed completedAt',recovered({error:undefined,completedAt:'not-a-date'}),{ready:true,programmeRunId:'rec'}],
+  ['no error, no runId',recovered({error:undefined,runId:undefined}),{ready:true,programmeRunId:'rec'}],
+ ]){// stage alone is not a success: no doneAt, no healthy, and still no second run
+  const h=setup({sync,authority});
+  const r=runner(h,{startAt:due+30*MIN});
+  await h.epg.ensure(h.env,{now:due+30*MIN});
+  assert.notEqual((await h.epg.readModel(h.env,due+30*MIN)).health,'healthy',label+': not done in the read model');
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(starts(h),0,label+': no second run');assert.equal(h.state.calls.length,0,label+': nothing stepped');
+  assert.equal(outcome.reason,'evidence_contradictory',label);
+  const c=await control(h);assert.equal(c.doneAt,null,label);assert.equal(c.publishedRunId,null,label);
+ }
+ for(const [label,extra] of [
+  ['malformed runKey',{runKey:'tomorrow'}],
+  ['runKey contradicts startedAt',{runKey:'2026-11-06'}],
+  ['unparseable startedAt',{startedAt:'not-a-date'}],
+  ['absent startedAt',{startedAt:undefined}],
+ ]){// AIR-464: a complete run (with a prior error) whose frozen day is malformed or contradicting fails closed, even with the pointer at it
+  const h=setup({sync:recovered(extra)});
+  const r=runner(h,{startAt:due+30*MIN});
+  await h.epg.ensure(h.env,{now:due+30*MIN});
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(starts(h),0,label+': no start');assert.equal(h.state.calls.length,0,label+': nothing stepped');
+  assert.equal(outcome.reason,'evidence_contradictory',label);
+  assert.equal(h.state.authority.programmeRunId,'rec',label+': publication unchanged');
+  const c=await control(h);assert.equal(c.doneAt,null,label);assert.equal(c.failure.code,'evidence_contradictory',label);
+ }
+ for(const [label,extra] of [
+  ['removal references',{removalRefs:{films:[{id:'f1'}],ref:{eventKey:'events/items/x.json',sourceRunId:'rec',at:at(due+5*MIN)}}}],
+  ['removal references as a list',{removalRefs:[{films:[{id:'f1'}],ref:{eventKey:'events/items/x.json'}}]}],
+  ['removal lookups',{removalLookups:[{id:'f1'}]}],
+  ['an open ratings attempt',{ratingPending:[{id:'f1'}],ratingAttempt:{state:'started',phase:'lookup',at:at(due+5*MIN)}}],
+ ]){// a Ratings hand-over alone (events already written): one /api/sync/epg step on the same runId, then finished; bounded under a gate
+  // that keeps the hand-over (the scripted continuation leaves those fields as they are, like a blocked Ratings gate)
+  const h=setup({sync:recovered(extra)});
+  const r=runner(h,{startAt:due+30*MIN});
+  await h.epg.ensure(h.env,{now:due+30*MIN});
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(outcome.reason,'complete',label);assert.equal(starts(h),0,label+': no start');
+  const steps=h.state.calls.filter(c=>c.pathname==='/api/sync/epg');
+  assert.equal(steps.length,1,label+': exactly one hand-over step');assert.ok(steps.every(c=>c.body.runId==='rec'),label+': same runId');
+  assert.equal(h.state.authority.programmeRunId,'rec',label+': publication unchanged');
+  const c=await control(h);assert.ok(c.doneAt,label);assert.equal(c.publishedRunId,'rec',label);assert.equal(c.lastStep.note,'recovered_complete',label);
+  // A repeated action stops on the control record: no second hand-over step, no start.
+  assert.equal((await follow(h.epg,h.env,r,day)).reason,'complete');assert.equal(h.state.calls.length,1,label);
+ }
+ {// a closed ratings attempt is history, not an owed hand-over
+  const h=setup({sync:recovered({ratingPending:[{id:'f1'}],ratingAttempt:{state:'unknown',cause:'interrupted'}})});
+  const r=runner(h,{startAt:due+30*MIN});
+  await h.epg.ensure(h.env,{now:due+30*MIN});
+  assert.equal((await follow(h.epg,h.env,r,day)).reason,'complete');assert.equal(h.state.calls.length,0);
+ }
+ {// a step that completes a run whose proof does not hold does not certify the control: the pointer never moved to the run
+  const h=cloudflare({pipeline:pipeline({metadataSteps:0})});
+  const r=runner(h,{startAt:due});
+  await h.epg.ensure(h.env,{now:due});
+  h.state.sync={runId:'nopub',stage:'seal',runKey:day,startedAt:at(due),updatedAt:at(due),seal:{phase:'queue'}};
+  h.state.authority={ready:true,programmeRunId:'previous'};
+  const outcome=await follow(h.epg,h.env,r,day);
+  assert.equal(outcome.reason,'evidence_contradictory');assert.equal(starts(h),0);
+  const c=await control(h);assert.equal(c.doneAt,null);assert.equal(c.publishedRunId,null);
  }
 }
-
 console.log('epg-orchestration: ok');
