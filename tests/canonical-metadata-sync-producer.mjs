@@ -326,4 +326,42 @@ const filmRow=id=>({id,url:'https://letterboxd.com/film/heat-1995/',title:'Heat'
  assert.equal(seen[2].length,0);
 }
 
+// AIR-533: one sanitized `metadata_sync_breakdown` per step on every outcome, and the step's results and exceptions stay exactly as they were.
+{
+ const files=new Map(),logs=[];
+ const behaviours=[
+  ()=>({state:'incomplete',applied:0,failed:1,unknown:0,preflightFailed:0,refused:0,intent:[{requestId:'held-1',operation:'film_metadata',input:{x:1}}]}),
+  ()=>{const error=new Error('D1_ERROR: injected');error.code='d1_error';throw error;},
+  ()=>{const error=new Error('held');error.code='film_person_held';throw error;},
+  ()=>({state:'complete',applied:1,failed:0,unknown:0,preflightFailed:0,refused:0,intent:[]}),
+ ];
+ let call=0;
+ const CanonicalMetadataSync={
+  applyMetadataSync:async()=>behaviours[call++](),
+  metadataSyncSettled:out=>M.metadataSyncSettled(out),
+  metadataSyncRecord:out=>M.metadataSyncRecord(out),
+  carryMetadataSyncIntent:out=>M.carryMetadataSyncIntent(out),
+ };
+ const ctx=workerCtx(CanonicalMetadataSync,files);
+ ctx.console={log:line=>{try{logs.push(JSON.parse(line));}catch{}}};
+ const original=filmRow('28nq');
+ files.set('metadata.json',{'28nq':original});
+ const run={runId:'breakdown',stage:'metadata',watchlist:[structuredClone(original)],pending:['28nq'],cursor:0,remaining:1,failures:[]};
+ ctx.run=run;
+ const incomplete=await vm.runInContext('metadataSync(env,run)',ctx);
+ assert.equal(incomplete.canonicalMetadataIncomplete,true);
+ const handled=await vm.runInContext('metadataSync(env,run)',ctx);
+ assert.equal(handled.canonicalMetadataIncomplete,true);
+ assert.equal(run.canonicalMetadataErrors,1);
+ await assert.rejects(vm.runInContext('metadataSync(env,run)',ctx),error=>error.code==='film_person_held');
+ const ok=await vm.runInContext('metadataSync(env,run)',ctx);
+ assert.equal(ok.stage,'epg');
+ const lines=logs.filter(line=>line.event==='epg_phase'&&line.phase==='metadata_sync_breakdown');
+ assert.deepEqual(lines.map(line=>line.outcome),['incomplete','handled_error','thrown','ok']);
+ for(const line of lines){
+  assert.deepEqual(Object.keys(line).sort(),['at','canonicalMs','edge','event','fetchMs','films','loadMs','localizeMs','outcome','phase','runId','tailMs','totalMs'].sort(),'sanitized: outcome, counts and milliseconds only');
+  for(const field of ['films','loadMs','fetchMs','localizeMs','canonicalMs','tailMs','totalMs'])assert.ok(Number.isFinite(line[field])&&line[field]>=0,field);
+ }
+}
+
 console.log('canonical-metadata-sync-producer: ok');
