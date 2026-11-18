@@ -28,10 +28,12 @@ jobs:
         with:
           persist-credentials: false
 
+      # AIR-490: Node.js 22 for this workflow only. footer-memory-profile.mjs (AIR-519) needs node:sqlite, which Node 20 lacks.
+      # Required core CI stays on Node.js 20 (ci.yml); this nightly is not a deploy gate.
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
