@@ -111,10 +111,6 @@ export const FILES={
  "candidate-discovery.mjs": {
   "suite": "core"
  },
- "bench-watchlist-retention.mjs": {
-  "suite": "non-functional",
-  "note": "AIR-532 offline benchmark: D1 round trips and wall time of one daily watchlist retention scan on the sqlite D1 stand-in. A measurement, not a check of production behaviour."
- },
  "candidate-show-identity.mjs": {
   "suite": "core"
  },
