@@ -100,7 +100,7 @@ if(on(1)){
 if(on(2)){
  const input={id:ID,expectedRevision:0,at:T,requestId:'r1',person:{identity,localization:loc()}};
  const conflicts={kind:'person',id:ID,expectedRevision:0,at:T,requestId:'r2',conflicts:[{value:'v',reason:'owner_kept',at:T}]};
- for(const [stage,expected] of [['r2','film_person_not_open'],['prepared','film_person_not_open'],['held','film_person_held']]){
+ for(const [stage,expected] of [['r2','film_person_unavailable'],['prepared','film_person_unavailable'],['held','film_person_held']]){
   const file=database(stage);seedPerson(file);
   const env=envOf(file),before=dump(file);
   for(const [call,arg] of [[recordPersonState,input],[recordLocalizationConflicts,conflicts]]){
@@ -115,7 +115,7 @@ if(on(2)){
  assert.deepEqual(await recordPersonState(env,input),{id:ID,revision:1,already:false,requestId:'r1'});
  assert.equal(one(open,"SELECT value FROM person_dimension WHERE dimension='localization'"),'Новое');
  const legacy=path.join(root,'legacy.sqlite');assert.equal(sqlite(legacy,chain.filter(name=>name<'0013').map(sql).join('\n')).status,0);
- await assert.rejects(()=>recordPersonState(envOf(legacy),input),code('film_person_not_open'),'legacy is not writable');
+ await assert.rejects(()=>recordPersonState(envOf(legacy),input),code('film_person_unavailable'),'legacy is not writable');
  await assert.rejects(()=>recordPersonState(envOf(open),{...input,expectedRevision:-1}),code('film_person_invalid'));
  await assert.rejects(()=>recordPersonState(envOf(open),{...input,requestId:''}),code('film_person_invalid'));
  await assert.rejects(()=>recordPersonState(envOf(open),{id:'film:x',expectedRevision:0,at:T,requestId:'r',person:{identity}}),code('film_person_invalid'));
@@ -298,10 +298,9 @@ if(on(7)){
  assert.equal(planConflictCall({kind:'person',id:ID,revision:3,at:T,requestId:'r',conflicts:[{value:'v',reason:'r',at:T}]}).calls[0].input.expectedRevision,3);
  const prepared=database('prepared');seedPerson(prepared);
  const env=envOf(prepared),before=dump(prepared);
- assert.equal((await writerRoute(env)).writer,'projector');
+ await assert.rejects(()=>writerRoute(env),code('film_person_unavailable'));
  for(const plan of [planPersonCall({id:ID,revision:0,at:T,requestId:'r',person:{identity,localization:loc()}}),planConflictCall({kind:'person',id:ID,revision:0,at:T,requestId:'r',conflicts:[{value:'v',reason:'r',at:T}]})]){
-  const result=await dispatch(env,plan);
-  assert.deepEqual([result.executed,result.reason],[false,'projector_is_writer']);
+  await assert.rejects(()=>dispatch(env,plan),code('film_person_unavailable'));
  }
  assert.equal(env.DB.calls.batches,0);assert.equal(dump(prepared),before);
  const open=database('open');seedPerson(open);

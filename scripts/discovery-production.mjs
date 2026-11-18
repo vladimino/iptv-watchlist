@@ -1,47 +1,16 @@
 #!/usr/bin/env node
-// Production entry for the discovery schema (ADR 0085). Default is read-only.
-// --target iptv reads the contract, the prerequisite tables, the four authority
-// rows, the neighbour markers, the D1 bookmark and the idle state of sync, the
-// resolver lease and the enrichment projection. It does not download a ledger.
-// --apply --confirm apply --target iptv sends only migrations/0011_discovery_authority.sql,
-// and only when the contract is a complete version 10 and every discovery table
-// is absent. The inserted marker stays mode r2, cutover open, generation 0.
-// --load --confirm load --target iptv copies every observation and every show
-// into the observation tables while the marker stays r2. Shows are not trimmed.
-// The statements of one observation may span requests. A later --load resumes
-// a clean prefix: it compares the stored full etag, sha256, byte size and
-// programme id, reads the rows already stored, and sends only the missing
-// suffix. A stored show list that is a clean prefix of that observation is
-// continued at the next show. A list that is not a prefix is partial_mismatch
-// and is not retried. A cursor that is behind the completed rows is fenced
-// forward. --reset-load --confirm reset-load discards an uncommitted copy only
-// when the load checkpoint identity matches the transfer. The first statement
-// of that batch fails closed before any delete. It does not download a
-// replacement. Generation becomes 1 only in the commit batch, after every key,
-// payload and show matches.
-// --import --confirm import --producers-drained copies the catalog, decisions,
-// status, score preview, continuation and workflow while mode stays r2. A
-// decision whose evidence key disagrees with the loaded observation is stored
-// with that key. A score preview for another programme stores no rows. The
-// commit pins that source on the checkpoint (hop imported) and keeps the pin
-// through hold. It does not copy an archive segment or the resolver lease.
-// --hold --confirm hold --producers-drained sets mode d1 and cutover held only
-// when a fresh read still matches that pin. --activate --confirm activate
-// --producers-drained opens that held cutover after the same comparison and
-// then clears the pin. --reset-import --confirm reset-import --producers-drained
-// deletes only that import's catalog, decisions, import history and scores and
-// restores the status, continuation, workflow and checkpoint. It does not
-// delete the loaded ledger. Revert is not a command. A deploy does not run this
-// script. Each write needs its own confirm. A write_uncertain result is not
-// retried inside the process.
-// This script does not call Time Travel restore. The D1 token is sent only to
-// https://api.cloudflare.com/client/v4, and only for database iptv.
-import {createHash} from 'node:crypto';
+// Production entry for the discovery schema (ADR 0085, ADR 0162). Default is read-only status.
+// --target iptv reads the contract, the prerequisite tables, the four authority rows, the neighbour markers, the D1 bookmark and the
+// idle state of sync, the resolver lease and the enrichment projection. It does not download a ledger.
+// --apply --confirm apply --target iptv sends only migrations/0011_discovery_authority.sql, and only when the contract is a complete
+// version 10 and every discovery table is absent. The inserted marker stays mode r2, cutover open, generation 0, which the Worker
+// refuses: the load, reset-load, import, reset-import, hold, activate and revert commands of the former R2 to D1 cutover are retired
+// and answer `retired` before any request (ADR 0162), and no command brings the marker to d1 any more. A deploy does not run this
+// script. A write_uncertain result is not retried inside the process. This script does not call Time Travel restore. The D1 token is
+// sent only to https://api.cloudflare.com/client/v4, and only for database iptv.
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
-import {evidenceKey} from '../src/discovery-authority.js';
-import {activateDecision, activateSql, admissionSql, bodySha, catalogEntries, commitImportSql, decisionEntries, decisionGroup, holdDecision, holdSql, importDecision, importIdentity, isCutoverStop, openingImportSql, packImportBatches, parseImportIdentity, recordText, resetImportDecision, resetImportSql, sameImportIdentity, scoreEntries, SMALL_MAX_BYTES, staleEvidenceCount, statusText, valuePrefix} from './discovery-cutover.mjs';
 import {createD1Adapter, D1Error, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {ExportError} from './migration-export.mjs';
 import {createReadOnlyClient, readCredentials} from './r2-snapshot-export.mjs';
@@ -52,14 +21,9 @@ export const PRODUCTION_DATABASE_NAME='iptv';
 export const PREREQUISITE=['prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent','published_epg_authority','published_epg_cas','published_epg_generation','published_epg_document','published_epg_member','published_epg_show','published_epg_stage','published_epg_stage_chunk','published_epg_stage_row','owner_review_authority','owner_review_cas','owner_review_entry','ratings_domain_authority','ratings_domain_cas','ratings_document','ratings_view'];
 export const DISCOVERY_TABLES=['discovery_authority','discovery_cas','discovery_transfer','discovery_lease','discovery_continuation','discovery_status','discovery_checkpoint','discovery_workflow','discovery_observation','discovery_observation_show','discovery_decision','discovery_decision_history','discovery_admission','discovery_segment','discovery_score','discovery_intent'];
 const STATEMENT_BYTES=100*1024;
-// One observation's statements may span requests. A request that finishes in
-// the middle of its shows does not move the item cursor. The stored show rows
-// are the resume point, and only a clean prefix of those shows is continued.
 const BATCH_STATEMENTS=100;
 const BATCH_BYTES=1024*1024;
-const READ_PAGE=20;
 const WRITER_WINDOW_MS=15*60*1000;
-export const LEDGER_MAX_BYTES=64*1024*1024;
 const MIGRATION_PATH=path.join(path.dirname(fileURLToPath(import.meta.url)),'../migrations/0011_discovery_authority.sql');
 const ALLOWED=/^(?:INSERT INTO schema_contract\b|UPDATE schema_contract\b|CREATE TABLE discovery_|CREATE INDEX discovery_|CREATE UNIQUE INDEX discovery_|CREATE TRIGGER\b|INSERT INTO discovery_)/i;
 
@@ -122,299 +86,16 @@ export function applyDecision(snapshot){
  return 'apply';
 }
 
-export function loadDecision(snapshot){
- if(Number(snapshot.schemaVersion)!==11)return 'schema_unexpected';
- const present=DISCOVERY_TABLES.filter(name=>snapshot.discovery?.[name]);
- if(present.length!==DISCOVERY_TABLES.length)return 'prerequisite_incomplete';
- const marker=snapshot.marker;
- if(!marker||marker.mode!=='r2'||marker.cutover!=='open')return 'marker_refused';
- const observations=Number(snapshot.observations);
- if(!Number.isFinite(observations))return 'partial_load';
- const state=snapshot.transfer?.state??null;
- const programme=marker.programmeRunId;
- const published=marker.publishedProgrammeRunId===programme&&snapshot.transfer?.programmeRunId===programme;
- const hop=snapshot.checkpoint?.hopId??null;
- if(marker.generation===0&&programme==null&&marker.publishedProgrammeRunId==null&&state==='idle'&&observations===0&&hop==null)return 'load';
- if(marker.generation>=1&&programme&&published&&state==='committed'&&hop!=='load')return 'already_loaded';
- if(state==='loading'||observations>0||hop==='load')return 'partial_load';
- return 'partial_load';
-}
-
-export function resetDecision(snapshot){
- if(Number(snapshot.schemaVersion)!==11)return 'schema_unexpected';
- const present=DISCOVERY_TABLES.filter(name=>snapshot.discovery?.[name]);
- if(present.length!==DISCOVERY_TABLES.length)return 'prerequisite_incomplete';
- const marker=snapshot.marker;
- if(!marker||marker.mode!=='r2'||marker.cutover!=='open')return 'marker_refused';
- if(snapshot.transfer?.state==='committed')return 'already_loaded';
- if(Number(snapshot.foreignObservations)>0||Number(snapshot.foreignShows)>0||Number(snapshot.sideRows)>0)return 'partial_mismatch';
- const hop=snapshot.checkpoint?.hopId??null;
- const observations=Number(snapshot.observations);
- const state=snapshot.transfer?.state??null;
- const clean=state==='idle'&&observations===0&&hop==null&&marker.generation===0&&marker.programmeRunId==null&&marker.publishedProgrammeRunId==null;
- if(clean)return 'already_reset';
- const identity=loadResetIdentity(snapshot);
- if(!identity)return 'partial_mismatch';
- const openPartial=marker.generation===0&&marker.programmeRunId==null&&marker.publishedProgrammeRunId==null;
- const tornCommit=marker.generation===1&&marker.programmeRunId===identity.programmeRunId&&marker.publishedProgrammeRunId===identity.programmeRunId;
- if(openPartial)return 'reset';
- if(tornCommit)return 'reset_torn';
- return 'partial_mismatch';
-}
-
-function loadResetIdentity(snapshot){
- if(snapshot.checkpoint?.hopId!=='load')return null;
- const identity=parseLoadIdentity(snapshot.checkpoint.payload);
- if(!identity)return null;
- if(snapshot.checkpoint.programmeRunId!==identity.programmeRunId)return null;
- if(snapshot.transfer?.state!=='loading'||snapshot.transfer.programmeRunId!==identity.programmeRunId)return null;
- return identity;
-}
-
-function storedInteger(value){
- if(value==null||value==='')return null;
- const number=Number(value);
- if(!Number.isFinite(number)||!Number.isInteger(number))throw new OperatorStop('ledger_refused',3);
- return number;
-}
-
-function showsOf(item){
- const shows=Array.isArray(item?.shows)?item.shows:[];
- return shows.map(show=>({channelId:show?.channelId??null,channel:show?.channel??null,start:storedInteger(show?.start),end:storedInteger(show?.end)}));
-}
-
-export function observationShape(item){
- const rows=showsOf(item);
- const payload={...item};
- delete payload.shows;
- return {key:item.key,payload:JSON.stringify(payload),evidence:evidenceKey(item),shows:rows.map((show,ordinal)=>({ordinal,channelId:show.channelId??null,channel:show.channel??null,start:show.start,end:show.end}))};
-}
-
-function sameShow(left, right){
- return Number(left.ordinal)===right.ordinal&&(left.channelId??null)===right.channelId&&(left.channel??null)===right.channel&&(left.start??null)===right.start&&(left.end??null)===right.end;
-}
-
-function sameShows(stored, expected){
- if(!Array.isArray(stored)||stored.length!==expected.length)return false;
- for(let index=0;index<expected.length;index++)if(!sameShow(stored[index],expected[index]))return false;
- return true;
-}
-
-function showsArePrefix(stored, expected){
- if(!Array.isArray(stored)||stored.length>expected.length)return false;
- for(let index=0;index<stored.length;index++)if(!sameShow(stored[index],expected[index]))return false;
- return true;
-}
-
-export function loadPrefix(items, stored){
- const stopped={cursor:0,showCursor:0,resumeAt:0,mismatch:true};
- if(stored?.orphans)return stopped;
- const byKey=new Map(stored.map(row=>[row.key,row]));
- let cursor=0;
- for(const item of items){
-  const row=byKey.get(item.key);
-  if(!row)break;
-  const expected=observationShape(item);
-  if(row.payload!==expected.payload||row.evidence!==expected.evidence)return {...stopped,cursor};
-  if(sameShows(row.shows,expected.shows)){byKey.delete(item.key);cursor++;continue;}
-  if(!showsArePrefix(row.shows,expected.shows))return {...stopped,cursor};
-  byKey.delete(item.key);
-  for(const later of items.slice(cursor+1))if(byKey.has(later.key))return {...stopped,cursor};
-  if(byKey.size)return {...stopped,cursor};
-  return {cursor,showCursor:row.shows.length,resumeAt:1+row.shows.length,mismatch:false};
- }
- for(const item of items.slice(cursor))if(byKey.has(item.key))return {...stopped,cursor};
- if(byKey.size)return {...stopped,cursor};
- return {cursor,showCursor:0,resumeAt:0,mismatch:false};
-}
-
-export function ledgerStatements(document){
- if(!document||typeof document!=='object'||Array.isArray(document)||!Array.isArray(document.items))throw new OperatorStop('ledger_refused',3);
- const run=document.programmeRunId;
- if(typeof run!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(run))throw new OperatorStop('ledger_refused',3);
- const seen=new Set();
- const groups=[];
- let shows=0;
- for(const item of document.items){
-  if(!item||typeof item!=='object'||Array.isArray(item)||typeof item.key!=='string'||!item.key||item.key.length>200||/[\u0000-\u001f]/.test(item.key)||seen.has(item.key))throw new OperatorStop('ledger_refused',3);
-  seen.add(item.key);
-  const shape=observationShape(item);
-  const group=[renderSql("INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, normalized_title, title, year, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id, payload_json) VALUES ('active',?,'active',?,?,?,?,?,?,?,?,?,?)",[item.key,run,item.normalizedTitle??null,item.title??null,Number.isInteger(item.year)?item.year:null,shape.evidence,item.seenInLatestSnapshot===true?1:item.seenInLatestSnapshot===false?0:null,item.lastSeenAt??null,storedInteger(item.lastAiring),item.confirmedTmdbId==null?null:String(item.confirmedTmdbId),shape.payload])];
-  shape.shows.forEach(show=>{
-   shows++;
-   group.push(renderSql("INSERT INTO discovery_observation_show (source_key, observation_key, ordinal, channel_id, channel, start_ms, end_ms) VALUES ('active',?,?,?,?,?,?)",[item.key,show.ordinal,show.channelId,show.channel,show.start,show.end]));
-  });
-  for(const sql of group)if(Buffer.byteLength(sql,'utf8')>STATEMENT_BYTES)throw new OperatorStop('batch_too_large',3);
-  groups.push(group);
- }
- return {run,items:document.items.length,shows,groups,statements:groups.flat(),source:document.items};
-}
-
-function fits(list, extra){
- const bytes=list.concat(extra).reduce((sum,sql)=>sum+Buffer.byteLength(sql,'utf8'),0);
- return list.length+extra.length<=BATCH_STATEMENTS&&bytes<=BATCH_BYTES;
-}
-
-function identityJson(identity){
- return JSON.stringify({bytes:identity.bytes,etag:identity.etag,items:identity.items,programmeRunId:identity.programmeRunId,sha256:identity.sha256,shows:identity.shows});
-}
-
-export function parseLoadIdentity(payload){
- if(typeof payload!=='string'||payload.length>2000)return null;
- let value;
- try{value=JSON.parse(payload);}catch{return null;}
- if(!value||typeof value.etag!=='string'||typeof value.sha256!=='string'||typeof value.programmeRunId!=='string')return null;
- if(!Number.isInteger(value.bytes)||!Number.isInteger(value.items)||!Number.isInteger(value.shows))return null;
- return value;
-}
-
-function openingSql(identity){
- const payload=identityJson(identity);
- return [
-  renderSql("UPDATE discovery_transfer SET state='loading', programme_run_id=?, batches=0 WHERE id=1 AND state='idle' AND programme_run_id IS NULL AND batches=0",[identity.programmeRunId]),
-  renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='loading' AND programme_run_id=? AND batches=0)",[identity.programmeRunId]),
-  renderSql("UPDATE discovery_checkpoint SET programme_run_id=?, generation=0, hop_id='load', payload_json=? WHERE id=1 AND hop_id IS NULL AND payload_json IS NULL AND programme_run_id IS NULL AND generation=0",[identity.programmeRunId,payload]),
-  renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_checkpoint WHERE id=1 AND hop_id='load' AND programme_run_id=? AND payload_json=?)",[identity.programmeRunId,payload]),
- ];
-}
-
-function cursorSql(run, from, to){
- return [
-  renderSql("UPDATE discovery_transfer SET batches=? WHERE id=1 AND state='loading' AND programme_run_id=? AND batches=?",[to,run,from]),
-  renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='loading' AND programme_run_id=? AND batches=?)",[run,to]),
- ];
-}
-
-export function commitSql(run, items){
- return [
-  renderSql("UPDATE discovery_authority SET programme_run_id=?, published_programme_run_id=?, generation=1 WHERE id=1 AND mode='r2' AND cutover='open' AND ((generation=0 AND programme_run_id IS NULL AND published_programme_run_id IS NULL) OR (generation=1 AND programme_run_id=? AND published_programme_run_id=?))",[run,run,run,run]),
-  renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_authority WHERE id=1 AND mode='r2' AND cutover='open' AND generation=1 AND programme_run_id=? AND published_programme_run_id=?)",[run,run]),
-  renderSql("UPDATE discovery_transfer SET state='committed', batches=? WHERE id=1 AND state='loading' AND programme_run_id=? AND batches=?",[items,run,items]),
-  renderSql("INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='committed' AND programme_run_id=? AND batches=?)",[run,items]),
-  "UPDATE discovery_checkpoint SET programme_run_id=NULL, generation=0, hop_id=NULL, payload_json=NULL WHERE id=1 AND hop_id='load'",
-  "INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_checkpoint WHERE id=1 AND hop_id IS NULL AND payload_json IS NULL AND programme_run_id IS NULL AND generation=0)",
- ];
-}
-
-const RESET_CLEAN="NOT EXISTS (SELECT 1 FROM discovery_observation WHERE residence<>'active' OR source_key<>'active' OR (source_key='active' AND residence='active' AND programme_run_id IS NOT ?)) AND NOT EXISTS (SELECT 1 FROM discovery_observation_show WHERE source_key<>'active') AND NOT EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND NOT EXISTS (SELECT 1 FROM discovery_observation o WHERE o.source_key='active' AND o.residence='active' AND o.observation_key=s.observation_key AND o.programme_run_id=?)) AND NOT EXISTS (SELECT 1 FROM discovery_decision) AND NOT EXISTS (SELECT 1 FROM discovery_admission) AND NOT EXISTS (SELECT 1 FROM discovery_segment) AND NOT EXISTS (SELECT 1 FROM discovery_score) AND NOT EXISTS (SELECT 1 FROM discovery_intent)";
-
-export function resetSql(claim){
- if(!claim||(claim.shape!=='open'&&claim.shape!=='torn')||typeof claim.programmeRunId!=='string'||typeof claim.payload!=='string')throw new OperatorStop('partial_mismatch',3);
- const run=claim.programmeRunId;
- const payload=claim.payload;
- const torn=claim.shape==='torn';
- const authority=torn
-  ? "a.generation=1 AND a.programme_run_id=? AND a.published_programme_run_id=?"
-  : "a.generation=0 AND a.programme_run_id IS NULL AND a.published_programme_run_id IS NULL";
- const authorityExists=torn
-  ? "EXISTS (SELECT 1 FROM discovery_authority WHERE id=1 AND mode='r2' AND cutover='open' AND generation=1 AND programme_run_id=? AND published_programme_run_id=?)"
-  : "EXISTS (SELECT 1 FROM discovery_authority WHERE id=1 AND mode='r2' AND cutover='open' AND generation=0 AND programme_run_id IS NULL AND published_programme_run_id IS NULL)";
- const authorityParams=torn?[run,run]:[];
- const owned=authorityExists+" AND EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='loading' AND programme_run_id=?) AND EXISTS (SELECT 1 FROM discovery_checkpoint WHERE id=1 AND hop_id='load' AND programme_run_id=? AND payload_json=?) AND "+RESET_CLEAN;
- const ownedParams=authorityParams.concat([run,run,payload,run,run]);
- const fence=renderSql(
-  "INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_authority a, discovery_transfer t, discovery_checkpoint c WHERE a.id=1 AND t.id=1 AND c.id=1 AND a.mode='r2' AND a.cutover='open' AND "+authority+" AND t.state='loading' AND t.programme_run_id=? AND c.hop_id='load' AND c.programme_run_id=? AND c.payload_json=? AND "+RESET_CLEAN+")",
-  authorityParams.concat([run,run,payload,run,run]),
- );
- const deleteShows=renderSql(
-  "DELETE FROM discovery_observation_show WHERE source_key='active' AND observation_key IN (SELECT observation_key FROM discovery_observation WHERE source_key='active' AND residence='active' AND programme_run_id=?) AND "+owned,
-  [run].concat(ownedParams),
- );
- const deleteRows=renderSql(
-  "DELETE FROM discovery_observation WHERE source_key='active' AND residence='active' AND programme_run_id=? AND "+owned,
-  [run].concat(ownedParams),
- );
- const clearAuthority=torn
-  ? renderSql("UPDATE discovery_authority SET programme_run_id=NULL, published_programme_run_id=NULL, generation=0 WHERE id=1 AND mode='r2' AND cutover='open' AND generation=1 AND programme_run_id=? AND published_programme_run_id=? AND "+owned,[run,run].concat(ownedParams))
-  : renderSql("UPDATE discovery_authority SET programme_run_id=NULL, published_programme_run_id=NULL, generation=0 WHERE id=1 AND mode='r2' AND cutover='open' AND generation=0 AND programme_run_id IS NULL AND published_programme_run_id IS NULL AND "+owned,ownedParams);
- const clearTransfer=renderSql(
-  "UPDATE discovery_transfer SET state='idle', programme_run_id=NULL, batches=0 WHERE id=1 AND state='loading' AND programme_run_id=? AND EXISTS (SELECT 1 FROM discovery_checkpoint WHERE id=1 AND hop_id='load' AND programme_run_id=? AND payload_json=?) AND "+RESET_CLEAN,
-  [run,run,payload,run,run],
- );
- const clearCheckpoint=renderSql(
-  "UPDATE discovery_checkpoint SET programme_run_id=NULL, generation=0, hop_id=NULL, payload_json=NULL WHERE id=1 AND hop_id='load' AND programme_run_id=? AND payload_json=?",
-  [run,payload],
- );
- return [
-  fence,
-  deleteShows,
-  deleteRows,
-  clearAuthority,
-  "INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_authority WHERE id=1 AND mode='r2' AND cutover='open' AND generation=0 AND programme_run_id IS NULL AND published_programme_run_id IS NULL)",
-  clearTransfer,
-  "INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='idle' AND programme_run_id IS NULL AND batches=0)",
-  clearCheckpoint,
-  "INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_checkpoint WHERE id=1 AND hop_id IS NULL AND payload_json IS NULL AND programme_run_id IS NULL AND generation=0)",
- ];
-}
-
-export function packLoadSlice(groups, run, from, skip=0){
- if(!Number.isInteger(from)||from<0||from>groups.length||!Number.isInteger(skip)||skip<0)throw new OperatorStop('partial_mismatch',3);
- const batches=[];
- let index=from;
- let offset=index<groups.length?skip:0;
- if(index<groups.length&&offset>groups[index].length)throw new OperatorStop('partial_mismatch',3);
- if(index<groups.length&&offset===groups[index].length)throw new OperatorStop('partial_mismatch',3);
- let fenced=from;
- let current=[];
- let completes=0;
- const canTake=(count)=>{
-  const piece=groups[index].slice(offset,offset+count);
-  const finishes=offset+count===groups[index].length;
-  const fence=finishes||completes>0?cursorSql(run,fenced,fenced+completes+(finishes?1:0)):[];
-  return fits(current.concat(piece),fence);
- };
- const flush=()=>{
-  if(!current.length)return;
-  let batch=current;
-  if(completes>0){
-   const fence=cursorSql(run,fenced,fenced+completes);
-   if(!fits(current,fence))throw new OperatorStop('batch_too_large',3);
-   batch=current.concat(fence);
-   fenced+=completes;
-  }
-  batches.push(batch);
-  current=[];
-  completes=0;
- };
- while(index<groups.length){
-  if(!groups[index].length)throw new OperatorStop('batch_too_large',3);
-  if(!canTake(1)){
-   if(!current.length)throw new OperatorStop('batch_too_large',3);
-   flush();
-   continue;
-  }
-  let low=1;
-  let high=groups[index].length-offset;
-  while(low<high){
-   const mid=Math.ceil((low+high)/2);
-   if(canTake(mid))low=mid;
-   else high=mid-1;
-  }
-  current.push(...groups[index].slice(offset,offset+low));
-  offset+=low;
-  if(offset===groups[index].length){completes++;index++;offset=0;}
-  else flush();
- }
- flush();
- return batches;
-}
-
-function prefix(value){
- return typeof value==='string'&&value?value.slice(0,12):null;
-}
 
 function parseArgs(argv){
  const args=argv.slice(2);
- const commands=['--apply','--load','--reset-load','--reset-import','--activate','--import','--hold','--revert'].filter(flag=>args.includes(flag));
- if(commands.length>1)throw new OperatorStop('usage',2);
- const command=commands[0]||'status';
- if(!['status','--apply','--load','--reset-load','--reset-import','--import','--hold','--activate'].includes(command))throw new OperatorStop('usage',2);
+ // ADR 0162: the commands of the former R2 to D1 cutover are retired and refused before any request.
+ if(['--load','--reset-load','--reset-import','--import','--hold','--activate','--revert'].some(flag=>args.includes(flag)))throw new OperatorStop('retired',2);
+ const command=args.includes('--apply')?'--apply':'status';
  const target=args.includes('--target')?args[args.indexOf('--target')+1]:undefined;
  const confirm=args.includes('--confirm')?args[args.indexOf('--confirm')+1]:undefined;
- const drained=args.includes('--producers-drained');
  if((args.includes('--target')&&!target)||(args.includes('--confirm')&&!confirm))throw new OperatorStop('usage',2);
- const known=new Set(['--apply','--load','--reset-load','--reset-import','--import','--hold','--activate','--target','--confirm','--producers-drained']);
+ const known=new Set(['--apply','--target','--confirm']);
  for(let index=0;index<args.length;index++){
   const arg=args[index];
   if(!known.has(arg))throw new OperatorStop('usage',2);
@@ -426,16 +107,12 @@ function parseArgs(argv){
  }
  if(target!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_refused',2);
  if(command==='--apply'&&confirm!=='apply')throw new OperatorStop('confirm_required',2);
- if(command==='--load'&&confirm!=='load')throw new OperatorStop('confirm_required',2);
- if(command==='--reset-load'&&confirm!=='reset-load')throw new OperatorStop('confirm_required',2);
- if(command==='--import'&&confirm!=='import')throw new OperatorStop('confirm_required',2);
- if(command==='--reset-import'&&confirm!=='reset-import')throw new OperatorStop('confirm_required',2);
- if(command==='--hold'&&confirm!=='hold')throw new OperatorStop('confirm_required',2);
- if(command==='--activate'&&confirm!=='activate')throw new OperatorStop('confirm_required',2);
- if((command==='--import'||command==='--reset-import'||command==='--hold'||command==='--activate')&&!drained)throw new OperatorStop('drain_required',2);
- if(drained&&command!=='--import'&&command!=='--reset-import'&&command!=='--hold'&&command!=='--activate')throw new OperatorStop('usage',2);
  if(command==='status'&&confirm!==undefined)throw new OperatorStop('usage',2);
- return {command,target,confirm,drained};
+ return {command,target,confirm};
+}
+
+function prefix(value){
+ return typeof value==='string'&&value?value.slice(0,12):null;
 }
 
 function productionTarget(env){
@@ -605,91 +282,6 @@ async function sourceReport(client, programmeRunId){
  return {shared,generation,stable:true};
 }
 
-async function readLedger(client, programmeRunId){
- if(typeof programmeRunId!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(programmeRunId))throw new OperatorStop('source_missing',3);
- const sharedKey='epg/discovery-latest.json';
- const generationKey='epg/generations/'+programmeRunId+'/discovery-latest.json';
- const shared=await client.head(sharedKey);
- const generation=await client.head(generationKey);
- if(!shared||!generation)throw new OperatorStop('source_missing',3);
- if(shared.etag!==generation.etag||shared.size!==generation.size)throw new OperatorStop('source_mismatch',3);
- if(shared.size>LEDGER_MAX_BYTES)throw new OperatorStop('ledger_too_large',3);
- const got=await client.get(sharedKey,{ifMatch:shared.etag});
- if(!got)throw new OperatorStop('source_changed',3);
- const body=Buffer.from(await new Response(got.body).arrayBuffer());
- if(body.length!==shared.size)throw new OperatorStop('source_changed',3);
- const againShared=await client.head(sharedKey,{ifMatch:shared.etag});
- const againGeneration=await client.head(generationKey,{ifMatch:generation.etag});
- if(!againShared||!againGeneration||againShared.etag!==shared.etag||againGeneration.etag!==generation.etag||againShared.size!==shared.size||againGeneration.size!==generation.size)throw new OperatorStop('source_changed',3);
- let document;
- try{document=JSON.parse(body.toString('utf8'));}
- catch{throw new OperatorStop('ledger_refused',3);}
- if(!document||document.programmeRunId!==programmeRunId)throw new OperatorStop('ledger_refused',3);
- return {document,bytes:shared.size,etag:shared.etag,sha256:createHash('sha256').update(body).digest('hex')};
-}
-
-async function readStored(binding){
- const rows=[];
- let cursor='';
- for(;;){
-  const page=(await binding.prepare("SELECT observation_key AS key, payload_json AS payload, evidence_key AS evidence FROM discovery_observation WHERE source_key='active' AND residence='active' AND observation_key>? ORDER BY observation_key LIMIT "+READ_PAGE).bind(cursor).all()).results;
-  if(!page.length)break;
-  if(page.at(-1).key<=cursor)throw new OperatorStop('unknown_state',3);
-  for(const row of page)rows.push({key:row.key,payload:row.payload,evidence:row.evidence,shows:[]});
-  cursor=page.at(-1).key;
-  if(page.length<READ_PAGE)break;
- }
- const byKey=new Map(rows.map(row=>[row.key,row]));
- let showKey='';
- let showOrdinal=-1;
- for(;;){
-  const page=(await binding.prepare("SELECT observation_key AS key, ordinal, channel_id AS channelId, channel, start_ms AS start, end_ms AS end FROM discovery_observation_show WHERE source_key='active' AND (observation_key>? OR (observation_key=? AND ordinal>?)) ORDER BY observation_key, ordinal LIMIT 200").bind(showKey,showKey,showOrdinal).all()).results;
-  if(!page.length)break;
-  const last=page.at(-1);
-  if(last.key<showKey||(last.key===showKey&&Number(last.ordinal)<=showOrdinal))throw new OperatorStop('unknown_state',3);
-  for(const show of page){
-   const row=byKey.get(show.key);
-   if(!row){rows.orphans=(rows.orphans||0)+1;continue;}
-   row.shows.push({ordinal:Number(show.ordinal),channelId:show.channelId??null,channel:show.channel??null,start:show.start==null?null:Number(show.start),end:show.end==null?null:Number(show.end)});
-  }
-  showKey=last.key;
-  showOrdinal=Number(last.ordinal);
-  if(page.length<200)break;
- }
- return rows;
-}
-
-function sameIdentity(stored, identity){
- return stored.etag===identity.etag&&stored.sha256===identity.sha256&&stored.bytes===identity.bytes&&stored.programmeRunId===identity.programmeRunId&&stored.items===identity.items&&stored.shows===identity.shows;
-}
-
-async function proveRows(binding, built){
- const loaded=await snapshotOf(binding);
- const verified=loadPrefix(built.source, await readStored(binding));
- if(verified.mismatch||verified.cursor!==built.items||verified.resumeAt!==0)throw new OperatorStop('readback_mismatch',4);
- if(loaded.observations!==built.items||loaded.foreignObservations||loaded.foreignShows||loaded.sideRows)throw new OperatorStop('readback_mismatch',4);
- const showCount=await binding.prepare('SELECT COUNT(*) AS n FROM discovery_observation_show').bind().first();
- if(Number(showCount?.n)!==built.shows)throw new OperatorStop('readback_mismatch',4);
- const marker=loaded.marker;
- if(loaded.schemaVersion!==11||marker?.mode!=='r2'||marker.cutover!=='open')throw new OperatorStop('readback_mismatch',4);
- return loaded;
-}
-
-async function proveCommitted(binding, built, beforeMarkers){
- const loaded=await proveRows(binding, built);
- if(loaded.transfer?.state!=='committed'||loaded.transfer.batches!==built.items||loaded.transfer.programmeRunId!==built.run)throw new OperatorStop('readback_mismatch',4);
- if(loaded.marker?.generation!==1||loaded.marker.programmeRunId!==built.run||loaded.marker.publishedProgrammeRunId!==built.run)throw new OperatorStop('readback_mismatch',4);
- if(loaded.checkpoint?.hopId!=null||loaded.checkpoint?.payload!=null)throw new OperatorStop('readback_mismatch',4);
- const lease=await binding.prepare('SELECT lease_id AS leaseId, expires_at AS expiresAt FROM discovery_lease WHERE id=1').bind().first();
- if(lease?.leaseId!=null||Number(lease?.expiresAt)!==0)throw new OperatorStop('readback_mismatch',4);
- if(neighboursMoved(beforeMarkers,loaded.markers))throw new OperatorStop('readback_mismatch',4);
- return loaded;
-}
-
-function neighboursMoved(before, after){
- return !sameMarker(before.ratings,after.ratings)||!sameMarker(before.publishedEpg,after.publishedEpg)||!sameMarker(before.ownerReviews,after.ownerReviews)||!sameMarker(before.predictions,after.predictions)||!sameMarker(before.metadataCache,after.metadataCache);
-}
-
 async function readBookmark(target, fetchImpl){
  const url=target.endpoint+'/accounts/'+target.accountId+'/d1/database/'+PRODUCTION_DATABASE_ID+'/time_travel/bookmark';
  let response;
@@ -707,267 +299,15 @@ function sameMarker(left, right){
  return JSON.stringify(left??null)===JSON.stringify(right??null);
 }
 
+function neighboursMoved(before, after){
+ return !sameMarker(before.ratings,after.ratings)||!sameMarker(before.publishedEpg,after.publishedEpg)||!sameMarker(before.ownerReviews,after.ownerReviews)||!sameMarker(before.predictions,after.predictions)||!sameMarker(before.metadataCache,after.metadataCache);
+}
+
 function normalize(error){
  if(error instanceof OperatorStop)return error;
  if(error instanceof D1Error)return new OperatorStop(error.kind==='write_uncertain'?'write_uncertain':'d1_'+error.kind,error.kind==='write_uncertain'?4:3);
  if(error instanceof ExportError)return new OperatorStop('source_'+error.kind,3);
  return new OperatorStop('unknown_state',3);
-}
-
-async function readImportBody(client, key, {required,maxBytes}){
- const head=await client.head(key);
- if(!head){
-  if(required)throw new OperatorStop('source_missing',3);
-  return {present:false,etag:null,sha256:null,bytes:0,value:null};
- }
- if(head.size>maxBytes)throw new OperatorStop('import_too_large',3);
- const got=await client.get(key,{ifMatch:head.etag});
- if(!got)throw new OperatorStop('source_changed',3);
- const text=Buffer.from(await new Response(got.body).arrayBuffer()).toString('utf8');
- if(Buffer.byteLength(text)!==head.size)throw new OperatorStop('source_changed',3);
- const again=await client.head(key,{ifMatch:head.etag});
- if(!again||again.etag!==head.etag||again.size!==head.size)throw new OperatorStop('source_changed',3);
- let value;
- try{value=JSON.parse(text);}catch{throw new OperatorStop('import_refused',3);}
- return {present:true,etag:head.etag,sha256:bodySha(text),bytes:head.size,value};
-}
-
-async function readPaged(binding, sql, cursorColumn, map){
- const rows=[];
- let cursor='';
- for(;;){
-  const page=(await binding.prepare(sql).bind(cursor).all()).results;
-  if(!page.length)break;
-  if(page.at(-1)[cursorColumn]<=cursor)throw new OperatorStop('unknown_state',3);
-  for(const row of page)rows.push(map(row));
-  cursor=page.at(-1)[cursorColumn];
-  if(page.length<20)break;
- }
- return rows;
-}
-
-function requireLoadedProgramme(snapshot){
- const programme=snapshot.marker?.programmeRunId??null;
- if(!programme||snapshot.markers.publishedEpg?.programmeRunId!==programme)throw new OperatorStop('source_changed',3);
- return programme;
-}
-
-async function buildCutover(client, binding, snapshot, writtenAt){
- const programme=requireLoadedProgramme(snapshot);
- const generation=snapshot.marker.generation;
- const batches=snapshot.transfer.batches;
- const catalogHead=await client.head('epg/generations/'+programme+'/discovered-films.json');
- const catalog=await readImportBody(client,'epg/discovered-films.json',{required:true,maxBytes:LEDGER_MAX_BYTES});
- if(!catalogHead)throw new OperatorStop('source_missing',3);
- if(catalogHead.etag!==catalog.etag||catalogHead.size!==catalog.bytes)throw new OperatorStop('source_changed',3);
- const decisions=await readImportBody(client,'epg/discovery-resolution.json',{required:true,maxBytes:LEDGER_MAX_BYTES});
- const status=await readImportBody(client,'epg/discovery-status.json',{required:true,maxBytes:SMALL_MAX_BYTES});
- const scores=await readImportBody(client,'epg/discovery-score-preview.json',{required:false,maxBytes:SMALL_MAX_BYTES});
- const continuation=await readImportBody(client,'epg/resolver-continuation.json',{required:false,maxBytes:SMALL_MAX_BYTES});
- const workflow=await readImportBody(client,'epg/discovery-workflow.json',{required:false,maxBytes:SMALL_MAX_BYTES});
- let films,decisionRows,scoreRows,statusBody,continuationBody,workflowBody,staleEvidence;
- try{
-  films=catalogEntries(catalog.value);
-  decisionRows=decisionEntries(decisions.value);
-  const evidence=new Map(await readPaged(binding,"SELECT observation_key AS key, evidence_key AS evidence FROM discovery_observation WHERE source_key='active' AND residence='active' AND observation_key>? ORDER BY observation_key LIMIT 20",'key',row=>[row.key,row.evidence]));
-  staleEvidence=staleEvidenceCount(decisionRows,evidence);
-  scoreRows=scoreEntries(scores.value,programme);
-  statusBody=statusText(status.value,programme);
-  continuationBody=recordText(continuation.value,programme);
-  workflowBody=recordText(workflow.value,programme);
- }catch(error){
-  if(isCutoverStop(error))throw new OperatorStop(error.reason,error.exitCode);
-  throw error;
- }
- const identity={
-  programmeRunId:programme,
-  generation,
-  batches,
-  catalog:{present:true,etag:catalog.etag,sha256:catalog.sha256,bytes:catalog.bytes},
-  decisions:{present:true,etag:decisions.etag,sha256:decisions.sha256,bytes:decisions.bytes},
-  status:{present:true,etag:status.etag,sha256:status.sha256,bytes:status.bytes},
-  scores:scores.present?{present:true,etag:scores.etag,sha256:scores.sha256,bytes:scores.bytes}:{present:false,etag:null,sha256:null,bytes:0},
-  continuation:continuation.present?{present:true,etag:continuation.etag,sha256:continuation.sha256,bytes:continuation.bytes}:{present:false,etag:null,sha256:null,bytes:0},
-  workflow:workflow.present?{present:true,etag:workflow.etag,sha256:workflow.sha256,bytes:workflow.bytes}:{present:false,etag:null,sha256:null,bytes:0},
- };
- const payload=importIdentity(identity);
- return {programme,generation,batches,films,decisionRows,scoreRows,statusBody,continuationBody,workflowBody,identity,payload,writtenAt,staleEvidence};
-}
-
-async function proveCutover(binding, built){
- const films=await readPaged(binding,"SELECT film_id AS filmId, payload_json AS payload FROM discovery_admission WHERE state='current' AND film_id>? ORDER BY film_id LIMIT 20",'filmId',row=>{
-  let film;try{film=JSON.parse(row.payload);}catch{throw new OperatorStop('partial_mismatch',3);}
-  return {filmId:row.filmId,film};
- });
- const filmPrefix=valuePrefix(films,built.films,(stored,expected)=>stored.filmId===expected.filmId&&JSON.stringify(stored.film)===JSON.stringify(expected.film));
- if(filmPrefix.mismatch)return {complete:false,mismatch:true,filmCursor:filmPrefix.cursor,decisionCursor:0};
- if(filmPrefix.cursor!==built.films.length)return {complete:false,mismatch:false,filmCursor:filmPrefix.cursor,decisionCursor:0};
- const decisions=await readPaged(binding,"SELECT observation_key AS key, payload_json AS payload FROM discovery_decision WHERE observation_key>? ORDER BY observation_key LIMIT 20",'key',row=>{
-  let decision;try{decision=JSON.parse(row.payload);}catch{throw new OperatorStop('partial_mismatch',3);}
-  return {key:row.key,decision};
- });
- const decisionPrefix=valuePrefix(decisions,built.decisionRows,(stored,expected)=>stored.key===expected.key&&JSON.stringify(stored.decision)===JSON.stringify(expected.decision));
- if(decisionPrefix.mismatch)return {complete:false,mismatch:true,filmCursor:filmPrefix.cursor,decisionCursor:decisionPrefix.cursor};
- return {complete:decisionPrefix.cursor===built.decisionRows.length,mismatch:false,filmCursor:filmPrefix.cursor,decisionCursor:decisionPrefix.cursor};
-}
-
-async function storedScores(binding, programme){
- const rows=[];
- let cursor='';
- for(;;){
-  const page=(await binding.prepare("SELECT observation_key AS key, payload_json AS payload FROM discovery_score WHERE programme_run_id IS ? AND observation_key>? ORDER BY observation_key LIMIT 20").bind(programme,cursor).all()).results;
-  if(!page.length)break;
-  if(page.at(-1).key<=cursor)throw new OperatorStop('unknown_state',3);
-  for(const row of page){
-   try{rows.push(JSON.parse(row.payload));}
-   catch{throw new OperatorStop('partial_mismatch',3);}
-  }
-  cursor=page.at(-1).key;
-  if(page.length<20)break;
- }
- return rows;
-}
-
-function cutoverReady(built, status, scores, continuation, workflow){
- if(!status||status.payload!==built.statusBody.text||(status.retryAt??null)!==built.statusBody.retryAt)return false;
- if(scores.length!==built.scoreRows.length)return false;
- for(let index=0;index<scores.length;index++)if(JSON.stringify(scores[index])!==JSON.stringify(built.scoreRows[index]))return false;
- if((continuation?.payload??null)!==built.continuationBody.text||Number(continuation?.revision)!==built.continuationBody.revision)return false;
- if((workflow?.payload??null)!==built.workflowBody.text||Number(workflow?.revision)!==built.workflowBody.revision)return false;
- if((workflow?.instanceId??null)!==built.workflowBody.instanceId)return false;
- const storedSeries=workflow?.series==null?null:Number(workflow.series);
- if(storedSeries!==built.workflowBody.series)return false;
- return true;
-}
-
-async function readSingletons(binding){
- const status=await binding.prepare('SELECT payload_json AS payload, retry_at AS retryAt FROM discovery_status WHERE id=1').bind().first();
- const continuation=await binding.prepare('SELECT payload_json AS payload, revision, programme_run_id AS programmeRunId FROM discovery_continuation WHERE id=1').bind().first();
- const workflow=await binding.prepare('SELECT payload_json AS payload, revision, instance_id AS instanceId, programme_run_id AS programmeRunId, series FROM discovery_workflow WHERE id=1').bind().first();
- return {status,continuation,workflow};
-}
-
-async function executeCutover(args, adapter, binding, snapshot, client, now, reads, bookmark){
- const clock=typeof now==='function'?now():now;
- const decision=args.command==='--import'?importDecision(snapshot):args.command==='--hold'?holdDecision(snapshot):activateDecision(snapshot);
- if(['already_held','already_active','ledger_required','partial_mismatch','marker_refused','import_required'].includes(decision))throw new OperatorStop(decision,3);
- if(decision==='partial_import'&&args.command!=='--import')throw new OperatorStop('partial_import',3);
- if(decision==='hold'||decision==='activate'||decision==='import'||decision==='partial_import'){
-  const guarded=await writerReport(client,binding,clock);
-  if(Object.values(guarded).includes('active'))throw new OperatorStop('writer_active',3);
- }
- let built;
- try{built=await buildCutover(client,binding,snapshot,new Date(clock).toISOString());}
- catch(error){if(isCutoverStop(error))throw new OperatorStop(error.reason,error.exitCode);throw error;}
- const proved=await proveCutover(binding,built);
- const pinned=parseImportIdentity(snapshot.checkpoint?.payload??null);
- const pinMatches=!!pinned&&sameImportIdentity(pinned,built.identity);
- if((decision==='hold'||decision==='activate'||decision==='imported'||decision==='partial_import')&&!pinMatches)throw new OperatorStop('source_changed',3);
- if(proved.mismatch)throw new OperatorStop('partial_mismatch',3);
- const scores=await storedScores(binding,built.programme);
- const single=await readSingletons(binding);
- const ready=proved.complete&&cutoverReady(built,single.status,scores,single.continuation,single.workflow);
- if(decision==='imported'){
-  if(!pinMatches)throw new OperatorStop('source_changed',3);
-  if(!ready)throw new OperatorStop('partial_mismatch',3);
-  return {exit:0,result:{operation:'import',writes:false,writeState:'none',reason:'already_imported',rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',generation:built.generation,programmeRunId:built.programme,films:built.films.length,decisions:built.decisionRows.length,staleEvidence:built.staleEvidence}};
- }
- if(decision==='hold'||decision==='activate'){
-  if(snapshot.checkpoint?.hopId!=='imported'||!pinMatches)throw new OperatorStop('source_changed',3);
-  if(!ready)throw new OperatorStop('partial_mismatch',3);
- }
- if(decision==='partial_import'&&!pinMatches)throw new OperatorStop('source_changed',3);
- if(decision==='import'&&(proved.filmCursor>0||proved.decisionCursor>0||ready))throw new OperatorStop('partial_mismatch',3);
- const spec={programmeRunId:built.programme,generation:built.generation,batches:built.batches,payload:built.payload,retryAt:built.statusBody.retryAt,statusText:built.statusBody.text,scores:built.scoreRows,continuation:built.continuationBody,workflow:built.workflowBody};
- let batches;
- try{
-  if(decision==='hold')batches=[holdSql(spec)];
-  else if(decision==='activate')batches=[activateSql(spec)];
-  else{
-   if(proved.filmCursor<built.films.length&&proved.decisionCursor>0)throw new OperatorStop('partial_mismatch',3);
-   const filmGroups=built.films.slice(proved.filmCursor).map(film=>[admissionSql(film,built.programme,built.generation)]);
-   const decisionGroups=[];
-   const decisionStart=proved.filmCursor===built.films.length?proved.decisionCursor:0;
-   for(const row of built.decisionRows.slice(decisionStart))decisionGroups.push(await decisionGroup(row,built.programme,built.generation,built.writtenAt));
-   batches=[];
-   if(decision==='import')batches.push(openingImportSql(spec));
-   batches.push(...packImportBatches(filmGroups),...packImportBatches(decisionGroups),commitImportSql(spec));
-  }
- }catch(error){if(isCutoverStop(error))throw new OperatorStop(error.reason,error.exitCode);throw error;}
- let neighbours=false;
- for(const statements of batches){
-  const guarded=await writerReport(client,binding,clock);
-  if(Object.values(guarded).includes('active'))throw new OperatorStop('writer_active',3);
-  const fresh=await snapshotOf(binding);
-  if(neighboursMoved(snapshot.markers,fresh.markers))throw new OperatorStop('source_changed',3);
-  if(fresh.marker?.mode!==snapshot.marker?.mode||fresh.marker?.cutover!==snapshot.marker?.cutover||fresh.marker?.generation!==snapshot.marker?.generation||fresh.marker?.programmeRunId!==snapshot.marker?.programmeRunId||fresh.transfer?.batches!==snapshot.transfer?.batches||fresh.transfer?.state!==snapshot.transfer?.state)throw new OperatorStop('source_changed',3);
-  reads.writeState='unknown';
-  await adapter.executeRendered(statements);
-  reads.writeState='committed';
-  const moved=await snapshotOf(binding);
-  if(neighboursMoved(snapshot.markers,moved.markers))neighbours=true;
- }
- const after=await snapshotOf(binding);
- const marker=after.marker;
- if(decision==='hold'){
-  if(marker?.mode!=='d1'||marker.cutover!=='held'||marker.generation!==built.generation||marker.programmeRunId!==built.programme||after.checkpoint?.hopId!=='imported'||after.checkpoint?.payload!==built.payload)throw new OperatorStop('readback_mismatch',4);
- }else if(decision==='activate'){
-  if(marker?.mode!=='d1'||marker.cutover!=='open'||marker.generation!==built.generation||marker.programmeRunId!==built.programme||after.checkpoint?.hopId!=null||after.checkpoint?.payload!=null)throw new OperatorStop('readback_mismatch',4);
- }else{
-  if(marker?.mode!=='r2'||marker.cutover!=='open'||marker.generation!==built.generation||after.checkpoint?.hopId!=='imported'||after.checkpoint?.payload!==built.payload)throw new OperatorStop('readback_mismatch',4);
-  if(!await cutoverMatches(binding,built))throw new OperatorStop('readback_mismatch',4);
- }
- return {exit:0,result:{operation:args.command.slice(2),writes:true,writeState:reads.writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:marker?.mode??null,cutover:marker?.cutover??null,generation:marker?.generation??null,programmeRunId:built.programme,films:built.films.length,decisions:built.decisionRows.length,scores:built.scoreRows.length,resumed:decision==='partial_import',neighboursMoved:neighbours,...(args.command==='--import'?{staleEvidence:built.staleEvidence}:{})}};
-}
-
-async function cutoverMatches(binding, built){
- const proved=await proveCutover(binding,built);
- if(proved.mismatch||!proved.complete)return false;
- const scores=await storedScores(binding,built.programme);
- const single=await readSingletons(binding);
- return cutoverReady(built,single.status,scores,single.continuation,single.workflow);
-}
-
-async function importCopyForeign(binding, programme, generation){
- const row=await binding.prepare("SELECT (SELECT COUNT(*) FROM discovery_segment) AS segments, (SELECT COUNT(*) FROM discovery_intent) AS intents, (SELECT COUNT(*) FROM discovery_admission WHERE programme_run_id IS NOT ? OR generation<>? OR state<>'current') AS admissions, (SELECT COUNT(*) FROM discovery_decision WHERE programme_run_id IS NOT ? OR generation<>?) AS decisions, (SELECT COUNT(*) FROM discovery_decision_history WHERE writer<>'import' OR revision<>1 OR generation<>?) AS history, (SELECT COUNT(*) FROM discovery_score WHERE programme_run_id IS NOT ? OR generation<>?) AS scores").bind(programme,generation,programme,generation,generation,programme,generation).first();
- return [row?.segments,row?.intents,row?.admissions,row?.decisions,row?.history,row?.scores].some(value=>Number(value)>0);
-}
-
-async function importCopyClear(binding){
- const row=await binding.prepare("SELECT (SELECT COUNT(*) FROM discovery_decision_history) AS history, (SELECT COUNT(*) FROM discovery_admission) AS admissions, (SELECT payload_json FROM discovery_status WHERE id=1) AS status, (SELECT generation FROM discovery_status WHERE id=1) AS status_generation, (SELECT revision FROM discovery_continuation WHERE id=1) AS continuation, (SELECT payload_json FROM discovery_continuation WHERE id=1) AS continuation_payload, (SELECT revision FROM discovery_workflow WHERE id=1) AS workflow, (SELECT payload_json FROM discovery_workflow WHERE id=1) AS workflow_payload").bind().first();
- return Number(row?.history)===0&&Number(row?.admissions)===0&&row?.status==null&&Number(row?.status_generation)===0&&Number(row?.continuation)===0&&row?.continuation_payload==null&&Number(row?.workflow)===0&&row?.workflow_payload==null;
-}
-
-async function executeResetImport(adapter, binding, snapshot, client, now, reads, bookmark){
- const clock=typeof now==='function'?now():now;
- const decision=resetImportDecision(snapshot);
- if(['already_held','already_active','ledger_required','partial_mismatch','marker_refused'].includes(decision))throw new OperatorStop(decision,3);
- if(decision==='already_reset'){
-  if(!await importCopyClear(binding))throw new OperatorStop('partial_mismatch',3);
-  return {exit:0,result:{operation:'reset-import',writes:false,writeState:'none',reason:'already_reset',rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',generation:snapshot.marker?.generation??null,observations:snapshot.observations}};
- }
- if(decision!=='reset_import')throw new OperatorStop('unknown_state',3);
- const guarded=await writerReport(client,binding,clock);
- if(Object.values(guarded).includes('active'))throw new OperatorStop('writer_active',3);
- const programme=snapshot.marker.programmeRunId;
- const generation=snapshot.marker.generation;
- if(await importCopyForeign(binding,programme,generation))throw new OperatorStop('partial_mismatch',3);
- const lease=await binding.prepare('SELECT lease_id AS leaseId, expires_at AS expiresAt FROM discovery_lease WHERE id=1').bind().first();
- if(lease?.leaseId!=null||Number(lease?.expiresAt)!==0)throw new OperatorStop('partial_mismatch',3);
- const fresh=await snapshotOf(binding);
- if(neighboursMoved(snapshot.markers,fresh.markers))throw new OperatorStop('source_changed',3);
- if(fresh.marker?.mode!==snapshot.marker?.mode||fresh.marker?.cutover!==snapshot.marker?.cutover||fresh.marker?.generation!==generation||fresh.marker?.programmeRunId!==programme||fresh.transfer?.state!==snapshot.transfer?.state||fresh.transfer?.batches!==snapshot.transfer?.batches||fresh.checkpoint?.hopId!==snapshot.checkpoint?.hopId||fresh.checkpoint?.payload!==snapshot.checkpoint?.payload||fresh.observations!==snapshot.observations)throw new OperatorStop('source_changed',3);
- const spec={programmeRunId:programme,generation,batches:snapshot.transfer.batches,payload:snapshot.checkpoint.payload,hop:snapshot.checkpoint.hopId,observations:snapshot.observations};
- reads.writeState='unknown';
- await adapter.executeRendered(resetImportSql(spec));
- reads.writeState='committed';
- const after=await snapshotOf(binding);
- const marker=after.marker;
- if(marker?.mode!=='r2'||marker.cutover!=='open'||marker.generation!==generation||marker.programmeRunId!==programme||after.transfer?.state!=='committed'||after.transfer?.batches!==snapshot.transfer.batches||after.checkpoint?.hopId!=null||after.checkpoint?.payload!=null||after.observations!==snapshot.observations||after.sideRows!==0)throw new OperatorStop('readback_mismatch',4);
- if(!await importCopyClear(binding))throw new OperatorStop('readback_mismatch',4);
- const leaseAfter=await binding.prepare('SELECT lease_id AS leaseId, expires_at AS expiresAt FROM discovery_lease WHERE id=1').bind().first();
- if(leaseAfter?.leaseId!=null||Number(leaseAfter?.expiresAt)!==0)throw new OperatorStop('readback_mismatch',4);
- return {exit:0,result:{operation:'reset-import',writes:true,writeState:reads.writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',cutover:'open',generation,programmeRunId:programme,observations:after.observations,neighboursMoved:neighboursMoved(snapshot.markers,after.markers)}};
 }
 
 export async function runDiscoveryProduction({argv=process.argv,env=process.env,fetchImpl=fetch,now=Date.now()}={}){
@@ -1003,10 +343,6 @@ export async function runDiscoveryProduction({argv=process.argv,env=process.env,
    authorityRows:snapshot.authorities?4:0,
    discoveryTables:DISCOVERY_TABLES.filter(name=>snapshot.discovery[name]).length,
    decision,
-   load:loadDecision(snapshot),
-   loadHop:snapshot.checkpoint?.hopId??null,
-   loadCursor:snapshot.transfer&&Number.isInteger(snapshot.transfer.batches)?snapshot.transfer.batches:null,
-   loadEtagPrefix:prefix(parseLoadIdentity(snapshot.checkpoint?.payload??null)?.etag),
    marker:snapshot.marker,
    markers:snapshot.markers,
    transfer:snapshot.transfer?.state??null,
@@ -1033,96 +369,7 @@ export async function runDiscoveryProduction({argv=process.argv,env=process.env,
    if(neighboursMoved(before,readback.markers))throw new OperatorStop('readback_mismatch',4);
    return {exit:0,result:{operation:'apply',writes:true,writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),schemaVersion:11,mode:'r2',cutover:'open',generation:0,discoveryTables:DISCOVERY_TABLES.length,observations:0}};
   }
-  if(args.command==='--reset-load'){
-   const guarded=await writerReport(client,binding,typeof now==='function'?now():now);
-   if(Object.values(guarded).includes('active'))throw new OperatorStop('writer_active',3);
-   const fresh=await snapshotOf(binding);
-   if(neighboursMoved(snapshot.markers,fresh.markers))throw new OperatorStop('source_changed',3);
-   const resetGate=resetDecision(fresh);
-   if(resetGate==='already_reset')return {exit:0,result:{operation:'reset-load',writes:false,writeState:'none',reason:'already_reset',rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),schemaVersion:fresh.schemaVersion,mode:fresh.marker?.mode??null,generation:fresh.marker?.generation??null,observations:fresh.observations}};
-   if(resetGate!=='reset'&&resetGate!=='reset_torn')throw new OperatorStop(resetGate,3);
-   const identity=loadResetIdentity(fresh);
-   if(!identity||fresh.checkpoint?.payload==null)throw new OperatorStop('partial_mismatch',3);
-   const otherProgramme=await binding.prepare("SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key='active' AND residence='active' AND programme_run_id IS NOT ?").bind(identity.programmeRunId).first();
-   if(Number(otherProgramme?.n)!==0)throw new OperatorStop('partial_mismatch',3);
-   const again=await snapshotOf(binding);
-   if(resetDecision(again)!==resetGate||again.checkpoint?.payload!==fresh.checkpoint.payload||again.transfer?.programmeRunId!==fresh.transfer?.programmeRunId||again.transfer?.state!==fresh.transfer?.state)throw new OperatorStop('partial_mismatch',3);
-   const leaseBefore=await binding.prepare('SELECT lease_id AS leaseId, expires_at AS expiresAt FROM discovery_lease WHERE id=1').bind().first();
-   writeState='unknown';
-   await adapter.executeRendered(resetSql({programmeRunId:identity.programmeRunId,payload:fresh.checkpoint.payload,shape:resetGate==='reset_torn'?'torn':'open'}));
-   const cleared=await snapshotOf(binding);
-   const leaseAfter=await binding.prepare('SELECT lease_id AS leaseId, expires_at AS expiresAt FROM discovery_lease WHERE id=1').bind().first();
-   const marker=cleared.marker;
-   if(cleared.schemaVersion!==11||marker?.mode!=='r2'||marker.cutover!=='open'||marker.generation!==0||marker.programmeRunId!=null||marker.publishedProgrammeRunId!=null)throw new OperatorStop('readback_mismatch',4);
-   if(cleared.transfer?.state!=='idle'||cleared.transfer.programmeRunId!=null||cleared.transfer.batches!==0||cleared.observations!==0)throw new OperatorStop('readback_mismatch',4);
-   if(cleared.checkpoint?.hopId!=null||cleared.checkpoint?.payload!=null||cleared.foreignObservations||cleared.foreignShows||cleared.sideRows)throw new OperatorStop('readback_mismatch',4);
-   if((leaseBefore?.leaseId??null)!==(leaseAfter?.leaseId??null)||Number(leaseBefore?.expiresAt)!==Number(leaseAfter?.expiresAt))throw new OperatorStop('readback_mismatch',4);
-   if(neighboursMoved(fresh.markers,cleared.markers))throw new OperatorStop('readback_mismatch',4);
-   writeState='committed';
-   return {exit:0,result:{operation:'reset-load',writes:true,writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),schemaVersion:11,mode:'r2',cutover:'open',generation:0,observations:0}};
-  }
-  if(args.command==='--reset-import')return await executeResetImport(adapter,binding,snapshot,client,now,reads,bookmark);
-  if(args.command==='--import'||args.command==='--hold'||args.command==='--activate')return await executeCutover(args,adapter,binding,snapshot,client,now,reads,bookmark);
-  const gate=loadDecision(snapshot);
-  if(gate==='already_loaded')throw new OperatorStop(gate,3);
-  if(gate!=='load'&&gate!=='partial_load')throw new OperatorStop(gate,3);
-  if(gate==='partial_load'){
-   const resumeState=snapshot.transfer?.state;
-   if(snapshot.checkpoint?.hopId!=='load'||!parseLoadIdentity(snapshot.checkpoint?.payload)||(resumeState!=='loading'&&resumeState!=='committed'))throw new OperatorStop('partial_mismatch',3);
-  }
-  const published=snapshot.markers.publishedEpg?.programmeRunId??null;
-  const ledger=await readLedger(client,published);
-  const built=ledgerStatements(ledger.document);
-  if(built.run!==published)throw new OperatorStop('ledger_refused',3);
-  const identity={bytes:ledger.bytes,etag:ledger.etag,items:built.items,programmeRunId:built.run,sha256:ledger.sha256,shows:built.shows};
-  let cursorStart=0;
-  let resumeAt=0;
-  let resumed=false;
-  let finishCommitted=false;
-  if(gate==='partial_load'){
-   const stored=parseLoadIdentity(snapshot.checkpoint?.payload);
-   if(!stored)throw new OperatorStop('partial_mismatch',3);
-   if(!sameIdentity(stored,identity))throw new OperatorStop('source_changed',3);
-   const state=snapshot.transfer?.state;
-   if(state!=='loading'&&state!=='committed')throw new OperatorStop('partial_mismatch',3);
-   const prefixState=loadPrefix(built.source, await readStored(binding));
-   if(prefixState.mismatch)throw new OperatorStop('partial_mismatch',3);
-   const recorded=snapshot.transfer?.batches;
-   if(!Number.isInteger(recorded)||recorded<0||recorded>prefixState.cursor)throw new OperatorStop('partial_mismatch',3);
-   const complete=prefixState.cursor===built.items&&prefixState.resumeAt===0;
-   if(state==='committed'&&(!complete||recorded!==built.items||snapshot.marker?.generation!==1||snapshot.marker?.programmeRunId!==built.run||snapshot.marker?.publishedProgrammeRunId!==built.run))throw new OperatorStop('partial_mismatch',3);
-   finishCommitted=state==='committed';
-   cursorStart=prefixState.cursor;
-   resumeAt=prefixState.resumeAt;
-   resumed=true;
-  }
-  const guarded=await writerReport(client,binding,typeof now==='function'?now():now);
-  if(Object.values(guarded).includes('active'))throw new OperatorStop('writer_active',3);
-  const fresh=await snapshotOf(binding);
-  if(neighboursMoved(snapshot.markers,fresh.markers))throw new OperatorStop('source_changed',3);
-  if(gate==='load'){
-   if(loadDecision(fresh)!=='load')throw new OperatorStop(loadDecision(fresh),3);
-  }else if(fresh.checkpoint?.payload!==snapshot.checkpoint?.payload||fresh.transfer?.state!==snapshot.transfer?.state||fresh.transfer?.batches!==snapshot.transfer?.batches||loadDecision(fresh)!=='partial_load'){
-   throw new OperatorStop('partial_mismatch',3);
-  }
-  const beforeLoad=fresh.markers;
-  let sent=0;
-  const send=async statements=>{sent++;await adapter.executeRendered(statements);};
-  writeState='unknown';
-  if(gate==='load')await send(openingSql(identity));
-  if(!finishCommitted){
-   if(resumed&&fresh.transfer.batches<cursorStart)await send(cursorSql(built.run,fresh.transfer.batches,cursorStart));
-   for(const batch of packLoadSlice(built.groups,built.run,cursorStart,resumeAt))await send(batch);
-   const ready=await proveRows(binding,built);
-   const marker=ready.marker;
-   const freshStart=marker.generation===0&&marker.programmeRunId==null&&marker.publishedProgrammeRunId==null;
-   const torn=marker.generation===1&&marker.programmeRunId===built.run&&marker.publishedProgrammeRunId===built.run;
-   if((!freshStart&&!torn)||ready.transfer?.state!=='loading'||ready.transfer.programmeRunId!==built.run||ready.transfer.batches!==built.items)throw new OperatorStop('readback_mismatch',4);
-  }
-  await send(commitSql(built.run,built.items));
-  await proveCommitted(binding,built,beforeLoad);
-  writeState='committed';
-  return {exit:0,result:{operation:'load',writes:true,writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),schemaVersion:11,mode:'r2',cutover:'open',generation:1,programmeRunId:built.run,observations:built.items,shows:built.shows,batches:sent,resumed,cursorStart,etagCompared:true,etagPrefix:prefix(ledger.etag),shaPrefix:prefix(ledger.sha256),bytes:ledger.bytes,decisions:0,admissions:0}};
+  throw new OperatorStop('usage',2);
  }catch(error){
   const stop=normalize(error);
    const reported=reads.writeState??writeState;

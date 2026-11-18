@@ -13,6 +13,7 @@ import vm from 'node:vm';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {CONFIRMED_RETIREMENTS,RETIREMENTS_KEY,buildPlan,d1Holders,d1Readback,d1State,loadDomain,sqliteReader} from '../scripts/tmdb-tv-identity-plan.mjs';
+import {STANDIN_FLAGS} from './local-standins.mjs';
 
 assert.equal(spawnSync(process.execPath,['build.mjs'],{stdio:'ignore'}).status,0);
 const logs=[],pages=new Map();
@@ -87,7 +88,7 @@ for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show
 // Every projector run only reads R2: no put, delete or listing, whatever the object holds.
 const run=async(mode='on',env={})=>{
  const before=counted.put+counted.delete+counted.list;
- const summary=plain(await api.runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:mode,OWNER_REVIEW_DB_OPTIONAL:'standin',METADATA_CACHE_DB_OPTIONAL:'standin',PUBLISHED_EPG_DB_OPTIONAL:'standin',...env},{now:NOW})); // ADR 0162: schema v4 has no owner-review tables; the explicit local stand-in
+ const summary=plain(await api.runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:mode,...STANDIN_FLAGS,...env},{now:NOW})); // ADR 0162: schema v4 has no owner-review tables; the explicit local stand-in
  assert.equal(counted.put+counted.delete+counted.list,before,'the projector writes and lists nothing in R2');
  return summary;
 };
@@ -139,7 +140,7 @@ async function refresh(pagesFor){
  const watchlist=JSON.parse(bucket.objects.get('watchlist.json').text).films.map(film=>({...film,metadataAt:OLD}));
  const syncRun={runId:'sync-1',watchlist,pending:watchlist.map(film=>film.id),cursor:0,remaining:watchlist.length,failures:[],events:[]};
  fetched=[];
- const step=await api.metadataSync({BUCKET:bucket,METADATA_CACHE_DB_OPTIONAL:'standin'},syncRun); // ADR 0162: no D1 binding here, so the explicit local metadata-cache stand-in
+ const step=await api.metadataSync({BUCKET:bucket,METADATA_CACHE_DB_OPTIONAL:'standin',FILM_PERSON_DB_OPTIONAL:'standin'},syncRun); // ADR 0162: no D1 binding here, so the explicit local metadata-cache stand-in
  assert.equal(step.failedMetadata,0);
  assert.ok(fetched.every(href=>href.startsWith('https://letterboxd.com/')||!href.includes('themoviedb')),'no TMDB request');
  // finishSync writes the run's films to watchlist.json without their shows; the EPG commit carries them into the programme.

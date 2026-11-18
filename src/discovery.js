@@ -271,7 +271,6 @@ async function saveScorePreview(env,source,preview,fence=null){if(fence)await fe
 async function takeDiscoveryLease(env,role=null){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence',name:'DiscoveryFenceError'});
   if(gate.ready){
    const published=await publishedPointer(env);
    const taken=await DiscoveryAuthority.acquireLease(env,{programmeRunId:published?.programmeRunId??null,...(role?{role}:{})});
@@ -294,7 +293,6 @@ async function acquireDiscoveryLease(env,role=null){return (await takeDiscoveryL
 async function renewDiscoveryLease(env,lease){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence',name:'DiscoveryFenceError'});
   if(gate.ready){
    const published=await publishedPointer(env);
    const renewed=await DiscoveryAuthority.renewLease(env,lease,{programmeRunId:published?.programmeRunId??null});
@@ -447,7 +445,6 @@ const CATALOG_POSTER_D1_KEY='discovery_admission';
 async function catalogPosterD1Gate(env){
  if(typeof DiscoveryAuthority==='undefined')return {d1:false};
  const gate=await DiscoveryAuthority.readAuthority(env);
- if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence'});
  if(!gate.ready)throw Object.assign(new Error('discovery_not_authoritative'),{code:'discovery_not_authoritative'});
  return {d1:true,gate};
 }
@@ -1107,8 +1104,9 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // AIR-374 P3c: the catch-up of the canonical Discovery admission, once per completed paged chunk (the one path every Discovery hop runs, with or without a new admission): the origin's own due receipts and the sweep of current movie admissions without a
  // trusted canonical Film. One cached marker read below the marker `open`; bounded and never throws at `open`; skipped when the chunk has no time left for it.
  if(typeof CanonicalDiscoveryAdmission!=='undefined'&&Date.now()<canonicalLimit()){try{await CanonicalDiscoveryAdmission.admitDiscoveryFilms(env,{films:{},written:[],deadline:canonicalLimit()});}catch{/* the chunk keeps its own outcome */}}
- // The prediction queue is not refreshed here: that call has no bound of its own, and the prediction runner refreshes the queue
- // from the catalog on every step, so a Film admitted by this chunk joins it on the runner's next step.
+ // The prediction queue is not refreshed here: that call has no bound of its own. The runner does NOT rebuild it on every step (AIR-431): a batch start
+ // refreshes it only when its gate or its priority basis is stale. AIR-529: new `published_epg_show` assignments inside the same programmeRunId change
+ // `PublishedEpg.assignedShowsSignature`, and the next batch preflight sees that as priority-due (or, if unreadable, degraded) and rebuilds hot/cold before it selects.
  // The preview is this chunk's scored outcomes. remaining is the SQL actionable set minus what this chunk settled, not the page.
  if((walkComplete||checked>0)&&Date.now()+writeEstimate(1)<=persistLimit()){try{await fence();await timedWrite(()=>saveScorePreview(env,source,preview));}catch(e){if(e&&typeof e==='object'&&!e.failedAt)e.failedAt='preview';throw lost(e,'preview');}}
  timings.writeMaxMs=writeCostMs;
@@ -1310,7 +1308,6 @@ async function writeObservationIndex(env,run,shards,fence,fields,layout){
 async function saveObservationIndex(env,source,decisions,fence,writer){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence',name:'DiscoveryFenceError'});
   if(gate.ready)return {written:true,reason:null};
  }
  const run=source.programmeRunId||null;
@@ -1653,7 +1650,6 @@ function assessInterruptedRecovery({now,epgStage,publishedRunId,programmeRunId,s
  if(!record||typeof record!=='object'||Array.isArray(record))return refused('owner_investigation','record_malformed');
  if(record.stage!=='paused'||record.reason!=='interrupted')return refused('not_interrupted');
  if(!authority||typeof authority!=='object'||authority.unavailable)return refused('authority_unavailable');
- if(authority.held||authority.cutover==='held')return refused('authority_held');
  if(authority.transfer==='loading')return refused('authority_loading');
  if(authority.mode!=='r2'&&authority.mode!=='d1')return refused('authority_unavailable');
  if(authority.mode==='d1'&&(authority.ready!==true||authority.transfer!=='idle'&&authority.transfer!=='committed'))return refused('authority_unavailable');
@@ -1900,7 +1896,7 @@ async function resolveDiscoveryRequest(env,execution,body,caller='http'){
    const recovery=body.recovery==='interrupted';
    let authority=null;
    if(recovery&&typeof DiscoveryAuthority!=='undefined'){try{authority=await DiscoveryAuthority.readAuthority(env);}catch{authority={unavailable:true};}}
-   const authorityCause=authority?.unavailable?'authority_unavailable':authority?.transfer==='loading'?'authority_loading':authority?.held||authority?.cutover==='held'?'authority_held':null;
+   const authorityCause=authority?.unavailable?'authority_unavailable':authority?.transfer==='loading'?'authority_loading':null;
    if(!report?.films){step.branch='no_programme';response=json({error:'No programme'},409);}
    else if(recovery){step.branch='recovery_refused';response=json({recovery:{permit:'refused',reason:'owner_investigation',cause:'executor_workflow',budget:null,proof:null},discovery:{state:'paused',nextAction:'stop',reason:'interrupted',remainingChunks:null},diagnostic:step.diagnostic});}
    else{step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);response=json({...presented,diagnostic:step.diagnostic});}
@@ -1933,7 +1929,6 @@ async function discoveryOperationalStatus(env){
  if(snapshot?.handled){
   source='d1_snapshot';authority=snapshot.authority;records=snapshot.records||{status:null,continuation:null,workflow:null,lease:null,window:null};
   for(const name of snapshot.unreadable||[])unavailable.push(name);
-  if(authority.state==='held')unavailable.push('records');
  }else if(authority?.state==='unavailable'){
   source='none';records={status:null,continuation:null,workflow:null,lease:null,window:null};
  }else{

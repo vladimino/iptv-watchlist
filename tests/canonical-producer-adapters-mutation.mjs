@@ -10,8 +10,8 @@ import {sqliteSync} from './sqlite-session.mjs';
 
 // [name, file in src/, exact text that occurs once, replacement]
 const MUTANTS=[
- ["applyFilmFacts ignores the route", "canonical-producer-adapters.js", "const route=await writerRoute(env);\n if(route.writer!=='canonical')return {state:'skipped'", "const route=await writerRoute(env);\n if(false)return {state:'skipped'"],
- ["reconcileOwnOrigin ignores the route", "canonical-producer-adapters.js", "if(route.writer!=='canonical')return {skipped:true", "if(false)return {skipped:true"],
+ ["applyFilmFacts ignores the route", "canonical-producer-adapters.js", "const route=await writerRoute(env);\n if(route.writer!=='canonical')return {state:'skipped'", "const route=await writerRoute(env).catch(()=>({writer:'projector'}));\n if(route.writer!=='canonical')return {state:'skipped'"],
+ ["reconcileOwnOrigin ignores the route", "canonical-producer-adapters.js", "const route=await writerRoute(env);\n if(route.writer!=='canonical')return {skipped:true", "const route=await writerRoute(env).catch(()=>({writer:'projector'}));\n if(route.writer!=='canonical')return {skipped:true"],
  ["the digest keeps the write clock at", "canonical-producer-adapters.js", "if(key!=='at'&&key!=='updatedAt'&&value[key]!==undefined)", "if(key!=='updatedAt'&&value[key]!==undefined)"],
  ["the digest keeps updatedAt", "canonical-producer-adapters.js", "if(key!=='at'&&key!=='updatedAt'&&value[key]!==undefined)", "if(key!=='at'&&value[key]!==undefined)"],
  ["the digest ignores the target id", "canonical-producer-adapters.js", "digestOf({operation:FILM_FACTS_OPERATION,id:input?.id,content:", "digestOf({operation:FILM_FACTS_OPERATION,content:"],

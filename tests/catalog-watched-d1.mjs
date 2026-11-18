@@ -12,6 +12,7 @@ import {webcrypto} from 'node:crypto';
 import {d1Standin} from './d1-standin.mjs';
 import {scoped,scopedEpgPriority,scopedDiscoveryAuthority} from '../scripts/bundle-scope.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {standins, strict} from './local-standins.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-catalog-watched-'));let databases=0;
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -97,7 +98,7 @@ const noR2Catalog=label=>assert.ok(!gets.some(key=>/discovered-films\.json$/.tes
 {
  const stale={tmdb_10:film(10)};
  {seedBucket({withR2Catalog:stale});const db=d1World();db.sql("UPDATE discovery_authority SET cutover='held' WHERE id=1");
-  refusedWithoutWrite(await post({DB:db,BUCKET:bucket},{tmdbId:'10',watched:true}),503,'discovery_fence','held cutover');noR2Catalog('held');}
+  refusedWithoutWrite(await post({DB:db,BUCKET:bucket},{tmdbId:'10',watched:true}),503,'discovery_unavailable','held cutover is refused (ADR 0162)');noR2Catalog('held');}
  {seedBucket({withR2Catalog:stale});const db=d1World();db.sql("UPDATE discovery_transfer SET state='loading' WHERE id=1");
   refusedWithoutWrite(await post({DB:db,BUCKET:bucket},{tmdbId:'10',watched:true}),503,'discovery_incomplete','transfer loading');noR2Catalog('loading');}
  {seedBucket({withR2Catalog:stale});const db=d1World();db.sql(`UPDATE discovery_authority SET programme_run_id=${lit(G2)} WHERE id=1`);
@@ -116,8 +117,9 @@ const noR2Catalog=label=>assert.ok(!gets.some(key=>/discovered-films\.json$/.tes
 }
 // The Discovery authority changing after the film was verified, with the publication and the programme run unchanged: nothing is written.
 for(const [label,sql,code] of [
- ['cutover held',"UPDATE discovery_authority SET cutover='held' WHERE id=1",'discovery_fence'],
- ['authority D1/open to R2/open, same run',"UPDATE discovery_authority SET mode='r2' WHERE id=1",'catalog_generation_changed'],
+ // ADR 0162: a marker moved to held or r2 is no longer served; the re-read refuses it, and nothing is written.
+ ['cutover held',"UPDATE discovery_authority SET cutover='held' WHERE id=1",'catalog_read_failed'],
+ ['authority D1/open to R2/open, same run',"UPDATE discovery_authority SET mode='r2' WHERE id=1",'catalog_read_failed'],
  ['D1 generation advanced, same run',"UPDATE discovery_authority SET generation=generation+1 WHERE id=1",'catalog_generation_changed'],
  ['transfer loading, same run',"UPDATE discovery_transfer SET state='loading' WHERE id=1",'discovery_incomplete'],
 ]){
@@ -132,18 +134,16 @@ for(const [label,sql,code] of [
  const ok=await post({DB:db,BUCKET:bucket},{tmdbId:'10',watched:true});assert.deepEqual([ok.status,ok.body],[200,{outcome:'saved',watched:true}],'stable D1');
 }
 
-// 4. Discovery still R2-owned: the generation's own R2 copy is read as before; an absent copy is unavailability, not a missing film.
+// 4. No D1 binding (the local stand-in): the generation's own R2 copy is read as before; an absent copy is unavailability, not a missing film.
 {
  seedBucket({withR2Catalog:{tmdb_10:film(10)}});
- const ok=await post({BUCKET:bucket},{tmdbId:'10',watched:true});assert.deepEqual([ok.status,ok.body],[200,{outcome:'saved',watched:true}]);
- const withDb=await post({DB:migrated(),BUCKET:bucket},{tmdbId:'10',watched:false});assert.deepEqual([withDb.status,withDb.body],[200,{outcome:'saved',watched:false}],'a D1 binding with Discovery on r2 reads R2');
- {const db=migrated();let flipped=false;
-  seedBucket({withR2Catalog:{tmdb_10:film(10)}});
-  onPointerRead=count=>{if(count===2&&!flipped){flipped=true;db.sql(`UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id=${lit(G1)} WHERE id=1`);}};
-  refusedWithoutWrite(await post({DB:db,BUCKET:bucket},{tmdbId:'10',watched:true}),503,'catalog_generation_changed','R2 to D1 after the R2 read');assert.ok(flipped);
-  seedBucket({withR2Catalog:{tmdb_10:film(10)}});}
- puts=[];refusedWithoutWrite(await post({BUCKET:bucket},{tmdbId:'99',watched:true}),409,'film_not_in_catalog','unknown film');
- seedBucket();refusedWithoutWrite(await post({BUCKET:bucket},{tmdbId:'10',watched:true}),503,'catalog_generation_unavailable','no copy at all');
+ const ok=await post(standins({BUCKET:bucket}),{tmdbId:'10',watched:true});assert.deepEqual([ok.status,ok.body],[200,{outcome:'saved',watched:true}]);
+ // Without the opt-in a missing binding is refused, not served from R2, and nothing is written.
+ puts=[];gets.length=0;refusedWithoutWrite(await post(strict({BUCKET:bucket}),{tmdbId:'10',watched:true}),503,'discovery_unavailable','a missing binding without the opt-in is refused');noR2Catalog('strict');
+ // ADR 0162: a D1 binding whose Discovery marker is r2 (the migration's value) is refused, not read from R2, and nothing is written.
+ puts=[];refusedWithoutWrite(await post({DB:migrated(),BUCKET:bucket},{tmdbId:'10',watched:false}),503,'discovery_unavailable','a D1 binding with Discovery on r2 is refused');
+ puts=[];refusedWithoutWrite(await post(standins({BUCKET:bucket}),{tmdbId:'99',watched:true}),409,'film_not_in_catalog','unknown film');
+ seedBucket();refusedWithoutWrite(await post(standins({BUCKET:bucket}),{tmdbId:'10',watched:true}),503,'catalog_generation_unavailable','no copy at all');
 }
 
 // 5. The client shows no success for a refusal: only an ok answer with a boolean `watched` is a success; 409 and 503 become the card's error.

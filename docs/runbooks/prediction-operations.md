@@ -197,3 +197,7 @@ This is the procedure the owner's production operation ([AIR-478](https://trello
 4. To stop pending films, `POST …/cancel {cohortId}`. Already committed predictions stay; the old versions remain in `prediction_lineage` and R2.
 
 A code rollback leaves the rows in D1 and an older Worker ignores them; the intents then stop applying until the code returns. Expired intents stop applying on their own.
+
+## Hot/cold priority after Discovery assignments in the same generation (AIR-529)
+
+Discovery can add shows to the published EPG generation without a new `programmeRunId`. The queue stores `showsSignature`; the next `prediction_batch_start` rebuilds hot/cold when the live signature differs. Diagnose a suspected stale ranking read-only: compare `prediction_queue_overview` `hotRemaining` with the completed programme's films in the window, and treat a queue with no `showsSignature` as due once. Do not run a manual reconcile POST for this; the natural next start performs the rebuild.

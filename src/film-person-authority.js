@@ -23,36 +23,59 @@ export async function many(db,sql,params=[]){
 
 function legacy(version=null){return {state:'legacy',r2Allowed:true,open:false,held:false,generation:0,version,baseline:null};}
 
-// Reads the marker. A database without the binding, or with a contract below version 13, is `legacy` (before this feature).
-// From version 13 on, anything but one well-formed marker row (and its companion rows) throws `film_person_unavailable`.
-export async function readAuthority(env){
+// Reads the marker. ADR 0162: only `open` (mode d1, cutover open) is served for reading and writing, and `held` (mode d1, cutover held) is the
+// fail-closed emergency and forward-fix gate that its callers refuse with `film_person_held`. A marker in mode r2 or prepared, a missing binding, a
+// missing schema_contract, a contract below 13, a database without the four tables, a partly installed set, a contract at 13 or later with none of the
+// tables, a malformed marker, baseline or fence row and any D1 error throw `film_person_unavailable`, before any R2 read and before any D1 write.
+// The explicit local stand-in (FILM_PERSON_DB_OPTIONAL set to standin, never set in the deployed configuration) answers `legacy` (R2 allowed) only for a domain that is not
+// installed at all: no binding, no schema_contract, or a contract below 13 with none of the tables.
+export async function readAuthority(env){return readState(env,{servedOnly:true});}
+// The marker as it is, for the one operation that must move it (`transitionAuthority`) and for operator reports: it still refuses everything that is not
+// a well-formed marker, but it does not refuse a well-formed r2 or prepared one.
+export async function readMarker(env){return readState(env,{servedOnly:false});}
+async function readState(env,{servedOnly}){
+ const standin=env?.FILM_PERSON_DB_OPTIONAL==='standin';
  const db=database(env);
- if(!db)return legacy();
+ if(!db){
+  if(standin)return legacy();
+  throw failed('film_person_unavailable');
+ }
+ // The tables are inventoried first, so that no stand-in path below can serve R2 over a partly installed domain, whatever schema_contract says.
+ let names;
+ try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('film_person_authority','film_person_cas','film_person_baseline','canonical_revision')")).map(item=>item.name);}
+ catch(error){throw failed('film_person_unavailable',error);}
+ const installed=FILM_PERSON_TABLES.every(name=>names.includes(name));
+ if(!installed&&names.length>0)throw failed('film_person_unavailable');
  let version;
  try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
  catch(error){
-  if(/no such table/i.test(String(error?.message||error)))return legacy();
+  if(!installed&&standin&&/no such table/i.test(String(error?.message||error)))return legacy();
   throw failed('film_person_unavailable',error);
  }
  const numeric=Number(version);
- if(!Number.isFinite(numeric)||numeric<FILM_PERSON_MIN_VERSION)return legacy(Number.isFinite(numeric)?numeric:null);
+ if(!installed){
+  if(!standin)throw failed('film_person_unavailable');
+  if(!Number.isFinite(numeric))return legacy();
+  // A contract at 13 or later declares the domain installed: none of its tables is a broken install, not an uninstalled domain.
+  if(numeric>=FILM_PERSON_MIN_VERSION)throw failed('film_person_unavailable');
+  return legacy(numeric);
+ }
+ if(!Number.isFinite(numeric)||numeric<FILM_PERSON_MIN_VERSION)throw failed('film_person_unavailable');
  let row,fence,baseline;
  try{
-  // AIR-532: ONE round trip for the table check and the three marker rows (was four). A missing table makes the statement fail whole, which the catch below
-  // maps to the same `film_person_unavailable` as the explicit table check.
-  const read=await one(db,"SELECT (SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('film_person_authority','film_person_cas','film_person_baseline','canonical_revision')) AS tables,(SELECT mode FROM film_person_authority WHERE id=1) AS mode,(SELECT cutover FROM film_person_authority WHERE id=1) AS cutover,(SELECT generation FROM film_person_authority WHERE id=1) AS generation,(SELECT ok FROM film_person_cas WHERE id=1) AS fence_ok,(SELECT COUNT(*) FROM film_person_cas WHERE id=1) AS fence_rows,(SELECT state FROM film_person_baseline WHERE id=1) AS baseline_state,(SELECT reference FROM film_person_baseline WHERE id=1) AS baseline_reference,(SELECT COUNT(*) FROM film_person_authority WHERE id=1) AS marker_rows,(SELECT COUNT(*) FROM film_person_baseline WHERE id=1) AS baseline_rows");
-  if(Number(read?.tables)!==FILM_PERSON_TABLES.length)throw failed('film_person_unavailable');
-  row=Number(read.marker_rows)>0?{mode:read.mode,cutover:read.cutover,generation:read.generation}:null;
-  fence=Number(read.fence_rows)>0?{ok:read.fence_ok}:null;
-  baseline=Number(read.baseline_rows)>0?{state:read.baseline_state,reference:read.baseline_reference}:null;
+  // AIR-532: the three marker rows come back in ONE statement (the four tables are known to exist here: the inventory above ran first), same rows, same checks below.
+  const read=await one(db,"SELECT (SELECT COUNT(*) FROM film_person_authority WHERE id=1) AS marker_rows,(SELECT mode FROM film_person_authority WHERE id=1) AS mode,(SELECT cutover FROM film_person_authority WHERE id=1) AS cutover,(SELECT generation FROM film_person_authority WHERE id=1) AS generation,(SELECT COUNT(*) FROM film_person_cas WHERE id=1) AS fence_rows,(SELECT ok FROM film_person_cas WHERE id=1) AS fence_ok,(SELECT COUNT(*) FROM film_person_baseline WHERE id=1) AS baseline_rows,(SELECT state FROM film_person_baseline WHERE id=1) AS baseline_state,(SELECT reference FROM film_person_baseline WHERE id=1) AS baseline_reference");
+  row=Number(read?.marker_rows)>0?{mode:read.mode,cutover:read.cutover,generation:read.generation}:null;
+  fence=Number(read?.fence_rows)>0?{ok:read.fence_ok}:null;
+  baseline=Number(read?.baseline_rows)>0?{state:read.baseline_state,reference:read.baseline_reference}:null;
  }catch(error){
-  if(error?.code==='film_person_unavailable')throw error;
   throw failed('film_person_unavailable',error);
  }
  const generation=Number(row?.generation);
  const ok=row&&['r2','prepared','d1'].includes(row.mode)&&['open','held'].includes(row.cutover)&&Number.isInteger(generation)&&generation>=0&&(row.mode==='d1'||row.cutover==='open');
  if(!ok||!fence||Number(fence.ok)<1||!baseline||!['empty','loading','verified'].includes(baseline.state))throw failed('film_person_unavailable');
  const state=row.mode==='r2'?'r2':row.mode==='prepared'?'prepared':row.cutover==='held'?'held':'open';
+ if(servedOnly&&(state==='r2'||state==='prepared'))throw failed('film_person_unavailable');
  return {state,r2Allowed:state==='r2'||state==='prepared',open:state==='open',held:state==='held',generation,version:numeric,baseline:baseline.state};
 }
 
@@ -111,7 +134,7 @@ export async function transitionAuthority(env,{from,to,expectedGeneration}){
  if(!db||typeof db.batch!=='function')throw failed('film_person_unavailable');
  if(!(FILM_PERSON_TRANSITIONS[from]||[]).includes(to))throw failed('film_person_transition');
  if(!Number.isInteger(expectedGeneration)||expectedGeneration<0)throw failed('film_person_transition');
- const gate=await readAuthority(env);
+ const gate=await readMarker(env);
  if(gate.state!==from||gate.generation!==expectedGeneration)throw failed('film_person_fence');
  const [mode,cutover]=MARKER[to],[fromMode,fromCutover]=MARKER[from];
  const statements=[
@@ -127,5 +150,5 @@ export async function transitionAuthority(env,{from,to,expectedGeneration}){
   if(/CHECK constraint failed/i.test(message))throw failed('film_person_fence',error);
   throw failed('film_person_unavailable',error);
  }
- return readAuthority(env);
+ return readMarker(env);
 }

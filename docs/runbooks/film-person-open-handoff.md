@@ -2,6 +2,8 @@
 
 **Live production (16 Nov 2026 UTC):** `film_person_authority` is `mode=d1`, `cutover=open`, generation **2** after an owner L3 MCP `apply` ([evidence](../evidence/d1-migration/air-499-film-person-open-2026-11-16.md)). Do **not** repeat `mode: apply` with `expectedGeneration: 1`. Merging code, CI, or a `dry_run` is still not a GO for any later `held` recovery or reverse move. Decisions: [ADR 0117](../adr/0117-film-person-d1-handoff-owner-decisions.md), [ADR 0099](../adr/0099-canonical-film-person-d1-authority.md), [ADR 0103](../adr/0103-projector-exclusive-window.md). Card: [AIR-499](https://trello.com/c/8ifHCioP); parent design [AIR-374](https://trello.com/c/ha7ais3w).
 
+**ADR 0162 (AIR-79 slice 7):** the operator is retained and deferred, not removed: production is already `open`, so no `prepared` marker can be served any more. The Worker's serving reader refuses an installed `r2` or `prepared` marker with `film_person_unavailable`; this operator and `transitionAuthority` use the non-serving `readMarker` to report and move the marker, so the `held` and `open` forward-fix path is unchanged. Retiring this operator needs its own approved card.
+
 Counts and digests only in any evidence; no ids, titles, payloads or credentials.
 
 ## What exists

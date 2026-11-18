@@ -36,22 +36,22 @@ const source=(over={})=>({source:'wikidata',value:'Авто',sourceVersion:'v1',
 const auto=(e,kind,id,value,rev=1)=>recordLocalizationSources(e,{kind,id,expectedRevision:rev,at:AT,requestId:'r-'+id+value,sources:[source({value})]});
 const run=(file,sql)=>sqlite(file,sql);
 
-// 1. The marker gate: legacy/r2/prepared keep the existing runtime, open reads D1, held and unreadable states fail closed; never R2.
+// 1. The marker gate (ADR 0162): only open reads D1; legacy, r2, prepared, held and unreadable states fail closed; never R2.
 {
  const legacy=database({upTo:12,state:'none'});
- assert.deepEqual(Object.values(await canonicalReaderMode(env(legacy))).slice(0,1),['existing']);
- assert.equal((await canonicalReaderMode(env(database({state:'r2'})))).mode,'existing');
- assert.equal((await canonicalReaderMode(env(database({state:'prepared'})))).mode,'existing');
+ await assert.rejects(()=>canonicalReaderMode(env(legacy)),code('film_person_unavailable'),'legacy');
+ await assert.rejects(()=>canonicalReaderMode(env(database({state:'r2'}))),code('film_person_unavailable'),'r2');
+ await assert.rejects(()=>canonicalReaderMode(env(database({state:'prepared'}))),code('film_person_unavailable'),'prepared');
  const open=await canonicalReaderMode(env(database()));
  assert.deepEqual([open.mode,open.generation,open.state],['d1',2,'open']);
  await assert.rejects(()=>canonicalReaderMode(env(database({state:'held'}))),code('film_person_held'));
  const broken=database();run(broken,'DROP TRIGGER film_person_authority_no_delete;DELETE FROM film_person_authority');
  await assert.rejects(()=>canonicalReaderMode(env(broken)),code('film_person_unavailable'),'a missing marker row');
  for(const state of ['r2','prepared']){
-  await assert.rejects(()=>readFilms(env(database({state})),['film:tmdb:1']),code('canonical_read_not_authoritative'),state+' is not a D1 read authority');
-  await assert.rejects(()=>readPersons(env(database({state})),['person:actor/a']),code('canonical_read_not_authoritative'));
+  await assert.rejects(()=>readFilms(env(database({state})),['film:tmdb:1']),code('film_person_unavailable'),state+' is not served');
+  await assert.rejects(()=>readPersons(env(database({state})),['person:actor/a']),code('film_person_unavailable'));
  }
- await assert.rejects(()=>readFilms(env(legacy),['film:tmdb:1']),code('canonical_read_not_authoritative'),'legacy');
+ await assert.rejects(()=>readFilms(env(legacy),['film:tmdb:1']),code('film_person_unavailable'),'legacy');
  await assert.rejects(()=>readFilms(env(database({state:'held'})),['film:tmdb:1']),code('film_person_held'),'held fails closed, never R2');
  await assert.rejects(()=>readFilms(env(broken),['film:tmdb:1']),code('film_person_unavailable'));
  // Schema 13 (no source table) with an open marker: the precedence cannot be proven, so the read fails closed.

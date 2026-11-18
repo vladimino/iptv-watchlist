@@ -79,7 +79,6 @@ async function identityPublishedEpgSupport(env){
  if(typeof DiscoveryAuthority!=='undefined'){
   let discovery;
   try{discovery=await DiscoveryAuthority.readAuthority(env);}catch{return {supported:false,mode:null};}
-  if(discovery.held)return {supported:false,mode:'d1',discoveryAuthority:'held'};
   if(discovery.ready)return {supported:true,mode:'d1',discoveryAuthority:'d1',programmeRunId:discovery.programmeRunId??null};
  }
  const db=env?.DB;
@@ -312,7 +311,6 @@ async function drConfirm(request,env,url){
   beforeImage:null,afterImage:null,receipt:null,index:null};
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)return drRefused('unknown_authority',409);
   if(gate.ready){
    const intent=await DiscoveryAuthority.putIntent(env,{idempotencyKey:body.idempotencyKey,kind:'reconsider',observationKey:key,issued,expectedHash:observed.record?.decisionHash??null,expiresAt:Date.parse(issued.expiresAt)});
    if(!intent.saved)return drRefused('idempotency_conflict',409);
@@ -385,7 +383,6 @@ async function drExecuteD1(request,env,url){
 async function drExecute(request,env,url){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)return drRefused('unknown_authority',409);
   if(gate.ready)return drExecuteD1(request,env,url);
  }
  const principal=drPrincipal(request,url);
@@ -457,7 +454,6 @@ async function drReceipt(env,url){
  if(!idempotencyKey||!DR_IDEMPOTENCY.test(idempotencyKey))return adminError('invalid_request',400);
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)return adminError('storage_unavailable',503);
   if(gate.ready)return drIntentReceipt(idempotencyKey,(await DiscoveryAuthority.readIntent(env,idempotencyKey)).intent);
  }
  const {bucket}=drReadOnly(env.BUCKET);
@@ -611,7 +607,6 @@ async function diConfirm(request,env,url){
   beforeImage:null,afterImage:null,receipt:null,index:null};
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)return drRefused('unknown_authority',409);
   if(gate.ready){
    const intent=await DiscoveryAuthority.putIntent(env,{idempotencyKey:body.idempotencyKey,kind:command.effect==='assign'?'identity_assign':'identity_reject',observationKey:key,issued,command:{effect:command.effect,tmdbId:command.tmdbId,basis:command.basis},expectedHash:observed.record?.decisionHash??null,expiresAt:Date.parse(issued.expiresAt)});
    if(!intent.saved)return drRefused('idempotency_conflict',409);
@@ -719,7 +714,6 @@ async function diExecuteD1(request,env,url){
 async function diExecute(request,env,url){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)return drRefused('unknown_authority',409);
   if(gate.ready)return diExecuteD1(request,env,url);
  }
  if(!diPrincipal(request,url).owner)return drRefused('access_denied',403);
@@ -805,7 +799,6 @@ async function diReceipt(env,url){
  if(!idempotencyKey||!DR_IDEMPOTENCY.test(idempotencyKey))return adminError('invalid_request',400);
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)return adminError('storage_unavailable',503);
   if(gate.ready){
    const intent=await DiscoveryAuthority.readIntent(env,idempotencyKey);
    if(intent.intent&&intent.intent.kind!=='reconsider')return drIntentReceipt(idempotencyKey,intent.intent);
@@ -865,7 +858,6 @@ async function pePreview(request,env,url){
  if(!filmId||!PE_FILM_ID.test(filmId))return adminError('invalid_request',400);
  if(typeof DiscoveryAuthority==='undefined')return drRefused('unknown_authority',409);
  const gate=await DiscoveryAuthority.readAuthority(env);
- if(gate.held)return drRefused('unknown_authority',409);
  if(!gate.ready)return drRefused('unknown_authority',409);
  const preview=await DiscoveryAuthority.readPolicyExcludePreview(env,filmId);
  return json({capability:PE_CAPABILITY.id,version:PE_CAPABILITY.version,...preview,consumers:['discovery_admission','resolution_decision','published_epg_show','prediction_queue']});
@@ -878,7 +870,7 @@ async function peExecute(request,env,url){
  if(!PE_FILM_ID.test(filmId)||!DR_IDEMPOTENCY.test(idempotencyKey))return drRefused('invalid_request',400);
  if(typeof DiscoveryAuthority==='undefined')return drRefused('unknown_authority',409);
  const gate=await DiscoveryAuthority.readAuthority(env);
- if(gate.held||!gate.ready)return drRefused('unknown_authority',409);
+ if(!gate.ready)return drRefused('unknown_authority',409);
  const preview=await DiscoveryAuthority.readPolicyExcludePreview(env,filmId);
  if(preview.reason==='already_applied'){
   return peFinishExclude(env,filmId,{replayed:true,durable:true,state:'applied',outcome:'already_applied',filmId,policy:preview.policy,observations:(preview.observations||[]).map(row=>row.key)});

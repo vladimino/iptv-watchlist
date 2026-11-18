@@ -106,7 +106,7 @@ const uncertain=(extra={})=>({status:'no_confident_match',attempts:1,retryAt:'20
  sql(file,"UPDATE discovery_lease SET lease_id='other', expires_at="+(Date.now()+80000)+' WHERE id=1');
  await assert.rejects(()=>Authority.writeDecisionDelta(env,{'obs-a':{previous:null,next:uncertain()}}),error=>error.code==='discovery_fence');
  sql(file,"UPDATE discovery_authority SET cutover='held' WHERE id=1");
- await assert.rejects(()=>Authority.writeDecisionDelta(env,{'obs-a':{previous:null,next:uncertain()}}),error=>error.code==='discovery_fence');
+ await assert.rejects(()=>Authority.writeDecisionDelta(env,{'obs-a':{previous:null,next:uncertain()}}),error=>error.code==='discovery_unavailable','a held cutover is refused (ADR 0162)');
  const noLease=await setup();
  noLease.env.discoveryLease=null;
  await assert.rejects(()=>Authority.writeDecisionDelta(noLease.env,{'obs-a':{previous:null,next:uncertain()}}),error=>error.code==='discovery_lease');

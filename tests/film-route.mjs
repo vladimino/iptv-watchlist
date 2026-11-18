@@ -235,7 +235,7 @@ assert.equal(new URL(window.location.href).pathname,'/');
 
 const worker=fs.readFileSync('src/worker.js','utf8');
 assert.match(worker,/pathname==='\/events'\?'\/'/);
-assert.equal(worker.includes('/^\\/film\\/[A-Za-z0-9_-]{1,80}$/'),true);
+assert.equal(worker.includes('/^\\/film\\/([A-Za-z0-9_-]{1,80})$/'),true);
 const html=fs.readFileSync('public/index.html','utf8');
 const css=fs.readFileSync('public/styles.css','utf8');
 assert.match(html,/href="\/styles\.css"/);

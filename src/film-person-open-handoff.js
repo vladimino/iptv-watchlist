@@ -3,7 +3,7 @@
 // invokes it. A merge authorizes no production flip. The flip is ONE guarded UPDATE plus readback (no REST
 // `changes()` CAS pair). Exclusive window/lease predicates use the database clock, not the preflight timestamp.
 // The dormant producer-readiness module stays unbundled: wiring and H1 counts are copied here and asserted equal in tests.
-import {database,failed,many,one,projectorExpectation,readAuthority} from './film-person-authority.js';
+import {database,failed,many,one,projectorExpectation,readMarker} from './film-person-authority.js';
 import {grantProjectorWindow,releaseProjectorWindow,requestProjectorWindow,WINDOW_DEADLINE_MS} from './discovery-authority.js';
 import {writerRoute} from './canonical-writer-route.js';
 import {CANONICAL_READER_REGISTRY} from './canonical-catalog-reader.js';
@@ -158,7 +158,7 @@ export async function activationReadiness(env,{now=new Date().toISOString(),expe
  if(!Number.isFinite(nowMs))blockers.push('now_invalid');
  if(report.consumers.length!==CANONICAL_READER_REGISTRY.length)blockers.push('audit_incomplete');
  let gate=null;
- try{gate=await readAuthority(env);}catch(error){blockers.push('marker_unreadable:'+(error?.code||'error'));}
+ try{gate=await readMarker(env);}catch(error){blockers.push('marker_unreadable:'+(error?.code||'error'));}
  if(gate){
   if(gate.state!=='prepared')blockers.push('marker_not_prepared:'+gate.state);
   if(gate.baseline!=='verified')blockers.push('baseline_not_verified:'+String(gate.baseline));
@@ -202,8 +202,9 @@ export async function activationReadiness(env,{now=new Date().toISOString(),expe
   if(lease?.leaseId&&Number(lease.expiresAt)>nowMs)blockers.push('discovery_lease_live');
  }catch{blockers.push('discovery_lease_unreadable');}
  try{
-  const route=await writerRoute(env);
-  if(route.writer!=='projector')blockers.push('writer_not_projector:'+route.writer);
+  // The operator reports the marker as it is (ADR 0162: prepared is not a served state, so the serving route would refuse it).
+  const marker=await readMarker(env);
+  if(marker.r2Allowed!==true)blockers.push('writer_not_projector:'+(marker.state==='open'?'canonical':marker.state));
  }catch(error){blockers.push('writer_route_unreadable:'+(error?.code||'error'));}
  for(const item of classes){
   if(!tables.has(item.table)){blockers.push('empty_class_unreadable:'+item.name);continue;}
@@ -226,7 +227,7 @@ export async function flipOpen(env,{expectedGeneration,expectedReference,owner}=
  if(!db||typeof db.prepare!=='function')throw failed('film_person_unavailable');
  if(!Number.isInteger(expectedGeneration)||expectedGeneration<0||!expectedReference||!owner)throw failed('film_person_invalid');
  let before=null;
- try{before=await readAuthority(env);}catch(error){return {outcome:'unknown',retry:false,error};}
+ try{before=await readMarker(env);}catch(error){return {outcome:'unknown',retry:false,error};}
  if(before.state==='open'&&before.generation===expectedGeneration+1)return {outcome:'unknown_committed',retry:false,generation:before.generation};
  if(before.state!=='prepared'||before.generation!==expectedGeneration)return {outcome:'stop',reason:'flip_precondition',retry:false,generation:before.generation,state:before.state};
  const params=[expectedGeneration,expectedReference,OPEN_HANDOFF_MIN_VERSION,owner,OPEN_HANDOFF_PROJECTION,owner,owner];
@@ -236,13 +237,13 @@ export async function flipOpen(env,{expectedGeneration,expectedReference,owner}=
   await statement.run();
  }catch(error){
   let after=null;
-  try{after=await readAuthority(env);}catch{after=null;}
+  try{after=await readMarker(env);}catch{after=null;}
   if(after?.state==='open'&&after.generation===expectedGeneration+1)return {outcome:'unknown_committed',retry:false,generation:after.generation,error};
   if(after?.state==='prepared'&&after.generation===expectedGeneration)return {outcome:'stop',reason:'flip_not_applied',retry:false,error};
   return {outcome:'unknown',retry:false,after,error};
  }
  let after=null;
- try{after=await readAuthority(env);}
+ try{after=await readMarker(env);}
  catch(error){return {outcome:'unknown',retry:false,error,wrote:true};}
  if(after.state==='open'&&after.generation===expectedGeneration+1&&before.state==='prepared')return {outcome:'flipped',generation:after.generation,state:after.state};
  if(after.state==='prepared'&&after.generation===expectedGeneration)return {outcome:'stop',reason:'flip_precondition',retry:false,generation:after.generation};
@@ -250,7 +251,7 @@ export async function flipOpen(env,{expectedGeneration,expectedReference,owner}=
 }
 
 async function proveOpen(env,{expectedGeneration}){
- const gate=await readAuthority(env);
+ const gate=await readMarker(env);
  const route=await writerRoute(env);
  const row=await one(database(env),'SELECT mode,cutover,generation FROM film_person_authority WHERE id=1');
  const baseline=await verifyBaseline(env);

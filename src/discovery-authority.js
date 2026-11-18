@@ -1,10 +1,10 @@
 // D1 authority for discovery observations, decisions, admission, the lease and
-// the continuation (ADR 0085). The marker starts at r2. Mode d1 with cutover
-// open is the only authority. Held is not that authority: readers stay on R2
-// and writers fail closed. A missing binding, or a contract below version 11,
-// stays on R2, including schema v10 with the ratings tables and no discovery
-// tables. Version 11 without these tables, a bad marker, a loading transfer,
-// or a failed read fails closed and does not serve the R2 ledger.
+// the continuation (ADR 0085, ADR 0162). Mode d1 with cutover open is the only
+// authority. Held fails closed for readers and writers. A missing binding, a
+// missing schema, a contract below version 11, a bad marker, a loading transfer
+// or a failed read is refused; none of these serves the R2 ledger. The explicit
+// local stand-in (DISCOVERY_DB_OPTIONAL) covers only a domain that is not
+// installed at all.
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 import {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
 import {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';
@@ -143,7 +143,6 @@ export async function readFilmAdmission(env,tmdbId){
  const id=String(tmdbId);
  if(!/^[1-9]\d{0,11}$/.test(id))throw failed('discovery_conflict');
  const opened=await readAuthority(env);
- if(opened.held)throw failed('discovery_fence');
  if(!opened.ready)return {handled:false};
  let sealing=false;
  if(opened.transfer==='loading'){
@@ -168,7 +167,6 @@ export const ADMISSION_IDS_PER_QUERY=80;
 export async function readAdmissionsById(env,ids){
  const wanted=[...new Set((ids||[]).map(String).filter(Boolean))];
  const opened=await readAuthority(env);
- if(opened.held)throw failed('discovery_fence');
  if(!opened.ready)return {handled:false};
  if(opened.transfer==='loading'&&!await loadingIsLedgerSeal(env))throw failed('discovery_incomplete');
  const films=new Map();
@@ -314,32 +312,47 @@ export async function readDiscoveryGates(env,now=nowMs()){
 
 export async function readAuthority(env){
  const db=database(env);
- if(!db)return closed();
- let version;
- try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
- catch(error){
-  if(/no such table/i.test(String(error?.message||error)))return closed();
-  throw failed('discovery_unavailable',error);
+ // ADR 0162: a missing binding, a missing schema_contract, a contract below 11 and a database without the tables are refused. Only the explicit local stand-in
+ // (DISCOVERY_DB_OPTIONAL set to standin, never set by wrangler.jsonc) serves the R2 objects, and only for a domain that is not installed at all.
+ const standin=env?.DISCOVERY_DB_OPTIONAL==='standin';
+ if(!db){
+  if(standin)return closed();
+  throw failed('discovery_unavailable');
  }
- const numeric=Number(version);
- if(!Number.isFinite(numeric)||numeric<11)return {...closed(),version:Number.isFinite(numeric)?numeric:null};
+ // The tables are inventoried first, so that no stand-in path below can serve R2 over a partly installed domain, whatever schema_contract says.
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'discovery\\_%' ESCAPE '\\' OR name='projector_window')")).map(row=>row.name);}
  catch(error){throw failed('discovery_unavailable',error);}
- if(!TABLES.every(name=>names.includes(name)))throw failed('discovery_unavailable');
+ const installed=TABLES.every(name=>names.includes(name));
+ if(!installed&&names.some(name=>name.startsWith('discovery_')))throw failed('discovery_unavailable');
+ let version;
+ try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
+ catch(error){
+  if(!installed&&standin&&/no such table/i.test(String(error?.message||error)))return closed();
+  throw failed('discovery_unavailable',error);
+ }
+ const numeric=Number(version);
+ if(!installed){
+  if(!standin)throw failed('discovery_unavailable');
+  if(!Number.isFinite(numeric))return {...closed(),version:null};
+  // A contract at 11 or later declares the domain installed: none of its tables is a broken install, not an uninstalled domain.
+  if(numeric>=11)throw failed('discovery_unavailable');
+  return {...closed(),version:numeric};
+ }
+ if(!Number.isFinite(numeric)||numeric<11)throw failed('discovery_unavailable');
  let row,transfer;
  try{
   row=await one(db,'SELECT mode, cutover, programme_run_id AS programmeRunId, generation, published_programme_run_id AS publishedProgrammeRunId FROM discovery_authority WHERE id=1');
   transfer=await one(db,'SELECT state, batches FROM discovery_transfer WHERE id=1');
  }catch(error){throw failed('discovery_unavailable',error);}
- if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.cutover!=='open'&&row.cutover!=='held'))throw failed('discovery_unavailable');
+ // ADR 0162: only mode d1 with cutover open is served. A marker in mode r2 (the migration inserts it) or with cutover held is refused, never read as the R2 objects.
+ if(!row||row.mode!=='d1'||row.cutover!=='open')throw failed('discovery_unavailable');
  if(!transfer||!['idle','loading','committed'].includes(transfer.state))throw failed('discovery_unavailable');
- const ready=row.mode==='d1'&&row.cutover==='open',held=row.mode==='d1'&&row.cutover==='held';
+ const ready=true,held=false;
  return {ready,held,tables:true,windowTable:names.includes('projector_window'),priorityTable:names.includes(PRIORITY_TABLE),mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state,transferBatches:Number(transfer.batches)||0};
 }
 
 function assertOpen(gate){
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)throw failed('discovery_not_authoritative');
  if(gate.transfer==='loading')throw failed('discovery_incomplete');
 }
@@ -418,7 +431,6 @@ async function readKey(env,key,gate,options=null){
 export async function routeWrite(env,key,value,context={}){
  if(!ownsKey(key))return {handled:false};
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)return {handled:false};
  if(key==='epg/resolver-lease.json')throw failed('discovery_fence');
  if(gate.transfer==='loading')throw failed('discovery_incomplete');
@@ -823,7 +835,6 @@ function observationFromRow(row,shows){
 }
 export async function readObservationPage(env,options={}){
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)throw failed('discovery_not_authoritative');
  if(gate.transfer==='loading')throw failed('discovery_incomplete');
  const limit=Math.min(LEDGER_PAGE,Number.isInteger(options.limit)&&options.limit>0?options.limit:LEDGER_PAGE);
@@ -845,7 +856,6 @@ export async function readObservationPage(env,options={}){
 // authority marker, the programme or the generation changed while it ran.
 export async function walkObservationPages(env,options={}){
  const opened=await readAuthority(env);
- if(opened.held)throw failed('discovery_fence');
  if(!opened.ready)throw failed('discovery_not_authoritative');
  if(opened.transfer==='loading')throw failed('discovery_incomplete');
  const concurrency=Math.max(1,Math.min(6,Number.isInteger(options.concurrency)&&options.concurrency>0?options.concurrency:4));
@@ -873,7 +883,7 @@ export async function walkObservationPages(env,options={}){
   for(const page of batch){items+=page.length;await options.onPage(page);}
  }
  const closed=await readAuthority(env);
- if(closed.held||!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
+ if(!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
  return {programmeRunId:opened.programmeRunId,pages:starts.length,items,complete};
 }
 
@@ -928,7 +938,6 @@ export const SELECT_QUERIES=6;
 // `touchAfter` is the last key of that page (wraps once). The same generation fence as the full walk.
 export async function selectActionableObservations(env,options={}){
  const opened=await readAuthority(env);
- if(opened.held)throw failed('discovery_fence');
  if(!opened.ready)throw failed('discovery_not_authoritative');
  if(opened.transfer==='loading')throw failed('discovery_incomplete');
  const now=Number.isFinite(options.now)?options.now:Date.now();
@@ -991,7 +1000,7 @@ export async function selectActionableObservations(env,options={}){
   }
  }
  const closed=await readAuthority(env);
- if(closed.held||!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
+ if(!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
  return {programmeRunId:opened.programmeRunId,items,touches,after:cursor,touchAfter:touchCursor,wrapped,touchWrapped,queries,remaining,waitingRetry,nextRetryAt,complete};
 }
 
@@ -1715,7 +1724,6 @@ async function ledgerSealLoading(env){
 }
 export async function acquireLease(env,context={}){
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)return {handled:false,lease:null};
  if(gate.transfer==='loading'){
   const live=await one(database(env),'SELECT lease_id FROM discovery_lease WHERE id=1 AND lease_id IS NOT NULL AND expires_at>?',[nowMs()]);
@@ -1774,7 +1782,6 @@ export async function acquireLease(env,context={}){
 }
 export async function renewLease(env,lease,context={}){
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)return {handled:false,ok:false};
  if(!lease?.id)return {handled:true,ok:false};
  const programme=context.programmeRunId??null;
@@ -1797,7 +1804,6 @@ export async function requestProjectorWindow(env,{owner,deadlineMs=WINDOW_DEADLI
  if(typeof owner!=='string'||!owner)throw failed('discovery_conflict');
  if(!windowMillis(deadlineMs)||deadlineMs>WINDOW_DEADLINE_MS||!validWindowTime(now))throw failed('discovery_window_invalid');
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready||!gate.windowTable)return {outcome:'not_applicable',reason:gate.ready?'no_window_table':'authority_not_d1'};
  const db=database(env),expiresAt=now+deadlineMs;
  await commit(db,[['UPDATE projector_window SET state=\'requested\', owner=?, requested_at=?, expires_at=? WHERE id=1 AND (state=\'idle\' OR expires_at<=?)',[owner,now,expiresAt,now]]]);
@@ -1812,7 +1818,6 @@ export async function grantProjectorWindow(env,{owner,minRunMs=WINDOW_MIN_RUN_MS
  if(typeof owner!=='string'||!owner)throw failed('discovery_conflict');
  if(!windowMillis(minRunMs)||minRunMs>WINDOW_DEADLINE_MS||!validWindowTime(now))throw failed('discovery_window_invalid');
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready||!gate.windowTable)return {outcome:'not_applicable',reason:gate.ready?'no_window_table':'authority_not_d1'};
  const db=database(env);
  try{
@@ -1859,14 +1864,12 @@ async function readLeaseValue(env){
 }
 export async function readLease(env){
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)return {handled:false,lease:null};
  return {handled:true,lease:await readLeaseValue(env)};
 }
 
 export async function readContinuation(env){
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)return {handled:false,record:null,etag:null};
  const row=await one(database(env),'SELECT revision, payload_json FROM discovery_continuation WHERE id=1');
  let record=null;
@@ -1875,7 +1878,6 @@ export async function readContinuation(env){
 }
 export async function writeContinuation(env,record,etag){
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)return {handled:false,saved:false};
  const expected=etag==null?null:etag.startsWith('d1:')?Number(etag.slice(3)):NaN;
  if(etag!=null&&!Number.isInteger(expected))return {handled:true,saved:false};
@@ -1895,7 +1897,6 @@ export async function writeContinuation(env,record,etag){
 }
 export async function readWorkflow(env){
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)return {handled:false,record:null,etag:null};
  const row=await one(database(env),'SELECT revision, payload_json FROM discovery_workflow WHERE id=1');
  let record=null;
@@ -1910,9 +1911,8 @@ export async function readWorkflow(env){
 // cannot be parsed is `null` and listed in `unreadable`. `handled: false` means the R2 objects are the authority.
 export async function readOperationalSnapshot(env){
  const opened=await readAuthority(env);
- if(!opened.ready&&!opened.held)return {handled:false};
- const publicGate=gate=>({state:gate.held?'held':gate.transfer==='loading'?'loading':'ready',mode:gate.mode,cutover:gate.cutover,transfer:gate.transfer,generation:gate.generation,programmeRunId:gate.programmeRunId,publishedProgrammeRunId:gate.publishedProgrammeRunId});
- if(opened.held)return {handled:true,authority:publicGate(opened),records:null,unreadable:[],statements:0};
+ if(!opened.ready)return {handled:false};
+ const publicGate=gate=>({state:gate.transfer==='loading'?'loading':'ready',mode:gate.mode,cutover:gate.cutover,transfer:gate.transfer,generation:gate.generation,programmeRunId:gate.programmeRunId,publishedProgrammeRunId:gate.publishedProgrammeRunId});
  const db=database(env),wanted=[
   ['authority','SELECT mode, cutover, programme_run_id AS programmeRunId, generation, published_programme_run_id AS publishedProgrammeRunId FROM discovery_authority WHERE id=1'],
   ['transfer','SELECT state FROM discovery_transfer WHERE id=1'],
@@ -1931,7 +1931,7 @@ export async function readOperationalSnapshot(env){
  const parse=(name,row)=>{if(!row?.payload_json)return null;try{return JSON.parse(row.payload_json);}catch{unreadable.push(name);return null;}};
  const gate=rows.authority&&rows.transfer?{...opened,mode:rows.authority.mode,cutover:rows.authority.cutover,generation:Number(rows.authority.generation),programmeRunId:rows.authority.programmeRunId??null,publishedProgrammeRunId:rows.authority.publishedProgrammeRunId??null,transfer:rows.transfer.state}:opened;
  // The mode can change between the gate read and the batch; the snapshot's own row decides, and a no-longer-open authority is not served as D1 records.
- if(gate.mode!=='d1'||gate.cutover!=='open')return gate.mode==='d1'&&gate.cutover==='held'?{handled:true,authority:publicGate({...gate,held:true}),records:null,unreadable:[],statements:wanted.length}:{handled:false};
+ if(gate.mode!=='d1'||gate.cutover!=='open')throw failed('discovery_unavailable');
  return {handled:true,authority:publicGate(gate),statements:wanted.length,unreadable,records:{
   status:parse('status',rows.status),continuation:parse('continuation',rows.continuation),workflow:parse('workflow',rows.workflow),
   lease:rows.lease?.lease_id?{id:rows.lease.lease_id,expiresAt:Number(rows.lease.expires_at)}:null,
@@ -1945,7 +1945,6 @@ export async function readOperationalSnapshot(env){
 const WORKFLOW_GENERATION_PIN_SQL=" AND programme_run_id=? AND published_programme_run_id=? AND EXISTS (SELECT 1 FROM published_epg_authority WHERE id=1 AND programme_run_id=?)";
 export async function writeWorkflow(env,record,etag,options={}){
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)return {handled:false,saved:false};
  const expected=etag==null?null:String(etag).startsWith('d1:workflow:')?Number(String(etag).slice('d1:workflow:'.length)):NaN;
  if(etag!=null&&!Number.isInteger(expected))return {handled:true,saved:false};
@@ -1979,7 +1978,6 @@ export async function writeWorkflow(env,record,etag,options={}){
 
 export async function readObservationIndex(env,options={}){
  const gate=await readAuthority(env);
- if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)return {handled:false,index:null};
  if(gate.transfer==='loading')throw failed('discovery_incomplete');
  if(!gate.programmeRunId)return {handled:true,index:{programmeRunId:null,manifest:null,manifestEtag:null,records:[],state:'unavailable',reasons:['no_published_generation'],generation:null,indexScope:options.scope||'current_unresolved_with_decision',resolutionEtag:null}};
@@ -2078,7 +2076,6 @@ export async function ownerDecision(env,spec){
 async function policyExcludePlan(env,filmId){
  const gate=await readAuthority(env);
  if(!gate.ready)return {handled:false};
- if(gate.held)return {handled:true,available:false,reason:'held',gate};
  const id=typeof filmId==='string'?filmId:'';
  if(!POLICY_FILM_ID.test(id))return {handled:true,available:false,reason:'invalid',gate};
  const tmdbId=id.slice(5);

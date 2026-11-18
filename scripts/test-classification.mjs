@@ -38,6 +38,9 @@ export const FILES={
  "admin-identity-work-api.mjs": {
   "suite": "core"
  },
+ "admin-identity-work-page.mjs": {
+  "suite": "core"
+ },
  "admin-letterboxd-apply.mjs": {
   "suite": "core"
  },
@@ -1003,6 +1006,9 @@ export const FILES={
  "local-dev-smoke.mjs": {
   "suite": "core"
  },
+ "local-standins.mjs": {
+  "suite": "core"
+ },
  "local-fixtures.mjs": {
   "suite": "core"
  },
@@ -1176,6 +1182,10 @@ export const FILES={
  },
  "prediction-queue-cas.mjs": {
   "suite": "core"
+ },
+ "prediction-hot-reconcile-same-generation.mjs": {
+  "suite": "core",
+  "note": "AIR-529: new Discovery show assignments in the same published EPG generation move the shows signature and the next batch start rebuilds hot/cold."
  },
  "prediction-queue-discovery-independence.mjs": {
   "suite": "core",

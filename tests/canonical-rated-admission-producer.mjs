@@ -55,8 +55,7 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
 {
  const file=database('prepared');
  const before=one(file,'SELECT COUNT(*) FROM film_rated_admission');
- const out=await applyRatedAdmissionRetention(envOf(file),{event:'rated:p',admissions:[{receiptKey:'tmdb_603',receipt:receipt(603)}],now:()=>T});
- assert.equal(out.state,'skipped');assert.equal(out.reason,'projector_is_writer');
+ await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'rated:p',admissions:[{receiptKey:'tmdb_603',receipt:receipt(603)}],now:()=>T}),error=>error.code==='film_person_unavailable');
  assert.equal(one(file,'SELECT COUNT(*) FROM film_rated_admission'),before);
 }
 
@@ -399,11 +398,9 @@ async function putPayload(env,runId,report){
  workerCtx.run=run;
  await env.BUCKET.put('sync.json',JSON.stringify(run));
  await putPayload(env,'prep-26',report);
- const first=await vm.runInContext('sealFinalizeStep(env,run)',workerCtx);
- assert.equal(run.seal.phase,'queue');
- assert.equal(first.discovery.nextAction,'continue');
+ await assert.rejects(()=>vm.runInContext('sealFinalizeStep(env,run)',workerCtx),error=>error.code==='film_person_unavailable');
+ assert.equal(run.seal.phase,'finalize');
  assert.equal(run.ratedAdmissionScan,undefined);
- assert.equal(scans,1);
  assert.equal(env.BUCKET.records.get('sync.json').ratedAdmissionScan,undefined);
  assert.equal(one(file,'SELECT COUNT(*) FROM film_retention'),0);
 }

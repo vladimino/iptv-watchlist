@@ -44,12 +44,11 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
 {
  const plan=planDiscoveryAdmission({key:'tmdb_603',entry:{verified:true,title:'The Matrix'},resolved:{id:'film:tmdb:603',revision:0,held:null,redirected:false},at:AT});
  for(const stage of ['legacy','r2','prepared']){
+  // ADR 0162: only d1/open is served; an installed r2/prepared marker (or a missing marker row) is a refusal before any write.
   const file=database(stage),env=state(file);
-  const route=await writerRoute(env);
-  assert.deepEqual([route.writer,route.projector,route.canonical],['projector','writes','dormant'],stage);
   const before=tables(file),batches=env.DB.calls.batches;
-  const result=await dispatch(env,plan);
-  assert.deepEqual([result.executed,result.reason,result.results],[false,'projector_is_writer',[]],stage);
+  await assert.rejects(()=>writerRoute(env),code('film_person_unavailable'),stage);
+  await assert.rejects(()=>dispatch(env,plan),code('film_person_unavailable'),stage);
   assert.equal(env.DB.calls.batches,batches,stage+': no batch');
   assert.equal(tables(file),before,stage+': nothing written');
  }
@@ -79,11 +78,11 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  };
  const log=[];
  const writers=async label=>{
-  const gate=await (await import('../src/film-person-authority.js')).readAuthority(env);
+  const gate=await (await import('../src/film-person-authority.js')).readMarker(env);
   let projector='refused',canonical='refused';
   try{if(gate.r2Allowed){await projectorWrite(gate);projector='wrote';}}catch{projector='refused';}
-  const route=await dispatch(env,planDiscoveryAdmission({key:'tmdb_'+(1000+log.length),entry:{verified:true},resolved:{id:'film:tmdb:'+(1000+log.length),revision:0,held:null,redirected:false},at:AT}));
-  canonical=route.executed?'wrote':'refused';
+  try{const route=await dispatch(env,planDiscoveryAdmission({key:'tmdb_'+(1000+log.length),entry:{verified:true},resolved:{id:'film:tmdb:'+(1000+log.length),revision:0,held:null,redirected:false},at:AT}));
+  canonical=route.executed?'wrote':'refused';}catch{canonical='refused';}
   log.push({label,projector,canonical});
   assert.ok(!(projector==='wrote'&&canonical==='wrote'),label+': two writers');
   return {projector,canonical};
@@ -93,7 +92,7 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  await transitionAuthority(env,{from:'r2',to:'prepared',expectedGeneration:0});
  assert.deepEqual(await writers('prepared'),{projector:'wrote',canonical:'refused'});
  // An in-flight projector batch read at prepared generation 1 loses when the marker moves to open before its batch runs; nothing is written.
- const gatePrepared=await (await import('../src/film-person-authority.js')).readAuthority(env);
+ const gatePrepared=await (await import('../src/film-person-authority.js')).readMarker(env);
  const before=count(file,'film');
  await assert.rejects(()=>projectorWrite(gatePrepared,{beforeBatch:async()=>{sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1");}}));
  assert.equal(count(file,'film'),before,'the in-flight projector batch wrote nothing');
@@ -104,7 +103,7 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  assert.throws(()=>projectorFence({state:'open',r2Allowed:false,generation:2}),code('film_person_not_projector'));
  // A generation change inside prepared (back to r2 and forward) also kills a batch built on the old generation: no writer without a generation match.
  const file2=database('prepared'),env2=state(file2);
- const gate1=await (await import('../src/film-person-authority.js')).readAuthority(env2);
+ const gate1=await (await import('../src/film-person-authority.js')).readMarker(env2);
  await transitionAuthority(env2,{from:'prepared',to:'r2',expectedGeneration:1});
  await transitionAuthority(env2,{from:'r2',to:'prepared',expectedGeneration:2});
  const fence=projectorFence(gate1),db=d1Standin(file2);
