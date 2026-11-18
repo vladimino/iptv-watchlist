@@ -51,17 +51,17 @@ const DB = {rows: async (sql, params) => {tally.sql.push(sql); return admissions
 const env = {BUCKET: bucket, DB};
 
 const {context} = loadArchiveWorker({now: NOW, console: {log() {}, warn() {}, error() {}}, fetch: async () => {tally.fetches++; throw new Error('no outbound request');}});
-let limboMode = 'unavailable', limboItems = [], limboPinValue = 'L:1';
+let limboMode = 'unavailable', limboItems = [], limboPinValue = 'L:1', limboItemsFn = null;
 context.__stub = {
   load: async () => {if (limboMode === 'unavailable') return {error: 'programme_unavailable'}; if (limboMode === 'throws') throw new Error('boom'); return {tuple: {n: 1}, observations: {state: 'fresh'}};},
-  items: () => limboItems, pin: () => limboPinValue,
+  items: now => (limboItemsFn ? limboItemsFn(now) : limboItems), pin: () => limboPinValue,
 };
 vm.runInContext(`
 var adminLimboLoad = (env, hasPin) => __stub.load(env, hasPin);
-var limboEvaluate = () => ({scope: {coverage: {films: 'partial'}, subjects: {films: [1, 2], observations: [1]}}});
+var limboEvaluate = (snapshot, nowMs) => ({now: nowMs, scope: {coverage: {films: 'partial'}, subjects: {films: [1, 2], observations: [1]}}});
 var limboEncodePin = () => __stub.pin();
 var limboObservationCoverage = () => ({available: true, state: 'fresh', complete: false});
-var LimboInventory = {limboItems: () => __stub.items()};
+var LimboInventory = {limboItems: health => __stub.items(health.now)};
 var FilmPersonAuthority = {database: env => env.DB, many: (db, sql, params) => db.rows(sql, params)};
 `, context);
 vm.runInContext(scoped('src/domain/identity-work-inventory.js', 'IdentityWorkInventory'), context);
@@ -316,6 +316,29 @@ limboItems = [issue('tmdb_1', 'stalled', 3 * DAY), issue('tmdb_2', 'pending', 8 
   assert.equal(filmOnly.status, 200); assert.deepEqual(filmOnly.body.rows.map(row => row.type), ['film', 'film']);
   assert.equal(tally.lists.length + tally.gets.length + tally.heads.length, 0);
   assert.equal(filmOnly.body.coverage.letterboxd_rated_candidate, undefined);
+}
+
+// ---- the evaluation clock is pinned in the cursor: a threshold crossed between pages changes nothing ----
+{
+  reset();
+  limboMode = 'ok';
+  const THRESHOLD = NOW + 60 * 60 * 1000;
+  const film = (id, now) => issue(id, now < THRESHOLD ? 'pending' : 'stalled', 4 * DAY);
+  limboItemsFn = now => ['tmdb_1', 'tmdb_2', 'tmdb_3'].map(id => film(id, now));
+  const realNow = context.Date.now;
+  context.Date.now = () => NOW;
+  const one = await get('?type=film&disposition=waiting&limit=2');
+  assert.deepEqual(one.body.rows.map(row => [row.key, row.disposition]), [['film:tmdb_1', 'waiting'], ['film:tmdb_2', 'waiting']]);
+  assert.equal(one.body.snapshot.evaluatedAt, new Date(NOW).toISOString());
+  context.Date.now = () => THRESHOLD + 5 * 60 * 1000;
+  const two = await get('?type=film&disposition=waiting&limit=2&cursor=' + encodeURIComponent(one.body.nextCursor));
+  assert.equal(two.status, 200, 'the threshold was crossed, the source versions did not move: the cursor stays valid');
+  assert.deepEqual(two.body.rows.map(row => [row.key, row.disposition]), [['film:tmdb_3', 'waiting']], 'the same evaluation as the first page');
+  assert.equal(two.body.snapshot.evaluatedAt, new Date(NOW).toISOString(), 'the first page\'s clock is reported');
+  const fresh = await get('?type=film&disposition=waiting&limit=2');
+  assert.deepEqual(fresh.body.rows, [], 'a new first request evaluates at the new time: the films are blocked now');
+  assert.equal(fresh.body.snapshot.evaluatedAt, new Date(THRESHOLD + 5 * 60 * 1000).toISOString());
+  context.Date.now = realNow; limboItemsFn = null;
 }
 
 // ---- the read-only boundary over the whole file ----

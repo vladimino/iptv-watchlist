@@ -66,7 +66,7 @@ Lane order is `film`, `epg_observation`, `letterboxd_rated_candidate`. Inside a 
 
 **What the pin holds.** The `pin` is the tuple of the versions read at the first page: the Limbo tuple (for the first two lanes) and the **registry etag**. It does not hold any candidate document etag.
 
-**What the cursor holds.** The lane, the position, the filter key and limit, and, when the position is inside the candidate lane, the page archive's `sha` and the `documentEtag` read when the cursor was minted.
+**What the cursor holds.** The evaluation clock of the first page (`nowMs`, reused by every later page, so causes, dispositions, ages and filtered positions of the Film and observation lanes cannot move between pages while the source versions stand; a new first request evaluates at the new time), the lane, the position, the filter key and limit, and, when the position is inside the candidate lane, the page archive's `sha` and the `documentEtag` read when the cursor was minted.
 
 **What is validated on each request.** The Limbo tuple and the registry etag (`stale_pin`, 409, when either moved); the filter key and limit (`stale_cursor`, 400); and, for a cursor inside an archive, that the archive's document etag still equals the cursor's (`stale_cursor`, 400). 
 
@@ -86,9 +86,9 @@ Lane order is `film`, `epg_observation`, `letterboxd_rated_candidate`. Inside a 
 
 ## Registry
 
-`letterboxd/imports/registry.json` is a derived, droppable projection: `{schemaVersion: 1, updatedAt, archives: {<sha>: {registeredAt, generatedAt, counts: {pending, admitting, needs_review, verified, removed}, documentEtag, summarizedAt}}}`, at most 256 KiB and 500 archives. Every successful write of a candidate document (register, identity step, retry, rollback and the other mutation paths all go through one compare-and-swap helper) is followed by a bounded registry update (three attempts, its own compare-and-swap) that names the etag of the document just saved. The update never fails or undoes the primary write, never creates a second owner and never hides an older archive. Rules:
+`letterboxd/imports/registry.json` is a derived, droppable projection: `{schemaVersion: 1, updatedAt, archives: {<sha>: {registeredAt, generatedAt, counts: {pending, admitting, needs_review, verified, removed}, documentEtag, revision, summarizedAt}}}`, at most 256 KiB and 500 archives. Every successful write of a candidate document (register, identity step, retry, rollback and the other mutation paths all go through one compare-and-swap helper) is followed by a bounded registry update (three attempts, its own compare-and-swap) that names the etag of the document just saved. The update never fails or undoes the primary write, never creates a second owner and never hides an older archive. Rules:
 
-- An older `summarizedAt` never replaces a newer one for the same archive; `registeredAt` is kept from the first registration.
+- Every candidate document carries a `revision` that rises by one inside the compare-and-swap that writes it, and the registry row names the revision it summarizes. A summary whose revision is not newer than the row's (or has none) never replaces the row, so a delayed writer cannot overwrite the row of a newer document, and no clock is involved; `summarizedAt` is only a label. `registeredAt` is kept from the first registration.
 - A new archive beyond 500 archives, or a registry beyond 256 KiB, is refused and the archive stays `unindexed`.
 - A registry that is unreadable or of another schema is left untouched by writers and reported by the read (`registry_unreadable`, `registry_invalid`, `registry_oversized`); dropping the object is the recovery, and the next writer starts it again from its own archive.
 - A write that changes nothing writes nothing. An archive whose document was last written before the registry existed stays `unindexed` until its next write or an owner-confirmed backfill.

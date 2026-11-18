@@ -103,11 +103,12 @@ assert.deepEqual(['unknown_type', 'unknown_disposition', 'unknown_include', 'inv
 
 // ---- cursor and paging ----
 {
-  const query = q('limit=2'), base = {key: query.key, limit: 2, pin: 'I1|a|b'};
+  const query = q('limit=2'), base = {key: query.key, limit: 2, pin: 'I1|a|b', nowMs: NOW};
   const encoded = W.encodeCursor({...base, lane: 'film', index: 1, total: 5, id: 'film:x'});
-  assert.deepEqual(W.decodeCursor(encoded, {key: query.key, limit: 2}), {pin: 'I1|a|b', cursor: {lane: 'film', index: 1, total: 5, id: 'film:x'}});
+  assert.deepEqual(W.decodeCursor(encoded, {key: query.key, limit: 2}), {pin: 'I1|a|b', nowMs: NOW, cursor: {lane: 'film', index: 1, total: 5, id: 'film:x'}});
   assert.equal(W.decodeCursor(encoded, {key: query.key, limit: 3}).error, 'stale_cursor', 'another limit');
   assert.equal(W.decodeCursor(encoded, {key: q('type=film').key, limit: 2}).error, 'stale_cursor', 'another filter');
+  assert.equal(W.decodeCursor(W.encodeCursor({...base, nowMs: undefined, lane: 'film', index: 0, total: 1, id: 'x'}), {key: query.key, limit: 2}).error, 'stale_cursor', 'a cursor without the evaluation clock is refused');
   assert.equal(W.decodeCursor('garbage', {key: query.key, limit: 2}).error, 'stale_cursor');
   assert.equal(W.decodeCursor(W.encodeCursor({...base, lane: 'nope', index: 0, total: 1, id: 'x'}), {key: query.key, limit: 2}).error, 'stale_cursor');
   const cand = W.encodeCursor({...base, lane: 'letterboxd_rated_candidate', sha: SHA_A, after: 'Bb2', etag: 'e1'});

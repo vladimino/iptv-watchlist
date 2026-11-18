@@ -98,7 +98,7 @@ async function adminIdentityWorkRoute(request,env,url){
  if(params.has('cursor')){cursorRaw=params.get('cursor');if(!cursorRaw||cursorRaw.length>IDENTITY_WORK_CURSOR_MAX)return adminError('stale_cursor',400);}
  let decoded=null;
  if(cursorRaw!==null){decoded=IdentityWorkInventory.decodeCursor(cursorRaw,{key:query.key,limit:query.limit});if(decoded.error)return adminError(decoded.error,400);}
- const nowMs=Date.now();
+ const nowMs=decoded?decoded.nowMs:Date.now();
  const wantsMemory=IdentityWorkInventory.laneEnabled(query,'film')||IdentityWorkInventory.laneEnabled(query,'epg_observation');
  const wantsCandidates=IdentityWorkInventory.laneEnabled(query,'letterboxd_rated_candidate');
  const limbo=wantsMemory?await identityWorkLimbo(env,pin!==null||decoded!==null,nowMs):null;
@@ -167,7 +167,7 @@ async function adminIdentityWorkRoute(request,env,url){
   pin:currentPin,snapshot:{sources:IDENTITY_WORK_SOURCES,evaluatedAt:new Date(nowMs).toISOString(),scope:'per_archive'},
   type:query.type,disposition:query.disposition,include:query.includeResolved?'resolved':null,archive:query.archive,q:query.q,limit,
   rows:outRows,
-  nextCursor:next?IdentityWorkInventory.encodeCursor({...next,key:query.key,limit,pin:currentPin}):null,
+  nextCursor:next?IdentityWorkInventory.encodeCursor({...next,key:query.key,limit,pin:currentPin,nowMs}):null,
   coverage,
   vocabulary:{types:IdentityWorkInventory.IDENTITY_LANES,dispositions:IdentityWorkInventory.IDENTITY_DISPOSITIONS},
  });

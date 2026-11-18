@@ -29,7 +29,8 @@ export function summarizeDocument(doc, {etag = null, now} = {}) {
     if (Object.prototype.hasOwnProperty.call(counts, item.state)) counts[item.state]++;
     if (typeof item.registeredAt === 'string' && (first === null || item.registeredAt < first)) first = item.registeredAt;
   }
-  return {registeredAt: first, generatedAt: typeof doc?.generatedAt === 'string' ? doc.generatedAt : null, counts, documentEtag: typeof etag === 'string' && etag ? etag : null, summarizedAt: now};
+  // `revision` is the document's own mutation counter, raised by the compare-and-swap that wrote it: the only proof of mutation order.
+  return {registeredAt: first, generatedAt: typeof doc?.generatedAt === 'string' ? doc.generatedAt : null, counts, documentEtag: typeof etag === 'string' && etag ? etag : null, revision: Number.isInteger(doc?.revision) && doc.revision >= 0 ? doc.revision : null, summarizedAt: now};
 }
 
 // A registry read from storage, or null when the value is not a registry of this schema. Rows that are not well formed are dropped.
@@ -40,21 +41,22 @@ export function parseRegistry(value) {
     if (!HEX64.test(sha) || !row || typeof row !== 'object' || !row.counts || typeof row.counts !== 'object') continue;
     const counts = emptyCounts();
     for (const state of REGISTRY_STATES) counts[state] = Number.isInteger(row.counts[state]) && row.counts[state] >= 0 ? row.counts[state] : 0;
-    archives[sha] = {registeredAt: typeof row.registeredAt === 'string' ? row.registeredAt : null, generatedAt: typeof row.generatedAt === 'string' ? row.generatedAt : null, counts, documentEtag: typeof row.documentEtag === 'string' ? row.documentEtag : null, summarizedAt: typeof row.summarizedAt === 'string' ? row.summarizedAt : null};
+    archives[sha] = {registeredAt: typeof row.registeredAt === 'string' ? row.registeredAt : null, generatedAt: typeof row.generatedAt === 'string' ? row.generatedAt : null, counts, documentEtag: typeof row.documentEtag === 'string' ? row.documentEtag : null, revision: Number.isInteger(row.revision) && row.revision >= 0 ? row.revision : null, summarizedAt: typeof row.summarizedAt === 'string' ? row.summarizedAt : null};
   }
   return {schemaVersion: REGISTRY_SCHEMA_VERSION, updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : null, archives};
 }
 
-// The next registry after one archive's summary, or why it was not written. An older summary never replaces a newer one for the
-// same archive; a new archive beyond the cap, or a registry beyond its byte cap, is refused and leaves the archive `unindexed`.
+// The next registry after one archive's summary, or why it was not written. A summary of a document revision that is not newer than
+// the row's never replaces it (ordered by the document's mutation revision, never by a clock: a delayed writer cannot overwrite a newer
+// document's row, and equal-millisecond summaries are ordered too). A summary without a revision replaces only a row without one; a new archive beyond the cap, or a registry beyond its byte cap, is refused and leaves the archive `unindexed`.
 export function applyArchive(registry, sha, summary, now) {
   if (!HEX64.test(String(sha || ''))) return {changed: false, refused: 'invalid_archive'};
   const base = registry ? parseRegistry(registry) : {schemaVersion: REGISTRY_SCHEMA_VERSION, updatedAt: null, archives: {}};
   if (!base) return {changed: false, refused: 'registry_invalid'};
   const prior = base.archives[sha];
   if (!prior && Object.keys(base.archives).length >= REGISTRY_MAX_ARCHIVES) return {changed: false, refused: 'registry_full'};
-  if (prior && prior.summarizedAt && summary.summarizedAt && prior.summarizedAt > summary.summarizedAt) return {changed: false, refused: 'older_summary'};
-  const row = {registeredAt: prior?.registeredAt || summary.registeredAt || now, generatedAt: summary.generatedAt, counts: summary.counts, documentEtag: summary.documentEtag, summarizedAt: summary.summarizedAt};
+  if (prior && prior.revision !== null && (summary.revision === null || summary.revision <= prior.revision)) return {changed: false, refused: 'older_summary'};
+  const row = {registeredAt: prior?.registeredAt || summary.registeredAt || now, generatedAt: summary.generatedAt, counts: summary.counts, documentEtag: summary.documentEtag, revision: summary.revision, summarizedAt: summary.summarizedAt};
   const next = {schemaVersion: REGISTRY_SCHEMA_VERSION, updatedAt: now, archives: {...base.archives, [sha]: row}};
   if (bytesOf(next) > REGISTRY_MAX_BYTES) return {changed: false, refused: 'registry_too_large'};
   return {changed: true, registry: next};

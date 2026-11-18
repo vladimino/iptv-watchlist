@@ -190,7 +190,8 @@ function decode(cursor) {
   } catch {return null;}
 }
 
-// A cursor names the pin, the filter key, the limit and a position. In film / epg_observation the position is the index and key of
+// A cursor names the pin, the evaluation clock `nowMs` of the first page (every later page is cut from the same evaluation, so causes, ages
+// and dispositions cannot move between pages while the source versions stand), the filter key, the limit and a position. In film / epg_observation the position is the index and key of
 // the last served row of that lane (`index` -1: nothing served yet). In the candidate lane it is the archive and the last short code
 // served ('' : start), plus the document etag read when the cursor was minted (null when the archive was not read yet).
 export function encodeCursor(cursor) {
@@ -199,13 +200,13 @@ export function encodeCursor(cursor) {
 // The pin is returned, not judged here: a moved pin is `stale_pin` (409), any other mismatch is `stale_cursor` (400).
 export function decodeCursor(raw, {key, limit}) {
   const payload = decode(raw);
-  if (!object(payload) || payload.v !== 1 || payload.key !== key || payload.limit !== limit || typeof payload.pin !== 'string' || !IDENTITY_LANES.includes(payload.lane)) return {error: 'stale_cursor'};
+  if (!object(payload) || payload.v !== 1 || payload.key !== key || payload.limit !== limit || typeof payload.pin !== 'string' || !Number.isInteger(payload.nowMs) || payload.nowMs <= 0 || !IDENTITY_LANES.includes(payload.lane)) return {error: 'stale_cursor'};
   if (payload.lane === 'letterboxd_rated_candidate') {
     if (typeof payload.after !== 'string' || (payload.sha !== null && !HEX64.test(String(payload.sha))) || (payload.etag !== null && typeof payload.etag !== 'string')) return {error: 'stale_cursor'};
-    return {pin: payload.pin, cursor: {lane: payload.lane, sha: payload.sha, after: payload.after, etag: payload.etag}};
+    return {pin: payload.pin, nowMs: payload.nowMs, cursor: {lane: payload.lane, sha: payload.sha, after: payload.after, etag: payload.etag}};
   }
   if (!Number.isInteger(payload.index) || payload.index < -1 || !Number.isInteger(payload.total) || typeof payload.id !== 'string') return {error: 'stale_cursor'};
-  return {pin: payload.pin, cursor: {lane: payload.lane, index: payload.index, total: payload.total, id: payload.id}};
+  return {pin: payload.pin, nowMs: payload.nowMs, cursor: {lane: payload.lane, index: payload.index, total: payload.total, id: payload.id}};
 }
 
 export const START = {lane: 'film', index: -1, total: 0, id: ''};

@@ -43,6 +43,9 @@ const LetterboxdRatedCandidates = (() => {
       const base = current.value || empty;
       const next = await apply(JSON.parse(JSON.stringify(base)));
       if (next == null) return {value: base, changed: false};
+      // AIR-527: a candidate document carries a mutation revision. It rises by one inside the compare-and-swap that writes it, so two
+      // committed writes are always ordered, whatever the order in which their responses arrive and their registry syncs start.
+      if (typeof LetterboxdImportRegistry !== 'undefined' && LetterboxdImportRegistry.archiveOfCandidateKey(key)) next.revision = (Number.isInteger(base?.revision) && base.revision >= 0 ? base.revision : 0) + 1;
       const saved = await env.BUCKET.put(key, JSON.stringify(next), {httpMetadata: {contentType: 'application/json'}, onlyIf: current.etag ? {etagMatches: current.etag} : {etagDoesNotMatch: '*'}});
       if (saved !== null) {
         await syncRegistry(env, key, next, saved && typeof saved.etag === 'string' ? saved.etag : null);

@@ -16,7 +16,8 @@ assert.equal(R.archiveOfCandidateKey('letterboxd/imports/' + SHA_A + '/rated-can
 assert.equal(R.archiveOfCandidateKey('letterboxd/imports/' + SHA_A + '/chunks/0.receipt.json'), null);
 assert.equal(R.archiveOfCandidateKey('letterboxd/admissions/verified-films.json'), null);
 {
-  const summary = R.summarizeDocument(doc(['pending', 'verified', 'verified', 'needs_review', 'removed', 'bogus']), {etag: 'e1', now: NOW});
+  const summary = R.summarizeDocument({...doc(['pending', 'verified', 'verified', 'needs_review', 'removed', 'bogus']), revision: 3}, {etag: 'e1', now: NOW});
+  assert.equal(summary.revision, 3); assert.equal(R.summarizeDocument(doc(['pending']), {etag: 'e', now: NOW}).revision, null);
   assert.deepEqual(summary.counts, {pending: 1, admitting: 0, needs_review: 1, verified: 2, removed: 1});
   assert.equal(summary.documentEtag, 'e1');
   assert.equal(summary.registeredAt, '2026-11-01T00:00:00.000Z');
@@ -26,10 +27,12 @@ assert.equal(R.archiveOfCandidateKey('letterboxd/admissions/verified-films.json'
   assert.deepEqual(Object.keys(first.registry.archives), [SHA_A]);
   assert.equal(first.registry.archives[SHA_A].registeredAt, '2026-11-01T00:00:00.000Z');
   // registeredAt of an archive is kept from the first registration
-  const again = R.applyArchive(first.registry, SHA_A, {...summary, registeredAt: '2027-01-01T00:00:00.000Z', summarizedAt: LATER}, LATER);
+  const again = R.applyArchive(first.registry, SHA_A, {...summary, revision: 4, registeredAt: '2027-01-01T00:00:00.000Z', summarizedAt: LATER}, LATER);
   assert.equal(again.registry.archives[SHA_A].registeredAt, '2026-11-01T00:00:00.000Z');
-  // an older summary never replaces a newer one
-  assert.deepEqual(R.applyArchive(again.registry, SHA_A, {...summary, summarizedAt: NOW}, LATER), {changed: false, refused: 'older_summary'});
+  assert.equal(again.registry.archives[SHA_A].revision, 4);
+  // ordered by the document's mutation revision, not by a clock: an older or equal revision never replaces a row, even with a later summarizedAt
+  for (const revision of [3, 4, null]) assert.deepEqual(R.applyArchive(again.registry, SHA_A, {...summary, revision, summarizedAt: '2030-01-01T00:00:00.000Z'}, LATER), {changed: false, refused: 'older_summary'});
+  assert.equal(R.applyArchive(again.registry, SHA_A, {...summary, revision: 5, summarizedAt: NOW}, LATER).changed, true, 'a newer revision wins whatever its clock says');
   assert.deepEqual(R.applyArchive(null, 'nope', summary, NOW), {changed: false, refused: 'invalid_archive'});
   assert.deepEqual(R.applyArchive({schemaVersion: 9, archives: {}}, SHA_A, summary, NOW), {changed: false, refused: 'registry_invalid'});
 }
@@ -40,7 +43,7 @@ assert.equal(R.archiveOfCandidateKey('letterboxd/admissions/verified-films.json'
   const full = {schemaVersion: 1, updatedAt: NOW, archives};
   const summary = R.summarizeDocument(doc(['pending']), {etag: 'e', now: NOW});
   assert.deepEqual(R.applyArchive(full, SHA_A, summary, NOW), {changed: false, refused: 'registry_full'});
-  assert.equal(R.applyArchive(full, Object.keys(archives)[3], {...summary, summarizedAt: LATER}, LATER).changed, true, 'an archive already in the registry still updates at the cap');
+  assert.equal(R.applyArchive(full, Object.keys(archives)[3], {...summary, revision: 1, summarizedAt: LATER}, LATER).changed, true, 'an archive already in the registry still updates at the cap');
   const wide = {...summary, documentEtag: 'x'.repeat(R.REGISTRY_MAX_BYTES)};
   assert.deepEqual(R.applyArchive(null, SHA_A, wide, NOW), {changed: false, refused: 'registry_too_large'});
 }
@@ -128,6 +131,35 @@ assert.notEqual(registry().archives[SHA_B].documentEtag, records.get(docKey(SHA_
 failRegistryPut = false;
 await Candidates.registerCandidates(env, {sha: SHA_B, generatedAt: '2026-11-02T00:00:00.000Z', chunk: 1, rows: rows('Ee5')});
 assert.equal(registry().archives[SHA_B].counts.pending, 3, 'the next writer of the archive repairs the row');
+// every committed candidate write raises the document's revision by one, and the row carries it
+{
+  const stored = JSON.parse(records.get(docKey(SHA_A)).text);
+  assert.ok(Number.isInteger(stored.revision) && stored.revision >= 2, 'register then rollback: revision ' + stored.revision);
+  assert.equal(registry().archives[SHA_A].revision, stored.revision);
+}
+// a delayed response of an older write must not overwrite the newer write's row (equal-millisecond clocks included: the test clock is frozen)
+{
+  const SHA_D = 'd'.repeat(64);
+  let gate = null, release = null, held = false;
+  const slow = {...bucket, async put(key, value, options) {
+    const saved = await bucket.put(key, value, options);
+    if (key === docKey(SHA_D) && saved && !held) {held = true; gate = new Promise(resolve => {release = resolve;}); await gate;}
+    return saved;
+  }};
+  const first = Candidates.registerCandidates({BUCKET: slow}, {sha: SHA_D, generatedAt: '2026-11-04T00:00:00.000Z', chunk: 0, rows: rows('Aa1')});
+  while (!held) await new Promise(resolve => setTimeout(resolve, 1));
+  // write B commits and syncs while A's response is still on its way
+  await Candidates.registerCandidates(env, {sha: SHA_D, generatedAt: '2026-11-04T00:00:00.000Z', chunk: 1, rows: rows('Bb2')});
+  const after = registry().archives[SHA_D];
+  assert.equal(after.counts.pending, 2); assert.equal(after.documentEtag, records.get(docKey(SHA_D)).etag);
+  release();
+  const done = await first;
+  assert.deepEqual([...done.added], ['Aa1'], 'the delayed write still succeeded');
+  const row = registry().archives[SHA_D];
+  assert.equal(row.counts.pending, 2, 'the delayed sync did not overwrite the newer counts');
+  assert.equal(row.documentEtag, records.get(docKey(SHA_D)).etag, 'nor the newer etag');
+  assert.equal(row.revision, JSON.parse(records.get(docKey(SHA_D)).text).revision);
+}
 // an unreadable registry is left alone (never overwritten with a guess), the primary write still succeeds
 records.set(R.REGISTRY_KEY, {text: '{not json', etag: 'broken'});
 const beforeBroken = registryPuts;
