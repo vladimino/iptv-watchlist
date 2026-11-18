@@ -7,7 +7,7 @@
 //
 // The production prompt cannot run offline literally (it drives the IPTV MCP batch protocol and web search). The adapter
 // below is symmetric: both variants get the same preamble, the same output contract and the same verbatim scoring steps
-// 3а, 3б, 4, 5 and 6 of the installed prompt; the candidate adds only its verbatim step 6а. Steps 1-3, 3в, 3г, 7-11 are
+// 3а, 3б, 4, 5 and 6 of the frozen pre-install prompt; the candidate adds only its verbatim step 6а. Steps 1-3, 3в, 3г, 7-11 are
 // orchestration, audit and reporting and are omitted from both. This is adapter parity, not literal prompt parity.
 //
 // Usage:
@@ -24,7 +24,7 @@ const sha=t=>createHash('sha256').update(t).digest('hex');
 const block=(doc,name)=>{const m=doc.match(new RegExp('---BEGIN '+name+'---\\n([\\s\\S]*?)\\n---END '+name+'---'));if(!m)throw new Error(name+' markers missing');return m[1];};
 export const BASE_SHA='1192b92c3d50a2478afd27b06b2d055972375497374e237ef212b6b6e5e2c95c';
 // Candidate versions. v1 is the historical text of the first A/B (seed 476, method fingerprint 7647d808…) and stays
-// reproducible; v2 (positive-only matchSignals) is the latest pending candidate and the default.
+// reproducible; v2 (positive-only matchSignals) was subsequently installed, and remains the offline harness default.
 export const CANDIDATES={
  v1:{file:'docs/evidence/prediction/air-476-evidence-aware-scoring-candidate-2026-11-17.md',sha:'1826af6f11eb3aad6d3f2dd4c40542b93d0040e46d316cd3d9bf30168c4ee2c1',seed:476},
  v2:{file:'docs/evidence/prediction/air-476-evidence-aware-scoring-candidate-v2-2026-11-18.md',sha:'ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520',seed:4762},
@@ -36,7 +36,7 @@ export const SEED=CANDIDATES[LATEST_CANDIDATE].seed;
 
 export function promptTexts(version=LATEST_CANDIDATE){
  const spec=CANDIDATES[version];if(!spec)throw new Error('unknown candidate version '+version);
- const base=block(fs.readFileSync(path.join(root,'docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2.md'),'utf8'),'PROMPT');
+ const base=block(fs.readFileSync(path.join(root,'docs/evidence/prediction/air-476-preinstall-baseline-2026-11-17.md'),'utf8'),'PROMPT');
  const candidate=block(fs.readFileSync(path.join(root,spec.file),'utf8'),'CANDIDATE PROMPT');
  if(sha(base)!==BASE_SHA)throw new Error('base prompt drifted from '+BASE_SHA);
  if(sha(candidate)!==spec.sha)throw new Error('candidate '+version+' drifted from '+spec.sha);

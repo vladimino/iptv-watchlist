@@ -1,5 +1,5 @@
 // AIR-476 candidate v2: positive-only matchSignals. Static checks only (no model, network, production or Scheduled Task):
-// v2 differs from the historical v1 by one insertion inside step 6а, is still the installed base plus exactly two lines,
+// v2 differs from historical v1 by one insertion inside step 6а, and equals the frozen pre-install base plus exactly two lines,
 // keeps the batch v2 invariants, and the grader's matchSignals checks behave on synthetic outputs.
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
@@ -10,19 +10,22 @@ import {CANDIDATES,LATEST_CANDIDATE,plan,promptTexts,grade} from '../scripts/pre
 const sha=t=>createHash('sha256').update(t).digest('hex');
 const block=(doc,name)=>{const m=doc.match(new RegExp('---BEGIN '+name+'---\\n([\\s\\S]*?)\\n---END '+name+'---'));assert.ok(m,name);return m[1];};
 const canonical=fs.readFileSync('docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2.md','utf8');
-const base=block(canonical,'PROMPT'),dry=block(canonical,'DRY RUN PROMPT');
+const historical=fs.readFileSync('docs/evidence/prediction/air-476-preinstall-baseline-2026-11-17.md','utf8');
+const base=block(historical,'PROMPT'),installed=block(canonical,'PROMPT'),dry=block(canonical,'DRY RUN PROMPT');
 const v1Doc=fs.readFileSync(CANDIDATES.v1.file,'utf8'),v2Doc=fs.readFileSync(CANDIDATES.v2.file,'utf8');
 const v1=block(v1Doc,'CANDIDATE PROMPT'),v2=block(v2Doc,'CANDIDATE PROMPT');
 
 // 1. Hashes and the latest-pending pointer.
 assert.equal(LATEST_CANDIDATE,'v2');
-assert.equal(sha(base),'1192b92c3d50a2478afd27b06b2d055972375497374e237ef212b6b6e5e2c95c','canonical installed prompt unchanged');
+assert.equal(sha(base),'1192b92c3d50a2478afd27b06b2d055972375497374e237ef212b6b6e5e2c95c','frozen historical baseline unchanged');
 assert.equal(sha(v1),CANDIDATES.v1.sha,'v1 historical candidate unchanged');
 assert.equal(sha(v2),CANDIDATES.v2.sha);assert.equal(v2.length,45938);assert.equal(Buffer.byteLength(v2,'utf8'),69379);
 assert.ok(/\| 45938 \| 69379 \| `ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520` \|/.test(v2Doc));
-assert.ok(/Status: latest pending candidate, NOT installed/.test(v2Doc));
-assert.ok(!canonical.includes(CANDIDATES.v2.sha)&&!base.includes('EVIDENCE-AWARE'),'canonical snapshot not rewritten');
-assert.ok(fs.readFileSync('docs/reference/scheduled-tasks.md','utf8').includes('air-476-evidence-aware-scoring-candidate-v2-2026-11-18.md'),'pending pointer updated');
+assert.ok(/Status: accepted and installed/.test(v2Doc));
+assert.equal(sha(installed),CANDIDATES.v2.sha,'installed canonical must be approved candidate v2');
+assert.equal(installed,v2,'canonical prompt must match the frozen v2 candidate byte for byte');
+assert.ok(!base.includes('EVIDENCE-AWARE'),'historical baseline has no scoring overlay');
+assert.ok(fs.readFileSync('docs/reference/scheduled-tasks.md','utf8').includes('air-476-evidence-aware-scoring-candidate-v2-2026-11-18.md'),'candidate evidence remains linked from operational reference');
 
 // 2. v1 -> v2: only step 6а changes, by one insertion before «Это не новый поиск:».
 const L1=v1.split('\n'),L2=v2.split('\n');
