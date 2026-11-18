@@ -83,13 +83,14 @@ assert.deepEqual(Object.keys(records.get('started/one.json')).sort(),['id','last
 assert.equal(records.get('started/one.json').lastEvent.id,byId('one').id);
 assert.ok([...records.keys()].some(k=>/^events\/items\/\d{13}-[0-9a-f-]{36}\.json$/.test(k)),'the event journal key is unchanged');
 
-// Repeated started: the stored last event is delivered again, the mark and its event are not replaced, and D1 is not needed for the repeat.
+// Repeated started: with the Film/Person marker open the stored last event is delivered again under its own key, the mark itself and its event are not replaced.
+// The D1 read comes first, so a replay is fenced like any other request (below, with the refusals).
 {
  const before=JSON.stringify(records.get('started/one.json')),eventCount=(await events()).length;puts=[];
  assert.deepEqual(await (await call('POST',{id:'one',started:true})).json(),{id:'one',started:true});
  assert.equal(JSON.stringify(records.get('started/one.json')),before);assert.equal((await events()).length,eventCount,'the same event is written again under the same key, not duplicated');
  assert.ok(!puts.includes('started/one.json'),'the mark itself is not rewritten');
- const noDb=await call('POST',{id:'one',started:true},{}, {BUCKET:bucket});assert.equal(noDb.status,200);
+ assert.ok(puts.length>0&&puts.every(k=>k.startsWith('events/items/')),'an open-domain replay writes only the existing event key');
 }
 
 // Refusals: every one leaves zero R2 writes and never falls back to the frozen documents.
@@ -125,6 +126,17 @@ await refused({id:'tmdb_12',started:true},503,null,{BUCKET:bucket});
 {const unreadable=database('open',SEED);fs.writeFileSync(unreadable.file,'not a database');await refused({id:'tmdb_12',started:true},503,null,{BUCKET:bucket,DB:unreadable.db});}
 assert.deepEqual(reachedFrozen(),[]);
 
+// Same-state replay is fenced by D1 authority as well: held, not open, unreadable and a missing binding answer 503 with zero R2 writes (started and unstarted alike). The mark `one` is started, `two` is not.
+{
+ const held=database('held'),prepared=database('prepared'),legacy=database(null);
+ const broken=d1Standin(open.file,{rewrite:sql=>/FROM film_external_id/.test(sql)?'SELECT * FROM missing_table':sql});
+ for(const [name,env] of [['held',{BUCKET:bucket,DB:held.db}],['prepared',{BUCKET:bucket,DB:prepared.db}],['legacy',{BUCKET:bucket,DB:legacy.db}],['unreadable',{BUCKET:bucket,DB:broken}],['no binding',{BUCKET:bucket}]]){
+  await refused({id:'one',started:true},503,null,env);
+  await refused({id:'two',started:false},503,null,env);
+ }
+ await refused({id:'one',started:true},503,'film_person_held',{BUCKET:bucket,DB:held.db});
+}
+
 // unstarted: the mark's own last known event film is used when the identity no longer resolves, and the availability of D1 is still checked.
 {
  const removed=database('open',SEED.replace(/INSERT INTO film[^;]*film:tmdb:11[^;]*;/g,'').replace(/INSERT INTO film_[a-z_]+ \([^)]*\) VALUES \('film:tmdb:11'[^;]*;/g,''),{});
@@ -144,12 +156,36 @@ assert.deepEqual(reachedFrozen(),[]);
  assert.ok(Date.parse(stored.lastEvent.at)>=before-1000,'at is the actual time of the new action');
 }
 {
+ // A repeated unstarted of `two` (already unstarted) is a replay: refused with zero writes while D1 is held, only the existing event key when open.
+ const held=database('held');await refused({id:'two',started:false},503,'film_person_held',{BUCKET:bucket,DB:held.db});
+ puts=[];assert.equal((await call('POST',{id:'two',started:false})).status,200);assert.ok(puts.length>0&&puts.every(k=>k.startsWith('events/items/')),'an open replay of unstarted writes only the existing event key');
+}
+{
  // unstarted does not create an identity: a conflicting alias still removes the mark with the film of its own last event.
  const held=database('held');puts=[];
  const response=await call('POST',{id:'solo',started:false},{},{BUCKET:bucket,DB:held.db});
  assert.equal(response.status,503);assert.equal(puts.length,0);assert.equal(records.get('started/solo.json').started,true,'a refused unstarted leaves the mark as it was');
 }
 assert.deepEqual((await (await call('GET')).json()).ids.sort(),['solo','tmdb_13'],'GET lists the remaining marks');
+
+// A new started takes only D1 values: the Film `one` was unstarted above with the last event {Один, 1999, tmdb 11}; D1 now has neither a title nor a year for it. The new event must not
+// inherit the old R2 values: a neutral placeholder and null, the D1 TMDB claim.
+{
+ const bare=database('open',film('film:tmdb:11',11,'')+claim('film:tmdb:11','tmdb','11')+claim('film:tmdb:11','letterboxd','one'));
+ assert.equal(records.get('started/one.json').started,false);assert.deepEqual(records.get('started/one.json').lastEvent.film,{id:'one',title:'Один',year:1999,tmdb:'11'});
+ assert.equal((await call('POST',{id:'one',started:true},{},{BUCKET:bucket,DB:bare.db})).status,200);
+ assert.deepEqual(records.get('started/one.json').lastEvent.film,{id:'one',title:'Фильм',year:null,tmdb:'11'},'a new started never takes its title or year from the previous R2 event');
+}
+// An identity reassigned since the mark: the Letterboxd id `one` now has a different trusted TMDB claim (12, was 11). Cancelling the mark keeps the film of the mark's own event and never
+// records the unstart for another movie; nothing is matched by title or year.
+{
+ const reassigned=database('open',film('film:tmdb:12',12,'Original two')+claim('film:tmdb:12','tmdb','12')+claim('film:tmdb:12','letterboxd','one')+meta('film:tmdb:12',2001));
+ const stored=records.get('started/one.json').lastEvent.film;assert.equal(stored.tmdb,'11');
+ assert.equal((await call('POST',{id:'one',started:false},{},{BUCKET:bucket,DB:reassigned.db})).status,200);
+ const after=records.get('started/one.json');assert.equal(after.started,false);assert.equal(after.lastEvent.type,'unstarted');
+ assert.deepEqual(after.lastEvent.film,stored,'unstarted keeps the original event film when the verified TMDB identity changed');
+ // The same Film still resolving to the same trusted TMDB claim is described from D1 as before (the `two` case above).
+}
 
 // A re-started mark after unstarted is a new action with a new event; an old stored event stays readable through GET /api/events.
 puts=[];assert.equal((await call('POST',{id:'one',started:true})).status,200);assert.equal(records.get('started/one.json').started,true);

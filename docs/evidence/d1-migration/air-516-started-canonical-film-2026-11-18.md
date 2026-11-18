@@ -12,6 +12,8 @@
 | --- | --- |
 | `CanonicalCatalogReader.catalogStartedFilm` (new, SELECT only) | The verified identity bridge, the owner retirement ledger and the Film's localization and year; marker read before and after, generation drift refused |
 | `setStarted` | Reads no `metadata.json` and no `programme.json`; every refusal is answered before the first R2 write |
+| D1 read order | The D1 read precedes every R2 write, a same-state replay included (review of the first HEAD): a replay with a held, not-open or unreadable marker is `503` with zero writes |
+| Event film | A new `started` uses only D1 title and year (placeholder or null when missing); `unstarted` keeps the original event film when the verified TMDB identity changed since the mark |
 | Mark and event objects | `started/<id>.json`, `customMetadata.started`, `events/items/` keys, write order and repeat delivery of `lastEvent` unchanged |
 | `CANONICAL_READER_REGISTRY` | One entry added, `moved: true` |
 
@@ -24,7 +26,9 @@
 | Conflicting, untrusted or ambiguous claim; identity that disagrees with the claim | `409` | none |
 | Redirect source or owner-retired movie id | `410` | none |
 | Held, not open, unreadable or missing D1, generation moved | `503` | none |
-| `unstarted` of an existing mark whose Film no longer resolves | `200`, last known `lastEvent.film` | mark and event |
+| `unstarted` of an existing mark whose Film no longer resolves, or now names another verified TMDB movie | `200`, last known `lastEvent.film` | mark and event |
+| Same-state replay, marker open | `200`, stored `lastEvent` re-delivered | existing event key only |
+| Same-state replay, held / not open / unreadable | `503` | none |
 
 ## Regression
 
