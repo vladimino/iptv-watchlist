@@ -26,7 +26,7 @@ Item failures still use `failureStage: "parse_error"` and the same retry. The di
 
 The ChatGPT Scheduled Task is not a Worker cron and is not edited here. When that task is next changed, it should:
 
-1. Send or read `X-Request-Id` / `requestId` on `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete`.
+1. Send or read `X-Request-Id` / `requestId` on `prediction_batch_start`, `prediction_batch_submit`, `prediction_batch_hold`, `prediction_heartbeat`, and `prediction_complete`.
 2. Remember the id only from a response the client actually received.
 3. On a real external stop, call `prediction_complete` with the existing `reason` plus `fault`. Set `receivedRequestId` to the id from the last response the client received, `failedStep` to the step that failed, and `origin` to `worker_http`, `transport`, `model_provider`, `orchestrator`, or `unknown`.
 4. Omit `fault` when the client cannot tell where the failure happened. The Worker then records `external_unattributed` instead of guessing.

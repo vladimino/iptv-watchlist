@@ -1,95 +1,108 @@
-import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
-const records=new Map(),etags=new Map();let revision=0,failKey='',failProducedNext=false;
-const env={BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;if(key===failKey){failKey='';throw new Error('Storage checkpoint interrupted')}if(failProducedNext&&key.startsWith('enrichment/run-diagnostics/')){const parsed=JSON.parse(value);if(parsed.steps?.some(step=>step.step==='next'&&step.outcome==='produced'))throw new Error('finish diagnostic failed');}records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)}},list:async({prefix=''})=>({objects:[...records.keys()].filter(k=>k.startsWith(prefix)).map(key=>({key})),truncated:false})}};
-const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
-ctx.env=env;const call=code=>vm.runInContext(code,ctx);
-async function api(path,body,method='POST',headers={}){const response=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json',...headers},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:response.status,requestId:response.headers.get('X-Request-Id'),data:await response.json()};}
-const film=(id,start)=>({id,title:id,original:id,year:2020,tmdbId:id.replace(/\D/g,'')||id,genres:[],actors:[],directors:[],shows:[{start}]});
-const execution=Object.fromEntries(Object.entries(call('EXECUTION')).map(([key,values])=>[key,values.includes('unknown')?'unknown':values[0]]));
-const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['investigation'],execution,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']},prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'MODEL-OUTPUT-CANARY',moodLabels:['мрачный','напряжённый']};
-function boot(ids){records.clear();etags.clear();revision=0;failKey='';failProducedNext=false;records.set('enrichment/profile/current.json',{version:1,profileHash:'p',profile:{ratingScale:'Half stars'}});records.set('sync.json',{runId:'test',stage:'complete'});const catalog={};for(const id of ids)catalog[id]=film(id,Date.now());records.set('programme.json',{runId:'test',films:[]});records.set('epg/discovered-films.json',catalog);}
-const diagnostic=runId=>[...records.values()].find(value=>value?.runId===runId&&Array.isArray(value.steps));
-const events=()=>[...records.keys()].filter(key=>key.startsWith('events/items/')&&!key.includes('prediction-start-'));
-const secret=/Bearer|token|prompt|stack|MODEL-OUTPUT-CANARY|tmdb_88/i;
+// Run diagnostics of batch runner v2 runs (ADR 0167; D1 prediction authority, as production runs it): a failed step, a caller-reported fault, an unattributed
+// api_error, a clean completion, a duplicate complete, a lease loss, item validation stages and a dropped finish write. Nothing secret, no model output and no
+// film id reaches a diagnostic row. Local stand-ins only.
+import assert from 'node:assert/strict';
+import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 
-boot(['tmdb_8801','tmdb_8802']);
-let start=await api('start',{scope:'watchlist_all',mode:'queued'});assert.equal(start.status,200);assert.equal(start.data.status,'running');assert.equal(start.data.delivery,'unconfirmed');assert.equal(start.requestId,start.data.requestId);
-// AIR-431: next no longer writes the queue (it advances the stored one), so the storage failure is injected into the run record write it does make.
-failKey='enrichment/latest-run.json';
-let next=await api('next',{runId:start.data.runId});
-assert.equal(next.status,502);assert.equal(next.data.error,'storage_error');assert.equal(next.data.delivery,'unconfirmed');assert.equal(next.requestId,next.data.requestId);
-let run=records.get('enrichment/runs/'+start.data.runId+'.json');assert.ok(run.firstNextAt);
+let w,failRunSave=false,failProducedHeartbeat=false;
+async function boot(films){
+ w=await flowWorld({films});failRunSave=false;failProducedHeartbeat=false;
+ const bucket=w.env.BUCKET,put=bucket.put;
+ bucket.list=async({prefix='',limit=1000}={})=>({objects:[...w.records.keys()].filter(key=>key.startsWith(prefix)).sort().slice(0,limit).map(key=>({key})),truncated:false});
+ bucket.put=async(key,value,options)=>{if(failProducedHeartbeat&&key.startsWith('enrichment/run-diagnostics/')){const parsed=JSON.parse(value);if(parsed.steps?.some(step=>step.step==='heartbeat'&&step.outcome==='produced'))throw new Error('finish write dropped');}return put.call(bucket,key,value,options);};
+ // One run-record write that fails: the way a storage failure inside a step is simulated.
+ const original=w.ctx.PredictionD1;w.ctx.PredictionD1={...original,saveMutable:async(...a)=>{if(failRunSave&&/^enrichment\/runs\//.test(a[1])){failRunSave=false;throw new Error('Storage checkpoint interrupted');}return original.saveMutable(...a);}};
+ assert.equal((await w.api('queue/reconcile',{})).status,200);
+}
+async function api(path,body,method='POST',headers={}){const response=await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json',...headers},...(body===undefined?{}:{body:JSON.stringify(body)})}),w.env);return {status:response.status,requestId:response.headers.get('X-Request-Id'),data:await response.json()};}
+const startRun=async(extra={})=>{const r=await api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',...extra});assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'running');return r;};
+const runStatus=id=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+id+"'")[0].d).status;
+const diagnostic=runId=>[...w.records.values()].find(value=>value?.runId===runId&&Array.isArray(value.steps));
+const events=()=>[...w.records.keys()].filter(key=>key.startsWith('events/items/'));
+const secret=/Bearer|token|prompt|stack|MODEL-OUTPUT-CANARY|tmdb_/i;
+const canary=()=>({...w.prediction,mainRisk:'MODEL-OUTPUT-CANARY'});
+
+// A step whose storage write fails: 502 storage_error, observed by the server, delivery unconfirmed.
+await boot(2);
+let start=await startRun();assert.equal(start.data.delivery,'unconfirmed');assert.equal(start.requestId,start.data.requestId);
+failRunSave=true;
+let beat=await api('heartbeat',{runId:start.data.runId});
+assert.equal(beat.status,502);assert.equal(beat.data.error,'storage_error');assert.equal(beat.data.delivery,'unconfirmed');assert.equal(beat.requestId,beat.data.requestId);
 let row=diagnostic(start.data.runId);
-assert.equal(row.lastAttemptedStep,'next');assert.equal(row.lastCompletedStep,'start');assert.equal(row.serverFault.origin,'worker');assert.equal(row.serverFault.httpStatus,502);assert.equal(row.serverFault.errorClass,'storage_error');
-const failedNext=row.steps.find(step=>step.step==='next');assert.equal(failedNext.outcome,'failed');assert.equal(failedNext.observedBy,'server');assert.equal(failedNext.delivery,'unconfirmed');assert.equal(failedNext.completedAt,null);assert.equal(row.callerFault,null);
+assert.equal(row.lastAttemptedStep,'heartbeat');assert.equal(row.lastCompletedStep,'start');assert.equal(row.serverFault.origin,'worker');assert.equal(row.serverFault.httpStatus,502);assert.equal(row.serverFault.errorClass,'storage_error');
+const failed=row.steps.find(step=>step.step==='heartbeat');assert.equal(failed.outcome,'failed');assert.equal(failed.observedBy,'server');assert.equal(failed.delivery,'unconfirmed');assert.equal(failed.completedAt,null);assert.equal(row.callerFault,null);
 assert.doesNotMatch(JSON.stringify(row),secret);
 
-boot(['tmdb_8803']);
-start=await api('start',{scope:'watchlist_all',mode:'queued'});
-next=await api('next',{runId:start.data.runId},'POST',{'X-Request-Id':'client-step-1'});
-assert.equal(next.status,200);assert.equal(next.requestId,'client-step-1');assert.equal(next.data.requestId,'client-step-1');assert.equal(next.data.delivery,'unconfirmed');
-const echoed=await api('next',{runId:start.data.runId},'POST',{'X-Request-Id':'not valid'});
+// A caller-reported fault: the request id is echoed or replaced, the fault is stored as the caller's claim, and a repeated complete keeps the first.
+await boot(1);
+start=await startRun();
+beat=await api('heartbeat',{runId:start.data.runId},'POST',{'X-Request-Id':'client-step-1'});
+assert.equal(beat.status,200);assert.equal(beat.requestId,'client-step-1');assert.equal(beat.data.requestId,'client-step-1');assert.equal(beat.data.delivery,'unconfirmed');
+const echoed=await api('heartbeat',{runId:start.data.runId},'POST',{'X-Request-Id':'not valid'});
 assert.match(echoed.requestId,/^[A-Za-z0-9_-]{1,80}$/);assert.notEqual(echoed.requestId,'not valid');
 const beforeExternal=events().length;
-let done=await api('complete',{runId:start.data.runId,reason:'api_error',fault:{origin:'model_provider',failedStep:'next',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:'client-step-1'}});
+let done=await api('complete',{runId:start.data.runId,reason:'api_error',fault:{origin:'model_provider',failedStep:'heartbeat',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:'client-step-1'}});
 assert.equal(done.status,200);assert.equal(done.data.stopReason,'api_error');assert.equal(done.data.delivery,'unconfirmed');
 row=diagnostic(start.data.runId);
-assert.equal(row.stopReason,'api_error');assert.equal(row.callerFault.reportedBy,'caller');assert.equal(row.callerFault.attribution,'caller_reported');assert.equal(row.callerFault.origin,'model_provider');assert.equal(row.callerFault.failedStep,'next');assert.equal(row.callerFault.providerErrorCode,'provider_timeout');assert.equal(row.callerFault.httpStatus,503);assert.equal(row.serverFault,null);
-assert.equal(row.steps.find(step=>step.step==='next'&&step.requestId==='client-step-1').delivery,'unconfirmed');
+assert.equal(row.stopReason,'api_error');assert.equal(row.callerFault.reportedBy,'caller');assert.equal(row.callerFault.attribution,'caller_reported');assert.equal(row.callerFault.origin,'model_provider');assert.equal(row.callerFault.failedStep,'heartbeat');assert.equal(row.callerFault.providerErrorCode,'provider_timeout');assert.equal(row.callerFault.httpStatus,503);assert.equal(row.serverFault,null);
+assert.equal(row.steps.find(step=>step.step==='heartbeat'&&step.requestId==='client-step-1').delivery,'unconfirmed');
 const status=await api('status',undefined,'GET');
 assert.equal(status.data.diagnostics.attribution,'caller_reported');assert.equal(status.data.diagnostics.steps.find(step=>step.requestId==='client-step-1').callerAcknowledged,true);assert.equal(status.data.diagnostics.delivery,'unconfirmed');
 const listed=(await api('runs?limit=10',undefined,'GET')).data.runs.find(item=>item.runId===start.data.runId);
 assert.equal(listed.steps.find(step=>step.requestId==='client-step-1').callerAcknowledged,true);
 const again=await api('complete',{runId:start.data.runId,reason:'api_error',fault:{origin:'transport',failedStep:'complete',providerErrorCode:'dropped',httpStatus:504,receivedRequestId:'other-client'}});
 assert.equal(again.data.status,'partial');assert.equal(diagnostic(start.data.runId).callerFault.origin,'model_provider');assert.equal(events().length,beforeExternal+1);
-assert.doesNotMatch(JSON.stringify(diagnostic(start.data.runId)),secret);assert.doesNotMatch(JSON.stringify(events().map(key=>records.get(key))),/provider_timeout|Bearer|token|prompt|stack/i);
+assert.doesNotMatch(JSON.stringify(diagnostic(start.data.runId)),secret);assert.doesNotMatch(JSON.stringify(events().map(key=>w.records.get(key))),/provider_timeout|Bearer|token|prompt|stack/i);
 
-boot(['tmdb_8804']);
-start=await api('start',{scope:'watchlist_all',mode:'queued'});
-await api('next',{runId:start.data.runId});
+// An api_error without a fault is external and unattributed, never the Worker's.
+await boot(1);
+start=await startRun();
 done=await api('complete',{runId:start.data.runId,reason:'api_error'});
 row=diagnostic(start.data.runId);
 assert.equal(row.stopReason,'api_error');assert.equal(row.callerFault.attribution,'external_unattributed');assert.equal(row.callerFault.origin,'unknown');assert.equal(row.callerFault.reportedBy,null);assert.equal(row.callerFault.errorClass,'unknown');assert.equal(row.serverFault,null);assert.notEqual(row.callerFault.origin,'worker');
 
-boot(['tmdb_8805']);
-start=await api('start',{scope:'watchlist_all',mode:'queued'});
+// An invalid fault is refused whole; the run keeps running.
+await boot(1);
+start=await startRun();
 const rejected=await api('complete',{runId:start.data.runId,reason:'api_error',fault:{origin:'model_provider',providerErrorCode:'Bearer secret',httpStatus:503}});
-assert.equal(rejected.status,400);assert.equal(records.get('enrichment/runs/'+start.data.runId+'.json').status,'running');assert.equal(diagnostic(start.data.runId).callerFault,null);assert.equal(diagnostic(start.data.runId).stopReason,null);
+assert.equal(rejected.status,400);assert.equal(runStatus(start.data.runId),'running');assert.equal(diagnostic(start.data.runId).callerFault,null);assert.equal(diagnostic(start.data.runId).stopReason,null);
 assert.doesNotMatch(JSON.stringify(diagnostic(start.data.runId)),/Bearer|secret|stack/i);
 
-boot(['tmdb_8806']);
-start=await api('start',{scope:'watchlist_all',mode:'queued'});
-next=await api('next',{runId:start.data.runId});
-const submitted=await api('submit',{runId:start.data.runId,items:[{filmId:next.data.items[0].filmId,fingerprint,prediction}]});
+// A clean completion: no fault, no failed step, no film id; a duplicate complete with a late fault changes nothing.
+await boot(1);
+start=await startRun();
+const filmId=start.data.films[0].filmId;
+const submitted=await api('batch/submit',{runId:start.data.runId,epoch:start.data.lease.epoch,items:[{filmId,fingerprint:w.fingerprint,prediction:canary()}]});
 assert.equal(submitted.data.results[0].status,'created');
 done=await api('complete',{runId:start.data.runId});
 assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'queue_empty');
 row=diagnostic(start.data.runId);
 assert.equal(row.callerFault,null);assert.equal(row.serverFault,null);assert.equal(row.lastAttemptedStep,'complete');assert.equal(row.lastCompletedStep,'complete');
 assert.equal(row.steps.some(step=>step.outcome==='failed'||step.errorClass),false);
-assert.doesNotMatch(JSON.stringify(row),secret);assert.equal(JSON.stringify(row).includes(next.data.items[0].filmId),false);
+assert.doesNotMatch(JSON.stringify(row),secret);assert.equal(JSON.stringify(row).includes(filmId),false);
 const duplicate=await api('complete',{runId:start.data.runId,fault:{origin:'orchestrator',failedStep:'complete',providerErrorCode:'late',httpStatus:500}});
 assert.equal(duplicate.data.status,'complete');assert.equal(diagnostic(start.data.runId).callerFault,null);
 
-boot(['tmdb_8817']);
-start=await api('start',{scope:'watchlist_all',mode:'queued'});
-next=await api('next',{runId:start.data.runId},'POST',{'X-Request-Id':'client-step-clean'});
-await api('submit',{runId:start.data.runId,items:[{filmId:next.data.items[0].filmId,fingerprint,prediction}]});
+// A fault on a normal completion is rejected and writes nothing.
+await boot(1);
+start=await startRun();
+beat=await api('heartbeat',{runId:start.data.runId},'POST',{'X-Request-Id':'client-step-clean'});
+await api('batch/submit',{runId:start.data.runId,epoch:start.data.lease.epoch,items:[{filmId:start.data.films[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});
 const beforeClean=events().length;
-const falseFault=await api('complete',{runId:start.data.runId,fault:{origin:'model_provider',failedStep:'next',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:'client-step-clean'}});
-assert.equal(falseFault.status,400);assert.equal(records.get('enrichment/runs/'+start.data.runId+'.json').status,'running');assert.equal(diagnostic(start.data.runId).callerFault,null);assert.equal(diagnostic(start.data.runId).stopReason,null);assert.equal(events().length,beforeClean);
+const falseFault=await api('complete',{runId:start.data.runId,fault:{origin:'model_provider',failedStep:'heartbeat',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:'client-step-clean'}});
+assert.equal(falseFault.status,400);assert.equal(runStatus(start.data.runId),'running');assert.equal(diagnostic(start.data.runId).callerFault,null);assert.equal(diagnostic(start.data.runId).stopReason,null);assert.equal(events().length,beforeClean);
 const falseQueue=await api('complete',{runId:start.data.runId,reason:'queue_empty',fault:{origin:'model_provider',failedStep:'complete',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:'client-step-clean'}});
-assert.equal(falseQueue.status,400);assert.equal(records.get('enrichment/runs/'+start.data.runId+'.json').status,'running');assert.equal(diagnostic(start.data.runId).callerFault,null);assert.equal(events().length,beforeClean);
+assert.equal(falseQueue.status,400);assert.equal(runStatus(start.data.runId),'running');assert.equal(diagnostic(start.data.runId).callerFault,null);assert.equal(events().length,beforeClean);
 done=await api('complete',{runId:start.data.runId});
 assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'queue_empty');
 const cleanStatus=await api('status',undefined,'GET');
 assert.equal(cleanStatus.data.diagnostics.callerFault,null);assert.equal(cleanStatus.data.diagnostics.attribution,null);assert.equal(cleanStatus.data.diagnostics.steps.every(step=>step.callerAcknowledged===false),true);
 
-boot(['tmdb_8818']);
-start=await api('start',{scope:'watchlist_all',mode:'queued'});
-next=await api('next',{runId:start.data.runId},'POST',{'X-Request-Id':'client-step-real'});
-done=await api('complete',{runId:start.data.runId,reason:'api_error',fault:{origin:'transport',failedStep:'next',providerErrorCode:'dropped',httpStatus:504,receivedRequestId:'never-issued'}});
+// A receivedRequestId that names no issued step acknowledges nothing.
+await boot(1);
+start=await startRun();
+await api('heartbeat',{runId:start.data.runId},'POST',{'X-Request-Id':'client-step-real'});
+done=await api('complete',{runId:start.data.runId,reason:'api_error',fault:{origin:'transport',failedStep:'heartbeat',providerErrorCode:'dropped',httpStatus:504,receivedRequestId:'never-issued'}});
 assert.equal(done.data.stopReason,'api_error');
 row=diagnostic(start.data.runId);
 assert.equal(row.callerFault.attribution,'caller_reported');assert.equal(row.callerFault.receivedRequestId,'never-issued');
@@ -99,36 +112,42 @@ assert.equal(unknownStatus.data.diagnostics.delivery,'unconfirmed');
 assert.equal(unknownStatus.data.diagnostics.steps.every(step=>step.callerAcknowledged===false),true);
 assert.equal(unknownStatus.data.diagnostics.steps.some(step=>step.requestId==='client-step-real'),true);
 
-boot(['tmdb_8807']);
-start=await api('start',{scope:'watchlist_all',mode:'queued'});
-records.get('enrichment/runner-lease.json').runId='another-owner';
-next=await api('next',{runId:start.data.runId});
-assert.equal(next.status,409);assert.equal(next.data.status,'lease_lost');assert.equal(records.get('enrichment/runner-lease.json').runId,'another-owner');
+// A lost lease: 409 lease_lost, the other owner's lease untouched, a server-observed lease_lost fault.
+await boot(1);
+start=await startRun();
+{const doc=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);doc.runId='another-owner';sql(w.file,"UPDATE prediction_lease SET document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE name='runner'");}
+beat=await api('heartbeat',{runId:start.data.runId});
+assert.equal(beat.status,409);assert.equal(beat.data.status,'lease_lost');assert.equal(JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d).runId,'another-owner');
 row=diagnostic(start.data.runId);
-assert.equal(row.serverFault.origin,'worker');assert.equal(row.serverFault.errorClass,'lease_lost');assert.equal(row.steps.find(step=>step.step==='next').outcome,'produced');assert.equal(row.steps.find(step=>step.step==='next').httpStatus,409);assert.equal(row.steps.find(step=>step.step==='next').delivery,'unconfirmed');
+assert.equal(row.serverFault.origin,'worker');assert.equal(row.serverFault.errorClass,'lease_lost');assert.equal(row.steps.find(step=>step.step==='heartbeat').outcome,'produced');assert.equal(row.steps.find(step=>step.step==='heartbeat').httpStatus,409);assert.equal(row.steps.find(step=>step.step==='heartbeat').delivery,'unconfirmed');
 
-boot(['tmdb_8811','tmdb_8812','tmdb_8813','tmdb_8814','tmdb_8815']);
-start=await api('start',{scope:'watchlist_all',mode:'queued'});
-next=await api('next',{runId:start.data.runId,batchSize:5});
-assert.equal(next.data.items.length,5);
-const ids=next.data.items.map(item=>item.filmId);
-await api('submit',{runId:start.data.runId,items:[{filmId:ids[0],failure:{kind:'parse_error'}}]});
-await api('submit',{runId:start.data.runId,items:[{filmId:ids[1],fingerprint:{}}]});
-await api('submit',{runId:start.data.runId,items:[{filmId:ids[2]}]});
-await api('submit',{runId:start.data.runId,items:[{filmId:ids[3],fingerprint,prediction:{predictedRating:'nope'}}]});
-const storm=await api('submit',{runId:start.data.runId,items:[{filmId:ids[4],failure:{kind:'parse_error'}}]});
-assert.equal(storm.data.stopReason,'format_error_storm');assert.equal(storm.data.mustComplete,true);
+// Item validation stages of one batch submit: the stages name who reported each failure and no film id. A caller-reported failure with a reason does not count
+// toward the format storm (AIR-487), so the three Worker-detected failures make the streak.
+await boot(5);
+start=await startRun();
+const ids=start.data.films.map(film=>film.filmId);assert.equal(ids.length,5);
+const storm=await api('batch/submit',{runId:start.data.runId,epoch:start.data.lease.epoch,items:[
+ {filmId:ids[0],failure:{kind:'parse_error',reason:'json_unparseable'}},
+ {filmId:ids[1],fingerprint:{},prediction:w.prediction},
+ {filmId:ids[2],prediction:w.prediction},
+ {filmId:ids[3],fingerprint:w.fingerprint,prediction:{...canary(),predictedRating:'nope'}},
+ {filmId:ids[4],failure:{kind:'parse_error',reason:'json_unparseable'}}]});
+assert.equal(storm.status,200,JSON.stringify(storm.data).slice(0,300));
+const stopped=await api('complete',{runId:start.data.runId,reason:'api_error'});assert.equal(stopped.status,200);
+const stored=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+start.data.runId+"'")[0].d);
+assert.equal(stored.itemValidation.consecutive,3);
+assert.deepEqual(stored.itemValidation.stages.map(stage=>stage.stage),['caller_reported','fingerprint_schema','fingerprint_missing','prediction_schema','caller_reported']);
+assert.deepEqual(stored.itemValidation.stages.map(stage=>stage.reportedBy),['caller','worker','worker','worker','caller']);
 row=diagnostic(start.data.runId);
-assert.equal(row.itemValidation.consecutive,5);
-assert.deepEqual(row.itemValidation.stages.map(stage=>stage.stage),['caller_reported','fingerprint_schema','fingerprint_missing','prediction_schema','caller_reported']);
-assert.deepEqual(row.itemValidation.stages.map(stage=>stage.reportedBy),['caller','worker','worker','worker','caller']);
+assert.equal(row.itemValidation.consecutive,3);
 const stages=JSON.stringify(row.itemValidation);for(const id of ids)assert.equal(stages.includes(id),false);assert.doesNotMatch(stages,/MODEL-OUTPUT-CANARY|Bearer|stack|title/i);
 
-boot(['tmdb_8816']);
-start=await api('start',{scope:'watchlist_all',mode:'queued'});
-failProducedNext=true;
-next=await api('next',{runId:start.data.runId});
-assert.equal(next.status,200);assert.ok(next.data.items.length);assert.equal(next.data.delivery,'unconfirmed');
-assert.equal(diagnostic(start.data.runId).steps.find(step=>step.step==='next').outcome,'entered');
+// A dropped finish write: the step answers normally and stays recorded as entered.
+await boot(1);
+start=await startRun();
+failProducedHeartbeat=true;
+beat=await api('heartbeat',{runId:start.data.runId});
+assert.equal(beat.status,200);assert.equal(beat.data.delivery,'unconfirmed');
+assert.equal(diagnostic(start.data.runId).steps.find(step=>step.step==='heartbeat').outcome,'entered');
 
-console.log('Run diagnostics: failed next, caller fault, unattributed api_error, clean completion, duplicate complete, lease loss, validation stages and a dropped finish write passed');
+console.log('Run diagnostics (batch v2): failed step, caller fault, unattributed api_error, clean completion, duplicate complete, lease loss, validation stages and a dropped finish write passed');

@@ -132,7 +132,7 @@ function reference(f){
  assert.equal(derived,300);
 }
 
-// 6. Submit and validate agree: the MCP validator, the v5 submit, the v2 submit and the dry run all accept the omitted form, store the derived fields, and give the same content hash as the spelled-out form.
+// 6. Submit and validate agree: the MCP batch validator, the batch submit and the dry run all accept the omitted form, store the derived fields, and give the same content hash as the spelled-out form.
 {
  const {flowWorld}=await import('./prediction-d1-flow-lib.mjs');
  const {sqliteSync}=await import('./sqlite-session.mjs');
@@ -147,7 +147,7 @@ function reference(f){
   const film=start.data.films[0],id=film.filmId,meta=film.modelMetadata;
   const f=fp({evidence,...(form==='spelled'?expectedAgg:{})});
   // the MCP validator (with the film's metadata only when a token needs it)
-  const v=await w.call('prediction_validate',{fingerprint:f,prediction});assert.equal(v.data.valid,true,JSON.stringify(v.data).slice(0,300));
+  const v=await w.call('prediction_batch_validate',{items:[{filmId:id,fingerprint:f,prediction}]});assert.equal(v.data.valid,true,JSON.stringify(v.data).slice(0,300));
   const r=await w.call('prediction_batch_submit',{runId:start.data.runId,epoch:start.data.lease.epoch,items:[{filmId:id,fingerprint:f,prediction}]});
   assert.ok(!r.isError,JSON.stringify(r.data).slice(0,300));
   const key=[...w.records.keys()].find(k=>k.startsWith('enrichment/films/'+id+'/fingerprints/')&&!k.includes('generations')&&/\/[0-9a-f]{64}\.json$/.test(k));assert.ok(key,'the immutable fingerprint body is stored');
@@ -158,7 +158,7 @@ function reference(f){
  assert.deepEqual(hashes.map(x=>x[1]),['created','created']);
  assert.equal(hashes[0][2],hashes[1][2],'the omitted and the spelled-out form store the same content hash');
 }
-// 7. The dry run and the v5 submit apply the same rule (one contract for every submit path), and a wrong supplied aggregate is still rejected on each.
+// 7. The dry run and the batch submit apply the same rule (one contract for every submit path), and a wrong supplied aggregate is still rejected on each.
 {
  const {flowWorld}=await import('./prediction-d1-flow-lib.mjs');
  const evidence={plotMechanics:{heist:[item('web_research',['https://example.com/a'])],investigation:[item('model_knowledge',['model_knowledge'])]}};
@@ -173,19 +173,17 @@ function reference(f){
   const wrongRefs=(await dry(fp({evidence,sourceBasis:'mixed',sourceRefs:[]}))).data.results[0];assert.deepEqual(wrongRefs.validation.issues,[{path:'fingerprint.sourceRefs',code:'invalid_ref'}],'the AIR-450 C3 shape is still rejected when the caller supplies it');
   const broken=(await dry(fp({evidence:{plotMechanics:{heist:[item('web_research',['http://x.example/a'])],investigation:[item('model_knowledge',['model_knowledge'])]}}}))).data.results[0];assert.deepEqual(broken.validation.issues,[{path:'fingerprint.evidence.plotMechanics.heist',code:'invalid_ref'}],'invalid evidence: its own issue only');
  }
- // v5 submit
- {const w=await flowWorld({films:4});assert.equal((await w.api('queue/reconcile',{})).status,200);
-  const start=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(start.status,200);
-  const next=await w.api('next',{runId:start.data.runId,batchSize:1});const id=next.data.items[0].filmId;
-  const bad=await w.api('submit',{runId:start.data.runId,items:[{filmId:id,fingerprint:fp({evidence,sourceBasis:'mixed',sourceRefs:[]}),prediction}]});
-  assert.equal(bad.data.results[0].validation.issues[0].path,'fingerprint.sourceRefs');
-  const next2=await w.api('next',{runId:start.data.runId,batchSize:1});const id2=next2.data.items?.[0]?.filmId||id;
-  const ok=await w.api('submit',{runId:start.data.runId,items:[{filmId:id2,fingerprint:fp({evidence}),prediction}]});
+ // real batch submit (ADR 0167: the only submit path)
+ {const w=await flowWorld({films:4});const {start}=await w.reconcileAndStart();assert.equal(start.status,200);
+  const m=start.data,[id,id2]=m.films.map(f=>f.filmId);
+  const bad=await w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items:[{filmId:id,fingerprint:fp({evidence,sourceBasis:'mixed',sourceRefs:[]}),prediction}]});
+  assert.equal(bad.data.results[0].status,'validation_failure');assert.equal(bad.data.results[0].validation.issues[0].path,'fingerprint.sourceRefs');
+  const ok=await w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items:[{filmId:id2,fingerprint:fp({evidence}),prediction}]});
   assert.ok(['created','recalculated'].includes(ok.data.results[0].status),JSON.stringify(ok.data.results[0]).slice(0,300));
  }
 }
 // 8. Evidence that is not a map at all (null, a list, a string, a number, a boolean) is an invalid map like any other: only its own issue is reported, the omitted fields are not reported as missing on top
-// of it, and a genuinely supplied wrong field is still reported. Through fingerprintIssues, prediction_validate and a submit path.
+// of it, and a genuinely supplied wrong field is still reported. Through fingerprintIssues, prediction_batch_validate and a submit path.
 {
  const {flowWorld}=await import('./prediction-d1-flow-lib.mjs');
  const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
@@ -200,14 +198,14 @@ function reference(f){
   assert.ok(wrongBasis.includes('fingerprint.sourceBasis invalid_enum')&&wrongBasis.includes('fingerprint.evidence invalid_type'),'a supplied wrong field is not hidden: '+wrongBasis);
   assert.ok(!wrongBasis.includes('fingerprint.sourceRefs required'),'the omitted field is not reported as missing: '+wrongBasis);
  }
- // through prediction_validate and the dry-run submit on the real handlers
+ // through prediction_batch_validate and the dry-run submit on the real handlers
  const w=await flowWorld({films:4});assert.equal((await w.api('queue/reconcile',{})).status,200);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
  const call2=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);return JSON.parse(r.result.content[0].text);};
  const m=(await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',dryRun:true})).data,id=m.films[0].filmId;
  for(const bad of nonMaps){
-  const v=await call2('prediction_validate',{fingerprint:fp({evidence:bad}),prediction});
-  assert.equal(v.valid,false);assert.deepEqual(v.fingerprint.issues,[{path:'fingerprint.evidence',code:'invalid_type'}],'prediction_validate, evidence '+JSON.stringify(bad));
+  const v=await call2('prediction_batch_validate',{items:[{filmId:id,fingerprint:fp({evidence:bad}),prediction}]});
+  assert.equal(v.valid,false);assert.deepEqual(v.results[0].fingerprint.issues,[{path:'fingerprint.evidence',code:'invalid_type'}],'prediction_batch_validate, evidence '+JSON.stringify(bad));
   const r=(await w.api('batch/submit',{runId:'dry-run',epoch:1,dryRun:true,manifestHash:m.manifestHash,items:[{filmId:id,fingerprint:fp({evidence:bad}),prediction,inputHash:m.films[0].inputHash}]})).data.results[0];
   assert.equal(r.status,'validation_failure');assert.deepEqual(r.validation.issues,[{path:'fingerprint.evidence',code:'invalid_type'}],'dry-run submit, evidence '+JSON.stringify(bad));
  }

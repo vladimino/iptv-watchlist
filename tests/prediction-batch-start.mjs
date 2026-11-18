@@ -1,5 +1,5 @@
-// Batch runner v2, `batch_start` (ADR 0122). One request returns one self-sufficient manifest of at most 100 films, on the same queue, runner lease and
-// persistence as the v5 runner, with the prediction domain in D1 mode as production runs it. Offline: a sqlite D1 stand-in and an in-memory R2. No Cloudflare,
+// Batch runner v2, `batch_start` (ADR 0122). One request returns one self-sufficient manifest of at most 100 films, on the queue, runner lease and
+// persistence the retired v5 runner shared (ADR 0167: a stored legacy v5 run is still recognized), with the prediction domain in D1 mode as production runs it. Offline: a sqlite D1 stand-in and an in-memory R2. No Cloudflare,
 // TMDB, model or production call. `batch_submit`, the Scheduled Task and every activation are other deliveries; nothing here generates a prediction.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -20,6 +20,25 @@ const LIMIT=256*1024,INITIAL_LIMIT=160*1024;
 const batch=(w,body={})=>w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',...body});
 const ready=async(films,opts={})=>{const w=await flowWorld({films,...opts});return w;};
 const reconcile=async w=>{const r=await w.api('queue/reconcile',{});assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));return r;};
+// AIR-452 (ADR 0167): the v5 routes are retired, but a legacy v5 run stored before the deploy can still hold the runner lease. It is planted here by turning
+// a fresh v2 run's record (D1 row and R2 mirrors) into a v5 record: no protocol, pipeline version 5.
+const legacyRun=async(w,body={})=>{
+ const r=await batch(w,body);assert.equal(r.data.status,'running',JSON.stringify(r.data).slice(0,200));
+ const edit=doc=>{const out={...doc};delete out.protocol;out.pipelineVersion=5;return out;};
+ const row=sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+r.data.runId+"'")[0];
+ sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify(edit(JSON.parse(row.d))).replace(/'/g,"''")+"' WHERE run_id='"+r.data.runId+"'");
+ for(const key of ['enrichment/runs/'+r.data.runId+'.json','enrichment/latest-run.json'])if(w.records.has(key)&&w.records.get(key).runId===r.data.runId)w.records.set(key,edit(w.records.get(key)));
+ return {runId:r.data.runId,films:r.data.films,epoch:r.data.lease.epoch};
+};
+// Settles one film through v2 as a Task does: start a one-film manifest, submit it (written or a claimed failure), complete.
+const v2Settle=async(w,make,reason)=>{
+ const r=await batch(w,{manifestSize:1});assert.equal(r.data.status,'running',JSON.stringify(r.data).slice(0,200));
+ const id=r.data.films[0].filmId,sub=await w.api('batch/submit',{runId:r.data.runId,epoch:r.data.lease.epoch,items:[make(id)]});assert.equal(sub.status,200,JSON.stringify(sub.data).slice(0,200));
+ const done=await w.api('complete',reason?{runId:r.data.runId,reason}:{runId:r.data.runId});assert.equal(done.status,200,JSON.stringify(done.data).slice(0,200));
+ return id;
+};
+const written=w=>id=>({filmId:id,fingerprint:w.fingerprint,prediction:w.prediction});
+const claimedFailure=id=>({filmId:id,failure:{kind:'parse_error',reason:'insufficient_evidence'}});
 const setCold=(w,ids)=>sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.shows',json('[]')) WHERE film_id IN ("+ids.map(id=>"'"+id+"'").join(',')+")");
 
 // 1. A manifest is self-sufficient: the model needs no next, no enrichment_profile and no metadata call to generate every film in it.
@@ -75,12 +94,9 @@ for(const [films,expected] of [[1,1],[100,100],[130,100]]){
 {
  const w=await ready(1);await reconcile(w);
  const first=await batch(w);assert.equal(first.status,200);
- // the only film is written through v5 steps of another run after this one stops; a later start finds nothing eligible
+ // the only film is written by another run after this one stops; a later start finds nothing eligible
  const stop=await w.api('complete',{runId:first.data.runId,reason:'client_state_lost'});assert.equal(stop.status,200);
- const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.status,200);
- const step=await w.api('next',{runId:v5.data.runId,batchSize:1});
- const sub=await w.api('submit',{runId:v5.data.runId,items:[{filmId:step.data.items[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});assert.equal(sub.status,200);
- await w.api('complete',{runId:v5.data.runId});
+ await v2Settle(w,written(w));
  const none=await batch(w);
  assert.equal(none.status,200);assert.equal(none.data.status,'noop','0 eligible films: a noop, no run, no lease');
  assert.ok(!none.data.films);
@@ -97,10 +113,7 @@ for(const [films,expected] of [[1,1],[100,100],[130,100]]){
 {
  const w=await ready(8);await reconcile(w);
  // a failure of one film makes it wait for its retry time: it is not in the next manifest
- const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});
- const step=await w.api('next',{runId:v5.data.runId,batchSize:1});const failed=step.data.items[0].filmId;
- const sub=await w.api('submit',{runId:v5.data.runId,items:[{filmId:failed,failure:{kind:'parse_error'}}]});assert.equal(sub.status,200);
- await w.api('complete',{runId:v5.data.runId,reason:'external_termination'});
+ const failed=await v2Settle(w,claimedFailure,'manifest_spent');
  const r=await batch(w);assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));
  assert.ok(!r.data.films.some(f=>f.filmId===failed),'a film held by its retry time is not delivered');assert.equal(r.data.films.length,7);
 }
@@ -181,10 +194,10 @@ for(const [films,expected] of [[1,1],[100,100],[130,100]]){
  const dryRef=await batch(over,{dryRun:true,pin:{filmIds:Array.from({length:100},(_,i)=>'tmdb_'+(i+1))}});assert.equal(dryRef.status,409);assert.equal(dryRef.data.limit,262144);assert.deepEqual(await state(over),b2,'a refused dry run with a pin of 100 writes nothing either');
 }
 
-// 6. One lease: a v2 run and a v5 run never run together, in either order, and neither adopts the other.
+// 6. One lease: two runs never run together, and a stored legacy v5 run that holds the lease is never adopted.
 {
  const w=await ready(20);await reconcile(w);
- const [a,b]=await Promise.all([batch(w),w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})]);
+ const [a,b]=await Promise.all([batch(w),batch(w)]);
  const running=[a,b].filter(x=>x.data.status==='running');assert.equal(running.length,1,'exactly one of two concurrent starts runs: '+[a,b].map(x=>x.status+':'+x.data.status+'/'+x.data.reason));
  const other=[a,b].find(x=>x.data.status!=='running');assert.ok(['already_running','busy'].includes(other.data.status),'the other is already_running or busy: '+other.data.status);
 }
@@ -192,17 +205,34 @@ for(const [films,expected] of [[1,1],[100,100],[130,100]]){
  const w=await ready(20);await reconcile(w);
  const v2=await batch(w);assert.equal(v2.status,200);
  const again=await batch(w);assert.equal(again.data.status,'already_running');assert.equal(again.data.runId,v2.data.runId,'the answer names the holder and never gives a second manifest');assert.ok(!again.data.films);
- const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.data.status,'already_running');
- // a v5 step on a v2 run is refused, writes nothing and does not change the run
+ // the retired v5 steps are gone: their routes answer 404 and change nothing
  const run0=JSON.stringify(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+v2.data.runId+"'"));const d0=domain(w.file);
- const next=await w.api('next',{runId:v2.data.runId,batchSize:1});assert.equal(next.status,409);assert.equal(next.data.code,'wrong_protocol');
- const sub=await w.api('submit',{runId:v2.data.runId,items:[{filmId:v2.data.films[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});assert.equal(sub.status,409);assert.equal(sub.data.code,'wrong_protocol');
- assert.equal(domain(w.file),d0,'a wrong_protocol refusal changed no run, lease, queue or film');assert.equal(JSON.stringify(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+v2.data.runId+"'")),run0);
+ for(const [route,body] of [['start',{scope:'watchlist_all',capacity:{remainingPercent:100}}],['next',{runId:v2.data.runId,batchSize:1}],['submit',{runId:v2.data.runId,items:[{filmId:v2.data.films[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]}]]){
+  const gone=await w.api(route,body);assert.equal(gone.status,404,route);assert.equal(gone.data.error,'Not found');
+ }
+ assert.equal(domain(w.file),d0,'a retired route changed no run, lease, queue or film');assert.equal(JSON.stringify(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+v2.data.runId+"'")),run0);
 }
 {
+ // a stored legacy v5 run that holds the lease turns a v2 start away, and the v2 steps refuse it with wrong_protocol, writing nothing
  const w=await ready(20);await reconcile(w);
- const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.data.status,'running');
- const v2=await batch(w);assert.equal(v2.data.status,'already_running');assert.equal(v2.data.runId,v5.data.runId);assert.ok(!v2.data.films);
+ const v5=await legacyRun(w);
+ const v2=await batch(w);assert.equal(v2.data.status,'already_running');assert.equal(v2.data.runId,v5.runId);assert.ok(!v2.data.films);
+ const d0=domain(w.file);
+ const sub=await w.api('batch/submit',{runId:v5.runId,epoch:v5.epoch,items:[{filmId:v5.films[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});assert.equal(sub.status,409);assert.equal(sub.data.code,'wrong_protocol');
+ const hold=await w.api('batch/hold',{runId:v5.runId,epoch:v5.epoch,items:[{filmId:v5.films[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});assert.equal(hold.status,409,JSON.stringify(hold.data));assert.equal(hold.data.code,'wrong_protocol');
+ assert.equal(domain(w.file),d0,'a wrong_protocol refusal changed no run, lease, queue or film');
+ // heartbeat and complete still settle it
+ assert.equal((await w.api('heartbeat',{runId:v5.runId})).status,200);
+ const done=await w.api('complete',{runId:v5.runId,reason:'external_termination'});assert.equal(done.status,200,JSON.stringify(done.data).slice(0,200));
+ const next=await batch(w);assert.equal(next.data.status,'running','after the legacy run completed a v2 start runs');
+}
+{
+ // an expired legacy v5 lease is recovered by the next v2 start, which takes over with a higher epoch
+ const w=await ready(20);await reconcile(w);
+ const v5=await legacyRun(w);
+ const doc=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);doc.expiresAt=1;sql(w.file,"UPDATE prediction_lease SET expires_at=1, document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE name='runner'");
+ const v2=await batch(w);assert.equal(v2.data.status,'running',JSON.stringify(v2.data).slice(0,200));assert.notEqual(v2.data.runId,v5.runId);assert.equal(v2.data.lease.epoch,v5.epoch+1);
+ const old=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+v5.runId+"'")[0].d);assert.equal(old.status,'interrupted','the expired legacy run is recorded as interrupted');assert.ok(!old.protocol);
 }
 
 // 7. Ownership epoch: set once, kept by a heartbeat, incremented by a takeover; an expired owner is fenced.
@@ -225,12 +255,11 @@ for(const [films,expected] of [[1,1],[100,100],[130,100]]){
  assert.equal(JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d).epoch,2,'a release keeps the epoch');
  const third=await batch(w);assert.equal(third.data.lease.epoch,3);
 }
-// 7b. A v5 run keeps working with the epoch in its lease, and its heartbeat answer has no epoch.
+// 7b. A stored legacy v5 run keeps working with the epoch in its lease, and its heartbeat answer has no epoch.
 {
  const w=await ready(5);await reconcile(w);
- const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.status,200);
- const hb=await w.api('heartbeat',{runId:v5.data.runId});assert.equal(hb.status,200);assert.ok(!('epoch' in hb.data),'v5 answers do not change');
- const pair=await w.pair(v5.data.runId);assert.equal(pair.submit.status,200);
+ const v5=await legacyRun(w);
+ const hb=await w.api('heartbeat',{runId:v5.runId});assert.equal(hb.status,200);assert.ok(!('epoch' in hb.data),'v5 answers do not change');
 }
 
 // 8. Replay and unknown outcome: a repeated start never creates a second run or a second manifest, and a lost answer is recovered by the holder's heartbeat and complete.
@@ -397,28 +426,26 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  assert.ok([...d.added,...d.changed].some(k=>k.startsWith('enrichment/run-diagnostics')),'the attempt is recorded as a start attempt');
  // an empty queue is a noop with the same absence of run history
  const one=await ready(1);await reconcile(one);const first=await batch(one);await one.api('complete',{runId:first.data.runId,reason:'client_state_lost'});
- const v5=await one.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});const step=await one.api('next',{runId:v5.data.runId,batchSize:1});
- await one.api('submit',{runId:v5.data.runId,items:[{filmId:step.data.items[0].filmId,fingerprint:one.fingerprint,prediction:one.prediction}]});await one.api('complete',{runId:v5.data.runId});
+ await v2Settle(one,written(one));
  const b=r2Snapshot(one),n0=runs(one),leaseN=leaseRow(one),noop=await batch(one);
  assert.equal(noop.data.status,'noop');assert.equal(runs(one),n0);assert.equal(leaseRow(one),leaseN);
  const dn=r2Diff(b,r2Snapshot(one));assert.deepEqual([...dn.added,...dn.changed].filter(k=>RUN_HISTORY.test(k)),[]);
 }
 
-// 17. Coexistence with a running v5 run: a v2 attempt that is turned away writes nothing to the queue, the run, the lease or the films, even when the stored queue is stale; it is recorded as a start attempt.
+// 17. Coexistence with a stored legacy v5 run that holds the lease: a v2 attempt that is turned away writes nothing to the queue, the run, the lease or the films, even when the stored queue is stale; it is recorded as a start attempt.
 {
  const w=await ready(20);await reconcile(w);
- const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.data.status,'running');
- const pair=await w.pair(v5.data.runId);assert.equal(pair.submit.status,200);
+ const v5=await legacyRun(w);
  // the programme moves: the stored queue now fails the advance gate (a v2 start that went on would refresh it under the running v5 run)
  w.records.set('programme.json',{runId:'p2',films:[]});w.records.set('sync.json',{runId:'p2',stage:'complete'});
  const queue0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),run0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),lease0=leaseRow(w),films0=filmTables(w),r2a=r2Snapshot(w);
  const turned=await batch(w);
- assert.equal(turned.data.status,'already_running');assert.equal(turned.data.runId,v5.data.runId);assert.ok(!turned.data.films);
+ assert.equal(turned.data.status,'already_running');assert.equal(turned.data.runId,v5.runId);assert.ok(!turned.data.films);
  assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),queue0,'the stale queue was not refreshed or settled by a turned-away attempt');
  assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),run0);assert.equal(leaseRow(w),lease0);assert.equal(filmTables(w),films0);
  const d=r2Diff(r2a,r2Snapshot(w));assert.deepEqual([...d.added,...d.changed].filter(k=>!k.startsWith('enrichment/run-diagnostics')),[],'only the start-attempt row was written: '+[...d.added,...d.changed]);
  // the v5 run is unaffected
- const hb=await w.api('heartbeat',{runId:v5.data.runId});assert.equal(hb.status,200);assert.ok(!('epoch' in hb.data));
+ const hb=await w.api('heartbeat',{runId:v5.runId});assert.equal(hb.status,200);assert.ok(!('epoch' in hb.data));
 }
 
 // 18. Precedence of a real start: a live runner lease first (already_running), then an idle outcome (quota), then the size refusal. A dry run stays read-only and usable beside a live run.
@@ -426,11 +453,11 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const w=await ready(100);
  sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+'x'.repeat(4000)+"')");
  await reconcile(w);
- const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.data.status,'running');
- // the queue is current and the oversized selection would be refused, but a v5 run holds the lease: the answer is the holder's, with no manifest and no write
+ const v5=await legacyRun(w,{manifestSize:1});
+ // the queue is current and the oversized selection would be refused, but a legacy v5 run holds the lease: the answer is the holder's, with no manifest and no write
  const queue0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),run0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),lease0=leaseRow(w),films0=filmTables(w),r2a=r2Snapshot(w);
  const turned=await batch(w);
- assert.equal(turned.status,200);assert.equal(turned.data.status,'already_running','an overlapping trigger is turned away, not refused on size');assert.equal(turned.data.runId,v5.data.runId);assert.ok(!turned.data.films&&!turned.data.code);
+ assert.equal(turned.status,200);assert.equal(turned.data.status,'already_running','an overlapping trigger is turned away, not refused on size');assert.equal(turned.data.runId,v5.runId);assert.ok(!turned.data.films&&!turned.data.code);
  assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),queue0);assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),run0);assert.equal(leaseRow(w),lease0);assert.equal(filmTables(w),films0);
  const d=r2Diff(r2a,r2Snapshot(w));assert.deepEqual([...d.added,...d.changed].filter(k=>!k.startsWith('enrichment/run-diagnostics')),[],'only the start-attempt row: '+[...d.added,...d.changed]);
  // zero capacity beside a live run is the same: the holder answers first
@@ -438,7 +465,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  // a dry run does not look at the lease: it is the read-only manifest path and reports the size
  const dry=await batch(w,{dryRun:true});assert.equal(dry.status,409);assert.equal(dry.data.code,'manifest_too_large');assert.equal(dry.data.dryRun,true);
  // the holder is gone: the same oversized selection is now refused write-free
- const stop=await w.api('complete',{runId:v5.data.runId,reason:'external_termination'});assert.equal(stop.status,200);
+ const stop=await w.api('complete',{runId:v5.runId,reason:'external_termination'});assert.equal(stop.status,200);
  const before=await state(w),counts=counted(w),puts=counts.put;
  const refused=await batch(w);assert.equal(refused.status,409);assert.equal(refused.data.code,'manifest_too_large');
  assert.deepEqual(await state(w),before,'with no holder the size refusal wrote nothing');assert.equal(counts.put,puts);
@@ -456,18 +483,20 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const r=await batch(w);assert.equal(r.status,409);assert.equal(r.data.code,'batch_runner_requires_d1');
 }
 
-// 11. Legacy behavior is unchanged: the v5 contract is the same plus one additive block, v5 steps still work, and no new route reads or writes by itself.
+// 11. The runner contract is v2-only (ADR 0167): no v5 step, batch size or model batching is advertised.
 {
  const w=await ready(5);const contract=await (await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/runner'),w.env)).json();
- assert.equal(contract.pipelineVersion,5);assert.deepEqual(contract.modelBatching,{enabled:false,readyFingerprintsPerCall:1});assert.equal(contract.maxBatchFilms,20);
+ assert.equal(contract.pipelineVersion,5);assert.equal(contract.protocol,'batch_v2');assert.deepEqual(contract.retiredProtocols,['v5']);
+ for(const key of ['modelBatching','maxBatchFilms','maxRunFilms','maxRunMinutes','continuous'])assert.ok(!(key in contract),key+' is a v5 field');
+ assert.ok(!JSON.stringify(contract).match(/next\/submit|\/api\/enrichment\/(start|next|submit)\b/),'no retired route is advertised');
  assert.equal(contract.batchRunner.version,2);assert.equal(contract.batchRunner.protocol,'batch_v2');assert.equal(contract.batchRunner.start,'/api/enrichment/batch/start');assert.equal(contract.batchRunner.maxManifestFilms,100);assert.deepEqual(contract.batchRunner.requires,{predictionAuthority:'d1'});
 }
-// 5d. The v5 protocol and the runner contract are unchanged by the new ceiling: only batchRunner.maxManifestBytes moved.
+// 5d. The runner contract under the 256 KiB ceiling: only batchRunner.maxManifestBytes moved (AIR-450); the v5 start route is gone (ADR 0167).
 {
  const w=await ready(5);const contract=JSON.parse(JSON.stringify(w.ctx.predictionRunnerContract?w.ctx.predictionRunnerContract():(await import('node:vm')).runInContext('predictionRunnerContract()',w.ctx)));
- assert.equal(contract.pipelineVersion,5);assert.equal(contract.maxBatchFilms,20);assert.equal(contract.maxRunFilms,null);assert.equal(contract.leaseTtlMs,15*60000);assert.deepEqual(contract.modelBatching,{enabled:false,readyFingerprintsPerCall:1});
- assert.deepEqual(contract.batchRunner,{version:2,protocol:'batch_v2',start:'/api/enrichment/batch/start',manifestFormat:'compact-1',maxManifestFilms:100,maxManifestBytes:262144,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:57344,callBudgetMs:25000,requires:{predictionAuthority:'d1'}});
- await reconcile(w);const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.status,200,JSON.stringify(v5.data).slice(0,160));assert.ok(!('protocol' in v5.data)||v5.data.protocol!=='batch_v2','a v5 start is not a v2 run');
+ assert.equal(contract.pipelineVersion,5);assert.equal(contract.leaseTtlMs,15*60000);
+ assert.deepEqual(contract.batchRunner,{version:2,protocol:'batch_v2',start:'/api/enrichment/batch/start',submit:'/api/enrichment/batch/submit',hold:'/api/enrichment/batch/hold',manifestFormat:'compact-1',maxManifestFilms:100,maxManifestBytes:262144,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:57344,callBudgetMs:25000,requires:{predictionAuthority:'d1'}});
+ await reconcile(w);const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.status,404,'the retired v5 start route is gone');
 }
 
 // AIR-510: a truncated ~42 KiB start text is not usable; bounded owned-run parts recover the full input without a second start.

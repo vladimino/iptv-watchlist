@@ -7,6 +7,7 @@ import {webcrypto} from 'node:crypto';
 // The prediction queue and the shared compatibility evaluator (ADR-0031): the selective rule always decides (ADR 0044:
 // the PREDICTION_PROFILE_COMPATIBILITY switch is retired and inert), the strict outcome is counted beside it, an unknown
 // or unapproved change fails closed, and impact features come from the full fingerprint, bound to its hash.
+// Since ADR 0167 the only runner is batch runner v2 (D1 mode only); this R2 bucket is seeded through the shared writers a submit uses (`T.seedFilm`).
 const records=new Map(),etags=new Map();let revision=0;
 const store={
  async get(key){if(!records.has(key))return null;const text=records.get(key);return {etag:etags.get(key),text:async()=>text,json:async()=>JSON.parse(text)};},
@@ -19,7 +20,17 @@ const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Dat
 vm.runInContext(['src/domain/film-person.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js'].map(file=>fs.readFileSync(file,'utf8')).join('\n'),ctx);
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
-vm.runInContext('globalThis.T={fingerprintImpactFacet,EXECUTION,GENERAL_EXECUTION};',ctx);
+vm.runInContext(`globalThis.seedFilm=async(env,id,input,prediction)=>{
+  const state=await readFilmState(env,id),profile=await loadJSON(env,profileKey);let fingerprint=state.fingerprint;
+  if(input)fingerprint=await writeFingerprint(env,id,input,fingerprint,'generated',undefined,FINGERPRINT_PROMPT_VERSION,false);
+  const old=state.predictions?.current||null,at=new Date().toISOString();
+  const generated={...pickPrediction(prediction),filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:'seed',trigger:'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})};
+  const stored={...generated,...(await writePredictionVersion(env,id,generated))},history=[...(state.predictions?.history||[])];if(old)history.push({...old,replacedAt:at});
+  await saveJSON(env,filmKey(id)+'predictions.json',{current:stored,history});
+  await updateViewIndex(env,id,{prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});
+  return old?'recalculated':'created';};
+globalThis.restoreImpactFacet=async(env,id)=>{const state=await readFilmState(env,id);await updateViewIndex(env,id,{impactFeatures:fingerprintImpactFacet(state.fingerprint)});};`,ctx);
+vm.runInContext('globalThis.T={seedFilm,restoreImpactFacet,fingerprintImpactFacet,EXECUTION,GENERAL_EXECUTION};',ctx);
 const T=ctx.T;
 const api=async(path,method='GET',body)=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:response.status,data:await response.json()};};
 const read=key=>records.has(key)?JSON.parse(records.get(key)):null;
@@ -43,9 +54,7 @@ const profile={ratingScale:'Letterboxd half-star steps',positiveSignals:['Good p
 assert.equal((await api('enrichment/profile','PUT',{version:1,schemaVersion:1,profile})).status,200);
 const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['investigation'],execution,moodLabels:['напряжённый','расследование'],strengths:['Good mystery'],risks:[],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']};
 const prediction={predictedRating:4,probability4Plus:.72,confidence:'medium',matchSignals:['Strong puzzle'],mainRisk:'Pace may lag',moodLabels:['напряжённый','расследование']};
-let started=await api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'});assert.equal(started.status,200);
-for(const id of ['film000','film001','film002'])assert.equal((await api('enrichment/submit','POST',{runId:started.data.runId,items:[{filmId:id,fingerprint,prediction}]})).data.results[0].status,'created');
-await api('enrichment/complete','POST',{runId:started.data.runId,reason:'model_error'});
+for(const id of ['film000','film001','film002'])assert.equal(await ctx.T.seedFilm(env,id,fingerprint,prediction),'created');
 const index=read('enrichment/view-index.json');
 for(const id of ['film000','film001','film002']){assert.equal(index[id].impactFeatures.fingerprintHash,index[id].fingerprintHash,id+' submit stores impact features bound to the fingerprint');assert.deepEqual(index[id].impactFeatures.execution,execution);}
 // film002 stands for an index entry written before impact features existed.
@@ -123,20 +132,12 @@ const indexNow=read('enrichment/view-index.json'),catalogFilm=(id,genres)=>({id,
 ctx.catalogInput={catalog:{tmdb_900:catalogFilm('tmdb_900',['Драма']),tmdb_901:catalogFilm('tmdb_901',['Ужасы'])},programme:read('programme.json'),watchlist:{films:[]},index:{tmdb_900:indexNow.film000,tmdb_901:indexNow.film001},profile:read('enrichment/profile/current.json'),metadata:{},programmeRunId:'programme-1',pinned:false,now:Date.now()};
 const offered=async()=>vm.runInContext("(async()=>catalogAvailable({...catalogInput,freshness:await predictionFreshness(diagEnv,catalogInput.profile)}).films.map(film=>film.id))()",ctx);
 assert.deepEqual([...await offered()],['tmdb_900'],'the catalog offers the carried prediction, not the reached one');
-// The runner: start does not count the kept film as pending; a submit for it is already_current and keeps version 1.
-started=await api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'});assert.equal(started.status,200);
-// The runner reads the full fingerprint, so it also keeps film002, whose index entry lacks the impact facet.
-assert.equal(started.data.pendingCount,2,'film001 and film003 are pending; film000 and film002 are kept');
-assert.equal((await api('enrichment/submit','POST',{runId:started.data.runId,items:[{filmId:'film000',fingerprint,prediction}]})).data.results[0].status,'already_current');
+// The reached film is recalculated; the kept film keeps version 1 (the v5 runner's own already_current answer and index repair are retired with v5, ADR 0167).
 assert.equal(read('enrichment/films/film000/predictions.json').current.tasteProfileVersion,1,'no recomputation, no version rewrite');
-assert.equal((await api('enrichment/submit','POST',{runId:started.data.runId,items:[{filmId:'film001',fingerprint,prediction}]})).data.results[0].status,'recalculated','the reached film is recalculated');
-await api('enrichment/complete','POST',{runId:started.data.runId,reason:'model_error'});
-// The entry without impact features: the runner, which reads the full fingerprint, keeps it, and its repair restores the
-// facet so the queue and the view agree with it on the next refresh.
-started=await api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'});
-await api('enrichment/next','POST',{runId:started.data.runId});
-assert.equal(read('enrichment/view-index.json').film002.impactFeatures?.fingerprintHash,read('enrichment/view-index.json').film002.fingerprintHash,'next repairs the missing impact facet');
-await api('enrichment/complete','POST',{runId:started.data.runId,reason:'model_error'});
+assert.equal(await ctx.T.seedFilm(env,'film001',fingerprint,prediction),'recalculated','the reached film is recalculated');
+// The entry without impact features: its facet is restored from the full fingerprint by the shared index writer, so the queue and the view agree on the next refresh.
+await ctx.T.restoreImpactFacet(env,'film002');
+assert.equal(read('enrichment/view-index.json').film002.impactFeatures?.fingerprintHash,read('enrichment/view-index.json').film002.fingerprintHash,'the facet is bound to the fingerprint again');
 queue=await reconcile();
 assert.deepEqual(pending(queue),['film003']);
 const afterRepair=(await api('enrichment/view')).data.films;

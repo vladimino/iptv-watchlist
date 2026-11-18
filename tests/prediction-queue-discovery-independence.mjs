@@ -1,50 +1,40 @@
 // AIR-431 / AIR-493. The Prediction queue advances on its own state while Discovery keeps writing. A runner step does
 // not rebuild from the whole catalog. A full rebuild reads the catalog as one admission snapshot (ADR 0147): a Discovery
-// chunk that only bumps `discovery_authority.generation` does not fence it. Here the Worker runs in a vm on an in-memory
-// R2 and a real Discovery authority on a local sqlite D1 stand-in, and every catalog query moves the Discovery generation
-// (a continuation write on each statement). Local stand-ins only; nothing here calls Cloudflare, TMDB or production.
-import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
+// chunk that only bumps `discovery_authority.generation` does not fence it. The runner is batch runner v2 (the only one since
+// ADR 0167), with the prediction domain and the Discovery authority in D1 mode on a local sqlite D1 stand-in, and every catalog
+// query moves the Discovery generation (a continuation write on each statement). Local stand-ins only; nothing here calls
+// Cloudflare, TMDB or production.
+import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
 import * as Authority from '../src/discovery-authority.js';
-import {d1Standin} from './d1-standin.mjs';
-import {migrated,sql} from './discovery-paged-write.mjs';
+import * as PredictionD1 from '../src/prediction-d1.js';
+import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 
-const records=new Map(),etags=new Map();let revision=0,putHook=null;const reads=new Map();
-const env={BUCKET:{async get(key){reads.set(key,(reads.get(key)||0)+1);return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null},async put(key,value,options={}){if(putHook&&key==='enrichment/prediction-queue.json'&&JSON.parse(value).trigger===putHook.trigger){const hook=putHook;putHook=null;await hook.run();}const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)}},list:async()=>({objects:[],truncated:false})}};
-const logs=[];const capture={log:()=>{},info:()=>{},error:(...a)=>logs.push(a.join(' ')),warn:(...a)=>logs.push(a.join(' '))};
-const file=migrated();
-sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
+const now=Date.now(),HOT=60,COLD=140,TOTAL=HOT+COLD;
+// Films 1..HOT air now; the rest aired ten days ago (cold).
+const w=await flowWorld({films:TOTAL,extra:n=>n<=HOT?{}:{shows:[{start:now-10*86400000}]}});
+const {file,env,api,logs,fingerprint,prediction}=w;
 // The storm: while on, every query against the admission table moves the generation, as a Discovery chunk committing between two statements does.
 const stats={storm:false,fullReads:0,idReads:0,queries:0};
-const db=d1Standin(file,{onQuery:text=>{
+w.hooks.query=text=>{
  stats.queries++;
  if(/FROM discovery_admission WHERE state='current' ORDER BY film_id/.test(text))stats.fullReads++;
  else if(/FROM discovery_admission WHERE state='current' AND film_id IN/.test(text))stats.idReads++;
  if(stats.storm&&/FROM discovery_admission/.test(text))sql(file,'UPDATE discovery_authority SET generation=generation+1 WHERE id=1');
-}});
-env.DB=db;
-const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console:capture,setTimeout,DiscoveryAuthority:Authority,encodeURIComponent,decodeURIComponent});
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);for(const f of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext(fs.readFileSync(f,'utf8').replace('export default','globalThis.worker='),ctx);
-async function api(path,body){const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),env);return {status:r.status,data:await r.json()}}
-const lines=()=>logs.filter(l=>l.includes('prediction_boundary_failed')).map(l=>JSON.parse(l));
-const resetLease=()=>{const lease=records.get('enrichment/runner-lease.json');if(lease)lease.expiresAt=0;const writer=records.get('enrichment/writer-lease.json');if(writer)writer.expiresAt=0;};
-
-const now=Date.now(),HOT=60,COLD=140,TOTAL=HOT+COLD;
+};
 const film=(n,start)=>({id:'tmdb_'+n,title:'tmdb_'+n,original:'tmdb_'+n,year:2020,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,genres:[],actors:[],directors:[],shows:[{start}]});
-const catalogFilms=[];for(let n=1;n<=TOTAL;n++)catalogFilms.push(film(n,n<=HOT?now:now-10*86400000));
-const insertAdmissions=films=>{for(let at=0;at<films.length;at+=50)sql(file,"INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES "+films.slice(at,at+50).map(f=>"('"+f.id+"','"+f.tmdbId+"','movie','"+f.canonicalIdentity+"',NULL,NULL,1,'current','"+JSON.stringify(f).replace(/'/g,"''")+"')").join(','));};
-insertAdmissions(catalogFilms);
-records.set('enrichment/profile/current.json',{version:1,profileHash:'p',profile:{ratingScale:'Half stars'}});
-const publish=runId=>{records.set('programme.json',{runId,films:[]});records.set('sync.json',{runId,stage:'complete'});};
-publish('p1');
-
-const EXECUTION=JSON.parse(JSON.stringify(vm.runInContext('EXECUTION',ctx)));
-const execution=Object.fromEntries(Object.entries(EXECUTION).map(([key,values])=>[key,values.includes('unknown')?'unknown':values[0]]));
-const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['heist','investigation'],execution,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']};
-const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
-const queue=()=>records.get('enrichment/prediction-queue.json');
+const insertAdmissions=films=>{for(let at=0;at<films.length;at+=50)sql(file,"INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES "+films.slice(at,at+50).map(f=>"('"+f.id+"','"+f.tmdbId+"','movie','"+f.canonicalIdentity+"','"+f.id+"','p1',1,'current','"+JSON.stringify(f).replace(/'/g,"''")+"')").join(','));};
+const publish=runId=>{w.records.set('programme.json',{runId,films:[]});w.records.set('sync.json',{runId,stage:'complete'});};
+const queue=()=>JSON.parse(sql(file,'SELECT chunk_text FROM prediction_queue ORDER BY seq').map(r=>r.chunk_text).join(''));
+const runOf=runId=>JSON.parse(sql(file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+runId+"'")[0].d);
+const leaseOf=()=>JSON.parse(sql(file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0]?.d||'null');
+const resetLease=()=>{for(const name of ['runner','writer'])sql(file,"UPDATE prediction_lease SET expires_at=1, document_json=json_set(document_json,'$.expiresAt',1) WHERE name='"+name+"'");};
+const lines=()=>logs.filter(l=>l.includes('prediction_boundary_failed')).map(l=>JSON.parse(l));
 const measured=async(work)=>{const q0=stats.queries,full0=stats.fullReads,id0=stats.idReads,t0=performance.now();const value=await work();return {value,queries:stats.queries-q0,fullReads:stats.fullReads-full0,idReads:stats.idReads-id0,ms:performance.now()-t0};};
+const start=(body={})=>api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'manual',capacity:{remainingPercent:100},...body});
+const submit=(m,items)=>api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items});
+const item=id=>({filmId:id,fingerprint,prediction});
 
-// 1. The queue exists (a quiet Discovery built it: the EPG tail / resolver checkpoint refresh). Then Discovery storms and a run drains it end to end.
+// 1. The queue exists (a quiet Discovery built it: the EPG tail / resolver checkpoint refresh). Then Discovery storms and batch runs drain it end to end.
 const built=await measured(()=>api('queue/reconcile',{}));
 assert.equal(built.value.status,200);assert.equal(queue().pending.length+queue().coldPending.length>0,true);
 assert.equal(queue().hotPending.length,HOT,'hot films in the queue');assert.equal(queue().programmeRunId,'p1');
@@ -55,24 +45,16 @@ const control=await measured(()=>api('queue/reconcile',{}));
 assert.equal(control.value.status,200,'a catalog snapshot rebuild survives a generation-only storm: '+JSON.stringify(control.value.data).slice(0,200));
 assert.equal(control.fullReads,1,'no generation-fence retries of the catalog SELECT');
 
-resetLease();logs.length=0;
-const started=await measured(()=>api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}}));
-assert.equal(started.value.status,200,JSON.stringify(started.value.data));assert.equal(started.value.data.status,'running');
-assert.equal(started.value.data.queueStale,undefined,'start under a generation storm rebuilds a readable catalog, not a stale fallback');
-const run=started.value.data;
-console.log('start under storm: queries',started.queries,'whole-catalog reads (bounded retries)',started.fullReads,'by-id reads',started.idReads,'ms',started.ms.toFixed(0));
-let progressReads=0,predicted=new Set(),batches=0,steps={next:[],submit:[],complete:null};
-for(let guard=0;guard<200;guard++){
- const step=await measured(()=>api('next',{runId:run.runId,batchSize:20}));steps.next.push(step);
- assert.equal(step.value.status,200,'next '+guard+' '+JSON.stringify(step.value.data).slice(0,300));
- assert.equal(step.fullReads,0,'next reads no whole catalog');
- const items=step.value.data.items;
- if(step.value.data.mustComplete){assert.equal(step.value.data.stopReason,'queue_empty');break;}
- if(!items.length)continue;
- batches++;
- for(let at=0;at<items.length;at+=10){
-  const payload={runId:run.runId,items:items.slice(at,at+10).map(item=>({filmId:item.filmId,fingerprint,prediction}))};
-  const sub=await measured(()=>api('submit',payload));steps.submit.push(sub);
+logs.length=0;
+let progressReads=0,runs=0;const predicted=new Set(),steps={start:[],submit:[],complete:[]};
+for(let guard=0;guard<10;guard++){
+ const started=await measured(()=>start());steps.start.push(started);
+ assert.equal(started.value.status,200,JSON.stringify(started.value.data).slice(0,300));
+ if(started.value.data.status==='noop')break;
+ assert.equal(started.value.data.status,'running');assert.equal(started.value.data.queueStale,undefined,'a start under a generation storm reads a readable catalog, not a stale fallback');
+ const m=started.value.data,ids=m.films.map(f=>f.filmId);runs++;
+ for(let at=0;at<ids.length;at+=10){
+  const sub=await measured(()=>submit(m,ids.slice(at,at+10).map(item)));steps.submit.push(sub);
   assert.equal(sub.value.status,200,'submit '+JSON.stringify(sub.value.data).slice(0,300));assert.equal(sub.idReads,0,'submit reads no catalog film at all');
   // The only whole-catalog read a submit may make is the periodic progress Event (every 50 results), which is best effort and never fails the step.
   if(sub.fullReads)progressReads++;assert.ok(sub.fullReads<=1,'submit whole-catalog reads '+sub.fullReads);
@@ -80,124 +62,122 @@ for(let guard=0;guard<200;guard++){
   const q=queue();assert.ok(!sub.value.data.results.some(r=>q.pending.includes(r.filmId)||q.hotPending.includes(r.filmId)||q.coldPending.includes(r.filmId)||q.priority[r.filmId]||q.work?.[r.filmId]),'settled films left the queue');
   assert.equal(q.priorityCount,q.hotPending.length);assert.equal(q.coldRemaining,q.coldPending.length);assert.equal(sub.value.data.remaining,q.pending.length);
  }
+ const remaining=queue().pending.length+queue().coldPending.length;
+ const done=await measured(()=>api('complete',{runId:m.runId,...(remaining?{reason:'manifest_spent'}:{})}));steps.complete.push(done);
+ assert.equal(done.value.status,200,JSON.stringify(done.value.data).slice(0,300));assert.equal(done.value.data.status,'complete');assert.ok(done.fullReads<=1,'complete reads the catalog at most once, for its Event coverage (best effort): '+done.fullReads);
+ assert.equal(runOf(m.runId).status,'complete');assert.equal(queue().lastBatch.runId,m.runId);
+ if(!remaining)assert.equal(done.value.data.snapshot.coverage?.confirmedFilmsTotal,TOTAL,'coverage is computed from the readable catalog snapshot under a generation storm');
 }
-assert.ok(progressReads<=Math.ceil(TOTAL/50),'progress Event reads '+progressReads);
-assert.equal(predicted.size,TOTAL,'every film of the catalog was predicted across '+batches+' batches while Discovery kept writing');
-assert.ok(batches>=2,'at least two full sequential runner batches');
+assert.ok(progressReads<=Math.ceil(TOTAL/50)+runs,'progress Event reads '+progressReads);
+assert.equal(predicted.size,TOTAL,'every film of the catalog was predicted across '+runs+' runs while Discovery kept writing');
+assert.ok(runs>=2,'at least two sequential batch runs (the manifest holds at most 100 films)');
 assert.equal(queue().hotPredicted,HOT,'hot counter follows the settled films');assert.equal(queue().priorityCount,0);assert.equal(queue().coldRemaining,0);assert.equal(queue().pending.length,0);
-const done=await measured(()=>api('complete',{runId:run.runId}));steps.complete=done;
-assert.equal(done.value.status,200,JSON.stringify(done.value.data).slice(0,300));assert.equal(done.value.data.status,'complete');assert.ok(done.fullReads<=1,'complete reads the catalog at most once, for its Event coverage (best effort): '+done.fullReads);
-assert.equal(done.value.data.snapshot.coverage?.confirmedFilmsTotal,TOTAL,'coverage is computed from the readable catalog snapshot under a generation storm');
-assert.equal(records.get('enrichment/runs/'+run.runId+'.json').status,'complete');
-assert.equal(queue().lastBatch.runId,run.runId);assert.equal(queue().metrics.hotProcessedTotal,HOT);
-assert.equal(lines().length,0,'no failed prediction boundary during the whole run: '+JSON.stringify(lines()).slice(0,300));
+assert.equal(queue().metrics.hotProcessedTotal,HOT);
+assert.equal(lines().length,0,'no failed prediction boundary during the whole drain: '+JSON.stringify(lines()).slice(0,300));
 assert.ok(!logs.some(l=>l.includes('discovery_fence')),'no discovery_fence reached the runner');
-assert.equal(records.get('enrichment/runner-lease.json').expiresAt,0,'the lease was released, not left to expire');
+assert.ok(leaseOf().expiresAt<=Date.now(),'the lease was released, not left to expire');
 const mean=list=>list.length?list.reduce((a,b)=>a+b,0)/list.length:0;
-console.log('run under storm:',batches,'batches,',steps.next.length,'next,',steps.submit.length,'submit; mean D1 queries per next',mean(steps.next.map(s=>s.queries)).toFixed(2),'per submit',mean(steps.submit.map(s=>s.queries)).toFixed(2),'complete',done.queries,'; mean ms per next',mean(steps.next.map(s=>s.ms)).toFixed(0),'submit',mean(steps.submit.map(s=>s.ms)).toFixed(0),'; rebuild was',built.queries,'queries /',built.ms.toFixed(0),'ms');
+console.log('drain under storm:',runs,'runs,',steps.submit.length,'submits; mean D1 queries per start',mean(steps.start.map(s=>s.queries)).toFixed(2),'per submit',mean(steps.submit.map(s=>s.queries)).toFixed(2),'per complete',mean(steps.complete.map(s=>s.queries)).toFixed(2),'; mean ms per submit',mean(steps.submit.map(s=>s.ms)).toFixed(0),'; rebuild was',built.queries,'queries');
 
-// 2. Idempotent replay: the same submit again is already_current and settles nothing twice.
+// 2. Idempotent replay: the same submit again is a replay and settles nothing twice. A film whose admission disappears before a start is settled out of the
+//    queue by that start and never delivered.
 {
  stats.storm=false;resetLease();
  insertAdmissions([film(TOTAL+1,now)]);
  assert.equal((await api('queue/reconcile',{})).status,200);
  stats.storm=true;resetLease();
- const second=(await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data;assert.equal(second.status,'running');
- const first=(await api('next',{runId:second.runId,batchSize:1})).data;assert.equal(first.items[0].filmId,'tmdb_'+(TOTAL+1));
- const payload={runId:second.runId,items:[{filmId:first.items[0].filmId,fingerprint,prediction}]};
- const one=(await api('submit',payload)).data;assert.equal(one.results[0].status,'created');
+ const second=(await start()).data;assert.equal(second.status,'running');assert.deepEqual(second.films.map(f=>f.filmId),['tmdb_'+(TOTAL+1)]);
+ const one=(await submit(second,[item('tmdb_'+(TOTAL+1))])).data;assert.equal(one.results[0].status,'created');
  const predictedWas=queue().hotPredicted;
- const replay=(await api('submit',payload)).data;assert.equal(replay.results[0].status,'already_current');
+ const replay=(await submit(second,[item('tmdb_'+(TOTAL+1))])).data;assert.equal(replay.results[0].replayed,true);
  assert.equal(queue().hotPredicted,predictedWas,'a replayed submit settles nothing twice');
- // A film whose admission disappears between the queue write and a step is dropped from the queue, not left to stall the run.
+ assert.equal((await api('complete',{runId:second.runId})).status,200);
  stats.storm=false;resetLease();
- insertAdmissions([film(TOTAL+2,now),film(TOTAL+3,now)]);assert.equal((await api('queue/reconcile',{})).status,200);
- stats.storm=true;resetLease();
- const third=(await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data;assert.equal(third.status,'running');
- sql(file,"UPDATE discovery_admission SET state='superseded' WHERE film_id='tmdb_"+(TOTAL+3)+"'");
- // The start already selected both; a later batch picks metadata by id, so supersede a film the run has not selected yet.
- stats.storm=false;
- insertAdmissions([film(TOTAL+4,now)]);assert.equal((await api('queue/reconcile',{})).status,200);
+ insertAdmissions([film(TOTAL+2,now),film(TOTAL+4,now)]);assert.equal((await api('queue/reconcile',{})).status,200);
  sql(file,"UPDATE discovery_admission SET state='superseded' WHERE film_id='tmdb_"+(TOTAL+4)+"'");
  stats.storm=true;
- const progressAnswer=await api('next',{runId:third.runId,batchSize:20}),progress=progressAnswer.data;assert.equal(progressAnswer.status,200,JSON.stringify(progress).slice(0,300));
- assert.ok(!progress.items.some(i=>i.filmId==='tmdb_'+(TOTAL+4)),'a superseded film is never offered');
+ const third=(await start()).data;assert.equal(third.status,'running',JSON.stringify(third).slice(0,300));
+ assert.ok(!third.films.some(f=>f.filmId==='tmdb_'+(TOTAL+4)),'a superseded film is never offered');
  assert.ok(!queue().pending.includes('tmdb_'+(TOTAL+4)),'and it is out of the queue');
+ assert.equal((await submit(third,third.films.map(f=>item(f.filmId)))).status,200);assert.equal((await api('complete',{runId:third.runId})).status,200);
 }
 
-// 3. A published programme transition does not stop the run and does not rebuild inside next (ADR 0154).
+// 3. A published programme transition does not stop the run and does not rebuild inside a submit (ADR 0154).
 //    Priority moves on the named refresh, not on this step. A generation-only storm does not hold the step.
 {
- stats.storm=false;resetLease();publish('p3');assert.equal((await api('queue/reconcile',{})).status,200);resetLease();
- const run3=(await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data;assert.equal(run3.status,'running',JSON.stringify(run3));
+ stats.storm=false;resetLease();publish('p3');insertAdmissions([film(TOTAL+5,now),film(TOTAL+6,now)]);assert.equal((await api('queue/reconcile',{})).status,200);resetLease();
+ const run3=(await start()).data;assert.equal(run3.status,'running',JSON.stringify(run3).slice(0,300));
  publish('p4');stats.storm=true;logs.length=0;
- const waiting=await api('next',{runId:run3.runId,batchSize:20});
- assert.equal(waiting.status,200,JSON.stringify(waiting.data).slice(0,300));
- assert.equal(records.get('enrichment/runs/'+run3.runId+'.json').status,'running','the run keeps its lease and is not stopped');
- assert.equal(queue().programmeRunId,'p3','next does not rebuild the queue just because the published programme changed');
+ const step=await submit(run3,[item(run3.films[0].filmId)]);
+ assert.equal(step.status,200,JSON.stringify(step.data).slice(0,300));
+ assert.equal(runOf(run3.runId).status,'running','the run keeps its lease and is not stopped');
+ assert.equal(queue().programmeRunId,'p3','a submit does not rebuild the queue just because the published programme changed');
+ assert.equal((await api('complete',{runId:run3.runId,reason:'external_termination'})).status,200);
 }
 // 4. Reads stay independent of the storm: enrichment status reads no catalog and still reports the queue; the queue
 //    overview stays eligible/ready. The catalog snapshot is readable under a generation-only storm (ADR 0147).
 {
  stats.storm=false;resetLease();publish('p5');assert.equal((await api('queue/reconcile',{})).status,200);
- stats.storm=true;ctx.env=env;
- const statusRead=await measured(async()=>{const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/status'),env);return {status:r.status,data:await r.json()};});
+ stats.storm=true;
+ const statusRead=await measured(async()=>{const r=await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/status'),env);return {status:r.status,data:await r.json()};});
  assert.equal(statusRead.value.status,200);assert.equal(statusRead.fullReads,0,'status reads no whole catalog');assert.equal(statusRead.idReads,0);
- assert.equal(statusRead.value.data.selectedCount,queue().hotCount+queue().coldCount);assert.ok(statusRead.value.data.queue.pendingCount>0);
- const view=await vm.runInContext('(async()=>predictionQueueOverview(await loadPredictionDiagnosticSnapshot(env),Date.now()))()',ctx);
+ assert.ok(statusRead.value.data.queue.pendingCount>0);
+ w.ctx.env=env;if(typeof w.ctx.predictionQueueOverview!=='function')vm.runInContext(fs.readFileSync('src/prediction-diagnostics.js','utf8'),w.ctx);
+ const view=await vm.runInContext('(async()=>predictionQueueOverview(await loadPredictionDiagnosticSnapshot(env),Date.now()))()',w.ctx);
  assert.equal(view.state,'eligible');assert.equal(view.cause,'ready');
  assert.ok(!view.snapshot.reasons.includes('catalog_unavailable'),JSON.stringify(view.snapshot.reasons));
- // The enrichment status also survives an unreadable Discovery status record.
  assert.ok(['object'].includes(typeof statusRead.value.data.discovery)||statusRead.value.data.discovery===null);
 }
 // 6. AIR-431 review: a start whose stored queue lists films with no admission any more settles them out and takes replacements; it never repeats a
-//    batch of missing films. First N missing, then every film missing (eventual progress, then an honest noop).
+//    manifest of missing films. First N missing, then every film missing (eventual progress, then an honest noop).
 {
  stats.storm=false;resetLease();publish('p9');
  insertAdmissions(Array.from({length:40},(_,k)=>film(5001+k,now)));assert.equal((await api('queue/reconcile',{})).status,200);
- const gone=queue().hotPending.slice(0,25);assert.equal(gone.length,25,'more than one batch of missing films');
+ const gone=queue().hotPending.slice(0,25);assert.equal(gone.length,25,'more than one group of missing films');
  sql(file,"UPDATE discovery_admission SET state='superseded' WHERE film_id IN ("+gone.map(id=>"'"+id+"'").join(',')+")");
  stats.storm=true;resetLease();
- const partial=await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});
+ const partial=await start();
  assert.equal(partial.status,200,JSON.stringify(partial.data).slice(0,300));assert.equal(partial.data.status,'running');
- const partialRun=records.get('enrichment/runs/'+partial.data.runId+'.json');
- assert.ok(partialRun.selectedIds.length>0&&partialRun.selectedIds.every(id=>!gone.includes(id)),'replacements were selected, none of the missing films');
+ assert.ok(partial.data.films.length>0&&partial.data.films.every(f=>!gone.includes(f.filmId)),'replacements were delivered, none of the missing films');
  assert.ok(gone.every(id=>!queue().pending.includes(id)&&!queue().hotPending.includes(id)&&!queue().coldPending.includes(id)&&!queue().priority[id]),'the missing films left the queue');
  assert.equal(queue().priorityCount,queue().hotPending.length);
- // Every remaining film missing: a start settles them all under its round cap and answers noop; the next start has nothing to repeat.
+ assert.equal((await api('complete',{runId:partial.data.runId,reason:'external_termination'})).status,200);
+ // Every remaining film missing: a batch start delivers nothing and takes no lease (its idle outcome comes before any settlement, unlike the retired
+ // v5 start, which settled them and answered noop); the named queue refresh drops the missing films, and the next start has nothing to repeat.
  sql(file,"UPDATE discovery_admission SET state='superseded' WHERE state='current'");
  resetLease();
- const emptied=await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});
- assert.equal(emptied.status,200,JSON.stringify(emptied.data).slice(0,300));assert.equal(emptied.data.status,'noop','nothing left is a noop, not an endless retry_backoff');
+ const emptied=await start();
+ assert.equal(emptied.status,200,JSON.stringify(emptied.data).slice(0,300));assert.ok(['noop','blocked'].includes(emptied.data.status),JSON.stringify(emptied.data).slice(0,400));assert.equal(emptied.data.runId,null,'no run is created');
+ assert.equal((await api('queue/reconcile',{})).status,200);
  assert.equal(queue().pending.length+queue().coldPending.length,0,'the queue holds none of the missing films');
- resetLease();assert.equal((await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data.status,'noop');
+ resetLease();assert.equal((await start()).data.status,'noop');
  sql(file,"UPDATE discovery_admission SET state='current' WHERE CAST(tmdb_id AS INTEGER)<="+(TOTAL+2));
  sql(file,"UPDATE discovery_admission SET state='superseded' WHERE CAST(tmdb_id AS INTEGER)>"+(TOTAL+2));
 }
 
 // 7. AIR-431 review: the gate holds inside the conditional write. A reconcile that rebuilds the queue for a newer programme between the step's gate
-//    and its write (a forced CAS conflict) makes the retried mutation see the new generation, and the old settlement does not touch it.
+//    and its write (a forced D1 queue-generation conflict) makes the retried mutation see the new generation, and the old settlement does not touch it.
 {
  stats.storm=false;resetLease();publish('p10');
  insertAdmissions(Array.from({length:30},(_,k)=>film(6001+k,now)));assert.equal((await api('queue/reconcile',{})).status,200);resetLease();
- const run7=(await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data;assert.equal(run7.status,'running',JSON.stringify(run7).slice(0,300));
- const item=(await api('next',{runId:run7.runId,batchSize:1})).data.items[0];
- // In the newer generation the submitted film is pending again (as if its prediction had not counted there): the old settlement must not remove it.
- putHook={trigger:'batch_progress',run:async()=>{publish('p11');const r=await api('queue/reconcile',{});assert.equal(r.status,200);const q=queue();if(!q.hotPending.includes(item.filmId)){q.hotPending.push(item.filmId);q.pending.push(item.filmId);q.priorityCount=q.hotPending.length;q.priority[item.filmId]={hot:true,rank:1};records.set('enrichment/prediction-queue.json',q);etags.set('enrichment/prediction-queue.json',String(++revision));}}};
- const sub=await api('submit',{runId:run7.runId,items:[{filmId:item.filmId,fingerprint,prediction}]});
- assert.equal(putHook,null,'the conflict was forced');assert.equal(sub.status,200,JSON.stringify(sub.data).slice(0,300));assert.equal(sub.data.results[0].status,'created');
- assert.equal(queue().programmeRunId,'p11','the newer generation is what is stored');assert.equal(queue().trigger,'manual_reconcile','the old settlement did not write over it');assert.equal(queue().advancedAt,undefined);assert.ok(queue().hotPending.includes(item.filmId),'the newer generation still lists the film: the old settlement was refused by the gate inside the write');
- // Complete: with nothing ready (all deferred by retry) the completion's own write meets the same conflict. The new generation keeps its lastBatch and
- // counters; the run is still completed.
- const deferred={};for(const id of [...queue().pending,...queue().coldPending])deferred[id]={kind:'parse_error',retryable:true,attempts:1,retryAt:Date.now()+3600000,failedAt:new Date().toISOString(),lastRunId:'other'};
- const q=queue();q.retries=deferred;records.set('enrichment/prediction-queue.json',q);etags.set('enrichment/prediction-queue.json',String(++revision));
- const metricsBefore=JSON.stringify(queue().metrics),lastBatchBefore=JSON.stringify(queue().lastBatch);
- putHook={trigger:'batch_complete',run:async()=>{publish('p12');const r=await api('queue/reconcile',{});assert.equal(r.status,200);}};
- const fin=await api('complete',{runId:run7.runId,reason:'eligible_queue_empty'});
- assert.equal(putHook,null,'the conflict was forced for the completion');assert.equal(fin.status,200,JSON.stringify(fin.data).slice(0,300));assert.ok(['complete','partial'].includes(fin.data.status));
+ const run7=(await start({manifestSize:1})).data;assert.equal(run7.status,'running',JSON.stringify(run7).slice(0,300));
+ const filmId=run7.films[0].filmId;
+ // The concurrent writer runs once, just before the submit's first queue write reaches D1. In the newer generation the submitted film is pending again
+ // (as if its prediction had not counted there): the old settlement must not remove it.
+ const original=env.DB.batch.bind(env.DB);let forced=0;
+ const interfere=work=>{env.DB.batch=async statements=>{if(!forced&&statements.some(s=>/prediction_queue/i.test(s.text)&&!/^\s*SELECT/i.test(s.text))){forced++;env.DB.batch=original;await work();}return original(statements);};};
+ interfere(async()=>{publish('p11');const r=await api('queue/reconcile',{});assert.equal(r.status,200);const head=await PredictionD1.openQueue(env),q=head.queue;if(!q.hotPending.includes(filmId)){q.hotPending.push(filmId);q.pending.push(filmId);q.priorityCount=q.hotPending.length;q.priority[filmId]={hot:true,rank:1};assert.ok(await PredictionD1.writeQueue(env,head,q));}});
+ const sub=await submit(run7,[item(filmId)]);env.DB.batch=original;
+ assert.equal(forced,1,'the conflict was forced');assert.equal(sub.status,200,JSON.stringify(sub.data).slice(0,300));assert.equal(sub.data.results[0].status,'created');
+ assert.equal(queue().programmeRunId,'p11','the newer generation is what is stored');assert.equal(queue().trigger,'manual_reconcile','the old settlement did not write over it');assert.equal(queue().advancedAt,undefined);assert.ok(queue().hotPending.includes(filmId),'the newer generation still lists the film: the old settlement was refused by the gate inside the write');
+ // Complete: the completion's own queue write meets the same conflict. The new generation keeps its lastBatch and counters; the run is still completed.
+ const metricsBefore=JSON.stringify(queue().metrics?.hotProcessedTotal);
+ forced=0;interfere(async()=>{publish('p12');const r=await api('queue/reconcile',{});assert.equal(r.status,200);});
+ const fin=await api('complete',{runId:run7.runId,reason:'manifest_spent'});env.DB.batch=original;
+ assert.equal(forced,1,'the conflict was forced for the completion');assert.equal(fin.status,200,JSON.stringify(fin.data).slice(0,300));assert.ok(['complete','partial'].includes(fin.data.status));
  assert.equal(queue().programmeRunId,'p12');assert.notEqual(queue().lastBatch?.runId,run7.runId,'the new generation keeps its own lastBatch');
- assert.equal(JSON.stringify(queue().metrics.hotProcessedTotal),JSON.stringify(JSON.parse(metricsBefore).hotProcessedTotal),'its counters were not moved by the old completion');
- assert.equal(records.get('enrichment/runs/'+run7.runId+'.json').status,fin.data.status);
+ assert.equal(JSON.stringify(queue().metrics?.hotProcessedTotal),metricsBefore,'its counters were not moved by the old completion');
+ assert.equal(runOf(run7.runId).status,fin.data.status);
 }
 
 // 5. readAdmissionsById: indexed lookups in chunks, current rows only, one authority check, closed like routeRead.
@@ -208,7 +188,7 @@ console.log('run under storm:',batches,'batches,',steps.next.length,'next,',step
  const found=await Authority.readAdmissionsById(env,ids);
  assert.equal(found.handled,true);assert.equal(stats.idReads-before,Math.ceil(ids.length/Authority.ADMISSION_IDS_PER_QUERY),'one statement per chunk of '+Authority.ADMISSION_IDS_PER_QUERY+' ids');
  assert.ok(stats.queries-q0<=stats.idReads-before+8,'a constant number of authority reads beside the chunks');
- assert.equal(found.films.size,TOTAL+2,'the admitted films among the ids (the catalog plus the two admitted in scenario 2; the two superseded ones and the missing id are absent)');assert.equal(found.films.get('tmdb_7').tmdbId,'7');
+ assert.equal(found.films.size,TOTAL+2,'the admitted films among the ids (the catalog plus the two admitted in scenario 2; the later ones are superseded and the missing id is absent)');assert.equal(found.films.get('tmdb_7').tmdbId,'7');
  sql(file,"UPDATE discovery_admission SET state='superseded' WHERE film_id='tmdb_7'");
  assert.ok(!(await Authority.readAdmissionsById(env,['tmdb_7','tmdb_8'])).films.has('tmdb_7'),'a superseded admission is not current');
  assert.equal((await Authority.readAdmissionsById(env,[])).films.size,0,'no ids, no statement');
