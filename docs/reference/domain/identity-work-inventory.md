@@ -1,6 +1,6 @@
-# Identity work inventory (proposed contract)
+# Identity work inventory (accepted design contract)
 
-**Status:** proposed, not implemented. No route, module or object described here exists yet. The decision is [ADR 0169](../../adr/0169-unified-identity-work-inventory.md), Proposed; this page is the exact contract the implementation must meet once the ADR is Accepted. The installed [Limbo inventory](data-health.md#limbo-inventory) and [`GET /api/admin/limbo`](../api/admin.md#limbo-inventory) are unchanged.
+**Status:** accepted architecture, not implemented. No route, module or object described here exists yet. The decision is [ADR 0169](../../adr/0169-unified-identity-work-inventory.md), Accepted on 2026-11-18; this page is the design contract for separately approved implementation. The installed [Limbo inventory](data-health.md#limbo-inventory) and [`GET /api/admin/limbo`](../api/admin.md#limbo-inventory) are unchanged.
 
 **Role:** a read-only owner view of all identity work that has not yet become a trusted Film: EPG observations, Letterboxd rated candidates and stalled canonical Films, in typed lanes with honest per-lane coverage.
 
