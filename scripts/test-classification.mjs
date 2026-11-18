@@ -428,6 +428,10 @@ export const FILES={
   "suite": "core",
   "note": "AIR-523 batched replay of a new generation's assigned rows. Round-trip and statement counts are asserted, wall time is not."
  },
+ "discovery-replay-timeline.mjs": {
+  "suite": "core",
+  "note": "AIR-535 offline replay benchmark. Round trips per restored row and chunk counts under a MODELLED clock are asserted; no wall-clock or latency threshold."
+ },
  "discovery-bundle-slot-scan.mjs": {
   "suite": "core",
   "note": "The built Worker bundle must resolve slotScanConfirmation inside assignObservationSlots. A direct module import does not load that scope."

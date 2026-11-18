@@ -115,20 +115,20 @@ const decide=async(env,item,next)=>assert.deepEqual((await Authority.writeDecisi
 
 // 4. Bounded and resumable: a stop signal ends the call with its cursor, the next call continues from it and finishes; a wrong or old run is a no-op.
 {
- const items=[];for(let n=0;n<100;n++)items.push(obs('r'+String(n).padStart(3,'0'),slotsOf(DAY,['c'+n,1+(n%20),90])));
- const {file,env}=await newRun(items,{catalog:[...Array(100).keys()].map(n=>String(2000+n))});
- for(let n=0;n<100;n++)await decide(env,items[n],verifiedFor(items[n],'tmdb_'+(2000+n),String(2000+n)));
+ const N=Authority.REPLAY_PAGE*2+20,items=[];for(let n=0;n<N;n++)items.push(obs('r'+String(n).padStart(3,'0'),slotsOf(DAY,['c'+n,1+(n%20),90])));
+ const {file,env}=await newRun(items,{catalog:[...Array(N).keys()].map(n=>String(2000+n))});
+ for(let n=0;n<N;n++)await decide(env,items[n],verifiedFor(items[n],'tmdb_'+(2000+n),String(2000+n)));
  // Stop checks come at the head of a page, before its counts and before every write group. A stop between the first and second group keeps what was written and does not advance the cursor: the rows already inserted are no longer selected.
  const midPage=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:'',shouldStop:(()=>{let calls=0;return()=>calls++>=3;})()});
  assert.equal(midPage.complete,false);assert.equal(midPage.after,'');assert.equal(midPage.outcomes.assigned,38);assert.equal(rows(file).length,38);
  // A stop between pages ends with the cursor of the last finished page.
- const first=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:'',shouldStop:(()=>{let calls=0;return()=>calls++>=4;})()});
+ const first=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:'',shouldStop:(()=>{let calls=0;return()=>calls++>=Math.ceil(Authority.REPLAY_PAGE/38)+2;})()});
  assert.equal(first.complete,false);
  assert.equal(first.after,'r'+String(38+Authority.REPLAY_PAGE-1).padStart(3,'0'),'the cursor is the last key of the last finished page (the first 38 are already assigned)');
  assert.equal(rows(file).length,38+first.outcomes.assigned);
  let cursor=first.after,done=false,guard=0;
  while(!done&&guard++<10){const next=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:cursor});cursor=next.after;done=next.complete;}
- assert.equal(done,true);assert.equal(rows(file).length,100);
+ assert.equal(done,true);assert.equal(rows(file).length,N);
  const stale=await Authority.replayUnassignedSlots(env,{programmeRunId:OLD,after:''});
  assert.equal(stale.stale,true);assert.equal(stale.outcomes.assigned,0);
 }
@@ -192,16 +192,16 @@ for(const [label,pattern] of [['after the free-slot read',/FROM discovery_observ
 // 8. A lap ends at the end of the key space. Observations that can never be assigned (here: evidence drift) are scanned once per lap, never twice: a
 // lap resumed after a stop continues to the end and completes, without wrapping back over the keys the lap already visited.
 {
- const items=[];for(let n=0;n<100;n++)items.push(obs('p'+String(n).padStart(3,'0'),slotsOf(DAY,['c'+n,1+(n%20),150])));
- const {file,env}=await newRun(items,{catalog:[...Array(100).keys()].map(n=>String(5000+n))});
- for(let n=0;n<100;n++)await decide(env,items[n],verifiedFor(items[n],'tmdb_'+(5000+n),String(5000+n)));
+ const N=Authority.REPLAY_PAGE*2+20,items=[];for(let n=0;n<N;n++)items.push(obs('p'+String(n).padStart(3,'0'),slotsOf(DAY,['c'+n,1+(n%20),150])));
+ const {file,env}=await newRun(items,{catalog:[...Array(N).keys()].map(n=>String(5000+n))});
+ for(let n=0;n<N;n++)await decide(env,items[n],verifiedFor(items[n],'tmdb_'+(5000+n),String(5000+n)));
  let calls=0;
  const first=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:'',shouldStop:()=>calls++>=1});
  assert.equal(first.complete,false);assert.equal(first.observations,Authority.REPLAY_PAGE);assert.equal(first.outcomes.evidence_drift,Authority.REPLAY_PAGE);
  assert.equal(first.after,'p'+String(Authority.REPLAY_PAGE-1).padStart(3,'0'));
  const rest=await Authority.replayUnassignedSlots(env,{programmeRunId:NEW,after:first.after});
  assert.equal(rest.complete,true,'the end of the key space ends the lap');
- assert.equal(rest.observations,100-Authority.REPLAY_PAGE,'no wrap back over the keys this lap already scanned');
+ assert.equal(rest.observations,N-Authority.REPLAY_PAGE,'no wrap back over the keys this lap already scanned');
  assert.equal(rest.after,'');assert.equal(rows(file).length,0);
 }
 console.log('discovery-bulk-replay ok');

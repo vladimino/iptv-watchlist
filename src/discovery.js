@@ -793,6 +793,13 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  }else if(replayResting)replayRun={...replayRun,skipped:true};
  const nextReplayLapAt=!replayRun.skipped&&source.programmeRunId&&replayRun.complete===true&&!replayRun.stale&&!replayRun.refused?new Date().toISOString():replayLapAt;
  timings.replayMs=Date.now()-replayStarted;
+ // AIR-535: measured, per generation and carried in the status, never an estimate. `firstAssignedAt` is the first chunk of this run that wrote an assigned row; `sincePublishedMs`
+ // is that moment minus the publication, so a late start (no chunk admitted) and a slow replay (many chunks) read differently. No count query: only what the chunk already holds.
+ const priorStats=sameRun&&last?.replayStats&&last.replayStats.programmeRunId===source.programmeRunId?last.replayStats:null;
+ const publishedAt=priorStats?.publishedAt||(source.programmeRunId?await DiscoveryAuthority.publishedAtOf(env,source.programmeRunId):null);
+ const chunkAssigned=replayRun.outcomes.assigned,nowIso=new Date().toISOString(),sincePublished=at=>publishedAt&&at?Math.max(0,Date.parse(at)-Date.parse(publishedAt)):null;
+ const firstAssignedAt=priorStats?.firstAssignedAt||(chunkAssigned>0?nowIso:null);
+ const replayStats=source.programmeRunId?{programmeRunId:source.programmeRunId,publishedAt,firstReplayChunkAt:priorStats?.firstReplayChunkAt||(replayRun.skipped?null:startedAt),firstAssignedAt,firstAssignedSincePublishedMs:priorStats?.firstAssignedSincePublishedMs??(chunkAssigned>0?sincePublished(nowIso):null),chunks:(priorStats?.chunks||0)+(replayRun.skipped?0:1),observations:(priorStats?.observations||0)+replayRun.observations,assigned:(priorStats?.assigned||0)+chunkAssigned,guardSkipped:(priorStats?.guardSkipped||0)+replayRun.outcomes.guard_skipped,lapCompletedAt:nextReplayLapAt&&nextReplayLapAt!==replayLapAt?nextReplayLapAt:priorStats?.lapCompletedAt||null,lapCompletedSincePublishedMs:nextReplayLapAt&&nextReplayLapAt!==replayLapAt?sincePublished(nextReplayLapAt):priorStats?.lapCompletedSincePublishedMs??null}:null;
  const walkStarted=Date.now();
  const selected=await DiscoveryAuthority.selectActionableObservations(env,{after:selectAfter,touchAfter,now:Date.now(),pageSize:Math.max(limit,DiscoveryAuthority.SELECT_PAGE),touchLimit:PAGED_CHEAP_FILMS,shouldStop:()=>Date.now()>=walkDeadline,beforeQuery:heartbeat});
  timings.walkMs=Date.now()-walkStarted;timings.pages=selected.queries;timings.concurrency=1;
@@ -1125,7 +1132,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  }
  if(!selected.items.length&&remaining===0)nextAfter=selected.after||'';
  const nextTouchAfter=selected.touches.length?selected.touchAfter||touchAfter:touchAfter;
- const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',replayLapAt:nextReplayLapAt,timings};
+ const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',replayLapAt:nextReplayLapAt,replayStats,timings};
  try{await fence();}catch(e){throw lost(e,'final');}
  // `preCommitMs` is what the stored status carries: the time up to its own write. The status write, the continuation
  // checkpoint and the total through that checkpoint are measured after the writes and reach only the returned

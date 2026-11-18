@@ -901,9 +901,9 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
 // chunk, owns its own slice of the budget, restores real assignments from the new run's observation rows on the first hop, and still leaves candidate time:
 // unresolved work neither displaces it nor is displaced by it. With a fast D1 the whole set is restored in one hop and the cursor wraps to the start.
 {
- const decided=[],decisions={},catalog={};
- for(let index=0;index<90;index++){
-  const key='rep'+String(index).padStart(2,'0');
+ const replayCount=Authority.REPLAY_PAGE+54,decided=[],decisions={},catalog={};
+ for(let index=0;index<replayCount;index++){
+  const key='rep'+String(index).padStart(3,'0');
   const tmdb=String(5000+index);
   decided.push(key);
   decisions[key]={status:'verified',filmId:'tmdb_'+tmdb,tmdbId:tmdb,identitySource:'owner'};
@@ -935,25 +935,42 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.ok(slow.result.timings.replayMs<=10000+2800,'the replay keeps to its own slice of the budget: '+slow.result.timings.replayMs);
  assert.equal(slow.result.assignment.bulkComplete,false,'a slow hop leaves the cursor mid-circle');
  assert.equal(slow.result.stage,'partial','unfinished replay keeps the series going');
- assert.ok(JSON.parse(statusPayload(file)).replayAfter,'the replay cursor is stored with the status');
+ // A page of 96 rows is three write batches: at 2.8 s each it may not finish inside the slice. The cursor then stays at the page start, which is harmless because the
+ // rows already written are no longer selected; the next hop must continue from there and restore more, not rescan the same rows.
+ const stored=JSON.parse(statusPayload(file));
+ assert.ok(typeof stored.replayAfter==='string'&&stored.programmeRunId===RUN,'the replay cursor belongs to the status of this run');
+ const resumed=await runHop({slowMs:2800});
+ assert.ok(assignedRows()>afterSlow,'the next slow hop continues and restores more: '+afterSlow+' then '+assignedRows());
+ assert.ok(resumed.result.assignment.assigned>0);
+ // AIR-535: measured per-generation replay metrics are carried in the status: the publication moment, the first chunk that assigned, and running totals.
+ const stats=JSON.parse(statusPayload(file)).replayStats;
+ assert.equal(stats.programmeRunId,RUN);assert.equal(stats.publishedAt,'2026-11-17T10:00:00.000Z');
+ assert.equal(stats.chunks,2,'two replay chunks so far');
+ assert.equal(stats.assigned,assignedRows(),'running total equals the assigned rows of the run');
+ assert.ok(stats.firstAssignedAt&&stats.firstAssignedSincePublishedMs>=0,'first assigned chunk is timed against the publication');
+ assert.equal(Boolean(stats.lapCompletedAt),assignedRows()===replayCount,'the lap is stamped complete exactly when every verified observation has its slot');
+ assert.ok(!stats.lapCompletedAt||stats.lapCompletedSincePublishedMs>=0);
+ assert.ok(stats.observations>=stats.assigned);
  assert.deepEqual(sql(file,'SELECT generation, watchlist_generation, programme_run_id FROM published_epg_authority')[0],publishedBefore,'only the EPG sync moves the published generation');
  // Uniqueness and provenance: one Film per slot, every row a Discovery row of this run.
  assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM (SELECT channel_id, start_ms FROM published_epg_show WHERE programme_run_id='"+RUN+"' GROUP BY channel_id, start_ms HAVING COUNT(*)>1)")[0].n),0);
  // A new EPG generation: the stored cursor belongs to the previous run and must not carry over. The new run has no assigned rows; the lowest verified key is restored first.
+ // Force a mid-lap cursor (at this page size a slow hop may leave it at the page start) so the test still proves a cursor of another run is ignored.
+ sql(file,"UPDATE discovery_status SET payload_json=json_set(payload_json,'$.replayAfter','rep"+String(replayCount-1).padStart(3,'0')+"')");
  assert.ok(JSON.parse(statusPayload(file)).replayAfter);
  sql(file,'DELETE FROM published_epg_show');
  sql(file,"UPDATE discovery_status SET payload_json=json_set(payload_json,'$.programmeRunId','run-previous')");
  const nextGeneration=await runHop({slowMs:2800});
  assert.ok(nextGeneration.result.assignment.bulkObservations>0);
- assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM published_epg_show WHERE match_reason='rep00'")[0].n)>0,true,'a cursor stored for another run is ignored: the new run starts at its first key');
+ assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM published_epg_show WHERE match_reason='rep000'")[0].n)>0,true,'a cursor stored for another run is ignored: the new run starts at its first key');
  // The next natural hops finish the circle; with a fast D1 that is one hop.
  let hops=0,last;
  do{last=await runHop();hops++;}while(last.result.assignment.bulkComplete===false&&hops<5);
  assert.equal(last.result.assignment.bulkComplete,true,'the circle completes');
- assert.equal(assignedRows(),90,'every verified observation of the new run has its slot');
+ assert.equal(assignedRows(),replayCount,'every verified observation of the new run has its slot');
  const again=await runHop();
  assert.equal(again.result.assignment.bulkObservations,0,'a finished replay finds nothing to do and costs one select');
- assert.equal(assignedRows(),90);
+ assert.equal(assignedRows(),replayCount);
 }
 
 // 24. The replay of a new generation is not paced by the series backoff. On a D1 so slow that no TMDB request fits after the replay, a chunk whose replay wrote assigned rows

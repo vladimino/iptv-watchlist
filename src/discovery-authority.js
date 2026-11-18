@@ -1379,10 +1379,22 @@ export async function assignObservationSlots(env,spec,context={}){
 // SAME guarded statement (`slotInsert`) in fenced batches of `SLOT_BATCH`. Every guard of decision 4 is still evaluated inside each statement; the
 // JavaScript side is only a prefilter, so a stale read can cost a skipped row, never a wrong one. Slot coordinates are copied from the current run's
 // observation rows, never from an earlier run. `after` is a key cursor that wraps; `complete` means the circle of keys was covered.
-export const REPLAY_PAGE=40;
+// AIR-535: a page costs six fixed round trips (select, slots, members, admissions, two counts) plus one per 38 rows written. 40 observations measured ~0.13 round trips per
+// restored row offline; the page is capped by BIND_CAP, because the slots and count queries bind every key plus the run.
+export const REPLAY_PAGE=BIND_CAP-4;
 export const REPLAY_SELECT_SQL="SELECT o.observation_key, o.confirmed_tmdb_id, o.payload_json AS observation_json, d.payload_json AS decision_json, d.decision_hash, d.tmdb_id, d.film_id FROM discovery_observation o JOIN discovery_decision d ON d.observation_key=o.observation_key WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND o.programme_run_id=? AND d.status='verified' AND d.media_kind='movie' AND d.film_id IS NOT NULL AND d.tmdb_id IS NOT NULL AND o.observation_key>? AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND NOT EXISTS (SELECT 1 FROM published_epg_show p INDEXED BY published_epg_show_by_generation WHERE p.programme_run_id=? AND p.channel_id=s.channel_id AND p.start_ms=s.start_ms)) ORDER BY o.observation_key LIMIT ?";
 const marks=count=>Array.from({length:count},()=>'?').join(',');
 export const replaySlotsSql=count=>"SELECT s.observation_key, s.channel_id, s.start_ms, s.end_ms FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key IN ("+marks(count)+") AND NOT EXISTS (SELECT 1 FROM published_epg_show p INDEXED BY published_epg_show_by_generation WHERE p.programme_run_id=? AND p.channel_id=s.channel_id AND p.start_ms=s.start_ms) ORDER BY s.observation_key, s.ordinal";
+// AIR-535. The moment the current published programme generation was committed, for the replay's time-since-publication metric. One row read, only when the
+// stored status does not carry it yet (once per generation). Returns an ISO string or null; never throws into the chunk.
+export async function publishedAtOf(env,programmeRunId){
+ if(!programmeRunId)return null;
+ try{
+  const row=await one(database(env),"SELECT published_at FROM published_epg_generation WHERE programme_run_id=? AND phase='published'",[programmeRunId]);
+  const at=row?.published_at?Date.parse(row.published_at):NaN;
+  return Number.isFinite(at)?new Date(at).toISOString():null;
+ }catch{return null;}
+}
 export async function replayUnassignedSlots(env,spec={},context={}){
  const lease=context.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
