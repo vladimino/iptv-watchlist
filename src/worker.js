@@ -1440,7 +1440,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  // ARCHIVE_SEGMENT_FENCE_MS, whichever comes first (the Discovery lease lives 90 s), instead of every write: on 11 Nov 2026 each full fence cost about
  // 4 s and the 64 of them were 273 s of a 348 s step. The manifest write and the pointer swap keep the full fence.
  let lastFenceAt=0,sinceFence=Infinity;
- const segmentFence=async(writes=1)=>{if(sinceFence+writes<=ARCHIVE_SEGMENT_FENCE_EVERY&&Date.now()-lastFenceAt<ARCHIVE_SEGMENT_FENCE_MS){sinceFence+=writes;tally.skipped+=writes;return;}await fence();sinceFence=writes;};
+ const segmentFence=async(writes=1)=>{if(sinceFence+writes<=ARCHIVE_SEGMENT_FENCE_EVERY&&Date.now()-lastFenceAt<ARCHIVE_SEGMENT_FENCE_MS){sinceFence+=writes;tally.skipped+=writes;return;}await fence();tally.skipped+=writes-1;sinceFence=writes;};
  const prevKeys=view.prevKeys;
  const start=await readLedgerManifest(env,startId);
  if(startId&&!start)throw new Error('Discovery archive manifest missing');
@@ -1495,14 +1495,16 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
    const readAt=Date.now(),segmentItems=await readLedgerSegment(env,start,segment);tally.readMs+=Date.now()-readAt;
    for(const record of records){const payload=JSON.parse(record.json);if(archivedPayloadNewer(payload,segmentItems[payload.key]?.payload))segmentItems[payload.key]={payload,envelope:{archivedAt:at,archivedFromProgrammeRunId:publishedRunId,archiveWriteId:writeId}};}
    const object=ledgerArchiveSegmentKey(segment,writeId),written=await writeLedgerSegment(env,object,{schemaVersion:1,segment,writeId,items:segmentItems},noFence,tally);
-   tally.segments++;tally.bytes+=written.bytes;
+   tally.segments++;if(tally.segments%16===0)epgBoundary(runId,'seal_stage_archive_segments','exit',{segments:tally.segments,count:bySegment.size,elapsedMs:Date.now()-archiveStarted});tally.bytes+=written.bytes;
    segments[segment]={segment,object,sha256:written.sha256,items:Object.keys(segmentItems).length,bytes:written.bytes};
   };
-  for(let from=0;from<ordered.length;from+=ARCHIVE_SEGMENT_CONCURRENCY){
-   const windowEntries=ordered.slice(from,from+ARCHIVE_SEGMENT_CONCURRENCY),before=tally.segments;
+  // A window never crosses a fence boundary (3, 3, 2 writes per fence of 8), so the cadence of AIR-444 is exactly the sequential one.
+  for(let from=0;from<ordered.length;){
+   const due=sinceFence>=ARCHIVE_SEGMENT_FENCE_EVERY||Date.now()-lastFenceAt>=ARCHIVE_SEGMENT_FENCE_MS;
+   const size=Math.min(ARCHIVE_SEGMENT_CONCURRENCY,ordered.length-from,due?ARCHIVE_SEGMENT_CONCURRENCY:ARCHIVE_SEGMENT_FENCE_EVERY-sinceFence);
+   const windowEntries=ordered.slice(from,from+size);from+=size;
    await segmentFence(windowEntries.length);
    await Promise.all(windowEntries.map(archiveSegment));
-   if(Math.floor(tally.segments/16)>Math.floor(before/16))epgBoundary(runId,'seal_stage_archive_segments','exit',{segments:tally.segments,count:bySegment.size,elapsedMs:Date.now()-archiveStarted});
   }
   manifestId=crypto.randomUUID();
   manifest={schemaVersion:1,manifestId,parentManifestId:startId,segmentCount:count,hash:'fnv1a32-utf8',segments,totals:{items:segments.reduce((n,entry)=>n+entry.items,0),bytes:segments.reduce((n,entry)=>n+entry.bytes,0)},upsertedKeys:departures.map(record=>record.key).sort(),writer:{runId,kind,basedOnProgrammeRunId:publishedRunId,basedOnPointerEtag:pointerEtag,leaseId:lease.id,writtenAt:at}};

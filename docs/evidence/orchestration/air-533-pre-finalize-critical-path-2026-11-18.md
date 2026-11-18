@@ -9,6 +9,7 @@ Status: offline code change plus telemetry. **No production measurement of the c
 - Segment read, merge, serialization and create-only put of up to `ARCHIVE_SEGMENT_CONCURRENCY` = 3 segments now overlap. Memory bound: three segment texts and parsed objects (about 1.3 MB serialized each) in flight at once.
 - Unchanged: every segment is a create-only object under the run's write id, the manifest names the segments in order, the archive pointer moves only after a full fence and a compare-and-swap, history, first absence, re-entry and idempotent replay are untouched, and no storage format changed.
 - Fence cadence: one `segmentFence(windowSize)` before each window counts the window's writes, so a full fence still runs after at most 8 writes or 20 s (Discovery lease 90 s). The fence now also precedes the window's reads, which is stricter than before.
+- Telemetry meaning: `readMs` and `putMs` of `seal_stage_archive` are now the summed time of the overlapping operations (identical to wall time only when nothing overlaps), so they can exceed `elapsedMs`; compare wall time through `elapsedMs`.
 - Expected effect (a model, not a measurement): put and read wall time of the archive falls towards one third (86.3 + 18.9 s towards about 35 s), bounded by R2 per-request latency; fences (39.4 s) are not reduced.
 
 ## Telemetry added (no behaviour change)

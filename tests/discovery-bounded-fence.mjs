@@ -69,7 +69,9 @@ function record(state){
  try{await stage(state,{latest:latestFew()});}finally{context.Date=RealDate;rec.restore();}
  let sinceFence=0,worst=0;
  for(const item of rec.events){if(item==='fence')sinceFence=0;else if(item==='segment'){sinceFence++;worst=Math.max(worst,sinceFence);}}
- assert.ok(worst<=4,'at 6 s a write no more than 4 writes (24 s) pass between two fences: '+worst);
+ // AIR-533: writes go out in windows of three that share one fence check at their start; the clock of this test adds 6 s to every put serially (18 s a window),
+ // so at most two windows (6 writes, 36 s simulated, 90 s lease) pass between two fences. Parallel puts of a real window cost about one put latency.
+ assert.ok(worst<=6,'at 6 s a write no more than 6 writes (two windows) pass between two fences: '+worst);
  assert.ok(rec.events.filter(item=>item==='fence').length>Math.ceil(rec.events.filter(item=>item==='segment').length/8)+2,'slow rounds fence more often than the call bound alone');
 }
 
@@ -85,8 +87,9 @@ function record(state){
  try{await stage(state,{latest:latestFew()});}finally{context.Date=RealDate;context.renewDiscoveryLease=realRenew;state.bkt.onPut=priorOnPut;}
  const [archive]=phase('seal_stage_archive');
  assert.ok(Math.abs(archive.fenceMs-archive.fences*3000)<=400,'fenceMs is the fences alone: '+archive.fenceMs+' for '+archive.fences);
- assert.ok(Math.abs(archive.putMs-archive.segments*500)<=400,'putMs is the segment puts alone, without the 3 s fences: '+archive.putMs+' for '+archive.segments);
- assert.ok(archive.fenceMs+archive.readMs+archive.putMs<=archive.elapsedMs+5,'the parts do not overlap');
+ // AIR-533: puts of a window overlap, so `putMs` is the summed time of the puts (one window's puts share the global clock of this test): at least one 0.5 s per put, at most three.
+ assert.ok(archive.putMs>=archive.segments*500-400&&archive.putMs<=archive.segments*500*3+400,'putMs is the segment puts alone, without the 3 s fences: '+archive.putMs+' for '+archive.segments);
+ assert.ok(archive.fenceMs+(archive.readMs+archive.putMs)/3<=archive.elapsedMs+5,'the fences and the overlapped reads and puts (summed time over at most three in flight) fit the elapsed time');
 }
 
 // 2b-2. With an archive already in place the loop reads each existing segment first, and `readMs` counts exactly those reads (700 ms each here).
@@ -101,7 +104,7 @@ function record(state){
  try{await stage(state,{latest:scan(3).slice(0,5),day:3});}finally{context.Date=RealDate;state.bkt.get=realGet;}
  const [archive]=phase('seal_stage_archive');
  assert.ok(reads>=1&&archive,'segments were read: '+reads);
- assert.ok(Math.abs(archive.readMs-reads*700)<=400,'readMs is the segment reads alone: '+archive.readMs+' for '+reads);
+ assert.ok(archive.readMs>=reads*700-400&&archive.readMs<=reads*700*3+400,'readMs is the segment reads alone (summed time of overlapping reads): '+archive.readMs+' for '+reads);
  assert.ok(archive.fenceMs<archive.readMs,'and not part of the fences');
 }
 
