@@ -20,9 +20,13 @@ Status: offline fix and regression test. Production acceptance is pending a natu
 
 Per batch preflight the signature is one D1 statement that returns the (film, channel, start) of the run's assigned rows (about 60 bytes of text each) and hashes them in Worker memory. At the 6,000 to 7,000 films in the window seen on 18 November that is on the order of 0.4 MB and the same number of rows read; the local stand-in hashes 3,600 rows in about 7 ms, which is a lower bound, not a D1 measurement. A start makes one preflight, plus one more after a rebuild, plus the lease re-check preflight, so up to three reads per start and no read on submit or complete. A hand-measured D1 figure is still owed from an authorized read-only probe. **Revisit** (replace the row hash with a revision counter on the generation, which needs an owner decision and an ADR) when assigned rows per generation pass about 20,000, when a preflight is measured above about 250 ms of D1 wall time, or when rows read per day from this statement exceed a few percent of the D1 daily budget.
 
+## Clock-only transitions
+
+The hot window is `[now-72h, now+24h)` over show starts. The queue now stores `priorityNextChangeAt` (the earliest start-24h or start+72h after the build) and a natural start re-evaluates a queue whose boundary has passed, at most every 15 minutes (`window_transition`). `tests/prediction-hot-reconcile-same-generation.mjs` controls the clock on one fixed generation and signature: cold to hot at T0+1h, hot to cold on the same boundary, no rebuild before the boundary or inside the interval, hot to cold again when the other show passes 72 h. The 15-minute interval and the use of the show start (not `rank`, which also moves with `availableNow`) are executor choices, recorded here for review.
+
 ## Parity and acceptance still open
 
-- Same-semantics parity of hot outstanding between the UI counters and the queue (window, Film IDs, freshness, retry policy) is not implemented as a separate metric here; the queue's `priorityCause` and `unknown` handling only cover the stale basis.
+- Same-semantics parity of hot outstanding between the UI counters and the queue (window, Film IDs, freshness, retry-exhausted, deferred, eligibility) is **not implemented as an independent recomputation**: it would be a second implementation of the queue rules. What is implemented is `hotBasis` in the dry-run answer (`degraded` with the cause), present only when the queue's own count does not rest on the current programme, shows signature or window boundary (degraded, with the cause). An independent parity check needs an owner scope decision.
 - Production acceptance (after the natural EPG publication, after same-run Discovery assignments and at the next batch) is pending.
 
 ## Limits
