@@ -1,9 +1,9 @@
 # ADR 0169: The owner policy-exclusion writer reads concert and documentary words on a card with no feature genre
 
-**Status:** Proposed (2026-11-18; the owner directed this approach on [AIR-501](https://trello.com/c/ShipZn0N) in the project session, and acceptance is requested on the pull request. This records a classifier for one owner-only writer, not permission to exclude any Film or to run Discovery, EPG, TMDB, predictions, Tasks, or a storage write)  
+**Status:** Accepted (2026-11-18; explicit Product Owner acceptance of ADR 0169 following the [independent technical PASS](https://github.com/vladimino/iptv-watchlist/pull/750#pullrequestreview-5956582740), [recorded in PR #750](https://github.com/vladimino/iptv-watchlist/pull/750#issuecomment-6979013313). The approval covers the writer-only classifier and routine merge/deploy, not Film exclusion or other production operations)  
 **Original decision date:** 2026-11-18  
 **Recorded at:** 2026-11-18  
-**Approval source:** not yet documented as a GitHub approval; the owner's chat instruction to extend the classifier for the writer  
+**Approval source:** [Product Owner's explicit approval in the AIR-501 project chat, recorded on PR #750](https://github.com/vladimino/iptv-watchlist/pull/750#issuecomment-6979013313) after the [technical PASS at HEAD `6884382`](https://github.com/vladimino/iptv-watchlist/pull/750#pullrequestreview-5956582740)  
 **Related work:** [AIR-501](https://trello.com/c/ShipZn0N), [ADR 0153](0153-catalog-policy-exclusion.md), [ADR 0150](0150-documentary-and-concert-film-exclusion.md), [ADR 0168](0168-empty-genre-card-is-unclassified.md), [AIR-498](https://trello.com/c/3dPOigK9)  
 **Supersedes:** None. It qualifies the eligibility sentence of [ADR 0153](0153-catalog-policy-exclusion.md) (rule 1): the writer no longer uses `admissionPolicy` alone.  
 **Superseded by:** None
