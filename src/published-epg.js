@@ -274,6 +274,18 @@ export async function readDocumentAt(env,programmeRunId,kind,generation){
  if(!closed||closed.generation!==generation||closed.programmeRunId!==programmeRunId)throw failed('published_epg_fence');
  return document;
 }
+// AIR-529. The signature of the Discovery-assigned shows of one generation, for the Prediction queue. Discovery adds, and revalidation deletes and re-inserts, assigned rows
+// inside a generation whose `programmeRunId` does not move, so the id alone cannot tell the queue that its hot/cold basis is old. An aggregate over the rows is not reliable
+// (SQLite reuses a freed rowid and a numeric sum can collide on a reassignment), so the exact (film, channel, start) tuples of the run's `basis='discovery'` rows are read in the order
+// of the generation index and hashed with SHA-256: any change of the set changes the signature. Cost: the rows of one generation per call (about 4 columns of text per assigned
+// show), made once per batch preflight, never per submit or complete. No new index or schema is used (a revision counter would need an owner decision and an ADR).
+export async function assignedShowsSignature(env,programmeRunId){
+ if(!programmeRunId)return null;
+ const rows=await many(database(env),"SELECT film_id, channel_id, start_ms FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' ORDER BY start_ms, channel_id, film_id",[programmeRunId]);
+ const text=rows.map(row=>String(row.film_id)+'\u0001'+String(row.channel_id)+'\u0001'+String(row.start_ms)).join('\u0002');
+ const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));
+ return String(rows.length)+':'+Array.from(digest.slice(0,12),byte=>byte.toString(16).padStart(2,'0')).join('');
+}
 export async function readShows(env,programmeRunId){
  const rows=await many(database(env),'SELECT film_id, channel_id, channel, start_ms, end_ms, epg_title, basis, match_reason FROM published_epg_show WHERE programme_run_id=? ORDER BY film_id, start_ms, channel_id',[programmeRunId]);
  return rows.map(row=>({filmId:row.film_id,channelId:row.channel_id,channel:row.channel??null,startMs:Number(row.start_ms),endMs:row.end_ms==null?null:Number(row.end_ms),epgTitle:row.epg_title??null,basis:row.basis??null,matchReason:row.match_reason??null}));

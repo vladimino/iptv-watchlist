@@ -2,6 +2,7 @@
 // modules, provisioning script and diagnostic migrations are gone from the tree and from the BUILT bundle. ADR 0121/0124/0139 and the dated evidence stay as history.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import {execFileSync} from 'node:child_process';
 
 const raw=fs.readFileSync('wrangler.jsonc','utf8');
 const config=JSON.parse(raw.replace(/^\s*\/\/.*$/gm,''));
@@ -26,6 +27,9 @@ for(const dir of ['src','scripts','public'])for(const file of fs.readdirSync(dir
  const path=(file.parentPath||file.path)+'/'+file.name;assert.doesNotMatch(fs.readFileSync(path,'utf8'),CANARY,path+' references the retired EPG diagnostic canary');
 }
 // The deployed artifact, not only the sources: `npm run build` must have produced a bundle without the canary.
+// The bundle is built here when no earlier file of the shard produced it: CI builds after the tests, and which shard file builds first depends on how the files are dealt, so this guard must not rest on that order.
+// `build.mjs` replaces its outputs atomically, so a concurrent build never exposes a missing bundle (50cecee).
+if(!['dist/server/index.js','dist/server/workflow-entry.js'].every(file=>fs.existsSync(file)))execFileSync(process.execPath,['build.mjs'],{stdio:'inherit'});
 for(const artifact of ['dist/server/index.js','dist/server/workflow-entry.js']){
  assert.equal(fs.existsSync(artifact),true,artifact+' is built before the tests');
  assert.doesNotMatch(fs.readFileSync(artifact,'utf8'),CANARY,artifact+' carries no retired canary code');
