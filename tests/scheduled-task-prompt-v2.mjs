@@ -114,11 +114,14 @@ assert.ok(!/только активн\w* Predictions Task/i.test(prompt)&&!/only
 const mcp=fs.readFileSync('src/mcp.js','utf8');
 const tools=new Set([...mcp.matchAll(/\{name:'([a-z_]+)',title:/g)].map(x=>x[1]));
 const calls=text=>new Set([...text.matchAll(/\b((?:prediction|enrichment|epg|ratings)_[a-z_]+)\(/g)].map(x=>x[1]));
+// AIR-452 (ADR 0167): the v5 tools are retired and no longer registered; the prompts keep forbidding them by name, and they must stay unregistered.
+const RETIRED=new Set(['prediction_start','prediction_next','prediction_submit','prediction_validate']);
+for(const t of RETIRED)assert.ok(!tools.has(t),t+' is retired and not registered');
 const forbiddenOf=text=>text.split('\n').find(l=>l.startsWith('ЗАПРЕЩЕНО:'));
 const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_manifest','prediction_batch_validate','prediction_batch_hold','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_validate','prediction_batch_submit']);
 for(const [text,allowed,forbidden] of [[prompt,SCHEDULED_ALLOWED,['prediction_start','prediction_next','prediction_submit','prediction_validate','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']],[dry,DRY_ALLOWED,['prediction_batch_start','prediction_start','prediction_next','prediction_submit','prediction_validate','prediction_heartbeat','prediction_complete','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']]]){
  const line=forbiddenOf(text);assert.ok(line,'forbidden list present');
- for(const t of forbidden){assert.ok(tools.has(t),t+' is a real tool');assert.ok(line.includes(t),t+' is forbidden');}
+ for(const t of forbidden){assert.ok(tools.has(t)||RETIRED.has(t),t+' is a real or a retired tool');assert.ok(line.includes(t),t+' is forbidden');}
  for(const t of calls(text)){if(forbidden.includes(t)&&line.includes(t)&&!text.replace(line,'').includes(t+'('))continue;assert.ok(tools.has(t),t+' is a real MCP tool');assert.ok(allowed.has(t),t+' is outside the vocabulary');}
  for(const t of allowed)assert.ok(tools.has(t));
 }

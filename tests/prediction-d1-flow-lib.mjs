@@ -16,8 +16,9 @@ export function migrated(){
  if(result.status!==0)throw new Error(result.stderr||'migration failed');
  return file;
 }
-export async function flowWorld({scope=true,films=40}={}){
- const hooks={write:null};
+// `extra(n)` adds fields to film n (for example genres or a synopsis that fingerprint evidence cites).
+export async function flowWorld({scope=true,films=40,extra=null}={}){
+ const hooks={write:null,query:null};
  const records=new Map(),etags=new Map();let revision=0;
  const bucket={
   async get(key){return records.has(key)?{etag:etags.get(key),size:JSON.stringify(records.get(key)).length,json:async()=>structuredClone(records.get(key)),text:async()=>JSON.stringify(records.get(key))}:null;},
@@ -30,14 +31,15 @@ export async function flowWorld({scope=true,films=40}={}){
  sql(file,"UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
  // A D1 round trip is a statement run on its own (`queries`) or a batch (`batches`); a batch of reads is not seen by `onQuery`.
  const stats={queries:0,batches:0,writeBatches:0};
- const db=d1Standin(file,{onQuery:()=>{stats.queries++;},onBatch:statements=>{stats.batches++;if(!statements.every(item=>/^\s*SELECT/i.test(item.text))){stats.writeBatches++;if(hooks.write)hooks.write(statements,stats.writeBatches);}}});
+ // hooks.query(text) sees every statement, run on its own or inside a batch (a test can count or react to the statements it cares about).
+ const db=d1Standin(file,{onQuery:text=>{stats.queries++;if(hooks.query)hooks.query(text);},onBatch:statements=>{stats.batches++;if(hooks.query)for(const item of statements)hooks.query(item.text);if(!statements.every(item=>/^\s*SELECT/i.test(item.text))){stats.writeBatches++;if(hooks.write)hooks.write(statements,stats.writeBatches);}}});
  const env={BUCKET:bucket,DB:db,PREDICTION_DB_REQUIRED:'on'};
  const module=scope?PredictionD1:{...PredictionD1,scopeRequest:undefined};
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console:capture,setTimeout,DiscoveryAuthority:Authority,PredictionD1:module,encodeURIComponent,decodeURIComponent});
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
  for(const f of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(f,'utf8').replace('export default','globalThis.worker='),ctx);
  const api=async(route,body)=>{const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),env);return {status:r.status,data:await r.json()};};
- const now=Date.now(),film=n=>({id:'tmdb_'+n,title:'tmdb_'+n,original:'tmdb_'+n,year:2020,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,genres:[],actors:[],directors:[],shows:[{start:now}]});
+ const now=Date.now(),film=n=>({id:'tmdb_'+n,title:'tmdb_'+n,original:'tmdb_'+n,year:2020,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,genres:[],actors:[],directors:[],shows:[{start:now}],...(extra?extra(n):{})});
  const list=[];for(let n=1;n<=films;n++)list.push(film(n));
  sql(file,"INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES "+list.map(f=>"('"+f.id+"','"+f.tmdbId+"','movie','"+f.canonicalIdentity+"','"+f.id+"','p1',1,'current','"+JSON.stringify(f).replace(/'/g,"''")+"')").join(','));
  records.set('programme.json',{runId:'p1',films:[]});records.set('sync.json',{runId:'p1',stage:'complete'});
@@ -48,12 +50,16 @@ export async function flowWorld({scope=true,films=40}={}){
  const execution=Object.fromEntries(Object.entries(EXECUTION).map(([k,v])=>[k,v.includes('unknown')?'unknown':v[0]]));
  const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['heist','investigation'],execution,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']};
  const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
+ const manifests=new Map();
  return {records,file,env,db,stats,hooks,api,logs,ctx,fingerprint,prediction,
-  async reconcileAndStart(){const built=await api('queue/reconcile',{});const start=await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});return {built,start};},
-  // One film per step, as the MCP tools do. Returns the answers and the D1 round trips each step made.
-  async pair(runId){
-   const trips=()=>stats.queries+stats.batches,q0=trips(),next=await api('next',{runId,batchSize:1}),afterNext=trips();
-   const submit=await api('submit',{runId,items:[{filmId:next.data.items[0].filmId,fingerprint,prediction}]});
-   return {next,submit,nextQueries:afterNext-q0,submitQueries:trips()-afterNext};
+  // Batch runner v2 (the only runner since ADR 0167): rebuild the queue, then one batch start whose answer is the manifest (runId, lease.epoch, films).
+  async reconcileAndStart(body={}){const built=await api('queue/reconcile',{});const start=await api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'manual',capacity:{remainingPercent:100},...body});if(start.status===200&&start.data.runId)manifests.set(start.data.runId,{manifest:start.data,sent:new Set()});return {built,start};},
+  // One film per batch submit: the next manifest film of the run not yet sent. Returns the answer and the D1 round trips of the submit.
+  async pair(runId,item={}){
+   const held=manifests.get(runId);if(!held)throw new Error('pair: no manifest for run '+runId);
+   const film=held.manifest.films.find(f=>!held.sent.has(f.filmId));if(!film)throw new Error('pair: manifest spent');held.sent.add(film.filmId);
+   const trips=()=>stats.queries+stats.batches,q0=trips();
+   const submit=await api('batch/submit',{runId,epoch:held.manifest.lease.epoch,items:[{filmId:film.filmId,...(film.plan==='prediction_only'?{}:{fingerprint}),prediction,...item}]});
+   return {filmId:film.filmId,plan:film.plan,submit,submitQueries:trips()-q0};
   }};
 }

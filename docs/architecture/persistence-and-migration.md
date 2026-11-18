@@ -20,7 +20,7 @@ flowchart TD
     archive --> importer --> local
     local -.-> gate
     r2 -->|one-off export| snapshot --> reload -->|one-off load, no live flow| d1
-    worker -.->|metadata cache only when the schema v6 marker is d1| d1
+    worker -.->|current metadata cache: schema v6 marker d1, anything else refused| d1
     worker -.->|current prediction authority: schema v7 marker d1| d1
     worker -.->|current published EPG and watchlist: schema v8, marker d1/open| d1
     worker -.->|current owner reviews: schema v9 marker d1| d1

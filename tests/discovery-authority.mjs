@@ -35,7 +35,7 @@ assert.doesNotMatch(fs.readFileSync('src/discovery-authority.js','utf8'),/INSERT
 assert.doesNotMatch(fs.readFileSync('src/discovery.js','utf8'),/env\.DB\b/);
 assert.match(fs.readFileSync('build.mjs','utf8'),/scopedDiscoveryAuthority\(\)/);
 assert.match(fs.readFileSync('scripts/bundle-scope.mjs','utf8'),/scopedImports\('src\/discovery-authority\.js','DiscoveryAuthority'/);
-assert.match(fs.readFileSync('src/worker.js','utf8'),/DiscoveryAuthority\.routeRead\(env,key\)/);
+assert.match(fs.readFileSync('src/worker.js','utf8'),/DiscoveryAuthority\.routeRead\(env,key(,options)?\)/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/DiscoveryAuthority\.routeWrite\(env,key,value\)/);
 assert.doesNotMatch(fs.readFileSync('src/discovery-authority.js','utf8'),/ensureDiscoveryWorkflow|reconcileDiscoveryWorkflow|\.create\(/);
 assert.doesNotMatch(fs.readFileSync('src/discovery-workflow.js','utf8'),/DISCOVERY_EXECUTOR|discoveryExecutorMode/);

@@ -1,6 +1,6 @@
 # Batch runner v2 dry-run A/B procedure (AIR-450 input, proposed)
 
-**Status: proposed procedure, nothing authorized.** This page is the repeatable procedure for the dry-run A/B experiment of [AIR-450](https://trello.com/c/VPd21Y9d)'s scope. Delivered by AIR-449 as documentation. Running it needs the owner's explicit, operation-specific approval. Creating, editing, enabling or running a Scheduled Task, any production `prediction_batch_start` or `prediction_batch_submit` (dry run included), flags and authority changes stay unauthorized until then ([authorization](../process/authorization-and-escalation.md#chatgpt-scheduled-task-authorization)). The dry run writes nothing to prediction state: no lease, run, queue, fingerprint, prediction, version object or view-index entry ([contract](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract)).
+**Status: proposed procedure, nothing authorized.** This page is the repeatable procedure for the dry-run A/B experiment of [AIR-450](https://trello.com/c/VPd21Y9d)'s scope. Delivered by AIR-449 as documentation. Running it needs the owner's explicit, operation-specific approval. Creating, editing, enabling or running a Scheduled Task, any production `prediction_batch_start` or `prediction_batch_submit` (dry run included), flags and authority changes stay unauthorized until then ([authorization](../process/authorization-and-escalation.md#chatgpt-scheduled-task-authorization)). The dry run writes nothing to prediction state: no lease, run, queue, fingerprint, prediction, version object or view-index entry ([contract](../reference/api/prediction-runner.md#batch-runner-v2)).
 
 ## Frozen manifest (one start, ten passes)
 
@@ -81,7 +81,7 @@ It refuses (fails closed, exit 1) when the passes are not one experiment: anothe
 
 ## Isolation proof (offline)
 
-`tests/prediction-dry-run-isolation.mjs` runs every dry-run RPC on the real Worker code while any R2 put or delete and any D1 write statement or batch is a fault: default and pinned start (a current film, an unknown id, a 100-film pin, a bad pin), submit of valid, invalid, failure-only and unknown-film items, repeated trials, a wrong or malformed `manifestHash`, a changed contract, a missing `runId`, `epoch` 0, a group of 11, a profile that moved after the freeze, all beside a live run that holds the lease. It counts write attempts (none are allowed) and compares the whole D1 dump and every R2 object before and after. It also asserts the production surface is unchanged: the v5 tools take no dry-run argument, the v5 `next` and `submit` refuse a v2 run, and the runner contract is pipeline 5 with model batching off.
+`tests/prediction-dry-run-isolation.mjs` runs every dry-run RPC on the real Worker code while any R2 put or delete and any D1 write statement or batch is a fault: default and pinned start (a current film, an unknown id, a 100-film pin, a bad pin), submit of valid, invalid, failure-only and unknown-film items, repeated trials, a wrong or malformed `manifestHash`, a changed contract, a missing `runId`, `epoch` 0, a group of 11, a profile that moved after the freeze, all beside a live run that holds the lease. It counts write attempts (none are allowed) and compares the whole D1 dump and every R2 object before and after.
 
 ## Not part of this procedure
 

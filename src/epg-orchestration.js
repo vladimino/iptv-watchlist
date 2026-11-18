@@ -325,6 +325,34 @@ function frozenDay(run){
   if(!key)return false;
   return !(await loadJSON(fe,key));
  }
+ // AIR-525: a Ratings hand-over still owed by a complete run (removal references or lookups not yet handed to the ratings queue, or a
+ // ratings attempt still open). The `/api/sync/epg` continuation of the same run hands them over (idempotently, under the current
+ // Ratings gate); drive asks for one such step and then judges completion by the journal alone, so a gate that keeps them stays bounded.
+ function handoverOwed(run){
+  if(run?.stage!=='complete')return false;
+  const refs=Array.isArray(run.removalRefs)?run.removalRefs:run.removalRefs?[run.removalRefs]:[];
+  if(refs.some(item=>Array.isArray(item?.films)&&item.films.length&&item.ref))return true;
+  if(Array.isArray(run.removalLookups)&&run.removalLookups.length)return true;
+  return Array.isArray(run.ratingPending)&&run.ratingPending.length>0&&(!run.ratingAttempt||run.ratingAttempt.state==='started');
+ }
+ // AIR-525: a complete sync run is a success only on a proof, never on its stage alone: a completion receipt and the D1 published
+ // pointer naming this very runId. The receipt is the AIR-518 one: `completedAt` when the record has the field (it must parse), else,
+ // for a legacy record without the field, `updatedAt` only when no `error` is on the run. `run.error` on a complete run is the history of
+ // an earlier attempt of the same runId (a seal unit that threw and a retry that completed) or of a tail that threw after the complete
+ // record was saved; it never decides the outcome by itself. Results: `proven`; `unproven` (no valid receipt, another or no published
+ // runId, authority not ready); `unreadable` (the authority read threw). Neither of the last two is a reason to start a second run.
+ async function completion(env,run){
+  if(run?.stage!=='complete')return {state:'none'};
+  if(typeof run.runId!=='string'||!run.runId)return {state:'unproven'};
+  const receipt=Object.prototype.hasOwnProperty.call(run,'completedAt')?run.completedAt:(run.error?null:run.updatedAt);
+  if(typeof receipt!=='string'||!Number.isFinite(Date.parse(receipt)))return {state:'unproven'};
+  if(typeof PublishedEpg==='undefined')return {state:'unreadable'};
+  let authority;
+  try{authority=await PublishedEpg.readAuthority(env);}catch{return {state:'unreadable'};}
+  if(authority?.ready!==true||authority.programmeRunId!==run.runId)return {state:'unproven'};
+  return {state:'proven',recovered:!!run.error};
+ }
+ const proofFailure=done=>done.state==='unreadable'?{code:'d1_unavailable'}:{code:'evidence_contradictory'};
  async function publishedEpgRun(fe,run){
   if(run?.stage!=='epg')return false;
   try{const published=await loadJSON(fe,'programme.json');return published?.runId===run.runId;}catch{return false;}
@@ -336,11 +364,17 @@ function frozenDay(run){
   let run=await loadJSON(fe,'sync.json');
   const started=frozenDay(run);
   const owed=await journalOwed(fe,run);
-  // Read-after-unknown: a run of this Madrid date that already completed is the success, whoever drove it — unless an event or Ratings hand-over is still owed.
-  if(run?.stage==='complete'&&started===runKey&&!run.error&&!owed)return {finished:true,runId:run.runId,run,published:run.runId};
-  if(run&&run.stage==='seal'&&started===null)return {failure:{code:'evidence_contradictory'}};
+  // AIR-464 / AIR-525: a sealed or complete run whose frozen day is malformed or contradicting has no day: fail closed, never start.
+  if(run&&(run.stage==='seal'||run.stage==='complete')&&started===null)return {runId:run.runId??null,run,failure:{code:'evidence_contradictory'}};
+  // AIR-525: a complete run of this Madrid date is judged by its completion proof (receipt and D1 pointer), never by its stage alone and
+  // never by a prior attempt's `run.error`. A run of another day keeps the AIR-464 rule: it is never this control's success.
+  const done=run?.stage==='complete'&&started===runKey?await completion(fe,run):{state:'none'};
+  if(done.state==='unreadable'||done.state==='unproven')return {runId:run.runId,run,failure:proofFailure(done)};
+  const handover=done.state==='proven'&&handoverOwed(run);
+  // Read-after-unknown: a proven run of this Madrid date is the success, whoever drove it — unless an event or Ratings hand-over is still owed.
+  if(done.state==='proven'&&!owed&&!handover)return {finished:true,runId:run.runId,run,published:run.runId,note:done.recovered?'recovered_complete':null};
   const fresh=run&&['metadata','epg'].includes(run.stage)&&Number.isFinite(Date.parse(run.updatedAt||''))&&now-Date.parse(run.updatedAt)<EXTERNAL_FRESH_MS;
-  const usable=run&&(run.stage==='seal'||fresh||await publishedEpgRun(fe,run)||(run.stage==='complete'&&!run.error&&owed));
+  const usable=run&&(run.stage==='seal'||fresh||await publishedEpgRun(fe,run)||(done.state==='proven'&&(owed||handover))||(run.stage==='complete'&&started!==runKey&&!run.error&&owed));
   if(!usable){
    const reply=await body(await postSync(fe,null,'/api/sync/start',{},'internal'));
    if(!reply.runId)return {failure:{code:'evidence_contradictory'}};
@@ -369,7 +403,10 @@ function frozenDay(run){
    // certifies this control; the next action finds a complete run of another day, which is not usable, and starts this day's run.
    if(started!==runKey)return {...base,note:'foreign_run_sealed'};
    if(await journalOwed(fe,after||run))return {...base,wake:now+policy().COOLDOWNS_MS[0],note:'journal_pending'};
-   return {...base,finished:true,published:after?.runId||run.runId};
+   // AIR-525: the step that reached `complete` (or drained a complete run) certifies the control only on the completion proof.
+   const proof=await completion(fe,after);
+   if(proof.state!=='proven')return {...base,failure:proofFailure(proof)};
+   return {...base,finished:true,published:after?.runId||run.runId,note:proof.recovered?'recovered_complete':null};
   }
   return base;
  }
@@ -694,7 +731,10 @@ function frozenDay(run){
   let run=null;
   try{run=await loadJSON(env,'sync.json');}catch{run=null;}
   const started=frozenDay(run);
-  const doneToday=(c.runKey===dayKey&&!!c.doneAt)||(started===dayKey&&run?.stage==='complete'&&!run.error);
+  // AIR-525: without a control `doneAt`, a complete run of today is done on its completion proof; a prior attempt's `run.error` alone
+  // does not make it undone, and an unproven or unreadable one is not done.
+  const doneToday=(c.runKey===dayKey&&!!c.doneAt)||(started===dayKey&&(await completion(env,run)).state==='proven');
+  const priorAttemptError=run?.stage==='complete'&&!!run.error;
   let liveness=null;
   if(m.mode==='cloudflare'&&c.instanceId&&typeof env?.EPG_WORKFLOW?.get==='function'){
    const status=await instanceStatus(env.EPG_WORKFLOW,c.instanceId);
@@ -711,7 +751,7 @@ function frozenDay(run){
   const publication=Number.isFinite(dueAt)?{dueAt:iso(dueAt),publishedAt:Number.isFinite(doneAt)?iso(doneAt):null,latencyMs:Number.isFinite(doneAt)?Math.max(0,doneAt-dueAt):null,overdueMs:!doneToday&&now>=dueAt?now-dueAt:null,targetMs:policy().EPG_LATE_MS}:null;
   return {mode:m.mode,available:true,epoch:m.epoch,...(m.mode==='switching'?{target:m.target,drain:m.drain||null}:{}),runKey:c.runKey,published:c.publishedRunId??null,phase:c.phase,
    owner:{kind:'workflow',instanceId:c.instanceId,liveness},lastDurableProgressAt:c.lastDurableProgressAt,dueAt:iso(dueAt),nextWakeAt:c.nextWakeAt||(now>=dueAt?null:iso(dueAt)),
-   syncRun:run?{runId:run.runId,stage:run.stage,remaining:run.remaining??null,sealPhase:run.seal?.phase??null,updatedAt:run.updatedAt??null}:null,seal,publication,
+   syncRun:run?{runId:run.runId,stage:run.stage,remaining:run.remaining??null,sealPhase:run.seal?.phase??null,updatedAt:run.updatedAt??null,priorAttemptError}:null,seal,publication,
    failure:{class:c.failure?.class??null,code:c.failure?.code??null,fingerprint:c.budget?.fingerprint??null,consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,caps:policy().BUDGET_CAPS},
    cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,...(c.handoff?{handoff:{fromSeries:c.handoff.fromSeries??null,toSeries:c.handoff.toSeries??null,at:c.handoff.at??null,successorPending:c.phase==='starting'&&!c.doneAt&&liveness==='absent'}}:{}),health,sideEffects:'none'};
  }

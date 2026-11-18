@@ -22,11 +22,12 @@ const issues=async a=>(await verdict(a)).assessment.issues.map(x=>x.path+' '+x.c
 const same=(a,b)=>assert.equal(JSON.stringify(a),JSON.stringify(b));
 const mutate=fn=>{const a=base();fn(a);return a;};
 
-// 1. A valid assessment passes; an absent one is not checked; prediction_validate has no assessment verdict.
+// 1. A valid assessment passes; an absent one is not checked; the retired prediction_validate is an unknown tool (ADR 0167).
 {
  const ok=await verdict(base());assert.equal(ok.valid,true,JSON.stringify(ok.assessment));same(ok.assessment,{checked:true,issues:[]});
  const none=await call('prediction_batch_validate',{items:[{filmId:'f1',prediction:w.prediction}]});same(none.data.results[0].assessment,{checked:false,issues:[]});assert.equal(none.data.results[0].valid,true);
- const single=await call('prediction_validate',{prediction:w.prediction,assessment:base()});assert.equal(single.isError,true,'prediction_validate refuses an assessment key');
+ w.ctx.__a={name:'prediction_validate',args:{prediction:w.prediction,assessment:base()}};w.ctx.__env=w.env;
+ const single=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);assert.equal(single.error,'Unknown tool','prediction_validate is retired');
 }
 // 2. Every rule and issue code, at its path, without echoing a value.
 {
@@ -161,13 +162,14 @@ let firstDigest;
  same(r.data.results[0].validation,{stage:'assessment_schema',reportedBy:'worker',issues:[{path:'assessment.conflicts.positions',code:'invalid_ref'}]});
  assert.equal(sql(w.file,"SELECT film_id FROM prediction_pointer WHERE film_id='"+f4+"'").length,0);assert.equal(asmKeys().filter(k=>k.includes('/'+f4+'/')).length,0);
 }
-// 9. The published contract and the v5 route: enrichment_schema carries contract.assessment; the v5 submit refuses the key.
+// 9. The published contract: enrichment_schema carries contract.assessment; the retired v5 submit route and tool are gone (ADR 0167).
 {
  const schema=await call('enrichment_schema',{});const a=schema.data?.contract?.assessment||JSON.parse(schema.text).contract.assessment;
  assert.equal(a.version,1);assert.equal(a.required,false);assert.equal(a.maxSerializedBytes,3000);assert.ok(a.consistency.includes('attempted_found'));
  assert.ok((schema.data?.contract||JSON.parse(schema.text).contract).issueCodes.includes('unknown_field'));
- const v5=await w.api('submit',{runId:'none',items:[{filmId:f1,prediction:w.prediction,assessment:asm()}]});assert.equal(v5.status,400);same(v5.data.issues,[{path:'items[0].assessment',code:'unknown_field'}]);
- const mcp=await call('prediction_submit',{runId:m.runId,items:[{filmId:f1,prediction:w.prediction,assessment:asm()}]});assert.equal(mcp.isError,true);
+ const v5=await w.api('submit',{runId:'none',items:[{filmId:f1,prediction:w.prediction,assessment:asm()}]});assert.equal(v5.status,404);
+ w.ctx.__a={name:'prediction_submit',args:{runId:m.runId,items:[{filmId:f1,prediction:w.prediction,assessment:asm()}]}};w.ctx.__env=w.env;
+ const mcp=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);assert.equal(mcp.error,'Unknown tool');
 }
 // 10. The group limit: ten films with a full-size assessment exceed the 56 KiB request bound and are refused whole with nothing checked; the same films in two groups of five pass. Generation size and call size are independent.
 {

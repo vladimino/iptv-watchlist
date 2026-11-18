@@ -852,6 +852,10 @@ export const FILES={
  "footer-collection.mjs": {
   "suite": "core"
  },
+ "footer-memory.mjs": {
+  "suite": "split",
+  "note": "AIR-519. Equivalence of the indexed D1 identity claims, the copy-free coverage and the projected footer blocks, and the degraded malformed record stay in core. The production-sized heap and CPU reproduction is scenario footer-memory-production-size."
+ },
  "footer-resilience.mjs": {
   "suite": "split",
   "note": "Status, degraded names and unknown values stay in core. The measured 3s waits are scenarios footer-resilience-silent-source and footer-resilience-hung-freshness. A real hang still hits the per-file timeout."
@@ -1087,10 +1091,6 @@ export const FILES={
  "prediction-authority-scope.mjs": {
   "suite": "core"
  },
- "prediction-batch-profile.mjs": {
-  "suite": "core",
-  "note": "The profile asserts storage-call counts and byte sizes. It does not assert wall-clock speed."
- },
  "prediction-batch-start-budget.mjs": {
   "suite": "core"
  },
@@ -1179,9 +1179,6 @@ export const FILES={
   "suite": "core"
  },
  "prediction-scoring-candidate.mjs": {
-  "suite": "core"
- },
- "prediction-r2-roundtrips.mjs": {
   "suite": "core"
  },
  "prediction-recovery.mjs": {

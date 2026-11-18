@@ -79,7 +79,7 @@ Every queue refresh evaluates each queue film against the current profile:
 - `state(prediction, fingerprint, genres)` takes the stored prediction and the **full** fingerprint file;
 - `indexed(item, film)` takes the view-index entry and its `impactFeatures` (above), with the catalog or programme film for the genres.
 
-**Recovery overlay** ([ADR 0165](../../adr/0165-scoped-prediction-recovery-intent.md), Proposed). The same object also holds the active owner-confirmed recovery intents, read once per request. `state(prediction, fingerprint, genres, filmId)` and `indexed(item, film)` answer *not current* for the one exact stored version an intent denies, and only when the caller names that film (`filmId`, or `film.id`); without a film id, or without migration `0024`, the rule above alone answers. The queue rebuild applies the same overlay to its own verdict and records the film's work as `reason: recovery_intent`. The overlay never makes a stale prediction current.
+**Recovery overlay** ([ADR 0165](../../adr/0165-scoped-prediction-recovery-intent.md), Proposed). The same object also holds the active owner-confirmed recovery intents, read with one D1 batch each time the object is built. `state(prediction, fingerprint, genres, filmId)` and `indexed(item, film)` answer *not current* for the one exact stored version an intent denies, and only when the caller names that film (`filmId`, or `film.id`); without a film id, or without migration `0024`, the rule above alone answers. The queue rebuild applies the same overlay to its own verdict and records the film's work as `reason: recovery_intent`. The overlay never makes a stale prediction current.
 
 Both ask the evaluator in `selective` mode.
 

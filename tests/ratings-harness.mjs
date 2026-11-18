@@ -101,7 +101,8 @@ export function loadContext({net,clock,FakeDate,crypto,root='.',files=SERVER_FIL
  }
  return context;
 }
-export function baseEnv(bucket,extra={}){return {BUCKET:bucket,LETTERBOXD_USERNAME:USER,EPG_XML_URL:'https://epg.test/guide.xml',...extra};}
+// ADR 0162: these envs have no D1 binding, so they opt in to the explicit local metadata-cache stand-in.
+export function baseEnv(bucket,extra={}){return {BUCKET:bucket,LETTERBOXD_USERNAME:USER,EPG_XML_URL:'https://epg.test/guide.xml',METADATA_CACHE_DB_OPTIONAL:'standin',...extra};}
 export const SEPARATE={RATINGS_PIPELINE:'separate',LETTERBOXD_DIARY_HISTORY:'on',REMOVAL_RATING_LOOKUP:'on'};
 export const plain=value=>JSON.parse(JSON.stringify(value));
 // A top-level binding of the context (a `const` is not a property of the global object).

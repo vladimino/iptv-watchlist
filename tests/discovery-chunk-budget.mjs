@@ -1001,4 +1001,62 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.ok(idle.result.retryAt);
 }
 
+// 25. AIR-523, 18 Nov 2026: after the assignments of a new generation were restored, about 200 verified observations stayed unassignable (evidence drift),
+// and every chunk scanned them again: no row written, the TMDB candidates never started, a five-minute backoff each time. A completed lap now rests for
+// 30 minutes in the same run: the next chunks skip the replay and start TMDB; the next lap after the rest picks up an observation that became assignable.
+{
+ const decided=[],decisions={},catalog={};
+ for(let index=0;index<210;index++){
+  const key='drf'+String(index).padStart(3,'0');
+  const tmdb=String(8000+index);
+  decided.push(key);
+  // An anchored duration of 100 minutes against slots of under a minute: never eligible, so `evidence_drift`.
+  decisions[key]={status:'verified',filmId:'tmdb_'+tmdb,tmdbId:tmdb,identitySource:'tmdb_detail',anchor:[100]};
+  catalog['tmdb_'+tmdb]={id:'tmdb_'+tmdb,tmdbId:tmdb,canonicalIdentity:'tmdb:'+tmdb,title:'Film '+key,original:'Film '+key,year:2005};
+ }
+ // An owner-confirmed identity whose Film has no record yet: `film_absent` until the record exists.
+ decided.push('late');decisions.late={status:'verified',filmId:'tmdb_9999',tmdbId:'9999',identitySource:'owner'};
+ const {file,env}=await fixture({decided,decisions,catalog,extraHot:30});
+ sql(file,`INSERT INTO published_epg_generation (programme_run_id, phase, published_at, payload_sha256, created_at) VALUES ('${RUN}','published','2026-11-18T00:00:00Z','x','2026-11-18T00:00:00Z')`);
+ sql(file,`UPDATE published_epg_authority SET mode='d1', cutover='open', programme_run_id='${RUN}', generation=7`);
+ const runHop=async({slowMs=2800,offset=0}={})=>{
+  const clock={offset};
+  const {context,searched}=chunkContext({clock,respond:()=>({results:[]})});
+  const hopEnv={...env,DB:d1Standin(file,{onBatch(){clock.offset+=slowMs;}})};
+  const lease=await Authority.acquireLease(hopEnv,{programmeRunId:RUN});hopEnv.discoveryLease=lease.lease;
+  const result=await context.resolveDiscoveryChunk(hopEnv,{films:[]},24,lease.lease);
+  await Authority.releaseLease(hopEnv,lease.lease);
+  return {result,searched};
+ };
+ const lap=await runHop();
+ assert.equal(lap.result.assignment.assigned,0);
+ assert.ok(lap.result.assignment.evidence_drift>=210&&lap.result.assignment.film_absent>=1,'the lap meets the unassignable observations once');
+ assert.equal(lap.result.assignment.bulkComplete,true,'the lap reaches the end of the keys and completes');
+ assert.ok(JSON.parse(statusPayload(file)).replayLapAt,'the completed lap is stored with the run');
+ // The next chunks of the same run rest the replay: nothing is scanned again, and the TMDB candidates get the time.
+ for(let hop=0;hop<2;hop++){
+  const rested=await runHop();
+  assert.equal(rested.result.assignment.bulkResting,true);
+  assert.equal(rested.result.assignment.bulkObservations,0,'no rescan of the unassignable observations');
+  assert.equal(rested.result.assignment.bulkComplete,true,'a resting replay is not reported as unfinished work');
+  assert.ok(rested.searched.length>0,'TMDB candidates start while the replay rests: '+rested.searched.length);
+  assert.notEqual(rested.result.error,'wall_budget');
+ }
+ // The Film record appears during the rest; the next lap, 31 minutes after the completed one, assigns it. No assignment is lost.
+ const setup={DB:d1Standin(file),BUCKET:new MemoryBucket(),discoveryLease:null};
+ const held=await Authority.acquireLease(setup,{programmeRunId:RUN});setup.discoveryLease=held.lease;
+ await Authority.upsertAdmissions(setup,{tmdb_9999:{id:'tmdb_9999',tmdbId:'9999',canonicalIdentity:'tmdb:9999',title:'Film late',original:'Film late',year:2005}},{lease:held.lease});
+ await Authority.releaseLease(setup,held.lease);
+ // The stand-in's clock shifts Date.now() but not new Date(), so the 31 minutes are put on the stored lap time instead of on the clock.
+ sql(file,`UPDATE discovery_status SET payload_json=json_set(payload_json,'$.replayLapAt','${new Date(Date.now()-31*60*1000).toISOString()}')`);
+ const relap=await runHop();
+ assert.equal(relap.result.assignment.bulkResting,false);
+ assert.ok(relap.result.assignment.bulkObservations>0,'the rest ends and a new lap runs');
+ assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM published_epg_show WHERE basis='discovery' AND match_reason='late'")[0].n),1,'the observation that became assignable is assigned');
+ // A new generation does not inherit the rest of the previous one: the lap time is run-scoped like the cursor.
+ sql(file,"UPDATE discovery_status SET payload_json=json_set(payload_json,'$.programmeRunId','run-previous')");
+ const fresh=await runHop();
+ assert.equal(fresh.result.assignment.bulkResting,false,'another run starts with a lap');
+}
+
 console.log('discovery chunk budget ok');

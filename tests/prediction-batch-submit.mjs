@@ -9,6 +9,14 @@ import {nonFunctional} from './suite-gate.mjs';
 const sha=async text=>[...new Uint8Array(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,'0')).join('');
 const dump=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const ready=async n=>{const w=await flowWorld({films:n});const r=await w.api('queue/reconcile',{});assert.equal(r.status,200);return w;};
+// AIR-452 (ADR 0167): no v5 route is left; a legacy v5 run stored before the deploy is planted by turning a fresh v2 run's record into a v5 record.
+const legacyRun=async w=>{
+ const m=await start(w),edit=doc=>{const out={...doc};delete out.protocol;out.pipelineVersion=5;return out;};
+ const row=sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+m.runId+"'")[0];
+ sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify(edit(JSON.parse(row.d))).replace(/'/g,"''")+"' WHERE run_id='"+m.runId+"'");
+ for(const key of ['enrichment/runs/'+m.runId+'.json','enrichment/latest-run.json'])if(w.records.has(key)&&w.records.get(key).runId===m.runId)w.records.set(key,edit(w.records.get(key)));
+ return m;
+};
 const start=async w=>{const r=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled'});assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));return r.data;};
 const submit=(w,m,items,extra={})=>w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items,...extra});
 const item=(w,id)=>({filmId:id,fingerprint:w.fingerprint,prediction:w.prediction});
@@ -170,19 +178,21 @@ const state=async w=>({d1:await sha(dump(w.file)),r2:[...r2Snapshot(w).entries()
  // an expired lease: the old owner writes nothing
  setLease(w,d=>{d.expiresAt=1;});
  const films0=domain(w.file),expired=await submit(w,m,[item(w,pick[1])]);assert.equal(expired.status,409);assert.equal(expired.data.status,'lease_lost');assert.equal(domain(w.file),films0);
- assert.equal((await w.api('heartbeat',{runId:m.runId})).status,409,'the expired owner cannot renew (the stop of the lost lease was recorded, as for a v5 step)');
+ assert.equal((await w.api('heartbeat',{runId:m.runId})).status,409,'the expired owner cannot renew (the stop of the lost lease was recorded)');
  // bodies that are not a batch
  for(const bad of [{},{runId:m.runId,epoch:1,items:[]},{runId:m.runId,epoch:1,items:Array.from({length:11},(_,i)=>({filmId:'f'+i}))},{runId:m.runId,epoch:0,items:[{filmId:'a'}]},{runId:m.runId,epoch:1,items:[{filmId:'a'},{filmId:'a'}]},{runId:m.runId,epoch:1,items:[{filmId:'a',extra:1}]},{runId:m.runId,epoch:1,items:[{filmId:'a',inputHash:'0'.repeat(24)}]},{runId:m.runId,epoch:1,items:[{filmId:'a'}],manifestHash:'0'.repeat(64)},{runId:m.runId,epoch:1,items:[{filmId:'a'}],dryRun:'yes'}])assert.equal((await w.api('batch/submit',bad)).status,400,JSON.stringify(bad).slice(0,80));
 }
 {
- // a finished run, and a v5 run
+ // a finished run, and a stored legacy v5 run
  const w=await ready(8);const m=await start(w);await submit(w,m,[item(w,ids(m)[0])]);
  assert.equal((await w.api('complete',{runId:m.runId,reason:'external_termination'})).status,200);
  const done=await submit(w,m,[item(w,ids(m)[1])]);assert.equal(done.status,409);assert.match(done.data.error,/already complete/);
- const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.data.status,'running');
- const d0=domain(w.file),wrong=await w.api('batch/submit',{runId:v5.data.runId,epoch:1,items:[item(w,'tmdb_1')]});assert.equal(wrong.status,409);assert.equal(wrong.data.code,'wrong_protocol');assert.equal(domain(w.file),d0);
- // and the v5 run still works with its own tools
- assert.equal((await w.pair(v5.data.runId)).submit.status,200);
+ const v5=await legacyRun(w);
+ const d0=domain(w.file),wrong=await w.api('batch/submit',{runId:v5.runId,epoch:v5.lease.epoch,items:[item(w,v5.films[0].filmId)]});assert.equal(wrong.status,409);assert.equal(wrong.data.code,'wrong_protocol');assert.equal(domain(w.file),d0);
+ // its own v5 steps are retired (404); heartbeat and complete still settle it
+ for(const route of ['next','submit']){const gone=await w.api(route,{runId:v5.runId,batchSize:1,items:[item(w,v5.films[0].filmId)]});assert.equal(gone.status,404,route);}
+ assert.equal((await w.api('heartbeat',{runId:v5.runId})).status,200);
+ assert.equal((await w.api('complete',{runId:v5.runId,reason:'external_termination'})).status,200);
 }
 
 // 7. The submit gate: one call of a run at a time. An unexpired gate of another request is answered `submit_in_flight` and nothing is written; an expired one is taken over.
@@ -293,7 +303,7 @@ const state=async w=>({d1:await sha(dump(w.file)),r2:[...r2Snapshot(w).entries()
  w.ctx.mutatePredictionQueue=original;
 }
 
-// 13. Lineage and the immutable output of a written film are the ones a v5 submit writes: the version object, the D1 pointer and the record's run and prompt identity.
+// 13. Lineage and the immutable output of a written film are the ones the retired v5 submit wrote: the version object, the D1 pointer and the record's run and prompt identity.
 {
  const w=await ready(6);const m=await start(w),id=ids(m)[0];
  const r=await submit(w,m,[item(w,id)]);assert.equal(r.data.results[0].status,'created');
@@ -302,7 +312,7 @@ const state=async w=>({d1:await sha(dump(w.file)),r2:[...r2Snapshot(w).entries()
  assert.equal(cur.runId,m.runId);assert.equal(cur.trigger,'scheduled');assert.equal(cur.tasteProfileHash,'p');assert.equal(cur.predictionPromptVersion,m.contract.predictionPromptVersion);assert.equal(cur.fingerprintPromptVersion,m.contract.fingerprintPromptVersion);
  assert.equal(cur.fingerprintHash,sql(w.file,"SELECT fingerprint_hash AS h FROM prediction_pointer WHERE film_id='"+id+"'")[0].h);assert.ok(cur.confidenceAssessment,'the Worker computes the confidence assessment');assert.ok(cur.r2Key&&cur.contentSha256,'linked to its immutable version object');
  assert.ok(w.records.has(cur.r2Key),'the immutable version object exists in R2');assert.ok([...w.records.keys()].some(k=>k.includes('/fingerprints/')),'and the fingerprint body and its generation record');
- // an Event and the run status are the v5 ones: the run is a run
+ // an Event and the run status are the shared ones (as for v5 runs): the run is a run
  const status=await (await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/status'),w.env)).json();assert.equal(status.run?.runId??m.runId,m.runId);
 }
 
@@ -403,7 +413,7 @@ function r2Diff2(a,b){return [...b.keys()].filter(k=>!a.has(k)||a.get(k)!==b.get
  assert.equal(JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+m.runId+"'")[0].d).status,'running','the old run was not marked stopped on its former holder\'s behalf');
 }
 
-// 19. A batch_v2 run does not write start or progress Events, even when a progress checkpoint would have been due on v5.
+// 19. A batch_v2 run does not write start or progress Events, even when a progress checkpoint would have been due on the retired v5 runner.
 {
  const w=await ready(12);const m=await start(w),pick=ids(m);
  const doc=run(w,m);doc.lastProgressAt=new Date(Date.now()-3600000).toISOString();sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE run_id='"+m.runId+"'");
