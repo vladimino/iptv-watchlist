@@ -7,7 +7,7 @@ import {webcrypto} from 'node:crypto';
 // The prediction queue and the shared compatibility evaluator (ADR-0031): the selective rule always decides (ADR 0044:
 // the PREDICTION_PROFILE_COMPATIBILITY switch is retired and inert), the strict outcome is counted beside it, an unknown
 // or unapproved change fails closed, and impact features come from the full fingerprint, bound to its hash.
-// Since ADR 0162 the only runner is batch runner v2 (D1 mode only); this R2 bucket is seeded through the shared writers a submit uses (`T.seedFilm`).
+// Since ADR 0167 the only runner is batch runner v2 (D1 mode only); this R2 bucket is seeded through the shared writers a submit uses (`T.seedFilm`).
 const records=new Map(),etags=new Map();let revision=0;
 const store={
  async get(key){if(!records.has(key))return null;const text=records.get(key);return {etag:etags.get(key),text:async()=>text,json:async()=>JSON.parse(text)};},
@@ -132,7 +132,7 @@ const indexNow=read('enrichment/view-index.json'),catalogFilm=(id,genres)=>({id,
 ctx.catalogInput={catalog:{tmdb_900:catalogFilm('tmdb_900',['Драма']),tmdb_901:catalogFilm('tmdb_901',['Ужасы'])},programme:read('programme.json'),watchlist:{films:[]},index:{tmdb_900:indexNow.film000,tmdb_901:indexNow.film001},profile:read('enrichment/profile/current.json'),metadata:{},programmeRunId:'programme-1',pinned:false,now:Date.now()};
 const offered=async()=>vm.runInContext("(async()=>catalogAvailable({...catalogInput,freshness:await predictionFreshness(diagEnv,catalogInput.profile)}).films.map(film=>film.id))()",ctx);
 assert.deepEqual([...await offered()],['tmdb_900'],'the catalog offers the carried prediction, not the reached one');
-// The reached film is recalculated; the kept film keeps version 1 (the v5 runner's own already_current answer and index repair are retired with v5, ADR 0162).
+// The reached film is recalculated; the kept film keeps version 1 (the v5 runner's own already_current answer and index repair are retired with v5, ADR 0167).
 assert.equal(read('enrichment/films/film000/predictions.json').current.tasteProfileVersion,1,'no recomputation, no version rewrite');
 assert.equal(await ctx.T.seedFilm(env,'film001',fingerprint,prediction),'recalculated','the reached film is recalculated');
 // The entry without impact features: its facet is restored from the full fingerprint by the shared index writer, so the queue and the view agree on the next refresh.

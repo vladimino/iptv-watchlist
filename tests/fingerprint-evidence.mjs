@@ -156,7 +156,7 @@ assert.deepEqual(kept.issues,[{path:'fingerprint.evidence.execution.payoff',code
 
 {
 const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Heist'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
-// The submit path on batch runner v2 (ADR 0162), D1 mode: D1 holds the pointers, R2 the immutable bodies and the mutable mirrors read below.
+// The submit path on batch runner v2 (ADR 0167), D1 mode: D1 holds the pointers, R2 the immutable bodies and the mutable mirrors read below.
 const w=await flowWorld({films:3,extra:()=>({title:'Heat',year:1995,genres:['Crime'],synopsis:'A crew plans a robbery.',directors:['Michael Mann'],actors:['Al Pacino'],runtime:170})});
 const records=w.records,call=code=>vm.runInContext(code,w.ctx);
 const api=async(path,body,method='POST')=>{const response=await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),w.env);return {status:response.status,data:await response.json()};};

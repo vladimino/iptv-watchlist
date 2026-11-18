@@ -66,7 +66,7 @@ assert.equal(body.result.protocolVersion,'2025-11-25');
 assert.deepEqual(body.result.capabilities,{tools:{listChanged:true}});
 assert.equal(body.result.serverInfo.name,'iptv-watchlist-probe');
 assert.match(body.result.instructions,/probe_read and probe_echo/);
-assert.match(body.result.instructions,/legacy one-film runner v5 \(prediction_start, prediction_next, prediction_submit, prediction_validate\) is retired \(ADR 0162\)/,'the instructions name the retired tools only as retired');
+assert.match(body.result.instructions,/legacy one-film runner v5 \(prediction_start, prediction_next, prediction_submit, prediction_validate\) is retired \(ADR 0167\)/,'the instructions name the retired tools only as retired');
 assert.doesNotMatch(body.result.instructions,/prediction_next returns|then prediction_submit|prediction_start uses/,'no v5 call instruction remains');
 assert.equal((await result(rpc(2,'initialize',{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'c',version:'1'}}))).protocolVersion,'2025-06-18');
 assert.equal((await result(rpc(3,'initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'c',version:'1'}}))).protocolVersion,'2025-11-25');

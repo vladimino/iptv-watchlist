@@ -1,4 +1,4 @@
-// Live telemetry of batch runner v2 runs (ADR 0162; D1 prediction authority, as production runs it): idle, running, completed and blocked states; fresh added,
+// Live telemetry of batch runner v2 runs (ADR 0167; D1 prediction authority, as production runs it): idle, running, completed and blocked states; fresh added,
 // failed, heartbeat and queue counters while a run is live; no start, resume or progress Event (a v2 run has one terminal Event, ADR 0146); a silent overlapping
 // trigger; and a final Event whose coverage shares the footer's canonical semantics. Local stand-ins only.
 import assert from 'node:assert/strict';

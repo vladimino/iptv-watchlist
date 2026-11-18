@@ -1,6 +1,6 @@
 # Prediction runner v5: consumer inventory and retirement (17 November 2026)
 
-**Scope.** Every consumer of the one-film prediction runner v5 on `main` at `2ff86710ba9699d77a709862ef03818ff8c65ed3` (17 Nov 2026), classified `v5-only`, `shared-with-v2`, `required-by-other-client` or `historical`, with the keep or remove disposition delivered by [AIR-452](https://trello.com/c/bHuKy3eF) under [ADR 0162](../../adr/0162-retire-prediction-runner-v5.md).
+**Scope.** Every consumer of the one-film prediction runner v5 on `main` at `2ff86710ba9699d77a709862ef03818ff8c65ed3` (17 Nov 2026), classified `v5-only`, `shared-with-v2`, `required-by-other-client` or `historical`, with the keep or remove disposition delivered by [AIR-452](https://trello.com/c/bHuKy3eF) under [ADR 0167](../../adr/0167-retire-prediction-runner-v5.md).
 
 **Method.** Repository search for the tool names, the HTTP paths and the implementing functions (`src/`, `public/`, `scripts/`, `tests/`, `docs/`); a reference-graph pass over the top-level declarations of the concatenated Worker sources, repeated until no declaration lost its last reference; reading the batch v2 start to compare its repair duties with the v5 start. No production call, Scheduled Task registry read, flag, D1 or R2 operation was made. The live registry state is taken from the AIR-451 readback and the installed batch v2 prompt in the repository.
 
@@ -44,7 +44,7 @@ The reference-graph pass found these declarations without a caller once the v5 f
 | `startIdle` lease release and blocked Event branches, `runnerStarted` start Event | only the v5 start passed `holdsLease`/`userEvent` and created v5 runs that write a start Event; batch v2 writes no start Event (ADR 0146) |
 | `REQUEST_SCOPE`, `createRequestScope`, `requestScopeOf`, `requestScopeRead`, `requestScopeLearn`, `requestScopeForget`, `requestScopeUnchanged`, `noteQueueCounts`, the hooks in `loadJSON` and `saveJSON` | AIR-442 per-request object scope; only `next` and `submit` created a scope, so every branch was inert |
 
-Kept although close to v5: `adaptivePredictionBatch` (the batch start's idle plan), `startIdle` and `runnerStarted` (narrowed to their v2 paths), the non-final progress Event (a heartbeat of a stored legacy v5 run can still emit it), `START_EVENT_PREFIX` delivery of stored v5 start Events, `runContractChanged`, `wrongProtocolResponse`, `PredictionD1.scopeRequest` (the authority-marker scope the batch steps use), and the pure rule `fingerprintRestoreCandidate` with its ADR 0035 specification fixtures (no runtime caller; follow-up decision in ADR 0162).
+Kept although close to v5: `adaptivePredictionBatch` (the batch start's idle plan), `startIdle` and `runnerStarted` (narrowed to their v2 paths), the non-final progress Event (a heartbeat of a stored legacy v5 run can still emit it), `START_EVENT_PREFIX` delivery of stored v5 start Events, `runContractChanged`, `wrongProtocolResponse`, `PredictionD1.scopeRequest` (the authority-marker scope the batch steps use), and the pure rule `fingerprintRestoreCandidate` with its ADR 0035 specification fixtures (no runtime caller; follow-up decision in ADR 0167).
 
 ## Consequences recorded
 

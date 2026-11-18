@@ -173,7 +173,7 @@ function reference(f){
   const wrongRefs=(await dry(fp({evidence,sourceBasis:'mixed',sourceRefs:[]}))).data.results[0];assert.deepEqual(wrongRefs.validation.issues,[{path:'fingerprint.sourceRefs',code:'invalid_ref'}],'the AIR-450 C3 shape is still rejected when the caller supplies it');
   const broken=(await dry(fp({evidence:{plotMechanics:{heist:[item('web_research',['http://x.example/a'])],investigation:[item('model_knowledge',['model_knowledge'])]}}}))).data.results[0];assert.deepEqual(broken.validation.issues,[{path:'fingerprint.evidence.plotMechanics.heist',code:'invalid_ref'}],'invalid evidence: its own issue only');
  }
- // real batch submit (ADR 0162: the only submit path)
+ // real batch submit (ADR 0167: the only submit path)
  {const w=await flowWorld({films:4});const {start}=await w.reconcileAndStart();assert.equal(start.status,200);
   const m=start.data,[id,id2]=m.films.map(f=>f.filmId);
   const bad=await w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items:[{filmId:id,fingerprint:fp({evidence,sourceBasis:'mixed',sourceRefs:[]}),prediction}]});

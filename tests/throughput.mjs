@@ -16,7 +16,7 @@ ctx.queue={priorityCount:0,coldRemaining:100,pending:Array(100).fill('x'),lastBa
 const catalog={};for(let i=1;i<=50;i++)catalog['tmdb_'+i]=film('tmdb_'+i,now,{discoveredAt:new Date(now-10000).toISOString()});catalog.tmdb_900=film('tmdb_900',now-71*3600000);catalog.tmdb_901=film('tmdb_901',now-10*86400000);
 records.set('programme.json',{runId:'test',films:[]});records.set('epg/discovered-films.json',catalog);
 let q=(await api('queue/reconcile',{})).data;assert.equal(q.hotRemaining,51);assert.equal(q.coldRemaining,1);assert.equal(q.urgentCount,1);assert.equal(records.get('enrichment/prediction-queue.json').pending[0],'tmdb_900');
-// AIR-452 (ADR 0162): the run flows of this file drove the retired v5 runner (start/next/submit) on R2; batch runner v2 runs only with D1 prediction authority
+// AIR-452 (ADR 0167): the run flows of this file drove the retired v5 runner (start/next/submit) on R2; batch runner v2 runs only with D1 prediction authority
 // and its start, submit, checkpoint and recovery behaviour is covered by the prediction-batch-* tests. The adaptive plan above is still the batch start's idle plan;
 // the queue rules below are runner-independent.
 // A new urgent hot candidate enters the stored queue through its named refresh (as the resolver checkpoint does), ahead of all older work.

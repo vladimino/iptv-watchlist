@@ -1,4 +1,4 @@
-// Run diagnostics of batch runner v2 runs (ADR 0162; D1 prediction authority, as production runs it): a failed step, a caller-reported fault, an unattributed
+// Run diagnostics of batch runner v2 runs (ADR 0167; D1 prediction authority, as production runs it): a failed step, a caller-reported fault, an unattributed
 // api_error, a clean completion, a duplicate complete, a lease loss, item validation stages and a dropped finish write. Nothing secret, no model output and no
 // film id reaches a diagnostic row. Local stand-ins only.
 import assert from 'node:assert/strict';

@@ -19,6 +19,6 @@ const owner=l1.status==='owned'?'race-a':'race-b';ctx.owner=owner;await call("ru
 // After release a new owner acquires; an expired lease is taken over atomically and names the run it recovered (the batch start settles that run).
 ctx.third='race-c';const reacquired=await call("runnerLease(env,third,'acquire')");assert.equal(reacquired.status,'owned');
 records.get('enrichment/runner-lease.json').expiresAt=0;ctx.fourth='race-d';const takeover=await call("runnerLease(env,fourth,'acquire')");assert.equal(takeover.status,'owned');assert.equal(takeover.recoveredRunId,'race-c');
-// AIR-452 (ADR 0162): the continuous next/submit drain of this file drove the retired v5 runner on R2. Batch runner v2 runs only with D1 prediction authority;
+// AIR-452 (ADR 0167): the continuous next/submit drain of this file drove the retired v5 runner on R2. Batch runner v2 runs only with D1 prediction authority;
 // its already_running, heartbeat, lease takeover, fencing, events and manifest_spent completion are covered by the prediction-batch-* tests.
 console.log('Continuous drain: alias dedupe, atomic runner lease acquisition, release and expired-lease takeover passed');

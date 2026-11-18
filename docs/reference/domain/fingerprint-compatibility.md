@@ -81,7 +81,7 @@ fingerprintCompatibility(fingerprint, metadata, registry, target, mode, {vocabul
 - A stored `fingerprintPromptVersion` that is absent reads as 1.
 - `links` is the number of version steps between the record and the target on both fingerprint axes.
 - `fingerprintCompatibilityFresh(result)` is true for `current` and `compatible`.
-- `fingerprintRestoreCandidate(history, metadata, registry, target, options)` returns the first stored generation record that is `current` for the target, or null: the record a rollback would restore the pointer to without a model run. Since [ADR 0162](../../adr/0162-retire-prediction-runner-v5.md) no runtime caller uses it: the pure rule stays as the ADR-0035 specification.
+- `fingerprintRestoreCandidate(history, metadata, registry, target, options)` returns the first stored generation record that is `current` for the target, or null: the record a rollback would restore the pointer to without a model run. Since [ADR 0167](../../adr/0167-retire-prediction-runner-v5.md) no runtime caller uses it: the pure rule stays as the ADR-0035 specification.
 - `fingerprintRegistryIssue(registry, options)` validates the whole registry (`{code, index}` or null); `fingerprintTransitionIssue(transition, previous, vocabulary, digest)` one declaration, with the codes of the table above.
 - `fingerprintSchemaVocabulary(schemaTransitions, version, base)` derives the vocabulary and tightened constraints of a schema version from schema 1 through the declared changes.
 
@@ -91,7 +91,7 @@ The first deciding check wins. Within one link the selectors are read before the
 | --- | --- | --- |
 | no fingerprint | `stale/fingerprint_missing` | `full` |
 | `invalidatedAt` set | `stale/fingerprint_invalidated` | `full` |
-| a version newer than the target | `stale/fingerprint_ahead` | `full` (no runner restores a stored current version since [ADR 0162](../../adr/0162-retire-prediction-runner-v5.md)) |
+| a version newer than the target | `stale/fingerprint_ahead` | `full` (no runner restores a stored current version since [ADR 0167](../../adr/0167-retire-prediction-runner-v5.md)) |
 | both versions equal the target | `current/exact` | `none` |
 | mode `strict` | `stale/fingerprint_version_changed` | `full` |
 | no registry path | `stale/transition_unknown` | `global` |
@@ -151,7 +151,7 @@ Three parts, the first two immutable and create-only:
 
 - The fingerprint rule reads the prompt version from the generation record the pointer names.
 - A prediction depends on the content hash, so a new generation record with the same body keeps it current.
-- Restoring the pointer to a stored generation record is the only rollback that would avoid a model run; no runner performs it since [ADR 0162](../../adr/0162-retire-prediction-runner-v5.md).
+- Restoring the pointer to a stored generation record is the only rollback that would avoid a model run; no runner performs it since [ADR 0167](../../adr/0167-retire-prediction-runner-v5.md).
 
 Objects under `enrichment/films/<id>/`:
 
@@ -190,7 +190,7 @@ The transition registry is the code constant `FINGERPRINT_TRANSITIONS` in `src/e
 
 **Batches.** `queueBatchIds` takes the ready ids in queue order and lets migration work fill at most half of the slots (rounded up, `FINGERPRINT_MIGRATION_SHARE`); missing work fills the rest; slots migration cannot fill stay empty. The batch start selects through it, and the adaptive batch size, the lease and the quota rules are unchanged.
 
-**Runner.** The batch start records `fingerprintPromptVersion` and the registry digest with the schema and prediction prompt versions, and its manifest names each film's work: `prediction_only` when the stored fingerprint is usable (exact or compatible), otherwise `fingerprint_and_prediction`. The batch submit and `complete` answer `409 {code: "contract_changed"}` when any of those versions differs from the Worker's, as they answer a profile change for the profile hash. The submit accepts a new fingerprint only when the stored one is not usable, stamps the new prediction with the fingerprint's own schema version, and writes the fingerprint as described under [Storage](#storage). A fingerprint whose stored versions are newer than the code's is regenerated; no runner restores it from a stored generation record since [ADR 0162](../../adr/0162-retire-prediction-runner-v5.md).
+**Runner.** The batch start records `fingerprintPromptVersion` and the registry digest with the schema and prediction prompt versions, and its manifest names each film's work: `prediction_only` when the stored fingerprint is usable (exact or compatible), otherwise `fingerprint_and_prediction`. The batch submit and `complete` answer `409 {code: "contract_changed"}` when any of those versions differs from the Worker's, as they answer a profile change for the profile hash. The submit accepts a new fingerprint only when the stored one is not usable, stamps the new prediction with the fingerprint's own schema version, and writes the fingerprint as described under [Storage](#storage). A fingerprint whose stored versions are newer than the code's is regenerated; no runner restores it from a stored generation record since [ADR 0167](../../adr/0167-retire-prediction-runner-v5.md).
 
 ## Readers and diagnostics
 
@@ -218,5 +218,5 @@ Strict by contract, and unchanged: the D1 prediction projection (`src/prediction
 | --- | --- |
 | return to exact equality | no runtime switch ([ADR 0047](../../adr/0047-retire-fingerprint-compatibility-switch.md)); a code revert to a release that reads the former `PREDICTION_FINGERPRINT_COMPATIBILITY`, with that binding set to `strict` or absent, makes every non-exact fingerprint stale: a full re-fingerprint after a non-identity transition, bounded per batch like any migration work |
 | code rollback | safe only down to the release with immutable fingerprint versions and `fingerprint_ahead` handling |
-| schema or prompt constant restored | no runner restores the pointer since [ADR 0162](../../adr/0162-retire-prediction-runner-v5.md) (the retired v5 `next` did): a `fingerprint_ahead` film regenerates; a prediction made from the restored content is current again, one made from the newer content is `prediction_only`; history predictions are not promoted |
+| schema or prompt constant restored | no runner restores the pointer since [ADR 0167](../../adr/0167-retire-prediction-runner-v5.md) (the retired v5 `next` did): a `fingerprint_ahead` film regenerates; a prediction made from the restored content is current again, one made from the newer content is `prediction_only`; history predictions are not promoted |
 | forced recompute | a `global` transition |

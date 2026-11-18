@@ -24,7 +24,7 @@ const good={filmId:a,fingerprint:w.fingerprint,prediction:w.prediction};
  const r=await w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items:[{...good,extra:1}]});
  assert.equal(r.status,400);assert.deepEqual(r.data.issues,[{path:'items[0].extra',code:'unknown_field'}]);
 }
-// 3. The retired v5 submit route is gone (ADR 0162): 404 and nothing is checked or written.
+// 3. The retired v5 submit route is gone (ADR 0167): 404 and nothing is checked or written.
 {
  const before=versions(w).length;
  const r=await w.api('submit',{runId:'none',items:[{filmId:a,prediction:w.prediction,assessment:{x:1}}]});

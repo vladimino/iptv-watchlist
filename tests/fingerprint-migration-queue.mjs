@@ -8,7 +8,7 @@ import {createHash,webcrypto} from 'node:crypto';
 // FINGERPRINT_SCHEMA_VERSION 2, a declared split of chase_escape and the matching MECHANICS. The shared transition verdict
 // always decides (ADR 0047); the strict outcome is only counted beside it, and a stale PREDICTION_FINGERPRINT_COMPATIBILITY
 // binding of any value is inert.
-// Since ADR 0162 the only runner is batch runner v2, which runs in D1 mode only; this file keeps the R2 objects and seeds stored films through the shared
+// Since ADR 0167 the only runner is batch runner v2, which runs in D1 mode only; this file keeps the R2 objects and seeds stored films through the shared
 // writers (`T.seed`: writeFingerprint, the immutable prediction version and the view index, the writes a submit makes) instead of a one-film v5 run.
 // The v5-only behaviour (one-film next, its run binding and the pointer restore on rollback) is gone with that runner.
 const records=new Map(),etags=new Map();let revision=0;
@@ -141,7 +141,7 @@ assert.deepEqual(plain([queue.fingerprintCompatibility.fingerprintReasons,queue.
 queue=await reconcile(R1);
 assert.deepEqual(queue.pending,['D','C'],'missing work before migration work');
 assert.deepEqual(plain(queue.work.C),{class:'fingerprint_and_prediction',requiredWork:'fingerprint_and_prediction',migration:'full',reason:'fingerprint_not_current'});
-// The v5 runner restored the prompt-1 record here (retired with v5, ADR 0162); the pointer is moved back by the shared writer so the release-2 steps start from schema 1.
+// The v5 runner restored the prompt-1 record here (retired with v5, ADR 0167); the pointer is moved back by the shared writer so the release-2 steps start from schema 1.
 {
  const {filmId:_i,fingerprintHash:_h,generatedAt:_g,invalidatedAt:_n,fingerprintPromptVersion:_p,produced:_r,previous:_v,...content}=pointer('C');
  await R1.T.writeFingerprint(baseEnv,'C',content,pointer('C'),'generated',undefined,1);
@@ -194,7 +194,7 @@ assert.deepEqual(stable(await reconcile(R2,SELECTIVE)),stable(queue),'a repeated
 }
 
 // Rollback to release 1: E (schema 1) is exact again; B and D, now schema 2, are ahead of the code and need work. (The v5 runner's pointer
-// restore from a stored schema-1 record is retired with v5, ADR 0162.)
+// restore from a stored schema-1 record is retired with v5, ADR 0167.)
 programme(films);
 queue=await reconcile(R1,STRICT);
 assert.deepEqual(queue.pending,['B','D']);

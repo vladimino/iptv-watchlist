@@ -1,4 +1,4 @@
-// AIR-438. Since ADR 0162 the timed steps are batch runner v2 `batch_start`, `batch_submit` and `batch_hold`; each logs one sanitized `prediction_step_timing` line that splits their wall time by what they touched. The
+// AIR-438. Since ADR 0167 the timed steps are batch runner v2 `batch_start`, `batch_submit` and `batch_hold`; each logs one sanitized `prediction_step_timing` line that splits their wall time by what they touched. The
 // instrumentation is inert: the same scripted run with it, without it, and with a logger that throws leaves the same answers and the same
 // stored records. Calls in parallel are not summed as sequential, the line holds no id, key, statement or body, and a failure of any timing
 // code is swallowed.
@@ -26,7 +26,7 @@ function world({timing=true,logger='capture'}={}){
  const api=async(route,body,method='POST')=>{const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+route,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:r.status,data:await r.json()};};
  return {records,etags,env,ctx,call,api,logs,calls};
 }
-// A batch runner v2 world (ADR 0162; D1 prediction authority, as production runs it) with counted R2 calls, timing on or off, and a capturing or throwing logger.
+// A batch runner v2 world (ADR 0167; D1 prediction authority, as production runs it) with counted R2 calls, timing on or off, and a capturing or throwing logger.
 async function flow({timing=true,logger='capture'}={}){
  const w=await flowWorld({films:6});const calls={get:0,put:0,head:0,list:0};
  const bucket=w.env.BUCKET;for(const op of Object.keys(calls)){const original=bucket[op];bucket[op]=async(...a)=>{calls[op]++;return original.apply(bucket,a);};}

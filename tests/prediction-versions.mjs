@@ -74,7 +74,7 @@ env.PREDICTION_VERSION_OBJECTS='off';
  records.delete(first.r2Key);etags.delete(first.r2Key);
 }
 
-// The submit path end to end on batch runner v2 (the only runner since ADR 0162), D1 mode: first with a stale 'off' binding, then without any binding.
+// The submit path end to end on batch runner v2 (the only runner since ADR 0167), D1 mode: first with a stale 'off' binding, then without any binding.
 // D1 holds the pointers; R2 holds the immutable version objects and the bundle mirror read below. Puts are recorded and one key can be made to fail.
 const profile={ratingScale:'Letterboxd half-star steps',positiveSignals:['Good plans'],negativeSignals:['Stupid choices'],characterLogic:'Characters reason clearly',pace:'Prefer momentum',payoffEnding:'Payoff matters',genrePreferences:'Mysteries welcome',comedyPreferences:'Smart humor',horrorPreferences:'Consistent rules',scifiAdventurePreferences:'Plot driven ideas',actionPreferences:'Readable action',anchorFilms:[{title:'Example',rating:4.5,reason:'Clever'}],hardSkips:['Cruelty for spectacle'],calibration:'Use full scale, be conservative'};
 const prediction={predictedRating:4,probability4Plus:.72,confidence:'medium',matchSignals:['Strong puzzle'],mainRisk:'Pace may lag',moodLabels:['напряжённый','расследование']};

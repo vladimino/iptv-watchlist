@@ -8,7 +8,7 @@ import {createHash,webcrypto} from 'node:crypto';
 // Worker releases run over one bucket, as in tests/fingerprint-migration-queue.mjs: release 1 is the live code, release 2
 // has schema 2 and a declared split of chase_escape. The transition rule always decides (ADR 0047) and explains with reasons;
 // a stale PREDICTION_FINGERPRINT_COMPATIBILITY binding of any value is inert.
-// Since ADR 0162 the only runner is batch runner v2 (D1 mode only); this R2 bucket is seeded through the shared writers a submit uses (`T.seedFilm`).
+// Since ADR 0167 the only runner is batch runner v2 (D1 mode only); this R2 bucket is seeded through the shared writers a submit uses (`T.seedFilm`).
 const records=new Map(),etags=new Map();let revision=0;
 const store={
  async get(key){if(!records.has(key))return null;const text=records.get(key);return {etag:etags.get(key),text:async()=>text,json:async()=>JSON.parse(text)};},

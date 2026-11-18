@@ -1,6 +1,6 @@
 // AIR-298 / ADR 0064: every prediction queue writer is conditional on the etag it read. Each race below parks one writer
 // between its read and its put, lets another writer commit, then releases it; the storage stub enforces R2 conditions.
-// The races of the retired v5 runner (its submit, completion and next-start retry heal in R2 mode) are gone with it (ADR 0162); batch runner v2 runs in
+// The races of the retired v5 runner (its submit, completion and next-start retry heal in R2 mode) are gone with it (ADR 0167); batch runner v2 runs in
 // D1 mode only, where the queue fence is the D1 queue generation (ADR 0078): the last section races its retry write against a concurrent queue writer there.
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
 import {sql} from './prediction-d1-flow-lib.mjs';

@@ -1,4 +1,4 @@
-// Run diagnostic history of batch runner v2 runs (ADR 0162; D1 prediction authority, as production runs it): normal, already_running and quota outcomes, a run
+// Run diagnostic history of batch runner v2 runs (ADR 0167; D1 prediction authority, as production runs it): normal, already_running and quota outcomes, a run
 // that died before and after its first saved result, immutable counters, stale-lease recovery, the separate active run, newest-first order and more than twenty
 // persistent records. Reads write nothing. Local stand-ins only.
 import fs from 'node:fs';import assert from 'node:assert/strict';

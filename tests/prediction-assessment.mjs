@@ -22,7 +22,7 @@ const issues=async a=>(await verdict(a)).assessment.issues.map(x=>x.path+' '+x.c
 const same=(a,b)=>assert.equal(JSON.stringify(a),JSON.stringify(b));
 const mutate=fn=>{const a=base();fn(a);return a;};
 
-// 1. A valid assessment passes; an absent one is not checked; the retired prediction_validate is an unknown tool (ADR 0162).
+// 1. A valid assessment passes; an absent one is not checked; the retired prediction_validate is an unknown tool (ADR 0167).
 {
  const ok=await verdict(base());assert.equal(ok.valid,true,JSON.stringify(ok.assessment));same(ok.assessment,{checked:true,issues:[]});
  const none=await call('prediction_batch_validate',{items:[{filmId:'f1',prediction:w.prediction}]});same(none.data.results[0].assessment,{checked:false,issues:[]});assert.equal(none.data.results[0].valid,true);
@@ -162,7 +162,7 @@ let firstDigest;
  same(r.data.results[0].validation,{stage:'assessment_schema',reportedBy:'worker',issues:[{path:'assessment.conflicts.positions',code:'invalid_ref'}]});
  assert.equal(sql(w.file,"SELECT film_id FROM prediction_pointer WHERE film_id='"+f4+"'").length,0);assert.equal(asmKeys().filter(k=>k.includes('/'+f4+'/')).length,0);
 }
-// 9. The published contract: enrichment_schema carries contract.assessment; the retired v5 submit route and tool are gone (ADR 0162).
+// 9. The published contract: enrichment_schema carries contract.assessment; the retired v5 submit route and tool are gone (ADR 0167).
 {
  const schema=await call('enrichment_schema',{});const a=schema.data?.contract?.assessment||JSON.parse(schema.text).contract.assessment;
  assert.equal(a.version,1);assert.equal(a.required,false);assert.equal(a.maxSerializedBytes,3000);assert.ok(a.consistency.includes('attempted_found'));

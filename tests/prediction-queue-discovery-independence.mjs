@@ -1,7 +1,7 @@
 // AIR-431 / AIR-493. The Prediction queue advances on its own state while Discovery keeps writing. A runner step does
 // not rebuild from the whole catalog. A full rebuild reads the catalog as one admission snapshot (ADR 0147): a Discovery
 // chunk that only bumps `discovery_authority.generation` does not fence it. The runner is batch runner v2 (the only one since
-// ADR 0162), with the prediction domain and the Discovery authority in D1 mode on a local sqlite D1 stand-in, and every catalog
+// ADR 0167), with the prediction domain and the Discovery authority in D1 mode on a local sqlite D1 stand-in, and every catalog
 // query moves the Discovery generation (a continuation write on each statement). Local stand-ins only; nothing here calls
 // Cloudflare, TMDB or production.
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';

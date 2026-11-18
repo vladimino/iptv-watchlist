@@ -52,7 +52,7 @@ export async function flowWorld({scope=true,films=40,extra=null}={}){
  const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
  const manifests=new Map();
  return {records,file,env,db,stats,hooks,api,logs,ctx,fingerprint,prediction,
-  // Batch runner v2 (the only runner since ADR 0162): rebuild the queue, then one batch start whose answer is the manifest (runId, lease.epoch, films).
+  // Batch runner v2 (the only runner since ADR 0167): rebuild the queue, then one batch start whose answer is the manifest (runId, lease.epoch, films).
   async reconcileAndStart(body={}){const built=await api('queue/reconcile',{});const start=await api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'manual',capacity:{remainingPercent:100},...body});if(start.status===200&&start.data.runId)manifests.set(start.data.runId,{manifest:start.data,sent:new Set()});return {built,start};},
   // One film per batch submit: the next manifest film of the run not yet sent. Returns the answer and the D1 round trips of the submit.
   async pair(runId,item={}){

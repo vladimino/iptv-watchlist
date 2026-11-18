@@ -37,7 +37,7 @@ const sub=await w.api('batch/submit',{runId:first.data.runId,epoch:first.data.le
 assert.equal((await w.call('prediction_complete',{runId:first.data.runId,reason:'time_budget'})).isError,false);
 const live=await w.call('prediction_batch_start',{trigger:'scheduled'});assert.equal(live.isError,false);assert.equal(live.data.status,'running','a live run holds the lease during every dry run below');
 const liveFilms=live.data.films.map(f=>f.filmId);
-for(const route of ['next','submit']){const r=await w.api(route,{runId:live.data.runId,items:[],batchSize:1});assert.equal(r.status,404,'the retired v5 '+route+' route is gone (ADR 0162)');}
+for(const route of ['next','submit']){const r=await w.api(route,{runId:live.data.runId,items:[],batchSize:1});assert.equal(r.status,404,'the retired v5 '+route+' route is gone (ADR 0167)');}
 assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled'})).data.status,'already_running');
 // the one frozen manifest, taken by a dry-run start (still allowed to run before the faults, it writes nothing anyway)
 const freeze=await w.call('prediction_batch_start',{trigger:'manual',dryRun:true});assert.equal(freeze.isError,false,JSON.stringify(freeze.data).slice(0,200));
@@ -107,7 +107,7 @@ assert.ok(liveFilms.length>0);
  assert.deepEqual(f.attempts,[]);assert.equal(snapshot(v),baseline,'a profile mismatch writes nothing either');
 }
 
-// Phase 4: the production surface. The shared lease tools never accept a dry-run argument, the retired v5 tools are not listed (ADR 0162), the runner contract is v2-only, and the dry run needs the batch tools.
+// Phase 4: the production surface. The shared lease tools never accept a dry-run argument, the retired v5 tools are not listed (ADR 0167), the runner contract is v2-only, and the dry run needs the batch tools.
 {
  const tools=vm.runInContext('MCP_TOOLS',w.ctx),named=n=>tools.find(t=>t.name===n);
  for(const n of ['prediction_heartbeat','prediction_complete']){const p=named(n).inputSchema.properties||{};assert.ok(!('dryRun' in p)&&!('pin' in p)&&!('manifestHash' in p),n+' has no dry-run argument');}

@@ -145,7 +145,7 @@ for(const [name,args] of forbidden){
  assert.equal(environment.BUCKET.objects.size,0,name);
  assert.deepEqual(fetches.filter(url=>url!==TEAM+'/cdn-cgi/access/certs'),[],name);
 }
-// AIR-452 (ADR 0162): the retired one-film v5 tools are unknown tools. A call is a JSON-RPC error, not a tool result, and reads or writes nothing, with or without arguments.
+// AIR-452 (ADR 0167): the retired one-film v5 tools are unknown tools. A call is a JSON-RPC error, not a tool result, and reads or writes nothing, with or without arguments.
 const RETIRED_TOOLS=[['prediction_start',{trigger:'scheduled'}],['prediction_next',{runId:'run-1'}],['prediction_submit',{runId:'run-1',items:[{filmId:'film-1',failure:{kind:'parse_error'}}]}],['prediction_validate',{prediction:{}}]];
 for(const [name,args] of RETIRED_TOOLS){
  const touched=[],environment={BUCKET:{async get(key){touched.push('get '+key);return null;},async put(key){touched.push('put '+key);return {etag:'1'};},async head(key){touched.push('head '+key);return null;},async list(){touched.push('list');return {objects:[],truncated:false};},async delete(key){touched.push('delete '+key);}},MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD};
@@ -180,7 +180,7 @@ assert.equal(mismatch.body.result.isError,true);
 const unknown=await tool(env(),'prediction_complete',{runId:'missing-run'});
 assert.equal(unknown.body.result.structuredContent.httpStatus,404);
 assert.equal(unknown.body.result.isError,true);
-// A batch start without the D1 prediction authority (this R2-only environment) refuses and writes nothing: v2 is the only runner (ADR 0162).
+// A batch start without the D1 prediction authority (this R2-only environment) refuses and writes nothing: v2 is the only runner (ADR 0167).
 {const environment=env(),started=await tool(environment,'prediction_batch_start',{trigger:'scheduled',capacity:{remainingPercent:40}});
 assert.equal(started.body.result.isError,true);
 assert.equal(JSON.parse(started.body.result.content[0].text).httpStatus,409);
@@ -271,7 +271,7 @@ assert.equal(background.length,0);
 const predictionFields=Object.fromEntries(Object.entries(vm.runInContext('EXECUTION',context)).map(([key,values])=>[key,values.includes('unknown')?'unknown':values[0]]));
 const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['investigation'],execution:predictionFields,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']};
 const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
-// AIR-452 (ADR 0162): the prediction lifecycle runs on batch runner v2 only, through the real MCP handler, in D1 mode as production runs it
+// AIR-452 (ADR 0167): the prediction lifecycle runs on batch runner v2 only, through the real MCP handler, in D1 mode as production runs it
 // (sqlite D1 stand-in, in-memory R2; no model, network, Cloudflare or production). The Access JWT of these tools is asserted above over HTTP.
 const dumpDb=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 async function mcpFlow(films){

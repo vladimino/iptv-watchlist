@@ -58,6 +58,8 @@ The programme status (`programmeStatus` in `public/app.js`) distinguishes:
 | Future ended | Window has no shows ahead, archive remains | «Будущее закончилось» |
 | None | Saved window over | «Нет актуального окна» |
 
+The snapshot age is measured from `GET /api/programme` `publishedAt`, the confirmed completion of the published run ([AIR-518](https://trello.com/c/9TuQIIud), [read model](../api/enrichment.md#compact-footer-read-model)); the window states come from the clock, the saved window and the feed's real show times. «Окно закончилось» and «снимок старый» are therefore independent: a fresh publication whose feed has ended reads «Будущей программы нет», and an old publication with shows ahead reads «Данные устарели». The header reads only `/api/programme`, never the footer endpoint.
+
 The known end is the feed's last show (from `retained`), never the display edge, so an older programme is not passed off as fresh and no show is invented.
 
 ## Film availability on these horizons

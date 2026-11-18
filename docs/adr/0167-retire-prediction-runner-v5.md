@@ -1,4 +1,4 @@
-# ADR 0162: Retire the one-film prediction runner v5; batch runner v2 is the only prediction protocol
+# ADR 0167: Retire the one-film prediction runner v5; batch runner v2 is the only prediction protocol
 
 **Status:** Proposed
 **Original decision date:** 2026-11-17
@@ -21,7 +21,7 @@ v5 was also the only runner able to write predictions while `prediction_domain_a
 1. **Retire v5.** Remove the MCP tools `prediction_start`, `prediction_next`, `prediction_submit` and `prediction_validate`, the HTTP routes `POST /api/enrichment/start`, `POST /api/enrichment/next` and `POST /api/enrichment/submit`, and their implementation (the v5 start with its `legacy` mode, the one-film `next` with adaptive batch selection, the v5 submit, their step-timing wrapper and the helpers only they used). A removed tool is an unknown tool (`-32602`); a removed route falls through to the Worker's `404 Not found`. No `410` compatibility shim is kept, because no client remains.
 2. **Batch runner v2 is the only prediction protocol.** `prediction_heartbeat` and `prediction_complete` stay shared runner tools. `GET /api/enrichment/runner` (MCP `enrichment_runner`) describes v2 only and lists `retiredProtocols: ["v5"]`.
 3. **Stored v5 runs stay readable and safe.** Run records written by v5 (no `protocol`, or not `batch_v2`) are not migrated or deleted. Batch v2 still treats such a run as another protocol: its live lease turns a start away with `already_running`, an expired one is settled by the next v2 start, the v2 submit, hold and manifest tools answer `wrong_protocol`, and heartbeat, complete, diagnostics, history and Events keep reading it.
-4. **Predictions require the D1 prediction authority.** With v5 gone no runner writes predictions while the marker is `r2`. The owner confirmed that D1 stays the prediction authority and that no rollback to R2 is planned. The offline `--revert --confirm r2` procedure of ADR 0078 is unchanged as a data operation, but after it predictions stop until the marker is `d1` again or the Worker is rolled back to a version with v5.
+4. **Predictions require the D1 prediction authority.** With v5 gone no runner writes predictions while the marker is `r2`. The owner confirmed that D1 stays the prediction authority and that no rollback to R2 is planned. This is consistent with [ADR 0162](0162-d1-only-authority-retire-rollback-toolchain.md) (D1 is the only authority; the R2 rollback toolchain of ADR 0078 is retired): no prediction writer is kept for an `r2` marker.
 
 Not decided here: any change to the Scheduled Task registry (the disabled legacy v5 Task, the four v2 Tasks, the drift monitor), the prediction authority marker, flags, D1 or R2 data, or a v2 implementation of fingerprint pointer restoration.
 

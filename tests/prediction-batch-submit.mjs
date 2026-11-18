@@ -9,7 +9,7 @@ import {nonFunctional} from './suite-gate.mjs';
 const sha=async text=>[...new Uint8Array(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,'0')).join('');
 const dump=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const ready=async n=>{const w=await flowWorld({films:n});const r=await w.api('queue/reconcile',{});assert.equal(r.status,200);return w;};
-// AIR-452 (ADR 0162): no v5 route is left; a legacy v5 run stored before the deploy is planted by turning a fresh v2 run's record into a v5 record.
+// AIR-452 (ADR 0167): no v5 route is left; a legacy v5 run stored before the deploy is planted by turning a fresh v2 run's record into a v5 record.
 const legacyRun=async w=>{
  const m=await start(w),edit=doc=>{const out={...doc};delete out.protocol;out.pipelineVersion=5;return out;};
  const row=sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+m.runId+"'")[0];

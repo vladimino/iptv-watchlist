@@ -152,7 +152,7 @@ for(const [size,films,expected] of [[undefined,40,40],[1,40,1],[5,40,5],[10,40,1
  assert.equal(stop.status,200);assert.equal(stop.data.status,'partial');assert.equal(stop.data.stopReason,'time_budget');assert.equal(stop.data.title,'Пакет прогнозов прерван');assert.equal(stop.data.presentation,'batch_v2_terminal');
 }
 {
- // manifest_spent on a stored legacy v5 run is refused (ADR 0162: no v5 route is left, so the record is planted from a fresh v2 run).
+ // manifest_spent on a stored legacy v5 run is refused (ADR 0167: no v5 route is left, so the record is planted from a fresh v2 run).
  const w=await ready(3);await reconcile(w);
  const v5=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled'});assert.equal(v5.status,200);
  const edit=doc=>{const out={...doc};delete out.protocol;out.pipelineVersion=5;return out;};

@@ -1741,10 +1741,49 @@ function integrationTime(value){const ms=Date.parse(value);return Number.isFinit
 // `updatedAt`), the same instant the `epg` event stores as `at`. Not scan `report.updatedAt`, not `startedAt`/`dueAt`,
 // not D1 `published_epg_generation.published_at` (that column still copies the scan clock at pointer switch). An
 // in-flight or failed later run keeps `lastEpgPublishedAt` from the last complete record. Missing or invalid → null.
-function epgUxPublishedAt(sync,report){
- if(sync?.stage==='complete'&&!sync.error&&(!report?.runId||!sync.runId||sync.runId===report.runId))return integrationTime(sync.completedAt||sync.updatedAt);
- return integrationTime(sync?.lastEpgPublishedAt);
+//
+// AIR-518: the one read model of the published EPG generation, shared by `/api/programme` `publishedAt`, the header, the
+// footer EPG health and the EPG events/status reads. Publication and the last attempt are separate facts:
+// - the completion receipt is `stage: complete` with a valid `completedAt` (set by `prepareEpgCompletion` only once the run
+//   has passed its pointer switch and every seal phase), or, for a record written before AIR-390, a complete `updatedAt`
+//   without an error;
+// - the receipt counts for the published generation only when its runId is that generation's runId (`report` is the
+//   pinned published programme). A different runId, a missing receipt or an unreadable time never becomes a success;
+// - an `error` kept on a complete record is a failed earlier attempt of the same run that a retry recovered (the seal
+//   step stores the error and the successful retry does not clear it). It is reported as `attempt.outcome: recovered`
+//   and never makes the published generation failed. Without a readable generation (no `report` / no `runId`) or
+//   without `sync.runId` no record is proven and the surfaces stay unknown (`epg_unproven`).
+// The start's carried `lastEpgPublishedAt` is a separate, explicitly unbound helper (`epgCarriedPublishedAt`).
+const EPG_RUNNING_STAGES=['metadata','epg','seal'];
+function epgErrorCode(message){const text=String(message||'');return /HTTP/i.test(text)?'epg_http':/cover the current window/i.test(text)?'epg_window':/parse|xml|unexpected/i.test(text)?'epg_parse':'epg_failed';}
+// The completion receipt: a valid `completedAt`, or, only for a record written before AIR-390 (no `completedAt` field at all),
+// a complete `updatedAt` without an error. A present but invalid `completedAt` (null included) is never replaced by `updatedAt`.
+function epgCompletionReceipt(sync){
+ if(sync?.stage!=='complete')return null;
+ if(Object.prototype.hasOwnProperty.call(sync,'completedAt'))return integrationTime(sync.completedAt);
+ return sync.error?null:integrationTime(sync.updatedAt);
 }
+// The published-generation contract of every UI surface: success needs the receipt AND both runIds, non-empty and equal
+// (`report` is the pinned published programme). An absent or unreadable programme, a missing `sync.runId` or another
+// runId never credits the record; those surfaces then show the last proven (carried) date with an unproven state.
+function epgPublicationState(sync,report){
+ const receipt=epgCompletionReceipt(sync),reportRunId=typeof report?.runId==='string'&&report.runId?report.runId:null,runId=typeof sync?.runId==='string'&&sync.runId?sync.runId:null,error=sync?.error?String(sync.error):null;
+ const bound=!!receipt&&!!reportRunId&&reportRunId===runId;
+ const carried=integrationTime(sync?.lastEpgPublishedAt);
+ const publishedAt=bound?receipt:carried;
+ let attempt;
+ if(bound)attempt=error?{outcome:'recovered',code:epgErrorCode(error),at:null}:{outcome:'complete',code:null,at:receipt};
+ else if(sync?.stage==='complete'&&(receipt||!error))attempt={outcome:'unproven',code:error?epgErrorCode(error):null,at:null};
+ else if(error)attempt={outcome:'failed',code:epgErrorCode(error),at:integrationTime(sync.updatedAt)};
+ else if(sync&&EPG_RUNNING_STAGES.includes(sync.stage))attempt={outcome:'running',code:null,at:integrationTime(sync.updatedAt)};
+ else attempt={outcome:'unknown',code:null,at:null};
+ return {publishedAt,runId:bound?runId:reportRunId,binding:bound?'run':publishedAt?'carried':'none',attempt};
+}
+function epgUxPublishedAt(sync,report){return epgPublicationState(sync,report).publishedAt;}
+// Not a UI contract: the timestamp a new run carries forward as `lastEpgPublishedAt` at start, from the previous record
+// alone (no published programme is read there). The previous run's own receipt, else what it carried. Explicitly unbound;
+// the UI surfaces above still bind every date they show to the published runId.
+function epgCarriedPublishedAt(sync){return epgCompletionReceipt(sync)||integrationTime(sync?.lastEpgPublishedAt);}
 function integrationEntry(id,role,state,code,lastSuccessAt,lastFailureAt){return {id,role,state,code,lastSuccessAt:lastSuccessAt||null,lastFailureAt:lastFailureAt||null};}
 function ratingsFailureCode(kind){if(kind==='blocked'||kind==='anti_bot')return 'ratings_blocked';if(kind==='http_429')return 'ratings_rate_limit';if(kind==='degraded'||kind==='incomplete')return 'ratings_incomplete';if(kind==='lookup_failed'||kind==='publish_failed'||kind==='failed')return 'ratings_failed';return null;}
 function ratingsMessageCode(message){if(/403|anti-bot/i.test(message))return 'ratings_blocked';if(/429/.test(message))return 'ratings_rate_limit';if(/incomplete|pagination changed|duplicate letterboxd/i.test(message))return 'ratings_incomplete';return 'ratings_failed';}
@@ -1845,12 +1884,15 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
   if(!latestRating.ok)return entry(latestRating.code==='ratings_failed'?'failed':'degraded',latestRating.code,ratingSuccess,ratingFailureAt);
   return entry(fresh(ratingSuccess),freshCode(ratingSuccess),ratingSuccess,ratingFailureAt);
  })();
- const epgFailure=sync?.error?integrationTime(sync.updatedAt):null,epgSuccess=epgUxPublishedAt(sync,report);
+ const epgPublication=epgPublicationState(sync,report),epgSuccess=epgPublication.publishedAt,epgAttempt=epgPublication.attempt;
  const epg=(()=>{
-  if(sync?.error){const code=/HTTP/i.test(sync.error)?'epg_http':/cover the current window/i.test(sync.error)?'epg_window':/parse|xml|unexpected/i.test(sync.error)?'epg_parse':'epg_failed';return integrationEntry('epg','source','failed',code,epgSuccess,epgFailure);}
-  if(sync?.stage==='complete')return integrationEntry('epg','source',fresh(epgSuccess),freshCode(epgSuccess),epgSuccess,null);
-  if(sync&&['metadata','epg','seal'].includes(sync.stage)){const elapsed=age(sync.updatedAt);return elapsed!=null&&elapsed<15*60000?integrationEntry('epg','source','running','running',epgSuccess,null):integrationEntry('epg','source','degraded','epg_failed',epgSuccess,integrationTime(sync.updatedAt));}
-  return integrationEntry('epg','source','unknown','no_data',epgSuccess,null);
+  const entry=(...args)=>({...integrationEntry('epg','source',...args),runId:epgPublication.runId});
+  if(epgAttempt.outcome==='complete')return entry(fresh(epgSuccess),freshCode(epgSuccess),epgSuccess,null);
+  if(epgAttempt.outcome==='recovered')return {...entry(fresh(epgSuccess),freshCode(epgSuccess),epgSuccess,null),lastAttempt:{outcome:'recovered',code:epgAttempt.code}};
+  if(epgAttempt.outcome==='failed')return entry('failed',epgAttempt.code,epgSuccess,epgAttempt.at);
+  if(epgAttempt.outcome==='running'){const elapsed=age(sync.updatedAt);return elapsed!=null&&elapsed<15*60000?entry('running','running',epgSuccess,null):entry('degraded','epg_failed',epgSuccess,integrationTime(sync.updatedAt));}
+  if(epgAttempt.outcome==='unproven')return entry('unknown','epg_unproven',epgSuccess,null);
+  return entry('unknown','no_data',epgSuccess,null);
  })();
  const reportRunId=report?.runId||null,resolverConfirmed=[];
  if(discoveryStatus?.stage==='complete'&&!discoveryStatus.error){const at=integrationTime(discoveryStatus.finishedAt||discoveryStatus.at);if(at)resolverConfirmed.push({at,current:resolverMatches(discoveryStatus.programmeRunId,reportRunId)});}
@@ -1874,7 +1916,7 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
   if(continuation?.retryAt&&Date.parse(continuation.retryAt)>now)return integrationEntry('resolver','source','degraded','resolver_backoff',success,checkpoint);
   if(skewed(checkpointMs)||skewed(batchMs))return entry('unknown','no_data');
   if(continuation?.remainingChunks>0)return resolverProgress();
-  const epgSettled=sync?.stage==='complete'&&!sync.error,exhausted=continuation?.remainingChunks===0;
+  const epgSettled=['complete','recovered'].includes(epgAttempt.outcome),exhausted=continuation?.remainingChunks===0;
   if(!sameGeneration||!epgSettled||!exhausted||!Number.isFinite(gateMs))return entry('waiting','resolver_waiting');
   if(gateMs>now)return entry('waiting','resolver_waiting',{gateAt:gate});
   const graceEnd=resolverProgressGraceEnd(gateMs);
@@ -2081,7 +2123,7 @@ async function startIdle(env,{body,profile,queue,plan}){
  const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');return json({status:stage,...lastBatch,...scheduledRunFields()});
 }
 // ---- Batch runner v2: batch_start (ADR 0122 + ADR 0136). One request returns one self-sufficient manifest of at most the client-requested manifestSize (default and ceiling BATCH_RUNNER.maxManifestFilms). ----
-// It shares the queue, runner lease, retry records and persistence of the retired v5 runner (ADR 0162), whose stored runs it still recognizes. `batch_submit` is a separate delivery.
+// It shares the queue, runner lease, retry records and persistence of the retired v5 runner (ADR 0167), whose stored runs it still recognizes. `batch_submit` is a separate delivery.
 const BATCH_PROTOCOL='batch_v2';
 const BATCH_V2_PRESENTATION='batch_v2_terminal';
 const BATCH_MANIFEST_FORMAT='compact-1';
@@ -2883,7 +2925,7 @@ async function timedBatchStep(env,step,body,requestId,work){
 async function savePredictionRun(env,run){await saveJSON(env,runKey(run.runId),run);await saveJSON(env,ENRICHMENT_KEY+'latest-run.json',run);await diagnosticCheckpoint(env,run);}
 // The document GET /api/enrichment/schema serves; the batch manifest carries the same one, so a model needs no further read.
 function enrichmentSchemaDocument(){return {profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:GENERAL_EXECUTION,moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS},strengths:'short string array',risks:'short string array',confidence:CONFIDENCE,sourceBasis:SOURCE_BASIS,sourceRefs:'URL or model_knowledge',evidence:'optional; see contract.fingerprint.evidence. Omitting the key keeps a legacy fingerprint'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:CONFIDENCE,matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS}},contract:schemaContract(),rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film','Check the fingerprint and prediction against contract before prediction_batch_submit: every required execution dimension present, every enum value from its list (payoff and ending_quality use weak, mixed, strong, unknown, not medium; hero_vulnerability uses low, mixed, high, unknown), moodLabels 2–4 labels. A rejected item returns results[].validation.issues with the field path and code.']};}
-// GET /api/enrichment/runner (and the enrichment_runner MCP tool): the live runner contract. Since ADR 0162 batch runner v2 is the only protocol; the one-film
+// GET /api/enrichment/runner (and the enrichment_runner MCP tool): the live runner contract. Since ADR 0167 batch runner v2 is the only protocol; the one-film
 // v5 start/next/submit routes and tools are retired. pipelineVersion stays the stored run format of the shared run records, unchanged by the retirement.
 function predictionRunnerContract(){return {pipelineVersion:5,protocol:BATCH_PROTOCOL,retiredProtocols:['v5'],leaseTtlMs:RUNNER_LEASE_TTL,heartbeat:'/api/enrichment/heartbeat',complete:'/api/enrichment/complete',read:'/api/enrichment/runner',itemFailures:{reportVia:'batch submit items[].failure {kind, reason}',allowedKinds:['parse_error','validation_error'],retryable:true,retryBaseMs:3600000,validation:{preflight:'prediction_batch_validate (read-only) or GET /api/enrichment/schema contract',reportedVia:'batch submit results[].validation {stage, reportedBy, issues[{path, code}]}',issueCodes:ISSUE_CODES}},batchRunner:{version:BATCH_RUNNER.version,protocol:BATCH_PROTOCOL,start:'/api/enrichment/batch/start',submit:'/api/enrichment/batch/submit',hold:'/api/enrichment/batch/hold',manifestFormat:BATCH_MANIFEST_FORMAT,...batchLimits(),requires:{predictionAuthority:'d1'}},instructions:['Batch start returns already_running: exit immediately, do not adopt its runId.','One batch start returns the whole manifest with the profile, schema and metadata; generate, validate, hold and submit its films in groups of at most 10 with the runId and lease epoch.','Lease TTL is 15 minutes. Heartbeat before model calls and about every 10 minutes during long calls.','Malformed or invalid per-film output: submit {filmId,failure:{kind,reason}} and continue. Never complete for one item failure.','Complete with reason manifest_spent once every manifest film is settled while ready films remain in the queue; omit reason when the queue is empty; otherwise pass the real systemic stop reason.','A formed response does not prove the client received it. Send or read X-Request-Id. On an external or systemic stop, complete may include fault {origin, failedStep, providerErrorCode, httpStatus, receivedRequestId}. Omit fault when the cause is unknown. A fault on a normal completion is rejected.']};}
 function runSummary(r){return {runId:r.runId,processed:Object.values(r.results||{}).filter(x=>x!=='failed').length,batchCount:r.batchCount||1,lastHeartbeatAt:r.lastHeartbeatAt||null,hotRemaining:r.hotRemaining??null,coldRemaining:r.coldRemaining??null,stopReason:r.stopReason||null,sourceProgrammeRunId:r.sourceProgrammeRunId,tasteProfileVersion:r.tasteProfileVersion,tasteProfileHash:r.tasteProfileHash,fingerprintSchemaVersion:r.fingerprintSchemaVersion,predictionPromptVersion:r.predictionPromptVersion,eligibleCount:r.eligibleCount,selectedCount:r.selectedIds.length,batchSize:r.batchSize??r.selectedIds.length,adaptivePlan:r.adaptivePlan||null,deadlineAt:r.deadlineAt||null,status:r.status,trigger:r.trigger||'manual',startedAt:r.createdAt,finishedAt:r.completedAt||null,checked:Object.keys(r.results||{}).length,added:Object.values(r.results||{}).filter(x=>x==='created').length,updated:Object.values(r.results||{}).filter(x=>x==='recalculated').length,failed:Object.keys(r.failures||{}).length,hotProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='hot').length,coldProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='cold').length};}

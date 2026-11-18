@@ -1,6 +1,6 @@
 # Hourly prompt — Stage B Predictions only
 
-**Retired, historical only.** This is the prompt of the retired one-film v5 runner. It calls `prediction_start`, `prediction_next`, `prediction_submit` and `prediction_validate`, which the Worker no longer exposes ([ADR 0162](../../adr/0162-retire-prediction-runner-v5.md)), so it is neither a producer nor a working rollback path. It is kept as history; do not install it.
+**Retired, historical only.** This is the prompt of the retired one-film v5 runner. It calls `prediction_start`, `prediction_next`, `prediction_submit` and `prediction_validate`, which the Worker no longer exposes ([ADR 0167](../../adr/0167-retire-prediction-runner-v5.md)), so it is neither a producer nor a working rollback path. It is kept as history; do not install it.
 
 **Status:** the exact text proposed for the owner-approved registry edit of [AIR-324](https://trello.com/c/kNtaEbm8) (Hourly Predictions). This file is **not** the live ChatGPT Scheduled Task. Merging it does not change the registry, enable the task, or authorize a production run.
 

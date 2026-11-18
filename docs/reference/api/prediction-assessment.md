@@ -10,7 +10,7 @@ A per-film diagnostic artifact for later analysis of the Taste Profile and of Pr
 
 An optional `assessment` object on an item of `prediction_batch_submit` (a sibling of `prediction`, **not** inside it), validated identically in `prediction_batch_validate` and the `dryRun: true` submit. Nothing else accepts it:
 
-- The retired v5 single-film tools `prediction_validate` and `prediction_submit` ([ADR 0162](../../adr/0162-retire-prediction-runner-v5.md)) never took an assessment; no remaining path accepts one outside the batch tools.
+- The retired v5 single-film tools `prediction_validate` and `prediction_submit` ([ADR 0167](../../adr/0167-retire-prediction-runner-v5.md)) never took an assessment; no remaining path accepts one outside the batch tools.
 - `prediction_batch_validate` states in its description and answer that its assessment verdict applies to the v2 submit only; the answer carries `assessment {checked, issues}` per item beside `fingerprint` and `prediction`.
 
 ```
@@ -94,7 +94,7 @@ Optional at first. A version without an assessment object is "no assessment", ne
 
 ## Prerequisite: close the unknown-key hole
 
-The prerequisite and phases below record how the assessment was delivered while the v5 runner still existed; its v5 parts are historical since [ADR 0162](../../adr/0162-retire-prediction-runner-v5.md).
+The prerequisite and phases below record how the assessment was delivered while the v5 runner still existed; its v5 parts are historical since [ADR 0167](../../adr/0167-retire-prediction-runner-v5.md).
 
 Today the prediction validator ignores keys outside the six model fields and both submit paths copy the whole object into the version body, the D1 display document, the bundle and the view index. Before any assessment is stored, validators must reject undeclared keys in `prediction` (the derived `confidenceAssessment` stays stripped) in both protocols, with `unknown_field` at the rejected field path. The v5 HTTP route must also reject undeclared top-level item keys with `unknown_field` instead of silently dropping them; v5 MCP already rejects undeclared keys. Valid legacy payloads containing only the six declared model fields remain compatible. A live v5 Task prompt change is neither required by this decision nor authorized here; test the actual caller shape before shipping the stricter validator.
 

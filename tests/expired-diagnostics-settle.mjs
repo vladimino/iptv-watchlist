@@ -1,5 +1,5 @@
 // AIR-415 / AIR-486: expired run diagnostics are settled eventually, one small list page per authorized complete, with a durable resume cursor; a start
-// never walks the history. Since ADR 0162 the runs are batch runner v2 runs over D1 prediction authority, as production runs them; the run records are D1 rows
+// never walks the history. Since ADR 0167 the runs are batch runner v2 runs over D1 prediction authority, as production runs them; the run records are D1 rows
 // and the diagnostic rows, the settle cursor and the lease mirror stay in R2. Local stand-ins only.
 import vm from 'node:vm';import assert from 'node:assert/strict';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';

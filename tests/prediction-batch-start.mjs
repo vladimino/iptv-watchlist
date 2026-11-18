@@ -1,5 +1,5 @@
 // Batch runner v2, `batch_start` (ADR 0122). One request returns one self-sufficient manifest of at most 100 films, on the queue, runner lease and
-// persistence the retired v5 runner shared (ADR 0162: a stored legacy v5 run is still recognized), with the prediction domain in D1 mode as production runs it. Offline: a sqlite D1 stand-in and an in-memory R2. No Cloudflare,
+// persistence the retired v5 runner shared (ADR 0167: a stored legacy v5 run is still recognized), with the prediction domain in D1 mode as production runs it. Offline: a sqlite D1 stand-in and an in-memory R2. No Cloudflare,
 // TMDB, model or production call. `batch_submit`, the Scheduled Task and every activation are other deliveries; nothing here generates a prediction.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -20,7 +20,7 @@ const LIMIT=256*1024,INITIAL_LIMIT=160*1024;
 const batch=(w,body={})=>w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',...body});
 const ready=async(films,opts={})=>{const w=await flowWorld({films,...opts});return w;};
 const reconcile=async w=>{const r=await w.api('queue/reconcile',{});assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));return r;};
-// AIR-452 (ADR 0162): the v5 routes are retired, but a legacy v5 run stored before the deploy can still hold the runner lease. It is planted here by turning
+// AIR-452 (ADR 0167): the v5 routes are retired, but a legacy v5 run stored before the deploy can still hold the runner lease. It is planted here by turning
 // a fresh v2 run's record (D1 row and R2 mirrors) into a v5 record: no protocol, pipeline version 5.
 const legacyRun=async(w,body={})=>{
  const r=await batch(w,body);assert.equal(r.data.status,'running',JSON.stringify(r.data).slice(0,200));
@@ -483,7 +483,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const r=await batch(w);assert.equal(r.status,409);assert.equal(r.data.code,'batch_runner_requires_d1');
 }
 
-// 11. The runner contract is v2-only (ADR 0162): no v5 step, batch size or model batching is advertised.
+// 11. The runner contract is v2-only (ADR 0167): no v5 step, batch size or model batching is advertised.
 {
  const w=await ready(5);const contract=await (await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/runner'),w.env)).json();
  assert.equal(contract.pipelineVersion,5);assert.equal(contract.protocol,'batch_v2');assert.deepEqual(contract.retiredProtocols,['v5']);
@@ -491,7 +491,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  assert.ok(!JSON.stringify(contract).match(/next\/submit|\/api\/enrichment\/(start|next|submit)\b/),'no retired route is advertised');
  assert.equal(contract.batchRunner.version,2);assert.equal(contract.batchRunner.protocol,'batch_v2');assert.equal(contract.batchRunner.start,'/api/enrichment/batch/start');assert.equal(contract.batchRunner.maxManifestFilms,100);assert.deepEqual(contract.batchRunner.requires,{predictionAuthority:'d1'});
 }
-// 5d. The runner contract under the 256 KiB ceiling: only batchRunner.maxManifestBytes moved (AIR-450); the v5 start route is gone (ADR 0162).
+// 5d. The runner contract under the 256 KiB ceiling: only batchRunner.maxManifestBytes moved (AIR-450); the v5 start route is gone (ADR 0167).
 {
  const w=await ready(5);const contract=JSON.parse(JSON.stringify(w.ctx.predictionRunnerContract?w.ctx.predictionRunnerContract():(await import('node:vm')).runInContext('predictionRunnerContract()',w.ctx)));
  assert.equal(contract.pipelineVersion,5);assert.equal(contract.leaseTtlMs,15*60000);

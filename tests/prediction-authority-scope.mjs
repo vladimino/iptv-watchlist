@@ -1,4 +1,4 @@
-// AIR-441. The prediction domain's authority marker is read in one D1 round trip, and inside one runner step (a batch submit since ADR 0162 retired the
+// AIR-441. The prediction domain's authority marker is read in one D1 round trip, and inside one runner step (a batch submit since ADR 0167 retired the
 // v5 next and submit) it is reused until that request's own database does something other than read. This test proves the reduction on a run in D1 mode, that the answers and the stored state are those of a run
 // without the scope, that the scope never leaves its request, and that a marker that moves under a request fails its next write closed instead of
 // landing it. Local sqlite and in-memory R2 stand-ins only.

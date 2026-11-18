@@ -1,5 +1,5 @@
 // AIR-152: submit schema rejections name the field and the violation from a closed vocabulary, the same contract GET /api/enrichment/schema publishes for
-// preflight. Since ADR 0162 the submit is the batch runner v2 `batch_submit` (D1 mode, sections 2, 3 and 6); the pure validators, the runner contract and the
+// preflight. Since ADR 0167 the submit is the batch runner v2 `batch_submit` (D1 mode, sections 2, 3 and 6); the pure validators, the runner contract and the
 // film diagnostics (sections 1, 4 and 5) need no runner. Retry and lease semantics are unchanged; no payload text, title or secret leaves the request.
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';

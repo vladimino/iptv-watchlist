@@ -102,6 +102,9 @@ export const FILES={
  "alias-provenance.mjs": {
   "suite": "core"
  },
+ "build-atomic-dist.mjs": {
+  "suite": "core"
+ },
  "candidate-discovery.mjs": {
   "suite": "core"
  },
@@ -928,6 +931,19 @@ export const FILES={
  "letterboxd-inferred.mjs": {
   "suite": "core"
  },
+ "letterboxd-diary-identity-d1.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-diary-identity-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "letterboxd-diary-identity.mjs": {
+  "suite": "core"
+ },
+ "ratings-diary-identity.mjs": {
+  "suite": "core"
+ },
  "letterboxd-rated-admission.mjs": {
   "suite": "core"
  },
@@ -1153,6 +1169,9 @@ export const FILES={
   "suite": "core"
  },
  "prediction-queue-hotenteredat.mjs": {
+  "suite": "core"
+ },
+ "prediction-scoring-candidate.mjs": {
   "suite": "core"
  },
  "prediction-recovery.mjs": {

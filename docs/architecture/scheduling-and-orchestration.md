@@ -50,13 +50,13 @@ The hourly Predictions Task does not wait for the EPG Workflow to finish a seal.
 
 ### Hourly prediction pipeline
 
-The producer of personal predictions is the external batch v2 Scheduled Tasks described in the next section; batch v2 is the only prediction protocol, and the one-film v5 path (`prediction_start`, `prediction_next`, `prediction_validate`, `prediction_submit`) is retired ([ADR 0162](../adr/0162-retire-prediction-runner-v5.md)). Verify the enabled Tasks, schedules and prompts in the live registry; the dated readback is in the [Scheduled Tasks reference](../reference/scheduled-tasks.md).
+The producer of personal predictions is the external batch v2 Scheduled Tasks described in the next section; batch v2 is the only prediction protocol, and the one-film v5 path (`prediction_start`, `prediction_next`, `prediction_validate`, `prediction_submit`) is retired ([ADR 0167](../adr/0167-retire-prediction-runner-v5.md)). Verify the enabled Tasks, schedules and prompts in the live registry; the dated readback is in the [Scheduled Tasks reference](../reference/scheduled-tasks.md).
 
 Migration `0007` is applied and the prediction marker is `d1`, so the runner writes D1 mutable state with immutable R2 bodies ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)). The batch runner refuses to start while the marker is `r2` (`batch_runner_requires_d1`); D1 stays the prediction authority and no rollback to `r2` is planned. A new `fingerprint_and_prediction` item carries `fingerprint.evidence`, and the film's metadata is passed to `prediction_batch_validate` when an item cites a metadata token. Worker fingerprint versions stay at 1.
 
 ### Four independent hourly Predictions v2 Tasks
 
-**Live producer.** Four batch v2 Tasks were created and enabled under separate owner GOs; the live registry, not this page, is the authority for their state. Nothing here creates, edits, enables or runs a Task ([authorization](../process/authorization-and-escalation.md#chatgpt-scheduled-task-authorization)). The contract is [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md), [ADR 0136](../adr/0136-prediction-batch-manifest-size-and-spent-complete.md) and [ADR 0162](../adr/0162-retire-prediction-runner-v5.md).
+**Live producer.** Four batch v2 Tasks were created and enabled under separate owner GOs; the live registry, not this page, is the authority for their state. Nothing here creates, edits, enables or runs a Task ([authorization](../process/authorization-and-escalation.md#chatgpt-scheduled-task-authorization)). The contract is [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md), [ADR 0136](../adr/0136-prediction-batch-manifest-size-and-spent-complete.md) and [ADR 0167](../adr/0167-retire-prediction-runner-v5.md).
 
 Four hourly Tasks, offset by 15 minutes, each one bounded invocation: A `:00`, B `:15`, C `:30`, D `:45` (Europe/Madrid). They are four hourly recurrences, not one 15-minute recurrence. The Tasks share no memory and no orchestration; the only coordination is the one D1 queue and the one runner lease.
 

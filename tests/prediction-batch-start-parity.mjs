@@ -3,7 +3,7 @@
 // run, lease and diagnostics state), except the known differences below. The Worker no longer puts a ChatGPT Task time on the start envelope, so
 // nextCatchUpAt / nextScheduledRunAt are null and envelope byte counts (manifestBytes, overflow bytes) shrink by that JSON. Regenerate the baseline with
 // scripts/prediction-batch-start-diff.mjs --write-baseline.
-// AIR-452 (ADR 0162): retiring v5 reworded the schema contract text the manifest carries (prediction_batch_submit / prediction_batch_validate instead of
+// AIR-452 (ADR 0167): retiring v5 reworded the schema contract text the manifest carries (prediction_batch_submit / prediction_batch_validate instead of
 // prediction_submit / prediction_validate), so contractSha, manifestHash and the manifest byte counts differ from the baseline; no rule, film, order, lane,
 // plan, queue, run, lease or diagnostics value does. The rewording itself is checked below.
 import assert from 'node:assert/strict';

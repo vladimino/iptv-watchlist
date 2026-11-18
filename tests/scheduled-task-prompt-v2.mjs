@@ -114,7 +114,7 @@ assert.ok(!/только активн\w* Predictions Task/i.test(prompt)&&!/only
 const mcp=fs.readFileSync('src/mcp.js','utf8');
 const tools=new Set([...mcp.matchAll(/\{name:'([a-z_]+)',title:/g)].map(x=>x[1]));
 const calls=text=>new Set([...text.matchAll(/\b((?:prediction|enrichment|epg|ratings)_[a-z_]+)\(/g)].map(x=>x[1]));
-// AIR-452 (ADR 0162): the v5 tools are retired and no longer registered; the prompts keep forbidding them by name, and they must stay unregistered.
+// AIR-452 (ADR 0167): the v5 tools are retired and no longer registered; the prompts keep forbidding them by name, and they must stay unregistered.
 const RETIRED=new Set(['prediction_start','prediction_next','prediction_submit','prediction_validate']);
 for(const t of RETIRED)assert.ok(!tools.has(t),t+' is retired and not registered');
 const forbiddenOf=text=>text.split('\n').find(l=>l.startsWith('ЗАПРЕЩЕНО:'));

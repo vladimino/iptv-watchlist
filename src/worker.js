@@ -816,7 +816,29 @@ async function writeDiscoveryEvent(env,event){
  const replaced=await env.BUCKET.put(key,JSON.stringify(event),{httpMetadata,onlyIf:{etagMatches:current.etag}});
  return replaced!==null?'written':'failed';
 }
-async function eventPage(env,cursor){const page=await env.BUCKET.list({prefix:'events/items/',limit:20,...(cursor?{cursor}:{})});const events=await Promise.all(page.objects.map(o=>loadJSON(env,o.key)));for(const event of events.filter(Boolean)){if(event.film)event.film=eventFilm(event.film);if(Array.isArray(event.added))event.added=event.added.map(f=>eventFilm(f));if(Array.isArray(event.removed))event.removed=event.removed.map(f=>eventRemovedFilm(f));}return {events:events.filter(Boolean),cursor:page.truncated?page.cursor:null};}
+// AIR-489 / ADR 0166: read-side presentation only. A stored ratings event whose film has no title is shown with the label of the TMDB movie its Letterboxd id has
+// been bridged to since (a verified source check), from the facts link and the catalog / rated admission. The stored event is never rewritten; an unbridged id stays unlabelled.
+async function presentRatingsEvents(env,events){
+ try{
+  if(typeof LetterboxdFacts==='undefined'||typeof LetterboxdFacts.tmdbForLids!=='function')return;
+  const films=[];
+  for(const event of events||[]){if(event?.type!=='ratings'||!event.details)continue;for(const group of ['added','updated','rated'])for(const film of Array.isArray(event.details[group])?event.details[group]:[])if(film&&!film.title&&typeof film.id==='string'&&!film.id.startsWith('tmdb_'))films.push(film);}
+  const capped=films.slice(0,50);
+  if(!capped.length)return;
+  const tmdbs=await LetterboxdFacts.tmdbForLids(env,capped.map(film=>film.id));
+  if(!tmdbs.size)return;
+  const ids=[...new Set([...tmdbs.values()].map(tmdb=>'tmdb_'+tmdb))],labels=await ratingsFilmLabels(env,ids);
+  let admitted=new Map();
+  if(ids.some(id=>!labels.get(id)?.title)&&typeof CanonicalCatalogReader!=='undefined')try{admitted=await CanonicalCatalogReader.readAdmissions(env,ids.map(id=>'film:tmdb:'+id.slice(5)));}catch{admitted=new Map();}
+  for(const film of capped){
+   const tmdb=tmdbs.get(film.id);if(!tmdb)continue;
+   const label=labels.get('tmdb_'+tmdb),receipt=admitted.get?.('film:tmdb:'+tmdb)?.ratedAdmission||null,title=(label&&label.title)||(receipt&&receipt.title)||null;
+   if(!film.tmdb)film.tmdb=tmdb;
+   if(title){film.title=title;if(!Number.isInteger(film.year))film.year=(label&&Number.isInteger(label.year)?label.year:null)??(receipt&&Number.isInteger(receipt.year)?receipt.year:null);}
+  }
+ }catch{}
+}
+async function eventPage(env,cursor){const page=await env.BUCKET.list({prefix:'events/items/',limit:20,...(cursor?{cursor}:{})});const events=await Promise.all(page.objects.map(o=>loadJSON(env,o.key)));for(const event of events.filter(Boolean)){if(event.film)event.film=eventFilm(event.film);if(Array.isArray(event.added))event.added=event.added.map(f=>eventFilm(f));if(Array.isArray(event.removed))event.removed=event.removed.map(f=>eventRemovedFilm(f));}await presentRatingsEvents(env,events);return {events:events.filter(Boolean),cursor:page.truncated?page.cursor:null};}
 async function bootstrapEvents(env){if(await loadJSON(env,'events/bootstrap.json'))return;const report=await loadJSON(env,'programme.json'),list=await loadJSON(env,'watchlist.json');if(report)await writeEvent(env,epgEvent(report,'baseline-epg'));if(list)await writeEvent(env,watchlistEvent(null,list,null,report,'baseline-watchlist'));let cursor;do{const page=await env.BUCKET.list({prefix:'started/',...(cursor?{cursor}:{})});for(const o of page.objects){const mark=await loadJSON(env,o.key);if(mark?.lastEvent){await writeEvent(env,mark.lastEvent);continue;}if(mark&&mark.started!==false&&mark.startedAt){const film=report?.films.find(f=>String(f.id)===mark.id)||list?.films.find(f=>String(f.id)===mark.id);if(film)await writeEvent(env,{id:'baseline-started-'+mark.id,type:'started',at:mark.startedAt,film:eventFilm(film,eventTitles(report))});}}cursor=page.truncated?page.cursor:undefined;}while(cursor);await saveJSON(env,'events/bootstrap.json',{at:new Date().toISOString()});}
 async function startedFilms(env){let cursor;const ids=[];do{const page=await env.BUCKET.list({prefix:'started/',include:['customMetadata'],...(cursor?{cursor}:{})});for(const object of page.objects){const match=object.key.match(/^started\/([a-zA-Z0-9_-]+)\.json$/);if(match&&object.customMetadata?.started!=='false')ids.push(match[1]);}cursor=page.truncated?page.cursor:undefined;}while(cursor);return ids;}
 async function setStarted(env,body){
@@ -848,7 +870,7 @@ async function beginSync(env){
  const gate=await ratingsGate(env);
  if(gate.active&&current)await flushRemovalHandover(env,current);
  const carried=!gate.active&&current?{...(current.removalRefs?{removalRefs:current.removalRefs}:{}),...(current.removalLookups?{removalLookups:current.removalLookups}:{})}:{};
- const lastEpgPublishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(current,null):null;
+ const lastEpgPublishedAt=typeof epgCarriedPublishedAt==='function'?epgCarriedPublishedAt(current):null;
  const startedNow=new Date();const run={runId:crypto.randomUUID(),startedAt:startedNow.toISOString(),...(typeof OrchestrationPolicy!=='undefined'&&pausePresent?{runKey:OrchestrationPolicy.madridDayKey(startedNow.getTime())}:{}),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...carried,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{}),...(lastEpgPublishedAt?{lastEpgPublishedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
  }catch(e){const previous=await loadJSON(env,'sync.json'),ingest=await loadJSON(env,'watchlist-ingest.json'),lastSuccessAt=previous?.stage==='complete'&&!previous.error?previous.updatedAt:ingest?.lastSuccessAt||null;await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});throw e;}
 }

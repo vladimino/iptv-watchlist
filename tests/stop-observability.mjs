@@ -1,4 +1,4 @@
-// Stop observability of batch runner v2 runs (ADR 0162; D1 prediction authority, as production runs it): a zero-success quota-blocked start, a quota stop
+// Stop observability of batch runner v2 runs (ADR 0167; D1 prediction authority, as production runs it): a zero-success quota-blocked start, a quota stop
 // before and after saved results with measured counts, silent item failures and overlapping triggers, immediate storage and lease-loss stops, idempotent
 // completion and durable Event delivery after a journal outage. Events carry no secret or caller text. Local stand-ins only.
 import assert from 'node:assert/strict';

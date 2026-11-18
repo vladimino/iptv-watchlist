@@ -1,4 +1,4 @@
-// AIR-417 / AIR-424 / AIR-431 on batch runner v2 (ADR 0162; D1 prediction authority, as production runs it). A catalog that an EPG publication holds or loads
+// AIR-417 / AIR-424 / AIR-431 on batch runner v2 (ADR 0167; D1 prediction authority, as production runs it). A catalog that an EPG publication holds or loads
 // is a wait at start, not a storage failure: the start answers 503 prediction_catalog_held, takes no lease, creates no run and writes no Event. A run that
 // already owns its manifest reads no catalog: its batch submit and its completion are untouched by a held catalog, and an identical replay is already_current.
 // The stage failure lines of the retired v5 start (diagnosedStart) are gone with it. Local stand-ins only.

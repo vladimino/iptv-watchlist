@@ -2,7 +2,7 @@
 // the server stores `eligible_queue_empty` from the refreshed outstanding set, the Event snapshot and the
 // footer status carry the read-only queue slices (outstanding, eligible now, deferred by retry, earliest
 // retry time), and the UI never claims that the queue was processed completely.
-// Since ADR 0162 the runs are batch runner v2 runs over D1 prediction authority, as production runs them (small catalog; the production-shaped coverage
+// Since ADR 0167 the runs are batch runner v2 runs over D1 prediction authority, as production runs them (small catalog; the production-shaped coverage
 // arithmetic is covered by the footer and Event tests).
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';

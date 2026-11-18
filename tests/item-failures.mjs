@@ -1,4 +1,4 @@
-// Item failures on batch runner v2 (the only runner since ADR 0162), on the real Worker code with the prediction domain in D1 mode over a sqlite D1 stand-in and an
+// Item failures on batch runner v2 (the only runner since ADR 0167), on the real Worker code with the prediction domain in D1 mode over a sqlite D1 stand-in and an
 // in-memory R2. One bad film never ends the run: a Worker validation failure and a caller-reported failure each become a retry record with the existing backoff,
 // their replay is idempotent, the healthy films are written, the run completes normally, and after the backoff the next run offers the failed films again,
 // reusing a stored valid fingerprint (prediction_only). Local stand-ins only; nothing calls a model, TMDB or production.

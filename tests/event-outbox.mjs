@@ -1,5 +1,5 @@
 // AIR-416 (ADR 0107): delivery of a prediction run's stop events to the Events Log is owned by the Predictions writer. No read delivers anything;
-// the next authorized start does, under the writer lease. Since ADR 0162 the start is batch runner v2 (D1 prediction authority, as production runs it); a v2
+// the next authorized start does, under the writer lease. Since ADR 0167 the start is batch runner v2 (D1 prediction authority, as production runs it); a v2
 // run has one terminal Event and no start Event (ADR 0146), so start records exist only as stored legacy v5 records, which the delivery still handles.
 // Covered here: an empty outbox costs no write, a failed stop event delivered by the next start without a page visit, a crash between the durable record and
 // the journal, duplicate and concurrent deliveries, a partial success, bounded retries ending in a visible quarantine that keeps the record, a failing index
