@@ -24,10 +24,11 @@ const good={filmId:a,fingerprint:w.fingerprint,prediction:w.prediction};
  const r=await w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items:[{...good,extra:1}]});
  assert.equal(r.status,400);assert.deepEqual(r.data.issues,[{path:'items[0].extra',code:'unknown_field'}]);
 }
-// 3. v5: undeclared item keys are a 400 with the explicit code (no run is needed: the check is pure).
+// 3. The retired v5 submit route is gone (ADR 0167): 404 and nothing is checked or written.
 {
+ const before=versions(w).length;
  const r=await w.api('submit',{runId:'none',items:[{filmId:a,prediction:w.prediction,assessment:{x:1}}]});
- assert.equal(r.status,400);assert.deepEqual(r.data.issues,[{path:'items[0].assessment',code:'unknown_field'}]);
+ assert.equal(r.status,404);assert.deepEqual(r.data,{error:'Not found'});assert.equal(versions(w).length,before);
 }
 // 4. A valid payload (six model fields) is unchanged and the stored version carries exactly those fields; confidenceAssessment is still stripped.
 {
@@ -37,4 +38,4 @@ const good={filmId:a,fingerprint:w.fingerprint,prediction:w.prediction};
  const text=JSON.stringify(body);assert.ok(!text.includes('ignored'),'the caller confidenceAssessment is replaced by the Worker own');
  for(const k of ['predictedRating','probability4Plus','confidence','matchSignals','mainRisk','moodLabels'])assert.ok(k in (body.prediction||body),k);
 }
-console.log('prediction-closed-contract: unknown_field on prediction and item keys, no write on rejection and v5 compatibility passed');
+console.log('prediction-closed-contract: unknown_field on prediction and item keys, no write on rejection and the retired v5 submit route passed');

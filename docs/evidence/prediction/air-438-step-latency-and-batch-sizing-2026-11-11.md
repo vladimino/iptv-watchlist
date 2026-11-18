@@ -6,7 +6,7 @@ This record decides nothing. It supports one next card (section 7). Production t
 
 ## 1. What the instrument is
 
-Each `next` and `submit` writes one log line `prediction_step_timing` ([contract](../../reference/api/prediction-runner.md#step-timing-line-air-438)). The Worker's environment is replaced for the length of the step by a copy whose R2 bucket and D1 database time every call and forward it unchanged. No call is added, reordered, retried or awaited differently, and a failure of the timing code is swallowed. [`tests/prediction-step-timing.mjs`](../../../tests/prediction-step-timing.mjs) proves:
+Each `next` and `submit` writes one log line `prediction_step_timing` ([contract](../../reference/api/prediction-runner.md#step-timing-line)). The Worker's environment is replaced for the length of the step by a copy whose R2 bucket and D1 database time every call and forward it unchanged. No call is added, reordered, retried or awaited differently, and a failure of the timing code is swallowed. [`tests/prediction-step-timing.mjs`](../../../tests/prediction-step-timing.mjs) proves:
 
 - the same scripted run with the instrument, without it, and with a logger that throws gives the same answers, the same stored records and the same R2 calls;
 - the calls counted in the lines are exactly the calls the steps made;

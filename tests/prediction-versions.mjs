@@ -74,94 +74,102 @@ env.PREDICTION_VERSION_OBJECTS='off';
  records.delete(first.r2Key);etags.delete(first.r2Key);
 }
 
-// The runner protocol end to end, first with a stale 'off' binding, then without any binding.
+// The submit path end to end on batch runner v2 (the only runner since ADR 0167), D1 mode: first with a stale 'off' binding, then without any binding.
+// D1 holds the pointers; R2 holds the immutable version objects and the bundle mirror read below. Puts are recorded and one key can be made to fail.
 const profile={ratingScale:'Letterboxd half-star steps',positiveSignals:['Good plans'],negativeSignals:['Stupid choices'],characterLogic:'Characters reason clearly',pace:'Prefer momentum',payoffEnding:'Payoff matters',genrePreferences:'Mysteries welcome',comedyPreferences:'Smart humor',horrorPreferences:'Consistent rules',scifiAdventurePreferences:'Plot driven ideas',actionPreferences:'Readable action',anchorFilms:[{title:'Example',rating:4.5,reason:'Clever'}],hardSkips:['Cruelty for spectacle'],calibration:'Use full scale, be conservative'};
-assert.equal((await api('enrichment/profile','PUT',{version:1,schemaVersion:1,profile})).status,200);
-const now=Date.now(),film=id=>({id,title:id,original:id,url:'https://letterboxd.com/film/'+id+'/',year:2020,genres:['Боевик'],synopsis:'A plot',directors:[],actors:[],shows:[{start:now}]});
-const films=['film000','film001','film002'].map(film);
-records.set('programme.json',JSON.stringify({runId:'programme-1',updatedAt:new Date().toISOString(),window:{from:now-72*3600000,to:now+24*3600000},films,watchlistCount:films.length}));records.set('sync.json',JSON.stringify({runId:'programme-1',stage:'complete'}));
-const execution={plot_engine:'strong',pace:'fast',stakes:'high',decision_logic:'unknown',protagonist_competence:'unknown',opposition_competence:'unknown',problem_solving:'unknown',plan_counterplan_strength:'unknown',multi_party_goals:'unknown',chemistry:'unknown',payoff:'unknown',ending_quality:'unknown',technical_plausibility:'unknown',horror_rule_consistency:'strong',action_readability:'strong'};
-const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['investigation'],execution,moodLabels:['напряжённый','расследование'],strengths:['Good mystery'],risks:[],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']};
 const prediction={predictedRating:4,probability4Plus:.72,confidence:'medium',matchSignals:['Strong puzzle'],mainRisk:'Pace may lag',moodLabels:['напряжённый','расследование']};
-async function startRun(){const started=await api('enrichment/start','POST',{scope:'watchlist_all',mode:'legacy'});assert.equal(started.status,200);return started.data.runId;}
-async function submit(runId,filmId,extra={}){const result=await api('enrichment/submit','POST',{runId,items:[{filmId,fingerprint,prediction:{...prediction,...extra}}]});assert.equal(result.status,200);return result.data.results[0];}
+const {flowWorld,sql}=await import('./prediction-d1-flow-lib.mjs');
+const w=await flowWorld({films:3});
+const v2Text=key=>w.records.has(key)?JSON.stringify(w.records.get(key)):undefined;
+const v2Read=key=>w.records.has(key)?structuredClone(w.records.get(key)):null;
+const v2Keys=id=>[...w.records.keys()].filter(key=>key.startsWith('enrichment/films/'+id+'/predictions/versions/')).sort();
+const v2Puts=[];
+{const put=w.env.BUCKET.put.bind(w.env.BUCKET);w.env.BUCKET.put=async(key,value,options={})=>{v2Puts.push({key,onlyIf:options.onlyIf||null});return put(key,value,options);};}
+const v2Api=async(route,method='POST',body)=>{const r=await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+route,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),w.env);return {status:r.status,data:await r.json()};};
+// The flow world publishes a minimal profile version 1; version 2 is the full test profile over it (a global change of the fields that differ).
+const publish=async(version,body)=>{const from=(await v2Api('profile','GET')).data;const ask=changedFields=>v2Api('profile','PUT',{version,schemaVersion:1,profile:body,changeImpact:{impactSchemaVersion:1,from:{version:from.version,profileHash:from.profileHash},scope:'global',changedFields,selectors:[]}});let r=await ask([]);if(r.data.code==='changed_fields_mismatch')r=await ask(r.data.changedFields);assert.equal(r.status,200,JSON.stringify(r.data));};
+await publish(2,profile);
+async function startRun(){assert.equal((await v2Api('queue/reconcile','POST',{})).status,200);const started=await v2Api('batch/start','POST',{scope:'watchlist_all',mode:'queued',trigger:'manual'});assert.equal(started.status,200,JSON.stringify(started.data).slice(0,300));return started.data;}
+async function submit(run,filmId,extra={}){const result=await v2Api('batch/submit','POST',{runId:run.runId,epoch:run.lease.epoch,items:[{filmId,fingerprint:w.fingerprint,prediction:{...prediction,...extra}}]});assert.equal(result.status,200,JSON.stringify(result.data).slice(0,300));return result.data.results[0];}
+const stop=run=>v2Api('complete','POST',{runId:run.runId,reason:'model_error'});
+const [f0,f1,f2]=['tmdb_1','tmdb_2','tmdb_3'];
 
 // A stale 'off' binding changes nothing: the version object is written and the bundle current points at it.
-let runId=await startRun();
-assert.equal((await submit(runId,'film000')).status,'created');
-assert.equal(versionKeys('film000').length,1);
-assert.equal(read('enrichment/films/film000/predictions.json').current.r2Key,versionKeys('film000')[0]);
-assert.equal(ctx.testApi.predictionVersionLinked(read('enrichment/films/film000/predictions.json').current,'film000'),true);
-await api('enrichment/complete','POST',{runId,reason:'model_error'});
-delete env.PREDICTION_VERSION_OBJECTS;
+w.env.PREDICTION_VERSION_OBJECTS='off';
+let run=await startRun();
+assert.equal((await submit(run,f0)).status,'created');
+assert.equal(v2Keys(f0).length,1);
+assert.equal(v2Read('enrichment/films/'+f0+'/predictions.json').current.r2Key,v2Keys(f0)[0]);
+assert.equal(ctx.testApi.predictionVersionLinked(v2Read('enrichment/films/'+f0+'/predictions.json').current,f0),true);
+assert.equal((await stop(run)).status,200);
+delete w.env.PREDICTION_VERSION_OBJECTS;
 
-// No binding: a version object is written first, the bundle current points at it, the view index carries the same record.
-runId=await startRun();
-assert.equal((await submit(runId,'film001')).status,'created');
-const bundle1=read('enrichment/films/film001/predictions.json');
-assert.equal(versionKeys('film001').length,1);
-assert.equal(bundle1.current.r2Key,versionKeys('film001')[0]);
+// No binding: a version object is written first, the bundle current points at it.
+run=await startRun();
+assert.equal((await submit(run,f1)).status,'created');
+const bundle1=v2Read('enrichment/films/'+f1+'/predictions.json');
+assert.equal(v2Keys(f1).length,1);
+assert.equal(bundle1.current.r2Key,v2Keys(f1)[0]);
 // Byte-hash invariant end to end: the pointer checksum is the SHA-256 of the exact stored bytes, the key names it, and the bundle record derives those same bytes.
-assert.equal(sha256(records.get(bundle1.current.r2Key)),bundle1.current.contentSha256);
+assert.equal(sha256(v2Text(bundle1.current.r2Key)),bundle1.current.contentSha256);
 assert.equal(bundle1.current.r2Key.endsWith('/'+bundle1.current.contentSha256+'.json'),true);
 assert.equal(sha256(ctx.testApi.predictionVersionText(bundle1.current)),bundle1.current.contentSha256);
-assert.equal(ctx.testApi.predictionVersionLinked(bundle1.current,'film001'),true);
-assert.equal(records.get(bundle1.current.r2Key),JSON.stringify(ctx.testApi.predictionVersionBody(bundle1.current)));
+assert.equal(ctx.testApi.predictionVersionLinked(bundle1.current,f1),true);
+assert.equal(v2Text(bundle1.current.r2Key),JSON.stringify(ctx.testApi.predictionVersionBody(bundle1.current)));
 assert.equal(bundle1.current.predictedRating,4);
 assert.deepEqual(bundle1.history,[]);
-assert.equal(read('enrichment/view-index.json').film001.prediction.r2Key,bundle1.current.r2Key);
-const versionPut=puts.findIndex(item=>item.key===bundle1.current.r2Key),bundlePut=puts.map(item=>item.key).lastIndexOf('enrichment/films/film001/predictions.json');
+const versionPut=v2Puts.findIndex(item=>item.key===bundle1.current.r2Key),bundlePut=v2Puts.map(item=>item.key).lastIndexOf('enrichment/films/'+f1+'/predictions.json');
 assert.equal(versionPut>=0&&versionPut<bundlePut,true,'the version object is written before the bundle');
-// Backward compatibility: a pointer-carrying current prediction is still recognised as current.
-assert.equal((await submit(runId,'film001')).status,'already_current');
-assert.equal(versionKeys('film001').length,1);
-assert.equal((await api('enrichment/view')).status,200);
-await api('enrichment/complete','POST',{runId,reason:'model_error'});
+assert.equal(v2Puts[versionPut].onlyIf?.etagDoesNotMatch,'*','the version write is conditional on absence');
+// The identical submit again is a replay of the committed film and writes no second object.
+{const again=await submit(run,f1);assert.equal(again.replayed,true,JSON.stringify(again));assert.equal(v2Keys(f1).length,1);}
+assert.equal((await v2Api('view','GET')).status,200);
+assert.equal((await stop(run)).status,200);
 
 // Recalculation after a profile change: the replaced record keeps its pointer in history, the new current has its own object.
-assert.equal((await api('enrichment/profile','PUT',{version:2,schemaVersion:1,profile:{...profile,pace:'Slower is fine'},changeImpact:{impactSchemaVersion:1,from:{version:1,profileHash:JSON.parse(records.get('enrichment/profile/current.json')).profileHash},scope:'global',changedFields:['pace'],selectors:[]}})).status,200);
-runId=await startRun();
-assert.equal((await submit(runId,'film001',{predictedRating:3.5})).status,'recalculated');
-const bundle2=read('enrichment/films/film001/predictions.json');
-assert.equal(versionKeys('film001').length,2);
+await publish(3,{...profile,pace:'Slower is fine'});
+run=await startRun();
+assert.equal((await submit(run,f1,{predictedRating:3.5})).status,'recalculated');
+const bundle2=v2Read('enrichment/films/'+f1+'/predictions.json');
+assert.equal(v2Keys(f1).length,2);
 assert.equal(bundle2.history.length,1);
 assert.equal(bundle2.history[0].r2Key,bundle1.current.r2Key);
 assert.equal(bundle2.history[0].contentSha256,bundle1.current.contentSha256);
 assert.equal(typeof bundle2.history[0].replacedAt,'string');
 assert.notEqual(bundle2.current.r2Key,bundle1.current.r2Key);
-assert.equal(sha256(records.get(bundle2.current.r2Key)),bundle2.current.contentSha256);
+assert.equal(sha256(v2Text(bundle2.current.r2Key)),bundle2.current.contentSha256);
 // The history body excludes replacedAt and the pointer, so it hashes to the stored object exactly.
 assert.equal(sha256(ctx.testApi.predictionVersionText(bundle2.history[0])),bundle2.history[0].contentSha256);
 // Lineage of every new record: the run that produced it, its trigger and the fingerprint's full identity, also inside the
 // immutable object; the replaced record keeps the run it came from.
-assert.equal(bundle2.current.runId,runId);assert.equal(bundle2.current.trigger,'manual');assert.equal(bundle2.current.fingerprintPromptVersion,1);
-assert.equal(bundle2.current.fingerprintHash,read('enrichment/films/film001/fingerprint.json').fingerprintHash);
-assert.equal(bundle2.current.tasteProfileVersion,2);assert.equal(bundle2.history[0].tasteProfileVersion,1);
-assert.notEqual(bundle2.history[0].runId,runId);assert.equal(typeof bundle2.history[0].runId,'string');
-assert.equal(JSON.parse(records.get(bundle2.current.r2Key)).runId,runId);
-assert.equal(JSON.parse(records.get(bundle2.current.r2Key)).replacedAt,undefined);
+assert.equal(bundle2.current.runId,run.runId);assert.equal(bundle2.current.trigger,'manual');assert.equal(bundle2.current.fingerprintPromptVersion,1);
+assert.equal(bundle2.current.fingerprintHash,v2Read('enrichment/films/'+f1+'/fingerprint.json').fingerprintHash);
+assert.equal(bundle2.current.tasteProfileVersion,3);assert.equal(bundle2.history[0].tasteProfileVersion,2);
+assert.notEqual(bundle2.history[0].runId,run.runId);assert.equal(typeof bundle2.history[0].runId,'string');
+assert.equal(JSON.parse(v2Text(bundle2.current.r2Key)).runId,run.runId);
+assert.equal(JSON.parse(v2Text(bundle2.current.r2Key)).replacedAt,undefined);
 
-// Partial commit: the bundle write fails after the version object exists. The bundle is unchanged, the object stays unreferenced,
-// and the next successful submit writes a new version and points at that one.
-failKey='enrichment/films/film002/predictions.json';
-const failed=await submit(runId,'film002');
-assert.equal(failed.status,'failed');
-assert.equal(failed.error,'storage_error');
-assert.equal(records.has('enrichment/films/film002/predictions.json'),false);
-assert.equal(versionKeys('film002').length,1);
-const orphan=versionKeys('film002')[0];
-failKey='';
-runId=await startRun();
-assert.equal((await submit(runId,'film002')).status,'created');
-const bundle3=read('enrichment/films/film002/predictions.json');
-assert.equal(versionKeys('film002').length,2);
+// Partial commit: the authoritative D1 commit of the pointer fails after the version object exists. No pointer names it, the object stays
+// unreferenced, and the next successful submit writes a new version and points at that one.
+w.hooks.write=statements=>{if(statements.some(item=>/prediction_pointer/i.test(item.text)&&!/^\s*SELECT/i.test(item.text)))throw new Error('Simulated storage failure');};
+const failed=await v2Api('batch/submit','POST',{runId:run.runId,epoch:run.lease.epoch,items:[{filmId:f2,fingerprint:w.fingerprint,prediction}]});
+assert.notEqual(failed.data?.results?.[0]?.status,'created','the film is not committed: '+JSON.stringify(failed.data).slice(0,300));
+assert.equal(v2Keys(f2).length,1,'the version object was written first');
+const orphan=v2Keys(f2)[0];
+w.hooks.write=null;
+assert.ok(!sql(w.file,"SELECT film_id FROM prediction_pointer").some(row=>row.film_id===f2),'no D1 pointer names the object');
+await stop(run);
+run=await startRun();
+assert.equal((await submit(run,f2)).status,'created');
+const bundle3=v2Read('enrichment/films/'+f2+'/predictions.json');
+assert.equal(v2Keys(f2).length,2);
 assert.notEqual(bundle3.current.r2Key,orphan);
-assert.equal(records.has(orphan),true,'nothing deletes the unreferenced object');
-await api('enrichment/complete','POST',{runId,reason:'model_error'});
+assert.equal(w.records.has(orphan),true,'nothing deletes the unreferenced object');
+await stop(run);
 
 // Materialization plan over a mixed bundle: linked records stay, unlinked ones get exact bytes, malformed pointers are reported.
 {
- const plan=ctx.testApi.predictionMaterializationPlan('film001',{current:bundle2.current,history:[{...bundle1.current,r2Key:undefined,contentSha256:undefined,replacedAt:'2026-10-26T11:00:00.000Z'},{filmId:'film001',predictedRating:2,r2Key:'enrichment/films/film001/predictions.json',contentSha256:'abc'}]});
+ const plan=ctx.testApi.predictionMaterializationPlan(f1,{current:bundle2.current,history:[{...bundle1.current,r2Key:undefined,contentSha256:undefined,replacedAt:'2026-10-26T11:00:00.000Z'},{filmId:f1,predictedRating:2,r2Key:'enrichment/films/'+f1+'/predictions.json',contentSha256:'abc'}]});
  assert.equal(plan.linked.length,1);
  assert.equal(plan.pending.length,1);
  assert.equal(plan.malformed.length,1);
@@ -169,7 +177,7 @@ await api('enrichment/complete','POST',{runId,reason:'model_error'});
  assert.equal(plan.pending[0].text,ctx.testApi.predictionVersionText(bundle1.current));
  assert.equal(sha256(plan.pending[0].text),bundle1.current.contentSha256,'the plan reproduces the object the writer would have written');
  assert.equal(plan.bundleRewriteNeeded,true);
- assert.equal(ctx.testApi.predictionMaterializationPlan('film001',{current:bundle2.current,history:[bundle2.history[0]]}).bundleRewriteNeeded,false);
+ assert.equal(ctx.testApi.predictionMaterializationPlan(f1,{current:bundle2.current,history:[bundle2.history[0]]}).bundleRewriteNeeded,false);
 }
 
 // The plan tool over a snapshot directory: counts, link-only detection, checksum mismatch, unreferenced objects; no file is written.
@@ -183,10 +191,10 @@ await api('enrichment/complete','POST',{runId,reason:'model_error'});
   'enrichment/films/tmdb_7/predictions.json':JSON.stringify(legacy),
   [presentKey]:presentText,
   [mismatchKey]:'{"corrupt":true}',
-  'enrichment/films/film001/predictions.json':records.get('enrichment/films/film001/predictions.json'),
-  [bundle2.current.r2Key]:records.get(bundle2.current.r2Key),
-  [bundle2.history[0].r2Key]:records.get(bundle2.history[0].r2Key),
-  [orphan]:records.get(orphan),
+  ['enrichment/films/'+f1+'/predictions.json']:v2Text('enrichment/films/'+f1+'/predictions.json'),
+  [bundle2.current.r2Key]:v2Text(bundle2.current.r2Key),
+  [bundle2.history[0].r2Key]:v2Text(bundle2.history[0].r2Key),
+  [orphan]:v2Text(orphan),
  };
  fs.mkdirSync(path.join(root,'objects'),{recursive:true});
  const entries=Object.entries(bodies).map(([key,text])=>{const bytes=Buffer.from(text,'utf8');const name=createHash('sha256').update(Buffer.from(key,'utf8')).digest('hex')+'.bin';fs.writeFileSync(path.join(root,'objects',name),bytes);return {key,file:'objects/'+name,size:bytes.length,sha256:sha256(text),metadata:{size:bytes.length}};});

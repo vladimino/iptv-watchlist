@@ -50,48 +50,19 @@ The hourly Predictions Task does not wait for the EPG Workflow to finish a seal.
 
 ### Hourly prediction pipeline
 
-```mermaid
-sequenceDiagram
-    actor Hourly as Hourly Task (hourly)
-    participant MCP as Worker MCP
-    participant Runner as Prediction runner
-    participant R2 as R2 objects
-    participant D1 as D1 prediction marker
-    Hourly->>MCP: Runner, schema, profile, queue preflight
-    Hourly->>MCP: prediction_start(scheduled) once
-    MCP->>Runner: Acquire owned run / check lease
-    loop Eligible server-sized batches
-        Hourly->>MCP: prediction_next
-        MCP-->>Hourly: Item and fingerprint mode
-        Hourly->>MCP: prediction_validate(exact objects)
-        MCP-->>Hourly: Validity, contract version, checked flags
-        alt Full preflight passes
-            Hourly->>MCP: prediction_submit
-            MCP->>Runner: Revalidate and persist
-            alt Prediction marker is not d1
-                Runner->>R2: Store the mutable outcome
-            else Schema v7 marker is d1
-                Runner->>R2: Verify the immutable body
-                Runner->>D1: Commit the pointer, queue and run
-            end
-        else Validation unavailable or invalid
-            Note over Hourly,Runner: Correct / revalidate or fail closed
-        end
-    end
-    Hourly->>MCP: prediction_complete on allowed owned stop
-```
+The producer of personal predictions is the external batch v2 Scheduled Tasks described in the next section; batch v2 is the only prediction protocol, and the one-film v5 path (`prediction_start`, `prediction_next`, `prediction_validate`, `prediction_submit`) is retired ([ADR 0167](../adr/0167-retire-prediction-runner-v5.md)). Verify the enabled Tasks, schedules and prompts in the live registry; the dated readback is in the [Scheduled Tasks reference](../reference/scheduled-tasks.md).
 
-Migration `0007` is applied and the prediction marker is `d1`, so the live branch is D1 mutable state with immutable R2 bodies. The `r2` branch documents the prior and rollback behavior ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)). The hourly task stays enabled on the same `:20` Europe/Madrid schedule, and Stage A is unchanged. Stage B of the external prompt requests `fingerprint.evidence` on a new `fingerprint_and_prediction` item and passes that film's metadata into `prediction_validate` when an item cites a metadata token ([hourly evidence instruction](../reference/scheduled-tasks.md#fingerprint-evidence-instruction-in-the-live-hourly-task-air-335-2026-11-03)). The diagram above is the same validate and submit path. Worker fingerprint versions stay at 1.
+Migration `0007` is applied and the prediction marker is `d1`, so the runner writes D1 mutable state with immutable R2 bodies ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)). The batch runner refuses to start while the marker is `r2` (`batch_runner_requires_d1`); D1 stays the prediction authority and no rollback to `r2` is planned. A new `fingerprint_and_prediction` item carries `fingerprint.evidence`, and the film's metadata is passed to `prediction_batch_validate` when an item cites a metadata token. Worker fingerprint versions stay at 1.
 
-### Planned: four independent hourly Predictions v2 Tasks (AIR-451, not installed)
+### Four independent hourly Predictions v2 Tasks
 
-**Planned design only.** As of this page no v2 Task exists in the ChatGPT registry, none is enabled and none has run; the live producer is still described under [Hourly prediction pipeline](#hourly-prediction-pipeline) and the Cloudflare cron and Workflows above are unchanged. Nothing here creates, edits, enables or runs a Task ([authorization](../process/authorization-and-escalation.md#chatgpt-scheduled-task-authorization)). The rollout is [AIR-451](https://trello.com/c/NN3N6kRp); the contract is [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md) and [ADR 0136](../adr/0136-prediction-batch-manifest-size-and-spent-complete.md).
+**Live producer.** Four batch v2 Tasks were created and enabled under separate owner GOs; the live registry, not this page, is the authority for their state. Nothing here creates, edits, enables or runs a Task ([authorization](../process/authorization-and-escalation.md#chatgpt-scheduled-task-authorization)). The contract is [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md), [ADR 0136](../adr/0136-prediction-batch-manifest-size-and-spent-complete.md) and [ADR 0167](../adr/0167-retire-prediction-runner-v5.md).
 
 Four hourly Tasks, offset by 15 minutes, each one bounded invocation: A `:00`, B `:15`, C `:30`, D `:45` (Europe/Madrid). They are four hourly recurrences, not one 15-minute recurrence. The Tasks share no memory and no orchestration; the only coordination is the one D1 queue and the one runner lease.
 
 ```mermaid
 sequenceDiagram
-    participant Sched as ChatGPT Scheduler, planned A to D
+    participant Sched as ChatGPT Scheduler, Tasks A to D
     participant Task as One v2 Task invocation
     participant MCP as Worker MCP
     participant D1 as D1 queue and lease
@@ -124,7 +95,7 @@ sequenceDiagram
     Note over Sched,D1: Overlap gives already_running for the later Task, retries stay in the queue, no manual make-up
 ```
 
-Boundaries: legacy v5 stays disabled for the whole cutover; the Worker never reads the Task registry; `IPTV Scheduled Task Drift` is not changed by this plan; a fifth Task (`:00/:12/:24/:36/:48`) is out of scope until measured jitter and limits are reviewed and needs its own owner GO. Rollout order after this documentation is merged: one one-off canary Task, then that same Task rescheduled to `:00`, then `:15/:30/:45`, each a separate owner GO ([runbook](../runbooks/prediction-operations.md#planned-rollout-of-four-hourly-v2-tasks-air-451)).
+Boundaries: the legacy v5 Task cannot run because its tools are retired; the Worker never reads the Task registry; `IPTV Scheduled Task Drift` is not changed by the Tasks; a fifth Task (`:00/:12/:24/:36/:48`) is out of scope until measured jitter and limits are reviewed and needs its own owner GO. The rollout ran as one one-off canary Task, then that same Task rescheduled to `:00`, then `:15/:30/:45`, each a separate owner GO ([runbook](../runbooks/prediction-operations.md#planned-rollout-of-four-hourly-v2-tasks-air-451)).
 
 ### Read-only Scheduled Task registry drift
 
