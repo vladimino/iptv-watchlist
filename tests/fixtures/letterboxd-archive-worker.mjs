@@ -15,7 +15,7 @@ export function loadArchiveWorker({now, console: logger, fetch}) {
   vm.runInContext(fs.readFileSync('src/admin/owner-reviews.js', 'utf8'), context);
 vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), context);
   vm.runInContext(scoped('src/domain/data-health.js', 'DataHealth'), context);
-  for (const [file, name] of [['src/letterboxd-export.js', 'LetterboxdExport'], ['src/letterboxd-match.js', 'LetterboxdMatch'], ['src/domain/letterboxd-archive-zip.js', 'LetterboxdArchiveZip'], ['src/domain/letterboxd-archive-preview.js', 'LetterboxdArchivePreview'], ['src/domain/letterboxd-archive-apply.js', 'LetterboxdArchiveApply'], ['src/domain/admin-actions.js', 'AdminActions'], ['src/domain/letterboxd-rated-admission.js', 'LetterboxdRatedAdmission']]) vm.runInContext(scoped(file, name), context);
+  for (const [file, name] of [['src/letterboxd-export.js', 'LetterboxdExport'], ['src/letterboxd-match.js', 'LetterboxdMatch'], ['src/domain/letterboxd-archive-zip.js', 'LetterboxdArchiveZip'], ['src/domain/letterboxd-archive-preview.js', 'LetterboxdArchivePreview'], ['src/domain/letterboxd-archive-apply.js', 'LetterboxdArchiveApply'], ['src/domain/admin-actions.js', 'AdminActions'], ['src/domain/letterboxd-rated-admission.js', 'LetterboxdRatedAdmission'], ['src/domain/letterboxd-import-registry.js', 'LetterboxdImportRegistry']]) vm.runInContext(scoped(file, name), context);
   vm.runInContext(scopedReplacing('src/letterboxd-identity.js', 'LetterboxdIdentity', 'const normTitle=LetterboxdMatch.normTitle;\n'), context);
   vm.runInContext(fs.readFileSync('src/letterboxd-rated-candidates.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive.js', 'utf8'), context);
