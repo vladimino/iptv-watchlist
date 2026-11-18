@@ -479,9 +479,38 @@ async function catalogArchiveFallbackR2(env,tmdbId){
 }
 // AIR-475 review: Discovery is an independent domain. These are the ways its reader can refuse; while the Film/Person marker is open a refusal never hides a canonical Film.
 const CATALOG_DISCOVERY_FAULTS=['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative'];
-async function catalogFilmRoute(env,tmdbId){
- if(!CATALOG_FILM_TMDB.test(tmdbId))return json({status:'invalid',error:'A TMDB movie id is a positive integer'},400);
- const now=Date.now();
+// AIR-531: HTTP status of the HTML document `/film/<id>`, in the SPA's own order (`resolveFilm`): (1) a film of the pinned published generation by its own id (programme or
+// watchlist member, one indexed point read) is 200 whatever the catalog says; (2) a `tmdb_<n>` id then looks at the published films that own that TMDB id through their trusted
+// link (`memberTmdbOwners`, keyed and fenced by the publication generation): one owner is 200, several are 409, BEFORE the catalog is asked, as the page does; (3) the bounded
+// catalog identity decision (no enrichment, no write, no outbound request) gives 404 absent, 410 retired, 409 conflict. An id of another shape that is no member is 404. Only a definite
+// answer sets a non-200 status: when the generation, a member read, the owner map or the catalog cannot answer, nothing is proven absent and the shell is 200 (the page decides).
+// A catalog answer is a definite absence only when the published side was read completely. No published generation at all (no D1 binding or no pointer) has no members.
+async function filmDocumentStatus(env,id){
+ const tmdb=/^tmdb_(.+)$/.exec(id);
+ if(tmdb&&!CATALOG_FILM_TMDB.test(tmdb[1]))return 404;
+ let live=null,unknown=false;
+ if(typeof PublishedEpg!=='undefined'&&PublishedEpg.hasDatabase(env)){
+  try{
+   const generation=await PublishedEpg.currentGeneration(env);
+   if(generation&&generation.programmeRunId)live=generation;
+   if(live&&await PublishedEpg.isMember(env,live.programmeRunId,id))return 200;
+  }catch{unknown=true;}
+ }
+ if(!tmdb)return live&&!unknown?404:200;
+ if(live&&!unknown){
+  try{
+   const owners=(await PublishedEpg.memberTmdbOwners(env,live.programmeRunId,live.generation)).get(tmdb[1]);
+   if(owners)return owners.size===1?200:409;
+  }catch{unknown=true;}
+ }
+ const identity=await catalogFilmIdentity(env,tmdb[1]);
+ if(identity.fault)return 200;
+ const status={absent:404,retired:410,conflict:409}[identity.found.state]||200;
+ return unknown?200:status;
+}
+// AIR-531: the identity decision of `/api/catalog/film/<tmdbId>` and nothing else: found, absent, retired, conflict or unavailable, or a typed fault. No programme, watchlist,
+// metadata, prediction or ratings read happens here, so the HTML document status can use it without the enrichment of the full answer.
+async function catalogFilmIdentity(env,tmdbId){
  let found,discoveryFault=null;
  try{
   try{
@@ -508,9 +537,18 @@ async function catalogFilmRoute(env,tmdbId){
   else if(found.state==='absent')found=await catalogArchiveFallback(env,tmdbId);
  }catch(error){
   const code=error?.code||'';
-  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read','film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative'].includes(code))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);
-  return json({status:'error',error:'The catalog lookup failed'},500);
+  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read','film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative'].includes(code))return {fault:'unavailable',reason:code};
+  return {fault:'error'};
  }
+ return {found};
+}
+async function catalogFilmRoute(env,tmdbId){
+ if(!CATALOG_FILM_TMDB.test(tmdbId))return json({status:'invalid',error:'A TMDB movie id is a positive integer'},400);
+ const now=Date.now();
+ const identity=await catalogFilmIdentity(env,tmdbId);
+ if(identity.fault==='unavailable')return json({status:'unavailable',error:'The catalog is not readable right now',reason:identity.reason},503);
+ if(identity.fault)return json({status:'error',error:'The catalog lookup failed'},500);
+ const found=identity.found;
  if(found.state==='absent')return json({status:'absent'},404);
  if(found.state==='retired')return json({status:'retired'},410);
  if(found.state==='conflict')return json({status:'conflict'},409);
@@ -2174,7 +2212,13 @@ async fetch(request,env,execution){
   return json({error:'Not found'},404);
  }
  if((request.method==='GET'||request.method==='HEAD')&&url.pathname==='/admin/limbo'){const target=new URL(request.url);target.pathname='/admin/limb';return new Response(null,{status:302,headers:{Location:target.pathname+target.search,'Cache-Control':'no-store'}});}
- const page=url.pathname==='/events'?'/':/^\/film\/[A-Za-z0-9_-]{1,80}$/.test(url.pathname)?'/':url.pathname,asset=ASSETS[page];if(asset&&(request.method==='GET'||request.method==='HEAD'))return new Response(request.method==='HEAD'?null:asset.body,{headers:{'Content-Type':asset.type+'; charset=utf-8','Cache-Control':'no-cache'}});
+ const filmDocument=/^\/film\/([A-Za-z0-9_-]{1,80})$/.exec(url.pathname);
+ const page=url.pathname==='/events'?'/':filmDocument?'/':url.pathname,asset=ASSETS[page];
+ if(asset&&(request.method==='GET'||request.method==='HEAD')){
+  // AIR-531: the HTTP status of a film permalink document follows what the page will say (404 absent, 410 retired, 409 conflict, 503/500 unavailable); the shell is the same.
+  const status=filmDocument?await filmDocumentStatus(env,filmDocument[1]):200;
+  return new Response(request.method==='HEAD'?null:asset.body,{status,headers:{'Content-Type':asset.type+'; charset=utf-8','Cache-Control':status===200?'no-cache':'no-store'}});
+ }
  return json({error:'Not found'},404);
  }catch(e){
   // The only trace of an unhandled route error, so a 502 can be read from the logs. Only values shaped like an internal code are logged (lower-case letters,

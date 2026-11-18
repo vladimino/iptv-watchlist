@@ -146,6 +146,18 @@ const base={
  r=await get('999');assert.deepEqual([r.status,r.body.status],[404,'absent']);
  r=await get('11');assert.deepEqual([r.status,r.body.status],[409,'conflict'],'a record that does not verify its identity fails closed');
  r=await get('13');assert.equal(r.status,409,'two current records of one identity are not guessed between');
+
+ // AIR-531: the HTML document `/film/<id>` carries the status the page will show. Same read-only lookup as the API, GET and HEAD alike, no write.
+ vm.runInContext("var ASSETS={'/':{type:'text/html',body:'<!doctype html><title>shell</title>'}};",ctx);
+ {
+  const doc=async(id,method='GET')=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/film/'+id,{method}),envW,{waitUntil(){}});return {status:r.status,text:await r.text(),cache:r.headers.get('Cache-Control')};};
+  for(const method of ['GET','HEAD']){
+   let d=await doc('tmdb_999',method);assert.equal(d.status,404,method+': an absent TMDB permalink is 404');assert.equal(d.text.includes('shell'),method==='GET','the shell is served on GET only');assert.equal(d.cache,'no-store');
+   d=await doc('tmdb_11',method);assert.equal(d.status,409,method+': a conflicting identity is 409');
+   d=await doc('tmdb_7',method);assert.equal(d.status,200,method+': a verified catalog Film is 200');assert.equal(d.cache,'no-cache');
+   d=await doc('tmdb_0',method);assert.equal(d.status,404,method+': a malformed TMDB permalink is 404');
+  }
+ }
  for(const bad of ['0','abc','-1','7.5','007','1234567890123','%E0%A4%A']){r=await get(bad);assert.deepEqual([r.status,r.body.status],[400,'invalid'],'invalid: '+bad);}
  // The film is still found when the watchlist, a rating or the profile say nothing about it.
  const index=records.get(constant('ENRICHMENT_KEY')+'view-index.json');index.tmdb_7.actualRating=5;index.tmdb_7.watchlist=true;records.set(constant('ENRICHMENT_KEY')+'view-index.json',index);
@@ -169,6 +181,7 @@ const base={
  answer(true,[rec('tmdb_7','current')]);let r=await get('7');assert.equal(r.status,200);assert.equal(r.body.film.id,'tmdb_7');
  answer(true,[]);r=await get('7');assert.deepEqual([r.status,r.body.status],[404,'absent']);
  answer(true,[rec('tmdb_7','superseded')]);r=await get('7');assert.deepEqual([r.status,r.body.status],[410,'retired']);
+ {const r2=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/film/tmdb_7'),envW,{waitUntil(){}});assert.equal(r2.status,410,'AIR-531: a retired Film permalink document is 410');const r3=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/film/tmdb_7',{method:'HEAD'}),envW,{waitUntil(){}});assert.equal(r3.status,410,'HEAD is 410 too');}
  answer(true,[rec('tmdb_7','superseded'),rec('tmdb_7b','current')]);r=await get('7');assert.deepEqual([r.status,r.body.film?.id],[200,'tmdb_7b'],'the current record is the film; a superseded sibling is history');
  answer(true,[{...rec('other-id','current'),film:catalogFilm('tmdb_7',7)}]);r=await get('7');assert.equal(r.status,409,'a payload whose own id is not the row id is a conflict');
  answer(true,[rec('tmdb_7','current',7,{canonicalIdentity:'tmdb:8'})]);r=await get('7');assert.equal(r.status,409,'a payload whose identity disagrees with the row');
@@ -233,6 +246,65 @@ const base={
   assert.equal(db.calls.batches,callsBefore.batches,'no D1 batch');assert.equal(db.calls.statements,callsBefore.statements,'no D1 statement written');
   assert.ok(statementsSeen.length>0&&statementsSeen.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1: '+statementsSeen.filter(text=>!/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)).join(' | '));
   assert.deepEqual(fetches,[],'no provider request');
+ }
+
+ // AIR-531 review: the HTML document status against a real D1-published generation. Members of both kinds are 200 whatever the catalog says (the SPA resolves them first),
+ // an id that is no member is 404, a TMDB permalink with no member falls to the bounded catalog identity (absent 404), and an unreadable generation or catalog is 200 (never absence).
+ {
+  const {db:docDb,statementsSeen:docSeen}=mkdb('published-doc');
+  docDb.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
+  const docMem=new Map(),docBucket={async get(key){return docMem.has(key)?{etag:'e',json:async()=>structuredClone(docMem.get(key))}:null;},async put(key,value){docMem.set(key,JSON.parse(value));return {etag:'e'};},async list(){return {objects:[],truncated:false};},async head(key){return docMem.has(key)?{etag:'e'}:null;}};
+  const member=id=>({id,title:'T '+id,original:'T '+id,year:2001,runtime:100,genres:[],directors:[],actors:[],shows:[]});
+  const docPublished=await PublishedEpgModule.publishGeneration({DB:docDb,BUCKET:docBucket},{programmeRunId:G1,phase:'published',expectedProgrammeRunId:null,programme:{runId:G1,updatedAt:new Date(now).toISOString(),watchlistCount:1,films:[member('heat-1995'),member('tmdb_555'),{...member('alias-777'),tmdbId:'777',tmdbLink:{status:'resolved',link:{type:'movie',id:'777'}}},{...member('twin-a'),tmdbId:'888',tmdbLink:{status:'resolved',link:{type:'movie',id:'888'}}},{...member('twin-b'),tmdbId:'888',tmdbLink:{status:'resolved',link:{type:'movie',id:'888'}}},{...member('weak-889'),tmdbId:'889',tmdbLink:{status:'pending',link:{type:'movie',id:'889'}}}]},watchlist:{updatedAt:new Date(now).toISOString(),films:[member('only-watchlist'),member('tmdb_556')]}},{now});
+  assert.equal(docPublished.pointed,true);
+  for(const key of ['epg/discovered-films.json','epg/generations/'+G1+'/discovered-films.json'])docMem.set(key,{tmdb_7:catalogFilm('tmdb_7',7,{shows:[]})});
+  const world=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{'/':{type:'text/html',body:'<!doctype html><title>shell</title>'}},INITIAL_PERSONAL_RATINGS:{},
+   fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
+  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),world);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),world);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),world);
+  vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);
+  vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),world);
+  for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),world);
+  const doc=async(id,method='GET',env={DB:docDb,BUCKET:docBucket})=>{const r=await world.worker.fetch(new Request('https://iptv.vladimino.workers.dev/film/'+id,{method}),env,{waitUntil(){}});return {status:r.status,text:await r.text()};};
+  for(const method of ['GET','HEAD']){
+   assert.equal((await doc('heat-1995',method)).status,200,method+': a programme member is 200');
+   assert.equal((await doc('only-watchlist',method)).status,200,method+': a watchlist member is 200');
+   assert.equal((await doc('tmdb_555',method)).status,200,method+': a programme member that is a TMDB permalink is 200 although the catalog does not hold it');
+   assert.equal((await doc('tmdb_556',method)).status,200,method+': a watchlist member that is a TMDB permalink is 200');
+   assert.equal((await doc('tmdb_777',method)).status,200,method+': a published film that owns the TMDB id through its trusted link is 200 although the catalog holds no such film');
+   assert.equal((await doc('tmdb_888',method)).status,409,method+': two published owners of one TMDB id are a conflict, as in the page');
+   assert.equal((await doc('tmdb_889',method)).status,404,method+': an untrusted link is no owner');
+   assert.equal((await doc('blablabla',method)).status,404,method+': an id that is no member is 404');
+   assert.equal((await doc('tmdb_999',method)).status,404,method+': an absent TMDB permalink with no member is 404');
+  }
+  // AIR-531 review 2: the sealed documents change in place within one run (`saveWatchlist`, `patchProgramme`) and advance the generation; the owner map and the status follow.
+  {
+   const PE=vm.runInContext('PublishedEpg',world),env={DB:docDb,BUCKET:docBucket};
+   const linked=(id,t)=>({...member(id),tmdbId:t,tmdbLink:{status:'resolved',link:{type:'movie',id:t}}});
+   const watch=films=>({updatedAt:new Date(now).toISOString(),films});
+   assert.equal((await doc('tmdb_777')).status,200,'warm: one owner');
+   const gen0=(await PE.currentGeneration(env)).generation;
+   const saved=await PE.saveWatchlist(env,watch([member('only-watchlist'),member('tmdb_556'),linked('twin-777','777')]),{now});
+   assert.ok(saved,'the watchlist is replaced in place');
+   assert.ok((await PE.currentGeneration(env)).generation>gen0,'a replacement in the same run advances the generation');
+   assert.equal((await doc('tmdb_777')).status,409,'same run, new owner: the cached map is not served; two owners are a conflict');
+   // The page answers a conflict of two owners before the catalog: a Film the catalog holds (tmdb_7) is 409 too.
+   await PE.saveWatchlist(env,watch([member('only-watchlist'),member('tmdb_556'),linked('twin-7a','7'),linked('twin-7b','7')]),{now});
+   assert.equal((await doc('tmdb_7')).status,409,'two owners and a catalog hit: 409, as the page');
+   assert.equal((await doc('tmdb_777')).status,200,'the removed second owner leaves one owner (the programme film): 200');
+   await PE.saveWatchlist(env,watch([member('only-watchlist'),member('tmdb_556')]),{now});
+   assert.equal((await doc('tmdb_7')).status,200,'no owner: the catalog Film is 200 again');
+   // A read that sees the generation move is unknown, never an absence.
+   const live=await PE.currentGeneration(env);
+   await assert.rejects(()=>PE.memberTmdbOwners(env,live.programmeRunId,live.generation-1),/published_epg_fence/,'a stale generation is fenced');
+  }
+  assert.ok((await doc('heat-1995')).text.includes('shell'),'the shell is still served on GET');
+  // A generation that cannot be read is no proof of absence: the shell is served and the page decides.
+  assert.equal((await doc('blablabla','GET',{DB:{prepare(){throw new Error('d1 down');}},BUCKET:docBucket})).status,200,'an unreadable generation fails open for a programme id');
+  docSeen.length=0;assert.equal((await doc('tmdb_7')).status,200,'a catalog Film is 200');
+  assert.equal(docSeen.some(text=>/published_epg_document/.test(text)),false,'a found catalog Film never reads the sealed documents');
+  assert.ok(docSeen.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1');
+  const memberProbe=docSeen.filter(text=>/SELECT 1 AS hit FROM published_epg_member/.test(text));
+  assert.ok(memberProbe.length>0&&memberProbe.every(text=>/kind IN/.test(text)),'the membership probe names both kinds so it follows the (run, kind, film) index');
  }
 }
 

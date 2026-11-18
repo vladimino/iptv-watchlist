@@ -65,7 +65,7 @@ assert.match(css, /\.health-group-critical/);
 assert.match(bundle, /credentials:'same-origin'/);
 assert.doesNotMatch(movie, /admin-query|\/admin/);
 assert.doesNotMatch(movieHtml, /id="admin-search"|admin-query/);
-assert.match(worker, /url\.pathname==='\/events'\?'\/':\/\^\\\/film\\\/\[A-Za-z0-9_-\]\{1,80\}\$\/\.test\(url\.pathname\)\?'\/':url\.pathname/);
+assert.match(worker, /const filmDocument=\/\^\\\/film\\\/\(\[A-Za-z0-9_-\]\{1,80\}\)\$\/\.exec\(url\.pathname\);\s*const page=url\.pathname==='\/events'\?'\/':filmDocument\?'\/':url\.pathname/);
 assert.match(worker, /\/api\/admin\//);
 assert.doesNotMatch(worker, /pathname==='\/admin'\?'\/'/);
 assert.match(worker, /request\.method==='GET'\|\|request\.method==='HEAD'\)&&url\.pathname==='\/admin\/limbo'/);
