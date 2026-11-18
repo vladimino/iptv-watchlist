@@ -109,6 +109,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-470 Path A full-scale offline measurement: prior NO-GO withdrawn; isolate margin not yet established | [orchestration/epg-diagnostic-path-a-feasibility-air-470-2026-11-14.md](orchestration/epg-diagnostic-path-a-feasibility-air-470-2026-11-14.md) |
 | AIR-470 Path A local workerd run of `stageSealedGeneration`: count invariants hold, isolate margin INCONCLUSIVE | [orchestration/epg-diagnostic-path-a-workerd-air-470-2026-11-14.md](orchestration/epg-diagnostic-path-a-workerd-air-470-2026-11-14.md) |
 | AIR-348 migration 0017 production apply | [d1-migration/air-348-0017-apply-2026-11-08.md](d1-migration/air-348-0017-apply-2026-11-08.md) |
+| AIR-478 migration 0024 production apply | [d1-migration/air-478-0024-apply-2026-11-18.md](d1-migration/air-478-0024-apply-2026-11-18.md) |
 | AIR-525 EPG recovered `complete` with a prior attempt's `error`: offline red-before/green-after, no second start | [orchestration/air-525-recovered-complete-error.md](orchestration/air-525-recovered-complete-error.md) |
 | AIR-348 cron `0 * * * *` coexistence preflight | [orchestration/cron-coexistence-air-348-2026-11-08.md](orchestration/cron-coexistence-air-348-2026-11-08.md) |
 | AIR-348 first natural EPG Cloudflare run, read-only 8 November 2026: the instance stopped after 61 steps with `epoch_mismatch` while the mode document was unchanged | [orchestration/epg-first-natural-run-air-348-2026-11-08.md](orchestration/epg-first-natural-run-air-348-2026-11-08.md) |
