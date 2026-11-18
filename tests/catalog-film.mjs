@@ -253,17 +253,21 @@ const base={
  {
   const {db:docDb,statementsSeen:docSeen}=mkdb('published-doc');
   docDb.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
+  // ADR 0162: Discovery is served from D1 only: the production state is d1/open with the Film admitted there (not the R2 shared object).
+  open(docDb);admit(docDb,'tmdb_7',7);
+  // ADR 0162: Film/Person is served from D1 only (as the `published` fixture above): without an open marker the catalog is unreadable and every absence would be an unknown, i.e. 200.
+  docDb.sql("UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;");
   const docMem=new Map(),docBucket={async get(key){return docMem.has(key)?{etag:'e',json:async()=>structuredClone(docMem.get(key))}:null;},async put(key,value){docMem.set(key,JSON.parse(value));return {etag:'e'};},async list(){return {objects:[],truncated:false};},async head(key){return docMem.has(key)?{etag:'e'}:null;}};
   const member=id=>({id,title:'T '+id,original:'T '+id,year:2001,runtime:100,genres:[],directors:[],actors:[],shows:[]});
   const docPublished=await PublishedEpgModule.publishGeneration({DB:docDb,BUCKET:docBucket},{programmeRunId:G1,phase:'published',expectedProgrammeRunId:null,programme:{runId:G1,updatedAt:new Date(now).toISOString(),watchlistCount:1,films:[member('heat-1995'),member('tmdb_555'),{...member('alias-777'),tmdbId:'777',tmdbLink:{status:'resolved',link:{type:'movie',id:'777'}}},{...member('twin-a'),tmdbId:'888',tmdbLink:{status:'resolved',link:{type:'movie',id:'888'}}},{...member('twin-b'),tmdbId:'888',tmdbLink:{status:'resolved',link:{type:'movie',id:'888'}}},{...member('weak-889'),tmdbId:'889',tmdbLink:{status:'pending',link:{type:'movie',id:'889'}}}]},watchlist:{updatedAt:new Date(now).toISOString(),films:[member('only-watchlist'),member('tmdb_556')]}},{now});
   assert.equal(docPublished.pointed,true);
-  for(const key of ['epg/discovered-films.json','epg/generations/'+G1+'/discovered-films.json'])docMem.set(key,{tmdb_7:catalogFilm('tmdb_7',7,{shows:[]})});
   const world=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{'/':{type:'text/html',body:'<!doctype html><title>shell</title>'}},INITIAL_PERSONAL_RATINGS:{},
    fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
   vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),world);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),world);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),world);
   vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);
   vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),world);
   for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),world);
+  world.DiscoveryAuthority=Authority;
   const doc=async(id,method='GET',env={DB:docDb,BUCKET:docBucket})=>{const r=await world.worker.fetch(new Request('https://iptv.vladimino.workers.dev/film/'+id,{method}),env,{waitUntil(){}});return {status:r.status,text:await r.text()};};
   for(const method of ['GET','HEAD']){
    assert.equal((await doc('heat-1995',method)).status,200,method+': a programme member is 200');
@@ -298,10 +302,29 @@ const base={
    await assert.rejects(()=>PE.memberTmdbOwners(env,live.programmeRunId,live.generation-1),/published_epg_fence/,'a stale generation is fenced');
   }
   assert.ok((await doc('heat-1995')).text.includes('shell'),'the shell is still served on GET');
+  // An unreadable catalog is no proof of absence either: the same published generation with Film/Person not open (the fixture state that hid this once) answers 200 for an absent TMDB id,
+  // while an id that is a known non-member (the published side was read completely) is still 404.
+  {
+   const {db:closedDb}=mkdb('published-doc-closed');
+   closedDb.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
+   open(closedDb);
+   const closedMem=new Map(),closedBucket={async get(key){return closedMem.has(key)?{etag:'e',json:async()=>structuredClone(closedMem.get(key))}:null;},async put(key,value){closedMem.set(key,JSON.parse(value));return {etag:'e'};},async list(){return {objects:[],truncated:false};},async head(key){return closedMem.has(key)?{etag:'e'}:null;}};
+   const closedPublished=await PublishedEpgModule.publishGeneration({DB:closedDb,BUCKET:closedBucket},{programmeRunId:G1,phase:'published',expectedProgrammeRunId:null,programme:{runId:G1,updatedAt:new Date(now).toISOString(),watchlistCount:0,films:[member('heat-1995')]},watchlist:{updatedAt:new Date(now).toISOString(),films:[]}},{now});
+   assert.equal(closedPublished.pointed,true);
+   const closedEnv={DB:closedDb,BUCKET:closedBucket};
+   const api=await world.worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/889'),closedEnv,{waitUntil(){}});
+   assert.deepEqual([api.status,(await api.json()).reason],[503,'film_person_unavailable'],'the fixture state: the catalog cannot answer');
+   assert.equal((await doc('tmdb_889','GET',closedEnv)).status,200,'an unreadable catalog is unknown: 200, not 404');
+   assert.equal((await doc('tmdb_889','HEAD',closedEnv)).status,200,'HEAD too');
+   assert.equal((await doc('blablabla','GET',closedEnv)).status,404,'a complete published read still proves a non-member');
+  }
   // A generation that cannot be read is no proof of absence: the shell is served and the page decides.
   assert.equal((await doc('blablabla','GET',{DB:{prepare(){throw new Error('d1 down');}},BUCKET:docBucket})).status,200,'an unreadable generation fails open for a programme id');
+  // The owners are asked before the catalog (as the page does), so the first TMDB request of a generation reads the sealed documents once; a warm one reads no document row.
+  const documentReads=()=>docSeen.filter(text=>/published_epg_document/.test(text)).length;
   docSeen.length=0;assert.equal((await doc('tmdb_7')).status,200,'a catalog Film is 200');
-  assert.equal(docSeen.some(text=>/published_epg_document/.test(text)),false,'a found catalog Film never reads the sealed documents');
+  const cold=documentReads();assert.ok(cold>0,'cold: the sealed documents are read for the owner map');
+  assert.equal((await doc('tmdb_7')).status,200);assert.equal(documentReads(),cold,'warm: no further document read for the same generation');
   assert.ok(docSeen.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1');
   const memberProbe=docSeen.filter(text=>/SELECT 1 AS hit FROM published_epg_member/.test(text));
   assert.ok(memberProbe.length>0&&memberProbe.every(text=>/kind IN/.test(text)),'the membership probe names both kinds so it follows the (run, kind, film) index');
