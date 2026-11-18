@@ -836,20 +836,32 @@ function indexedFingerprintRecord(item){
  if(!item?.fingerprintHash||!impact||impact.fingerprintHash!==item.fingerprintHash)return null;
  return {fingerprintHash:impact.fingerprintHash,fingerprintSchemaVersion:impact.fingerprintSchemaVersion,fingerprintPromptVersion:impact.fingerprintPromptVersion??1,invalidatedAt:impact.invalidatedAt||null,plotMechanics:impact.plotMechanics??undefined,execution:impact.execution??undefined};
 }
+// AIR-477 (ADR 0165, Accepted). The owner-confirmed recovery intents, read at each call (one D1 batch of two SELECTs; there is no request
+// cache since AIR-452 removed the request scope): a film's exact denied prediction (and fingerprint) version is not current for every
+// consumer that names the film. An absent module, binding or migration 0024 is the empty overlay: the ordinary rule alone decides. An
+// INSTALLED store that cannot be read (a fault, a partial table set) fails closed: the error reaches the caller, so no rebuild treats a
+// recovery film as current and no queue write drops its retry record on that answer.
+const NO_RECOVERY_OVERLAY=Object.freeze({ready:false,revision:null,size:0,deniesPrediction:()=>false,deniesFingerprint:()=>false,modeOf:()=>null});
+async function predictionRecoveryOverlay(env){
+ if(typeof PredictionRecoveryIntent==='undefined')return NO_RECOVERY_OVERLAY;
+ return PredictionRecoveryIntent.readOverlay(env,Date.now());
+}
 async function predictionFreshness(env,profile){
+ const recovery=await predictionRecoveryOverlay(env);
  const mode=PREDICTION_PROFILE_MODE,fingerprintMode=PREDICTION_FINGERPRINT_MODE,digest=profile?await profileLineageDigests(profile):null;
  // The combined verdict checks two kinds of approval: the registry's declarations and the profile lineage's; one digest lookup serves both.
  const registry=await fingerprintRegistryDigests(),transitionOptions=fingerprintEvaluatorOptions(text=>registry.lookup(text)??digest?.(text)??null),modes={fingerprint:fingerprintMode,prompt:fingerprintMode,profile:mode};
  // One verdict covers the fingerprint, the prediction prompt and the profile, and it decides.
  const verdict=(prediction,fingerprint,genres)=>predictionTransitionCompatibility(prediction,fingerprint,{genres},profile,FINGERPRINT_TRANSITIONS,fingerprintTarget(),modes,transitionOptions);
  const fingerprintVerdict=(fingerprint,genres)=>fingerprintCompatibility(fingerprint,{genres},FINGERPRINT_TRANSITIONS,fingerprintTarget(),fingerprintMode,transitionOptions);
- return {mode,fingerprintMode,needsGenres:true,registryDigest:registry.registry,target:fingerprintTarget(),
-  state:(prediction,fingerprint,genres)=>!!profile&&!!prediction&&predictionCompatibilityFresh(verdict(prediction,fingerprint,genres)),
-  indexed:(item,film)=>!!profile&&!!item?.prediction&&predictionCompatibilityFresh(verdict(item.prediction,indexedFingerprintRecord(item),film?.genres)),
+ // `filmId` (optional) lets the recovery overlay deny that film's exact stored version; without it the ordinary rule alone answers.
+ return {mode,fingerprintMode,needsGenres:true,registryDigest:registry.registry,target:fingerprintTarget(),recovery:{ready:recovery.ready,revision:recovery.revision,size:recovery.size},
+  state:(prediction,fingerprint,genres,filmId)=>!!profile&&!!prediction&&!recovery.deniesPrediction(filmId,prediction)&&predictionCompatibilityFresh(verdict(prediction,fingerprint,genres)),
+  indexed:(item,film)=>!!profile&&!!item?.prediction&&!recovery.deniesPrediction(film?.id==null?undefined:String(film.id),item.prediction)&&predictionCompatibilityFresh(verdict(item.prediction,indexedFingerprintRecord(item),film?.genres)),
   // The evaluator's own verdict for an indexed item ({outcome:'current'|'compatible'|'stale',reason}); the film page shows its reason, it never re-derives one from a version number.
   verdictOf:(item,film)=>profile&&item?.prediction?verdict(item.prediction,indexedFingerprintRecord(item),film?.genres):null,
   // The stored fingerprint may be reused for a prediction when it is exact or compatible under the transition rule.
-  fingerprintUsable:(fingerprint,genres)=>fingerprintCompatibilityFresh(fingerprintVerdict(fingerprint,genres)),
+  fingerprintUsable:(fingerprint,genres,filmId)=>!recovery.deniesFingerprint(filmId,fingerprint)&&fingerprintCompatibilityFresh(fingerprintVerdict(fingerprint,genres)),
   work:(prediction,fingerprint,genres)=>verdict(prediction,fingerprint,genres),
   fingerprintVerdict:(fingerprint,genres)=>fingerprintVerdict(fingerprint,genres)};
 }
@@ -1429,6 +1441,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const [profile,storedIndex,catalog,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned),loadJSON(env,'sync.json')]);
  const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
  if(!profile)return null;
+ const recovery=await predictionRecoveryOverlay(env);let recoveryDenied=0;
  const safeSource=source&&Array.isArray(source.films)?source:{runId:source?.runId||null,films:[]};
  if(capture)Object.assign(capture,{report:safeSource,profile,index,catalog});
  const now=Date.now();
@@ -1478,8 +1491,15 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
   if(!strict&&predictionCompatibilityFresh(selective))compatibility.wouldKeep++;
   if(strict&&!predictionCompatibilityFresh(selective))compatibility.wouldRequeue++;
   if(strictEvaluated!==strict)compatibility.strictDisagreements++;
-  const chosen=verdicts.selective,decided=predictionCompatibilityFresh(chosen);
-  if(chosen&&predictionCompatibilityFresh(chosen)!==decided)fingerprintCompatibilityBlock.strictDisagreements++;
+  const chosen=verdicts.selective,ordinary=predictionCompatibilityFresh(chosen);
+  if(chosen&&predictionCompatibilityFresh(chosen)!==ordinary)fingerprintCompatibilityBlock.strictDisagreements++;
+  // AIR-477: an owner-confirmed intent denies exactly this film's stored version; the film is then outstanding like any stale one.
+  if(ordinary&&recovery.deniesPrediction(id,item.prediction)){
+   recoveryDenied++;fresh.set(id,false);
+   const requiredWork=recovery.modeOf?.(id)==='fingerprint_and_prediction'?'fingerprint_and_prediction':'prediction_only';
+   fingerprintCompatibilityBlock.classes[requiredWork]++;work[id]={class:requiredWork,requiredWork,migration:null,reason:'recovery_intent'};continue;
+  }
+  const decided=ordinary;
   fresh.set(id,decided);
   if(decided){fingerprintCompatibilityBlock.classes.unchanged++;continue;}
   const fv=chosen.fingerprint,migration=!predictionCompatibilityFresh(fv)||chosen.reason?.startsWith('prompt_')?fv.migration==='none'?'prediction':fv.migration:null,unknown=['transition_unknown','transition_impact_unknown','film_features_unknown','prompt_transition_unknown','prompt_features_unknown'].includes(chosen.reason);
@@ -1494,6 +1514,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const hotPending=missing.filter(f=>priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))];
  const hotCount=films.filter(f=>priority[f.id].hot).length,missingHot=missing.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-missingHot,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&fresh.get(String(f.id))).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
  const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:priorityProgrammeRunId,priorityBasis,priorityAsOf,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
+ if(recovery.ready){queue.recoveryRevision=recovery.revision;queue.recovery={revision:recovery.revision,activeIntents:recovery.size,denied:recoveryDenied};}
  return queue;
 }
 // AIR-431. The Prediction queue advances on its own state. A runner step (next, submit, complete) no longer rebuilds the queue from the
@@ -1539,11 +1560,14 @@ function carriedPredictionPriority(previous,id,now){
  if(fromCompleted&&age<=PRIORITY_CARRY_MS&&stored&&typeof stored==='object')return {...stored,basis:'carried'};
  return null;
 }
-function queueAdvanceGate(queue,report,profile,registry){
+// `recoveryRevision` (optional): the recovery intent revision read now. A queue built under another revision is rebuilt, so a confirmed
+// or cancelled intent reaches the queue through the ordinary rebuild, never through a per-film queue write (ADR 0165).
+function queueAdvanceGate(queue,report,profile,registry,recoveryRevision=null){
  if(!queueShapeValid(queue))return 'queue_shape';
  if(!profile||queue.profileHash!==profile.profileHash||queue.profileVersion!==profile.version)return 'profile_changed';
  if(queue.fingerprintSchemaVersion!==FINGERPRINT_SCHEMA_VERSION||(queue.fingerprintPromptVersion??1)!==FINGERPRINT_PROMPT_VERSION||queue.predictionPromptVersion!==PREDICTION_PROMPT_VERSION)return 'contract_changed';
  if(queue.fingerprintCompatibility?.registryDigest!==registry)return 'registry_changed';
+ if(Number.isInteger(recoveryRevision)&&(queue.recoveryRevision??0)!==recoveryRevision)return 'recovery_changed';
  return null;
 }
 // Pure. The films leave every list, map and counter of the queue; null when none was in it (nothing to write). `compatibility`,
@@ -1584,7 +1608,7 @@ function guardedSettle(context,ids,trigger){
 // finds the catalog held keep working on a persisted queue that is still valid and not older than QUEUE_STALE_LIMIT_MS; the answer then
 // carries `queueStale` (never silent). Any other failure, and a stale or invalid queue, is thrown as before.
 async function currentPredictionQueue(env,report,profile,trigger,{force=false,fallback=false,capture=null}={}){
- const read=await readQueueHead(env),stored=read.current,why=queueAdvanceGate(stored,report,profile,(await fingerprintRegistryDigests()).registry);
+ const read=await readQueueHead(env),stored=read.current,why=queueAdvanceGate(stored,report,profile,(await fingerprintRegistryDigests()).registry,(await predictionRecoveryOverlay(env)).revision);
  if(stored&&!why)QUEUE_HEADS.set(stored,read);
  if(!force&&!why)return stored;
  try{return await refreshPredictionQueue(env,report,trigger,{capture});}
@@ -2383,8 +2407,8 @@ async function batchSelection(env,{profile,report,queue,pin=null,limit=BATCH_RUN
   const found=await readFilmsById(env,report,chunk),states=await Promise.all(chunk.map(id=>found.has(id)?readFilmStateCurrent(env,id):null));
   chunk.forEach((id,i)=>{
    const film=found.get(id);if(!film){skipped.missingAdmission.push(id);return;}
-   const state=states[i];if(freshness.state(state.predictions?.current,state.fingerprint,film.genres)){skipped.alreadyCurrent.push(id);return;}
-   const plan=freshness.fingerprintUsable(state.fingerprint,film.genres)?'prediction_only':'fingerprint_and_prediction';
+   const state=states[i];if(freshness.state(state.predictions?.current,state.fingerprint,film.genres,id)){skipped.alreadyCurrent.push(id);return;}
+   const plan=freshness.fingerprintUsable(state.fingerprint,film.genres,id)?'prediction_only':'fingerprint_and_prediction';
    items.push({filmId:id,lane:queue.priority?.[id]?.hot?'hot':'cold',plan,film,state});
   });
  }
@@ -2430,7 +2454,7 @@ async function batchPreflight(env,body,tally=null){
  const dryRun=body.dryRun===true,manifestSize=resolveManifestSize(body).size,[profile,report]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json')]);
  if(!profile)return {response:json({error:'Taste profile is not configured'},409)};
  const programme=report&&Array.isArray(report.films)?report:{runId:report?.runId||null,films:[]};
- const read=await readQueueHead(env),stored=read.current,revision=read.head?.queueGeneration??null,why=queueAdvanceGate(stored,programme,profile,(await fingerprintRegistryDigests()).registry);
+ const read=await readQueueHead(env),stored=read.current,revision=read.head?.queueGeneration??null,why=queueAdvanceGate(stored,programme,profile,(await fingerprintRegistryDigests()).registry,(await predictionRecoveryOverlay(env)).revision);
  const priorityOpen=!why&&!!stored&&(stored.priorityBasis==='carried'||stored.priorityBasis==='neutral'||stored.programmeRunId!==programme.runId);
  const sync=priorityOpen?await loadJSON(env,'sync.json'):null;
  const priorityDue=priorityOpen&&priorityRefreshDue(stored,programme,sync);
@@ -2790,14 +2814,14 @@ async function batchSubmitItem(env,ctx,item){
    rememberBatchEventFilm(run,id,source,{group:'success',status:outcome,rating:stored?.predictedRating,source:compactEventSource(item.assessment)});
    return {result:{filmId:id,status:outcome,assessment:assessmentStatus,replayed:true},settled:true};
   }
-  if(item.failure&&!freshness.state(stored,fingerprint,genres)){failureStage='parse_error';validationStage='caller_reported';reportedBy='caller';issues=[];claimed=callerFailureClaim(item.failure);throw new Error('Reported malformed model response');}
-  const usable=f=>freshness.fingerprintUsable(f,genres);
+  if(item.failure&&!freshness.state(stored,fingerprint,genres,id)){failureStage='parse_error';validationStage='caller_reported';reportedBy='caller';issues=[];claimed=callerFailureClaim(item.failure);throw new Error('Reported malformed model response');}
+  const usable=f=>freshness.fingerprintUsable(f,genres,id);
   if(item.fingerprint&&!usable(fingerprint)){
    const found=fingerprintIssues(item.fingerprint,source[id]);if(found.length){failureStage='parse_error';validationStage='fingerprint_schema';reportedBy='worker';issues=found;throw new Error('Invalid fingerprint');}
    fingerprint=await batchGuardedCommit(env,ctx,()=>writeFingerprint(guarded,id,item.fingerprint,fingerprint,'generated',undefined,FINGERPRINT_PROMPT_VERSION,false));deferredIndex=fingerprintIndexPatch(fingerprint);
   }
   if(!usable(fingerprint)){failureStage='parse_error';validationStage='fingerprint_missing';reportedBy='worker';issues=[{path:'fingerprint',code:'required'}];throw new Error('Current fingerprint required');}
-  if(freshness.state(stored,fingerprint,genres)){
+  if(freshness.state(stored,fingerprint,genres,id)){
    await updateViewIndex(env,id,{prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});deferredIndex=null;
    run.results[id] ||= 'already_current';delete run.failures[id];run.submitted[id]={outcome:'already_current',inputDigest:digest,assessment:item.assessment!==undefined?'not_applicable':'not_sent',committedAt:new Date().toISOString()};result={filmId:id,status:'already_current',assessment:item.assessment!==undefined?'not_applicable':'not_sent'};
   }else{
@@ -2998,13 +3022,13 @@ async function batchSubmitDryRun(env,body){
   if(!film||!state){results.push({filmId:id,status:'not_eligible',liveInput:'not_eligible',dryRun:true});continue;}
   const item=withDerivedSource(rawItem,modelMetadata(film));
   let liveInput='same';
-  if(item.inputHash){const plan=freshness.fingerprintUsable(state.fingerprint,genres)?'prediction_only':'fingerprint_and_prediction',entry={filmId:id,lane:queue?.priority?.[id]?.hot?'hot':'cold',plan,modelMetadata:batchCompact(modelMetadata(film)),...(plan==='prediction_only'?{fingerprint:batchCompact(state.fingerprint)}:{})};liveInput=(await batchFilmInputHash(entry))===item.inputHash?'same':'changed';}
+  if(item.inputHash){const plan=freshness.fingerprintUsable(state.fingerprint,genres,id)?'prediction_only':'fingerprint_and_prediction',entry={filmId:id,lane:queue?.priority?.[id]?.hot?'hot':'cold',plan,modelMetadata:batchCompact(modelMetadata(film)),...(plan==='prediction_only'?{fingerprint:batchCompact(state.fingerprint)}:{})};liveInput=(await batchFilmInputHash(entry))===item.inputHash?'same':'changed';}
   const current_=state.predictions?.current;
   if(item.failure){results.push({filmId:id,status:'validation_failure',error:'parse_error',validation:{stage:'caller_reported',reportedBy:'caller',issues:[],...(callerFailureClaim(item.failure)?{claimed:callerFailureClaim(item.failure)}:{})},liveInput,assessment:item.assessment!==undefined?'not_applicable':'not_sent',dryRun:true});continue;}
   let fingerprint=state.fingerprint;
-  if(freshness.state(current_,fingerprint,genres)){results.push({filmId:id,status:'already_current',liveInput:'not_eligible',assessment:item.assessment!==undefined?'not_applicable':'not_sent',dryRun:true});continue;}
-  if(item.fingerprint&&!freshness.fingerprintUsable(fingerprint,genres)){const found=fingerprintIssues(item.fingerprint,modelMetadata(film));if(found.length){issues=found;stage='fingerprint_schema';}else fingerprint={...item.fingerprint,filmId:id,fingerprintHash:await contentHash({...item.fingerprint,filmId:id}),fingerprintSchemaVersion:item.fingerprint.fingerprintSchemaVersion??FINGERPRINT_SCHEMA_VERSION};}
-  if(!issues&&!freshness.fingerprintUsable(fingerprint,genres)&&!item.fingerprint){issues=[{path:'fingerprint',code:'required'}];stage='fingerprint_missing';}
+  if(freshness.state(current_,fingerprint,genres,id)){results.push({filmId:id,status:'already_current',liveInput:'not_eligible',assessment:item.assessment!==undefined?'not_applicable':'not_sent',dryRun:true});continue;}
+  if(item.fingerprint&&!freshness.fingerprintUsable(fingerprint,genres,id)){const found=fingerprintIssues(item.fingerprint,modelMetadata(film));if(found.length){issues=found;stage='fingerprint_schema';}else fingerprint={...item.fingerprint,filmId:id,fingerprintHash:await contentHash({...item.fingerprint,filmId:id}),fingerprintSchemaVersion:item.fingerprint.fingerprintSchemaVersion??FINGERPRINT_SCHEMA_VERSION};}
+  if(!issues&&!freshness.fingerprintUsable(fingerprint,genres,id)&&!item.fingerprint){issues=[{path:'fingerprint',code:'required'}];stage='fingerprint_missing';}
   if(!issues){const found=predictionIssues(item.prediction);if(found.length){issues=found;stage='prediction_schema';}}
   if(!issues){const found=assessmentIssues(item.assessment,modelMetadata(film));if(found.length){issues=found;stage='assessment_schema';}}
   if(issues){results.push({filmId:id,status:'validation_failure',error:'parse_error',validation:{stage,reportedBy:'worker',issues},liveInput,assessment:item.assessment!==undefined?'not_applicable':'not_sent',dryRun:true});continue;}
@@ -3100,7 +3124,7 @@ async function drainBatchStage(env,run,gate,profile){
   const id=row.filmId,stale=stageOriginStale(row,profile,registry);
   if(stale){dropped.push({filmId:id,reason:stale});remove.add(id);continue;}
   const films=await readFilmsById(env,report,[id]),film=films.get(id),state=await readFilmState(env,id);
-  const plan=film&&freshness.fingerprintUsable(state.fingerprint,film.genres)?'prediction_only':'fingerprint_and_prediction';
+  const plan=film&&freshness.fingerprintUsable(state.fingerprint,film.genres,id)?'prediction_only':'fingerprint_and_prediction';
   const liveHash=film?await stagedFilmInputHash(id,plan,modelMetadata(film),plan==='prediction_only'?state.fingerprint:null):null;
   if(!row.origin?.filmInputHash||!liveHash||row.origin.filmInputHash!==liveHash){dropped.push({filmId:id,reason:'stale_input'});remove.add(id);continue;}
   if(!run.selectedIds.includes(id)){
@@ -3171,7 +3195,7 @@ async function batchHold(env,body){
   const stored=heldItemBody(item);
   const state=await readFilmState(env,item.filmId);
   const metadata=source[item.filmId]||{};
-  const plan=freshness.fingerprintUsable(state.fingerprint,metadata.genres)?'prediction_only':'fingerprint_and_prediction';
+  const plan=freshness.fingerprintUsable(state.fingerprint,metadata.genres,String(item.filmId))?'prediction_only':'fingerprint_and_prediction';
   const origin={...originBase,filmInputHash:await stagedFilmInputHash(item.filmId,plan,metadata,plan==='prediction_only'?state.fingerprint:null)};
   incoming.push({...stored,itemDigest:await batchItemDigest(item.filmId,stored),origin,stagedAt:new Date().toISOString()});
  }
@@ -3272,7 +3296,7 @@ async function enrichmentComplete(env,body,requestId){
  if(run.mode==='queued'&&(!body.reason||['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason))&&!run.systemicStopReason){let queue;try{queue=await atStage('queue_refresh',async()=>currentPredictionQueue(env,await loadJSON(env,'programme.json'),profile,'completion_check'));}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('complete',held,requestId,run.runId);throw error;}if(queueReadyIds(queue).some(id=>!run.failures[id]))return json({error:'Queue not empty; continue next',runId:run.runId,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining},409);}
  const states=await Promise.all(run.selectedIds.map(id=>readFilmState(env,id)));let created=0,recalculated=0,pending=0;
  const freshness=await predictionFreshness(env,profile),source=freshness.needsGenres||isBatchV2Run(run)?await loadJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json')||{}:{};
- for(let i=0;i<states.length;i++){const s=states[i],p=s.predictions?.current,id=run.selectedIds[i];if(p?.generatedAt&&p.generatedAt!==run.baseline[id]&&p.tasteProfileHash===run.tasteProfileHash&&p.predictionPromptVersion===run.predictionPromptVersion){run.baseline[id]?recalculated++:created++;if(!['created','recalculated'].includes(run.results?.[id]))run.results[id]=run.baseline[id]?'recalculated':'created';}else if(!run.failures[id]&&!freshness.state(p,s.fingerprint,source[id]?.genres)&&!SETTLED_STATUSES.includes(run.results?.[id]))pending++;}
+ for(let i=0;i<states.length;i++){const s=states[i],p=s.predictions?.current,id=run.selectedIds[i];if(p?.generatedAt&&p.generatedAt!==run.baseline[id]&&p.tasteProfileHash===run.tasteProfileHash&&p.predictionPromptVersion===run.predictionPromptVersion){run.baseline[id]?recalculated++:created++;if(!['created','recalculated'].includes(run.results?.[id]))run.results[id]=run.baseline[id]?'recalculated':'created';}else if(!run.failures[id]&&!freshness.state(p,s.fingerprint,source[id]?.genres,id)&&!SETTLED_STATUSES.includes(run.results?.[id]))pending++;}
  created=Object.values(run.results).filter(x=>x==='created').length;recalculated=Object.values(run.results).filter(x=>x==='recalculated').length;const failed=Object.keys(run.failures).length;run.counts={created,recalculated,failed,pending};run.reason=['queue_empty','eligible_queue_empty','parse_error','manifest_spent'].includes(body.reason)?null:safePredictionReason(body.reason||run.interruption);run.reason=run.systemicStopReason||run.reason;run.stopReason=run.reason||(failed?'eligible_queue_empty':pending?'external_termination':'queue_empty');run.status=pending||run.reason?'partial':'complete';run.completedAt=new Date().toISOString();
  const summary=runSummary(run);let hotRemaining=null,coldRemaining=null,remaining=pending;
  if(run.mode==='queued'){
