@@ -189,7 +189,7 @@ The Scheduled Task itself is outside this repository. Compare explicitly timezon
 
 ## Scoped recovery of films whose prediction is current (AIR-477, dormant)
 
-This is the procedure the owner's production operation ([AIR-478](https://trello.com/c/IbsSCRce)) will use; it is **not** authorized by AIR-477. It needs migration `0024` applied (a separate owner GO), the prediction marker `d1` with writes `open`, and an explicit owner GO for the exact cohort. Contract: [scoped prediction recovery intent](../reference/api/admin-actions.md#scoped-prediction-recovery-intent).
+This is the procedure the owner's production operation ([AIR-478](https://trello.com/c/IbsSCRce)) will use; it is **not** authorized by AIR-477. It needs migration `0024` applied (a separate owner GO), the prediction marker `d1` (its `writes` is normally `held` and does not matter), and an explicit owner GO for the exact cohort. Contract: [scoped prediction recovery intent](../reference/api/admin-actions.md#scoped-prediction-recovery-intent).
 
 1. Read `GET /api/admin/prediction-recovery-intent/preview?films=<≤50 ids>&mode=prediction_only` (or `fingerprint_and_prediction`). It writes nothing. Check `schema.ready`, `authority`, `runner`, every film's `outcome` and `reason`, and `budget`. `unchanged` films need no intent: the ordinary rule already queues them. `blocked` and `conflict` films are not written.
 2. Confirm with the exact `scopeHash` and a fresh idempotency key (16–80 characters of `A-Za-z0-9_-`). A `stale_scope` answer means something the preview rested on moved: read the preview again; never retry with an old hash. A lost answer is safe to resend with the same key and hash: it returns `replayed` and the stored receipt.
