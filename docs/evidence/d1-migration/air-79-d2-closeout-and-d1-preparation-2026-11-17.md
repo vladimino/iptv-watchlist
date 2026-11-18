@@ -106,6 +106,27 @@ Prepared for the Coordinator and Product Owner. It restates the matrix above; it
 
 A superseding ADR would supersede in part the revert and release sections of ADRs 0073, 0078, 0079, 0081, 0084 and 0085 and, under Option A only, their import, hold, activate and seal sections, not their schema, fence or authority decisions. The live markers of the six domains, the live `*_DB_REQUIRED` bindings and ADRs 0017, 0051, 0076, 0108, 0141 and 0142 were not read for this brief **(U)**.
 
+## Owner decision and production markers
+
+**Decision (17 November, AIR-79 executor session).** The owner decided: D1 stays the authority, no rollback to R2 is planned, and the code keeps no insurance for that case. This selects Option A of choice 4 in its broadest form and replaces choices 1 to 3 with one rule: a domain is served only when its marker says D1, and any other state or a missing binding is refused. The owner confirmed the rule, accepted the residual risk (a restore to a point before a domain's activation leaves that domain refused, with no tool to bring it back) and authorized one read-only read of the markers. It is recorded as [ADR 0162](../../adr/0162-d1-only-authority-retire-rollback-toolchain.md) (Accepted, approval recorded on AIR-79). With this, the review note about choice 2 is settled: `activatePublished` is retired, so a published EPG `held` marker is reachable only through a restore or a manual SQL write, and the single rule refuses it.
+
+### Production markers read on 17 November
+
+One `SELECT` per marker row through the Cloudflare D1 query API, at 21:45:15 UTC, by the author; the sum of `rows_written` and `changes` over all queries was 0.
+
+| Domain | Marker |
+| --- | --- |
+| `schema_contract` | version 23 |
+| Ratings documents | `mode` `d1`, `cutover` `open`, generation 4079 |
+| Mutable predictions | `mode` `d1`, `writes` `held`, generation 18665 |
+| Owner reviews | `mode` `d1`, `writes` `open`, generation 1, mirror generation 1 |
+| Metadata cache | `mode` `d1`, cache generation 43, mirror generation 43 |
+| Published EPG | `mode` `d1`, `cutover` `open`, generation 512 |
+| Discovery | `mode` `d1`, `cutover` `open`, generation 189354 |
+| Film/Person | `mode` `d1`, `cutover` `open`, generation 2 |
+
+**Correction to the matrix above.** The predictions row and finding 1 assumed `writes` `held` exists only with `mode` `r2`. The read shows `d1` with `writes` `held`, and the code explains it: `activatePredictionDomain` changes only `mode` (it requires `writes` `held` and leaves it), `readPredictionAuthority` reports `ready` from `mode` alone, and `releasePredictionWriters` acts only in `r2`. In `d1` the `writes` column is a leftover of the import fence and carries no meaning, so the single rule checks `mode` only for this domain. Owner reviews are different: their writer refuses unless `writes` is `open` in any mode, and production has `open`.
+
 ## Verification
 
 Documentation-only change, so the expensive suite is skipped by the repository's rule. Checked locally: `git diff --check`, the documentation governance and timeless-documentation checks. CI of the pull request and the independent review are recorded on the pull request and the card.

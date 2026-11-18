@@ -6,7 +6,7 @@
 **Approval source:** [Owner ADR acceptance and approval of two rendered Mermaid diagrams, 2026-11-02](https://trello.com/c/RBxi5Pcf#comment-6ae7c9c667f360d012b09f40), after [independent technical PASS on PR #319 HEAD b4aeec266b6421bf799ce503508a4b610a818248](https://github.com/vladimino/iptv-watchlist/pull/319#pullrequestreview-5730733380)  
 **Related work:** [AIR-314](https://trello.com/c/RBxi5Pcf), [ADR 0072](0072-owner-reviewed-localization-overlay.md), [ADR 0073](0073-metadata-cache-d1-authority.md), [ADR 0056](0056-d1-enrichment-write-through.md), [ADR 0051](0051-d1-domain-r2-blobs.md)  
 **Supersedes:** [ADR 0072](0072-owner-reviewed-localization-overlay.md) in part, and only while `owner_review_authority.mode` is `d1`, replacing its R2-only authority decision. ADR 0072 remains the contract while the marker is absent or `r2`.  
-**Superseded by:** None
+**Superseded by:** in part [ADR 0162](0162-d1-only-authority-retire-rollback-toolchain.md): the `r2` mode, the import, activate and revert procedures and the implicit fallback below version 9 are retired; the tables, fence and authority decision stay
 
 ## Context
 

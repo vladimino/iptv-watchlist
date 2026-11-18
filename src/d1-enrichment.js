@@ -220,12 +220,11 @@ async function d1EnrichmentStore(env,timer=D1_ENRICHMENT_NO_TIMER){
   d1EnrichmentRead(env,etags,'letterboxd/admissions/verified-films.json',value=>d1EnrichmentRecord(value)&&value.schemaVersion===1&&d1EnrichmentRecord(value.films),false),
  ]));
  if(!published){watchlist=watchlistObject;programme=programmeObject;}
- let ownerGate=null,ownerMirror=null,ownerDocument=null;
+ let ownerGate=null,ownerDocument=null;
  if(typeof OwnerReview!=='undefined'){
   await timer.time('store.ownerReview',async()=>{
    ownerGate=await OwnerReview.readAuthority(env);
    if(ownerGate.failClosed)throw new D1EnrichmentInputError('owner_review_unavailable','owner_review');
-   if(!ownerGate.legacy&&ownerGate.mode==='r2')ownerMirror=await d1EnrichmentRead(env,etags,'admin/owner-reviews.json',value=>!!value&&typeof value==='object'&&!Array.isArray(value)&&value.contractVersion===1&&plainOwner(value),false);
   });
  }
  await timer.time('store.etagRecheck',async()=>{for(const [key,etag] of etags)if(((await env.BUCKET.head(key))?.etag??null)!==etag)throw new D1EnrichmentInputError('input_changed',key);},{rows:()=>etags.size});
@@ -234,20 +233,17 @@ async function d1EnrichmentStore(env,timer=D1_ENRICHMENT_NO_TIMER){
   if(!again||again.generation!==published.generation||again.programmeRunId!==runId)throw new D1EnrichmentInputError('input_changed','published_epg');
  }
  await timer.time('store.writersIdle',()=>d1EnrichmentWritersIdle(env));
+ // ADR 0162: the owner-review domain is served only in mode d1; the local stand-in (legacy) adds no overlay.
  if(ownerGate&&!ownerGate.legacy){
-  ownerDocument=ownerMirror;
-  if(ownerGate.mode==='d1'){
-   const snap=await timer.time('store.ownerReview',()=>OwnerReview.readFenced(env));
-   if(!snap.ok||snap.mode!=='d1'||snap.generation!==ownerGate.generation)throw new D1EnrichmentInputError('owner_review_unavailable','owner_review');
-   ownerDocument=snap.body;
-  }
+  const snap=await timer.time('store.ownerReview',()=>OwnerReview.readFenced(env));
+  if(!snap.ok||snap.mode!=='d1'||snap.generation!==ownerGate.generation)throw new D1EnrichmentInputError('owner_review_unavailable','owner_review');
+  ownerDocument=snap.body;
   if(ownerDocument){OwnerReview.stampLocalized(programme,ownerDocument);OwnerReview.stampLocalized(watchlist,ownerDocument);}
  }
  const store=timer.sync('store.build',()=>EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,watchlistAdmissions:EnrichmentProjection.watchlistAdmissionsFromIndex(viewIndex),archiveAdmissions:archiveDocument?EnrichmentProjection.archiveAdmissionsFromDocument(archiveDocument):null,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}}));
  if(ownerDocument)store.ownerReviews=ownerDocument;
  return {store,programmeRunId:runId,discoveryGate:d1EnrichmentAuthoritySnapshot(authority)};
 }
-function plainOwner(value){return !!value.films&&typeof value.films==='object'&&!Array.isArray(value.films)&&!!value.people&&typeof value.people==='object'&&!Array.isArray(value.people);}
 
 // AIR-388: among the changed Films, those a verified rated archive admitted (letterboxd/admissions/verified-films.json) and D1 has never
 // projected go first; the others keep their order. A stable partition, so it changes only the order, never the set or the change keys.

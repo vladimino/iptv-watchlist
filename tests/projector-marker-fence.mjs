@@ -13,6 +13,9 @@ import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {projectorContext} from './d1-enrichment-context.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+// ADR 0162: an owner-review marker that is not d1 is refused; the fixture puts it at d1 with no rows (the former r2 marker with no
+// object gave the same empty overlay).
+const OWNER_D1="UPDATE owner_review_authority SET mode='d1' WHERE id=1;";
 
 // AIR-374: FENCE_ONLY="4,9" runs only those numbered sections (the mutation runner's first, cheap run of a mutant; a mutant that survives it is run against the whole file). Absent: every section.
 // A failing run names the section it died in on stderr (LEAN_SECTION), which is how the runner's hints are learned.
@@ -30,7 +33,7 @@ const migrated=(opts={})=>{
  const file=path.join(root,'m-'+(databases++)+'.sqlite');
  if(!template){
   template=path.join(root,'template.sqlite');
-  const result=sqliteSync(['-bail',template],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
+  const result=sqliteSync(['-bail',template],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+'\n'+OWNER_D1,encoding:'utf8'});
   if(result.status!==0)throw new Error(result.stderr||'migration failed');
  }
  fs.copyFileSync(template,file);

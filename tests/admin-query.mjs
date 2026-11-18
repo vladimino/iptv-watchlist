@@ -11,7 +11,7 @@ for (const sample of ['', 'abc', 'ёжик', 'a'.repeat(80)]) {
 }
 const buildSource = fs.readFileSync('build.mjs', 'utf8');
 // The Worker script receives the library only as the AdminQuery namespace: none of its helpers becomes a global there.
-const workerBundle = buildSource.slice(buildSource.indexOf("fs.writeFileSync('dist/server/index.js'"));
+const workerBundle = buildSource.slice(buildSource.indexOf("writeAtomic('dist/server/index.js'"));
 assert.match(workerBundle, /scoped\('src\/domain\/admin-query\.js','AdminQuery'\)/);
 assert.equal(workerBundle.includes("fs.readFileSync('src/domain/admin-query.js','utf8')+"), false);
 const scopedSource = scoped('src/domain/admin-query.js', 'AdminQuery');

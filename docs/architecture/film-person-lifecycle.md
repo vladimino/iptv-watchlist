@@ -115,11 +115,16 @@ flowchart LR
   rows[("owner_review_entry<br/>both maps, one generation")]
   mirror[("R2 mirror after the batch")]
   reads["Programme, watchlist,<br/>admin and catalogue"]
+  refused["503 owner_review_unavailable<br/>nothing read or written"]
+  standin["Local stand-in only<br/>OWNER_REVIEW_DB_OPTIONAL=standin"]
   form --> post --> marker
-  marker -->|absent or r2| object --> reads
   marker -->|d1| rows --> reads
   rows -.->|may lag; not a read fallback| mirror
+  marker -->|any other mode, missing binding or tables| refused
+  standin -.->|development and tests| object --> reads
 ```
+
+[ADR 0162](../adr/0162-d1-only-authority-retire-rollback-toolchain.md) (Accepted 2026-11-17) leaves `d1` as the only served marker: a marker in mode `r2`, a missing binding, a missing `schema_contract` or missing tables is refused, and only the explicit local stand-in keeps the R2 object. The import, activate and revert tooling is retired. The writer fence stays: a commit is refused unless `writes` is `open`. The name-confirmation figure above shows that stand-in store.
 
 ## Watchlist fact keeps the Film
 
@@ -152,6 +157,10 @@ flowchart LR
 This section adds no diagram. [ADR 0087](../adr/0087-rated-archive-film-admission.md) is Accepted. [ADR 0090](../adr/0090-rated-identity-redirect-proof-and-retry.md) is Proposed: the HTML shortlink tag is optional when the Worker already followed `boxd.it/<code>` onto the film page, `writes` follows a persisted candidate mutation, and a `shortlink_missing` review returns to pending only through an owner retry of named codes. A confirmed rated ZIP stores unknown rated rows by archive SHA-256 and short `boxd.it` code. That registration is not a Film and writes no watchlist fact. One later owner request verifies one admitting or pending code, or one named pending code. The cursor does not hide an earlier pending code. The request fences the intended movie, admits that one source code, and only then writes the rating. A second short code for the same movie stops for review and does not replace the first Film. A verified movie is `tmdb_<n>` on `letterboxd/admissions/verified-films.json`, with no `watchlist` field. Further explicit requests on that same route may store synopsis and credits only when the fetched page still matches the admitted movie; they are not the enrichment cron. The reader and the enrichment projector already in the diagram above read that object. A thin archive stub yields to a richer discovered film of the same movie id. A missing object admits nobody, so deploying this path does not upsert a rated-only Film. The same movie already reached by an EPG airing stays one Film. Finds eligibility is unchanged. **Historical:** R2 stayed the Film authority. **Current:** D1 is the Film authority at `open`.
 
 Storage note (AIR-374 P2a, [ADR 0120](../adr/0120-canonical-film-writers-identity-metadata-membership.md)): **Current at `open`:** the lifecycle rows above (identity, metadata and the effective localization) and the Film's identity title, metadata body, sync clocks and watchlist membership are written by one fenced batch per Film (`writeFilmFacts`, `src/canonical-film-writers.js`), reached from the wired producers. It never lets an automatic value replace a reviewed or owner one and it materialises the effective localization in the same batch as an automatic source. **Historical:** until `open` the projector was the only writer; the diagrams here still describe the domain contract.
+
+## Rated-only Diary admission (AIR-489, [ADR 0166](../adr/0166-diary-rated-only-identity-bridge.md))
+
+A Film behind a rated-only Diary id is admitted by the existing `applyRatedAdmissionRetention` (receipt `identity: "diary_page"`), exactly like a rated-archive Film, after a verified Letterboxd page and TMDB movie check. The admission writes the trusted `tmdb` claim and the `letterboxd_short_code` alias; it still writes no trusted `letterboxd` claim, so `catalogFilmIdentityBridge` stays `absent` for these Films and the bridge lives in the ratings facts alias (`tmdb:<n>`). A later card may add the claim. Diagrams unchanged.
 
 ## Discovery admission producer (P3c, [ADR 0134](../adr/0134-discovery-admission-producer-wiring.md))
 
