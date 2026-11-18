@@ -201,6 +201,7 @@ assert.equal(el('#summary-automation').textContent,'статус недосту�
 assert.equal(el('#summary-epg').textContent,'статус недоступен');
 assert.equal(el('#status-stale-note').hidden,false);
 assert.match(el('#status-stale-note').textContent,/^Не удалось обновить\. Показаны данные от /);
+assert.equal(el('#status-stale-note').dataset.failure,'http_503','AIR-519: the kind of the failed footer read is kept as data, not shown');
 assert.match(el('#summary-forecast').textContent,/1\/2/,'the last measured coverage is kept, beside the stale note');
 assert.equal(el('#activity-list').innerHTML,eventsHtml);
 assert.equal(el('#activity-status').textContent,'события на месте');
@@ -211,6 +212,8 @@ const recoveredFooter=run('loadPredictionQueue({quiet:true})');
 await untilIdle();
 await recoveredFooter;
 assert.match(el('#summary-forecast').textContent,/9/);
+assert.equal(el('#status-stale-note').hidden,true,'the next good read removes the stale note');
+assert.equal(Object.hasOwn(el('#status-stale-note').dataset,'failure'),false,'and the failure kind');
 failed.add('/api/events');
 const failedEvents=run('loadEvents()');
 flush();

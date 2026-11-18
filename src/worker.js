@@ -16,7 +16,7 @@ const loadJSON=async(env,key,options=null)=>{
  if(hit)return hit.value;
  const learned=value=>{if(typeof requestScopeLearn==='function')requestScopeLearn(env,key,value);return value;};
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
-  const routed=await DiscoveryAuthority.routeRead(env,key);
+  const routed=await DiscoveryAuthority.routeRead(env,key,options);
   if(routed.handled)return routed.value;
  }
  const publishedKey=key===EPG_GENERATION_KEY||key==='programme.json'||key==='watchlist.json'||key==='epg/discovery-latest.json'||key==='epg/discovered-films.json';
