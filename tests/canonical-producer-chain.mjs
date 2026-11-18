@@ -41,7 +41,7 @@ const P='run-p';
  const file=database('prepared');
  const before=one(file,'SELECT COUNT(*) FROM canonical_producer_chain');
  const env=envOf(file);
- assert.deepEqual(await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)}),{state:'skipped',reason:'projector_is_writer'});
+ await assert.rejects(()=>Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)}),error=>error.code==='film_person_unavailable');
  assert.equal(one(file,'SELECT COUNT(*) FROM canonical_producer_chain'),before);
 }
 
@@ -113,7 +113,7 @@ const P='run-p';
 {
  const created=[];
  const dormant=await reconcileProducerChain({...envOf(database('prepared')),PRODUCER_WORKFLOW:{create:async({id})=>{created.push(id);}}},{now:Date.parse(AT)});
- assert.equal(dormant.reason,'dormant');
+ assert.equal(dormant.reason,'marker_unreadable');
  assert.equal(created.length,0);
  const noBind=await reconcileProducerChain(envOf(database()),{now:Date.parse(AT)});
  assert.equal(noBind.reason,'workflow_unavailable');

@@ -79,10 +79,10 @@ const record=(body,key)=>(body.records||[]).find(item=>item.key===key);
 
 {
  seedFooter();
+ reads.length=0;
  const prepared=await footer({DB:standin(database('prepared'),'prepared')});
- assert.equal(prepared.status,200);
- assert.ok(reads.includes('metadata.json'),'prepared footer still reads metadata.json');
- assert.equal(prepared.body.collection.state,'ok');
+ assert.equal(prepared.status,503,'prepared is not served (ADR 0162)');
+ assert.ok(!reads.includes('metadata.json'),'prepared never reads the frozen metadata.json');
 }
 {
  seedFooter();
@@ -91,13 +91,6 @@ const record=(body,key)=>(body.records||[]).find(item=>item.key===key);
  assert.ok(!reads.includes('metadata.json'),'open footer does not GET frozen metadata.json');
  assert.equal(open.body.collection.state,'ok');
  assert.equal(open.body.collection.watched,1);
-}
-{
- seedFooter();
- records.delete('metadata.json');
- const prepared=await footer({DB:standin(database('prepared'),'prepared')});
- assert.equal(prepared.status,200);
- assert.equal(prepared.body.collection.state,'unknown','missing R2 metadata is unknown, not an empty cache');
 }
 {
  seedFooter();
@@ -129,21 +122,11 @@ const record=(body,key)=>(body.records||[]).find(item=>item.key===key);
  assert.equal(r.body.reason,'film_person_generation_moved');
 }
 {
- const file=database('prepared');seedFooter();
- let gates=0;
- const env={BUCKET:bucket,DB:standin(file,'prepared',{onQuery:async text=>{if(/FROM film_person_authority/.test(text)){gates++;if(gates===2)sqlite(file,TO_OPEN);}}})};
- const r=await footer(env);
- assert.equal(r.status,503,'prepared footer rechecks after predictionFreshness');
- assert.equal(r.body.reason,'film_person_generation_moved');
-}
-
-{
  seedFooter();
+ reads.length=0;
  const prepared=await exported({DB:standin(database('prepared'),'prepared')});
- assert.equal(prepared.status,200);
- assert.ok(reads.includes('metadata.json'));
- assert.ok(reads.includes('titles.json'));
- assert.equal(record(prepared.body,'metadata.json').value['heat-1995'].tmdbId,'99');
+ assert.equal(prepared.status,503,'prepared is not served (ADR 0162)');
+ assert.ok(!reads.includes('metadata.json')&&!reads.includes('titles.json'),'no frozen mirror is read');
 }
 {
  seedFooter();

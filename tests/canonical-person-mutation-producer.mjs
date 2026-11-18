@@ -101,10 +101,10 @@ const OPEN={origin:'epg',event:'epg:run-1',now:()=>T};
  assert.equal(personMutationContent(unit({},{externalIds:undefined,aliases:undefined})).externalIds.length,0);
 }
 
-// 2. Dormant below open: one marker read and nothing else; held throws, never a fallback.
+// 2. Below open: refused with film_person_unavailable, nothing written; held throws, never a fallback.
 for(const stage of ['legacy','r2','prepared']){
  const file=database(stage),env=envOf(file);
- assert.deepEqual(await applyPersonMutation(env,{...OPEN,input:unit()}),{state:'skipped',reason:'projector_is_writer',receipt:false},stage);
+ await assert.rejects(()=>applyPersonMutation(env,{...OPEN,input:unit()}),code('film_person_unavailable'),stage);
  assert.equal(env.DB.calls.batches,0);assert.equal(one(file,'SELECT COUNT(*) FROM person'),0);assert.equal(one(file,'SELECT COUNT(*) FROM canonical_write_receipt'),0);
 }
 {
@@ -396,8 +396,7 @@ for(const stage of ['legacy','r2','prepared']){
  const p4=planEpgPersonUnits({runId:'run-1',at:T,personRows:[{id:PID(1),roleId:'director/5',contractVersion:1},{id:PID(2),roleId:'director/2',contractVersion:1}]});
  const out4=await applyEpgPersonUnits(envOf(file4),{plan:p4,now:()=>T});
  assert.deepEqual([out4.counts.applied,out4.counts.failed,out4.failures],[1,1,[{id:PID(1),code:'person_role_collision'}]]);
- assert.equal((await applyEpgPersonUnits(envOf(database('prepared')),{plan:p,now:()=>T})).skipped,true);
- assert.equal((await applyEpgPersonUnits(envOf(database('prepared')),{plan:p,now:()=>T})).counts.applied,0);
+ await assert.rejects(()=>applyEpgPersonUnits(envOf(database('prepared')),{plan:p,now:()=>T}),code('film_person_unavailable'));
 }
 
 // 13. The bounded own-origin reconcile covers person_mutation in the same pass (the adapter's shared inline limit), and only the origin's own receipts.

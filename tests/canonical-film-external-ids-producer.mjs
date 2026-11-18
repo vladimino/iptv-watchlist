@@ -98,7 +98,7 @@ const OPEN={origin:'epg',event:'epg:run-1',now:()=>T};
 for(const stage of ['legacy','r2','prepared']){
  const file=database(stage),env=envOf(file);seedFilm(file,1,{ids:[['imdb','tt1']]});
  const before=dump(file);
- assert.deepEqual(await applyFilmExternalIds(env,{...OPEN,input:unit()}),{state:'skipped',reason:'projector_is_writer',receipt:false},stage);
+ await assert.rejects(()=>applyFilmExternalIds(env,{...OPEN,input:unit()}),code('film_person_unavailable'),stage);
  assert.equal(env.DB.calls.batches,0);assert.equal(dump(file),before);
 }
 {

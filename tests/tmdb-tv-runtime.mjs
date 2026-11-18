@@ -140,7 +140,7 @@ async function refresh(pagesFor){
  const watchlist=JSON.parse(bucket.objects.get('watchlist.json').text).films.map(film=>({...film,metadataAt:OLD}));
  const syncRun={runId:'sync-1',watchlist,pending:watchlist.map(film=>film.id),cursor:0,remaining:watchlist.length,failures:[],events:[]};
  fetched=[];
- const step=await api.metadataSync({BUCKET:bucket,METADATA_CACHE_DB_OPTIONAL:'standin'},syncRun); // ADR 0162: no D1 binding here, so the explicit local metadata-cache stand-in
+ const step=await api.metadataSync({BUCKET:bucket,METADATA_CACHE_DB_OPTIONAL:'standin',FILM_PERSON_DB_OPTIONAL:'standin'},syncRun); // ADR 0162: no D1 binding here, so the explicit local metadata-cache stand-in
  assert.equal(step.failedMetadata,0);
  assert.ok(fetched.every(href=>href.startsWith('https://letterboxd.com/')||!href.includes('themoviedb')),'no TMDB request');
  // finishSync writes the run's films to watchlist.json without their shows; the EPG commit carries them into the programme.

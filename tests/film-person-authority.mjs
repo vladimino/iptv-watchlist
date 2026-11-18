@@ -79,29 +79,70 @@ const refused=(file,text,pattern)=>{const r=sqlite(file,text);assert.notEqual(r.
  refused(file,"UPDATE film_person_authority SET mode='bogus' WHERE id=1");
 }
 
-// 3. Reading the marker: legacy before the feature, then r2, prepared, open and held; anything else fails closed.
+// 3. Reading the marker (ADR 0162): only d1/open is served; held is a separate fail-closed refusal; the local stand-in is an explicit opt-in for a domain that is NOT installed.
 {
+ const unavailable=async(env,label,read=Authority.readAuthority)=>assert.rejects(()=>read(env),error=>error.code==='film_person_unavailable',label);
+ const optIn=env=>({...env,FILM_PERSON_DB_OPTIONAL:'standin'});
  const v12=database(chain.length,false);
- assert.equal((await Authority.readAuthority({DB:d1Standin(v12)})).state,'legacy');
- const noDb=await Authority.readAuthority({});
+ // Strict (production) reads: no binding, no schema, a v12 without the tables.
+ await unavailable({},'no binding');
+ await unavailable({DB:d1Standin(v12)},'v12 without the tables');
+ const bare=path.join(root,'bare.sqlite');assert.equal(sqlite(bare,'CREATE TABLE unrelated (x)').status,0);
+ await unavailable({DB:d1Standin(bare)},'no schema_contract');
+ // The opt-in covers only a domain that is not installed at all.
+ const noDb=await Authority.readAuthority(optIn({}));
  assert.equal(noDb.state,'legacy');assert.equal(noDb.r2Allowed,true);
+ assert.equal((await Authority.readAuthority(optIn({DB:d1Standin(v12)}))).state,'legacy','v12 without tables, opted in');
+ assert.equal((await Authority.readAuthority(optIn({DB:d1Standin(bare)}))).state,'legacy','no schema_contract, opted in');
+ // A flag value other than the exact opt-in is no opt-in.
+ await unavailable({FILM_PERSON_DB_OPTIONAL:'true'},'a wrong flag value');
+ // Partial installs, a contract that declares the domain installed (13 and 24) with no tables, and an empty or broken contract never open the stand-in.
+ for(const table of ['film_person_authority','film_person_cas','film_person_baseline','canonical_revision']){
+  const f=database();sqlite(f,table==='canonical_revision'?'DROP TABLE canonical_revision':'DROP TRIGGER IF EXISTS '+table+'_no_delete;DROP TABLE '+table);
+  await unavailable({DB:d1Standin(f)},'partial (strict) without '+table);
+  await unavailable(optIn({DB:d1Standin(f)}),'partial (opted in) without '+table);
+  sqlite(f,'DELETE FROM schema_contract');
+  await unavailable(optIn({DB:d1Standin(f)}),'partial with an empty contract without '+table);
+  sqlite(f,"INSERT INTO schema_contract (id,version,note) VALUES (1,'broken','x')");
+  await unavailable(optIn({DB:d1Standin(f)}),'partial with a broken contract without '+table);
+ }
+ for(const version of [13,24]){
+  const f=database(chain.length,false);sqlite(f,'UPDATE schema_contract SET version='+version);
+  await unavailable({DB:d1Standin(f)},'contract '+version+' without tables (strict)');
+  await unavailable(optIn({DB:d1Standin(f)}),'contract '+version+' without tables (opted in)');
+ }
+ // Installed r2 and prepared markers are refused by the serving reader, with and without the opt-in; the operator reader still reports them.
  const file=database();
  const env={DB:d1Standin(file)};
- let gate=await Authority.readAuthority(env);
+ await unavailable(env,'r2');await unavailable(optIn(env),'r2 opted in');
+ let gate=await Authority.readMarker(env);
  assert.deepEqual([gate.state,gate.r2Allowed,gate.open,gate.held,gate.generation,gate.baseline],['r2',true,false,false,0,'empty']);
  assert.equal(Authority.readSource(gate),'r2');
  for(const state of ['legacy','r2','prepared'])assert.throws(()=>Authority.assertWritable({state}),error=>error.code==='film_person_not_open');
  sqlite(file,"UPDATE film_person_baseline SET state='loading' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1");
- gate=await Authority.readAuthority(env);
+ await unavailable(env,'prepared');await unavailable(optIn(env),'prepared opted in');
+ gate=await Authority.readMarker(env);
  assert.deepEqual([gate.state,gate.r2Allowed,gate.baseline],['prepared',true,'verified']);assert.equal(Authority.readSource(gate),'r2');
  sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1");
  gate=await Authority.readAuthority(env);
  assert.deepEqual([gate.state,gate.open,gate.r2Allowed],['open',true,false]);assert.equal(Authority.readSource(gate),'d1');assert.equal(Authority.assertWritable(gate).generation,2);
+ assert.equal((await Authority.readAuthority(optIn(env))).state,'open','the opt-in changes nothing at open');
  sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");
  gate=await Authority.readAuthority(env);
  assert.deepEqual([gate.state,gate.held,gate.open,gate.r2Allowed],['held',true,false,false]);
  assert.throws(()=>Authority.readSource(gate),error=>error.code==='film_person_held','held never names R2');
  assert.throws(()=>Authority.assertWritable(gate),error=>error.code==='film_person_held');
+ // The emergency path stays: held -> open again at a new generation.
+ sqlite(file,"UPDATE film_person_authority SET cutover='open',generation=4 WHERE id=1");
+ assert.deepEqual([(await Authority.readAuthority(env)).state,(await Authority.readAuthority(env)).generation],['open',4],'held -> open forward fix');
+ // A refusal touches no R2 and writes nothing to D1.
+ {
+  const f=database();const db=d1Standin(f);let touched=0;
+  const guarded={DB:db,BUCKET:new Proxy({},{get(){touched++;throw new Error('R2 must not be read');}})};
+  await unavailable(guarded,'r2 with guards');await unavailable(optIn(guarded),'r2 opted in with guards');
+  assert.equal(touched,0,'no R2 access on a refusal');assert.equal(db.calls.batches,0,'no D1 batch on a refusal');
+  assert.deepEqual(rows(f,'SELECT mode,cutover,generation FROM film_person_authority'),[{mode:'r2',cutover:'open',generation:0}],'the marker is unchanged');
+ }
  // Fail closed from version 13 on: a missing table, a missing row, a failed fence, a read error, a malformed row.
  const broken=async(setup,label)=>{
   const f=database();setup(f);
@@ -149,7 +190,7 @@ const people=file=>sqlite(file,"INSERT INTO person (id,role_id,contract_version,
 const revision=(file,kind,id)=>Number(one(file,`SELECT COALESCE((SELECT revision FROM canonical_revision WHERE kind='${kind}' AND id='${id}'),0)`));
 const filmInput=(id,expectedRevision,extra={})=>({id,expectedRevision,at:AT,film:{contractVersion:1,canonicalIdentity:'tmdb:603',originalTitle:'The Matrix',externalIds:[{scheme:'tmdb',value:603,trusted:true,provenance:{source:'tmdb'}},{scheme:'letterboxd',value:'1abc',trusted:true}],aliases:[{kind:'title',value:'Матрица'}],...extra.film},credits:extra.credits});
 
-// 5. Not open: legacy, r2, prepared and held reach no statement at all.
+// 5. Not open: legacy, r2, prepared (film_person_unavailable, ADR 0162) and held (film_person_held) reach no statement at all.
 {
  for(const [label,setup] of [
   ['r2',()=>database()],
@@ -158,13 +199,13 @@ const filmInput=(id,expectedRevision,extra={})=>({id,expectedRevision,at:AT,film
  ]){
   const file=setup(),db=d1Standin(file),env={DB:db};
   for(const run of [()=>mutateFilm(env,filmInput('film:tmdb:603',0)),()=>mutatePerson(env,{id:'person:actor/a1',expectedRevision:0,at:AT,person:{roleId:'actor/a1',contractVersion:1}}),()=>mergeFilms(env,{from:'film:a',to:'film:b',expected:{from:0,to:0},at:AT})]){
-   await assert.rejects(run,error=>['film_person_not_open','film_person_held'].includes(error.code),label);
+   await assert.rejects(run,error=>(label==='held'?error.code==='film_person_held':error.code==='film_person_unavailable'),label);
   }
   assert.equal(db.calls.batches,0,label+': no batch');
   assert.equal(one(file,'SELECT COUNT(*) FROM film'),0,label+': nothing written');
  }
  const legacyDb=d1Standin(database(chain.length,false));
- await assert.rejects(()=>mutateFilm({DB:legacyDb},filmInput('film:tmdb:603',0)),error=>error.code==='film_person_not_open');
+ await assert.rejects(()=>mutateFilm({DB:legacyDb},filmInput('film:tmdb:603',0)),error=>error.code==='film_person_unavailable');
  await assert.rejects(()=>mutateFilm({DB:{prepare:()=>{throw new Error('D1 down');}}},filmInput('film:tmdb:603',0)),error=>error.code==='film_person_unavailable','an unreadable marker fails closed');
 }
 

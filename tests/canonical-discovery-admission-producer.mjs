@@ -87,12 +87,10 @@ const EV='discovery:admission';
 // 2. Dormant below open: ONE marker read and nothing else; held throws (apply) or is reported (the call site); never a fallback to a writer.
 for(const stage of ['legacy','r2','prepared']){
  const file=database(stage),before=dump(file),env=envOf(file);
- assert.deepEqual(await applyDiscoveryAdmission(env,{event:EV,input:input()}),{state:'skipped',reason:'projector_is_writer',receipt:false},stage);
- const probe=envOf(file);await writerRoute(probe);
- assert.equal(env.DB.calls.queries,probe.DB.calls.queries,'exactly the marker read ('+stage+')');
+ await assert.rejects(applyDiscoveryAdmission(env,{event:EV,input:input()}),code('film_person_unavailable'),stage);
+ assert.equal(env.DB.calls.batches,0,'no batch ('+stage+')');
  const env2=envOf(file);
- assert.deepEqual(await admitDiscoveryFilms(env2,{films:{tmdb_603:entry(603)},written:['tmdb_603'],routeSkipMs:0}),{state:'skipped',reason:'projector_is_writer'},stage);
- assert.equal(env2.DB.calls.queries,probe.DB.calls.queries,'the call site is exactly the marker read ('+stage+')');
+ assert.deepEqual(await admitDiscoveryFilms(env2,{films:{tmdb_603:entry(603)},written:['tmdb_603'],routeSkipMs:0}),{state:'unavailable',code:'film_person_unavailable'},stage);
  assert.equal(env2.DB.calls.batches,0,'no batch');
  assert.equal(dump(file),before,'nothing written at '+stage);
 }
@@ -104,23 +102,18 @@ for(const stage of ['legacy','r2','prepared']){
  assert.equal(dump(file),before);
 }
 
-// 2b. The skip is cached per binding for ROUTE_SKIP_MS (the long `prepared` wait costs no marker read per batch); a cached skip never survives the marker move, never applies to another binding, and `routeSkipMs: 0` reads every time.
+// 2b. A refusal below open is never cached (no skip window): every call reads the marker again, and the marker move to open admits at once.
 {
  const file=database('prepared'),env=envOf(file);
  const first=await admitDiscoveryFilms(env,{films:{},written:[]});
- assert.deepEqual(first,{state:'skipped',reason:'projector_is_writer'});
+ assert.deepEqual(first,{state:'unavailable',code:'film_person_unavailable'});
  const reads=env.DB.calls.queries;assert.ok(reads>0);
  const second=await admitDiscoveryFilms(env,{films:{tmdb_603:entry(603)},written:['tmdb_603']});
- assert.deepEqual(second,{state:'skipped',reason:'projector_is_writer',cached:true});
- assert.equal(env.DB.calls.queries,reads,'a cached skip reads nothing');
- const other=envOf(file);
- assert.equal((await admitDiscoveryFilms(other,{films:{},written:[]})).cached,undefined,'another binding is not cached');
- assert.ok(other.DB.calls.queries>0);
- // the marker moves to open: with the cache off the next call admits; with the cache on, it waits at most ROUTE_SKIP_MS and the sweep then admits
+ assert.deepEqual(second,{state:'unavailable',code:'film_person_unavailable'});
+ assert.ok(env.DB.calls.queries>reads,'a refusal is not cached');
  sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1");sqlite(file,BASELINE);
  admit(file,603);
- assert.equal((await admitDiscoveryFilms(env,{films:{},written:[],now:()=>T})).cached,true,'inside the window the skip stands');
- const open=await admitDiscoveryFilms(env,{films:{},written:[],now:()=>T,routeSkipMs:0});
+ const open=await admitDiscoveryFilms(env,{films:{},written:[],now:()=>T});
  assert.equal(open.state,'done');assert.equal(open.swept,1);
  assert.equal(Number(one(file,'SELECT COUNT(*) FROM film')),1,'the sweep admitted the film once the marker was open');
  assert.ok(M.ROUTE_SKIP_MS>=1000);

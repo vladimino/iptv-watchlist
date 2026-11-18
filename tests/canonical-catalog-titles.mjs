@@ -108,23 +108,25 @@ const ROUTES=['/api/programme','/api/watchlist'];
 const parse=r=>JSON.parse(r.text);
 const REFUSAL={held:'film_person_held','unknown-row':'film_person_unavailable','unknown-table':'film_person_unavailable','unknown-read':'film_person_unavailable'};
 
-// 1. Existing runtime: legacy, r2 and prepared are byte-identical to each other and to an environment with no database at all; the R2 mirror is read.
+// 1. ADR 0162: the existing runtime (frozen R2 mirror) answers only for a domain that is not installed AND explicitly opted in (the local stand-in);
+// legacy, r2 and prepared with the production strictness are refused (503) and never read the mirror.
 if(ONLY!=='mutant'){
  seed();
- const base={};for(const route of ROUTES){seed();base[route]=await ask(route,{});assert.equal(base[route].status,200,route);assert.ok(reads.includes('titles.json'),route+' reads the R2 mirror with no database');}
+ const base={};for(const route of ROUTES){seed();base[route]=await ask(route,{FILM_PERSON_DB_OPTIONAL:'standin'});assert.equal(base[route].status,200,route);assert.ok(reads.includes('titles.json'),route+' reads the R2 mirror with no database (stand-in)');}
  const shown=parse(base['/api/watchlist']).films;
  assert.equal(shown.find(f=>f.id==='zzlid1').title,'Один','the cached title is applied');
  assert.equal(shown.find(f=>f.id==='zzmis4').title,'Original Four','a tmdb mismatch is not applied');
+ for(const route of ROUTES){seed();reads.length=0;const r=await ask(route,{});assert.equal(r.status,503,route+' without a database and without the opt-in');assert.ok(!reads.includes('titles.json'),'no mirror read');}
  for(const state of ['legacy','r2','prepared'])for(const route of ROUTES){
-  seed();const r=await ask(route,{DB:standin(database(state),state)});
-  assert.deepEqual(r,base[route],state+' '+route+' is byte-identical to the unchanged runtime');assert.ok(reads.includes('titles.json'),state+' reads the R2 mirror');
+  seed();reads.length=0;const r=await ask(route,{DB:standin(database(state),state)});
+  assert.equal(r.status,503,state+' '+route+' is refused');assert.ok(!reads.includes('titles.json'),state+' never reads the R2 mirror');
  }
 }
 
 // 2. The same data at `open` from D1: equal to the R2 answer, and the frozen mirror is never read. Named differences: none on this fixture.
 {
  for(const route of ROUTES){
-  seed();const r2=await ask(route,{DB:standin(database('r2'),'r2')});
+  seed();const r2=await ask(route,{FILM_PERSON_DB_OPTIONAL:'standin'});
   seed();const open=await ask(route,{DB:standin(database('open'),'open')});
   assert.equal(open.status,200,route);
   assert.deepEqual(parse(open),parse(r2),route+': D1 at open equals the R2 path at the same data');
@@ -155,13 +157,9 @@ for(const state of ['held','unknown-row','unknown-table','unknown-read'])for(con
  assert.deepEqual(reads,[],state+' '+route+': no R2 object is touched');
 }
 
-// 4. The marker moves mid-read. prepared -> open (and r2 -> prepared) between the gate and the end of the R2 reads is a 503, never a stale R2 answer; open -> held and a
+// 4. The marker moves mid-read (ADR 0162: only open is served, so only moves away from open can happen): open -> held and a
 // held-then-reopened generation also refuse (the generation is compared, not only the state).
 for(const route of ROUTES){
- {const file=database('prepared');seed();onR2=async key=>{if(key==='titles.json')sqlite(file,TO_OPEN);};
-  const r=await ask(route,{DB:standin(file,'prepared')});assert.equal(r.status,503,route+' prepared->open');assert.deepEqual(parse(r),{error:'storage_unavailable',reason:'film_person_generation_moved'},route);}
- {const file=database('r2');seed();onR2=async key=>{if(key==='titles.json')sqlite(file,MARKER.prepared);};
-  const r=await ask(route,{DB:standin(file,'r2')});assert.equal(r.status,503,route+' r2->prepared');assert.equal(parse(r).reason,'film_person_generation_moved');}
  {const file=database('open');seed();let flipped=false;
   const r=await ask(route,{DB:standin(file,'open',{onQuery:async text=>{if(!flipped&&/json_each/.test(text)){flipped=true;sqlite(file,TO_HELD);}}})});
   assert.ok(flipped);assert.equal(r.status,503,route+' open->held');assert.equal(parse(r).reason,'film_person_generation_moved');}
@@ -173,7 +171,7 @@ for(const route of ROUTES){
 // 4b. The LAST async boundary. The marker moves while the route awaits the owner-review read or the sync.json read, AFTER the titles were read: still a 503 and never a stale 200,
 // on both routes, on the open path and on the legacy/r2/prepared path, whatever the move. The empty watchlist answer (a normal 200 shape) is fenced the same way.
 {
- const FLIPS=[['prepared',TO_OPEN],['r2',MARKER.prepared],['open',TO_HELD],['open',TO_HELD+TO_REOPEN]];
+ const FLIPS=[['open',TO_HELD],['open',TO_HELD+TO_REOPEN]];
  const HOOKS={'/api/programme':['admin/owner-reviews.json','sync.json'],'/api/watchlist':['admin/owner-reviews.json']};
  for(const route of ROUTES)for(const hook of HOOKS[route])for(const [state,sql] of FLIPS){
   const file=database(state);seed();let flipped=false;
@@ -189,8 +187,6 @@ for(const route of ROUTES){
   const r=await ask('/api/watchlist',{DB:standin(file,state)});
   assert.ok(flipped,'empty '+state);assert.equal(r.status,503,'the empty answer is fenced: '+state);
  }
- {const file=database('r2');seed();records.delete('watchlist.json');for(const key of ['programme.json','epg/generations/'+G1+'/programme.json'])records.get(key).watchlistCount=99;
-  const r=await ask('/api/watchlist',{DB:standin(file,'r2')});assert.equal(r.status,200);assert.deepEqual(parse(r),{films:[]},'an unmoved marker answers the empty shape');}
  // The helper's own re-check (a direct call, no route behind it).
  const file=database('open');let flipped=false;
  const reader=vm.runInContext('CanonicalCatalogReader',ctx);
@@ -223,7 +219,7 @@ for(const route of ROUTES){
   assert.equal(open.status,200);assert.ok(!reads.includes('titles.json'));
   assert.ok(seen.filter(text=>/json_each/.test(text)).length>=2,'more than one bounded statement for the real catalogue size');
   assert.equal(parse(open).films.find(f=>f.id===last.id).title,'Ч1','a row in the last chunk is found');
-  seed([...FILMS,...filler],titles);const r2=await ask('/api/watchlist',{DB:standin(database('r2'),'r2')});
+  seed([...FILMS,...filler],titles);const r2=await ask('/api/watchlist',{FILM_PERSON_DB_OPTIONAL:'standin'});
   seed([...FILMS,...filler],titles);const again=await ask('/api/watchlist',{DB:standin(big,'open')});
   assert.equal(JSON.stringify(parse(again).films.map(f=>f.title).slice(-3)),JSON.stringify(parse(r2).films.map(f=>f.title).slice(-3)));
  }
