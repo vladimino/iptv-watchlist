@@ -2427,21 +2427,24 @@ function predictionDetailsHTML(details){
  }
  return groups.join('');
 }
+// AIR-508. The system codes a batch v2 terminal Event may show beside its sentence. Only a stored `stopReason`/`reason` that is in this list is printed; anything else reads «код не указан».
+const BATCH_V2_STOP_CODES=['quota','time_budget','parse_error','storage_error','model_error','model_unavailable','api_error','lease_lost','lease_expired','runner_aborted','priority_changed','profile_changed','format_error_storm','external_termination'];
 function batchV2TerminalHTML(event,delta,outcome,reason,hot,cold){
  const failed=Number.isInteger(delta.failed)?delta.failed:(Number.isInteger(event.failed)?event.failed:0),added=delta.added??event.added??0,updated=delta.updated??event.updated??0,selected=Number.isInteger(event.selectedCount)?event.selectedCount:null;
  const ok=event.stage==='complete'&&failed===0,withErrors=event.stage==='complete'&&failed>0;
  const title=ok?'Пакет прогнозов обработан':withErrors?'Пакет прогнозов обработан с ошибками':'Пакет прогнозов прерван';
  const details=event.details&&typeof event.details==='object'?event.details:null;
+ const stopCode=event.stopReason||event.reason,code=ok||withErrors||NORMAL_RUN_REASONS.includes(stopCode)?'':`<p class="event-note">${BATCH_V2_STOP_CODES.includes(stopCode)?`Код: <code>${stopCode}</code>`:'Код не указан'}.</p>`;
  if(!details){
   const explain=ok?outcome?.long:(withErrors?(outcome?.long||'Часть фильмов пакета не удалось обработать; они остаются для повторной попытки.'):reason);
   const packet=selected!==null?`<p class="event-note">В пакете: ${selected} · новых ${added} · пересчитано ${updated} · не удалось ${failed}.</p>`:`<p class="event-note">Добавлено ${added}${updated?` · пересчитано ${updated}`:''} · не удалось ${failed}.</p>`;
   const local=event.snapshot?.coverage&&Number.isInteger(event.snapshot.coverage.currentPredictionsTotal)&&Number.isInteger(event.snapshot.coverage.confirmedFilmsTotal)?`<p class="event-note">Локальная база: ${event.snapshot.coverage.currentPredictionsTotal} из ${event.snapshot.coverage.confirmedFilmsTotal} · ${formatCoveragePercent(event.snapshot.coverage.localPercent)}.</p>`:'';
   const window=event.snapshot?.coverage&&Number.isInteger(event.snapshot.coverage.windowCurrentPredictions)&&Number.isInteger(event.snapshot.coverage.windowFilmsTotal)?`<p class="event-note">Окно просмотра: ${event.snapshot.coverage.windowCurrentPredictions} из ${event.snapshot.coverage.windowFilmsTotal} · ${formatCoveragePercent(event.snapshot.coverage.windowPercent)}.</p>`:'';
-  return `<p>${title}</p>${packet}${local}${window}<p class="event-note">Осталось: ${hot} в окне · ${cold} вне окна.</p>${explain?`<p class="event-note">${explain}</p>`:''}${withErrors?'<p class="event-note">Фильмы с ошибками остаются для повторной попытки.</p>':''}`;
+  return `<p>${title}</p>${packet}${local}${window}<p class="event-note">Осталось: ${hot} в окне · ${cold} вне окна.</p>${explain?`<p class="event-note">${explain}</p>`:''}${code}${withErrors?'<p class="event-note">Фильмы с ошибками остаются для повторной попытки.</p>':''}`;
  }
  const count=v=>Number.isInteger(v)&&v>=0?String(v):'нет данных';
  const remaining=`<p class="event-note">Осталось в очереди: hot ${count(event.hotRemaining??(Number.isInteger(hot)?hot:null))} · cold ${count(event.coldRemaining??(Number.isInteger(cold)?cold:null))}.</p>`;
- const explain=ok||withErrors?'':(reason?`<p class="event-note">${reason}</p>`:'');
+ const explain=ok||withErrors?'':(reason?`<p class="event-note">${reason}</p>`:'')+code;
  return `<p>${title}</p><p class="event-note">Обработано: ${count(details.processed)}.</p>${remaining}${explain}${predictionDetailsHTML(details)}`;
 }
 // AIR-513. A watchlist or viewing-mark film links to its local page. A stored trusted `tmdb` uses `/film/tmdb_<n>`.

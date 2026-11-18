@@ -92,6 +92,8 @@ A **`protocol=batch_v2` run** does not write a start Event or a progress Event (
 
 **Named films on a new terminal object.** New `batch_v2_terminal` objects also carry a compact `details` snapshot of **this run**, recorded when each film settled and copied onto the Event at the terminal commit. It is not rebuilt from the live queue or from a later `latest` prediction. `GET /api/events` returns the stored object and writes nothing.
 
+**Stop code on an interrupted packet (AIR-508).** A `batch_v2_terminal` Event that is neither a normal `complete` nor `complete` with per-film errors shows the stored `stopReason` (else `reason`) as `Код: <code>` beside its plain-language sentence, so `storage_error`, `external_termination`, `api_error`, `lease_lost` and the other mapped reasons stay distinguishable under the one title «Пакет прогнозов прерван». Only a code in the fixed list of the renderer (`BATCH_V2_STOP_CODES` in `public/app.js`) is printed; a missing or unlisted value reads «Код не указан», and no raw backend text, stack or secret reaches the page. The code is the one frozen on the terminal Event, not current diagnostics. Coverage, percentages and global queue figures stay out. No schema or writer change; Events stored earlier render the same way from the fields they already hold.
+
 | Field | Meaning |
 | --- | --- |
 | `details.processed` | Films this run actually settled (`created`, `recalculated`, `already_current`, or a recorded per-film failure). Not the manifest size and not global coverage |
