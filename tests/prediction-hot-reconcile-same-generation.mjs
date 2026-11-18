@@ -88,5 +88,36 @@ mode='ok';
 
 // Another run id is the existing rollover path (`priorityRefreshDue`): the same-generation check stays silent about it.
 {records.set('programme.json',{runId:'p2',films:[],catalogFilms:[]});const d=await dry();assert.ok(!String(d.data.priorityCause||'').startsWith('shows_signature'),'rollover is not a shows-signature cause');}
+
+// 3. An EMPTY queue (nothing pending, hot or cold) on the fixed generation, then a new eligible Discovery admission and its same-generation assigned show. The preflight is priority-due; the start must
+// reconcile BEFORE it can answer `noop`, and select the new film as hot. The 3,200-film fixture above starts with candidates and cannot reach this branch.
+{
+ const e=await flowWorld({films:1,extra:()=>({shows:[{start:now-10*86400000}]})});
+ let sig='e0';e.ctx.PublishedEpg={
+  currentGeneration:async()=>({authority:'d1',programmeRunId:'p1',phase:'published',fence:'d1:1:p1',generation:1}),
+  readDocumentAt:async(env,run,kind)=>e.records.get(kind==='watchlist'?'watchlist.json':'programme.json')??null,
+  assignedShowsSignature:async()=>sig,
+ };
+ e.records.set('programme.json',{runId:'p1',films:[],catalogFilms:[]});e.records.set('sync.json',{runId:'p1',stage:'complete'});
+ const eapi=async(...a)=>e.api(...a),read=async()=>(await PredictionD1.openQueue(e.env)).queue;
+ const ebody={scope:'watchlist_all',mode:'queued',trigger:'manual',capacity:{remainingPercent:100}};
+ assert.equal((await eapi('queue/reconcile',{})).status,200);
+ // Drain the only film through a normal run: the queue ends empty.
+ {const m=(await eapi('batch/start',ebody)).data;assert.equal(m.status,'running');
+  const sub=await eapi('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items:m.films.map(f=>({filmId:f.filmId,fingerprint:e.fingerprint,prediction:e.prediction}))});assert.equal(sub.status,200,JSON.stringify(sub.data).slice(0,200));
+  assert.equal((await eapi('complete',{runId:m.runId})).status,200);}
+ let q=await read();assert.equal(q.pending.length+q.hotPending.length+q.coldPending.length,0,'the queue is empty');
+ assert.equal((await eapi('batch/start',ebody)).data.status,'noop','nothing to do while nothing changed');
+ // Discovery admits a new Film and assigns its show inside the same generation.
+ const f={id:'tmdb_900001',title:'tmdb_900001',original:'tmdb_900001',year:2020,tmdbId:'900001',canonicalIdentity:'tmdb:900001',genres:[],actors:[],directors:[],shows:[]};
+ sql(e.file,"INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES ('"+f.id+"','"+f.tmdbId+"','movie','"+f.canonicalIdentity+"','"+f.id+"','p1',1,'current','"+JSON.stringify(f).replace(/'/g,"''")+"')");
+ e.records.set('programme.json',{runId:'p1',films:[],catalogFilms:[{tmdbId:'900001',shows:[{channelId:'c',channel:'C',start:now-600000,end:now+7200000,basis:'discovery'}]}]});sig='e1';
+ const d=await eapi('batch/start',{...ebody,dryRun:true});assert.equal(d.data.priorityCause,'shows_signature_changed','a dry run reports the pending reconcile and writes nothing');assert.equal((await read()).showsSignature,'e0');
+ // Zero quota stays the quota outcome and writes nothing.
+ const quota=await eapi('batch/start',{...ebody,capacity:{remainingPercent:0}});assert.notEqual(quota.data.status,'running');assert.equal((await read()).showsSignature,'e0','a quota start does not write the queue');
+ const r=await eapi('batch/start',ebody);
+ assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.status,'running','the start reconciled instead of answering noop');
+ assert.deepEqual(r.data.films.map(x=>x.filmId),['tmdb_900001'],'the new film is delivered');assert.equal((await read()).showsSignature,'e1');
+}
 console.log('3,200-film same-generation reconcile ok; signature reads',reads);
 console.log('prediction hot reconcile same generation ok');

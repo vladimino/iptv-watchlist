@@ -873,6 +873,8 @@ function predictionPriority(film,now=Date.now()){
  const hot=filmIsHot(film,now),availableNow=starts.some(t=>t<=now),today=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid'}).format(now),availableToday=starts.some(t=>new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid'}).format(t)===today),deadline=starts.length?Math.max(...starts)+72*3600000:null;
  return {hot,availableNow,availableToday,availableUntil:deadline?new Date(deadline).toISOString():null,rank:hot?(availableNow&&deadline-now<=24*3600000?0:1):2,expiresInMs:deadline?deadline-now:Infinity};
 }
+// The zero-quota test of `adaptivePredictionBatch`, usable on an empty queue (which answers `empty` first).
+function capacityExhausted(capacity={}){return (Number.isFinite(capacity?.remainingPercent)&&Math.max(0,Math.min(100,capacity.remainingPercent))===0)||capacity?.quotaAvailable===false;}
 function adaptivePredictionBatch(queue,capacity={}){
  const hot=queue?.priorityCount||0,cold=queue?.coldRemaining??queue?.pending?.length??0,backlog=hot||cold;
  if(!backlog)return {batchSize:0,reason:'empty',usageKnown:Number.isFinite(capacity.remainingPercent)};
@@ -2563,7 +2565,9 @@ async function batchStartWork(env,body,requestId,tally){
  const turned=await timedStage(env,'turned_away',()=>batchTurnedAway(env,body,tally));if(turned)return turned;
  // Nothing to deliver, or no capacity, on a current queue: the idle outcome of a start (before the size refusal, so `remainingPercent: 0` is `quota`, not a size error).
  forgetAuthority(env);
- if(!pre.stale){const idle=await timedStage(env,'idle',()=>batchIdle(env,body,pre));if(idle)return idle;}
+ // AIR-529: a known priority-due queue is reconciled before it can be idle (an empty or exhausted queue plus a new assignment in the same generation would otherwise answer `noop` on every start). A zero-quota start stays the
+ // quota outcome and writes nothing; the next start with capacity reconciles.
+ if(!pre.stale&&!(pre.priorityDue&&!capacityExhausted(body.capacity))){const idle=await timedStage(env,'idle',()=>batchIdle(env,body,pre));if(idle)return idle;}
  // Zero writes while the manifest does not fit and the stored queue is current: no lease, run, queue, Event, diagnostics row or film write.
  if(pre.manifest&&pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre);
  // The guards a start runs before it takes the lease (as the retired v5 start did): the previous run's retries, and a held catalog.
