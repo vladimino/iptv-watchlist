@@ -43,7 +43,7 @@ const context={
 const exact=await runReplay({manifest,context,now,request:async path=>{
  if(path.startsWith('search/'))return {status:200,json:{results:[movie]}};
  assert.match(path,/append_to_response=credits/);
- return {status:200,json:{id:77,title,original_title:title,release_date:'2001-01-01',runtime:100,translations:{translations:[]},alternative_titles:{titles:[]}}};
+ return {status:200,json:{id:77,title,original_title:title,release_date:'2001-01-01',runtime:100,genres:[{id:18,name:'Drama'}],translations:{translations:[]},alternative_titles:{titles:[]}}};
 }});
 assert.equal(exact.rows[0].stop,'exact_title');
 assert.equal(exact.rows[0].searchCalls,1);

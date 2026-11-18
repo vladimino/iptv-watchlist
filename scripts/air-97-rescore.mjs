@@ -46,7 +46,7 @@ export function rescoreFrozen(){
   const baseline = scoreOf(false);
   const current = scoreOf(true);
   if(baseline.status!==row.score.status||baseline.reason!==row.score.reason||(baseline.acceptedTmdbId??null)!==(row.score.acceptedTmdbId??null))throw new Error('baseline drift '+row.key+' '+baseline.status+'/'+baseline.reason+'/'+baseline.acceptedTmdbId);
-  const detail = row.detail?.checked?invoke(live,'tmdbDetailFromMovie',[{id:row.detail.tmdbId,title:row.detail.title,original_title:row.detail.original,release_date:row.detail.year?String(row.detail.year)+'-01-01':'',runtime:row.detail.runtime,alternative_titles:{titles:[]},translations:{translations:[]}}]):null;
+  const detail = row.detail?.checked?invoke(live,'tmdbDetailFromMovie',[{id:row.detail.tmdbId,title:row.detail.title,original_title:row.detail.original,release_date:row.detail.year?String(row.detail.year)+'-01-01':'',runtime:row.detail.runtime,genres:[{id:18,name:'Drama'}],alternative_titles:{titles:[]},translations:{translations:[]}}]):null;
   const sameEvidence = item.evidenceState==='same'||item.evidenceState==='missing';
   const liveAuthorizes = !(item.terminalReason&&sameEvidence)&&!(item.retryAt&&Date.parse(item.retryAt)>now&&sameEvidence);
   const gateFor = (score,authorizes)=>{

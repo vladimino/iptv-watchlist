@@ -228,6 +228,8 @@ function detailCompetitors(aliasIndex,candidate,tmdbId,forms=[]){
  return [...films.values()];
 }
 function structuralCompetitorForms(score){const form=score?.titleBasis?.structural?.form;return form?[form]:[];}
+// Policy holds that keep their own reason on the durable decision (ADR 0150, ADR 0168).
+const POLICY_HOLD_REASONS=new Set(['concert_recording_ambiguous','genre_evidence_missing']);
 function tmdbDetailFromMovie(movie){
  const aliases=[...(movie?.alternative_titles?.titles||[]).map(item=>item?.title),...(movie?.translations?.translations||[]).map(item=>item?.data?.title)].filter(Boolean);
  return {authority:'tmdb_detail',tmdbId:movie?.id==null?null:String(movie.id),evidence:{movie:{id:movie?.id??null,title:movie?.title||'',original:movie?.original_title||'',aliases,year:Number(String(movie?.release_date||'').slice(0,4))||null,runtime:movie?.runtime??null,overview:typeof movie?.overview==='string'?movie.overview.slice(0,2000):'',genres:(movie?.genres||[]).map(genre=>genre&&typeof genre==='object'?{id:genre.id??null,name:genre.name||''}:genre).filter(Boolean),genreIds:(movie?.genres||[]).map(genre=>Number(genre?.id)).filter(id=>Number.isFinite(id)&&id>0),video:movie?.video===true}}};
@@ -979,7 +981,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     }
     preview[candidate.key]=scorePreview(candidate,score,gate,proposed);
     if(gate.outcome==='candidate_decision')recordUncertain(decisions,candidate,gate.candidateDecision.status,now,gate.candidateDecision.reason||gate.reason||null);
-    else if(gate.outcome==='needs_verification')recordNeedsVerification(decisions,candidate,score,now,gate.reason==='concert_recording_ambiguous'?gate.reason:null);
+    else if(gate.outcome==='needs_verification')recordNeedsVerification(decisions,candidate,score,now,POLICY_HOLD_REASONS.has(gate.reason)?gate.reason:null);
     else if(gate.outcome==='detail_verified'){
      const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
      if(knownTmdb.has(String(movie.id))){
@@ -1235,7 +1237,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
    }
    preview[candidate.key]=scorePreview(candidate,score,gate,proposed);
    if(gate.outcome==='candidate_decision')recordUncertain(decisions,candidate,gate.candidateDecision.status,now,gate.candidateDecision.reason||gate.reason||null);
-   else if(gate.outcome==='needs_verification')recordNeedsVerification(decisions,candidate,score,now,gate.reason==='concert_recording_ambiguous'?gate.reason:null);
+   else if(gate.outcome==='needs_verification')recordNeedsVerification(decisions,candidate,score,now,POLICY_HOLD_REASONS.has(gate.reason)?gate.reason:null);
    else if(gate.outcome==='detail_verified'){
     const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
     let saved=true;
