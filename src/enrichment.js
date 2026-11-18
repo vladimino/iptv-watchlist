@@ -398,7 +398,7 @@ function assessmentIssues(a,metadata){
  else add('assessment.model.status',typeof m.status==='string'?'invalid_enum':'invalid_type');
  return issues;
 }
-function schemaContract(){return {version:1,fingerprint:{rules:FINGERPRINT_RULES,maxChars:FINGERPRINT_MAX_CHARS,evidence:EVIDENCE_CONTRACT},prediction:{rules:PREDICTION_RULES},assessment:ASSESSMENT_CONTRACT,issueCodes:ISSUE_CODES,issuePath:'<fingerprint|prediction|assessment>[.<field>[.<dimension or evidence group>[.<claim>]]]; a list issue names the list, not the item',reportedVia:'POST /api/enrichment/submit results[].validation {stage, reportedBy, issues[]}'};}
+function schemaContract(){return {version:1,fingerprint:{rules:FINGERPRINT_RULES,maxChars:FINGERPRINT_MAX_CHARS,evidence:EVIDENCE_CONTRACT},prediction:{rules:PREDICTION_RULES},assessment:ASSESSMENT_CONTRACT,issueCodes:ISSUE_CODES,issuePath:'<fingerprint|prediction|assessment>[.<field>[.<dimension or evidence group>[.<claim>]]]; a list issue names the list, not the item',reportedVia:'POST /api/enrichment/batch/submit (MCP prediction_batch_submit) results[].validation {stage, reportedBy, issues[{path, code}]}'};}
 const fingerprintCurrent=f=>!!f&&f.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&!f.invalidatedAt;
 function executionFacet(execution){const out={};if(!execution||typeof execution!=='object')return out;for(const key of GENERAL_EXECUTION){const value=execution[key];if(typeof value==='string'&&EXECUTION[key].includes(value)&&value!=='unknown'&&value!=='not_applicable')out[key]=value;}return out;}
 // The display facet of a usable fingerprint: exact today; exact or compatible when the caller judged it under the transition rule.

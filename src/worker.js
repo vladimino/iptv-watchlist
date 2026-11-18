@@ -844,9 +844,27 @@ async function startedFilms(env){let cursor;const ids=[];do{const page=await env
 async function setStarted(env,body){
  if(typeof body.id!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(body.id)||typeof body.started!=='boolean')return json({error:'Invalid film or state'},400);
  const key='started/'+body.id+'.json',previous=await loadJSON(env,key),wasStarted=!!previous&&previous.started!==false;
+ // AIR-516: the Film is the canonical D1 Film (verified identity bridge, title, year, trusted TMDB claim), never the frozen metadata.json or the programme: a Film outside the EPG and the
+ // watchlist is a Film. There is no R2 fallback. The D1 read comes FIRST, for a replay too: a held, not-open or unreadable Film/Person marker answers 503 before any R2 write,
+ // whether the request is a new mark, an `unstarted` or the idempotent re-delivery of the stored event.
+ let lookup;
+ try{
+  if(typeof CanonicalCatalogReader==='undefined'){const error=new Error('canonical_read_not_authoritative');error.code='canonical_read_not_authoritative';throw error;}
+  lookup=await CanonicalCatalogReader.catalogStartedFilm(env,body.id);
+ }catch(error){const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
+ // Same state: the stored last event is delivered again under its own key; the mark is not rewritten and the identity is not judged.
  if(wasStarted===body.started){if(previous?.lastEvent)await writeEvent(env,previous.lastEvent);return json({id:body.id,started:body.started});}
- const metadata=await loadJSON(env,'metadata.json')||{},report=await loadJSON(env,'programme.json');const film=metadata[body.id]||report?.films.find(f=>String(f.id)===body.id);if(body.started&&!film)return json({error:'Unknown film'},404);
- const at=new Date().toISOString(),event={id:crypto.randomUUID(),type:body.started?'started':'unstarted',at,film:film?eventFilm(film,eventTitles(report)):previous?.lastEvent?.film||{id:body.id,title:'Фильм',year:null}};
+ // Only a new mark needs a resolvable identity. Removing an existing mark (`unstarted`) never creates or switches an identity.
+ if(body.started&&lookup.state==='conflict')return json({error:'Conflicting film identity'},409);
+ if(body.started&&lookup.state==='retired')return json({error:'Film retired'},410);
+ if(body.started&&lookup.state!=='found')return json({error:'Unknown film'},404);
+ const found=lookup.state==='found'?lookup.film:null,last=previous?.lastEvent?.film;
+ // `unstarted` keeps the film of the mark's own last event when the identity no longer resolves, or now resolves to another verified TMDB movie than the one the mark was made for
+ // (an identity reassigned since): cancelling a mark never records it for a different movie. Nothing is matched by title or year. A new `started` takes only D1 values; a missing title or
+ // year is the neutral placeholder or null, never a value of an earlier R2 event.
+ const reassigned=!body.started&&found&&last&&last.id===body.id&&last.tmdb!=null&&String(last.tmdb)!==String(found.tmdb);
+ const named=found&&!reassigned?{id:body.id,title:found.title||'Фильм',year:found.year,...(found.tmdb?{tmdb:found.tmdb}:{})}:null;
+ const at=new Date().toISOString(),event={id:crypto.randomUUID(),type:body.started?'started':'unstarted',at,film:named?eventFilm(named):last||{id:body.id,title:'Фильм',year:null}};
  await env.BUCKET.put(key,JSON.stringify({id:body.id,started:body.started,startedAt:body.started?at:null,lastEvent:event}),{httpMetadata:{contentType:'application/json'},customMetadata:{started:String(body.started)}});
  await writeEvent(env,event);return json({id:body.id,started:body.started});
 }

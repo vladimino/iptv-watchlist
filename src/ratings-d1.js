@@ -1,11 +1,13 @@
-// ADR 0084. Diary facts, confirmed ratings, the ratings run and the removal
-// queue are D1-owned only when ratings_domain_authority is mode d1 and
-// cutover open. The inserted marker is r2. A missing table below version 10
-// stays on the objects. Some but not all of these tables fails closed.
-// None of the tables on a later contract stays on the objects: this domain
-// is not installed. Mode d1 with cutover held is not authority. Readers stay
-// on R2 and a writer fails closed instead of writing R2. Mode d1 with cutover
-// open does not fall back to R2. The view index in R2 is not a rating source
+// ADR 0084, ADR 0162. Diary facts, confirmed ratings, the ratings run and the
+// removal queue are D1-owned, and the domain is served only while
+// ratings_domain_authority is mode d1 with cutover open. A marker in mode r2
+// (the migration's inserted value) or a missing or invalid marker fails closed;
+// so does mode d1 with cutover held, for readers as well as writers, so no
+// reader falls back to stale R2 copies. Some but not all of these tables fails
+// closed. With RATINGS_DB_REQUIRED=on (production) a missing binding, schema or
+// domain tables fails closed too; without it (local development and the test
+// harness, the domain's explicit stand-in) the domain is not installed and the
+// callers keep the R2 objects. Mode d1 with cutover open does not fall back to R2. The view index in R2 is not a rating source
 // once that marker is open: watched, actualRating and watchlist are replaced
 // from ratings_view. A film-record compare-and-swap writes that projection in
 // the same batch. Events stay in R2 as a projection of a confirmed rating.
@@ -109,12 +111,16 @@ export async function readRatingsAuthority(db,env){
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")")).map(row=>row.name);}
  catch(error){throw failed('ratings_domain_unavailable',error);}
  const present=TABLES.filter(name=>names.includes(name)).length;
- if(present===0)return idle(Number(version),true);
+ if(present===0){
+  if(env?.RATINGS_DB_REQUIRED==='on')throw failed('ratings_domain_unavailable');
+  return idle(Number(version),true);
+ }
  if(present!==TABLES.length||Number(version)<CONTRACT)throw failed('ratings_domain_unavailable');
  let row;
  try{row=await one(db,"SELECT mode, cutover, generation FROM ratings_domain_authority WHERE id=1");}
  catch(error){throw failed('ratings_domain_unavailable',error);}
- if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.cutover!=='open'&&row.cutover!=='held'))throw failed('ratings_domain_unavailable');
+ // ADR 0162: only mode d1 is served; a marker left in or restored to mode r2 is refused.
+ if(!row||row.mode!=='d1'||(row.cutover!=='open'&&row.cutover!=='held'))throw failed('ratings_domain_unavailable');
  const generation=Number(row.generation);
  return {mode:row.mode,cutover:row.cutover,tables:true,version:Number(version),ready:row.mode==='d1'&&row.cutover==='open',binding:true,generation};
 }
@@ -127,15 +133,15 @@ export async function ratingsReady(env){
 export async function ratingsGate(env){
  try{
   const authority=await readRatingsAuthority(database(env),env);
-  return {ready:authority.ready===true,generation:authority.ready?authority.generation:null,error:false};
- }catch{return {ready:false,generation:null,error:true};}
+  return {ready:authority.ready===true,generation:authority.ready?authority.generation:null,error:false,held:authority.tables===true&&authority.ready!==true};
+ }catch{return {ready:false,generation:null,error:true,held:false};}
 }
 
-async function requireOpen(env,mode){
+async function requireOpen(env){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
- if(authority.tables&&authority.mode==='d1'&&authority.cutover==='held'&&mode==='d1')throw failed('ratings_domain_not_authoritative');
- if(!authority.tables||authority.mode!==mode||authority.cutover!=='open')return {authority,db,open:false};
+ if(authority.tables&&!authority.ready)throw failed('ratings_domain_not_authoritative');
+ if(!authority.tables)return {authority,db,open:false};
  return {authority,db,open:true};
 }
 
@@ -155,6 +161,8 @@ export async function readOwned(env,key){
  if(!ratingsMutableKey(key))return {owned:false};
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
+ // A held marker is not authority and is not a reason to read R2 (ADR 0162); an uninstalled domain is the local stand-in.
+ if(authority.tables&&!authority.ready)throw failed('ratings_domain_not_authoritative');
  if(!authority.ready)return {owned:false};
  const document=await readParts(db,key);
  return {owned:true,value:document.value,etag:document.etag};
@@ -193,10 +201,10 @@ function epochFence(env){
  return [["UPDATE ratings_domain_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM ratings_document WHERE key=? AND part=0 AND (? IS NULL OR etag=?))=? THEN 1 ELSE 0 END WHERE id=1",[fence.key,fence.etag,fence.etag,fence.etag===null?0:1]]];
 }
 
-export async function putOwned(env,key,previousEtag,value,{mode='d1',extra=[]}={}){
+export async function putOwned(env,key,previousEtag,value,{extra=[]}={}){
  if(!ratingsMutableKey(key))return {owned:false};
- if(mode!=='d1'&&mode!=='r2')throw failed('ratings_domain_unavailable');
- const gate=await requireOpen(env,mode);
+ const mode='d1';
+ const gate=await requireOpen(env);
  if(!gate.open)return {owned:false};
  const text=JSON.stringify(value);
  const etag=await digest(text);
@@ -215,7 +223,7 @@ export async function putOwned(env,key,previousEtag,value,{mode='d1',extra=[]}={
 
 export async function casOwned(env,key,empty,apply){
  if(!ratingsMutableKey(key))return {owned:false};
- const gate=await requireOpen(env,'d1');
+ const gate=await requireOpen(env);
  if(!gate.open)return {owned:false};
  for(let attempt=0;attempt<5;attempt++){
   const current=await readParts(gate.db,key);
@@ -291,6 +299,8 @@ async function overlayViewRows(db){
 export async function overlayView(env,index){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
+ // ADR 0162: a held cutover refuses instead of serving the R2 view index's facts; only the uninstalled local domain keeps them.
+ if(authority.tables&&!authority.ready)throw failed('ratings_domain_not_authoritative');
  if(!authority.ready)return index;
  const rows=await overlayViewRows(db);
  const base=index&&typeof index==='object'&&!Array.isArray(index)?index:{};
@@ -315,10 +325,11 @@ export async function overlayView(env,index){
 
 // AIR-475 (review of the production acceptance fix): the owner's watched mark and rating of the given ids from D1 `ratings_view`, with no dependence on the R2 view index holding the key. `base` is
 // {id: entry} for exactly `ids`; the answer lays the D1 facts over each entry (its own watched, rating and watchlist facts are dropped first: D1 is the only source while the domain is d1 and open),
-// or is `base` unchanged otherwise. One indexed statement; nothing is written; an id with no D1 row has no rating and no mark.
+// is `base` unchanged for the uninstalled local domain, and a refusal for a held cutover or any other marker (ADR 0162). One indexed statement; nothing is written; an id with no D1 row has no rating and no mark.
 export async function viewItems(env,ids,base){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
+ if(authority.tables&&!authority.ready)throw failed('ratings_domain_not_authoritative');
  if(!authority.ready)return base;
  const list=[...new Set(ids)].filter(id=>typeof id==='string'&&id);
  if(!list.length)return base;
@@ -350,117 +361,17 @@ export async function listDocuments(env){
  return {generation:open.authority.generation,mode:open.authority.mode,cutover:open.authority.cutover,documents};
 }
 
-export async function importDocuments(env,documents,{confirm}={}){
- if(confirm!=='load')throw failed('ratings_domain_not_confirmed');
- const gate=await requireOpen(env,'r2');
- if(!gate.open)throw failed('ratings_domain_not_ready');
- if(!Array.isArray(documents))throw failed('ratings_domain_unavailable');
- const seen=new Set();
- const prepared=[];
- for(const item of documents){
-  if(!item||!ratingsMutableKey(item.key)||typeof item.text!=='string'||seen.has(item.key))throw failed('ratings_domain_unavailable');
-  seen.add(item.key);
-  let value;
-  try{value=JSON.parse(item.text);}catch{throw failed('ratings_domain_unavailable');}
-  if(value==null||typeof value!=='object'||Array.isArray(value))throw failed('ratings_domain_unavailable');
-  prepared.push({key:item.key,text:item.text,etag:await digest(item.text),value});
- }
- const now=new Date().toISOString();
- const probe=["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND mode='r2' AND cutover='open'",[]];
- const inserts=[];
- for(const item of prepared){
-  const parts=splitText(item.text);
-  for(let part=0;part<parts.length;part++)inserts.push(['INSERT INTO ratings_document (key, part, body, etag, updated_at) VALUES (?,?,?,?,?)',[item.key,part,parts[part],item.etag,now]]);
- }
- const view=new Map();
- for(const item of prepared){
-  if(!item.key.startsWith('letterboxd/facts/films/'))continue;
-  const record=item.value;
-  if(!record.factKey||!record.links)continue;
-  const row=projectionRow(record);
-  for(const id of projectionIds(record.links))view.set(id,{...row,alias_id:id});
- }
- const viewStatements=[...view].map(([id,row])=>['INSERT INTO ratings_view (alias_id, fact_key, watched, actual_rating, watchlist, rating_known, updated_at) VALUES (?,?,?,?,?,?,?)',[id,row.fact_key,row.present.watched?row.watched:null,row.present.rating?row.actual_rating:null,row.present.watchlist?row.watchlist:null,row.present.rating?1:0,now]]);
- await fenced(gate.db,[probe,[FENCE_SQL,[]],['DELETE FROM ratings_document',[]],['DELETE FROM ratings_view',[]]]);
- const chunkAt=200;
- for(let index=0;index<inserts.length;index+=chunkAt)await fenced(gate.db,[probe,[FENCE_SQL,[]],...inserts.slice(index,index+chunkAt)]);
- await fenced(gate.db,[probe,[FENCE_SQL,[]],...viewStatements,["UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1 AND mode='r2' AND cutover='open'",[]]]);
- const authority=await readRatingsAuthority(gate.db,env);
- return {mode:authority.mode,cutover:authority.cutover,generation:authority.generation,documents:prepared.length};
-}
-
-export async function activateDocuments(env,documents,{confirm}={}){
- if(confirm!=='activate')throw failed('ratings_domain_not_confirmed');
- const gate=await requireOpen(env,'r2');
- if(!gate.open)throw failed('ratings_domain_not_ready');
- const stored=await listDocuments(env);
- const incoming=new Map();
- for(const item of documents||[]){
-  if(!ratingsMutableKey(item?.key)||typeof item.text!=='string')throw failed('ratings_domain_unavailable');
-  incoming.set(item.key,item.text);
- }
- if(incoming.size!==stored.documents.length)throw failed('ratings_domain_fence');
- for(const item of stored.documents){
-  if(incoming.get(item.key)!==item.text||await digest(item.text)!==item.etag)throw failed('ratings_domain_fence');
- }
- await fenced(gate.db,[
-  ["UPDATE ratings_domain_authority SET mode='d1', cutover='held' WHERE id=1 AND mode='r2' AND cutover='open' AND generation=?",[gate.authority.generation]],
-  [FENCE_SQL,[]],
- ]);
- const authority=await readRatingsAuthority(gate.db,env);
- if(authority.mode!=='d1'||authority.cutover!=='held')throw failed('ratings_domain_fence');
- return authority;
-}
-
-export async function releaseHeld(env,{confirm}={}){
- if(confirm!=='release-hold')throw failed('ratings_domain_not_confirmed');
- const db=database(env);
- const authority=await readRatingsAuthority(db,env);
- if(!authority.tables||authority.mode!=='d1'||authority.cutover!=='held')throw failed('ratings_domain_not_ready');
- await fenced(db,[
-  ["UPDATE ratings_domain_authority SET mode='r2', cutover='open' WHERE id=1 AND mode='d1' AND cutover='held' AND generation=?",[authority.generation]],
-  [FENCE_SQL,[]],
- ]);
- return readRatingsAuthority(db,env);
-}
-
-export async function sealHeld(env,{confirm,generation}={}){
- if(confirm!=='seal-hold')throw failed('ratings_domain_not_confirmed');
- const db=database(env);
- const authority=await readRatingsAuthority(db,env);
- if(!authority.tables||authority.mode!=='d1'||authority.cutover!=='held'||authority.generation!==generation)throw failed('ratings_domain_not_ready');
- await fenced(db,[
-  ["UPDATE ratings_domain_authority SET cutover='open' WHERE id=1 AND mode='d1' AND cutover='held' AND generation=?",[generation]],
-  [FENCE_SQL,[]],
- ]);
- const next=await readRatingsAuthority(db,env);
- if(!next.ready)throw failed('ratings_domain_fence');
- return next;
-}
-
 export function ratingsRunActivity(value,now){
  if(!value)return 'absent';
  return value.state==='running'&&Date.parse(value.lease?.expiresAt)>now?'active':'idle';
 }
 
+// Read-only operator diagnostic (the production status command): it also reads the run lease of a held cutover, so an operator can see it.
+// It is not a serving path and never falls back to R2 for a domain whose tables exist.
 export async function readRatingsRun(env){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
  if(!authority.tables||authority.mode!=='d1')return {source:'r2',value:null,generation:authority.generation||0};
  const document=await readParts(db,'letterboxd/ratings/run.json');
  return {source:'d1',value:document.value,generation:authority.generation};
-}
-
-export async function revertMarker(env,{confirm,generation}={}){
- if(confirm!=='r2'||!Number.isInteger(generation))throw failed('ratings_domain_not_confirmed');
- const db=database(env);
- const authority=await readRatingsAuthority(db,env);
- if(!authority.ready)throw failed('ratings_domain_not_authoritative');
- await fenced(db,[
-  ["UPDATE ratings_domain_authority SET mode='r2', cutover='open' WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?",[generation]],
-  [FENCE_SQL,[]],
- ]);
- const next=await readRatingsAuthority(db,env);
- if(next.mode!=='r2'||next.cutover!=='open'||next.generation!==generation)throw failed('ratings_domain_fence');
- return next;
 }

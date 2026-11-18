@@ -58,6 +58,8 @@ export async function readAdmissions(env,ids){
 }
 
 const MOVIE_ID=/^[1-9]\d{0,11}$/;
+// The owner's retirement ledger (append-only): a retire of a movie id that no restore supersedes retires it, whatever Film row exists. Read by the film route and by POST /api/started.
+const RETIREMENT_SQL="SELECT 1 AS hit FROM tmdb_retirement_decision r WHERE r.movie_id=? AND r.kind='retire' AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s WHERE s.supersedes_seq=r.seq) LIMIT 1";
 // AIR-475. The canonical Film behind one typed TMDB movie id, answered from D1 only: {state:'absent'|'retired'|'conflict'|'found',film?}. The film route calls it at `open`
 // when Discovery holds no record: a retained Film (programme, watchlist, rated archive or none of them any more) is a Film because D1 holds it, never because Discovery or
 // a rated-archive admission names it. Nothing is written or scanned: one typed id, one trusted claim, one Film, its metadata and credits. The rated-archive admission, when
@@ -70,7 +72,7 @@ export async function catalogCanonicalFilmFromD1(env,tmdbId){
  let result;
  try{
   // The owner's retirement ledger (append-only): a retire of this movie id that no restore supersedes retires it, whatever Film row exists.
-  const retired=await one(db,"SELECT 1 AS hit FROM tmdb_retirement_decision r WHERE r.movie_id=? AND r.kind='retire' AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s WHERE s.supersedes_seq=r.seq) LIMIT 1",[tmdbId]);
+  const retired=await one(db,RETIREMENT_SQL,[tmdbId]);
   if(retired)result={state:'retired'};
   else{
    const rows=await many(db,"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value=?",[tmdbId]);
@@ -152,6 +154,38 @@ export async function catalogFilmIdentityBridge(env,id){
  const again=await readAuthority(env);
  if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');
  return found;
+}
+
+// AIR-516. The canonical Film behind the id of POST /api/started (a Letterboxd lid or tmdb_<n>, the spelling the mark is stored under): {state:'found',film:{filmId,title,year,tmdb}}
+// | {state:'absent'|'conflict'|'retired'}. The identity is the verified bridge above (never a title, a year or a slug), so a Film with a trusted Letterboxd id and no TMDB claim is found with
+// `tmdb:null`; `tmdb` is the Film's one trusted, non-conflicting movie claim and nothing else. The title is the reviewed, then provisional localization, then the original title; the year is the
+// stored metadata year; a missing value is null, never invented. Called only at `open`: held, an unreadable marker and any other state throw before a statement, and a generation that moved
+// during the reads is refused. Reads only; the caller writes nothing before this answers.
+const STARTED_SQL=`SELECT f.canonical_identity AS canonical_identity,f.original_title AS original_title,m.year AS year,(SELECT d.value FROM film_dimension d WHERE d.film_id=f.id AND d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' ORDER BY CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT 1) AS title FROM film f LEFT JOIN film_metadata m ON m.film_id=f.id WHERE f.id=?`;
+export async function catalogStartedFilm(env,id){
+ const gate=await readAuthority(env),db=database(env);
+ if(gate.state!=='open'){readSource(gate);throw failed('canonical_read_not_authoritative');}
+ const bridge=await catalogFilmIdentityBridge(env,id);
+ if(bridge.state!=='ok')return {state:bridge.state};
+ let row,retired=null;
+ try{
+  // The owner's append-only retirement ledger (as the film route reads it): a retire of the Film's movie id that no restore supersedes retires it, whatever Film row exists.
+  if(bridge.tmdb)retired=await one(db,RETIREMENT_SQL,[bridge.tmdb]);
+  if(!retired)row=await one(db,STARTED_SQL,[bridge.filmId]);
+ }catch(error){throw failed('canonical_read_unavailable',error);}
+ if(retired){
+  const again=await readAuthority(env);
+  if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');
+  return {state:'retired'};
+ }
+ // A claim without its Film row cannot be (foreign key): the store is inconsistent, not absent.
+ if(!row)throw failed('canonical_read_unavailable');
+ // A Film that records another canonical identity than its own trusted TMDB claim is a disagreement, never silently served.
+ if(bridge.tmdb&&row.canonical_identity!=null&&row.canonical_identity!=='tmdb:'+bridge.tmdb)return {state:'conflict'};
+ const text=value=>typeof value==='string'&&value.trim()?value:null;
+ const again=await readAuthority(env);
+ if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');
+ return {state:'found',film:{filmId:bridge.filmId,title:text(row.title)??text(row.original_title),year:Number.isInteger(row.year)?row.year:null,tmdb:bridge.tmdb}};
 }
 
 // Slice 2 (P4b): the titles.json consumers of the programme and watchlist routes. titles.json is a former mutable canonical mirror (frozen at `open`, owner decision 4); the
@@ -368,6 +402,7 @@ export const CANONICAL_READER_REGISTRY=[
  {name:'GET /api/programme titles.json',file:'src/worker.js',class:'freeze',moved:true},
  {name:'GET /api/watchlist titles.json',file:'src/worker.js',class:'freeze',moved:true},
  {name:'catalog film route optional metadata.json',file:'src/worker.js',class:'freeze',moved:true},
+ {name:'POST /api/started film identity (was metadata.json and programme.json)',file:'src/worker.js',class:'freeze',moved:true},
  {name:'catalog available route metadata.json',file:'src/worker.js',class:'freeze',moved:true},
  {name:'ratingsFilmLabels metadata.json and titles.json',file:'src/worker.js',class:'freeze',moved:true},
  {name:'metadataSync titles.json, people.json and metadata.json working set (writer)',file:'src/worker.js',class:'freeze',moved:true},

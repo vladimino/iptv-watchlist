@@ -22,7 +22,11 @@ const stated=doc.match(/\*\*Text below:\*\* (\d+) characters, SHA-256 `([0-9a-f]
 assert.ok(stated&&statedDry,'headers state length and hash');
 assert.equal(prompt.length,Number(stated[1]));assert.equal(sha(prompt),stated[2]);
 // AIR-451: uniform installed Saved Task reports and human-readable minute-based registry titles.
-assert.equal(Buffer.byteLength(prompt,'utf8'),63331,'installed prompt UTF-8 byte count');
+assert.equal(Buffer.byteLength(prompt,'utf8'),69379,'AIR-476 installed prompt UTF-8 byte count');
+assert.equal(sha(prompt),'ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520','installed AIR-476 candidate v2 hash');
+assert.ok(prompt.includes('6а. EVIDENCE-AWARE SCORING')&&prompt.includes('matchSignals — ТОЛЬКО обоснованные положительные попадания'),'approved positive-only matchSignals scoring policy must be installed');
+assert.ok(prompt.includes('unknown НИКОГДА не превращай в минус')&&prompt.includes('Не повышай оценку автоматически'),'unknown and no-optimism guard retained');
+assert.ok(prompt.includes('**Основания оценки:**'),'human-readable evidence justification added to Saved Task report');
 assert.ok(!/RESEARCH AUDIT ДЛЯ PRODUCTION TASK A|для Production Task A/.test(prompt),'shared production research instructions must not depend on canary name');
 assert.ok(prompt.includes('3в. RESEARCH AUDIT ДЛЯ ВСЕХ BATCH V2 TASKS.')&&prompt.includes('3г. SOURCE SELECTION GATE / FULL-TEXT FALLBACK (для каждой batch v2 Task'),'all slots use identical research rules');
 const reportHeadings=['## Итог','## Прогнозы','## Ошибки','## Очередь','## Исследование'];

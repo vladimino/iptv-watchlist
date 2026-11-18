@@ -1,5 +1,5 @@
 // AIR-476: the evidence-aware scoring candidate for the batch v2 caller, its blind offline fixtures and the grader.
-// Static checks only: candidate integrity against the installed canonical prompt, fixture blindness and leakage,
+// Static checks only: historical v1 candidate integrity against the frozen pre-install prompt, fixture blindness and leakage,
 // and the grader on hand-written synthetic outputs. This is not a semantic A/B; no model, network, production or
 // Scheduled Task operation is involved.
 import fs from 'node:fs';
@@ -10,16 +10,17 @@ import {evaluate,loadFixtures} from '../scripts/prediction-scoring-rubric.mjs';
 const sha=text=>createHash('sha256').update(text).digest('hex');
 const block=(doc,name)=>{const m=doc.match(new RegExp('---BEGIN '+name+'---\\n([\\s\\S]*?)\\n---END '+name+'---'));assert.ok(m,name+' markers present');return m[1];};
 const canonicalDoc=fs.readFileSync('docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2.md','utf8');
+const historicalBaseDoc=fs.readFileSync('docs/evidence/prediction/air-476-preinstall-baseline-2026-11-17.md','utf8');
 const evidenceDoc=fs.readFileSync('docs/evidence/prediction/air-476-evidence-aware-scoring-candidate-2026-11-17.md','utf8');
-const base=block(canonicalDoc,'PROMPT'),dry=block(canonicalDoc,'DRY RUN PROMPT'),candidate=block(evidenceDoc,'CANDIDATE PROMPT');
+const base=block(historicalBaseDoc,'PROMPT'),dry=block(canonicalDoc,'DRY RUN PROMPT'),candidate=block(evidenceDoc,'CANDIDATE PROMPT');
 
-// 1. Stated hashes. The base is the installed text the canonical snapshot records; the candidate is not installed.
+// 1. Stated hashes. The historical base was installed before AIR-476; v1 was never installed.
 const BASE_SHA='1192b92c3d50a2478afd27b06b2d055972375497374e237ef212b6b6e5e2c95c',CANDIDATE_SHA='1826af6f11eb3aad6d3f2dd4c40542b93d0040e46d316cd3d9bf30168c4ee2c1';
-assert.equal(sha(base),BASE_SHA,'the candidate is based on the installed canonical prompt; a canonical change needs a rebased candidate');
+assert.equal(sha(base),BASE_SHA,'frozen pre-install baseline must never drift when canonical production changes');
 assert.equal(base.length,42097);
 assert.equal(sha(candidate),CANDIDATE_SHA);assert.equal(candidate.length,45165);assert.equal(Buffer.byteLength(candidate,'utf8'),68066);
 for(const [len,bytes,hash] of [[42097,63331,BASE_SHA],[45165,68066,CANDIDATE_SHA]])assert.ok(new RegExp('\\| '+len+' \\| '+bytes+' \\| `'+hash+'` \\|').test(evidenceDoc),'evidence table states '+hash);
-assert.ok(!canonicalDoc.includes(CANDIDATE_SHA)&&!base.includes('EVIDENCE-AWARE SCORING'),'the canonical snapshot is not rewritten as if the candidate were installed');
+assert.ok(!base.includes('EVIDENCE-AWARE SCORING'),'historical base must not incorporate later scoring policy');
 assert.ok(/Status: candidate, NOT installed/.test(evidenceDoc));
 
 // 2. Exactly two inserted lines, at the stated places; everything else byte-identical.

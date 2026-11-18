@@ -498,7 +498,9 @@ const LetterboxdRatings=(()=>{
   return {lastFinishedAt:latest(runs.filter(item=>['finished','error'].includes(item.state))),lastSuccessAt:latest(runs.filter(item=>item.state==='finished'))};
  }
  async function status(env,now=Date.now()){
-  const [state,{value:run}]=await Promise.all([storageState(env),read(env,KEYS.run)]);
+  // The run record is read only from a served domain: a held, r2 or unreadable marker is reported, not read through (ADR 0162).
+  const state=await storageState(env);
+  const run=state.authority==='open'?(await read(env,KEYS.run)).value:null;
   const queue=state.queue,entries=Object.values(queue?.films||{}),cursor=state.cursor;
   return {contractVersion:CONTRACT_VERSION,switch:'separate',pipeline:pipelineOf(state.supported,run),storage:storageOf(state),
    run:presentRun(run,now),

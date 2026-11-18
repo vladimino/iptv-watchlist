@@ -48,7 +48,8 @@ function lbaReadOnly(env){
 }
 function lbaNote(env,key,token){const versions=lbaVersions.get(env);if(versions)versions.set(key,token);}
 // Ratings documents use the same contract as LetterboxdFacts.readJSON. An open D1 marker does not fall back to R2,
-// including when the document is absent. A marker that is not open still reads R2. A broken marker is unavailable.
+// including when the document is absent. A held cutover or a broken marker is unavailable (ADR 0162). Only the local
+// stand-in without ratings tables reads R2.
 async function lbaRatingsRead(env,key){
  if(typeof RatingsD1==='undefined'||!RatingsD1.ratingsMutableKey(key))return null;
  try{
@@ -243,7 +244,8 @@ async function lbaCompare(env,parsed,origin){
  const first=new Map(fenced.map(key=>[key,versions.get(key)]));
  const again=await Promise.all(fenced.map(key=>lbaVersion(env,key)));
  const changed=fenced.filter((key,i)=>first.get(key)!==again[i]);
- if(ratingsGate.error)changed.push('ratings_domain_unavailable');
+ // ADR 0162: a held cutover is refused like a broken marker; its documents are not read from R2.
+ if(ratingsGate.error||ratingsGate.held)changed.push('ratings_domain_unavailable');
  else if(ratingsGate.ready){
   const later=await lbaRatingsGate(env);
   if(later.error||!later.ready||later.generation!==ratingsGate.generation)changed.push('ratings_domain_generation');
