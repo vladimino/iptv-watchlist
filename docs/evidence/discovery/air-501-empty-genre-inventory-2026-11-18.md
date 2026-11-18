@@ -17,7 +17,7 @@ Of the 16 empty-genre cards, **12 are ordinary Soviet/Russian feature films** (f
 
 ## Authority at capture
 
-Read in the same session as the AIR-504 GO-1 capture: Discovery `d1` / `open`, published EPG `d1` / `open`, one resolver run. Each execute re-reads the live admission and fences on the current generation; nothing here replaces that.
+Markers read in this 18 November session (the AIR-504 GO-1 capture is the separate 16 November record): Discovery `d1` / `open`, published EPG `d1` / `open`, programme run `ae4c4209-3894-41aa-8798-bb82a2d11a2b` at the 18 November previews. Each execute re-reads the live admission and fences on the current generation; nothing here replaces that.
 
 ## Proposed write set
 

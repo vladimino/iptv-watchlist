@@ -16,12 +16,12 @@ After ADR 0168, the 18 November inventory ([evidence](../evidence/discovery/air-
 
 1. A second pure function `catalogCleanupPolicy(movie, observation)` is used **only** by `catalogPolicyKind`, that is by the writer's preview and execute. `admissionPolicy`, the detail gate, `policyExcludedPresentedFilm` and the programme overlay are unchanged.
 2. It returns the `admissionPolicy` result when that is `documentary`, `concert` or `ambiguous`. A card with a feature genre is returned unchanged.
-3. For a card with **no feature genre** (Music alone, TV Movie alone, or an empty genre list), the normalized title, aliases and stored synopsis are read: `документальн` or `documentary` gives `documentary`; `концерт`, `koncert`, `concert`, `выступлен…`, `выступил…`, `performance`, `performed`, `filmed live`, `live at/in/from`, `турне`, `tour`, `festival`, `фестивал…` gives `concert`. No words, or an empty synopsis, gives the `admissionPolicy` result, so the writer still refuses it.
+3. For a card with **no feature genre** (Music alone, TV Movie alone, or an empty genre list), the normalized **stored synopsis** is read. A word in the title or an alias alone is not evidence: `документальн` or `documentary` gives `documentary`; `концерт`, `koncert`, `concert`, `выступлен…`, `выступил…`, `performance`, `performed`, `filmed live`, `live at/in/from`, `турне`, `tour`, `festival`, `фестивал…` gives `concert`. No such word in the synopsis, an empty synopsis, or a placeholder such as `Описание отсутствует` gives the `admissionPolicy` result, so the writer still refuses it and the card stays in the external-verification tier.
 4. Eligibility is not an exclusion. Each film still needs an owner `GO` and an Access session per ADR 0153, with the preview read first.
 
-Measured on the 267 current admissions with an empty or Music genre list: the rule reaches seven of the nine unreachable cards and none of the 12 ordinary feature films with no genre list or of the Music-only fiction in that set. It does not reach a card with an empty synopsis, or a non-fiction card whose synopsis names neither a performance nor a documentary.
+Measured on the 267 current admissions with an empty or Music genre list: the rule reaches six of the nine unreachable cards and none of the 12 ordinary feature films with no genre list or of the Music-only fiction in that set. It does not reach a card with an empty or placeholder synopsis (`Britney Spears: Apple Music Festival`, whose only word is `Festival` in the title, `DJ BoBo`, `TesseracT`), or a non-fiction card whose synopsis names neither a performance nor a documentary.
 
-Not decided: how to retire a card the words do not reach (three non-fiction cards and two with an empty synopsis on the 18 November list); any wording change to the detail gate.
+Not decided: how to retire a card the words do not reach (three non-fiction cards and three with an empty or placeholder synopsis on the 18 November list); any wording change to the detail gate.
 
 ## Alternatives considered
 

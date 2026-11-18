@@ -113,8 +113,8 @@ function admissionPolicy(movie,observation){
  return null;
 }
 // AIR-501 (ADR 0169): writer-only classification for `catalog_policy_exclude@1`. The detail gate and the programme overlay keep using admissionPolicy.
-// A card with no feature genre (Music alone, TV Movie alone, or no genre at all) is retired by the owner writer when its stored title or synopsis names a
-// performance or a documentary in plain words. A card with no such words, or with an empty synopsis, stays out of reach of the writer.
+// A card with no feature genre (Music alone, TV Movie alone, or no genre at all) is reachable by the owner writer when its stored synopsis names a performance
+// or a documentary in plain words. A word in the title alone is not evidence, and a card with an empty or placeholder synopsis stays out of reach of the writer.
 const CLEANUP_CONCERT_TERMS=/концерт|koncert|concert|выступлен|выступил|выступа|performance|performed|filmed live|live (at|in|from)|турне|\btour\b|festival|фестивал/;
 const CLEANUP_DOCUMENTARY_TERMS=/документальн|documentary/;
 function catalogCleanupPolicy(movie,observation){
@@ -124,7 +124,7 @@ function catalogCleanupPolicy(movie,observation){
  if(featureGenre(facts))return base;
  const noGenre=!facts.ids.size&&!facts.unnamed.length;
  if(!noGenre&&!listedGenre(facts,TMDB_GENRE_MUSIC,MUSIC_GENRE_NAMES)&&!listedGenre(facts,TMDB_GENRE_TV_MOVIE,TV_MOVIE_GENRE_NAMES))return base;
- const text=detailNorm([titlePerformanceText(movie,observation),overviewPerformanceText(movie)].join(' '));
+ const text=overviewPerformanceText(movie);
  if(CLEANUP_DOCUMENTARY_TERMS.test(text))return 'documentary';
  if(CLEANUP_CONCERT_TERMS.test(text))return 'concert';
  return base;

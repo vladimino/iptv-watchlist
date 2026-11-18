@@ -346,16 +346,21 @@ for(const [id,title,genres,synopsis,expected] of [
  ['tmdb_1063549','Gaga Chromatica Ball',music,'Перед залом, заполненным на 52 000 человек, Леди Гага представляет выступление, ставшее знаковым для её карьеры.','concert'],
  ['tmdb_785554','BLACKPINK: The Show',music,'South Korea. The Show opened with. 2020. koncert','concert'],
  ['tmdb_801575','Кино в Севкабеле',music,'Группа «Кино» выступила без Цоя в «Севкабель порту» и записала фильм','concert'],
- ['tmdb_450202','Britney Spears: Apple Music Festival',music,'Описание отсутствует','concert'],
- ['tmdb_988831','Neil Young: Three More Decades',music,'Various. Following on from this label\'s previous Neil Young DVD documentary, The First Decade.','documentary'],
+ ['tmdb_534012','Paul Rodgers -  Free Spirit',music,"United Kingdom. The 16-song collection, 'Free Spirit', filmed in London, England returned Paul Rodgers to his roots, bringing fans an extraordinary evening celebrating the music of Free… 2018. koncert",'concert'],
+ ['tmdb_988831','Neil Young: Three More Decades',music,'Various. Following on from this label\'s previous Neil Young DVD documentary, The First Decade, comes this second instalment focusing on the great man\'s career between the years 1976 and 2006 with the help of obscure archive footage, rare film of Neil Young in performance and in the studio… 2020. koncert','documentary'],
  ['tmdb_110445','Пикник: 30 Световых лет',music,'Рок-группа "Пикник" дает грандиозный концерт.','ambiguous'],
  ['tmdb_24970','Pink Floyd: Pulse',music,'Фильм «Pulse» был снят во время турне Pink Floyd «Division Bell» 1994 года.','concert'],
 ]){
  assert.equal(cleanup({id,title,genres,synopsis}),expected,id);
 }
-// Not reached: no words to read (empty or title-only synopsis), non-fiction with no performance or documentary word, and fiction.
+// Not reached: no words in the stored synopsis (empty, placeholder, or a word only in the title), non-fiction with no performance or documentary word, and fiction.
 for(const [id,title,genres,synopsis] of [
+ ['tmdb_450202','Britney Spears: Apple Music Festival',music,'Описание отсутствует'],
  ['tmdb_1126350','DJ BoBo - EVOLUT30N',music,'Описание отсутствует'],
+ ['tmdb_9001','Britney Spears: Apple Music Festival',music,''],
+ ['tmdb_9002','Summer Festival',[],'Two friends open a bakery in a small town.'],
+ ['tmdb_9003','The Concert',[],'Фильм рассказывает о дирижёре и его семье.'],
+ ['tmdb_9004','Festival Nights',music,'A fictional band argues about a name.'],
  ['tmdb_1603159','TesseracT: RADAR',music,'Tesseract - Radar'],
  ['tmdb_1623086','Арктика. Очищение',[],'Водитель и бизнесмен, студент-медик и 3D-аниматор, пивовар, слесарь – 18 мужчин разных профессий.'],
  ['tmdb_569928','Большой белый танец',[],'Лента посвящена самому древнему и загадочному хищнику океана – большой белой акуле.'],
@@ -370,3 +375,4 @@ for(const genres of [['драма','музыка'],['комедия','музык
 // The detail gate and the programme overlay keep the ADR 0150 / ADR 0168 reading: Picnic is held (unclassified), not excluded, and Gaga still verifies.
 assert.equal(gateKind({id:'tmdb_761960',title:'Пикник: Традиционный весенний концерт',genres:[],synopsis:'7 марта 2014 года в ДК им. Ленсовета прошёл традиционный весенний концерт группы "Пикник".'}),'unclassified');
 assert.equal(gateKind({id:'tmdb_1063549',title:'Gaga Chromatica Ball',genres:music,synopsis:'Леди Гага представляет выступление.'}),null);
+assert.equal(gateKind({id:'tmdb_534012',title:'Paul Rodgers -  Free Spirit',genres:music,synopsis:"United Kingdom. The 16-song collection, 'Free Spirit', filmed in London, England returned Paul Rodgers to his roots, bringing fans an extraordinary evening celebrating the music of Free… 2018. koncert"}),null);
