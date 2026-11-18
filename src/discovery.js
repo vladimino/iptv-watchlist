@@ -42,6 +42,14 @@ const PAGED_REPLAY_BUDGET_MS=10000;
 // A new decision is assigned when it is written; the next lap picks up an observation that became assignable later.
 const PAGED_REPLAY_RELAP_MS=30*60*1000;
 const DISCOVERY_LEASE_RENEW_MARGIN_MS=45000;
+// AIR-535: the completion receipt of the EPG run `runId`, with the contract of `epgPublicationState`: the sync record names this run, is complete, and carries `completedAt`
+// (or, for a legacy record without the field, `updatedAt` when it has no error). Anything else is no receipt.
+function epgCompletionOf(sync,runId){
+ if(!sync||typeof sync!=='object'||!runId||sync.runId!==runId||sync.stage!=='complete')return null;
+ const receipt=Object.prototype.hasOwnProperty.call(sync,'completedAt')?sync.completedAt:(sync.error?null:sync.updatedAt);
+ const ms=typeof receipt==='string'?Date.parse(receipt):NaN;
+ return Number.isFinite(ms)?{at:new Date(ms).toISOString(),recovered:!!sync.error}:null;
+}
 const budgetExhaustedError=()=>Object.assign(new Error('chunk wall budget exhausted'),{name:'BudgetExhaustedError'});
 // Fairness fence written *before* TMDB so a request that overruns persistLimit still rotates HOL.
 // Not checked/verified, not dropped, and does not pause the series while other keys are eligible.
@@ -793,6 +801,24 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  }else if(replayResting)replayRun={...replayRun,skipped:true};
  const nextReplayLapAt=!replayRun.skipped&&source.programmeRunId&&replayRun.complete===true&&!replayRun.stale&&!replayRun.refused?new Date().toISOString():replayLapAt;
  timings.replayMs=Date.now()-replayStarted;
+ // AIR-535: measured, per generation, carried in the status; nothing here is an estimate. The clock is the generation-matched completion receipt of `sync.json` (the contract of
+ // `epgPublicationState`), NOT `published_epg_generation.published_at`, which is the scan time (82 minutes earlier on 18 Nov). Without that receipt (run in flight, another run,
+ // an unreadable record) the clock is null and no interval is derived. An interval is never clamped: a negative one (replay before completion) is data.
+ const priorStats=sameRun&&last?.replayStats&&last.replayStats.programmeRunId===source.programmeRunId?last.replayStats:null;
+ let completion=priorStats?.epgCompletedAt?{at:priorStats.epgCompletedAt,recovered:!!priorStats.epgCompletionRecovered}:null;
+ if(!completion&&source.programmeRunId){try{completion=epgCompletionOf(await loadJSON(env,'sync.json'),source.programmeRunId);}catch{completion=null;}}
+ const nowIso=new Date().toISOString(),sinceCompleted=at=>completion&&at?Date.parse(at)-Date.parse(completion.at):null;
+ // One count statement per replaying chunk, only when the replay slice left room for it; a resting chunk carries the previous reading.
+ const coverageFits=()=>Date.now()+cappedWriteMs()<persistLimit();
+ const coverageNow=source.programmeRunId&&!replayRun.skipped&&coverageFits()?await DiscoveryAuthority.replayCoverage(env,source.programmeRunId):null;
+ const coverage=coverageNow?{...coverageNow,measuredAt:nowIso,basis:'verified_slots_upper_bound'}:priorStats?.coverage||null;
+ const milestones={...(priorStats?.coverageMilestones||{})};
+ if(coverageNow&&coverageNow.verifiedSlots>0)for(const [name,share] of [['t50',0.5],['t90',0.9],['t95',0.95],['t99',0.99]])if(!milestones[name]&&coverageNow.assigned>=Math.ceil(coverageNow.verifiedSlots*share))milestones[name]={at:nowIso,sinceCompletedMs:sinceCompleted(nowIso)};
+ const chunkAssigned=replayRun.outcomes.assigned,firstAssignedAt=priorStats?.firstAssignedAt||(chunkAssigned>0?nowIso:null);
+ // A hop retried after its status was saved but before its checkpoint reads this status as prior; counting its own hopId twice would inflate `chunks`.
+ const sameHop=!!priorStats&&priorStats.lastHopId===hopId;
+ const lapNow=nextReplayLapAt&&nextReplayLapAt!==replayLapAt?nextReplayLapAt:null;
+ const replayStats=source.programmeRunId?{programmeRunId:source.programmeRunId,epgCompletedAt:completion?.at||null,epgCompletionRecovered:completion?!!completion.recovered:null,clock:completion?'sync_completion_receipt':null,lastHopId:hopId,firstReplayChunkAt:priorStats?.firstReplayChunkAt||(replayRun.skipped?null:startedAt),firstAssignedAt,firstAssignedSinceCompletedMs:firstAssignedAt?(priorStats?.firstAssignedSinceCompletedMs??sinceCompleted(firstAssignedAt)):null,chunks:(priorStats?.chunks||0)+(replayRun.skipped||sameHop?0:1),coverage,coverageMilestones:milestones,lapCompletedAt:lapNow||priorStats?.lapCompletedAt||null,lapCompletedSinceCompletedMs:lapNow?sinceCompleted(lapNow):priorStats?.lapCompletedSinceCompletedMs??null}:null;
  const walkStarted=Date.now();
  const selected=await DiscoveryAuthority.selectActionableObservations(env,{after:selectAfter,touchAfter,now:Date.now(),pageSize:Math.max(limit,DiscoveryAuthority.SELECT_PAGE),touchLimit:PAGED_CHEAP_FILMS,shouldStop:()=>Date.now()>=walkDeadline,beforeQuery:heartbeat});
  timings.walkMs=Date.now()-walkStarted;timings.pages=selected.queries;timings.concurrency=1;
@@ -1126,7 +1152,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  }
  if(!selected.items.length&&remaining===0)nextAfter=selected.after||'';
  const nextTouchAfter=selected.touches.length?selected.touchAfter||touchAfter:touchAfter;
- const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',replayLapAt:nextReplayLapAt,timings};
+ const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',replayLapAt:nextReplayLapAt,replayStats,timings};
  try{await fence();}catch(e){throw lost(e,'final');}
  // `preCommitMs` is what the stored status carries: the time up to its own write. The status write, the continuation
  // checkpoint and the total through that checkpoint are measured after the writes and reach only the returned
