@@ -1386,15 +1386,14 @@ export async function replayUnassignedSlots(env,spec={},context={}){
  const published=await one(db,"SELECT programme_run_id FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open'");
  const run=published?.programme_run_id??null;
  if(!run||(spec.programmeRunId&&spec.programmeRunId!==run)){result.stale=true;result.complete=true;return result;}
- let cursor=startAfter,wrapped=false;
+ let cursor=startAfter;
  while(!stop()){
   if(typeof spec.beforePage==='function')await spec.beforePage({page:result.pages,after:cursor});
   const rows=await many(db,REPLAY_SELECT_SQL,[run,cursor,run,limit]);
   result.pages++;
-  if(!rows.length){
-   if(cursor&&!wrapped){cursor='';wrapped=true;continue;}
-   cursor='';result.complete=true;break;
-  }
+  // A lap starts at the first key (the cursor is run-scoped and reset when a lap ends), so the end of the key space ends the lap. Wrapping back to the
+  // first key would scan the observations that can never be assigned (evidence drift, a Film with no record) a second time in the same lap.
+  if(!rows.length){cursor='';result.complete=true;break;}
   const keys=rows.map(row=>row.observation_key);
   const slotRows=await many(db,replaySlotsSql(keys.length),[...keys,run]);
   const freeSlots=new Map();
@@ -1438,12 +1437,7 @@ export async function replayUnassignedSlots(env,spec={},context={}){
   }
   if(stopped)break;
   cursor=keys[keys.length-1];
-  if(rows.length<limit){
-   // The end of the key space. A pass that began after a cursor still owes the keys before it, one wrap.
-   if(startAfter&&!wrapped){cursor='';wrapped=true;continue;}
-   cursor='';result.complete=true;break;
-  }
-  if(wrapped&&startAfter&&cursor>=startAfter){result.complete=true;break;}
+  if(rows.length<limit){cursor='';result.complete=true;break;}
  }
  result.after=cursor;
  return result;
