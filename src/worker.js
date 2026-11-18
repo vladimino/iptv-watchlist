@@ -2119,6 +2119,7 @@ async fetch(request,env,execution){
   if(url.pathname.startsWith('/api/d1/'))return await catalogD1Route(request,env,url);
   if(url.pathname==='/api/admin/health')return await adminHealthRoute(request,env,url);
   if(url.pathname==='/api/admin/limbo')return await adminLimboRoute(request,env,url);
+  if(url.pathname==='/api/admin/identity-work')return await adminIdentityWorkRoute(request,env,url);
   if(url.pathname==='/api/admin/posters')return await adminPostersRoute(request,env,url);
   if(url.pathname==='/api/admin/prediction-recovery')return await adminPredictionRecoveryRoute(request,env,url);
   if(url.pathname.startsWith('/api/admin/prediction-recovery-intent/'))return await adminPredictionRecoveryIntentRoute(request,env,url);
