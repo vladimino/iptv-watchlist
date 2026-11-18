@@ -33,7 +33,7 @@ One new **read-only projection**, served by a **new endpoint** `GET /api/admin/i
 | `letterboxd_rated_candidate` | `lbc:<archiveSha256>:<shortCode>` | `letterboxd/imports/<sha>/rated-candidates.json` | A rated-only short code from one archive, not yet a Film |
 | `film` | `film:<canonicalFilmId>` | The existing Limbo Film evaluation, embedded unchanged | A canonical Film with stalled metadata, fingerprint or prediction |
 
-A title, a year, a short code, an alias match or a `tmdb_tv` id is **never** proof of `tmdb:movie`. A row carries a trusted Film link (`film.filmId`) only when D1 `film_rated_admission` (candidate) or the canonical catalog (observation) names the Film with trusted movie provenance. Otherwise the row carries at most an untrusted `hints[]` entry (`kind: title_year_match`, `trusted: false`) and no link. The projection creates no Film, no merge and no alias.
+A title, a year, a short code, an alias match or a `tmdb_tv` id is **never** proof of `tmdb:movie`. A row carries a trusted Film link (`film.filmId`) only with proof: for a candidate, a D1 `film_rated_admission` row whose `archive_sha256` **and** `source_code` both equal the candidate's key and whose `tmdb` is a typed movie identity (a row matching the short code alone, from another ZIP, never confirms it; the historical R2 receipt is never an alternative proof); for an observation, the canonical catalog with movie provenance. Otherwise the row carries at most untrusted `observedHints[]`, which are best-effort and computed only from rows present in the same response (an absent hint means "not observed", not "none exists"). The projection creates no Film, no merge and no alias. A global candidate correlation index would need its own bounded design and is not part of this decision.
 
 ### 2. Source-specific state, not a merged state machine
 
@@ -42,26 +42,38 @@ Each row keeps its own source `status` and `reason` (`pending`, `admitting`, `ne
 ### 3. Deduplication without losing provenance
 
 - A candidate that is `verified` and has a `film_rated_admission` row is shown as `disposition: resolved` with its trusted Film link and is **excluded from the unresolved list** by default (`include=resolved` shows it). It keeps `provenance`; the Film row is the one that remains in the list when the Film itself is stalled.
-- A `verified` candidate **without** a confirming D1 row is not resolved: `disposition: needs_owner_review`, `reason: admission_unconfirmed`. The receipt `verified-films.json` alone never confirms.
-- Two archives with the same `shortCode` are two rows (the key contains the hash). Each row lists the other under `sameShortCodeIn` as information only.
+- A `verified` candidate **without** a D1 row matching both `archive_sha256` and `source_code` is not resolved: `disposition: needs_owner_review`, `reason: admission_unconfirmed`. The receipt `verified-films.json` alone never confirms.
+- Two archives with the same `shortCode` are two rows (the key contains the hash). A `same_short_code` observed hint appears only when both rows are in the same response.
 - A remake with the same title and year is two rows. `same_title_year` stays the candidate's own `needs_review` reason and links nothing.
-- An EPG observation and a Letterboxd candidate for one **not yet proven** movie are two rows with an untrusted hint each. They merge only through a verified Film that both reach by trusted proof.
+- An EPG observation and a Letterboxd candidate for one **not yet proven** movie are two rows; an untrusted hint appears only when both are in the same response. They merge only through a verified Film that both reach by trusted proof.
 - A double receipt (a short code present on two chunk receipts of one archive) is one row: the row key is `(archiveSha256, shortCode)`.
 
-### 4. Coverage is part of the answer
+### 4. Coverage is part of the answer, and it is not one word
 
-Every response and every page carries `coverage` per lane with `state` in `full`, `partial`, `unavailable`, `unknown` and a `reason`. A lane is `full` only when its whole source was read to its end under the page pin. An index that is declared partial, a truncated listing, an oversized or unreadable document, and an archive that is not in the registry are `partial` or `unknown`, counted, and **never shown as an empty queue**. A selected-archive view is never presented as global coverage: the response states `archives: {registered, listed, summarized, unindexed, unreadable}`.
+Every response carries per-lane coverage. The `film` and `epg_observation` lanes use `full`, `partial`, `unavailable`, `unknown` for their single source; a declared-partial index is `partial`. The Letterboxd candidate lane separates three questions:
+
+- **Enumeration:** which archives exist. `complete` only when the delimiter listing was not truncated, every listed prefix is in the registry and every registry row is listed. It proves prefix presence only.
+- **Counts:** an **estimate** from the derived registry, labelled `summarizedAt`, never called verified, because the registry is written after the primary write and not transactionally.
+- **Page:** the only verified part: `read_whole` for the page archive's document, or `oversized`, `unreadable`, `registry_stale`.
+
+The response never calls the candidate lane globally `full` and never says "no work" for it; the strongest statement is "the registry estimates N, enumeration complete". An unindexed archive is counted and never shown as an empty queue. A selected-archive view is never presented as global coverage.
 
 ### 5. Bounded archive enumeration (the chosen source for "all archives")
 
 - **Archive registry:** a small derived R2 object `letterboxd/imports/registry.json` (a projection, not an owner): `{schemaVersion, updatedAt, archives: {<sha>: {registeredAt, generatedAt, counts: {pending, admitting, needs_review, verified, removed}, documentEtag, summarizedAt}}}`, capped at 256 KiB and 500 archives. It is written by the **existing** candidate writers (register, identity step terminal write, retry, rollback) with its own compare-and-swap after their primary write. It is derived: a lost or stale registry update never changes a candidate and is repaired by the next writer of that archive or by the explicit backfill below.
-- **Completeness probe on GET:** one R2 `LIST` with `prefix=letterboxd/imports/`, `delimiter=/`, at most 1000 prefixes, no object bodies. Every prefix not in the registry is an **unindexed archive** (lane coverage `partial`, the count shown). A truncated listing is `partial` with `reason: listing_truncated`. A registry row whose prefix is not listed is `registry_orphan`, shown, not hidden.
-- **Row reads:** at most **one** candidate document per request (the archive of the current page), capped at 2 MiB; a larger or unreadable document is `partial` for that archive with `oversized` or `unreadable`. Summary counts for the other archives come from the registry and are labelled `summarizedAt`; a mismatch of `documentEtag` on the page's archive is `registry_stale` for that archive. No N+1 reads, no unbounded `list`, no ZIP access, no TMDB or Letterboxd call.
+- **Completeness probe on GET:** one R2 `LIST` with `prefix=letterboxd/imports/`, `delimiter=/`, at most 1000 prefixes, no object bodies. Every prefix not in the registry is an **unindexed archive** (lane coverage `partial`, the count shown). A truncated listing is `partial` with `reason: listing_truncated`. A registry row whose prefix is not listed is a `registryOrphans` entry, shown, not hidden. Both make enumeration `partial`.
+- **Row reads:** at most **one** candidate document per request (the archive of the current page), capped at 2 MiB; a larger or unreadable document is `partial` for that archive with `oversized` or `unreadable`. Counts for the other archives are registry **estimates** labelled `summarizedAt`; a mismatch of `documentEtag` on the page's archive is `registry_stale` for that archive. No N+1 reads, no unbounded `list`, no ZIP access, no TMDB or Letterboxd call.
 - **Backfill of archives that exist but are not in the registry:** an owner-confirmed write operation of its own (read the delimiter listing, read each archive's document once, write the registry). It is a downstream card with its own L2 contract; until it runs, those archives are `unindexed` and visible as such.
 
 ### 6. Ordering, pin and cursor
 
-Rows are ordered lane by lane in a fixed order (`film`, `epg_observation`, `letterboxd_rated_candidate`), inside a lane by the lane's own deterministic key (`ageMs` descending, then work key); candidates inside an archive by `shortCode`, archives by `(registeredAt, sha)`. There is **no global cross-lane sort by age**: that would require loading all sources, which this decision forbids. The page `pin` is a tuple of per-lane versions (Limbo tuple for `film` and `epg_observation`; registry etag and the page archive's document etag for candidates). A pin that no longer matches is 409 `stale_pin`; a cursor from another filter, limit or lane position is 400 `stale_cursor`. A source that changed between pages is therefore refused, never silently re-cut.
+Rows are ordered lane by lane (`film`, `epg_observation`, `letterboxd_rated_candidate`), inside a lane by the lane's own deterministic key (`ageMs` descending, then work key); candidates by archive `(registeredAt, sha)` then `shortCode`. There is **no global cross-lane sort by age**: that would require loading all sources.
+
+- **Pin:** the Limbo tuple and the **registry etag**, read at the first page. No candidate document etag is in the pin.
+- **Cursor:** lane, position, filter key, limit and, inside the candidate lane, the page archive's `sha` and the `documentEtag` read when the cursor was minted.
+- **Validated per request:** the Limbo tuple and registry etag (409 `stale_pin`); filter key and limit; and, inside an archive, that its document etag equals the cursor's (400 `stale_cursor`).
+- **A to B:** when A is exhausted the next cursor names B without an etag; B is read fresh and its etag goes into the following cursor. A different etag for B is a different document, not a change.
+- **Not detectable:** a change to A after the reader moved to B is detected only through the registry etag, because the existing writers update the registry after their primary write. If that update has not landed, the change is invisible to the cursor. The response therefore says `snapshot: "per_archive"`, names each page's `documentEtag` and never claims one global snapshot; a fresh view needs a new first request.
 
 ### 7. Read-only boundary
 
@@ -95,8 +107,8 @@ The Limbo UI, the exact Russian labels, any owner action on a candidate from Lim
 ## Consequences
 
 - One new read route, one pure domain module and tests, one derived R2 object and small hooks in the existing candidate writers, all in later atomic cards. Until they exist, the inventory is **not production-ready** and nothing here may be described as live.
-- Owner-visible honesty: unindexed, oversized and partial are explicit states; "no work" is only said when every lane is `full`.
-- Risk: a derived registry can lag its documents; it is labelled and repaired, never authoritative. Risk: the lane-sequential order cannot answer "oldest across everything"; the cost is accepted, and the UI must say so.
+- Owner-visible honesty: unindexed, oversized and partial are explicit states; for the candidate lane "no work" is never asserted, only a labelled registry estimate with complete enumeration.
+- Risk: a derived registry can lag its documents and cannot prove other archives' content; it is labelled an estimate, repaired and never authoritative. Risk: a change in an already visited archive can go undetected by the cursor until the registry updates; the response says so. Risk: the lane-sequential order cannot answer "oldest across everything"; the cost is accepted, and the UI must say so.
 - Compatibility: `GET /api/admin/limbo`, its pin, cursor and vocabulary are untouched.
 
 ## Recovery and migration boundary
