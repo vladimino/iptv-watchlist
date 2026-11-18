@@ -318,6 +318,17 @@ for(const categories of [['Фильм'],[],['Концерт'],['Music']]){
 }
 assert.equal(policyBound('live by night|2016','Live by Night',2016,129,'259693',[{id:80,name:'Crime'},{id:18,name:'Drama'}],{overview:'A crime story.'}).outcome,'detail_verified');
 assert.equal(policyBound('the concert|2009','The Concert',2009,119,'19407',[{id:35,name:'Comedy'},{id:18,name:'Drama'}],{categories:['Фильм'],overview:'A drama about musicians who missed a concert.'}).outcome,'detail_verified');
+// AIR-501 18 Nov RCA: a TMDB card with an empty genre list verified on title, year and runtime alone.
+const picnic=policyBound('пикник традиционный весенний концерт|2014','Пикник: Традиционный весенний концерт',2014,100,'761960',[],{overview:'Прошёл концерт группы Пикник, исполнены песни, концертная сцена.',genreIds:[]});
+assert.equal(picnic.outcome,'needs_verification');
+assert.equal(picnic.reason,'genre_evidence_missing');
+assert.equal(picnic.transition,null);
+assert.equal(policyBound('арктика очищение|2021','Арктика. Очищение',2021,52,'1623086',[],{overview:'Экспедиция.',genreIds:[]}).reason,'genre_evidence_missing');
+assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7120',[],{overview:'A filmed live performance of the tour.',genreIds:[]}).reason,'concert_recording');
+const emptyOwner={authority:'owner',tmdbId:'761961',evidence:{authority:'owner',reviewed:true,tmdbId:'761961'}};
+assert.equal(policyBound('тихий дом|2014','Тихий дом',2014,100,'761961',[],{overview:'Семейная история.',genreIds:[],confirmation:emptyOwner}).outcome,'detail_verified');
+assert.equal(policyBound('концерт|2009','Концерт',2009,119,'19407',[{id:18,name:'Drama'}],{overview:'Дирижёр собирает оркестр.',genreIds:[18]}).outcome,'detail_verified');
+assert.equal(policyBound('shakira tour|2007','Shakira Oral Fixation Tour',2007,120,'23710',[{id:10402,name:'Music'}],{overview:'Концерт Шакиры в Майами.',genreIds:[10402]}).reason,'concert_recording_ambiguous');
 assert.equal(policyBound('rhythm of the road|2011','Rhythm of the Road',2011,100,'88001',[{id:10402,name:'Music'}],{overview:'A fictional band spends a summer writing songs.',genreIds:[10402]}).outcome,'detail_verified');
 assert.equal(policyBound('summer notes|2014','Summer Notes',2014,102,'88011',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'Two musicians live in Paris and form a band.',genreIds:[10402]}).outcome,'detail_verified');
 assert.equal(policyBound('quiet days|2014','Quiet Days',2014,102,'88012',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'The singers live above the club and write songs.',genreIds:[10402]}).outcome,'detail_verified');
