@@ -8,13 +8,14 @@ Status: offline fix and regression test. Production acceptance is pending a natu
 
 ## Fix
 
-- `PublishedEpg.assignedShowsSignature`: one indexed aggregate (count, max rowid, small content sum) per generation. The content sum is needed because SQLite reuses a freed rowid, so a delete plus re-insert at the same count is otherwise invisible (found by the test).
-- The queue stores `showsSignature`; `batchPreflight` marks priority due on mismatch; no full scan on submit or complete.
+- `PublishedEpg.assignedShowsSignature`: one statement reading the exact (film, channel, start) of the run's Discovery rows in generation-index order, hashed with SHA-256. A first version used a numeric aggregate (count, max rowid, sum); independent review showed it misses a reassignment because SQLite reuses a freed rowid, so it was replaced.
+- The queue stores `showsSignature`; `batchPreflight` marks priority due on mismatch, on a missing stored value, and on an unreadable current value (`priorityCause`), so a start never silently selects cold when hot outstanding cannot be verified. The dry run reports the cause.
+- No new schema or index. A revision counter on the generation would be cheaper per preflight but needs an owner decision and an ADR.
 
 ## Evidence
 
-`tests/prediction-hot-reconcile-same-generation.mjs`: signature semantics; an all-cold queue on a fixed generation becomes 60 hot at the next start with no new generation; unchanged and unreadable signatures rebuild nothing; a dry run writes nothing.
+`tests/prediction-hot-reconcile-same-generation.mjs`: reassignment of the only slot to another film, channel and start changes; 3,600 assigned shows hashed by one statement in about 7 ms on the local stand-in (rows read: 3,600 per preflight; D1 production cost is not measured here); 3,200 catalog films under one generation go from 0 hot to 3,100 hot at the next natural start; unreadable signature blocks the cold manifest and the next start recovers; incremental Discovery chunks; a signature that lands during a rebuild is picked up by the next start; rollover stays on the existing path.
 
 ## Limits
 
-Concurrent-writer and rollover scenarios rely on the existing queue CAS tests (`prediction-queue-cas`, `prediction-queue-discovery-independence`), which pass. No ADR: a local bugfix, no new data contract or schema. No production action was taken.
+D1 production read cost and walltime are not measured; the preflight reads the assigned rows once per batch start. Lost or duplicate checkpoints and CAS conflicts rely on the existing `prediction-queue-cas` and `prediction-queue-discovery-independence` tests. No ADR: local bugfix. No production action was taken.
