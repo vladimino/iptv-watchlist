@@ -845,8 +845,20 @@ async function setStarted(env,body){
  if(typeof body.id!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(body.id)||typeof body.started!=='boolean')return json({error:'Invalid film or state'},400);
  const key='started/'+body.id+'.json',previous=await loadJSON(env,key),wasStarted=!!previous&&previous.started!==false;
  if(wasStarted===body.started){if(previous?.lastEvent)await writeEvent(env,previous.lastEvent);return json({id:body.id,started:body.started});}
- const metadata=await loadJSON(env,'metadata.json')||{},report=await loadJSON(env,'programme.json');const film=metadata[body.id]||report?.films.find(f=>String(f.id)===body.id);if(body.started&&!film)return json({error:'Unknown film'},404);
- const at=new Date().toISOString(),event={id:crypto.randomUUID(),type:body.started?'started':'unstarted',at,film:film?eventFilm(film,eventTitles(report)):previous?.lastEvent?.film||{id:body.id,title:'Фильм',year:null}};
+ // AIR-516: the Film is the canonical D1 Film (verified identity bridge, title, year, trusted TMDB claim), never the frozen metadata.json or the programme: a Film outside the EPG and the
+ // watchlist is a Film. Every refusal is answered before the first R2 write; there is no R2 fallback. `unstarted` keeps the last known event film when the identity no longer resolves.
+ let lookup;
+ try{
+  if(typeof CanonicalCatalogReader==='undefined'){const error=new Error('canonical_read_not_authoritative');error.code='canonical_read_not_authoritative';throw error;}
+  lookup=await CanonicalCatalogReader.catalogStartedFilm(env,body.id);
+ }catch(error){const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
+ // Only a new mark needs a resolvable identity. Removing an existing mark (`unstarted`) never creates an identity: it keeps the film of the mark's own last event.
+ if(body.started&&lookup.state==='conflict')return json({error:'Conflicting film identity'},409);
+ if(body.started&&lookup.state==='retired')return json({error:'Film retired'},410);
+ if(body.started&&lookup.state!=='found')return json({error:'Unknown film'},404);
+ const found=lookup.state==='found'?lookup.film:null,last=previous?.lastEvent?.film;
+ const named=found?{id:body.id,title:found.title||(last&&last.id===body.id?last.title:null)||'Фильм',year:found.year??(last&&last.id===body.id&&Number.isInteger(last.year)?last.year:null),...(found.tmdb?{tmdb:found.tmdb}:{})}:null;
+ const at=new Date().toISOString(),event={id:crypto.randomUUID(),type:body.started?'started':'unstarted',at,film:named?eventFilm(named):last||{id:body.id,title:'Фильм',year:null}};
  await env.BUCKET.put(key,JSON.stringify({id:body.id,started:body.started,startedAt:body.started?at:null,lastEvent:event}),{httpMetadata:{contentType:'application/json'},customMetadata:{started:String(body.started)}});
  await writeEvent(env,event);return json({id:body.id,started:body.started});
 }
