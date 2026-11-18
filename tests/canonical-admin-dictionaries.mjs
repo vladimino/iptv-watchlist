@@ -112,10 +112,10 @@ async function preview(env,films){
 
 {
  seedAdmin();
+ reads.length=0;
  const r=await ask('/api/admin/overview',{DB:standin(database('prepared'),'prepared')});
- assert.equal(r.status,200,JSON.stringify(r.body).slice(0,300));
- assert.ok(reads.includes('titles.json'),'prepared still reads titles.json');
- assert.ok(reads.includes('people.json'));
+ assert.equal(r.status,503,'prepared is not served (ADR 0162)');
+ assert.ok(!reads.includes('titles.json')&&!reads.includes('people.json'),'prepared reads no frozen mirror');
 }
 
 {
@@ -231,4 +231,4 @@ async function preview(env,films){
  assert.equal(heat.h95.original,'Heat');
 }
 
-console.log('canonical-admin-dictionaries: admin snapshot/health/limbo/archive keep R2 at prepared, read bounded D1 at open, STOP on held/unreadable/generation move, and preserve original title, reviewed Person names and D1 skew');
+console.log('canonical-admin-dictionaries: admin snapshot/health/limbo/archive refuse prepared (ADR 0162), read bounded D1 at open, STOP on held/unreadable/generation move, and preserve original title, reviewed Person names and D1 skew');

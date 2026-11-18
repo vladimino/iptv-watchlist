@@ -84,7 +84,7 @@ vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);vm.runI
 vm.runInContext(scoped('src/prediction-d1.js','PredictionD1'),ctx);vm.runInContext(scoped('src/ratings-d1.js','RatingsD1'),ctx);
 for(const file of ['src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/filter-presets.js',process.env.CATALOG_WORKER_FILE||'src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const worker=ctx.worker,constant=name=>vm.runInContext(name,ctx);
-const envW={BUCKET:bucket};
+const envW={BUCKET:bucket,FILM_PERSON_DB_OPTIONAL:'standin'};
 const get=async id=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/'+id),envW,{waitUntil(){}});return {status:r.status,body:await r.json()};};
 const hour=3600000,now=Date.now(),G1='22222222-2222-4222-8222-222222222222',G0='11111111-1111-4111-8111-111111111111';
 const profile={version:1,profileHash:'p1'};
@@ -203,6 +203,8 @@ const base={
  };
  const {db,statementsSeen}=mkdb('published');
  db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
+ // ADR 0162: the Film/Person marker is served only at d1 / open.
+ db.sql("UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;");
  const seeding=new Map(),seedBucket={async get(key){return seeding.has(key)?{etag:'e',json:async()=>structuredClone(seeding.get(key))}:null;},async put(key,value){seeding.set(key,JSON.parse(value));return {etag:'e'};},async list(){return {objects:[],truncated:false};}};
  const published=await PublishedEpgModule.publishGeneration({DB:db,BUCKET:seedBucket},{programmeRunId:G1,phase:'published',expectedProgrammeRunId:null,programme:{runId:G1,updatedAt:new Date(now).toISOString(),watchlistCount:0,films:[]},watchlist:{updatedAt:new Date(now).toISOString(),films:[]}},{now});
  assert.equal(published.pointed,true,'the fixture is a real D1-published generation');
@@ -293,17 +295,10 @@ const base={
  });
  const ask=async(db,id='300')=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/'+id),{BUCKET:bucket,DB:db},{waitUntil(){}});return {status:r.status,body:await r.json()};};
  seed(base);records.set(ADM,receipt(300));
- // Allowed R2 states: legacy (a contract below 13), r2 and prepared. An admitted Film whose projection is still pending is found.
- let r=await ask(fake({version:12}));assert.equal(r.status,200,'legacy');
- reads.length=0;r=await ask(fake());assert.ok(reads.includes(ADM),'r2 still reads the R2 receipt');assert.equal(r.status,200,'r2: the receipt is the R2 identity decision, a pending projection is still a Film');assert.equal(r.body.film.id,'tmdb_300');
- r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1}}));assert.equal(r.status,200,'prepared');
- // AIR-374 P4: the marker is read again after the R2 and D1 reads; an answer read under one state and generation is never returned after the marker moved.
- r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'d1',cutover:'open',generation:2}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'prepared to open mid-read refuses the answer');
- r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'prepared',cutover:'open',generation:2}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'a new generation of the same state refuses the answer');
- r=await ask(fake({drift:{after:1,marker:{mode:'prepared',cutover:'open',generation:1}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'r2 to prepared mid-read refuses the answer');
- r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'d1',cutover:'held',generation:3}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'prepared to held mid-read fails closed');
- r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'d1',cutover:'open',generation:1}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'a state change at the same generation refuses the answer');
- r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1}}));assert.equal(r.status,200,'an unchanged prepared marker still answers');
+ // ADR 0162: only d1 / open answers. A legacy contract (below 13), an r2 or prepared marker and a drifting generation are refused (503) and the R2 receipt is never read.
+ let r=await ask(fake({version:12}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],'legacy');
+ reads.length=0;r=await ask(fake());assert.ok(!reads.includes(ADM),'r2 never reads the R2 receipt');assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],'r2 is refused');
+ reads.length=0;r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1}}));assert.ok(!reads.includes(ADM));assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],'prepared is refused');
  // The authority names D1 or is unreadable: never R2.
  r=await ask(fake({marker:{mode:'d1',cutover:'held',generation:2}}));assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable','film_person_held'],'held fails closed');
  // AIR-374 P4: at open D1 answers (film_rated_admission, identity claims, redirects, the retirement ledger) and the R2 receipt and retirements object are never read.
@@ -339,22 +334,18 @@ r=await ask(fake({marker:OPEN,external:own,admissions:[{...adm,tmdb:'301'}]}));a
  // AIR-499: optional metadata at held is typed STOP, not a Discovery-only 200 with R2 metadata.json.
  r=await ask(fake({marker:{mode:'d1',cutover:'held',generation:2}}),'7');assert.deepEqual([r.status,r.body.reason],[503,'film_person_held'],'held stops the film page before frozen metadata.json');
  // Canonical guards. The owner's R2 retirement, a D1 contradiction, a redirected Film.
- records.set(RET,{schemaVersion:1,retirements:[]});r=await ask(fake());assert.equal(r.status,200,'an empty retirements object retires nobody');
- records.set(RET,{schemaVersion:99,nonsense:true});r=await ask(fake());assert.deepEqual([r.status,r.body.reason],[503,'discovery_unavailable'],'an unreadable retirements object fails closed');
- const retire=movie=>({schemaVersion:1,retirements:[{filmId:'film:abc',lid:'abc',movieId:movie,tvId:555,evidence:{movieStatus:404,movieCheckedAt:'2026-11-01T00:00:00Z',letterboxdUrl:'https://letterboxd.com/film/abc/',link:'tv/555',linkCheckedAt:'2026-11-01T00:00:00Z',tvResponseId:555,tvCheckedAt:'2026-11-01T00:00:00Z'},confirmation:{by:'owner',at:'2026-11-01T00:00:00Z',source:'test'}}]});
- records.set(RET,retire(300));r=await ask(fake());assert.deepEqual([r.status,r.body.status],[410,'retired'],'the owner retired this TMDB movie id: a receipt does not resurrect it');
- records.set(RET,retire(301));r=await ask(fake());assert.equal(r.status,200,'another id retired: this Film is unaffected');
- records.delete(RET);
- r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:b',trusted:1,conflicting:0}]}));assert.equal(r.status,409,'two Films trust one TMDB id');
- r=await ask(fake({external:[{film_id:'film:a',trusted:0,conflicting:1}]}));assert.equal(r.status,409,'a conflicting external id');
- r=await ask(fake({external:[{film_id:'film:a',trusted:0,conflicting:0}]}));assert.equal(r.status,409,'only an untrusted, non-conflicting claim holds the identity');
- r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:b',trusted:0,conflicting:0}]}));assert.equal(r.status,409,'a trusted owner beside an untrusted claim of another Film');
- r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:a',trusted:0,conflicting:0}]}));assert.equal(r.status,409,'any claim that is not the owner\'s own trusted row, even on the same Film');
- r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:x',trusted:0,conflicting:0},{film_id:'film:y',trusted:0,conflicting:0},{film_id:'film:z',trusted:0,conflicting:0},{film_id:'film:v',trusted:0,conflicting:0},{film_id:'film:w',trusted:0,conflicting:1}]}));assert.equal(r.status,409,'six claims: none is masked by a row limit');
- r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0}],redirects:['film:a']}));assert.equal(r.status,410,'the Film was merged into another');
- r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0}]}));assert.equal(r.status,200,'one trusted, unredirected Film agrees with the receipt');
- r=await ask(fake({broken:/film_external_id/}));assert.deepEqual([r.status,r.body.reason],[503,'discovery_unavailable'],'a failed canonical guard is unavailable, never found');
- r=await ask(fake({broken:/film_redirect/,external:[{film_id:'film:a',trusted:1,conflicting:0}]}));assert.equal(r.status,503);
+ const fo=o=>fake({marker:OPEN,admissions:[adm],filmRow:canon,external:own,...o});
+ // The R2 retirements object is never read at open (the D1 ledger decides); the R2-only retirement arm is gone with the r2 state (ADR 0162).
+ r=await ask(fo({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:b',trusted:1,conflicting:0}]}));assert.equal(r.status,409,'two Films trust one TMDB id');
+ r=await ask(fo({external:[{film_id:'film:a',trusted:0,conflicting:1}]}));assert.equal(r.status,409,'a conflicting external id');
+ r=await ask(fo({external:[{film_id:'film:a',trusted:0,conflicting:0}]}));assert.equal(r.status,409,'only an untrusted, non-conflicting claim holds the identity');
+ r=await ask(fo({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:b',trusted:0,conflicting:0}]}));assert.equal(r.status,409,'a trusted owner beside an untrusted claim of another Film');
+ r=await ask(fo({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:a',trusted:0,conflicting:0}]}));assert.equal(r.status,409,'any claim that is not the owner\'s own trusted row, even on the same Film');
+ r=await ask(fo({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:x',trusted:0,conflicting:0},{film_id:'film:y',trusted:0,conflicting:0},{film_id:'film:z',trusted:0,conflicting:0},{film_id:'film:v',trusted:0,conflicting:0},{film_id:'film:w',trusted:0,conflicting:1}]}));assert.equal(r.status,409,'six claims: none is masked by a row limit');
+ r=await ask(fo({external:[{film_id:'film:a',trusted:1,conflicting:0}],redirects:['film:a']}));assert.equal(r.status,410,'the Film was merged into another');
+ r=await ask(fo());assert.equal(r.status,200,'one trusted, unredirected Film agrees with the receipt');
+ r=await ask(fo({broken:/film_external_id/}));assert.deepEqual([r.status,r.body.reason],[503,'canonical_read_unavailable'],'a failed canonical guard is unavailable, never found');
+ r=await ask(fo({broken:/film_redirect/}));assert.equal(r.status,503);
  assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 }
 
@@ -434,7 +425,7 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
    assert.deepEqual([(await ask(open.db,'22004')).status,(await ask(open.db,'1272837')).status],[409,410],code+': a verified conflict and a redirect stay 409 and 410');
    r=await ask(open.db,'999999');assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable',code],code+': a canonical absence does not turn an unreadable Discovery into absent');
    r=await ask(held.db,'10750');assert.deepEqual([r.status,r.body.reason],[503,code],code+': a held Film/Person marker keeps the Discovery refusal, never R2');
-   r=await ask(prepared.db,'10750');assert.deepEqual([r.status,r.body.reason],[503,code],code+': below open the Discovery refusal stands');
+   r=await ask(prepared.db,'10750');assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],code+': a prepared marker is not served (ADR 0162)');
    assert.ok(statements.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),code+': only reads');
   }
   vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
@@ -481,7 +472,7 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
  assert.ok(statements.length>0&&statements.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1');assert.deepEqual([puts,fetches],[[],[]],'no write, no provider request');
  // Below open there is no D1 identity: no alias, so the TMDB entry alone is read (the production defect, kept visible).
  const prepared=mount(VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;");
- r=await ask(prepared,'1423191');assert.equal(r.status,404,'below open the canonical Film is not read at all (unchanged)');
+ r=await ask(prepared,'1423191');assert.equal(r.status,503,'below open nothing is served (ADR 0162)');
  // A held marker keeps failing closed (503), with no alias read.
  const held=mount(OPEN+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;");r=await ask(held,'1423191');assert.deepEqual([r.status,r.body.reason],[503,'film_person_held']);
  // ADR 0162 (review of #742): a held ratings cutover is a 503, never the stale rating and watched mark of the R2 view index above.

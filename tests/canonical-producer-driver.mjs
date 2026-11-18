@@ -98,14 +98,14 @@ const params=(over={})=>{
  assert.deepEqual(await runDictionaryProducerPass(fresh,{...params(),version:'v1',entries:[],at:T}),{state:'invalid_parameters',field:'dictionary'});
 }
 
-// 2. Dormant below open: ONE marker read, no applier call, nothing written; held is a named error, never a fallback.
+// 2. Below open: refused with film_person_unavailable, no applier call, nothing written; held is a named error, never a fallback.
 for(const stage of ['legacy','r2','prepared']){
  const file=database(stage),before=dump(file),film=scripted();
- const probe=envOf(file);await writerRoute(probe);
  const spy={resolved:0,reviewed:0};
+ const probe=envOf(file);await writerRoute(probe).catch(()=>{});
  for(const call of [env=>runEpgProducerPass(env,params({film,departed:[ID(7)]})),env=>retryEpgProducerResults(env,{...params({film,departed:[ID(7)]}),limit:5}),env=>runDictionaryProducerPass(env,{...params({film}),version:'v1',entries:[{id:'d1',original:'O',title:'T',status:'verified'}],at:T,resolveFilm:async()=>{spy.resolved++;return {filmId:ID(1)};},readOwnerReview:async()=>{spy.reviewed++;return {read:'ok',entry:'absent'};}})]){
   const env=envOf(file);
-  assert.deepEqual(await call(env),{state:'skipped',reason:'projector_is_writer'},stage);
+  assert.deepEqual(await call(env),{state:'error',code:'film_person_unavailable'},stage);
   assert.equal(env.DB.calls.queries,probe.DB.calls.queries,'exactly the marker read ('+stage+')');
   assert.equal(env.DB.calls.batches,0);
  }
@@ -598,7 +598,7 @@ const retry=(file,over={})=>retryEpgProducerResults(envOf(file),{...params(over)
  assert.equal(await S.epgRunForGeneration(env,{sourceGeneration:'gen-999'}),null);
  await assert.rejects(()=>S.epgRunForGeneration(env,{}),error=>error.code==='film_person_invalid');
  const prepared=database('prepared'),probe=envOf(prepared);
- assert.deepEqual(await S.updateResult(probe,{row,patch,at:LATER}),{state:'skipped',reason:'projector_is_writer'});
+ await assert.rejects(()=>S.updateResult(probe,{row,patch,at:LATER}),error=>error.code==='film_person_unavailable');
  assert.equal(await S.epgRunForGeneration(envOf(database('open')),{sourceGeneration:GEN}),null);
 }
 

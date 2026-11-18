@@ -301,8 +301,7 @@ const merged=await scenario('redirect_merge_retired_into_survivor',{setup:seedPr
   const env=envOf(file);
   for(const [name,call] of Object.entries(calls))await assert.rejects(()=>call(env),error=>/^film_person_/.test(String(error.code)),name+' refuses at '+state);
   assert.equal(JSON.stringify(Object.keys(TABLES).map(table=>dumpTable(file,table))),before,state+': no row changed');
-  if(state==='held'||state==='unknown')await assert.rejects(()=>writerRoute(env),error=>/^film_person_/.test(String(error.code)),state+': no writer is named');
-  else assert.equal((await writerRoute(env)).writer,'projector',state+': the projector is the only writer');
+  await assert.rejects(()=>writerRoute(env),error=>/^film_person_/.test(String(error.code)),state+': no writer is named');
  }
  const prepared=fresh(),open=opened(prepared);
  const holds=(file,mode,generation)=>rows(file,'SELECT '+PROJECTOR_MARKER_CONDITION.replace('?',"'"+mode+"'").replace('?',String(generation))+' AS ok')[0].ok;

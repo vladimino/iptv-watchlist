@@ -36,7 +36,7 @@ const MUTANTS=[
  ["revalidate always proceeds", "canonical-person-mutation-producer.js", "return plan.absent||plan.noop?'superseded':'proceed';", "return 'proceed';"],
  ["every planner error is a missing plan", "canonical-person-mutation-producer.js", "if(PERSON_MUTATION_REFUSALS.has(error?.code))return null;throw error;", "return null;"],
  ["a role collision is not a content refusal", "canonical-person-mutation-producer.js", "[...CONTENT_REFUSALS,'person_role_collision','identity_collision']", "[...CONTENT_REFUSALS,'identity_collision']"],
- ["the pass gate ignores the route", "canonical-person-mutation-producer.js", "if(route.writer!=='canonical')return {state:'skipped'", "if(false)return {state:'skipped'"],
+ ["the pass gate ignores the route", "canonical-person-mutation-producer.js", "const route=await writerRoute(env);\n if(route.writer!=='canonical')return {state:'skipped'", "const route=await writerRoute(env).catch(()=>({writer:'projector'}));\n if(route.writer!=='canonical')return {state:'skipped'"],
  ["the receipt plans revision zero", "canonical-person-mutation-producer.js", "expectedRevision:plan.revision,digest", "expectedRevision:0,digest"],
  ["the writer does not prove an existing Person", "canonical-mutations.js", "if(input.presence==='existing')statements.push(", "if(false)statements.push("],
  ["the writer does not prove an absent Person", "canonical-mutations.js", "if(input.presence==='absent')statements.push(", "if(false)statements.push("],

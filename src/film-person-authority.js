@@ -27,7 +27,7 @@ function legacy(version=null){return {state:'legacy',r2Allowed:true,open:false,h
 // fail-closed emergency and forward-fix gate that its callers refuse with `film_person_held`. A marker in mode r2 or prepared, a missing binding, a
 // missing schema_contract, a contract below 13, a database without the four tables, a partly installed set, a contract at 13 or later with none of the
 // tables, a malformed marker, baseline or fence row and any D1 error throw `film_person_unavailable`, before any R2 read and before any D1 write.
-// The explicit local stand-in (FILM_PERSON_DB_OPTIONAL set to standin, never set by wrangler.jsonc) answers `legacy` (R2 allowed) only for a domain that is not
+// The explicit local stand-in (FILM_PERSON_DB_OPTIONAL set to standin, never set in the deployed configuration) answers `legacy` (R2 allowed) only for a domain that is not
 // installed at all: no binding, no schema_contract, or a contract below 13 with none of the tables.
 export async function readAuthority(env){return readState(env,{servedOnly:true});}
 // The marker as it is, for the one operation that must move it (`transitionAuthority`) and for operator reports: it still refuses everything that is not

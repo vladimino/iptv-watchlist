@@ -276,7 +276,7 @@ if(onAny(4)){
  const done=await receiptedWrite(personEnv,{...personInput,now:clockAt(0)},{run:()=>mutatePerson(personEnv,{id:PERSON,expectedRevision:0,at:T,person:{roleId:'director/1',contractVersion:1}}),readback:async()=>null});
  assert.equal(done.state,'applied');
  // Before open nothing is written: r2, prepared, held, and a database one schema short.
- for(const [stage,expected] of [['r2','film_person_not_open'],['prepared','film_person_not_open'],['held','film_person_held']]){
+ for(const [stage,expected] of [['r2','film_person_unavailable'],['prepared','film_person_unavailable'],['held','film_person_held']]){
   const f=database(stage),e=envOf(f);
   const c={run:0,readback:0};
   await assert.rejects(()=>receiptedWrite(e,{...input,now:clockAt(0)},hooksFor(e,SECRET_TITLE,c)),code(expected),stage);
@@ -640,10 +640,10 @@ if(onAny(10)){
  assert.equal(sqlite(wide,Array.from({length:55},(_,i)=>rawInsert({id:'w'+i,target:'film:w'+i})).join(';\n')).status,0);
  assert.equal((await listReceipts(envOf(wide),{limit:1000})).length,50,'the cap');
  assert.equal((await listReceipts(envOf(wide),{limit:0})).length,1,'at least one');
- // before open the reconciler writes nothing
+ // below open the reconciler refuses (ADR 0162) and writes nothing
  const r2=database('prepared');
- const idle=await reconcileReceipts(envOf(r2),{operations:registry,now:clockAt(99999999)});
- assert.equal(idle.considered,0);assert.equal(count(r2),0);
+ await assert.rejects(()=>reconcileReceipts(envOf(r2),{operations:registry,now:clockAt(99999999)}),error=>error.code==='film_person_unavailable');
+ assert.equal(count(r2),0);
  }
 }
 
@@ -884,7 +884,7 @@ if(on(15)){
  // refused unless the marker is open, and bounded
  for(const stage of ['prepared','held']){
   const f=database(stage,template,false);
-  await assert.rejects(()=>recordBaseline(envOf(f)),code(stage==='held'?'film_person_held':'film_person_not_open'));
+  await assert.rejects(()=>recordBaseline(envOf(f)),code(stage==='held'?'film_person_held':'film_person_unavailable'));
   assert.equal(Number(one(f,'SELECT COUNT(*) FROM canonical_receipt_watermark')),0);
  }
  const f2=database('open',template,false);

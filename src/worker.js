@@ -461,13 +461,10 @@ async function catalogArchiveFallback(env,tmdbId){
  // the identity claims and the retirement ledger come from D1. held and an unreadable marker fail closed (503) and never reach R2.
  if(gate.state==='open')return CanonicalCatalogReader.catalogCanonicalFilmFromD1(env,tmdbId);
  if(!gate.r2Allowed){const error=new Error(gate.state==='held'?'film_person_held':'film_person_not_open_read');error.code=error.message;throw error;}
- const result=await catalogArchiveFallbackR2(env,tmdbId,gate);
- // The marker is read again after the R2 and D1 reads: an answer read under one state and generation is never returned after the marker moved (r2 to prepared, prepared to open, held).
- const again=await FilmPersonAuthority.readAuthority(env);
- if(again.state!==gate.state||again.generation!==gate.generation){const error=new Error('film_person_generation_moved');error.code='film_person_generation_moved';throw error;}
- return result;
+ // Only the explicit local stand-in (a domain that is not installed) reaches the R2 receipt (ADR 0162); a marker that cannot move cannot be re-read.
+ return catalogArchiveFallbackR2(env,tmdbId);
 }
-async function catalogArchiveFallbackR2(env,tmdbId,gate){
+async function catalogArchiveFallbackR2(env,tmdbId){
  const retirements=await loadJSON(env,'identity/tmdb-retirements.json');
  if(retirements!=null){
   const set=tmdbRetirementSet(retirements);
@@ -478,23 +475,6 @@ async function catalogArchiveFallbackR2(env,tmdbId,gate){
  if(archive==null)return {state:'absent'};
  const film=catalogAdmittedFilm(archive,tmdbId);
  if(!film)return {state:'absent'};
- if(gate.state!=='legacy'){
-  // D1 is a projection here and need not hold the Film yet; it can only contradict the receipt.
-  let rows;
-  try{rows=await FilmPersonAuthority.many(FilmPersonAuthority.database(env),"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value=?",[tmdbId]);}
-  catch{const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
-  // The rule of the admission writer (resolveAdmissionFilm): ALL claims of this typed id are read, and any claim that is not the one owner's own
-  // trusted, non-conflicting row (an untrusted or conflicting claim, on this or another Film, even beside a trusted owner) holds the identity.
-  const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0,owner=rows.find(isOwn)?.film_id??null;
-  if(rows.some(row=>!(isOwn(row)&&row.film_id===owner)))return {state:'conflict'};
-  const trusted=owner===null?[]:[owner];
-  if(trusted.length===1){
-   let redirected;
-   try{redirected=await FilmPersonAuthority.one(FilmPersonAuthority.database(env),'SELECT 1 AS hit FROM film_redirect WHERE from_id=? LIMIT 1',[trusted[0]]);}
-   catch{const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
-   if(redirected)return {state:'retired'};
-  }
- }
  return {state:'found',film};
 }
 // AIR-475 review: Discovery is an independent domain. These are the ways its reader can refuse; while the Film/Person marker is open a refusal never hides a canonical Film.
