@@ -13,7 +13,8 @@ import {spawn} from 'node:child_process';
 import {manifestFor} from '../scripts/migration-export.mjs';
 import {loadWorker} from '../scripts/discovery-ledger-offline.mjs';
 import {plan} from '../scripts/discovery-ledger-split.mjs';
-import {InstallError,createS3Store,preflight,run} from '../scripts/discovery-ledger-install.mjs';
+import {InstallError,preflight,run} from '../scripts/discovery-ledger-install.mjs';
+import {createS3Store,readInstallCredentials} from '../scripts/r2-s3-store.mjs';
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const hmac=(key,value)=>createHmac('sha256',key).update(value).digest();
@@ -93,15 +94,14 @@ try{
  const bucket=fakeBucket(Object.fromEntries(Object.entries(bodies).map(([k,v])=>[k,JSON.stringify(v)])));const endpoint=await bucket.start();
  const snapshot=writeSnapshot(bucket),planDir=out('plan');
  const planned=await plan({snapshot,output:planDir});assert.equal(planned.report.verdict,'READY');
- const seen=planned.report.active.items;assert.ok(seen>0&&planned.report.archived.items>0);
+ assert.ok(planned.report.active.items>0&&planned.report.archived.items>0);
 
  // Dry run: read-only credential, no write, READY.
  const dry=await run({plan:planDir,output:out('dry'),env:envFor(endpoint)});
  assert.equal(dry.verdict,'READY');assert.equal(dry.preflight.wouldWrite,planned.plan.writes.length);assert.deepEqual(dry.preflight.conflicts,[]);
  assert.equal(bucket.calls.put,0);assert.equal(dry.calls.put,0);
- // --apply without the flag, and without the write credential, never reaches the bucket.
- await assert.rejects(run({plan:planDir,output:out('noflag'),apply:true,env:envFor(endpoint)}),e=>e instanceof InstallError&&e.exitCode===2);
- await assert.rejects(run({plan:planDir,output:out('nocred'),apply:true,approved:true,env:envFor(endpoint)}),e=>e instanceof InstallError&&e.exitCode===2);
+ // The apply path is retired (AIR-537): --apply is refused before any request, with or without the old flag or write credential.
+ for(const approved of [false,true])for(const write of [false,true])await assert.rejects(run({plan:planDir,output:out('apply'),apply:true,approved,env:envFor(endpoint,write)}),e=>e instanceof InstallError&&e.exitCode===2&&/retired/.test(e.message));
  assert.equal(bucket.calls.put,0);
  // The store refuses a non-planned key and a write without precondition before any request.
  const guarded=createS3Store({credentials:{accountId:ACCOUNT,accessKeyId:WRITE_KEY,secretAccessKey:WRITE_SECRET,bucket:'iptv',endpoint},allowedWrites:new Set(['a'])});
@@ -113,54 +113,23 @@ try{
  const readOnlyStore=createS3Store({credentials:{accountId:ACCOUNT,accessKeyId:READ_KEY,secretAccessKey:READ_SECRET,bucket:'iptv',endpoint},allowedWrites:new Set(['probe'])});
  await assert.rejects(readOnlyStore.put('probe','{}',{onlyIf:{etagDoesNotMatch:'*'}}),e=>e.exitCode===3);assert.equal(bucket.calls.readOnlyWrite,1);
 
- // Apply: exactly the plan's keys plus the lease, in plan order; the Worker reads the active ledger afterwards.
- const applyDir=out('apply'),applied=await run({plan:planDir,output:applyDir,apply:true,approved:true,env:envFor(endpoint,true)});
- assert.equal(applied.verdict,'INSTALLED',JSON.stringify(applied));
- assert.equal(applied.applied.applied,planned.plan.writes.length);
  const plannedKeys=planned.plan.writes.map(w=>w.key);
- assert.deepEqual(bucket.puts.filter(k=>k!=='epg/resolver-lease.json'),plannedKeys,'planned keys in plan order');
- assert.ok(bucket.puts.filter(k=>k==='epg/resolver-lease.json').length>=2,'the lease is acquired and released');
- assert.equal(applied.postCheck.workerReadsActive,true);assert.equal(applied.postCheck.activeItems,seen);assert.equal(applied.postCheck.rootSha256Matches,true);assert.equal(applied.postCheck.archivePointer,true);
- const receipts=JSON.parse(fs.readFileSync(path.join(applyDir,'receipts.json'),'utf8'));
- assert.equal(receipts.length,plannedKeys.length+bucket.puts.filter(k=>k==='epg/resolver-lease.json').length);
- for(const receipt of receipts.filter(r=>plannedKeys.includes(r.key)))assert.equal(receipt.sha256,planned.plan.writes.find(w=>w.key===receipt.key).sha256);
- const active=JSON.parse(bucket.items.get('epg/generations/'+P+'/discovery-latest.json').bytes.toString());assert.equal(active.ledgerMode,'bounded');assert.equal(active.items.length,seen);
- assert.deepEqual(JSON.parse(bucket.items.get('epg/discovery-archive/v1/sources/'+planned.plan.manifestId+'/discovery-latest.json').bytes.toString()).items.length,ledgerItems.length,'the source copy holds the full ledger');
-
- // Rerun: everything is done, nothing but the lease is written.
- const putsBefore=bucket.puts.length;
- const again=await run({plan:planDir,output:out('again'),apply:true,approved:true,env:envFor(endpoint,true)});
- assert.equal(again.verdict,'INSTALLED');assert.equal(again.applied.applied,0);
- assert.deepEqual(bucket.puts.slice(putsBefore).filter(k=>k!=='epg/resolver-lease.json'),[]);
- // Dry run after the install reports done, not ready.
- const after=await run({plan:planDir,output:out('after'),env:envFor(endpoint)});
- assert.equal(after.verdict,'ALREADY-INSTALLED');assert.equal(after.preflight.states.done,plannedKeys.length);assert.equal(after.preflight.wouldWrite,0);assert.equal(after.preflight.fence.archivePointerAbsent,false);
-
- // A lost precondition stops the apply: a fresh bucket whose published pointer moved after the plan.
+ // A dry run against a bucket whose published pointer moved after the plan is NOT-READY, and still writes nothing.
  const bucket2=fakeBucket(Object.fromEntries(Object.entries(bodies).map(([k,v])=>[k,JSON.stringify(v)])));const endpoint2=await bucket2.start();
  bucket2.put('epg/published-generation.json',JSON.stringify({programmeRunId:runId(10),phase:'published'}));
- const moved=await run({plan:planDir,output:out('moved'),apply:true,approved:true,env:envFor(endpoint2,true)});
+ const moved=await run({plan:planDir,output:out('moved'),env:envFor(endpoint2,true)});
  assert.equal(moved.verdict,'NOT-READY');assert.equal(moved.preflight.fence.pointerEtagMatches,false);assert.equal(bucket2.calls.put,0);
- // A 412 during the apply (a concurrent writer replaced the generation copy between the state check and the CAS) is a stop
- // with receipts for what was written; neither ledger copy is replaced and the archive pointer already exists.
- const bucket3=fakeBucket(Object.fromEntries(Object.entries(bodies).map(([k,v])=>[k,JSON.stringify(v)])));const endpoint3=await bucket3.start();
- const original3=bucket3.server.listeners('request')[0];
- let armed=true;bucket3.server.removeAllListeners('request');bucket3.server.on('request',(request,response)=>{if(armed&&request.method==='PUT'&&request.url.includes('generations')&&request.url.includes('discovery-latest')){armed=false;bucket3.put('epg/generations/'+P+'/discovery-latest.json',JSON.stringify({...ledger,updatedAt:'moved'}));}original3(request,response);});
- const raceDir=out('race');await assert.rejects(run({plan:planDir,output:raceDir,apply:true,approved:true,env:envFor(endpoint3,true)}),e=>e instanceof InstallError&&e.exitCode===3);
- const raceReport=JSON.parse(fs.readFileSync(path.join(raceDir,'install-report.json'),'utf8'));
- assert.equal(raceReport.verdict,'STOPPED');assert.match(raceReport.error,/Conditional write lost/);assert.equal(bucket3.calls.precondition,1,'the bucket answered 412 once');
- for(const key of ['epg/generations/'+P+'/discovery-latest.json','epg/discovery-latest.json'])assert.ok(!bucket3.items.get(key).bytes.toString().includes('"ledgerMode":"bounded"'),'no ledger copy was replaced');
- assert.ok(bucket3.items.has('epg/discovery-archive/v1/current.json'),'the archive pointer exists: readers see full ledger plus archive, losslessly');
+ // The shared store module is a neutral import: the write credential reader still demands both keys.
+ assert.throws(()=>readInstallCredentials({}),e=>e instanceof InstallError&&e.exitCode===2);
 
  // CLI: the dry run exits 0 with aggregates only; --apply without the flag exits 2; output inside the repository exits 2.
  const cli=await cliRun(['--plan',planDir,'--output',out('cli')],envFor(endpoint));
- assert.equal(cli.status,0,cli.stderr);assert.equal(JSON.parse(cli.stdout).verdict,'ALREADY-INSTALLED','the first bucket is already installed');
+ assert.equal(cli.status,0,cli.stderr);assert.equal(JSON.parse(cli.stdout).verdict,'READY');assert.equal(bucket.calls.put,0);
  const cli2=await cliRun(['--plan',planDir,'--output',out('cli2'),'--apply'],envFor(endpoint,true));
- assert.equal(cli2.status,2);assert.match(cli2.stderr,/approved-production-writes/);
+ assert.equal(cli2.status,2);assert.match(cli2.stderr,/retired/);assert.equal(bucket.calls.put,0);
  const cli3=await cliRun(['--plan',planDir,'--output',path.join(process.cwd(),'tmp-install')],envFor(endpoint));
  assert.equal(cli3.status,2);
- for(const text of [cli.stdout,JSON.stringify(applied),JSON.stringify(dry)])for(const item of ledgerItems.slice(0,20))assert.ok(!text.includes(item.key)&&!text.includes(item.title),'no key or title in reports');
- await bucket.stop();await bucket2.stop();await bucket3.stop();
- await bucket.stop();await bucket2.stop();await bucket3.stop();
+ for(const text of [cli.stdout,JSON.stringify(dry)])for(const item of ledgerItems.slice(0,20))assert.ok(!text.includes(item.key)&&!text.includes(item.title),'no key or title in reports');
+ await bucket.stop();await bucket2.stop();
  console.log('discovery ledger install: ok');
 }finally{fs.rmSync(root,{recursive:true,force:true});}
