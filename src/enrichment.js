@@ -836,7 +836,7 @@ function indexedFingerprintRecord(item){
  if(!item?.fingerprintHash||!impact||impact.fingerprintHash!==item.fingerprintHash)return null;
  return {fingerprintHash:impact.fingerprintHash,fingerprintSchemaVersion:impact.fingerprintSchemaVersion,fingerprintPromptVersion:impact.fingerprintPromptVersion??1,invalidatedAt:impact.invalidatedAt||null,plotMechanics:impact.plotMechanics??undefined,execution:impact.execution??undefined};
 }
-// AIR-477 (ADR 0165, Proposed). The owner-confirmed recovery intents, read at each call (one D1 batch of two SELECTs; there is no request
+// AIR-477 (ADR 0165, Accepted). The owner-confirmed recovery intents, read at each call (one D1 batch of two SELECTs; there is no request
 // cache since AIR-452 removed the request scope): a film's exact denied prediction (and fingerprint) version is not current for every
 // consumer that names the film. An absent module, binding or migration 0024 is the empty overlay: the ordinary rule alone decides. An
 // INSTALLED store that cannot be read (a fault, a partial table set) fails closed: the error reaches the caller, so no rebuild treats a

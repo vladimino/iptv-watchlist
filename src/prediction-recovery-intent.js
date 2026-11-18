@@ -1,4 +1,4 @@
-// AIR-477 (ADR 0165, Proposed). The owner-confirmed, scoped prediction recovery intent: the D1 store of migration 0024 and the pure
+// AIR-477 (ADR 0165, Accepted). The owner-confirmed, scoped prediction recovery intent: the D1 store of migration 0024 and the pure
 // rules around it. An intent names ONE stored prediction version of ONE film (and, in mode fingerprint_and_prediction, ONE stored
 // fingerprint version) that the freshness rule must not accept as current. Nothing else changes: the ordinary queue rebuild admits the
 // film because the ordinary freshness rule now calls it outstanding; retry records, the hot/cold order, the runner lease and the

@@ -438,6 +438,40 @@ async function catalogPosterApply(env,key,found,guard){
  }
  return {key,written:false,reason:'catalog_changed',status};
 }
+// AIR-515. With Discovery on D1 (mode d1, cutover open) the catalog and its posters are the `discovery_admission` rows: reads come from
+// DiscoveryAuthority.routeRead and the one poster write is DiscoveryAuthority.applyPosters. Nothing reads or writes the R2 catalog
+// objects then, and a D1 failure is a failure, never "no poster". The R2 path below exists only for offline stand-ins without DiscoveryAuthority (ADR 0162: no rollback toolchain).
+const CATALOG_POSTER_D1_KEY='discovery_admission';
+// Fail closed: the built Worker always has DiscoveryAuthority, so a missing binding, an absent or old schema or a marker that is not d1/open is an
+// unavailable authority and never a reason to read or write the R2 catalog. The R2 path exists only where the symbol is absent (offline vm stand-ins).
+async function catalogPosterD1Gate(env){
+ if(typeof DiscoveryAuthority==='undefined')return {d1:false};
+ const gate=await DiscoveryAuthority.readAuthority(env);
+ if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence'});
+ if(!gate.ready)throw Object.assign(new Error('discovery_not_authoritative'),{code:'discovery_not_authoritative'});
+ return {d1:true,gate};
+}
+async function catalogPosterD1Source(env,gate,programmeRunId){
+ if(gate.transfer==='loading')throw Object.assign(new Error('discovery_incomplete'),{code:'discovery_incomplete'});
+ if(programmeRunId&&gate.programmeRunId!==programmeRunId)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence'});
+ const routed=await DiscoveryAuthority.routeRead(env,'epg/discovered-films.json');
+ if(!routed.handled||!routed.value||typeof routed.value!=='object')throw Object.assign(new Error('discovery_unavailable'),{code:'discovery_unavailable'});
+ return {key:CATALOG_POSTER_D1_KEY,etag:'d1:'+gate.generation,films:routed.value};
+}
+async function catalogPosterApplyD1(env,found,programmeRunId,guard){
+ const stop=await guard();
+ if(stop)return {key:CATALOG_POSTER_D1_KEY,written:false,reason:stop,status:Object.fromEntries(found.map(row=>[row.id,stop]))};
+ if(typeof env.beforeCatalogPosterWrite==='function'){const hook=env.beforeCatalogPosterWrite;env.beforeCatalogPosterWrite=null;await hook(CATALOG_POSTER_D1_KEY);}
+ let applied;
+ try{applied=await DiscoveryAuthority.applyPosters(env,found.map(row=>({filmId:row.id,tmdbId:row.tmdbId,poster:row.poster})),{lease:env.discoveryLease,programmeRunId});}
+ catch(error){
+  // A fence or conflict refusal rolled the batch back whole. Any other failure (D1 error, lost response) may or may not have committed: `write_uncertain`.
+  const reason=error?.code==='discovery_fence'||error?.code==='discovery_conflict'?(await guard().catch(()=>'catalog_changed'))||'catalog_changed':'write_uncertain';
+  return {key:CATALOG_POSTER_D1_KEY,written:false,reason,status:Object.fromEntries(found.map(row=>[row.id,reason]))};
+ }
+ const written=Object.values(applied.status).some(state=>state==='written');
+ return {key:CATALOG_POSTER_D1_KEY,written,reason:written?null:'nothing_to_apply',status:applied.status};
+}
 // Display fields of an outcome, from the catalog record this call already read: bounded text and an integer year, never markup.
 function catalogPosterDisplay(film){return {title:typeof film?.title==='string'&&film.title?film.title.slice(0,200):null,year:Number.isInteger(film?.year)?film.year:null};}
 function catalogPosterOutcome(id,writes){
@@ -538,8 +572,20 @@ async function catalogPosterHydration(env,body={}){
  // request or write, once another generation (or none) is published.
  const fenced=current=>json({dryRun,enabled:true,error:'Programme generation changed',generationChanged:true,leaseLost:false,expectedProgrammeRunId:expected,programmeRunId:current},409);
  if(expected&&programmeRunId!==expected)return fenced(programmeRunId);
- const sources=[await catalogPosterObject(env,'epg/discovered-films.json')];
- if(programmeRunId)sources.push(await catalogPosterObject(env,epgGenerationKey(programmeRunId,'discovered-films.json')));
+ let posterGate;
+ try{posterGate=await catalogPosterD1Gate(env);}catch{return json({dryRun,enabled:true,error:'Discovery authority unavailable',storageUnavailable:true},503);}
+ const posterD1=posterGate.d1;
+ let sources;
+ if(posterD1){
+  try{sources=[await catalogPosterD1Source(env,posterGate.gate,programmeRunId)];}
+  catch(error){
+   if(error?.code==='discovery_fence'&&programmeRunId&&posterGate.gate.programmeRunId!==programmeRunId)return fenced(posterGate.gate.programmeRunId??null);
+   return json({dryRun,enabled:true,error:'Discovery catalog unavailable',storageUnavailable:true},503);
+  }
+ }else{
+  sources=[await catalogPosterObject(env,'epg/discovered-films.json')];
+  if(programmeRunId)sources.push(await catalogPosterObject(env,epgGenerationKey(programmeRunId,'discovered-films.json')));
+ }
  const counts=catalogPosterMissing(sources);
  const negatives=await catalogPosterNegativesRead(env);
  if(!negatives.ok)return json({dryRun,enabled:true,error:'Poster negatives unreadable',negativesReadable:false},503);
@@ -596,12 +642,15 @@ async function catalogPosterHydration(env,body={}){
   if(found.length){
    const guard=()=>catalogPosterGuard(env,programmeRunId,lease);
    let stopped=null;
-   for(const key of programmeRunId?[epgGenerationKey(programmeRunId,'discovered-films.json'),'epg/discovered-films.json']:['epg/discovered-films.json']){
+   if(posterD1)writes.push(await catalogPosterApplyD1(env,found,programmeRunId,guard));
+   else for(const key of programmeRunId?[epgGenerationKey(programmeRunId,'discovered-films.json'),'epg/discovered-films.json']:['epg/discovered-films.json']){
     if(stopped){writes.push({key,written:false,reason:stopped,status:Object.fromEntries(found.map(row=>[row.id,stopped]))});continue;}
     const result=await catalogPosterApply(env,key,found,guard);writes.push(result);
     if(result.reason==='generation_changed'||result.reason==='lease_lost')stopped=result.reason;
    }
   }
+  // A D1 batch that failed without a fence refusal is uncertain: stop before judging outcomes or saving remembered answers, and say so.
+  if(writes.some(write=>write.reason==='write_uncertain'))return json({...summary,dryRun:false,enabled:true,error:'Poster write outcome unknown',storageUnavailable:true,writeUncertain:true,retryable:found.map(row=>row.id)},503);
   for(const item of outcomes)if(item.outcome==='pending'){const result=catalogPosterOutcome(item.id,writes);item.outcome=result.outcome;if(result.writtenTo.length)item.writtenTo=result.writtenTo;if(result.outcome!=='hydrated'&&!result.writtenTo.length)delete item.poster;}
   // Remember only answers this call actually got from TMDB. A failed write is reported on the outcome and is not treated as stored.
   const additions=new Map();

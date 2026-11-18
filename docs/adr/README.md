@@ -6,7 +6,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 | ADR | Status | Decision and evidence |
 | --- | --- | --- |
-| [0165 — Owner-confirmed scoped prediction recovery intent as a denied-version overlay on the freshness rule](0165-scoped-prediction-recovery-intent.md) | **Proposed** 2026-11-17 (owner chose the option on [AIR-477](https://trello.com/c/WhwaXRRl); acceptance is the owner's decision on the pull request) | A D1 intent (migration `0024`, not applied) denies one film's exact stored prediction (and fingerprint) version; the ordinary freshness rule and queue rebuild then re-admit the film, and the ordinary batch v2 runner re-scores it; the first new version satisfies the intent. Owner-only preview and fenced confirm; retained Films outside admission and exhausted retry budgets fail closed. No production write is authorized. |
+| [0165 — Owner-confirmed scoped prediction recovery intent as a denied-version overlay on the freshness rule](0165-scoped-prediction-recovery-intent.md) | **Accepted** 2026-11-18 (explicit owner approval on [AIR-477](https://trello.com/c/WhwaXRRl)) | A D1 intent (migration `0024`, not applied) denies one film's exact stored prediction (and fingerprint) version; the ordinary freshness rule and queue rebuild then re-admit the film, and the ordinary batch v2 runner re-scores it; the first new version satisfies the intent. Owner-only preview and fenced confirm; retained Films outside admission and exhausted retry budgets fail closed. No production write is authorized. |
 
 ## Accepted records
 
