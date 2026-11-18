@@ -1280,8 +1280,15 @@ function onLimboMore() {
   const button = document.querySelector('[data-limbo-more="items"]');
   if (button) button.disabled = true;
   const seq = limboLive.seq;
-  const pending = loadLimboMore(state, cursor, {pin: limboLive.pin}).then(page => {
+  // The same heavy read as the first page: it never overlaps the unified identity list (see iwIdle in admin-identity-work.js). After the wait the view may have
+  // changed (a refresh or filter bumped the sequence, or another page took the cursor): then this request is obsolete and nothing is sent.
+  const waited = typeof iwIdle === 'function' ? iwIdle() : Promise.resolve();
+  const pending = waited.then(() => (seq !== limboLive.seq || limboLive.next !== cursor) ? {mode: 'skipped'} : loadLimboMore(state, cursor, {pin: limboLive.pin})).then(page => {
     if (seq !== limboLive.seq) return page;
+    if (page.mode === 'skipped') {
+      if (button) button.disabled = false;
+      return page;
+    }
     if (page.mode === 'stale') {
       if (button) button.disabled = false;
       limboLive.pin = null;

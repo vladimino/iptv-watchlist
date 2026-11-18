@@ -107,18 +107,18 @@ function node(id) {
   return {id, value: '', checked: false, hidden: false, disabled: false, textContent: '', innerHTML: '', dataset: {}, attrs: {}, listeners,
     addEventListener(type, fn) {listeners[type] = fn;}, setAttribute(name, value) {this.attrs[name] = value;}};
 }
-async function runController(responses, extra = {}) {
+async function runController(responses, extra = {}, source = '') {
   const ids = ['iw-section', 'iw-form', 'iw-type', 'iw-disposition', 'iw-q', 'iw-include', 'iw-reset', 'iw-refresh', 'iw-reload', 'iw-retry', 'iw-more', 'iw-loading', 'iw-error', 'iw-error-text', 'iw-stale', 'iw-verdict', 'iw-results', 'iw-empty', 'iw-empty-text', 'iw-coverage-body'];
   const nodes = Object.fromEntries(ids.map(id => [id, node(id)]));
   const calls = [];
   const context = vm.createContext({URLSearchParams, Intl, Date, encodeURIComponent, String, Number, Array, Object, JSON, Math, Promise, AbortController, setTimeout,
-    document: {querySelector: selector => nodes[selector.slice(1)] || null},
+    document: {querySelector: selector => (extra.__query && extra.__query(selector)) || nodes[selector.slice(1)] || null},
     ...extra,
     fetch: async url => {calls.push(String(url)); const next = responses.shift(); if (next.gate) await next.gate; return {ok: next.status < 400, status: next.status, json: async () => next.body};}});
-  vm.runInContext(bundleAdmin([text.client, text.iwClient, text.view, text.controller]) + '\nthis.iwLive=iwLive;', context);
+  vm.runInContext(bundleAdmin([text.client, text.iwClient, text.view, source, text.controller]) + '\nthis.iwLive=iwLive;', context);
   const settle = () => new Promise(resolve => setTimeout(resolve, 5));
   await settle();
-  return {nodes, calls, live: context.iwLive, settle, idle: () => vm.runInContext('iwIdle()', context)};
+  return {nodes, calls, live: context.iwLive, settle, idle: () => vm.runInContext('iwIdle()', context), more: () => vm.runInContext('onLimboMore()', context), context};
 }
 const ok = (rows, next, pin = 'P1') => ({status: 200, body: {pin, snapshot: {}, rows, nextCursor: next, coverage: {film: {state: 'partial'}, letterboxd_rated_candidate: {enumeration: {state: 'complete'}, counts: {state: 'estimate', summarizedAt: null, byStatus: {pending: 0, admitting: 0, needs_review: 0, verified: 0, removed: 0}}, page: {state: 'read_whole'}}}}});
 {
@@ -209,5 +209,88 @@ const ok = (rows, next, pin = 'P1') => ({status: 200, body: {pin, snapshot: {}, 
   assert.equal(quietIdle, true, 'iwIdle resolves at once when nothing is loading');
   assert.match(fs.readFileSync('public/admin-limbo.js', 'utf8'), /typeof iwIdle === 'function'\) return iwIdle\(\)\.then\(\(\) => loadLimboLive/, 'limboRead waits for the identity list');
   assert.match(text.controller, /await iwAfterLimbo\(\)/);
+}
+{
+  // "Показать ещё" of the Limbo queue is the same heavy read as its first page: it goes through the same wait, and an obsolete one is not sent.
+  const limbo = fs.readFileSync('public/admin-limbo.js', 'utf8');
+  const handler = limbo.slice(limbo.indexOf('function onLimboMore() {'), limbo.indexOf('function limboCauseSelection(state)'));
+  assert.ok(handler.includes('iwIdle()') && handler.length > 200 && !handler.includes('function limboCauseSelection'));
+  const make = () => {
+    const sent = [], button = {disabled: false, removed: false, remove() {this.removed = true;}}, results = {insertAdjacentHTML() {}};
+    let pageGate = null;
+    const globals = {
+      limboLive: {seq: 1, next: 'c1', pin: 'P', pending: null},
+      limboState: () => ({}), limboAppendGrouped() {}, limboApplyFind() {}, limboRender: () => Promise.resolve(null), limboErrorText: code => String(code),
+      loadLimboMore: async (state, cursor, options) => {sent.push({cursor, pin: options.pin}); if (pageGate) await pageGate; return {mode: 'ready', error: null, items: [], nextCursor: null};},
+    };
+    globals.__query = selector => selector === '[data-limbo-more="items"]' ? button : selector === '#limbo-results' ? results : null;
+    return {sent, button, globals, hold: () => {let open; pageGate = new Promise(resolve => {open = resolve;}); return open;}};
+  };
+  // 1. an identity read is in flight: no Limbo page request until it finishes, then exactly one with the cursor and pin of the click
+  {
+    const m = make();
+    let open; const gate = new Promise(resolve => {open = resolve;});
+    const view = await runController([{...ok([row()], null), gate}], {...m.globals}, handler);
+    assert.equal(view.live.inflight !== null, true);
+    const pending = view.more();
+    await view.settle();
+    assert.equal(m.sent.length, 0, 'no /api/admin/limbo page request while the identity list loads');
+    assert.equal(m.button.disabled, true);
+    open(); await view.settle(); await pending;
+    assert.deepEqual(m.sent, [{cursor: 'c1', pin: 'P'}]);
+  }
+  // 2. nothing in flight: the page request goes out at once
+  {
+    const m = make();
+    const view = await runController([ok([row()], null)], {...m.globals}, handler);
+    await view.settle();
+    await view.more(); await view.settle();
+    assert.equal(m.sent.length, 1);
+  }
+  // 3. the view changed while it waited (a refresh or a filter bumped the sequence, or the cursor moved): obsolete, nothing is sent
+  {
+    const m = make();
+    let open; const gate = new Promise(resolve => {open = resolve;});
+    const view = await runController([{...ok([row()], null), gate}], {...m.globals}, handler);
+    const pending = view.more();
+    view.context.limboLive.seq = 2;
+    open(); await view.settle(); await pending;
+    assert.equal(m.sent.length, 0, 'a refresh while waiting makes the page request obsolete');
+    const m2 = make();
+    let open2; const gate2 = new Promise(resolve => {open2 = resolve;});
+    const view2 = await runController([{...ok([row()], null), gate: gate2}], {...m2.globals}, handler);
+    const pending2 = view2.more();
+    view2.context.limboLive.next = 'c2';
+    open2(); await view2.settle(); await pending2;
+    assert.equal(m2.sent.length, 0, 'a moved cursor makes it obsolete');
+    assert.equal(m2.button.disabled, false, 'and the button is usable again');
+  }
+  // 4. the other direction with the real handler: a Limbo page request in flight holds the identity list back
+  {
+    const m = make();
+    const release = m.hold();
+    const view = await runController([ok([row()], null), ok([row()], null)], {...m.globals}, handler);
+    await view.settle();
+    const first = view.calls.length;
+    const pending = view.more();
+    await view.settle();
+    assert.equal(m.sent.length, 1);
+    view.nodes['iw-form'].listeners.submit({preventDefault() {}}); await view.settle();
+    assert.equal(view.calls.length, first, 'no identity request while the Limbo page request is in flight');
+    release(); await pending; await view.settle();
+    assert.equal(view.calls.length, first + 1, 'it goes out once the Limbo page request is done');
+  }
+  // 5. a failing page request does not leave the list waiting
+  {
+    const m = make();
+    m.globals.loadLimboMore = async () => {throw new Error('network');};
+    const view = await runController([ok([row()], null), ok([row()], null)], {...m.globals}, handler);
+    await view.settle();
+    const first = view.calls.length;
+    const pending = view.more().catch(() => null);
+    await pending; await view.settle();
+    view.nodes['iw-form'].listeners.submit({preventDefault() {}}); await view.settle();
+    assert.equal(view.calls.length, first + 1, 'a failed Limbo page request does not hold the list back');
+  }
 }
 console.log('admin-identity-work-page: ok');
