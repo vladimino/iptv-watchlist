@@ -58,6 +58,8 @@ export async function readAdmissions(env,ids){
 }
 
 const MOVIE_ID=/^[1-9]\d{0,11}$/;
+// The owner's retirement ledger (append-only): a retire of a movie id that no restore supersedes retires it, whatever Film row exists. Read by the film route and by POST /api/started.
+const RETIREMENT_SQL="SELECT 1 AS hit FROM tmdb_retirement_decision r WHERE r.movie_id=? AND r.kind='retire' AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s WHERE s.supersedes_seq=r.seq) LIMIT 1";
 // AIR-475. The canonical Film behind one typed TMDB movie id, answered from D1 only: {state:'absent'|'retired'|'conflict'|'found',film?}. The film route calls it at `open`
 // when Discovery holds no record: a retained Film (programme, watchlist, rated archive or none of them any more) is a Film because D1 holds it, never because Discovery or
 // a rated-archive admission names it. Nothing is written or scanned: one typed id, one trusted claim, one Film, its metadata and credits. The rated-archive admission, when
@@ -70,7 +72,7 @@ export async function catalogCanonicalFilmFromD1(env,tmdbId){
  let result;
  try{
   // The owner's retirement ledger (append-only): a retire of this movie id that no restore supersedes retires it, whatever Film row exists.
-  const retired=await one(db,"SELECT 1 AS hit FROM tmdb_retirement_decision r WHERE r.movie_id=? AND r.kind='retire' AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s WHERE s.supersedes_seq=r.seq) LIMIT 1",[tmdbId]);
+  const retired=await one(db,RETIREMENT_SQL,[tmdbId]);
   if(retired)result={state:'retired'};
   else{
    const rows=await many(db,"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value=?",[tmdbId]);
@@ -168,7 +170,7 @@ export async function catalogStartedFilm(env,id){
  let row,retired=null;
  try{
   // The owner's append-only retirement ledger (as the film route reads it): a retire of the Film's movie id that no restore supersedes retires it, whatever Film row exists.
-  if(bridge.tmdb)retired=await one(db,"SELECT 1 AS hit FROM tmdb_retirement_decision r WHERE r.movie_id=? AND r.kind='retire' AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s WHERE s.supersedes_seq=r.seq) LIMIT 1",[bridge.tmdb]);
+  if(bridge.tmdb)retired=await one(db,RETIREMENT_SQL,[bridge.tmdb]);
   if(!retired)row=await one(db,STARTED_SQL,[bridge.filmId]);
  }catch(error){throw failed('canonical_read_unavailable',error);}
  if(retired){
