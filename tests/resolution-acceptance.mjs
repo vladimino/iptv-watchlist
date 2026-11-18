@@ -11,7 +11,7 @@ assert.match(fs.readFileSync('src/discovery.js','utf8'),/acceptScoredIdentity/);
 assert.match(fs.readFileSync('build.mjs','utf8'),/src\/domain\/resolution-acceptance\.js/);
 assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/SCORED_RESOLUTION/);
 const ctx=vm.createContext({Map,Set,JSON});
-vm.runInContext(scorer+'\n'+gate+'\nglobalThis.api={scoreFilmResolution,acceptScoredIdentity};',ctx);
+vm.runInContext(scorer+'\n'+gate+'\nglobalThis.api={scoreFilmResolution,acceptScoredIdentity,admissionPolicy,catalogCleanupPolicy,filmAdmissionInput};',ctx);
 const film=(tmdbId,title,year,runtime,extra={})=>({tmdbId,title,original:title,year,runtime,...extra});
 const observe=(key,title,year,duration)=>({key,title,normalizedTitle:title.toLowerCase(),year,duration,durations:[duration]});
 function score(observation,candidates){ctx.observation=observation;ctx.candidates=candidates;return vm.runInContext('scoreFilmResolution({observation,candidates})',ctx);}
@@ -336,3 +336,37 @@ assert.equal(policyBound('band live in paris|2012','Band Live in Paris',2012,100
 assert.equal(policyBound('ordinary film|1995','Ordinary Film',1995,170,'949',[{id:18,name:'Drama'},{id:80,name:'Crime'}]).outcome,'detail_verified');
 
 console.log('Scored identity acceptance passed.');
+
+// AIR-501 / ADR 0169: the owner writer reads concert and documentary words on a card with no feature genre; the detail gate and the programme overlay do not.
+function cleanup(card){ctx.card=card;return vm.runInContext('catalogCleanupPolicy(filmAdmissionInput(card).movie,filmAdmissionInput(card).observation)',ctx);}
+function gateKind(card){ctx.card=card;return vm.runInContext('admissionPolicy(filmAdmissionInput(card).movie,filmAdmissionInput(card).observation)',ctx);}
+const music=['музыка'];
+for(const [id,title,genres,synopsis,expected] of [
+ ['tmdb_761960','Пикник: Традиционный весенний концерт',[],'7 марта 2014 года в ДК им. Ленсовета прошёл традиционный весенний концерт группы "Пикник".','concert'],
+ ['tmdb_1063549','Gaga Chromatica Ball',music,'Перед залом, заполненным на 52 000 человек, Леди Гага представляет выступление, ставшее знаковым для её карьеры.','concert'],
+ ['tmdb_785554','BLACKPINK: The Show',music,'South Korea. The Show opened with. 2020. koncert','concert'],
+ ['tmdb_801575','Кино в Севкабеле',music,'Группа «Кино» выступила без Цоя в «Севкабель порту» и записала фильм','concert'],
+ ['tmdb_450202','Britney Spears: Apple Music Festival',music,'Описание отсутствует','concert'],
+ ['tmdb_988831','Neil Young: Three More Decades',music,'Various. Following on from this label\'s previous Neil Young DVD documentary, The First Decade.','documentary'],
+ ['tmdb_110445','Пикник: 30 Световых лет',music,'Рок-группа "Пикник" дает грандиозный концерт.','ambiguous'],
+ ['tmdb_24970','Pink Floyd: Pulse',music,'Фильм «Pulse» был снят во время турне Pink Floyd «Division Bell» 1994 года.','concert'],
+]){
+ assert.equal(cleanup({id,title,genres,synopsis}),expected,id);
+}
+// Not reached: no words to read (empty or title-only synopsis), non-fiction with no performance or documentary word, and fiction.
+for(const [id,title,genres,synopsis] of [
+ ['tmdb_1126350','DJ BoBo - EVOLUT30N',music,'Описание отсутствует'],
+ ['tmdb_1603159','TesseracT: RADAR',music,'Tesseract - Radar'],
+ ['tmdb_1623086','Арктика. Очищение',[],'Водитель и бизнесмен, студент-медик и 3D-аниматор, пивовар, слесарь – 18 мужчин разных профессий.'],
+ ['tmdb_569928','Большой белый танец',[],'Лента посвящена самому древнему и загадочному хищнику океана – большой белой акуле.'],
+ ['tmdb_143112','Формула радуги',[],'Молодой ученый Владимир Батников создает своего двойника - робота Яшу.'],
+ ['tmdb_18700','Till the Clouds Roll By',music,'Songwriter and Broadway pioneer Jerome Kern is unable to find immediate success.'],
+]){
+ const kind=cleanup({id,title,genres,synopsis});
+ assert.ok(kind!=='documentary'&&kind!=='concert'&&kind!=='ambiguous',id+' '+kind);
+}
+// A card with a feature genre is never reached, whatever its synopsis says.
+for(const genres of [['драма','музыка'],['комедия','музыка'],['драма']])assert.equal(cleanup({id:'tmdb_661539',title:'Боб Дилан: Никому не известный',genres,synopsis:'На музыкальном фестивале в Ньюпорте производит фурор выступление молодого Боба Дилана. Концерт.'}),null);
+// The detail gate and the programme overlay keep the ADR 0150 / ADR 0168 reading: Picnic is held (unclassified), not excluded, and Gaga still verifies.
+assert.equal(gateKind({id:'tmdb_761960',title:'Пикник: Традиционный весенний концерт',genres:[],synopsis:'7 марта 2014 года в ДК им. Ленсовета прошёл традиционный весенний концерт группы "Пикник".'}),'unclassified');
+assert.equal(gateKind({id:'tmdb_1063549',title:'Gaga Chromatica Ball',genres:music,synopsis:'Леди Гага представляет выступление.'}),null);

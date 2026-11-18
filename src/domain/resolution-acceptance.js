@@ -112,6 +112,23 @@ function admissionPolicy(movie,observation){
  if(!facts.ids.size&&!facts.unnamed.length&&genreListPresent(movie))return 'unclassified';
  return null;
 }
+// AIR-501 (ADR 0169): writer-only classification for `catalog_policy_exclude@1`. The detail gate and the programme overlay keep using admissionPolicy.
+// A card with no feature genre (Music alone, TV Movie alone, or no genre at all) is retired by the owner writer when its stored title or synopsis names a
+// performance or a documentary in plain words. A card with no such words, or with an empty synopsis, stays out of reach of the writer.
+const CLEANUP_CONCERT_TERMS=/концерт|koncert|concert|выступлен|выступил|выступа|performance|performed|filmed live|live (at|in|from)|турне|\btour\b|festival|фестивал/;
+const CLEANUP_DOCUMENTARY_TERMS=/документальн|documentary/;
+function catalogCleanupPolicy(movie,observation){
+ const base=admissionPolicy(movie,observation);
+ if(base==='documentary'||base==='concert'||base==='ambiguous')return base;
+ const facts=genreFacts(movie);
+ if(featureGenre(facts))return base;
+ const noGenre=!facts.ids.size&&!facts.unnamed.length;
+ if(!noGenre&&!listedGenre(facts,TMDB_GENRE_MUSIC,MUSIC_GENRE_NAMES)&&!listedGenre(facts,TMDB_GENRE_TV_MOVIE,TV_MOVIE_GENRE_NAMES))return base;
+ const text=detailNorm([titlePerformanceText(movie,observation),overviewPerformanceText(movie)].join(' '));
+ if(CLEANUP_DOCUMENTARY_TERMS.test(text))return 'documentary';
+ if(CLEANUP_CONCERT_TERMS.test(text))return 'concert';
+ return base;
+}
 function verifyTmdbDetail(detail,tmdbId,observation,competitors,structural){
  const movie=detail?.evidence?.movie;
  if(detail?.authority!=='tmdb_detail'||!movie||typeof movie!=='object')return {ok:false,hold:'needs',reason:'detail_incomplete'};
