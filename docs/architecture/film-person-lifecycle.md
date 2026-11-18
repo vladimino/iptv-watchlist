@@ -119,11 +119,16 @@ flowchart LR
   rows[("owner_review_entry<br/>both maps, one generation")]
   mirror[("R2 mirror after the batch")]
   reads["Programme, watchlist,<br/>admin and catalogue"]
+  refused["503 owner_review_unavailable<br/>nothing read or written"]
+  standin["Local stand-in only<br/>OWNER_REVIEW_DB_OPTIONAL=standin"]
   form --> post --> marker
-  marker -->|absent or r2| object --> reads
   marker -->|d1| rows --> reads
   rows -.->|may lag; not a read fallback| mirror
+  marker -->|any other mode, missing binding or tables| refused
+  standin -.->|development and tests| object --> reads
 ```
+
+[ADR 0162](../adr/0162-d1-only-authority-retire-rollback-toolchain.md) (Accepted 2026-11-17) leaves `d1` as the only served marker: a marker in mode `r2`, a missing binding, a missing `schema_contract` or missing tables is refused, and only the explicit local stand-in keeps the R2 object. The import, activate and revert tooling is retired. The writer fence stays: a commit is refused unless `writes` is `open`. The name-confirmation figure above shows that stand-in store.
 
 ## Watchlist fact keeps the Film
 

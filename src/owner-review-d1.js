@@ -1,14 +1,15 @@
-// ADR 0081. Owner-reviewed Film titles and Person names.
-// A confirmed contract below version 9, with these tables absent, keeps the R2
-// object. A missing binding, a missing schema_contract, or a missing version
-// row fails closed unless the caller sets OWNER_REVIEW_DB_OPTIONAL to standin.
-// Once the tables exist, mode r2 still stores the object and fences generation
-// before the put. Mode d1 reads and writes the rows and does not fall back to
-// the object. A d1 read takes the marker, the rows and the marker again. One
+// ADR 0081, ADR 0162. Owner-reviewed Film titles and Person names. D1 is the only
+// authority: the domain is served only while its marker says mode d1. A marker in
+// any other mode, a missing binding, a missing schema_contract, a missing version
+// row or missing tables fails closed. Only the explicit local stand-in
+// (OWNER_REVIEW_DB_OPTIONAL=standin) keeps the R2 object, for development and the
+// test harness. The writer fence stays: a commit is refused unless writes is open.
+// A d1 read takes the marker, the rows and the marker again. One
 // disagreement retries once; a second fails closed. A later consistent
 // generation is the one the response reports.
 // One commit is one batch, and a document above that budget is refused before
-// any row is deleted. This module does not import. The Worker bundle wraps it.
+// any row is deleted. The R2 object is a mirror written after each commit.
+// This module does not import. The Worker bundle wraps it.
 
 export const OWNER_REVIEWS_KEY='admin/owner-reviews.json';
 export const OWNER_REVIEW_MAX_STATEMENTS=950;
@@ -23,7 +24,7 @@ function failed(code,cause){const error=new Error(code);error.code=code;if(cause
 function binding(db){return typeof db?.prepare==='function';}
 function database(source){return source&&typeof source.prepare==='function'?source:source?.DB;}
 function standin(source){return source?.OWNER_REVIEW_DB_OPTIONAL==='standin';}
-function legacyResult(version){return {legacy:true,mode:'r2',tables:false,version:version??null,failClosed:false};}
+function legacyResult(version){return {legacy:true,mode:'standin',tables:false,version:version??null,failClosed:false};}
 function closedResult(version){return {legacy:false,mode:null,tables:false,version:version??null,failClosed:true};}
 function bytesOf(sql,params){
  let size=new TextEncoder().encode(sql).length;
@@ -65,7 +66,6 @@ export function ownerReviewDocument(body){
  if(!plain(body)||body.contractVersion!==1||!plain(body.films)||!plain(body.people))return null;
  return {contractVersion:1,films:{...body.films},people:{...body.people}};
 }
-function emptyDocument(){return {contractVersion:1,films:{},people:{}};}
 function sameValue(left,right){
  if(left===right)return true;
  if(typeof left!==typeof right||left===null||right===null||Array.isArray(left)!==Array.isArray(right))return false;
@@ -92,12 +92,12 @@ export async function readAuthority(source){
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('owner_review_entry','owner_review_authority','owner_review_cas')")).map(row=>row.name);}
  catch{return closedResult(numeric);}
  const tables=names.includes('owner_review_entry')&&names.includes('owner_review_authority')&&names.includes('owner_review_cas');
- if(!tables)return numeric>=9?closedResult(numeric):legacyResult(numeric);
+ if(!tables)return numeric<9&&standin(source)?legacyResult(numeric):closedResult(numeric);
  let row;
  try{row=await one(db,'SELECT mode, generation, mirror_generation AS mirrorGeneration, mirror_etag AS mirrorEtag, writes FROM owner_review_authority WHERE id=1');}
  catch{return {legacy:false,mode:null,tables:true,version,failClosed:true};}
- if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.writes!=='open'&&row.writes!=='held'))return {legacy:false,mode:null,tables:true,version,failClosed:true};
- return {legacy:false,mode:row.mode,tables:true,version,failClosed:false,generation:Number(row.generation),mirrorGeneration:Number(row.mirrorGeneration),mirrorEtag:row.mirrorEtag??null,writes:row.writes,revision:row.mode==='d1'?revisionOf(Number(row.generation)):null};
+ if(!row||row.mode!=='d1'||(row.writes!=='open'&&row.writes!=='held'))return {legacy:false,mode:null,tables:true,version,failClosed:true};
+ return {legacy:false,mode:row.mode,tables:true,version,failClosed:false,generation:Number(row.generation),mirrorGeneration:Number(row.mirrorGeneration),mirrorEtag:row.mirrorEtag??null,writes:row.writes,revision:revisionOf(Number(row.generation))};
 }
 
 export async function readDocument(db){
@@ -195,7 +195,8 @@ async function replaceStatements(db,document,generation){
  return statements;
 }
 
-async function publishMirror(db,bucket,document,generation,mode){
+async function publishMirror(db,bucket,document,generation){
+ const mode='d1';
  const text=JSON.stringify(document);
  let current=await readAuthority(db);
  if(current.mode!==mode||current.generation!==generation)return {mirrored:false,authority:current};
@@ -219,7 +220,7 @@ async function publishMirror(db,bucket,document,generation,mode){
 
 export async function commit(env,{expectedRevision=null,document}={}){
  const db=env?.DB;
- const gate=await readAuthority(db);
+ const gate=await readAuthority(env);
  if(gate.legacy)return null;
  if(gate.failClosed)return {ok:false,reason:'owner_review_unavailable'};
  const next=ownerReviewDocument(document);
@@ -238,27 +239,15 @@ export async function commit(env,{expectedRevision=null,document}={}){
   try{await fenced(db,statements);}catch(error){return {ok:false,reason:error.code==='owner_review_cas'?'version_conflict':'commit_unknown'};}
   const after=await readAuthority(db);
   if(after.generation!==generation||after.mode!=='d1')return {ok:false,reason:'commit_unknown'};
-  try{await publishMirror(db,env.BUCKET,next,generation,'d1');}catch{/* the rows are the authority; the mirror may lag */}
+  try{await publishMirror(db,env.BUCKET,next,generation);}catch{/* the rows are the authority; the mirror may lag */}
   return {ok:true,revision:revisionOf(generation),generation};
  }
- const generation=gate.generation+1;
- try{await fenced(db,[
-  ['UPDATE owner_review_authority SET generation=? WHERE id=1 AND mode=\'r2\' AND writes=\'open\' AND generation=?',[generation,gate.generation]],
-  [FENCE_SQL,[]],
- ]);}catch(error){return {ok:false,reason:error.code==='owner_review_cas'?'version_conflict':'commit_unknown'};}
- let saved;
- try{
-  const onlyIf=expectedRevision?{etagMatches:expectedRevision}:{etagDoesNotMatch:'*'};
-  saved=await env.BUCKET.put(OWNER_REVIEWS_KEY,JSON.stringify(next),{...JSON_PUT,onlyIf});
- }catch{return {ok:false,reason:'commit_unknown'};}
- if(!saved)return {ok:false,reason:'version_conflict'};
- try{await db.prepare('UPDATE owner_review_authority SET mirror_generation=?, mirror_etag=? WHERE id=1 AND mode=\'r2\' AND generation=?').bind(generation,saved.etag,generation).run();}catch{return {ok:false,reason:'commit_unknown'};}
- return {ok:true,revision:saved.etag,generation,legacy:false};
+ return {ok:false,reason:'owner_review_unavailable'};
 }
 
 export async function readBack(env){
  const gate=await readAuthority(env);
- if(gate.legacy||gate.mode==='r2')return null;
+ if(gate.legacy)return null;
  if(gate.failClosed||gate.mode!=='d1')return {unavailable:true};
  const snap=await readFenced(env);
  if(!snap.ok||snap.mode!=='d1')return {unavailable:true};
@@ -267,7 +256,7 @@ export async function readBack(env){
 
 export async function loadSnapshotReviews(env){
  const gate=await readAuthority(env);
- if(gate.legacy||gate.mode==='r2')return null;
+ if(gate.legacy)return null;
  if(gate.failClosed||gate.mode!=='d1')throw failed('owner_review_unavailable');
  const snap=await readFenced(env);
  if(!snap.ok||snap.mode!=='d1')throw failed('owner_review_unavailable');
@@ -278,11 +267,11 @@ export async function loadSnapshotReviews(env){
 export async function loadForRead(env){
  const gate=await readAuthority(env);
  if(gate.failClosed)return {ok:false,unavailable:true,body:null};
- if(gate.legacy||gate.mode==='r2'){
+ if(gate.legacy){
   let object;
   try{object=await env.BUCKET.get(OWNER_REVIEWS_KEY);}catch{return {ok:false,unavailable:true,body:null};}
-  if(!object)return {ok:true,unavailable:false,body:null,mode:gate.mode||'r2'};
-  try{return {ok:true,unavailable:false,body:await object.json(),mode:gate.mode||'r2'};}
+  if(!object)return {ok:true,unavailable:false,body:null,mode:'standin'};
+  try{return {ok:true,unavailable:false,body:await object.json(),mode:'standin'};}
   catch{return {ok:false,unavailable:true,body:null};}
  }
  const snap=await readFenced(env);
@@ -350,16 +339,9 @@ export async function overlayCatalogResponse(env,response){
  if(!response||response.status!==200)return response;
  let body;
  try{body=await response.json();}catch{return response;}
- let document,links=[];
- if(gate.mode==='d1'){
-  const snap=await readFenced(env);
-  if(!snap.ok||snap.mode!=='d1')return jsonUnavailable();
-  document=snap.body;links=snap.links;
- }else{
-  const loaded=await loadForRead(env);
-  if(!loaded.ok)return jsonUnavailable();
-  document=ownerReviewDocument(loaded.body)||emptyDocument();
- }
+ const snap=await readFenced(env);
+ if(!snap.ok||snap.mode!=='d1')return jsonUnavailable();
+ const document=snap.body,links=snap.links;
  const headers=new Headers(response.headers);
  headers.set('content-type','application/json; charset=utf-8');
  return new Response(JSON.stringify(overlayCatalogBody(body,document,links)),{status:200,headers});
@@ -431,96 +413,4 @@ export function stampLocalized(data,document){
  for(const film of data?.films||[])for(const person of [...(film.directors||[]),...(film.actors||[])])visit(person);
  for(const key of ['actors','directors'])for(const person of data?.people?.[key]||[])visit(person);
  return data;
-}
-
-async function countTable(db,table){
- try{return Number((await one(db,'SELECT COUNT(*) AS n FROM '+table))?.n)||0;}
- catch(error){if(/no such table/i.test(String(error?.message||error)))return null;throw error;}
-}
-async function prove(db,document){
- const stored=await readDocument(db);
- if(!stored||!sameValue(stored,document))throw failed('owner_review_loss');
- const count=entriesOf(document).length;
- const rows=await one(db,'SELECT COUNT(*) AS n FROM owner_review_entry');
- if(Number(rows?.n)!==count)throw failed('owner_review_loss');
- return {films:await countTable(db,'film'),people:await countTable(db,'person')};
-}
-
-export async function importOwnerReviews(db,bucket,{confirm}={}){
- if(confirm!=='load')throw failed('owner_review_confirm');
- const gate=await readAuthority(db);
- if(gate.legacy||gate.failClosed||gate.mode!=='r2'||gate.writes!=='open')throw failed('owner_review_schema');
- let object;
- try{object=await bucket.get(OWNER_REVIEWS_KEY);}catch(error){throw failed('owner_review_unreadable',error);}
- let document;
- if(!object)document=emptyDocument();
- else{
-  let body;try{body=await object.json();}catch{throw failed('owner_review_unreadable');}
-  document=ownerReviewDocument(body);
-  if(!document)throw failed('owner_review_shape');
-  const again=await bucket.head(OWNER_REVIEWS_KEY);
-  if((again?.etag??null)!==(object.etag??null))throw failed('owner_review_fence');
- }
- if(entriesOf(document).length+5>OWNER_REVIEW_MAX_STATEMENTS)throw failed('owner_review_too_large');
- const generation=gate.generation+1;
- const statements=[
-  ['UPDATE owner_review_authority SET writes=\'held\' WHERE id=1 AND mode=\'r2\' AND writes=\'open\' AND generation=?',[gate.generation]],
-  [FENCE_SQL,[]],
-  ...await replaceStatements(db,document,generation),
-  ['UPDATE owner_review_authority SET generation=?, mirror_generation=?, mirror_etag=?, writes=\'open\' WHERE id=1 AND mode=\'r2\' AND writes=\'held\' AND generation=?',[generation,generation,object?.etag??null,gate.generation]],
-  [FENCE_SQL,[]],
- ];
- if(overBudget(statements))throw failed('owner_review_too_large');
- await fenced(db,statements);
- const after=await readAuthority(db);
- if(after.mode!=='r2'||after.generation!==generation||after.writes!=='open')throw failed('owner_review_cas');
- const proof=await prove(db,document);
- return {mode:'r2',generation,absent:!object,entries:entriesOf(document).length,...proof,writes:false};
-}
-
-export async function activateOwnerReviews(db,bucket,{confirm}={}){
- if(confirm!=='activate')throw failed('owner_review_confirm');
- const gate=await readAuthority(db);
- if(gate.legacy||gate.failClosed||gate.mode!=='r2'||gate.writes!=='open'||gate.generation!==gate.mirrorGeneration)throw failed('owner_review_fence');
- let object;try{object=await bucket.get(OWNER_REVIEWS_KEY);}catch{throw failed('owner_review_unreadable');}
- let document;
- if(!object){
-  if(gate.mirrorEtag!==null)throw failed('owner_review_fence');
-  document=emptyDocument();
- }else{
-  if(object.etag!==gate.mirrorEtag)throw failed('owner_review_fence');
-  let body;try{body=await object.json();}catch{throw failed('owner_review_unreadable');}
-  document=ownerReviewDocument(body);
-  if(!document)throw failed('owner_review_shape');
- }
- await prove(db,document);
- const etagSql=gate.mirrorEtag==null?'mirror_etag IS NULL':'mirror_etag=?';
- const etagParams=gate.mirrorEtag==null?[gate.generation,gate.generation]:[gate.generation,gate.generation,gate.mirrorEtag];
- await fenced(db,[
-  ['UPDATE owner_review_authority SET mode=\'d1\' WHERE id=1 AND mode=\'r2\' AND writes=\'open\' AND generation=? AND mirror_generation=? AND '+etagSql,etagParams],
-  [FENCE_SQL,[]],
- ]);
- const after=await readAuthority(db);
- if(after.mode!=='d1')throw failed('owner_review_cas');
- return {mode:'d1',generation:after.generation,writes:false};
-}
-
-export async function revertOwnerReviews(db,bucket,{confirm}={}){
- if(confirm!=='r2')throw failed('owner_review_confirm');
- const gate=await readAuthority(db);
- if(gate.legacy||gate.failClosed||gate.mode!=='d1'||gate.writes!=='open')throw failed('owner_review_schema');
- const document=await readDocument(db);
- if(!document)throw failed('owner_review_unavailable');
- const published=await publishMirror(db,bucket,document,gate.generation,'d1');
- if(!published.mirrored)throw failed('owner_review_fence');
- const mirror=await bucket.get(OWNER_REVIEWS_KEY);
- let body;try{body=mirror?await mirror.json():null;}catch{throw failed('owner_review_unreadable');}
- if(!sameValue(ownerReviewDocument(body),document))throw failed('owner_review_loss');
- await fenced(db,[
-  ['UPDATE owner_review_authority SET mode=\'r2\' WHERE id=1 AND mode=\'d1\' AND writes=\'open\' AND generation=? AND mirror_generation=? AND mirror_etag=?',[gate.generation,published.authority.mirrorGeneration,published.authority.mirrorEtag]],
-  [FENCE_SQL,[]],
- ]);
- const after=await readAuthority(db);
- if(after.mode!=='r2')throw failed('owner_review_cas');
- return {mode:'r2',generation:after.generation,writes:false};
 }
