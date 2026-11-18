@@ -1,4 +1,4 @@
-# ADR 0170: A short owner-reviewed id list lets the policy-exclusion writer reach cards the synopsis rule cannot
+# ADR 0171: A short owner-reviewed id list lets the policy-exclusion writer reach cards the synopsis rule cannot
 
 **Status:** Proposed (2026-11-18; the owner approved this path in the AIR-501 project chat and asked for the six films to be verified against TMDB. Acceptance is requested on the pull request. This records writer eligibility, not permission to exclude any Film or to run Discovery, EPG, TMDB, predictions, Tasks, or a storage write)  
 **Original decision date:** 2026-11-18  

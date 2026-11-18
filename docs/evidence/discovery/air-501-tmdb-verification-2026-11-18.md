@@ -1,7 +1,7 @@
 # AIR-501: external TMDB verification of the six remaining candidates
 
 **Captured:** 2026-11-18 13:55–14:10 UTC (14:55–15:10 Europe/Madrid). Public TMDB API `GET /3/movie/{id}` (`en-US` and `ru-RU`, with keywords, release dates, credits) through the session's proxy credential. Read-only; no Worker route, no D1, no R2, no write. Stored values are from the [inventory](air-501-empty-genre-inventory-2026-11-18.md).
-**Used by:** [AIR-501](https://trello.com/c/ShipZn0N), [ADR 0170](../../adr/0170-owner-reviewed-policy-exclusion-list.md). **This is a verification, not a GO and not an exclusion.**
+**Used by:** [AIR-501](https://trello.com/c/ShipZn0N), [ADR 0171](../../adr/0171-owner-reviewed-policy-exclusion-list.md). **This is a verification, not a GO and not an exclusion.**
 
 ## Result
 

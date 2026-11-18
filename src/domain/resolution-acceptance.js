@@ -117,7 +117,7 @@ function admissionPolicy(movie,observation){
 // or a documentary in plain words. A word in the title alone is not evidence, and a card with an empty or placeholder synopsis stays out of reach of the writer.
 const CLEANUP_CONCERT_TERMS=/концерт|koncert|concert|выступлен|выступил|выступа|performance|performed|filmed live|live (at|in|from)|турне|\btour\b|festival|фестивал/;
 const CLEANUP_DOCUMENTARY_TERMS=/документальн|documentary/;
-// ADR 0170: films the owner reviewed against the TMDB card on 2026-11-18, whose stored synopsis is empty, a placeholder, or names no performance or documentary word.
+// ADR 0171: films the owner reviewed against the TMDB card on 2026-11-18, whose stored synopsis is empty, a placeholder, or names no performance or documentary word.
 // A listed id is reached only while the stored card still has no feature genre and matches the reviewed title, year and runtime exactly.
 const OWNER_REVIEWED_POLICY_EXCLUSIONS={
  '450202':{kind:'concert',title:'Britney Spears: Apple Music Festival',year:2016,runtime:88},
@@ -147,6 +147,24 @@ function catalogCleanupPolicy(movie,observation){
  if(CLEANUP_DOCUMENTARY_TERMS.test(text))return 'documentary';
  if(CLEANUP_CONCERT_TERMS.test(text))return 'concert';
  return base;
+}
+// ADR 0172: TMDB ids the owner has retired from the catalog on policy grounds (a recording of a real concert or a documentary): the 160 distinct ids that
+// `catalog_policy_exclude@1` had written by 2026-11-18T14:30Z, plus the six reviewed ids below that are still awaiting an owner GO. A new observation of such a film
+// must not reach `detail_verified` or an owner confirmation while the catalog holds no current admission of it. A film retired by the writer is added here in the same change.
+const OWNER_POLICY_EXCLUDED_TMDB_IDS=new Set((
+  '1777,1781,5205,11019,11194,11401,13576,16971,17210,18570,23710,24964,24970,25326,26695,32562,36569,38178,46077,49294,53194,53505,,'+
+  '54487,54518,57436,57586,59490,60234,60868,62941,63371,63973,70760,72334,75720,82914,86822,93333,96821,96844,101267,108848,110445,,'+
+  '114207,123431,124075,124835,148686,152940,192657,223936,237523,238858,246400,246818,249407,251909,252384,252511,281091,301056,,'+
+  '335844,348421,352342,353047,364933,380171,394189,397619,424289,428144,431339,438517,444246,450494,478456,489087,496599,500107,,'+
+  '505191,515042,515245,516259,523579,525364,534012,540003,541572,543836,549559,561325,566222,566232,576234,576716,586534,590390,,'+
+  '603106,612654,615381,618548,634571,654754,655125,656690,662244,685530,686970,724460,751135,761960,773736,785554,797594,801575,,'+
+  '821546,842356,856184,899082,933249,936625,949583,957457,962288,972545,977021,988831,1012444,1014890,1044610,1058699,1063549,,'+
+  '1081789,1094451,1094473,1134011,1227976,1255187,1256250,1259918,1273871,1275027,1275598,1326142,1356259,1360677,1370481,1440718,,'+
+  '1451867,1467479,1491570,1522301,1527005,1586129,1597390,1612018,1631532,1644360,1650306,1758404,450202,1126350,1603159,1623086,,'+
+  '569928,1603299').split(','));
+function ownerPolicyExcludedTmdb(tmdbId){return tmdbId!=null&&tmdbId!==''&&OWNER_POLICY_EXCLUDED_TMDB_IDS.has(String(tmdbId));}
+function retiredFilmDecision(result,observationKey,score,provenance,authority){
+ return {...result,outcome:'candidate_decision',reason:'owner_policy_excluded',candidateDecision:{status:'no_confident_match',observationKey,reason:'owner_policy_excluded',evidence:scoringEvidence(score),provenance:{...provenance,authority}}};
 }
 function verifyTmdbDetail(detail,tmdbId,observation,competitors,structural){
  const movie=detail?.evidence?.movie;
@@ -196,6 +214,8 @@ function acceptScoredIdentity(input={}){
    const reason=policy==='documentary'?'documentary_excluded':'concert_recording';
    return {...result,outcome:'candidate_decision',reason,candidateDecision:{status:'no_confident_match',observationKey,reason,evidence:scoringEvidence(score),provenance:{...provenance,authority:'tmdb_detail'}}};
   }
+  // A retired film re-enters only through a reviewed change to the list: no new observation key and no owner confirmation admits it again.
+  if(!film&&ownerPolicyExcludedTmdb(tmdbId))return retiredFilmDecision(result,observationKey,score,provenance,'tmdb_detail');
   if(policy==='ambiguous'&&!confirmed)return {...result,outcome:'needs_verification',reason:'concert_recording_ambiguous'};
   if(policy==='unclassified'&&!confirmed)return {...result,outcome:'needs_verification',reason:'genre_evidence_missing'};
   const observationYear=detailNumber(input.observation?.year),yearGap=observationYear==null||detail.releaseYear==null?null:Math.abs(observationYear-detail.releaseYear);
@@ -205,6 +225,7 @@ function acceptScoredIdentity(input={}){
   }
   return {...result,outcome:'detail_verified',reason:'tmdb_detail',transition:{kind:'identity_transition',observationKey,tmdbId,programmeRunId:pinned,provenance,authority:'tmdb_detail',detail:{movieId:tmdbId,runtime:detail.runtime,releaseYear:detail.releaseYear,matchedTitle:detail.matchedTitle}}};
  }
+ if(!film&&ownerPolicyExcludedTmdb(tmdbId))return retiredFilmDecision(result,observationKey,score,provenance,'owner_policy_excluded');
  if(!confirmed)return {...result,outcome:'needs_verification',reason:'needs_verification'};
  return {...result,outcome:'trusted_acceptance',reason:'confirmed_identity',transition:{kind:'identity_transition',observationKey,tmdbId,programmeRunId:pinned,provenance,authority:input.confirmation.authority}};
 }
