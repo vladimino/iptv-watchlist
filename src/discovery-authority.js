@@ -376,7 +376,9 @@ async function loadingIsLedgerSeal(env){
  const pending=await one(database(env),"SELECT 1 AS n FROM discovery_admission WHERE state='pending' LIMIT 1");
  return !pending;
 }
-export async function routeRead(env,key){
+// `options.project` (AIR-519, catalog only) maps each admitted film after its identity is checked, so a reader that needs a few fields never holds
+// every payload whole; without it the catalog is the stored payloads, as before.
+export async function routeRead(env,key,options=null){
  if(!ownsKey(key))return {handled:false};
  const opened=await readAuthority(env);
  if(!opened.ready)return {handled:false};
@@ -387,7 +389,7 @@ export async function routeRead(env,key){
  }
  const requested=generationRequest(key);
  if(sealing&&requested&&requested!==opened.programmeRunId)return {handled:true,value:null,transfer:'loading'};
- const value=await readKey(env,key,opened);
+ const value=await readKey(env,key,opened,options);
  const closedGate=await readAuthority(env);
  // A seal moves the generation with every batch; that does not touch these keys, so a sealing read is stable while the
  // authority, the programme and the loading state hold, and a finished or restarted seal fails the read.
@@ -399,11 +401,11 @@ export async function routeRead(env,key){
  closeReadFence(opened,closedGate,{generationFence:generationFencedKey(key)});
  return {handled:true,value};
 }
-async function readKey(env,key,gate){
+async function readKey(env,key,gate,options=null){
  const requested=generationRequest(key);
  if(requested&&requested!==gate.programmeRunId)return null;
  if(key==='epg/discovery-resolution.json')return readDecisions(env,gate);
- if(key==='epg/discovered-films.json'||requested&&key.endsWith('discovered-films.json'))return readCatalog(env,gate);
+ if(key==='epg/discovered-films.json'||requested&&key.endsWith('discovered-films.json'))return readCatalog(env,gate,options);
  if(key==='epg/discovery-latest.json'||requested&&key.endsWith('discovery-latest.json'))return readLedger(env,gate);
  if(key==='epg/discovery-status.json')return readPayload(env,'discovery_status');
  if(key==='epg/discovery-score-preview.json')return readScores(env,gate);
@@ -1386,15 +1388,14 @@ export async function replayUnassignedSlots(env,spec={},context={}){
  const published=await one(db,"SELECT programme_run_id FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open'");
  const run=published?.programme_run_id??null;
  if(!run||(spec.programmeRunId&&spec.programmeRunId!==run)){result.stale=true;result.complete=true;return result;}
- let cursor=startAfter,wrapped=false;
+ let cursor=startAfter;
  while(!stop()){
   if(typeof spec.beforePage==='function')await spec.beforePage({page:result.pages,after:cursor});
   const rows=await many(db,REPLAY_SELECT_SQL,[run,cursor,run,limit]);
   result.pages++;
-  if(!rows.length){
-   if(cursor&&!wrapped){cursor='';wrapped=true;continue;}
-   cursor='';result.complete=true;break;
-  }
+  // A lap starts at the first key (the cursor is run-scoped and reset when a lap ends), so the end of the key space ends the lap. Wrapping back to the
+  // first key would scan the observations that can never be assigned (evidence drift, a Film with no record) a second time in the same lap.
+  if(!rows.length){cursor='';result.complete=true;break;}
   const keys=rows.map(row=>row.observation_key);
   const slotRows=await many(db,replaySlotsSql(keys.length),[...keys,run]);
   const freeSlots=new Map();
@@ -1438,12 +1439,7 @@ export async function replayUnassignedSlots(env,spec={},context={}){
   }
   if(stopped)break;
   cursor=keys[keys.length-1];
-  if(rows.length<limit){
-   // The end of the key space. A pass that began after a cursor still owes the keys before it, one wrap.
-   if(startAfter&&!wrapped){cursor='';wrapped=true;continue;}
-   cursor='';result.complete=true;break;
-  }
-  if(wrapped&&startAfter&&cursor>=startAfter){result.complete=true;break;}
+  if(rows.length<limit){cursor='';result.complete=true;break;}
  }
  result.after=cursor;
  return result;
@@ -1577,14 +1573,15 @@ export async function upsertAdmissions(env,films,context={}){
  }
  return {written,refused,batches,reads,remaining:entries.length-index,carried};
 }
-async function readCatalog(env){
+async function readCatalog(env,gate,options=null){
  const rows=await many(database(env),'SELECT film_id, payload_json, canonical_identity, tmdb_id, media_kind FROM discovery_admission WHERE state=\'current\' ORDER BY film_id');
  if(rows.length>READ_CAP)throw failed('discovery_bounded');
- const catalog={};
+ const catalog={},project=typeof options?.project==='function'?options.project:null;
  for(const row of rows){
   let film;try{film=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
   if(film.canonicalIdentity!==row.canonical_identity||String(film.tmdbId)!==row.tmdb_id)throw failed('discovery_unavailable');
-  catalog[row.film_id]=film;
+  if(project){row.payload_json=null;catalog[row.film_id]=project(film);}
+  else catalog[row.film_id]=film;
  }
  return catalog;
 }

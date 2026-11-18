@@ -90,7 +90,10 @@ function mergeDiscoveryCandidates(previous,latest,options={}){
 // Exactly one top-level `items` array is visited per element; every other top-level field is returned parsed.
 // A missing or non-array `items`, a second `items`, a truncated document, or trailing non-whitespace throws,
 // so a commit never publishes a partial candidate list. Whitespace after the closing brace is allowed.
-async function forEachJsonArrayItems(chunks,field,onItem){
+// AIR-519: with `field` null and `onEntry` given, no array is expected: every member of the top-level object is parsed on its own and handed to
+// onEntry(key, value), and nothing is kept, so a large object map (the view index) is never held whole. The scan and its failures are the same.
+async function forEachJsonObjectEntries(chunks,onEntry){return forEachJsonArrayItems(chunks,null,null,onEntry);}
+async function forEachJsonArrayItems(chunks,field,onItem,onEntry=null){
  let buf='',pos=0,eof=false;
  const source=chunks[Symbol.asyncIterator]();
  const pull=async min=>{while(buf.length-pos<min&&!eof){const step=await source.next();if(step.done){eof=true;break;}if(step.value)buf+=step.value;}};
@@ -125,9 +128,9 @@ async function forEachJsonArrayItems(chunks,field,onItem){
     if(!itemFirst){if(buf[pos]!==',')fail();pos++;await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();}
     itemFirst=false;const start=pos;await scanValue();const slice=buf.slice(start,pos);compact();await onItem(JSON.parse(slice));
    }
-  }else{const start=pos;await scanValue();wrapper[key]=JSON.parse(buf.slice(start,pos));compact();}
+  }else{const start=pos;await scanValue();const value=JSON.parse(buf.slice(start,pos));compact();if(onEntry)await onEntry(key,value);else wrapper[key]=value;}
  }
- if(!sawField)fail();
+ if(!sawField&&field!==null)fail();
  await skipWs();
  if(pos<buf.length)fail();
  return wrapper;
