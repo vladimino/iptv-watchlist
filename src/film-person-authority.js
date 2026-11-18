@@ -36,13 +36,15 @@ export async function readAuthority(env){
  }
  const numeric=Number(version);
  if(!Number.isFinite(numeric)||numeric<FILM_PERSON_MIN_VERSION)return legacy(Number.isFinite(numeric)?numeric:null);
- let names,row,fence,baseline;
+ let row,fence,baseline;
  try{
-  names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('film_person_authority','film_person_cas','film_person_baseline','canonical_revision')")).map(item=>item.name);
-  if(!FILM_PERSON_TABLES.every(name=>names.includes(name)))throw failed('film_person_unavailable');
-  row=await one(db,'SELECT mode, cutover, generation FROM film_person_authority WHERE id=1');
-  fence=await one(db,'SELECT ok FROM film_person_cas WHERE id=1');
-  baseline=await one(db,'SELECT state, reference FROM film_person_baseline WHERE id=1');
+  // AIR-532: ONE round trip for the table check and the three marker rows (was four). A missing table makes the statement fail whole, which the catch below
+  // maps to the same `film_person_unavailable` as the explicit table check.
+  const read=await one(db,"SELECT (SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('film_person_authority','film_person_cas','film_person_baseline','canonical_revision')) AS tables,(SELECT mode FROM film_person_authority WHERE id=1) AS mode,(SELECT cutover FROM film_person_authority WHERE id=1) AS cutover,(SELECT generation FROM film_person_authority WHERE id=1) AS generation,(SELECT ok FROM film_person_cas WHERE id=1) AS fence_ok,(SELECT COUNT(*) FROM film_person_cas WHERE id=1) AS fence_rows,(SELECT state FROM film_person_baseline WHERE id=1) AS baseline_state,(SELECT reference FROM film_person_baseline WHERE id=1) AS baseline_reference,(SELECT COUNT(*) FROM film_person_authority WHERE id=1) AS marker_rows,(SELECT COUNT(*) FROM film_person_baseline WHERE id=1) AS baseline_rows");
+  if(Number(read?.tables)!==FILM_PERSON_TABLES.length)throw failed('film_person_unavailable');
+  row=Number(read.marker_rows)>0?{mode:read.mode,cutover:read.cutover,generation:read.generation}:null;
+  fence=Number(read.fence_rows)>0?{ok:read.fence_ok}:null;
+  baseline=Number(read.baseline_rows)>0?{state:read.baseline_state,reference:read.baseline_reference}:null;
  }catch(error){
   if(error?.code==='film_person_unavailable')throw error;
   throw failed('film_person_unavailable',error);
