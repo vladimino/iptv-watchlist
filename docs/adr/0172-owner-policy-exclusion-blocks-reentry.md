@@ -1,9 +1,9 @@
 # ADR 0172: A film the owner retired on policy grounds does not re-enter Discovery through a new observation key
 
-**Status:** Proposed (2026-11-18; the owner chose to include this protection in [PR #754](https://github.com/vladimino/iptv-watchlist/pull/754) after the independent review raised the re-entry path. Acceptance is requested on the pull request. This records an admission rule, not permission to exclude any Film or to run Discovery, EPG, TMDB, predictions, Tasks, or a storage write)  
+**Status:** **Accepted** (2026-11-18; explicit Product Owner decision recorded on [PR #754](https://github.com/vladimino/iptv-watchlist/pull/754#issuecomment-6983206270) after the independent [technical PASS on HEAD `81fa7df`](https://github.com/vladimino/iptv-watchlist/pull/754#pullrequestreview-5959669822). This records an admission rule, not permission to exclude any Film, and authorizes no execute of `catalog_policy_exclude` on the six remaining current films, no Discovery, EPG, TMDB or prediction run, no Task, flag, Access or storage change)  
 **Original decision date:** 2026-11-18  
 **Recorded at:** 2026-11-18  
-**Approval source:** not yet documented as a GitHub approval; the owner's chat choice «Защита от повторного входа в этом PR»  
+**Approval source:** [Product Owner decision on PR #754, 18 November 2026](https://github.com/vladimino/iptv-watchlist/pull/754#issuecomment-6983206270) (the owner's decision, recorded as durable provenance and not as an independent production receipt)  
 **Related work:** [AIR-501](https://trello.com/c/ShipZn0N), [ADR 0153](0153-catalog-policy-exclusion.md), [ADR 0169](0169-writer-only-catalog-cleanup-classification.md), [ADR 0171](0171-owner-reviewed-policy-exclusion-list.md), [ADR 0150](0150-documentary-and-concert-film-exclusion.md)  
 **Supersedes:** None. It qualifies [ADR 0153](0153-catalog-policy-exclusion.md) rule 2: the writer's `rejectedTmdbIds` guard is per observation key, and this ADR adds an identity-level guard for the films the owner retired.  
 **Superseded by:** None
