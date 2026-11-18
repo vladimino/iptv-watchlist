@@ -45,7 +45,9 @@ export const POSTER_STOP_COPY = Object.freeze({
   no_progress: {tone: 'warning', text: `${POSTER_NO_PROGRESS_MAX} вызовов подряд без продвижения: ни одного нового постера и курсор не сдвинулся. Остановлено, чтобы не повторять одно и то же.`, retry: false},
   rate_limited: {tone: 'warning', text: 'TMDB ограничил частоту запросов. Следующая попытка — не раньше указанного времени.', retry: true},
   generation_changed: {tone: 'warning', text: 'Во время запуска опубликовано новое поколение программы. Продолжение — только после новой проверки.', retry: true},
-  lease_lost: {tone: 'warning', text: 'Блокировка резолвера потеряна во время записи; одна из копий каталога могла записаться без другой. Смотрите результат по каждой копии.', retry: true},
+  lease_lost: {tone: 'warning', text: 'Блокировка резолвера потеряна во время записи. Смотрите результат по каждой записи; в старом режиме R2 одна из двух копий каталога могла записаться без другой.', retry: true},
+  storage_unavailable: {tone: 'blocked', text: 'Каталог Discovery (D1) недоступен или не является источником истины. Ничего не запрошено и не записано.', retry: true},
+  write_uncertain: {tone: 'blocked', text: 'Запись постера в D1 завершилась ошибкой, и неизвестно, применилась ли она. Не повторяйте вслепую: сначала перечитайте покрытие на странице.', retry: false},
   resolver_busy: {tone: 'warning', text: 'Резолвер сейчас пишет каталог. Этот вызов ничего не записал; повторите позже.', retry: true},
   tmdb_unconfigured: {tone: 'blocked', text: 'TMDB не настроен в Worker. Ничего не записано. Токен настраивается в секретах Worker, не через эту страницу.', retry: false},
   invalid_request: {tone: 'blocked', text: 'Сервер отклонил запрос как некорректный. Ничего не записано.', retry: false},
@@ -241,6 +243,8 @@ function answerStop(answer, record) {
   if (answer.status === 409 && body?.error === 'Resolver is writing the catalog') return 'resolver_busy';
   if (answer.status === 503 && body?.error === 'TMDB is not configured') return 'tmdb_unconfigured';
   if (answer.status === 503 && body?.error === 'Poster negatives unreadable') return 'negatives_unreadable';
+  if (answer.status === 503 && body?.writeUncertain === true) return 'write_uncertain';
+  if (answer.status === 503 && body?.storageUnavailable === true) return 'storage_unavailable';
   if (answer.status === 400) return 'invalid_request';
   if (answer.status !== 200 || !body || body.dryRun !== false || !Array.isArray(body.outcomes) || record.nextCursor === undefined) return 'unknown_result';
   if (record.outcomes.some(item => !Object.hasOwn(POSTER_OUTCOME_COPY, item.outcome))) return 'unknown_result';

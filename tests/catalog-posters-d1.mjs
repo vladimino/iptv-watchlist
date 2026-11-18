@@ -11,6 +11,7 @@ import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {scoped} from '../scripts/bundle-scope.mjs';
+import {runPosterSweep} from '../src/admin/posters-run.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-poster-d1-'));
 const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority'].map(name=>name+'.sql');
@@ -162,5 +163,39 @@ const withLease=async(db,body)=>{
  const held=await post({});
  assert.equal(held.status,503,JSON.stringify(held.body));
  noR2Catalog();
+ // 4. Fail closed (review of AIR-515): an authority that is not d1/open is unavailable, never the R2 catalog. An R2 catalog object is seeded, and none is read or written.
+ const seedR2=async()=>{for(const key of ['epg/discovered-films.json','epg/generations/'+RUN+'/discovered-films.json'])await bucket.put(key,JSON.stringify({tmdb_1:film('tmdb_1',1)}));};
+ await seedR2();
+ const adminGet=async extra=>{const response=await context.worker.fetch(new Request('https://iptv.example/api/admin/posters',{headers:{'Cf-Access-Jwt-Assertion':'header.payload.signature'}}),{...base,...extra},{waitUntil(){}});return {status:response.status,body:await response.json()};};
+ const closedCases={
+  'missing D1 binding':()=>({DB:undefined}),
+  'schema missing':()=>({DB:d1Standin(path.join(root,'empty.sqlite'))}),
+  'schema too old':()=>{const file=path.join(root,'old.sqlite');const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.slice(0,8).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});assert.equal(result.status,0);return {DB:d1Standin(file)};},
+  'marker r2':()=>{db.sql("UPDATE discovery_authority SET mode='r2', cutover='open' WHERE id=1");return {};},
+ };
+ tmdb={1:{id:1,poster_path:'/one.jpg'}};
+ for(const [name,arrange] of Object.entries(closedCases)){
+  const extra=arrange();r2Reads.length=0;r2Writes.length=0;fetches.length=0;
+  for(const body of [{},{dryRun:false,limit:5}]){
+   const answer=await post(body,extra);
+   assert.equal(answer.status,503,name+' '+JSON.stringify(body)+JSON.stringify(answer.body));assert.equal(answer.body.storageUnavailable,true,name);
+  }
+  const read=await adminGet(extra);assert.equal(read.status,503,name);
+  assert.deepEqual(fetches,[],name+': no TMDB call');assert.deepEqual(r2Writes,[],name+': no R2 write');
+  assert.ok(!r2Reads.some(key=>key.includes('discovered-films')),name+': no R2 catalog read');
+ }
+ db.sql("UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
+
+ // 5. A D1 batch that fails after the dry run, TMDB and the lease is an uncertain write: 503 `writeUncertain`, no remembered answer saved, and the admin runner stops without a retry.
+ db.sql("UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.poster',NULL) WHERE film_id='tmdb_1'");
+ let armed=true;
+ const flaky={prepare:sql=>db.prepare(sql),batch:async statements=>{if(armed&&statements.some(item=>String(item.text).includes("json_set(payload_json,'$.poster'")&&String(item.text).startsWith('UPDATE discovery_admission')))throw new Error('D1_ERROR: connection lost');return db.batch(statements);}};
+ r2Writes.length=0;tmdb={1:{id:1,poster_path:'/one.jpg'},3:{id:3,poster_path:null}};
+ const failed=await post({dryRun:false,limit:10},{DB:flaky});
+ assert.equal(failed.status,503,JSON.stringify(failed.body));assert.equal(failed.body.writeUncertain,true);assert.ok(Array.isArray(failed.body.retryable)&&failed.body.retryable.includes('tmdb_1'));
+ assert.ok(!r2Writes.includes('epg/catalog-poster-negatives.json'),'nothing remembered after an uncertain write');
+ const receipt=await runPosterSweep({confirmation:{programmeRunId:RUN,limit:10,calls:5,cursor:null},now:Date.now,call:async body=>{const response=await post(body,{DB:flaky});return {ok:response.status===200,status:response.status,body:response.body};}});
+ assert.equal(receipt.stop,'write_uncertain');assert.equal(receipt.calls.length,1,'no blind retry');
+ armed=false;
 }
 console.log('catalog-posters-d1: ok');

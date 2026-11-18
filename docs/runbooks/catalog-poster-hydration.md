@@ -16,7 +16,7 @@ Catalog-only films offered in the «Находки» section show the year place
 
 ## D1 authority (AIR-515)
 
-While Discovery is `d1`/`open` the steps above run against the `discovery_admission` rows: counts, the queue and the preview come from D1, one D1 batch writes the poster, and nothing in R2 that holds the catalog is read or written (only `epg/catalog-poster-negatives.json`). `writes` has the single entry `discovery_admission`; `generationChanged`/`leaseLost` mean the batch was not written and the same call can be repeated. A `503` is a D1 or authority fault, not "no poster". The merge of this change authorizes no sweep and no copy of historical R2-only posters: that needs its own operation-specific owner GO, after the read-only inventory of R2 posters that D1 lacks.
+While Discovery is `d1`/`open` the steps above run against the `discovery_admission` rows: counts, the queue and the preview come from D1, one D1 batch writes the poster, and nothing in R2 that holds the catalog is read or written (only `epg/catalog-poster-negatives.json`). `writes` has the single entry `discovery_admission`; `generationChanged`/`leaseLost` mean the batch was not written and the same call can be repeated. A `503` with `storageUnavailable` is a D1 or authority fault (nothing was written, no R2 fallback); with `writeUncertain: true` the D1 batch failed and may have committed, so re-read coverage on `/admin/posters` before any repeat. The runner stops with `storage_unavailable` or `write_uncertain` (no automatic retry). The merge of this change authorizes no sweep and no copy of historical R2-only posters: that needs its own operation-specific owner GO, after the read-only inventory of R2 posters that D1 lacks.
 
 ## Through the admin page
 

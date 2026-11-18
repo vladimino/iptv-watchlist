@@ -442,11 +442,14 @@ async function catalogPosterApply(env,key,found,guard){
 // DiscoveryAuthority.routeRead and the one poster write is DiscoveryAuthority.applyPosters. Nothing reads or writes the R2 catalog
 // objects then, and a D1 failure is a failure, never "no poster". Below that marker the R2 objects stay the catalog (rollback path).
 const CATALOG_POSTER_D1_KEY='discovery_admission';
+// Fail closed: the built Worker always has DiscoveryAuthority, so a missing binding, an absent or old schema or a marker that is not d1/open is an
+// unavailable authority and never a reason to read or write the R2 catalog. The R2 path exists only where the symbol is absent (offline vm stand-ins).
 async function catalogPosterD1Gate(env){
  if(typeof DiscoveryAuthority==='undefined')return {d1:false};
  const gate=await DiscoveryAuthority.readAuthority(env);
  if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence'});
- return gate.ready?{d1:true,gate}:{d1:false};
+ if(!gate.ready)throw Object.assign(new Error('discovery_not_authoritative'),{code:'discovery_not_authoritative'});
+ return {d1:true,gate};
 }
 async function catalogPosterD1Source(env,gate,programmeRunId){
  if(gate.transfer==='loading')throw Object.assign(new Error('discovery_incomplete'),{code:'discovery_incomplete'});
@@ -462,7 +465,8 @@ async function catalogPosterApplyD1(env,found,programmeRunId,guard){
  let applied;
  try{applied=await DiscoveryAuthority.applyPosters(env,found.map(row=>({filmId:row.id,tmdbId:row.tmdbId,poster:row.poster})),{lease:env.discoveryLease,programmeRunId});}
  catch(error){
-  const reason=error?.code==='discovery_fence'||error?.code==='discovery_conflict'?(await guard().catch(()=>'storage_unavailable'))||'catalog_changed':'storage_unavailable';
+  // A fence or conflict refusal rolled the batch back whole. Any other failure (D1 error, lost response) may or may not have committed: `write_uncertain`.
+  const reason=error?.code==='discovery_fence'||error?.code==='discovery_conflict'?(await guard().catch(()=>'catalog_changed'))||'catalog_changed':'write_uncertain';
   return {key:CATALOG_POSTER_D1_KEY,written:false,reason,status:Object.fromEntries(found.map(row=>[row.id,reason]))};
  }
  const written=Object.values(applied.status).some(state=>state==='written');
@@ -645,6 +649,8 @@ async function catalogPosterHydration(env,body={}){
     if(result.reason==='generation_changed'||result.reason==='lease_lost')stopped=result.reason;
    }
   }
+  // A D1 batch that failed without a fence refusal is uncertain: stop before judging outcomes or saving remembered answers, and say so.
+  if(writes.some(write=>write.reason==='write_uncertain'))return json({...summary,dryRun:false,enabled:true,error:'Poster write outcome unknown',storageUnavailable:true,writeUncertain:true,retryable:found.map(row=>row.id)},503);
   for(const item of outcomes)if(item.outcome==='pending'){const result=catalogPosterOutcome(item.id,writes);item.outcome=result.outcome;if(result.writtenTo.length)item.writtenTo=result.writtenTo;if(result.outcome!=='hydrated'&&!result.writtenTo.length)delete item.poster;}
   // Remember only answers this call actually got from TMDB. A failed write is reported on the outcome and is not treated as stored.
   const additions=new Map();
