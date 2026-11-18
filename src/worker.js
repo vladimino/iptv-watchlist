@@ -606,7 +606,7 @@ async function catalogWatchedRoute(request,env,url){
  const runId=publication.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
  if(!runId)return unavailable('catalog_not_published','No published catalog generation');
  // The Discovery authority the verdict is read under, captured before the read: mode, cutover, generation, programme run and transfer.
- const discoveryState=gate=>gate?[gate.mode,gate.cutover,gate.generation,gate.programmeRunId,gate.transfer,gate.ready,gate.held].join('|'):'none';
+ const discoveryState=gate=>gate?[gate.mode,gate.cutover,gate.generation,gate.programmeRunId,gate.transfer,gate.ready].join('|'):'none';
  let catalog,opened=null;
  try{
   if(typeof DiscoveryAuthority!=='undefined'){
@@ -627,7 +627,6 @@ async function catalogWatchedRoute(request,env,url){
    // Immediately before the write the authority must still be the one the catalog was read under: same mode and cutover (a D1 to R2
    // switch is a change), same generation, same published run, not held and not loading. The R2-owned path (not ready) stays R2.
    const gate=await DiscoveryAuthority.readAuthority(env);
-   if(gate.held)return unavailable('discovery_fence');
    if(gate.ready&&gate.transfer==='loading')return unavailable('discovery_incomplete');
    if(discoveryState(gate)!==discoveryState(opened)||gate.ready&&gate.programmeRunId!==runId)return unavailable('catalog_generation_changed','The published generation changed; try again');
   }
@@ -645,7 +644,6 @@ async function catalogWatchedRoute(request,env,url){
 async function catalogGenerationCopy(env,publication,pinnedRunId,name){
   if(name==='discovered-films.json'&&typeof DiscoveryAuthority!=='undefined'){
    const gate=await DiscoveryAuthority.readAuthority(env);
-   if(gate.held){const error=new Error('discovery_fence');error.code='discovery_fence';throw error;}
    if(gate.ready){
     if(!pinnedRunId||gate.programmeRunId!==pinnedRunId)return null;
     const routed=await DiscoveryAuthority.routeRead(env,epgGenerationKey(pinnedRunId,'discovered-films.json'));
@@ -1276,7 +1274,6 @@ async function putKnownLength(bucket,key,length,source,options){
 async function discoveryLedgerAuthoritative(env){
  if(typeof DiscoveryAuthority==='undefined')return false;
  const gate=await DiscoveryAuthority.readAuthority(env);
- if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence'});
  return gate.ready===true;
 }
 async function storePlannedDiscovery(env,runId,meta,planned,next,lease){

@@ -271,7 +271,6 @@ async function saveScorePreview(env,source,preview,fence=null){if(fence)await fe
 async function takeDiscoveryLease(env,role=null){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence',name:'DiscoveryFenceError'});
   if(gate.ready){
    const published=await publishedPointer(env);
    const taken=await DiscoveryAuthority.acquireLease(env,{programmeRunId:published?.programmeRunId??null,...(role?{role}:{})});
@@ -294,7 +293,6 @@ async function acquireDiscoveryLease(env,role=null){return (await takeDiscoveryL
 async function renewDiscoveryLease(env,lease){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence',name:'DiscoveryFenceError'});
   if(gate.ready){
    const published=await publishedPointer(env);
    const renewed=await DiscoveryAuthority.renewLease(env,lease,{programmeRunId:published?.programmeRunId??null});
@@ -447,7 +445,6 @@ const CATALOG_POSTER_D1_KEY='discovery_admission';
 async function catalogPosterD1Gate(env){
  if(typeof DiscoveryAuthority==='undefined')return {d1:false};
  const gate=await DiscoveryAuthority.readAuthority(env);
- if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence'});
  if(!gate.ready)throw Object.assign(new Error('discovery_not_authoritative'),{code:'discovery_not_authoritative'});
  return {d1:true,gate};
 }
@@ -1310,7 +1307,6 @@ async function writeObservationIndex(env,run,shards,fence,fields,layout){
 async function saveObservationIndex(env,source,decisions,fence,writer){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
-  if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence',name:'DiscoveryFenceError'});
   if(gate.ready)return {written:true,reason:null};
  }
  const run=source.programmeRunId||null;
@@ -1653,7 +1649,6 @@ function assessInterruptedRecovery({now,epgStage,publishedRunId,programmeRunId,s
  if(!record||typeof record!=='object'||Array.isArray(record))return refused('owner_investigation','record_malformed');
  if(record.stage!=='paused'||record.reason!=='interrupted')return refused('not_interrupted');
  if(!authority||typeof authority!=='object'||authority.unavailable)return refused('authority_unavailable');
- if(authority.held||authority.cutover==='held')return refused('authority_held');
  if(authority.transfer==='loading')return refused('authority_loading');
  if(authority.mode!=='r2'&&authority.mode!=='d1')return refused('authority_unavailable');
  if(authority.mode==='d1'&&(authority.ready!==true||authority.transfer!=='idle'&&authority.transfer!=='committed'))return refused('authority_unavailable');
@@ -1900,7 +1895,7 @@ async function resolveDiscoveryRequest(env,execution,body,caller='http'){
    const recovery=body.recovery==='interrupted';
    let authority=null;
    if(recovery&&typeof DiscoveryAuthority!=='undefined'){try{authority=await DiscoveryAuthority.readAuthority(env);}catch{authority={unavailable:true};}}
-   const authorityCause=authority?.unavailable?'authority_unavailable':authority?.transfer==='loading'?'authority_loading':authority?.held||authority?.cutover==='held'?'authority_held':null;
+   const authorityCause=authority?.unavailable?'authority_unavailable':authority?.transfer==='loading'?'authority_loading':null;
    if(!report?.films){step.branch='no_programme';response=json({error:'No programme'},409);}
    else if(recovery){step.branch='recovery_refused';response=json({recovery:{permit:'refused',reason:'owner_investigation',cause:'executor_workflow',budget:null,proof:null},discovery:{state:'paused',nextAction:'stop',reason:'interrupted',remainingChunks:null},diagnostic:step.diagnostic});}
    else{step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);response=json({...presented,diagnostic:step.diagnostic});}
@@ -1933,7 +1928,6 @@ async function discoveryOperationalStatus(env){
  if(snapshot?.handled){
   source='d1_snapshot';authority=snapshot.authority;records=snapshot.records||{status:null,continuation:null,workflow:null,lease:null,window:null};
   for(const name of snapshot.unreadable||[])unavailable.push(name);
-  if(authority.state==='held')unavailable.push('records');
  }else if(authority?.state==='unavailable'){
   source='none';records={status:null,continuation:null,workflow:null,lease:null,window:null};
  }else{

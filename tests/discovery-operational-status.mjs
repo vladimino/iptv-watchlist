@@ -109,10 +109,10 @@ assert.ok(measures[1500].detailedQueries>measures[3].detailedQueries,'the detail
 // 3. Every honest state of the authority and the records.
 {
  const at=Date.now();
- // 3a. Held cutover: answered as held, records not served, nothing thrown.
+ // 3a. Held cutover (ADR 0162: refused like an unreadable marker): answered as unavailable, records not served, nothing thrown.
  const held=world();await seed(held,{ledger:2});sql(held.file,"UPDATE discovery_authority SET cutover='held' WHERE id=1");
  let r=await worker(held).get(OPERATIONAL);
- assert.equal(r.status,200);assert.equal(r.data.authority.state,'held');assert.ok(r.data.unavailable.includes('records'));assert.equal(r.data.backlog.chunks.state,'unknown');assert.equal(r.data.backlog.ledger.state,'unknown');
+ assert.equal(r.status,200);assert.equal(r.data.authority.state,'unavailable');assert.ok(r.data.unavailable.includes('authority'));assert.equal(r.data.backlog.chunks.state,'unknown');assert.equal(r.data.backlog.ledger.state,'unknown');
  // 3b. A loading transfer: records are still served, the state says loading.
  const loading=world();await seed(loading,{ledger:2});continuation(loading,{stage:'idle',reason:'idle',at:iso(at-1000),remainingChunks:0,programmeRunId:'run-1'});sql(loading.file,"UPDATE discovery_transfer SET state='loading', programme_run_id='run-1' WHERE id=1");
  r=await worker(loading).get(OPERATIONAL);assert.equal(r.status,200);assert.equal(r.data.authority.state,'loading');assert.equal(r.data.lastCheckpoint.stage,'idle');
@@ -194,17 +194,13 @@ assert.ok(measures[1500].detailedQueries>measures[3].detailedQueries,'the detail
  const next=await h.get(OPERATIONAL);assert.equal(next.data.executor.instanceId,'wf-B');assert.equal(next.data.executor.series,2);
 }
 
-// 4. Outside D1 authority the same view reads the small R2 objects, each on its own; one that fails is named.
+// 4. ADR 0162: outside D1 authority (the migration's mode r2) the view is refused as unavailable, with no invented records and no read of the R2 objects.
 {
  const w=world({mode:'r2'});await seed(w,{ledger:1}).catch(()=>{});
- const h=worker(w);const at=Date.now();
- await h.bucket.put('epg/resolver-continuation.json',JSON.stringify({stage:'idle',reason:'chunk_budget',at:iso(at-1000),remainingChunks:5,programmeRunId:'run-r2'}));
- await h.bucket.put('epg/discovery-status.json',JSON.stringify({programmeRunId:'run-r2',stage:'chunk',remaining:33,finishedAt:iso(at-2000)}));
- await h.bucket.put('epg/published-generation.json',JSON.stringify({phase:'published',programmeRunId:'run-r2'}));
+ const h=worker(w);
+ await h.bucket.put('epg/discovery-status.json',JSON.stringify({programmeRunId:'run-r2',stage:'chunk',remaining:33}));
  const r=await h.get(OPERATIONAL);
- assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.source,'r2_objects');assert.equal(r.data.authority.state,'r2');assert.equal(r.data.publishedProgrammeRunId,'run-r2');assert.equal(r.data.backlog.ledger.remaining,33);assert.equal(r.data.backlog.ledger.state,'known');
- const originalGet=h.bucket.get.bind(h.bucket);h.bucket.get=async key=>{if(key==='epg/discovery-status.json')throw new Error('R2 down');return originalGet(key);};
- const partial=await h.get(OPERATIONAL);assert.equal(partial.status,200);assert.ok(partial.data.unavailable.includes('status'));assert.equal(partial.data.lastChunk,null);assert.equal(partial.data.discovery.remainingChunks,5,'the other records are still served');
+ assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.authority.state,'unavailable');assert.ok(r.data.unavailable.includes('authority'));assert.equal(r.data.source,'none');assert.equal(r.data.backlog.ledger.state,'unknown');
 }
 
 // 5. The contract: no `view` and `view=detailed` are the unchanged status, an unknown view is refused before any read, the alias path serves both views,

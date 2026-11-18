@@ -85,9 +85,8 @@ function open(db){
 {
  const {db}=migrated();open(db);admit(db,film(10));
  db.sql("UPDATE discovery_authority SET cutover='held' WHERE id=1");
- const held=await Authority.routeRead({DB:db},'epg/discovered-films.json');
- assert.equal(held.handled,false,'held cutover is not D1 authority for routeRead');
- await assert.rejects(()=>Authority.readFilmAdmission({DB:db},'10'),error=>error.code==='discovery_fence');
+ await assert.rejects(()=>Authority.routeRead({DB:db},'epg/discovered-films.json'),error=>error.code==='discovery_unavailable','a held cutover is refused by routeRead (ADR 0162)');
+ await assert.rejects(()=>Authority.readFilmAdmission({DB:db},'10'),error=>error.code==='discovery_unavailable');
 }
 
 function catalogReplaceAba(db){
@@ -199,11 +198,11 @@ async function get(path,env){
  db.sql("UPDATE discovery_authority SET cutover='held' WHERE id=1");
  const heldCatalog=await get('/api/catalog/available',{DB:db,BUCKET:bucket});
  assert.equal(heldCatalog.status,503,JSON.stringify(heldCatalog.body));
- assert.equal(heldCatalog.body.code,'discovery_fence');
+ assert.equal(heldCatalog.body.code,'discovery_unavailable');
  assert.ok(!heldCatalog.body.films,'held catalog GET does not serve the R2 mirror');
  const heldView=await get('/api/enrichment/view',{DB:db,BUCKET:bucket});
  assert.equal(heldView.status,503,JSON.stringify(heldView.body).slice(0,200));
- assert.equal(heldView.body.code,'discovery_fence');
+ assert.equal(heldView.body.code,'discovery_unavailable');
  assert.equal(heldView.body.films,undefined,'held enrichment view does not serve the R2 catalog');
 }
 

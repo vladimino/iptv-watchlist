@@ -85,7 +85,6 @@ assert.equal(assess(facts({lease:{expiresAt:clockTime-1000}})).permit,'eligible'
 assert.equal(assess(facts({record:{stage:'paused',reason:'interrupted',remainingChunks:12,programmeRunId:GENERATION,hopId:HOP,nextCatchUpAt:iso(clockTime+1000)}})).reason,'backoff');
 assert.equal(assess(facts({status:{hopId:HOP,programmeRunId:GENERATION,checkpoint:'cheap_pass',retryAt:iso(clockTime+1000)}})).reason,'backoff');
 assert.equal(assess(facts({authority:{unavailable:true}})).reason,'authority_unavailable');
-assert.equal(assess(facts({authority:{mode:'d1',ready:false,held:true,cutover:'held',transfer:'idle'}})).reason,'authority_held');
 assert.equal(assess(facts({authority:{mode:'d1',ready:true,held:false,cutover:'open',transfer:'loading',programmeRunId:GENERATION}})).reason,'authority_loading');
 assert.equal(assess(facts({authority:{mode:'d1',ready:false,held:false,cutover:'open',transfer:'idle'}})).reason,'authority_unavailable');
 assert.equal(assess(facts({status:null})).cause,'status_missing');

@@ -11,6 +11,7 @@ import * as Authority from '../src/discovery-authority.js';
 import {loadWorker} from '../scripts/discovery-ledger-offline.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {standins} from './local-standins.mjs';
 
 const context=loadWorker();
 context.DiscoveryAuthority=Authority;
@@ -557,7 +558,7 @@ context.DiscoveryAuthority=Authority;
  assert.equal(parsed.catalog.tmdb_9.title,'Снято');
  const dropped=await call('sealPayload')({BUCKET:bkt},{runId:'run-l1'});
  assert.equal(dropped.catalog,undefined);
- const result=await call('sealCatalogStep')({BUCKET:bkt}, {runId:'run-l1',stage:'seal',seal:{jobId:'j',phase:'catalog'}},{},Date.now()+1e9);
+ const result=await call('sealCatalogStep')(standins({BUCKET:bkt}), {runId:'run-l1',stage:'seal',seal:{jobId:'j',phase:'catalog'}},{},Date.now()+1e9);
  assert.equal(result.written,1);
  assert.equal(received.tmdb_9.title,'Снято');assert.equal(received.tmdb_9.canonicalIdentity,'tmdb:9');
 }

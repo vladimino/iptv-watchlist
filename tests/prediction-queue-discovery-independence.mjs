@@ -193,7 +193,7 @@ console.log('drain under storm:',runs,'runs,',steps.submit.length,'submits; mean
  assert.ok(!(await Authority.readAdmissionsById(env,['tmdb_7','tmdb_8'])).films.has('tmdb_7'),'a superseded admission is not current');
  assert.equal((await Authority.readAdmissionsById(env,[])).films.size,0,'no ids, no statement');
  sql(file,"UPDATE discovery_authority SET cutover='held' WHERE id=1");
- await assert.rejects(Authority.readAdmissionsById(env,['tmdb_8']),error=>error.code==='discovery_fence','a held cutover is a fence, never "absent"');
+ await assert.rejects(Authority.readAdmissionsById(env,['tmdb_8']),error=>error.code==='discovery_unavailable','a held cutover is refused, never "absent" (ADR 0162)');
  sql(file,"UPDATE discovery_authority SET cutover='open' WHERE id=1");
  sql(file,"UPDATE discovery_transfer SET state='loading', programme_run_id='x' WHERE id=1");
  sql(file,"UPDATE discovery_admission SET state='pending' WHERE film_id='tmdb_9'");
@@ -201,6 +201,6 @@ console.log('drain under storm:',runs,'runs,',steps.submit.length,'submits; mean
  sql(file,"UPDATE discovery_transfer SET state='idle', programme_run_id=NULL WHERE id=1");
  sql(file,"UPDATE discovery_admission SET state='current' WHERE film_id='tmdb_9'");
  sql(file,"UPDATE discovery_authority SET mode='r2' WHERE id=1");
- assert.deepEqual(await Authority.readAdmissionsById(env,['tmdb_8']),{handled:false},'outside D1 authority the R2 catalog serves');
+ await assert.rejects(Authority.readAdmissionsById(env,['tmdb_8']),error=>error.code==='discovery_unavailable','a marker in mode r2 is refused, not served from the R2 catalog (ADR 0162)');
 }
 console.log('prediction queue / discovery independence tests passed');
