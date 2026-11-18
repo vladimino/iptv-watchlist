@@ -7,7 +7,7 @@
 -- order a late observation against a later unchanged confirmation. This row can: an observation older than it is stale for every Film,
 -- because a complete scan observes every listed Film. The row only moves forward (trigger), is never deleted, and is advanced by the
 -- fenced producer (marker generation asserted) once per scan, not once per Film.
--- Times only: no title, name, id or payload.
+-- Times only: no title, name, id or payload. The two guard triggers on film_retention make a code rollback after the apply safe (docs/runbooks/film-person-0025-apply.md).
 -- It follows a complete version 24 and refuses anything else before a table is created: the first statement inserts a second
 -- schema_contract row and so aborts the file. The version becomes 25 and never goes down.
 -- D1 evaluates a LIKE or GLOB pattern of at most 50 bytes, so the CHECK keeps its patterns short (see 0021).
@@ -47,6 +47,27 @@ CREATE TRIGGER film_retention_scan_no_delete
 BEFORE DELETE ON film_retention_scan
 BEGIN
  SELECT RAISE(ABORT, 'film_retention_scan_delete');
+END;
+
+-- The ordering guard lives in the database, so it holds for ANY writer, including a Worker rolled back to code that never reads
+-- film_retention_scan: a write that CONTRADICTS the stored boolean with an observation that is newer than the stored row but
+-- older than the watermark is a late observation (a complete scan newer than it already confirmed the stored state) and aborts the
+-- whole fenced batch. BEFORE INSERT also covers INSERT ... ON CONFLICT DO UPDATE, the writer's own statement. Writes at or after the
+-- watermark, writes that agree with the stored boolean, and the first row of a Film are not affected.
+CREATE TRIGGER film_retention_scan_guard_insert
+BEFORE INSERT ON film_retention
+WHEN EXISTS (SELECT 1 FROM film_retention r WHERE r.film_id = NEW.film_id AND r.watchlist <> NEW.watchlist AND r.observed_at < NEW.observed_at)
+ AND EXISTS (SELECT 1 FROM film_retention_scan s WHERE s.id = 1 AND s.observed_at > NEW.observed_at)
+BEGIN
+ SELECT RAISE(ABORT, 'film_retention_scan_stale');
+END;
+
+CREATE TRIGGER film_retention_scan_guard_update
+BEFORE UPDATE ON film_retention
+WHEN NEW.watchlist <> OLD.watchlist AND NEW.observed_at > OLD.observed_at
+ AND EXISTS (SELECT 1 FROM film_retention_scan s WHERE s.id = 1 AND s.observed_at > NEW.observed_at)
+BEGIN
+ SELECT RAISE(ABORT, 'film_retention_scan_stale');
 END;
 
 CREATE TRIGGER IF NOT EXISTS schema_contract_no_downgrade

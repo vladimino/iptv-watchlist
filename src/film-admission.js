@@ -12,6 +12,7 @@ import {assertWritable,database,failed,many,one,readAuthority} from './film-pers
 import {fenced} from './canonical-mutations.js';
 import {ADMISSION_READ_CHUNK,loadAdmissionRows,readAdmissions} from './canonical-catalog-reader.js';
 const writeFenced=fenced.commit;
+export const RETENTION_WATERMARK_SCHEMA=25;
 
 export const RATED_RECEIPT_KEY='letterboxd/admissions/verified-films.json';
 export {ADMISSION_READ_CHUNK,loadAdmissionRows,readAdmissions};
@@ -157,8 +158,14 @@ export async function readRetentionWatermark(env){
   const row=await one(db,'SELECT observed_at FROM film_retention_scan WHERE id=1');
   return {present:true,observedAt:row?.observed_at??null};
  }catch(error){
-  if(/no such table/i.test(String(error?.cause?.message||error?.message||error)))return {present:false,observedAt:null};
-  throw failed('film_person_unavailable',error);
+  if(!/no such table/i.test(String(error?.cause?.message||error?.message||error)))throw failed('film_person_unavailable',error);
+  // The table is absent. That is the legitimate pre-migration state ONLY while the schema is genuinely below 25. At schema 25 or later it is a missing or damaged
+  // watermark table, and falling back to row-only ordering would silently reopen the stale-overwrite hole: fail closed.
+  let version;
+  try{version=Number((await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version);}
+  catch(inner){throw failed('film_person_unavailable',inner);}
+  if(Number.isFinite(version)&&version<RETENTION_WATERMARK_SCHEMA)return {present:false,observedAt:null};
+  throw failed('film_person_unavailable',new Error('film_retention_scan_missing_at_schema_'+version));
  }
 }
 // Moves the watermark forward to `observedAt` (never back: the statement and a trigger both refuse), in a fenced batch (marker generation asserted).

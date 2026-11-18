@@ -12,6 +12,7 @@ import {sqliteSync} from './sqlite-session.mjs';
 const SRC=path.resolve('src');
 const load=name=>import(pathToFileURL(path.join(SRC,name)).href);
 const M=await load('canonical-rated-admission-producer.js');
+const FA=await load('film-admission.js');
 const {PRODUCER_OPERATIONS,PRODUCER_WIRING,handoffReadiness}=await load('canonical-producers.js');
 const {activationAudit}=await load('film-person-open-handoff.js');
 const {
@@ -29,13 +30,16 @@ const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const template=path.join(root,'template.sqlite');
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 assert.equal(sqlite(template,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
+// A real schema 24 database (the chain without 0025), for the pre-migration behaviour.
+const template24=path.join(root,'template24.sqlite');
+assert.equal(sqlite(template24,chain.filter(name=>!name.startsWith('0025_')).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
 const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
 const EMPTY='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
 const BASELINE="INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'2026-11-11T09:00:00.000Z');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+EMPTY+"','"+EMPTY+"','2026-11-11T09:00:00.000Z');";
 let n=0;
-function database(stage='open'){
+function database(stage='open',source=template){
  const file=path.join(root,'e-'+(n++)+'.sqlite');
- fs.copyFileSync(template,file);
+ fs.copyFileSync(source,file);
  if(['r2','prepared','open','held'].includes(stage))assert.equal(sqlite(file,VERIFY).status,0);
  if(['prepared','open','held'].includes(stage))assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1").status,0);
  if(stage==='open'||stage==='held')assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1").status,0);
@@ -265,16 +269,53 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
   assert.equal(wmark(file),d('18'));
  }
 
- // 6. without the table (schema below 25) the previous behaviour stays: an unchanged scan rewrites observed_at, and a deploy before the migration is safe.
+ // 6. a real schema 24 database (no table yet): the previous behaviour stays, so deploying the code before the migration is safe.
  {
-  const file=mk();
-  assert.equal(sqlite(file,'DROP TABLE film_retention_scan').status,0);
+  const file=database('open',template24);
+  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),24);
+  sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:tmdb:81',1,'"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:tmdb:81','tmdb','81',1,0,NULL),('film:tmdb:81','letterboxd','w81',1,0,NULL);");
   await applyRatedAdmissionRetention(envOf(file),{event:'l:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
   const again=await applyRatedAdmissionRetention(envOf(file),{event:'l:2',retentions:[unit(true,d('18'),'s2')],now:()=>d('18')});
-  assert.equal(again.applied,1);assert.equal(st(file).at,d('18'),'no watermark table: every newer scan rewrites observed_at');
+  assert.equal(again.applied,1);assert.equal(st(file).at,d('18'),'schema 24: every newer scan rewrites observed_at');
   const stale=await applyRatedAdmissionRetention(envOf(file),{event:'l:3',retentions:[unit(false,d('15'),'s3')],now:()=>d('19')});
   assert.equal(stale.applied,0);assert.equal(st(file).w,1,'the row-level monotonic rule still refuses an older observation');
  }
+
+ // 6b. schema 25 WITHOUT the watermark table is a damaged schema, not a pre-migration one: fail closed, write nothing, never fall back to row-only ordering.
+ {
+  const file=mk();
+  await applyRatedAdmissionRetention(envOf(file),{event:'m:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
+  const before=st(file);
+  assert.equal(sqlite(file,'DROP TABLE film_retention_scan').status,0);
+  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),25);
+  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'m:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')}),error=>error.code==='film_person_unavailable'&&/film_retention_scan_missing_at_schema_25/.test(String(error.cause?.message)));
+  assert.deepEqual(st(file),before,'nothing was written');
+  await assert.rejects(()=>FA.readRetentionWatermark(envOf(file)),error=>error.code==='film_person_unavailable');
+ }
+
+ // 7. rollback contract: Worker code that never reads the watermark (here: retainFilm called without `watermark`) cannot overwrite a newer confirmation, because the guard is in the database.
+ {
+  const file=mk();
+  await applyRatedAdmissionRetention(envOf(file),{event:'b:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
+  await applyRatedAdmissionRetention(envOf(file),{event:'b:3',retentions:[unit(true,d('18'),'s3')],now:()=>d('18')});
+  assert.equal(wmark(file),d('18'));
+  const before=st(file);
+  const oldCode=(watchlist,observedAt,requestId)=>FA.retainFilm(envOf(file),{id:'film:tmdb:81',expectedRevision:st(file).rev,at:d('20'),requestId,watchlist,observedAt,evidence:{scanId:requestId}});
+  await assert.rejects(()=>oldCode(false,d('15'),'old-late'),error=>error.code==='film_person_unavailable'&&/film_retention_scan_stale/.test(String(error.cause?.message)),'a rolled-back producer is refused by the database for a late contradictory observation');
+  assert.deepEqual(st(file),before,'and nothing was written');
+  const same=await oldCode(true,d('16'),'old-late-same');
+  assert.equal(same.written,true,'a late observation that agrees with the stored boolean is harmless and allowed');
+  assert.equal((await oldCode(false,d('21'),'old-new')).written,true,'an observation at or after the watermark is allowed: the reverted producer works as before');
+  assert.equal(st(file).w,0);assert.equal(wmark(file),d('18'),'the reverted producer does not advance the watermark; it only lags');
+  // re-deploying the new code resumes from the stored watermark
+  const resumed=await applyRatedAdmissionRetention(envOf(file),{event:'b:5',retentions:[unit(true,d('22'),'s5')],now:()=>d('22')});
+  assert.equal(resumed.applied,1);assert.equal(st(file).w,1);assert.equal(wmark(file),d('22'));
+  // the first row of a Film is not covered by the guard (documented limit); a direct contradicting UPDATE is
+  assert.equal(sqlite(file,"UPDATE film_retention_scan SET observed_at='"+d('30')+"' WHERE id=1").status,0);
+  assert.notEqual(sqlite(file,"UPDATE film_retention SET watchlist=0,observed_at='"+d('25')+"' WHERE film_id='film:tmdb:81'").status,0,'a direct contradicting UPDATE newer than the row but older than the watermark is refused too');
+  assert.equal(st(file).w,1);
+ }
+
 }
 
 {
