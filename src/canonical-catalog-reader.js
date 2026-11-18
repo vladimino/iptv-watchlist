@@ -238,6 +238,9 @@ export async function catalogPeopleFromD1(env,ids,gate){
 }
 
 const META_SQL=`SELECT f.id AS film_id,f.original_title AS original_title,m.year AS year,m.poster AS poster,m.url AS url,(SELECT d.value FROM film_dimension d WHERE d.film_id=f.id AND d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' ORDER BY CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT 1) AS title FROM film f LEFT JOIN film_metadata m ON m.film_id=f.id WHERE f.id IN (SELECT value FROM json_each(?)) LIMIT ?`;
+// AIR-519: the same Film membership as META_SQL (a row per existing film of the chunk) without the localized title, the metadata join or their text,
+// for a reader that needs only the identity verdict (the footer's Letterboxd-to-TMDB bridge).
+const IDENTITY_SQL=`SELECT f.id AS film_id FROM film f WHERE f.id IN (SELECT value FROM json_each(?)) LIMIT ?`;
 const EXT_FILM_SQL=`SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme IN ('tmdb','letterboxd') AND film_id IN (SELECT value FROM json_each(?))`;
 const EXT_VALUE_SQL=`SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme IN ('tmdb','letterboxd') AND value IN (SELECT value FROM json_each(?))`;
 // Same rule as catalogCanonicalFilmFromD1: ALL claims of the scheme (and of the typed value when given) are
@@ -264,7 +267,8 @@ function identityClaim(rows,scheme,value){
 // identity claim (every stored tmdb / letterboxd row for that value is assessed; any non-owner claim is a conflict) — never
 // inferred from a title. A conflict sets identityBlocked:true with tmdbId null so catalogLidTmdb cannot restore the lid
 // from watchlist/programme; a missing TMDB claim is tmdbId null without that flag.
-export async function catalogMetadataFromD1(env,ids,gate){
+// `options.identityOnly` (AIR-519): every record keeps only id, tmdbId and identityBlocked, with the same verdicts; films are selected with IDENTITY_SQL.
+export async function catalogMetadataFromD1(env,ids,gate,options={}){
  if(gate?.mode!=='d1')throw failed('canonical_read_not_authoritative');
  const db=database(env);
  if(!db)throw failed('film_person_unavailable');
@@ -279,11 +283,11 @@ export async function catalogMetadataFromD1(env,ids,gate){
   if(tmdb)keys.push('film:tmdb:'+tmdb[1]);
  }
  const unique=[...new Set(keys)];
- const films=[],externals=[];
+ const films=[],externals=[],identityOnly=options?.identityOnly===true,FILM_SQL=identityOnly?IDENTITY_SQL:META_SQL;
  try{
   for(let at=0;at<unique.length;at+=TITLE_READ_CHUNK){
    const chunk=unique.slice(at,at+TITLE_READ_CHUNK);
-   films.push(...await many(db,META_SQL,[JSON.stringify(chunk),chunk.length]));
+   films.push(...await many(db,FILM_SQL,[JSON.stringify(chunk),chunk.length]));
    externals.push(...await many(db,EXT_FILM_SQL,[JSON.stringify(chunk)]));
   }
   const extra=[];
@@ -299,7 +303,7 @@ export async function catalogMetadataFromD1(env,ids,gate){
   externals.push(...extra);
   for(let at=0;at<missing.length;at+=TITLE_READ_CHUNK){
    const chunk=missing.slice(at,at+TITLE_READ_CHUNK);
-   films.push(...await many(db,META_SQL,[JSON.stringify(chunk),chunk.length]));
+   films.push(...await many(db,FILM_SQL,[JSON.stringify(chunk),chunk.length]));
    externals.push(...await many(db,EXT_FILM_SQL,[JSON.stringify(chunk)]));
   }
  }catch(error){throw failed('canonical_read_unavailable',error);}
@@ -319,14 +323,14 @@ export async function catalogMetadataFromD1(env,ids,gate){
   if(!filmId){
    const lid=claimOf('letterboxd',id);
    if(lid.conflict){
-    out[id]={id,tmdbId:null,identityBlocked:true,poster:null,year:null,url:null,title:null,original:null};
+    out[id]=identityOnly?{id,tmdbId:null,identityBlocked:true}:{id,tmdbId:null,identityBlocked:true,poster:null,year:null,url:null,title:null,original:null};
     continue;
    }
    if(lid.filmId&&byFilm.has(lid.filmId))filmId=lid.filmId;
    else if(tmdb){
     const claim=claimOf('tmdb',tmdb[1]);
     if(claim.conflict){
-     out[id]={id,tmdbId:null,identityBlocked:true,poster:null,year:null,url:null,title:null,original:null};
+     out[id]=identityOnly?{id,tmdbId:null,identityBlocked:true}:{id,tmdbId:null,identityBlocked:true,poster:null,year:null,url:null,title:null,original:null};
      continue;
     }
     if(claim.filmId&&byFilm.has(claim.filmId))filmId=claim.filmId;
@@ -338,9 +342,14 @@ export async function catalogMetadataFromD1(env,ids,gate){
   const tmdbClaim=tmdbLocal.conflict||tmdbLocal.value==null?tmdbLocal:claimOf('tmdb',tmdbLocal.value);
   const lidLocal=identityClaim(ext,'letterboxd');
   const lidClaim=lidLocal.conflict||lidLocal.value==null?lidLocal:claimOf('letterboxd',lidLocal.value);
-  const original=typeof row.original_title==='string'&&row.original_title?row.original_title:null;
-  const title=typeof row.title==='string'&&row.title?row.title:original;
-  const record={id,tmdbId:tmdbClaim.conflict||tmdbClaim.value==null?null:tmdbClaim.value,poster:row.poster??null,year:row.year??null,url:row.url??null,title,original};
+  const tmdbId=tmdbClaim.conflict||tmdbClaim.value==null?null:tmdbClaim.value;
+  let record;
+  if(identityOnly)record={id,tmdbId};
+  else{
+   const original=typeof row.original_title==='string'&&row.original_title?row.original_title:null;
+   const title=typeof row.title==='string'&&row.title?row.title:original;
+   record={id,tmdbId,poster:row.poster??null,year:row.year??null,url:row.url??null,title,original};
+  }
   if(tmdbClaim.conflict||lidClaim.conflict)record.identityBlocked=true;
   out[id]=record;
   if(lidClaim.value&&lidClaim.value!==id)out[lidClaim.value]={...record,id:lidClaim.value};

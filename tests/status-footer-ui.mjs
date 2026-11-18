@@ -64,6 +64,13 @@ assert.match(text.local,/75\/100 с актуальным прогнозом · 7
 assert.match(text.windowCoverage,/18\/20 с актуальным прогнозом · 90%/);
 context.tenths={...context.input,coverage:{...context.input.coverage,confirmedFilmsTotal:2260,currentPredictionsTotal:2257,windowFilmsTotal:1832,windowCurrentPredictions:1829,localPercent:99.9,windowPercent:99.8}};
 const tenths=vm.runInContext('footerStatusText(tenths)',context);
+// AIR-519: a run whose counts could not be computed (the server names it in degraded and sends null) shows «нет данных», not 0; a measured 0 stays 0.
+context.unknownRun={...context.input,lastRun:{status:'completed',reason:null,startedAt:'2026-10-13T09:00:00Z',finishedAt:'2026-10-13T09:10:00Z',added:null,failed:null},degraded:['run']};
+const unknownRun=vm.runInContext('footerStatusText(unknownRun)',context);
+assert.equal(unknownRun.runAdded,'нет данных');assert.equal(unknownRun.runFailed,'нет данных');
+context.emptyRun={...context.unknownRun,lastRun:{...context.unknownRun.lastRun,added:0,failed:0},degraded:undefined};
+const emptyRun=vm.runInContext('footerStatusText(emptyRun)',context);
+assert.equal(emptyRun.runAdded,'0');assert.equal(emptyRun.runFailed,'0');
 assert.match(tenths.local,/2[\s\u00a0\u202f]?260/);
 assert.match(tenths.local,/99,9%/);
 assert.doesNotMatch(tenths.local,/100%/);

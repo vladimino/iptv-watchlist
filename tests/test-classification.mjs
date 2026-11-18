@@ -12,7 +12,7 @@ const SCENARIOS={
  'discovery-chunk-budget-concurrent-walk':{file:'discovery-chunk-budget.mjs',marker:'concurrentMs<sequentialMs*0.7'},
  'discovery-user-read-fence-slow-catalog':{file:'discovery-user-read-fence.mjs',marker:'Date.now()-started>=80'},
  'film-person-reader-completed-slots-index':{file:'film-person-reader.mjs',marker:'Date.now()-at<8000'},
- 'footer-memory-production-size':{file:'footer-memory.mjs',marker:'result.cpuMs<8*15000'},
+ 'footer-memory-production-size':{file:'footer-memory.mjs',marker:'result.cpuMs<8*10000'},
  'footer-resilience-hung-freshness':{file:'footer-resilience.mjs',marker:'Date.now()-started<3000'},
  'footer-resilience-silent-source':{file:'footer-resilience.mjs',marker:'took<3000'},
  'prediction-batch-submit-wall':{file:'prediction-batch-submit.mjs',marker:'ms<15000'},
