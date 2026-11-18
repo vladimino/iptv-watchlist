@@ -1531,6 +1531,15 @@ export async function applyPosters(env,rows,context={}){
  }
  return {status,batches:1};
 }
+// AIR-515: the conflict clause keeps a stored https poster when the incoming same-identity film has none, so a landed admission is not byte-equal to
+// what was sent. It has landed when the stored payload is the incoming film with only that preserved poster added: any other difference is not a match.
+function admissionLanded(film,json,storedJson){
+ if(storedJson===json)return true;
+ let stored;try{stored=JSON.parse(storedJson);}catch{return false;}
+ const https=value=>typeof value==='string'&&value.startsWith('https://');
+ if(!https(stored?.poster)||https(film?.poster))return false;
+ return canonicalJson({...film,poster:stored.poster})===canonicalJson(stored);
+}
 export async function upsertAdmissions(env,films,context={}){
  const lease=context.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
@@ -1566,7 +1575,7 @@ export async function upsertAdmissions(env,films,context={}){
   for(let at=0;at<rows.length;at+=BIND_CAP){
    const slice=rows.slice(at,at+BIND_CAP);
    const stored=new Map((await many(db,'SELECT film_id, payload_json FROM discovery_admission WHERE state=\'current\' AND film_id IN ('+slice.map(()=>'?').join(',')+')',slice.map(row=>row[0]))).map(row=>[row.film_id,row.payload_json]));
-   if(!slice.every(row=>stored.get(row[0])===row[2]))return false;
+   if(!slice.every(row=>stored.has(row[0])&&admissionLanded(row[1],row[2],stored.get(row[0]))))return false;
   }
   return true;
  };
@@ -1576,7 +1585,7 @@ export async function upsertAdmissions(env,films,context={}){
   catch(error){
    if(error.code!=='discovery_conflict'&&error.code!=='discovery_fence')throw error.code?error:failed('discovery_unavailable',error);
    const stored=await one(db,'SELECT payload_json FROM discovery_admission WHERE film_id=? AND state=\'current\'',[row[0]]);
-   if(stored?.payload_json===row[2]){written.push(row[0]);return;}
+   if(stored&&admissionLanded(row[1],row[2],stored.payload_json)){written.push(row[0]);return;}
    const owner=await one(db,'SELECT film_id FROM discovery_admission WHERE media_kind=? AND tmdb_id=?',[mediaKind(row[1]),String(row[1].tmdbId)]);
    if(owner&&owner.film_id!==row[0]){refused.push({filmId:row[0],reason:'identity_conflict'});return;}
    throw error;

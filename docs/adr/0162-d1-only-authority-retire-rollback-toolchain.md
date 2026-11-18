@@ -46,7 +46,7 @@ Recovery after this decision is a forward-fix through the fenced adapters, or an
 ## Evidence
 
 - **Original decision:** owner, AIR-79 executor session, 2026-11-17; recorded on [AIR-79](https://trello.com/c/485tlGLA) the same day.
-- **Implementation:** not started; one pull request per domain as listed above.
+- **Implementation:** in progress, one pull request per domain as listed above: owner reviews ([PR #736](https://github.com/vladimino/iptv-watchlist/pull/736), [evidence](../evidence/d1-migration/air-79-owner-reviews-d1-only-2026-11-18.md)), metadata cache ([PR #740](https://github.com/vladimino/iptv-watchlist/pull/740), [evidence](../evidence/d1-migration/air-79-metadata-cache-d1-only-2026-11-18.md)), ratings documents ([evidence](../evidence/d1-migration/air-79-ratings-documents-d1-only-2026-11-18.md)); predictions, published EPG, Discovery and Film/Person remain.
 - **Dated verification:** [production markers read on 17 November](../evidence/d1-migration/air-79-d2-closeout-and-d1-preparation-2026-11-17.md#production-markers-read-on-17-november).
 - **Uncertainty:** the length of the D1 Time Travel window on the account plan, the live `*_DB_REQUIRED` bindings, and the content of ADRs 0017, 0051, 0076, 0108, 0141 and 0142 were not read; each code slice checks the documents it touches.
 

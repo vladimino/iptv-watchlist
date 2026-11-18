@@ -234,6 +234,10 @@ assert.equal(ctx.compareHistoryEvents({type:'diary_viewing',at:'2026-09-20',atPr
  const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
  const base=path.join(root,'base.sqlite');sqlite(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ // ADR 0162: a ratings marker that is not d1/open is refused. Sections that test the history itself use a database without the ratings
+ // tables (the domain's local stand-in: not installed, RATINGS_DB_REQUIRED unset), so the Diary comes from the R2 objects; a fixture that
+ // names the ratings tables gets the full schema.
+ const bare=path.join(root,'bare.sqlite');fs.copyFileSync(base,bare);sqlite(bare,'DROP TABLE ratings_view;DROP TABLE ratings_document;DROP TABLE ratings_domain_cas;DROP TABLE ratings_domain_authority;');
  const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
  const MARKER={prepared:VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;"};
  MARKER.open=MARKER.prepared+"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";MARKER.held=MARKER.open+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;";
@@ -248,7 +252,7 @@ assert.equal(ctx.compareHistoryEvents({type:'diary_viewing',at:'2026-09-20',atPr
   +film('film:tmdb:4900',4900)+claim('film:tmdb:4900','tmdb','4900')
   +film('film:solo4990',null)+claim('film:solo4990','letterboxd','solo4990')
   +film('film:tmdb:4950',4950)+claim('film:tmdb:4950','tmdb','4950')+claim('film:tmdb:4950','letterboxd','lid4950')+claim('film:tmdb:4950','letterboxd','lid4951',0,0);
- const database=(state='open',extra='')=>{const file=path.join(root,'h-'+(n++)+'.sqlite');fs.copyFileSync(base,file);sqlite(file,SEED+(MARKER[state]||'')+extra);return file;};
+ const database=(state='open',extra='')=>{const file=path.join(root,'h-'+(n++)+'.sqlite');fs.copyFileSync(/ratings_/.test(extra)?base:bare,file);sqlite(file,SEED+(MARKER[state]||'')+extra);return file;};
  const seen=[];
  const envFor=(state,extra,onQuery)=>({...env,DB:d1Standin(database(state,extra),{onQuery:async text=>{seen.push(text);if(onQuery)await onQuery(text);}})});
  const stored=(id,gen,rating)=>{const record={filmId:id,predictedRating:rating,probability4Plus:.6,confidence:'high',matchSignals:['s'],mainRisk:'r',moodLabels:['m','n'],generatedAt:gen,tasteProfileVersion:2,tasteProfileHash:'p2',fingerprintHash:'f',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1,runId:'run-'+id+gen,trigger:'scheduled'};const digest=sha(body(record));return {...record,r2Key:versionKey(id,digest),contentSha256:digest};};
@@ -358,8 +362,10 @@ INSERT INTO prediction_lineage (film_id,replaced_at,predicted_rating,taste_profi
   // A held ratings domain refuses; an unreadable one is a typed 503; neither falls back to the stale R2 Diary.
   {const file=database('open',ratingsRows+"UPDATE ratings_domain_authority SET cutover='held' WHERE id=1;");({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(file)}));assert.deepEqual([status,data.error,data.reason],[503,'ratings_unavailable','ratings_domain_not_authoritative']);}
   {const file=database('open',ratingsRows+"DROP TABLE ratings_view;");({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(file)}));assert.deepEqual([status,data.error],[503,'ratings_unavailable'],'a half-installed ratings domain fails closed');}
-  // Where the domain is not d1 (here the default r2 marker), the R2 objects are read exactly as before.
-  ({data}=await history('filmId=lone4600',envFor('open')));assert.deepEqual(data.events.filter(e=>e.type==='diary_viewing').map(e=>e.watchedDate),['2026-10-01'],'ratings domain on r2: the R2 Diary is the source');
+  // ADR 0162: a ratings marker left in mode r2 is refused too, never read from R2.
+  {const file=database('open',"UPDATE ratings_domain_authority SET generation=0 WHERE id=1;");({status,data}=await history('filmId=tmdb_4600',{...env,DB:d1Standin(file)}));assert.deepEqual([status,data.error],[503,'ratings_unavailable'],'a ratings marker in mode r2 is refused');}
+  // Where the domain is not installed (the local stand-in), the R2 objects are read exactly as before.
+  ({data}=await history('filmId=lone4600',envFor('open')));assert.deepEqual(data.events.filter(e=>e.type==='diary_viewing').map(e=>e.watchedDate),['2026-10-01'],'ratings domain not installed: the R2 Diary is the source');
  }
 }
 console.log('Film history: validation, empty film, chronology, lineage gaps, version links, rationale per version, legacy log by both ids, no account URL, watchedAt unknown, rollback and re-apply, idempotent reads, paging and change refusal, ties, redirect, unreadable bundle, convergence overlay, Diary viewings by lid only (never slug), day-only ordering, day counts, lower bounds, unknown re-watch, undated entries, identity disagreement, Diary paging and change refusal, coverage and unreadable Diary passed');

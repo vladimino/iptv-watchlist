@@ -84,6 +84,31 @@ const withLease=async(db,body)=>{
  assert.equal(stored(db,'tmdb_1').poster,POSTER+'/one.jpg');
 }
 
+// 2b. Reconciliation of a lost response with a preserved poster (review of AIR-515): the batch lands, the response is a fence error, and the stored
+// payload carries the preserved poster, so it is not byte-equal to what was sent. It is still written; a different identity or another payload change is not.
+{
+ const db=migrated();const {env}=await withLease(db);
+ await Authority.replaceCatalog(env,{tmdb_1:film('tmdb_1',1),tmdb_2:film('tmdb_2',2)});
+ await Authority.applyPosters(env,[{filmId:'tmdb_1',tmdbId:'1',poster:POSTER+'/one.jpg'},{filmId:'tmdb_2',tmdbId:'2',poster:POSTER+'/two.jpg'}],{lease:env.discoveryLease});
+ let mode='lost';
+ const lossy={prepare:sql=>db.prepare(sql),batch:async statements=>{
+  if(mode==='lost'){await db.batch(statements);throw new Error('CHECK constraint failed: lost response');}
+  if(mode==='refused')throw new Error('CHECK constraint failed: refused');
+  return db.batch(statements);
+ }};
+ const lossyEnv={...env,DB:lossy};
+ const result=await Authority.upsertAdmissions(lossyEnv,{tmdb_1:film('tmdb_1',1,{title:'Renamed'}),tmdb_2:film('tmdb_2',2,{title:'Renamed too'})},{lease:env.discoveryLease});
+ assert.deepEqual([...result.written].sort(),['tmdb_1','tmdb_2'],JSON.stringify(result));
+ assert.equal(stored(db,'tmdb_1').title,'Renamed');assert.equal(stored(db,'tmdb_1').poster,POSTER+'/one.jpg');
+ // The same one film alone (applyOne path).
+ const single=await Authority.upsertAdmissions(lossyEnv,{tmdb_1:film('tmdb_1',1,{title:'Renamed again'})},{lease:env.discoveryLease});
+ assert.deepEqual(single.written,['tmdb_1']);assert.equal(stored(db,'tmdb_1').poster,POSTER+'/one.jpg');
+ // A refused batch whose stored payload differs in anything but the preserved poster is not reported as written.
+ mode='refused';
+ await assert.rejects(()=>Authority.upsertAdmissions(lossyEnv,{tmdb_1:film('tmdb_1',1,{title:'Someone elses title'})},{lease:env.discoveryLease}));
+ assert.equal(stored(db,'tmdb_1').title,'Renamed again');
+}
+
 // 3. The Worker: hydration and the admin read use D1 and never touch an R2 catalog object.
 {
  const db=migrated();const {env,bucket}=await withLease(db);

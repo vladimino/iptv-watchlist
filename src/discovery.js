@@ -440,7 +440,7 @@ async function catalogPosterApply(env,key,found,guard){
 }
 // AIR-515. With Discovery on D1 (mode d1, cutover open) the catalog and its posters are the `discovery_admission` rows: reads come from
 // DiscoveryAuthority.routeRead and the one poster write is DiscoveryAuthority.applyPosters. Nothing reads or writes the R2 catalog
-// objects then, and a D1 failure is a failure, never "no poster". Below that marker the R2 objects stay the catalog (rollback path).
+// objects then, and a D1 failure is a failure, never "no poster". The R2 path below exists only for offline stand-ins without DiscoveryAuthority (ADR 0162: no rollback toolchain).
 const CATALOG_POSTER_D1_KEY='discovery_admission';
 // Fail closed: the built Worker always has DiscoveryAuthority, so a missing binding, an absent or old schema or a marker that is not d1/open is an
 // unavailable authority and never a reason to read or write the R2 catalog. The R2 path exists only where the symbol is absent (offline vm stand-ins).
