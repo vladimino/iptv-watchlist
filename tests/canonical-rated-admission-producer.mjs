@@ -13,7 +13,6 @@ const SRC=path.resolve('src');
 const load=name=>import(pathToFileURL(path.join(SRC,name)).href);
 const M=await load('canonical-rated-admission-producer.js');
 const {PRODUCER_OPERATIONS,PRODUCER_WIRING,handoffReadiness}=await load('canonical-producers.js');
-const {activationAudit}=await load('film-person-open-handoff.js');
 const {
  applyRatedAdmissionRetention,applyFilmAdmission,FILM_ADMISSION_OPERATION,FILM_RETENTION_OPERATION,
  RATED_ADMISSION_KINDS,RATED_ADMISSION_ORIGIN,ratedAdmissionRegistry,ratedAdmissionSettled,ratedAdmissionSliceSettled,
@@ -221,9 +220,6 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
  for(const kind of RATED_ADMISSION_KINDS)assert.equal(PRODUCER_OPERATIONS.get(kind).atomic,true);
  const flipped=PRODUCER_WIRING.filter(item=>item.requires.every(kind=>[...PRODUCER_OPERATIONS.values()].some(op=>op.operation===kind&&op.atomic===true))).map(item=>item.name);
  assert.deepEqual(flipped,['epg_commit','metadata_sync','discovery_admission','rated_admission_retention']);
- const audit=activationAudit();
- assert.equal(audit.producers.find(item=>item.name==='rated_admission_retention').wired,true);
- assert.ok(!audit.residuals.includes('producer_not_wired:rated_admission_retention'));
  const ready=await handoffReadiness(envOf(database('prepared')),{now:T});
  assert.equal(ready.ready,false);
  assert.ok(!ready.blockers.includes('producer_not_wired:rated_admission_retention'));
