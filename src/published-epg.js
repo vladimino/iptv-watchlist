@@ -290,6 +290,38 @@ export async function readShows(env,programmeRunId){
  const rows=await many(database(env),'SELECT film_id, channel_id, channel, start_ms, end_ms, epg_title, basis, match_reason FROM published_epg_show WHERE programme_run_id=? ORDER BY film_id, start_ms, channel_id',[programmeRunId]);
  return rows.map(row=>({filmId:row.film_id,channelId:row.channel_id,channel:row.channel??null,startMs:Number(row.start_ms),endMs:row.end_ms==null?null:Number(row.end_ms),epgTitle:row.epg_title??null,basis:row.basis??null,matchReason:row.match_reason??null}));
 }
+// AIR-531: is there a D1 binding to read at all (the worker never names the binding itself).
+export function hasDatabase(env){return !!database(env);}
+// AIR-531: one indexed point read for the HTML permalink status: is this film id a member (programme or watchlist) of the pinned published generation?
+// Read-only; the caller treats any failure as "unknown", never as "absent".
+export async function isMember(env,programmeRunId,filmId){
+ const rows=await many(database(env),"SELECT 1 AS hit FROM published_epg_member WHERE programme_run_id=? AND kind IN ('programme','watchlist') AND film_id=? LIMIT 1",[programmeRunId,filmId]);
+ return rows.length>0;
+}
+// AIR-531: the TMDB movie ids that members of a published run own through their trusted link, as a small map tmdbId -> set of member film ids. `published_epg_member` has no
+// TMDB column (ADR 0142 decision 4), so it is built from the sealed programme and watchlist documents. Those documents are NOT fixed for a run: `saveWatchlist` and
+// `patchProgramme` replace one of them in place and advance the publication generation. The map is therefore keyed by (database, run, generation) and the reads are fenced: the
+// generation must still be the asked one after both documents are read, otherwise the read throws `published_epg_fence` (unknown, never an absence). The trust rule is the
+// page's (`trustedMovieTmdb`): `tmdbId` is a positive integer and `tmdbLink` resolves to that very movie. Read-only; only the last key is kept.
+let memberTmdbCache={db:null,run:null,generation:null,map:null};
+export async function memberTmdbOwners(env,programmeRunId,generation){
+ const db=database(env);
+ if(memberTmdbCache.db===db&&memberTmdbCache.run===programmeRunId&&memberTmdbCache.generation===generation)return memberTmdbCache.map;
+ const map=new Map();
+ for(const kind of ['programme','watchlist']){
+  const document=await readDocument(env,programmeRunId,kind);
+  for(const film of Array.isArray(document?.films)?document.films:[]){
+   const tmdb=film?.tmdbId==null?'':String(film.tmdbId),link=film?.tmdbLink;
+   if(film?.id==null||!/^[1-9]\d{0,11}$/.test(tmdb)||link?.status!=='resolved'||link.link?.type!=='movie'||String(link.link.id)!==tmdb)continue;
+   if(!map.has(tmdb))map.set(tmdb,new Set());
+   map.get(tmdb).add(String(film.id));
+  }
+ }
+ const closed=await currentGeneration(env);
+ if(!closed||closed.programmeRunId!==programmeRunId||closed.generation!==generation)throw failed('published_epg_fence');
+ memberTmdbCache={db,run:programmeRunId,generation,map};
+ return map;
+}
 export async function readMembers(env,programmeRunId,kind){
  const rows=await many(database(env),'SELECT ordinal, film_id FROM published_epg_member WHERE programme_run_id=? AND kind=? ORDER BY ordinal',[programmeRunId,kind]);
  return rows.map(row=>({ordinal:Number(row.ordinal),filmId:row.film_id}));

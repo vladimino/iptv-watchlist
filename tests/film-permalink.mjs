@@ -130,14 +130,41 @@ reset();setFilms([lid('plain','77',undefined)]);
 run('filmScreen=null;applyFilmScreen("plain")');
 assert.equal(query('#film-compare').hidden,false);assert.match(html('#film-screen-synopsis'),/секретный сюжет/);assert.match(html('#film-screen-actions'),/data-started-id/);
 
+// AIR-531 review: hidden is not cleared. The comparison chosen for a film id is dropped when that id's page is a terminal error, so it does not come back when the id is valid again;
+// the selection of another, valid film is its own and stays.
+{
+ reset();setFilms([lid('plain','77',undefined),lid('other','78',undefined)]);
+ run('filmScreen=null;applyFilmScreen("plain")');
+ run('filmCompareId="other";filmCompareFilm="plain"');query('#film-compare-input').value='Фильм other';
+ run('filmCompareById.set("tmdb_60","other")');
+ plan.set('/api/catalog/film/60',{status:410,body:{status:'retired'}});
+ run('applyFilmScreen("tmdb_60")');await tick();await tick();
+ assert.equal(query('#film-compare').hidden,true,'the error page has no comparison');
+ assert.equal(run('filmCompareId'),null,'the error page has no selection');assert.equal(query('#film-compare-input').value,'');
+ assert.equal(run('filmCompareById.has("tmdb_60")'),false,'the selection saved for the errored id is dropped');
+ run('applyFilmScreen("plain")');
+ assert.equal(run('filmCompareId'),'other','another valid film keeps its own selection');
+ // The errored id becomes valid again: nothing is restored for it.
+ setFilms([lid('plain','77',undefined),lid('tmdb_60','60',undefined)]);
+ run('applyFilmScreen("tmdb_60")');
+ assert.equal(run('filmCompareId'),null,'valid -> error -> valid: no stale selection');assert.equal(query('#film-compare-input').value,'');
+ assert.equal(query('#film-compare').hidden,false);assert.equal(html('#film-compare-result').includes('film-compare-body'),false);
+ // A page that is only still loading is not an error: its saved selection stays.
+ reset({programmeReady:false});setFilms([]);run('filmCompareById.set("tmdb_61","x")');
+ run('filmScreen=null;applyFilmScreen("tmdb_61")');
+ assert.equal(run('resolveFilm("tmdb_61").status'),'loading');assert.equal(run('filmCompareById.get("tmdb_61")'),'x','a loading film keeps its saved selection');
+}
+
 // Every other answer is its own message, never a fake film.
 const states=[[404,{status:'absent'},'Фильм не найден',/нет проверенного фильма/],[410,{status:'retired'},'Запись каталога снята',/заменена/],[409,{status:'conflict'},'Идентичность фильма не подтверждена',/конфликт/],[503,{status:'unavailable'},'Каталог сейчас недоступен',/Не удалось прочитать/],[500,{status:'error'},'Не удалось загрузить фильм',/ошибкой/]];
 for(const [status,body,title,text] of states){
  reset();plan.set('/api/catalog/film/51',{status,body});await open('tmdb_51');
  assert.equal(query('#film-screen-title').textContent,title,String(status));assert.match(query('#film-screen-status').textContent,text);
  assert.equal(html('#film-screen-score'),'','no film, no score');assert.equal(run('currentFilm()'),null);
+ assert.equal(query('#film-compare').hidden,true,'AIR-531: no film, no comparison ('+status+')');assert.equal(html('#film-compare-result'),'');assert.equal(query('#film-similar').hidden,true);
 }
 reset();plan.set('/api/catalog/film/51',new Error('offline'));await open('tmdb_51');
+assert.equal(query('#film-compare').hidden,true,'AIR-531: a failed load hides the comparison');
 assert.equal(query('#film-screen-title').textContent,'Не удалось загрузить фильм','a network failure is an error, not "not found"');
 reset();plan.set('/api/catalog/film/51',{status:200,body:{status:'found',film:entry(52)}});await open('tmdb_51');
 assert.equal(query('#film-screen-title').textContent,'Не удалось загрузить фильм','a film of another identity than the route is refused');
