@@ -925,6 +925,9 @@ export const FILES={
  "letterboxd-diary-identity.mjs": {
   "suite": "core"
  },
+ "prediction-skipped-event.mjs": {
+  "suite": "core"
+ },
  "ratings-diary-identity.mjs": {
   "suite": "core"
  },

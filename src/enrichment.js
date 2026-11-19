@@ -1028,7 +1028,7 @@ async function deliverPendingEvents(env,now=Date.now()){
      report.checked++;
      // A stop is completed as a whole (run record, diagnostic row, journal item): the same idempotent path the stop itself took.
      if(key.startsWith(STOP_EVENT_PREFIX)){
-      if(record.event.stage==='complete')result=await flushStopEvent(env,record,key)?'delivered':'failed';
+      if(record.event.presentation===BATCH_V2_SKIPPED||record.event.stage==='complete')result=await flushStopEvent(env,record,key)?'delivered':'failed';
       else{const stop=await recordRunStop(env,record.event.runId,record.event.reason,{outbox:true});result=stop.status==='superseded'||stop.eventPending===false?'delivered':'failed';}
      }
      else result=await flushStopEvent(env,record,key)?'delivered':'failed';
@@ -1053,6 +1053,30 @@ async function deliverPendingEvents(env,now=Date.now()){
  }catch{report.failed++;}
  if(report.checked||report.failed||report.quarantined)logEventOutbox(report);
  return report;
+}
+// AIR-548 (ADR 0180): a real `batch_start` that a live runner lease turns away leaves ONE neutral Event of the refused request, `presentation: "batch_v2_skipped"`. It is not a run: no runId of its own, no
+// counts, no lease, queue or film is touched for it. Its identity is the request's `X-Request-Id` (the id is stable under replay and different for another request, so no two requests are merged by time or
+// guess), and it is parked create-only in `enrichment/stop-events/skipped-<requestId>.json`, so a repeated write reads the first record back (same `at`, same journal key) and a failed journal write is retried
+// by the existing outbox. Best-effort by construction: it never throws and never changes the `already_running` answer. Only `already_running` is recorded; `409` refusals, `noop`, `catalog_held` and the rest are not.
+const BATCH_V2_SKIPPED='batch_v2_skipped';
+const SKIPPED_EVENT_PREFIX=STOP_EVENT_PREFIX+'skipped-';
+function skippedStartEvent({requestId,body,holder,at}){
+ const event={id:'enrichment-skipped-'+requestId,type:'enrichment',at,stage:'skipped',protocol:BATCH_PROTOCOL,presentation:BATCH_V2_SKIPPED,reason:'already_running',requestId};
+ if(body?.trigger==='scheduled'||body?.trigger==='manual')event.trigger=body.trigger;
+ if(isText(holder?.runId,100)&&SAFE_LOG_ID.test(holder.runId))event.holderRunId=holder.runId;
+ if(Number.isFinite(holder?.expiresAt)){const age=Math.round(Date.parse(at)-(holder.expiresAt-RUNNER_LEASE_TTL));if(Number.isFinite(age)&&age>=0&&age<=7*86400000)event.holderAgeMs=age;}
+ return event;
+}
+async function recordSkippedStart(env,{requestId,body,holder}){
+ try{
+  const id=safeRequestId(requestId)||crypto.randomUUID(),key=SKIPPED_EVENT_PREFIX+id+'.json';
+  let record=await loadJSON(env,key);
+  if(!record){
+   record={event:skippedStartEvent({requestId:id,body,holder,at:new Date().toISOString()})};
+   const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key)||record;
+  }
+  const written=await flushStopEvent(env,record,key);if(!written)await noteEventOutbox(env,key);return written;
+ }catch{return false;}
 }
 // The read side of the outbox: counts only, one small object, no write.
 async function eventOutboxStatus(env){
@@ -2554,13 +2578,14 @@ async function batchRefreshQueue(env,body,pre,tally=null){
  return {queue,settled};
 }
 // A live runner lease turns a real start away; it is recorded as a start attempt and nothing else is written.
-async function batchTurnedAway(env,body,tally=null){
+async function batchTurnedAway(env,body,tally=null,requestId=null){
  const live=await loadJSON(env,RUNNER_LEASE_KEY);
  if(!(live?.runId&&live.expiresAt>Date.now()))return null;
  if(tally){tally.leaseRefused=1;tally.liveLeaseAgeMs=Math.max(0,Math.round(Date.now()-(live.expiresAt-RUNNER_LEASE_TTL)));}
  const turned={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'completed',selectedIds:[],results:{},failures:{}};
  turned.diagnosticStartedAt=turned.createdAt;turned.completedAt=turned.createdAt;
  await diagnosticCheckpoint(env,turned,{startResult:'already_running'});
+ await recordSkippedStart(env,{requestId,body,holder:live});
  return json({status:'already_running',runId:live.runId,expiresAt:live.expiresAt});
 }
 // Nothing eligible, or no capacity: the ordinary idle outcome of a start (`noop`, or `blocked` for `quota` and `retry_backoff`). No lease is taken and no run exists, so it is not passed
@@ -2649,7 +2674,7 @@ async function batchStartWork(env,body,requestId,tally){
  // Precedence of a real start: an overlapping run first, then an idle outcome, then the size refusal. A live runner lease (an earlier v2 run, or a stored legacy v5 run still holding it) turns the attempt away with
  // `already_running` before anything else, naming the holder: an overlapping trigger never reports an independent start result, and it writes nothing to the queue, the run, the lease or
  // the films. It is recorded as a start attempt, like every start attempt.
- const turned=await timedStage(env,'turned_away',()=>batchTurnedAway(env,body,tally));if(turned)return turned;
+ const turned=await timedStage(env,'turned_away',()=>batchTurnedAway(env,body,tally,requestId));if(turned)return turned;
  // Nothing to deliver, or no capacity, on a current queue: the idle outcome of a start (before the size refusal, so `remainingPercent: 0` is `quota`, not a size error).
  forgetAuthority(env);
  // AIR-529: a known priority-due queue is reconciled before it can be idle (an empty or exhausted queue plus a new assignment in the same generation would otherwise answer `noop` on every start). A zero-quota start stays the
@@ -2685,6 +2710,8 @@ async function batchStartWork(env,body,requestId,tally){
   if(lease.status==='already_running'){tally.leaseRefused=1;tally.leaseRefusedAtAcquire=1;if(Number.isFinite(lease.expiresAt))tally.liveLeaseAgeMs=Math.max(0,Math.round(Date.now()-(lease.expiresAt-RUNNER_LEASE_TTL)));}
   attempt.status='completed';attempt.completedAt=new Date().toISOString();attempt.stopReason=lease.status==='already_running'?null:lease.status;
   await diagnosticCheckpoint(env,attempt,{startResult:'already_running'});
+  // Only a refusal the lease itself answers `already_running` is a skipped start; any other lease status keeps its own answer and writes no Event.
+  if(lease.status==='already_running')await recordSkippedStart(env,{requestId,body,holder:lease});
   return json(lease);
  }
  // Revalidation, before a run, an Event or a diagnostics row exists: the queue's own generation must be the baseline's, and the selection and the manifest the same. Only the lease

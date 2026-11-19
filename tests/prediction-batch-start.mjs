@@ -41,6 +41,8 @@ const written=w=>id=>({filmId:id,fingerprint:w.fingerprint,prediction:w.predicti
 const claimedFailure=id=>({filmId:id,failure:{kind:'parse_error',reason:'insufficient_evidence'}});
 const setCold=(w,ids)=>sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.shows',json('[]')) WHERE film_id IN ("+ids.map(id=>"'"+id+"'").join(',')+")");
 
+// AIR-548 (ADR 0180): a turned-away start also parks and delivers one neutral skipped Event; nothing else is written.
+const SKIPPED_START_KEY=/^(enrichment\/stop-events\/skipped-|events\/items\/\d+-enrichment-skipped-)/;
 // 1. A manifest is self-sufficient: the model needs no next, no enrichment_profile and no metadata call to generate every film in it.
 {
  const w=await ready(37);await reconcile(w);
@@ -443,7 +445,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  assert.equal(turned.data.status,'already_running');assert.equal(turned.data.runId,v5.runId);assert.ok(!turned.data.films);
  assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),queue0,'the stale queue was not refreshed or settled by a turned-away attempt');
  assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),run0);assert.equal(leaseRow(w),lease0);assert.equal(filmTables(w),films0);
- const d=r2Diff(r2a,r2Snapshot(w));assert.deepEqual([...d.added,...d.changed].filter(k=>!k.startsWith('enrichment/run-diagnostics')),[],'only the start-attempt row was written: '+[...d.added,...d.changed]);
+ const d=r2Diff(r2a,r2Snapshot(w));assert.deepEqual([...d.added,...d.changed].filter(k=>!k.startsWith('enrichment/run-diagnostics')&&!SKIPPED_START_KEY.test(k)),[],'only the start-attempt row and its neutral skipped Event (AIR-548) were written: '+[...d.added,...d.changed]);
  // the v5 run is unaffected
  const hb=await w.api('heartbeat',{runId:v5.runId});assert.equal(hb.status,200);assert.ok(!('epoch' in hb.data));
 }
@@ -459,7 +461,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const turned=await batch(w);
  assert.equal(turned.status,200);assert.equal(turned.data.status,'already_running','an overlapping trigger is turned away, not refused on size');assert.equal(turned.data.runId,v5.runId);assert.ok(!turned.data.films&&!turned.data.code);
  assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),queue0);assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),run0);assert.equal(leaseRow(w),lease0);assert.equal(filmTables(w),films0);
- const d=r2Diff(r2a,r2Snapshot(w));assert.deepEqual([...d.added,...d.changed].filter(k=>!k.startsWith('enrichment/run-diagnostics')),[],'only the start-attempt row: '+[...d.added,...d.changed]);
+ const d=r2Diff(r2a,r2Snapshot(w));assert.deepEqual([...d.added,...d.changed].filter(k=>!k.startsWith('enrichment/run-diagnostics')&&!SKIPPED_START_KEY.test(k)),[],'only the start-attempt row and its skipped Event: '+[...d.added,...d.changed]);
  // zero capacity beside a live run is the same: the holder answers first
  assert.equal((await batch(w,{capacity:{remainingPercent:0}})).data.status,'already_running');
  // a dry run does not look at the lease: it is the read-only manifest path and reports the size
