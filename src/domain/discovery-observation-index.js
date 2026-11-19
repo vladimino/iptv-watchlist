@@ -109,7 +109,15 @@ function ownerIdentityView(value) {
   if (!indexObject(value) || (value.effect !== 'assign' && value.effect !== 'reject')) return null;
   const tmdbId = movieId(value.tmdbId);
   if (!tmdbId) return null;
-  return {effect: value.effect, tmdbId, at: indexText(value.at, 40), basis: indexText(value.basis, 200)};
+  return {effect: value.effect, tmdbId, at: indexText(value.at, 40), basis: indexText(value.basis, 200), requestId: indexText(value.requestId, 80)};
+}
+
+// ADR 0178: the fence of a revoked owner assign, shown to the owner. Ids, times and a request id only.
+function revokedAssignView(value) {
+  if (!indexObject(value)) return null;
+  const tmdbId = movieId(value.tmdbId);
+  if (!tmdbId) return null;
+  return {tmdbId, requestId: indexText(value.requestId, 80), revokedBy: indexText(value.revokedBy, 80), at: indexText(value.at, 40)};
 }
 
 function rejectedView(value) {
@@ -135,6 +143,8 @@ export function observationDecisionView(decision) {
   view.scoring = scoringView(decision.scoring);
   view.ownerIdentity = ownerIdentityView(decision.ownerIdentity);
   view.rejectedTmdbIds = rejectedView(decision.rejectedTmdbIds);
+  const fence = revokedAssignView(decision.revokedOwnerAssign);
+  if (fence) view.revokedOwnerAssign = fence;
   const marker = indexObject(decision.reconsidered) ? decision.reconsidered : null;
   view.reconsidered = marker ? {at: indexText(marker.at, 40), idempotencyKey: indexText(marker.idempotencyKey, 80), previousTerminalReason: indexText(marker.previousTerminalReason, 80)} : null;
   return view;

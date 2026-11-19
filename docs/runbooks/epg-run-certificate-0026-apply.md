@@ -1,6 +1,6 @@
-# EPG run certificate migration 0026: owner GO, apply preconditions, readback and rollback contract (not applied)
+# EPG run certificate migration 0026: owner GO, apply preconditions, readback and rollback contract (applied)
 
-**Status:** the migration file and the code are in the repository ([AIR-539](https://trello.com/c/2eYDrWBS), [ADR 0175](../adr/0175-epg-priority-holds-until-run-complete.md), Accepted). `0026` is **not applied** to production D1 `iptv`. Applying it is a separate, action-specific owner GO; a merge, a deploy or the acceptance of ADR 0175 is not that GO.
+**Status:** the migration file and the code are in the repository ([AIR-539](https://trello.com/c/2eYDrWBS), [ADR 0175](../adr/0175-epg-priority-holds-until-run-complete.md), Accepted). `0026` was **applied** to production D1 `iptv` on 19 Nov 2026 (about 21:12 UTC) as one execution after an action-specific owner GO ([evidence](../evidence/d1-migration/air-539-0026-apply-2026-11-19.md)): schema version 26, both columns NULL. A merge, a deploy or the acceptance of ADR 0175 was not that GO. The natural-run acceptance is still open.
 
 ## What the migration is, and is not
 

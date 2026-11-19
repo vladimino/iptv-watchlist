@@ -7,6 +7,7 @@
 // installed at all.
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 import {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
+import {revokeWriteMatches,originalStillEffective} from './domain/discovery-identity-review.js';
 import {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';
 export const planRevalidation=revalidationPlan;
 export const REVALIDATION_LIMIT=SLOT_REVALIDATION_LIMIT;
@@ -2083,6 +2084,34 @@ export async function readIntent(env,idempotencyKey){
  try{issued=row.issued_json?JSON.parse(row.issued_json):null;command=row.command_json?JSON.parse(row.command_json):null;}catch{throw failed('discovery_unavailable');}
  return {handled:true,intent:{idempotencyKey:row.idempotency_key,kind:row.kind,state:row.state,observationKey:row.observation_key,before:row.before_json?JSON.parse(row.before_json):null,receipt:row.receipt_json?JSON.parse(row.receipt_json):null,issued,command,expectedHash:row.expected_hash??null,expiresAt:row.expires_at==null?null:Number(row.expires_at),generation:row.generation==null?null:Number(row.generation)}};
 }
+const IDENTITY_HISTORY_CAP=200;
+// ADR 0178: the stored rows a revoke is proven from. Read only: one intent by primary key, the history of ONE observation
+// (bounded) and its current decision. No scan, no TMDB, no write.
+export async function readIdentityActionEvidence(env,requestId,key){
+ const gate=await readAuthority(env);
+ if(!gate.ready)return {handled:false};
+ const stored=await readIntent(env,requestId);
+ if(!stored.intent)return {handled:true,intent:null};
+ if(stored.intent.observationKey!==key)return {handled:true,intent:stored.intent,wrongObservation:true};
+ const rows=await many(database(env),'SELECT revision, writer, written_at, payload_json FROM discovery_decision_history WHERE observation_key=? ORDER BY revision LIMIT ?',[key,IDENTITY_HISTORY_CAP+1]);
+ if(rows.length>IDENTITY_HISTORY_CAP)return {handled:true,intent:stored.intent,bounded:true};
+ const row=await one(database(env),'SELECT decision_hash, payload_json FROM discovery_decision WHERE observation_key=?',[key]);
+ let history=[],current=null;
+ try{
+  history=rows.map(item=>({revision:Number(item.revision),writer:item.writer,at:item.written_at,payload:JSON.parse(item.payload_json)}));
+  current=row?JSON.parse(row.payload_json):null;
+ }catch{return {handled:true,intent:stored.intent,malformed:true};}
+ if(row&&await decisionHash(current)!==row.decision_hash)return {handled:true,intent:stored.intent,malformed:true};
+ return {handled:true,intent:stored.intent,history,current,decisionHash:row?.decision_hash??null,generation:gate.generation,programmeRunId:gate.programmeRunId};
+}
+// ADR 0178: whether the intent table accepts the `identity_revoke` kind (schema 27 applied). A read of the stored table
+// definition only: it tells a missing migration apart from an unrelated D1 fault, which the caller must not mistake for it.
+export async function revokeSchemaReady(env){
+ const gate=await readAuthority(env);
+ if(!gate.ready)return {handled:false,ready:false};
+ const row=await one(database(env),"SELECT sql FROM sqlite_master WHERE type='table' AND name='discovery_intent'");
+ return {handled:true,ready:typeof row?.sql==='string'&&row.sql.includes("'identity_revoke'")};
+}
 export async function markIntentRunning(env,spec){
  const gate=await readAuthority(env);
  assertOpen(gate);
@@ -2117,11 +2146,26 @@ export async function ownerDecision(env,spec){
    const ids=Array.isArray(spec.next.rejectedTmdbIds)?spec.next.rejectedTmdbIds.map(String):[];
    if(!ids.includes(String(command.tmdbId)))return {outcome:'conflict'};
   }
+  // ADR 0178: a revoke has its own typed branch and is never passed through the assign/reject checks above.
+  if(command.effect==='revoke'&&(existing.intent.kind!=='identity_revoke'||!revokeWriteMatches(command,spec.next)))return {outcome:'conflict'};
+  // A supersede is bound to the original same-observation action and to the exact current hash, or it is refused.
+  if(command.supersedes){
+   const sup=command.supersedes;
+   if(existing.intent.kind==='identity_revoke'||!sup||typeof sup.requestId!=='string'||typeof sup.decisionHash!=='string'||sup.decisionHash!==expectedHash)return {outcome:'conflict'};
+   const original=await readIntent(env,sup.requestId);
+   if(!original.intent||original.intent.observationKey!==key||original.intent.state!=='receipt'||!original.intent.receipt||!['identity_assign','identity_reject'].includes(original.intent.kind))return {outcome:'conflict'};
+  }
  }
+ if(existing.intent.kind==='identity_revoke'&&existing.intent.command?.effect!=='revoke')return {outcome:'conflict'};
  const bound={...spec,key,expectedHash};
  const row=await one(database(env),'SELECT decision_hash, payload_json FROM discovery_decision WHERE observation_key=?',[key]);
  let previous=null;try{previous=row?JSON.parse(row.payload_json):null;}catch{return {outcome:'malformed'};}
  if(!row||await decisionHash(previous)!==row.decision_hash||row.decision_hash!==expectedHash)return {outcome:'conflict'};
+ // ADR 0178, section 3: a supersede replaces the LIVE effective assertion. The original must still be carried by the decision this write is about to replace (same CAS hash, same fence).
+ if(existing.intent.command?.supersedes){
+  const original=await readIntent(env,existing.intent.command.supersedes.requestId);
+  if(!original.intent||!originalStillEffective(original.intent,previous))return {outcome:'conflict'};
+ }
  const lease=spec.lease||leaseOf(env);
  if(!lease)return {outcome:'lease'};
  try{await markIntentRunning(env,{idempotencyKey:spec.idempotencyKey,before:previous,lease});}
