@@ -631,6 +631,9 @@ export const FILES={
  "epg-repository.mjs": {
   "suite": "core"
  },
+ "epg-run-certificate.mjs": {
+  "suite": "core"
+ },
  "epg-slot-uniqueness.mjs": {
   "suite": "core"
  },

@@ -631,6 +631,60 @@ function frozenDay(run){
   }
  }
 
+ // ---- the completion certificate repair (ADR 0175 decision 5) -------------------------------------------------
+ // A separate certify-only unit, called from the hourly `ensure`. It is NOT routed through ensureWorkflow, act or drive, whose gates (`not_due`, `control.doneAt`,
+ // `day_rolled`) decide whether to schedule or drive a RUN and correctly refuse a finished or rolled one. It never creates a Workflow instance, runs a seal, a sync or a
+ // publication, and never writes `control`, `sync.json`, the completion receipt or R2. Its only D1 write is the one fenced certify batch (step lease, mode revision, CAS on the
+ // pointer's programme run and Madrid day, atomic pause clear), followed by a readback. Anything stale, contradicting or unreadable does nothing.
+ // `receiptAt` is the durable completion receipt of the run (never a clock of this unit); it dates the debt. `unreadable` means the evidence could not be read, not that nothing is owed.
+ async function owedCertificate(env){
+  let run;
+  try{run=await loadJSON(env,'sync.json');}catch{return {owed:false,unreadable:true,reason:'sync_unreadable'};}
+  if(!run||run.stage!=='complete'||typeof run.runId!=='string'||!run.runId)return {owed:false,reason:'not_owed'};
+  const day=frozenDay(run);
+  if(day===null)return {owed:false,unreadable:true,reason:'day_unproven'};
+  const proof=await completion(env,run);
+  if(proof.state==='unreadable')return {owed:false,unreadable:true,reason:'d1_unavailable'};
+  if(proof.state!=='proven')return {owed:false,reason:'not_owed'};
+  let certificate;
+  try{certificate=await PublishedEpg.readCertificate(env);}catch{return {owed:false,unreadable:true,reason:'d1_unavailable'};}
+  if(certificate.column!=='present')return {owed:false,reason:'column_absent'};
+  if(certificate.programmeRunId!==run.runId||certificate.madridRunKey!==day)return {owed:false,reason:'not_owed'};
+  if(certificate.finalizedRunId===run.runId)return {owed:false,reason:'certified'};
+  const receiptAt=Object.prototype.hasOwnProperty.call(run,'completedAt')?run.completedAt:run.updatedAt;
+  return {owed:true,runId:run.runId,day,receiptAt:typeof receiptAt==='string'&&Number.isFinite(Date.parse(receiptAt))?Date.parse(receiptAt):null};
+ }
+ // The repair result. A proven debt carries `owed: true` and `ageMs` (now minus the durable completion receipt, or null when that is not known); unreadable evidence carries
+ // `unreadable: true`. Both stay visible in the hourly `ensure` result; an idle tick (nothing owed) stays quiet. Reasons are closed codes: no payload, id or SQL.
+ async function certifyComplete(env,{now=Date.now()}={}){
+  if(typeof PublishedEpg?.certifyRun!=='function'||typeof PublishedEpg?.readCertificate!=='function')return {ran:false,reason:'unavailable'};
+  let mode;
+  try{mode=await readMode(env);}catch{return {ran:false,unreadable:true,reason:'mode_unreadable'};}
+  // A verified absent or unconfigured mode and the `external` mode are quiet. A malformed mode document is unreadable evidence, not 'nothing owed': reported, never written on.
+  if(!mode.schema)return {ran:false,reason:'not_owed'};
+  if(mode.malformed)return {ran:false,unreadable:true,reason:'mode_unreadable'};
+  if(mode.record?.mode!=='cloudflare')return {ran:false,reason:'not_owed'};
+  // The cheap, lease-free check first: a run that needs nothing never takes the step lease.
+  const first=await owedCertificate(env);
+  if(!first.owed)return {ran:false,...(first.unreadable?{unreadable:true}:{}),reason:first.reason};
+  const debt={owed:true,ageMs:first.receiptAt===null?null:Math.max(0,now-first.receiptAt)};
+  let taken;
+  try{taken=await acquireStep(env,{kind:'certify',modeRevision:mode.revision,now});}catch{return {ran:false,...debt,unreadable:true,reason:'lease_unreadable'};}
+  if(taken.reason)return {ran:false,...debt,reason:taken.reason};
+  if(taken.busy)return {ran:false,...debt,reason:'step_lease_held',until:iso(taken.until)};
+  const fe=fencedEnv(env,mode.revision,taken.step);
+  try{
+   // The world may have changed between the cheap check and the lease: the same check again, now holding it.
+   const second=await owedCertificate(fe);
+   if(!second.owed)return {ran:false,...(second.unreadable?{unreadable:true,...debt}:{}),reason:second.reason};
+   const stamp=Date.now();
+   const out=await PublishedEpg.certifyRun(fe,{programmeRunId:second.runId,madridRunKey:second.day,step:taken.step,epgFence:fe.epgFence,leaseBound:iso(stamp+BOUNDARY_MARGIN_MS),now:stamp});
+   return out.certified===true?{ran:true,certified:true,reason:'certified',runId:second.runId}:{ran:true,certified:false,...debt,reason:'readback_mismatch',runId:second.runId};
+  }catch(error){
+   return {ran:true,certified:false,...debt,reason:String(error?.code||'error').slice(0,60)};
+  }finally{await endStep(env,taken.step).catch(()=>false);}
+ }
+
  // ---- the cron `ensure` ---------------------------------------------------------------------------------------
  // Mirror reconcile on every hourly tick (even when the daily publication is not due), then at most a few reads and at
  // most one Workflow create. Safe under duplicate and overlapping firings: the control record is claimed by
@@ -638,13 +692,16 @@ function frozenDay(run){
  async function ensure(env,{now=Date.now(),random=Math.random}={}){
   const mirrors=await reconcileMirrors(env,{now});
   const result=await ensureWorkflow(env,{now,random});
+  // ADR 0175: the certificate repair, after the Workflow reconcile. Reported when it ran, waited for a live step lease, found a proven debt (`owed`, `ageMs`) or could not read its evidence (`unreadable`): the debt of a persistent failure stays visible. An idle tick (nothing owed) keeps the result unchanged. It never touches the Workflow failure budget.
+  let certificate=null;
+  try{certificate=await certifyComplete(env,{now});}catch(error){certificate={ran:false,reason:error?.code||'error'};}
   let producer={ran:false,reason:'unavailable'};
   try{
    if(typeof CanonicalProducerWorkflow!=='undefined'&&typeof CanonicalProducerWorkflow.reconcileProducerChain==='function'){
     producer=await CanonicalProducerWorkflow.reconcileProducerChain(env,{now});
    }
   }catch(error){producer={ran:false,reason:error?.code||'error'};}
-  return {...result,mirrors,producer};
+  return {...result,mirrors,...(certificate&&(certificate.ran===true||certificate.owed===true||certificate.unreadable===true||certificate.reason==='step_lease_held')?{certificate}:{}),producer};
  }
  async function ensureWorkflow(env,{now=Date.now(),random=Math.random}={}){
   let mode;
@@ -934,7 +991,7 @@ function frozenDay(run){
    failure:{class:c.failure?.class??null,code:c.failure?.code??null,fingerprint:c.budget?.fingerprint??null,consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,caps:policy().BUDGET_CAPS},
    cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,...(c.handoff?{handoff:{fromSeries:c.handoff.fromSeries??null,toSeries:c.handoff.toSeries??null,at:c.handoff.at??null,successorPending:c.phase==='starting'&&!c.doneAt&&liveness==='absent'}}:{}),health,sideEffects:'none'};
  }
- return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,reconcileMirrors,readModel,drainState,rolloverPreflight,epgWorkflowRollover,handleRolloverTool,workerVersion,classifyThrown,checkpointKey,progressCount,sealClaimPending,createSuccessor};
+ return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,certifyComplete,reconcileMirrors,readModel,drainState,rolloverPreflight,epgWorkflowRollover,handleRolloverTool,workerVersion,classifyThrown,checkpointKey,progressCount,sealClaimPending,createSuccessor};
 })();
 async function handleEpgRolloverTool(env,args){return EpgOrchestration.handleRolloverTool(env,args);}
 async function runEpgWorkflow(env,payload,step){return EpgOrchestration.run(env,payload,step);}

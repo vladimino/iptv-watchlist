@@ -386,6 +386,12 @@ function claimStillHeld(stage,claim,now,ttl){
 // Discovery pin already names this run and the stamped day is the owed or overridden date. The batch never writes the pin. If the pin is behind, the row stays `paused`
 // and a later batch (the replay branch below, or the next Discovery acquire) clears it once both name the run.
 const PAUSE_CLEAR_SQL="UPDATE discovery_epg_priority SET state='clear', owed_day_key=NULL, override_day_key=NULL WHERE id=1 AND (state<>'clear' OR override_day_key IS NOT NULL) AND EXISTS (SELECT 1 FROM published_epg_authority e, discovery_authority a WHERE e.id=1 AND a.id=1 AND e.programme_run_id=? AND a.published_programme_run_id=e.programme_run_id AND e.madrid_run_key IS NOT NULL AND (e.madrid_run_key=discovery_epg_priority.owed_day_key OR e.madrid_run_key=discovery_epg_priority.override_day_key))";
+// ADR 0175: the certificate column. With it present the pointer batch no longer clears the pause: only the certify batch does, after `sync.json` is complete.
+const PAUSE_CLEAR_CERT_SQL=PAUSE_CLEAR_SQL.replace("AND e.madrid_run_key IS NOT NULL AND","AND e.finalized_run_id=e.programme_run_id AND e.madrid_run_key IS NOT NULL AND");
+async function certPresent(db){
+ const row=await one(db,"SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='published_epg_authority' AND sql LIKE '%finalized_run_id%'");
+ return Number(row?.n)===1;
+}
 async function pausePresent(db){
  const row=await one(db,"SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='discovery_epg_priority'");
  return !!row;
@@ -394,9 +400,13 @@ async function commitPublish(db,stage,claim,authority,expected,now,ttl){
  const stamp=new Date(now).toISOString();
  const generation=stage.expectedGeneration??authority.generation;
  const paused=stage.phase==='published'&&stage.pausePresent===true;
+ const cert=paused&&stage.certPresent===true;
  const move=stage.phase==='published'
   ?paused
-   ?['UPDATE published_epg_authority SET programme_run_id=?, generation=generation+1, watchlist_generation=watchlist_generation+1, madrid_run_key=? WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND programme_run_id IS ?',[stage.target,stage.madridRunKey??null,generation,expected]]
+   ?cert
+    // ADR 0175: a different programme run resets the certificate in the same UPDATE (the right side reads the old row); the same run keeps it.
+    ?['UPDATE published_epg_authority SET finalized_run_id=CASE WHEN programme_run_id IS NOT ? THEN NULL ELSE finalized_run_id END, finalized_at=CASE WHEN programme_run_id IS NOT ? THEN NULL ELSE finalized_at END, programme_run_id=?, generation=generation+1, watchlist_generation=watchlist_generation+1, madrid_run_key=? WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND programme_run_id IS ?',[stage.target,stage.target,stage.target,stage.madridRunKey??null,generation,expected]]
+    :['UPDATE published_epg_authority SET programme_run_id=?, generation=generation+1, watchlist_generation=watchlist_generation+1, madrid_run_key=? WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND programme_run_id IS ?',[stage.target,stage.madridRunKey??null,generation,expected]]
    :['UPDATE published_epg_authority SET programme_run_id=?, generation=generation+1, watchlist_generation=watchlist_generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND programme_run_id IS ?',[stage.target,generation,expected]]
   :['UPDATE published_epg_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=?',[generation]];
  await fenced(db,[
@@ -405,7 +415,7 @@ async function commitPublish(db,stage,claim,authority,expected,now,ttl){
   [FENCE_SQL,[]],
   move,
   [FENCE_SQL,[]],
-  ...(paused?[[PAUSE_CLEAR_SQL,[stage.target]]]:[]),
+  ...(paused&&!cert?[[PAUSE_CLEAR_SQL,[stage.target]]]:[]),
   ['INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES (?,?,?,?,?)',[stage.target,stage.phase,stage.publishedAt,stage.sha,stamp]],
   ...copyStatements(stage.target,stage.id),
   ['UPDATE published_epg_stage SET state=\'published\', updated_at=? WHERE programme_run_id=? AND owner_token=? AND claim_nonce=? AND claim_generation=? AND state=\'validated\'',[stamp,stage.id,stage.owner,claim.nonce,claim.generation]],
@@ -452,7 +462,8 @@ async function stageCommit(db,spec,options){
   ...spec.logical.documents,
  ];
  const chunks=pack(spec.stageId,rows,options.chunkStatements||CHUNK_STATEMENTS,options.chunkBytes||CHUNK_BYTES);
- const stage={id:spec.stageId,target:spec.target,phase:spec.phase,sha:spec.sha,publishedAt:spec.publishedAt??null,chunks:chunks.length,members:spec.logical.members.length,shows:spec.logical.shows.length,documents:spec.logical.documents.length,owner,expectedGeneration:spec.expectedGeneration??null,madridRunKey:spec.madridRunKey??null,pausePresent:spec.phase==='published'?await pausePresent(db):false};
+ const stage={id:spec.stageId,target:spec.target,phase:spec.phase,sha:spec.sha,publishedAt:spec.publishedAt??null,chunks:chunks.length,members:spec.logical.members.length,shows:spec.logical.shows.length,documents:spec.logical.documents.length,owner,expectedGeneration:spec.expectedGeneration??null,madridRunKey:spec.madridRunKey??null,pausePresent:spec.phase==='published'?await pausePresent(db):false,certPresent:false};
+ stage.certPresent=stage.pausePresent===true?await certPresent(db):false;
  const claim=await ensureClaim(db,stage,now,ttl,owner);
  if(!claim.done){
   for(let index=0;index<chunks.length;index++)await writeChunk(db,{...stage,owner},chunks[index],index,claim,now,ttl);
@@ -477,6 +488,48 @@ async function stageCommit(db,spec,options){
  return readAuthority(db);
 }
 
+// ADR 0175. The completion certificate of the published run, read only. `column: 'absent'` is a verified absence (today's behaviour); an unreadable
+// answer throws, so no caller reads it as absence.
+export async function readCertificate(env){
+ const db=database(env);
+ if(!db)throw failed('published_epg_unavailable');
+ let present;
+ try{present=await certPresent(db);}catch(error){throw failed('published_epg_unavailable',error);}
+ if(!present)return {column:'absent'};
+ let row;
+ try{row=await one(db,'SELECT programme_run_id AS programmeRunId, madrid_run_key AS madridRunKey, finalized_run_id AS finalizedRunId, finalized_at AS finalizedAt FROM published_epg_authority WHERE id=1');}
+ catch(error){throw failed('published_epg_unavailable',error);}
+ return {column:'present',programmeRunId:row?.programmeRunId??null,madridRunKey:row?.madridRunKey??null,finalizedRunId:row?.finalizedRunId??null,finalizedAt:row?.finalizedAt??null};
+}
+// ADR 0175 decision 4. The one fenced certify batch: the mode revision, the step lease (holder, mode revision, not released, expiry beyond `leaseBound`,
+// all inside the batch, not a preceding read), the compare-and-set on the pointer's programme run and Madrid day, and the pause clear. Proof and clear are
+// atomic. It refuses a call with no fence or no step: there is no mode-revision-only or fence-less fallback. `leaseBound` is an ISO instant, the
+// step's `now` plus the boundary margin that `EpgOrchestration.assertStep` uses. A verified-absent column certifies nothing and writes nothing.
+export async function certifyRun(env,input={}){
+ const db=database(env);
+ if(!db)throw failed('published_epg_unavailable');
+ const id=typeof input.programmeRunId==='string'?input.programmeRunId:'';
+ if(!id)throw failed('published_epg_programme');
+ const fence=input.epgFence===undefined?env?.epgFence:input.epgFence;
+ const step=input.step;
+ if(fence==null||!step||typeof step.holder!=='string'||!step.holder||typeof input.leaseBound!=='string'||!input.leaseBound)throw failed('published_epg_certify_unfenced');
+ if(!await certPresent(db))return {certified:false,column:'absent'};
+ const stamp=new Date(input.now??Date.now()).toISOString();
+ const day=/^\d{4}-\d{2}-\d{2}$/.test(input.madridRunKey||'')?input.madridRunKey:null;
+ if(!day)throw failed('published_epg_certify_day');
+ const pause=await pausePresent(db);
+ await fenced(db,[
+  ...epgFenceStatements(fence),
+  ["UPDATE published_epg_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM epg_orchestration_document WHERE key='lease' AND json_extract(body,'$.holder')=? AND json_extract(body,'$.modeRevision') IS ? AND COALESCE(json_extract(body,'$.released'),0)=0 AND json_extract(body,'$.expiresAt')>?)=1 THEN 1 ELSE 0 END WHERE id=1",[step.holder,step.modeRevision??null,input.leaseBound]],
+  [FENCE_SQL,[]],
+  ['UPDATE published_epg_authority SET finalized_run_id=?, finalized_at=COALESCE(finalized_at,?) WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND programme_run_id=? AND madrid_run_key IS ? AND (finalized_run_id IS NULL OR finalized_run_id=?)',[id,stamp,id,day,id]],
+  [FENCE_SQL,[]],
+  ...(pause?[[PAUSE_CLEAR_CERT_SQL,[id]]]:[]),
+ ]);
+ const readback=await readCertificate(env);
+ return {certified:readback.column==='present'&&readback.finalizedRunId===id,column:readback.column,finalizedAt:readback.finalizedAt??null};
+}
+
 export async function publishGeneration(env,input,options={}){
  if(options.epgFence===undefined&&env?.epgFence!==undefined)options={...options,epgFence:env.epgFence};
  const db=database(env);
@@ -497,7 +550,7 @@ export async function publishGeneration(env,input,options={}){
   if(existing.phase!==phase||existing.sha!==sha)throw failed('published_epg_conflict');
   const authority=await readAuthority(db);
   // ADR 0135: a repeated pointer publication is the replay branch, not a second publish. It may still clear a pause the first batch could not (pin behind then).
-  if(phase==='published'&&authority.programmeRunId===programmeRunId&&await pausePresent(db))await db.batch([db.prepare(PAUSE_CLEAR_SQL).bind(programmeRunId)]);
+  if(phase==='published'&&authority.programmeRunId===programmeRunId&&await pausePresent(db)&&!await certPresent(db))await db.batch([db.prepare(PAUSE_CLEAR_SQL).bind(programmeRunId)]);
   return {programmeRunId,phase,replay:true,pointed:authority.programmeRunId===programmeRunId,authoritative:true};
  }
  const logical=logicalRows(programme,watchlist,programmeText,watchlistText);
