@@ -2573,19 +2573,31 @@ async function batchIdle(env,body,pre){
 }
 // What a refusal of the manifest never does: it creates no run, Event, diagnostics row or `latest-run`, and it does not pass through the start's stop recorder.
 // AIR-542: the proof that a queue revision or manifest change between the baseline preflight and the post-lease preflight is a re-rank and nothing else. Returns null when proven, else the
-// refusal cause. The proof compares the queue itself, not the manifest hash: every field outside PRIORITY_QUEUE_FIELDS (work and migration share, retries, last batch, profile, contract,
-// compatibility versions, recovery revision, shape) must be equal, and so must the set of queued films, so a change that decides WHICH films may be selected is never a re-rank. A rank-only
+// refusal cause. The proof compares the queue itself, not the manifest hash: every field outside PRIORITY_QUEUE_FIELDS (work and migration share compared per film and independent of key
+// order, retries, last batch, profile, contract, compatibility versions, recovery revision, shape) must be equal, and so must the set of queued films. `pending`, `hotPending` and `coldPending`
+// are ordered by rank and `pending` takes every hot film, so a real rebuild that promotes a film reorders and resizes `pending`: only the union of the three is compared. A change that decides WHICH films may be selected is never a re-rank. A rank-only
 // revision may leave the delivered manifest byte-identical (films outside the first `manifestSize` re-ranked): that is proven the same way and the run continues. When the manifest differs the
 // films present in both must keep plan, metadata and fingerprint, and a film the new selection dropped must not have been skipped as no longer admitted or current, nor be staged elsewhere.
 // `again` was read under the owned lease, so it stays the manifest that is delivered.
-const PRIORITY_QUEUE_FIELDS=new Set(['hotCount','coldCount','coldWithoutPrediction','hotPredicted','priority','priorityBasis','priorityAsOf','priorityCount','priorityNextChangeAt','showsSignature','urgentCount','coldRemaining','hotPending','coldPending','refreshedAt','trigger','metrics','discovery','compatibility']);
+const PRIORITY_QUEUE_FIELDS=new Set(['pending','work','hotCount','coldCount','coldWithoutPrediction','hotPredicted','priority','priorityBasis','priorityAsOf','priorityCount','priorityNextChangeAt','showsSignature','urgentCount','coldRemaining','hotPending','coldPending','refreshedAt','trigger','metrics','discovery','compatibility']);
 async function priorityOnlyRebaseCause(env,pre,again){
  if(again.report?.runId!==pre.report?.runId||again.queue?.programmeRunId!==pre.queue?.programmeRunId)return 'programme';
  const a=pre.manifest.body,b=again.manifest.body;
  if(a.profile?.hash!==b.profile?.hash||JSON.stringify(a.contract)!==JSON.stringify(b.contract))return 'contract';
- const rest=queue=>{const out={};for(const key of Object.keys(queue).sort())if(!PRIORITY_QUEUE_FIELDS.has(key))out[key]=queue[key];return JSON.stringify(out);};
- const members=queue=>JSON.stringify([...new Set([...(queue.pending||[]),...(queue.hotPending||[]),...(queue.coldPending||[])])].sort());
+ // Canonical: object keys sorted at every depth. A real rebuild orders `pending` by priority and builds `work` in that order, so neither list order nor key insertion order is meaning.
+ const stable=v=>Array.isArray(v)?v.map(stable):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,stable(v[k])])):v;
+ const rest=queue=>{const out={};for(const key of Object.keys(queue))if(!PRIORITY_QUEUE_FIELDS.has(key))out[key]=queue[key];return JSON.stringify(stable(out));};
+ const set=list=>JSON.stringify([...new Set(list||[])].sort());
+ const members=queue=>set([...(queue.pending||[]),...(queue.hotPending||[]),...(queue.coldPending||[])]);
  if(rest(pre.queue)!==rest(again.queue)||members(pre.queue)!==members(again.queue))return 'queue';
+ // `work` is built for the films of `pending` only, so a promoted film gains an entry and a demoted one loses it: that follows the rank. For every film that has one on both sides the classification
+ // (class, migration, reason, fields) must be equal, which is what the migration-share cap reads.
+ const w0=pre.queue.work||{},w1=again.queue.work||{};
+ for(const id of Object.keys(w0))if(id in w1&&JSON.stringify(stable(w0[id]))!==JSON.stringify(stable(w1[id])))return 'queue';
+ // An entry that appears or disappears must belong to the films that entered or left `pending`: a classification written for a film outside it is not a rebuild's.
+ const p0=new Set(pre.queue.pending||[]),p1=new Set(again.queue.pending||[]);
+ for(const id of Object.keys(w1))if(!(id in w0)&&!p1.has(id))return 'queue';
+ for(const id of Object.keys(w0))if(!(id in w1)&&!p0.has(id))return 'queue';
  if(again.manifest.hash===pre.manifest.hash)return null;
  // The queue's selection inputs are the same, so a different manifest under an unchanged revision is a change of film state, not of rank.
  if(again.revision===pre.revision)return 'manifest';

@@ -192,7 +192,7 @@ mode='ok';
   e.ctx.PublishedEpg={
    currentGeneration:async()=>({authority:'d1',programmeRunId:'p1',phase:'published',fence:'d1:1:p1',generation:1}),
    readDocumentAt:async(env,run,kind)=>e.records.get(kind==='watchlist'?'watchlist.json':'programme.json')??null,
-   assignedShowsSignature:async()=>{const n=state.calls++;if(n===1&&state.down)throw new Error('d1 down');if(n===0&&state.mutate)await state.mutate();return state.sig[Math.min(n,state.sig.length-1)];},
+   assignedShowsSignature:async()=>{const n=state.calls++;if(n===1&&state.down)throw new Error('d1 down');const value=state.signature??state.sig[Math.min(n,state.sig.length-1)];if(n===0&&state.mutate)await state.mutate();return value;},
   };
   e.records.set('programme.json',{runId:'p1',films:[],catalogFilms:[]});e.records.set('sync.json',{runId:'p1',stage:'complete'});
   assert.equal((await e.api('queue/reconcile',{})).status,200);
@@ -233,6 +233,29 @@ mode='ok';
   w.state.mutate=()=>w.edit(q=>{q.work={...(q.work||{}),tmdb_1:{migration:true},tmdb_2:{migration:true},tmdb_3:{migration:true}};});
   const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');assert.equal(runs(),0,'no run was persisted on the refusal');
   assert.notEqual(r.data.status,'running');void leaseBefore;}
+ // Third-round cases: the REAL `queue/reconcile` (buildPredictionQueue) runs between the baseline and the post-lease preflights. A Discovery assignment promotes tmdb_8 from cold to hot on the same generation;
+ // the real rebuild reorders and resizes `pending` (watchlist films tmdb_1..4) and rebuilds `work`. The start must keep its slot on the hot film, and the next natural start continues from that ranking.
+ {const realRebuild=async(w,after=null)=>{
+   const watch=[1,2,3,4].map(n=>({id:'tmdb_'+n,title:'tmdb_'+n,original:'tmdb_'+n,year:2020,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,genres:[],actors:[],directors:[],shows:[{start:nowMs-10*86400000}]}));
+   w.e.records.set('programme.json',{runId:'p1',films:watch,catalogFilms:[]});
+   assert.equal((await w.e.api('queue/reconcile',{})).status,200);
+   w.state.mutate=async()=>{
+    w.state.signature='s1';w.e.records.set('programme.json',{runId:'p1',films:watch,catalogFilms:[{tmdbId:'8',shows:[{channelId:'c',channel:'C',start:nowMs-600000,end:nowMs+7200000,basis:'discovery'}]}]});
+    {const head=await PredictionD1.openQueue(w.e.env),report=w.e.records.get('programme.json'),rebuilt=await w.e.ctx.buildPredictionQueue(w.e.env,report,'manual_reconcile',head.queue);assert.ok(await PredictionD1.writeQueue(w.e.env,head,rebuilt),'the real rebuild committed');w.state.rebuilt=rebuilt;}
+    if(after)await after();
+   };
+  };
+  {const w=await make();w.state.signature='s0';await realRebuild(w);const before=(await w.read()).queue;assert.deepEqual(before.pending,['tmdb_1','tmdb_2','tmdb_3','tmdb_4'],'baseline pending: the watchlist films');
+   const r=await w.start();assert.equal(r.status,200,JSON.stringify(r.data).slice(0,260));assert.equal(r.data.status,'running','a real priority-only rebuild keeps the slot');
+   
+   const rebuilt=w.state.rebuilt;assert.equal(JSON.stringify(rebuilt.hotPending),'["tmdb_8"]');assert.equal(JSON.stringify(rebuilt.pending),'["tmdb_8","tmdb_1","tmdb_2","tmdb_3","tmdb_4"]','the real rebuild reordered and resized pending, which a hand-edited queue never does');assert.notEqual(JSON.stringify(rebuilt.pending),JSON.stringify(before.pending));
+   w.state.mutate=null;const next=await w.start();assert.equal(next.status,200);}
+  // Negative, on the real rebuild: a film that left the queue, and a changed work/migration classification, are not a re-rank.
+  {const w=await make();w.state.signature='s0';await realRebuild(w,()=>w.edit(q=>{q.coldPending=q.coldPending.filter(x=>x!=='tmdb_7');q.pending=q.pending.filter(x=>x!=='tmdb_7');}));
+   const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');}
+  {const w=await make();w.state.signature='s0';await realRebuild(w,()=>w.edit(q=>{q.work={...(q.work||{}),tmdb_5:{...(q.work?.tmdb_5||{}),migration:'fingerprint'}};}));
+   const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');}
+ }
  // The reviewer's second case: the signature is still due at the lease AND a selected film's retry record changed. priorityDue must not excuse the non-priority change.
  {const w=await make();w.state.sig=['s0','s1'];w.state.mutate=()=>w.edit(q=>{q.retries={...(q.retries||{}),tmdb_2:{attempts:1}};});
   const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');}
