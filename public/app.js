@@ -284,7 +284,10 @@ function noteDegraded(key,body,kind='mirror'){
  return degradedSignature()!==before;
 }
 function degradedSignature(){return [...degradedSources.entries()].map(([key,item])=>key+':'+item.kind).sort().join('|');}
-function mirrorSnapshotShown(){for(const item of degradedSources.values())if(item.kind==='mirror')return true;return false;}
+// Scoped to the data being rendered: the PROGRAMME is a saved copy (every programme film), or one FILM object came from a saved copy (`mirrorCopy`). A mirror-backed film that is open
+// does not make the separately valid D1 programme lose its availability (decision A: separately valid authoritative data stays visible); only the write fence is global.
+function mirrorSnapshotShown(){return degradedSources.get('programme')?.kind==='mirror';}
+function savedCopyFilm(film){return mirrorSnapshotShown()||film?.mirrorCopy===true;}
 // The saved schedule of a film, as stored: historical, never classified as archive, on air or soon.
 function savedShows(film){return (film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null);}
 const stampIso=ms=>Number.isFinite(ms)?new Date(ms).toISOString():null;
@@ -312,7 +315,7 @@ async function ensureCatalogFilm(tmdb,{refresh=false}={}){
   let body=null;try{body=await response.json();}catch{}
   const status=typeof body?.status==='string'?body.status:'';
   if(response.ok&&status==='found'&&body.film&&String(body.film.tmdbId)===tmdb&&body.film.canonicalIdentity==='tmdb:'+tmdb){
-   next={state:'found',film:body.film,programmeRunId:body.programmeRunId||null,at:Date.now()};
+   next={state:'found',film:body.source==='mirror'&&body.readOnly===true?{...body.film,mirrorCopy:true}:body.film,programmeRunId:body.programmeRunId||null,at:Date.now()};
    if(body.source==='mirror'&&body.readOnly===true){next.mirror=true;noteDegraded('film:'+tmdb,body,'mirror');}
    else if(clearDegraded('film:'+tmdb)&&programmeReady&&typeof renderPreservingScroll==='function')renderPreservingScroll();
   }
@@ -859,7 +862,7 @@ function eligible(film) { const parsed=searchTokens(state.query); const matched=
 // film state comes only from `filmAvail`. `channels` overrides the selection (an empty or absent set means every channel).
 function filmLifecycle(film,now=viewingClock(),channels=state.channels){
  // ADR 0177 decision 5 (owner A): a saved copy keeps its historical schedule, but no state about the PRESENT (archive, on air, soon, last chance) is derived from it.
- if(film&&mirrorSnapshotShown())return {avail:null,archive:[],ahead:[],saved:savedShows(film)};
+ if(film&&savedCopyFilm(film))return {avail:null,archive:[],ahead:[],saved:savedShows(film)};
  const lib=availabilityLib();if(!lib||!film)return {avail:null,archive:[],ahead:[]};
  const model=viewingWindow(now),shows=findsWindowShows(film,now,channels?.size?{channels}:null).filter(show=>inEnvelope(model,show.start)),avail=filmAvail(film,now,shows),archive=[],ahead=[];
  for(const show of shows){const info=lib.showPhase({start:show.start,end:show.end},now,{runtimeMinutes:film.runtime}),phase=info.phase;if(phase==='archive')archive.push(show);else if(phase==='on_air'||phase==='future')ahead.push({...show,effectiveEnd:info.end});}
@@ -1014,7 +1017,7 @@ function filmAvailabilityHead(avail,now,count){
  return `<div class="film-avail-head" data-availability="${avail.state}">${pill}${note}</div>${hint}`;
 }
 function filmAvailability(film){
- if(mirrorSnapshotShown()){
+ if(savedCopyFilm(film)){
   // A saved copy: the historical schedule as stored, with no phase, archive deadline or «скоро» claim; current availability is unverified.
   const saved=savedShows(film).sort((a,b)=>a.start-b.start);
   return `<section class="film-section film-availability" aria-label="Показы"><h2>Показы</h2><p class="film-hint">Расписание из сохранённой копии, как оно было сохранено. Доступность сейчас не проверена.</p>${saved.length?`<div class="film-show-list">${saved.map(show=>filmShowRow(show,null)).join('')}</div>`:'<p class="film-missing">В сохранённой копии нет показов этого фильма</p>'}</section>`;
@@ -1412,7 +1415,7 @@ const findsMarks=new Map();let findsNotice=null;
 // clock and needs no new request. Without the module (an isolated test context) it answers `null` and every consumer keeps its previous behavior.
 function availabilityLib(){return typeof FilmAvailability==='undefined'?null:FilmAvailability;}
 function filmAvail(film,now=viewingClock(),shows=film?.shows){
- if(mirrorSnapshotShown())return null;
+ if(savedCopyFilm(film))return null;
  const lib=availabilityLib();if(!lib||!film)return null;
  const list=(shows||[]).map(show=>({start:showStart(show),end:show?.end})).filter(show=>show.start!==null);
  return lib.filmAvailability(list,now,{runtimeMinutes:film.runtime});
@@ -2304,7 +2307,11 @@ async function loadProgramme({quiet}={}){
   }
   const recovered=!(data.source==='mirror'&&data.readOnly===true)&&clearDegraded('programme');
   if(recovered)loadStarted({quiet:true});
-  if(!(data.source==='mirror'&&data.readOnly===true))programmeLoadedAt=Date.now();
+  if(!(data.source==='mirror'&&data.readOnly===true)){
+   programmeLoadedAt=Date.now();
+   // D1 answers again: films that were shown from a saved copy are asked again, so their read-only state ends by an authoritative read of their own.
+   for(const [key,item] of degradedSources)if(key.startsWith('film:')&&item.kind==='mirror')ensureCatalogFilm(key.slice(5),{refresh:true});
+  }
   programmeRefreshError=false;
   const changed=installProgramme(data);
   if(recovered&&!changed&&programmeReady)refreshDegradedViews();

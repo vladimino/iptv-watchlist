@@ -141,6 +141,38 @@ assert.deepEqual(fetches.filter(item=>item.method!=='GET'),[]);
  run('clearDegraded("programme")');
 }
 
+// ---- 3c. mixed authority: a valid D1 programme keeps its availability while ONE film outside it is shown from a saved copy ----
+{
+ const hourMs=3600000,at=Date.now();
+ const shows=[{channelId:'c',channel:'Канал',start:at-3*hourMs,end:at-hourMs}];
+ const d1Film={...film,id:'tmdb_42',shows};
+ const win={from:at-72*hourMs,to:at+24*hourMs};
+ reset();
+ run(`films=[input];report={runId:"R9",updatedAt:"2026-11-19T10:00:00Z",window:${JSON.stringify(win)},people:{directors:[],actors:[]}};enrichment={profile:null,films:{}};ratingsLoaded=true;startedReady=true;startedIds=new Set();startedLoading=false;savingStarted.clear()`,d1Film);
+ const before=plain(run('periodShows(films[0],"all")')).length;
+ assert.ok(run('filmLifecycle(films[0])').avail,'the authoritative programme has a lifecycle');
+ // Open a film that is NOT in the programme and whose catalog read alone fell back to a saved copy.
+ plan.set('/api/catalog/film/99',{status:200,body:{status:'found',programmeRunId:'R1',film:entry(99,{shows}),...meta}});await open('tmdb_99');
+ assert.equal(run('degradedSources.get("film:99").kind'),'mirror');assert.equal(run('mirrorSnapshotShown()'),false,'the programme is not a saved copy');
+ const mirrored=run('resolveFilm("tmdb_99").film');
+ assert.equal(run('savedCopyFilm(input)',mirrored),true);assert.equal(run('filmLifecycle(input).avail',mirrored),null,'the mirror-backed film makes no present-tense claim');
+ assert.doesNotMatch(run('filmAvailability(input)',mirrored),/film-avail-head|Архив доступен до|В эфире/);
+ assert.ok(run('filmLifecycle(films[0])').avail,'the D1 programme film keeps its availability while the other film is a saved copy');
+ assert.equal(plain(run('periodShows(films[0],"all")')).length,before);assert.doesNotMatch(run('card(films[0])'),/СОХРАНЁННОЕ РАСПИСАНИЕ/);
+ assert.match(run('filmAvailability(films[0])'),/film-avail-head/);
+ assert.equal(run('isDegraded()'),true,'the write fence stays global and conservative');assert.match(run('startedButton(films[0])'),/disabled/);
+ fetches.length=0;run('toggleStarted("tmdb_42")');await tick();assert.deepEqual(fetches.filter(item=>item.method!=='GET'),[]);
+ // Navigating away does not change the programme's availability either.
+ run('filmScreen=null;applyFilmScreen(null)');await tick();
+ assert.ok(run('filmLifecycle(films[0])').avail,'after leaving the film the D1 programme still shows current availability');
+ // Recovery: an authoritative programme read asks the mirror-backed film again; its authoritative answer ends the read-only state.
+ run(stubs);plan.set('/api/programme',{status:200,body:{runId:'R9',films:[d1Film],window:win,updatedAt:'2026-11-19T10:00:00Z'}});
+ plan.set('/api/catalog/film/99',{status:200,body:{status:'found',programmeRunId:'R9',film:entry(99,{shows})}});
+ run('programmeLoading=false');assert.equal(await run('loadProgramme()'),true);await tick();await tick();await tick();
+ assert.equal(run('isDegraded()'),false,'the film was asked again and its authoritative answer ended the degradation');
+ assert.equal(run('catalogFilmReads.get("99").film.mirrorCopy'),undefined,'the authoritative film carries no saved-copy mark');
+}
+
 // ---- 4. the film page ----
 // A film proven by the mirrors is shown with the note and no write.
 reset();plan.set('/api/catalog/film/42',{status:200,body:{status:'found',programmeRunId:'R1',film:entry(42),...meta}});await open('tmdb_42');

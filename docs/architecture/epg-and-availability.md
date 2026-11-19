@@ -96,8 +96,9 @@ flowchart TD
     hard["Structural or authority refusal: 503 as before, no mirror read"]
     fence["published_epg_fence: 409, the client retries D1"]
     temp["Temporary: transport, timeout, overload, fence moved, load in progress"]
-    objects["Bounded read-only R2 GETs: pointer, generation copy, root, at most four older copies"]
+    objects["Bounded read-only R2 reads: pointer, its generation copy, root; older copies only if both fail, found by listing at most 5 pages of 1000 and ranked by upload time, at most 6 read"]
     valid{"Each object validated alone"}
+    other["Film not in the selected pair: the same bounded set of recent copies is searched"]
     degraded["200 with source mirror, readOnly, runId, asOf, joined, reason"]
     shell["Typed 503 and neutral shell with retry: nothing invented, never 404 or 410"]
     read --> d1
@@ -108,7 +109,10 @@ flowchart TD
     cls -->|"temporary"| temp
     temp --> objects --> valid
     valid -->|"at least one usable object"| degraded
-    valid -->|"none, or the film identity is not proven"| shell
+    valid -->|"film not listed"| other
+    other -->|"found in an older run"| degraded
+    other -->|"not found or contradictory"| shell
+    valid -->|"no usable object"| shell
 ```
 
 The mirror is read per object. The root `programme.json` is valid by its own `runId` even when `epg/published-generation.json` lags it; a programme and a watchlist are joined only as a best-effort heuristic (same run key, or the root pair of the pointer's run), and the response says so. Older generation copies are ranked by their upload time, not by their UUID run id. No `available`, `soon`, hot or last-chance state is recomputed from a stale snapshot: the schedule is shown as saved at its own time.
@@ -128,4 +132,4 @@ flowchart LR
     handler -->|"D1 cannot answer"| typed
 ```
 
-The page keeps the last good authoritative result only in memory. A saved-copy answer never replaces it, but any failed refresh makes the page read-only until an authoritative read succeeds; the normal source and the write actions return only then. A displayed saved copy keeps its historical schedule but yields no archive, on-air, soon or last-chance claim.
+The page keeps the last good authoritative result only in memory. A saved-copy answer never replaces it, but any failed refresh makes the page read-only until an authoritative read succeeds; the normal source and the write actions return only then. The write fence is global, but the loss of present-tense claims is scoped to the data being rendered: a saved programme, or one film that came from a saved copy, keeps its historical schedule without archive, on-air, soon or last-chance claims, while a separately valid authoritative programme keeps its availability even when another film is shown from a mirror. When D1 answers again, films shown from a saved copy are asked again.
