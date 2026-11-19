@@ -149,6 +149,8 @@ The programme generation unit is the one unit the executor cannot send as one re
 
 ## Enrichment projector (schema v4)
 
+> **Historical implementation (AIR-537 slice 3, 19 Nov 2026).** The enrichment projector, its runner and its write arms were removed from the repository; it had been off the cron since ADR 0155. The three tables below stay in the schema and `/api/d1/status` still counts their rows read-only; nothing writes them now. The method, input and TMDB-retirement text after the table describes the pre-retirement implementation and is not an executable or current contract.
+
 [ADR 0056](../../adr/0056-d1-enrichment-write-through.md): migration `0004` adds three tables.
 
 | Table | Holds |
@@ -387,6 +389,8 @@ D1 refuses to **evaluate** a `LIKE` or `GLOB` pattern longer than **50 bytes** (
 - `src/tmdb-retirement-decisions.js` is **not bundled into the Worker** and nothing calls it. `recordRetirementDecision` validates its input before any SQL, refuses unless the marker is `open`, proves the marker generation and the Film's revision in one batch, appends exactly one row and moves the revision. A `retire` is held (refused, nothing written) when another Film trusts the TV entry (`retirement_tv_collision`) or the retired movie id (`retirement_movie_on_other_film`), the Film has no `tmdb` row for the retired movie id (`retirement_movie_missing`), or it trusts another TMDB id (`retirement_identity_mismatch`); the same checks run inside the batch. `prepareRetirementImport` is the pure, prepare-only loader of the R2 object: it validates the body exactly like `tmdbRetirementSet` (tested for parity) and returns decisions with deterministic request ids, so a second load is all replays; it reads and writes nothing. `compareRetirementImport` is the compare-only classification (`same`, `missing`, `restored`, `differs`, `extra`). The actual load is a separate owner-gated step of AIR-373.
 
 ## Projector window (schema v18)
+
+> **The projector that requested this window was removed (AIR-537 slice 3).** The table, the Discovery request/grant/release functions and the `held` admission fence are retained and unchanged; with no projector, nothing requests a window and `D1_ENRICHMENT_WINDOW` is retired and ignored.
 
 [`migrations/0018_projector_window.sql`](../../../migrations/0018_projector_window.sql) ([ADR 0103](../../adr/0103-projector-exclusive-window.md)) adds one table, `projector_window`, with one seeded row: `id` 1, `state` one of `idle`, `requested`, `held` (`idle` has no `owner`; the other two have an `owner`, a `requested_at` and a positive `expires_at`), `owner` (the projector's lease id), `requested_at` and `expires_at` (epoch milliseconds, one absolute deadline for `requested` and `held` together, never extended; an expired row is idle for every reader and writer). It follows a complete version 17 and refuses anything else before the table is created; the version becomes 18 and never goes down. It writes no Film, Person or Discovery row. The file was applied to production on 2026-11-08 ([apply record](../../evidence/d1-migration/air-383-0018-apply-2026-11-08.md)). The Worker treats an absent table as no window, so a deploy before the file is applied changes nothing, and applying it changes nothing until the owner sets `D1_ENRICHMENT_WINDOW`.
 

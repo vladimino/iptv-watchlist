@@ -1,8 +1,9 @@
 // ADR 0103 (AIR-383), stage A: the exclusive projector window. Local sqlite stand-ins for D1 (the sqlite3 CLI, each batch one
 // transaction) and a memory bucket for R2. Nothing here calls Cloudflare, TMDB or production. Covered: the migration file, the
 // window protocol (request, grant, release) as atomic statements, Discovery admission closing, the three lease-free generation
-// writers, a stalled former lease holder, every generation bump statement having a fence or the window predicate, the projector under
-// a held window with the strict generation pin unchanged, and the failure and not-applicable paths. The 1,000-tick interleaving at the
+// writers, a stalled former lease holder, every generation bump statement having a fence or the window predicate, and the failure and
+// not-applicable paths. AIR-537 slice 3: the enrichment projector that ran under a held window is retired and its scenarios are removed;
+// the window table, protocol and Discovery fences are the retained contract. The 1,000-tick interleaving at the
 // end is a MODEL (seeded, assumptions stated in the code), not a measurement.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
@@ -313,4 +314,4 @@ assert.equal(DEADLINE,300000);assert.equal(MIN,120000);
  assert.equal(granted.expiresAt,T0+HEAD+DEADLINE);
 }
 
-console.log('Projector window (ADR 0103): migration 0018 refuses anything but a complete version 17 and seeds one idle row; with the table absent every path is as before; request, grant and release are atomic, an expired or late request is never granted and leaves no lease; admission closes while requested or held with a typed busy; the three lease-free generation writers are refused while held; a stalled former lease holder cannot commit; every generation bump has the lease fence or the window predicate; under a window the projector is productive with the generation pin unchanged, waits without a busy loop, defers with its own reasons when not granted, busy, expired or forced, tells the window lost from the lease lost, and writes nothing for the window when the flag is off, the table is absent or the run is dry; a seeded 1,000-tick model keeps the closed time within one deadline');
+console.log('Projector window (ADR 0103): migration 0018 refuses anything but a complete version 17 and seeds one idle row; with the table absent every path is as before; request, grant and release are atomic, an expired or late request is never granted and leaves no lease; admission closes while requested or held with a typed busy; the three lease-free generation writers are refused while held; a stalled former lease holder cannot commit; every generation bump has the lease fence or the window predicate; a seeded 1,000-tick model keeps the closed time within one deadline');
