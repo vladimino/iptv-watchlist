@@ -253,6 +253,7 @@ export const CORE_WEIGHTS={
  'epg-mirror-reconciliation.mjs':2,
  'epg-priority-gate.mjs':2,
  'epg-producer-m2b.mjs':2,
+ 'epg-run-certificate.mjs':2,
  'evidence-json-paths.mjs':2,
  'film-admission.mjs':2,
  'film-person-0019-preflight.mjs':2,

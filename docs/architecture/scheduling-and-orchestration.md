@@ -195,16 +195,16 @@ The projector's strict generation pin cannot pass while Discovery writes about s
 
 **Marker fence on every batch ([ADR 0116](../adr/0116-projector-marker-and-generation-fence-on-every-batch.md)).** Every `on` run reads the `film_person_authority` marker first (not `r2`/`prepared`: deferred `authority_unavailable`), and every per-entity and grouped write batch asserts mode, `cutover='open'` and generation inside the batch, so a marker move fails the batch whole (`authority_moved`).
 
-### EPG-priority Discovery pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md), Accepted; inert code delivered by AIR-459, not activated)
+### EPG-priority Discovery pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md), Accepted and live since 14 Nov 2026; release point moved by [ADR 0175](../adr/0175-epg-priority-holds-until-run-complete.md), Accepted, code by AIR-539)
 
-The gate code is in the Worker but inert: the migration `0022` is not applied, so there is no pause row in production and every statement is today's. Nothing in this section runs until a later, separately authorized activation. The sequence is the shape recorded for the owner decision on [AIR-458](https://trello.com/c/RrtTkNg1): new Discovery admission closes at 16:55 Europe/Madrid by a predicate on the lease write, with no business TTL and no cron at that minute. `sealArchive` moves the Discovery pin first and does not lift the pause. `publishGeneration` later switches the pointer and writes `published_epg_authority.madrid_run_key` from `sync.json.runKey`, frozen when that sync run started. A later Workflow that resumes the seal does not relabel the day with its own `runKey`. The day is not `published_at` and not the live orchestration control. An in-flight chunk may finish. EPG does not run Discovery; it may wait, without a failure count, while a Discovery lease is live. The projector window is a separate hold and is not drawn here. GitHub's own SVG of this figure is a reviewer's check of the blob; a headless session does not run GitHub's Mermaid enricher.
+The pause is live (migration `0022` applied). ADR 0175 changes **when it lifts**: not in the pointer batch but after the run is durably `stage=complete`, certified by one fenced D1 batch. That code is dormant until migration `0026` (two certificate columns) is applied under a separate owner GO; with the columns absent every statement is the ADR 0135 behaviour and the pause lifts at the pointer. The diagram shows the ADR 0175 behaviour once the columns exist: new Discovery admission closes at 16:55 Europe/Madrid by a predicate on the lease write, with no business TTL and no cron at that minute. `sealArchive` moves the Discovery pin first and does not lift the pause. `publishGeneration` later switches the pointer and writes `published_epg_authority.madrid_run_key` from `sync.json.runKey`, frozen when that sync run started. A later Workflow that resumes the seal does not relabel the day with its own `runKey`. The day is not `published_at` and not the live orchestration control. An in-flight chunk may finish. EPG does not run Discovery; it may wait, without a failure count, while a Discovery lease is live. The projector window is a separate hold and is not drawn here. GitHub's own SVG of this figure is a reviewer's check of the blob; a headless session does not run GitHub's Mermaid enricher.
 
 ```mermaid
 sequenceDiagram
     participant Disc as Discovery admission
     participant D1 as D1
     participant EPG as EPG publication
-    Note over Disc,EPG: Accepted, not live. No business TTL. No 16:55 cron.
+    Note over Disc,EPG: Pause live. ADR 0175 release point dormant until 0026. No business TTL. No 16:55 cron.
     Disc->>D1: New acquire after 16:55, pointer unchanged
     D1-->>Disc: Lease unchanged. epg_priority, no failure
     Note over D1: Second statement sets paused while the predicate holds
@@ -214,11 +214,16 @@ sequenceDiagram
     Note over EPG: Holder finishes or the 90 s lease expires
     EPG->>D1: Acquire, exempt from the pause
     Note over D1: sealArchive moves the pin. Pointer stays previous.
-    EPG->>D1: publishGeneration moves the pointer and clears the row if the pin matches
+    EPG->>D1: publishGeneration moves the pointer and resets the certificate. The pause stays closed.
     Disc->>D1: Previous programme id acquire
     D1-->>Disc: stale_generation, no lease
     Disc->>D1: Published programme id acquire
+    D1-->>Disc: epg_priority, awaiting_complete
+    Note over EPG: finalize, queue attempted, then sync.json stage complete in R2
+    EPG->>D1: Certify batch: mode revision and step lease fence, CAS on run and day, pause clear
+    Disc->>D1: Published programme id acquire
     D1-->>Disc: admitted
+    Note over EPG,D1: Hourly ensure certifies a complete but uncertified run. No Workflow, no control or sync.json write.
 ```
 
 ### Seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), implemented by AIR-484; production acceptance awaits a natural run)

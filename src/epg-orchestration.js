@@ -624,6 +624,52 @@ function frozenDay(run){
   }
  }
 
+ // ---- the completion certificate repair (ADR 0175 decision 5) -------------------------------------------------
+ // A separate certify-only unit, called from the hourly `ensure`. It is NOT routed through ensureWorkflow, act or drive, whose gates (`not_due`, `control.doneAt`,
+ // `day_rolled`) decide whether to schedule or drive a RUN and correctly refuse a finished or rolled one. It never creates a Workflow instance, runs a seal, a sync or a
+ // publication, and never writes `control`, `sync.json`, the completion receipt or R2. Its only D1 write is the one fenced certify batch (step lease, mode revision, CAS on the
+ // pointer's programme run and Madrid day, atomic pause clear), followed by a readback. Anything stale, contradicting or unreadable does nothing.
+ async function owedCertificate(env){
+  let run;
+  try{run=await loadJSON(env,'sync.json');}catch{return {owed:false,reason:'sync_unreadable'};}
+  if(!run||run.stage!=='complete'||typeof run.runId!=='string'||!run.runId)return {owed:false,reason:'not_owed'};
+  const day=frozenDay(run);
+  if(day===null)return {owed:false,reason:'day_unproven'};
+  const proof=await completion(env,run);
+  if(proof.state==='unreadable')return {owed:false,reason:'d1_unavailable'};
+  if(proof.state!=='proven')return {owed:false,reason:'not_owed'};
+  let certificate;
+  try{certificate=await PublishedEpg.readCertificate(env);}catch{return {owed:false,reason:'d1_unavailable'};}
+  if(certificate.column!=='present')return {owed:false,reason:'column_absent'};
+  if(certificate.programmeRunId!==run.runId||certificate.madridRunKey!==day)return {owed:false,reason:'not_owed'};
+  if(certificate.finalizedRunId===run.runId)return {owed:false,reason:'certified'};
+  return {owed:true,runId:run.runId,day};
+ }
+ async function certifyComplete(env,{now=Date.now()}={}){
+  if(typeof PublishedEpg?.certifyRun!=='function'||typeof PublishedEpg?.readCertificate!=='function')return {ran:false,reason:'unavailable'};
+  let mode;
+  try{mode=await readMode(env);}catch{return {ran:false,reason:'mode_unreadable'};}
+  if(!mode.schema||mode.malformed||mode.record?.mode!=='cloudflare')return {ran:false,reason:'not_owed'};
+  // The cheap, lease-free check first: a run that needs nothing never takes the step lease.
+  const first=await owedCertificate(env);
+  if(!first.owed)return {ran:false,reason:first.reason};
+  let taken;
+  try{taken=await acquireStep(env,{kind:'certify',modeRevision:mode.revision,now});}catch{return {ran:false,reason:'lease_unreadable'};}
+  if(taken.reason)return {ran:false,reason:taken.reason};
+  if(taken.busy)return {ran:false,reason:'step_lease_held',until:iso(taken.until)};
+  const fe=fencedEnv(env,mode.revision,taken.step);
+  try{
+   // The world may have changed between the cheap check and the lease: the same check again, now holding it.
+   const second=await owedCertificate(fe);
+   if(!second.owed)return {ran:false,reason:second.reason};
+   const stamp=Date.now();
+   const out=await PublishedEpg.certifyRun(fe,{programmeRunId:second.runId,madridRunKey:second.day,step:taken.step,epgFence:fe.epgFence,leaseBound:iso(stamp+BOUNDARY_MARGIN_MS),now:stamp});
+   return {ran:true,certified:out.certified===true,reason:out.certified?'certified':'readback_mismatch',runId:second.runId};
+  }catch(error){
+   return {ran:true,certified:false,reason:error?.code||'error'};
+  }finally{await endStep(env,taken.step).catch(()=>false);}
+ }
+
  // ---- the cron `ensure` ---------------------------------------------------------------------------------------
  // Mirror reconcile on every hourly tick (even when the daily publication is not due), then at most a few reads and at
  // most one Workflow create. Safe under duplicate and overlapping firings: the control record is claimed by
@@ -631,13 +677,16 @@ function frozenDay(run){
  async function ensure(env,{now=Date.now(),random=Math.random}={}){
   const mirrors=await reconcileMirrors(env,{now});
   const result=await ensureWorkflow(env,{now,random});
+  // ADR 0175: the certificate repair, after the Workflow reconcile. Reported only when it ran or waited for a live step lease: an idle tick keeps the result unchanged.
+  let certificate=null;
+  try{certificate=await certifyComplete(env,{now});}catch(error){certificate={ran:false,reason:error?.code||'error'};}
   let producer={ran:false,reason:'unavailable'};
   try{
    if(typeof CanonicalProducerWorkflow!=='undefined'&&typeof CanonicalProducerWorkflow.reconcileProducerChain==='function'){
     producer=await CanonicalProducerWorkflow.reconcileProducerChain(env,{now});
    }
   }catch(error){producer={ran:false,reason:error?.code||'error'};}
-  return {...result,mirrors,producer};
+  return {...result,mirrors,...(certificate&&(certificate.ran===true||certificate.reason==='step_lease_held')?{certificate}:{}),producer};
  }
  async function ensureWorkflow(env,{now=Date.now(),random=Math.random}={}){
   let mode;
@@ -755,6 +804,6 @@ function frozenDay(run){
    failure:{class:c.failure?.class??null,code:c.failure?.code??null,fingerprint:c.budget?.fingerprint??null,consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,caps:policy().BUDGET_CAPS},
    cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,...(c.handoff?{handoff:{fromSeries:c.handoff.fromSeries??null,toSeries:c.handoff.toSeries??null,at:c.handoff.at??null,successorPending:c.phase==='starting'&&!c.doneAt&&liveness==='absent'}}:{}),health,sideEffects:'none'};
  }
- return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,reconcileMirrors,readModel,drainState,classifyThrown,checkpointKey,progressCount,sealClaimPending,createSuccessor};
+ return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,certifyComplete,reconcileMirrors,readModel,drainState,classifyThrown,checkpointKey,progressCount,sealClaimPending,createSuccessor};
 })();
 async function runEpgWorkflow(env,payload,step){return EpgOrchestration.run(env,payload,step);}

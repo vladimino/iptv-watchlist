@@ -145,3 +145,9 @@ The Ratings owner switch is a high-impact L3 operation requiring an owner-approv
 ## A Discovery Workflow instance that errors (AIR-360)
 
 Read-only: `epg_pipeline_status` (`discoveryExecutor`), the instance steps in Cloudflare (`owner`, `plan` and `chunk` step outputs and attempts) and the Worker log line `discovery_workflow_step_failed`, which carries the bounded cause and the statement count of the instance. A step failure that the instance recognises as transient (`discovery_unavailable` or a transient class) is recovered by the instance itself at `recovery.dueAt` ([ADR 0098](../adr/0098-discovery-workflow-step-failure-recovery.md)); its record reads `stopped` with reason `step_failure` while the instance sleeps. An instance that errors for any other reason, is killed by the platform, or fails to arm is replaced by the hourly cron through `recovery.dueAt`; do not start, terminate or reset anything by hand without an owner decision. An instance that ends near 6,000 statements is the planned handover ([ADR 0094](../adr/0094-discovery-workflow-invocation-budget.md)), not an error.
+
+## EPG run certificate: deploy and rollback holdpoint (AIR-539, [ADR 0175](../adr/0175-epg-priority-holds-until-run-complete.md))
+
+- **Order.** (1) Deploy the code; it is dormant while `published_epg_authority.finalized_run_id` is absent. (2) A separate owner GO applies `0026` ([runbook](epg-run-certificate-0026-apply.md)). (3) Read-only preflight that the deployed version is the certificate code and no older instance is live. A deploy never applies the migration.
+- **Mixed versions.** A Worker without the code ignores the columns, lifts the pause at the pointer and never certifies. Do not roll back after the apply without an owner decision; the monitoring runbook has the signature.
+- **Absent vs unreadable.** A verified-absent column is today's behaviour. An unreadable introspection admits no Discovery (the EPG role is exempt).

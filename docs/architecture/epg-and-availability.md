@@ -1,6 +1,6 @@
 # EPG publication and availability
 
-The active programme is a **published-generation projection**, not an append-only lifetime schedule. Accepted [ADR 0135](../adr/0135-epg-priority-discovery-pause.md) gives this publication priority over new Discovery admission until the generation is handed off. Its gate code is delivered inert (AIR-459) and is not activated, and the diagram below does not draw it. Sources: [EPG publication ADR](../adr/0008-atomic-epg-publication.md), [Film/Person availability contract](../reference/domain/film-person.md), [discovery reference](../reference/domain/candidate-discovery.md), and [Worker routing](../../src/worker.js).
+The active programme is a **published-generation projection**, not an append-only lifetime schedule. Accepted [ADR 0135](../adr/0135-epg-priority-discovery-pause.md) gives this publication priority over new Discovery admission until the generation is handed off. The pause is live in production; [ADR 0175](../adr/0175-epg-priority-holds-until-run-complete.md) (Accepted; code delivered by [AIR-539](https://trello.com/c/2eYDrWBS), dormant until migration `0026` is applied under a separate owner GO) moves its release from the pointer switch to a durable completion certificate, drawn below as the last step. Sources: [EPG publication ADR](../adr/0008-atomic-epg-publication.md), [Film/Person availability contract](../reference/domain/film-person.md), [discovery reference](../reference/domain/candidate-discovery.md), and [Worker routing](../../src/worker.js).
 
 ```mermaid
 flowchart TD
@@ -12,6 +12,9 @@ flowchart TD
     readers["Programme / film page / availability readers"]
     window["Availability projection:<br/>past 72h, future 24h for hot"]
     ensure["Hourly ensure: R2 mirrors"]
+    finish["finalize, queue and stage complete:<br/>sync.json complete in R2"]
+    certificate[("D1 certificate finalized_run_id:<br/>one fenced batch, then Discovery admitted")]
+    repair["Hourly ensure certifyComplete:<br/>certify-only repair, no new publication"]
     previous["Prior published generation remains readable"]
     stale{"Writer still owns pinned generation?"}
     update["Apply generation-scoped catalogue/decision update"]
@@ -19,6 +22,8 @@ flowchart TD
     source --> parse --> staging --> seal --> pointer
     pointer --> readers --> window
     pointer --> ensure
+    pointer --> finish --> certificate
+    ensure -.->|complete but not certified| repair --> certificate
     seal -.->|until pointer switch| previous
     pointer --> stale
     stale -->|yes| update
@@ -45,7 +50,7 @@ The 72-hour catch-up and the rolling 24 hours are the existing [EPG horizons](..
 
 The publication pointer changes **after** the complete generation exists, and with D1-authoritative discovery after its ledger is sealed ([ADR 0092](../adr/0092-resumable-bounded-ledger-seal.md)): the commit stages the generation and returns, bounded `epg_sync_step` calls seal the ledger, update the catalog and publish, and the previous generation stays readable meanwhile. A partial write does not expose mixed versions. A newly published generation replaces its current show lists; current availability does not carry forward old shows. Show observations and `epgLastAiring` are not permanent Film identity attributes. Where the published generation is known, absent or mismatched `showsProgrammeRunId` cannot prove the film is hot; explicit `shows: []` means no known availability.
 
-After the pointer switch the commit opens the discovery series of the new generation before its memory-heavy tail (watchlist and events, prediction queue, ratings); the write is fenced to the published generation and keeps a live writer or an existing series of the same generation. See [ADR 0030](../adr/0030-discovery-queued-at-publication.md). Under a live D1 pin `persistWatchlist` does not call `saveWatchlist`: the publish commit already wrote the watchlist, and a second `generation + 1` is forbidden ([ADR 0142](../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 14). If the pin cannot be read, the tail writes nothing and the error propagates so the bounded step can retry. A successful read that yields `null` still copies `watchlist.json` when `updatedAt` differs (R2 authority). The tail's prediction queue rebuild is a conditional write that rebuilds on conflict with another queue writer ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31). A conflict it cannot resolve is recorded as `enrichmentQueueError` and does not fail the commit.
+After the pointer switch the commit queues the discovery series of the new generation before its memory-heavy tail (with the ADR 0175 certificate column present, that series is admitted only after the run is `stage=complete` and certified; the pointer switch no longer releases the pause) (watchlist and events, prediction queue, ratings); the write is fenced to the published generation and keeps a live writer or an existing series of the same generation. See [ADR 0030](../adr/0030-discovery-queued-at-publication.md). Under a live D1 pin `persistWatchlist` does not call `saveWatchlist`: the publish commit already wrote the watchlist, and a second `generation + 1` is forbidden ([ADR 0142](../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 14). If the pin cannot be read, the tail writes nothing and the error propagates so the bounded step can retry. A successful read that yields `null` still copies `watchlist.json` when `updatedAt` differs (R2 authority). The tail's prediction queue rebuild is a conditional write that rebuilds on conflict with another queue writer ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31). A conflict it cannot resolve is recorded as `enrichmentQueueError` and does not fail the commit.
 
 A watchlist showing is attached only when the alias index leaves one trusted identity ([ADR 0151](../adr/0151-epg-known-film-title-collision.md), Accepted). The same normalized title on two catalog identities, with no year in the EPG title and runtimes inside each other's contradiction band, is not a Film showing: the slot is an ordinary discovery observation. A year within one of exactly one identity still attaches that film, unless the runtime is beyond `max(45 minutes, 40%)`. A catalog confirmation is stored per slot and becomes the observation's confirmed id only when every retained slot agrees. `stats.identityCollision` counts withheld hot-window slots. The publication diagram is unchanged.
 
