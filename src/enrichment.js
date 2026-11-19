@@ -2594,10 +2594,11 @@ async function priorityOnlyRebaseCause(env,pre,again){
  // (class, migration, reason, fields) must be equal, which is what the migration-share cap reads.
  const w0=pre.queue.work||{},w1=again.queue.work||{};
  for(const id of Object.keys(w0))if(id in w1&&JSON.stringify(stable(w0[id]))!==JSON.stringify(stable(w1[id])))return 'queue';
- // An entry that appears or disappears must belong to the films that entered or left `pending`: a classification written for a film outside it is not a rebuild's.
+ // An entry may appear only for a film that ENTERED `pending` (not in it before, in it now) and disappear only for one that LEFT it. A film pending on both sides keeps its entry: adding or
+ // deleting it changes the migration share, which is not a re-rank.
  const p0=new Set(pre.queue.pending||[]),p1=new Set(again.queue.pending||[]);
- for(const id of Object.keys(w1))if(!(id in w0)&&!p1.has(id))return 'queue';
- for(const id of Object.keys(w0))if(!(id in w1)&&!p0.has(id))return 'queue';
+ for(const id of Object.keys(w1))if(!(id in w0)&&!(!p0.has(id)&&p1.has(id)))return 'queue';
+ for(const id of Object.keys(w0))if(!(id in w1)&&!(p0.has(id)&&!p1.has(id)))return 'queue';
  if(again.manifest.hash===pre.manifest.hash)return null;
  // The queue's selection inputs are the same, so a different manifest under an unchanged revision is a change of film state, not of rank.
  if(again.revision===pre.revision)return 'manifest';

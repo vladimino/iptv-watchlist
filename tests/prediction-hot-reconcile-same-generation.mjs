@@ -250,6 +250,22 @@ mode='ok';
    
    const rebuilt=w.state.rebuilt;assert.equal(JSON.stringify(rebuilt.hotPending),'["tmdb_8"]');assert.equal(JSON.stringify(rebuilt.pending),'["tmdb_8","tmdb_1","tmdb_2","tmdb_3","tmdb_4"]','the real rebuild reordered and resized pending, which a hand-edited queue never does');assert.notEqual(JSON.stringify(rebuilt.pending),JSON.stringify(before.pending));
    w.state.mutate=null;const next=await w.start();assert.equal(next.status,200);}
+  // Fourth-round: the work entry of a film that stays in `pending` on both sides may be neither deleted nor added by a concurrent writer, even with a real promotion beside it.
+  {const w=await make();w.state.signature='s0';await realRebuild(w,()=>w.edit(q=>{delete q.work.tmdb_2;}));
+   const runs=()=>sql(w.e.file,'SELECT count(*) AS n FROM prediction_run')[0].n;
+   const r=await w.start();assert.equal(r.status,409,'a work entry deleted for a film that stays pending: '+JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');assert.equal(runs(),0,'no run persisted');}
+  {const w=await make();w.state.signature='s0';await realRebuild(w);await w.edit(q=>{delete q.work.tmdb_2;});
+   const runs=()=>sql(w.e.file,'SELECT count(*) AS n FROM prediction_run')[0].n;
+   const r=await w.start();assert.equal(r.status,409,'a work entry added for a film that stays pending: '+JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');assert.equal(runs(),0,'no run persisted');}
+  // Positive counterpart: a film demoted from hot to cold leaves `pending` and loses its work entry, which a real rebuild does and the proof allows.
+  {const w=await make();w.state.signature='s1';
+   const watch=[1,2,3,4].map(n=>({id:'tmdb_'+n,title:'tmdb_'+n,original:'tmdb_'+n,year:2020,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,genres:[],actors:[],directors:[],shows:[{start:nowMs-10*86400000}]}));
+   w.e.records.set('programme.json',{runId:'p1',films:watch,catalogFilms:[{tmdbId:'8',shows:[{channelId:'c',channel:'C',start:nowMs-600000,end:nowMs+7200000,basis:'discovery'}]}]});
+   assert.equal((await w.e.api('queue/reconcile',{})).status,200);const hotBefore=(await w.read()).queue;assert.equal(JSON.stringify(hotBefore.hotPending),'["tmdb_8"]');assert.ok('tmdb_8' in hotBefore.work,'the hot film has a work entry');
+   w.state.mutate=async()=>{w.state.signature='s2';w.e.records.set('programme.json',{runId:'p1',films:watch,catalogFilms:[]});
+    const head=await PredictionD1.openQueue(w.e.env),rebuilt=await w.e.ctx.buildPredictionQueue(w.e.env,w.e.records.get('programme.json'),'manual_reconcile',head.queue);assert.ok(await PredictionD1.writeQueue(w.e.env,head,rebuilt));w.state.rebuilt=rebuilt;};
+   const r=await w.start();assert.equal(r.status,200,JSON.stringify(r.data).slice(0,260));assert.equal(r.data.status,'running','a real demotion keeps the slot');
+   assert.ok(!('tmdb_8' in w.state.rebuilt.work),'the demoted film lost its work entry');assert.equal(JSON.stringify(w.state.rebuilt.hotPending),'[]');}
   // Negative, on the real rebuild: a film that left the queue, and a changed work/migration classification, are not a re-rank.
   {const w=await make();w.state.signature='s0';await realRebuild(w,()=>w.edit(q=>{q.coldPending=q.coldPending.filter(x=>x!=='tmdb_7');q.pending=q.pending.filter(x=>x!=='tmdb_7');}));
    const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');}
