@@ -368,6 +368,8 @@ reset({});
 const [n0, n1, n2, n3, o0, o1, o2, o3] = ['n0', 'n1', 'n2', 'n3', 'o0', 'o1', 'o2', 'o3'].map(id => ev(id));
 archive = {first: {events: [o0, o1], cursor: 'o'}, o: {events: [o2, o3], cursor: null}};
 await run('loadEvents(false)');
+scrollToEnd(); await settle(); // an older page is loaded: the cursor is now kept across refreshes
+assert.deepEqual(shownIds(), ['o0', 'o1', 'o2', 'o3']);
 archive = {first: {events: [n0, n1], cursor: 'm'}, m: {events: [n2, n3], cursor: 'o'}, o: {events: [o2, o3], cursor: null}};
 assert.equal(await run('loadEvents(false,{quiet:true})'), true);
 assert.deepEqual(shownIds(), ['n0', 'n1'], 'a disjoint first page restarts the list instead of leaving a hole');

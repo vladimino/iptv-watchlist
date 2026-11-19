@@ -12,7 +12,7 @@ The API returns the four hours in order on pages 3 and 4, between the 04:00Z and
 
 - `eventPage` lists `events/items/` (limit 20, reversed-timestamp keys), reads each object and returns the objects plus the R2 cursor. It writes nothing and drops nothing except an unreadable object.
 - `renderActivity` and the hourly Discovery card hide no event for `queueEmpty=false` or `status=running`.
-- `loadEvents(false)` (background refresh of the first page) merged the new page into `loadedEvents` and kept the old cursor. When more events arrived than one page holds, the new page shared no id with the loaded list, so the events between them were in no page the kept cursor would ever return. They stayed in R2 but never reached the list. This matches the symptom (23:00 and 04:00 shown, 00:00-03:00 missing).
+- `loadEvents(false)` (background refresh of the first page) merged the new page into `loadedEvents` and kept the old cursor. The cursor is kept once an older page has been loaded (or more than 20 events are loaded). When more events arrived than one page holds, the new page shares no id with the loaded list, so the events between them are in no page the kept cursor will ever return. With only the first page loaded the cursor is replaced and there is no hole. They stayed in R2 but never reached the list. This matches the symptom (23:00 and 04:00 shown, 00:00-03:00 missing).
 
 ## Fix
 
@@ -20,8 +20,16 @@ A first-page refresh that shares no event id with the loaded list, while a curso
 
 ## Test
 
-Scenario 14 of `tests/events-pagination-ui.mjs` fails without the fix and passes with it: disjoint refresh restarts, scrolling reaches every event once with no gap, the end marker appears only at cursor exhaustion; an overlapping refresh keeps the list without duplicates. `npm test` (416 files) and `npm run build` passed locally.
+Scenario 14 of `tests/events-pagination-ui.mjs` (an older page loaded first, then a disjoint refresh) fails without the fix on the restart assertion and passes with it: disjoint refresh restarts, scrolling reaches every event once with no gap, the end marker appears only at cursor exhaustion; an overlapping refresh keeps the list without duplicates. `npm test` (416 files) and `npm run build` passed locally.
+
+## Visual QA (19 November 2026, Playwright Chromium, local `public/` with stubbed `/api`, no screenshots saved)
+
+70 epg events plus the four hourly Discovery events (1418/53, 1411/106, 1386/115, 1343/143) on `/events`. The tab loads two pages, then 25 newer events arrive and the first page is refreshed, then the list is scrolled to the end, at 1280x900 and 390x844.
+
+- Fix: 74 of 74 events shown, 74 unique, in the app's order (time, then id), the four hours present with the right numbers, end marker shown, no horizontal overflow, at both widths.
+- Base `main`: 69 of 74 shown, five events missing, and the end marker shown anyway (the hole).
+- Not checked: the compact Events block on the home screen, and real card styling beyond the numbers.
 
 ## Not yet proven
 
-The exact client sequence that dropped the hours in the owner's browser was not observed (the refresh gap is the code-level cause that fits). After deploy, check that `/events` shows 00:00-03:00 Madrid. Desktop 1280 / mobile 390 Visual QA, and independent review of the exact HEAD.
+The exact client sequence that dropped the hours in the owner's browser was not observed (the refresh gap is the code-level cause that fits and is reproduced in a browser). After deploy, check that `/events` shows 00:00-03:00 Madrid. Independent review of the exact HEAD.
