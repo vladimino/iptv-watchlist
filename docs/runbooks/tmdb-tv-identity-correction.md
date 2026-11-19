@@ -77,7 +77,7 @@ This procedure describes future corrections; it does not retroactively change th
    - `outcome: failed` with `reason: input_invalid` and `inputKey: identity/tmdb-retirements.json` means the object failed its check: nothing was written. Stop, and roll back R2 or correct the object under a new approval.
    - A Film in `held` is owner review. Examples: `link_changed` (the refreshed Letterboxd page shows no TMDB link or another one), `attributes_changed` (its `data-tmdb-*` attributes changed), `film_missing` (no R2 source lists it). The projector neither writes nor releases it, so its D1 rows and watchlist membership stay as they were.
 5. **One scoped downstream acceptance.**
-   - Once the existing projector has run (do **not** trigger it without separate owner approval), check its targeted `tmdbRetirements` summary and `d1Readback` against the accepted plan: the four Films must be `corrected`; `held` or `mismatch` stops for review. If the projector is inactive, record D1 as `pending` rather than inventing success.
+   - Historical (retired in AIR-537 slice 3; nothing runs the projector now): once the projector had run (do **not** trigger anything without separate owner approval), check its targeted `tmdbRetirements` summary and `d1Readback` against the accepted plan: the four Films must be `corrected`; `held` or `mismatch` stops for review. If the projector is inactive, record D1 as `pending` rather than inventing success.
    - Check relevant identity / coCredit preservation in the **same scoped verification** when the plan requires it. Do not automatically re-run the entire dry-run merely to duplicate `d1Readback`; re-run it only if the scoped result is ambiguous, a conflict appears or the plan's assumptions changed.
 
 ## Rollback

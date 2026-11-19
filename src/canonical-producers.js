@@ -1,9 +1,9 @@
 // AIR-371 / ADR 0099 (Accepted), decomposition C4. Producer adapters and the single-writer routing for canonical Film/Person. INACTIVE:
 // nothing in the Worker imports this module (it is not bundled; no route, job or cron calls it), no schema is applied and no marker moves.
-// While the marker is legacy, r2 or prepared the enrichment projector is the ONLY canonical writer and every adapter here is dormant
-// (dispatch returns without a database statement). From open the adapters are the only writers and the projector is compare-only/off;
+// While the marker is legacy, r2 or prepared every adapter here is dormant (dispatch returns without a database statement; the enrichment
+// projector that used to write there was removed in AIR-537 slice 3, so no writer exists in those states). From open the adapters are the only writers;
 // held and every unreadable marker fail closed and never fall back to R2 (AIR-374 owns the real handoff and each production step).
-// - writerRoute: the one routing decision. Exactly one of the projector and the canonical adapters may write in any state.
+// - writerRoute: the one routing decision. Only the canonical adapters write, and only at open (the `projector` label of the other states is historical).
 // - projectorFence: the SQL assertion a FUTURE projector batch carries so an in-flight projector batch loses once the marker moves
 //   (a generation mismatch or mode d1 fails its CHECK and rolls the batch back whole). It is the proof of "no overlap"; the real projector
 //   carries the same condition from src/film-person-authority.js (AIR-374 P1, ADR 0117), so this module stays dormant and unimported.
@@ -89,8 +89,7 @@ const ROLES=new Set(['director','actor']);
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const skipped=(producer,reason)=>({producer,calls:[],skipped:[{reason}]});
 
-// One routing decision from the marker. legacy/r2/prepared: the projector writes, the adapters are dormant. open: the adapters write, the
-// projector is compare-only. held and an unreadable marker throw (film_person_held / film_person_unavailable) and name no writer.
+// One routing decision from the marker. legacy/r2/prepared: the adapters are dormant (historically the removed projector wrote). open: the adapters write. held and an unreadable marker throw (film_person_held / film_person_unavailable) and name no writer.
 export {writerRoute};
 
 // The statement a projector batch would add after its own fence. Null when there is no marker (legacy): nothing to prove. Otherwise it

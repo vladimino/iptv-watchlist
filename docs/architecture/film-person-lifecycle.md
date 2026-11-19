@@ -67,12 +67,12 @@ flowchart LR
 ```mermaid
 flowchart LR
     marker["Film/Person marker<br/>read per request"]
-    existing["legacy / r2 / prepared:<br/>existing runtime,<br/>responses unchanged"]
     d1["open:<br/>D1 readers, authoritative:true"]
-    refuse["held / unreadable:<br/>503, nothing read"]
-    marker --> existing
+    refuse["held / r2 / prepared / unreadable:<br/>503, nothing read"]
+    standin["Local stand-in only:<br/>legacy, existing runtime,<br/>authoritative:false"]
     marker --> d1
     marker --> refuse
+    marker -.->|development and tests, FILM_PERSON_DB_OPTIONAL| standin
 ```
 
 The marker is read before `GET /api/d1/*`, before the catalog film route's canonical fallback and before the film history identity bridge (AIR-475: at `open` the film route reads the canonical Film by its trusted TMDB claim, independent of Discovery and of a rated admission, and `GET /api/enrichment/history` resolves the verified storage ids of a Film through the same D1 identity claims; both are SELECT-only, both re-read the marker generation before answering). Only `open` reads D1 for them; `held` and every unreadable state answer `503` and never reach R2, and at `open` the frozen R2 receipt is not read (owner decision 4). The marker is read again after the fallback's D1 reads and, for `GET /api/d1/*`, after every view and overlay read, immediately before the answer: an answer is returned only while the marker has the same state and generation it had at the start (any GET that has a marker, not only `open`), otherwise `503`; the catalog film route's R2 path does the same; a legacy database (no marker table) compares as unchanged legacy and keeps its historical output. Other readers of the canonical mirrors are not yet moved; see the [P4 evidence](../evidence/d1-migration/air-374-p4-readers-offline-2026-11-11.md).
@@ -81,7 +81,7 @@ The marker is read before `GET /api/d1/*`, before the catalog film route's canon
 
 **Handoff and recovery ([ADR 0117](../adr/0117-film-person-d1-handoff-owner-decisions.md), [runbook](../runbooks/film-person-open-handoff.md)):** `prepared` to `open` is one fenced batch under the projector lease and exclusive window, executed once on 16 Nov 2026 by an owner-only MCP operator that AIR-537 slice 2 has since retired (it cannot be repeated, and no `prepared` marker can be served). That flip is recorded as generation 2 ([evidence](../evidence/d1-migration/air-499-film-person-open-2026-11-16.md)). After `open`, recovery is `held` (fail closed) plus a forward fix `held` to `open` proven on a safe copy. After D1-only writes exist, a return to `r2` or a git revert is not a rollback. At `open` the canonical R2 `titles.json`/`people.json` mirrors are frozen. The diagram above is unchanged.
 
-The projector asserts the marker and generation in every write batch, not only the grouped one ([ADR 0116](../adr/0116-projector-marker-and-generation-fence-on-every-batch.md), AIR-374); the guard SQL is single-sourced in `src/film-person-authority.js` and the dormant `projectorFence` consumes it.
+Historical: the enrichment projector asserted the marker and generation in every write batch ([ADR 0116](../adr/0116-projector-marker-and-generation-fence-on-every-batch.md), AIR-374) until AIR-537 slice 3 removed it; the guard SQL stays single-sourced in `src/film-person-authority.js` (pinned by `tests/projector-marker-guard.mjs`) and the dormant `projectorFence` consumes it.
 
 Readiness before the handoff (AIR-374 P6, offline, dormant): `handoffReadiness` is computed from the marker, the schema contract, the lease and window rows, three counts and frozen registries (former gaps with their fenced writers and differential coverage, producer wiring, readers, the receipts protocol). It reads only and writes nothing; with the current repository it reports not ready (`empty_class_not_loaded` for the H1 classes). `metadata_sync` and `rated_admission_retention` are wired (typed Film identity, durable intent only for an unsettled batch; rated admission walks a watchlist scan with a cursor of at most 12 units). Freeze `reader_not_moved` is cleared. That registry is not rewritten for activation. The operator's `activationReadiness` is the H2 gate: GET programme/watchlist already move to D1 at `open`; remaining freeze writers are frozen R2 mirrors, not dual D1 writers. The differential harness (`tests/canonical-differential.mjs`) runs the projector path at `prepared` and the canonical writers at `open` from one identical starting database and classifies every difference; no runtime topology, data flow or trust boundary changes.
 

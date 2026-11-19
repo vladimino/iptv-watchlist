@@ -1,8 +1,8 @@
 // AIR-367 / ADR 0099 (Accepted). The canonical Film/Person authority marker, read for the fenced mutations and, later, the readers.
 // States: no table (legacy), r2, prepared, open (mode d1, cutover open) and held (mode d1, cutover held). Only `open` lets a
 // fenced canonical mutation write. Once the marker table exists, a missing or malformed row, a failed read, `held` and a failed
-// baseline gate fail closed: this module never answers "go back to R2" for them. R2 is allowed only in the verified legacy, r2
-// and prepared states. The Worker bundles it only for `readAuthority` (AIR-409, the catalog film route); nothing here moves the marker on its own or writes a Film or a Person.
+// baseline gate fail closed: this module never answers "go back to R2" for them. R2 is allowed only in the legacy state (the explicit local stand-in, ADR 0162); readAuthority refuses r2 and prepared, which
+// only readMarker and transitionAuthority still see. The Worker bundles it only for `readAuthority` (AIR-409, the catalog film route); nothing here moves the marker on its own or writes a Film or a Person.
 export const FILM_PERSON_MIN_VERSION=13;
 export const FILM_PERSON_TABLES=['film_person_authority','film_person_cas','film_person_baseline','canonical_revision'];
 const STATES=['legacy','r2','prepared','open','held'];
@@ -79,18 +79,19 @@ async function readState(env,{servedOnly}){
  return {state,r2Allowed:state==='r2'||state==='prepared',open:state==='open',held:state==='held',generation,version:numeric,baseline:baseline.state};
 }
 
-// AIR-374 P1 / ADR 0117 (Accepted owner decision 1). The ONE source of the enrichment projector's marker fence. Every SQL batch the projector
-// writes asserts, in the same atomic batch, the marker mode, cutover and generation it read BEFORE its diff, whatever flag is set. The
-// projector may write only in the states legacy (no marker table: it cannot be asserted in SQL except as "still absent"), `r2` and `prepared`,
+// AIR-374 P1 / ADR 0117 (Accepted owner decision 1). HISTORICAL (the enrichment projector was removed in AIR-537 slice 3; these symbols are retained, pinned by
+// tests/projector-marker-guard.mjs). The ONE source of the enrichment projector's marker fence. Every SQL batch the projector
+// wrote asserted, in the same atomic batch, the marker mode, cutover and generation it read BEFORE its diff, whatever flag is set. The
+// projector could write only in the states legacy (no marker table: it cannot be asserted in SQL except as "still absent"), `r2` and `prepared`,
 // both with cutover `open`. A transition bumps the generation (transitionAuthority), so a batch planned before it fails whole. The Worker
-// bundle uses this for the projector (src/d1-enrichment.js); the dormant producer routing module (its `projectorFence`) consumes the same condition.
+// bundle no longer uses this; the dormant producer routing module (its `projectorFence`) consumes the same condition.
 export const PROJECTOR_MARKER_READ='SELECT mode,cutover,generation FROM film_person_authority WHERE id=1';
 export const PROJECTOR_MARKER_CONDITION="EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode=? AND cutover='open' AND generation=?)";
 export const PROJECTOR_MARKER_GUARD='INSERT INTO projection_fence (held) SELECT CASE WHEN '+PROJECTOR_MARKER_CONDITION+' THEN 1 ELSE 0 END';
 // Legacy (the marker table does not exist): the batch holds only while it still does not, so a migration landing mid-run fails it whole.
 export const PROJECTOR_LEGACY_GUARD="INSERT INTO projection_fence (held) SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='film_person_authority') THEN 0 ELSE 1 END";
 const PROJECTOR_MODES=['r2','prepared'];
-// The marker row the projector may write under, as {mode,cutover:'open',generation}; null for every other row (d1, held, malformed).
+// The marker row the removed projector could write under, as {mode,cutover:'open',generation}; null for every other row (d1, held, malformed).
 export function projectorExpectation(row){
  if(!row||!PROJECTOR_MODES.includes(row.mode)||row.cutover!=='open')return null;
  const generation=Number(row.generation);
