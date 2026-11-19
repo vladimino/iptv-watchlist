@@ -74,6 +74,9 @@ function rowUsable(row) {
 
 function handoffConfirmed(facts) {
   const id = facts.publishedProgrammeRunId;
+  // ADR 0175: with the certificate column present the hand-off also needs `finalized_run_id` to name the published run. An absent column
+  // (`certRequired` not true) is today's behaviour; the pointer and the pin alone prove the hand-off.
+  if (facts.certRequired === true && !(typeof id === 'string' && id !== '' && facts.finalizedRunId === id)) return false;
   // publishedDayKey is published_epg_authority.madrid_run_key, a YYYY-MM-DD run key.
   // A timestamp, a null, or any other string is not that column and does not prove a day.
   return DAY.test(facts.publishedDayKey || '')
@@ -114,8 +117,15 @@ function decide(admit, reason, owedDayKey, budget, nextCatchUpAt = null) {
   return {admit, reason, owedDayKey, budget, nextCatchUpAt};
 }
 
-function waitForPublication(owed, nowMs) {
-  return decide(false, 'epg_priority', owed, 'wait', new Date(nowMs + DISCOVERY_EPG_PRIORITY_POLL_MS).toISOString());
+function waitForPublication(owed, nowMs, detail = null) {
+  return {...decide(false, 'epg_priority', owed, 'wait', new Date(nowMs + DISCOVERY_EPG_PRIORITY_POLL_MS).toISOString()), detail};
+}
+
+// ADR 0175: the pointer already names the owed day's run but the run is not yet certified complete.
+function awaitingComplete(facts, owed) {
+  return facts.certRequired === true && DAY.test(facts.publishedDayKey || '') && facts.publishedDayKey === owed
+    && typeof facts.publishedProgrammeRunId === 'string' && facts.publishedProgrammeRunId !== ''
+    && facts.publishedProgrammeRunId === facts.handoffProgrammeRunId;
 }
 
 // New Discovery admission (`acquire`: a chunk, a Workflow create, a rollover, a reconcile or an admin/manual lease).
@@ -142,7 +152,7 @@ export function discoveryAdmission(facts) {
   const override = owed != null && facts.row.overrideDayKey === owed;
   const blocking = owed != null && !publishedFor(facts, owed) && !override
     && (facts.row.state === 'paused' || facts.nowMs >= pauseOpensAt(owed));
-  if (blocking) return waitForPublication(owed, facts.nowMs);
+  if (blocking) return waitForPublication(owed, facts.nowMs, awaitingComplete(facts, owed) ? 'awaiting_complete' : null);
   if (owed != null && !publishedFor(facts, owed) && override) {
     // Override admits only the programme id the pointer already names. A missing or foreign id stays closed.
     if (!publishedId || requested !== publishedId) return decide(false, 'evidence_unreadable', owed, 'fail_closed');
