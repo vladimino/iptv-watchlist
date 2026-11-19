@@ -1,7 +1,7 @@
 // AIR-533: offline before/after benchmark of the `seal_stage` archive loop of a bounded commit (the Worker's own `planDiscoveryLedger`, loaded unchanged except for the
 // `ARCHIVE_SEGMENT_CONCURRENCY` constant). Synthetic objects only: no network, no R2, no D1, no production data.
 //
-// What it measures, per concurrency (1 = the sequential path before AIR-533, 3 = the shipped window):
+// What it measures, per concurrency (1 = the sequential path before AIR-533, 2 = the shipped window, 3 = the value of PR 766 before the follow-up):
 //   wallMs      wall time of the whole bounded commit with a SIMULATED R2 latency on the segment objects: a put costs putBaseMs + MB * putMsPerMb, a read readBaseMs + MB * readMsPerMb,
 //               both multiplied by --latency-scale (default 0.02, so a run takes seconds, not minutes). The model constants come from the natural run of 18 November 2026
 //               (AIR-420 evidence: 64 puts 86.3 s for 81.6 MB, 64 reads 18.9 s). The CPU of the commit is real and NOT scaled, so a wall time is not a production time:
@@ -12,7 +12,7 @@
 //   segments, archiveMB  how many segments the commit rewrote and how much it wrote.
 // The latency is a model, not a measurement of R2; a natural production run stays the acceptance gate.
 //
-// Usage: node scripts/discovery-archive-window-benchmark.mjs --output /absolute/dir/outside/repo [--total 21000] [--archived 26000] [--seen 20500] [--churn 3500] [--latency-scale 0.02] [--concurrency 1,3]
+// Usage: node scripts/discovery-archive-window-benchmark.mjs --output /absolute/dir/outside/repo [--total 21000] [--archived 26000] [--seen 20500] [--churn 3500] [--latency-scale 0.02] [--concurrency 1,2,3]
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -38,14 +38,15 @@ function loadWorker(concurrency){
  for(const file of SOURCES){
   let source=fs.readFileSync(path.join(REPO,file),'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation');
   if(file==='src/worker.js'){
-   if(!/ARCHIVE_SEGMENT_CONCURRENCY=3\b/.test(source))throw new Error('ARCHIVE_SEGMENT_CONCURRENCY=3 not found in src/worker.js: the benchmark needs the AIR-533 loop');
-   source=source.replace(/ARCHIVE_SEGMENT_CONCURRENCY=3\b/,'ARCHIVE_SEGMENT_CONCURRENCY='+concurrency);
+   // The shipped constant (2 since the AIR-533 follow-up, 3 in PR 766) is kept while the store is built and replaced by the level under test when it is measured, so any level compares against the same loop.
+   if(!/ARCHIVE_SEGMENT_CONCURRENCY=\d+\b/.test(source))throw new Error('ARCHIVE_SEGMENT_CONCURRENCY=<n> not found in src/worker.js: the benchmark needs the AIR-533 loop');
+   if(concurrency!==null)source=source.replace(/ARCHIVE_SEGMENT_CONCURRENCY=\d+\b/,'ARCHIVE_SEGMENT_CONCURRENCY='+concurrency);
   }
   vm.runInContext(source,context);
  }
  return context;
 }
-async function commit(store,day,mode,latest,concurrency=3){
+async function commit(store,day,mode,latest,concurrency=null){
  const context=loadWorker(concurrency),id=run(day);
  await store.put('sync.json',JSON.stringify({runId:id,stage:'epg'}));
  await vm.runInContext('publishGenerationWithLedger',context)(withLedgerMode({BUCKET:store},mode||'full'),id,latest,{programmeRunId:id},{'programme.json':{runId:id,films:[]},'discovered-films.json':{}});
@@ -89,9 +90,9 @@ async function child(concurrency,dir,scale){
 const args=process.argv.slice(2),value=flag=>{const i=args.indexOf(flag);return i<0?null:args[i+1];};
 if(args[0]==='--child'){await child(Number(args[1]),args[2],Number(args[3]));process.exit(0);}
 const output=value('--output');
-if(!output||!path.isAbsolute(output)||path.resolve(output).startsWith(REPO+path.sep)){console.error('Usage: node scripts/discovery-archive-window-benchmark.mjs --output /absolute/dir/outside/repo [--total 21000] [--archived 26000] [--seen 20500] [--churn 3500] [--latency-scale 0.02] [--concurrency 1,3]');process.exit(2);}
+if(!output||!path.isAbsolute(output)||path.resolve(output).startsWith(REPO+path.sep)){console.error('Usage: node scripts/discovery-archive-window-benchmark.mjs --output /absolute/dir/outside/repo [--total 21000] [--archived 26000] [--seen 20500] [--churn 3500] [--latency-scale 0.02] [--concurrency 1,2,3]');process.exit(2);}
 const sizes={total:Number(value('--total')||21000),archived:Number(value('--archived')||26000),seen:Number(value('--seen')||20500),churn:Number(value('--churn')||3500)};
-const scale=Number(value('--latency-scale')||0.02),levels=(value('--concurrency')||'1,3').split(',').map(Number);
+const scale=Number(value('--latency-scale')||0.02),levels=(value('--concurrency')||'1,2,3').split(',').map(Number);
 fs.mkdirSync(output,{recursive:true});
 const dir=fs.mkdtempSync(path.join(output,'archive-window-'));
 try{
