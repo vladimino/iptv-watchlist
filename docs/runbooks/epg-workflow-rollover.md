@@ -45,8 +45,9 @@ Call `{"mode":"apply","confirmGo":true,"requestId":"<8–64 of A-Z a-z 0-9 _ ->"
 | 200, `outcome: handed_over_version_pending` | Accepted; the successor has not run its first step yet. | Read `dry_run` again after a minute: expect `already_current`. |
 | 202, `outcome: successor_uncertain` | The swap is done, the create could not be confirmed; the record stays `starting`. | Repeat the same request, or wait for the hourly `ensure`: both create the same id and spend no budget. |
 | 202, `outcome: swap_unknown` | The swap statement threw; its outcome is not known. | Repeat the same request with the same pins. |
-| 202, `outcome: readback_unproven` | The swap and the create answered, the readback did not prove owner, liveness or checkpoint. | Repeat the same request. If it stays unproven, stop and escalate with the receipt. |
-| 409, `writes: 0` | Refused: `stale_pin` (with `stale` naming the fields), `unsafe`, `unknown`, `already_current`, `cas_lost`, `preflight_too_slow`, `request_id_reused`, `no_owner`. | Read a fresh `dry_run`. Never reuse a request id with other pins. |
+| 202, `outcome: create_blocked` | A repeat found the create still owed, but a current fact is unsafe or unknown (authority held, epoch moved, mode switched, version, platform status or `sync.json` unreadable). Nothing was created. | Read `dry_run`; the blockers clear on their own or need their own procedure. Repeat the same request only when they have cleared. |
+| 202, `outcome: readback_unproven` | The swap and the create answered, the readback did not prove owner, liveness, a readable `sync.json` of the same run, or the checkpoint. | Repeat the same request. If it stays unproven, stop and escalate with the receipt. |
+| 409, `writes: 0` | Refused: `stale_pin` (with `stale` naming the fields), `unsafe`, `unknown`, `already_current`, `cas_lost`, `preflight_too_slow`, `request_id_reused`, `no_owner`; on a repeat, `request_id_reused` when any of the six pins differs from the original request. | Read a fresh `dry_run`. Never reuse a request id with other pins. |
 | 400 | Invalid arguments or no `confirmGo`. | Nothing was written. |
 
 A timeout or a lost answer: repeat the **same** request. It never swaps twice; it resumes an owed create or reads back, and `superseded` (a later natural successor replaced it) is a success.

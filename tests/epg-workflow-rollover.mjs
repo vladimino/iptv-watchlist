@@ -243,4 +243,50 @@ for(const [label,options,tweak,unknown] of [
  }
  assert.equal(rows(w.db).length,2,'mode and control only: validation wrote nothing');
 }
+// 8. Review fixes. (a) The readback proves the run document after the swap: unreadable, missing or another run is never a success.
+for(const [label,mutate,expectUnreadable] of [
+ ['unreadable sync.json after the swap',w=>{w.state.syncThrows=true;},true],
+ ['missing sync.json after the swap',w=>{w.state.sync=null;},false],
+ ['another run with a higher stage after the swap',w=>{w.state.sync={runId:'run-9',stage:'complete',cursor:99,updatedAt:at(T)};},false]]){
+ let w;let armed=false;
+ w=world({db:{onQuery:async text=>{if(!armed&&/^UPDATE epg_orchestration_document SET body=.*WHERE key='control'/s.test(text)){armed=true;mutate(w);}}}});
+ const reply=await apply(w,await pins(w));
+ assert.equal(reply.status,202,label);assert.equal(reply.body.ok,false,label);assert.equal(reply.body.outcome,'readback_unproven',label);assert.equal(reply.body.readback.accepted,false,label);
+ if(expectUnreadable)assert.equal(reply.body.readback.syncReadable,false,label);
+ assert.equal((await ctl(w)).instanceId,'epg_20261119_3',label+': the swap stands and is read back, not undone');
+ assert.equal(w.wf.creates.length,1,label+': one successor, no more');
+}
+// (b) A replay is gated by the current facts and by all six original pins; it never creates in an unsafe or unknown state.
+const base={mode:'apply',confirmGo:true,requestId:'req-00000001',expectedRunKey:RUN_KEY,expectedEpoch:1,expectedSeries:2,expectedInstanceId:'epg_20261119_2',expectedRunId:'run-1',expectedControlRevision:1};
+async function lostCreate(options){const w=world(options);w.wf.failNext='lost';const reply=await apply(w,await pins(w));assert.equal(reply.body.outcome,'successor_uncertain');return w;}
+for(const [field,value] of [['expectedRunKey','2026-11-18'],['expectedEpoch',2],['expectedSeries',3],['expectedInstanceId','epg_20261119_9'],['expectedRunId','other'],['expectedControlRevision',2]]){
+ const w=await lostCreate();
+ const before=plain(rows(w.db)),creates=w.wf.creates.length;
+ const reply=await apply(w,{...base,[field]:value});
+ assert.equal(reply.body.reason,'request_id_reused','altered '+field);assert.equal(reply.body.writes,0);
+ assert.deepEqual(plain(rows(w.db)),before);assert.equal(w.wf.creates.length,creates,'no create for altered '+field);
+}
+for(const [label,mutate,expected] of [
+ ['authority held after the swap',w=>{w.state.authority={ready:false};},'authority_held'],
+ ['mode epoch changed after the swap',w=>{w.db.sql("UPDATE epg_orchestration_document SET body=json_set(body,'$.epoch',2), revision=revision+1 WHERE key='mode'");},'epoch_mismatch'],
+ ['mode switched away after the swap',w=>{w.db.sql("UPDATE epg_orchestration_document SET body=json_set(body,'$.mode','switching','$.target','external'), revision=revision+1 WHERE key='mode'");},'switch_in_progress'],
+ ['version metadata gone after the swap',w=>{delete w.env.CF_VERSION_METADATA;},'deployed_version_unavailable'],
+ ['platform status unreadable after the swap',w=>{w.wf.statusUnknown=true;},'instance_status_unknown'],
+ ['sync.json unreadable after the swap',w=>{w.state.syncThrows=true;},'sync_unreadable']]){
+ const w=await lostCreate();mutate(w);
+ const before=plain(rows(w.db)),creates=w.wf.creates.length;
+ const reply=await apply(w,base);
+ assert.equal(reply.status,202,label);assert.equal(reply.body.ok,false,label);assert.equal(reply.body.writes,0,label);
+ if(label==='platform status unreadable after the swap'||label==='sync.json unreadable after the swap'||label==='version metadata gone after the swap')assert.equal(reply.body.outcome==='create_blocked'||reply.body.outcome==='readback_unproven',true,label);
+ else assert.equal(reply.body.outcome,'create_blocked',label);
+ assert.ok([...reply.body.blockers||[],...reply.body.unknowns||[]].includes(expected)||reply.body.outcome==='readback_unproven',label+': '+JSON.stringify(reply.body.blockers)+JSON.stringify(reply.body.unknowns));
+ assert.deepEqual(plain(rows(w.db)),before,label+': documents untouched');assert.equal(w.wf.creates.length,creates,label+': no create');
+}
+// The same replay in a safe state still recreates the very same id.
+{
+ const w=await lostCreate();
+ const reply=await apply(w,base);
+ assert.equal(reply.body.replay,true);assert.equal(reply.body.writes,1);assert.deepEqual(w.wf.creates.map(c=>c.id),['epg_20261119_3','epg_20261119_3']);
+}
+
 console.log('EPG Workflow rollover: dry_run writes nothing, apply is one fenced swap for a sleeping owner, every unsafe/unknown/stale/lost case refuses with zero writes, the old instance stops, budget and run survive, replays and unknown creates reuse the same id passed');

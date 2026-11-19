@@ -18,6 +18,8 @@ Scope: [AIR-540](https://trello.com/c/YAVfVHrs), [ADR 0176](../../adr/0176-contr
 | Lost compare-and-set | a lease row inserted between read and swap: `cas_lost`, control untouched, no create. Control revision moved after the preflight: `stale_pin` |
 | Unknown create | swap stands, `successor_uncertain` (202); a repeat with other pins is `request_id_reused`; with the same pins it recreates the same id with no second swap; another `requestId` is a stale pin; `ensure` recreates the same id and spends no budget |
 | Crash between swap and create | `ensure` creates the same id; a second `ensure` reads `in_progress`; no `series+2` |
+| Readback proof after the swap (review fix) | `sync.json` unreadable, missing or another run with a higher stage after the swap: `readback_unproven` (202), swap stands, one create; the earlier code accepted all three |
+| Replay gating (review fix) | each of the six pins altered: `request_id_reused`, zero writes, no create; authority held, epoch changed, mode switched, version metadata gone, platform status or `sync.json` unreadable after a lost create: nothing created; the same replay in a safe state recreates the same id |
 | Argument validation | invalid shapes answer 400 and write nothing |
 
 ## Limits
