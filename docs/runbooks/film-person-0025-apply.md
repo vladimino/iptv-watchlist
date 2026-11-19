@@ -1,12 +1,12 @@
-# Film/Person migration 0025: owner GO, apply preconditions, readback and rollback contract (NOT applied)
+# Film/Person migration 0025: owner GO, apply preconditions, readback and rollback contract (applied)
 
-**Status:** repository file only. Migration `0025_film_retention_scan_watermark.sql` ([ADR 0173](../adr/0173-watchlist-retention-observed-at-is-state-start.md), Proposed; [AIR-532](https://trello.com/c/mGPwomMX)) has **not** been applied to any database. Merging and deploying the code applies nothing; the Worker never applies SQL files and CI applies nothing. Applying it to production D1 `iptv` needs a separate, explicit, operation-specific owner GO. This page describes the procedure and the contract; it authorizes nothing.
+**Status:** applied to production D1 `iptv` on 19 Nov 2026 (about 07:05-07:08 UTC) as one execution after the owner GO; schema version 25, empty `film_retention_scan`, four triggers, `film_retention` and the Film/Person marker unchanged ([apply record and readback](../evidence/d1-migration/air-532-0025-apply-2026-11-19.md)). Migration `0025_film_retention_scan_watermark.sql` ([ADR 0173](../adr/0173-watchlist-retention-observed-at-is-state-start.md), Proposed; [AIR-532](https://trello.com/c/mGPwomMX)). Merging and deploying the code applies nothing; the Worker never applies SQL files and CI applies nothing, so any other database needs its own explicit, operation-specific owner GO. The GO used on 19 Nov 2026 is spent and must not be reused. This page keeps the procedure and the contract; it authorizes nothing.
 
 ## What the migration is, and is not
 
 - One file: a refuse-insert unless schema is a complete version 24 with the listed tables, `CREATE TABLE film_retention_scan` (STRICT, empty, one row at most), a monotonic and a no-delete trigger on it, **two guard triggers on `film_retention`**, and the version bump to 25. It writes no data row.
 - It does not backfill or rewrite any `film_retention` row, does not touch `canonical_revision`, the receipts, the marker or the Film/Person authority.
-- **The performance benefit is not active on code deploy alone.** Until this migration is applied the producer keeps the previous behaviour (every newer scan rewrites `observed_at`, the expensive per-scan writes). The benefit starts only after the apply.
+- **The performance benefit is not active on code deploy alone.** It started with the production apply of 19 Nov 2026; before that the producer kept the previous behaviour (every newer scan rewrites `observed_at`, the expensive per-scan writes). Natural-run timing is still to be verified.
 
 ## Preconditions (checked before the owner GO is used)
 
