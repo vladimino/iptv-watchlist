@@ -474,6 +474,7 @@ const EVENT_TYPE_FILTERS=[
  {id:'ratings',label:'Оценки',types:['ratings']},
  {id:'enrichment',label:'Прогнозы',types:['enrichment']},
  {id:'taste_profile',label:'Модель вкуса',types:['taste_profile']},
+ {id:'catalog_posters',label:'Постеры',types:['catalog_posters']},
 ];
 function eventTypeFrom(search){
  let params;try{params=new URLSearchParams(String(search||''));}catch{return 'all';}
@@ -2577,6 +2578,15 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
   const queue=empty?'пуста':known?String(event.remaining):'неизвестен';
   body=`<p>${title}</p><dl><div><dt>Новых фильмов</dt><dd>${added}</dd></div><div><dt>Разобрано наблюдений</dt><dd>${checked}</dd></div><div><dt>Осталось в очереди</dt><dd>${queue}</dd></div></dl>`
    +(event.kind==='empty'?'<p class="event-note">Новых изменений нет.</p>':`<p class="event-note">Повторно использовано: ${n(event.reused)} · отсеяно: ${n(event.screenedOut)} · запросов к TMDB: ${n(event.tmdbCalls)}.</p>`);
+ }
+ // AIR-543 (ADR 0179): the weekly catalog poster report. The title is fixed text chosen by `outcome`: a deferred report is never shown as a final success.
+ // Every number is a strict integer ('неизвестно' otherwise) and no film, id or error text reaches the page.
+ if(event.type==='catalog_posters'){
+  const int=v=>Number.isInteger(v)&&v>=0,num=v=>int(v)?String(v):'неизвестно',failed=event.outcome==='failed',deferred=event.outcome==='deferred'||(event.outcome!=='completed'&&!failed&&event.final===false);
+  const title=failed?'Проверка постеров каталога не удалась':deferred?'Проверка постеров отложена':event.outcome==='completed'?'Постеры каталога проверены':'Отчёт о постерах каталога';
+  const retry=(()=>{const t=Date.parse(event.nextRetryAt);return Number.isFinite(t)?new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(new Date(t)):null;})();
+  body=`<p>${title}</p><dl><div><dt>Проверено</dt><dd>${num(event.checked)}</dd></div><div><dt>Постеров добавлено</dt><dd>${num(event.hydrated)}</dd></div><div><dt>Нет постера на TMDB</dt><dd>${num(event.noPoster)}</dd></div><div><dt>Повторить позже</dt><dd>${num(event.retryable)}</dd></div><div><dt>Отложено (занято)</dt><dd>${num(event.deferredBusy)}</dd></div><div><dt>Ещё в очереди</dt><dd>${num(event.pending)}</dd></div></dl>`
+   +(deferred?`<p class="event-note">Проверка не закончена, это не итог недели.${retry?` Следующая попытка не раньше ${retry}.`:''}</p>`:failed?'<p class="event-note">Автоматические попытки исчерпаны, нужно внимание владельца.</p>':'<p class="event-note">«Нет постера на TMDB» — обычный ответ, а не ошибка.</p>');
  }
  if(event.type==='taste_profile'){const labels={ratingScale:'Изменена шкала оценок',positiveSignals:'Изменены положительные сигналы',negativeSignals:'Изменены отрицательные сигналы',characterLogic:'Изменена логика персонажей',pace:'Изменён темп',payoffEnding:'Изменены развязка и финал',genrePreferences:'Изменены жанровые предпочтения',comedyPreferences:'Изменены предпочтения для комедий',horrorPreferences:'Изменены предпочтения для хорроров',scifiAdventurePreferences:'Изменены предпочтения для фантастики и приключений',actionPreferences:'Изменены предпочтения для боевиков',anchorFilms:'Изменены опорные фильмы',hardSkips:'Изменены жёсткие исключения',calibration:'Изменена калибровка'},known=Array.isArray(event.changedFields)?event.changedFields.filter(field=>Object.hasOwn(labels,field)):[],phrase=event.scope==='identity'&&!known.length?'Содержание модели не изменилось':known.length===1?labels[known[0]]:known.length>1?'Изменены несколько разделов модели вкуса':'',impact=event.scope==='selective'?'Влияние: выборочное':event.scope==='global'?'Влияние: глобальное':'',from=Number.isInteger(event.fromVersion)?event.fromVersion:null,to=Number.isInteger(event.toVersion)?event.toVersion:null,version=from!==null&&to!==null?`Версия ${from} → ${to}`:to!==null?`Версия ${to}`:'';body=`<p>Модель вкуса обновлена</p>${version?`<p class="event-note">${version}</p>`:''}${phrase?`<p class="event-note">${phrase}</p>`:''}${impact?`<p class="event-note">${impact}</p>`:''}`;}
  return `<li class="activity-event" data-event-id="${escapeHTML(event.id)}"><time datetime="${escapeHTML(event.at)}">${date}</time>${body}</li>`;}

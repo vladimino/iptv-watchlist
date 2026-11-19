@@ -26,8 +26,8 @@ const app = fs.readFileSync('public/app.js', 'utf8');
   const buttons = [...panel.matchAll(/<button type="button" data-event-type="([a-z_]+)" aria-pressed="(true|false)">([^<]+)<\/button>/g)].map(match => match.slice(1, 4));
   assert.deepEqual(buttons, [
     ['all', 'true', 'Все события'], ['watchlist', 'false', 'Watchlist и просмотр'], ['epg', 'false', 'Программа'], ['discovery', 'false', 'Находки'],
-    ['ratings', 'false', 'Оценки'], ['enrichment', 'false', 'Прогнозы'], ['taste_profile', 'false', 'Модель вкуса'],
-  ], 'seven buttons, «Все события» pressed by default');
+    ['ratings', 'false', 'Оценки'], ['enrichment', 'false', 'Прогнозы'], ['taste_profile', 'false', 'Модель вкуса'], ['catalog_posters', 'false', 'Постеры'],
+  ], 'eight buttons, «Все события» pressed by default');
 }
 
 // 2. CSS: the grid is never replaced, so the sidebar keeps its width and position on every route.
