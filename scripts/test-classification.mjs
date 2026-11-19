@@ -723,46 +723,6 @@ export const FILES={
  "film-person-backfill.mjs": {
   "suite": "core"
  },
- "film-person-baseline.mjs": {
-  "suite": "core"
- },
- "film-person-capture-mutation.mjs": {
-  "suite": "non-functional",
-  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
- },
- "film-person-capture.mjs": {
-  "suite": "core"
- },
- "film-person-connector-mutation.mjs": {
-  "suite": "non-functional",
-  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
- },
- "film-person-connector.mjs": {
-  "suite": "core"
- },
- "film-person-cutover-accepted.mjs": {
-  "suite": "core"
- },
- "film-person-cutover-minimum-mutation.mjs": {
-  "suite": "non-functional",
-  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
- },
- "film-person-cutover-minimum.mjs": {
-  "suite": "core"
- },
- "film-person-open-handoff.mjs": {
-  "suite": "core"
- },
- "film-person-cutover-record-mutation.mjs": {
-  "suite": "non-functional",
-  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
- },
- "film-person-cutover-record.mjs": {
-  "suite": "core"
- },
- "film-person-cutover-run.mjs": {
-  "suite": "core"
- },
  "film-person-diagnostics.mjs": {
   "suite": "core"
  },
@@ -774,24 +734,7 @@ export const FILES={
   "suite": "core",
   "note": "Percentile arithmetic and stop rules of the measurement kit are functional. This file does not assert a runner latency."
  },
- "film-person-h1-rehearsal.mjs": {
-  "suite": "core"
- },
- "film-person-h1-verify-mutation.mjs": {
-  "suite": "non-functional",
-  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
- },
- "film-person-h1-verify.mjs": {
-  "suite": "core"
- },
  "film-person-localize.mjs": {
-  "suite": "core"
- },
- "film-person-prepared-loader-mutation.mjs": {
-  "suite": "non-functional",
-  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
- },
- "film-person-prepared-loader.mjs": {
   "suite": "core"
  },
  "film-person-reader.mjs": {
