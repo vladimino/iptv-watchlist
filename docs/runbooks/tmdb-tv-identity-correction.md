@@ -1,5 +1,7 @@
 # TMDB TV identity correction for four retired movie ids (owner approval required)
 
+> **Step 4 (D1) is not executable (AIR-537 slice 3, 19 Nov 2026).** It relied on the ADR 0056 enrichment projector, which was removed from the repository (its runner and write arms; it had been off the cron since ADR 0155). Nothing here writes D1 now. Any D1 write for these Films needs a new owner-approved plan through the fenced canonical adapters, which this page does not define; the R2 and read-only steps remain a design record.
+
 This runbook prepares and later executes the correction of [ADR 0057](../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md). Four watchlist miniseries have a retired TMDB movie id. Each one gets its live TMDB TV entry as a trusted `tmdb_tv` identity. The retired movie id is kept, untrusted, with its evidence.
 
 | Film | Retired movie id | TV entry | Letterboxd permalink |
@@ -70,7 +72,7 @@ This procedure describes future corrections; it does not retroactively change th
      - Put the approved bytes once, with `content-type: application/json`. Do not retry blindly: after any error, `GET` first.
      - `GET` the key back and require identical bytes (or the same SHA-256 and byte length). On conflict, mismatch or unknown outcome, stop instead of repeating an unconditional PUT.
      - Check the body with `tmdbRetirementSet` (`ok: true`, four retirements) before PUT; read-back integrity and the downstream projector's scoped result complete the normal lightweight checks.
-4. **D1.** D1 is not written by hand. The [ADR 0056](../adr/0056-d1-enrichment-write-through.md) enrichment projector owns each Film's identity rows and rewrites them from R2, so one projector run after the R2 write carries the four Films. If the projector is off (`D1_ENRICHMENT_WRITE` unset), D1 stays `pending` until it runs or until a reload replays R2; there is no separate D1 write path.
+4. **D1 (historical, retired in AIR-537 slice 3).** D1 is not written by hand. The [ADR 0056](../adr/0056-d1-enrichment-write-through.md) enrichment projector owned each Film's identity rows and rewrote them from R2, so one projector run after the R2 write carried the four Films. If the projector is off (`D1_ENRICHMENT_WRITE` unset), D1 stays `pending` until it runs or until a reload replays R2; there is no separate D1 write path.
    - The run's summary (`GET /api/d1/status`, `lastRun.summary`) carries `tmdbRetirements`. Expect `valid: true`, `applied: 4`, `held: []`.
    - `outcome: failed` with `reason: input_invalid` and `inputKey: identity/tmdb-retirements.json` means the object failed its check: nothing was written. Stop, and roll back R2 or correct the object under a new approval.
    - A Film in `held` is owner review. Examples: `link_changed` (the refreshed Letterboxd page shows no TMDB link or another one), `attributes_changed` (its `data-tmdb-*` attributes changed), `film_missing` (no R2 source lists it). The projector neither writes nor releases it, so its D1 rows and watchlist membership stay as they were.

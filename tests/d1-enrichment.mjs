@@ -1,587 +1,92 @@
-// AIR-275 phase 2 / ADR 0056: the D1 enrichment projector. A D1 stand-in runs the real migrations in the sqlite3 CLI and applies
-// each batch as one transaction; R2 is a memory bucket. Covered: off reads nothing, dry writes nothing, on writes and converges,
-// change keys ignore the run's own clock, the D1-only TMDB credits of a watchlist Film survive and are renumbered while
-// Letterboxd credits come and go, the R2 roster wins a duplicate, a catalog Film's credits follow R2, fingerprint and prediction
-// dimensions stay, a Film no source lists is released once, the lease keeps a second run out, a run that lost its lease writes
-// nothing, the query budget resumes on the next run, one bad Person does not hold back its group, the seed, the status view.
+// AIR-537 slice 3 (ADR 0155, ADR 0162): src/d1-enrichment.js now holds only the read-only status of the retired enrichment projector
+// for /api/d1/status. The projector's runner, R2 reads, checkpoint diff and `legacy`/`r2`/`prepared` D1 write arms are gone (their
+// scenarios, previously in this file, are removed with them). A D1 stand-in runs the real migrations in the sqlite3 CLI. Covered: no
+// runner or write arm remains in the module or is reachable from the Worker, the cron and the Worker bundle; the status is retired
+// (mode and windowMode null whatever the retired selectors say), schema detection for v3/partial v4/v4, the checkpoint counts and last
+// run it reports from the rows, and the owner-review, metadata-cache and prediction-domain fields of later schemas.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {MemoryBucket} from './memory-bucket.mjs';
+import vm from 'node:vm';
+import {spawnSync} from 'node:child_process';
 import {d1Standin} from './d1-standin.mjs';
-import {projectorContext} from './d1-enrichment-context.mjs';
-import {openSqlite as openSqliteProcess} from '../scripts/offline-import.mjs';
-import {sqliteRunner} from './sqlite-session.mjs';
-// AIR-408: the offline-import adapter keeps one sqlite3 process per database instead of starting one per statement.
-const openSqlite=file=>openSqliteProcess(file,{runner:sqliteRunner});
-import {seedProjection} from '../scripts/d1-projection-seed.mjs';
 
 const source=fs.readFileSync('src/d1-enrichment.js','utf8');
-assert.doesNotMatch(source,/\bBUCKET\.(put|delete)\b/,'the projector never writes R2');
-assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/runD1EnrichmentProjection\(/,'the cron handler does not call the projector');
-assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/runD1EnrichmentProjection\([^)]*\)[^\n]*metadataSync|metadataSync[^\n]*runD1EnrichmentProjection/,'no sync step runs the projector');
+const code=source.split('\n').filter(line=>!line.startsWith('//')).join('\n');
+const worker=fs.readFileSync('src/worker.js','utf8').split('\n').filter(line=>!/^\s*\/\//.test(line)).join('\n');
+// The module is read-only: no runner, no write, no R2, no lease, no window, no retired selector read.
+for(const pattern of [/runD1EnrichmentProjection/,/\bBUCKET\b/,/\b(INSERT|UPDATE|DELETE)\s/,/projection_fence\s*\(/,/D1_ENRICHMENT_(WRITE|WINDOW|BULK|TEST_HARNESS)/,/\bd1Enrichment(Mode|Adapter|Plan|Store|Diff|Write|Lease|Release|Guard)\b/])assert.doesNotMatch(code,pattern,String(pattern));
+assert.deepEqual([...code.matchAll(/^(?:async )?function (\w+)/gm)].map(match=>match[1]),['d1EnrichmentStatus'],'the status is the only function left');
+assert.doesNotMatch(worker,/runD1EnrichmentProjection|D1_ENRICHMENT_(WRITE|WINDOW|BULK|TEST_HARNESS)/,'the Worker never starts the projector or reads the retired selectors');
+assert.doesNotMatch(fs.readFileSync('src/catalog-d1.js','utf8'),/runD1EnrichmentProjection/);
 assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*"\]/);
-{
- const closed=projectorContext({harness:false});
- let touched=0;
- const db=new Proxy({},{get(){touched++;throw new Error('db touched');}});
- const bucket=new Proxy({},{get(){touched++;throw new Error('bucket touched');}});
- const summary=await closed.runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on',D1_ENRICHMENT_WINDOW:'on',D1_ENRICHMENT_BULK:'on'});
- assert.deepEqual(JSON.parse(JSON.stringify(summary)),{mode:null,retired:true,skipped:'retired'});
- assert.equal(touched,0,'set enrichment selectors do not touch D1 or R2 outside the offline harness');
- assert.equal(closed.d1EnrichmentMode({D1_ENRICHMENT_WRITE:'on'}),null);
- assert.equal(closed.d1EnrichmentMode({D1_ENRICHMENT_WRITE:'dry'}),null);
- const tableNames=['projection_state','projection_run','projection_fence','film_sync_state','metadata_cache','metadata_cache_authority','metadata_cache_cas'];
- const statusBinding={prepare(sql){return {bind(){return this;},async all(){return {results:/owner_review_/.test(sql)?[]:tableNames.map(name=>({name}))};},async first(){if(/schema_contract/.test(sql))return {version:7};if(/COUNT\(\*\).*projection_state/.test(sql))return {total:0,absent:0,lastWriteAt:null};return null;}};}};
- const status=await closed.d1EnrichmentStatus(statusBinding,{D1_ENRICHMENT_WINDOW:'on'});
- assert.equal(status.windowMode,null,'the production status does not expose a retired window selector as effective');
-}
+assert.match(fs.readFileSync('src/catalog-d1.js','utf8'),/d1EnrichmentStatus\(/,'/api/d1/status still reports through the status');
+// CI shards do not build first: like the other bundle tests, build the Worker bundle here (atomic write).
+assert.equal(spawnSync(process.execPath,['build.mjs'],{stdio:'ignore'}).status,0);
+const bundle=fs.readFileSync('dist/server/index.js','utf8').split('\n').filter(line=>!/^\s*\/\//.test(line)).join('\n');
+assert.ok(bundle.includes('async function d1EnrichmentStatus('),'the bundle carries the status');
+assert.doesNotMatch(bundle,/runD1EnrichmentProjection|d1EnrichmentPlan|d1EnrichmentDiff|LifecycleReader/,'the bundle carries no projector runner');
 
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-enrichment-'));
+const context=vm.createContext({Date,Map,Set,JSON,Object,Number,Promise,console});
+vm.runInContext(source+'\nglobalThis.status=d1EnrichmentStatus;',context);
+const status=(binding,env={})=>context.status(binding,env);
+const plain=value=>JSON.parse(JSON.stringify(value));
+
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-enrichment-status-'));
 let databases=0;
-const migrated=(names=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state'])=>{
- const file=path.join(root,'d1-'+(databases++)+'.sqlite');
- const db=d1Standin(file);
+const migrated=(names)=>{
+ const db=d1Standin(path.join(root,'status-'+(databases++)+'.sqlite'));
  for(const name of names)db.sql(fs.readFileSync('migrations/'+name+'.sql','utf8').replace(/;\s*$/,''));
- return {file,db};
+ return db;
 };
-const T='2026-10-28T10:00:00.000Z';
-const person=(id,name)=>({id,name,original:name});
-const MANN=person('director/michael-mann','Michael Mann'),PACINO=person('actor/al-pacino','Al Pacino'),DE_NIRO=person('actor/robert-de-niro','Robert De Niro'),KILMER=person('actor/val-kilmer','Val Kilmer'),FOXX=person('actor/jamie-foxx','Jamie Foxx');
-const film=(id,title,tmdbId,directors,actors)=>({id,title,original:title,year:1995,tmdbId,url:'https://letterboxd.com/film/'+id+'/',directors,actors});
-const meta=(record)=>({...record,metadataAt:T,peopleVersion:1,peopleNamesVersion:2,synopsis:'Synopsis',synopsisFetchedAt:T,runtime:120});
-function r2({heat=[PACINO,DE_NIRO],collateral=true,catalogActors=[person('tmdb_actor/2','Jean Reno')],heatCatalog=null}={}){
- const films=[film('heat','Heat','949',[MANN],heat),...(collateral?[film('collateral','Collateral','1538',[MANN],[FOXX])]:[])];
- const bucket=new MemoryBucket();
- const put=(key,value)=>bucket.put(key,JSON.stringify(value));
- put('watchlist.json',{updatedAt:T,films});
- put('programme.json',{updatedAt:T,films:films.map(item=>({...item,shows:[]}))});
- put('metadata.json',Object.fromEntries(films.map(item=>[item.id,meta(item)])));
- put('titles.json',{});put('people.json',{});
- put('epg/discovery-resolution.json',{});
- put('epg/published-generation.json',{phase:'published',programmeRunId:'run-1'});
- put('epg/discovered-films.json',{tmdb_100:{id:'tmdb_100',tmdbId:'100',title:'Ronin',original:'Ronin',year:1998,discoveredAt:T,synopsis:'Overview',directors:[person('tmdb_director/1','John Frankenheimer')],actors:catalogActors},...(heatCatalog?{tmdb_949:{id:'tmdb_949',tmdbId:'949',title:'Heat',original:'Heat',year:1995,discoveredAt:T,synopsis:'Overview',directors:[],actors:heatCatalog}}:{})});
- // The projector reads the published generation's copies, never the root ones.
- bucket.objects.set('epg/generations/run-1/programme.json',bucket.objects.get('programme.json'));
- bucket.objects.set('epg/generations/run-1/discovered-films.json',bucket.objects.get('epg/discovered-films.json'));
- bucket.objects.delete('programme.json');bucket.objects.delete('epg/discovered-films.json');
- return bucket;
-}
-const reads=bucket=>{const counted={count:0};const get=bucket.get.bind(bucket);bucket.get=async key=>{counted.count++;return get(key);};return counted;};
-const logs=[];
-const projector=projectorContext({log:line=>logs.push(JSON.parse(line))});
-const run=(env,options={})=>projector.runD1EnrichmentProjection(env,options);
-const credits=(db,id)=>db.sql(`SELECT person_id p,role r,ordinal o FROM film_person_credit WHERE film_id='${id}' ORDER BY role,ordinal`).map(row=>row.r[0]+row.o+':'+row.p);
 const one=(db,sql)=>Object.values(db.sql(sql)[0]||{})[0];
+const V3=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity'];
 
-// 1. off: nothing is read, nothing is written; a missing binding is reported.
+// 1. Retired, whatever the selectors say: mode and windowMode are null even when the retired variables are set.
 {
- const bucket=r2(),counted=reads(bucket),{db}=migrated();
- assert.deepEqual({...await run({DB:db,BUCKET:bucket})},{mode:'off',skipped:'off'});
- assert.equal(counted.count,0);assert.equal(db.calls.queries+db.calls.batches,0);
- assert.equal((await run({BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'})).skipped,'binding_missing');
- for(const value of ['On',' on','true','dry ',{}])assert.equal(projector.d1EnrichmentMode({D1_ENRICHMENT_WRITE:value}),'off');
-}
-
-// 2. dry: the whole diff is computed and logged, D1 gets reads only.
-const {db,file}=migrated();
-const bucket=r2();
-{
- const summary=await run({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'dry'});
- assert.equal(summary.outcome,'dry');
- assert.deepEqual([summary.films,summary.changedFilms,summary.people,summary.changedPeople,summary.absent],[3,3,6,6,0]);
- assert.equal(db.calls.batches,0);assert.equal(one(db,'SELECT COUNT(*) FROM film'),0);assert.equal(one(db,'SELECT COUNT(*) FROM projection_run'),0);
- assert.equal(logs.at(-1).event,'d1_enrichment_projection');assert.equal(logs.at(-1).outcome,'dry');
-}
-
-// 3. on: every Person, then every Film, each with its change key; the run releases its lease and records its summary.
-const env={DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'};
-{
- const summary=await run(env);
- assert.equal(summary.outcome,'complete',JSON.stringify(summary));
- assert.deepEqual([summary.writtenPeople,summary.writtenFilms,summary.errorCount],[6,3,0]);
- assert.equal(one(db,'SELECT COUNT(*) FROM projection_state'),9);
- assert.deepEqual(db.sql('SELECT film_id f FROM watchlist_film ORDER BY film_id').map(row=>row.f),['film:collateral','film:heat']);
- assert.deepEqual(credits(db,'film:heat'),['a0:person:actor/al-pacino','a1:person:actor/robert-de-niro','d0:person:director/michael-mann']);
- assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','d0:person:tmdb_director/1']);
- assert.equal(one(db,"SELECT year FROM film_metadata WHERE film_id='film:heat'"),1995);
- const stored=db.sql("SELECT lease_id l,outcome o FROM projection_run WHERE projection='enrichment'")[0];
- assert.deepEqual([stored.l,stored.o],[null,'complete']);
- assert.equal(one(db,'SELECT COUNT(*) FROM projection_fence'),0,'the fence row never outlives its batch');
-}
-
-// 4. Converged: a second run, and one a week later, write nothing. The view stamps undated dimensions with the run's clock;
-// the change key ignores that stamp.
-for(const now of [Date.now(),Date.now()+7*86400000]){
- const before=db.calls.batches,summary=await run(env,{now});
- assert.deepEqual([summary.changedFilms,summary.changedPeople,summary.absent,summary.outcome],[0,0,0,'complete']);
- assert.equal(db.calls.batches,before);
-}
-
-// 5. Fingerprint and prediction dimensions belong to other writers and stay as they are.
-// A Film the projector creates gets no fingerprint or prediction row; the prediction writer adds them.
-assert.equal(one(db,"SELECT COUNT(*) FROM film_dimension WHERE dimension IN ('fingerprint','prediction')"),0);
-db.sql(`INSERT INTO film_dimension (film_id,dimension,status,source,updated_at) VALUES ('film:heat','fingerprint','current','fingerprint','${T}'),('film:heat','prediction','current','prediction','${T}')`);
-
-// 6. D1-only TMDB credits of a watchlist Film (AIR-286) survive every rewrite, numbered after the R2 credits of their role.
-db.sql(`INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:tmdb_actor/1158','tmdb_actor/1158',1,'${T}'),('person:tmdb_actor/380','tmdb_actor/380',1,'${T}'),('person:tmdb_director/638','tmdb_director/638',1,'${T}');
-INSERT INTO film_person_credit VALUES ('film:heat','person:tmdb_actor/1158','actor',2),('film:heat','person:tmdb_actor/380','actor',3),('film:heat','person:tmdb_director/638','director',1)`);
-const heatAfter=async(options)=>{const next=r2(options);for(const [key,value] of next.objects)bucket.objects.set(key,value);const summary=await run(env);assert.equal(summary.outcome,'complete',JSON.stringify(summary));return credits(db,'film:heat');};
-assert.deepEqual(await heatAfter({heat:[PACINO,KILMER,DE_NIRO]}),['a0:person:actor/al-pacino','a1:person:actor/val-kilmer','a2:person:actor/robert-de-niro','a3:person:tmdb_actor/1158','a4:person:tmdb_actor/380','d0:person:director/michael-mann','d1:person:tmdb_director/638'],'a Letterboxd credit added');
-assert.deepEqual(await heatAfter({heat:[DE_NIRO]}),['a0:person:actor/robert-de-niro','a1:person:tmdb_actor/1158','a2:person:tmdb_actor/380','d0:person:director/michael-mann','d1:person:tmdb_director/638'],'Letterboxd credits removed');
-assert.deepEqual(await heatAfter({heat:[DE_NIRO],heatCatalog:[person('tmdb_actor/380','Robert De Niro')]}),['a0:person:actor/robert-de-niro','a1:person:tmdb_actor/380','a2:person:tmdb_actor/1158','d0:person:director/michael-mann','d1:person:tmdb_director/638'],'the R2 roster wins a duplicate');
-assert.equal(one(db,"SELECT status FROM film_dimension WHERE film_id='film:heat' AND dimension='fingerprint'"),'current');
-assert.equal(one(db,"SELECT status FROM film_dimension WHERE film_id='film:heat' AND dimension='prediction'"),'current');
-
-// 7. A catalog Film's credits all come from R2: a credit only D1 holds is dropped on the next rewrite.
-db.sql(`INSERT INTO film_person_credit VALUES ('film:tmdb:100','person:tmdb_actor/1158','actor',1)`);
-await heatAfter({heat:[DE_NIRO],catalogActors:[person('tmdb_actor/2','Jean Reno'),person('tmdb_actor/3','Robert De Niro')]});
-assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:person:tmdb_actor/3','d0:person:tmdb_director/1']);
-
-// 8. A Film no R2 source lists any more loses only its watchlist membership, once; its row and credits stay.
-{
- const next=r2({heat:[DE_NIRO],collateral:false,catalogActors:[person('tmdb_actor/2','Jean Reno'),person('tmdb_actor/3','Robert De Niro')]});
- for(const [key,value] of next.objects)bucket.objects.set(key,value);
- const summary=await run(env);
- assert.deepEqual([summary.absent,summary.released,summary.outcome],[2,2,'complete'],JSON.stringify(summary));
- assert.deepEqual(db.sql('SELECT film_id f FROM watchlist_film').map(row=>row.f),['film:heat']);
- assert.equal(one(db,"SELECT COUNT(*) FROM film WHERE id='film:collateral'"),1);
- assert.deepEqual(credits(db,'film:collateral'),['a0:person:actor/jamie-foxx','d0:person:director/michael-mann']);
- assert.deepEqual(db.sql("SELECT kind k,id i FROM projection_state WHERE change_key='absent' ORDER BY id").map(row=>row.k+':'+row.i),['film:film:collateral','person:person:actor/al-pacino','person:person:actor/jamie-foxx','person:person:actor/val-kilmer','person:person:tmdb_actor/380'],'people dropped from every roster in steps 6 and 7 were marked absent then');
- assert.equal((await run(env)).released,0,'an absent entity is not released again');
-}
-
-// 9. The lease keeps a second run out; an expired lease is taken over.
-{
- db.sql(`UPDATE projection_run SET lease_id='other',lease_until='${new Date(Date.now()+60000).toISOString()}'`);
- assert.equal((await run(env)).skipped,'lease_held');
- db.sql(`UPDATE projection_run SET lease_until='${new Date(Date.now()-1000).toISOString()}'`);
- assert.equal((await run(env)).outcome,'complete');
-}
-
-// 10. A run that loses its lease mid-way writes nothing more: the fence fails the batch whole, keys included, and the run stops.
-{
- const next=r2({heat:[PACINO],collateral:true,catalogActors:[person('tmdb_actor/2','Jean Reno')]});
- for(const [key,value] of next.objects)bucket.objects.set(key,value);
- const {file:fenceFile}=migrated();fs.copyFileSync(file,fenceFile);
- let batches=0;
- const stolen=d1Standin(fenceFile,{onBatch:()=>{if(++batches===2)stolen.sql("UPDATE projection_run SET lease_id='thief'");}});
- const keysBefore=stolen.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id');
- const summary=await run({...env,DB:stolen});
- assert.equal(summary.outcome,'lease_lost',JSON.stringify(summary));
- assert.equal(batches,2,'nothing is sent after the lost lease');
- const keysAfter=stolen.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id');
- assert.equal(keysAfter.filter((row,index)=>row.change_key!==keysBefore[index]?.change_key).length,summary.writtenPeople+summary.writtenFilms+summary.released,'only the batch before the theft moved a key');
- assert.equal(one(stolen,'SELECT COUNT(*) FROM projection_fence'),0);
- assert.equal(one(stolen,"SELECT lease_id FROM projection_run"),'thief','the thief keeps its lease');
-}
-
-// 11. The query budget stops a run with work left; the next run carries on and converges.
-{
- const summary=await run(env,{queryBudget:3});
- assert.equal(summary.outcome,'budget',JSON.stringify(summary));
- assert.ok(summary.remaining>0);
- let guard=0,last;
- do{last=await run(env,{queryBudget:7});}while(last.outcome==='budget'&&++guard<20);
- assert.equal(last.outcome,'complete');
- assert.deepEqual([(await run(env)).changedFilms,(await run(env)).changedPeople],[0,0]);
-}
-
-// 12. One Person that cannot be written does not hold back the rest of its group.
-{
- const {file:groupFile}=migrated();
- const failing=d1Standin(groupFile,{onBatch:statements=>{if(statements.some(item=>item.text.includes("INSERT INTO person (")&&item.text.includes("'person:actor/robert-de-niro'")))throw new Error('D1_ERROR: synthetic');}});
- const summary=await run({DB:failing,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'});
- assert.equal(summary.outcome,'partial');
- assert.equal(summary.writtenPeople,5);
- assert.ok(summary.errors.some(item=>item.kind==='person'&&item.id==='person:actor/robert-de-niro'));
- assert.ok(summary.errors.some(item=>item.kind==='film'&&item.id==='film:heat'),'a Film whose person is missing fails and is retried later');
- assert.equal(one(failing,"SELECT COUNT(*) FROM projection_state WHERE id='person:actor/robert-de-niro'"),0);
-}
-
-// 13. Inputs fail closed: a missing or malformed object, an unpublished pointer, a missing generation copy or a pointer that
-// moves during the reads stops (or defers) the run before any D1 write. An empty but present dataset is data, guarded by the absent limit.
-{
- const keys=()=>db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id');
- const before=keys(),batches=db.calls.batches;
- const broken=[
-  ['watchlist.json',bucket=>bucket.objects.delete('watchlist.json'),'input_missing'],
-  ['metadata.json',bucket=>bucket.put('metadata.json','not json'),'input_invalid'],
-  ['people.json',bucket=>bucket.put('people.json','[]'),'input_invalid'],
-  ['watchlist.json',bucket=>bucket.put('watchlist.json',JSON.stringify({films:null})),'input_invalid'],
-  ['epg/generations/run-1/discovered-films.json',bucket=>bucket.objects.delete('epg/generations/run-1/discovered-films.json'),'input_missing'],
-  ['epg/generations/run-1/programme.json',bucket=>bucket.objects.delete('epg/generations/run-1/programme.json'),'input_missing'],
-  ['epg/published-generation.json',bucket=>bucket.put('epg/published-generation.json',JSON.stringify({phase:'staging',programmeRunId:'run-1'})),'generation_unpublished'],
-  ['epg/published-generation.json',bucket=>bucket.objects.delete('epg/published-generation.json'),'input_missing'],
- ];
- for(const [key,breakIt,reason] of broken){
-  const next=r2({heat:[PACINO]});breakIt(next);
-  for(const mode of ['dry','on']){
-   const summary=await run({DB:db,BUCKET:next,D1_ENRICHMENT_WRITE:mode});
-   assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['failed',reason,key],key+' '+mode);
-  }
+ const tableNames=['projection_state','projection_run','projection_fence','film_sync_state','metadata_cache','metadata_cache_authority','metadata_cache_cas'];
+ const binding={prepare(sql){return {bind(){return this;},async all(){return {results:/owner_review_/.test(sql)?[]:tableNames.map(name=>({name}))};},async first(){if(/schema_contract/.test(sql))return {version:7};if(/COUNT\(/.test(sql))return {total:0,absent:0,lastWriteAt:null};return null;}};}};
+ for(const env of [{},{D1_ENRICHMENT_WRITE:'on',D1_ENRICHMENT_WINDOW:'on',D1_ENRICHMENT_BULK:'on'},{D1_ENRICHMENT_WRITE:'dry'}]){
+  const reported=await status(binding,env);
+  assert.deepEqual([reported.mode,reported.windowMode,reported.retired,reported.schema],[null,null,true,true],JSON.stringify(env));
  }
- // The pointer moves to another generation during the reads: its etag check defers the run.
- const moving=r2({heat:[PACINO]});const get=moving.get.bind(moving);let moved=false;
- moving.get=async key=>{const object=await get(key);if(key==='watchlist.json'&&!moved){moved=true;await moving.put('epg/published-generation.json',JSON.stringify({phase:'published',programmeRunId:'run-2'}));}return object;};
- const movedRun=await run({DB:db,BUCKET:moving,D1_ENRICHMENT_WRITE:'on'});
- assert.deepEqual([movedRun.outcome,movedRun.reason,movedRun.inputKey],['deferred','input_changed','epg/published-generation.json']);
- // A diary history that is absent is fine: its switch can be off.
- assert.equal(bucket.objects.has('letterboxd/diary/history.json'),false);
- assert.equal(db.calls.batches,batches,'no failed input reached a batch');
- assert.deepEqual(keys(),before);
- // An empty but present watchlist is a real dataset; past the absent limit it is held as suspect and nothing is written.
- const values=Array.from({length:26},(_,index)=>`('enrichment','film','film:ghost-${index}','k','${T}')`).join(',');
- db.sql('INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES '+values);
- const guarded=await run(env);
- assert.deepEqual([guarded.outcome,guarded.absentFilms,guarded.absentLimit.films],['absent_guard',26,25]);
- assert.equal(db.calls.batches,batches);
- db.sql("DELETE FROM projection_state WHERE id LIKE 'film:ghost-%'");
- const people=Array.from({length:251},(_,index)=>`('enrichment','person','person:actor/ghost-${index}','k','${T}')`).join(',');
- db.sql('INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES '+people);
- assert.deepEqual([(await run(env)).outcome,db.calls.batches],['absent_guard',batches]);
- db.sql("DELETE FROM projection_state WHERE id LIKE 'person:actor/ghost-%'");
- assert.equal((await run(env)).outcome,'complete');
 }
 
-// 14. A consistent cut: no run while a writer works, and none when an object changes during the reads, even under the same
-// published generation (the catalog and the resolution are updated in place). Each defers before any D1 write.
+// 2. A database without schema v4 has no projector tables; a partial 0004 is not schema v4.
 {
- const batches=db.calls.batches,keysBefore=db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id');
- const deferred=async(prepare,reason,key)=>{
-  for(const mode of ['dry','on']){const next=r2({heat:[DE_NIRO],collateral:true,catalogActors:[person('tmdb_actor/2','Jean Reno')]});prepare(next);const summary=await run({DB:db,BUCKET:next,D1_ENRICHMENT_WRITE:mode});assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['deferred',reason,key],reason+' '+key+' '+mode);}
- };
- await deferred(bucket=>bucket.put('epg/resolver-lease.json',JSON.stringify({id:'chunk',expiresAt:Date.now()+60000})),'writer_active','epg/resolver-lease.json');
- await deferred(bucket=>bucket.put('sync.json',JSON.stringify({stage:'metadata',updatedAt:new Date().toISOString()})),'writer_active','sync.json');
- const during=(key,mutate)=>bucket=>{const get=bucket.get.bind(bucket);let done=false;bucket.get=async name=>{const object=await get(name);if(name===key&&!done){done=true;await mutate(bucket);}return object;};};
- await deferred(during('epg/generations/run-1/discovered-films.json',bucket=>bucket.put('epg/generations/run-1/discovered-films.json',JSON.stringify({}))),'input_changed','epg/generations/run-1/discovered-films.json');
- await deferred(during('epg/discovery-resolution.json',bucket=>bucket.put('epg/discovery-resolution.json',JSON.stringify({moved:{status:'verified',tmdbId:'7'}}))),'input_changed','epg/discovery-resolution.json');
- await deferred(during('watchlist.json',bucket=>bucket.put('epg/resolver-lease.json',JSON.stringify({id:'late',expiresAt:Date.now()+60000}))),'writer_active','epg/resolver-lease.json');
- // A finished or stale writer state does not hold the run.
- const idle=r2({heat:[DE_NIRO],collateral:true,catalogActors:[person('tmdb_actor/2','Jean Reno')]});
- await idle.put('epg/resolver-lease.json',JSON.stringify({id:'old',expiresAt:0}));
- await idle.put('sync.json',JSON.stringify({stage:'metadata',updatedAt:new Date(Date.now()-3600000).toISOString()}));
- assert.equal((await run({DB:db,BUCKET:idle,D1_ENRICHMENT_WRITE:'dry'})).outcome,'dry');
- assert.equal(db.calls.batches,batches);
- assert.deepEqual(db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id'),keysBefore);
-}
-
-// 15. Watchlist membership at production scale: 394 listed Films. An empty or truncated watchlist that leaves the Films in the
-// programme and catalog loses no membership and writes nothing; a routine removal of a few Films goes through.
-{
- const {db:big}=migrated();
- const films=Array.from({length:394},(_,index)=>film('w'+index,'Film '+index,String(10000+index),[MANN],[]));
- const scaled=(listed)=>{
-  const bucket=new MemoryBucket();const put=(key,value)=>bucket.put(key,JSON.stringify(value));
-  put('watchlist.json',{updatedAt:T,films:listed});put('metadata.json',Object.fromEntries(films.map(item=>[item.id,meta(item)])));
-  put('titles.json',{});put('people.json',{});put('epg/discovery-resolution.json',{});
-  put('epg/published-generation.json',{phase:'published',programmeRunId:'run-9'});
-  put('epg/generations/run-9/programme.json',{updatedAt:T,films:films.map(item=>({...item,shows:[]}))});
-  put('epg/generations/run-9/discovered-films.json',{});
-  return bucket;
- };
- const first=await run({DB:big,BUCKET:scaled(films),D1_ENRICHMENT_WRITE:'on'},{queryBudget:1e6,wallMs:6e5});
- assert.equal(first.outcome,'complete',JSON.stringify(first));
- assert.equal(one(big,'SELECT COUNT(*) FROM watchlist_film'),394);
- for(const listed of [[],films.slice(0,300)]){
-  const before=big.calls.batches;
-  for(const mode of ['dry','on']){
-   const summary=await run({DB:big,BUCKET:scaled(listed),D1_ENRICHMENT_WRITE:mode});
-   assert.deepEqual([summary.outcome,summary.members,summary.membershipRemoved,summary.membershipLimit,summary.absent],['membership_guard',394,394-listed.length,8,0]);
-  }
-  assert.equal(big.calls.batches,before,'zero D1 batches');
-  assert.equal(one(big,'SELECT COUNT(*) FROM watchlist_film'),394);
- }
- const routine=await run({DB:big,BUCKET:scaled(films.slice(3)),D1_ENRICHMENT_WRITE:'on'},{queryBudget:1e6});
- assert.deepEqual([routine.outcome,routine.membershipRemoved],['complete',3]);
- assert.equal(one(big,'SELECT COUNT(*) FROM watchlist_film'),391);
-}
-
-// 16. Status: a database without schema v4 has no projector; with it, checkpoints and the last run.
-{
- const {db:v3}=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity']);
- const plain=value=>JSON.parse(JSON.stringify(value));
- assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',retired:true,schema:false,schemaVersion:3,projectionTables:[]});
- // A partial 0004 is not schema v4: the three tables without the version, or the version without a table.
+ const v3=migrated(V3);
+ assert.deepEqual(plain(await status(v3)),{mode:null,retired:true,schema:false,schemaVersion:3,projectionTables:[]});
  v3.sql(fs.readFileSync('migrations/0004_projection_state.sql','utf8').replace(/UPDATE schema_contract[^;]*;/,''));
- assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',retired:true,schema:false,schemaVersion:3,projectionTables:['projection_fence','projection_run','projection_state']});
+ assert.deepEqual(plain(await status(v3)),{mode:null,retired:true,schema:false,schemaVersion:3,projectionTables:['projection_fence','projection_run','projection_state']});
  v3.sql('UPDATE schema_contract SET version=4 WHERE id=1;DROP TABLE projection_fence');
- assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',retired:true,schema:false,schemaVersion:4,projectionTables:['projection_run','projection_state']});
- assert.equal((await run(env)).outcome,'complete');
- const status=await projector.d1EnrichmentStatus(db,{D1_ENRICHMENT_WRITE:'on'});
- assert.deepEqual([status.mode,status.schema,status.checkpoints,status.absent,status.lastRun.outcome,status.lastRun.leaseHeld],['on',true,one(db,'SELECT COUNT(*) FROM projection_state'),one(db,"SELECT COUNT(*) FROM projection_state WHERE change_key='absent'"),'complete',false]);
- assert.ok(status.checkpoints>9&&status.absent>0);
+ assert.deepEqual(plain(await status(v3)),{mode:null,retired:true,schema:false,schemaVersion:4,projectionTables:['projection_run','projection_state']});
 }
 
-// 17. The seed writes keys only for entities the database holds and replaces the projection's earlier keys.
+// 3. Schema v4: the checkpoint counts and the last run come from the rows; the v4 shape has no sync, cache or prediction fields.
 {
- const {file:seedFile}=migrated();fs.copyFileSync(file,seedFile);
- const sqlite=openSqlite(seedFile);
- const result=await seedProjection(sqlite,{at:T,keys:[{kind:'film',id:'film:heat',key:'k1'},{kind:'film',id:'film:nowhere',key:'k2'},{kind:'person',id:'person:actor/al-pacino',key:'k3'}]});
- assert.deepEqual({...result},{seeded:2,skipped:1,films:1,people:1});
- assert.deepEqual(d1Standin(seedFile).sql('SELECT id,change_key k FROM projection_state ORDER BY id').map(row=>row.id+'='+row.k),['film:heat=k1','person:actor/al-pacino=k3']);
- const {file:bare}=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity']);
- await assert.rejects(seedProjection(openSqlite(bare),{at:T,keys:[]}),/apply migrations\/0004/);
+ const db=migrated([...V3,'0004_projection_state']);
+ const T='2026-11-10T10:00:00.000Z';
+ db.sql(`INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES ('enrichment','film','film:heat','k1','${T}'),('enrichment','film','film:gone','absent','${T}'),('enrichment','person','actor/a','k2','${T}'),('other','film','film:x','k3','${T}')`);
+ db.sql(`INSERT INTO projection_run (projection,lease_id,lease_until,started_at,finished_at,outcome,summary_json) VALUES ('enrichment',NULL,NULL,'${T}','${T}','complete','{"changed":3}')`);
+ const reported=await status(db);
+ assert.deepEqual([reported.mode,reported.schema,reported.checkpoints,reported.absent,reported.lastWriteAt,reported.windowMode],[null,true,3,1,T,null]);
+ assert.deepEqual(plain(reported.lastRun),{startedAt:T,finishedAt:T,outcome:'complete',leaseHeld:false,summary:{changed:3}});
+ assert.equal(one(db,'SELECT COUNT(*) FROM projection_state'),4,'the status only reads');
+ assert.equal(reported.schemaVersion,undefined);assert.equal(reported.syncCheckpoints,undefined);assert.equal(reported.cacheMode,undefined);assert.equal(reported.predictionMode,undefined);
+ assert.deepEqual(Object.keys(reported).sort(),['absent','checkpoints','lastRun','lastWriteAgeSec','lastWriteAt','mode','retired','schema','windowMode']);
 }
 
-// 18. An admitted Film whose cache disappeared keeps the body already stored. A cache row with another id is not a new body.
+// 4. Schema v5 adds the sync checkpoints; a run row with a lease reports leaseHeld; an unreadable summary stays null.
 {
- const {db:kept}=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state']);
- const sourceBucket=r2();
- const first=await run({DB:kept,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
- assert.equal(first.outcome,'complete',JSON.stringify(first));
- const beforeCredits=credits(kept,'film:heat');
- const snap=()=>({
-  credits:credits(kept,'film:heat'),
-  tmdb:one(kept,"SELECT value FROM film_external_id WHERE film_id='film:heat' AND scheme='tmdb' AND trusted=1"),
-  identity:one(kept,"SELECT status FROM film_dimension WHERE film_id='film:heat' AND dimension='identity'"),
-  canonical:one(kept,"SELECT canonical_identity FROM film WHERE id='film:heat'"),
-  year:one(kept,"SELECT year FROM film_metadata WHERE film_id='film:heat'"),
-  sync:one(kept,"SELECT metadata_at FROM film_sync_state WHERE film_id='film:heat'"),
-  title:one(kept,"SELECT original_title FROM film WHERE id='film:heat'")
- });
- const stored=snap();
- assert.equal(stored.tmdb,'949');
- assert.equal(stored.identity,'resolved');
- assert.equal(stored.year,1995);
- assert.equal(stored.sync,T);
- const read=async key=>JSON.parse(await (await sourceBucket.get(key)).text());
- const watch=await read('watchlist.json');
- watch.films=watch.films.filter(film=>film.id!=='heat');
- await sourceBucket.put('watchlist.json',JSON.stringify(watch));
- const programme=await read('epg/generations/run-1/programme.json');
- programme.films=programme.films.filter(film=>film.id!=='heat');
- await sourceBucket.put('epg/generations/run-1/programme.json',JSON.stringify(programme));
- const metadata=await read('metadata.json');
- delete metadata.heat;
- await sourceBucket.put('metadata.json',JSON.stringify(metadata));
- await sourceBucket.put('enrichment/view-index.json',JSON.stringify({heat:{watchlist:false},collateral:{watchlist:true}}));
- const departedRun=await run({DB:kept,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
- assert.equal(departedRun.outcome,'complete',JSON.stringify(departedRun));
- assert.deepEqual(snap(),stored);
- assert.deepEqual(beforeCredits,stored.credits);
- assert.equal(one(kept,"SELECT COUNT(*) FROM watchlist_film WHERE film_id='film:heat'"),0);
- assert.equal(one(kept,"SELECT change_key='absent' FROM projection_state WHERE projection='enrichment' AND kind='film' AND id='film:heat'"),0);
- const again=await run({DB:kept,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
- assert.equal(again.writtenFilms,0,JSON.stringify(again));
- assert.deepEqual(snap(),stored);
- metadata.heat={id:'other',tmdbId:'1',original:'Other',metadataAt:T,peopleVersion:1,peopleNamesVersion:2,synopsis:'Nope',synopsisFetchedAt:T,directors:[MANN],actors:[PACINO]};
- await sourceBucket.put('metadata.json',JSON.stringify(metadata));
- const clash=await run({DB:kept,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
- assert.equal(clash.outcome,'complete',JSON.stringify(clash));
- assert.deepEqual(snap(),stored,'a cache id that disagrees does not replace the stored Film');
- assert.equal(one(kept,"SELECT COUNT(*) FROM film WHERE id='film:heat'"),1);
+ const db=migrated([...V3,'0004_projection_state','0005_film_sync_state']);
+ const T='2026-11-10T10:00:00.000Z';
+ db.sql(`INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES ('metadata_sync','film','film:heat','s1','${T}'),('metadata_sync','film','film:gone','absent','${T}')`);
+ db.sql(`INSERT INTO projection_run (projection,lease_id,lease_until,started_at,finished_at,outcome,summary_json) VALUES ('enrichment','lease','2999-01-01T00:00:00.000Z','${T}',NULL,NULL,'not json')`);
+ const reported=await status(db);
+ assert.deepEqual([reported.schemaVersion,reported.syncCheckpoints,reported.syncAbsent,reported.checkpoints],[5,2,1,0]);
+ assert.equal(reported.lastRun.leaseHeld,true);assert.equal(reported.lastRun.summary,null);
 }
 
-// 19. A missing rated-archive admissions object admits nobody. A present one is the next cron's Film, still not watchlist membership.
-{
- const {db:fresh}=migrated();
- const sourceBucket=r2();
- const before=await run({DB:fresh,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
- assert.equal(before.outcome,'complete',JSON.stringify(before));
- assert.equal(one(fresh,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:77'"),0,'deploy with no admissions object upserts no rated-only film');
- await sourceBucket.put('letterboxd/admissions/verified-films.json',JSON.stringify({schemaVersion:1,films:{tmdb_77:{tmdb:'77',sourceCode:'Zz9',archiveSha256:'ab'.repeat(32),title:'Rated Only',year:1994}}}));
- const after=await run({DB:fresh,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
- assert.equal(after.outcome,'complete',JSON.stringify(after));
- assert.equal(one(fresh,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:77'"),1);
- assert.equal(one(fresh,"SELECT COUNT(*) FROM watchlist_film WHERE film_id='film:tmdb:77'"),0,'the rating does not create watchlist membership');
- const {db:invalid}=migrated();
- const bad=r2();
- await bad.put('letterboxd/admissions/verified-films.json','{"schemaVersion":1,"films":[]}');
- const stopped=await run({DB:invalid,BUCKET:bad,D1_ENRICHMENT_WRITE:'on'});
- assert.deepEqual([stopped.outcome,stopped.reason,stopped.inputKey],['failed','input_invalid','letterboxd/admissions/verified-films.json']);
- assert.equal(one(invalid,'SELECT COUNT(*) FROM film'),0,'an invalid admissions object writes nothing');
-}
-
-// 15. AIR-363: between the D1 ledger seal and the publish step the discovery authority names the new run while the pointer still
-// names the old one, and the old generation's R2 catalog copy may be absent. The run is deferred as generation_pending before any
-// read of that catalog or any write; outside the window a missing copy is still a failed input. After the handoff it projects.
-{
- const state={ready:true,mode:'d1',cutover:'open',generation:5,programmeRunId:'run-2'};
- const handoff=projectorContext({log:line=>logs.push(JSON.parse(line)),globals:{DiscoveryAuthority:{readAuthority:async()=>({...state}),routeRead:async(env,key)=>{const object=await env.BUCKET.get(key);return {handled:true,value:object?await object.json():null};}}}});
- const runWith=(env,options={})=>handoff.runD1EnrichmentProjection(env,options);
- const {db:window}=migrated();
- const missing=r2();missing.objects.delete('epg/generations/run-1/discovered-films.json');
- const catalogReads=[];const get=missing.get.bind(missing);missing.get=async key=>{if(key.endsWith('discovered-films.json'))catalogReads.push(key);return get(key);};
- const batches=window.calls.batches,before=window.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id');
- // Published run-1, authority run-2, the old catalog copy missing: deferred, twice (two crons), in dry and on.
- for(const mode of ['dry','on','on']){
-  const summary=await runWith({DB:window,BUCKET:missing,D1_ENRICHMENT_WRITE:mode});
-  assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['deferred','generation_pending','discovery_authority'],mode);
- }
- assert.equal(catalogReads.length,0,'no catalog of any generation is read in the window');
- assert.equal(window.calls.batches,batches,'nothing is written');
- assert.deepEqual(window.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id'),before);
- // A newer EPG run: the pointer moves to run-3 while the authority still names run-2: still deferred, no read of any catalog.
- await missing.put('epg/published-generation.json',JSON.stringify({phase:'published',programmeRunId:'run-3'}));
- const newer=await runWith({DB:window,BUCKET:missing,D1_ENRICHMENT_WRITE:'on'});
- assert.deepEqual([newer.outcome,newer.reason],['deferred','generation_pending']);
- assert.equal(catalogReads.length,0);
- await missing.put('epg/published-generation.json',JSON.stringify({phase:'published',programmeRunId:'run-1'}));
- // Without the window (authority on the published run) a missing copy is still a failed input: the fail-closed rule is unchanged.
- state.ready=false;state.programmeRunId=null;
- const broken=await runWith({DB:window,BUCKET:missing,D1_ENRICHMENT_WRITE:'on'});
- assert.deepEqual([broken.outcome,broken.reason,broken.inputKey],['failed','input_missing','epg/generations/run-1/discovered-films.json']);
- // A D1 authority that names the published run answers for the catalog itself; there is no R2 copy to be missing (AIR-375, block 16).
- state.ready=true;state.programmeRunId='run-1';
- // After the publish the generation and the authority agree and the copy exists: the next run projects.
- const {db:after}=migrated();
- const done=await runWith({DB:after,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'});
- assert.equal(done.outcome,'complete',JSON.stringify(done));
- // An unreadable or held D1 authority is unknown: the run defers before any read or write and guesses nothing.
- const batchesBefore=window.calls.batches;
- for(const readAuthority of [async()=>{throw new Error('discovery_unavailable');},async()=>({ready:false,held:true})]){
-  const down=projectorContext({globals:{DiscoveryAuthority:{readAuthority}}});
-  const outage=await down.runD1EnrichmentProjection({DB:window,BUCKET:missing,D1_ENRICHMENT_WRITE:'on'});
-  assert.deepEqual([outage.outcome,outage.reason,outage.inputKey],['deferred','authority_unavailable','discovery_authority']);
- }
- assert.equal(window.calls.batches,batchesBefore);
- // An authority that is not D1 (not ready) has no handoff window: the R2 catalog stays the source and projects as before.
- const notD1=projectorContext({globals:{DiscoveryAuthority:{readAuthority:async()=>({ready:false,held:false,programmeRunId:null})}}});
- const {db:plain}=migrated();
- assert.equal((await notD1.runD1EnrichmentProjection({DB:plain,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'})).outcome,'complete');
- // The authority moves to the next run after the first guard, while the plan is built: the guard repeats right before the D1 write,
- // so nothing is written and the run defers.
- let reads=0;
- const racing=projectorContext({globals:{DiscoveryAuthority:{readAuthority:async()=>({ready:true,mode:'d1',cutover:'open',generation:5,programmeRunId:++reads>1?'run-2':'run-1'}),routeRead:async(env,key)=>{const object=await env.BUCKET.get(key);return {handled:true,value:object?await object.json():null};}}}});
- const {db:race}=migrated();
- const raced=await racing.runD1EnrichmentProjection({DB:race,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'});
- assert.deepEqual([raced.outcome,raced.reason],['deferred','generation_pending']);
- assert.equal(reads,2,'checked before the reads and again before the write');
- assert.equal(one(race,'SELECT COUNT(*) FROM film'),0,'stale run-1 projection is not written');
-}
-
-// 16. AIR-375: under a D1 discovery authority a generation's catalog is not an R2 object (a write of its key goes to the D1 catalog and
-// no R2 copy is made), and the R2 copy of the shared decisions is frozen at the cutover. The projector read both straight from R2: it
-// failed `input_missing` on every run once a generation was published under D1 authority (production: every hourly run from the first
-// tick after generation 5744aef7 was published), and the decisions it could have read were stale. It now reads both through the
-// authority route; an authority that is not D1 keeps the R2 objects and a missing copy there stays a failed input.
-{
- const base=r2();
- const catalog=await (await base.get('epg/generations/run-1/discovered-films.json')).json();
- const decisions=await (await base.get('epg/discovery-resolution.json')).json();
- // The D1 authority world: no R2 copy of the generation catalog, and a stale R2 copy of the decisions that must never be used.
- const d1World=()=>{const bucket=r2();bucket.objects.delete('epg/generations/run-1/discovered-films.json');bucket.objects.set('epg/discovery-resolution.json',base.objects.get('epg/discovery-resolution.json'));bucket.put('epg/discovery-resolution.json',JSON.stringify({stale:{decision:'frozen-at-cutover'}}));return bucket;};
- const authority=(over={})=>{const calls=[];const state={ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1',generation:7,...over.state};return {calls,state,api:{
-  readAuthority:over.readAuthority||(async()=>({...state})),
-  routeRead:over.routeRead||(async (env,key)=>{calls.push(key);if(key==='epg/generations/run-1/discovered-films.json')return {handled:true,value:catalog};if(key==='epg/discovery-resolution.json')return {handled:true,value:decisions};return {handled:false};}),
- }};};
- const spy=bucket=>{const keys=[];const get=bucket.get.bind(bucket);bucket.get=async key=>{keys.push(key);return get(key);};return keys;};
- const withAuthority=api=>projectorContext({log:line=>logs.push(JSON.parse(line)),globals:{DiscoveryAuthority:api}});
- // Baseline: the same data from R2 under an R2 authority.
- const {db:baseline}=migrated();
- assert.equal((await run({DB:baseline,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'})).outcome,'complete');
- const baselineFilms=one(baseline,'SELECT COUNT(*) FROM film');
-
- // (a) D1 authority, the R2 catalog copy absent: the run projects from the authority's catalog and decisions; neither R2 object is read.
- {
-  const a=authority(),bucket=d1World(),keys=spy(bucket),{db}=migrated();
-  const summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
-  assert.equal(summary.outcome,'complete',JSON.stringify(summary));
-  assert.equal(one(db,'SELECT COUNT(*) FROM film'),baselineFilms,'the same Films as the R2 catalog yields');
-  assert.deepEqual(a.calls.sort(),['epg/discovery-resolution.json','epg/generations/run-1/discovered-films.json']);
-  assert.ok(!keys.includes('epg/generations/run-1/discovered-films.json')&&!keys.includes('epg/discovery-resolution.json'),'no R2 read of the routed keys, so no stale decisions');
-  assert.equal(summary.discoveryGeneration,7);
-  // A natural retry converges and does not duplicate anything.
-  const again=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
-  assert.equal(again.outcome,'complete');assert.equal(one(db,'SELECT COUNT(*) FROM film'),baselineFilms);
- }
- // (b) Fail closed is unchanged where the authority is not D1: the R2 copy is the source and a missing copy is a failed input.
- {
-  const bucket=d1World(),{db}=migrated();
-  const notD1=withAuthority({readAuthority:async()=>({ready:false,held:false,programmeRunId:null}),routeRead:async()=>{throw new Error('must not be routed');}});
-  const summary=await notD1.runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
-  assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['failed','input_missing','epg/generations/run-1/discovered-films.json']);
-  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,'nothing is written');
- }
- // (c) The authority cannot answer for now (fence, ledger seal in progress): deferred, nothing written, projection clocks untouched.
- for(const code of ['discovery_fence','discovery_incomplete']){
-  const a=authority({routeRead:async()=>{const error=new Error(code);error.code=code;throw error;}}),{db}=migrated(),before=db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id'),batches=db.calls.batches;
-  const summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
-  assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['deferred','authority_unavailable','discovery_authority'],code);
-  assert.equal(db.calls.batches,batches);assert.deepEqual(db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id'),before);
- }
- // (d) An answer that cannot be used fails closed with the key, never silently: a bounded or unreadable catalog, a non-object value.
- for(const [label,routeRead,cause] of [['bounded',async()=>{const error=new Error('discovery_bounded');error.code='discovery_bounded';throw error;},'discovery_bounded'],['unreadable',async()=>{const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;},'discovery_unavailable'],['not an object',async()=>({handled:true,value:[1,2,3]}),undefined]]){
-  const a=authority({routeRead}),{db}=migrated();
-  const summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
-  assert.deepEqual([summary.outcome,summary.reason],['failed','input_invalid'],label);
-  assert.equal(summary.inputCause,cause,label+' is told apart from the other input_invalid causes');
-  assert.match(summary.inputKey,/discovered-films\.json$|discovery-resolution\.json$/,label);
-  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,label);
- }
- // (e) The authority no longer names the generation (null answer): a handoff, deferred before any write; the decisions answer null: absent.
- {
-  const gone=authority({routeRead:async (env,key)=>({handled:true,value:key.endsWith('discovered-films.json')?null:decisions})}),{db}=migrated();
-  const summary=await withAuthority(gone.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
-  assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['deferred','generation_pending','discovery_authority']);
-  const noDecisions=authority({routeRead:async (env,key)=>({handled:true,value:key.endsWith('discovered-films.json')?catalog:null})});
-  const missing=await withAuthority(noDecisions.api).runD1EnrichmentProjection({DB:migrated().db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
-  assert.deepEqual([missing.outcome,missing.reason,missing.inputKey],['failed','input_missing','epg/discovery-resolution.json']);
-  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0);
- }
- // (f) A fenced discovery write moves the authority generation between the reads and the write: the inputs may have changed, so nothing is
- // written and the run defers; the next run, on a stable generation, projects.
- {
-  let reads=0;const a=authority({readAuthority:async()=>({ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1',generation:++reads>1?8:7})}),{db}=migrated();
-  const moved=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
-  assert.deepEqual([moved.outcome,moved.reason,moved.inputKey],['deferred','input_changed','discovery_authority']);
-  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,'nothing is written when the authority generation moved');
-  const stable=authority(),retry=await withAuthority(stable.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
-  assert.equal(retry.outcome,'complete');assert.equal(one(db,'SELECT COUNT(*) FROM film'),baselineFilms);
- }
- // (g) A present, empty routed catalog is a real empty dataset, never a missing input; a failing run returns its summary and never throws,
- // so the other hourly work (monitor, Ratings, Discovery) in the same firing is unaffected (they run under Promise.allSettled).
- {
-  const empty=authority({routeRead:async (env,key)=>({handled:true,value:key.endsWith('discovered-films.json')?{}:decisions})}),{db}=migrated();
-  const summary=await withAuthority(empty.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
-  assert.notEqual(summary.reason,'input_missing',JSON.stringify(summary));
- }
- // (h) The read was D1-owned and the authority moved away from D1 between the first read and the route (the route answers handled:false): the
- // run defers and never falls back to the R2 copy, even though a stale R2 catalog and stale R2 decisions exist. Nothing is written.
- {
-  const stale=r2(),staleKeys=spy(stale),{db}=migrated();
-  const a=authority({routeRead:async()=>({handled:false})});
-  const summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:stale,D1_ENRICHMENT_WRITE:'on'});
-  assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['deferred','authority_unavailable','discovery_authority']);
-  assert.ok(!staleKeys.includes('epg/generations/run-1/discovered-films.json')&&!staleKeys.includes('epg/discovery-resolution.json'),'no R2 fallback for a D1-owned read');
-  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,'nothing is written');
-  // A D1 authority without a route at all cannot be read through: deferred, no R2 fallback either.
-  const noRoute=withAuthority({readAuthority:async()=>({ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1',generation:7})});
-  const bare=await noRoute.runD1EnrichmentProjection({DB:db,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'});
-  assert.deepEqual([bare.outcome,bare.reason],['deferred','authority_unavailable']);
-  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0);
-  // A D1 authority without a finite generation cannot prove the inputs unchanged: deferred before any read.
-  const noGeneration=withAuthority({readAuthority:async()=>({ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1'}),routeRead:async()=>{throw new Error('must not be read');}});
-  const unproven=await noGeneration.runD1EnrichmentProjection({DB:db,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'});
-  assert.deepEqual([unproven.outcome,unproven.reason],['deferred','authority_unavailable']);
- }
- // (i) The authority changes between the input reads and the write, with stale R2 decisions and catalog present: every kind of change defers
- // before any D1 write: away from D1 (not ready), held, another mode or cutover, another run, another generation, an unreadable authority.
- for(const [label,later,reason] of [
-  ['away from D1',{ready:false,held:false,mode:'r2',cutover:'open',programmeRunId:null,generation:7},'input_changed'],
-  ['held',{ready:false,held:true,mode:'d1',cutover:'held',programmeRunId:'run-1',generation:7},'authority_unavailable'],
-  ['another mode',{ready:true,held:false,mode:'r2',cutover:'open',programmeRunId:'run-1',generation:7},'input_changed'],
-  ['another cutover',{ready:true,held:false,mode:'d1',cutover:'held',programmeRunId:'run-1',generation:7},'input_changed'],
-  ['another run',{ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-2',generation:7},'generation_pending'],
-  ['another generation',{ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1',generation:9},'input_changed'],
-  ['no generation',{ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1'},'authority_unavailable'],
-  ['unreadable',null,'authority_unavailable']]){
-  let reads=0;const stale=r2(),{db}=migrated();
-  const a=authority({readAuthority:async()=>{if(++reads===1)return {ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1',generation:7};if(later===null)throw new Error('discovery_unavailable');return {...later};}});
-  const summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:stale,D1_ENRICHMENT_WRITE:'on'});
-  assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['deferred',reason,'discovery_authority'],label);
-  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,label+': nothing is written');
-  assert.equal(reads,2,label+': checked before the reads and again right before the write');
- }
- // The snapshot guarding the write is not part of the logged summary.
- {
-  const a=authority(),{db}=migrated(),summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
-  assert.equal(summary.outcome,'complete');assert.equal(Object.keys(summary).includes('discoveryGate'),false);assert.equal(summary.discoveryGeneration,7);
- }
- assert.match(fs.readFileSync('src/worker.js','utf8'),/Promise\.allSettled\(\[[^\]]*RatingsOrchestration\.ensure[^\]]*Monitor\.run/,'the ratings ensure and the monitor run under one allSettled');
-assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/runD1EnrichmentProjection/,'AIR-308: scheduled does not name the projector');
-}
-
-console.log('D1 enrichment projector (ADR 0056): fail-closed inputs, consistent cut (writers idle, etags unchanged), absent and membership guards at 394 watchlist Films, off reads nothing, dry writes nothing, on writes and converges, keys ignore the run clock, D1-only watchlist TMDB credits survive and renumber as Letterboxd credits come and go, R2 roster wins duplicates, catalog credits follow R2, fingerprint/prediction dimensions kept, absent released once, lease and lost-lease fence, budget resume, group fallback, status and seed passed, a missing rated-archive object admits nobody');
+fs.rmSync(root,{recursive:true,force:true});
+console.log('D1 enrichment status (AIR-537 slice 3): the projector runner, R2 reads and write arms are gone from the module, the Worker and the bundle; the status is retired (mode and windowMode null whatever the retired selectors say), detects schema v3, partial and v4, reports checkpoints, the last run and the sync clocks from rows without writing');

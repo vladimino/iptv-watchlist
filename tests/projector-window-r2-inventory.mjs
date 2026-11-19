@@ -195,13 +195,9 @@ const reached=new Set([...writers(chunk),...writers(publication)]);
 for(const key of reached)assert.ok(classes[key],'unclassified R2 writer reachable from Discovery or publication: '+key+' (classify it against the projector inputs)');
 for(const key of Object.keys(classes))assert.ok(reached.has(key),'stale classification, no longer reachable as a writer: '+key);
 
-// The projector's own input list, read from its source.
-const projector=fs.readFileSync('src/d1-enrichment.js','utf8');
-const inputs=new Set();
-for(const line of projector.split('\n')){
- if(!/d1EnrichmentRead\(|d1EnrichmentDiscoveryRead\(/.test(line))continue;
- for(const m of line.matchAll(/'([^']+\.json)'/g))inputs.add(m[1]);
-}
+// AIR-537 slice 3: the enrichment projector that read these R2 objects is retired, so its input list can no longer be read from its
+// source. The list is frozen here as it stood when the runner was removed; the objects stay protected from unfenced Discovery writes.
+const inputs=new Set(['watchlist.json','programme.json','metadata.json','titles.json','people.json','discovered-films.json','epg/discovery-resolution.json','letterboxd/diary/history.json','enrichment/view-index.json','letterboxd/admissions/verified-films.json']);
 // ADR 0162: admin/owner-reviews.json is no longer a projector input; the projector reads owner reviews from D1 only.
 const notDiscovery=['metadata.json','titles.json','people.json','watchlist.json','letterboxd/diary/history.json','enrichment/view-index.json','letterboxd/admissions/verified-films.json'];
 for(const name of notDiscovery)assert.ok(inputs.has(name),'the projector reads '+name);
@@ -222,11 +218,8 @@ for(const key of seen)assert.ok(NAMING[key],'a reachable function names a projec
 for(const key of Object.keys(NAMING))assert.ok(seen.has(key),'stale: '+key);
 
 // 3. The lease-free path that writes a projector-input key is the EPG writer's mirror reconcile (repairMirrors,
-// writeMirrors, putStable): it writes only R2 copies of a document that D1 owns. GET does not call it. The projector reads that document from the D1 published
-// snapshot whenever one exists, and only otherwise from R2, so a mirror write cannot change what a run reads under a D1 published authority.
-assert.match(projector,/published\?null:d1EnrichmentRead\(env,etags,'watchlist\.json'/,'watchlist is read from R2 only without a published D1 snapshot');
-assert.match(projector,/published\?null:d1EnrichmentRead\(env,etags,epgGenerationKey\(runId,'programme\.json'\)/,'programme is read from R2 only without a published D1 snapshot');
-assert.match(projector,/PublishedEpg\.authoritativeSnapshot\(env\)/,'the published snapshot is the D1 authority');
+// writeMirrors, putStable): it writes only R2 copies of a document that D1 owns. GET does not call it. (AIR-537 slice 3: the projector that
+// read those objects is retired; the published EPG is D1-owned and the mirrors are compatibility copies.)
 const chunkNaming=new Set(naming(chunk));
 assert.ok(chunkNaming.has('loadJSON@src/worker.js'),'loadJSON still names a projector input as a read');
 assert.equal(chunkNaming.has('repairMirrors@src/published-epg.js'),false,'GET and the chunk path no longer call repairMirrors');

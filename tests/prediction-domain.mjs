@@ -7,7 +7,7 @@ import path from 'node:path';
 import {openLease,openQueue,overlayIndex,readPredictionAuthority,routeRead,saveMutable,writeLease,writeQueue,PREDICTION_HISTORY_LIMIT} from '../src/prediction-d1.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
-import {projectorContext} from './d1-enrichment-context.mjs';
+import {statusContext} from './d1-status-context.mjs';
 
 assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/prediction-d1\.js','PredictionD1'\)/);
 assert.doesNotMatch(fs.readFileSync('src/prediction-d1.js','utf8'),/INSERT INTO film\b/);
@@ -216,29 +216,12 @@ const unavailable=error=>error.code==='prediction_domain_unavailable';
  assert.equal((await routeRead(env,'enrichment/runs/run-8.json')).value.status,'partial');
 }
 
-// 4. The projector runs on a d1 prediction marker and refuses a partial schema or a marker that is not d1. The offline import script is retired.
+// 4. The status reports a d1 prediction marker and later schemas, and does not report a partial prediction schema. The offline import script is
+// retired. AIR-537 slice 3: the projector runner that also refused a partial schema or a marker that is not d1 is retired with its scenarios.
 {
- const projector=projectorContext();
+ const projector=statusContext();
  const db=migrated('0007_prediction_authority');
  serve(db);
- const bucket=new MemoryBucket();
- const films=[{id:'heat',title:'Heat',original:'Heat',year:1995,tmdbId:'949',url:'https://letterboxd.com/film/heat/'}];
- const putJson=(key,value)=>bucket.put(key,JSON.stringify(value));
- putJson('watchlist.json',{updatedAt:'2026-11-01T00:00:00.000Z',films});
- putJson('metadata.json',{});
- putJson('titles.json',{});
- putJson('people.json',{});
- putJson('epg/discovery-resolution.json',{});
- putJson('epg/published-generation.json',{phase:'published',programmeRunId:'run-1'});
- putJson('epg/generations/run-1/programme.json',{updatedAt:'2026-11-01T00:00:00.000Z',films:films.map(item=>({...item,shows:[]}))});
- putJson('epg/generations/run-1/discovered-films.json',{});
- const env={DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'};
- const run=await projector.runD1EnrichmentProjection(env);
- assert.equal(run.outcome,'complete',JSON.stringify(run));
- assert.equal(run.schemaVersion,7);
- assert.equal(run.predictionMode,'d1');
- assert.equal(one(db,'SELECT COUNT(*) FROM prediction_fingerprint'),0);
- assert.equal(one(db,"SELECT COUNT(*) FROM film WHERE id='film:heat'"),1);
  const status=await projector.d1EnrichmentStatus(db,{D1_ENRICHMENT_WRITE:'on'});
  assert.equal(status.schema,true);
  assert.equal(status.schemaVersion,7);
@@ -248,37 +231,18 @@ const unavailable=error=>error.code==='prediction_domain_unavailable';
  partial.sql('DROP TABLE prediction_queue');
  const blind=await projector.d1EnrichmentStatus(partial,{});
  assert.equal(blind.schema,false);
- const failed=await projector.runD1EnrichmentProjection({DB:partial,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
- assert.equal(failed.outcome,'failed');
- assert.equal(failed.reason,'prediction_domain_unavailable');
  const ahead=migrated('0006_metadata_cache');
  ahead.sql('UPDATE schema_contract SET version=8');
  const aheadStatus=await projector.d1EnrichmentStatus(ahead,{});
  assert.equal(aheadStatus.schema,true);
  assert.equal(aheadStatus.schemaVersion,8);
  assert.equal(aheadStatus.predictionMode,undefined);
- // The loader opts in to the published-EPG stand-in; the strict one refuses a database without the published tables (ADR 0162).
- const strict=projectorContext({publishedEpgStandin:false});
- const aheadRun=await strict.runD1EnrichmentProjection({DB:ahead,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on',PREDICTION_DB_REQUIRED:'on'});
- assert.equal(aheadRun.outcome,'failed',JSON.stringify(aheadRun));
- assert.match(aheadRun.error,/published_epg_unavailable/);
- const chain=migrated('0007_prediction_authority');
- serve(chain);
- chain.sql(fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'));
- const chainRun=await projector.runD1EnrichmentProjection({DB:chain,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on',PREDICTION_DB_REQUIRED:'on'});
- // The published tables are installed with the migration's marker in mode r2, which is refused: the projector does not run against the R2 generation.
- assert.equal(chainRun.outcome,'failed',JSON.stringify(chainRun));
- assert.match(chainRun.error,/published_epg_unavailable/);
  const v6=migrated('0006_metadata_cache');
  const v6Status=await projector.d1EnrichmentStatus(v6,{});
  assert.equal(v6Status.schema,true);
  assert.equal(v6Status.schemaVersion,6);
  assert.equal(v6Status.predictionMode,undefined);
  assert.equal(fs.existsSync('scripts/prediction-domain-authority.mjs'),false,'the offline import, activate and revert script is retired (ADR 0162)');
- // A marker that is not d1 stops the projector too: it never projects against the R2 objects.
- const refused=migrated('0007_prediction_authority');
- const stopped=await projector.runD1EnrichmentProjection({DB:refused,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
- assert.equal(stopped.outcome,'failed');assert.equal(stopped.reason,'prediction_domain_unavailable');
 }
 
 // 5. A later additive schema keeps the marker. A missing binding, schema or table is refused in production and is the stand-in only locally.
@@ -335,7 +299,7 @@ const unavailable=error=>error.code==='prediction_domain_unavailable';
  v8.sql('DROP TABLE prediction_queue');
  await assert.rejects(routeRead({DB:v8,BUCKET:bucket},'enrichment/prediction-queue.json'),unavailable);
  assert.deepEqual(JSON.parse(bucket.objects.get('enrichment/prediction-queue.json').text).pending,['r2']);
- const projector=projectorContext();
+ const projector=statusContext();
  const whole=migrated('0007_prediction_authority');
  whole.sql('UPDATE schema_contract SET version=8');
  serve(whole);

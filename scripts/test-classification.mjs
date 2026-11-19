@@ -296,6 +296,9 @@ export const FILES={
  "canonical-receipts.mjs": {
   "suite": "core"
  },
+ "canonical-repository-context.mjs": {
+  "suite": "core"
+ },
  "canonical-repository-projected-link.mjs": {
   "suite": "core"
  },
@@ -363,33 +366,6 @@ export const FILES={
  "d1-backfill.mjs": {
   "suite": "core"
  },
- "d1-enrichment-bucket-unicode.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-buckets.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-context.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-duplicate-retained.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-fairness.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-identity-collision.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-phase-log.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-phases.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-stored-pages.mjs": {
-  "suite": "core"
- },
  "d1-enrichment.mjs": {
   "suite": "core"
  },
@@ -400,6 +376,9 @@ export const FILES={
   "suite": "core"
  },
  "d1-standin.mjs": {
+  "suite": "core"
+ },
+ "d1-status-context.mjs": {
   "suite": "core"
  },
  "daily-quality.mjs": {
@@ -1214,21 +1193,7 @@ export const FILES={
  "programme-policy-projection.mjs": {
   "suite": "core"
  },
- "projector-bulk-spike.mjs": {
-  "suite": "core",
-  "note": "Grouped writes must refuse a conflict and fall back to the same rows. That is a correctness check of the spike, not a benchmark gate."
- },
- "projector-bulk.mjs": {
-  "suite": "core"
- },
- "projector-l1-budget.mjs": {
-  "suite": "core"
- },
- "projector-marker-fence-mutation.mjs": {
-  "suite": "non-functional",
-  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
- },
- "projector-marker-fence.mjs": {
+ "projector-marker-guard.mjs": {
   "suite": "core"
  },
  "projector-view-parity.mjs": {

@@ -14,7 +14,7 @@ import {readAuthority as readCache} from '../src/metadata-cache.js';
 import {readPredictionAuthority, routeRead} from '../src/prediction-d1.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
-import {projectorContext} from './d1-enrichment-context.mjs';
+import {statusContext} from './d1-status-context.mjs';
 
 assert.equal(CHUNK_STATEMENTS,DEFAULT_CHUNK_STATEMENTS);
 assert.equal(CHUNK_BYTES,DEFAULT_CHUNK_BYTES);
@@ -159,7 +159,7 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  chain.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
  assert.equal((await currentGeneration({DB:chain})).authority,'d1');
  assert.equal((await routeRead({DB:chain,...required},'enrichment/prediction-queue.json')).handled,true);
- const projector=projectorContext();
+ const projector=statusContext();
  const status=await projector.d1EnrichmentStatus(chain,{});
  assert.equal(status.schema,true);
  assert.equal(status.schemaVersion,8);
@@ -288,27 +288,7 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.equal((await readDocument(db,'run-m','programme')).runId,'run-m');
 }
 
-{
- const db=arm(open());
- db.sql("UPDATE metadata_cache_authority SET mode='d1'"); // ADR 0162: a metadata-cache marker that is not d1 is refused
- db.sql("UPDATE prediction_domain_authority SET mode='d1'"); // likewise the prediction domain
- const films=[{id:'film:heat',title:'Heat',original:'Heat',year:1995,tmdbId:'949',shows:[]}];
- const body={runId:'run-d1',updatedAt:'2026-11-01T12:00:00.000Z',films};
- const list={updatedAt:'2026-11-01T12:00:00.000Z',films};
- await publishGeneration({DB:db},{programmeRunId:'run-d1',phase:'published',expectedProgrammeRunId:null,programme:body,watchlist:list},{now:0});
- const bucket=new MemoryBucket();
- const put=(key,value)=>bucket.put(key,JSON.stringify(value));
- put('epg/published-generation.json',{phase:'published',programmeRunId:'run-stale'});
- put('epg/generations/run-stale/programme.json',{runId:'run-stale',updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:other',title:'Other',shows:[]}]});
- put('metadata.json',{'film:heat':{id:'film:heat',title:'Heat',metadataAt:'2026-11-01T12:00:00.000Z',peopleVersion:1,peopleNamesVersion:2,synopsis:'Synopsis',synopsisFetchedAt:'2026-11-01T12:00:00.000Z'}});
- put('titles.json',{});put('people.json',{});put('epg/discovery-resolution.json',{});
- put('epg/generations/run-d1/discovered-films.json',{});
- const projector=projectorContext();
- const summary=await projector.runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'dry'});
- assert.equal(summary.programmeRunId,'run-d1');
- assert.notEqual(summary.outcome,'failed');
-}
-
+// AIR-537 slice 3: the block that ran the retired enrichment projector (dry) against the published D1 generation is gone with the runner.
 {
  const db=arm(open());
  const body={runId:'run-d1',updatedAt:'2026-11-01T12:00:00.000Z',films:[]};

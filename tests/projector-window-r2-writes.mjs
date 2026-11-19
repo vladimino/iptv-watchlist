@@ -28,13 +28,9 @@ function sites(file){
  return found;
 }
 
-// The projector's inputs, read from its own source (never typed here): every .json key it reads through its input readers.
-const projector=fs.readFileSync('src/d1-enrichment.js','utf8');
-const inputs=new Set();
-for(const line of projector.split('\n')){
- if(!/d1EnrichmentRead\(|d1EnrichmentDiscoveryRead\(/.test(line))continue;
- for(const m of line.matchAll(/'([^']+\.json)'/g))inputs.add(m[1]);
-}
+// AIR-537 slice 3: the enrichment projector that read these R2 objects is retired, so its input list can no longer be read from its
+// source. The list is frozen here as it stood when the runner was removed; the objects stay protected from unfenced Discovery writes.
+const inputs=new Set(['watchlist.json','programme.json','metadata.json','titles.json','people.json','discovered-films.json','epg/discovery-resolution.json','letterboxd/diary/history.json','enrichment/view-index.json','letterboxd/admissions/verified-films.json']);
 for(const expected of ['watchlist.json','metadata.json','titles.json','people.json','epg/discovery-resolution.json','discovered-films.json','programme.json'])assert.ok(inputs.has(expected)||[...inputs].some(k=>k.endsWith(expected)),'the projector input list is read from the source: '+expected);
 const isInput=key=>[...inputs].some(name=>key.includes("'"+name+"'")||key.includes('/'+name+"'"));
 

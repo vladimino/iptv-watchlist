@@ -9,8 +9,6 @@ const reader=fs.readFileSync('src/domain/film-person-reader.js','utf8');
 const ctx=vm.createContext({Date,Map,Set,JSON,Object,URL,encodeURIComponent});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+reader+'\nglobalThis.api={readLifecycle,reconcileDepartedFilms,storedFilmId};',ctx);
 const {readLifecycle,reconcileDepartedFilms,storedFilmId}=ctx.api;
-const planCtx=vm.createContext({Date,Map,Set,JSON,Object,console});
-vm.runInContext(scoped('src/enrichment-projection.js','EnrichmentProjection')+'\n'+fs.readFileSync('src/d1-enrichment.js','utf8')+'\nglobalThis.plan=d1EnrichmentPlan;',planCtx);
 
 const NOW=Date.parse('2026-11-04T00:00:00.000Z');
 const FRESH=new Date(NOW-2*86400000).toISOString();
@@ -86,16 +84,11 @@ const view=readLifecycle(departed,NOW,{entitiesOnly:true});
 const inputs=enrichmentInputs({view,store:departed});
 const keptInput=inputs.films.find(item=>item.id==='film:gone');
 assert.equal(keptInput.watchlist,false);
+// AIR-537 slice 3: the projector's planner (`d1EnrichmentPlan`) is retired. The retained film stays in the view and keeps
+// `watchlist:false`; the departed-film retention itself is the D1 `film_retention` class, covered by the film-admission tests.
 const nowIso=new Date(NOW).toISOString();
-const stored=new Map([['film\nfilm:gone','stale']]);
-assert.equal(planCtx.plan({films:inputs.films,people:inputs.people},stored,nowIso).absent.some(item=>item.id==='film:gone'),false);
-assert.equal(planCtx.plan({films:[],people:[]},stored,nowIso).absent.some(item=>item.id==='film:gone'),true,'without the fact the same row is absent');
 const current=filmChangeKey(keptInput,nowIso);
-const replay=planCtx.plan({films:inputs.films,people:inputs.people},new Map([['film\nfilm:gone',current]]),nowIso);
-assert.equal(replay.films.some(item=>item.id==='film:gone'),false);
-assert.equal(replay.absent.some(item=>item.id==='film:gone'),false,'a second pass writes nothing and does not drop the film');
-assert.match(fs.readFileSync('src/d1-enrichment.js','utf8'),/enrichment\/view-index\.json/);
-assert.match(fs.readFileSync('src/d1-enrichment.js','utf8'),/watchlistAdmissionsFromIndex/);
+assert.ok(typeof current==='string'&&current.length>0,'the retained film still has a change key');
 
 const report=reconcileDepartedFilms({
  admissions:{remembered:false},
