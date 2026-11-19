@@ -60,6 +60,9 @@ vm.runInContext(scoped('src/domain/admin-actions.js','AdminActions'),context);
 vm.runInContext(scoped('src/domain/discovery-identity-review.js','DiscoveryIdentity'),context);
 vm.runInContext(scoped('src/domain/discovery-recovery.js','DiscoveryRecovery'),context);
 vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js','utf8'),context);
+vm.runInContext(scoped('src/domain/letterboxd-import-registry.js','LetterboxdImportRegistry'),context);
+vm.runInContext(scoped('src/domain/identity-work-inventory.js','IdentityWorkInventory'),context);
+vm.runInContext(fs.readFileSync('src/admin/identity-work.js','utf8'),context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker;
 const resetCache=()=>vm.runInContext('ADMIN_SNAPSHOT_CACHE=null;ADMIN_LIMBO_CACHE=null',context);
@@ -564,5 +567,57 @@ assert.equal(r.body.attention.checked,false);
 assert.equal(r.body.attention.reason,'coordination_status');
 assert.equal(r.body.attention.now,null);
 assert.deepEqual(r.body.items,[]);
+
+// 13. AIR-528: the authority may answer state `stale` with manifest null (reason generation_moved, the D1 generation moved while
+// the index was read). That is not a readable index: the route answers 200, the EPG lane is unavailable (never zero), Film keeps
+// showing, no reader dereferences the manifest, and a valid stale index with a manifest behaves exactly as before.
+seed();seedIndex();
+vm.runInContext('var __realIndexRead=discoveryIndexRead;var __indexMode="real";var __indexCalls=0;discoveryIndexRead=async(...args)=>{__indexCalls++;const real=await __realIndexRead(...args);if(__indexMode==="moved")return {state:"stale",reasons:["generation_moved"],programmeRunId:null,manifest:null,manifestEtag:null,records:[]};if(__indexMode==="flip_after_read"&&__indexCalls>1)return {state:"stale",reasons:["generation_moved"],programmeRunId:null,manifest:null,manifestEtag:null,records:[]};return real;};',context);
+const setIndexMode=mode=>vm.runInContext('__indexMode='+JSON.stringify(mode)+';__indexCalls=0;ADMIN_LIMBO_CACHE=null;ADMIN_SNAPSHOT_CACHE=null',context);
+const writesBefore=puts.length,fetchesBefore=fetches.length;
+setIndexMode('real');
+r=await call('/api/admin/limbo');
+assert.equal(r.status,200);assert.equal(r.body.coverage.observations.available,true,'a valid index with a manifest is read as before');
+const filmIds=new Set(r.body.items.filter(item=>item.kind==='film').map(item=>item.subjectId));assert.ok(filmIds.size>0);
+for(const mode of ['moved','flip_after_read']){
+ setIndexMode(mode);
+ if(mode==='flip_after_read'){await call('/api/admin/limbo');}
+ r=await call('/api/admin/limbo');
+ assert.equal(r.status,200,mode+': no 500 when the index has no manifest');
+ assert.equal(r.body.coverage.observations.available,false,mode+': EPG observations are unavailable, not none');
+ assert.equal(r.body.coverage.observations.state,'stale');
+ assert.deepEqual(r.body.coverage.observations.reasons,['generation_moved'],'the reason is kept');
+ assert.equal(r.body.coverage.observations.writtenAt,undefined);
+ assert.equal(r.body.items.filter(item=>item.kind==='observation').length,0,'no observation row is invented');
+ {const shown=new Set(r.body.items.filter(item=>item.kind==='film').map(item=>item.subjectId));assert.ok([...filmIds].every(id=>shown.has(id)),'Film items still show');}
+ assert.ok(!JSON.stringify(r.body).includes('Cannot read properties'));
+ r=await call('/api/admin/limbo?attention=now');
+ assert.equal(r.status,200);assert.equal(r.body.attention.checked,false);assert.equal(r.body.attention.now,null);
+}
+assert.equal(puts.length,writesBefore,'a GET never writes');assert.equal(fetches.length,fetchesBefore,'no outbound request');
+// The same state through the real /api/admin/identity-work route (film and EPG lanes; the Letterboxd lane reads no limbo).
+for(const mode of ['moved','flip_after_read']){
+ setIndexMode(mode);
+ if(mode==='flip_after_read'){await call('/api/admin/identity-work?type=film');}
+ for(const type of ['film','epg_observation']){
+  r=await call('/api/admin/identity-work?type='+type);
+  assert.equal(r.status,200,mode+' '+type+': identity-work answers 200');
+  assert.ok(!JSON.stringify(r.body).includes('Cannot read properties'),'no raw TypeError text');
+  assert.ok(!JSON.stringify(r.body).includes('evaluation_failed'));
+ }
+ r=await call('/api/admin/identity-work?type=epg_observation');
+ const epg=r.body.coverage.epg_observation;
+ assert.equal(epg.state,'unavailable','EPG is unavailable, never counted as zero');
+ assert.equal(epg.reason,'index_stale');
+ assert.deepEqual(epg.index.reasons,['generation_moved']);
+ assert.deepEqual(r.body.rows,[]);
+ r=await call('/api/admin/identity-work?type=film');
+ assert.equal(r.body.coverage.film.state,'partial','Film keeps its own coverage');
+}
+setIndexMode('real');
+r=await call('/api/admin/identity-work?type=epg_observation');
+assert.equal(r.status,200);assert.equal(r.body.coverage.epg_observation.state,'partial','a valid index is judged as before');
+setIndexMode('real');
+r=await call('/api/admin/limbo');assert.equal(r.body.coverage.observations.available,true,'the index is read again once the generation settles');
 
 console.log('Admin limbo API: reads, causes, filters, pages, stale pin, projection lag, changing generation, missing objects, warm isolate and the observation index passed');
