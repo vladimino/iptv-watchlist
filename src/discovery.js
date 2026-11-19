@@ -594,7 +594,7 @@ async function catalogPosterHydration(env,body={}){
  const result=await catalogPosterRun(env,body);
  return json(result.payload,result.status);
 }
-async function catalogPosterRun(env,body={}){
+async function catalogPosterRun(env,body={},opts={}){
  const json=(payload,status=200)=>({payload,status});
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
  if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>CATALOG_POSTER_LIMIT))return json({error:'Invalid limit'},400);
@@ -634,6 +634,9 @@ async function catalogPosterRun(env,body={}){
  const part=catalogPosterPartition(counts.verified,negatives.entries,Date.now());
  const summary={programmeRunId,catalogRecords:counts.all.length,missingPoster:counts.missing.length,verifiedMissing:counts.verified.length,unverifiedMissing:counts.unverified.length,actionable:part.actionable.length,noPosterHeld:part.held.length,identityReview:part.review.length};
  if(dryRun)return json({dryRun:true,enabled:true,...summary,ids:part.actionable.slice(0,CATALOG_POSTER_ID_SAMPLE).map(row=>row.id)});
+ // ADR 0179 (R1): the weekly path with nothing due asks nobody and takes nothing: no TMDB credential check, no resolver lease, no write of any kind. The owner route
+ // keeps its semantics (it still takes the lease and may clean stale remembered answers); only the automatic caller passes `skipWhenNothingDue`.
+ if(opts.skipWhenNothingDue&&!recheckIds&&!part.actionable.some(row=>!cursor||row.id.localeCompare(cursor,'en')>0))return json({dryRun:false,enabled:true,...summary,recheck:false,requested:limit,processed:0,hydrated:0,outcomes:[],writes:[],negatives:{persisted:true,reason:null,written:false},retryable:[],generationChanged:false,leaseLost:false,retryAt:null,done:true,nextCursor:null,remainingAfterCursor:0,nothingDue:true});
  if(!env.TMDB_API_READ_ACCESS_TOKEN)return json({error:'TMDB is not configured'},503);
  const takenLease=await takeDiscoveryLease(env),lease=takenLease.lease;
  // ADR 0135: a paused admission keeps the one admin-visible text (`resolver_busy`) and adds the closed reason, so it is a wait and not a fault.
@@ -670,7 +673,11 @@ async function catalogPosterRun(env,body={}){
    if(!movieId){outcomes.push({id:row.id,tmdbId,...shown,outcome:'tmdb_failed',error:'TMDB detail has no movie id'});continue;}
    if(movieId!==tmdbId){outcomes.push({id:row.id,tmdbId,...shown,outcome:'tmdb_id_mismatch'});continue;}
    const poster=catalogPosterFromDetail(detail.movie);
-   if(!poster){outcomes.push({id:row.id,tmdbId,...shown,outcome:'no_poster_on_tmdb'});continue;}
+   if(!poster){
+    // Only an explicit `poster_path: null` is TMDB saying there is no poster. A missing key, an empty or malformed value is an incomplete answer: retryable, never remembered (ADR 0179 decision 1).
+    if(Object.prototype.hasOwnProperty.call(detail.movie,'poster_path')&&detail.movie.poster_path===null){outcomes.push({id:row.id,tmdbId,...shown,outcome:'no_poster_on_tmdb'});continue;}
+    outcomes.push({id:row.id,tmdbId,...shown,outcome:'tmdb_failed',error:'TMDB detail has no valid poster_path field'});continue;
+   }
    found.push({id:row.id,tmdbId,poster});outcomes.push({id:row.id,tmdbId,...shown,outcome:'pending',poster});
   }
   if(recheckSlots){
@@ -1043,7 +1050,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    const searched=rejectedTop||!score.considered.some(row=>row.title.quality===1);
    if(searched)candidates=[...candidates,...await scoredSearchCandidates(query,candidate)],score=scoreFilmResolution({observation,candidates});
    const proposed=[];
-   let filmEntry=null,newFilm=false;
+   let filmEntry=null,newFilm=false,seedMovie=null;
    if(ownerRejected(previous,score.acceptedTmdbId)){
     recordUncertain(decisions,candidate,'no_confident_match',now);
     preview[candidate.key]=scorePreview(candidate,score,{outcome:'candidate_decision',reason:'owner_rejected',candidateDecision:{status:'no_confident_match'}},proposed);
@@ -1063,7 +1070,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
       if(!await attachWatchlistShowing(env,source.programmeRunId,id,candidate,fence)||!await publishedGenerationMatches(env,source.programmeRunId))return programmeChanged();
      }else{
       const old=films[id];
-      films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id,writeAvailability);indexFilm(films[id]);if(!old)await catalogPosterSeedNegative(env,movie);
+      films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id,writeAvailability);indexFilm(films[id]);if(!old)seedMovie=movie;
       filmEntry=[id,films[id]];
       newFilm=!old;
       if(newFilm)added++;
@@ -1077,6 +1084,8 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    if(saved==='skipped'){deferredKeys.delete(candidate.key);continue;}
    if(saved==='refused'){error='admission_identity_conflict';retryAt=new Date(Date.now()+3600000).toISOString();decisions[candidate.key]=previous;if(newFilm){added--;delete films[filmEntry[0]];}break;}
    deferredKeys.delete(candidate.key);
+   // ADR 0179 decision 1: only a committed, verified admission may leave a remembered no-poster answer (after the candidate and its film are saved).
+   if(seedMovie&&newFilm)await catalogPosterSeedNegative(env,seedMovie);
    checked++;
    if(decisions[candidate.key]?.status==='verified'&&Date.now()<persistLimit())await assignSlots(candidate.key,'candidate_assignment');
    if(generationCollision)return programmeChanged();
@@ -1318,13 +1327,15 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
    else if(gate.outcome==='needs_verification')recordNeedsVerification(decisions,candidate,score,now,POLICY_HOLD_REASONS.has(gate.reason)?gate.reason:null);
    else if(gate.outcome==='detail_verified'){
     const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
-    let saved=true;
+    let saved=true,seedNew=false;
     if(knownTmdb.has(String(movie.id)))saved=await attachWatchlistShowing(env,source.programmeRunId,id,candidate,fence);
     else{
-     const old=films[id];if(!old)added++;
+     const old=films[id];if(!old)added++;seedNew=!old;
      if(streamed&&!movie.overview&&candidate.description===undefined)candidate.description=await ledgerDescription(pinned,candidate.key)??undefined;
-     films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id,writeAvailability);indexFilm(films[id]);if(!old)await catalogPosterSeedNegative(env,movie);saved=await saveDiscoveredFilms(env,films,source.programmeRunId,fence);}
+     films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id,writeAvailability);indexFilm(films[id]);saved=await saveDiscoveredFilms(env,films,source.programmeRunId,fence);}
     if(!saved||!await publishedGenerationMatches(env,source.programmeRunId))return {schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
+    // ADR 0179 decision 1: seed only after the film is saved and the generation still matches.
+    if(seedNew)await catalogPosterSeedNegative(env,movie);
     decisions[candidate.key]={status:'verified',filmId:id,tmdbId:String(movie.id),canonicalIdentity:'tmdb:'+movie.id,identitySource:'tmdb_detail',checkedAt:new Date().toISOString(),evidenceKey:candidateEvidence(candidate),anchor:verifiedAnchor(pinned,source,candidate,candidates,observation,movie,decisions,films,now,aliasIndex),provenance:{authority:'tmdb_detail',searchHit:searched,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null},scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,acceptedTmdbId:score.acceptedTmdbId??null},...ownerMarkerCarry(decisions[candidate.key])};
    }
    // A film is committed before its decision. A crash between writes is repaired by alias reuse.

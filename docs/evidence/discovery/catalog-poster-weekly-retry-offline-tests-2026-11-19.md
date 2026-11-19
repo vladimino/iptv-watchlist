@@ -4,6 +4,8 @@
 
 ## What the tests prove
 
+[`tests/catalog-poster-weekly-d1.mjs`](../../../tests/catalog-poster-weekly-d1.mjs) is the production-path evidence: the actual Worker entry (`worker.scheduled` with the exact cron) over real sqlite as the D1 stand-in, Discovery in `d1` / `open` mode on the full migration chain. It shows positive guarded hydration into `discovery_admission` with no R2 catalog object read or written (only the negative index, the checkpoint and the event reach R2); a zero-due week while Discovery holds the lease takes no lease, writes no lease row, makes no TMDB call (not even a credential is needed) and yields one completed report with two checkpoint writes and one event put; due work under a busy lease or an EPG-priority pause defers with a `deferred` report and resumes on a later firing; an uncertain D1 batch leaves the run `pending`, remembers nothing and converges to one written row on the next firing; a missing, empty or malformed `poster_path` is never remembered as no-poster and an explicit `null` is. The R2-catalog tests below remain as compatibility coverage, not as production proof. The seed ordering (after the committed admission, none for a refused candidate, none for a missing or malformed `poster_path`) is covered in [`tests/discovery-chunk-budget.mjs`](../../../tests/discovery-chunk-budget.mjs).
+
 [`tests/catalog-poster-weekly.mjs`](../../../tests/catalog-poster-weekly.mjs):
 
 - week arithmetic (weeks start Sunday 00:00 UTC), the next 03:24 UTC firing and the stable event id format `catalog_posters-<YYYY-MM-DD>-<deferred|final>`;

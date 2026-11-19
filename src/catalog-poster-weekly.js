@@ -196,7 +196,7 @@ export async function run(env,{now=Date.now()}={}){
  let outcome='pending',nextRetryAt=null,busy=0,stop=null;
  for(let batch=0;batch<MAX_BATCHES;batch++){
   let result;
-  try{result=await catalogPosterRun(env,{dryRun:false,limit:BATCH_LIMIT,...(cursor?{cursor}:{})});}
+  try{result=await catalogPosterRun(env,{dryRun:false,limit:BATCH_LIMIT,...(cursor?{cursor}:{})},{skipWhenNothingDue:true});}
   catch{result={status:503,payload:{error:'core_error'}};}
   const payload=result?.payload||{},status=result?.status||0;
   if(status===200){

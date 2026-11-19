@@ -336,6 +336,9 @@ export const FILES={
  "catalog-poster-monitor.mjs": {
   "suite": "core"
  },
+ "catalog-poster-weekly-d1.mjs": {
+  "suite": "core"
+ },
  "catalog-poster-weekly.mjs": {
   "suite": "core"
  },
