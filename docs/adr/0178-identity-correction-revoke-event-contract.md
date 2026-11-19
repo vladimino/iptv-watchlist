@@ -1,9 +1,9 @@
 # ADR 0178: Revoking one saved Identity correction is its own append-only intent kind
 
-**Status:** Proposed  
-**Original decision date:** unknown (awaiting owner decision)  
+**Status:** Accepted  
+**Original decision date:** 2026-11-19  
 **Recorded at:** 2026-11-19  
-**Approval source:** not documented (owner gate required before implementation, [AIR-132](https://trello.com/c/3AXbSoHe))  
+**Approval source:** [explicit Product Owner approval of Option A + A1 in AIR-132 on 2026-11-19](https://trello.com/c/3AXbSoHe#comment-6aff57b6f18bcafb9e0d7c1c), following [independent review of PR #792](https://github.com/vladimino/iptv-watchlist/pull/792#issuecomment-7020719335). Approval covers the architectural contract and routine delivery, not production D1 migration application or identity writes.  
 **Related work:** [AIR-132](https://trello.com/c/3AXbSoHe), [AIR-65](https://trello.com/c/MKb4JMXi), [AIR-528](https://trello.com/c/bj4JSgB9), [AIR-131](https://trello.com/c/0WtLPRnH)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -18,9 +18,9 @@ Audit of `main` at a888290 (read-only; no production access):
 - Nothing can express "withdraw this earlier assertion". A new `reject` would block the id (a different meaning), and an `assign` of another id is a replacement, not a withdrawal.
 - AIR-65 produced no confirmed production correction, so the number of historical actions is unknown.
 
-## Decision (proposed)
+## Decision
 
-Add the effect `revoke` as a first-class append-only intent (`identity_revoke`), bound to one original `requestId`. Review of this PR (technical review on HEAD e51cce5) shaped the invariants below.
+Add the effect `revoke` as a first-class append-only intent (`identity_revoke`), bound to one original `requestId`. The Product Owner selected alternative **A** and the strict revocation-release rule **A1**. The following invariants are part of the approved architecture.
 
 ### 1. Binding: the original action must still be the effective one
 
@@ -41,14 +41,14 @@ Any mismatch refuses with `old_action_not_effective` (or `record_changed` for a 
 
 Define `identityBasis` as a digest of the observation's identity inputs only: normalized title, year and `confirmedTmdbId` (from the index record). Airings, durations, channels and the scoring result are excluded. It is computed from the *current* record at preview and at execute, and new code records it in `ownerIdentity.identityBasis` for every later assign, reject and revoke. It serves stable provenance and comparison only.
 
-**Proposed default (owner decision, conservative):** a revoked owner assign is a targeted fence on `(observation, tmdbId)` and is **not** lifted by any drift of `identityBasis`. A title normalization fix or a year edit changes the digest but does not verify that the revoked id is right, and a duration (omitted from the basis) can matter between movie versions. The fence lifts only on:
+**Approved A1 rule (strict revocation):** a revoked owner assign is a targeted fence on `(observation, tmdbId)` and is **not** lifted by any drift of `identityBasis`. A title normalization fix or a year edit changes the digest but does not verify that the revoked id is right, and a duration (omitted from the basis) can matter between movie versions. The fence lifts only on:
 
 - a fresh explicit owner-confirmed `assign` of the same id (deliberate override), or
 - new, independently sourced, trusted id-specific proof with provenance that was not present at revoke time (for example a `confirmedTmdbId` that comes from a source recorded after the revocation). The exact proof contract is a separate, later decision; until it exists the only release is the owner `assign`.
 
 There is no TTL and no global queue hold. A change of title or year alone lets ordinary Discovery evaluate **other** candidates for the observation, never the revoked id. A new airing, a rescore or a changed `evidenceKey` has no effect on the fence. Other observations are untouched.
 
-The alternative is to treat any `identityBasis` change as new evidence and lift the fence automatically. It is a less conservative product choice, and its risk (silently re-confirming the same erroneous id after a metadata correction) is stated under Consequences. The owner chooses.
+The rejected **A2** alternative would lift the fence on any `identityBasis` change. Its risk is silently re-confirming the same erroneous id after a title or year correction; this is not authorized by ADR 0178.
 
 ### 1b. Existing corrections: authoritative derivation, fail closed
 
@@ -75,11 +75,11 @@ The alternative is to treat any `identityBasis` change as new evidence and lift 
 
 Preview is read-only and bounded: one intent by primary key, the history of that one observation, the current decision and its assigned rows. No scan, no TMDB. Execute re-checks D1 authority and generation, the lease fence, a fresh idempotency key and sections 1 to 3, appends history, writes a receipt, and starts no Discovery chunk (the UI says "waits for the ordinary chunk"). No R2 authority or fallback. The STRICT-table rebuild of `discovery_intent` must be tested offline for row and constraint preservation and for old-code behavior with the new kind.
 
-Not decided here: applying the new migration to production (separate owner GO), merging, any production POST.
+**Not authorized by this decision:** applying a D1 migration to production or executing a real identity-correction POST. Both require a separate, operation-specific owner approval. Implementing and delivering the approved code and documentation follows the ordinary AIR-132 review and CI/CD gates.
 
 ## Alternatives considered
 
-- **A. Extend `kind` with a migration (proposed).** Honest audit trail, explicit state, small rebuild of a table that holds only owner actions. Costs a schema-26 migration and a separate apply gate.
+- **A. Extend `kind` with a migration (accepted).** Honest audit trail, explicit state, small rebuild of a table that holds only owner actions. Requires a versioned D1 migration at the next available version and a separate production apply gate.
 - **B. No migration: store a revoke under `identity_reject` with `effect: revoke` in `command_json`.** No schema change, but the stored kind lies about the action, the CHECK no longer documents the contract, and readers filtering by kind misclassify it. Not recommended.
 - **C. Revoke by writing an `assign`/`reject` replacement only.** No new contract, but it cannot withdraw without asserting something new, which the card rules out.
 
@@ -87,7 +87,7 @@ Not decided here: applying the new migration to production (separate owner GO), 
 
 The targeted fence in section 1a can stay in place after a legitimate metadata correction until the owner re-assigns the id or trusted id-specific proof exists; that costs one owner click, and it is the intended trade for never re-verifying a revoked wrong id silently. If the owner instead lifts the fence on any `identityBasis` change, a title or year correction could silently re-confirm the same erroneous id.
 
-A: one migration and one apply gate; code is tested offline with a v26 fixture. Rollback of code leaves intent rows with the new kind; the old code must ignore unknown kinds (to be tested). B: faster but weakens the contract permanently.
+A: one versioned migration and one operation-specific production apply gate; code is tested offline at the actual migration's schema version. Rolling back code does not remove rows with the new kind; the prior code must safely ignore unknown kinds (to be tested). B: faster but weakens the contract permanently.
 
 ## Recovery and migration boundary
 
@@ -95,11 +95,11 @@ Revoke is itself append-only; undoing it is a new owner action. Code rollback do
 
 ## Evidence
 
-- **Original decision:** not recorded
+- **Original decision:** [Product Owner approved A + A1 on 2026-11-19 in AIR-132](https://trello.com/c/3AXbSoHe#comment-6aff57b6f18bcafb9e0d7c1c)
 - **Implementation:** none yet
 - **Dated verification:** not recorded
-- **Uncertainty:** whether any real production correction exists; whether the index record always carries `confirmedTmdbId` and year for `identityBasis`; `ownerDecision` expiry semantics for a revoke issuance (to confirm in implementation).
+- **Implementation checks:** verify whether any real production correction exists, the handling of absent `confirmedTmdbId` or year in `identityBasis`, and `ownerDecision` issuance-expiry semantics. Missing or ambiguous provenance must fail closed. These checks do not authorize an identity write.
 
 ## Follow-ups
 
-Implementation of [AIR-132](https://trello.com/c/3AXbSoHe) after owner decision; [AIR-131](https://trello.com/c/0WtLPRnH) follows.
+Implement the approved design in [AIR-132](https://trello.com/c/3AXbSoHe), with separate approval before production migration application or identity writes; [AIR-131](https://trello.com/c/0WtLPRnH) follows.
