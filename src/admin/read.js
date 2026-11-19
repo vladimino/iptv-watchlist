@@ -249,7 +249,7 @@ function adminProjection(programme,titles,people,clock,reviews){
 }
 // While the published EPG marker is d1, the pointer and the programme body come from D1.
 // A missing document or a failed read does not fall through to another R2 generation.
-// Dictionaries: Film/Person legacy/r2/prepared keep R2 titles.json/people.json; at open they come from bounded D1.
+// Dictionaries: at open they come from bounded D1; only the explicit local stand-in (legacy marker state, ADR 0162) still answers from the frozen R2 titles.json/people.json.
 // PublishedEpg is absent in tests that load this file alone.
 async function adminD1Programme(env){
  if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.currentGeneration!=='function')return null;

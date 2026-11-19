@@ -69,7 +69,7 @@ async function identityWorkLimbo(env,hasPin,nowMs){
  if(snapshot.error)return {error:snapshot.error};
  const health=limboEvaluate(snapshot,nowMs);
  if(health.error)return {error:'evaluation_failed'};
- const readable=['fresh','stale'].includes(snapshot.observations?.state);
+ const readable=limboIndexReadable(snapshot.observations);
  const items=LimboInventory.limboItems(health,{films:snapshot.films,observations:readable?snapshot.observations.records:[]});
  return {snapshot,health,items,pin:limboEncodePin(snapshot.tuple),observationCoverage:limboObservationCoverage(snapshot.observations)};
 }

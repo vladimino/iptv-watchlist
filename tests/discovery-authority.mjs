@@ -501,6 +501,26 @@ const listed=await Authority.readObservationIndex({DB:indexed.db},{limit:2});
 assert.equal(listed.index.records.length,2);
 assert.equal(listed.index.records.some(row=>row.key==='k03000'),false);
 assert.equal(listed.index.manifest.coverage.complete,false);
+// AIR-528: the D1 generation moves AFTER the observation SELECT and before the closing generation check. The real authority then answers
+// stale with no manifest (never an index shell that a reader could mistake for a described index), and nothing is written by the read.
+{
+ let moved=false;
+ const drifting={calls:indexed.db.calls,prepare(sql){
+  const inner=indexed.db.prepare(sql);
+  if(!/FROM discovery_observation o JOIN discovery_decision d/.test(sql))return inner;
+  return {bind(...params){const bound=inner.bind(...params);return {...bound,all:async(...args)=>{const rows=await bound.all(...args);if(!moved){moved=true;indexed.db.sql('UPDATE discovery_authority SET generation=generation+1 WHERE id=1');}return rows;}};}};
+ }};
+ const writesBefore=count(indexed.db,'SELECT SUM(generation) AS n FROM discovery_authority');
+ const flipped=await Authority.readObservationIndex({DB:drifting},{limit:2});
+ assert.equal(moved,true,'the generation moved between the SELECT and the closing check');
+ assert.equal(flipped.index.state,'stale');
+ assert.equal(flipped.index.manifest,null);
+ assert.deepEqual(flipped.index.records,[]);
+ assert.deepEqual(flipped.index.reasons,['generation_moved']);
+ assert.equal(count(indexed.db,'SELECT SUM(generation) AS n FROM discovery_authority'),writesBefore+1,'only the simulated move changed state');
+ const settled=await Authority.readObservationIndex({DB:indexed.db},{limit:2});
+ assert.equal(settled.index.state,'fresh');
+}
 // The shows of the listed observations are read in chunked statements, grouped by observation and ordered by ordinal; never one statement per observation.
 {
  const showRows=[];

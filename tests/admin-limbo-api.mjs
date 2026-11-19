@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {createHash} from 'node:crypto';
-import {scoped} from '../scripts/bundle-scope.mjs';
+import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
 import * as DI from '../src/domain/discovery-observation-index.js';
 
 const source=fs.readFileSync('src/admin/limbo.js','utf8');
@@ -60,6 +60,11 @@ vm.runInContext(scoped('src/domain/admin-actions.js','AdminActions'),context);
 vm.runInContext(scoped('src/domain/discovery-identity-review.js','DiscoveryIdentity'),context);
 vm.runInContext(scoped('src/domain/discovery-recovery.js','DiscoveryRecovery'),context);
 vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js','utf8'),context);
+for(const [file,name] of [['src/letterboxd-export.js','LetterboxdExport'],['src/letterboxd-match.js','LetterboxdMatch'],['src/domain/letterboxd-archive-zip.js','LetterboxdArchiveZip'],['src/domain/letterboxd-archive-preview.js','LetterboxdArchivePreview'],['src/domain/letterboxd-archive-apply.js','LetterboxdArchiveApply'],['src/domain/letterboxd-rated-admission.js','LetterboxdRatedAdmission'],['src/domain/letterboxd-import-registry.js','LetterboxdImportRegistry']])vm.runInContext(scoped(file,name),context);
+vm.runInContext(scopedReplacing('src/letterboxd-identity.js','LetterboxdIdentity','const normTitle=LetterboxdMatch.normTitle;\n'),context);
+vm.runInContext(fs.readFileSync('src/letterboxd-rated-candidates.js','utf8'),context);
+vm.runInContext(scoped('src/domain/identity-work-inventory.js','IdentityWorkInventory'),context);
+vm.runInContext(fs.readFileSync('src/admin/identity-work.js','utf8'),context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker;
 const resetCache=()=>vm.runInContext('ADMIN_SNAPSHOT_CACHE=null;ADMIN_LIMBO_CACHE=null',context);
@@ -564,5 +569,99 @@ assert.equal(r.body.attention.checked,false);
 assert.equal(r.body.attention.reason,'coordination_status');
 assert.equal(r.body.attention.now,null);
 assert.deepEqual(r.body.items,[]);
+
+// 13. AIR-528: the authority may answer state `stale` with manifest null (reason generation_moved, the D1 generation moved while
+// the index was read). That is not a readable index: the route answers 200, the EPG lane is unavailable (never zero), Film keeps
+// showing, no reader dereferences the manifest, and a valid stale index with a manifest behaves exactly as before. The injected
+// shape is the one the real authority returns when the D1 generation moves after its SELECT; that path is driven against the real
+// authority and a synthetic D1 in tests/discovery-authority.mjs (AIR-528 block before the chunked show reads). `index_flips_between_calls`
+// only means the index is healthy on one request and stale on the next; it does not simulate a flip inside one read.
+seed();seedIndex();
+vm.runInContext('var __realIndexRead=discoveryIndexRead;var __indexMode="real";var __indexCalls=0;discoveryIndexRead=async(...args)=>{__indexCalls++;const real=await __realIndexRead(...args);if(__indexMode==="moved")return {state:"stale",reasons:["generation_moved"],programmeRunId:null,manifest:null,manifestEtag:null,records:[]};if(__indexMode==="index_flips_between_calls"&&__indexCalls>1)return {state:"stale",reasons:["generation_moved"],programmeRunId:null,manifest:null,manifestEtag:null,records:[]};return real;};',context);
+const setIndexMode=mode=>vm.runInContext('__indexMode='+JSON.stringify(mode)+';__indexCalls=0;ADMIN_LIMBO_CACHE=null;ADMIN_SNAPSHOT_CACHE=null',context);
+const writesBefore=puts.length,fetchesBefore=fetches.length;
+setIndexMode('real');
+r=await call('/api/admin/limbo');
+assert.equal(r.status,200);assert.equal(r.body.coverage.observations.available,true,'a valid index with a manifest is read as before');
+const filmIds=new Set(r.body.items.filter(item=>item.kind==='film').map(item=>item.subjectId));assert.ok(filmIds.size>0);
+for(const mode of ['moved','index_flips_between_calls']){
+ setIndexMode(mode);
+ if(mode==='index_flips_between_calls'){await call('/api/admin/limbo');}
+ r=await call('/api/admin/limbo');
+ assert.equal(r.status,200,mode+': no 500 when the index has no manifest');
+ assert.equal(r.body.coverage.observations.available,false,mode+': EPG observations are unavailable, not none');
+ assert.equal(r.body.coverage.observations.state,'stale');
+ assert.deepEqual(r.body.coverage.observations.reasons,['generation_moved'],'the reason is kept');
+ assert.equal(r.body.coverage.observations.writtenAt,undefined);
+ assert.equal(r.body.items.filter(item=>item.kind==='observation').length,0,'no observation row is invented');
+ {const shown=new Set(r.body.items.filter(item=>item.kind==='film').map(item=>item.subjectId));assert.ok([...filmIds].every(id=>shown.has(id)),'Film items still show');}
+ assert.ok(!JSON.stringify(r.body).includes('Cannot read properties'));
+ r=await call('/api/admin/limbo?attention=now');
+ assert.equal(r.status,200);assert.equal(r.body.attention.checked,false);assert.equal(r.body.attention.now,null);
+}
+assert.equal(puts.length,writesBefore,'a GET never writes');assert.equal(fetches.length,fetchesBefore,'no outbound request');
+// The same state through the real /api/admin/identity-work route (film and EPG lanes; the Letterboxd lane reads no limbo).
+for(const mode of ['moved','index_flips_between_calls']){
+ setIndexMode(mode);
+ if(mode==='index_flips_between_calls'){await call('/api/admin/identity-work?type=film');}
+ for(const type of ['film','epg_observation']){
+  r=await call('/api/admin/identity-work?type='+type);
+  assert.equal(r.status,200,mode+' '+type+': identity-work answers 200');
+  assert.ok(!JSON.stringify(r.body).includes('Cannot read properties'),'no raw TypeError text');
+  assert.ok(!JSON.stringify(r.body).includes('evaluation_failed'));
+ }
+ r=await call('/api/admin/identity-work?type=epg_observation');
+ const epg=r.body.coverage.epg_observation;
+ assert.equal(epg.state,'unavailable','EPG is unavailable, never counted as zero');
+ assert.equal(epg.reason,'index_stale');
+ assert.deepEqual(epg.index.reasons,['generation_moved']);
+ assert.deepEqual(r.body.rows,[]);
+ r=await call('/api/admin/identity-work?type=film');
+ assert.equal(r.body.coverage.film.state,'partial','Film keeps its own coverage');
+}
+// The default, unfiltered request is what the owner page sends. With a real Letterboxd registry and candidate document seeded, a
+// stale/manifest:null EPG index must not block the Film lane or the candidate lane (cross-lane isolation), nor read as "no work".
+{
+ const SHA='a'.repeat(64),REG='letterboxd/imports/registry.json',DOC='letterboxd/imports/'+SHA+'/rated-candidates.json';
+ const stamp=new Date(Date.parse(NOW)-9*D).toISOString();
+ records.set(DOC,{schemaVersion:1,archiveSha256:SHA,generatedAt:stamp,candidates:{c1:{code:'c1',state:'pending',reason:null,name:'Seeded Candidate',year:2001,rating:4,chunk:0,observedAt:stamp,registeredAt:stamp}},checkpoint:{cursor:null,stopped:null}});etags.set(DOC,'doc-1');
+ records.set(REG,{schemaVersion:1,updatedAt:stamp,archives:{[SHA]:{registeredAt:stamp,generatedAt:stamp,counts:{pending:1,admitting:0,needs_review:0,verified:0,removed:0},documentEtag:'doc-1',summarizedAt:stamp}}});etags.set(REG,'reg-1');
+ const listing={...bucket,async list(){lists++;return {objects:[],delimitedPrefixes:['letterboxd/imports/'+SHA+'/'],truncated:false};}};
+ const sqlSeen=[];const writesBefore=puts.length,fetchesBefore=fetches.length;
+ for(const mode of ['moved','index_flips_between_calls']){
+  setIndexMode(mode);
+  if(mode==='index_flips_between_calls'){await callEnv('/api/admin/identity-work',{BUCKET:listing});}
+  r=await callEnv('/api/admin/identity-work',{BUCKET:listing});
+  assert.equal(r.status,200,mode+': the default three-lane read answers 200');
+  const text=JSON.stringify(r.body);
+  assert.ok(!text.includes('Cannot read properties')&&!text.includes('evaluation_failed')&&!text.includes('storage_unavailable'));
+  assert.equal(r.body.coverage.epg_observation.state,'unavailable');
+  assert.equal(r.body.coverage.epg_observation.reason,'index_stale');
+  assert.deepEqual(r.body.coverage.epg_observation.index.reasons,['generation_moved']);
+  assert.equal(r.body.coverage.film.state,'partial','Film lane answers');
+  assert.equal(r.body.coverage.letterboxd_rated_candidate.enumeration.state,'complete','Letterboxd enumeration stays truthful');
+  assert.ok(r.body.rows.some(row=>row.type==='film'),'Film rows remain');
+  // The first page is full of Film rows, so the candidate lane is reached by following the cursor under the same pin.
+  const first=r.body;let all=[...first.rows],page=first,guard=0;
+  while(page.nextCursor&&guard++<20){
+   setIndexMode('moved');
+   const next=await callEnv('/api/admin/identity-work?pin='+encodeURIComponent(page.pin)+'&cursor='+encodeURIComponent(page.nextCursor),{BUCKET:listing});
+   assert.equal(next.status,200,mode+': later pages answer 200 '+JSON.stringify(next.body).slice(0,200));
+   page=next.body;all=all.concat(page.rows);
+  }
+  const laneOf=row=>row.type||row.lane;
+  const candidates=all.filter(row=>laneOf(row)==='letterboxd_rated_candidate');
+  assert.equal(candidates.length,1,'the seeded candidate is listed, not "no work"');
+  assert.equal(candidates[0].archiveSha256,SHA);
+  assert.ok(!all.some(row=>laneOf(row)==='epg_observation'),'EPG rows are withheld');
+ }
+ assert.equal(puts.length,writesBefore,'no write');assert.equal(fetches.length,fetchesBefore,'no outbound request');
+ records.delete(DOC);records.delete(REG);etags.delete(DOC);etags.delete(REG);
+}
+setIndexMode('real');
+r=await call('/api/admin/identity-work?type=epg_observation');
+assert.equal(r.status,200);assert.equal(r.body.coverage.epg_observation.state,'partial','a valid index is judged as before');
+setIndexMode('real');
+r=await call('/api/admin/limbo');assert.equal(r.body.coverage.observations.available,true,'the index is read again once the generation settles');
 
 console.log('Admin limbo API: reads, causes, filters, pages, stale pin, projection lag, changing generation, missing objects, warm isolate and the observation index passed');

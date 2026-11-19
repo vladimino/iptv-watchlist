@@ -138,7 +138,7 @@ Lane order is `film`, `epg_observation`, `letterboxd_rated_candidate`. Inside a 
 }
 ```
 
-A lane that the query excluded has no `coverage` entry. `page.state` is `read_whole`, `registry_stale`, `oversized`, `unreadable`, `absent` or `not_read`. `enumeration.state` is `complete`, `partial` or `unknown` (listing unavailable). Errors: 400 `unknown_type`, `unknown_disposition`, `unknown_include`, `invalid_archive`, `invalid_query`, `invalid_limit`, `invalid_pin`, `stale_cursor`; 405 for a method other than `GET`; 409 `stale_pin`.
+A lane that the query excluded has no `coverage` entry. `page.state` is `read_whole`, `registry_stale`, `oversized`, `unreadable`, `absent` or `not_read`. `enumeration.state` is `complete`, `partial` or `unknown` (listing unavailable). Errors: 400 `unknown_type`, `unknown_disposition`, `unknown_include`, `invalid_archive`, `invalid_query`, `invalid_limit`, `invalid_pin`, `stale_cursor`; 405 for a method other than `GET`; 409 `stale_pin`. The `epg_observation` lane is `unavailable` with `reason: index_stale` and `index.reasons: ['generation_moved']` when the observation index answered `stale` without a manifest (the D1 generation moved during the read); it is never `partial` with a count of zero, and the `film` and `letterboxd_rated_candidate` lanes still answer.
 
 ## Performance bounds
 
