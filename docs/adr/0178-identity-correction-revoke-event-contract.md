@@ -20,15 +20,36 @@ Audit of `main` at a888290 (read-only; no production access):
 
 ## Decision (proposed)
 
-Add the effect `revoke` as a first-class append-only intent, referencing the original `requestId`:
+Add the effect `revoke` as a first-class append-only intent (`identity_revoke`), bound to one original `requestId`. Review of this PR (technical review on HEAD e51cce5) shaped the invariants below.
 
-1. A new migration `0026` rebuilds `discovery_intent` with `kind` extended by `identity_revoke`. No column is removed and no history row is rewritten. `supersede` needs no new kind: it is `identity_assign` or `identity_reject` with `command.supersedes = <original requestId>`.
-2. Preview is read-only and bounded: one intent by primary key, the history of that one observation, the current decision, and its assigned rows. No scan, no TMDB.
-3. Execute re-checks D1 authority and generation, the exact `decision_hash`, that `ownerIdentity.requestId` still equals the original, the lease fence and a fresh idempotency key. If a newer evidence or owner action changed the decision, the answer is a refusal (`old_action_not_effective`), never a restore of the old before-image.
-4. The write clears only the effect of that assertion and dependent assigned rows. It records the revoked `tmdbId` as not to be re-applied without new independent evidence, appends history and writes a receipt. It starts no Discovery chunk; the UI states "waits for the ordinary chunk".
-5. No R2 authority or fallback.
+### 1. Binding: the original action must still be the effective one
 
-Not decided here: applying migration `0026` to production (separate owner GO), merging, any production POST.
+`ownerMarkerCarry` (`src/discovery.js`) copies `ownerIdentity` and `rejectedTmdbIds` into later resolver decisions even when evidence, status or `tmdbId` change. A matching `ownerIdentity.requestId` therefore proves only that the marker was carried, not that the owner action still governs the decision. Preview and confirm bind, and the fenced D1 commit re-checks, all of:
+
+- the original intent row (key = `requestId`, `state='receipt'`, same `observation_key`, its `kind` and `command`);
+- the current `decision_hash` and the original issuance's `evidenceKey` and target `tmdbId`;
+- for `assign`: `status='verified'`, `identitySource='owner'`, `tmdbId` equal to the original target, and `filmId` equal to `tmdb_<id>`;
+- for `reject`: the id is still in `rejectedTmdbIds` and `ownerIdentity` still names this `requestId`;
+- no later owner action or independent verified decision on this observation: the history rows after the original revision are read, and any revision whose writer is not a carry of this marker refuses;
+- the dependent assigned rows are the ones `assignedRowsDelete` would remove for this decision, nothing else.
+
+Any mismatch refuses with `old_action_not_effective` (or `record_changed` for a plain hash race). `before_json` is never replayed: the next decision is computed from the current decision by removing only this marker's effect.
+
+### 2. `revoke` of `assign` and of `reject` have different semantics
+
+- **Revoke an assign:** remove `ownerIdentity`, `identitySource='owner'`, the verified `tmdbId`/`filmId`/`canonicalIdentity` and the dependent assigned rows; set `status='needs_verification'`. The revoked id is recorded as `revokedOwnerAssign {tmdbId, requestId, evidenceKey}`. Discovery must not re-confirm that id on the same `evidenceKey`; it may on a different `evidenceKey` (new evidence means a changed candidate evidence key, never a new owner click or a re-score on unchanged evidence).
+- **Revoke a reject:** remove only this owner's entry from `rejectedTmdbIds` and `ownerIdentity`. It writes no negative marker and no `revokedOwnerAssign`. An exclusion that is independently justified (another owner action, another request id, or a resolver-level rule) stays. The id becomes eligible for the next ordinary chunk.
+- `revokedOwnerAssign` is a new decision field. It must be added to `ownerMarkerCarry`, to the observation-index view, and to the resolver consumer check next to `ownerRejected`. A later owner `assign` of the same id clears it. `rejectedTmdbIds` is not used to hold it.
+
+### 3. `supersede` is enforced, not descriptive
+
+`supersede` is `identity_assign` or `identity_reject` with `command.supersedes = {requestId, decisionHash}`. `DiscoveryAuthority.ownerDecision` today checks only the assign/reject specifics. This ADR requires a typed validation branch for `revoke` and for `supersedes`: preview and confirm bind the original same-observation action and the exact current target and hash, and the D1 writer enforces that binding in the same fence or refuses. A `revoke` is never passed through the existing assign/reject-only checks.
+
+### 4. Execution boundary
+
+Preview is read-only and bounded: one intent by primary key, the history of that one observation, the current decision and its assigned rows. No scan, no TMDB. Execute re-checks D1 authority and generation, the lease fence, a fresh idempotency key and sections 1 to 3, appends history, writes a receipt, and starts no Discovery chunk (the UI says "waits for the ordinary chunk"). No R2 authority or fallback. The STRICT-table rebuild of `discovery_intent` must be tested offline for row and constraint preservation and for old-code behavior with the new kind.
+
+Not decided here: applying the new migration to production (separate owner GO), merging, any production POST.
 
 ## Alternatives considered
 
@@ -42,7 +63,7 @@ A: one migration and one apply gate; code is tested offline with a v26 fixture. 
 
 ## Recovery and migration boundary
 
-Revoke is itself append-only; undoing it is a new owner action. Code rollback does not revert D1 rows. Migration `0026` follows the ordinary migration-apply procedure with its own evidence; this ADR authorizes no operation.
+Revoke is itself append-only; undoing it is a new owner action. Code rollback does not revert D1 rows. Migration the new migration follows the ordinary migration-apply procedure with its own evidence; this ADR authorizes no operation.
 
 ## Evidence
 
