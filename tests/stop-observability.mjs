@@ -9,7 +9,7 @@ let writes=[],eventsUnavailable=false,failKey=null;
  bucket.list=async({prefix='',limit=1000}={})=>({objects:[...records.keys()].filter(key=>key.startsWith(prefix)).sort().slice(0,limit).map(key=>({key})),truncated:false});}
 async function api(path,body,method='POST'){const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:r.status,data:await r.json()};}
 assert.equal((await api('queue/reconcile',{})).status,200);
-const events=()=>[...records].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v);
+const events=()=>[...records].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v).filter(e=>e.presentation!=='batch_v2_skipped'); // AIR-548: a refused start leaves a neutral skipped Event, not a run Event
 const lease=()=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);
 const setLease=edit=>{const doc=lease();edit(doc);sql(w.file,"UPDATE prediction_lease SET expires_at="+Number(doc.expiresAt)+", document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE name='runner'");};
 const runRow=id=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+id+"'")[0].d);
