@@ -32,6 +32,8 @@ export const INDEX_CAP=3000;
 const READ_CAP=20000;
 export const LEDGER_PAGE=500;
 export const BIND_CAP=100;
+// A statement binds at most BIND_CAP (100) parameters on D1: the shows are read BIND_CAP-20 keys at a time.
+const SHOW_READ_CHUNK=BIND_CAP-20;
 export const POLICY_EXCLUDE_OVERHEAD=4;
 export const POLICY_EXCLUDE_STATEMENTS_PER=3;
 export const POLICY_EXCLUDE_CAP=Math.floor((STATEMENT_CAP-POLICY_EXCLUDE_OVERHEAD)/POLICY_EXCLUDE_STATEMENTS_PER);
@@ -2003,11 +2005,22 @@ export async function readObservationIndex(env,options={}){
   :await many(database(env),`SELECT o.observation_key, o.payload_json, o.evidence_key, d.payload_json AS decision_json, d.decision_hash, d.status, d.terminal_reason FROM discovery_observation o JOIN discovery_decision d ON d.observation_key=o.observation_key WHERE o.source_key='active' AND o.residence='active' AND d.status IS NOT NULL AND d.status<>'excluded_nonfilm' AND ${verified?'d.status=\'verified\'':'d.status<>\'verified\''} ORDER BY CASE WHEN d.terminal_reason IS NOT NULL THEN 0 ELSE 1 END, o.observation_key LIMIT ?`,[limit+1]);
  const capped=!keyed&&rows.length>limit;
  const wanted=keyed?rows:rows.slice(0,limit);
+ // The shows of the wanted observations are read in a few chunked statements, not one statement per observation: the owner Limbo reads up to INDEX_CAP
+ // records, and a statement each kept every row alive for thousands of sequential round trips (tens of seconds of wall) and doubled that cost per concurrent reader.
+ const showsByKey=new Map();
+ for(let at=0;at<wanted.length;at+=SHOW_READ_CHUNK){
+  const keys=wanted.slice(at,at+SHOW_READ_CHUNK).map(row=>row.observation_key);
+  const found=await many(database(env),"SELECT observation_key, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key IN ("+keys.map(()=>'?').join(',')+") ORDER BY observation_key, ordinal",keys);
+  for(const show of found){
+   const list=showsByKey.get(show.observation_key);
+   if(list)list.push(show);else showsByKey.set(show.observation_key,[show]);
+  }
+ }
  const records=[];
  for(const row of wanted){
   let payload,decision;try{payload=JSON.parse(row.payload_json);decision=JSON.parse(row.decision_json);}catch{return {handled:true,index:indexShell(gate,'malformed')};}
   if(await decisionHash(decision)!==row.decision_hash)return {handled:true,index:indexShell(gate,'malformed')};
-  const shows=await many(database(env),'SELECT channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key=\'active\' AND observation_key=? ORDER BY ordinal',[row.observation_key]);
+  const shows=showsByKey.get(row.observation_key)||[];
   records.push({...payload,key:row.observation_key,shows:shows.map(show=>({channelId:show.channel_id,channel:show.channel,start:show.start_ms,end:show.end_ms})),decision,decisionHash:row.decision_hash,programmeRunId:gate.programmeRunId});
  }
  const again=await readAuthority(env);
