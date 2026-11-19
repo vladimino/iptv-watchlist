@@ -63,7 +63,7 @@ A: one migration and one apply gate; code is tested offline with a v26 fixture. 
 
 ## Recovery and migration boundary
 
-Revoke is itself append-only; undoing it is a new owner action. Code rollback does not revert D1 rows. Migration the new migration follows the ordinary migration-apply procedure with its own evidence; this ADR authorizes no operation.
+Revoke is itself append-only; undoing it is a new owner action. Code rollback does not revert D1 rows. The new migration follows the ordinary migration-apply procedure with its own evidence; this ADR authorizes no operation.
 
 ## Evidence
 
