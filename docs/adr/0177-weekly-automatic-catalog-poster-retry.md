@@ -23,14 +23,24 @@ D1 `discovery_admission` is the authority for the catalog and its posters. Today
 
 ## Open design forks (owner decision required before implementation)
 
-**Fork A — how a busy or rate-limited run resumes.**
-- **A1 (recommended): one weekly expression with an hourly window on Sunday**, `24 3-9 * * 0`. The first firing starts the week's run; later firings resume only if a checkpoint says `pending` and `nextRetryAt` has passed, otherwise they end after one read. No new Workflow, no coupling to the Discovery fast tick, at most 7 firings a week. Resume granularity is one hour; a checkpoint still pending after Sunday 09:24 UTC is resumed first by the next week's firing and is superseded after 7 days.
-- A2: checkpoint plus piggyback on the two-minute Discovery fast tick. Finer resume, but adds a poster read to a tick ADR 0174 defined as Discovery-only.
-- A3: a new Cloudflare Workflow with `step.sleepUntil`. Most precise, heaviest: new binding, class, rollover path.
+### Fork A: how a busy or rate-limited run resumes
 
-**Fork B — where the checkpoint lives.**
-- **B1 (recommended): one R2 object `epg/catalog-poster-weekly.json`** (run id, cursor, `pending`, `nextRetryAt`, last summary), written by CAS like the negative index. No migration.
-- B2: a D1 table (new migration, the schema-gated path). Stronger consistency, but needs an owner-gated migration for a single small row.
+| Option | Mechanism | Advantages | Drawbacks |
+| --- | --- | --- | --- |
+| **A1 (recommended)** | One weekly expression with an hourly Sunday window, `24 3-9 * * 0`. The first firing starts the run; later firings resume only when the checkpoint says `pending` and `nextRetryAt` has passed, otherwise they end after one read. | One new schedule entry; no new Workflow or binding; no coupling to the Discovery fast tick; at most 7 firings a week; trivially reversible. | Resume granularity is one hour. A checkpoint still pending after Sunday 09:24 UTC is resumed by the next week's first firing and superseded after 7 days. |
+| A2 | Checkpoint plus a poster check on the two-minute Discovery fast tick. | Finest resume time. | Adds a poster read to a tick that ADR 0174 defines as Discovery-only; couples two recovery clocks; 720 extra reads a day. |
+| A3 | A new Cloudflare Workflow with `step.sleepUntil`. | Most precise, no lease held while sleeping. | New binding, class, rollover path and instance ownership rules; disproportionate for one weekly low-priority job. |
+
+### Fork B: where the checkpoint lives
+
+| Option | Advantages | Drawbacks |
+| --- | --- | --- |
+| **B1 (recommended)** One R2 object `epg/catalog-poster-weekly.json` (run id, cursor, `pending`, `nextRetryAt`, last summary), written by compare-and-swap like the negative index. | No migration; same proven CAS pattern; small. | Weaker consistency than D1; a lost CAS race is retried once, then the run ends and resumes next firing. |
+| B2 A D1 table. | Stronger consistency, transactional with poster writes. | Needs an owner-gated schema migration for one small row. |
+
+### Recommendation
+
+**A1 + B1.** It is the smallest change that meets "a busy lease must not skip the week": no new execution surface, no change to existing schedules, no migration, one-line rollback (remove the cron entry and branch). A2/A3 buy resume precision this low-priority job does not need. If the owner later wants stronger consistency, B2 can replace B1 behind the same service interface.
 
 ## Alternatives considered
 
