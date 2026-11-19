@@ -79,6 +79,21 @@ function adminHealthGroups(issues){
  }
  return [...groups.values()].map(group=>({...group,observedAt:adminHealthBoundsIso(group.observedAt),lastProgressAt:adminHealthBoundsIso(group.lastProgressAt),retryAt:adminHealthBoundsIso(group.retryAt)}));
 }
+// AIR-543 / ADR 0179: the owner-visible provenance of the weekly poster retry, from the same one-read projection the Monitor and the footer use. It reads one checkpoint
+// object and the Monitor's own markers, writes nothing and asks TMDB nothing. An unreadable fact is `unknown`, never healthy; any failure here never fails the health read.
+async function adminHealthCatalogPosters(env,nowMs){
+ try{
+  if(typeof CatalogPosterWeekly==='undefined')return {state:'unknown',monitor:'degraded',detail:'module_unavailable'};
+  let markers={baselineAt:null,seenAt:null};
+  try{
+   const object=await env.BUCKET.get('monitor/state.json');
+   const doc=object?await object.json():null;
+   markers={baselineAt:typeof doc?.catalogPostersBaselineAt==='string'?doc.catalogPostersBaselineAt:null,seenAt:typeof doc?.catalogPostersSeenAt==='string'?doc.catalogPostersSeenAt:null};
+  }catch{}
+  const status=await CatalogPosterWeekly.readStatus(env,{markers,monitorOn:true,nowMs});
+  return {state:status.state,monitor:status.monitor,detail:status.detail??null,nextExpectedAt:status.nextExpectedAt,freshnessAt:status.freshnessAt,checkpointStatus:status.checkpointStatus,lastOutcome:status.lastOutcome,summary:status.summary};
+ }catch{return {state:'unknown',monitor:'degraded',detail:'read_failed'};}
+}
 async function adminHealthRoute(request,env,url){
  if(request.method!=='GET')return adminError('method_not_allowed',405);
  let pin=null;
@@ -134,8 +149,9 @@ async function adminHealthRoute(request,env,url){
  if(!freshness)for(const name of ['fingerprint','prediction'])subsystems[name]={...subsystems[name],evidence:index===null||profileBody===null?'object_missing':'not_supplied',status:'unknown',derived:'view_index'};
  const groups=adminHealthGroups(result.issues);
  const whole=result.issues.filter(item=>item.subject.kind!=='film'&&item.subject.kind!=='observation');
+ const catalogPosters=await adminHealthCatalogPosters(env,nowMs);
  return json({
-  pin:adminEncodePin(snapshot.tuple),snapshot:snapshot.info,
+  pin:adminEncodePin(snapshot.tuple),snapshot:snapshot.info,catalogPosters,
   health:{schemaVersion:result.schemaVersion,now:result.now,clock:result.clock,published:result.published,scope:{programmeRunId:result.scope.programmeRunId,coverage:result.scope.coverage,sources:result.scope.sources,subjects:{films:result.scope.subjects.films.length,observations:result.scope.subjects.observations.length}},subsystems,counts:result.counts,thresholds:result.thresholds,groups,issues:whole},
   sources:{
    published:{key:d1?'published_epg_authority':EPG_GENERATION_KEY,evidence:'observed',observedAt:now},
