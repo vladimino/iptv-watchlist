@@ -1,11 +1,11 @@
-# ADR 0177: A weekly Worker cron retries TMDB for catalog films without a poster and hydrates D1 through one shared core
+# ADR 0179: A weekly Worker cron retries TMDB for catalog films without a poster and hydrates D1 through one shared core
 
 **Status:** Proposed  
 **Original decision date:** 2026-11-19 (product goal and weekly cadence only; design forks below are open)  
 **Recorded at:** 2026-11-19  
 **Approval source:** [Product Owner decision on the AIR-543 card, 19 November 2026 (Europe/Madrid)](https://trello.com/c/GQDcwdVx): approves the product goal and a weekly cadence. It does **not** approve this design, the new production cron, or any TMDB sweep.  
 **Related work:** [AIR-543](https://trello.com/c/GQDcwdVx); [AIR-515](https://trello.com/c/FMWcvvWI); [AIR-526](https://trello.com/c/olszZU9B); [AIR-302](https://trello.com/c/9rqjCMhy); [ADR 0048](0048-permanent-catalog-poster-maintenance-route.md); [ADR 0063](0063-catalog-poster-negative-index.md); [ADR 0174](0174-discovery-only-fast-recovery-cron.md)  
-**Supersedes:** None. It **extends** ADR 0048 and ADR 0063: the manual owner route stays; ADR 0063's rejection of a cron for plain record expiry is not reversed, because this cron performs a real retry and hydration.  
+**Supersedes:** [ADR 0048](0048-permanent-catalog-poster-maintenance-route.md) decision 5 and [ADR 0063](0063-catalog-poster-negative-index.md) decision 2, **for the automated paths only** (see "Authorization override"). ADR 0063's rejection of a cron for plain record expiry is not reversed: this cron performs a real retry and hydration. Takes effect only when Accepted and activated.  
 **Superseded by:** None
 
 ## Context
@@ -16,10 +16,19 @@ D1 `discovery_admission` is the authority for the catalog and its posters. Today
 
 1. **Seed at admission.** When Discovery has a complete TMDB movie detail whose `id` equals the verified canonical id and `poster_path` is absent, it writes `no_poster_on_tmdb` (`checkedAt`, `nextCheckAt = checkedAt + 90 d`) through the existing index compare-and-swap, with no second TMDB request. Network error, 429, 5xx, incomplete body, id mismatch and unverified identity are never recorded as "no poster". An index failure never blocks the admission; the film is left for the weekly catch-up.
 2. **One shared core.** The body of the poster route (partition, TMDB detail, validation, guarded D1 conditional update, lease, generation and authority guards, negative-index CAS) is extracted into one bounded internal service. The owner route and the weekly handler both call it; the weekly handler does not call the Access-protected route. D1 only: no R2 catalog writer or fallback. `tmdb_id_mismatch` is never rechecked automatically.
-3. **Weekly cron, separate branch.** `src/worker.js` dispatches on the exact `controller.cron`; the weekly branch runs only the poster service and none of EPG, Ratings, Monitor or Discovery recovery. Existing `0 * * * *` and `1-59/2 * * * *` are unchanged and asserted by test. Candidates: current D1 Film with no HTTPS poster, verified TMDB id, not retired/superseded, and no index entry or an expired `no_poster_on_tmdb`. Batch size, TMDB pacing and per-run request budget are bounded; a cursor resumes a large backlog.
+3. **Weekly sweep on a separate cron branch.** `src/worker.js` dispatches on the exact `controller.cron`; the weekly branch runs only the poster service and none of EPG, Ratings, Monitor or Discovery recovery. Existing `0 * * * *` and `1-59/2 * * * *` are unchanged and asserted by test. Candidates: current D1 Film with no HTTPS poster, verified TMDB id, not retired/superseded, and no index entry or an expired `no_poster_on_tmdb`. Batch size, TMDB pacing and per-run request budget are bounded; a cursor resumes a large backlog.
 4. **Outcomes.** Real `poster_path` → guarded HTTPS poster in D1. Absent again → new `checkedAt`, `nextCheckAt +90 d`. 429 → honour `Retry-After`; 5xx, network, timeout → candidate stays due with bounded backoff and no 90-day penalty. Stale, superseded or already-present → no-op with 0 TMDB calls and 0 D1/R2 writes.
-5. **Busy Discovery lease / EPG priority.** A `409`/busy is not a skipped week. The run records a checkpoint and resumes (fork A below) without holding the lease while waiting and without competing with EPG or Discovery priority.
+5. **Busy Discovery lease / EPG priority.** A `409`/busy is not a skipped week. The run records a checkpoint and resumes (fork A below; bound stated there) without holding the lease while waiting and without competing with EPG or Discovery priority.
 6. **Observability.** One structured run summary (`runId, scanned, due, checked, hydrated, noPoster, retryable, deferredBusy, pending, nextRetryAt, rateLimit, duration`), readable through the existing read-only status/admin surface; a signal only on material failure or success, none on no-op. `GET /api/admin/posters` stays side-effect free.
+
+## Authorization override (explicit)
+
+This proposal deliberately changes two Accepted contracts, for the automated paths only:
+
+- **ADR 0048 decision 5** ("every production execution call stays a separate owner-approved operation"): superseded for the weekly handler. After **one** owner-approved activation GO for the Cloudflare schedule, each scheduled retry and its D1 poster writes run without a further approval.
+- **ADR 0063 decision 2** (negative verdicts are stored only from an explicit owner `POST`): superseded for (a) the admission-time seed and (b) the weekly handler's own TMDB answers.
+- **Unchanged:** the manual `POST /api/enrichment/catalog/posters` keeps its owner gate, dry run, `recheck` and receipts; `tmdb_id_mismatch` is never rechecked automatically; no R2 catalog writer; `GET /api/admin/posters` stays side-effect free.
+- **Approving this Proposed ADR activates nothing.** Activation needs a separate explicit owner GO on the Cloudflare schedule before the implementation PR merges. Cross-ADR status text in 0048 and 0063 is updated with the implementation PR, when this ADR is Accepted.
 
 ## Open design forks (owner decision required before implementation)
 
@@ -27,7 +36,7 @@ D1 `discovery_admission` is the authority for the catalog and its posters. Today
 
 | Option | Mechanism | Advantages | Drawbacks |
 | --- | --- | --- | --- |
-| **A1 (recommended)** | One weekly expression with an hourly Sunday window, `24 3-9 * * 0`. The first firing starts the run; later firings resume only when the checkpoint says `pending` and `nextRetryAt` has passed, otherwise they end after one read. | One new schedule entry; no new Workflow or binding; no coupling to the Discovery fast tick; at most 7 firings a week; trivially reversible. | Resume granularity is one hour. A checkpoint still pending after Sunday 09:24 UTC is resumed by the next week's first firing and superseded after 7 days. |
+| **A1 (recommended, revised after review)** | One daily expression, `24 3 * * *`. Sunday firing starts the weekly sweep; every other firing is **pending-only**: it reads the checkpoint (one R2 read) and ends unless a run is `pending` and `nextRetryAt` has passed. | One new schedule entry; no Workflow or binding; no coupling to the Discovery fast tick; 7 firings a week, six of them one read. **Stated bound:** a busy lease or 429 on any day is retried at the next daily firing, so the worst added delay is about 24 h plus the `Retry-After`, and a pending run keeps being resumed through the whole week until the next Sunday sweep supersedes it. | Resume granularity is one day, not minutes. A week's work can still end `pending` if the lease is busy on every daily firing; that is reported in the run summary and is the exception the owner accepts under this option. |
 | A2 | Checkpoint plus a poster check on the two-minute Discovery fast tick. | Finest resume time. | Adds a poster read to a tick that ADR 0174 defines as Discovery-only; couples two recovery clocks; 720 extra reads a day. |
 | A3 | A new Cloudflare Workflow with `step.sleepUntil`. | Most precise, no lease held while sleeping. | New binding, class, rollover path and instance ownership rules; disproportionate for one weekly low-priority job. |
 
@@ -40,7 +49,7 @@ D1 `discovery_admission` is the authority for the catalog and its posters. Today
 
 ### Recommendation
 
-**A1 + B1.** It is the smallest change that meets "a busy lease must not skip the week": no new execution surface, no change to existing schedules, no migration, one-line rollback (remove the cron entry and branch). A2/A3 buy resume precision this low-priority job does not need. If the owner later wants stronger consistency, B2 can replace B1 behind the same service interface.
+**A1 + B1.** The daily pending-only tick spans the whole week, so a busy lease or 429 does not skip the week (it is retried within about a day, not stranded until next Sunday). It is the smallest change that meets this: no new execution surface, no change to existing schedules, no migration, one-line rollback (remove the cron entry and branch). A2/A3 buy resume precision this low-priority job does not need. If the owner later wants stronger consistency, B2 can replace B1 behind the same service interface.
 
 ## Alternatives considered
 
@@ -51,7 +60,7 @@ D1 `discovery_admission` is the authority for the catalog and its posters. Today
 ## Consequences
 
 - Posters that appear on TMDB reach D1 without manual action; a film with no poster costs one TMDB call per 90 days (checked weekly, held until due).
-- A third schedule entry exists in live configuration; deploy replaces schedules with `wrangler.jsonc`.
+- A third schedule entry exists in live configuration (fork A1: daily firing, weekly sweep); deploy replaces schedules with `wrangler.jsonc`.
 - An automatic D1 writer exists. Its safety is the existing guards; seed adds one conditional R2 write per newly admitted film without a poster.
 
 ## Recovery and migration boundary
