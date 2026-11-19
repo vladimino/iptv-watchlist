@@ -2,7 +2,11 @@
 
 ## Method and limits
 
-Code reading of `src/worker.js` (`eventPage`) and `public/app.js` (`loadEvents`, `renderActivity`) plus an offline reproduction in `tests/events-pagination-ui.mjs`. **No production read was made**: the four stored hourly reports were not compared with live `GET /api/events` pages, so the production path R2 -> `/api/events` -> `loadedEvents` -> UI is not proven end to end. No R2, D1, Discovery or flag operation was run.
+Code reading of `src/worker.js` (`eventPage`) and `public/app.js` (`loadEvents`, `renderActivity`) plus an offline reproduction in `tests/events-pagination-ui.mjs`. Production was read through the owner-approved Access login with only `GET /api/events`, 12 pages following the cursor (240 events, counts and ids only, no payloads kept). No R2, D1, Discovery or flag operation was run.
+
+## Production result
+
+The API returns the four hours in order on pages 3 and 4, between the 04:00Z and 23:00Z controls, with no duplicate ids across the 240 events: `discovery-hour-...-20261118T23` (checked 1418, added 53), `...19T00` (1411, 106), `...19T01` (1386, 115), `...19T02` (1343, 143). Totals 5,558 checked and 417 added match the card. So the server side and R2 are correct and the loss happens in the client (`loadedEvents` and cursor handling), not in `GET /api/events`.
 
 ## Findings
 
@@ -20,4 +24,4 @@ Scenario 14 of `tests/events-pagination-ui.mjs` fails without the fix and passes
 
 ## Not yet proven
 
-Production confirmation of the four hours (00:00-03:00 Madrid, 5,558 checked / 417 added), desktop 1280 / mobile 390 Visual QA, and independent review of the exact HEAD.
+The exact client sequence that dropped the hours in the owner's browser was not observed (the refresh gap is the code-level cause that fits). After deploy, check that `/events` shows 00:00-03:00 Madrid. Desktop 1280 / mobile 390 Visual QA, and independent review of the exact HEAD.
