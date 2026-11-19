@@ -362,4 +362,24 @@ assert.equal(more.hidden, false);
 assert.equal(more.textContent, 'Более давние события');
 context.IntersectionObserver = FakeObserver;
 
+// 14. AIR-538: a refresh whose first page shares nothing with the loaded list (more events than a page arrived meanwhile) must not leave a hole.
+// The list restarts from the fresh page; scrolling then reaches every event once, the former middle included, with the end marker only at real exhaustion.
+reset({});
+const [n0, n1, n2, n3, o0, o1, o2, o3] = ['n0', 'n1', 'n2', 'n3', 'o0', 'o1', 'o2', 'o3'].map(id => ev(id));
+archive = {first: {events: [o0, o1], cursor: 'o'}, o: {events: [o2, o3], cursor: null}};
+await run('loadEvents(false)');
+archive = {first: {events: [n0, n1], cursor: 'm'}, m: {events: [n2, n3], cursor: 'o'}, o: {events: [o2, o3], cursor: null}};
+assert.equal(await run('loadEvents(false,{quiet:true})'), true);
+assert.deepEqual(shownIds(), ['n0', 'n1'], 'a disjoint first page restarts the list instead of leaving a hole');
+scrollToEnd(); await settle();
+scrollToEnd(); await settle();
+assert.deepEqual(shownIds(), ['n0', 'n1', 'n2', 'n3', 'o2', 'o3'], 'every event once, no gap');
+assert.equal(end.hidden, false);
+// An overlapping refresh keeps the loaded list and its cursor.
+reset({first: {events: [ev('a0'), ev('a1')], cursor: 'o'}, o: {events: [ev('a2')], cursor: null}});
+await run('loadEvents(false)');
+archive = {first: {events: [ev('b0'), ev('a0')], cursor: 'o'}, o: archive.o};
+await run('loadEvents(false,{quiet:true})');
+assert.ok(shownIds().includes('b0') && shownIds().includes('a1') && new Set(shownIds()).size === shownIds().length, 'overlap merges without duplicates');
+
 console.log('Events pagination UI: scroll sentinel on the real container, loader, one request at a time, exact end marker, retry from the saved cursor, repeated cursor, filtered zero-match pages, aborts, refresh and anchor/group preservation passed');
