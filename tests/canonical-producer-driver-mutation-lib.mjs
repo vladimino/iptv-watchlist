@@ -12,7 +12,7 @@ import path from 'node:path';
 import {sqliteSync} from './sqlite-session.mjs';
 
 const DRIVER='canonical-producer-driver.js',STORE='canonical-producer-store.js';
-const SKIP="return {state:'skipped',reason:'projector_is_writer'};";
+const SKIP="return {state:'skipped',reason:'film_person_route_not_open'};";
 const MUTANTS=[
  ["a deadline above the step lease is accepted", DRIVER, "intIn(params.sliceDeadlineMs,1,MAX_DEADLINE_MS)", "intIn(params.sliceDeadlineMs,1,1e9)"],
  ["the lease margin is dropped", DRIVER, "export const MAX_DEADLINE_MS=STEP_LEASE_MS-STEP_LEASE_MARGIN_MS;", "export const MAX_DEADLINE_MS=STEP_LEASE_MS;"],

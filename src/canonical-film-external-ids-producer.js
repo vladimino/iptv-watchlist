@@ -162,13 +162,13 @@ export function filmExternalIdsOperation({replan,now=()=>new Date().toISOString(
 }
 
 // ONE unit, once per source event. opts: {origin, event, input, replan?, now?, policy?}; input: {id:'film:...', at, schemes:[...], externalIds?:[{scheme,value,trusted?,conflicting?,provenance?}]}. Returns:
-//   {state:'skipped', reason:'projector_is_writer', receipt:false}   the marker is not `open`: one marker read, nothing else;
+//   {state:'skipped', reason:'film_person_route_not_open', receipt:false}   the marker is not `open`: one marker read, nothing else;
 //   {state:'absent', receipt:false}                                  the Film is not in the store: nothing is created;
 //   {state:'noop', receipt:false}                                    the stored ids already equal the source in the owned schemes: no receipt, no batch;
 //   {state:'applied'|'unknown'|..., requestId, ...}                  the receiptedWrite outcome (`already:true` when the same request was applied before).
 export async function applyFilmExternalIds(env,{origin,event,input,replan,now,policy=RETRY_POLICY}={}){
  const route=await writerRoute(env);
- if(route.writer!=='canonical')return {state:'skipped',reason:'projector_is_writer',receipt:false};
+ if(route.writer!=='canonical')return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const digest=await filmExternalIdsDigest(input);
  const target={kind:'film',id:input.id};
  const requestId=await producerRequestId({origin,operation:FILM_EXTERNAL_IDS_OPERATION,event,target,digest});

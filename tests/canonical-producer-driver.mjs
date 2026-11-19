@@ -60,7 +60,7 @@ const ZERO={applied:0,noop:0,already:0,unknown:0,failed:0,absent:0,pending:0};
 const OK=(kind='applied')=>({skipped:false,cursor:1,done:true,counts:{...ZERO,[kind]:1},failures:[],stoppedBy:null});
 const FAIL=code=>({skipped:false,cursor:1,done:true,counts:{...ZERO,failed:1},failures:[{id:'x',code}],stoppedBy:null});
 const HELD=code=>({skipped:false,cursor:0,done:false,counts:{...ZERO},failures:[],stoppedBy:code});
-const SKIPPED={skipped:true,reason:'projector_is_writer',cursor:0,done:false,counts:{...ZERO},failures:[]};
+const SKIPPED={skipped:true,reason:'film_person_route_not_open',cursor:0,done:false,counts:{...ZERO},failures:[]};
 function scripted(behaviour={}){
  const log=[],calls={};
  const apply=async(env,{plan})=>{

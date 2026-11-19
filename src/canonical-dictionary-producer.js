@@ -151,12 +151,12 @@ export const dictionaryUnitCap=limit=>Math.min(Math.max(Number(limit)||1,1),DICT
 const emptyCounts=()=>({applied:0,noop:0,already:0,unknown:0,failed:0,pending:0,absent:0,redirected:0,identity_mismatch:0,kept:0});
 
 // cursor: index of the next unit (resumable; the caller persists it). limit: units per call. Returns
-//   {skipped:true, reason:'projector_is_writer', ...}                                  marker not open: one marker read, nothing else;
+//   {skipped:true, reason:'film_person_route_not_open', ...}                                  marker not open: one marker read, nothing else;
 //   {skipped:false, cursor, done, counts, conflicts:[{id,field,reason,kind,from?}], failures:[{id,code}], stoppedBy}.
 export async function applyDictionaryUnits(env,{plan,cursor=0,limit=DICTIONARY_UNIT_LIMIT_DEFAULT,now,policy}={}){
  if(!plan||!Array.isArray(plan.units)||typeof plan.event!=='string'||typeof plan.at!=='string'||!Number.isInteger(cursor)||cursor<0)throw failed('film_person_invalid');
  const cap=dictionaryUnitCap(limit);
- if(!(await producerRouteOpen(env)))return {skipped:true,reason:'projector_is_writer',cursor,done:false,counts:emptyCounts(),conflicts:[],failures:[]};
+ if(!(await producerRouteOpen(env)))return {skipped:true,reason:'film_person_route_not_open',cursor,done:false,counts:emptyCounts(),conflicts:[],failures:[]};
  const counts=emptyCounts(),conflicts=[],failures=[];
  let index=cursor,stoppedBy=null;
  for(;index<plan.units.length&&index-cursor<cap;index++){

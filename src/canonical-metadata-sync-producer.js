@@ -268,7 +268,7 @@ export function metadataSyncOperations({replan=async()=>null,now}={}){
 
 async function applyFacts(operation,env,{origin,event,input,replan,now,policy=RETRY_POLICY}={}){
  const route=await writerRoute(env);
- if(route.writer!=='canonical')return {state:'skipped',reason:'projector_is_writer',receipt:false};
+ if(route.writer!=='canonical')return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const digest=await factsKindDigest(operation,input);
  const target={kind:'film',id:input.id};
  const requestId=await producerRequestId({origin,operation,event,target,digest});
@@ -287,7 +287,7 @@ async function applyFacts(operation,env,{origin,event,input,replan,now,policy=RE
 
 async function applyLoc(operation,env,{origin,event,input,replan,now,policy=RETRY_POLICY}={}){
  const route=await writerRoute(env);
- if(route.writer!=='canonical')return {state:'skipped',reason:'projector_is_writer',receipt:false};
+ if(route.writer!=='canonical')return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const digest=await localizationDigest(operation,input);
  const target={kind:input.kind,id:input.id};
  const requestId=await producerRequestId({origin,operation,event,target,digest});
@@ -400,7 +400,7 @@ export async function planMetadataSyncIntent(env,{event,films=[],titles={},peopl
 }
 
 export async function applyMetadataSync(env,{event,films=[],titles={},people={},failedIds=[],intent:previousIntent=[],now,policy=RETRY_POLICY}={}){
- if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'projector_is_writer',receipt:false};
+ if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const nowFn=clockOf(now);
  const origin=METADATA_SYNC_ORIGIN;
  const planned=await planMetadataSyncIntent(env,{event,films,titles,people,failedIds,now:nowFn});

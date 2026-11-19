@@ -214,7 +214,7 @@ Object.assign(CALLS,PERSON_STATE_CALLS);
 // NOT retried: settle it with readback() and then replay with the same request id. A lost fence or revision is a `conflict` to read again.
 export async function dispatch(env,plan){
  const route=await writerRoute(env);
- if(route.writer!=='canonical')return {executed:false,reason:'projector_is_writer',route,results:[]};
+ if(route.writer!=='canonical')return {executed:false,reason:'film_person_route_not_open',route,results:[]};
  const results=[];
  for(const call of plan.calls||[]){
   const run=CALLS[call.fn];

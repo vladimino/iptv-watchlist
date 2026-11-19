@@ -32,4 +32,8 @@ const fence=projectorFence({state:'prepared',generation:3,r2Allowed:true});
 assert.deepEqual(fence[1],['prepared',3]);assert.ok(String(fence[0]).includes('cutover'),'the dormant producers fence carries the marker condition');
 // The retired runner cannot come back unnoticed: no source file but the authority module and the producers names these guards.
 for(const file of fs.readdirSync('src').filter(name=>name.endsWith('.js')&&!['film-person-authority.js','canonical-producers.js'].includes(name)))assert.doesNotMatch(fs.readFileSync('src/'+file,'utf8'),/PROJECTOR_MARKER_GUARD|projectorGuard\(/,file);
+// AIR-537 slice 4 (owner decision A2): the stale skip reason `projector_is_writer` was renamed to `film_person_route_not_open`. The skip is
+// still taken only when the writer route is not `canonical` (never at `open`); the old label must not come back.
+for(const file of fs.readdirSync('src').filter(name=>name.endsWith('.js')))assert.doesNotMatch(fs.readFileSync('src/'+file,'utf8'),/projector_is_writer/,file);
+assert.match(fs.readFileSync('src/canonical-producer-chain.js','utf8'),/const SKIPPED=Object\.freeze\(\{state:'skipped',reason:'film_person_route_not_open'\}\)/);
 console.log('projector marker guard: only r2 and prepared at open give an expectation, d1/held/malformed rows never do, a moved mode or generation fails the re-read, the guard SQL binds mode and generation, and no other module uses it');
