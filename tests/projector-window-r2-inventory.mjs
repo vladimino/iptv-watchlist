@@ -91,6 +91,7 @@ const FILE_SITES={
  'src/admin/film-title-route.js':{r2:1,wrapper:0,dynamic:0},
  'src/admin/letterboxd-archive-apply.js':{r2:3,wrapper:0,dynamic:1},
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
+ 'src/catalog-poster-weekly.js':{r2:2,wrapper:0,dynamic:1},   // ADR 0179 (AIR-543): the weekly poster checkpoint (epg/catalog-poster-weekly.json) and the immutable catalog_posters events (events/items/<reverse-timestamp>-<id>.json); neither is a projector input
  'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0118: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)
  'src/discovery.js':{r2:8,wrapper:15,dynamic:3},
  // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
@@ -190,6 +191,11 @@ const classes={
  'putKnownLength@src/worker.js':'under the publication lease',
  'writeEvent@src/worker.js':'EPG event log (not a projector input)',
  'writeWorkflowState@src/discovery-workflow.js':'Workflow record: D1-routed, refused inside a held window by windowHeldGuard',
+ // ADR 0179 (AIR-543). The daily poster cron is reached by name from the Worker's scheduled entry; none of these is a projector input.
+ 'catalogPosterApply@src/discovery.js':'poster-only copy write of the owner route and of the weekly sweep (the shared core); takes the resolver lease and re-checks the generation before every write (ADR 0048, ADR 0179)',
+ 'catalogPosterNegativesSave@src/discovery.js':'the poster negative index epg/catalog-poster-negatives.json (not a projector input), by compare-and-swap: the route, the weekly sweep and the admission seed, which runs inside the chunk that holds the lease',
+ 'writeCheckpoint@src/catalog-poster-weekly.js':'the weekly poster checkpoint epg/catalog-poster-weekly.json (not a projector input), by compare-and-swap; the daily cron entry only',
+ 'deliver@src/catalog-poster-weekly.js':'immutable catalog_posters events under events/items/ (not a projector input) and the outbox mark; the daily cron entry only',
 };
 const reached=new Set([...writers(chunk),...writers(publication)]);
 for(const key of reached)assert.ok(classes[key],'unclassified R2 writer reachable from Discovery or publication: '+key+' (classify it against the projector inputs)');
