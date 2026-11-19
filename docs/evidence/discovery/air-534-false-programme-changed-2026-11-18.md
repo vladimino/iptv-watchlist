@@ -59,7 +59,10 @@ Owner decision of 18 November 2026 on the AIR-534 card, recorded as [ADR 0174](.
 - Mutating the published-generation comparison, the no-record handover and the incident on `started` each fails the test.
 - Docs: rollback now removes only `1-59/2 * * * *` and never replaces the hourly trigger; the stale single-cron statements in the deployment runbook and the scheduling page were corrected; the Mermaid sequence now puts the admission/CAS write inside the "needs a decision" branch.
 - ADR number: main took 0173 for the AIR-532 retention ADR first, so this decision is ADR 0174.
-- Mermaid: parsed and rendered locally with mermaid 10.9.1 only. The actual GitHub rendering, legibility and arrow meaning are for the independent QA on the pull request.
+- Mermaid, actual GitHub rendering (19 November 2026, headless Chromium on the GitHub file view of the branch, no screenshots; measured in the GitHub mermaid frame at a 1280 px viewport, then at 390 px):
+  - `scheduling-and-orchestration.md`, fast-tick sequence diagram: renders without a syntax error; the first version was 1,821 units wide and shrank to a scale of 0.47 (about 5.7 px text), so the labels were shortened; the pushed version is 1,182 units wide, scale 0.73, smallest text about 9 px at 1280 px and scale 0.27 (about 3 px) at 390 px, where the page offers the diagram's own zoom. Meaning checked from the rendered positions: `No-op, no write` sits above the `Needs a decision` branch; `Admission reads, one CAS write`, `Refused` and `Accepted` all sit below it, so no admission or write is drawn after a no-op.
+  - `runtime-topology.md`: renders without error; the new node `Cloudflare cron trigger: 1-59/2 * * * * (Discovery only)` and its dashed edge `reconcileDiscoveryRecovery: recovery of a stopped Workflow only` to the Workflow are present beside the hourly node and its edge; scale 0.65, smallest text about 10 px at 1280 px.
+  - Limit: a headless browser, not a human reading; the mobile text of the sequence diagram is small by the nature of a five-participant diagram.
 
 ## Not done here (open on AIR-534)
 
