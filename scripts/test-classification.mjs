@@ -207,6 +207,9 @@ export const FILES={
  "canonical-metadata-sync-producer.mjs": {
   "suite": "core"
  },
+ "canonical-rated-admission-bundle.mjs": {
+  "suite": "core"
+ },
  "canonical-rated-admission-producer.mjs": {
   "suite": "core"
  },

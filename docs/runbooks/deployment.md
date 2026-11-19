@@ -126,6 +126,10 @@ This is the operator sequence of the shared reliability contract ([ADR 0089](../
 
 The canary's bindings, route and Workflow class were removed by AIR-457 ([ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md)) and its code, operator script, diagnostic migrations and tests by AIR-521 ([ADR 0161](../adr/0160-delete-epg-diagnostic-canary-code.md)). `wrangler.jsonc` carries only the production `DB`, `BUCKET` and the four production Workflows; guarded by `tests/epg-diagnostic-bindings-ready.mjs`, which also checks the built bundle. `keep_vars: true` may keep a leftover live var: read the deployed bindings back and treat any leftover as a separate owner-approved settings change. Code rollback restores no deleted resource ([retirement evidence](../evidence/orchestration/epg-diagnostic-retirement-air-457-2026-11-17.md)).
 
+## Scoped Worker bundle: the build checks imports (AIR-532)
+
+`build.mjs` turns several modules into named scopes with `scopedImports`: it strips every ES import and prepends a hand-written preamble that destructures the already-scoped bindings. A used import that the preamble does not name is undefined in the Worker, and an ES-module test cannot see it (there the import resolves). Since 19 Nov 2026 the build fails with "imports and uses X but the scope preamble does not provide it" for such a name, and `tests/canonical-rated-admission-bundle.mjs` runs the generated bundle. When you add an import to a scoped module, add it to its preamble in `build.mjs`; a green `npm run build` is then the proof. Background: [the 19 Nov regression](../evidence/orchestration/air-532-bundle-binding-regression-2026-11-19.md). A fix is a normal deploy only when the deploy and rollback holdpoints above (no unfinished seal claim, no live Workflow owner) are clear; otherwise it needs its own owner-approved recovery plan.
+
 ## Troubleshooting and recovery
 
 - [Cloudflare deployment metadata HTTP 403](recovery/deploy-metadata-403.md) — token policy diagnostics; do not widen permissions without a specific failed check.
