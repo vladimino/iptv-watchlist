@@ -14,6 +14,10 @@
 const LIMBO_QUEUE_KEY=ENRICHMENT_KEY+'prediction-queue.json',LIMBO_INDEX_KEY=ENRICHMENT_KEY+'view-index.json';
 const LIMBO_SOURCES=['epg/published-generation.json','epg/generations/<programmeRunId>/programme.json','titles.json','people.json','admin/owner-reviews.json',LIMBO_QUEUE_KEY,LIMBO_INDEX_KEY,'epg/generations/<programmeRunId>/discovery-observations/manifest.json','epg/generations/<programmeRunId>/discovery-observations/shard-NN.json','epg/resolver-continuation.json','epg/discovery-status.json','epg/resolver-lease.json'];
 let ADMIN_LIMBO_CACHE=null;
+// An observation index is readable only when it carries a real manifest and a record list. The authority can answer
+// state `stale` with manifest null (reason generation_moved: the D1 generation moved while it was read); that is a
+// refusal to describe the index, not an index, and no reader may dereference its manifest.
+function limboIndexReadable(index){return Boolean(index)&&['fresh','stale'].includes(index.state)&&Boolean(index.manifest)&&typeof index.manifest==='object'&&Array.isArray(index.records);}
 
 function limboEncodePin(tuple){
  const coordination=tuple.coordinationVersion??'';
@@ -36,7 +40,7 @@ function limboSameTuple(left,right){return adminSameTuple(left,right)&&left.queu
 // generation; otherwise the index's own coverage (always partial: it holds only observations that already have a
 // decision) and whether its sources moved since it was written.
 function limboObservationCoverage(observations){
- if(!observations||!['fresh','stale'].includes(observations.state))return {available:false,reason:observations?'index_'+observations.state:'index_unavailable',state:observations?.state??'unavailable',programmeRunId:observations?.programmeRunId??null};
+ if(!limboIndexReadable(observations))return {available:false,reason:observations?'index_'+observations.state:'index_unavailable',...(Array.isArray(observations?.reasons)&&observations.reasons.length?{reasons:observations.reasons}:{}),state:observations?.state??'unavailable',programmeRunId:observations?.programmeRunId??null};
  const manifest=observations.manifest;
  return {available:true,state:observations.state,reasons:observations.reasons,programmeRunId:manifest.programmeRunId,writtenAt:manifest.writtenAt,writer:manifest.writer.kind,scope:manifest.coverage.scope,indexed:manifest.coverage.indexed,eligible:manifest.coverage.eligible??null,omitted:manifest.coverage.omitted??null,complete:manifest.coverage.complete,awaitingFirstLookup:manifest.counts?.awaitingFirstLookup??null};
 }
@@ -90,7 +94,7 @@ async function adminLimboLoad(env,hasPin){
  let observations;
  try{observations=await discoveryIndexRead(env.BUCKET,{cached:cache?.observations||null,env});}
  catch{observations={state:'unavailable',reasons:['storage_unavailable'],programmeRunId:null,manifest:null,manifestEtag:null,records:[]};}
- const readable=['fresh','stale'].includes(observations.state);
+ const readable=limboIndexReadable(observations);
  const coordination=await limboReadCoordination(env,observations);
  const tuple={...base.tuple,queueVersion:queue.present?queue.version:null,indexVersion:index.present?index.version:null,observationsVersion:readable?observations.manifestEtag:null,coordinationVersion:coordination.version||null};
  // The index's freshness is judged on every request; only its records are reused with the rest of the snapshot.
@@ -118,7 +122,7 @@ function limboEvaluate(snapshot,nowMs){
  const now=new Date(nowMs).toISOString(),run=snapshot.tuple.programmeRunId;
  const films=snapshot.films.map(record=>({...record,observedAt:now}));
  const queue=snapshot.queueBody?limboQueueForHealth(snapshot.queueBody,now):snapshot.queue.present?{observedAt:now}:null;
- const index=snapshot.observations,readable=['fresh','stale'].includes(index?.state);
+ const index=snapshot.observations,readable=limboIndexReadable(index);
  return DataHealth.evaluateDataHealth({
   now,
   published:{programmeRunId:run,phase:'published',publishedAt:snapshot.base.info.programmeUpdatedAt,observedAt:now},
@@ -149,7 +153,7 @@ function limboCoordinationReason(continuation,status,lease,publishedEpg){
 // One pass over the records already loaded. The three coordination objects are the ones the observation recovery read
 // opens. An unreadable one is not a completed check and does not fail the inventory. No per-record request.
 async function limboReadCoordination(env,observations){
- const readable=['fresh','stale'].includes(observations?.state);
+ const readable=limboIndexReadable(observations);
  const records=Array.isArray(observations?.records)?observations.records:[];
  if(!readable||!records.length)return {judged:readable,version:'',reason:null};
  const [continuation,status,lease]=await Promise.all([drStored(env,DR_CONTINUATION_KEY,env.BUCKET),drStored(env,DR_STATUS_KEY,env.BUCKET),drStored(env,DISCOVERY_LEASE_KEY,env.BUCKET)]);
@@ -163,7 +167,7 @@ function limboJudgeRecord(record,index,coordination,nowIso,nowMs){
  catch{return {now:false,checked:true,capability:null,reason:'not_confirmed'};}
 }
 function limboWithActions(items,snapshot,nowMs){
- const index=snapshot.observations,coordination=snapshot.coordination,judged=coordination?.judged===true&&['fresh','stale'].includes(index?.state)&&coordination.continuation;
+ const index=snapshot.observations,coordination=snapshot.coordination,judged=coordination?.judged===true&&limboIndexReadable(index)&&coordination.continuation;
  const byKey=new Map();
  if(judged){
   const nowIso=new Date(nowMs).toISOString();
@@ -217,7 +221,7 @@ async function adminLimboRoute(request,env,url){
  if(cursor!==null){const decoded=limboDecodeCursor(cursor,snapshot.tuple);if(!decoded)return adminError('stale_cursor',400);nowMs=decoded.nowMs;inner=decoded.inner;}
  const health=limboEvaluate(snapshot,nowMs);
  if(health.error)return adminError('evaluation_failed',500);
- const all=limboWithActions(LimboInventory.limboItems(health,{films:snapshot.films,observations:['fresh','stale'].includes(snapshot.observations?.state)?snapshot.observations.records:[]}),snapshot,nowMs);
+ const all=limboWithActions(LimboInventory.limboItems(health,{films:snapshot.films,observations:limboIndexReadable(snapshot.observations)?snapshot.observations.records:[]}),snapshot,nowMs);
  const filtered=LimboInventory.filterLimboItems(all,filter);
  if(filtered.error)return adminError(filtered.error,400);
  const page=LimboInventory.pageLimboItems(filtered.items,{limit,key:filtered.key,cursor:inner});
