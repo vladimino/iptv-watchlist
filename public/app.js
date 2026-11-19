@@ -2307,9 +2307,10 @@ async function loadProgramme({quiet}={}){
   if(!(data.source==='mirror'&&data.readOnly===true))programmeLoadedAt=Date.now();
   programmeRefreshError=false;
   const changed=installProgramme(data);
+  if(recovered&&!changed&&programmeReady)refreshDegradedViews();
   if(!programmeReady)await finishProgrammeUi();
   else if(changed){refreshGenreOptions();updateFacetOptions();updateSourceInfo();renderPreservingScroll();if(filmScreen)renderFilmShell();}
-  else{updateSourceInfo();if(recovered)refreshDegradedViews();}
+  else updateSourceInfo();
   renderFinds();
   return true;
  }catch(error){
