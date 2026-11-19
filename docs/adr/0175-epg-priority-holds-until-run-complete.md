@@ -1,9 +1,9 @@
 # ADR 0175: The EPG-priority Discovery pause stays closed until the EPG run is durably `stage=complete`
 
-**Status:** Proposed  
-**Original decision date:** unknown (awaiting owner decision)  
+**Status:** Accepted  
+**Original decision date:** 2026-11-19  
 **Recorded at:** 2026-11-19  
-**Approval source:** owner design review of [PR 789](https://github.com/vladimino/iptv-watchlist/pull/789) (19 November 2026, review 5980875662): Option A approved **with one material change** (hold until durable `stage=complete`, not only `finalize`); Option B out of scope. The record stays Proposed until the revised text is re-reviewed. It authorizes no implementation and no production operation.  
+**Approval source:** Product Owner explicitly accepted the revised Option A architecture on 2026-11-19, after confirming that the original architectural choice and product trade-off had not changed. Acceptance is recorded in [AIR-539](https://trello.com/c/2eYDrWBS) following the [independent exact-HEAD technical PASS on PR #789](https://github.com/vladimino/iptv-watchlist/pull/789#pullrequestreview-5981151709). New Discovery admissions remain refused until durable EPG `stage=complete`; the shared lease is retained; Option B is not chosen. The detailed D1 certificate/fence, consecutive-run reset, and separate certify-only recovery formalize safe implementation, not a different option. This ADR approval authorizes design acceptance and the offline implementation scope of AIR-539, **not** a D1 migration apply or other production operation.  
 **Related work:** [AIR-539](https://trello.com/c/2eYDrWBS); incident context [AIR-532](https://trello.com/c/mGPwomMX), [AIR-420](https://trello.com/c/J0dit94i); parallel optimization [AIR-533](https://trello.com/c/FyU4Qqud); [ADR 0135](0135-epg-priority-discovery-pause.md); [ADR 0092](0092-resumable-bounded-ledger-seal.md) (resumable seal); [ADR 0144](0144-epg-seal-successor-workflow-instance.md) and [ADR 0145](0145-epg-seal-publication-only-staging.md) (seal handoff and staging); [ADR 0173](0173-watchlist-retention-observed-at-is-state-start.md); [seal lease analysis 18 Nov](../evidence/orchestration/air-532-seal-lease-analysis-2026-11-18.md)  
 **Supersedes:** None. If accepted it **qualifies** decision 3 of ADR 0135 ("how long it lasts"): the pause no longer lifts in the pointer batch. ADR 0135 stays Accepted for everything else.  
 **Superseded by:** None
@@ -29,9 +29,9 @@ Confirmed from code on `main` (99ecc3a):
 12. In `sealQueueStep` the real order is: `queue` unit, `prepareEpgCompletion`, **`saveJSON sync.json` with `stage=complete`**, then `flushEpgEvent`, `flushWatchlistEvent`, the removal-handover flush, and deletion of the sealed payload keys. A completed-EPG event is never emitted before the durable complete save, and a failed flush is replayed later through the `owed` journal in `drive`. Those post-save flushes write R2 events and do not take `discovery_lease`; only `sealStep` does.
 13. `EpgOrchestration.ensure()` runs `reconcileMirrors`, `ensureWorkflow` and the producer chain. `ensureWorkflow` returns `not_due` when nothing is due and no claim is pending, and `complete` when `control.doneAt` is set; `act` returns `complete` on `control.doneAt` and `day_rolled` for a rolled day without a pending claim, all before a step lease. `drive()` accepts a `stage=complete` run through `completion()` (receipt plus D1 pointer). Today there is **no** certificate repair, and none of these gates can reach one.
 
-## Decision (proposed)
+## Decision
 
-**Option A, as approved by the owner with one change: keep refusing *new* Discovery admission until the EPG run is durably `stage=complete`.** Option B is rejected for this delivery.
+**Chosen Option A: keep refusing *new* Discovery admission until the EPG run is durably `stage=complete`.** Option B is not chosen for this delivery.
 
 1. **Release point.** The pause for the owed day lifts only after the run that published the pointer is certified complete. Complete means: `ledger`/`catalog`/`publish`/`finalize` units reached a terminal outcome, `queue` was **attempted**, and `sync.json` holds `stage=complete`. Success of `refreshPredictionQueue` is **not** required: its errors stay best-effort and recorded in `enrichmentQueueError`; the run still finishes and the pause lifts. `mirrors` and `copy` stay repairable by the hourly `ensure` and do not gate completion beyond today's `degraded` marker.
 2. **What the certificate means.** It certifies **protocol completion of this run**: no further seal step will take the lease for it. It does **not** certify that watchlist retention was applied (decision of context 9), and it is **not** the owner's end-to-end SLA clock. The run records `scanOutcome` (`applied`, `skipped_incomplete_watchlist`, `skipped_no_observation`, `facts_only`) next to the certificate; the SLA is read from `completedAt`, the per-unit outcomes and `scanOutcome`, never from the pause release or from `publishedAt`. A skipped scan is visible, not silently counted as a complete EPG-and-watchlist update.
@@ -99,11 +99,11 @@ Nothing is activated by this record. The implementation card carries the migrati
 
 ## Evidence
 
-- **Original decision:** owner review of [PR 789](https://github.com/vladimino/iptv-watchlist/pull/789), 19 Nov 2026; scope of [AIR-539](https://trello.com/c/2eYDrWBS).
+- **Original decision:** owner approval recorded in [AIR-539](https://trello.com/c/2eYDrWBS), 19 Nov 2026, following [PR #789 independent technical PASS](https://github.com/vladimino/iptv-watchlist/pull/789#pullrequestreview-5981151709); the initial choice of Option A and its `stage=complete` hold point were not changed.
 - **Implementation:** none.
 - **Dated verification:** code reading of `main` at 99ecc3a on 2026-11-19 (`src/worker.js` `sealStep`, `sealPublishStep`, `sealFinalizeStep`, `sealQueueStep`, `persistScan`, `epgStepGuard`; `src/published-epg.js` `commitPublish`, `commitReplace`, `PAUSE_CLEAR_SQL`; `src/discovery-authority.js` `PRIORITY_*`, `acquireLease`; `src/domain/epg-priority-pause.js`). The 19 Nov timings are quoted from the card, not re-measured.
 - **Uncertainty:** lease hold per step and collision count (not logged); how much of the 95m11s is lease wait; the exact bind shape of the lease body (`modeRevision` nullability, ISO string comparison) which the implementation card confirms against `assertStep`; how the Mermaid flows change (updated with the implementation, with rendered QA).
 
 ## Follow-ups
 
-The implementation card, the migration GO and the natural-run verification are created only after the owner accepts this record. Acceptance also updates `docs/reference/orchestration-reliability.md`, `docs/runbooks/monitoring.md`, `docs/runbooks/deployment.md` and the three architecture pages.
+This accepted ADR satisfies the architecture gate for the existing [AIR-539](https://trello.com/c/2eYDrWBS). Its code implementation, deterministic race/replay tests, and relevant updates to `docs/reference/orchestration-reliability.md`, `docs/runbooks/monitoring.md`, `docs/runbooks/deployment.md` and the three architecture pages are follow-up work under AIR-539. The D1 migration apply requires a **separate explicit owner GO**. Production acceptance remains contingent on safe verification of a natural EPG run after implementation and deployment.
