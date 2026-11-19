@@ -223,6 +223,16 @@ mode='ok';
  {const w=await make();
   w.state.mutate=()=>w.edit(q=>{w.rankHot(q,'tmdb_8');q.retries={...(q.retries||{}),tmdb_3:{attempts:99}};});
   const r=await w.start();assert.equal(r.status,409,'a displaced film that left the retry budget is not a re-rank: '+JSON.stringify(r.data).slice(0,200));}
+ // Second-round case 1: a rank-only revision that leaves the delivered manifest byte-identical (films outside the first three re-ranked). The slot is kept on the same manifest.
+ {const w=await make();const before=(await w.read()).queueGeneration,dry=await w.e.api('batch/start',{...{scope:'watchlist_all',mode:'queued',trigger:'manual',manifestSize:3,capacity:{remainingPercent:100}},dryRun:true});
+  w.state.calls=0;w.state.mutate=()=>w.edit(q=>{q.coldPending=[...q.coldPending.slice(0,3),...q.coldPending.slice(3).reverse()];});
+  const r=await w.start();assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'running');
+  assert.notEqual((await w.read()).queueGeneration,before,'the revision moved');assert.deepEqual(ids(r),['tmdb_1:cold','tmdb_2:cold','tmdb_3:cold']);assert.equal(r.data.manifestHash,dry.data.manifestHash,'the manifest is byte-identical to the baseline');}
+ // Second-round case 2: the migration share (`queue.work`) decides which films are selected. A concurrent change of it is not a re-rank, even with no priority, lane or retry change.
+ {const w=await make();const runs=()=>sql(w.e.file,'SELECT count(*) AS n FROM prediction_run')[0].n,leaseBefore=JSON.stringify(sql(w.e.file,"SELECT token FROM prediction_lease WHERE name='runner'"));
+  w.state.mutate=()=>w.edit(q=>{q.work={...(q.work||{}),tmdb_1:{migration:true},tmdb_2:{migration:true},tmdb_3:{migration:true}};});
+  const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');assert.equal(runs(),0,'no run was persisted on the refusal');
+  assert.notEqual(r.data.status,'running');void leaseBefore;}
  // The reviewer's second case: the signature is still due at the lease AND a selected film's retry record changed. priorityDue must not excuse the non-priority change.
  {const w=await make();w.state.sig=['s0','s1'];w.state.mutate=()=>w.edit(q=>{q.retries={...(q.retries||{}),tmdb_2:{attempts:1}};});
   const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');}

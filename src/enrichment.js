@@ -2572,27 +2572,32 @@ async function batchIdle(env,body,pre){
  return result;
 }
 // What a refusal of the manifest never does: it creates no run, Event, diagnostics row or `latest-run`, and it does not pass through the start's stop recorder.
-// AIR-542: the proof that a queue revision/manifest change between the baseline preflight and the post-lease preflight is a re-rank and nothing else. Returns null when proven, else the
-// refusal cause. Proven means: same programme generation, profile and contract; every film in both manifests has the same plan, metadata and fingerprint (only its lane or place may
-// differ); the films the new selection no longer holds are still pending, ready for retry and not staged elsewhere, and neither left the admission nor became current (they were displaced
-// by higher-ranked films); the retry records of the whole queue are unchanged; a revision change that leaves the manifest identical is never a re-rank. `again` was read under the owned lease, so it stays the manifest that is delivered.
+// AIR-542: the proof that a queue revision or manifest change between the baseline preflight and the post-lease preflight is a re-rank and nothing else. Returns null when proven, else the
+// refusal cause. The proof compares the queue itself, not the manifest hash: every field outside PRIORITY_QUEUE_FIELDS (work and migration share, retries, last batch, profile, contract,
+// compatibility versions, recovery revision, shape) must be equal, and so must the set of queued films, so a change that decides WHICH films may be selected is never a re-rank. A rank-only
+// revision may leave the delivered manifest byte-identical (films outside the first `manifestSize` re-ranked): that is proven the same way and the run continues. When the manifest differs the
+// films present in both must keep plan, metadata and fingerprint, and a film the new selection dropped must not have been skipped as no longer admitted or current, nor be staged elsewhere.
+// `again` was read under the owned lease, so it stays the manifest that is delivered.
+const PRIORITY_QUEUE_FIELDS=new Set(['hotCount','coldCount','coldWithoutPrediction','hotPredicted','priority','priorityBasis','priorityAsOf','priorityCount','priorityNextChangeAt','showsSignature','urgentCount','coldRemaining','hotPending','coldPending','refreshedAt','trigger','metrics','discovery','compatibility']);
 async function priorityOnlyRebaseCause(env,pre,again){
  if(again.report?.runId!==pre.report?.runId||again.queue?.programmeRunId!==pre.queue?.programmeRunId)return 'programme';
- // A queue write that left the delivered manifest byte-identical is not a re-rank (it touched something outside it): the existing revision fence stands.
- if(again.manifest.hash===pre.manifest.hash)return 'revision';
  const a=pre.manifest.body,b=again.manifest.body;
  if(a.profile?.hash!==b.profile?.hash||JSON.stringify(a.contract)!==JSON.stringify(b.contract))return 'contract';
+ const rest=queue=>{const out={};for(const key of Object.keys(queue).sort())if(!PRIORITY_QUEUE_FIELDS.has(key))out[key]=queue[key];return JSON.stringify(out);};
+ const members=queue=>JSON.stringify([...new Set([...(queue.pending||[]),...(queue.hotPending||[]),...(queue.coldPending||[])])].sort());
+ if(rest(pre.queue)!==rest(again.queue)||members(pre.queue)!==members(again.queue))return 'queue';
+ if(again.manifest.hash===pre.manifest.hash)return null;
+ // The queue's selection inputs are the same, so a different manifest under an unchanged revision is a change of film state, not of rank.
+ if(again.revision===pre.revision)return 'manifest';
  const content=f=>JSON.stringify([f.plan,f.modelMetadata,f.fingerprint?.fingerprintHash||null]);
  const oldFilms=new Map(a.films.map(f=>[f.filmId,f])),newFilms=new Map(b.films.map(f=>[f.filmId,f]));
  for(const [id,f] of newFilms)if(oldFilms.has(id)&&content(oldFilms.get(id))!==content(f))return 'manifest';
  const dropped=[...oldFilms.keys()].filter(id=>!newFilms.has(id));
  if(dropped.length){
-  const queued=new Set([...(again.queue.pending||[]),...(again.queue.hotPending||[]),...(again.queue.coldPending||[])]);
   const gone=new Set([...again.selection.skipped.missingAdmission,...again.selection.skipped.alreadyCurrent]);
   const staged=await loadJSON(env,BATCH_STAGE_KEY),stagedIds=new Set((Array.isArray(staged?.items)?staged.items:[]).map(item=>item.filmId));
-  for(const id of dropped)if(!queued.has(id)||gone.has(id)||stagedIds.has(id)||retryBudgetExhausted(again.queue.retries?.[id]))return 'manifest';
+  for(const id of dropped)if(gone.has(id)||stagedIds.has(id))return 'manifest';
  }
- if(JSON.stringify(pre.queue.retries??{})!==JSON.stringify(again.queue.retries??{}))return 'manifest';
  return null;
 }
 // What a start did, for the step-timing line: counters only (no ids, keys or payloads). `tally` is one request's own object.
@@ -2665,7 +2670,7 @@ async function batchStartWork(env,body,requestId,tally){
   // difference keep the refusal. Priority drift on its own (the manifest and revision unchanged) just continues. A proven re-rank rebases once onto `again`, taken under the lease.
   const moved=again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash;
   const unsafe=again.stale?'stale':again.priorityCause==='shows_signature_unreadable'?'priority':moved?await priorityOnlyRebaseCause(env,pre,again):null;
-  if(unsafe){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{cause:unsafe==='manifest'&&again.revision!==pre.revision?'revision':unsafe,...(queueRefreshed?{queueRefreshed:true}:{})});}
+  if(unsafe){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{cause:unsafe==='queue'||(unsafe==='manifest'&&again.revision!==pre.revision)?'revision':unsafe,...(queueRefreshed?{queueRefreshed:true}:{})});}
   if(again.priorityDue)tally.priorityLagAccepted=1;
   if(moved)tally.priorityRebased=1;
   const exact=await buildBatchManifest(env,{profile:again.profile,items:again.selection.items,runId,lease});
