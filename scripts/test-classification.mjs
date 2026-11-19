@@ -1004,6 +1004,21 @@ export const FILES={
  "migration-pattern-limit.mjs": {
   "suite": "core"
  },
+ "mirror-fallback-client.mjs": {
+  "suite": "core"
+ },
+ "mirror-fallback-routes.mjs": {
+  "suite": "core"
+ },
+ "mirror-fault-classifier.mjs": {
+  "suite": "core"
+ },
+ "mirror-read-write-fence.mjs": {
+  "suite": "core"
+ },
+ "mirror-read.mjs": {
+  "suite": "core"
+ },
  "monitor-policy.mjs": {
   "suite": "core"
  },

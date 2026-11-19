@@ -59,6 +59,10 @@ AIR-374 P4b (slice 2) gates `GET /api/programme` and `GET /api/watchlist` by the
 
 `GET /api/catalog/available` and `GET /api/enrichment/view` remain query-only under a live Discovery Workflow: they do not write D1 or R2 when `routeRead` takes a catalog snapshot, and a `503` with `Retry-After` does not schedule work. The browser may repeat that GET once; the second request is still a GET. The compiled ratings seed on `GET /api/enrichment/view` and catalog reads is now a pure in-memory overlay; an explicit stored `actualRating: null` wins over the seed. With the ratings marker open, that GET also replaces personal fields from `ratings_view` in keyset pages; those statements are SELECTs. The published-generation pin is query-only: GET never repairs R2 compatibility mirrors ([ADR 0108](../../adr/0108-epg-mirror-reconciliation-writer.md)). `GET /api/events` reads the journal page and nothing else: delivery of an undelivered run event belongs to `prediction_batch_start` ([events](../domain/events.md), [AIR-416](https://trello.com/c/f7FX4Elk)).
 
+## Degraded reads (ADR 0177)
+
+`GET /api/programme`, `GET /api/watchlist` and `GET /api/catalog/film/<tmdbId>` may answer from the R2 compatibility mirrors after a typed temporary authoritative failure ([contract](degraded-reads.md)). That path performs R2 GETs (and one bounded `list` of `epg/generations/`) and **no write of any kind**: no R2 PUT or delete, no D1 statement, no reconcile. It is not a new writing read and adds no entry to the baseline below; `tests/mirror-fallback-routes.mjs` asserts the zero writes and `tests/mirror-read-write-fence.mjs` that no write route can reach the mirror reader.
+
 ## Changing a read route or a writer
 
 - **A new read route, page or MCP tool:** it is found by the audit. Register a prefix in `PREFIX_ROUTES` (one GET sample per distinct read), a tool in `MCP_READ_TOOLS` or `MCP_WRITE_TOOLS`; it must have no effect.

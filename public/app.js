@@ -259,6 +259,46 @@ function filmPath(film){return filmHref(filmPermalinkId(film));}
 // conflict are cached too, a transient failure is not (the next render asks again). A cached film on another generation than the loaded
 // programme is refreshed in the background while the old one stays on screen, so the page never blinks "not found" and never mixes two runs.
 const catalogFilmReads=new Map(),catalogPageCache=new WeakMap();
+// AIR-541 (ADR 0177): data that came from a saved copy (an R2 compatibility mirror) rather than the authoritative D1. Every degraded answer is keyed by what it replaced ('programme' or 'film:<tmdb>').
+// While any is held the page is read-only: controls are disabled, no write is sent, and a write that slipped through carries `X-Data-Origin: mirror` so the server refuses it even after D1 recovered.
+// It lives only in memory: nothing is persisted, and a reload starts authoritative-first.
+const degradedSources=new Map();
+function isDegraded(){return degradedSources.size>0;}
+function writeHeaders(headers={}){return isDegraded()?{...headers,'X-Data-Origin':'mirror'}:headers;}
+const DEGRADED_WRITE_TEXT='Недоступно в сохранённой копии';
+function degradedStamp(){
+ const times=[...degradedSources.values()].map(item=>Date.parse(item.asOf)).filter(Number.isFinite).sort((a,b)=>a-b);
+ return times.length?madridStamp(times[0]):null;
+}
+function renderDegradedNote(){
+ const stamp=degradedStamp(),text=isDegraded()?`Сохранённая копия${stamp?` · обновлена ${stamp}`:''}`:'';
+ const detail=isDegraded()?'Данные из резервной копии, изменения отключены. Расписание показано как было сохранено; доступность сейчас не проверена.':'';
+ for(const node of [$('#degraded-note'),$('#film-degraded-note')]){if(!node)continue;node.hidden=!text;node.textContent=text;node.title=detail;if(text)node.setAttribute('aria-label',text+'. '+detail);else node.removeAttribute('aria-label');}
+}
+// `kind` is 'mirror' (the data IS a saved copy from R2) or 'lkg' (the data is the last authoritative result held in memory, and its refresh failed). Both are read-only; only a
+// 'mirror' copy is old enough that no claim about the PRESENT may be derived from its schedule (ADR 0177 decision 5).
+function noteDegraded(key,body,kind='mirror'){
+ const before=degradedSignature();
+ degradedSources.set(key,{kind,asOf:typeof body?.asOf==='string'?body.asOf:null,runId:body?.runId??null,reason:typeof body?.reason==='string'?body.reason:null,joined:body?.joined??null});
+ renderDegradedNote();
+ return degradedSignature()!==before;
+}
+function degradedSignature(){return [...degradedSources.entries()].map(([key,item])=>key+':'+item.kind).sort().join('|');}
+// Scoped to the data being rendered: the PROGRAMME is a saved copy (every programme film), or one FILM object came from a saved copy (`mirrorCopy`). A mirror-backed film that is open
+// does not make the separately valid D1 programme lose its availability (decision A: separately valid authoritative data stays visible); only the write fence is global.
+function mirrorSnapshotShown(){return degradedSources.get('programme')?.kind==='mirror';}
+function savedCopyFilm(film){return mirrorSnapshotShown()||film?.mirrorCopy===true;}
+// The saved schedule of a film, as stored: historical, never classified as archive, on air or soon.
+function savedShows(film){return (film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null);}
+const stampIso=ms=>Number.isFinite(ms)?new Date(ms).toISOString():null;
+let programmeLoadedAt=null;
+function refreshDegradedViews(){if(programmeReady&&typeof renderPreservingScroll==='function')renderPreservingScroll();if(filmScreen)renderFilmShell();}
+// A successful AUTHORITATIVE read of the same thing ends that degradation. The normal source and the write actions come back only through such a read.
+function clearDegraded(key){
+ if(!degradedSources.delete(key))return false;
+ renderDegradedNote();
+ return true;
+}
 function catalogPageFilm(entry){
  let page=catalogPageCache.get(entry);
  if(!page){page={...entry,catalogOnly:true,catalogRoute:true,genres:Array.isArray(entry.genres)?entry.genres:[],directors:entry.directors||[],actors:entry.actors||[],shows:Array.isArray(entry.shows)?entry.shows:[]};catalogPageCache.set(entry,page);}
@@ -274,7 +314,11 @@ async function ensureCatalogFilm(tmdb,{refresh=false}={}){
   const response=await fetch('/api/catalog/film/'+encodeURIComponent(tmdb),{headers:{Accept:'application/json'}});
   let body=null;try{body=await response.json();}catch{}
   const status=typeof body?.status==='string'?body.status:'';
-  if(response.ok&&status==='found'&&body.film&&String(body.film.tmdbId)===tmdb&&body.film.canonicalIdentity==='tmdb:'+tmdb)next={state:'found',film:body.film,programmeRunId:body.programmeRunId||null};
+  if(response.ok&&status==='found'&&body.film&&String(body.film.tmdbId)===tmdb&&body.film.canonicalIdentity==='tmdb:'+tmdb){
+   next={state:'found',film:body.source==='mirror'&&body.readOnly===true?{...body.film,mirrorCopy:true}:body.film,programmeRunId:body.programmeRunId||null,at:Date.now()};
+   if(body.source==='mirror'&&body.readOnly===true){next.mirror=true;noteDegraded('film:'+tmdb,body,'mirror');}
+   else if(clearDegraded('film:'+tmdb)&&programmeReady&&typeof renderPreservingScroll==='function')renderPreservingScroll();
+  }
   else if(response.status===404&&status==='absent')next={state:'absent'};
   else if(response.status===410&&status==='retired')next={state:'retired'};
   else if(response.status===409&&status==='conflict')next={state:'conflict'};
@@ -285,7 +329,11 @@ async function ensureCatalogFilm(tmdb,{refresh=false}={}){
  // A failed refresh keeps the film already shown.
  const previous=known?.state==='found'?known:null;
  if(next.state==='unavailable'||next.state==='error'){
-  if(previous)catalogFilmReads.set(tmdb,{...previous,refreshing:false,token:null,askedRun});
+  if(previous){
+   catalogFilmReads.set(tmdb,{...previous,refreshing:false,token:null,askedRun});
+   // The film stays on screen (last known good) but is read-only until an authoritative read of it succeeds.
+   if(!degradedSources.has('film:'+tmdb)&&noteDegraded('film:'+tmdb,{asOf:stampIso(previous.at),reason:'refresh_failed'},'lkg')&&programmeReady&&typeof renderPreservingScroll==='function')renderPreservingScroll();
+  }
   else catalogFilmReads.set(tmdb,{state:next.state,token:null,transient:true,at:Date.now()});
  }else catalogFilmReads.set(tmdb,{...next,token:null,askedRun});
  if(filmScreen&&routeTmdb(filmScreen)===tmdb)renderFilmShell();
@@ -309,6 +357,7 @@ function resolveFilm(routeId){
   const run=report?.runId??null;
   // Asked once per loaded generation: an answer pinned to another run than the loaded programme is not asked for again until the programme moves.
   if(run&&cached.programmeRunId&&cached.programmeRunId!==run&&cached.askedRun!==run&&!cached.refreshing&&settled)ensureCatalogFilm(tmdb,{refresh:true});
+  if(cached.mirror&&!cached.refreshing&&settled&&Date.now()-(cached.at||0)>15000)ensureCatalogFilm(tmdb,{refresh:true});
   return {film:catalogPageFilm(cached.film),source:'catalog',status:'ready'};
  }
  if(cached?.transient){if(settled&&Date.now()-cached.at>15000)ensureCatalogFilm(tmdb);return {film:null,source:null,status:cached.state};}
@@ -355,7 +404,7 @@ const FILM_STATUS_TEXT={
  absent:['Фильм не найден','В каталоге нет проверенного фильма с этим идентификатором TMDB.'],
  retired:['Запись каталога снята','Эта запись каталога заменена и больше не действует.'],
  conflict:['Идентичность фильма не подтверждена','Для этого идентификатора в данных есть конфликт, поэтому фильм не показан.'],
- unavailable:['Каталог сейчас недоступен','Не удалось прочитать каталог. Обнови страницу чуть позже.'],
+ unavailable:['Сведения пока не загружаются','Данные об этом фильме сейчас не удалось получить. Это не значит, что фильма нет. Повторим попытку автоматически.'],
  error:['Не удалось загрузить фильм','Каталог ответил ошибкой. Обнови страницу чуть позже.']
 };
 function renderFilmShell(){
@@ -369,6 +418,9 @@ function renderFilmShell(){
  if(identity)identity.textContent=filmScreen||'';
  if(status)status.textContent=film?(film.catalogOnly?'Только в каталоге':''):id?text[1]:'';
  if(!film&&id&&resolved.status!=='loading'&&(filmCompareId||filmCompareById.has(String(id)))){filmCompareId=null;filmCompareById.delete(String(id));filmCompareFilm=null;const input=$('#film-compare-input');if(input)input.value='';}
+ const retry=$('#film-screen-retry');
+ if(retry)retry.hidden=!(!film&&id&&(resolved.status==='unavailable'||resolved.status==='error'));
+ renderDegradedNote();
  fillFilmPage(film);
  armSoonTick();
 }
@@ -809,6 +861,8 @@ function eligible(film) { const parsed=searchTokens(state.query); const matched=
 // repeat on the chosen channel is the only show there. `archive` holds the ready recordings, `ahead` the show on air and the shows that start inside the next 24 hours; the
 // film state comes only from `filmAvail`. `channels` overrides the selection (an empty or absent set means every channel).
 function filmLifecycle(film,now=viewingClock(),channels=state.channels){
+ // ADR 0177 decision 5 (owner A): a saved copy keeps its historical schedule, but no state about the PRESENT (archive, on air, soon, last chance) is derived from it.
+ if(film&&savedCopyFilm(film))return {avail:null,archive:[],ahead:[],saved:savedShows(film)};
  const lib=availabilityLib();if(!lib||!film)return {avail:null,archive:[],ahead:[]};
  const model=viewingWindow(now),shows=findsWindowShows(film,now,channels?.size?{channels}:null).filter(show=>inEnvelope(model,show.start)),avail=filmAvail(film,now,shows),archive=[],ahead=[];
  for(const show of shows){const info=lib.showPhase({start:show.start,end:show.end},now,{runtimeMinutes:film.runtime}),phase=info.phase;if(phase==='archive')archive.push(show);else if(phase==='on_air'||phase==='future')ahead.push({...show,effectiveEnd:info.end});}
@@ -818,6 +872,7 @@ function filmLifecycle(film,now=viewingClock(),channels=state.channels){
 // its repeat in the «Все показы» list, but a repeat never moves it into «Скоро».
 function periodShows(film,period=state.period){
  const life=filmLifecycle(film),kind=life.avail?.state,p=normalizePeriod(period)||'all';
+ if(life.saved)return p==='all'?life.saved:[];
  if(kind==='available')return p==='soon'?[]:p==='archive'?life.archive:[...life.archive,...life.ahead];
  if(kind==='soon')return p==='archive'?[]:life.ahead;
  return [];
@@ -858,17 +913,17 @@ function letterboxdLink(film,options){const target=letterboxdTarget(film,options
 function channelControl(show){const hint=show.basis==='title_duration'?`<span class="match-hint" title="${escapeHTML(matchHintText(show.matchReason))}" aria-label="${escapeHTML(matchHintText(show.matchReason))}"> ≈</span>`:'';const name=typeof show.channel==='string'?show.channel:'';if(!name.trim())return `<span class="channel">${hint}</span>`;return `<span class="channel"><button type="button" class="channel-filter" data-channel="${escapeHTML(name)}" title="Добавить канал «${escapeHTML(name)}» в фильтр" aria-label="Добавить канал «${escapeHTML(name)}» в фильтр">${escapeHTML(name)}</button>${hint}</span>`;}
 function row(show){const start=showStart(show),date=new Date(start),time=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',hour:'2-digit',minute:'2-digit'}).format(date);return `<div class="show-row">${channelControl(show)}<time class="show-time" datetime="${date.toISOString()}">${madridStamp(start,{day:'numeric',month:'short'})}<b>${time}</b></time></div>`;}
 function compareShows(type){return (a,b)=>{const rank=(state.channels.has(a.channel)?0:1)-(state.channels.has(b.channel)?0:1);if(rank)return rank;return type==='archive'?showStart(b)-showStart(a):showStart(a)-showStart(b);};}
-function group(film,type){const life=filmLifecycle(film),shows=[...(type==='archive'?life.archive:life.ahead)].sort(compareShows(type));if(!shows.length)return '';return `<section class="show-group ${type}"><div class="group-title"><span>${type==='archive'?'АРХИВ':'ДАЛЬШЕ'}</span><span class="show-count">${shows.length} ${showWord(shows.length)}</span></div>${row(shows[0])}${shows.length>1?`<details class="more"><summary>Ещё ${shows.length-1} ${showWord(shows.length-1)}</summary>${shows.slice(1).map(row).join('')}</details>`:''}</section>`;}
+function group(film,type){const life=filmLifecycle(film),saved=!!life.saved;if(saved&&type==='archive')return '';const shows=[...(saved?life.saved:type==='archive'?life.archive:life.ahead)].sort(saved?(a,b)=>showStart(a)-showStart(b):compareShows(type));if(!shows.length)return '';return `<section class="show-group ${saved?'saved':type}"><div class="group-title"><span>${saved?'СОХРАНЁННОЕ РАСПИСАНИЕ':type==='archive'?'АРХИВ':'ДАЛЬШЕ'}</span><span class="show-count">${shows.length} ${showWord(shows.length)}</span></div>${row(shows[0])}${shows.length>1?`<details class="more"><summary>Ещё ${shows.length-1} ${showWord(shows.length-1)}</summary>${shows.slice(1).map(row).join('')}</details>`:''}</section>`;}
 function filmSupportsStarted(film){return !!(film&&!film.catalogOnly&&!film.catalogRoute);}
 function startedButton(film,labeled=false){
  const id=String(film.id),on=startedIds.has(id),busy=savingStarted.has(id);
  const caption=on?'Просмотр начат':'Начал просмотр';
- return `<div class="started-action"><button type="button" class="started-button" data-started-id="${escapeHTML(id)}" aria-pressed="${on}" aria-busy="${busy}" aria-label="${labeled?caption:on?'Снять отметку «Начал смотреть»':'Начал смотреть'}: ${escapeHTML(film.title)}" title="${labeled?caption:on?'Снять отметку «Начал смотреть»':'Отметить начатый просмотр'}" ${!startedReady||busy?'disabled':''}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>${labeled?`<span>${caption}</span>`:''}</button></div>`;
+ return `<div class="started-action"><button type="button" class="started-button" data-started-id="${escapeHTML(id)}" aria-pressed="${on}" aria-busy="${busy}" aria-label="${labeled?caption:on?'Снять отметку «Начал смотреть»':'Начал смотреть'}: ${escapeHTML(film.title)}" title="${labeled?caption:on?'Снять отметку «Начал смотреть»':'Отметить начатый просмотр'}" ${!startedReady||busy||isDegraded()?'disabled':''}${isDegraded()?` aria-disabled="true"`:''}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>${labeled?`<span>${caption}</span>`:''}</button></div>`;
 }
 function progressError(message){const text=$('#progress-error-text'),box=$('#progress-error');if(text)text.textContent=message;if(box)box.hidden=!message;const film=$('#film-screen-progress');if(film){film.textContent=message;film.hidden=!message;}}
 async function loadStarted(options={}){if(startedLoading||savingStarted.size)return 'busy';startedLoading=true;try{const r=await fetch('/api/started');if(!r.ok)throw new Error();const data=await r.json();if(!Array.isArray(data.ids))throw new Error();const next=new Set(data.ids.map(String)),wasReady=startedReady,same=next.size===startedIds.size&&[...next].every(id=>startedIds.has(id));startedIds=next;startedReady=true;$('#started-only').disabled=false;progressError('');if(!same||!wasReady)renderPreservingScroll();return true;}catch{if(!options.quiet)progressError('Не удалось загрузить отметки просмотра. Повтори попытку.');return false;}finally{startedLoading=false;}}
 function refreshFilmStarted(id){const film=currentFilm(),actions=$('#film-screen-actions');if(!filmScreen||!film||!filmSupportsStarted(film)||String(film.id)!==String(id))return;if(!film||!actions)return;actions.innerHTML=`${letterboxdLink(film)}${startedButton(film,true)}`;const button=document.querySelector(`#film-screen [data-started-id="${String(id).replace(/"/g,'')}"]`);button?.focus?.({preventScroll:true});}
-async function toggleStarted(id){if(!startedReady||startedLoading||savingStarted.has(id))return;const film=(films||[]).find(item=>String(item.id)===String(id));if(film&&!filmSupportsStarted(film))return;const next=!startedIds.has(id);savingStarted.add(id);progressError('');render();refreshFilmStarted(id);try{const r=await fetch('/api/started',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,started:next})});if(!r.ok)throw new Error();const data=await r.json();if(data.id!==id||data.started!==next)throw new Error();next?startedIds.add(id):startedIds.delete(id);loadEvents();}catch{progressError('Не удалось сохранить отметку. Нажми на глаз ещё раз, чтобы повторить.');}finally{savingStarted.delete(id);render();refreshFilmStarted(id);}}
+async function toggleStarted(id){if(isDegraded()||!startedReady||startedLoading||savingStarted.has(id))return;const film=(films||[]).find(item=>String(item.id)===String(id));if(film&&!filmSupportsStarted(film))return;const next=!startedIds.has(id);savingStarted.add(id);progressError('');render();refreshFilmStarted(id);try{const r=await fetch('/api/started',{method:'POST',headers:writeHeaders({'Content-Type':'application/json'}),body:JSON.stringify({id,started:next})});if(!r.ok)throw new Error();const data=await r.json();if(data.id!==id||data.started!==next)throw new Error();next?startedIds.add(id):startedIds.delete(id);loadEvents();}catch{progressError('Не удалось сохранить отметку. Нажми на глаз ещё раз, чтобы повторить.');}finally{savingStarted.delete(id);render();refreshFilmStarted(id);}}
 function confidenceText(value){return {low:'низкая',medium:'средняя',high:'высокая'}[value]||'';}
 // Optional evidence assessment. Absent on every live DTO today, so the forecast line stays the model
 // field. A present object is rendered from this allowlist only; the page does not compute or fetch it.
@@ -962,6 +1017,11 @@ function filmAvailabilityHead(avail,now,count){
  return `<div class="film-avail-head" data-availability="${avail.state}">${pill}${note}</div>${hint}`;
 }
 function filmAvailability(film){
+ if(savedCopyFilm(film)){
+  // A saved copy: the historical schedule as stored, with no phase, archive deadline or «скоро» claim; current availability is unverified.
+  const saved=savedShows(film).sort((a,b)=>a.start-b.start);
+  return `<section class="film-section film-availability" aria-label="Показы"><h2>Показы</h2><p class="film-hint">Расписание из сохранённой копии, как оно было сохранено. Доступность сейчас не проверена.</p>${saved.length?`<div class="film-show-list">${saved.map(show=>filmShowRow(show,null)).join('')}</div>`:'<p class="film-missing">В сохранённой копии нет показов этого фильма</p>'}</section>`;
+ }
  const now=viewingClock(),shows=availableShows(film,now),avail=filmAvail(film,now,shows),infos=shows.map(show=>filmShowInfo(film,show,now));
  const by=phase=>shows.map((show,i)=>({show,info:infos[i]})).filter(item=>(item.info?.phase||'')===phase);
  const archive=by('archive'),future=by('future'),live=[...by('on_air'),...by('unknown')];
@@ -1234,7 +1294,7 @@ function shortlistAvailabilityText(item){
 const SHORTLIST_EMPTY={available:'Нет подходящих вариантов с готовым архивом, оценкой или прогнозом. Измени фильтры или выбери «Скоро». Границы фильтров сохранены.',soon:'Сейчас нет подходящих вариантов «Скоро»: фильмов без готового архива, которые идут в эфире или начнутся в ближайшие 24 часа, с оценкой или прогнозом. Измени фильтры или выбери «Доступно». Границы фильтров сохранены.'};
 // A period that holds only the other group leaves this one empty by construction: say so instead of a generic empty state.
 const SHORTLIST_CONFLICT={'available:soon':'Период «Скоро» оставил только фильмы без готового архива. Выбери период «Все показы» или «Архив», чтобы увидеть «Доступно».','soon:archive':'Период «Архив» оставил только фильмы с готовым архивом. Выбери период «Все показы» или «Скоро», чтобы увидеть «Скоро».'};
-function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node)return;const mode=normalizeShortlistMode(state.shortlistMode),list=valid?buildShortlist(visible,mode):[];$('#shortlist-cards').innerHTML=list.map(item=>{const f=item.film;return `<article class="shortlist-card" data-shortlist-state="${item.availability.state}"><h3><button type="button" data-shortlist-film="${escapeHTML(f.id)}">${escapeHTML(f.title)}</button>${letterboxdLink(f)}</h3><p class="shortlist-meta">${escapeHTML(f.year||'Год не указан')} · ${Number(f.runtime)>0?Math.round(f.runtime)+' мин':'Длительность неизвестна'}</p><p class="shortlist-score">${item.score.actual?'Твоя оценка':'Прогноз'} <strong>${item.score.rating.toFixed(1)} ★</strong></p><p class="shortlist-availability">${escapeHTML(shortlistAvailabilityText(item))}</p><div class="shortlist-reasons">${item.reasons.map(reason=>`<span>${escapeHTML(reason)}</span>`).join('')}</div></article>`;}).join('');$('#shortlist-empty').hidden=list.length>0;$('#shortlist-empty').textContent=!valid?'Проверь значения фильтров.':!ratingsLoaded?'Загружаем оценки и прогнозы…':SHORTLIST_CONFLICT[mode+':'+normalizePeriod(state.period)]||SHORTLIST_EMPTY[mode];$('#shortlist-caption').textContent='Из твоей выборки · только актуальное окно показов';document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.shortlistMode===mode)));}
+function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node)return;const mode=normalizeShortlistMode(state.shortlistMode),list=valid?buildShortlist(visible,mode):[];$('#shortlist-cards').innerHTML=list.map(item=>{const f=item.film;return `<article class="shortlist-card" data-shortlist-state="${item.availability.state}"><h3><button type="button" data-shortlist-film="${escapeHTML(f.id)}">${escapeHTML(f.title)}</button>${letterboxdLink(f)}</h3><p class="shortlist-meta">${escapeHTML(f.year||'Год не указан')} · ${Number(f.runtime)>0?Math.round(f.runtime)+' мин':'Длительность неизвестна'}</p><p class="shortlist-score">${item.score.actual?'Твоя оценка':'Прогноз'} <strong>${item.score.rating.toFixed(1)} ★</strong></p><p class="shortlist-availability">${escapeHTML(shortlistAvailabilityText(item))}</p><div class="shortlist-reasons">${item.reasons.map(reason=>`<span>${escapeHTML(reason)}</span>`).join('')}</div></article>`;}).join('');$('#shortlist-empty').hidden=list.length>0;$('#shortlist-empty').textContent=!valid?'Проверь значения фильтров.':mirrorSnapshotShown()?'Подборка по доступности недоступна: данные из сохранённой копии, текущая доступность не проверена.':!ratingsLoaded?'Загружаем оценки и прогнозы…':SHORTLIST_CONFLICT[mode+':'+normalizePeriod(state.period)]||SHORTLIST_EMPTY[mode];$('#shortlist-caption').textContent=mirrorSnapshotShown()?'Доступность сейчас не проверена':'Из твоей выборки · только актуальное окно показов';document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.shortlistMode===mode)));}
 
 // Finds: strong catalog films outside the watchlist, read from GET /api/catalog/available. The route decides eligibility; this block only re-checks it against the loaded watchlist and clock, ranks and presents.
 // With a channel filter the section becomes channel-scoped: only shows on a selected channel (OR across channels) inside the selected period of the
@@ -1355,6 +1415,7 @@ const findsMarks=new Map();let findsNotice=null;
 // clock and needs no new request. Without the module (an isolated test context) it answers `null` and every consumer keeps its previous behavior.
 function availabilityLib(){return typeof FilmAvailability==='undefined'?null:FilmAvailability;}
 function filmAvail(film,now=viewingClock(),shows=film?.shows){
+ if(savedCopyFilm(film))return null;
  const lib=availabilityLib();if(!lib||!film)return null;
  const list=(shows||[]).map(show=>({start:showStart(show),end:show?.end})).filter(show=>show.start!==null);
  return lib.filmAvailability(list,now,{runtimeMinutes:film.runtime});
@@ -1763,7 +1824,7 @@ function findsCard(film,now=nowMs(),scope=findsScope(),context=null){
 function findsMarkAction(film){
  if(!findsSource.watchedMarkEnabled||!film.tmdbId)return '';
  const mark=findsMarks.get(String(film.tmdbId)),saving=mark?.state==='saving',title=film.title||film.original||'';
- return `<div class="finds-actions"><button type="button" class="finds-watched" data-finds-watched="${escapeHTML(String(film.tmdbId))}" ${saving?'disabled aria-busy="true"':''} aria-label="Отметить «${escapeHTML(title)}» как просмотренный">${saving?'Сохраняю…':'Смотрел'}</button>${mark?.state==='error'?`<span class="finds-mark-error" role="alert">${escapeHTML(mark.message)}</span>`:''}</div>`;
+ return `<div class="finds-actions"><button type="button" class="finds-watched" data-finds-watched="${escapeHTML(String(film.tmdbId))}" ${saving?'disabled aria-busy="true"':isDegraded()?`disabled aria-disabled="true" title="${DEGRADED_WRITE_TEXT}"`:''} aria-label="Отметить «${escapeHTML(title)}» как просмотренный">${saving?'Сохраняю…':'Смотрел'}</button>${mark?.state==='error'?`<span class="finds-mark-error" role="alert">${escapeHTML(mark.message)}</span>`:''}</div>`;
 }
 function findsNoticeHTML(){
  if(!findsNotice)return '';
@@ -1773,12 +1834,14 @@ function findsNoticeHTML(){
  return `<span>«${escapeHTML(title)}» отмечен как просмотренный.</span> <button type="button" class="finds-undo" data-finds-undo="${escapeHTML(tmdbId)}" ${state==='saving'?'disabled aria-busy="true"':''}>${state==='saving'?'Отменяю…':'Отменить'}</button>`;
 }
 async function postWatchedMark(tmdbId,watched){
- const response=await fetch('/api/catalog/watched',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tmdbId,watched})});
+ if(isDegraded())throw new Error(DEGRADED_WRITE_TEXT);
+ const response=await fetch('/api/catalog/watched',{method:'POST',headers:writeHeaders({'Content-Type':'application/json'}),body:JSON.stringify({tmdbId,watched})});
  const data=await response.json().catch(()=>null);
  if(!response.ok||!data||typeof data.watched!=='boolean')throw new Error(data?.code==='film_not_in_catalog'?'Фильм уже не в каталоге, обновляю «Находки»':'Не удалось сохранить, попробуй ещё раз');
  return data;
 }
 async function markFindWatched(tmdbId){
+ if(isDegraded())return;
  const film=(findsSource.films||[]).find(item=>String(item.tmdbId)===tmdbId);if(!film||findsMarks.get(tmdbId)?.state==='saving')return;
  const title=film.title||film.original||'';
  findsMarks.set(tmdbId,{state:'saving'});renderFinds();
@@ -1793,6 +1856,7 @@ async function markFindWatched(tmdbId){
  if(findsMarks.get(tmdbId)?.state==='marked'||/каталоге/.test(findsMarks.get(tmdbId)?.message||''))loadCatalog();
 }
 async function undoFindWatched(tmdbId){
+ if(isDegraded())return;
  if(!findsNotice||findsNotice.tmdbId!==tmdbId||findsNotice.state==='saving')return;
  findsNotice={...findsNotice,state:'saving'};renderFinds();
  try{
@@ -2071,9 +2135,10 @@ async function loadPresets(){
 }
 async function sendPreset(method,path,body){
  if(presetSaving)return false;
+ if(isDegraded()){presetStatus=DEGRADED_WRITE_TEXT+'.';renderPresets();return false;}
  presetSaving=true;
  try{
-  const headers={'If-Match':presetsEtag},options={method,headers};
+  const headers=writeHeaders({'If-Match':presetsEtag}),options={method,headers};
   if(body){headers['Content-Type']='application/json';options.body=JSON.stringify(body);}
   const response=await fetch(path,options);
   if(response.status===412){await loadPresets();presetStatus='Сценарии изменились на другом устройстве. Список обновлён — повтори действие.';renderPresets();return false;}
@@ -2137,6 +2202,8 @@ function bindControls(){
  document.querySelectorAll('[data-min-prediction]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minPrediction=b.dataset.minPrediction==='any'?null:Number(b.dataset.minPrediction);render();}}));
  document.querySelectorAll('[data-min-probability]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minProbability=b.dataset.minProbability==='any'?null:Number(b.dataset.minProbability);render();}}));
  $('#progress-retry').addEventListener('click',()=>loadStarted());
+ // AIR-541: the neutral film shell's retry asks for the same film again; it never turns "cannot read" into "absent".
+ $('#film-screen-retry')?.addEventListener('click',()=>{const tmdb=filmScreen?routeTmdb(filmScreen):null;if(tmdb)ensureCatalogFilm(tmdb,{refresh:true});else loadProgramme({quiet:true});});
  // A film card is a real link: before a new-tab open or a copy it takes the programme's current state as its return target.
  const refreshFilmLink=event=>{const link=event.target.closest?.('a.film-open');if(!link||!onHomeScreen())return;const id=link.dataset?.filmId;if(id)link.setAttribute('href',ReturnHome.withReturn(filmHref(id),homeTarget()));};
  for(const type of ['pointerdown','focusin','contextmenu'])$('#movies').addEventListener(type,refreshFilmLink);
@@ -2227,8 +2294,27 @@ async function loadProgramme({quiet}={}){
   if(!response.ok)throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
   const data=await response.json();
   if(!data||!Array.isArray(data.films))throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
+  // AIR-541: a saved copy never replaces what is already shown from the authoritative source (the last good result stays in memory); on a cold load it is shown, read-only and labelled.
+  if(data.source==='mirror'&&data.readOnly===true){
+   if(programmeReady&&degradedSources.get('programme')?.kind!=='mirror'){
+    // The authoritative result in memory stays on screen (last known good) but is read-only until an authoritative refresh succeeds.
+    programmeRefreshError=true;
+    const marked=noteDegraded('programme',{asOf:stampIso(programmeLoadedAt),reason:'refresh_failed'},'lkg');
+    updateProgrammeStatus();if(marked)refreshDegradedViews();
+    return false;
+   }
+   noteDegraded('programme',data,'mirror');
+  }
+  const recovered=!(data.source==='mirror'&&data.readOnly===true)&&clearDegraded('programme');
+  if(recovered)loadStarted({quiet:true});
+  if(!(data.source==='mirror'&&data.readOnly===true)){
+   programmeLoadedAt=Date.now();
+   // D1 answers again: films that were shown from a saved copy are asked again, so their read-only state ends by an authoritative read of their own.
+   for(const [key,item] of degradedSources)if(key.startsWith('film:')&&item.kind==='mirror')ensureCatalogFilm(key.slice(5),{refresh:true});
+  }
   programmeRefreshError=false;
   const changed=installProgramme(data);
+  if(recovered&&!changed&&programmeReady)refreshDegradedViews();
   if(!programmeReady)await finishProgrammeUi();
   else if(changed){refreshGenreOptions();updateFacetOptions();updateSourceInfo();renderPreservingScroll();if(filmScreen)renderFilmShell();}
   else updateSourceInfo();
@@ -2236,7 +2322,11 @@ async function loadProgramme({quiet}={}){
   return true;
  }catch(error){
   programmeRefreshError=true;
-  if(programmeReady)updateProgrammeStatus();
+  if(programmeReady){
+   // A failed refresh leaves the last authoritative result readable but read-only until a refresh succeeds (also without a usable saved copy).
+   const marked=!degradedSources.has('programme')&&noteDegraded('programme',{asOf:stampIso(programmeLoadedAt),reason:'refresh_failed'},'lkg');
+   updateProgrammeStatus();if(marked)refreshDegradedViews();
+  }
   if(!programmeReady&&!quiet){showProgrammeUnavailable(error);throw error;}
   return false;
  }finally{programmeLoading=false;}
