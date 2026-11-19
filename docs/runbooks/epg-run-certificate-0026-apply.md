@@ -20,6 +20,10 @@
    **Counterexample that must stop the apply:** the pointer has moved to today's run, no step lease is live, and `sync.json` is `stage=seal` (`finalize` or `queue` incomplete). The old condition ("not between 16:55 and the publication") and an empty lease both pass that state, and applying now would hold Discovery until the repair certifies the run. Apply only after the run is `stage=complete`, or before the pointer moves.
 4. The signed GO names the live git blob of the file on `main`, the production D1 id and the exact statement (one execution).
 
+## Failure semantics of the gate read (owner-accepted)
+
+The certificate column is detected in the shared `sqlite_master` inventory query of `readAuthority`. If that inventory cannot be read, the ordinary `discovery_unavailable` applies to every lease role, including the EPG role, which already needed the same inventory before AIR-539. This is the owner-accepted decision 9 clarification of 2026-11-19; it is not Option B and not an authorization to apply `0026`. A readable priority pause still exempts the EPG role.
+
 ## Readback after the apply
 
 `SELECT version, note FROM schema_contract WHERE id = 1` is 26 with the v26 note; `SELECT finalized_run_id, finalized_at FROM published_epg_authority WHERE id = 1` is `NULL, NULL`; the pointer, `madrid_run_key`, the Discovery pin and the pause row are unchanged.
