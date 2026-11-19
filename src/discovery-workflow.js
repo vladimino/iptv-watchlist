@@ -702,7 +702,7 @@ async function reconcileDiscoveryWorkflow(env,options={}){
  if(scheduled)await closeHourlyDiscoveryReport(env,outcome,options);
  return outcome;
 }
-// AIR-534 scope 3 (ADR 0173, owner decision of 18 November 2026). A second Worker cron, the Discovery-only fast tick, reconciles the Workflow every two minutes. It is a
+// AIR-534 scope 3 (ADR 0174, owner decision of 18 November 2026). A second Worker cron, the Discovery-only fast tick, reconciles the Workflow every two minutes. It is a
 // fallback for a killed, completed or errored instance, a missed or uncertain wake and an overdue recovery; the EPG-publication fast start and the durable
 // step.sleepUntil of a live instance (ADR 0098) stay as they are. The expression avoids minute 0 so it never fires together with the hourly cron.
 // It never closes the hourly report (`scheduled:false`), starts no chunk, calls no TMDB and no EPG, Ratings or Monitor code.
@@ -730,47 +730,72 @@ function fastRecoveryPlan(record,now){
  }
  return {action:'noop',reason:'unknown_phase'};
 }
+// `kind` is `recovery` (a due or dead owner of the published generation) or `handoff` (no record, or the record names an older generation than the published one:
+// a missed EPG-publication start). `incident` is set on every outcome that carries a lateness, a late success included.
 function recoveryObservation(plan,outcome,now){
+ const kind=plan.kind==='handoff'?'handoff':'recovery';
  const dueMs=Date.parse(plan.dueAt||'');
- const overdueMs=Number.isFinite(dueMs)&&now>dueMs?now-dueMs:null;
- if(outcome.started===true)return {state:'started',dueAt:plan.dueAt||null,recoveryDelayMs:overdueMs,reason:null};
- if(outcome.reason==='recovery_waiting')return {state:overdueMs!==null?'overdue':'waiting',dueAt:outcome.dueAt||plan.dueAt||null,recoveryDelayMs:null,overdueMs,reason:null};
- if(DISCOVERY_RECOVERY_REFUSALS.has(outcome.reason))return {state:'refused',dueAt:plan.dueAt||null,recoveryDelayMs:null,overdueMs,reason:outcome.reason,incident:overdueMs!==null&&overdueMs>DISCOVERY_RECOVERY_INCIDENT_MS};
+ const overdueMs=kind==='recovery'&&Number.isFinite(dueMs)&&now>dueMs?now-dueMs:null;
+ const late=overdueMs!==null&&overdueMs>DISCOVERY_RECOVERY_INCIDENT_MS;
+ if(outcome.started===true)return {kind,state:'started',dueAt:plan.dueAt||null,recoveryDelayMs:overdueMs,overdueMs:null,reason:null,incident:late};
+ if(outcome.reason==='recovery_waiting')return {kind,state:overdueMs!==null?'overdue':'waiting',dueAt:outcome.dueAt||plan.dueAt||null,recoveryDelayMs:null,overdueMs,reason:null,incident:late};
+ if(DISCOVERY_RECOVERY_REFUSALS.has(outcome.reason))return {kind,state:'refused',dueAt:plan.dueAt||null,recoveryDelayMs:null,overdueMs,reason:outcome.reason,incident:late};
  return null;
 }
+// A tick that could not decide is a typed failure, never a success and never a silent idle.
+const DISCOVERY_RECOVERY_FAILURES=new Set(['fast_tick_error','instance_status_unknown','published_unreadable','workflow_unavailable']);
+function failedObservation(reason,plan){return {kind:plan?.kind==='handoff'?'handoff':'recovery',state:'failed',dueAt:plan?.dueAt||null,recoveryDelayMs:null,overdueMs:null,reason,incident:false};}
 function logDiscoveryRecoveryTick(outcome){
  try{
   const recovery=outcome?.recovery;
   if(!recovery)return;
-  console.log(JSON.stringify({event:'discovery_recovery_tick',state:recovery.state,reason:typeof recovery.reason==='string'?recovery.reason.slice(0,48):null,dueAt:recovery.dueAt||null,recoveryDelayMs:Number.isFinite(recovery.recoveryDelayMs)?recovery.recoveryDelayMs:null,overdueMs:Number.isFinite(recovery.overdueMs)?recovery.overdueMs:null,incident:recovery.incident===true,programmeRunId:typeof outcome.programmeRunId==='string'?outcome.programmeRunId.slice(0,64):null,instanceId:typeof outcome.instanceId==='string'?outcome.instanceId.slice(0,96):null,series:Number.isInteger(outcome.series)?outcome.series:null}));
+  console.log(JSON.stringify({event:'discovery_recovery_tick',kind:recovery.kind==='handoff'?'handoff':'recovery',state:recovery.state,reason:typeof recovery.reason==='string'?recovery.reason.slice(0,48):null,dueAt:recovery.dueAt||null,recoveryDelayMs:Number.isFinite(recovery.recoveryDelayMs)?recovery.recoveryDelayMs:null,overdueMs:Number.isFinite(recovery.overdueMs)?recovery.overdueMs:null,incident:recovery.incident===true,programmeRunId:typeof outcome.programmeRunId==='string'?outcome.programmeRunId.slice(0,64):null,instanceId:typeof outcome.instanceId==='string'?outcome.instanceId.slice(0,96):null,series:Number.isInteger(outcome.series)?outcome.series:null}));
  }catch{}
 }
-// Idle cost: one read of the Workflow record and, for a record that says an instance is alive, one platform status call. No create, no write, no ledger or
-// authority read happens unless the plan hands the case to the existing reconcile. Never throws.
+// Idle cost: one read of the Workflow record, one read of the published generation pointer and, for a record that says an instance is alive, one platform
+// status call. No create, no write, no authority or ledger read happens unless the case is handed to the existing reconcile. A missing record or a record of an
+// older generation than the published one is the missed-EPG-handoff case and is handed over too, so the fast tick covers what the hourly reconcile covers. Never throws.
 async function reconcileDiscoveryRecovery(env,options={}){
  const now=Number.isFinite(options?.now)?options.now:Date.now();
- let outcome;
+ let outcome,plan={kind:'recovery',dueAt:null};
  try{
-  if(typeof env?.DISCOVERY_WORKFLOW?.create!=='function')return {started:false,reason:'workflow_unavailable',fast:true};
+  if(typeof env?.DISCOVERY_WORKFLOW?.create!=='function')return finishFast({started:false,reason:'workflow_unavailable',fast:true},plan);
   const state=await readWorkflowState(env);
-  const plan=fastRecoveryPlan(state.record,now);
-  if(plan.action==='noop'){
-   outcome={started:false,reason:plan.reason,fast:true,...(plan.dueAt?{dueAt:plan.dueAt}:{}),...(plan.reason==='recovery_waiting'?{recovery:{state:'waiting',dueAt:plan.dueAt||null,recoveryDelayMs:null,overdueMs:null,reason:null}}:{})};
-  }else{
-   let delegate=plan.action==='delegate';
-   if(plan.action==='liveness'){
-    const status=await workflowInstanceStatus(env.DISCOVERY_WORKFLOW,state.record.instanceId);
-    if(status==='complete'||status==='errored'||status==='terminated'||status==='absent')delegate=true;
-    else if(status==='running'||status==='waiting'||status==='queued'||status==='paused')outcome={started:false,reason:'in_progress',fast:true,programmeRunId:state.record.programmeRunId,instanceId:state.record.instanceId,series:state.record.series??0};
-    else outcome={started:false,reason:'instance_status_unknown',fast:true,programmeRunId:state.record.programmeRunId,instanceId:state.record.instanceId};
-   }
-   if(delegate){
-    outcome=await reconcileDiscoveryWorkflowAttempt(env,{scheduled:false,now});
-    const observed=recoveryObservation(plan.action==='liveness'?{dueAt:null}:plan,outcome||{},Date.now());
-    outcome={...outcome,fast:true,...(observed?{recovery:observed}:{})};
+  const record=state.record;
+  let delegate=false;
+  if(!record||!record.instanceId){plan={kind:'handoff',dueAt:null,reason:'no_record'};delegate=true;}
+  else{
+   let published;
+   try{
+    if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.currentGeneration!=='function')throw new Error('no_published_reader');
+    published=(await PublishedEpg.currentGeneration(env))?.programmeRunId||null;
+   }catch{outcome={started:false,reason:'published_unreadable',fast:true,programmeRunId:record.programmeRunId,instanceId:record.instanceId};}
+   if(!outcome){
+    if(published&&published!==record.programmeRunId){plan={kind:'handoff',dueAt:null,reason:'stale_generation'};delegate=true;}
+    else{
+     plan={...fastRecoveryPlan(record,now),kind:'recovery'};
+     delegate=plan.action==='delegate';
+     if(plan.action==='noop'){
+      outcome={started:false,reason:plan.reason,fast:true,...(plan.dueAt?{dueAt:plan.dueAt}:{}),...(plan.reason==='recovery_waiting'?{recovery:{kind:'recovery',state:'waiting',dueAt:plan.dueAt||null,recoveryDelayMs:null,overdueMs:null,reason:null,incident:false}}:{})};
+     }else if(plan.action==='liveness'){
+      const status=await workflowInstanceStatus(env.DISCOVERY_WORKFLOW,record.instanceId);
+      if(status==='complete'||status==='errored'||status==='terminated'||status==='absent')delegate=true;
+      else if(status==='running'||status==='waiting'||status==='queued'||status==='paused')outcome={started:false,reason:'in_progress',fast:true,programmeRunId:record.programmeRunId,instanceId:record.instanceId,series:record.series??0};
+      else outcome={started:false,reason:'instance_status_unknown',fast:true,programmeRunId:record.programmeRunId,instanceId:record.instanceId};
+     }
+    }
    }
   }
+  if(delegate){
+   const handed=await reconcileDiscoveryWorkflowAttempt(env,{scheduled:false,now});
+   const observed=recoveryObservation(plan.action==='liveness'?{kind:'recovery',dueAt:null}:plan,handed||{},Date.now());
+   outcome={...handed,fast:true,...(observed?{recovery:observed}:{})};
+  }
  }catch(error){outcome={started:false,reason:'fast_tick_error',fast:true};}
+ return finishFast(outcome,plan);
+}
+function finishFast(outcome,plan){
+ if(!outcome.recovery&&DISCOVERY_RECOVERY_FAILURES.has(outcome.reason))outcome={...outcome,recovery:failedObservation(outcome.reason,plan)};
  logDiscoveryRecoveryTick(outcome);
  return outcome;
 }

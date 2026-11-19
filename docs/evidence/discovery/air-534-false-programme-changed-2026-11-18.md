@@ -45,11 +45,21 @@ Local Chromium through Playwright, the real `public/styles.css` and the real `ev
 
 ## Scope 3 (fast recovery cron), offline
 
-Owner decision of 18 November 2026 on the AIR-534 card, recorded as [ADR 0173](../../adr/0173-discovery-only-fast-recovery-cron.md). Second cron `1-59/2 * * * *`, dispatched on `controller.cron` to `reconcileDiscoveryRecovery`; the hourly path is unchanged.
+Owner decision of 18 November 2026 on the AIR-534 card, recorded as [ADR 0174](../../adr/0174-discovery-only-fast-recovery-cron.md). Second cron `1-59/2 * * * *`, dispatched on `controller.cron` to `reconcileDiscoveryRecovery`; the hourly path is unchanged.
 - Idle cost measured in the test harness: a healthy live instance is one read of the Workflow record, one platform status call, zero writes, zero creates, zero authority reads and no report. A stopped record not yet due is one read and nothing else.
 - `tests/discovery-fast-recovery.mjs` (core) covers: healthy live and unreadable status (fail closed); stopped undue; stopped due with the deterministic successor id and `recoveryDelayMs`; wait then due then success; killed, completed and errored instances armed with a backoff first; terminal stop and quarantine; refusals (authority held, authority loading, D1 unavailable, EPG priority, projector window, published run mismatch) with the incident flag past five minutes; two fast ticks plus the hourly reconcile giving one successor id and one series bump; an uncertain start; isolation (the fast entry calls none of EPG, Ratings, Monitor and writes no Event, the hourly entry still calls all three); readout `recoveryState` and `recoveryIncident`. The fast-path and the wait gates fail when mutated.
 - The three tests that pinned a single cron now pin the two entries.
 - Not proven: any production behaviour of the fast tick, the real platform scheduling delay and the 18 November `:00` interleaving. Natural recovery proof (a `discovery_recovery_tick` `state=started` with `recoveryDelayMs`, no manual writer) stays for «Верификация».
+
+## Scope 3 review fixes (offline)
+
+- **Missed EPG handoff:** the tick now also reads the published generation pointer and hands a missing record, or a record of an older generation (also with the old instance still alive, a terminal stop or an undue recovery), to the existing reconcile, which creates series 0 of the published generation. Healthy idle cost is now one record read, one published-pointer read and one platform status call, no write, no authority read, no create (asserted). Tests: no record; refused admission on no record; old generation with a live old instance; old generation with a terminal stop and with an undue recovery; two fast ticks plus the hourly reconcile on the missed handoff (one id, one creation, no report); unreadable pointer (typed failure, nothing written).
+- **Late success is an incident:** `incident` is set on every outcome whose lateness exceeds five minutes, a successful start included; tests at 400 s (true) and 240 s (false).
+- **Typed failures are logged:** `fast_tick_error`, `instance_status_unknown`, `published_unreadable` and `workflow_unavailable` log `state=failed`; none claims success.
+- Mutating the published-generation comparison, the no-record handover and the incident on `started` each fails the test.
+- Docs: rollback now removes only `1-59/2 * * * *` and never replaces the hourly trigger; the stale single-cron statements in the deployment runbook and the scheduling page were corrected; the Mermaid sequence now puts the admission/CAS write inside the "needs a decision" branch.
+- ADR number: main took 0173 for the AIR-532 retention ADR first, so this decision is ADR 0174.
+- Mermaid: parsed and rendered locally with mermaid 10.9.1 only. The actual GitHub rendering, legibility and arrow meaning are for the independent QA on the pull request.
 
 ## Not done here (open on AIR-534)
 

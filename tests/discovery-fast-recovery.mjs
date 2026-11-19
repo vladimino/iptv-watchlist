@@ -1,4 +1,4 @@
-// AIR-534 scope 3 (ADR 0173): the Discovery-only fast cron. Offline only: in-memory R2 stand-in, a stub Workflow binding, stubbed authority. Nothing here calls Cloudflare, TMDB or production.
+// AIR-534 scope 3 (ADR 0174): the Discovery-only fast cron. Offline only: in-memory R2 stand-in, a stub Workflow binding, stubbed authority. Nothing here calls Cloudflare, TMDB or production.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -105,9 +105,9 @@ const stopped=(extra={},series=0)=>{
  set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series,instanceId,phase:'stopped',reason:'step_failure',updatedAt:new Date().toISOString(),waitingUntil:null,chunksThisInstance:3,lastProgress:null,recovery:{attempts:1,reason:'step_failure',at:iso,dueAt:new Date(Date.now()-180000).toISOString(),quarantined:false},...extra});
  return instanceId;
 };
-let reads=0,authorityReads=0;
+let reads=0,authorityReads=0,publishedReads=0;
 const realGet=bucket.get;bucket.get=async key=>{reads++;return realGet.call(bucket,key);};
-const fresh=()=>{seed();armWorkflowAdmission(GENERATION);statusOf='running';logs.length=0;reads=0;authorityReads=0;const real=context.DiscoveryAuthority.readAuthority;context.DiscoveryAuthority.readAuthority=async(...a)=>{authorityReads++;return real(...a);};};
+const fresh=()=>{seed();armWorkflowAdmission(GENERATION);statusOf='running';logs.length=0;reads=0;authorityReads=0;publishedReads=0;{const real=context.PublishedEpg.currentGeneration;context.PublishedEpg.currentGeneration=async(...a)=>{publishedReads++;return real(...a);};}const real=context.DiscoveryAuthority.readAuthority;context.DiscoveryAuthority.readAuthority=async(...a)=>{authorityReads++;return real(...a);};};
 const eventKeys=()=>[...records.keys()].filter(key=>key.startsWith('events/'));
 
 // 0. The expression, the constants and the dispatch.
@@ -215,5 +215,49 @@ assert.equal(readout.recoveryState,'overdue');assert.equal(readout.recoveryOverd
 workflowRecord().recovery.dueAt=new Date(Date.now()-400000).toISOString();
 readout=await call('discoveryExecutorReadout')(env,continuation());
 assert.equal(readout.recoveryIncident,true,'more than five minutes overdue is an incident');assert.equal(readout.recoveryOverdueMs>=400000,true);
+
+
+// 12. AIR-534 review P1: the fast tick also covers a missed EPG handoff. No Workflow record, or a record of an older generation than the published one (also with a live old
+// instance), is handed to the existing reconcile, which reconstructs the intent and creates the new generation's series 0 under admission, CAS and the deterministic id.
+const ticks=()=>logs.map(item=>{try{return JSON.parse(item);}catch{return null;}}).filter(item=>item?.event==='discovery_recovery_tick');
+fresh();
+assert.equal(workflowRecord(),undefined,'the EPG commit queued Discovery but its start was lost: no record');
+out=await fast();
+assert.equal(out.started,true,JSON.stringify(out));assert.equal(creates.length,1);assert.equal(creates[0].id,INSTANCE);assert.equal(out.recovery.kind,'handoff');assert.equal(out.recovery.state,'started');assert.equal(out.recovery.incident,false);
+assert.equal(ticks()[0].kind,'handoff');assert.deepEqual(eventKeys(),[]);
+// Refused admission on a missing record is typed, creates nothing and is logged.
+fresh();{const gate=context.DiscoveryAuthority.readAuthority;context.DiscoveryAuthority.readAuthority=async(...a)=>({...(await gate(...a)),held:true});}
+out=await fast();assert.equal(out.started,false);assert.equal(out.reason,'authority_held');assert.equal(creates.length,0);assert.equal(out.recovery.kind,'handoff');assert.equal(out.recovery.state,'refused');
+// An older generation's instance is still alive after the publication and the EPG fast start was missed.
+fresh();elect(0,OTHER);statusOf='running';
+out=await fast();
+assert.equal(out.started,true,JSON.stringify(out));assert.equal(creates.length,1);assert.equal(creates[0].id,INSTANCE,'the new generation starts at series 0');assert.equal(out.recovery.kind,'handoff');assert.equal(workflowRecord().programmeRunId,GENERATION);
+// An older generation's terminal stop and its undue recovery do not hide the published generation either.
+fresh();{const id=stopped({reason:'complete',recovery:null});set('epg/discovery-workflow.json',{...workflowRecord(),programmeRunId:OTHER,instanceId:id.replace(GENERATION.replace(/-/g,''),OTHER.replace(/-/g,''))});}
+out=await fast();assert.equal(out.started,true,JSON.stringify(out));assert.equal(creates[0].id,INSTANCE);
+fresh();{const id=stopped({recovery:{attempts:1,reason:'step_failure',at:iso,dueAt:new Date(Date.now()+600000).toISOString(),quarantined:false}});set('epg/discovery-workflow.json',{...workflowRecord(),programmeRunId:OTHER});void id;}
+out=await fast();assert.equal(out.started,true,JSON.stringify(out));assert.equal(creates[0].id,INSTANCE);
+// Two fast ticks beside the hourly reconcile on the missed handoff: one creation of the one deterministic id, no report from the fast ticks.
+fresh();elect(0,OTHER);
+await Promise.all([fast(),fast(),call('reconcileDiscoveryWorkflow')(env,{scheduled:false})]);
+assert.equal(new Set(creates.map(item=>item.id)).size,1);assert.equal(creates[0].id,INSTANCE);assert.equal(workflowRecord().programmeRunId,GENERATION);assert.deepEqual(eventKeys(),[]);
+// Healthy idle cost with the probe: record read + published read (+ one status call), no write, no authority read, nothing created.
+fresh();elect(0);
+out=await fast();assert.equal(out.reason,'in_progress');assert.equal(reads,1);assert.equal(publishedReads,1,'one published-generation read');assert.equal(authorityReads,0);assert.equal(creates.length,0);assert.equal(puts.length,0);assert.equal(ticks().length,0,'a healthy tick logs nothing');
+// An unreadable published pointer fails closed with a typed, logged failure.
+fresh();elect(0);context.PublishedEpg.currentGeneration=async()=>{throw new Error('d1');};
+out=await fast();assert.equal(out.reason,'published_unreadable');assert.equal(creates.length,0);assert.equal(puts.length,0);assert.equal(out.recovery.state,'failed');assert.equal(ticks()[0].reason,'published_unreadable');
+
+// 13. AIR-534 review P2: a late success is an incident; typed failures are logged and never claim success.
+fresh();stopped({recovery:{attempts:1,reason:'step_failure',at:iso,dueAt:new Date(Date.now()-400000).toISOString(),quarantined:false}});
+out=await fast();assert.equal(out.started,true);assert.equal(out.recovery.incident,true,'more than five minutes late and started');assert.equal(out.recovery.recoveryDelayMs>=400000,true);assert.equal(ticks()[0].incident,true);
+fresh();stopped({recovery:{attempts:1,reason:'step_failure',at:iso,dueAt:new Date(Date.now()-240000).toISOString(),quarantined:false}});
+out=await fast();assert.equal(out.started,true);assert.equal(out.recovery.incident,false,'four minutes late is not an incident');assert.equal(ticks()[0].incident,false);
+fresh();elect(0);statusOf='nonsense';
+out=await fast();assert.equal(out.reason,'instance_status_unknown');assert.equal(out.recovery.state,'failed');assert.equal(out.started,false);assert.equal(ticks()[0].state,'failed');
+fresh();elect(0);{const real=bucket.get;bucket.get=async()=>{throw new Error('r2');};out=await fast();bucket.get=real;}
+assert.equal(out.reason,'fast_tick_error');assert.equal(out.started,false);assert.equal(out.recovery.state,'failed');assert.equal(ticks()[0].reason,'fast_tick_error');
+fresh();{const real=binding.create;binding.create=undefined;out=await fast();binding.create=real;}
+assert.equal(out.reason,'workflow_unavailable');assert.equal(out.recovery.state,'failed');
 
 console.log('Discovery fast recovery cron: idle cost, due and undue, kill detection, true stop and quarantine, every refusal, duplicate ticks, isolation from EPG/Ratings/Monitor and the readout passed');

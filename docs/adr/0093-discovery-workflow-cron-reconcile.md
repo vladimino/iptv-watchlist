@@ -7,7 +7,7 @@
 **Related work:** [AIR-324](https://trello.com/c/kNtaEbm8); [ADR 0083](0083-inert-discovery-workflow.md); [ADR 0085](0085-d1-authoritative-discovery.md); [ADR 0089](0089-shared-orchestration-reliability-contract.md)  
 **Supersedes:** [ADR 0083](0083-inert-discovery-workflow.md) decisions 7 and 8 in part (the reconciler is no longer unscheduled; the cron may call it)  
 **Superseded by:** None  
-**Refined by:** [ADR 0173](0173-discovery-only-fast-recovery-cron.md) (decision 1 "same cron, no new trigger": a second, Discovery-only cron is added; the hourly cron is unchanged)
+**Refined by:** [ADR 0174](0174-discovery-only-fast-recovery-cron.md) (decision 1 "same cron, no new trigger": a second, Discovery-only cron is added; the hourly cron is unchanged)
 
 ## Context
 

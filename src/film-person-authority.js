@@ -63,9 +63,11 @@ async function readState(env,{servedOnly}){
  if(!Number.isFinite(numeric)||numeric<FILM_PERSON_MIN_VERSION)throw failed('film_person_unavailable');
  let row,fence,baseline;
  try{
-  row=await one(db,'SELECT mode, cutover, generation FROM film_person_authority WHERE id=1');
-  fence=await one(db,'SELECT ok FROM film_person_cas WHERE id=1');
-  baseline=await one(db,'SELECT state, reference FROM film_person_baseline WHERE id=1');
+  // AIR-532: the three marker rows come back in ONE statement (the four tables are known to exist here: the inventory above ran first), same rows, same checks below.
+  const read=await one(db,"SELECT (SELECT COUNT(*) FROM film_person_authority WHERE id=1) AS marker_rows,(SELECT mode FROM film_person_authority WHERE id=1) AS mode,(SELECT cutover FROM film_person_authority WHERE id=1) AS cutover,(SELECT generation FROM film_person_authority WHERE id=1) AS generation,(SELECT COUNT(*) FROM film_person_cas WHERE id=1) AS fence_rows,(SELECT ok FROM film_person_cas WHERE id=1) AS fence_ok,(SELECT COUNT(*) FROM film_person_baseline WHERE id=1) AS baseline_rows,(SELECT state FROM film_person_baseline WHERE id=1) AS baseline_state,(SELECT reference FROM film_person_baseline WHERE id=1) AS baseline_reference");
+  row=Number(read?.marker_rows)>0?{mode:read.mode,cutover:read.cutover,generation:read.generation}:null;
+  fence=Number(read?.fence_rows)>0?{ok:read.fence_ok}:null;
+  baseline=Number(read?.baseline_rows)>0?{state:read.baseline_state,reference:read.baseline_reference}:null;
  }catch(error){
   throw failed('film_person_unavailable',error);
  }

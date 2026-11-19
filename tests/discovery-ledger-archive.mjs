@@ -138,6 +138,20 @@ for(const [label,match] of [['first segment',key=>key.includes('/segments/')],['
  assertParity(fullNext,store,label+' retry');assertBoundary(store,15,label+' retry');assertCounts(store,fullNext,label+' retry');
 }
 
+// 6b. AIR-533: segment reads and puts of one archive overlap, bounded at two in flight; a kill of the second segment of a window still leaves nothing referenced.
+{
+ const store=cloneStore(bounded),before=pointerEtag(store);let inFlight=0,max=0,segmentPuts=0;
+ store.onPut=async key=>{if(!key.includes('/segments/'))return;segmentPuts++;inFlight++;max=Math.max(max,inFlight);await new Promise(resolve=>setTimeout(resolve,5));inFlight--;};
+ await commit(store,15,'bounded');
+ assert.ok(segmentPuts>3,'a day-15 commit rewrites more than one window of segments');assert.ok(max>=2,'segment puts overlap');assert.ok(max<=2,'segment puts stay bounded at two: '+max);
+ assertParity(fullNext,store,'overlapped segments');assertCounts(store,fullNext,'overlapped segments');
+ const killed=cloneStore(bounded);let seen=0;
+ killed.onPut=async key=>{if(key.includes('/segments/')&&++seen===2)throw new Error('killed second segment of the first window');};
+ await commit(killed,15,'bounded',{expectThrow:true});
+ assert.equal(published(killed),runId(14),'mid-window kill: nothing published');assert.equal(pointerEtag(killed),before,'mid-window kill: archive pointer unchanged');
+ killed.onPut=null;await commit(killed,15,'bounded');assertParity(fullNext,killed,'mid-window kill retry');
+}
+
 // 7. P → R (archive CAS succeeds, publication killed) → S keeps R's departures: counts stay exact, alsoArchived knows them.
 {
  // R's scan drops two titles that have aired every day, so their archive copies are R's own, never archived before.

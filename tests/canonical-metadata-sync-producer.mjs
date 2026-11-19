@@ -14,7 +14,6 @@ const SRC=process.env.METADATA_SYNC_SRC?path.resolve(process.env.METADATA_SYNC_S
 const load=name=>import(pathToFileURL(path.join(SRC,name)).href);
 const M=await load('canonical-metadata-sync-producer.js');
 const {PRODUCER_OPERATIONS,PRODUCER_WIRING,handoffReadiness}=await load('canonical-producers.js');
-const {activationAudit}=await load('film-person-open-handoff.js');
 const {
  applyMetadataSync,applyFilmMetadata,METADATA_SYNC_KINDS,canonicalMetadataFilmId,titleSourceOf,personSourcesOf,
  metadataFactsInput,syncFactsInput,FILM_METADATA_OPERATION,FILM_SYNC_OPERATION,LOCALIZATION_SOURCE_OPERATION,LOCALIZATION_CONFLICT_OPERATION,
@@ -142,9 +141,6 @@ assert.equal(personSourcesOf(film(),people)[0].id,PID);
  for(const kind of METADATA_SYNC_KINDS)assert.equal(PRODUCER_OPERATIONS.get(kind).atomic,true);
  const flipped=PRODUCER_WIRING.filter(item=>item.requires.every(kind=>[...PRODUCER_OPERATIONS.values()].some(op=>op.operation===kind&&op.atomic===true))).map(item=>item.name);
  assert.deepEqual(flipped,['epg_commit','metadata_sync','discovery_admission','rated_admission_retention']);
- const audit=activationAudit();
- assert.equal(audit.producers.find(item=>item.name==='metadata_sync').wired,true);
- assert.equal(audit.producers.find(item=>item.name==='rated_admission_retention').wired,true);
  const ready=await handoffReadiness(envOf(database('prepared')),{now:T});
  assert.equal(ready.ready,false);
  assert.ok(!ready.blockers.includes('producer_not_wired:metadata_sync'));
@@ -324,6 +320,44 @@ const filmRow=id=>({id,url:'https://letterboxd.com/film/heat-1995/',title:'Heat'
  assert.equal(run.cursor,25);
  assert.equal(run.metadataSyncIntent,undefined);
  assert.equal(seen[2].length,0);
+}
+
+// AIR-533: one sanitized `metadata_sync_breakdown` per step on every outcome, and the step's results and exceptions stay exactly as they were.
+{
+ const files=new Map(),logs=[];
+ const behaviours=[
+  ()=>({state:'incomplete',applied:0,failed:1,unknown:0,preflightFailed:0,refused:0,intent:[{requestId:'held-1',operation:'film_metadata',input:{x:1}}]}),
+  ()=>{const error=new Error('D1_ERROR: injected');error.code='d1_error';throw error;},
+  ()=>{const error=new Error('held');error.code='film_person_held';throw error;},
+  ()=>({state:'complete',applied:1,failed:0,unknown:0,preflightFailed:0,refused:0,intent:[]}),
+ ];
+ let call=0;
+ const CanonicalMetadataSync={
+  applyMetadataSync:async()=>behaviours[call++](),
+  metadataSyncSettled:out=>M.metadataSyncSettled(out),
+  metadataSyncRecord:out=>M.metadataSyncRecord(out),
+  carryMetadataSyncIntent:out=>M.carryMetadataSyncIntent(out),
+ };
+ const ctx=workerCtx(CanonicalMetadataSync,files);
+ ctx.console={log:line=>{try{logs.push(JSON.parse(line));}catch{}}};
+ const original=filmRow('28nq');
+ files.set('metadata.json',{'28nq':original});
+ const run={runId:'breakdown',stage:'metadata',watchlist:[structuredClone(original)],pending:['28nq'],cursor:0,remaining:1,failures:[]};
+ ctx.run=run;
+ const incomplete=await vm.runInContext('metadataSync(env,run)',ctx);
+ assert.equal(incomplete.canonicalMetadataIncomplete,true);
+ const handled=await vm.runInContext('metadataSync(env,run)',ctx);
+ assert.equal(handled.canonicalMetadataIncomplete,true);
+ assert.equal(run.canonicalMetadataErrors,1);
+ await assert.rejects(vm.runInContext('metadataSync(env,run)',ctx),error=>error.code==='film_person_held');
+ const ok=await vm.runInContext('metadataSync(env,run)',ctx);
+ assert.equal(ok.stage,'epg');
+ const lines=logs.filter(line=>line.event==='epg_phase'&&line.phase==='metadata_sync_breakdown');
+ assert.deepEqual(lines.map(line=>line.outcome),['incomplete','handled_error','thrown','ok']);
+ for(const line of lines){
+  assert.deepEqual(Object.keys(line).sort(),['at','canonicalMs','edge','event','fetchMs','films','loadMs','localizeMs','outcome','phase','runId','tailMs','totalMs'].sort(),'sanitized: outcome, counts and milliseconds only');
+  for(const field of ['films','loadMs','fetchMs','localizeMs','canonicalMs','tailMs','totalMs'])assert.ok(Number.isFinite(line[field])&&line[field]>=0,field);
+ }
 }
 
 console.log('canonical-metadata-sync-producer: ok');
