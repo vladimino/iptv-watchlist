@@ -21,7 +21,7 @@ const source=fs.readFileSync('src/d1-enrichment.js','utf8');
 assert.doesNotMatch(source,/\bBUCKET\.(put|delete)\b/,'the projector never writes R2');
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/runD1EnrichmentProjection\(/,'the cron handler does not call the projector');
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/runD1EnrichmentProjection\([^)]*\)[^\n]*metadataSync|metadataSync[^\n]*runD1EnrichmentProjection/,'no sync step runs the projector');
-assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["0 \* \* \* \*"\]/);
+assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*"\]/);
 {
  const closed=projectorContext({harness:false});
  let touched=0;

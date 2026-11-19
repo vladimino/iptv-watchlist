@@ -263,6 +263,7 @@ export const CORE_WEIGHTS={
  'd1-enrichment-phase-log.mjs':2,
  'discovery-bounded-fence.mjs':2,
  'discovery-events.mjs':2,
+ 'discovery-fast-recovery.mjs':2,
  'discovery-fence-collision.mjs':2,
  'discovery-ledger-archive.mjs':2,
  'discovery-revalidation.mjs':2,
