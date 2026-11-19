@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import * as Authority from '../src/discovery-authority.js';
 import * as Identity from '../src/domain/discovery-identity-review.js';
+import {observationDecisionView} from '../src/domain/discovery-observation-index.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
@@ -223,4 +224,7 @@ assert.equal((await evidenceOf('obs-3', w1.requestId)).provenance.reason, 'old_a
   // A new airing, a rescore or a drifted evidence key changes nothing: the fence is not tied to a scheduling fingerprint.
   assert.equal(ownerRejected({...fenced, evidenceKey: 'another airing', scoring: {acceptedTmdbId: '41'}}, '41'), true);
 }
+// The owner view shows the fence only when there is one, so ordinary index records do not grow.
+assert.equal('revokedOwnerAssign' in observationDecisionView({status: 'needs_verification'}), false);
+assert.deepEqual(observationDecisionView({status: 'needs_verification', revokedOwnerAssign: {tmdbId: '41', requestId: 'r', revokedBy: 'v', at: 'x', extra: 'dropped'}}).revokedOwnerAssign, {tmdbId: '41', requestId: 'r', revokedBy: 'v', at: 'x'});
 console.log('discovery-identity-revoke ok');

@@ -143,7 +143,8 @@ export function observationDecisionView(decision) {
   view.scoring = scoringView(decision.scoring);
   view.ownerIdentity = ownerIdentityView(decision.ownerIdentity);
   view.rejectedTmdbIds = rejectedView(decision.rejectedTmdbIds);
-  view.revokedOwnerAssign = revokedAssignView(decision.revokedOwnerAssign);
+  const fence = revokedAssignView(decision.revokedOwnerAssign);
+  if (fence) view.revokedOwnerAssign = fence;
   const marker = indexObject(decision.reconsidered) ? decision.reconsidered : null;
   view.reconsidered = marker ? {at: indexText(marker.at, 40), idempotencyKey: indexText(marker.idempotencyKey, 80), previousTerminalReason: indexText(marker.previousTerminalReason, 80)} : null;
   return view;
