@@ -148,31 +148,31 @@ The cron expression is `0 * * * *` (it was `37 * * * *` until AIR-348; Madrid is
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Fast as Fast cron, every 2 min
-    participant W as reconcileDiscoveryRecovery
-    participant D1 as D1 Workflow record
-    participant CF as Cloudflare Workflows
-    participant R as Existing reconcile (CAS, fencing, admission)
-    Fast->>W: Scheduled event, no report, no chunk
-    W->>D1: Read the Workflow record
-    W->>D1: Read the published generation pointer
-    opt Record is of the published generation and says an instance is alive
+    participant Fast as Fast cron
+    participant W as Fast tick
+    participant D1 as D1 record
+    participant CF as Workflows
+    participant R as Reconcile
+    Fast->>W: Every 2 min, no report
+    W->>D1: Read Workflow record
+    W->>D1: Read published run
+    opt Instance alive, same run
         W->>CF: Read instance status
     end
     alt Nothing to do
-        Note over W: Live instance of the published generation, recovery not yet due, terminal stop, quarantine, or a typed failure to decide
-        W-->>Fast: No-op, nothing created or written (a failure is logged)
+        Note over W: Alive, not due, terminal, quarantined, or cannot decide
+        W-->>Fast: No-op, no write
     else Needs a decision
-        Note over W: No record, older generation than the published one, dead instance, unarmed stop, or recovery due
+        Note over W: No record, older run, dead instance, or due
         W->>R: Hand over
-        R->>D1: Admission reads, then one CAS write
-        alt Refused (authority, priority, window, mismatch)
+        R->>D1: Admission reads, one CAS write
+        alt Refused
             R-->>W: Typed reason, nothing created
-            W-->>Fast: recovery_refused or recovery_overdue, with the reason
+            W-->>Fast: refused or overdue
         else Accepted
-            R->>CF: Create the deterministic id
+            R->>CF: Create deterministic id
             R-->>W: Started or attached
-            W-->>Fast: recovery_started with recoveryDelayMs
+            W-->>Fast: started, recoveryDelayMs
         end
     end
 ```
