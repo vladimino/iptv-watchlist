@@ -1,7 +1,7 @@
 // AIR-372 / ADR 0099 (Accepted), decisions 3 and 5. The canonical Film/Person BULK READ MODEL over D1, for the future UI, API, Admin, Finds,
 // film page and person filmography readers. Inactive: nothing in the Worker imports this module (it is not bundled, no route calls it), so
-// while the marker is legacy, r2 or prepared every existing reader is unchanged. It only reads: no write, no repair, no R2 access.
-// - canonicalReaderMode is the gate a future route calls: legacy/r2/prepared -> 'existing' (the current runtime answers), open -> 'd1',
+// while the marker is legacy (the explicit local stand-in; r2 and prepared are refused, ADR 0162) every existing reader is unchanged. It only reads: no write, no repair, no R2 access.
+// - canonicalReaderMode is the gate a future route calls: legacy (the local stand-in only) -> 'existing' (the current runtime answers), open -> 'd1',
 //   held, unreadable or malformed -> throws (fail closed, never R2).
 // - readFilms/readPersons answer an id SET in a fixed number of queries per chunk of 80 ids (no per-id query), resolve redirects in bounded
 //   rounds with cycle detection, resolve every title and name as owner > reviewed dictionary > automatic through src/localization-sources.js
@@ -20,7 +20,7 @@ export const CANONICAL_OWNER_ANCESTOR_CAP=300;
 export const CANONICAL_READ_CHUNK=80;
 const FILM=/^film:.+/,PERSON=/^person:[a-z_]+\/.+/;
 
-// legacy, r2 and prepared keep the existing runtime; open reads D1; held and every unreadable state throw (film_person_held / film_person_unavailable).
+// legacy (the explicit local stand-in only; r2 and prepared markers are refused, ADR 0162) keeps the existing runtime; open reads D1; held and every unreadable state throw (film_person_held / film_person_unavailable).
 // AIR-374 P4: the gate itself lives in canonical-catalog-reader.js (the one module the Worker bundles) so the Worker routes and this model share one implementation.
 export const canonicalReaderMode=catalogReaderGate;
 

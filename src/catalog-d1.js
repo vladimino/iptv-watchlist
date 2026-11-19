@@ -1,7 +1,7 @@
 // Read-only relational views over the D1 catalog. Persons are entities here: one row per Letterboxd role
 // slug, with their names, external ids and filmography, plus review queues for people stored twice.
 // The person identity route loads one person's neighborhood and calls the pure projection. Nothing here writes,
-// and nothing reads R2. Before `open` R2 stays authoritative for every existing page and `authoritative` is false (AIR-374 P4 gates it by the marker).
+// and nothing reads R2. Production serves these views only at `open` (ADR 0162, AIR-374 P4 gates them by the marker); `authoritative` is false only for the explicit local stand-in, which keeps R2 for every existing page.
 const D1_LIMIT_DEFAULT=50,D1_LIMIT_MAX=100;
 const d1Limit=value=>{const n=Number(value);return Number.isInteger(n)&&n>=1?Math.min(n,D1_LIMIT_MAX):D1_LIMIT_DEFAULT;};
 const d1Rows=async(db,sql,params=[])=>(await db.prepare(sql).bind(...params).all()).results||[];
@@ -249,7 +249,7 @@ async function catalogD1Dispatch(request,env,url,authoritative=false){
  if(match){const film=await d1Film(env.DB,'film:'+decodeURIComponent(match[1]));return film?json(film):json({error:'Film not found'},404);}
  return json({error:'Not found'},404);
 }
-// AIR-374 P4: the marker gate of the /api/d1/* views (and of the owner-review overlay, which is reachable only through this route). legacy, r2 and prepared answer exactly as
+// AIR-374 P4: the marker gate of the /api/d1/* views (and of the owner-review overlay, which is reachable only through this route). legacy (the explicit local stand-in only; r2 and prepared markers are refused, ADR 0162) answers exactly as
 // before (`authoritative:false`); held, an unreadable or malformed marker answer 503 and read nothing; open reads the same D1 rows and says `authoritative:true`.
 // A non-GET request is not gated (405 as before). The gate is one set of SELECTs of the marker tables; nothing is written.
 async function catalogD1Route(request,env,url){

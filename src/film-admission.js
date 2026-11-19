@@ -1,7 +1,7 @@
 // AIR-369 / ADR 0099 (Accepted), decomposition C3a; ADR 0086 and 0087. D1-owned canonical Film admission for VERIFIED rated-archive Films
 // and the watchlist retention fact that keeps a Film after it leaves the current lists. The AIR-499 producer `rated_admission_retention`
 // imports this module (bundled). Below the marker `open` both writers refuse before they reach the database; the enrichment projector
-// stays the only canonical writer at r2/prepared. The R2 object
+// that used to write at r2/prepared was removed in AIR-537 slice 3, so no writer exists below `open`. The R2 object
 // letterboxd/admissions/verified-films.json stays the immutable evidence and receipt (never a second mutable owner after a cutover) and the
 // enrichment/view-index.json `watchlist` boolean stops being the thing that decides which Films exist. The pre-Film rated-candidate queue is
 // not here (AIR-343): only an entry that carries every verification fact becomes a Film.
