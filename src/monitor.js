@@ -67,10 +67,22 @@ const Monitor=(()=>{
   return {present:true,pendingCount:Array.isArray(queue.pending)?queue.pending.length:0,processedTotal,lastProgressAt:iso(lastProgressAt),
    eligibleNow:outstanding.length-deferred.length,nextRetryAt:deferred.length?iso(Math.min(...deferred)):null,blockedReason:queue.lastBatch?.stage==='blocked'?String(queue.lastBatch.reason||'').slice(0,40):null};
  });
+ // AIR-543 / ADR 0179: one bounded read of the poster checkpoint plus the Monitor's two write-once markers. The markers are written only by this
+ // tick (never by a GET), are never cleared, and the first valid checkpoint fixes `seenAt` so a later loss is `lost`, not a new first-run grace.
+ const posterMarkers=state=>({baselineAt:typeof state?.catalogPostersBaselineAt==='string'?state.catalogPostersBaselineAt:null,seenAt:typeof state?.catalogPostersSeenAt==='string'?state.catalogPostersSeenAt:null});
+ const catalogPosterFacts=(env,now,state)=>guarded(async()=>{
+  if(typeof CatalogPosterWeekly==='undefined')return null;
+  const markers=posterMarkers(state);
+  const result=await CatalogPosterWeekly.readStatus(env,{markers,monitorOn:true,nowMs:now});
+  const next={...markers};
+  if(result.checkpointStatus==='ok'&&!next.seenAt)next.seenAt=iso(now);
+  if(result.checkpointStatus==='absent'&&!next.seenAt&&!next.baselineAt)next.baselineAt=iso(now);
+  return {...result,markers:next};
+ });
  async function collect(env,now,state){
   const epg=await epgFacts(env,now,state?.epgSeen||null);
-  const [discovery,ratings,predictions]=await Promise.all([discoveryFacts(env,now,epg?.publishedRunId||null),ratingsFacts(env,now),predictionFacts(env,now,state?.predictions||null)]);
-  return {epg,discovery,ratings,predictions};
+  const [discovery,ratings,predictions,catalogPosters]=await Promise.all([discoveryFacts(env,now,epg?.publishedRunId||null),ratingsFacts(env,now),predictionFacts(env,now,state?.predictions||null),catalogPosterFacts(env,now,state)]);
+  return {epg,discovery,ratings,predictions,...(catalogPosters===null?{}:{catalogPosters})};
  }
 
  // ---- delivery: one transport chosen by deliberate configuration. `MONITOR_TRANSPORT` absent or `webhook` is the generic JSON webhook
@@ -171,7 +183,8 @@ const Monitor=(()=>{
    const next={schemaVersion:SCHEMA_VERSION,updatedAt:iso(now),heartbeatAt:iso(now),mode:current,overall:evaluation.overall,
     streams:evaluation.streams.map(stream=>({stream:stream.stream,state:stream.state,facts:stream.facts,issues:stream.issues.map(item=>({key:item.key,severity:item.severity}))})),
     alerts,outbox:queued,cancelledUndelivered:cancelled,holdUntil:doc?.holdUntil||null,lastDeliveryFailure:doc?.lastDeliveryFailure||null,predictions,
-    epgSeen:publishedRunId&&doc?.epgSeen?.runId!==publishedRunId?{runId:publishedRunId,at:iso(now)}:doc?.epgSeen||null,lastTestAt:doc?.lastTestAt||null};
+    epgSeen:publishedRunId&&doc?.epgSeen?.runId!==publishedRunId?{runId:publishedRunId,at:iso(now)}:doc?.epgSeen||null,lastTestAt:doc?.lastTestAt||null,
+    catalogPostersBaselineAt:facts.catalogPosters?.markers?.baselineAt??doc?.catalogPostersBaselineAt??null,catalogPostersSeenAt:facts.catalogPosters?.markers?.seenAt??doc?.catalogPostersSeenAt??null};
    const claimed=await writeState(env,object,next);
    if(!claimed){log({mode:'on',overall:evaluation.overall,claimed:false});return {ran:true,mode:'on',overall:evaluation.overall,sent:0,failed:0,saved:false};}
    // Delivery is budgeted per tick: at most SEND_BUDGET attempts, and the tick stops after SEND_FAIL_STOP consecutive failures (the channel is

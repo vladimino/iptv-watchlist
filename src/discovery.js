@@ -565,7 +565,37 @@ async function catalogPosterNegativesSave(env,current,additions,stillMissing,gua
  }
  return {durable:false,unsaved:[...additions.keys()],reason:'cas_conflict',written:false};
 }
+// ADR 0179 decision 1: a verified admission whose complete TMDB movie detail carries `poster_path: null` is the answer "TMDB has no poster", so it is
+// remembered at once, with no second request. Only that exact shape counts: a missing key, a malformed path, a missing id or title is an incomplete
+// answer and is never recorded. Best effort: the index failing, being unreadable or full never blocks the admission; the film stays for the weekly
+// catch-up. An id this index already knows is left alone (a remembered mismatch or a running hold is not overwritten).
+function catalogPosterSeedable(movie){
+ if(!movie||typeof movie!=='object'||Array.isArray(movie))return null;
+ const id=catalogPosterMovieId(movie);
+ if(!id||typeof movie.title!=='string'||!movie.title)return null;
+ if(!Object.prototype.hasOwnProperty.call(movie,'poster_path')||movie.poster_path!==null)return null;
+ return id;
+}
+async function catalogPosterSeedNegative(env,movie){
+ try{
+  const id=catalogPosterSeedable(movie);
+  if(!id)return {seeded:false,reason:'not_seedable'};
+  const current=await catalogPosterNegativesRead(env);
+  if(!current.ok)return {seeded:false,reason:'unreadable'};
+  if(current.entries[id])return {seeded:false,reason:'known'};
+  const keep=new Set([...Object.keys(current.entries),id]);
+  const saved=await catalogPosterNegativesSave(env,current,new Map([[id,'no_poster_on_tmdb']]),keep,()=>null);
+  return {seeded:saved.durable&&!saved.unsaved.includes(id),reason:saved.reason};
+ }catch{return {seeded:false,reason:'error'};}
+}
+// ADR 0179: the route and the weekly automatic path share this one core. It answers {status,payload} and never builds a Response, so the
+// weekly handler reads the same outcomes without an HTTP hop and without Access. The route below only wraps the answer.
 async function catalogPosterHydration(env,body={}){
+ const result=await catalogPosterRun(env,body);
+ return json(result.payload,result.status);
+}
+async function catalogPosterRun(env,body={}){
+ const json=(payload,status=200)=>({payload,status});
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
  if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>CATALOG_POSTER_LIMIT))return json({error:'Invalid limit'},400);
  if(body.cursor!==undefined&&body.cursor!==null&&(typeof body.cursor!=='string'||body.cursor.length>200))return json({error:'Invalid cursor'},400);
@@ -1033,7 +1063,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
       if(!await attachWatchlistShowing(env,source.programmeRunId,id,candidate,fence)||!await publishedGenerationMatches(env,source.programmeRunId))return programmeChanged();
      }else{
       const old=films[id];
-      films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id,writeAvailability);indexFilm(films[id]);
+      films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id,writeAvailability);indexFilm(films[id]);if(!old)await catalogPosterSeedNegative(env,movie);
       filmEntry=[id,films[id]];
       newFilm=!old;
       if(newFilm)added++;
@@ -1293,7 +1323,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
     else{
      const old=films[id];if(!old)added++;
      if(streamed&&!movie.overview&&candidate.description===undefined)candidate.description=await ledgerDescription(pinned,candidate.key)??undefined;
-     films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id,writeAvailability);indexFilm(films[id]);saved=await saveDiscoveredFilms(env,films,source.programmeRunId,fence);}
+     films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id,writeAvailability);indexFilm(films[id]);if(!old)await catalogPosterSeedNegative(env,movie);saved=await saveDiscoveredFilms(env,films,source.programmeRunId,fence);}
     if(!saved||!await publishedGenerationMatches(env,source.programmeRunId))return {schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
     decisions[candidate.key]={status:'verified',filmId:id,tmdbId:String(movie.id),canonicalIdentity:'tmdb:'+movie.id,identitySource:'tmdb_detail',checkedAt:new Date().toISOString(),evidenceKey:candidateEvidence(candidate),anchor:verifiedAnchor(pinned,source,candidate,candidates,observation,movie,decisions,films,now,aliasIndex),provenance:{authority:'tmdb_detail',searchHit:searched,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null},scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,acceptedTmdbId:score.acceptedTmdbId??null},...ownerMarkerCarry(decisions[candidate.key])};
    }
