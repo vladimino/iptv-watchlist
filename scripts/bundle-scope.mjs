@@ -33,7 +33,15 @@ export function scopePersonIdentity(files=['src/domain/canonical-person.js','src
 // AIR-374 P3c: a canonical producer module that imports several already-scoped bindings. EVERY single-line import is removed and `preamble` (destructuring of the scopes already in the Worker) takes its place, so the module sees the same
 // names it has offline. `export {a,b};` re-export lines are dropped and `a`/`b` are handed over too (they must be bindings of the scope or of the preamble). The scope exports every `export function|const|async function`.
 export function scopedImports(file,name,preamble){
- let source=fs.readFileSync(file,'utf8').replace(/^\s*import\s+\{[^}]+\}\s+from\s+['"][^'"]+['"];?\r?\n/gm,'');
+ const original=fs.readFileSync(file,'utf8');
+ // AIR-532: every name the module IMPORTS and then USES must be supplied by `preamble`, otherwise the Worker scope has no such binding and the call is a ReferenceError at runtime
+ // (an ES-module test cannot see this: the real import resolves there). Checked here so a missing name fails the build, not the first production run that reaches it.
+ const body=original.replace(/^\s*import\s+\{[^}]+\}\s+from\s+['"][^'"]+['"];?\r?\n/gm,'');
+ const missing=[...original.matchAll(/^\s*import\s+\{([^}]+)\}\s+from\s+['"][^'"]+['"];?/gm)]
+  .flatMap(match=>match[1].split(',').map(item=>item.trim()).filter(Boolean).map(item=>item.split(/\s+as\s+/).pop().trim()))
+  .filter(local=>new RegExp('(?<![A-Za-z0-9_$.])'+local.replace(/\$/g,'\\$')+'(?![A-Za-z0-9_$])').test(body)&&!new RegExp('(?<![A-Za-z0-9_$.])'+local.replace(/\$/g,'\\$')+'(?![A-Za-z0-9_$])').test(preamble));
+ if(missing.length)throw new Error(file+' imports and uses '+missing.join(', ')+' but the scope preamble does not provide it: it would be undefined in the Worker');
+ let source=body;
  if(/^\s*import\s/m.test(source))throw new Error(file+' cannot be bundled: an import is not a single-line named import');
  const reexported=[];
  source=source.replace(/^export\s*\{([^}]+)\};?\r?\n/gm,(_,names)=>{reexported.push(...names.split(',').map(item=>item.trim()).filter(Boolean));return '';});
@@ -48,6 +56,7 @@ export function scopedEpgPriority(){
  return scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scopedReplacing('src/domain/epg-priority-pause.js','EpgPriorityPause','const {EPG_SCHEDULE,madridDayKey,madridInstant}=OrchestrationPolicy;\n');
 }
 // ADR 0142: the per-slot evidence rule is a pure module scoped in front of the authority, which assigns slots with it.
+// ADR 0178: the identity review module is scoped here too, because the owner write checks a revoke command with it.
 export function scopedDiscoveryAuthority(){
- return scoped('src/domain/slot-evidence.js','SlotEvidence')+'\n'+scopedImports('src/discovery-authority.js','DiscoveryAuthority','const {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\nconst {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT:SLOT_REVALIDATION_LIMIT}=SlotEvidence;');
+ return scoped('src/domain/slot-evidence.js','SlotEvidence')+'\n'+scoped('src/domain/discovery-identity-review.js','DiscoveryIdentity')+'\n'+scopedImports('src/discovery-authority.js','DiscoveryAuthority','const {revokeWriteMatches,originalStillEffective}=DiscoveryIdentity;\nconst {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\nconst {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT:SLOT_REVALIDATION_LIMIT}=SlotEvidence;');
 }

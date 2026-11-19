@@ -221,4 +221,22 @@ assert.equal(r.body.health.subsystems.poster.status,'clear');
 assert.equal(r.body.health.subsystems.identity.status,'clear_in_scope');
 assert.equal(r.body.health.subsystems.letterboxd_archive.status,'unknown');
 assert.deepEqual(puts,[]);assert.equal(lists,0);assert.deepEqual(fetches,[]);
+// 12. AIR-543 / ADR 0179: the `catalogPosters` section. Without the module it is unknown, never healthy. With it, the section is one more bounded read of the poster checkpoint and
+// one of the Monitor's markers after the eleven fixed reads; it writes nothing and asks nobody. Absent after it was seen is lost; a corrupt object is unknown/degraded.
+seed();r=await call('/api/admin/health');
+assert.equal(r.body.catalogPosters.state,'unknown');assert.equal(r.body.catalogPosters.monitor,'degraded','a missing module is a fault, not a pass');
+vm.runInContext(scoped('src/catalog-poster-weekly.js','CatalogPosterWeekly'),context);
+const POSTER_CP='epg/catalog-poster-weekly.json',cp=(over={})=>({schemaVersion:1,runId:'catalog_posters-2026-11-15',weekStart:weekStartNow(),status:'completed',lastScheduledAt:new Date().toISOString(),lastAttemptAt:new Date().toISOString(),lastCompletedAt:new Date().toISOString(),cursor:null,nextRetryAt:null,retryAttempts:0,rateLimitStreak:0,deferredReported:false,summary:{hydrated:2,checked:5},outbox:[],...over});
+function weekStartNow(){const d=new Date();return new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()-d.getUTCDay())).toISOString();}
+seed();records.set(POSTER_CP,cp());
+r=await call('/api/admin/health');
+assert.deepEqual(gets,[...HEALTH_KEYS,'monitor/state.json',POSTER_CP],'two more bounded reads after the fixed ones');
+assert.deepEqual(r.body.reads,HEALTH_KEYS,'the tracked source list is unchanged');
+assert.deepEqual(puts,[]);assert.equal(lists,0);assert.deepEqual(fetches,[]);
+assert.equal(r.body.catalogPosters.state,'healthy_idle');assert.equal(r.body.catalogPosters.monitor,'healthy');assert.equal(r.body.catalogPosters.summary.hydrated,2);
+seed();records.set('monitor/state.json',{catalogPostersSeenAt:'2026-11-08T00:00:00.000Z',catalogPostersBaselineAt:'2026-11-01T00:00:00.000Z'});
+r=await call('/api/admin/health');assert.equal(r.body.catalogPosters.state,'lost','absent after it was seen');assert.equal(r.body.catalogPosters.monitor,'degraded');
+seed();records.set(POSTER_CP,{schemaVersion:1,status:'pending'});
+r=await call('/api/admin/health');assert.equal(r.body.catalogPosters.state,'unknown');assert.equal(r.body.catalogPosters.detail,'checkpoint_invalid','a corrupt checkpoint is unknown/degraded and is not repaired');
+assert.deepEqual(puts,[]);
 console.log('Admin health API: bounded reads, grouped issues, unknown sources, generations, clocks, pin and failures passed');

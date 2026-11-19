@@ -12,7 +12,7 @@ import {
 
 const {assertSql,FENCE}=fenced;
 const COLUMNS='programme_run_id,input_generation,run_key,release_pin,owner_epoch,owner_instance,claim_nonce,owner_state,lease_expires_at,handoff_count,takeover_count,rebase_count,relaunch_count,reopen_count,stopped_by,recovery_class,recovery_attempts,streak_started_at,next_attempt_at,progress_relaunches,revision,created_at,updated_at';
-const SKIPPED=Object.freeze({state:'skipped',reason:'projector_is_writer'});
+const SKIPPED=Object.freeze({state:'skipped',reason:'film_person_route_not_open'});
 const iso=ms=>new Date(ms).toISOString();
 const fence=gate=>[FENCE,[gate.generation]];
 const changesOne=()=>[assertSql('changes()=1'),[]];

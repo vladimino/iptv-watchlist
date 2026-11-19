@@ -143,14 +143,14 @@ export function unitOperation(operation,{replan,now=()=>new Date().toISOString()
 }
 
 // ONE unit, once per source event. opts: {origin, event, input, replan?, now?, policy?}. Returns:
-//   {state:'skipped', reason:'projector_is_writer', receipt:false}   the marker is not `open`: one marker read, nothing else;
+//   {state:'skipped', reason:'film_person_route_not_open', receipt:false}   the marker is not `open`: one marker read, nothing else;
 //   {state:'absent', receipt:false}                                  the Person or Film is not in the store: nothing is created;
 //   {state:'noop', receipt:false}                                    the facts are already stored: no receipt, no batch;
 //   {state:'applied'|'unknown'|..., requestId, ...}                  the receiptedWrite outcome (`already:true` when the same request was applied before).
 async function applyUnit(operation,env,{origin,event,input,replan,now,policy=RETRY_POLICY}={}){
  const spec=KINDS[operation];
  const route=await writerRoute(env);
- if(route.writer!=='canonical')return {state:'skipped',reason:'projector_is_writer',receipt:false};
+ if(route.writer!=='canonical')return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const digest=await unitDigest(operation,input);
  const target={kind:spec.entity,id:input.id};
  const requestId=await producerRequestId({origin,operation,event,target,digest});

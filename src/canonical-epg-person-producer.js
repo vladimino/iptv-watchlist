@@ -73,12 +73,12 @@ export function epgPersonReplan(plan){
 }
 
 // cursor: index of the next unit (resumable; persist it in the run state). limit: units per call. Returns
-//   {skipped:true, reason:'projector_is_writer', ...}                                 marker not open: one marker read, nothing else;
+//   {skipped:true, reason:'film_person_route_not_open', ...}                                 marker not open: one marker read, nothing else;
 //   {skipped:false, cursor, done, counts:{...}, failures:[{id,code}], stoppedBy}       a bounded pass; `done` when every unit was visited; `stoppedBy` is the held code when the pass stopped on it.
 export async function applyEpgPersonUnits(env,{plan,cursor=0,limit=EPG_UNIT_LIMIT_DEFAULT,now,policy}={}){
  if(!plan||!Array.isArray(plan.units)||typeof plan.event!=='string'||!Number.isInteger(cursor)||cursor<0)throw failed('film_person_invalid');
  const cap=epgUnitCap(limit);
- if(!(await producerRouteOpen(env)))return {skipped:true,reason:'projector_is_writer',cursor,done:false,counts:emptyCounts(),failures:[]};
+ if(!(await producerRouteOpen(env)))return {skipped:true,reason:'film_person_route_not_open',cursor,done:false,counts:emptyCounts(),failures:[]};
  const counts=emptyCounts(),failures=[];
  let index=cursor,stoppedBy=null;
  for(;index<plan.units.length&&index-cursor<cap;index++){

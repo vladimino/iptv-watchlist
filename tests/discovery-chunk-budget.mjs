@@ -434,6 +434,33 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  await Authority.releaseLease(env,lease.lease);
 }
 
+// 12b. ADR 0178 (A1), review of PR 796: the fence of a revoked owner assign survives the screening transition. An observation
+// with a revoked-assign fence for id 41 is screened as non-film in one chunk and then gains a confirmed id 41 (a confirmed
+// id outranks title screening): the cheap pass must not re-verify the revoked id, and the fence must still be stored.
+{
+ const item={...hotItem({key:'rv1',year:null,lastAiring:hotStart+400000}),title:'Show: episode 9',normalizedTitle:'show episode 9'};
+ const fence={tmdbId:'41',requestId:'req-original-000001',revokedBy:'req-revoke-00000001',at:'2026-11-19T11:00:00.000Z'};
+ const decisions={rv1:{status:'needs_verification',attempts:1,evidenceKey:Authority.evidenceKey(item),terminalReason:null,retryAt:null,revokedOwnerAssign:fence}};
+ const {file,env}=await fixture({items:[item],decisions});
+ const stored=()=>JSON.parse(sql(file,"SELECT payload_json FROM discovery_decision WHERE observation_key='rv1'")[0].payload_json);
+ assert.deepEqual(stored().revokedOwnerAssign,fence,'the seeded decision carries the fence');
+ const run=()=>chunkContext({clock:{offset:0},respond:()=>({results:[]})});
+ let lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ await run().context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(stored().status,'excluded_nonfilm','the title is screened as non-film');
+ assert.deepEqual(stored().revokedOwnerAssign,fence,'the screening transition keeps the fence');
+ await Authority.releaseLease(env,lease.lease);
+ // The observation now names the revoked id as its confirmed id, which outranks the title screening.
+ sql(file,"UPDATE discovery_observation SET confirmed_tmdb_id='41', payload_json=json_set(payload_json,'$.confirmedTmdbId','41') WHERE observation_key='rv1'");
+ lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ await run().context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ const after=stored();
+ assert.notEqual(after.status,'verified','the revoked id is not silently re-verified from the confirmed id');
+ assert.notEqual(String(after.tmdbId??''),'41');
+ assert.deepEqual(after.revokedOwnerAssign,fence,'the fence is still stored');
+ await Authority.releaseLease(env,lease.lease);
+}
+
 // 13. A decision the owner stores while the chunk works stands: the chunk skips that key and overwrites nothing.
 {
  const {file,env}=await fixture({mix:1});
@@ -468,6 +495,36 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.equal(sql(file,"SELECT json_extract(payload_json,'$.deferReason') AS d FROM discovery_decision WHERE observation_key='mix00'")[0].d,'wall_budget','identity is not stored; the pre-TMDB fence may stand');
  assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_admission")[0].n,1);
  await Authority.releaseLease(env,lease.lease);
+}
+
+// 14b. ADR 0179 decision 1 (review of PR 799): the no-poster seed follows the COMMITTED verified admission and nothing else.
+{
+ const NEG='epg/catalog-poster-negatives.json';
+ const run=async(detail,catalog={})=>{
+  const {file,env}=await fixture({mix:1,catalog});
+  const {context}=chunkContext({clock:{offset:0},respond(url){
+   if(url.pathname.includes('/movie/'))return detail;
+   const title=url.searchParams.get('query');
+   return {results:title==='Film mix00'?[{id:1000,title,original_title:title,release_date:'2000-06-01'}]:[]};
+  }});
+  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+  const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+  const object=await env.BUCKET.get(NEG);
+  const index=object?JSON.parse(await object.text()).entries:null;
+  const admitted=Number(sql(file,"SELECT COUNT(*) AS n FROM discovery_admission")[0].n);
+  await Authority.releaseLease(env,lease.lease);
+  return {result,index,admitted};
+ };
+ // a committed new Film whose complete detail says poster_path:null: remembered, no second request
+ let out=await run({...movieFor(1000,'Film mix00'),poster_path:null});
+ assert.equal(out.result.added,1);assert.ok(out.admitted>=1);assert.equal(out.index['1000'].status,'no_poster_on_tmdb','seeded after the commit');
+ // a poster that exists, a missing key and a malformed value are never seeded
+ out=await run({...movieFor(1000,'Film mix00'),poster_path:'/real.jpg'});assert.equal(out.result.added,1);assert.equal(out.index,null,'a real poster is not a verdict');
+ out=await run(movieFor(1000,'Film mix00'));assert.equal(out.result.added,1);assert.equal(out.index,null,'a missing poster_path is an incomplete answer, never remembered');
+ out=await run({...movieFor(1000,'Film mix00'),poster_path:''});assert.equal(out.index,null,'an empty poster_path is not a verdict');
+ // a refused admission (the identity belongs to another film id) leaves no remembered answer although the detail was verified
+ out=await run({...movieFor(1000,'Film mix00'),poster_path:null},{legacy_1000:{id:'legacy_1000',tmdbId:'1000',canonicalIdentity:'tmdb:1000',title:'Legacy'}});
+ assert.equal(out.result.error,'admission_identity_conflict');assert.equal(out.result.added,0);assert.equal(out.index,null,'an uncommitted candidate leaves no 90-day marker');
 }
 
 

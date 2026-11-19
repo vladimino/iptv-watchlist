@@ -1,5 +1,7 @@
 # TMDB TV identity correction for four retired movie ids (owner approval required)
 
+> **Historical record, not an operating procedure (AIR-537 slice 5, 19 Nov 2026).** This runbook describes the October design in which an owner-written R2 object `identity/tmdb-retirements.json` was carried into D1 by the ADR 0056 enrichment projector. That projector was removed in AIR-537 slice 3, so **no step below changes D1 any more**: writing, changing or deleting the R2 object does not correct, converge or roll back any D1 row, and no later run does either. Do **not** use its R2 write, its `DELETE` or its Rollback section as a D1 correction or recovery mechanism. D1 Film/Person identity is owned by the fenced canonical adapters (marker `d1`/`open`); any correction or recovery is an owner-approved forward fix through them (`open` to `held`, the correction, back to `open`), with D1 Time Travel only as an owner-approved high-impact recovery. See [D1 authority and Time Travel recovery](recovery/d1-authority-and-time-travel.md) and the [Film/Person lifecycle](../architecture/film-person-lifecycle.md). The text below is kept as the record of that design; its present and future wording describes the design, not what any step does today.
+
 This runbook prepares and later executes the correction of [ADR 0057](../adr/0057-tmdb-tv-identity-and-retired-movie-ids.md). Four watchlist miniseries have a retired TMDB movie id. Each one gets its live TMDB TV entry as a trusted `tmdb_tv` identity. The retired movie id is kept, untrusted, with its evidence.
 
 | Film | Retired movie id | TV entry | Letterboxd permalink |
@@ -12,6 +14,8 @@ This runbook prepares and later executes the correction of [ADR 0057](../adr/005
 No other Film is ever planned. A link that disagrees with the attributes on another Film's Letterboxd page is review evidence, not a correction.
 
 ## Order and gates
+
+*Historical (retired design): step 2's projector path and step 3's D1 effect no longer exist.*
 
 1. **Contract and offline tooling** ([AIR-290](https://trello.com/c/70ldvbUB)): `src/domain/tmdb-tv-identity.js` and `scripts/tmdb-tv-identity-plan.mjs`. Code only.
 2. **Runtime integration** ([AIR-297](https://trello.com/c/1q6DkvCu)): the lifecycle projection applies `identity/tmdb-retirements.json`; `parseFilm` keeps the typed TMDB link through metadata refresh; `tmdb_tv` reaches D1 through the enrichment projector; movie-only consumers never receive a TV id ([contract](../reference/domain/film-person.md#runtime-projection), [projector](../reference/data/d1-schema.md#enrichment-projector-schema-v4)). **The production correction must not run before this is deployed** and `Test and build`, `Test shard 2 of 3`, `Test shard 3 of 3` and `Deploy to Cloudflare` completed with success on the exact merge SHA, or the next projection or metadata refresh writes the retired movie id back as trusted.
@@ -53,7 +57,7 @@ For each Film the plan states:
 
 ## Production correction (AIR-291)
 
-This procedure describes future corrections; it does not retroactively change the historical execution or evidence. Classify each action using [risk-proportional operational safeguards](../process/agent-workflow.md#risk-proportional-operational-safeguards). Creating an absent `identity/tmdb-retirements.json` with four approved entries and a single writer is **lightweight additive**. Overwriting an existing object, changing additional identities or encountering another writer is **not**: stop and use the elevated/high-impact path. The owner must explicitly approve the production write and any separately needed operational call; code deployment is never that approval.
+Historical: this procedure described future corrections under the retired R2 + projector design (see the banner); it is not executable now and does not change the historical execution or evidence. Classify each action using [risk-proportional operational safeguards](../process/agent-workflow.md#risk-proportional-operational-safeguards). Creating an absent `identity/tmdb-retirements.json` with four approved entries and a single writer is **lightweight additive**. Overwriting an existing object, changing additional identities or encountering another writer is **not**: stop and use the elevated/high-impact path. The owner must explicitly approve the production write and any separately needed operational call; code deployment is never that approval.
 
 1. **Bounded read-only preflight.**
    - Confirm the relevant runtime and projector code is deployed and `Test and build`, `Test shard 2 of 3`, `Test shard 3 of 3` and `Deploy to Cloudflare` completed with success on the exact merge SHA. Check the approved evidence and exact four Film identities against the current authoritative source. A targeted D1 readback/dry-run is sufficient when it establishes the required before-state and no collisions; do not require an unrelated full R2 snapshot merely to prove the new key is absent.
@@ -70,28 +74,30 @@ This procedure describes future corrections; it does not retroactively change th
      - Put the approved bytes once, with `content-type: application/json`. Do not retry blindly: after any error, `GET` first.
      - `GET` the key back and require identical bytes (or the same SHA-256 and byte length). On conflict, mismatch or unknown outcome, stop instead of repeating an unconditional PUT.
      - Check the body with `tmdbRetirementSet` (`ok: true`, four retirements) before PUT; read-back integrity and the downstream projector's scoped result complete the normal lightweight checks.
-4. **D1.** D1 is not written by hand. The [ADR 0056](../adr/0056-d1-enrichment-write-through.md) enrichment projector owns each Film's identity rows and rewrites them from R2, so one projector run after the R2 write carries the four Films. If the projector is off (`D1_ENRICHMENT_WRITE` unset), D1 stays `pending` until it runs or until a reload replays R2; there is no separate D1 write path.
+4. **D1 (historical, retired in AIR-537 slice 3).** D1 is not written by hand. The [ADR 0056](../adr/0056-d1-enrichment-write-through.md) enrichment projector owned each Film's identity rows and rewrote them from R2, so one projector run after the R2 write carried the four Films. If the projector is off (`D1_ENRICHMENT_WRITE` unset), D1 stays `pending` until it runs or until a reload replays R2; there is no separate D1 write path.
    - The run's summary (`GET /api/d1/status`, `lastRun.summary`) carries `tmdbRetirements`. Expect `valid: true`, `applied: 4`, `held: []`.
    - `outcome: failed` with `reason: input_invalid` and `inputKey: identity/tmdb-retirements.json` means the object failed its check: nothing was written. Stop, and roll back R2 or correct the object under a new approval.
    - A Film in `held` is owner review. Examples: `link_changed` (the refreshed Letterboxd page shows no TMDB link or another one), `attributes_changed` (its `data-tmdb-*` attributes changed), `film_missing` (no R2 source lists it). The projector neither writes nor releases it, so its D1 rows and watchlist membership stay as they were.
 5. **One scoped downstream acceptance.**
-   - Once the existing projector has run (do **not** trigger it without separate owner approval), check its targeted `tmdbRetirements` summary and `d1Readback` against the accepted plan: the four Films must be `corrected`; `held` or `mismatch` stops for review. If the projector is inactive, record D1 as `pending` rather than inventing success.
+   - Historical (retired in AIR-537 slice 3; nothing runs the projector now): once the projector had run (do **not** trigger anything without separate owner approval), check its targeted `tmdbRetirements` summary and `d1Readback` against the accepted plan: the four Films must be `corrected`; `held` or `mismatch` stops for review. If the projector is inactive, record D1 as `pending` rather than inventing success.
    - Check relevant identity / coCredit preservation in the **same scoped verification** when the plan requires it. Do not automatically re-run the entire dry-run merely to duplicate `d1Readback`; re-run it only if the scoped result is ambiguous, a conflict appears or the plan's assumptions changed.
 
-## Rollback
+## Rollback (historical, not executable)
 
-- **R2.** Remove the four entries from `identity/tmdb-retirements.json` (or delete the object if it holds only them). The projection then reads the records' movie ids again. Through the Cloudflare API this is a `DELETE` of the key, under its own owner approval, followed by a `GET` that must answer `404`.
-- **D1.** No hand-written inverse SQL. After the R2 rollback, the next projector run writes the four Films' previous identity back from R2. `d1Readback` against the preflight plan must then show them `pending`.
-- **Whole-database restore (exceptional).** A D1 Time Travel restore is not the routine rollback for a single additive R2 key. It requires a separately authorized, high-impact recovery decision and can discard unrelated newer writes. Do not take a D1 bookmark as a prerequisite for every lightweight change.
+> Under the retired design the rollback was an R2 change followed by a projector run. Neither half works now: the projector was removed (AIR-537 slice 3), so deleting or editing `identity/tmdb-retirements.json` leaves D1 exactly as it is, and a redeploy reapplies nothing. Do not use the steps below to correct or recover D1. The live contract is an owner-approved forward fix through the fenced D1 adapters, and, only for a high-impact recovery, D1 Time Travel ([recovery runbook](recovery/d1-authority-and-time-travel.md)).
 
-- Code rollback restores neither R2 nor D1. The retired movie ids are never deleted, so no rollback needs them back.
-- A code rollback to a release whose projection does not read the object, while the object exists, is a D1 rollback too. That projector ignores the object, so its next run writes the four Films' movie identity back. The object stays in R2, and redeploying the runtime reapplies it on the next run.
+What the design said, kept as a record:
 
-## D1 decision history (prepared, inactive)
+- **R2.** Remove the four entries from `identity/tmdb-retirements.json` (or delete the object if it held only them), through the Cloudflare API a `DELETE` under its own owner approval followed by a `GET` that must answer `404`.
+- **D1.** No hand-written inverse SQL; the projector's next run was to write the previous identity back from R2. That run no longer exists.
+- **Whole-database restore (exceptional).** A D1 Time Travel restore was never the routine rollback for a single additive key; it is a separately authorized, high-impact recovery decision and can discard unrelated newer writes.
+- A code rollback restores neither R2 nor D1. The retired movie ids are never deleted, so no rollback needs them back.
 
-[AIR-370](https://trello.com/c/wZmtK9tS) prepares the D1-owned, owner-only, append-only history of these decisions ([schema reference](../reference/data/d1-schema.md#owner-tmdb-retirement-decisions-schema-v16), [ADR 0099](../adr/0099-canonical-film-person-d1-authority.md) decision 7). It changes nothing in this procedure: the R2 object `identity/tmdb-retirements.json` is still written once by the owner and read by the projector, and the history table, its migration `0016` and its prepare-only loader are not applied, bundled or called.
+## D1 decision history (prepared; now loaded)
 
-- **Un-retirement.** Today the only inverse is the rollback above. In the D1 model the inverse is an explicit owner `restore` decision that names the retirement it reverses; removing a row or an entry is never an implicit un-retirement, and a `restore` is refused unless it reverses the Film's latest `retire` with the same ids.
+[AIR-370](https://trello.com/c/wZmtK9tS) prepares the D1-owned, owner-only, append-only history of these decisions ([schema reference](../reference/data/d1-schema.md#owner-tmdb-retirement-decisions-schema-v16), [ADR 0099](../adr/0099-canonical-film-person-d1-authority.md) decision 7). Status since then: the history table (migration `0016`) is applied and its four historical decisions are loaded in D1 (class `tmdb_retirement_decision`, [H1 evidence](../evidence/d1-migration/air-374-h1-load-2026-11-13.md)); the prepare-only loader was removed in AIR-537 slice 2 and no projector reads the R2 object `identity/tmdb-retirements.json` any more.
+
+- **Un-retirement.** The R2 rollback above no longer reaches D1, so it is not an inverse. In the D1 model the inverse is an explicit owner `restore` decision that names the retirement it reverses; removing a row or an entry is never an implicit un-retirement, and a `restore` is refused unless it reverses the Film's latest `retire` with the same ids.
 - **Load.** Loading the four historical Films from the R2 object into the history is a separate owner-approved step of the baseline card ([AIR-373](https://trello.com/c/ugu3sQmp)), run as fenced `retire` decisions with deterministic request ids, so repeating it is a replay. A potentially destructive identity correction stays an L3 owner gate.
 - **Held.** A decision is held, not written, when another Film trusts the TV entry or the retired movie id, or the Film does not carry the retired movie id; the owner reviews it as with `held` above.
 

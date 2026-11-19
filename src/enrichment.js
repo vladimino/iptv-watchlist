@@ -1141,7 +1141,7 @@ function logPredictionFailure(boundary,error,requestId,runId){
 // parallel are not summed as if sequential: `busyMs` is the union of their intervals, `overlapMs` what the sum exceeds it by, and
 // `unattributedMs` the rest of the wall time (compute, scheduling, the awaits between calls). A failure of any of this is swallowed.
 const STEP_TIMER=Symbol('predictionStepTimer');
-const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','leaseRefusedAtAcquire','liveLeaseAgeMs','drainedCommitted','drainedDropped'];
+const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','leaseRefusedAtAcquire','liveLeaseAgeMs','drainedCommitted','drainedDropped','priorityLagAccepted','priorityRebased'];
 const STEP_STAGES=['preflight','turned_away','idle','settle_previous','catalog_gate','queue_refresh','preflight_refreshed','runner_lease','preflight_lease','persist'],STEP_STAGE_CAP=16;
 const STEP_OPS_CAP=4000,STEP_CLASS_CAP=40;
 const STEP_TABLE=/\b(?:from|into|update|join)\s+["`]?([a-z_][a-z0-9_]{0,59})["`]?/i;
@@ -1920,7 +1920,18 @@ function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
  if(lastSuccessAt)return integrationEntry('predictions','capability',fresh(lastSuccessAt),freshCode(lastSuccessAt),lastSuccessAt,isInterrupt(latest)||isFailedOnly(latest)?lastFailureAt:null);
  return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
 }
-function integrationHealth({sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null,recentRuns=null,queue=null}){
+// ADR 0179 / AIR-543: the weekly poster source. One projection of the B1 checkpoint (CatalogPosterWeekly.readStatus); absent evidence is never healthy.
+const POSTER_STATE_MAP={healthy_idle:['healthy','poster_idle'],grace:['waiting','poster_first_run'],waiting:['waiting','poster_retry_scheduled'],overdue:['degraded','poster_overdue'],stalled:['degraded','poster_stalled'],lost:['degraded','poster_lost'],failed:['failed','poster_failed'],unknown:['unknown','no_data']};
+function posterIntegration(projection){
+ const state=projection&&typeof projection==='object'?projection.state:null,mapped=POSTER_STATE_MAP[state];
+ if(!mapped)return {...integrationEntry('posters','source','unknown','no_data',null,null),freshnessAt:null,lastWeek:null,nextAttemptAt:null};
+ const summary=projection.summary&&typeof projection.summary==='object'?projection.summary:null,count=value=>Number.isInteger(value)&&value>=0?value:null;
+ const code=state==='healthy_idle'&&summary?.hydrated>0?'poster_hydrated':mapped[1];
+ const completed=projection.lastOutcome?.status==='completed'&&state==='healthy_idle',freshness=integrationTime(projection.freshnessAt);
+ const failedAt=state==='failed'?freshness:null;
+ return {...integrationEntry('posters','source',mapped[0],code,completed?freshness:null,failedAt),freshnessAt:freshness,lastWeek:summary?{weekStart:projection.lastOutcome?.weekStart??null,checked:count(summary.checked),hydrated:count(summary.hydrated),noPoster:count(summary.noPoster),pending:count(summary.pending)}:null,nextAttemptAt:integrationTime(projection.nextExpectedAt)};
+}
+function integrationHealth({posters,sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null,recentRuns=null,queue=null}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
  const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
  const watchlistSuccess=[sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):null,integrationTime(report?.watchlistUpdatedAt),integrationTime(watchlistIngest?.lastSuccessAt)].filter(Boolean).sort((a,b)=>Date.parse(a)-Date.parse(b)).at(-1)||null;
@@ -2010,6 +2021,8 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
  const predictions=predictionCapabilityHealth({run,live,now,recentRuns,queue});
  const films=report?.watchlistCount||report?.films?.length||0,missing=(report?.stats?.metadataMissing||0)+(report?.stats?.titleMissing||0)+(report?.stats?.titleProvisional||0);
  const sources=[watchlist,ratingsSource,epg,resolver,predictions];
+ // `posters` is undefined only where the module is not bundled; a failed or timed-out read is null and shows as unknown, never healthy.
+ if(posters!==undefined)sources.push(posterIntegration(posters));
  if(films>=10&&missing/films>=.2)sources.push(integrationEntry('metadata','source','degraded','metadata_attention',null,null));
  const failed=sources.filter(item=>item.state==='failed').length,attention=sources.filter(item=>!['healthy','off','running','waiting'].includes(item.state)).length;
  return {aggregate:failed?'failed':attention?'attention':'healthy',attentionCount:attention,failedCount:failed,sources};
@@ -2181,6 +2194,8 @@ async function footerStatus(env){
  let metadata=metadataR2;
  if(filmPersonGate?.mode==='d1')metadata=footerMetadataProjection(await CanonicalCatalogReader.catalogMetadataFromD1(env,canonicalIdentityIds([report,catalog,watchlist,index]),filmPersonGate,{identityOnly:true}));
  const freshness=await guard('freshness',()=>predictionFreshness(env,profile));
+ // One extra read of monitor/state.json (the write-once markers) and one of the B1 checkpoint; no write, no TMDB.
+ const posters=typeof CatalogPosterWeekly==='undefined'?undefined:await guard('posters',async()=>{const state=await loadJSON(env,'monitor/state.json');return CatalogPosterWeekly.readStatus(env,{markers:{baselineAt:state?.catalogPostersBaselineAt??null,seenAt:state?.catalogPostersSeenAt??null},monitorOn:env?.MONITOR==='on',nowMs:Date.now()});});
  if(filmPersonGate)await CanonicalCatalogReader.catalogReaderStill(env,filmPersonGate);
  // Coverage needs the programme, the catalog, the view index and the freshness rule. If any of them could not be read the numbers are unknown, not zero or 100%.
  // A programme or catalog object that is simply absent (the read answered null) is as unreadable as one that failed: it is not an empty collection with 100% coverage.
@@ -2202,7 +2217,7 @@ async function footerStatus(env){
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?footerCompute(degraded,'run',()=>runSummary(run),null):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageKnown?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?summary.added:null,failed:summary?summary.failed:null}:null,integrations:footerCompute(degraded,'integrations',()=>integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease,recentRuns:predictionRuns,queue:storedQueue}),{aggregate:'unknown',attentionCount:null,failedCount:null,sources:[]}),...(degraded.length?{degraded:[...degraded]}:{})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageKnown?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?summary.added:null,failed:summary?summary.failed:null}:null,integrations:footerCompute(degraded,'integrations',()=>integrationHealth({posters,sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease,recentRuns:predictionRuns,queue:storedQueue}),{aggregate:'unknown',attentionCount:null,failedCount:null,sources:[]}),...(degraded.length?{degraded:[...degraded]}:{})};
 }
 function queueLaneIds(queue,exclude=new Set()){
  const skip=id=>exclude.has(id)||retryBudgetExhausted(queue.retries?.[id]);
@@ -2572,6 +2587,47 @@ async function batchIdle(env,body,pre){
  return result;
 }
 // What a refusal of the manifest never does: it creates no run, Event, diagnostics row or `latest-run`, and it does not pass through the start's stop recorder.
+// AIR-542: the proof that a queue revision or manifest change between the baseline preflight and the post-lease preflight is a re-rank and nothing else. Returns null when proven, else the
+// refusal cause. The proof compares the queue itself, not the manifest hash: every field outside PRIORITY_QUEUE_FIELDS (work and migration share compared per film and independent of key
+// order, retries, last batch, profile, contract, compatibility versions, recovery revision, shape) must be equal, and so must the set of queued films. `pending`, `hotPending` and `coldPending`
+// are ordered by rank and `pending` takes every hot film, so a real rebuild that promotes a film reorders and resizes `pending`: only the union of the three is compared. A change that decides WHICH films may be selected is never a re-rank. A rank-only
+// revision may leave the delivered manifest byte-identical (films outside the first `manifestSize` re-ranked): that is proven the same way and the run continues. When the manifest differs the
+// films present in both must keep plan, metadata and fingerprint, and a film the new selection dropped must not have been skipped as no longer admitted or current, nor be staged elsewhere.
+// `again` was read under the owned lease, so it stays the manifest that is delivered.
+const PRIORITY_QUEUE_FIELDS=new Set(['pending','work','hotCount','coldCount','coldWithoutPrediction','hotPredicted','priority','priorityBasis','priorityAsOf','priorityCount','priorityNextChangeAt','showsSignature','urgentCount','coldRemaining','hotPending','coldPending','refreshedAt','trigger','metrics','discovery','compatibility']);
+async function priorityOnlyRebaseCause(env,pre,again){
+ if(again.report?.runId!==pre.report?.runId||again.queue?.programmeRunId!==pre.queue?.programmeRunId)return 'programme';
+ const a=pre.manifest.body,b=again.manifest.body;
+ if(a.profile?.hash!==b.profile?.hash||JSON.stringify(a.contract)!==JSON.stringify(b.contract))return 'contract';
+ // Canonical: object keys sorted at every depth. A real rebuild orders `pending` by priority and builds `work` in that order, so neither list order nor key insertion order is meaning.
+ const stable=v=>Array.isArray(v)?v.map(stable):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,stable(v[k])])):v;
+ const rest=queue=>{const out={};for(const key of Object.keys(queue))if(!PRIORITY_QUEUE_FIELDS.has(key))out[key]=queue[key];return JSON.stringify(stable(out));};
+ const set=list=>JSON.stringify([...new Set(list||[])].sort());
+ const members=queue=>set([...(queue.pending||[]),...(queue.hotPending||[]),...(queue.coldPending||[])]);
+ if(rest(pre.queue)!==rest(again.queue)||members(pre.queue)!==members(again.queue))return 'queue';
+ // `work` is built for the films of `pending` only, so a promoted film gains an entry and a demoted one loses it: that follows the rank. For every film that has one on both sides the classification
+ // (class, migration, reason, fields) must be equal, which is what the migration-share cap reads.
+ const w0=pre.queue.work||{},w1=again.queue.work||{};
+ for(const id of Object.keys(w0))if(id in w1&&JSON.stringify(stable(w0[id]))!==JSON.stringify(stable(w1[id])))return 'queue';
+ // An entry may appear only for a film that ENTERED `pending` (not in it before, in it now) and disappear only for one that LEFT it. A film pending on both sides keeps its entry: adding or
+ // deleting it changes the migration share, which is not a re-rank.
+ const p0=new Set(pre.queue.pending||[]),p1=new Set(again.queue.pending||[]);
+ for(const id of Object.keys(w1))if(!(id in w0)&&!(!p0.has(id)&&p1.has(id)))return 'queue';
+ for(const id of Object.keys(w0))if(!(id in w1)&&!(p0.has(id)&&!p1.has(id)))return 'queue';
+ if(again.manifest.hash===pre.manifest.hash)return null;
+ // The queue's selection inputs are the same, so a different manifest under an unchanged revision is a change of film state, not of rank.
+ if(again.revision===pre.revision)return 'manifest';
+ const content=f=>JSON.stringify([f.plan,f.modelMetadata,f.fingerprint?.fingerprintHash||null]);
+ const oldFilms=new Map(a.films.map(f=>[f.filmId,f])),newFilms=new Map(b.films.map(f=>[f.filmId,f]));
+ for(const [id,f] of newFilms)if(oldFilms.has(id)&&content(oldFilms.get(id))!==content(f))return 'manifest';
+ const dropped=[...oldFilms.keys()].filter(id=>!newFilms.has(id));
+ if(dropped.length){
+  const gone=new Set([...again.selection.skipped.missingAdmission,...again.selection.skipped.alreadyCurrent]);
+  const staged=await loadJSON(env,BATCH_STAGE_KEY),stagedIds=new Set((Array.isArray(staged?.items)?staged.items:[]).map(item=>item.filmId));
+  for(const id of dropped)if(gone.has(id)||stagedIds.has(id))return 'manifest';
+ }
+ return null;
+}
 // What a start did, for the step-timing line: counters only (no ids, keys or payloads). `tally` is one request's own object.
 async function batchStartRoute(env,body,requestId){
  const tally={preflights:0,refreshRounds:0,scannedFilms:0,settledFilms:0};
@@ -2612,7 +2668,10 @@ async function batchStartWork(env,body,requestId,tally){
   catch(error){if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
   // The preflight is repeated on the refreshed queue and is the baseline from here on. An overflow now has the refresh as its only effect.
   pre=await timedStage(env,'preflight_refreshed',()=>batchPreflight(env,body,tally));if(pre.response)return pre.response;
-  if(pre.stale||pre.priorityDue)return batchBlocked('queue_changed',{queueRefreshed:true,cause:pre.stale?'stale':'priority'});
+  // AIR-542: one rebuild per start. A priority that moved again during it (a Discovery assignment landing mid-rebuild) is a lag the next start repairs, never a refusal or a second rebuild.
+  // An unreadable signature is not drift: hot outstanding cannot be verified at all, so no cold manifest is delivered (the next start retries the read).
+  if(pre.stale||pre.priorityCause==='shows_signature_unreadable')return batchBlocked('queue_changed',{queueRefreshed:true,cause:pre.stale?'stale':'priority'});
+  if(pre.priorityDue)tally.priorityLagAccepted=1;
   if(pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre,{queueRefreshed:true,...(queueSettled?{queueSettled}:{})});
  }
  // After the refresh the baseline can be idle too (the queue was stale, or every selected film was already current).
@@ -2635,7 +2694,13 @@ async function batchStartWork(env,body,requestId,tally){
   forgetAuthority(env);
   const again=await timedStage(env,'preflight_lease',()=>batchPreflight(env,body,tally));
   if(again.response){await runnerLease(env,runId,'release');return again.response;}
-  if(again.stale||again.priorityDue||again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{cause:again.stale?'stale':again.priorityDue?'priority':again.revision!==pre.revision?'revision':'manifest',...(queueRefreshed?{queueRefreshed:true}:{})});}
+  // AIR-542: `stale`, an unreadable signature, a revision or manifest change not proven to be a re-rank (priorityOnlyRebaseCause), and any such change that coexists with a genuine
+  // difference keep the refusal. Priority drift on its own (the manifest and revision unchanged) just continues. A proven re-rank rebases once onto `again`, taken under the lease.
+  const moved=again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash;
+  const unsafe=again.stale?'stale':again.priorityCause==='shows_signature_unreadable'?'priority':moved?await priorityOnlyRebaseCause(env,pre,again):null;
+  if(unsafe){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{cause:unsafe==='queue'||(unsafe==='manifest'&&again.revision!==pre.revision)?'revision':unsafe,...(queueRefreshed?{queueRefreshed:true}:{})});}
+  if(again.priorityDue)tally.priorityLagAccepted=1;
+  if(moved)tally.priorityRebased=1;
   const exact=await buildBatchManifest(env,{profile:again.profile,items:again.selection.items,runId,lease});
   answer=batchStartAnswer({...exact.body,...batchRealExtras(again.selection,again.queue,{queueRefreshed,queueSettled,dryRun:false})});
   if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes){await runnerLease(env,runId,'release');return batchOverflow({...exact,bytes:batchBytes(answer)},{queueRefreshed,...(queueSettled?{queueSettled}:{})});}

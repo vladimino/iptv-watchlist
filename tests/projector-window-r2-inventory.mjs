@@ -91,6 +91,7 @@ const FILE_SITES={
  'src/admin/film-title-route.js':{r2:1,wrapper:0,dynamic:0},
  'src/admin/letterboxd-archive-apply.js':{r2:3,wrapper:0,dynamic:1},
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
+ 'src/catalog-poster-weekly.js':{r2:2,wrapper:0,dynamic:1},   // ADR 0179 (AIR-543): the weekly poster checkpoint (epg/catalog-poster-weekly.json) and the immutable catalog_posters events (events/items/<reverse-timestamp>-<id>.json); neither is a projector input
  'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0118: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)
  'src/discovery.js':{r2:8,wrapper:15,dynamic:3},
  // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
@@ -190,18 +191,19 @@ const classes={
  'putKnownLength@src/worker.js':'under the publication lease',
  'writeEvent@src/worker.js':'EPG event log (not a projector input)',
  'writeWorkflowState@src/discovery-workflow.js':'Workflow record: D1-routed, refused inside a held window by windowHeldGuard',
+ // ADR 0179 (AIR-543). The daily poster cron is reached by name from the Worker's scheduled entry; none of these is a projector input.
+ 'catalogPosterApply@src/discovery.js':'poster-only copy write of the owner route and of the weekly sweep (the shared core); takes the resolver lease and re-checks the generation before every write (ADR 0048, ADR 0179)',
+ 'catalogPosterNegativesSave@src/discovery.js':'the poster negative index epg/catalog-poster-negatives.json (not a projector input), by compare-and-swap: the route, the weekly sweep and the admission seed, which runs inside the chunk that holds the lease',
+ 'writeCheckpoint@src/catalog-poster-weekly.js':'the weekly poster checkpoint epg/catalog-poster-weekly.json (not a projector input), by compare-and-swap; the daily cron entry only',
+ 'deliver@src/catalog-poster-weekly.js':'immutable catalog_posters events under events/items/ (not a projector input) and the outbox mark; the daily cron entry only',
 };
 const reached=new Set([...writers(chunk),...writers(publication)]);
 for(const key of reached)assert.ok(classes[key],'unclassified R2 writer reachable from Discovery or publication: '+key+' (classify it against the projector inputs)');
 for(const key of Object.keys(classes))assert.ok(reached.has(key),'stale classification, no longer reachable as a writer: '+key);
 
-// The projector's own input list, read from its source.
-const projector=fs.readFileSync('src/d1-enrichment.js','utf8');
-const inputs=new Set();
-for(const line of projector.split('\n')){
- if(!/d1EnrichmentRead\(|d1EnrichmentDiscoveryRead\(/.test(line))continue;
- for(const m of line.matchAll(/'([^']+\.json)'/g))inputs.add(m[1]);
-}
+// AIR-537 slice 3: the enrichment projector that read these R2 objects is retired, so its input list can no longer be read from its
+// source. The list is frozen here as it stood when the runner was removed; the objects stay protected from unfenced Discovery writes.
+const inputs=new Set(['watchlist.json','programme.json','metadata.json','titles.json','people.json','discovered-films.json','epg/discovery-resolution.json','letterboxd/diary/history.json','enrichment/view-index.json','letterboxd/admissions/verified-films.json']);
 // ADR 0162: admin/owner-reviews.json is no longer a projector input; the projector reads owner reviews from D1 only.
 const notDiscovery=['metadata.json','titles.json','people.json','watchlist.json','letterboxd/diary/history.json','enrichment/view-index.json','letterboxd/admissions/verified-films.json'];
 for(const name of notDiscovery)assert.ok(inputs.has(name),'the projector reads '+name);
@@ -222,11 +224,8 @@ for(const key of seen)assert.ok(NAMING[key],'a reachable function names a projec
 for(const key of Object.keys(NAMING))assert.ok(seen.has(key),'stale: '+key);
 
 // 3. The lease-free path that writes a projector-input key is the EPG writer's mirror reconcile (repairMirrors,
-// writeMirrors, putStable): it writes only R2 copies of a document that D1 owns. GET does not call it. The projector reads that document from the D1 published
-// snapshot whenever one exists, and only otherwise from R2, so a mirror write cannot change what a run reads under a D1 published authority.
-assert.match(projector,/published\?null:d1EnrichmentRead\(env,etags,'watchlist\.json'/,'watchlist is read from R2 only without a published D1 snapshot');
-assert.match(projector,/published\?null:d1EnrichmentRead\(env,etags,epgGenerationKey\(runId,'programme\.json'\)/,'programme is read from R2 only without a published D1 snapshot');
-assert.match(projector,/PublishedEpg\.authoritativeSnapshot\(env\)/,'the published snapshot is the D1 authority');
+// writeMirrors, putStable): it writes only R2 copies of a document that D1 owns. GET does not call it. (AIR-537 slice 3: the projector that
+// read those objects is retired; the published EPG is D1-owned and the mirrors are compatibility copies.)
 const chunkNaming=new Set(naming(chunk));
 assert.ok(chunkNaming.has('loadJSON@src/worker.js'),'loadJSON still names a projector input as a read');
 assert.equal(chunkNaming.has('repairMirrors@src/published-epg.js'),false,'GET and the chunk path no longer call repairMirrors');

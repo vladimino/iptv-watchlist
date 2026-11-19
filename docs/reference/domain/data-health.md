@@ -168,7 +168,7 @@ A record of another generation than the published one cannot be acted on: its ac
 
 Every evidence time is compared with the caller's `now`. A progress or publication time ahead of `now` by more than `skewToleranceMs` is clock skew: the issue gets `clock_skew` in `evidence.anomalies`, its `progress.status` or `freshness.status` is `unknown`, its action is `supply_evidence` with eligible `null`, and `result.clock.anomalies` lists `clock_skew`. Within the tolerance a future time has age `0`. A `retryAt` is expected in the future and is never skew; the policy cap bounds it instead.
 
-Each projection may say which `programmeRunId` it was built from. One that differs from `published.programmeRunId` is of another generation: film and observation issues keep their category and severity but carry `projection_generation_differs` with partial evidence and a `wait` / `reread_snapshot` action; the queue, the continuation and the poster summary add a `stale` / `projection_generation_differs` issue. Without a published pointer no generation comparison is made. The pin check is separate: `pin.programmeRunId` is what the caller believed it was reading and produces its own `pin_generation_changed` issue.
+Each projection may say which `programmeRunId` it was built from. One that differs from `published.programmeRunId` is of another generation: film and observation issues keep their category and severity but carry `projection_generation_differs` with partial evidence and a `wait` / `reread_snapshot` action; the queue, the continuation and the poster summary add a `stale` / `projection_generation_differs` issue. Without a published pointer no generation comparison is made. The pin check is separate: `pin.programmeRunId` is what the caller believed it was reading and produces its own `pin_generation_changed` issue. An observation index that is `stale` without a manifest (`generation_moved`) supplies no `observations` input and no `coverage.observations`: it is unreadable, not an empty projection.
 
 ## Order and deduplication
 
@@ -225,3 +225,6 @@ Limbo kinds are `film` and `observation`. A Letterboxd rated candidate before ve
 
 Tests: `node tests/limbo-inventory.mjs`.
 
+## Catalog posters (owner health read)
+
+The owner health read `GET /api/admin/health` carries a `catalogPosters` section next to the model's `health` object ([admin reference](../api/admin.md#catalog-posters-section)). It is **not** an issue of this model and adds no rule, threshold or group: it is the read-only projection of the automatic weekly poster retry ([ADR 0179](../../adr/0179-weekly-automatic-catalog-poster-retry.md)), with the domain state, the mapped Monitor status, `nextExpectedAt` and `freshnessAt`. The `poster` rule above (a film with `poster: null`) is unchanged; a film that TMDB has no poster for stays a `poster_missing` info issue while its `no_poster_on_tmdb` hold runs, and the weekly retry is the routine that later re-asks. An unreadable checkpoint is `unknown`, never healthy.

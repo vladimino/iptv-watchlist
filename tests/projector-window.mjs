@@ -1,8 +1,9 @@
 // ADR 0103 (AIR-383), stage A: the exclusive projector window. Local sqlite stand-ins for D1 (the sqlite3 CLI, each batch one
 // transaction) and a memory bucket for R2. Nothing here calls Cloudflare, TMDB or production. Covered: the migration file, the
 // window protocol (request, grant, release) as atomic statements, Discovery admission closing, the three lease-free generation
-// writers, a stalled former lease holder, every generation bump statement having a fence or the window predicate, the projector under
-// a held window with the strict generation pin unchanged, and the failure and not-applicable paths. The 1,000-tick interleaving at the
+// writers, a stalled former lease holder, every generation bump statement having a fence or the window predicate, and the failure and
+// not-applicable paths. AIR-537 slice 3: the enrichment projector that ran under a held window is retired and its scenarios are removed;
+// the window table, protocol and Discovery fences are the retained contract. The 1,000-tick interleaving at the
 // end is a MODEL (seeded, assumptions stated in the code), not a measurement.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
@@ -12,7 +13,6 @@ import path from 'node:path';
 import * as Authority from '../src/discovery-authority.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
-import {projectorContext} from './d1-enrichment-context.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 // ADR 0162: a marker that is not d1 is refused. The fixture puts the owner-review and metadata-cache markers at d1 with no rows
 // (the former r2 markers with no R2 object gave the same empty overlay and cache).
@@ -254,177 +254,8 @@ assert.equal(DEADLINE,300000);assert.equal(MIN,120000);
  assert.match(fs.readFileSync('src/discovery-authority.js','utf8'),/WINDOW_ACTIVE_SQL/);
 }
 
-// 7. The projector under a window. Real authority, real migrations, real write path; a Discovery process that keeps trying.
-const T='2026-10-28T10:00:00.000Z';
-const person=(id,name)=>({id,name,original:name});
-const MANN=person('director/michael-mann','Michael Mann'),PACINO=person('actor/al-pacino','Al Pacino'),DE_NIRO=person('actor/robert-de-niro','Robert De Niro');
-const film=(id,title,tmdbId,directors,actors)=>({id,title,original:title,year:1995,tmdbId,url:'https://letterboxd.com/film/'+id+'/',directors,actors});
-const meta=record=>({...record,metadataAt:T,peopleVersion:1,peopleNamesVersion:2,synopsis:'Synopsis',synopsisFetchedAt:T,runtime:120});
-function r2(){
- const films=[film('heat','Heat','949',[MANN],[PACINO,DE_NIRO]),film('collateral','Collateral','1538',[MANN],[PACINO])];
- const bucket=new MemoryBucket();
- const put=(key,value)=>bucket.put(key,JSON.stringify(value));
- put('watchlist.json',{updatedAt:T,films});
- put('metadata.json',Object.fromEntries(films.map(item=>[item.id,meta(item)])));
- put('titles.json',{});put('people.json',{});
- put('epg/published-generation.json',{phase:'published',programmeRunId:'run-1'});
- put('epg/generations/run-1/programme.json',{updatedAt:T,films:films.map(item=>({...item,shows:[]}))});
- return bucket;
-}
-const logs=[];
-const projectorFor=()=>projectorContext({log:line=>logs.push(JSON.parse(line)),globals:{DiscoveryAuthority:Authority}});
-const filmsWritten=db=>Number(first(db,"SELECT COUNT(*) AS n FROM projection_state WHERE projection='enrichment' AND kind='film'"));
-const fakeClock=(onSleep=()=>{})=>({t:Date.now(),sleeps:0,now(){return this.t;},async sleep(ms){this.sleeps++;this.t+=ms;await onSleep(this.sleeps);}});
-// A Discovery process: tries to take the lease and to write its own state. Returns what it saw.
-async function discoveryAttempt(env){
- const seen={};
- const taken=await Authority.acquireLease(env,{});
- seen.lease=taken.lease?'taken':taken.busy?.kind||'none';
- if(taken.lease){await Authority.releaseLease({...env,discoveryLease:taken.lease},taken.lease);}
- try{seen.continuation=(await Authority.writeContinuation(env,{programmeRunId:'run-1',stage:'idle',at:new Date().toISOString()},undefined)).saved?'saved':'conflict';}
- catch(error){seen.continuation=error.code;}
- return seen;
-}
-const setup=(opts={})=>{const {db,file}=migrated(18,opts);open(db);const bucket=r2();return {db,file,bucket,env:{DB:db,BUCKET:bucket,discoveryLease:null,D1_ENRICHMENT_WRITE:'on',D1_ENRICHMENT_WINDOW:'on'}};};
-
-// 7a. Reproduction without the window: Discovery bumps the generation once during the read; the strict pin defers the run.
-{
- const {db,bucket,env}=setup();
- delete env.D1_ENRICHMENT_WINDOW;
- const get=bucket.get.bind(bucket);let bumped=false;
- bucket.get=async key=>{if(!bumped&&key==='titles.json'){bumped=true; /* ADR 0162: metadata.json is no longer a projector input in mode d1 */ await Authority.writeContinuation(env,{programmeRunId:'run-1',stage:'idle'},undefined);}return get(key);};
- const summary=await projectorFor().runD1EnrichmentProjection(env,{window:{}});
- assert.equal(summary.outcome,'deferred');assert.ok(['input_changed','authority_unavailable'].includes(summary.reason),'the strict pin defers the run: '+summary.reason);
- assert.equal(summary.window,undefined,'flag off: no window record');
- assert.equal(filmsWritten(db),0);
-}
-
-// 7b. With the window: Discovery keeps trying during the whole run and is refused; the run is productive; the strict pin held;
-// the window and the lease are freed and Discovery resumes.
-{
- const {db,bucket,env}=setup();
- const seen=[];
- const get=bucket.get.bind(bucket);let attempts=0;
- bucket.get=async key=>{
-  const row=windowRow(db);
-  if(row.state==='held'&&attempts<6){attempts++;seen.push(await discoveryAttempt(env));}
-  return get(key);
- };
- const clock=fakeClock();
- const summary=await projectorFor().runD1EnrichmentProjection(env,{window:{clock,pollMs:1}});
- assert.equal(summary.outcome,'complete',JSON.stringify(summary));
- assert.equal(summary.window.outcome,'granted');
- assert.ok(Number.isFinite(summary.window.expiresAt));
- assert.equal(summary.window.generationAtGrant,summary.window.generationAtFirstBatch,'the generation did not move from the grant to the first batch');
- assert.equal(summary.discoveryGeneration,summary.window.generationAtGrant,'the pin read inside the window is the generation at the grant');
- assert.ok(Number.isFinite(summary.window.heldMs));
- assert.equal(summary.writtenFilms,2);assert.ok(summary.writtenPeople>0);assert.equal(filmsWritten(db),2);
- assert.ok(seen.length>0);
- for(const item of seen){assert.equal(item.lease,'projector_window');assert.equal(item.continuation,'discovery_window');}
- assert.deepEqual({...windowRow(db)},{state:'idle',owner:null,expiresAt:0});
- assert.ok((await Authority.acquireLease({...env},{})).lease,'Discovery resumes');
- assert.equal(logs.at(-1).window.outcome,'granted');assert.ok(!JSON.stringify(logs.at(-1)).includes('Heat'),'no payload in the log');
- // AIR-392: the window shows in the run's timing: the request to grant (diff excluded), the diff, the first batch and the window release.
- assert.ok(Number.isInteger(summary.timing.windowMs)&&summary.timing.windowMs>=0,JSON.stringify(summary.timing));
- assert.ok(Number.isInteger(logs.at(-1).timing.windowReleaseMs),'the release of the window is in the log line');
- assert.ok(Number.isInteger(summary.timing.preWriteMs)&&summary.timing.preWriteMs>=0,'pre-write time is measured from the grant');
-}
-
-// 7c. An in-flight chunk at the request: the run waits (polls, no busy loop, no failure) until the lease is free, then it is granted.
-{
- const {db,env}=setup();
- const held=await Authority.acquireLease(env,{});
- assert.ok(held.lease);
- const clock=fakeClock(count=>{if(count===3)db.sql('UPDATE discovery_lease SET expires_at=0 WHERE id=1');});
- const summary=await projectorFor().runD1EnrichmentProjection(env,{window:{clock,pollMs:2000}});
- assert.equal(summary.outcome,'complete',JSON.stringify(summary));
- assert.equal(clock.sleeps,3);assert.equal(summary.window.waitMs,6000);
- assert.equal(filmsWritten(db),2);
-}
-
-// 7d. The lease never frees: the run withdraws before the deadline leaves too little time, with its own reason and nothing changed.
-{
- const {db,env}=setup();
- const held=await Authority.acquireLease(env,{});
- db.sql(`UPDATE discovery_lease SET expires_at=${Date.now()+3600000} WHERE id=1`);
- const clock=fakeClock();
- const summary=await projectorFor().runD1EnrichmentProjection(env,{window:{clock,pollMs:4000,deadlineMs:130000}});
- assert.equal(summary.outcome,'deferred');assert.equal(summary.reason,'window_not_granted');
- assert.equal(summary.window.outcome,'window_not_granted');
- assert.equal(windowRow(db).state,'idle','the request was withdrawn');
- assert.equal(leaseRow(db).leaseId,held.lease.id,'the chunk lease is untouched');
- assert.equal(filmsWritten(db),0);
- assert.equal(summary.queries>=0,true);
-}
-
-// 7e. Another run owns the window: this run is refused and the other's row is left exactly as it was.
-{
- const {db,env}=setup();
- db.sql(`UPDATE projector_window SET state='requested', owner='other', requested_at=${Date.now()}, expires_at=${Date.now()+200000} WHERE id=1`);
- const summary=await projectorFor().runD1EnrichmentProjection(env,{window:{clock:fakeClock(),pollMs:1}});
- assert.equal(summary.outcome,'deferred');assert.equal(summary.reason,'window_busy');
- assert.equal(windowRow(db).owner,'other');assert.equal(windowRow(db).state,'requested');
- assert.equal(filmsWritten(db),0);
-}
-
-// 7f. The window ends under the run: every write batch is refused, nothing is written, no key advances, the outcome is deferred
-// with its own reason and the lease is not reported lost.
-{
- const {db,bucket,env}=setup();
- const get=bucket.get.bind(bucket);let expired=false;
- bucket.get=async key=>{if(!expired&&key==='titles.json'){expired=true;db.sql('UPDATE projector_window SET expires_at=1 WHERE id=1');}return get(key);};
- const summary=await projectorFor().runD1EnrichmentProjection(env,{window:{clock:fakeClock(),pollMs:1}});
- assert.equal(summary.outcome,'deferred');assert.equal(summary.reason,'window_lost');
- assert.equal(summary.leaseLost,false);assert.equal(summary.writtenFilms,0);assert.equal(summary.writtenPeople,0);
- assert.equal(filmsWritten(db),0);assert.equal(Number(first(db,"SELECT COUNT(*) AS n FROM projection_state")),0);
- assert.equal(windowRow(db).state,'idle','released even though it had expired');
-}
-
-// 7g. The projector's own lease lost inside a window is still the lease outcome, told apart by re-reading.
-{
- const {db,bucket,env}=setup();
- const get=bucket.get.bind(bucket);let stolen=false;
- bucket.get=async key=>{if(!stolen&&key==='titles.json'){stolen=true;db.sql("UPDATE projection_run SET lease_id='thief' WHERE projection='enrichment'");}return get(key);};
- const summary=await projectorFor().runD1EnrichmentProjection(env,{window:{clock:fakeClock(),pollMs:1}});
- assert.equal(summary.outcome,'lease_lost');assert.equal(summary.leaseLost,true);assert.equal(filmsWritten(db),0);
-}
-
-// 7h. The strict generation pin is unchanged: a bump forced inside the window (as no writer could) still defers the run.
-{
- const {db,bucket,env}=setup();
- const get=bucket.get.bind(bucket);let forced=false;
- bucket.get=async key=>{if(!forced&&key==='people.json'){forced=true;db.sql('UPDATE discovery_authority SET generation=generation+1 WHERE id=1');}return get(key);};
- const summary=await projectorFor().runD1EnrichmentProjection(env,{window:{clock:fakeClock(),pollMs:1}});
- assert.equal(summary.outcome,'deferred');assert.ok(['input_changed','authority_unavailable'].includes(summary.reason),'the strict pin still defers: '+summary.reason);
- assert.equal(filmsWritten(db),0);assert.equal(windowRow(db).state,'idle','the window is released on a deferred run');
-}
-
-// 7i. Not applicable: the table absent, or the flag off, or a dry run: the run is what it was and writes nothing for the window.
-{
- const recorded=[];
- const {db,env}=setup({onQuery:async text=>{recorded.push(text);}});
- delete env.D1_ENRICHMENT_WINDOW;
- const off=await projectorFor().runD1EnrichmentProjection(env,{});
- assert.equal(off.outcome,'complete',JSON.stringify(off));assert.equal(off.window,undefined);
- assert.equal(recorded.filter(text=>/^\s*(INSERT|UPDATE|DELETE)/i.test(text)&&/projector_window/.test(text)).length,0,'flag off: no window write');
- const noTable=migrated(17,{onQuery:async text=>{recorded.push(text);}});open(noTable.db);
- recorded.length=0;
- const absent=await projectorFor().runD1EnrichmentProjection({DB:noTable.db,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on',D1_ENRICHMENT_WINDOW:'on'},{});
- assert.equal(absent.outcome,'complete',JSON.stringify(absent));assert.deepEqual({...absent.window},{outcome:'not_applicable',reason:'no_window_table'});
- assert.equal(recorded.filter(text=>/projector_window/.test(text)&&!/sqlite_master/.test(text)).length,0,'table absent: the table is never touched');
- const dry=setup();dry.env.D1_ENRICHMENT_WRITE='dry';
- const dried=await projectorFor().runD1EnrichmentProjection(dry.env,{});
- assert.equal(dried.outcome,'dry');assert.equal(dried.window,undefined);assert.equal(windowRow(dry.db).state,'idle');
-}
-
-// 7j. The status view reports the window flag and the age of the last write, without a payload.
-{
- const {db,env}=setup();
- const projector=projectorFor();
- await projector.runD1EnrichmentProjection(env,{window:{clock:fakeClock(),pollMs:1}});
- const status=await projector.d1EnrichmentStatus(db,env);
- assert.equal(status.windowMode,'on');assert.ok(Number.isFinite(status.lastWriteAgeSec));assert.ok(status.lastWriteAt);
-}
+// 7. (AIR-537 slice 3) The enrichment projector that ran under this window is retired; its scenarios are gone. The window table, the
+// protocol and every Discovery fence above are the live contract, and the model below still exercises them.
 
 // 8. A MODEL of 1,000 hourly ticks (seeded; the assumptions are written here and nothing in it is measured): Discovery chunks
 // arrive about 17 generation bumps a minute and hold the lease up to one TTL; the projector asks at the top of every hour and runs
@@ -483,4 +314,4 @@ const setup=(opts={})=>{const {db,file}=migrated(18,opts);open(db);const bucket=
  assert.equal(granted.expiresAt,T0+HEAD+DEADLINE);
 }
 
-console.log('Projector window (ADR 0103): migration 0018 refuses anything but a complete version 17 and seeds one idle row; with the table absent every path is as before; request, grant and release are atomic, an expired or late request is never granted and leaves no lease; admission closes while requested or held with a typed busy; the three lease-free generation writers are refused while held; a stalled former lease holder cannot commit; every generation bump has the lease fence or the window predicate; under a window the projector is productive with the generation pin unchanged, waits without a busy loop, defers with its own reasons when not granted, busy, expired or forced, tells the window lost from the lease lost, and writes nothing for the window when the flag is off, the table is absent or the run is dry; a seeded 1,000-tick model keeps the closed time within one deadline');
+console.log('Projector window (ADR 0103): migration 0018 refuses anything but a complete version 17 and seeds one idle row; with the table absent every path is as before; request, grant and release are atomic, an expired or late request is never granted and leaves no lease; admission closes while requested or held with a typed busy; the three lease-free generation writers are refused while held; a stalled former lease holder cannot commit; every generation bump has the lease fence or the window predicate; a seeded 1,000-tick model keeps the closed time within one deadline');

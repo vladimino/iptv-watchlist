@@ -39,6 +39,18 @@ for (const broken of [{verdict: 'brand_new'}, {execute: {...okAnswer.assessment.
   assert.match(html, /Невозможно достоверно объяснить состояние наблюдения/);
   assert.doesNotMatch(html, /data-obs-recovery-accept|data-obs-recovery-confirm/, 'no action on an unexplained answer');
 }
+// ADR 0178 / AIR-132, review of PR 796: the Limbo detail offers a read-only entry to the revoke page for a PROVEN saved action only.
+{
+  const withRevoke = revoke => ({...okAnswer, identity: {available: false, reason: 'index_not_current', coverage: {}}, revoke});
+  const proven = V.obsRecoveryPanelHtml(withRevoke({requestId: 'req-original-000001', effect: 'assign', tmdbId: '41', available: true, reason: 'eligible'}), {slot: 'o1'});
+  assert.match(proven, /<a href="\/admin\/identity\/revoke\?key=[^"]*&amp;requestId=req-original-000001">Отозвать или заменить это действие<\/a>/, 'a proven action links to the revoke page with both identifiers');
+  const unproven = V.obsRecoveryPanelHtml(withRevoke({requestId: 'req-original-000001', effect: 'reject', tmdbId: '41', available: false, reason: 'old_action_not_effective'}), {slot: 'o1'});
+  assert.doesNotMatch(unproven, /admin\/identity\/revoke/, 'an unproven action has no link and no control');
+  assert.match(unproven, /не отзывается: позже решение заменили/, 'the reason is stated');
+  assert.doesNotMatch(V.obsRecoveryPanelHtml(withRevoke(null), {slot: 'o1'}), /obs-identity-revoke/, 'no saved action, no entry');
+  const hostile = V.obsRecoveryPanelHtml(withRevoke({requestId: 'req-"><script>x</script>', effect: 'assign', tmdbId: '41', available: true, reason: 'eligible'}), {slot: 'o1'});
+  assert.doesNotMatch(hostile, /<script>x/, 'the request id is escaped');
+}
 const visible = html => html.replace(/<details class="recovery-tech">[\s\S]*?<\/details>/g, '');
 let html = V.obsRecoveryPanelHtml(okAnswer, {slot: 'o1'});
 assert.match(html, /Автоматические попытки исчерпаны на тех же данных/);

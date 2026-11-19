@@ -259,6 +259,46 @@ function filmPath(film){return filmHref(filmPermalinkId(film));}
 // conflict are cached too, a transient failure is not (the next render asks again). A cached film on another generation than the loaded
 // programme is refreshed in the background while the old one stays on screen, so the page never blinks "not found" and never mixes two runs.
 const catalogFilmReads=new Map(),catalogPageCache=new WeakMap();
+// AIR-541 (ADR 0177): data that came from a saved copy (an R2 compatibility mirror) rather than the authoritative D1. Every degraded answer is keyed by what it replaced ('programme' or 'film:<tmdb>').
+// While any is held the page is read-only: controls are disabled, no write is sent, and a write that slipped through carries `X-Data-Origin: mirror` so the server refuses it even after D1 recovered.
+// It lives only in memory: nothing is persisted, and a reload starts authoritative-first.
+const degradedSources=new Map();
+function isDegraded(){return degradedSources.size>0;}
+function writeHeaders(headers={}){return isDegraded()?{...headers,'X-Data-Origin':'mirror'}:headers;}
+const DEGRADED_WRITE_TEXT='Недоступно в сохранённой копии';
+function degradedStamp(){
+ const times=[...degradedSources.values()].map(item=>Date.parse(item.asOf)).filter(Number.isFinite).sort((a,b)=>a-b);
+ return times.length?madridStamp(times[0]):null;
+}
+function renderDegradedNote(){
+ const stamp=degradedStamp(),text=isDegraded()?`Сохранённая копия${stamp?` · обновлена ${stamp}`:''}`:'';
+ const detail=isDegraded()?'Данные из резервной копии, изменения отключены. Расписание показано как было сохранено; доступность сейчас не проверена.':'';
+ for(const node of [$('#degraded-note'),$('#film-degraded-note')]){if(!node)continue;node.hidden=!text;node.textContent=text;node.title=detail;if(text)node.setAttribute('aria-label',text+'. '+detail);else node.removeAttribute('aria-label');}
+}
+// `kind` is 'mirror' (the data IS a saved copy from R2) or 'lkg' (the data is the last authoritative result held in memory, and its refresh failed). Both are read-only; only a
+// 'mirror' copy is old enough that no claim about the PRESENT may be derived from its schedule (ADR 0177 decision 5).
+function noteDegraded(key,body,kind='mirror'){
+ const before=degradedSignature();
+ degradedSources.set(key,{kind,asOf:typeof body?.asOf==='string'?body.asOf:null,runId:body?.runId??null,reason:typeof body?.reason==='string'?body.reason:null,joined:body?.joined??null});
+ renderDegradedNote();
+ return degradedSignature()!==before;
+}
+function degradedSignature(){return [...degradedSources.entries()].map(([key,item])=>key+':'+item.kind).sort().join('|');}
+// Scoped to the data being rendered: the PROGRAMME is a saved copy (every programme film), or one FILM object came from a saved copy (`mirrorCopy`). A mirror-backed film that is open
+// does not make the separately valid D1 programme lose its availability (decision A: separately valid authoritative data stays visible); only the write fence is global.
+function mirrorSnapshotShown(){return degradedSources.get('programme')?.kind==='mirror';}
+function savedCopyFilm(film){return mirrorSnapshotShown()||film?.mirrorCopy===true;}
+// The saved schedule of a film, as stored: historical, never classified as archive, on air or soon.
+function savedShows(film){return (film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null);}
+const stampIso=ms=>Number.isFinite(ms)?new Date(ms).toISOString():null;
+let programmeLoadedAt=null;
+function refreshDegradedViews(){if(programmeReady&&typeof renderPreservingScroll==='function')renderPreservingScroll();if(filmScreen)renderFilmShell();}
+// A successful AUTHORITATIVE read of the same thing ends that degradation. The normal source and the write actions come back only through such a read.
+function clearDegraded(key){
+ if(!degradedSources.delete(key))return false;
+ renderDegradedNote();
+ return true;
+}
 function catalogPageFilm(entry){
  let page=catalogPageCache.get(entry);
  if(!page){page={...entry,catalogOnly:true,catalogRoute:true,genres:Array.isArray(entry.genres)?entry.genres:[],directors:entry.directors||[],actors:entry.actors||[],shows:Array.isArray(entry.shows)?entry.shows:[]};catalogPageCache.set(entry,page);}
@@ -274,7 +314,11 @@ async function ensureCatalogFilm(tmdb,{refresh=false}={}){
   const response=await fetch('/api/catalog/film/'+encodeURIComponent(tmdb),{headers:{Accept:'application/json'}});
   let body=null;try{body=await response.json();}catch{}
   const status=typeof body?.status==='string'?body.status:'';
-  if(response.ok&&status==='found'&&body.film&&String(body.film.tmdbId)===tmdb&&body.film.canonicalIdentity==='tmdb:'+tmdb)next={state:'found',film:body.film,programmeRunId:body.programmeRunId||null};
+  if(response.ok&&status==='found'&&body.film&&String(body.film.tmdbId)===tmdb&&body.film.canonicalIdentity==='tmdb:'+tmdb){
+   next={state:'found',film:body.source==='mirror'&&body.readOnly===true?{...body.film,mirrorCopy:true}:body.film,programmeRunId:body.programmeRunId||null,at:Date.now()};
+   if(body.source==='mirror'&&body.readOnly===true){next.mirror=true;noteDegraded('film:'+tmdb,body,'mirror');}
+   else if(clearDegraded('film:'+tmdb)&&programmeReady&&typeof renderPreservingScroll==='function')renderPreservingScroll();
+  }
   else if(response.status===404&&status==='absent')next={state:'absent'};
   else if(response.status===410&&status==='retired')next={state:'retired'};
   else if(response.status===409&&status==='conflict')next={state:'conflict'};
@@ -285,7 +329,11 @@ async function ensureCatalogFilm(tmdb,{refresh=false}={}){
  // A failed refresh keeps the film already shown.
  const previous=known?.state==='found'?known:null;
  if(next.state==='unavailable'||next.state==='error'){
-  if(previous)catalogFilmReads.set(tmdb,{...previous,refreshing:false,token:null,askedRun});
+  if(previous){
+   catalogFilmReads.set(tmdb,{...previous,refreshing:false,token:null,askedRun});
+   // The film stays on screen (last known good) but is read-only until an authoritative read of it succeeds.
+   if(!degradedSources.has('film:'+tmdb)&&noteDegraded('film:'+tmdb,{asOf:stampIso(previous.at),reason:'refresh_failed'},'lkg')&&programmeReady&&typeof renderPreservingScroll==='function')renderPreservingScroll();
+  }
   else catalogFilmReads.set(tmdb,{state:next.state,token:null,transient:true,at:Date.now()});
  }else catalogFilmReads.set(tmdb,{...next,token:null,askedRun});
  if(filmScreen&&routeTmdb(filmScreen)===tmdb)renderFilmShell();
@@ -309,6 +357,7 @@ function resolveFilm(routeId){
   const run=report?.runId??null;
   // Asked once per loaded generation: an answer pinned to another run than the loaded programme is not asked for again until the programme moves.
   if(run&&cached.programmeRunId&&cached.programmeRunId!==run&&cached.askedRun!==run&&!cached.refreshing&&settled)ensureCatalogFilm(tmdb,{refresh:true});
+  if(cached.mirror&&!cached.refreshing&&settled&&Date.now()-(cached.at||0)>15000)ensureCatalogFilm(tmdb,{refresh:true});
   return {film:catalogPageFilm(cached.film),source:'catalog',status:'ready'};
  }
  if(cached?.transient){if(settled&&Date.now()-cached.at>15000)ensureCatalogFilm(tmdb);return {film:null,source:null,status:cached.state};}
@@ -355,7 +404,7 @@ const FILM_STATUS_TEXT={
  absent:['Фильм не найден','В каталоге нет проверенного фильма с этим идентификатором TMDB.'],
  retired:['Запись каталога снята','Эта запись каталога заменена и больше не действует.'],
  conflict:['Идентичность фильма не подтверждена','Для этого идентификатора в данных есть конфликт, поэтому фильм не показан.'],
- unavailable:['Каталог сейчас недоступен','Не удалось прочитать каталог. Обнови страницу чуть позже.'],
+ unavailable:['Сведения пока не загружаются','Данные об этом фильме сейчас не удалось получить. Это не значит, что фильма нет. Повторим попытку автоматически.'],
  error:['Не удалось загрузить фильм','Каталог ответил ошибкой. Обнови страницу чуть позже.']
 };
 function renderFilmShell(){
@@ -369,6 +418,9 @@ function renderFilmShell(){
  if(identity)identity.textContent=filmScreen||'';
  if(status)status.textContent=film?(film.catalogOnly?'Только в каталоге':''):id?text[1]:'';
  if(!film&&id&&resolved.status!=='loading'&&(filmCompareId||filmCompareById.has(String(id)))){filmCompareId=null;filmCompareById.delete(String(id));filmCompareFilm=null;const input=$('#film-compare-input');if(input)input.value='';}
+ const retry=$('#film-screen-retry');
+ if(retry)retry.hidden=!(!film&&id&&(resolved.status==='unavailable'||resolved.status==='error'));
+ renderDegradedNote();
  fillFilmPage(film);
  armSoonTick();
 }
@@ -474,6 +526,7 @@ const EVENT_TYPE_FILTERS=[
  {id:'ratings',label:'Оценки',types:['ratings']},
  {id:'enrichment',label:'Прогнозы',types:['enrichment']},
  {id:'taste_profile',label:'Модель вкуса',types:['taste_profile']},
+ {id:'catalog_posters',label:'Постеры',types:['catalog_posters']},
 ];
 function eventTypeFrom(search){
  let params;try{params=new URLSearchParams(String(search||''));}catch{return 'all';}
@@ -809,6 +862,8 @@ function eligible(film) { const parsed=searchTokens(state.query); const matched=
 // repeat on the chosen channel is the only show there. `archive` holds the ready recordings, `ahead` the show on air and the shows that start inside the next 24 hours; the
 // film state comes only from `filmAvail`. `channels` overrides the selection (an empty or absent set means every channel).
 function filmLifecycle(film,now=viewingClock(),channels=state.channels){
+ // ADR 0177 decision 5 (owner A): a saved copy keeps its historical schedule, but no state about the PRESENT (archive, on air, soon, last chance) is derived from it.
+ if(film&&savedCopyFilm(film))return {avail:null,archive:[],ahead:[],saved:savedShows(film)};
  const lib=availabilityLib();if(!lib||!film)return {avail:null,archive:[],ahead:[]};
  const model=viewingWindow(now),shows=findsWindowShows(film,now,channels?.size?{channels}:null).filter(show=>inEnvelope(model,show.start)),avail=filmAvail(film,now,shows),archive=[],ahead=[];
  for(const show of shows){const info=lib.showPhase({start:show.start,end:show.end},now,{runtimeMinutes:film.runtime}),phase=info.phase;if(phase==='archive')archive.push(show);else if(phase==='on_air'||phase==='future')ahead.push({...show,effectiveEnd:info.end});}
@@ -818,6 +873,7 @@ function filmLifecycle(film,now=viewingClock(),channels=state.channels){
 // its repeat in the «Все показы» list, but a repeat never moves it into «Скоро».
 function periodShows(film,period=state.period){
  const life=filmLifecycle(film),kind=life.avail?.state,p=normalizePeriod(period)||'all';
+ if(life.saved)return p==='all'?life.saved:[];
  if(kind==='available')return p==='soon'?[]:p==='archive'?life.archive:[...life.archive,...life.ahead];
  if(kind==='soon')return p==='archive'?[]:life.ahead;
  return [];
@@ -858,17 +914,17 @@ function letterboxdLink(film,options){const target=letterboxdTarget(film,options
 function channelControl(show){const hint=show.basis==='title_duration'?`<span class="match-hint" title="${escapeHTML(matchHintText(show.matchReason))}" aria-label="${escapeHTML(matchHintText(show.matchReason))}"> ≈</span>`:'';const name=typeof show.channel==='string'?show.channel:'';if(!name.trim())return `<span class="channel">${hint}</span>`;return `<span class="channel"><button type="button" class="channel-filter" data-channel="${escapeHTML(name)}" title="Добавить канал «${escapeHTML(name)}» в фильтр" aria-label="Добавить канал «${escapeHTML(name)}» в фильтр">${escapeHTML(name)}</button>${hint}</span>`;}
 function row(show){const start=showStart(show),date=new Date(start),time=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',hour:'2-digit',minute:'2-digit'}).format(date);return `<div class="show-row">${channelControl(show)}<time class="show-time" datetime="${date.toISOString()}">${madridStamp(start,{day:'numeric',month:'short'})}<b>${time}</b></time></div>`;}
 function compareShows(type){return (a,b)=>{const rank=(state.channels.has(a.channel)?0:1)-(state.channels.has(b.channel)?0:1);if(rank)return rank;return type==='archive'?showStart(b)-showStart(a):showStart(a)-showStart(b);};}
-function group(film,type){const life=filmLifecycle(film),shows=[...(type==='archive'?life.archive:life.ahead)].sort(compareShows(type));if(!shows.length)return '';return `<section class="show-group ${type}"><div class="group-title"><span>${type==='archive'?'АРХИВ':'ДАЛЬШЕ'}</span><span class="show-count">${shows.length} ${showWord(shows.length)}</span></div>${row(shows[0])}${shows.length>1?`<details class="more"><summary>Ещё ${shows.length-1} ${showWord(shows.length-1)}</summary>${shows.slice(1).map(row).join('')}</details>`:''}</section>`;}
+function group(film,type){const life=filmLifecycle(film),saved=!!life.saved;if(saved&&type==='archive')return '';const shows=[...(saved?life.saved:type==='archive'?life.archive:life.ahead)].sort(saved?(a,b)=>showStart(a)-showStart(b):compareShows(type));if(!shows.length)return '';return `<section class="show-group ${saved?'saved':type}"><div class="group-title"><span>${saved?'СОХРАНЁННОЕ РАСПИСАНИЕ':type==='archive'?'АРХИВ':'ДАЛЬШЕ'}</span><span class="show-count">${shows.length} ${showWord(shows.length)}</span></div>${row(shows[0])}${shows.length>1?`<details class="more"><summary>Ещё ${shows.length-1} ${showWord(shows.length-1)}</summary>${shows.slice(1).map(row).join('')}</details>`:''}</section>`;}
 function filmSupportsStarted(film){return !!(film&&!film.catalogOnly&&!film.catalogRoute);}
 function startedButton(film,labeled=false){
  const id=String(film.id),on=startedIds.has(id),busy=savingStarted.has(id);
  const caption=on?'Просмотр начат':'Начал просмотр';
- return `<div class="started-action"><button type="button" class="started-button" data-started-id="${escapeHTML(id)}" aria-pressed="${on}" aria-busy="${busy}" aria-label="${labeled?caption:on?'Снять отметку «Начал смотреть»':'Начал смотреть'}: ${escapeHTML(film.title)}" title="${labeled?caption:on?'Снять отметку «Начал смотреть»':'Отметить начатый просмотр'}" ${!startedReady||busy?'disabled':''}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>${labeled?`<span>${caption}</span>`:''}</button></div>`;
+ return `<div class="started-action"><button type="button" class="started-button" data-started-id="${escapeHTML(id)}" aria-pressed="${on}" aria-busy="${busy}" aria-label="${labeled?caption:on?'Снять отметку «Начал смотреть»':'Начал смотреть'}: ${escapeHTML(film.title)}" title="${labeled?caption:on?'Снять отметку «Начал смотреть»':'Отметить начатый просмотр'}" ${!startedReady||busy||isDegraded()?'disabled':''}${isDegraded()?` aria-disabled="true"`:''}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>${labeled?`<span>${caption}</span>`:''}</button></div>`;
 }
 function progressError(message){const text=$('#progress-error-text'),box=$('#progress-error');if(text)text.textContent=message;if(box)box.hidden=!message;const film=$('#film-screen-progress');if(film){film.textContent=message;film.hidden=!message;}}
 async function loadStarted(options={}){if(startedLoading||savingStarted.size)return 'busy';startedLoading=true;try{const r=await fetch('/api/started');if(!r.ok)throw new Error();const data=await r.json();if(!Array.isArray(data.ids))throw new Error();const next=new Set(data.ids.map(String)),wasReady=startedReady,same=next.size===startedIds.size&&[...next].every(id=>startedIds.has(id));startedIds=next;startedReady=true;$('#started-only').disabled=false;progressError('');if(!same||!wasReady)renderPreservingScroll();return true;}catch{if(!options.quiet)progressError('Не удалось загрузить отметки просмотра. Повтори попытку.');return false;}finally{startedLoading=false;}}
 function refreshFilmStarted(id){const film=currentFilm(),actions=$('#film-screen-actions');if(!filmScreen||!film||!filmSupportsStarted(film)||String(film.id)!==String(id))return;if(!film||!actions)return;actions.innerHTML=`${letterboxdLink(film)}${startedButton(film,true)}`;const button=document.querySelector(`#film-screen [data-started-id="${String(id).replace(/"/g,'')}"]`);button?.focus?.({preventScroll:true});}
-async function toggleStarted(id){if(!startedReady||startedLoading||savingStarted.has(id))return;const film=(films||[]).find(item=>String(item.id)===String(id));if(film&&!filmSupportsStarted(film))return;const next=!startedIds.has(id);savingStarted.add(id);progressError('');render();refreshFilmStarted(id);try{const r=await fetch('/api/started',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,started:next})});if(!r.ok)throw new Error();const data=await r.json();if(data.id!==id||data.started!==next)throw new Error();next?startedIds.add(id):startedIds.delete(id);loadEvents();}catch{progressError('Не удалось сохранить отметку. Нажми на глаз ещё раз, чтобы повторить.');}finally{savingStarted.delete(id);render();refreshFilmStarted(id);}}
+async function toggleStarted(id){if(isDegraded()||!startedReady||startedLoading||savingStarted.has(id))return;const film=(films||[]).find(item=>String(item.id)===String(id));if(film&&!filmSupportsStarted(film))return;const next=!startedIds.has(id);savingStarted.add(id);progressError('');render();refreshFilmStarted(id);try{const r=await fetch('/api/started',{method:'POST',headers:writeHeaders({'Content-Type':'application/json'}),body:JSON.stringify({id,started:next})});if(!r.ok)throw new Error();const data=await r.json();if(data.id!==id||data.started!==next)throw new Error();next?startedIds.add(id):startedIds.delete(id);loadEvents();}catch{progressError('Не удалось сохранить отметку. Нажми на глаз ещё раз, чтобы повторить.');}finally{savingStarted.delete(id);render();refreshFilmStarted(id);}}
 function confidenceText(value){return {low:'низкая',medium:'средняя',high:'высокая'}[value]||'';}
 // Optional evidence assessment. Absent on every live DTO today, so the forecast line stays the model
 // field. A present object is rendered from this allowlist only; the page does not compute or fetch it.
@@ -962,6 +1018,11 @@ function filmAvailabilityHead(avail,now,count){
  return `<div class="film-avail-head" data-availability="${avail.state}">${pill}${note}</div>${hint}`;
 }
 function filmAvailability(film){
+ if(savedCopyFilm(film)){
+  // A saved copy: the historical schedule as stored, with no phase, archive deadline or «скоро» claim; current availability is unverified.
+  const saved=savedShows(film).sort((a,b)=>a.start-b.start);
+  return `<section class="film-section film-availability" aria-label="Показы"><h2>Показы</h2><p class="film-hint">Расписание из сохранённой копии, как оно было сохранено. Доступность сейчас не проверена.</p>${saved.length?`<div class="film-show-list">${saved.map(show=>filmShowRow(show,null)).join('')}</div>`:'<p class="film-missing">В сохранённой копии нет показов этого фильма</p>'}</section>`;
+ }
  const now=viewingClock(),shows=availableShows(film,now),avail=filmAvail(film,now,shows),infos=shows.map(show=>filmShowInfo(film,show,now));
  const by=phase=>shows.map((show,i)=>({show,info:infos[i]})).filter(item=>(item.info?.phase||'')===phase);
  const archive=by('archive'),future=by('future'),live=[...by('on_air'),...by('unknown')];
@@ -1234,7 +1295,7 @@ function shortlistAvailabilityText(item){
 const SHORTLIST_EMPTY={available:'Нет подходящих вариантов с готовым архивом, оценкой или прогнозом. Измени фильтры или выбери «Скоро». Границы фильтров сохранены.',soon:'Сейчас нет подходящих вариантов «Скоро»: фильмов без готового архива, которые идут в эфире или начнутся в ближайшие 24 часа, с оценкой или прогнозом. Измени фильтры или выбери «Доступно». Границы фильтров сохранены.'};
 // A period that holds only the other group leaves this one empty by construction: say so instead of a generic empty state.
 const SHORTLIST_CONFLICT={'available:soon':'Период «Скоро» оставил только фильмы без готового архива. Выбери период «Все показы» или «Архив», чтобы увидеть «Доступно».','soon:archive':'Период «Архив» оставил только фильмы с готовым архивом. Выбери период «Все показы» или «Скоро», чтобы увидеть «Скоро».'};
-function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node)return;const mode=normalizeShortlistMode(state.shortlistMode),list=valid?buildShortlist(visible,mode):[];$('#shortlist-cards').innerHTML=list.map(item=>{const f=item.film;return `<article class="shortlist-card" data-shortlist-state="${item.availability.state}"><h3><button type="button" data-shortlist-film="${escapeHTML(f.id)}">${escapeHTML(f.title)}</button>${letterboxdLink(f)}</h3><p class="shortlist-meta">${escapeHTML(f.year||'Год не указан')} · ${Number(f.runtime)>0?Math.round(f.runtime)+' мин':'Длительность неизвестна'}</p><p class="shortlist-score">${item.score.actual?'Твоя оценка':'Прогноз'} <strong>${item.score.rating.toFixed(1)} ★</strong></p><p class="shortlist-availability">${escapeHTML(shortlistAvailabilityText(item))}</p><div class="shortlist-reasons">${item.reasons.map(reason=>`<span>${escapeHTML(reason)}</span>`).join('')}</div></article>`;}).join('');$('#shortlist-empty').hidden=list.length>0;$('#shortlist-empty').textContent=!valid?'Проверь значения фильтров.':!ratingsLoaded?'Загружаем оценки и прогнозы…':SHORTLIST_CONFLICT[mode+':'+normalizePeriod(state.period)]||SHORTLIST_EMPTY[mode];$('#shortlist-caption').textContent='Из твоей выборки · только актуальное окно показов';document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.shortlistMode===mode)));}
+function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node)return;const mode=normalizeShortlistMode(state.shortlistMode),list=valid?buildShortlist(visible,mode):[];$('#shortlist-cards').innerHTML=list.map(item=>{const f=item.film;return `<article class="shortlist-card" data-shortlist-state="${item.availability.state}"><h3><button type="button" data-shortlist-film="${escapeHTML(f.id)}">${escapeHTML(f.title)}</button>${letterboxdLink(f)}</h3><p class="shortlist-meta">${escapeHTML(f.year||'Год не указан')} · ${Number(f.runtime)>0?Math.round(f.runtime)+' мин':'Длительность неизвестна'}</p><p class="shortlist-score">${item.score.actual?'Твоя оценка':'Прогноз'} <strong>${item.score.rating.toFixed(1)} ★</strong></p><p class="shortlist-availability">${escapeHTML(shortlistAvailabilityText(item))}</p><div class="shortlist-reasons">${item.reasons.map(reason=>`<span>${escapeHTML(reason)}</span>`).join('')}</div></article>`;}).join('');$('#shortlist-empty').hidden=list.length>0;$('#shortlist-empty').textContent=!valid?'Проверь значения фильтров.':mirrorSnapshotShown()?'Подборка по доступности недоступна: данные из сохранённой копии, текущая доступность не проверена.':!ratingsLoaded?'Загружаем оценки и прогнозы…':SHORTLIST_CONFLICT[mode+':'+normalizePeriod(state.period)]||SHORTLIST_EMPTY[mode];$('#shortlist-caption').textContent=mirrorSnapshotShown()?'Доступность сейчас не проверена':'Из твоей выборки · только актуальное окно показов';document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.shortlistMode===mode)));}
 
 // Finds: strong catalog films outside the watchlist, read from GET /api/catalog/available. The route decides eligibility; this block only re-checks it against the loaded watchlist and clock, ranks and presents.
 // With a channel filter the section becomes channel-scoped: only shows on a selected channel (OR across channels) inside the selected period of the
@@ -1355,6 +1416,7 @@ const findsMarks=new Map();let findsNotice=null;
 // clock and needs no new request. Without the module (an isolated test context) it answers `null` and every consumer keeps its previous behavior.
 function availabilityLib(){return typeof FilmAvailability==='undefined'?null:FilmAvailability;}
 function filmAvail(film,now=viewingClock(),shows=film?.shows){
+ if(savedCopyFilm(film))return null;
  const lib=availabilityLib();if(!lib||!film)return null;
  const list=(shows||[]).map(show=>({start:showStart(show),end:show?.end})).filter(show=>show.start!==null);
  return lib.filmAvailability(list,now,{runtimeMinutes:film.runtime});
@@ -1763,7 +1825,7 @@ function findsCard(film,now=nowMs(),scope=findsScope(),context=null){
 function findsMarkAction(film){
  if(!findsSource.watchedMarkEnabled||!film.tmdbId)return '';
  const mark=findsMarks.get(String(film.tmdbId)),saving=mark?.state==='saving',title=film.title||film.original||'';
- return `<div class="finds-actions"><button type="button" class="finds-watched" data-finds-watched="${escapeHTML(String(film.tmdbId))}" ${saving?'disabled aria-busy="true"':''} aria-label="Отметить «${escapeHTML(title)}» как просмотренный">${saving?'Сохраняю…':'Смотрел'}</button>${mark?.state==='error'?`<span class="finds-mark-error" role="alert">${escapeHTML(mark.message)}</span>`:''}</div>`;
+ return `<div class="finds-actions"><button type="button" class="finds-watched" data-finds-watched="${escapeHTML(String(film.tmdbId))}" ${saving?'disabled aria-busy="true"':isDegraded()?`disabled aria-disabled="true" title="${DEGRADED_WRITE_TEXT}"`:''} aria-label="Отметить «${escapeHTML(title)}» как просмотренный">${saving?'Сохраняю…':'Смотрел'}</button>${mark?.state==='error'?`<span class="finds-mark-error" role="alert">${escapeHTML(mark.message)}</span>`:''}</div>`;
 }
 function findsNoticeHTML(){
  if(!findsNotice)return '';
@@ -1773,12 +1835,14 @@ function findsNoticeHTML(){
  return `<span>«${escapeHTML(title)}» отмечен как просмотренный.</span> <button type="button" class="finds-undo" data-finds-undo="${escapeHTML(tmdbId)}" ${state==='saving'?'disabled aria-busy="true"':''}>${state==='saving'?'Отменяю…':'Отменить'}</button>`;
 }
 async function postWatchedMark(tmdbId,watched){
- const response=await fetch('/api/catalog/watched',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tmdbId,watched})});
+ if(isDegraded())throw new Error(DEGRADED_WRITE_TEXT);
+ const response=await fetch('/api/catalog/watched',{method:'POST',headers:writeHeaders({'Content-Type':'application/json'}),body:JSON.stringify({tmdbId,watched})});
  const data=await response.json().catch(()=>null);
  if(!response.ok||!data||typeof data.watched!=='boolean')throw new Error(data?.code==='film_not_in_catalog'?'Фильм уже не в каталоге, обновляю «Находки»':'Не удалось сохранить, попробуй ещё раз');
  return data;
 }
 async function markFindWatched(tmdbId){
+ if(isDegraded())return;
  const film=(findsSource.films||[]).find(item=>String(item.tmdbId)===tmdbId);if(!film||findsMarks.get(tmdbId)?.state==='saving')return;
  const title=film.title||film.original||'';
  findsMarks.set(tmdbId,{state:'saving'});renderFinds();
@@ -1793,6 +1857,7 @@ async function markFindWatched(tmdbId){
  if(findsMarks.get(tmdbId)?.state==='marked'||/каталоге/.test(findsMarks.get(tmdbId)?.message||''))loadCatalog();
 }
 async function undoFindWatched(tmdbId){
+ if(isDegraded())return;
  if(!findsNotice||findsNotice.tmdbId!==tmdbId||findsNotice.state==='saving')return;
  findsNotice={...findsNotice,state:'saving'};renderFinds();
  try{
@@ -2071,9 +2136,10 @@ async function loadPresets(){
 }
 async function sendPreset(method,path,body){
  if(presetSaving)return false;
+ if(isDegraded()){presetStatus=DEGRADED_WRITE_TEXT+'.';renderPresets();return false;}
  presetSaving=true;
  try{
-  const headers={'If-Match':presetsEtag},options={method,headers};
+  const headers=writeHeaders({'If-Match':presetsEtag}),options={method,headers};
   if(body){headers['Content-Type']='application/json';options.body=JSON.stringify(body);}
   const response=await fetch(path,options);
   if(response.status===412){await loadPresets();presetStatus='Сценарии изменились на другом устройстве. Список обновлён — повтори действие.';renderPresets();return false;}
@@ -2137,6 +2203,8 @@ function bindControls(){
  document.querySelectorAll('[data-min-prediction]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minPrediction=b.dataset.minPrediction==='any'?null:Number(b.dataset.minPrediction);render();}}));
  document.querySelectorAll('[data-min-probability]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minProbability=b.dataset.minProbability==='any'?null:Number(b.dataset.minProbability);render();}}));
  $('#progress-retry').addEventListener('click',()=>loadStarted());
+ // AIR-541: the neutral film shell's retry asks for the same film again; it never turns "cannot read" into "absent".
+ $('#film-screen-retry')?.addEventListener('click',()=>{const tmdb=filmScreen?routeTmdb(filmScreen):null;if(tmdb)ensureCatalogFilm(tmdb,{refresh:true});else loadProgramme({quiet:true});});
  // A film card is a real link: before a new-tab open or a copy it takes the programme's current state as its return target.
  const refreshFilmLink=event=>{const link=event.target.closest?.('a.film-open');if(!link||!onHomeScreen())return;const id=link.dataset?.filmId;if(id)link.setAttribute('href',ReturnHome.withReturn(filmHref(id),homeTarget()));};
  for(const type of ['pointerdown','focusin','contextmenu'])$('#movies').addEventListener(type,refreshFilmLink);
@@ -2227,8 +2295,27 @@ async function loadProgramme({quiet}={}){
   if(!response.ok)throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
   const data=await response.json();
   if(!data||!Array.isArray(data.films))throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
+  // AIR-541: a saved copy never replaces what is already shown from the authoritative source (the last good result stays in memory); on a cold load it is shown, read-only and labelled.
+  if(data.source==='mirror'&&data.readOnly===true){
+   if(programmeReady&&degradedSources.get('programme')?.kind!=='mirror'){
+    // The authoritative result in memory stays on screen (last known good) but is read-only until an authoritative refresh succeeds.
+    programmeRefreshError=true;
+    const marked=noteDegraded('programme',{asOf:stampIso(programmeLoadedAt),reason:'refresh_failed'},'lkg');
+    updateProgrammeStatus();if(marked)refreshDegradedViews();
+    return false;
+   }
+   noteDegraded('programme',data,'mirror');
+  }
+  const recovered=!(data.source==='mirror'&&data.readOnly===true)&&clearDegraded('programme');
+  if(recovered)loadStarted({quiet:true});
+  if(!(data.source==='mirror'&&data.readOnly===true)){
+   programmeLoadedAt=Date.now();
+   // D1 answers again: films that were shown from a saved copy are asked again, so their read-only state ends by an authoritative read of their own.
+   for(const [key,item] of degradedSources)if(key.startsWith('film:')&&item.kind==='mirror')ensureCatalogFilm(key.slice(5),{refresh:true});
+  }
   programmeRefreshError=false;
   const changed=installProgramme(data);
+  if(recovered&&!changed&&programmeReady)refreshDegradedViews();
   if(!programmeReady)await finishProgrammeUi();
   else if(changed){refreshGenreOptions();updateFacetOptions();updateSourceInfo();renderPreservingScroll();if(filmScreen)renderFilmShell();}
   else updateSourceInfo();
@@ -2236,7 +2323,11 @@ async function loadProgramme({quiet}={}){
   return true;
  }catch(error){
   programmeRefreshError=true;
-  if(programmeReady)updateProgrammeStatus();
+  if(programmeReady){
+   // A failed refresh leaves the last authoritative result readable but read-only until a refresh succeeds (also without a usable saved copy).
+   const marked=!degradedSources.has('programme')&&noteDegraded('programme',{asOf:stampIso(programmeLoadedAt),reason:'refresh_failed'},'lkg');
+   updateProgrammeStatus();if(marked)refreshDegradedViews();
+  }
   if(!programmeReady&&!quiet){showProgrammeUnavailable(error);throw error;}
   return false;
  }finally{programmeLoading=false;}
@@ -2317,7 +2408,7 @@ async function init(){
 async function loadEnrichment(options={}){if(enrichmentLoading)return 'busy';enrichmentLoading=true;try{const response=await fetchUserRead('/api/enrichment/view');if(!response.ok)throw new Error();const data=await response.json();if(!data||typeof data.films!=='object')throw new Error();const key=JSON.stringify(data);if(key===enrichmentKey)return true;enrichmentKey=key;enrichment=data;ratingsLoaded=true;enrichmentUnavailable=false;updateFacetOptions();renderPreservingScroll();return true;}catch{enrichmentUnavailable=true;if(!ratingsLoaded&&!options.quiet)render();return false;}finally{enrichmentLoading=false;}}
  const FOOTER_RUN_STATUS={idle:'не запускался',running:'выполняется',completed:'завершён',blocked:'приостановлен',interrupted:'прерван'};
 const INTEGRATION_STATE={healthy:'работает',degraded:'требует внимания',failed:'сбой',stale:'давний успех',unknown:'нет данных',off:'выключено',running:'выполняется',waiting:'ожидает'};
-const INTEGRATION_CODE={ok:'',stale:'последний успех давно',no_data:'',running:'',ratings_blocked:'список оценок временно недоступен',ratings_incomplete:'список оценок прочитан не полностью',ratings_rate_limit:'слишком много запросов',ratings_failed:'оценки прочитать не удалось',ratings_pending:'чтение оценок не завершилось, причина неизвестна',watchlist_failed:'watchlist прочитать не удалось',watchlist_stuck:'синхронизация не завершилась',epg_http:'загрузка EPG не удалась',epg_window:'EPG не покрывает текущее окно',epg_parse:'разбор EPG не удался',epg_failed:'обновление EPG не завершилось',epg_unproven:'публикация этого поколения не подтверждена',resolver_waiting:'',resolver_backoff:'распознавание подождёт: слишком много запросов',resolver_unconfigured:'распознавание не настроено',resolver_failed:'распознавание остановилось',resolver_no_recent_progress:'нет подтверждённого выполнения · вероятна внешняя блокировка; проверь Usage',prediction_interrupted:'запуск прерван',prediction_blocked:'прогнозы приостановлены',prediction_runs_interrupted:'часть запусков прервалась',prediction_no_recent_progress:'нет недавнего прогресса прогнозов',prediction_partial:'часть прогнозов не сохранилась',metadata_attention:'метаданные и локализация требуют внимания'};
+const INTEGRATION_CODE={ok:'',stale:'последний успех давно',no_data:'',running:'',ratings_blocked:'список оценок временно недоступен',ratings_incomplete:'список оценок прочитан не полностью',ratings_rate_limit:'слишком много запросов',ratings_failed:'оценки прочитать не удалось',ratings_pending:'чтение оценок не завершилось, причина неизвестна',watchlist_failed:'watchlist прочитать не удалось',watchlist_stuck:'синхронизация не завершилась',epg_http:'загрузка EPG не удалась',epg_window:'EPG не покрывает текущее окно',epg_parse:'разбор EPG не удался',epg_failed:'обновление EPG не завершилось',epg_unproven:'публикация этого поколения не подтверждена',resolver_waiting:'',resolver_backoff:'распознавание подождёт: слишком много запросов',resolver_unconfigured:'распознавание не настроено',resolver_failed:'распознавание остановилось',resolver_no_recent_progress:'нет подтверждённого выполнения · вероятна внешняя блокировка; проверь Usage',prediction_interrupted:'запуск прерван',prediction_blocked:'прогнозы приостановлены',prediction_runs_interrupted:'часть запусков прервалась',prediction_no_recent_progress:'нет недавнего прогресса прогнозов',prediction_partial:'часть прогнозов не сохранилась',poster_idle:'',poster_hydrated:'на прошлой неделе найдены новые постеры',poster_first_run:'первая проверка ещё впереди',poster_retry_scheduled:'повторная попытка запланирована',poster_overdue:'еженедельная проверка не выполнена вовремя',poster_stalled:'проверка зависла или отчёт не доставлен',poster_lost:'данные проверки постеров пропали',poster_failed:'проверка постеров не удалась',metadata_attention:'метаданные и локализация требуют внимания'};
 const FOOTER_RUN_REASON={queue_empty:'',eligible_queue_empty:'остались фильмы без прогноза',manifest_spent:'пакет манифеста исчерпан',retry_backoff:'остались фильмы без прогноза',quota:'лимит',time_budget:'лимит времени',parse_error:'ошибка формата',storage_error:'ошибка хранения',model_error:'ошибка модели',model_unavailable:'модель недоступна',api_error:'ошибка API',lease_lost:'сеанс потерян',lease_expired:'сеанс истёк',profile_changed:'модель вкуса обновлена',format_error_storm:'ошибки формата',external_termination:'внешняя остановка',priority_changed:'приоритет обновлён'};
 function formatCoveragePercent(value){const number=Number(value);return Number.isFinite(number)?`${number.toLocaleString('ru',{maximumFractionDigits:1})}%`:'';}
 const NORMAL_RUN_REASONS=['queue_empty','eligible_queue_empty','manifest_spent','retry_backoff'];
@@ -2355,14 +2446,14 @@ function footerStatusText(data){
  const stamp=value=>date(value,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
  // The ratings line shows the routine EPG ratings read; the retired ratings-only refresh appears only as a labelled past attempt.
  const retiredLine=retired=>{if(!retired)return '';const at=retired.lastOutcome==='failed'?retired.lastFailureAt:retired.lastOutcome==='succeeded'?retired.lastSuccessAt:null;return at?`отдельное обновление снято, последн${retired.lastOutcome==='failed'?'ий сбой':'ий успех'} ${stamp(at)}`:'отдельное обновление снято';};
- const integrationLine=source=>{if(!source)return 'нет данных';const word=INTEGRATION_STATE[source.state]||'нет данных',detail=INTEGRATION_CODE[source.code]||'',ratings=source.id==='letterboxd_ratings',since=ratings&&source.code==='ratings_pending'&&source.pendingSince?`синхронизация ${stamp(source.pendingSince)}`:'',failure=ratings&&['failed','degraded'].includes(source.state)&&source.code!=='ratings_pending'&&source.lastFailureAt?`ошибка ${stamp(source.lastFailureAt)}`:'',batch=source.lastBatchAt?`последний пакет ${stamp(source.lastBatchAt)}`:'',gate=source.state==='waiting'&&source.gateAt?`не раньше ${stamp(source.gateAt)}`:'',when=source.lastSuccessAt&&source.state!=='unknown'&&source.lastSuccessAt!==source.lastBatchAt?`успех ${stamp(source.lastSuccessAt)}`:'',history=ratings?retiredLine(source.retiredRefresh):'';return [word,detail&&detail!==word?detail:'',gate,batch,since,failure,when,history].filter(Boolean).join(' · ');};
+ const integrationLine=source=>{if(!source)return 'нет данных';const word=INTEGRATION_STATE[source.state]||'нет данных',detail=INTEGRATION_CODE[source.code]||'',ratings=source.id==='letterboxd_ratings',since=ratings&&source.code==='ratings_pending'&&source.pendingSince?`синхронизация ${stamp(source.pendingSince)}`:'',failure=ratings&&['failed','degraded'].includes(source.state)&&source.code!=='ratings_pending'&&source.lastFailureAt?`ошибка ${stamp(source.lastFailureAt)}`:'',batch=source.lastBatchAt?`последний пакет ${stamp(source.lastBatchAt)}`:'',gate=source.state==='waiting'&&source.gateAt?`не раньше ${stamp(source.gateAt)}`:'',when=source.lastSuccessAt&&source.state!=='unknown'&&source.lastSuccessAt!==source.lastBatchAt?`успех ${stamp(source.lastSuccessAt)}`:'',posters=source.id==='posters',week=posters&&source.lastWeek?`за неделю: проверено ${source.lastWeek.checked??'—'} · новых постеров ${source.lastWeek.hydrated??'—'} · без постера ${source.lastWeek.noPoster??'—'} · ждут ${source.lastWeek.pending??'—'}`:'',next=posters&&source.nextAttemptAt&&source.state!=='unknown'?`${source.state==='waiting'?'следующая попытка':'ожидалась'} ${stamp(source.nextAttemptAt)}`:'',seen=posters&&source.freshnessAt&&source.state!=='unknown'&&source.freshnessAt!==source.lastSuccessAt?`данные от ${stamp(source.freshnessAt)}`:'',history=ratings?retiredLine(source.retiredRefresh):'';return [word,detail&&detail!==word?detail:'',gate,batch,since,failure,when,week,next,seen,history].filter(Boolean).join(' · ');};
  const byId=Object.fromEntries((integrations.sources||[]).map(source=>[source.id,source]));
  // AIR-389. The compact footer reads a known count or says "нет данных": an unreadable source is never shown as 0 or as healthy.
  const collection=data.collection||{},unseen=data.recommendations?.newUnseen||{},known=value=>Number.isInteger(value)?value:null,count=value=>known(value)===null?'нет данных':known(value).toLocaleString('ru');
  const collectionOk=collection.state==='ok',unseenOk=unseen.state==='ok',newTotal=unseenOk&&known(unseen.rating40to44)!==null&&known(unseen.rating45plus)!==null?unseen.rating40to44+unseen.rating45plus:null;
  const epgSource=byId.epg,epgUpdated=epgSource?.lastSuccessAt?stamp(epgSource.lastSuccessAt):'нет данных';
  const epgKnown=data.epgTmdb&&typeof data.epgTmdb==='object';
- return {profile:profile?`v${profile.version} · обновлена ${date(profile.updatedAt,{day:'numeric',month:'short'})}`:'не настроена',local,windowCoverage,runLabel:active?'Текущий run':'Последний run',runHeading:active?'Текущий запуск':'Последний запуск',runLine,nextLine:'Следующий запуск по расписанию: —',localDetail:local,windowDetail:windowCoverage,pendingHot:n(p.pendingHot),pendingCold:n(p.pendingCold),cacheOffWindow:n(c.cacheOffWindowTotal),pendingOffWindow:n(p.pendingOffWindow),deferred:deferredLine,currentBatch:p.currentBatch?.size?`${n(p.currentBatch.size)} фильмов`:'нет активного',nextBatch:p.nextBatchSize&&!(Number.isInteger(p.eligibleNow)&&p.eligibleNow===0)?`до ${n(p.nextBatchSize)} ${p.nextBatchSize%10===1&&p.nextBatchSize%100!==11?'фильма':'фильмов'}`:outcome?.state==='drained'?'очередь пуста':outcome?.state==='deferred'?'ждёт повторной попытки':outcome&&outcome.state!=='unknown'?'нет готовых фильмов':'нет данных',epgRecognized:n(epg.recognizedFilms),epgPending:n(epg.pendingRecognition),epgHistory:n(epg.historicalUnresolved),epgConfirmed:n(epg.confirmedMovies),epgCache:n(epg.cacheOffWindow),epgCoverage:epg.epgStart||epg.epgEnd?`${date(epg.epgStart,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})} — ${date(epg.epgEnd,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}`:'—',epgChannels:n(epg.channels),epgChecked:n(epg.checkedTransmissions),watchlistFilms:n(watchlist.films),watchlistUpdated:date(watchlist.updatedAt,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}),watchlistMetadata:n(watchlist.metadataMissing),watchlistTitles:n((watchlist.titleMissing||0)+(watchlist.titleProvisional||0)),runStarted:date(run?.startedAt,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}),runAdded:run&&finiteCount(run.added)===null?'нет данных':n(run?.added),runFailed:run&&finiteCount(run.failed)===null?'нет данных':n(run?.failed),runResult:`${runStatus}${runReason?` · ${runReason}`:''}`,nextRun:'—',profileVersion:profile?`v${profile.version}`:'—',profileUpdated:date(profile?.updatedAt,{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}),integrationAggregate,integrations:{letterboxd_watchlist:integrationLine(byId.letterboxd_watchlist),letterboxd_ratings:integrationLine(byId.letterboxd_ratings),epg:integrationLine(byId.epg),resolver:integrationLine(byId.resolver),predictions:integrationLine(byId.predictions),metadata:byId.metadata?integrationLine(byId.metadata):''},
+ return {profile:profile?`v${profile.version} · обновлена ${date(profile.updatedAt,{day:'numeric',month:'short'})}`:'не настроена',local,windowCoverage,runLabel:active?'Текущий run':'Последний run',runHeading:active?'Текущий запуск':'Последний запуск',runLine,nextLine:'Следующий запуск по расписанию: —',localDetail:local,windowDetail:windowCoverage,pendingHot:n(p.pendingHot),pendingCold:n(p.pendingCold),cacheOffWindow:n(c.cacheOffWindowTotal),pendingOffWindow:n(p.pendingOffWindow),deferred:deferredLine,currentBatch:p.currentBatch?.size?`${n(p.currentBatch.size)} фильмов`:'нет активного',nextBatch:p.nextBatchSize&&!(Number.isInteger(p.eligibleNow)&&p.eligibleNow===0)?`до ${n(p.nextBatchSize)} ${p.nextBatchSize%10===1&&p.nextBatchSize%100!==11?'фильма':'фильмов'}`:outcome?.state==='drained'?'очередь пуста':outcome?.state==='deferred'?'ждёт повторной попытки':outcome&&outcome.state!=='unknown'?'нет готовых фильмов':'нет данных',epgRecognized:n(epg.recognizedFilms),epgPending:n(epg.pendingRecognition),epgHistory:n(epg.historicalUnresolved),epgConfirmed:n(epg.confirmedMovies),epgCache:n(epg.cacheOffWindow),epgCoverage:epg.epgStart||epg.epgEnd?`${date(epg.epgStart,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})} — ${date(epg.epgEnd,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}`:'—',epgChannels:n(epg.channels),epgChecked:n(epg.checkedTransmissions),watchlistFilms:n(watchlist.films),watchlistUpdated:date(watchlist.updatedAt,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}),watchlistMetadata:n(watchlist.metadataMissing),watchlistTitles:n((watchlist.titleMissing||0)+(watchlist.titleProvisional||0)),runStarted:date(run?.startedAt,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}),runAdded:run&&finiteCount(run.added)===null?'нет данных':n(run?.added),runFailed:run&&finiteCount(run.failed)===null?'нет данных':n(run?.failed),runResult:`${runStatus}${runReason?` · ${runReason}`:''}`,nextRun:'—',profileVersion:profile?`v${profile.version}`:'—',profileUpdated:date(profile?.updatedAt,{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}),integrationAggregate,integrations:{letterboxd_watchlist:integrationLine(byId.letterboxd_watchlist),letterboxd_ratings:integrationLine(byId.letterboxd_ratings),epg:integrationLine(byId.epg),resolver:integrationLine(byId.resolver),predictions:integrationLine(byId.predictions),posters:byId.posters?integrationLine(byId.posters):'',metadata:byId.metadata?integrationLine(byId.metadata):''},
   collectionSummary:collectionOk?`${count(collection.total)} ${filmWord(collection.total)}`:'нет данных',collectionTotal:collectionOk?count(collection.total):'нет данных',collectionWatched:collectionOk?count(collection.watched):'нет данных',collectionRated:collectionOk?count(collection.rated):'нет данных',collectionWatchlist:collectionOk?count(collection.watchlist):'нет данных',
   newSummary:newTotal===null?'нет данных':newTotal===0?'нет':`${newTotal.toLocaleString('ru')} · 4.5+: ${count(unseen.rating45plus)}`,new45:unseenOk?count(unseen.rating45plus):'нет данных',new40:unseenOk?count(unseen.rating40to44):'нет данных',
   epgSummary:epgSource?.lastSuccessAt?(epgSource.state==='stale'?`${epgUpdated} · давно`:epgUpdated):'нет данных',epgUpdated,epgHorizon:epg.epgEnd?`до ${stamp(epg.epgEnd)}`:'нет данных',epgRecognizedText:epgKnown?count(epg.recognizedFilms):'нет данных',epgPendingText:epgKnown?count(epg.pendingRecognition):'нет данных'};
@@ -2371,18 +2462,19 @@ const FOOTER_VALUES=[['summary-collection','collectionSummary'],['summary-foreca
  ['detail-collection-total','collectionTotal'],['detail-collection-watched','collectionWatched'],['detail-collection-rated','collectionRated'],['detail-collection-watchlist','collectionWatchlist'],
  ['detail-forecast-local','local'],['detail-forecast-window','windowCoverage'],['detail-new-45','new45'],['detail-new-40','new40'],['detail-taste','profile'],
  ['detail-epg-updated','epgUpdated'],['detail-epg-horizon','epgHorizon'],['detail-epg-recognized','epgRecognizedText'],['detail-epg-pending','epgPendingText']];
-const FOOTER_INTEGRATIONS=[['integration-watchlist','letterboxd_watchlist'],['integration-ratings','letterboxd_ratings'],['integration-epg','epg'],['integration-resolver','resolver'],['integration-predictions','predictions'],['integration-metadata','metadata']];
+const FOOTER_INTEGRATIONS=[['integration-watchlist','letterboxd_watchlist'],['integration-ratings','letterboxd_ratings'],['integration-epg','epg'],['integration-resolver','resolver'],['integration-predictions','predictions'],['integration-posters','posters'],['integration-metadata','metadata']];
 function renderFooterStatus(data){
  const text=footerStatusText(data);
  for(const [id,key] of FOOTER_VALUES){const node=$('#'+id);if(node)node.textContent=text[key];}
  const metadata=$('[data-integration="metadata"]');if(metadata)metadata.hidden=!text.integrations.metadata;
+ const posterRow=$('[data-integration="posters"]');if(posterRow)posterRow.hidden=!text.integrations.posters;
  for(const [id,key] of FOOTER_INTEGRATIONS){const node=$('#'+id),source=(data.integrations?.sources||[]).find(item=>item.id===key);if(!node)continue;node.textContent=text.integrations[key];node.classList.remove('is-failed','is-attention');if(source?.state==='failed')node.classList.add('is-failed');else if(source&&['degraded','stale','unknown'].includes(source.state))node.classList.add('is-attention');}
  const automation=$('#summary-automation');if(automation){automation.classList.remove('is-failed','is-attention');if(data.integrations?.aggregate==='failed')automation.classList.add('is-failed');else if(data.integrations?.aggregate==='attention')automation.classList.add('is-attention');}
  const stale=$('#status-stale-note');if(stale){stale.hidden=true;stale.textContent='';}
 }
 // A failed refresh keeps the last confirmed counts on screen as a stale snapshot, says how old it is, and shows health (EPG, automation) as unavailable:
 // an old "всё работает" is never presented as the current state.
-function markFooterUnreadable(){const unavailable='статус недоступен';const stale=$('#status-stale-note');if(stale){stale.hidden=false;stale.textContent=footerReadAt?`Не удалось обновить. Показаны данные от ${madridStamp(footerReadAt)}.`:'Не удалось обновить.';}for(const id of ['summary-epg','summary-automation']){const node=$('#'+id);if(node){node.classList.remove('is-failed');node.classList.add('is-attention');node.textContent=unavailable;}}for(const id of ['integration-watchlist','integration-ratings','integration-epg','integration-resolver','integration-predictions','integration-metadata']){const node=$('#'+id);if(!node)continue;node.classList.remove('is-failed','is-attention');node.classList.add('is-attention');node.textContent=unavailable;}}
+function markFooterUnreadable(){const unavailable='статус недоступен';const stale=$('#status-stale-note');if(stale){stale.hidden=false;stale.textContent=footerReadAt?`Не удалось обновить. Показаны данные от ${madridStamp(footerReadAt)}.`:'Не удалось обновить.';}for(const id of ['summary-epg','summary-automation']){const node=$('#'+id);if(node){node.classList.remove('is-failed');node.classList.add('is-attention');node.textContent=unavailable;}}for(const id of ['integration-watchlist','integration-ratings','integration-epg','integration-resolver','integration-predictions','integration-posters','integration-metadata']){const node=$('#'+id);if(!node)continue;node.classList.remove('is-failed','is-attention');node.classList.add('is-attention');node.textContent=unavailable;}}
 function markFooterUnavailable(){const unavailable='статус недоступен';for(const id of ['summary-collection','summary-forecast','summary-new','summary-epg','summary-automation']){const node=$('#'+id);if(node){node.textContent=unavailable;node.classList.remove('is-failed');node.classList.add('is-attention');}}}
 // AIR-519. The kind of the last failed read stays on the stale note as `data-failure` (http_<status>, timeout, network, bad_json, render) and is removed
 // by the next good read; nothing new is shown. A read that has not answered in FOOTER_READ_TIMEOUT_MS is aborted, so one hung request cannot stop the polling.
@@ -2577,6 +2669,15 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
   body=`<p>${title}</p><dl><div><dt>Новых фильмов</dt><dd>${added}</dd></div><div><dt>Разобрано наблюдений</dt><dd>${checked}</dd></div><div><dt>Осталось в очереди</dt><dd>${queue}</dd></div></dl>`
    +(event.kind==='empty'?'<p class="event-note">Новых изменений нет.</p>':`<p class="event-note">Повторно использовано: ${n(event.reused)} · отсеяно: ${n(event.screenedOut)} · запросов к TMDB: ${n(event.tmdbCalls)}.</p>`);
  }
+ // AIR-543 (ADR 0179): the weekly catalog poster report. The title is fixed text chosen by `outcome`: a deferred report is never shown as a final success.
+ // Every number is a strict integer ('неизвестно' otherwise) and no film, id or error text reaches the page.
+ if(event.type==='catalog_posters'){
+  const int=v=>Number.isInteger(v)&&v>=0,num=v=>int(v)?String(v):'неизвестно',failed=event.outcome==='failed',deferred=event.outcome==='deferred'||(event.outcome!=='completed'&&!failed&&event.final===false);
+  const title=failed?'Проверка постеров каталога не удалась':deferred?'Проверка постеров отложена':event.outcome==='completed'?'Постеры каталога проверены':'Отчёт о постерах каталога';
+  const retry=(()=>{const t=Date.parse(event.nextRetryAt);return Number.isFinite(t)?new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(new Date(t)):null;})();
+  body=`<p>${title}</p><dl><div><dt>Проверено</dt><dd>${num(event.checked)}</dd></div><div><dt>Постеров добавлено</dt><dd>${num(event.hydrated)}</dd></div><div><dt>Нет постера на TMDB</dt><dd>${num(event.noPoster)}</dd></div><div><dt>Повторить позже</dt><dd>${num(event.retryable)}</dd></div><div><dt>Отложено (занято)</dt><dd>${num(event.deferredBusy)}</dd></div><div><dt>Ещё в очереди</dt><dd>${num(event.pending)}</dd></div></dl>`
+   +(deferred?`<p class="event-note">Проверка не закончена, это не итог недели.${retry?` Следующая попытка не раньше ${retry}.`:''}</p>`:failed?'<p class="event-note">Автоматические попытки исчерпаны, нужно внимание владельца.</p>':'<p class="event-note">«Нет постера на TMDB» — обычный ответ, а не ошибка.</p>');
+ }
  if(event.type==='taste_profile'){const labels={ratingScale:'Изменена шкала оценок',positiveSignals:'Изменены положительные сигналы',negativeSignals:'Изменены отрицательные сигналы',characterLogic:'Изменена логика персонажей',pace:'Изменён темп',payoffEnding:'Изменены развязка и финал',genrePreferences:'Изменены жанровые предпочтения',comedyPreferences:'Изменены предпочтения для комедий',horrorPreferences:'Изменены предпочтения для хорроров',scifiAdventurePreferences:'Изменены предпочтения для фантастики и приключений',actionPreferences:'Изменены предпочтения для боевиков',anchorFilms:'Изменены опорные фильмы',hardSkips:'Изменены жёсткие исключения',calibration:'Изменена калибровка'},known=Array.isArray(event.changedFields)?event.changedFields.filter(field=>Object.hasOwn(labels,field)):[],phrase=event.scope==='identity'&&!known.length?'Содержание модели не изменилось':known.length===1?labels[known[0]]:known.length>1?'Изменены несколько разделов модели вкуса':'',impact=event.scope==='selective'?'Влияние: выборочное':event.scope==='global'?'Влияние: глобальное':'',from=Number.isInteger(event.fromVersion)?event.fromVersion:null,to=Number.isInteger(event.toVersion)?event.toVersion:null,version=from!==null&&to!==null?`Версия ${from} → ${to}`:to!==null?`Версия ${to}`:'';body=`<p>Модель вкуса обновлена</p>${version?`<p class="event-note">${version}</p>`:''}${phrase?`<p class="event-note">${phrase}</p>`:''}${impact?`<p class="event-note">${impact}</p>`:''}`;}
  return `<li class="activity-event" data-event-id="${escapeHTML(event.id)}"><time datetime="${escapeHTML(event.at)}">${date}</time>${body}</li>`;}
 function rememberActivityAnchor(scroll){
@@ -2630,6 +2731,10 @@ async function loadEvents(more=false,options={}){
   const response=await fetch('/api/events'+(cursor?'?cursor='+encodeURIComponent(cursor):''),options.signal?{signal:options.signal}:undefined);
   if(!response.ok)throw new Error();
   const data=await response.json();
+  // AIR-538: a background refresh of the first page that shares no event with what is already loaded means more events arrived than one page holds (a sleeping
+  // tab, a busy hour). Merging it would leave the events between the new page and the old list in no page the cursor will ever visit, so the list restarts from
+  // the fresh page and the cursor, with a fresh prefetch budget and a fresh type search (an `exhausted` one described the old cursor); older events come back by scrolling, each exactly once.
+  if(!more&&loadedEvents.size>0&&data.cursor&&!data.events.some(event=>loadedEvents.has(event.id))){loadedEvents.clear();eventPaging.seen.clear();eventPaging.stuck=false;resetEventPrefetch();cancelEventSearch();}
   const keepCursor=!more&&loadedEvents.size>0&&(eventPaging.seen.size>0||loadedEvents.size>20);
   for(const event of data.events)loadedEvents.set(event.id,event);
   if(!keepCursor){eventCursor=data.cursor;if(!more)eventPaging.seen.clear();}

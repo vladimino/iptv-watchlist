@@ -57,15 +57,15 @@ async function publishedOwnerReviews(env){
  if(typeof OwnerReview==='undefined'||typeof OwnerReview.loadForRead!=='function')return {ok:true,body:await loadJSON(env,'admin/owner-reviews.json')};
  return OwnerReview.loadForRead(env);
 }
-// AIR-374 P4b (owner decision 4): the titles.json dictionary behind GET /api/programme and GET /api/watchlist. The marker is read FIRST on every GET: legacy, r2 and prepared read the
+// AIR-374 P4b (owner decision 4): the titles.json dictionary behind GET /api/programme and GET /api/watchlist. The marker is read FIRST on every GET: legacy (the explicit local stand-in only; r2 and prepared markers are refused, ADR 0162) reads the
 // R2 mirror exactly as before; at `open` the mirror is frozen and the same rows come from D1 (one bounded SELECT); held and an unreadable marker throw before any read and never reach R2.
-// The marker is read again after the reads, so prepared -> open (or held) mid-request is a 503, never a stale R2 answer. The bundle always defines CanonicalCatalogReader (the guard
+// The marker is read again after the reads, so a move to open (or held) mid-request is a 503, never a stale R2 answer. The bundle always defines CanonicalCatalogReader (the guard
 // serves only the vm-scoped tests that load the Worker without it; tests/canonical-catalog-titles.mjs asserts the bundle).
 const TITLE_READ_REFUSALS=['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'];
 const titleReadGate=env=>typeof CanonicalCatalogReader==='undefined'?null:CanonicalCatalogReader.catalogReaderGate(env);
 // Frozen titles.json / people.json stay R2 only while the Film/Person marker is not open. At open (and held / unreadable) the
 // Producer Workflow is the writer; these sync steps must not refresh the frozen mirrors. The lock is re-read at the write, after any
-// localization await, so a prepared→open flip mid-step cannot land a canonical R2 put.
+// localization await, so a flip to open mid-step (historically prepared→open) cannot land a canonical R2 put.
 async function frozenCanonicalMirrorsLocked(env){
  if(typeof CanonicalCatalogReader==='undefined')return false;
  try{
@@ -85,13 +85,111 @@ async function localizedTitleStore(env,pinned,gate,films){
  return (await loadJSON(pinned,'titles.json'))||{};
 }
 // The LAST async boundary: after every awaited read of the route (titles, owner reviews, sync.json, documents) and right before a successful answer, the marker is read again
-// and must still have the state AND generation the first read saw, on the open path and on the legacy/r2/prepared path alike. A 200 shape that carries no title (the empty
+// and must still have the state AND generation the first read saw, on the open path and on the legacy (local stand-in) path alike. A 200 shape that carries no title (the empty
 // watchlist) is fenced the same way. Error answers are not fenced: they carry no stored facts.
 async function titleReadFinish(env,gate,response){
  if(gate)await CanonicalCatalogReader.catalogReaderStill(env,gate);
  return response;
 }
 const titleReadRefusal=error=>TITLE_READ_REFUSALS.includes(error?.code)?json({error:'storage_unavailable',reason:error.code},503):null;
+// AIR-541 (ADR 0177): the degraded, read-only answer from the R2 compatibility mirrors. Reached only from the read handlers below, after a TYPED TEMPORARY authoritative failure
+// (`MirrorRead.isTemporaryReadFault`); a healthy D1, a structural refusal, a fence (409 retry) and a confirmed absence/retirement/conflict never come here. The healthy response shape is
+// unchanged: a body without `source` is authoritative. Nothing in this block writes (R2, D1 or anywhere else); the write routes do not call these functions.
+// The bundle always defines MirrorRead; the guard serves only the vm-scoped tests that load the Worker without it (no degraded answer is then possible).
+const isTemporaryReadFault=error=>typeof MirrorRead==='undefined'?false:MirrorRead.isTemporaryReadFault(error);
+const DEGRADED_EVENT_WINDOW_MS=60000,DEGRADED_RUN_ID=/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const degradedSeen=new Map();let degradedLastAt=0;
+function degradedEvent(event,fields){
+ try{
+  const key=event+':'+(fields.route||'')+':'+(fields.reason||''),now=Date.now();
+  if(now-(degradedSeen.get(key)||0)<DEGRADED_EVENT_WINDOW_MS)return;
+  if(degradedSeen.size>64)degradedSeen.clear();
+  degradedSeen.set(key,now);
+  console.log(JSON.stringify({event,at:new Date(now).toISOString(),...fields}));
+ }catch{}
+}
+// An authoritative read that succeeds after a degraded one: one `mirror_fallback_recovered` event (per window), no personal data.
+function degradedRecovered(route){
+ if(!degradedLastAt)return;
+ const afterMs=Date.now()-degradedLastAt;degradedLastAt=0;
+ degradedEvent('mirror_fallback_recovered',{route,afterMs});
+}
+function degradedReason(error){return typeof error?.code==='string'?error.code.slice(0,64):'temporary_read_fault';}
+function degradedResponse(body,snapshot,error,route){
+ const meta=MirrorRead.mirrorMeta(snapshot,degradedReason(error));
+ degradedLastAt=Date.now();
+ const age=meta.asOf?Math.max(0,Math.round((Date.now()-Date.parse(meta.asOf))/1000)):null;
+ degradedEvent('mirror_fallback_activated',{route,reason:meta.reason,runId:meta.runId,asOf:meta.asOf,ageSeconds:age,joined:meta.joined});
+ return json({...body,...meta,availability:'unverified'},200,{'X-Data-Origin':'mirror'});
+}
+async function degradedSnapshot(env,error,route){
+ let snapshot=null;
+ try{snapshot=await MirrorRead.readMirrorSnapshot(env);}catch{snapshot=null;}
+ if(!snapshot||(!snapshot.programme&&!snapshot.watchlist)){
+  degradedEvent('mirror_fallback_unusable',{route,reason:degradedReason(error),rejected:(snapshot?.rejected||[]).map(item=>item.reason).slice(0,8)});
+  return null;
+ }
+ for(const item of snapshot.rejected)if(item.reason!=='absent')degradedEvent('mirror_validation_failed',{route,reason:item.reason,key:item.key});
+ return snapshot;
+}
+// GET /api/programme from the mirrors. D1-owned overlays (localized titles, owner reviews) are not applied: they are not read here.
+async function degradedProgrammeResponse(env,error){
+ const snapshot=await degradedSnapshot(env,error,'programme');
+ if(!snapshot)return null;
+ let body;
+ if(snapshot.programme){
+  const watchlist=snapshot.joined==='best_effort'?snapshot.watchlist.doc:null;
+  body={...programmeWithWatchlist(JSON.parse(JSON.stringify(snapshot.programme.doc)),watchlist&&JSON.parse(JSON.stringify(watchlist))),publishedAt:snapshot.programme.asOf};
+ }else{
+  // A watchlist alone has no schedule: `shows` are unknown (not empty) and the page labels them so.
+  const stamp=snapshot.watchlist.doc.updatedAt??snapshot.watchlist.asOf;
+  if(!stamp){degradedEvent('mirror_fallback_unusable',{route:'programme',reason:'no_snapshot_time'});return null;}
+  const films=snapshot.watchlist.doc.films.map(film=>({...film,shows:Array.isArray(film.shows)?film.shows:[]}));
+  body={runId:null,updatedAt:stamp,publishedAt:snapshot.watchlist.asOf,films,watchlistCount:films.length,scheduleUnavailable:true};
+ }
+ return degradedResponse(body,snapshot,error,'programme');
+}
+async function degradedWatchlistResponse(env,error){
+ const snapshot=await degradedSnapshot(env,error,'watchlist');
+ if(!snapshot)return null;
+ const body=snapshot.watchlist?{...snapshot.watchlist.doc}:{updatedAt:snapshot.programme.doc.updatedAt??null,films:snapshot.programme.doc.films};
+ return degradedResponse(body,snapshot,error,'watchlist');
+}
+// The film page of a verified TMDB movie from the mirrors (C1). Never a 404/410/409: an identity the mirrors cannot prove is `null` here and the caller keeps its typed 503.
+async function degradedFilmResponse(env,tmdbId,error){
+ const snapshot=await degradedSnapshot(env,error,'catalog_film');
+ if(!snapshot)return null;
+ const identity=await MirrorRead.findMirrorFilm(env,snapshot,tmdbId);
+ if(identity.state!=='found'){degradedEvent('mirror_fallback_unusable',{route:'catalog_film',reason:identity.reason});return null;}
+ const meta=MirrorRead.mirrorMeta(identity.pair||snapshot,degradedReason(error));
+ degradedLastAt=Date.now();
+ degradedEvent('mirror_fallback_activated',{route:'catalog_film',reason:meta.reason,runId:identity.provenance.runId,asOf:identity.provenance.asOf});
+ return json({status:'found',programmeRunId:identity.provenance.runId,generatedAt:identity.provenance.asOf,...meta,runId:identity.provenance.runId,asOf:identity.provenance.asOf,availability:'unverified',provenance:identity.provenance,...(identity.disputed?{disputedAttributes:['title','year']}:{}),degraded:['predictions','metadata','facts','shows_unverified'],film:identity.film},200,{'X-Data-Origin':'mirror'});
+}
+// The server-side write fence (ADR 0177 decision 7). A client that rendered from a mirror labels every mutating request `X-Data-Origin: mirror`: it is refused even when D1 has recovered, so a
+// stale degraded page cannot write before it has completed an authoritative refresh. Film-dependent writes may also send `X-Expected-Run`: a different current run is a 409, an unreadable one a 503.
+// Requests without these headers are not touched. This runs before any handler, so no route can be skipped.
+const DEGRADED_WRITE_RUN_ROUTES=['/api/started','/api/catalog/watched'];
+async function degradedWriteFence(request,env,url){
+ if(['GET','HEAD','OPTIONS'].includes(request.method))return null;
+ const origin=request.headers.get('X-Data-Origin');
+ if(origin!==null&&origin!=='authoritative'){
+  degradedEvent('degraded_write_refused',{route:'write',reason:origin==='mirror'?'degraded_origin':'invalid_origin_header'});
+  return json({error:'Writes are refused for data read from a saved copy; refresh first',code:'degraded_origin_write_refused'},409);
+ }
+ const expected=request.headers.get('X-Expected-Run');
+ if(expected!==null&&DEGRADED_WRITE_RUN_ROUTES.includes(url.pathname)){
+  if(!DEGRADED_RUN_ID.test(expected))return json({error:'Invalid X-Expected-Run',code:'invalid_expected_run'},400);
+  let current;
+  try{current=await epgPublicationReadOnly(env);}
+  catch{return json({error:'The published generation is not readable right now',code:'published_epg_unavailable'},503);}
+  if(current?.programmeRunId!==expected){
+   degradedEvent('degraded_write_refused',{route:'write',reason:'published_generation_changed'});
+   return json({error:'The published generation changed; refresh and try again',code:'published_generation_changed'},409);
+  }
+ }
+ return null;
+}
 function catalogBridgeIds({catalog,programme,watchlist,index,film}){
  const ids=[];
  if(film?.id!=null)ids.push(String(film.id));
@@ -439,7 +537,7 @@ function catalogFilmState(records,tmdbId){
 }
 // AIR-409: a canonical Film admitted by a verified rated archive (letterboxd/admissions/verified-films.json) that Discovery never admitted. At `open` (AIR-475) the fallback is
 // the D1 canonical Film itself (catalogCanonicalFilmFromD1), whatever admissions it has; the R2 receipt below is only the pre-open reader.
-// Read only, only when Discovery says "absent" and only while the Film/Person authority names R2 (legacy, r2, prepared; ADR 0099): `held`, `open` and an
+// Read only, only when Discovery says "absent" and only while the Film/Person authority names R2 (legacy, the explicit local stand-in only; ADR 0099, ADR 0162): `held`, `open` and an
 // unreadable marker fail closed and never fall back to R2. The receipt is the R2 identity decision, so it is bounded by the owner's R2 retirements
 // object and by D1 contradictions (a conflicting or second trusted TMDB id, a redirected Film); a Film whose projection is still pending is found. The entry must verify exactly as the rated-archive admission rules require (key tmdb_<n>, tmdb equal to the key,
 // short code, sha256 digest, verification time, no watchlist field); anything else is not a Film here. Nothing is scanned: one key of one object.
@@ -537,7 +635,7 @@ async function catalogFilmIdentity(env,tmdbId){
   else if(found.state==='absent')found=await catalogArchiveFallback(env,tmdbId);
  }catch(error){
   const code=error?.code||'';
-  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read','film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative'].includes(code))return {fault:'unavailable',reason:code};
+  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read','film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative'].includes(code))return {fault:'unavailable',reason:code,temporary:isTemporaryReadFault(error)};
   return {fault:'error'};
  }
  return {found};
@@ -546,7 +644,11 @@ async function catalogFilmRoute(env,tmdbId){
  if(!CATALOG_FILM_TMDB.test(tmdbId))return json({status:'invalid',error:'A TMDB movie id is a positive integer'},400);
  const now=Date.now();
  const identity=await catalogFilmIdentity(env,tmdbId);
- if(identity.fault==='unavailable')return json({status:'unavailable',error:'The catalog is not readable right now',reason:identity.reason},503);
+ if(identity.fault==='unavailable'){
+  // AIR-541 (ADR 0177): only a typed TEMPORARY fault may be answered from the mirrors; a structural refusal keeps its 503.
+  if(identity.temporary){const degraded=await degradedFilmResponse(env,tmdbId,{code:identity.reason,temporary:true});if(degraded)return degraded;}
+  return json({status:'unavailable',error:'The catalog is not readable right now',reason:identity.reason},503);
+ }
  if(identity.fault)return json({status:'error',error:'The catalog lookup failed'},500);
  const found=identity.found;
  if(found.state==='absent')return json({status:'absent'},404);
@@ -569,7 +671,7 @@ async function catalogFilmRoute(env,tmdbId){
   metadata=read.records;metaGate=read.gate;
  }
  catch(error){
-  const refused=titleReadRefusal(error);
+  const refused=isTemporaryReadFault(error)?null:titleReadRefusal(error);
   if(refused)return refused;
   degraded.push('metadata');
  }
@@ -598,7 +700,7 @@ async function catalogFilmRoute(env,tmdbId){
  }
  const page=catalogFilmPage({film:found.film,alias,programmeRunId:runId,completedOnly:publication?.authority==='d1'&&!!pinnedRunId,index:facts,profile:freshness?profile:null,metadata,watchlist,programme,freshness:freshness||{indexed:()=>false},now});
  try{await catalogMetadataFinish(env,metaGate);}
- catch(error){const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
+ catch(error){if(isTemporaryReadFault(error))degraded.push('metadata');else{const refused=titleReadRefusal(error);if(refused)return refused;throw error;}}
  return json({status:'found',programmeRunId:runId,generatedAt:new Date(now).toISOString(),...(degraded.length?{degraded}:{}),film:page});
 }
 // The owner's watched mark on a Finds card (ADR-0032): one verified film of the published catalog copy, named by its TMDB id only.
@@ -643,7 +745,7 @@ async function catalogWatchedRoute(request,env,url){
   if(again.programmeRunId!==runId||again.phase!==publication.phase||again.fence!==publication.fence||again.authority!==publication.authority)return unavailable('catalog_generation_changed','The published generation changed; try again');
   if(typeof DiscoveryAuthority!=='undefined'){
    // Immediately before the write the authority must still be the one the catalog was read under: same mode and cutover (a D1 to R2
-   // switch is a change), same generation, same published run, not held and not loading. The R2-owned path (not ready) stays R2.
+   // switch is a change), same generation, same published run, not held and not loading. The R2-owned path (not ready: the explicit local stand-in only, ADR 0162) stays R2.
    const gate=await DiscoveryAuthority.readAuthority(env);
    if(gate.ready&&gate.transfer==='loading')return unavailable('discovery_incomplete');
    if(discoveryState(gate)!==discoveryState(opened)||gate.ready&&gate.programmeRunId!==runId)return unavailable('catalog_generation_changed','The published generation changed; try again');
@@ -977,7 +1079,11 @@ async function persistWatchlist(env,run,report){
 }
 async function persistScan(env,run,report){
  // A complete watchlist is one observation of every listed film (ADR-0024).
- if(!(report.films?.length===report.watchlistCount&&run.watchlistObservedAt))return 'ok';
+ // ADR 0175 decision 2: what the scan did is recorded next to the completion, so a skipped scan is visible and is not read as an applied one.
+ if(!(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)){
+  run.scanOutcome=report.films?.length===report.watchlistCount?'skipped_no_observation':'skipped_incomplete_watchlist';
+  return 'ok';
+ }
  const scanId=String(run.runId||'');
  const films=report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}));
  let writerOpen=false;
@@ -986,6 +1092,7 @@ async function persistScan(env,run,report){
   delete run.ratedAdmissionScan;
   delete run.ratedAdmissionIntent;
   await LetterboxdFacts.applyWatchlistScan(env,{scanId,observedAt:run.watchlistObservedAt,films});
+  run.scanOutcome='facts_only';
   return 'ok';
  }
  if(!run.ratedAdmissionScan||run.ratedAdmissionScan.scanId!==scanId){
@@ -1026,6 +1133,7 @@ async function persistScan(env,run,report){
   throw error;
  }
  if(run.ratedAdmissionScan.cursor<queue.length)return 'continue';
+ run.scanOutcome='applied';
  delete run.ratedAdmissionScan;
  delete run.ratedAdmissionIntent;
  await saveJSON(env,'sync.json',run);
@@ -1713,12 +1821,21 @@ function sealBusyResponse(run,taken,now=Date.now()){
   // ADR 0103: the window's own absolute deadline, not the lease TTL cap, and its own busy kind. It is a wait for the executor; the
   // external Task contract waits only for `lease_held` within about 93 s, so for it this is a stop that it reports, never a failure.
   const until=Math.max(expiresAt+SEAL_BUSY_MARGIN_MS,now+1000);
-  return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:'projector_window',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000)});
+  return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:'projector_window',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000),...sealBusyTelemetry(run,taken,'projector_window',expiresAt,until,now)});
  }
  const held=kind==='lease_held'&&expiresAt!==null;
  const bounded=held?Math.min(expiresAt,now+DiscoveryAuthority.LEASE_TTL_MS)+SEAL_BUSY_MARGIN_MS:now+SEAL_BUSY_LOST_RACE_MS;
  const until=Math.max(bounded,now+1000);
- return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:held?'lease_held':'lost_race',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000)});
+ return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:held?'lease_held':'lost_race',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000),...sealBusyTelemetry(run,taken,held?'lease_held':'lost_race',expiresAt,until,now)});
+}
+// ADR 0175 decision 8. Who held the lease, until when, the scheduled retry delay and in which seal phase: kinds and times only, no Film, id list, SQL or payload.
+// `holderKind` tells an EPG-held lease from a Discovery-held one; a soft wait is not a failure and does not count against the budget.
+function sealBusyTelemetry(run,taken,busyKind,expiresAt,until,now){
+ const holderKind=taken?.busy?.holderKind??taken?.busy?.ownerKind??null;
+ // `scheduledWaitMs` is the PLANNED retry delay (`nextCatchUpAt` minus now), not the measured time spent blocked: it must not be read as observed contention latency.
+ const fields={holderKind,holdExpiry:expiresAt?new Date(expiresAt).toISOString():null,scheduledWaitMs:Math.max(0,until-now),sealPhase:run.seal?.phase??null};
+ try{epgPhase(run.runId,'seal_busy','exit',{busyKind,...fields});}catch{}
+ return fields;
 }
 async function sealedPublishAvailable(env){
  if(typeof DiscoveryAuthority==='undefined'||typeof PublishedEpg==='undefined')return false;
@@ -1946,6 +2063,27 @@ async function sealFinalizeStep(env,run,deadline=Infinity){
  return sealResponse(run,{},{seal:{persisted:true}});
 }
 // `queue`: the prediction queue refresh, then the run is complete. A failed refresh is recorded and does not hold the run.
+// ADR 0175 decision 4. One fenced D1 batch writes the run's completion certificate and clears the EPG-priority pause. It runs under the step lease the seal step holds
+// (`env.epgStep`, `env.epgFence`); with no lease it writes nothing. The Madrid day is the run's frozen day (`publicationRunKey`), as for the pointer. An absent
+// certificate column certifies nothing (today's behaviour). Never throws: the outcome is `certified`, `absent`, `skipped` (no lease, no pause table or no day) or `owed`.
+async function certifyCompletedRun(env,run){
+ try{
+  if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.certifyRun!=='function')return 'skipped';
+  if(!env.epgStep||env.epgFence==null)return 'skipped';
+  const day=await publicationRunKey(env,run,run.runId);
+  if(!day)return 'skipped';
+  await epgStepGuard(env);
+  const now=Date.now();
+  const margin=typeof EpgOrchestration!=='undefined'?EpgOrchestration.BOUNDARY_MARGIN_MS:0;
+  const out=await PublishedEpg.certifyRun(env,{programmeRunId:run.runId,madridRunKey:day,step:env.epgStep,epgFence:env.epgFence,leaseBound:new Date(now+margin).toISOString(),now});
+  const outcome=out.column==='absent'?'absent':out.certified?'certified':'owed';
+  try{epgPhase(run.runId,'seal_certify','exit',{outcome});}catch{}
+  return outcome;
+ }catch(error){
+  try{epgPhase(run.runId,'seal_certify','error',{code:String(error?.code||error?.message||'error').slice(0,60)});}catch{}
+  return 'owed';
+ }
+}
 async function sealQueueStep(env,run,deadline=Infinity){
  const payload=await sealPayload(env,run);
  const report=payload.report;
@@ -1956,12 +2094,15 @@ async function sealQueueStep(env,run,deadline=Infinity){
  await prepareEpgCompletion(env,run,report);
  run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;delete run.seal;
  await saveJSON(env,'sync.json',run);
+ // ADR 0175 decision 4: the certificate comes after the durable `complete` save and before the event flushes below. A failure never stops the flushes; the
+ // run stays certificate-owed and `EpgOrchestration.certifyComplete` repairs it from the hourly `ensure`.
+ const certificate=await certifyCompletedRun(env,run);
  await flushEpgEvent(env,run);
  await flushWatchlistEvent(env,run);
  if(run.ratingsPipeline==='separate'&&run.removalRefs&&await watchlistEventStored(env,run)&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
  try{await env.BUCKET.delete(sealPayloadKey(run.runId));}catch{}
  try{await env.BUCKET.delete(sealPublicationKey(run.runId));}catch{}
- return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsStorage:run.ratingsStorage}:{}),...(run.sealDegraded?.length?{degraded:run.sealDegraded}:{})};
+ return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,...(certificate?{certificate}:{}),...(run.scanOutcome?{scanOutcome:run.scanOutcome}:{}),ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsStorage:run.ratingsStorage}:{}),...(run.sealDegraded?.length?{degraded:run.sealDegraded}:{})};
 }
 // One bounded step of the staged publication. It starts no unit of work after SEAL_REQUEST_BUDGET_MS from the request's entry and answers
 // `nextAction: continue` until the run is complete.
@@ -2184,6 +2325,7 @@ export default {
 // AIR-324 (ADR 0093): the same firing also calls reconcileDiscoveryWorkflow; it creates instances only while the admission gate passes.
 async scheduled(controller,env,execution){const at=controller.scheduledTime||Date.now();
 // AIR-534 (ADR 0174): the Discovery-only fast cron reconciles the Workflow and nothing else: no hourly report, no EPG, Ratings or Monitor.
+if(typeof CatalogPosterWeekly!=='undefined'&&controller.cron===CatalogPosterWeekly.CRON){execution.waitUntil(Promise.resolve().then(()=>CatalogPosterWeekly.run(env,{now:at})).catch(()=>{}));return;}
 if(typeof DISCOVERY_FAST_CRON==='string'&&controller.cron===DISCOVERY_FAST_CRON){execution.waitUntil(Promise.resolve().then(()=>typeof reconcileDiscoveryRecovery==='function'?reconcileDiscoveryRecovery(env,{now:at}):undefined).catch(()=>{}));return;}
 const reconcile=Promise.resolve().then(()=>typeof reconcileDiscoveryWorkflow==='function'?reconcileDiscoveryWorkflow(env,{scheduled:true,now:at}):undefined);const settled=reconcile.then(()=>{},()=>{});const head=new Promise(resolve=>{const timer=setTimeout(resolve,SCHEDULED_RECONCILE_HEAD_MS);settled.then(()=>{clearTimeout(timer);resolve();});});execution.waitUntil((async()=>{await head;await Promise.allSettled([reconcile,typeof RatingsOrchestration==='undefined'?Promise.resolve():RatingsOrchestration.ensure(env,{now:Date.now()}),typeof EpgOrchestration==='undefined'?Promise.resolve():EpgOrchestration.ensure(env,{now:Date.now()}),typeof Monitor==='undefined'?Promise.resolve():Monitor.run(env,{now:controller.scheduledTime||Date.now()})]);})());},
 async fetch(request,env,execution){
@@ -2193,6 +2335,8 @@ async fetch(request,env,execution){
  if(url.pathname.startsWith('/api/')){
   if(!env.BUCKET)return json({error:'Storage unavailable'},503);
   if(['POST','PUT'].includes(request.method)&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
+  // AIR-541 (ADR 0177): the degraded-origin / expected-run write fence runs before any handler, so no mutating route can skip it.
+  {const fenced=await degradedWriteFence(request,env,url);if(fenced)return fenced;}
   if(url.pathname.startsWith('/api/enrichment/'))return await enrichmentRoute(request,env,url,execution);
   if(url.pathname.startsWith('/api/d1/'))return await catalogD1Route(request,env,url);
   if(url.pathname==='/api/admin/health')return await adminHealthRoute(request,env,url);
@@ -2229,7 +2373,7 @@ async fetch(request,env,execution){
     const watchlist=await loadJSON(pinned,'watchlist.json');
     const titles=await localizedTitleStore(env,pinned,gate,[...(data?.films||[]),...(watchlist?.films||[])]);
     const reviews=await publishedOwnerReviews(pinned);
-    if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
+    if(!reviews.ok){if(reviews.temporary){const degraded=await degradedProgrammeResponse(env,{code:'owner_review_unavailable',temporary:true});if(degraded)return degraded;}return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);}
     const merged=programmeWithWatchlist(data,watchlist);
     let catalog=null;
     if(Array.isArray(merged.catalogFilms)&&merged.catalogFilms.length){
@@ -2240,8 +2384,9 @@ async fetch(request,env,execution){
     const sync=await loadJSON(env,'sync.json');
     const publishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(sync,data):null;
     if(publishedAt)presented.publishedAt=publishedAt;else delete presented.publishedAt;
+    degradedRecovered('programme');
     return await titleReadFinish(env,gate,json(presented));
-   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);if(isTemporaryReadFault(error)){const degraded=await degradedProgrammeResponse(env,error);if(degraded)return degraded;}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){
    try{
@@ -2253,9 +2398,10 @@ async fetch(request,env,execution){
     if(!data)return await titleReadFinish(env,gate,json({films:[]}));
     const titles=await localizedTitleStore(env,pinned,gate,data?.films||[]);
     const reviews=await publishedOwnerReviews(pinned);
-    if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
+    if(!reviews.ok){if(reviews.temporary){const degraded=await degradedWatchlistResponse(env,{code:'owner_review_unavailable',temporary:true});if(degraded)return degraded;}return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);}
+    degradedRecovered('watchlist');
     return await titleReadFinish(env,gate,json(presentLocalized(data,titles,reviews.body)));
-   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);if(isTemporaryReadFault(error)){const degraded=await degradedWatchlistResponse(env,error);if(degraded)return degraded;}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
   {const permanent=/^\/api\/catalog\/film\/([^/]+)$/.exec(url.pathname);if(permanent&&request.method==='GET'){let id;try{id=decodeURIComponent(permanent[1]);}catch{id='';}return await catalogFilmRoute(env,id);}}

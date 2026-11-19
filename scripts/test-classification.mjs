@@ -207,6 +207,9 @@ export const FILES={
  "canonical-metadata-sync-producer.mjs": {
   "suite": "core"
  },
+ "canonical-rated-admission-bundle.mjs": {
+  "suite": "core"
+ },
  "canonical-rated-admission-producer.mjs": {
   "suite": "core"
  },
@@ -296,6 +299,9 @@ export const FILES={
  "canonical-receipts.mjs": {
   "suite": "core"
  },
+ "canonical-repository-context.mjs": {
+  "suite": "core"
+ },
  "canonical-repository-projected-link.mjs": {
   "suite": "core"
  },
@@ -322,6 +328,18 @@ export const FILES={
   "note": "The route contract stays in core. Twenty timed identity reads are scenario catalog-d1-identity-read-latency."
  },
  "catalog-film.mjs": {
+  "suite": "core"
+ },
+ "catalog-poster-footer.mjs": {
+  "suite": "core"
+ },
+ "catalog-poster-monitor.mjs": {
+  "suite": "core"
+ },
+ "catalog-poster-weekly-d1.mjs": {
+  "suite": "core"
+ },
+ "catalog-poster-weekly.mjs": {
   "suite": "core"
  },
  "catalog-posters-d1.mjs": {
@@ -363,33 +381,6 @@ export const FILES={
  "d1-backfill.mjs": {
   "suite": "core"
  },
- "d1-enrichment-bucket-unicode.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-buckets.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-context.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-duplicate-retained.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-fairness.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-identity-collision.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-phase-log.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-phases.mjs": {
-  "suite": "core"
- },
- "d1-enrichment-stored-pages.mjs": {
-  "suite": "core"
- },
  "d1-enrichment.mjs": {
   "suite": "core"
  },
@@ -400,6 +391,9 @@ export const FILES={
   "suite": "core"
  },
  "d1-standin.mjs": {
+  "suite": "core"
+ },
+ "d1-status-context.mjs": {
   "suite": "core"
  },
  "daily-quality.mjs": {
@@ -422,6 +416,15 @@ export const FILES={
   "note": "8,312-film write stays in core. newTrips*350<60000 is a cap on round trips at a fixed 350ms model, not the runner clock. localMs is only logged."
  },
  "discovery-archive-import.mjs": {
+  "suite": "core"
+ },
+ "admin-identity-revoke-page.mjs": {
+  "suite": "core"
+ },
+ "discovery-identity-revoke.mjs": {
+  "suite": "core"
+ },
+ "discovery-intent-migration-0027.mjs": {
   "suite": "core"
  },
  "discovery-authority.mjs": {
@@ -593,6 +596,9 @@ export const FILES={
  "epg-orchestration.mjs": {
   "suite": "core"
  },
+ "epg-workflow-rollover.mjs": {
+  "suite": "core"
+ },
  "epg-path-a-feasibility.mjs": {
   "suite": "core",
   "note": "The tiny-scale replay must be exact and must refuse bad paths. heapUsed>0 only proves a sample was recorded."
@@ -644,6 +650,9 @@ export const FILES={
   "suite": "core"
  },
  "epg-repository.mjs": {
+  "suite": "core"
+ },
+ "epg-run-certificate.mjs": {
   "suite": "core"
  },
  "epg-slot-uniqueness.mjs": {
@@ -1007,6 +1016,21 @@ export const FILES={
  "migration-pattern-limit.mjs": {
   "suite": "core"
  },
+ "mirror-fallback-client.mjs": {
+  "suite": "core"
+ },
+ "mirror-fallback-routes.mjs": {
+  "suite": "core"
+ },
+ "mirror-fault-classifier.mjs": {
+  "suite": "core"
+ },
+ "mirror-read-write-fence.mjs": {
+  "suite": "core"
+ },
+ "mirror-read.mjs": {
+  "suite": "core"
+ },
  "monitor-policy.mjs": {
   "suite": "core"
  },
@@ -1214,21 +1238,7 @@ export const FILES={
  "programme-policy-projection.mjs": {
   "suite": "core"
  },
- "projector-bulk-spike.mjs": {
-  "suite": "core",
-  "note": "Grouped writes must refuse a conflict and fall back to the same rows. That is a correctness check of the spike, not a benchmark gate."
- },
- "projector-bulk.mjs": {
-  "suite": "core"
- },
- "projector-l1-budget.mjs": {
-  "suite": "core"
- },
- "projector-marker-fence-mutation.mjs": {
-  "suite": "non-functional",
-  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
- },
- "projector-marker-fence.mjs": {
+ "projector-marker-guard.mjs": {
   "suite": "core"
  },
  "projector-view-parity.mjs": {

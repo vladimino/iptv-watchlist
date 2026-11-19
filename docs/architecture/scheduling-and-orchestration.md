@@ -195,16 +195,16 @@ The projector's strict generation pin cannot pass while Discovery writes about s
 
 **Marker fence on every batch ([ADR 0116](../adr/0116-projector-marker-and-generation-fence-on-every-batch.md)).** Every `on` run reads the `film_person_authority` marker first (not `r2`/`prepared`: deferred `authority_unavailable`), and every per-entity and grouped write batch asserts mode, `cutover='open'` and generation inside the batch, so a marker move fails the batch whole (`authority_moved`).
 
-### EPG-priority Discovery pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md), Accepted; inert code delivered by AIR-459, not activated)
+### EPG-priority Discovery pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md), Accepted and live since 14 Nov 2026; release point moved by [ADR 0175](../adr/0175-epg-priority-holds-until-run-complete.md), Accepted, code by AIR-539)
 
-The gate code is in the Worker but inert: the migration `0022` is not applied, so there is no pause row in production and every statement is today's. Nothing in this section runs until a later, separately authorized activation. The sequence is the shape recorded for the owner decision on [AIR-458](https://trello.com/c/RrtTkNg1): new Discovery admission closes at 16:55 Europe/Madrid by a predicate on the lease write, with no business TTL and no cron at that minute. `sealArchive` moves the Discovery pin first and does not lift the pause. `publishGeneration` later switches the pointer and writes `published_epg_authority.madrid_run_key` from `sync.json.runKey`, frozen when that sync run started. A later Workflow that resumes the seal does not relabel the day with its own `runKey`. The day is not `published_at` and not the live orchestration control. An in-flight chunk may finish. EPG does not run Discovery; it may wait, without a failure count, while a Discovery lease is live. The projector window is a separate hold and is not drawn here. GitHub's own SVG of this figure is a reviewer's check of the blob; a headless session does not run GitHub's Mermaid enricher.
+The pause is live (migration `0022` applied). ADR 0175 changes **when it lifts**: not in the pointer batch but after the run is durably `stage=complete`, certified by one fenced D1 batch. Migration `0026` (two certificate columns) was applied to production on 19 Nov 2026 under a separate owner GO, so that behaviour is active; before it, with the columns absent, every statement was the ADR 0135 behaviour and the pause lifted at the pointer. Its natural-run acceptance is not yet recorded. The diagram shows the ADR 0175 behaviour: new Discovery admission closes at 16:55 Europe/Madrid by a predicate on the lease write, with no business TTL and no cron at that minute. `sealArchive` moves the Discovery pin first and does not lift the pause. `publishGeneration` later switches the pointer and writes `published_epg_authority.madrid_run_key` from `sync.json.runKey`, frozen when that sync run started. A later Workflow that resumes the seal does not relabel the day with its own `runKey`. The day is not `published_at` and not the live orchestration control. An in-flight chunk may finish. EPG does not run Discovery; it may wait, without a failure count, while a Discovery lease is live. The projector window is a separate hold and is not drawn here. GitHub's own SVG of this figure is a reviewer's check of the blob; a headless session does not run GitHub's Mermaid enricher.
 
 ```mermaid
 sequenceDiagram
     participant Disc as Discovery admission
     participant D1 as D1
     participant EPG as EPG publication
-    Note over Disc,EPG: Accepted, not live. No business TTL. No 16:55 cron.
+    Note over Disc,EPG: Pause live. ADR 0175 release point active since 0026 (19 Nov 2026). No business TTL. No 16:55 cron.
     Disc->>D1: New acquire after 16:55, pointer unchanged
     D1-->>Disc: Lease unchanged. epg_priority, no failure
     Note over D1: Second statement sets paused while the predicate holds
@@ -214,11 +214,16 @@ sequenceDiagram
     Note over EPG: Holder finishes or the 90 s lease expires
     EPG->>D1: Acquire, exempt from the pause
     Note over D1: sealArchive moves the pin. Pointer stays previous.
-    EPG->>D1: publishGeneration moves the pointer and clears the row if the pin matches
+    EPG->>D1: publishGeneration moves the pointer and resets the certificate. The pause stays closed.
     Disc->>D1: Previous programme id acquire
     D1-->>Disc: stale_generation, no lease
     Disc->>D1: Published programme id acquire
+    D1-->>Disc: epg_priority, awaiting_complete
+    Note over EPG: finalize, queue attempted, then sync.json stage complete in R2
+    EPG->>D1: Certify batch: mode revision and step lease fence, CAS on run and day, pause clear
+    Disc->>D1: Published programme id acquire
     D1-->>Disc: admitted
+    Note over EPG,D1: Hourly ensure certifies a complete but uncertified run. No Workflow, no control or sync.json write.
 ```
 
 ### Seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), implemented by AIR-484; production acceptance awaits a natural run)
@@ -437,6 +442,49 @@ sequenceDiagram
 
 The sequence shows only the operator path. The natural handover, the step-failure recovery and the reconcile are unchanged. The diagram is not evidence that a live apply ran; each production `apply` needs its own owner approval.
 
+## Controlled EPG Workflow rollover ([ADR 0176](../adr/0176-controlled-epg-workflow-rollover.md), Accepted)
+
+A live EPG Workflow instance keeps the Worker version it was created on until it hands over or ends. The owner can move the run onto the deployed version earlier with the owner-only MCP tool `epg_workflow_rollover` ([runbook](../runbooks/epg-workflow-rollover.md)). It is never called by the cron, a Workflow schedule or a Scheduled Task. The only ownership change is one compare-and-set of the control record to the deterministic successor (`series + 1`, same run key, epoch and run id), conditioned on the mode revision and on the step-lease row being unchanged since the read, and admitted only while the owner is provably asleep outside a step.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Owner as Owner via /mcp (Access JWT)
+    participant Op as Rollover operator in the Worker
+    participant D1 as D1 control, mode and lease rows
+    participant CF as Cloudflare Workflows
+    participant Old as Old instance (asleep)
+    participant New as Successor instance
+    participant Cron as Hourly ensure
+
+    Owner->>Op: dry_run
+    Op->>D1: Read mode, control, lease, sync.json, published authority
+    Op->>CF: Read owner instance status
+    Op-->>Owner: eligible, already_current, unsafe or unknown, with expect pins
+    Note over Op,D1: dry_run writes nothing
+    Owner->>Op: apply with confirmGo, requestId and the expect pins
+    Op->>D1: Same reads again, pins and eligibility re-checked
+    alt Not eligible, stale pin or lost compare-and-set
+        Op-->>Owner: Refusal, writes 0
+    else Eligible: durable sleep ahead, no live lease
+        Op->>D1: One CAS: successor named, starting, receipt stored
+        Note over Op,D1: Same statement checks mode and lease revisions<br/>Run, checkpoint, budget, cooldown and claim carried
+        Op->>CF: Create epg_runKey_series+1 (existing id attaches)
+        alt Create unproven
+            Cron->>D1: Read control, phase starting with the receipt
+            Cron->>CF: Create the same id, no budget spent
+        end
+        Op->>D1: Read back record, run and checkpoint
+        Op->>CF: Read back successor status
+        Op-->>Owner: Receipt: accepted, version confirmed or pending
+        New->>D1: First act records its own Worker version
+        Old->>D1: Wakes, admit reads another owner
+        Old-->>Old: Stops with not_owner, no write
+    end
+```
+
+The sequence shows only the operator path. The natural seal hand-off, the orphan-claim recovery and the failure budget are unchanged: a rollover never writes a claim naming the old series, so the old instance cannot recover one. The diagram is not evidence that a live apply ran; each production `apply` needs its own owner approval.
+
 ## Discovery Workflow step-failure recovery ([ADR 0098](../adr/0098-discovery-workflow-step-failure-recovery.md), Accepted)
 
 An instance whose step fails after the platform's retries, with a recognised transient failure (the `discovery_unavailable` code or a transient class), arms the existing recovery once, sleeps durably until `recovery.dueAt` (60 s for the first failure, then 5 min, 15 min, 1 h; four, then quarantine) and, after re-checking owner, authority, pinned generation and mode, opens the deterministic successor through `ensureDiscoveryWorkflow`. The hourly cron remains the fallback and covers what this cannot: an instance killed by the platform, a failure of the arming step, and a `stopped` record without a live owner. No trigger, binding or cron changes; no diagram changes.
@@ -449,3 +497,36 @@ The hourly cron also calls `Monitor.run`, which does nothing unless `MONITOR` is
 
 The canary flow (route, Workflow, diagnostic D1 and R2) is gone: [ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md) detached it and [ADR 0161](../adr/0160-delete-epg-diagnostic-canary-code.md) deleted the code. Its diagram was removed with it; the original design stays in ADR 0121/0124 as history.
 
+## Daily catalog-poster retry cron
+
+The Worker has a third cron trigger, `24 3 * * *` UTC, beside the hourly `0 * * * *` and the Discovery-only `1-59/2 * * * *` ([ADR 0179](../adr/0179-weekly-automatic-catalog-poster-retry.md), Accepted; implemented and tested offline, **not activated**: the live schedule gains the entry only when a deploy carries it, and the owner's separate activation decision is still required). `src/worker.js` dispatches on the exact `controller.cron`: the other two expressions are routed exactly as before, asserted by test, and the poster branch runs only `CatalogPosterWeekly.run`, none of EPG, Ratings, Monitor or Discovery recovery.
+
+A firing starts a sweep on the first firing of a new week (weeks start Sunday 00:00 UTC) whose `weekStart` is newer than the checkpoint's, normally the Sunday one; a missed Sunday is caught up by the next firing, and an absent checkpoint bootstraps a sweep on any day. Otherwise it is **pending-only**: it resumes only a run that is `pending` with `nextRetryAt` reached (or `running` past its 2 h budget). A firing with nothing pending, nothing owed and the week's report present is **idle**: one R2 read, no TMDB call, no write, no event. A firing with an undelivered event replays it first and is not idle.
+
+```mermaid
+flowchart TD
+    fire["Cron 24 3 * * * UTC fires"]
+    route{"controller.cron equals<br/>the poster expression?"}
+    other["Other crons: routed as before"]
+    read[("Read R2 checkpoint<br/>epg/catalog-poster-weekly.json")]
+    owed{"Undelivered outbox entry?"}
+    replay["Replay event put<br/>no TMDB call"]
+    plan{"New week, or pending run<br/>with nextRetryAt reached?"}
+    idle["Idle: no write, no event"]
+    core["catalogPosterRun: up to 5 batches of 10<br/>shared with the owner route"]
+    commit["One CAS: result + outbox entry"]
+    put["Put event, CAS deliveredAt"]
+    fire --> route
+    route -->|no| other
+    route -->|yes| read
+    read --> owed
+    owed -->|yes| replay
+    owed -->|no| plan
+    replay --> plan
+    plan -->|no| idle
+    plan -->|yes| core
+    core --> commit
+    commit --> put
+```
+
+The unfinished-run backoff is 30 minutes by default (`Retry-After` is honoured), the retry cap is six attempts, and a busy resolver lease or EPG priority is recorded as `deferredBusy` and resumed on a later firing without holding the lease. A checkpoint write that loses its compare-and-swap leaves the guarded D1 hydration idempotent; the next firing re-reads D1 and the negative index. The R2 checkpoint is one object with version-aware compare-and-swap and needs no D1 migration. Rollback removes the cron entry and its dispatch by pull request; stored posters and index entries stay.

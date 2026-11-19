@@ -1,6 +1,6 @@
 # EPG publication and availability
 
-The active programme is a **published-generation projection**, not an append-only lifetime schedule. Accepted [ADR 0135](../adr/0135-epg-priority-discovery-pause.md) gives this publication priority over new Discovery admission until the generation is handed off. Its gate code is delivered inert (AIR-459) and is not activated, and the diagram below does not draw it. Sources: [EPG publication ADR](../adr/0008-atomic-epg-publication.md), [Film/Person availability contract](../reference/domain/film-person.md), [discovery reference](../reference/domain/candidate-discovery.md), and [Worker routing](../../src/worker.js).
+The active programme is a **published-generation projection**, not an append-only lifetime schedule. Accepted [ADR 0135](../adr/0135-epg-priority-discovery-pause.md) gives this publication priority over new Discovery admission until the generation is handed off. The pause is live in production; [ADR 0175](../adr/0175-epg-priority-holds-until-run-complete.md) (Accepted; code delivered by [AIR-539](https://trello.com/c/2eYDrWBS), migration `0026` applied to production on 19 Nov 2026 under a separate owner GO) moves its release from the pointer switch to a durable completion certificate, drawn below as the last step. Sources: [EPG publication ADR](../adr/0008-atomic-epg-publication.md), [Film/Person availability contract](../reference/domain/film-person.md), [discovery reference](../reference/domain/candidate-discovery.md), and [Worker routing](../../src/worker.js).
 
 ```mermaid
 flowchart TD
@@ -12,6 +12,9 @@ flowchart TD
     readers["Programme / film page / availability readers"]
     window["Availability projection:<br/>past 72h, future 24h for hot"]
     ensure["Hourly ensure: R2 mirrors"]
+    finish["finalize, queue and stage complete:<br/>sync.json complete in R2"]
+    certificate[("D1 certificate finalized_run_id:<br/>one fenced batch, then Discovery admitted")]
+    repair["Hourly ensure certifyComplete:<br/>certify-only repair, no new publication"]
     previous["Prior published generation remains readable"]
     stale{"Writer still owns pinned generation?"}
     update["Apply generation-scoped catalogue/decision update"]
@@ -19,6 +22,8 @@ flowchart TD
     source --> parse --> staging --> seal --> pointer
     pointer --> readers --> window
     pointer --> ensure
+    pointer --> finish --> certificate
+    ensure -.->|complete but not certified| repair --> certificate
     seal -.->|until pointer switch| previous
     pointer --> stale
     stale -->|yes| update
@@ -45,7 +50,7 @@ The 72-hour catch-up and the rolling 24 hours are the existing [EPG horizons](..
 
 The publication pointer changes **after** the complete generation exists, and with D1-authoritative discovery after its ledger is sealed ([ADR 0092](../adr/0092-resumable-bounded-ledger-seal.md)): the commit stages the generation and returns, bounded `epg_sync_step` calls seal the ledger, update the catalog and publish, and the previous generation stays readable meanwhile. A partial write does not expose mixed versions. A newly published generation replaces its current show lists; current availability does not carry forward old shows. Show observations and `epgLastAiring` are not permanent Film identity attributes. Where the published generation is known, absent or mismatched `showsProgrammeRunId` cannot prove the film is hot; explicit `shows: []` means no known availability.
 
-After the pointer switch the commit opens the discovery series of the new generation before its memory-heavy tail (watchlist and events, prediction queue, ratings); the write is fenced to the published generation and keeps a live writer or an existing series of the same generation. See [ADR 0030](../adr/0030-discovery-queued-at-publication.md). Under a live D1 pin `persistWatchlist` does not call `saveWatchlist`: the publish commit already wrote the watchlist, and a second `generation + 1` is forbidden ([ADR 0142](../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 14). If the pin cannot be read, the tail writes nothing and the error propagates so the bounded step can retry. A successful read that yields `null` still copies `watchlist.json` when `updatedAt` differs (R2 authority). The tail's prediction queue rebuild is a conditional write that rebuilds on conflict with another queue writer ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31). A conflict it cannot resolve is recorded as `enrichmentQueueError` and does not fail the commit.
+After the pointer switch the commit queues the discovery series of the new generation before its memory-heavy tail (with the ADR 0175 certificate column present, that series is admitted only after the run is `stage=complete` and certified; the pointer switch no longer releases the pause) (watchlist and events, prediction queue, ratings); the write is fenced to the published generation and keeps a live writer or an existing series of the same generation. See [ADR 0030](../adr/0030-discovery-queued-at-publication.md). Under a live D1 pin `persistWatchlist` does not call `saveWatchlist`: the publish commit already wrote the watchlist, and a second `generation + 1` is forbidden ([ADR 0142](../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 14). If the pin cannot be read, the tail writes nothing and the error propagates so the bounded step can retry. A successful read that yields `null` still copies `watchlist.json` when `updatedAt` differs (R2 authority). The tail's prediction queue rebuild is a conditional write that rebuilds on conflict with another queue writer ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31). A conflict it cannot resolve is recorded as `enrichmentQueueError` and does not fail the commit.
 
 A watchlist showing is attached only when the alias index leaves one trusted identity ([ADR 0151](../adr/0151-epg-known-film-title-collision.md), Accepted). The same normalized title on two catalog identities, with no year in the EPG title and runtimes inside each other's contradiction band, is not a Film showing: the slot is an ordinary discovery observation. A year within one of exactly one identity still attaches that film, unless the runtime is beyond `max(45 minutes, 40%)`. A catalog confirmation is stored per slot and becomes the observation's confirmed id only when every retained slot agrees. `stats.identityCollision` counts withheld hot-window slots. The publication diagram is unchanged.
 
@@ -73,3 +78,58 @@ Everything a reader or an R2 mirror sees is the completed programme: `GET /api/p
 | `aliases` | Identity data on the catalog record and, for a watchlist Film, on the verified decision/observation. Scan and Discovery alias indexes (`src/sources.js`, `src/discovery.js`), Finds title rule, UI search (`public/app.js`). Never written into the programme document. Never written to canonical `film_alias` by Discovery. | Same identity writers. |
 
 Stale availability bytes on a D1 admission payload are dropped on the next identity write (`touchCanonicalFilm`, or `mergeCatalogIdentity` when the staged record's identity actually changed or the Film is staged-only). Untouched live rows keep leftover bytes so `sealCatalogStep` does not rewrite the catalog. `replaceCatalogAvailability` still does not rewrite or strip the whole catalog in one pass. D1 readers ignore leftover bytes until that write. Film/Person `projectFilm` / `observedShows` takes shows from the completed programme (`films` matched by id or TMDB, then `catalogFilms`) when `catalogFilms` is present (the D1 projector stamps `[]` when the pin has no assigned rows). A Film absent from that list has zero shows; body `shows` / `epgLastAiring` are not a second source. The R2 projector path still uses the member record, then the Film body. The programme screen does not list presented `catalogFilms` in the watchlist grid; they remain a completed-read field for Finds, the film page and coverage. Not remaining from the completed-read work: natural-run delay measurement.
+
+## Moving a live EPG Workflow onto a deployed version
+
+The EPG Workflow instance runs the Worker version it was created on. The owner-only `epg_workflow_rollover` operator ([ADR 0176](../adr/0176-controlled-epg-workflow-rollover.md), [sequence](scheduling-and-orchestration.md#controlled-epg-workflow-rollover-adr-0176-proposed)) hands the run to the next series of the same run key while the instance sleeps. The published pointer, `sync.json`, the staging and the Discovery handoff are untouched: the successor continues from the same run and checkpoint, and no publication is repeated.
+
+## Degraded read from R2 mirrors ([ADR 0177](../adr/0177-read-only-mirror-fallback-for-film-and-programme.md))
+
+D1 remains the only authority. When the authoritative read of the programme, the watchlist or one film fails for a **temporary** storage reason, the Worker may answer from the R2 compatibility mirrors that the hourly `ensure` and the publication tail already maintain ([ADR 0108](../adr/0108-epg-mirror-reconciliation-writer.md)). The answer is read-only, labelled and never a confirmed absence. Contract: [degraded reads](../reference/api/degraded-reads.md); diagnosis: [runbook](../runbooks/mirror-fallback-diagnostics.md).
+
+```mermaid
+flowchart TD
+    read["GET programme, watchlist or film by TMDB id"]
+    d1{"Authoritative D1 read"}
+    normal["Normal answer, no source field, no R2 mirror read"]
+    cls{"Class of the failure, taken from its cause at the throw site"}
+    hard["Structural or authority refusal: 503 as before, no mirror read"]
+    fence["published_epg_fence: 409, the client retries D1"]
+    temp["Temporary: transport, timeout, overload, fence moved, load in progress"]
+    objects["Bounded read-only R2 reads: pointer, its generation copy, root; older copies only if both fail, found by listing at most 5 pages of 1000 and ranked by upload time, at most 6 read"]
+    valid{"Each object validated alone"}
+    other["Film not in the selected pair: the same bounded set of recent copies is searched"]
+    degraded["200 with source mirror, readOnly, runId, asOf, joined, reason"]
+    shell["Typed 503 and neutral shell with retry: nothing invented, never 404 or 410"]
+    read --> d1
+    d1 -->|"answers"| normal
+    d1 -->|"fails"| cls
+    cls -->|"structural"| hard
+    cls -->|"fence"| fence
+    cls -->|"temporary"| temp
+    temp --> objects --> valid
+    valid -->|"at least one usable object"| degraded
+    valid -->|"film not listed"| other
+    other -->|"found in an older run"| degraded
+    other -->|"not found or contradictory"| shell
+    valid -->|"no usable object"| shell
+```
+
+The mirror is read per object. The root `programme.json` is valid by its own `runId` even when `epg/published-generation.json` lags it; a programme and a watchlist are joined only as a best-effort heuristic (same run key, or the root pair of the pointer's run), and the response says so. Older generation copies are ranked by their upload time, not by their UUID run id. No `available`, `soon`, hot or last-chance state is recomputed from a stale snapshot: the schedule is shown as saved at its own time.
+
+```mermaid
+flowchart LR
+    saved["Page rendered from a saved copy"]
+    live["Page rendered from D1"]
+    fence["Write fence before every API handler"]
+    handler["Route handler with its own authoritative D1 read and fence"]
+    refused["409 degraded_origin_write_refused: nothing written, even when D1 has recovered"]
+    typed["Existing typed 503 when D1 cannot answer: no mirror read, no PUT"]
+    saved -->|"write with X-Data-Origin mirror"| fence
+    fence --> refused
+    live -->|"write without the header"| fence
+    fence -->|"passes"| handler
+    handler -->|"D1 cannot answer"| typed
+```
+
+The page keeps the last good authoritative result only in memory. A saved-copy answer never replaces it, but any failed refresh makes the page read-only until an authoritative read succeeds; the normal source and the write actions return only then. The write fence is global, but the loss of present-tense claims is scoped to the data being rendered: a saved programme, or one film that came from a saved copy, keeps its historical schedule without archive, on-air, soon or last-chance claims, while a separately valid authoritative programme keeps its availability even when another film is shown from a mirror. When D1 answers again, films shown from a saved copy are asked again.

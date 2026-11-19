@@ -1,17 +1,17 @@
 // AIR-374 P4 / ADR 0099 (Accepted), owner decisions 3 and 4 of 11 Nov 2026. The marker-gated, fail-closed D1 readers of the Film/Person catalog routes.
 // This is the ONE module of the canonical read side the Worker bundles (build.mjs, scopedReplacing over film-person-authority.js): it imports only the marker
 // reader, performs SELECTs only, never touches R2 and never writes. the fenced writers and the localization sources stay unbundled.
-// - catalogReaderGate: legacy/r2/prepared -> mode 'existing' (today's runtime answers, byte-identical); open -> mode 'd1'; held, an unreadable or malformed
+// - catalogReaderGate: legacy (the explicit local stand-in only; readAuthority refuses r2 and prepared, ADR 0162) -> mode 'existing' (today's runtime answers, byte-identical); open -> mode 'd1'; held, an unreadable or malformed
 //   marker -> throws film_person_held / film_person_unavailable. It never answers "go back to R2" for held or unknown.
 // - catalogTitlesFromD1 (slice 2, P4b): the provisional localized titles behind GET /api/programme and GET /api/watchlist, bounded SELECTs (chunks of one JSON id list), in the shape of
-//   a titles.json row; catalogReaderStill re-checks the marker after any read, so a move between the gate and the answer (prepared -> open, held) is refused.
+//   a titles.json row; catalogReaderStill re-checks the marker after any read, so a move between the gate and the answer (to open or held) is refused.
 // - catalogCanonicalFilmFromD1 (AIR-475): the film route's canonical fallback at `open` when Discovery holds no record: the typed TMDB claim, the redirect table, the
 //   tmdb_retirement_decision ledger and the Film's own metadata, localization and credits; film_rated_admission (readAdmissions) only fills a missing title or year. The marker generation is read again after the reads, so a move mid-read is refused.
 import {database,failed,many,one,readAuthority,readSource} from './film-person-authority.js';
 
 export const ADMISSION_READ_CHUNK=80;
 
-// legacy, r2 and prepared keep the existing runtime; open reads D1; held and every unreadable state throw.
+// legacy (the explicit local stand-in only; r2 and prepared markers are refused, ADR 0162) keeps the existing runtime; open reads D1; held and every unreadable state throw.
 export async function catalogReaderGate(env){
  const gate=await readAuthority(env);
  const source=readSource(gate);
@@ -199,7 +199,7 @@ const TITLE_SQL=`SELECT d.film_id AS film_id,d.value AS value,d.provenance_json 
 // The film id the canonical writers give a stored spelling (the rule of canonicalFilmId in src/domain/film-person.js, repeated here: this module imports nothing else).
 const titleFilmId=id=>{const tmdb=/^tmdb_(\d+)$/.exec(id);return tmdb?'film:tmdb:'+tmdb[1]:'film:'+id;};
 
-// After the reads: the marker is read again. The answer stands only if it is the state and the generation the gate saw (r2 -> prepared -> open and held all refuse).
+// After the reads: the marker is read again. The answer stands only if it is the state and the generation the gate saw (a move to open or held refuses).
 export async function catalogReaderStill(env,gate){
  const again=await readAuthority(env);
  if(again.state!==gate.state||again.generation!==gate.generation)throw failed('film_person_generation_moved');

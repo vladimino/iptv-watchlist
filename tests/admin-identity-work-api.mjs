@@ -59,6 +59,7 @@ context.__stub = {
 vm.runInContext(`
 var adminLimboLoad = (env, hasPin) => __stub.load(env, hasPin);
 var limboEvaluate = (snapshot, nowMs) => ({now: nowMs, scope: {coverage: {films: 'partial'}, subjects: {films: [1, 2], observations: [1]}}});
+var limboIndexReadable = index => ['fresh', 'stale'].includes(index?.state);
 var limboEncodePin = () => __stub.pin();
 var limboObservationCoverage = () => ({available: true, state: 'fresh', complete: false});
 var LimboInventory = {limboItems: health => __stub.items(health.now)};

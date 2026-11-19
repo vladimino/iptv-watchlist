@@ -138,13 +138,13 @@ export async function producerRouteOpen(env){
 
 // ONE Film's facts, once per source event. input: the writer input of `writeFilmFacts` without requestId, expectedRevision and receiptMark (id, at, film, dimensions, localization, metadata, sync, watchlist, ...).
 // opts: {origin, event, input, replan?, now?, policy?}. Returns:
-//   {state:'skipped', reason:'projector_is_writer', receipt:false}  the marker is not `open`: one marker read, nothing else;
+//   {state:'skipped', reason:'film_person_route_not_open', receipt:false}  the marker is not `open`: one marker read, nothing else;
 //   {state:'noop', receipt:false}                                    the facts are already stored: no receipt, no batch;
 //   {state:'applied'|'unknown'|..., requestId, ...}                  the receiptedWrite outcome (`already:true` when the same request was applied before).
 // A refusal of the writer is thrown after the receipt is marked (`film_person_fence` and `film_person_revision_conflict` leave it `failed`, retried by the SAME request id on a later call or inline reconcile).
 export async function applyFilmFacts(env,{origin,event,input,replan,now,policy=RETRY_POLICY}={}){
  const route=await writerRoute(env);
- if(route.writer!=='canonical')return {state:'skipped',reason:'projector_is_writer',receipt:false};
+ if(route.writer!=='canonical')return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const digest=await filmFactsDigest(input);
  const target={kind:'film',id:input.id};
  const requestId=await producerRequestId({origin,event,target,digest});
@@ -166,7 +166,7 @@ export async function applyFilmFacts(env,{origin,event,input,replan,now,policy=R
 export async function reconcileOwnOrigin(env,{origin,operations,limit=INLINE_RECONCILE_LIMIT,now,policy=RETRY_POLICY}={}){
  if(!IDENT.test(origin||'')||!operations||typeof operations.get!=='function')throw failed('film_person_invalid');
  const route=await writerRoute(env);
- if(route.writer!=='canonical')return {skipped:true,reason:'projector_is_writer',origin,considered:0};
+ if(route.writer!=='canonical')return {skipped:true,reason:'film_person_route_not_open',origin,considered:0};
  const cap=Math.min(Math.max(Number(limit)||1,1),INLINE_RECONCILE_LIMIT,RECONCILE_LIMIT_MAX);
  return reconcileReceipts(env,{operations,origin,limit:cap,policy,...(now?{now}:{})});
 }

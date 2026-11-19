@@ -82,7 +82,7 @@ mode='ok';
 {assign(3200,'racing-old');let first=true;
  const original=ctx.PublishedEpg.assignedShowsSignature;
  ctx.PublishedEpg.assignedShowsSignature=async(...args)=>{const value=await original(...args);if(first){first=false;signature='racing-new';}return value;};
- const r=await realStart();assert.ok(r.status===200||r.status===409,'the racing start is allowed to be refused once');
+ const r=await realStart();assert.equal(r.status,200,'AIR-542: a priority-only race never refuses the start: '+JSON.stringify(r.data).slice(0,200));
  ctx.PublishedEpg.assignedShowsSignature=original;
  const again=await realStart();assert.equal(again.status,200);assert.equal(queue().showsSignature,'racing-new','the next natural start ranks on the signature that landed during the rebuild');}
 
@@ -180,6 +180,111 @@ mode='ok';
   assert.equal((await start()).status,200);q=await read();assert.ok(!q.hotPending.includes('tmdb_1'),'hot to cold 1 ms past start+72h');
   clock=S3+72*HOUR+1;assert.equal((await start()).status,200);q=await read();assert.equal(q.hotPending.length,0);assert.equal(q.priorityNextChangeAt,null);
  }finally{globalThis.Date=RealDate;}
+}
+
+// 4. AIR-542: races at the preflight-to-lease boundary on a small world (8 cold films, manifest of 3). The hook runs inside the BASELINE preflight's signature read, after its queue head was
+// read and before the lease is taken, so the post-lease preflight reads the mutated queue: its revision differs from the baseline's.
+{
+ const nowMs=Date.now();
+ const make=async()=>{
+  const e=await flowWorld({films:8,extra:()=>({shows:[{start:nowMs-10*86400000}]})});
+  const state={calls:0,sig:['s0','s0'],mutate:null,down:false};
+  e.ctx.PublishedEpg={
+   currentGeneration:async()=>({authority:'d1',programmeRunId:'p1',phase:'published',fence:'d1:1:p1',generation:1}),
+   readDocumentAt:async(env,run,kind)=>e.records.get(kind==='watchlist'?'watchlist.json':'programme.json')??null,
+   assignedShowsSignature:async()=>{const n=state.calls++;if(n===1&&state.down)throw new Error('d1 down');const value=state.signature??state.sig[Math.min(n,state.sig.length-1)];if(n===0&&state.mutate)await state.mutate();return value;},
+  };
+  e.records.set('programme.json',{runId:'p1',films:[],catalogFilms:[]});e.records.set('sync.json',{runId:'p1',stage:'complete'});
+  assert.equal((await e.api('queue/reconcile',{})).status,200);
+  const b={scope:'watchlist_all',mode:'queued',trigger:'manual',manifestSize:3,capacity:{remainingPercent:100}};
+  const read=async()=>(await PredictionD1.openQueue(e.env));
+  const edit=async fn=>{const head=await read();fn(head.queue);assert.ok(await PredictionD1.writeQueue(e.env,head,head.queue),'the concurrent writer committed');};
+  const start=async()=>{state.calls=0;const r=await e.api('batch/start',b);if(r.data?.runId&&r.data.status==='running')await e.api('complete',{runId:r.data.runId,reason:'manifest_spent'});return r;};
+  const rankHot=(q,id)=>{q.priority[id]={...(q.priority[id]||{}),hot:true,rank:1};q.coldPending=q.coldPending.filter(x=>x!==id);q.hotPending=[id,...q.hotPending.filter(x=>x!==id)];};
+  return {e,state,read,edit,start,rankHot};
+ };
+ const ids=r=>r.data.films.map(f=>f.filmId+':'+f.lane);
+ // (0) The baseline: three cold films, no race.
+ {const w=await make();const r=await w.start();assert.equal(r.status,200);assert.deepEqual(ids(r),['tmdb_1:cold','tmdb_2:cold','tmdb_3:cold']);}
+ // (a) A concurrent reconcile already ranked another film hot and moved the queue generation: priorityDue is false, the revision differs. The start keeps its slot on the re-ranked manifest,
+ // and the next natural start sees the new order.
+ {const w=await make();const before=(await w.read()).queueGeneration;
+  w.state.mutate=()=>w.edit(q=>w.rankHot(q,'tmdb_8'));
+  const r=await w.start();assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'running','an owned run, not queue_changed');
+  assert.notEqual((await w.read()).queueGeneration,before,'the race moved the queue generation');
+  assert.deepEqual(ids(r),['tmdb_8:hot'],'hot first: the manifest is the re-ranked one validated under the lease');
+  assert.ok(r.data.manifestHash,'the manifest carries its own identity');
+  w.state.mutate=null;const next=await w.start();assert.equal(next.status,200);assert.equal((await w.read()).queue.priority.tmdb_8.hot,true,'the concurrent ranking is kept; the next natural start continues from it');}
+ // (b) The same re-rank together with a genuine change: a displaced film (tmdb_3) just used its retry budget, and a selected film (tmdb_1) has a new retry record. Both are refused.
+ {const w=await make();
+  w.state.mutate=()=>w.edit(q=>{w.rankHot(q,'tmdb_8');q.retries={...(q.retries||{}),tmdb_1:{attempts:1}};});
+  const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');
+  assert.notEqual(r.data.status,'running');}
+ {const w=await make();
+  w.state.mutate=()=>w.edit(q=>{w.rankHot(q,'tmdb_8');q.retries={...(q.retries||{}),tmdb_3:{attempts:99}};});
+  const r=await w.start();assert.equal(r.status,409,'a displaced film that left the retry budget is not a re-rank: '+JSON.stringify(r.data).slice(0,200));}
+ // Second-round case 1: a rank-only revision that leaves the delivered manifest byte-identical (films outside the first three re-ranked). The slot is kept on the same manifest.
+ {const w=await make();const before=(await w.read()).queueGeneration,dry=await w.e.api('batch/start',{...{scope:'watchlist_all',mode:'queued',trigger:'manual',manifestSize:3,capacity:{remainingPercent:100}},dryRun:true});
+  w.state.calls=0;w.state.mutate=()=>w.edit(q=>{q.coldPending=[...q.coldPending.slice(0,3),...q.coldPending.slice(3).reverse()];});
+  const r=await w.start();assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'running');
+  assert.notEqual((await w.read()).queueGeneration,before,'the revision moved');assert.deepEqual(ids(r),['tmdb_1:cold','tmdb_2:cold','tmdb_3:cold']);assert.equal(r.data.manifestHash,dry.data.manifestHash,'the manifest is byte-identical to the baseline');}
+ // Second-round case 2: the migration share (`queue.work`) decides which films are selected. A concurrent change of it is not a re-rank, even with no priority, lane or retry change.
+ {const w=await make();const runs=()=>sql(w.e.file,'SELECT count(*) AS n FROM prediction_run')[0].n,leaseBefore=JSON.stringify(sql(w.e.file,"SELECT token FROM prediction_lease WHERE name='runner'"));
+  w.state.mutate=()=>w.edit(q=>{q.work={...(q.work||{}),tmdb_1:{migration:true},tmdb_2:{migration:true},tmdb_3:{migration:true}};});
+  const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');assert.equal(runs(),0,'no run was persisted on the refusal');
+  assert.notEqual(r.data.status,'running');void leaseBefore;}
+ // Third-round cases: the REAL `queue/reconcile` (buildPredictionQueue) runs between the baseline and the post-lease preflights. A Discovery assignment promotes tmdb_8 from cold to hot on the same generation;
+ // the real rebuild reorders and resizes `pending` (watchlist films tmdb_1..4) and rebuilds `work`. The start must keep its slot on the hot film, and the next natural start continues from that ranking.
+ {const realRebuild=async(w,after=null)=>{
+   const watch=[1,2,3,4].map(n=>({id:'tmdb_'+n,title:'tmdb_'+n,original:'tmdb_'+n,year:2020,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,genres:[],actors:[],directors:[],shows:[{start:nowMs-10*86400000}]}));
+   w.e.records.set('programme.json',{runId:'p1',films:watch,catalogFilms:[]});
+   assert.equal((await w.e.api('queue/reconcile',{})).status,200);
+   w.state.mutate=async()=>{
+    w.state.signature='s1';w.e.records.set('programme.json',{runId:'p1',films:watch,catalogFilms:[{tmdbId:'8',shows:[{channelId:'c',channel:'C',start:nowMs-600000,end:nowMs+7200000,basis:'discovery'}]}]});
+    {const head=await PredictionD1.openQueue(w.e.env),report=w.e.records.get('programme.json'),rebuilt=await w.e.ctx.buildPredictionQueue(w.e.env,report,'manual_reconcile',head.queue);assert.ok(await PredictionD1.writeQueue(w.e.env,head,rebuilt),'the real rebuild committed');w.state.rebuilt=rebuilt;}
+    if(after)await after();
+   };
+  };
+  {const w=await make();w.state.signature='s0';await realRebuild(w);const before=(await w.read()).queue;assert.deepEqual(before.pending,['tmdb_1','tmdb_2','tmdb_3','tmdb_4'],'baseline pending: the watchlist films');
+   const r=await w.start();assert.equal(r.status,200,JSON.stringify(r.data).slice(0,260));assert.equal(r.data.status,'running','a real priority-only rebuild keeps the slot');
+   
+   const rebuilt=w.state.rebuilt;assert.equal(JSON.stringify(rebuilt.hotPending),'["tmdb_8"]');assert.equal(JSON.stringify(rebuilt.pending),'["tmdb_8","tmdb_1","tmdb_2","tmdb_3","tmdb_4"]','the real rebuild reordered and resized pending, which a hand-edited queue never does');assert.notEqual(JSON.stringify(rebuilt.pending),JSON.stringify(before.pending));
+   w.state.mutate=null;const next=await w.start();assert.equal(next.status,200);}
+  // Fourth-round: the work entry of a film that stays in `pending` on both sides may be neither deleted nor added by a concurrent writer, even with a real promotion beside it.
+  {const w=await make();w.state.signature='s0';await realRebuild(w,()=>w.edit(q=>{delete q.work.tmdb_2;}));
+   const runs=()=>sql(w.e.file,'SELECT count(*) AS n FROM prediction_run')[0].n;
+   const r=await w.start();assert.equal(r.status,409,'a work entry deleted for a film that stays pending: '+JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');assert.equal(runs(),0,'no run persisted');}
+  {const w=await make();w.state.signature='s0';await realRebuild(w);await w.edit(q=>{delete q.work.tmdb_2;});
+   const runs=()=>sql(w.e.file,'SELECT count(*) AS n FROM prediction_run')[0].n;
+   const r=await w.start();assert.equal(r.status,409,'a work entry added for a film that stays pending: '+JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');assert.equal(runs(),0,'no run persisted');}
+  // Positive counterpart: a film demoted from hot to cold leaves `pending` and loses its work entry, which a real rebuild does and the proof allows.
+  {const w=await make();w.state.signature='s1';
+   const watch=[1,2,3,4].map(n=>({id:'tmdb_'+n,title:'tmdb_'+n,original:'tmdb_'+n,year:2020,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,genres:[],actors:[],directors:[],shows:[{start:nowMs-10*86400000}]}));
+   w.e.records.set('programme.json',{runId:'p1',films:watch,catalogFilms:[{tmdbId:'8',shows:[{channelId:'c',channel:'C',start:nowMs-600000,end:nowMs+7200000,basis:'discovery'}]}]});
+   assert.equal((await w.e.api('queue/reconcile',{})).status,200);const hotBefore=(await w.read()).queue;assert.equal(JSON.stringify(hotBefore.hotPending),'["tmdb_8"]');assert.ok('tmdb_8' in hotBefore.work,'the hot film has a work entry');
+   w.state.mutate=async()=>{w.state.signature='s2';w.e.records.set('programme.json',{runId:'p1',films:watch,catalogFilms:[]});
+    const head=await PredictionD1.openQueue(w.e.env),rebuilt=await w.e.ctx.buildPredictionQueue(w.e.env,w.e.records.get('programme.json'),'manual_reconcile',head.queue);assert.ok(await PredictionD1.writeQueue(w.e.env,head,rebuilt));w.state.rebuilt=rebuilt;};
+   const r=await w.start();assert.equal(r.status,200,JSON.stringify(r.data).slice(0,260));assert.equal(r.data.status,'running','a real demotion keeps the slot');
+   assert.ok(!('tmdb_8' in w.state.rebuilt.work),'the demoted film lost its work entry');assert.equal(JSON.stringify(w.state.rebuilt.hotPending),'[]');}
+  // Negative, on the real rebuild: a film that left the queue, and a changed work/migration classification, are not a re-rank.
+  {const w=await make();w.state.signature='s0';await realRebuild(w,()=>w.edit(q=>{q.coldPending=q.coldPending.filter(x=>x!=='tmdb_7');q.pending=q.pending.filter(x=>x!=='tmdb_7');}));
+   const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');}
+  {const w=await make();w.state.signature='s0';await realRebuild(w,()=>w.edit(q=>{q.work={...(q.work||{}),tmdb_5:{...(q.work?.tmdb_5||{}),migration:'fingerprint'}};}));
+   const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');}
+ }
+ // The reviewer's second case: the signature is still due at the lease AND a selected film's retry record changed. priorityDue must not excuse the non-priority change.
+ {const w=await make();w.state.sig=['s0','s1'];w.state.mutate=()=>w.edit(q=>{q.retries={...(q.retries||{}),tmdb_2:{attempts:1}};});
+  const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');}
+ // A displaced film that left the queue (admission removed or already current) is not a re-rank either.
+ {const w=await make();
+  w.state.mutate=()=>w.edit(q=>{w.rankHot(q,'tmdb_8');q.coldPending=q.coldPending.filter(x=>x!=='tmdb_3');q.pending=(q.pending||[]).filter(x=>x!=='tmdb_3');});
+  const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));}
+ // (c) Priority drift alone at the lease (the signature moved, nothing else): the run is owned. An unreadable signature at the lease refuses. A new programme run refuses.
+ {const w=await make();w.state.sig=['s0','s1'];const r=await w.start();assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'running');}
+ {const w=await make();w.state.down=true;const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');}
+ // A queue that fails the advance gate at the boundary (registry changed: stale) refuses, with a re-rank beside it.
+ {const w=await make();w.state.mutate=()=>w.edit(q=>{w.rankHot(q,'tmdb_8');q.fingerprintCompatibility={...q.fingerprintCompatibility,registryDigest:'changed'};});
+  const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');assert.notEqual(r.data.status,'running','a failed advance gate is never a priority-only drift');}
 }
 console.log('3,200-film same-generation reconcile ok; signature reads',reads);
 console.log('prediction hot reconcile same generation ok');

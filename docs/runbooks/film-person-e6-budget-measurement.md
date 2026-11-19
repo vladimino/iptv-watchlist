@@ -27,7 +27,7 @@ The dormant EPG producer layer of P3a ([`src/canonical-epg-producer.js`](../../s
 | CPU time of one unit and the fixed CPU of an EPG step | Not measurable by a read; only a run of the producer (its own dry run, a later and separately authorized step) or Workers metrics of a real step | Yes; **unknown**, so the tool proposes no ceiling while it is missing |
 | The share of units that really change content (`changedShare`) | Only a producer dry run: membership change is not content change | Yes; unknown, the tool then assumes every unit applies (worst case) and says so |
 
-The membership delta is a lower-resolution fact than the number of `film_facts` units that apply: a Film that stays in the generation can still have changed facts, and a Film that joined can already be current in D1 (the projector writes it today). The day counts of `updated_at` are the projector's writes, not the producer's.
+The membership delta is a lower-resolution fact than the number of `film_facts` units that apply: a Film that stays in the generation can still have changed facts, and a Film that joined can already be current in D1 (historically the removed enrichment projector wrote it; AIR-537 slice 3). The day counts of `updated_at` were the projector's writes, not the producer's.
 
 ## 3. Cost of one unit, measured offline
 

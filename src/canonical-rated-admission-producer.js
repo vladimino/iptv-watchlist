@@ -175,7 +175,7 @@ export function ratedAdmissionOperations({replan=async()=>null,now}={}){
 async function applyAdmission(env,{origin,event,input,replan,now,policy=RETRY_POLICY,routeOpen=false}={}){
  // AIR-532: a slice reads the marker ONCE (applyRatedAdmissionRetention) and passes `routeOpen`; a single call still reads it itself.
  const route=routeOpen===true||await producerRouteOpen(env);
- if(!route)return {state:'skipped',reason:'projector_is_writer',receipt:false};
+ if(!route)return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const plan=await planAdmission(env,input);
  if(plan.noop)return {state:'noop',receipt:false,requestId:null,id:plan.id};
  const digest=await admissionDigest(input);
@@ -193,7 +193,7 @@ async function applyAdmission(env,{origin,event,input,replan,now,policy=RETRY_PO
 async function applyRetention(env,{origin,event,input,replan,now,policy=RETRY_POLICY,routeOpen=false,watermark}={}){
  // AIR-532: a slice reads the marker ONCE (applyRatedAdmissionRetention) and passes `routeOpen`; a single call still reads it itself.
  const route=routeOpen===true||await producerRouteOpen(env);
- if(!route)return {state:'skipped',reason:'projector_is_writer',receipt:false};
+ if(!route)return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const wm=watermark??await readRetentionWatermark(env);
  const plan=await planRetention(env,input,{watermark:wm});
  if(plan.absent)return {state:'absent',receipt:false,requestId:null,id:plan.id};
@@ -313,7 +313,7 @@ export async function planRatedAdmissionIntent(env,{event,admissions=[],retentio
 }
 
 export async function applyRatedAdmissionRetention(env,{event,admissions=[],retentions=[],intent:previousIntent=[],now,policy=RETRY_POLICY,limit=UNIT_CAP}={}){
- if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'projector_is_writer',receipt:false};
+ if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const nowFn=clockOf(now);
  const origin=RATED_ADMISSION_ORIGIN;
  const cap=Math.min(Math.max(Number(limit)||UNIT_CAP,1),UNIT_CAP);
