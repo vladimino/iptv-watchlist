@@ -26,7 +26,7 @@ let databases=0;
 let beforeBatch=null,failColumnProbe=false;
 const options={
  onBatch:async()=>{if(beforeBatch){const hook=beforeBatch;beforeBatch=null;await hook();}},
- onQuery:async text=>{if(failColumnProbe&&/pragma_table_info\('published_epg_authority'\)/.test(text))throw new Error('D1_ERROR: introspection unavailable');},
+ onQuery:async text=>{if(failColumnProbe&&/col:finalized_run_id/.test(text))throw new Error('D1_ERROR: inventory unavailable');},
 };
 const migrated=(upTo=26)=>{
  const file=path.join(root,'c-'+(databases++)+'.sqlite');
@@ -233,20 +233,17 @@ const pointerPublished=async()=>{
  assert.equal((await take(made.env,{programmeRunId:'run-2'})).busy.kind,'epg_priority');
 }
 
-// 6. An unreadable certificate column is unreadable evidence: Discovery admits nothing, the EPG role is exempt.
+// 6. The column is detected in the same inventory query as the other gate tables (no extra D1 call). If that inventory cannot be read, the whole gate read fails
+// as the existing `discovery_unavailable`: nothing is admitted for any role, which is today's failure class for an unreadable D1.
 {
  const {db}=armed();
  failColumnProbe=true;
- const gate=await Authority.readAuthority(envFor(db));
- failColumnProbe=false;
- assert.equal(gate.certColumn,null);
- failColumnProbe=true;
  at(D2,10,0);
- await assert.rejects(take(envFor(db),{programmeRunId:'run-1'}),/discovery_epg_priority_evidence/,'unreadable introspection: fail closed');
- const epg=await Authority.acquireLease(envFor(db),{programmeRunId:null,role:'epg'});
+ await assert.rejects(Authority.readAuthority(envFor(db)),/discovery_unavailable/);
+ await assert.rejects(take(envFor(db),{programmeRunId:'run-1'}),/discovery_unavailable/,'an unreadable inventory admits nothing');
  failColumnProbe=false;
- assert.ok(epg.lease,'the EPG role is not refused by the introspection');
- assert.equal(first(db,'SELECT COUNT(*) FROM discovery_lease WHERE lease_id IS NOT NULL AND holder_kind=\'discovery\''),0);
+ assert.equal((await Authority.readAuthority(envFor(db))).certColumn,true,'one inventory query reports the column');
+ assert.equal((await Authority.readAuthority(envFor(armed(25).db))).certColumn,false);
 }
 
 // 7. The certify-only repair `certifyComplete` of the hourly `ensure`. It bypasses no Workflow gate: it is not on that path at all.

@@ -337,7 +337,8 @@ export async function readAuthority(env){
  }
  // The tables are inventoried first, so that no stand-in path below can serve R2 over a partly installed domain, whatever schema_contract says.
  let names;
- try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'discovery\\_%' ESCAPE '\\' OR name='projector_window')")).map(row=>row.name);}
+ // ADR 0175: the certificate column is detected in the same round trip (the stored CREATE text of the table names it after the ALTER), so the gate read costs no extra D1 call.
+ try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'discovery\\_%' ESCAPE '\\' OR name='projector_window') UNION ALL SELECT 'col:finalized_run_id' FROM sqlite_master WHERE type='table' AND name='published_epg_authority' AND sql LIKE '%finalized_run_id%'")).map(row=>row.name);}
  catch(error){throw failed('discovery_unavailable',error);}
  const installed=TABLES.every(name=>names.includes(name));
  if(!installed&&names.some(name=>name.startsWith('discovery_')))throw failed('discovery_unavailable');
@@ -365,14 +366,9 @@ export async function readAuthority(env){
  if(!row||row.mode!=='d1'||row.cutover!=='open')throw failed('discovery_unavailable');
  if(!transfer||!['idle','loading','committed'].includes(transfer.state))throw failed('discovery_unavailable');
  const ready=true,held=false;
- // ADR 0175: the certificate column is introspected only when the pause table exists. `true` present, `false` verified absent (today's behaviour),
- // `null` unreadable (the pause admits nothing for Discovery; the EPG role is exempt).
+ // ADR 0175: `true` the certificate column is present, `false` it is verified absent (today's behaviour). An unreadable inventory is the existing `discovery_unavailable` above.
  const priorityTable=names.includes(PRIORITY_TABLE);
- let certColumn=false;
- if(priorityTable){
-  try{certColumn=Number((await one(db,"SELECT COUNT(*) AS n FROM pragma_table_info('published_epg_authority') WHERE name='finalized_run_id'"))?.n)===1;}
-  catch{certColumn=null;}
- }
+ const certColumn=priorityTable?names.includes('col:finalized_run_id'):false;
  return {ready,held,tables:true,windowTable:names.includes('projector_window'),priorityTable,certColumn,mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state,transferBatches:Number(transfer.batches)||0};
 }
 

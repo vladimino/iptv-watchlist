@@ -389,7 +389,7 @@ const PAUSE_CLEAR_SQL="UPDATE discovery_epg_priority SET state='clear', owed_day
 // ADR 0175: the certificate column. With it present the pointer batch no longer clears the pause: only the certify batch does, after `sync.json` is complete.
 const PAUSE_CLEAR_CERT_SQL=PAUSE_CLEAR_SQL.replace("AND e.madrid_run_key IS NOT NULL AND","AND e.finalized_run_id=e.programme_run_id AND e.madrid_run_key IS NOT NULL AND");
 async function certPresent(db){
- const row=await one(db,"SELECT COUNT(*) AS n FROM pragma_table_info('published_epg_authority') WHERE name='finalized_run_id'");
+ const row=await one(db,"SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='published_epg_authority' AND sql LIKE '%finalized_run_id%'");
  return Number(row?.n)===1;
 }
 async function pausePresent(db){
