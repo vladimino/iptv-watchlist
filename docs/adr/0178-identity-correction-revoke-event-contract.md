@@ -1,4 +1,4 @@
-# ADR 0176: Revoking one saved Identity correction is its own append-only intent kind
+# ADR 0178: Revoking one saved Identity correction is its own append-only intent kind
 
 **Status:** Proposed  
 **Original decision date:** unknown (awaiting owner decision)  
