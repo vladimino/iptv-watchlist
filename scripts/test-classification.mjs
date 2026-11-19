@@ -50,6 +50,9 @@ export const FILES={
  "admin-letterboxd-page.mjs": {
   "suite": "core"
  },
+ "admin-limb-startup.mjs": {
+  "suite": "core"
+ },
  "admin-limbo-api.mjs": {
   "suite": "core"
  },

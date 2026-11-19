@@ -1687,4 +1687,7 @@ function startLimbo() {
   limboRender();
 }
 
-startLimbo();
+// Served together with the identity list (admin-identity-work.js, appended to this file by the build), the page is started once, by that file's bootstrap after its
+// state is initialised: starting here would call iwIdle() before `const iwLive` exists. startIdentityWork is a function declaration, hoisted, so this check is safe;
+// this file on its own (the tests of this page) has no such function and starts here.
+if (typeof startIdentityWork !== 'function') startLimbo();

@@ -52,9 +52,9 @@ An unchanged day writes one row (the watermark) plus nothing per Film. A scan no
 - **Original decisions:** owner chat decisions of 18 November 2026 on [AIR-532](https://trello.com/c/mGPwomMX)
 - **Review:** [independent review of PR #771](https://github.com/vladimino/iptv-watchlist/pull/771) (P1 ordering finding)
 - **Implementation:** `migrations/0025_film_retention_scan_watermark.sql`, `src/film-admission.js` (`readRetentionWatermark`, `advanceRetentionWatermark`, `retainFilm`), `src/canonical-rated-admission-producer.js` (`planRetention`, `applyRatedAdmissionRetention`), regression block in `tests/canonical-rated-admission-producer.mjs`
-- **Dated verification:** offline benchmark, see [the before/after report](../evidence/orchestration/air-532-retention-read-batching-before-after-2026-11-18.md); not a production measurement
+- **Dated verification:** offline benchmark, see [the before/after report](../evidence/orchestration/air-532-retention-read-batching-before-after-2026-11-18.md); not a production measurement. Migration `0025` applied to production on 19 Nov 2026 with a verified readback ([apply record](../evidence/d1-migration/air-532-0025-apply-2026-11-19.md)); no natural run has used it yet
 - **Uncertainty:** production per-slice latency and the share of platform idle time are not measured
 
 ## Follow-ups
 
-Owner GO and apply of migration `0025` in production; read batching and the Discovery lease question stay under the same card.
+Natural-run verification of the applied protocol; read batching and the Discovery lease question stay under the same card.
