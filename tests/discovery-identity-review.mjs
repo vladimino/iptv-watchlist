@@ -333,6 +333,34 @@ assert.equal(kept.tmdbId, '11');
 assert.ok(((await json(CATALOG)).tmdb_11.shows || []).length > 0, 'the cheap pass updates shows of the owner-verified film');
 assert.equal(tmdbCalls, 0);
 
+// ADR 0178 (A1), review of PR 796: the whole-ledger screening and alias transitions keep the fence of a revoked owner assign.
+// The observation is screened as non-film, then gains the confirmed id of the revoked assign (a confirmed id outranks screening):
+// the cheap pass must not re-verify that id, and the fence must still be stored.
+{
+  const fence = {tmdbId: '11', requestId: 'req-original-000001', revokedBy: 'req-revoke-00000001', at: iso(-H)};
+  await seed({revokedOwnerAssign: fence});
+  const ledger = items => put('epg/generations/' + RUN + '/discovery-latest.json', {programmeRunId: RUN, items});
+  const other = candidate(OTHER, {title: 'Громкий берег'});
+  const run = async () => {
+    const decisions = await json(MAP);
+    decisions[OTHER] = {...decisions[OTHER], retryAt: iso(48 * H), evidenceKey: evidenceOf(other)};
+    await put(MAP, decisions);
+    context.report = {runId: RUN, films: []};
+    await put('programme.json', context.report);
+    await vm.runInContext('resolveDiscoveryBatch(env,report,4)', context);
+    return (await json(MAP))[KEY];
+  };
+  await ledger([candidate(KEY, {title: 'Show: Episode 5'}), other]);
+  const screened = await run();
+  assert.equal(screened.status, 'excluded_nonfilm', 'the title is screened as non-film');
+  assert.deepEqual(screened.revokedOwnerAssign, fence, 'the whole-ledger screening transition keeps the fence');
+  await ledger([candidate(KEY, {title: 'Show: Episode 5', confirmedTmdbId: '11'}), other]);
+  const after = await run();
+  assert.notEqual(after.identitySource, 'known_epg_alias', 'the revoked id is not re-verified from the confirmed id');
+  assert.notEqual(after.status === 'verified' ? after.tmdbId : null, '11');
+  assert.deepEqual(after.revokedOwnerAssign, fence, 'the fence is still stored');
+}
+
 // A wrong automatic verification is readable from the verified index and can be rejected or replaced. GET does not parse the map.
 await seed({status: 'verified', tmdbId: '99', filmId: 'tmdb_99', canonicalIdentity: 'tmdb:99', identitySource: 'tmdb_detail', scoring: {scorerVersion: '1', status: 'accepted', reason: 'unique', acceptedTmdbId: '99'}});
 log.gets = [];

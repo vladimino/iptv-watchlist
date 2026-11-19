@@ -27,7 +27,7 @@ An observation key goes to shard `FNV-1a(key) % 16`, computed over the key's UTF
 
 - identity and evidence: `key`, `programmeRunId`, `title`, `normalizedTitle`, `year`, `durations`, `shows` (`{channelId, channel, start}`, sorted by start);
 - activity: `seenInLatestSnapshot`, `lastSeenAt`, `lastAiring`, `confirmedTmdbId`;
-- `decision`: the shown subset `status`, `attempts`, `evidenceKey`, `retryAt`, `terminalReason`, `lastAttemptAt`, `checkedAt`, `reconsidered`, `tmdbId`, `identitySource`, `scoring` (`status`, `reason`, `acceptedTmdbId`, `scorerVersion`), `ownerIdentity` (`effect`, `tmdbId`, `at`, `basis`) and `rejectedTmdbIds` (at most eight movie ids). Rows written before these fields existed stay readable; the fields appear when the next chunk or an identity correction rewrites the row;
+- `decision`: the shown subset `status`, `attempts`, `evidenceKey`, `retryAt`, `terminalReason`, `lastAttemptAt`, `checkedAt`, `reconsidered`, `tmdbId`, `identitySource`, `scoring` (`status`, `reason`, `acceptedTmdbId`, `scorerVersion`), `ownerIdentity` (`effect`, `tmdbId`, `at`, `basis`), `rejectedTmdbIds` (at most eight movie ids) and `revokedOwnerAssign` (`tmdbId`, `requestId`, `revokedBy`, `at`: the fence a revoked owner assign leaves, [ADR 0178](../../adr/0178-identity-correction-revoke-event-contract.md)). Rows written before these fields existed stay readable; the fields appear when the next chunk or an identity correction rewrites the row;
 - `decisionHash`: the SHA-256 of the canonical JSON (keys sorted) of the **full** decision.
 
 `decisionHash` is the record version the guarded action compares.

@@ -434,6 +434,33 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  await Authority.releaseLease(env,lease.lease);
 }
 
+// 12b. ADR 0178 (A1), review of PR 796: the fence of a revoked owner assign survives the screening transition. An observation
+// with a revoked-assign fence for id 41 is screened as non-film in one chunk and then gains a confirmed id 41 (a confirmed
+// id outranks title screening): the cheap pass must not re-verify the revoked id, and the fence must still be stored.
+{
+ const item={...hotItem({key:'rv1',year:null,lastAiring:hotStart+400000}),title:'Show: episode 9',normalizedTitle:'show episode 9'};
+ const fence={tmdbId:'41',requestId:'req-original-000001',revokedBy:'req-revoke-00000001',at:'2026-11-19T11:00:00.000Z'};
+ const decisions={rv1:{status:'needs_verification',attempts:1,evidenceKey:Authority.evidenceKey(item),terminalReason:null,retryAt:null,revokedOwnerAssign:fence}};
+ const {file,env}=await fixture({items:[item],decisions});
+ const stored=()=>JSON.parse(sql(file,"SELECT payload_json FROM discovery_decision WHERE observation_key='rv1'")[0].payload_json);
+ assert.deepEqual(stored().revokedOwnerAssign,fence,'the seeded decision carries the fence');
+ const run=()=>chunkContext({clock:{offset:0},respond:()=>({results:[]})});
+ let lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ await run().context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(stored().status,'excluded_nonfilm','the title is screened as non-film');
+ assert.deepEqual(stored().revokedOwnerAssign,fence,'the screening transition keeps the fence');
+ await Authority.releaseLease(env,lease.lease);
+ // The observation now names the revoked id as its confirmed id, which outranks the title screening.
+ sql(file,"UPDATE discovery_observation SET confirmed_tmdb_id='41', payload_json=json_set(payload_json,'$.confirmedTmdbId','41') WHERE observation_key='rv1'");
+ lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ await run().context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ const after=stored();
+ assert.notEqual(after.status,'verified','the revoked id is not silently re-verified from the confirmed id');
+ assert.notEqual(String(after.tmdbId??''),'41');
+ assert.deepEqual(after.revokedOwnerAssign,fence,'the fence is still stored');
+ await Authority.releaseLease(env,lease.lease);
+}
+
 // 13. A decision the owner stores while the chunk works stands: the chunk skips that key and overwrites nothing.
 {
  const {file,env}=await fixture({mix:1});

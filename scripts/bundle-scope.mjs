@@ -56,6 +56,7 @@ export function scopedEpgPriority(){
  return scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scopedReplacing('src/domain/epg-priority-pause.js','EpgPriorityPause','const {EPG_SCHEDULE,madridDayKey,madridInstant}=OrchestrationPolicy;\n');
 }
 // ADR 0142: the per-slot evidence rule is a pure module scoped in front of the authority, which assigns slots with it.
+// ADR 0178: the identity review module is scoped here too, because the owner write checks a revoke command with it.
 export function scopedDiscoveryAuthority(){
- return scoped('src/domain/slot-evidence.js','SlotEvidence')+'\n'+scopedImports('src/discovery-authority.js','DiscoveryAuthority','const {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\nconst {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT:SLOT_REVALIDATION_LIMIT}=SlotEvidence;');
+ return scoped('src/domain/slot-evidence.js','SlotEvidence')+'\n'+scoped('src/domain/discovery-identity-review.js','DiscoveryIdentity')+'\n'+scopedImports('src/discovery-authority.js','DiscoveryAuthority','const {revokeWriteMatches,originalStillEffective}=DiscoveryIdentity;\nconst {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\nconst {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT:SLOT_REVALIDATION_LIMIT}=SlotEvidence;');
 }
