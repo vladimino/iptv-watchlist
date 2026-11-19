@@ -9,6 +9,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Film/Person baseline: parity ledger, bounded import and the `prepared` gate](film-person-baseline.md) (historical; tooling retired in AIR-537 slice 2)
 - [Film/Person `prepared` loader: rated admission, retention and TMDB retirement](film-person-prepared-loader.md) (AIR-374 P5; historical, tooling retired in AIR-537 slice 2)
 - [Production monitor and incident response](monitoring.md)
+- [Mirror fallback diagnostics: reading a saved-copy answer, the Worker events and why a failure was not degraded (read-only, ADR 0177)](mirror-fallback-diagnostics.md)
 - [Local development setup](local-setup.md)
 - [Recovery procedures](recovery/README.md), including [D1 authority and recovery](recovery/d1-authority-and-time-travel.md)
 - [MCP connection and read-only smoke](mcp-connectivity.md)

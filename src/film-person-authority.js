@@ -9,7 +9,16 @@ const STATES=['legacy','r2','prepared','open','held'];
 // The states a caller may be in and the single move each allows. The migration's trigger enforces the same table in SQL.
 export const FILM_PERSON_TRANSITIONS={r2:['prepared'],prepared:['r2','open'],open:['held'],held:['open']};
 
-export function failed(code,cause){const error=new Error(code);error.code=code;if(cause)error.cause=cause;return error;}
+// AIR-541 (ADR 0177): a caught storage error is a TEMPORARY outage only when its own text names a transport, timeout or overload failure. An unknown error, a missing table or column,
+// a schema, syntax or constraint error is structural and stays a hard refusal. The same function is kept in src/published-epg.js, src/discovery-authority.js and src/film-person-authority.js (tests/mirror-fault-classifier.mjs asserts they agree).
+const STRUCTURAL_STORAGE_ERROR=/no such (table|column)|has no column|syntax error|SQLITE_ERROR|SQLITE_CONSTRAINT|constraint failed|datatype mismatch|malformed|no such|not authorized|SQLITE_AUTH|SQLITE_READONLY|SQLITE_CORRUPT/i;
+const TRANSIENT_STORAGE_ERROR=/overloaded|timed? ?out|timeout|network connection lost|connection (lost|reset|closed)|temporar|too many requests|try again|SQLITE_BUSY|database is locked|durable object.*(reset|overloaded)|internal error|service unavailable|storage operation exceeded/i;
+export function transientStorageCause(cause){
+ const text=String(cause?.message??cause??'');
+ if(!text||STRUCTURAL_STORAGE_ERROR.test(text))return false;
+ return TRANSIENT_STORAGE_ERROR.test(text);
+}
+export function failed(code,cause){const error=new Error(code);error.code=code;if(cause){error.cause=cause;if(transientStorageCause(cause))error.temporary=true;}return error;}
 function binding(db){return typeof db?.prepare==='function';}
 export function database(env){return env&&typeof env.prepare==='function'?env:env?.DB;}
 export async function one(db,sql,params=[]){
