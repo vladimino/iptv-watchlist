@@ -4,7 +4,7 @@
 
 ## Verdict
 
-Nothing in scope item 4 can be removed without an owner decision, and this slice removes nothing. Every tail the audit named is **reachable in production only through the explicit local stand-in family** (`*_DB_OPTIONAL=standin`, never set by `wrangler.jsonc`) or is a live fail-closed guard. They are one question, not several: *is the local stand-in family a kept developer and test contract?* The default is `retain`; the decision brief is at the end.
+This static audit removes nothing: each apparent legacy tail is either a live fail-closed guard or a D1-routed façade/local-only `*_DB_OPTIONAL=standin` contract. The two owner gates reduce to whether local developer/test stand-ins remain supported. **Owner decision: A2 approved on 19 November 2026** ([AIR-537 comment](https://trello.com/c/wbe7jjNs#comment-6aff1ed67e619f77b90d8e80)): retain the stand-ins, R2-only local DR/DI recovery variants, current D1 routing and safety fences, but rename the misleading internal `projector_is_writer` reason to `film_person_route_not_open` in a separately reviewed, narrowly scoped code/tests PR within AIR-537. That rename is **not implemented in this audit PR**. The alternatives and trade-offs are retained in the decision brief below.
 
 ## What the callgraph proved
 
@@ -46,16 +46,18 @@ The four keys are used as **key-name façades**: `loadJSON(env,'epg/resolver-lea
 
 These are the four R2 write variants of the audit (DR confirm and execute, DI confirm and execute). None is reachable from the hourly cron, the fast recovery cron or the Workflow; they are owner-only routes behind Cloudflare Access. Removing them leaves production behaviour unchanged but removes the local-development and test recovery path for those capabilities.
 
-## Owner decision brief
+## Owner decision: A2 approved; alternatives considered
 
-**The question** (one decision covers gates 1 and 2): is the `*_DB_OPTIONAL=standin` local stand-in family a kept developer and test contract?
+**Decision and authorization (19 November 2026):** the owner selected **A2** for both gates ([source](https://trello.com/c/wbe7jjNs#comment-6aff1ed67e619f77b90d8e80)). All five `*_DB_OPTIONAL=standin` domains, four DR/DI local R2 recovery branches, existing producer skip semantics and live fail-closed guards remain supported. The rename of the internal reason string `projector_is_writer` to `film_person_route_not_open` is authorized as a **separate narrow follow-up PR**; confirm exact source/test/external consumers before changing a contract string. Any newly identified persisted/external consumer is a stop-and-escalate boundary. No production R2/D1 writes, state mutations, flag/Task changes or recovery operations are authorized.
+
+**The question considered** (one decision covers gates 1 and 2): is the `*_DB_OPTIONAL=standin` local stand-in family a kept developer and test contract?
 
 - **Option A, retain (default, nothing changes).** Keep the stand-ins, the skip contract and the R2 admin variants. Cost: dead-in-production branches stay, and the skip reason `projector_is_writer` keeps naming a writer that no longer exists. Risk: none. Rollback: n/a.
-- **Option A2, retain and rename only the label.** Change the reason string to a neutral name (for example `film_person_route_not_open`) in the 14 modules and 3 tests. Production never emits it at `open`. Risk: low but it is a contract string; every consumer found is in `src/` and tests. Rollback: revert.
+- **Option A2, retain and rename only the label (APPROVED).** Change the reason string to a neutral name (for example `film_person_route_not_open`) in the 14 modules and 3 tests. Production never emits it at `open`. Risk: low but it is a contract string; every consumer found is in `src/` and tests. Rollback: revert.
 - **Option B, retire the Film/Person stand-in.** Remove the `legacy()` branch, `FILM_PERSON_DB_OPTIONAL`, the `projector` writer branch, `routeOf {open:false}`, `SKIPPED` and `routeSkipMs`; any non-open state refuses like `held`. Local dev and the 10 tests move to a `d1`/`open` marker fixture. Cost: about 20 call sites and 10 tests; real authority semantics of non-open states change, so it needs this owner decision first. Rollback: revert.
 - **Option C, retire the whole stand-in family together with the R2 admin variants.** Option B plus the four DR/DI R2 variants and the other four domain stand-ins; local dev would need D1 fixtures for every domain. Largest change and the largest test churn; production unchanged.
 
-**Recommendation:** A now, then A2 as a small separate change; decide B or C only if the stand-in family stops being used for local development, because the cost is mostly test and local-dev rework, not production risk.
+**Disposition:** A2 is the approved target. This docs-only PR records the audit and decision; the code-label rename, its tests, and exact-HEAD CI remain to be delivered in a separate PR. B and C were not approved and must not be implemented as implicit cleanup. A future switch to local D1 fixtures would require a new owner decision.
 
 ## Not changed
 
