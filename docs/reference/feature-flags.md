@@ -55,7 +55,7 @@ The explicit `off` values in this table describe **effective behavior**, not nec
 
 ### Tuning variables that are not feature flags
 
-Two environment names are read by Worker code but are not feature flags: they are not registered in `src/feature-flags.js`, `feature_flags` does not report them, and `wrangler.jsonc` sets neither (AIR-537 slice 5 audited their consumers; neither is orphaned and neither is removed).
+Two environment names are read by Worker code but are not feature flags: they are not registered in `src/feature-flags.js`, `feature_flags` does not report them, and `wrangler.jsonc` sets neither.
 
 | Variable | Default | Where it is read and what it does | Scope and side effects |
 | --- | --- | --- | --- |
