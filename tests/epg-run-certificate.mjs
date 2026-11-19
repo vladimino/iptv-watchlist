@@ -78,6 +78,8 @@ const refused=(promise,code)=>assert.rejects(promise,error=>error.code===code||n
  const runbook=fs.readFileSync('docs/runbooks/epg-run-certificate-0026-apply.md','utf8');
  assert.match(runbook,/Counterexample that must stop the apply/,'the runbook preflight names the pointer-moved, no-lease, stage=seal counterexample');
  assert.match(runbook,/A missing step lease proves nothing/);
+ assert.match(runbook,/positively verified terminal or absent/,'the Workflow check is positive: unknown or unreadable status is a stop');
+ assert.match(runbook,/is a \*\*stop\*\*, never evidence that no Workflow is alive/);
 }
 
 // 1. The column ABSENT (schema 25): today's behaviour, byte for byte. The pointer batch clears the pause, nothing is certified, and a certify writes nothing.
@@ -388,6 +390,23 @@ const docs=db=>JSON.stringify(db.sql("SELECT key, body, revision FROM epg_orches
  // certified: the debt is gone and the idle tick is quiet again
  assert.equal(plain(await epg.ensure(env,{now:clock})).certificate.certified,true);
  assert.equal('certificate' in plain(await epg.ensure(env,{now:clock})),false,'nothing owed: the idle tick keeps the result unchanged');
+}
+
+{
+ // A malformed mode document is unreadable evidence, reported and never written on. A verified unconfigured mode and the external mode stay quiet.
+ const {db}=await pointerPublished();
+ at(D2,18,1);
+ db.sql("INSERT OR REPLACE INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('mode','{\"schemaVersion\":1,\"mode\":\"bogus\",\"epoch\":1}',3,'x')");
+ const {env,epg}=load({db,sync:completeRun('run-2',D2)});
+ const malformed=plain(await epg.certifyComplete(env,{now:clock}));
+ assert.deepEqual(malformed,{ran:false,unreadable:true,reason:'mode_unreadable'});
+ assert.equal(plain(await epg.ensure(env,{now:clock})).certificate.reason,'mode_unreadable','the hourly result keeps the warning');
+ assert.equal(cert(db).finalized,null,'no certificate write on malformed evidence');
+ assert.equal(first(db,"SELECT COUNT(*) FROM epg_orchestration_document WHERE key='lease'"),0,'no step lease is taken');
+ db.sql("DELETE FROM epg_orchestration_document WHERE key='mode'");
+ assert.deepEqual(plain(await epg.certifyComplete(env,{now:clock})),{ran:false,reason:'not_owed'},'a verified unconfigured mode stays quiet');
+ db.sql("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('mode','{\"schemaVersion\":1,\"mode\":\"external\",\"epoch\":1}',4,'x')");
+ assert.deepEqual(plain(await epg.certifyComplete(env,{now:clock})),{ran:false,reason:'not_owed'},'the external mode stays quiet');
 }
 
 // 8. Structure: the Worker certifies after the durable complete save and before the event flushes; the repair is not on the Workflow gates; a

@@ -660,7 +660,10 @@ function frozenDay(run){
   if(typeof PublishedEpg?.certifyRun!=='function'||typeof PublishedEpg?.readCertificate!=='function')return {ran:false,reason:'unavailable'};
   let mode;
   try{mode=await readMode(env);}catch{return {ran:false,unreadable:true,reason:'mode_unreadable'};}
-  if(!mode.schema||mode.malformed||mode.record?.mode!=='cloudflare')return {ran:false,reason:'not_owed'};
+  // A verified absent or unconfigured mode and the `external` mode are quiet. A malformed mode document is unreadable evidence, not 'nothing owed': reported, never written on.
+  if(!mode.schema)return {ran:false,reason:'not_owed'};
+  if(mode.malformed)return {ran:false,unreadable:true,reason:'mode_unreadable'};
+  if(mode.record?.mode!=='cloudflare')return {ran:false,reason:'not_owed'};
   // The cheap, lease-free check first: a run that needs nothing never takes the step lease.
   const first=await owedCertificate(env);
   if(!first.owed)return {ran:false,...(first.unreadable?{unreadable:true}:{}),reason:first.reason};
