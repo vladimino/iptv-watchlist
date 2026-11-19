@@ -30,7 +30,7 @@ for(const name of files){
  }else assert.deepEqual(long.map(pattern=>Buffer.byteLength(pattern)),[],name+' has no LIKE or GLOB pattern over '+LIMIT+' bytes (D1 error 7500)');
 }
 assert.ok(files.includes('0021_d1_glob_pattern_limit.sql'),'0021 exists');
-assert.deepEqual(files.slice(-6),['0021_d1_glob_pattern_limit.sql','0022_epg_priority_pause.sql','0023_canonical_producer_chain.sql','0024_prediction_recovery_intent.sql','0025_film_retention_scan_watermark.sql','0026_epg_run_certificate.sql'],'0021 is followed by 0022, 0023 (dormant producer chain), 0024 (dormant prediction recovery intent), 0025 (retention scan watermark) then 0026 (EPG run certificate, dormant)');
+assert.deepEqual(files.slice(-7),['0021_d1_glob_pattern_limit.sql','0022_epg_priority_pause.sql','0023_canonical_producer_chain.sql','0024_prediction_recovery_intent.sql','0025_film_retention_scan_watermark.sql','0026_epg_run_certificate.sql','0027_discovery_intent_identity_revoke.sql'],'0021 is followed by 0022, 0023 (dormant producer chain), 0024 (dormant prediction recovery intent), 0025 (retention scan watermark) 0026 (EPG run certificate, dormant) then 0027 (identity revoke intent kind)');
 
 // ===== 2. the databases: v20 (the defect still in), v21 (0021 applied), and the pattern scan of the final schema =====
 const upTo=number=>files.filter(name=>Number(name.slice(0,4))<=number);

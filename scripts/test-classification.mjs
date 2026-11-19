@@ -406,6 +406,15 @@ export const FILES={
  "discovery-archive-import.mjs": {
   "suite": "core"
  },
+ "admin-identity-revoke-page.mjs": {
+  "suite": "core"
+ },
+ "discovery-identity-revoke.mjs": {
+  "suite": "core"
+ },
+ "discovery-intent-migration-0027.mjs": {
+  "suite": "core"
+ },
  "discovery-authority.mjs": {
   "suite": "core"
  },
