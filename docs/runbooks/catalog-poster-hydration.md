@@ -1,6 +1,6 @@
 # Catalog poster hydration: scoped maintenance and authorization
 
-Catalog-only films offered in the «Находки» section show the year placeholder when their catalog record has `poster: null` and the `metadata.json` fallback has nothing for them. The decisions are [ADR 0020](../adr/0020-owner-triggered-catalog-poster-hydration.md), [ADR 0048](../adr/0048-permanent-catalog-poster-maintenance-route.md) and [ADR 0063](../adr/0063-catalog-poster-negative-index.md); the route, outcomes and write rules are in the [catalog reference](../reference/api/catalog.md#poster-hydration). This page is the procedure. The route is a permanent owner-only maintenance tool for restoring posters, for example after a mass TMDB discovery failure; it has no switch of its own (the former `CATALOG_POSTER_HYDRATION` is retired and inert). Access is the Worker's owner-only Cloudflare Access. A bounded poster sweep is a **candidate for L2 remediation** under [authorization policy](../process/authorization-and-escalation.md), because the current route has generation, lease, budgets and receipts. AIR-358 does **not** authorize new autonomous sweeps: production writes still require a scoped owner-approved execution plan until an independent contract/runtime review explicitly enables an enforceable L2 standing authorization. A code deploy approves none. It is a bounded manual operation, never a schedule. The owner page `/admin/posters` runs the same steps through the same route, with its own preview, confirmation and receipt ([below](#through-the-admin-page)); the direct calls of the plan stay valid.
+Catalog-only films offered in the «Находки» section show the year placeholder when their catalog record has `poster: null` and the `metadata.json` fallback has nothing for them. The decisions are [ADR 0020](../adr/0020-owner-triggered-catalog-poster-hydration.md), [ADR 0048](../adr/0048-permanent-catalog-poster-maintenance-route.md) and [ADR 0063](../adr/0063-catalog-poster-negative-index.md); the route, outcomes and write rules are in the [catalog reference](../reference/api/catalog.md#poster-hydration). This page is the procedure. The route is a permanent owner-only maintenance tool for restoring posters, for example after a mass TMDB discovery failure; it has no switch of its own (the former `CATALOG_POSTER_HYDRATION` is retired and inert). Access is the Worker's owner-only Cloudflare Access. A bounded poster sweep is a **candidate for L2 remediation** under [authorization policy](../process/authorization-and-escalation.md), because the current route has generation, lease, budgets and receipts. AIR-358 does **not** authorize new autonomous sweeps: production writes still require a scoped owner-approved execution plan until an independent contract/runtime review explicitly enables an enforceable L2 standing authorization. A code deploy approves none. The route itself is a bounded manual operation; the separate [weekly automatic retry](#weekly-automatic-retry) is a different path with its own gate. The owner page `/admin/posters` runs the same steps through the same route, with its own preview, confirmation and receipt ([below](#through-the-admin-page)); the direct calls of the plan stay valid.
 
 ## Plan
 
@@ -41,4 +41,34 @@ A code revert to a release that reads the former switch needs `CATALOG_POSTER_HY
 
 ## When to use
 
-When the read-only count shows actionable records that matter to the owner, typically after a mass TMDB discovery failure. Each run needs an approved bounded execution scope (not necessarily repeated approval of every within-scope call), then the owner's visual smoke with at least some posters visible. Films TMDB has no asset for keep the placeholder until the remembered answer expires or a recheck finds one. A mismatch waits for an identity change or an explicit recheck. A recurring or scheduled hydration is not part of this procedure.
+When the read-only count shows actionable records that matter to the owner, typically after a mass TMDB discovery failure. Each run needs an approved bounded execution scope (not necessarily repeated approval of every within-scope call), then the owner's visual smoke with at least some posters visible. Films TMDB has no asset for keep the placeholder until the remembered answer expires or a recheck finds one. A mismatch waits for an identity change or an explicit recheck. The manual procedure above is never scheduled; the recurring path is the weekly automatic retry below, which does not use this route.
+
+## Weekly automatic retry
+
+The decision is [ADR 0179](../adr/0179-weekly-automatic-catalog-poster-retry.md); the contracts are in the [catalog reference](../reference/api/catalog.md#automatic-weekly-retry), the [monitor reference](../reference/api/monitor.md#catalog-poster-stream) and the [events reference](../reference/domain/events.md#catalog-poster-weekly-report-catalog_posters). The code, the Monitor stream and the cron entry `24 3 * * *` UTC in `wrangler.jsonc` exist and are tested offline. **Nothing is activated or verified in production by the documentation or by a merge:** the cron takes effect only on a deploy that carries it, and activation needs a separate explicit owner GO on the Cloudflare schedule. Positive hydration is unproven until a real `poster_path` appears on a natural weekly run.
+
+**What runs.** The first firing of each week (weeks start Sunday 00:00 UTC, normally the Sunday firing) runs a sweep of the verified Films without a poster whose hold has expired or that have no index entry, through the same core as the owner route. Other days the firing only resumes a run that is `pending` with its retry time reached. A firing with nothing to do reads one R2 object and writes nothing.
+
+**Read the status (read-only).** Use only reads that cannot write:
+
+1. `GET /api/monitor/status`, stream `catalog_posters` (`state`, `detail`, `freshnessAt`, `nextExpectedAt`).
+2. The `catalogPosters` section of `GET /api/admin/health`, and the footer source «Постеры» (`GET /api/enrichment/footer/status`).
+3. The weekly report in the Events Log, type `catalog_posters` (`deferred` and `final`, with checked, hydrated and still-without-poster counts).
+4. `GET /api/admin/posters` for the coverage counts. It is side-effect free.
+
+**What each state means.**
+
+| State | Monitor status | Meaning and what to do |
+| --- | --- | --- |
+| `healthy_idle` | healthy | The week has its receipt. Zero due films and 90-day holds are normal. Nothing to do |
+| `grace` | healthy | No checkpoint yet and the first firing is not overdue. Nothing to do |
+| `waiting` | waiting | A run is pending with a scheduled retry, or in progress. Wait for the next daily firing |
+| `overdue` | delayed, then degraded | The week's sweep (or the first one) has not left a receipt 26 h after its due firing. Check that the cron entry is in the live schedule (read-only schedules readout) and that the deploy carried it |
+| `stalled` | degraded | An undelivered event or a stuck run or retry. The next firing replays owed events without TMDB; if it persists, report it to the owner |
+| `lost` | degraded | A checkpoint existed and is now absent. Report it; do not recreate it |
+| `unknown` | degraded | The checkpoint is unreadable or invalid, or the Monitor is off. Report it; never treat it as healthy |
+| `failed` | needs_owner | The run failed, the retry cap of six was reached or the rate limit persisted over two due firings. Owner decision needed |
+
+**Do not.** Run the cron by hand, trigger a firing, call TMDB or POST the owner route to "make the week green"; edit, delete or recreate `epg/catalog-poster-weekly.json` or the Monitor markers in `monitor/state.json`; reset a lease; or create a Scheduled Task for it. A deploy does not run the sweep and grants no permission for a data operation. Activating the cron needs the owner's explicit GO on the Cloudflare schedule, with a read-only readback of the live schedule afterwards.
+
+**Rollback.** A pull request that removes `24 3 * * *` from `wrangler.jsonc` and its dispatch in `src/worker.js` (and the branch), with its own deploy and a readback that the live schedule no longer lists it. Stored posters, negative-index entries, the checkpoint and delivered events are not rolled back; the manual route and its procedure above are unaffected.

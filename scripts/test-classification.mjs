@@ -330,6 +330,18 @@ export const FILES={
  "catalog-film.mjs": {
   "suite": "core"
  },
+ "catalog-poster-footer.mjs": {
+  "suite": "core"
+ },
+ "catalog-poster-monitor.mjs": {
+  "suite": "core"
+ },
+ "catalog-poster-weekly-d1.mjs": {
+  "suite": "core"
+ },
+ "catalog-poster-weekly.mjs": {
+  "suite": "core"
+ },
  "catalog-posters-d1.mjs": {
   "suite": "core"
  },

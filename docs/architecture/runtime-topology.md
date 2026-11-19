@@ -10,6 +10,7 @@ flowchart TB
     mcpAccess["Access: IPTV MCP"]
     cron["Cloudflare cron trigger: 0 * * * *"]
     fastCron["Cloudflare cron trigger: 1-59/2 * * * * (Discovery only)"]
+    posterCron["Cloudflare cron trigger: 24 3 * * * (poster retry only)"]
     subgraph worker["Single Worker: iptv"]
         route["src/worker.js HTTP router"]
         mcp["src/mcp.js: JWT and MCP protocol"]
@@ -38,6 +39,7 @@ flowchart TB
     catalogD1 -->|SELECT only| d1
     cron -.->|reconcileDiscoveryWorkflow when admission passes| workflow
     fastCron -.->|reconcileDiscoveryRecovery: recover a stopped or dead Workflow, or a missed EPG handoff| workflow
+    posterCron -.->|"CatalogPosterWeekly.run: guarded poster updates"| d1
     sync -.->|"D1 metadata cache (v6+) and published EPG/watchlist (v8), both d1"| d1
     sync -.->|canonical Film/Person at open: fenced adapters| d1
     classDef current fill:#edf8ef,stroke:#579266,color:#15361e
@@ -71,3 +73,5 @@ No diagnostic binding, route or Workflow class exists: removed by AIR-457 ([ADR 
 ## Monitor (AIR-349)
 
 One more tick on the existing hourly cron, one R2 key (`monitor/state.json`) and, once the owner configures it, one outbound alert channel (the generic HTTPS webhook, or the fixed Telegram Bot API endpoint chosen by `MONITOR_TRANSPORT`) and one dead-man ping. No new Worker, Workflow, trigger or binding. See [ADR 0095](../adr/0095-cloudflare-native-production-monitor.md) and [ADR 0097](../adr/0097-monitor-telegram-bot-api-transport.md).
+
+The Worker declares a third cron entry, `24 3 * * *` UTC, that runs only the automatic catalog-poster retry ([ADR 0179](../adr/0179-weekly-automatic-catalog-poster-retry.md)); `src/worker.js` dispatches on the exact `controller.cron` and the poster branch runs none of the EPG, Ratings, Monitor or Discovery recovery work. The entry is declared in `wrangler.jsonc`; it takes effect on a deploy of that configuration, and its production activation is a separate owner decision that has not been taken. See [scheduling](scheduling-and-orchestration.md#daily-catalog-poster-retry-cron).

@@ -132,13 +132,26 @@ export function evaluatePredictions(facts, previous, now) {
   return {stream: 'predictions', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {pendingCount: pending}};
 }
 
-// All four streams plus the overall state. A stream that is `delayed` or `waiting` is recorded but never alerts.
+// ---- Catalog posters (AIR-543, ADR 0179): the weekly poster sweep, judged by the one projection of its R2 checkpoint (CatalogPosterWeekly.project).
+// The projection already carries the existing vocabulary in `monitor`; only a degraded or needs_owner state raises an issue. A normal no-poster
+// verdict, an empty due set, a first-run grace and a legitimate retry wait are never issues. An unreadable fact is a fault, never a pass.
+export function evaluateCatalogPosters(facts) {
+  if (!facts || facts.error || !STATES.includes(facts.monitor)) return unreadable('catalog_posters', 'catalog poster');
+  const issues = [];
+  if (facts.monitor === 'degraded' || facts.monitor === 'needs_owner') {
+    issues.push(issue('catalog_posters_' + facts.state, facts.monitor, 'catalog_posters', 'Catalog poster retry is ' + facts.state + (facts.detail ? ' (' + facts.detail + ')' : '')));
+  }
+  return {stream: 'catalog_posters', state: facts.monitor, issues, facts: {state: facts.state, detail: facts.detail ?? null, freshnessAt: facts.freshnessAt ?? null, nextExpectedAt: facts.nextExpectedAt ?? null}};
+}
+
+// All four streams (plus catalog posters when its facts are supplied) and the overall state. A stream that is `delayed` or `waiting` is recorded but never alerts.
 export function evaluateAll(facts, previous, now, helpers) {
   const streams = [
     evaluateEpg(facts.epg, now, helpers),
     evaluateDiscovery(facts.discovery, now),
     evaluateRatings(facts.ratings, now),
     evaluatePredictions(facts.predictions, previous?.predictions ?? null, now),
+    ...(facts.catalogPosters === undefined ? [] : [evaluateCatalogPosters(facts.catalogPosters)]),
   ];
   const issues = streams.flatMap(stream => stream.issues);
   const overall = streams.reduce((state, stream) => STATE_RANK[stream.state] > STATE_RANK[state] ? stream.state : state, 'healthy');

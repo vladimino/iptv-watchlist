@@ -120,3 +120,27 @@ The replay reports each slot that no rule makes eligible as `evidence_drift` wit
 ## Recovery after a stop: the fast tick (AIR-534, [ADR 0174](../adr/0174-discovery-only-fast-recovery-cron.md))
 
 A recoverable stop of a Discovery Workflow records `recovery.dueAt`. The successor no longer waits for the next hourly cron: a Discovery-only cron every two minutes (`1-59/2 * * * *`) reads the Workflow record and, once the due time has passed and the existing admission accepts, hands the case to the existing reconcile, which creates the deterministic successor id under the existing CAS. A missing record or a record of an older generation than the published one (a missed EPG-publication start) is handed over the same way. A live instance of the published generation, a recovery not yet due, a terminal stop and a quarantine are left alone with no write. The fast tick runs no chunk, no TMDB call and no hourly report. The flow is drawn in [scheduling and orchestration](scheduling-and-orchestration.md); a false `programme_changed` from a generation CAS collision is handled inside the chunk by a bounded retry and defer (see the [AIR-534 evidence](../evidence/discovery/air-534-false-programme-changed-2026-11-18.md)).
+
+## Catalog posters: admission seed and the weekly retry ([ADR 0179](../adr/0179-weekly-automatic-catalog-poster-retry.md))
+
+A catalog film without a poster has two automatic paths besides the owner route, both D1 only and both using the existing guards. **Seed:** when Discovery admits a new film from a complete TMDB movie detail whose id equals the verified id and whose `poster_path` is explicitly `null`, it records `no_poster_on_tmdb` (90-day hold) in the negative index by compare-and-swap, with no second TMDB request; an index failure never blocks the admission. **Weekly retry:** the daily poster cron calls the one shared core `catalogPosterRun` (also wrapped by the owner `POST /api/enrichment/catalog/posters`), which re-asks TMDB only for verified films whose hold has expired or that have no entry, and writes a poster only through the guarded D1 conditional update. `tmdb_id_mismatch` is never rechecked automatically. The paths are implemented and tested offline; production behaviour is unproven until the cron is activated by a separate owner decision.
+
+```mermaid
+flowchart TD
+    adm["Discovery admits a new film<br/>from complete TMDB detail"]
+    pp{"poster_path explicitly null<br/>and id equals verified id?"}
+    seed["Seed no_poster_on_tmdb<br/>CAS in negative index, no extra TMDB call"]
+    none["No seed: film left for the weekly retry"]
+    cron["Daily poster cron"]
+    core["catalogPosterRun: shared core<br/>lease, generation fence, TMDB detail"]
+    owner["Owner POST /api/enrichment/catalog/posters"]
+    d1[("D1 discovery_admission<br/>guarded poster update")]
+    neg[("R2 negative index<br/>epg/catalog-poster-negatives.json")]
+    adm --> pp
+    pp -->|yes| seed --> neg
+    pp -->|no| none
+    cron --> core
+    owner --> core
+    core -->|"real poster_path"| d1
+    core -->|"absent again: new 90-day hold"| neg
+```
