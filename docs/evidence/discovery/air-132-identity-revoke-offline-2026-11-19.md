@@ -1,6 +1,6 @@
 # AIR-132: revoke one saved identity correction, offline evidence, 19 November 2026
 
-[AIR-132](https://trello.com/c/3AXbSoHe) · [ADR 0178](../../adr/0178-identity-correction-revoke-event-contract.md) (Accepted, owner choice A + A1 recorded in the card). Offline tests and a local browser check only. **No production read or write was made, no migration was applied, no Discovery chunk, TMDB call, EPG run, flag or Scheduled Task was touched.** No production correction exists to revoke (none was confirmed when [AIR-65](https://trello.com/c/MKb4JMXi) closed), and none was created for a test.
+[AIR-132](https://trello.com/c/3AXbSoHe) · [ADR 0178](../../adr/0178-identity-correction-revoke-event-contract.md) (Accepted, owner choice A + A1 recorded in the card). Offline tests and a local browser check only. **No production read or write was made, no migration was applied, no Discovery chunk, TMDB call, EPG run, flag or Scheduled Task was touched.** No production correction was created for a test. (Correction of an earlier wording: none was confirmed when [AIR-65](https://trello.com/c/MKb4JMXi) closed, but one real owner correction exists, the AIR-498 reject of 16 November 2026; see the [0027 apply evidence](../d1-migration/air-132-0027-apply-2026-11-19.md).)
 
 ## What the tests prove
 
@@ -41,7 +41,7 @@ Browser check of the replace form (same method, 1280 px and 390 px, keyboard onl
 
 ## Not proven here
 
-- The real POST on production, and the product acceptance of it, stay with the owner. There is no production correction to revoke; an offline test does not replace that action or an explicit owner waiver.
-- Migration 0027 on production D1 (separate owner GO, own evidence). Until then the confirm route answers `revoke_schema_not_ready`.
+- The real POST on production, and the product acceptance of it, stay with the owner. The only existing production correction is the AIR-498 reject, a legitimate fix of a false identity that is not a test candidate; an offline test does not replace an owner action or an explicit owner waiver.
+- Migration 0027 on production D1: applied afterwards, see the [apply evidence](../d1-migration/air-132-0027-apply-2026-11-19.md).
 - A link from a row of the read-only `/admin/identity` queue is not added (the queue stays read-only); the entry is the Limbo observation detail.
 - Behaviour of the next ordinary chunk on a fenced observation is covered by the carry and consumer checks above, not by a production chunk.
