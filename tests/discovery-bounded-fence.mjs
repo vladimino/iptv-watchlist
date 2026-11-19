@@ -77,9 +77,9 @@ function record(state){
  try{await stage(state,{latest:latestFew()});}finally{context.Date=RealDate;rec.restore();}
  let sinceFence=0,worst=0;
  for(const item of rec.events){if(item==='fence')sinceFence=0;else if(item==='segment'){sinceFence++;worst=Math.max(worst,sinceFence);}}
- // AIR-533: writes go out in windows of three that share one fence check at their start; the clock of this test adds 6 s to every put serially (18 s a window),
- // so at most two windows (6 writes, 36 s simulated, 90 s lease) pass between two fences. Parallel puts of a real window cost about one put latency.
- assert.ok(worst<=6,'at 6 s a write no more than 6 writes (two windows) pass between two fences: '+worst);
+ // AIR-533: writes go out in windows of two that share one fence check at their start; the clock of this test adds 6 s to every put serially (12 s a window),
+ // so at most two windows (4 writes, 24 s simulated, 90 s lease) pass between two fences. Parallel puts of a real window cost about one put latency.
+ assert.ok(worst<=4,'at 6 s a write no more than 4 writes (two windows) pass between two fences: '+worst);
  assert.ok(rec.events.filter(item=>item==='fence').length>Math.ceil(rec.events.filter(item=>item==='segment').length/8)+2,'slow rounds fence more often than the call bound alone');
 }
 
@@ -95,9 +95,9 @@ function record(state){
  try{await stage(state,{latest:latestFew()});}finally{context.Date=RealDate;context.renewDiscoveryLease=realRenew;state.bkt.onPut=priorOnPut;}
  const [archive]=phase('seal_stage_archive');
  assert.ok(Math.abs(archive.fenceMs-archive.fences*3000)<=400,'fenceMs is the fences alone: '+archive.fenceMs+' for '+archive.fences);
- // AIR-533: puts of a window overlap, so `putMs` is the summed time of the puts (one window's puts share the global clock of this test): at least one 0.5 s per put, at most three.
- assert.ok(archive.putMs>=archive.segments*500-400&&archive.putMs<=archive.segments*500*3+400,'putMs is the segment puts alone, without the 3 s fences: '+archive.putMs+' for '+archive.segments);
- assert.ok(archive.fenceMs+(archive.readMs+archive.putMs)/3<=archive.elapsedMs+5,'the fences and the overlapped reads and puts (summed time over at most three in flight) fit the elapsed time');
+ // AIR-533: puts of a window overlap, so `putMs` is the summed time of the puts (one window's puts share the global clock of this test): at least one 0.5 s per put, at most two.
+ assert.ok(archive.putMs>=archive.segments*500-400&&archive.putMs<=archive.segments*500*2+400,'putMs is the segment puts alone, without the 3 s fences: '+archive.putMs+' for '+archive.segments);
+ assert.ok(archive.fenceMs+(archive.readMs+archive.putMs)/2<=archive.elapsedMs+5,'the fences and the overlapped reads and puts (summed time over at most two in flight) fit the elapsed time');
 }
 
 // 2b-2. With an archive already in place the loop reads each existing segment first, and `readMs` counts exactly those reads (700 ms each here).
@@ -112,7 +112,7 @@ function record(state){
  try{await stage(state,{latest:scan(3).slice(0,5),day:3});}finally{context.Date=RealDate;state.bkt.get=realGet;}
  const [archive]=phase('seal_stage_archive');
  assert.ok(reads>=1&&archive,'segments were read: '+reads);
- assert.ok(archive.readMs>=reads*700-400&&archive.readMs<=reads*700*3+400,'readMs is the segment reads alone (summed time of overlapping reads): '+archive.readMs+' for '+reads);
+ assert.ok(archive.readMs>=reads*700-400&&archive.readMs<=reads*700*2+400,'readMs is the segment reads alone (summed time of overlapping reads): '+archive.readMs+' for '+reads);
  assert.ok(archive.fenceMs<archive.readMs,'and not part of the fences');
 }
 
@@ -122,7 +122,7 @@ function record(state){
  const state=await setup();
  const clock={reads:0,readsDone:0,puts:0,lastOpAt:0,releasedAt:null};
  const realRead=context.readLedgerSegment,priorOnPut=state.bkt.onPut,realRelease=context.releaseDiscoveryLease;
- // The first read of the window fails at once; its two siblings are still reading for 60 ms and would put after it.
+ // The first read of the window fails at once; its sibling is still reading for 60 ms and would put after it.
  context.readLedgerSegment=async(...args)=>{
   const n=++clock.reads;
   if(n===1){clock.readsDone++;clock.lastOpAt=performance.now();throw new Error('injected read failure');}
@@ -133,8 +133,8 @@ function record(state){
  context.releaseDiscoveryLease=async(...args)=>{clock.releasedAt=performance.now();return realRelease(...args);};
  try{await assert.rejects(stage(state,{latest:latestFew()}),/injected read failure/);}
  finally{context.readLedgerSegment=realRead;state.bkt.onPut=priorOnPut;context.releaseDiscoveryLease=realRelease;}
- assert.equal(clock.reads,3,'one window of three reads started: '+clock.reads);
- assert.equal(clock.readsDone,3,'the siblings finished before the error left the window and the lease was released');
+ assert.equal(clock.reads,2,'one window of two reads started: '+clock.reads);
+ assert.equal(clock.readsDone,2,'the sibling finished before the error left the window and the lease was released');
  assert.equal(clock.puts,0,'no segment put started after a sibling failed');
  assert.ok(clock.releasedAt!==null&&clock.releasedAt>=clock.lastOpAt,'the lease is released after the last archive operation');
  assert.equal(state.bkt.objects.get(POINTER)?.etag??null,null,'the pointer did not move');

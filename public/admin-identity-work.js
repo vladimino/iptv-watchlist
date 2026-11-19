@@ -92,4 +92,7 @@ function startIdentityWork() {
   iwLoad(false);
 }
 
+// The one bootstrap of the served bundle, after every definition and every initialised const of both files: the Limbo page first (its first read is scheduled once), then
+// this list, which waits for that read. Without the Limbo file (the tests of this controller) only the list starts.
+if (typeof startLimbo === 'function') startLimbo();
 startIdentityWork();

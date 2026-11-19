@@ -1429,7 +1429,7 @@ async function* iterateLedgerItems(env,view,holder,reentry,options,active){
  }finally{stopped=true;release();kick();try{await task;}catch{}}
 }
 // AIR-444: the segment writes of one archive commit take the full fence at most this many writes or milliseconds apart (see planDiscoveryLedger).
-const ARCHIVE_SEGMENT_FENCE_EVERY=8,ARCHIVE_SEGMENT_FENCE_MS=20000,ARCHIVE_SEGMENT_CONCURRENCY=3;
+const ARCHIVE_SEGMENT_FENCE_EVERY=8,ARCHIVE_SEGMENT_FENCE_MS=20000,ARCHIVE_SEGMENT_CONCURRENCY=2;
 // Sanitized counters of the archive loop, for its exit and its error marker. The four times do not overlap: `fenceMs` is every full fence of the
 // commit (segments, manifest and pointer), `readMs` the reads of the existing segments, `putMs` the bucket puts of the segments alone; what is left of
 // `elapsedMs` is serialization, hashing and the manifest and pointer puts.
@@ -1554,7 +1554,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
    segments[segment]={segment,object,sha256:written.sha256,items:Object.keys(segmentItems).length,bytes:written.bytes};
   };
   const archiveGuarded=async entry=>{try{await archiveSegment(entry);}catch(error){windowFailed=windowFailed||error;throw error;}};
-  // A window never crosses a fence boundary (3, 3, 2 writes per fence of 8), so the cadence of AIR-444 is exactly the sequential one.
+  // A window never crosses a fence boundary (2, 2, 2, 2 writes per fence of 8), so the cadence of AIR-444 is exactly the sequential one.
   for(let from=0;from<ordered.length;){
    const due=sinceFence>=ARCHIVE_SEGMENT_FENCE_EVERY||Date.now()-lastFenceAt>=ARCHIVE_SEGMENT_FENCE_MS;
    const size=Math.min(ARCHIVE_SEGMENT_CONCURRENCY,ordered.length-from,due?ARCHIVE_SEGMENT_CONCURRENCY:ARCHIVE_SEGMENT_FENCE_EVERY-sinceFence);

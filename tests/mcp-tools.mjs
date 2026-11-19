@@ -212,11 +212,11 @@ for(const name of ['prediction_queue_overview','prediction_film_diagnostics','pr
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
 }
-for(const name of ['epg_sync_start','epg_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','film_person_open_handoff']){
+for(const name of ['epg_sync_start','epg_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,false,name);
 }
-assert.deepEqual(tools.find(item=>item.name==='film_person_open_handoff').inputSchema.properties.mode.enum,['dry_run','apply']);
-assert.equal(tools.find(item=>item.name==='film_person_open_handoff').inputSchema.properties.expectedReference.maxLength,96);
+// AIR-537: the owner-only Film/Person prepared-to-open operator is retired; neither the listing nor the instructions may name it.
+assert.equal(tools.some(item=>item.name==='film_person_open_handoff'),false,'film_person_open_handoff is not listed');
 assert.equal(tools.find(item=>item.name==='epg_sync_step').annotations.openWorldHint,true);
 const faultSchema=tools.find(item=>item.name==='prediction_complete').inputSchema.properties.fault;
 assert.equal(faultSchema.type,'object');
