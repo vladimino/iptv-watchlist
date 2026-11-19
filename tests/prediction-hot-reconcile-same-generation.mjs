@@ -82,7 +82,7 @@ mode='ok';
 {assign(3200,'racing-old');let first=true;
  const original=ctx.PublishedEpg.assignedShowsSignature;
  ctx.PublishedEpg.assignedShowsSignature=async(...args)=>{const value=await original(...args);if(first){first=false;signature='racing-new';}return value;};
- const r=await realStart();assert.ok(r.status===200||r.status===409,'the racing start is allowed to be refused once');
+ const r=await realStart();assert.equal(r.status,200,'AIR-542: a priority-only race never refuses the start: '+JSON.stringify(r.data).slice(0,200));
  ctx.PublishedEpg.assignedShowsSignature=original;
  const again=await realStart();assert.equal(again.status,200);assert.equal(queue().showsSignature,'racing-new','the next natural start ranks on the signature that landed during the rebuild');}
 

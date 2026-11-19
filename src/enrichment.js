@@ -1141,7 +1141,7 @@ function logPredictionFailure(boundary,error,requestId,runId){
 // parallel are not summed as if sequential: `busyMs` is the union of their intervals, `overlapMs` what the sum exceeds it by, and
 // `unattributedMs` the rest of the wall time (compute, scheduling, the awaits between calls). A failure of any of this is swallowed.
 const STEP_TIMER=Symbol('predictionStepTimer');
-const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','leaseRefusedAtAcquire','liveLeaseAgeMs','drainedCommitted','drainedDropped'];
+const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','leaseRefusedAtAcquire','liveLeaseAgeMs','drainedCommitted','drainedDropped','priorityLagAccepted','priorityRebased'];
 const STEP_STAGES=['preflight','turned_away','idle','settle_previous','catalog_gate','queue_refresh','preflight_refreshed','runner_lease','preflight_lease','persist'],STEP_STAGE_CAP=16;
 const STEP_OPS_CAP=4000,STEP_CLASS_CAP=40;
 const STEP_TABLE=/\b(?:from|into|update|join)\s+["`]?([a-z_][a-z0-9_]{0,59})["`]?/i;
@@ -2612,7 +2612,10 @@ async function batchStartWork(env,body,requestId,tally){
   catch(error){if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
   // The preflight is repeated on the refreshed queue and is the baseline from here on. An overflow now has the refresh as its only effect.
   pre=await timedStage(env,'preflight_refreshed',()=>batchPreflight(env,body,tally));if(pre.response)return pre.response;
-  if(pre.stale||pre.priorityDue)return batchBlocked('queue_changed',{queueRefreshed:true,cause:pre.stale?'stale':'priority'});
+  // AIR-542: one rebuild per start. A priority that moved again during it (a Discovery assignment landing mid-rebuild) is a lag the next start repairs, never a refusal or a second rebuild.
+  // An unreadable signature is not drift: hot outstanding cannot be verified at all, so no cold manifest is delivered (the next start retries the read).
+  if(pre.stale||pre.priorityCause==='shows_signature_unreadable')return batchBlocked('queue_changed',{queueRefreshed:true,cause:pre.stale?'stale':'priority'});
+  if(pre.priorityDue)tally.priorityLagAccepted=1;
   if(pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre,{queueRefreshed:true,...(queueSettled?{queueSettled}:{})});
  }
  // After the refresh the baseline can be idle too (the queue was stale, or every selected film was already current).
@@ -2635,7 +2638,12 @@ async function batchStartWork(env,body,requestId,tally){
   forgetAuthority(env);
   const again=await timedStage(env,'preflight_lease',()=>batchPreflight(env,body,tally));
   if(again.response){await runnerLease(env,runId,'release');return again.response;}
-  if(again.stale||again.priorityDue||again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{cause:again.stale?'stale':again.priorityDue?'priority':again.revision!==pre.revision?'revision':'manifest',...(queueRefreshed?{queueRefreshed:true}:{})});}
+  // AIR-542: a stale gate (profile, contract, registry, recovery overlay, programme) or a revision/manifest change with no priority drift behind it stays a refusal. When the only
+  // drift is the priority (the queue was re-ranked by a concurrent reconcile), the preflight just taken under the lease is itself a consistent, freshly validated snapshot of the
+  // same queue gates, selection and admission: rebase onto it once, bounded, and keep the slot. The next start actualises the ranking.
+  if(again.stale||again.priorityCause==='shows_signature_unreadable'||(!again.priorityDue&&(again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash))){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{cause:again.stale?'stale':again.priorityCause==='shows_signature_unreadable'?'priority':again.revision!==pre.revision?'revision':'manifest',...(queueRefreshed?{queueRefreshed:true}:{})});}
+  if(again.priorityDue)tally.priorityLagAccepted=1;
+  if(again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash)tally.priorityRebased=1;
   const exact=await buildBatchManifest(env,{profile:again.profile,items:again.selection.items,runId,lease});
   answer=batchStartAnswer({...exact.body,...batchRealExtras(again.selection,again.queue,{queueRefreshed,queueSettled,dryRun:false})});
   if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes){await runnerLease(env,runId,'release');return batchOverflow({...exact,bytes:batchBytes(answer)},{queueRefreshed,...(queueSettled?{queueSettled}:{})});}
