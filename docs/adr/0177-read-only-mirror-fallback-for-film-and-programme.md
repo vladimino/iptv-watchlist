@@ -1,9 +1,9 @@
 # ADR 0177: Film and programme reads may fall back to existing R2 mirrors, best-effort, read-only and visibly degraded
 
-**Status:** Proposed (retained until the corrected text is independently re-reviewed and approved by the owner)  
-**Original decision date:** unknown (not yet decided)  
+**Status:** Accepted  
+**Original decision date:** 2026-11-19  
 **Recorded at:** 2026-11-19  
-**Approval source:** The availability-first direction and decisions A, B3, C1 and D1 are recorded by the Product Owner on [AIR-541](https://trello.com/c/0i308J15) and in the review of PR #791. The ADR text itself is not yet approved.  
+**Approval source:** [Explicit Product Owner acceptance of ADR 0177 on AIR-541](https://trello.com/c/0i308J15#comment-6aff5ffbfb28393ad929dcf9) on 2026-11-19, after [independent technical PASS of the agreed A/B3/C1/D1 contract on PR #791](https://github.com/vladimino/iptv-watchlist/pull/791#pullrequestreview-5982927760) at HEAD `2ad7d7c6`. Approval is for the architecture contract; implementation, production writes, migrations, flags and schedules remain separate.  
 **Related work:** [AIR-541](https://trello.com/c/0i308J15), [AIR-414](https://trello.com/c/GJefgNm8), [AIR-79](https://trello.com/c/485tlGLA), [AIR-531](https://trello.com/c/t5dNQxdC), [AIR-537](https://trello.com/c/wbe7jjNs); [ADR 0079](0079-d1-authoritative-published-epg.md), [ADR 0108](0108-epg-mirror-reconciliation-writer.md), [ADR 0162](0162-d1-only-authority-retire-rollback-toolchain.md)  
 **Supersedes:** None (narrows ADR 0108 decision 1 and the fail-closed reader rule of ADR 0079 only for the degraded read path below; ADR 0162's refusal of non-`d1`/`open` markers is unchanged)  
 **Superseded by:** None
@@ -28,7 +28,7 @@ D1 is the only authoritative database. `GET /api/programme`, `/api/watchlist`, `
 - **C1. Existing mirrors only.** A verified film identity is displayed from them if available; a Discovery-only film with no usable source gets a neutral shell. No new catalog or Discovery R2 writer.
 - **D1. Last-known-good lives only in app-instance memory.** No persistence across reload.
 
-## Decision (proposed)
+## Decision
 
 1. **D1 stays the authority; R2 is a degraded read replica.** A healthy D1 never reads R2 for these routes, and no request is ever served from a mirror by default.
 
@@ -92,11 +92,11 @@ This ADR authorizes no production operation: no R2 or D1 write, flag, schedule, 
 
 ## Evidence
 
-- **Original decision:** owner decisions A, B3, C1, D1 and the review of PR #791, recorded on [AIR-541](https://trello.com/c/0i308J15).
-- **Implementation:** none.
+- **Original decision:** owner choices A, B3, C1 and D1 recorded on [AIR-541](https://trello.com/c/0i308J15), followed by [explicit final acceptance](https://trello.com/c/0i308J15#comment-6aff5ffbfb28393ad929dcf9) after [independent technical PASS](https://github.com/vladimino/iptv-watchlist/pull/791#pullrequestreview-5982927760).
+- **Implementation:** not part of this architecture-only PR. The Worker, UI, tests and operational verification remain undelivered under AIR-541.
 - **Dated verification:** 2026-11-19 code reading of `src/published-epg.js` (`putStable`, `writeMirrors`, `replacePart`, `repairMirrors`, `readAuthority`) and `src/worker.js` (`catalogFilmRoute`, `loadJSON`, write routes); R2 object inventory as recorded on AIR-541 (current run lacks `discovered-films.json`; root copy historical). No production read or write was made by the author of this draft.
 - **Uncertainty:** the exact D1 fault class of the 2026-11-19 incident (Observability not read here); retention of older generation copies; how often a programme/watchlist best-effort join is inconsistent in practice.
 
 ## Follow-ups
 
-Implementation slices (typed fault classification, mirror reader and C1 identity, write fence, client note and memory LKG, observability, tests and browser QA) follow only after independent re-review and owner approval of this ADR.
+Implementation (typed fault classification, mirror reader and C1 identity, write fence, client note and memory LKG, observability, tests and browser QA) follows separately under AIR-541, with independent code PR review, approved delivery, safe verification and the owner's UX acceptance. Acceptance of this ADR does not imply that the runtime fallback has shipped.
