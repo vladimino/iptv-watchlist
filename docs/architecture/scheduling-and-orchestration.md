@@ -463,7 +463,7 @@ sequenceDiagram
         Op-->>Owner: Refusal, writes 0
     else Eligible: durable sleep ahead, no live lease
         Op->>D1: One CAS: successor named, starting, receipt stored
-        Note over Op,D1: Same statement checks mode and lease revisions. Run, checkpoint, budget, cooldown and claim carried
+        Note over Op,D1: Same statement checks mode and lease revisions<br/>Run, checkpoint, budget, cooldown and claim carried
         Op->>CF: Create epg_runKey_series+1 (existing id attaches)
         alt Create unproven
             Cron->>D1: Read control, phase starting with the receipt

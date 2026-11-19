@@ -25,5 +25,5 @@ Scope: [AIR-540](https://trello.com/c/YAVfVHrs), [ADR 0176](../../adr/0176-contr
 ## Limits
 
 - Not established: that Cloudflare runs a new instance on the version deployed at its creation, that `CF_VERSION_METADATA` inside a Workflow step reports the instance's own version, and the platform's behaviour of an instance that wakes after a swap. The first live apply, under a separate owner GO, is the only check.
-- The Mermaid sequence in the architecture page was written for GitHub rendering; its rendered QA is a review step on the PR, not part of this evidence.
+- Mermaid visual QA (19 Nov 2026): the sequence in `docs/architecture/scheduling-and-orchestration.md` was rendered with mermaid 11.4.0 in headless Chromium at 1280 px and 390 px width. No parse error; 7 participants, 17 numbered steps, both `alt` blocks and both notes drawn; arrow directions and dashed returns match the text (dry_run read-only, one CAS, create, readback, the ensure branch, the old instance stopping). One note overflowed its box and was fixed with a line break. At 390 px the diagram scales to about a third of its width and is legible only by zoom. This is not GitHub's own renderer, so the final look on GitHub stays a reviewer check. No screenshot is stored.
 - No live `apply` ran; the tool has not been exercised on production.
