@@ -43,6 +43,10 @@ The serving retirement is complete and every remaining item of the AIR-79 audit 
 
 Maintained runbooks no longer carry an executable instruction for a removed tool: `discovery-ledger-install --apply`, the Film/Person baseline, cutover, capture, connector, loader, verifier and `film_person_open_handoff` pages are banners or retired stubs; the `d1-backfill` projector and seed sections, the e6 budget note and the TMDB TV correction acceptance step are marked historical. Three genuinely dead relative links were fixed (`docs/reference/domain/film-person.md` twice, `docs/reference/integrations/letterboxd-ratings.md`). The real recovery stays documented: owner-approved forward-fix (`open` to `held` and back), D1 Time Travel as an owner-approved recovery, and the authority-marker holds. Historical evidence and Accepted ADRs were not rewritten.
 
+## Correction to an earlier ledger
+
+The [slice 3 ledger](air-537-enrichment-projector-retirement-2026-11-19.md) says the projector's D1 side effects (`projection_state`, `projection_run`, Film/Person rows, `film_sync_state`) "are not written by anything now". That is exact only for the projector's own writes and for `projection_state` and `projection_run` (no Worker code writes them; the retained offline seed script `scripts/d1-projection-seed.mjs` can). The Film/Person rows and `film_sync_state` are written at `d1`/`open` by the fenced canonical adapters (for the clocks, `writeFilmFacts` and `SYNC_UPSERT` in `src/canonical-film-writers.js`, reached from the metadata-sync producer). Dated evidence is not rewritten; this note is the correction.
+
 ## Not changed, and no production action
 
 Production R2 and D1 data, schema and migrations, flags, bindings, Access, Scheduled Tasks, schedules, the Discovery Workflow and fast recovery cron, protected admin routes, recovery, sync, leases. Code rollback of this change is a revert of the PR and restores no data.
