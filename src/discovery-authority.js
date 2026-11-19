@@ -234,39 +234,53 @@ const PRIORITY_TABLE='discovery_epg_priority';
 // is judged at the write. `requested` is the programme id the caller wants to lease for; it is checked against the pointer here, not only in a pre-read: a published day
 // admits an id that equals the pointer (or no id), and an override admits only an id the pointer already names.
 const PRIORITY_DB_NOW_SQL="(CAST(strftime('%s','now') AS INTEGER)*1000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER))";
-const PRIORITY_PUBLISHED_SQL="EXISTS (SELECT 1 FROM published_epg_authority e, discovery_authority a WHERE e.id=1 AND a.id=1 AND e.madrid_run_key=? AND e.programme_run_id IS NOT NULL AND e.programme_run_id=a.published_programme_run_id AND (? IS NULL OR e.programme_run_id=?))";
-const PRIORITY_OVERRIDE_SQL="(p.override_day_key=? AND EXISTS (SELECT 1 FROM published_epg_authority e WHERE e.id=1 AND e.programme_run_id IS NOT NULL AND e.programme_run_id=?))";
-const PRIORITY_DAY_SQL="(("+PRIORITY_DB_NOW_SQL+">=? AND ("+PRIORITY_PUBLISHED_SQL+" OR "+PRIORITY_OVERRIDE_SQL+")) OR ("+PRIORITY_DB_NOW_SQL+"<? AND ("+PRIORITY_PUBLISHED_SQL+" OR "+PRIORITY_OVERRIDE_SQL+")))";
-const PRIORITY_ADMIT_SQL="EXISTS (SELECT 1 FROM discovery_epg_priority p WHERE p.id=1 AND p.state IN ('clear','paused') AND "+PRIORITY_DAY_SQL+")";
+// ADR 0175: with the certificate column `published_epg_authority.finalized_run_id` present, "published for the day" also needs the run certified complete
+// (`finalized_run_id = programme_run_id`). The SQL is built twice, once for each state of that column; `psql(gate)` picks by the introspected gate.
+const CERT_CLAUSE=' AND e.finalized_run_id=e.programme_run_id';
+function buildPrioritySql(cert){
+ const c=cert?CERT_CLAUSE:'';
+ const PUBLISHED="EXISTS (SELECT 1 FROM published_epg_authority e, discovery_authority a WHERE e.id=1 AND a.id=1 AND e.madrid_run_key=? AND e.programme_run_id IS NOT NULL AND e.programme_run_id=a.published_programme_run_id AND (? IS NULL OR e.programme_run_id=?)"+c+")";
+ const OVERRIDE="(p.override_day_key=? AND EXISTS (SELECT 1 FROM published_epg_authority e WHERE e.id=1 AND e.programme_run_id IS NOT NULL AND e.programme_run_id=?))";
+ const DAYSQL="(("+PRIORITY_DB_NOW_SQL+">=? AND ("+PUBLISHED+" OR "+OVERRIDE+")) OR ("+PRIORITY_DB_NOW_SQL+"<? AND ("+PUBLISHED+" OR "+OVERRIDE+")))";
+ const ADMIT="EXISTS (SELECT 1 FROM discovery_epg_priority p WHERE p.id=1 AND p.state IN ('clear','paused') AND "+DAYSQL+")";
+ const ANY="EXISTS (SELECT 1 FROM published_epg_authority e, discovery_authority a WHERE e.id=1 AND a.id=1 AND e.madrid_run_key=? AND e.programme_run_id IS NOT NULL AND e.programme_run_id=a.published_programme_run_id"+c+")";
+ const OWED="CASE WHEN "+PRIORITY_DB_NOW_SQL+">=? THEN ? ELSE ? END";
+ const HANDED="CASE WHEN "+PRIORITY_DB_NOW_SQL+">=? THEN "+ANY+" ELSE "+ANY+" END";
+ return {
+  ADMIT,
+  ARM:"UPDATE discovery_epg_priority SET state='paused', owed_day_key="+OWED+", override_day_key=NULL WHERE id=1 AND NOT ("+HANDED+" OR COALESCE(override_day_key="+OWED+",0)) AND NOT (state='paused' AND owed_day_key="+OWED+" AND override_day_key IS NULL)",
+  CLEAR:"UPDATE discovery_epg_priority SET state='clear', owed_day_key=NULL, override_day_key=NULL WHERE id=1 AND "+HANDED+" AND (state<>'clear' OR override_day_key IS NOT NULL)",
+ };
+}
+const PRIORITY_SQL={plain:buildPrioritySql(false),cert:buildPrioritySql(true)};
+const psql=gate=>gate?.certColumn===true?PRIORITY_SQL.cert:PRIORITY_SQL.plain;
 function priorityAdmitParams(bounds,requested){
  const asked=typeof requested==='string'&&requested!==''?requested:null;
  const day=key=>[key,asked,asked,key,asked];
  return [bounds.armAt,...day(bounds.today),bounds.armAt,...day(bounds.previous)];
 }
 // Admission predicate for a statement. A row that is missing or malformed matches nothing. `holder` is the lease holder's own write (an in-flight chunk finishes).
+// ADR 0175: a pause table whose certificate column could not be introspected (`certColumn` null) is unreadable evidence: nothing is admitted.
 function priorityGuard(gate,bounds,requested,holder){
  if(!gate?.priorityTable)return ['',[]];
- if(holder?.id)return [' AND (EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND lease_id=? AND expires_at>?) OR '+PRIORITY_ADMIT_SQL+')',[holder.id,nowMs(),...priorityAdmitParams(bounds,requested)]];
- return [' AND '+PRIORITY_ADMIT_SQL,priorityAdmitParams(bounds,requested)];
+ if(gate.certColumn!==true&&gate.certColumn!==false)return [' AND 0',[]];
+ const admit=psql(gate).ADMIT;
+ if(holder?.id)return [' AND (EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND lease_id=? AND expires_at>?) OR '+admit+')',[holder.id,nowMs(),...priorityAdmitParams(bounds,requested)]];
+ return [' AND '+admit,priorityAdmitParams(bounds,requested)];
 }
-// The row arm and the clear. Both carry their own predicate (the same day decision, without a requested id), so they write only where it still holds.
-const PRIORITY_PUBLISHED_ANY_SQL="EXISTS (SELECT 1 FROM published_epg_authority e, discovery_authority a WHERE e.id=1 AND a.id=1 AND e.madrid_run_key=? AND e.programme_run_id IS NOT NULL AND e.programme_run_id=a.published_programme_run_id)";
-const PRIORITY_OWED_SQL="CASE WHEN "+PRIORITY_DB_NOW_SQL+">=? THEN ? ELSE ? END";
-const PRIORITY_HANDED_OFF_SQL="CASE WHEN "+PRIORITY_DB_NOW_SQL+">=? THEN "+PRIORITY_PUBLISHED_ANY_SQL+" ELSE "+PRIORITY_PUBLISHED_ANY_SQL+" END";
-const PRIORITY_ARM_SQL="UPDATE discovery_epg_priority SET state='paused', owed_day_key="+PRIORITY_OWED_SQL+", override_day_key=NULL WHERE id=1 AND NOT ("+PRIORITY_HANDED_OFF_SQL+" OR COALESCE(override_day_key="+PRIORITY_OWED_SQL+",0)) AND NOT (state='paused' AND owed_day_key="+PRIORITY_OWED_SQL+" AND override_day_key IS NULL)";
-const PRIORITY_CLEAR_SQL="UPDATE discovery_epg_priority SET state='clear', owed_day_key=NULL, override_day_key=NULL WHERE id=1 AND "+PRIORITY_HANDED_OFF_SQL+" AND (state<>'clear' OR override_day_key IS NOT NULL)";
-function priorityRowStatements(write,bounds){
+function priorityRowStatements(write,bounds,gate){
  const owed=[bounds.armAt,bounds.today,bounds.previous],handed=[bounds.armAt,bounds.today,bounds.previous];
- if(write?.state==='paused')return [[PRIORITY_ARM_SQL,[...owed,...handed,...owed,...owed]]];
- if(write?.state==='clear')return [[PRIORITY_CLEAR_SQL,handed]];
+ if(write?.state==='paused')return [[psql(gate).ARM,[...owed,...handed,...owed,...owed]]];
+ if(write?.state==='clear')return [[psql(gate).CLEAR,handed]];
  return [];
 }
 function priorityError(info){const error=failed('discovery_epg_priority');error.priority=info;return error;}
-async function readPriorityFacts(env,nowMs_,context){
+async function readPriorityFacts(env,nowMs_,context,gate){
  const db=database(env);
  const row=await one(db,'SELECT state, owed_day_key AS owedDayKey, override_day_key AS overrideDayKey FROM discovery_epg_priority WHERE id=1');
- const published=await one(db,'SELECT e.madrid_run_key AS publishedDayKey, e.programme_run_id AS publishedProgrammeRunId, a.published_programme_run_id AS handoffProgrammeRunId FROM published_epg_authority e, discovery_authority a WHERE e.id=1 AND a.id=1');
- return {tablePresent:true,action:'acquire',role:context.role??null,nowMs:nowMs_,row:row||null,...(published||{}),requestedProgrammeRunId:context.programmeRunId??null};
+ const cert=gate?.certColumn===true;
+ const published=await one(db,'SELECT e.madrid_run_key AS publishedDayKey, e.programme_run_id AS publishedProgrammeRunId, a.published_programme_run_id AS handoffProgrammeRunId'+(cert?', e.finalized_run_id AS finalizedRunId':'')+' FROM published_epg_authority e, discovery_authority a WHERE e.id=1 AND a.id=1');
+ return {tablePresent:true,certRequired:cert,action:'acquire',role:context.role??null,nowMs:nowMs_,row:row||null,...(published||{}),requestedProgrammeRunId:context.programmeRunId??null};
 }
 // Who holds what, for the answer only (never for a decision): the kind and the expiry. No Film id, no SQL, no continuation body.
 async function readPriorityHold(env,gate,now){
@@ -282,14 +296,14 @@ async function readPriorityHold(env,gate,now){
 }
 async function priorityBusy(env,gate,decision,now){
  const hold=await readPriorityHold(env,gate,now);
- return {kind:'epg_priority',expiresAt:null,owedDayKey:decision.owedDayKey,nextCatchUpAt:decision.nextCatchUpAt,pollMs:DISCOVERY_EPG_PRIORITY_POLL_MS,...hold};
+ return {kind:'epg_priority',expiresAt:null,owedDayKey:decision.owedDayKey,nextCatchUpAt:decision.nextCatchUpAt,pollMs:DISCOVERY_EPG_PRIORITY_POLL_MS,...(decision.detail?{detail:decision.detail}:{}),...hold};
 }
 // A lease-free writer whose batch the pause refused learns why by re-asking the pure contract: a soft, typed refusal (the caller waits);
 // anything else stays the ordinary fence failure.
 async function throwIfPriorityPaused(env,gate,error,context={}){
  if(!gate?.priorityTable)return;
  let decision;
- try{decision=discoveryAdmission(await readPriorityFacts(env,nowMs(),context));}catch{return;}
+ try{decision=discoveryAdmission(await readPriorityFacts(env,nowMs(),context,gate));}catch{return;}
  if(decision.reason!=='epg_priority')return;
  throw Object.assign(priorityError(await priorityBusy(env,gate,decision,nowMs())),{cause:error});
 }
@@ -306,8 +320,8 @@ export async function readDiscoveryGates(env,now=nowMs()){
  }
  if(gate.priorityTable){
   try{
-   const decision=discoveryAdmission(await readPriorityFacts(env,now,{role:null,programmeRunId:gate.publishedProgrammeRunId??null}));
-   out.priority={present:true,paused:decision.reason==='epg_priority',reason:decision.reason,nextCatchUpAt:decision.nextCatchUpAt??null,unreadable:decision.admit!==true&&decision.reason!=='epg_priority'};
+   const decision=discoveryAdmission(await readPriorityFacts(env,now,{role:null,programmeRunId:gate.publishedProgrammeRunId??null},gate));
+   out.priority={present:true,paused:decision.reason==='epg_priority',reason:decision.reason,...(decision.detail?{detail:decision.detail}:{}),nextCatchUpAt:decision.nextCatchUpAt??null,unreadable:decision.admit!==true&&decision.reason!=='epg_priority'};
   }catch{out.priority={present:true,paused:null,reason:'unknown',nextCatchUpAt:null};}
  }
  return out;
@@ -324,7 +338,8 @@ export async function readAuthority(env){
  }
  // The tables are inventoried first, so that no stand-in path below can serve R2 over a partly installed domain, whatever schema_contract says.
  let names;
- try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'discovery\\_%' ESCAPE '\\' OR name='projector_window')")).map(row=>row.name);}
+ // ADR 0175: the certificate column is detected in the same round trip (the stored CREATE text of the table names it after the ALTER), so the gate read costs no extra D1 call.
+ try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'discovery\\_%' ESCAPE '\\' OR name='projector_window') UNION ALL SELECT 'col:finalized_run_id' FROM sqlite_master WHERE type='table' AND name='published_epg_authority' AND sql LIKE '%finalized_run_id%'")).map(row=>row.name);}
  catch(error){throw failed('discovery_unavailable',error);}
  const installed=TABLES.every(name=>names.includes(name));
  if(!installed&&names.some(name=>name.startsWith('discovery_')))throw failed('discovery_unavailable');
@@ -352,7 +367,10 @@ export async function readAuthority(env){
  if(!row||row.mode!=='d1'||row.cutover!=='open')throw failed('discovery_unavailable');
  if(!transfer||!['idle','loading','committed'].includes(transfer.state))throw failed('discovery_unavailable');
  const ready=true,held=false;
- return {ready,held,tables:true,windowTable:names.includes('projector_window'),priorityTable:names.includes(PRIORITY_TABLE),mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state,transferBatches:Number(transfer.batches)||0};
+ // ADR 0175: `true` the certificate column is present, `false` it is verified absent (today's behaviour). An unreadable inventory is the existing `discovery_unavailable` above.
+ const priorityTable=names.includes(PRIORITY_TABLE);
+ const certColumn=priorityTable?names.includes('col:finalized_run_id'):false;
+ return {ready,held,tables:true,windowTable:names.includes('projector_window'),priorityTable,certColumn,mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state,transferBatches:Number(transfer.batches)||0};
 }
 
 function assertOpen(gate){
@@ -1750,32 +1768,34 @@ export async function acquireLease(env,context={}){
  const refusal=gate.windowTable?[WINDOW_ACTIVE_SQL,[nowMs()]]:['',[]];
  // ADR 0135: only the Discovery side is paused. `role: 'epg'` (the publication, `sealStep` included) is exempt, and a caller that omits `role` is Discovery.
  const paused=gate.priorityTable&&context.role!=='epg';
+ // ADR 0175: an unreadable certificate-column introspection is unreadable evidence for Discovery: fail closed, write nothing (the EPG role is exempt above).
+ if(paused&&gate.certColumn!==true&&gate.certColumn!==false)throw failed('discovery_epg_priority_evidence');
  let decision=null,priority=['',[]],rowStatements=[],bounds=null;
  if(paused){
   const now=nowMs();
   bounds=admissionBounds(now);
-  const facts=await readPriorityFacts(env,now,context);
+  const facts=await readPriorityFacts(env,now,context,gate);
   decision=discoveryAdmission(facts);
   // An unreadable row, table or id is fail-closed and writes nothing. A foreign programme id is the existing hard conflict.
   if(decision.reason==='stale_generation')return {handled:true,lease:null,busy:{kind:'generation_mismatch',expiresAt:null}};
   if(!decision.admit&&decision.reason!=='epg_priority')throw failed('discovery_epg_priority_evidence');
   priority=priorityGuard(gate,bounds,context.programmeRunId,null);
-  rowStatements=priorityRowStatements(pauseRowWrite(facts),bounds);
+  rowStatements=priorityRowStatements(pauseRowWrite(facts),bounds,gate);
   // The refused first read is not the end of it: the arm below must still run when the row is `clear`, so the batch always carries it.
   // The pure read is a snapshot. The clock can cross the arming instant before the write, so the batch always carries the arm too: its own WHERE (the same day decision on the database clock) writes only where the pause holds.
-  if(!rowStatements.some(([sql])=>sql===PRIORITY_ARM_SQL))rowStatements=[...rowStatements,...priorityRowStatements({state:'paused'},bounds)];
+  if(!rowStatements.some(([sql])=>sql===psql(gate).ARM))rowStatements=[...rowStatements,...priorityRowStatements({state:'paused'},bounds,gate)];
  }
  // The programme fence. While the pause names itself, the previous id waits as `epg_priority` (ADR 0135 T34), so the mismatch answer is only the unpaused one.
  if(gate.programmeRunId&&context.programmeRunId&&gate.programmeRunId!==context.programmeRunId&&!(paused&&decision.reason==='epg_priority'))return {handled:true,lease:null,busy:{kind:'generation_mismatch',expiresAt:null}};
  const holder=gate.priorityTable?', holder_kind=?':'';
  await commit(db,[['UPDATE discovery_lease SET lease_id=?, expires_at=?, programme_run_id=?'+holder+' WHERE id=1 AND (lease_id IS NULL OR expires_at<=?)'+refusal[0]+priority[0],[id,expiresAt,context.programmeRunId??gate.programmeRunId??null,...(gate.priorityTable?[context.role==='epg'?'epg':'discovery']:[]),nowMs(),...refusal[1],...priority[1]]],...rowStatements]);
- const row=await one(db,'SELECT lease_id, expires_at, programme_run_id FROM discovery_lease WHERE id=1');
+ const row=await one(db,'SELECT lease_id, expires_at, programme_run_id'+(gate.priorityTable?', holder_kind':'')+' FROM discovery_lease WHERE id=1');
  if(row?.lease_id!==id){
   // ADR 0135: when the pause is why the lease was not taken, it names itself, ahead of the projector window and the holder.
   if(paused){
    // The pre-read is a snapshot, whatever it said: the pointer and the pin can move before the write, so the answer is always read again. `epg_priority` survives only while it is still true.
    let again;
-   try{again=discoveryAdmission(await readPriorityFacts(env,nowMs(),context));}catch{again=null;}
+   try{again=discoveryAdmission(await readPriorityFacts(env,nowMs(),context,gate));}catch{again=null;}
    // A hard conflict is never softened to contention: a request for a programme the pointer no longer names is the stale-generation fence (ADR 0135 decision 6), also under an
    // override, and unreadable evidence fails closed. Both are decided before `lease_held` / `lost_race`.
    if(again==null)throw failed('discovery_epg_priority_evidence');
@@ -1792,7 +1812,7 @@ export async function acquireLease(env,context={}){
   // expired or released (the holder finished between the failed update and this read) is `lost_race`, with no expiry.
   const expiresAt=Number(row?.expires_at);
   const live=!!row?.lease_id&&Number.isFinite(expiresAt)&&expiresAt>nowMs();
-  return {handled:true,lease:null,busy:{kind:live?'lease_held':'lost_race',expiresAt:live?expiresAt:null}};
+  return {handled:true,lease:null,busy:{kind:live?'lease_held':'lost_race',expiresAt:live?expiresAt:null,holderKind:live?(row?.holder_kind??null):null}};
  }
  return {handled:true,lease:{id,expiresAt:Number(row.expires_at)}};
 }

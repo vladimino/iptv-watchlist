@@ -751,7 +751,7 @@ assert.equal(identityReceipt.body.record.receipt.state,'applied');
 const identityReplay=await call('/api/admin/discovery-recovery/identity-correct',{method:'POST',headers:ownerHeaders('discovery_identity_correct'),body:JSON.stringify({confirmation:identityConfirmed.body.confirmation})});
 assert.equal(identityReplay.body.replayed,true,JSON.stringify(identityReplay.body));
 // ADR 0178 / AIR-132: revoke the saved correction above through the real routes. The harness database is at schema 11, so the
-// rebuild DDL of migration 0026 is applied as written, without its version guard.
+// rebuild DDL of migration 0027 is applied as written, without its version guard.
 const dbRows=()=>JSON.stringify([httpDb.db.sql('SELECT * FROM discovery_decision ORDER BY observation_key'),httpDb.db.sql('SELECT * FROM discovery_decision_history ORDER BY observation_key, revision'),httpDb.db.sql('SELECT * FROM discovery_intent ORDER BY idempotency_key'),httpDb.db.sql('SELECT * FROM discovery_admission ORDER BY film_id')]);
 const revokePath='/api/admin/discovery-recovery/revoke-preview?key='+encodeURIComponent(identityItem.key)+'&requestId=identity-http-00001';
 const rowsBeforePreview=dbRows();
@@ -774,11 +774,11 @@ assert.equal((await revokeConfirm({...revokeBody,accepted:false})).body.refusal,
 assert.equal((await revokeConfirm({...revokeBody,basis:''})).body.reason,'basis_required');
 assert.equal((await revokeConfirm({...revokeBody,pin:'D1.'+'0'.repeat(32)})).body.refusal,'stale_pin');
 assert.equal((await revokeConfirm({...revokeBody,idempotencyKey:'identity-http-00001'})).status,400,'the revoke key must be fresh');
-assert.equal((await revokeConfirm(revokeBody)).body.refusal,'revoke_schema_not_ready','before 0026 the new kind cannot be stored');
+assert.equal((await revokeConfirm(revokeBody)).body.refusal,'revoke_schema_not_ready','before 0027 the new kind cannot be stored');
 assert.equal(dbRows(),rowsBeforePreview,'a refused confirm writes nothing');
 {
- const ddl=fs.readFileSync('migrations/0026_discovery_intent_identity_revoke.sql','utf8').split('\n');
- const from=ddl.findIndex(line=>line.startsWith('CREATE TABLE discovery_intent_v26')),to=ddl.findIndex(line=>line.startsWith('ALTER TABLE discovery_intent_v26'));
+ const ddl=fs.readFileSync('migrations/0027_discovery_intent_identity_revoke.sql','utf8').split('\n');
+ const from=ddl.findIndex(line=>line.startsWith('CREATE TABLE discovery_intent_v27')),to=ddl.findIndex(line=>line.startsWith('ALTER TABLE discovery_intent_v27'));
  assert.ok(from>0&&to>from);
  const applied=sqliteSync(['-bail',httpDb.file],{input:ddl.slice(from,to+1).join('\n'),encoding:'utf8'});
  assert.equal(applied.status,0,applied.stderr);

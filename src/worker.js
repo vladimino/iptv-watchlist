@@ -977,7 +977,11 @@ async function persistWatchlist(env,run,report){
 }
 async function persistScan(env,run,report){
  // A complete watchlist is one observation of every listed film (ADR-0024).
- if(!(report.films?.length===report.watchlistCount&&run.watchlistObservedAt))return 'ok';
+ // ADR 0175 decision 2: what the scan did is recorded next to the completion, so a skipped scan is visible and is not read as an applied one.
+ if(!(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)){
+  run.scanOutcome=report.films?.length===report.watchlistCount?'skipped_no_observation':'skipped_incomplete_watchlist';
+  return 'ok';
+ }
  const scanId=String(run.runId||'');
  const films=report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}));
  let writerOpen=false;
@@ -986,6 +990,7 @@ async function persistScan(env,run,report){
   delete run.ratedAdmissionScan;
   delete run.ratedAdmissionIntent;
   await LetterboxdFacts.applyWatchlistScan(env,{scanId,observedAt:run.watchlistObservedAt,films});
+  run.scanOutcome='facts_only';
   return 'ok';
  }
  if(!run.ratedAdmissionScan||run.ratedAdmissionScan.scanId!==scanId){
@@ -1026,6 +1031,7 @@ async function persistScan(env,run,report){
   throw error;
  }
  if(run.ratedAdmissionScan.cursor<queue.length)return 'continue';
+ run.scanOutcome='applied';
  delete run.ratedAdmissionScan;
  delete run.ratedAdmissionIntent;
  await saveJSON(env,'sync.json',run);
@@ -1713,12 +1719,21 @@ function sealBusyResponse(run,taken,now=Date.now()){
   // ADR 0103: the window's own absolute deadline, not the lease TTL cap, and its own busy kind. It is a wait for the executor; the
   // external Task contract waits only for `lease_held` within about 93 s, so for it this is a stop that it reports, never a failure.
   const until=Math.max(expiresAt+SEAL_BUSY_MARGIN_MS,now+1000);
-  return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:'projector_window',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000)});
+  return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:'projector_window',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000),...sealBusyTelemetry(run,taken,'projector_window',expiresAt,until,now)});
  }
  const held=kind==='lease_held'&&expiresAt!==null;
  const bounded=held?Math.min(expiresAt,now+DiscoveryAuthority.LEASE_TTL_MS)+SEAL_BUSY_MARGIN_MS:now+SEAL_BUSY_LOST_RACE_MS;
  const until=Math.max(bounded,now+1000);
- return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:held?'lease_held':'lost_race',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000)});
+ return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:held?'lease_held':'lost_race',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000),...sealBusyTelemetry(run,taken,held?'lease_held':'lost_race',expiresAt,until,now)});
+}
+// ADR 0175 decision 8. Who held the lease, until when, the scheduled retry delay and in which seal phase: kinds and times only, no Film, id list, SQL or payload.
+// `holderKind` tells an EPG-held lease from a Discovery-held one; a soft wait is not a failure and does not count against the budget.
+function sealBusyTelemetry(run,taken,busyKind,expiresAt,until,now){
+ const holderKind=taken?.busy?.holderKind??taken?.busy?.ownerKind??null;
+ // `scheduledWaitMs` is the PLANNED retry delay (`nextCatchUpAt` minus now), not the measured time spent blocked: it must not be read as observed contention latency.
+ const fields={holderKind,holdExpiry:expiresAt?new Date(expiresAt).toISOString():null,scheduledWaitMs:Math.max(0,until-now),sealPhase:run.seal?.phase??null};
+ try{epgPhase(run.runId,'seal_busy','exit',{busyKind,...fields});}catch{}
+ return fields;
 }
 async function sealedPublishAvailable(env){
  if(typeof DiscoveryAuthority==='undefined'||typeof PublishedEpg==='undefined')return false;
@@ -1946,6 +1961,27 @@ async function sealFinalizeStep(env,run,deadline=Infinity){
  return sealResponse(run,{},{seal:{persisted:true}});
 }
 // `queue`: the prediction queue refresh, then the run is complete. A failed refresh is recorded and does not hold the run.
+// ADR 0175 decision 4. One fenced D1 batch writes the run's completion certificate and clears the EPG-priority pause. It runs under the step lease the seal step holds
+// (`env.epgStep`, `env.epgFence`); with no lease it writes nothing. The Madrid day is the run's frozen day (`publicationRunKey`), as for the pointer. An absent
+// certificate column certifies nothing (today's behaviour). Never throws: the outcome is `certified`, `absent`, `skipped` (no lease, no pause table or no day) or `owed`.
+async function certifyCompletedRun(env,run){
+ try{
+  if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.certifyRun!=='function')return 'skipped';
+  if(!env.epgStep||env.epgFence==null)return 'skipped';
+  const day=await publicationRunKey(env,run,run.runId);
+  if(!day)return 'skipped';
+  await epgStepGuard(env);
+  const now=Date.now();
+  const margin=typeof EpgOrchestration!=='undefined'?EpgOrchestration.BOUNDARY_MARGIN_MS:0;
+  const out=await PublishedEpg.certifyRun(env,{programmeRunId:run.runId,madridRunKey:day,step:env.epgStep,epgFence:env.epgFence,leaseBound:new Date(now+margin).toISOString(),now});
+  const outcome=out.column==='absent'?'absent':out.certified?'certified':'owed';
+  try{epgPhase(run.runId,'seal_certify','exit',{outcome});}catch{}
+  return outcome;
+ }catch(error){
+  try{epgPhase(run.runId,'seal_certify','error',{code:String(error?.code||error?.message||'error').slice(0,60)});}catch{}
+  return 'owed';
+ }
+}
 async function sealQueueStep(env,run,deadline=Infinity){
  const payload=await sealPayload(env,run);
  const report=payload.report;
@@ -1956,12 +1992,15 @@ async function sealQueueStep(env,run,deadline=Infinity){
  await prepareEpgCompletion(env,run,report);
  run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;delete run.seal;
  await saveJSON(env,'sync.json',run);
+ // ADR 0175 decision 4: the certificate comes after the durable `complete` save and before the event flushes below. A failure never stops the flushes; the
+ // run stays certificate-owed and `EpgOrchestration.certifyComplete` repairs it from the hourly `ensure`.
+ const certificate=await certifyCompletedRun(env,run);
  await flushEpgEvent(env,run);
  await flushWatchlistEvent(env,run);
  if(run.ratingsPipeline==='separate'&&run.removalRefs&&await watchlistEventStored(env,run)&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
  try{await env.BUCKET.delete(sealPayloadKey(run.runId));}catch{}
  try{await env.BUCKET.delete(sealPublicationKey(run.runId));}catch{}
- return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsStorage:run.ratingsStorage}:{}),...(run.sealDegraded?.length?{degraded:run.sealDegraded}:{})};
+ return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,...(certificate?{certificate}:{}),...(run.scanOutcome?{scanOutcome:run.scanOutcome}:{}),ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsStorage:run.ratingsStorage}:{}),...(run.sealDegraded?.length?{degraded:run.sealDegraded}:{})};
 }
 // One bounded step of the staged publication. It starts no unit of work after SEAL_REQUEST_BUDGET_MS from the request's entry and answers
 // `nextAction: continue` until the run is complete.

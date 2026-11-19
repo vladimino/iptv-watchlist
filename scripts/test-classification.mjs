@@ -412,7 +412,7 @@ export const FILES={
  "discovery-identity-revoke.mjs": {
   "suite": "core"
  },
- "discovery-intent-migration-0026.mjs": {
+ "discovery-intent-migration-0027.mjs": {
   "suite": "core"
  },
  "discovery-authority.mjs": {
@@ -638,6 +638,9 @@ export const FILES={
   "suite": "core"
  },
  "epg-repository.mjs": {
+  "suite": "core"
+ },
+ "epg-run-certificate.mjs": {
   "suite": "core"
  },
  "epg-slot-uniqueness.mjs": {
