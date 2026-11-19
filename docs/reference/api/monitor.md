@@ -12,7 +12,7 @@ A pure read of the stored monitor result: nothing is evaluated, written or sent.
 | `stored` | Whether a snapshot document exists |
 | `heartbeatAt`, `heartbeatAgeMs` | Time of the last saved snapshot and its age at read time. An external dead-man check can poll this |
 | `overall` | The worst stream state: `healthy`, `waiting`, `delayed`, `degraded` or `needs_owner` |
-| `streams[]` | `epg`, `discovery`, `ratings`, `predictions`, each with `state`, a few non-private `facts` and its issue keys |
+| `streams[]` | `epg`, `discovery`, `ratings`, `predictions` and `catalog_posters` (see [Catalog poster stream](#catalog-poster-stream)), each with `state`, a few non-private `facts` and its issue keys |
 | `openIssues[]` | Alertable issues with `key`, `severity`, `firstSeenAt`, `sendCount` |
 | `outbox`, `outboxOldestAt` | Number of undelivered notifications and the queue time of the oldest; a growing value means the channel is failing |
 | `cancelledUndelivered` | Alerts cancelled because their issue cleared before they were ever delivered |
@@ -33,7 +33,7 @@ A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-m
 
 ## Issue keys
 
-`epg_stale`, `epg_failed`, `epg_authority`, `epg_resource_limit`, `discovery_stalled`, `discovery_executor_stalled`, `discovery_generation_mismatch`, `discovery_quarantined`, `discovery_resource_limit`, `ratings_stalled`, `ratings_quarantined`, `ratings_failed_permanent`, `ratings_switch_open`, `ratings_resource_limit`, `predictions_stale`, `predictions_backlog_growing`, and `<stream>_unreadable` when a source cannot be read.
+`epg_stale`, `epg_failed`, `epg_authority`, `epg_resource_limit`, `discovery_stalled`, `discovery_executor_stalled`, `discovery_generation_mismatch`, `discovery_quarantined`, `discovery_resource_limit`, `ratings_stalled`, `ratings_quarantined`, `ratings_failed_permanent`, `ratings_switch_open`, `ratings_resource_limit`, `predictions_stale`, `predictions_backlog_growing`, `catalog_posters_unknown`, `catalog_posters_lost`, `catalog_posters_stalled`, `catalog_posters_overdue` (only once degraded), `catalog_posters_failed`, and `<stream>_unreadable` when a source cannot be read.
 
 ## Thresholds
 
@@ -48,3 +48,28 @@ Configured only through the Worker bindings `MONITOR_TELEGRAM_BOT_TOKEN` (a Work
 A delivery counts only when the HTTP status is successful **and** the body says `ok: true`. Every other answer leaves the message queued and uncounted, with a fixed reason in `lastDeliveryFailure` (`telegram_not_ok`, `http_<status>`, `malformed_response`, `timeout`, `network`, `rate_limited`, `config_invalid`, `transport_invalid`); the AIR-349 budget (five attempts per tick, stop after two consecutive failures, rotation to the tail) is unchanged. On a 429 the answer's `retry_after` (or the `Retry-After` header; one minute when absent; capped at one hour) is stored as `holdUntil`: ticks before it make no attempt, `POST /api/monitor/test` answers `rate_limited`, and nothing sleeps. Telegram has no idempotency key, so `Ref` helps a reader but cannot deduplicate; a crash after Telegram accepted a message and before the state commit can repeat it. Exactly-once is not claimed.
 
 The status adds `holdUntil` and `lastDeliveryFailure` (`{at, reason}`) next to `outbox`, `outboxOldestAt` and `cancelledUndelivered`.
+
+## Catalog poster stream
+
+`catalog_posters` judges the automatic weekly poster retry ([ADR 0179](../../adr/0179-weekly-automatic-catalog-poster-retry.md), [operating procedure](../../runbooks/catalog-poster-hydration.md#weekly-automatic-retry)). It is evaluated by the same hourly `Monitor.run` and reuses the alert deduplication, cooldown, recovery and transport of the other streams. The stream is absent from the snapshot only when the poster module is not part of the running Worker; when its facts cannot be read the stream reads `unreadable` like any other.
+
+**Fact source.** One read of the poster checkpoint `epg/catalog-poster-weekly.json` plus the Monitor's own state document. No TMDB request, no domain write, no repair. The checkpoint is the single source that the Monitor, the footer source `posters` and the Events Log type `catalog_posters` all derive from, so they cannot disagree.
+
+**Two write-once markers** in `monitor/state.json`, written only by `Monitor.run` (never by a GET) and never cleared: `catalogPostersBaselineAt` is set the first time the stream is evaluated and no checkpoint exists; `catalogPostersSeenAt` is set the first time a **valid** checkpoint is read. They make the bootstrap grace a one-time allowance: after `catalogPostersSeenAt` an absent checkpoint is `lost`, not a new grace. If the Monitor's own state document is lost as well, the stream falls back to bootstrap grace once (an accepted residual risk).
+
+**Predicates.** The first true row wins. `now` is the Monitor clock, `W` the start of the current week (Sunday 00:00 UTC), `D` the `nextRetryAt` of a pending run. The poster cron fires daily at 03:24 UTC; the sweep starts on the first firing of a new week.
+
+| Order | Domain state | Predicate | Monitor status |
+| --- | --- | --- | --- |
+| 1 | `unknown` | checkpoint unreadable, corrupt, wrong `schemaVersion` or incomplete for its status; or the Monitor is off | `degraded` |
+| 1a | `lost` | no checkpoint and `catalogPostersSeenAt` is set | `degraded` |
+| 2 | `failed` | `status=failed`, or `retryAttempts` at the cap of 6, or `rateLimitStreak` of 2 or more | `needs_owner` |
+| 3 | `stalled` | the outbox holds 8 undelivered entries, or an undelivered entry is older than 52 h; or `status=running` and `now - lastAttemptAt` is above 2 h; or `status=pending` and `now > D + 26 h` | `degraded` |
+| 4 | `grace` | no checkpoint, no `SeenAt`, and `now` is not later than the first 03:24 UTC after the baseline plus 26 h | `healthy` |
+| 5 | `overdue` | no checkpoint after that grace; or the checkpoint's `weekStart` is older than `W` and `now > W + 03:24 UTC + 26 h` | `delayed`, and `degraded` once 2 h more have passed |
+| 6 | `waiting` | `status=pending` (retry scheduled) or `status=running` (in progress), not stalled | `waiting` |
+| 7 | `healthy_idle` | `status=completed` with a receipt for the current week, or for the previous week before the current week's grace expires; includes zero due films and normal 90-day holds | `healthy` |
+
+Only `degraded` and `needs_owner` raise an issue (`catalog_posters_<state>`); `waiting`, `delayed`, `grace` and `healthy_idle` never alert. An empty due set, a no-poster verdict and a legitimate retry wait are not faults. The stream `facts` carry `state`, `detail`, `freshnessAt` (the newest of `lastScheduledAt`, `lastAttemptAt`, `lastCompletedAt`) and `nextExpectedAt`.
+
+**Detectability limit.** An idle daily firing writes nothing and is therefore not detectable. The Sunday sweep is monitored from its persisted weekly receipt, and daily firings only when an unfinished run was due. The constants (26 h grace, 2 h, 52 h, retry cap 6, outbox 8) live in the implementation and are measured on the first natural weeks, not proven. The stream is implemented and tested offline only; the cron it judges is not activated by this documentation.

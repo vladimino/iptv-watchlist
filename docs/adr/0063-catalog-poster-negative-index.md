@@ -7,6 +7,7 @@
 **Related work:** [AIR-302](https://trello.com/c/9rqjCMhy); [AIR-283](https://trello.com/c/s35GwqRz); [ADR 0020](0020-owner-triggered-catalog-poster-hydration.md); [ADR 0048](0048-permanent-catalog-poster-maintenance-route.md)  
 **Supersedes:** [ADR 0020](0020-owner-triggered-catalog-poster-hydration.md) in part: the completion invariant that a cursor followed until `done` settles every verified record without a poster. [ADR 0048](0048-permanent-catalog-poster-maintenance-route.md) in part: terminal `no_poster_on_tmdb` and `tmdb_id_mismatch` answers are retained, and the ordinary queue no longer revisits them  
 **Superseded by:** None
+**Extended by:** [ADR 0179](0179-weekly-automatic-catalog-poster-retry.md) (Accepted 2026-11-19), for the automated paths only: decision 2 (negative verdicts are stored only from an explicit owner `POST`) does not apply to the admission-time seed and the weekly handler's own TMDB answers. The rejection of a cron for plain record expiry is not reversed. Manual behaviour is unchanged.  
 
 ## Context
 

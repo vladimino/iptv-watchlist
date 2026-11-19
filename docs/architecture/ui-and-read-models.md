@@ -66,7 +66,7 @@ Contracts: [admin read model](../reference/domain/admin-read-contract.md), [rout
 
 The programme page, the film screen and the expanded events screen share one status footer in the document flow. The same footer is mounted on the six admin sections (`/admin`, `/admin/health`, `/admin/letterboxd`, `/admin/limb`, `/admin/identity` and `/admin/posters`) and is filled only by `GET /api/enrichment/footer/status`. The block of `public/app.js` and `public/status-footer.js` that reads and paints it is kept byte-identical (a test compares the two copies, and the two copies of the markup), so the pages cannot drift apart. «Показать детали» stays the disclosure; «Админка» stays the link after it.
 
-**Compact footer.** The footer answers four questions instead of listing thirty-three technical fields: what is in my collection, how useful are the recommendations, how fresh is the programme, and does the automation work. It shows five indicators — **Коллекция** (unique films), **Прогнозы** (current predictions over the local database), **Новые 4.0+** (new films, with the 4.5+ share), **EPG** (the last confirmed update) and **Автоматизация** (an aggregate of the five integrations) — and, behind «Показать детали», exactly four groups of eighteen rows:
+**Compact footer.** The footer answers four questions instead of listing thirty-three technical fields: what is in my collection, how useful are the recommendations, how fresh is the programme, and does the automation work. It shows five indicators — **Коллекция** (unique films), **Прогнозы** (current predictions over the local database), **Новые 4.0+** (new films, with the 4.5+ share), **EPG** (the last confirmed update) and **Автоматизация** (an aggregate of the six integrations, the sixth being the poster retry described below) — and, behind «Показать детали», exactly four groups of eighteen rows:
 
 | Group | Rows | Meaning |
 | --- | --- | --- |
@@ -109,3 +109,19 @@ On an admin page the events link opens `/events`. On the programme page and the 
 **Important side-effect boundary:** do not assume all HTTP GET requests are pure reads. Some existing view/event handlers can initialize or recover persisted state; consult the [deployment runbook](../runbooks/deployment.md) and [GET side-effect tests](../../tests/get-side-effects.mjs) before operational probing.
 
 **Authority:** the read cutovers are done per domain; which store each reader uses is in [authority per domain](persistence-and-migration.md#authority-per-domain). The published programme and watchlist are read from D1 at the pinned generation; the R2 view index is a base that the Worker overlays with D1 predictions and ratings on read.
+
+#### Poster retry in the footer and the Events Log
+
+The footer integrations gain a sixth source, `posters`, and the events feed a type `catalog_posters` ([ADR 0179](../adr/0179-weekly-automatic-catalog-poster-retry.md)). Both read the same R2 checkpoint and the same projection as the Monitor, so the footer line, the Monitor status and the last weekly event agree. The footer stays a pure, public read with one extra object read; the admin pages mount the same footer. The source feeds the aggregate **Автоматизация** indicator and the details disclosure only; the five top-level indicators are unchanged. States: `healthy`, `waiting`, `degraded`, `failed`, `unknown` (unknown is neutral, never green); the field contract is in the [enrichment reference](../reference/api/enrichment.md#footer-source-for-the-weekly-poster-retry).
+
+```mermaid
+flowchart LR
+    cp[("R2 checkpoint<br/>catalog-poster-weekly.json")]
+    proj["Poster projection<br/>read-only"]
+    footerApi["GET /api/enrichment/footer/status<br/>integrations.sources: six"]
+    eventsApi["GET /api/events<br/>type catalog_posters"]
+    footerUi["Footer: Автоматизация and details"]
+    eventsUi["Events screen: card, filter, detail"]
+    cp --> proj --> footerApi --> footerUi
+    cp -->|"delivered event objects"| eventsApi --> eventsUi
+```

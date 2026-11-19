@@ -18,7 +18,7 @@ assert.ok(footer.indexOf('id="status-details-label"')<footer.indexOf('class="foo
 const headings=[...detailsBlock.matchAll(/<h3[^>]*>([^<]+)<\/h3>/g)].map(match=>match[1]);
 assert.deepEqual(headings,['Моя коллекция','Рекомендации','Кинопрограмма','Автоматизация'],'exactly four visible groups, in this order');
 const detailRows=(detailsBlock.replace(/<div data-integration="metadata" hidden>[\s\S]*?<\/div>/,'').match(/<dt\b/g)||[]).length;
-assert.ok(detailRows>=15&&detailRows<=18,'about fifteen to eighteen readable rows instead of the old thirty-three: '+detailRows);
+assert.ok(detailRows>=15&&detailRows<=19,'about fifteen to nineteen readable rows (AIR-543 adds the Постеры integration row) instead of the old thirty-three: '+detailRows);
 assert.match(footer,/data-integration="metadata" hidden/);
 assert.match(footer,/id="status-integrations-events" href="\/events" data-return-carry>События/,'AIR-376: a real /events link, not an in-page anchor');
 assert.match(footer,/id="status-health-link" href="\/admin\/health" data-return-carry>Диагностика/,'AIR-389: a link to the exact diagnostics in Admin Health');
