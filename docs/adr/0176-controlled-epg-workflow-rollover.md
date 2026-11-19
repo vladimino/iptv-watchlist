@@ -1,9 +1,10 @@
 # ADR 0176: Controlled EPG Workflow rollover onto the deployed Worker version
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-19  
 **Recorded at:** 2026-11-19  
-**Approval source:** [AIR-540](https://trello.com/c/YAVfVHrs) asks for the mechanism and requires the owner to accept this protocol before the implementation merges. Acceptance of [ADR 0164](0164-controlled-discovery-workflow-rollover.md) does not transfer to the EPG protocol. Accepting this record authorizes the mechanism only; no production `apply` is approved by it  
+**Accepted at:** 2026-11-19  
+**Approval source:** Explicit Product Owner approval of ADR 0176 in [AIR-540](https://trello.com/c/YAVfVHrs) on 2026-11-19, after the [independent code review](https://github.com/vladimino/iptv-watchlist/pull/790#pullrequestreview-5981745152) and the [Mermaid visual QA evidence](../evidence/orchestration/air-540-epg-rollover-offline-2026-11-19.md). This approves the EPG rollover mechanism and its delivery only. **Every production `epg_workflow_rollover.apply` requires a separate, explicit owner GO with exact pins; no apply is authorized by this ADR.**  
 **Related work:** [AIR-540](https://trello.com/c/YAVfVHrs); precedents [AIR-524](https://trello.com/c/G32xYzLC), [AIR-484](https://trello.com/c/CDvqIdUn), [AIR-520](https://trello.com/c/AJEULl3k); incident context [AIR-532](https://trello.com/c/mGPwomMX), [PR #786](https://github.com/vladimino/iptv-watchlist/pull/786)  
 **Supersedes:** None  
 **Superseded by:** None
