@@ -88,11 +88,14 @@ function ownerMarkerCarry(previous){
  const carried={};
  if(previous.ownerIdentity&&typeof previous.ownerIdentity==='object')carried.ownerIdentity=previous.ownerIdentity;
  if(Array.isArray(previous.rejectedTmdbIds)&&previous.rejectedTmdbIds.length)carried.rejectedTmdbIds=previous.rejectedTmdbIds.slice(0,8);
+ // ADR 0178: the fence of a revoked owner assign survives every later decision of this observation. Only an owner assign of the same id removes it.
+ if(previous.revokedOwnerAssign&&typeof previous.revokedOwnerAssign==='object'&&!Array.isArray(previous.revokedOwnerAssign))carried.revokedOwnerAssign=previous.revokedOwnerAssign;
  return carried;
 }
 function ownerRejected(decision,tmdbId){
  if(tmdbId==null||tmdbId==='')return false;
  const id=String(tmdbId);
+ if(decision?.revokedOwnerAssign&&String(decision.revokedOwnerAssign.tmdbId)===id)return true;
  return Array.isArray(decision?.rejectedTmdbIds)&&decision.rejectedTmdbIds.map(String).includes(id);
 }
 function recordUncertain(decisions,candidate,status,now=Date.now(),reason=null){

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Отзыв коррекции</title>
+  <meta name="description" content="Страница владельца: отзыв одной ранее сохранённой коррекции идентичности наблюдения EPG.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body class="admin-page">
+  <header class="masthead">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ отзыв коррекции</span></div>
+  </header>
+  <main class="admin-shell">
+    <a class="return-home" data-return-home href="/">На главную</a>
+    <section class="page-heading limbo-heading">
+      <div>
+        <p class="eyebrow">ВЛАДЕЛЕЦ · ЗАПИСЬ ТОЛЬКО ПОСЛЕ ПОДТВЕРЖДЕНИЯ</p>
+        <h1>Отзыв сохранённой коррекции</h1>
+        <p class="admin-intro">Отзывает одно ранее сохранённое действие владельца над одним наблюдением EPG. Превью только читает. Запись идёт отдельным подтверждением и не запускает чанк Discovery, TMDB или EPG. История и прежние действия остаются.</p>
+      </div>
+    </section>
+    <div class="admin-workspace">
+      <nav class="admin-views" aria-label="Разделы"><a href="/admin" data-return-carry>Каталог</a><a href="/admin/health" data-return-carry>Здоровье данных</a><a href="/admin/letterboxd" data-return-carry>Архив Letterboxd</a><a href="/admin/limb" data-return-carry>Лимб</a><a href="/admin/identity" data-return-carry>Идентификация</a><a href="/admin/posters" data-return-carry>Постеры</a></nav>
+      <div class="admin-main">
+        <section class="iw-section revoke-section" aria-labelledby="revoke-title">
+          <h2 id="revoke-title">Какое действие отозвать</h2>
+          <form id="revoke-form" class="iw-form" action="/admin/identity/revoke">
+            <label class="limbo-field iw-q-field" for="revoke-key">Ключ наблюдения<input id="revoke-key" name="key" type="text" autocomplete="off" spellcheck="false" maxlength="300" required></label>
+            <label class="limbo-field iw-q-field" for="revoke-request">Идентификатор исходного запроса<input id="revoke-request" name="requestId" type="text" autocomplete="off" spellcheck="false" maxlength="80" pattern="[A-Za-z0-9_\-]{16,80}" required></label>
+            <div class="iw-actions"><button type="submit" class="admin-refresh iw-apply" id="revoke-preview-button">Показать, что изменится</button></div>
+          </form>
+          <p id="revoke-loading" class="admin-state" role="status" aria-busy="false" hidden>Читаем историю…</p>
+          <div id="revoke-error" class="admin-state admin-state-error" role="alert" hidden></div>
+          <div id="revoke-preview" class="revoke-preview" tabindex="-1"></div>
+          <form id="revoke-confirm-form" class="iw-form revoke-confirm" hidden>
+            <label class="limbo-field iw-q-field" for="revoke-basis">Основание<input id="revoke-basis" name="basis" type="text" maxlength="200" autocomplete="off" required></label>
+            <label class="iw-check"><input id="revoke-accept" type="checkbox"> Я отзываю именно это действие</label>
+            <div class="iw-actions">
+              <button type="submit" class="admin-refresh iw-apply" id="revoke-confirm-button" disabled>Подготовить отзыв</button>
+              <button type="button" class="admin-refresh iw-apply" id="revoke-execute-button" hidden>Выполнить отзыв</button>
+              <button type="button" class="admin-more" id="revoke-cancel-button" hidden>Отмена</button>
+            </div>
+          </form>
+          <p id="revoke-receipt" class="admin-state" role="status" tabindex="-1" hidden></p>
+        </section>
+      </div>
+    </div>
+  </main>
+  <script src="/return-home.js"></script>
+  <script src="/admin-identity-revoke.js"></script>
+  <script src="/status-footer.js"></script>
+</body>
+</html>

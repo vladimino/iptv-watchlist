@@ -31,6 +31,15 @@ export function identityVersion(decisionHash, effect, tmdbId) {
   return decisionHash + ':' + effect + ':' + tmdbId;
 }
 
+export function revokeVersion(decisionHash, tmdbId) {
+  return decisionHash + ':revoke:' + tmdbId;
+}
+
+export function parseRevokeVersion(version) {
+  const match = /^([0-9a-f]{64}):revoke:([1-9]\d{0,11})$/.exec(typeof version === 'string' ? version : '');
+  return match ? {decisionHash: match[1], effect: 'revoke', tmdbId: match[2]} : null;
+}
+
 export function parseIdentityVersion(version) {
   const match = /^([0-9a-f]{64}):(assign|reject):([1-9]\d{0,11})$/.exec(typeof version === 'string' ? version : '');
   return match ? {decisionHash: match[1], effect: match[2], tmdbId: match[3]} : null;
@@ -193,16 +202,18 @@ export function identityIssue(key, offer, command) {
 // The next decision object. Assign verifies this id and clears the terminal fence. Reject blocks that one id, clears
 // the terminal fence and the retry time so the next ordinary chunk may evaluate a different id, and does not touch
 // any other observation. The rejected id itself is not fetched as movie detail.
-export function appliedIdentityDecision(previous, command, {at, requestId, programmeRunId}) {
+export function appliedIdentityDecision(previous, command, {at, requestId, programmeRunId, identityBasis}) {
   const prior = identityObject(previous) ? previous : {};
   const rejected = rejectedIds(prior).filter(id => id !== command.tmdbId);
   const ownerIdentity = {
     effect: command.effect, tmdbId: command.tmdbId, basis: command.basis, at, requestId, programmeRunId,
     capability: DISCOVERY_IDENTITY_CAPABILITY + '@' + DISCOVERY_IDENTITY_VERSION,
   };
+  // ADR 0178: provenance of the identity inputs at the time of the action. Absent on corrections made before this change.
+  if (typeof identityBasis === 'string' && /^[0-9a-f]{64}$/.test(identityBasis)) ownerIdentity.identityBasis = identityBasis;
   if (command.effect === 'assign') {
     return {
-      ...prior,
+      ...clearRevokedFence(prior, command.tmdbId),
       status: 'verified', tmdbId: command.tmdbId, filmId: 'tmdb_' + command.tmdbId, canonicalIdentity: 'tmdb:' + command.tmdbId,
       identitySource: 'owner', terminalReason: null, retryAt: null, checkedAt: at, ownerIdentity,
       rejectedTmdbIds: rejected,
@@ -231,4 +242,143 @@ export function identityApplication(effect, offer, command) {
   }
   const catalog = command?.catalog === true;
   return {decision: 'written', shows: catalog ? (offer?.effect?.when || 'next_series') : 'awaiting_catalog_film', catalog, consumers: ['resolution_decision']};
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// ADR 0178: revoke one saved owner correction. Pure: the caller reads the stored rows (one intent, the history of one
+// observation, the current decision) and hashes `identityBasisText`. Nothing here replays a before-image.
+// ---------------------------------------------------------------------------------------------------------------------
+
+export const DISCOVERY_REVOKE_REASONS = [
+  'eligible', 'basis_required', 'invalid_request', 'intent_missing', 'intent_not_applied', 'not_identity_action',
+  'wrong_observation', 'provenance_unproven', 'provenance_ambiguous', 'old_action_not_effective', 'already_revoked',
+];
+export const DISCOVERY_REVOKE_WRITER = 'discovery_identity_correct';
+
+// The identity inputs only: normalized title, year, confirmed movie id. No airing, duration, channel or score.
+// It is provenance. It never releases a revoked-assign fence (ADR 0178, section 1a).
+export function identityBasisText(record) {
+  const title = typeof record?.normalizedTitle === 'string' ? record.normalizedTitle : '';
+  const year = yearOf(record?.year);
+  const confirmed = identityMovieId(record?.confirmedTmdbId);
+  return JSON.stringify([title, year, confirmed]);
+}
+
+function ownerRequestId(decision) {
+  return typeof decision?.ownerIdentity?.requestId === 'string' ? decision.ownerIdentity.requestId : null;
+}
+
+// Whether `decision` still carries the effect of the original action. A carry of the marker holds; anything else (another
+// owner action, a changed id, a removed marker) does not.
+function carriesAction(decision, original) {
+  if (!identityObject(decision) || ownerRequestId(decision) !== original.requestId) return false;
+  if (decision.ownerIdentity.effect !== original.effect || identityMovieId(decision.ownerIdentity.tmdbId) !== original.tmdbId) return false;
+  if (original.effect === 'assign') {
+    return decision.status === 'verified' && decision.identitySource === 'owner'
+      && identityMovieId(decision.tmdbId) === original.tmdbId && decision.filmId === 'tmdb_' + original.tmdbId;
+  }
+  return rejectedIds(decision).includes(original.tmdbId);
+}
+
+// The original action of one request id, proven from stored D1 rows alone. `intent` is the discovery_intent row, `history`
+// the observation's discovery_decision_history rows (any order), `current` the current decision. Fails closed.
+export function revokeProvenance({intent, history, current}) {
+  const refuse = reason => ({ok: false, reason});
+  if (!identityObject(intent)) return refuse('intent_missing');
+  if (intent.kind !== 'identity_assign' && intent.kind !== 'identity_reject') return refuse('not_identity_action');
+  if (intent.state !== 'receipt' || !intent.receipt) return refuse('intent_not_applied');
+  const command = intent.command;
+  const effect = intent.kind === 'identity_assign' ? 'assign' : 'reject';
+  const tmdbId = identityMovieId(command?.tmdbId);
+  if (!identityObject(command) || command.effect !== effect || !tmdbId) return refuse('provenance_unproven');
+  const original = {requestId: intent.idempotencyKey, effect, tmdbId};
+  const rows = (Array.isArray(history) ? history : []).filter(row => identityObject(row) && identityObject(row.payload) && Number.isInteger(row.revision))
+    .sort((a, b) => a.revision - b.revision);
+  const index = rows.findIndex(row => row.writer === DISCOVERY_REVOKE_WRITER && ownerRequestId(row.payload) === original.requestId);
+  if (index < 0) return refuse('provenance_unproven');
+  const introduced = rows[index].payload;
+  const ownerOf = introduced.ownerIdentity;
+  if (ownerOf.effect !== effect || identityMovieId(ownerOf.tmdbId) !== tmdbId) return refuse('provenance_unproven');
+  const prior = identityObject(intent.before) ? intent.before : null;
+  if (!prior) return refuse('provenance_unproven');
+  const previousRow = index > 0 ? rows[index - 1] : null;
+  if (previousRow && previousRow.revision === rows[index].revision - 1 && JSON.stringify(rejectedIds(previousRow.payload)) !== JSON.stringify(rejectedIds(prior))) {
+    return refuse('provenance_unproven');
+  }
+  if (effect === 'assign') {
+    if (!(introduced.status === 'verified' && identityMovieId(introduced.tmdbId) === tmdbId)) return refuse('provenance_unproven');
+  } else {
+    if (!rejectedIds(introduced).includes(tmdbId)) return refuse('provenance_unproven');
+    if (rejectedIds(prior).includes(tmdbId)) return refuse('provenance_ambiguous');
+  }
+  for (const row of rows.slice(index + 1)) {
+    if (!carriesAction(row.payload, original)) return refuse('old_action_not_effective');
+  }
+  if (!carriesAction(current, original)) return refuse('old_action_not_effective');
+  return {ok: true, reason: 'eligible', original, introducedRevision: rows[index].revision, priorRevision: previousRow ? previousRow.revision : null};
+}
+
+// The revoke command. `basis` is the owner's reason. `original` comes from `revokeProvenance`.
+export function revokeCommand(provenance, command) {
+  if (!provenance?.ok) return {ok: false, reason: provenance?.reason || 'provenance_unproven'};
+  const basis = basisOf(command?.basis);
+  if (!basis) return {ok: false, reason: 'basis_required'};
+  const {original} = provenance;
+  return {
+    ok: true, reason: 'eligible', effect: 'revoke', basis,
+    revokes: {requestId: original.requestId, effect: original.effect, tmdbId: original.tmdbId},
+  };
+}
+
+// The next decision of a revoke: only the effect of the original action is removed. Computed from the current decision,
+// never from a stored before-image.
+export function appliedRevokeDecision(current, command, {at, requestId, identityBasis}) {
+  const prior = identityObject(current) ? current : {};
+  const {revokes} = command;
+  const {ownerIdentity, revokedOwnerAssign, ...rest} = prior;
+  if (revokes.effect === 'assign') {
+    return {
+      ...rest,
+      status: 'needs_verification', tmdbId: null, filmId: null, canonicalIdentity: null, identitySource: null,
+      terminalReason: null, retryAt: null,
+      revokedOwnerAssign: {tmdbId: revokes.tmdbId, requestId: revokes.requestId, revokedBy: requestId, at, ...(typeof identityBasis === 'string' && /^[0-9a-f]{64}$/.test(identityBasis) ? {identityBasis} : {})},
+    };
+  }
+  const kept = {...rest, terminalReason: null, retryAt: null, rejectedTmdbIds: rejectedIds(prior).filter(id => id !== revokes.tmdbId)};
+  if (revokedOwnerAssign) kept.revokedOwnerAssign = revokedOwnerAssign;
+  return kept;
+}
+
+// The typed check the D1 writer runs on a revoke command and its next decision (ADR 0178, section 3).
+export function revokeWriteMatches(command, next) {
+  if (!identityObject(command) || command.effect !== 'revoke' || !identityObject(command.revokes) || !identityObject(next)) return false;
+  const {revokes} = command;
+  const id = identityMovieId(revokes.tmdbId);
+  if (!id || (revokes.effect !== 'assign' && revokes.effect !== 'reject') || typeof revokes.requestId !== 'string') return false;
+  if (next.ownerIdentity) return false;
+  if (revokes.effect === 'assign') {
+    return next.status === 'needs_verification' && next.tmdbId == null && identityMovieId(next.revokedOwnerAssign?.tmdbId) === id
+      && next.revokedOwnerAssign.requestId === revokes.requestId;
+  }
+  return !rejectedIds(next).includes(id);
+}
+
+// An assign of the same id is the deliberate owner override of a revoked-assign fence (ADR 0178, section 1a).
+export function clearRevokedFence(decision, tmdbId) {
+  if (!identityObject(decision?.revokedOwnerAssign) || identityMovieId(decision.revokedOwnerAssign.tmdbId) !== tmdbId) return decision;
+  const {revokedOwnerAssign, ...rest} = decision;
+  return rest;
+}
+
+export const DISCOVERY_REVOKE_CAPABILITY = 'discovery_identity_revoke';
+
+// The admin-action issue of one revoke: eligible only when the provenance and the command both hold.
+export function revokeIssue(key, command) {
+  const ok = command?.ok === true;
+  return {
+    id: DISCOVERY_REVOKE_CAPABILITY + ':' + key,
+    subject: {kind: 'observation', id: key},
+    action: {code: DISCOVERY_REVOKE_CAPABILITY, eligible: ok, reason: ok ? 'eligible' : command?.reason || 'not_eligible'},
+    evidence: {completeness: 'complete'},
+  };
 }

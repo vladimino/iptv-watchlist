@@ -96,7 +96,7 @@ Revoke is itself append-only; undoing it is a new owner action. Code rollback do
 ## Evidence
 
 - **Original decision:** [Product Owner approved A + A1 on 2026-11-19 in AIR-132](https://trello.com/c/3AXbSoHe#comment-6aff57b6f18bcafb9e0d7c1c)
-- **Implementation:** none yet
+- **Implementation:** [AIR-132](https://trello.com/c/3AXbSoHe) delivery PR: migration `0026_discovery_intent_identity_revoke.sql` (inert until its own owner GO), pure revoke rules in `src/domain/discovery-identity-review.js`, the typed `revoke` and `supersedes` branches of `DiscoveryAuthority.ownerDecision`, the carried `revokedOwnerAssign` fence in `src/discovery.js`, the routes and the page `/admin/identity/revoke`. Link to the merged PR is added when it merges.
 - **Dated verification:** not recorded
 - **Implementation checks:** verify whether any real production correction exists, the handling of absent `confirmedTmdbId` or year in `identityBasis`, and `ownerDecision` issuance-expiry semantics. Missing or ambiguous provenance must fail closed. These checks do not authorize an identity write.
 

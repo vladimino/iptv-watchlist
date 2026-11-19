@@ -93,6 +93,17 @@ This is a production write of one decision. Agents do not run it. The owner does
 4. If the panel says the index was not refreshed, the list may still show the row until the next ordinary chunk. Do not start a chunk to hide the row.
 5. **Undo is manual.** The record under `admin/actions/discovery_identity_correct/v1/` keeps the before-image. Restoring it is a separate owner-approved write. A code revert stops the route and leaves the decision and the record in place. The next ordinary chunk must not verify a rejected id and must not request its movie card. It may search for a different id.
 
+## Revoke one saved identity correction
+
+A production write of one decision; agents do not run it. [ADR 0178](../adr/0178-identity-correction-revoke-event-contract.md). It needs schema 26 (`migrations/0026_discovery_intent_identity_revoke.sql`), whose production apply is a separate owner GO; before it the page says `revoke_schema_not_ready`. The owner needs the original request id of the correction (its receipt).
+
+1. Open `/admin/identity/revoke?key=<observation key>&requestId=<original request id>` and press «Показать, что изменится». The preview reads the original action, the history of that observation and today's decision; it writes nothing.
+2. If it says it cannot revoke, read the reason: `old_action_not_effective` means a later decision or owner action replaced it, `provenance_unproven` or `provenance_ambiguous` mean the history does not prove which action introduced the effect. Nothing is changed in those cases and nothing is restored by hand.
+3. Write the basis, tick the box, press «Подготовить отзыв», then «Выполнить отзыв». Read the receipt and the read-back verdict.
+4. A revoked `assign` leaves a fence for that id on that observation. To use the id again the owner assigns it again; a new airing or rescore does not. A revoked `reject` removes only that rejection.
+5. The ordinary Discovery chunk re-evaluates the observation. Do not start a chunk from this page. `in_progress` means the outcome is unknown: read the preview again, never resubmit blindly.
+6. **Undo is a new owner action.** History and intents are append-only; code rollback does not revert D1 rows.
+
 ## Rollback
 
 - **R1 (stop archiving):** a code revert to a Worker that still reads `DISCOVERY_LEDGER_MODE`, with that binding restored to `frozen` (or absent while an archive exists). On the retired Worker a leftover `frozen` or `full` binding is ignored and the seal stays bounded ([ADR 0156](../adr/0156-retire-discovery-ledger-mode.md)). Nothing is rebuilt or deleted.

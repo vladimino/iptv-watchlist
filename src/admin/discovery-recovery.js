@@ -6,6 +6,8 @@
 //   POST /api/admin/discovery-recovery/identity-confirm                 confirmation of one assign or reject
 //   POST /api/admin/discovery-recovery/identity-correct                 the guarded write discovery_identity_correct@1
 //   GET  /api/admin/discovery-recovery/identity-receipt?idempotencyKey= the stored identity record and its receipt
+//   GET  /api/admin/discovery-recovery/revoke-preview?key=&requestId=   ADR 0178: read-only preview of revoking one saved correction
+//   POST /api/admin/discovery-recovery/revoke-confirm, revoke-execute    ADR 0178: the guarded write discovery_identity_revoke@1
 // Every read of the observation comes from the generation-scoped observation index (src/domain/discovery-observation-index.js),
 // never from the discovery ledger or the body of the resolution map; the GET routes get a bucket that has nothing but `get`
 // and `head`, so they cannot write, list or delete. Nothing here calls TMDB, runs a chunk, starts a series or dispatches
@@ -33,6 +35,13 @@ const DI_CAPABILITY=AdminActions.defineCapability({
  compensation:{kind:'manual',guidance:'No automatic undo. The action record keeps the before-image of the one decision. Restoring it is a separate owner-approved write. A rejection blocks only that movie id on this observation.'},
  confirmTtlMs:10*60000,
 });
+const DV_CAPABILITY=AdminActions.defineCapability({
+ id:'discovery_identity_revoke',version:1,title:'Revoke one saved identity correction of one discovery observation',
+ subjectKinds:['observation'],healthActionCode:'discovery_identity_revoke',
+ budget:{maxRecords:1,maxWritesPerRecord:1,externalCallsPerRecord:0},retry:{maxAttempts:1,backoffMs:0},
+ compensation:{kind:'manual',guidance:'No automatic undo and no replay of a before-image. The revoke removes only the effect of the one original action. Undoing it is a new owner action. History and intents are never rewritten.'},
+ confirmTtlMs:10*60000,
+});
 const PE_CAPABILITY=AdminActions.defineCapability({
  id:'catalog_policy_exclude',version:1,title:'Exclude one Documentary or concert-recording Film from Discovery admission',
  subjectKinds:['film'],healthActionCode:'catalog_policy_exclude',
@@ -40,7 +49,7 @@ const PE_CAPABILITY=AdminActions.defineCapability({
  compensation:{kind:'manual',guidance:'No automatic undo. The action record names the superseded admission and rejected observation keys. Restoring them is a separate owner-approved write. Ratings, fingerprints and immutable predictions are not deleted.'},
  confirmTtlMs:10*60000,
 });
-const DR_REGISTRY=AdminActions.createRegistry([DR_CAPABILITY,DI_CAPABILITY,PE_CAPABILITY]);
+const DR_REGISTRY=AdminActions.createRegistry([DR_CAPABILITY,DI_CAPABILITY,DV_CAPABILITY,PE_CAPABILITY]);
 const PE_ACTION_PREFIX='admin/actions/catalog_policy_exclude/v1/';
 const PE_FILM_ID=/^tmdb_[1-9]\d{0,11}$/;
 
@@ -899,6 +908,114 @@ async function peExecute(request,env,url){
   return drRefused('not_eligible',409,{reason:result.reason||result.outcome});
  }finally{await releaseDiscoveryLease(env,lease);}
 }
+
+// ADR 0178: revoke one saved owner correction. D1 only: there is no R2 authority or fallback for it.
+//   GET  .../revoke-preview?key=&requestId=   read-only: the original action, its versions, the current decision, the effect
+//   POST .../revoke-confirm                   server-issued confirmation of exactly this revoke
+//   POST .../revoke-execute                   the guarded write discovery_identity_revoke@1
+async function dvGate(env){
+ if(typeof DiscoveryAuthority==='undefined')return null;
+ const gate=await DiscoveryAuthority.readAuthority(env);
+ return gate.ready?gate:null;
+}
+function dvShown(evidence,provenance){
+ const intent=evidence.intent;
+ const original=provenance.ok?provenance.original:null;
+ const versions=(evidence.history||[]).slice(-12).map(row=>({revision:row.revision,writer:row.writer,at:row.at,status:row.payload?.status??null,tmdbId:row.payload?.tmdbId??null,ownerEffect:row.payload?.ownerIdentity?.effect??null,requestId:row.payload?.ownerIdentity?.requestId??null}));
+ const current=evidence.current;
+ return {
+  original:intent?{requestId:intent.idempotencyKey,kind:intent.kind,state:intent.state,effect:intent.command?.effect??null,tmdbId:intent.command?.tmdbId??null,basis:intent.command?.basis??null,issuedAt:intent.issued?.issuedAt??null,receipt:intent.receipt??null}:null,
+  versions,
+  current:current?{status:current.status??null,tmdbId:current.tmdbId??null,filmId:current.filmId??null,decisionHash:evidence.decisionHash,ownerEffect:current.ownerIdentity?.effect??null,rejectedTmdbIds:Array.isArray(current.rejectedTmdbIds)?current.rejectedTmdbIds:[],revokedOwnerAssign:current.revokedOwnerAssign??null}:null,
+  application:original?{
+   decision:'written',
+   shows:original.effect==='assign'?'clears_assigned_rows_and_fences_id':'removes_this_rejection_only',
+   waitsForOrdinaryChunk:true,
+   fence:original.effect==='assign'?{kind:'observation_and_id',tmdbId:original.tmdbId,releasedBy:'owner_assign_of_same_id'}:null,
+   consumers:['resolution_decision'],
+  }:null,
+ };
+}
+async function dvEvidence(env,key,requestId){
+ const evidence=await DiscoveryAuthority.readIdentityActionEvidence(env,requestId,key);
+ if(!evidence.handled)return {evidence,provenance:{ok:false,reason:'not_authoritative'}};
+ if(!evidence.intent)return {evidence,provenance:{ok:false,reason:'intent_missing'}};
+ if(evidence.wrongObservation)return {evidence,provenance:{ok:false,reason:'wrong_observation'}};
+ if(evidence.bounded||evidence.malformed)return {evidence,provenance:{ok:false,reason:'provenance_unproven'}};
+ if(evidence.current&&evidence.current.revokedOwnerAssign&&evidence.current.revokedOwnerAssign.requestId===requestId)return {evidence,provenance:{ok:false,reason:'already_revoked'}};
+ return {evidence,provenance:DiscoveryIdentity.revokeProvenance({intent:evidence.intent,history:evidence.history,current:evidence.current})};
+}
+async function dvPreview(request,env,url){
+
+ const key=drKey(url.searchParams.get('key')),requestId=url.searchParams.get('requestId');
+ if(!key||!requestId||!DR_IDEMPOTENCY.test(requestId))return drRefused('invalid_request',400);
+ if(!await dvGate(env))return drRefused('not_authoritative',409);
+ const {bucket,versions}=drReadOnly(env.BUCKET);
+ const observed=await drObserve(bucket,versions,key,Date.now(),null,env);
+ const {evidence,provenance}=await dvEvidence(env,key,requestId);
+ const body={key,requestId,available:provenance.ok,reason:provenance.reason,pin:observed.pin,generation:evidence.generation??null,...dvShown(evidence,provenance)};
+ return json(body);
+}
+async function dvConfirm(request,env,url){
+ if(!diPrincipal(request,url).owner)return drRefused('access_denied',403);
+ const body=await drBody(request);
+ if(!body)return drRefused('invalid_request',400);
+ const key=drKey(body.key);
+ if(!key||typeof body.pin!=='string'||!DR_PIN.test(body.pin)||typeof body.requestId!=='string'||!DR_IDEMPOTENCY.test(body.requestId)||typeof body.idempotencyKey!=='string'||!DR_IDEMPOTENCY.test(body.idempotencyKey)||body.idempotencyKey===body.requestId)return drRefused('invalid_request',400);
+ if(body.accepted!==true)return drRefused('confirmation_missing',400);
+ if(!await dvGate(env))return drRefused('not_authoritative',409);
+ const {bucket,versions}=drReadOnly(env.BUCKET);
+ const observed=await drObserve(bucket,versions,key,Date.now(),null,env);
+ if(observed.pin!==body.pin)return drRefused('stale_pin',409,{pin:observed.pin,reason:'stale_pin'});
+ const {evidence,provenance}=await dvEvidence(env,key,body.requestId);
+ const command=DiscoveryIdentity.revokeCommand(provenance,body);
+ if(!command.ok)return drRefused('not_eligible',409,{pin:observed.pin,reason:command.reason});
+ const version=DiscoveryIdentity.revokeVersion(evidence.decisionHash,command.revokes.tmdbId);
+ const preview=AdminActions.previewAction(DR_REGISTRY,{capability:DV_CAPABILITY.id,version:DV_CAPABILITY.version,subject:{kind:'observation',id:key},pin:observed.pin,ids:[key]},{pin:observed.pin,now:observed.now,records:[{id:key,version}],issues:[DiscoveryIdentity.revokeIssue(key,command)]});
+ const issued=AdminActions.confirmAction(preview,{now:observed.now,idempotencyKey:body.idempotencyKey,accepted:true});
+ if(issued.error)return drRefused(issued.error,409,{pin:observed.pin,reason:'eligible'});
+ const stored={effect:'revoke',revokes:command.revokes,basis:command.basis};
+ try{
+  const intent=await DiscoveryAuthority.putIntent(env,{idempotencyKey:body.idempotencyKey,kind:'identity_revoke',observationKey:key,issued,command:stored,expectedHash:evidence.decisionHash,expiresAt:Date.parse(issued.expiresAt)});
+  if(!intent.saved)return drRefused('idempotency_conflict',409);
+ }catch{return drRefused('revoke_schema_not_ready',409);}
+ return json({confirmation:issued,command:stored,application:dvShown(evidence,provenance).application,scope:{key,decisionHash:evidence.decisionHash,requestId:body.requestId}});
+}
+async function dvExecute(request,env,url){
+ if(!diPrincipal(request,url).owner)return drRefused('access_denied',403);
+ const body=await drBody(request);
+ const submitted=AdminActions.validateConfirmation(body?.confirmation);
+ if(!submitted||submitted.capability!==DV_CAPABILITY.id)return drRefused(submitted?'unsupported_capability':'invalid_request',400);
+ const parsed=DiscoveryIdentity.parseRevokeVersion(submitted.records?.[0]?.version);
+ if(!parsed)return drRefused('invalid_request',400);
+ if(!await dvGate(env))return drRefused('not_authoritative',409);
+ const stored=await DiscoveryAuthority.readIntent(env,submitted.idempotencyKey);
+ if(!stored.intent)return drRefused('confirmation_missing',409);
+ const intent=stored.intent;
+ if(intent.receipt)return json({replayed:true,receipt:intent.receipt,state:'applied',durable:true});
+ if(intent.state==='running')return drRefused('in_progress',409,{state:'unknown',note:'An earlier submission with this key started and left no receipt. Its outcome is unknown: read the observation again; nothing is retried.'});
+ const bound=AdminActions.bindIssuance(intent.issued,body.confirmation,new Date().toISOString());
+ if(!bound.ok)return drRefused(bound.refusal,409);
+ const command=intent.command;
+ if(intent.kind!=='identity_revoke'||command?.effect!=='revoke'||String(command.revokes?.tmdbId)!==parsed.tmdbId||intent.observationKey!==submitted.subject.id||intent.expectedHash!==parsed.decisionHash)return drRefused('confirmation_mismatch',409);
+ const key=intent.observationKey;
+ const {evidence,provenance}=await dvEvidence(env,key,command.revokes.requestId);
+ if(!provenance.ok)return drRefused(provenance.reason==='old_action_not_effective'||provenance.reason==='already_revoked'?provenance.reason:'not_eligible',409,{reason:provenance.reason});
+ if(evidence.decisionHash!==intent.expectedHash)return drRefused('record_changed',409);
+ const {bucket,versions}=drReadOnly(env.BUCKET);
+ const observed=await drObserve(bucket,versions,key,Date.now(),null,env);
+ const basis=observed.record?await adminDigest(DiscoveryIdentity.identityBasisText(observed.record)):null;
+ const lease=await acquireDiscoveryLease(env);
+ if(!lease)return drRefused('lease_held',409);
+ try{
+  const next=DiscoveryIdentity.appliedRevokeDecision(evidence.current,command,{at:new Date().toISOString(),requestId:submitted.idempotencyKey,identityBasis:basis});
+  const result=await DiscoveryAuthority.ownerDecision(env,{idempotencyKey:submitted.idempotencyKey,key,expectedHash:intent.expectedHash,next,lease,writer:'discovery_identity_revoke',receipt:{state:'applied',capability:'discovery_identity_revoke',effect:'revoke',revokes:command.revokes,decisionHash:await DiscoveryAuthority.decisionHash(next)}});
+  if(result.outcome==='written'||result.outcome==='replay')return json({replayed:result.outcome==='replay',receipt:result.receipt,state:'applied',durable:true,application:dvShown(evidence,provenance).application});
+  if(result.outcome==='unknown')return drRefused('in_progress',409,{state:'unknown'});
+  if(result.outcome==='expired')return drRefused('confirmation_expired',409);
+  return drRefused('record_changed',409);
+ }finally{await releaseDiscoveryLease(env,lease);}
+}
 async function adminDiscoveryReconsiderRoute(request,env,url){
  const action=url.pathname.slice('/api/admin/discovery-recovery/'.length);
  if(action==='receipt')return request.method==='GET'?await drReceipt(env,url):adminError('method_not_allowed',405);
@@ -906,6 +1023,15 @@ async function adminDiscoveryReconsiderRoute(request,env,url){
  if(action==='identity-confirm'||action==='identity-correct'){
   if(request.method!=='POST')return adminError('method_not_allowed',405);
   try{return action==='identity-confirm'?await diConfirm(request,env,url):await diExecute(request,env,url);}
+  catch{return drRefused('storage_unavailable',503);}
+ }
+ if(action==='revoke-preview'){
+  if(request.method!=='GET')return adminError('method_not_allowed',405);
+  try{return await dvPreview(request,env,url);}catch{return drRefused('storage_unavailable',503);}
+ }
+ if(action==='revoke-confirm'||action==='revoke-execute'){
+  if(request.method!=='POST')return adminError('method_not_allowed',405);
+  try{return action==='revoke-confirm'?await dvConfirm(request,env,url):await dvExecute(request,env,url);}
   catch{return drRefused('storage_unavailable',503);}
  }
  if(action==='policy-exclude'){

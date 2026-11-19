@@ -317,12 +317,19 @@ Source: [`src/admin/discovery-recovery.js`](../../../src/admin/discovery-recover
 | `POST /api/admin/discovery-recovery/identity-confirm` | Issues one assign or reject; changes no decision |
 | `POST /api/admin/discovery-recovery/identity-correct` | Executes one issued identity correction |
 | `GET /api/admin/discovery-recovery/identity-receipt?idempotencyKey=<key>` | Returns the stored identity record; read-only |
+| `GET /api/admin/discovery-recovery/revoke-preview?key=<observation key>&requestId=<original request id>` | [ADR 0178](../../adr/0178-identity-correction-revoke-event-contract.md) read-only preview of revoking one saved identity correction: the original action, the history of that observation, today's decision, the fence it leaves; writes nothing, calls no TMDB |
+| `POST /api/admin/discovery-recovery/revoke-confirm` | Issues one revoke of one saved correction; stores an `identity_revoke` intent, changes no decision |
+| `POST /api/admin/discovery-recovery/revoke-execute` | Executes one issued revoke through the fenced D1 owner write; the receipt is read back with `identity-receipt` |
 | `GET /api/admin/discovery-recovery/policy-exclude?filmId=tmdb_<id>` | Read-only ADR 0150 preview of one current admission |
 | `POST /api/admin/discovery-recovery/policy-exclude` | Executes `catalog_policy_exclude@1` for that film |
 
 Any other method is 405 `method_not_allowed`, and an unknown path under `/api/admin/discovery-recovery/` is 404.
 
-### What is read
+#### Revoke one saved identity correction (`/admin/identity/revoke`)
+
+The owner page `/admin/identity/revoke` and the three routes above ([ADR 0178](../../adr/0178-identity-correction-revoke-event-contract.md), [AIR-132](https://trello.com/c/3AXbSoHe)) revoke **one** earlier `identity_assign` or `identity_reject` by its original request id. D1 only: with any other Discovery authority the routes answer `not_authoritative` and there is no R2 path. Writes need the same Access assertion, same-origin `Origin`, `X-IPTV-Admin-Action: discovery_identity_correct` and JSON body as the identity writes; the confirm key must be new and different from the original request id. Refusals the client shows: `intent_missing`, `wrong_observation`, `provenance_unproven`, `provenance_ambiguous`, `old_action_not_effective`, `already_revoked`, `stale_pin`, `record_changed`, `lease_held`, `in_progress` (unknown outcome, never retried), `confirmation_expired`, `revoke_schema_not_ready` (migration 0026 not applied). The page requests nothing on load, starts no Discovery chunk and links from nothing yet: the owner opens it with `?key=&requestId=`.
+
+## What is read
 
 The GET routes get a bucket wrapper with only `get` and `head`, so they cannot put, list or delete. The assessment reads exactly:
 
