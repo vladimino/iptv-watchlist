@@ -11,7 +11,7 @@ assert.deepEqual(config.d1_databases.map(item=>item.binding),['DB'],'only the pr
 assert.deepEqual(config.r2_buckets.map(item=>item.binding),['BUCKET'],'only the production R2 binding');
 assert.deepEqual(config.workflows.map(item=>item.binding),['DISCOVERY_WORKFLOW','RATINGS_WORKFLOW','EPG_WORKFLOW','PRODUCER_WORKFLOW'],'production Workflows unchanged');
 assert.equal(config.d1_databases[0].database_id,'3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb','production D1 id unchanged');
-assert.deepEqual(config.triggers.crons,['0 * * * *'],'single hourly cron unchanged');
+assert.deepEqual(config.triggers.crons,['0 * * * *','1-59/2 * * * *'],'hourly cron unchanged, plus the AIR-534 Discovery-only fast cron (ADR 0174)');
 assert.equal(config.keep_vars,true,'keep_vars unchanged');
 const worker=fs.readFileSync('src/worker.js','utf8'),build=fs.readFileSync('build.mjs','utf8');
 assert.doesNotMatch(worker,/api\/epg\/diagnostic|EpgDiagnosticRun\.route/,'the Worker does not route the diagnostic API');
