@@ -106,7 +106,7 @@ One request answers the owner's "Здоровье данных" view: it builds 
 
 Not read, and therefore **not supplied** to the model, which reports them as unknown rather than healthy: the unresolved observations (they live in the resolution ledger; the limbo inventory is their bounded view) and the Letterboxd baseline (the import leaves per-chunk receipts under `letterboxd/imports/<sha256>/` and no summary object; finding the latest one would list the bucket). `coverage` is `films: complete` (the whole programme) and `observations: partial`, so `identity` can at most be `clear_in_scope`.
 
-A cold request is eleven R2 reads (six of the admin snapshot, five health objects), one parse of each changed object and no other work; every read settles before the answer, so a failed read never leaves another half-open. `now` is the Worker clock at the request.
+A cold request is eleven R2 reads (six of the admin snapshot, five health objects) plus two bounded reads for the `catalogPosters` section (the Monitor's own state document and the poster checkpoint), one parse of each changed object and no other work; every read settles before the answer, so a failed read never leaves another half-open. `now` is the Worker clock at the request.
 
 Answer, 200:
 

@@ -90,7 +90,7 @@ async function adminHealthCatalogPosters(env,nowMs){
    const doc=object?await object.json():null;
    markers={baselineAt:typeof doc?.catalogPostersBaselineAt==='string'?doc.catalogPostersBaselineAt:null,seenAt:typeof doc?.catalogPostersSeenAt==='string'?doc.catalogPostersSeenAt:null};
   }catch{}
-  const status=await CatalogPosterWeekly.readStatus(env,{markers,monitorOn:true,nowMs});
+  const status=await CatalogPosterWeekly.readStatus(env,{markers,monitorOn:env.MONITOR==='on',nowMs});
   return {state:status.state,monitor:status.monitor,detail:status.detail??null,nextExpectedAt:status.nextExpectedAt,freshnessAt:status.freshnessAt,checkpointStatus:status.checkpointStatus,lastOutcome:status.lastOutcome,summary:status.summary};
  }catch{return {state:'unknown',monitor:'degraded',detail:'read_failed'};}
 }
