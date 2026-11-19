@@ -12,6 +12,7 @@ import {assertWritable,database,failed,many,one,readAuthority} from './film-pers
 import {fenced} from './canonical-mutations.js';
 import {ADMISSION_READ_CHUNK,loadAdmissionRows,readAdmissions} from './canonical-catalog-reader.js';
 const writeFenced=fenced.commit;
+export const RETENTION_WATERMARK_SCHEMA=25;
 
 export const RATED_RECEIPT_KEY='letterboxd/admissions/verified-films.json';
 export {ADMISSION_READ_CHUNK,loadAdmissionRows,readAdmissions};
@@ -114,7 +115,8 @@ export async function admitRatedFilm(env,input){
 // The fenced write of the watchlist retention fact for ONE existing Film (ADR 0086: a Film stays after it leaves the lists). It never creates
 // a Film and never reads or writes membership (watchlist_film). The row is a monotonic fact: a newer observation replaces the older one, an
 // older or equal one is skipped, a replay with the same request id and content opens no batch.
-// input: {id, expectedRevision, at, requestId, watchlist:boolean, observedAt, evidence?:object}
+// input: {id, expectedRevision, at, requestId, watchlist:boolean, observedAt, evidence?:object, watermark?:true}
+// `watermark: true` (the scan watermark table exists, schema 25) adds one assertion to the batch: the observation must not be older than film_retention_scan.
 export async function retainFilm(env,input){
  const id=fenced.filmId(input?.id);
  const expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at),requestId=fenced.text(input.requestId);
@@ -138,10 +140,42 @@ export async function retainFilm(env,input){
  const entities=[{kind:'film',id,expected}];
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]);
+ // AIR-532 (ADR 0173): with the scan watermark present, an observation older than it is refused in the SAME fenced batch, so a late contradictory observation cannot land between the caller's plan and this write.
+ if(input.watermark===true)statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_retention_scan WHERE id=1 AND observed_at>?)'),[observed]]);
  statements.push(["INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) VALUES (?,'watchlist_fact',?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET watchlist=excluded.watchlist,evidence_json=excluded.evidence_json,request_id=excluded.request_id,observed_at=excluded.observed_at,updated_at=excluded.updated_at WHERE excluded.observed_at>film_retention.observed_at",[id,input.watchlist?1:0,evidence,requestId,observed,at]]);
  statements.push([fenced.BUMP,['film',id,at]]);
  await writeFenced(env,gate,statements,entities,tail);
  return {id,revision:expected+1,retained:true,written:true};
+}
+
+// AIR-532 / ADR 0173. The scan watermark: ONE row (schema 25, `film_retention_scan`) with the observation time of the newest admitted complete scan.
+// `film_retention.observed_at` is the start of a Film's current state, so it cannot order a late observation against a later unchanged confirmation;
+// this row can. While the table is absent (schema below 25) `present` is false and the producer keeps the previous behaviour.
+export async function readRetentionWatermark(env){
+ const db=database(env);
+ if(!db)throw failed('film_person_unavailable');
+ try{
+  const row=await one(db,'SELECT observed_at FROM film_retention_scan WHERE id=1');
+  return {present:true,observedAt:row?.observed_at??null};
+ }catch(error){
+  if(!/no such table/i.test(String(error?.cause?.message||error?.message||error)))throw failed('film_person_unavailable',error);
+  // The table is absent. That is the legitimate pre-migration state ONLY while the schema is genuinely below 25. At schema 25 or later it is a missing or damaged
+  // watermark table, and falling back to row-only ordering would silently reopen the stale-overwrite hole: fail closed.
+  let version;
+  try{version=Number((await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version);}
+  catch(inner){throw failed('film_person_unavailable',inner);}
+  if(Number.isFinite(version)&&version<RETENTION_WATERMARK_SCHEMA)return {present:false,observedAt:null};
+  throw failed('film_person_unavailable',new Error('film_retention_scan_missing_at_schema_'+version));
+ }
+}
+// Moves the watermark forward to `observedAt` (never back: the statement and a trigger both refuse), in a fenced batch (marker generation asserted).
+// Returns the watermark as it stands afterwards. A scan advances it once; later slices of the same scan read it and write nothing.
+export async function advanceRetentionWatermark(env,{observedAt,at}={}){
+ const observed=instant(observedAt),stamp=fenced.text(at);
+ if(!observed)throw failed('retention_invalid');
+ const gate=assertWritable(await readAuthority(env));
+ await writeFenced(env,gate,[["INSERT INTO film_retention_scan (id,observed_at,updated_at) VALUES (1,?,?) ON CONFLICT(id) DO UPDATE SET observed_at=excluded.observed_at,updated_at=excluded.updated_at WHERE excluded.observed_at>film_retention_scan.observed_at",[observed,stamp]]],[],[]);
+ return readRetentionWatermark(env);
 }
 
 // The two D1 readers (loadAdmissionRows, readAdmissions) live in canonical-catalog-reader.js, the one import-free read module the Worker bundles (AIR-374 P4);
