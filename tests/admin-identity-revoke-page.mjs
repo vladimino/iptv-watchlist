@@ -91,4 +91,58 @@ assert.match(run('revokePreviewHtml(refused)'), /Отозвать нельзя\.
 assert.match(run('revokeVersionsHtml([])'), /пуста/, 'an empty history is stated');
 assert.equal(run("revokeReceiptText({receipt: {decisionHash: 'abcdef0123456789'}, replayed: true})").startsWith('Это повтор'), true);
 assert.equal(run('revokeReceiptText(null)'), '');
+// The page script on a minimal fake DOM: only one staged mutation at a time (review of PR 796). Prepare a supersede after the
+// revoke form was filled and ticked: the revoke confirm button must be disabled, rvConfirm must refuse, and no second request goes out.
+{
+  const elements = new Map();
+  const make = id => {
+    const listeners = new Map();
+    const element = {id, hidden: false, disabled: false, value: '', checked: false, textContent: '', innerHTML: '', dataset: {}, focus() {}, setAttribute() {}, addEventListener(type, fn) { listeners.set(type, [...(listeners.get(type) || []), fn]); },
+      fire(type) { for (const fn of listeners.get(type) || []) fn({preventDefault() {}, target: element}); }};
+    elements.set(id, element);
+    return element;
+  };
+  for (const id of ['revoke-form', 'revoke-key', 'revoke-request', 'revoke-preview-button', 'revoke-loading', 'revoke-error', 'revoke-preview', 'revoke-confirm-form', 'revoke-basis', 'revoke-accept', 'revoke-confirm-button', 'revoke-execute-button', 'revoke-cancel-button', 'supersede-form', 'supersede-effect', 'supersede-id', 'supersede-basis', 'supersede-accept', 'supersede-confirm-button', 'supersede-execute-button', 'supersede-cancel-button', 'revoke-receipt']) make(id);
+  const requests = [];
+  const answer = body => ({ok: true, status: 200, json: async () => body});
+  const preview = {key: 'k|2001', requestId: 'req-0123456789abcdef', available: true, reason: 'eligible', pin: 'D1.' + 'a'.repeat(32), original: {requestId: 'req-0123456789abcdef', state: 'receipt', effect: 'assign', tmdbId: '41'}, versions: [], current: {status: 'verified'}, application: {shows: 'clears_assigned_rows_and_fences_id', fence: {tmdbId: '41'}}};
+  const page = vm.createContext({URLSearchParams, JSON, Math, Array, Uint8Array, String, Promise, crypto: webcrypto, location: {search: ''},
+    document: {querySelector: selector => elements.get(selector.slice(1)) || null},
+    fetch: async (url, init) => { requests.push(String(url).split('/').pop().split('?')[0]); return answer(String(url).includes('revoke-preview') ? preview : {confirmation: {capability: 'x', idempotencyKey: 'revoke-staged-0000001'}}); }});
+  vm.runInContext(['src/admin/identity-revoke-client.js', 'src/admin/identity-revoke-view.js', 'public/admin-identity-revoke.js'].map(file => fs.readFileSync(file, 'utf8')).join('\n'), page);
+  const el = id => elements.get(id);
+  el('revoke-key').value = 'k|2001'; el('revoke-request').value = 'req-0123456789abcdef';
+  el('revoke-form').fire('submit');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(requests, ['revoke-preview']);
+  assert.equal(el('supersede-form').hidden, false, 'the replace form is offered for an eligible preview');
+  // Fill and tick the revoke form first, then prepare a supersede.
+  el('revoke-basis').value = 'wrong film'; el('revoke-basis').fire('input');
+  el('revoke-accept').checked = true; el('revoke-accept').fire('change');
+  assert.equal(el('revoke-confirm-button').disabled, false, 'the revoke can be confirmed on its own');
+  el('supersede-id').value = '41'; el('supersede-id').fire('input');
+  el('supersede-basis').value = 'better id'; el('supersede-basis').fire('input');
+  el('supersede-accept').checked = true; el('supersede-accept').fire('change');
+  el('supersede-form').fire('submit');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(requests, ['revoke-preview', 'identity-confirm'], 'the supersede is staged');
+  assert.equal(el('supersede-execute-button').hidden, false);
+  assert.equal(el('revoke-confirm-button').disabled, true, 'while a replacement is staged the revoke cannot be confirmed');
+  assert.equal(el('revoke-execute-button').hidden, true, 'only one execute path is shown');
+  // Even a forced submit of the revoke form issues nothing.
+  el('revoke-confirm-form').fire('submit');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(requests, ['revoke-preview', 'identity-confirm'], 'no second confirmation while one mutation is staged');
+  // Cancelling the replacement gives the revoke back, and then a revoke staged blocks the replacement the same way.
+  el('supersede-cancel-button').fire('click');
+  assert.equal(el('revoke-confirm-button').disabled, false, 'the revoke form kept its own basis and box, so the revoke can be confirmed again');
+  el('revoke-confirm-form').fire('submit');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(requests, ['revoke-preview', 'identity-confirm', 'revoke-confirm'], 'the revoke is staged after the replacement was cancelled');
+  assert.equal(el('supersede-confirm-button').disabled, true, 'while a revoke is staged the replacement cannot be confirmed');
+  el('supersede-accept').checked = true; el('supersede-accept').fire('change');
+  el('supersede-form').fire('submit');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(requests, ['revoke-preview', 'identity-confirm', 'revoke-confirm'], 'no replacement while a revoke is staged');
+}
 console.log('admin-identity-revoke-page: ok');

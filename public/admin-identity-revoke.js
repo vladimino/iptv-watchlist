@@ -32,7 +32,8 @@ function rvPaint() {
   basis.disabled = staged || replacing || rvLive.busy;
   accept.disabled = staged || replacing || rvLive.busy;
   rvEl('revoke-confirm-button').hidden = staged;
-  rvEl('revoke-confirm-button').disabled = rvLive.busy || !accept.checked || !basis.value.trim();
+  // Only one staged mutation at a time: while a replacement is prepared, the revoke cannot be confirmed (and the other way round).
+  rvEl('revoke-confirm-button').disabled = rvLive.busy || replacing || !accept.checked || !basis.value.trim();
   rvShow('revoke-execute-button', staged);
   rvEl('revoke-execute-button').disabled = rvLive.busy;
   rvShow('revoke-cancel-button', staged);
@@ -59,7 +60,7 @@ async function rvPreview() {
 }
 async function rvConfirm() {
   const preview = rvLive.preview;
-  if (!preview || !preview.available || rvLive.busy || rvLive.confirmation) return null;
+  if (!preview || !preview.available || rvLive.busy || rvLive.confirmation || rvLive.supersede) return null;
   rvError('');
   rvLive.busy = true; rvPaint();
   const result = await revokeConfirmPost({key: preview.key, pin: preview.pin, requestId: preview.requestId, basis: rvEl('revoke-basis').value.trim()});
