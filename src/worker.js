@@ -159,9 +159,9 @@ async function degradedWatchlistResponse(env,error){
 async function degradedFilmResponse(env,tmdbId,error){
  const snapshot=await degradedSnapshot(env,error,'catalog_film');
  if(!snapshot)return null;
- const identity=MirrorRead.mirrorFilmIdentity(snapshot,tmdbId);
+ const identity=await MirrorRead.findMirrorFilm(env,snapshot,tmdbId);
  if(identity.state!=='found'){degradedEvent('mirror_fallback_unusable',{route:'catalog_film',reason:identity.reason});return null;}
- const meta=MirrorRead.mirrorMeta(snapshot,degradedReason(error));
+ const meta=MirrorRead.mirrorMeta(identity.pair||snapshot,degradedReason(error));
  degradedLastAt=Date.now();
  degradedEvent('mirror_fallback_activated',{route:'catalog_film',reason:meta.reason,runId:identity.provenance.runId,asOf:identity.provenance.asOf});
  return json({status:'found',programmeRunId:identity.provenance.runId,generatedAt:identity.provenance.asOf,...meta,runId:identity.provenance.runId,asOf:identity.provenance.asOf,availability:'unverified',provenance:identity.provenance,...(identity.disputed?{disputedAttributes:['title','year']}:{}),degraded:['predictions','metadata','facts','shows_unverified'],film:identity.film},200,{'X-Data-Origin':'mirror'});

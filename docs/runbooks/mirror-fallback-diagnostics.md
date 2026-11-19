@@ -13,7 +13,7 @@ For [ADR 0177](../adr/0177-read-only-mirror-fallback-for-film-and-programme.md) 
 | --- | --- | --- |
 | `mirror_fallback_activated` | a typed temporary failure was answered from a mirror (`route`, `reason`, `ageSeconds`) | `reason` names the failing authority read; a large `ageSeconds` means the hourly reconcile has not run or failed |
 | `mirror_fallback_unusable` | the failure was temporary but no mirror object was usable | `rejected` lists why (`absent`, `invalid_json`, `invalid_shape`, `run_mismatch`, `too_large`) |
-| `mirror_validation_failed` | one object was dropped, the others were still used | the `key` and `reason` |
+| `mirror_validation_failed` | one object was dropped, the others were still used | the `key` and `reason` (`invalid_shape` also covers a record without an id or a title and a missing `updatedAt`); a `list_truncated` rejection in `mirror_fallback_unusable` means the older-copy listing was cut off |
 | `mirror_fallback_recovered` | an authoritative read succeeded after a degraded one (`afterMs`) | confirms automatic recovery |
 | `degraded_write_refused` | a write labelled `mirror` (or with a stale `X-Expected-Run`) was refused | expected after a recovery while an old page is open |
 

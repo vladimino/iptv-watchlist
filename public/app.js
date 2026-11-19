@@ -275,10 +275,21 @@ function renderDegradedNote(){
  const detail=isDegraded()?'Данные из резервной копии, изменения отключены. Расписание показано как было сохранено; доступность сейчас не проверена.':'';
  for(const node of [$('#degraded-note'),$('#film-degraded-note')]){if(!node)continue;node.hidden=!text;node.textContent=text;node.title=detail;if(text)node.setAttribute('aria-label',text+'. '+detail);else node.removeAttribute('aria-label');}
 }
-function noteDegraded(key,body){
- degradedSources.set(key,{asOf:typeof body?.asOf==='string'?body.asOf:null,runId:body?.runId??null,reason:typeof body?.reason==='string'?body.reason:null,joined:body?.joined??null});
+// `kind` is 'mirror' (the data IS a saved copy from R2) or 'lkg' (the data is the last authoritative result held in memory, and its refresh failed). Both are read-only; only a
+// 'mirror' copy is old enough that no claim about the PRESENT may be derived from its schedule (ADR 0177 decision 5).
+function noteDegraded(key,body,kind='mirror'){
+ const before=degradedSignature();
+ degradedSources.set(key,{kind,asOf:typeof body?.asOf==='string'?body.asOf:null,runId:body?.runId??null,reason:typeof body?.reason==='string'?body.reason:null,joined:body?.joined??null});
  renderDegradedNote();
+ return degradedSignature()!==before;
 }
+function degradedSignature(){return [...degradedSources.entries()].map(([key,item])=>key+':'+item.kind).sort().join('|');}
+function mirrorSnapshotShown(){for(const item of degradedSources.values())if(item.kind==='mirror')return true;return false;}
+// The saved schedule of a film, as stored: historical, never classified as archive, on air or soon.
+function savedShows(film){return (film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null);}
+const stampIso=ms=>Number.isFinite(ms)?new Date(ms).toISOString():null;
+let programmeLoadedAt=null;
+function refreshDegradedViews(){if(programmeReady&&typeof renderPreservingScroll==='function')renderPreservingScroll();if(filmScreen)renderFilmShell();}
 // A successful AUTHORITATIVE read of the same thing ends that degradation. The normal source and the write actions come back only through such a read.
 function clearDegraded(key){
  if(!degradedSources.delete(key))return false;
@@ -302,8 +313,8 @@ async function ensureCatalogFilm(tmdb,{refresh=false}={}){
   const status=typeof body?.status==='string'?body.status:'';
   if(response.ok&&status==='found'&&body.film&&String(body.film.tmdbId)===tmdb&&body.film.canonicalIdentity==='tmdb:'+tmdb){
    next={state:'found',film:body.film,programmeRunId:body.programmeRunId||null,at:Date.now()};
-   if(body.source==='mirror'&&body.readOnly===true){next.mirror=true;noteDegraded('film:'+tmdb,body);}
-   else clearDegraded('film:'+tmdb);
+   if(body.source==='mirror'&&body.readOnly===true){next.mirror=true;noteDegraded('film:'+tmdb,body,'mirror');}
+   else if(clearDegraded('film:'+tmdb)&&programmeReady&&typeof renderPreservingScroll==='function')renderPreservingScroll();
   }
   else if(response.status===404&&status==='absent')next={state:'absent'};
   else if(response.status===410&&status==='retired')next={state:'retired'};
@@ -315,7 +326,11 @@ async function ensureCatalogFilm(tmdb,{refresh=false}={}){
  // A failed refresh keeps the film already shown.
  const previous=known?.state==='found'?known:null;
  if(next.state==='unavailable'||next.state==='error'){
-  if(previous)catalogFilmReads.set(tmdb,{...previous,refreshing:false,token:null,askedRun});
+  if(previous){
+   catalogFilmReads.set(tmdb,{...previous,refreshing:false,token:null,askedRun});
+   // The film stays on screen (last known good) but is read-only until an authoritative read of it succeeds.
+   if(!degradedSources.has('film:'+tmdb)&&noteDegraded('film:'+tmdb,{asOf:stampIso(previous.at),reason:'refresh_failed'},'lkg')&&programmeReady&&typeof renderPreservingScroll==='function')renderPreservingScroll();
+  }
   else catalogFilmReads.set(tmdb,{state:next.state,token:null,transient:true,at:Date.now()});
  }else catalogFilmReads.set(tmdb,{...next,token:null,askedRun});
  if(filmScreen&&routeTmdb(filmScreen)===tmdb)renderFilmShell();
@@ -843,6 +858,8 @@ function eligible(film) { const parsed=searchTokens(state.query); const matched=
 // repeat on the chosen channel is the only show there. `archive` holds the ready recordings, `ahead` the show on air and the shows that start inside the next 24 hours; the
 // film state comes only from `filmAvail`. `channels` overrides the selection (an empty or absent set means every channel).
 function filmLifecycle(film,now=viewingClock(),channels=state.channels){
+ // ADR 0177 decision 5 (owner A): a saved copy keeps its historical schedule, but no state about the PRESENT (archive, on air, soon, last chance) is derived from it.
+ if(film&&mirrorSnapshotShown())return {avail:null,archive:[],ahead:[],saved:savedShows(film)};
  const lib=availabilityLib();if(!lib||!film)return {avail:null,archive:[],ahead:[]};
  const model=viewingWindow(now),shows=findsWindowShows(film,now,channels?.size?{channels}:null).filter(show=>inEnvelope(model,show.start)),avail=filmAvail(film,now,shows),archive=[],ahead=[];
  for(const show of shows){const info=lib.showPhase({start:show.start,end:show.end},now,{runtimeMinutes:film.runtime}),phase=info.phase;if(phase==='archive')archive.push(show);else if(phase==='on_air'||phase==='future')ahead.push({...show,effectiveEnd:info.end});}
@@ -852,6 +869,7 @@ function filmLifecycle(film,now=viewingClock(),channels=state.channels){
 // its repeat in the «Все показы» list, but a repeat never moves it into «Скоро».
 function periodShows(film,period=state.period){
  const life=filmLifecycle(film),kind=life.avail?.state,p=normalizePeriod(period)||'all';
+ if(life.saved)return p==='all'?life.saved:[];
  if(kind==='available')return p==='soon'?[]:p==='archive'?life.archive:[...life.archive,...life.ahead];
  if(kind==='soon')return p==='archive'?[]:life.ahead;
  return [];
@@ -892,7 +910,7 @@ function letterboxdLink(film,options){const target=letterboxdTarget(film,options
 function channelControl(show){const hint=show.basis==='title_duration'?`<span class="match-hint" title="${escapeHTML(matchHintText(show.matchReason))}" aria-label="${escapeHTML(matchHintText(show.matchReason))}"> ≈</span>`:'';const name=typeof show.channel==='string'?show.channel:'';if(!name.trim())return `<span class="channel">${hint}</span>`;return `<span class="channel"><button type="button" class="channel-filter" data-channel="${escapeHTML(name)}" title="Добавить канал «${escapeHTML(name)}» в фильтр" aria-label="Добавить канал «${escapeHTML(name)}» в фильтр">${escapeHTML(name)}</button>${hint}</span>`;}
 function row(show){const start=showStart(show),date=new Date(start),time=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',hour:'2-digit',minute:'2-digit'}).format(date);return `<div class="show-row">${channelControl(show)}<time class="show-time" datetime="${date.toISOString()}">${madridStamp(start,{day:'numeric',month:'short'})}<b>${time}</b></time></div>`;}
 function compareShows(type){return (a,b)=>{const rank=(state.channels.has(a.channel)?0:1)-(state.channels.has(b.channel)?0:1);if(rank)return rank;return type==='archive'?showStart(b)-showStart(a):showStart(a)-showStart(b);};}
-function group(film,type){const life=filmLifecycle(film),shows=[...(type==='archive'?life.archive:life.ahead)].sort(compareShows(type));if(!shows.length)return '';return `<section class="show-group ${type}"><div class="group-title"><span>${type==='archive'?'АРХИВ':'ДАЛЬШЕ'}</span><span class="show-count">${shows.length} ${showWord(shows.length)}</span></div>${row(shows[0])}${shows.length>1?`<details class="more"><summary>Ещё ${shows.length-1} ${showWord(shows.length-1)}</summary>${shows.slice(1).map(row).join('')}</details>`:''}</section>`;}
+function group(film,type){const life=filmLifecycle(film),saved=!!life.saved;if(saved&&type==='archive')return '';const shows=[...(saved?life.saved:type==='archive'?life.archive:life.ahead)].sort(saved?(a,b)=>showStart(a)-showStart(b):compareShows(type));if(!shows.length)return '';return `<section class="show-group ${saved?'saved':type}"><div class="group-title"><span>${saved?'СОХРАНЁННОЕ РАСПИСАНИЕ':type==='archive'?'АРХИВ':'ДАЛЬШЕ'}</span><span class="show-count">${shows.length} ${showWord(shows.length)}</span></div>${row(shows[0])}${shows.length>1?`<details class="more"><summary>Ещё ${shows.length-1} ${showWord(shows.length-1)}</summary>${shows.slice(1).map(row).join('')}</details>`:''}</section>`;}
 function filmSupportsStarted(film){return !!(film&&!film.catalogOnly&&!film.catalogRoute);}
 function startedButton(film,labeled=false){
  const id=String(film.id),on=startedIds.has(id),busy=savingStarted.has(id);
@@ -996,6 +1014,11 @@ function filmAvailabilityHead(avail,now,count){
  return `<div class="film-avail-head" data-availability="${avail.state}">${pill}${note}</div>${hint}`;
 }
 function filmAvailability(film){
+ if(mirrorSnapshotShown()){
+  // A saved copy: the historical schedule as stored, with no phase, archive deadline or «скоро» claim; current availability is unverified.
+  const saved=savedShows(film).sort((a,b)=>a.start-b.start);
+  return `<section class="film-section film-availability" aria-label="Показы"><h2>Показы</h2><p class="film-hint">Расписание из сохранённой копии, как оно было сохранено. Доступность сейчас не проверена.</p>${saved.length?`<div class="film-show-list">${saved.map(show=>filmShowRow(show,null)).join('')}</div>`:'<p class="film-missing">В сохранённой копии нет показов этого фильма</p>'}</section>`;
+ }
  const now=viewingClock(),shows=availableShows(film,now),avail=filmAvail(film,now,shows),infos=shows.map(show=>filmShowInfo(film,show,now));
  const by=phase=>shows.map((show,i)=>({show,info:infos[i]})).filter(item=>(item.info?.phase||'')===phase);
  const archive=by('archive'),future=by('future'),live=[...by('on_air'),...by('unknown')];
@@ -1268,7 +1291,7 @@ function shortlistAvailabilityText(item){
 const SHORTLIST_EMPTY={available:'Нет подходящих вариантов с готовым архивом, оценкой или прогнозом. Измени фильтры или выбери «Скоро». Границы фильтров сохранены.',soon:'Сейчас нет подходящих вариантов «Скоро»: фильмов без готового архива, которые идут в эфире или начнутся в ближайшие 24 часа, с оценкой или прогнозом. Измени фильтры или выбери «Доступно». Границы фильтров сохранены.'};
 // A period that holds only the other group leaves this one empty by construction: say so instead of a generic empty state.
 const SHORTLIST_CONFLICT={'available:soon':'Период «Скоро» оставил только фильмы без готового архива. Выбери период «Все показы» или «Архив», чтобы увидеть «Доступно».','soon:archive':'Период «Архив» оставил только фильмы с готовым архивом. Выбери период «Все показы» или «Скоро», чтобы увидеть «Скоро».'};
-function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node)return;const mode=normalizeShortlistMode(state.shortlistMode),list=valid?buildShortlist(visible,mode):[];$('#shortlist-cards').innerHTML=list.map(item=>{const f=item.film;return `<article class="shortlist-card" data-shortlist-state="${item.availability.state}"><h3><button type="button" data-shortlist-film="${escapeHTML(f.id)}">${escapeHTML(f.title)}</button>${letterboxdLink(f)}</h3><p class="shortlist-meta">${escapeHTML(f.year||'Год не указан')} · ${Number(f.runtime)>0?Math.round(f.runtime)+' мин':'Длительность неизвестна'}</p><p class="shortlist-score">${item.score.actual?'Твоя оценка':'Прогноз'} <strong>${item.score.rating.toFixed(1)} ★</strong></p><p class="shortlist-availability">${escapeHTML(shortlistAvailabilityText(item))}</p><div class="shortlist-reasons">${item.reasons.map(reason=>`<span>${escapeHTML(reason)}</span>`).join('')}</div></article>`;}).join('');$('#shortlist-empty').hidden=list.length>0;$('#shortlist-empty').textContent=!valid?'Проверь значения фильтров.':!ratingsLoaded?'Загружаем оценки и прогнозы…':SHORTLIST_CONFLICT[mode+':'+normalizePeriod(state.period)]||SHORTLIST_EMPTY[mode];$('#shortlist-caption').textContent='Из твоей выборки · только актуальное окно показов';document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.shortlistMode===mode)));}
+function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node)return;const mode=normalizeShortlistMode(state.shortlistMode),list=valid?buildShortlist(visible,mode):[];$('#shortlist-cards').innerHTML=list.map(item=>{const f=item.film;return `<article class="shortlist-card" data-shortlist-state="${item.availability.state}"><h3><button type="button" data-shortlist-film="${escapeHTML(f.id)}">${escapeHTML(f.title)}</button>${letterboxdLink(f)}</h3><p class="shortlist-meta">${escapeHTML(f.year||'Год не указан')} · ${Number(f.runtime)>0?Math.round(f.runtime)+' мин':'Длительность неизвестна'}</p><p class="shortlist-score">${item.score.actual?'Твоя оценка':'Прогноз'} <strong>${item.score.rating.toFixed(1)} ★</strong></p><p class="shortlist-availability">${escapeHTML(shortlistAvailabilityText(item))}</p><div class="shortlist-reasons">${item.reasons.map(reason=>`<span>${escapeHTML(reason)}</span>`).join('')}</div></article>`;}).join('');$('#shortlist-empty').hidden=list.length>0;$('#shortlist-empty').textContent=!valid?'Проверь значения фильтров.':mirrorSnapshotShown()?'Подборка по доступности недоступна: данные из сохранённой копии, текущая доступность не проверена.':!ratingsLoaded?'Загружаем оценки и прогнозы…':SHORTLIST_CONFLICT[mode+':'+normalizePeriod(state.period)]||SHORTLIST_EMPTY[mode];$('#shortlist-caption').textContent=mirrorSnapshotShown()?'Доступность сейчас не проверена':'Из твоей выборки · только актуальное окно показов';document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.shortlistMode===mode)));}
 
 // Finds: strong catalog films outside the watchlist, read from GET /api/catalog/available. The route decides eligibility; this block only re-checks it against the loaded watchlist and clock, ranks and presents.
 // With a channel filter the section becomes channel-scoped: only shows on a selected channel (OR across channels) inside the selected period of the
@@ -1389,6 +1412,7 @@ const findsMarks=new Map();let findsNotice=null;
 // clock and needs no new request. Without the module (an isolated test context) it answers `null` and every consumer keeps its previous behavior.
 function availabilityLib(){return typeof FilmAvailability==='undefined'?null:FilmAvailability;}
 function filmAvail(film,now=viewingClock(),shows=film?.shows){
+ if(mirrorSnapshotShown())return null;
  const lib=availabilityLib();if(!lib||!film)return null;
  const list=(shows||[]).map(show=>({start:showStart(show),end:show?.end})).filter(show=>show.start!==null);
  return lib.filmAvailability(list,now,{runtimeMinutes:film.runtime});
@@ -2269,19 +2293,32 @@ async function loadProgramme({quiet}={}){
   if(!data||!Array.isArray(data.films))throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
   // AIR-541: a saved copy never replaces what is already shown from the authoritative source (the last good result stays in memory); on a cold load it is shown, read-only and labelled.
   if(data.source==='mirror'&&data.readOnly===true){
-   if(programmeReady&&!degradedSources.has('programme')){programmeRefreshError=true;updateProgrammeStatus();return false;}
-   noteDegraded('programme',data);
-  }else if(clearDegraded('programme')){loadStarted({quiet:true});}
+   if(programmeReady&&degradedSources.get('programme')?.kind!=='mirror'){
+    // The authoritative result in memory stays on screen (last known good) but is read-only until an authoritative refresh succeeds.
+    programmeRefreshError=true;
+    const marked=noteDegraded('programme',{asOf:stampIso(programmeLoadedAt),reason:'refresh_failed'},'lkg');
+    updateProgrammeStatus();if(marked)refreshDegradedViews();
+    return false;
+   }
+   noteDegraded('programme',data,'mirror');
+  }
+  const recovered=!(data.source==='mirror'&&data.readOnly===true)&&clearDegraded('programme');
+  if(recovered)loadStarted({quiet:true});
+  if(!(data.source==='mirror'&&data.readOnly===true))programmeLoadedAt=Date.now();
   programmeRefreshError=false;
   const changed=installProgramme(data);
   if(!programmeReady)await finishProgrammeUi();
   else if(changed){refreshGenreOptions();updateFacetOptions();updateSourceInfo();renderPreservingScroll();if(filmScreen)renderFilmShell();}
-  else updateSourceInfo();
+  else{updateSourceInfo();if(recovered)refreshDegradedViews();}
   renderFinds();
   return true;
  }catch(error){
   programmeRefreshError=true;
-  if(programmeReady)updateProgrammeStatus();
+  if(programmeReady){
+   // A failed refresh leaves the last authoritative result readable but read-only until a refresh succeeds (also without a usable saved copy).
+   const marked=!degradedSources.has('programme')&&noteDegraded('programme',{asOf:stampIso(programmeLoadedAt),reason:'refresh_failed'},'lkg');
+   updateProgrammeStatus();if(marked)refreshDegradedViews();
+  }
   if(!programmeReady&&!quiet){showProgrammeUnavailable(error);throw error;}
   return false;
  }finally{programmeLoading=false;}

@@ -111,7 +111,7 @@ flowchart TD
     valid -->|"none, or the film identity is not proven"| shell
 ```
 
-The mirror is read per object. The root `programme.json` is valid by its own `runId` even when `epg/published-generation.json` lags it; a programme and a watchlist are joined only as a best-effort heuristic (same run key, or the root pair of the pointer's run), and the response says so. No `available`, `soon`, hot or last-chance state is recomputed from a stale snapshot: the schedule is shown as saved at its own time.
+The mirror is read per object. The root `programme.json` is valid by its own `runId` even when `epg/published-generation.json` lags it; a programme and a watchlist are joined only as a best-effort heuristic (same run key, or the root pair of the pointer's run), and the response says so. Older generation copies are ranked by their upload time, not by their UUID run id. No `available`, `soon`, hot or last-chance state is recomputed from a stale snapshot: the schedule is shown as saved at its own time.
 
 ```mermaid
 flowchart LR
@@ -128,4 +128,4 @@ flowchart LR
     handler -->|"D1 cannot answer"| typed
 ```
 
-The page keeps the last good authoritative result only in memory. A saved-copy answer never replaces it, and the normal source and the write actions return only after a successful authoritative read.
+The page keeps the last good authoritative result only in memory. A saved-copy answer never replaces it, but any failed refresh makes the page read-only until an authoritative read succeeds; the normal source and the write actions return only then. A displayed saved copy keeps its historical schedule but yields no archive, on-air, soon or last-chance claim.

@@ -10,7 +10,8 @@ export const MIRROR_POINTER_KEY='epg/published-generation.json';
 export const MIRROR_PROGRAMME_KEY='programme.json';
 export const MIRROR_WATCHLIST_KEY='watchlist.json';
 export const MIRROR_MAX_BYTES=8*1024*1024;
-const MIRROR_RUN_LIST_LIMIT=40,MIRROR_OLDER_RUNS=4;
+// The older-run search is bounded: at most MIRROR_LIST_PAGES pages of MIRROR_LIST_PAGE objects are listed and at most MIRROR_OLDER_READS programme copies are read (newest upload first).
+const MIRROR_LIST_PAGE=1000,MIRROR_LIST_PAGES=5,MIRROR_OLDER_READS=6;
 const RUN_ID=/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const TMDB_ID=/^[1-9]\d{0,11}$/;
 const generationKey=(run,name)=>'epg/generations/'+run+'/'+name;
@@ -25,11 +26,17 @@ export function isTemporaryReadFault(error){
 
 const isObject=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const isIso=value=>typeof value==='string'&&Number.isFinite(Date.parse(value));
+// The minimum a record must carry to be shown and joined: an id and a title (and, when present, `shows` as a list of objects). A document is valid only when its required
+// fields and EVERY record meet this minimum, so a corrupt but syntactically valid object cannot win over a healthy one; independently valid objects are never affected.
+const nonEmptyId=value=>(typeof value==='string'&&value.length>0&&value.length<=160)||(Number.isSafeInteger(value)&&value>=0);
+const usableFilm=film=>isObject(film)&&nonEmptyId(film.id)&&typeof film.title==='string'&&film.title.trim().length>0&&(film.shows===undefined||(Array.isArray(film.shows)&&film.shows.every(isObject)));
+const usableCatalogFilm=film=>isObject(film)&&nonEmptyId(film.id)&&(film.shows===undefined||(Array.isArray(film.shows)&&film.shows.every(isObject)));
 export function validProgramme(doc){
- return isObject(doc)&&Array.isArray(doc.films)&&typeof doc.runId==='string'&&RUN_ID.test(doc.runId)&&doc.films.every(isObject);
+ return isObject(doc)&&typeof doc.runId==='string'&&RUN_ID.test(doc.runId)&&isIso(doc.updatedAt)&&Array.isArray(doc.films)&&doc.films.every(usableFilm)
+  &&(doc.catalogFilms===undefined||(Array.isArray(doc.catalogFilms)&&doc.catalogFilms.every(usableCatalogFilm)));
 }
 export function validWatchlist(doc){
- return isObject(doc)&&Array.isArray(doc.films)&&doc.films.every(isObject);
+ return isObject(doc)&&isIso(doc.updatedAt)&&Array.isArray(doc.films)&&doc.films.every(usableFilm);
 }
 // The snapshot time of one object: its own timestamp, else the R2 upload time. Never the request time.
 const uploadedIso=uploaded=>{try{return uploaded?new Date(uploaded).toISOString():null;}catch{return null;}};
@@ -62,20 +69,32 @@ async function readPointer(bucket){
  return {run,reason:run?null:'invalid_pointer'};
 }
 
-// Older generation copies by the run id in their key, newest snapshot first. Only used when neither the pointer's copy nor the root programme is usable.
-async function olderProgrammes(bucket,skip){
- if(typeof bucket.list!=='function')return [];
- let listed;
- try{listed=await bucket.list({prefix:'epg/generations/',delimiter:'/',limit:MIRROR_RUN_LIST_LIMIT});}catch{return [];}
- const fromPrefixes=(listed?.delimitedPrefixes||[]).map(prefix=>String(prefix).slice('epg/generations/'.length).replace(/\/$/,''));
- const fromObjects=(listed?.objects||[]).map(object=>/^epg\/generations\/([^/]+)\/programme\.json$/.exec(String(object?.key))?.[1]).filter(Boolean);
- const runs=[...new Set([...fromPrefixes,...fromObjects])].sort().filter(run=>RUN_ID.test(run)&&!skip.has(run));
- const found=[];
- for(const run of runs.slice(-MIRROR_OLDER_RUNS).reverse()){
-  const read=await readOne(bucket,generationKey(run,'programme.json'),validProgramme);
-  if(read.ok&&read.doc.runId===run)found.push(read);
+// Generation copies of OTHER runs. A run id is a UUID, not a timestamp, so the lexical order of keys says nothing about recency: the programme copies are listed (bounded
+// pagination) and ranked by their R2 `uploaded` time, then each of the newest few is read, validated alone and ranked by its own snapshot time.
+async function listProgrammeCopies(bucket,skip){
+ if(typeof bucket.list!=='function')return {copies:[],truncated:false};
+ const copies=new Map();let cursor,truncated=false;
+ for(let page=0;page<MIRROR_LIST_PAGES;page++){
+  let listed;
+  try{listed=await bucket.list({prefix:'epg/generations/',limit:MIRROR_LIST_PAGE,...(cursor?{cursor}:{})});}catch{return {copies:[...copies.values()],truncated:true};}
+  for(const object of listed?.objects||[]){
+   const run=/^epg\/generations\/([^/]+)\/programme\.json$/.exec(String(object?.key))?.[1];
+   if(run&&RUN_ID.test(run)&&!skip.has(run))copies.set(run,{run,key:String(object.key),uploaded:object.uploaded?Date.parse(object.uploaded):NaN});
+  }
+  if(!listed?.truncated||!listed.cursor){truncated=false;cursor=undefined;break;}
+  cursor=listed.cursor;truncated=true;
  }
- return found.sort((a,b)=>String(programmeAsOf(b.doc,b.uploaded)).localeCompare(String(programmeAsOf(a.doc,a.uploaded))));
+ return {copies:[...copies.values()],truncated:truncated&&!!cursor};
+}
+async function olderProgrammes(bucket,skip,limit=MIRROR_OLDER_READS){
+ const {copies,truncated}=await listProgrammeCopies(bucket,skip);
+ const ranked=copies.sort((a,b)=>(Number.isFinite(b.uploaded)?b.uploaded:-Infinity)-(Number.isFinite(a.uploaded)?a.uploaded:-Infinity)||a.run.localeCompare(b.run));
+ const found=[];
+ for(const copy of ranked.slice(0,limit)){
+  const read=await readOne(bucket,copy.key,validProgramme);
+  if(read.ok&&read.doc.runId===copy.run)found.push(read);
+ }
+ return {found:found.sort((a,b)=>String(programmeAsOf(b.doc,b.uploaded)).localeCompare(String(programmeAsOf(a.doc,a.uploaded)))),truncated};
 }
 
 // The best valid programme and the best valid watchlist, each read and validated alone. Candidate order for a programme: the generation copy of the pointer's run, the root
@@ -100,7 +119,8 @@ export async function readMirrorSnapshot(env){
  }
  if(!programme){
   const older=await olderProgrammes(bucket,new Set(pointerRun?[pointerRun]:[]));
-  if(older.length)programme={...older[0],run:older[0].doc.runId,source:'older_generation_copy'};
+  if(older.truncated)rejected.push({key:'epg/generations/',reason:'list_truncated'});
+  if(older.found.length)programme={...older.found[0],run:older.found[0].doc.runId,source:'older_generation_copy'};
  }
  let watchlist=null;
  const watchCandidates=[];
@@ -172,4 +192,27 @@ export function mirrorFilmIdentity(snapshot,tmdbId){
  const disputed=candidates.some(other=>other!==chosen&&(String(other.film.title)!==String(chosen.film.title)||String(other.film.year)!==String(chosen.film.year)));
  const film={...chosen.film,tmdbId:wanted,canonicalIdentity:'tmdb:'+wanted};
  return {state:'found',film,disputed,provenance:{object:chosen.kind,key:chosen.object.key,runId:chosen.object.runId,asOf:chosen.object.asOf},sources:candidates.map(entry=>({object:entry.kind,key:entry.object.key,runId:entry.object.runId,asOf:entry.object.asOf}))};
+}
+
+// The film page lookup: the selected programme/watchlist pair first; when the film is in none of them, other RECENT generation copies (each read and validated alone, newest
+// snapshot first, bounded) are searched, so a film that only an older run still lists is shown with the provenance of that run. Never a 404, 410 or 409.
+export async function findMirrorFilm(env,snapshot,tmdbId){
+ const first=mirrorFilmIdentity(snapshot,tmdbId);
+ if(first.state==='found'||first.reason!=='not_in_mirror')return first;
+ const bucket=env?.BUCKET;
+ if(!bucket)return first;
+ const skip=new Set([snapshot.programme?.runId,snapshot.pointerRun].filter(Boolean));
+ const {found}=await olderProgrammes(bucket,skip);
+ for(const programme of found){
+  const watch=await readOne(bucket,generationKey(programme.doc.runId,'watchlist.json'),validWatchlist);
+  const pair={
+   programme:{doc:programme.doc,runId:programme.doc.runId,key:programme.key,source:'older_generation_copy',asOf:programmeAsOf(programme.doc,programme.uploaded)},
+   watchlist:watch.ok?{doc:watch.doc,runId:programme.doc.runId,key:watch.key,source:'generation_copy',asOf:watchlistAsOf(watch.doc,watch.uploaded)}:null,
+   pointerRun:snapshot.pointerRun,
+  };
+  const identity=mirrorFilmIdentity(pair,tmdbId);
+  if(identity.state==='found')return {...identity,olderRun:true,pair};
+  if(identity.reason==='identity_key_contradiction')return identity;
+ }
+ return first;
 }

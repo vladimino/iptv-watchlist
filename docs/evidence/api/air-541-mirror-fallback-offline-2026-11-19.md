@@ -4,7 +4,7 @@ Dated, offline evidence for [ADR 0177](../../adr/0177-read-only-mirror-fallback-
 
 ## Automated tests
 
-`npm run test:all` on the final tree: core suite 424 of 424 files passed, non-functional suite 35 of 35 passed (the pre-push hook ran the core suite again on the pushed commit). `npm run build` passed. New core files:
+`npm run test:all` on the final tree: core suite 424 of 424 files passed (counted again after the review fixes, see the final PR comment), non-functional suite 35 of 35 passed (the pre-push hook ran the core suite again on the pushed commit). `npm run build` passed. New core files:
 
 | File | What it proves |
 | --- | --- |
@@ -16,18 +16,24 @@ Dated, offline evidence for [ADR 0177](../../adr/0177-read-only-mirror-fallback-
 
 Existing tests changed: `tests/film-permalink.mjs` (the unavailable shell text), `scripts/test-classification.mjs` (five new files, core). `tests/canonical-catalog-titles-mutation.mjs` still passes unchanged (its anchors are kept).
 
+## Review round 1 (PR #798): four P1 fixes
+
+Independent review of `56a2a724` blocked four findings; each has an isolated test. (1) A failed refresh now makes the page read-only while the last authoritative result stays visible (`tests/mirror-fallback-client.mjs`: a saved copy over an authoritative result, a network error, a `503`, a film refresh failure and the recovery of each). (2) A displayed saved copy yields no archive, on-air, soon, last-chance, deadline or shortlist claim; the stored schedule stays readable (same file: lifecycle, card, film page, periods, shortlist, with an on-air and a deadline-within-8-hours show against the current clock). (3) Strict minimum schema: an empty record, a record without a title, a missing `updatedAt`, a non-list `shows` or a malformed `catalogFilms` entry no longer wins over a healthy root (`tests/mirror-read.mjs`). (4) Older generation copies are ranked by R2 upload time with bounded pagination: 60 generations with shuffled UUID run ids, listed in pages of 25, find the newest usable copy within at most 5 list pages and 12 reads, and a corrupt newest copy falls to the next most recent. The non-blocking question is answered: a film that only an older generation lists is found by a bounded search of recent copies (`findMirrorFilm`, `tests/mirror-read.mjs`, `tests/mirror-fallback-routes.mjs`); a film older than the bound is an honest neutral shell.
+
 ## Rendered browser check
 
-A real Chromium against the production bundle behind a local HTTP port (sqlite D1, in-memory R2, a switch that makes document reads fail with `D1 DB is overloaded`), desktop 1280×900 and mobile 390×844, 39 checks, all passed:
+A real Chromium against the production bundle behind a local HTTP port (sqlite D1, in-memory R2, a switch that makes document reads fail with `D1 DB is overloaded`), desktop 1280×900 and mobile 390×844, 43 checks, all passed (re-run after the review fixes; the first run had 39):
 
 - healthy page: no note; outage cold load: «Сохранённая копия · обновлена …» and the saved film rendered;
 - the «Начал просмотр» button is `disabled` and `aria-disabled="true"`, and **no non-GET request** was sent while degraded;
 - cold `/film/tmdb_42` and its reload show the film with the note; list → film → Back → Forward works;
 - an unknown film shows «Сведения пока не загружаются» (not «Фильм не найден») with a keyboard-focusable retry, focus reaches the retry control with Tab;
 - recovery: after D1 returns, the retry shows the authoritative answer (a confirmed absence for that id), a reload removes the note, and **without a reload** a live refresh clears the note and the write controls come back;
+- the saved copy lists the stored schedule as «СОХРАНЁННОЕ РАСПИСАНИЕ» with no «АРХИВ», «ДАЛЬШЕ», «Последний шанс» or «Скоро» text;
+- last known good: a healthy page whose refresh then fails keeps its data, shows the note, and an authoritative refresh restores normal mode;
 - no horizontal overflow at 390 px.
 
-No screenshot was created, saved or committed. Limits of this check: it used synthetic films, not production data; the «started button enabled after recovery» check passes also when the page has no such button, so it is weaker than the other checks.
+No screenshot was created, saved or committed. Limits of this check: the healthy page of this local database lists no film card, so the browser run did not click a disabled control in the last-known-good case (that case is covered by `tests/mirror-fallback-client.mjs`); it used synthetic films, not production data; the «started button enabled after recovery» check passes also when the page has no such button, so it is weaker than the other checks.
 
 ## Not verified
 

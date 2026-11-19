@@ -151,6 +151,17 @@ for(const route of ['/api/programme','/api/watchlist']){
  assert.notEqual(absent.body?.source,'mirror');
 }
 
+// A film that only an OLDER generation copy still lists is shown with the provenance of that run; a film in no recent copy keeps the typed 503.
+{
+ const down=sql=>/FROM discovery_admission/.test(sql);
+ const OLD='33333333-3333-4333-8333-333333333333';
+ const older=programme=>bucket=>{seed()(bucket);put(bucket,'epg/generations/'+OLD+'/programme.json',{...mirrorProgramme([film('tmdb_88',88,'Only in the older run')]),runId:OLD,updatedAt:'2026-11-15T10:00:00.000Z'});};
+ const r=await call('/api/catalog/film/88',{mirrors:older(),fail:down});
+ assert.equal(r.status,200);assert.equal(r.body.source,'mirror');assert.equal(r.body.film.title,'Only in the older run');assert.equal(r.body.provenance.runId,OLD);assert.equal(r.body.runId,OLD);
+ assert.deepEqual(r.bucket.writes,[]);
+ const none=await call('/api/catalog/film/89',{mirrors:older(),fail:down});assert.equal(none.status,503);
+}
+
 // ---- the write fence ----
 {
  const post=(body,headers={})=>({init:{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)}});

@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {scoped} from '../scripts/bundle-scope.mjs';
 
 
 const source=fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
@@ -31,6 +32,7 @@ const live=vm.createContext({Date,Intl,Set,Map,URL,URLSearchParams,JSON,window,d
   return Promise.resolve({ok:status>=200&&status<300,status,json:async()=>body,headers:{get(){return null;}}});
  }});
 vm.runInContext(source,live);
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),live);
 const run=(code,input)=>{live.input=input;return vm.runInContext(code,live);};
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const html=id=>query(id).innerHTML;
@@ -87,11 +89,57 @@ assert.equal(run('isDegraded()'),true,'a cold load from a saved copy is shown, l
 plan.set('/api/programme',{status:200,body:{runId:'R2',films:[film]}});run('programmeLoading=false');
 assert.equal(await run('loadProgramme()'),true);
 assert.equal(run('isDegraded()'),false,'after an authoritative refresh the normal source and the actions return');assert.equal(run('loadedStarted'),1,'the started marks are read again from the authoritative source');
-// An authoritative programme already in memory is the last known good: a later saved-copy answer does not replace it.
+// An authoritative programme already in memory is the last known good: a later saved-copy answer does not replace it, but the page is READ-ONLY until an authoritative refresh succeeds.
 plan.set('/api/programme',{status:200,body:{runId:'R0-old',films:[],...meta}});run('programmeLoading=false');
-assert.equal(await run('loadProgramme()'),false);assert.equal(run('report.runId'),'R2','the authoritative result stays in memory');assert.equal(run('isDegraded()'),false);
-assert.equal(run('programmeRefreshError'),true,'the page says the refresh failed, quietly');
+assert.equal(await run('loadProgramme()'),false);assert.equal(run('report.runId'),'R2','the authoritative result stays in memory');
+assert.equal(run('isDegraded()'),true,'the unsafe state is gone: a refresh that failed makes the page read-only');assert.equal(run('degradedSources.get("programme").kind'),'lkg');
+assert.equal(run('mirrorSnapshotShown()'),false,'the data is authoritative, only its refresh failed: no saved-copy claims are suppressed');
+assert.equal(run('programmeRefreshError'),true,'the page says the refresh failed, quietly');assert.match(query('#degraded-note').textContent,/^Сохранённая копия · обновлена /);
+run('startedReady=true;startedIds=new Set();startedLoading=false;savingStarted.clear()');
+assert.match(run('startedButton(input)',film),/disabled/);fetches.length=0;run('toggleStarted("w1")');await tick();assert.deepEqual(fetches,[],'no write from a page whose refresh failed');
+assert.deepEqual(plain(run('writeHeaders({})')),{'X-Data-Origin':'mirror'});
+// The next authoritative refresh restores the actions and reads the started marks again.
+plan.set('/api/programme',{status:200,body:{runId:'R3',films:[film]}});run('programmeLoading=false;loadedStarted=0');
+assert.equal(await run('loadProgramme()'),true);assert.equal(run('isDegraded()'),false);assert.equal(run('loadedStarted'),1);assert.doesNotMatch(run('startedButton(input)',film),/aria-disabled/);
+// A refresh that fails outright (a network error, or a 503 with no usable saved copy) has the same read-only consequence, and the data stays.
+for(const failure of [new Error('offline'),{status:503,body:{error:'x'}}]){
+ plan.set('/api/programme',failure);run('programmeLoading=false');
+ assert.equal(await run('loadProgramme({quiet:true})'),false);
+ assert.equal(run('report.runId'),'R3','the last authoritative result stays');assert.equal(run('isDegraded()'),true,'a failed refresh makes the page read-only: '+(failure.status||failure.message));
+ fetches.length=0;run('toggleStarted("w1")');await tick();assert.deepEqual(fetches,[],'no write');
+ plan.set('/api/programme',{status:200,body:{runId:'R3',films:[film]}});run('programmeLoading=false');await run('loadProgramme()');assert.equal(run('isDegraded()'),false,'and an authoritative success ends it');
+}
 assert.deepEqual(fetches.filter(item=>item.method!=='GET'),[]);
+
+// ---- 3b. no claim about the PRESENT is derived from a saved schedule (ADR 0177 decision 5, owner A) ----
+{
+ const hourMs=3600000,at=Date.now();
+ const live={...film,id:'tmdb_42',shows:[{channelId:'c',channel:'Канал',start:at-3*hourMs,end:at-hourMs},{channelId:'c',channel:'Канал',start:at+2*hourMs,end:at+4*hourMs}]};
+ const setReport=()=>run(`films=[input];report={runId:"R1",updatedAt:"2026-11-19T10:00:00Z",window:{from:${at-72*hourMs},to:${at+24*hourMs}},people:{directors:[],actors:[]}};enrichment={profile:null,films:{}};ratingsLoaded=true`,live);
+ reset();setReport();
+ // Authoritative: the lifecycle talks about the present (an archive, a deadline).
+ const normal=run('filmLifecycle(films[0])');
+ assert.ok(normal.avail,'authoritative data has a lifecycle');assert.equal(typeof normal.avail.state,'string');
+ assert.match(run('filmAvailability(films[0])'),/film-avail-head/);
+ // Saved copy: the same stored shows, but no state, no deadline, no «скоро», no last-chance badge, no shortlist, no phase labels.
+ run('noteDegraded("programme",input,"mirror")',meta);
+ const saved=run('filmLifecycle(films[0])');
+ assert.equal(saved.avail,null);assert.equal(saved.archive.length,0);assert.equal(saved.ahead.length,0);assert.equal(saved.saved.length,2,'the historical schedule is kept');
+ assert.equal(run('filmAvail(films[0])'),null);assert.equal(run('isLastChance(films[0])'),false);assert.equal(run('archiveDeadline(films[0])'),null);assert.equal(run('soonBadge(films[0])'),'');assert.equal(run('lastChanceBadge(films[0])'),'');
+ const head=run('filmAvailability(films[0])');
+ assert.doesNotMatch(head,/Архив доступен до|Сейчас в эфире|В эфире|Повтор в эфире|Дальше|Готового архива|film-avail-head|last-chance|Скоро/);
+ assert.match(head,/Расписание из сохранённой копии/);assert.match(head,/Доступность сейчас не проверена/);assert.equal((head.match(/class="show-row/g)||[]).length+(head.match(/film-show-row|show-row/g)||[]).length>=2,true,'the stored shows are still readable');
+ const cardHtml=run('card(films[0])');
+ assert.doesNotMatch(cardHtml,/АРХИВ|ДАЛЬШЕ|last-chance|soon-badge|Последний шанс|Скоро:/);assert.match(cardHtml,/СОХРАНЁННОЕ РАСПИСАНИЕ/);
+ assert.equal(run('periodShows(films[0],"all").length'),2);assert.equal(run('periodShows(films[0],"archive").length'),0);assert.equal(run('periodShows(films[0],"soon").length'),0);
+ assert.equal(run('inSelectedScope(films[0],"all")'),true,'the film is still listed');
+ assert.deepEqual(plain(run('buildShortlist([films[0]],"available",Date.now())')),[],'no availability shortlist from a saved copy');
+ run('renderShortlist([films[0]],true)');assert.match(query('#shortlist-empty').textContent,/сохранённой копии/);assert.match(query('#shortlist-caption').textContent,/не проверена/);
+ // A last-known-good (authoritative data, failed refresh) is NOT a saved copy: its lifecycle is still computed.
+ run('clearDegraded("programme");noteDegraded("programme",input,"lkg")',{asOf:null});
+ assert.ok(run('filmLifecycle(films[0])').avail,'an authoritative result keeps its lifecycle when only the refresh failed');
+ run('clearDegraded("programme")');
+}
 
 // ---- 4. the film page ----
 // A film proven by the mirrors is shown with the note and no write.
@@ -121,6 +169,9 @@ assert.equal(run('isDegraded()'),false);
 reset();plan.set('/api/catalog/film/54',{status:200,body:{status:'found',programmeRunId:'R1',film:entry(54)}});await open('tmdb_54');
 plan.set('/api/catalog/film/54',{status:503,body:{status:'unavailable'}});run('ensureCatalogFilm("54",{refresh:true})');await tick();await tick();
 assert.equal(query('#film-screen-title').textContent,'Каталожный 54','the film already shown is kept through a transient failure');
+assert.equal(run('isDegraded()'),true,'a film whose refresh failed is read-only');assert.equal(run('degradedSources.get("film:54").kind'),'lkg');
+plan.set('/api/catalog/film/54',{status:200,body:{status:'found',programmeRunId:'R2',film:entry(54)}});run('ensureCatalogFilm("54",{refresh:true})');await tick();await tick();
+assert.equal(run('isDegraded()'),false,'an authoritative read of the film ends it');
 
 // ---- 5. nothing is persisted: a reload starts empty and authoritative-first ----
 const appSource=fs.readFileSync('public/app.js','utf8');

@@ -14,7 +14,7 @@ for(const file of files){
 }
 const worker=fs.readFileSync('src/worker.js','utf8');
 const uses=[...worker.matchAll(/MirrorRead\.([A-Za-z]+)/g)].map(match=>match[1]);
-assert.deepEqual([...new Set(uses)].sort(),['isTemporaryReadFault','mirrorFilmIdentity','mirrorMeta','readMirrorSnapshot'],'the Worker uses exactly the read API of the mirror module');
+assert.deepEqual([...new Set(uses)].sort(),['findMirrorFilm','isTemporaryReadFault','mirrorMeta','readMirrorSnapshot'],'the Worker uses exactly the read API of the mirror module');
 // Every call of a degraded response builder sits in a GET read handler (catalogFilmRoute, /api/programme, /api/watchlist) and nowhere else.
 const callers=[...worker.matchAll(/degraded(?:Programme|Watchlist|Film)Response\(/g)];
 assert.ok(callers.length>=6);
