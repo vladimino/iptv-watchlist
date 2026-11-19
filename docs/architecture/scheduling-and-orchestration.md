@@ -437,7 +437,7 @@ sequenceDiagram
 
 The sequence shows only the operator path. The natural handover, the step-failure recovery and the reconcile are unchanged. The diagram is not evidence that a live apply ran; each production `apply` needs its own owner approval.
 
-## Controlled EPG Workflow rollover ([ADR 0175](../adr/0175-controlled-epg-workflow-rollover.md), Proposed)
+## Controlled EPG Workflow rollover ([ADR 0176](../adr/0176-controlled-epg-workflow-rollover.md), Proposed)
 
 A live EPG Workflow instance keeps the Worker version it was created on until it hands over or ends. The owner can move the run onto the deployed version earlier with the owner-only MCP tool `epg_workflow_rollover` ([runbook](../runbooks/epg-workflow-rollover.md)). It is never called by the cron, a Workflow schedule or a Scheduled Task. The only ownership change is one compare-and-set of the control record to the deterministic successor (`series + 1`, same run key, epoch and run id), conditioned on the mode revision and on the step-lease row being unchanged since the read, and admitted only while the owner is provably asleep outside a step.
 

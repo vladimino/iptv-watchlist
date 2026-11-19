@@ -1,6 +1,6 @@
 # EPG Workflow controlled rollover: offline test evidence (19 November 2026, UTC)
 
-Scope: [AIR-540](https://trello.com/c/YAVfVHrs), [ADR 0175](../../adr/0175-controlled-epg-workflow-rollover.md). Method: `tests/epg-workflow-rollover.mjs`, an offline vm Worker with the real `src/epg-orchestration.js`, a sqlite D1 stand-in with the migrated `epg_orchestration_document` table, a scripted pipeline, a Workflow binding stand-in and a fixed clock (2026-11-19T20:00:00Z, run key 2026-11-19). `tests/mcp.mjs` covers the Access gate. No production read or write, no Cloudflare call, no network.
+Scope: [AIR-540](https://trello.com/c/YAVfVHrs), [ADR 0176](../../adr/0176-controlled-epg-workflow-rollover.md). Method: `tests/epg-workflow-rollover.mjs`, an offline vm Worker with the real `src/epg-orchestration.js`, a sqlite D1 stand-in with the migrated `epg_orchestration_document` table, a scripted pipeline, a Workflow binding stand-in and a fixed clock (2026-11-19T20:00:00Z, run key 2026-11-19). `tests/mcp.mjs` covers the Access gate. No production read or write, no Cloudflare call, no network.
 
 ## Verified offline
 

@@ -1,4 +1,4 @@
-// The controlled EPG Workflow rollover (ADR 0175): dry_run writes nothing; apply swaps the control record to the deterministic successor
+// The controlled EPG Workflow rollover (ADR 0176): dry_run writes nothing; apply swaps the control record to the deterministic successor
 // by one compare-and-set only for an owner provably asleep outside a step; every unsafe, unknown, stale or lost case refuses with zero writes;
 // the old instance stops without a write; budget, cooldown, checkpoint and run survive; a repeat never swaps twice. No network, no production.
 import assert from 'node:assert/strict';

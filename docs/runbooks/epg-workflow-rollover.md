@@ -1,6 +1,6 @@
 # Controlled EPG Workflow rollover
 
-**Authorization:** `dry_run` is a verified safe observation (L0). Every `apply` in production is an owner-gated operation: it needs a separate, explicit owner GO naming the exact pins (`expectedRunKey`, `expectedEpoch`, `expectedSeries`, `expectedInstanceId`, `expectedRunId`, `expectedControlRevision`) and the preconditions below. A merge, a deploy or this tool listing is not a GO. Decision record: [ADR 0175](../adr/0175-controlled-epg-workflow-rollover.md).
+**Authorization:** `dry_run` is a verified safe observation (L0). Every `apply` in production is an owner-gated operation: it needs a separate, explicit owner GO naming the exact pins (`expectedRunKey`, `expectedEpoch`, `expectedSeries`, `expectedInstanceId`, `expectedRunId`, `expectedControlRevision`) and the preconditions below. A merge, a deploy or this tool listing is not a GO. Decision record: [ADR 0176](../adr/0176-controlled-epg-workflow-rollover.md).
 
 ## What it does
 

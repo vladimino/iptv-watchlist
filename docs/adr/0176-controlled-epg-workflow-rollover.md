@@ -1,4 +1,4 @@
-# ADR 0175: Controlled EPG Workflow rollover onto the deployed Worker version
+# ADR 0176: Controlled EPG Workflow rollover onto the deployed Worker version
 
 **Status:** Proposed  
 **Original decision date:** 2026-11-19  

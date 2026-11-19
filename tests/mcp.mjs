@@ -187,7 +187,7 @@ assert.equal((await result(rpc(30,'tools/call',{name:'discovery_workflow_rollove
 assert.equal(rolloverCalls,1,'a valid owner assertion reaches it');
 delete context.handleDiscoveryRolloverTool;
 assert.match((await result(rpc(31,'tools/call',{name:'discovery_workflow_rollover',arguments:{mode:'dry_run'}}))).content[0].text,/unavailable/);
-// ADR 0175: the controlled EPG Workflow rollover sits behind the same Access gate; a denied caller never reaches the operator.
+// ADR 0176: the controlled EPG Workflow rollover sits behind the same Access gate; a denied caller never reaches the operator.
 let epgRolloverCalls=0;context.handleEpgRolloverTool=async()=>{epgRolloverCalls++;return {status:200,body:{ok:true}};};
 for(const [label,options] of denied){
  for(const args of [{mode:'dry_run'},{mode:'apply',confirmGo:true,requestId:'denied-request-1',expectedRunKey:'2026-11-19',expectedEpoch:1,expectedSeries:2,expectedInstanceId:'epg_20261119_2',expectedRunId:'run',expectedControlRevision:1}]){
