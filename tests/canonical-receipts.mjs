@@ -663,7 +663,7 @@ if(onAny(11)){
  assert.deepEqual(Object.keys(receiptRows(file)[0]).sort(),['applied_revision','attempts','content_digest','created_at','error_class','marker_generation','next_attempt_at','operation','origin','planned_revision','request_id','settled_at','state','target_id','target_kind','updated_at'],'the whole column set');
  }
  if(on(11,2)){
- // the budget: a new request is ONE read of the table availability, the five marker reads, ONE receipt read, ONE insert batch, the writer, ONE re-read of the receipt and ONE mark batch (in-batch applied adopters skip the mark batch).
+ // the budget: a new request is ONE read of the table availability, the three marker reads (the table inventory, the version, then ONE statement for the marker rows, AIR-532), ONE receipt read, ONE insert batch, the writer, ONE re-read of the receipt and ONE mark batch (in-batch applied adopters skip the mark batch).
  const file2=database('open');
  const env2=envOf(file2);
  const input2=await request('event-budget');
@@ -671,7 +671,7 @@ if(onAny(11)){
  const writerCalls={batches:0,queries:0};
  await receiptedWrite(env2,{...input2,now:clockAt(0)},{run:async()=>{const b={...env2.DB.calls};const r=await writeFilm(env2,SECRET_TITLE);writerCalls.batches=env2.DB.calls.batches-b.batches;writerCalls.queries=env2.DB.calls.queries-b.queries;return r;},readback:readbackFilm});
  const used={batches:env2.DB.calls.batches-before.batches-writerCalls.batches,queries:env2.DB.calls.queries-before.queries-writerCalls.queries};
- assert.deepEqual(used,{batches:2,queries:8},'the receipt protocol adds exactly 2 batches and 8 reads to a new write: '+JSON.stringify(used));
+ assert.deepEqual(used,{batches:2,queries:6},'the receipt protocol adds exactly 2 batches and 6 reads to a new write: '+JSON.stringify(used));
  // each receipt batch stays inside its cap: fence + one write + one assertion.
  const sizes=[];
  const env3=envOf(database('open'),{onBatch:async list=>{sizes.push(list.length);}});
