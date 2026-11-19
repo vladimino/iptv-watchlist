@@ -260,4 +260,53 @@ assert.equal(out.reason,'fast_tick_error');assert.equal(out.started,false);asser
 fresh();{const real=binding.create;binding.create=undefined;out=await fast();binding.create=real;}
 assert.equal(out.reason,'workflow_unavailable');assert.equal(out.recovery.state,'failed');
 
+
+// 14. AIR-534 review P2: the three-way interleaving the handoff requires. The OLD owner (armed recovery, durable sleep) wakes at the due time at the same moment as two fast ticks and
+// the REAL scheduled hourly reconcile, which also closes the hourly report (outbox, D1 generation CAS). Exactly one deterministic successor and one series bump, the counters of the
+// committed chunk are reported exactly once (no lost checkpoint, no duplicate report), the fast ticks write no report, and the displaced owner writes nothing when it wakes again.
+{
+ fresh();elect(0);
+ const hourMs=Math.floor(Date.now()/3600000)*3600000;
+ {const rec=workflowRecord();const base=call('newDiscoveryReport')(new Date(hourMs-1800000).toISOString(),[]);rec.report=call('addChunkToDiscoveryReport')(base,{checked:5,added:1,reused:0,screenedOut:0,touched:0,tmdbCalls:2,remaining:7,cheapRemaining:0,error:null},'k-1',GENERATION);set('epg/discovery-workflow.json',rec);}
+ const transient=()=>Object.assign(new Error('discovery_unavailable'),{code:'discovery_unavailable'});
+ let group=null,sleepCalls=0;
+ const owner={
+  async do(name,fn){if(name.startsWith('chunk'))throw transient();return fn();},
+  async sleepUntil(){
+   sleepCalls++;
+   if(sleepCalls>1)return;
+   // The due time has come: age the armed recovery, then fire the other writers while this instance wakes.
+   const rec=workflowRecord();rec.recovery.dueAt=new Date(Date.now()-1000).toISOString();set('epg/discovery-workflow.json',rec);
+   group=Promise.all([fast(),fast(),call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:hourMs+1000})]);
+  },
+ };
+ const ended=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},owner);
+ const [fastA,fastB,hourlyOut]=await group;
+ const successorId=INSTANCE.replace(/_0$/,'_1');
+ assert.equal(new Set(creates.map(item=>item.id)).size,1,'one deterministic successor id: '+JSON.stringify(creates.map(item=>item.id)));
+ assert.equal(creates[0].id,successorId);
+ assert.equal(workflowRecord().instanceId,successorId);assert.equal(workflowRecord().series,1,'one series bump');assert.equal(workflowRecord().programmeRunId,GENERATION);
+ assert.equal(workflowRecord().recovery?.attempts??1,1,'the failure is counted once');
+ assert.equal(['recovered','not_owner','recovery_waiting'].includes(ended.reason)||ended.stopped===true,true,'the woken owner ended cleanly: '+JSON.stringify(ended));
+ // The hourly reconcile really ran as a scheduled firing: its report is closed and delivered once, with the committed chunk's counters.
+ const stamp=new Date(hourMs).toISOString().replace(/[-:]/g,'').slice(0,11);
+ const hourEvents=eventKeys().map(key=>records.get(key)).filter(event=>event?.kind==='hour');
+ assert.equal(hourEvents.length,1,'exactly one hourly report: '+JSON.stringify(eventKeys()));
+ assert.equal(hourEvents[0].id.endsWith('-'+stamp),true,hourEvents[0].id);
+ assert.equal(hourEvents[0].checked,5);assert.equal(hourEvents[0].added,1);assert.equal(hourEvents[0].chunks,1);
+ const left=workflowRecord().report;
+ assert.equal(hourEvents[0].checked+(left?.checked||0),5,'no counter is lost or doubled across the successor');assert.equal(left.lastClosedHour,stamp);
+ assert.equal((workflowRecord().outbox||[]).length,0,'the outbox was delivered');
+ // A repeated firing of the same hour and further fast ticks add no report and no creation.
+ const repeat=await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:hourMs+2000});
+ await fast();
+ assert.equal(eventKeys().map(key=>records.get(key)).filter(event=>event?.kind==='hour').length,1,'no duplicate report: '+JSON.stringify(repeat));
+ assert.equal(new Set(creates.map(item=>item.id)).size,1);
+ // The displaced owner wakes again: not owner, nothing written, nothing fetched.
+ const putsBefore=puts.length;
+ const displaced=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},{async do(name,fn){return fn();},async sleepUntil(){}});
+ assert.equal(displaced.reason,'not_owner',JSON.stringify(displaced));assert.equal(puts.length,putsBefore,'the displaced owner wrote nothing');
+ void fastA;void fastB;void hourlyOut;
+}
+
 console.log('Discovery fast recovery cron: idle cost, due and undue, kill detection, true stop and quarantine, every refusal, duplicate ticks, isolation from EPG/Ratings/Monitor and the readout passed');

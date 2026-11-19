@@ -39,7 +39,7 @@ flowchart TB
     catalogD1 -->|SELECT only| d1
     cron -->|scheduled event| projector
     cron -.->|reconcileDiscoveryWorkflow when admission passes| workflow
-    fastCron -.->|reconcileDiscoveryRecovery: recovery of a stopped Workflow only| workflow
+    fastCron -.->|reconcileDiscoveryRecovery: recover a stopped or dead Workflow, or a missed EPG handoff| workflow
     store -->|reads enrichment objects| projector
     projector -.->|compare-only Film/Person at open; metadata from D1 when the cache marker is d1| d1
     sync -.->|"D1 metadata cache (v6+) and published EPG/watchlist (v8), both d1"| d1
