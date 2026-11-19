@@ -95,7 +95,7 @@ This is a production write of one decision. Agents do not run it. The owner does
 
 ## Revoke one saved identity correction
 
-A production write of one decision; agents do not run it. [ADR 0178](../adr/0178-identity-correction-revoke-event-contract.md). It needs schema 26 (`migrations/0027_discovery_intent_identity_revoke.sql`), whose production apply is a separate owner GO; before it the page says `revoke_schema_not_ready`. The owner needs the original request id of the correction (its receipt).
+A production write of one decision; agents do not run it. [ADR 0178](../adr/0178-identity-correction-revoke-event-contract.md). It needs schema 27 (`migrations/0027_discovery_intent_identity_revoke.sql`, applied to production D1 on 19-20 Nov 2026, [evidence](../evidence/d1-migration/air-132-0027-apply-2026-11-19.md)); on a database without it the page says `revoke_schema_not_ready`. The owner needs the original request id of the correction (its receipt).
 
 1. Open the observation in the Limbo detail (or the closed technical search by key). For a saved owner action that the history proves, the identity section shows «Отозвать или заменить это действие»; it opens `/admin/identity/revoke?key=&requestId=` with both fields filled. An action the history does not prove shows the reason and no link. Press «Показать, что изменится». The preview reads the original action, the history of that observation and today's decision; it writes nothing.
 2. If it says it cannot revoke, read the reason: `old_action_not_effective` means a later decision or owner action replaced it, `provenance_unproven` or `provenance_ambiguous` mean the history does not prove which action introduced the effect. Nothing is changed in those cases and nothing is restored by hand.

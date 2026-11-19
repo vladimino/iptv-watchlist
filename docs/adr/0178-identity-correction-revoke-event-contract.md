@@ -16,7 +16,7 @@ Audit of `main` at a888290 (read-only; no production access):
 - `discovery_intent.kind` is `CHECK (kind IN ('reconsider','identity_assign','identity_reject'))` on a STRICT table (`migrations/0011_discovery_authority.sql`). `ownerDecision` accepts only the effects `assign` and `reject`.
 - The saved correction is traceable: `discovery_intent` is keyed by `requestId`, and the decision payload carries `ownerIdentity {effect, tmdbId, basis, requestId}`. `discovery_decision_history` keeps `writer` and the payload per revision but has no `requestId` column; the original is found by intent key, then by `observation_key` history.
 - Nothing can express "withdraw this earlier assertion". A new `reject` would block the id (a different meaning), and an `assign` of another id is a replacement, not a withdrawal.
-- AIR-65 produced no confirmed production correction, so the number of historical actions is unknown.
+- AIR-65 produced no confirmed production correction, so the number of historical actions was unknown at the time. The later AIR-498 reject (16 November 2026) is the one real owner correction stored in production.
 
 ## Decision
 
@@ -96,7 +96,7 @@ Revoke is itself append-only; undoing it is a new owner action. Code rollback do
 ## Evidence
 
 - **Original decision:** [Product Owner approved A + A1 on 2026-11-19 in AIR-132](https://trello.com/c/3AXbSoHe#comment-6aff57b6f18bcafb9e0d7c1c)
-- **Implementation:** [AIR-132](https://trello.com/c/3AXbSoHe) delivery PR: migration `0027_discovery_intent_identity_revoke.sql` (inert until its own owner GO), pure revoke rules in `src/domain/discovery-identity-review.js`, the typed `revoke` and `supersedes` branches of `DiscoveryAuthority.ownerDecision`, the carried `revokedOwnerAssign` fence in `src/discovery.js`, the routes and the page `/admin/identity/revoke`. Link to the merged PR is added when it merges.
+- **Implementation:** [AIR-132](https://trello.com/c/3AXbSoHe) delivery PR: migration `0027_discovery_intent_identity_revoke.sql` (inert until its own owner GO; applied to production D1 after that GO, [apply evidence](../evidence/d1-migration/air-132-0027-apply-2026-11-19.md)), pure revoke rules in `src/domain/discovery-identity-review.js`, the typed `revoke` and `supersedes` branches of `DiscoveryAuthority.ownerDecision`, the carried `revokedOwnerAssign` fence in `src/discovery.js`, the routes and the page `/admin/identity/revoke`. Link to the merged PR is added when it merges.
 - **Dated verification:** not recorded
 - **Implementation checks:** verify whether any real production correction exists, the handling of absent `confirmedTmdbId` or year in `identityBasis`, and `ownerDecision` issuance-expiry semantics. Missing or ambiguous provenance must fail closed. These checks do not authorize an identity write.
 
