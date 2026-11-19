@@ -2383,7 +2383,8 @@ async fetch(request,env,execution){
     const sync=await loadJSON(env,'sync.json');
     const publishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(sync,data):null;
     if(publishedAt)presented.publishedAt=publishedAt;else delete presented.publishedAt;
-    const answered=await titleReadFinish(env,gate,json(presented));degradedRecovered('programme');return answered;
+    degradedRecovered('programme');
+    return await titleReadFinish(env,gate,json(presented));
    }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);if(isTemporaryReadFault(error)){const degraded=await degradedProgrammeResponse(env,error);if(degraded)return degraded;}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){
@@ -2397,7 +2398,8 @@ async fetch(request,env,execution){
     const titles=await localizedTitleStore(env,pinned,gate,data?.films||[]);
     const reviews=await publishedOwnerReviews(pinned);
     if(!reviews.ok){if(reviews.temporary){const degraded=await degradedWatchlistResponse(env,{code:'owner_review_unavailable',temporary:true});if(degraded)return degraded;}return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);}
-    const answered=await titleReadFinish(env,gate,json(presentLocalized(data,titles,reviews.body)));degradedRecovered('watchlist');return answered;
+    degradedRecovered('watchlist');
+    return await titleReadFinish(env,gate,json(presentLocalized(data,titles,reviews.body)));
    }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);if(isTemporaryReadFault(error)){const degraded=await degradedWatchlistResponse(env,error);if(degraded)return degraded;}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);

@@ -156,7 +156,7 @@ assert.equal(query('#film-compare').hidden,false);assert.match(html('#film-scree
 }
 
 // Every other answer is its own message, never a fake film.
-const states=[[404,{status:'absent'},'Фильм не найден',/нет проверенного фильма/],[410,{status:'retired'},'Запись каталога снята',/заменена/],[409,{status:'conflict'},'Идентичность фильма не подтверждена',/конфликт/],[503,{status:'unavailable'},'Каталог сейчас недоступен',/Не удалось прочитать/],[500,{status:'error'},'Не удалось загрузить фильм',/ошибкой/]];
+const states=[[404,{status:'absent'},'Фильм не найден',/нет проверенного фильма/],[410,{status:'retired'},'Запись каталога снята',/заменена/],[409,{status:'conflict'},'Идентичность фильма не подтверждена',/конфликт/],[503,{status:'unavailable'},'Сведения пока не загружаются',/не значит, что фильма нет/],[500,{status:'error'},'Не удалось загрузить фильм',/ошибкой/]];
 for(const [status,body,title,text] of states){
  reset();plan.set('/api/catalog/film/51',{status,body});await open('tmdb_51');
  assert.equal(query('#film-screen-title').textContent,title,String(status));assert.match(query('#film-screen-status').textContent,text);
