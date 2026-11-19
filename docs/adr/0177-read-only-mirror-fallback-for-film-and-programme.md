@@ -1,4 +1,4 @@
-# ADR 0175: Film and programme reads may fall back to independently valid R2 mirrors, read-only and visibly degraded
+# ADR 0177: Film and programme reads may fall back to independently valid R2 mirrors, read-only and visibly degraded
 
 **Status:** Proposed (owner architecture approval required before implementation)  
 **Original decision date:** unknown (not yet decided)  
