@@ -363,25 +363,59 @@ assert.equal(more.textContent, 'Более давние события');
 context.IntersectionObserver = FakeObserver;
 
 // 14. AIR-538: a refresh whose first page shares nothing with the loaded list (more events than a page arrived meanwhile) must not leave a hole.
-// The list restarts from the fresh page; scrolling then reaches every event once, the former middle included, with the end marker only at real exhaustion.
-reset({});
-const [n0, n1, n2, n3, o0, o1, o2, o3] = ['n0', 'n1', 'n2', 'n3', 'o0', 'o1', 'o2', 'o3'].map(id => ev(id));
-archive = {first: {events: [o0, o1], cursor: 'o'}, o: {events: [o2, o3], cursor: null}};
+// 60 stored events, a 20-item page, four hourly Discovery events in the part the refresh skipped (just past the first 20), two pairs of tied timestamps (one pair across the page boundary). The tab had loaded
+// the older 35 (two pages, the cursor kept) when 25 newer events arrived. Cursors are event ids, as an R2 key cursor is, so an old cursor stays valid in the new archive.
+const stored = [];
+{
+  const base = Date.UTC(2026, 10, 19, 16);
+  for (let n = 0; n < 60; n++) stored.push({id: 'ev' + String(n).padStart(2, '0'), type: n >= 21 && n <= 24 ? 'discovery' : n % 3 === 0 ? 'watchlist' : 'epg', at: new Date(base - n * 600000).toISOString()});
+  stored[1].at = stored[0].at; stored[20].at = stored[19].at; // ties, the second across the 20-item boundary
+}
+const sorted = list => [...list].sort((x, y) => Date.parse(y.at) - Date.parse(x.at) || x.id.localeCompare(y.id));
+const view = (first) => { // the archive as the API serves it when the newest stored event is stored[first]
+  const out = {}, pageAt = i => ({events: stored.slice(i, i + 20), cursor: i + 20 < stored.length ? 'after-' + stored[i + 19].id : null});
+  out.first = pageAt(first);
+  for (let i = first + 20; i < stored.length; i += 1) out['after-' + stored[i - 1].id] = pageAt(i);
+  return out;
+};
+// (a) «Все события», the prefetch budget used up before the refresh.
+reset(view(25));
 await run('loadEvents(false)');
-scrollToEnd(); await settle(); // an older page is loaded: the cursor is now kept across refreshes
-assert.deepEqual(shownIds(), ['o0', 'o1', 'o2', 'o3']);
-archive = {first: {events: [n0, n1], cursor: 'm'}, m: {events: [n2, n3], cursor: 'o'}, o: {events: [o2, o3], cursor: null}};
+scrollToEnd(); await settle();
+assert.equal(shownIds().length, 35, 'the older 35 are loaded and the cursor is kept');
+run('eventPaging.run=EVENT_PREFETCH_LIMIT;eventPaging.paused=true');
+archive = view(0);
 assert.equal(await run('loadEvents(false,{quiet:true})'), true);
-assert.deepEqual(shownIds(), ['n0', 'n1'], 'a disjoint first page restarts the list instead of leaving a hole');
-scrollToEnd(); await settle();
-scrollToEnd(); await settle();
-assert.deepEqual(shownIds(), ['n0', 'n1', 'n2', 'n3', 'o2', 'o3'], 'every event once, no gap');
-assert.equal(end.hidden, false);
-// An overlapping refresh keeps the loaded list and its cursor.
-reset({first: {events: [ev('a0'), ev('a1')], cursor: 'o'}, o: {events: [ev('a2')], cursor: null}});
+assert.equal(run('eventPaging.run'), 0, 'the restart renews the prefetch budget');
+assert.equal(run('eventPaging.paused'), false);
+assert.deepEqual(shownIds(), sorted(stored.slice(0, 20)).map(event => event.id), 'the list restarts from the fresh 20-item page');
+for (let i = 0; i < 4 && end.hidden; i++) { scrollToEnd(); await settle(); }
+assert.deepEqual(shownIds(), sorted(stored).map(event => event.id), 'all 60 events once, in order, ties by id');
+assert.equal(new Set(shownIds()).size, 60);
+assert.equal(end.hidden, false, 'the end marker only after the cursor was exhausted');
+// (b) The filter «Discovery»: its search had walked the older archive to the end (`exhausted`, no match) before the refresh.
+reset(view(25));
 await run('loadEvents(false)');
-archive = {first: {events: [ev('b0'), ev('a0')], cursor: 'o'}, o: archive.o};
+win.history.replaceState(null, '', 'https://iptv.example/events?type=discovery');
+run('eventsScreen=false;applyEventsScreen(true)');
+await settle();
+assert.equal(run('eventSearch.state'), 'exhausted', 'no Discovery event among the older 35');
+assert.deepEqual(shownIds(), []);
+archive = view(0);
+assert.equal(await run('loadEvents(false,{quiet:true})'), true);
+await settle();
+assert.equal(run('eventSearch.state'), 'exhausted', 'the new cursor was searched to its end again');
+assert.deepEqual(shownIds(), sorted(stored.slice(21, 25)).map(event => event.id), 'the four hourly events appear, none duplicated');
+assert.equal(maxInFlight, 1);
+// (c) An overlapping refresh keeps the loaded list and its cursor.
+reset(view(25));
+await run('loadEvents(false)');
+scrollToEnd(); await settle();
+const keptCursor = run('eventCursor');
+archive = view(24);
 await run('loadEvents(false,{quiet:true})');
-assert.ok(shownIds().includes('b0') && shownIds().includes('a1') && new Set(shownIds()).size === shownIds().length, 'overlap merges without duplicates');
+assert.equal(run('eventCursor'), keptCursor, 'overlap keeps the cursor');
+assert.equal(shownIds().length, 36, 'one new event merged without duplicates');
+assert.equal(new Set(shownIds()).size, 36);
 
 console.log('Events pagination UI: scroll sentinel on the real container, loader, one request at a time, exact end marker, retry from the saved cursor, repeated cursor, filtered zero-match pages, aborts, refresh and anchor/group preservation passed');

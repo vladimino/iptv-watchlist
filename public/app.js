@@ -2632,8 +2632,8 @@ async function loadEvents(more=false,options={}){
   const data=await response.json();
   // AIR-538: a background refresh of the first page that shares no event with what is already loaded means more events arrived than one page holds (a sleeping
   // tab, a busy hour). Merging it would leave the events between the new page and the old list in no page the cursor will ever visit, so the list restarts from
-  // the fresh page and the cursor; older events come back by scrolling, each exactly once.
-  if(!more&&loadedEvents.size>0&&data.cursor&&!data.events.some(event=>loadedEvents.has(event.id))){loadedEvents.clear();eventPaging.seen.clear();eventPaging.stuck=false;eventPaging.paused=false;}
+  // the fresh page and the cursor, with a fresh prefetch budget and a fresh type search (an `exhausted` one described the old cursor); older events come back by scrolling, each exactly once.
+  if(!more&&loadedEvents.size>0&&data.cursor&&!data.events.some(event=>loadedEvents.has(event.id))){loadedEvents.clear();eventPaging.seen.clear();eventPaging.stuck=false;resetEventPrefetch();cancelEventSearch();}
   const keepCursor=!more&&loadedEvents.size>0&&(eventPaging.seen.size>0||loadedEvents.size>20);
   for(const event of data.events)loadedEvents.set(event.id,event);
   if(!keepCursor){eventCursor=data.cursor;if(!more)eventPaging.seen.clear();}
