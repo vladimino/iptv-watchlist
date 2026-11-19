@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import {spawnSync} from 'node:child_process';
 import {d1Standin} from './d1-standin.mjs';
 
 const source=fs.readFileSync('src/d1-enrichment.js','utf8');
@@ -21,6 +22,8 @@ assert.doesNotMatch(worker,/runD1EnrichmentProjection|D1_ENRICHMENT_(WRITE|WINDO
 assert.doesNotMatch(fs.readFileSync('src/catalog-d1.js','utf8'),/runD1EnrichmentProjection/);
 assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["0 \* \* \* \*"\]/);
 assert.match(fs.readFileSync('src/catalog-d1.js','utf8'),/d1EnrichmentStatus\(/,'/api/d1/status still reports through the status');
+// CI shards do not build first: like the other bundle tests, build the Worker bundle here (atomic write).
+assert.equal(spawnSync(process.execPath,['build.mjs'],{stdio:'ignore'}).status,0);
 const bundle=fs.readFileSync('dist/server/index.js','utf8').split('\n').filter(line=>!/^\s*\/\//.test(line)).join('\n');
 assert.ok(bundle.includes('async function d1EnrichmentStatus('),'the bundle carries the status');
 assert.doesNotMatch(bundle,/runD1EnrichmentProjection|d1EnrichmentPlan|d1EnrichmentDiff|LifecycleReader/,'the bundle carries no projector runner');
