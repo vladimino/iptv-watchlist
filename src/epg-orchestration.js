@@ -636,44 +636,49 @@ function frozenDay(run){
  // `day_rolled`) decide whether to schedule or drive a RUN and correctly refuse a finished or rolled one. It never creates a Workflow instance, runs a seal, a sync or a
  // publication, and never writes `control`, `sync.json`, the completion receipt or R2. Its only D1 write is the one fenced certify batch (step lease, mode revision, CAS on the
  // pointer's programme run and Madrid day, atomic pause clear), followed by a readback. Anything stale, contradicting or unreadable does nothing.
+ // `receiptAt` is the durable completion receipt of the run (never a clock of this unit); it dates the debt. `unreadable` means the evidence could not be read, not that nothing is owed.
  async function owedCertificate(env){
   let run;
-  try{run=await loadJSON(env,'sync.json');}catch{return {owed:false,reason:'sync_unreadable'};}
+  try{run=await loadJSON(env,'sync.json');}catch{return {owed:false,unreadable:true,reason:'sync_unreadable'};}
   if(!run||run.stage!=='complete'||typeof run.runId!=='string'||!run.runId)return {owed:false,reason:'not_owed'};
   const day=frozenDay(run);
-  if(day===null)return {owed:false,reason:'day_unproven'};
+  if(day===null)return {owed:false,unreadable:true,reason:'day_unproven'};
   const proof=await completion(env,run);
-  if(proof.state==='unreadable')return {owed:false,reason:'d1_unavailable'};
+  if(proof.state==='unreadable')return {owed:false,unreadable:true,reason:'d1_unavailable'};
   if(proof.state!=='proven')return {owed:false,reason:'not_owed'};
   let certificate;
-  try{certificate=await PublishedEpg.readCertificate(env);}catch{return {owed:false,reason:'d1_unavailable'};}
+  try{certificate=await PublishedEpg.readCertificate(env);}catch{return {owed:false,unreadable:true,reason:'d1_unavailable'};}
   if(certificate.column!=='present')return {owed:false,reason:'column_absent'};
   if(certificate.programmeRunId!==run.runId||certificate.madridRunKey!==day)return {owed:false,reason:'not_owed'};
   if(certificate.finalizedRunId===run.runId)return {owed:false,reason:'certified'};
-  return {owed:true,runId:run.runId,day};
+  const receiptAt=Object.prototype.hasOwnProperty.call(run,'completedAt')?run.completedAt:run.updatedAt;
+  return {owed:true,runId:run.runId,day,receiptAt:typeof receiptAt==='string'&&Number.isFinite(Date.parse(receiptAt))?Date.parse(receiptAt):null};
  }
+ // The repair result. A proven debt carries `owed: true` and `ageMs` (now minus the durable completion receipt, or null when that is not known); unreadable evidence carries
+ // `unreadable: true`. Both stay visible in the hourly `ensure` result; an idle tick (nothing owed) stays quiet. Reasons are closed codes: no payload, id or SQL.
  async function certifyComplete(env,{now=Date.now()}={}){
   if(typeof PublishedEpg?.certifyRun!=='function'||typeof PublishedEpg?.readCertificate!=='function')return {ran:false,reason:'unavailable'};
   let mode;
-  try{mode=await readMode(env);}catch{return {ran:false,reason:'mode_unreadable'};}
+  try{mode=await readMode(env);}catch{return {ran:false,unreadable:true,reason:'mode_unreadable'};}
   if(!mode.schema||mode.malformed||mode.record?.mode!=='cloudflare')return {ran:false,reason:'not_owed'};
   // The cheap, lease-free check first: a run that needs nothing never takes the step lease.
   const first=await owedCertificate(env);
-  if(!first.owed)return {ran:false,reason:first.reason};
+  if(!first.owed)return {ran:false,...(first.unreadable?{unreadable:true}:{}),reason:first.reason};
+  const debt={owed:true,ageMs:first.receiptAt===null?null:Math.max(0,now-first.receiptAt)};
   let taken;
-  try{taken=await acquireStep(env,{kind:'certify',modeRevision:mode.revision,now});}catch{return {ran:false,reason:'lease_unreadable'};}
-  if(taken.reason)return {ran:false,reason:taken.reason};
-  if(taken.busy)return {ran:false,reason:'step_lease_held',until:iso(taken.until)};
+  try{taken=await acquireStep(env,{kind:'certify',modeRevision:mode.revision,now});}catch{return {ran:false,...debt,unreadable:true,reason:'lease_unreadable'};}
+  if(taken.reason)return {ran:false,...debt,reason:taken.reason};
+  if(taken.busy)return {ran:false,...debt,reason:'step_lease_held',until:iso(taken.until)};
   const fe=fencedEnv(env,mode.revision,taken.step);
   try{
    // The world may have changed between the cheap check and the lease: the same check again, now holding it.
    const second=await owedCertificate(fe);
-   if(!second.owed)return {ran:false,reason:second.reason};
+   if(!second.owed)return {ran:false,...(second.unreadable?{unreadable:true,...debt}:{}),reason:second.reason};
    const stamp=Date.now();
    const out=await PublishedEpg.certifyRun(fe,{programmeRunId:second.runId,madridRunKey:second.day,step:taken.step,epgFence:fe.epgFence,leaseBound:iso(stamp+BOUNDARY_MARGIN_MS),now:stamp});
-   return {ran:true,certified:out.certified===true,reason:out.certified?'certified':'readback_mismatch',runId:second.runId};
+   return out.certified===true?{ran:true,certified:true,reason:'certified',runId:second.runId}:{ran:true,certified:false,...debt,reason:'readback_mismatch',runId:second.runId};
   }catch(error){
-   return {ran:true,certified:false,reason:error?.code||'error'};
+   return {ran:true,certified:false,...debt,reason:String(error?.code||'error').slice(0,60)};
   }finally{await endStep(env,taken.step).catch(()=>false);}
  }
 
@@ -684,7 +689,7 @@ function frozenDay(run){
  async function ensure(env,{now=Date.now(),random=Math.random}={}){
   const mirrors=await reconcileMirrors(env,{now});
   const result=await ensureWorkflow(env,{now,random});
-  // ADR 0175: the certificate repair, after the Workflow reconcile. Reported only when it ran or waited for a live step lease: an idle tick keeps the result unchanged.
+  // ADR 0175: the certificate repair, after the Workflow reconcile. Reported when it ran, waited for a live step lease, found a proven debt (`owed`, `ageMs`) or could not read its evidence (`unreadable`): the debt of a persistent failure stays visible. An idle tick (nothing owed) keeps the result unchanged. It never touches the Workflow failure budget.
   let certificate=null;
   try{certificate=await certifyComplete(env,{now});}catch(error){certificate={ran:false,reason:error?.code||'error'};}
   let producer={ran:false,reason:'unavailable'};
@@ -693,7 +698,7 @@ function frozenDay(run){
     producer=await CanonicalProducerWorkflow.reconcileProducerChain(env,{now});
    }
   }catch(error){producer={ran:false,reason:error?.code||'error'};}
-  return {...result,mirrors,...(certificate&&(certificate.ran===true||certificate.reason==='step_lease_held')?{certificate}:{}),producer};
+  return {...result,mirrors,...(certificate&&(certificate.ran===true||certificate.owed===true||certificate.unreadable===true||certificate.reason==='step_lease_held')?{certificate}:{}),producer};
  }
  async function ensureWorkflow(env,{now=Date.now(),random=Math.random}={}){
   let mode;

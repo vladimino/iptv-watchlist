@@ -12,7 +12,12 @@
 
 1. `SELECT version FROM schema_contract WHERE id = 1` is 25, and `main` contains `PublishedEpg.certifyRun` and `EpgOrchestration.certifyComplete` (the code ships first, dormant).
 2. Read-only preflight of the deployed version: the deployed Worker is the one that contains the certificate code, and no gradual rollout or older instance is live. An older Worker would lift the pause at the pointer and never certify.
-3. No EPG run is in flight: `epg_status` shows no live `seal` step lease, and it is not between 16:55 and the publication of the day (apply outside the daily EPG window).
+3. **The EPG run is terminal, proven from evidence, not from a lease.** A missing step lease proves nothing: the lease is released between bounded seal steps, during Workflow sleeps, cooldowns and the successor handoff, including after the pointer has already moved while `finalize` or `queue` is incomplete. The migration activates the new admission policy immediately, so the apply must not land in that interval. Read-only, all of these must hold:
+   - `sync.json` is `stage=complete` for the run the pointer names (`programme_run_id`), with a well-formed completion receipt (or the latest run is of an earlier Madrid day and no run of today has started: `stage` is not `seal`, `epg` or `metadata`);
+   - no seal is unfinished and no successor claim is pending: the `control` document has no `handoff` that `sealClaimPending` would report, and `sync.json` is not `stage=seal`;
+   - no Workflow instance of the EPG family is alive: the control `instanceId` status is not `running`, `waiting` or `starting` (read it, do not infer it from the time of day);
+   - no live step lease, as the last, not the only, check.
+   **Counterexample that must stop the apply:** the pointer has moved to today's run, no step lease is live, and `sync.json` is `stage=seal` (`finalize` or `queue` incomplete). The old condition ("not between 16:55 and the publication") and an empty lease both pass that state, and applying now would hold Discovery until the repair certifies the run. Apply only after the run is `stage=complete`, or before the pointer moves.
 4. The signed GO names the live git blob of the file on `main`, the production D1 id and the exact statement (one execution).
 
 ## Readback after the apply
@@ -25,7 +30,7 @@ The columns are present, so "published for the day" now needs `finalized_run_id 
 
 ## Natural-run acceptance (no manual run)
 
-On the first natural EPG after the apply: the pointer batch leaves the pause closed and resets the certificate; Discovery waits as `awaiting_complete`; the run reaches `stage=complete`; the certify batch writes `finalized_run_id`, clears the pause and Discovery resumes on the new generation. Record the separate times (pointer publish, complete, certificate, first admitted chunk), the `holderKind`/`waitMs`/`sealPhase` of any `seal_busy`, and `scanOutcome`. Do not run EPG, Discovery, a lease reset or a Task to speed this up.
+On the first natural EPG after the apply: the pointer batch leaves the pause closed and resets the certificate; Discovery waits as `awaiting_complete`; the run reaches `stage=complete`; the certify batch writes `finalized_run_id`, clears the pause and Discovery resumes on the new generation. Record the separate times (pointer publish, complete, certificate, first admitted chunk), the `holderKind`/`scheduledWaitMs` (planned retry delay, not measured contention)/`sealPhase` of any `seal_busy`, and `scanOutcome`. Do not run EPG, Discovery, a lease reset or a Task to speed this up.
 
 ## Rollback contract after the apply
 

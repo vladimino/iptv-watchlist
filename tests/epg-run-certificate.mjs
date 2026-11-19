@@ -23,10 +23,10 @@ import {sqliteSync} from './sqlite-session.mjs';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-run-certificate-'));
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 let databases=0;
-let beforeBatch=null,failColumnProbe=false;
+let beforeBatch=null,failColumnProbe=false,failCertRead=false;
 const options={
  onBatch:async()=>{if(beforeBatch){const hook=beforeBatch;beforeBatch=null;await hook();}},
- onQuery:async text=>{if(failColumnProbe&&/col:finalized_run_id/.test(text))throw new Error('D1_ERROR: inventory unavailable');},
+ onQuery:async text=>{if(failColumnProbe&&/col:finalized_run_id/.test(text))throw new Error('D1_ERROR: inventory unavailable');if(failCertRead&&/name='published_epg_authority' AND sql LIKE/.test(text))throw new Error('D1_ERROR: certificate read unavailable');},
 };
 const migrated=(upTo=26)=>{
  const file=path.join(root,'c-'+(databases++)+'.sqlite');
@@ -75,6 +75,9 @@ const refused=(promise,code)=>assert.rejects(promise,error=>error.code===code||n
  assert.deepEqual({...db.sql('SELECT finalized_run_id AS a, finalized_at AS b FROM published_epg_authority WHERE id=1')[0]},{a:null,b:null},'both columns are NULL after the apply');
  assert.throws(()=>db.sql('UPDATE schema_contract SET version=25 WHERE id=1'),/downgrade/,'the version never goes down');
  assert.match(fs.readFileSync('migrations/README.md','utf8'),/0026_epg_run_certificate\.sql/);
+ const runbook=fs.readFileSync('docs/runbooks/epg-run-certificate-0026-apply.md','utf8');
+ assert.match(runbook,/Counterexample that must stop the apply/,'the runbook preflight names the pointer-moved, no-lease, stage=seal counterexample');
+ assert.match(runbook,/A missing step lease proves nothing/);
 }
 
 // 1. The column ABSENT (schema 25): today's behaviour, byte for byte. The pointer batch clears the pause, nothing is certified, and a certify writes nothing.
@@ -351,6 +354,42 @@ const docs=db=>JSON.stringify(db.sql("SELECT key, body, revision FROM epg_orches
  assert.deepEqual(plain(await epg.certifyComplete(env,{now:clock})),{ran:false,reason:'column_absent'});
 }
 
+{
+ // Persistent certificate debt stays visible in the hourly `ensure` result, with the age from the durable completion receipt; an idle tick stays quiet.
+ const {db}=await pointerPublished();
+ at(D2,18,1);setMode(db);controlDone(db,D2);
+ const {env,epg}=load({db,sync:completeRun('run-2',D2)});
+ const receipt=madridInstant(D2,17,20);
+ // repeated D1 outage after sync.json is complete: unreadable evidence, reported each tick, no throw, no failure budget touched
+ failCertRead=true;
+ for(let tick=0;tick<2;tick++){
+  const out=plain(await epg.ensure(env,{now:clock}));
+  assert.equal(out.certificate.unreadable,true,'an unreadable certificate is reported, not discarded');
+  assert.equal(out.certificate.reason,'d1_unavailable');
+  assert.equal(out.certificate.ran,false);
+  clock+=60*60000;
+ }
+ failCertRead=false;
+ at(D2,18,1);
+ // a certify batch that fails (the lease is taken over before it): a proven debt with its age, the closed code, no payload
+ beforeBatch=()=>db.sql("UPDATE epg_orchestration_document SET body=json_set(body,'$.holder','taker') WHERE key='lease'");
+ const failed=plain(await epg.ensure(env,{now:clock}));
+ assert.equal(failed.certificate.owed,true);
+ assert.equal(failed.certificate.ageMs,clock-receipt,'the age is counted from the durable completion receipt');
+ assert.equal(failed.certificate.certified,false);
+ assert.equal(failed.certificate.reason,'published_epg_fence');
+ assert.deepEqual(Object.keys(failed.certificate).sort(),['ageMs','certified','owed','ran','reason']);
+ assert.equal(cert(db).finalized,null);
+ // a live step lease also carries the debt and its age
+ setLease(db,{holder:'workflow',expiresAt:iso(clock+120000)});
+ const waiting=plain(await epg.certifyComplete(env,{now:clock}));
+ assert.equal(waiting.reason,'step_lease_held');assert.equal(waiting.owed,true);assert.equal(waiting.ageMs,clock-receipt);
+ db.sql("DELETE FROM epg_orchestration_document WHERE key='lease'");
+ // certified: the debt is gone and the idle tick is quiet again
+ assert.equal(plain(await epg.ensure(env,{now:clock})).certificate.certified,true);
+ assert.equal('certificate' in plain(await epg.ensure(env,{now:clock})),false,'nothing owed: the idle tick keeps the result unchanged');
+}
+
 // 8. Structure: the Worker certifies after the durable complete save and before the event flushes; the repair is not on the Workflow gates; a
 // certify failure never stops the flushes; scanOutcome and the busy telemetry exist; the pointer batch clears the pause only without the column.
 {
@@ -364,7 +403,7 @@ const docs=db=>JSON.stringify(db.sql("SELECT key, body, revision FROM epg_orches
  assert.match(certifier,/catch\(error\)\{[\s\S]*return 'owed'/,'a certify failure is caught: the flushes still run');
  assert.match(certifier,/env\.epgStep/,'no lease, no certificate');
  for(const outcome of ['applied','facts_only','skipped_incomplete_watchlist','skipped_no_observation'])assert.match(worker,new RegExp("scanOutcome="+"[^;]*'"+outcome+"'|run\\.scanOutcome='"+outcome+"'"),'scanOutcome '+outcome);
- for(const field of ['holderKind','holdExpiry','waitMs','sealPhase'])assert.match(worker,new RegExp(field+'[:,]'),'busy telemetry '+field);
+ for(const field of ['holderKind','holdExpiry','scheduledWaitMs','sealPhase'])assert.match(worker,new RegExp(field+'[:,]'),'busy telemetry '+field);
  const orch=fs.readFileSync('src/epg-orchestration.js','utf8');
  const certifyBody=orch.slice(orch.indexOf('async function certifyComplete'),orch.indexOf('// ---- the cron `ensure`'));
  assert.doesNotMatch(certifyBody,/ensureWorkflow|\bact\(|drive\(|createSuccessor|EPG_WORKFLOW|casDoc\(env,'control'|saveJSON|postSync/,'the repair never schedules, drives, writes control or sync');

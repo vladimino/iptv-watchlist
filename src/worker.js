@@ -1726,11 +1726,12 @@ function sealBusyResponse(run,taken,now=Date.now()){
  const until=Math.max(bounded,now+1000);
  return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:held?'lease_held':'lost_race',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000),...sealBusyTelemetry(run,taken,held?'lease_held':'lost_race',expiresAt,until,now)});
 }
-// ADR 0175 decision 8. Who held the lease, until when, how long EPG waits and in which seal phase: kinds and times only, no Film, id list, SQL or payload.
+// ADR 0175 decision 8. Who held the lease, until when, the scheduled retry delay and in which seal phase: kinds and times only, no Film, id list, SQL or payload.
 // `holderKind` tells an EPG-held lease from a Discovery-held one; a soft wait is not a failure and does not count against the budget.
 function sealBusyTelemetry(run,taken,busyKind,expiresAt,until,now){
  const holderKind=taken?.busy?.holderKind??taken?.busy?.ownerKind??null;
- const fields={holderKind,holdExpiry:expiresAt?new Date(expiresAt).toISOString():null,waitMs:Math.max(0,until-now),sealPhase:run.seal?.phase??null};
+ // `scheduledWaitMs` is the PLANNED retry delay (`nextCatchUpAt` minus now), not the measured time spent blocked: it must not be read as observed contention latency.
+ const fields={holderKind,holdExpiry:expiresAt?new Date(expiresAt).toISOString():null,scheduledWaitMs:Math.max(0,until-now),sealPhase:run.seal?.phase??null};
  try{epgPhase(run.runId,'seal_busy','exit',{busyKind,...fields});}catch{}
  return fields;
 }
