@@ -57,15 +57,15 @@ async function publishedOwnerReviews(env){
  if(typeof OwnerReview==='undefined'||typeof OwnerReview.loadForRead!=='function')return {ok:true,body:await loadJSON(env,'admin/owner-reviews.json')};
  return OwnerReview.loadForRead(env);
 }
-// AIR-374 P4b (owner decision 4): the titles.json dictionary behind GET /api/programme and GET /api/watchlist. The marker is read FIRST on every GET: legacy, r2 and prepared read the
+// AIR-374 P4b (owner decision 4): the titles.json dictionary behind GET /api/programme and GET /api/watchlist. The marker is read FIRST on every GET: legacy (the explicit local stand-in only; r2 and prepared markers are refused, ADR 0162) reads the
 // R2 mirror exactly as before; at `open` the mirror is frozen and the same rows come from D1 (one bounded SELECT); held and an unreadable marker throw before any read and never reach R2.
-// The marker is read again after the reads, so prepared -> open (or held) mid-request is a 503, never a stale R2 answer. The bundle always defines CanonicalCatalogReader (the guard
+// The marker is read again after the reads, so a move to open (or held) mid-request is a 503, never a stale R2 answer. The bundle always defines CanonicalCatalogReader (the guard
 // serves only the vm-scoped tests that load the Worker without it; tests/canonical-catalog-titles.mjs asserts the bundle).
 const TITLE_READ_REFUSALS=['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'];
 const titleReadGate=env=>typeof CanonicalCatalogReader==='undefined'?null:CanonicalCatalogReader.catalogReaderGate(env);
 // Frozen titles.json / people.json stay R2 only while the Film/Person marker is not open. At open (and held / unreadable) the
 // Producer Workflow is the writer; these sync steps must not refresh the frozen mirrors. The lock is re-read at the write, after any
-// localization await, so a prepared→open flip mid-step cannot land a canonical R2 put.
+// localization await, so a flip to open mid-step (historically prepared→open) cannot land a canonical R2 put.
 async function frozenCanonicalMirrorsLocked(env){
  if(typeof CanonicalCatalogReader==='undefined')return false;
  try{
@@ -85,7 +85,7 @@ async function localizedTitleStore(env,pinned,gate,films){
  return (await loadJSON(pinned,'titles.json'))||{};
 }
 // The LAST async boundary: after every awaited read of the route (titles, owner reviews, sync.json, documents) and right before a successful answer, the marker is read again
-// and must still have the state AND generation the first read saw, on the open path and on the legacy/r2/prepared path alike. A 200 shape that carries no title (the empty
+// and must still have the state AND generation the first read saw, on the open path and on the legacy (local stand-in) path alike. A 200 shape that carries no title (the empty
 // watchlist) is fenced the same way. Error answers are not fenced: they carry no stored facts.
 async function titleReadFinish(env,gate,response){
  if(gate)await CanonicalCatalogReader.catalogReaderStill(env,gate);
@@ -439,7 +439,7 @@ function catalogFilmState(records,tmdbId){
 }
 // AIR-409: a canonical Film admitted by a verified rated archive (letterboxd/admissions/verified-films.json) that Discovery never admitted. At `open` (AIR-475) the fallback is
 // the D1 canonical Film itself (catalogCanonicalFilmFromD1), whatever admissions it has; the R2 receipt below is only the pre-open reader.
-// Read only, only when Discovery says "absent" and only while the Film/Person authority names R2 (legacy, r2, prepared; ADR 0099): `held`, `open` and an
+// Read only, only when Discovery says "absent" and only while the Film/Person authority names R2 (legacy, the explicit local stand-in only; ADR 0099, ADR 0162): `held`, `open` and an
 // unreadable marker fail closed and never fall back to R2. The receipt is the R2 identity decision, so it is bounded by the owner's R2 retirements
 // object and by D1 contradictions (a conflicting or second trusted TMDB id, a redirected Film); a Film whose projection is still pending is found. The entry must verify exactly as the rated-archive admission rules require (key tmdb_<n>, tmdb equal to the key,
 // short code, sha256 digest, verification time, no watchlist field); anything else is not a Film here. Nothing is scanned: one key of one object.
@@ -643,7 +643,7 @@ async function catalogWatchedRoute(request,env,url){
   if(again.programmeRunId!==runId||again.phase!==publication.phase||again.fence!==publication.fence||again.authority!==publication.authority)return unavailable('catalog_generation_changed','The published generation changed; try again');
   if(typeof DiscoveryAuthority!=='undefined'){
    // Immediately before the write the authority must still be the one the catalog was read under: same mode and cutover (a D1 to R2
-   // switch is a change), same generation, same published run, not held and not loading. The R2-owned path (not ready) stays R2.
+   // switch is a change), same generation, same published run, not held and not loading. The R2-owned path (not ready: the explicit local stand-in only, ADR 0162) stays R2.
    const gate=await DiscoveryAuthority.readAuthority(env);
    if(gate.ready&&gate.transfer==='loading')return unavailable('discovery_incomplete');
    if(discoveryState(gate)!==discoveryState(opened)||gate.ready&&gate.programmeRunId!==runId)return unavailable('catalog_generation_changed','The published generation changed; try again');

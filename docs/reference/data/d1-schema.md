@@ -149,7 +149,7 @@ The programme generation unit is the one unit the executor cannot send as one re
 
 ## Enrichment projector (schema v4)
 
-> **Historical implementation (AIR-537 slice 3, 19 Nov 2026).** The enrichment projector, its runner and its write arms were removed from the repository; it had been off the cron since ADR 0155. The three tables below stay in the schema and `/api/d1/status` still counts their rows read-only; nothing writes them now. The method, input and TMDB-retirement text after the table describes the pre-retirement implementation and is not an executable or current contract.
+> **Historical implementation (AIR-537 slice 3, 19 Nov 2026).** The enrichment projector, its runner and its write arms were removed from the repository; it had been off the cron since ADR 0155. The three tables below stay in the schema and `/api/d1/status` still counts their rows read-only; no Worker code writes them now (only the retained offline seed script `scripts/d1-projection-seed.mjs` can). The method, input and TMDB-retirement text after the table describes the pre-retirement implementation and is not an executable or current contract.
 
 [ADR 0056](../../adr/0056-d1-enrichment-write-through.md): migration `0004` adds three tables.
 
@@ -183,7 +183,7 @@ The projector fails closed on its R2 inputs. Missing, malformed or unpublished i
 
 ## Metadata sync clocks (schema v5)
 
-[ADR 0070](../../adr/0070-metadatasync-freshness-clocks.md): migration `0005` adds `film_sync_state` and is applied on production. The enrichment projector wrote it when `schema_contract.version` was 5, 6 or 7 and the table existed; the projector was removed in AIR-537 slice 3, so nothing writes the table now and the status only counts its `metadata_sync` checkpoints. There is no new flag and no new cron. `metadataSync` does not read the table. While the schema v6 marker is `r2` or absent, the clocks still come from `metadata.json`.
+[ADR 0070](../../adr/0070-metadatasync-freshness-clocks.md): migration `0005` adds `film_sync_state` and is applied on production. The enrichment projector wrote it when `schema_contract.version` was 5, 6 or 7 and the table existed; the projector was removed in AIR-537 slice 3. At `d1`/`open` the fenced canonical Film adapters write the table (`writeFilmFacts`, `SYNC_UPSERT` in `src/canonical-film-writers.js`, reached from the metadata-sync producer), and `/api/d1/status` still counts the `metadata_sync` checkpoints of `projection_state` read-only. There is no new flag and no new cron. `metadataSync` does not read the table. While the schema v6 marker is `r2` or absent, the clocks still come from `metadata.json`.
 
 | Column | Holds |
 | --- | --- |

@@ -183,5 +183,6 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-412 GET and HEAD read side-effect audit: R2 and D1 instrumentation, route inventory, baseline of the reads that write | [api/air-412-get-head-audit-2026-11-10.md](api/air-412-get-head-audit-2026-11-10.md) |
 | AIR-414 EPG compatibility mirrors: GET no longer repairs; hourly `ensure` reconciles (offline tests only) | [api/air-414-epg-mirror-reconciliation-2026-11-10.md](api/air-414-epg-mirror-reconciliation-2026-11-10.md) |
 | AIR-419 watchlist card: confirmed Diary rating missing next to a forecast (offline RCA and fix) | [letterboxd/air-419-watchlist-card-rating-2026-11-10.md](letterboxd/air-419-watchlist-card-rating-2026-11-10.md) |
+| AIR-528 `/admin/identity`: stale observation index without manifest (offline RCA and fix) | [api/air-528-identity-stale-index-null-manifest-2026-11-19.md](api/air-528-identity-stale-index-null-manifest-2026-11-19.md) |
 
 See [current reference](../reference/README.md), [architectural decisions](../adr/README.md) and [operator runbooks](../runbooks/README.md). No production operations were performed for this registry.

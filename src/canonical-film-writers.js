@@ -3,11 +3,11 @@
 // membership (set, clear), the film_dimension lifecycle rows (identity, metadata) and the EFFECTIVE localization row, which is materialised in the same
 // batch as the automatic source write so the SQL of src/catalog-d1.js never sees a source with no effective value.
 // DORMANT, like src/canonical-mutations.js: not bundled, imported only by the producer adapters module, and writeFilmFacts reaches the database only after
-// assertWritable (marker d1/open). At r2/prepared (and held, legacy, unreadable) it refuses before any database statement but the marker read; the projector
-// stays the only canonical writer. Nothing here reads R2, scores a Film or writes identity ids, aliases, credits, a fingerprint or a prediction.
+// assertWritable (marker d1/open). In every state but open (r2, prepared, held, legacy, unreadable) it refuses before any database statement but the marker read; the enrichment projector
+// that used to write below open was removed in AIR-537 slice 3, so no writer exists there. Nothing here reads R2, scores a Film or writes identity ids, aliases, credits, a fingerprint or a prediction.
 // - planFilmFacts(snapshot,input) is PURE: it turns the stored rows of ONE Film and a caller's facts into statements and says what it skipped and why. The P6
-//   differential harness runs it (and the projector) on one fixture. The same rows come out as the projector's writeFilm for the same inputs; where the
-//   canonical rule is stricter (never blank, never overwrite reviewed/owner, trusted-source precedence) the difference is the documented rule.
+//   differential harness ran it (and the projector) on one fixture. (Historical: the same rows came out as the removed projector's writeFilm for the same inputs; where the
+//   canonical rule is stricter (never blank, never overwrite reviewed/owner, trusted-source precedence) the difference is the documented rule.)
 // - writeFilmFacts(env,input) is the ONE fenced batch: the marker generation, the Film revision and the absence of a redirect are proven in the batch itself
 //   (fenced.head / fenced.assertSql), the revision is bumped, and a lost fence or revision rolls it back whole (film_person_fence / film_person_revision_conflict).
 // - Title provenance (owner-approved 11 Nov 2026): the source of the stored original_title is kept in a DISTINCT key `titleSource` of film_dimension.identity.provenance_json,
@@ -32,7 +32,7 @@ const blank=value=>value===undefined||value===null||(typeof value==='string'&&va
 const json=value=>value==null?null:JSON.stringify(value);
 const parse=text=>{if(text==null)return null;try{return JSON.parse(text);}catch{return null;}};
 const instant=value=>{if(typeof value!=='string'||!ISO.test(value))return null;const ms=Date.parse(value);return Number.isFinite(ms)?new Date(ms).toISOString():null;};
-// Machine-readable differences from the projector that the P6 differential harness must report as NAMED exceptions, never as parity.
+// Machine-readable differences from the removed projector (AIR-537 slice 3) that the P6 differential harness must report as NAMED exceptions, never as parity.
 export const P6_DIFFERENTIAL_EXCEPTIONS=Object.freeze([
  {id:'sync_null_clock_keeps_stored',status:'accepted',area:'film_sync_state',rule:'A missing or null clock in a partial sync update leaves the stored clock unchanged; clearing needs sync.clear or sync:null. The projector writes a missing clock as null.'},
  {id:'identity_provenance_title_source',status:'accepted',area:'film_dimension.identity.provenance_json',rule:'The canonical writer adds a titleSource key {source,at} when it writes original_title; the projector writes the provenance it is given.'},
@@ -44,12 +44,12 @@ const titleSourceOf=row=>{try{const value=JSON.parse(row?.provenance_json||'null
 const rank=source=>{const index=TITLE_SOURCE_ORDER.indexOf(source);return index<0?-1:TITLE_SOURCE_ORDER.length-index;};
 const strong=row=>!!row&&(row.status==='reviewed'||row.authority==='owner');
 
-// The guard of a dimension upsert, the one of the projector's localization write: a reviewed row is replaced only by an owner write over an owner row, or
+// The guard of a dimension upsert, the one of the removed projector's localization write: a reviewed row is replaced only by an owner write over an owner row, or
 // by a reviewed dictionary/owner write over a reviewed one.
 function dimensionUpsert(){
  return `INSERT INTO film_dimension (film_id,${DIM_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id,dimension) DO UPDATE SET status=excluded.status,source=excluded.source,source_version=excluded.source_version,provenance_json=excluded.provenance_json,value=excluded.value,authority=excluded.authority,last_error=excluded.last_error,failure_reason=excluded.failure_reason,retry_at=excluded.retry_at,attempts=excluded.attempts,next_action=excluded.next_action,updated_at=excluded.updated_at WHERE film_dimension.status<>'reviewed' OR (film_dimension.authority='owner' AND excluded.status='reviewed' AND excluded.authority='owner') OR (COALESCE(film_dimension.authority,'')<>'owner' AND excluded.status='reviewed' AND (excluded.authority IN ('dictionary','owner') OR excluded.source='dictionary'))`;
 }
-// The same parameters as the projector's dimensionParams, so the same state gives the same row.
+// The same parameters as the removed projector's dimensionParams, so the same state gives the same row.
 function dimensionParams(id,state){
  if(!plain(state)||!state.status||!state.updatedAt||!state.dimension)throw failed('film_person_invalid');
  return [id,state.dimension,state.status,state.source??null,state.sourceVersion??null,json(state.provenance),state.value??null,state.provenance?.authority??null,state.lastError??null,state.failureReason??null,state.retryAt??null,state.attempts??0,state.nextAction??'none',state.updatedAt];
@@ -66,7 +66,7 @@ export function mergeMetadata(stored,incoming){
  out.payload=blank(incoming.payload)?(base.payload||{}):incoming.payload;
  return out;
 }
-// Same column order and defaults as the projector's metadataParams.
+// Same column order and defaults as the removed projector's metadataParams.
 function metadataParams(id,m){return [id,m.schemaVersion??1,m.year??null,m.runtime??null,m.synopsis??null,m.poster??null,m.url??null,JSON.stringify(m.genres||[]),m.peopleVersion??null,JSON.stringify(m.payload??{}),m.r2Key??null,m.contentSha256??null,m.updatedAt];}
 const METADATA_UPSERT='INSERT INTO film_metadata (film_id,schema_version,year,runtime,synopsis,poster,url,genres_json,people_version,payload_json,r2_key,content_sha256,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET schema_version=excluded.schema_version,year=excluded.year,runtime=excluded.runtime,synopsis=excluded.synopsis,poster=excluded.poster,url=excluded.url,genres_json=excluded.genres_json,people_version=excluded.people_version,payload_json=excluded.payload_json,r2_key=excluded.r2_key,content_sha256=excluded.content_sha256,updated_at=excluded.updated_at';
 const SYNC_UPSERT='INSERT INTO film_sync_state (film_id,metadata_at,synopsis_fetched_at,people_names_version,people_localized_at) VALUES (?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET metadata_at=excluded.metadata_at,synopsis_fetched_at=excluded.synopsis_fetched_at,people_names_version=excluded.people_names_version,people_localized_at=excluded.people_localized_at';
