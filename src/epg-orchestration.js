@@ -24,6 +24,9 @@ const EpgOrchestration=(()=>{
  const STEP_CAP=400,SLEEP_FLOOR_MS=1000,EXTERNAL_FRESH_MS=15*60000,LEASE_MS=5*60000,BOUNDARY_MARGIN_MS=15000,PAUSE_MS=6*3600000,CONTROL_ATTEMPTS=4,ALIVE=['running','waiting','queued','paused'],ENDED=['complete','errored','terminated','absent'];
  const STAGE_RANK={metadata:1,epg:2,seal:3,complete:4},SEAL_RANK={ledger:1,catalog:2,publish:3,finalize:4,queue:5};
  const iso=ms=>new Date(ms).toISOString();
+ // The Worker version this code runs as (version metadata binding); null when absent or malformed. Inside a Workflow step it is the version
+ // of the instance, which the controlled rollover compares with the deployed one. Never trusted beyond a short id.
+ const workerVersion=env=>{try{const id=env?.CF_VERSION_METADATA?.id;return typeof id==='string'&&/^[0-9A-Za-z-]{1,64}$/.test(id)?id:null;}catch{return null;}};
  const policy=()=>OrchestrationPolicy;
  const schedule=()=>policy().EPG_SCHEDULE;
  const dayOf=ms=>policy().madridDayKey(ms);
@@ -44,10 +47,14 @@ const EpgOrchestration=(()=>{
  }
  // One compare-and-set. `revision` null creates (refused if the key exists); a number replaces that revision only. `modeRevision`
  // (undefined: no condition) additionally requires the mode document to still be at that revision, null meaning absent.
- async function casDoc(env,key,revision,value,modeRevision){
+ // `leaseRevision` (undefined: no condition) additionally requires the lease row to still be at that revision, null meaning absent: a step
+ // that took or released the lease since the read moves that revision, so the write is refused (the controlled rollover uses it).
+ async function casDoc(env,key,revision,value,modeRevision,leaseRevision){
   // Every write carries its own id, so the read-back below can tell this writer's document from an identical one of a competitor.
   const body=JSON.stringify({...value,writeId:crypto.randomUUID()}),now=iso(Date.now());
-  const cond=modeRevision===undefined?['',[]]:modeRevision===null?[' AND NOT EXISTS (SELECT 1 FROM '+TABLE+" WHERE key='mode')",[]]:[' AND EXISTS (SELECT 1 FROM '+TABLE+" WHERE key='mode' AND revision=?)",[modeRevision]];
+  const modeCond=modeRevision===undefined?['',[]]:modeRevision===null?[' AND NOT EXISTS (SELECT 1 FROM '+TABLE+" WHERE key='mode')",[]]:[' AND EXISTS (SELECT 1 FROM '+TABLE+" WHERE key='mode' AND revision=?)",[modeRevision]];
+  const leaseCond=leaseRevision===undefined?['',[]]:leaseRevision===null?[' AND NOT EXISTS (SELECT 1 FROM '+TABLE+" WHERE key='lease')",[]]:[' AND EXISTS (SELECT 1 FROM '+TABLE+" WHERE key='lease' AND revision=?)",[leaseRevision]];
+  const cond=[modeCond[0]+leaseCond[0],[...modeCond[1],...leaseCond[1]]];
   const statement=revision===null
    ?env.DB.prepare('INSERT INTO '+TABLE+' (key, body, revision, updated_at) SELECT ?, ?, 1, ? WHERE NOT EXISTS (SELECT 1 FROM '+TABLE+' WHERE key=?)'+cond[0]).bind(key,body,now,key,...cond[1])
    :env.DB.prepare('UPDATE '+TABLE+' SET body=?, revision=revision+1, updated_at=? WHERE key=? AND revision=?'+cond[0]).bind(body,now,key,revision,...cond[1]);
@@ -444,7 +451,7 @@ function frozenDay(run){
   if(outcome.failure?.code==='epoch_mismatch'||outcome.failure?.code==='step_lease_expired')return {kind:'stop',reason:outcome.failure.code};
   // Commit. A thrown commit is not retried blind: the next action reads the control record and sync.json first.
   const key=outcome.run?checkpointKey(outcome.run):control.checkpoint?.key??null;
-  const next={...control,runId:outcome.runId??control.runId,updatedAt:iso(now),nextWakeAt:outcome.wake?iso(outcome.wake):null,lastStep:{latencyMs:Math.max(0,clock()-began),started:outcome.started===true,note:outcome.note||null}};
+  const next={...control,runId:outcome.runId??control.runId,updatedAt:iso(now),...(workerVersion(env)?{versionId:workerVersion(env)}:{}),nextWakeAt:outcome.wake?iso(outcome.wake):null,lastStep:{latencyMs:Math.max(0,clock()-began),started:outcome.started===true,note:outcome.note||null}};
   let result;
   if(outcome.failure){
    const {code,retryAfterAt}=outcome.failure,applied=policy().applyFailure(control.budget,{code},{now,phase:outcome.run?.stage??control.checkpoint?.phase??null,checkpoint:key,retryAfterAt:code==='rate_limited'?(retryAfterAt??now+PAUSE_MS):retryAfterAt,random:ctx.random});
@@ -682,6 +689,13 @@ function frozenDay(run){
      if(applied.quarantine)return {started:false,reason:'quarantined',scope:'run'};
      return {started:false,reason:'status_unknown',instanceId:control.instanceId,until:applied.cooldownUntil};
     }
+    // A controlled rollover swapped the control record to its successor but the create never landed: the same id is created (idempotent) or
+    // attached. It is not a failure of the run, so it spends no budget.
+    if(status==='absent'&&control.phase==='starting'&&control.rollover?.toInstanceId===control.instanceId&&control.epoch===mode.record.epoch){
+     const created=await createSuccessor(env,{runKey:control.runKey,series:control.series,epoch:mode.record.epoch});
+     if(created.uncertain)return {started:false,reason:'create_uncertain',instanceId:control.instanceId};
+     return {started:true,attached:!created.created,instanceId:control.instanceId,runKey:control.runKey,series:control.series,recovered:'rollover'};
+    }
     // A claimed seal whose successor reports `complete` while sync.json still says `seal` is contradictory evidence: fail closed.
     const code=claim&&status==='complete'?'evidence_contradictory':status==='errored'?'instance_errored':status==='absent'?'create_uncertain':'instance_terminated';
     if(claim&&status==='absent'&&Number.isFinite(cooling)&&cooling>now)return {started:false,reason:'cooldown',until:control.cooldownUntil};
@@ -720,6 +734,171 @@ function frozenDay(run){
   }
  }
 
+ // ---- the controlled rollover onto the deployed Worker version (owner-only MCP tool `epg_workflow_rollover`) ------
+ // A running Workflow instance keeps the version it was created on. The rollover hands the control record to the deterministic successor
+ // (`series + 1`) of the SAME run key, epoch and run, by one compare-and-set of the control document, conditioned on the mode revision and on
+ // the step lease row being unchanged since the read. It is admitted only for an owner that is provably asleep outside a step. The old
+ // instance finds `not_owner` on its next wake and stops without a write (its orphan-claim recovery needs a claim naming itself, which a
+ // rollover never writes). Nothing here resets a lease, a budget, a cooldown or a quarantine, publishes, or terminates a platform instance.
+ const ROLLOVER_WAKE_MARGIN_MS=120000,ROLLOVER_REQUEST_ID=/^[A-Za-z0-9_-]{8,64}$/;
+ const ROLLOVER_PINS=[['expectedRunKey','runKey'],['expectedEpoch','epoch'],['expectedSeries','series'],['expectedInstanceId','instanceId'],['expectedRunId','runId'],['expectedControlRevision','controlRevision']];
+ // Reads only. Every unreadable or ambiguous fact is an `unknown`, every unsafe one a `blocker`; only a clean read of both lists empty is `eligible`.
+ async function rolloverPreflight(env,now=Date.now()){
+  const unknowns=[],blockers=[],facts={now:iso(now)};
+  const deployed=workerVersion(env);facts.deployedVersionId=deployed;
+  if(!deployed)unknowns.push('deployed_version_unavailable');
+  if(typeof env?.EPG_WORKFLOW?.get!=='function')unknowns.push('workflow_binding_unavailable');
+  let mode=null,control=null,lease=null,run,authority=null,status='unknown';
+  try{mode=await readMode(env);}catch{unknowns.push('mode_unreadable');}
+  try{control=await readControl(env);}catch{unknowns.push('control_unreadable');}
+  try{lease=await readLease(env);}catch{unknowns.push('lease_unreadable');}
+  try{run=await loadJSON(env,'sync.json');}catch{unknowns.push('sync_unreadable');run=undefined;}
+  authority=await authorityState(env);if(authority.error)unknowns.push('authority_unreadable');
+  if(mode){
+   if(!mode.schema)blockers.push('not_cloudflare');
+   else if(mode.malformed)unknowns.push('mode_malformed');
+   else if(mode.record.mode==='switching')blockers.push('switch_in_progress');
+   else if(mode.record.mode!=='cloudflare')blockers.push('not_cloudflare');
+  }
+  if(control?.malformed)unknowns.push('control_malformed');
+  if(lease?.malformed)unknowns.push('lease_unreadable');
+  const c=control&&!control.malformed?control.record:null;
+  facts.control=c?{runKey:c.runKey,series:c.series,instanceId:c.instanceId,epoch:c.epoch,phase:c.phase,runId:c.runId,revision:control.revision,stored:control.stored,versionId:c.versionId??null,nextWakeAt:c.nextWakeAt,cooldownUntil:c.cooldownUntil,consecutive:c.budget?.consecutive??null,total:c.budget?.total??null}:null;
+  if(c){
+   if(!control.stored||!c.instanceId||!c.runKey)blockers.push('no_owner');
+   if(c.doneAt)blockers.push('complete');
+   if(c.quarantine)blockers.push('quarantined');
+   if(mode&&mode.record&&c.epoch!==mode.record.epoch&&c.instanceId)blockers.push('epoch_mismatch');
+   if(c.phase==='starting')blockers.push('successor_not_started');
+   if(c.instanceId&&env?.EPG_WORKFLOW?.get)status=await instanceStatus(env.EPG_WORKFLOW,c.instanceId);
+   facts.platformStatus=status;
+   if(status==='unknown')unknowns.push('instance_status_unknown');
+   else if(c.instanceId&&!['running','waiting'].includes(status))blockers.push('owner_not_alive');
+   // The proof of a sleep outside a step: a durable wake time well in the future. `waiting` carries it in nextWakeAt, a cooldown in cooldownUntil;
+   // a `running` record with neither is an owner that continues at once.
+   const wake=Math.max(Date.parse(c.nextWakeAt||'')||0,Date.parse(c.cooldownUntil||'')||0);
+   const sleeping=(c.phase==='waiting'||c.phase==='running')&&wake>0;
+   facts.sleepsUntil=wake>0?iso(wake):null;
+   if(c.phase!=='starting'){
+    if(!sleeping||wake<=now)blockers.push('owner_not_sleeping');
+    else if(wake-now<ROLLOVER_WAKE_MARGIN_MS)blockers.push('wake_too_soon');
+   }
+   const ownerDay=policy().madridDayKey(now);
+   const claim=c.handoff?await sealClaimPending(env,c):{pending:false};
+   if(claim.unreadable)unknowns.push('sync_unreadable');
+   if(c.runKey&&ownerDay!==c.runKey&&!claim.pending)blockers.push('day_rolled');
+   if(run!==undefined){
+    facts.syncRun=run?{runId:run.runId??null,stage:run.stage??null,sealPhase:run.seal?.phase??null,key:checkpointKey(run)}:null;
+    if(run&&run.stage==='seal'&&c.handoff?.sealRunId!==run.runId)blockers.push('seal_unclaimed');
+    if(run&&c.runId&&run.runId!==c.runId&&run.stage!=='complete')blockers.push('run_mismatch');
+   }
+  }
+  if(lease&&!lease.malformed){
+   facts.lease={live:leaseLive(lease.record,now),revision:lease.stored?lease.revision:null};
+   if(facts.lease.live)blockers.push('lease_live');
+  }
+  if(!authority.error&&!authority.ready)blockers.push('authority_held');
+  facts.modeRevision=mode&&!mode.malformed&&mode.schema?mode.revision:null;
+  const alive=c&&c.instanceId&&['running','waiting','queued'].includes(status);
+  const current=!!deployed&&!!c&&c.versionId===deployed;
+  let decision;
+  if(unknowns.length)decision='unknown';
+  else if(alive&&current&&!blockers.some(b=>['not_cloudflare','switch_in_progress','no_owner','complete','quarantined'].includes(b)))decision='already_current';
+  else decision=blockers.length?'unsafe':'eligible';
+  const expect=c&&c.instanceId?{runKey:c.runKey,epoch:c.epoch,series:c.series,instanceId:c.instanceId,runId:c.runId??null,controlRevision:control.revision}:null;
+  return {decision,blockers:[...new Set(blockers)],unknowns:[...new Set(unknowns)],expect,facts,raw:{mode,control,lease,c,status,run,authority}};
+ }
+ const rolloverView=pre=>{const {raw,...view}=pre;return view;};
+ const rolloverLog=(outcome,fields={})=>{try{console.log(JSON.stringify({event:'epg_workflow_rollover',outcome,at:new Date().toISOString(),...fields}));}catch{}};
+ // What a read of the control record says after an apply: the record names the successor and only it, the platform reports it alive, the run and
+ // its checkpoint are the ones before the swap, the budget is unchanged. The version is confirmed only once the successor has recorded its own.
+ async function rolloverReadback(env,receipt,before){
+  let control=null,status='unknown',run=null;
+  try{control=await readControl(env);}catch{return {accepted:false,reason:'control_unreadable'};}
+  const c=control.malformed?null:control.record;
+  if(!c)return {accepted:false,reason:'control_unreadable'};
+  if(env?.EPG_WORKFLOW?.get)status=await instanceStatus(env.EPG_WORKFLOW,receipt.toInstanceId);
+  try{run=await loadJSON(env,'sync.json');}catch{run=undefined;}
+  const named=c.instanceId===receipt.toInstanceId&&c.series===receipt.toSeries&&c.runKey===receipt.runKey&&c.rollover?.requestId===receipt.requestId;
+  const superseded=!named&&c.runKey===receipt.runKey&&Number.isInteger(c.series)&&c.series>receipt.toSeries;
+  const alive=['running','waiting','queued'].includes(status);
+  // The run document must be readable and be the very run pinned before the swap (or absent exactly when it was absent); only within that run is the
+  // checkpoint compared, and it may only have moved forward. An unreadable, missing or different run is unproven, never a success.
+  const syncReadable=run!==undefined;
+  const sameSync=syncReadable&&((run?.runId??null)===(before.syncRunId??null))&&(!run||progressCount(run)>=(before.syncCount??0));
+  const sameRun=c.runId===before.runId&&sameSync;
+  const budgetKept=named?c.budget?.consecutive>=before.consecutive&&c.budget?.total>=before.total:true;
+  const accepted=named&&alive&&sameRun&&budgetKept;
+  return {accepted,superseded,named,successorStatus:status,syncReadable,sameRun,budgetKept,versionConfirmed:named&&!!receipt.deployedVersionId&&c.versionId===receipt.deployedVersionId,controlRevision:control.revision,phase:c.phase,series:c.series,instanceId:c.instanceId};
+ }
+ const rolloverReceipt=r=>({requestId:r.requestId,runKey:r.runKey,fromInstanceId:r.fromInstanceId,fromSeries:r.fromSeries,toInstanceId:r.toInstanceId,toSeries:r.toSeries,deployedVersionId:r.deployedVersionId,fromVersionId:r.fromVersionId??null,fromControlRevision:r.fromControlRevision,at:r.at});
+ async function epgWorkflowRollover(env,args={}){
+  const startedAt=Date.now();
+  let pre;
+  try{pre=await rolloverPreflight(env,startedAt);}catch{return {status:200,body:{ok:false,mode:args.mode,decision:'unknown',unknowns:['preflight_failed'],blockers:[],writes:0}};}
+  if(args.mode==='dry_run')return {status:200,body:{ok:true,mode:'dry_run',writes:0,...rolloverView(pre)}};
+  const c=pre.raw.c,refuse=(reason,extra={})=>({status:409,body:{ok:false,mode:'apply',reason,writes:0,decision:pre.decision,blockers:pre.blockers,unknowns:pre.unknowns,expect:pre.expect,...extra}});
+  if(args.confirmGo!==true)return {status:400,body:{ok:false,mode:'apply',reason:'confirm_required',writes:0}};
+  // A repeat of the same request id never swaps again: it resumes a swap whose create is owed, or reads back.
+  if(c?.rollover?.requestId===args.requestId){
+   const r=c.rollover;
+   // All six pins of the original request must match the stored receipt before anything else, an owed create included.
+   const sixth=[['expectedRunKey',r.runKey],['expectedEpoch',r.epoch],['expectedSeries',r.fromSeries],['expectedInstanceId',r.fromInstanceId],['expectedRunId',r.runId??null],['expectedControlRevision',r.fromControlRevision]];
+   if(sixth.some(([arg,value])=>args[arg]!==value))return refuse('request_id_reused');
+   // A readback is always allowed. An owed create is gated by the CURRENT facts: every fact readable, no blocker but the two a swapped record
+   // shows by itself (successor not started, successor not yet alive), the control epoch equal to the mode epoch, authority ready, and the
+   // platform reporting the successor absent. Otherwise nothing is created and the answer is a readback only.
+   const stillOwed=c.instanceId===r.toInstanceId&&c.phase==='starting'&&pre.raw.status==='absent';
+   const gated=pre.unknowns.length===0&&pre.blockers.every(b=>b==='successor_not_started'||b==='owner_not_alive')&&pre.raw.mode?.record?.mode==='cloudflare'&&pre.raw.mode.record.epoch===c.epoch;
+   let created=null,writes=0;
+   if(stillOwed&&gated){created=await createSuccessor(env,{runKey:r.runKey,series:r.toSeries,epoch:c.epoch});writes=created.created?1:0;}
+   const readback=await rolloverReadback(env,r,{runId:r.runId??null,syncRunId:r.syncRunId??null,syncCount:r.syncCount??0,consecutive:r.consecutive??0,total:r.total??0});
+   const blocked=stillOwed&&!gated;
+   const outcome=readback.superseded?'superseded':blocked?'create_blocked':created?.uncertain?'successor_uncertain':readback.accepted?(readback.versionConfirmed?'handed_over':'handed_over_version_pending'):'readback_unproven';
+   rolloverLog(outcome,{requestId:String(args.requestId).slice(0,64),replay:true,to:r.toInstanceId});
+   return {status:(readback.accepted||readback.superseded)&&!blocked?200:202,body:{ok:(readback.accepted||readback.superseded)&&!blocked,mode:'apply',outcome,replay:true,writes,...(blocked?{blockers:pre.blockers,unknowns:pre.unknowns}:{}),receipt:rolloverReceipt(r),readback}};
+  }
+  if(!pre.expect)return refuse('no_owner');
+  const stale=ROLLOVER_PINS.filter(([arg,key])=>args[arg]!==pre.expect[key]).map(([arg])=>arg);
+  if(stale.length)return refuse('stale_pin',{stale});
+  if(pre.decision==='already_current')return refuse('already_current');
+  if(pre.decision!=='eligible')return refuse(pre.decision);
+  const raw=pre.raw,wake=Date.parse(pre.facts.sleepsUntil||'');
+  // The reads must have left at least half of the wake margin.
+  if(!Number.isFinite(wake)||wake-Date.now()<ROLLOVER_WAKE_MARGIN_MS/2)return refuse('preflight_too_slow');
+  const runKey=c.runKey,toSeries=c.series+1,toInstanceId=instanceId(runKey,toSeries),at=iso(Date.now());
+  const receipt={requestId:args.requestId,runKey,runId:c.runId??null,fromInstanceId:c.instanceId,fromSeries:c.series,toInstanceId,toSeries,deployedVersionId:pre.facts.deployedVersionId,fromVersionId:c.versionId??null,fromControlRevision:raw.control.revision,epoch:c.epoch,syncRunId:pre.facts.syncRun?.runId??null,syncCount:progressCount(raw.run),consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,at};
+  const next={...c,series:toSeries,instanceId:toInstanceId,phase:'starting',nextWakeAt:null,versionId:null,createdVersionId:pre.facts.deployedVersionId,rollover:receipt,updatedAt:at};
+  let swapped=false;
+  try{swapped=await casDoc(env,'control',raw.control.stored?raw.control.revision:null,next,raw.mode.revision,raw.lease.stored?raw.lease.revision:null);}
+  catch{rolloverLog('swap_unknown',{requestId:String(args.requestId).slice(0,64)});return {status:202,body:{ok:false,mode:'apply',outcome:'swap_unknown',writes:0,hint:'repeat the same requestId and the same pins'}};}
+  if(!swapped){rolloverLog('swap_refused',{requestId:String(args.requestId).slice(0,64)});return refuse('cas_lost');}
+  let created;
+  try{created=await createSuccessor(env,{runKey,series:toSeries,epoch:raw.mode.record.epoch});}catch{created={uncertain:true,id:toInstanceId,status:'unknown'};}
+  const before={runId:c.runId??null,syncRunId:receipt.syncRunId,syncCount:receipt.syncCount,consecutive:receipt.consecutive,total:receipt.total};
+  const readback=await rolloverReadback(env,receipt,before);
+  const outcome=created.uncertain?'successor_uncertain':readback.accepted?(readback.versionConfirmed?'handed_over':'handed_over_version_pending'):'readback_unproven';
+  rolloverLog(outcome,{requestId:String(args.requestId).slice(0,64),from:receipt.fromInstanceId,to:toInstanceId,deployedVersionId:receipt.deployedVersionId});
+  return {status:readback.accepted?200:202,body:{ok:readback.accepted,mode:'apply',outcome,replay:false,writes:1+(created.created?1:0),receipt:rolloverReceipt(receipt),readback}};
+ }
+ // The MCP entry. Validates the arguments exactly; dry_run never writes.
+ async function handleRolloverTool(env,args={}){
+  const bad=reason=>({status:400,body:{ok:false,reason}});
+  if(!args||typeof args!=='object'||Array.isArray(args))return bad('invalid');
+  if(args.mode!=='dry_run'&&args.mode!=='apply')return bad('invalid_mode');
+  if(args.confirmGo!==undefined&&typeof args.confirmGo!=='boolean')return bad('invalid_confirm');
+  if(args.mode==='apply'){
+   if(typeof args.requestId!=='string'||!ROLLOVER_REQUEST_ID.test(args.requestId))return bad('invalid_request_id');
+   if(typeof args.expectedRunKey!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(args.expectedRunKey))return bad('invalid_expected_run_key');
+   if(!Number.isInteger(args.expectedEpoch)||args.expectedEpoch<0)return bad('invalid_expected_epoch');
+   if(!Number.isInteger(args.expectedSeries)||args.expectedSeries<0)return bad('invalid_expected_series');
+   if(typeof args.expectedInstanceId!=='string'||!/^epg_\d{8}_\d{1,6}$/.test(args.expectedInstanceId))return bad('invalid_expected_instance_id');
+   if(args.expectedRunId!==null&&(typeof args.expectedRunId!=='string'||!args.expectedRunId||args.expectedRunId.length>100))return bad('invalid_expected_run_id');
+   if(!Number.isInteger(args.expectedControlRevision)||args.expectedControlRevision<1)return bad('invalid_expected_control_revision');
+  }
+  return epgWorkflowRollover(env,args);
+ }
+
  // ---- the read model. Reads only; never creates or repairs. ----------------------------------------------------
  async function readModel(env,now=Date.now()){
   const mode=await readMode(env);
@@ -755,6 +934,7 @@ function frozenDay(run){
    failure:{class:c.failure?.class??null,code:c.failure?.code??null,fingerprint:c.budget?.fingerprint??null,consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,caps:policy().BUDGET_CAPS},
    cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,...(c.handoff?{handoff:{fromSeries:c.handoff.fromSeries??null,toSeries:c.handoff.toSeries??null,at:c.handoff.at??null,successorPending:c.phase==='starting'&&!c.doneAt&&liveness==='absent'}}:{}),health,sideEffects:'none'};
  }
- return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,reconcileMirrors,readModel,drainState,classifyThrown,checkpointKey,progressCount,sealClaimPending,createSuccessor};
+ return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,reconcileMirrors,readModel,drainState,rolloverPreflight,epgWorkflowRollover,handleRolloverTool,workerVersion,classifyThrown,checkpointKey,progressCount,sealClaimPending,createSuccessor};
 })();
+async function handleEpgRolloverTool(env,args){return EpgOrchestration.handleRolloverTool(env,args);}
 async function runEpgWorkflow(env,payload,step){return EpgOrchestration.run(env,payload,step);}
