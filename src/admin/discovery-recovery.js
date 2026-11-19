@@ -260,8 +260,15 @@ async function adminDiscoveryRecoveryRoute(request,env,url){
  try{observed=await drObserve(bucket,versions,key,Date.now(),null,env);}
  catch{return adminError('storage_unavailable',503);}
  if(pin&&pin!==observed.pin)return json({error:'stale_pin',pin:observed.pin},409);
+ // ADR 0178 / AIR-132: a read-only entry to the revoke page, offered only for a saved owner action the history proves.
+ let revoke=null;
+ const savedAction=observed.record?.decision?.ownerIdentity;
+ if(savedAction&&typeof savedAction.requestId==='string'&&DR_IDEMPOTENCY.test(savedAction.requestId)&&await dvGate(env)){
+  revoke={requestId:savedAction.requestId,effect:savedAction.effect,tmdbId:savedAction.tmdbId,available:false,reason:'unavailable'};
+  try{const proof=await dvEvidence(env,key,savedAction.requestId);revoke.available=proof.provenance.ok===true;revoke.reason=proof.provenance.reason;}catch{}
+ }
  return json({
-  pin:observed.pin,evaluatedAt:observed.now,atomic:false,target:{key},
+  pin:observed.pin,evaluatedAt:observed.now,atomic:false,target:{key},revoke,
   index:drIndexView(observed.index),indexed:!!observed.record,
   observation:drObservationView(observed.record),
   assessment:observed.assessment,
@@ -609,6 +616,17 @@ async function diConfirm(request,env,url){
  const preview=AdminActions.previewAction(DR_REGISTRY,{capability:DI_CAPABILITY.id,version:DI_CAPABILITY.version,subject:{kind:'observation',id:key},pin:observed.pin,ids:[key]},{pin:observed.pin,now:observed.now,records:[{id:key,version}],issues:[issue]});
  const issued=AdminActions.confirmAction(preview,{now:observed.now,idempotencyKey:body.idempotencyKey,accepted:true});
  if(issued.error)return drRefused(issued.error,409,{pin:observed.pin,reason:command.reason});
+ // ADR 0178, section 3: a supersede names the saved action it replaces. It is proven here and again at execute, and the D1 writer enforces it.
+ let supersedes=null;
+ if(body.supersedes!==undefined){
+  const original=body.supersedes&&typeof body.supersedes==='object'&&typeof body.supersedes.requestId==='string'&&DR_IDEMPOTENCY.test(body.supersedes.requestId)?body.supersedes.requestId:null;
+  if(!original||original===body.idempotencyKey)return drRefused('invalid_request',400);
+  if(!await dvGate(env))return drRefused('not_authoritative',409);
+  const proof=await dvEvidence(env,key,original);
+  if(!proof.provenance.ok)return drRefused('not_eligible',409,{pin:observed.pin,reason:proof.provenance.reason});
+  if(proof.evidence.decisionHash!==observed.record.decisionHash)return drRefused('record_changed',409,{pin:observed.pin});
+  supersedes={requestId:original,decisionHash:proof.evidence.decisionHash};
+ }
  const application=DiscoveryIdentity.identityApplication(command.effect,offer,command);
  const plan=diPlan(observed.record,command);
  const record={schemaVersion:1,kind:'discovery_identity_action',idempotencyKey:body.idempotencyKey,state:'approved',issued,command:{effect:command.effect,tmdbId:command.tmdbId,basis:command.basis},application,plan,createdAt:observed.now,startedAt:null,finishedAt:null,
@@ -617,9 +635,9 @@ async function diConfirm(request,env,url){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
   if(gate.ready){
-   const intent=await DiscoveryAuthority.putIntent(env,{idempotencyKey:body.idempotencyKey,kind:command.effect==='assign'?'identity_assign':'identity_reject',observationKey:key,issued,command:{effect:command.effect,tmdbId:command.tmdbId,basis:command.basis},expectedHash:observed.record?.decisionHash??null,expiresAt:Date.parse(issued.expiresAt)});
+   const intent=await DiscoveryAuthority.putIntent(env,{idempotencyKey:body.idempotencyKey,kind:command.effect==='assign'?'identity_assign':'identity_reject',observationKey:key,issued,command:{effect:command.effect,tmdbId:command.tmdbId,basis:command.basis,...(supersedes?{supersedes}:{})},expectedHash:observed.record?.decisionHash??null,expiresAt:Date.parse(issued.expiresAt)});
    if(!intent.saved)return drRefused('idempotency_conflict',409);
-   return json({confirmation:issued,command:{effect:command.effect,tmdbId:command.tmdbId,basis:command.basis},plan,application,scope:{key,programmeRunId:observed.index.programmeRunId,decisionHash:observed.record.decisionHash}});
+   return json({confirmation:issued,command:{effect:command.effect,tmdbId:command.tmdbId,basis:command.basis,...(supersedes?{supersedes}:{})},plan,application,scope:{key,programmeRunId:observed.index.programmeRunId,decisionHash:observed.record.decisionHash}});
   }
  }
  const saved=await env.BUCKET.put(diActionKey(body.idempotencyKey),JSON.stringify(record),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
@@ -709,10 +727,19 @@ async function diExecuteD1(request,env,url){
  const film=parsed.effect==='assign'?await diCatalogFilm(env,parsed.tmdbId):{status:'recorded',film:null};
  const command=DiscoveryIdentity.identityCommand(observed.record,intent.intent.command,film.film);
  if(!command.ok)return drRefused('not_eligible',409,{reason:command.reason});
+ // A supersede is proven again against the live decision before any lease is taken (ADR 0178, section 3).
+ const sup=intent.intent.command.supersedes;
+ if(sup){
+  const proof=await dvEvidence(env,intent.intent.observationKey,sup.requestId);
+  if(!proof.provenance.ok)return drRefused(proof.provenance.reason==='old_action_not_effective'||proof.provenance.reason==='already_revoked'?proof.provenance.reason:'not_eligible',409,{reason:proof.provenance.reason});
+  if(proof.evidence.decisionHash!==intent.intent.expectedHash||sup.decisionHash!==intent.intent.expectedHash)return drRefused('record_changed',409);
+ }
  const lease=await acquireDiscoveryLease(env);
  if(!lease)return drRefused('lease_held',409);
  try{
-  const next=DiscoveryIdentity.appliedIdentityDecision(observed.record.decision,command,{at:new Date().toISOString(),requestId:submitted.idempotencyKey,programmeRunId:observed.index.programmeRunId});
+  // ADR 0178 section 1a: the identity basis (title, year, confirmed id) of this observation is recorded as provenance.
+  const identityBasis=await adminDigest(DiscoveryIdentity.identityBasisText(observed.record));
+  const next=DiscoveryIdentity.appliedIdentityDecision(observed.record.decision,command,{at:new Date().toISOString(),requestId:submitted.idempotencyKey,programmeRunId:observed.index.programmeRunId,identityBasis});
   const result=await DiscoveryAuthority.ownerDecision(env,{idempotencyKey:submitted.idempotencyKey,key:intent.intent.observationKey,expectedHash:intent.intent.expectedHash,next,lease,writer:'discovery_identity_correct',receipt:{state:'applied',capability:'discovery_identity_correct',effect:intent.intent.command.effect,tmdbId:intent.intent.command.tmdbId,decisionHash:await DiscoveryAuthority.decisionHash(next)}});
   if(result.outcome==='written'||result.outcome==='replay')return json({replayed:result.outcome==='replay',receipt:result.receipt,state:'applied',durable:true,application:DiscoveryIdentity.identityApplication(parsed.effect,observed.identity,command)});
   if(result.outcome==='unknown')return drRefused('in_progress',409,{state:'unknown'});
@@ -975,10 +1002,12 @@ async function dvConfirm(request,env,url){
  const issued=AdminActions.confirmAction(preview,{now:observed.now,idempotencyKey:body.idempotencyKey,accepted:true});
  if(issued.error)return drRefused(issued.error,409,{pin:observed.pin,reason:'eligible'});
  const stored={effect:'revoke',revokes:command.revokes,basis:command.basis};
- try{
-  const intent=await DiscoveryAuthority.putIntent(env,{idempotencyKey:body.idempotencyKey,kind:'identity_revoke',observationKey:key,issued,command:stored,expectedHash:evidence.decisionHash,expiresAt:Date.parse(issued.expiresAt)});
-  if(!intent.saved)return drRefused('idempotency_conflict',409);
- }catch{return drRefused('revoke_schema_not_ready',409);}
+ // A missing migration is told apart by reading the stored table definition. Any other fault below is a truthful
+ // storage_unavailable from the route (the intent row may or may not exist; nothing is retried), never "schema not ready".
+ const schema=await DiscoveryAuthority.revokeSchemaReady(env);
+ if(!schema.ready)return drRefused('revoke_schema_not_ready',409);
+ const intent=await DiscoveryAuthority.putIntent(env,{idempotencyKey:body.idempotencyKey,kind:'identity_revoke',observationKey:key,issued,command:stored,expectedHash:evidence.decisionHash,expiresAt:Date.parse(issued.expiresAt)});
+ if(!intent.saved)return drRefused('idempotency_conflict',409);
  return json({confirmation:issued,command:stored,application:dvShown(evidence,provenance).application,scope:{key,decisionHash:evidence.decisionHash,requestId:body.requestId}});
 }
 async function dvExecute(request,env,url){

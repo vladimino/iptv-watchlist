@@ -40,6 +40,10 @@ function revokeReasonText(reason) {
   return REVOKE_REASON_COPY[reason] || 'Отзыв сейчас недоступен.';
 }
 
+function supersedeReasonText(reason) {
+  return REVOKE_REASON_COPY[reason] || ('Замена сейчас недопустима (код: ' + String(reason || 'неизвестно') + ').');
+}
+
 function revokeEffectText(effect) {
   return effect === 'assign' ? 'назначение фильма' : effect === 'reject' ? 'исключение id' : '—';
 }

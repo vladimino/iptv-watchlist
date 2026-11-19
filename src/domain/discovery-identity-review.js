@@ -277,7 +277,18 @@ function carriesAction(decision, original) {
     return decision.status === 'verified' && decision.identitySource === 'owner'
       && identityMovieId(decision.tmdbId) === original.tmdbId && decision.filmId === 'tmdb_' + original.tmdbId;
   }
-  return rejectedIds(decision).includes(original.tmdbId);
+  // A later independent verification (another id verified by the resolver) is not a carry of this rejection.
+  return rejectedIds(decision).includes(original.tmdbId) && decision.status !== 'verified';
+}
+
+// Whether the current decision still carries the effect of the original action `intent` recorded (ADR 0178, section 3:
+// a supersede is bound to the live effective assertion, not to a historical request id).
+export function originalStillEffective(intent, current) {
+  if (!identityObject(intent) || (intent.kind !== 'identity_assign' && intent.kind !== 'identity_reject')) return false;
+  const effect = intent.kind === 'identity_assign' ? 'assign' : 'reject';
+  const tmdbId = identityMovieId(intent.command?.tmdbId);
+  if (!tmdbId) return false;
+  return carriesAction(current, {requestId: intent.idempotencyKey, effect, tmdbId});
 }
 
 // The original action of one request id, proven from stored D1 rows alone. `intent` is the discovery_intent row, `history`

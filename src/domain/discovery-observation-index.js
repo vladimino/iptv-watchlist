@@ -109,7 +109,7 @@ function ownerIdentityView(value) {
   if (!indexObject(value) || (value.effect !== 'assign' && value.effect !== 'reject')) return null;
   const tmdbId = movieId(value.tmdbId);
   if (!tmdbId) return null;
-  return {effect: value.effect, tmdbId, at: indexText(value.at, 40), basis: indexText(value.basis, 200)};
+  return {effect: value.effect, tmdbId, at: indexText(value.at, 40), basis: indexText(value.basis, 200), requestId: indexText(value.requestId, 80)};
 }
 
 // ADR 0178: the fence of a revoked owner assign, shown to the owner. Ids, times and a request id only.

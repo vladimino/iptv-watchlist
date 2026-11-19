@@ -167,6 +167,17 @@ assert.equal(Identity.revokeProvenance({intent, history: rows, current: {...assi
 assert.equal(Identity.revokeProvenance({intent, history: rows, current: {...assigned, tmdbId: '6', filmId: 'tmdb_6'}}).reason, 'old_action_not_effective', 'a newer independent decision');
 assert.equal(Identity.revokeProvenance({intent, history: [...rows, {revision: 2, writer: 'resolver_chunk', payload: {status: 'needs_verification'}}], current: assigned}).reason, 'old_action_not_effective', 'a later revision that dropped the marker');
 assert.equal(Identity.revokeProvenance({intent, history: [...rows, {revision: 2, writer: 'resolver_chunk', payload: {...assigned, evidenceKey: 'other airing'}}], current: assigned}).ok, true, 'a carried marker with a drifted scheduling fingerprint is still effective');
+// A reject is not carried by a later independent verification of another id, even if the marker was copied along.
+{
+  const rejectIntent = {idempotencyKey: 'req-r', kind: 'identity_reject', state: 'receipt', receipt: {}, observationKey: 'o', command: {effect: 'reject', tmdbId: '5'}, before: {status: 'needs_verification'}};
+  const rejectOwner = {effect: 'reject', tmdbId: '5', requestId: 'req-r'};
+  const rejected = {status: 'needs_verification', rejectedTmdbIds: ['5'], ownerIdentity: rejectOwner};
+  const rejectRows = [{revision: 1, writer: 'discovery_identity_correct', payload: rejected}];
+  assert.equal(Identity.revokeProvenance({intent: rejectIntent, history: rejectRows, current: rejected}).ok, true);
+  const independent = {...rejected, status: 'verified', tmdbId: '9', filmId: 'tmdb_9', identitySource: 'tmdb_detail'};
+  assert.equal(Identity.revokeProvenance({intent: rejectIntent, history: [...rejectRows, {revision: 2, writer: 'resolver_chunk', payload: independent}], current: rejected}).reason, 'old_action_not_effective', 'a later independent verification refuses');
+  assert.equal(Identity.revokeProvenance({intent: rejectIntent, history: rejectRows, current: independent}).reason, 'old_action_not_effective', 'the same as the current decision');
+}
 assert.equal(Identity.revokeCommand({ok: true, original: {requestId: 'req-x', effect: 'assign', tmdbId: '5'}}, {}).reason, 'basis_required');
 assert.equal(Identity.revokeWriteMatches({effect: 'revoke', revokes: {requestId: 'r', effect: 'assign', tmdbId: '5'}}, {status: 'needs_verification', tmdbId: null, revokedOwnerAssign: {tmdbId: '5', requestId: 'r'}}), true);
 assert.equal(Identity.revokeWriteMatches({effect: 'revoke', revokes: {requestId: 'r', effect: 'assign', tmdbId: '5'}}, {status: 'verified', tmdbId: '5', ownerIdentity: owner}), false);
@@ -199,13 +210,23 @@ assert.equal((await Authority.ownerDecision(env, {idempotencyKey: 'req-bad-comma
 // --- supersede is enforced, not descriptive ---------------------------------------------------------------------------
 const currentHash = await hash(await read('obs-3'));
 const sup = {effect: 'assign', tmdbId: '56', basis: 'better id'};
-const okSupersede = await act('obs-3', 'identity_assign', {...sup, supersedes: {requestId: w1.requestId, decisionHash: currentHash}}, p => Identity.appliedIdentityDecision(p, sup, {at: 'x', requestId: 'r', programmeRunId: RUN}), currentHash);
+const okSupersede = await act('obs-3', 'identity_assign', {...sup, supersedes: {requestId: w1.requestId, decisionHash: currentHash}}, (p, requestId) => Identity.appliedIdentityDecision(p, sup, {at: 'x', requestId, programmeRunId: RUN}), currentHash);
 assert.equal(okSupersede.result.outcome, 'written', 'a supersede bound to the original and the exact hash is written');
 const staleSupersede = await act('obs-1', 'identity_assign', {effect: 'assign', tmdbId: '57', basis: 'b', supersedes: {requestId: w1.requestId, decisionHash: await hash(await read('obs-1'))}}, p => Identity.appliedIdentityDecision(p, {effect: 'assign', tmdbId: '57', basis: 'b'}, {at: 'x', requestId: 'r', programmeRunId: RUN}), await hash(await read('obs-1')));
 assert.equal(staleSupersede.result.outcome, 'conflict', 'a supersede of an action on another observation is refused');
 const hashLie = await act('obs-1', 'identity_assign', {effect: 'assign', tmdbId: '58', basis: 'b', supersedes: {requestId: a1.requestId, decisionHash: staleHash}}, p => Identity.appliedIdentityDecision(p, {effect: 'assign', tmdbId: '58', basis: 'b'}, {at: 'x', requestId: 'r', programmeRunId: RUN}), await hash(await read('obs-1')));
 assert.equal(hashLie.result.outcome, 'conflict', 'a supersede that names another hash than the one it writes over is refused');
 assert.equal((await read('obs-1')).tmdbId, null, 'nothing was written by the refused supersedes');
+// The original must be the LIVE assertion, not just a historical request id (ADR 0178, section 3). w1 was superseded above: naming it
+// again with the exact current hash is refused by the writer although its intent row exists, belongs to the observation and has a receipt.
+{
+  const liveHash = await hash(await read('obs-3'));
+  const notLive = await act('obs-3', 'identity_assign', {effect: 'assign', tmdbId: '57', basis: 'b', supersedes: {requestId: w1.requestId, decisionHash: liveHash}}, (p, requestId) => Identity.appliedIdentityDecision(p, {effect: 'assign', tmdbId: '57', basis: 'b'}, {at: 'x', requestId, programmeRunId: RUN}), liveHash);
+  assert.equal(notLive.result.outcome, 'conflict', 'a superseded original is not the live action');
+  assert.equal((await read('obs-3')).tmdbId, '56', 'nothing was written');
+  const liveOriginal = await act('obs-3', 'identity_assign', {effect: 'assign', tmdbId: '58', basis: 'b', supersedes: {requestId: okSupersede.requestId, decisionHash: liveHash}}, (p, requestId) => Identity.appliedIdentityDecision(p, {effect: 'assign', tmdbId: '58', basis: 'b'}, {at: 'x', requestId, programmeRunId: RUN}), liveHash);
+  assert.equal(liveOriginal.result.outcome, 'written', 'the live original can be superseded');
+}
 // The old action is no longer effective after the supersede.
 assert.equal((await evidenceOf('obs-3', w1.requestId)).provenance.reason, 'old_action_not_effective');
 

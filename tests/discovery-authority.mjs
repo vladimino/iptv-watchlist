@@ -744,6 +744,7 @@ assert.equal(identityTamper.status,400,JSON.stringify(identityTamper.body));
 const identityExecuted=await call('/api/admin/discovery-recovery/identity-correct',{method:'POST',headers:ownerHeaders('discovery_identity_correct'),body:JSON.stringify({confirmation:identityConfirmed.body.confirmation})});
 assert.equal(identityExecuted.status,200,JSON.stringify(identityExecuted.body));
 assert.equal((await Authority.routeRead(httpEnv,'epg/discovery-resolution.json')).value[identityItem.key].tmdbId,'41');
+assert.match((await Authority.routeRead(httpEnv,'epg/discovery-resolution.json')).value[identityItem.key].ownerIdentity.identityBasis,/^[0-9a-f]{64}$/,'ADR 0178 section 1a: the live assign records the identity basis as provenance');
 assert.equal(count(httpDb.db,'SELECT COUNT(*) AS n FROM film'),0);
 const identityReceipt=await call('/api/admin/discovery-recovery/identity-receipt?idempotencyKey=identity-http-00001');
 assert.equal(identityReceipt.status,200,JSON.stringify(identityReceipt.body));
@@ -782,6 +783,15 @@ assert.equal(dbRows(),rowsBeforePreview,'a refused confirm writes nothing');
  assert.ok(from>0&&to>from);
  const applied=sqliteSync(['-bail',httpDb.file],{input:ddl.slice(from,to+1).join('\n'),encoding:'utf8'});
  assert.equal(applied.status,0,applied.stderr);
+}
+// An unrelated D1 fault after the migration is a truthful storage_unavailable, never "the migration is missing", and nothing is retried.
+{
+ const flaky=d1Standin(httpDb.file,{onBatch:async statements=>{if(statements.some(item=>/INSERT INTO discovery_intent/.test(item.text)))throw new Error('D1_ERROR: network connection lost');}});
+ const response=await httpContext.worker.fetch(new Request(origin+'/api/admin/discovery-recovery/revoke-confirm',{method:'POST',headers:ownerHeaders('discovery_identity_correct'),body:JSON.stringify(revokeBody)}),{...routeEnv,DB:flaky},{waitUntil(){}});
+ const outage=await response.json();
+ assert.equal(response.status,503,JSON.stringify(outage));
+ assert.equal(outage.refusal,'storage_unavailable');
+ assert.equal(count(httpDb.db,"SELECT COUNT(*) AS n FROM discovery_intent WHERE idempotency_key='revoke-http-000000001'"),0,'the failed insert left no intent');
 }
 const revokeConfirmed=await revokeConfirm(revokeBody);
 assert.equal(revokeConfirmed.status,200,JSON.stringify(revokeConfirmed.body));
@@ -826,6 +836,59 @@ assert.equal(afterRevoke.body.reason,'already_revoked');
 const rowsAfterRevoke=dbRows();
 await call(revokePath);
 assert.equal(dbRows(),rowsAfterRevoke,'reading again writes nothing');
+// ADR 0178, section 3, review of PR 796: a supersede is owner-confirmed through the real routes and bound to the LIVE effective action.
+const idView=()=>call('/api/admin/discovery-recovery?key='+encodeURIComponent(identityItem.key));
+const idConfirm=async(body,extra)=>call('/api/admin/discovery-recovery/identity-confirm',{method:'POST',headers:ownerHeaders('discovery_identity_correct'),body:JSON.stringify({key:identityItem.key,accepted:true,...body,pin:(extra&&extra.pin)||(await idView()).body.pin})});
+const idExecute=confirmation=>call('/api/admin/discovery-recovery/identity-correct',{method:'POST',headers:ownerHeaders('discovery_identity_correct'),body:JSON.stringify({confirmation})});
+const fenced=(await Authority.routeRead(httpEnv,'epg/discovery-resolution.json')).value[identityItem.key];
+assert.equal(fenced.revokedOwnerAssign.tmdbId,'41');
+// The deliberate override: a fresh owner assign of the same id clears the fence.
+const a2=await idConfirm({idempotencyKey:'identity-http-00002',effect:'assign',tmdbId:'41',basis:'снова этот фильм'});
+assert.equal(a2.status,200,JSON.stringify(a2.body));
+assert.equal((await idExecute(a2.body.confirmation)).status,200);
+const assignedAgain=(await Authority.routeRead(httpEnv,'epg/discovery-resolution.json')).value[identityItem.key];
+assert.equal(assignedAgain.revokedOwnerAssign,undefined,'only an owner assign of the same id clears the fence');
+assert.equal(assignedAgain.ownerIdentity.requestId,'identity-http-00002');
+// The Limbo detail offers the revoke entry for a proven saved action, and only then (read-only).
+const entryView=await idView();
+assert.deepEqual([entryView.body.revoke.requestId,entryView.body.revoke.available,entryView.body.revoke.reason],['identity-http-00002',true,'eligible']);
+const entryOld=await call('/api/admin/discovery-recovery/revoke-preview?key='+encodeURIComponent(identityItem.key)+'&requestId=identity-http-00001');
+assert.equal(entryOld.body.available,false,'the first, revoked action is not offered again');
+// Supersede confirm: invalid, unknown, own key, not effective.
+assert.equal((await idConfirm({idempotencyKey:'identity-http-00003',effect:'reject',tmdbId:'41',basis:'b',supersedes:'identity-http-00002'})).status,400);
+assert.equal((await idConfirm({idempotencyKey:'identity-http-00003',effect:'reject',tmdbId:'41',basis:'b',supersedes:{requestId:'identity-http-00003'}})).status,400,'a supersede cannot name itself');
+const supUnknown=await idConfirm({idempotencyKey:'identity-http-00003',effect:'reject',tmdbId:'41',basis:'b',supersedes:{requestId:'missing-request-00001'}});
+assert.deepEqual([supUnknown.status,supUnknown.body.reason],[409,'intent_missing']);
+const supOld=await idConfirm({idempotencyKey:'identity-http-00003',effect:'reject',tmdbId:'41',basis:'b',supersedes:{requestId:'identity-http-00001'}});
+assert.deepEqual([supOld.status,supOld.body.reason],[409,'old_action_not_effective'],'an original that is not the live action cannot be superseded');
+assert.equal(count(httpDb.db,"SELECT COUNT(*) AS n FROM discovery_intent WHERE idempotency_key='identity-http-00003'"),0,'a refused confirm stores nothing');
+// A valid supersede stores the binding and writes through the ordinary identity writer.
+const supConfirmed=await idConfirm({idempotencyKey:'identity-http-00003',effect:'reject',tmdbId:'41',basis:'это не тот фильм',supersedes:{requestId:'identity-http-00002'}});
+assert.equal(supConfirmed.status,200,JSON.stringify(supConfirmed.body));
+assert.equal(supConfirmed.body.command.supersedes.requestId,'identity-http-00002');
+assert.equal(supConfirmed.body.command.supersedes.decisionHash,await Authority.decisionHash(assignedAgain));
+assert.match(one(httpDb.db,"SELECT command_json FROM discovery_intent WHERE idempotency_key='identity-http-00003'").command_json,/"supersedes":\{"requestId":"identity-http-00002"/);
+const supExecuted=await idExecute(supConfirmed.body.confirmation);
+assert.equal(supExecuted.status,200,JSON.stringify(supExecuted.body));
+const superseded=(await Authority.routeRead(httpEnv,'epg/discovery-resolution.json')).value[identityItem.key];
+assert.deepEqual([superseded.status,superseded.rejectedTmdbIds,superseded.ownerIdentity.requestId],['needs_verification',['41'],'identity-http-00003']);
+assert.equal(one(httpDb.db,"SELECT state FROM discovery_intent WHERE idempotency_key='identity-http-00002'").state,'receipt','the superseded intent is kept');
+assert.equal((await idExecute(supConfirmed.body.confirmation)).body.replayed,true);
+assert.equal((await call('/api/admin/discovery-recovery/revoke-preview?key='+encodeURIComponent(identityItem.key)+'&requestId=identity-http-00002')).body.reason,'old_action_not_effective','the superseded action is no longer effective');
+// The original is proven again at execute: if it stopped being the live action after the confirmation, nothing is written.
+const supStale=await idConfirm({idempotencyKey:'identity-http-00004',effect:'assign',tmdbId:'41',basis:'вернуть фильм',supersedes:{requestId:'identity-http-00003'}});
+assert.equal(supStale.status,200,JSON.stringify(supStale.body));
+{
+ const live=(await Authority.routeRead(httpEnv,'epg/discovery-resolution.json')).value[identityItem.key];
+ const {ownerIdentity,...stripped}=live;
+ const hash=await Authority.decisionHash(stripped);
+ httpDb.db.sql("UPDATE discovery_decision SET payload_json='"+JSON.stringify(stripped).replace(/'/g,"''")+"', decision_hash='"+hash+"' WHERE observation_key='"+identityItem.key.replace(/'/g,"''")+"'");
+}
+const historyBeforeStale=count(httpDb.db,"SELECT COUNT(*) AS n FROM discovery_decision_history");
+const supStaleRun=await idExecute(supStale.body.confirmation);
+assert.equal(supStaleRun.status,409,JSON.stringify(supStaleRun.body));
+assert.ok(['record_changed','old_action_not_effective','not_eligible'].includes(supStaleRun.body.refusal),supStaleRun.body.refusal);
+assert.equal(count(httpDb.db,"SELECT COUNT(*) AS n FROM discovery_decision_history"),historyBeforeStale,'a stale supersede writes nothing');
 const policyFilm={id:'tmdb_70',tmdbId:'70',canonicalIdentity:'tmdb:70',title:'A Life',year:2020,genres:['документальный']};
 const otherPolicyFilm={id:'tmdb_82',tmdbId:'82',canonicalIdentity:'tmdb:82',title:'Another Life',year:2019,genres:['документальный']};
 const unreadPolicyFilm={id:'tmdb_83',tmdbId:'83',canonicalIdentity:'tmdb:83',title:'Unread Queue',year:2018,genres:['документальный']};

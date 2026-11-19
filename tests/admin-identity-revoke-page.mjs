@@ -13,6 +13,8 @@ assert.doesNotMatch(html, /admin-limbo\.js|admin-identity\.js/, 'it shares no bu
 assert.doesNotMatch(html, /\son[a-z]+=|<script>[^<]/i, 'no inline handler or script');
 assert.match(html, /<a href="\/admin\/identity" data-return-carry>Идентификация<\/a>/, 'the queue is one link away');
 assert.match(html, /id="revoke-confirm-form"[^>]*hidden/, 'confirmation stays hidden until a preview says it may be used');
+assert.match(html, /id="supersede-form"[^>]*hidden/, 'the replace form stays hidden until a preview says the action can be replaced');
+assert.doesNotMatch(html, /<form[^>]*supersede[^>]*method=/i, 'no native form post');
 assert.match(build, /assets\['\/admin\/identity\/revoke'\]=\{body:fs\.readFileSync\('public\/admin-identity-revoke\.html'/);
 assert.match(build, /assets\['\/admin-identity-revoke\.js'\]=\{body:bundleAdmin\(\[fs\.readFileSync\('src\/admin\/identity-revoke-client\.js'/);
 for (const own of ['/admin-limbo.js', '/admin-identity.js']) {
@@ -50,6 +52,21 @@ calls.length = 0;
 await run("revokeExecutePost({capability: 'discovery_identity_revoke'}, {fetch: fetchWith(reply(409, {refusal: 'in_progress', state: 'unknown'}))})");
 assert.equal(calls.length, 1, 'an unknown outcome is not retried');
 assert.equal(JSON.parse(calls[0].init.body).confirmation.capability, 'discovery_identity_revoke');
+// A supersede uses the two identity routes with the same header, names the saved action it replaces and is sent once.
+calls.length = 0;
+await run("supersedeConfirmPost({key: 'k', pin: 'D1.x', effect: 'reject', tmdbId: '41', basis: 'b', supersedes: {requestId: 'req-0123456789abcdef'}}, {fetch: fetchWith(reply(200, {confirmation: {a: 1}}))})");
+assert.equal(calls.length, 1);
+assert.equal(calls[0].url, '/api/admin/discovery-recovery/identity-confirm');
+assert.equal(calls[0].init.headers['X-IPTV-Admin-Action'], 'discovery_identity_correct');
+const supBody = JSON.parse(calls[0].init.body);
+assert.deepEqual([supBody.effect, supBody.tmdbId, supBody.supersedes.requestId, supBody.accepted], ['reject', '41', 'req-0123456789abcdef', true]);
+assert.match(supBody.idempotencyKey, /^revoke-[0-9a-f]{36}$/);
+calls.length = 0;
+await run("supersedeExecutePost({capability: 'discovery_identity_correct'}, {fetch: fetchWith(reply(409, {refusal: 'old_action_not_effective'}))})");
+assert.equal(calls.length, 1, 'a refused or unknown supersede is not retried');
+assert.equal(calls[0].url, '/api/admin/discovery-recovery/identity-correct');
+assert.equal(run("supersedeReasonText('old_action_not_effective')").startsWith('Это действие уже не действует'), true);
+assert.match(run("supersedeReasonText('year_conflict')"), /код: year_conflict/, 'an identity reason without copy is shown by code, not hidden');
 // Refusals and a lost connection are mapped, never thrown, never retried.
 result = await run("revokeExecutePost({}, {fetch: fetchWith(reply(409, {refusal: 'record_changed'}))})");
 assert.deepEqual([result.ok, result.error], [false, 'record_changed']);

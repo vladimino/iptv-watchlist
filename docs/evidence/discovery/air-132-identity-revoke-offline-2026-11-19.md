@@ -26,9 +26,22 @@ Chromium via Playwright against the built Worker's static assets with the three 
 
 The Mermaid diagram of `docs/architecture/discovery-and-resolution.md` is not changed by this PR, so no rendered Mermaid QA applies.
 
+## Review of PR 796: fixes and how each is proven
+
+| Finding | Fix | Proof |
+| --- | --- | --- |
+| A1: the fence was dropped by the non-film screening transition | `fenceCarry` on the screening, alias and TMDB-verified transitions, paged D1 cheap pass and whole-ledger path | `tests/discovery-chunk-budget.mjs` section 12b (real paged chunk: revoke fence, screened as non-film, confirmed id 41 appears, 41 is not re-verified, fence stored) and `tests/discovery-identity-review.mjs` (the whole-ledger `resolveDiscoveryBatch` twin). Mutation: removing the carry in either branch fails its test |
+| Supersede not an effective-action contract | `identity-confirm` takes and proves `supersedes`, `identity-correct` proves it again, the writer checks `originalStillEffective` inside the CAS fence | `tests/discovery-authority.mjs` HTTP section (confirm refusals: bad shape, unknown, self, not effective; confirm stores the binding; execute writes, replays, keeps the superseded intent; the superseded action is no longer effective; a decision changed after confirmation writes nothing) and `tests/discovery-identity-revoke.mjs` (a superseded original named with the exact current hash is refused by the writer; the live original is accepted). Mutation: disabling the writer check fails the writer test |
+| No entry point | `GET discovery-recovery` carries a proven `revoke` field; the Limbo identity section links to the page only for a proven action | `tests/admin-discovery-recovery-page.mjs` (link with both identifiers, no link and the reason for an unproven action, none without a saved action, escaping) and the HTTP section (`revoke.available`, the first action not offered again) |
+| `identityBasis` missing on assign and reject | `identity-correct` computes and records it | HTTP section asserts the stored `ownerIdentity.identityBasis` of the live assign |
+| Schema-not-ready masked a D1 fault | `revokeSchemaReady` reads the stored table definition; other faults propagate as `storage_unavailable` | HTTP section: a simulated D1 failure on the intent insert answers 503 `storage_unavailable`, writes nothing and is not `revoke_schema_not_ready` |
+| Reject revoke after a later independent verification | A `verified` decision is not a carry of a rejection | `tests/discovery-identity-revoke.mjs` |
+
+Browser check of the replace form (same method, 1280 px and 390 px, keyboard only): the form is hidden until a preview allows it, confirm stays disabled until id, basis and box are set, the id and basis fields lock after confirm and the revoke form locks with them, focus moves to the execute button and then to the receipt, the request sequence is preview, `identity-confirm` (with `supersedes`), `identity-correct`, preview, and the read-back says the old action is no longer effective. No horizontal overflow. Checkboxes are 20 px inside labels with the existing 44 px minimum height.
+
 ## Not proven here
 
 - The real POST on production, and the product acceptance of it, stay with the owner. There is no production correction to revoke; an offline test does not replace that action or an explicit owner waiver.
 - Migration 0027 on production D1 (separate owner GO, own evidence). Until then the confirm route answers `revoke_schema_not_ready`.
-- A link from a queue row to this page and from the Limbo panel is not part of this PR.
+- A link from a row of the read-only `/admin/identity` queue is not added (the queue stays read-only); the entry is the Limbo observation detail.
 - Behaviour of the next ordinary chunk on a fenced observation is covered by the carry and consumer checks above, not by a production chunk.

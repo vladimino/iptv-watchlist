@@ -7,7 +7,7 @@
 // installed at all.
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 import {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
-import {revokeWriteMatches} from './domain/discovery-identity-review.js';
+import {revokeWriteMatches,originalStillEffective} from './domain/discovery-identity-review.js';
 import {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';
 export const planRevalidation=revalidationPlan;
 export const REVALIDATION_LIMIT=SLOT_REVALIDATION_LIMIT;
@@ -2092,6 +2092,14 @@ export async function readIdentityActionEvidence(env,requestId,key){
  if(row&&await decisionHash(current)!==row.decision_hash)return {handled:true,intent:stored.intent,malformed:true};
  return {handled:true,intent:stored.intent,history,current,decisionHash:row?.decision_hash??null,generation:gate.generation,programmeRunId:gate.programmeRunId};
 }
+// ADR 0178: whether the intent table accepts the `identity_revoke` kind (schema 27 applied). A read of the stored table
+// definition only: it tells a missing migration apart from an unrelated D1 fault, which the caller must not mistake for it.
+export async function revokeSchemaReady(env){
+ const gate=await readAuthority(env);
+ if(!gate.ready)return {handled:false,ready:false};
+ const row=await one(database(env),"SELECT sql FROM sqlite_master WHERE type='table' AND name='discovery_intent'");
+ return {handled:true,ready:typeof row?.sql==='string'&&row.sql.includes("'identity_revoke'")};
+}
 export async function markIntentRunning(env,spec){
  const gate=await readAuthority(env);
  assertOpen(gate);
@@ -2141,6 +2149,11 @@ export async function ownerDecision(env,spec){
  const row=await one(database(env),'SELECT decision_hash, payload_json FROM discovery_decision WHERE observation_key=?',[key]);
  let previous=null;try{previous=row?JSON.parse(row.payload_json):null;}catch{return {outcome:'malformed'};}
  if(!row||await decisionHash(previous)!==row.decision_hash||row.decision_hash!==expectedHash)return {outcome:'conflict'};
+ // ADR 0178, section 3: a supersede replaces the LIVE effective assertion. The original must still be carried by the decision this write is about to replace (same CAS hash, same fence).
+ if(existing.intent.command?.supersedes){
+  const original=await readIntent(env,existing.intent.command.supersedes.requestId);
+  if(!original.intent||!originalStillEffective(original.intent,previous))return {outcome:'conflict'};
+ }
  const lease=spec.lease||leaseOf(env);
  if(!lease)return {outcome:'lease'};
  try{await markIntentRunning(env,{idempotencyKey:spec.idempotencyKey,before:previous,lease});}

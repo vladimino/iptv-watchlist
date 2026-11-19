@@ -39,6 +39,16 @@ function revokeConfirmPost(body, options = {}) {
   return revokePost('revoke-confirm', {...body, idempotencyKey: options.idempotencyKey || revokeIdempotencyKey(), accepted: true}, options);
 }
 
+// A supersede is an ordinary owner assign or reject that names the saved action it replaces (ADR 0178, section 3): the same
+// two identity routes, the same header, and the server proves the original again at execute.
+function supersedeConfirmPost(body, options = {}) {
+  return revokePost('identity-confirm', {...body, idempotencyKey: options.idempotencyKey || revokeIdempotencyKey(), accepted: true}, options);
+}
+
+function supersedeExecutePost(confirmation, options = {}) {
+  return revokePost('identity-correct', {confirmation}, options);
+}
+
 function revokeExecutePost(confirmation, options = {}) {
   return revokePost('revoke-execute', {confirmation}, options);
 }
