@@ -82,7 +82,7 @@ const liveDiagKey=[...records.keys()].find(k=>k.startsWith(prefix)&&k.endsWith('
 assert.ok(liveDiagKey);
 const staleDiagExpiry=records.get(liveDiagKey).leaseExpiredAt;
 skipDiagnosticPuts=true;
-clockTime+=14*60000;
+clockTime+=11*60000;
 const beat=await api('heartbeat',{runId:live.runId});
 skipDiagnosticPuts=false;
 assert.equal(beat.status,200,JSON.stringify(beat.data).slice(0,300));

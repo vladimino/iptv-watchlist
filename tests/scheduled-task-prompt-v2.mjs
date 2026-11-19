@@ -28,6 +28,12 @@ assert.ok(prompt.includes('6а. EVIDENCE-AWARE SCORING')&&prompt.includes('match
 assert.ok(prompt.includes('unknown НИКОГДА не превращай в минус')&&prompt.includes('Не повышай оценку автоматически'),'unknown and no-optimism guard retained');
 assert.ok(prompt.includes('**Основания оценки:**'),'human-readable evidence justification added to Saved Task report');
 assert.ok(!/RESEARCH AUDIT ДЛЯ PRODUCTION TASK A|для Production Task A/.test(prompt),'shared production research instructions must not depend on canary name');
+// Proposed heartbeat wording for the 12-minute runner lease (not installed; the snapshot above stays the installed text): the candidate is the installed prompt with exactly one phrase replaced, and its documented size and hash stay reproducible.
+{const OLD='не реже, чем раз в 10 минут (TTL 15 минут)',NEW='не реже, чем раз в 5 минут (TTL 12 минут)';
+ assert.equal(prompt.split(OLD).length-1,1,'the heartbeat phrase occurs exactly once');
+ const candidate=prompt.replace(OLD,NEW);
+ assert.equal(candidate.length,45937);assert.equal(Buffer.byteLength(candidate,'utf8'),69378);assert.equal(sha(candidate),'59208a479175bcb829ca979f69c3f7370e9abc3b545978f899efbb128e17b4e7','heartbeat candidate hash');
+ assert.equal(candidate.replace(NEW,OLD),prompt,'the phrase is the only difference');}
 assert.ok(prompt.includes('3в. RESEARCH AUDIT ДЛЯ ВСЕХ BATCH V2 TASKS.')&&prompt.includes('3г. SOURCE SELECTION GATE / FULL-TEXT FALLBACK (для каждой batch v2 Task'),'all slots use identical research rules');
 const reportHeadings=['## Итог','## Прогнозы','## Ошибки','## Очередь','## Исследование'];
 const step11=prompt.slice(prompt.indexOf('11. После prediction_complete'));

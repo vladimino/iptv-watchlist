@@ -51,7 +51,7 @@ const setCold=(w,ids)=>sql(w.file,"UPDATE discovery_admission SET payload_json=j
  assert.equal(m.films.length,37,'37 eligible films, all delivered');
  assert.equal(m.dryRun,false);assert.equal(m.manifestFormat,'compact-1');
  assert.deepEqual(m.limits,{maxManifestFilms:100,maxManifestBytes:LIMIT,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:56*1024,callBudgetMs:25000});
- assert.equal(m.lease.ttlMs,15*60000);assert.equal(m.lease.epoch,1);assert.ok(m.lease.expiresAt>Date.now());
+ assert.equal(m.lease.ttlMs,12*60000);assert.equal(m.lease.epoch,1);assert.ok(m.lease.expiresAt>Date.now());
  // profile: body, hash, version, lineage
  assert.equal(m.profile.version,1);assert.equal(m.profile.hash,'p');assert.deepEqual(m.profile.body,{ratingScale:'Half stars'});assert.ok(Array.isArray(m.profile.lineage));
  // contract: the versions and the same schema document GET /api/enrichment/schema serves
@@ -497,7 +497,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
 // 5d. The runner contract under the 256 KiB ceiling: only batchRunner.maxManifestBytes moved (AIR-450); the v5 start route is gone (ADR 0167).
 {
  const w=await ready(5);const contract=JSON.parse(JSON.stringify(w.ctx.predictionRunnerContract?w.ctx.predictionRunnerContract():(await import('node:vm')).runInContext('predictionRunnerContract()',w.ctx)));
- assert.equal(contract.pipelineVersion,5);assert.equal(contract.leaseTtlMs,15*60000);
+ assert.equal(contract.pipelineVersion,5);assert.equal(contract.leaseTtlMs,12*60000);
  assert.deepEqual(contract.batchRunner,{version:2,protocol:'batch_v2',start:'/api/enrichment/batch/start',submit:'/api/enrichment/batch/submit',hold:'/api/enrichment/batch/hold',manifestFormat:'compact-1',maxManifestFilms:100,maxManifestBytes:262144,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:57344,callBudgetMs:25000,requires:{predictionAuthority:'d1'}});
  await reconcile(w);const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.status,404,'the retired v5 start route is gone');
 }
