@@ -181,5 +181,61 @@ mode='ok';
   clock=S3+72*HOUR+1;assert.equal((await start()).status,200);q=await read();assert.equal(q.hotPending.length,0);assert.equal(q.priorityNextChangeAt,null);
  }finally{globalThis.Date=RealDate;}
 }
+
+// 4. AIR-542: races at the preflight-to-lease boundary on a small world (8 cold films, manifest of 3). The hook runs inside the BASELINE preflight's signature read, after its queue head was
+// read and before the lease is taken, so the post-lease preflight reads the mutated queue: its revision differs from the baseline's.
+{
+ const nowMs=Date.now();
+ const make=async()=>{
+  const e=await flowWorld({films:8,extra:()=>({shows:[{start:nowMs-10*86400000}]})});
+  const state={calls:0,sig:['s0','s0'],mutate:null,down:false};
+  e.ctx.PublishedEpg={
+   currentGeneration:async()=>({authority:'d1',programmeRunId:'p1',phase:'published',fence:'d1:1:p1',generation:1}),
+   readDocumentAt:async(env,run,kind)=>e.records.get(kind==='watchlist'?'watchlist.json':'programme.json')??null,
+   assignedShowsSignature:async()=>{const n=state.calls++;if(n===1&&state.down)throw new Error('d1 down');if(n===0&&state.mutate)await state.mutate();return state.sig[Math.min(n,state.sig.length-1)];},
+  };
+  e.records.set('programme.json',{runId:'p1',films:[],catalogFilms:[]});e.records.set('sync.json',{runId:'p1',stage:'complete'});
+  assert.equal((await e.api('queue/reconcile',{})).status,200);
+  const b={scope:'watchlist_all',mode:'queued',trigger:'manual',manifestSize:3,capacity:{remainingPercent:100}};
+  const read=async()=>(await PredictionD1.openQueue(e.env));
+  const edit=async fn=>{const head=await read();fn(head.queue);assert.ok(await PredictionD1.writeQueue(e.env,head,head.queue),'the concurrent writer committed');};
+  const start=async()=>{state.calls=0;const r=await e.api('batch/start',b);if(r.data?.runId&&r.data.status==='running')await e.api('complete',{runId:r.data.runId,reason:'manifest_spent'});return r;};
+  const rankHot=(q,id)=>{q.priority[id]={...(q.priority[id]||{}),hot:true,rank:1};q.coldPending=q.coldPending.filter(x=>x!==id);q.hotPending=[id,...q.hotPending.filter(x=>x!==id)];};
+  return {e,state,read,edit,start,rankHot};
+ };
+ const ids=r=>r.data.films.map(f=>f.filmId+':'+f.lane);
+ // (0) The baseline: three cold films, no race.
+ {const w=await make();const r=await w.start();assert.equal(r.status,200);assert.deepEqual(ids(r),['tmdb_1:cold','tmdb_2:cold','tmdb_3:cold']);}
+ // (a) A concurrent reconcile already ranked another film hot and moved the queue generation: priorityDue is false, the revision differs. The start keeps its slot on the re-ranked manifest,
+ // and the next natural start sees the new order.
+ {const w=await make();const before=(await w.read()).queueGeneration;
+  w.state.mutate=()=>w.edit(q=>w.rankHot(q,'tmdb_8'));
+  const r=await w.start();assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'running','an owned run, not queue_changed');
+  assert.notEqual((await w.read()).queueGeneration,before,'the race moved the queue generation');
+  assert.deepEqual(ids(r),['tmdb_8:hot'],'hot first: the manifest is the re-ranked one validated under the lease');
+  assert.ok(r.data.manifestHash,'the manifest carries its own identity');
+  w.state.mutate=null;const next=await w.start();assert.equal(next.status,200);assert.equal((await w.read()).queue.priority.tmdb_8.hot,true,'the concurrent ranking is kept; the next natural start continues from it');}
+ // (b) The same re-rank together with a genuine change: a displaced film (tmdb_3) just used its retry budget, and a selected film (tmdb_1) has a new retry record. Both are refused.
+ {const w=await make();
+  w.state.mutate=()=>w.edit(q=>{w.rankHot(q,'tmdb_8');q.retries={...(q.retries||{}),tmdb_1:{attempts:1}};});
+  const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');
+  assert.notEqual(r.data.status,'running');}
+ {const w=await make();
+  w.state.mutate=()=>w.edit(q=>{w.rankHot(q,'tmdb_8');q.retries={...(q.retries||{}),tmdb_3:{attempts:99}};});
+  const r=await w.start();assert.equal(r.status,409,'a displaced film that left the retry budget is not a re-rank: '+JSON.stringify(r.data).slice(0,200));}
+ // The reviewer's second case: the signature is still due at the lease AND a selected film's retry record changed. priorityDue must not excuse the non-priority change.
+ {const w=await make();w.state.sig=['s0','s1'];w.state.mutate=()=>w.edit(q=>{q.retries={...(q.retries||{}),tmdb_2:{attempts:1}};});
+  const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');}
+ // A displaced film that left the queue (admission removed or already current) is not a re-rank either.
+ {const w=await make();
+  w.state.mutate=()=>w.edit(q=>{w.rankHot(q,'tmdb_8');q.coldPending=q.coldPending.filter(x=>x!=='tmdb_3');q.pending=(q.pending||[]).filter(x=>x!=='tmdb_3');});
+  const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));}
+ // (c) Priority drift alone at the lease (the signature moved, nothing else): the run is owned. An unreadable signature at the lease refuses. A new programme run refuses.
+ {const w=await make();w.state.sig=['s0','s1'];const r=await w.start();assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'running');}
+ {const w=await make();w.state.down=true;const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');}
+ // A queue that fails the advance gate at the boundary (registry changed: stale) refuses, with a re-rank beside it.
+ {const w=await make();w.state.mutate=()=>w.edit(q=>{w.rankHot(q,'tmdb_8');q.fingerprintCompatibility={...q.fingerprintCompatibility,registryDigest:'changed'};});
+  const r=await w.start();assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.reason,'queue_changed');assert.notEqual(r.data.status,'running','a failed advance gate is never a priority-only drift');}
+}
 console.log('3,200-film same-generation reconcile ok; signature reads',reads);
 console.log('prediction hot reconcile same generation ok');
