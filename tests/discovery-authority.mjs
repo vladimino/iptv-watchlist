@@ -810,6 +810,13 @@ assert.equal(one(httpDb.db,"SELECT state FROM discovery_intent WHERE idempotency
 assert.equal(count(httpDb.db,'SELECT COUNT(*) AS n FROM film'),0);
 const revokeReplay=await call('/api/admin/discovery-recovery/revoke-execute',{method:'POST',headers:ownerHeaders('discovery_identity_correct'),body:JSON.stringify({confirmation:revokeConfirmed.body.confirmation})});
 assert.equal(revokeReplay.body.replayed,true,JSON.stringify(revokeReplay.body));
+// A confirmation of one capability cannot be executed through the other's route, in either direction.
+const crossRevoke=await call('/api/admin/discovery-recovery/identity-correct',{method:'POST',headers:ownerHeaders('discovery_identity_correct'),body:JSON.stringify({confirmation:revokeConfirmed.body.confirmation})});
+assert.equal(crossRevoke.status,400,JSON.stringify(crossRevoke.body));
+assert.equal(crossRevoke.body.refusal,'unsupported_capability');
+const crossIdentity=await call('/api/admin/discovery-recovery/revoke-execute',{method:'POST',headers:ownerHeaders('discovery_identity_correct'),body:JSON.stringify({confirmation:identityConfirmed.body.confirmation})});
+assert.equal(crossIdentity.status,400,JSON.stringify(crossIdentity.body));
+assert.equal(crossIdentity.body.refusal,'unsupported_capability');
 const revokeReceipt=await call('/api/admin/discovery-recovery/identity-receipt?idempotencyKey=revoke-http-000000001');
 assert.equal(revokeReceipt.status,200,JSON.stringify(revokeReceipt.body));
 assert.equal(revokeReceipt.body.record.receipt.state,'applied');
