@@ -9,12 +9,12 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import {d1Standin} from './d1-standin.mjs';
-import {projectorContext} from './d1-enrichment-context.mjs';
+import {repositoryContext} from './canonical-repository-context.mjs';
 
 const domain=vm.createContext({Date,Map,Set,JSON});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\nglobalThis.contract={filmView,personView,linkFilms};',domain);
 const {filmView,personView,linkFilms}=domain.contract;
-const projector=projectorContext({log:()=>{}});
+const projector=repositoryContext({log:()=>{}});
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-projected-link-'));
 let databases=0;
 const NOW='2026-10-13T09:30:00.000Z',FRESH='2026-10-01T09:30:00.000Z';

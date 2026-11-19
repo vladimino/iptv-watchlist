@@ -111,9 +111,11 @@ When D1 still holds what the last reload built from a known snapshot, plus D1-on
    - A seed that lost its lease stops with `lease_lost` and writes nothing more.
    - It releases the lease at the end, and finishes by reading every key back.
    - A dead seed's lease expires after 10 minutes. A run stopped by an uncertain write is finished by running it again. If something else fails, stop with the flag off and look; do not restore by default.
-5. **Projector.** Continue with `dry`, then `on`, as in step 7 of the reload below. Read the Cloudflare Workers memory and CPU metrics too: the run log carries no heap figure, and memory is shared by all requests of one isolate.
+5. **Projector (retired in AIR-537 slice 3; historical).** Continue with `dry`, then `on`, as in step 7 of the reload below. Read the Cloudflare Workers memory and CPU metrics too: the run log carries no heap figure, and memory is shared by all requests of one isolate.
 
 ## Reload with the enrichment projector (AIR-275 phase 2)
+
+> **Historical, not executable (AIR-537 slice 3, 19 Nov 2026).** The enrichment projector (its runner, the `dry`/`on` modes, the lease and window steps) was removed from the repository; it had been off the cron since ADR 0155 and `D1_ENRICHMENT_WRITE` is ignored. Every projector step below describes the pre-retirement procedure only.
 
 Once the [enrichment projector](../adr/0056-d1-enrichment-write-through.md) writes D1, a reload must not restart it from nothing, and it must not lose what only D1 holds. Each production step below is a separate owner approval.
 

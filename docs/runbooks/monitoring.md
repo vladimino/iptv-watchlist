@@ -53,6 +53,8 @@ A growing `outbox` with a `lastDeliveryFailure` means alerts are not reaching th
 
 ## D1 projector grouped write path
 
+> **Historical (AIR-537 slice 3, 19 Nov 2026).** The D1 enrichment projector, its runner and its write arms were removed; this section describes fields and log lines that are no longer produced. Nothing here is an operating check.
+
 This section describes historical projector summaries that can still exist in `projection_run` and be returned by `GET /api/d1/status`. The production projector and its `D1_ENRICHMENT_BULK` selector are retired ([ADR 0155](../adr/0155-retire-enrichment-projector-cron.md), AIR-512), so the live Worker cannot create a new grouped run. In the offline historical harness, a grouped run carries a `bulk` object; a per-entity run does not. The fields are whole numbers, fixed names and one short error sample: no payload, id, key or SQL.
 
 | Field | Meaning |
@@ -71,7 +73,9 @@ How to read it. The healthy picture is `fallbacks` 0 and `prefetchMisses` 0, `gu
 
 ## D1 projector run: phase timing (AIR-392)
 
-The D1 enrichment projector ([ADR 0056](../adr/0056-d1-enrichment-write-through.md), [ADR 0103](../adr/0103-projector-exclusive-window.md)) logs one `event: d1_enrichment_projection` line per hourly run and keeps the same summary in `projection_run.summary_json` (also `GET /api/d1/status`, `projector.lastRun.summary`). Since [AIR-392](https://trello.com/c/ivMqVpKC) the summary carries three additive measurement groups. They only read the clock around calls the run already makes; no run, fence, budget, retry or write depends on them. They hold fixed names and whole numbers only: no payload, id, key, SQL or parameter. All times are milliseconds on the Worker's `Date.now()`, which advances only across I/O: pure CPU work between two calls shows as 0 ms and lands in the I/O phase that follows it, so a CPU-local share cannot be separated by these fields.
+> **Historical (AIR-537 slice 3, 19 Nov 2026).** The D1 enrichment projector, its runner and its write arms were removed; this section describes fields and log lines that are no longer produced. Nothing here is an operating check.
+
+**Historical (AIR-537 slice 3): the projector runner was removed and the `d1_enrichment_projection` line is no longer emitted; the hourly cron never ran it after [ADR 0155](../adr/0155-retire-enrichment-projector-cron.md). Do not alert on it.** The D1 enrichment projector ([ADR 0056](../adr/0056-d1-enrichment-write-through.md), [ADR 0103](../adr/0103-projector-exclusive-window.md)) logged one `event: d1_enrichment_projection` line per hourly run and keeps the same summary in `projection_run.summary_json` (also `GET /api/d1/status`, `projector.lastRun.summary`). Since [AIR-392](https://trello.com/c/ivMqVpKC) the summary carries three additive measurement groups. They only read the clock around calls the run already makes; no run, fence, budget, retry or write depends on them. They hold fixed names and whole numbers only: no payload, id, key, SQL or parameter. All times are milliseconds on the Worker's `Date.now()`, which advances only across I/O: pure CPU work between two calls shows as 0 ms and lands in the I/O phase that follows it, so a CPU-local share cannot be separated by these fields.
 
 **`timing`: the run in order.** `leaseMs` (taking the projector lease), `windowMs` (ADR 0103 request to grant, only when a window was taken; the existing `window.waitMs` is the part spent waiting for quiet), `diffMs` (load, view and diff, see `phases`), `diffResidualMs` (the named remainder of the diff, see below), `writeGateMs` (the pre-write authority check), `writeMs` (the write loop), `windowReleaseMs`, `leaseReleaseMs` and `runMs` (log line only: they are measured after `summary_json` is stored). `leaseMs`, `windowMs`, `diffMs`, `writeGateMs` and `writeMs` are consecutive and add up to at most `runMs`.
 

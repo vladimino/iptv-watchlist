@@ -107,19 +107,15 @@ await stops(database(),{},'entity_missing',{...plan,keys:[...plan.keys,{kind:'fi
 // An expired lease does not hold the seed.
 {const expired=database();sqlite(expired,`INSERT INTO projection_run (projection,lease_id,lease_until) VALUES ('enrichment',NULL,'2026-01-01T00:00:00.000Z')`);assert.equal((await seedProjectionD1(api(expired).adapter,target,plan,{apply:true})).outcome,'verified');}
 
-// 5. Mutual exclusion with the projector and a second seed.
+// 5. Mutual exclusion with a second seed.
 {
- const {projectorContext}=await import('./d1-enrichment-context.mjs');
  const {d1Standin}=await import('./d1-standin.mjs');
- const {MemoryBucket}=await import('./memory-bucket.mjs');
- const projector=projectorContext();
- // The projector starts while the seed writes its chunks: its lease acquisition refuses, and it reads and writes nothing.
+ // AIR-537 slice 3: the retired projector no longer competes for the lease; a second seed starting while the first writes its chunks is refused.
  const shared=database();const attempts=[];
- const {adapter}=api(shared,{onWrite:async count=>{if(count===2){attempts.push(await projector.runD1EnrichmentProjection({DB:d1Standin(shared),BUCKET:new MemoryBucket(),D1_ENRICHMENT_WRITE:'on'}));attempts.push(await seedProjectionD1(api(shared).adapter,target,plan,{apply:true}).catch(error=>error.reason));}}});
+ const {adapter}=api(shared,{onWrite:async count=>{if(count===2){attempts.push(await seedProjectionD1(api(shared).adapter,target,plan,{apply:true}).catch(error=>error.reason));}}});
  const seeded=await seedProjectionD1(adapter,target,plan,{apply:true,chunkRows:2});
  assert.equal(seeded.outcome,'verified');
- assert.equal(attempts[0].skipped,'lease_held','the projector does not start under the seed lease');
- assert.equal(attempts[1],'lease_held','a second seed does not start either');
+ assert.equal(attempts[0],'lease_held','a second seed does not start under the seed lease');
  assert.deepEqual(state(shared),["film:film:a=ka","film:film:b=kb'quote","person:person:actor/x=kx"]);
  // A seed whose lease is taken away mid-run: the next chunk's batch fails whole and the seed stops; no later key, no release
  // of the new holder's lease.

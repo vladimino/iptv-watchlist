@@ -14,7 +14,7 @@ assert.doesNotMatch(sources,/filmView|invalidatePredictionForProfile|availabilit
 const bundle=fs.readFileSync('build.mjs','utf8');
 assert.match(bundle,/src\/domain\/film-person\.js/);
 // AIR-275 phase 2 (ADR 0056): the reader is bundled in its own scope for the enrichment projector; the backfill stays offline.
-assert.match(bundle,/scoped\('src\/domain\/film-person-reader\.js','LifecycleReader',\['readLifecycle'\]\)/);
+assert.doesNotMatch(bundle,/film-person-reader|LifecycleReader/,'AIR-537 slice 3: the Worker bundle carries no lifecycle reader (the enrichment projector that used it is retired)');
 assert.doesNotMatch(bundle,/film-person-backfill/);
 
 const ctx=vm.createContext({Date,Map,Set,JSON});
