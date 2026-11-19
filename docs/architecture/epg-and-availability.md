@@ -82,3 +82,54 @@ Stale availability bytes on a D1 admission payload are dropped on the next ident
 ## Moving a live EPG Workflow onto a deployed version
 
 The EPG Workflow instance runs the Worker version it was created on. The owner-only `epg_workflow_rollover` operator ([ADR 0176](../adr/0176-controlled-epg-workflow-rollover.md), [sequence](scheduling-and-orchestration.md#controlled-epg-workflow-rollover-adr-0176-proposed)) hands the run to the next series of the same run key while the instance sleeps. The published pointer, `sync.json`, the staging and the Discovery handoff are untouched: the successor continues from the same run and checkpoint, and no publication is repeated.
+
+## Degraded read from R2 mirrors ([ADR 0177](../adr/0177-read-only-mirror-fallback-for-film-and-programme.md))
+
+D1 remains the only authority. When the authoritative read of the programme, the watchlist or one film fails for a **temporary** storage reason, the Worker may answer from the R2 compatibility mirrors that the hourly `ensure` and the publication tail already maintain ([ADR 0108](../adr/0108-epg-mirror-reconciliation-writer.md)). The answer is read-only, labelled and never a confirmed absence. Contract: [degraded reads](../reference/api/degraded-reads.md); diagnosis: [runbook](../runbooks/mirror-fallback-diagnostics.md).
+
+```mermaid
+flowchart TD
+    read["GET programme, watchlist or film by TMDB id"]
+    d1{"Authoritative D1 read"}
+    normal["Normal answer, no source field, no R2 mirror read"]
+    cls{"Class of the failure, taken from its cause at the throw site"}
+    hard["Structural or authority refusal: 503 as before, no mirror read"]
+    fence["published_epg_fence: 409, the client retries D1"]
+    temp["Temporary: transport, timeout, overload, fence moved, load in progress"]
+    objects["Bounded read-only R2 reads: pointer, its generation copy, root; older copies only if both fail, found by listing at most 5 pages of 1000 and ranked by upload time, at most 6 read"]
+    valid{"Each object validated alone"}
+    other["Film not in the selected pair: the same bounded set of recent copies is searched"]
+    degraded["200 with source mirror, readOnly, runId, asOf, joined, reason"]
+    shell["Typed 503 and neutral shell with retry: nothing invented, never 404 or 410"]
+    read --> d1
+    d1 -->|"answers"| normal
+    d1 -->|"fails"| cls
+    cls -->|"structural"| hard
+    cls -->|"fence"| fence
+    cls -->|"temporary"| temp
+    temp --> objects --> valid
+    valid -->|"at least one usable object"| degraded
+    valid -->|"film not listed"| other
+    other -->|"found in an older run"| degraded
+    other -->|"not found or contradictory"| shell
+    valid -->|"no usable object"| shell
+```
+
+The mirror is read per object. The root `programme.json` is valid by its own `runId` even when `epg/published-generation.json` lags it; a programme and a watchlist are joined only as a best-effort heuristic (same run key, or the root pair of the pointer's run), and the response says so. Older generation copies are ranked by their upload time, not by their UUID run id. No `available`, `soon`, hot or last-chance state is recomputed from a stale snapshot: the schedule is shown as saved at its own time.
+
+```mermaid
+flowchart LR
+    saved["Page rendered from a saved copy"]
+    live["Page rendered from D1"]
+    fence["Write fence before every API handler"]
+    handler["Route handler with its own authoritative D1 read and fence"]
+    refused["409 degraded_origin_write_refused: nothing written, even when D1 has recovered"]
+    typed["Existing typed 503 when D1 cannot answer: no mirror read, no PUT"]
+    saved -->|"write with X-Data-Origin mirror"| fence
+    fence --> refused
+    live -->|"write without the header"| fence
+    fence -->|"passes"| handler
+    handler -->|"D1 cannot answer"| typed
+```
+
+The page keeps the last good authoritative result only in memory. A saved-copy answer never replaces it, but any failed refresh makes the page read-only until an authoritative read succeeds; the normal source and the write actions return only then. The write fence is global, but the loss of present-tense claims is scoped to the data being rendered: a saved programme, or one film that came from a saved copy, keeps its historical schedule without archive, on-air, soon or last-chance claims, while a separately valid authoritative programme keeps its availability even when another film is shown from a mirror. When D1 answers again, films shown from a saved copy are asked again.

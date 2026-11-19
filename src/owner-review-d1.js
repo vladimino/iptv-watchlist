@@ -24,8 +24,17 @@ function failed(code,cause){const error=new Error(code);error.code=code;if(cause
 function binding(db){return typeof db?.prepare==='function';}
 function database(source){return source&&typeof source.prepare==='function'?source:source?.DB;}
 function standin(source){return source?.OWNER_REVIEW_DB_OPTIONAL==='standin';}
+// AIR-541 (ADR 0177): a caught storage error is a TEMPORARY outage only when its own text names a transport, timeout or overload failure. An unknown error, a missing table or column,
+// a schema, syntax or constraint error is structural and stays a hard refusal. The same function is kept in src/published-epg.js, src/discovery-authority.js, src/film-person-authority.js and src/owner-review-d1.js (tests/mirror-fault-classifier.mjs asserts they agree).
+const STRUCTURAL_STORAGE_ERROR=/no such (table|column)|has no column|syntax error|SQLITE_ERROR|SQLITE_CONSTRAINT|constraint failed|datatype mismatch|malformed|no such|not authorized|SQLITE_AUTH|SQLITE_READONLY|SQLITE_CORRUPT/i;
+const TRANSIENT_STORAGE_ERROR=/overloaded|timed? ?out|timeout|network connection lost|connection (lost|reset|closed)|temporar|too many requests|try again|SQLITE_BUSY|database is locked|durable object.*(reset|overloaded)|internal error|service unavailable|storage operation exceeded/i;
+export function transientStorageCause(cause){
+ const text=String(cause?.message??cause??'');
+ if(!text||STRUCTURAL_STORAGE_ERROR.test(text))return false;
+ return TRANSIENT_STORAGE_ERROR.test(text);
+}
 function legacyResult(version){return {legacy:true,mode:'standin',tables:false,version:version??null,failClosed:false};}
-function closedResult(version){return {legacy:false,mode:null,tables:false,version:version??null,failClosed:true};}
+function closedResult(version,cause){return {legacy:false,mode:null,tables:false,version:version??null,failClosed:true,...(transientStorageCause(cause)?{temporary:true}:{})};}
 function bytesOf(sql,params){
  let size=new TextEncoder().encode(sql).length;
  for(const value of params)size+=value==null?4:new TextEncoder().encode(String(value)).length+2;
@@ -84,18 +93,18 @@ export async function readAuthority(source){
  try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
  catch(error){
   if(/no such table/i.test(String(error?.message||error))&&standin(source))return legacyResult(null);
-  return closedResult(null);
+  return closedResult(null,error);
  }
  const numeric=Number(version);
  if(version==null||!Number.isFinite(numeric))return standin(source)?legacyResult(null):closedResult(version);
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('owner_review_entry','owner_review_authority','owner_review_cas')")).map(row=>row.name);}
- catch{return closedResult(numeric);}
+ catch(error){return closedResult(numeric,error);}
  const tables=names.includes('owner_review_entry')&&names.includes('owner_review_authority')&&names.includes('owner_review_cas');
  if(!tables)return numeric<9&&standin(source)?legacyResult(numeric):closedResult(numeric);
  let row;
  try{row=await one(db,'SELECT mode, generation, mirror_generation AS mirrorGeneration, mirror_etag AS mirrorEtag, writes FROM owner_review_authority WHERE id=1');}
- catch{return {legacy:false,mode:null,tables:true,version,failClosed:true};}
+ catch(error){return {legacy:false,mode:null,tables:true,version,failClosed:true,...(transientStorageCause(error)?{temporary:true}:{})};}
  if(!row||row.mode!=='d1'||(row.writes!=='open'&&row.writes!=='held'))return {legacy:false,mode:null,tables:true,version,failClosed:true};
  return {legacy:false,mode:row.mode,tables:true,version,failClosed:false,generation:Number(row.generation),mirrorGeneration:Number(row.mirrorGeneration),mirrorEtag:row.mirrorEtag??null,writes:row.writes,revision:revisionOf(Number(row.generation))};
 }
@@ -135,7 +144,7 @@ export async function readFenced(source){
    before=await one(db,'SELECT mode, generation, writes FROM owner_review_authority WHERE id=1');
    rows=await many(db,ENTRY_SQL);
    after=await one(db,'SELECT mode, generation, writes FROM owner_review_authority WHERE id=1');
-  }catch{return {ok:false};}
+  }catch(error){return {ok:false,...(transientStorageCause(error)?{temporary:true}:{})};}
   if(!before||!after||!rows)continue;
   if(before.mode!==after.mode||Number(before.generation)!==Number(after.generation)||before.writes!==after.writes)continue;
   const generation=Number(before.generation);
@@ -266,7 +275,7 @@ export async function loadSnapshotReviews(env){
 
 export async function loadForRead(env){
  const gate=await readAuthority(env);
- if(gate.failClosed)return {ok:false,unavailable:true,body:null};
+ if(gate.failClosed)return {ok:false,unavailable:true,body:null,...(gate.temporary?{temporary:true}:{})};
  if(gate.legacy){
   let object;
   try{object=await env.BUCKET.get(OWNER_REVIEWS_KEY);}catch{return {ok:false,unavailable:true,body:null};}
@@ -275,7 +284,7 @@ export async function loadForRead(env){
   catch{return {ok:false,unavailable:true,body:null};}
  }
  const snap=await readFenced(env);
- if(!snap.ok||snap.mode!=='d1')return {ok:false,unavailable:true,body:null};
+ if(!snap.ok||snap.mode!=='d1')return {ok:false,unavailable:true,body:null,...(snap.temporary?{temporary:true}:{})};
  return {ok:true,unavailable:false,body:snap.body,mode:'d1',revision:revisionOf(snap.generation)};
 }
 
