@@ -1,4 +1,4 @@
-// The unified identity queue on /admin/limb (read-only): static boundary, the pure view (escaping, wording, no Film link without proof,
+// The unified identity queue on its own page /admin/identity (read-only): static boundary, the pure view (escaping, wording, no Film link without proof,
 // coverage labelled as an estimate) and the controller over a DOM stand-in (first page, show more under the pin, stale keeps rows,
 // error, reset). Real browser checks at 1280 and 390 px are a written report in the PR, not a test.
 import fs from 'node:fs';
@@ -6,7 +6,8 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {bundleAdmin} from '../src/admin/bundle.js';
 
-const html = fs.readFileSync('public/admin-limbo.html', 'utf8');
+const html = fs.readFileSync('public/admin-identity.html', 'utf8');
+const limboHtml = fs.readFileSync('public/admin-limbo.html', 'utf8');
 const css = fs.readFileSync('public/admin.css', 'utf8');
 const build = fs.readFileSync('build.mjs', 'utf8');
 const files = {client: 'src/admin/client.js', iwClient: 'src/admin/identity-work-client.js', view: 'src/admin/identity-work-view.js', controller: 'public/admin-identity-work.js'};
@@ -14,15 +15,23 @@ const text = Object.fromEntries(Object.entries(files).map(([name, file]) => [nam
 
 // ---- static boundary ----
 for (const id of ['iw-section', 'iw-form', 'iw-type', 'iw-disposition', 'iw-q', 'iw-include', 'iw-reset', 'iw-refresh', 'iw-loading', 'iw-error', 'iw-error-text', 'iw-retry', 'iw-stale', 'iw-reload', 'iw-verdict', 'iw-coverage', 'iw-coverage-body', 'iw-empty', 'iw-empty-text', 'iw-results', 'iw-more']) assert.match(html, new RegExp(`id="${id}"`), id);
-assert.ok(html.indexOf('id="limbo-results"') < html.indexOf('id="iw-section"') && html.indexOf('id="iw-section"') < html.indexOf('id="limbo-causes"'), 'the identity queue sits after the existing queue and before its filters');
-assert.doesNotMatch(html.slice(html.indexOf('id="iw-section"'), html.indexOf('id="limbo-filters-panel"')), /<details[^>]*\bopen\b/, 'panels stay closed');
+assert.match(html, /<h1>Единая очередь идентификации<\/h1>/, 'its own page, with its own H1');
+assert.match(html, /<a href="\/admin\/identity" aria-current="page" data-return-carry>Идентификация<\/a>/, 'its own tab is the current one');
+assert.ok(html.indexOf('<a href="/admin/limb" data-return-carry>Лимб</a><a href="/admin/identity"') > 0 && html.indexOf('data-return-carry>Идентификация</a><a href="/admin/posters"') > 0, 'the tab sits between Лимб and Постеры');
+assert.match(html, /<script src="\/admin-identity\.js"><\/script>/); assert.doesNotMatch(html, /admin-limbo\.js/, 'the Limbo script is not loaded here');
+assert.ok(!limboHtml.includes('iw-section') && !limboHtml.includes('id="iw-') && !limboHtml.includes('Единая очередь идентификации'), 'the Limbo page no longer holds the identity queue');
+assert.doesNotMatch(html, /id="limbo-/, 'and this page holds nothing of the Limbo queue');
+assert.doesNotMatch(html, /<details[^>]*\bopen\b/, 'panels stay closed');
 assert.match(html, /<label class="limbo-field iw-q-field" for="iw-q">/);
-assert.match(html.slice(html.indexOf('id="iw-section"')), /Только чтение: ничего не запускается и не меняется/);
+assert.match(html, /Только чтение: ничего не запускается и не меняется/);
 for (const [name, source] of Object.entries(text).filter(([name]) => name !== 'client')) {
   assert.doesNotMatch(source, /method\s*:\s*['"](?:POST|PUT|PATCH|DELETE)|XMLHttpRequest|sendBeacon|localStorage|sessionStorage|document\.cookie|\bfetch\(/i, name + ' only reads through adminCall and stores nothing');
 }
 assert.deepEqual([...text.iwClient.matchAll(/adminCall\('([^']+)'/g)].map(match => match[1]), ['/identity-work'], 'the only route is identity-work');
-assert.match(build, /identity-work-client\.js[^]*identity-work-view\.js[^]*public\/admin-limbo\.js[^]*public\/admin-identity-work\.js/, 'the bundle order: client, view, existing page script, controller');
+assert.match(build, /assets\['\/admin\/identity'\]=\{body:fs\.readFileSync\('public\/admin-identity\.html'/, 'the page is registered');
+assert.match(build, /assets\['\/admin-identity\.js'\]=\{body:bundleAdmin\(\[fs\.readFileSync\('src\/admin\/client\.js','utf8'\),fs\.readFileSync\('src\/admin\/identity-work-client\.js','utf8'\),fs\.readFileSync\('src\/admin\/identity-work-view\.js','utf8'\),fs\.readFileSync\('public\/admin-identity-work\.js','utf8'\)\]\)/, 'its own bundle: client, identity client, view, controller');
+const limboBundle = build.slice(build.indexOf("assets['/admin-limbo.js']"), build.indexOf("assets['/admin/identity']"));
+assert.ok(!/identity-work|admin-identity/.test(limboBundle.replace(/\/\/[^\n]*/g, '')), 'the Limbo bundle holds no identity file: the two pages never share a bundle');
 assert.match(css, /\.iw-more\[hidden\]/, 'the show-more button honours hidden despite display:block of .admin-more');
 
 // ---- bundle in one scope, as the page runs it ----
@@ -178,119 +187,5 @@ const ok = (rows, next, pin = 'P1') => ({status: 200, body: {pin, snapshot: {}, 
   view.nodes['iw-reset'].listeners.click(); await view.settle();
   assert.equal(view.nodes['iw-type'].value, ''); assert.equal(view.nodes['iw-q'].value, '');
   assert.ok(view.calls.every(call => call.startsWith('/api/admin/identity-work')), 'no other request');
-}
-{
-  // The page never has the Limbo read and this list in flight together: the list waits for the Limbo read the page started first (success or failure),
-  // and a Limbo read that starts while the list loads waits for it. Both routes load the same sources; at once they overran the isolate's memory.
-  let release;
-  const held = new Promise(resolve => {release = resolve;});
-  const view = await runController([ok([row()], null)], {limboLive: {pending: held}});
-  assert.equal(view.calls.length, 0, 'no identity request while the Limbo read is pending');
-  assert.equal(view.live.mode, 'loading');
-  release(); await view.settle();
-  assert.equal(view.calls.length, 1); assert.equal(view.live.mode, 'ready');
-  const failed = await runController([ok([row()], null)], {limboLive: {pending: Promise.reject(new Error('limbo read failed'))}});
-  await failed.settle();
-  assert.equal(failed.calls.length, 1, 'a failed Limbo read does not hold the list back');
-  const none = await runController([ok([row()], null)], {});
-  assert.equal(none.calls.length, 1, 'without a Limbo read nothing is awaited');
-  // the other direction: iwIdle (called by limboRead) resolves only when no identity read is in flight
-  let open;
-  const gate = new Promise(resolve => {open = resolve;});
-  const busy = await runController([{...ok([row()], null), gate}], {});
-  let idle = false;
-  busy.idle().then(() => {idle = true;});
-  await busy.settle();
-  assert.equal(idle, false, 'iwIdle waits while the identity list is loading');
-  open(); await busy.settle();
-  assert.equal(idle, true); assert.equal(busy.live.inflight, null);
-  const quiet = await runController([ok([row()], null)], {});
-  let quietIdle = false; quiet.idle().then(() => {quietIdle = true;}); await quiet.settle();
-  assert.equal(quietIdle, true, 'iwIdle resolves at once when nothing is loading');
-  assert.match(fs.readFileSync('public/admin-limbo.js', 'utf8'), /typeof iwIdle === 'function'\) return iwIdle\(\)\.then\(\(\) => loadLimboLive/, 'limboRead waits for the identity list');
-  assert.match(text.controller, /await iwAfterLimbo\(\)/);
-}
-{
-  // "Показать ещё" of the Limbo queue is the same heavy read as its first page: it goes through the same wait, and an obsolete one is not sent.
-  const limbo = fs.readFileSync('public/admin-limbo.js', 'utf8');
-  const handler = limbo.slice(limbo.indexOf('function onLimboMore() {'), limbo.indexOf('function limboCauseSelection(state)'));
-  assert.ok(handler.includes('iwIdle()') && handler.length > 200 && !handler.includes('function limboCauseSelection'));
-  const make = () => {
-    const sent = [], button = {disabled: false, removed: false, remove() {this.removed = true;}}, results = {insertAdjacentHTML() {}};
-    let pageGate = null;
-    const globals = {
-      limboLive: {seq: 1, next: 'c1', pin: 'P', pending: null},
-      limboState: () => ({}), limboAppendGrouped() {}, limboApplyFind() {}, limboRender: () => Promise.resolve(null), limboErrorText: code => String(code),
-      loadLimboMore: async (state, cursor, options) => {sent.push({cursor, pin: options.pin}); if (pageGate) await pageGate; return {mode: 'ready', error: null, items: [], nextCursor: null};},
-    };
-    globals.__query = selector => selector === '[data-limbo-more="items"]' ? button : selector === '#limbo-results' ? results : null;
-    return {sent, button, globals, hold: () => {let open; pageGate = new Promise(resolve => {open = resolve;}); return open;}};
-  };
-  // 1. an identity read is in flight: no Limbo page request until it finishes, then exactly one with the cursor and pin of the click
-  {
-    const m = make();
-    let open; const gate = new Promise(resolve => {open = resolve;});
-    const view = await runController([{...ok([row()], null), gate}], {...m.globals}, handler);
-    assert.equal(view.live.inflight !== null, true);
-    const pending = view.more();
-    await view.settle();
-    assert.equal(m.sent.length, 0, 'no /api/admin/limbo page request while the identity list loads');
-    assert.equal(m.button.disabled, true);
-    open(); await view.settle(); await pending;
-    assert.deepEqual(m.sent, [{cursor: 'c1', pin: 'P'}]);
-  }
-  // 2. nothing in flight: the page request goes out at once
-  {
-    const m = make();
-    const view = await runController([ok([row()], null)], {...m.globals}, handler);
-    await view.settle();
-    await view.more(); await view.settle();
-    assert.equal(m.sent.length, 1);
-  }
-  // 3. the view changed while it waited (a refresh or a filter bumped the sequence, or the cursor moved): obsolete, nothing is sent
-  {
-    const m = make();
-    let open; const gate = new Promise(resolve => {open = resolve;});
-    const view = await runController([{...ok([row()], null), gate}], {...m.globals}, handler);
-    const pending = view.more();
-    view.context.limboLive.seq = 2;
-    open(); await view.settle(); await pending;
-    assert.equal(m.sent.length, 0, 'a refresh while waiting makes the page request obsolete');
-    const m2 = make();
-    let open2; const gate2 = new Promise(resolve => {open2 = resolve;});
-    const view2 = await runController([{...ok([row()], null), gate: gate2}], {...m2.globals}, handler);
-    const pending2 = view2.more();
-    view2.context.limboLive.next = 'c2';
-    open2(); await view2.settle(); await pending2;
-    assert.equal(m2.sent.length, 0, 'a moved cursor makes it obsolete');
-    assert.equal(m2.button.disabled, false, 'and the button is usable again');
-  }
-  // 4. the other direction with the real handler: a Limbo page request in flight holds the identity list back
-  {
-    const m = make();
-    const release = m.hold();
-    const view = await runController([ok([row()], null), ok([row()], null)], {...m.globals}, handler);
-    await view.settle();
-    const first = view.calls.length;
-    const pending = view.more();
-    await view.settle();
-    assert.equal(m.sent.length, 1);
-    view.nodes['iw-form'].listeners.submit({preventDefault() {}}); await view.settle();
-    assert.equal(view.calls.length, first, 'no identity request while the Limbo page request is in flight');
-    release(); await pending; await view.settle();
-    assert.equal(view.calls.length, first + 1, 'it goes out once the Limbo page request is done');
-  }
-  // 5. a failing page request does not leave the list waiting
-  {
-    const m = make();
-    m.globals.loadLimboMore = async () => {throw new Error('network');};
-    const view = await runController([ok([row()], null), ok([row()], null)], {...m.globals}, handler);
-    await view.settle();
-    const first = view.calls.length;
-    const pending = view.more().catch(() => null);
-    await pending; await view.settle();
-    view.nodes['iw-form'].listeners.submit({preventDefault() {}}); await view.settle();
-    assert.equal(view.calls.length, first + 1, 'a failed Limbo page request does not hold the list back');
-  }
 }
 console.log('admin-identity-work-page: ok');

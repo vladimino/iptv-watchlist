@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Идентификация</title>
+  <meta name="description" content="Страница владельца: фильмы каталога, наблюдения EPG и кандидаты Letterboxd, которые ещё не стали проверенным фильмом; только чтение.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body class="admin-page">
+  <header class="masthead">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ идентификация</span></div>
+  </header>
+  <main class="admin-shell">
+    <a class="return-home" data-return-home href="/">На главную</a>
+    <section class="page-heading limbo-heading">
+      <div>
+        <p class="eyebrow">ВЛАДЕЛЕЦ · ТОЛЬКО ЧТЕНИЕ</p>
+        <h1>Единая очередь идентификации</h1>
+        <p class="admin-intro">Фильмы каталога, наблюдения EPG и кандидаты Letterboxd, которые ещё не стали проверенным фильмом. Только чтение: ничего не запускается и не меняется. По умолчанию решённые записи скрыты.</p>
+      </div>
+    </section>
+    <div class="admin-workspace">
+      <nav class="admin-views" aria-label="Разделы"><a href="/admin" data-return-carry>Каталог</a><a href="/admin/health" data-return-carry>Здоровье данных</a><a href="/admin/letterboxd" data-return-carry>Архив Letterboxd</a><a href="/admin/limb" data-return-carry>Лимб</a><a href="/admin/identity" aria-current="page" data-return-carry>Идентификация</a><a href="/admin/posters" data-return-carry>Постеры</a></nav>
+      <div class="admin-main">
+        <section class="iw-section" id="iw-section" aria-labelledby="iw-title">
+      <h2 id="iw-title">Очередь</h2>
+      <form id="iw-form" class="iw-form" action="/admin/identity" role="search">
+        <label class="limbo-field">Тип<select id="iw-type" name="type"><option value="">все три</option><option value="film">фильмы каталога</option><option value="epg_observation">наблюдения EPG</option><option value="letterboxd_rated_candidate">кандидаты Letterboxd</option></select></label>
+        <label class="limbo-field">Состояние<select id="iw-disposition" name="disposition"><option value="">все нерешённые</option><option value="retryable">можно повторить</option><option value="blocked">заблокировано</option><option value="needs_owner_review">нужен разбор владельца</option><option value="waiting">ожидает</option><option value="resolved">только решённые</option></select></label>
+        <label class="limbo-field iw-q-field" for="iw-q">Найти<input id="iw-q" name="q" type="search" autocomplete="off" spellcheck="false" maxlength="100" placeholder="название или код"></label>
+        <label class="iw-check"><input id="iw-include" type="checkbox"> показывать и решённые</label>
+        <div class="iw-actions"><button type="submit" class="admin-refresh iw-apply">Применить</button><button type="button" id="iw-reset" class="admin-more iw-reset">Сбросить</button><button type="button" id="iw-refresh" class="admin-more iw-refresh">Обновить</button></div>
+      </form>
+      <p id="iw-loading" class="admin-state" role="status" aria-busy="false" hidden>Читаем очередь…</p>
+      <div id="iw-error" class="admin-state admin-state-error" role="alert" hidden><span id="iw-error-text"></span> <button type="button" id="iw-retry" class="admin-more iw-inline">Повторить чтение</button></div>
+      <div id="iw-stale" class="admin-state admin-state-stale" role="status" hidden><span>Данные изменились после первой страницы. Показанные строки не считаются актуальными.</span> <button type="button" id="iw-reload" class="admin-refresh iw-inline">Перечитать с начала</button></div>
+      <p id="iw-verdict" class="limbo-verdict" role="status">Очередь ещё не прочитана.</p>
+      <details class="limbo-tech iw-coverage" id="iw-coverage">
+        <summary>Покрытие и источники</summary>
+        <div id="iw-coverage-body"><p class="muted">Покрытие не прочитано.</p></div>
+        <p class="limbo-refresh-hint">Счётчики по Letterboxd берутся из реестра и являются оценкой. Проверенной частью считается только документ архива страницы. Запросы этой секции ничего не записывают.</p>
+      </details>
+      <p id="iw-empty" class="empty" role="status" hidden><span aria-hidden="true">∅</span><b>Подходящих записей нет</b><span id="iw-empty-text"></span></p>
+      <div id="iw-results" class="iw-results"></div>
+      <button type="button" id="iw-more" class="admin-more iw-more" hidden>Показать ещё</button>
+    </section>
+      </div>
+    </div>
+  </main>
+  <script src="/return-home.js"></script>
+  <script src="/admin-identity.js"></script>
+  <script src="/status-footer.js"></script>
+</body>
+</html>

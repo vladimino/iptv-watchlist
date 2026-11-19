@@ -1174,8 +1174,6 @@ function limboShow(view, state) {
 }
 
 function limboRead(state, pin, signal) {
-  // The unified identity list below reads the same sources: never both in flight at once (see iwIdle in admin-identity-work.js).
-  if (typeof iwIdle === 'function') return iwIdle().then(() => loadLimboLive(state, {pin: pin || null, snapshot: limboLive.snapshot, signal}));
   return loadLimboLive(state, {pin: pin || null, snapshot: limboLive.snapshot, signal});
 }
 
@@ -1280,15 +1278,8 @@ function onLimboMore() {
   const button = document.querySelector('[data-limbo-more="items"]');
   if (button) button.disabled = true;
   const seq = limboLive.seq;
-  // The same heavy read as the first page: it never overlaps the unified identity list (see iwIdle in admin-identity-work.js). After the wait the view may have
-  // changed (a refresh or filter bumped the sequence, or another page took the cursor): then this request is obsolete and nothing is sent.
-  const waited = typeof iwIdle === 'function' ? iwIdle() : Promise.resolve();
-  const pending = waited.then(() => (seq !== limboLive.seq || limboLive.next !== cursor) ? {mode: 'skipped'} : loadLimboMore(state, cursor, {pin: limboLive.pin})).then(page => {
+  const pending = loadLimboMore(state, cursor, {pin: limboLive.pin}).then(page => {
     if (seq !== limboLive.seq) return page;
-    if (page.mode === 'skipped') {
-      if (button) button.disabled = false;
-      return page;
-    }
     if (page.mode === 'stale') {
       if (button) button.disabled = false;
       limboLive.pin = null;
@@ -1687,7 +1678,4 @@ function startLimbo() {
   limboRender();
 }
 
-// Served together with the identity list (admin-identity-work.js, appended to this file by the build), the page is started once, by that file's bootstrap after its
-// state is initialised: starting here would call iwIdle() before `const iwLive` exists. startIdentityWork is a function declaration, hoisted, so this check is safe;
-// this file on its own (the tests of this page) has no such function and starts here.
-if (typeof startIdentityWork !== 'function') startLimbo();
+startLimbo();
