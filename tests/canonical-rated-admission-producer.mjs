@@ -31,7 +31,7 @@ const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(nam
 assert.equal(sqlite(template,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
 // A real schema 24 database (the chain without 0025), for the pre-migration behaviour.
 const template24=path.join(root,'template24.sqlite');
-assert.equal(sqlite(template24,chain.filter(name=>!name.startsWith('0025_')).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
+assert.equal(sqlite(template24,chain.filter(name=>!/^002[56]_/.test(name)).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
 const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
 const EMPTY='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
 const BASELINE="INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'2026-11-11T09:00:00.000Z');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+EMPTY+"','"+EMPTY+"','2026-11-11T09:00:00.000Z');";
@@ -280,14 +280,14 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
   assert.equal(stale.applied,0);assert.equal(st(file).w,1,'the row-level monotonic rule still refuses an older observation');
  }
 
- // 6b. schema 25 WITHOUT the watermark table is a damaged schema, not a pre-migration one: fail closed, write nothing, never fall back to row-only ordering.
+ // 6b. schema 25 or later (the chain now ends at 26) WITHOUT the watermark table is a damaged schema, not a pre-migration one: fail closed, write nothing, never fall back to row-only ordering.
  {
   const file=mk();
   await applyRatedAdmissionRetention(envOf(file),{event:'m:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
   const before=st(file);
   assert.equal(sqlite(file,'DROP TABLE film_retention_scan').status,0);
-  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),25);
-  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'m:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')}),error=>error.code==='film_person_unavailable'&&/film_retention_scan_missing_at_schema_25/.test(String(error.cause?.message)));
+  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),26);
+  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'m:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')}),error=>error.code==='film_person_unavailable'&&/film_retention_scan_missing_at_schema_26/.test(String(error.cause?.message)));
   assert.deepEqual(st(file),before,'nothing was written');
   await assert.rejects(()=>FA.readRetentionWatermark(envOf(file)),error=>error.code==='film_person_unavailable');
  }
