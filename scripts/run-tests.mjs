@@ -82,6 +82,7 @@ export const WEIGHTS={
  'canonical-producer-adapters-mutation.mjs':11,
  'canonical-producer-driver.mjs':11,
  'epg-orchestration.mjs':11,
+ 'epg-workflow-rollover.mjs':10,
  'prediction-authority-scope.mjs':11,
  'canonical-epg-producer-mutation.mjs':10,
  'discovery-archive-import.mjs':10,

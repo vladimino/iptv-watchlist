@@ -442,6 +442,49 @@ sequenceDiagram
 
 The sequence shows only the operator path. The natural handover, the step-failure recovery and the reconcile are unchanged. The diagram is not evidence that a live apply ran; each production `apply` needs its own owner approval.
 
+## Controlled EPG Workflow rollover ([ADR 0176](../adr/0176-controlled-epg-workflow-rollover.md), Accepted)
+
+A live EPG Workflow instance keeps the Worker version it was created on until it hands over or ends. The owner can move the run onto the deployed version earlier with the owner-only MCP tool `epg_workflow_rollover` ([runbook](../runbooks/epg-workflow-rollover.md)). It is never called by the cron, a Workflow schedule or a Scheduled Task. The only ownership change is one compare-and-set of the control record to the deterministic successor (`series + 1`, same run key, epoch and run id), conditioned on the mode revision and on the step-lease row being unchanged since the read, and admitted only while the owner is provably asleep outside a step.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Owner as Owner via /mcp (Access JWT)
+    participant Op as Rollover operator in the Worker
+    participant D1 as D1 control, mode and lease rows
+    participant CF as Cloudflare Workflows
+    participant Old as Old instance (asleep)
+    participant New as Successor instance
+    participant Cron as Hourly ensure
+
+    Owner->>Op: dry_run
+    Op->>D1: Read mode, control, lease, sync.json, published authority
+    Op->>CF: Read owner instance status
+    Op-->>Owner: eligible, already_current, unsafe or unknown, with expect pins
+    Note over Op,D1: dry_run writes nothing
+    Owner->>Op: apply with confirmGo, requestId and the expect pins
+    Op->>D1: Same reads again, pins and eligibility re-checked
+    alt Not eligible, stale pin or lost compare-and-set
+        Op-->>Owner: Refusal, writes 0
+    else Eligible: durable sleep ahead, no live lease
+        Op->>D1: One CAS: successor named, starting, receipt stored
+        Note over Op,D1: Same statement checks mode and lease revisions<br/>Run, checkpoint, budget, cooldown and claim carried
+        Op->>CF: Create epg_runKey_series+1 (existing id attaches)
+        alt Create unproven
+            Cron->>D1: Read control, phase starting with the receipt
+            Cron->>CF: Create the same id, no budget spent
+        end
+        Op->>D1: Read back record, run and checkpoint
+        Op->>CF: Read back successor status
+        Op-->>Owner: Receipt: accepted, version confirmed or pending
+        New->>D1: First act records its own Worker version
+        Old->>D1: Wakes, admit reads another owner
+        Old-->>Old: Stops with not_owner, no write
+    end
+```
+
+The sequence shows only the operator path. The natural seal hand-off, the orphan-claim recovery and the failure budget are unchanged: a rollover never writes a claim naming the old series, so the old instance cannot recover one. The diagram is not evidence that a live apply ran; each production `apply` needs its own owner approval.
+
 ## Discovery Workflow step-failure recovery ([ADR 0098](../adr/0098-discovery-workflow-step-failure-recovery.md), Accepted)
 
 An instance whose step fails after the platform's retries, with a recognised transient failure (the `discovery_unavailable` code or a transient class), arms the existing recovery once, sleeps durably until `recovery.dueAt` (60 s for the first failure, then 5 min, 15 min, 1 h; four, then quarantine) and, after re-checking owner, authority, pinned generation and mode, opens the deterministic successor through `ensureDiscoveryWorkflow`. The hourly cron remains the fallback and covers what this cannot: an instance killed by the platform, a failure of the arming step, and a `stopped` record without a live owner. No trigger, binding or cron changes; no diagram changes.
