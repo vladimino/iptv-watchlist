@@ -103,12 +103,12 @@ export function discoveryAdmissionOperation({replan,now=()=>new Date().toISOStri
 }
 
 // ONE admitted Film per source event. opts: {event, input:{tmdbId, title?, at}, replan?, now?, policy?}. Returns:
-//   {state:'skipped', reason:'projector_is_writer', receipt:false}   the marker is not `open`: one marker read, nothing else;
+//   {state:'skipped', reason:'film_person_route_not_open', receipt:false}   the marker is not `open`: one marker read, nothing else;
 //   {state:'noop', receipt:false}                                    the Film already holds the id (and a title): no receipt, no batch;
 //   {state:'applied'|'unknown'|..., requestId, ...}                  the receiptedWrite outcome.
 export async function applyDiscoveryAdmission(env,options={}){
  const route=await writerRoute(env);
- if(route.writer!=='canonical')return {state:'skipped',reason:'projector_is_writer',receipt:false};
+ if(route.writer!=='canonical')return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  return applyRouted(env,options);
 }
 async function applyRouted(env,{event,input,replan,now,policy=RETRY_POLICY}={}){
@@ -166,13 +166,13 @@ const skipUntil=new WeakMap();
 export async function admitDiscoveryFilms(env,{films={},written=[],deadline=null,now,sweepLimit=SWEEP_PER_CALL,admitLimit=ADMIT_PER_CALL,routeSkipMs=ROUTE_SKIP_MS}={}){
  const out={state:'done',applied:0,noop:0,refused:0,failed:0,deferred:0,swept:0,reconciled:0};
  const binding=env?.DB&&typeof env.DB==='object'?env.DB:null;
- if(binding&&routeSkipMs>0&&(skipUntil.get(binding)||0)>Date.now())return {state:'skipped',reason:'projector_is_writer',cached:true};
+ if(binding&&routeSkipMs>0&&(skipUntil.get(binding)||0)>Date.now())return {state:'skipped',reason:'film_person_route_not_open',cached:true};
  let route;
  try{route=await writerRoute(env);}
  catch(error){return {state:'unavailable',code:String(error?.code||'error')};}
  if(route.writer!=='canonical'){
   if(binding&&routeSkipMs>0)skipUntil.set(binding,Date.now()+routeSkipMs);
-  return {state:'skipped',reason:'projector_is_writer'};
+  return {state:'skipped',reason:'film_person_route_not_open'};
  }
  if(binding)skipUntil.delete(binding);
  const clock=clockOf(now);

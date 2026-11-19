@@ -151,13 +151,13 @@ export function personMutationOperation({replan,now=()=>new Date().toISOString()
 }
 
 // ONE unit, once per source event. opts: {origin, event, input, replan?, now?, policy?}; input: {id:'person:...', at, mode?, person:{roleId, contractVersion, externalIds?, aliases?}}. Returns:
-//   {state:'skipped', reason:'projector_is_writer', receipt:false}   the marker is not `open`: one marker read, nothing else;
+//   {state:'skipped', reason:'film_person_route_not_open', receipt:false}   the marker is not `open`: one marker read, nothing else;
 //   {state:'absent', receipt:false}                                  mode `existing` and the Person is not in the store: nothing is created;
 //   {state:'noop', receipt:false}                                    the facts are already stored: no receipt, no batch;
 //   {state:'applied'|'unknown'|..., requestId, ...}                  the receiptedWrite outcome (`already:true` when the same request was applied before).
 export async function applyPersonMutation(env,{origin,event,input,replan,now,policy=RETRY_POLICY}={}){
  const route=await writerRoute(env);
- if(route.writer!=='canonical')return {state:'skipped',reason:'projector_is_writer',receipt:false};
+ if(route.writer!=='canonical')return {state:'skipped',reason:'film_person_route_not_open',receipt:false};
  const digest=await personMutationDigest(input);
  const target={kind:'person',id:input.id};
  const requestId=await producerRequestId({origin,operation:PERSON_MUTATION_OPERATION,event,target,digest});

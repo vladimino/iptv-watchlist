@@ -356,12 +356,12 @@ export async function runEpgProducerPass(env,params={}){
   const problem=parameterProblem(params);
   if(problem)return {state:'invalid_parameters',field:problem};
   if(typeof params.runId!=='string'||!params.runId||typeof params.sourceGeneration!=='string'||!params.sourceGeneration||typeof params.at!=='string'||!params.at)return {state:'invalid_parameters',field:'run'};
-  if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'projector_is_writer'};
+  if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'film_person_route_not_open'};
   const plan=await buildEpgPlan(env,params);
   const event=epgEvent(params.runId);
   const fingerprint=await planFingerprint({origin:'epg',event,units:plan.entries});
   const opened=await openEpgRun(env,{runKey:event,sourceGeneration:params.sourceGeneration,fingerprint,units:plan.entries,at:nowOf(params)()});
-  if(opened.state==='skipped')return {state:'skipped',reason:'projector_is_writer'};
+  if(opened.state==='skipped')return {state:'skipped',reason:'film_person_route_not_open'};
   if(opened.run.pass_state==='passed'&&opened.run.applied_generation!==null)return {state:'already_complete',passNo:opened.run.pass_no,appliedGeneration:opened.run.applied_generation};
   return await runSlices(env,{params,origin:'epg',sourceGeneration:params.sourceGeneration,event,at:params.at,entries:plan.entries,byKey:plan.byKey,run:opened.run,startIndex:opened.startIndex,absent:plan.absent,
    prerequisites:params.prerequisites,appliers:applierOf(params),applyOptions:applyOptionsOf(params)});
@@ -379,7 +379,7 @@ export async function runDictionaryProducerPass(env,params={}){
   const problem=parameterProblem(params);
   if(problem)return {state:'invalid_parameters',field:problem};
   if(typeof params.version!=='string'||!Array.isArray(params.entries)||typeof params.at!=='string'||!params.at||typeof params.resolveFilm!=='function'||typeof params.readOwnerReview!=='function')return {state:'invalid_parameters',field:'dictionary'};
-  if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'projector_is_writer'};
+  if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'film_person_route_not_open'};
   const resolved=[],refused=[];
   for(const entry of params.entries){
    const label=plain(entry)&&typeof entry.id==='string'?entry.id:null;
@@ -409,7 +409,7 @@ export async function runDictionaryProducerPass(env,params={}){
   const fingerprint=await planFingerprint({origin:'dictionary',event:plan.event,units:entries});
   const snapshotDigest=refused.length?await digestOf({snapshot:plan.snapshot.digest,refused:entries.filter(entry=>entry.refusal!==undefined).map(entry=>({id:entry.id,code:entry.refusal,digest:entry.unitDigest}))}):plan.snapshot.digest;
   const minted=await mintDictionaryRun(env,{snapshotDigest,fingerprint,unitCount:entries.length,at:nowOf(params)()});
-  if(minted.state==='skipped')return {state:'skipped',reason:'projector_is_writer'};
+  if(minted.state==='skipped')return {state:'skipped',reason:'film_person_route_not_open'};
   // A reused version carries the fingerprint it was minted with; a different one means the plan of this snapshot moved (a plan version change): it needs a new version, never a guessed resume.
   if(minted.run.fingerprint!==fingerprint)return {state:'stopped',code:'producer_cas_lost',recorded:false,minted:false};
   return await runSlices(env,{params,origin:'dictionary',event:plan.event,at:params.at,snapshot:plan.snapshot,entries,byKey,run:minted.run,startIndex:resumeIndex(entries,minted.run.cursor_kind===null?null:{kind:minted.run.cursor_kind,id:minted.run.cursor_id}),
@@ -428,7 +428,7 @@ export async function retryEpgProducerResults(env,params={}){
   const problem=parameterProblem(params,{retry:true});
   if(problem)return {state:'invalid_parameters',field:problem};
   if(typeof params.runId!=='string'||!params.runId||typeof params.at!=='string'||!params.at)return {state:'invalid_parameters',field:'run'};
-  if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'projector_is_writer'};
+  if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'film_person_route_not_open'};
   const clock=clockOf(params),now=nowOf(params),t0=clock();
   const rows=await dueResults(env,{now:now(),limit:params.limit,origin:'epg'});
   const counts={taken:0,settled:0,superseded:0,abandoned:0,deferred:0,updated:0,unchanged:0,other_origin:0,not_proven:0};

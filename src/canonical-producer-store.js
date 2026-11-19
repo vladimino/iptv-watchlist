@@ -69,7 +69,7 @@ async function routeOf(env){
  const route=await writerRoute(env);
  return route.writer==='canonical'?{open:true,generation:route.generation}:{open:false};
 }
-const SKIPPED=Object.freeze({state:'skipped',reason:'projector_is_writer'});
+const SKIPPED=Object.freeze({state:'skipped',reason:'film_person_route_not_open'});
 
 // A failed batch, named from what is stored now. `cause` says which write it was.
 async function refuse(env,gate,error,cause,run){
