@@ -575,6 +575,9 @@ export const FILES={
  "epg-orchestration.mjs": {
   "suite": "core"
  },
+ "epg-workflow-rollover.mjs": {
+  "suite": "core"
+ },
  "epg-path-a-feasibility.mjs": {
   "suite": "core",
   "note": "The tiny-scale replay must be exact and must refuse bad paths. heapUsed>0 only proves a sample was recorded."

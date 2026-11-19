@@ -231,6 +231,7 @@ Every domain delivery implements the rows that apply to it, against an injected 
 | T11 | Authority held, `loading`, or D1 unavailable | Held or loading: `unsafe` quarantine. D1 outage: `transient` with cooldown; no fallback store |
 | T12 | Discovery paused or interrupted hop | Workflow recovers only with proof; contradictory proof quarantines; external mode stays a stop |
 | T13 | Discovery 20-step rollover and lost successor create | Rollover is not a failure; lost create is `create_uncertain`, reconciled by `ensure` without a new id |
+| T13a | Controlled EPG Workflow rollover while the owner sleeps; lost create | One fenced swap to `series+1` of the same run; budget, cooldown, checkpoint and claim carried; same id recreated by repeat or `ensure`; any unsafe or unknown fact refuses with zero writes |
 | T14 | Budget exhaustion | `budget_exhausted` on the run key; next run key fresh; read model `quarantined` |
 | T15 | Durable progress after failures | `consecutive` resets; `total` does not |
 | T16 | HTTP 200 or Workflow create without a checkpoint | No budget reset |
