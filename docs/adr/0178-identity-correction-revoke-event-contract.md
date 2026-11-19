@@ -37,9 +37,18 @@ The binding deliberately does **not** compare the resolver's `evidenceKey`. `can
 
 Any mismatch refuses with `old_action_not_effective` (or `record_changed` for a plain hash race). `before_json` is never replayed: the next decision is computed from the current decision by removing only this marker's effect.
 
-### 1a. Identity evidence is a separate, stable basis
+### 1a. Identity basis is provenance, not a release condition
 
-Define `identityBasis` as a digest of the observation's identity inputs only: normalized title, year and `confirmedTmdbId` (from the index record). Airings, durations, channels and the scoring result are excluded. It is computed from the *current* record at preview and at execute. New code records it in `ownerIdentity.identityBasis` for every later assign, reject and revoke. "Genuinely new independent identity evidence" means exactly: the current `identityBasis` differs from the one stored in the revocation. A new airing, a rescore or a changed `evidenceKey` does not qualify. An explicit fresh owner `assign` of the same id is a deliberate override and clears the revocation. Ordinary Discovery processing of other candidates is unchanged; the fence is checked only for this observation and this id.
+Define `identityBasis` as a digest of the observation's identity inputs only: normalized title, year and `confirmedTmdbId` (from the index record). Airings, durations, channels and the scoring result are excluded. It is computed from the *current* record at preview and at execute, and new code records it in `ownerIdentity.identityBasis` for every later assign, reject and revoke. It serves stable provenance and comparison only.
+
+**Proposed default (owner decision, conservative):** a revoked owner assign is a targeted fence on `(observation, tmdbId)` and is **not** lifted by any drift of `identityBasis`. A title normalization fix or a year edit changes the digest but does not verify that the revoked id is right, and a duration (omitted from the basis) can matter between movie versions. The fence lifts only on:
+
+- a fresh explicit owner-confirmed `assign` of the same id (deliberate override), or
+- new, independently sourced, trusted id-specific proof with provenance that was not present at revoke time (for example a `confirmedTmdbId` that comes from a source recorded after the revocation). The exact proof contract is a separate, later decision; until it exists the only release is the owner `assign`.
+
+There is no TTL and no global queue hold. A change of title or year alone lets ordinary Discovery evaluate **other** candidates for the observation, never the revoked id. A new airing, a rescore or a changed `evidenceKey` has no effect on the fence. Other observations are untouched.
+
+The alternative is to treat any `identityBasis` change as new evidence and lift the fence automatically. It is a less conservative product choice, and its risk (silently re-confirming the same erroneous id after a metadata correction) is stated under Consequences. The owner chooses.
 
 ### 1b. Existing corrections: authoritative derivation, fail closed
 
@@ -54,7 +63,7 @@ Define `identityBasis` as a digest of the observation's identity inputs only: no
 
 ### 2. `revoke` of `assign` and of `reject` have different semantics
 
-- **Revoke an assign:** remove `ownerIdentity`, `identitySource='owner'`, the verified `tmdbId`/`filmId`/`canonicalIdentity` and the dependent assigned rows; set `status='needs_verification'`. Record `revokedOwnerAssign {tmdbId, requestId, identityBasis}`. Discovery must not re-confirm that id while the current `identityBasis` equals the recorded one (section 1a).
+- **Revoke an assign:** remove `ownerIdentity`, `identitySource='owner'`, the verified `tmdbId`/`filmId`/`canonicalIdentity` and the dependent assigned rows; set `status='needs_verification'`. Record `revokedOwnerAssign {tmdbId, requestId, identityBasis}`. Discovery must not re-confirm that id for this observation except through the release conditions of section 1a; `identityBasis` is stored for provenance only.
 - **Revoke a reject:** remove only the entry proven in section 1b and this owner's `ownerIdentity`. It writes no negative marker and no `revokedOwnerAssign`. Any independently justified exclusion stays. The id becomes eligible for the next ordinary chunk.
 - `revokedOwnerAssign` is a new decision field. It must be added to `ownerMarkerCarry`, to the observation-index view, and to the resolver consumer check next to `ownerRejected`. A later owner `assign` of the same id clears it. `rejectedTmdbIds` is not used to hold it.
 
@@ -75,6 +84,8 @@ Not decided here: applying the new migration to production (separate owner GO), 
 - **C. Revoke by writing an `assign`/`reject` replacement only.** No new contract, but it cannot withdraw without asserting something new, which the card rules out.
 
 ## Consequences
+
+The targeted fence in section 1a can stay in place after a legitimate metadata correction until the owner re-assigns the id or trusted id-specific proof exists; that costs one owner click, and it is the intended trade for never re-verifying a revoked wrong id silently. If the owner instead lifts the fence on any `identityBasis` change, a title or year correction could silently re-confirm the same erroneous id.
 
 A: one migration and one apply gate; code is tested offline with a v26 fixture. Rollback of code leaves intent rows with the new kind; the old code must ignore unknown kinds (to be tested). B: faster but weakens the contract permanently.
 
