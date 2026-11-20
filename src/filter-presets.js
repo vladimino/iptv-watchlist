@@ -157,6 +157,10 @@ async function filterPresetsRoute(request,env,url){
   if(committed.reason==='conflict'){const fresh=await readD1PresetDocument(env);if(fresh.unavailable||fresh.error)return presetJson({error:'Filter presets storage unavailable'},503);return presetJson({error:'Filter presets changed',presets:fresh.presets},412,fresh.etag);}
   return presetJson({error:committed.reason==='writes_held'?'Filter presets are temporarily read-only':'Filter presets storage unavailable'},503);
  }
+ // R2 branch. The marker was read at the start of the request; a hold may have been set since. Re-read it right before the PUT: a writer that passes this check
+ // and is then delayed carries the R2 ETag it read, and the operator's fence write (runbook, "fence the R2 object") changes that ETag, so its PUT fails on the R2 condition.
+ const again=await presetAuthority(env);
+ if(again.state!==authority.state||again.writes==='held')return presetJson({error:again.state==='closed'?'Filter presets storage unavailable':'Filter presets are temporarily read-only'},503);
  const etag=await writePresetDocument(env,presets,ifMatch);
  if(!etag){const fresh=await readPresetDocument(env);return presetJson({error:'Filter presets changed',presets:fresh.presets||[]},412,fresh.etag);}
  return presetJson({schemaVersion:1,presets},request.method==='POST'?201:200,etag);

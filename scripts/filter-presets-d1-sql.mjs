@@ -41,9 +41,15 @@ export function importSql(presets){
  presets.forEach((item,index)=>lines.push('INSERT INTO filter_preset (id,position,name,query,created_at,updated_at,generation) VALUES ('+[sql(item.id),index,sql(item.name),sql(item.query),sql(item.createdAt),sql(item.updatedAt),1].join(',')+');'));
  return lines.join('\n')+'\n';
 }
+// D1 refuses a SQL statement over 100,000 bytes, and a valid document (30 presets of about 4,000 characters) is larger than that. So parity is checked
+// by one short statement per preset (each aborts the file when its row differs, through the fence row's CHECK) and the activation itself is one short
+// guarded statement. Every statement is on its own line and holds one preset at most.
 export function activateSql(presets){
- const parity=presets.map((item,index)=>'(position='+index+' AND id='+sql(item.id)+' AND name='+sql(item.name)+' AND query='+sql(item.query)+' AND created_at='+sql(item.createdAt)+' AND updated_at='+sql(item.updatedAt)+' AND generation=1)').join(' OR ')||'0';
- return "UPDATE filter_preset_authority SET mode='d1', writes='open' WHERE id=1 AND mode='r2' AND writes='held' AND generation=1\n AND (SELECT COUNT(*) FROM filter_preset)="+presets.length+"\n AND (SELECT COUNT(*) FROM filter_preset WHERE "+parity+")="+presets.length+";\nUPDATE filter_preset_cas SET ok=changes() WHERE id=1;\n";
+ const lines=[];
+ presets.forEach((item,index)=>lines.push('UPDATE filter_preset_cas SET ok=(SELECT COUNT(*) FROM filter_preset WHERE position='+index+' AND id='+sql(item.id)+' AND name='+sql(item.name)+' AND query='+sql(item.query)+' AND created_at='+sql(item.createdAt)+' AND updated_at='+sql(item.updatedAt)+' AND generation=1) WHERE id=1;'));
+ lines.push("UPDATE filter_preset_authority SET mode='d1', writes='open' WHERE id=1 AND mode='r2' AND writes='held' AND generation=1 AND (SELECT COUNT(*) FROM filter_preset)="+presets.length+';');
+ lines.push('UPDATE filter_preset_cas SET ok=changes() WHERE id=1;');
+ return lines.join('\n')+'\n';
 }
 function main(argv){
  const [command,file]=argv;

@@ -3,7 +3,9 @@
 // it does not import. The Worker bundle wraps it; tests load it as an ES module.
 //
 // Authority (one marker row, filter_preset_authority):
-//  - no DB binding, or the schema is provably absent (sqlite_master answers and lacks the tables) -> `legacy`: R2 serves, exactly as before 0028.
+//  - `legacy` (R2 serves, exactly as before 0028) only when the database itself proves it is pre-migration: the tables are absent AND schema_contract answers a version below 28.
+//    A missing binding, an unreadable or absent schema_contract (a wrong or empty database) or version 28 without the tables is `closed`. The one exception is the explicit
+//    local stand-in `FILTER_PRESETS_DB_OPTIONAL=standin` (tests and local development), which is never set in production.
 //  - mode r2 -> `r2`: R2 serves; writes `held` makes every preset write answer 503 (the import fence). Nothing here touches R2.
 //  - mode d1 -> `d1`: the rows serve; R2 is never read or written for presets again. There is no fallback.
 //  - any other state with the tables present (marker missing, unknown mode, unreadable) or a storage error -> `closed` (503). Never R2.
@@ -42,11 +44,16 @@ function presetsFrom(rows,generation){
 // -> {state:'legacy'} | {state:'r2',writes,generation} | {state:'d1',writes,generation} | {state:'closed'}
 export async function readAuthority(source){
  const db=database(source);
- if(!db||typeof db.prepare!=='function')return {state:'legacy'};
+ const standin=source?.FILTER_PRESETS_DB_OPTIONAL==='standin';
+ if(!db||typeof db.prepare!=='function')return standin?{state:'legacy'}:{state:'closed'};
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('filter_preset','filter_preset_authority','filter_preset_cas')")).map(row=>row.name);}
  catch{return {state:'closed'};}
- if(!names.length)return {state:'legacy'};
+ if(!names.length){
+  let version=null;
+  try{version=Number((await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version);}catch{return standin?{state:'legacy'}:{state:'closed'};}
+  return Number.isFinite(version)&&version<28?{state:'legacy'}:(standin?{state:'legacy'}:{state:'closed'});
+ }
  if(TABLES.some(name=>!names.includes(name)))return {state:'closed'};
  let row;
  try{row=await one(db,MARKER_SQL);}catch{return {state:'closed'};}
@@ -97,8 +104,14 @@ export async function commitPresets(source,{expectedGeneration,presets}){
  if(outcome==='conflict')return {ok:false,reason:'conflict'};
  if(outcome!=='ok'){
   // A lost reply is not a failed write: read the marker once. A move to exactly our generation means our batch committed.
+  // The marker reaching our generation does not say whose batch won: a competitor from the same generation may have committed instead.
+  // Success is claimed only when the stored rows are exactly this request's document at this generation.
   const after=await readAuthority(db);
-  if(after.state==='d1'&&after.generation===generation)return {ok:true,generation};
+  if(after.state==='d1'&&after.generation===generation){
+   let rows;try{rows=await many(db,ROW_SQL);}catch{return {ok:false,reason:'unavailable'};}
+   if(rows.every(row=>Number(row.generation)===generation)&&sameRows(rows,presets))return {ok:true,generation};
+   return {ok:false,reason:'conflict'};
+  }
   return {ok:false,reason:'unavailable'};
  }
  return {ok:true,generation};

@@ -27,6 +27,15 @@ API, `schemaVersion:1`, record fields, normalization, the limit of 30, statuses 
 
 Existing tests changed only where they pinned "the last migration is 0027 / schema 27": `tests/canonical-producer-chain.mjs`, `tests/canonical-producer-schema.mjs`, `tests/canonical-rated-admission-bundle.mjs`, `tests/canonical-rated-admission-producer.mjs`, `tests/discovery-intent-migration-0027.mjs`, `tests/migration-pattern-limit.mjs`.
 
+## Independent review corrections (same pull request)
+
+Three P1 and one P2 finding were reproduced and fixed, each with a regression in `tests/filter-presets-d1.mjs` (two of them mutation checked):
+
+- **Hold did not fence an in-flight R2 writer.** The R2 branch now re-reads the marker right before its PUT, and the runbook adds a fence write on the R2 object (step 2b) so that any writer holding an older ETag fails its conditional PUT. Tests: a writer suspended after its R2 read (hold plus fence, PUT fails with 412), one suspended before its R2 read (stopped by the marker re-read, `503`; fails without the re-read), one resuming after activation (R2 stays untouched).
+- **Lost reply claimed a competitor's commit.** Success after a failed batch needs the stored rows to equal this request's document at the new generation; otherwise `conflict`, which the route answers with `412` and the winner's state. Tests: competitor commits and our batch never reaches D1, at module and route level (fails when the check is removed).
+- **Absent binding or schema reopened R2.** `legacy` now needs the database to prove it is pre-migration (tables absent and `schema_contract` below 28) or the explicit stand-in. After activation: no binding, an empty database and version 28 without the tables answer `503` with zero R2 access. Residual limit: a binding to a different database below version 28 looks like the true pre-migration state.
+- **Activation SQL could exceed 100,000 bytes.** One short parity statement per preset plus one short guarded switch. A fixture of 30 near-limit presets (about 22 KB percent-encoded each) generates a file far above 100,000 bytes in total with every statement below it; a mismatch in the last preset stops the file before the switch.
+
 ## Not done, not claimed
 
 - Migration 0028 is not applied; no row is imported; the marker is not `d1`; R2 `ui/filter-presets.json` is the production authority and was not read.

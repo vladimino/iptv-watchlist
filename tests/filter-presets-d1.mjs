@@ -74,7 +74,7 @@ const preset=(index,name='Пресет '+index,query='viewing=new')=>({id:uuid(i
 resetR2();
 {
  const noSchema=database(v27);
- for(const env of [{BUCKET:bucket},{BUCKET:bucket,DB:noSchema.db}]){
+ for(const env of [{BUCKET:bucket,FILTER_PRESETS_DB_OPTIONAL:'standin'},{BUCKET:bucket,DB:noSchema.db}]){
   resetR2();
   const empty=await call(withD1,env,'GET',URLP);
   assert.equal(empty.status,200);assert.equal(empty.etag,'"none"');
@@ -83,8 +83,9 @@ resetR2();
   assert.equal((await call(withD1,env,'GET',URLP)).body.presets[0].name,'Старый');
  }
  assert.equal(rowsOf(noSchema.file,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'filter_preset%'")[0].n,0,'the route never creates the schema');
- assert.deepEqual((await Presets.readAuthority({})),{state:'legacy'});
- assert.deepEqual((await Presets.readAuthority({DB:noSchema.db})),{state:'legacy'});
+ assert.deepEqual((await Presets.readAuthority({FILTER_PRESETS_DB_OPTIONAL:'standin'})),{state:'legacy'},'only the explicit stand-in may run without a binding');
+ assert.deepEqual((await Presets.readAuthority({})),{state:'closed'},'a missing binding is closed');
+ assert.deepEqual((await Presets.readAuthority({DB:noSchema.db})),{state:'legacy'},'a database that proves it is pre-migration (version below 28)');
 }
 resetR2();
 {
@@ -300,6 +301,110 @@ for(const bad of ['"7"','"d1:0"','"d1:x"','"abc123"','']){assert.equal(Presets.f
  assert.equal((await call(withD1,{BUCKET:bucket,DB:emptyDb.db},'GET',URLP)).etag,'"d1:1"');
  const releaseDb=database();run(releaseDb.file,tool('hold').stdout);run(releaseDb.file,tool('release').stdout);
  assert.deepEqual(marker(releaseDb.file),{mode:'r2',generation:0,writes:'open'},'release restores the pre-hold marker');
+}
+
+// ===== 8. review findings (P1 x3, P2) =====
+{
+ // P1 fail-closed: after activation a missing binding or a wrong/empty database never serves R2
+ resetR2();
+ const active=database();
+ run(active.file,"UPDATE filter_preset_authority SET mode='d1',generation=1");
+ const empty=path.join(root,'wrong-empty.sqlite');run(empty,'CREATE TABLE unrelated(x)');
+ const wrongV28=path.join(root,'wrong-v28.sqlite');run(wrongV28,"CREATE TABLE schema_contract(id INTEGER PRIMARY KEY, version INTEGER, note TEXT);INSERT INTO schema_contract VALUES(1,28,'x')");
+ for(const [label,env] of [['no binding',{BUCKET:bucket}],['an empty database',{BUCKET:bucket,DB:d1Standin(empty)}],['version 28 without the tables',{BUCKET:bucket,DB:d1Standin(wrongV28)}]]){
+  assert.equal((await call(withD1,env,'GET',URLP)).status,503,label+': GET');
+  assert.equal((await call(withD1,env,'POST',URLP,'"none"',{name:'x',query:''})).status,503,label+': POST');
+ }
+ assert.equal(gets+puts.length,0,'a wrong database never reaches R2');
+ assert.equal((await call(withD1,{BUCKET:bucket,DB:active.db},'GET',URLP)).status,200,'the real database still serves');
+}
+{
+ // P1 lost reply: a competitor from the same generation committed and our batch never reached D1
+ const {file,db}=database();
+ run(file,"UPDATE filter_preset_authority SET mode='d1',generation=4");
+ const racing={prepare:db.prepare.bind(db),async batch(){await Presets.commitPresets(db,{expectedGeneration:4,presets:[preset(7,'Победитель')]});throw new Error('D1_ERROR: network connection lost');}};
+ const lost=await Presets.commitPresets(racing,{expectedGeneration:4,presets:[preset(8,'Проигравший')]});
+ assert.deepEqual(lost,{ok:false,reason:'conflict'},'the competitor won: our request is not a success');
+ assert.deepEqual(rowsOf(file,'SELECT id,name FROM filter_preset'),[{id:uuid(7),name:'Победитель'}]);
+ // the same through the route: 412 with the winner's state, never 200 with the loser's body
+ const route=database();
+ run(route.file,"UPDATE filter_preset_authority SET mode='d1',generation=1");
+ const r2=route.db;
+ let armed=true;
+ const flaky={prepare:r2.prepare.bind(r2),async batch(list){if(armed){armed=false;await Presets.commitPresets(r2,{expectedGeneration:1,presets:[preset(9,'Победитель')]});throw new Error('D1_ERROR: network connection lost');}return r2.batch(list);}};
+ const answer=await call(withD1,{BUCKET:bucket,DB:flaky},'POST',URLP,'"d1:1"',{name:'Проигравший',query:''});
+ assert.equal(answer.status,412,JSON.stringify(answer.body));assert.equal(answer.body.presets[0].name,'Победитель');assert.equal(answer.etag,'"d1:2"');
+}
+{
+ // P1 hold versus an in-flight R2 writer. The writer is admitted at r2/open, is suspended while the operator holds and fences the R2 object, then resumes.
+ resetR2();
+ const {file,db}=database();
+ const env={BUCKET:bucket,DB:db};
+ const seeded=await call(withD1,env,'POST',URLP,'"none"',{name:'Исходный',query:'started=1'});
+ assert.equal(seeded.status,201);
+ const fence=async()=>{ // the runbook's fence write: same content, new R2 ETag, conditional on the ETag just read
+  const object=await bucket.get('ui/filter-presets.json');const saved=await bucket.put('ui/filter-presets.json',JSON.stringify(await object.json()),{onlyIf:{etagMatches:object.etag}});assert.ok(saved,'the fence write lands');
+ };
+ // (a) suspended after the R2 read, hold + fence happen, then the PUT with the old ETag
+ let stage=0;const realGet=bucket.get;
+ bucket.get=async function(key){const object=await realGet.call(bucket,key);if(stage===1){stage=2;run(file,"UPDATE filter_preset_authority SET writes='held'");await fence();}return object;};
+ stage=1;
+ const delayed=await call(withD1,env,'PATCH',URLP+'/'+seeded.body.presets[0].id,seeded.etag,{name:'Запоздавший'});
+ bucket.get=realGet;
+ assert.ok([412,503].includes(delayed.status),'a writer admitted before the hold cannot write after it: '+delayed.status);
+ assert.equal(records.get('ui/filter-presets.json').presets[0].name,'Исходный','the delayed edit did not land in R2');
+ run(file,"UPDATE filter_preset_authority SET writes='open'");
+ // (b) suspended after the marker recheck would pass: the fence changes the ETag, the conditional PUT fails
+ const current=await call(withD1,env,'GET',URLP);
+ const realPut=bucket.put;let fenced=false;
+ bucket.put=async function(key,value,options){if(!fenced){fenced=true;await fence();}return realPut.call(bucket,key,value,options);};
+ const late=await call(withD1,env,'PATCH',URLP+'/'+seeded.body.presets[0].id,current.etag,{name:'После fence'});
+ bucket.put=realPut;
+ assert.equal(late.status,412,'a PUT carrying the pre-fence ETag fails on the R2 condition');
+ assert.equal(records.get('ui/filter-presets.json').presets[0].name,'Исходный');
+ // (b2) admitted at r2/open, stalled BEFORE its R2 read; hold and fence happen; it then reads the post-fence ETag. Only the marker re-read before the PUT stops it.
+ {
+  const fresh=await call(withD1,env,'GET',URLP);
+  let go=true;const get0=bucket.get;
+  bucket.get=async function(key){if(go){go=false;run(file,"UPDATE filter_preset_authority SET writes='held'");await fence();}return get0.call(bucket,key);};
+  const before=JSON.stringify(records.get('ui/filter-presets.json'));
+  const stalled=await call(withD1,env,'PATCH',URLP+'/'+seeded.body.presets[0].id,fresh.etag,{name:'Читал после fence'});
+  bucket.get=get0;
+  assert.equal(stalled.status,503,'a writer that reads R2 after the fence is stopped by the marker re-read');
+  assert.equal(JSON.stringify(records.get('ui/filter-presets.json')),before);
+  run(file,"UPDATE filter_preset_authority SET writes='open'");
+ }
+ // (c) hold, fence, activation: a writer that resumes after activation is refused
+ run(file,"UPDATE filter_preset_authority SET writes='held'");
+ const exported=records.get('ui/filter-presets.json').presets;
+ assert.equal((await Presets.importPresets(db,{presets:exported})).ok,true);
+ assert.equal((await Presets.activatePresets(db,{presets:exported})).ok,true);
+ const afterSwitch=await call(withD1,env,'PATCH',URLP+'/'+exported[0].id,'"d1:1"',{name:'Через D1'});
+ assert.equal(afterSwitch.status,200);assert.equal(records.get('ui/filter-presets.json').presets[0].name,'Исходный','R2 stays untouched after activation');
+}
+{
+ // P2 activation size: 30 near-limit presets keep every generated statement under D1's 100,000-byte limit
+ const {spawnSync}=await import('node:child_process');
+ const longQuery=index=>Array.from({length:30},(_,i)=>'channel='+('К'+index+'_'+i+'_').padEnd(120,'к')).join('&');
+ const big=Array.from({length:30},(_,i)=>({id:uuid(i+1),name:('Имя '+i).padEnd(80,'и'),schemaVersion:1,query:longQuery(i),createdAt:'2026-11-01T10:00:00.000Z',updatedAt:'2026-11-01T10:00:00.000Z'}));
+ const file=path.join(root,'big.json');fs.writeFileSync(file,JSON.stringify({schemaVersion:1,presets:big}));
+ const tool=(...args)=>spawnSync(process.execPath,['scripts/filter-presets-d1-sql.mjs',...args],{encoding:'utf8',maxBuffer:1<<26});
+ const imported=tool('import',file),activate=tool('activate',file);
+ assert.equal(imported.status,0,imported.stderr);assert.equal(activate.status,0,activate.stderr);
+ const bytes=text=>text.trim().split('\n').map(line=>Buffer.byteLength(line));
+ assert.ok(Math.min(...bytes(activate.stdout))>0);
+ const total=Buffer.byteLength(activate.stdout);assert.ok(total>100000,'the fixture is large enough that one statement would not fit ('+total+')');
+ for(const text of [imported.stdout,activate.stdout,tool('hold').stdout,tool('release').stdout])assert.ok(Math.max(...bytes(text))<100000,'every statement stays under 100000 bytes: '+Math.max(...bytes(text)));
+ assert.ok(Math.max(...bytes(activate.stdout))<60000,'one preset per statement (a percent-encoded normalized query is at most about 12 bytes per input character)');
+ const {file:dbFile}=database();
+ assert.equal(run(dbFile,tool('hold').stdout+imported.stdout+activate.stdout).status,0);
+ assert.deepEqual(marker(dbFile),{mode:'d1',generation:1,writes:'open'});
+ // one wrong row aborts before the switch
+ const other=database();
+ const tampered=path.join(root,'big-tampered.json');fs.writeFileSync(tampered,JSON.stringify({schemaVersion:1,presets:big.map((item,i)=>i===29?{...item,name:'Другое'}:item)}));
+ run(other.file,tool('hold').stdout+imported.stdout);
+ assert.notEqual(run(other.file,tool('activate',tampered).stdout).status,0);
+ assert.equal(marker(other.file).mode,'r2','a parity mismatch in the last preset stops the file before the switch');
 }
 
 // the bundle wraps the module under its own name and the Worker route names it

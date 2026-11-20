@@ -62,14 +62,14 @@ There is no `PUT`. Every write needs `If-Match`: absent is `428`, a token that i
 
 | Marker state | Behavior |
 | --- | --- |
-| Binding absent, or the schema provably absent | R2 object `ui/filter-presets.json` serves, exactly as before schema v28. |
+| The database proves it is pre-migration (tables absent and `schema_contract` below version 28) | R2 object `ui/filter-presets.json` serves, exactly as before schema v28. |
 | `mode r2`, writes `open` | R2 serves; no D1 preset row is read or written. |
 | `mode r2`, writes `held` | R2 serves reads; every write is `503` (the import fence). |
 | `mode d1`, writes `open` | D1 rows serve; R2 is never read or written for presets. |
 | `mode d1`, writes `held` | D1 rows serve reads; every write is `503`. |
-| Tables present but marker unreadable or unknown, or a storage error | `503`. The route never falls back to R2. |
+| Binding missing, database without `schema_contract`, version 28 without the tables, tables present but marker unreadable or unknown, or a storage error | `503`. The route never falls back to R2. Only the explicit local stand-in `FILTER_PRESETS_DB_OPTIONAL=standin` (tests, never production) runs without a database. |
 
-A D1 read takes the marker, the rows and the marker again and retries once on disagreement; rows of another generation are never served. A D1 write is one batch: a compare-and-swap of the marker generation, a fence statement that aborts the whole batch when that update changed nothing, then the rows are replaced. An empty D1 table is never evidence that R2 holds no presets: the switch happens only through the documented import with a parity proof ([runbook](../../runbooks/filter-presets-cutover.md)). Code rollback does not move data: presets written in D1 are not in R2.
+A D1 read takes the marker, the rows and the marker again and retries once on disagreement; rows of another generation are never served. A request on the R2 branch re-reads the marker right before its R2 write and answers `503` when writes are held; a write admitted earlier is stopped by the operator's fence write on the R2 object (its conditional PUT fails). A write whose reply is lost is reported as success only when the stored rows are exactly its own document. A D1 write is one batch: a compare-and-swap of the marker generation, a fence statement that aborts the whole batch when that update changed nothing, then the rows are replaced. An empty D1 table is never evidence that R2 holds no presets: the switch happens only through the documented import with a parity proof ([runbook](../../runbooks/filter-presets-cutover.md)). Code rollback does not move data: presets written in D1 are not in R2.
 
 ## Not in this contract
 
