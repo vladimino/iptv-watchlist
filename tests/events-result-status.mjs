@@ -62,7 +62,15 @@ const table = [
   // Discovery
   [{type: 'discovery', kind: 'hour', status: 'idle', checked: 0, added: 0}, 'success', 'nothing new is not a warning'],
   [{type: 'discovery', kind: 'hour', status: 'empty', checked: 3, added: 1}, 'success', 'hour report'],
-  [{type: 'discovery', kind: 'hour', status: 'running', checked: 3, added: 1}, null, 'still running: no outcome yet'],
+  [{type: 'discovery', kind: 'hour', status: 'running', checked: 3, added: 1}, 'success', 'running, clean report with results: the report is published'],
+  [{type: 'discovery', kind: 'hour', status: 'running', checked: 588, added: 39, remaining: 6155}, 'success', 'running, the production shape of 20 Nov 18:00 Madrid (39 found, 6155 left)'],
+  [{type: 'discovery', kind: 'hour', status: 'running', checked: 0, added: 0}, 'success', 'running, clean report with zero counters'],
+  [{type: 'discovery', kind: 'hour', status: 'running', checked: 3, added: 1, incomplete: true}, 'warning', 'running + incomplete'],
+  [{type: 'discovery', kind: 'hour', status: 'running', checked: 3, added: 1, queueUnreadable: true}, 'warning', 'running + queueUnreadable'],
+  [{type: 'discovery', kind: 'hour', status: 'running', checked: null, added: null}, 'warning', 'running, counters unreadable'],
+  [{type: 'discovery', kind: 'hour', status: 'running', incomplete: true, queueUnreadable: true}, 'warning', 'running, several warning fields'],
+  [{type: 'discovery', kind: 'hour', status: 'idle', checked: 4, added: 2}, 'success', 'normal idle'],
+  [{type: 'discovery', kind: 'hour', status: 'empty', checked: 4, added: 2, queueEmpty: true}, 'success', 'normal empty'],
   [{type: 'discovery', kind: 'hour', status: 'unknown', checked: 0, added: 0}, null, 'unrecognised status is not a success'],
   [{type: 'discovery', kind: 'hour', checked: 2, added: 1}, null, 'missing status is not a success'],
   [{type: 'discovery', kind: 'hour', status: 'unknown', checked: 1, added: 0, incomplete: true}, 'warning', 'an unrecognised status with an incomplete report still warns'],
@@ -139,6 +147,10 @@ assert.equal(count('watchlist', 'all'), 1);
 assert.equal(count('watchlist', 'success'), 1, 'watchlist + success combine');
 assert.equal(count('watchlist', 'error'), 0);
 assert.equal(count('epg', 'success'), 1);
+const runningHour = JSON.stringify({type: 'discovery', kind: 'hour', status: 'running', checked: 588, added: 39});
+assert.equal(run(`eventMatchesFilters(${runningHour},'discovery','success')`), true, 'result=success + «Находки» shows the running hour report');
+assert.equal(run(`eventMatchesFilters(${runningHour},'all','warning')`), false);
+assert.match(run(`eventStatusBadgeHTML(${runningHour})`), /event-status-success/);
 assert.equal(run("eventMatchesResult({type:'epg'},'nonsense')"), true, 'an unknown result id never hides events');
 
 // The automatic search counts matches of BOTH axes: ten skipped events (warning) are not ten «error» matches of the prediction type.

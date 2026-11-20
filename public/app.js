@@ -610,9 +610,9 @@ function eventPresentationStatus(event){
     if(status==='failed'||status==='stalled')return 'error';
     if(status==='waiting'||status==='blocked')return 'warning';
     if(event.incomplete===true||!int(event.checked)||!int(event.added)||event.queueUnreadable===true)return 'warning';
-    // Only the verified normal ends are a success («nothing new» is not a warning). A Workflow that is still running has no outcome yet, and a missing or
-    // unrecognised status is not confirmed by anything else.
-    return status==='idle'||status==='empty'?'success':null;
+    // The badge is the result of THIS hourly report (it was formed and published, counters read, nothing incomplete or unreadable), not of the Workflow, which
+    // may still be running (`running`). «Nothing new» is not a warning. A missing or unrecognised status is confirmed by nothing else: no result.
+    return status==='idle'||status==='empty'||status==='running'?'success':null;
    }
    if(event.kind==='report_failed')return status==='failed'||status==='stalled'?'error':'warning';
    // Legacy per-chain card (`kind=run`, written before ADR 0111): `finished` is a confirmed end, `stopped` (a refusal) and `kind=empty` (no stored result) have no outcome.
