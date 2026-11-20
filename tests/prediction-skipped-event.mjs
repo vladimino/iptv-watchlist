@@ -15,6 +15,8 @@ const STOP=call('STOP_EVENT_PREFIX'),OUTBOX=call('EVENT_OUTBOX_KEY');
 const journal=()=>[...records].filter(([key])=>key.startsWith('events/items/')).map(([,value])=>value);
 const skipped=()=>journal().filter(event=>event.presentation==='batch_v2_skipped');
 const start=(requestId,extra={})=>api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',manifestSize:2,...extra},{requestId});
+// Invariant (review of PR #805): a parked, undelivered skipped record always has an outbox index entry, so it can never be orphaned.
+const orphans=()=>[...records].filter(([k,v])=>k.startsWith(STOP+'skipped-')&&!v.delivered&&!(records.get(OUTBOX)?.pending||{})[k]).map(([k])=>k);
 const filmTables=()=>JSON.stringify(sql(w.file,'SELECT * FROM prediction_run'))+JSON.stringify(sql(w.file,"SELECT * FROM prediction_lease"))+JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue'));
 
 // 1. A live holder turns the request away: the answer is the existing one, one neutral Event is in the journal, the stored runner is unchanged.
@@ -30,7 +32,7 @@ assert.equal(filmTables(),state0,'a skipped start changes no run, lease or queue
  assert.ok(!('runId' in e)&&!('added' in e)&&!('processed' in e)&&!('details' in e)&&!('queueSchemaVersion' in e),'no run identity and no processed count is claimed');
  assert.ok(Number.isFinite(Date.parse(e.at)));
  assert.equal(records.get(STOP+'skipped-req-skip-1.json').delivered,true,'the durable record is delivered');
- assert.equal(records.has(OUTBOX),false,'a delivered Event leaves nothing in the outbox');
+ assert.deepEqual(Object.keys(records.get(OUTBOX)?.pending||{}),[],'a delivered Event leaves nothing in the outbox index');
  // GET /api/events returns it and writes nothing
  const before=records.size,read=await ctx.worker.fetch(new Request('https://site.example/api/events'),env),body=await read.json();
  assert.equal(read.status,200);assert.ok((body.events||body).some(x=>x.id===e.id&&x.presentation==='batch_v2_skipped'));assert.equal(records.size,before,'the read writes nothing');}
@@ -76,5 +78,30 @@ assert.equal(filmTables(),state0,'a skipped start changes no run, lease or queue
  ctx.runnerLease=async(e2,id,operation)=>operation==='acquire'?{status:'lease_lost'}:original(e2,id,operation);
  try{const lost=await start('req-lost');assert.equal(lost.data.status,'lease_lost');}finally{ctx.runnerLease=original;}
  assert.equal(skipped().length,before+1,'a status other than already_running is not a skipped start');}
+
+// 6. Review of PR #805, dual failure: the journal AND the outbox index are down at the refusal. The answer is unchanged, nothing is parked (so nothing can be orphaned), and the next starts stay healthy.
+{
+ assert.deepEqual(orphans(),[]);
+ const h2=await start('req-h2');assert.equal(h2.data.status,'running',JSON.stringify(h2.data).slice(0,160));
+ blocked=key=>key.startsWith('events/items/')||key===OUTBOX;
+ const dual=await start('req-dual');assert.equal(dual.status,200);assert.equal(dual.data.status,'already_running');assert.equal(dual.data.runId,h2.data.runId);
+ blocked=()=>false;
+ assert.equal(records.has(STOP+'skipped-req-dual.json'),false,'with the index unwritable nothing is parked');assert.deepEqual(orphans(),[],'no orphaned record');
+ assert.equal(skipped().some(e=>e.requestId==='req-dual'),false,'the limitation: journal and index both down loses this one Event, never the answer');
+ // the index alone is down: the Event is still journaled directly, nothing is parked, no orphan
+ blocked=key=>key===OUTBOX;const idx=await start('req-index-down');blocked=()=>false;assert.equal(idx.data.status,'already_running');
+ assert.equal(skipped().filter(e=>e.requestId==='req-index-down').length,1,'journaled directly');assert.equal(records.has(STOP+'skipped-req-index-down.json'),false);assert.deepEqual(orphans(),[]);
+ // the park alone fails after the index entry: journaled directly, the entry is `absent` and leaves the index at the next sweep
+ blocked=key=>key===STOP+'skipped-req-park-down.json';const pd=await start('req-park-down');blocked=()=>false;assert.equal(pd.data.status,'already_running');
+ assert.equal(skipped().filter(e=>e.requestId==='req-park-down').length,1,'journaled directly');assert.deepEqual(orphans(),[]);
+ // the journal is down, the index works: parked and indexed; a LATER start with a different request id delivers it
+ blocked=key=>key.startsWith('events/items/');const down=await start('req-journal-down');blocked=()=>false;assert.equal(down.data.status,'already_running');
+ assert.ok(records.get(OUTBOX)?.pending?.[STOP+'skipped-req-journal-down.json'],'indexed');assert.equal(skipped().some(e=>e.requestId==='req-journal-down'),false);assert.deepEqual(orphans(),[]);
+ assert.equal((await api('complete',{runId:h2.data.runId,reason:'quota'})).status,200);
+ const later=await start('req-later');assert.equal(later.data.status,'running');
+ assert.equal(skipped().filter(e=>e.requestId==='req-journal-down').length,1,'recovered by a later start with another request id');
+ assert.deepEqual(Object.keys(records.get(OUTBOX)?.pending||{}),[],'every entry settled, the absent one included');assert.deepEqual(orphans(),[]);
+ assert.equal((await api('complete',{runId:later.data.runId,reason:'quota'})).status,200);
+}
 
 console.log('Skipped Predictions start (AIR-548): one neutral Event per refused request on both paths, replay is one item, another request id is another, dry run, 409 and other lease statuses write none, a journal outage never changes the answer and the outbox recovers it, the runner keeps one terminal Event.');

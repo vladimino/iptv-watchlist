@@ -42,7 +42,7 @@ const claimedFailure=id=>({filmId:id,failure:{kind:'parse_error',reason:'insuffi
 const setCold=(w,ids)=>sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.shows',json('[]')) WHERE film_id IN ("+ids.map(id=>"'"+id+"'").join(',')+")");
 
 // AIR-548 (ADR 0180): a turned-away start also parks and delivers one neutral skipped Event; nothing else is written.
-const SKIPPED_START_KEY=/^(enrichment\/stop-events\/skipped-|events\/items\/\d+-enrichment-skipped-)/;
+const SKIPPED_START_KEY=/^(enrichment\/stop-events\/skipped-|enrichment\/event-outbox\.json$|events\/items\/\d+-enrichment-skipped-)/;
 // 1. A manifest is self-sufficient: the model needs no next, no enrichment_profile and no metadata call to generate every film in it.
 {
  const w=await ready(37);await reconcile(w);
