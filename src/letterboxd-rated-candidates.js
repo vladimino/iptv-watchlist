@@ -474,6 +474,7 @@ const LetterboxdRatedCandidates = (() => {
         const parked = await park(env, key, opened.value, stopped);
         return {pending: true, fetched: true, verified: false, enriched: false, writes: parked.changed === true, persisted: parked.changed ? 'stop' : 'none', stop: stopped, code, phase: 'enrich'};
       }
+      if (!(await candidateBound(env, key, sha, code, film))) return claimChanged(code, false);
       const stored = await storeMetadata(env, filmId, parsed, film.filmPath, film);
       if (stored.refused) {
         const stopped = {reason: 'admission_changed', code, at: new Date().toISOString(), phase: 'enrich'};
@@ -485,6 +486,7 @@ const LetterboxdRatedCandidates = (() => {
       const wrote = stored.changed === true || marked.changed === true;
       return {pending: true, fetched: true, verified: false, enriched: true, writes: wrote, persisted: wrote ? 'enrichment' : 'none', code, tmdb: item.tmdb, filmId, phase: 'enrich', state: 'enriched'};
     }
+    if (!(await candidateBound(env, key, sha, code, film))) return claimChanged(code, false);
     const base = {id: filmId, title: film.title, original: film.title, year: film.year, tmdbId: film.tmdb, url: film.url, directors: film.directors || [], actors: film.actors || []};
     const titles = {};
     const people = {};
@@ -496,6 +498,7 @@ const LetterboxdRatedCandidates = (() => {
       const parked = await park(env, key, opened.value, stopped);
       return {pending: true, fetched: true, verified: false, enriched: false, writes: parked.changed === true, persisted: parked.changed ? 'stop' : 'none', stop: stopped, code, phase: 'enrich'};
     }
+    if (!(await candidateBound(env, key, sha, code, film))) return claimChanged(code, false);
     const localized = await storeLocalization(env, filmId, base, titles, film);
     if (localized.refused) {
       const stopped = {reason: 'admission_changed', code, at: new Date().toISOString(), phase: 'enrich', part: 'localization'};
@@ -510,6 +513,14 @@ const LetterboxdRatedCandidates = (() => {
     return {pending: !!next.next, fetched: true, verified: false, enriched: true, writes: wrote, persisted: wrote ? 'enrichment' : 'none', code, tmdb: item.tmdb, filmId, phase: 'enrich', state: 'enriched'};
   }
   // The candidate row the page was proven against. A row that left `verified`, or now names another TMDB id or film path, is not advanced.
+  // Latest candidate row against the persisted admission, read just before a write (AIR-354). R2 has no cross-document transaction;
+  // the per-document CAS fences below remain, and a change after this read is reported by them as partial persistence, not hidden.
+  async function candidateBound(env, key, sha, code, film) {
+    const latest = await readDoc(env, key);
+    const doc = latest.value;
+    const row = doc && doc.candidates && doc.candidates[code];
+    return !!row && doc.archiveSha256 === sha && row.state === 'verified' && String(row.tmdb) === String(film.tmdb) && row.filmPath === film.filmPath && film.sourceCode === code && film.archiveSha256 === sha;
+  }
   function claimChanged(code, wrote) {
     return {pending: true, fetched: true, verified: false, enriched: false, writes: wrote === true, persisted: wrote ? 'enrichment' : 'none', code, state: 'needs_review', reason: 'claim_changed', phase: 'enrich'};
   }

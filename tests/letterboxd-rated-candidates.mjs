@@ -680,6 +680,7 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
     assert.equal(r.meta.body.reason, 'claim_changed', JSON.stringify(r.meta.body));
     const doc = read(r.candKey);
     assert.notEqual(doc.candidates.Rr1.enrichment, 'metadata');
+    {const stored = read(r.admissionsKey).films.tmdb_900040; assert.equal(stored.synopsis, undefined, 'no metadata is written for a refused claim'); assert.equal(stored.metadataAt, undefined);}
     assert.equal(doc.candidates.Rr1.filmPath, '/film/another-cut/', 'the changed row is not rewritten');
     assert.equal(doc.checkpoint.stopped.code, 'Zz0', 'an unrelated stop is preserved');
   }
@@ -687,11 +688,13 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
     const r = await raced('Rr2', 'rated-key-rr2000001', {onMetadataFetch: candKey => {const doc = read(candKey); doc.candidates.Rr2.state = 'needs_review'; put(candKey, doc);}});
     assert.equal(r.meta.body.enriched, false, JSON.stringify(r.meta.body));
     assert.notEqual(read(r.candKey).candidates.Rr2.enrichment, 'metadata');
+    {const stored = read(r.admissionsKey).films.tmdb_900040; assert.equal(stored.synopsis, undefined, 'no metadata is written for a refused claim'); assert.equal(stored.metadataAt, undefined);}
   }
   {
     const r = await raced('Rr3', 'rated-key-rr3000001', {onMetadataFetch: candKey => {const doc = read(candKey); doc.candidates.Rr3.tmdb = '1'; put(candKey, doc);}});
     assert.equal(r.meta.body.enriched, false, JSON.stringify(r.meta.body));
     assert.notEqual(read(r.candKey).candidates.Rr3.enrichment, 'metadata');
+    {const stored = read(r.admissionsKey).films.tmdb_900040; assert.equal(stored.synopsis, undefined, 'no metadata is written for a refused claim'); assert.equal(stored.metadataAt, undefined);}
   }
   // With no shortlink tag the absent-tag path refuses an inconsistent candidate/admission pair, not only a changed archive.
   {
@@ -699,6 +702,32 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
     assert.equal(r.meta.body.enriched, false, JSON.stringify(r.meta.body));
     assert.equal(r.meta.body.stop && r.meta.body.stop.reason, 'admission_unproven', JSON.stringify(r.meta.body));
     assert.equal(read(r.admissionsKey).films.tmdb_900040.synopsis, undefined);
+  }
+  // metadataAt is already present and the candidate path disagrees with the admission: no localization and no 'done'.
+  {
+    const r = await raced('Rr6', 'rated-key-rr6000001', {});
+    assert.equal(r.meta.body.enriched, true, JSON.stringify(r.meta.body));
+    assert.ok(read(r.admissionsKey).films.tmdb_900040.metadataAt, 'metadata was persisted first');
+    const doc = read(r.candKey);
+    doc.candidates.Rr6.filmPath = '/film/another-cut/';
+    put(r.candKey, doc);
+    const callsBefore = net.calls.length;
+    const loc = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: r.sha, accepted: true}});
+    assert.equal(loc.body.enriched, false, JSON.stringify(loc.body));
+    assert.equal(loc.body.reason, 'claim_changed', JSON.stringify(loc.body));
+    assert.equal(read(r.admissionsKey).films.tmdb_900040.titleRu, undefined, 'no localization for a disagreeing candidate');
+    assert.ok(net.calls.slice(callsBefore).every(url => !/wikidata/.test(String(url))), 'the lookup is not even started for a disagreeing candidate');
+    assert.notEqual(read(r.candKey).candidates.Rr6.enrichment, 'done');
+  }
+  // The candidate changes while the localization lookup runs: nothing is written and no 'done' is recorded.
+  {
+    const r = await raced('Rr7', 'rated-key-rr7000001', {onLocalize: candKey => {const doc = read(candKey); doc.candidates.Rr7.filmPath = '/film/another-cut/'; put(candKey, doc);}});
+    assert.equal(r.meta.body.enriched, true, JSON.stringify(r.meta.body));
+    const loc = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: r.sha, accepted: true}});
+    assert.equal(loc.body.enriched, false, JSON.stringify(loc.body));
+    assert.equal(loc.body.reason, 'claim_changed', JSON.stringify(loc.body));
+    assert.equal(read(r.admissionsKey).films.tmdb_900040.titleRu, undefined);
+    assert.notEqual(read(r.candKey).candidates.Rr7.enrichment, 'done');
   }
   // The admission changes owner during localization: nothing of the other owner is written and no 'done' is recorded.
   {
