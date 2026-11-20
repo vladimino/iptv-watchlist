@@ -43,7 +43,7 @@ The lease is **renewed by every start, heartbeat, hold and submit**, so the TTL 
 
 **Update, 20 November 2026:** the owner-authorized step 1 installed exactly this text on all four Tasks while the Worker TTL stayed 15; see the [install record](air-544-four-task-heartbeat-install-2026-11-20.md). The text below is the planning-time description, kept as history.
 
-The installed prompt (45 938 characters, 69 379 UTF-8 bytes, SHA-256 `ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520`) has one heartbeat sentence, in step 3. The candidate replaces exactly one phrase and nothing else:
+At planning time on 19 November 2026 the installed prompt (45 938 characters, 69 379 UTF-8 bytes, SHA-256 `ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520`) has one heartbeat sentence, in step 3. The candidate replaces exactly one phrase and nothing else:
 
 ```diff
 -Держи lease живым: prediction_heartbeat({runId}) перед долгой генерацией и не реже, чем раз в 10 минут (TTL 15 минут);
@@ -57,7 +57,7 @@ Text: **45 937 characters, 69 378 UTF-8 bytes, SHA-256 `59208a479175bcb829ca979f
 | Step | Operation | Readback | Reversal |
 | --- | --- | --- | --- |
 | 0 | Review this pull request; **do not merge** (merge deploys TTL 12) | CI green on the exact head | Close the PR |
-| 1 (done 20 Nov 2026 under a separate owner GO; [record](air-544-four-task-heartbeat-install-2026-11-20.md)) | Edit the four Tasks: heartbeat wording only, TTL still 15 | Four independent readbacks equal the candidate hash; then a prompt-install delivery updates the snapshot and `scheduled-tasks.md`; observe natural runs for a period the owner sets | Restore the frozen installed text (snapshot at the base commit) |
+| 1 (done 20 Nov 2026 under a separate owner GO; [record](air-544-four-task-heartbeat-install-2026-11-20.md)) | Edit the four Tasks: heartbeat wording only, TTL still 15 | Four independent readbacks equal the `59208a47…` hash; then a prompt-install delivery updates the snapshot and `scheduled-tasks.md`; observe natural runs for a period the owner sets | Restore the frozen installed text (snapshot at the base commit) |
 | 2 | Merge and deploy the Worker with TTL 12 (Controller; `Test and build`, shards 2 and 3, `Deploy to Cloudflare`) | Read-only `enrichment_runner` shows `leaseTtlMs` 720000 and the new instruction; no start is run for the check | Revert PR and deploy (TTL back to 15; the faster heartbeat is harmless at 15) |
 | 3 | Move the four schedules to `:00/:12/:24/:36` one at a time in the order `:15`→`:12`, `:30`→`:24`, `:45`→`:36`, then create the fifth at `:48` with the step-1 text | Registry readback after each edit: schedule, enabled state, prompt hash | Disable the fifth; restore `:15/:30/:45`; revert TTL by step 2's reversal if the owner decides |
 
