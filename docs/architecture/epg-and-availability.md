@@ -40,7 +40,7 @@ flowchart TD
     batch["One D1 batch per save:<br/>1 authority fence (d1, open, generation)<br/>2 step fence (mode revision, live lease)<br/>3 run compare-and-swap (run_id, revision)<br/>4 body and changed film rows"]
     run[("Proposed D1 checkpoint:<br/>run row, body chunks, film rows")]
     ingest[("Proposed D1 ingest status")]
-    done["queue attempted, then one batch:<br/>stage complete, certificate, pause clear"]
+    done["completeRun, the only completion route:<br/>queue attempted, then one batch:<br/>stage complete, film rows removed,<br/>certificate, pause clear"]
     cert[("published_epg_authority:<br/>finalized_run_id")]
     flush["Event flushes after the batch"]
     r2["R2 sync.json and watchlist-ingest.json:<br/>authority today (marker r2),<br/>frozen image after activation"]
@@ -53,7 +53,7 @@ flowchart TD
     class batch,run,ingest,done proposed
 ```
 
-A save is refused, and writes nothing, when the authority generation, the step lease, the run revision or the stage order does not match. Completion, certificate and pause clear are one batch only in `d1` mode; the certificate update is conditional so a non-matching certificate still lets the run complete and the hourly repair certifies it. In `r2` mode the order stays: complete in R2, certificate, then flushes.
+A save is refused, and writes nothing, when the authority generation, the step lease, the run revision or the stage order does not match; a run can reach `complete` only through the one completion operation, which both the seal route and the single-call route use, so the order queue attempted, then complete, then certificate holds on every route. Completion, certificate and pause clear are one batch only in `d1` mode; the certificate update is conditional so a non-matching certificate still lets the run complete and the hourly repair certifies it. In `r2` mode the order stays: complete in R2, certificate, then flushes.
 
 Prediction scoring does not read this publication as permission to run. Hot and cold order use a completed snapshot of these shows, or last-known completed priority for 36 hours, and an unsealed generation does not block the prediction queue ([ADR 0154](../adr/0154-prediction-eligibility-independent-of-epg.md)).
 
