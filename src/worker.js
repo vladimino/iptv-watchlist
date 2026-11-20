@@ -949,34 +949,86 @@ async function presentRatingsEvents(env,events){
  }catch{}
 }
 async function eventPage(env,cursor){const page=await env.BUCKET.list({prefix:'events/items/',limit:20,...(cursor?{cursor}:{})});const events=await Promise.all(page.objects.map(o=>loadJSON(env,o.key)));for(const event of events.filter(Boolean)){if(event.film)event.film=eventFilm(event.film);if(Array.isArray(event.added))event.added=event.added.map(f=>eventFilm(f));if(Array.isArray(event.removed))event.removed=event.removed.map(f=>eventRemovedFilm(f));}await presentRatingsEvents(env,events);return {events:events.filter(Boolean),cursor:page.truncated?page.cursor:null};}
-async function bootstrapEvents(env){if(await loadJSON(env,'events/bootstrap.json'))return;const report=await loadJSON(env,'programme.json'),list=await loadJSON(env,'watchlist.json');if(report)await writeEvent(env,epgEvent(report,'baseline-epg'));if(list)await writeEvent(env,watchlistEvent(null,list,null,report,'baseline-watchlist'));let cursor;do{const page=await env.BUCKET.list({prefix:'started/',...(cursor?{cursor}:{})});for(const o of page.objects){const mark=await loadJSON(env,o.key);if(mark?.lastEvent){await writeEvent(env,mark.lastEvent);continue;}if(mark&&mark.started!==false&&mark.startedAt){const film=report?.films.find(f=>String(f.id)===mark.id)||list?.films.find(f=>String(f.id)===mark.id);if(film)await writeEvent(env,{id:'baseline-started-'+mark.id,type:'started',at:mark.startedAt,film:eventFilm(film,eventTitles(report))});}}cursor=page.truncated?page.cursor:undefined;}while(cursor);await saveJSON(env,'events/bootstrap.json',{at:new Date().toISOString()});}
-async function startedFilms(env){let cursor;const ids=[];do{const page=await env.BUCKET.list({prefix:'started/',include:['customMetadata'],...(cursor?{cursor}:{})});for(const object of page.objects){const match=object.key.match(/^started\/([a-zA-Z0-9_-]+)\.json$/);if(match&&object.customMetadata?.started!=='false')ids.push(match[1]);}cursor=page.truncated?page.cursor:undefined;}while(cursor);return ids;}
+async function bootstrapEvents(env){if(await loadJSON(env,'events/bootstrap.json'))return;
+ // Started marks come from the one authority of the request; an unreadable D1 marker or row set stops the bootstrap before any event is written.
+ const authority=await startedAuthority(env);let marks=[];
+ if(authority.state==='closed')throw new StartedStorageError();
+ if(authority.state==='d1'){const read=await StartedD1.listMarks(env);if(!read.ok)throw new StartedStorageError();marks=read.marks;}
+ const report=await loadJSON(env,'programme.json'),list=await loadJSON(env,'watchlist.json');if(report)await writeEvent(env,epgEvent(report,'baseline-epg'));if(list)await writeEvent(env,watchlistEvent(null,list,null,report,'baseline-watchlist'));const bootstrapMark=async mark=>{if(mark?.lastEvent){await writeEvent(env,mark.lastEvent);return;}if(mark&&mark.started!==false&&mark.startedAt){const film=report?.films.find(f=>String(f.id)===mark.id)||list?.films.find(f=>String(f.id)===mark.id);if(film)await writeEvent(env,{id:'baseline-started-'+mark.id,type:'started',at:mark.startedAt,film:eventFilm(film,eventTitles(report))});}};
+ if(authority.state==='d1'){for(const mark of marks)await bootstrapMark(mark);}
+ else{let cursor;do{const page=await env.BUCKET.list({prefix:'started/',...(cursor?{cursor}:{})});for(const o of page.objects)await bootstrapMark(await loadJSON(env,o.key));cursor=page.truncated?page.cursor:undefined;}while(cursor);}
+ await saveJSON(env,'events/bootstrap.json',{at:new Date().toISOString()});}
+// AIR-549 stage 2: one store per request, chosen by the D1 marker of Started marks. `legacy` (no binding, or schema 29 absent) and `r2` serve the R2 `started/` objects as before;
+// `d1` serves the rows and never touches R2 `started/`; a marker that cannot be read answers 503 and never falls back to R2. A held marker refuses every mark write.
+async function startedAuthority(env){
+ if(typeof StartedD1==='undefined')return {state:'legacy'};
+ return StartedD1.readAuthority(env);
+}
+const STARTED_UNAVAILABLE='Started marks storage unavailable',STARTED_READ_ONLY='Started marks are temporarily read-only';
+class StartedStorageError extends Error{constructor(){super(STARTED_UNAVAILABLE);this.name='StartedStorageError';}}
+async function startedFilms(env){
+ const authority=await startedAuthority(env);
+ if(authority.state==='closed')throw new StartedStorageError();
+ if(authority.state==='d1'){const read=await StartedD1.listStartedIds(env);if(!read.ok)throw new StartedStorageError();return read.ids;}
+ return r2StartedFilms(env);
+}
+async function r2StartedFilms(env){let cursor;const ids=[];do{const page=await env.BUCKET.list({prefix:'started/',include:['customMetadata'],...(cursor?{cursor}:{})});for(const object of page.objects){const match=object.key.match(/^started\/([a-zA-Z0-9_-]+)\.json$/);if(match&&object.customMetadata?.started!=='false')ids.push(match[1]);}cursor=page.truncated?page.cursor:undefined;}while(cursor);return ids;}
 async function setStarted(env,body){
  if(typeof body.id!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(body.id)||typeof body.started!=='boolean')return json({error:'Invalid film or state'},400);
- const key='started/'+body.id+'.json',previous=await loadJSON(env,key),wasStarted=!!previous&&previous.started!==false;
+ // AIR-549 stage 2: the store is chosen by the Started marker of this request. A marker that cannot be read, or a held one, refuses the write before any read of a Film or any write; there is no R2 fallback after `d1`.
+ const authority=await startedAuthority(env);
+ if(authority.state==='closed')return json({error:STARTED_UNAVAILABLE},503);
+ if(authority.writes==='held')return json({error:STARTED_READ_ONLY},503);
+ const d1=authority.state==='d1',key='started/'+body.id+'.json';
+ const readPrevious=async()=>d1?StartedD1.readMark(env,body.id):{ok:true,mark:await loadJSON(env,key)};
+ const first=await readPrevious();
+ if(!first.ok)return json({error:STARTED_UNAVAILABLE},503);
+ let previous=first.mark;
  // AIR-516: the Film is the canonical D1 Film (verified identity bridge, title, year, trusted TMDB claim), never the frozen metadata.json or the programme: a Film outside the EPG and the
- // watchlist is a Film. There is no R2 fallback. The D1 read comes FIRST, for a replay too: a held, not-open or unreadable Film/Person marker answers 503 before any R2 write,
+ // watchlist is a Film. There is no R2 fallback. The D1 read comes FIRST, for a replay too: a held, not-open or unreadable Film/Person marker answers 503 before any mark write,
  // whether the request is a new mark, an `unstarted` or the idempotent re-delivery of the stored event.
  let lookup;
  try{
   if(typeof CanonicalCatalogReader==='undefined'){const error=new Error('canonical_read_not_authoritative');error.code='canonical_read_not_authoritative';throw error;}
   lookup=await CanonicalCatalogReader.catalogStartedFilm(env,body.id);
  }catch(error){const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
- // Same state: the stored last event is delivered again under its own key; the mark is not rewritten and the identity is not judged.
- if(wasStarted===body.started){if(previous?.lastEvent)await writeEvent(env,previous.lastEvent);return json({id:body.id,started:body.started});}
- // Only a new mark needs a resolvable identity. Removing an existing mark (`unstarted`) never creates or switches an identity.
- if(body.started&&lookup.state==='conflict')return json({error:'Conflicting film identity'},409);
- if(body.started&&lookup.state==='retired')return json({error:'Film retired'},410);
- if(body.started&&lookup.state!=='found')return json({error:'Unknown film'},404);
- const found=lookup.state==='found'?lookup.film:null,last=previous?.lastEvent?.film;
- // `unstarted` keeps the film of the mark's own last event when the identity no longer resolves, or now resolves to another verified TMDB movie than the one the mark was made for
- // (an identity reassigned since): cancelling a mark never records it for a different movie. Nothing is matched by title or year. A new `started` takes only D1 values; a missing title or
- // year is the neutral placeholder or null, never a value of an earlier R2 event.
- const reassigned=!body.started&&found&&last&&last.id===body.id&&last.tmdb!=null&&String(last.tmdb)!==String(found.tmdb);
- const named=found&&!reassigned?{id:body.id,title:found.title||'Фильм',year:found.year,...(found.tmdb?{tmdb:found.tmdb}:{})}:null;
- const at=new Date().toISOString(),event={id:crypto.randomUUID(),type:body.started?'started':'unstarted',at,film:named?eventFilm(named):last||{id:body.id,title:'Фильм',year:null}};
- await env.BUCKET.put(key,JSON.stringify({id:body.id,started:body.started,startedAt:body.started?at:null,lastEvent:event}),{httpMetadata:{contentType:'application/json'},customMetadata:{started:String(body.started)}});
- await writeEvent(env,event);return json({id:body.id,started:body.started});
+ for(let attempt=0;;attempt++){
+  const wasStarted=!!previous&&previous.started!==false;
+  // Same state: the stored last event is delivered again under its own key; the mark is not rewritten and the identity is not judged.
+  if(wasStarted===body.started){if(previous?.lastEvent)await writeEvent(env,previous.lastEvent);return json({id:body.id,started:body.started});}
+  // Only a new mark needs a resolvable identity. Removing an existing mark (`unstarted`) never creates or switches an identity.
+  if(body.started&&lookup.state==='conflict')return json({error:'Conflicting film identity'},409);
+  if(body.started&&lookup.state==='retired')return json({error:'Film retired'},410);
+  if(body.started&&lookup.state!=='found')return json({error:'Unknown film'},404);
+  const found=lookup.state==='found'?lookup.film:null,last=previous?.lastEvent?.film;
+  // `unstarted` keeps the film of the mark's own last event when the identity no longer resolves, or now resolves to another verified TMDB movie than the one the mark was made for
+  // (an identity reassigned since): cancelling a mark never records it for a different movie. Nothing is matched by title or year. A new `started` takes only D1 values; a missing title or
+  // year is the neutral placeholder or null, never a value of an earlier R2 event.
+  const reassigned=!body.started&&found&&last&&last.id===body.id&&last.tmdb!=null&&String(last.tmdb)!==String(found.tmdb);
+  const named=found&&!reassigned?{id:body.id,title:found.title||'Фильм',year:found.year,...(found.tmdb?{tmdb:found.tmdb}:{})}:null;
+  const at=new Date().toISOString(),event={id:crypto.randomUUID(),type:body.started?'started':'unstarted',at,film:named?eventFilm(named):last||{id:body.id,title:'Фильм',year:null}};
+  if(!d1){
+   // An R2 object write has no compare-and-swap: the marker is read once more right before it, so a request admitted before an import hold or the activation answers 503 instead of writing.
+   const again=await startedAuthority(env);
+   if(again.state==='closed'||again.state==='d1')return json({error:STARTED_UNAVAILABLE},503);
+   if(again.writes==='held')return json({error:STARTED_READ_ONLY},503);
+   await env.BUCKET.put(key,JSON.stringify({id:body.id,started:body.started,startedAt:body.started?at:null,lastEvent:event}),{httpMetadata:{contentType:'application/json'},customMetadata:{started:String(body.started)}});
+   await writeEvent(env,event);return json({id:body.id,started:body.started});
+  }
+  // A transition must never overwrite an event that may not have reached the journal: the stored event is delivered first (an idempotent write under its own key). If that write fails
+  // the request fails and nothing is committed, so the earlier transition stays recoverable and is never replaced unwritten.
+  if(previous?.lastEvent)await writeEvent(env,previous.lastEvent);
+  const committed=await StartedD1.commitMark(env,{expectedRev:previous?previous.rev:0,mark:{id:body.id,started:body.started,startedAt:body.started?at:null,lastEvent:event}});
+  // The event is written after the mark commit, as before; a request that dies in between is repaired by the same-state repeat above, which delivers the stored event under its own id.
+  if(committed.ok){await writeEvent(env,event);return json({id:body.id,started:body.started});}
+  if(committed.reason==='conflict'&&attempt<2){
+   // Another request committed this id first: decide again on the state it left. A same-state winner turns this request into the idempotent repeat of the winner's event.
+   const fresh=await StartedD1.readMark(env,body.id);
+   if(!fresh.ok)return json({error:STARTED_UNAVAILABLE},503);
+   previous=fresh.mark;continue;
+  }
+  return json({error:committed.reason==='writes_held'?STARTED_READ_ONLY:STARTED_UNAVAILABLE},503);
+ }
 }
 async function beginSync(env){
  const current=await loadJSON(env,'sync.json');
@@ -2361,8 +2413,8 @@ async fetch(request,env,execution){
   if(url.pathname==='/api/letterboxd/ratings/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await RatingsOrchestration.handle(env,body);return json(reply.body,reply.status);}
   if(['/api/letterboxd/ratings/start','/api/letterboxd/ratings/step'].includes(url.pathname)&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdRatings.handle(env,url.pathname.slice('/api/letterboxd/ratings/'.length),body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/events'&&request.method==='GET'){const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
-  if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
-  if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
+  if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){try{await bootstrapEvents(env);}catch(error){if(error instanceof StartedStorageError)return json({error:STARTED_UNAVAILABLE},503);throw error;}return json({ok:true});}
+  if(url.pathname==='/api/started'&&request.method==='GET'){try{return json({ids:await startedFilms(env)});}catch(error){if(error instanceof StartedStorageError)return json({error:STARTED_UNAVAILABLE},503);throw error;}}
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
   if(url.pathname==='/api/programme'&&request.method==='GET'){
    try{
