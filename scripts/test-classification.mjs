@@ -1480,6 +1480,12 @@ export const FILES={
  "view-index-seed-membership.mjs": {
   "suite": "core"
  },
+ "view-index-d1-export.mjs": {
+  "suite": "core"
+ },
+ "view-index-d1-source.mjs": {
+  "suite": "core"
+ },
  "view-index-membership-parity.mjs": {
   "suite": "core"
  },

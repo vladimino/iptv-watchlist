@@ -239,4 +239,28 @@ r=await call('/api/admin/health');assert.equal(r.body.catalogPosters.state,'lost
 seed();records.set(POSTER_CP,{schemaVersion:1,status:'pending'});
 r=await call('/api/admin/health');assert.equal(r.body.catalogPosters.state,'unknown');assert.equal(r.body.catalogPosters.detail,'checkpoint_invalid','a corrupt checkpoint is unknown/degraded and is not repaired');
 assert.deepEqual(puts,[]);
+// ADR 0183: with the D1 read source selected the raw index object is not read; the index body is the D1-derived one (stubbed with the same entries) and the displayed
+// version is the D1 token. The count of entries and the per-film dimensions come from that body. Any other selector value reads the raw object.
+{
+ const realDerived=context.derivedViewIndex,realVersion=context.viewIndexD1Version;
+ let derivedCalls=0;
+ context.derivedViewIndex=async()=>{derivedCalls++;return {p00:current(),p01:current({tasteProfileHash:'old'}),q2:{actualRating:3}};};
+ context.viewIndexD1Version=async()=>'d1:p9.q9.r9';
+ try{
+  env.VIEW_INDEX_SOURCE='d1';
+  seed();records.delete(VIEW_INDEX);
+  r=await call('/api/admin/health');
+  assert.equal(r.status,200,JSON.stringify(r.body).slice(0,300));
+  assert.equal(gets.includes(VIEW_INDEX),false,'the raw index is not read under d1');
+  assert.ok(derivedCalls>=1);
+  assert.equal(r.body.sources.viewIndex.present,true);assert.equal(r.body.sources.viewIndex.entries,3,'entries counted on the derived body');
+  assert.equal(r.body.sources.viewIndex.version,'d1:p9.q9.r9','the displayed version is the D1 token');
+  for(const value of ['D1',' d1','on','r2','']){
+   env.VIEW_INDEX_SOURCE=value;seed();derivedCalls=0;
+   r=await call('/api/admin/health');
+   assert.equal(r.status,200);assert.ok(gets.includes(VIEW_INDEX),JSON.stringify(value)+' keeps the raw object');assert.equal(derivedCalls,0);
+  }
+ }finally{context.derivedViewIndex=realDerived;context.viewIndexD1Version=realVersion;delete env.VIEW_INDEX_SOURCE;resetCache();}
+}
+
 console.log('Admin health API: bounded reads, grouped issues, unknown sources, generations, clocks, pin and failures passed');

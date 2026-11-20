@@ -19,14 +19,14 @@ import {buildIndex,matchExport,normTitle} from '../src/letterboxd-match.js';
 import {DEFAULT_MAX_REQUESTS,DEFAULT_RPS,MAX_RPS,runSearches,searchUrl} from '../src/letterboxd-tmdb-search.js';
 import {ReconcileError,assertOutsideRepository,exportDigest,loadCatalogDir} from './letterboxd-reconcile.mjs';
 
-export async function unmatchedFilms({exportDir,catalogDir}){
+export async function unmatchedFilms({exportDir,catalogDir,viewIndexFile=null}){
  const texts={};
  for(const [kind,name] of Object.entries(EXPORT_FILES)){try{texts[kind]=await readFile(path.join(exportDir,name),'utf8');}catch(error){if(error.code!=='ENOENT')throw new ReconcileError('Export file '+name+' could not be read',2);texts[kind]=null;}}
  if(texts.watched===null)throw new ReconcileError('Export directory has no '+EXPORT_FILES.watched,2);
- const parsed=parseExport(texts),loaded=await loadCatalogDir(catalogDir),index=buildIndex(loaded.objects);
+ const parsed=parseExport(texts),loaded=await loadCatalogDir(catalogDir,{viewIndexFile}),index=buildIndex(loaded.objects);
  const matches=matchExport(parsed.films,index,{inferred:true}),byCode=new Map(parsed.films.map(film=>[film.code,film]));
  const films=matches.filter(match=>match.status==='unmatched').map(match=>byCode.get(match.code)).sort((a,b)=>a.code<b.code?-1:1);
- return {films,matches,index,byCode,total:parsed.films.length,exportSha256:exportDigest(texts),status:Object.fromEntries([...new Set(matches.map(match=>match.status))].map(status=>[status,matches.filter(match=>match.status===status).length])),provenance:loaded.baselineIdentity};
+ return {films,matches,index,byCode,total:parsed.films.length,exportSha256:exportDigest(texts),status:Object.fromEntries([...new Set(matches.map(match=>match.status))].map(status=>[status,matches.filter(match=>match.status===status).length])),provenance:loaded.baselineIdentity,viewIndex:loaded.baselineIdentity?.viewIndex??null};
 }
 
 const sha256=text=>createHash('sha256').update(text).digest('hex');
@@ -52,14 +52,14 @@ const bump=(map,key)=>{map[key]=(map[key]||0)+1;};
 //  - unmatched with no attempt, ever: stays pending. Nothing is searched here.
 // `rebase.original` is the root: the binding, provenance, request count and file digest of the first search, never replaced; `rebase.steps`
 // lists every rebase (when, from which binding, the digest of the file it started from).
-export async function rebaseResults({exportDir,catalogDir,previous,outputDir,now=()=>new Date()}){
+export async function rebaseResults({exportDir,catalogDir,previous,outputDir,viewIndexFile=null,now=()=>new Date()}){
  const previousText=await readFile(previous,'utf8');let doc;try{doc=JSON.parse(previousText);}catch{throw new ReconcileError('The previous tmdb-results.json is not readable JSON',2);}
  if(doc?.schemaVersion!==1||!doc.results||typeof doc.results!=='object'||Array.isArray(doc.results)||!doc.binding||!Number.isInteger(doc.requests)||doc.requests<0)throw new ReconcileError('The previous tmdb-results.json has an unknown schema',2);
  const priorSuperseded=doc.rebase?.superseded;
  if(doc.rebase!==undefined&&(!doc.rebase||typeof doc.rebase!=='object'||!doc.rebase.original||!Array.isArray(doc.rebase.steps)||!priorSuperseded||typeof priorSuperseded!=='object'||Array.isArray(priorSuperseded)))throw new ReconcileError('The previous tmdb-results.json has an unknown rebase block',2);
  const target=path.join(outputDir,'tmdb-results.json');
  if(await access(target).then(()=>true,()=>false))throw new ReconcileError('--output already holds a tmdb-results.json; rebase into a new empty directory',2);
- const {matches,index,byCode,total,exportSha256,provenance}=await unmatchedFilms({exportDir,catalogDir});
+ const {matches,index,byCode,total,exportSha256,provenance,viewIndex}=await unmatchedFilms({exportDir,catalogDir,viewIndexFile});
  if(doc.binding.exportSha256!==exportSha256)throw new ReconcileError('The previous results were searched for another export: a rebase needs the same export digest',3);
  if(doc.binding.catalogReadAt===provenance.readAt&&doc.binding.catalogFilms===provenance.catalogFilms)throw new ReconcileError('The catalog read is the one the results are already bound to: nothing to rebase',2);
  const statusOf=new Map(matches.map(match=>[match.code,match]));
@@ -91,7 +91,7 @@ export async function rebaseResults({exportDir,catalogDir,previous,outputDir,now
  if(Object.keys(stop).length)throw Object.assign(new ReconcileError('The rebase stops, nothing was written: '+JSON.stringify(stop),3),{report});
  report.pendingWithoutAttempt=matches.filter(match=>match.status==='unmatched'&&!root.has(match.code)).length;
  const rootOriginal=doc.rebase?doc.rebase.original:{binding:doc.binding,provenance:doc.provenance??null,requests:doc.requests,resultsSha256:sha256(previousText)};
- const out={schemaVersion:1,binding:{exportSha256,catalogReadAt:provenance.readAt,catalogFilms:provenance.catalogFilms},requests:doc.requests,
+ const out={schemaVersion:1,binding:{exportSha256,catalogReadAt:provenance.readAt,catalogFilms:provenance.catalogFilms,...(viewIndex?{viewIndexSha256:viewIndex.sha256}:{})},requests:doc.requests,
   provenance:{searchedAt:rootOriginal.provenance?.searchedAt??doc.provenance?.searchedAt??null,catalog:rootOriginal.provenance?.catalog??doc.provenance?.catalog??null},
   rebase:{rebasedAt:now().toISOString(),original:rootOriginal,steps:[...(doc.rebase?.steps||[]),{rebasedAt:now().toISOString(),from:doc.binding,fromResultsSha256:sha256(previousText),to:{catalogReadAt:provenance.readAt,catalogFilms:provenance.catalogFilms}}],counts:{kept:report.kept,superseded:report.superseded,movedToReview:report.movedToReview,restored:report.restored},superseded},
   results};
@@ -115,30 +115,33 @@ export async function main(argv=process.argv.slice(2),{env=process.env,fetchImpl
  const rebasing=argv[0]==='rebase';if(rebasing)argv=argv.slice(1);
  for(let i=0;i<argv.length;i++){
   if(argv[i]==='--dry-run'){args.dry=true;continue;}
-  const name={'--export':'exportDir','--catalog-dir':'catalogDir','--output':'outputDir','--max-requests':'maxRequests','--rps':'rps','--auth':'auth','--previous':'previous'}[argv[i]];
-  if(!name||i+1>=argv.length)throw new ReconcileError('Usage: letterboxd-tmdb-search.mjs --export <abs> --catalog-dir <abs> --output <abs> [--max-requests n] [--rps n] [--auth token|proxy] [--dry-run]',2);
+  const name={'--export':'exportDir','--catalog-dir':'catalogDir','--output':'outputDir','--max-requests':'maxRequests','--rps':'rps','--auth':'auth','--previous':'previous','--view-index-d1':'viewIndexFile'}[argv[i]];
+  if(!name||i+1>=argv.length)throw new ReconcileError('Usage: letterboxd-tmdb-search.mjs --export <abs> --catalog-dir <abs> --output <abs> [--max-requests n] [--rps n] [--auth token|proxy] [--view-index-d1 <abs export file>] [--dry-run]',2);
   args[name]=argv[++i];
  }
  if(!args.exportDir||!args.catalogDir||!args.outputDir)throw new ReconcileError('--export, --catalog-dir and --output are required',2);
  if(rebasing){
   if(!args.previous||args.dry||args.maxRequests!==undefined||args.rps!==undefined||args.auth!==undefined)throw new ReconcileError('Usage: letterboxd-tmdb-search.mjs rebase --export <abs> --catalog-dir <abs> --previous <abs tmdb-results.json> --output <abs new dir>',2);
   const [exportDir,catalogDir,previous,outputDir]=[await assertOutsideRepository(args.exportDir,'--export'),await assertOutsideRepository(args.catalogDir,'--catalog-dir'),await assertOutsideRepository(args.previous,'--previous'),await assertOutsideRepository(args.outputDir,'--output')];
-  return rebaseResults({exportDir,catalogDir,previous,outputDir,...(now?{now:()=>new Date(now())}:{})});
+  const viewIndexFile=args.viewIndexFile?await assertOutsideRepository(args.viewIndexFile,'--view-index-d1'):null;
+  return rebaseResults({exportDir,catalogDir,previous,outputDir,viewIndexFile,...(now?{now:()=>new Date(now())}:{})});
  }
  if(args.previous!==undefined)throw new ReconcileError('--previous belongs to the rebase command',2);
  const maxRequests=args.maxRequests===undefined?DEFAULT_MAX_REQUESTS:Number(args.maxRequests),rps=args.rps===undefined?DEFAULT_RPS:Number(args.rps);
  if(!Number.isInteger(maxRequests)||maxRequests<1||maxRequests>DEFAULT_MAX_REQUESTS)throw new ReconcileError('--max-requests must be an integer 1..'+DEFAULT_MAX_REQUESTS,2);
  if(!(rps>0)||rps>MAX_RPS)throw new ReconcileError('--rps must be above 0 and at most '+MAX_RPS,2);
  const exportDir=await assertOutsideRepository(args.exportDir,'--export'),catalogDir=await assertOutsideRepository(args.catalogDir,'--catalog-dir'),outputDir=await assertOutsideRepository(args.outputDir,'--output');
- const {films,total,exportSha256,status,provenance}=await unmatchedFilms({exportDir,catalogDir});
- const binding={exportSha256,catalogReadAt:provenance.readAt,catalogFilms:provenance.catalogFilms};
+ const viewIndexFile=args.viewIndexFile?await assertOutsideRepository(args.viewIndexFile,'--view-index-d1'):null;
+ const {films,total,exportSha256,status,provenance,viewIndex}=await unmatchedFilms({exportDir,catalogDir,viewIndexFile});
+ // A results file made with a D1-derived view index is bound to that input's digest, so it is never reused with another view index.
+ const binding={exportSha256,catalogReadAt:provenance.readAt,catalogFilms:provenance.catalogFilms,...(viewIndex?{viewIndexSha256:viewIndex.sha256}:{})};
  const file=path.join(outputDir,'tmdb-results.json');
  // The results file is bound to the export and the catalog read it was made for, and it keeps the cumulative request count: a resume asks
  // only the films with no recorded attempt and can never spend more than the total budget. A file for another input is refused, not reused.
  let state={results:{},requests:0};
  let prior=null;try{prior=JSON.parse(await readFile(file,'utf8'));}catch(error){if(error.code!=='ENOENT')throw new ReconcileError('The existing tmdb-results.json is not readable JSON',2);}
  if(prior){
-  if(prior.schemaVersion!==1||!prior.results||typeof prior.results!=='object'||!prior.binding||prior.binding.exportSha256!==binding.exportSha256||prior.binding.catalogReadAt!==binding.catalogReadAt||prior.binding.catalogFilms!==binding.catalogFilms)throw new ReconcileError('The existing tmdb-results.json belongs to another export or catalog read; use a new --output directory',2);
+  if(prior.schemaVersion!==1||!prior.results||typeof prior.results!=='object'||!prior.binding||prior.binding.exportSha256!==binding.exportSha256||prior.binding.catalogReadAt!==binding.catalogReadAt||prior.binding.catalogFilms!==binding.catalogFilms||prior.binding.viewIndexSha256!==binding.viewIndexSha256)throw new ReconcileError('The existing tmdb-results.json belongs to another export or catalog read; use a new --output directory',2);
   state={results:prior.results,requests:Number.isInteger(prior.requests)&&prior.requests>=0?prior.requests:0};
  }
  // A code a rebase moved to `rebase.superseded` was attempted once already: it is never asked again, whatever the catalog says now.

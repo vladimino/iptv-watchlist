@@ -9,6 +9,27 @@ function recordLifecycle(run,path,mode,count){if(!run||(mode!=='on'&&mode!=='sha
 // `options.item`, for a discovery ledger stored in R2, parses the `items` array one element at a time and keeps what
 // `item` returns for each (AIR-342): the document is never held whole as text and tree. Any other key, a D1-routed
 // read, or an object without a readable body is parsed as before.
+// ADR 0183: the temporary read selector of the view index. Exactly 'd1' reads the key set and the fields from D1 (prediction_pointer, prediction_fingerprint,
+// ratings_view, then the compiled seed where the reader applies it) and never touches the raw R2 object; anything else, including an absent or malformed
+// binding, is the default `r2`. The raw writers are not behind this selector: they keep writing the raw object, so setting it back is the rollback.
+const VIEW_INDEX_KEY='enrichment/view-index.json';
+function viewIndexSource(env){return env?.VIEW_INDEX_SOURCE==='d1'?'d1':'r2';}
+// The guard other modules use: a module loaded without this one (a test context) simply stays on the raw object.
+function viewIndexIsD1(env){return viewIndexSource(env)==='d1';}
+function viewIndexRefusal(code){const error=new Error(code);error.code=code;return error;}
+// The D1 view index. `ratingsOnly` is the Letterboxd facts reader, which has only ever applied the ratings overlay. Fail closed: a prediction domain that
+// is not d1 or a ratings domain that is not d1 and open refuses with the existing domain codes (the routes answer 503); there is no raw fallback.
+async function derivedViewIndex(env,{ratingsOnly=false,moodFacet=canonicalMoodFacet}={}){
+ if(typeof RatingsD1==='undefined'||(!ratingsOnly&&typeof PredictionD1==='undefined'))throw viewIndexRefusal('view_index_d1_unavailable');
+ if(!(await RatingsD1.ratingsReady(env)))throw viewIndexRefusal('ratings_domain_not_authoritative');
+ const base=ratingsOnly?{}:await PredictionD1.derivedIndex(env,moodFacet);
+ return RatingsD1.overlayView(env,base);
+}
+// A version token for the D1 view index, in place of the raw object's ETag in pins and displayed versions: it changes whenever either domain commits.
+async function viewIndexD1Version(env){
+ const [prediction,ratings]=await Promise.all([PredictionD1.readPredictionAuthority(env?.DB??null,env),RatingsD1.readRatingsAuthority(env?.DB??null,env)]);
+ return 'd1:p'+prediction.generation+'.q'+prediction.queueGeneration+'.r'+ratings.generation;
+}
 const loadJSON=async(env,key,options=null)=>{
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
   const routed=await DiscoveryAuthority.routeRead(env,key,options);
@@ -48,6 +69,7 @@ const loadJSON=async(env,key,options=null)=>{
  }
  if(typeof PredictionD1!=='undefined'){const routed=await PredictionD1.routeRead(env,key,options);if(routed.handled)return routed.value;}
  if(typeof RatingsD1!=='undefined'){const routed=await RatingsD1.routeRead(env,key);if(routed.handled)return routed.value;}
+ if(key===VIEW_INDEX_KEY&&viewIndexSource(env)==='d1')return derivedViewIndex(env);
  const o=await env.BUCKET.get(key);let value=o?await storedJSON(o,key,options):null;
  if(key==='enrichment/view-index.json'&&typeof PredictionD1!=='undefined')value=await PredictionD1.overlayIndex(env,value,canonicalMoodFacet);
  if(key==='enrichment/view-index.json'&&typeof RatingsD1!=='undefined')value=await RatingsD1.overlayView(env,value);

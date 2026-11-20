@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {CsvError,parseCsv,parseExport,parseRating} from '../src/letterboxd-export.js';
 import {buildIndex,lidHypothesis,matchExport,normTitle} from '../src/letterboxd-match.js';
-import {reconcile} from '../scripts/letterboxd-reconcile.mjs';
+import {reconcile,loadSnapshot} from '../scripts/letterboxd-reconcile.mjs';
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const scratch=await mkdtemp(path.join(os.tmpdir(),'lbx-reconcile-'));
@@ -220,6 +220,22 @@ assert.ok(partialReport.notes.includes('snapshot_missing_key:metadata.json'));
 const badExport=path.join(scratch,'bad-export');await mkdir(badExport);await writeFile(path.join(badExport,'watched.csv'),'Date,Name,Year,Letterboxd URI\n2024-01-01,"open,2000,https://boxd.it/Q7t1\n');
 const runI=cli(['--export',badExport,'--output',path.join(scratch,'out-i')]);
 assert.equal(runI.status,1);assert.match(runI.stderr,/watched\.csv: Unterminated/);assert.equal(existsSync(path.join(scratch,'out-i')),false);
+
+// ADR 0183: a D1-derived view index replaces the raw object of the snapshot, entirely and bound by digest.
+{
+ const d1Index={Q7a1:{actualRating:4.5},tmdb_602:{actualRating:4},tmdb_701:{actualRating:3.5},stale_only_in_d1:{actualRating:2}};
+ const d1File=path.join(scratch,'view-index.d1.json');
+ await writeFile(d1File,JSON.stringify({schema:'view-index-d1-export@1',source:'d1_derived',readAt:'2026-11-20T15:00:00.000Z',database:{id:null},counts:{keys:Object.keys(d1Index).length},index:d1Index}));
+ const rawLoaded=await loadSnapshot(snapshotDir),d1Loaded=await loadSnapshot(snapshotDir,{viewIndexFile:d1File});
+ assert.deepEqual(Object.keys(rawLoaded.objects.viewIndex),['Q7a1','tmdb_602','tmdb_701'],'the raw object is the input without the option');
+ assert.deepEqual(d1Loaded.objects.viewIndex,d1Index,'the D1 export replaces it: nothing is merged');
+ assert.equal(d1Loaded.baselineIdentity.viewIndex.source,'d1_derived');assert.equal(d1Loaded.baselineIdentity.viewIndex.sha256,sha256(Buffer.from(await readFile(d1File,'utf8'))));
+ assert.equal(d1Loaded.status,rawLoaded.status,'the fenced snapshot identity is untouched');
+ const report=await reconcile({exportDir,snapshotDir,outputDir:path.join(scratch,'out-d1'),viewIndexFile:d1File});
+ assert.equal(report.matching.snapshot.baselineIdentity.viewIndex.source,'d1_derived','the option reaches the loader and the report records the input');
+ assert.equal(report.matching.snapshot.baselineIdentity.viewIndex.keys,4);
+ assert.equal(JSON.stringify(report).includes('stale_only_in_d1'),false,'no id of the input leaves in the aggregate report');
+}
 
 await rm(scratch,{recursive:true,force:true});
 console.log('Letterboxd reconciliation tests passed.');

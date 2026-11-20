@@ -664,4 +664,35 @@ assert.equal(r.status,200);assert.equal(r.body.coverage.epg_observation.state,'p
 setIndexMode('real');
 r=await call('/api/admin/limbo');assert.equal(r.body.coverage.observations.available,true,'the index is read again once the generation settles');
 
+// ADR 0183: with the D1 read source selected the raw index object is never read. The index body comes from the D1-derived reader (stubbed here with the same fixture),
+// the pin's index version is the D1 token instead of an ETag, and the snapshot cache follows the token. Any other selector value keeps the raw object.
+{
+ const realDerived=context.derivedViewIndex,realVersion=context.viewIndexD1Version;
+ let token='d1:p1.q1.r1',derivedCalls=0;
+ context.derivedViewIndex=async()=>{derivedCalls++;return indexOf();};
+ context.viewIndexD1Version=async()=>token;
+ try{
+  env.VIEW_INDEX_SOURCE='d1';
+  seed({index:false});
+  r=await call('/api/admin/limbo');
+  assert.equal(r.status,200,JSON.stringify(r.body));
+  assert.equal(gets.includes(INDEX),false,'the raw index is not read under d1');
+  assert.ok(derivedCalls>=1,'the D1 derived index was used');
+  assert.ok(r.body.coverage&&r.body.items.length>0,'the inventory is built from the derived body');
+  const pinD=r.body.pin,callsBefore=derivedCalls;
+  r=await call('/api/admin/limbo?pin='+encodeURIComponent(pinD));
+  assert.equal(r.status,200,'the pin is stable while the D1 token is unchanged');
+  assert.equal(derivedCalls,callsBefore,'the cached body is reused while the token is unchanged');
+  token='d1:p2.q1.r1';
+  r=await call('/api/admin/limbo?pin='+encodeURIComponent(pinD));
+  assert.equal(r.status,409);assert.equal(r.body.error,'stale_pin','a committed prediction or ratings write moves the pin');
+  assert.equal(gets.includes(INDEX),false,'still no raw read');
+  for(const value of ['D1',' d1','on','r2','']){
+   env.VIEW_INDEX_SOURCE=value;seed();derivedCalls=0;
+   r=await call('/api/admin/limbo');
+   assert.equal(r.status,200);assert.ok(gets.includes(INDEX),JSON.stringify(value)+' keeps the raw object');assert.equal(derivedCalls,0,JSON.stringify(value)+' does not derive');
+  }
+ }finally{context.derivedViewIndex=realDerived;context.viewIndexD1Version=realVersion;delete env.VIEW_INDEX_SOURCE;resetCache();}
+}
+
 console.log('Admin limbo API: reads, causes, filters, pages, stale pin, projection lag, changing generation, missing objects, warm isolate and the observation index passed');
