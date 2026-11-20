@@ -2,7 +2,7 @@
 
 [AIR-545](https://trello.com/c/dBh2iQye) · 19 November 2026 (UTC) · context: [AIR-461](https://trello.com/c/a9TdXgNM).
 
-**Method.** Official OpenAI documentation pages only, fetched on 19 November 2026 (Markdown twins of the pages). No OAuth client was created, no consent was given, no token, model or API call was made, nothing in Cloudflare or production was touched, no form was submitted, no Scheduled Task was created. This is a documentation reading, not a measurement. Page revisions are not dated by the vendor; the statements below are as read on the fetch date and the "preview" pages can change.
+**Method.** Official OpenAI documentation pages (fetched 19 November 2026) and official Cloudflare documentation (fetched 20 November 2026) (Markdown twins of the pages). No OAuth client was created, no consent was given, no token, model or API call was made, nothing in Cloudflare or production was touched, no form was submitted, no Scheduled Task was created. This is a documentation reading, not a measurement. Page revisions are not dated by the vendor; the statements below are as read on the fetch date and the "preview" pages can change.
 
 ## Verdict
 
@@ -11,7 +11,7 @@
 | 1 | Remote hosting approved for a personal Cloudflare Worker/Workflow | **UNKNOWN** | Official scope is "open-source and locally hosted apps"; a remotely hosted app needs OpenAI's interest-form approval. No official page says a personal Worker is allowed or forbidden. |
 | 2 | Model plus full-text web research | **UNKNOWN** | Responses API with `store:false`, `stream:true` and function tools is supported; web search is "subject to model and account/workspace policy"; whether the account's catalog offers a suitable model and whether full-text reading reaches S5 depth cannot be known without an authenticated call, which this card forbids. |
 | 3 | Taste Profile parity path | **UNKNOWN** (path exists, parity unproven) | The call is stateless, so the versioned profile and instructions must be sent explicitly; this matches the repository's immutable profile versions. Parity with S5 is a measurement that has not been made. |
-| 4 | No incremental cash cost, limits known | **UNKNOWN** | Plan usage is "included in the user's ChatGPT plan or available credits", and the user can choose whether an app may use credits after the plan limit. Numeric Pro limits and per-request cost are not published on the pages read. Cloudflare Worker/Workflow limits and cost could not be read from official Cloudflare documentation in this session (see Limitations). |
+| 4 | No incremental cash cost, limits known | **UNKNOWN** (Cloudflare half: documented limits fit, cost expected small) | Plan usage is "included in the user's ChatGPT plan or available credits", and the user can choose whether an app may use credits after the plan limit. Numeric Pro limits and per-request cost are not published on the pages read. Cloudflare Worker/Workflow limits fit a streamed call (section 4) and the Cloudflare marginal cost looks small, but it is not measured against this account's actual usage and plan. |
 
 No mandatory condition is a documented **NO**, so no PoC is rejected on the evidence, but **no PoC is authorized either**: check 1 is a hard gate that only an owner action can open. Overall: **UNKNOWN, blocked on an owner-controlled approval**. This is not a finding that v3 is feasible, and it does not support "no feasible zero-cost v3" either; it supports "not yet decidable".
 
@@ -71,7 +71,19 @@ Consequence for the two model checks: whether web search with full-text review r
 
 - What the SIWC pages require of the runtime, independent of Cloudflare: a long-lived streamed HTTPS response read to `response.completed`; durable storage of a rotating refresh token with serialized refresh; an interactive local OAuth step that a Worker cannot perform (loopback callback); a stable per-host ID; bounded backoff on `503` and usage errors.
 - Fit in principle: the repository's Workflows already provide durable steps, retries and single-flight leases ([scheduling and orchestration](../../architecture/scheduling-and-orchestration.md)), and D1 mutable prediction authority stays the writer.
-- **Not verified:** Worker and Workflow limits (wall time, CPU, subrequest and streaming behaviour, step timeout/retry bounds) and the incremental cost of running such a Workflow. `developers.cloudflare.com` was not reachable from this session (proxy answered 403), so no official Cloudflare statement is cited here. Those facts are UNKNOWN for this brief, not assumed.
+- Official Cloudflare limits, read on 20 November 2026 from [Workflows limits](https://developers.cloudflare.com/workflows/reference/limits/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [Workflows pricing](https://developers.cloudflare.com/workflows/reference/pricing/), [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) and [step retries](https://developers.cloudflare.com/workflows/build/sleeping-and-retrying/):
+
+| Need of a streamed v3 call | Documented limit (Workers Paid) | Reading |
+| --- | --- | --- |
+| Long wait for a model and web-research stream | Workflow step wall clock "Unlimited"; waiting on network I/O is not CPU time; incoming HTTP and Durable Object calls also unlimited while connected | A single `/v1/responses` stream per step fits; the stream wait costs no CPU. Cron Trigger invocations are capped at 15 minutes wall. |
+| Step timeout and retry | Default `retries` 5 × exponential from 10 s and `timeout` 10 minutes per attempt, both configurable; up to 10,000 retries per step; dynamic delay function for rate limits | Bounded backoff on `503` and usage errors is expressible. The 10-minute default must be raised if one film's research stream can exceed it (unmeasured). |
+| CPU | 30 s default per invocation, up to 5 min via `limits.cpu_ms` | SSE parsing and JSON validation are small against that. |
+| Memory | 128 MB per isolate; stream bodies rather than buffering | Same ceiling as the existing Workflows, which have already hit it on large ledgers (see [AIR-460](../orchestration/air-460-parser-churn-2026-11-14.md)); a five-film response is small. |
+| Step result | 1 MiB per non-stream step result; 1 GB state per instance on Paid | Return a compact per-film result, store bodies in R2/D1. |
+| Subrequests and connections | 10,000 per invocation (up to 10 million); 6 simultaneous connections awaiting response headers | One stream at a time is far inside both. |
+| Durable timers | `step.sleep` up to 365 days; `waiting` instances do not count toward concurrency | Waiting for a usage-limit reset or a retry costs no concurrency slot. |
+
+- Incremental Cloudflare cost: Workflows use Workers Standard pricing (Paid: 10 million requests, 30 million CPU ms included per month, +$0.30 per million requests, +$0.02 per million CPU ms), plus Workflow steps (500,000 included per month, then $0.80 per 100,000) and storage (1 GB-month included, then $0.20 per GB-month). The pricing page states that step and storage billing applies "starting August 10th, 2026", so it is already in force. A v3 Workflow doing a handful of steps per five-film batch would sit well inside these allowances, but this brief did **not** read the account's current usage or plan, so "$0 incremental" for Cloudflare is an expectation, not a measurement. Idle waiting incurs no CPU time.
 - OAuth security notes for a design, if check 1 ever opens: refresh token and access token only in Worker secrets or encrypted storage, never in logs, Trello, git or analytics; one writer for the refresh to avoid rotating-token races; no new Access bypass; the existing owner-only Access rules stay as documented ([authentication and MCP](../../architecture/authentication-and-mcp.md)).
 
 ## 5. SIWC, API credits and Agents API are different things
@@ -93,7 +105,7 @@ The API-credits route is **not** evaluated as a v3 candidate here because the ow
 ## Limitations
 
 - Documentation only; no behaviour of the live service was observed. Preview pages may change; re-read before acting.
-- `developers.cloudflare.com` unreachable (HTTP 403 from the session proxy): Cloudflare limits and cost not covered.
+- Cloudflare limits and prices are as documented on 20 November 2026; the account's plan and current Workflow/step/CPU usage were not read, so Cloudflare marginal cost is an expectation.
 - Model catalog, web-search policy for the owner's account, numeric plan limits and approval timing are unknowable without the owner's action.
 - No claim of parity with S5, of zero cost, or of permission to host remotely.
 
@@ -102,6 +114,6 @@ The API-credits route is **not** evaluated as a v3 candidate here because the ow
 1. Decide whether to submit the SIWC interest form for a personal remotely hosted app (needs an explicit owner GO; outward-facing).
 2. Only after an approval answer: separate GO for the authenticated test above, with the owner present and limits set.
 3. Separately decide whether API credits on an eligible Pro/Business plan are acceptable as "$0 extra".
-4. Allow `developers.cloudflare.com` in the session network to close the Cloudflare half of check 4 (read-only).
+4. Optional: a read-only check of the account's Workers plan and monthly Workflow step/CPU usage to turn the Cloudflare cost expectation into a measurement.
 
 Documentation impact: this report, the registry row in `docs/evidence/README.md`, and a handoff comment on AIR-461. No architecture, runtime or production change. Rollback: none, read-only.
