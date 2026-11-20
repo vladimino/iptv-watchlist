@@ -1,6 +1,6 @@
 # Letterboxd claim backfill: read-only preflight, L3 plan and readback (owner approval required)
 
-Applies to the dormant module `src/canonical-letterboxd-claim.js` ([ADR 0184](../adr/0184-ratings-confirmed-letterboxd-claim-on-existing-film.md), Proposed). Nothing here authorizes a production write: the backfill is an L3 operation under [authorization and escalation](../process/authorization-and-escalation.md) and needs an owner-approved plan before it runs, even for a handful of rows.
+Applies to the dormant module `src/canonical-letterboxd-claim.js` ([ADR 0184](../adr/0184-ratings-confirmed-letterboxd-claim-on-existing-film.md), Accepted). Nothing here authorizes a production write: the backfill is an L3 operation under [authorization and escalation](../process/authorization-and-escalation.md) and needs an owner-approved plan before it runs, even for a handful of rows.
 
 ## When this applies
 

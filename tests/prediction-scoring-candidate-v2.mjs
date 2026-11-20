@@ -23,8 +23,8 @@ assert.equal(sha(v2),CANDIDATES.v2.sha);assert.equal(v2.length,45938);assert.equ
 assert.ok(/\| 45938 \| 69379 \| `ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520` \|/.test(v2Doc));
 assert.ok(/Status: accepted and installed/.test(v2Doc));
 // AIR-544: only the runner heartbeat cadence changed AFTER v2 scoring was installed. The archived AIR-476 candidate is immutable; reversing this single phrase must recover it byte-for-byte.
-const oldHeartbeat='не реже, чем раз в 10 минут (TTL 15 минут)',newHeartbeat='не реже, чем раз в 5 минут (TTL 12 минут)';
-assert.equal(sha(installed),'59208a479175bcb829ca979f69c3f7370e9abc3b545978f899efbb128e17b4e7','installed AIR-544 heartbeat prompt');
+const oldHeartbeat='не реже, чем раз в 10 минут (TTL 15 минут)',newHeartbeat='не реже, чем раз в 5 минут';
+assert.equal(sha(installed),'54e0e7eeb6bb628ca00a6b6a195eaf984a9483443446cf5f206f0e91b30be860','installed AIR-544 heartbeat prompt after the TTL-wording cleanup');
 assert.equal(installed.split(newHeartbeat).length-1,1,'one installed heartbeat phrase');
 assert.equal(installed.replace(newHeartbeat,oldHeartbeat),v2,'installed scoring candidate v2 remains byte-identical except the heartbeat phrase');
 assert.equal(sha(installed.replace(newHeartbeat,oldHeartbeat)),CANDIDATES.v2.sha,'frozen AIR-476 v2 candidate remains unchanged');

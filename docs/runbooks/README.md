@@ -19,7 +19,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Scheduled Task drift monitor: triage and owner gates](scheduled-task-drift.md)
 - [Taste-profile publication procedure (owner approval required)](taste-profile-publication.md)
 - [Production R2 snapshot export, read-only (owner approval required)](r2-snapshot-export.md)
-- [Letterboxd claim backfill: read-only preflight, L3 plan and readback (owner approval required, ADR 0184 Proposed)](letterboxd-claim-backfill.md)
+- [Letterboxd claim backfill: read-only preflight, L3 plan and readback (owner approval required, ADR 0184 Accepted)](letterboxd-claim-backfill.md)
 - [Letterboxd baseline import (owner approval required)](letterboxd-baseline-import.md)
 - [Letterboxd Diary viewing history: activation, observation and rollback (owner approval required to switch on)](letterboxd-diary-history.md)
 - [Finds display-only title exclusion: build, placement and switch (owner approval required)](finds-display-exclusion.md)
