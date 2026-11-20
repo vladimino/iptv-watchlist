@@ -203,3 +203,12 @@ A code rollback leaves the rows in D1 and an older Worker ignores them; the inte
 ## Hot/cold priority after Discovery assignments in the same generation (AIR-529)
 
 Discovery can add shows to the published EPG generation without a new `programmeRunId`. The queue stores `showsSignature`; the next `prediction_batch_start` rebuilds hot/cold when the live signature differs. Diagnose a suspected stale ranking read-only: compare `prediction_queue_overview` `hotRemaining` with the completed programme's films in the window, and treat a queue with no `showsSignature` as due once. Do not run a manual reconcile POST for this; the natural next start performs the rebuild.
+
+## Hot queue parity check
+
+Use `prediction_hot_parity` ([contract](../reference/api/prediction-diagnostics.md#hot-queue-parity)) when the hot lane of the queue may not reflect what is on air, for example after Discovery assignments in a generation, a window edge or a generation rollover. It is read-only and owner-only, and it reads the whole catalog, so call it occasionally, never in a loop and never to decide a start.
+
+1. Read `verdict` first. `match`: nothing to do. `degraded` with `window_transition_deferred`: the accepted 15-minute rate cap; the next natural `prediction_batch_start` after the cap rebuilds. `degraded` with `generation_rollover_pending`: the queue waits for its own refresh on the new generation. `mismatch`: read `reasons` and `diff.causes`; `shows_signature_changed` and `window_transition` are cured by the next natural start, `no_longer_outstanding` and `absent_from_queue` that persist across two natural starts are a finding to record. `unknown`: say so; it proves nothing, so repeat later or read the named source.
+2. A repeated `unknown` of the same reason (for example `shows_changed_during_read` while Discovery assigns continuously) is not a failure of the queue; retry between chunks.
+3. Record the verdict, `generation`, `cutoff`, `evaluated.films` and `elapsedMs` in the card or evidence. Do not report `expected.hotOutstanding` as a verified count when the verdict is `unknown` or `degraded`.
+4. Do not respond with a manual `queue/reconcile` POST, a lease reset, a retry reset, a Scheduled Task edit or a model call. The natural start is the only repair path; a mismatch that outlives it is a code finding.

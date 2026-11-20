@@ -1175,6 +1175,10 @@ export const FILES={
  "prediction-queue-cas.mjs": {
   "suite": "core"
  },
+ "prediction-hot-parity.mjs": {
+  "suite": "core",
+  "note": "AIR-536: read-only parity of the actual hot outstanding work against the persisted hot queue on 3,200 films; unknown is never a PASS."
+ },
  "prediction-hot-reconcile-same-generation.mjs": {
   "suite": "core",
   "note": "AIR-529: new Discovery show assignments in the same published EPG generation move the shows signature and the next batch start rebuilds hot/cold."
