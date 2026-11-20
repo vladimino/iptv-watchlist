@@ -1470,6 +1470,9 @@ export const FILES={
  "view-index-seed-membership.mjs": {
   "suite": "core"
  },
+ "view-index-membership-parity.mjs": {
+  "suite": "core"
+ },
  "viewing.mjs": {
   "suite": "core"
  },
