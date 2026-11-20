@@ -365,22 +365,32 @@ const strange=path.join(scratch,'strange.json');
   const out=await (await post({BUCKET:raced},'commit',{origin:{...originBody,archiveSha256:'5'.repeat(64)},chunk:0,items:[{lid:'Rr1',tmdb:'333',facts:{watched:true},effectiveOn:{},identity:'inferred',admit:{title:'Race Movie',year:2012}}]})).json();
   assert.equal(out.conflicts,1);assert.equal(raced.records.get(admKey).films.tmdb_333.sourceCode,'Other1','an entry found, not created, stays');
  }
- // ADR 0184 wiring: the canonical Letterboxd claim is requested for a chunk's proven links AFTER the facts and the link are durable, never for a conflict, never throws into the import, and is a no-op when the claim module is absent.
+ // ADR 0184 wiring: the canonical Letterboxd claim is requested for a chunk's VERIFIED links only, after the chunk receipt is committed and the facts and the link are durable; never for an inferred link (it can be unlinked later),
+ // never for a conflict, never when the receipt fails, never throws into the import, and is a no-op when the claim module is absent.
  {
-  const calls=[];const stub={mode:'ok',ensureLetterboxdClaims:async(envArg,{pairs})=>{calls.push({pairs:JSON.parse(JSON.stringify(pairs)),durable:pairs.map(pair=>!!factRecord(held.BUCKET,'tmdb-'+pair.tmdb))});if(stub.mode==='throw')throw Object.assign(new Error('boom'),{code:'film_person_unavailable'});return {state:'complete'};}};
+  const calls=[];const stub={mode:'ok',ensureLetterboxdClaims:async(envArg,{pairs})=>{calls.push({pairs:JSON.parse(JSON.stringify(pairs)),durable:pairs.map(pair=>!!factRecord(held.BUCKET,'tmdb-'+pair.tmdb)),receipt:[...held.BUCKET.records.keys()].some(key=>/\.receipt\.json$/.test(key))});if(stub.mode==='throw')throw Object.assign(new Error('boom'),{code:'film_person_unavailable'});return {state:'complete'};}};
   const held={BUCKET:bucket()};
   ctx.CanonicalLetterboxdClaim=stub;
   const origin={...originBody,archiveSha256:'3'.repeat(64)};
   const item={lid:'Qq1',tmdb:'131',facts:{watched:true},effectiveOn:{}};
   assert.equal((await post(held,'commit',{origin,chunk:0,items:[item]})).status,200);
-  assert.deepEqual(calls.map(call=>call.pairs),[[{lid:'Qq1',tmdb:'131'}]]);assert.deepEqual(calls[0].durable,[true],'the facts and the link are durable before the claim is requested');
-  // a replay of the committed chunk re-offers it (the natural recovery of an interrupted claim), with no new facts
+  assert.deepEqual(calls.map(call=>call.pairs),[[{lid:'Qq1',tmdb:'131'}]]);assert.deepEqual(calls[0].durable,[true],'the facts and the link are durable before the claim is requested');assert.equal(calls[0].receipt,true,'the chunk receipt is committed first');
+  // a replay of the committed chunk re-offers it (the recovery of an interrupted claim), with no new facts
   const replay=await (await post(held,'commit',{origin,chunk:0,items:[item]})).json();
   assert.equal(replay.replay,true);assert.deepEqual(calls.at(-1).pairs,[{lid:'Qq1',tmdb:'131'}]);
-  // a link conflict (the movie id already aliases another lid) is never offered
+  // an INFERRED link is never offered: the existing unlink route can withdraw it later, and a claim must not outlive its evidence
   calls.length=0;
+  assert.equal((await post(held,'commit',{origin:{...originBody,archiveSha256:'7'.repeat(64)},chunk:0,items:[{lid:'Qq5',tmdb:'135',facts:{watched:true,rating:3},effectiveOn:{},identity:'inferred',admit:{title:'Inferred Five',year:2011}}]})).status,200);
+  assert.equal(calls.length,0,'an inferred link reaches no claim request');
+  // a link conflict (the movie id already aliases another lid) is never offered
   const conflict=await (await post(held,'commit',{origin:{...originBody,archiveSha256:'4'.repeat(64)},chunk:0,items:[{lid:'Qq2',tmdb:'131',facts:{watched:true},effectiveOn:{}}]})).json();
   assert.equal(conflict.conflicts,1);assert.equal(calls.length,0,'a conflicting link reaches no claim request');
+  // a receipt that cannot be written means no claim request
+  const failing={BUCKET:bucket()},realPut=failing.BUCKET.put.bind(failing.BUCKET);
+  failing.BUCKET.put=async(key,value,options)=>{if(/\.receipt\.json$/.test(key))throw new Error('receipt lost');return realPut(key,value,options);};
+  calls.length=0;
+  const lost=await post(failing,'commit',{origin:{...originBody,archiveSha256:'8'.repeat(64)},chunk:0,items:[{lid:'Qq6',tmdb:'136',facts:{watched:true},effectiveOn:{}}]}).then(response=>response.status,()=>'threw');
+  assert.notEqual(lost,200);assert.equal(calls.length,0,'no claim is requested for a chunk whose commit failed');
   // a throwing claim step never fails the import
   stub.mode='throw';
   assert.equal((await post(held,'commit',{origin:{...originBody,archiveSha256:'5'.repeat(64)},chunk:0,items:[{lid:'Qq3',tmdb:'133',facts:{watched:true},effectiveOn:{}}]})).status,200);

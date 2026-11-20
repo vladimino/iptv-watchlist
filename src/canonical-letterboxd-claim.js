@@ -201,26 +201,32 @@ export const LETTERBOXD_CLAIM_ACTIVATED=false;
 // The pairs a flow has JUST made durable on the Ratings side (the fact record and the link index) and, for an admitted Film, the D1 admission. Never throws into the caller: the rating fact, the Diary fact and the Event do not wait
 // for the claim and never fail because of it. {state:'inactive'|'complete'|'incomplete'|'skipped', requested, written, already, refused, unknown, deferred, overflow, failed, results?}. At most LETTERBOXD_CLAIM_UNIT_CAP pairs are
 // attempted per call; the rest are `overflow` (the next ordinary run of the same flow offers them again, and `already` makes a repeat free). `event` is stable per pair (`link:<lid>:<tmdb>`), never a timestamp.
+export const LETTERBOXD_CLAIM_OFFER_MAX=200;
 export async function ensureLetterboxdClaims(env,{pairs=[],enabled=LETTERBOXD_CLAIM_ACTIVATED,now}={}){
- if(enabled!==true)return {state:'inactive',requested:0,written:0,already:0,refused:0,unknown:0,deferred:0,overflow:0,failed:0};
- const seen=new Set(),list=[];
+ if(enabled!==true)return {state:'inactive',requested:0,written:0,already:0,refused:0,unknown:0,deferred:0,overflow:0,failed:0,unattempted:[],results:[]};
+ const seen=new Set(),all=[];
  for(const pair of Array.isArray(pairs)?pairs:[]){
   const lid=typeof pair?.lid==='string'?pair.lid:'',tmdb=pair?.tmdb==null?'':String(pair.tmdb);
   if(!LID.test(lid)||lid.startsWith('tmdb_')||!TMDB.test(tmdb)||seen.has(lid))continue;
-  seen.add(lid);list.push({lid,tmdb});
+  seen.add(lid);all.push({lid,tmdb});
  }
- const out={state:'complete',requested:list.length,written:0,already:0,refused:0,unknown:0,deferred:0,overflow:Math.max(0,list.length-LETTERBOXD_CLAIM_UNIT_CAP),failed:0,results:[]};
+ // The whole call has a fixed budget: ONE ordering read, then at most LETTERBOXD_CLAIM_UNIT_CAP full proofs (each a bounded number of reads and at most one fenced batch). Everything beyond is `overflow` (offered again by the next ordinary run).
+ const list=all.slice(0,LETTERBOXD_CLAIM_OFFER_MAX),beyond=all.slice(LETTERBOXD_CLAIM_OFFER_MAX);
+ const out={state:'complete',requested:all.length,written:0,already:0,refused:0,unknown:0,deferred:0,overflow:0,failed:0,unattempted:[],results:[]};
+ // ONE batched read ORDERS the offer: lids that no trusted claim holds yet go first. It is never evidence and never declares `already`: every attempted pair, held or not, gets the full read-only proof of `planLetterboxdClaim`.
+ let held=new Set();
  const db=database(env);
- // A pair whose Film already holds the lid as its trusted claim next to the trusted movie claim needs nothing and costs ONE read (no link documents are read): it is `already` and does not use the per-call cap.
- const todo=[];
- for(const pair of list){
-  let held=null;
-  try{held=db?await one(db,"SELECT l.film_id AS film_id FROM film_external_id l JOIN film_external_id t ON t.film_id=l.film_id AND t.scheme='tmdb' AND t.value=? AND t.trusted=1 AND t.conflicting=0 WHERE l.scheme='letterboxd' AND l.value=? AND l.trusted=1 AND l.conflicting=0 LIMIT 1",[pair.tmdb,pair.lid]):null;}catch{held=null;}
-  if(held)out.already++;
-  else todo.push(pair);
+ if(db&&list.length){
+  try{held=new Set((await many(db,"SELECT value FROM film_external_id WHERE scheme='letterboxd' AND trusted=1 AND conflicting=0 AND value IN (SELECT value FROM json_each(?))",[JSON.stringify(list.map(pair=>pair.lid))])).map(row=>String(row.value)));}catch{held=new Set();}
  }
- out.overflow=Math.max(0,todo.length-LETTERBOXD_CLAIM_UNIT_CAP);
- for(const pair of todo.slice(0,LETTERBOXD_CLAIM_UNIT_CAP)){
+ const ordered=[...list.filter(pair=>!held.has(pair.lid)),...list.filter(pair=>held.has(pair.lid))];
+ const attempt=ordered.slice(0,LETTERBOXD_CLAIM_UNIT_CAP),rest=ordered.slice(LETTERBOXD_CLAIM_UNIT_CAP);
+ // `unattempted`: the lids whose claim was not attempted and may still lack one (a lid already held by a trusted claim that did not fit is not listed: it needs nothing). A caller that keeps a retry state keeps it for these.
+ const unattempted=[...rest.filter(pair=>!held.has(pair.lid)),...beyond].map(pair=>pair.lid);
+ out.overflow=rest.length+beyond.length;
+ let stopped=false;
+ for(const pair of attempt){
+  if(stopped){unattempted.push(pair.lid);out.overflow++;continue;}
   try{
    const result=await applyLetterboxdClaim(env,{event:'link:'+pair.lid+':'+pair.tmdb,lid:pair.lid,tmdb:pair.tmdb,now});
    if(result.state==='written')out.written++;
@@ -233,9 +239,10 @@ export async function ensureLetterboxdClaims(env,{pairs=[],enabled=LETTERBOXD_CL
    // A held or unreadable authority, a moved generation or a read failure: nothing was written for this pair, the flow goes on, the next ordinary run offers it again.
    out.failed++;
    out.results.push({lid:pair.lid,state:'failed',verdict:null,reason:error?.code||'unclassified'});
-   if(error?.code==='film_person_not_open'||error?.code==='film_person_held'||error?.code==='film_person_unavailable')break;
+   if(error?.code==='film_person_not_open'||error?.code==='film_person_held'||error?.code==='film_person_unavailable')stopped=true;
   }
  }
+ out.unattempted=unattempted;
  if(out.refused||out.unknown||out.deferred||out.failed||out.overflow)out.state='incomplete';
  return out;
 }

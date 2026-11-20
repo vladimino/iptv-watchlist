@@ -9,6 +9,8 @@
 // run: the rating fact and the Event do not wait for it. Concatenated into the Worker like the other server modules: one global, no exports.
 const LetterboxdDiaryIdentity=(()=>{
  const LINK_REASONS=new Set(['linking','link_failed']);
+ // ADR 0184: an id whose Ratings link is durable but whose canonical claim is not proved yet keeps this bounded local state, so an id that has left Diary page 1 is still offered again by a later ordinary step (no source request, no Task).
+ const CLAIM_REASON='claim_pending';
  const STEP_LIMIT=3,MAX_ATTEMPTS=6,STEP_BUDGET_MS=40000,WRITE_RESERVE_MS=15000;
  const HOUR=3600000;
  const LID=/^[A-Za-z0-9_-]{1,80}$/,SLUG=/^[a-z0-9-]{1,200}$/,TMDB=/^[1-9]\d{0,11}$/;
@@ -101,8 +103,9 @@ const LetterboxdDiaryIdentity=(()=>{
   const now=clock(),onPage=new Set(page.map(item=>item.lid));
   // A link intent (`linking`, or a `link_failed` bridge) is a local repair: it is served at once, before source retries, whatever its source-attempt count or slug.
   const repair=entry=>entry&&LINK_REASONS.has(entry.reason);
-  const due=Object.entries(stored.films).filter(([lid,entry])=>!onPage.has(lid)&&entry&&(repair(entry)||typeof entry.slug==='string'&&SLUG.test(entry.slug)&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now))
-   .sort(([,x],[,y])=>repair(x)!==repair(y)?(repair(x)?-1:1):String(x.nextAttemptAt)<String(y.nextAttemptAt)?-1:1).slice(0,STEP_LIMIT*2).map(([lid,entry])=>({lid,slug:entry.slug,onPage:false}));
+  const claimDue=entry=>entry&&entry.reason===CLAIM_REASON&&TMDB.test(String(entry.tmdb||''))&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now;
+  const due=Object.entries(stored.films).filter(([lid,entry])=>!onPage.has(lid)&&entry&&(repair(entry)||claimDue(entry)||typeof entry.slug==='string'&&SLUG.test(entry.slug)&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now))
+   .sort(([,x],[,y])=>(repair(x)||claimDue(x))!==(repair(y)||claimDue(y))?((repair(x)||claimDue(x))?-1:1):String(x.nextAttemptAt)<String(y.nextAttemptAt)?-1:1).slice(0,STEP_LIMIT*2).map(([lid,entry])=>({lid,slug:entry.slug,onPage:false}));
   const wanted=[...page,...due];
   if(!wanted.length)return {labels,counts};
   let links;
@@ -128,9 +131,11 @@ const LetterboxdDiaryIdentity=(()=>{
     // ADR 0184: a lid the Ratings link index already ties to a movie is offered for its canonical claim (the claim step re-proves it from the authoritative link; `already` is free).
     if(TMDB.test(String(own.tmdb)))claimPairs.push({lid,tmdb:String(own.tmdb)});
     if(!prior){clear.push(lid);continue;}
+    if(prior.reason===CLAIM_REASON)continue; // served by the claim step below, not a link repair
     try{const repaired=await LetterboxdFacts.reprojectDiaryFilm(env,lid);if(repaired.state==='projected'){counts.repaired++;clear.push(lid);}else{counts.skipped++;}}catch{counts.skipped++;}
     continue;
    }
+   if(prior&&prior.reason===CLAIM_REASON){clear.push(lid);continue;} // the Ratings link is gone: nothing to claim
    if(!own.factKey){counts.skipped++;continue;}
    // A bridge whose admission was confirmed but whose alias/record link did not commit (`link_failed` with its verified movie id) is completed locally:
    // no source request and no admission, whatever the source-attempt count. Only a confirmed admission ever writes this entry.
@@ -194,9 +199,29 @@ const LetterboxdDiaryIdentity=(()=>{
    set[lid]={...entry(item,outcome.reason,attempts+1,now+delayMs(outcome.reason,attempts+1)),...(outcome.tmdb?{tmdb:String(outcome.tmdb)}:{})};
   }
   try{await LetterboxdFacts.updateDiaryIdentity(env,{set,clear:clear.filter(lid=>stored.films[lid])});}catch{counts.persistFailed=1;}
-  // ADR 0184: the canonical Letterboxd claim of the ids whose Ratings link is now durable. After the facts and the pending document; never throws, never delays the rating or the Event; skipped when the lease has no room. Inactive until the activation line of the claim module is turned on.
-  if(claimPairs.length&&remaining()>=WRITE_RESERVE_MS&&typeof CanonicalLetterboxdClaim!=='undefined'){
-   try{const claimed=await CanonicalLetterboxdClaim.ensureLetterboxdClaims(env,{pairs:claimPairs});if(claimed.state!=='inactive')counts.claim=claimed.state==='complete'?'complete':'incomplete';}catch{counts.claim='failed';}
+  // ADR 0184: the canonical Letterboxd claim of the ids whose Ratings link is now durable (after the facts and the settled pending document). Never throws, never delays the rating or the Event.
+  // INACTIVE (the module's activation constant is off): nothing is requested and nothing is stored. ACTIVE: an id whose claim is not proved (refused, unknown, deferred, failed, not attempted for budget or cap) keeps a bounded
+  // `claim_pending` entry that later ordinary steps serve, also when the id has left Diary page 1; a proved claim clears it. Attempts are bounded like every source retry and the entry stays visible after the last one.
+  if(claimPairs.length&&typeof CanonicalLetterboxdClaim!=='undefined'){
+   let claimed=null;
+   if(remaining()>=WRITE_RESERVE_MS){
+    try{claimed=await CanonicalLetterboxdClaim.ensureLetterboxdClaims(env,{pairs:claimPairs});}catch{claimed={state:'failed',results:[],unattempted:claimPairs.map(pair=>pair.lid)};}
+   }
+   const live=claimed?claimed.state!=='inactive':CanonicalLetterboxdClaim.LETTERBOXD_CLAIM_ACTIVATED===true;
+   if(live){
+    const proved=new Set((claimed?.results||[]).filter(result=>result.state==='written'||result.state==='already').map(result=>result.lid));
+    const tried=new Set((claimed?.results||[]).map(result=>result.lid));
+    const claimSet={},claimClear=[];
+    for(const pair of claimPairs){
+     const prior=stored.films[pair.lid]&&stored.films[pair.lid].reason===CLAIM_REASON?stored.films[pair.lid]:null;
+     if(proved.has(pair.lid)){if(prior)claimClear.push(pair.lid);continue;}
+     // an id the call did not try keeps its attempts and is due again at once; a tried and unproved one backs off like a review
+     const attemptsNow=(Number(prior?.attempts)||0)+(tried.has(pair.lid)?1:0);
+     claimSet[pair.lid]={reason:CLAIM_REASON,slug:null,tmdb:pair.tmdb,attempts:attemptsNow,lastAttemptAt:iso(now),nextAttemptAt:iso(tried.has(pair.lid)?now+delayMs('review',Math.max(attemptsNow,1)):now)};
+    }
+    counts.claim=claimed&&claimed.state==='complete'?'complete':claimed?'incomplete':'skipped';
+    if(Object.keys(claimSet).length||claimClear.length){try{await LetterboxdFacts.updateDiaryIdentity(env,{set:claimSet,clear:claimClear});}catch{counts.persistFailed=1;}}
+   }
   }
   return {labels,counts};
  }

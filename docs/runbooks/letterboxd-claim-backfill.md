@@ -4,7 +4,7 @@ Applies to the dormant module `src/canonical-letterboxd-claim.js` ([ADR 0184](..
 
 ## Activation of the producer path
 
-The Ratings flows already offer their durable links to the claim module, which stays inactive until the constant `LETTERBOXD_CLAIM_ACTIVATED` in `src/canonical-letterboxd-claim.js` is changed to `true` in a reviewed change. That change is a production activation: it needs the owner's explicit GO, after the backfill preflight and after the matching tests pass, and it is separate from the backfill. Reverting that line stops new claims; claims already written stay (see Rollback). While inactive, the flows write nothing for claims.
+The Ratings flows already offer their durable links to the claim module, which stays inactive until the constant `LETTERBOXD_CLAIM_ACTIVATED` in `src/canonical-letterboxd-claim.js` is changed to `true` in a reviewed change. That change is a production activation: it needs the owner's explicit GO, after the backfill preflight and after the matching tests pass, and it is separate from the backfill. Reverting that line stops new claims; claims already written stay (see Rollback). While inactive, the flows write nothing for claims and store nothing. While active, an unproved id keeps a bounded `claim_pending` entry in the Diary identity document (six attempts, then it stays visible and is no longer served); the baseline import offers verified entries only and a replay of a committed chunk re-offers it.
 
 ## When this applies
 
