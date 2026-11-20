@@ -2112,6 +2112,111 @@ export async function revokeSchemaReady(env){
  const row=await one(database(env),"SELECT sql FROM sqlite_master WHERE type='table' AND name='discovery_intent'");
  return {handled:true,ready:typeof row?.sql==='string'&&row.sql.includes("'identity_revoke'")};
 }
+// ---------------------------------------------------------------------------------------------------------------------
+// ADR 0181 (AIR-131): group assign of selected observations. Every function here is a bounded D1 read or the one atomic issuance
+// batch. None calls TMDB, reads R2, starts a chunk or writes on a read path. The caps are passed in by the caller (the pure
+// domain module owns them) so this module needs no import.
+// ---------------------------------------------------------------------------------------------------------------------
+export async function readGateSnapshot(env){
+ const gate=await readAuthority(env);
+ if(!gate.ready)return {ready:false};
+ return {ready:true,programmeRunId:gate.programmeRunId,generation:gate.generation};
+}
+// The catalogue Film of the anchor: one primary-key read of its admission, never the whole catalogue.
+export async function readGroupFilm(env,tmdbId){
+ const gate=await readAuthority(env);
+ if(!gate.ready)return {handled:false};
+ const id=typeof tmdbId==='string'?tmdbId:String(tmdbId??'');
+ if(!/^[1-9]\d{0,11}$/.test(id))return {handled:true,film:null,reason:'invalid'};
+ const row=await one(database(env),'SELECT film_id, tmdb_id, media_kind, state, payload_json FROM discovery_admission WHERE film_id=?',['tmdb_'+id]);
+ if(!row)return {handled:true,film:null,reason:'missing'};
+ if(row.media_kind!=='movie'||String(row.tmdb_id)!==id)return {handled:true,film:null,reason:'not_movie'};
+ let film=null;
+ try{film=row.payload_json?JSON.parse(row.payload_json):null;}catch{return {handled:true,film:null,reason:'malformed'};}
+ if(!film||typeof film!=='object'||Array.isArray(film))return {handled:true,film:null,reason:'malformed'};
+ return {handled:true,film,reason:row.state==='current'?null:'not_current'};
+}
+// One primary-key prefix range per anchor, ordered, with `limit` rows each. A range on (source_key, observation_key) is an index
+// SEARCH; a title or confirmed-id predicate is not and is never used here.
+export async function readGroupCandidates(env,ranges,limit){
+ const gate=await readAuthority(env);
+ if(!gate.ready)return {handled:false};
+ const db=database(env);
+ const perAnchor=[];
+ for(const range of ranges){
+  const rows=await many(db,"SELECT observation_key FROM discovery_observation WHERE source_key='active' AND observation_key>=? AND observation_key<? ORDER BY observation_key LIMIT ?",[range.from,range.to,limit]);
+  perAnchor.push({anchor:range.anchor,rows:rows.map(row=>({key:row.observation_key}))});
+ }
+ return {handled:true,perAnchor,gate:{programmeRunId:gate.programmeRunId,generation:gate.generation}};
+}
+// The per-key D1 proof, read fresh: the observation row, its decision with the stored hash checked against the payload, the shows.
+// Constant queries for the whole key list (at most `cap` keys, below the bind limit).
+export async function readGroupProofs(env,keys,cap){
+ const gate=await readAuthority(env);
+ if(!gate.ready)return {handled:false};
+ const list=[...new Set(Array.isArray(keys)?keys.filter(key=>typeof key==='string'&&key):[])];
+ if(list.length>cap)throw failed('discovery_conflict');
+ const proofs={};
+ if(list.length){
+  const db=database(env),marks=list.map(()=>'?').join(',');
+  const [observations,decisions,shows]=await Promise.all([
+   many(db,"SELECT observation_key, programme_run_id, evidence_key, confirmed_tmdb_id, payload_json FROM discovery_observation WHERE source_key='active' AND observation_key IN ("+marks+")",list),
+   many(db,'SELECT observation_key, decision_hash, payload_json FROM discovery_decision WHERE observation_key IN ('+marks+')',list),
+   many(db,"SELECT observation_key, ordinal, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key IN ("+marks+") ORDER BY observation_key, ordinal",list),
+  ]);
+  for(const key of list)proofs[key]={key,observation:null,decision:null,decisionHash:null,hashOk:false,shows:[]};
+  for(const row of observations){
+   let item=null;try{item=JSON.parse(row.payload_json);}catch{item=null;}
+   proofs[row.observation_key].observation=item&&typeof item==='object'&&!Array.isArray(item)?{...item,key:row.observation_key,evidenceKey:row.evidence_key??null,confirmedTmdbId:row.confirmed_tmdb_id??item.confirmedTmdbId??null,belongsToPublishedRun:row.programme_run_id===gate.programmeRunId}:null;
+  }
+  for(const row of decisions){
+   let payload=null;try{payload=JSON.parse(row.payload_json);}catch{payload=null;}
+   const proof=proofs[row.observation_key];
+   proof.decision=payload&&typeof payload==='object'&&!Array.isArray(payload)?payload:null;
+   proof.decisionHash=row.decision_hash;
+   proof.hashOk=proof.decision!==null&&await decisionHash(proof.decision)===row.decision_hash;
+  }
+  for(const row of shows){const proof=proofs[row.observation_key];if(proof&&proof.shows.length<5)proof.shows.push({channelId:row.channel_id,channel:row.channel,start:row.start_ms,end:row.end_ms});}
+ }
+ return {handled:true,proofs,gate:{programmeRunId:gate.programmeRunId,generation:gate.generation}};
+}
+export async function readWriterActive(env){
+ const gate=await readAuthority(env);
+ if(!gate.ready)return {handled:false};
+ const row=await one(database(env),'SELECT lease_id, expires_at FROM discovery_lease WHERE id=1');
+ return {handled:true,active:Boolean(row?.lease_id)&&Number(row.expires_at)>nowMs()};
+}
+// All children of one group in ONE D1 batch (one transaction): all N rows or none. A key already used is `saved:false`, nothing written.
+export async function putIntents(env,specs,cap){
+ const gate=await readAuthority(env);
+ assertOpen(gate);
+ if(!Array.isArray(specs)||!specs.length||specs.length>cap||specs.length>STATEMENT_CAP)throw failed('discovery_conflict');
+ const statements=[];
+ for(const spec of specs){
+  if(!spec?.idempotencyKey||!spec.observationKey)throw failed('discovery_conflict');
+  const issued=spec.issued&&typeof spec.issued==='object'?JSON.stringify(spec.issued):null;
+  const command=spec.command&&typeof spec.command==='object'?JSON.stringify(spec.command):null;
+  statements.push(['INSERT INTO discovery_intent (idempotency_key, kind, state, observation_key, before_json, receipt_json, issued_json, command_json, expected_hash, expires_at, generation) VALUES (?,?,\'approved\',?,NULL,NULL,?,?,?,?,?)',[spec.idempotencyKey,spec.kind,spec.observationKey,issued,command,typeof spec.expectedHash==='string'?spec.expectedHash:null,Number.isFinite(spec.expiresAt)?spec.expiresAt:null,gate.generation]]);
+ }
+ try{await commit(database(env),statements);}
+ catch(error){if(error.code==='discovery_conflict')return {saved:false};throw error;}
+ return {saved:true};
+}
+// The children of a group by their derived keys, in the order asked. A key with no row is simply absent from the answer.
+export async function readIntents(env,keys){
+ const gate=await readAuthority(env);
+ if(!gate.ready)return {handled:false,intents:[]};
+ const list=[...new Set(Array.isArray(keys)?keys:[])];
+ if(!list.length)return {handled:true,intents:[]};
+ const rows=await many(database(env),'SELECT idempotency_key, kind, state, observation_key, receipt_json, issued_json, command_json, expected_hash, expires_at, generation FROM discovery_intent WHERE idempotency_key IN ('+list.map(()=>'?').join(',')+')',list);
+ const byKey=new Map();
+ for(const row of rows){
+  let issued=null,command=null,receipt=null;
+  try{issued=row.issued_json?JSON.parse(row.issued_json):null;command=row.command_json?JSON.parse(row.command_json):null;receipt=row.receipt_json?JSON.parse(row.receipt_json):null;}catch{throw failed('discovery_unavailable');}
+  byKey.set(row.idempotency_key,{idempotencyKey:row.idempotency_key,kind:row.kind,state:row.state,observationKey:row.observation_key,receipt,issued,command,expectedHash:row.expected_hash??null,expiresAt:row.expires_at==null?null:Number(row.expires_at),generation:row.generation==null?null:Number(row.generation)});
+ }
+ return {handled:true,intents:list.map(key=>byKey.get(key)).filter(Boolean)};
+}
 export async function markIntentRunning(env,spec){
  const gate=await readAuthority(env);
  assertOpen(gate);

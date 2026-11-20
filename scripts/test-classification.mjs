@@ -421,6 +421,9 @@ export const FILES={
  "admin-identity-revoke-page.mjs": {
   "suite": "core"
  },
+ "discovery-identity-group.mjs": {
+  "suite": "core"
+ },
  "discovery-identity-revoke.mjs": {
   "suite": "core"
  },
