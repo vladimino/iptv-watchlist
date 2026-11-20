@@ -28,6 +28,9 @@
       <div class="admin-main">
         <section class="iw-section group-section" aria-labelledby="group-title">
           <h2 id="group-title">Шаг 1. Какой фильм</h2>
+          <div id="group-task" class="admin-state" role="status" hidden>
+            <span id="group-task-text"></span> <button type="button" id="group-task-clear" class="admin-more iw-inline">Снять выбор записи</button>
+          </div>
           <div class="group-start" id="group-queue-box">
             <h3 id="group-queue-title">Записи EPG, ожидающие разбора</h3>
             <p class="muted">Ограниченная часть очереди (до 10 за раз): это не весь список наблюдений. Нажмите на запись, чтобы найти для неё фильм.</p>
@@ -61,6 +64,7 @@
           <p id="group-loading" class="admin-state" role="status" aria-busy="false" hidden>Читаем…</p>
           <div id="group-error" class="admin-state admin-state-error" role="alert" hidden></div>
           <h2 id="group-step2" class="group-step2" tabindex="-1" hidden>Шаг 2. Какие наблюдения подтвердить</h2>
+          <div id="group-task-note" class="admin-state" role="status" hidden></div>
           <div id="group-film" class="group-film"></div>
           <div id="group-coverage" class="group-coverage"></div>
           <p id="group-writer" class="admin-state" role="status" hidden>Сейчас работает писатель Discovery: подтвердить можно будет позже.</p>

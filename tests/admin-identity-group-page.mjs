@@ -371,7 +371,7 @@ assert.match(html, /<a class="admin-more" href="\/admin\/identity" id="group-bac
   const ok = body => () => ({ok: true, status: 200, json: async () => body});
   const fail = status => () => ({ok: false, status, json: async () => ({error: 'x'})});
   const target = value => ({closest: () => ({getAttribute: () => value})});
-  const epgRow = (title, year = 2001) => ({key: 'epg:' + title + '|' + year, type: 'epg_observation', title, year, status: 'needs_verification', reason: 'no_decision'});
+  const epgRow = (title, year = 2001) => ({key: 'epg:' + title + '|' + year, type: 'epg_observation', title, year, status: 'manual_review', reason: 'no_decision'});
   const filmItem = (title, tmdb) => ({id: 'film:tmdb_' + tmdb, preferred: title, originalTitle: title, year: 2001, externalIds: tmdb ? [{scheme: 'tmdb', value: String(tmdb), trusted: true, conflicting: false}] : []});
 
   // A first-time owner with no id: the page opens on a useful bounded list, not an empty required field.
@@ -404,6 +404,52 @@ assert.match(html, /<a class="admin-more" href="\/admin\/identity" id="group-bac
   assert.equal(journey.el('group-list-box').hidden, false);
   assert.equal(journey.el('group-count').textContent.includes('Выбрано: 0'), true, 'nothing is preselected');
   assert.deepEqual(journey.seen.filter(line => line.startsWith('POST')), [], 'no write anywhere in the journey');
+  // Review P2: the worklist speaks Russian; an unknown code gets a Russian fallback and the raw id only as escaped technical detail.
+  context.qreal = [
+    {key: 'epg:a|2001', title: 'А', year: 2001, status: 'manual_review', reason: 'tmdb_fetch_failed'},
+    {key: 'epg:b|2001', title: 'Б', year: 2001, status: 'retry_eligible', reason: 'no_decision'},
+    {key: 'epg:c|2001', title: 'В', year: 2001, status: 'brand_new_state', reason: '<i>odd</i>'},
+  ];
+  const realHtml = run('groupQueueHtml(qreal)');
+  assert.match(realHtml, /нужен ручной разбор: не удалось получить страницу фильма/);
+  assert.match(realHtml, /можно повторить: у наблюдения ещё нет решения/);
+  assert.match(realHtml, /состояние не распознано <code>brand_new_state<\/code>/);
+  assert.match(realHtml, /причина не распознана <code>&lt;i&gt;odd&lt;\/i&gt;<\/code>/, 'an unknown code is a Russian fallback with an escaped technical detail');
+  assert.doesNotMatch(realHtml.replace(/<code>[^<]*<\/code>/g, ''), /manual_review|retry_eligible|tmdb_fetch_failed|no_decision/, 'no raw code is shown as the primary text');
+  // Review P1: the chosen EPG record stays with the owner; the page says where it stands in the bounded group answer and never promotes a title match.
+  const rowOf = (key, extra = {}) => ({key, observation: {title: key.split('|')[0], year: 2001, durations: [95]}, decision: {status: 'needs_verification'}, shows: [], selectable: true, reasons: [], info: [], runtime: null, yearGap: 0, plan: null, ...extra});
+  const previewWith = rows => ({tmdbId: '500', available: true, pin: 'D1.' + 'a'.repeat(32), film: {tmdbId: '500', title: 'Тихий берег', year: 2001, runtime: 95}, coverage: {kind: 'partial', anchors: [], anchorsOmitted: 0, merged: rows.length, shown: rows.length, dropped: 0}, writerActive: false, rows});
+  const picked = async rows => {
+    const page = await make({'identity-work': ok({pin: 'p', rows: [{key: 'epg:тихий берег|2001', type: 'epg_observation', title: 'Тихий берег', year: 2001, status: 'manual_review', reason: 'no_decision'}], nextCursor: null}), films: ok({items: [filmItem('Тихий берег', 500)]}), 'group-preview': ok(previewWith(rows))});
+    const attr = {'data-group-find': 'Тихий берег', 'data-group-key': 'epg:тихий берег|2001'};
+    page.el('group-queue-list').fire('click', {target: {closest: () => ({getAttribute: name => attr[name]})}}); await page.settle();
+    assert.equal(page.el('group-task').hidden, false, 'the chosen record is shown as the current task');
+    assert.match(page.el('group-task-text').textContent, /Выбрана запись EPG «Тихий берег» \(2001\)/);
+    page.el('group-search-results').fire('click', {target: target('500')}); await page.settle();
+    return page;
+  };
+  // (a) the record is absent from the bounded result: only observation B comes back.
+  const absent = await picked([rowOf('другой фильм|2001')]);
+  assert.equal(absent.el('group-task-note').hidden, false);
+  assert.match(absent.el('group-task-note').innerHTML, /нет среди кандидатов этого фильма/);
+  assert.match(absent.el('group-task-note').innerHTML, /другие записи, а не ваша/, 'the shown observations are not described as the chosen task');
+  assert.match(absent.el('group-task-note').innerHTML, /href="\/admin\/limb"/, 'a recovery path: the single-key route');
+  assert.doesNotMatch(absent.el('group-list').innerHTML, /group-task-badge/, 'no candidate is marked as the chosen record');
+  assert.doesNotMatch(absent.el('group-list').innerHTML, /checked/, 'nothing is selected for the owner');
+  // (b) present but not selectable: the reason is stated.
+  const blocked = await picked([rowOf('тихий берег|2001', {selectable: false, reasons: ['runtime_conflict']}), rowOf('другой фильм|2001')]);
+  assert.match(blocked.el('group-task-note').innerHTML, /есть среди кандидатов, но её нельзя подтвердить/);
+  assert.match(blocked.el('group-task-note').innerHTML, /Длительность наблюдения расходится/);
+  assert.match(blocked.el('group-list').innerHTML, /group-task-badge/, 'the chosen record is marked');
+  // (c) present and selectable: marked, still never selected for the owner; the owner can clear the task.
+  const present = await picked([rowOf('тихий берег|2001'), rowOf('другой фильм|2001')]);
+  assert.match(present.el('group-task-note').innerHTML, /есть среди кандидатов\.<\/b> За вас она не отмечена/);
+  assert.equal((present.el('group-list').innerHTML.match(/group-task-badge/g) || []).length, 1, 'only the chosen record is marked');
+  assert.doesNotMatch(present.el('group-list').innerHTML, /checked/);
+  assert.deepEqual(present.seen.filter(line => line.startsWith('POST')), [], 'no write');
+  present.el('group-task-clear').fire('click');
+  assert.equal(present.el('group-task').hidden, true);
+  assert.equal(present.el('group-task-note').hidden, true, 'clearing the task removes the claim');
   // Empty worklist, failing worklist, stale worklist: honest, never a dead end, never a hidden action.
   const empty = await make({'identity-work': ok({pin: 'p', rows: [], nextCursor: null})});
   assert.equal(empty.el('group-queue-empty').hidden, false);

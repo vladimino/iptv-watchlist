@@ -1,7 +1,7 @@
 // ADR 0181 / AIR-131: the owner group workflow of ONE movie: preview (read) -> explicit selection -> confirm -> execute -> readback.
 // State lives in memory. Reads: the bounded EPG worklist (on open), the catalogue title search, the preview GET and the receipt GET. Writes: only
 // the two POSTs after the owner's explicit confirmation. Nothing is selected for the owner and a write is never repeated automatically.
-const gpLive = {queue: {rows: [], next: null, pin: null, mode: 'idle', seq: 0}, search: {mode: 'idle', items: [], seq: 0}, pending: null, groupKey: null, preview: null, selected: new Set(), confirmation: null, members: null, result: null, busy: false, seq: 0};
+const gpLive = {task: null, queue: {rows: [], next: null, pin: null, mode: 'idle', seq: 0}, search: {mode: 'idle', items: [], seq: 0}, pending: null, groupKey: null, preview: null, selected: new Set(), confirmation: null, members: null, result: null, busy: false, seq: 0};
 const GP_CAP = 10;
 const GP_STORE = 'iptv-group-pending';
 
@@ -93,8 +93,15 @@ function gpPaint() {
   gpEl('group-coverage').innerHTML = available ? groupCoverageHtml(preview) : '';
   gpShow('group-writer', available && preview.writerActive === true);
   gpShow('group-list-box', available);
+  // The EPG record chosen in the worklist stays with the owner through the journey; where it stands in the bounded group answer is stated, never assumed.
+  const task = gpLive.task;
+  gpShow('group-task', !!task);
+  gpEl('group-task-text').textContent = task ? 'Выбрана запись EPG «' + (task.title || task.key) + '»' + (task.year ? ' (' + task.year + ')' : '') + '. Найдите для неё фильм ниже.' : '';
+  const assessed = groupTaskAssess(task, preview);
+  gpEl('group-task-note').innerHTML = assessed ? assessed.html : '';
+  gpShow('group-task-note', !!assessed);
   gpShow('group-step2', available);
-  gpEl('group-list').innerHTML = available ? groupRowsHtml(preview, gpLive.selected, locked) : '';
+  gpEl('group-list').innerHTML = available ? groupRowsHtml(preview, gpLive.selected, locked, task && task.key) : '';
   if (available) {
     const full = gpLive.selected.size >= GP_CAP;
     for (const box of gpEl('group-list').querySelectorAll('input[data-group-key]')) if (!box.checked && full) box.disabled = true;
@@ -289,7 +296,11 @@ async function gpPick(tmdbId) {
   if (heading && !heading.hidden && heading.focus) heading.focus();
   return result;
 }
-function gpFind(title) {
+function gpFind(title, rowKey) {
+  const key = groupTaskKey(rowKey);
+  const record = key ? gpLive.queue.rows.find(row => row.key === rowKey) : null;
+  gpLive.task = key ? {key, title: String(title || '').slice(0, 200), year: record && record.year != null ? record.year : null} : null;
+  gpPaint();
   gpEl('group-query').value = String(title || '').slice(0, 200);
   gpEl('group-query').focus();
   return gpSearch();
@@ -300,7 +311,8 @@ function gpStart() {
   gpEl('group-form').addEventListener('submit', event => { event.preventDefault(); gpPreview(false); });
   gpEl('group-search-form').addEventListener('submit', event => { event.preventDefault(); gpSearch(); });
   gpEl('group-search-results').addEventListener('click', event => { const button = event.target && event.target.closest ? event.target.closest('[data-group-pick]') : null; if (button) gpPick(button.getAttribute('data-group-pick')); });
-  gpEl('group-queue-list').addEventListener('click', event => { const button = event.target && event.target.closest ? event.target.closest('[data-group-find]') : null; if (button) gpFind(button.getAttribute('data-group-find')); });
+  gpEl('group-queue-list').addEventListener('click', event => { const button = event.target && event.target.closest ? event.target.closest('[data-group-find]') : null; if (button) gpFind(button.getAttribute('data-group-find'), button.getAttribute('data-group-key')); });
+  gpEl('group-task-clear').addEventListener('click', () => { gpLive.task = null; gpPaint(); });
   gpEl('group-queue-more').addEventListener('click', () => { gpQueueLoad(true); });
   gpEl('group-queue-retry').addEventListener('click', () => { gpQueueLoad(false); });
   gpEl('group-list').addEventListener('change', gpToggle);
