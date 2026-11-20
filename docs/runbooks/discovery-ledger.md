@@ -108,7 +108,7 @@ A production write of one decision; agents do not run it. [ADR 0178](../adr/0178
 
 A production write of up to 10 decisions; agents do not run it. [ADR 0181](../adr/0181-owner-confirmed-group-assign-of-selected-observations.md). No migration is needed (schema 27).
 
-1. Open `/admin/identity/group?tmdbId=<digits>` from a queue row or the Limbo identity section. The page reads nothing on load beyond the preview you request and selects nothing.
+1. Open «Открыть групповую идентификацию» at the top of `/admin/identity` (or a contextual link from a queue row or the Limbo identity section). You do not need a TMDB id: pick an EPG record from the bounded worklist, or search the catalogue by title, then press «Показать группу для этого фильма» on a Film that shows a trusted TMDB id. Typing a numeric id is an optional path. Everything up to confirmation is a read and nothing is selected for you.
 2. Read the partial candidate list: counts, `more`, `dropped`, and each row's before/after. Tick only the keys you have checked, write the basis, tick the box.
 3. «Подготовить» shows the exact selected set with versions. «Подтвердить» issues all children at once; «Выполнить» writes them one by one.
 4. Read the per-key receipts. `applied` is written; `conflict`, `refused`, `skipped`, `expired` and `not_attempted` wrote nothing for that key; `unknown` stops the run: read the receipt again, never resubmit blindly.

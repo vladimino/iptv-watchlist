@@ -51,6 +51,26 @@ const GROUP_REASON_COPY = {
   unsupported_capability: 'Это подтверждение не для группового действия.',
   invalid_request: 'Проверьте id фильма и выбор.',
 };
+// Controlled Russian validation: the browser's own constraint tooltip (in the browser's language) is never used.
+const GROUP_VALIDATION_COPY = {
+  query_empty: 'Введите название фильма.',
+  query_long: 'Название не длиннее 200 знаков.',
+  tmdb_empty: 'Введите числовой TMDB id фильма или выберите фильм из списка выше.',
+  tmdb_invalid: 'TMDB id — это число из цифр (до 12), без пробелов и букв.',
+  basis_empty: 'Укажите основание: почему эти наблюдения относятся к этому фильму (до 200 знаков).',
+  basis_long: 'Основание не длиннее 200 знаков.',
+  accept_missing: 'Отметьте, что вы подтверждаете именно этот набор.',
+  none_selected: 'Отметьте хотя бы одно наблюдение.',
+  search_empty: 'В каталоге нет фильмов с таким названием. Проверьте написание или введите TMDB id в разделе ниже.',
+  no_tmdb: 'У этого фильма нет подтверждённого TMDB id: начать группу для него нельзя.',
+  queue_empty: 'В доступной части очереди нет наблюдений EPG на разбор. Это не доказывает, что их нет совсем: найдите фильм по названию ниже.',
+  queue_failed: 'Не удалось прочитать очередь EPG. Найдите фильм по названию ниже или повторите чтение.',
+  search_failed: 'Не удалось выполнить поиск. Ничего не записано, повторите.',
+  stale_cursor: 'Очередь изменилась после первой страницы. Прочитайте её заново.',
+  stale_pin: 'Очередь изменилась после первой страницы. Прочитайте её заново.',
+  invalid_query: 'Некорректный запрос поиска: уберите лишние знаки.',
+  invalid_limit: 'Некорректный размер страницы.',
+};
 const GROUP_OUTCOME_COPY = {
   applied: 'записано', conflict: 'конфликт: не записано', refused: 'отказ: не записано', skipped: 'пропущено', expired: 'срок истёк: не записано',
   not_attempted: 'не выполнялось', unknown: 'исход неизвестен', pending: 'ждёт', missing: 'заявки нет',
@@ -66,7 +86,7 @@ function groupEscape(value) {
 }
 
 function groupReasonText(code) {
-  return GROUP_REASON_COPY[code] || ('Недопустимо (код: ' + String(code || 'неизвестно') + ').');
+  return GROUP_REASON_COPY[code] || GROUP_VALIDATION_COPY[code] || ('Недопустимо (код: ' + String(code || 'неизвестно') + ').');
 }
 
 function groupFilmHtml(preview) {
@@ -128,4 +148,40 @@ function groupOutcomesHtml(result) {
   const stored = result.readback && Array.isArray(result.readback.outcomes)
     ? `<p class="muted">Чтение из D1 после записи: ${result.readback.outcomes.map(item => groupEscape(item.index) + ' ' + groupEscape(GROUP_OUTCOME_COPY[item.outcome] || item.outcome)).join('; ')}${result.readback.complete === false ? '. Набор заявок неполон.' : '.'}</p>` : '';
   return state + (rows ? `<ol class="group-outcomes">${rows}</ol>` : '') + stored;
+}
+
+
+function groupValidationText(code) {
+  return GROUP_VALIDATION_COPY[code] || groupReasonText(code);
+}
+
+// A catalogue Film may start a group only with a TRUSTED, non-conflicting numeric TMDB id on its record. Titles and hints never do.
+function groupFilmTmdb(item) {
+  const ids = item && Array.isArray(item.externalIds) ? item.externalIds : [];
+  const found = ids.find(entry => entry && entry.scheme === 'tmdb' && entry.trusted === true && entry.conflicting !== true && /^[1-9]\d{0,11}$/.test(String(entry.value)));
+  return found ? String(found.value) : null;
+}
+
+function groupFilmResultsHtml(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return '';
+  return '<ul class="group-picks">' + list.map(item => {
+    const title = item.preferred || item.originalTitle || item.epgTitle || item.id || '—';
+    const original = item.originalTitle && item.originalTitle !== title ? ' (' + groupEscape(item.originalTitle) + ')' : '';
+    const tmdb = groupFilmTmdb(item);
+    const action = tmdb
+      ? `<button type="button" class="admin-refresh iw-apply" data-group-pick="${groupEscape(tmdb)}">Показать группу для этого фильма</button>`
+      : `<span class="muted">${groupEscape(GROUP_VALIDATION_COPY.no_tmdb)}</span>`;
+    return `<li class="admin-hit"><b>${groupEscape(title)}</b>${original} · ${groupEscape(item.year ?? 'год неизвестен')}${tmdb ? ' · TMDB ' + groupEscape(tmdb) : ''} <span class="muted">${groupEscape(item.collision ? '· есть фильм с таким же названием, сверьте год и id' : '')}</span><div class="iw-actions">${action}</div></li>`;
+  }).join('') + '</ul>';
+}
+
+function groupQueueHtml(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return '';
+  return '<ul class="group-picks">' + list.map(row => {
+    const title = row.title || '—';
+    return `<li class="admin-hit"><b>${groupEscape(title)}</b> · ${groupEscape(row.year ?? 'год неизвестен')} <span class="muted">· ${groupEscape(row.status || '—')}${row.reason ? ': ' + groupEscape(row.reason) : ''}</span>`
+      + `<div class="iw-actions"><button type="button" class="admin-more" data-group-find="${groupEscape(String(title).slice(0, 200))}">Найти фильм для этой записи</button></div></li>`;
+  }).join('') + '</ul>';
 }

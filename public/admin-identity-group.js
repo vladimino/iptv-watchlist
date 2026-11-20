@@ -1,8 +1,7 @@
 // ADR 0181 / AIR-131: the owner group workflow of ONE movie: preview (read) -> explicit selection -> confirm -> execute -> readback.
-// State lives in memory. The only requests are the preview GET, the two POSTs and the receipt GET of the group-* routes. Nothing is
-// requested on load: a link may prefill the TMDB id, the owner presses the button. Nothing is selected for the owner and a write is
-// never repeated automatically.
-const gpLive = {pending: null, groupKey: null, preview: null, selected: new Set(), confirmation: null, members: null, result: null, busy: false, seq: 0};
+// State lives in memory. Reads: the bounded EPG worklist (on open), the catalogue title search, the preview GET and the receipt GET. Writes: only
+// the two POSTs after the owner's explicit confirmation. Nothing is selected for the owner and a write is never repeated automatically.
+const gpLive = {queue: {rows: [], next: null, pin: null, mode: 'idle', seq: 0}, search: {mode: 'idle', items: [], seq: 0}, pending: null, groupKey: null, preview: null, selected: new Set(), confirmation: null, members: null, result: null, busy: false, seq: 0};
 const GP_CAP = 10;
 const GP_STORE = 'iptv-group-pending';
 
@@ -63,6 +62,22 @@ function gpError(text) {
   node.textContent = text || '';
   node.hidden = !text;
 }
+// Controlled inline validation (Russian, role=alert): the browser's own tooltip is never used. An invalid field is marked, described and focused.
+function gpField(inputId, errorId, code) {
+  const input = gpEl(inputId), note = gpEl(errorId);
+  note.textContent = code ? groupValidationText(code) : '';
+  note.hidden = !code;
+  if (input) { if (code) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid'); }
+  if (code && input && input.focus) input.focus();
+  return !code;
+}
+function gpClearFields() {
+  for (const [inputId, errorId] of [['group-query', 'group-query-error'], ['group-tmdb', 'group-tmdb-error'], ['group-basis', 'group-basis-error'], ['group-accept', 'group-accept-error']]) {
+    const note = gpEl(errorId), input = gpEl(inputId);
+    note.textContent = ''; note.hidden = true;
+    if (input) input.removeAttribute('aria-invalid');
+  }
+}
 function gpRefusal(result) {
   const body = result.body || {};
   const reason = typeof body.reason === 'string' ? body.reason : result.error;
@@ -78,6 +93,7 @@ function gpPaint() {
   gpEl('group-coverage').innerHTML = available ? groupCoverageHtml(preview) : '';
   gpShow('group-writer', available && preview.writerActive === true);
   gpShow('group-list-box', available);
+  gpShow('group-step2', available);
   gpEl('group-list').innerHTML = available ? groupRowsHtml(preview, gpLive.selected, locked) : '';
   if (available) {
     const full = gpLive.selected.size >= GP_CAP;
@@ -89,12 +105,14 @@ function gpPaint() {
   gpEl('group-accept-text').textContent = available ? 'Я подтверждаю именно этот набор из ' + size + ' наблюдений для фильма «' + (preview.film.title || preview.tmdbId) + '»' : '';
   const basis = gpEl('group-basis'), accept = gpEl('group-accept');
   basis.disabled = gpLive.busy; accept.disabled = gpLive.busy;
-  gpEl('group-confirm-button').disabled = gpLive.busy || !accept.checked || !basis.value.trim() || !available || preview.writerActive === true || size < 1;
+  // Enabled whenever a submit is possible: a missing basis or acknowledgement is explained inline on submit, not by a silent disabled button.
+  gpEl('group-confirm-button').disabled = gpLive.busy || !available || preview.writerActive === true || size < 1;
   gpShow('group-staged', staged);
   gpEl('group-plan').innerHTML = staged ? groupMembersHtml(gpLive.members) : '';
   gpEl('group-execute-button').disabled = gpLive.busy;
   gpEl('group-cancel-button').disabled = gpLive.busy;
   gpEl('group-preview-button').disabled = gpLive.busy;
+  gpEl('group-search-button').disabled = gpLive.busy || gpLive.search.mode === 'loading';
   gpEl('group-loading').setAttribute('aria-busy', gpLive.busy ? 'true' : 'false');
   gpShow('group-loading', gpLive.busy);
   const result = gpEl('group-result');
@@ -104,7 +122,9 @@ function gpPaint() {
 async function gpPreview(keepResult) {
   const tmdbId = gpEl('group-tmdb').value.trim();
   gpError('');
-  if (!/^[1-9]\d{0,11}$/.test(tmdbId)) { gpError(groupReasonText('invalid_request')); return null; }
+  gpClearFields();
+  if (!tmdbId) { gpEl('group-advanced').open = true; gpField('group-tmdb', 'group-tmdb-error', 'tmdb_empty'); return null; }
+  if (!/^[1-9]\d{0,11}$/.test(tmdbId)) { gpEl('group-advanced').open = true; gpField('group-tmdb', 'group-tmdb-error', 'tmdb_invalid'); return null; }
   const seq = ++gpLive.seq;
   gpLive.busy = true; gpLive.confirmation = null; gpLive.members = null; gpLive.selected = new Set();
   if (!keepResult) gpLive.result = null;
@@ -129,10 +149,16 @@ function gpToggle(event) {
 }
 async function gpConfirm() {
   const preview = gpLive.preview;
-  if (!preview || !preview.available || gpLive.busy || gpLive.confirmation || !gpLive.selected.size) return null;
+  if (!preview || !preview.available || gpLive.busy || gpLive.confirmation) return null;
   gpError('');
+  gpClearFields();
   // Any unfinished group blocks a fresh confirmation: it must be proven terminal or deliberately forgotten first. No same-key resubmit from here.
   if (gpLive.pending) { gpError('Есть незавершённая группа. Проверьте её результат или забудьте её кнопками выше: новая группа возможна только после этого.'); return null; }
+  if (!gpLive.selected.size) { gpError(groupValidationText('none_selected')); return null; }
+  const basisText = gpEl('group-basis').value.trim();
+  if (!basisText) { gpField('group-basis', 'group-basis-error', 'basis_empty'); return null; }
+  if (basisText.length > 200) { gpField('group-basis', 'group-basis-error', 'basis_long'); return null; }
+  if (!gpEl('group-accept').checked) { gpField('group-accept', 'group-accept-error', 'accept_missing'); return null; }
   gpLive.groupKey = groupIdempotencyKey();
   gpLive.pending = {groupKey: gpLive.groupKey, tmdbId: preview.tmdbId};
   gpRemember(gpLive.pending);
@@ -186,10 +212,97 @@ function gpCancel() {
   gpEl('group-accept').checked = false;
   gpPaint();
 }
+// ---- Step 1 without knowing an id: the bounded EPG worklist and the catalogue search. Both only READ; nothing here posts.
+function gpQueuePaint() {
+  const queue = gpLive.queue;
+  const busy = queue.mode === 'loading' || queue.mode === 'more';
+  gpShow('group-queue-loading', busy);
+  gpEl('group-queue-loading').setAttribute('aria-busy', busy ? 'true' : 'false');
+  const failed = queue.mode === 'error' || queue.mode === 'stale';
+  gpShow('group-queue-error', failed);
+  gpEl('group-queue-error-text').textContent = failed ? groupValidationText(queue.mode === 'stale' ? 'stale_cursor' : 'queue_failed') : '';
+  const empty = queue.mode === 'ready' && !queue.rows.length;
+  gpShow('group-queue-empty', empty);
+  gpEl('group-queue-empty-text').textContent = empty ? ' ' + groupValidationText('queue_empty') : '';
+  gpEl('group-queue-list').innerHTML = groupQueueHtml(queue.rows);
+  const more = gpEl('group-queue-more');
+  more.hidden = !queue.next || failed;
+  more.disabled = busy;
+}
+async function gpQueueLoad(more) {
+  const queue = gpLive.queue;
+  if (queue.mode === 'loading' || queue.mode === 'more') return null;
+  const seq = ++queue.seq;
+  const cursor = more ? queue.next : null;
+  queue.mode = more ? 'more' : 'loading';
+  if (!more) { queue.rows = []; queue.next = null; queue.pin = null; }
+  gpQueuePaint();
+  const result = await groupQueueGet({cursor, pin: more ? queue.pin : null});
+  if (seq !== queue.seq) return result;
+  const body = result.body || {};
+  if (result.status === 409 || (result.status === 400 && result.error === 'stale_cursor') || (more && queue.pin && body.pin && body.pin !== queue.pin)) { queue.mode = 'stale'; gpQueuePaint(); return result; }
+  if (!result.ok) { queue.mode = 'error'; gpQueuePaint(); return result; }
+  queue.pin = body.pin || null;
+  queue.rows = (more ? queue.rows : []).concat(Array.isArray(body.rows) ? body.rows : []);
+  queue.next = body.nextCursor || null;
+  queue.mode = 'ready';
+  gpQueuePaint();
+  return result;
+}
+async function gpSearch() {
+  const query = gpEl('group-query').value.trim();
+  gpError('');
+  gpClearFields();
+  gpShow('group-search-empty', false);
+  if (!query) { gpField('group-query', 'group-query-error', 'query_empty'); return null; }
+  if (query.length > 200) { gpField('group-query', 'group-query-error', 'query_long'); return null; }
+  const search = gpLive.search;
+  const seq = ++search.seq;
+  search.mode = 'loading'; search.items = [];
+  gpEl('group-search-results').innerHTML = '';
+  gpShow('group-search-loading', true); gpEl('group-search-loading').setAttribute('aria-busy', 'true');
+  gpPaint();
+  const result = await groupFilmSearchGet(query);
+  if (seq !== search.seq) return result;
+  search.mode = 'ready';
+  gpShow('group-search-loading', false); gpEl('group-search-loading').setAttribute('aria-busy', 'false');
+  const empty = gpEl('group-search-empty');
+  if (!result.ok) {
+    const code = result.error === 'invalid_query' ? 'invalid_query' : 'search_failed';
+    search.mode = 'error';
+    empty.textContent = groupValidationText(code); empty.hidden = false;
+  } else {
+    search.items = Array.isArray(result.body && result.body.items) ? result.body.items : [];
+    gpEl('group-search-results').innerHTML = groupFilmResultsHtml(search.items);
+    empty.textContent = search.items.length ? '' : groupValidationText('search_empty');
+    empty.hidden = !!search.items.length;
+  }
+  gpPaint();
+  return result;
+}
+// A chosen catalogue Film becomes the anchor: its TRUSTED tmdb id goes through the unchanged group-preview (D1 proof), never a title or hint.
+async function gpPick(tmdbId) {
+  if (gpLive.busy) return null;
+  gpEl('group-tmdb').value = tmdbId;
+  const result = await gpPreview(false);
+  const heading = gpEl('group-step2');
+  if (heading && !heading.hidden && heading.focus) heading.focus();
+  return result;
+}
+function gpFind(title) {
+  gpEl('group-query').value = String(title || '').slice(0, 200);
+  gpEl('group-query').focus();
+  return gpSearch();
+}
 function gpStart() {
   const query = new URLSearchParams(location.search);
   if (query.get('tmdbId')) gpEl('group-tmdb').value = query.get('tmdbId').slice(0, 12);
   gpEl('group-form').addEventListener('submit', event => { event.preventDefault(); gpPreview(false); });
+  gpEl('group-search-form').addEventListener('submit', event => { event.preventDefault(); gpSearch(); });
+  gpEl('group-search-results').addEventListener('click', event => { const button = event.target && event.target.closest ? event.target.closest('[data-group-pick]') : null; if (button) gpPick(button.getAttribute('data-group-pick')); });
+  gpEl('group-queue-list').addEventListener('click', event => { const button = event.target && event.target.closest ? event.target.closest('[data-group-find]') : null; if (button) gpFind(button.getAttribute('data-group-find')); });
+  gpEl('group-queue-more').addEventListener('click', () => { gpQueueLoad(true); });
+  gpEl('group-queue-retry').addEventListener('click', () => { gpQueueLoad(false); });
   gpEl('group-list').addEventListener('change', gpToggle);
   gpEl('group-confirm-form').addEventListener('submit', event => { event.preventDefault(); gpConfirm(); });
   gpEl('group-execute-button').addEventListener('click', () => { gpExecute(); });
@@ -202,5 +315,9 @@ function gpStart() {
   gpEl('group-basis').addEventListener('input', gpPaint);
   gpEl('group-tmdb').addEventListener('input', () => { gpLive.preview = null; gpLive.selected = new Set(); gpLive.confirmation = null; gpLive.members = null; gpPaint(); });
   gpPaint();
+  gpQueuePaint();
+  // Opening the page is useful at once and read-only: the bounded EPG worklist is read, and a deep link with a movie id shows its group. No POST starts here.
+  gpQueueLoad(false);
+  if (query.get('tmdbId')) gpPreview(false);
 }
 if (typeof document !== 'undefined' && document.querySelector('#group-form')) gpStart();

@@ -19,24 +19,48 @@
       <div>
         <p class="eyebrow">ВЛАДЕЛЕЦ · ЗАПИСЬ ТОЛЬКО ПОСЛЕ ПОДТВЕРЖДЕНИЯ</p>
         <h1>Подтвердить группу совпадений</h1>
-        <p class="admin-intro">Выбираете фильм, видите ограниченный список похожих наблюдений EPG и сами отмечаете от 1 до 10 из них. Список не полный: поиск идёт по началу названия. Показ только читает. Запись идёт отдельным подтверждением, по каждому наблюдению отдельно, и не запускает Discovery, TMDB или EPG. Вернуть одно решение можно через «Отзыв коррекции».</p>
+        <p class="admin-intro">Шаг 1: выберите запись EPG из очереди или найдите фильм каталога по названию, TMDB id знать не нужно. Шаг 2: посмотрите ограниченный список похожих наблюдений и сами отметьте от 1 до 10 из них. Список не полный: поиск идёт по началу названия. Всё до подтверждения только читает. Запись идёт отдельным подтверждением, по каждому наблюдению отдельно, и не запускает Discovery, TMDB или EPG.</p>
+        <p><a class="admin-more" href="/admin/identity" id="group-back-queue" data-return-carry>← Назад к очереди идентификации</a></p>
       </div>
     </section>
     <div class="admin-workspace">
       <nav class="admin-views" aria-label="Разделы"><a href="/admin" data-return-carry>Каталог</a><a href="/admin/health" data-return-carry>Здоровье данных</a><a href="/admin/letterboxd" data-return-carry>Архив Letterboxd</a><a href="/admin/limb" data-return-carry>Лимб</a><a href="/admin/identity" data-return-carry>Идентификация</a><a href="/admin/posters" data-return-carry>Постеры</a></nav>
       <div class="admin-main">
         <section class="iw-section group-section" aria-labelledby="group-title">
-          <h2 id="group-title">Для какого фильма</h2>
-          <form id="group-form" class="iw-form" action="/admin/identity/group">
-            <label class="limbo-field" for="group-tmdb">TMDB id фильма<input id="group-tmdb" name="tmdbId" type="text" inputmode="numeric" pattern="[1-9][0-9]{0,11}" maxlength="12" autocomplete="off" required></label>
-            <div class="iw-actions"><button type="submit" class="admin-refresh iw-apply" id="group-preview-button">Показать кандидатов</button></div>
+          <h2 id="group-title">Шаг 1. Какой фильм</h2>
+          <div class="group-start" id="group-queue-box">
+            <h3 id="group-queue-title">Записи EPG, ожидающие разбора</h3>
+            <p class="muted">Ограниченная часть очереди (до 10 за раз): это не весь список наблюдений. Нажмите на запись, чтобы найти для неё фильм.</p>
+            <p id="group-queue-loading" class="admin-state" role="status" aria-busy="false" hidden>Читаем очередь EPG…</p>
+            <div id="group-queue-error" class="admin-state admin-state-error" role="alert" hidden><span id="group-queue-error-text"></span> <button type="button" id="group-queue-retry" class="admin-more iw-inline">Повторить чтение</button></div>
+            <p id="group-queue-empty" class="empty" role="status" hidden><span aria-hidden="true">∅</span><b>Подходящих записей нет</b><span id="group-queue-empty-text"></span></p>
+            <div id="group-queue-list" class="group-queue-list"></div>
+            <button type="button" id="group-queue-more" class="admin-more iw-more" hidden>Показать ещё записи</button>
+          </div>
+          <form id="group-search-form" class="iw-form group-start" action="/admin/identity/group" role="search" novalidate>
+            <h3 id="group-search-title">Найти фильм каталога по названию</h3>
+            <label class="limbo-field iw-q-field" for="group-query">Название на русском или оригинальное<input id="group-query" name="q" type="search" maxlength="200" autocomplete="off" spellcheck="false" aria-describedby="group-query-error" placeholder="например, «Тихий берег»"></label>
+            <p id="group-query-error" class="admin-state admin-state-error" role="alert" hidden></p>
+            <div class="iw-actions"><button type="submit" class="admin-refresh iw-apply" id="group-search-button">Найти фильм</button></div>
+            <p id="group-search-loading" class="admin-state" role="status" aria-busy="false" hidden>Ищем в каталоге…</p>
+            <div id="group-search-empty" class="admin-state" role="status" hidden></div>
+            <div id="group-search-results" class="group-search-results"></div>
           </form>
+          <details class="limbo-tech group-advanced" id="group-advanced">
+            <summary>Я знаю TMDB id фильма</summary>
+            <form id="group-form" class="iw-form" action="/admin/identity/group" novalidate>
+              <label class="limbo-field" for="group-tmdb">TMDB id фильма (только цифры)<input id="group-tmdb" name="tmdbId" type="text" inputmode="numeric" maxlength="12" autocomplete="off" aria-describedby="group-tmdb-error"></label>
+              <p id="group-tmdb-error" class="admin-state admin-state-error" role="alert" hidden></p>
+              <div class="iw-actions"><button type="submit" class="admin-refresh iw-apply" id="group-preview-button">Показать кандидатов</button></div>
+            </form>
+          </details>
           <div id="group-recover" class="admin-state" role="status" hidden>
             <p id="group-recover-text"></p>
             <div class="iw-actions"><button type="button" class="admin-more" id="group-recover-button">Проверить результат записи</button><button type="button" class="admin-more" id="group-recover-dismiss">Забыть эту группу</button></div>
           </div>
           <p id="group-loading" class="admin-state" role="status" aria-busy="false" hidden>Читаем…</p>
           <div id="group-error" class="admin-state admin-state-error" role="alert" hidden></div>
+          <h2 id="group-step2" class="group-step2" tabindex="-1" hidden>Шаг 2. Какие наблюдения подтвердить</h2>
           <div id="group-film" class="group-film"></div>
           <div id="group-coverage" class="group-coverage"></div>
           <p id="group-writer" class="admin-state" role="status" hidden>Сейчас работает писатель Discovery: подтвердить можно будет позже.</p>
@@ -45,11 +69,13 @@
             <div id="group-list" class="group-list"></div>
             <p id="group-count" class="muted" role="status"></p>
           </fieldset>
-          <form id="group-confirm-form" class="iw-form group-confirm" hidden>
-            <label class="limbo-field iw-q-field" for="group-basis">Основание<input id="group-basis" name="basis" type="text" maxlength="200" autocomplete="off" required></label>
-            <label class="iw-check"><input id="group-accept" type="checkbox"> <span id="group-accept-text">Я подтверждаю именно этот набор</span></label>
+          <form id="group-confirm-form" class="iw-form group-confirm" novalidate hidden>
+            <label class="limbo-field iw-q-field" for="group-basis">Основание<input id="group-basis" name="basis" type="text" maxlength="200" autocomplete="off" aria-describedby="group-basis-error"></label>
+            <p id="group-basis-error" class="admin-state admin-state-error" role="alert" hidden></p>
+            <label class="iw-check"><input id="group-accept" type="checkbox" aria-describedby="group-accept-error"> <span id="group-accept-text">Я подтверждаю именно этот набор</span></label>
+            <p id="group-accept-error" class="admin-state admin-state-error" role="alert" hidden></p>
             <div class="iw-actions">
-              <button type="submit" class="admin-refresh iw-apply" id="group-confirm-button" disabled>Подготовить подтверждение</button>
+              <button type="submit" class="admin-refresh iw-apply" id="group-confirm-button">Подготовить подтверждение</button>
             </div>
           </form>
           <div id="group-staged" class="group-staged" hidden>
