@@ -29,13 +29,13 @@ export function namesakesDistinct(films){
  return films.filter(film=>!seen(film)).every(film=>watched.every(year=>Math.abs(year-film.year)>=2));
 }
 
-export async function build({zip,plan,snapshot,output,now=Date.now()}){
+export async function build({zip,plan,snapshot,output,viewIndexFile=null,now=Date.now()}){
  const outputPath=await assertOutsideRepository(output,'--output'),snapshotPath=await assertOutsideRepository(snapshot,'--snapshot');
  // The plan binds the archive: loadVerifiedPlan refuses an archive or a plan that differs from origin.json.
  const {origin,chunks}=await loadVerifiedPlan({zip,output:plan,now});
  const {files}=readZip(await readFile(zip),Object.values(EXPORT_FILES));
  const parsed=parseExport(Object.fromEntries(Object.entries(EXPORT_FILES).map(([kind,name])=>[kind,files[name]?.text??null])));
- const matches=matchExport(parsed.films,buildIndex((await loadSnapshot(snapshotPath)).objects)),films=new Map(parsed.films.map(film=>[film.code,film]));
+ const matches=matchExport(parsed.films,buildIndex((await loadSnapshot(snapshotPath,{viewIndexFile:viewIndexFile?await assertOutsideRepository(viewIndexFile,'--view-index-d1'):null})).objects)),films=new Map(parsed.films.map(film=>[film.code,film]));
  // The snapshot must reproduce the plan exactly, so the accepted identities are the plan's and never an empty fallback.
  const accepted=matches.filter(match=>match.status==='accepted');
  if(canonical(accepted.map(match=>planItem(films.get(match.code),match)))!==canonical(chunks.flat()))throw new ImportError('The snapshot does not reproduce the baseline plan',3);
@@ -65,7 +65,7 @@ export async function build({zip,plan,snapshot,output,now=Date.now()}){
 }
 
 function parseArgs(argv){
- const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--plan':'plan','--snapshot':'snapshot','--output':'output'};
+ const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--plan':'plan','--snapshot':'snapshot','--output':'output','--view-index-d1':'viewIndexFile'};
  for(let i=0;i<rest.length;i++){const name=names[rest[i]];if(!name||i+1>=rest.length)throw new ImportError('Usage: letterboxd-display-exclusion.mjs build --zip <abs> --plan <abs plan dir> --snapshot <abs> --output <abs file>',2);args[name]=rest[++i];}
  if(mode!=='build'||!args.zip||!args.plan||!args.snapshot||!args.output)throw new ImportError('build needs --zip, --plan, --snapshot and --output',2);
  return args;

@@ -73,6 +73,14 @@ try{
  const reportText=fs.readFileSync(path.join(output,'report.json'),'utf8');for(const secret of ['Invented','Ab1','Cd2','Zz9','4.5'])assert.ok(!reportText.includes(secret),'report leaks '+secret);
  const origin=JSON.parse(fs.readFileSync(path.join(output,'origin.json'),'utf8'));
  assert.equal(origin.generatedAt,'2026-10-26T13:48:00.000Z');assert.equal(origin.archiveSha256,sha256(fs.readFileSync(zipPath)));assert.equal(origin.files['watched.csv'],sha256(exportFiles['watched.csv']));
+ // ADR 0183: the same plan from a D1-derived view index (replacing the snapshot's raw object): the identity is recorded and the accepted films are the same.
+ {
+  const d1File=path.join(scratch,'view-index.d1.json');
+  await writeFile(d1File,JSON.stringify({schema:'view-index-d1-export@1',source:'d1_derived',readAt:'2026-11-20T15:00:00.000Z',database:{id:null},counts:{keys:1},index:{Ab1:{actualRating:4.5}}}));
+  const viaD1=await plan({zip:zipPath,snapshot:snapshotDir,viewIndexFile:d1File,output:path.join(scratch,'out-d1'),now});
+  assert.deepEqual(viaD1.planned,report.planned,'the D1 input leaves the accepted films as they are');
+  await assert.rejects(plan({zip:zipPath,snapshot:snapshotDir,viewIndexFile:path.join(scratch,'absent.json'),output:path.join(scratch,'out-d1b'),now}),/could not be read/);
+ }
  // Archive name and time rules.
  const renamed=path.join(scratch,'export.zip');await writeFile(renamed,zip(exportFiles));
  await assert.rejects(plan({zip:renamed,snapshot:snapshotDir,output:path.join(scratch,'o2'),now}),/--generated-at/);

@@ -246,6 +246,16 @@ try{
  const report=await build({zip:zipPath,plan:planDir,snapshot:snapshotDir,output,now:buildNow});
  assert.deepEqual(report.counts,{exportFilms:13,withIdentity:1,droppedNoYear:2,droppedNoName:0,droppedExportNamesake:4,keptExportNamesake:4,entries:6});
  for(const secret of ['Unique','Twin','Rated','Same','Wish','Gh3','Op7'])assert.ok(!JSON.stringify(report).includes(secret),'report leaks '+secret);
+ // ADR 0183: the same build with a D1-derived view index in place of the snapshot's raw object. The view index only contributes rating evidence, so the entries are the same.
+ {
+  const d1File=path.join(scratch,'view-index.d1.json');
+  fs.writeFileSync(d1File,JSON.stringify({schema:'view-index-d1-export@1',source:'d1_derived',readAt:'2026-11-20T15:00:00.000Z',database:{id:null},counts:{keys:0},index:{}}));
+  const d1Output=path.join(scratch,'display-exclusion-d1.json');
+  const viaD1=await build({zip:zipPath,plan:planDir,snapshot:snapshotDir,output:d1Output,viewIndexFile:d1File,now:buildNow});
+  assert.deepEqual(viaD1.counts,report.counts,'the D1 input leaves the counts as they are');
+  assert.deepEqual(JSON.parse(fs.readFileSync(d1Output,'utf8')).entries,JSON.parse(fs.readFileSync(output,'utf8')).entries);
+  await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:snapshotDir,output:path.join(scratch,'display-exclusion-d1b.json'),viewIndexFile:path.join(scratch,'absent.json'),now:buildNow}),/could not be read/);
+ }
  const built=JSON.parse(fs.readFileSync(output,'utf8'));
  assert.equal(fs.statSync(output).mode&0o777,0o600);
  assert.equal(built.rule,RULE);
