@@ -1,0 +1,235 @@
+// AIR-559 (ADR 0184, Proposed): the trusted `letterboxd` claim of an existing canonical Film that the Ratings domain already ties to one TMDB movie (src/canonical-letterboxd-claim.js), on the sqlite3-CLI
+// D1 stand-in. SYNTHETIC ids only (no owner-private profile, no production id list). No Worker, R2, D1 or Cloudflare access.
+// Covered: the full proof (both authorities, one unambiguous Ratings alias, unique trusted TMDB ownership, no competing claim), every refusal writes nothing, a pass writes exactly one fenced receipted claim
+// and nothing else, idempotent replay and retry, dry run vs live, concurrency and the revision CAS, authority below `open` / held, `catalogStartedFilm` found afterwards with the canonical security rule
+// unchanged, the `addOnly` mode of the existing unit (no pruning, existing digests unchanged), the bounds, and the static dormancy. CLAIM_SRC points the file at a mutant copy of src/.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+import {d1Standin} from './d1-standin.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
+
+const SRC=process.env.CLAIM_SRC?path.resolve(process.env.CLAIM_SRC):path.resolve('src');
+const load=name=>import(pathToFileURL(path.join(SRC,name)).href);
+const M=await load('canonical-letterboxd-claim.js');
+const {mutateFilm}=await load('canonical-mutations.js');
+const {filmExternalIdsDigest,filmExternalIdsContent}=await load('canonical-film-external-ids-producer.js');
+const {catalogStartedFilm}=await load('canonical-catalog-reader.js');
+const {planLetterboxdClaim,applyLetterboxdClaim,applyLetterboxdClaims,LETTERBOXD_CLAIM_ORIGIN,LETTERBOXD_CLAIM_UNIT_CAP}=M;
+
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-lb-claim-'));
+process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
+const sqlite=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
+const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
+const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
+const template=path.join(root,'template.sqlite');
+{
+ const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ assert.equal(sqlite(template,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
+}
+const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
+const EMPTY='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
+const BASELINE="INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'2026-11-11T09:00:00.000Z');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+EMPTY+"','"+EMPTY+"','2026-11-11T09:00:01.000Z');";
+let n=0;
+function database(stage='open'){
+ const file=path.join(root,'c-'+(n++)+'.sqlite');
+ fs.copyFileSync(template,file);
+ if(['r2','prepared','open','held'].includes(stage))assert.equal(sqlite(file,VERIFY).status,0);
+ if(['prepared','open','held'].includes(stage))assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1").status,0);
+ if(stage==='open'||stage==='held')assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1").status,0);
+ if(stage==='open')assert.equal(sqlite(file,BASELINE).status,0);
+ if(stage==='held')assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0);
+ assert.equal(sqlite(file,"UPDATE ratings_domain_authority SET mode='d1',cutover='open' WHERE id=1").status,0);
+ return file;
+}
+const envOf=(file,options)=>({DB:d1Standin(file,options)});
+const code=expected=>error=>error.code===expected;
+const T='2026-11-20T10:00:00.000Z';
+const U='2026-11-01T00:00:00.000Z';
+const FID=k=>'film:tmdb:'+k;
+const q=value=>value==null?'NULL':"'"+String(value).replace(/'/g,"''")+"'";
+// A Film with its trusted tmdb claim (default) and any extra stored ids [scheme,value,trusted,conflicting].
+const seedFilm=(file,k,{ids=null,identity=true}={})=>{
+ const claims=ids||[['tmdb',String(k),1,0]];
+ assert.equal(sqlite(file,"INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('"+FID(k)+"',2,"+q(identity?'tmdb:'+k:null)+",'Kept Title','"+U+"');"+claims.map(([s,v,t,c])=>"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('"+FID(k)+"','"+s+"','"+v+"',"+t+","+c+",NULL);").join('')).status,0);
+};
+// The Ratings projection of one record: the lid and the movie alias carry the same fact key.
+const seedRatings=(file,lid,k,{key='tmdb-'+k,movie=true,lidKey=key}={})=>assert.equal(sqlite(file,"INSERT INTO ratings_view (alias_id,fact_key,watched,actual_rating,watchlist,rating_known,updated_at) VALUES ("+q(lid)+","+q(lidKey)+",NULL,NULL,1,0,'"+U+"');"+(movie?"INSERT OR IGNORE INTO ratings_view (alias_id,fact_key,watched,actual_rating,watchlist,rating_known,updated_at) VALUES ('tmdb_"+k+"',"+q(key)+",NULL,NULL,1,0,'"+U+"');":'')).status,0);
+const ext=(file,k=1)=>rows(file,"SELECT scheme,value,trusted,conflicting,provenance_json FROM film_external_id WHERE film_id='"+FID(k)+"' ORDER BY scheme,value");
+const pairs=(file,k=1)=>ext(file,k).map(item=>item.scheme+':'+item.value);
+const receipts=file=>rows(file,'SELECT request_id,operation,origin,target_id,state,attempts,applied_revision,error_class FROM canonical_write_receipt ORDER BY target_id,created_at');
+const revision=(file,id=FID(1))=>Number(one(file,"SELECT revision FROM canonical_revision WHERE kind='film' AND id='"+id+"'")??0);
+const TABLES=['film','film_external_id','film_alias','film_person_credit','film_redirect','film_rated_admission','film_retention','film_dimension','film_metadata','canonical_revision','canonical_write_receipt','ratings_view','tmdb_retirement_decision'];
+const dump=file=>JSON.stringify(TABLES.map(table=>[table,rows(file,'SELECT * FROM '+table+' ORDER BY 1,2,3')]));
+const REQ={event:'cohort:test',now:()=>T};
+// A fresh database with ONE provable cohort member: Film 1 (movie 1), lid AAA1.
+const proved=(over={})=>{const file=database();seedFilm(file,1);seedRatings(file,'AAA1',1);if(over.more)over.more(file);return file;};
+
+// 1. A pass: exactly one trusted claim with fixed provenance, one revision, one applied receipt of the existing unit; every other row is untouched.
+{
+ const file=proved(),env=envOf(file),before=dump(file);
+ const plan=await planLetterboxdClaim(env,{lid:'AAA1',tmdb:'1'});
+ assert.deepEqual({verdict:plan.verdict,reason:plan.reason,filmId:plan.filmId,already:plan.already},{verdict:'pass',reason:'proved',filmId:FID(1),already:false});
+ assert.equal(dump(file),before,'planning is read-only');
+ const out=await applyLetterboxdClaim(env,{...REQ,lid:'AAA1',tmdb:'1'});
+ assert.equal(out.state,'written');assert.equal(out.outcomeState,'applied');
+ assert.deepEqual(pairs(file),['letterboxd:AAA1','tmdb:1']);
+ const claim=ext(file).find(item=>item.scheme==='letterboxd');
+ assert.equal(claim.trusted,1);assert.equal(claim.conflicting,0);
+ assert.deepEqual(JSON.parse(claim.provenance_json),{source:'ratings_alias_bridge',tmdb:'1',adr:'0184'});
+ assert.equal(revision(file),1);
+ const r=receipts(file);assert.equal(r.length,1);assert.deepEqual([r[0].operation,r[0].origin,r[0].state,r[0].target_id],['film_external_ids',LETTERBOXD_CLAIM_ORIGIN,'applied',FID(1)]);
+ // Nothing else moved: the Film row's identity and title, the aliases, ratings, retention, metadata and the other tables.
+ assert.equal(one(file,"SELECT original_title FROM film WHERE id='"+FID(1)+"'"),'Kept Title');
+ assert.equal(one(file,"SELECT canonical_identity FROM film WHERE id='"+FID(1)+"'"),'tmdb:1');
+ for(const table of ['film_alias','film_person_credit','film_rated_admission','film_retention','film_dimension','film_metadata','ratings_view','tmdb_retirement_decision','film_redirect'])assert.equal(JSON.parse(before).find(item=>item[0]===table)[1].length,rows(file,'SELECT * FROM '+table).length,table+' is untouched');
+ // The reader that returned 404 now finds the Film by its lid, without any Ratings fallback and with the unchanged canonical rule.
+ const found=await catalogStartedFilm(env,'AAA1');
+ assert.equal(found.state,'found');assert.equal(found.film.filmId,FID(1));assert.equal(found.film.tmdb,'1');
+ assert.equal((await catalogStartedFilm(env,'tmdb_1')).state,'found');
+ assert.equal((await catalogStartedFilm(env,'UNKNOWN')).state,'absent','an unknown id stays absent (404)');
+}
+
+// 2. Before the claim the reader answers absent (the AIR-549 defect), so the pass is what fixes it.
+{
+ const file=proved(),env=envOf(file);
+ assert.equal((await catalogStartedFilm(env,'AAA1')).state,'absent');
+}
+
+// 3. Idempotent: the same event again, a different event again, and the same call concurrently write no second row, no second revision and no second receipt.
+{
+ const file=proved(),env=envOf(file);
+ await applyLetterboxdClaim(env,{...REQ,lid:'AAA1',tmdb:'1'});
+ const after=dump(file);
+ const again=await applyLetterboxdClaim(env,{...REQ,lid:'AAA1',tmdb:'1'});
+ assert.equal(again.state,'already');assert.equal(again.reason,'already');
+ const other=await applyLetterboxdClaim(env,{...REQ,event:'cohort:other',lid:'AAA1',tmdb:'1'});
+ assert.equal(other.state,'already');
+ assert.equal(dump(file),after,'a replay and a second event change nothing');
+ const file2=proved(),env2=envOf(file2);
+ const both=await Promise.all([applyLetterboxdClaim(env2,{...REQ,lid:'AAA1',tmdb:'1'}),applyLetterboxdClaim(env2,{...REQ,lid:'AAA1',tmdb:'1'})].map(p=>p.catch(error=>({state:'error',code:error.code}))));
+ assert.ok(both.some(item=>item.state==='written'),'one of two concurrent calls writes');
+ assert.equal(pairs(file2).filter(item=>item.startsWith('letterboxd:')).length,1);assert.equal(revision(file2),1);assert.equal(receipts(file2).length,1);
+}
+
+// 4. Dry run writes nothing and reports what a live run would do; a live run does exactly that.
+{
+ const file=proved(),env=envOf(file),before=dump(file);
+ const dry=await applyLetterboxdClaims(env,{event:'cohort:dry',items:[{lid:'AAA1',tmdb:'1'}],dryRun:true,now:()=>T});
+ assert.equal(dry.dryRun,true);assert.equal(dry.results[0].state,'would_write');assert.equal(dry.written,0);
+ assert.equal(dump(file),before,'a dry run writes nothing');
+ const live=await applyLetterboxdClaims(env,{event:'cohort:dry',items:[{lid:'AAA1',tmdb:'1'}],now:()=>T});
+ assert.deepEqual([live.written,live.already,live.refused,live.unknown,live.deferred],[1,0,0,0,0]);
+ const second=await applyLetterboxdClaims(env,{event:'cohort:dry',items:[{lid:'AAA1',tmdb:'1'}],now:()=>T});
+ assert.deepEqual([second.written,second.already],[0,1]);
+}
+
+// 5. not_proved and conflict: every refusal names its reason and writes NOTHING (the dump is byte-identical).
+const refusal=async(name,setup,input,expectVerdict,expectReason)=>{
+ const file=database();setup(file);const env=envOf(file),before=dump(file);
+ const plan=await planLetterboxdClaim(env,input);
+ assert.deepEqual([plan.verdict,plan.reason],[expectVerdict,expectReason],name);
+ const out=await applyLetterboxdClaim(env,{...REQ,...input});
+ assert.equal(out.state,'refused',name);assert.equal(out.verdict,expectVerdict,name);
+ assert.equal(dump(file),before,name+': nothing written');
+};
+const I={lid:'AAA1',tmdb:'1'};
+await refusal('no Ratings alias',file=>seedFilm(file,1),I,'not_proved','ratings_alias_absent');
+await refusal('Ratings movie alias absent',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1,{movie:false});},I,'not_proved','ratings_movie_alias_absent');
+await refusal('Ratings alias points to another movie',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1,{lidKey:'tmdb-2'});},I,'conflict','ratings_alias_points_elsewhere');
+await refusal('Ratings alias is a title-style key',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1,{lidKey:'lb-AAA1'});},I,'conflict','ratings_alias_points_elsewhere');
+await refusal('a second lid carries the movie key',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1);seedRatings(file,'BBB1',1);},I,'conflict','ratings_alias_ambiguous');
+await refusal('no canonical Film',file=>seedRatings(file,'AAA1',1),I,'not_proved','film_absent');
+await refusal('Film whose tmdb claim is untrusted',file=>{seedFilm(file,1,{ids:[['tmdb','1',0,0]]});seedRatings(file,'AAA1',1);},I,'conflict','tmdb_claim_not_unique_trusted');
+await refusal('Film whose tmdb claim is conflicting',file=>{seedFilm(file,1,{ids:[['tmdb','1',1,1]]});seedRatings(file,'AAA1',1);},I,'conflict','tmdb_claim_not_unique_trusted');
+await refusal('movie also claimed (untrusted) by another Film',file=>{seedFilm(file,1);seedFilm(file,2,{ids:[['tmdb','2',1,0],['tmdb','1',0,0]]});seedRatings(file,'AAA1',1);},I,'conflict','tmdb_claim_not_unique_trusted');
+await refusal('redirected Film',file=>{seedFilm(file,1);seedFilm(file,9);assert.equal(sqlite(file,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('"+FID(1)+"','"+FID(9)+"','"+U+"')").status,0);seedRatings(file,'AAA1',1);},I,'conflict','film_redirected');
+await refusal('lid trusted on another Film',file=>{seedFilm(file,1);seedFilm(file,2,{ids:[['tmdb','2',1,0],['letterboxd','AAA1',1,0]]});seedRatings(file,'AAA1',1);},I,'conflict','lid_claimed_elsewhere');
+await refusal('lid untrusted on another Film',file=>{seedFilm(file,1);seedFilm(file,2,{ids:[['tmdb','2',1,0],['letterboxd','AAA1',0,0]]});seedRatings(file,'AAA1',1);},I,'conflict','lid_claimed_elsewhere');
+await refusal('Film holds another lid',file=>{seedFilm(file,1,{ids:[['tmdb','1',1,0],['letterboxd','ZZZ9',1,0]]});seedRatings(file,'AAA1',1);},I,'conflict','film_has_other_lid');
+await refusal('Film holds an untrusted claim',file=>{seedFilm(file,1,{ids:[['tmdb','1',1,0],['letterboxd','AAA1',0,0]]});seedRatings(file,'AAA1',1);},I,'conflict','film_has_untrusted_claim');
+await refusal('Film holds a second tmdb claim',file=>{seedFilm(file,1,{ids:[['tmdb','1',1,0],['tmdb','5',1,0]]});seedRatings(file,'AAA1',1);},I,'conflict','film_has_other_tmdb_claim');
+await refusal('retired movie id',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1);assert.equal(sqlite(file,"INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id,evidence_json,confirmation_json,origin,payload_json,recorded_at) VALUES ('r1','"+FID(1)+"','retire','AAA1','1','7','{}','{\"by\":\"owner\",\"at\":\""+U+"\",\"source\":\"t\"}','owner_request','{}','"+U+"')").status,0);},I,'conflict','tmdb_retired');
+await refusal('ratings domain not authoritative',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1);assert.equal(sqlite(file,"UPDATE ratings_domain_authority SET cutover='held' WHERE id=1").status,0);},I,'not_proved','ratings_not_authoritative');
+for(const bad of [{lid:'',tmdb:'1'},{lid:'a b',tmdb:'1'},{lid:'tmdb_1',tmdb:'1'},{lid:'AAA1',tmdb:'0'},{lid:'AAA1',tmdb:'x'},{lid:'AAA1'},{tmdb:'1'},{lid:7,tmdb:'1'}])
+ await refusal('invalid input '+JSON.stringify(bad),file=>{seedFilm(file,1);seedRatings(file,'AAA1',1);},bad,'not_proved','invalid_input');
+// A title, a year or the watchlist flag is never accepted as proof: a Ratings row with watchlist=1 and a Film of the same title but no alias writes nothing.
+await refusal('same title is not identity',file=>{seedFilm(file,1);seedFilm(file,2);},{lid:'AAA1',tmdb:'2'},'not_proved','ratings_alias_absent');
+
+// 6. Authority: below open and held THROW before any statement that writes (never a verdict, never a fallback).
+for(const stage of ['legacy','r2','prepared','held']){
+ const file=database(stage),env=envOf(file);
+ if(stage!=='legacy')seedFilm(file,1);
+ const before=dump(file);
+ await assert.rejects(()=>planLetterboxdClaim(env,I),error=>!!error.code,'plan at '+stage);
+ await assert.rejects(()=>applyLetterboxdClaim(env,{...REQ,...I}),error=>!!error.code,'apply at '+stage);
+ assert.equal(dump(file),before,stage+': nothing written');
+}
+// A marker that moves between the reads is refused (the generation fence of the plan).
+{
+ const file=proved();let seen=0;
+ const env=envOf(file,{onQuery:async text=>{if(/FROM ratings_view/.test(text)&&++seen===1)assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0);}});
+ await assert.rejects(()=>planLetterboxdClaim(env,I),error=>error.code==='film_person_generation_moved'||error.code==='film_person_held'||error.code==='film_person_not_open');
+}
+
+// 7. The fenced write: a Film whose revision moved between the plan and the batch is refused (CAS), writes no claim and leaves the receipt retryable; a retry then writes it once.
+{
+ const file=proved();let step=0;
+ const moved=envOf(file,{onBatch:async()=>{step++;if(step===1)await mutateFilm(envOf(file),{id:FID(1),expectedRevision:0,at:T,film:{contractVersion:2,aliases:[{kind:'title',value:'Other'}]}});}});
+ await assert.rejects(()=>applyLetterboxdClaim(moved,{...REQ,...I}),code('film_person_revision_conflict'));
+ assert.deepEqual(pairs(file),['tmdb:1'],'no claim written by the refused batch');
+ const soon=await applyLetterboxdClaim(envOf(file),{...REQ,...I});
+ assert.equal(soon.state,'deferred');assert.deepEqual(pairs(file),['tmdb:1'],'a retry inside the backoff window writes nothing');
+ const retry=await applyLetterboxdClaim(envOf(file),{...REQ,now:()=>'2026-11-21T10:00:00.000Z',...I});
+ assert.equal(retry.state,'written');assert.equal(receipts(file).length,1,'the SAME receipt is retried');assert.equal(pairs(file).filter(item=>item.startsWith('letterboxd:')).length,1);
+}
+// A competing Film that claims the lid between the plan and the batch: the claim is refused, never overwritten.
+{
+ const file=proved();seedFilm(file,2);let step=0;
+ const racing=envOf(file,{onBatch:async()=>{step++;if(step===1)assert.equal(sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('"+FID(2)+"','letterboxd','AAA1',1,0,NULL)").status,0);}});
+ await assert.rejects(()=>applyLetterboxdClaim(racing,{...REQ,...I}),error=>!!error.code);
+ assert.deepEqual(pairs(file),['tmdb:1'],'the racing claim stands, ours is not written');
+ assert.deepEqual(pairs(file,2),['letterboxd:AAA1','tmdb:2']);
+}
+
+// 8. The cohort batch: bounded, duplicates refused, one refusal never stops another item, results carry a verdict per item.
+{
+ const file=database();seedFilm(file,1);seedRatings(file,'AAA1',1);seedFilm(file,2);seedRatings(file,'BBB2',2);seedFilm(file,3);seedRatings(file,'CCC3',3,{lidKey:'tmdb-4'});seedFilm(file,5);
+ const env=envOf(file);
+ const out=await applyLetterboxdClaims(env,{event:'cohort:mixed',items:[{lid:'AAA1',tmdb:'1'},{lid:'CCC3',tmdb:'3'},{lid:'BBB2',tmdb:'2'},{lid:'NOPE',tmdb:'5'}],now:()=>T});
+ assert.deepEqual([out.written,out.already,out.refused,out.unknown,out.deferred],[2,0,2,0,0]);
+ assert.deepEqual(out.results.map(item=>[item.lid,item.state,item.verdict]),[['AAA1','written','pass'],['CCC3','refused','conflict'],['BBB2','written','pass'],['NOPE','refused','not_proved']]);
+ assert.deepEqual(pairs(file,3),['tmdb:3'],'the conflicting item is untouched');assert.deepEqual(pairs(file,5),['tmdb:5']);
+ assert.equal(receipts(file).length,2);
+ await assert.rejects(()=>applyLetterboxdClaims(env,{event:'cohort:dup',items:[{lid:'AAA1',tmdb:'1'},{lid:'AAA1',tmdb:'1'}]}),code('film_person_invalid'));
+ const big=Array.from({length:LETTERBOXD_CLAIM_UNIT_CAP+1},(_,i)=>({lid:'L'+i,tmdb:String(i+1)}));
+ await assert.rejects(()=>applyLetterboxdClaims(env,{event:'cohort:big',items:big}),code('film_person_bounded'));
+ await assert.rejects(()=>applyLetterboxdClaim(env,{lid:'AAA1',tmdb:'1'}),code('film_person_invalid'),'an event is required');
+}
+
+// 9. The `addOnly` mode of the existing unit: it never prunes, and every existing digest is unchanged by its introduction.
+{
+ const base={id:FID(1),at:T,schemes:['letterboxd'],externalIds:[{scheme:'letterboxd',value:'AAA1',trusted:true}]};
+ assert.equal(await filmExternalIdsDigest(base),await filmExternalIdsDigest({...base,addOnly:false}),'addOnly:false is the default and the same digest');
+ assert.notEqual(await filmExternalIdsDigest(base),await filmExternalIdsDigest({...base,addOnly:true}),'addOnly is content when true');
+ assert.deepEqual(filmExternalIdsContent(base),{schemes:['letterboxd'],externalIds:[{scheme:'letterboxd',value:'AAA1',trusted:true,conflicting:false,provenance:null}]});
+ assert.throws(()=>filmExternalIdsContent({...base,addOnly:'yes'}),code('film_person_invalid'));
+ const {applyFilmExternalIds}=await load('canonical-film-external-ids-producer.js');
+ const file=database();seedFilm(file,1,{ids:[['tmdb','1',1,0],['letterboxd','OLD1',1,0]]});
+ const env=envOf(file);
+ // Without addOnly the owned scheme is replaced (the stored lid is pruned); with addOnly it is kept next to the new one (the trusted-per-scheme rule then refuses the second trusted value).
+ await assert.rejects(()=>applyFilmExternalIds(env,{origin:'x',event:'e',input:{...base,addOnly:true}}),code('identity_collision'));
+ assert.deepEqual(pairs(file),['letterboxd:OLD1','tmdb:1'],'addOnly pruned nothing');
+ const pruning=await applyFilmExternalIds(env,{origin:'x',event:'e2',input:base,now:()=>T});
+ assert.equal(pruning.state,'applied');assert.deepEqual(pairs(file),['letterboxd:AAA1','tmdb:1'],'the existing mode still prunes');
+}
+
+// 10. Dormancy: the Worker bundle does not import the module yet (activation follows the owner's decision on ADR 0184).
+{
+ const worker=fs.readFileSync(path.join(SRC,'worker.js'),'utf8');
+ assert.ok(!/canonical-letterboxd-claim/.test(worker),'src/worker.js does not import the claim module');
+ for(const file of fs.readdirSync(SRC).filter(name=>name.endsWith('.js')&&name!=='canonical-letterboxd-claim.js'))assert.ok(!/canonical-letterboxd-claim/.test(fs.readFileSync(path.join(SRC,file),'utf8')),file+' does not import the claim module');
+}
+console.log('canonical letterboxd claim: ok');

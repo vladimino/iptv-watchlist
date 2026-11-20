@@ -166,7 +166,7 @@ Storage note (AIR-374 P2a, [ADR 0120](../adr/0120-canonical-film-writers-identit
 
 ## Rated-only Diary admission (AIR-489, [ADR 0166](../adr/0166-diary-rated-only-identity-bridge.md))
 
-A Film behind a rated-only Diary id is admitted by the existing `applyRatedAdmissionRetention` (receipt `identity: "diary_page"`), exactly like a rated-archive Film, after a verified Letterboxd page and TMDB movie check. The admission writes the trusted `tmdb` claim and the `letterboxd_short_code` alias; it still writes no trusted `letterboxd` claim, so `catalogFilmIdentityBridge` stays `absent` for these Films and the bridge lives in the ratings facts alias (`tmdb:<n>`). A later card may add the claim. Diagrams unchanged.
+A Film behind a rated-only Diary id is admitted by the existing `applyRatedAdmissionRetention` (receipt `identity: "diary_page"`), exactly like a rated-archive Film, after a verified Letterboxd page and TMDB movie check. The admission writes the trusted `tmdb` claim and the `letterboxd_short_code` alias; it still writes no trusted `letterboxd` claim, so `catalogFilmIdentityBridge` stays `absent` for these Films and the bridge lives in the ratings facts alias (`tmdb:<n>`). A separate, dormant module can add that claim to an existing Film when the Ratings alias, the canonical TMDB ownership and the absence of any competing claim all agree ([ADR 0184](../adr/0184-ratings-confirmed-letterboxd-claim-on-existing-film.md), Proposed: not active until the owner accepts it). Diagrams unchanged: no component, authority or flow changes, only one more fenced unit on the existing admission path.
 
 ## Discovery admission producer (P3c, [ADR 0134](../adr/0134-discovery-admission-producer-wiring.md))
 

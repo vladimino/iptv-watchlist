@@ -8,6 +8,7 @@
 // WHAT THE UNIT OWNS. Not the whole external-id set of a Film (other writers add ids too: the Letterboxd id of a rated admission, owner ids), but the ids of the SCHEMES THE SOURCE OWNS. The input names them (`schemes`, non-empty) and every source id
 // must be in one of them. Inside those schemes the unit makes the Film's stored set equal to the source set (add what is missing, remove what the source dropped); an id of any other scheme is never touched. An empty source set with a non-empty
 // `schemes` therefore removes every stored id of those schemes, which is the only way an id can leave, and it is explicit: `externalIds` must be present as an own array property, so `[]` means "the source lists none" while an omitted, undefined or null field is refused `film_person_invalid`.
+// AIR-559: the optional input flag `addOnly: true` makes the unit add the listed ids and never prune (the caller owns ONE id, not the whole scheme); the Letterboxd claim module (ADR 0184) is its only caller and is itself dormant until the owner accepts ADR 0184.
 // WHAT IT NEVER REMOVES OR WRITES (typed refusals BEFORE any receipt, never a silent skip):
 //   - an id the Film's identity stands on: the trusted tmdb id of `film.canonical_identity` (`tmdb:<n>`) and the tmdb id of the Film's rated admission (`film_rated_admission.tmdb`). A source that drops one is refused `film_person_identity_conflict`; the owner or
 //     the dictionary decides that, a producer does not. Silent loss of a primary identity is not acceptable.
@@ -61,6 +62,9 @@ export function filmExternalIdsContent(input){
  if(externalIds.length>FILM_EXTERNAL_IDS_PER_UNIT_MAX)throw failed('film_person_bounded');
  schemes.sort();
  externalIds.sort((a,b)=>byKey(keyOf(a.scheme,a.value),keyOf(b.scheme,b.value)));
+ // AIR-559: `addOnly: true` makes the unit ADD the listed ids and never prune (a caller that owns one id, not the whole scheme). It is content only when true, so every digest of an existing caller is unchanged.
+ if(input.addOnly!==undefined&&typeof input.addOnly!=='boolean')throw failed('film_person_invalid');
+ if(input.addOnly===true)return {schemes,externalIds,addOnly:true};
  return {schemes,externalIds};
 }
 export async function filmExternalIdsDigest(input){
@@ -82,7 +86,7 @@ export async function planFilmExternalIds(env,input){
  const have=new Set(stored.map(item=>keyOf(item.scheme,item.value)));
  const want=new Set(content.externalIds.map(item=>keyOf(item.scheme,item.value)));
  const add=content.externalIds.filter(item=>!have.has(keyOf(item.scheme,item.value)));
- const remove=stored.filter(item=>content.schemes.includes(item.scheme)&&!want.has(keyOf(item.scheme,item.value))).map(item=>({scheme:item.scheme,value:String(item.value)}));
+ const remove=content.addOnly?[]:stored.filter(item=>content.schemes.includes(item.scheme)&&!want.has(keyOf(item.scheme,item.value))).map(item=>({scheme:item.scheme,value:String(item.value)}));
  remove.sort((a,b)=>byKey(keyOf(a.scheme,a.value),keyOf(b.scheme,b.value)));
  if(add.length+remove.length>FILM_EXTERNAL_IDS_PER_UNIT_MAX)throw failed('film_person_bounded');
  if(remove.length){
