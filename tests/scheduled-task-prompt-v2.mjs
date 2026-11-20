@@ -22,8 +22,12 @@ const stated=doc.match(/\*\*Text below:\*\* (\d+) characters, SHA-256 `([0-9a-f]
 assert.ok(stated&&statedDry,'headers state length and hash');
 assert.equal(prompt.length,Number(stated[1]));assert.equal(sha(prompt),stated[2]);
 // AIR-451: uniform installed Saved Task reports and human-readable minute-based registry titles.
-assert.equal(Buffer.byteLength(prompt,'utf8'),69379,'AIR-476 installed prompt UTF-8 byte count');
-assert.equal(sha(prompt),'ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520','installed AIR-476 candidate v2 hash');
+assert.equal(Buffer.byteLength(prompt,'utf8'),69378,'AIR-544 step-1 installed prompt UTF-8 byte count');
+assert.equal(sha(prompt),'59208a479175bcb829ca979f69c3f7370e9abc3b545978f899efbb128e17b4e7','installed AIR-544 four-Task heartbeat candidate hash');
+const previousHeartbeat='не реже, чем раз в 10 минут (TTL 15 минут)',currentHeartbeat='не реже, чем раз в 5 минут (TTL 12 минут)';
+assert.equal(prompt.split(currentHeartbeat).length-1,1,'the installed heartbeat phrase occurs once');
+assert.equal(prompt.split(previousHeartbeat).length-1,0,'the old heartbeat phrase is no longer installed');
+assert.equal(sha(prompt.replace(currentHeartbeat,previousHeartbeat)),'ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520','the ONLY installed change since AIR-476 is the heartbeat phrase');
 assert.ok(prompt.includes('6а. EVIDENCE-AWARE SCORING')&&prompt.includes('matchSignals — ТОЛЬКО обоснованные положительные попадания'),'approved positive-only matchSignals scoring policy must be installed');
 assert.ok(prompt.includes('unknown НИКОГДА не превращай в минус')&&prompt.includes('Не повышай оценку автоматически'),'unknown and no-optimism guard retained');
 assert.ok(prompt.includes('**Основания оценки:**'),'human-readable evidence justification added to Saved Task report');
