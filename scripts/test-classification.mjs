@@ -931,6 +931,9 @@ export const FILES={
  "letterboxd-diary-identity.mjs": {
   "suite": "core"
  },
+ "prediction-skipped-event.mjs": {
+  "suite": "core"
+ },
  "ratings-diary-identity.mjs": {
   "suite": "core"
  },
@@ -1459,6 +1462,9 @@ export const FILES={
   "note": "Historical integration fixture, intentionally absent from the public suite."
  },
  "url-state.mjs": {
+  "suite": "core"
+ },
+ "view-index-seed-membership.mjs": {
   "suite": "core"
  },
  "viewing.mjs": {

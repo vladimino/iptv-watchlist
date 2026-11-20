@@ -60,4 +60,4 @@ OR within the selected mood ids and AND across filter families are unchanged. Me
 
 ## Sidecars
 
-`POST /api/enrichment/moods/backfill` still writes `mood-facet.json` and, when the scan finishes, `enrichment/diagnostics/moods.json`. Shipping version 2 does not call it. Those objects may stay on version 1. The view recomputes, and the page uses the view. A later sidecar refresh needs its own approval. The backfill test fixture still proves a local call leaves fingerprint and prediction JSON byte-for-byte unchanged.
+`POST /api/enrichment/moods/backfill` patches the view-index facets and, when the scan finishes, writes `enrichment/diagnostics/moods.json`; it no longer writes a per-film `mood-facet.json`, which nothing reads. Shipping version 2 does not call it. The diagnostics object may stay on version 1. The view recomputes, and the page uses the view. A later diagnostics refresh needs its own approval. The backfill test fixture still proves a local call leaves fingerprint and prediction JSON byte-for-byte unchanged.

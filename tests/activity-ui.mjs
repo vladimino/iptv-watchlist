@@ -218,4 +218,24 @@ const unknownTypeHTML=vm.runInContext('eventHTML(unknownType)',context);assert.m
  assert.match(hostile,/data-event-id="discovery-&lt;b&gt;"/,'the id attribute is escaped');
  for(const legacy of [{id:'e',type:'epg',at:'2026-11-10T13:05:00.000Z',films:1,archive:0,future:1,broadcasts:2}])assert.doesNotMatch(card(legacy),/Discovery/,'other types do not render the Discovery card');
 }
+// AIR-548 (ADR 0180): a refused start attempt is a neutral card of its own: no error styling, no processed counts, no packet title, nothing from the stored event printed unescaped.
+{
+ const card=event=>{context.skippedEvent=event;return vm.runInContext('eventHTML(skippedEvent)',context);};
+ const base={id:'enrichment-skipped-req-1',type:'enrichment',at:'2026-11-20T10:15:00.000Z',stage:'skipped',protocol:'batch_v2',presentation:'batch_v2_skipped',reason:'already_running',requestId:'req-1',trigger:'scheduled',holderRunId:'9ffedadf-38e0-4c44-acc7-4b742ca6d260',holderAgeMs:420000};
+ let html=card(base);
+ assert.match(html,/Запуск прогнозов пропущен: предыдущий ещё выполняется/);assert.match(html,/Попытка запуска \(по расписанию\) отклонена/);
+ assert.match(html,/Выполняется пакет <code>9ffedadf<\/code> · работает 7 мин/);assert.match(html,/Запрос: <code>req-1<\/code>\. Код: <code>already_running<\/code>/);
+ assert.match(html,/data-event-id="enrichment-skipped-req-1"/);
+ assert.doesNotMatch(html,/Пакет прогнозов|Обработано|Осталось|Не удалось|error|ошиб|0 фильмов/i,'neutral: not a packet, not an error, no processed or remaining count');
+ html=card({...base,trigger:'manual'});assert.match(html,/\(вручную\)/);
+ html=card({...base,trigger:undefined,holderRunId:undefined,holderAgeMs:undefined});assert.match(html,/Попытка запуска отклонена/);assert.doesNotMatch(html,/по расписанию|вручную|Выполняется пакет|работает \d/,'absent fields are not guessed');
+ html=card({...base,requestId:'<img src=x onerror=alert(1)>',holderRunId:'"><script>',holderAgeMs:-5});assert.doesNotMatch(html,/<img|<script|onerror/,'unsafe ids are dropped, never printed');assert.doesNotMatch(html,/работает -/,'a negative age is not shown');
+ // an older skipped Event is never the baseline of a later queue comparison
+ context.run1={id:'a',type:'enrichment',at:'2026-11-20T09:00:00.000Z',added:1,updated:0,remaining:10,stage:'complete'};
+ context.run2={id:'b',type:'enrichment',at:'2026-11-20T11:00:00.000Z',added:1,updated:0,remaining:20,stage:'complete'};
+ context.skipBetween={...base,at:'2026-11-20T10:00:00.000Z'};
+ vm.runInContext("loadedEvents.clear();for(const e of [run1,skipBetween,run2])loadedEvents.set(e.id,e);",context);
+ const baseline=vm.runInContext("(()=>{const ordered=[...loadedEvents.values()].sort((a,b)=>Date.parse(b.at)-Date.parse(a.at));let older=null;const by=new Map();for(const event of [...ordered].reverse())if(event.type==='enrichment'&&event.presentation!=='batch_v2_skipped'){by.set(event.id,older);older=event;}return by.get('b')?.id;})()",context);
+ assert.equal(baseline,'a','the skipped Event does not become the queue baseline of the next run');
+}
 console.log('Activity UI: taste-profile publication event, unknown scope, unknown type and the Discovery tick card passed');
