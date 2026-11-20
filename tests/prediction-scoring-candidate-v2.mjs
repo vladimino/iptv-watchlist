@@ -22,8 +22,12 @@ assert.equal(sha(v1),CANDIDATES.v1.sha,'v1 historical candidate unchanged');
 assert.equal(sha(v2),CANDIDATES.v2.sha);assert.equal(v2.length,45938);assert.equal(Buffer.byteLength(v2,'utf8'),69379);
 assert.ok(/\| 45938 \| 69379 \| `ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520` \|/.test(v2Doc));
 assert.ok(/Status: accepted and installed/.test(v2Doc));
-assert.equal(sha(installed),CANDIDATES.v2.sha,'installed canonical must be approved candidate v2');
-assert.equal(installed,v2,'canonical prompt must match the frozen v2 candidate byte for byte');
+// AIR-544: only the runner heartbeat cadence changed AFTER v2 scoring was installed. The archived AIR-476 candidate is immutable; reversing this single phrase must recover it byte-for-byte.
+const oldHeartbeat='не реже, чем раз в 10 минут (TTL 15 минут)',newHeartbeat='не реже, чем раз в 5 минут (TTL 12 минут)';
+assert.equal(sha(installed),'59208a479175bcb829ca979f69c3f7370e9abc3b545978f899efbb128e17b4e7','installed AIR-544 heartbeat prompt');
+assert.equal(installed.split(newHeartbeat).length-1,1,'one installed heartbeat phrase');
+assert.equal(installed.replace(newHeartbeat,oldHeartbeat),v2,'installed scoring candidate v2 remains byte-identical except the heartbeat phrase');
+assert.equal(sha(installed.replace(newHeartbeat,oldHeartbeat)),CANDIDATES.v2.sha,'frozen AIR-476 v2 candidate remains unchanged');
 assert.ok(!base.includes('EVIDENCE-AWARE'),'historical baseline has no scoring overlay');
 assert.ok(fs.readFileSync('docs/reference/scheduled-tasks.md','utf8').includes('air-476-evidence-aware-scoring-candidate-v2-2026-11-18.md'),'candidate evidence remains linked from operational reference');
 
