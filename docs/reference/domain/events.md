@@ -140,6 +140,25 @@ The search stops at once, and its request is aborted, when the type or the scree
 
 The end marker «Это самое раннее доступное событие.» is shown only when the server returned no next cursor and at least one event is shown. It is never shown for an error, a stuck cursor, a search that has not finished, ten matches found with a cursor left, or an empty result of a type (that is «Во всём доступном архиве событий этого типа нет.»); an empty archive keeps «Здесь появятся события списка.». It is a client-side reading of the existing `GET /api/events` contract: the API, the event writer, storage and the event format are unchanged.
 
+## Result status and result filter (AIR-557)
+
+The events screen and the compact feed show one result marker per event: icon, restrained colour accent and text («Успех», «Предупреждение», «Прервано», «Ошибка»). The status is `presentationStatus`, derived **in the browser** by one function (`eventPresentationStatus` in `public/app.js`) from structured fields only (`type`, `presentation`, `kind`, `state`, `status`, `reason`/`stopReason`, `cause`, `outcome`, `stage`, `delta`), never from a title or a translation. It is not stored, not returned by `GET /api/events` and not a backfill; the existing `catalog_posters.outcome` field is only read for `catalog_posters` events. An event with no confirmed result has **no** status and shows no badge: there is no fifth status and no invented «success».
+
+| Source | success | warning | interrupted | error |
+| --- | --- | --- | --- | --- |
+| Predictions `batch_v2_terminal` | `stage=complete`, no per-film failures (also `manifest_spent`) | `complete` with per-film failures; `quota`, `time_budget`, `parse_error`, `lease_lost`, `lease_expired`; any other unlisted stop code | `priority_changed`, `profile_changed`, `runner_aborted`, `external_termination` | `api_error`, `storage_error`, `model_error`, `model_unavailable`, `format_error_storm` |
+| Predictions `batch_v2_skipped` (AIR-548) | | always (a refused attempt, not an interrupted run) | | |
+| Discovery `kind=hour` | `idle`, `empty`, found/nothing new (complete report) | `waiting`, `blocked`, `incomplete`, unreadable counts, `queueUnreadable` | | `failed`, `stalled` |
+| Discovery `kind=report_failed` | | unknown or non-alarming state, `waiting`, `blocked` | | confirmed `status=failed\|stalled` |
+| Discovery legacy per-chain | | | `status=superseded` | `failed`, `stalled` |
+| Ratings | `state=finished` | `cause=blocked\|rate_limited` | `state=unknown`, `cause=interrupted\|abandoned` | `state=error` |
+| Catalog posters | `outcome=completed` (zero results and `noPoster` are normal) | `outcome=deferred` (or `final=false` with no outcome) | | `outcome=failed` |
+| EPG | published | | | |
+
+No status (neutral): `watchlist`, `started`, `unstarted`, `taste_profile`, Predictions `started`/`resumed`/progress and legacy v3-v5 `enrichment`, Discovery `hour` with `status=running` (the Workflow has no outcome yet), legacy Discovery `stopped`/`empty`, unknown types, fields and combinations. Priority on collision: for a terminal packet, `stage=complete` decides first (failures → warning), then a systemic error code beats an interruption code beats a soft code; `stopReason` beats `reason`; for a Discovery hour, confirmed `failed`/`stalled` beats `waiting`/`blocked` beats an incomplete or unreadable report; for Ratings, `finished` beats a stray `cause`, and a temporary `cause` beats `state=error`.
+
+**«Результат» filter.** `/events` has a second single-select, «Результат»: `Все | Успех | Предупреждение | Прервано | Ошибка`, next to «Тип событий». The two axes combine; «Пропущенные» stays a **type** option and `warning` a **result**. The filter is client-side only: it reads the loaded events and writes nothing. The choice is the `result` query parameter (`/events?type=enrichment&result=error`); each axis rewrites only its own parameter, so the other filter, `return` and the fragment survive; reload, Back/Forward and deep links restore both. The automatic first-ten search of AIR-381 counts events that match **both** active axes and keeps its bounds (sequential cursor order, abort on a change of filter or screen, explicit retry on an error, no repeated cursor, «archive exhausted» only when the cursor ends); with both axes on «Все» it never scans.
+
 ## Catalog poster weekly report (`catalog_posters`)
 
 The automatic weekly poster retry ([ADR 0179](../../adr/0179-weekly-automatic-catalog-poster-retry.md)) writes at most **two reports per logical week** (weeks start Sunday 00:00 UTC) into `events/items/`: a `deferred` report the first time a run carries over, and a `final` report when it completes or fails. A zero-result week writes only `final`. A deferred report is never terminal success. An idle daily firing writes no event.
