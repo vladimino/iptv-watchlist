@@ -1,9 +1,9 @@
 # ADR 0183: The view index key set comes from D1 rows, not from the mutable R2 object
 
-**Status:** Proposed  
-**Original decision date:** not decided; the owner has not chosen between the options below  
+**Status:** Accepted (target design; production not activated)  
+**Original decision date:** 2026-11-20  
 **Recorded at:** 2026-11-20  
-**Approval source:** not documented. This record asks for the owner decision; it is not Accepted and authorizes nothing.  
+**Approval source:** [Owner decision recorded on AIR-552](https://trello.com/c/Hk2dJf2U#comment-6b005e464d8174c52aca7148), following the [decision brief](https://trello.com/c/Hk2dJf2U). The owner chose A, authorized one bounded read-only parity comparison and selected the temporary read selector. Activation and acceptance of observed differences remain separate gates.  
 **Related work:** [AIR-552](https://trello.com/c/Hk2dJf2U); [AIR-546](https://trello.com/c/1dRSJEbp); [AIR-275](https://trello.com/c/4x7hH0gI); [AIR-547](https://trello.com/c/99faXisC); [field-level contract](../reference/domain/view-index-read-model.md); [offline analysis](../evidence/d1-migration/air-552-membership-options-offline-2026-11-20.md)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -18,13 +18,13 @@ The object costs memory and writes: the footer has a streaming reader because th
 
 ## Decision
 
-**Proposed (recommended): option A.** The key set of the view index is the union of the film ids of `prediction_pointer`, `prediction_fingerprint` and `ratings_view`, read in bounded keyset pages by the same overlay readers that exist today. The compiled ratings seed stays a separate in-memory layer applied afterwards with today's rule: an own `actualRating` (an explicit `null` included) wins, otherwise the seed fills it, and a seed-only id adds a key. The raw object is no longer read, and `updateViewIndex`, `ensureInitialRatings` and the mood and fingerprint backfills stop writing it. No new table, no migration, no second mutable authority. Field values, `moodFacet` recomputation, the fail-closed refusals (`ratings_domain_not_authoritative`, `overlay_rows`) and the no-write rule of GET are unchanged.
+**Accepted target: option A.** The key set of the view index is the union of the film ids of `prediction_pointer`, `prediction_fingerprint` and `ratings_view`, read in bounded keyset pages by the same overlay readers that exist today. The compiled ratings seed stays a separate in-memory layer applied afterwards with today's rule: an own `actualRating` (an explicit `null` included) wins, otherwise the seed fills it, and a seed-only id adds a key. The raw object is no longer read, and `updateViewIndex`, `ensureInitialRatings` and the mood and fingerprint backfills stop writing it. No new table, no migration, no second mutable authority. Field values, `moodFacet` recomputation, the fail-closed refusals (`ratings_domain_not_authoritative`, `overlay_rows`) and the no-write rule of GET are unchanged.
 
-Not decided here: whether the switch is an owner-set flag or a deploy, the parity thresholds the owner accepts, and every production read or write.
+The owner chose a temporary `r2` (default) / `d1` read selector for the implementation, with the R2 writers continuing until a controlled switch and later cleanup. This decision accepts the **architecture**, not a particular production data diff. A single scoped read-only comparison of the existing R2 key set with the three D1 tables and the compiled seed is separately approved in the decision record. Actual field/key differences, activation thresholds, selector creation or modification in production, cutover and decommission remain unapproved until their own evidence and owner decisions.
 
 ## Alternatives considered
 
-**A. Union of D1 rows (above).** Differences from today, each reported by id by the offline classifier and typed by which D1 table holds the row (the prediction overlay supplies different fields per table):
+**A. Union of D1 rows (accepted target).** Differences from today, each reported by id by the offline classifier and typed by which D1 table holds the row (the prediction overlay supplies different fields per table):
 
 - **Removed key.** A raw key with no D1 row of any of the three kinds and no seed id disappears. It carries no fact, so every field-based reader is unchanged; it leaves the bridge candidate list, the health `entries` count and the operator scripts' lid targets.
 - **Forecast gain** (an id with a `prediction_pointer` row that is not a raw key). `item.prediction` appears, with a mood facet derived from it. Today such an id shows no forecast. Visible effects: the full view, the footer prediction coverage, queue freshness (the film reads as predicted) and Finds eligibility.
@@ -39,37 +39,38 @@ Cost per request: the keyset reads the overlays already do, minus one 11.3 MB ob
 
 ## Consequences
 
-A removes the dependency, the per-submit object rewrite and the whole-object read, and creates nothing to repair. Its risk is the two differences above; they are bounded by the parity run, not argued away. B keeps behavior identical at the price of new state; it is the safer choice only if the parity run shows a raw-only key that a reader needs. Either option must keep the seed layer and the Letterboxd reader path (ratings overlay only; it needs the ratings and seed ids, not the prediction ids).
+A removes the dependency, the per-submit object rewrite and the whole-object read, and creates nothing to repair. Its risk is the removed keys and two distinct typed field gains above; these must be measured by the parity run, not assumed harmless. B better preserves legacy membership at the price of new state; reconsider B only with a further owner decision if a raw-only key is essential and cannot be recovered through an authoritative identity source. Either option must keep the seed layer and the Letterboxd reader path (ratings overlay only; it needs the ratings and seed ids, not the prediction ids).
 
-## Parity criteria and rollout (for owner approval; none is authorized now)
+## Approved parity investigation and gated rollout
 
-1. **Owner GO for one read-only export** of `enrichment/view-index.json` and the film ids of the three D1 tables, using the existing read-only snapshot tooling. `compareMembership` (`scripts/view-index-membership-parity.mjs`) classifies it. Report: counts of `removedKeys`, `newKeys`, `forecastOnly`, `featuresOnly`, `forecastAndFeatures` (and how many of each already are a key through a ratings alias or the seed) and the seed categories; for each removed key whether it is the only bridge to a film; for each forecast gain the effect on Finds eligibility, footer prediction coverage and queue freshness; for each feature gain the effect on the mood and mechanics filters.
-1b. **Operator tooling.** Under A the snapshot export (`r2-snapshot-export`) and the four Letterboxd scripts need a defined view-index source (a D1-derived key set, or none); that change belongs to the implementation PR.
-2. **Acceptance of A** needs: removed keys inert for every field reader and bridge-redundant (or explicitly accepted by the owner), forecast gains and feature gains each reviewed by the owner as separate outcomes, no seed-category change, keyset reads within the existing 20,000-row caps with a measured margin.
-3. **Implementation PR** after the decision, against fresh `main`, reading from D1 for every consumer (`loadJSON`, `readViewIndex`, Finds and programme, footer streaming, Admin health and limbo, queue, diagnostics and recovery, `LetterboxdFacts.readJSON`) behind a temporary selector (`r2` default, `d1`) with its removal card created first and the flag-lifecycle entry in the same PR; raw writers retained so the object stays current and the switch stays reversible by setting the selector back.
-4. **Controlled switch** under an owner-approved L3 plan with holdpoints: before and after readback of the footer counts and the Finds count on permitted read-only routes, stabilization, owner acceptance.
-5. **Cleanup PR**: remove the raw writers and reads and the selector; the object itself is retired by a separate owner-approved R2 operation (no delete here).
+1. **Owner-authorized single read-only parity comparison.** This one permission covers a bounded export of the *key set* of `enrichment/view-index.json`, the film ids of `prediction_pointer`, `prediction_fingerprint` and `ratings_view` in the production `iptv` D1 database, and the compiled ratings seed. Use proven side-effect-free read tooling only, verify the production D1 binding and authority markers first, and do not publish raw private records. The offline `compareMembership` classifier (`scripts/view-index-membership-parity.mjs`) reports `removedKeys`, `newKeys`, `forecastOnly`, `featuresOnly`, `forecastAndFeatures`, seed categories and overlap through existing ratings/seed keys. For each removed key determine whether it is the only identity bridge to a film; for forecast gains assess Finds eligibility, footer coverage and queue freshness; for feature gains assess mood/mechanics. An unexpected marker, source error or budget overrun is a stop, not a reason to repair or fall back.
+2. **Operator tooling contract.** The snapshot export (`r2-snapshot-export`) and the four Letterboxd scripts must use an explicitly defined D1-derived key-set source (or no view-index source) after cutover. This belongs to the implementation, not the read-only audit.
+3. **Owner review of real parity evidence.** Before implementing or activating the replacement, independently verify that removed keys carry no needed field facts and are bridge-redundant (or are explicitly handled by a new owner decision), and separately inspect forecast and feature gains and any effect on user-facing counts and eligibility. Preserve seed precedence including an own `actualRating: null`. Measure the row-count and CPU margin against the existing 20,000-row overlay caps. **A is approved as the target, but no specific production difference is approved yet.** If the audit exposes essential legacy-only ids or an unacceptable effect, stop and ask the owner to choose targeted preservation or reconsider B.
+4. **Implementation PR, after the parity review.** Target fresh `main`; implement D1-derived membership across `loadJSON`, `readViewIndex`, Finds/programme, footer streaming, Admin health/limbo, queue, diagnostics/recovery, `LetterboxdFacts.readJSON` and operator scripts. Add a temporary read selector with `r2` as default and `d1` as an option, plus a defined retirement follow-up and feature-flag contract. Keep the R2 writers running until the approved switch so that read rollback remains possible. Read-only GET must never write. Retain the existing authoritative-domain fail-closed guards and bounded keyset paging.
+5. **Controlled switch, requiring a distinct owner-approved L3 plan.** The owner must approve the actual parity differences and activation holdpoints, including before/after footer and Finds readbacks, measured resource budgets and bounded stabilization. Creating or changing any production selector/flag is not authorized by the architectural decision or the audit permission.
+6. **Cleanup, separately gated.** After verified acceptance, remove raw R2 writers/readers and the temporary selector in a reviewed PR. Retire the object only under a separate owner-approved R2 operation, not in this ADR approval PR.
 
-Rollback until step 5: set the selector back; the raw object was never stopped being written. After step 5 the raw object can be rebuilt only from D1 rows by an owner-approved offline export, so step 5 needs its own gate.
+Rollback until cleanup: return the selector to `r2` while the raw index is still being maintained. A code rollback is not a data rollback. After cleanup, rebuilding an R2 view index from D1 would require a separate owner-approved offline export.
 
-## Questions for the owner
+## Recorded owner decisions and unresolved acceptance
 
-1. Choose A (recommended) or B.
-2. May one read-only export for the parity run be performed (the single R2 object and the film ids of the three tables)? Without it neither option can be accepted.
-3. If A: temporary selector (`r2`/`d1`, instant rollback, owner-set binding) or a code-only switch by deploy (simpler, rollback is a revert deploy)? Recommended: selector.
-4. If A: are the two gains acceptable, subject to review of the parity list: (a) a forecast appearing for a film with a `prediction_pointer` row but no raw key, and (b) mood and mechanics features appearing, without a forecast, for a film with only a `prediction_fingerprint` row?
+- **Selected:** A rather than a new mutable D1 membership table (B) or a permanent raw R2 mirror (C).
+- **Approved observation:** one bounded read-only production parity comparison of the specified R2 key set, D1 film ids and compiled seed. No other production operation is included.
+- **Selected rollout shape:** temporary `r2` / `d1` selector with `r2` as default, removed after stabilization. The selector is not yet deployed or set in production.
+- **Conditionally acceptable in principle, not yet accepted in production:** previously committed forecast gains and fingerprint/feature gains, with their actual effects presented after parity.
+- **Still gated:** any essential removed key, real user-facing behavioral differences, implementation release acceptance, production flag change, cutover, R2 cleanup and AIR-552 final acceptance.
 
 ## Recovery and migration boundary
 
-Documentation and an offline classifier only. No production read or write, migration, flag, Task, R2 delete or cutover is authorized by this record; each needs its own owner GO. A code rollback never reverts R2 or D1 data.
+Architecture and documentation only. The single narrowly scoped, read-only production parity comparison described above is owner-authorized; this ADR does not authorize any production mutation, additional read/repair, migration, flag change, Task, R2 deletion or authority cutover. Each such action needs separate owner approval. A code rollback never reverts R2 or D1 data.
 
 ## Evidence
 
-- **Original decision:** not recorded (Proposed).
-- **Implementation:** none.
+- **Original decision:** [owner-approved target A, bounded parity permission and selector choice](https://trello.com/c/Hk2dJf2U#comment-6b005e464d8174c52aca7148), 20 November 2026.
+- **Implementation:** no read-model replacement yet; [PR #812](https://github.com/vladimino/iptv-watchlist/pull/812) delivered the earlier Proposed ADR and offline classifier only.
 - **Dated verification:** [offline analysis, 20 November 2026](../evidence/d1-migration/air-552-membership-options-offline-2026-11-20.md), synthetic fixtures only.
-- **Uncertainty:** the production raw object's real key set against the D1 rows, and the number of removed keys, forecast gains and feature gains.
+- **Uncertainty:** the production raw object's real key set against the D1 rows, the number and effect of removed keys and typed gains, and whether any legacy-only identifier needs preservation. No production parity readback has yet been recorded.
 
 ## Follow-ups
 
-The implementation card and the temporary-flag removal card are created only after the owner decision. Coordinate documentation with [AIR-547](https://trello.com/c/99faXisC).
+The implementation and temporary-selector retirement follow-ups remain to be scoped after the approved parity investigation, with explicit owner gates for production action. Coordinate documentation with [AIR-547](https://trello.com/c/99faXisC). AIR-552 remains open and continues to block AIR-275 until actual acceptance.
