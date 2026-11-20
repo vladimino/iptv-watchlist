@@ -14,7 +14,7 @@ flowchart TD
     gate["Owner approval and live evidence gates"]
     snapshot["Fenced R2 snapshot (read-only export)"]
     reload["Offline executor build, loaded by D1 Import API"]
-    d1[("D1 iptv: cache, predictions, EPG, owner reviews, ratings, discovery, canonical Film/Person")]
+    d1[("D1 iptv: cache, predictions, EPG, owner reviews, ratings, discovery, canonical Film/Person, Filter presets")]
     worker <--> r2
     worker -->|read-only /api/d1| d1
     archive --> importer --> local
@@ -27,6 +27,7 @@ flowchart TD
     worker -.->|current ratings facts, diary and the removal queue: schema v10 marker d1/open| d1
     worker -.->|current discovery ledger, decisions and admission: schema v11 marker d1/open| d1
     worker -.->|current canonical Film/Person: marker d1/open generation 2, fenced adapters| d1
+    worker -.->|current Filter presets: schema v28 marker d1/1/open, rows in D1, no R2 read or write| d1
     classDef future fill:#fff3de,stroke:#a56c2b,color:#42300e
     class gate future
 ```
@@ -100,7 +101,7 @@ Historical (the tooling below was removed in AIR-537 slice 2; the move is comple
 
 ## Filter presets authority (schema v28, D1 since 20 Nov 2026)
 
-`migrations/0028_filter_preset_authority.sql` adds a per-domain marker, one revision row and the preset rows for the saved main-page filters. The marker was `r2` until the owner-approved activation on 20 Nov 2026 ([cutover evidence](../evidence/d1-migration/air-549-filter-presets-cutover-2026-11-20.md)); it now reads `d1`, generation 1, so D1 rows are the only authority and R2 `ui/filter-presets.json` is stale. Before activation R2 was the only authority, and the Worker reads the marker per request, serves R2 when the marker is `r2` or the database proves it is pre-migration, and answers `503` (never R2) when the marker, the binding or the schema cannot be trusted, including after activation. A hold stops new R2 writes, and a fence write on the R2 object stops writes admitted earlier. The import holds preset writes (`writes` `held`), loads the rows with the marker still `r2`, and one guarded update with a row-by-row parity check switches `mode` to `d1`; from then on R2 is neither read nor written for presets, and a stale R2 `ETag` is refused so clients refresh. User state of this kind has no other writer: the Events journal and Started marks are a separate domain. No Mermaid block names this domain, so no diagram changed with the activation. Reference: [programme filters](../reference/domain/programme-filters.md#saved-filter-presets-api-and-storage-contract); procedure: [runbook](../runbooks/filter-presets-cutover.md).
+`migrations/0028_filter_preset_authority.sql` adds a per-domain marker, one revision row and the preset rows for the saved main-page filters. The marker was `r2` until the owner-approved activation on 20 Nov 2026 ([cutover evidence](../evidence/d1-migration/air-549-filter-presets-cutover-2026-11-20.md)); it now reads `d1`, generation 1, so D1 rows are the only authority and R2 `ui/filter-presets.json` is stale. Before activation R2 was the only authority, and the Worker reads the marker per request, serves R2 when the marker is `r2` or the database proves it is pre-migration, and answers `503` (never R2) when the marker, the binding or the schema cannot be trusted, including after activation. A hold stops new R2 writes, and a fence write on the R2 object stops writes admitted earlier. The import holds preset writes (`writes` `held`), loads the rows with the marker still `r2`, and one guarded update with a row-by-row parity check switches `mode` to `d1`; from then on R2 is neither read nor written for presets, and a stale R2 `ETag` is refused so clients refresh. User state of this kind has no other writer: the Events journal and Started marks are a separate domain. The graph at the top shows the switch as the `Filter presets` arrow to D1; R2 `ui/filter-presets.json` is not drawn as a presets authority because nothing reads or writes it for presets any more (the stale object stays in the bucket until a separately approved decommission). Reference: [programme filters](../reference/domain/programme-filters.md#saved-filter-presets-api-and-storage-contract); procedure: [runbook](../runbooks/filter-presets-cutover.md).
 
 ## Diary identity pending document (AIR-489)
 

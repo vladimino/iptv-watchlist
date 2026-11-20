@@ -17,7 +17,7 @@ D1 is the only authority for presets since the activation: marker `d1`, generati
 | Marker | `r2`, generation 0, writes `open`; `filter_preset` 0 rows; `filter_preset_cas.ok` 1 |
 | R2 `ui/filter-presets.json` | ETag `c9e2fab3b9b2237003b3262627948905`, 1525 bytes, raw sha256 `9f4557933509967e8e2d23e3e22b67fc2584ccbcebb65ab4307e8802ef3d2737`; `digest` exit 0, count 3, sha256 `8ff4117e2f68b0777faadcd2535571dccb0da34074c953824843ca461d698abc` |
 
-**Deviation.** The handoff said migration 0028 had not been applied. It had already been applied to production D1 by someone other than this executor, before the preflight; the state was exactly the post-0028 state (marker `r2`/0/`open`, no rows). The "apply 0028" step was therefore skipped, and who applied it and when is not recorded here.
+**Deviation.** The handoff said migration 0028 had not been applied. It was already applied to production D1 when the preflight ran, by someone other than this executor; the operator and the application time are unknown and remain an unresolved provenance gap. It is not established that it happened before 20 Nov 2026; the state was exactly the post-0028 state (marker `r2`/0/`open`, no rows). The "apply 0028" step was therefore skipped, and who applied it and when is not recorded here.
 
 ## Hold and R2 fence
 
@@ -36,6 +36,23 @@ D1 is the only authority for presets since the activation: marker `d1`, generati
 - Readback: marker `d1`, generation 1, writes `open`, CAS 1, 3 rows.
 - `GET /api/ui/filter-presets` through Cloudflare Access (a read-only route in the [read side-effects baseline](../../reference/api/read-side-effects.md)): HTTP 200, ETag `"d1:1"`, `schemaVersion` 1, three presets equal to the fenced export. D1 after the GET: unchanged, generation 1, no write.
 - R2 after the activation: ETag `afa0bf35…`, raw sha256 `7f885be2…`, byte-equal to the fenced export (no write by the activation).
+
+## Authorization provenance (operator-attested, not independently verified)
+
+Each production step had its own owner GO, given in the executor chat session. There is no linkable approval record outside that chat. The times below are the server-recorded creation times of the owner's messages in the session transcript (UTC; Madrid is UTC+1 on this date); the step times are not separately recorded, so each step ran after its GO and before the next message.
+
+| Owner message | UTC | Madrid | Step it authorized |
+| --- | --- | --- | --- |
+| "GO preflight" | 2026-11-20 14:36:22 | 15:36:22 | Read-only preflight (D1 binding and schema, R2 object read) |
+| "GO hold + fence" | 2026-11-20 14:37:26 | 15:37:26 | Hold, then the R2 fence write |
+| owner told the executor that the `R2_RW_ACCES_*` keys work | 2026-11-20 14:38:40 | 15:38:40 | Not a GO of its own: the pointer to the working read-write pair after the first fence attempt was refused (the fence ran under the GO above) |
+| "GO import" | 2026-11-20 14:39:26 | 15:39:26 | Guarded import from the fenced export |
+| "GO activate" | 2026-11-20 14:40:19 | 15:40:19 | Activation, then the Access readback |
+| permission to download `cloudflared` | 2026-11-20 14:41:28 | 15:41:28 | Installing the tool for the Access login |
+| "signed in" | 2026-11-20 14:42:15 | 15:42:15 | Owner completed the Access login; read-only `GET` followed |
+| "record the evidence without the UI check" | 2026-11-20 14:42:47 | 15:42:47 | Deferral of the owner UI and stale-token checks |
+
+The unknown actor and time of the earlier 0028 apply stay an open gap. No timestamp or link is invented here.
 
 ## Not done
 
