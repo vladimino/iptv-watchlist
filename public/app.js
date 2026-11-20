@@ -2851,7 +2851,7 @@ async function loadEvents(more=false,options={}){
   activityNote=eventPaging.error?'Не удалось загрузить события.':eventPaging.stuck?'Архив событий не продвигается дальше.':(!more&&!data.events.length?'Здесь появятся события списка.':'');
   eventLoadingMore=false;
   renderActivity();
-  if(!options.auto&&eventsScreen&&eventTypeFilterId!=='all'&&!eventSearch.controller&&eventSearch.state==='idle')startEventSearch();
+  if(!options.auto&&eventsScreen&&eventFilterActive()&&!eventSearch.controller&&eventSearch.state==='idle')startEventSearch();
   return true;
  }catch{
   if(options.signal&&options.signal.aborted)return 'aborted';
