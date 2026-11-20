@@ -198,7 +198,17 @@ function placeActivity(){
 function syncEventTypeButtons(){
  for(const button of document.querySelectorAll('#events-types [data-event-type]'))button.setAttribute('aria-pressed',String(button.dataset.eventType===eventTypeFilterId));
 }
-function syncEventTypeFromUrl(){eventTypeFilterId=eventTypeFrom(new URL(window.location.href).search);syncEventTypeButtons();startEventSearch();}
+function syncEventResultButtons(){
+ for(const button of document.querySelectorAll('#events-results [data-event-result]'))button.setAttribute('aria-pressed',String(button.dataset.eventResult===eventResultFilterId));
+}
+function syncEventTypeFromUrl(){const search=new URL(window.location.href).search;eventTypeFilterId=eventTypeFrom(search);eventResultFilterId=eventResultFrom(search);syncEventTypeButtons();syncEventResultButtons();startEventSearch();}
+function selectEventResult(id){
+ if(!EVENT_RESULT_FILTERS.some(item=>item.id===id))return;
+ resetEventPrefetch();
+ eventResultFilterId=id;syncEventResultButtons();
+ if(eventsRequested()&&currentPathname()==='/events'){const here=new URL(window.location.href);window.history.replaceState(window.history.state,'',withEventResult(here.pathname+here.search+here.hash,id));}
+ startEventSearch();
+}
 function selectEventType(id){
  if(!EVENT_TYPE_FILTERS.some(item=>item.id===id))return;
  resetEventPrefetch();
@@ -213,8 +223,9 @@ function applyEventsScreen(on){
  document.documentElement?.classList?.toggle('events-screen',eventsScreen);
  const expand=$('#activity-expand');
  if(expand)expand.hidden=eventsScreen;
- const types=$('#events-types'),main=$('#events-screen');
+ const types=$('#events-types'),results=$('#events-results'),main=$('#events-screen');
  if(types)types.hidden=!eventsScreen;
+ if(results)results.hidden=!eventsScreen;
  if(main)main.hidden=!eventsScreen;
  placeActivity();
  resetEventPrefetch();
@@ -541,18 +552,95 @@ function eventMatchesType(event,id){
  return filter.types.includes(event&&event.type)&&(!filter.presentation||event.presentation===filter.presentation);
 }
 // Replaces only the `type` parameter of an href: every other parameter (the encoded `return` target included) and the fragment stay byte for byte.
-function withEventType(href,id){
+function withEventParam(href,name,id,allowed){
  const text=String(href),hashAt=text.indexOf('#'),hash=hashAt>=0?text.slice(hashAt):'',noHash=hashAt>=0?text.slice(0,hashAt):text;
  const queryAt=noHash.indexOf('?'),path=queryAt>=0?noHash.slice(0,queryAt):noHash,query=queryAt>=0?noHash.slice(queryAt+1):'';
- const keyOf=pair=>{const name=pair.split('=')[0];try{return decodeURIComponent(name.replace(/\+/g,' '));}catch{return name;}};
- const kept=query?query.split('&').filter(pair=>pair!==''&&keyOf(pair)!=='type'):[];
- if(id!=='all'&&EVENT_TYPE_FILTERS.some(item=>item.id===id))kept.push('type='+encodeURIComponent(id));
+ const keyOf=pair=>{const key=pair.split('=')[0];try{return decodeURIComponent(key.replace(/\+/g,' '));}catch{return key;}};
+ const kept=query?query.split('&').filter(pair=>pair!==''&&keyOf(pair)!==name):[];
+ if(id!=='all'&&allowed.some(item=>item.id===id))kept.push(name+'='+encodeURIComponent(id));
  return path+(kept.length?'?'+kept.join('&'):'')+hash;
 }
+function withEventType(href,id){return withEventParam(href,'type',id,EVENT_TYPE_FILTERS);}
+function withEventResult(href,id){return withEventParam(href,'result',id,EVENT_RESULT_FILTERS);}
+// AIR-557: the result axis of the events screen. `presentationStatus` is derived on the client from the structured fields of the stored event (never from
+// a title or a translation) by the one function below; an event with no confirmed result has none and shows no badge.
+const EVENT_RESULT_FILTERS=[
+ {id:'all',label:'Все'},
+ {id:'success',label:'Успех'},
+ {id:'warning',label:'Предупреждение'},
+ {id:'interrupted',label:'Прервано'},
+ {id:'error',label:'Ошибка'},
+];
+const EVENT_STATUS_BADGES={success:{label:'Успех',icon:'✓'},warning:{label:'Предупреждение',icon:'!'},interrupted:{label:'Прервано',icon:'■'},error:{label:'Ошибка',icon:'✕'}};
+function eventResultFrom(search){
+ let params;try{params=new URLSearchParams(String(search||''));}catch{return 'all';}
+ for(const value of params.getAll('result')){const found=EVENT_RESULT_FILTERS.find(item=>item.id===value);if(found)return found.id;}
+ return 'all';
+}
+// Priority when several signals meet: a systemic error code beats an interruption code, which beats a soft «attention» code; a confirmed hard status
+// (`failed`/`stalled`) beats a soft one (`waiting`/`blocked`), which beats an incomplete or unreadable report. Anything not listed has no status.
+const PRESENTATION_ERROR_CODES=['api_error','storage_error','model_error','model_unavailable','format_error_storm'];
+const PRESENTATION_INTERRUPTED_CODES=['priority_changed','profile_changed','runner_aborted','external_termination'];
+const PRESENTATION_WARNING_CODES=['quota','time_budget','parse_error','lease_lost','lease_expired'];
+function eventPresentationStatus(event){
+ if(!event||typeof event!=='object')return null;
+ const int=v=>Number.isInteger(v)&&v>=0;
+ switch(event.type){
+  case 'epg':return 'success';
+  case 'enrichment':{
+   if(event.presentation==='batch_v2_skipped')return 'warning';
+   if(event.presentation!=='batch_v2_terminal')return null;
+   const stop=event.stopReason||event.reason,delta=event.delta&&typeof event.delta==='object'?event.delta:{},failed=int(delta.failed)?delta.failed:(int(event.failed)?event.failed:0);
+   if(event.stage==='complete')return failed>0?'warning':'success';
+   if(PRESENTATION_ERROR_CODES.includes(stop))return 'error';
+   if(PRESENTATION_INTERRUPTED_CODES.includes(stop))return 'interrupted';
+   if(NORMAL_RUN_REASONS.includes(stop))return failed>0?'warning':'success';
+   return 'warning';
+  }
+  case 'discovery':{
+   const status=event.status;
+   if(event.kind==='hour'){
+    if(status==='failed'||status==='stalled')return 'error';
+    if(status==='waiting'||status==='blocked')return 'warning';
+    if(event.incomplete===true||!int(event.checked)||!int(event.added)||event.queueUnreadable===true)return 'warning';
+    // A Workflow that is still running has no outcome yet; «nothing new» is a normal result, not a warning.
+    return status==='running'?null:'success';
+   }
+   if(event.kind==='report_failed')return status==='failed'||status==='stalled'?'error':'warning';
+   if(status==='failed'||status==='stalled')return 'error';
+   if(status==='superseded')return 'interrupted';
+   return null;
+  }
+  case 'ratings':{
+   const cause=event.cause;
+   if(event.state==='finished')return 'success';
+   if(cause==='blocked'||cause==='rate_limited')return 'warning';
+   if(cause==='interrupted'||cause==='abandoned'||event.state==='unknown')return 'interrupted';
+   if(event.state==='error')return 'error';
+   return null;
+  }
+  case 'catalog_posters':
+   if(event.outcome==='completed')return 'success';
+   if(event.outcome==='failed')return 'error';
+   if(event.outcome==='deferred'||(event.outcome===undefined&&event.final===false))return 'warning';
+   return null;
+  default:return null;
+ }
+}
+function eventMatchesResult(event,id){
+ if(!EVENT_RESULT_FILTERS.some(item=>item.id===id)||id==='all')return true;
+ return eventPresentationStatus(event)===id;
+}
+function eventMatchesFilters(event,typeId,resultId){return eventMatchesType(event,typeId)&&eventMatchesResult(event,resultId);}
+function eventStatusBadgeHTML(event){
+ const status=eventPresentationStatus(event),badge=status&&EVENT_STATUS_BADGES[status];
+ return badge?`<span class="event-status event-status-${status}"><span class="event-status-icon" aria-hidden="true">${badge.icon}</span>${badge.label}</span>`:'';
+}
 const EVENT_SEARCH_TARGET=10;
-let eventTypeFilterId='all',activityNote='Загружаем события…',eventsReady=false;
+let eventTypeFilterId='all',eventResultFilterId='all',activityNote='Загружаем события…',eventsReady=false;
 const eventSearch={token:0,state:'idle',controller:null};
-function eventMatchCount(id){let count=0;for(const event of loadedEvents.values())if(eventMatchesType(event,id))count++;return count;}
+function eventMatchCount(id,result=eventResultFilterId){let count=0;for(const event of loadedEvents.values())if(eventMatchesFilters(event,id,result))count++;return count;}
+function eventFilterActive(){return eventTypeFilterId!=='all'||eventResultFilterId!=='all';}
 const eventPause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function resetEventPrefetch(){eventPaging.run=0;eventPaging.paused=false;}
 function cancelEventSearch(){
@@ -567,7 +655,7 @@ function cancelEventSearch(){
 async function startEventSearch(){
  const id=eventTypeFilterId;
  cancelEventSearch();
- if(!eventsScreen||id==='all'||!eventsReady){renderActivity();return;}
+ if(!eventsScreen||!eventFilterActive()||!eventsReady){renderActivity();return;}
  const token=eventSearch.token,controller=typeof AbortController==='function'?new AbortController():null,seen=new Set();
  eventSearch.controller=controller;
  if(eventCursor&&eventMatchCount(id)<EVENT_SEARCH_TARGET)eventSearch.state='searching';
@@ -591,21 +679,21 @@ async function startEventSearch(){
  renderActivity();
 }
 function activityStatusText(filter,ordered,shown){
- if(filter==='all')return activityNote;
+ if(filter==='all'&&eventResultFilterId==='all')return activityNote;
  const state=eventSearch.state,found='Найдено среди загруженных: '+eventMatchCount(filter)+'.';
  // The state of the search is told first: an empty first page followed by a failure, a repeated cursor or the end of the archive must show.
  if(state==='searching')return 'Ищем более давние события… '+found;
  if(state==='error')return 'Не удалось загрузить события. '+found;
  if(state==='stuck')return 'Архив событий не продвигается дальше. '+found;
- if(!shown.length&&state==='exhausted')return 'Во всём доступном архиве событий этого типа нет.';
- if(!shown.length&&ordered.length)return 'Среди загруженных событий этого типа пока нет.';
+ if(!shown.length&&state==='exhausted')return (eventResultFilterId==='all'?'Во всём доступном архиве событий этого типа нет.':'Во всём доступном архиве событий с такими фильтрами нет.');
+ if(!shown.length&&ordered.length)return (eventResultFilterId==='all'?'Среди загруженных событий этого типа пока нет.':'Среди загруженных событий с такими фильтрами пока нет.');
  return activityNote;
 }
 // The tail of the list is one of: none (nothing to say), idle (older events exist and the sentinel waits for the scroll), loading (a request is in
 // flight), error (a failed page or a cursor that does not advance, with an explicit retry) or end. «end» is told only when the server returned no next
 // cursor and something is shown: never for an error, an unfinished search, an empty filter result or the target of ten matches.
 function activityTailState(){
- const filtered=eventsScreen&&eventTypeFilterId!=='all';
+ const filtered=eventsScreen&&eventFilterActive();
  if(eventPaging.error||eventPaging.stuck||(filtered&&(eventSearch.state==='error'||eventSearch.state==='stuck')))return 'error';
  if(!eventsReady)return 'none';
  if(eventLoadingMore||(filtered&&eventSearch.state==='searching'))return 'loading';
@@ -642,7 +730,7 @@ function syncActivityTail(){
 // retry, and nothing while the type search of AIR-381 is still walking the pages by itself.
 function loadOlderEvents(){
  if(!eventsReady||!eventCursor||eventLoading||eventPaging.error||eventPaging.stuck)return false;
- if(eventsScreen&&eventTypeFilterId!=='all'&&(eventSearch.controller||eventSearch.state==='error'||eventSearch.state==='stuck'))return false;
+ if(eventsScreen&&eventFilterActive()&&(eventSearch.controller||eventSearch.state==='error'||eventSearch.state==='stuck'))return false;
  if(eventPaging.seen.has(eventCursor)){eventPaging.stuck=true;activityNote='Архив событий не продвигается дальше.';renderActivity();return false;}
  // No user scroll since the last pages and the sentinel is still in view: the list cannot scroll. After a few pages stop and offer the button.
  if(eventPaging.run>=EVENT_PREFETCH_LIMIT){eventPaging.paused=true;syncActivityTail();return false;}
@@ -663,7 +751,7 @@ function bindActivityDemand(){
  for(const name of ['scroll','wheel','touchmove','keydown'])scroll.addEventListener(name,onActivityDemand,{passive:true});
 }
 function retryEvents(){
- const filtered=eventsScreen&&eventTypeFilterId!=='all';
+ const filtered=eventsScreen&&eventFilterActive();
  if(filtered&&(eventSearch.state==='error'||eventSearch.state==='stuck')){startEventSearch();return;}
  const kind=eventPaging.error;
  eventPaging.error=null;eventPaging.stuck=false;eventPaging.paused=false;eventPaging.run=0;
@@ -2248,7 +2336,7 @@ function bindControls(){
  const statusDetails=$('#status-details');statusDetails.addEventListener('toggle',()=>{$('#status-details-label').textContent=statusDetails.open?'Скрыть детали':'Показать детали';});
  // Both footer links are real /events links. A plain click opens the in-page screen; a modified or non-primary click (new tab, copy) keeps native navigation.
  for(const link of [$('#status-integrations-events')])if(link)link.addEventListener('click',event=>{if(!plainFilmActivation(event))return;event.preventDefault();openEventsScreen(link);});
- const typeGroup=$('#events-types');if(typeGroup)typeGroup.addEventListener('click',event=>{const button=event.target.closest?.('[data-event-type]');if(button)selectEventType(button.dataset.eventType);});
+ const typeGroup=$('#events-types');if(typeGroup)typeGroup.addEventListener('click',event=>{const button=event.target.closest?.('[data-event-type]');if(button)selectEventType(button.dataset.eventType);});const resultGroup=$('#events-results');if(resultGroup)resultGroup.addEventListener('click',event=>{const button=event.target.closest?.('[data-event-result]');if(button)selectEventResult(button.dataset.eventResult);});
  const activityExpand=$('#activity-expand');if(activityExpand)activityExpand.addEventListener('click',()=>openEventsScreen(activityExpand));
  const returnLink=$('#return-home');if(returnLink)returnLink.addEventListener('click',event=>{if(!plainFilmActivation(event))return;event.preventDefault();returnHome();});
  $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',retryEvents);bindActivityDemand();
@@ -2693,7 +2781,7 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
    +(deferred?`<p class="event-note">Проверка не закончена, это не итог недели.${retry?` Следующая попытка не раньше ${retry}.`:''}</p>`:failed?'<p class="event-note">Автоматические попытки исчерпаны, нужно внимание владельца.</p>':'<p class="event-note">«Нет постера на TMDB» — обычный ответ, а не ошибка.</p>');
  }
  if(event.type==='taste_profile'){const labels={ratingScale:'Изменена шкала оценок',positiveSignals:'Изменены положительные сигналы',negativeSignals:'Изменены отрицательные сигналы',characterLogic:'Изменена логика персонажей',pace:'Изменён темп',payoffEnding:'Изменены развязка и финал',genrePreferences:'Изменены жанровые предпочтения',comedyPreferences:'Изменены предпочтения для комедий',horrorPreferences:'Изменены предпочтения для хорроров',scifiAdventurePreferences:'Изменены предпочтения для фантастики и приключений',actionPreferences:'Изменены предпочтения для боевиков',anchorFilms:'Изменены опорные фильмы',hardSkips:'Изменены жёсткие исключения',calibration:'Изменена калибровка'},known=Array.isArray(event.changedFields)?event.changedFields.filter(field=>Object.hasOwn(labels,field)):[],phrase=event.scope==='identity'&&!known.length?'Содержание модели не изменилось':known.length===1?labels[known[0]]:known.length>1?'Изменены несколько разделов модели вкуса':'',impact=event.scope==='selective'?'Влияние: выборочное':event.scope==='global'?'Влияние: глобальное':'',from=Number.isInteger(event.fromVersion)?event.fromVersion:null,to=Number.isInteger(event.toVersion)?event.toVersion:null,version=from!==null&&to!==null?`Версия ${from} → ${to}`:to!==null?`Версия ${to}`:'';body=`<p>Модель вкуса обновлена</p>${version?`<p class="event-note">${version}</p>`:''}${phrase?`<p class="event-note">${phrase}</p>`:''}${impact?`<p class="event-note">${impact}</p>`:''}`;}
- return `<li class="activity-event" data-event-id="${escapeHTML(event.id)}"><time datetime="${escapeHTML(event.at)}">${date}</time>${body}</li>`;}
+ return `<li class="activity-event" data-event-id="${escapeHTML(event.id)}"><time datetime="${escapeHTML(event.at)}">${date}</time>${eventStatusBadgeHTML(event)}${body}</li>`;}
 function rememberActivityAnchor(scroll){
  if(!scroll||scroll.scrollTop<=0||typeof scroll.querySelectorAll!=='function')return null;
  const item=[...scroll.querySelectorAll('[data-event-id]')].find(node=>node.offsetTop+node.offsetHeight>scroll.scrollTop);
@@ -2724,7 +2812,7 @@ function renderActivity(){
  const ordered=[...loadedEvents.values()].sort((a,b)=>Date.parse(b.at)-Date.parse(a.at)||a.id.localeCompare(b.id)),olderById=new Map();
  let older=null;
  for(const event of [...ordered].reverse())if(event.type==='enrichment'&&event.presentation!=='batch_v2_skipped'){olderById.set(event.id,older);older=event;}
- const filter=eventsScreen?eventTypeFilterId:'all',shown=ordered.filter(event=>eventMatchesType(event,filter));
+ const filter=eventsScreen?eventTypeFilterId:'all',shown=ordered.filter(event=>eventMatchesFilters(event,filter,eventsScreen?eventResultFilterId:'all'));
  $('#activity-list').innerHTML=shown.map(event=>eventHTML(event,olderById.get(event.id))).join('');
  activityShownCount=shown.length;
  restoreEventGroups(groups);
