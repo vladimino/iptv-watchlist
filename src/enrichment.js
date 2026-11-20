@@ -1922,7 +1922,8 @@ const predictionProgressStalled=ageMs=>ageMs==null||ageMs>=PREDICTION_NO_PROGRES
 function predictionStallAssessment({now,sinceMs=null,eligibleNow=null,nextRetryAtMs=null,activeStartedAtMs=null,activeRun=false,observedSinceMs=null}){
  if(!Number.isInteger(eligibleNow))return {state:'unknown',reason:'queue_unreadable',idleMs:null};
  if(eligibleNow===0)return {state:Number.isFinite(nextRetryAtMs)&&nextRetryAtMs>now?'waiting':'idle',reason:eligibleNow===0?'no_eligible_work':null,idleMs:null};
- if(activeRun&&(!Number.isFinite(activeStartedAtMs)||now-activeStartedAtMs<PREDICTION_ACTIVE_RUN_MAX_MS))return {state:'running',reason:'active_run',idleMs:null};
+ // An unknown start is not trusted as young: a lease without a provable start never hides a long silence.
+ if(activeRun&&Number.isFinite(activeStartedAtMs)&&now-activeStartedAtMs<PREDICTION_ACTIVE_RUN_MAX_MS)return {state:'running',reason:'active_run',idleMs:null};
  const known=Number.isFinite(sinceMs);
  const base=known?sinceMs:Number.isFinite(observedSinceMs)?observedSinceMs:null;
  if(base===null)return {state:'unknown',reason:'no_progress_evidence',idleMs:null};
@@ -1930,7 +1931,9 @@ function predictionStallAssessment({now,sinceMs=null,eligibleNow=null,nextRetryA
  if(predictionProgressStalled(idleMs))return {state:'no_progress',reason:known?'no_productive_batch':'no_progress_evidence',idleMs,sinceKnown:known};
  return {state:known?'ok':'unknown',reason:known?null:'no_progress_evidence',idleMs,sinceKnown:known};
 }
-const PREDICTION_DRAINED=new Set(['queue_empty','eligible_queue_empty','retry_backoff','manifest_spent']);
+// AIR-556 review: only the two reasons whose completion re-read the queue and found no ready film prove an empty (or fully deferred) queue. `manifest_spent`
+// only says the selected manifest was settled (including `already_current`), and `retry_backoff` is a noop with work remaining: neither is progress.
+const PREDICTION_DRAINED=new Set(['queue_empty','eligible_queue_empty']);
 function predictionRunFact(row,now){
  if(!row||typeof row!=='object')return null;
  const reason=row.stopReason||row.reason||null;
@@ -1949,7 +1952,18 @@ function predictionFactMs(fact){const at=integrationTime(fact?.endedAt||fact?.st
 function predictionRunEvidence({run,recentRuns,now}){
  const facts=[];
  const seen=new Set();
- const push=row=>{const fact=predictionRunFact(row,now);if(!fact||!fact.runId||seen.has(fact.runId))return;seen.add(fact.runId);facts.push(fact);};
+ // The same run can arrive as a diagnostic checkpoint and as latest-run.json. A checkpoint written before `updated` existed has no recalculation count, so the
+ // two are merged by run id: counts take the larger value and a missing end time is filled, never dropped in favour of whichever arrived first.
+ const byRun=new Map();
+ const push=row=>{
+  const fact=predictionRunFact(row,now);if(!fact||!fact.runId)return;
+  const known=byRun.get(fact.runId);
+  if(!known){seen.add(fact.runId);byRun.set(fact.runId,fact);facts.push(fact);return;}
+  known.added=Math.max(known.added||0,fact.added||0);known.updated=Math.max(known.updated||0,fact.updated||0);known.failed=Math.max(known.failed||0,fact.failed||0);
+  if(!known.endedAt&&fact.endedAt){known.endedAt=fact.endedAt;known.at=fact.endedAt;}
+  if(!known.reason&&fact.reason)known.reason=fact.reason;
+  if(!known.status&&fact.status)known.status=fact.status;
+ };
  for(const row of recentRuns||[])push(row);
  push(run);
  facts.sort((a,b)=>(Date.parse(b.at||0)-Date.parse(a.at||0))||String(b.runId).localeCompare(String(a.runId)));
@@ -1972,13 +1986,15 @@ function predictionProgressFacts({queue,runs,latestRun,lease,now}){
  const slices=predictionQueueSlices(queue,now);
  const evidence=predictionRunEvidence({run:latestRun,recentRuns:runs,now});
  const activeRun=!!(lease&&lease.runId&&Number.isFinite(lease.expiresAt)&&lease.expiresAt>now);
- const startedMs=activeRun&&latestRun?.runId===lease.runId?Date.parse(latestRun.createdAt||''):NaN;
+ // The start of the run that holds the lease: its own record, else its diagnostic checkpoint; a lease for another or an unreadable run has no provable start.
+ const owned=activeRun?(latestRun?.runId===lease.runId?latestRun.createdAt:(runs||[]).find(row=>row?.runId===lease.runId)?.startedAt):null;
+ const startedMs=Date.parse(owned||'');
  return {slices,lastProgressAt:evidence.lastProgressAt,activeRun,activeStartedAtMs:Number.isFinite(startedMs)?startedMs:null,runHistoryEmpty:!evidence.facts.length};
 }
 function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
  const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
- if(live){const startedMs=Date.parse(run?.createdAt||'');if(!Number.isFinite(startedMs)||now-startedMs<PREDICTION_ACTIVE_RUN_MAX_MS)return integrationEntry('predictions','capability','running','running',null,null);}
+ if(live){const startedMs=Date.parse(run?.createdAt||'');if(Number.isFinite(startedMs)&&now-startedMs<PREDICTION_ACTIVE_RUN_MAX_MS)return integrationEntry('predictions','capability','running','running',null,null);}
  const {facts,isHard,isComplete,isDrained,isProgress,isFailedOnly,isInterrupt}=predictionRunEvidence({run,recentRuns,now});
  if(!facts.length)return integrationEntry('predictions','capability','unknown','no_data',null,null);
  const slices=predictionQueueSlices(queue,now);
@@ -2327,7 +2343,7 @@ function diagnosticKey(id,at){return RUN_DIAGNOSTICS_PREFIX+String(9999999999999
 async function diagnosticCheckpoint(env,run,patch={}){
  if(run.runId.startsWith('blocked-'))return null; // Aggregate stop Events are not additional trigger attempts.
  const at=run.diagnosticStartedAt||run.createdAt,key=diagnosticKey(run.runId,at),old=await loadJSON(env,key),queue=await loadJSON(env,predictionQueueKey),lease=await loadJSON(env,RUNNER_LEASE_KEY),summary=runSummary(run);
- const value={runId:run.runId,trigger:run.trigger==='scheduled'?'scheduled':'manual',startedAt:at,endedAt:run.completedAt||null,state:run.status==='complete'?'completed':run.status==='partial'?'blocked':run.status||'running',startResult:old?.startResult||run.startResult||'running',stopReason:run.stopReason||run.reason||null,leaseAcquiredAt:old?.leaseAcquiredAt||run.leaseAcquiredAt||null,leaseExpiredAt:lease?.runId===run.runId?new Date(lease.expiresAt||Date.parse(old?.leaseExpiredAt||at)).toISOString():old?.leaseExpiredAt||null,lastHeartbeatAt:run.lastHeartbeatAt||old?.lastHeartbeatAt||null,firstNextAt:run.firstNextAt||old?.firstNextAt||null,firstSubmitAt:run.firstSubmitAt||old?.firstSubmitAt||null,added:summary.added,failed:summary.failed,hotRemaining:queue?.priorityCount??run.hotRemaining??null,coldRemaining:queue?.coldRemaining??run.coldRemaining??null,batchesProcessed:Math.max(0,(run.batchCount||1)-1)+(run.selectedIds?.length&&run.selectedIds.every(id=>run.results?.[id])?1:0),...patch,steps:Array.isArray(old?.steps)?old.steps.slice(-8):[],lastAttemptedStep:old?.lastAttemptedStep||null,lastCompletedStep:old?.lastCompletedStep||null,serverFault:old?.serverFault||null,callerFault:run.callerFault||old?.callerFault||null,itemValidation:run.itemValidation||old?.itemValidation||null,delivery:'unconfirmed'};
+ const value={runId:run.runId,trigger:run.trigger==='scheduled'?'scheduled':'manual',startedAt:at,endedAt:run.completedAt||null,state:run.status==='complete'?'completed':run.status==='partial'?'blocked':run.status||'running',startResult:old?.startResult||run.startResult||'running',stopReason:run.stopReason||run.reason||null,leaseAcquiredAt:old?.leaseAcquiredAt||run.leaseAcquiredAt||null,leaseExpiredAt:lease?.runId===run.runId?new Date(lease.expiresAt||Date.parse(old?.leaseExpiredAt||at)).toISOString():old?.leaseExpiredAt||null,lastHeartbeatAt:run.lastHeartbeatAt||old?.lastHeartbeatAt||null,firstNextAt:run.firstNextAt||old?.firstNextAt||null,firstSubmitAt:run.firstSubmitAt||old?.firstSubmitAt||null,added:summary.added,updated:summary.updated,failed:summary.failed,hotRemaining:queue?.priorityCount??run.hotRemaining??null,coldRemaining:queue?.coldRemaining??run.coldRemaining??null,batchesProcessed:Math.max(0,(run.batchCount||1)-1)+(run.selectedIds?.length&&run.selectedIds.every(id=>run.results?.[id])?1:0),...patch,steps:Array.isArray(old?.steps)?old.steps.slice(-8):[],lastAttemptedStep:old?.lastAttemptedStep||null,lastCompletedStep:old?.lastCompletedStep||null,serverFault:old?.serverFault||null,callerFault:run.callerFault||old?.callerFault||null,itemValidation:run.itemValidation||old?.itemValidation||null,delivery:'unconfirmed'};
  await saveJSON(env,key,value);return value;
 }
 function leaseExpiredDiagnostic(row,now=Date.now()){

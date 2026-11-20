@@ -176,6 +176,49 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  await exhausted.M.run(exhausted.env,{now:Date.parse('2026-11-20T09:00:00Z')});assert.equal(exhausted.bucket.value(KEY).streams.find(item=>item.stream==='predictions').state,'healthy');
 }
 
+// 6c. AIR-556 review counterexamples (PR 810).
+{
+ const base=Date.parse('2026-11-20T04:54:00Z'),ids=Array.from({length:3740},(_,index)=>'f'+index);
+ const queue=(extra={})=>({pending:ids,hotPending:ids,coldPending:[],retries:{},metrics:{hotProcessedTotal:100},lastBatch:null,...extra});
+ const state=bucket=>bucket.value(KEY).streams.find(item=>item.stream==='predictions').state;
+ const T=value=>Date.parse('2026-11-20T'+value+':00Z');
+ const diag=(bucket,runId,startedAt,endedAt,fields)=>bucket.set('enrichment/run-diagnostics/'+String(9999999999999-Date.parse(startedAt)).padStart(13,'0')+'-'+runId+'.json',{runId,trigger:'scheduled',startedAt,endedAt,state:'completed',stopReason:'manifest_spent',added:0,failed:0,...fields});
+ // 1. A manifest_spent batch that settled only `already_current` films after the last real progress does not hide the backlog.
+ {const {bucket,env,M,calls}=setup();healthy(bucket);
+  bucket.set('enrichment/latest-run.json',{runId:'run-0454',status:'complete',createdAt:at(base-8*MIN),completedAt:at(base),counts:{created:3,recalculated:0}});
+  diag(bucket,'run-0454',at(base-8*MIN),at(base),{stopReason:'eligible_queue_empty',added:3});
+  diag(bucket,'run-spent','2026-11-20T05:40:00Z','2026-11-20T05:50:00Z',{});
+  bucket.set('enrichment/prediction-queue.json',queue());
+  await M.run(env,{now:T('06:00')});
+  assert.equal(state(bucket),'degraded','manifest_spent with zero productivity at 05:50 does not count as progress at 06:00');
+  assert.equal(posts(calls).filter(item=>item.body.key==='predictions_no_progress').length,1);}
+ // 2. Recalculated work: a checkpoint without `updated` and a latest run with recalculations.
+ {const {bucket,env,M}=setup();healthy(bucket);
+  bucket.set('enrichment/latest-run.json',{runId:'run-recalc',status:'complete',createdAt:'2026-11-20T08:40:00Z',completedAt:'2026-11-20T08:50:00Z',stopReason:'eligible_queue_empty',results:{a:'recalculated',b:'recalculated',c:'recalculated',d:'recalculated'},failures:{e:{}},counts:{created:0,recalculated:4,failed:1}});
+  diag(bucket,'run-recalc','2026-11-20T08:40:00Z','2026-11-20T08:50:00Z',{stopReason:'eligible_queue_empty',failed:1});
+  bucket.set('enrichment/prediction-queue.json',queue());
+  await M.run(env,{now:T('09:00')});assert.equal(state(bucket),'healthy','four recalculated films 10 minutes ago are progress');}
+ // 3. The unknown-age clock starts only when eligible work is first observed: drained then eligible, and retry-deferred then eligible, are measured from that tick.
+ for(const quiet of ['drained','deferred']){
+  const {bucket,env,M,calls}=setup();healthy(bucket);
+  const idle=quiet==='drained'?{pending:[],hotPending:[],coldPending:[],retries:{},metrics:{hotProcessedTotal:100},lastBatch:null}:queue({pending:['a'],hotPending:['a'],retries:{a:{retryAt:T0+10*H}}});
+  for(let hour=0;hour<3;hour++){bucket.set('enrichment/prediction-queue.json',idle);await M.run(env,{now:T0+hour*H});}
+  bucket.set('enrichment/prediction-queue.json',queue());
+  await M.run(env,{now:T0+3*H});
+  assert.equal(state(bucket),'delayed',quiet+': newly eligible work observed for zero minutes is unknown, not a stall');assert.equal(posts(calls).length,0,'no false alert');
+  assert.equal(bucket.value(KEY).predictions.unknownSince,at(T0+3*H));
+  await M.run(env,{now:T0+4*H});assert.equal(state(bucket),'degraded','60 minutes after it was first observed');assert.equal(posts(calls).filter(item=>item.body.key==='predictions_no_progress').length,1);}
+ // 4. A live lease for a run whose record is missing or another run has no provable start: the 60-minute cap cannot be bypassed.
+ for(const latest of [null,{runId:'run-other',status:'complete',createdAt:'2026-11-20T08:00:00Z',completedAt:'2026-11-20T08:05:00Z',counts:{created:0,recalculated:0}}]){
+  const {bucket,env,M}=setup();healthy(bucket);
+  bucket.set('enrichment/latest-run.json',latest||{runId:'run-0454',status:'complete',createdAt:at(base-8*MIN),completedAt:at(base),counts:{created:3,recalculated:0}});
+  diag(bucket,'run-0454',at(base-8*MIN),at(base),{stopReason:'eligible_queue_empty',added:3});
+  bucket.set('enrichment/runner-lease.json',{runId:'run-live',expiresAt:T('09:30'),heartbeatAt:'2026-11-20T08:59:00Z'});
+  bucket.set('enrichment/prediction-queue.json',queue());
+  await M.run(env,{now:T('09:00')});
+  assert.equal(state(bucket),'degraded','a lease without a provable start does not make the run "running"');}
+}
+
 // 6b. Delivery is claimed before it is sent: concurrent ticks send once, a failed delivered-mark may repeat with the same id, a lost claim sends nothing.
 {
  const stale=()=>{const t=setup();healthy(t.bucket,{publishedAt:at(T0-40*H)});t.bucket.set('sync.json',{runId:'run-a',stage:'complete',updatedAt:at(T0-40*H),failures:[]});return t;};

@@ -71,7 +71,10 @@ const Monitor=(()=>{
   const known=previous?.progressBasis==='evidence'?Date.parse(previous.progressAt||''):NaN;
   const candidates=[productive,evidenceAt,moved?now:null,Number.isFinite(known)?known:null].filter(value=>Number.isFinite(value)&&value<=now+300000);
   const lastProgressMs=candidates.length?Math.max(...candidates):null;
-  const unknownSince=lastProgressMs===null?(Number.isFinite(Date.parse(previous?.unknownSince||''))?previous.unknownSince:iso(now)):null;
+  // The unknown-age clock runs only across ticks that observed eligible work with no progress evidence: idle, deferred and unreadable ticks reset it, so work
+  // that becomes eligible is measured from the first tick that saw it, never from an earlier quiet tick.
+  const observingEligible=lastProgressMs===null&&Number.isInteger(slices.eligibleNow)&&slices.eligibleNow>0;
+  const unknownSince=observingEligible?(Number.isFinite(Date.parse(previous?.unknownSince||''))?previous.unknownSince:iso(now)):null;
   const stall=predictionStallAssessment({now,sinceMs:lastProgressMs,eligibleNow:slices.eligibleNow,nextRetryAtMs:slices.nextRetryAt?Date.parse(slices.nextRetryAt):null,activeRun:shared.activeRun,activeStartedAtMs:shared.activeStartedAtMs,observedSinceMs:unknownSince?Date.parse(unknownSince):null});
   return {present:true,pendingCount:Array.isArray(queue.pending)?queue.pending.length:0,processedTotal,lastProgressAt:lastProgressMs===null?null:iso(lastProgressMs),unknownSince,
    eligibleNow:slices.eligibleNow,outstanding:slices.outstanding,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,stall,

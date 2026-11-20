@@ -235,3 +235,43 @@ const setNow=value=>{now=Date.parse(value);};
  records.delete('enrichment/runner-lease.json');
  now=savedNow;
 }
+
+// AIR-556 review counterexamples (PR 810).
+{
+ const savedNow=now;
+ // 1. A completed batch that only settled `already_current` films (manifest_spent) or a retry_backoff noop is not progress while the backlog stays eligible.
+ for(const reason of ['manifest_spent','retry_backoff']){
+  clearRuns();bigQueue(3740);
+  putRun({runId:'run-real',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T04:46:00Z',endedAt:'2026-11-16T04:54:00Z',added:5});
+  putRun({runId:'run-'+reason,status:'complete',reason,startedAt:'2026-11-16T09:30:00Z',endedAt:'2026-11-16T09:40:00Z',added:0,updated:0,failed:0,latest:true});
+  setNow('2026-11-16T09:46:00Z');
+  const entry=sourceOf(await footer(),'predictions');
+  assert.equal(entry.state,'degraded',reason+' with zero created or recalculated films is not progress');
+  assert.equal(entry.lastSuccessAt,'2026-11-16T04:54:00.000Z');
+ }
+ // A global drained completion (queue_empty) still proves an empty queue at that time, and a genuine batch is still progress.
+ clearRuns();bigQueue(50);
+ putRun({runId:'run-drained',status:'complete',reason:'queue_empty',startedAt:'2026-11-16T09:30:00Z',endedAt:'2026-11-16T09:40:00Z',added:0,latest:true});
+ setNow('2026-11-16T09:46:00Z');assert.equal(sourceOf(await footer(),'predictions').state,'healthy','queue_empty is a verified global drain');
+ // 2. Recalculated work survives the checkpoint/latest-run merge: a checkpoint written without `updated` plus a latest run with four recalculations and one failure.
+ clearRuns();bigQueue(3740);
+ putRun({runId:'run-recalc',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T09:30:00Z',endedAt:'2026-11-16T09:40:00Z',added:0,updated:4,failed:1,latest:true});
+ const checkpoint=records.get(diagKey('run-recalc','2026-11-16T09:30:00Z'));delete checkpoint.updated;
+ setNow('2026-11-16T09:46:00Z');
+ const recalculated=sourceOf(await footer(),'predictions');
+ assert.notEqual(recalculated.code,'prediction_no_recent_progress','four recalculated films are progress even though the checkpoint has no `updated`');
+ assert.equal(recalculated.code,'prediction_partial','the one failed item is reported as a partial run, not as missing progress');
+ assert.equal(recalculated.lastSuccessAt,'2026-11-16T09:40:00.000Z');
+ // Mixed: recalculated plus failed, and a failed-only run is still not progress.
+ clearRuns();bigQueue(3740);
+ putRun({runId:'run-failed-only',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T09:30:00Z',endedAt:'2026-11-16T09:40:00Z',added:0,updated:0,failed:3,latest:true});
+ assert.notEqual(sourceOf(await footer(),'predictions').state,'healthy','failed-only is not progress');
+ // 3. A live lease whose run has no provable start never hides a long silence.
+ clearRuns();bigQueue(3740);
+ putRun({runId:'run-before',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T04:46:00Z',endedAt:'2026-11-16T04:54:00Z',added:5});
+ records.set('enrichment/latest-run.json',{runId:'run-live',status:'running',trigger:'scheduled',selectedIds:[],results:{},failures:{}});
+ records.set('enrichment/runner-lease.json',{runId:'run-live',expiresAt:now+10*60000,heartbeatAt:new Date(now).toISOString()});
+ assert.equal(sourceOf(await footer(),'predictions').state,'degraded','a live lease without a start time is not "running"');
+ records.delete('enrichment/runner-lease.json');
+ now=savedNow;
+}
