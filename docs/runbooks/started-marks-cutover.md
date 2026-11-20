@@ -1,6 +1,6 @@
 # Started marks: R2 to D1 cutover
 
-Procedure for moving the Started marks (the owner's «Начал просмотр» state) from the R2 objects `started/<id>.json` to D1 (schema v29). **Every production step below needs its own operation-specific owner GO**, and code delivery is not activation. The event journal `events/items/` is not part of this procedure: it stays R2-authoritative, no event is copied and no event is created by the import.
+Procedure for moving the Started marks (the owner's «Начал просмотр» state) from the R2 objects `started/<id>.json` to D1 (schema v29). **Every production step below needs its own operation-specific owner GO**, and code delivery is not activation. The procedure was executed on 20 Nov 2026: [production evidence](../evidence/d1-migration/air-549-started-marks-cutover-2026-11-20.md). The event journal `events/items/` is not part of this procedure: it stays R2-authoritative, no event is copied and no event is created by the import.
 
 ## What is safe before any GO
 
