@@ -21,6 +21,9 @@ assets['/admin-identity.js']={body:bundleAdmin([fs.readFileSync('src/admin/clien
 // ADR 0178: the owner revoke workflow of one saved identity correction. Its own page and script: the read-only queue above and the Limbo page never share this bundle.
 assets['/admin/identity/revoke']={body:fs.readFileSync('public/admin-identity-revoke.html','utf8'),type:'text/html'};
 assets['/admin-identity-revoke.js']={body:bundleAdmin([fs.readFileSync('src/admin/identity-revoke-client.js','utf8'),fs.readFileSync('src/admin/identity-revoke-view.js','utf8'),fs.readFileSync('public/admin-identity-revoke.js','utf8')]),type:'text/javascript'};
+// ADR 0181: the owner group workflow for one movie. Its own page and script: the read-only queue and the revoke page never share this bundle.
+assets['/admin/identity/group']={body:fs.readFileSync('public/admin-identity-group.html','utf8'),type:'text/html'};
+assets['/admin-identity-group.js']={body:bundleAdmin([fs.readFileSync('src/admin/identity-group-client.js','utf8'),fs.readFileSync('src/admin/identity-group-view.js','utf8'),fs.readFileSync('public/admin-identity-group.js','utf8')]),type:'text/javascript'};
 assets['/admin/posters']={body:fs.readFileSync('public/admin-posters.html','utf8'),type:'text/html'};
 // The poster page: the GET client, the explicit POST client of the maintenance route, the pure run logic and the page script.
 assets['/admin-posters.js']={body:bundleAdmin([fs.readFileSync('src/admin/client.js','utf8'),fs.readFileSync('src/admin/posters-client.js','utf8'),fs.readFileSync('src/admin/posters-run.js','utf8'),fs.readFileSync('public/admin-posters.js','utf8')]),type:'text/javascript'};
