@@ -11,9 +11,9 @@ const run=(file,text)=>sqliteSync(['-bail',file],{input:text,encoding:'utf8',max
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);return r.stdout.trim()?JSON.parse(r.stdout):[];};
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const read=name=>fs.readFileSync('migrations/'+name,'utf8');
-const last=files.at(-1);
-assert.equal(last,'0027_discovery_intent_identity_revoke.sql');
-const before=files.slice(0,-1);
+const last='0027_discovery_intent_identity_revoke.sql';
+assert.ok(files.includes(last),'0027 exists');
+const before=files.filter(name=>name<last);
 const base=path.join(root,'v26.sqlite');
 assert.equal(run(base,before.map(read).join('\n')).status,0);
 assert.equal(rows(base,'SELECT version FROM schema_contract WHERE id=1')[0].version,26);

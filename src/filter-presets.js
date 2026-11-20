@@ -91,8 +91,26 @@ async function writePresetDocument(env,presets,ifMatch){
  if(!stored)return null;
  return presetHttpEtag(stored);
 }
+// AIR-549: one store per request, chosen by the D1 marker. `legacy` (no binding or schema 28 absent) and `r2` serve the R2 object as before;
+// `d1` serves the rows and never touches R2; a marker that cannot be read answers 503 and never falls back to R2. The R2 tests load this file
+// without src/filter-presets-d1.js, which is the same as `legacy`.
+async function presetAuthority(env){
+ if(typeof FilterPresetsD1==='undefined')return {state:'legacy'};
+ return FilterPresetsD1.readAuthority(env);
+}
+async function readD1PresetDocument(env){
+ const read=await FilterPresetsD1.readPresets(env);
+ if(!read.ok)return {unavailable:true};
+ const inspected=inspectPresetDocument({schemaVersion:1,presets:read.presets});
+ if(inspected.error)return {etag:FilterPresetsD1.filterPresetEtag(read.generation),error:inspected.error};
+ return {etag:FilterPresetsD1.filterPresetEtag(read.generation),generation:read.generation,presets:inspected.presets,missing:read.generation===0};
+}
 async function filterPresetsRoute(request,env,url){
- const current=await readPresetDocument(env);
+ const authority=await presetAuthority(env);
+ if(authority.state==='closed')return presetJson({error:'Filter presets storage unavailable'},503);
+ const d1=authority.state==='d1';
+ const current=d1?await readD1PresetDocument(env):await readPresetDocument(env);
+ if(current.unavailable)return presetJson({error:'Filter presets storage unavailable'},503);
  if(current.error)return presetJson({error:current.error},500,current.etag);
  const item=url.pathname.slice('/api/ui/filter-presets/'.length);
  const id=item?decodeURIComponent(item):'';
@@ -103,7 +121,9 @@ async function filterPresetsRoute(request,env,url){
  if(origin&&origin!==url.origin)return presetJson({error:'Origin not allowed'},403);
  const ifMatch=request.headers.get('If-Match');
  if(!ifMatch)return presetJson({error:'If-Match required'},428);
- if(current.missing&&barePresetEtag(ifMatch)!=='none')return presetJson({error:'Filter presets changed',presets:[]},412,current.etag);
+ if(authority.writes==='held')return presetJson({error:'Filter presets are temporarily read-only'},503);
+ if(d1){if(FilterPresetsD1.filterPresetGeneration(ifMatch)!==current.generation)return presetJson({error:'Filter presets changed',presets:current.presets},412,current.etag);}
+ else if(current.missing&&barePresetEtag(ifMatch)!=='none')return presetJson({error:'Filter presets changed',presets:[]},412,current.etag);
  let body=null;
  if(request.method!=='DELETE'){
   const raw=await request.text();
@@ -131,6 +151,16 @@ async function filterPresetsRoute(request,env,url){
    presets[index].updatedAt=now;
   }
  }
+ if(d1){
+  const committed=await FilterPresetsD1.commitPresets(env,{expectedGeneration:current.generation,presets});
+  if(committed.ok)return presetJson({schemaVersion:1,presets},request.method==='POST'?201:200,FilterPresetsD1.filterPresetEtag(committed.generation));
+  if(committed.reason==='conflict'){const fresh=await readD1PresetDocument(env);if(fresh.unavailable||fresh.error)return presetJson({error:'Filter presets storage unavailable'},503);return presetJson({error:'Filter presets changed',presets:fresh.presets},412,fresh.etag);}
+  return presetJson({error:committed.reason==='writes_held'?'Filter presets are temporarily read-only':'Filter presets storage unavailable'},503);
+ }
+ // R2 branch. The marker was read at the start of the request; a hold may have been set since. Re-read it right before the PUT: a writer that passes this check
+ // and is then delayed carries the R2 ETag it read, and the operator's fence write (runbook, "fence the R2 object") changes that ETag, so its PUT fails on the R2 condition.
+ const again=await presetAuthority(env);
+ if(again.state!==authority.state||again.writes==='held')return presetJson({error:again.state==='closed'?'Filter presets storage unavailable':'Filter presets are temporarily read-only'},503);
  const etag=await writePresetDocument(env,presets,ifMatch);
  if(!etag){const fresh=await readPresetDocument(env);return presetJson({error:'Filter presets changed',presets:fresh.presets||[]},412,fresh.etag);}
  return presetJson({schemaVersion:1,presets},request.method==='POST'?201:200,etag);
