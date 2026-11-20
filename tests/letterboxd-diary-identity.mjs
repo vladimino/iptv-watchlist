@@ -293,4 +293,42 @@ out = await Identity.resolve(env, items(['Other3', 'other-3']), opts()); assert.
 
 // 9. the pending retry spacing is monotone and bounded; transport backs off less than a review.
 assert.ok(Identity.delayMs('forbidden', 1) < Identity.delayMs('slug_mismatch', 1)); assert.ok(Identity.delayMs('forbidden', 9) <= 48 * 3600000);
+// 18. ADR 0184 wiring: the canonical Letterboxd claim is requested AFTER the facts, the link and the pending document are durable, only for a proven Ratings link, never throws into the run, never delays the rating,
+// and does not run when the lease has no room or the claim module is absent. (The claim module itself is gated off in production; here a recording stub stands in for it.)
+const claimCalls = []; const claimStub = {mode: 'complete', ensureLetterboxdClaims: async (envArg, {pairs}) => {
+  claimCalls.push({pairs: JSON.parse(JSON.stringify(pairs)), linked: JSON.parse(JSON.stringify(pairs.map(pair => recordOf(pair.lid)?.links?.tmdb ?? null))), pendingKeys: Object.keys(pending())});
+  if (claimStub.mode === 'throw') throw Object.assign(new Error('boom'), {code: 'film_person_unavailable'});
+  return {state: claimStub.mode === 'incomplete' ? 'incomplete' : 'complete'};
+}};
+ctx.CanonicalLetterboxdClaim = claimStub;
+reset(); claimCalls.length = 0; claimStub.mode = 'complete'; await seed('vMEO', 3.5); add('vMEO', 'fixture-alpha-2023', '900001', 'Fixture Alpha', 2023);
+out = await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts());
+assert.equal(out.counts.verified, 1); assert.equal(out.counts.claim, 'complete');
+assert.equal(claimCalls.length, 1); assert.deepEqual(claimCalls[0].pairs, [{lid: 'vMEO', tmdb: '900001'}]);
+assert.deepEqual(claimCalls[0].linked, ['900001'], 'the Ratings link is durable before the claim is requested'); assert.deepEqual(claimCalls[0].pendingKeys, [], 'the pending document is settled first');
+// the next ordinary run re-offers an already-linked id (the natural recovery of an interrupted claim); the claim step itself makes a repeat free
+out = await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts());
+assert.equal(claimCalls.length, 2); assert.deepEqual(claimCalls[1].pairs, [{lid: 'vMEO', tmdb: '900001'}]);
+// an existing trusted bridge is offered too
+reset(); claimCalls.length = 0; await seed('Brg1', 3); canonical.bridge.Brg1 = {state: 'ok', filmId: 'film:tmdb:900020', tmdb: '900020', lid: 'Brg1'};
+out = await Identity.resolve(env, items(['Brg1', 'fixture-brg-2019']), opts()); assert.equal(out.counts.bridged, 1); assert.deepEqual(claimCalls.map(call => call.pairs), [[{lid: 'Brg1', tmdb: '900020'}]]);
+// a repaired link_failed bridge is offered
+reset(); claimCalls.length = 0; await seed('Itr9', 3); await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {Itr9: {reason: 'link_failed', slug: 'fixture-itr-2009', tmdb: '900030', attempts: 1, lastAttemptAt: new Date(NOW - 7200000).toISOString(), nextAttemptAt: new Date(NOW - 3600000).toISOString()}}}), {});
+out = await Identity.resolve(env, items(['Itr9', 'fixture-itr-2009']), opts()); assert.equal(out.counts.repaired, 1); assert.deepEqual(claimCalls.map(call => call.pairs), [[{lid: 'Itr9', tmdb: '900030'}]]);
+// no proven link, no claim request: a 403 pending, a refused identity and an unlinked id never reach the claim step
+reset(); claimCalls.length = 0; await seed('Aj8u', 4); site.set('Aj8u', {status: 403}); out = await Identity.resolve(env, items(['Aj8u', 'fixture-beta-2024']), opts());
+assert.equal(out.counts.pending, 1); assert.equal(claimCalls.length, 0); assert.equal(out.counts.claim, undefined);
+// a claim step that throws or ends incomplete never fails the run, the label or the rating
+for (const mode of ['throw', 'incomplete']) {
+  reset(); claimCalls.length = 0; claimStub.mode = mode; await seed('vMEO', 3.5); add('vMEO', 'fixture-alpha-2023', '900001', 'Fixture Alpha', 2023);
+  out = await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts());
+  assert.equal(out.counts.verified, 1, mode); assert.deepEqual({...out.labels.get('vMEO')}, {title: 'Fixture Alpha', year: 2023, tmdb: '900001'}); assert.equal(recordOf('vMEO').rating.value, 3.5);
+  assert.equal(out.counts.claim, mode === 'throw' ? 'failed' : 'incomplete');
+}
+// a short lease skips the claim step (the rating and the Event never wait for it); an absent claim module is a no-op
+reset(); claimCalls.length = 0; claimStub.mode = 'complete'; await seed('Brg1', 3); canonical.bridge.Brg1 = {state: 'ok', filmId: 'film:tmdb:900020', tmdb: '900020', lid: 'Brg1'};
+out = await Identity.resolve(env, items(['Brg1', 'fixture-brg-2019']), opts({remaining: () => 1000})); assert.equal(claimCalls.length, 0);
+delete ctx.CanonicalLetterboxdClaim; reset(); await seed('Brg1', 3); canonical.bridge.Brg1 = {state: 'ok', filmId: 'film:tmdb:900020', tmdb: '900020', lid: 'Brg1'};
+out = await Identity.resolve(env, items(['Brg1', 'fixture-brg-2019']), opts()); assert.equal(out.counts.bridged, 1); assert.equal(out.counts.claim, undefined);
+
 console.log('letterboxd-diary-identity: ok');

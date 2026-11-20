@@ -2,6 +2,10 @@
 
 Applies to the dormant module `src/canonical-letterboxd-claim.js` ([ADR 0184](../adr/0184-ratings-confirmed-letterboxd-claim-on-existing-film.md), Accepted). Nothing here authorizes a production write: the backfill is an L3 operation under [authorization and escalation](../process/authorization-and-escalation.md) and needs an owner-approved plan before it runs, even for a handful of rows.
 
+## Activation of the producer path
+
+The Ratings flows already offer their durable links to the claim module, which stays inactive until the constant `LETTERBOXD_CLAIM_ACTIVATED` in `src/canonical-letterboxd-claim.js` is changed to `true` in a reviewed change. That change is a production activation: it needs the owner's explicit GO, after the backfill preflight and after the matching tests pass, and it is separate from the backfill. Reverting that line stops new claims; claims already written stay (see Rollback). While inactive, the flows write nothing for claims.
+
 ## When this applies
 
 A published programme lid has no trusted `letterboxd` claim in `film_external_id`, so `POST /api/started` answers `404 Unknown film`, while the Ratings projection ties that lid to one TMDB movie whose canonical Film exists. The cohort is whatever a fresh preflight finds; a number seen earlier is only a baseline.

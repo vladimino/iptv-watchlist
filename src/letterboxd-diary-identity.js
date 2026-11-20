@@ -107,7 +107,7 @@ const LetterboxdDiaryIdentity=(()=>{
   if(!wanted.length)return {labels,counts};
   let links;
   try{links=await LetterboxdFacts.diaryLinks(env,wanted.map(item=>item.lid));}catch{return {labels,counts:{...counts,skipped:wanted.length}};}
-  const set={},clear=[];let fetched=0,stopped=false,gate=null;
+  const set={},clear=[],claimPairs=[];let fetched=0,stopped=false,gate=null;
   try{gate=await CanonicalCatalogReader.catalogReaderGate(env);}catch{gate=null;}
   const open=!!gate&&gate.mode==='d1'&&gate.state==='open';
   const entry=(item,reason,attempts,at)=>({reason:String(reason).slice(0,64),slug:item.slug||null,attempts,lastAttemptAt:iso(now),nextAttemptAt:iso(at)});
@@ -125,6 +125,8 @@ const LetterboxdDiaryIdentity=(()=>{
    // Already linked: nothing to check. A pending entry on a linked id is a bridge that failed after the alias and the record link were committed (review of PR #720):
    // the committed projection is repaired (no outbound request, no admission, no new fact) and the entry is cleared only when that succeeded.
    if(own.tmdb){
+    // ADR 0184: a lid the Ratings link index already ties to a movie is offered for its canonical claim (the claim step re-proves it from the authoritative link; `already` is free).
+    if(TMDB.test(String(own.tmdb)))claimPairs.push({lid,tmdb:String(own.tmdb)});
     if(!prior){clear.push(lid);continue;}
     try{const repaired=await LetterboxdFacts.reprojectDiaryFilm(env,lid);if(repaired.state==='projected'){counts.repaired++;clear.push(lid);}else{counts.skipped++;}}catch{counts.skipped++;}
     continue;
@@ -135,7 +137,7 @@ const LetterboxdDiaryIdentity=(()=>{
    if(prior&&prior.reason==='link_failed'&&TMDB.test(String(prior.tmdb||''))){
     try{
      const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:String(prior.tmdb)});
-     if(linked.state==='linked'){counts.repaired++;clear.push(lid);}
+     if(linked.state==='linked'){counts.repaired++;clear.push(lid);claimPairs.push({lid,tmdb:String(prior.tmdb)});}
      else{set[lid]={...prior,reason:'link_conflict',nextAttemptAt:iso(now+delayMs('link_conflict',attempts))};counts.pending++;}
     }catch{counts.skipped++;}
     continue;
@@ -151,7 +153,7 @@ const LetterboxdDiaryIdentity=(()=>{
     if(!(await intend(item,bridge.tmdb,attempts))){counts.deferred++;continue;}
     try{
      const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:bridge.tmdb});
-     if(linked.state==='linked'){counts.bridged++;clear.push(lid);const known=await CanonicalCatalogReader.catalogTitlesFromD1(env,[{id:'tmdb_'+bridge.tmdb,tmdbId:bridge.tmdb}],gate).catch(()=>({}));const title=known['tmdb_'+bridge.tmdb]?.title||null;labels.set(lid,{title,year:null,tmdb:bridge.tmdb});continue;}
+     if(linked.state==='linked'){counts.bridged++;clear.push(lid);claimPairs.push({lid,tmdb:String(bridge.tmdb)});const known=await CanonicalCatalogReader.catalogTitlesFromD1(env,[{id:'tmdb_'+bridge.tmdb,tmdbId:bridge.tmdb}],gate).catch(()=>({}));const title=known['tmdb_'+bridge.tmdb]?.title||null;labels.set(lid,{title,year:null,tmdb:bridge.tmdb});continue;}
      set[lid]=entry(item,'link_conflict',attempts+1,now+delayMs('link_conflict',attempts+1));counts.pending++;continue;
     }catch{defer(item,prior);continue;}
    }
@@ -184,7 +186,7 @@ const LetterboxdDiaryIdentity=(()=>{
     }catch(error){outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':error?.code||'admission_failed'};}
     if(confirmed){
      const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:outcome.verdict.tmdb}).catch(()=>({state:'error'}));
-     if(linked.state==='linked'){counts.verified++;clear.push(lid);labels.set(lid,label(outcome.verdict));continue;}
+     if(linked.state==='linked'){counts.verified++;clear.push(lid);claimPairs.push({lid,tmdb:String(outcome.verdict.tmdb)});labels.set(lid,label(outcome.verdict));continue;}
      outcome={state:'pending',reason:linked.state==='conflict'?'link_conflict':'link_failed',...(linked.state==='conflict'?{}:{tmdb:outcome.verdict.tmdb})};
     }
    }
@@ -192,6 +194,10 @@ const LetterboxdDiaryIdentity=(()=>{
    set[lid]={...entry(item,outcome.reason,attempts+1,now+delayMs(outcome.reason,attempts+1)),...(outcome.tmdb?{tmdb:String(outcome.tmdb)}:{})};
   }
   try{await LetterboxdFacts.updateDiaryIdentity(env,{set,clear:clear.filter(lid=>stored.films[lid])});}catch{counts.persistFailed=1;}
+  // ADR 0184: the canonical Letterboxd claim of the ids whose Ratings link is now durable. After the facts and the pending document; never throws, never delays the rating or the Event; skipped when the lease has no room. Inactive until the activation line of the claim module is turned on.
+  if(claimPairs.length&&remaining()>=WRITE_RESERVE_MS&&typeof CanonicalLetterboxdClaim!=='undefined'){
+   try{const claimed=await CanonicalLetterboxdClaim.ensureLetterboxdClaims(env,{pairs:claimPairs});if(claimed.state!=='inactive')counts.claim=claimed.state==='complete'?'complete':'incomplete';}catch{counts.claim='failed';}
+  }
   return {labels,counts};
  }
 

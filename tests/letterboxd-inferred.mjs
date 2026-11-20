@@ -365,5 +365,29 @@ const strange=path.join(scratch,'strange.json');
   const out=await (await post({BUCKET:raced},'commit',{origin:{...originBody,archiveSha256:'5'.repeat(64)},chunk:0,items:[{lid:'Rr1',tmdb:'333',facts:{watched:true},effectiveOn:{},identity:'inferred',admit:{title:'Race Movie',year:2012}}]})).json();
   assert.equal(out.conflicts,1);assert.equal(raced.records.get(admKey).films.tmdb_333.sourceCode,'Other1','an entry found, not created, stays');
  }
+ // ADR 0184 wiring: the canonical Letterboxd claim is requested for a chunk's proven links AFTER the facts and the link are durable, never for a conflict, never throws into the import, and is a no-op when the claim module is absent.
+ {
+  const calls=[];const stub={mode:'ok',ensureLetterboxdClaims:async(envArg,{pairs})=>{calls.push({pairs:JSON.parse(JSON.stringify(pairs)),durable:pairs.map(pair=>!!factRecord(held.BUCKET,'tmdb-'+pair.tmdb))});if(stub.mode==='throw')throw Object.assign(new Error('boom'),{code:'film_person_unavailable'});return {state:'complete'};}};
+  const held={BUCKET:bucket()};
+  ctx.CanonicalLetterboxdClaim=stub;
+  const origin={...originBody,archiveSha256:'3'.repeat(64)};
+  const item={lid:'Qq1',tmdb:'131',facts:{watched:true},effectiveOn:{}};
+  assert.equal((await post(held,'commit',{origin,chunk:0,items:[item]})).status,200);
+  assert.deepEqual(calls.map(call=>call.pairs),[[{lid:'Qq1',tmdb:'131'}]]);assert.deepEqual(calls[0].durable,[true],'the facts and the link are durable before the claim is requested');
+  // a replay of the committed chunk re-offers it (the natural recovery of an interrupted claim), with no new facts
+  const replay=await (await post(held,'commit',{origin,chunk:0,items:[item]})).json();
+  assert.equal(replay.replay,true);assert.deepEqual(calls.at(-1).pairs,[{lid:'Qq1',tmdb:'131'}]);
+  // a link conflict (the movie id already aliases another lid) is never offered
+  calls.length=0;
+  const conflict=await (await post(held,'commit',{origin:{...originBody,archiveSha256:'4'.repeat(64)},chunk:0,items:[{lid:'Qq2',tmdb:'131',facts:{watched:true},effectiveOn:{}}]})).json();
+  assert.equal(conflict.conflicts,1);assert.equal(calls.length,0,'a conflicting link reaches no claim request');
+  // a throwing claim step never fails the import
+  stub.mode='throw';
+  assert.equal((await post(held,'commit',{origin:{...originBody,archiveSha256:'5'.repeat(64)},chunk:0,items:[{lid:'Qq3',tmdb:'133',facts:{watched:true},effectiveOn:{}}]})).status,200);
+  assert.ok(factRecord(held.BUCKET,'tmdb-133'),'the facts are committed whatever the claim step does');
+  // an absent claim module is a no-op
+  delete ctx.CanonicalLetterboxdClaim;
+  assert.equal((await post(held,'commit',{origin:{...originBody,archiveSha256:'6'.repeat(64)},chunk:0,items:[{lid:'Qq4',tmdb:'134',facts:{watched:true},effectiveOn:{}}]})).status,200);
+ }
 }finally{await rm(scratch,{recursive:true,force:true});}
 console.log('Letterboxd inferred identity: off by default and accepted rows unchanged, unique original title with the same year, every review bucket (year drift, alias only, linked elsewhere, duplicate in export, already accepted, no TMDB id, missing year), remakes told apart by year, plan switch and counts without names, route validation, provenance, replay and no relabelling');

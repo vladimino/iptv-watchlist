@@ -669,6 +669,16 @@ function recordRatingChange(record,incoming,effective){
   });
  }
 
+ // ADR 0184: the canonical Letterboxd claim of the lids of a chunk whose Ratings link is durable and whose movie id is the chunk's (an inferred or verified entry, never a conflict). Called AFTER the facts, the link and the D1
+ // admission; never throws into the import, so the import and its receipt never wait for or fail because of the claim. Inactive until the claim module's activation line is turned on.
+ async function ensureChunkClaims(env,items,films){
+  if(typeof CanonicalLetterboxdClaim==='undefined')return;
+  try{
+   const ok=new Set((films||[]).filter(film=>film&&!film.conflict&&film.factKey).map(film=>film.lid));
+   const pairs=(items||[]).filter(item=>item?.tmdb&&ok.has(item.lid)).map(item=>({lid:item.lid,tmdb:String(item.tmdb)}));
+   if(pairs.length)await CanonicalLetterboxdClaim.ensureLetterboxdClaims(env,{pairs});
+  }catch{/* the claim is retried by the next ordinary run of the flow */}
+ }
  // Commit: intent (with the projection's before-image) before any write, idempotent fact writes, receipt after read-back.
  async function commitBaselineChunk(env,body){
   const {origin,chunk,items}=validateBaselineRequest(body),hash=await itemsHash(items),sha=origin.archiveSha256;
@@ -676,6 +686,7 @@ function recordRatingChange(record,incoming,effective){
   if(receipt){
    if(receipt.itemsHash!==hash)throw new FactsError('chunk_conflict','This chunk was committed with other items');
    await applyCanonicalInferredAdmissions(env,'inferred:'+sha+':'+chunk,origin,items);
+   await ensureChunkClaims(env,items,(receipt.entries||[]).map(entry=>({lid:entry.lid,factKey:entry.factKey||null,conflict:!!entry.conflict})));
    return {...receipt,replay:true};
   }
   const {value:view}=await readJSON(env,FACTS_KEYS.viewIndex);
@@ -725,6 +736,7 @@ function recordRatingChange(record,incoming,effective){
     if(!current||current.observationId!==mine.observationId&&compareObservations(current,mine.observation)<=0)throw new FactsError('readback_failed','Fact '+fact+' is not current after commit');
    }
   }
+  await ensureChunkClaims(env,items,films);
   const entries=films.map(film=>film.conflict?film:{...film,observations:film.observations.map(({fact,observationId})=>({fact,observationId}))});
   const next={schemaVersion:1,archiveSha256:sha,chunk,itemsHash:hash,origin,committedAt:new Date().toISOString(),films:films.length,conflicts,outcomes:counts,entries,viewBefore:intent.viewBefore};
   await casJSON(env,importKey(sha,chunk,'receipt'),null,current=>current?null:next);
