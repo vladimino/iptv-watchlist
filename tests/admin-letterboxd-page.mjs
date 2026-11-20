@@ -727,6 +727,24 @@ assert.match(result.innerHTML, /Подтвердить повтор размет
 assert.match(result.innerHTML, /data-archive-retry-pick="103U" checked/);
 assert.match(result.innerHTML, /Men in Black 3 \(2012\)/);
 assert.doesNotMatch(result.innerHTML, /Вернуть в очередь/);
+// AIR-354: a stop in the enrich phase says the Film is admitted and only the metadata step is blocked.
+{
+  const enrichStop = run(`archiveStepSummary({stop:{reason:'shortlink_mismatch',code:'103U',phase:'enrich'},phase:'enrich'})`);
+  assert.match(enrichStop, /Film уже admitted\. Дозаполнение метаданных остановлено \(shortlink_mismatch\)/);
+  assert.doesNotMatch(enrichStop, /Код не подтверждён|\[object Object\]/);
+  // Localization stops after the metadata was saved: the text must not say that nothing was written.
+  const locStop = {reason: 'localization_unavailable', code: '103U', phase: 'enrich', part: 'localization'};
+  const locSummary = run(`archiveStepSummary(${JSON.stringify({stop: locStop, phase: 'enrich'})})`);
+  assert.match(locSummary, /Метаданные сохранены, локализация остановлена \(localization_unavailable\)/);
+  assert.doesNotMatch(locSummary, /метаданные не записаны|Код не подтверждён/);
+  const locHtml = run(`archiveIdentityHtml(${JSON.stringify({identity: {mode: 'identity', writes: true, verified: false, enriched: false, fetched: true, pending: true, stop: locStop, code: '103U', state: 'verified', phase: 'enrich'}, identityStatus: null, inflight: false})})`);
+  assert.match(locHtml, /Film уже admitted\. Метаданные сохранены, локализация остановлена/);
+  assert.doesNotMatch(locHtml, /метаданные не записаны|Кандидат остаётся непроверенным|\[object Object\]/);
+  const metaHtml = run(`archiveIdentityHtml(${JSON.stringify({identity: {mode: 'identity', writes: true, verified: false, enriched: false, fetched: true, pending: true, stop: {reason: 'shortlink_mismatch', code: '103U', phase: 'enrich'}, code: '103U', state: 'verified', phase: 'enrich'}, identityStatus: null, inflight: false})})`);
+  assert.match(metaHtml, /Дозаполнение метаданных остановлено \(shortlink_mismatch\); метаданные не записаны/);
+  const identityStop = run(`archiveStepSummary({stop:{reason:'forbidden',code:'Bb1',phase:'identity'},phase:'identity'})`);
+  assert.match(identityStop, /остановлена \(forbidden\)\. Код не подтверждён\./);
+}
 // The owner unticks 10TQ: only 103U is confirmed.
 run('onArchiveRetryPick("10TQ", false)');
 assert.match(result.innerHTML, /Подтвердить повтор разметки \(1\)/);
