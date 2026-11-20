@@ -11,8 +11,7 @@
 // The export is a JSON array, one entry per object of a COMPLETE listing of the prefix `started/` (tombstones and inactive marks included):
 //   {"key":"started/<id>.json","etag":"<strong etag>","customMetadata":{"started":"true"},"body":"<the raw object text>"}
 // Anything the Worker would read differently is a blocker (exit 2, no SQL): not an array, a duplicate or foreign key, a key outside `started/<[a-zA-Z0-9_-]{1,80}>.json`,
-// a body that is not a JSON object, a body id that differs from the key, a `started` flag that disagrees with `customMetadata.started` (the list read and the write read
-// would disagree), a `startedAt` that is neither a string nor null, a `lastEvent` that is not an object with a string id. It never turns a broken source into a partial or empty
+// a body that is not a JSON object, a body id that differs from the key, a `started` state on which the list read (customMetadata.started) and the write read (body.started) disagree, an absent flag with `started:false` included, an object without a strong ETag, a `startedAt` that is neither a string nor null, a `lastEvent` that is not an object with a string id. It never turns a broken source into a partial or empty
 // import. The event journal `events/items/` is not read or copied here, and no event is created.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -35,15 +34,18 @@ export function normalizeExport(data){
   try{body=JSON.parse(entry.body);}catch{throw blocker('an object body is not JSON: '+entry.key);}
   if(!body||typeof body!=='object'||Array.isArray(body))throw blocker('an object body is not a JSON object: '+entry.key);
   if(body.id!==match[1])throw blocker('the body id differs from the key: '+entry.key);
-  const started=body.started!==false,flag=entry.customMetadata?.started;
-  if(flag!==undefined&&flag!==String(started))throw blocker('customMetadata.started disagrees with the body: '+entry.key);
+  // The two legacy readers must agree on every object: the list read (GET) includes a key unless customMetadata.started is exactly 'false', the write read (POST previous state)
+  // takes body.started !== false. An absent or odd flag with body.started false makes them disagree (listed as started, unstarted on write): ambiguous, so a blocker.
+  const started=body.started!==false,listed=entry.customMetadata?.started!=='false';
+  if(listed!==started)throw blocker('the list read and the write read disagree (customMetadata.started vs body.started): '+entry.key);
+  if(typeof entry.etag!=='string'||!entry.etag||/^W\//.test(entry.etag))throw blocker('an object has no strong ETag: '+entry.key);
   if(body.startedAt!==undefined&&body.startedAt!==null&&typeof body.startedAt!=='string')throw blocker('startedAt is neither a string nor null: '+entry.key);
   let lastEvent=null;
   if(body.lastEvent!==undefined&&body.lastEvent!==null){
    if(typeof body.lastEvent!=='object'||Array.isArray(body.lastEvent)||typeof body.lastEvent.id!=='string')throw blocker('lastEvent is not an object with an id: '+entry.key);
    lastEvent=JSON.stringify(body.lastEvent);
   }
-  marks.push({id:match[1],started,startedAt:body.startedAt??null,lastEvent,etag:typeof entry.etag==='string'?entry.etag:null});
+  marks.push({id:match[1],started,startedAt:body.startedAt??null,lastEvent,etag:entry.etag});
  }
  return marks;
 }

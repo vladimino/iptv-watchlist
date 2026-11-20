@@ -212,6 +212,31 @@ assert.notEqual(run(v29,"UPDATE started_cas SET ok=0").status,0,'the fence row r
  assert.equal((await call('POST',{id:'one',started:true},env)).status,200);assert.equal(journal().length,1,'no duplicate');
 }
 
+// P1 (review): a committed transition whose event write failed is delivered BEFORE a later transition overwrites it; both distinct event ids land exactly once
+{
+ reset();const db=d1Db();const env={BUCKET:bucket,DB:db.db};
+ const realPut=bucket.put;let failNext=true;
+ bucket.put=async(k,v,o)=>{if(failNext&&k.startsWith('events/items/')){failNext=false;throw new Error('simulated crash before the event write');}return realPut(k,v,o);};
+ await call('POST',{id:'one',started:true},env).catch(()=>null);bucket.put=realPut;
+ const eventA=JSON.parse(marks(db.file)[0].last_event_json);assert.equal(journal().length,0,'A committed in D1 but is not in the journal');
+ // the opposite transition arrives before any same-state retry
+ assert.equal((await call('POST',{id:'one',started:false},env)).status,200);
+ const eventB=JSON.parse(marks(db.file)[0].last_event_json);assert.notEqual(eventA.id,eventB.id);assert.equal(marks(db.file)[0].rev,2);
+ assert.deepEqual(journal().map(e=>e.id).sort(),[eventA.id,eventB.id].sort(),'both transitions are in the journal, A was delivered before B replaced it');
+ for(let i=0;i<2;i++){assert.equal((await call('POST',{id:'one',started:false},env)).status,200);assert.equal(journal().length,2,'repeats add nothing: each event exactly once');}
+ // when the delivery of the earlier event fails again, the later transition is refused and nothing is overwritten
+ reset();const db2=d1Db();const env2={BUCKET:bucket,DB:db2.db};
+ failNext=true;bucket.put=async(k,v,o)=>{if(failNext&&k.startsWith('events/items/')){failNext=false;throw new Error('crash');}return realPut(k,v,o);};
+ await call('POST',{id:'one',started:true},env2).catch(()=>null);
+ const stuck=JSON.parse(marks(db2.file)[0].last_event_json);failNext=true;
+ const refused=await call('POST',{id:'one',started:false},env2).catch(error=>error);
+ bucket.put=realPut;
+ assert.ok(refused instanceof Error||refused.status>=500,'the transition is refused while the earlier event cannot be delivered');
+ assert.deepEqual(marks(db2.file).map(m=>[m.started,m.rev,JSON.parse(m.last_event_json).id]),[[1,1,stuck.id]],'nothing was overwritten');
+ assert.equal((await call('POST',{id:'one',started:false},env2)).status,200);
+ assert.equal(journal().length,2,'after the retry both events are journaled once');
+}
+
 // concurrency: one row, one winner; the loser decides again on the state the winner left
 {
  reset();const db=d1Db();const env={BUCKET:bucket,DB:db.db};
@@ -314,6 +339,17 @@ fs.writeFileSync(exportFile,JSON.stringify(EXPORT));
  bad('flag',[{...obj('one',{started:true}),customMetadata:{started:'false'}}]);bad('startedAt',[obj('one',{started:true,startedAt:5})]);
  bad('lastEvent',[obj('one',{started:true,lastEvent:'x'})]);bad('lastEvent-id',[obj('one',{started:true,lastEvent:{type:'started'}})]);bad('body-array',[{...obj('one',{}),body:'[]'}]);bad('no-body',[{key:'started/one.json'}]);
  bad('bad-id',[{key:'started/a b.json',body:'{"id":"a b"}'}]);
+ // the review fixture: body.started false with no custom metadata is listed as started by GET and unstarted by POST: ambiguous
+ bad('absent-flag-false',[{key:'started/x.json',etag:'e',body:'{"id":"x","started":false}',customMetadata:{}}]);
+ bad('no-metadata-false',[{key:'started/x.json',etag:'e',body:'{"id":"x","started":false}'}]);
+ bad('odd-flag-false',[{key:'started/x.json',etag:'e',body:'{"id":"x","started":false}',customMetadata:{started:'x'}}]);
+ bad('flag-false-body-true',[{key:'started/x.json',etag:'e',body:'{"id":"x","started":true}',customMetadata:{started:'false'}}]);
+ // an object without a strong ETag cannot be tied to the accepted inventory
+ bad('no-etag',[{key:'started/x.json',body:'{"id":"x","started":true}',customMetadata:{started:'true'}}]);
+ bad('empty-etag',[{key:'started/x.json',etag:'',body:'{"id":"x","started":true}',customMetadata:{started:'true'}}]);
+ bad('weak-etag',[{key:'started/x.json',etag:'W/"abc"',body:'{"id":"x","started":true}',customMetadata:{started:'true'}}]);
+ // consistent states stay importable: absent flag with started true, absent flag with no started field
+ {const ok=path.join(root,'consistent.json');fs.writeFileSync(ok,JSON.stringify([{key:'started/p.json',etag:'e1',body:'{"id":"p","started":true}'},{key:'started/q.json',etag:'e2',body:'{"id":"q"}',customMetadata:{}}]));assert.equal(generator('digest',ok).status,0);assert.equal(JSON.parse(generator('digest',ok).stdout).started,2);}
  // the generated SQL is one statement per line and every statement is well under the D1 limit
  const big=[obj('big',{started:true,lastEvent:event('eb','started','t',{id:'big',title:'x'.repeat(30000),year:1})})];const bigFile=path.join(root,'big.json');fs.writeFileSync(bigFile,JSON.stringify(big));
  assert.ok(Math.max(...generator('import',bigFile).stdout.split('\n').map(line=>Buffer.byteLength(line)))<100000);

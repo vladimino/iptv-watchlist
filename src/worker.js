@@ -1015,6 +1015,9 @@ async function setStarted(env,body){
    await env.BUCKET.put(key,JSON.stringify({id:body.id,started:body.started,startedAt:body.started?at:null,lastEvent:event}),{httpMetadata:{contentType:'application/json'},customMetadata:{started:String(body.started)}});
    await writeEvent(env,event);return json({id:body.id,started:body.started});
   }
+  // A transition must never overwrite an event that may not have reached the journal: the stored event is delivered first (an idempotent write under its own key). If that write fails
+  // the request fails and nothing is committed, so the earlier transition stays recoverable and is never replaced unwritten.
+  if(previous?.lastEvent)await writeEvent(env,previous.lastEvent);
   const committed=await StartedD1.commitMark(env,{expectedRev:previous?previous.rev:0,mark:{id:body.id,started:body.started,startedAt:body.started?at:null,lastEvent:event}});
   // The event is written after the mark commit, as before; a request that dies in between is repaired by the same-state repeat above, which delivers the stored event under its own id.
   if(committed.ok){await writeEvent(env,event);return json({id:body.id,started:body.started});}
