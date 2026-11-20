@@ -50,22 +50,32 @@ const Monitor=(()=>{
   if(typeof RatingsOrchestration==='undefined')throw new Error('unavailable');
   return await RatingsOrchestration.readModel(env,now);
  });
- // Prediction activity is real model progress only: a productive completed run (created or recalculated films) or a moved processed
- // counter. A scheduled wake-up that found nothing to do rewrites `lastBatch` and `lastCheckAt` and is deliberately not progress.
+ // AIR-556. Prediction progress is confirmed work only, read through the same helpers as the Footer (enrichment.js: queue slices, retry budget, run
+ // history, one 60-minute no-progress threshold). Progress is a productive batch, a drained run that proved an empty queue, or a moved processed counter.
+ // A heartbeat, `already_running`, a noop wake-up, a queue recount and a lost monitor document are never progress, and an unknown time is never "now":
+ // without any evidence the clock starts at the first tick that saw eligible work (`unknownSince`, persisted), so the silence is bounded, not hidden.
  const predictionFacts=(env,now,previous)=>guarded(async()=>{
   const queue=await loadJSON(env,predictionQueueKey);
   if(!queue)return {present:false};
-  const latest=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json').catch(()=>null);
+  const [latest,runs,lease]=await Promise.all([
+   loadJSON(env,ENRICHMENT_KEY+'latest-run.json').catch(()=>null),
+   diagnosticHistory(env,20).then(history=>history.runs).catch(()=>null),
+   loadJSON(env,RUNNER_LEASE_KEY).catch(()=>null)]);
+  const shared=predictionProgressFacts({queue,runs,latestRun:latest,lease,now});
+  const slices=shared.slices;
   const productiveAt=Date.parse(latest?.completedAt||''),productive=Number.isFinite(productiveAt)&&((latest?.counts?.created||0)+(latest?.counts?.recalculated||0))>0?productiveAt:null;
+  const evidenceAt=shared.lastProgressAt?Date.parse(shared.lastProgressAt):null;
   const processedTotal=Number.isInteger(queue.metrics?.hotProcessedTotal)?queue.metrics.hotProcessedTotal:null;
   const moved=Number.isInteger(processedTotal)&&Number.isInteger(previous?.processedTotal)&&processedTotal>previous.processedTotal;
-  const known=Date.parse(previous?.progressAt||'');
-  const candidates=[productive,moved?now:null,Number.isFinite(known)?known:null].filter(value=>value!==null);
-  const lastProgressAt=candidates.length?Math.max(...candidates):now;
-  const outstanding=[...new Set([...(queue.hotPending||[]),...(queue.coldPending||[])])].filter(id=>!(Number.isInteger(queue.retries?.[id]?.attempts)&&queue.retries[id].attempts>=10));
-  const deferred=outstanding.map(id=>queue.retries?.[id]?.retryAt).filter(value=>typeof value==='number'&&value>now);
-  return {present:true,pendingCount:Array.isArray(queue.pending)?queue.pending.length:0,processedTotal,lastProgressAt:iso(lastProgressAt),
-   eligibleNow:outstanding.length-deferred.length,nextRetryAt:deferred.length?iso(Math.min(...deferred)):null,blockedReason:queue.lastBatch?.stage==='blocked'?String(queue.lastBatch.reason||'').slice(0,40):null};
+  // Only a stored progress time that came from evidence is carried over: an earlier build stamped `now` when it had none.
+  const known=previous?.progressBasis==='evidence'?Date.parse(previous.progressAt||''):NaN;
+  const candidates=[productive,evidenceAt,moved?now:null,Number.isFinite(known)?known:null].filter(value=>Number.isFinite(value)&&value<=now+300000);
+  const lastProgressMs=candidates.length?Math.max(...candidates):null;
+  const unknownSince=lastProgressMs===null?(Number.isFinite(Date.parse(previous?.unknownSince||''))?previous.unknownSince:iso(now)):null;
+  const stall=predictionStallAssessment({now,sinceMs:lastProgressMs,eligibleNow:slices.eligibleNow,nextRetryAtMs:slices.nextRetryAt?Date.parse(slices.nextRetryAt):null,activeRun:shared.activeRun,activeStartedAtMs:shared.activeStartedAtMs,observedSinceMs:unknownSince?Date.parse(unknownSince):null});
+  return {present:true,pendingCount:Array.isArray(queue.pending)?queue.pending.length:0,processedTotal,lastProgressAt:lastProgressMs===null?null:iso(lastProgressMs),unknownSince,
+   eligibleNow:slices.eligibleNow,outstanding:slices.outstanding,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,stall,
+   blockedReason:queue.lastBatch?.stage==='blocked'?String(queue.lastBatch.reason||'').slice(0,40):null};
  });
  // AIR-543 / ADR 0179: one bounded read of the poster checkpoint plus the Monitor's two write-once markers. The markers are written only by this
  // tick (never by a GET), are never cleared, and the first valid checkpoint fixes `seenAt` so a later loss is `lost`, not a new first-run grace.
@@ -179,7 +189,7 @@ const Monitor=(()=>{
     else outbox.push({...message,id:message.key+'|'+message.kind+'|'+iso(now),queuedAt:iso(now),after});
    }
    const queued=outbox;
-   const publishedRunId=facts.epg?.publishedRunId||null,predictions=facts.predictions?.present?{pendingCount:facts.predictions.pendingCount,processedTotal:facts.predictions.processedTotal,progressAt:facts.predictions.lastProgressAt}:doc?.predictions||null;
+   const publishedRunId=facts.epg?.publishedRunId||null,predictions=facts.predictions?.present?{pendingCount:facts.predictions.pendingCount,processedTotal:facts.predictions.processedTotal,progressAt:facts.predictions.lastProgressAt,progressBasis:'evidence',unknownSince:facts.predictions.unknownSince}:doc?.predictions||null;
    const next={schemaVersion:SCHEMA_VERSION,updatedAt:iso(now),heartbeatAt:iso(now),mode:current,overall:evaluation.overall,
     streams:evaluation.streams.map(stream=>({stream:stream.stream,state:stream.state,facts:stream.facts,issues:stream.issues.map(item=>({key:item.key,severity:item.severity}))})),
     alerts,outbox:queued,cancelledUndelivered:cancelled,holdUntil:doc?.holdUntil||null,lastDeliveryFailure:doc?.lastDeliveryFailure||null,predictions,

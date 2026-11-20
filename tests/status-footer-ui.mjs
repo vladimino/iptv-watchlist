@@ -153,7 +153,7 @@ context.predictionRunsInterrupted={integrations:{aggregate:'attention',attention
 assert.match(vm.runInContext('footerStatusText(predictionRunsInterrupted)',context).integrations.predictions,/часть запусков прервалась/);
 assert.doesNotMatch(vm.runInContext('footerStatusText(predictionRunsInterrupted)',context).integrations.predictions,/прогнозы приостановлены/);
 context.predictionStall={integrations:{aggregate:'attention',attentionCount:1,sources:[{id:'predictions',state:'degraded',code:'prediction_no_recent_progress',lastSuccessAt:'2026-11-16T06:00:00Z',lastFailureAt:'2026-11-16T13:04:00Z'}]}};
-assert.match(vm.runInContext('footerStatusText(predictionStall)',context).integrations.predictions,/нет недавнего прогресса прогнозов/);
+assert.match(vm.runInContext('footerStatusText(predictionStall)',context).integrations.predictions,/нет подтверждённого прогресса прогнозов/);
 context.offRatings={integrations:{aggregate:'healthy',attentionCount:0,sources:[{id:'letterboxd_ratings',state:'healthy',code:'ok',manualRefreshEnabled:false,lastSuccessAt:'2026-10-13T09:10:00Z',lastFailureAt:null}]}};
 const offLine=vm.runInContext('footerStatusText(offRatings)',context).integrations.letterboxd_ratings;
 assert.match(offLine,/^работает · успех /);

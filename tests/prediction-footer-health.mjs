@@ -185,3 +185,53 @@ putRun({runId:'run-busy',status:'partial',reason:'already_running',startedAt:'20
 const overlap=await footer();
 assert.equal(sourceOf(overlap,'predictions').state,'healthy','already_running after recent progress is not a hard stop');
 assert.notEqual(sourceOf(overlap,'predictions').code,'prediction_blocked');
+
+// AIR-556. The 20 Nov 2026 incident: the last productive batch was at 04:54 and nothing started since; 3740 films are eligible. The Footer must not say "works".
+const bigQueue=count=>{const ids=Array.from({length:count},(_,index)=>'q'+index);records.set('enrichment/prediction-queue.json',{schemaVersion:3,hotCount:count,coldCount:0,hotPending:ids,coldPending:[],pending:ids,priorityCount:count,coldRemaining:0,retries:{},work:{}});};
+const setNow=value=>{now=Date.parse(value);};
+{
+ const savedNow=now;
+ clearRuns();bigQueue(3740);
+ putRun({runId:'run-0454',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T04:46:00Z',endedAt:'2026-11-16T04:54:00Z',added:5,latest:true});
+ setNow('2026-11-16T09:46:00Z');
+ const incident=await footer();
+ const entry=sourceOf(incident,'predictions');
+ assert.equal(entry.state,'degraded','4 h 52 min without a productive batch is not healthy');
+ assert.equal(entry.code,'prediction_no_recent_progress');
+ assert.equal(entry.lastSuccessAt,'2026-11-16T04:54:00.000Z','the last success is shown as history, not as current health');
+ assert.equal(incident.integrations.aggregate,'attention','the automation aggregate is not healthy');
+ assert.notEqual(entry.code,'ok');
+ assert.ok(!/api_error|auth|missed/i.test(JSON.stringify(entry)),'the Worker claims nothing about why');
+ // The limit is 60 minutes: 59 minutes after progress is healthy, 61 is not (a Task start is at most about 29 minutes apart, so four slots can miss).
+ setNow('2026-11-16T05:53:00Z');assert.equal(sourceOf(await footer(),'predictions').state,'healthy','59 minutes after progress');
+ setNow('2026-11-16T05:55:00Z');assert.equal(sourceOf(await footer(),'predictions').state,'degraded','61 minutes after progress');
+ // A heartbeat-like noop (`already_running`) newer than the last progress is not progress.
+ putRun({runId:'run-busy-0900',status:'partial',reason:'already_running',startedAt:'2026-11-16T09:40:00Z',endedAt:'2026-11-16T09:40:00Z',added:0,latest:true});
+ setNow('2026-11-16T09:46:00Z');assert.equal(sourceOf(await footer(),'predictions').state,'degraded','an already_running start is not new progress');
+ // Nothing eligible (drained) or everything deferred by its own retry time is not a stall, whatever the age of the last batch.
+ emptyQueue();assert.equal(sourceOf(await footer(),'predictions').state,'healthy','drained queue');
+ records.set('enrichment/prediction-queue.json',{schemaVersion:3,hotCount:1,coldCount:0,hotPending:['x'],coldPending:[],pending:['x'],priorityCount:1,coldRemaining:0,retries:{x:{attempts:1,retryAt:now+3600000,retryable:true,scope:'item',kind:'parse_error'}},work:{}});
+ assert.equal(sourceOf(await footer(),'predictions').state,'healthy','eligibleNow 0 with a future retry');
+ // Cold-only work is eligible work too.
+ const ids=Array.from({length:50},(_,index)=>'c'+index);records.set('enrichment/prediction-queue.json',{schemaVersion:3,hotCount:0,coldCount:50,hotPending:[],coldPending:ids,pending:ids,priorityCount:0,coldRemaining:50,retries:{},work:{}});
+ assert.equal(sourceOf(await footer(),'predictions').state,'degraded','cold-only eligible work with no progress');
+ // Recovery: a productive batch clears it at once.
+ putRun({runId:'run-0946',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T09:40:00Z',endedAt:'2026-11-16T09:45:00Z',added:4,latest:true});
+ assert.equal(sourceOf(await footer(),'predictions').state,'healthy','delay, failure and recovery');
+ now=savedNow;
+}
+
+// AIR-556: a live run younger than the 60-minute limit is running; an older live lease is not evidence of progress.
+{
+ const savedNow=now;
+ clearRuns();bigQueue(200);
+ putRun({runId:'run-before',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T04:46:00Z',endedAt:'2026-11-16T04:54:00Z',added:5});
+ const live=(startedAt)=>{records.set('enrichment/latest-run.json',{runId:'run-live',status:'running',createdAt:startedAt,trigger:'scheduled',selectedIds:[],results:{},failures:{}});records.set('enrichment/runner-lease.json',{runId:'run-live',expiresAt:now+10*60000,heartbeatAt:new Date(now).toISOString()});};
+ setNow('2026-11-16T09:46:00Z');
+ live('2026-11-16T09:30:00Z');
+ assert.equal(sourceOf(await footer(),'predictions').state,'running','a 16-minute live run is running');
+ live('2026-11-16T08:00:00Z');
+ assert.equal(sourceOf(await footer(),'predictions').state,'degraded','a lease held for 106 minutes without a finished batch does not hide the missing progress');
+ records.delete('enrichment/runner-lease.json');
+ now=savedNow;
+}

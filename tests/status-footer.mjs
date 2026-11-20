@@ -281,7 +281,8 @@ records.set('sync.json',{runId:'programme-dst',stage:'complete',updatedAt:'2026-
 records.set('epg/discovery-latest.json',{programmeRunId:'programme-dst',items:[{key:'pending',title:'Pending film',seenInLatestSnapshot:true,shows:[{channelId:'b',start:Date.parse('2026-10-25T02:00:00.000Z')}]}]});
 records.set('epg/discovery-resolution.json',{});
 records.set('epg/discovery-status.json',{stage:'partial',programmeRunId:'programme-dst',finishedAt:'2026-10-24T23:40:00.000Z',error:null});
-records.set('enrichment/latest-run.json',{runId:'run-1',status:'complete',trigger:'scheduled',createdAt:'2026-10-24T22:00:00Z',completedAt:'2026-10-24T22:08:00Z',stopReason:'queue_empty',selectedIds:['watch-a'],results:{'watch-a':'created'},failures:{},selectionKind:{'watch-a':'hot'},batchCount:1});
+// AIR-556: predictions must stay fresh here (the 60-minute limit); this block is about the resolver gate, not about prediction progress.
+records.set('enrichment/latest-run.json',{runId:'run-1',status:'complete',trigger:'scheduled',createdAt:'2026-10-25T02:02:00Z',completedAt:'2026-10-25T02:10:00Z',stopReason:'queue_empty',selectedIds:['watch-a'],results:{'watch-a':'created'},failures:{},selectionKind:{'watch-a':'hot'},batchCount:1});
 const budgetPause=(patch={})=>({stage:'paused',reason:'chunk_budget',at:'2026-10-24T23:40:00.000Z',programmeRunId:'programme-dst',remainingChunks:0,nextCatchUpAt:gate,retryAt:null,...patch});
 records.set('epg/resolver-continuation.json',budgetPause());
 records.delete('epg/resolver-lease.json');

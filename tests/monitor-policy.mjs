@@ -84,20 +84,32 @@ const keys=result=>result.issues.map(item=>item.key);
  assert.deepEqual(keys(P.evaluateRatings({error:true},now)),['ratings_unreadable']);
 }
 
-// 4. Prediction queue: empty is healthy, stale pending work is not, growth while idle is named, a missing queue waits.
+// 4. Prediction queue (AIR-556): the verdict arrives in `facts.stall` from the one shared assessment (enrichment.js). Empty and deferred work never alert,
+// eligible work with no confirmed progress degrades, unknown evidence is delayed (never healthy), and the alert needs one snapshot.
 {
  const now=T('2026-11-06T18:00:00Z');
- const q=extra=>({present:true,pendingCount:5,lastProgressAt:at(now-30*MIN),...extra});
- assert.equal(P.evaluatePredictions(q({pendingCount:0,lastProgressAt:at(now-30*H)}),null,now).state,'healthy','an empty queue is healthy however old the last batch is');
+ const q=extra=>({present:true,pendingCount:5,eligibleNow:5,lastProgressAt:at(now-30*MIN),stall:{state:'ok',idleMs:30*MIN},...extra});
+ const stalled=idleMs=>({stall:{state:'no_progress',reason:'no_productive_batch',idleMs,sinceKnown:true},lastProgressAt:at(now-idleMs)});
+ assert.equal(P.evaluatePredictions(q({pendingCount:0,eligibleNow:0,stall:{state:'idle',idleMs:null},lastProgressAt:at(now-30*H)}),null,now).state,'healthy','an empty queue is healthy however old the last batch is');
  assert.equal(P.evaluatePredictions(q(),null,now).state,'healthy');
- assert.equal(P.evaluatePredictions(q({lastProgressAt:at(now-4*H)}),null,now).state,'delayed');
- assert.equal(P.evaluatePredictions(q({lastProgressAt:at(now-4*H),pendingCount:9}),{pendingCount:5},now).state,'degraded','growing while idle');
- assert.ok(keys(P.evaluatePredictions(q({lastProgressAt:at(now-4*H),pendingCount:9}),{pendingCount:5},now)).includes('predictions_backlog_growing'));
- const stale=P.evaluatePredictions(q({lastProgressAt:at(now-8*H)}),null,now);
- assert.equal(stale.state,'degraded');assert.deepEqual(keys(stale),['predictions_stale']);
- assert.equal(P.evaluatePredictions(q({lastProgressAt:null}),null,now).state,'degraded','pending work and no model batch ever recorded');
+ assert.equal(P.evaluatePredictions(q({stall:{state:'running',idleMs:null}}),null,now).state,'healthy','a live run is not an incident');
+ const stale=P.evaluatePredictions(q(stalled(70*MIN)),null,now);
+ assert.equal(stale.state,'degraded');assert.deepEqual(keys(stale),['predictions_no_progress']);
+ assert.doesNotMatch(stale.issues[0].message,/api_error|auth|missed|expired/i,'no claim about why Tasks did not run');
+ assert.equal(P.evaluatePredictions(q({pendingCount:9,...stalled(5*H)}),{pendingCount:5},now).state,'degraded','growth changes nothing: one issue, one key');
+ assert.deepEqual(keys(P.evaluatePredictions(q({pendingCount:9,...stalled(5*H)}),{pendingCount:5},now)),['predictions_no_progress']);
+ assert.equal(P.evaluatePredictions(q({eligibleNow:0,stall:{state:'waiting',idleMs:null},nextRetryAt:at(now+H)}),null,now).state,'waiting','work deferred by its own retry time waits by design');
+ assert.equal(P.evaluatePredictions(q({lastProgressAt:null,stall:{state:'unknown',reason:'no_progress_evidence',idleMs:null}}),null,now).state,'delayed','unknown progress time is never healthy and never an alert by itself');
+ assert.deepEqual(keys(P.evaluatePredictions(q({lastProgressAt:null,stall:{state:'unknown',reason:'no_progress_evidence',idleMs:null}}),null,now)),[]);
+ const unsplit=P.evaluatePredictions(q({eligibleNow:null,stall:{state:'unknown',reason:'queue_unreadable',idleMs:null}}),null,now);
+ assert.equal(unsplit.state,'delayed','pending work that cannot be split into eligible and deferred is visible, never healthy');assert.deepEqual(keys(unsplit),[],'and raises no false alert');
+ assert.equal(P.evaluatePredictions(q({pendingCount:2,eligibleNow:0,stall:{state:'idle',idleMs:null}}),null,now).state,'healthy','only retry-exhausted work is not a stall');
  assert.equal(P.evaluatePredictions({present:false},null,now).state,'waiting');
  assert.deepEqual(keys(P.evaluatePredictions({error:true},null,now)),['predictions_unreadable']);
+ // One snapshot confirms the prediction verdict; every other degraded issue still needs two.
+ const issue=P.evaluatePredictions(q(stalled(70*MIN)),null,now).issues;
+ assert.equal(P.planAlerts(issue,{issues:{}},now).sends.length,1,'confirmed by one snapshot');
+ assert.equal(P.planAlerts([{key:'epg_stale',severity:'degraded',stream:'epg',message:'x'}],{issues:{}},now).sends.length,0,'other degraded issues keep two snapshots');
 }
 
 // 5. Overall state: the worst stream; delayed and waiting never produce an alertable issue.
