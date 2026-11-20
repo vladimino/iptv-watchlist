@@ -1054,6 +1054,7 @@ async function adminDiscoveryReconsiderRoute(request,env,url){
   try{return action==='identity-confirm'?await diConfirm(request,env,url):await diExecute(request,env,url);}
   catch{return drRefused('storage_unavailable',503);}
  }
+ if(action==='group-preview'||action==='group-receipt'||action==='group-confirm'||action==='group-execute')return await adminIdentityGroupRoute(request,env,url,action);
  if(action==='revoke-preview'){
   if(request.method!=='GET')return adminError('method_not_allowed',405);
   try{return await dvPreview(request,env,url);}catch{return drRefused('storage_unavailable',503);}

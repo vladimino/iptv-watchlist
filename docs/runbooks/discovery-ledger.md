@@ -104,6 +104,18 @@ A production write of one decision; agents do not run it. [ADR 0178](../adr/0178
 5. The ordinary Discovery chunk re-evaluates the observation. Do not start a chunk from this page. `in_progress` means the outcome is unknown: read the preview again, never resubmit blindly.
 6. **Undo is a new owner action.** History and intents are append-only; code rollback does not revert D1 rows.
 
+## Assign one movie to a group of observations
+
+A production write of up to 10 decisions; agents do not run it. [ADR 0181](../adr/0181-owner-confirmed-group-assign-of-selected-observations.md). No migration is needed (schema 27).
+
+1. Open `/admin/identity/group?tmdbId=<digits>` from a queue row or the Limbo identity section. The page reads nothing on load beyond the preview you request and selects nothing.
+2. Read the partial candidate list: counts, `more`, `dropped`, and each row's before/after. Tick only the keys you have checked, write the basis, tick the box.
+3. «Подготовить» shows the exact selected set with versions. «Подтвердить» issues all children at once; «Выполнить» writes them one by one.
+4. Read the per-key receipts. `applied` is written; `conflict`, `refused`, `skipped`, `expired` and `not_attempted` wrote nothing for that key; `unknown` stops the run: read the receipt again, never resubmit blindly.
+5. While a group is unfinished the page refuses a new confirmation, also after a reload. A receipt that is not proven is shown as unproven, never as success. The page keeps the group handle until every key is applied or you press «Забыть эту группу». If the answer is lost, partial or unknown (timeout, network, reload), press «Проверить результат записи»: it only reads the stored group. A group that was written but not executed offers the original scope to continue; one that was never stored says so and nothing was written. Never submit a different selection under the same expectation.
+6. A partial result is valid. Replay finishes only children without a receipt and never adds keys.
+7. Do not start a chunk from this page. **Undo is per key** through the revoke page; code rollback does not revert D1 rows.
+
 ## Rollback
 
 - **R1 (stop archiving):** a code revert to a Worker that still reads `DISCOVERY_LEDGER_MODE`, with that binding restored to `frozen` (or absent while an archive exists). On the retired Worker a leftover `frozen` or `full` binding is ignored and the seal stays bounded ([ADR 0156](../adr/0156-retire-discovery-ledger-mode.md)). Nothing is rebuilt or deleted.
