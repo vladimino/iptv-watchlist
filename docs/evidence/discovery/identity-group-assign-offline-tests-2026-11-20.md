@@ -16,4 +16,6 @@ Offline tests: `tests/admin-identity-group-page.mjs` (journey without an id, emp
 
 Real Chromium (stubbed API, English browser locale, no screenshots stored), 1280 and 390 px, keyboard (Tab, Enter, Space): the entry is visible on the first screen of `/admin/identity` at both widths; the group page opens on the worklist; an empty search, an empty basis, a missing acknowledgement and a non-numeric id each show their Russian message with focus on the field; the pick button works with Enter; no horizontal overflow; no page error; no POST.
 
+The review of that fix added: the chosen EPG record's row key travels through the journey and is compared with the group candidates by observation key (absent, blocked with reasons, present and marked, never selected for the owner), and worklist rows show Russian status and reason text with a Russian fallback for unknown codes (tests for both, including a preview that returns only another observation).
+
 Limits: no production request or write was made.
