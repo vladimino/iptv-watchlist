@@ -260,7 +260,7 @@ const setNow=value=>{now=Date.parse(value);};
  setNow('2026-11-16T09:46:00Z');
  const recalculated=sourceOf(await footer(),'predictions');
  assert.notEqual(recalculated.code,'prediction_no_recent_progress','four recalculated films are progress even though the checkpoint has no `updated`');
- assert.equal(recalculated.code,'prediction_partial','the one failed item is reported as a partial run, not as missing progress');
+ assert.equal(recalculated.state,'healthy','one failed item beside four saved predictions is not a pipeline problem');
  assert.equal(recalculated.lastSuccessAt,'2026-11-16T09:40:00.000Z');
  // Mixed: recalculated plus failed, and a failed-only run is still not progress.
  clearRuns();bigQueue(3740);
@@ -273,5 +273,48 @@ const setNow=value=>{now=Date.parse(value);};
  records.set('enrichment/runner-lease.json',{runId:'run-live',expiresAt:now+10*60000,heartbeatAt:new Date(now).toISOString()});
  assert.equal(sourceOf(await footer(),'predictions').state,'degraded','a live lease without a start time is not "running"');
  records.delete('enrichment/runner-lease.json');
+ now=savedNow;
+}
+
+// AIR-556 (owner follow-up): per-film failures are classified apart from pipeline health.
+{
+ const savedNow=now;
+ const entryOf=async()=>sourceOf(await footer(),'predictions');
+ // Mixed success: 4 saved, 1 failed, progress fresh: normal health, aggregate healthy, the item failure stays in lastRun.
+ clearRuns();bigQueue(500);
+ putRun({runId:'run-mixed',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T09:30:00Z',endedAt:'2026-11-16T09:40:00Z',added:4,updated:0,failed:1,latest:true});
+ setNow('2026-11-16T09:46:00Z');
+ const mixedBody=await footer();
+ assert.equal(sourceOf(mixedBody,'predictions').state,'healthy');assert.equal(sourceOf(mixedBody,'predictions').code,'ok');
+ assert.equal(mixedBody.integrations.aggregate,'healthy','an expected item failure does not raise the automation aggregate');
+ assert.equal(mixedBody.lastRun.added,4);assert.equal(mixedBody.lastRun.failed,1,'the item failure stays visible in the latest-run details');
+ // Failed-only with fresh earlier progress: no invented outage, no invented progress (lastSuccessAt stays the earlier batch).
+ clearRuns();bigQueue(500);
+ putRun({runId:'run-good',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T09:10:00Z',endedAt:'2026-11-16T09:20:00Z',added:3});
+ putRun({runId:'run-allfail',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T09:30:00Z',endedAt:'2026-11-16T09:40:00Z',added:0,updated:0,failed:5,latest:true});
+ const failedFresh=await entryOf();
+ assert.equal(failedFresh.state,'healthy','a failed-only batch does not assert an outage by its failure count');
+ assert.equal(failedFresh.lastSuccessAt,'2026-11-16T09:20:00.000Z','and does not become progress');
+ // The shared 60-minute rule then decides: 61 minutes after the last progress it is no confirmed progress.
+ setNow('2026-11-16T10:22:00Z');
+ assert.equal((await entryOf()).code,'prediction_no_recent_progress');
+ // Failed-only history with no progress at all: unknown while the evidence is younger than 60 minutes, no confirmed progress after.
+ clearRuns();bigQueue(500);
+ putRun({runId:'run-onlyfail',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T09:30:00Z',endedAt:'2026-11-16T09:40:00Z',added:0,updated:0,failed:5,latest:true});
+ setNow('2026-11-16T09:46:00Z');
+ const young=await entryOf();assert.equal(young.state,'unknown');assert.equal(young.code,'no_data');
+ setNow('2026-11-16T10:35:00Z');assert.equal((await entryOf()).code,'prediction_no_recent_progress');
+ // Systemic stops keep degrading, whatever else the batch did, and repeated interruptions keep degrading.
+ for(const reason of ['api_error','quota','model_unavailable','storage_error','format_error_storm']){
+  clearRuns();bigQueue(500);
+  putRun({runId:'run-before-'+reason,status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T09:10:00Z',endedAt:'2026-11-16T09:20:00Z',added:3});
+  putRun({runId:'run-stop-'+reason,status:'partial',reason,startedAt:'2026-11-16T09:30:00Z',endedAt:'2026-11-16T09:40:00Z',added:0,latest:true});
+  setNow('2026-11-16T09:46:00Z');
+  const stop=await entryOf();assert.equal(stop.state,'degraded',reason);assert.equal(stop.code,'prediction_blocked',reason);
+ }
+ clearRuns();bigQueue(500);
+ putRun({runId:'run-i1',status:'partial',reason:'external_termination',startedAt:'2026-11-16T09:20:00Z',endedAt:'2026-11-16T09:21:00Z',added:0});
+ putRun({runId:'run-i2',status:'partial',reason:'external_termination',startedAt:'2026-11-16T09:30:00Z',endedAt:'2026-11-16T09:31:00Z',added:0,latest:true});
+ assert.equal((await entryOf()).code,'prediction_runs_interrupted','repeated interruptions keep their degradation');
  now=savedNow;
 }

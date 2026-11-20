@@ -2014,12 +2014,15 @@ function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
  const latestAge=latest.at?now-Date.parse(latest.at):null;
  if(workLeft&&predictionProgressStalled(progressAge)){
   if(lastSuccessAt)return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',lastSuccessAt,lastFailureAt);
-  if(latestAge!=null&&predictionProgressStalled(latestAge))return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',null,lastFailureAt);
-  if(isFailedOnly(latest)||facts.filter(fact=>isInterrupt(fact)||isFailedOnly(fact)).length>=2)return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',null,lastFailureAt);
+  // No progress anywhere in the history: the oldest recorded attempt bounds how long that has lasted (a failed-only batch never asserts an outage by its count).
+  const oldest=facts[facts.length-1],oldestMs=Date.parse(oldest?.startedAt||oldest?.at||''),oldestAge=Number.isFinite(oldestMs)?now-oldestMs:null;
+  if(oldestAge!=null&&predictionProgressStalled(oldestAge))return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',null,lastFailureAt);
+  if(facts.filter(fact=>isInterrupt(fact)).length>=2)return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',null,lastFailureAt);
   if(!queueReadable)return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
   if(isInterrupt(latest))return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
  }
- if(isComplete(latest)&&latest.failed&&!isDrained(latest))return integrationEntry('predictions','capability','degraded','prediction_partial',lastSuccessAt,lastFailureAt);
+ // AIR-556: item failures of a completed batch (parse, validation, retry) are expected and live in lastRun.failed and the item diagnostics. They are not pipeline health:
+ // health comes from confirmed progress (60 minutes), a hard stop, or repeated interruptions, never from a failure count alone.
  if(lastSuccessAt)return integrationEntry('predictions','capability',fresh(lastSuccessAt),freshCode(lastSuccessAt),lastSuccessAt,isInterrupt(latest)||isFailedOnly(latest)?lastFailureAt:null);
  return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
 }
