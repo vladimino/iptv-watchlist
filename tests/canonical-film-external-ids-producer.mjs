@@ -352,7 +352,8 @@ for(const stage of ['legacy','r2','prepared']){
  const code_=text.split('\n').filter(line=>!line.trim().startsWith('//')).join('\n');
  assert.ok(!/\b(INSERT|UPDATE|DELETE)\b\s/i.test(code_.replace(/SELECT[^'`"]*/g,'')),'no write SQL of its own');
  for(const word of ['fetch(','setTimeout','setInterval','env.BUCKET','R2','cron','waitUntil'])assert.ok(!code_.includes(word),word);
- for(const file of fs.readdirSync('src').filter(name=>name.endsWith('.js')&&name!=='canonical-film-external-ids-producer.js'))assert.ok(!fs.readFileSync('src/'+file,'utf8').includes('canonical-film-external-ids-producer'),file+' does not import the unit');
+ // AIR-559 (ADR 0184, Proposed): the dormant Letterboxd claim module is the ONLY importer, and it is itself imported by nothing (tests/canonical-letterboxd-claim.mjs), so the unit is still not reachable from the Worker.
+ for(const file of fs.readdirSync('src').filter(name=>name.endsWith('.js')&&name!=='canonical-film-external-ids-producer.js'&&name!=='canonical-letterboxd-claim.js'))assert.ok(!fs.readFileSync('src/'+file,'utf8').includes('canonical-film-external-ids-producer'),file+' does not import the unit');
  assert.ok(!fs.readFileSync('build.mjs','utf8').includes('canonical-film-external-ids-producer'),'not bundled');
  assert.ok(!PRODUCER_OPERATIONS.has('film_external_ids'));
  assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
