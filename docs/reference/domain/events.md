@@ -142,20 +142,46 @@ The end marker «Это самое раннее доступное событи�
 
 ## Result status and result filter (AIR-557)
 
-The events screen and the compact feed show one result marker per event: icon, restrained colour accent and text («Успех», «Предупреждение», «Прервано», «Ошибка»). The status is `presentationStatus`, derived **in the browser** by one function (`eventPresentationStatus` in `public/app.js`) from structured fields only (`type`, `presentation`, `kind`, `state`, `status`, `reason`/`stopReason`, `cause`, `outcome`, `stage`, `delta`), never from a title or a translation. It is not stored, not returned by `GET /api/events` and not a backfill; the existing `catalog_posters.outcome` field is only read for `catalog_posters` events. An event with no confirmed result has **no** status and shows no badge: there is no fifth status and no invented «success».
+The events screen and the compact feed show one result marker per event: icon, restrained colour accent and text («Успех», «Предупреждение», «Прервано», «Ошибка»). The status is `presentationStatus`, derived **in the browser** by one function (`eventPresentationStatus` in `public/app.js`) from structured fields only (`type`, `presentation`, `kind`, `state`, `status`, `reason`/`stopReason`, `cause`, `outcome`, `stage`, `delta`), never from a title or a translation. It is not stored, not returned by `GET /api/events` and not a backfill; the existing `catalog_posters.outcome` field is only read for `catalog_posters` events. An event with no confirmed result has **no** status and shows no badge: there is no fifth status and no default «success».
 
-| Source | success | warning | interrupted | error |
-| --- | --- | --- | --- | --- |
-| Predictions `batch_v2_terminal` | `stage=complete`, no per-film failures (also `manifest_spent`) | `complete` with per-film failures; `quota`, `time_budget`, `parse_error`, `lease_lost`, `lease_expired`; any other unlisted stop code | `priority_changed`, `profile_changed`, `runner_aborted`, `external_termination` | `api_error`, `storage_error`, `model_error`, `model_unavailable`, `format_error_storm` |
-| Predictions `batch_v2_skipped` (AIR-548) | | always (a refused attempt, not an interrupted run) | | |
-| Discovery `kind=hour` | `idle`, `empty`, found/nothing new (complete report) | `waiting`, `blocked`, `incomplete`, unreadable counts, `queueUnreadable` | | `failed`, `stalled` |
-| Discovery `kind=report_failed` | | unknown or non-alarming state, `waiting`, `blocked` | | confirmed `status=failed\|stalled` |
-| Discovery legacy per-chain | | | `status=superseded` | `failed`, `stalled` |
-| Ratings | `state=finished` | `cause=blocked\|rate_limited` | `state=unknown`, `cause=interrupted\|abandoned` | `state=error` |
-| Catalog posters | `outcome=completed` (zero results and `noPoster` are normal) | `outcome=deferred` (or `final=false` with no outcome) | | `outcome=failed` |
-| EPG | published | | | |
+**Layout.** One renderer (`eventHTML` + `eventStatusBadgeHTML`) puts the date and the marker in one header, `<div class="event-head"><time datetime>…</time><span class="event-status …">`, followed by the event title on its own line. In the compact feed the header is stacked (date, marker below it). On `/events` it is one row: date on the left, marker flush right; on a narrow screen the marker wraps below the date, still flush right, with no overlap, clipping or horizontal scroll.
 
-No status (neutral): `watchlist`, `started`, `unstarted`, `taste_profile`, Predictions `started`/`resumed`/progress and legacy v3-v5 `enrichment`, Discovery `hour` with `status=running` (the Workflow has no outcome yet), legacy Discovery `stopped`/`empty`, unknown types, fields and combinations. Priority on collision: for a terminal packet, `stage=complete` decides first (failures → warning), then a systemic error code beats an interruption code beats a soft code; `stopReason` beats `reason`; for a Discovery hour, confirmed `failed`/`stalled` beats `waiting`/`blocked` beats an incomplete or unreadable report; for Ratings, `finished` beats a stray `cause`, and a temporary `cause` beats `state=error`.
+**Audit of every supported `type`** (the nine types of the Worker: `epg`, `watchlist`, `started`, `unstarted`, `taste_profile`, `ratings`, `discovery`, `enrichment`, `catalog_posters`; `batch_v2_skipped` is a `presentation` of `enrichment`, not a type). Producers checked: `src/worker.js` (`epgEvent`, `watchlistEvent`, started/unstarted), `src/enrichment.js` (taste profile, run, terminal and skipped events), `src/discovery-workflow.js` (hour, `report_failed`, legacy run), `src/letterboxd-ratings.js`, `src/catalog-poster-weekly.js`.
+
+| Type, subtype and evidence | Result |
+| --- | --- |
+| `epg` (a published generation) | success |
+| `watchlist` (a committed list; also `added=[]`/`removed=[]` and `baseline`) | success |
+| `started`, `unstarted` (a saved owner mark) | success |
+| `taste_profile` (a published current pointer; any `scope`, including `identity`) | success |
+| `enrichment` `presentation=batch_v2_terminal`, `stage=complete`, no per-film failures (also `manifest_spent`) | success |
+| same, with per-film failures (`delta.failed` or `failed` > 0) | warning |
+| same, partial: `quota`, `time_budget`, `parse_error`, `lease_lost`, `lease_expired`, or any unlisted or missing stop code | warning |
+| same, partial: `priority_changed`, `profile_changed`, `runner_aborted`, `external_termination` | interrupted |
+| same, partial: `api_error`, `storage_error`, `model_error`, `model_unavailable`, `format_error_storm` | error |
+| `enrichment` `presentation=batch_v2_skipped` (a refused attempt, not an interrupted run) | warning |
+| `enrichment` v3-v6 **without** `presentation`, `stage=complete`/`completed` (failures → warning) | success / warning |
+| same, `stage=partial` or `interrupted`: the stop-code rules above (`interrupted` stage with no listed code → interrupted; a normal reason such as `queue_empty` on `partial` → success) | per code |
+| same, `stage=blocked`: waiting for the next run → warning; a systemic error code → error; an interruption code → interrupted | warning / error / interrupted |
+| Discovery `kind=hour`: `failed`/`stalled` | error |
+| same: `waiting`/`blocked`, `incomplete`, unreadable counts, `queueUnreadable` | warning |
+| same: `idle`/`empty`, complete report (found or nothing new; `provisional` too) | success |
+| Discovery `kind=report_failed`: confirmed `status=failed\|stalled` | error |
+| same: unknown, non-alarming, `waiting`, `blocked` | warning |
+| Discovery legacy `kind=run`: `finished` (`complete`, `backlog_empty`) | success |
+| same: `superseded` | interrupted |
+| same: `failed`, `stalled` | error |
+| Ratings `state=finished` | success |
+| Ratings `cause=blocked\|rate_limited` | warning |
+| Ratings `state=unknown`, `cause=interrupted\|abandoned` | interrupted |
+| Ratings `state=error` | error |
+| Catalog posters `outcome=completed` (zero results and `noPoster` are normal) | success |
+| Catalog posters `outcome=deferred`, or `final=false` with no outcome | warning |
+| Catalog posters `outcome=failed` | error |
+
+**Justified `null` (no badge).** (1) `enrichment` `started`/`resumed`, running progress (`-progress-` ids) and any record without a stage: the run has no outcome yet, and a progress record never gets one whatever its `reason`. (2) `enrichment` with an unknown `stage` or an unknown `presentation`: the contract does not say what it means. (3) Discovery `kind=hour` with `status=running`: the Workflow is still running, so it is not declared finished. (4) Discovery legacy `status=stopped` (`executor_not_workflow`): a refusal to run, not an outcome; legacy `kind=empty` and a bare `discovery` record carry no stored result. (5) Ratings or Catalog posters records whose `state`/`outcome` is missing or unknown. (6) Unknown types, fields and combinations. None of these is treated as success by default.
+
+**Priority on collision.** `stage=complete` decides first (failures → warning); then a systemic error code beats an interruption code (and an `interrupted` stage), which beats `blocked`, which beats a normal reason, which beats a soft code; `stopReason` beats `reason`. For a Discovery hour, confirmed `failed`/`stalled` beats `waiting`/`blocked`, which beats an incomplete or unreadable report. For Ratings, `finished` beats a stray `cause`, and a temporary `cause` beats `state=error`.
 
 **«Результат» filter.** `/events` has a second single-select, «Результат»: `Все | Успех | Предупреждение | Прервано | Ошибка`, next to «Тип событий». The two axes combine; «Пропущенные» stays a **type** option and `warning` a **result**. The filter is client-side only: it reads the loaded events and writes nothing. The choice is the `result` query parameter (`/events?type=enrichment&result=error`); each axis rewrites only its own parameter, so the other filter, `return` and the fragment survive; reload, Back/Forward and deep links restore both. The automatic first-ten search of AIR-381 counts events that match **both** active axes and keeps its bounds (sequential cursor order, abort on a change of filter or screen, explicit retry on an error, no repeated cursor, «archive exhausted» only when the cursor ends); with both axes on «Все» it never scans.
 

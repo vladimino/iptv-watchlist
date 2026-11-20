@@ -35,8 +35,24 @@ const table = [
   [terminal({stage: 'partial', stopReason: 'something_new'}), 'warning', 'unknown stop code: attention, not a proven failure'],
   [terminal({stage: 'partial', stopReason: 'api_error', reason: 'priority_changed'}), 'error', 'collision: stopReason wins over reason, error over interruption'],
   [{type: 'enrichment', stage: 'started', queueSchemaVersion: 6}, null, 'start has no result'],
-  [{type: 'enrichment', stage: 'partial', reason: 'api_error', queueSchemaVersion: 5}, null, 'legacy v5 is not guessed'],
-  [{type: 'enrichment'}, null, 'bare legacy enrichment'],
+  [{type: 'enrichment', stage: 'resumed', queueSchemaVersion: 6}, null, 'resume has no result'],
+  [{type: 'enrichment', stage: 'running', queueSchemaVersion: 6}, null, 'running progress is intermediate'],
+  [{type: 'enrichment', stage: 'running', queueSchemaVersion: 4, reason: 'api_error'}, null, 'a progress record never gets a result, whatever its reason'],
+  [{type: 'enrichment'}, null, 'bare legacy enrichment: no stage, no result'],
+  [{type: 'enrichment', stage: 'mystery', queueSchemaVersion: 5}, null, 'unknown stage'],
+  [{type: 'enrichment', presentation: 'something_new', stage: 'complete'}, null, 'unknown presentation'],
+  // Historical enrichment runs (v3-v6, no `presentation`): classified only by the stored end stage.
+  [{type: 'enrichment', stage: 'completed', queueSchemaVersion: 6, delta: {failed: 0}}, 'success', 'legacy v6 completed'],
+  [{type: 'enrichment', stage: 'complete', queueSchemaVersion: 5, failed: 0}, 'success', 'legacy v5 complete'],
+  [{type: 'enrichment', stage: 'complete', queueSchemaVersion: 3, failed: 3}, 'warning', 'legacy v3 complete with failures'],
+  [{type: 'enrichment', stage: 'partial', reason: 'api_error', queueSchemaVersion: 5}, 'error', 'legacy v5 partial, api_error'],
+  [{type: 'enrichment', stage: 'partial', reason: 'priority_changed', queueSchemaVersion: 5}, 'interrupted', 'legacy v5 partial, priority_changed'],
+  [{type: 'enrichment', stage: 'partial', reason: 'quota', queueSchemaVersion: 4}, 'warning', 'legacy partial, quota'],
+  [{type: 'enrichment', stage: 'partial', queueSchemaVersion: 4}, 'warning', 'legacy partial, no reason: attention, not a proven failure'],
+  [{type: 'enrichment', stage: 'partial', reason: 'queue_empty', queueSchemaVersion: 6}, 'success', 'legacy partial with a normal reason'],
+  [{type: 'enrichment', stage: 'blocked', reason: 'retry_backoff', queueSchemaVersion: 5}, 'warning', 'legacy blocked waits for the next run'],
+  [{type: 'enrichment', stage: 'blocked', reason: 'model_unavailable', queueSchemaVersion: 6}, 'error', 'legacy blocked by a systemic error'],
+  [{type: 'enrichment', stage: 'interrupted', stopReason: 'lease_expired', queueSchemaVersion: 6}, 'interrupted', 'legacy interrupted run'],
   // Discovery
   [{type: 'discovery', kind: 'hour', status: 'idle', checked: 0, added: 0}, 'success', 'nothing new is not a warning'],
   [{type: 'discovery', kind: 'hour', status: 'empty', checked: 3, added: 1}, 'success', 'hour report'],
@@ -55,8 +71,13 @@ const table = [
   [{type: 'discovery', kind: 'report_failed', status: 'stalled'}, 'error', 'report_failed + confirmed stalled'],
   [{type: 'discovery', status: 'superseded'}, 'interrupted', 'legacy superseded'],
   [{type: 'discovery', status: 'failed'}, 'error', 'legacy failed'],
-  [{type: 'discovery', status: 'stopped'}, null, 'legacy stopped is not guessed'],
-  [{type: 'discovery', kind: 'empty'}, null, 'legacy empty queue'],
+  [{type: 'discovery', kind: 'run', status: 'finished', reason: 'complete'}, 'success', 'legacy run finished'],
+  [{type: 'discovery', kind: 'run', status: 'finished', reason: 'backlog_empty'}, 'success', 'legacy run, backlog empty'],
+  [{type: 'discovery', kind: 'run', status: 'superseded'}, 'interrupted', 'legacy run superseded'],
+  [{type: 'discovery', kind: 'run', status: 'failed', reason: 'recovery_exhausted'}, 'error', 'legacy run failed'],
+  [{type: 'discovery', kind: 'run', status: 'stopped', reason: 'executor_not_workflow'}, null, 'legacy stopped is a refusal, not an outcome'],
+  [{type: 'discovery', kind: 'empty'}, null, 'legacy empty record has no stored result'],
+  [{type: 'discovery'}, null, 'bare discovery record'],
   // Ratings
   [{type: 'ratings', state: 'finished'}, 'success', 'finished'],
   [{type: 'ratings', state: 'finished', cause: 'blocked'}, 'success', 'finished wins over a stray cause'],
@@ -76,8 +97,16 @@ const table = [
   [{type: 'enrichment', presentation: 'batch_v2_terminal', stage: 'complete', outcome: 'failed'}, 'success', 'outcome of another type is ignored'],
   // Neutral and unknown
   [{type: 'epg', films: 1}, 'success', 'epg published'],
-  [{type: 'watchlist'}, null, 'watchlist neutral'], [{type: 'started'}, null, 'started neutral'], [{type: 'unstarted'}, null, 'unstarted neutral'],
-  [{type: 'taste_profile'}, null, 'taste profile neutral'], [{type: 'future_type', state: 'error'}, null, 'unknown type'], [{}, null, 'empty'], [null, null, 'null'],
+  // Recorded actions are successes even with nothing changed (owner return of AIR-557).
+  [{type: 'watchlist', total: 3, baseline: false, added: [], removed: []}, 'success', 'watchlist commit with no diff'],
+  [{type: 'watchlist', total: 3, baseline: true, added: [], removed: []}, 'success', 'watchlist baseline'],
+  [{type: 'watchlist', total: 4, added: [{id: 'x'}], removed: []}, 'success', 'watchlist with additions'],
+  [{type: 'watchlist'}, 'success', 'watchlist, bare'],
+  [{type: 'started', film: {id: 'a'}}, 'success', 'started'], [{type: 'unstarted', film: {id: 'a'}}, 'success', 'unstarted'],
+  [{type: 'taste_profile', scope: 'identity', changedFields: []}, 'success', 'taste profile, identity scope'],
+  [{type: 'taste_profile', scope: 'global', toVersion: 4}, 'success', 'taste profile, global'],
+  [{type: 'taste_profile', scope: 'selective', toVersion: 5}, 'success', 'taste profile, selective'],
+  [{type: 'future_type', state: 'error'}, null, 'unknown type'], [{type: 'diary_viewing', state: 'finished'}, null, 'unknown type with a known-looking state'], [{}, null, 'empty'], [null, null, 'null'],
 ];
 for (const [event, expected, name] of table) assert.equal(status(event), expected, name);
 
@@ -92,13 +121,15 @@ const events = [
 const count = (type, result) => events.filter(event => run(`eventMatchesFilters(${JSON.stringify(event)},'${type}','${result}')`)).length;
 assert.equal(count('all', 'all'), 6);
 assert.equal(count('all', 'warning'), 2);
+assert.equal(count('all', 'success'), 3, 'a successful watchlist commit is in «Успех»');
 assert.equal(count('skipped', 'warning'), 1);
 assert.equal(count('skipped', 'success'), 0, 'zero results for a combination');
 assert.equal(count('enrichment', 'error'), 1);
 assert.equal(count('enrichment', 'all'), 3);
-assert.equal(count('all', 'success'), 2);
 assert.equal(count('watchlist', 'all'), 1);
-assert.equal(count('watchlist', 'success'), 0, 'a neutral event matches only «Все»');
+assert.equal(count('watchlist', 'success'), 1, 'watchlist + success combine');
+assert.equal(count('watchlist', 'error'), 0);
+assert.equal(count('epg', 'success'), 1);
 assert.equal(run("eventMatchesResult({type:'epg'},'nonsense')"), true, 'an unknown result id never hides events');
 
 // The automatic search counts matches of BOTH axes: ten skipped events (warning) are not ten «error» matches of the prediction type.
@@ -134,8 +165,21 @@ assert.equal(run("withEventResult('/events?result=error&result=warning','success
     assert.match(badge, /<span class="event-status-icon" aria-hidden="true">.<\/span>(Успех|Предупреждение|Прервано|Ошибка)<\/span>$/);
     assert.match(css, new RegExp(`\\.event-status-${name}\\{--st:#`));
   }
-  assert.equal(run("eventStatusBadgeHTML({type:'watchlist'})"), '', 'no result, no badge');
-  assert.match(run("eventHTML({id:'e1',at:'2026-11-20T10:00:00Z',type:'epg',films:1,archive:1,future:1,broadcasts:1})"), /<time[^>]*>[^<]*<\/time><span class="event-status event-status-success">/);
-  assert.doesNotMatch(run("eventHTML({id:'e2',at:'2026-11-20T10:00:00Z',type:'watchlist',total:0,added:[],removed:[]})"), /event-status/);
+  assert.equal(run("eventStatusBadgeHTML({type:'future_type'})"), '', 'no result, no badge');
+  // One header holds the date and the marker, then the title follows on its own line (owner return of AIR-557).
+  const head = run("eventHTML({id:'e1',at:'2026-11-20T10:00:00Z',type:'epg',films:1,archive:1,future:1,broadcasts:1})");
+  assert.match(head, /<li class="activity-event" data-event-id="e1"><div class="event-head"><time datetime="2026-11-20T10:00:00Z">[^<]*<\/time><span class="event-status event-status-success"><span class="event-status-icon" aria-hidden="true">.<\/span>Успех<\/span><\/div><p>Обновлён EPG<\/p>/);
+  const quiet = run("eventHTML({id:'e3',at:'2026-11-20T10:00:00Z',type:'future_type'})");
+  assert.match(quiet, /<div class="event-head"><time[^>]*>[^<]*<\/time><\/div>/);
+  assert.doesNotMatch(quiet, /event-status/);
+  // Watchlist with no change shows the success marker on both layouts (one renderer).
+  const wl = run("eventHTML({id:'e2',at:'2026-11-20T10:00:00Z',type:'watchlist',total:3,baseline:false,added:[],removed:[]})");
+  assert.match(wl, /event-status-success/);
+  assert.match(wl, /Состав без изменений/);
+  // Layout CSS: stacked in the compact feed (the approved layout), one row with the marker flush right on /events, wrapping on a narrow screen.
+  assert.match(css, /\.event-head\{display:block\}/);
+  assert.match(css, /html\.events-screen \.event-head\{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;/);
+  assert.match(css, /html\.events-screen \.event-head \.event-status\{margin:0 0 0 auto\}/, 'flush right, also when it wraps');
+  assert.match(css, /html\.events-screen \.event-head time\{margin:0;min-width:0\}/);
 }
 console.log('events-result-status: ok');

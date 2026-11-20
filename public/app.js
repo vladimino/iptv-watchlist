@@ -586,14 +586,21 @@ function eventPresentationStatus(event){
  if(!event||typeof event!=='object')return null;
  const int=v=>Number.isInteger(v)&&v>=0;
  switch(event.type){
-  case 'epg':return 'success';
+  // A recorded user or publication action: the event exists only because the write committed. `success` is the success of that action, not a claim
+  // about changed data: a watchlist with no diff or a baseline, and a taste profile of `scope=identity`, are still successful commits.
+  case 'epg':case 'watchlist':case 'started':case 'unstarted':case 'taste_profile':return 'success';
   case 'enrichment':{
    if(event.presentation==='batch_v2_skipped')return 'warning';
-   if(event.presentation!=='batch_v2_terminal')return null;
+   const terminal=event.presentation==='batch_v2_terminal',stage=event.stage;
+   // Starts, resumes, running progress and records without a stage are intermediate: no outcome yet. Historical v3-v6 runs (no `presentation`) are
+   // classified only when their stored stage says the run ended.
+   if(!terminal&&!['complete','completed','partial','blocked','interrupted'].includes(stage))return null;
+   if(!terminal&&event.presentation)return null;
    const stop=event.stopReason||event.reason,delta=event.delta&&typeof event.delta==='object'?event.delta:{},failed=int(delta.failed)?delta.failed:(int(event.failed)?event.failed:0);
-   if(event.stage==='complete')return failed>0?'warning':'success';
+   if(stage==='complete'||stage==='completed')return failed>0?'warning':'success';
    if(PRESENTATION_ERROR_CODES.includes(stop))return 'error';
-   if(PRESENTATION_INTERRUPTED_CODES.includes(stop))return 'interrupted';
+   if(PRESENTATION_INTERRUPTED_CODES.includes(stop)||stage==='interrupted')return 'interrupted';
+   if(stage==='blocked')return 'warning';
    if(NORMAL_RUN_REASONS.includes(stop))return failed>0?'warning':'success';
    return 'warning';
   }
@@ -607,8 +614,10 @@ function eventPresentationStatus(event){
     return status==='running'?null:'success';
    }
    if(event.kind==='report_failed')return status==='failed'||status==='stalled'?'error':'warning';
+   // Legacy per-chain card (`kind=run`, written before ADR 0111): `finished` is a confirmed end, `stopped` (a refusal) and `kind=empty` (no stored result) have no outcome.
    if(status==='failed'||status==='stalled')return 'error';
    if(status==='superseded')return 'interrupted';
+   if(status==='finished')return 'success';
    return null;
   }
   case 'ratings':{
@@ -2781,7 +2790,7 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
    +(deferred?`<p class="event-note">Проверка не закончена, это не итог недели.${retry?` Следующая попытка не раньше ${retry}.`:''}</p>`:failed?'<p class="event-note">Автоматические попытки исчерпаны, нужно внимание владельца.</p>':'<p class="event-note">«Нет постера на TMDB» — обычный ответ, а не ошибка.</p>');
  }
  if(event.type==='taste_profile'){const labels={ratingScale:'Изменена шкала оценок',positiveSignals:'Изменены положительные сигналы',negativeSignals:'Изменены отрицательные сигналы',characterLogic:'Изменена логика персонажей',pace:'Изменён темп',payoffEnding:'Изменены развязка и финал',genrePreferences:'Изменены жанровые предпочтения',comedyPreferences:'Изменены предпочтения для комедий',horrorPreferences:'Изменены предпочтения для хорроров',scifiAdventurePreferences:'Изменены предпочтения для фантастики и приключений',actionPreferences:'Изменены предпочтения для боевиков',anchorFilms:'Изменены опорные фильмы',hardSkips:'Изменены жёсткие исключения',calibration:'Изменена калибровка'},known=Array.isArray(event.changedFields)?event.changedFields.filter(field=>Object.hasOwn(labels,field)):[],phrase=event.scope==='identity'&&!known.length?'Содержание модели не изменилось':known.length===1?labels[known[0]]:known.length>1?'Изменены несколько разделов модели вкуса':'',impact=event.scope==='selective'?'Влияние: выборочное':event.scope==='global'?'Влияние: глобальное':'',from=Number.isInteger(event.fromVersion)?event.fromVersion:null,to=Number.isInteger(event.toVersion)?event.toVersion:null,version=from!==null&&to!==null?`Версия ${from} → ${to}`:to!==null?`Версия ${to}`:'';body=`<p>Модель вкуса обновлена</p>${version?`<p class="event-note">${version}</p>`:''}${phrase?`<p class="event-note">${phrase}</p>`:''}${impact?`<p class="event-note">${impact}</p>`:''}`;}
- return `<li class="activity-event" data-event-id="${escapeHTML(event.id)}"><time datetime="${escapeHTML(event.at)}">${date}</time>${eventStatusBadgeHTML(event)}${body}</li>`;}
+ return `<li class="activity-event" data-event-id="${escapeHTML(event.id)}"><div class="event-head"><time datetime="${escapeHTML(event.at)}">${date}</time>${eventStatusBadgeHTML(event)}</div>${body}</li>`;}
 function rememberActivityAnchor(scroll){
  if(!scroll||scroll.scrollTop<=0||typeof scroll.querySelectorAll!=='function')return null;
  const item=[...scroll.querySelectorAll('[data-event-id]')].find(node=>node.offsetTop+node.offsetHeight>scroll.scrollTop);
