@@ -10,7 +10,15 @@ if(!url){console.error('usage: node check.cjs <github blob url> [needle ...]');p
  const context=await browser.newContext({viewport:{width:1280,height:1000},deviceScaleFactor:1});
  const page=await context.newPage();
  // A long page may never reach network idle: load the document first, then wait for idle only as long as it takes, and judge the HTTP status of the document itself.
- const response=await page.goto(url,{waitUntil:'domcontentloaded',timeout:60000}).catch(()=>null);
+ // github.com blob pages answer 503 for minutes at a time, then recover: retry a non-200 document with a growing pause (default 5 attempts, 30 s apart growing by 30 s; QA_ATTEMPTS and QA_PAUSE_S override) before judging.
+const attempts=Number(process.env.QA_ATTEMPTS)||5,pause=Number(process.env.QA_PAUSE_S)||30;
+let response=null;
+for(let attempt=1;attempt<=attempts;attempt++){
+ response=await page.goto(url,{waitUntil:'domcontentloaded',timeout:60000}).catch(()=>null);
+ if(response&&response.status()===200)break;
+ console.error(JSON.stringify({attempt,httpStatus:response&&response.status(),retryInSeconds:attempt<attempts?pause*attempt:null}));
+ if(attempt<attempts)await page.waitForTimeout(pause*attempt*1000);
+}
  await page.waitForLoadState('networkidle',{timeout:30000}).catch(()=>{});
  // GitHub renders each ```mermaid block in its own iframe after the page loads.
  await page.waitForTimeout(8000);
