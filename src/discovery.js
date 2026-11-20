@@ -19,6 +19,8 @@ const PAGED_COMMIT_RESERVE_MS=8000;
 const PAGED_MIN_REQUEST_MS=2000;
 const PAGED_BUDGET_BACKOFF_MS=300000;
 const PAGED_TMDB_CALLS=16;
+// AIR-503 (owner decision, 20 Nov 2026): at most this many legacy alias decisions of a page are revalidated BEFORE the candidates that have no decision (one TMDB detail call each), so they get their calls and their time slice under any candidate pressure.
+const PAGED_LEGACY_REVALIDATION_KEYS=4;
 const PAGED_WALK_CONCURRENCY=4;
 // The cheap pass writes at most this many decisions and Film touches per chunk; the rest waits for the next one.
 const PAGED_CHEAP_GROUP=4;
@@ -1041,6 +1043,86 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   return true;
  };
  const preview={},now=Date.now(),tmdbStarted=Date.now();
+ // One revalidation of a drifted, verified observation: one detail call, then provenance (when a catalog-only Film lacks the titles), then the decision. Returns what the caller does next:
+ // 'continue' (this key is done or skipped), 'break' (budget, lease-free stop or error: stop revalidating this chunk) or 'changed' (the programme moved).
+ const revalidation={observations:0,revalidated:0,revalidation_failed:0,revalidation_exhausted:0,deferred:0};
+ const revalidatedFirst=new Set();
+ const revalidateDrift=async(key,previous,candidate,plan)=>{
+   try{
+    const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
+    const known=knownScorerCandidates(aliasIndex,candidate);
+    // The fresh detail is the runtime evidence of the stored TMDB id, even when the alias index already holds that Film with an older runtime; other editions stay as competitors.
+    // AIR-503 / ADR 0158: the movie-detail gate below already requires the observed title among the titles of this TMDB detail, so a stored alias that TMDB does not list cannot reconfirm a duration.
+    const catalogKey='tmdb_'+previous.tmdbId,catalogFilm=!knownTmdb.has(String(previous.tmdbId))?films[catalogKey]:null,authorityTitles=movieAuthorityTitles(movie);
+    const scorerCandidates=known.some(row=>String(row.tmdbId)===String(movie.id))?known.map(row=>String(row.tmdbId)===String(movie.id)?{...row,runtime:movie.runtime??row.runtime??null}:row):[...known,{...searchHitCandidate(movie),runtime:movie.runtime??null}];
+    const reconfirmed=[],failed=[];let proposed=null;
+    for(const duration of plan.todo){
+     if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)break;
+     const alone={...candidate,duration,durations:[duration]};
+     const observation={key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration,durations:[duration]};
+     const rescored=scoreFilmResolution({observation,candidates:scorerCandidates});
+     const sameId=rescored.status==='accepted'&&String(rescored.acceptedTmdbId)===String(previous.tmdbId)&&!ownerRejected(previous,previous.tmdbId);
+     let confirmed=false;
+     if(sameId){
+      const gate=gateScoredCandidate(pinned,source,alone,rescored,{},films,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:detailCompetitors(aliasIndex,alone,previous.tmdbId,structuralCompetitorForms(rescored))});
+      confirmed=gate.outcome==='detail_verified';
+     }else if(rescored.status==='accepted'&&rescored.acceptedTmdbId!=null)proposed=String(rescored.acceptedTmdbId);
+     (confirmed?reconfirmed:failed).push(duration);
+    }
+    if(!reconfirmed.length&&!failed.length)return 'continue';
+    const next=DiscoveryAuthority.decisionAfterRevalidation(previous,{reconfirmed,failed,proposedTmdbId:proposed},{evidenceKey:candidateEvidence(candidate),checkedAt:new Date().toISOString(),provenance:{authority:'tmdb_detail',searchHit:false,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null}});
+    // A duration that the movie authority reconfirmed alone is independent evidence: record that movie's own titles as the Film's provenance (one fenced admission write).
+    // The provenance is written BEFORE the decision that makes the duration an anchor. The anchor ends the drift that triggers this revalidation, so a decision stored first and a
+    // provenance write that then failed or was skipped could never be retried. If the budget does not fit both writes, or the write does not land, nothing durable has changed and the
+    // next chunk evaluates the duration again (the provenance write is idempotent: it happens only while a title is missing).
+    const missingTitles=reconfirmed.length&&catalogFilm?authorityTitles.filter(title=>!(catalogFilm.movieTitles||[]).includes(title)):[];
+    if(missingTitles.length){
+     if(Date.now()+writeEstimate(3)>persistLimit()){revalidation.deferred++;return 'break';}
+     const recorded={...catalogFilm,movieTitles:[...new Set([...(catalogFilm.movieTitles||[]),...authorityTitles])],aliases:[...new Set([...(catalogFilm.aliases||[]),...authorityTitles])]};
+     await heartbeat();
+     const stored=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,{[catalogKey]:recorded},{lease,canonicalDeadline:canonicalLimit()}))));
+     if(!stored)return 'changed';
+     if(!stored.written.includes(catalogKey)){revalidation.deferred++;return 'continue';}
+     films[catalogKey]=recorded;indexFilm(recorded);
+    }
+    await heartbeat();
+    const wrote=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[key]:{previous,next}},{lease}))));
+    if(!wrote)return 'changed';
+    if(!wrote.written.includes(key))return 'continue';
+    decisions[key]=next;
+    revalidation.revalidated+=reconfirmed.length;revalidation.revalidation_failed+=failed.length;
+    if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)revalidation.revalidation_exhausted++;
+    if(reconfirmed.length&&Date.now()+writeEstimate(1)<=persistLimit())await assignSlots(key,'revalidation_assignment');
+    if(generationCollision)return 'changed';
+    return 'continue';
+   }catch(e){
+    if(e?.name==='BudgetExhaustedError'){revalidation.deferred++;return 'break';}
+    if(e?.name==='LeaseLostError'){e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt:'revalidation'};throw e;}
+    if(e?.code&&TYPED_DISCOVERY_CODES.has(e.code))throw e;
+    error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();return 'break';
+   }
+ };
+
+ // AIR-503 (owner decision, 20 Nov 2026), pass 1. A verified `known_epg_alias` decision of a catalog-only Film whose observed title the movie authority has not given the Film (the scan
+ // no longer confirms its slots) is revalidated BEFORE the candidates that have no decision, at most PAGED_LEGACY_REVALIDATION_KEYS per chunk and only while a request and its writes still
+ // fit. With thousands of candidates they used every call and all the time of the chunk, so the revalidation after them never ran. Provenance still comes only from the movie-detail
+ // gate inside revalidateDrift; this pass changes which work goes first, not what counts as evidence. Every other drifted decision keeps its place after the candidates (pass 2).
+ if(!error&&typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.planRevalidation==='function'){
+  for(const [key,entry] of [...driftSeen].sort((a,b)=>String(a[0]).localeCompare(String(b[0])))){
+   if(revalidatedFirst.size>=PAGED_LEGACY_REVALIDATION_KEYS)break;
+   const previous=decisions[key],observed=candidateByKey.get(key);
+   if(!observed||previous?.status!=='verified'||previous.identitySource!=='known_epg_alias'||knownTmdb.has(String(previous.tmdbId)))continue;
+   const catalog=films['tmdb_'+previous.tmdbId];
+   if(!catalog||movieTitleKeys(catalog).has(observed.normalizedTitle))continue;
+   const plan=DiscoveryAuthority.planRevalidation(previous,[...entry.minutes]);
+   if(!plan.eligible||plan.exhausted||!plan.todo.length)continue;
+   if(Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(3)>persistLimit())break;
+   revalidatedFirst.add(key);revalidation.observations++;
+   const outcome=await revalidateDrift(key,previous,observed,plan);
+   if(outcome==='changed')return programmeChanged();
+   if(outcome==='break')break;
+  }
+ }
  if(!error)for(const candidate of pending){
   // Start a candidate only if a request and its two writes still fit before the durable-write deadline.
   if(tmdbCalls>=PAGED_TMDB_CALLS||Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(2)>persistLimit())break;
@@ -1124,9 +1206,9 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
 
  // ADR 0142 decision 6: bounded revalidation of the drifted durations of verified observations, after every candidate that has no decision, with the TMDB calls and the time that are left.
  // Each duration is evaluated alone, without the stored decision as a confirmation. A budget stop, a TMDB failure or a rate limit completes no evaluation and records nothing.
- const revalidation={observations:0,revalidated:0,revalidation_failed:0,revalidation_exhausted:0,deferred:0};
  if(!error&&typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.planRevalidation==='function'){
   for(const [key,entry] of [...driftSeen].sort((a,b)=>String(a[0]).localeCompare(String(b[0])))){
+   if(revalidatedFirst.has(key))continue;
    const previous=decisions[key],candidate=candidateByKey.get(key);
    if(!candidate)continue;
    const plan=DiscoveryAuthority.planRevalidation(previous,[...entry.minutes]);
@@ -1135,58 +1217,9 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    if(plan.exhausted){revalidation.revalidation_exhausted++;continue;}
    if(!plan.todo.length)continue;
    if(tmdbCalls>=PAGED_TMDB_CALLS||Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(2)>persistLimit()){revalidation.deferred++;break;}
-   try{
-    const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
-    const known=knownScorerCandidates(aliasIndex,candidate);
-    // The fresh detail is the runtime evidence of the stored TMDB id, even when the alias index already holds that Film with an older runtime; other editions stay as competitors.
-    // AIR-503 / ADR 0158: the movie-detail gate below already requires the observed title among the titles of this TMDB detail, so a stored alias that TMDB does not list cannot reconfirm a duration.
-    const catalogKey='tmdb_'+previous.tmdbId,catalogFilm=!knownTmdb.has(String(previous.tmdbId))?films[catalogKey]:null,authorityTitles=movieAuthorityTitles(movie);
-    const scorerCandidates=known.some(row=>String(row.tmdbId)===String(movie.id))?known.map(row=>String(row.tmdbId)===String(movie.id)?{...row,runtime:movie.runtime??row.runtime??null}:row):[...known,{...searchHitCandidate(movie),runtime:movie.runtime??null}];
-    const reconfirmed=[],failed=[];let proposed=null;
-    for(const duration of plan.todo){
-     if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)break;
-     const alone={...candidate,duration,durations:[duration]};
-     const observation={key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration,durations:[duration]};
-     const rescored=scoreFilmResolution({observation,candidates:scorerCandidates});
-     const sameId=rescored.status==='accepted'&&String(rescored.acceptedTmdbId)===String(previous.tmdbId)&&!ownerRejected(previous,previous.tmdbId);
-     let confirmed=false;
-     if(sameId){
-      const gate=gateScoredCandidate(pinned,source,alone,rescored,{},films,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:detailCompetitors(aliasIndex,alone,previous.tmdbId,structuralCompetitorForms(rescored))});
-      confirmed=gate.outcome==='detail_verified';
-     }else if(rescored.status==='accepted'&&rescored.acceptedTmdbId!=null)proposed=String(rescored.acceptedTmdbId);
-     (confirmed?reconfirmed:failed).push(duration);
-    }
-    if(!reconfirmed.length&&!failed.length)continue;
-    const next=DiscoveryAuthority.decisionAfterRevalidation(previous,{reconfirmed,failed,proposedTmdbId:proposed},{evidenceKey:candidateEvidence(candidate),checkedAt:new Date().toISOString(),provenance:{authority:'tmdb_detail',searchHit:false,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null}});
-    // A duration that the movie authority reconfirmed alone is independent evidence: record that movie's own titles as the Film's provenance (one fenced admission write).
-    // The provenance is written BEFORE the decision that makes the duration an anchor. The anchor ends the drift that triggers this revalidation, so a decision stored first and a
-    // provenance write that then failed or was skipped could never be retried. If the budget does not fit both writes, or the write does not land, nothing durable has changed and the
-    // next chunk evaluates the duration again (the provenance write is idempotent: it happens only while a title is missing).
-    const missingTitles=reconfirmed.length&&catalogFilm?authorityTitles.filter(title=>!(catalogFilm.movieTitles||[]).includes(title)):[];
-    if(missingTitles.length){
-     if(Date.now()+writeEstimate(3)>persistLimit()){revalidation.deferred++;break;}
-     const recorded={...catalogFilm,movieTitles:[...new Set([...(catalogFilm.movieTitles||[]),...authorityTitles])],aliases:[...new Set([...(catalogFilm.aliases||[]),...authorityTitles])]};
-     await heartbeat();
-     const stored=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,{[catalogKey]:recorded},{lease,canonicalDeadline:canonicalLimit()}))));
-     if(!stored)return programmeChanged();
-     if(!stored.written.includes(catalogKey)){revalidation.deferred++;continue;}
-     films[catalogKey]=recorded;indexFilm(recorded);
-    }
-    await heartbeat();
-    const wrote=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[key]:{previous,next}},{lease}))));
-    if(!wrote)return programmeChanged();
-    if(!wrote.written.includes(key))continue;
-    decisions[key]=next;
-    revalidation.revalidated+=reconfirmed.length;revalidation.revalidation_failed+=failed.length;
-    if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)revalidation.revalidation_exhausted++;
-    if(reconfirmed.length&&Date.now()+writeEstimate(1)<=persistLimit())await assignSlots(key,'revalidation_assignment');
-    if(generationCollision)return programmeChanged();
-   }catch(e){
-    if(e?.name==='BudgetExhaustedError'){revalidation.deferred++;break;}
-    if(e?.name==='LeaseLostError'){e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt:'revalidation'};throw e;}
-    if(e?.code&&TYPED_DISCOVERY_CODES.has(e.code))throw e;
-    error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;
-   }
+   const outcome=await revalidateDrift(key,previous,candidate,plan);
+   if(outcome==='changed')return programmeChanged();
+   if(outcome==='break')break;
   }
  }
  const waitingRetry=(Number.isInteger(selected.waitingRetry)?selected.waitingRetry:0)+deferred;

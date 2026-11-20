@@ -199,5 +199,21 @@ try{
  const reduced=await tmdbSearchFn({token:'t',fetchImpl:async()=>new Response(JSON.stringify({results:[{id:1,title:'a',original_title:'b',release_date:'2000-01-01',overview:'x',popularity:3}]}),{status:200})})({name:'a'});
  assert.deepEqual(reduced.results[0],{id:1,title:'a',original_title:'b',release_date:'2000-01-01'});
  assert.equal((await tmdbSearchFn({token:'t',fetchImpl:async()=>new Response('x',{status:200})})({name:'a'})).status,502);
+
+ // ADR 0183: a D1-derived view index is an explicit input; the results file is bound to its digest and never reused with another view index.
+ {
+  const d1File=path.join(scratch,'view-index.d1.json');
+  await writeFile(d1File,JSON.stringify({schema:'view-index-d1-export@1',source:'d1_derived',readAt:'2026-11-20T15:00:00.000Z',database:{id:null},counts:{keys:1},index:{Zz9:{actualRating:4}}}));
+  const withInput=await unmatchedFilms({exportDir,catalogDir,viewIndexFile:d1File});
+  assert.equal(withInput.viewIndex.source,'d1_derived');assert.equal(withInput.provenance.viewIndex.keys,1);
+  assert.equal((await unmatchedFilms({exportDir,catalogDir})).viewIndex,null,'without the option there is no D1 input');
+  const none=async()=>new Response(JSON.stringify({results:[]}),{status:200});
+  const out=path.join(scratch,'out-d1');
+  await main(['--export',exportDir,'--catalog-dir',catalogDir,'--output',out,'--view-index-d1',d1File],{env:{TMDB_READ_TOKEN:'tok-x'},fetchImpl:none,sleep:async()=>{},now:()=>1});
+  const results=JSON.parse(await readFile(path.join(out,'tmdb-results.json'),'utf8'));
+  assert.equal(results.binding.viewIndexSha256,withInput.viewIndex.sha256,'the results are bound to the D1 input');
+  await assert.rejects(main(['--export',exportDir,'--catalog-dir',catalogDir,'--output',out],{env:{TMDB_READ_TOKEN:'tok-x'},fetchImpl:none,sleep:async()=>{},now:()=>1}),/another export or catalog read/);
+  await assert.rejects(main(['--export',exportDir,'--catalog-dir',catalogDir,'--output',path.join(scratch,'out-d1b'),'--view-index-d1',path.join(os.tmpdir(),'absent-view-index.json')],{env:{TMDB_READ_TOKEN:'tok-x'},fetchImpl:none,sleep:async()=>{},now:()=>1}),/could not be read/);
+ }
 }finally{await rm(scratch,{recursive:true,force:true});}
 console.log('Letterboxd TMDB search: selection by one movie with the original title and the exact year, review reasons, 4 requests per second and a budget of 1500, the first 403 or 429 ends the run, repeated failures end it, resume, no credential no request, counts only, private output, live catalog directory checks');

@@ -137,11 +137,18 @@ function recordRatingChange(record,incoming,effective){
 
  // ---- Storage. While the ratings marker is r2, every write is an R2 compare-and-swap.
  // Once it is d1 and cutover open, the same keys are D1 documents and do not fall back (ADR 0084).
- async function readJSON(env,key){
+ // The stored object as it is, for the compare-and-swap writers: they must read and write the raw object whatever the view index read selector says.
+ async function readRawJSON(env,key){
   if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {value:owned.value,etag:owned.etag};}
   const object=await env.BUCKET.get(key);let value=object?await object.json():null;
   if(key===FACTS_KEYS.viewIndex&&typeof RatingsD1!=='undefined')value=await RatingsD1.overlayView(env,value);
   return {value,etag:object?.etag??null};
+ }
+ // The reader of the scans and the Diary projection. ADR 0183: with the D1 source selected the view index is the ratings_view aliases only (this path has only ever
+ // applied the ratings overlay, never the prediction one) and the raw object is not read; the version is the D1 token. Writers do not use this: see casJSON.
+ async function readJSON(env,key){
+  if(key===FACTS_KEYS.viewIndex&&typeof viewIndexIsD1==='function'&&viewIndexIsD1(env))return {value:await derivedViewIndex(env,{ratingsOnly:true}),etag:await viewIndexD1Version(env)};
+  return readRawJSON(env,key);
  }
  async function casJSON(env,key,empty,apply){
   if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){
@@ -149,7 +156,7 @@ function recordRatingChange(record,incoming,effective){
    catch(error){if(error.code==='write_contention')throw new FactsError('write_contention','Stored JSON changed during write: '+key);throw error;}
   }
   for(let attempt=0;attempt<5;attempt++){
-   const {value,etag}=await readJSON(env,key),current=value??clone(empty),next=await apply(clone(current),etag);
+   const {value,etag}=await readRawJSON(env,key),current=value??clone(empty),next=await apply(clone(current),etag);
    if(next==null)return {value:current,changed:false};
    const saved=await env.BUCKET.put(key,JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:etag?{etagMatches:etag}:{etagDoesNotMatch:'*'}});
    if(saved!==null)return {value:next,changed:true};

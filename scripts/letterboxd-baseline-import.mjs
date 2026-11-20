@@ -65,7 +65,7 @@ export function originChunkSize(origin){
  throw new ImportError('origin.json has an unknown schema or chunk size',3);
 }
 
-export async function plan({zip,snapshot=null,catalogDir=null,tmdbResults=null,output,generatedAt=null,chunkSize=DEFAULT_CHUNK_SIZE,includeInferred=false,now=Date.now()}){
+export async function plan({zip,snapshot=null,catalogDir=null,viewIndexFile=null,tmdbResults=null,output,generatedAt=null,chunkSize=DEFAULT_CHUNK_SIZE,includeInferred=false,now=Date.now()}){
  checkChunkSize(chunkSize);
  // The identity input is either a fenced consistent snapshot (the original contract) or, for matching only, a catalog directory read once from
  // the live authorities (ADR 0105); never both, never neither. TMDB search results only extend an inferred plan.
@@ -78,7 +78,7 @@ export async function plan({zip,snapshot=null,catalogDir=null,tmdbResults=null,o
  // films (another snapshot, other matching) and would destroy the only copy of the plan its receipts were made from.
  for(const name of OUTPUT_FILES)if(await access(path.join(outputPath,name)).then(()=>true,()=>false))throw new ImportError('--output already holds a plan or its results ('+name+'); plan into a new empty directory',2);
  const texts=Object.fromEntries(Object.entries(EXPORT_FILES).map(([kind,name])=>[kind,archive.files[name]?.text??null]));
- const parsed=parseExport(texts),loaded=catalogPath?await loadCatalogDir(catalogPath):await loadSnapshot(snapshotPath),index=buildIndex(loaded.objects),matches=matchExport(parsed.films,index,{inferred:includeInferred});
+ const parsed=parseExport(texts),viewIndexPath=viewIndexFile?await assertOutsideRepository(viewIndexFile,'--view-index-d1'):null,loaded=catalogPath?await loadCatalogDir(catalogPath,{viewIndexFile:viewIndexPath}):await loadSnapshot(snapshotPath,{viewIndexFile:viewIndexPath}),index=buildIndex(loaded.objects),matches=matchExport(parsed.films,index,{inferred:includeInferred});
  const films=new Map(parsed.films.map(film=>[film.code,film])),byStatus={},items=[],review={};
  for(const match of matches){byStatus[match.status]=(byStatus[match.status]||0)+1;if(match.status==='accepted'||(includeInferred&&match.status==='inferred'))items.push(planItem(films.get(match.code),match));else if(includeInferred&&match.status==='candidate'&&match.reason)review[match.reason]=(review[match.reason]||0)+1;}
  // TMDB search results (ADR 0105): only for films the catalog does not know. A search decision is applied by the same rules as a stored
@@ -217,7 +217,7 @@ function networkCause(error){
 }
 
 function parseArgs(argv){
- const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--chunk-size':'chunkSize','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk','--lid':'lid','--catalog-dir':'catalogDir','--tmdb-results':'tmdbResults'};
+ const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--chunk-size':'chunkSize','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk','--lid':'lid','--catalog-dir':'catalogDir','--tmdb-results':'tmdbResults','--view-index-d1':'viewIndexFile'};
  for(let i=0;i<rest.length;i++){
   // A switch, not a value: the AIR-388 policy is never on by default and only a plan can turn it on.
   if(rest[i]==='--include-inferred'){if(mode!=='plan')throw new ImportError('--include-inferred is a plan option; '+mode+' uses the plan in its directory',2);args.includeInferred=true;continue;}

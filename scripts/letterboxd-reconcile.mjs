@@ -8,6 +8,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {EXPORT_FILES,SET_NAMES,filmSets,parseExport} from '../src/letterboxd-export.js';
 import {METHODS,STATUSES,buildIndex,lidHypothesis,matchExport} from '../src/letterboxd-match.js';
+import {VIEW_INDEX_D1_SCHEMA,SOURCE as VIEW_INDEX_D1_SOURCE} from './view-index-d1-export.mjs';
 
 const REPO_ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 export const SNAPSHOT_KEYS=Object.freeze({watchlist:'watchlist.json',programme:'programme.json',metadata:'metadata.json',catalog:'epg/discovered-films.json',viewIndex:'enrichment/view-index.json',ratingsPointer:'enrichment/ratings/published.json'});
@@ -39,7 +40,26 @@ async function readExport(directory){
 }
 
 // Reads only the named keys of a production snapshot and checks each against the manifest checksum.
-export async function loadSnapshot(directory){
+// ADR 0183: the view index these tools read can come from an explicit D1-derived export (scripts/view-index-d1-export.mjs, passed as --view-index-d1) instead of
+// the raw R2 object of a snapshot or catalog directory. The raw object stays current only while its writers run, so this is the input that survives them. The
+// file is self-describing and validated; its identity (digest, read time, key count) joins the baseline identity, so a plan or a results file made from it is
+// bound to it. When given, it replaces the raw object entirely: the two are never merged.
+export async function loadViewIndexInput(file){
+ let text;try{text=await readFile(file,'utf8');}catch{throw new ReconcileError('The --view-index-d1 file could not be read',2);}
+ let document;try{document=JSON.parse(text);}catch{throw new ReconcileError('The --view-index-d1 file is not JSON',2);}
+ if(document?.schema!==VIEW_INDEX_D1_SCHEMA||document.source!==VIEW_INDEX_D1_SOURCE||typeof document.readAt!=='string')throw new ReconcileError('The --view-index-d1 file is not a '+VIEW_INDEX_D1_SCHEMA+' export',2);
+ const index=document.index;
+ if(!index||typeof index!=='object'||Array.isArray(index)||Object.values(index).some(item=>!item||typeof item!=='object'||Array.isArray(item)))throw new ReconcileError('The --view-index-d1 index must be an object of entry objects',2);
+ if(document.counts?.keys!==Object.keys(index).length)throw new ReconcileError('The --view-index-d1 key count does not match its index',2);
+ return {index,identity:{source:VIEW_INDEX_D1_SOURCE,sha256:sha256(Buffer.from(text,'utf8')),readAt:document.readAt,keys:Object.keys(index).length,databaseId:document.database?.id??null}};
+}
+export function withViewIndexInput(loaded,input){
+ const missing=loaded.missing.filter(key=>key!=='enrichment/view-index.json'&&key!=='view-index.json');
+ return {...loaded,objects:{...loaded.objects,viewIndex:input.index},missing,baselineIdentity:{...(loaded.baselineIdentity??{}),viewIndex:input.identity}};
+}
+const withInput=async(loaded,viewIndexFile)=>viewIndexFile?withViewIndexInput(loaded,await loadViewIndexInput(viewIndexFile)):loaded;
+
+export async function loadSnapshot(directory,{viewIndexFile=null}={}){
  let manifest;
  try{manifest=JSON.parse(await readFile(path.join(directory,'manifest.json'),'utf8'));}catch{throw new ReconcileError('Snapshot manifest is missing or not JSON',2);}
  if(manifest?.schemaVersion!==1||!Array.isArray(manifest.objects))throw new ReconcileError('Snapshot manifest schema is not supported',2);
@@ -62,14 +82,14 @@ export async function loadSnapshot(directory){
   const key=ratingsGenerationKey(pointer.generationId),value=await load(key);
   if(value===undefined)missing.push('enrichment/ratings/generations/<published>.json');else objects.ratings=value;
  }else if(pointer)missing.push('enrichment/ratings/published.json:not_projected');
- return {objects,missing,status:manifest.status,baselineIdentity:manifest.baselineIdentity??null};
+ return withInput({objects,missing,status:manifest.status,baselineIdentity:manifest.baselineIdentity??null},viewIndexFile);
 }
 
 // AIR-388 B2 (ADR 0105): a directory of objects read once, read-only, from the live authorities, for matching only. It is not a fenced
 // snapshot and does not claim to be one: `provenance.json` records what was read and when, and a missing required file is an error, never a
 // silently smaller catalog. Files: catalog.json (the admitted Film records, id -> record), links.json (the trusted Letterboxd-to-TMDB link
 // index), provenance.json {source: 'live_catalog_read', readAt, ...}; optional metadata.json, watchlist.json, programme.json, view-index.json.
-export async function loadCatalogDir(directory){
+export async function loadCatalogDir(directory,{viewIndexFile=null}={}){
  const read=async(name,required)=>{
   let text;try{text=await readFile(path.join(directory,name),'utf8');}catch(error){if(required)throw new ReconcileError('Catalog directory has no '+name,2);return undefined;}
   try{return JSON.parse(text);}catch{throw new ReconcileError(name+' is not JSON',2);}
@@ -81,7 +101,7 @@ export async function loadCatalogDir(directory){
  if(!factLinks||typeof factLinks!=='object'||Array.isArray(factLinks))throw new ReconcileError('links.json must be an object',2);
  const objects={catalog,factLinks},missing=[];
  for(const [name,key] of [['metadata.json','metadata'],['watchlist.json','watchlist'],['programme.json','programme'],['view-index.json','viewIndex']]){const value=await read(name,false);if(value===undefined)missing.push(name);else objects[key]=value;}
- return {objects,missing,status:'live_catalog_read',baselineIdentity:{readAt:provenance.readAt,catalogFilms:Object.keys(catalog).length,linkAliases:Object.keys(factLinks).length}};
+ return withInput({objects,missing,status:'live_catalog_read',baselineIdentity:{readAt:provenance.readAt,catalogFilms:Object.keys(catalog).length,linkAliases:Object.keys(factLinks).length}},viewIndexFile);
 }
 
 // A digest of the export's named CSV texts, so a TMDB results file can be tied to the exact export it was searched for (the search tool reads
@@ -106,16 +126,17 @@ function matchSummary(parsed,matches){
  return {byStatus,acceptedByMethod:byMethod,reasons:Object.fromEntries(Object.entries(reasons).sort(([a],[b])=>a<b?-1:1)),bySet,catalogLinked:matches.filter(row=>row.status==='accepted'&&row.catalogIds.length).length};
 }
 
-export async function reconcile({exportDir,snapshotDir=null,outputDir}){
+export async function reconcile({exportDir,snapshotDir=null,outputDir,viewIndexFile=null}){
  const output=await assertOutsideRepository(outputDir,'--output');
  const exportPath=await assertOutsideRepository(exportDir,'--export');
  const snapshotPath=snapshotDir?await assertOutsideRepository(snapshotDir,'--snapshot'):null;
+ const viewIndexPath=viewIndexFile?await assertOutsideRepository(viewIndexFile,'--view-index-d1'):null;
  const parsed=parseExport(await readExport(exportPath));
  const report={schemaVersion:1,tool:'letterboxd-reconcile',privacy:'Aggregate counts only. Per-film rows are in the private matches.jsonl next to this file.',export:exportSummary(parsed),matching:null,notes:[...parsed.notes]};
  const rows=parsed.invalidRows.map(row=>({type:'invalid_row',...row}));
  if(!snapshotPath)report.matching={blocked:'snapshot_missing'};
  else{
-  const snapshot=await loadSnapshot(snapshotPath),index=buildIndex(snapshot.objects),matches=matchExport(parsed.films,index);
+  const snapshot=await loadSnapshot(snapshotPath,{viewIndexFile:viewIndexPath}),index=buildIndex(snapshot.objects),matches=matchExport(parsed.films,index);
   const films=new Map(parsed.films.map(film=>[film.code,film]));
   report.matching={blocked:null,snapshot:{status:snapshot.status,baselineIdentity:snapshot.baselineIdentity,missingKeys:snapshot.missing},index:index.summary,...matchSummary(parsed,matches),lidHypothesis:lidHypothesis(matches,index)};
   for(const key of snapshot.missing)report.notes.push('snapshot_missing_key:'+key);
@@ -130,8 +151,8 @@ export async function reconcile({exportDir,snapshotDir=null,outputDir}){
 function parseArgs(argv){
  const args={};
  for(let i=0;i<argv.length;i++){
-  const flag=argv[i],name={'--export':'exportDir','--snapshot':'snapshotDir','--output':'outputDir'}[flag];
-  if(!name||i+1>=argv.length||argv[i+1].startsWith('--'))throw new ReconcileError('Usage: letterboxd-reconcile.mjs --export <abs dir> [--snapshot <abs dir>] --output <abs dir outside the repository>',2);
+  const flag=argv[i],name={'--export':'exportDir','--snapshot':'snapshotDir','--output':'outputDir','--view-index-d1':'viewIndexFile'}[flag];
+  if(!name||i+1>=argv.length||argv[i+1].startsWith('--'))throw new ReconcileError('Usage: letterboxd-reconcile.mjs --export <abs dir> [--snapshot <abs dir>] [--view-index-d1 <abs export file>] --output <abs dir outside the repository>',2);
   args[name]=argv[++i];
  }
  if(!args.exportDir||!args.outputDir)throw new ReconcileError('--export and --output are required',2);

@@ -245,4 +245,32 @@ assert.equal((await call('?film=w1&pin='+down.body.pin)).status,409,'a failed re
 assert.deepEqual(writes,[],'no put, delete or head');
 assert.equal(lists,0,'no listing');
 assert.deepEqual(fetches,[],'no outbound request');
+// ADR 0183: with the D1 read source selected the raw index object is not read and its ETag is absent from the pin; the D1 token (both domains' generations) stands in
+// for it, so a committed prediction or ratings write makes an old pin stale. Any other selector value reads the raw object.
+{
+ const realDerived=context.derivedViewIndex,realVersion=context.viewIndexD1Version;
+ let token='d1:p1.q1.r1',derivedCalls=0;
+ context.derivedViewIndex=async()=>{derivedCalls++;return {};};
+ context.viewIndexD1Version=async()=>token;
+ try{
+  env.VIEW_INDEX_SOURCE='d1';
+  seed();records.delete(INDEX);
+  const first=await call('?film=w1');
+  assert.equal(first.status,200,first.text.slice(0,300));
+  assert.equal(gets.includes(INDEX),false,'the raw index is not read under d1');
+  assert.ok(derivedCalls>=1);
+  assert.ok(first.body.sources.includes(INDEX),'the view index is still a named source of the answer');
+  assert.equal((await call('?film=w1&pin='+first.body.pin)).status,200,'the pin is stable while the token is unchanged');
+  token='d1:p2.q1.r1';
+  const stale=await call('?film=w1&pin='+first.body.pin);
+  assert.equal(stale.status,409);assert.equal(stale.body.error,'stale_pin','a committed domain write moves the pin');
+  assert.notEqual((await call('?film=w1')).body.pin,first.body.pin);
+  for(const value of ['D1',' d1','on','r2','']){
+   env.VIEW_INDEX_SOURCE=value;seed();derivedCalls=0;
+   const got=await call('?film=w1');
+   assert.equal(got.status,200);assert.ok(gets.includes(INDEX),JSON.stringify(value)+' keeps the raw object');assert.equal(derivedCalls,0);
+  }
+ }finally{context.derivedViewIndex=realDerived;context.viewIndexD1Version=realVersion;delete env.VIEW_INDEX_SOURCE;}
+}
+
 console.log('Admin prediction recovery API: input checks, read set, pin and torn reads, verdicts, canaries, no write passed');

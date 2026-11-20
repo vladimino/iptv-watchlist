@@ -88,6 +88,7 @@ Authority is per domain, not per database. A domain is D1-authoritative only whi
 | Discovery | discovery marker `d1`/`open` | D1 ledger, decisions, admission, continuation and lease | Immutable observation segments, archive and R2 ledger copies |
 | Ratings documents | `ratings_domain_authority` `d1`/`open` | D1 documents | Ratings and removal events, raw Letterboxd inputs |
 | Owner reviews | `owner_review_authority` `d1` | D1 rows | `admin/owner-reviews.json` mirror |
+| View index (read source) | none: the temporary read selector `VIEW_INDEX_SOURCE` (`r2` default, `d1`) | `d1` derives the view from `prediction_pointer`, `prediction_fingerprint` and `ratings_view`; `r2` reads the raw object and overlays them | The mutable object `enrichment/view-index.json` is still written by the raw writers and read under `r2` only ([contract](../reference/domain/view-index-read-model.md#read-source-selector)) |
 | Filter presets | `filter_preset_authority` (schema v28; `d1`/generation 1/`open` since 20 Nov 2026) | D1 rows (R2 `ui/filter-presets.json` until the activation) | The object, unread and unwritten after activation (no fallback) |
 | Started marks | `started_authority` (schema v29; `d1`/generation 1/`open` since 20 Nov 2026) | D1 `started_mark` rows (R2 `started/<id>.json` until the activation) | The objects, unread and unwritten after activation (no fallback); the event journal `events/items/` stays R2 |
 
