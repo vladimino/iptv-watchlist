@@ -320,10 +320,18 @@ Source: [`src/admin/discovery-recovery.js`](../../../src/admin/discovery-recover
 | `GET /api/admin/discovery-recovery/revoke-preview?key=<observation key>&requestId=<original request id>` | [ADR 0178](../../adr/0178-identity-correction-revoke-event-contract.md) read-only preview of revoking one saved identity correction: the original action, the history of that observation, today's decision, the fence it leaves; writes nothing, calls no TMDB |
 | `POST /api/admin/discovery-recovery/revoke-confirm` | Issues one revoke of one saved correction; stores an `identity_revoke` intent, changes no decision |
 | `POST /api/admin/discovery-recovery/revoke-execute` | Executes one issued revoke through the fenced D1 owner write; the receipt is read back with `identity-receipt` |
+| `GET /api/admin/discovery-recovery/group-preview?tmdbId=<digits>&key=<key>...` | [ADR 0181](../../adr/0181-owner-confirmed-group-assign-of-selected-observations.md) read-only candidates and per-key proof for one `tmdb:<digits>` movie: bounded primary-key prefix-range reads over at most 4 title anchors, at most 50 candidates, always `coverage: partial` with `more`, `dropped` and `anchorsOmitted`; writes nothing, calls no TMDB or model |
+| `POST /api/admin/discovery-recovery/group-confirm` | Issues N `identity_assign` child intents for 1 to 10 explicitly selected keys in one atomic D1 batch; the bound scope is exactly the selected set (an unknown, excluded or stale key refuses the whole request); changes no decision |
+| `POST /api/admin/discovery-recovery/group-execute` | Runs the issued children one by one through the fenced D1 owner write under one lease; answers per-key outcomes (`applied`, `conflict`, `refused`, `skipped`, `expired`, `not_attempted`, `unknown`) |
+| `GET /api/admin/discovery-recovery/group-receipt?groupId=<id>` | Reads the stored children and receipts; read-only |
 | `GET /api/admin/discovery-recovery/policy-exclude?filmId=tmdb_<id>` | Read-only ADR 0150 preview of one current admission |
 | `POST /api/admin/discovery-recovery/policy-exclude` | Executes `catalog_policy_exclude@1` for that film |
 
 Any other method is 405 `method_not_allowed`, and an unknown path under `/api/admin/discovery-recovery/` is 404.
+
+#### Assign one movie to a selected group of observations (`/admin/identity/group`)
+
+The owner page `/admin/identity/group` and the four routes above ([ADR 0181](../../adr/0181-owner-confirmed-group-assign-of-selected-observations.md), [AIR-131](https://trello.com/c/0WtLPRnH)) assign **one** `tmdb:<digits>` movie to 1 to 10 explicitly selected observations. It is a convenience over single-key owner writes: every key is written by the same fenced `ownerDecision` as `identity-correct`, with its own intent, history row and receipt. D1 only (`not_authoritative` otherwise). Owner-only, same Access and CSRF rules as the other writes. The page requests nothing on load and preselects nothing; its entry links are on the `/admin/identity` queue rows of a confirmed catalogue Film and in the Limbo identity section. Candidates are always partial; the page shows the counts and never claims that the list is complete. Execution stops on the first `unknown` outcome and never retries blindly; to see what happened read the receipt. `GET /api/admin/identity-work` stays read-only and unchanged. Code rollback does not revert D1 owner decisions.
 
 #### Revoke one saved identity correction (`/admin/identity/revoke`)
 

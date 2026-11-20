@@ -156,6 +156,20 @@ A reject appends the id to `rejectedTmdbIds` (at most eight movie ids), clears `
 Not covered: more than one observation ([AIR-131](https://trello.com/c/0WtLPRnH)), revoke of a stored correction (a separate capability, [`discovery_identity_revoke@1`](#revoke-a-saved-identity-correction-discovery_identity_revoke1)), a television id, retiring a catalog admission, and rewriting the prediction queue. A held Discovery marker, or a published-EPG marker that is neither `r2` nor a ready D1 Discovery authority, writes nothing. Retiring an already admitted Documentary or concert recording from the catalog is [`catalog_policy_exclude@1`](#policy-exclusion-catalog_policy_exclude1), not this reject.
 
 
+## Group assignment: `discovery_identity_group_assign@1`
+
+[ADR 0181](../../adr/0181-owner-confirmed-group-assign-of-selected-observations.md), Accepted; [AIR-131](https://trello.com/c/0WtLPRnH). Assigns **one** movie to 1 to 10 explicitly selected observations. Declaration: subject kind `observation`, `healthActionCode: discovery_identity_group_assign`, at most 10 records, one owner write per key, 0 external calls, no retry, compensation `manual`, `confirmTtlMs` 10 minutes.
+
+| Principle | In `discovery_identity_group_assign` |
+| --- | --- |
+| Eligibility | Per key the unchanged single-key gate over a fresh complete D1 proof (decision, observation, `identityCommand`, `catalogueFilmTrust`) plus a runtime check (more than max(10 minutes, 15%) apart refuses; an unknown runtime is shown, not blocked), the revoked-assign fence and the owner-assignment and scorer conflicts. Preview is eligible if any key is |
+| Confirmation | The scope is exactly the selected keys with their versions: `affected` must equal `selected`; an unknown, excluded or stale key refuses the whole request and the scope is never shrunk. All N children are stored in one D1 batch |
+| Execution | A barrier proves every child is issued before the first write. Then sequential `DiscoveryAuthority.ownerDecision` under one lease with a drift fence (programme run unchanged, generation moved only by this run's own writes), lease renewal before each key, expiry checks and a 60-second budget. `running` or `unknown` stops the run |
+| Replay | Finishes only children without a receipt, validated against the issued identity; never creates or extends children |
+| Receipt | Per key; honest partial results; no all-or-nothing |
+
+Not covered: more than 10 keys, more than one movie per request, a television id, TMDB search, a reject or revoke by group.
+
 ## Revoke a saved identity correction: `discovery_identity_revoke@1`
 
 [ADR 0178](../../adr/0178-identity-correction-revoke-event-contract.md), Accepted; [AIR-132](https://trello.com/c/3AXbSoHe). Revokes the effect of **one** earlier owner `assign` or `reject` of one observation. Declaration: subject kind `observation`, `healthActionCode: discovery_identity_revoke`, 1 record, 1 write, 0 external calls, no retry, compensation `manual` (undoing a revoke is a new owner action; there is no replay of a before-image), `confirmTtlMs` 10 minutes.
