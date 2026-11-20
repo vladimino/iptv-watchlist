@@ -324,6 +324,9 @@ async function predictionHotParity(env,now=Date.now()){
  const stored=read.current,revision=read.head?.queueGeneration??null;
  if(!stored)return unknown('queue_not_recorded');
  if(!queueShapeValid(stored))return unknown('queue_shape_invalid');
+ // The lanes are compared as sets, so a duplicate id or an id in both lanes would be hidden by the comparison. Such a queue is malformed: reported as such, never deduplicated into a match.
+ {const hotIds=new Set(stored.hotPending),coldIds=new Set(stored.coldPending);
+  if(hotIds.size!==stored.hotPending.length||coldIds.size!==stored.coldPending.length||stored.hotPending.some(id=>coldIds.has(id)))return unknown('queue_shape_invalid');}
  let programme,profile;
  try{[programme,profile]=await Promise.all([loadJSON(env,'programme.json'),loadJSON(env,profileKey)]);}catch(error){return unknown('source_unreadable',error);}
  if(!profile)return unknown('profile_not_recorded');
@@ -343,7 +346,17 @@ async function predictionHotParity(env,now=Date.now()){
  if(why)return unknown('queue_not_comparable_'+why,null,base);
  if(stored.priorityBasis!=='completed')return unknown('queue_basis_'+String(stored.priorityBasis||'unknown').replace(/[^a-z_]/g,''),null,base);
  // A queue ranked on an earlier generation is waiting for its own natural refresh: its hot lane says nothing about this generation, so it is reported, not compared.
- if(stored.programmeRunId!==programme.runId)return answer('degraded',['generation_rollover_pending'],base);
+ // The fence re-reads the generation, the queue revision and (when a signature was read) the assigned shows after the evaluation. A change during this call is `unknown`, whichever verdict was about to be stated.
+ const fence=async before=>{
+  try{
+   const [again,live,after]=await Promise.all([readQueueHead(env),typeof PublishedEpg!=='undefined'?PublishedEpg.currentGeneration(env):null,before?currentShowsSignature(pinned,programme):null]);
+   if(!live||live.programmeRunId!==pin.programmeRunId||(live.fence??null)!==generation.fence||(live.generation??null)!==generation.generation)return {reason:'generation_changed_during_read'};
+   if(revision!==null?again.head?.queueGeneration!==revision:again.current?.refreshedAt!==stored.refreshedAt)return {reason:'queue_changed_during_read'};
+   if(before){if(after.unreadable)return {reason:'shows_signature_unreadable'};if(after.signature!==before.signature)return {reason:'shows_changed_during_read'};}
+   return null;
+  }catch(error){return {reason:'fence_unverifiable',error};}
+ };
+ if(stored.programmeRunId!==programme.runId){const broken=await fence(null);return broken?unknown(broken.reason,broken.error,base):answer('degraded',['generation_rollover_pending'],base);}
  const signature=await currentShowsSignature(pinned,programme);
  if(signature.applicable===false)return unknown('shows_signature_not_applicable',null,base);
  if(signature.unreadable)return unknown('shows_signature_unreadable',null,base);
@@ -352,13 +365,7 @@ async function predictionHotParity(env,now=Date.now()){
  if(!expected||!Array.isArray(capture.films))return unknown('snapshot_incomplete',null,base);
  if(capture.catalog==null)return unknown('catalog_not_recorded',null,base);
  // Fence: the generation, the queue revision and the assigned shows must be what they were before the evaluation, or the two sides are not one snapshot.
- try{
-  const [again,live,after]=await Promise.all([readQueueHead(env),typeof PublishedEpg!=='undefined'?PublishedEpg.currentGeneration(env):null,currentShowsSignature(pinned,programme)]);
-  if(!live||live.programmeRunId!==pin.programmeRunId||(live.fence??null)!==generation.fence||(live.generation??null)!==generation.generation)return unknown('generation_changed_during_read',null,base);
-  if(revision!==null?again.head?.queueGeneration!==revision:again.current?.refreshedAt!==stored.refreshedAt)return unknown('queue_changed_during_read',null,base);
-  if(after.unreadable)return unknown('shows_signature_unreadable',null,base);
-  if(after.signature!==signature.signature)return unknown('shows_changed_during_read',null,base);
- }catch(error){return unknown('fence_unverifiable',error,base);}
+ {const broken=await fence(signature);if(broken)return unknown(broken.reason,broken.error,base);}
  const storedHotSet=new Set(storedHot),expectedHot=expected.hotPending.filter(id=>!exhausted(id)),expectedHotSet=new Set(expectedHot),expectedCold=expected.coldPending.filter(id=>!exhausted(id));
  const storedKnown=new Set([...stored.hotPending,...stored.coldPending]),filmsById=new Map(capture.films.map(film=>[String(film.id),film]));
  const signatureMatches=stored.showsSignature===signature.signature;

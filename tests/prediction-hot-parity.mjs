@@ -71,7 +71,21 @@ built=await reconcile();
  const cold=clone(base);cold.hotPending=base.hotPending.slice(1);cold.coldPending=[base.hotPending[0],...base.coldPending];cold.priorityCount=cold.hotPending.length;cold.pending=cold.hotPending;
  await writeQueue(cold);
  const c=await readOnly(()=>parity());assert.equal(c.verdict,'mismatch');assert.equal(c.diff.causes.reclassified_hot,1,JSON.stringify(c.diff));
- await writeQueue(base);assert.equal((await readOnly(()=>parity())).verdict,'match');}
+ await writeQueue(base);assert.equal((await readOnly(()=>parity())).verdict,'match');
+
+ // Malformed lanes are never deduplicated into a match: a duplicate id in one lane, or an id in both lanes, makes the queue itself unreadable as a lane set.
+ const malformed={
+  duplicateHot:q=>{q.hotPending=[q.hotPending[0],...q.hotPending];q.priorityCount=q.hotPending.length;},
+  duplicateCold:q=>{q.coldPending=[q.coldPending[0],...q.coldPending];q.coldRemaining=q.coldPending.length;},
+  hotAndCold:q=>{q.coldPending=[q.hotPending[0],...q.coldPending];q.coldRemaining=q.coldPending.length;},
+ };
+ for(const [name,mutate] of Object.entries(malformed)){
+  const bad=clone(base);mutate(bad);await writeQueue(bad);
+  const r=await readOnly(()=>parity());
+  assert.equal(r.verdict,'unknown',name+': '+JSON.stringify(r).slice(0,200));assert.deepEqual(r.reasons,['queue_shape_invalid'],name);assert.equal(r.expected,undefined,name+': no count is claimed');assert.equal(r.diff,undefined,name);
+  await writeQueue(base);
+ }
+ assert.equal((await readOnly(()=>parity())).verdict,'match','the legitimate queue is still a match after the malformed ones');}
 
 const predicted=new Set();
 // 5. Mismatched freshness: a film is settled by a real submit, then an OLDER snapshot of the queue (which still lists it outstanding) is put back. The queue lies; the facts do not.
@@ -119,6 +133,16 @@ assert.equal(built.hotPending.length,upper,'the films that are inside the window
 {const previous=generation,programme=records.get('programme.json');
  generation={...generation,programmeRunId:'p2',fence:'d1:2:p2',generation:2};records.set('programme.json',{...programme,runId:'p2'});
  const r=await readOnly(()=>parity());assert.equal(r.verdict,'degraded');assert.deepEqual(r.reasons,['generation_rollover_pending']);assert.equal(r.queue.programmeRunId,'p1');assert.equal(r.generation.programmeRunId,'p2');
+ // The rollover answer is fenced like any other: the published generation or the queue revision moving during the call is `unknown`, not the stated deferral. `n` is the number of generation reads of a stable call; the fence is the last.
+ {const live=ctx.PublishedEpg.currentGeneration;let n=0;ctx.PublishedEpg.currentGeneration=async(...args)=>{n++;return live(...args);};
+  assert.equal((await readOnly(()=>parity())).verdict,'degraded','the stable rollover stays degraded');const last=n;
+  let calls=0;ctx.PublishedEpg.currentGeneration=async()=>{calls++;return calls===last?{...generation,programmeRunId:'p3',fence:'d1:3:p3',generation:3}:generation;};
+  const moved=await readOnly(()=>parity());assert.equal(moved.verdict,'unknown',JSON.stringify(moved).slice(0,200));assert.deepEqual(moved.reasons,['generation_changed_during_read']);
+  const before=clone(await queue());calls=0;
+  // The concurrent writer commits before the fence starts reading (the generation read before it).
+  ctx.PublishedEpg.currentGeneration=async()=>{if(++calls===last-1){const h=await head();await PredictionD1.writeQueue(env,h,{...clone(h.queue),trigger:'batch_complete'});}return generation;};
+  const raced=await parity();assert.equal(raced.verdict,'unknown',JSON.stringify(raced).slice(0,200));assert.deepEqual(raced.reasons,['queue_changed_during_read']);
+  ctx.PublishedEpg.currentGeneration=live;await writeQueue(before);}
  generation=previous;records.set('programme.json',programme);assert.equal((await readOnly(()=>parity(Date.parse(built.refreshedAt)))).verdict,'match');}
 
 // 10. Unknown, never a PASS and never a proven zero.

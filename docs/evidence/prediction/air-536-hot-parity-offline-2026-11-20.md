@@ -6,7 +6,7 @@
 
 ## Method
 
-The expected side is not a second implementation of the queue rules. `predictionHotParity` pins the published D1 generation, reads the stored queue head, and runs `buildPredictionQueue` in memory at the call's own cutoff (a new `options.now`; every other caller keeps the wall clock) with the stored queue as `previous`. The two hot lanes are compared as sets, retry-exhausted ids excluded from both. A difference is classified clock-only when the Film, with the shows it has now, is classified at the queue's own build instant exactly as the queue classified it (`predictionPriority`, the queue's own predicate). After the evaluation the generation fence, the queue revision and the assigned-shows signature are read again; any change is `unknown`.
+The expected side is not a second implementation of the queue rules. `predictionHotParity` pins the published D1 generation, reads the stored queue head, and runs `buildPredictionQueue` in memory at the call's own cutoff (a new `options.now`; every other caller keeps the wall clock) with the stored queue as `previous`. The two hot lanes are compared as sets, retry-exhausted ids excluded from both. A difference is classified clock-only when the Film, with the shows it has now, is classified at the queue's own build instant exactly as the queue classified it (`predictionPriority`, the queue's own predicate). Before the queue is compared, its lanes must be sets (no duplicate id, no id in both lanes). After the evaluation, and before any verdict is stated, the generation fence and the queue revision (and the assigned-shows signature when the queue is compared) are read again; any change is `unknown`.
 
 ## Fixtures and results (`tests/prediction-hot-parity.mjs`, 3,200 Discovery-admitted films, one generation)
 
@@ -29,6 +29,8 @@ The expected side is not a second implementation of the queue rules. `prediction
 | Generation moves, a concurrent CAS writer commits the queue, or Discovery assigns shows during the evaluation | `unknown`: `generation_changed_during_read`, `queue_changed_during_read`, `shows_changed_during_read` |
 | Queue built under another profile | `unknown`, `queue_not_comparable_profile_changed` |
 | Programme not recorded | `unknown`, never an empty hot lane |
+| Duplicate id in the hot lane, duplicate id in the cold lane, an id in both lanes | `unknown`, `queue_shape_invalid`, no count; the previous code stated `match` for a duplicated hot id (found in review, fixed) |
+| Generation or queue revision moves during a stable rollover call | `unknown` (`generation_changed_during_read`, `queue_changed_during_read`); the stable rollover stays `degraded` |
 
 Every call is wrapped so that a non-`SELECT` D1 statement, a write batch, or a changed stored queue document fails the test. The MCP audit (`tests/get-write-audit.mjs`) calls the tool in every read scenario.
 
