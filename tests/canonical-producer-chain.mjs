@@ -20,7 +20,7 @@ const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const template=path.join(root,'t.sqlite');
 assert.equal(sqlite(template,chainFiles.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
-assert.equal(Number(one(template,'SELECT version FROM schema_contract WHERE id=1')),28,'the whole chain: 0023, 0024 (dormant prediction recovery intent), 0025 (retention scan watermark), 0026 (EPG run certificate), 0027 (identity revoke intent kind) then 0028 (dormant Filter presets authority)');
+assert.equal(Number(one(template,'SELECT version FROM schema_contract WHERE id=1')),29,'the whole chain: 0023, 0024 (dormant prediction recovery intent), 0025 (retention scan watermark), 0026 (EPG run certificate), 0027 (identity revoke intent kind) then 0028 (dormant Filter presets authority) then 0029 (dormant Started marks authority)');
 assert.equal(Number(one(template,'SELECT COUNT(*) FROM canonical_producer_chain')),0);
 const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
 let n=0;
