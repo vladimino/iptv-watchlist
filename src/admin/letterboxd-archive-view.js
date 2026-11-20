@@ -500,6 +500,19 @@ function archiveRequeuedState(row) {
   if (row.state === 'removed') return 'удалён из архива';
   return String(row.state || 'неизвестно');
 }
+function archiveStopReason(stop) {
+  return stop && typeof stop === 'object' ? String(stop.reason || 'unknown') : String(stop);
+}
+function archiveStopIsEnrichment(stop, step) {
+  return !!(stop && ((typeof stop === 'object' && stop.phase === 'enrich') || (step && step.phase === 'enrich')));
+}
+// A stop in the enrich phase means the Film is already admitted: only the metadata step is blocked (AIR-354).
+function archiveStopText(stop, step) {
+  const reason = archiveStopReason(stop);
+  return archiveStopIsEnrichment(stop, step)
+    ? 'Film уже admitted. Дозаполнение метаданных остановлено (' + reason + '); метаданные не записаны.'
+    : 'Проверка остановлена (' + reason + ').';
+}
 function archiveStepSummary(step) {
   if (!step) return '';
   if (step.running) return 'Проверка выполняется…';
@@ -507,7 +520,7 @@ function archiveStepSummary(step) {
   if (step.refused) return 'Последняя проверка отклонена: ' + step.refused + '. Ничего не изменено.';
   if (step.verified) return 'Последняя проверка: Film admitted' + (step.filmId ? ' (' + step.filmId + ')' : '') + '. Watchlist не менялся.';
   if (step.enriched) return 'Последняя проверка: метаданные или имена записаны.';
-  if (step.stop) return 'Последняя проверка остановлена (' + step.stop + '). Код не подтверждён.';
+  if (step.stop) return (archiveStopIsEnrichment(step.stop, step) ? 'Последняя проверка: ' : 'Последняя ') + archiveStopText(step.stop, step).replace(/^Проверка/, 'проверка') + (archiveStopIsEnrichment(step.stop, step) ? '' : ' Код не подтверждён.');
   if (step.state === 'needs_review') return 'Последняя проверка: требует разбора' + (step.reason ? ' (' + step.reason + ')' : '') + (step.writes ? '; состояние записано' : '') + '.';
   if (step.persisted === 'enrichment') return 'Последняя проверка: метаданные не разобраны, enrichment pending' + (step.reason ? ' (' + step.reason + ')' : '') + '.';
   if (!step.writes) return 'Последняя проверка ничего не изменила.';
@@ -581,7 +594,7 @@ function archiveIdentityHtml(session) {
   else if (identity && identity.refused) note = 'Последняя проверка идентичности отклонена (' + identity.refused + '). Ничего не изменено.';
   else if (identity && identity.verified) note = (identity.code ? identity.code + ': ' : '') + 'Film admitted' + (identity.filmId ? ' (' + identity.filmId + ')' : '') + ' — сверен по TMDB. Watchlist не менялся.';
   else if (identity && identity.enriched) note = (identity.code ? identity.code + ': ' : '') + 'метаданные или имена записаны. Watchlist не менялся. Это не новая идентичность.';
-  else if (identity && identity.stop) note = 'Проверка остановлена (' + identity.stop + '). Кандидат остаётся непроверенным. Это не подтверждение.';
+  else if (identity && identity.stop) note = archiveStopText(identity.stop, identity) + (archiveStopIsEnrichment(identity.stop, identity) ? ' Повторное нажатие «Дозаполнить метаданные» повторит только этот шаг.' : ' Кандидат остаётся непроверенным. Это не подтверждение.');
   else if (identity && identity.state === 'needs_review') {
     note = (identity.code ? identity.code + ': ' : '') + (identity.writes
       ? 'состояние кандидата записано в R2. Фильм в каталог не добавлен. Это не подтверждение.'

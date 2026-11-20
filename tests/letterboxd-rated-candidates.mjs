@@ -594,6 +594,48 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   await poisoned('Nn1', 'rated-key-nn1000001', 'tmdb_tv', html => html.replace('data-tmdb-type="movie"', 'data-tmdb-type="tv"'));
   await poisoned('Oo1', 'rated-key-oo1000001', 'shortlink_mismatch', html => html.replace('https://boxd.it/Oo1', 'https://boxd.it/Zz9'));
   await poisoned('Pp1', 'rated-key-pp1000001', 'canonical_mismatch', html => html.replace('https://letterboxd.com/film/enrich-cut/', 'https://letterboxd.com/film/other-cut/'));
+
+  // AIR-354: a verified film whose page has no shortlink tag still enriches, because the persisted admission proves the code.
+  async function noShortlink(code, key, tweak, expectStop, between = () => {}) {
+    const sha = await committed([{code, name: 'Enrich Cut', year: 2005, rating: 4}], key);
+    env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+    const richDoc = html => html.replace(/<link href="[^"]*" rel="shortlink[^"]*">/, '').replace('</head>', '<meta name="description" content="Synthetic synopsis."></head>');
+    const good = richDoc(page({code, title: 'Enrich Cut', year: 2005, tmdb: '900030', slug: 'enrich-cut'}));
+    const admissionsKey = 'letterboxd/admissions/verified-films.json';
+    net.handler = async url => {
+      const address = String(url);
+      if (address === 'https://boxd.it/' + code) return http(301, '', {location: 'https://letterboxd.com/film/enrich-cut/'});
+      if (address === 'https://letterboxd.com/film/enrich-cut/') {
+        if (net.calls.filter(item => item === address).length > 1) tweak(admissionsKey);
+        return http(200, net.calls.filter(item => item === address).length > 1 ? good : page({code, title: 'Enrich Cut', year: 2005, tmdb: '900030', slug: 'enrich-cut'}));
+      }
+      if (address.startsWith('https://api.themoviedb.org/3/movie/900030')) return http(200, JSON.stringify({id: 900030, media_type: 'movie', title: 'Enrich Cut', original_title: 'Enrich Cut', release_date: '2005-01-01'}));
+      throw new Error(address);
+    };
+    const verified = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true}});
+    assert.equal(verified.body.verified, true, code + ' ' + JSON.stringify(verified.body));
+    between(admissionsKey);
+    const enrich = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true}});
+    const stored = read(admissionsKey).films.tmdb_900030;
+    const candidates = read('letterboxd/imports/' + sha + '/rated-candidates.json').candidates[code];
+    assert.equal(candidates.state, 'verified');
+    if (!expectStop) {
+      assert.equal(enrich.body.enriched, true, JSON.stringify(enrich.body));
+      assert.equal(stored.synopsis, 'Synthetic synopsis.');
+      assert.equal(candidates.enrichment, 'metadata');
+      return;
+    }
+    assert.equal(enrich.body.enriched, false, JSON.stringify(enrich.body));
+    assert.equal(enrich.body.stop && enrich.body.stop.reason, expectStop, JSON.stringify(enrich.body));
+    assert.equal(enrich.body.stop.phase, 'enrich');
+    assert.equal(stored.synopsis, undefined, 'no metadata on a failed proof');
+    assert.notEqual(candidates.enrichment, 'metadata');
+  }
+  await noShortlink('Qq1', 'rated-key-qq1000001', () => {}, null);
+  // The admission changed after the verify step: no shortlink, so nothing proves the code any more.
+  await noShortlink('Qq2', 'rated-key-qq2000001', () => {}, 'admission_unproven', key => {const doc = read(key); doc.films.tmdb_900030.archiveSha256 = 'f'.repeat(64); put(key, doc);});
+  // The admission changes between the read and the metadata write: the CAS leaves the row alone.
+  await noShortlink('Qq3', 'rated-key-qq3000001', key => {const doc = read(key); doc.films.tmdb_900030.archiveSha256 = 'e'.repeat(64); put(key, doc);}, 'admission_changed');
 }
 
 // 6. AIR-346: a valid movie page without a shortlink tag still verifies, writes is honest, and retry is bounded.
