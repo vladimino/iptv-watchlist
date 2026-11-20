@@ -506,12 +506,15 @@ function archiveStopReason(stop) {
 function archiveStopIsEnrichment(stop, step) {
   return !!(stop && ((typeof stop === 'object' && stop.phase === 'enrich') || (step && step.phase === 'enrich')));
 }
-// A stop in the enrich phase means the Film is already admitted: only the metadata step is blocked (AIR-354).
+// A stop in the enrich phase means the Film is already admitted: only the enrichment step is blocked (AIR-354).
+// A localization stop comes after the metadata was saved, so it must not say that nothing was written.
 function archiveStopText(stop, step) {
   const reason = archiveStopReason(stop);
-  return archiveStopIsEnrichment(stop, step)
-    ? 'Film уже admitted. Дозаполнение метаданных остановлено (' + reason + '); метаданные не записаны.'
-    : 'Проверка остановлена (' + reason + ').';
+  if (!archiveStopIsEnrichment(stop, step)) return 'Проверка остановлена (' + reason + ').';
+  const localization = stop && typeof stop === 'object' && (stop.part === 'localization' || stop.reason === 'localization_unavailable');
+  return localization
+    ? 'Film уже admitted. Метаданные сохранены, локализация остановлена (' + reason + ').'
+    : 'Film уже admitted. Дозаполнение метаданных остановлено (' + reason + '); метаданные не записаны.';
 }
 function archiveStepSummary(step) {
   if (!step) return '';

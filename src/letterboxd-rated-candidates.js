@@ -368,11 +368,17 @@ const LetterboxdRatedCandidates = (() => {
   }
   // `expected` is the admission the page was proven against. A row that changed ownership, TMDB id, archive or path between the
   // read and this write is left untouched (AIR-354).
+  function sameAdmission(row, expected) {
+    return !!row && !!expected && row.sourceCode === expected.sourceCode && String(row.tmdb) === String(expected.tmdb) && row.archiveSha256 === expected.archiveSha256 && row.filmPath === expected.filmPath;
+  }
+  // `refused` is true only when the compare-and-set found another owner; `changed:false` alone can also mean an identical payload.
   async function storeMetadata(env, filmId, parsed, filmPath, expected) {
-    return casDoc(env, ADMISSIONS, {schemaVersion: 1, films: {}}, current => {
+    let refused = false;
+    const saved = await casDoc(env, ADMISSIONS, {schemaVersion: 1, films: {}}, current => {
+      refused = false;
       const prior = current.films[filmId];
-      if (!prior) return null;
-      if (expected && (prior.sourceCode !== expected.sourceCode || String(prior.tmdb) !== String(expected.tmdb) || prior.archiveSha256 !== expected.archiveSha256 || prior.filmPath !== expected.filmPath)) return null;
+      if (!prior) {refused = true; return null;}
+      if (!sameAdmission(prior, expected)) {refused = true; return null;}
       prior.synopsis = parsed.synopsis || null;
       prior.synopsisFetchedAt = parsed.synopsisFetchedAt || null;
       prior.metadataAt = parsed.metadataAt || null;
@@ -385,12 +391,15 @@ const LetterboxdRatedCandidates = (() => {
       prior.url = 'https://letterboxd.com' + filmPath;
       return current;
     });
+    return {...saved, refused};
   }
-  async function storeLocalization(env, filmId, film, titles) {
+  async function storeLocalization(env, filmId, film, titles, expected) {
     const cached = titles[film.id];
-    return casDoc(env, ADMISSIONS, {schemaVersion: 1, films: {}}, current => {
+    let refused = false;
+    const saved = await casDoc(env, ADMISSIONS, {schemaVersion: 1, films: {}}, current => {
+      refused = false;
       const prior = current.films[filmId];
-      if (!prior) return null;
+      if (!prior || !sameAdmission(prior, expected)) {refused = true; return null;}
       if (cached && cached.title) {prior.titleRu = cached.title; prior.titleStatus = cached.status || 'provisional';}
       prior.directors = peopleOf(film.directors);
       prior.actors = peopleOf(film.actors);
@@ -398,11 +407,12 @@ const LetterboxdRatedCandidates = (() => {
       prior.peopleLocalizedAt = new Date().toISOString();
       return current;
     });
+    return {...saved, refused};
   }
 
   // A present shortlink must name this code. An absent one is accepted only when the persisted admission itself proves the code:
   // ownChecks admitted it on a shortlink or on the boxd.it redirect hop, and the row still names this code, archive, TMDB id and path (AIR-354).
-  function enrichmentAgrees(html, film, code, sha) {
+  function enrichmentAgrees(html, film, code, sha, item) {
     let evidence;
     try {evidence = LetterboxdIdentity.pageEvidence(html, new URL('https://letterboxd.com' + film.filmPath), letterboxdPageTools());}
     catch {return {ok: false, reason: 'metadata_unparsed'};}
@@ -410,7 +420,7 @@ const LetterboxdRatedCandidates = (() => {
     if (evidence.path !== film.filmPath) return {ok: false, reason: 'path_mismatch'};
     if (evidence.shortlinkPresent) {
       if (evidence.shortCode !== code) return {ok: false, reason: 'shortlink_mismatch'};
-    } else if (film.sourceCode !== code || film.archiveSha256 !== sha || !film.tmdb || !film.filmPath) return {ok: false, reason: 'admission_unproven'};
+    } else if (film.sourceCode !== code || film.archiveSha256 !== sha || !film.tmdb || !film.filmPath || !item || item.state !== 'verified' || String(item.tmdb) !== String(film.tmdb) || item.filmPath !== film.filmPath) return {ok: false, reason: 'admission_unproven'};
     if (evidence.canonicalPath !== film.filmPath) return {ok: false, reason: 'canonical_mismatch'};
     if (!(evidence.tmdbTypes.length === 1 && evidence.tmdbTypes[0] === 'movie')) return {ok: false, reason: evidence.tmdbTypes.includes('tv') ? 'tmdb_tv' : 'tmdb_not_movie'};
     if (evidence.tmdbIds.length !== 1 || evidence.tmdbIds[0] !== String(film.tmdb)) return {ok: false, reason: 'tmdb_mismatch'};
@@ -454,22 +464,24 @@ const LetterboxdRatedCandidates = (() => {
       let parsed;
       try {parsed = letterboxdPageTools().parseFilm(fetched.text, {id: filmId, title: film.title, original: film.title, year: film.year, tmdbId: film.tmdb, url: 'https://letterboxd.com' + film.filmPath});}
       catch {
-        const marked = await markEnrichment(env, key, code, 'pending');
+        const marked = await markEnrichment(env, key, code, 'pending', {sha, item});
+        if (marked.refused) return claimChanged(code, false);
         return {pending: true, fetched: true, verified: false, enriched: false, writes: marked.changed === true, persisted: marked.changed ? 'enrichment' : 'none', code, state: 'verified', reason: 'metadata_unparsed', phase: 'enrich'};
       }
-      const agreed = enrichmentAgrees(fetched.text, film, code, sha);
+      const agreed = enrichmentAgrees(fetched.text, film, code, sha, item);
       if (!agreed.ok) {
         const stopped = {reason: agreed.reason, code, at: new Date().toISOString(), phase: 'enrich'};
         const parked = await park(env, key, opened.value, stopped);
         return {pending: true, fetched: true, verified: false, enriched: false, writes: parked.changed === true, persisted: parked.changed ? 'stop' : 'none', stop: stopped, code, phase: 'enrich'};
       }
       const stored = await storeMetadata(env, filmId, parsed, film.filmPath, film);
-      if (stored.changed !== true && !(await admissionIntact(env, filmId, film))) {
+      if (stored.refused) {
         const stopped = {reason: 'admission_changed', code, at: new Date().toISOString(), phase: 'enrich'};
         const parked = await park(env, key, opened.value, stopped);
         return {pending: true, fetched: true, verified: false, enriched: false, writes: parked.changed === true, persisted: parked.changed ? 'stop' : 'none', stop: stopped, code, phase: 'enrich'};
       }
-      const marked = await markEnrichment(env, key, code, 'metadata');
+      const marked = await markEnrichment(env, key, code, 'metadata', {sha, item});
+      if (marked.refused) return claimChanged(code, stored.changed === true);
       const wrote = stored.changed === true || marked.changed === true;
       return {pending: true, fetched: true, verified: false, enriched: true, writes: wrote, persisted: wrote ? 'enrichment' : 'none', code, tmdb: item.tmdb, filmId, phase: 'enrich', state: 'enriched'};
     }
@@ -480,28 +492,40 @@ const LetterboxdRatedCandidates = (() => {
       if (typeof localizeFilmTitles === 'function') await localizeFilmTitles([base], titles, 'off');
       if (typeof localizePeople === 'function') await localizePeople([base], people, 'off');
     } catch {
-      const stopped = {reason: 'localization_unavailable', code, at: new Date().toISOString(), phase: 'enrich'};
+      const stopped = {reason: 'localization_unavailable', code, at: new Date().toISOString(), phase: 'enrich', part: 'localization'};
       const parked = await park(env, key, opened.value, stopped);
       return {pending: true, fetched: true, verified: false, enriched: false, writes: parked.changed === true, persisted: parked.changed ? 'stop' : 'none', stop: stopped, code, phase: 'enrich'};
     }
-    const localized = await storeLocalization(env, filmId, base, titles);
-    const marked = await markEnrichment(env, key, code, 'done');
+    const localized = await storeLocalization(env, filmId, base, titles, film);
+    if (localized.refused) {
+      const stopped = {reason: 'admission_changed', code, at: new Date().toISOString(), phase: 'enrich', part: 'localization'};
+      const parked = await park(env, key, opened.value, stopped);
+      return {pending: true, fetched: true, verified: false, enriched: false, writes: parked.changed === true, persisted: parked.changed ? 'stop' : 'none', stop: stopped, code, phase: 'enrich'};
+    }
+    const marked = await markEnrichment(env, key, code, 'done', {sha, item});
+    if (marked.refused) return claimChanged(code, localized.changed === true);
     const after = await readDoc(env, key);
     const next = LetterboxdRatedAdmission.resumePending(after.value && after.value.checkpoint, after.value && after.value.candidates);
     const wrote = localized.changed === true || marked.changed === true;
     return {pending: !!next.next, fetched: true, verified: false, enriched: true, writes: wrote, persisted: wrote ? 'enrichment' : 'none', code, tmdb: item.tmdb, filmId, phase: 'enrich', state: 'enriched'};
   }
-  async function admissionIntact(env, filmId, film) {
-    const again = await readDoc(env, ADMISSIONS);
-    const row = again.value && again.value.films && again.value.films[filmId];
-    return !!row && row.sourceCode === film.sourceCode && String(row.tmdb) === String(film.tmdb) && row.archiveSha256 === film.archiveSha256 && row.filmPath === film.filmPath;
+  // The candidate row the page was proven against. A row that left `verified`, or now names another TMDB id or film path, is not advanced.
+  function claimChanged(code, wrote) {
+    return {pending: true, fetched: true, verified: false, enriched: false, writes: wrote === true, persisted: wrote ? 'enrichment' : 'none', code, state: 'needs_review', reason: 'claim_changed', phase: 'enrich'};
   }
-  async function markEnrichment(env, key, code, enrichment) {
-    return casDoc(env, key, null, current => {
-      if (current.candidates[code]) current.candidates[code] = {...current.candidates[code], enrichment};
-      current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
+  async function markEnrichment(env, key, code, enrichment, guard) {
+    let refused = false;
+    const saved = await casDoc(env, key, null, current => {
+      refused = false;
+      const row = current.candidates[code];
+      if (guard && (!row || row.state !== 'verified' || current.archiveSha256 !== guard.sha || String(row.tmdb) !== String(guard.item.tmdb) || row.filmPath !== guard.item.filmPath)) {refused = true; return null;}
+      if (row) current.candidates[code] = {...row, enrichment};
+      const stopped = current.checkpoint && current.checkpoint.stopped;
+      // Only this code's own stop is cleared; another code's stop stays.
+      current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: stopped && stopped.code && stopped.code !== code ? stopped : null};
       return current;
     });
+    return {...saved, refused};
   }
 
   async function retryCandidates(env, {sha, codes, expected}) {

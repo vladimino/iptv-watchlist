@@ -636,6 +636,85 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   await noShortlink('Qq2', 'rated-key-qq2000001', () => {}, 'admission_unproven', key => {const doc = read(key); doc.films.tmdb_900030.archiveSha256 = 'f'.repeat(64); put(key, doc);});
   // The admission changes between the read and the metadata write: the CAS leaves the row alone.
   await noShortlink('Qq3', 'rated-key-qq3000001', key => {const doc = read(key); doc.films.tmdb_900030.archiveSha256 = 'e'.repeat(64); put(key, doc);}, 'admission_changed');
+
+  // AIR-354 review: the candidate row and the localization writer carry the same ownership fences as the metadata writer.
+  async function raced(code, key, {onMetadataFetch, onLocalize, between}) {
+    const sha = await committed([{code, name: 'Enrich Cut', year: 2005, rating: 4}], key);
+    const candKey = 'letterboxd/imports/' + sha + '/rated-candidates.json';
+    const admissionsKey = 'letterboxd/admissions/verified-films.json';
+    env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+    const withDesc = html => html.replace('</head>', '<meta name="description" content="Synthetic synopsis."></head>');
+    let fetches = 0;
+    net.handler = async url => {
+      const address = String(url);
+      if (address === 'https://boxd.it/' + code) return http(301, '', {location: 'https://letterboxd.com/film/enrich-cut/'});
+      if (address === 'https://letterboxd.com/film/enrich-cut/') {
+        fetches += 1;
+        if (fetches > 1 && onMetadataFetch) onMetadataFetch(candKey, admissionsKey);
+        return http(200, withDesc(page({code, title: 'Enrich Cut', year: 2005, tmdb: '900040', slug: 'enrich-cut', shortlink: false})));
+      }
+      if (address.startsWith('https://api.themoviedb.org/3/movie/900040')) return http(200, JSON.stringify({id: 900040, media_type: 'movie', title: 'Enrich Cut', original_title: 'Enrich Cut', release_date: '2005-01-01'}));
+      if (address.startsWith('https://query.wikidata.org/')) {
+        if (onLocalize) onLocalize(candKey, admissionsKey);
+        const query = new URL(address).searchParams.get('query') || '';
+        if (query.includes('?en')) return http(200, JSON.stringify({results: {bindings: []}}));
+        return http(200, JSON.stringify({results: {bindings: [{tmdb: {value: '900040'}, film: {value: 'http://www.wikidata.org/entity/Q9'}, ru: {value: 'Чужое'}}]}}));
+      }
+      throw new Error(address);
+    };
+    const verified = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true}});
+    assert.equal(verified.body.verified, true, code + ' ' + JSON.stringify(verified.body));
+    if (between) between(candKey, admissionsKey);
+    const meta = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true}});
+    return {sha, candKey, admissionsKey, meta};
+  }
+  // The selected candidate changes while the page is fetched and another code leaves a stop: nothing is marked, the other stop stays.
+  {
+    const r = await raced('Rr1', 'rated-key-rr1000001', {onMetadataFetch: (candKey) => {
+      const doc = read(candKey);
+      doc.candidates.Rr1.filmPath = '/film/another-cut/';
+      doc.checkpoint = {...(doc.checkpoint || {}), stopped: {reason: 'forbidden', code: 'Zz0', phase: 'identity'}};
+      put(candKey, doc);
+    }});
+    assert.equal(r.meta.body.enriched, false, JSON.stringify(r.meta.body));
+    assert.equal(r.meta.body.reason, 'claim_changed', JSON.stringify(r.meta.body));
+    const doc = read(r.candKey);
+    assert.notEqual(doc.candidates.Rr1.enrichment, 'metadata');
+    assert.equal(doc.candidates.Rr1.filmPath, '/film/another-cut/', 'the changed row is not rewritten');
+    assert.equal(doc.checkpoint.stopped.code, 'Zz0', 'an unrelated stop is preserved');
+  }
+  {
+    const r = await raced('Rr2', 'rated-key-rr2000001', {onMetadataFetch: candKey => {const doc = read(candKey); doc.candidates.Rr2.state = 'needs_review'; put(candKey, doc);}});
+    assert.equal(r.meta.body.enriched, false, JSON.stringify(r.meta.body));
+    assert.notEqual(read(r.candKey).candidates.Rr2.enrichment, 'metadata');
+  }
+  {
+    const r = await raced('Rr3', 'rated-key-rr3000001', {onMetadataFetch: candKey => {const doc = read(candKey); doc.candidates.Rr3.tmdb = '1'; put(candKey, doc);}});
+    assert.equal(r.meta.body.enriched, false, JSON.stringify(r.meta.body));
+    assert.notEqual(read(r.candKey).candidates.Rr3.enrichment, 'metadata');
+  }
+  // With no shortlink tag the absent-tag path refuses an inconsistent candidate/admission pair, not only a changed archive.
+  {
+    const r = await raced('Rr4', 'rated-key-rr4000001', {between: candKey => {const doc = read(candKey); doc.candidates.Rr4.filmPath = '/film/another-cut/'; put(candKey, doc);}});
+    assert.equal(r.meta.body.enriched, false, JSON.stringify(r.meta.body));
+    assert.equal(r.meta.body.stop && r.meta.body.stop.reason, 'admission_unproven', JSON.stringify(r.meta.body));
+    assert.equal(read(r.admissionsKey).films.tmdb_900040.synopsis, undefined);
+  }
+  // The admission changes owner during localization: nothing of the other owner is written and no 'done' is recorded.
+  {
+    const r = await raced('Rr5', 'rated-key-rr5000001', {onLocalize: (candKey, admissionsKey) => {
+      const doc = read(admissionsKey);
+      doc.films.tmdb_900040.sourceCode = 'Other';
+      put(admissionsKey, doc);
+    }});
+    assert.equal(r.meta.body.enriched, true, JSON.stringify(r.meta.body));
+    const loc = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: r.sha, accepted: true}});
+    assert.equal(loc.body.enriched, false, JSON.stringify(loc.body));
+    assert.equal(loc.body.stop && loc.body.stop.reason, 'admission_changed', JSON.stringify(loc.body));
+    assert.equal(loc.body.stop.part, 'localization');
+    assert.equal(read(r.admissionsKey).films.tmdb_900040.titleRu, undefined, 'no title is written to another owner');
+    assert.notEqual(read(r.candKey).candidates.Rr5.enrichment, 'done');
+  }
 }
 
 // 6. AIR-346: a valid movie page without a shortlink tag still verifies, writes is honest, and retry is bounded.
