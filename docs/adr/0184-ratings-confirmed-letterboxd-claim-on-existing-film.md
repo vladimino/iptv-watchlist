@@ -1,9 +1,9 @@
 # ADR 0184: A trusted `letterboxd` claim is materialized on an existing Film only when the Ratings alias, canonical TMDB ownership and the absence of any competing claim agree
 
-**Status:** Proposed
-**Original decision date:** unknown (awaiting owner decision)
+**Status:** Accepted
+**Original decision date:** 2026-11-20
 **Recorded at:** 2026-11-20
-**Approval source:** not documented. The owner approved a separate card for the identity-rule change and the backfill of the currently affected Films ([AIR-559 handoff](https://trello.com/c/733sRAxu)); the **semantics below are not accepted** until the owner decides on this record. Architecture only: no production run, flag, Task, migration or data write is authorized.
+**Approval source:** explicit Product Owner approval on 2026-11-20 ([AIR-559 decision](https://trello.com/c/733sRAxu#comment-6b00b5d4f49dd64bcc597d54)), after [independent technical PASS](https://github.com/vladimino/iptv-watchlist/pull/829#pullrequestreview-5999341697). This accepts the identity-trust semantics and regular code delivery only; it authorizes no production run, backfill, flag, Task, migration or data write.
 **Related work:** [AIR-559](https://trello.com/c/733sRAxu), [AIR-549](https://trello.com/c/BgwRv3uw), [ADR 0166](0166-diary-rated-only-identity-bridge.md) (option B, deferred there), [ADR 0087](0087-rated-archive-film-admission.md), [ADR 0099](0099-canonical-film-person-d1-authority.md), [ADR 0133](0133-film-external-ids-producer-unit.md)
 **Supersedes:** None
 **Superseded by:** None
@@ -14,7 +14,7 @@
 
 Confirmed on 20 Nov 2026 by a read-only root-cause analysis recorded on the AIR-549 card (aggregated here, no id lists): 395 lids are published, 386 have a trusted canonical Letterboxd claim and **9 have none**, so marking one of those nine started returns `404 Unknown film` although the Film exists. For all nine the Ratings projection `ratings_view` holds the lid with `fact_key = tmdb-<n>` and the movie alias `tmdb_<n>` with the same key, and the canonical `tmdb` claim of that movie is trusted, non-conflicting and not a redirect source. The same gap will recur for any future Film whose lid reached the Ratings alias protocol but never a canonical claim.
 
-## Decision (proposed)
+## Decision
 
 1. **One narrow claim.** For an **existing** canonical Film only, the system may materialize **one** trusted, non-conflicting `letterboxd` external-id claim for a lid. It never creates a Film, alias, title, rating, membership or Started mark, and it never matches by title, year, slug or the watchlist flag.
 2. **Proof, all of it, read at write time by the writer's own planner and never supplied by the caller.** (a) The Film/Person marker is `d1`/`open` and the ratings domain is `d1`/`open`, and neither generation moves during the read. (b) The **current, authoritative** Ratings link: the facts link index maps `letterboxd:<lid>` and `tmdb:<n>` to the **same fact key**, whatever its form (a Diary-first link keeps its `lb-<lid>` key and later gains the movie alias on it, so the key is never derived from the movie id), no other alias carries that key, and the fact record under that key states the same lid and movie and is neither a redirect nor mid-migration. The `ratings_view` projection is **not** evidence (it keeps an alias after an unlink); it may only corroborate: a row of either alias that carries another key is a conflict, and a missing row is neither a conflict nor proof. (c) Exactly one trusted, non-conflicting canonical `tmdb` claim for `<n>` exists; its Film exists, is not a redirect source, `<n>` is not retired by the owner's retirement ledger, and the Film's `canonical_identity` is null or exactly `tmdb:<n>`. (d) No other Film claims the lid in any form, no untrusted or conflicting claim of the lid or the movie exists, and the Film has no other `letterboxd` claim, no second `tmdb` claim and no untrusted or conflicting claim of either scheme.
@@ -35,7 +35,7 @@ Not decided: any runtime fallback from the Started route to the Ratings alias (r
 
 ## Consequences
 
-The nine affected Films become markable without any reader change, and the rule closes the same gap for later Films. A trusted `letterboxd` claim now also exists for a Film whose lid equals its `letterboxd_short_code` alias; the claim's provenance names its basis, so a wrong claim is corrected by the existing owner-review and unlink routes, not by deleting rows. The Ratings projection becomes an input to a canonical write; the proof therefore re-reads it inside the same generation window and refuses on any ambiguity. Cost: one planner pass (about eight small reads) per candidate and at most one fenced batch.
+After separate producer activation and an owner-approved backfill, the affected Films become markable without any reader change, and the rule closes the same gap for later Films. A trusted `letterboxd` claim now also exists for a Film whose lid equals its `letterboxd_short_code` alias; the claim's provenance names its basis, so a wrong claim is corrected by the existing owner-review and unlink routes, not by deleting rows. The Ratings projection becomes an input to a canonical write; the proof therefore re-reads it inside the same generation window and refuses on any ambiguity. Cost: one planner pass (about eight small reads) per candidate and at most one fenced batch.
 
 ## Recovery and migration boundary
 
@@ -43,11 +43,11 @@ Code rollback leaves written claims in place. A claim written by mistake is corr
 
 ## Evidence
 
-- **Original decision:** not recorded (Proposed).
+- **Original decision:** 2026-11-20, explicit Product Owner approval ([AIR-559 decision](https://trello.com/c/733sRAxu#comment-6b00b5d4f49dd64bcc597d54)).
 - **Implementation:** dormant module `src/canonical-letterboxd-claim.js` and its offline tests (synthetic ids only), delivered by the implementation PR of AIR-559.
 - **Dated verification:** the read-only cohort analysis of 20 Nov 2026 on the AIR-549 card (aggregates only); no production write recorded.
 - **Uncertainty:** whether the Ratings alias of a lid is as authoritative as a verified admission receipt for every historical lid; the nine are expected to `pass`, which only a fresh private preflight can show.
 
 ## Follow-ups
 
-Owner decision on this record; the L3 plan and the backfill under [AIR-559](https://trello.com/c/733sRAxu); activation of the producer call sites; the owner's repeat acceptance of Started marks under [AIR-549](https://trello.com/c/BgwRv3uw).
+Owner decision recorded above; the L3 plan and the backfill under [AIR-559](https://trello.com/c/733sRAxu); activation of the producer call sites; the owner's repeat acceptance of Started marks under [AIR-549](https://trello.com/c/BgwRv3uw).

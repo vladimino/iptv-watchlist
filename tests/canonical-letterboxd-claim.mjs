@@ -1,4 +1,4 @@
-// AIR-559 (ADR 0184, Proposed): the trusted `letterboxd` claim of an existing canonical Film that the Ratings domain already ties to one TMDB movie (src/canonical-letterboxd-claim.js), on the sqlite3-CLI
+// AIR-559 (ADR 0184, Accepted; dormant): the trusted `letterboxd` claim of an existing canonical Film that the Ratings domain already ties to one TMDB movie (src/canonical-letterboxd-claim.js), on the sqlite3-CLI
 // D1 stand-in. SYNTHETIC ids only (no owner-private profile, no production id list). No Worker, R2, D1 or Cloudflare access.
 // Covered: the full proof (both authorities, one unambiguous Ratings alias, unique trusted TMDB ownership, no competing claim), every refusal writes nothing, a pass writes exactly one fenced receipted claim
 // and nothing else, idempotent replay and retry, dry run vs live, concurrency and the revision CAS, authority below `open` / held, `catalogStartedFilm` found afterwards with the canonical security rule
@@ -318,7 +318,7 @@ await raced('the Film loses its trusted tmdb claim after the plan',file=>assert.
 await raced('the Film gains a second trusted tmdb value after the plan',file=>assert.equal(sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('"+FID(1)+"','tmdb','5',1,0,NULL)").status,0));
 await raced('the Film trusted tmdb claim is downgraded after the plan',file=>assert.equal(sqlite(file,"UPDATE film_external_id SET trusted=0 WHERE film_id='"+FID(1)+"' AND scheme='tmdb'").status,0));
 
-// 10. Dormancy: the Worker bundle does not import the module yet (activation follows the owner's decision on ADR 0184).
+// 10. Dormancy: the Worker bundle does not import the module yet (producer activation is separate from the accepted ADR).
 {
  const worker=fs.readFileSync(path.join(SRC,'worker.js'),'utf8');
  assert.ok(!/canonical-letterboxd-claim/.test(worker),'src/worker.js does not import the claim module');

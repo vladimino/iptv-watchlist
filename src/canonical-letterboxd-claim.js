@@ -1,4 +1,4 @@
-// AIR-559 (ADR 0184, PROPOSED: not active until the owner accepts it). The trusted `letterboxd` external-id claim of a canonical Film that the Ratings domain has already tied to one TMDB movie.
+// AIR-559 (ADR 0184, Accepted; this module remains dormant until separately delivered producer activation). The trusted `letterboxd` external-id claim of a canonical Film that the Ratings domain has already tied to one TMDB movie.
 // WHY. `admitRatedFilm` keeps the verified Letterboxd short code only as the historical alias `letterboxd_short_code`, never as a trusted `letterboxd` claim (ADR 0166 option B was deferred), so
 // `catalogFilmIdentityBridge` / `catalogStartedFilm` answer `absent` for a published lid whose Film exists and whose Ratings alias is unambiguous (the AIR-549 acceptance 404 `Unknown film`).
 // WHAT. ONE targeted, fenced claim for an EXISTING Film, and nothing else: no Film is created, no alias, title, rating, membership or Started mark is touched, and no title/year/slug is ever used.
