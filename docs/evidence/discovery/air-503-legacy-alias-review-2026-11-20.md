@@ -2,7 +2,7 @@
 
 **Captured:** 20 November 2026 (UTC), read-only `SELECT` against production D1 `iptv` (`rows_written` 0, 426 rows read). No Worker GET, no TMDB call, no R2 read, no EPG, Discovery, prediction or ratings run, no flag change.
 **Used by:** [AIR-503](https://trello.com/c/t9fZCHLQ). Follows [the alias provenance impact record](air-503-alias-provenance-impact-2026-11-17.md) and the owner's natural-run verification of 20 November 2026 (EPG generations 512 to 515), which this record does not repeat. [ADR 0158](../../adr/0158-epg-title-alias-provenance.md).
-**Verdict:** the guard against false identities works; the recovery of correct legacy aliases has not started. Of the 222 pinned decisions, 51 have an active observation in the latest run; none of the 51 has an `anchor` or `failedDurations` (no revalidation outcome was ever recorded) and one has `movieTitles`. The 51 are a mixture that no single rule separates, so the owner decided on 20 November 2026: **reserve revalidation calls (this PR), then owner-review for what TMDB does not list (next PR)**.
+**Verdict:** the guard against false identities works; the recovery of correct legacy aliases has not started. Of the 222 pinned decisions, 51 have an active observation in the latest run; none of the 51 has an `anchor` or `failedDurations` (no revalidation outcome was ever recorded) and one has `movieTitles`. The 51 are a mixture that no single rule separates, so the owner decided on 20 November 2026: **revalidate those decisions before the candidates (this PR), then owner-review for what TMDB does not list (next PR)**.
 
 ## What was read
 
@@ -43,7 +43,7 @@ Why no deterministic rule: the same operation gives right and wrong answers. Dro
 
 ## What the owner decided and what this PR does
 
-Owner decision, 20 November 2026: reserve a bounded part of each chunk's TMDB calls for revalidating legacy `known_epg_alias` decisions without title provenance (this PR, no ADR change: it carries out the ADR 0158 recovery as designed), and put what TMDB does not list through owner review (next PR, after the owner has decided each row of the table below). Provenance still comes only from the movie-detail gate. No TMDB call per slot, no trust in an EPG title, no production write by hand.
+Owner decision, 20 November 2026: revalidate the legacy `known_epg_alias` decisions without title provenance (a bounded cohort of at most four per page) before the candidates that have no decision, and put what TMDB does not list through owner review (next PR, after the owner has decided each row of the table below). An earlier draft of this PR held back a quota of calls instead; review showed that a quota neither reserves the time nor the order, so the cohort goes first. Provenance still comes only from the movie-detail gate. No TMDB call per slot, no trust in an EPG title, no production write by hand.
 
 ## Owner-review table (51 rows)
 
