@@ -28,7 +28,7 @@ API shapes (`GET /api/started` `{ids}`, `POST /api/started` `{id, started}`), th
 
 ## Checks on the final checkout
 
-`npm ci`, `npm run test:all` (core 438 of 438 files, non-functional 35 of 35), `npm run build`, `git diff --check` and the timeless-documentation check (0 errors) passed. Four mutations each fail `tests/started-d1.mjs`: the row revision guard removed from the update, the marker guard removed from the commit batch, the marker re-read removed from the R2 branch, and the lost-reply check loosened to "any row at the next revision".
+`npm ci`, `npm run test:all` (core 440 of 440 files, non-functional 35 of 35, on the tree merged with `main` at `6a4af2b4`), `npm run build`, `git diff --check` and the timeless-documentation check (0 errors) passed. Four mutations each fail `tests/started-d1.mjs`: the row revision guard removed from the update, the marker guard removed from the commit batch, the marker re-read removed from the R2 branch, and the lost-reply check loosened to "any row at the next revision".
 
 Existing tests changed only where they pinned "the last migration is 0028 / schema 28": `tests/canonical-producer-chain.mjs`, `tests/canonical-producer-schema.mjs`, `tests/canonical-rated-admission-bundle.mjs`, `tests/canonical-rated-admission-producer.mjs`, `tests/migration-pattern-limit.mjs`. `tests/local-standins.mjs` and `scripts/local-dev.mjs` gain the explicit local flag `STARTED_DB_OPTIONAL` so a local stack without a D1 binding keeps serving `/api/started` from R2; production never sets it.
 
