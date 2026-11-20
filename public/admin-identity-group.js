@@ -35,15 +35,17 @@ async function gpRecover() {
   const receipt = await groupReceiptGet(pending.groupKey);
   gpLive.busy = false;
   if (!receipt.ok || !receipt.body || !Array.isArray(receipt.body.outcomes)) {
-    gpError(receipt.status === 404 ? 'Подтверждение этого набора не сохранилось: ничего не записано. Набор можно подтвердить заново.' : gpRefusal(receipt));
-    if (receipt.status === 404) { gpLive.pending = null; gpRemember(null); }
+    gpError(receipt.status === 404 ? 'Подтверждение этого набора пока не найдено в D1. Проверьте ещё раз позже или забудьте группу кнопкой выше: новая группа возможна только после этого.' : gpRefusal(receipt));
     gpPaint();
     return receipt;
   }
   const body = receipt.body;
   gpLive.pending = {...gpLive.pending, phase: 'stored'};
+  gpRemember(gpLive.pending);
   const open = body.outcomes.filter(item => item.outcome === 'pending').length;
-  gpLive.result = {state: body.outcomes.some(item => item.outcome === 'unknown') ? 'unknown' : open ? 'partial' : 'applied', outcomes: body.outcomes, readback: body};
+  // A terminal success is shown only for a PROVEN group (the receipt's barrier succeeded). Unproven stays unproven, handle kept, no replay.
+  const state = !body.complete ? 'unproven' : body.outcomes.some(item => item.outcome === 'unknown') ? 'unknown' : open ? 'partial' : 'applied';
+  gpLive.result = {state, outcomes: body.outcomes, readback: body};
   if (body.complete && body.confirmation && open && !body.outcomes.some(item => item.outcome === 'unknown' || item.outcome === 'missing')) {
     gpLive.confirmation = body.confirmation; gpLive.members = body.outcomes.map(item => ({key: item.key, index: item.index, plan: null}));
   } else { gpLive.confirmation = null; gpLive.members = null; }
@@ -129,8 +131,9 @@ async function gpConfirm() {
   const preview = gpLive.preview;
   if (!preview || !preview.available || gpLive.busy || gpLive.confirmation || !gpLive.selected.size) return null;
   gpError('');
-  if (gpLive.pending && gpLive.pending.phase === 'stored') { gpError('Сначала проверьте результат прошлой группы или забудьте её: кнопки выше.'); return null; }
-  if (!gpLive.groupKey) gpLive.groupKey = groupIdempotencyKey();
+  // Any unfinished group blocks a fresh confirmation: it must be proven terminal or deliberately forgotten first. No same-key resubmit from here.
+  if (gpLive.pending) { gpError('Есть незавершённая группа. Проверьте её результат или забудьте её кнопками выше: новая группа возможна только после этого.'); return null; }
+  gpLive.groupKey = groupIdempotencyKey();
   gpLive.pending = {groupKey: gpLive.groupKey, tmdbId: preview.tmdbId};
   gpRemember(gpLive.pending);
   gpLive.busy = true; gpPaint();
@@ -154,15 +157,17 @@ async function gpExecute() {
   gpLive.busy = false;
   if (result.ok && result.body && Array.isArray(result.body.outcomes)) {
     gpLive.confirmation = null; gpLive.members = null;
-    // A 200 is not a terminal state: only a fully applied group is forgotten. unknown, partial and refused keep the group key for a read-only check.
-    if (result.body.state === 'applied') { gpLive.pending = null; gpLive.groupKey = null; gpRemember(null); }
+    if (gpLive.pending) { gpLive.pending = {...gpLive.pending, phase: 'stored'}; gpRemember(gpLive.pending); }
     gpPending();
     gpLive.result = {state: result.body.state, outcomes: result.body.outcomes};
     if (gpLive.pending) gpLive.pending = {...gpLive.pending, phase: 'stored'};
     gpEl('group-accept').checked = false;
     // Readback: the stored per-key children, read from D1, not the answer above.
     const receipt = await groupReceiptGet(confirmation.idempotencyKey);
-    if (receipt.ok && receipt.body && Array.isArray(receipt.body.outcomes)) gpLive.result = {state: result.body.state, outcomes: result.body.outcomes, readback: receipt.body};
+    if (receipt.ok && receipt.body && Array.isArray(receipt.body.outcomes)) gpLive.result = {state: receipt.body.complete ? result.body.state : 'unproven', outcomes: result.body.outcomes, readback: receipt.body};
+    // Forgotten only when the D1 readback PROVES the group and every child is applied; an unread or unproven group keeps its handle.
+    if (receipt.ok && receipt.body && receipt.body.complete === true && receipt.body.outcomes.every(item => item.outcome === 'applied')) { gpLive.pending = null; gpLive.groupKey = null; gpRemember(null); }
+    gpPending();
     await gpPreview(true);
     gpPaint();
     gpEl('group-result').focus();
@@ -190,8 +195,8 @@ function gpStart() {
   gpEl('group-execute-button').addEventListener('click', () => { gpExecute(); });
   gpEl('group-cancel-button').addEventListener('click', gpCancel);
   gpEl('group-recover-button').addEventListener('click', () => { gpRecover(); });
-  gpEl('group-recover-dismiss').addEventListener('click', () => { if (gpLive.busy) return; gpLive.pending = null; gpLive.groupKey = null; gpRemember(null); gpPending(); gpPaint(); });
-  gpLive.pending = gpRecall(); gpPending();
+  gpEl('group-recover-dismiss').addEventListener('click', () => { if (gpLive.busy) return; gpLive.pending = null; gpLive.groupKey = null; gpLive.confirmation = null; gpLive.members = null; gpLive.result = null; gpEl('group-accept').checked = false; gpRemember(null); gpPending(); gpPaint(); });
+  gpLive.pending = gpRecall(); gpLive.groupKey = gpLive.pending ? gpLive.pending.groupKey : null; gpPending();
   if (gpLive.pending && !gpEl('group-tmdb').value) gpEl('group-tmdb').value = gpLive.pending.tmdbId;
   gpEl('group-accept').addEventListener('change', gpPaint);
   gpEl('group-basis').addEventListener('input', gpPaint);

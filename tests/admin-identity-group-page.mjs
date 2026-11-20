@@ -100,7 +100,9 @@ assert.match(run("groupRowsHtml(hostile, new Set(['<script>k</script>|2001']), t
     'group-receipt': () => ({ok: true, status: 200, json: async () => ({complete: true, outcomes: [{index: 1, outcome: 'applied'}]})}),
   };
   const bodies = {};
+  const sessionStore = new Map();
   const page = vm.createContext({URLSearchParams, JSON, Math, Array, Set, Uint8Array, String, Promise, Date, crypto: webcrypto, location: {search: '?tmdbId=500'},
+    sessionStorage: {getItem: key => sessionStore.get(key) ?? null, setItem: (key, value) => sessionStore.set(key, value), removeItem: key => sessionStore.delete(key)},
     document: {querySelector: selector => elements.get(selector.slice(1)) || null},
     fetch: async (url, init) => { const route = String(url).split('/').pop().split('?')[0]; requests.push(route); if (init && init.body) bodies[route] = JSON.parse(init.body); return answers[route](bodies[route]); }});
   vm.runInContext(['src/admin/identity-group-client.js', 'src/admin/identity-group-view.js', 'public/admin-identity-group.js'].map(file => fs.readFileSync(file, 'utf8')).join('\n'), page);
@@ -160,15 +162,24 @@ assert.match(run("groupRowsHtml(hostile, new Set(['<script>k</script>|2001']), t
   const lostKey = bodies['group-confirm'].idempotencyKey;
   assert.match(lostKey, /^group-[0-9a-f]{36}$/, 'the key was made before the POST');
   assert.equal(requests[requests.length - 1], 'group-receipt', 'after an unknown outcome the page only READS the stored group');
-  assert.match(el('group-error').textContent, /ничего не записано/, 'a missing group is reported as not written');
-  await attempt();
-  assert.equal(bodies['group-confirm'].idempotencyKey, lostKey, 'a manual second submit reuses the SAME group key (idempotent), not an unrelated group');
-  // The confirm landed in D1 but the response was lost: the receipt proves it and offers the ORIGINAL scope for a replay.
-  const original = {capability: 'discovery_identity_group_assign', idempotencyKey: lostKey, ids: ['k00']};
-  answers['group-receipt'] = () => ({ok: true, status: 200, json: async () => ({complete: true, groupKey: lostKey, confirmation: original, outcomes: [{key: 'k00', index: 1, state: 'approved', outcome: 'pending'}]})});
+  assert.match(el('group-error').textContent, /не найдено в D1/, 'a group not (yet) found is reported honestly, not as proven unwritten');
+  // Review P1: an unfinished group blocks every fresh confirmation, including after a reload; its handle is never overwritten.
+  const kept = sessionStore.get('iptv-group-pending');
   postsBefore = count('group-confirm');
   await attempt();
-  assert.equal(count('group-confirm'), postsBefore + 1);
+  assert.equal(count('group-confirm'), postsBefore, 'zero new confirm POSTs while a group is unfinished');
+  assert.equal(sessionStore.get('iptv-group-pending'), kept, 'the stored group handle is unchanged');
+  assert.match(el('group-error').textContent, /незавершённая группа/);
+  el('group-recover-dismiss').fire('click');
+  assert.equal(sessionStore.has('iptv-group-pending'), false, 'a deliberate dismissal forgets it');
+  assert.equal(el('group-staged').hidden, true, 'and clears any staged scope');
+  // The confirm landed in D1 but the response was lost: the receipt proves it and offers the ORIGINAL scope for a replay.
+  postsBefore = count('group-confirm');
+  answers['group-receipt'] = () => ({ok: true, status: 200, json: async () => ({complete: true, confirmation: {capability: 'discovery_identity_group_assign', idempotencyKey: bodies['group-confirm'].idempotencyKey, ids: ['k00']}, outcomes: [{key: 'k00', index: 1, state: 'approved', outcome: 'pending'}]})});
+  await attempt();
+  assert.equal(count('group-confirm'), postsBefore + 1, 'after the dismissal a fresh group starts');
+  const original = {capability: 'discovery_identity_group_assign', idempotencyKey: bodies['group-confirm'].idempotencyKey, ids: ['k00']};
+  assert.notEqual(original.idempotencyKey, lostKey, 'a deliberately forgotten group is replaced by an unrelated one');
   assert.equal(el('group-staged').hidden, false, 'a recovered, proven group can be continued by the owner');
   answers['group-execute'] = () => { throw new Error('network lost'); };
   const executes = count('group-execute');
@@ -265,6 +276,39 @@ assert.match(run("groupRowsHtml(hostile, new Set(['<script>k</script>|2001']), t
   const done = await session({'group-receipt': () => ({ok: true, status: 200, json: async () => ({complete: true, confirmation, outcomes: [{key: 'k0', index: 1, state: 'receipt', outcome: 'applied'}]})})}, {stored: JSON.stringify({groupKey: key, tmdbId: '500'})});
   done.el('group-recover-button').fire('click'); await done.flush();
   assert.equal(done.store.has('iptv-group-pending'), false, 'forgotten only after a proven terminal state');
+  // Review (third): a pending group A survives a reload and blocks a fresh group B until proven terminal or deliberately dismissed.
+  const keyA = 'group-' + 'c'.repeat(36);
+  const answersB = {...base, 'group-receipt': () => ({ok: true, status: 200, json: async () => ({complete: true, confirmation, outcomes: [{key: 'k0', index: 1, state: 'approved', outcome: 'pending'}, {key: 'k1', index: 2, state: 'receipt', outcome: 'applied'}]})})};
+  const tryB = async page => {
+    page.el('group-form').fire('submit'); await page.flush();
+    for (const key of ['k0', 'k1']) page.el('group-list').fire('change', {target: {getAttribute: () => key, checked: true}});
+    page.el('group-basis').value = 'b'; page.el('group-basis').fire('input'); page.el('group-accept').checked = true; page.el('group-accept').fire('change');
+    page.el('group-confirm-form').fire('submit'); await page.flush();
+  };
+  const storedA = JSON.stringify({groupKey: keyA, tmdbId: '500'});
+  const reloadA = await session(answersB, {stored: storedA});
+  await tryB(reloadA);
+  assert.equal(reloadA.requests.filter(route => route === 'group-confirm').length, 0, 'after a reload, zero POSTs for a new group while A is unfinished');
+  assert.equal(JSON.parse(reloadA.store.get('iptv-group-pending')).groupKey, keyA, "A's stored handle is unchanged");
+  reloadA.el('group-recover-button').fire('click'); await reloadA.flush();
+  assert.equal(JSON.parse(reloadA.store.get('iptv-group-pending')).phase, 'stored', 'the readback phase is persisted, not only in memory');
+  const second = await session(answersB, {stored: reloadA.store.get('iptv-group-pending')});
+  await tryB(second);
+  assert.equal(second.requests.filter(route => route === 'group-confirm').length, 0, 'after the readback and another reload the guard still holds');
+  assert.equal(JSON.parse(second.store.get('iptv-group-pending')).groupKey, keyA);
+  second.el('group-recover-dismiss').fire('click');
+  assert.equal(second.store.has('iptv-group-pending'), false);
+  assert.equal(second.el('group-staged').hidden, true, 'a forgotten group cannot be executed through a staged action');
+  await tryB(second);
+  assert.equal(second.requests.filter(route => route === 'group-confirm').length, 1, 'after the dismissal B can start');
+  assert.notEqual(JSON.parse(second.store.get('iptv-group-pending')).groupKey, keyA);
+  // Review (third) P2: an unproven receipt is never shown as success, keeps the handle and offers no replay.
+  const unproven = await session({'group-receipt': () => ({ok: true, status: 200, json: async () => ({complete: false, confirmation: null, outcomes: [{key: 'k0', index: 1, state: 'receipt', outcome: 'applied'}, {key: 'k1', index: 2, state: 'receipt', outcome: 'applied'}]})})}, {stored: storedA});
+  unproven.el('group-recover-button').fire('click'); await unproven.flush();
+  assert.doesNotMatch(unproven.el('group-result').innerHTML, /Все выбранные наблюдения записаны/, 'no success claim without a proven group');
+  assert.match(unproven.el('group-result').innerHTML, /Группа не доказана/);
+  assert.equal(unproven.store.has('iptv-group-pending'), true, 'the handle is kept');
+  assert.equal(unproven.el('group-staged').hidden, true, 'and no replay is offered');
   void IDS;
 }
 
