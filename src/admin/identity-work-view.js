@@ -41,6 +41,8 @@ function iwRowHtml(row){
  if(row.film&&row.film.filmId){
   const proof=row.film.proof==='film_rated_admission'?'подтверждено admission в D1 по архиву и коду':'канонический фильм';
   lines.push('<p class="iw-film"><b>Фильм.</b> <a class="limbo-link" href="/admin?kind=film&amp;id='+encodeURIComponent(row.film.filmId)+'">'+iwEscape(row.film.filmId)+'</a> <span class="muted">('+proof+')</span></p>');
+ const groupId=row.film&&typeof row.film.filmId==='string'?/^tmdb_([1-9]\d{0,11})$/.exec(row.film.filmId):null;
+ if(groupId)lines.push('<p class="iw-group"><a class="limbo-link" href="/admin/identity/group?tmdbId='+groupId[1]+'">Подобрать группу наблюдений EPG для этого фильма</a> <span class="muted">(откроется отдельная страница, ничего не записывается)</span></p>');
  }else if(row.type==='letterboxd_rated_candidate'||row.type==='epg_observation')lines.push('<p class="iw-film muted">Фильм не подтверждён: ссылка на каталог не показывается без доказательства.</p>');
  const hints=(row.observedHints||[]).map(hint=>'<li>'+iwEscape(hint.kind==='same_short_code'?'тот же короткий код в другом архиве':'то же название и год')+': <code>'+iwEscape(hint.ref)+'</code></li>');
  if(hints.length)lines.push('<div class="iw-hints"><p class="muted">Возможные совпадения среди строк этого ответа. Не доказано, фильм не назначен:</p><ul>'+hints.join('')+'</ul></div>');

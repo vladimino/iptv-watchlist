@@ -10,7 +10,7 @@ import {OBS_GATE_COPY} from '../src/admin/discovery-recovery-view.js';
 // Pure and offline. In the Worker it is consumed only by the discovery recovery adapter, scoped; no other read wires it.
 const source = fs.readFileSync('src/domain/discovery-recovery.js', 'utf8');
 assert.doesNotMatch(source, /\bfetch\b|BUCKET|cloudflare:|node:|\bimport\b|\brequire\(|Date\.now|new Date\(\)|Math\.random|crypto/);
-assert.match(fs.readFileSync('build.mjs', 'utf8'), /scoped\('src\/domain\/discovery-recovery\.js','DiscoveryRecovery'\)\+'\\n'\+fs\.readFileSync\('src\/admin\/discovery-recovery\.js','utf8'\)/);
+assert.match(fs.readFileSync('build.mjs', 'utf8'), /scoped\('src\/domain\/discovery-recovery\.js','DiscoveryRecovery'\)\+'\\n'\+scopedImports\('src\/domain\/discovery-identity-group\.js','DiscoveryIdentityGroup','[^']*'\)\+'\\n'\+fs\.readFileSync\('src\/admin\/discovery-recovery\.js','utf8'\)/);
 for (const file of ['src/worker.js', 'src/admin/limbo.js', 'src/admin/health.js', 'src/admin/actions-fixture.js', 'public/admin-actions.js', 'src/discovery.js']) {
   assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /DiscoveryRecovery\.|assessObservationRecovery/, file + ' must not wire the assessment');
 }
