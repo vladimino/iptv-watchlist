@@ -104,7 +104,7 @@ const LetterboxdDiaryIdentity=(()=>{
   // A link intent (`linking`, or a `link_failed` bridge) is a local repair: it is served at once, before source retries, whatever its source-attempt count or slug.
   const repair=entry=>entry&&LINK_REASONS.has(entry.reason);
   const claimDue=entry=>entry&&entry.reason===CLAIM_REASON&&TMDB.test(String(entry.tmdb||''))&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now;
-  const due=Object.entries(stored.films).filter(([lid,entry])=>!onPage.has(lid)&&entry&&(repair(entry)||claimDue(entry)||typeof entry.slug==='string'&&SLUG.test(entry.slug)&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now))
+  const due=Object.entries(stored.films).filter(([lid,entry])=>!onPage.has(lid)&&entry&&(claimDue(entry)||(repair(entry)||typeof entry.slug==='string'&&SLUG.test(entry.slug)&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now)))
    .sort(([,x],[,y])=>(repair(x)||claimDue(x))!==(repair(y)||claimDue(y))?((repair(x)||claimDue(x))?-1:1):String(x.nextAttemptAt)<String(y.nextAttemptAt)?-1:1).slice(0,STEP_LIMIT*2).map(([lid,entry])=>({lid,slug:entry.slug,onPage:false}));
   const wanted=[...page,...due];
   if(!wanted.length)return {labels,counts};
