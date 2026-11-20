@@ -30,6 +30,31 @@ flowchart TD
     stale -->|no| reject
 ```
 
+## Accepted design: the run checkpoint in D1 ([ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md), Accepted, not implemented)
+
+Today the run checkpoint `sync.json` and the ingest status `watchlist-ingest.json` are R2 objects written by unconditional PUT after a separate step-lease read (the first diagram). The accepted design moves both behind their own marker. The diagram below is the **future, not implemented** write path; the shaded nodes do not exist in production, and with the marker `r2` or absent the dashed arrow is the only path.
+
+```mermaid
+flowchart TD
+    step["EPG step holding the step lease"]
+    batch["One D1 batch per save:<br/>1 authority fence (d1, open, generation)<br/>2 step fence (mode revision, live lease)<br/>3 run compare-and-swap (run_id, revision)<br/>4 body and changed film rows"]
+    run[("Proposed D1 checkpoint:<br/>run row, body chunks, film rows")]
+    ingest[("Proposed D1 ingest status")]
+    done["completeRun, the only completion route:<br/>queue attempted, then one batch:<br/>stage complete, film rows removed,<br/>certificate, pause clear"]
+    cert[("published_epg_authority:<br/>finalized_run_id")]
+    flush["Event flushes after the batch"]
+    r2["R2 sync.json and watchlist-ingest.json:<br/>authority today (marker r2),<br/>frozen image after activation"]
+    step --> batch --> run
+    batch -.->|"run creation also records ingest success"| ingest
+    run --> done --> cert
+    done --> flush
+    step -.->|"marker r2 or absent: unconditional PUT"| r2
+    classDef proposed fill:#fff3de,stroke:#a56c2b,color:#42300e
+    class batch,run,ingest,done proposed
+```
+
+A save is refused, and writes nothing, when the authority generation, the step lease, the run revision or the stage order does not match; a run can reach `complete` only through the one completion operation, which both the seal route and the single-call route use, so the order queue attempted, then complete, then certificate holds on every route. Completion, certificate and pause clear are one batch only in `d1` mode; the certificate update is conditional so a non-matching certificate still lets the run complete and the hourly repair certifies it. In `r2` mode the order stays: complete in R2, certificate, then flushes.
+
 Prediction scoring does not read this publication as permission to run. Hot and cold order use a completed snapshot of these shows, or last-known completed priority for 36 hours, and an unsealed generation does not block the prediction queue ([ADR 0154](../adr/0154-prediction-eligibility-independent-of-epg.md)).
 
 ## Film availability lifecycle

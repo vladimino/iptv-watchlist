@@ -17,6 +17,7 @@ node .claude/skills/github-mermaid-qa/check.cjs "https://github.com/<owner>/<rep
 ```
 
    `require('playwright')` works from any directory; do not run `playwright install`. The script waits for GitHub's `viewscreen.githubusercontent.com` iframes, reads each diagram's SVG, and prints one JSON line per diagram (`ok`, size, label count, `textOutsideSvg`, `error`), one line per needle (which diagram holds it) and a final `PASS`/`FAIL` verdict with the exit code.
+   **A 503 is not a verdict.** github.com blob pages return `503` for several minutes at a time (seen 20 Nov 2026, also to `curl`, while the repository root answered 200) and then recover. The script retries a non-200 document up to 5 times with growing pauses (`QA_ATTEMPTS`, `QA_PAUSE_S` change that). If it still ends `FAIL` with `httpStatus` 503, run it again a few minutes later (a Monitor until-loop, not chained sleeps) before writing anything about a gap. Only after a repeat on a later attempt fails too, say in the PR which commit, which status and when, and that the reviewer must repeat it. Do not open a PR with "not done" after a single failed run.
 3. `PASS` means: every diagram on the page rendered an SVG, none shows a Mermaid error, no label sits outside its SVG, and each needle is in a rendered diagram. A diagram you did not change also failing is a real finding (report it, it may be older).
 
 ## What it does not do
