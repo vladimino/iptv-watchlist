@@ -49,7 +49,7 @@ sequenceDiagram
                 MCP-->>Client: Manifest of new films, drained counts, profile, contract, epoch
                 loop Until every selected manifest film is settled
                     opt Model call may be long
-                        Client->>MCP: prediction_heartbeat, before the call and at least every 10 minutes
+                        Client->>MCP: prediction_heartbeat, before the call and at least every 5 minutes
                         MCP->>Queue: Renew lease, same ownership epoch
                         MCP-->>Client: expiresAt and epoch
                     end
