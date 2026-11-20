@@ -1409,6 +1409,9 @@ export const FILES={
   "suite": "core",
   "note": "LARGE_ANSWER selects quote mode so large values stay correct. It is not a suite speed gate."
  },
+ "started-d1.mjs": {
+  "suite": "core"
+ },
  "started.mjs": {
   "suite": "core"
  },
