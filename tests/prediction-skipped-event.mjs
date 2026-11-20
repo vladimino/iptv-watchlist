@@ -7,7 +7,10 @@ import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 const w=await flowWorld({films:8});assert.equal((await w.api('queue/reconcile',{})).status,200);
 const records=w.records,env=w.env,ctx=w.ctx;ctx.env=env;
 let blocked=()=>false;
-{const bucket=env.BUCKET,put=bucket.put;bucket.put=async(key,value,options)=>{if(blocked(key))throw new Error('storage outage');return put.call(bucket,key,value,options);};
+let lostAck=()=>false,headDown=false;
+{const bucket=env.BUCKET,put=bucket.put,head=bucket.head;
+ bucket.put=async(key,value,options)=>{if(blocked(key,options))throw new Error('storage outage');const saved=await put.call(bucket,key,value,options);if(lostAck(key))throw new Error('acknowledgement lost');return saved;};
+ bucket.head=async key=>{if(headDown)throw new Error('head outage');return head.call(bucket,key);};
  bucket.delete=async key=>{records.delete(key);};
  bucket.list=async({prefix=''})=>({objects:[...records.keys()].filter(key=>key.startsWith(prefix)).map(key=>({key})),truncated:false});}
 const call=code=>vm.runInContext(code,ctx);
@@ -104,6 +107,24 @@ assert.equal(filmTables(),state0,'a skipped start changes no run, lease or queue
  blocked=key=>key.startsWith('events/items/')||key===OUTBOX;await start('req-dual-replay');blocked=()=>false;
  assert.equal(records.has(STOP+'skipped-req-dual-replay.json'),false,'the unindexed record was removed again');assert.equal(skipped().some(e=>e.requestId==='req-dual-replay'),false);
  await start('req-dual-replay');assert.equal(skipped().filter(e=>e.requestId==='req-dual-replay').length,1,'a replay after recovery records it exactly once');assert.deepEqual(orphans(),[]);
+ // Review of PR #805, round 3: ambiguous journal outcomes must never lead to a second journal key for one request id.
+ const itemKeys=id=>[...records.keys()].filter(k=>k.startsWith('events/items/')&&k.endsWith('-enrichment-skipped-'+id+'.json'));
+ const replayOnce=async id=>{await new Promise(r=>setTimeout(r,25));const r=await start(id);assert.equal(r.data.status,'already_running');};
+ // (a) index down; park and journal put succeed; EVERY `delivered` marker write fails: the item exists, the identity record is kept (never deleted), the replay reuses it
+ {const id='req-amb-marker',rk=STOP+'skipped-'+id+'.json';
+  blocked=(key,options)=>key===OUTBOX||(key===rk&&!options?.onlyIf);const first=await start(id);blocked=()=>false;assert.equal(first.data.status,'already_running');
+  const before=itemKeys(id);assert.equal(before.length,1,'journaled once');const parked=records.get(rk);assert.ok(parked&&!parked.delivered,'the identity record is kept, marker not written');
+  await replayOnce(id);assert.deepEqual(itemKeys(id),before,'the replay after recovery wrote no second journal key');assert.equal(records.get(rk).delivered,true,'the replay completed the marker');assert.equal(skipped().filter(e=>e.requestId===id).length,1);}
+ // (b) index down; the journal put PERSISTS but its acknowledgement is lost (the write looks failed): a head proves the item present, so the record is kept and marked, never deleted
+ {const id='req-amb-lostack',rk=STOP+'skipped-'+id+'.json';
+  blocked=key=>key===OUTBOX;lostAck=key=>key.startsWith('events/items/')&&key.endsWith('-enrichment-skipped-'+id+'.json');const first=await start(id);blocked=()=>false;lostAck=()=>false;assert.equal(first.data.status,'already_running');
+  const before=itemKeys(id);assert.equal(before.length,1);assert.equal(records.get(rk)?.delivered,true,'the item exists, so the record is kept and marked delivered');
+  await replayOnce(id);assert.deepEqual(itemKeys(id),before,'one journal key after the replay');}
+ // (c) index down; the journal put fails AND the head fails: the outcome is unknown, the record is kept (replay-safe); a replay after recovery reuses its `at`
+ {const id='req-amb-unknown',rk=STOP+'skipped-'+id+'.json';
+  blocked=key=>key===OUTBOX||key.startsWith('events/items/');headDown=true;const first=await start(id);blocked=()=>false;headDown=false;assert.equal(first.data.status,'already_running');
+  const kept=records.get(rk);assert.ok(kept&&!kept.delivered,'an unknown outcome keeps the identity record');assert.equal(itemKeys(id).length,0);
+  await replayOnce(id);assert.equal(itemKeys(id).length,1,'the replay journals it once');assert.equal(skipped().find(e=>e.requestId===id).at,kept.event.at,'with the identity of the first attempt');}
  // the park alone fails after the index entry: journaled directly, the entry is `absent` and leaves the index at the next sweep
  blocked=key=>key===STOP+'skipped-req-park-down.json';const pd=await start('req-park-down');blocked=()=>false;assert.equal(pd.data.status,'already_running');
  assert.equal(skipped().some(e=>e.requestId==='req-park-down'),false,'a failed park writes no journal item (no identity to deduplicate on)');assert.deepEqual(orphans(),[]);

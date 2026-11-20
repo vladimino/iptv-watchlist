@@ -1073,9 +1073,11 @@ async function clearEventOutbox(env,key){
 }
 // Order is the guarantee (review of PR #805): the outbox index entry is written BEFORE the record is parked, so a parked record never exists without an entry that finds it and a failure of both the
 // journal and the index cannot orphan a stored record. The parked record is also the request's idempotency identity (it holds `at`, which is part of the journal key): no journal item is ever written for
-// a request whose record is not parked, so a replay of one request id can never produce a second item. If the index cannot be written the record is still parked and delivered once; when that delivery
-// fails the record is deleted again (never left unindexed), so the Event is lost only when the journal AND the index are both down (a stated limitation, ADR 0180). A park that fails after the index
-// entry writes nothing: the entry, whose record is `absent`, leaves the index at the next sweep.
+// a request whose record is not parked, and a record whose journal outcome is not KNOWN to be absent is never deleted, so a replay of one request id always reuses the same `at` and can never create a second
+// item. The journal write and the `delivered` marker are separate steps: a journal item that exists counts as delivered even when the marker cannot be written (the next sweep or a replay rewrites the same
+// item and marks it). If the index cannot be written the record is parked and delivered once; it is deleted again only when a `head` of the journal key proves the item absent. An unknown outcome
+// (the head fails too) keeps the record, which is replay-safe. The Event is lost only when the journal AND the index are both down (a stated limitation, ADR 0180). A park that fails after the index entry writes
+// nothing: the entry, whose record is `absent`, leaves the index at the next sweep.
 async function recordSkippedStart(env,{requestId,body,holder}){
  try{
   const id=safeRequestId(requestId)||crypto.randomUUID(),key=SKIPPED_EVENT_PREFIX+id+'.json';
@@ -1088,10 +1090,18 @@ async function recordSkippedStart(env,{requestId,body,holder}){
    catch{return false;}
   }
   if(record.delivered){if(indexed)await clearEventOutbox(env,key);return true;}
-  const written=await flushStopEvent(env,record,key);
-  if(written){if(indexed)await clearEventOutbox(env,key);return true;}
-  if(created&&!indexed){try{await env.BUCKET.delete(key);}catch{/* an unindexed record that cannot be removed is the one residual case, see ADR 0180 */}}
-  return false;
+  let journaled=false;
+  for(let attempt=0;attempt<3&&!journaled;attempt++){try{await writeEvent(env,record.event);journaled=true;}catch{/* tried again, then probed below */}}
+  if(!journaled&&created&&!indexed){
+   let present=null;try{present=!!await env.BUCKET.head(removalEventKey(record.event));}catch{present=null;}
+   if(present===false){try{await env.BUCKET.delete(key);}catch{/* an unindexed record that cannot be removed is replay-safe: it keeps its `at` */}}
+   else if(present===true)journaled=true;
+  }
+  if(!journaled)return false;
+  let marked=false;
+  for(let attempt=0;attempt<3&&!marked;attempt++){try{record.delivered=true;await saveJSON(env,key,record);marked=true;}catch{/* the item exists; a sweep or a replay marks it */}}
+  if(marked&&indexed)await clearEventOutbox(env,key);
+  return true;
  }catch{return false;}
 }
 // The read side of the outbox: counts only, one small object, no write.
