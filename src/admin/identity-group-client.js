@@ -24,6 +24,27 @@ async function groupGet(path, options = {}) {
   catch { return {ok: false, status: 0, error: 'network', body: null}; }
 }
 
+// Two more read-only GETs for the start of the workflow (no id needed): a bounded page of the EPG worklist and a catalogue search by
+// title. Both are existing admin routes; the page never writes through them and never treats a title or a hint as a confirmed id.
+async function groupGetUrl(url, options = {}) {
+  const fetchImpl = options.fetch || globalThis.fetch;
+  try { return await groupRead(await fetchImpl(url, {headers: {Accept: 'application/json'}, credentials: 'same-origin'})); }
+  catch { return {ok: false, status: 0, error: 'network', body: null}; }
+}
+
+const GROUP_QUEUE_LIMIT = 10;
+const GROUP_SEARCH_LIMIT = 10;
+
+function groupQueueGet(options = {}) {
+  let url = '/api/admin/identity-work?type=epg_observation&limit=' + GROUP_QUEUE_LIMIT;
+  if (options.cursor) url += '&cursor=' + encodeURIComponent(options.cursor) + (options.pin ? '&pin=' + encodeURIComponent(options.pin) : '');
+  return groupGetUrl(url, options);
+}
+
+function groupFilmSearchGet(query, options = {}) {
+  return groupGetUrl('/api/admin/films?q=' + encodeURIComponent(query) + '&limit=' + GROUP_SEARCH_LIMIT, options);
+}
+
 function groupPreviewGet(tmdbId, options = {}) {
   return groupGet('group-preview?tmdbId=' + encodeURIComponent(tmdbId), options);
 }

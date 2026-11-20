@@ -443,3 +443,5 @@
 .iw-more[hidden],.iw-inline[hidden],.iw-section [hidden]{display:none}
 .iw-section button:focus-visible,.iw-section select:focus-visible,.iw-section input:focus-visible,.iw-section summary:focus-visible,.iw-section a:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
 @media(max-width:800px){.iw-form{flex-direction:column;align-items:stretch}.iw-actions{flex-direction:column}.iw-actions .admin-refresh,.iw-actions .admin-more{width:100%}.iw-inline{display:block;width:100%;margin:8px 0 0}}
+/* AIR-131: the start of the group page (worklist, title search) and the entry link of the identity queue. */
+.group-picks{list-style:none;margin:8px 0;padding:0;display:grid;gap:8px}.group-picks .admin-hit{overflow-wrap:anywhere}.group-start{margin:0 0 20px}.group-start h3{margin:0 0 6px;font-size:16px}.group-advanced{margin:12px 0}.iw-group-entry{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:10px 0 0}

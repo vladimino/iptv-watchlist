@@ -96,7 +96,7 @@ Lane order is `film`, `epg_observation`, `letterboxd_rated_candidate`. Inside a 
 
 ## Group entry link
 
-A row whose `film.filmId` is `tmdb_<digits>` carries a link to `/admin/identity/group?tmdbId=<digits>` ([ADR 0181](../../adr/0181-owner-confirmed-group-assign-of-selected-observations.md)). The link is navigation only: the queue route stays read-only, its response shape is unchanged and no group candidate is read by the queue.
+The heading of `/admin/identity` carries a permanent link «Открыть групповую идентификацию» to `/admin/identity/group` (a plain anchor, not part of the queue read). The group page reads this queue itself, `type=epg_observation`, `limit=10`, as a bounded and partial worklist; that read adds no parameter or field to the route. A row whose `film.filmId` is `tmdb_<digits>` carries a link to `/admin/identity/group?tmdbId=<digits>` ([ADR 0181](../../adr/0181-owner-confirmed-group-assign-of-selected-observations.md)). The link is navigation only: the queue route stays read-only, its response shape is unchanged and no group candidate is read by the queue.
 
 ## Registry
 
