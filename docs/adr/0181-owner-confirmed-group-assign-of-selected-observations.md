@@ -1,9 +1,9 @@
 # ADR 0181: Owner-confirmed group assign of up to ten explicitly selected EPG observations to one movie
 
-**Status:** Proposed  
-**Original decision date:** unknown (awaiting owner decision)  
+**Status:** Accepted  
+**Original decision date:** 2026-11-20  
 **Recorded at:** 2026-11-20  
-**Approval source:** not documented (owner gate required before implementation, [AIR-131](https://trello.com/c/0WtLPRnH))  
+**Approval source:** [explicit Product Owner acceptance of all five ADR 0181 choices in AIR-131, 2026-11-20](https://trello.com/c/0WtLPRnH#comment-6afffb58df182f916d6bec14), following [independent PASS on PR #807](https://github.com/vladimino/iptv-watchlist/pull/807#issuecomment-7033627137)  
 **Related work:** [AIR-131](https://trello.com/c/0WtLPRnH), [AIR-65](https://trello.com/c/MKb4JMXi), [AIR-132](https://trello.com/c/3AXbSoHe), [ADR 0080](0080-discovery-identity-correction.md), [ADR 0170](0170-unified-identity-work-inventory.md), [ADR 0178](0178-identity-correction-revoke-event-contract.md)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -21,7 +21,7 @@ Audit of `main` at 648800c2 (read-only; no production access):
 - Every `DiscoveryAuthority.ownerDecision` advances `discovery_authority.generation` (the intent moving to `running` and the commit each move it) and needs a live lease (TTL 90 seconds). A group run therefore moves the generation by its own writes. A revoked owner assign leaves a targeted fence for `(observation, tmdbId)` ([ADR 0178](0178-identity-correction-revoke-event-contract.md)).
 - The only owner correction stored in production is the AIR-498 reject; no group has ever been confirmed.
 
-## Decision (proposed)
+## Decision
 
 A group is a **convenience over single-key owner writes, not a new authority**: each selected key is written by the existing fenced writer and keeps its own intent, history row and receipt.
 
@@ -54,11 +54,11 @@ Every key is an ordinary owner assignment: undoing one is the ADR 0178 revoke or
 
 ## Evidence
 
-- **Original decision:** not recorded
+- **Original decision:** [Product Owner accepted all five options, 2026-11-20](https://trello.com/c/0WtLPRnH#comment-6afffb58df182f916d6bec14)
 - **Implementation:** none yet
 - **Dated verification:** query plans checked offline on the stand-in schema, 20 November 2026; nothing read from production
-- **Uncertainty:** how often a real wrong-match observation shares a title prefix with the correct Film (affects how useful partial coverage is); the runtime tolerance (10 minutes or 15%) is a proposal to confirm with the owner
+- **Uncertainty:** how often a real wrong-match observation shares a title prefix with the correct Film (affects how useful partial coverage is); the runtime tolerance max(10 minutes, 15%) is explicitly owner-approved and remains a hypothesis to validate through ordinary implementation testing
 
 ## Follow-ups
 
-Implementation of [AIR-131](https://trello.com/c/0WtLPRnH) after the owner decision; optional index migration for confirmed-id discovery; group revoke is out of scope and would be its own card.
+Implementation of [AIR-131](https://trello.com/c/0WtLPRnH) under this accepted decision; optional index migration for confirmed-id discovery; group revoke is out of scope and would be its own card.
