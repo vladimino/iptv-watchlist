@@ -270,4 +270,37 @@ const legacyCatalog=extra=>({id:'tmdb_101',tmdbId:'101',title:'Film R',original:
  assert.deepEqual(admissionOf(file,'tmdb_101').movieTitles,['Film R','Фільм Р']);
 }
 
+// N. AIR-503 reserve. Candidates without a decision took every TMDB call of the chunk in scenario F, so a drifted decision never got one. A legacy `known_epg_alias` decision of a catalog-only Film
+// whose observed title has no movie provenance now holds one call back for itself (at most four): the candidates stop one call earlier, the chunk still makes at most sixteen calls,
+// and the revalidation records the provenance. A drifted decision that is not in that class (scenario F) gets no reserve.
+{
+ const {file,chunk,fetched}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Фільм Р',normalized:'фільм р'},catalog:legacyCatalog(),fillers:12,
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}}],alternatives:[]}});
+ const result=await chunk();
+ assert.equal(result.tmdbCalls<=16,true,'the chunk never exceeds its sixteen calls');
+ assert.equal(result.tmdbCalls,16,'the candidates and the revalidation used every call: '+result.tmdbCalls);
+ assert.equal(movieCalls(fetched)>=1,true);
+ assert.equal(result.revalidation.revalidated,1,JSON.stringify(result.revalidation));
+ assert.deepEqual(decisionOf(file,'фільм р|2001').anchor,[96]);
+ assert.deepEqual(admissionOf(file,'tmdb_101').movieTitles,['Film R','Фільм Р']);
+}
+// O. The reserve is for that class only and does not widen what counts as evidence: the same starved chunk with an alias that TMDB does not list reserves a call, spends it, fails the
+// gate and writes neither an anchor nor provenance.
+{
+ const {file,chunk}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Series R',normalized:'series r'},catalog:legacyCatalog(),fillers:12,
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}}],alternatives:[]}});
+ const result=await chunk();
+ assert.equal(result.revalidation.revalidation_failed,1,JSON.stringify(result.revalidation));
+ assert.equal(admissionOf(file,'tmdb_101').movieTitles,undefined);
+ assert.deepEqual(decisionOf(file,'series r|2001').failedDurations,[96]);
+}
+
+// P. The reserve is bounded: at most four calls, one per waiting decision, never more than the sixteen of the chunk (a fixture of five waiting decisions would need five Films, so the bound is pinned in the source).
+{
+ const source=fs.readFileSync('src/discovery.js','utf8');
+ assert.match(source,/const PAGED_REVALIDATION_RESERVE=4;/);
+ assert.match(source,/callCap=PAGED_TMDB_CALLS-Math\.min\(PAGED_REVALIDATION_RESERVE,waiting\);/);
+ assert.equal((source.match(/callCap=PAGED_TMDB_CALLS;/g)||[]).length,2,'the cap is the full sixteen again before the revalidation');
+}
+
 console.log('discovery revalidation ok');

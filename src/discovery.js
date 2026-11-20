@@ -19,6 +19,8 @@ const PAGED_COMMIT_RESERVE_MS=8000;
 const PAGED_MIN_REQUEST_MS=2000;
 const PAGED_BUDGET_BACKOFF_MS=300000;
 const PAGED_TMDB_CALLS=16;
+// AIR-503 (owner decision, 20 Nov 2026): the TMDB calls of a chunk that candidates without a decision may not use while a legacy alias decision of this page waits for revalidation (at most this many, one per decision).
+const PAGED_REVALIDATION_RESERVE=4;
 const PAGED_WALK_CONCURRENCY=4;
 // The cheap pass writes at most this many decisions and Film touches per chunk; the rest waits for the next one.
 const PAGED_CHEAP_GROUP=4;
@@ -1003,9 +1005,10 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  timings.cheapMs=Date.now()-cheapStarted;
  // The call cap and the time left are enforced at the request boundary: a candidate that would need a request beyond
  // either stops the loop. That is the budget running out, not a TMDB failure, so it sets no error and no retry time.
+ let callCap=PAGED_TMDB_CALLS;
  const query=async path=>{
   const left=candidateDeadline-Date.now();
-  if(tmdbCalls>=PAGED_TMDB_CALLS||left<PAGED_MIN_REQUEST_MS)throw budgetExhaustedError();
+  if(tmdbCalls>=callCap||left<PAGED_MIN_REQUEST_MS)throw budgetExhaustedError();
   tmdbCalls++;
   try{return await tmdbRequest(env,path,{timeoutMs:left});}
   catch(e){if(left<12000&&(e?.name==='TimeoutError'||e?.name==='AbortError'))throw budgetExhaustedError();throw e;}
@@ -1040,10 +1043,26 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   decisions[candidate.key]=next;
   return true;
  };
+ // AIR-503 (owner decision, 20 Nov 2026): a verified `known_epg_alias` decision of a catalog-only Film whose observed title the movie authority has not given the Film
+ // (the scan no longer confirms its slots) waits for the revalidation below, which runs after the candidates. With thousands of candidates that have no decision they used every
+ // call of the chunk, so the revalidation never ran. Keep a bounded reserve (one call per such decision of this page, at most PAGED_REVALIDATION_RESERVE) for it.
+ // Provenance still comes only from the movie-detail gate of the revalidation; the reserve changes which work gets the calls, not what counts as evidence.
+ if(typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.planRevalidation==='function'){
+  let waiting=0;
+  for(const [key,entry] of driftSeen){
+   const previous=decisions[key],observed=candidateByKey.get(key);
+   if(!observed||previous?.status!=='verified'||previous.identitySource!=='known_epg_alias'||knownTmdb.has(String(previous.tmdbId)))continue;
+   const catalog=films['tmdb_'+previous.tmdbId];
+   if(!catalog||movieTitleKeys(catalog).has(observed.normalizedTitle))continue;
+   const plan=DiscoveryAuthority.planRevalidation(previous,[...entry.minutes]);
+   if(plan.eligible&&!plan.exhausted&&plan.todo.length>0)waiting++;
+  }
+  callCap=PAGED_TMDB_CALLS-Math.min(PAGED_REVALIDATION_RESERVE,waiting);
+ }
  const preview={},now=Date.now(),tmdbStarted=Date.now();
  if(!error)for(const candidate of pending){
   // Start a candidate only if a request and its two writes still fit before the durable-write deadline.
-  if(tmdbCalls>=PAGED_TMDB_CALLS||Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(2)>persistLimit())break;
+  if(tmdbCalls>=callCap||Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(2)>persistLimit())break;
   let previous=decisions[candidate.key];
   const callsAtStart=tmdbCalls;
   const fenced=await persistBudgetDefer(candidate,previous);
@@ -1124,6 +1143,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
 
  // ADR 0142 decision 6: bounded revalidation of the drifted durations of verified observations, after every candidate that has no decision, with the TMDB calls and the time that are left.
  // Each duration is evaluated alone, without the stored decision as a confirmation. A budget stop, a TMDB failure or a rate limit completes no evaluation and records nothing.
+ callCap=PAGED_TMDB_CALLS;
  const revalidation={observations:0,revalidated:0,revalidation_failed:0,revalidation_exhausted:0,deferred:0};
  if(!error&&typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.planRevalidation==='function'){
   for(const [key,entry] of [...driftSeen].sort((a,b)=>String(a[0]).localeCompare(String(b[0])))){
