@@ -566,4 +566,25 @@ for (const [label, mutate, reason] of [
   assert.equal(ok.body.state, 'applied', 'the recovered confirmation executes the original exact scope');
 }
 
+// Review P2: the receipt proves a group against the IMMUTABLE stored issuance, not against the children being checked.
+{
+  const group = await stage();
+  const first = G.groupChildKey(group.group.id, 1);
+  const intact = await send('group-receipt?groupKey=' + group.group.id);
+  assert.equal(intact.body.complete, true, 'sanity: the untouched group is proven');
+  const original = db.sql("SELECT expected_hash FROM discovery_intent WHERE idempotency_key='" + first + "'")[0].expected_hash;
+  db.sql("UPDATE discovery_intent SET expected_hash='" + 'f'.repeat(64) + "' WHERE idempotency_key='" + first + "'");
+  const tampered = await send('group-receipt?groupKey=' + group.group.id);
+  assert.equal(tampered.body.complete, false, 'a child whose expected hash differs from the issued scope is not a proven group');
+  assert.equal(tampered.body.confirmation, null, 'and no replayable confirmation is offered');
+  const refused = await post('group-execute', {confirmation: group.confirmation});
+  assert.equal(refused.status, 409, 'execute refuses the same tampering');
+  db.sql("UPDATE discovery_intent SET expected_hash='" + original + "' WHERE idempotency_key='" + first + "'");
+  assert.equal((await send('group-receipt?groupKey=' + group.group.id)).body.complete, true);
+  // A decision that changed on purpose after a receipt does not make the group unproven.
+  const run = await post('group-execute', {confirmation: group.confirmation});
+  assert.equal(run.body.state, 'applied');
+  assert.equal((await send('group-receipt?groupKey=' + group.group.id)).body.complete, true, 'the receipt-only exception holds: a live decision that moved on is fine');
+}
+
 console.log('discovery-identity-group ok');

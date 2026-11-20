@@ -24,7 +24,7 @@ function gpPending() {
   const node = gpEl('group-recover');
   const pending = gpLive.pending;
   node.hidden = !pending;
-  gpEl('group-recover-text').textContent = pending ? 'Исход записи группы неизвестен. Ничего не повторяется само: проверьте результат, он читается из D1.' : '';
+  gpEl('group-recover-text').textContent = pending ? 'Запись группы не завершена или её исход неизвестен. Ничего не повторяется само: проверьте результат, он читается из D1. Новую группу можно подтвердить, когда эта проверена или забыта.' : '';
 }
 // Read-only: the stored children of the group. A proven group with receipt-less children can then be continued with its ORIGINAL scope.
 async function gpRecover() {
@@ -41,12 +41,15 @@ async function gpRecover() {
     return receipt;
   }
   const body = receipt.body;
+  gpLive.pending = {...gpLive.pending, phase: 'stored'};
   const open = body.outcomes.filter(item => item.outcome === 'pending').length;
   gpLive.result = {state: body.outcomes.some(item => item.outcome === 'unknown') ? 'unknown' : open ? 'partial' : 'applied', outcomes: body.outcomes, readback: body};
   if (body.complete && body.confirmation && open && !body.outcomes.some(item => item.outcome === 'unknown' || item.outcome === 'missing')) {
     gpLive.confirmation = body.confirmation; gpLive.members = body.outcomes.map(item => ({key: item.key, index: item.index, plan: null}));
   } else { gpLive.confirmation = null; gpLive.members = null; }
-  if (!open) { gpLive.pending = null; gpRemember(null); }
+  // Forgotten only after a PROVEN terminal state: every child applied. Unknown, running, approved or missing children keep the handle.
+  if (body.complete && body.outcomes.every(item => item.outcome === 'applied')) { gpLive.pending = null; gpLive.groupKey = null; gpRemember(null); }
+  gpPending();
   gpPaint();
   return receipt;
 }
@@ -126,6 +129,7 @@ async function gpConfirm() {
   const preview = gpLive.preview;
   if (!preview || !preview.available || gpLive.busy || gpLive.confirmation || !gpLive.selected.size) return null;
   gpError('');
+  if (gpLive.pending && gpLive.pending.phase === 'stored') { gpError('Сначала проверьте результат прошлой группы или забудьте её: кнопки выше.'); return null; }
   if (!gpLive.groupKey) gpLive.groupKey = groupIdempotencyKey();
   gpLive.pending = {groupKey: gpLive.groupKey, tmdbId: preview.tmdbId};
   gpRemember(gpLive.pending);
@@ -149,8 +153,12 @@ async function gpExecute() {
   const result = await groupExecutePost(confirmation);
   gpLive.busy = false;
   if (result.ok && result.body && Array.isArray(result.body.outcomes)) {
-    gpLive.confirmation = null; gpLive.members = null; gpLive.pending = null; gpLive.groupKey = null; gpRemember(null); gpPending();
+    gpLive.confirmation = null; gpLive.members = null;
+    // A 200 is not a terminal state: only a fully applied group is forgotten. unknown, partial and refused keep the group key for a read-only check.
+    if (result.body.state === 'applied') { gpLive.pending = null; gpLive.groupKey = null; gpRemember(null); }
+    gpPending();
     gpLive.result = {state: result.body.state, outcomes: result.body.outcomes};
+    if (gpLive.pending) gpLive.pending = {...gpLive.pending, phase: 'stored'};
     gpEl('group-accept').checked = false;
     // Readback: the stored per-key children, read from D1, not the answer above.
     const receipt = await groupReceiptGet(confirmation.idempotencyKey);
@@ -182,6 +190,7 @@ function gpStart() {
   gpEl('group-execute-button').addEventListener('click', () => { gpExecute(); });
   gpEl('group-cancel-button').addEventListener('click', gpCancel);
   gpEl('group-recover-button').addEventListener('click', () => { gpRecover(); });
+  gpEl('group-recover-dismiss').addEventListener('click', () => { if (gpLive.busy) return; gpLive.pending = null; gpLive.groupKey = null; gpRemember(null); gpPending(); gpPaint(); });
   gpLive.pending = gpRecall(); gpPending();
   if (gpLive.pending && !gpEl('group-tmdb').value) gpEl('group-tmdb').value = gpLive.pending.tmdbId;
   gpEl('group-accept').addEventListener('change', gpPaint);

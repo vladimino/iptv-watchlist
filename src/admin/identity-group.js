@@ -232,8 +232,14 @@ async function igReceipt(env,url){
   return {key:child?.observationKey??null,index:index+1,state:child?child.state:'missing',outcome:child?child.state==='receipt'?'applied':child.state==='running'?'unknown':'pending':'missing',receipt:child?.receipt??null};
  });
  // complete means a PROVEN group: every child present, bound to the same stored issuance and member set (the barrier), not only N rows.
- const ids=read.intents.map(child=>child.observationKey);
- const proven=read.intents.length===size&&first.issued&&Array.isArray(first.issued.ids)?DiscoveryIdentityGroup.groupBarrier({group:{id:groupKey,tmdbId:String(first.command.tmdbId),programmeRunId:first.command.group.programmeRunId,ids:first.issued.ids,versions:Object.fromEntries(read.intents.map(child=>[child.observationKey,String(child.expectedHash)+':x']))},children:read.intents}):{ok:false,reason:'group_incomplete'};
+ // The versions come from the IMMUTABLE stored issuance (its scope records), never from the children being checked.
+ const issuedScope=first.issued?AdminActions.validateConfirmation(first.issued):null;
+ let proven={ok:false,reason:'group_incomplete'};
+ if(issuedScope&&issuedScope.idempotencyKey===groupKey&&issuedScope.capability===IG_CAPABILITY.id&&issuedScope.ids.length===size&&read.intents.length===size){
+  const versions={};
+  for(const entry of issuedScope.records||[])versions[entry.id]=entry.version;
+  proven=DiscoveryIdentityGroup.groupBarrier({group:{id:groupKey,tmdbId:String(first.command.tmdbId),programmeRunId:first.command.group.programmeRunId,ids:issuedScope.ids,versions},children:read.intents});
+ }
  const complete=proven.ok===true||proven.reason==='group_running';
  // The stored issuance of a proven group lets the owner replay the receipt-less children with the ORIGINAL exact scope after a lost response or a reload.
  return json({groupKey,size,tmdbId:first.command.tmdbId,complete,confirmation:complete?first.issued:null,outcomes});
