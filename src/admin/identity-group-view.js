@@ -51,6 +51,26 @@ const GROUP_REASON_COPY = {
   unsupported_capability: 'Это подтверждение не для группового действия.',
   invalid_request: 'Проверьте id фильма и выбор.',
 };
+// Controlled Russian validation: the browser's own constraint tooltip (in the browser's language) is never used.
+const GROUP_VALIDATION_COPY = {
+  query_empty: 'Введите название фильма.',
+  query_long: 'Название не длиннее 200 знаков.',
+  tmdb_empty: 'Введите числовой TMDB id фильма или выберите фильм из списка выше.',
+  tmdb_invalid: 'TMDB id — это число из цифр (до 12), без пробелов и букв.',
+  basis_empty: 'Укажите основание: почему эти наблюдения относятся к этому фильму (до 200 знаков).',
+  basis_long: 'Основание не длиннее 200 знаков.',
+  accept_missing: 'Отметьте, что вы подтверждаете именно этот набор.',
+  none_selected: 'Отметьте хотя бы одно наблюдение.',
+  search_empty: 'В каталоге нет фильмов с таким названием. Проверьте написание или введите TMDB id в разделе ниже.',
+  no_tmdb: 'У этого фильма нет подтверждённого TMDB id: начать группу для него нельзя.',
+  queue_empty: 'В доступной части очереди нет наблюдений EPG на разбор. Это не доказывает, что их нет совсем: найдите фильм по названию ниже.',
+  queue_failed: 'Не удалось прочитать очередь EPG. Найдите фильм по названию ниже или повторите чтение.',
+  search_failed: 'Не удалось выполнить поиск. Ничего не записано, повторите.',
+  stale_cursor: 'Очередь изменилась после первой страницы. Прочитайте её заново.',
+  stale_pin: 'Очередь изменилась после первой страницы. Прочитайте её заново.',
+  invalid_query: 'Некорректный запрос поиска: уберите лишние знаки.',
+  invalid_limit: 'Некорректный размер страницы.',
+};
 const GROUP_OUTCOME_COPY = {
   applied: 'записано', conflict: 'конфликт: не записано', refused: 'отказ: не записано', skipped: 'пропущено', expired: 'срок истёк: не записано',
   not_attempted: 'не выполнялось', unknown: 'исход неизвестен', pending: 'ждёт', missing: 'заявки нет',
@@ -66,7 +86,7 @@ function groupEscape(value) {
 }
 
 function groupReasonText(code) {
-  return GROUP_REASON_COPY[code] || ('Недопустимо (код: ' + String(code || 'неизвестно') + ').');
+  return GROUP_REASON_COPY[code] || GROUP_VALIDATION_COPY[code] || ('Недопустимо (код: ' + String(code || 'неизвестно') + ').');
 }
 
 function groupFilmHtml(preview) {
@@ -94,7 +114,7 @@ function groupPlanText(plan) {
   return `${before} → ${after}`;
 }
 
-function groupRowHtml(row, checked, locked) {
+function groupRowHtml(row, checked, locked, taskKey) {
   const observation = row.observation || {};
   const decision = row.decision || {};
   const reasons = (row.reasons || []).map(code => `<li>${groupEscape(groupReasonText(code))}</li>`).join('');
@@ -102,17 +122,17 @@ function groupRowHtml(row, checked, locked) {
   const shows = (row.shows || []).slice(0, 2).map(show => groupEscape(show.channel || show.channelId || '') + ' ' + groupEscape(show.start ? new Date(show.start).toISOString().slice(0, 16).replace('T', ' ') : '')).join('; ');
   const disabled = !row.selectable || locked ? ' disabled' : '';
   const meta = [`год ${groupEscape(observation.year ?? '—')}`, observation.durations && observation.durations.length ? 'длит. ' + groupEscape(observation.durations.join(', ')) + ' мин' : null, row.yearGap != null ? 'разница в годах ' + groupEscape(row.yearGap) : null, row.runtime && row.runtime.diffMinutes != null ? 'разница в минутах ' + groupEscape(row.runtime.diffMinutes) + ' (допуск ' + groupEscape(row.runtime.toleranceMinutes) + ')' : null].filter(Boolean).join(' · ');
-  return `<div class="admin-hit group-row" data-group-row="${groupEscape(row.key)}"><label class="iw-check"><input type="checkbox" data-group-key="${groupEscape(row.key)}"${checked ? ' checked' : ''}${disabled}> <b>${groupEscape(observation.title || row.key)}</b></label>`
+  return `<div class="admin-hit group-row" data-group-row="${groupEscape(row.key)}"><label class="iw-check"><input type="checkbox" data-group-key="${groupEscape(row.key)}"${checked ? ' checked' : ''}${disabled}> <b>${groupEscape(observation.title || row.key)}</b>${taskKey && row.key === taskKey ? ' <span class="group-task-badge">выбранная вами запись EPG</span>' : ''}</label>`
     + `<p class="iw-meta muted"><code>${groupEscape(row.key)}</code> · ${meta}</p>`
     + `<p class="iw-meta">Решение сейчас: ${groupEscape(decision.status || 'нет')}${decision.tmdbId ? ' · ' + groupEscape(decision.tmdbId) : ''}${decision.ownerEffect ? ' · владелец' : ''}. После: ${groupEscape(groupPlanText(row.plan))}</p>`
     + (shows ? `<p class="iw-meta muted">Эфиры: ${shows}</p>` : '')
     + (reasons ? `<ul class="group-reasons">${reasons}</ul>` : '') + (info ? `<ul>${info}</ul>` : '') + '</div>';
 }
 
-function groupRowsHtml(preview, selected, locked) {
+function groupRowsHtml(preview, selected, locked, taskKey) {
   const rows = (preview && preview.rows) || [];
   if (!rows.length) return '<p class="empty" role="status">Подходящих кандидатов не найдено. Это не доказывает, что их нет: покрытие частичное.</p>';
-  return rows.map(row => groupRowHtml(row, selected.has(row.key), locked)).join('');
+  return rows.map(row => groupRowHtml(row, selected.has(row.key), locked, taskKey)).join('');
 }
 
 // The exact plan the owner confirmed: one line per key with its before and after.
@@ -128,4 +148,77 @@ function groupOutcomesHtml(result) {
   const stored = result.readback && Array.isArray(result.readback.outcomes)
     ? `<p class="muted">Чтение из D1 после записи: ${result.readback.outcomes.map(item => groupEscape(item.index) + ' ' + groupEscape(GROUP_OUTCOME_COPY[item.outcome] || item.outcome)).join('; ')}${result.readback.complete === false ? '. Набор заявок неполон.' : '.'}</p>` : '';
   return state + (rows ? `<ol class="group-outcomes">${rows}</ol>` : '') + stored;
+}
+
+
+function groupValidationText(code) {
+  return GROUP_VALIDATION_COPY[code] || groupReasonText(code);
+}
+
+// A catalogue Film may start a group only with a TRUSTED, non-conflicting numeric TMDB id on its record. Titles and hints never do.
+function groupFilmTmdb(item) {
+  const ids = item && Array.isArray(item.externalIds) ? item.externalIds : [];
+  const found = ids.find(entry => entry && entry.scheme === 'tmdb' && entry.trusted === true && entry.conflicting !== true && /^[1-9]\d{0,11}$/.test(String(entry.value)));
+  return found ? String(found.value) : null;
+}
+
+function groupFilmResultsHtml(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return '';
+  return '<ul class="group-picks">' + list.map(item => {
+    const title = item.preferred || item.originalTitle || item.epgTitle || item.id || '—';
+    const original = item.originalTitle && item.originalTitle !== title ? ' (' + groupEscape(item.originalTitle) + ')' : '';
+    const tmdb = groupFilmTmdb(item);
+    const action = tmdb
+      ? `<button type="button" class="admin-refresh iw-apply" data-group-pick="${groupEscape(tmdb)}">Показать группу для этого фильма</button>`
+      : `<span class="muted">${groupEscape(GROUP_VALIDATION_COPY.no_tmdb)}</span>`;
+    return `<li class="admin-hit"><b>${groupEscape(title)}</b>${original} · ${groupEscape(item.year ?? 'год неизвестен')}${tmdb ? ' · TMDB ' + groupEscape(tmdb) : ''} <span class="muted">${groupEscape(item.collision ? '· есть фильм с таким же названием, сверьте год и id' : '')}</span><div class="iw-actions">${action}</div></li>`;
+  }).join('') + '</ul>';
+}
+
+// The worklist rows carry the queue's own words (status = the limbo cause, reason = the source's reason). The owner sees Russian text; an unknown code
+// gets a Russian fallback and the raw identifier only as a secondary technical detail, escaped.
+const GROUP_QUEUE_STATUS = {
+  pending: 'ожидает проверки', retry_eligible: 'можно повторить', stalled: 'застряло', backoff: 'ждёт по backoff', manual_review: 'нужен ручной разбор',
+  stale_projection: 'устаревшая проекция', external_archive: 'нужен внешний архив', unknown: 'состояние неизвестно',
+};
+const GROUP_QUEUE_REASON = {
+  no_decision: 'у наблюдения ещё нет решения', tmdb_unavailable: 'остановка: TMDB недоступен', tmdb_fetch_failed: 'не удалось получить страницу фильма',
+  same_title_year: 'то же название и год, что у другого фильма', ambiguous_needs_stronger: 'решение неоднозначно: нужно более сильное доказательство',
+};
+function groupQueueStatusHtml(code) {
+  if (code && Object.prototype.hasOwnProperty.call(GROUP_QUEUE_STATUS, code)) return groupEscape(GROUP_QUEUE_STATUS[code]);
+  return 'состояние не распознано' + (code ? ` <code>${groupEscape(code)}</code>` : '');
+}
+function groupQueueReasonHtml(code) {
+  if (!code) return '';
+  if (Object.prototype.hasOwnProperty.call(GROUP_QUEUE_REASON, code)) return groupEscape(GROUP_QUEUE_REASON[code]);
+  if (Object.prototype.hasOwnProperty.call(GROUP_REASON_COPY, code)) return groupEscape(GROUP_REASON_COPY[code]);
+  return `причина не распознана <code>${groupEscape(code)}</code>`;
+}
+
+function groupQueueHtml(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return '';
+  return '<ul class="group-picks">' + list.map(row => {
+    const title = row.title || '—';
+    return `<li class="admin-hit"><b>${groupEscape(title)}</b> · ${groupEscape(row.year ?? 'год неизвестен')} <span class="muted">· ${groupQueueStatusHtml(row.status)}${row.reason ? ': ' + groupQueueReasonHtml(row.reason) : ''}</span>`
+      + `<div class="iw-actions"><button type="button" class="admin-more" data-group-find="${groupEscape(String(title).slice(0, 200))}" data-group-key="${groupEscape(row.key || '')}">Найти фильм для этой записи</button></div></li>`;
+  }).join('') + '</ul>';
+}
+
+
+// The observation key of a worklist record: its row key is `epg:<observationKey>`, the same key the group candidates carry. Never inferred from a title.
+function groupTaskKey(rowKey) {
+  return typeof rowKey === 'string' && rowKey.startsWith('epg:') && rowKey.length > 4 ? rowKey.slice(4) : null;
+}
+
+// Where the selected EPG record stands in the bounded group answer. It is never selected for the owner and a similar title is never promoted.
+function groupTaskAssess(task, preview) {
+  if (!task || !task.key || !preview || !preview.available) return null;
+  const row = (preview.rows || []).find(entry => entry.key === task.key);
+  const name = `«${groupEscape(task.title || task.key)}»${task.year ? ' (' + groupEscape(task.year) + ')' : ''}`;
+  if (!row) return {state: 'absent', html: `<b>Выбранной записи EPG ${name} нет среди кандидатов этого фильма.</b> Список ограничен и частичный: поиск идёт по началу названия, а запись может относиться к другому фильму. Показанные ниже наблюдения — другие записи, а не ваша. Выберите другой фильм, снимите выбор записи или разберите её по одной в разделе <a href="/admin/limb" data-return-carry>«Лимб»</a>.`};
+  if (row.selectable !== true) return {state: 'blocked', html: `<b>Выбранная запись EPG ${name} есть среди кандидатов, но её нельзя подтвердить.</b> ${(row.reasons || []).map(code => groupEscape(groupReasonText(code))).join(' ')}`};
+  return {state: 'present', html: `<b>Выбранная запись EPG ${name} есть среди кандидатов.</b> За вас она не отмечена: отметьте её сами, если фильм подходит.`};
 }

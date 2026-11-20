@@ -1,6 +1,8 @@
 # AIR-544 five-Task configuration: 12-minute lease, heartbeat wording and rollout plan
 
 > Dated evidence, 19 November 2026 UTC. Not a runtime authority. It authorizes no Scheduled Task create, edit, enable, disable or run, no Worker deploy and no production write. **Merging the pull request that carries this file deploys the 12-minute TTL to production** (the deploy job runs after merge), so the merge is itself a gated step of the plan below.
+>
+> Status update, 20 November 2026: step 1 of the rollout is done and recorded separately; the Worker TTL is still 15 minutes and every later step stays gated by its own owner GO.
 
 [AIR-544](https://trello.com/c/w6lw3KYy) now targets five independent hourly Predictions v2 Tasks at `:00/:12/:24/:36/:48`, one shared runner lease with a **12-minute TTL**, `manifestSize=5` and the unchanged research-first prompt, replacing the rejected single extra Task at `:07` ([preflight](air-544-fifth-task-preflight-2026-11-19.md), historical). The owner's reasons: ChatGPT scheduler drift of about ±7 minutes and collisions already seen. This document covers the offline work: lease code audit, the minimal code change, the heartbeat wording, the rollout order and the 48 h experiment.
 
@@ -27,7 +29,7 @@ The lease is **renewed by every start, heartbeat, hold and submit**, so the TTL 
 - `RUNNER_LEASE_TTL` from 15 to 12 minutes.
 - Client instruction (runner contract `instructions`) and the `prediction_heartbeat` tool description: TTL 12 minutes, heartbeat at least every 5 minutes, and that start, hold and submit also renew.
 - Tests: the TTL assertions and the frozen start baseline (`ttlMs`) follow the constant; the aged-holder fixtures keep the same 60 s age under the new TTL. `tests/lease-recovery.mjs` gains the boundary section: alive after 11 minutes of silence (a rival start is `already_running`, the owner's heartbeat restores a full 12 minutes and keeps the epoch); six rounds of 5-minute silence (30 simulated minutes) keep ownership; a submit after 11 minutes of silence succeeds and renews; after 12.5 minutes the owner's heartbeat is `409 lease_lost`, its late submit and a rival-film submit are fenced and write nothing, one start takes over with `epoch + 1`, and the film the owner had committed is not selected again. Elapsed time is simulated by moving the stored expiry; renewals, takeover and refusals run the real code on D1 stand-ins.
-- Maintained contract docs that describe the Worker (`docs/reference/api/prediction-runner.md`, `docs/runbooks/prediction-operations.md`, the heartbeat line of `docs/architecture/prediction-pipeline.md`) state 12 minutes and 5 minutes. The installed-Task descriptions (`docs/reference/scheduled-tasks.md` and the canonical prompt snapshot) are **not** changed here: they describe the prompt that is installed, and change in the delivery that installs the new wording.
+- Maintained contract docs that describe the Worker (`docs/reference/api/prediction-runner.md`, `docs/runbooks/prediction-operations.md`, the heartbeat line of `docs/architecture/prediction-pipeline.md`) state 12 minutes and 5 minutes. The installed-Task descriptions (`docs/reference/scheduled-tasks.md` and the canonical prompt snapshot) were not changed by this plan; they changed with the separate [record of the four-Task prompt installation](air-544-four-task-heartbeat-install-2026-11-20.md).
 
 ## Is 12 minutes safe? What is and is not proven
 
@@ -37,7 +39,9 @@ The lease is **renewed by every start, heartbeat, hold and submit**, so the TTL 
 - **What a violation costs.** A run that is silent for 12 minutes loses the lease: its heartbeat and later submit are refused (`lease_lost`, fenced by epoch), uncommitted films stay in the queue and a later start takes over. No data is corrupted and nothing is committed twice (tests above); the cost is lost generation work of that run.
 - **Expected benefit, not a forecast.** Of the 16 `already_running` refusals in the window, 11 were refused 15 to 35 seconds after a renewal (near-simultaneous starts) and 5 were refused 7.6 to 13.4 minutes after one; per the Controller's readout only 2 of the 16 would have crossed expiry under a 12-minute TTL. Most collisions come from start jitter, which a TTL cannot remove; equal spacing of five Tasks changes the arithmetic, and neither the TTL nor the spacing proves fewer collisions.
 
-## Heartbeat wording (candidate, not installed)
+## Heartbeat wording (a candidate when planned; installed on 20 November 2026)
+
+**Update, 20 November 2026:** the owner-authorized step 1 installed exactly this text on all four Tasks while the Worker TTL stayed 15; see the [install record](air-544-four-task-heartbeat-install-2026-11-20.md). The text below is the planning-time description, kept as history.
 
 The installed prompt (45 938 characters, 69 379 UTF-8 bytes, SHA-256 `ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520`) has one heartbeat sentence, in step 3. The candidate replaces exactly one phrase and nothing else:
 
@@ -46,14 +50,14 @@ The installed prompt (45 938 characters, 69 379 UTF-8 bytes, SHA-256 `ccfd5c1cbe
 +Держи lease живым: prediction_heartbeat({runId}) перед долгой генерацией и не реже, чем раз в 5 минут (TTL 12 минут);
 ```
 
-Candidate: **45 937 characters, 69 378 UTF-8 bytes, SHA-256 `59208a479175bcb829ca979f69c3f7370e9abc3b545978f899efbb128e17b4e7`**. `tests/scheduled-task-prompt-v2.mjs` checks that the phrase occurs once and that applying it to the snapshot gives these figures. The same text must be installed on all five Tasks (the fifth is a copy of the new text). A period of 5 minutes was chosen inside the 5 to 6 minute range of the card: the Task already heartbeats before each long generation, and one film cycle takes about a minute at the observed run wall, so the rule only bounds the worst case. Whether the model obeys it cannot be proven offline.
+Text: **45 937 characters, 69 378 UTF-8 bytes, SHA-256 `59208a479175bcb829ca979f69c3f7370e9abc3b545978f899efbb128e17b4e7`**. `tests/scheduled-task-prompt-v2.mjs` now pins the installed hash and that reversing the phrase reproduces the former hash. The same text must be installed on all five Tasks (the fifth is a copy of the new text). A period of 5 minutes was chosen inside the 5 to 6 minute range of the card: the Task already heartbeats before each long generation, and one film cycle takes about a minute at the observed run wall, so the rule only bounds the worst case. Whether the model obeys it cannot be proven offline.
 
 ## Rollout order (each step needs its own owner GO; none is granted here)
 
 | Step | Operation | Readback | Reversal |
 | --- | --- | --- | --- |
 | 0 | Review this pull request; **do not merge** (merge deploys TTL 12) | CI green on the exact head | Close the PR |
-| 1 | Edit the four Tasks: heartbeat wording only, TTL still 15 | Four independent readbacks equal the candidate hash; then a prompt-install delivery updates the snapshot and `scheduled-tasks.md`; observe natural runs for a period the owner sets | Restore the frozen installed text (snapshot at the base commit) |
+| 1 (done 20 Nov 2026 under a separate owner GO; [record](air-544-four-task-heartbeat-install-2026-11-20.md)) | Edit the four Tasks: heartbeat wording only, TTL still 15 | Four independent readbacks equal the candidate hash; then a prompt-install delivery updates the snapshot and `scheduled-tasks.md`; observe natural runs for a period the owner sets | Restore the frozen installed text (snapshot at the base commit) |
 | 2 | Merge and deploy the Worker with TTL 12 (Controller; `Test and build`, shards 2 and 3, `Deploy to Cloudflare`) | Read-only `enrichment_runner` shows `leaseTtlMs` 720000 and the new instruction; no start is run for the check | Revert PR and deploy (TTL back to 15; the faster heartbeat is harmless at 15) |
 | 3 | Move the four schedules to `:00/:12/:24/:36` one at a time in the order `:15`→`:12`, `:30`→`:24`, `:45`→`:36`, then create the fifth at `:48` with the step-1 text | Registry readback after each edit: schedule, enabled state, prompt hash | Disable the fifth; restore `:15/:30/:45`; revert TTL by step 2's reversal if the owner decides |
 
