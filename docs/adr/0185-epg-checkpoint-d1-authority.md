@@ -1,11 +1,11 @@
 # ADR 0185: The EPG run checkpoint `sync.json` and the watchlist ingest status `watchlist-ingest.json` become one D1 authority, written only through fenced batches
 
-**Status:** Proposed  
-**Original decision date:** not decided (Proposed; owner acceptance pending)  
+**Status:** Accepted  
+**Original decision date:** 2026-11-20  
 **Recorded at:** 2026-11-20  
-**Approval source:** not documented. The storage strategy (migrate the EPG checkpoints to D1, keep archives and independent operational state in R2) is the owner disposition recorded on [AIR-275](https://trello.com/c/4x7hH0gI) on 2026-11-20; the design below is **not** accepted by that disposition and needs its own owner acceptance before any behavior change.  
+**Approval source:** The Product Owner explicitly authorized acceptance of the architecture in the project conversation on 2026-11-20, following the exact-HEAD technical PASS on [PR #830](https://github.com/vladimino/iptv-watchlist/pull/830#pullrequestreview-5999701124). The decision and its exact scope (Option B, single D1 marker, atomic `completeRun`, O4 queue-before-completion for the D1 single-call path) are recorded in [AIR-550](https://trello.com/c/xMTEtaLp#comment-6b00be2707bdee5b99160fe4). The earlier [AIR-275 storage disposition](https://trello.com/c/4x7hH0gI) approved migration direction, not this design. Acceptance authorizes only the dormant implementation in AIR-550, not any production apply, import, activation or cutover.  
 **Related work:** [AIR-550](https://trello.com/c/xMTEtaLp) (this design, then a dormant implementation); [AIR-551](https://trello.com/c/YAVPlcAe) (separate controlled production cutover); [AIR-546 ledger](../evidence/d1-migration/air-546-mutable-r2-inventory-2026-11-20.md); [AIR-547](https://trello.com/c/99faXisC) (maintained-docs alignment); [ADR 0175](0175-epg-priority-holds-until-run-complete.md); [ADR 0100](0100-epg-cloudflare-workflow-executor.md); [ADR 0092](0092-resumable-bounded-ledger-seal.md); [ADR 0144](0144-epg-seal-successor-workflow-instance.md); [ADR 0145](0145-epg-seal-publication-only-staging.md); [ADR 0162](0162-d1-only-authority-retire-rollback-toolchain.md)  
-**Supersedes:** None. If accepted, it **qualifies decision 4 of ADR 0175** (the cross-store ordering) for the `d1` checkpoint mode only; ADR 0175 stays Accepted for everything else and for the `r2` mode.  
+**Supersedes:** None. It **qualifies decision 4 of ADR 0175** (the cross-store ordering) for the `d1` checkpoint mode only; ADR 0175 stays Accepted for everything else and for the `r2` mode.  
 **Superseded by:** None
 
 ## Context
@@ -24,9 +24,9 @@ Confirmed from code on `main` `6349e8d`; sizes and production behavior are **not
 
 **Not established:** the production size of either object; whether the retired external `/api/sync/*` path obtains a step lease in every mode (Stage 2 confirms, see open question O1); how many D1 statements one metadata step may use before the Worker invocation budget matters (Stage 2 measures offline).
 
-## Decision (proposed)
+## Decision (accepted; not implemented)
 
-The owner is asked to accept or amend each numbered decision. Nothing here is active, and no schema is applied.
+The owner accepted the recommended Option B and decisions 1–8, including O4 as stated in decision 4, on 2026-11-20 (approval source above). Nothing here is active in production, and no schema is applied.
 
 ### 1. One domain, one marker
 
@@ -160,8 +160,8 @@ Nothing is activated or applied by this record. The implementation (Stage 2, a s
 
 ## Evidence
 
-- **Original decision:** not yet taken. Storage strategy: owner disposition on [AIR-275](https://trello.com/c/4x7hH0gI) (2026-11-20); this design: [AIR-550](https://trello.com/c/xMTEtaLp), stage 1.
-- **Implementation:** none (Stage 2 after owner acceptance).
+- **Original decision:** 2026-11-20, owner approval recorded in [AIR-550](https://trello.com/c/xMTEtaLp#comment-6b00be2707bdee5b99160fe4) after technical review; storage strategy previously accepted under [AIR-275](https://trello.com/c/4x7hH0gI).
+- **Implementation:** none yet; Stage 2 (dormant repository and offline tests) may proceed under the accepted architecture.
 - **Dated verification:** code reading of `main` `6349e8d` on 2026-11-20 (`src/worker.js` `saveJSON`, `epgStepGuard`, `beginSync`, metadata step, `sealStep`, `sealPublishStep`, `sealFinalizeStep`, `sealQueueStep`, `certifyCompletedRun`; `src/epg-orchestration.js` `casDoc`, `acquireStep`, `assertStep`; `src/published-epg.js` `certifyRun`); the [AIR-546 ledger](../evidence/d1-migration/air-546-mutable-r2-inventory-2026-11-20.md). No production read was made for this design.
 - **Uncertainty:** object and entry sizes; D1 statement budget per Worker invocation for the largest step; whether the external sync path holds a step lease (O1); the final migration number (O3).
 
@@ -170,8 +170,8 @@ Nothing is activated or applied by this record. The implementation (Stage 2, a s
 - **O1.** Does `beginExternalStep` ever return an environment without `epgStep` while a checkpoint write follows? If yes, the contract "no step, no write" refuses that path in `d1` mode; Stage 2 confirms and documents it.
 - **O2.** The caps (90,000 characters per statement, 900,000 per body) are borrowed from `prediction_queue`; a read-only size measurement before activation confirms or revises them.
 - **O3.** Migration number and schema version are reserved against the current `main` and renumbered if another migration lands first.
-- **O4.** In `d1` mode the single-call route attempts the queue refresh before completion (decision 4). This is the only behavior reorder the ADR proposes outside the storage move; the owner may instead ask to retire that route first, or to keep it certify-less (repair only), in which case the structural order rule would need a different guard.
+- **O4 (decided).** The owner accepted queue refresh attempted before completion in `d1` mode for the single-call route, as specified in decision 4. The refresh error remains non-blocking, and the `r2` path remains unchanged.
 
 ## Follow-ups
 
-[AIR-550](https://trello.com/c/xMTEtaLp) stage 2 (repository and dormant integration, after acceptance); [AIR-551](https://trello.com/c/YAVPlcAe) (controlled production cutover and retirement of the R2 arm); [AIR-547](https://trello.com/c/99faXisC) (maintained documentation alignment). Current status lives in Trello and GitHub.
+[AIR-550](https://trello.com/c/xMTEtaLp) stage 2 (repository and dormant integration under this accepted architecture); [AIR-551](https://trello.com/c/YAVPlcAe) (controlled production cutover and retirement of the R2 arm); [AIR-547](https://trello.com/c/99faXisC) (maintained documentation alignment). Current status lives in Trello and GitHub.
