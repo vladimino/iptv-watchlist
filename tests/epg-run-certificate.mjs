@@ -414,8 +414,9 @@ const docs=db=>JSON.stringify(db.sql("SELECT key, body, revision FROM epg_orches
 {
  const worker=fs.readFileSync('src/worker.js','utf8');
  const queue=worker.slice(worker.indexOf('async function sealQueueStep'),worker.indexOf('// ADR 0074, ADR 0161'));
- const save=queue.indexOf("await saveJSON(env,'sync.json',run);\n // ADR 0175");
- assert.ok(save>0,'the complete save comes first');
+ // ADR 0185: with the checkpoint in D1 the save and the certificate are one batch (completeCheckpointRun); the r2 branch keeps the ADR 0175 order this test pins.
+ const save=queue.indexOf("else{await saveJSON(env,'sync.json',run);certificate=await certifyCompletedRun(env,run);}");
+ assert.ok(save>0,'the complete save comes first (r2 mode)');
  assert.ok(queue.indexOf('certifyCompletedRun(env,run)')>save,'certify follows the durable complete save');
  assert.ok(queue.indexOf('certifyCompletedRun(env,run)')<queue.indexOf('flushEpgEvent(env,run)'),'certify precedes the event flushes');
  const certifier=worker.slice(worker.indexOf('async function certifyCompletedRun'),worker.indexOf('async function sealQueueStep'));

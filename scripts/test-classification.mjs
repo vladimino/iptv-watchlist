@@ -577,6 +577,15 @@ export const FILES={
  "enrichment.mjs": {
   "suite": "core"
  },
+ "epg-checkpoint-worker.mjs": {
+  "suite": "core"
+ },
+ "epg-checkpoint-certificate.mjs": {
+  "suite": "core"
+ },
+ "epg-checkpoint-d1.mjs": {
+  "suite": "core"
+ },
  "epg-commit-durable-enqueue.mjs": {
   "suite": "core"
  },
