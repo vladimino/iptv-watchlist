@@ -1461,6 +1461,9 @@ export const FILES={
  "url-state.mjs": {
   "suite": "core"
  },
+ "view-index-seed-membership.mjs": {
+  "suite": "core"
+ },
  "viewing.mjs": {
   "suite": "core"
  },
