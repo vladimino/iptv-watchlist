@@ -258,7 +258,7 @@ const raced=async(name,change)=>{
  let result=null;
  try{result=await applyLetterboxdClaim(env,{...REQ,...I});}catch(error){assert.ok(error.code,name+': a typed failure');}
  assert.ok(!result||result.state!=='written',name+': never reported written');
- assert.deepEqual(pairs(file),['tmdb:1'],name+': no claim written');
+ assert.ok(!pairs(file).some(item=>item.startsWith('letterboxd:')),name+': no claim written');
  assert.equal(revision(file),0,name+': no revision moved');
 };
 await raced('ratings domain held after the plan',file=>assert.equal(sqlite(file,"UPDATE ratings_domain_authority SET cutover='held' WHERE id=1").status,0));
@@ -293,6 +293,30 @@ await raced('the Film identity changes to another movie',file=>assert.equal(sqli
  const fresh=await applyLetterboxdClaim(env,{...REQ,event:'cohort:again',...I});
  assert.equal(fresh.state,'written');assert.deepEqual(pairs(file),['letterboxd:AAA1','tmdb:1']);
 }
+
+// 12. Second review. (a) A Diary-first link keeps its `lb-<lid>` key and later gains the movie alias on the SAME key: a valid current link, so the claim is written (the key is never built from the movie id).
+{
+ const file=database();seedFilm(file,1);seedRatings(file,'AAA1',1,{key:'lb-AAA1'});
+ const env=envOf(file);
+ const plan=await planLetterboxdClaim(env,I);
+ assert.deepEqual([plan.verdict,plan.reason],['pass','proved']);
+ assert.equal((await applyLetterboxdClaim(env,{...REQ,...I})).state,'written');
+ assert.deepEqual(pairs(file),['letterboxd:AAA1','tmdb:1']);
+ assert.equal((await catalogStartedFilm(env,'AAA1')).state,'found');
+}
+await refusal('Diary-first key but the movie alias is on another key',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1,{key:'lb-AAA1'});const index=getDoc(file,'letterboxd/facts/links.json');index['tmdb:1']='tmdb-1';putDoc(file,'letterboxd/facts/links.json',index);},I,'conflict','ratings_link_points_elsewhere');
+await refusal('malformed link key',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1);const index=getDoc(file,'letterboxd/facts/links.json');index['letterboxd:AAA1']='../x';putDoc(file,'letterboxd/facts/links.json',index);},I,'conflict','ratings_link_malformed');
+await refusal('record names another fact key',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1,{key:'lb-AAA1',record:{schemaVersion:1,factKey:'lb-OTHER',links:{letterboxd:'AAA1',tmdb:'1'},redirectTo:null,migrating:null}});},I,'conflict','ratings_record_disagrees');
+// (b) The projection check covers BOTH aliases (a missing row is neither a conflict nor proof).
+await refusal('movie projection row carries another key',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1);assert.equal(sqlite(file,"UPDATE ratings_view SET fact_key='tmdb-9' WHERE alias_id='tmdb_1'").status,0);},I,'conflict','ratings_alias_points_elsewhere');
+{
+ const file=database();seedFilm(file,1);seedRatings(file,'AAA1',1);assert.equal(sqlite(file,"DELETE FROM ratings_view").status,0);
+ assert.equal((await planLetterboxdClaim(envOf(file),I)).verdict,'pass','a missing projection is not a conflict (the link documents prove)');
+}
+// (c) The write-time guard asserts that the target Film STILL owns exactly one trusted tmdb claim for the movie.
+await raced('the Film loses its trusted tmdb claim after the plan',file=>assert.equal(sqlite(file,"DELETE FROM film_external_id WHERE film_id='"+FID(1)+"' AND scheme='tmdb'").status,0));
+await raced('the Film gains a second trusted tmdb value after the plan',file=>assert.equal(sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('"+FID(1)+"','tmdb','5',1,0,NULL)").status,0));
+await raced('the Film trusted tmdb claim is downgraded after the plan',file=>assert.equal(sqlite(file,"UPDATE film_external_id SET trusted=0 WHERE film_id='"+FID(1)+"' AND scheme='tmdb'").status,0));
 
 // 10. Dormancy: the Worker bundle does not import the module yet (activation follows the owner's decision on ADR 0184).
 {

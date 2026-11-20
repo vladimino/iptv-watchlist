@@ -22,6 +22,7 @@ export const VERDICTS=Object.freeze(['pass','conflict','not_proved']);
 const LINKS_KEY='letterboxd/facts/links.json';
 const FACTS_RECORD_PREFIX='letterboxd/facts/films/';
 const LID=/^[A-Za-z0-9_-]{1,80}$/;
+const FACT_KEY=/^[A-Za-z0-9_-]{1,100}$/;
 const TMDB=/^[1-9]\d{0,11}$/;
 const RETIRED_SQL="SELECT 1 AS hit FROM tmdb_retirement_decision r WHERE r.movie_id=? AND r.kind='retire' AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s WHERE s.supersedes_seq=r.seq) LIMIT 1";
 const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0;
@@ -40,18 +41,20 @@ async function ratingsGate(db){
 // The AUTHORITATIVE current link evidence (never the projection): the Ratings facts link index and the fact record it names, both D1-owned documents read through the ratings domain. `ratings_view` is only a projection that
 // does not drop an alias on an unlink, so it can corroborate but never prove. Returns {ok:true} or {ok:false,verdict,reason}.
 async function linkEvidence(env,lid,tmdb){
- const key='tmdb-'+tmdb;
- let index,record;
+ let index,record,key;
  try{
   const links=await readOwned(env,LINKS_KEY);
   if(!links.owned)return {ok:false,verdict:'not_proved',reason:'ratings_not_authoritative'};
   index=links.value;
   if(index===null||index===undefined)return {ok:false,verdict:'not_proved',reason:'ratings_link_absent'};
-  if(!index||typeof index!=='object'||Array.isArray(index))return {ok:false,verdict:'not_proved',reason:'ratings_links_unreadable'};
-  const own=index['letterboxd:'+lid];
-  if(own===undefined)return {ok:false,verdict:'not_proved',reason:'ratings_link_absent'};
-  if(own!==key)return {ok:false,verdict:'conflict',reason:'ratings_link_points_elsewhere'};
-  if(index['tmdb:'+tmdb]!==key)return {ok:false,verdict:'not_proved',reason:'ratings_movie_link_absent'};
+  if(typeof index!=='object'||Array.isArray(index))return {ok:false,verdict:'not_proved',reason:'ratings_links_unreadable'};
+  // The record key is whatever the index says (a Diary-first link keeps `lb-<lid>` and later gains `tmdb:<n>` on the SAME key), never a key built from the movie id.
+  key=index['letterboxd:'+lid];
+  if(key===undefined)return {ok:false,verdict:'not_proved',reason:'ratings_link_absent'};
+  if(typeof key!=='string'||!FACT_KEY.test(key))return {ok:false,verdict:'conflict',reason:'ratings_link_malformed'};
+  const movie=index['tmdb:'+tmdb];
+  if(movie===undefined)return {ok:false,verdict:'not_proved',reason:'ratings_movie_link_absent'};
+  if(movie!==key)return {ok:false,verdict:'conflict',reason:'ratings_link_points_elsewhere'};
   for(const [alias,target] of Object.entries(index))if(target===key&&alias!=='letterboxd:'+lid&&alias!=='tmdb:'+tmdb)return {ok:false,verdict:'conflict',reason:'ratings_link_ambiguous'};
   const doc=await readOwned(env,FACTS_RECORD_PREFIX+key+'.json');
   record=doc.value;
@@ -61,9 +64,10 @@ async function linkEvidence(env,lid,tmdb){
  }
  // The record must say the same thing as the index: this lid and this movie, not redirected and not mid-migration.
  if(!record||typeof record!=='object')return {ok:false,verdict:'not_proved',reason:'ratings_record_absent'};
+ if(record.factKey!==undefined&&record.factKey!==key)return {ok:false,verdict:'conflict',reason:'ratings_record_disagrees'};
  if(record.links?.letterboxd!==lid||String(record.links?.tmdb)!==tmdb)return {ok:false,verdict:'conflict',reason:'ratings_record_disagrees'};
  if(record.redirectTo||record.migrating)return {ok:false,verdict:'conflict',reason:'ratings_record_not_settled'};
- return {ok:true};
+ return {ok:true,factKey:key};
 }
 
 // Read-only. {verdict:'pass'|'conflict'|'not_proved', reason, lid, tmdb, filmId?, already?, generation?, guards?}. Typed infrastructure failures (a held or unreadable marker, a read error) THROW and are never a verdict.
@@ -89,10 +93,10 @@ export async function planLetterboxdClaim(env,{lid,tmdb}={}){
   if(!evidence.ok)return await done(out(evidence.verdict,evidence.reason));
   const after=await ratingsGate(db);
   if(!after.open||after.generation!==ratings.generation)throw failed('ratings_generation_moved');
-  const key='tmdb-'+t;
+  const key=evidence.factKey;
+  // The projection corroborates and never proves: a row that exists must carry the authoritative key (both aliases), and no other alias may carry it; a missing row is not a conflict and not proof.
   const views=await many(db,'SELECT alias_id,fact_key FROM ratings_view WHERE alias_id=? OR alias_id=? OR fact_key=?',[l,'tmdb_'+t,key]);
-  const lidRow=views.find(row=>row.alias_id===l);
-  if(lidRow&&lidRow.fact_key!==key)return await done(out('conflict','ratings_alias_points_elsewhere'));
+  if(views.some(row=>(row.alias_id===l||row.alias_id==='tmdb_'+t)&&row.fact_key!==key))return await done(out('conflict','ratings_alias_points_elsewhere'));
   if(views.some(row=>row.fact_key===key&&row.alias_id!==l&&row.alias_id!=='tmdb_'+t))return await done(out('conflict','ratings_alias_ambiguous'));
   // 3. Canonical TMDB ownership of that movie id.
   const movie=await many(db,"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value=?",[t]);
@@ -119,6 +123,8 @@ export async function planLetterboxdClaim(env,{lid,tmdb}={}){
    {sql:"NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision r WHERE r.movie_id=? AND r.kind='retire' AND NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision s WHERE s.supersedes_seq=r.seq))",params:[t]},
    {sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='letterboxd' AND value=? AND film_id<>?)",params:[l,owner]},
    {sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=? AND NOT (film_id=? AND trusted=1 AND conflicting=0))",params:[t,owner]},
+   {sql:"EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND value=? AND trusted=1 AND conflicting=0)",params:[owner,t]},
+   {sql:"(SELECT COUNT(*) FROM film_external_id WHERE film_id=? AND scheme='tmdb')=1",params:[owner]},
    {sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme IN ('tmdb','letterboxd') AND NOT (trusted=1 AND conflicting=0))",params:[owner]},
    {sql:"(SELECT COUNT(*) FROM film_external_id WHERE film_id=? AND scheme='letterboxd')=0",params:[owner]},
    {sql:"COALESCE((SELECT canonical_identity FROM film WHERE id=?),?)=?",params:[owner,'tmdb:'+t,'tmdb:'+t]},
