@@ -117,7 +117,7 @@ async function writeUnit(env,input,requestId,ctx,clock){
  const plan=await planFilmExternalIds(env,input);
  if(plan.absent)throw failed('film_person_reference');
  if(plan.noop)return {id:input.id,revision:plan.revision,already:true};
- return mutateFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,requireExisting:true,
+ return mutateFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,requireExisting:true,...(input.guards!==undefined?{guards:input.guards}:{}),
   film:{contractVersion:plan.contractVersion,
    removeExternalIds:plan.remove.map(({scheme,value})=>({scheme,value})),
    externalIds:plan.add.map(({scheme,value,trusted,conflicting,provenance})=>({scheme,value,trusted,conflicting,provenance}))},
