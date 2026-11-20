@@ -91,6 +91,7 @@ const FILE_SITES={
  'src/admin/film-title-route.js':{r2:1,wrapper:0,dynamic:0},
  'src/admin/letterboxd-archive-apply.js':{r2:3,wrapper:0,dynamic:1},
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
+ 'src/catalog-poster-weekly.js':{r2:2,wrapper:0,dynamic:1},   // ADR 0179 (AIR-543): the weekly poster checkpoint (epg/catalog-poster-weekly.json) and the immutable catalog_posters events (events/items/<reverse-timestamp>-<id>.json); neither is a projector input
  'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0118: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)
  'src/discovery.js':{r2:8,wrapper:15,dynamic:3},
  // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
@@ -99,7 +100,7 @@ const FILE_SITES={
  // of the run's films) and the interrupted record of a recovered earlier run (`enrichment/runs/<runId>.json`). Neither is a projector input or on a Discovery, admin-recovery or publication path.
  // Batch runner v2 batch_submit: +1 r2 site, +1 wrapper site and +1 dynamic key, all of the shape the v5 runner already writes: `runnerLeaseEdit` puts the runner lease object (the same key `runnerLease` puts, in the object
  // mode) and the per-film `enrichment/films/<id>/predictions.json` bundle (the key the v5 submit writes). Neither is a projector input or on a Discovery, admin-recovery or publication path.
- 'src/enrichment.js':{r2:15,wrapper:42,dynamic:31}, // AIR-452: -6 wrapper and -3 dynamic, the retired v5 start/next/submit, the v5 start Event and the request object scope only they created (ADR 0167); none was a projector input. AIR-510: batch-manifest persist plus transferable batch-stage drain/hold; not a projector input. AIR-79: -3 wrapper and -3 dynamic, the three mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,...) writes of the removed lookupRemovalRatings (the removal queue, not a projector input; the Ratings step keeps its own)
+ 'src/enrichment.js':{r2:17,wrapper:44,dynamic:32}, // AIR-452: -6 wrapper and -3 dynamic, the retired v5 start/next/submit, the v5 start Event and the request object scope only they created (ADR 0167); none was a projector input. AIR-510: batch-manifest persist plus transferable batch-stage drain/hold; not a projector input. AIR-79: -3 wrapper and -3 dynamic, the three mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,...) writes of the removed lookupRemovalRatings (the removal queue, not a projector input; the Ratings step keeps its own) AIR-548: +1 r2, the create-only park of a skipped-start Event under enrichment/stop-events/skipped-<requestId>.json (prediction Events outbox, not a projector input; ADR 0180). AIR-548 (index first, review of PR #805): +1 wrapper and +1 dynamic, clearEventOutbox, mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) removing a delivered skipped-start entry from the same Predictions Events outbox index (not a projector input). AIR-548 (idempotent fallback, round 2): +1 r2, the compensating `BUCKET.delete` of an unindexed skipped-start record whose delivery failed (never a projector input). AIR-548 (round 3): +1 wrapper, recordSkippedStart now calls saveJSON for the `delivered` marker and writeEvent for the journal item itself (separate steps so an existing item is never treated as lost); the same Predictions Events outbox, never a projector input.
  'src/filter-presets.js':{r2:1,wrapper:0,dynamic:0},
  'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
  'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},
@@ -190,6 +191,11 @@ const classes={
  'putKnownLength@src/worker.js':'under the publication lease',
  'writeEvent@src/worker.js':'EPG event log (not a projector input)',
  'writeWorkflowState@src/discovery-workflow.js':'Workflow record: D1-routed, refused inside a held window by windowHeldGuard',
+ // ADR 0179 (AIR-543). The daily poster cron is reached by name from the Worker's scheduled entry; none of these is a projector input.
+ 'catalogPosterApply@src/discovery.js':'poster-only copy write of the owner route and of the weekly sweep (the shared core); takes the resolver lease and re-checks the generation before every write (ADR 0048, ADR 0179)',
+ 'catalogPosterNegativesSave@src/discovery.js':'the poster negative index epg/catalog-poster-negatives.json (not a projector input), by compare-and-swap: the route, the weekly sweep and the admission seed, which runs inside the chunk that holds the lease',
+ 'writeCheckpoint@src/catalog-poster-weekly.js':'the weekly poster checkpoint epg/catalog-poster-weekly.json (not a projector input), by compare-and-swap; the daily cron entry only',
+ 'deliver@src/catalog-poster-weekly.js':'immutable catalog_posters events under events/items/ (not a projector input) and the outbox mark; the daily cron entry only',
 };
 const reached=new Set([...writers(chunk),...writers(publication)]);
 for(const key of reached)assert.ok(classes[key],'unclassified R2 writer reachable from Discovery or publication: '+key+' (classify it against the projector inputs)');

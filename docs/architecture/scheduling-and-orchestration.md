@@ -497,3 +497,36 @@ The hourly cron also calls `Monitor.run`, which does nothing unless `MONITOR` is
 
 The canary flow (route, Workflow, diagnostic D1 and R2) is gone: [ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md) detached it and [ADR 0161](../adr/0160-delete-epg-diagnostic-canary-code.md) deleted the code. Its diagram was removed with it; the original design stays in ADR 0121/0124 as history.
 
+## Daily catalog-poster retry cron
+
+The Worker has a third cron trigger, `24 3 * * *` UTC, beside the hourly `0 * * * *` and the Discovery-only `1-59/2 * * * *` ([ADR 0179](../adr/0179-weekly-automatic-catalog-poster-retry.md), Accepted; implemented and tested offline, **not activated**: the live schedule gains the entry only when a deploy carries it, and the owner's separate activation decision is still required). `src/worker.js` dispatches on the exact `controller.cron`: the other two expressions are routed exactly as before, asserted by test, and the poster branch runs only `CatalogPosterWeekly.run`, none of EPG, Ratings, Monitor or Discovery recovery.
+
+A firing starts a sweep on the first firing of a new week (weeks start Sunday 00:00 UTC) whose `weekStart` is newer than the checkpoint's, normally the Sunday one; a missed Sunday is caught up by the next firing, and an absent checkpoint bootstraps a sweep on any day. Otherwise it is **pending-only**: it resumes only a run that is `pending` with `nextRetryAt` reached (or `running` past its 2 h budget). A firing with nothing pending, nothing owed and the week's report present is **idle**: one R2 read, no TMDB call, no write, no event. A firing with an undelivered event replays it first and is not idle.
+
+```mermaid
+flowchart TD
+    fire["Cron 24 3 * * * UTC fires"]
+    route{"controller.cron equals<br/>the poster expression?"}
+    other["Other crons: routed as before"]
+    read[("Read R2 checkpoint<br/>epg/catalog-poster-weekly.json")]
+    owed{"Undelivered outbox entry?"}
+    replay["Replay event put<br/>no TMDB call"]
+    plan{"New week, or pending run<br/>with nextRetryAt reached?"}
+    idle["Idle: no write, no event"]
+    core["catalogPosterRun: up to 5 batches of 10<br/>shared with the owner route"]
+    commit["One CAS: result + outbox entry"]
+    put["Put event, CAS deliveredAt"]
+    fire --> route
+    route -->|no| other
+    route -->|yes| read
+    read --> owed
+    owed -->|yes| replay
+    owed -->|no| plan
+    replay --> plan
+    plan -->|no| idle
+    plan -->|yes| core
+    core --> commit
+    commit --> put
+```
+
+The unfinished-run backoff is 30 minutes by default (`Retry-After` is honoured), the retry cap is six attempts, and a busy resolver lease or EPG priority is recorded as `deferredBusy` and resumed on a later firing without holding the lease. A checkpoint write that loses its compare-and-swap leaves the guarded D1 hydration idempotent; the next firing re-reads D1 and the negative index. The R2 checkpoint is one object with version-aware compare-and-swap and needs no D1 migration. Rollback removes the cron entry and its dispatch by pull request; stored posters and index entries stay.

@@ -6,7 +6,7 @@ import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 const w=await flowWorld({films:4});const records=w.records,ctx=w.ctx,env=w.env;
 env.BUCKET.list=async({prefix='',limit=1000}={})=>({objects:[...records.keys()].filter(key=>key.startsWith(prefix)).sort().slice(0,limit).map(key=>({key})),truncated:false});
 async function api(path,body,method='POST'){const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:r.status,data:await r.json()};}
-const events=()=>[...records].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v),status=async()=>(await api('status',undefined,'GET')).data;
+const allEvents=()=>[...records].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v),events=()=>allEvents().filter(e=>e.presentation!=='batch_v2_skipped'),status=async()=>(await api('status',undefined,'GET')).data;
 const setRun=(id,edit)=>{const doc=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+id+"'")[0].d);edit(doc);sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE run_id='"+id+"'");};
 const COVERAGE=['confirmedFilmsTotal','currentPredictionsTotal','windowFilmsTotal','windowCurrentPredictions','cacheOffWindowTotal','pendingOffWindowTotal'];
 const start=body=>api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',...body}).then(r=>r.data);
@@ -16,7 +16,7 @@ assert.equal((await status()).state,'idle');
 assert.equal((await api('queue/reconcile',{})).status,200);
 let run=await start({manifestSize:3});assert.equal(run.status,'running');assert.equal(events().length,0,'a batch v2 start writes no start Event');
 let live=await status();assert.equal(live.state,'running');assert.equal(live.runId,run.runId);assert.equal(live.added,0);assert.equal(live.failed,0);assert.equal(live.hotRemaining,4);
-assert.equal((await start()).status,'already_running');assert.equal(events().length,0,'an overlapping trigger is silent');
+assert.equal((await start()).status,'already_running');assert.equal(events().length,0,'an overlapping trigger writes no run Event');assert.equal(allEvents().filter(e=>e.presentation==='batch_v2_skipped').length,1,'it leaves exactly one neutral skipped Event (AIR-548)');
 const ids=run.films.map(f=>f.filmId);
 setRun(run.runId,doc=>{doc.lastHeartbeatAt='2000-01-01T00:00:00Z';});
 await api('batch/submit',{runId:run.runId,epoch:run.lease.epoch,items:[item(ids[0])]});live=await status();assert.equal(live.added,1);assert.equal(live.hotRemaining,3);assert(live.lastHeartbeatAt>'2000-01-01T00:00:00Z');assert.equal(events().length,0);

@@ -330,6 +330,18 @@ export const FILES={
  "catalog-film.mjs": {
   "suite": "core"
  },
+ "catalog-poster-footer.mjs": {
+  "suite": "core"
+ },
+ "catalog-poster-monitor.mjs": {
+  "suite": "core"
+ },
+ "catalog-poster-weekly-d1.mjs": {
+  "suite": "core"
+ },
+ "catalog-poster-weekly.mjs": {
+  "suite": "core"
+ },
  "catalog-posters-d1.mjs": {
   "suite": "core"
  },
@@ -911,6 +923,9 @@ export const FILES={
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test. That measures how effective the tests are. It is not a check of production behaviour."
  },
  "letterboxd-diary-identity.mjs": {
+  "suite": "core"
+ },
+ "prediction-skipped-event.mjs": {
   "suite": "core"
  },
  "ratings-diary-identity.mjs": {

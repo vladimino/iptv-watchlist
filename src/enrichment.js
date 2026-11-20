@@ -1028,7 +1028,7 @@ async function deliverPendingEvents(env,now=Date.now()){
      report.checked++;
      // A stop is completed as a whole (run record, diagnostic row, journal item): the same idempotent path the stop itself took.
      if(key.startsWith(STOP_EVENT_PREFIX)){
-      if(record.event.stage==='complete')result=await flushStopEvent(env,record,key)?'delivered':'failed';
+      if(record.event.presentation===BATCH_V2_SKIPPED||record.event.stage==='complete')result=await flushStopEvent(env,record,key)?'delivered':'failed';
       else{const stop=await recordRunStop(env,record.event.runId,record.event.reason,{outbox:true});result=stop.status==='superseded'||stop.eventPending===false?'delivered':'failed';}
      }
      else result=await flushStopEvent(env,record,key)?'delivered':'failed';
@@ -1053,6 +1053,56 @@ async function deliverPendingEvents(env,now=Date.now()){
  }catch{report.failed++;}
  if(report.checked||report.failed||report.quarantined)logEventOutbox(report);
  return report;
+}
+// AIR-548 (ADR 0180): a real `batch_start` that a live runner lease turns away leaves ONE neutral Event of the refused request, `presentation: "batch_v2_skipped"`. It is not a run: no runId of its own, no
+// counts, no lease, queue or film is touched for it. Its identity is the request's `X-Request-Id` (the id is stable under replay and different for another request, so no two requests are merged by time or
+// guess), and it is parked create-only in `enrichment/stop-events/skipped-<requestId>.json`, so a repeated write reads the first record back (same `at`, same journal key) and a failed journal write is retried
+// by the existing outbox. Best-effort by construction: it never throws and never changes the `already_running` answer. Only `already_running` is recorded; `409` refusals, `noop`, `catalog_held` and the rest are not.
+const BATCH_V2_SKIPPED='batch_v2_skipped';
+const SKIPPED_EVENT_PREFIX=STOP_EVENT_PREFIX+'skipped-';
+function skippedStartEvent({requestId,body,holder,at}){
+ const event={id:'enrichment-skipped-'+requestId,type:'enrichment',at,stage:'skipped',protocol:BATCH_PROTOCOL,presentation:BATCH_V2_SKIPPED,reason:'already_running',requestId};
+ if(body?.trigger==='scheduled'||body?.trigger==='manual')event.trigger=body.trigger;
+ if(isText(holder?.runId,100)&&SAFE_LOG_ID.test(holder.runId))event.holderRunId=holder.runId;
+ if(Number.isFinite(holder?.expiresAt)){const age=Math.round(Date.parse(at)-(holder.expiresAt-RUNNER_LEASE_TTL));if(Number.isFinite(age)&&age>=0&&age<=7*86400000)event.holderAgeMs=age;}
+ return event;
+}
+// Removes one delivered entry from the outbox index at once (best effort: an entry that stays is removed by the next sweep, which finds its record delivered).
+async function clearEventOutbox(env,key){
+ try{await mergeStoredJSON(env,EVENT_OUTBOX_KEY,{pending:{}},index=>{const pending=isObject(index?.pending)?index.pending:{};if(!pending[key])return null;const next={...pending};delete next[key];return {pending:next,updatedAt:new Date().toISOString()};});}catch{/* the next sweep settles it */}
+}
+// Order is the guarantee (review of PR #805): the outbox index entry is written BEFORE the record is parked, so a parked record never exists without an entry that finds it and a failure of both the
+// journal and the index cannot orphan a stored record. The parked record is also the request's idempotency identity (it holds `at`, which is part of the journal key): no journal item is ever written for
+// a request whose record is not parked, and a record whose journal outcome is not KNOWN to be absent is never deleted, so a replay of one request id always reuses the same `at` and can never create a second
+// item. The journal write and the `delivered` marker are separate steps: a journal item that exists counts as delivered even when the marker cannot be written (the next sweep or a replay rewrites the same
+// item and marks it). If the index cannot be written the record is parked and delivered once; it is deleted again only when a `head` of the journal key proves the item absent. An unknown outcome
+// (the head fails too) keeps the record, which is replay-safe. The Event is lost only when the journal AND the index are both down (a stated limitation, ADR 0180). A park that fails after the index entry writes
+// nothing: the entry, whose record is `absent`, leaves the index at the next sweep.
+async function recordSkippedStart(env,{requestId,body,holder}){
+ try{
+  const id=safeRequestId(requestId)||crypto.randomUUID(),key=SKIPPED_EVENT_PREFIX+id+'.json';
+  let record=await loadJSON(env,key);
+  if(record?.delivered)return true;
+  const indexed=await noteEventOutbox(env,key),created=!record;
+  if(!record){
+   record={event:skippedStartEvent({requestId:id,body,holder,at:new Date().toISOString()})};
+   try{const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key)||record;}
+   catch{return false;}
+  }
+  if(record.delivered){if(indexed)await clearEventOutbox(env,key);return true;}
+  let journaled=false;
+  for(let attempt=0;attempt<3&&!journaled;attempt++){try{await writeEvent(env,record.event);journaled=true;}catch{/* tried again, then probed below */}}
+  if(!journaled&&created&&!indexed){
+   let present=null;try{present=!!await env.BUCKET.head(removalEventKey(record.event));}catch{present=null;}
+   if(present===false){try{await env.BUCKET.delete(key);}catch{/* an unindexed record that cannot be removed is replay-safe: it keeps its `at` */}}
+   else if(present===true)journaled=true;
+  }
+  if(!journaled)return false;
+  let marked=false;
+  for(let attempt=0;attempt<3&&!marked;attempt++){try{record.delivered=true;await saveJSON(env,key,record);marked=true;}catch{/* the item exists; a sweep or a replay marks it */}}
+  if(marked&&indexed)await clearEventOutbox(env,key);
+  return true;
+ }catch{return false;}
 }
 // The read side of the outbox: counts only, one small object, no write.
 async function eventOutboxStatus(env){
@@ -1920,7 +1970,18 @@ function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
  if(lastSuccessAt)return integrationEntry('predictions','capability',fresh(lastSuccessAt),freshCode(lastSuccessAt),lastSuccessAt,isInterrupt(latest)||isFailedOnly(latest)?lastFailureAt:null);
  return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
 }
-function integrationHealth({sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null,recentRuns=null,queue=null}){
+// ADR 0179 / AIR-543: the weekly poster source. One projection of the B1 checkpoint (CatalogPosterWeekly.readStatus); absent evidence is never healthy.
+const POSTER_STATE_MAP={healthy_idle:['healthy','poster_idle'],grace:['waiting','poster_first_run'],waiting:['waiting','poster_retry_scheduled'],overdue:['degraded','poster_overdue'],stalled:['degraded','poster_stalled'],lost:['degraded','poster_lost'],failed:['failed','poster_failed'],unknown:['unknown','no_data']};
+function posterIntegration(projection){
+ const state=projection&&typeof projection==='object'?projection.state:null,mapped=POSTER_STATE_MAP[state];
+ if(!mapped)return {...integrationEntry('posters','source','unknown','no_data',null,null),freshnessAt:null,lastWeek:null,nextAttemptAt:null};
+ const summary=projection.summary&&typeof projection.summary==='object'?projection.summary:null,count=value=>Number.isInteger(value)&&value>=0?value:null;
+ const code=state==='healthy_idle'&&summary?.hydrated>0?'poster_hydrated':mapped[1];
+ const completed=projection.lastOutcome?.status==='completed'&&state==='healthy_idle',freshness=integrationTime(projection.freshnessAt);
+ const failedAt=state==='failed'?freshness:null;
+ return {...integrationEntry('posters','source',mapped[0],code,completed?freshness:null,failedAt),freshnessAt:freshness,lastWeek:summary?{weekStart:projection.lastOutcome?.weekStart??null,checked:count(summary.checked),hydrated:count(summary.hydrated),noPoster:count(summary.noPoster),pending:count(summary.pending)}:null,nextAttemptAt:integrationTime(projection.nextExpectedAt)};
+}
+function integrationHealth({posters,sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null,recentRuns=null,queue=null}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
  const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
  const watchlistSuccess=[sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):null,integrationTime(report?.watchlistUpdatedAt),integrationTime(watchlistIngest?.lastSuccessAt)].filter(Boolean).sort((a,b)=>Date.parse(a)-Date.parse(b)).at(-1)||null;
@@ -2010,6 +2071,8 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
  const predictions=predictionCapabilityHealth({run,live,now,recentRuns,queue});
  const films=report?.watchlistCount||report?.films?.length||0,missing=(report?.stats?.metadataMissing||0)+(report?.stats?.titleMissing||0)+(report?.stats?.titleProvisional||0);
  const sources=[watchlist,ratingsSource,epg,resolver,predictions];
+ // `posters` is undefined only where the module is not bundled; a failed or timed-out read is null and shows as unknown, never healthy.
+ if(posters!==undefined)sources.push(posterIntegration(posters));
  if(films>=10&&missing/films>=.2)sources.push(integrationEntry('metadata','source','degraded','metadata_attention',null,null));
  const failed=sources.filter(item=>item.state==='failed').length,attention=sources.filter(item=>!['healthy','off','running','waiting'].includes(item.state)).length;
  return {aggregate:failed?'failed':attention?'attention':'healthy',attentionCount:attention,failedCount:failed,sources};
@@ -2181,6 +2244,8 @@ async function footerStatus(env){
  let metadata=metadataR2;
  if(filmPersonGate?.mode==='d1')metadata=footerMetadataProjection(await CanonicalCatalogReader.catalogMetadataFromD1(env,canonicalIdentityIds([report,catalog,watchlist,index]),filmPersonGate,{identityOnly:true}));
  const freshness=await guard('freshness',()=>predictionFreshness(env,profile));
+ // One extra read of monitor/state.json (the write-once markers) and one of the B1 checkpoint; no write, no TMDB.
+ const posters=typeof CatalogPosterWeekly==='undefined'?undefined:await guard('posters',async()=>{const state=await loadJSON(env,'monitor/state.json');return CatalogPosterWeekly.readStatus(env,{markers:{baselineAt:state?.catalogPostersBaselineAt??null,seenAt:state?.catalogPostersSeenAt??null},monitorOn:env?.MONITOR==='on',nowMs:Date.now()});});
  if(filmPersonGate)await CanonicalCatalogReader.catalogReaderStill(env,filmPersonGate);
  // Coverage needs the programme, the catalog, the view index and the freshness rule. If any of them could not be read the numbers are unknown, not zero or 100%.
  // A programme or catalog object that is simply absent (the read answered null) is as unreadable as one that failed: it is not an empty collection with 100% coverage.
@@ -2202,7 +2267,7 @@ async function footerStatus(env){
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?footerCompute(degraded,'run',()=>runSummary(run),null):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageKnown?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?summary.added:null,failed:summary?summary.failed:null}:null,integrations:footerCompute(degraded,'integrations',()=>integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease,recentRuns:predictionRuns,queue:storedQueue}),{aggregate:'unknown',attentionCount:null,failedCount:null,sources:[]}),...(degraded.length?{degraded:[...degraded]}:{})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageKnown?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?summary.added:null,failed:summary?summary.failed:null}:null,integrations:footerCompute(degraded,'integrations',()=>integrationHealth({posters,sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease,recentRuns:predictionRuns,queue:storedQueue}),{aggregate:'unknown',attentionCount:null,failedCount:null,sources:[]}),...(degraded.length?{degraded:[...degraded]}:{})};
 }
 function queueLaneIds(queue,exclude=new Set()){
  const skip=id=>exclude.has(id)||retryBudgetExhausted(queue.retries?.[id]);
@@ -2539,13 +2604,14 @@ async function batchRefreshQueue(env,body,pre,tally=null){
  return {queue,settled};
 }
 // A live runner lease turns a real start away; it is recorded as a start attempt and nothing else is written.
-async function batchTurnedAway(env,body,tally=null){
+async function batchTurnedAway(env,body,tally=null,requestId=null){
  const live=await loadJSON(env,RUNNER_LEASE_KEY);
  if(!(live?.runId&&live.expiresAt>Date.now()))return null;
  if(tally){tally.leaseRefused=1;tally.liveLeaseAgeMs=Math.max(0,Math.round(Date.now()-(live.expiresAt-RUNNER_LEASE_TTL)));}
  const turned={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'completed',selectedIds:[],results:{},failures:{}};
  turned.diagnosticStartedAt=turned.createdAt;turned.completedAt=turned.createdAt;
  await diagnosticCheckpoint(env,turned,{startResult:'already_running'});
+ await recordSkippedStart(env,{requestId,body,holder:live});
  return json({status:'already_running',runId:live.runId,expiresAt:live.expiresAt});
 }
 // Nothing eligible, or no capacity: the ordinary idle outcome of a start (`noop`, or `blocked` for `quota` and `retry_backoff`). No lease is taken and no run exists, so it is not passed
@@ -2634,7 +2700,7 @@ async function batchStartWork(env,body,requestId,tally){
  // Precedence of a real start: an overlapping run first, then an idle outcome, then the size refusal. A live runner lease (an earlier v2 run, or a stored legacy v5 run still holding it) turns the attempt away with
  // `already_running` before anything else, naming the holder: an overlapping trigger never reports an independent start result, and it writes nothing to the queue, the run, the lease or
  // the films. It is recorded as a start attempt, like every start attempt.
- const turned=await timedStage(env,'turned_away',()=>batchTurnedAway(env,body,tally));if(turned)return turned;
+ const turned=await timedStage(env,'turned_away',()=>batchTurnedAway(env,body,tally,requestId));if(turned)return turned;
  // Nothing to deliver, or no capacity, on a current queue: the idle outcome of a start (before the size refusal, so `remainingPercent: 0` is `quota`, not a size error).
  forgetAuthority(env);
  // AIR-529: a known priority-due queue is reconciled before it can be idle (an empty or exhausted queue plus a new assignment in the same generation would otherwise answer `noop` on every start). A zero-quota start stays the
@@ -2670,6 +2736,8 @@ async function batchStartWork(env,body,requestId,tally){
   if(lease.status==='already_running'){tally.leaseRefused=1;tally.leaseRefusedAtAcquire=1;if(Number.isFinite(lease.expiresAt))tally.liveLeaseAgeMs=Math.max(0,Math.round(Date.now()-(lease.expiresAt-RUNNER_LEASE_TTL)));}
   attempt.status='completed';attempt.completedAt=new Date().toISOString();attempt.stopReason=lease.status==='already_running'?null:lease.status;
   await diagnosticCheckpoint(env,attempt,{startResult:'already_running'});
+  // Only a refusal the lease itself answers `already_running` is a skipped start; any other lease status keeps its own answer and writes no Event.
+  if(lease.status==='already_running')await recordSkippedStart(env,{requestId,body,holder:lease});
   return json(lease);
  }
  // Revalidation, before a run, an Event or a diagnostics row exists: the queue's own generation must be the baseline's, and the selection and the manifest the same. Only the lease

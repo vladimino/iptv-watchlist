@@ -89,3 +89,21 @@ The user-facing «События» journal carries one `discovery` event per **s
 ## Cloudflare-native monitor (AIR-349)
 
 An inert monitor reads the stored status of EPG, Discovery, Ratings and the prediction queue on the hourly cron, judges it with a pure policy and alerts the owner through one deliberately chosen channel: a generic webhook or, per [ADR 0097](../adr/0097-monitor-telegram-bot-api-transport.md), the Telegram Bot API (a fixed outbound endpoint, a bot token in a Worker secret and a chat id in a Worker variable, at-least-once with a 429 hold). It diagnoses and reports only and does not observe a Cloudflare-wide outage unless an external dead-man service receives its heartbeat. See [ADR 0095](../adr/0095-cloudflare-native-production-monitor.md), the [monitor API](../reference/api/monitor.md) and the [runbook](../runbooks/monitoring.md).
+
+## Catalog poster weekly retry: one fact source, three surfaces
+
+The automatic weekly poster retry ([ADR 0179](../adr/0179-weekly-automatic-catalog-poster-retry.md)) records its operational facts in one R2 object, `epg/catalog-poster-weekly.json` (run status, week, retry time, last summary and a bounded outbox of frozen events). The Monitor stream `catalog_posters`, the footer source `posters` and the Events Log type `catalog_posters` all derive from that object and from nothing else, through the same pure projection, so they cannot disagree. Every read is one object read: no TMDB request, no write, no repair. An absent, unreadable or invalid object is never healthy.
+
+```mermaid
+flowchart LR
+    cron["Daily poster cron"] -->|"CAS: result and outbox"| cp[("R2 checkpoint<br/>catalog-poster-weekly.json")]
+    cp -->|"put event, then mark delivered"| events["Events Log<br/>type catalog_posters"]
+    cp -->|"read-only projection"| proj["project(): state and Monitor status"]
+    mstate[("monitor/state.json<br/>write-once BaselineAt, SeenAt")] -->|"read-only markers"| proj
+    proj --> monitor["Monitor stream catalog_posters"]
+    proj --> footer["Footer source posters"]
+    proj --> health["GET /api/admin/health<br/>catalogPosters"]
+    monitor -->|"write-once markers by Monitor.run only"| mstate
+```
+
+Domain states, in predicate order: `unknown`, `lost`, `failed`, `stalled`, `grace`, `overdue`, `waiting`, `healthy_idle`, mapped to the existing Monitor vocabulary (`healthy`, `waiting`, `delayed`, `degraded`, `needs_owner`); the table is in the [monitor reference](../reference/api/monitor.md#catalog-poster-stream). The bootstrap grace exists only before the first valid checkpoint; once a valid checkpoint has been seen, an absent one is `lost` and actionable. An idle daily firing writes nothing and is deliberately not detectable; the Sunday sweep is monitored from its receipt, and daily firings only when a pending run was due. The documented residual risk is the joint loss of the checkpoint and the Monitor state document, which returns the stream to one bootstrap grace.

@@ -26,8 +26,8 @@ const app = fs.readFileSync('public/app.js', 'utf8');
   const buttons = [...panel.matchAll(/<button type="button" data-event-type="([a-z_]+)" aria-pressed="(true|false)">([^<]+)<\/button>/g)].map(match => match.slice(1, 4));
   assert.deepEqual(buttons, [
     ['all', 'true', 'Все события'], ['watchlist', 'false', 'Watchlist и просмотр'], ['epg', 'false', 'Программа'], ['discovery', 'false', 'Находки'],
-    ['ratings', 'false', 'Оценки'], ['enrichment', 'false', 'Прогнозы'], ['taste_profile', 'false', 'Модель вкуса'],
-  ], 'seven buttons, «Все события» pressed by default');
+    ['ratings', 'false', 'Оценки'], ['enrichment', 'false', 'Прогнозы'], ['skipped', 'false', 'Пропущенные'], ['taste_profile', 'false', 'Модель вкуса'], ['catalog_posters', 'false', 'Постеры'],
+  ], 'nine buttons, «Все события» pressed by default, «Пропущенные» right after «Прогнозы» (AIR-548)');
 }
 
 // 2. CSS: the grid is never replaced, so the sidebar keeps its width and position on every route.
@@ -58,6 +58,13 @@ const pureRun = code => vm.runInContext(code, pure);
     const matched = everything.filter(type => pureRun(`eventMatchesType({type:${JSON.stringify(type)}},${JSON.stringify(id)})`));
     assert.deepEqual(matched, expected, id);
   }
+  // AIR-548: «Пропущенные» is the `batch_v2_skipped` presentation of an enrichment Event; «Прогнозы» still shows it, and no other prediction card is «Пропущенные».
+  const skipped = {type: 'enrichment', presentation: 'batch_v2_skipped'}, terminal = {type: 'enrichment', presentation: 'batch_v2_terminal'}, legacy = {type: 'enrichment'};
+  const matches = (event, id) => pureRun(`eventMatchesType(${JSON.stringify(event)},${JSON.stringify(id)})`);
+  assert.equal(matches(skipped, 'skipped'), true);assert.equal(matches(skipped, 'enrichment'), true, 'the original «Прогнозы» section shows the skipped Event too');assert.equal(matches(skipped, 'all'), true);
+  assert.equal(matches(terminal, 'skipped'), false);assert.equal(matches(legacy, 'skipped'), false, 'historical v5 and v2 terminal Events are not «Пропущенные»');
+  assert.equal(matches({type: 'epg', presentation: 'batch_v2_skipped'}, 'skipped'), false, 'the presentation alone is not enough');assert.equal(matches(skipped, 'watchlist'), false);
+  assert.equal(pureRun("eventTypeFrom('?type=skipped')"), 'skipped');assert.equal(pureRun("withEventType('/events','skipped')"), '/events?type=skipped');
   assert.equal(pureRun("eventMatchesType({type:'epg'},'nonsense')"), true, 'an unknown filter id never hides events');
   assert.equal(pureRun("eventMatchesType(null,'epg')"), false);
   assert.equal(pureRun("eventMatchesType({type:'taste_profile'},'enrichment')"), false, 'the taste profile is not a prediction run');

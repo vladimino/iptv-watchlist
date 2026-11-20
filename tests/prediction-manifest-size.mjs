@@ -187,14 +187,14 @@ for(const [size,films,expected] of [[undefined,40,40],[1,40,1],[5,40,5],[10,40,1
  const journal=w=>[...w.records.entries()].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v);
  const starts=w=>journal(w).filter(e=>String(e.id||'').startsWith('prediction-start-'));
  const progress=w=>journal(w).filter(e=>/-progress-/.test(String(e.id||'')));
- const terminals=w=>journal(w).filter(e=>String(e.id||'').startsWith('enrichment-')&&!/-progress-/.test(e.id));
+ const terminals=w=>journal(w).filter(e=>String(e.id||'').startsWith('enrichment-')&&!/-progress-/.test(e.id)&&e.presentation!=='batch_v2_skipped');
  const w=await ready(30);await reconcile(w);
  const start=await batch(w,{manifestSize:5});assert.equal(start.status,200);
  assert.equal(starts(w).length,0,'no prediction-start Event for a new batch_v2 run');
  assert.equal(progress(w).length,0);
  assert.equal(w.records.has('enrichment/start-events/'+start.data.runId+'.json'),false);
  const overlapping=await batch(w,{manifestSize:5});assert.equal(overlapping.data.status,'already_running');
- assert.equal(journal(w).length,0,'already_running before a terminal commit writes no Event');
+ assert.deepEqual(journal(w).map(e=>e.presentation),['batch_v2_skipped'],'already_running before a terminal commit writes only the neutral skipped Event (AIR-548), no run Event');
  await submitAll(w,start.data);
  assert.equal(progress(w).length,0,'batch_submit does not write a progress Event');
  const done=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});

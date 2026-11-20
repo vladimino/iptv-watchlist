@@ -58,7 +58,8 @@ const note=(name,line)=>{assert.ok(line.d1.n<BEFORE[name].d1,name+': fewer D1 ca
  assert.equal(second.data.status,'already_running');assert.equal(second.data.runId,first.data.runId,'the live holder is named, never adopted');assert.ok(!('films' in second.data),'no manifest');
  const line=last(w);note('already_running',line);
  assert.equal(line.notes.leaseRefused,1);assert.ok(Number.isSafeInteger(line.notes.liveLeaseAgeMs)&&line.notes.liveLeaseAgeMs>=0&&line.notes.liveLeaseAgeMs<12*60000);
- assert.ok(line.r2.n<=12&&line.d1.n<=25,'refusal cost '+line.r2.n+' R2, '+line.d1.n+' D1');
+ // AIR-548 (ADR 0180): the refusal also records its neutral skipped Event, index entry first (read+write of the outbox index, the record, the journal item, delivered flag, then the index removal): +8 R2 calls over the former 12-call cap's baseline of 9; D1 is untouched.
+ assert.ok(line.r2.n<=18&&line.d1.n<=25,'refusal cost '+line.r2.n+' R2, '+line.d1.n+' D1');
  assert.notEqual(timing(w)[0].requestId,line.requestId,'each start has its own request id');
  assert.equal(sql(w.file,"SELECT COUNT(*) AS n FROM prediction_run WHERE run_id='"+first.data.runId+"'")[0].n,1);
 }

@@ -225,3 +225,6 @@ Limbo kinds are `film` and `observation`. A Letterboxd rated candidate before ve
 
 Tests: `node tests/limbo-inventory.mjs`.
 
+## Catalog posters (owner health read)
+
+The owner health read `GET /api/admin/health` carries a `catalogPosters` section next to the model's `health` object ([admin reference](../api/admin.md#catalog-posters-section)). It is **not** an issue of this model and adds no rule, threshold or group: it is the read-only projection of the automatic weekly poster retry ([ADR 0179](../../adr/0179-weekly-automatic-catalog-poster-retry.md)), with the domain state, the mapped Monitor status, `nextExpectedAt` and `freshnessAt`. The `poster` rule above (a film with `poster: null`) is unchanged; a film that TMDB has no poster for stays a `poster_missing` info issue while its `no_poster_on_tmdb` hold runs, and the weekly retry is the routine that later re-asks. An unreadable checkpoint is `unknown`, never healthy.
