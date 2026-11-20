@@ -150,7 +150,7 @@ const settle = async () => {await sleep(0); for (let i = 0; i < 600 && (run('eve
 const reset = async (pages, first = 'first') => {
   run('cancelEventSearch()');
   archive = pages; requests = []; inFlight = 0; maxInFlight = 0; failures = new Set(); gates = new Map(); tick = 0;
-  run("loadedEvents.clear();eventCursor=null;eventsReady=false;eventTypeFilterId='all';activityNote='Загружаем события…';eventPaging.error=null;eventPaging.stuck=false;eventPaging.seen.clear()");
+  run("loadedEvents.clear();eventCursor=null;eventsReady=false;eventTypeFilterId='all';eventResultFilterId='all';activityNote='Загружаем события…';eventPaging.error=null;eventPaging.stuck=false;eventPaging.seen.clear()");
   win.history.replaceState(null, '', 'https://iptv.example/?q=x');
   run('eventsScreen=false;applyEventsScreen(false)');
   void first;
@@ -354,6 +354,46 @@ assert.equal(eventsMain.hidden, true);
 assert.equal(typePanel.hidden, true);
 assert.equal(shownIds().length, run('loadedEvents.size'), 'the compact feed is not filtered');
 assert.ok(requests.every(request => request.method === 'GET' && request.url.startsWith('/api/events')), 'no request but reads of the events feed');
+
+// 4.8b AIR-557: a RESULT-only deep link (type=all) also waits for the first page and then searches by itself. `epg` events are the successes of this archive:
+// 0 + 0 + 4 + 6 successes over four pages (six events each), so the first page alone holds fewer than ten matches.
+await reset(chain([6, 6, 2, 0]));
+win.history.replaceState(null, '', 'https://iptv.example/events?result=success');
+run('eventsScreen=false;applyEventsScreen(true)');
+assert.equal(run('eventResultFilterId'), 'success', 'the result comes from the URL');
+assert.equal(run('eventTypeFilterId'), 'all');
+assert.equal(requests.length, 0, 'nothing is requested before the feed has loaded');
+await run('loadEvents(false)');
+await settle();
+assert.deepEqual(requests.map(request => request.cursor), ['first', 'c1', 'c2', 'c3'], 'result-only: the first page, then the search with no click');
+assert.equal(run('eventMatchCount("all")'), 10, 'ten matches of the result axis');
+assert.ok(requests.every(request => request.method === 'GET'), 'reads only');
+// A refresh of the first page restarts the search on the same gate.
+run("eventSearch.state='idle'");
+await run('loadEvents(false,{quiet:true})');
+await settle();
+assert.equal(run('eventMatchCount("all")'), 10, 'a refresh keeps the result filter and does not duplicate');
+// Both axes «Все»: no search at all.
+await reset(chain([6, 6, 2, 0]));
+win.history.replaceState(null, '', 'https://iptv.example/events');
+run('eventsScreen=false;applyEventsScreen(true)');
+await run('loadEvents(false)');
+await settle();
+assert.equal(requests.length, 1, 'both axes on «Все» never scan the archive');
+// First-page failure with a result-only URL: shown, never retried by itself, explicit retry then searches.
+await reset(chain([6, 6, 2, 0]));
+failures.add('first');
+win.history.replaceState(null, '', 'https://iptv.example/events?result=success');
+run('eventsScreen=false;applyEventsScreen(true)');
+await run('loadEvents(false)');
+await settle();
+await sleep(30);
+assert.equal(requests.length, 1, 'an error is not retried by itself');
+failures.clear();
+run('retryEvents()');
+await settle();
+assert.equal(run('eventMatchCount("all")'), 10, 'the explicit retry loads the first page and then the search continues');
+run("eventResultFilterId='all'");
 
 // 4.10 Choosing a type changes only the `type` parameter of the current events URL: every other parameter, the encoded non-ASCII return target and the fragment survive byte for byte.
 await reset(chain([1]));

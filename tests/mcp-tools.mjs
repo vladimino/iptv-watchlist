@@ -127,6 +127,8 @@ const forbidden=[
  ['prediction_pending',{limit:100}],
  ['prediction_pending',{limit:1,cursor:'not-a-cursor'}],
  ['prediction_pending',{limit:1,prefix:'enrichment/'}],
+ ['prediction_hot_parity',{key:'enrichment/prediction-queue.json'}],
+ ['prediction_hot_parity',{now:1}],
  ['prediction_batch_manifest',{runId:'../secret'}],
  ['prediction_batch_manifest',{runId:'run-1',part:'all'}],
  ['prediction_batch_manifest',{prefix:'enrichment/'}],
@@ -205,9 +207,9 @@ assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readO
 // AIR-452: the retired v5 tools are not listed; every batch v2 tool and the shared heartbeat and completion stay.
 const toolNames=tools.map(item=>item.name);
 for(const name of ['prediction_start','prediction_next','prediction_submit','prediction_validate'])assert.ok(!toolNames.includes(name),name+' is retired');
-for(const name of ['prediction_batch_start','prediction_batch_manifest','prediction_batch_validate','prediction_batch_hold','prediction_batch_submit','prediction_heartbeat','prediction_complete','enrichment_schema','enrichment_runner','enrichment_status','prediction_queue_overview','prediction_film_diagnostics','prediction_pending'])assert.ok(toolNames.includes(name),name+' stays');
+for(const name of ['prediction_batch_start','prediction_batch_manifest','prediction_batch_validate','prediction_batch_hold','prediction_batch_submit','prediction_heartbeat','prediction_complete','enrichment_schema','enrichment_runner','enrichment_status','prediction_queue_overview','prediction_film_diagnostics','prediction_pending','prediction_hot_parity'])assert.ok(toolNames.includes(name),name+' stays');
 assert.equal(new Set(toolNames).size,toolNames.length,'each tool is listed once');
-for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_batch_validate','prediction_pending','prediction_batch_manifest']){
+for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_batch_validate','prediction_pending','prediction_hot_parity','prediction_batch_manifest']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,true,name);
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
@@ -391,6 +393,14 @@ const sealedBucket={async get(){denied.push('get');},async put(){denied.push('pu
 const anonymousDiagnostic=await tool({BUCKET:sealedBucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'prediction_queue_overview',{},{assertion:null});
 assert.equal(anonymousDiagnostic.response.status,403);
 assert.deepEqual(denied,[]);
+// AIR-536: the parity tool is owner-only like its siblings. The fixture queue is a stub without the full queue shape, so it answers `unknown`, never a match and never a count.
+const anonymousParity=await tool({BUCKET:sealedBucket,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'prediction_hot_parity',{},{assertion:null});
+assert.equal(anonymousParity.response.status,403);assert.deepEqual(denied,[]);
+const hotParity=await tool(diagnosticEnv,'prediction_hot_parity',{});
+assert.equal(hotParity.body.result.isError,undefined);
+assert.equal(hotParity.body.result.structuredContent.verdict,'unknown');
+assert.deepEqual(hotParity.body.result.structuredContent.reasons,['queue_shape_invalid']);
+assert.equal(hotParity.body.result.structuredContent.expected,undefined);
 const diagnosticOverview=await tool(diagnosticEnv,'prediction_queue_overview',{});
 assert.equal(diagnosticOverview.body.result.isError,undefined);
 assert.equal(diagnosticOverview.body.result.structuredContent.state,'temporarily_ineligible');
