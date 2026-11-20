@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
-import {webcrypto} from 'node:crypto';
+import {createHash,webcrypto} from 'node:crypto';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {scoped} from '../scripts/bundle-scope.mjs';
@@ -43,10 +43,11 @@ const database=(source=template)=>{const file=path.join(root,'db-'+(n++)+'.sqlit
 const marker=file=>rowsOf(file,'SELECT mode,generation,writes FROM filter_preset_authority')[0];
 
 // ===== 2. the harness: the real Worker route, with and without the D1 module =====
-const records=new Map(),etags=new Map();let revision=0,puts=[],gets=0;
+// R2 ETags are derived from the object's bytes: identical bytes give the identical ETag (the mock models that with MD5 of the raw body; it does not count revisions).
+const records=new Map(),etags=new Map(),raws=new Map();let puts=[],gets=0;
 const bucket={
- async get(key){gets++;if(!records.has(key))return null;const etag=etags.get(key);return {etag,httpEtag:`"${etag}"`,json:async()=>structuredClone(records.get(key))};},
- async put(key,value,options={}){const condition=options.onlyIf||{},current=etags.get(key);if(condition.etagDoesNotMatch==='*'&&records.has(key)||condition.etagMatches&&condition.etagMatches!==current)return null;records.set(key,JSON.parse(value));const etag=String(++revision);etags.set(key,etag);puts.push(key);return {etag,httpEtag:`"${etag}"`};},
+ async get(key){gets++;if(!records.has(key))return null;const etag=etags.get(key);return {etag,httpEtag:`"${etag}"`,json:async()=>JSON.parse(raws.get(key)),text:async()=>raws.get(key)};},
+ async put(key,value,options={}){const condition=options.onlyIf||{},current=etags.get(key);if(condition.etagDoesNotMatch==='*'&&records.has(key)||condition.etagMatches&&condition.etagMatches!==current)return null;const raw=String(value);records.set(key,JSON.parse(raw));raws.set(key,raw);const etag=createHash('md5').update(raw).digest('hex');etags.set(key,etag);puts.push(key);return {etag,httpEtag:`"${etag}"`};},
  async delete(){},async list(){return {objects:[],truncated:false};},
 };
 function load(withD1){
@@ -66,7 +67,7 @@ async function call(context,env,method,pathname,etag,body){
  return {status:response.status,etag:response.headers.get('ETag'),body:await response.json()};
 }
 const URLP='/api/ui/filter-presets';
-const resetR2=()=>{records.clear();etags.clear();puts=[];gets=0;};
+const resetR2=()=>{records.clear();etags.clear();raws.clear();puts=[];gets=0;};
 const uuid=index=>`00000000-0000-4000-8000-${String(index).padStart(12,'0')}`;
 const preset=(index,name='Пресет '+index,query='viewing=new')=>({id:uuid(index),name,schemaVersion:1,query,createdAt:'2026-11-01T10:00:00.000Z',updatedAt:'2026-11-01T10:00:00.000Z'});
 
@@ -342,9 +343,30 @@ for(const bad of ['"7"','"d1:0"','"d1:x"','"abc123"','']){assert.equal(Presets.f
  const env={BUCKET:bucket,DB:db};
  const seeded=await call(withD1,env,'POST',URLP,'"none"',{name:'Исходный',query:'started=1'});
  assert.equal(seeded.status,201);
- const fence=async()=>{ // the runbook's fence write: same content, new R2 ETag, conditional on the ETag just read
-  const object=await bucket.get('ui/filter-presets.json');const saved=await bucket.put('ui/filter-presets.json',JSON.stringify(await object.json()),{onlyIf:{etagMatches:object.etag}});assert.ok(saved,'the fence write lands');
+ const fence=async()=>{ // the runbook's fence write: the stored raw bytes plus one trailing newline (valid JSON whitespace), conditional on the ETag just read, and the ETag must change
+  const object=await bucket.get('ui/filter-presets.json');
+  const saved=await bucket.put('ui/filter-presets.json',(await object.text())+'\n',{onlyIf:{etagMatches:object.etag}});
+  assert.ok(saved,'the fence write lands');assert.notEqual(saved.etag,object.etag,'the fence write rotated the ETag');
  };
+ {
+  // content-addressed ETags: rewriting the identical bytes keeps the ETag, so it is NOT a fence, and a suspended writer then still lands (the defect the review found)
+  const object=await bucket.get('ui/filter-presets.json');
+  const same=await bucket.put('ui/filter-presets.json',await object.text(),{onlyIf:{etagMatches:object.etag}});
+  assert.equal(same.etag,object.etag,'identical bytes keep the identical ETag');
+  const unfenced=await bucket.put('ui/filter-presets.json',JSON.stringify({schemaVersion:1,presets:[]}),{onlyIf:{etagMatches:object.etag}});
+  assert.ok(unfenced,'with an identical-bytes rewrite a pre-existing conditional PUT still succeeds');
+  records.clear();raws.clear();etags.clear();
+  const again=await call(withD1,env,'POST',URLP,'"none"',{name:'Исходный',query:'started=1'});assert.equal(again.status,201);seeded.body=again.body;seeded.etag=again.etag;
+ }
+ {
+  // the byte-distinct fence: a writer holding the pre-fence ETag fails, and the fenced object still reads
+  const object=await bucket.get('ui/filter-presets.json');
+  await fence();
+  const stale=await bucket.put('ui/filter-presets.json',JSON.stringify({schemaVersion:1,presets:[]}),{onlyIf:{etagMatches:object.etag}});
+  assert.equal(stale,null,'a suspended writer with the old ETag fails after the byte-distinct fence');
+  const read=await call(withD1,env,'GET',URLP);assert.equal(read.status,200);assert.equal(read.body.presets.length,1,'the fenced object reads as the same preset list');
+  seeded.etag=read.etag;
+ }
  // (a) suspended after the R2 read, hold + fence happen, then the PUT with the old ETag
  let stage=0;const realGet=bucket.get;
  bucket.get=async function(key){const object=await realGet.call(bucket,key);if(stage===1){stage=2;run(file,"UPDATE filter_preset_authority SET writes='held'");await fence();}return object;};

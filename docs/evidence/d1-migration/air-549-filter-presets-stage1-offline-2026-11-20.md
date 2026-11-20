@@ -36,6 +36,10 @@ Three P1 and one P2 finding were reproduced and fixed, each with a regression in
 - **Absent binding or schema reopened R2.** `legacy` now needs the database to prove it is pre-migration (tables absent and `schema_contract` below 28) or the explicit stand-in. After activation: no binding, an empty database and version 28 without the tables answer `503` with zero R2 access. Residual limit: a binding to a different database below version 28 looks like the true pre-migration state.
 - **Activation SQL could exceed 100,000 bytes.** One short parity statement per preset plus one short guarded switch. A fixture of 30 near-limit presets (about 22 KB percent-encoded each) generates a file far above 100,000 bytes in total with every statement below it; a mismatch in the last preset stops the file before the switch.
 
+## Second review correction: the fence must change the bytes
+
+The first fence rewrote the stored content as `JSON.stringify(await object.json())`. R2 ETags are content-derived, so the Worker's compact output could be reproduced byte for byte and the old ETag stayed valid, leaving a pre-hold writer able to land after the fence. The test mock hid it by assigning a new ETag on every PUT. The mock now derives the ETag from the raw bytes (MD5), the test shows that an identical-bytes rewrite keeps the ETag and a pre-existing conditional PUT still succeeds, and the fence is now the stored bytes plus one trailing newline with a mandatory check that the ETag changed; the old-ETag writer then fails and the fenced object still reads as the same list. The runbook states the residual limit explicitly: a binding to a different but valid database below version 28 is not detected by the marker and needs a binding identity check before every cutover (an unconditional post-activation gate is an owner decision).
+
 ## Not done, not claimed
 
 - Migration 0028 is not applied; no row is imported; the marker is not `d1`; R2 `ui/filter-presets.json` is the production authority and was not read.
