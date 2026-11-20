@@ -2144,14 +2144,17 @@ export async function readGroupCandidates(env,ranges,limit){
  const db=database(env);
  const perAnchor=[];
  for(const range of ranges){
-  const rows=await many(db,"SELECT observation_key FROM discovery_observation WHERE source_key='active' AND observation_key>=? AND observation_key<? ORDER BY observation_key LIMIT ?",[range.from,range.to,limit]);
+  const rows=await many(db,"SELECT observation_key FROM discovery_observation WHERE source_key='active' AND residence='active' AND seen_in_latest=1 AND observation_key>=? AND observation_key<? ORDER BY observation_key LIMIT ?",[range.from,range.to,limit]);
   perAnchor.push({anchor:range.anchor,rows:rows.map(row=>({key:row.observation_key}))});
  }
- return {handled:true,perAnchor,gate:{programmeRunId:gate.programmeRunId,generation:gate.generation}};
+ // Closing readback: the authority must still be the one the reads started under, or the result is torn and refused.
+ const closing=await readAuthority(env);
+ const torn=!closing.ready||closing.programmeRunId!==gate.programmeRunId||closing.generation!==gate.generation;
+ return {handled:true,torn,perAnchor,gate:{programmeRunId:gate.programmeRunId,generation:gate.generation}};
 }
 // The per-key D1 proof, read fresh: the observation row, its decision with the stored hash checked against the payload, the shows.
 // Constant queries for the whole key list (at most `cap` keys, below the bind limit).
-export async function readGroupProofs(env,keys,cap){
+export async function readGroupProofs(env,keys,cap,showCap=20){
  const gate=await readAuthority(env);
  if(!gate.ready)return {handled:false};
  const list=[...new Set(Array.isArray(keys)?keys.filter(key=>typeof key==='string'&&key):[])];
@@ -2160,14 +2163,15 @@ export async function readGroupProofs(env,keys,cap){
  if(list.length){
   const db=database(env),marks=list.map(()=>'?').join(',');
   const [observations,decisions,shows]=await Promise.all([
-   many(db,"SELECT observation_key, programme_run_id, evidence_key, confirmed_tmdb_id, payload_json FROM discovery_observation WHERE source_key='active' AND observation_key IN ("+marks+")",list),
+   many(db,"SELECT observation_key, programme_run_id, evidence_key, confirmed_tmdb_id, seen_in_latest, payload_json FROM discovery_observation WHERE source_key='active' AND residence='active' AND observation_key IN ("+marks+")",list),
    many(db,'SELECT observation_key, decision_hash, payload_json FROM discovery_decision WHERE observation_key IN ('+marks+')',list),
-   many(db,"SELECT observation_key, ordinal, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key IN ("+marks+") ORDER BY observation_key, ordinal",list),
+   // At most showCap+1 rows per key (a window over the primary key): the extra row only proves the proof is incomplete.
+   many(db,"SELECT observation_key, ordinal, channel_id, channel, start_ms, end_ms FROM (SELECT observation_key, ordinal, channel_id, channel, start_ms, end_ms, ROW_NUMBER() OVER (PARTITION BY observation_key ORDER BY ordinal) AS rn FROM discovery_observation_show WHERE source_key='active' AND observation_key IN ("+marks+")) WHERE rn<=? ORDER BY observation_key, ordinal",[...list,showCap+1]),
   ]);
-  for(const key of list)proofs[key]={key,observation:null,decision:null,decisionHash:null,hashOk:false,shows:[]};
+  for(const key of list)proofs[key]={key,observation:null,decision:null,decisionHash:null,hashOk:false,shows:[],showsComplete:true};
   for(const row of observations){
    let item=null;try{item=JSON.parse(row.payload_json);}catch{item=null;}
-   proofs[row.observation_key].observation=item&&typeof item==='object'&&!Array.isArray(item)?{...item,key:row.observation_key,evidenceKey:row.evidence_key??null,confirmedTmdbId:row.confirmed_tmdb_id??item.confirmedTmdbId??null,belongsToPublishedRun:row.programme_run_id===gate.programmeRunId}:null;
+   proofs[row.observation_key].observation=item&&typeof item==='object'&&!Array.isArray(item)?{...item,key:row.observation_key,evidenceKey:row.evidence_key??null,confirmedTmdbId:row.confirmed_tmdb_id??item.confirmedTmdbId??null,belongsToPublishedRun:row.programme_run_id===gate.programmeRunId&&Number(row.seen_in_latest)===1}:null;
   }
   for(const row of decisions){
    let payload=null;try{payload=JSON.parse(row.payload_json);}catch{payload=null;}
@@ -2176,9 +2180,16 @@ export async function readGroupProofs(env,keys,cap){
    proof.decisionHash=row.decision_hash;
    proof.hashOk=proof.decision!==null&&await decisionHash(proof.decision)===row.decision_hash;
   }
-  for(const row of shows){const proof=proofs[row.observation_key];if(proof&&proof.shows.length<5)proof.shows.push({channelId:row.channel_id,channel:row.channel,start:row.start_ms,end:row.end_ms});}
+  for(const row of shows){
+   const proof=proofs[row.observation_key];
+   if(!proof)continue;
+   if(proof.shows.length<showCap)proof.shows.push({channelId:row.channel_id,channel:row.channel,start:row.start_ms,end:row.end_ms});
+   else proof.showsComplete=false;
+  }
  }
- return {handled:true,proofs,gate:{programmeRunId:gate.programmeRunId,generation:gate.generation}};
+ const closing=await readAuthority(env);
+ const torn=!closing.ready||closing.programmeRunId!==gate.programmeRunId||closing.generation!==gate.generation;
+ return {handled:true,torn,proofs,gate:{programmeRunId:gate.programmeRunId,generation:gate.generation}};
 }
 export async function readWriterActive(env){
  const gate=await readAuthority(env);

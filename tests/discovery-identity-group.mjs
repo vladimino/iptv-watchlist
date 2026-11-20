@@ -50,7 +50,7 @@ assert.equal(G.groupChildKey('g'.repeat(72), 10).length, 75, 'a child key stays 
 }
 const HASH = 'a'.repeat(64);
 const group = {id: 'grp-0123456789abcdef', tmdbId: '500', programmeRunId: 'run-1', ids: ['k1', 'k2'], versions: {k1: HASH + ':assign:500', k2: 'b'.repeat(64) + ':assign:500'}};
-const child = (index, id, extra = {}) => ({idempotencyKey: G.groupChildKey(group.id, index), kind: 'identity_assign', state: 'approved', observationKey: id, expectedHash: group.versions[id].split(':')[0], command: {effect: 'assign', tmdbId: '500', group: {id: group.id, size: 2, index, anchorTmdbId: '500', programmeRunId: 'run-1'}}, ...extra});
+const child = (index, id, extra = {}) => ({idempotencyKey: G.groupChildKey(group.id, index), kind: 'identity_assign', state: 'approved', observationKey: id, expectedHash: group.versions[id].split(':')[0], command: {effect: 'assign', tmdbId: '500', group: {id: group.id, size: 2, index, anchorTmdbId: '500', programmeRunId: 'run-1'}}, issued: {idempotencyKey: group.id, ids: group.ids, expiresAt: '2026-11-20T10:00:00.000Z'}, expiresAt: Date.parse('2026-11-20T10:00:00.000Z'), ...extra});
 assert.equal(G.groupBarrier({group, children: [child(1, 'k1'), child(2, 'k2')]}).ok, true);
 assert.equal(G.groupBarrier({group, children: [child(1, 'k1')]}).reason, 'group_incomplete');
 assert.equal(G.groupBarrier({group, children: [child(1, 'k1'), child(2, 'k2', {state: 'running'})]}).reason, 'group_running');
@@ -58,6 +58,15 @@ assert.equal(G.groupBarrier({group, children: [child(1, 'k1'), child(2, 'k2', {o
 assert.equal(G.groupBarrier({group, children: [child(1, 'k1'), child(2, 'k2', {expectedHash: 'c'.repeat(64)})]}).reason, 'group_mismatch');
 assert.equal(G.groupBarrier({group, children: [child(1, 'k1', {kind: 'identity_reject'}), child(2, 'k2')]}).reason, 'group_mismatch');
 assert.equal(G.groupBarrier({group, children: [child(2, 'k2'), child(1, 'k1')]}).reason, 'group_mismatch', 'order is part of the scope');
+// Review: every child carries the SAME stored issuance and expiry, not only the first.
+{
+  const mismatched = extra => G.groupBarrier({group, children: [child(1, 'k1'), child(2, 'k2', extra)]});
+  assert.equal(mismatched({issued: undefined}).reason, 'group_mismatch', 'a child without an issuance fails the barrier');
+  assert.equal(mismatched({issued: {idempotencyKey: group.id, ids: group.ids, expiresAt: '2026-11-20T11:00:00.000Z'}, expiresAt: Date.parse('2026-11-20T11:00:00.000Z')}).failing[0].reason, 'issuance_mismatch', 'a different issuance fails');
+  assert.equal(mismatched({expiresAt: Date.parse('2026-11-20T09:00:00.000Z')}).failing[0].reason, 'issuance_mismatch', 'a different child expiry fails');
+  assert.equal(mismatched({expiresAt: null}).failing[0].reason, 'issuance_mismatch', 'a missing child expiry fails');
+  assert.equal(mismatched({issued: {idempotencyKey: 'other-group', ids: group.ids, expiresAt: '2026-11-20T10:00:00.000Z'}}).failing[0].reason, 'issuance_mismatch', 'an issuance of another group fails');
+}
 assert.equal(G.groupBarrier({group, children: [child(1, 'k1', {state: 'receipt'}), child(2, 'k2')]}).ok, true, 'a receipt child is checked against the issued identity, not the current decision hash');
 assert.equal(G.groupDrift({baseProgrammeRunId: 'r', observed: {programmeRunId: 'r', generation: 5}, lastGeneration: 5}), null);
 assert.equal(G.groupDrift({baseProgrammeRunId: 'r', observed: {programmeRunId: 'r2', generation: 5}, lastGeneration: 5}), 'programme_moved');
@@ -71,9 +80,10 @@ assert.equal(G.groupBasis(''), null);
 assert.equal(G.groupBasis('x'.repeat(201)), null);
 {
   const film = {id: 'tmdb_500', tmdbId: '500', canonicalIdentity: 'tmdb:500', title: 'Тихий берег', year: 2001, runtime: 95};
-  const proof = (decision, extra = {}) => ({record: {key: 'тихий берег|2001', year: 2001, durations: [95], confirmedTmdbId: null, decision, ...extra}, decisionHash: HASH, hashOk: true, current: true});
+  const proof = (decision, extra = {}) => ({record: {key: 'тихий берег|2001', year: 2001, durations: [95], confirmedTmdbId: null, decision, ...extra}, decisionHash: HASH, hashOk: true, current: true, showsComplete: true, ...extra.proof});
   const ok = G.groupAssess({tmdbId: '500', film, proof: proof({status: 'needs_verification'})});
   assert.equal(ok.selectable, true);
+  assert.deepEqual(G.groupAssess({tmdbId: '500', film, proof: proof({status: 'needs_verification'}, {proof: {showsComplete: false}})}).reasons, ['proof_incomplete'], 'a truncated airing proof is never selectable');
   assert.equal(ok.version, HASH + ':assign:500');
   assert.deepEqual(ok.plan.after, {status: 'verified', tmdbId: '500', filmId: 'tmdb_500', rejectedTmdbIds: []});
   const reasons = (decision, extra, f = film) => G.groupAssess({tmdbId: '500', film: f, proof: proof(decision, extra)}).reasons;
@@ -464,6 +474,96 @@ for (const [label, mutate, reason] of [
   assert.deepEqual([clash.status, clash.body.refusal], [409, 'idempotency_conflict']);
   assert.equal(db.sql("SELECT COUNT(*) AS n FROM discovery_intent WHERE idempotency_key LIKE '" + taken + "-%'")[0].n, 1, 'only the pre-existing child is there: the other children were not inserted');
   db.sql("DELETE FROM discovery_intent WHERE idempotency_key LIKE 'group-%'");
+}
+
+// Review P1: an inactive observation is never listed, proved or assigned, even with an unchanged decision hash.
+{
+  for (const [label, damage, restore] of [
+    ['archive residence', "UPDATE discovery_observation SET residence='archive' WHERE source_key='active' AND observation_key=?", "UPDATE discovery_observation SET residence='active' WHERE source_key='active' AND observation_key=?"],
+    ['not seen in the latest snapshot', "UPDATE discovery_observation SET seen_in_latest=0 WHERE source_key='active' AND observation_key=?", "UPDATE discovery_observation SET seen_in_latest=1 WHERE source_key='active' AND observation_key=?"],
+  ]) {
+    await reset();
+    const key = order[0], quoted = text => text.replace('?', "'" + key.replace(/'/g, "''") + "'");
+    const view = await preview();
+    assert.ok(view.body.rows.some(row => row.key === key && row.selectable), label + ': listed and selectable while active');
+    const staged = await stage();
+    db.sql(quoted(damage));
+    const hidden = await preview();
+    assert.equal(hidden.body.rows.some(row => row.key === key), false, label + ': the candidate list does not show it');
+    const run = await post('group-execute', {confirmation: staged.confirmation});
+    assert.equal(run.status, 200, JSON.stringify(run.body));
+    assert.equal(run.body.outcomes[0].outcome, 'refused', label + ': execute refuses that key although the decision hash is unchanged');
+    assert.equal(dec(key).ownerIdentity, undefined, label + ': nothing was written for it');
+    assert.deepEqual(run.body.outcomes.slice(1).map(o => o.outcome), ['applied', 'applied'], label + ': the other keys still apply, nothing is shrunk');
+    const issuedBefore = intents().length;
+    const refused = await post('group-confirm', confirmBody([key], {pin: hidden.body.pin}));
+    assert.notEqual(refused.status, 200, label + ': an inactive key cannot be confirmed');
+    assert.equal(intents().length, issuedBefore, label + ': no child was issued for it');
+    db.sql(quoted(restore));
+    await reset();
+    db.sql("DELETE FROM discovery_intent WHERE idempotency_key LIKE 'group-%'");
+  }
+}
+
+// Review P1: the show proof is bounded and never advertises a truncated list as complete.
+{
+  await reset();
+  const key = order[2];
+  const quoted = "'" + key.replace(/'/g, "''") + "'";
+  const base = db.sql("SELECT COUNT(*) AS n FROM discovery_observation_show WHERE source_key='active' AND observation_key=" + quoted)[0].n;
+  for (let ordinal = base; ordinal < 24; ordinal++) db.sql("INSERT INTO discovery_observation_show (source_key, observation_key, ordinal, channel_id, channel, start_ms, end_ms) VALUES ('active'," + quoted + "," + ordinal + ",'c1','Первый'," + (now + ordinal * 1000) + "," + (now + ordinal * 1000 + 60000) + ")");
+  let largest = 0;
+  const counted = d1Standin(file, {onQuery: text => { if (/FROM discovery_observation_show/.test(text) && !/ROW_NUMBER/.test(text)) largest = -1; }});
+  const view = await preview('500', counted);
+  assert.notEqual(largest, -1, 'every show read is the windowed, per-key bounded query');
+  const row = view.body.rows.find(entry => entry.key === key);
+  assert.ok(row.reasons.includes('proof_incomplete') && row.selectable === false, 'more shows than the cap is a visible incomplete, unselectable proof');
+  assert.ok(row.shows.length <= 20, 'the answer carries at most the cap');
+  const refused = await post('group-confirm', confirmBody([key], {pin: view.body.pin}));
+  assert.equal(refused.status, 409);
+  db.sql("DELETE FROM discovery_observation_show WHERE source_key='active' AND observation_key=" + quoted + " AND ordinal>=" + base);
+  const six = (await preview()).body.rows.find(entry => entry.key === key);
+  assert.equal(six.reasons.includes('proof_incomplete'), false, 'a proof within the cap stays selectable');
+}
+
+// Review P1: a generation that moves during the multi-query read refuses a torn answer.
+{
+  await reset();
+  let fired = false;
+  const racing = d1Standin(file, {onQuery: text => { if (!fired && /FROM discovery_observation_show/.test(text)) { fired = true; db.sql('UPDATE discovery_authority SET generation=generation+1 WHERE id=1'); } }});
+  const view = await preview('500', racing);
+  assert.equal(fired, true);
+  assert.equal(view.body.available, false);
+  assert.equal(view.body.reason, 'stale_read', 'a moved generation during the read is a refused, torn read');
+  assert.equal(view.body.rows.length, 0);
+  const calm = await preview();
+  assert.equal(calm.body.available, true, 'the next read under one generation is fine');
+}
+
+// Review P2: execution barrier over EVERY child's stored issuance, and a receipt is "complete" only for a proven group.
+{
+  const group = await stage();
+  const second = G.groupChildKey(group.group.id, 2);
+  const stored = JSON.parse(db.sql("SELECT issued_json FROM discovery_intent WHERE idempotency_key='" + second + "'")[0].issued_json);
+  db.sql("UPDATE discovery_intent SET issued_json='" + JSON.stringify({...stored, ids: [...stored.ids].reverse()}) + "' WHERE idempotency_key='" + second + "'");
+  const baseline = snapshot();
+  const run = await post('group-execute', {confirmation: group.confirmation});
+  assert.deepEqual([run.status, run.body.refusal], [409, 'group_mismatch'], 'a child with another issuance blocks the whole run');
+  assert.equal(run.body.failing[0].reason, 'issuance_mismatch');
+  assert.equal(snapshot(), baseline, 'nothing was written');
+  const receipt = await send('group-receipt?groupKey=' + group.group.id);
+  assert.equal(receipt.body.complete, false, 'N rows with a mismatched issuance are not a proven group');
+  assert.equal(receipt.body.confirmation, null);
+  db.sql("UPDATE discovery_intent SET issued_json='" + JSON.stringify(stored) + "' WHERE idempotency_key='" + second + "'");
+  db.sql("UPDATE discovery_intent SET expires_at=expires_at+1000 WHERE idempotency_key='" + second + "'");
+  const expiry = await post('group-execute', {confirmation: group.confirmation});
+  assert.equal(expiry.body.failing[0].reason, 'issuance_mismatch', 'a different child expiry blocks the run');
+  db.sql("UPDATE discovery_intent SET expires_at=expires_at-1000 WHERE idempotency_key='" + second + "'");
+  const proven = await send('group-receipt?groupKey=' + group.group.id);
+  assert.equal(proven.body.complete, true);
+  assert.deepEqual(proven.body.confirmation.ids, order, 'a proven group returns its ORIGINAL issued scope for a read-only recovery');
+  const ok = await post('group-execute', {confirmation: proven.body.confirmation});
+  assert.equal(ok.body.state, 'applied', 'the recovered confirmation executes the original exact scope');
 }
 
 console.log('discovery-identity-group ok');

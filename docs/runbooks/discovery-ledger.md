@@ -112,8 +112,9 @@ A production write of up to 10 decisions; agents do not run it. [ADR 0181](../ad
 2. Read the partial candidate list: counts, `more`, `dropped`, and each row's before/after. Tick only the keys you have checked, write the basis, tick the box.
 3. «Подготовить» shows the exact selected set with versions. «Подтвердить» issues all children at once; «Выполнить» writes them one by one.
 4. Read the per-key receipts. `applied` is written; `conflict`, `refused`, `skipped`, `expired` and `not_attempted` wrote nothing for that key; `unknown` stops the run: read the receipt again, never resubmit blindly.
-5. A partial result is valid. Replay finishes only children without a receipt and never adds keys.
-6. Do not start a chunk from this page. **Undo is per key** through the revoke page; code rollback does not revert D1 rows.
+5. If the answer is lost (timeout, network, reload), press «Проверить результат записи»: it only reads the stored group. A group that was written but not executed offers the original scope to continue; one that was never stored says so and nothing was written. Never submit a different selection under the same expectation.
+6. A partial result is valid. Replay finishes only children without a receipt and never adds keys.
+7. Do not start a chunk from this page. **Undo is per key** through the revoke page; code rollback does not revert D1 rows.
 
 ## Rollback
 

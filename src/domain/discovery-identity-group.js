@@ -11,13 +11,14 @@ export const GROUP_ANCHOR_MAX = 4;
 export const GROUP_ANCHOR_FETCH = 26;
 export const GROUP_ANCHOR_USED = GROUP_ANCHOR_FETCH - 1;
 export const GROUP_CANDIDATE_MAX = 50;
+export const GROUP_SHOW_CAP = 20;
 export const GROUP_KEY_PATTERN = /^[A-Za-z0-9_-]{16,72}$/;
 export const GROUP_RUN_BUDGET_MS = 60000;
 export const GROUP_RUNTIME_MIN_MINUTES = 10;
 export const GROUP_RUNTIME_RATIO = 0.15;
 export const GROUP_BASIS_MAX = 200;
 export const GROUP_REASONS = [
-  'no_decision', 'runtime_conflict', 'revoked_fence', 'other_owner_assignment', 'scorer_other_id', 'proof_torn', 'proof_stale', 'proof_missing',
+  'no_decision', 'runtime_conflict', 'revoked_fence', 'other_owner_assignment', 'scorer_other_id', 'proof_torn', 'proof_stale', 'proof_incomplete', 'proof_missing',
   'film_absent', 'film_not_movie', 'group_too_large', 'invalid_selection', 'group_selection_changed', 'stale_pin', 'basis_required',
   'writer_active', 'programme_moved', 'generation_moved', 'lease_lost', 'group_incomplete', 'group_mismatch', 'group_running',
   'budget_exhausted', 'expired', 'not_authoritative',
@@ -103,6 +104,7 @@ export function groupAssess({tmdbId, film, proof}) {
   const record = proof.record;
   const decision = plainObject(record.decision) ? record.decision : null;
   if (proof.current !== true) reasons.push('proof_stale');
+  if (proof.showsComplete !== true) reasons.push('proof_incomplete');
   if (!decision) reasons.push('no_decision');
   else if (proof.hashOk !== true || typeof proof.decisionHash !== 'string') reasons.push('proof_torn');
   const command = identityCommand({...record, decision: decision || {}, decisionHash: proof.decisionHash}, {effect: 'assign', tmdbId: id, basis: 'group review'}, film);
@@ -175,7 +177,14 @@ export function groupBarrier({group, children}) {
       || command.effect !== 'assign' || String(command.tmdbId) !== String(group.tmdbId)
       || member.id !== group.id || member.size !== ids.length || member.index !== index + 1 || String(member.anchorTmdbId) !== String(group.tmdbId) || member.programmeRunId !== group.programmeRunId
       || !expected || child?.expectedHash !== expected || (child?.state !== 'approved' && child?.state !== 'receipt' && child?.state !== 'running');
+    // Every child must carry the SAME stored group issuance: same issued object bound to this group and member set, and the same expiry.
+    const head = rows[0];
+    const issued = plainObject(child?.issued) ? child.issued : null;
+    const sameIssuance = issued !== null && plainObject(head?.issued) && JSON.stringify(issued) === JSON.stringify(head.issued)
+      && issued.idempotencyKey === group.id && Array.isArray(issued.ids) && issued.ids.length === ids.length && issued.ids.every((value, position) => value === ids[position])
+      && Number.isFinite(child?.expiresAt) && child.expiresAt === head?.expiresAt && child.expiresAt === Date.parse(issued.expiresAt);
     if (wrong) failing.push({id, reason: 'child_mismatch'});
+    else if (!sameIssuance) failing.push({id, reason: 'issuance_mismatch'});
     if (child?.state === 'running') running = true;
   });
   if (failing.length) return refuse('group_mismatch', failing);

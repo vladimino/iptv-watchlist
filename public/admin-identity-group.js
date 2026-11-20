@@ -2,8 +2,54 @@
 // State lives in memory. The only requests are the preview GET, the two POSTs and the receipt GET of the group-* routes. Nothing is
 // requested on load: a link may prefill the TMDB id, the owner presses the button. Nothing is selected for the owner and a write is
 // never repeated automatically.
-const gpLive = {preview: null, selected: new Set(), confirmation: null, members: null, result: null, busy: false, seq: 0};
+const gpLive = {pending: null, groupKey: null, preview: null, selected: new Set(), confirmation: null, members: null, result: null, busy: false, seq: 0};
 const GP_CAP = 10;
+const GP_STORE = 'iptv-group-pending';
+
+// The group key is generated and kept BEFORE the confirmation is sent, so an unknown outcome (timeout, lost response, reload) never
+// loses the only handle on the stored group. It is kept in this tab only; nothing is requested from it until the owner presses the button.
+function gpRemember(value) {
+  try { if (value) sessionStorage.setItem(GP_STORE, JSON.stringify(value)); else sessionStorage.removeItem(GP_STORE); } catch { /* no storage: the page still works */ }
+}
+function gpRecall() {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(GP_STORE) || 'null');
+    return parsed && typeof parsed.groupKey === 'string' && typeof parsed.tmdbId === 'string' ? parsed : null;
+  } catch { return null; }
+}
+function gpUncertain(result) {
+  return result.status === 0 || result.status >= 500 || result.error === 'in_progress' || result.error === 'idempotency_conflict';
+}
+function gpPending() {
+  const node = gpEl('group-recover');
+  const pending = gpLive.pending;
+  node.hidden = !pending;
+  gpEl('group-recover-text').textContent = pending ? 'Исход записи группы неизвестен. Ничего не повторяется само: проверьте результат, он читается из D1.' : '';
+}
+// Read-only: the stored children of the group. A proven group with receipt-less children can then be continued with its ORIGINAL scope.
+async function gpRecover() {
+  const pending = gpLive.pending;
+  if (!pending || gpLive.busy) return null;
+  gpError('');
+  gpLive.busy = true; gpPaint();
+  const receipt = await groupReceiptGet(pending.groupKey);
+  gpLive.busy = false;
+  if (!receipt.ok || !receipt.body || !Array.isArray(receipt.body.outcomes)) {
+    gpError(receipt.status === 404 ? 'Подтверждение этого набора не сохранилось: ничего не записано. Набор можно подтвердить заново.' : gpRefusal(receipt));
+    if (receipt.status === 404) { gpLive.pending = null; gpRemember(null); }
+    gpPaint();
+    return receipt;
+  }
+  const body = receipt.body;
+  const open = body.outcomes.filter(item => item.outcome === 'pending').length;
+  gpLive.result = {state: body.outcomes.some(item => item.outcome === 'unknown') ? 'unknown' : open ? 'partial' : 'applied', outcomes: body.outcomes, readback: body};
+  if (body.complete && body.confirmation && open && !body.outcomes.some(item => item.outcome === 'unknown' || item.outcome === 'missing')) {
+    gpLive.confirmation = body.confirmation; gpLive.members = body.outcomes.map(item => ({key: item.key, index: item.index, plan: null}));
+  } else { gpLive.confirmation = null; gpLive.members = null; }
+  if (!open) { gpLive.pending = null; gpRemember(null); }
+  gpPaint();
+  return receipt;
+}
 
 function gpEl(id) {return document.querySelector('#' + id);}
 function gpShow(id, shown) {const node = gpEl(id); if (node) node.hidden = !shown;}
@@ -73,18 +119,24 @@ function gpToggle(event) {
   if (box.checked) { if (gpLive.selected.size < GP_CAP) gpLive.selected.add(key); else box.checked = false; }
   else gpLive.selected.delete(key);
   gpEl('group-accept').checked = false;
+  if (!gpLive.pending) gpLive.groupKey = null;
   gpPaint();
 }
 async function gpConfirm() {
   const preview = gpLive.preview;
   if (!preview || !preview.available || gpLive.busy || gpLive.confirmation || !gpLive.selected.size) return null;
   gpError('');
+  if (!gpLive.groupKey) gpLive.groupKey = groupIdempotencyKey();
+  gpLive.pending = {groupKey: gpLive.groupKey, tmdbId: preview.tmdbId};
+  gpRemember(gpLive.pending);
   gpLive.busy = true; gpPaint();
-  const result = await groupConfirmPost({tmdbId: preview.tmdbId, keys: [...gpLive.selected], basis: gpEl('group-basis').value.trim(), pin: preview.pin});
+  const result = await groupConfirmPost({tmdbId: preview.tmdbId, keys: [...gpLive.selected], basis: gpEl('group-basis').value.trim(), pin: preview.pin}, {idempotencyKey: gpLive.groupKey});
   gpLive.busy = false;
-  if (result.ok && result.body && result.body.confirmation) { gpLive.confirmation = result.body.confirmation; gpLive.members = result.body.members; gpPaint(); gpEl('group-execute-button').focus(); return result; }
+  if (result.ok && result.body && result.body.confirmation) { gpPending(); gpLive.confirmation = result.body.confirmation; gpLive.members = result.body.members; gpPaint(); gpEl('group-execute-button').focus(); return result; }
   gpError(gpRefusal(result));
   gpEl('group-accept').checked = false;
+  if (gpUncertain(result)) { gpPending(); gpPaint(); return gpRecover(); }
+  gpLive.pending = null; gpLive.groupKey = null; gpRemember(null); gpPending();
   if (result.error === 'stale_pin') return gpPreview(true);
   gpPaint();
   return result;
@@ -97,7 +149,7 @@ async function gpExecute() {
   const result = await groupExecutePost(confirmation);
   gpLive.busy = false;
   if (result.ok && result.body && Array.isArray(result.body.outcomes)) {
-    gpLive.confirmation = null; gpLive.members = null;
+    gpLive.confirmation = null; gpLive.members = null; gpLive.pending = null; gpLive.groupKey = null; gpRemember(null); gpPending();
     gpLive.result = {state: result.body.state, outcomes: result.body.outcomes};
     gpEl('group-accept').checked = false;
     // Readback: the stored per-key children, read from D1, not the answer above.
@@ -110,6 +162,7 @@ async function gpExecute() {
   }
   // A refusal or an unknown outcome is shown as it is. A write is never repeated from here.
   gpError(gpRefusal(result));
+  if (gpUncertain(result)) { gpPending(); gpPaint(); return gpRecover(); }
   if (result.error !== 'lease_held' && result.error !== 'writer_active') { gpLive.confirmation = null; gpLive.members = null; }
   gpPaint();
   return result;
@@ -128,6 +181,9 @@ function gpStart() {
   gpEl('group-confirm-form').addEventListener('submit', event => { event.preventDefault(); gpConfirm(); });
   gpEl('group-execute-button').addEventListener('click', () => { gpExecute(); });
   gpEl('group-cancel-button').addEventListener('click', gpCancel);
+  gpEl('group-recover-button').addEventListener('click', () => { gpRecover(); });
+  gpLive.pending = gpRecall(); gpPending();
+  if (gpLive.pending && !gpEl('group-tmdb').value) gpEl('group-tmdb').value = gpLive.pending.tmdbId;
   gpEl('group-accept').addEventListener('change', gpPaint);
   gpEl('group-basis').addEventListener('input', gpPaint);
   gpEl('group-tmdb').addEventListener('input', () => { gpLive.preview = null; gpLive.selected = new Set(); gpLive.confirmation = null; gpLive.members = null; gpPaint(); });

@@ -88,7 +88,7 @@ assert.match(run("groupRowsHtml(hostile, new Set(['<script>k</script>|2001']), t
     elements.set(id, element);
     return element;
   };
-  for (const id of ['group-form', 'group-tmdb', 'group-preview-button', 'group-loading', 'group-error', 'group-film', 'group-coverage', 'group-writer', 'group-list-box', 'group-list', 'group-count', 'group-confirm-form', 'group-basis', 'group-accept', 'group-accept-text', 'group-confirm-button', 'group-staged', 'group-plan', 'group-execute-button', 'group-cancel-button', 'group-result']) make(id);
+  for (const id of ['group-form', 'group-tmdb', 'group-preview-button', 'group-loading', 'group-error', 'group-film', 'group-coverage', 'group-writer', 'group-list-box', 'group-list', 'group-count', 'group-confirm-form', 'group-basis', 'group-accept', 'group-accept-text', 'group-confirm-button', 'group-staged', 'group-plan', 'group-execute-button', 'group-cancel-button', 'group-result', 'group-recover', 'group-recover-text', 'group-recover-button']) make(id);
   const requests = [];
   const row = (key, selectable = true) => ({key, observation: {title: key, year: 2001, durations: [95]}, decision: {status: 'needs_verification'}, shows: [], selectable, reasons: selectable ? [] : ['year_conflict'], info: [], runtime: null, yearGap: 0, plan: {before: {status: 'needs_verification'}, after: {status: 'verified', tmdbId: '500'}}, version: 'v'});
   const rows = Array.from({length: 12}, (_, i) => row('k' + String(i).padStart(2, '0'))).concat(row('zz', false));
@@ -149,6 +149,54 @@ assert.match(run("groupRowsHtml(hostile, new Set(['<script>k</script>|2001']), t
   assert.match(el('group-error').textContent, /k00: Длительность наблюдения расходится/, 'the failing key and its reason are shown');
   assert.equal(el('group-staged').hidden, true, 'a refused confirmation stages nothing');
   assert.equal(el('group-accept').checked, false);
+  // Review P1: a lost response never loses the group. The key exists before the POST, is kept, and nothing is repeated by itself.
+  const attempt = async () => { el('group-basis').value = 'b'; el('group-basis').fire('input'); el('group-accept').checked = true; el('group-accept').fire('change'); el('group-confirm-form').fire('submit'); await wait(); await wait(); };
+  const count = route => requests.filter(item => item === route).length;
+  answers['group-confirm'] = () => { throw new Error('network lost'); };
+  answers['group-receipt'] = () => ({ok: false, status: 404, json: async () => ({error: 'not_found'})});
+  let postsBefore = count('group-confirm');
+  await attempt();
+  assert.equal(count('group-confirm'), postsBefore + 1, 'one confirm POST, no automatic retry');
+  const lostKey = bodies['group-confirm'].idempotencyKey;
+  assert.match(lostKey, /^group-[0-9a-f]{36}$/, 'the key was made before the POST');
+  assert.equal(requests[requests.length - 1], 'group-receipt', 'after an unknown outcome the page only READS the stored group');
+  assert.match(el('group-error').textContent, /ничего не записано/, 'a missing group is reported as not written');
+  await attempt();
+  assert.equal(bodies['group-confirm'].idempotencyKey, lostKey, 'a manual second submit reuses the SAME group key (idempotent), not an unrelated group');
+  // The confirm landed in D1 but the response was lost: the receipt proves it and offers the ORIGINAL scope for a replay.
+  const original = {capability: 'discovery_identity_group_assign', idempotencyKey: lostKey, ids: ['k00']};
+  answers['group-receipt'] = () => ({ok: true, status: 200, json: async () => ({complete: true, groupKey: lostKey, confirmation: original, outcomes: [{key: 'k00', index: 1, state: 'approved', outcome: 'pending'}]})});
+  postsBefore = count('group-confirm');
+  await attempt();
+  assert.equal(count('group-confirm'), postsBefore + 1);
+  assert.equal(el('group-staged').hidden, false, 'a recovered, proven group can be continued by the owner');
+  answers['group-execute'] = () => { throw new Error('network lost'); };
+  const executes = count('group-execute');
+  el('group-execute-button').fire('click'); await wait(); await wait();
+  assert.deepEqual(bodies['group-execute'].confirmation, original, 'the replay carries the original issued scope');
+  assert.equal(count('group-execute'), executes + 1, 'a lost execute response is not repeated automatically');
+  assert.equal(requests[requests.length - 1], 'group-receipt', 'the stored children are read back instead');
+  assert.match(el('group-result').innerHTML, /group-outcomes/, 'the stored per-key state is shown');
+}
+
+// A reload keeps the handle: nothing is requested on load, the owner presses one button, and only the receipt is read.
+{
+  const elements = new Map();
+  const make = id => { const listeners = new Map(); const element = {id, hidden: false, disabled: false, value: '', checked: false, textContent: '', innerHTML: '', focus() {}, setAttribute() {}, addEventListener(type, fn) { listeners.set(type, [...(listeners.get(type) || []), fn]); }, fire(type) { for (const fn of listeners.get(type) || []) fn({preventDefault() {}, target: element}); }, querySelectorAll() { return []; }}; elements.set(id, element); return element; };
+  for (const id of ['group-form', 'group-tmdb', 'group-preview-button', 'group-loading', 'group-error', 'group-film', 'group-coverage', 'group-writer', 'group-list-box', 'group-list', 'group-count', 'group-confirm-form', 'group-basis', 'group-accept', 'group-accept-text', 'group-confirm-button', 'group-staged', 'group-plan', 'group-execute-button', 'group-cancel-button', 'group-result', 'group-recover', 'group-recover-text', 'group-recover-button']) make(id);
+  const store = new Map([['iptv-group-pending', JSON.stringify({groupKey: 'group-' + 'a'.repeat(36), tmdbId: '500'})]]);
+  const requests = [];
+  const page = vm.createContext({URLSearchParams, JSON, Math, Array, Set, Uint8Array, String, Promise, Date, crypto: webcrypto, location: {search: ''},
+    sessionStorage: {getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value), removeItem: key => store.delete(key)},
+    document: {querySelector: selector => elements.get(selector.slice(1)) || null},
+    fetch: async url => { requests.push(String(url).split('/api/admin/discovery-recovery/')[1]); return {ok: true, status: 200, json: async () => ({complete: true, confirmation: {idempotencyKey: 'x'}, outcomes: [{key: 'k00', index: 1, state: 'receipt', outcome: 'applied'}]})}; }});
+  vm.runInContext(['src/admin/identity-group-client.js', 'src/admin/identity-group-view.js', 'public/admin-identity-group.js'].map(file => fs.readFileSync(file, 'utf8')).join('\n'), page);
+  assert.deepEqual(requests, [], 'nothing is requested on load, not even the recovery read');
+  assert.equal(elements.get('group-recover').hidden, false, 'an unfinished group is announced after a reload');
+  assert.equal(elements.get('group-tmdb').value, '500');
+  elements.get('group-recover-button').fire('click'); await new Promise(resolve => setTimeout(resolve, 0)); await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(requests, ['group-receipt?groupKey=group-' + 'a'.repeat(36)], 'one read-only receipt GET, no POST');
+  assert.equal(store.has('iptv-group-pending'), false, 'a finished group is forgotten');
 }
 
 // The two read-only entries: the queue row and the Limbo detail.

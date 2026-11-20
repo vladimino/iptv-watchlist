@@ -24,7 +24,7 @@ function igRecord(proof){
 function igAssess(tmdbId,film,proof){
  const record=igRecord(proof);
  if(!record)return DiscoveryIdentityGroup.groupAssess({tmdbId,film,proof:null});
- const assessed=DiscoveryIdentityGroup.groupAssess({tmdbId,film,proof:{record,decisionHash:proof.decisionHash,hashOk:proof.hashOk===true,current:proof.observation.belongsToPublishedRun===true}});
+ const assessed=DiscoveryIdentityGroup.groupAssess({tmdbId,film,proof:{record,decisionHash:proof.decisionHash,hashOk:proof.hashOk===true,current:proof.observation.belongsToPublishedRun===true,showsComplete:proof.showsComplete===true}});
  return assessed;
 }
 function igFilmTitles(film){
@@ -55,9 +55,11 @@ async function igObserve(env,tmdbId){
  const ranges=anchors.map(anchor=>({anchor,...DiscoveryIdentityGroup.groupRange(anchor)}));
  const read=await DiscoveryAuthority.readGroupCandidates(env,ranges,DiscoveryIdentityGroup.GROUP_ANCHOR_FETCH);
  if(!read.handled)return {error:'not_authoritative'};
+ if(read.torn)return {error:'stale_read'};
  const merge=DiscoveryIdentityGroup.groupMerge(read.perAnchor);
- const proofRead=await DiscoveryAuthority.readGroupProofs(env,merge.candidates.map(item=>item.key),DiscoveryIdentityGroup.GROUP_CANDIDATE_MAX);
+ const proofRead=await DiscoveryAuthority.readGroupProofs(env,merge.candidates.map(item=>item.key),DiscoveryIdentityGroup.GROUP_CANDIDATE_MAX,DiscoveryIdentityGroup.GROUP_SHOW_CAP);
  if(!proofRead.handled)return {error:'not_authoritative'};
+ if(proofRead.torn||proofRead.gate.programmeRunId!==read.gate.programmeRunId||proofRead.gate.generation!==read.gate.generation)return {error:'stale_read'};
  const writer=await DiscoveryAuthority.readWriterActive(env);
  const rows=merge.candidates.map(candidate=>{
   const proof=proofRead.proofs[candidate.key];
@@ -195,7 +197,8 @@ async function igExecute(request,env,url){
    const observed=await DiscoveryAuthority.readGateSnapshot(env);
    const drift=DiscoveryIdentityGroup.groupDrift({baseProgrammeRunId:group.programmeRunId,observed,lastGeneration:last});
    if(drift){stop=drift;outcomes.push({...at,outcome:'not_attempted',reason:drift});continue;}
-   const proofRead=await DiscoveryAuthority.readGroupProofs(env,[key],1);
+   const proofRead=await DiscoveryAuthority.readGroupProofs(env,[key],1,DiscoveryIdentityGroup.GROUP_SHOW_CAP);
+   if(proofRead.torn){stop='stale_read';outcomes.push({...at,outcome:'not_attempted',reason:stop});continue;}
    const proof=proofRead.proofs?.[key];
    const assessment=igAssess(group.tmdbId,found.film,proof);
    if(!assessment.selectable){outcomes.push({...at,outcome:'refused',reason:assessment.reasons[0]||'not_eligible'});continue;}
@@ -228,7 +231,12 @@ async function igReceipt(env,url){
   const child=read.intents.find(item=>item.idempotencyKey===key);
   return {key:child?.observationKey??null,index:index+1,state:child?child.state:'missing',outcome:child?child.state==='receipt'?'applied':child.state==='running'?'unknown':'pending':'missing',receipt:child?.receipt??null};
  });
- return json({groupKey,size,tmdbId:first.command.tmdbId,complete:read.intents.length===size,outcomes});
+ // complete means a PROVEN group: every child present, bound to the same stored issuance and member set (the barrier), not only N rows.
+ const ids=read.intents.map(child=>child.observationKey);
+ const proven=read.intents.length===size&&first.issued&&Array.isArray(first.issued.ids)?DiscoveryIdentityGroup.groupBarrier({group:{id:groupKey,tmdbId:String(first.command.tmdbId),programmeRunId:first.command.group.programmeRunId,ids:first.issued.ids,versions:Object.fromEntries(read.intents.map(child=>[child.observationKey,String(child.expectedHash)+':x']))},children:read.intents}):{ok:false,reason:'group_incomplete'};
+ const complete=proven.ok===true||proven.reason==='group_running';
+ // The stored issuance of a proven group lets the owner replay the receipt-less children with the ORIGINAL exact scope after a lost response or a reload.
+ return json({groupKey,size,tmdbId:first.command.tmdbId,complete,confirmation:complete?first.issued:null,outcomes});
 }
 async function adminIdentityGroupRoute(request,env,url,action){
  try{

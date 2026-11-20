@@ -165,6 +165,7 @@ Not covered: more than one observation ([AIR-131](https://trello.com/c/0WtLPRnH)
 | Eligibility | Per key the unchanged single-key gate over a fresh complete D1 proof (decision, observation, `identityCommand`, `catalogueFilmTrust`) plus a runtime check (more than max(10 minutes, 15%) apart refuses; an unknown runtime is shown, not blocked), the revoked-assign fence and the owner-assignment and scorer conflicts. Preview is eligible if any key is |
 | Confirmation | The scope is exactly the selected keys with their versions: `affected` must equal `selected`; an unknown, excluded or stale key refuses the whole request and the scope is never shrunk. All N children are stored in one D1 batch |
 | Execution | A barrier proves every child is issued before the first write. Then sequential `DiscoveryAuthority.ownerDecision` under one lease with a drift fence (programme run unchanged, generation moved only by this run's own writes), lease renewal before each key, expiry checks and a 60-second budget. `running` or `unknown` stops the run |
+| Barrier | Every one of the N children must carry the same stored issuance (same issued object, group id, ordered member set) and the same expiry; a mismatch refuses the whole run before any write |
 | Replay | Finishes only children without a receipt, validated against the issued identity; never creates or extends children |
 | Receipt | Per key; honest partial results; no all-or-nothing |
 
