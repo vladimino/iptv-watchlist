@@ -8,6 +8,7 @@ const w=await flowWorld({films:8});assert.equal((await w.api('queue/reconcile',{
 const records=w.records,env=w.env,ctx=w.ctx;ctx.env=env;
 let blocked=()=>false;
 {const bucket=env.BUCKET,put=bucket.put;bucket.put=async(key,value,options)=>{if(blocked(key))throw new Error('storage outage');return put.call(bucket,key,value,options);};
+ bucket.delete=async key=>{records.delete(key);};
  bucket.list=async({prefix=''})=>({objects:[...records.keys()].filter(key=>key.startsWith(prefix)).map(key=>({key})),truncated:false});}
 const call=code=>vm.runInContext(code,ctx);
 const api=async(path,body,{method='POST',requestId=null}={})=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json',...(requestId?{'X-Request-Id':requestId}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:response.status,data:await response.json()};};
@@ -79,21 +80,33 @@ assert.equal(filmTables(),state0,'a skipped start changes no run, lease or queue
  try{const lost=await start('req-lost');assert.equal(lost.data.status,'lease_lost');}finally{ctx.runnerLease=original;}
  assert.equal(skipped().length,before+1,'a status other than already_running is not a skipped start');}
 
-// 6. Review of PR #805, dual failure: the journal AND the outbox index are down at the refusal. The answer is unchanged, nothing is parked (so nothing can be orphaned), and the next starts stay healthy.
+// 6. Review of PR #805, failures of the journal, the outbox index and the park: the answer is unchanged, no record is orphaned, and no request id ever produces two journal items.
 {
  assert.deepEqual(orphans(),[]);
  const h2=await start('req-h2');assert.equal(h2.data.status,'running',JSON.stringify(h2.data).slice(0,160));
  blocked=key=>key.startsWith('events/items/')||key===OUTBOX;
  const dual=await start('req-dual');assert.equal(dual.status,200);assert.equal(dual.data.status,'already_running');assert.equal(dual.data.runId,h2.data.runId);
  blocked=()=>false;
- assert.equal(records.has(STOP+'skipped-req-dual.json'),false,'with the index unwritable nothing is parked');assert.deepEqual(orphans(),[],'no orphaned record');
+ assert.equal(records.has(STOP+'skipped-req-dual.json'),false,'an unindexed record whose delivery failed is removed again');assert.deepEqual(orphans(),[],'no orphaned record');
  assert.equal(skipped().some(e=>e.requestId==='req-dual'),false,'the limitation: journal and index both down loses this one Event, never the answer');
- // the index alone is down: the Event is still journaled directly, nothing is parked, no orphan
+ // the index alone is down (review of PR #805, round 2): the record is still parked, the Event is journaled once and marked delivered, and a REPLAY of the same request id after the
+ // index recovers, at a different clock millisecond, is still one journal item under the same key.
  blocked=key=>key===OUTBOX;const idx=await start('req-index-down');blocked=()=>false;assert.equal(idx.data.status,'already_running');
- assert.equal(skipped().filter(e=>e.requestId==='req-index-down').length,1,'journaled directly');assert.equal(records.has(STOP+'skipped-req-index-down.json'),false);assert.deepEqual(orphans(),[]);
+ {const stored=skipped().filter(e=>e.requestId==='req-index-down');assert.equal(stored.length,1,'journaled once');
+  const parked=records.get(STOP+'skipped-req-index-down.json');assert.ok(parked&&parked.delivered===true&&parked.event.at===stored[0].at,'the record persisted the identity and the time');
+  const keys=()=>[...records.keys()].filter(k=>k.startsWith('events/items/')&&k.endsWith('-enrichment-skipped-req-index-down.json'));
+  const before=keys();assert.equal(before.length,1);
+  await new Promise(r=>setTimeout(r,25));
+  const replay=await start('req-index-down');assert.equal(replay.data.status,'already_running');
+  assert.deepEqual(keys(),before,'the replay of the same request id wrote no second journal item and no new key');
+  assert.equal(skipped().filter(e=>e.requestId==='req-index-down').length,1);assert.deepEqual(orphans(),[]);}
+ // the index AND the journal are down for a request that is replayed after recovery: nothing was recorded, so the replay records it once
+ blocked=key=>key.startsWith('events/items/')||key===OUTBOX;await start('req-dual-replay');blocked=()=>false;
+ assert.equal(records.has(STOP+'skipped-req-dual-replay.json'),false,'the unindexed record was removed again');assert.equal(skipped().some(e=>e.requestId==='req-dual-replay'),false);
+ await start('req-dual-replay');assert.equal(skipped().filter(e=>e.requestId==='req-dual-replay').length,1,'a replay after recovery records it exactly once');assert.deepEqual(orphans(),[]);
  // the park alone fails after the index entry: journaled directly, the entry is `absent` and leaves the index at the next sweep
  blocked=key=>key===STOP+'skipped-req-park-down.json';const pd=await start('req-park-down');blocked=()=>false;assert.equal(pd.data.status,'already_running');
- assert.equal(skipped().filter(e=>e.requestId==='req-park-down').length,1,'journaled directly');assert.deepEqual(orphans(),[]);
+ assert.equal(skipped().some(e=>e.requestId==='req-park-down'),false,'a failed park writes no journal item (no identity to deduplicate on)');assert.deepEqual(orphans(),[]);
  // the journal is down, the index works: parked and indexed; a LATER start with a different request id delivers it
  blocked=key=>key.startsWith('events/items/');const down=await start('req-journal-down');blocked=()=>false;assert.equal(down.data.status,'already_running');
  assert.ok(records.get(OUTBOX)?.pending?.[STOP+'skipped-req-journal-down.json'],'indexed');assert.equal(skipped().some(e=>e.requestId==='req-journal-down'),false);assert.deepEqual(orphans(),[]);

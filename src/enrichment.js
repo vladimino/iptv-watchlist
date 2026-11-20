@@ -1072,21 +1072,26 @@ async function clearEventOutbox(env,key){
  try{await mergeStoredJSON(env,EVENT_OUTBOX_KEY,{pending:{}},index=>{const pending=isObject(index?.pending)?index.pending:{};if(!pending[key])return null;const next={...pending};delete next[key];return {pending:next,updatedAt:new Date().toISOString()};});}catch{/* the next sweep settles it */}
 }
 // Order is the guarantee (review of PR #805): the outbox index entry is written BEFORE the record is parked, so a parked record never exists without an entry that finds it and a failure of both the
-// journal and the index cannot orphan a stored record. If the index cannot be written, nothing is parked: the one journal write is tried directly and the Event is lost only when the journal is down too
-// (a stated limitation, ADR 0180). An entry whose record never got parked is `absent` for the next sweep and leaves the index.
+// journal and the index cannot orphan a stored record. The parked record is also the request's idempotency identity (it holds `at`, which is part of the journal key): no journal item is ever written for
+// a request whose record is not parked, so a replay of one request id can never produce a second item. If the index cannot be written the record is still parked and delivered once; when that delivery
+// fails the record is deleted again (never left unindexed), so the Event is lost only when the journal AND the index are both down (a stated limitation, ADR 0180). A park that fails after the index
+// entry writes nothing: the entry, whose record is `absent`, leaves the index at the next sweep.
 async function recordSkippedStart(env,{requestId,body,holder}){
  try{
   const id=safeRequestId(requestId)||crypto.randomUUID(),key=SKIPPED_EVENT_PREFIX+id+'.json';
   let record=await loadJSON(env,key);
   if(record?.delivered)return true;
+  const indexed=await noteEventOutbox(env,key),created=!record;
   if(!record){
-   const event=skippedStartEvent({requestId:id,body,holder,at:new Date().toISOString()});
-   if(!await noteEventOutbox(env,key)){try{await writeEvent(env,event);return true;}catch{return false;}}
-   record={event};
+   record={event:skippedStartEvent({requestId:id,body,holder,at:new Date().toISOString()})};
    try{const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key)||record;}
-   catch{try{await writeEvent(env,event);await clearEventOutbox(env,key);return true;}catch{return false;}}
-  }else await noteEventOutbox(env,key);
-  const written=await flushStopEvent(env,record,key);if(written)await clearEventOutbox(env,key);return written;
+   catch{return false;}
+  }
+  if(record.delivered){if(indexed)await clearEventOutbox(env,key);return true;}
+  const written=await flushStopEvent(env,record,key);
+  if(written){if(indexed)await clearEventOutbox(env,key);return true;}
+  if(created&&!indexed){try{await env.BUCKET.delete(key);}catch{/* an unindexed record that cannot be removed is the one residual case, see ADR 0180 */}}
+  return false;
  }catch{return false;}
 }
 // The read side of the outbox: counts only, one small object, no write.
