@@ -1,9 +1,9 @@
 # ADR 0182: One confirmed-progress policy for Predictions, shared by the Footer and the Cloudflare Monitor, alerts within about two hours
 
-**Status:** Proposed (the owner's goal is approved; the exact thresholds below are the Executor's choice within it and need owner acceptance)  
+**Status:** Accepted  
 **Original decision date:** 2026-11-20 (owner goal on [AIR-556](https://trello.com/c/ZjqzW7EB))  
 **Recorded at:** 2026-11-20  
-**Approval source:** [AIR-556 card scope and owner decision, 20 November 2026 (Europe/Madrid)](https://trello.com/c/ZjqzW7EB); threshold acceptance pending  
+**Approval source:** [AIR-556, explicit Product Owner approval of ADR 0182, its 60-minute threshold, single-snapshot Monitor alert, Footer wording and expected per-film failure behavior, 20 November 2026 (Europe/Madrid)](https://trello.com/c/ZjqzW7EB)  
 **Related work:** [AIR-556](https://trello.com/c/ZjqzW7EB); [AIR-349](https://trello.com/c/VUyampoh); [AIR-389](https://trello.com/c/DKDuJnkk); [AIR-548](https://trello.com/c/lv04pDu2); [ADR 0095](0095-cloudflare-native-production-monitor.md)  
 **Supersedes:** None. It **amends** [ADR 0095](0095-cloudflare-native-production-monitor.md) decisions 4 and 5 for the `predictions` stream only (the 3-hour delayed and 6-hour degraded limits, and two-snapshot confirmation for that one issue key). ADR 0095 stays Accepted for every other stream.  
 **Superseded by:** None
