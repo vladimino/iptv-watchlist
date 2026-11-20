@@ -592,9 +592,9 @@ function eventPresentationStatus(event){
   case 'enrichment':{
    if(event.presentation==='batch_v2_skipped')return 'warning';
    const terminal=event.presentation==='batch_v2_terminal',stage=event.stage;
-   // Starts, resumes, running progress and records without a stage are intermediate: no outcome yet. Historical v3-v6 runs (no `presentation`) are
-   // classified only when their stored stage says the run ended.
-   if(!terminal&&!['complete','completed','partial','blocked','interrupted'].includes(stage))return null;
+   // Starts, resumes, running progress and records without a known end stage are intermediate or inconsistent: no confirmed outcome, whatever their reason
+   // says. The guard covers the v2 terminal packet and the historical v3-v6 runs (no `presentation`) alike.
+   if(!['complete','completed','partial','blocked','interrupted'].includes(stage))return null;
    if(!terminal&&event.presentation)return null;
    const stop=event.stopReason||event.reason,delta=event.delta&&typeof event.delta==='object'?event.delta:{},failed=int(delta.failed)?delta.failed:(int(event.failed)?event.failed:0);
    if(stage==='complete'||stage==='completed')return failed>0?'warning':'success';
@@ -610,8 +610,9 @@ function eventPresentationStatus(event){
     if(status==='failed'||status==='stalled')return 'error';
     if(status==='waiting'||status==='blocked')return 'warning';
     if(event.incomplete===true||!int(event.checked)||!int(event.added)||event.queueUnreadable===true)return 'warning';
-    // A Workflow that is still running has no outcome yet; «nothing new» is a normal result, not a warning.
-    return status==='running'?null:'success';
+    // Only the verified normal ends are a success («nothing new» is not a warning). A Workflow that is still running has no outcome yet, and a missing or
+    // unrecognised status is not confirmed by anything else.
+    return status==='idle'||status==='empty'?'success':null;
    }
    if(event.kind==='report_failed')return status==='failed'||status==='stalled'?'error':'warning';
    // Legacy per-chain card (`kind=run`, written before ADR 0111): `finished` is a confirmed end, `stopped` (a refusal) and `kind=empty` (no stored result) have no outcome.

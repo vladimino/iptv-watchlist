@@ -154,7 +154,7 @@ The events screen and the compact feed show one result marker per event: icon, r
 | `watchlist` (a committed list; also `added=[]`/`removed=[]` and `baseline`) | success |
 | `started`, `unstarted` (a saved owner mark) | success |
 | `taste_profile` (a published current pointer; any `scope`, including `identity`) | success |
-| `enrichment` `presentation=batch_v2_terminal`, `stage=complete`, no per-film failures (also `manifest_spent`) | success |
+| `enrichment` `presentation=batch_v2_terminal` with a known end stage (`complete`, `partial`; the same guard applies to every row below that reads a stop code): `stage=complete`, no per-film failures (also `manifest_spent`) | success |
 | same, with per-film failures (`delta.failed` or `failed` > 0) | warning |
 | same, partial: `quota`, `time_budget`, `parse_error`, `lease_lost`, `lease_expired`, or any unlisted or missing stop code | warning |
 | same, partial: `priority_changed`, `profile_changed`, `runner_aborted`, `external_termination` | interrupted |
@@ -165,7 +165,7 @@ The events screen and the compact feed show one result marker per event: icon, r
 | same, `stage=blocked`: waiting for the next run → warning; a systemic error code → error; an interruption code → interrupted | warning / error / interrupted |
 | Discovery `kind=hour`: `failed`/`stalled` | error |
 | same: `waiting`/`blocked`, `incomplete`, unreadable counts, `queueUnreadable` | warning |
-| same: `idle`/`empty`, complete report (found or nothing new; `provisional` too) | success |
+| same: verified normal end `idle`/`empty`, complete report (found or nothing new; `provisional` too) | success |
 | Discovery `kind=report_failed`: confirmed `status=failed\|stalled` | error |
 | same: unknown, non-alarming, `waiting`, `blocked` | warning |
 | Discovery legacy `kind=run`: `finished` (`complete`, `backlog_empty`) | success |
@@ -179,7 +179,7 @@ The events screen and the compact feed show one result marker per event: icon, r
 | Catalog posters `outcome=deferred`, or `final=false` with no outcome | warning |
 | Catalog posters `outcome=failed` | error |
 
-**Justified `null` (no badge).** (1) `enrichment` `started`/`resumed`, running progress (`-progress-` ids) and any record without a stage: the run has no outcome yet, and a progress record never gets one whatever its `reason`. (2) `enrichment` with an unknown `stage` or an unknown `presentation`: the contract does not say what it means. (3) Discovery `kind=hour` with `status=running`: the Workflow is still running, so it is not declared finished. (4) Discovery legacy `status=stopped` (`executor_not_workflow`): a refusal to run, not an outcome; legacy `kind=empty` and a bare `discovery` record carry no stored result. (5) Ratings or Catalog posters records whose `state`/`outcome` is missing or unknown. (6) Unknown types, fields and combinations. None of these is treated as success by default.
+**Justified `null` (no badge).** (1) `enrichment` `started`/`resumed`, running progress (`-progress-` ids) and any record without a stage: the run has no outcome yet, and a progress record never gets one whatever its `reason`. (2) `enrichment` (the v2 terminal packet included) with a missing, intermediate (`running`, `started`, `resumed`) or unknown `stage`, or with an unknown `presentation`: no confirmed end, so even an error-looking `reason` does not make it an error. (3) Discovery `kind=hour` with `status=running` (the Workflow is still running, so it is not declared finished) and with a missing or unrecognised `status` (the producer emits `running|failed|stalled|waiting|blocked|empty|idle`; only `idle`/`empty` are a success), unless an independent signal such as `incomplete` already warns. (4) Discovery legacy `status=stopped` (`executor_not_workflow`): a refusal to run, not an outcome; legacy `kind=empty` and a bare `discovery` record carry no stored result. (5) Ratings or Catalog posters records whose `state`/`outcome` is missing or unknown. (6) Unknown types, fields and combinations. None of these is treated as success by default.
 
 **Priority on collision.** `stage=complete` decides first (failures → warning); then a systemic error code beats an interruption code (and an `interrupted` stage), which beats `blocked`, which beats a normal reason, which beats a soft code; `stopReason` beats `reason`. For a Discovery hour, confirmed `failed`/`stalled` beats `waiting`/`blocked`, which beats an incomplete or unreadable report. For Ratings, `finished` beats a stray `cause`, and a temporary `cause` beats `state=error`.
 
