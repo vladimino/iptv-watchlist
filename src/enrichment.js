@@ -1484,7 +1484,8 @@ async function consistentQueueReport(pinned,report){
  if(!reloaded||reloaded.runId!==pinned.epgPin.programmeRunId)publishedEpgUnavailable();
  return reloaded;
 }
-async function buildPredictionQueue(env,report,trigger,previous,capture=null){
+// AIR-536: `options.now` pins the evaluation instant (the parity read evaluates at its own cutoff); every caller that omits it keeps the wall clock.
+async function buildPredictionQueue(env,report,trigger,previous,capture=null,options={}){
  const pinned=await queuePin(env,report);
  // AIR-529: read BEFORE the programme and catalog are used, so an assignment landing during the rebuild leaves the stored signature older than the data and costs one more refresh, never a missed one.
  const showsSignature=await currentShowsSignature(pinned,report);
@@ -1495,7 +1496,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const recovery=await predictionRecoveryOverlay(env);let recoveryDenied=0;
  const safeSource=source&&Array.isArray(source.films)?source:{runId:source?.runId||null,films:[]};
  if(capture)Object.assign(capture,{report:safeSource,profile,index,catalog});
- const now=Date.now();
+ const now=Number.isFinite(options?.now)?options.now:Date.now();
  const authoritative=showsAuthoritative(sync,safeSource);
  const watchlistDoc=authoritative?null:await loadJSON(env,'watchlist.json');
  // ADR 0142: completed-only ranking is a live D1 published pin whose run matches the completed programme, not the mere presence of the PublishedEpg module (the Worker always bundles it; currentGeneration null is the R2 path).
@@ -1504,6 +1505,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const membership=authoritative?safeSource:Array.isArray(watchlistDoc?.films)?{films:watchlistDoc.films}:{films:safeSource.films};
  const films=allEnrichmentFilms(membership,catalog).map(film=>authoritative?withCompletedShows(film,completed,safeSource.runId,completedOnly):{...film,shows:[],epgLastAiring:null});
  const watchlistIds=new Set(eligibleEnrichmentFilms(membership).map(f=>String(f.id)));
+ if(capture)capture.films=films;
  let priorityBasis='completed',priorityProgrammeRunId=safeSource.runId;
  const priority=Object.fromEntries(films.map(f=>{
   const id=String(f.id);
@@ -2672,8 +2674,8 @@ async function batchTurnedAway(env,body,tally=null,requestId=null){
 // Nothing eligible, or no capacity: the ordinary idle outcome of a start (`noop`, or `blocked` for `quota` and `retry_backoff`). No lease is taken and no run exists, so it is not passed
 // through the stop recorder, which would manufacture a stopped run, a stop Event and a `latest-run` for it. The attempt is recorded and the queue's `lastBatch` is kept, as a v5 start does.
 // AIR-529: the read-only statement, in the dry-run answer, that the hot count of a start does NOT rest on a current basis: the cause is named, `hotRemaining` is the queue's own count and may be stale, never a verified 0.
-// It is present only when degraded: the dry-run answer of a current queue is unchanged (the start parity baseline pins its shape). This does NOT recompute hot outstanding independently from the catalog; that would be a second
-// implementation of the queue rules (window, Film IDs, freshness, retry, deferral) and is an owner scope decision.
+// It is present only when degraded: the dry-run answer of a current queue is unchanged (the start parity baseline pins its shape). This does NOT recompute hot outstanding from the catalog on a start. The independent comparison is
+// the read-only `prediction_hot_parity` tool (`predictionHotParity`), which runs this very builder in memory instead of keeping a second copy of the rules; a start never pays for it.
 function hotBasisOf(pre){
  const queue=pre.queue||null;
  return {status:'degraded',cause:pre.priorityCause||'programme',hotRemaining:Number.isInteger(queue?.priorityCount)?queue.priorityCount:null,programmeRunId:queue?.programmeRunId??null,showsSignature:queue?.showsSignature??null,nextChangeAt:queue?.priorityNextChangeAt??null};

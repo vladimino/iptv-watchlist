@@ -306,3 +306,88 @@ function predictionPendingPage(snapshot,query,now){
  const nextCursor=cursor.offset+items.length<rows.length?predictionDiagnosticEncodeCursor({...identity,offset:cursor.offset+items.length}):null;
  return {atomic:false,status:'recorded',filter:parsed.filter,snapshot:identity,items,nextCursor};
 }
+
+// Read-only parity of the actual hot outstanding work against the persisted hot queue (AIR-536).
+// One cutoff (`now`) and one pinned published generation. The expected side is the queue builder itself, `buildPredictionQueue`, run in memory on a fresh read of the
+// pinned D1 programme, catalog admissions, Prediction facts and recovery intents, with the stored queue passed as `previous` (its retry records are the one retry authority). Nothing
+// is persisted, settled, refreshed or sent to a model, and the stored queue is never touched: there is no second copy of the window, freshness, retry or eligibility rules.
+// A source that cannot be read, a generation or queue revision that moves during the read, or a basis the comparison cannot judge is `unknown`, never a match and never zero.
+const PARITY_EXAMPLE_LIMIT=10;
+const PARITY_SAFE_CODE=/^[a-z][a-z0-9_]{0,59}$/;
+function parityExamples(ids){return {ids:ids.slice(0,PARITY_EXAMPLE_LIMIT),total:ids.length,truncated:ids.length>PARITY_EXAMPLE_LIMIT};}
+async function predictionHotParity(env,now=Date.now()){
+ const started=Date.now();
+ const answer=(verdict,reasons,extra={})=>({schemaVersion:1,verdict,reasons,cutoff:new Date(now).toISOString(),atomic:false,elapsedMs:Date.now()-started,...extra});
+ const unknown=(reason,error=null,extra={})=>answer('unknown',[reason],{...(error?{errorCode:PARITY_SAFE_CODE.test(error?.code||'')?error.code:'read_failed'}:{}),...extra});
+ let read;
+ try{read=await readQueueHead(env);}catch(error){return unknown('queue_unreadable',error);}
+ const stored=read.current,revision=read.head?.queueGeneration??null;
+ if(!stored)return unknown('queue_not_recorded');
+ if(!queueShapeValid(stored))return unknown('queue_shape_invalid');
+ // The lanes are compared as sets, so a duplicate id or an id in both lanes would be hidden by the comparison. Such a queue is malformed: reported as such, never deduplicated into a match.
+ {const hotIds=new Set(stored.hotPending),coldIds=new Set(stored.coldPending);
+  if(hotIds.size!==stored.hotPending.length||coldIds.size!==stored.coldPending.length||stored.hotPending.some(id=>coldIds.has(id)))return unknown('queue_shape_invalid');}
+ let programme,profile;
+ try{[programme,profile]=await Promise.all([loadJSON(env,'programme.json'),loadJSON(env,profileKey)]);}catch(error){return unknown('source_unreadable',error);}
+ if(!profile)return unknown('profile_not_recorded');
+ if(!programme||!Array.isArray(programme.films)||!programme.runId)return unknown('programme_not_recorded');
+ let pinned;
+ try{pinned=await queuePin(env,programme);}catch(error){return unknown('generation_unreadable',error);}
+ const pin=pinned?.epgPin;
+ if(pin?.authority!=='d1'||!pin.programmeRunId)return unknown('epg_authority_not_d1');
+ if(pin.programmeRunId!==programme.runId)return unknown('programme_generation_mismatch');
+ const generation={authority:'d1',programmeRunId:pin.programmeRunId,generation:pin.generation??null,fence:pin.fence??null,phase:pin.phase??null};
+ const builtAt=Date.parse(stored.refreshedAt||''),exhausted=id=>retryBudgetExhausted(stored.retries?.[id]);
+ const queueIdentity={revision,programmeRunId:stored.programmeRunId??null,priorityBasis:stored.priorityBasis??null,refreshedAt:stored.refreshedAt??null,ageSeconds:Number.isFinite(builtAt)?Math.max(0,Math.round((now-builtAt)/1000)):null,nextChangeAt:stored.priorityNextChangeAt??null};
+ const storedHot=stored.hotPending.filter(id=>!exhausted(id)),storedCold=stored.coldPending.filter(id=>!exhausted(id));
+ const base={generation,queue:{...queueIdentity,hotPending:storedHot.length,coldPending:storedCold.length,declaredHot:Number.isInteger(stored.priorityCount)?stored.priorityCount:null}};
+ let why;
+ try{why=queueAdvanceGate(stored,programme,profile,(await fingerprintRegistryDigests()).registry,(await predictionRecoveryOverlay(env)).revision);}catch(error){return unknown('source_unreadable',error,base);}
+ if(why)return unknown('queue_not_comparable_'+why,null,base);
+ if(stored.priorityBasis!=='completed')return unknown('queue_basis_'+String(stored.priorityBasis||'unknown').replace(/[^a-z_]/g,''),null,base);
+ // A queue ranked on an earlier generation is waiting for its own natural refresh: its hot lane says nothing about this generation, so it is reported, not compared.
+ // The fence re-reads the generation, the queue revision and (when a signature was read) the assigned shows after the evaluation. A change during this call is `unknown`, whichever verdict was about to be stated.
+ const fence=async before=>{
+  try{
+   const [again,live,after]=await Promise.all([readQueueHead(env),typeof PublishedEpg!=='undefined'?PublishedEpg.currentGeneration(env):null,before?currentShowsSignature(pinned,programme):null]);
+   if(!live||live.programmeRunId!==pin.programmeRunId||(live.fence??null)!==generation.fence||(live.generation??null)!==generation.generation)return {reason:'generation_changed_during_read'};
+   if(revision!==null?again.head?.queueGeneration!==revision:again.current?.refreshedAt!==stored.refreshedAt)return {reason:'queue_changed_during_read'};
+   if(before){if(after.unreadable)return {reason:'shows_signature_unreadable'};if(after.signature!==before.signature)return {reason:'shows_changed_during_read'};}
+   return null;
+  }catch(error){return {reason:'fence_unverifiable',error};}
+ };
+ if(stored.programmeRunId!==programme.runId){const broken=await fence(null);return broken?unknown(broken.reason,broken.error,base):answer('degraded',['generation_rollover_pending'],base);}
+ const signature=await currentShowsSignature(pinned,programme);
+ if(signature.applicable===false)return unknown('shows_signature_not_applicable',null,base);
+ if(signature.unreadable)return unknown('shows_signature_unreadable',null,base);
+ const capture={};let expected;
+ try{expected=await buildPredictionQueue(pinned,programme,'parity',stored,capture,{now});}catch(error){return unknown('source_unreadable',error,base);}
+ if(!expected||!Array.isArray(capture.films))return unknown('snapshot_incomplete',null,base);
+ if(capture.catalog==null)return unknown('catalog_not_recorded',null,base);
+ // Fence: the generation, the queue revision and the assigned shows must be what they were before the evaluation, or the two sides are not one snapshot.
+ {const broken=await fence(signature);if(broken)return unknown(broken.reason,broken.error,base);}
+ const storedHotSet=new Set(storedHot),expectedHot=expected.hotPending.filter(id=>!exhausted(id)),expectedHotSet=new Set(expectedHot),expectedCold=expected.coldPending.filter(id=>!exhausted(id));
+ const storedKnown=new Set([...stored.hotPending,...stored.coldPending]),filmsById=new Map(capture.films.map(film=>[String(film.id),film]));
+ const signatureMatches=stored.showsSignature===signature.signature;
+ // A difference is clock-only when the Film, with the shows it has now, was classified at the queue's own build instant as the queue classified it: only the window moved.
+ const clockOnly=id=>{const film=filmsById.get(id);return !!film&&Number.isFinite(builtAt)&&predictionPriority(film,builtAt).hot===storedHotSet.has(id);};
+ const missing=expectedHot.filter(id=>!storedHotSet.has(id)).map(id=>({id,cause:!storedKnown.has(id)?'absent_from_queue':clockOnly(id)?'window_transition':signatureMatches?'reclassified_hot':'shows_signature_changed'}));
+ const extra=storedHot.filter(id=>!expectedHotSet.has(id)).map(id=>({id,cause:!expected.priority?.[id]?'no_longer_outstanding':clockOnly(id)?'window_transition':'reclassified_cold'}));
+ const causes={};for(const item of [...missing,...extra])causes[item.cause]=(causes[item.cause]||0)+1;
+ const withinCap=Number.isFinite(builtAt)&&now-builtAt<PRIORITY_WINDOW_REEVAL_MS,onlyClock=missing.length+extra.length>0&&(causes.window_transition||0)===missing.length+extra.length;
+ const verdict=!missing.length&&!extra.length?'match':onlyClock&&withinCap?'degraded':'mismatch';
+ const reasons=verdict==='match'?[]:verdict==='degraded'?['window_transition_deferred']:Object.entries(causes).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0])).map(([cause])=>cause);
+ const hotDeferred=ids=>ids.filter(id=>stored.retries?.[id]?.retryAt>now).length;
+ let staged=null;
+ try{const stage=await loadJSON(env,BATCH_STAGE_KEY);staged=Array.isArray(stage?.items)?stage.items.length:0;}catch{staged=null;}
+ return answer(verdict,reasons,{
+  ...base,
+  showsSignature:{stored:stored.showsSignature??null,current:signature.signature,matches:signatureMatches},
+  rateCap:{seconds:PRIORITY_WINDOW_REEVAL_MS/1000,withinCap},
+  expected:{hotOutstanding:expectedHot.length,coldOutstanding:expectedCold.length,hotDeferredByRetry:hotDeferred(expectedHot),actionableNow:queueReadyIds(expected,now).length},
+  queueCounts:{hotOutstanding:storedHot.length,coldOutstanding:storedCold.length,hotDeferredByRetry:hotDeferred(storedHot),actionableNow:queueReadyIds(stored,now).length,retryExhausted:[...stored.hotPending,...stored.coldPending].filter(exhausted).length,staged},
+  diff:{missingFromQueueHot:missing.length,extraInQueueHot:extra.length,causes},
+  examples:{missingFromQueueHot:parityExamples(missing.map(item=>item.id)),extraInQueueHot:parityExamples(extra.map(item=>item.id))},
+  evaluated:{films:capture.films.length},
+ });
+}
