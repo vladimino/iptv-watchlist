@@ -1,7 +1,7 @@
 # Hot queue parity: offline evidence
 
 - **Date:** 20 Nov 2026 UTC.
-- **Card:** [AIR-536](https://trello.com/c/G2DKOFyo). **PR:** PR_LINK_PLACEHOLDER.
+- **Card:** [AIR-536](https://trello.com/c/G2DKOFyo). **PR:** [vladimino/iptv-watchlist#817](https://github.com/vladimino/iptv-watchlist/pull/817).
 - **Scope:** the read-only `prediction_hot_parity` MCP tool (`predictionHotParity` in `src/prediction-diagnostics.js`) and its contract in [prediction diagnostics](../../reference/api/prediction-diagnostics.md#hot-queue-parity). Offline only: a migrated sqlite D1 stand-in, a local R2 and the real Worker code in a Node `vm`. No production read, write, run, Task, flag, migration or model call was made for this report.
 
 ## Method
