@@ -786,6 +786,9 @@ export const FILES={
  "filter-preset-ui.mjs": {
   "suite": "core"
  },
+ "filter-presets-d1.mjs": {
+  "suite": "core"
+ },
  "filter-presets.mjs": {
   "suite": "core"
  },
