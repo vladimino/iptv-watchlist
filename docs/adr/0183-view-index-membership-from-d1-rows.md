@@ -24,9 +24,16 @@ Not decided here: whether the switch is an owner-set flag or a deploy, the parit
 
 ## Alternatives considered
 
-**A. Union of D1 rows (above).** Two key-set differences from today, both reported by id by the offline classifier: a raw key with no D1 row and no seed id **disappears** (an entry with no fact left; inert for every field-based reader, but it leaves the bridge candidate list, the health `entries` count and the operator scripts' lid targets), and a prediction or fingerprint id that is not a raw key **gains its forecast** (today it shows none; one possible cause is a submit that committed D1 and then failed before the index write, which the parity run cannot prove). The second is visible: the full view, the footer prediction coverage, queue freshness and Finds eligibility treat that film as predicted. Cost per request: the keyset reads the overlays already do, minus one 11.3 MB object read; no per-submit object rewrite.
+**A. Union of D1 rows (above).** Differences from today, each reported by id by the offline classifier and typed by which D1 table holds the row (the prediction overlay supplies different fields per table):
 
-**B. Explicit D1 membership table.** A table of ids written in the same D1 batch as each prediction and ratings write, with a migration, a marker or fence, a backfill from the raw object and a repair path. It preserves today's membership exactly, including keys that no reader needs. Cost: a new mutable authority that must be kept consistent with the two domains it mirrors, a migration number (0028 is taken by an open change; verify before use), an owner-approved read of the raw object for the backfill, and retirement of the table if A is later chosen.
+- **Removed key.** A raw key with no D1 row of any of the three kinds and no seed id disappears. It carries no fact, so every field-based reader is unchanged; it leaves the bridge candidate list, the health `entries` count and the operator scripts' lid targets.
+- **Forecast gain** (an id with a `prediction_pointer` row that is not a raw key). `item.prediction` appears, with a mood facet derived from it. Today such an id shows no forecast. Visible effects: the full view, the footer prediction coverage, queue freshness (the film reads as predicted) and Finds eligibility.
+- **Feature gain** (an id with a `prediction_fingerprint` row that is not a raw key). `fingerprint`, `fingerprintHash`, `impactFeatures` and the mood facet appear, **without a forecast**. This is a different visible change: mood and mechanics filtering and the compatibility evaluator see the film's features. It does not change prediction coverage or queue freshness by itself.
+- An id with both rows gains both; an id that is already a key today through a ratings alias or a seed id gains the fields but not the key. One possible cause of any gain is a submit that committed D1 and then failed before the index write, which the parity run cannot prove.
+
+Cost per request: the keyset reads the overlays already do, minus one 11.3 MB object read; no per-submit object rewrite.
+
+**B. Explicit D1 membership table.** A table of ids written in the same D1 batch as each prediction and ratings write, with a migration, a marker or fence, a backfill from the raw object and a repair path. It preserves today's membership exactly, including keys that no reader needs. Cost: a new mutable authority that must be kept consistent with the two domains it mirrors, a migration number (schema 0028 is already allocated by the merged Filter presets migration; verify the next free number before use), an owner-approved read of the raw object for the backfill, and retirement of the table if A is later chosen.
 
 **C. Keep the raw object as a read-only mirror.** Rejected for AIR-552: production still reads an 11.3 MB mutable object, so the dependency the card removes stays.
 
@@ -36,9 +43,9 @@ A removes the dependency, the per-submit object rewrite and the whole-object rea
 
 ## Parity criteria and rollout (for owner approval; none is authorized now)
 
-1. **Owner GO for one read-only export** of `enrichment/view-index.json` and the film ids of the three D1 tables, using the existing read-only snapshot tooling. `compareMembership` (`scripts/view-index-membership-parity.mjs`) classifies it. Report: counts of `disappears`, `gainsForecast`, `addedKeys`, seed categories; for each `disappears` id whether it is the only bridge to a film; for each `gainsForecast` id the effect on Finds eligibility and footer counts.
+1. **Owner GO for one read-only export** of `enrichment/view-index.json` and the film ids of the three D1 tables, using the existing read-only snapshot tooling. `compareMembership` (`scripts/view-index-membership-parity.mjs`) classifies it. Report: counts of `removedKeys`, `newKeys`, `forecastOnly`, `featuresOnly`, `forecastAndFeatures` (and how many of each already are a key through a ratings alias or the seed) and the seed categories; for each removed key whether it is the only bridge to a film; for each forecast gain the effect on Finds eligibility, footer prediction coverage and queue freshness; for each feature gain the effect on the mood and mechanics filters.
 1b. **Operator tooling.** Under A the snapshot export (`r2-snapshot-export`) and the four Letterboxd scripts need a defined view-index source (a D1-derived key set, or none); that change belongs to the implementation PR.
-2. **Acceptance of A** needs: `disappears` entries inert for every field reader and bridge-redundant (or explicitly accepted by the owner), `gainsForecast` reviewed by the owner, no seed-category change, keyset reads within the existing 20,000-row caps with a measured margin.
+2. **Acceptance of A** needs: removed keys inert for every field reader and bridge-redundant (or explicitly accepted by the owner), forecast gains and feature gains each reviewed by the owner as separate outcomes, no seed-category change, keyset reads within the existing 20,000-row caps with a measured margin.
 3. **Implementation PR** after the decision, against fresh `main`, reading from D1 for every consumer (`loadJSON`, `readViewIndex`, Finds and programme, footer streaming, Admin health and limbo, queue, diagnostics and recovery, `LetterboxdFacts.readJSON`) behind a temporary selector (`r2` default, `d1`) with its removal card created first and the flag-lifecycle entry in the same PR; raw writers retained so the object stays current and the switch stays reversible by setting the selector back.
 4. **Controlled switch** under an owner-approved L3 plan with holdpoints: before and after readback of the footer counts and the Finds count on permitted read-only routes, stabilization, owner acceptance.
 5. **Cleanup PR**: remove the raw writers and reads and the selector; the object itself is retired by a separate owner-approved R2 operation (no delete here).
@@ -50,7 +57,7 @@ Rollback until step 5: set the selector back; the raw object was never stopped b
 1. Choose A (recommended) or B.
 2. May one read-only export for the parity run be performed (the single R2 object and the film ids of the three tables)? Without it neither option can be accepted.
 3. If A: temporary selector (`r2`/`d1`, instant rollback, owner-set binding) or a code-only switch by deploy (simpler, rollback is a revert deploy)? Recommended: selector.
-4. If A: is a forecast appearing for a film that has a D1 prediction but no raw key acceptable, subject to review of the parity list?
+4. If A: are the two gains acceptable, subject to review of the parity list: (a) a forecast appearing for a film with a `prediction_pointer` row but no raw key, and (b) mood and mechanics features appearing, without a forecast, for a film with only a `prediction_fingerprint` row?
 
 ## Recovery and migration boundary
 
@@ -61,7 +68,7 @@ Documentation and an offline classifier only. No production read or write, migra
 - **Original decision:** not recorded (Proposed).
 - **Implementation:** none.
 - **Dated verification:** [offline analysis, 20 November 2026](../evidence/d1-migration/air-552-membership-options-offline-2026-11-20.md), synthetic fixtures only.
-- **Uncertainty:** the production raw object's real key set against the D1 rows, and the number of `disappears` and `gainsForecast` ids.
+- **Uncertainty:** the production raw object's real key set against the D1 rows, and the number of removed keys, forecast gains and feature gains.
 
 ## Follow-ups
 
