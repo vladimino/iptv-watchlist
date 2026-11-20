@@ -94,6 +94,10 @@ Lane order is `film`, `epg_observation`, `letterboxd_rated_candidate`. Inside a 
 - A new first page (apply, reset, refresh, reload) clears the previous query's rows, coverage, pin and cursor before it reads, so a failed first read shows nothing of the old list as current and sends no old cursor. A failed or stale list hides «Показать ещё»; retry and reload start from the first page.
 - Coverage is in a closed panel under the verdict: per-lane state for Film and EPG, and for Letterboxd the enumeration, the registry-estimated counts (labelled as an estimate with its time, never as verified, and scoped to the archives the registry holds; archives outside it are named as unknown). An absent, unreadable or invalid registry shows no counts at all, never zeros and the page archive's own state. The page never states that the candidate lane is complete or that no work exists.
 
+## Group entry link
+
+A row whose `film.filmId` is `tmdb_<digits>` carries a link to `/admin/identity/group?tmdbId=<digits>` ([ADR 0181](../../adr/0181-owner-confirmed-group-assign-of-selected-observations.md)). The link is navigation only: the queue route stays read-only, its response shape is unchanged and no group candidate is read by the queue.
+
 ## Registry
 
 `letterboxd/imports/registry.json` is a derived, droppable projection: `{schemaVersion: 1, updatedAt, archives: {<sha>: {registeredAt, generatedAt, counts: {pending, admitting, needs_review, verified, removed}, documentEtag, revision, summarizedAt}}}`, at most 256 KiB and 500 archives. Every successful write of a candidate document (register, identity step, retry, rollback and the other mutation paths all go through one compare-and-swap helper) is followed by a bounded registry update (three attempts, its own compare-and-swap) that names the etag of the document just saved. The update never fails or undoes the primary write, never creates a second owner and never hides an older archive. Rules:

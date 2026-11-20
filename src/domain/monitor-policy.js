@@ -13,12 +13,15 @@ export const THRESHOLDS = Object.freeze({
   epgDegradedAfterMs: 5 * HOUR,       // then degraded: an actionable alert
   discoveryWaitingMs: 90 * MIN,       // past the allowed next progress: still waiting by design
   discoveryDegradedMs: 3 * HOUR,      // backlog without allowed progress for this long: degraded
-  predictionsDelayedMs: 3 * HOUR,     // hourly Task at :20 plus grace
-  predictionsDegradedMs: 6 * HOUR,
+  // Predictions have no threshold here: the one no-progress limit (60 minutes) lives in enrichment.js beside the Footer's use of it, and the monitor
+  // passes its verdict in `facts.stall` (AIR-556), so the two surfaces cannot disagree.
   switchStuckMs: 2 * HOUR,            // a mode switch that stays open
 });
 export const ALERT_POLICY = Object.freeze({
   confirmSnapshots: 2,                // degraded issues alert after this many consecutive snapshots; needs_owner at once
+  // AIR-556: the prediction no-progress verdict is computed from stored run times, not from a transient read, so one snapshot confirms it. With
+  // the 60-minute limit and the hourly Cron tick the alert follows the last confirmed progress by 60 to about 120 minutes (+ cron/Telegram latency).
+  confirmSnapshotsByKey: Object.freeze({predictions_no_progress: 1}),
   cooldownMs: Object.freeze({degraded: 6 * HOUR, needs_owner: 2 * HOUR}),
   maxPerIssuePerDay: 8,
 });
@@ -104,32 +107,29 @@ export function evaluateRatings(model, now) {
   return {stream: 'ratings', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {mode: model.mode ?? null, health: health ?? null}};
 }
 
-// ---- Prediction queue: an empty queue is healthy; pending work with no real model progress for long is not, and growth makes it worse.
-// `lastProgressAt` is the last time the model really produced predictions (a productive run or a moved processed counter), never the time
-// a scheduled wake-up found nothing to do. Work that is all deferred by its own retry time is waiting by design.
+// ---- Prediction queue (AIR-556): an empty or fully deferred queue is healthy or waiting; eligible work with no confirmed progress is not.
+// `facts.stall` is the verdict of the one shared assessment in enrichment.js (`predictionStallAssessment`): running | ok | idle | waiting | unknown | no_progress.
+// Confirmed progress is a productive batch or a drained run, never a heartbeat, `already_running`, a noop wake-up or a queue recount. The monitor does
+// not know why a Task did not reach the Worker, so no message names api_error, an expired authorization or a number of missed Tasks.
 export function evaluatePredictions(facts, previous, now) {
   if (!facts || facts.error) return unreadable('predictions', 'prediction queue');
   if (!facts.present) return {stream: 'predictions', state: 'waiting', issues: [], facts: {present: false}};
   const issues = [];
   const pending = Number.isInteger(facts.pendingCount) ? facts.pendingCount : 0;
+  const eligible = Number.isInteger(facts.eligibleNow) ? facts.eligibleNow : null;
+  const stall = facts.stall && typeof facts.stall === 'object' ? facts.stall : {state: 'unknown', reason: 'queue_unreadable', idleMs: null};
+  const why = facts.blockedReason === 'quota' ? ' (the last batch reported a quota limit)' : '';
   let state = 'healthy';
-  if (pending > 0) {
-    const activity = time(facts.lastProgressAt);
-    const idle = activity !== null ? now - activity : null;
-    const growing = Number.isInteger(previous?.pendingCount) && pending > previous.pendingCount;
-    const deferredUntil = facts.eligibleNow === 0 ? time(facts.nextRetryAt) : null;
-    const why = facts.blockedReason === 'quota' ? ' (the model reported a quota limit)' : '';
-    if (deferredUntil !== null && deferredUntil > now) state = 'waiting';
-    else if (idle === null || idle >= THRESHOLDS.predictionsDegradedMs) {
+  if (pending > 0 || eligible > 0) {
+    if (stall.state === 'no_progress') {
       state = 'degraded';
-      issues.push(issue('predictions_stale', 'degraded', 'predictions', pending + ' predictions pending and no model progress for ' + (idle === null ? 'an unknown time' : hours(idle) + ' hours') + why));
-    } else if (idle >= THRESHOLDS.predictionsDelayedMs) {
-      state = 'delayed';
-      if (growing) { state = 'degraded'; issues.push(issue('predictions_backlog_growing', 'degraded', 'predictions', 'The prediction backlog grows while the model makes no progress' + why)); }
-    }
+      const last = time(facts.lastProgressAt);
+      issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why));
+    } else if (stall.state === 'waiting') state = 'waiting';
+    else if (stall.state === 'unknown') state = 'delayed'; // unreadable queue split or no progress evidence yet: visible, never healthy, never an alert by itself
   }
   const all = worst(issues);
-  return {stream: 'predictions', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {pendingCount: pending}};
+  return {stream: 'predictions', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {pendingCount: pending, eligibleNow: eligible, stall: stall.state, idleMs: stall.idleMs ?? null, lastProgressAt: facts.lastProgressAt ?? null}};
 }
 
 // ---- Catalog posters (AIR-543, ADR 0179): the weekly poster sweep, judged by the one projection of its R2 checkpoint (CatalogPosterWeekly.project).
@@ -170,7 +170,7 @@ export function planAlerts(issues, state, now) {
     const old = previous[item.key] || null;
     const entry = {severity: item.severity, firstSeenAt: old?.firstSeenAt || new Date(now).toISOString(), seen: (old?.seen || 0) + 1, lastSentAt: old?.lastSentAt || null, sendCount: old?.sendCount || 0, sendDay: old?.sendDay === day ? day : day, sendsToday: old?.sendDay === day ? old.sendsToday || 0 : 0};
     const escalated = !!old && old.severity !== item.severity && STATE_RANK[item.severity] > STATE_RANK[old.severity];
-    const confirmed = item.severity === 'needs_owner' || entry.seen >= ALERT_POLICY.confirmSnapshots;
+    const confirmed = item.severity === 'needs_owner' || entry.seen >= (ALERT_POLICY.confirmSnapshotsByKey[item.key] ?? ALERT_POLICY.confirmSnapshots);
     const lastSent = time(entry.lastSentAt);
     const cooled = lastSent === null || now - lastSent >= ALERT_POLICY.cooldownMs[item.severity];
     if (confirmed && (cooled || escalated) && entry.sendsToday < ALERT_POLICY.maxPerIssuePerDay) {

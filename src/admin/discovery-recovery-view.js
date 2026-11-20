@@ -391,6 +391,15 @@ function obsRevokeEntryHtml(answer) {
   return `<p class="obs-identity-revoke">Сохранённое действие владельца (${what}) доказано историей решения. <a href="${obsEscape(href)}">Отозвать или заменить это действие</a> (откроется отдельная страница, ничего не записывается).</p>`;
 }
 
+// ADR 0181 / AIR-131: a read-only entry to the group page for the trusted movie id this observation itself carries (its confirmed id).
+// The link opens a separate page; nothing is written and nothing is selected.
+function obsGroupEntryHtml(answer) {
+  const trusted = answer?.identity?.trusted;
+  const tmdbId = Array.isArray(trusted) && trusted[0] && /^[1-9]\d{0,11}$/.test(String(trusted[0].tmdbId)) ? String(trusted[0].tmdbId) : null;
+  if (!tmdbId) return '';
+  return `<p class="obs-identity-group"><a href="${obsEscape('/admin/identity/group?tmdbId=' + tmdbId)}">Подобрать группу похожих наблюдений для фильма ${obsEscape(tmdbId)}</a> (откроется отдельная страница, ничего не записывается и не выбирается за вас).</p>`;
+}
+
 function obsIdentityHtml(answer, state) {
   const identity = answer?.identity;
   if (!identity) return '';
@@ -400,7 +409,7 @@ function obsIdentityHtml(answer, state) {
     const limit = identity.coverage?.scope === 'current_verified'
       ? 'Индекс проверенных совпадений покрывает только текущие наблюдения, которые резолвер уже записал как фильм. Неполный или устаревший индекс ничего не записывает.'
       : 'Индекс покрывает только текущие нерешённые наблюдения, по которым уже есть решение. Наблюдения без первой проверки в него не входят.';
-    return `${receipt}<section class="obs-identity"><h4>Идентичность этого наблюдения</h4><p>${obsEscape(text)}</p><p class="muted">${limit}</p>${obsRevokeEntryHtml(answer)}</section>`;
+    return `${receipt}<section class="obs-identity"><h4>Идентичность этого наблюдения</h4><p>${obsEscape(text)}</p><p class="muted">${limit}</p>${obsRevokeEntryHtml(answer)}${obsGroupEntryHtml(answer)}</section>`;
   }
   const title = answer.observation?.title || answer.observation?.normalizedTitle || 'без названия';
   const key = answer.observation?.key || answer.target?.key || '';
@@ -438,7 +447,7 @@ function obsIdentityHtml(answer, state) {
   const hypothesis = identity.hypothesis ? `<p>Гипотеза автоматики (не выбор): ${obsEscape(identity.hypothesis.tmdbId)}. Её нельзя подтвердить одним только этим совпадением.</p>` : '';
   const rejectable = (identity.rejectable || []).length ? `<p>Можно отклонить только: ${obsEscape(identity.rejectable.join(', '))}.</p>` : '<p>На этом решении нет id, который можно отклонить.</p>';
   const acceptId = 'obs-identity-accept-' + obsEscape(state.slot || '0');
-  return `${receipt}<section class="obs-identity"><h4>Идентичность этого наблюдения</h4>${provenance}${verifiedNow}${limit}${obsRevokeEntryHtml(answer)}${hypothesis}${rejectable}`
+  return `${receipt}<section class="obs-identity"><h4>Идентичность этого наблюдения</h4>${provenance}${verifiedNow}${limit}${obsRevokeEntryHtml(answer)}${obsGroupEntryHtml(answer)}${hypothesis}${rejectable}`
     + `<label class="obs-identity-option"><input type="radio" name="obs-identity-effect-${obsEscape(state.slot || '0')}" value="assign" data-obs-identity-effect${effect === 'assign' ? ' checked' : ''}> Подтвердить фильм</label>`
     + `<label class="obs-identity-option"><input type="radio" name="obs-identity-effect-${obsEscape(state.slot || '0')}" value="reject" data-obs-identity-effect${effect === 'reject' ? ' checked' : ''}${identity.rejectable?.length ? '' : ' disabled'}> Отклонить совпадение</label>`
     + choices

@@ -104,7 +104,8 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  assert.deepEqual(writes(bucket).filter(key=>key!==KEY),[],'no domain record was written');
 }
 
-// 6. Prediction queue: an empty queue is healthy; scheduled zero-work wake-ups are not progress; real progress is; retry backoff waits.
+// 6. Prediction queue (AIR-556): an empty queue is healthy; a noop wake-up is not progress; real progress is; retry backoff waits.
+// With no run evidence at all the clock starts at the first tick that saw eligible work (never at "now" each tick), so silence is bounded.
 {
  const {bucket,env,M,calls}=setup();healthy(bucket);
  const noop=ms=>bucket.set('enrichment/prediction-queue.json',{pending:['a','b'],hotPending:['a','b'],coldPending:[],retries:{},refreshedAt:at(ms),lastCheckAt:at(ms),metrics:{hotProcessedTotal:7},
@@ -112,11 +113,13 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  // Every hour a scheduled batch finds nothing to do and rewrites lastBatch and lastCheckAt; the pending queue never moves.
  let states=[];
  for(let hour=0;hour<=9;hour++){noop(T0+hour*H);await M.run(env,{now:T0+hour*H});states.push(bucket.value(KEY).streams.find(item=>item.stream==='predictions').state);}
- assert.deepEqual(states.slice(0,3),['healthy','healthy','healthy']);assert.ok(states.includes('delayed'),'zero-work batches become delayed');assert.equal(states.at(-1),'degraded','and then degraded');
- assert.equal(posts(calls).filter(item=>item.body.key==='predictions_stale').length,1,'one alert, not one per wake-up');
- // A moved processed counter is real progress and recovers the stream.
+ assert.deepEqual(states.slice(0,3),['delayed','degraded','degraded'],'unknown at first sight, then no confirmed progress after the 60-minute limit');
+ assert.equal(posts(calls).filter(item=>item.body.key==='predictions_no_progress'&&item.body.kind==='alert').length,1,'one alert, not one per wake-up');
+ assert.equal(posts(calls).filter(item=>item.body.key==='predictions_no_progress'&&item.body.kind==='reminder').length,1,'one reminder after the 6-hour cooldown, none before');
+ // A moved processed counter is real progress and recovers the stream, with one recovery message.
  bucket.set('enrichment/prediction-queue.json',{...bucket.value('enrichment/prediction-queue.json'),metrics:{hotProcessedTotal:9}});
  await M.run(env,{now:T0+10*H});assert.equal(bucket.value(KEY).streams.find(item=>item.stream==='predictions').state,'healthy');
+ assert.equal(posts(calls).filter(item=>item.body.kind==='recovery'&&item.body.key==='predictions_no_progress').length,1);
  // Work that is all deferred by its own retry time is waiting by design, however long it is idle.
  const backoff=setup();healthy(backoff.bucket);
  backoff.bucket.set('enrichment/prediction-queue.json',{pending:['a'],hotPending:['a'],coldPending:[],retries:{a:{retryAt:T0+30*H}},metrics:{hotProcessedTotal:1},lastBatch:null});
@@ -124,6 +127,96 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  assert.equal(backoff.bucket.value(KEY).streams.find(item=>item.stream==='predictions').state,'waiting');assert.equal(posts(backoff.calls).length,0);
  const quiet=setup();healthy(quiet.bucket);quiet.bucket.set('enrichment/prediction-queue.json',{pending:[],refreshedAt:at(T0-30*H),lastBatch:null});
  await quiet.M.run(quiet.env,{now:T0});assert.equal(quiet.bucket.value(KEY).overall,'healthy');
+}
+
+// 6a. AIR-556 regression: last productive batch 04:54, 3740 eligible, no Task reached the Worker. The hourly tick after the 60-minute limit alerts once.
+{
+ const base=Date.parse('2026-11-20T04:54:00Z'),ids=Array.from({length:3740},(_,index)=>'f'+index);
+ const run=(extra={})=>({runId:'run-0454',status:'complete',createdAt:at(base-8*MIN),completedAt:at(base),counts:{created:3,recalculated:0},...extra});
+ const queue=(extra={})=>({pending:ids,hotPending:ids,coldPending:[],retries:{},metrics:{hotProcessedTotal:100},lastBatch:{runId:'run-0454',stage:'complete',startedAt:at(base-8*MIN),finishedAt:at(base)},...extra});
+ const prediction=bucket=>bucket.value(KEY).streams.find(item=>item.stream==='predictions');
+ const {bucket,env,M,calls}=setup();healthy(bucket);
+ bucket.set('enrichment/latest-run.json',run());bucket.set('enrichment/prediction-queue.json',queue());
+ const sent=()=>posts(calls).filter(item=>item.body.key==='predictions_no_progress');
+ await M.run(env,{now:Date.parse('2026-11-20T05:00:00Z')});assert.equal(prediction(bucket).state,'healthy','6 minutes after progress');
+ await M.run(env,{now:Date.parse('2026-11-20T05:53:00Z')});assert.equal(prediction(bucket).state,'healthy','59 minutes after progress');
+ assert.equal(sent().length,0);
+ await M.run(env,{now:Date.parse('2026-11-20T06:00:00Z')});
+ assert.equal(prediction(bucket).state,'degraded','66 minutes after progress: past the limit');assert.equal(sent().length,1,'the first hourly tick after the limit alerts');
+ assert.match(sent()[0].body.message,/3740 predictions are eligible/);assert.doesNotMatch(sent()[0].body.message,/api_error|auth|missed|expired/i);
+ for(const hour of [7,8,9,10])await M.run(env,{now:Date.parse('2026-11-20T'+String(hour).padStart(2,'0')+':00:00Z')});
+ assert.equal(sent().length,1,'no alert per Task slot: the cooldown holds until the 6-hour reminder');
+ assert.equal(bucket.value(KEY).alerts.issues.predictions_no_progress.sendCount,1);
+ // The worst case: the limit is crossed one minute after a tick, so the alert comes at the next tick, about two hours after the last progress.
+ const late=setup();healthy(late.bucket);late.bucket.set('enrichment/latest-run.json',run({completedAt:at(Date.parse('2026-11-20T05:01:00Z'))}));late.bucket.set('enrichment/prediction-queue.json',queue());
+ await late.M.run(late.env,{now:Date.parse('2026-11-20T06:00:00Z')});assert.equal(posts(late.calls).length,0,'59 minutes after progress');
+ await late.M.run(late.env,{now:Date.parse('2026-11-20T07:00:00Z')});assert.equal(posts(late.calls).filter(item=>item.body.key==='predictions_no_progress').length,1,'alert 119 minutes after progress');
+ // Progress resumes: one recovery in the same channel.
+ bucket.set('enrichment/latest-run.json',run({runId:'run-1100',completedAt:at(Date.parse('2026-11-20T10:50:00Z')),createdAt:at(Date.parse('2026-11-20T10:42:00Z'))}));
+ await M.run(env,{now:Date.parse('2026-11-20T11:00:00Z')});assert.equal(prediction(bucket).state,'healthy');
+ assert.equal(posts(calls).filter(item=>item.body.kind==='recovery'&&item.body.key==='predictions_no_progress').length,1);
+ // A lost monitor document does not make the silence fresh: the next tick still measures from the stored run evidence.
+ const lost=setup();healthy(lost.bucket);lost.bucket.set('enrichment/latest-run.json',run());lost.bucket.set('enrichment/prediction-queue.json',queue());
+ await lost.M.run(lost.env,{now:Date.parse('2026-11-20T09:00:00Z')});
+ assert.equal(lost.bucket.value(KEY).streams.find(item=>item.stream==='predictions').state,'degraded','4 h after progress on the first tick with no monitor state');
+ // A noop `already_running` start after the last progress is not progress; a live run younger than the limit is running, an older lease is not a pass.
+ const noopRuns=setup();healthy(noopRuns.bucket);noopRuns.bucket.set('enrichment/latest-run.json',{runId:'run-noop',status:'partial',reason:'already_running',createdAt:at(Date.parse('2026-11-20T08:50:00Z')),counts:{created:0,recalculated:0}});
+ noopRuns.bucket.set('enrichment/prediction-queue.json',queue());
+ await noopRuns.M.run(noopRuns.env,{now:Date.parse('2026-11-20T09:00:00Z')});
+ assert.equal(noopRuns.bucket.value(KEY).streams.find(item=>item.stream==='predictions').state,'delayed','no evidence at all is unknown, not healthy');
+ const active=setup();healthy(active.bucket);active.bucket.set('enrichment/latest-run.json',{runId:'run-live',status:'running',createdAt:at(Date.parse('2026-11-20T08:40:00Z')),counts:{created:0,recalculated:0}});
+ active.bucket.set('enrichment/runner-lease.json',{runId:'run-live',expiresAt:Date.parse('2026-11-20T09:30:00Z'),heartbeatAt:at(Date.parse('2026-11-20T08:59:00Z'))});active.bucket.set('enrichment/prediction-queue.json',queue());
+ await active.M.run(active.env,{now:Date.parse('2026-11-20T09:00:00Z')});
+ assert.equal(active.bucket.value(KEY).streams.find(item=>item.stream==='predictions').state,'healthy','a 20-minute live run is running');
+ // Cold-only work counts as eligible (the Footer and the batch runner read the same lane rule); retry-exhausted work alone is not a stall.
+ const cold=setup();healthy(cold.bucket);cold.bucket.set('enrichment/latest-run.json',run());cold.bucket.set('enrichment/prediction-queue.json',queue({hotPending:[],coldPending:ids.slice(0,10),pending:ids.slice(0,10)}));
+ await cold.M.run(cold.env,{now:Date.parse('2026-11-20T09:00:00Z')});assert.equal(cold.bucket.value(KEY).streams.find(item=>item.stream==='predictions').state,'degraded');
+ const exhausted=setup();healthy(exhausted.bucket);exhausted.bucket.set('enrichment/latest-run.json',run());
+ exhausted.bucket.set('enrichment/prediction-queue.json',queue({pending:['x'],hotPending:['x'],retries:{x:{attempts:10}}}));
+ await exhausted.M.run(exhausted.env,{now:Date.parse('2026-11-20T09:00:00Z')});assert.equal(exhausted.bucket.value(KEY).streams.find(item=>item.stream==='predictions').state,'healthy');
+}
+
+// 6c. AIR-556 review counterexamples (PR 810).
+{
+ const base=Date.parse('2026-11-20T04:54:00Z'),ids=Array.from({length:3740},(_,index)=>'f'+index);
+ const queue=(extra={})=>({pending:ids,hotPending:ids,coldPending:[],retries:{},metrics:{hotProcessedTotal:100},lastBatch:null,...extra});
+ const state=bucket=>bucket.value(KEY).streams.find(item=>item.stream==='predictions').state;
+ const T=value=>Date.parse('2026-11-20T'+value+':00Z');
+ const diag=(bucket,runId,startedAt,endedAt,fields)=>bucket.set('enrichment/run-diagnostics/'+String(9999999999999-Date.parse(startedAt)).padStart(13,'0')+'-'+runId+'.json',{runId,trigger:'scheduled',startedAt,endedAt,state:'completed',stopReason:'manifest_spent',added:0,failed:0,...fields});
+ // 1. A manifest_spent batch that settled only `already_current` films after the last real progress does not hide the backlog.
+ {const {bucket,env,M,calls}=setup();healthy(bucket);
+  bucket.set('enrichment/latest-run.json',{runId:'run-0454',status:'complete',createdAt:at(base-8*MIN),completedAt:at(base),counts:{created:3,recalculated:0}});
+  diag(bucket,'run-0454',at(base-8*MIN),at(base),{stopReason:'eligible_queue_empty',added:3});
+  diag(bucket,'run-spent','2026-11-20T05:40:00Z','2026-11-20T05:50:00Z',{});
+  bucket.set('enrichment/prediction-queue.json',queue());
+  await M.run(env,{now:T('06:00')});
+  assert.equal(state(bucket),'degraded','manifest_spent with zero productivity at 05:50 does not count as progress at 06:00');
+  assert.equal(posts(calls).filter(item=>item.body.key==='predictions_no_progress').length,1);}
+ // 2. Recalculated work: a checkpoint without `updated` and a latest run with recalculations.
+ {const {bucket,env,M}=setup();healthy(bucket);
+  bucket.set('enrichment/latest-run.json',{runId:'run-recalc',status:'complete',createdAt:'2026-11-20T08:40:00Z',completedAt:'2026-11-20T08:50:00Z',stopReason:'eligible_queue_empty',results:{a:'recalculated',b:'recalculated',c:'recalculated',d:'recalculated'},failures:{e:{}},counts:{created:0,recalculated:4,failed:1}});
+  diag(bucket,'run-recalc','2026-11-20T08:40:00Z','2026-11-20T08:50:00Z',{stopReason:'eligible_queue_empty',failed:1});
+  bucket.set('enrichment/prediction-queue.json',queue());
+  await M.run(env,{now:T('09:00')});assert.equal(state(bucket),'healthy','four recalculated films 10 minutes ago are progress');}
+ // 3. The unknown-age clock starts only when eligible work is first observed: drained then eligible, and retry-deferred then eligible, are measured from that tick.
+ for(const quiet of ['drained','deferred']){
+  const {bucket,env,M,calls}=setup();healthy(bucket);
+  const idle=quiet==='drained'?{pending:[],hotPending:[],coldPending:[],retries:{},metrics:{hotProcessedTotal:100},lastBatch:null}:queue({pending:['a'],hotPending:['a'],retries:{a:{retryAt:T0+10*H}}});
+  for(let hour=0;hour<3;hour++){bucket.set('enrichment/prediction-queue.json',idle);await M.run(env,{now:T0+hour*H});}
+  bucket.set('enrichment/prediction-queue.json',queue());
+  await M.run(env,{now:T0+3*H});
+  assert.equal(state(bucket),'delayed',quiet+': newly eligible work observed for zero minutes is unknown, not a stall');assert.equal(posts(calls).length,0,'no false alert');
+  assert.equal(bucket.value(KEY).predictions.unknownSince,at(T0+3*H));
+  await M.run(env,{now:T0+4*H});assert.equal(state(bucket),'degraded','60 minutes after it was first observed');assert.equal(posts(calls).filter(item=>item.body.key==='predictions_no_progress').length,1);}
+ // 4. A live lease for a run whose record is missing or another run has no provable start: the 60-minute cap cannot be bypassed.
+ for(const latest of [null,{runId:'run-other',status:'complete',createdAt:'2026-11-20T08:00:00Z',completedAt:'2026-11-20T08:05:00Z',counts:{created:0,recalculated:0}}]){
+  const {bucket,env,M}=setup();healthy(bucket);
+  bucket.set('enrichment/latest-run.json',latest||{runId:'run-0454',status:'complete',createdAt:at(base-8*MIN),completedAt:at(base),counts:{created:3,recalculated:0}});
+  diag(bucket,'run-0454',at(base-8*MIN),at(base),{stopReason:'eligible_queue_empty',added:3});
+  bucket.set('enrichment/runner-lease.json',{runId:'run-live',expiresAt:T('09:30'),heartbeatAt:'2026-11-20T08:59:00Z'});
+  bucket.set('enrichment/prediction-queue.json',queue());
+  await M.run(env,{now:T('09:00')});
+  assert.equal(state(bucket),'degraded','a lease without a provable start does not make the run "running"');}
 }
 
 // 6b. Delivery is claimed before it is sent: concurrent ticks send once, a failed delivered-mark may repeat with the same id, a lost claim sends nothing.

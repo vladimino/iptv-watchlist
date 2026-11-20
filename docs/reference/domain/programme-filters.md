@@ -43,6 +43,34 @@ Two **disjoint sets of films**, selected by `shortlist=`:
 - The assistant tool `filter_watchlist_programme` accepts `period` `all`, `archive`, `soon` and `future` (an alias of `soon`); the state stores `soon`.
 - Finds follow the same period names: `period=soon` keeps finds whose state is `soon`.
 
+## Saved filter presets: API and storage contract
+
+A preset is a named, normalized main-page filter query. One document `{schemaVersion:1, presets:[{id,name,schemaVersion:1,query,createdAt,updatedAt}]}` holds at most 30 presets in creation order; `id` is a UUID, `name` is 1 to 80 characters without control characters, `query` is the normalized URL query (at most 4000 characters; unknown keys and values are dropped on write and on read). Implementation: `src/filter-presets.js` (route, validation, normalization), `src/filter-presets-d1.js` (D1 storage). Tests: `tests/filter-presets.mjs` (R2 path), `tests/filter-presets-d1.mjs` (D1 path, import, activation), `tests/filter-preset-ui.mjs`.
+
+| Method and path | Result |
+| --- | --- |
+| `GET /api/ui/filter-presets` | `200` with the document and a quoted `ETag`. Never writes. |
+| `POST /api/ui/filter-presets` | `201` with the new document. |
+| `PATCH /api/ui/filter-presets/:id` | `200`; `name`, `query` or both; nothing to update is `400`. |
+| `DELETE /api/ui/filter-presets/:id` | `200` with the remaining document. |
+
+There is no `PUT`. Every write needs `If-Match`: absent is `428`, a token that is not the current one is `412` with the current document and `ETag` in the answer (the client refreshes and retries), a cross-origin write is `403`, a malformed id is `404`, invalid input is `400` and writes nothing. An unreadable stored document is `500` on reads and writes alike.
+
+**Revision token.** The empty state of a store that holds no document is `"none"`. In R2 the token is the object's ETag. In D1 it is `"d1:<generation>"` (`"none"` only at generation 0), and every committed write adds one. The two spellings are never interchangeable: after the switch a stale R2 token is `412`, so a client re-reads and never updates through an old token. Two writers that start from one token cannot both commit; the second gets `412`.
+
+**Authority.** One marker row (`filter_preset_authority`, schema v28) decides where the document lives, per request:
+
+| Marker state | Behavior |
+| --- | --- |
+| The database proves it is pre-migration (tables absent and `schema_contract` below version 28) | R2 object `ui/filter-presets.json` serves, exactly as before schema v28. |
+| `mode r2`, writes `open` | R2 serves; no D1 preset row is read or written. |
+| `mode r2`, writes `held` | R2 serves reads; every write is `503` (the import fence). |
+| `mode d1`, writes `open` | D1 rows serve; R2 is never read or written for presets. |
+| `mode d1`, writes `held` | D1 rows serve reads; every write is `503`. |
+| Binding missing, database without `schema_contract`, version 28 without the tables, tables present but marker unreadable or unknown, or a storage error | `503`. The route never falls back to R2. Only the explicit local stand-in `FILTER_PRESETS_DB_OPTIONAL=standin` (tests, never production) runs without a database. |
+
+A D1 read takes the marker, the rows and the marker again and retries once on disagreement; rows of another generation are never served. A request on the R2 branch re-reads the marker right before its R2 write and answers `503` when writes are held; a write admitted earlier is stopped by the operator's fence write on the R2 object: the stored bytes plus one trailing newline, because R2 ETags are content-derived and identical bytes would not rotate the ETag (its conditional PUT then fails). A database binding that points at a different but valid database below version 28 is not detected by the marker; the runbook requires a binding identity check before every cutover. A write whose reply is lost is reported as success only when the stored rows are exactly its own document. A D1 write is one batch: a compare-and-swap of the marker generation, a fence statement that aborts the whole batch when that update changed nothing, then the rows are replaced. An empty D1 table is never evidence that R2 holds no presets: the switch happens only through the documented import with a parity proof ([runbook](../../runbooks/filter-presets-cutover.md)). Code rollback does not move data: presets written in D1 are not in R2.
+
 ## Not in this contract
 
 Poster hourglass and the film page show layout ([ADR 0114](../../adr/0114-film-availability-lifecycle.md) follow-ups), sorting by appearance time, any change of the discovery window, hot processing or retention.

@@ -421,6 +421,12 @@ export const FILES={
  "admin-identity-revoke-page.mjs": {
   "suite": "core"
  },
+ "admin-identity-group-page.mjs": {
+  "suite": "core"
+ },
+ "discovery-identity-group.mjs": {
+  "suite": "core"
+ },
  "discovery-identity-revoke.mjs": {
   "suite": "core"
  },
@@ -778,6 +784,9 @@ export const FILES={
   "suite": "core"
  },
  "filter-preset-ui.mjs": {
+  "suite": "core"
+ },
+ "filter-presets-d1.mjs": {
   "suite": "core"
  },
  "filter-presets.mjs": {
@@ -1456,6 +1465,9 @@ export const FILES={
   "note": "Historical integration fixture, intentionally absent from the public suite."
  },
  "url-state.mjs": {
+  "suite": "core"
+ },
+ "view-index-seed-membership.mjs": {
   "suite": "core"
  },
  "viewing.mjs": {

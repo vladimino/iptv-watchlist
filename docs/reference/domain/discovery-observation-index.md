@@ -60,6 +60,10 @@ Bounds:
 
 The verified index uses the same cap and the same omission rules. Its candidates are the current, unscreened observations whose decision is `verified`. `coverage.complete !== true` refuses an identity correction, including for a key the partial index does contain. A verified decision is not a limbo inventory row.
 
+## Group candidate reads
+
+[ADR 0181](../../adr/0181-owner-confirmed-group-assign-of-selected-observations.md) adds a read-only candidate lookup that needs no new index or migration: bounded primary-key prefix ranges over `discovery_observation(source_key, observation_key)`, where `observation_key` is `normalizedTitle|year`. The anchors are the normalized titles of the catalogue Film (at most 4 used, 25 candidates fetched per anchor, at most 50 candidates after the merge). The result is always `coverage: partial` with `more`, `dropped` and `anchorsOmitted` counts. Only active observations seen in the latest snapshot are candidates. Each candidate is proved separately from D1 (at most 20 shows per key; more is an incomplete, unselectable proof, and the reads are closed by an authority readback) before it can be selected; the index manifest is not required to be complete for this read.
+
 ## Writer
 
 `saveObservationIndex` runs at the end of every resolver chunk, after the status, the checkpoint and the score preview. It uses the decisions the chunk persisted: the in-memory copy, or the stored map when the chunk ended with an error.
