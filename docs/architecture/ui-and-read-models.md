@@ -1,6 +1,6 @@
 # UI and read-model projections
 
-This diagram describes the **current read projections**: D1 is authoritative per domain, and R2 contributes only the roles drawn (the raw view index that D1 prediction and ratings state overlay, and immutable version bodies). Compatibility mirrors such as `programme.json`, `watchlist.json` and `metadata.json` are not read as authority and are not drawn. It is not a new canonical Film database. The browser reads views assembled by the Worker from published programme data and enrichment records. Sources: [Film/Person read contract](../reference/domain/film-person.md), [enrichment API](../reference/api/enrichment.md), [prediction diagnostics](../reference/api/prediction-diagnostics.md), and [fingerprint/prediction ADR](../adr/0014-fingerprint-prediction-lifecycle.md).
+This diagram describes the **current read projections**: D1 is authoritative per domain, and R2 contributes only the roles drawn (the raw view index that D1 prediction and ratings state overlay when the read source is `r2`, and immutable version bodies). With the temporary read source `d1` selected, the view index is derived from the D1 rows and the raw object is not read ([view index contract](../reference/domain/view-index-read-model.md#read-source-selector)). Compatibility mirrors such as `programme.json`, `watchlist.json` and `metadata.json` are not read as authority and are not drawn. It is not a new canonical Film database. The browser reads views assembled by the Worker from published programme data and enrichment records. Sources: [Film/Person read contract](../reference/domain/film-person.md), [enrichment API](../reference/api/enrichment.md), [prediction diagnostics](../reference/api/prediction-diagnostics.md), and [fingerprint/prediction ADR](../adr/0014-fingerprint-prediction-lifecycle.md).
 
 ```mermaid
 flowchart LR
@@ -9,9 +9,10 @@ flowchart LR
         d1canon["Canonical Film/Person and owner reviews"]
         d1pred["Prediction queue, lease, profile and current pointers"]
         d1rat["Actual ratings documents and view"]
+        d1idx["View index derived from D1 rows: prediction pointer, fingerprint and ratings ids (read source d1)"]
     end
     subgraph R2roles["R2: retained roles only"]
-        idx["Raw view index, the base that D1 predictions and ratings overlay"]
+        idx["Raw view index, the base that D1 predictions and ratings overlay (read source r2, the default)"]
         bodies["Immutable fingerprint and prediction version bodies"]
     end
     subgraph Server["Cloudflare Worker read paths"]
@@ -28,7 +29,10 @@ flowchart LR
     d1canon --> api
     d1pred --> ready
     d1rat --> ready
-    idx --> ready
+    d1pred --> d1idx
+    d1rat --> d1idx
+    idx -->|"r2 default"| ready
+    d1idx -->|"d1 selected"| ready
     bodies --> ready
     api --> combine
     ready --> combine
@@ -108,7 +112,7 @@ On an admin page the events link opens `/events`. On the programme page and the 
 
 **Important side-effect boundary:** do not assume all HTTP GET requests are pure reads. Some existing view/event handlers can initialize or recover persisted state; consult the [deployment runbook](../runbooks/deployment.md) and [GET side-effect tests](../../tests/get-side-effects.mjs) before operational probing.
 
-**Authority:** the read cutovers are done per domain; which store each reader uses is in [authority per domain](persistence-and-migration.md#authority-per-domain). The published programme and watchlist are read from D1 at the pinned generation; the R2 view index is a base that the Worker overlays with D1 predictions and ratings on read.
+**Authority:** the read cutovers are done per domain; which store each reader uses is in [authority per domain](persistence-and-migration.md#authority-per-domain). The published programme and watchlist are read from D1 at the pinned generation; the R2 view index is a base that the Worker overlays with D1 predictions and ratings on read. With the temporary read source `d1` selected there is no raw base: the view is derived from the D1 rows, the raw writers keep the object current, and `r2` is the rollback ([runbook](../runbooks/view-index-source.md)).
 
 #### Poster retry in the footer and the Events Log
 

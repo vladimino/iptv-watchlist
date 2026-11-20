@@ -637,14 +637,15 @@ export async function openProfile(env){
 }
 
 // Rows of one prediction table that belong to a film in the index, read in keyset pages (film_id is the primary key). A table
-// beyond PREDICTION_OVERLAY_ROWS rows is refused and nothing is returned. Rows of films outside the index are read and dropped.
+// beyond PREDICTION_OVERLAY_ROWS rows is refused and nothing is returned. Rows of films outside the index are read and dropped;
+// `wanted === null` keeps every row (the derived key set of the D1 view index source).
 async function overlayRows(db,sql,wanted){
  const rows=[];let after='',total=0;
  for(;;){
   const page=await many(db,sql,[after,PREDICTION_OVERLAY_PAGE]);
   total+=page.length;
   if(total>PREDICTION_OVERLAY_ROWS)throw failed('prediction_domain_budget',undefined,'overlay_rows');
-  for(const row of page)if(wanted.has(row.filmId))rows.push(row);
+  for(const row of page)if(wanted===null||wanted.has(row.filmId))rows.push(row);
   if(page.length<PREDICTION_OVERLAY_PAGE)return rows;
   after=page[page.length-1].filmId;
  }
@@ -684,6 +685,36 @@ export async function overlayIndex(env,index,moodFacet){
   byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),display});
  }
  for(const filmId of ids)next[filmId]=overlayedItem(next[filmId],byFilm.get(filmId),moodFacet);
+ return next;
+}
+
+// The view index key set taken from D1 (ADR 0183, option A): the film ids of prediction_pointer and prediction_fingerprint, each entry laid out
+// by the same overlay rule as overlayIndex. It reads no R2 object and writes nothing. A film with a pointer row gets `prediction`, a film with a
+// fingerprint row gets `fingerprint`, `fingerprintHash` and `impactFeatures`, and either gets the mood facet. Ratings aliases are added afterwards
+// by RatingsD1.overlayView and the compiled seed by the caller, so the full key set is the union the ADR names.
+// Fail closed: the prediction domain must be d1 (a marker that is not d1, an absent schema or a missing binding is a refusal, never a fallback to
+// the raw object) and each table is capped at PREDICTION_OVERLAY_ROWS rows. The two tables are read in parallel keyset pages and are not one
+// snapshot, exactly as in overlayIndex.
+export async function derivedIndex(env,moodFacet){
+ const direct=!!env&&typeof env.prepare==='function'&&env.BUCKET==null;
+ const db=direct?env:(env?.DB??null);
+ const authority=await readPredictionAuthority(db,direct?undefined:env);
+ if(authority.mode!=='d1')throw failed('prediction_domain_not_authoritative');
+ const byFilm=new Map();
+ const [fingerprints,pointers]=await Promise.all([
+  overlayRows(db,'SELECT film_id AS filmId, features_json AS features FROM prediction_fingerprint WHERE film_id>? ORDER BY film_id LIMIT ?',null),
+  overlayRows(db,'SELECT film_id AS filmId, display_json AS display FROM prediction_pointer WHERE film_id>? ORDER BY film_id LIMIT ?',null),
+ ]);
+ for(const row of fingerprints){
+  let features;try{features=JSON.parse(row.features);}catch{throw failed('prediction_domain_unavailable');}
+  byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),features});
+ }
+ for(const row of pointers){
+  let display;try{display=JSON.parse(row.display);}catch{throw failed('prediction_domain_unavailable');}
+  byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),display});
+ }
+ const next={};
+ for(const filmId of [...byFilm.keys()].sort())next[filmId]=overlayedItem(undefined,byFilm.get(filmId),moodFacet);
  return next;
 }
 

@@ -106,6 +106,8 @@ async function adminHealthRoute(request,env,url){
  const run=snapshot.tuple.programmeRunId,bucket=env.BUCKET,reads=[];
  const read=async key=>{
   reads.push(key);
+  // ADR 0183: with the D1 source selected the view index is derived from D1; the displayed version is the D1 token, not an ETag.
+  if(key===ENRICHMENT_KEY+'view-index.json'&&typeof viewIndexIsD1==='function'&&viewIndexIsD1(env))return {present:true,body:await derivedViewIndex(env),version:await viewIndexD1Version(env),etag:null};
   if(typeof PredictionD1!=='undefined'&&(key===ENRICHMENT_KEY+'view-index.json'||PredictionD1.predictionMutableKey(key))){
    if(key===ENRICHMENT_KEY+'view-index.json'){const object=await adminReadObject(bucket,key,null);if(!object.present)return object;let body=await PredictionD1.overlayIndex(env,object.body,canonicalMoodFacet);if(typeof RatingsD1!=='undefined')body=await RatingsD1.overlayView(env,body);return {...object,body};}
    const routed=await PredictionD1.routeRead(env,key);

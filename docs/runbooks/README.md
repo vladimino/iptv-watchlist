@@ -3,6 +3,7 @@
 These pages describe maintained operational boundaries under [authorization levels L0–L3](../process/authorization-and-escalation.md). Proven L0 reads and scoped L1 delivery need no repeated owner prompt; no new automatic L2 production writer is authorized by the policy change, and L3 retains owner-approved plans and holdpoints. Check each operation-specific runbook and accepted safeguards.
 
 - [Deployment and Cloudflare operations](deployment.md)
+- [View index read source: selector, switch, rollback and retirement](view-index-source.md) (`VIEW_INDEX_SOURCE`, [ADR 0183](../adr/0183-view-index-membership-from-d1-rows.md))
 - [Historical, superseded and non-executable: Discovery pause window for the retired D1 enrichment projector](d1-projector-discovery-freeze.md) (AIR-383; superseded by ADR 0155 and AIR-512)
 - [Historical, superseded and non-executable: activation plan for the retired D1 projector exclusive-window selector](d1-projector-window-activation.md) (AIR-383; superseded by ADR 0155 and AIR-512)
 - [Film/Person schema 13–16: read-only preflight and apply sequence](film-person-schema-preflight.md)

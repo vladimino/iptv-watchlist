@@ -1491,7 +1491,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null,opt
  const showsSignature=await currentShowsSignature(pinned,report);
  const source=await consistentQueueReport(pinned,report);
  const [profile,storedIndex,catalog,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned),loadJSON(env,'sync.json')]);
- const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
+ const index=typeof PredictionD1==='undefined'||(typeof viewIndexIsD1==='function'&&viewIndexIsD1(env))?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
  if(!profile)return null;
  const recovery=await predictionRecoveryOverlay(env);let recoveryDenied=0;
  const safeSource=source&&Array.isArray(source.films)?source:{runId:source?.runId||null,films:[]};
@@ -2246,6 +2246,13 @@ function footerMetadataProjection(metadata){
 // one that moved in between fails the read (the index is then unknown, never counted from a half-dropped copy).
 const FOOTER_PREDICTION_FIELDS=['prediction','fingerprintHash','impactFeatures'],FOOTER_RATING_FIELDS=['watched','actualRating','watchlist'];
 async function footerViewIndex(env){
+ // ADR 0183: with the D1 source selected the index is derived from D1 and the raw object is never read. The authority is checked again after the read.
+ if(typeof viewIndexIsD1==='function'&&viewIndexIsD1(env)){
+  const derived=await derivedViewIndex(env,{moodFacet:null});
+  const stillOpen=(await PredictionD1.readPredictionAuthority(env?.DB??null,env))?.mode==='d1'&&(await RatingsD1.readRatingsAuthority(env?.DB??null,env))?.ready===true;
+  if(!stillOpen){const error=new Error('footer_index_authority_moved');error.code='footer_index_authority_moved';throw error;}
+  return footerIndexProjection(Object.fromEntries(Object.entries(derived).map(([id,item])=>[id,footerPick(item,FOOTER_INDEX_FIELDS)])));
+ }
  const predictionsD1=async()=>typeof PredictionD1!=='undefined'&&typeof PredictionD1.readPredictionAuthority==='function'&&(await PredictionD1.readPredictionAuthority(env?.DB??null,env))?.mode==='d1';
  const ratingsReady=async()=>typeof RatingsD1!=='undefined'&&typeof RatingsD1.readRatingsAuthority==='function'&&(await RatingsD1.readRatingsAuthority(env?.DB??null,env))?.ready===true;
  const dropPredictions=await predictionsD1(),dropRatings=await ratingsReady();
@@ -3558,7 +3565,7 @@ async function loadGenreCatalog(env){
  }
  return loadJSON(env,'epg/discovered-films.json');
 }
-async function enrichmentView(env){const [profile,stored]=await Promise.all([loadJSON(env,profileKey),readViewIndex(env)]),index=typeof PredictionD1==='undefined'?stored:await PredictionD1.overlayIndex(env,stored,canonicalMoodFacet),freshness=await predictionFreshness(env,profile);
+async function enrichmentView(env){const [profile,stored]=await Promise.all([loadJSON(env,profileKey),readViewIndex(env)]),index=typeof PredictionD1==='undefined'||(typeof viewIndexIsD1==='function'&&viewIndexIsD1(env))?stored:await PredictionD1.overlayIndex(env,stored,canonicalMoodFacet),freshness=await predictionFreshness(env,profile);
  // Genres feed only the selective rules, so the programme and catalog are read only when one of them is on.
  const films=freshness.needsGenres?await (async()=>{const pinned=await pinEpg(env),[report,catalog]=await Promise.all([loadJSON(pinned,'programme.json'),loadGenreCatalog(pinned)]);return new Map(allEnrichmentFilms(report||{films:[]},catalog).map(f=>[String(f.id),f]));})():null;return {moodVocabulary:{version:MOOD_MAPPING_VERSION,labels:MOOD_LABELS,groups:MOOD_GROUPS},profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,compatibility:{profileMode:freshness.mode,fingerprintMode:freshness.fingerprintMode,...fingerprintTarget()},films:Object.fromEntries(Object.entries(index||{}).map(([id,item])=>{const p=item.prediction,f=item.fingerprint,facet=canonicalMoodFacet(f,p);return [id,{moodIds:facet.moodIds,moodGroups:moodPresentationGroups(facet.mapping),fingerprint:f&&f.fingerprintHash===item.fingerprintHash?{plotMechanics:f.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(f.execution)}:null,prediction:p?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodIds:facet.moodIds,...(Object.hasOwn(p,'confidenceAssessment')?{confidenceAssessment:p.confidenceAssessment,fingerprintHash:p.fingerprintHash??null}:{}),stale:!freshness.indexed(item,films?.get(id))}:null,actualRating:item.actualRating??null,watched:item.watched===true?true:item.watched===false?false:null}];}))};}
 
