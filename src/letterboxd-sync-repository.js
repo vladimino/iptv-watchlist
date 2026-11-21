@@ -3,10 +3,16 @@
 // Every committing call carries the Workflow's mode-epoch guard, so a stale instance of a closed mode writes nothing (decision 3). The causal effects are applied by
 // INJECTED writers (`effectWriters.scan_facts|retention|removal_enqueue`, each `(ctx, effect, snapshot) -> receipt string`); an effect with no writer holds the drain
 // (`effect_writer_absent`) and the scan, it is never marked done without a receipt. The admission ledger step is injected too (`admitNew`), and is optional.
-export function watchlistRepository(WatchlistD1, {epochGuard, effectWriters = {}, admitNew = null} = {}) {
+export function watchlistRepository(WatchlistD1, {epochGuard, scanGuard = null, effectWriters = {}, admitNew = null} = {}) {
   const guards = ctx => {
     if (typeof epochGuard !== 'function' || !Number.isInteger(ctx?.epoch)) return null;
     const guard = epochGuard(ctx.epoch);
+    return Array.isArray(guard) ? [guard] : null;
+  };
+  // AIR-571 D2: the promotion batch carries the stricter guard (mode `cloudflare`, this epoch AND scanning not stopped); every other write keeps the epoch guard so the effects drain while scanning is stopped.
+  const promotionGuards = ctx => {
+    if (typeof scanGuard !== 'function' || !Number.isInteger(ctx?.epoch)) return guards(ctx);
+    const guard = scanGuard(ctx.epoch);
     return Array.isArray(guard) ? [guard] : null;
   };
   return {
@@ -39,7 +45,7 @@ export function watchlistRepository(WatchlistD1, {epochGuard, effectWriters = {}
     },
     // One publication. `no_change` still advances `last_success_at` inside the repository. `indeterminate` is never replayed here.
     async commitScan(ctx, {members, scan}) {
-      const g = guards(ctx);
+      const g = promotionGuards(ctx);
       if (!g) throw Object.assign(new Error('epoch guard'), {code: 'epoch_guard_absent'});
       const result = await WatchlistD1.publishSnapshot(ctx.env, members, {...scan, completedAt: scan.observedAt}, {now: ctx.now(), guards: g});
       if (!result.ok) throw Object.assign(new Error(result.reason), {code: String(result.reason).slice(0, 60)});

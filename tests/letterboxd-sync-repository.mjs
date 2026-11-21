@@ -109,4 +109,51 @@ const slotRows=(f,key)=>f.db.sql("SELECT watchlist_outcome,status FROM letterbox
  const text=fs.readFileSync('src/letterboxd-sync-repository.js','utf8');
  assert.doesNotMatch(text,/\b(SELECT|INSERT|UPDATE|DELETE)\b\s+(INTO|FROM|watchlist|letterboxd)|prepare\(|BUCKET/i);
 }
+// 8. AIR-571 D2: drain mode against the real repository. A stale worker that scanned before the marker cannot promote; new scans do not start; the causal effects still drain; the reverse close then goes through.
+{
+ const f=open(),b=bucket(),wf=workflow(),env={DB:f.db,BUCKET:b,LETTERBOXD_WORKFLOW:wf};
+ const NOW0=T('2026-11-21T09:39:00Z');
+ const effectsPort=async()=>{const row=f.db.sql("SELECT version, effects_drained_version AS drainedVersion, (SELECT COUNT(*) FROM watchlist_effect WHERE status<>'done') AS pending FROM watchlist_current WHERE id=1")[0];
+  return {drained:row.drainedVersion===row.version&&row.pending===0,pending:row.pending,version:row.version,drainedVersion:row.drainedVersion,guard:["INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN (SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=? AND effects_drained_version=version)=1 AND (SELECT COUNT(*) FROM watchlist_effect WHERE status<>'done')=0 THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok",[row.version]]};};
+ const ports={...GOOD,effects:effectsPort};
+ await Sync.switchMode(env,{action:'close_admission',target:'cloudflare'},ports,NOW0);await Sync.switchMode(env,{action:'complete'},ports,NOW0);
+ // a slot with real guards: scanGuard on promotions, the scan gate on the phase
+ const slot=async({now,list,effectWriters=writers,beforeCommit=null})=>{
+  const s=site(list);
+  const fetchPage=async url=>{const page=await s.fetchPage(url);if(beforeCommit&&url.includes('/page/')===false&&beforeCommit.armed){/* first read of page 1 */}return page;};
+  const repository=watchlistRepository(WatchlistD1,{epochGuard:e=>[Sync.FENCE_GUARD_SQL,[e]],scanGuard:e=>[Sync.SCAN_GUARD_SQL,[e]],effectWriters});
+  const phase=Phase.watchlistPhase({repository,scanOpen:e=>Sync.scanOpen(e),fetchPage,parse:s.parse,firstUrl:'https://letterboxd.com/me/watchlist/',username:'me'});
+  // the hook lands after the scan, before the commit: the real race of a stale worker
+  const wrapped={...phase,async run(ctx){const original=repository.commitScan;if(beforeCommit)repository.commitScan=async(c,a)=>{await beforeCommit();return original(c,a);};try{return await phase.run(ctx);}finally{repository.commitScan=original;}}};
+  const started=await Sync.ensure(env,{now});
+  const result=await Sync.run(env,{slotKey:started.slot,series:0,epoch:1},step(),{now:()=>now+60000,ports:{ratings:{run:async()=>({done:true,outcome:'finished'})},watchlist:wrapped,reconcile:{run:async()=>({done:true,outcome:'done'})}}});
+  return {started,result};
+ };
+ const version=()=>f.db.sql('SELECT version FROM watchlist_current')[0].version;
+ const failing={...writers,removal_enqueue:async()=>null};
+ await slot({now:T('2026-11-21T09:40:00Z'),list:[film(0),film(1),film(2)]});assert.equal(version(),1);
+ // a stale worker: it scanned while scanning was open, the owner starts the drain, then it tries to promote version 2: refused in the batch, nothing written
+ let drainResult=null;
+ const row=await Sync.readMode(env);
+ await slot({now:T('2026-11-21T15:40:00Z'),list:[film(0),film(1),film(9)],beforeCommit:async()=>{drainResult=await Sync.switchMode(env,{action:'drain',expectEpoch:row.epoch,expectRevision:row.revision},ports,NOW0);}});
+ assert.equal(drainResult?.draining,true,JSON.stringify(drainResult));
+ assert.equal(version(),1,'the stale worker promoted nothing');
+ assert.notEqual(slotRows(f,'2026-11-21T1630').watchlist_outcome,'committed');
+ // recovery: resume, then a normal promotion whose removal effect cannot be applied (the effects stay pending)
+ const marked=await Sync.readMode(env);
+ assert.equal((await Sync.switchMode(env,{action:'resume',expectEpoch:marked.epoch,expectRevision:marked.revision},ports,NOW0)).resumed,true);
+ await slot({now:T('2026-11-21T21:40:00Z'),list:[film(0),film(1),film(9)],effectWriters:failing});assert.equal(version(),2);
+ assert.equal((await effectsPort()).drained,false,'effects of version 2 are pending');
+ const again=await Sync.readMode(env);
+ assert.equal((await Sync.switchMode(env,{action:'drain',expectEpoch:again.epoch,expectRevision:again.revision},ports,NOW0)).draining,true);
+ // the next slot in drain mode: no scan starts (nothing promoted, outcome `disabled`), and the pending effects ARE applied
+ await slot({now:T('2026-11-22T03:40:00Z'),list:[film(0),film(1),film(7)]});
+ assert.equal(version(),2,'no new scan, no promotion while draining');
+ assert.deepEqual([slotRows(f,'2026-11-22T0430').watchlist_outcome],['disabled']);
+ assert.equal((await effectsPort()).drained,true,'the causal effects of version 2 drained while scanning was stopped');
+ // the reverse close: the marker is set, effects are drained, the guard is pinned at the commit
+ const mode=await Sync.readMode(env);
+ const closed=await Sync.switchMode(env,{action:'close_admission',target:'external',expectEpoch:mode.epoch,expectRevision:mode.revision},ports,NOW0);
+ assert.equal(closed.closed,true,JSON.stringify(closed));
+}
 console.log('letterboxd-sync-repository ok');
