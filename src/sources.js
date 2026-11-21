@@ -348,24 +348,39 @@ function applySlotConfirmation(candidate,metas){
 // (its title, its original title or `movieTitles`, which a TMDB detail read records). An alias without that provenance still counts as a
 // competitor in `knownSlotDecision`, but it never confirms: the slot stays an ordinary discovery observation for the resolver.
 function movieTitleKeys(film){return new Set([film?.title,film?.original,...(film?.movieTitles||[])].map(value=>value?epgTitleParts(value).normalizedTitle:'').filter(Boolean));}
-async function scanEPG(stream,watchlist,now){
+// AIR-564 (ADR 0187 decision 5): `options.policies` is the in-memory Map<channelId,{policy,basis}> a consumer materialized once from ONE Channel snapshot
+// (null/absent = no channel policy, the earlier behaviour byte for byte). Each in-window programme does one Map lookup by its channel id, before Film matching
+// and before the discovery build: `deny_all` ignores the slot even for a known Film; `known_only` keeps only a reliably identified Film (a single watchlist
+// match, or a catalog Film the slot confirms by a movie title, ADR 0142/0158) and creates no unknown candidate, uncertain entry or TMDB lookup; `discover`
+// is the unchanged pipeline. An id the Map does not hold is `known_only`. The policy of a channel never depends on the title, so the same Film on another
+// allowed channel is untouched. `stats` keeps the raw input counters (`scanned`, `coverage`) and adds the post-filter policy counters.
+async function scanEPG(stream,watchlist,now,options={}){
+ const policies=options&&options.policies instanceof Map?options.policies:null;
+ const UNKNOWN_POLICY={policy:'known_only',basis:'unknown'};
+ const policyCounts={inWindow:0,filteredDenyAll:0,skippedKnownOnly:0,discoveryEligible:0,unclassified:0};
  const index=new Map();for(const film of watchlist){for(const title of new Set([...(film.catalogOnly?[film.title,film.original]:[]),...(film.aliases||[film.original]),...(film.movieTitles||[])].map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}
- const rawDiscovery=new Set(),filteredNonMovies=new Set();const channels=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map(),slotOwners=new Map(),conflictedSlots=new Map(),showMeta=new WeakMap();let scanned=0,min=Infinity,max=-Infinity,kept=0,identityCollision=0,buffer='',complete=false,bytes=0;
+ const rawDiscovery=new Set(),filteredNonMovies=new Set();const channels=new Map(),declared=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map(),slotOwners=new Map(),conflictedSlots=new Map(),showMeta=new WeakMap();let scanned=0,min=Infinity,max=-Infinity,kept=0,identityCollision=0,buffer='',complete=false,bytes=0;
  const reader=stream.getReader(),decoder=new TextDecoder();
  // ADR 0142 decision 1: one owner per (channel, start). The same owner again is ignored; a second owner discards both records after the stream.
  const claimSlot=(channelId,startAt,owner,title,channel)=>{const slot=channelId+':'+startAt,held=slotOwners.get(slot);if(held===undefined){slotOwners.set(slot,owner);return 'new';}if(held===owner)return 'same';if(!conflictedSlots.has(slot))conflictedSlots.set(slot,{title,channel,start:startAt,reason:'duplicate_slot'});return 'conflict';};
  try{while(true){const {done,value}=await reader.read();if(done){buffer+=decoder.decode();break;}bytes+=value.length;if(bytes>400000000)throw new Error('EPG exceeds supported size');buffer+=decoder.decode(value,{stream:true});
  while(true){const start=buffer.search(/<(?:channel|programme)\s/);if(start<0){if(buffer.includes('</tv>'))complete=true;buffer=buffer.slice(-1000);break;}if(start>0)buffer=buffer.slice(start);const type=buffer.startsWith('<channel ')?'channel':'programme',end=buffer.indexOf('</'+type+'>');if(end<0){if(buffer.length>1000000)throw new Error('EPG record exceeds limit');break;}const xml=buffer.slice(0,end+type.length+3);buffer=buffer.slice(end+type.length+3);
- if(type==='channel'){channels.set(attr(xml,'id'),field(xml,'display-name'));continue;}
+ if(type==='channel'){channels.set(attr(xml,'id'),field(xml,'display-name'));declared.set(attr(xml,'id'),field(xml,'display-name'));continue;}
  scanned++;const startAt=xmlTime(attr(xml,'start')),endAt=xmlTime(attr(xml,'stop'));if(!Number.isFinite(startAt)||!Number.isFinite(endAt)||endAt<=startAt)continue;min=Math.min(min,startAt);max=Math.max(max,startAt);const channelId=attr(xml,'channel'),channel=channels.get(channelId)||channelId;if(/^[A-Z]{2}:/.test(channel))continue;const c=coverage.get(channelId)||{name:channel,min:startAt,max:endAt};c.min=Math.min(c.min,startAt);c.max=Math.max(c.max,endAt);coverage.set(channelId,c);
  // Retention/display horizon (7 days) is separate from the hot processing horizon (24 hours): days 2-7 keep only shows that match a
  // reliable non-catalog watchlist film. Discovery, uncertain matches and the raw candidate counts never see them.
  if(startAt<now-72*3600000||startAt>=now+EPG_RETAIN_FUTURE_MS)continue;
+ let channelPolicy='discover';
+ if(policies){policyCounts.inWindow++;const found=policies.get(channelId)||UNKNOWN_POLICY;channelPolicy=found.policy;if(found.basis==='unknown'||found.basis==='unclassified')policyCounts.unclassified++;if(channelPolicy==='deny_all'){policyCounts.filteredDenyAll++;continue;}if(channelPolicy==='discover')policyCounts.discoveryEligible++;}
  const title=field(xml,'title'),parts=epgTitleParts(title),titleYear=parts.year,key=parts.normalizedTitle,candidates=index.get(key)||[];const duration=(endAt-startAt)/60000;
  let decision=knownSlotDecision(candidates,titleYear,duration);
  if(decision.films.length===1&&decision.films[0].catalogOnly&&!movieTitleKeys(decision.films[0]).has(key))decision={films:[],reason:'alias_without_movie_provenance'};
  const valid=decision.films;
- if(startAt>=now+EPG_HOT_FUTURE_MS&&(valid.length!==1||valid[0]?.catalogOnly))continue;kept++;
+ if(startAt>=now+EPG_HOT_FUTURE_MS&&(valid.length!==1||valid[0]?.catalogOnly))continue;
+ // ADR 0142 decision 1 holds whatever the policy admits: a skipped record on a known_only channel still claims its slot for the owner the discover path would use (same non-film and shape rules),
+ // so a competing known Film on the same (channel, start) conflicts and both are discarded after the stream. The record itself never becomes a candidate.
+ if(channelPolicy==='known_only'&&valid.length!==1){policyCounts.skippedKnownOnly++;if(!nonFilmEPGReason(title,xml)&&duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160)claimSlot(channelId,startAt,'o:'+key+'|'+(titleYear||''),title,channel);continue;}
+ kept++;
  // A single reliable watchlist/catalog match is a known Film and is never screened out by its title.
  if(startAt<now+EPG_HOT_FUTURE_MS&&duration>=55&&duration<=300)rawDiscovery.add(key+'|'+(titleYear||''));if(valid.length!==1&&nonFilmEPGReason(title,xml)){if(duration>=55&&duration<=300)filteredNonMovies.add(key+'|'+(titleYear||''));continue;}
  if(valid.length!==1||valid[0]?.catalogOnly){if(candidates.length){if(decision.reason==='identity_collision')identityCollision++;uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:decision.reason||(valid.length>1?'ambiguous':'insufficient_year_or_duration')});}if(duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160){const discoveryKey=key+'|'+(titleYear||''),previous=discovery.get(discoveryKey),description=field(xml,'desc'),categories=xmltvCategories(xml);if(claimSlot(channelId,startAt,'o:'+discoveryKey,title,channel)!=='new')continue;const shown={channelId,channel,start:startAt,end:endAt,epgTitle:title};showMeta.set(shown,{title:parts.title,description:description&&description!=='Нет описания'?description.slice(0,700):null,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,categories});if(previous){previous.shows.push(shown);previous.airings++;previous.lastAiring=Math.max(previous.lastAiring,startAt);if(!previous.description&&description&&description!=='Нет описания')previous.description=description.slice(0,700);if(title!==previous.title&&!previous.rawTitles.includes(title)&&previous.rawTitles.length<8)previous.rawTitles.push(title);if(categories.length)previous.categories=[...new Set([...(previous.categories||[]),...categories])].slice(0,8);}else discovery.set(discoveryKey,{key:discoveryKey,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,title:parts.title,rawTitles:[title],normalizedTitle:key,year:titleYear,duration:Math.round(duration),description:description&&description!=='Нет описания'?description.slice(0,700):null,categories,firstAiring:startAt,lastAiring:startAt,airings:1,shows:[shown]});}continue;}
@@ -385,9 +400,21 @@ async function scanEPG(stream,watchlist,now){
    candidate.categories=[...new Set(metas.flatMap(meta=>meta.categories||[]))].slice(0,8);}
   }
  for(const candidate of discovery.values())applySlotConfirmation(candidate,candidate.shows.map(show=>showMeta.get(show)));
- return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,identityCollision,duplicate_slot:conflictedSlots.size,discoveryCandidates:discovery.size,rawCandidates:rawDiscovery.size,filteredNonMovies:filteredNonMovies.size},uncertain:[...uncertain.values(),...conflictedSlots.values()].slice(0,100)};
+ const policyChannels=policies?channelPolicyCounts(coverage,declared,policies):{channels:null,newChannels:[]};
+ return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,identityCollision,duplicate_slot:conflictedSlots.size,discoveryCandidates:discovery.size,rawCandidates:rawDiscovery.size,filteredNonMovies:filteredNonMovies.size,...(policies?{policy:{applied:true,...policyCounts,channels:policyChannels.channels}}:{})},newChannels:policyChannels.newChannels,uncertain:[...uncertain.values(),...conflictedSlots.values()].slice(0,100)};
 }
 
+// Per-channel counters by effective policy over the channels the feed DECLARES (<channel>) plus any channel it schedules without a declaration. `new` = a declared id the pinned
+// snapshot does not hold (registered after the scan, by id, never by name); `undeclared` = a scheduled id no <channel> declares: it is classified like any unknown id (`known_only`) but is
+// not trusted for registration. `unclassified` = no category and no override. A declared channel whose display name is a country-prefixed feed label (`XX:`) is skipped, as its programmes are.
+function channelPolicyCounts(coverage,declared,policies){
+ const counts={channels:{total:0,discover:0,denyAll:0,knownOnly:0,new:0,unclassified:0,undeclared:0},newChannels:[]};
+ const ids=new Map();
+ for(const [channelId,name] of declared){if(typeof channelId!=='string'||!channelId||/^[A-Z]{2}:/.test(name||''))continue;ids.set(channelId,{name:name||channelId,declared:true});}
+ for(const [channelId,item] of coverage)if(!ids.has(channelId))ids.set(channelId,{name:item.name,declared:false});
+ for(const [channelId,item] of ids){const found=policies.get(channelId)||{policy:'known_only',basis:'unknown'};counts.channels.total++;if(found.policy==='discover')counts.channels.discover++;else if(found.policy==='deny_all')counts.channels.denyAll++;else counts.channels.knownOnly++;if(!item.declared)counts.channels.undeclared++;if(found.basis==='unknown'&&item.declared){counts.channels.new++;counts.newChannels.push({channelId,name:item.name});}if(found.basis==='unknown'||found.basis==='unclassified')counts.channels.unclassified++;}
+ return counts;
+}
 async function loadPeopleNameIndex(films){
  const ids=[...new Set(films.map(f=>f.tmdbId).filter(id=>/^\d+$/.test(id)))];
  if(!ids.length)return null;
@@ -538,11 +565,17 @@ async function localizeFilmTitles(films,cache,mode){
  if(mode!=='on'&&mode!=='shadow'){legacy(films,cache);return {compared:0,mismatched:0};}
  return branchState(films,cache,mode,legacy,domain);
 }
+// Share of the in-window programmes a policy let through (not deny_all); 1 when nothing was in window.
+function policyKeptShare(stats){const total=stats.policy.inWindow||0;return total>0?Math.max(total-(stats.policy.filteredDenyAll||0),1)/total:1;}
 function assertEPGContinuity(result,previous,watchlistCount,now){
  if(result.stats.epgEnd<now+8*3600000)throw new Error('EPG horizon is too short for the next update');
  if(!previous?.stats)return;
  const old=previous.stats,ratio=watchlistCount/(previous.watchlistCount||watchlistCount);
  if(old.scanned>10000&&result.stats.scanned<old.scanned*.65)throw new Error('EPG has too few programmes compared with the last good update');
  if(old.channels>100&&result.coverage.length<old.channels*.65)throw new Error('EPG has too few channels compared with the last good update');
- if(ratio>.8&&ratio<1.2&&old.broadcasts>100&&result.films.reduce((n,f)=>n+f.shows.length,0)<old.broadcasts*.35)throw new Error('EPG has too few matching broadcasts compared with the last good update');
+ // AIR-564: raw counters (`scanned`, channels) are compared raw to raw. The broadcast floor compares post-filter output, so it is scaled by the share of in-window
+ // programmes the channel policy still lets through, relative to the share the last good update already had (1 when it had no policy): the expected shrinkage
+ // of a first filtered generation (about a third of the raw records in the 20 Nov 2026 audit) is not a feed fault, and a further collapse still is.
+ const kept=result.stats.policy?.applied?policyKeptShare(result.stats):1,was=old.policy?.applied?policyKeptShare(old):1,scale=Math.min(1,kept/was);
+ if(ratio>.8&&ratio<1.2&&old.broadcasts>100&&result.films.reduce((n,f)=>n+f.shows.length,0)<old.broadcasts*.35*scale)throw new Error('EPG has too few matching broadcasts compared with the last good update');
 }

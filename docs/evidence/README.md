@@ -6,6 +6,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 
 | Area | Reports and decisions |
 | --- | --- |
+| [EPG Channel policy in the scan: offline evidence](epg-channel-policy-offline-2026-11-21.md) | 21 Nov 2026, repository change and offline tests; the full XMLTV dry run on the real feed, D1 timing and any live observation are not done |
 | [Mutable R2 inventory and disposition brief](d1-migration/air-546-mutable-r2-inventory-2026-11-20.md) | Source-pinned inventory, live schema/authority readback, proposed migrate/retain decisions and explicit remaining closure gates; no migration authorized |
 | [AIR-550 stage 2: EPG checkpoint in D1, dormant repository, offline evidence](d1-migration/air-550-epg-checkpoint-stage2-offline-2026-11-20.md) | 20 Nov 2026, repository change and offline tests; no production read or write; resolutions of the ADR's open questions and the limits of the sqlite stand-in |
 | [AIR-571: production apply of migration 0031 (Watchlist authority schema)](d1-migration/air-571-0031-apply-2026-11-21.md) | 21 Nov 2026 15:27-15:28 UTC, one owner-authorized schema-only apply with independent readback | **Delivered.** Schema v31, marker `epg`, nothing imported | AIR-571 | 0032 and later steps need their own GO |
