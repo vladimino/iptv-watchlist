@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import {webcrypto} from 'node:crypto';
 import {d1Standin} from './d1-standin.mjs';
 import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
@@ -56,6 +57,7 @@ const ctx=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSi
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ctx);
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader',IMPORT),ctx);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),ctx);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+installViewIndexFixture(ctx);
 const worker=ctx.worker;
 
 function seedCatalog(){

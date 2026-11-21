@@ -74,7 +74,7 @@ Authority is per domain, as [authority per domain](../../architecture/persistenc
 | `epg/discovered-films.json` | Verified discovered catalog | Generation-pinned shows. Still not a search index |
 | `epg/resolver-lease.json`, `epg/resolver-continuation.json` | In-flight resolver coordination | Do not read these on an admin page load |
 | `enrichment/films/<id>/fingerprint.json`, `predictions.json` | Per-film prediction state | Point reads exist for diagnostics. Listing the prefix is a scan |
-| `enrichment/view-index.json`, `enrichment/prediction-queue.json` | Dashboard and queue projections | Not Film identity |
+| The D1-derived view index, `enrichment/prediction-queue.json` | Dashboard and queue projections | Not Film identity |
 | Lifecycle `*.lifecycle.json` sidecars | Computed by `readLifecycle` | Forbidden from replacing `discovery-latest` or predictions. Nothing in the Worker writes them on a GET |
 | D1 `film` / `person` tables | Offline and future migration | Empty of production authority until a separate cutover |
 

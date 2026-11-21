@@ -90,13 +90,10 @@ async function adminLimboLoad(env,hasPin){
  if(base.error)return base;
  const cache=ADMIN_LIMBO_CACHE;
  const queue=await adminReadObject(env.BUCKET,LIMBO_QUEUE_KEY,cache?.queue||null);
- // ADR 0183: with the D1 source selected the index is derived from D1 and its version in the pin is the D1 token (it changes whenever the prediction or
- // ratings domain commits), reused from the cache while unchanged. Without it, the raw object's ETag is the version, as before.
- let index;
- if(typeof viewIndexIsD1==='function'&&viewIndexIsD1(env)){
-  const token=await viewIndexD1Version(env);
-  index=cache?.index&&cache.index.version===token?{present:cache.index.present,body:cache.index.body,version:token}:{present:true,body:await derivedViewIndex(env),version:token};
- }else index=await adminReadObject(env.BUCKET,LIMBO_INDEX_KEY,cache?.index||null);
+ // ADR 0183 / AIR-558: the index is always derived from D1 and its version in the pin is the D1 token (it changes whenever the prediction or ratings
+ // domain commits), reused from the cache while unchanged.
+ const token=await viewIndexD1Version(env);
+ const index=cache?.index&&cache.index.version===token?{present:cache.index.present,body:cache.index.body,version:token}:{present:true,body:await derivedViewIndex(env),version:token};
  let observations;
  try{observations=await discoveryIndexRead(env.BUCKET,{cached:cache?.observations||null,env});}
  catch{observations={state:'unavailable',reasons:['storage_unavailable'],programmeRunId:null,manifest:null,manifestEtag:null,records:[]};}

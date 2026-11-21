@@ -589,6 +589,15 @@ export const FILES={
  "enrichment.mjs": {
   "suite": "core"
  },
+ "letterboxd-view-double.mjs": {
+  "suite": "core"
+ },
+ "view-index-d1-input.mjs": {
+  "suite": "core"
+ },
+ "view-index-fixture.mjs": {
+  "suite": "core"
+ },
  "watchlist-composition.mjs": {
   "suite": "core"
  },

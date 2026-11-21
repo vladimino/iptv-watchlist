@@ -13,6 +13,8 @@ import {crc32} from '../src/letterboxd-zip.js';
 import {normTitle} from '../src/letterboxd-match.js';
 import {plan} from '../scripts/letterboxd-baseline-import.mjs';
 import {RULE,build,namesakesDistinct} from '../scripts/letterboxd-display-exclusion.mjs';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
+import {writeD1Input} from './view-index-d1-input.mjs';// AIR-558
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const KEY='letterboxd/display-exclusion.json';
@@ -27,6 +29,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),context);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+installViewIndexFixture(context);
 const worker=context.worker,constant=name=>vm.runInContext(name,context);
 
 // Normalization parity: the Worker key and the builder's normTitle are the same function (normTitle_v1).
@@ -239,23 +242,26 @@ try{
   return dir;
  };
  const snapshotDir=await snapshot('snapshot',[{id:'Ab1',title:'Invented Heist',original:'Invented Heist',year:1995,tmdbId:'949'}]);
+ const d1Main=await writeD1Input(path.join(scratch,'d1-input'),{});// AIR-558: the snapshot holds no raw view-index; the D1 input is the empty index
  const planDir=path.join(scratch,'plan'),buildNow=Date.parse('2026-10-27T10:00:00Z');
- await plan({zip:zipPath,snapshot:snapshotDir,output:planDir,now:buildNow});
+ await plan({zip:zipPath,snapshot:snapshotDir,viewIndexFile:d1Main,output:planDir,now:buildNow});
  const origin=JSON.parse(fs.readFileSync(path.join(planDir,'origin.json'),'utf8'));
  const output=path.join(scratch,'display-exclusion.json');
- const report=await build({zip:zipPath,plan:planDir,snapshot:snapshotDir,output,now:buildNow});
+ const report=await build({zip:zipPath,plan:planDir,snapshot:snapshotDir,viewIndexFile:d1Main,output,now:buildNow});
  assert.deepEqual(report.counts,{exportFilms:13,withIdentity:1,droppedNoYear:2,droppedNoName:0,droppedExportNamesake:4,keptExportNamesake:4,entries:6});
  for(const secret of ['Unique','Twin','Rated','Same','Wish','Gh3','Op7'])assert.ok(!JSON.stringify(report).includes(secret),'report leaks '+secret);
  // ADR 0183: the same build with a D1-derived view index in place of the snapshot's raw object. The view index only contributes rating evidence, so the entries are the same.
  {
-  const d1File=path.join(scratch,'view-index.d1.json');
-  fs.writeFileSync(d1File,JSON.stringify({schema:'view-index-d1-export@1',source:'d1_derived',readAt:'2026-11-20T15:00:00.000Z',database:{id:null},counts:{keys:0},index:{}}));
+  const d1File=await writeD1Input(path.join(scratch,'d1-input'),{});// AIR-558
   const d1Output=path.join(scratch,'display-exclusion-d1.json');
-  const viaD1=await build({zip:zipPath,plan:planDir,snapshot:snapshotDir,output:d1Output,viewIndexFile:d1File,now:buildNow});
+  const viaD1=await build({zip:zipPath,plan:planDir,snapshot:snapshotDir,viewIndexFile:d1Main,output:d1Output,viewIndexFile:d1File,now:buildNow});
   assert.deepEqual(viaD1.counts,report.counts,'the D1 input leaves the counts as they are');
   assert.deepEqual(JSON.parse(fs.readFileSync(d1Output,'utf8')).entries,JSON.parse(fs.readFileSync(output,'utf8')).entries);
-  await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:snapshotDir,output:path.join(scratch,'display-exclusion-d1b.json'),viewIndexFile:path.join(scratch,'absent.json'),now:buildNow}),/could not be read/);
+  await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:snapshotDir,viewIndexFile:d1Main,output:path.join(scratch,'display-exclusion-d1b.json'),viewIndexFile:path.join(scratch,'absent.json'),now:buildNow}),/could not be read/);
  }
+ // AIR-558: omitting the option is refused (ReconcileError, exit 2) and the snapshot's raw view-index is not read as a fallback.
+ await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:snapshotDir,output:path.join(scratch,'display-exclusion-none.json'),now:buildNow}),error=>error.name==='ReconcileError'&&error.exitCode===2&&/--view-index-d1/.test(error.message));
+ assert.equal(fs.existsSync(path.join(scratch,'display-exclusion-none.json')),false);
  const built=JSON.parse(fs.readFileSync(output,'utf8'));
  assert.equal(fs.statSync(output).mode&0o777,0o600);
  assert.equal(built.rule,RULE);
@@ -268,11 +274,11 @@ try{
  const r=await get({});assert.deepEqual(ids(r.body),['tmdb_21','tmdb_23']);assert.deepEqual(r.body.displayExclusion,{state:'applied',excluded:2});
  // Binding: a snapshot that does not reproduce the plan, a tampered plan, an existing or in-repository output are refused.
  const other=await snapshot('other',[]);
- await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:other,output:path.join(scratch,'o1.json'),now:buildNow}),/does not reproduce the baseline plan/);
- await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:snapshotDir,output,now:buildNow}),/EEXIST/);
- await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:snapshotDir,output:path.resolve('tests','private-list.json'),now:buildNow}),/outside the Git repository/);
+ await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:other,viewIndexFile:d1Main,output:path.join(scratch,'o1.json'),now:buildNow}),/does not reproduce the baseline plan/);
+ await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:snapshotDir,viewIndexFile:d1Main,output,now:buildNow}),/EEXIST/);
+ await assert.rejects(build({zip:zipPath,plan:planDir,snapshot:snapshotDir,viewIndexFile:d1Main,output:path.resolve('tests','private-list.json'),now:buildNow}),/outside the Git repository/);
  const tampered=path.join(scratch,'tampered');fs.cpSync(planDir,tampered,{recursive:true});fs.appendFileSync(path.join(tampered,'plan.jsonl'),'\n');
- await assert.rejects(build({zip:zipPath,plan:tampered,snapshot:snapshotDir,output:path.join(scratch,'o2.json'),now:buildNow}),/plan.jsonl differs/);
+ await assert.rejects(build({zip:zipPath,plan:tampered,snapshot:snapshotDir,viewIndexFile:d1Main,viewIndexFile:d1Main,output:path.join(scratch,'o2.json'),now:buildNow}),/plan.jsonl differs/);
  assert.ok(!fs.existsSync(path.join(scratch,'o1.json'))&&!fs.existsSync(path.join(scratch,'o2.json')),'a refused build writes nothing');
 }finally{await rm(scratch,{recursive:true,force:true});}
 

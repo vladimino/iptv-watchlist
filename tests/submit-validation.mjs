@@ -3,11 +3,13 @@
 // film diagnostics (sections 1, 4 and 5) need no runner. Retry and lease semantics are unchanged; no payload text, title or secret leaves the request.
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 const records=new Map(),etags=new Map();let revision=0,failKey='';const logs=[];
 const env={BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;if(key===failKey){failKey='';throw new Error('Storage checkpoint interrupted TITLE-CANARY');}records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};},list:async()=>({objects:[],truncated:false})}};
 const capture={log:(...args)=>logs.push(args.map(String).join(' ')),error:(...args)=>logs.push(args.map(String).join(' ')),warn:(...args)=>logs.push(args.map(String).join(' '))};
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console:capture});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+installViewIndexFixture(ctx);
 ctx.env=env;const call=code=>vm.runInContext(code,ctx),plain=value=>JSON.parse(JSON.stringify(value));
 // Values crossing the vm boundary are JSON round-tripped so deepEqual compares structure, not realm prototypes.
 const fp=value=>plain(call('fingerprintIssues')(value)),pp=value=>plain(call('predictionIssues')(value));

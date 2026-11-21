@@ -1,7 +1,7 @@
 // The archive preview page: one check per submit, the answer held in this tab's memory only. Leaving or resetting the page
 // drops it; nothing is written to storage, the URL or history. A write that has already left the browser is not undone by
 // Cancel, Escape, a new file or a failed response: the tab keeps that command and will not say the write never started.
-const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, rollbackIssued: {}, rollbackKeys: {}, rollbackResult: {}, confirmUnknown: {}, rollbackConfirmUnknown: {}, bound: null, stale: false, inflight: null, viewStep: 1, reached: 1, navAway: false, identity: null, identityStatus: null, identityRetry: null, retryKey: null, retryPick: null, identityByCode: {}, identityTarget: null};
+const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, confirmUnknown: {}, bound: null, stale: false, inflight: null, viewStep: 1, reached: 1, navAway: false, identity: null, identityStatus: null, identityRetry: null, retryKey: null, retryPick: null, identityByCode: {}, identityTarget: null};
 
 function archiveNode(selector) {return document.querySelector(selector);}
 
@@ -11,23 +11,13 @@ function archiveHasUnresolved() {
     const done = committed[key];
     if (done && done.state === 'unknown' && !done.resolved) return true;
   }
-  const rollbackResult = archiveLive.rollbackResult || {};
-  for (const key in rollbackResult) {
-    const done = rollbackResult[key];
-    if (done && done.state === 'unknown' && !done.resolved) return true;
-  }
   for (const key in archiveLive.confirmUnknown || {}) if (archiveLive.confirmUnknown[key]) return true;
-  for (const key in archiveLive.rollbackConfirmUnknown || {}) if (archiveLive.rollbackConfirmUnknown[key]) return true;
   return false;
 }
 
 function archiveHasOutcome() {
   const committed = archiveLive.committed || {};
   for (const key in committed) if (committed[key] && !committed[key].pending) return true;
-  const rollbackResult = archiveLive.rollbackResult || {};
-  for (const key in rollbackResult) if (rollbackResult[key] && !rollbackResult[key].pending) return true;
-  const unknown = archiveLive.rollbackConfirmUnknown || {};
-  for (const key in unknown) if (unknown[key]) return true;
   if (archiveLive.identityStatus && archiveLive.identityStatus.present) return true;
   if (archiveLive.identity) return true;
   return false;
@@ -134,11 +124,7 @@ function archiveClearMemory() {
   archiveLive.issued = {};
   archiveLive.keys = {};
   archiveLive.committed = {};
-  archiveLive.rollbackIssued = {};
-  archiveLive.rollbackKeys = {};
-  archiveLive.rollbackResult = {};
   archiveLive.confirmUnknown = {};
-  archiveLive.rollbackConfirmUnknown = {};
   archiveLive.identity = null;
   archiveLive.identityStatus = null;
   archiveLive.identityRetry = null;
@@ -258,8 +244,6 @@ function archiveCommandSource() {
 
 function archiveLostText(kind) {
   if (kind === 'confirm') return 'Ответ на подтверждение не получен. Согласие могло сохраниться. Факты этим шагом не записываются. Повтор сам не запускается.';
-  if (kind === 'rollback-confirm') return 'Ответ на подтверждение отката не получен. Повтор сам не запускается.';
-  if (kind === 'rollback') return 'Ответ на откат не получен или не прочитан. Откат мог начаться. Повтор сам не запускается.';
   if (kind === 'status') return 'Сохранённое состояние не прочитано. Чтение состояния ничего не пишет; прочитай ещё раз.';
   return 'Ответ на запись не получен или не прочитан. Исход неизвестен: сервер мог уже изменить факты. Повтор сам не запускается.';
 }
@@ -276,17 +260,13 @@ function archiveTransportLost(result) {
 function archiveSettleLostWrite(inflight) {
   const chunk = inflight.chunk;
   if (inflight.kind === 'commit') archiveLive.committed[chunk] = {state: 'unknown', transport: true, counts: null};
-  else if (inflight.kind === 'rollback') archiveLive.rollbackResult[chunk] = {state: 'unknown', transport: true, counts: null};
   else if (inflight.kind === 'confirm') archiveLive.confirmUnknown[chunk] = true;
-  else if (inflight.kind === 'rollback-confirm') archiveLive.rollbackConfirmUnknown[chunk] = true;
 }
 
 function archiveMarkInProgress(inflight) {
   const chunk = inflight.chunk;
   if (inflight.kind === 'commit') archiveLive.committed[chunk] = {state: 'unknown', inProgress: true, counts: null};
-  else if (inflight.kind === 'rollback') archiveLive.rollbackResult[chunk] = {state: 'unknown', inProgress: true, counts: null};
   else if (inflight.kind === 'confirm') archiveLive.confirmUnknown[chunk] = true;
-  else if (inflight.kind === 'rollback-confirm') archiveLive.rollbackConfirmUnknown[chunk] = true;
 }
 
 function archiveApplyFailed(result) {
@@ -302,17 +282,14 @@ function archiveApplyFailed(result) {
   }
   const inProgress = !!(inflight && inflight.kind !== 'preview' && result.error === 'in_progress');
   const lost = inflight && inflight.kind !== 'preview' && archiveTransportLost(result);
-  const rollbackRefused = !!(inflight && inflight.kind === 'rollback' && !inProgress && !lost);
   if (inProgress) archiveMarkInProgress(inflight);
   else if (lost) archiveSettleLostWrite(inflight);
-  else if (rollbackRefused) archiveLive.rollbackResult[inflight.chunk] = {state: 'refused', error: result.error};
   else if (inflight && inflight.kind === 'commit' && archiveLive.committed[inflight.chunk] && archiveLive.committed[inflight.chunk].transport) archiveLive.committed[inflight.chunk] = {state: 'refused', error: result.error, counts: null};
   else if (inflight && inflight.kind === 'confirm') archiveLive.confirmUnknown[inflight.chunk] = false;
-  else if (inflight && inflight.kind === 'rollback-confirm') archiveLive.rollbackConfirmUnknown[inflight.chunk] = false;
-  if (inflight && (inflight.kind === 'commit' || inflight.kind === 'rollback' || inflight.kind === 'rollback-confirm')) archiveOfferReceipt();
+  if (inflight && inflight.kind === 'commit') archiveOfferReceipt();
   const error = archiveNode('#archive-error');
   error.hidden = false;
-  error.textContent = inProgress ? archiveErrorText(result.error, result.detail) : lost ? archiveLostText(inflight.kind) : rollbackRefused ? archiveRollbackRefusedBanner(result.error) : archiveErrorText(result.error, result.detail);
+  error.textContent = inProgress ? archiveErrorText(result.error, result.detail) : lost ? archiveLostText(inflight.kind) : archiveErrorText(result.error, result.detail);
   if (error.focus) error.focus();
   if (archiveLive.answer) archiveRepaint();
   return result;
@@ -578,62 +555,11 @@ function onArchiveIdentityCode(code) {
   return pending;
 }
 
-function onArchiveRollbackConfirm(chunk) {
-  if (!archiveLive.answer || archiveLive.controller) return Promise.resolve(null);
-  if (archiveLive.stale && !archiveLive.rollbackConfirmUnknown[chunk]) return Promise.resolve(null);
-  const sha = archiveLive.answer.archive && archiveLive.answer.archive.sha256;
-  if (!sha) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
-  archiveLive.viewStep = 5;
-  archiveLive.reached = Math.max(archiveLive.reached || 1, 5);
-  if (!archiveLive.rollbackKeys[chunk]) archiveLive.rollbackKeys[chunk] = archiveIdempotencyKey();
-  const run = archiveBeginAction('rollback-confirm', chunk);
-  archiveLive.rollbackConfirmUnknown[chunk] = true;
-  archiveRepaint();
-  const pending = postArchiveRollbackConfirm({archiveSha256: sha, chunk, idempotencyKey: archiveLive.rollbackKeys[chunk], accepted: true}, {signal: run.signal}).then(result => {
-    if (run.seq !== archiveLive.seq) return result;
-    if (result.mode !== 'ready') return archiveApplyFailed(result);
-    archiveLive.rollbackConfirmUnknown[chunk] = false;
-    archiveLive.rollbackIssued[chunk] = result.answer.confirmation;
-    archiveLive.inflight = null;
-    archiveLive.controller = null;
-    archiveShow('ready', archiveLive.answer);
-    return result;
-  });
-  archiveLive.pending = pending;
-  return pending;
-}
-
-function onArchiveRollback(chunk) {
-  if (!archiveLive.rollbackIssued[chunk] || archiveLive.controller) return Promise.resolve(null);
-  archiveLive.viewStep = 5;
-  archiveLive.reached = Math.max(archiveLive.reached || 1, 5);
-  const confirmation = archiveLive.rollbackIssued[chunk];
-  const run = archiveBeginAction('rollback', chunk);
-  archiveLive.rollbackResult[chunk] = {state: 'unknown', transport: true, pending: true, counts: null};
-  archiveRepaint();
-  const pending = postArchiveRollback(confirmation, {signal: run.signal}).then(result => {
-    if (run.seq !== archiveLive.seq) return result;
-    if (result.mode !== 'ready') return archiveApplyFailed(result);
-    archiveLive.rollbackResult[chunk] = {state: result.answer.state, replayed: result.answer.replayed === true, rolledBack: true};
-    archiveLive.inflight = null;
-    archiveLive.controller = null;
-    archiveOfferReceipt();
-    archiveShow('ready', archiveLive.answer);
-    return result;
-  });
-  archiveLive.pending = pending;
-  return pending;
-}
-
 function onArchiveAbandon(chunk) {
   delete archiveLive.issued[chunk];
   delete archiveLive.keys[chunk];
   delete archiveLive.committed[chunk];
-  delete archiveLive.rollbackIssued[chunk];
-  delete archiveLive.rollbackKeys[chunk];
-  delete archiveLive.rollbackResult[chunk];
   delete archiveLive.confirmUnknown[chunk];
-  delete archiveLive.rollbackConfirmUnknown[chunk];
   if ((archiveLive.viewStep || 1) === 5 && !archiveHasOutcome()) {archiveLive.viewStep = 4; archiveLive.reached = Math.min(archiveLive.reached || 4, 4);}
   const error = archiveNode('#archive-error');
   error.hidden = false;
@@ -651,7 +577,7 @@ function onArchiveResultClick(event) {
       if (node.hasAttribute && node.hasAttribute('data-archive-nav')) {action = 'data-archive-nav'; chunk = node.getAttribute('data-archive-nav'); break;}
       if (node.hasAttribute && node.hasAttribute('data-archive-identity-code')) {action = 'data-archive-identity-code'; chunk = node.getAttribute('data-archive-identity-code'); break;}
       if (node.hasAttribute && node.hasAttribute('data-archive-retry-pick')) {action = 'data-archive-retry-pick'; chunk = node.getAttribute('data-archive-retry-pick'); break;}
-      for (const name of ['data-archive-confirm', 'data-archive-commit', 'data-archive-rollback-confirm', 'data-archive-rollback', 'data-archive-abandon', 'data-archive-identity', 'data-archive-status', 'data-archive-retry-confirm', 'data-archive-retry']) {
+      for (const name of ['data-archive-confirm', 'data-archive-commit', 'data-archive-abandon', 'data-archive-identity', 'data-archive-status', 'data-archive-retry-confirm', 'data-archive-retry']) {
         if (node.hasAttribute && node.hasAttribute(name)) {action = name; chunk = Number(node.getAttribute(name)); break;}
       }
     }
@@ -667,8 +593,6 @@ function onArchiveResultClick(event) {
   if (action === 'data-archive-retry') return onArchiveRetry();
   if (action === 'data-archive-confirm') return onArchiveConfirm(chunk);
   if (action === 'data-archive-commit') return onArchiveCommit(chunk);
-  if (action === 'data-archive-rollback-confirm') return onArchiveRollbackConfirm(chunk);
-  if (action === 'data-archive-rollback') return onArchiveRollback(chunk);
   if (action === 'data-archive-abandon') return onArchiveAbandon(chunk);
   return null;
 }

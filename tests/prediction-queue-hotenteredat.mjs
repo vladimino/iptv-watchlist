@@ -1,4 +1,5 @@
 // AIR-480 stage 4b: the prediction queue ranks from completed-read showings and never reads hotEnteredAt (ADR 0142 decision 13, example 26).
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -36,6 +37,7 @@ const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Dat
 }});
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ctx);
 for(const file of ['src/domain/film-person.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+installViewIndexFixture(ctx);
 records.set('enrichment/profile/current.json',{version:1,profileHash:'p',profile:{ratingScale:'Half stars'}});
 records.set('enrichment/view-index.json',{});
 records.set('sync.json',{runId:'run-q',stage:'complete'});

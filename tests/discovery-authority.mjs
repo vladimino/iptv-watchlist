@@ -14,6 +14,7 @@ import {scoped} from '../scripts/bundle-scope.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-discovery-authority-'));
 let databases=0;
@@ -694,6 +695,7 @@ vm.runInContext(scoped('src/domain/discovery-recovery.js','DiscoveryRecovery'),h
 vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js','utf8'),httpContext);
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),httpContext);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),httpContext);
+installViewIndexFixture(httpContext);
 const routeEnv={...httpEnv,BUCKET:guardedBucket};
 const origin='https://iptv.example';
 const call=async(path,init)=>{const response=await httpContext.worker.fetch(new Request(origin+path,init),routeEnv,{waitUntil(){}});return {status:response.status,body:await response.json()};};

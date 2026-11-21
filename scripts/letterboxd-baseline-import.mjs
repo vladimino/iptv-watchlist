@@ -1,6 +1,6 @@
 // Letterboxd baseline import (ADR-0023, contract "Baseline import protocol"). `plan` is offline: it reads the export ZIP in
 // memory, binds it in origin.json, matches it against a verified snapshot exactly as the reconciliation does and plans one
-// observation set per accepted film. `validate`, `commit` and `rollback` send the planned chunks to the owner-only Worker
+// observation set per accepted film. `validate` and `commit` send the planned chunks to the owner-only Worker
 // route; each first re-checks the archive and the plan against origin.json. Film names, codes and ratings stay in the
 // private output directory; standard output carries counts only.
 import {createHash} from 'node:crypto';
@@ -16,7 +16,7 @@ import {ReconcileError,assertOutsideRepository,exportDigest,loadCatalogDir,loadS
 // A plan fixes its chunk size in origin.json, and every remote step re-derives the chunks from it. The Worker does several
 // sequential R2 operations per film, so a chunk must finish well inside the client's request limits: new plans default to
 // DEFAULT_CHUNK_SIZE and accept at most MAX_CHUNK_SIZE. A schema 1 origin.json has no chunkSize and was planned with
-// LEGACY_CHUNK_SIZE; it keeps that chunking for validate, replay and rollback, since receipts are keyed by archive + chunk.
+// LEGACY_CHUNK_SIZE; it keeps that chunking for validate, replay and resume, since receipts are keyed by archive + chunk.
 export const DEFAULT_CHUNK_SIZE=50,MAX_CHUNK_SIZE=100,LEGACY_CHUNK_SIZE=200;
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{3})?)?Z$/;
@@ -53,7 +53,7 @@ export function checkChunkSize(value){
  return value;
 }
 // Every file a plan's directory can hold: the plan itself and the results of the remote steps.
-const OUTPUT_FILES=['origin.json','plan.jsonl','report.json','validate.json','commit.json','rollback.json'];
+const OUTPUT_FILES=['origin.json','plan.jsonl','report.json','validate.json','commit.json'];
 async function readOrigin(outputPath){
  let text;try{text=await readFile(path.join(outputPath,'origin.json'),'utf8');}catch{return null;}
  try{return JSON.parse(text);}catch{throw new ImportError('origin.json is not valid JSON',3);}
@@ -169,9 +169,9 @@ function accessHeaders(env){
 }
 
 export async function remote({mode,zip,output,endpoint,fromChunk=0,toChunk=null,fetchImpl=fetch,env=process.env,now=Date.now()}){
- if(!['validate','commit','rollback'].includes(mode))throw new ImportError('Unknown mode',2);
+ if(!['validate','commit'].includes(mode))throw new ImportError('Unknown mode',2);
  const {origin,chunkSize,chunks,outputPath}=await loadVerifiedPlan({zip,output,now}),url=endpointUrl(endpoint,mode),last=Math.min(toChunk??chunks.length-1,chunks.length-1);
- const order=[];for(let chunk=fromChunk;chunk<=last;chunk++)order.push(chunk);if(mode==='rollback')order.reverse();
+ const order=[];for(let chunk=fromChunk;chunk<=last;chunk++)order.push(chunk);
  const originBody={archiveSha256:origin.archiveSha256,generatedAt:origin.generatedAt,generatedAtSource:origin.generatedAtSource};
  const results=[],totals={};
  // The result file is rewritten after every chunk, so a run cut short still leaves what it did and where it stopped.
@@ -181,7 +181,7 @@ export async function remote({mode,zip,output,endpoint,fromChunk=0,toChunk=null,
   return summary;
  };
  for(const chunk of order){
-  const body=mode==='rollback'?{origin:originBody,chunk}:{origin:originBody,chunk,items:chunks[chunk]};
+  const body={origin:originBody,chunk,items:chunks[chunk]};
   // A dropped connection or a client timeout leaves the chunk's outcome unknown: the Worker may have written part of it.
   // It is reported like any failure and the run stops; rerunning the same command completes the chunk from its intent.
   let response;
@@ -195,21 +195,6 @@ export async function remote({mode,zip,output,endpoint,fromChunk=0,toChunk=null,
  }
  return report();
 }
-// Corrects one inferred film of a committed plan (AIR-388, ADR 0104): the Worker reverses that film's facts under the rollback rules and
-// removes the Letterboxd link and `identity` the import made, leaving the rest of its chunk alone. Only an inferred item of this plan
-// is accepted; a repeat is safe. One owner-approved production operation like every remote step.
-export async function unlinkFilm({zip,output,endpoint,lid,fetchImpl=fetch,env=process.env,now=Date.now()}){
- const {origin,chunks}=await loadVerifiedPlan({zip,output,now}),url=endpointUrl(endpoint,'unlink');
- const chunk=chunks.findIndex(items=>items.some(item=>item.lid===lid&&item.identity==='inferred'));
- if(chunk<0)throw new ImportError('That film is not an inferred item of this plan',2);
- const body={origin:{archiveSha256:origin.archiveSha256,generatedAt:origin.generatedAt,generatedAtSource:origin.generatedAtSource},chunk,lid};
- let response;
- try{response=await fetchImpl(url,{method:'POST',headers:{'Content-Type':'application/json',...accessHeaders(env)},body:JSON.stringify(body),redirect:'error'});}
- catch(error){return {schemaVersion:1,mode:'unlink',chunk,failed:{error:'network_error',cause:networkCause(error)}};}
- let data=null;try{data=await response.json();}catch{}
- if(!response.ok)return {schemaVersion:1,mode:'unlink',chunk,failed:{status:response.status,error:data?.code||data?.error||'http_'+response.status}};
- return {schemaVersion:1,mode:'unlink',chunk,failed:null,facts:data?.facts||{},unlinked:!!data?.unlinked};
-}
 // Only an error code or name leaves the process: messages can quote the URL or headers.
 function networkCause(error){
  const code=[error?.cause?.code,error?.code,error?.name].find(value=>typeof value==='string'&&/^[A-Za-z0-9_]{1,64}$/.test(value));
@@ -217,11 +202,11 @@ function networkCause(error){
 }
 
 function parseArgs(argv){
- const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--chunk-size':'chunkSize','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk','--lid':'lid','--catalog-dir':'catalogDir','--tmdb-results':'tmdbResults','--view-index-d1':'viewIndexFile'};
+ const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--chunk-size':'chunkSize','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk','--catalog-dir':'catalogDir','--tmdb-results':'tmdbResults','--view-index-d1':'viewIndexFile'};
  for(let i=0;i<rest.length;i++){
   // A switch, not a value: the AIR-388 policy is never on by default and only a plan can turn it on.
   if(rest[i]==='--include-inferred'){if(mode!=='plan')throw new ImportError('--include-inferred is a plan option; '+mode+' uses the plan in its directory',2);args.includeInferred=true;continue;}
-  const name=names[rest[i]];if(!name||i+1>=rest.length)throw new ImportError('Usage: letterboxd-baseline-import.mjs plan --zip <abs> --snapshot <abs> --output <abs> [--generated-at <UTC>] [--chunk-size 1..'+MAX_CHUNK_SIZE+'] [--include-inferred] | validate|commit|rollback --zip <abs> --output <abs> --endpoint <https://…> [--from-chunk n] [--to-chunk n] | unlink --zip <abs> --output <abs> --endpoint <https://…> --lid <code>',2);args[name]=rest[++i];}
+  const name=names[rest[i]];if(!name||i+1>=rest.length)throw new ImportError('Usage: letterboxd-baseline-import.mjs plan --zip <abs> --snapshot <abs> --view-index-d1 <abs export file> --output <abs> [--generated-at <UTC>] [--chunk-size 1..'+MAX_CHUNK_SIZE+'] [--include-inferred] | validate|commit --zip <abs> --output <abs> --endpoint <https://…> [--from-chunk n] [--to-chunk n]',2);args[name]=rest[++i];}
  for(const key of ['fromChunk','toChunk'])if(args[key]!=null){args[key]=Number(args[key]);if(!Number.isInteger(args[key])||args[key]<0)throw new ImportError('Chunk numbers are non-negative integers',2);}
  // The chunk size belongs to the plan; the remote steps read it from origin.json.
  if(args.chunkSize!=null){if(mode!=='plan')throw new ImportError('--chunk-size is a plan option; '+mode+' uses the chunk size in origin.json',2);args.chunkSize=checkChunkSize(/^\d+$/.test(args.chunkSize)?Number(args.chunkSize):NaN);}
@@ -232,7 +217,6 @@ async function main(){
   const args=parseArgs(process.argv.slice(2));
   if(args.mode==='plan'){if(!args.zip||!args.output||(!args.snapshot&&!args.catalogDir))throw new ImportError('plan needs --zip, --output and one of --snapshot and --catalog-dir',2);console.log(JSON.stringify(await plan(args)));return;}
   if(!args.zip||!args.output||!args.endpoint)throw new ImportError(args.mode+' needs --zip, --output and --endpoint',2);
-  if(args.mode==='unlink'){if(!args.lid)throw new ImportError('unlink needs --lid',2);const summary=await unlinkFilm(args);console.log(JSON.stringify(summary));if(summary.failed)process.exit(1);return;}
   const summary=await remote(args);console.log(JSON.stringify(summary));if(summary.failed)process.exit(1);
  }catch(error){
   const known=error instanceof ImportError||error instanceof ReconcileError||error?.name==='ZipError'||error?.name==='CsvError';

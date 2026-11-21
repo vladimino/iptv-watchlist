@@ -3,6 +3,7 @@
 // delay or kill a get or put at a chosen key, and every operation is logged so a test can count writes and reads.
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
 
@@ -89,6 +90,24 @@ export function diaryPages(net,{pages,perPage=50,newest='2026-10-30',stars=8,pre
 }
 
 export const SERVER_FILES=['src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/prediction-quality.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/letterboxd-ratings.js','src/prediction-diagnostics.js','src/feature-flags.js','src/mcp.js','src/continuation.js','src/worker.js'];
+// AIR-558: see loadContext. Installs, in a context whose Worker sources are loaded, a RatingsD1 stand-in that owns the facts projection and keeps it in the plain
+// view-index fixture object of the fake bucket (BUCKET.set/value, so never an R2 write). Other RatingsD1 calls answer not owned. Pair it with installViewIndexFixture.
+export function installProjectionStandin(context,records=null){
+ const store=records,key='enrichment/view-index.json',stub={ratingsReady:async()=>false,projectView:async(env,list)=>{
+  if(!list.length||!(store||env.BUCKET.set))return {owned:true,changed:0};
+  const index=(store?structuredClone(store.get(key)):env.BUCKET.value(key))||{};let changed=0;
+  for(const record of list)for(const id of [...(record.links?.letterboxd?[String(record.links.letterboxd)]:[]),...(record.links?.tmdb?['tmdb_'+record.links.tmdb]:[])]){
+   const item={...(index[id]||{})};
+   if(record.rating)item.actualRating=record.rating.value;
+   if(record.watched)item.watched=record.watched.value;
+   if(record.watchlist)item.watchlist=record.watchlist.value;
+   if(JSON.stringify(item)!==JSON.stringify(index[id]||{})){index[id]=item;changed++;}
+  }
+  if(changed){if(store)store.set(key,index);else env.BUCKET.set(key,index);}
+  return {owned:true,changed};
+ }};
+ context.RatingsD1=new Proxy(stub,{get:(t,n)=>n in t?t[n]:async()=>({owned:false,handled:false,changed:0})});
+}
 // One Worker context from the given server files (read from `root`, the repository by default).
 export function loadContext({net,clock,FakeDate,crypto,root='.',files=SERVER_FILES,extra={}}){
  const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date:FakeDate||Date,Intl,Map,Set,JSON,Math,TextEncoder,TextDecoder,Uint8Array,atob,btoa,encodeURIComponent,decodeURIComponent,structuredClone,crypto:crypto||webcrypto,console:{log(){},warn(){},error(){}},setTimeout,ASSETS:{},fetch:net.fetch,...extra});
@@ -99,6 +118,10 @@ export function loadContext({net,clock,FakeDate,crypto,root='.',files=SERVER_FIL
   const path=root+'/'+file;if(!fs.existsSync(path))continue;
   vm.runInContext(fs.readFileSync(path,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context,{filename:file});
  }
+ if(!extra.RatingsD1)installViewIndexFixture(context);// AIR-558: derived view index read from the fake-bucket fixture (a test that passes a real RatingsD1 derives from D1)
+ // AIR-558: the facts pipeline projects into the D1-derived view only. Unless a test passes a real RatingsD1 (extra), this stand-in owns the projection and keeps the
+ // projected ratings facts in the plain fixture object (what ratings_view rows are for the seam's reader); it is not an R2 write (no log entry, no hook). Other RatingsD1 calls answer not owned.
+ if(!extra.RatingsD1)installProjectionStandin(context);
  return context;
 }
 // ADR 0162: these envs have no D1 binding, so they opt in to the explicit local metadata-cache stand-in.

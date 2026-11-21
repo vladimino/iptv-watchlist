@@ -17,11 +17,13 @@ The script turns the catalog into the R2 objects the dashboard reads. Dummy data
 - `titles.json` with one provisional title (`Movie2`) and `people.json` with one cached name (`Actor2`), which the owner page at `http://127.0.0.1:8787/admin` shows as the provisional queue; `Movie1` carries a synthetic TMDB id so it reads as resolved. The health view (`/admin/health`) reads the same store: the fixture has no prediction queue, continuation record or catalog copy, so those subsystems show as unknown or missing there, which is the honest state of the dummy store
 - `sync.json`
 - `enrichment/profile/current.json`, a local version and hash so the dummy prediction is not marked stale
-- `enrichment/view-index.json`, one record per film id, including `moodLabels`, `fingerprintHash`, and `execution`
+- `enrichment/view-index.json`, one record per film id, including `moodLabels`, `fingerprintHash`, and `execution`: a stand-in object for operator tools and snapshot import. The Worker derives the view index from D1 and never reads this object ([view index contract](../reference/domain/view-index-read-model.md)).
+
+After the view index retirement the local development stack serves the programme, started-mark and admin reads, but `GET /api/enrichment/view`, Finds (`/api/catalog/available`) and the footer refuse with `502` or `503`: the view index is derived from D1 and local development has no authoritative D1. A local D1 that satisfies the ratings contract also forces the published-EPG authority (the [ADR 0162](../adr/0162-d1-only-authority-retire-rollback-toolchain.md) stand-ins apply only while those tables are absent). `scripts/local-fixtures.mjs` and `scripts/local-store.mjs` still write `enrichment/view-index.json`, only for the operator tools and snapshot import; the Worker never reads it. The owner accepted this temporary limitation; restoring the full local D1 and R2 environment is [AIR-576](https://trello.com/c/ONq20jy9), and it must not add a production raw fallback or a new local runtime flag.
 - `started/movie-1.json`
 - `events/items/local-fixture-epg.json`
 
-The current view response uses the film-id map, mechanics, and mapped mood ids. It does not yet return the stored `execution` object.
+The local view response is not available (see above).
 
 Show times are calculated from the moment of import, so `Movie1` has one recent broadcast and one later the same day. `Movie3` has no broadcasts; enable “Показывать фильмы без показов” to see it. A later `npm run dev` reuses the fixture store when the catalog file is unchanged and `programme.json`, `watchlist.json`, and the view index are present. If those objects are missing, unreadable, or the view index is not a film map, the store is imported again. The marker for that store is written only after the import succeeds. `npm run dev -- --refresh` deletes the selected store and imports it again. Other stores are left in place.
 

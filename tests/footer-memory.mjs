@@ -13,6 +13,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {spawnSync} from 'node:child_process';
 import {webcrypto} from 'node:crypto';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {scoped,scopedReplacing,scopedEpgPriority,scopedDiscoveryAuthority} from '../scripts/bundle-scope.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
@@ -63,6 +64,7 @@ assert.ok(!/claimOf\(|asked\.has/.test(legacySource.slice(legacySource.indexOf('
 vm.runInContext('const LegacyCatalogReader=(()=>{\n'+legacySource.replace(/^export\s+/gm,'')+'\nreturn {catalogMetadataFromD1};\n})();',ctx);
 vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),ctx);
 for(const source of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(source,'utf8').replace('export default','globalThis.worker='),ctx);
+installViewIndexFixture(ctx); // AIR-558: the footer view index is derived from D1 in production; here the fixture object in the fake bucket stands in for it
 
 // ---- 1. the D1 metadata read: same records as the quadratic version ----
 const reads=[];

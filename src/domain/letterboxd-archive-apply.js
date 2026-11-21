@@ -3,7 +3,6 @@
 // writes, and a chunk contains only films the preview fully compared.
 export const APPLY_BATCH_SIZE = 50;
 export const APPLY_CAPABILITY_ID = 'letterboxd_archive_apply';
-export const ROLLBACK_CAPABILITY_ID = 'letterboxd_archive_rollback';
 export const RETRY_CAPABILITY_ID = 'letterboxd_identity_retry';
 
 // The baseline commit's item, in the key order `JSON.stringify` must keep so the plan hash matches the import receipt.
@@ -64,15 +63,6 @@ export function retryIssue(code) {
     id: 'letterboxd-identity-retry:' + code,
     subject: {kind: 'letterboxd_archive_chunk', id: code},
     action: {code: RETRY_CAPABILITY_ID, eligible: true, reason: 'parser_defect'},
-    evidence: {completeness: 'complete'},
-  };
-}
-
-export function rollbackIssue() {
-  return {
-    id: 'letterboxd-archive-rollback:chunk',
-    subject: {kind: 'letterboxd_archive_chunk', id: 'chunk'},
-    action: {code: ROLLBACK_CAPABILITY_ID, eligible: true, reason: 'committed'},
     evidence: {completeness: 'complete'},
   };
 }

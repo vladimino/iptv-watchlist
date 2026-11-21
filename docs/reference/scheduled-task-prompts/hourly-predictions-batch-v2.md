@@ -55,7 +55,7 @@ prediction_batch_start({trigger:"manual", dryRun:true, pin:{filmIds:[...]}})   /
 prediction_batch_submit({runId:"dry-run", epoch:1, dryRun:true, manifestHash:"<from start>", items:[{filmId, fingerprint?, prediction, inputHash:"<from start>"}, ...]})
 ```
 
-Nothing is written (no lease, run, queue, fingerprint, prediction, version object or view-index entry); `tests/scheduled-task-prompt-v2.mjs` hands one serialized manifest to ten independent passes, counts a single start in total and checks zero D1 and R2 change.
+Nothing is written (no lease, run, queue, fingerprint, prediction or version object); `tests/scheduled-task-prompt-v2.mjs` hands one serialized manifest to ten independent passes, counts a single start in total and checks zero D1 and R2 change.
 
 ### Owner activation gate: short-run completion
 

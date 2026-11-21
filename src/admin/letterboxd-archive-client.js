@@ -5,8 +5,6 @@
 const ARCHIVE_PREVIEW_API='/api/admin/letterboxd-archive/preview';
 const ARCHIVE_CONFIRM_API='/api/admin/letterboxd-archive/apply-confirm';
 const ARCHIVE_APPLY_API='/api/admin/letterboxd-archive/apply';
-const ARCHIVE_ROLLBACK_CONFIRM_API='/api/admin/letterboxd-archive/rollback-confirm';
-const ARCHIVE_ROLLBACK_API='/api/admin/letterboxd-archive/rollback';
 const ARCHIVE_IDENTITY_API='/api/admin/letterboxd-archive/identity-step';
 const ARCHIVE_IDENTITY_STATUS_API='/api/admin/letterboxd-archive/identity-status';
 const ARCHIVE_RETRY_CONFIRM_API='/api/admin/letterboxd-archive/identity-retry-confirm';
@@ -82,9 +80,6 @@ async function postArchiveConfirm(file,declared,fields,options={}){
 async function postArchiveCommit(file,declared,confirmation,options={}){
  return archiveRequest(ARCHIVE_APPLY_API,archiveForm(file,declared,{confirmation:JSON.stringify(confirmation)}),{...options,action:true},'apply');
 }
-async function postArchiveRollbackConfirm(body,options={}){
- return archiveRequest(ARCHIVE_ROLLBACK_CONFIRM_API,JSON.stringify(body),{...options,action:true,json:true},'rollback_confirm');
-}
 async function postArchiveIdentity(body,options={}){
  return archiveRequest(ARCHIVE_IDENTITY_API,JSON.stringify(body),{...options,action:true,json:true},'identity');
 }
@@ -96,7 +91,4 @@ async function postArchiveRetryConfirm(body,options={}){
 }
 async function postArchiveRetry(confirmation,options={}){
  return archiveRequest(ARCHIVE_RETRY_API,JSON.stringify({confirmation}),{...options,action:true,json:true},'identity_retry');
-}
-async function postArchiveRollback(confirmation,options={}){
- return archiveRequest(ARCHIVE_ROLLBACK_API,JSON.stringify({confirmation}),{...options,action:true,json:true},'rollback');
 }

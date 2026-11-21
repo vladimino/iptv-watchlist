@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import {webcrypto} from 'node:crypto';
 import {d1Standin} from './d1-standin.mjs';
 import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
@@ -78,6 +79,7 @@ for(const [file,name] of [['src/letterboxd-export.js','LetterboxdExport'],['src/
 vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive.js','utf8'),ctx);
 vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-apply.js','utf8'),ctx);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),ctx);
+installViewIndexFixture(ctx);
 const worker=ctx.worker;
 
 function seedAdmin(){

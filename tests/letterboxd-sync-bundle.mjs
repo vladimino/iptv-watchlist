@@ -22,8 +22,9 @@ assert.equal(built.status,0,built.stderr);
 const source=fs.readFileSync('dist/server/index.js','utf8');
 
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n');
+// AIR-558: the facts reader's view-index version token (viewIndexD1Version) reads both domain markers, so the stand-in runs the prediction domain in d1 as production does.
 const file=path.join(root,'db.sqlite');
-{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain+"\nUPDATE watchlist_authority SET mode='d1',generation=1 WHERE id=1;\nUPDATE ratings_domain_authority SET mode='d1',cutover='open' WHERE id=1;\nUPDATE metadata_cache_authority SET mode='d1' WHERE id=1;"});assert.equal(r.status,0,r.stderr);}
+{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain+"\nUPDATE watchlist_authority SET mode='d1',generation=1 WHERE id=1;\nUPDATE ratings_domain_authority SET mode='d1',cutover='open' WHERE id=1;\nUPDATE metadata_cache_authority SET mode='d1' WHERE id=1;UPDATE prediction_domain_authority SET mode='d1' WHERE id=1;"});assert.equal(r.status,0,r.stderr);}
 const db=d1Standin(file);
 
 // A fake Letterboxd: a watchlist of `list` ids in pages of 3.

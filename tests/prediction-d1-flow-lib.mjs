@@ -1,6 +1,7 @@
 // A prediction run on the real Worker code with the prediction domain in D1 mode (as production runs it) over a sqlite D1 stand-in and an in-memory R2.
 // Shared by the AIR-441 tests. Local stand-ins only; nothing here calls Cloudflare, TMDB or production.
-import fs from 'node:fs';import vm from 'node:vm';import os from 'node:os';import path from 'node:path';import {webcrypto} from 'node:crypto';
+import fs from 'node:fs';import vm from 'node:vm';import os from 'node:os';import path from 'node:path';import {installViewIndexFixture} from './view-index-fixture.mjs';
+import {webcrypto} from 'node:crypto';
 import * as Authority from '../src/discovery-authority.js';
 import * as PredictionD1 from '../src/prediction-d1.js';
 import {d1Standin} from './d1-standin.mjs';
@@ -38,6 +39,7 @@ export async function flowWorld({scope=true,films=40,extra=null}={}){
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console:capture,setTimeout,DiscoveryAuthority:Authority,PredictionD1:module,encodeURIComponent,decodeURIComponent});
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
  for(const f of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(f,'utf8').replace('export default','globalThis.worker='),ctx);
+ installViewIndexFixture(ctx);vm.runInContext('derivedViewIndex=async function(env,options){return PredictionD1.derivedIndex(env,options?.moodFacet===undefined?canonicalMoodFacet:options.moodFacet);}',ctx);// AIR-558: the prediction domain is real D1 here, so the derived index is its own rows (no ratings overlay in this world)
  const api=async(route,body)=>{const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),env);return {status:r.status,data:await r.json()};};
  const now=Date.now(),film=n=>({id:'tmdb_'+n,title:'tmdb_'+n,original:'tmdb_'+n,year:2020,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,genres:[],actors:[],directors:[],shows:[{start:now}],...(extra?extra(n):{})});
  const list=[];for(let n=1;n<=films;n++)list.push(film(n));

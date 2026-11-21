@@ -5,6 +5,7 @@
 // Worker, and the absence of any write, listing, delete or outbound request.
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
@@ -54,6 +55,9 @@ vm.runInContext(fs.readFileSync('src/prediction-diagnostics.js','utf8'),context)
 vm.runInContext(scoped('src/domain/prediction-recovery.js','PredictionRecovery'),context);
 vm.runInContext(source,context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
+installViewIndexFixture(context);
+// AIR-558: the real token is a D1 read (D1 stays up when R2 fails); the seam's token opens an R2 body, so cancel it and tolerate an R2 outage.
+vm.runInContext("viewIndexD1Version=async function(env){let object=null;try{object=await env.BUCKET.get('enrichment/view-index.json');}catch{}try{await object?.body?.cancel?.();}catch{}return 'fixture:'+(object?.etag??'none');}",context);
 const worker=context.worker;
 const constant=name=>vm.runInContext(name,context);
 
@@ -245,15 +249,13 @@ assert.equal((await call('?film=w1&pin='+down.body.pin)).status,409,'a failed re
 assert.deepEqual(writes,[],'no put, delete or head');
 assert.equal(lists,0,'no listing');
 assert.deepEqual(fetches,[],'no outbound request');
-// ADR 0183: with the D1 read source selected the raw index object is not read and its ETag is absent from the pin; the D1 token (both domains' generations) stands in
-// for it, so a committed prediction or ratings write makes an old pin stale. Any other selector value reads the raw object.
+// ADR 0183 / AIR-558: the D1 token (both domains' generations) stands in for an index ETag in the pin, so a committed prediction or ratings write makes an old pin stale.
 {
  const realDerived=context.derivedViewIndex,realVersion=context.viewIndexD1Version;
  let token='d1:p1.q1.r1',derivedCalls=0;
  context.derivedViewIndex=async()=>{derivedCalls++;return {};};
  context.viewIndexD1Version=async()=>token;
  try{
-  env.VIEW_INDEX_SOURCE='d1';
   seed();records.delete(INDEX);
   const first=await call('?film=w1');
   assert.equal(first.status,200,first.text.slice(0,300));
@@ -265,12 +267,8 @@ assert.deepEqual(fetches,[],'no outbound request');
   const stale=await call('?film=w1&pin='+first.body.pin);
   assert.equal(stale.status,409);assert.equal(stale.body.error,'stale_pin','a committed domain write moves the pin');
   assert.notEqual((await call('?film=w1')).body.pin,first.body.pin);
-  for(const value of ['D1',' d1','on','r2','']){
-   env.VIEW_INDEX_SOURCE=value;seed();derivedCalls=0;
-   const got=await call('?film=w1');
-   assert.equal(got.status,200);assert.ok(gets.includes(INDEX),JSON.stringify(value)+' keeps the raw object');assert.equal(derivedCalls,0);
-  }
- }finally{context.derivedViewIndex=realDerived;context.viewIndexD1Version=realVersion;delete env.VIEW_INDEX_SOURCE;}
+  // AIR-558: the VIEW_INDEX_SOURCE selector is retired; there is no raw-object fallback to assert any more.
+ }finally{context.derivedViewIndex=realDerived;context.viewIndexD1Version=realVersion;}
 }
 
 console.log('Admin prediction recovery API: input checks, read set, pin and torn reads, verdicts, canaries, no write passed');

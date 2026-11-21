@@ -23,6 +23,6 @@ Maintained source-verified domain contracts, distinct from dated rollout evidenc
 - [Film availability lifecycle](film-availability.md) — `available` / `soon` / `unavailable` per film: an archive outranks live and future, `soon` is ready at the END of the show, a missing end is never guessed ([ADR 0114](../../adr/0114-film-availability-lifecycle.md))
 - [EPG horizons](epg-horizons.md) — 7-day retention and display versus the 24-hour hot processing horizon, the report fields and the reader freshness states
 - [Events log](events.md) — the `events/items/` objects, including one `taste_profile` event per committed taste-profile version
-- [View index read model](view-index-read-model.md) — field-by-field authority of `enrichment/view-index.json` entries, what only the raw object still holds (membership), its producers and consumers, and the open decision on replacing it
+- [View index read model](view-index-read-model.md) — the D1-derived view index: field-by-field authority, the key set from D1 rows, the compiled seed layer, the readers, and the retired raw object `enrichment/view-index.json`
 
 Current rollout status belongs in Trello and production observations. See [the main documentation map](../../README.md) and [historical evidence](../../evidence/README.md).
