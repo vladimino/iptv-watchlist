@@ -111,7 +111,9 @@ const FILE_SITES={
  'src/monitor.js':{r2:1,wrapper:0,dynamic:0},
  'src/owner-review-d1.js':{r2:1,wrapper:0,dynamic:0}, // ADR 0162: -1 r2, the env.BUCKET.put of the retired mode-r2 commit; only the mirror put after a d1 commit remains
  'src/prediction-d1.js':{r2:3,wrapper:0,dynamic:0}, // ADR 0162: -2 r2, the mirror put of the retired revert toolchain (putSent) and its repair write; the D1 mirror put and the stand-in queue and lease puts remain
- 'src/published-epg.js':{r2:2,wrapper:8,dynamic:8},
+ // AIR-571 (C3): the root `watchlist.json` mirror has one guarded writer, putWatchlistRoot (two direct conditional puts of the root key: the first write of an absent object and the compare-and-swap of an existing one);
+ // the two former putStable calls of that key (replacePart, writeMirrors) go through it, so wrapper and dynamic sites each lose one and the direct puts gain two.
+ 'src/published-epg.js':{r2:4,wrapper:7,dynamic:7},
  // AIR-410: +1 for writeDiscoveryEvent, the create-only put of one `discovery` Events Log entry (events/items/..., not a projector input).
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
  // ADR 0145: +1 r2 put of `epg/seal/<runId>/publication.json` in `stageSealedGeneration` and +1 dynamic delete of that key in `sealQueueStep`
@@ -126,6 +128,7 @@ const INPUT_WRITERS={
  // AIR-558: the three view-index mergeStoredJSON sites (ratings and removal view-index maintenance) are removed with the raw writers; D1 owns the view index.
  "src/metadata-cache.js|bucket.put|MIRROR_KEY":{count:1,owner:'metadata cache R2 mirror, its own domain'},
  "src/owner-review-d1.js|bucket.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
+ "src/published-epg.js|bucket.put|WATCHLIST_KEY":{count:2,owner:'the one guarded writer of the root watchlist.json mirror (AIR-571 C3: read, marker check after the read, conditional put); the Watchlist marker decides who may write it'},
  "src/worker.js|saveCanonicalMirror|'people.json'":{count:2,owner:'metadata and EPG sync Persons, re-gated at put'},
  "src/worker.js|saveCanonicalMirror|'titles.json'":{count:2,owner:'metadata and EPG sync titles, re-gated at put'},
  "src/worker.js|saveJSON|'watchlist.json'":{count:3,owner:'EPG publication and watchlist persistence, under the publication lease'},
@@ -172,6 +175,7 @@ const classes={
  // Compatibility mirrors of D1-owned published documents: written by read-repair without the lease, never read by the projector under a
  // published D1 snapshot (section 3 below).
  'putStable@src/published-epg.js':'R2 compatibility mirror of a D1-owned published document',
+ 'putWatchlistRoot@src/published-epg.js':'R2 compatibility mirror of the root watchlist.json: read, marker check after the read, conditional put (AIR-571 C3); never read by the projector under a published D1 snapshot',
  // The publication and seal paths: each entry takes the Discovery lease before its first write (section 4 below).
  'sealStep@src/worker.js':'publication entry, lease first',
  'stageSealedGeneration@src/worker.js':'publication entry, lease first',
@@ -216,6 +220,7 @@ const NAMING={
  'loadJSON@src/worker.js':'a read of published documents and other JSON; it does not write',
  'catalogMetadataRead@src/worker.js':'AIR-569: a READ of the canonical metadata (D1 reader in d1 mode, else the metadata.json mirror) for the identity of a new Watchlist member; it writes nothing',
  'putStoredJson@src/worker.js':'frozen titles.json/people.json put after epgStepGuard; other keys are ordinary R2 JSON',
+ 'saveJSON@src/worker.js':'generic writer: the root watchlist.json key is routed to the one guarded writer (PublishedEpg.putWatchlistRoot) through saveWatchlistRoot (AIR-571 C3); every other key as before',
  'writeMirrors@src/published-epg.js':'writes those mirrors from the D1 document, idempotently',
  'persistWatchlist@src/worker.js':'publication path, under the lease',
  'persistScan@src/worker.js':'publication scan path; reads view-index to plan watchlist false retention, writes no frozen mirror',

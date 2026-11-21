@@ -307,6 +307,7 @@ export async function readShows(env,programmeRunId){
 }
 // AIR-531: is there a D1 binding to read at all (the worker never names the binding itself).
 export function hasDatabase(env){return !!database(env);}
+export function hasBucket(env){return !!env?.BUCKET&&typeof env.BUCKET.put==='function'&&typeof env.BUCKET.get==='function';}
 // AIR-531: one indexed point read for the HTML permalink status: is this film id a member (programme or watchlist) of the pinned published generation?
 // Read-only; the caller treats any failure as "unknown", never as "absent".
 export async function isMember(env,programmeRunId,filmId){
@@ -639,10 +640,13 @@ async function replacePart(env,target,kind,programme,watchlist,options){
  const body=kind==='watchlist'?storedWatchlist:storedProgramme;
  const key=kind==='watchlist'?WATCHLIST_KEY:PROGRAMME_KEY;
  if(env.BUCKET&&typeof env.BUCKET.put==='function'&&typeof env.BUCKET.get==='function'){
+  // The root watchlist goes through the guarded writer; the programme root and the generation-addressed copies are independent of the Watchlist marker, and of each other: a failure of the root (which may
+  // belong to another workflow) never skips the generation copy.
   try{
-   await putStable(env.BUCKET,key,body);
-   await putStable(env.BUCKET,generationObjectKey(target,key),body);
+   if(key===WATCHLIST_KEY)await putWatchlistRoot(env,body);
+   else await putStable(env.BUCKET,key,body);
   }catch{/* The D1 commit stands. A later read repairs the mirror. */}
+  try{await putStable(env.BUCKET,generationObjectKey(target,key),body);}catch{/* same */}
  }
  return true;
 }
@@ -677,6 +681,13 @@ async function putStable(bucket,key,value){
  const saved=await bucket.put(key,text,{...JSON_PUT,onlyIf:{etagDoesNotMatch:'*'}});
  return saved?.etag??null;
 }
+// The root watchlist mirror matches when the stored list equals the wanted one; the suffix token is not part of the comparison.
+async function mirrorRoot(bucket,value){
+ const object=await bucket.get(WATCHLIST_KEY);
+ if(!object)return {match:false,etag:null};
+ const stored=rootSemantic(await objectText(object));
+ return {match:stored!==null&&stored===rootSemantic(value),etag:object.etag??null};
+}
 async function mirrorObject(bucket,key,value){
  const object=await bucket.get(key);
  if(!object)return {match:false,etag:null};
@@ -686,9 +697,84 @@ async function mirrorObject(bucket,key,value){
 // ADR 0186 (AIR-569): once the Watchlist is its own D1 authority (marker `d1`) the root `watchlist.json` mirror belongs to the Letterboxd Sync and its reconcile, and the EPG must never overwrite it with an
 // EPG-pinned copy. The generation-addressed copy `epg/generations/<run>/watchlist.json` stays EPG-owned. Absent tables (`no such table`) mean the marker does not exist: the EPG owns the root mirror, as before.
 // Any other storage error fails closed (the root write is skipped; the next repair retries).
-export async function watchlistRootOwned(env){
- try{const row=await one(database(env),'SELECT mode FROM watchlist_authority WHERE id=1');return row?.mode==='d1';}
- catch(error){return !/no such table/i.test(String(error?.message||error));}
+// AIR-571 (C3). The root `watchlist.json` mirror and its writer contract.
+//
+// Who may write it: an EPG-side writer only while the Watchlist marker is POSITIVELY `epg` and `open` (a verified singleton row with a valid mode, writes, generation and its fence row), or while the schema
+// that has the marker is positively absent (a database below 0031: `no such table` for `watchlist_authority`). Everything else blocks, fail closed: `d1`, `held`, a missing singleton row, an unexpected or
+// contradicting value, an unreadable marker. `watchlistRootOwned` is the negation of that predicate.
+//
+// The representation fence. A conditional put by etag is only as strong as the etag: the etag is a content digest, so two writers could produce the same bytes again and a stale writer holding the first etag
+// would win after an ABA. Every root write therefore carries a token that no JSON reader can see: a trailing whitespace suffix after the document (`\n`, an optional run of tabs naming the held generation of a
+// fence, `\n`, then a 64-symbol space/tab nonce, a FRESH one for each write on every side: the EPG writer here, the cutover operator's fence, and any future Letterboxd-side writer). A write is skipped only when the stored
+// list is SEMANTICALLY equal (the parsed document, the suffix ignored). No representation is ever restored, so an etag a stale writer read before a fence can never match again, and `activate` accepts only a fence
+// written for its own generation. Parsers, the API and every other reader see the same document as before: JSON allows whitespace after the top-level value.
+const ROOT_NONCE_SYMBOLS=64;
+function rootNonce(){
+ const bytes=crypto.getRandomValues(new Uint8Array(ROOT_NONCE_SYMBOLS/8));
+ let bits='';
+ for(const byte of bytes)for(let shift=7;shift>=0;shift--)bits+=(byte>>shift)&1?'\t':' ';
+ return bits;
+}
+// The bytes of a root write: the compact document and the suffix. `fenceGeneration` (an integer) marks a fence of that held generation.
+export function serializeRoot(document,{fenceGeneration=null,nonce=rootNonce()}={}){
+ return JSON.stringify(document)+'\n'+(fenceGeneration==null?'':'\t'.repeat(fenceGeneration+1))+'\n'+nonce;
+}
+// The semantic content of a root: the parsed document, the suffix ignored. -> string | null
+export function rootSemantic(input){
+ try{const document=typeof input==='string'?JSON.parse(input):input;return document&&typeof document==='object'&&!Array.isArray(document)?JSON.stringify(document):null;}catch{return null;}
+}
+// The fence of a root text, or null when it is not a fence: {generation, nonce}.
+export function rootFence(text){
+ const match=/\n(\t+)\n([ \t]{64})$/.exec(String(text));
+ return match?{generation:match[1].length-1,nonce:match[2]}:null;
+}
+// -> true when an EPG-side root write may proceed. The same contract as `WatchlistD1.readAuthority` (src/watchlist-d1.js): the legacy case is the schema BELOW the Watchlist migration (a stored schema_contract version under 31)
+// with NONE of its tables; a partial table set, a schema at or above 31 without the tables, a missing or invalid marker row, a missing fence row and any unreadable answer are all closed. A test pins these two constants
+// to the ones of src/watchlist-d1.js.
+export const WATCHLIST_ROOT_SCHEMA_VERSION=31;
+export const WATCHLIST_ROOT_TABLES=Object.freeze(['watchlist_authority','watchlist_cas','watchlist_current','watchlist_staging','watchlist_snapshot','watchlist_member','watchlist_change','watchlist_effect','watchlist_admission_pending']);
+async function watchlistRootWritable(env){
+ const db=database(env);
+ // The explicit local stand-in (no D1 at all, as WatchlistD1.readAuthority) keeps today's behavior.
+ const standin=env?.WATCHLIST_DB_OPTIONAL==='standin';
+ if(!db||typeof db.prepare!=='function')return standin;
+ let present;
+ try{
+  const rows=await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+WATCHLIST_ROOT_TABLES.map(name=>"'"+name+"'").join(',')+')');
+  present=rows.map(row=>row.name);
+ }catch{return false;}
+ if(!present.length){
+  // No Watchlist table at all: legacy ONLY when the stored schema is below the Watchlist migration; at or above it the tables are missing, which is a contradiction and closed.
+  if(standin)return true;
+  try{const version=Number((await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version);return Number.isFinite(version)&&version<WATCHLIST_ROOT_SCHEMA_VERSION;}catch{return false;}
+ }
+ if(WATCHLIST_ROOT_TABLES.some(name=>!present.includes(name)))return false;
+ let row;
+ try{row=await one(db,'SELECT mode, writes, generation, (SELECT COUNT(*) FROM watchlist_cas WHERE id=1) AS cas FROM watchlist_authority WHERE id=1');}catch{return false;}
+ return !!row&&row.mode==='epg'&&row.writes==='open'&&Number.isInteger(Number(row.generation))&&Number(row.cas)===1;
+}
+export async function watchlistRootOwned(env){return !(await watchlistRootWritable(env));}
+// The ONE writer of the root `watchlist.json` on the EPG side (every EPG-side path goes through it: the part replacement, the mirror writer and its repair, and the Worker's fallback tail).
+// A state that is already known not to be writable is refused BEFORE the object is touched (the root then belongs to another workflow and its errors are not this writer's). On a write path the order is the
+// fence: (1) read the object and take its etag, (2) read the marker AGAIN after that read, (3) put only if the etag is still the one read, with a fresh token. A writer that read before a fence fails (3);
+// one that reads after it finds the marker `held` or `d1` at (2).
+// -> {blocked:true} (not writable: nothing was read or written) | {blocked:false,etag} (written, or semantically equal) | {blocked:false,etag:null} (a lost compare-and-swap, an object without an etag, or no bucket)
+export async function putWatchlistRoot(env,value){
+ const bucket=env?.BUCKET;
+ if(!bucket||typeof bucket.put!=='function'||typeof bucket.get!=='function')return {blocked:false,etag:null};
+ if(!(await watchlistRootWritable(env)))return {blocked:true,etag:null};
+ const wanted=rootSemantic(value);
+ const current=await bucket.get(WATCHLIST_KEY);
+ if(!(await watchlistRootWritable(env)))return {blocked:true,etag:null};
+ if(current){
+  const stored=rootSemantic(await objectText(current));
+  if(stored!==null&&stored===wanted)return {blocked:false,etag:current.etag??null};
+  if(!current.etag)return {blocked:false,etag:null};
+  const saved=await bucket.put(WATCHLIST_KEY,serializeRoot(value),{...JSON_PUT,onlyIf:{etagMatches:current.etag}});
+  return {blocked:false,etag:saved?.etag??null};
+ }
+ const saved=await bucket.put(WATCHLIST_KEY,serializeRoot(value),{...JSON_PUT,onlyIf:{etagDoesNotMatch:'*'}});
+ return {blocked:false,etag:saved?.etag??null};
 }
 export async function writeMirrors(env,input){
  const db=database(env);
@@ -702,10 +788,10 @@ export async function writeMirrors(env,input){
   if(!programmeCopy||!rootProgramme)return false;
   let watchlistEtag=null;
   if(input.watchlist){
-   const rootOwned=await watchlistRootOwned(env);
-   if(!rootOwned)watchlistEtag=await putStable(bucket,WATCHLIST_KEY,input.watchlist);
+   const root=await putWatchlistRoot(env,input.watchlist);
+   if(!root.blocked)watchlistEtag=root.etag;
    const watchlistCopy=await putStable(bucket,generationObjectKey(input.programmeRunId,'watchlist.json'),input.watchlist);
-   if((!rootOwned&&!watchlistEtag)||!watchlistCopy)return false;
+   if((!root.blocked&&!watchlistEtag)||!watchlistCopy)return false;
   }
   let pointerEtag=authority.mirrorEtag;
   if(input.phase!=='withheld'){
@@ -732,11 +818,11 @@ export async function repairMirrors(env){
  const run=current.programmeRunId;
  const pointer=await mirrorObject(bucket,POINTER_KEY,{programmeRunId:run,phase:'published'});
  const programmeMirror=await mirrorObject(bucket,PROGRAMME_KEY,programme);
- const watchlistMirror=await mirrorObject(bucket,WATCHLIST_KEY,watchlist);
+ // The root watchlist is compared only while the EPG may own it (a state that is not writable is never read: its errors belong to another workflow), and semantically (the token ignored).
+ const rootOwned=await watchlistRootOwned(env);
+ const watchlistMirror=rootOwned?{match:true,etag:null}:await mirrorRoot(bucket,watchlist);
  const programmeCopy=await mirrorObject(bucket,generationObjectKey(run,'programme.json'),programme);
  const watchlistCopy=await mirrorObject(bucket,generationObjectKey(run,'watchlist.json'),watchlist);
- // With the Watchlist marker `d1` the root watchlist mirror is not this writer's to compare or write.
- const rootOwned=await watchlistRootOwned(env);
  const aligned=pointer.match&&pointer.etag===current.mirrorEtag&&programmeMirror.match&&(rootOwned||(watchlistMirror.match&&watchlistMirror.etag===current.mirrorWatchlistEtag))&&programmeCopy.match&&watchlistCopy.match;
  if(aligned)return {mirrored:true,aligned:true,wrote:false,authority:current};
  const mirrored=await writeMirrors(env,{programmeRunId:run,programme,watchlist,phase:'published'});

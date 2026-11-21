@@ -184,6 +184,8 @@ async function call(pathname,made,{fail=null,failBatch=null,message='D1 DB is ov
  assert.deepEqual(rootOf(legacy.bucket),epgCopy,'marker epg: the EPG owns the root mirror, unchanged');
  const noTables=path.join(root,'w-notables.sqlite');fs.copyFileSync(scenario.dbFile,noTables);
  const old=d1Standin(noTables);old.sql("DROP TABLE watchlist_admission_pending;DROP TABLE watchlist_effect;DROP TABLE watchlist_change;DROP TABLE watchlist_member;DROP TABLE watchlist_snapshot;DROP TABLE watchlist_staging;DROP TABLE watchlist_current;DROP TABLE watchlist_cas;DROP TABLE watchlist_authority;");
+ // a database BELOW the Watchlist migration (schema 30, none of its tables): the maintained authority contract's legacy case. The same tables at schema 33 would be a contradiction and closed.
+ old.sql("DROP TRIGGER schema_contract_no_downgrade;UPDATE schema_contract SET version=30");
  const bare=new Bucket();
  await PublishedEpg.publishGeneration({DB:old,BUCKET:bare},{programmeRunId:RUN2,phase:'published',expectedProgrammeRunId:'22222222-2222-4222-8222-222222222222',programme,watchlist:epgCopy},{now:NOW});
  assert.equal(await PublishedEpg.writeMirrors({DB:old,BUCKET:bare},{programmeRunId:RUN2,programme,watchlist:epgCopy,phase:'published'}),true);

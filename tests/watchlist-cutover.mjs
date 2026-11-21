@@ -6,6 +6,8 @@ import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-se
 import {D1Error} from '../scripts/d1-backfill.mjs';
 import * as Boot from '../scripts/watchlist-bootstrap-production.mjs';
 import * as Op from '../scripts/watchlist-cutover-production.mjs';
+import * as PublishedEpg from '../src/published-epg.js';
+import {createHash} from 'node:crypto';
 import {listDigest,normalizeFilms,readCurrent,pinForEpg,readAuthority,publishSnapshot,completeEffect,EFFECTS} from '../src/watchlist-d1.js';
 import {membershipDigest} from '../src/watchlist-bootstrap.js';
 import {transitionStatements,exportGuards,TRANSITIONS} from '../src/watchlist-cutover.js';
@@ -20,6 +22,25 @@ const FILMS=Array.from({length:30},(_,i)=>({id:'film-'+i,title:'Film '+i,year:19
 const esc=text=>text.replace(/'/g,"''");
 const SHA=await listDigest(normalizeFilms(FILMS));
 const MEMBERS=await membershipDigest(normalizeFilms(FILMS));
+const md5=text=>createHash('md5').update(text).digest('hex');
+// An in-memory R2 object store with strong content etags and conditional puts, usable both as the operator's store (get, head, put) and as the Worker's bucket binding.
+function memStore(initial={}){
+ const objects=new Map(Object.entries(initial).map(([key,text])=>[key,{text,etag:md5(text)}]));
+ const log=[];
+ const store={objects,log,beforePut:null,failPut:null,
+  etag:key=>objects.get(key)?.etag??null,
+  async get(key){const o=objects.get(key);return o?{etag:o.etag,size:Buffer.byteLength(o.text),text:async()=>o.text}:null;},
+  async head(key){const o=objects.get(key);return o?{etag:o.etag,size:Buffer.byteLength(o.text)}:null;},
+  async put(key,text,options={}){
+   if(store.beforePut)await store.beforePut(key);
+   if(store.failPut)throw store.failPut;
+   const o=objects.get(key);
+   if(options.onlyIf?.etagMatches&&o?.etag!==options.onlyIf.etagMatches)return null;
+   if(options.onlyIf?.etagDoesNotMatch==='*'&&o)return null;
+   objects.set(key,{text,etag:md5(text)});log.push('put '+key);return {etag:md5(text)};
+  }};
+ return store;
+}
 let copies=0;
 // A database with the published generation and the bootstrap import done (marker epg/open g0, pointer v1).
 async function imported(){
@@ -35,7 +56,9 @@ async function imported(){
  assert.equal(done.writeState,'committed');
  // O4: the forward path needs the EPG checkpoint authority cut over to d1 and open first.
  sqlite(file,"UPDATE epg_checkpoint_authority SET mode='d1'");
- return {file,db};
+ // the root watchlist mirror in R2 (the list the EPG published) and a write-store factory that allows only that key
+ const store=memStore({'watchlist.json':JSON.stringify({films:FILMS.map(f=>({id:f.id,title:f.title,year:f.year,url:f.url})),updatedAt:'2026-11-21T16:11:45.255Z'})});
+ return {file,db,store,writeFactory:allowed=>{assert.deepEqual([...allowed],['watchlist.json'],'the fence may write only the root key');return store;}};
 }
 const snapshotId='snap-1';
 const FORWARD={run:RUN,epgGeneration:515,count:30,membersSha256:MEMBERS,sha256:SHA,snapshotId};
@@ -47,7 +70,14 @@ const states=[];const trackedCtx=()=>({track:state=>states.push(state)});
 const marker=file=>rows(file,'SELECT mode, writes, generation FROM watchlist_authority')[0];
 const pointer=file=>rows(file,'SELECT version, snapshot_id, list_sha256, film_count, effects_drained_version, revision FROM watchlist_current')[0];
 const counts=file=>rows(file,"SELECT (SELECT COUNT(*) FROM watchlist_staging) AS staging,(SELECT COUNT(*) FROM watchlist_snapshot) AS snapshot,(SELECT COUNT(*) FROM watchlist_member) AS member,(SELECT COUNT(*) FROM watchlist_change) AS change,(SELECT COUNT(*) FROM watchlist_effect) AS effect,(SELECT COUNT(*) FROM watchlist_admission_pending) AS pending")[0];
-const run=(env,command,args,extra={})=>Op.execute(command,{binding:env.db,args,now:NOW,ctx:trackedCtx(),...extra});
+// `activate` needs the root mirror fenced first (the runbook order): the helper fences with the etag it reads, then activates with the etag the fence produced.
+const run=async(env,command,args,extra={})=>{
+ if(command==='activate'&&args.rootEtag===undefined){
+  const fenced=await Op.execute('fence-root',{binding:env.db,args:{generation:args.generation,rootEtag:env.store.etag('watchlist.json')},now:NOW,readStore:env.store,writeStoreFactory:env.writeFactory});
+  args={...args,rootEtag:fenced.root.etag};
+ }
+ return Op.execute(command,{binding:env.db,args,now:NOW,ctx:trackedCtx(),readStore:env.store,writeStoreFactory:env.writeFactory,...extra});
+};
 // A guard tripped in the batch reaches the operator as a statement error of the D1 API; the stand-in throws a plain error.
 const asStmt=env=>({prepare:sql=>env.db.prepare(sql),batch:statements=>asStatement(()=>env.db.batch(statements))});
 const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statements=>{sqlite(env.file,mutate);return asStatement(()=>env.db.batch(statements));}});
@@ -56,6 +86,7 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
 {
  const A=(...a)=>['node','x',...a];
  const pins=['--expect-run',RUN,'--expect-epg-generation','515','--expect-count','30','--expect-members-sha256',MEMBERS,'--expect-sha256',SHA,'--expect-snapshot-id',snapshotId];
+ const activatePins=[...pins,'--expect-root-etag','abc123'];
  assert.deepEqual(Op.parseArgs(A()).report,{configured:false,writes:false,writeState:'none'});
  for(const command of Op.COMMANDS.filter(c=>c!=='status'))assert.throws(()=>Op.parseArgs(A('--'+command)),e=>e.reason==='target_required',command);
  assert.throws(()=>Op.parseArgs(A('--hold','--target','other','--confirm','hold')),e=>e.reason==='target_invalid');
@@ -65,8 +96,8 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  assert.throws(()=>Op.parseArgs(A('--hold','--activate','--target','iptv','--confirm','hold','--expect-generation','0',...pins)),e=>e.reason==='usage','one command only');
  assert.throws(()=>Op.parseArgs(A('--release-abort','--target','iptv','--confirm','release-abort','--expect-generation','1','--expect-count','30')),e=>e.reason==='usage','a command takes only its own pins');
  assert.throws(()=>Op.parseArgs(A('--status','--target','iptv','--confirm','status')),e=>e.reason==='usage');
- for(const drop of ['--expect-run','--expect-epg-generation','--expect-count','--expect-members-sha256','--expect-sha256','--expect-snapshot-id','--expect-generation']){
-  const full=['--activate','--target','iptv','--confirm','activate','--expect-generation','1',...pins];const at=full.indexOf(drop);full.splice(at,2);
+ for(const drop of ['--expect-run','--expect-epg-generation','--expect-count','--expect-members-sha256','--expect-sha256','--expect-snapshot-id','--expect-generation','--expect-root-etag']){
+  const full=['--activate','--target','iptv','--confirm','activate','--expect-generation','1',...activatePins];const at=full.indexOf(drop);full.splice(at,2);
   assert.throws(()=>Op.parseArgs(A(...full)),e=>e.reason==='usage','every pin of activate is required: '+drop);
  }
  assert.equal(Op.parseArgs(A('--hold','--target','iptv','--confirm','hold','--expect-generation','0',...pins)).command,'hold');
@@ -481,6 +512,104 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
   // a replacement between the read and the commit: the stored payload digest and the generation are pinned in the batch
   const racing={prepare:sql=>e.db.prepare(sql),batch:async b=>{sqlite(e.file,"UPDATE published_epg_generation SET payload_sha256='"+'9'.repeat(64)+"' WHERE programme_run_id='"+RUN+"'");return asStatement(()=>e.db.batch(b));}};
   await stop(Op.execute('revert-authority',{binding:racing,args:revert,now:NOW,ctx:trackedCtx()}),'predicate_refused');assert.deepEqual(marker(e.file),{mode:'d1',writes:'held',generation:3});
+ }
+}
+
+// ===== 9. C3: the root watchlist mirror fence before the switch =====
+{
+ const held=async()=>{const e=await imported();await run(e,'hold',{generation:0,...FORWARD});return e;};
+ const text=env=>env.store.objects.get('watchlist.json').text;
+ // the fence: the same list, a new etag, written by a conditional put on the etag read
+ {
+  const e=await held();const before=e.store.etag('watchlist.json');const original=JSON.parse(text(e));
+  states.length=0;
+  const fenced=await Op.execute('fence-root',{binding:e.db,args:{generation:1,rootEtag:before},now:NOW,ctx:trackedCtx(),readStore:e.store,writeStoreFactory:e.writeFactory});
+  assert.equal(fenced.writeState,'committed');assert.deepEqual(states,['unknown','committed']);
+  assert.notEqual(fenced.root.etag,before,'the etag changed');assert.equal(fenced.root.previousEtag,before);assert.match(fenced.next,/--expect-root-etag/);
+  assert.equal(fenced.root.fenceGeneration,1,'the fence is written for the held generation');
+  assert.equal(PublishedEpg.rootSemantic(text(e)),PublishedEpg.rootSemantic(original),'the list is the same, the token ignored');
+  assert.deepEqual(JSON.parse(text(e)),original,'a JSON reader sees the same document');
+  assert.deepEqual(PublishedEpg.rootFence(text(e)),{nonce:fenced.root.nonce,generation:1});
+  assert.equal(e.store.log.filter(l=>l==='put watchlist.json').length,1);
+  // a repeat with the etag read before is a lost compare-and-swap: root_moved, nothing written
+  states.length=0;
+  await stop(Op.execute('fence-root',{binding:e.db,args:{generation:1,rootEtag:before},now:NOW,ctx:trackedCtx(),readStore:e.store,writeStoreFactory:e.writeFactory}),'root_moved');
+  assert.equal(e.store.log.filter(l=>l==='put watchlist.json').length,1);
+  // activate needs the etag the fence produced
+  // a bare current etag is not a proof of a fence: the activate that skips `fence-root` (here the etag the root had before the fence) is refused
+  await stop(Op.execute('activate',{binding:e.db,args:{generation:1,...FORWARD,rootEtag:before},now:NOW,readStore:e.store}),'root_fence_mismatch');
+  await stop(Op.execute('activate',{binding:e.db,args:{generation:1,...FORWARD,rootEtag:fenced.root.etag},now:NOW}),'root_store_required');
+  assert.deepEqual(marker(e.file),{mode:'epg',writes:'held',generation:1},'a refused activate moved nothing');
+  const done=await Op.execute('activate',{binding:e.db,args:{generation:1,...FORWARD,rootEtag:fenced.root.etag},now:NOW,readStore:e.store});
+  assert.deepEqual(done.marker,{mode:'d1',writes:'held',generation:2});
+  // a writer that got through after the fence changes the root again: the fence is repeated, never assumed
+  const e2=await held();
+  const f2=await Op.execute('fence-root',{binding:e2.db,args:{generation:1,rootEtag:e2.store.etag('watchlist.json')},now:NOW,readStore:e2.store,writeStoreFactory:e2.writeFactory});
+  e2.store.objects.set('watchlist.json',{text:'{"films":[],"updatedAt":"x"}',etag:md5('{"films":[],"updatedAt":"x"}')});
+  await stop(Op.execute('activate',{binding:e2.db,args:{generation:1,...FORWARD,rootEtag:f2.root.etag},now:NOW,readStore:e2.store}),'root_not_fenced');
+  // a second fence over the changed root is a new representation and activates
+  const f3=await Op.execute('fence-root',{binding:e2.db,args:{generation:1,rootEtag:e2.store.etag('watchlist.json')},now:NOW,readStore:e2.store,writeStoreFactory:e2.writeFactory});
+  assert.notEqual(f3.root.nonce,f2.root.nonce,'every fence has its own nonce');
+  assert.equal((await Op.execute('activate',{binding:e2.db,args:{generation:1,...FORWARD,rootEtag:f3.root.etag},now:NOW,readStore:e2.store})).writeState,'committed');
+  // the bypass: hold, then activate with the CURRENT etag and no fence at all
+  const e4=await held();
+  await stop(Op.execute('activate',{binding:e4.db,args:{generation:1,...FORWARD,rootEtag:e4.store.etag('watchlist.json')},now:NOW,readStore:e4.store}),'root_not_fenced');
+  assert.deepEqual(marker(e4.file),{mode:'epg',writes:'held',generation:1},'the bypass moved nothing');
+  // the proof of an earlier hold is not reusable: abort, hold again (a new generation), activate with the first fence
+  const f4=await Op.execute('fence-root',{binding:e4.db,args:{generation:1,rootEtag:e4.store.etag('watchlist.json')},now:NOW,readStore:e4.store,writeStoreFactory:e4.writeFactory});
+  await run(e4,'release-abort',{generation:1});await run(e4,'hold',{generation:1,...FORWARD});
+  assert.deepEqual(marker(e4.file),{mode:'epg',writes:'held',generation:2});
+  const stale=await stop(Op.execute('activate',{binding:e4.db,args:{generation:2,...FORWARD,rootEtag:f4.root.etag},now:NOW,readStore:e4.store}),'root_not_fenced');
+  assert.deepEqual(stale.details,{fence:{generation:1},expected:2},'the proof of the earlier generation is refused');
+ }
+ // refusals
+ {
+  const open=await imported();
+  await stop(Op.execute('fence-root',{binding:open.db,args:{generation:0,rootEtag:open.store.etag('watchlist.json')},now:NOW,readStore:open.store,writeStoreFactory:open.writeFactory}),'state_mismatch');
+  const e=await held();const etag=e.store.etag('watchlist.json');
+  await stop(Op.execute('fence-root',{binding:e.db,args:{generation:1,rootEtag:etag},now:NOW,readStore:e.store}),'root_store_required');
+  e.store.objects.set('watchlist.json',{text:'not json',etag:md5('not json')});
+  await stop(Op.execute('fence-root',{binding:e.db,args:{generation:1,rootEtag:md5('not json')},now:NOW,readStore:e.store,writeStoreFactory:e.writeFactory}),'root_unreadable');
+  e.store.objects.delete('watchlist.json');
+  await stop(Op.execute('fence-root',{binding:e.db,args:{generation:1,rootEtag:etag},now:NOW,readStore:e.store,writeStoreFactory:e.writeFactory}),'root_absent');
+ }
+ // failures: a root changed by another writer between the read and the put loses the compare-and-swap (nothing written); an unproven put is write_uncertain, never retried
+ {
+  const e=await held();const etag=e.store.etag('watchlist.json');
+  e.store.beforePut=async()=>{e.store.objects.set('watchlist.json',{text:'{"films":[],"updatedAt":"y"}',etag:md5('{"films":[],"updatedAt":"y"}')});e.store.beforePut=null;};
+  states.length=0;
+  await stop(Op.execute('fence-root',{binding:e.db,args:{generation:1,rootEtag:etag},now:NOW,ctx:trackedCtx(),readStore:e.store,writeStoreFactory:e.writeFactory}),'root_moved');
+  assert.equal(states.at(-1),'none','a lost compare-and-swap wrote nothing');
+  const f=await held();let puts=0;
+  const timed={...f.store,get:f.store.get,head:f.store.head,put:async()=>{puts++;throw new Error('connection reset');}};
+  states.length=0;
+  const unproven=await stop(Op.execute('fence-root',{binding:f.db,args:{generation:1,rootEtag:f.store.etag('watchlist.json')},now:NOW,ctx:trackedCtx(),readStore:f.store,writeStoreFactory:()=>timed}),'write_uncertain');
+  assert.equal(states.at(-1),'unknown');assert.equal(puts,1,'no retry');assert.equal(unproven.details.root.fenced,false);
+  // a lost reply after the object changed: write_uncertain, with the fenced root reported
+  const g=await held();
+  const lost={...g.store,put:async(key,t,o)=>{await g.store.put(key,t,o);throw new Error('reply lost');}};
+  const reached=await stop(Op.execute('fence-root',{binding:g.db,args:{generation:1,rootEtag:g.store.etag('watchlist.json')},now:NOW,ctx:trackedCtx(),readStore:g.store,writeStoreFactory:()=>lost}),'write_uncertain');
+  assert.equal(reached.details.root.fenced,true);
+  const cli=await Op.runWatchlistCutoverProduction({argv:['node','x','--fence-root','--target','iptv','--confirm','fence-root','--expect-generation','1','--expect-root-etag',md5('z')],deps:{binding:f.db,readStore:f.store,writeStoreFactory:()=>timed},now:()=>NOW});
+  assert.equal(cli.result.reason,'root_moved');
+ }
+ // the drain, end to end with the EPG-side writer of the Worker: an in-flight writer that read the root before the fence loses its put; a new one is blocked by the held marker; after the flip nothing writes
+ {
+  const e=await imported();
+  const newer={updatedAt:'2026-11-21T17:00:00.000Z',films:[{id:'film-9',title:'Late',year:2001,url:'https://letterboxd.com/film/film-9/'}]};
+  // the writer read the object and passed the marker check (epg/open) when the cutover starts
+  const bucket={get:e.store.get,head:e.store.head,put:async(key,t,o)=>{
+   if(!bucket.started){bucket.started=true;await run(e,'hold',{generation:0,...FORWARD});await Op.execute('fence-root',{binding:e.db,args:{generation:1,rootEtag:e.store.etag('watchlist.json')},now:NOW,readStore:e.store,writeStoreFactory:e.writeFactory});}
+   return e.store.put(key,t,o);}};
+  const out=await PublishedEpg.putWatchlistRoot({DB:e.db,BUCKET:bucket},newer);
+  assert.equal(out.etag,null,'the in-flight writer lost its compare-and-swap');
+  assert.equal(JSON.parse(text(e)).films.length,30,'the root keeps the published list');
+  // a writer that starts now finds the marker held; after the switch and the release it finds d1
+  assert.equal((await PublishedEpg.putWatchlistRoot({DB:e.db,BUCKET:e.store},newer)).blocked,true);
+  await run(e,'activate',{generation:1,...FORWARD,rootEtag:e.store.etag('watchlist.json')});
+  assert.equal((await PublishedEpg.putWatchlistRoot({DB:e.db,BUCKET:e.store},newer)).blocked,true);
+  await run(e,'release',{generation:2,...RELEASE});
+  assert.equal((await PublishedEpg.putWatchlistRoot({DB:e.db,BUCKET:e.store},newer)).blocked,true,'d1/open: the root belongs to the Watchlist');
  }
 }
 console.log('watchlist cutover: ok');
