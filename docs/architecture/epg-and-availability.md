@@ -30,9 +30,9 @@ flowchart TD
     stale -->|no| reject
 ```
 
-## The run checkpoint in D1 ([ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md), Accepted; dormant, schema not applied)
+## The run checkpoint in D1 ([ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md), Accepted; dormant, schema applied)
 
-Today the run checkpoint `sync.json` and the ingest status `watchlist-ingest.json` are R2 objects written by unconditional PUT after a separate step-lease read (the first diagram). The accepted design moves both behind their own marker. The code and the migration file are delivered and **dormant**: nothing applies the schema or switches the marker. The diagram below is the write path that holds **only after a separately approved activation**; the shaded nodes do not exist in production, and with the marker `r2` or absent the dashed arrow is the only path.
+Today the run checkpoint `sync.json` and the ingest status `watchlist-ingest.json` are R2 objects written by unconditional PUT after a separate step-lease read (the first diagram). The accepted design moves both behind their own marker. The code and the schema are delivered and **dormant**: the schema is applied with the marker `r2` and empty tables, and nothing switches the marker. The diagram below is the write path that holds **only after a separately approved activation**; the shaded nodes do not exist in production, and with the marker `r2` or absent the dashed arrow is the only path.
 
 ```mermaid
 flowchart TD
