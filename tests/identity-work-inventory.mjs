@@ -133,4 +133,33 @@ assert.deepEqual(['unknown_type', 'unknown_disposition', 'unknown_include', 'inv
   const served = [...W.pageCandidateRows(codes, '', 2).rows, ...W.pageCandidateRows(codes, 'Bb2', 2).rows].map(row => row.shortCode);
   assert.deepEqual(served, ['Aa1', 'Bb2', 'Cc3'], 'no row is served twice or skipped across a cursor');
 }
+// ---- the Watchlist admission lane (ADR 0186 decision 5) ----
+{
+  assert.deepEqual(W.IDENTITY_LANES, ['film', 'epg_observation', 'watchlist_admission', 'letterboxd_rated_candidate'], 'the ledger lane sits before the archive lane');
+  assert.equal(W.laneEnabled(q('type=watchlist_admission'), 'watchlist_admission'), true); assert.equal(W.laneEnabled(q('type=watchlist_admission'), 'film'), false);
+  const base = {lid: 'f1', attempts: 2, nextRetryAt: null, lastReason: null, resolvedBy: null, firstSeenSnapshotId: 'snap1', firstSeenVersion: 3, firstSeenAt: iso(2), updatedAt: iso(1), title: 'Heat', year: 1995};
+  const d = row => W.admissionDisposition(row, NOW);
+  assert.deepEqual(d({...base, state: 'terminal', lastReason: 'age_exceeded'}), {disposition: 'needs_owner_review', reason: 'age_exceeded'});
+  assert.deepEqual(d({...base, state: 'terminal'}), {disposition: 'needs_owner_review', reason: 'terminal'});
+  assert.equal(d({...base, state: 'pending', nextRetryAt: iso(-1)}).disposition, 'waiting', 'a retry time in the future is waiting');
+  assert.equal(d({...base, state: 'pending', nextRetryAt: iso(1)}).disposition, 'retryable');
+  assert.equal(d({...base, state: 'pending'}).disposition, 'retryable');
+  assert.equal(d({...base, state: 'resolved'}).disposition, 'resolved'); assert.equal(d({...base, state: 'superseded'}).disposition, 'resolved');
+  const rows = W.admissionRows([{...base, state: 'terminal', lastReason: 'age_exceeded'}, {lid: '', state: 'pending'}, null], {nowMs: NOW});
+  assert.equal(rows.length, 1);
+  const row = rows[0];
+  assert.deepEqual([row.key, row.type, row.status, row.disposition, row.title, row.year, row.shortCode, row.film], ['wla:f1', 'watchlist_admission', 'terminal', 'needs_owner_review', 'Heat', 1995, 'f1', null], 'no Film link is ever claimed');
+  assert.deepEqual(row.provenance, [{source: 'watchlist_snapshot', ref: 'snap1'}]);
+  assert.equal(row.ageMs, 2 * DAY);
+  // resolved rows are history: hidden unless asked for; the filter and the sort are the shared ones
+  const resolved = W.admissionRows([{...base, state: 'resolved'}, {...base, lid: 'f2', state: 'terminal'}], {nowMs: NOW});
+  assert.deepEqual(W.filterRows(resolved, q('')).map(r => r.key), ['wla:f2']);
+  assert.deepEqual(W.filterRows(resolved, q('include=resolved')).map(r => r.key).sort(), ['wla:f1', 'wla:f2']);
+  assert.deepEqual(W.filterRows(resolved, q('disposition=needs_owner_review')).map(r => r.key), ['wla:f2']);
+  assert.deepEqual(W.filterRows(resolved, q('q=heat&include=resolved')).length, 2, 'the title is searchable');
+  // a cursor of this lane is a memory-lane cursor
+  const cur = W.encodeCursor({lane: 'watchlist_admission', index: 0, total: 2, id: 'wla:f1', key: q('').key, limit: 25, pin: 'I1|x|y', nowMs: NOW});
+  assert.deepEqual(W.decodeCursor(cur, {key: q('').key, limit: 25}).cursor, {lane: 'watchlist_admission', index: 0, total: 2, id: 'wla:f1'});
+  assert.deepEqual(W.admissionRows(null, {nowMs: NOW}), []);
+}
 console.log('identity-work-inventory: ok');

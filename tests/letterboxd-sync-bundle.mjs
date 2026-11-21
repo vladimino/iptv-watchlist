@@ -192,6 +192,27 @@ run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
  const perSlot=new Map();for(const k of keys){const slotKey=bucket.records.get(k).slot;perSlot.set(slotKey,(perSlot.get(slotKey)||0)+1);}
  for(const [k,count] of perSlot)assert.equal(count,2,'exactly two keys for '+k);
 }
+// 8b. Review P2 (ADR 0186 decision 5, ADR 0170): a TERMINAL admission row reaches the owner's identity work inventory as a `watchlist_admission` row needing an owner decision, with the title the first-seen
+// snapshot listed; pending rows are listed as waiting or retryable; resolved and superseded rows only with include=resolved. Read only (the route writes nothing).
+{
+ const sqlRun=text=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
+ sqlRun("UPDATE watchlist_admission_pending SET state='terminal', last_reason='age_exceeded', attempts=2, next_retry_at=NULL WHERE lid='f9';");
+ const call=async query=>{context.__req=new Request('https://iptv.example/api/admin/identity-work'+query);context.__url=new URL(context.__req.url);const response=await run('adminIdentityWorkRoute(__req,__env,__url)');return {status:response.status,body:await response.json()};};
+ context.__env=env;
+ const before=JSON.stringify(db.sql('SELECT lid,state,attempts FROM watchlist_admission_pending ORDER BY lid'));
+ const terminal=await call('?type=watchlist_admission&disposition=needs_owner_review');
+ assert.equal(terminal.status,200);
+ assert.deepEqual(terminal.body.rows.map(r=>[r.key,r.type,r.status,r.reason,r.disposition,r.title,r.year]),[['wla:f9','watchlist_admission','terminal','age_exceeded','needs_owner_review','Film f9',2001]]);
+ assert.equal(terminal.body.rows[0].film,null,'the identity stays a Film fact: no Film link is claimed');
+ assert.equal(terminal.body.coverage.watchlist_admission.state,'complete');
+ assert.ok(terminal.body.vocabulary.types.includes('watchlist_admission'));
+ const open=await call('?type=watchlist_admission');
+ assert.ok(open.body.rows.every(r=>r.disposition!=='resolved'),'resolved and superseded rows are history');
+ assert.ok(open.body.rows.some(r=>r.status==='pending'),'pending rows are listed');
+ const all=await call('?type=watchlist_admission&include=resolved');
+ assert.ok(all.body.rows.some(r=>r.status==='superseded'&&r.disposition==='resolved'),'a superseded row appears with include=resolved');
+ assert.equal(JSON.stringify(db.sql('SELECT lid,state,attempts FROM watchlist_admission_pending ORDER BY lid')),before,'the route changed nothing');
+}
 // 9. Review (stale writer): the owner closes admission WHILE an effect's side effect is in flight. A new promotion leaves effects pending; then the real facts module is made to flip the mode between the effect's
 // entry and its commit. The commit goes through the fenced env, so the stale writer changes NOTHING (the ratings documents are byte-identical), no effect receipt is recorded, and the effect stays pending.
 {

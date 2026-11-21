@@ -1,12 +1,12 @@
 // Owner-only identity work inventory behind the existing Cloudflare Access application: GET /api/admin/identity-work (AIR-527, ADR 0170).
-// Three typed lanes over the current owners: the Limbo Film and Discovery observation evaluation (read unchanged through adminLimboLoad),
+// Four typed lanes over the current owners (the Watchlist admission ledger is the fourth, ADR 0186): the Limbo Film and Discovery observation evaluation (read unchanged through adminLimboLoad),
 // and the Letterboxd rated candidates of ONE archive per request. The only storage calls are R2 `get` and `head` of named objects, one
 // delimiter `list` of letterboxd/imports/, and one bounded D1 SELECT of film_rated_admission for the page archive. It never calls identity-step,
 // TMDB, Letterboxd, a continuation, a ZIP, a writer or a Task, and it never writes or repairs the derived registry.
 // The contract is docs/reference/domain/identity-work-inventory.md and ADR 0170.
 const IDENTITY_WORK_CURSOR_MAX=6000;
 const IDENTITY_WORK_ADMISSION_CAP=5000;
-const IDENTITY_WORK_SOURCES=['letterboxd/imports/registry.json','letterboxd/imports/<archiveSha256>/rated-candidates.json','letterboxd/imports/ (delimiter list)','film_rated_admission (D1)'];
+const IDENTITY_WORK_SOURCES=['letterboxd/imports/registry.json','letterboxd/imports/<archiveSha256>/rated-candidates.json','letterboxd/imports/ (delimiter list)','film_rated_admission (D1)','watchlist_admission_pending (D1)'];
 
 function identityWorkPinOf(registryToken,limboPin){
  return ['I1',encodeURIComponent(registryToken),encodeURIComponent(limboPin??'')].join('|');
@@ -62,6 +62,12 @@ async function identityWorkReadAdmissions(env,sha){
   return rows.length>IDENTITY_WORK_ADMISSION_CAP?null:rows;
  }catch{return null;}
 }
+// The Watchlist admission ledger (D1, read only, at most 1000 rows). null means the ledger could not be read; absent tables are an unavailable lane, never an empty queue.
+async function identityWorkAdmissions(env){
+ if(typeof WatchlistD1==='undefined')return {error:'repository_unavailable'};
+ try{const read=await WatchlistD1.admissionInventory(env,{limit:1000});return read.ok?{rows:read.rows,truncated:read.truncated===true}:{error:read.reason||'unavailable'};}
+ catch{return {error:'unavailable'};}
+}
 async function identityWorkLimbo(env,hasPin,nowMs){
  let snapshot;
  try{snapshot=await adminLimboLoad(env,hasPin);}
@@ -101,6 +107,8 @@ async function adminIdentityWorkRoute(request,env,url){
  const nowMs=decoded?decoded.nowMs:Date.now();
  const wantsMemory=IdentityWorkInventory.laneEnabled(query,'film')||IdentityWorkInventory.laneEnabled(query,'epg_observation');
  const wantsCandidates=IdentityWorkInventory.laneEnabled(query,'letterboxd_rated_candidate');
+ const wantsAdmissions=IdentityWorkInventory.laneEnabled(query,'watchlist_admission');
+ const admissions=wantsAdmissions?await identityWorkAdmissions(env):null;
  const limbo=wantsMemory?await identityWorkLimbo(env,pin!==null||decoded!==null,nowMs):null;
  const registryRead=wantsCandidates?await identityWorkReadRegistry(env):{state:'not_read',registry:null,etag:null,token:'not_read'};
  const currentPin=identityWorkPinOf(registryRead.token,limbo&&!limbo.error?limbo.pin:(limbo?'unavailable':''));
@@ -118,7 +126,7 @@ async function adminIdentityWorkRoute(request,env,url){
  for(;laneAt<lanes.length;laneAt++){
   const lane=lanes[laneAt],same=lane===position.lane,after=lanes[laneAt+1]||null;
   if(lane!=='letterboxd_rated_candidate'){
-   const source=limbo&&!limbo.error?(lane==='film'?IdentityWorkInventory.filmRows(limbo.items):IdentityWorkInventory.observationRows(limbo.items)):[];
+   const source=lane==='watchlist_admission'?(admissions&&!admissions.error?IdentityWorkInventory.admissionRows(admissions.rows,{nowMs}):[]):limbo&&!limbo.error?(lane==='film'?IdentityWorkInventory.filmRows(limbo.items):IdentityWorkInventory.observationRows(limbo.items)):[];
    const laneRows=IdentityWorkInventory.filterRows(IdentityWorkInventory.sortLaneRows(source),query);
    if(limit-rows.length<=0){next=startOf(lane);break;}
    const served=IdentityWorkInventory.pageMemoryLane(laneRows,same?position:{index:-1},limit-rows.length);
@@ -156,6 +164,7 @@ async function adminIdentityWorkRoute(request,env,url){
  const coverage={};
  if(IdentityWorkInventory.laneEnabled(query,'film'))coverage.film=identityWorkLaneCoverage('film',limbo);
  if(IdentityWorkInventory.laneEnabled(query,'epg_observation'))coverage.epg_observation=identityWorkLaneCoverage('epg_observation',limbo);
+ if(wantsAdmissions)coverage.watchlist_admission=admissions&&!admissions.error?{state:admissions.truncated?'partial':'complete',observed:admissions.rows.length}:{state:'unavailable',reason:admissions?.error??'not_read'};
  if(wantsCandidates){
   const registryUsable=registryRead.state==='present'||registryRead.state==='absent';
   const enumeration=registryUsable?LetterboxdImportRegistry.enumerate(registryRead.registry,listing)

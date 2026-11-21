@@ -1,8 +1,8 @@
 // Pure view of the identity work inventory: strings in, HTML strings out, no DOM, no clock, no request. Every value from the answer is
 // escaped. Wording rule: the Letterboxd candidate lane is never called complete or empty; counts are labelled as a registry estimate
 // and only the page's own document is called verified. A trusted Film link is shown only when the row carries `film`.
-const IW_LANE_LABELS={film:'Фильм каталога',epg_observation:'Наблюдение EPG',letterboxd_rated_candidate:'Кандидат Letterboxd'};
-const IW_LANE_TITLES={film:'Фильмы каталога без прогресса',epg_observation:'Наблюдения EPG без фильма',letterboxd_rated_candidate:'Кандидаты Letterboxd (рейтинг без фильма)'};
+const IW_LANE_LABELS={film:'Фильм каталога',epg_observation:'Наблюдение EPG',watchlist_admission:'Новый фильм Watchlist',letterboxd_rated_candidate:'Кандидат Letterboxd'};
+const IW_LANE_TITLES={film:'Фильмы каталога без прогресса',epg_observation:'Наблюдения EPG без фильма',watchlist_admission:'Новые фильмы Watchlist без подтверждённого фильма',letterboxd_rated_candidate:'Кандидаты Letterboxd (рейтинг без фильма)'};
 const IW_DISPOSITION_LABELS={retryable:'Можно повторить',blocked:'Заблокировано',needs_owner_review:'Нужен разбор владельца',waiting:'Ожидает',resolved:'Решено'};
 const IW_DISPOSITION_TONES={retryable:'provisional',blocked:'conflict',needs_owner_review:'conflict',waiting:'ambiguous',resolved:'verified'};
 const IW_STATUS_LABELS={pending:'ожидает проверки',admitting:'идёт admission',needs_review:'нужна проверка',verified:'проверен',removed:'снят',retry_eligible:'можно повторить',stalled:'застряло',backoff:'ждёт по backoff',manual_review:'нужен ручной разбор',stale_projection:'устаревшая проекция',external_archive:'нужен внешний архив',unknown:'неизвестно'};
@@ -59,7 +59,7 @@ function iwRowsHtml(rows){
 }
 function iwLaneSummary(name,entry){
  if(!entry)return '';
- const label=name==='film'?'Фильмы':'Наблюдения EPG';
+ const label=name==='film'?'Фильмы':name==='watchlist_admission'?'Новые фильмы Watchlist':'Наблюдения EPG';
  if(entry.state==='unavailable')return '<li><b>'+label+':</b> не прочитаны ('+iwEscape(entry.reason||'недоступно')+'). Это не значит, что их нет.</li>';
  return '<li><b>'+label+':</b> '+(entry.state==='partial'?'частичное покрытие: источник перечисляет только записи, которые он уже знает':iwEscape(entry.state))+(Number.isInteger(entry.observed)?'; прочитано '+entry.observed:'')+'.</li>';
 }
@@ -87,7 +87,7 @@ function iwCandidateSummary(entry){
  return lines.join('');
 }
 function iwCoverageHtml(coverage){
- const parts=[iwLaneSummary('film',coverage?.film),iwLaneSummary('epg_observation',coverage?.epg_observation),iwCandidateSummary(coverage?.letterboxd_rated_candidate)].join('');
+ const parts=[iwLaneSummary('film',coverage?.film),iwLaneSummary('epg_observation',coverage?.epg_observation),iwLaneSummary('watchlist_admission',coverage?.watchlist_admission),iwCandidateSummary(coverage?.letterboxd_rated_candidate)].join('');
  return parts?'<ul class="iw-coverage-list">'+parts+'</ul>':'<p class="muted">Покрытие не прочитано.</p>';
 }
 // One honest sentence over the loaded rows. It never says there is no work.
@@ -101,7 +101,7 @@ function iwVerdict(view){
 }
 function iwEmptyText(view){
  const lane=view.coverage?.letterboxd_rated_candidate;
- const unread=['film','epg_observation'].filter(name=>view.coverage?.[name]?.state==='unavailable');
+ const unread=['film','epg_observation','watchlist_admission'].filter(name=>view.coverage?.[name]?.state==='unavailable');
  const notes=[];
  if(view.nextCursor)notes.push('В этой странице строк нет, но очередь не закончилась: нажмите «Показать ещё».');
  else notes.push('В прочитанной части записей, подходящих под фильтр, нет.');

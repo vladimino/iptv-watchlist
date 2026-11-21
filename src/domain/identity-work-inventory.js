@@ -4,7 +4,7 @@
 // Nothing here retries, resets, merges or writes; `disposition` is a read-side label, not an action.
 
 export const IDENTITY_WORK_VERSION = 1;
-export const IDENTITY_LANES = ['film', 'epg_observation', 'letterboxd_rated_candidate'];
+export const IDENTITY_LANES = ['film', 'epg_observation', 'watchlist_admission', 'letterboxd_rated_candidate'];
 export const IDENTITY_DISPOSITIONS = ['retryable', 'blocked', 'needs_owner_review', 'waiting', 'resolved'];
 export const IDENTITY_LIMIT_MAX = 25;
 export const IDENTITY_LIMIT_DEFAULT = 25;
@@ -128,6 +128,30 @@ export function filmRows(items) {
       film: {filmId: id, proof: 'canonical_film'}, observedHints: [], source: {issues},
     };
   });
+}
+
+// The Watchlist admission ledger (ADR 0186 decision 5): one row per Letterboxd id that still needs a Film, as the Letterboxd Sync keeps it. A terminal row (attempts or age exhausted) needs an owner decision; a pending one
+// is retryable once its retry time has come and waiting before; resolved and superseded rows are resolved (history). It carries no Film link: the identity stays a Film fact.
+export function admissionDisposition(row, nowMs) {
+  if (row?.state === 'terminal') return {disposition: 'needs_owner_review', reason: row.lastReason ?? 'terminal'};
+  if (row?.state === 'resolved' || row?.state === 'superseded') return {disposition: 'resolved', reason: row.lastReason ?? row.state};
+  const due = row?.nextRetryAt == null || (Number.isFinite(Date.parse(row.nextRetryAt)) && Date.parse(row.nextRetryAt) <= nowMs);
+  return {disposition: due ? 'retryable' : 'waiting', reason: row?.lastReason ?? null};
+}
+export function admissionRows(items, {nowMs}) {
+  const rows = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item || typeof item.lid !== 'string' || !item.lid) continue;
+    const verdict = admissionDisposition(item, nowMs);
+    rows.push({
+      key: 'wla:' + item.lid, type: 'watchlist_admission', status: item.state ?? null, reason: verdict.reason, disposition: verdict.disposition,
+      title: typeof item.title === 'string' && item.title ? item.title : null, year: Number.isInteger(item.year) ? item.year : null, shortCode: item.lid, archiveSha256: null,
+      provenance: [{source: 'watchlist_snapshot', ref: String(item.firstSeenSnapshotId ?? '')}],
+      observedAt: item.firstSeenAt ?? null, lastProgressAt: typeof item.updatedAt === 'string' ? item.updatedAt : null, ageMs: ageOf(nowMs, item.firstSeenAt),
+      film: null, observedHints: [], source: {attempts: Number.isInteger(item.attempts) ? item.attempts : null, nextRetryAt: item.nextRetryAt ?? null, firstSeenVersion: item.firstSeenVersion ?? null, resolvedBy: item.resolvedBy ?? null},
+    });
+  }
+  return rows;
 }
 
 export function observationRows(items) {

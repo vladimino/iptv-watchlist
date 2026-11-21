@@ -10,7 +10,7 @@
 
 | Query | Meaning |
 | --- | --- |
-| `type` | `film`, `epg_observation` or `letterboxd_rated_candidate`. Omitted: all lanes, in lane order |
+| `type` | `film`, `epg_observation`, `watchlist_admission` or `letterboxd_rated_candidate`. Omitted: all lanes, in lane order |
 | `disposition` | `retryable`, `blocked`, `needs_owner_review`, `waiting`. `include=resolved` adds `resolved` rows |
 | `archive` | One 64-hex `archiveSha256`. Restricts the candidate lane to that archive; the response still reports the global `archives` coverage and never presents the selection as global |
 | `q` | Case-insensitive substring of the title or short code, applied inside the page's source only; never a search across unread sources |
@@ -62,7 +62,7 @@ Consequently the response never states that the candidate lane is globally `full
 
 ## Order, pin and cursor
 
-Lane order is `film`, `epg_observation`, `letterboxd_rated_candidate`. Inside a lane: `ageMs` descending, then `key`; candidates by archive `(registeredAt, sha)` and then `shortCode`. There is no global cross-lane sort by age.
+Lane order is `film`, `epg_observation`, `watchlist_admission`, `letterboxd_rated_candidate`. Inside a lane: `ageMs` descending, then `key`; candidates by archive `(registeredAt, sha)` and then `shortCode`. There is no global cross-lane sort by age.
 
 **What the pin holds.** The `pin` is the tuple of the versions read at the first page: the Limbo tuple (for the first two lanes) and the **registry etag**. It does not hold any candidate document etag.
 
@@ -138,7 +138,7 @@ The heading of `/admin/identity` carries a permanent link «Открыть гр�
       "snapshot": "per_archive", "selected": null
     }
   },
-  "vocabulary": {"types": ["film", "epg_observation", "letterboxd_rated_candidate"], "dispositions": ["retryable", "blocked", "needs_owner_review", "waiting", "resolved"]}
+  "vocabulary": {"types": ["film", "epg_observation", "watchlist_admission", "letterboxd_rated_candidate"], "dispositions": ["retryable", "blocked", "needs_owner_review", "waiting", "resolved"]}
 }
 ```
 
@@ -182,3 +182,16 @@ Measured production sizes are in the [dated measurement](../../evidence/letterbo
 | Limbo tuple moved between pages | 409 `stale_pin` |
 | Registry estimate says 0 pending, enumeration complete | Reported as an estimate with `summarizedAt`; never as "no work" |
 | Double receipt for one short code in one archive | One row, key `(archiveSha256, shortCode)` |
+
+## The Watchlist admission lane
+
+`watchlist_admission` lists the durable ledger of Letterboxd ids that still need a Film (`watchlist_admission_pending`, [ADR 0186](../../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md)), one row per id, read from D1 (at most 1000 rows, one SELECT, joined to the first-seen snapshot for the title, year and age). Key `wla:<lid>`; `shortCode` is the Letterboxd id; `status` is the ledger state; `reason` is the last bounded reason code.
+
+| Ledger state | `disposition` |
+| --- | --- |
+| `terminal` (attempts or the 14-day age bound exhausted; the reason may be `age_exceeded`) | `needs_owner_review` |
+| `pending` with a retry time in the future | `waiting` |
+| `pending`, due | `retryable` |
+| `resolved`, `superseded` | `resolved` (shown only with `include=resolved`) |
+
+The row never carries a `film` link: identity stays a Film fact. The lane is served as an in-memory lane (index and total cursor). `coverage.watchlist_admission` is `complete`, `partial` (more than 1000 rows) or `unavailable` with a reason (tables absent or the repository unreadable), never an empty queue. The route writes nothing.
