@@ -2736,16 +2736,22 @@ function eventFilmHTML(f){
  const href=tmdb?filmHref('tmdb_'+tmdb):(FILM_ID.test(id)&&!id.startsWith('tmdb_')?filmHref(id):null);
  return href?`<a href="${escapeHTML(href)}">${text}</a>`:text;
 }
-// AIR-564: the Channel policy block of an `epg` event. Events written before it carry no `channels` and render exactly as before; a stored event is never recomputed.
+// AIR-564: the Channel policy block of an `epg` event. Events written before it carry no `channels` and render exactly as before (legacy); a stored event is never recomputed.
+// A degraded event says in words that the blacklist was NOT applied; a filtered one shows the counters and the applied revision.
 function epgPolicyDetails(event){
  const channels=event.channels,programmes=event.programmes;
  if(!channels||typeof channels!=='object')return '';
  const n=value=>Number.isFinite(Number(value))?Number(value):0;
  const row=(label,value)=>`<div><dt>${label}</dt><dd>${n(value)}</dd></div>`;
- const revision=event.policy&&event.policy.revision!=null?` (ревизия ${n(event.policy.revision)})`:'';
+ const policy=event.policy&&typeof event.policy==='object'?event.policy:{};
+ const degraded=policy.mode==='degraded';
  // The target is event data written by the Worker; only a same-origin path is rendered as a link.
- const href=event.policy&&typeof event.policy.href==='string'&&/^\/[A-Za-z0-9_\/-]{1,80}$/.test(event.policy.href)?event.policy.href:null;
- return `<p>Политика каналов${revision}${href?`: <a href="${escapeHTML(href)}">Admin Channels</a>`:''}</p><dl>${row('Каналов в эфире',channels.total)}${row('discover',channels.discover)}${row('deny_all',channels.denyAll)}${row('known_only',channels.knownOnly)}${row('Новых каналов',channels.new)}${row('Без категории',channels.unclassified)}${programmes?row('Показов отфильтровано (deny_all)',programmes.filteredDenyAll)+row('Показов пропущено (known_only)',programmes.skippedKnownOnly)+row('Показов для Discovery',programmes.discoveryEligible)+row('Показов на каналах без категории',programmes.unclassified):''}</dl>`;
+ const href=typeof policy.href==='string'&&/^\/[A-Za-z0-9_\/-]{1,80}$/.test(policy.href)?policy.href:null;
+ const link=href?`: <a href="${escapeHTML(href)}">Admin Channels</a>`:'';
+ const warning=event.warning&&typeof event.warning==='object'?(event.warning.code==='channel_policy_degraded'?`<p>Внимание: политика каналов не применена (режим degraded${event.warning.reason?`, причина: ${escapeHTML(event.warning.reason)}`:''}); чёрный список не действовал, все каналы обработаны как known_only.</p>`:event.warning.code==='channel_registration_failed'?`<p>Внимание: регистрация новых каналов не удалась${event.warning.reason?` (${escapeHTML(event.warning.reason)})`:''}; повтор при следующем обновлении.</p>`:''):'';
+ const heading=degraded?'Политика каналов: не применена':`Политика каналов${policy.revision!=null?` (ревизия ${n(policy.revision)})`:''}`;
+ const classified=degraded?'':row('discover',channels.discover)+row('deny_all',channels.denyAll)+row('Новых каналов (найдено)',channels.new)+row('Новых каналов (зарегистрировано)',channels.registered)+row('Без категории',channels.unclassified);
+ return `${warning}<p>${heading}${link}</p><dl>${row('Каналов в эфире',channels.total)}${classified}${row('known_only',channels.knownOnly)}${programmes?(degraded?'':row('Показов отфильтровано (deny_all)',programmes.filteredDenyAll))+row('Показов пропущено (known_only)',programmes.skippedKnownOnly)+(degraded?'':row('Показов для Discovery',programmes.discoveryEligible)+row('Показов на каналах без категории',programmes.unclassified)):''}</dl>`;
 }
 function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(event.at));const film=eventFilmHTML;const removal=f=>{const rating=Number(f.rating),known=Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0;return `${film(f)}${known?` · ${rating.toFixed(1)} ★`:''}`;};let body='';
  if(event.type==='started'||event.type==='unstarted')body=`<p>${event.type==='started'?'Начал смотреть':'Снял отметку «Начал»'}: <strong>${film(event.film)}</strong></p>`;
