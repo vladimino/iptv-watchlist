@@ -94,7 +94,7 @@ No two authority cutovers share a window: B and C are not in the same window as 
 
 ## 8. GO / no-GO
 
-**Historical verdict at the time of the reads (15:05-15:17 UTC): No-GO for any production operation.** It is superseded only for the schema-only apply of `0031`, by the later owner GO of 15:23 UTC recorded in [the 0031 apply evidence](air-571-0031-apply-2026-11-21.md); every other operation stays No-GO. The reasons at the time: Reasons: the prerequisite AIR-551 cutover is not complete (finding 1), the migration order depends on a second card (finding 2), and the operators and the mirror writer do not exist (finding 3 and the last row of section 5). **GO** is asked only for the preparation work of D2 to D5 (repository code, tests, docs, a scratch measurement), none of which touches production.
+**Historical verdict at the time of the reads (15:05-15:17 UTC): No-GO for any production operation.** It is superseded only for the schema-only apply of `0031`, by the later owner GO of 15:23 UTC recorded in [the 0031 apply evidence](air-571-0031-apply-2026-11-21.md); every other operation stays No-GO. The reasons at the time: the prerequisite AIR-551 cutover is not complete (finding 1), the migration order depends on a second card (finding 2), and the operators and the mirror writer do not exist (finding 3 and the last row of section 5). **GO** is asked only for the preparation work of D2 to D5 (repository code, tests, docs, a scratch measurement), none of which touches production.
 
 ## 9. Uncertainty
 
