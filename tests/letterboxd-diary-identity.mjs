@@ -338,6 +338,16 @@ claimStub.mode = 'incomplete'; await Identity.resolve(env, items(), opts({clock:
 assert.equal(claimCalls.length, 1, 'off-page: served by the later ordinary step'); assert.deepEqual(claimCalls[0].pairs, [{lid: 'vMEO', tmdb: '900001'}]); assert.equal(pending().vMEO.attempts, 2, 'a tried and unproved id counts an attempt');
 claimStub.mode = 'complete'; await Identity.resolve(env, items(), opts({clock: () => NOW + 60 * 3600000}));
 assert.equal(claimCalls.length, 2); assert.deepEqual(Object.keys(pending()), [], 'a proved claim clears the pending state');
+// the same backoff and attempt bound hold for an id that is still ON Diary page 1 (an ordinary run never retries early or past the bound)
+reset(); claimCalls.length = 0; claimStub.mode = 'incomplete'; await seed('vMEO', 3.5); add('vMEO', 'fixture-alpha-2023', '900001', 'Fixture Alpha', 2023);
+await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts()); assert.equal(claimCalls.length, 1); assert.equal(pending().vMEO.attempts, 1);
+claimCalls.length = 0; await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts({clock: () => NOW + 60000}));
+assert.equal(claimCalls.length, 0, 'on page, inside the backoff: no early retry'); assert.equal(pending().vMEO.attempts, 1);
+await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts({clock: () => NOW + 13 * 3600000}));
+assert.equal(claimCalls.length, 1, 'on page, once due: retried'); assert.equal(pending().vMEO.attempts, 2);
+await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {vMEO: {reason: 'claim_pending', slug: null, tmdb: '900001', attempts: 6, lastAttemptAt: new Date(NOW).toISOString(), nextAttemptAt: new Date(NOW).toISOString()}}}), {});
+claimCalls.length = 0; await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts({clock: () => NOW + 100 * 3600000}));
+assert.equal(claimCalls.length, 0, 'on page, at the attempt bound: never retried again'); assert.equal(pending().vMEO.attempts, 6);
 // bounded: after MAX_ATTEMPTS the entry stays visible and is no longer served
 await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {vMEO: {reason: 'claim_pending', slug: null, tmdb: '900001', attempts: 6, lastAttemptAt: new Date(NOW).toISOString(), nextAttemptAt: new Date(NOW).toISOString()}}}), {});
 claimCalls.length = 0; await Identity.resolve(env, items(), opts({clock: () => NOW + 100 * 3600000})); assert.equal(claimCalls.length, 0); assert.equal(pending().vMEO.attempts, 6);

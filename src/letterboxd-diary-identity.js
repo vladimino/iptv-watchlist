@@ -129,7 +129,8 @@ const LetterboxdDiaryIdentity=(()=>{
    // the committed projection is repaired (no outbound request, no admission, no new fact) and the entry is cleared only when that succeeded.
    if(own.tmdb){
     // ADR 0184: a lid the Ratings link index already ties to a movie is offered for its canonical claim (the claim step re-proves it from the authoritative link; `already` is free).
-    if(TMDB.test(String(own.tmdb)))claimPairs.push({lid,tmdb:String(own.tmdb)});
+    // A pending claim obeys its backoff and its attempt bound whether the id is on Diary page 1 or not: it is offered only when due; an id without a pending entry is offered every step (a proved claim is free).
+    if(TMDB.test(String(own.tmdb))&&(!prior||prior.reason!==CLAIM_REASON||claimDue(prior)))claimPairs.push({lid,tmdb:String(own.tmdb)});
     if(!prior){clear.push(lid);continue;}
     if(prior.reason===CLAIM_REASON)continue; // served by the claim step below, not a link repair
     try{const repaired=await LetterboxdFacts.reprojectDiaryFilm(env,lid);if(repaired.state==='projected'){counts.repaired++;clear.push(lid);}else{counts.skipped++;}}catch{counts.skipped++;}
