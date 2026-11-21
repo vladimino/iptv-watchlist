@@ -10,6 +10,14 @@ export const BOOTSTRAP_OUTCOME='bootstrap';
 const GUARD=expression=>'INSERT INTO watchlist_cas (id, ok) SELECT 1, '+expression+' WHERE 1 ON CONFLICT(id) DO UPDATE SET ok=excluded.ok';
 const FENCE='UPDATE watchlist_cas SET ok=changes() WHERE id=1';
 
+// Membership and order only: SHA-256 of the lines `ordinal<TAB>id<NEWLINE>`. It is what the owner can reproduce from the authoritative `GET /api/watchlist` response, because the
+// route localizes titles at read time (presentLocalized) while ids and order stay those of the published generation. The raw payload digest (`listDigest`, titles included) is a
+// separate pin bound to the exact generation, never compared with the presented titles.
+export async function membershipDigest(films){
+ const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(films.map((film,index)=>(film.ordinal??index)+'\t'+(film.lid??film.id)+'\n').join('')));
+ return [...new Uint8Array(bytes)].map(byte=>byte.toString(16).padStart(2,'0')).join('');
+}
+
 // The source document of a published generation -> {ok:true,films,digest} | {ok:false,reason}
 export async function sourceList(document){
  if(!document||!Array.isArray(document.films))return {ok:false,reason:'source_shape'};
@@ -20,10 +28,12 @@ export async function sourceList(document){
 
 // pin: {programmeRunId, epgGeneration, count, sha256, observedAt}; at: the commit instant (ISO); expected: the pointer row the batch starts from {revision}.
 // -> {statements:[[sql,params]], snapshotId, version:1}
-export function bootstrapStatements({films,pin,snapshotId,at,generation,revision}){
+export function bootstrapStatements({films,pin,snapshotId,at,generation,revision,liveness}){
  if(!Array.isArray(films)||!films.length||films.length>LIMITS.maxFilms)throw new Error('bootstrap_films');
  if(!pin?.programmeRunId||!Number.isInteger(pin.epgGeneration)||pin.count!==films.length||!/^[0-9a-f]{64}$/.test(pin.sha256||''))throw new Error('bootstrap_pin');
  if(!snapshotId||snapshotId.length>100||!Number.isInteger(generation)||!Number.isInteger(revision))throw new Error('bootstrap_args');
+ // The EPG liveness proof is part of the batch: the control and lease records are pinned by revision (absence included) and must not be live at commit time.
+ if(!liveness||!Number.isInteger(liveness.controlRevision)||!Number.isInteger(liveness.leaseRevision)||typeof liveness.nowIso!=='string')throw new Error('bootstrap_liveness');
  const count=films.length;
  const statements=[
   // The marker is the inert `epg` at the expected generation with writes open, the pointer is the birth row and no snapshot or staging row exists.
@@ -31,6 +41,8 @@ export function bootstrapStatements({films,pin,snapshotId,at,generation,revision
   [GUARD("(SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=0 AND snapshot_id IS NULL AND revision=?)"),[revision]],
   [GUARD('(SELECT COUNT(*) FROM watchlist_staging)+(SELECT COUNT(*) FROM watchlist_snapshot)+(SELECT COUNT(*) FROM watchlist_member)+(SELECT COUNT(*) FROM watchlist_change)+(SELECT COUNT(*) FROM watchlist_effect)+(SELECT COUNT(*) FROM watchlist_admission_pending)=0'),[]],
   // The source is still the pinned published generation: same run, same EPG generation, and the stored member rows still count the pinned list.
+  // No EPG writer holds a step at the commit. The table already refuses invalid JSON; a record that is valid JSON but not an object is unknown, not idle (fail closed), and a lease without an expiry counts as live.
+  [GUARD("NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key IN ('control','lease') AND json_type(body)<>'object') AND COALESCE((SELECT revision FROM epg_orchestration_document WHERE key='control'),-1)=? AND COALESCE((SELECT revision FROM epg_orchestration_document WHERE key='lease'),-1)=? AND NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key='control' AND json_extract(body,'$.phase') IN ('starting','running','waiting')) AND NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key='lease' AND COALESCE(json_extract(body,'$.released'),0)=0 AND (json_extract(body,'$.expiresAt') IS NULL OR json_extract(body,'$.expiresAt')>?))"),[liveness.controlRevision,liveness.leaseRevision,liveness.nowIso]],
   [GUARD("(SELECT COUNT(*) FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=? AND generation=? AND finalized_run_id=programme_run_id)=1 AND (SELECT COUNT(*) FROM published_epg_member WHERE programme_run_id=? AND kind='watchlist')=?"),[pin.programmeRunId,pin.epgGeneration,pin.programmeRunId,count]],
   ['INSERT INTO watchlist_staging (snapshot_id, attempt_id, run_id, slot_key, expected_count, expected_sha256, started_at) VALUES (?,?,?,NULL,?,?,?)',[snapshotId,snapshotId,pin.programmeRunId,count,pin.sha256,at]],
  ];

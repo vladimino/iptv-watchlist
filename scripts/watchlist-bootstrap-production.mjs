@@ -5,25 +5,28 @@
 // nothing else (no change, effect or pending-admission row, no fact, no marker move). It never calls Letterboxd, the Worker or R2.
 //
 //   status     read-only: schema, marker, pointer, the published generation and its certificate, the source list and its digest, the pin check, the EPG liveness
-//   bootstrap  --expect-run <programmeRunId> --expect-count <n> --expect-sha256 <digest> [--expect-epg-generation <n>]
-//              the pins come from the owner's read of GET /api/watchlist at the same generation (count, order, digest parity); a mismatch refuses
+//   digest     --file <saved GET /api/watchlist response>   local and read-only: count and membership digest (ids in order) of the presented list
+//   bootstrap  --expect-run <programmeRunId> --expect-epg-generation <n> --expect-count <n> --expect-members-sha256 <digest> --expect-sha256 <digest>
+//              two separate pins. Membership and order parity (members-sha256) come from the authoritative API response, which localizes titles at read time and so
+//              cannot pin titles. The raw payload pin (sha256, titles included) is bound to the exact generation and is read from the stored source by `status`; a mismatch of either refuses
 //
 // Fail-closed: exactly marker epg/open at the generation read, pointer version 0, empty watchlist tables, a published generation that is certified complete
 // (finalized_run_id = programme_run_id) and equal to the pin, a source list that normalizes (unique ids, order, shape) and whose digest equals the pin, and no executing
 // EPG step. After the batch the state is read back independently; an unproven outcome is `write_uncertain`, never retried, never downgraded by a readback.
 // A second run on an equal import answers `already_applied` and writes nothing. Stable fields are compared, never whole-row digests of live counters.
 import {randomUUID} from 'node:crypto';
+import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {createD1Adapter,D1Error} from './d1-backfill.mjs';
 import {createPublishedBinding,normalize,OperatorStop,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
 import {applyBusy} from './epg-checkpoint-production.mjs';
 import {listDigest} from '../src/watchlist-d1.js';
-import {bootstrapStatements,sourceList} from '../src/watchlist-bootstrap.js';
+import {bootstrapStatements,membershipDigest,sourceList} from '../src/watchlist-bootstrap.js';
 
-export const COMMANDS=['status','bootstrap'];
+export const COMMANDS=['status','bootstrap','digest'];
 const WATCHLIST_TABLES=['watchlist_authority','watchlist_cas','watchlist_current','watchlist_staging','watchlist_snapshot','watchlist_member','watchlist_change','watchlist_effect','watchlist_admission_pending'];
 const EMPTY_TABLES=['watchlist_staging','watchlist_snapshot','watchlist_member','watchlist_change','watchlist_effect','watchlist_admission_pending'];
-const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-run':'run','--expect-count':'count','--expect-sha256':'sha256','--expect-epg-generation':'epgGeneration'};
+const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-run':'run','--expect-count':'count','--expect-sha256':'sha256','--expect-members-sha256':'membersSha256','--expect-epg-generation':'epgGeneration','--file':'file'};
 const iso=ms=>new Date(ms).toISOString();
 
 async function one(binding,sql,params=[]){return (await binding.prepare(sql).bind(...params).first())??null;}
@@ -71,7 +74,7 @@ export async function sourceOf(state){
  if(!list.ok)return list;
  // The two stored forms of the same membership agree: the document order is the member row order.
  if(!state.sourceMembers||state.sourceMembers.length!==list.films.length||state.sourceMembers.some((id,index)=>id!==list.films[index].lid))return {ok:false,reason:'source_mismatch'};
- return list;
+ return {...list,membersSha256:await membershipDigest(list.films)};
 }
 
 // Decision of the bootstrap from the stored state alone.
@@ -88,16 +91,45 @@ export function decision(state){
  const pub=state.published;
  if(!pub||pub.mode!=='d1'||pub.cutover!=='open'||!pub.programme_run_id)return 'published_unavailable';
  if(pub.finalized_run_id!==pub.programme_run_id)return 'published_not_certified';
+ // Fail closed on a liveness record that cannot be read as an object: a missing record is idle, a record of another shape is unknown.
+ for(const key of ['control','lease']){const body=state.orchestration[key]?.body;if(state.orchestration[key]&&(body===null||typeof body!=='object'||Array.isArray(body)))return 'liveness_unknown';}
  return 'ready';
 }
 
 export function pinProblems(state,source,args){
  const problems=[];
  if(args.run!==state.published.programme_run_id)problems.push('run');
- if(args.epgGeneration!==undefined&&args.epgGeneration!==Number(state.published.generation))problems.push('epg_generation');
+ if(args.epgGeneration!==Number(state.published.generation))problems.push('epg_generation');
  if(args.count!==source.films.length)problems.push('count');
+ if(args.membersSha256!==source.membersSha256)problems.push('members_sha256');
  if(args.sha256!==source.digest)problems.push('sha256');
  return problems;
+}
+
+// A read-only proof that an existing import is complete and still the import of the CURRENT source. It validates the snapshot row, the staging row, every member row (count,
+// order, digest), the absence of unexpected rows and the pointer; then the published source against the pins. Nothing is written. `verified_equal` is a receipt of equality only:
+// it is never an authorization for the next holdpoint.
+export async function verifyImported(binding,state,args){
+ const problems=[];
+ const p=state.pointer,c=state.counts;
+ if(Number(p.version)!==1||!p.snapshot_id)return {ok:false,reason:'already_bootstrapped',problems:['pointer_version']};
+ const id=p.snapshot_id;
+ const snap=await one(binding,'SELECT version, scan_id, film_count, list_sha256, prev_version, run_id FROM watchlist_snapshot WHERE snapshot_id=?',[id]);
+ const stage=await one(binding,'SELECT run_id, expected_count, expected_sha256 FROM watchlist_staging WHERE snapshot_id=?',[id]);
+ if(!snap||Number(snap.version)!==1||Number(snap.prev_version)!==0||snap.list_sha256!==p.list_sha256||Number(snap.film_count)!==Number(p.film_count)||snap.scan_id!=='bootstrap:'+snap.run_id||snap.run_id!==p.last_success_run)problems.push('snapshot');
+ if(!stage||stage.expected_sha256!==p.list_sha256||Number(stage.expected_count)!==Number(p.film_count)||stage.run_id!==snap?.run_id)problems.push('staging');
+ if(c.watchlist_staging!==1||c.watchlist_snapshot!==1||c.watchlist_member!==Number(p.film_count)||c.watchlist_change!==0||c.watchlist_effect!==0||c.watchlist_admission_pending!==0||Number(p.effects_drained_version)!==1)problems.push('rows');
+ const rows=await many(binding,'SELECT ordinal, lid, title, year, url FROM watchlist_member WHERE snapshot_id=? ORDER BY ordinal',[id]);
+ const stored=rows.map(row=>({ordinal:Number(row.ordinal),lid:row.lid,title:row.title,year:row.year===null?null:Number(row.year),url:row.url}));
+ if(stored.length!==Number(p.film_count)||stored.some((row,index)=>row.ordinal!==index)||await listDigest(stored)!==p.list_sha256)problems.push('members');
+ if(problems.length)return {ok:false,reason:'snapshot_inconsistent',problems};
+ // The pins describe the import that was approved; they must equal it and the current published source must still be that source.
+ if(args.run!==snap.run_id||args.sha256!==p.list_sha256||args.count!==Number(p.film_count)||args.membersSha256!==await membershipDigest(stored))return {ok:false,reason:'already_bootstrapped',problems:['pins_differ']};
+ const pub=state.published;
+ if(!pub||pub.mode!=='d1'||pub.cutover!=='open'||pub.programme_run_id!==snap.run_id||Number(pub.generation)!==args.epgGeneration||pub.finalized_run_id!==pub.programme_run_id)return {ok:false,reason:'source_moved',problems:['published'],published:pub?{programmeRunId:pub.programme_run_id,generation:Number(pub.generation)}:null};
+ const source=await sourceOf(state);
+ if(!source.ok||source.digest!==p.list_sha256)return {ok:false,reason:'source_moved',problems:['source_digest']};
+ return {ok:true};
 }
 
 const view=state=>({schemaVersion:state.schemaVersion,marker:state.marker?{mode:state.marker.mode,writes:state.marker.writes,generation:Number(state.marker.generation)}:null,pointer:state.pointer?{version:Number(state.pointer.version),snapshotId:state.pointer.snapshot_id,filmCount:state.pointer.film_count===null?null:Number(state.pointer.film_count),listSha256:state.pointer.list_sha256,revision:Number(state.pointer.revision)}:null,counts:state.counts,published:state.published?{mode:state.published.mode,cutover:state.published.cutover,programmeRunId:state.published.programme_run_id,generation:Number(state.published.generation),certified:state.published.finalized_run_id===state.published.programme_run_id}:null});
@@ -127,12 +159,13 @@ export async function execute(command,{binding,args={},now,ctx={}}){
  const verdict=decision(state);
  let source=null;
  if(verdict==='ready'||verdict==='already_bootstrapped'){source=verdict==='ready'?await sourceOf(state):null;}
- if(command==='status')return {operation:'status',writes:false,writeState:'none',decision:verdict,...view(state),source:source?source.ok?{count:source.films.length,sha256:source.digest}:{problem:source.reason}:null,epgBusy:applyBusy({orchestration:state.orchestration},clock)};
+ if(command==='status')return {operation:'status',writes:false,writeState:'none',decision:verdict,...view(state),source:source?source.ok?{count:source.films.length,sha256:source.digest,membersSha256:source.membersSha256,epgGeneration:state.published?Number(state.published.generation):null}:{problem:source.reason}:null,epgBusy:applyBusy({orchestration:state.orchestration},clock)};
  if(command!=='bootstrap')throw new OperatorStop('usage',2);
  if(verdict==='already_bootstrapped'){
-  // An equal import is idempotent: nothing is written. Anything else is refused.
-  if(Number(state.pointer.version)===1&&state.pointer.list_sha256===args.sha256&&Number(state.pointer.film_count)===args.count&&state.pointer.last_success_run===args.run)return {operation:'bootstrap',writes:false,writeState:'none',outcome:'already_applied',...view(state)};
-  throw new OperatorStop('already_bootstrapped',3);
+  // An import that already exists is verified read-only, never trusted from the pointer alone. Equal and current: a receipt, nothing written. Anything else is refused with its reason.
+  const proof=await verifyImported(binding,state,args);
+  if(!proof.ok)throw new OperatorStop(proof.reason,3,{problems:proof.problems,...(proof.published?{published:proof.published}:{})});
+  return {operation:'bootstrap',writes:false,writeState:'none',outcome:'already_applied',receipt:'verified_equal',note:'a receipt of equality, not an authorization for the next holdpoint',...view(state)};
  }
  if(verdict!=='ready')throw new OperatorStop(verdict,3);
  if(!source.ok)throw new OperatorStop(source.reason,3);
@@ -142,7 +175,7 @@ export async function execute(command,{binding,args={},now,ctx={}}){
  if(busy)throw new OperatorStop('writer_active',3,{busy});
  const snapshotId=ctx.snapshotId??randomUUID();
  const pin={programmeRunId:state.published.programme_run_id,epgGeneration:Number(state.published.generation),count:source.films.length,sha256:source.digest,observedAt:iso(Date.parse(state.published.finalized_at||'')||clock)};
- const plan=bootstrapStatements({films:source.films,pin,snapshotId,at:iso(clock),generation:Number(state.marker.generation),revision:Number(state.pointer.revision)});
+ const plan=bootstrapStatements({films:source.films,pin,snapshotId,at:iso(clock),generation:Number(state.marker.generation),revision:Number(state.pointer.revision),liveness:{controlRevision:state.orchestration.control?.revision??-1,leaseRevision:state.orchestration.lease?.revision??-1,nowIso:iso(clock)}});
  if(ctx.track)ctx.track('unknown');
  try{await binding.batch(plan.statements.map(([sql,params])=>binding.prepare(sql).bind(...params)));}
  catch(error){
@@ -175,6 +208,7 @@ export function parseArgs(argv){
   parsed[name]=next;index++;
  }
  const command=commands[0]?commands[0].slice(2):'status';
+ if(command==='digest'){if(parsed.file===undefined||parsed.target!==undefined||parsed.confirm!==undefined)throw new OperatorStop('usage',2);return {command,args:{file:parsed.file}};}
  if(parsed.target===undefined){
   if(command!=='status')throw new OperatorStop('target_required',2);
   return {report:{configured:false,writes:false,writeState:'none'}};
@@ -182,11 +216,20 @@ export function parseArgs(argv){
  if(parsed.target!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_invalid',2);
  if(command==='status'){if(parsed.confirm!==undefined)throw new OperatorStop('usage',2);return {command,args:{}};}
  if(parsed.confirm!==command)throw new OperatorStop('confirm',2);
- for(const need of ['run','count','sha256'])if(parsed[need]===undefined)throw new OperatorStop('usage',2);
- if(!/^[0-9a-f]{64}$/.test(parsed.sha256)||!/^\d{1,5}$/.test(parsed.count)||parsed.run.length>100)throw new OperatorStop('usage',2);
- parsed.count=Number(parsed.count);
- if(parsed.epgGeneration!==undefined){if(!/^\d{1,9}$/.test(parsed.epgGeneration))throw new OperatorStop('usage',2);parsed.epgGeneration=Number(parsed.epgGeneration);}
+ for(const need of ['run','epgGeneration','count','membersSha256','sha256'])if(parsed[need]===undefined)throw new OperatorStop('usage',2);
+ if(!/^[0-9a-f]{64}$/.test(parsed.sha256)||!/^[0-9a-f]{64}$/.test(parsed.membersSha256)||!/^\d{1,5}$/.test(parsed.count)||!/^\d{1,9}$/.test(parsed.epgGeneration)||parsed.run.length>100)throw new OperatorStop('usage',2);
+ parsed.count=Number(parsed.count);parsed.epgGeneration=Number(parsed.epgGeneration);
  return {command,args:parsed};
+}
+
+// The membership pin of a saved authoritative `GET /api/watchlist` response: count and digest of the ids in order. Local and read-only; titles are never hashed.
+export async function digestOfFile(file){
+ let body;
+ try{body=JSON.parse(fs.readFileSync(file,'utf8'));}catch{throw new OperatorStop('digest_input',2);}
+ if(!body||!Array.isArray(body.films)||!body.films.length||body.films.some(film=>typeof film?.id!=='string'||!film.id))throw new OperatorStop('digest_input',2);
+ const ids=body.films.map(film=>film.id);
+ if(new Set(ids).size!==ids.length)throw new OperatorStop('digest_input',2);
+ return {operation:'digest',writes:false,writeState:'none',count:ids.length,membersSha256:await membershipDigest(ids.map((id,ordinal)=>({ordinal,lid:id})))};
 }
 
 export async function runWatchlistBootstrapProduction({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,now=()=>Date.now(),deps=null}={}){
@@ -195,6 +238,7 @@ export async function runWatchlistBootstrapProduction({argv=process.argv,env=pro
  try{
   const parsed=parseArgs(argv);
   if(parsed.report)return {exit:0,result:parsed.report};
+  if(parsed.command==='digest')return {exit:0,result:await digestOfFile(parsed.args.file)};
   let binding,target=null;
   if(deps)({binding}=deps);
   else{
