@@ -4,6 +4,10 @@
 // there is no second write), still pending with a backoff, or terminal after a bounded number of attempts (it then waits for an owner decision; nothing is guessed). A transport stop (rate limit, forbidden, challenge)
 // does not count as an attempt. The membership is never rolled back by an admission failure. Collaborators are injected: the ledger repository and the identity bridge.
 export const STEP_LIMIT = 3;
+// The bounded age (ADR 0186 decision 5): an id still unresolved this long after the snapshot that first listed it becomes terminal and waits for an owner decision, whatever its attempt count (transport deferrals
+// never use an attempt, so attempts alone could keep an id pending for ever). When that snapshot is already pruned the age is bounded by versions instead.
+export const AGE_MAX_MS = 14 * 24 * 3600000;
+export const AGE_MAX_VERSIONS = 8;
 const SLUG = /^https:\/\/letterboxd\.com\/film\/([a-z0-9-]{1,200})\/$/;
 // Reasons that mean "not now", not "the source said no": a transport stop, or the bridge deferring the id (budget, the canonical reader not open, facts not durable). None uses up an attempt.
 const NOT_NOW = new Set(['forbidden', 'rate_limited', 'challenge', 'timeout', 'fetch_failed', 'oversized', 'tmdb_unavailable', 'deferred', 'unavailable']);
@@ -16,6 +20,17 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
     const due = await repository.dueAdmissions(ctx.env, {now, limit: Math.min(limit, STEP_LIMIT)});
     if (!due.ok) return {resolved: 0, pending: null, terminal: 0, error: 'ledger_unreadable'};
     if (!due.rows.length) return {resolved: 0, pending: due.pending, terminal: 0};
+    // Aged rows are terminal now, before any source request: bounded age wins over everything else.
+    const aged = row => row.firstSeenAt && Number.isFinite(Date.parse(row.firstSeenAt)) ? now - Date.parse(row.firstSeenAt) > AGE_MAX_MS : (Number.isInteger(due.currentVersion) && due.currentVersion - row.firstSeenVersion >= AGE_MAX_VERSIONS);
+    let terminal = 0;
+    const live = [];
+    for (const row of due.rows) {
+      if (!aged(row)) { live.push(row); continue; }
+      const result = await repository.settleAdmission(ctx.env, {lid: row.lid, state: 'terminal', attempts: row.attempts, reason: 'age_exceeded', now}, {guards});
+      if (result.ok) terminal++; else live.push(row);
+    }
+    due.rows = live;
+    if (!due.rows.length) return {resolved: 0, pending: Math.max(0, (due.pending ?? 0) - terminal), terminal};
     // The film slug of each id comes from the snapshot that first listed it (its member URL), never from a title.
     const items = [], slugless = [];
     const cache = new Map();
@@ -27,7 +42,7 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
       (slug ? items : slugless).push(slug ? {lid: row.lid, slug} : row);
     }
     const settle = (row, fields) => repository.settleAdmission(ctx.env, {lid: row.lid, now, ...fields}, {guards});
-    let resolved = 0, terminal = 0, pending = 0;
+    let resolved = 0, pending = 0;
     for (const row of slugless) {
       const attempts = row.attempts + 1;
       const result = await settle(row, attempts >= identity.MAX_ATTEMPTS ? {state: 'terminal', attempts, reason: 'slug_missing'} : {state: 'pending', attempts, reason: 'slug_missing', nextRetryAt: new Date(now + 12 * HOUR).toISOString()});

@@ -8,7 +8,7 @@ import path from 'node:path';
 import {sqliteSync} from './sqlite-session.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import * as WatchlistD1 from '../src/watchlist-d1.js';
-import {admissionStep,STEP_LIMIT} from '../src/letterboxd-sync-admission.js';
+import {admissionStep,STEP_LIMIT,AGE_MAX_MS,AGE_MAX_VERSIONS} from '../src/letterboxd-sync-admission.js';
 import {effectWriters} from '../src/letterboxd-sync-effects.js';
 
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-lbadm-'));
@@ -107,6 +107,32 @@ const step=(env,id)=>admissionStep({repository:WatchlistD1,identity:id,epochGuar
  let seen=null;const id=identity({});const resolve=id.resolve;id.resolve=async(e,items,opts)=>{seen=e;return resolve(e,items,opts);};
  await admissionStep({repository:WatchlistD1,identity:id,epochGuard,fenceEnv:(e,epoch)=>({...e,fenced:true,epoch})})(ctx(env),{});
  assert.deepEqual([seen.fenced,seen.epoch],[true,1]);
+}
+// 7c. Review (ADR 0186 decision 5): a bounded AGE. A transport deferral never uses an attempt, so an id the source can never answer would stay pending for ever; past the age bound it becomes terminal with the reason
+// `age_exceeded`, before any source request, and then waits for an owner decision. The age is the first-seen snapshot's commit time; when that snapshot is already pruned the age is bounded by versions instead.
+{
+ const {db}=open(),env={DB:db};
+ await publish(env,[film(0),film(1)],'old','2026-11-01T09:40:00.000Z');
+ await WatchlistD1.publishSnapshot(env,[film(0),film(1),film(2)],{scanId:'new',observedAt:'2026-11-20T09:40:00.000Z',runId:'r',slotKey:'k'},{now:Date.parse('2026-11-20T09:40:00.000Z')});
+ const id=identity({entries:{f2:{reason:'rate_limited',attempts:1,nextAttemptAt:'2026-11-21T12:00:00.000Z'}}});
+ const out=await step(env,id);
+ assert.deepEqual(id.calls.resolve,[['f2:film-2']],'only the young id reaches the source; the aged ones never do');
+ const l=ledger(db);
+ assert.deepEqual([l.f0.state,l.f0.last_reason,l.f1.state,l.f1.last_reason],['terminal','age_exceeded','terminal','age_exceeded']);
+ assert.deepEqual([l.f2.state,l.f2.attempts],['pending',0],'the young id keeps waiting without using an attempt');
+ assert.equal(out.terminal,2);
+ assert.ok(NOW-Date.parse('2026-11-01T09:40:00.000Z')>AGE_MAX_MS&&NOW-Date.parse('2026-11-20T09:40:00.000Z')<AGE_MAX_MS);
+ const again=identity();await step(env,again);assert.ok(!again.calls.resolve.flat().some(x=>/^f[01]:/.test(x)),'terminal is final: never retried automatically');
+}
+{
+ // The first-seen snapshot was pruned: the age falls back to versions.
+ const {db,file}=open(),env={DB:db};
+ await publish(env,[film(0)],'s1','2026-11-21T08:00:00.000Z');
+ const sql=text=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
+ sql("UPDATE watchlist_admission_pending SET first_seen_snapshot_id='pruned' WHERE lid='f0';");
+ for(let i=1;i<=AGE_MAX_VERSIONS;i++)await publish(env,[film(0),film(100+i)],'s'+(i+1),'2026-11-21T0'+(Math.min(i,9))+':30:00.000Z');
+ const id=identity();await step(env,id);
+ assert.equal(ledger(db).f0.state,'terminal');assert.equal(ledger(db).f0.last_reason,'age_exceeded');assert.ok(!id.calls.resolve.flat().includes('f0:film-0'));
 }
 // 8. Module hygiene: no SQL, no table, no EPG or Discovery state of its own.
 {
