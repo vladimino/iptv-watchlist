@@ -158,3 +158,31 @@ flowchart LR
 ```
 
 The page keeps the last good authoritative result only in memory. A saved-copy answer never replaces it, but any failed refresh makes the page read-only until an authoritative read succeeds; the normal source and the write actions return only then. The write fence is global, but the loss of present-tense claims is scoped to the data being rendered: a saved programme, or one film that came from a saved copy, keeps its historical schedule without archive, on-air, soon or last-chance claims, while a separately valid authoritative programme keeps its availability even when another film is shown from a mirror. When D1 answers again, films shown from a saved copy are asked again.
+
+## Channel policy (dormant contract, [ADR 0187](../adr/0187-epg-channel-authority.md), Proposed)
+
+Channels get their own D1 tables with a provider category, a per-category policy and an optional owner override. **No scan reads them today**; the diagram shows the contract a later, separately approved reader would use, and it changes nothing in the publication flow above. The contract is in [EPG Channel](../reference/domain/epg-channel.md).
+
+```mermaid
+flowchart TD
+    m3u["M3U groups and tvg ids<br/>(source of classification)"]
+    plan["Pure import plan:<br/>tvg_1259 to ch1259, tvg_1 to ch001;<br/>duplicate or unknown group refuses the plan"]
+    tables[("D1 channel tables, one snapshot revision:<br/>category policy, owner override")]
+    snapshot["One bounded snapshot read:<br/>four statements, then in-memory lookup"]
+    derive{"Effective policy"}
+    override["owner override"]
+    category["category policy"]
+    fallback["known_only:<br/>unknown, unclassified, empty or unavailable"]
+    reader["Future scan consumer (not implemented)"]
+    shows["published_epg_show and discovery_observation_show:<br/>own keys, no foreign key to channels"]
+    m3u --> plan -->|"fenced batch at the expected revision"| tables --> snapshot --> derive
+    derive -->|"has override"| override
+    derive -->|"has category"| category
+    derive -->|"otherwise"| fallback
+    override --> reader
+    category --> reader
+    fallback --> reader
+    shows -.->|"channel_id matches by id only, never by name"| snapshot
+    classDef future fill:#fff3de,stroke:#a56c2b,color:#42300e
+    class reader future
+```
