@@ -188,7 +188,7 @@ There is no hard TTL. The run fails closed only when no snapshot exists or it ca
 
 ## Channel policy (dormant contract, [ADR 0187](../adr/0187-epg-channel-authority.md), Accepted design, dormant implementation)
 
-Channels get their own D1 tables with a provider category, a per-category policy and an optional owner override. **No scan reads them today**; the diagram shows the contract a later, separately approved reader would use, and it changes nothing in the publication flow above. The contract is in [EPG Channel](../reference/domain/epg-channel.md).
+Channels get their own D1 tables with a provider category, a per-category policy and an optional owner override. **No scan reads them today**; the owner-only `/admin/channels` page (AIR-562) imports an M3U, edits owner categories and overrides and shows the staged revision, so what it stores is staged policy and changes nothing in the publication flow or in Discovery. The diagram shows the contract a later, separately approved reader would use, and it changes nothing in the publication flow above. The contract is in [EPG Channel](../reference/domain/epg-channel.md).
 
 ```mermaid
 flowchart TD

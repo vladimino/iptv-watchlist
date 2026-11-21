@@ -2618,6 +2618,7 @@ async fetch(request,env,execution){
   if(url.pathname.startsWith('/api/enrichment/'))return await enrichmentRoute(request,env,url,execution);
   if(url.pathname.startsWith('/api/d1/'))return await catalogD1Route(request,env,url);
   if(url.pathname==='/api/admin/health')return await adminHealthRoute(request,env,url);
+  if(url.pathname==='/api/admin/channels'||url.pathname.startsWith('/api/admin/channels/'))return await adminChannelsRoute(request,env,url);
   if(url.pathname==='/api/admin/limbo')return await adminLimboRoute(request,env,url);
   if(url.pathname==='/api/admin/identity-work')return await adminIdentityWorkRoute(request,env,url);
   if(url.pathname==='/api/admin/posters')return await adminPostersRoute(request,env,url);

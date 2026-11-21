@@ -1,6 +1,6 @@
 # EPG Channel contract
 
-A **Channel** is an XMLTV channel with a provider category, an optional owner category and a scan policy, stored in D1 independently of the shows that name it. The decision is [ADR 0187](../../adr/0187-epg-channel-authority.md) (Accepted design, dormant implementation); the schema is in the [D1 schema reference](../data/d1-schema.md#epg-channel-authority-schema-v31-dormant-not-applied) and the module is `src/epg-channel-d1.js`. **Nothing in the Worker reads these tables yet**: the contract is dormant until a separately approved change reads one snapshot. That future consumer precomputes an in-memory `Map<channelId, {policy, basis}>` once per scan revision and does one lookup per show.
+A **Channel** is an XMLTV channel with a provider category, an optional owner category and a scan policy, stored in D1 independently of the shows that name it. The decision is [ADR 0187](../../adr/0187-epg-channel-authority.md) (Accepted design, dormant implementation); the schema is in the [D1 schema reference](../data/d1-schema.md#epg-channel-authority-schema-v32-dormant-not-applied) (schema v32) and the module is `src/epg-channel-d1.js`. **No scan reads these tables yet**: the stored policy is *staged*, not active, until a separately approved change reads one snapshot. Since AIR-562 the only Worker code that touches them is the owner-only [Channel admin](../api/admin.md#channels-api-admin-channels) (`src/admin/channels.js`), which fails closed while schema 32 is absent. That future consumer precomputes an in-memory `Map<channelId, {policy, basis}>` once per scan revision and does one lookup per show.
 
 ## Policies
 
@@ -38,6 +38,10 @@ The key is the XMLTV id (`ch001`, `ch1259`); the provider spelling is kept as `s
 - `setOverride` sets or clears the owner policy override of one known channel at an expected revision.
 - `setOwnerCategory` assigns or clears the owner category of one known channel (the category must exist) at an expected revision. It is a durable field apart from the provider category: an import never writes or resets it, and a category an owner assignment points at is kept even when the import stops declaring it.
 - Both writes are one fenced batch: the revision is advanced with a compare-and-swap, a fence statement aborts the batch when it changed nothing, so two writers on one revision cannot both win. A lost reply is success only when the stored state is exactly the request: the whole-plan digest for an import; policy, note and time for an override; category, note and time for an owner category.
+
+## Admin and staging
+
+The owner page `/admin/channels` ([API](../api/admin.md#channels-api-admin-channels), [runbook](../../runbooks/channel-management.md)) lists channels, queues the unclassified ones, sets owner categories and policy overrides, and imports an M3U that the browser parsed. It calls `commitImport`, `setOverride` and `setOwnerCategory` unchanged, so every rule above holds: an import never deletes a channel and never writes an owner category or override, and every write is a compare-and-swap at the revision the page read. What the page saves is **staged** policy: it changes the Channel revision, not any EPG or Discovery behavior. The exact scan behavior of each policy, and the first live effect, belong to the later reader change.
 
 ## Boundaries
 

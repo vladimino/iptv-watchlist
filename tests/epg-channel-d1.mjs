@@ -55,12 +55,13 @@ bad("UPDATE schema_contract SET version=30 WHERE id=1");
 bad("UPDATE epg_channel_cas SET ok=0 WHERE id=1");
 bad("UPDATE epg_channel_revision SET import_revision=9 WHERE id=1");
 
-// ===== 2. dormant: no source file, bundle step or route reaches the tables =====
+// ===== 2. the scan path stays dormant: only the owner Channel admin (AIR-562) bundles the module =====
 const holders=[];
 for(const dir of ['src','src/admin','src/domain']){for(const name of fs.readdirSync(dir)){if(!name.endsWith('.js')||name==='epg-channel-d1.js')continue;const text=fs.readFileSync(path.join(dir,name),'utf8');if(/epg_channel|epg-channel-d1|EpgChannel/.test(text))holders.push(path.join(dir,name));}}
-assert.deepEqual(holders,[],'nothing in src reads or imports the Channel tables or module');
-assert.ok(!/epg-channel/.test(fs.readFileSync('build.mjs','utf8')),'the bundle does not include the module');
-assert.ok(!/epg_channel/.test(fs.readFileSync('src/worker.js','utf8')),'scanEPG and the Worker never name the tables');
+assert.deepEqual(holders.sort(),['src/admin/channels-client.js','src/admin/channels.js'],'only the owner-only Channel admin route (and its browser client, which names just the action header) mentions the Channel module and tables');
+for(const scan of ['src/discovery.js','src/epg-orchestration.js','src/enrichment.js','src/published-epg.js','src/discovery-workflow.js','src/mcp.js','src/monitor.js','src/continuation.js'])assert.ok(!/epg_channel|EpgChannel/.test(fs.readFileSync(scan,'utf8')),scan+' never reads the Channel policy: it is staged, not active');
+assert.ok(/scoped\('src\/epg-channel-d1\.js','EpgChannelD1'\)/.test(fs.readFileSync('build.mjs','utf8')),'the bundle includes the module for the admin route');
+assert.ok(!/epg_channel|EpgChannel/.test(fs.readFileSync('src/worker.js','utf8')),'scanEPG and the Worker body never name the tables or the module (only the route name adminChannelsRoute)');
 
 // ===== 3. identity: tvg_1259 -> ch1259, tvg_1 -> ch001 =====
 const norm=value=>Channel.normalizeProviderId(value);
