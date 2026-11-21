@@ -63,7 +63,6 @@ Each transition is one conditional statement on `epg_checkpoint_authority` whose
 | (a2) `release` on a pre-activation abort | `mode=r2, writes=held, generation=G`, tables hold no imported rows or the owner approved their removal | `r2/open`, `G` | readback equals today's R2 behaviour |
 | (b) `release` after activation | `mode=d1, writes=held, generation=G` and import parity read back (typed columns, digests, ingest, receipt) and R2 ETags still equal the frozen ones | `d1/open`, `G` | the H4 evidence set |
 | (c) `hold` to start a data rollback | `mode=d1, writes=open, generation=G` and the boundary rule below | `d1/held`, `G+1` | live D1 run read back |
-
 | (d) `revert-authority` after a verified export | `mode=d1, writes=held, generation=G`, conditional two-object R2 export read back with byte and digest parity against the D1 rows, R2 ETags equal to the pre-export read | `r2/held`, `G+1`; **the D1 rows stay in place, inactive, as recovery evidence** | no D1 row is deleted by any rollback step |
 | (e) `release` after rollback | `mode=r2, writes=held, generation=G`, D1 checkpoint rows present **or** absent (both accepted), R2 objects equal the exported image | `r2/open`, `G` | the predicate differs from (a2), which still requires the D1 tables to hold no imported rows |
 
