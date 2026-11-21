@@ -177,7 +177,7 @@ Every run that reaches a terminal state writes one compact `ratings` event (see 
 
 The status adds a read-only `orchestration` object (`mode` external/switching/cloudflare, `epoch`, `runKey`, `health`, `failure`, caps, `cooldownUntil`, `quarantine`, `nextWakeAt`, `oldestPendingAt`). While the mode is `switching` or `cloudflare`, `start` and `step` answer `nextAction: stop` with `switch_in_progress` or `external_writer_fenced` (HTTP and MCP share `LetterboxdRatings.handle`); reads stay open. Admitted external commits assert the mode document's etag in the same D1 batch, and the executor's records are D1-only for reads and writes (no R2 fallback). When ownership cannot be read from D1 (held, non-`d1` or unavailable authority) `start` and `step` answer `evidence_unreadable`, and the status reports `health: unknown`. The owner route `POST /api/letterboxd/ratings/executor` takes `close_admission`, `complete` or `clear_quarantine`. Default and absent mode is `external`: the Task path is unchanged. See [ADR 0090](../../adr/0090-ratings-cloudflare-workflow-executor.md).
 
-## Proposed contract: the Letterboxd Sync run ([ADR 0186](../../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Proposed, not implemented)
+## Accepted design (not implemented): the Letterboxd Sync run ([ADR 0186](../../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
 
 The contract below is a design. The current Ratings pipeline above is unchanged until the Letterboxd Workflow is accepted, delivered and activated by a separate owner-approved cutover.
 
