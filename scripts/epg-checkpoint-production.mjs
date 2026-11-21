@@ -6,7 +6,7 @@
 // restarts a Workflow, starts an EPG run or deletes a D1 row. Which command may run, and when, is decided by the owner-approved L3 plan.
 //
 //   status                                   read-only: schema, marker, run, orchestration, lease, pause, R2 identities, drain proof
-//   apply         migration 0030 only        schema 29, tables absent, drain proof
+//   apply         migration 0030 only        schema exactly 29, tables absent, no executing EPG step; none of the cutover evidence
 //   hold          r2/open  G -> r2/held  G+1       (a1)
 //   release-abort r2/held  G -> r2/open  G         (a2) no imported rows
 //   import        rows from the frozen R2 objects  r2/held G, empty tables, identity equal to the one the owner approved
@@ -153,6 +153,15 @@ export function completionReceipt(run){
 export function proofFacts(state,evidence){
  const control=state.orchestration.control,lease=state.orchestration.lease;
  return {controlRevision:control?.revision??-1,leaseRevision:lease?.revision??-1,runKey:control?.body?.runKey??'',runId:control?.body?.runId??'',instanceId:control?.body?.instanceId??'',versionId:evidence.deployedVersionId??'',programmeRunId:state.published?.programme_run_id??''};
+}
+
+// The only liveness rule of the schema-only apply: no executing EPG step. A live step lease, or a control record that says a step is starting, running or waiting, refuses.
+export function applyBusy(state,now){
+ const lease=state.orchestration.lease?.body;
+ if(lease&&lease.released!==true&&Date.parse(lease.expiresAt)>now)return 'step_lease_live';
+ const phase=state.orchestration.control?.body?.phase;
+ if(['starting','running','waiting'].includes(phase))return 'epg_phase_'+phase;
+ return null;
 }
 
 // ---- the migration -------------------------------------------------------------------------------------------------------
@@ -343,12 +352,20 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
  if(command==='apply'){
   const decision=applyDecision(state);
   if(decision!=='apply')throw new OperatorStop(decision,3);
-  const objects=await readObjects();
-  if(!objects)throw new OperatorStop('source_missing',3);
-  const proof=await proofOf(await currentRun(binding,state,objects.sync));
-  if(!proof.ok)throw new OperatorStop('drain_refused',3,{failures:proof.failures});
+  // Schema only: the migration creates inert tables and a marker that keeps the R2 objects serving, and copies nothing. It therefore needs none of the cutover
+  // evidence (a completed run of today, the Workflow version, the R2 identities). It only refuses while an EPG step is executing, so that no D1 write lands inside one.
+  const busy=applyBusy(state,clock);
+  if(busy)throw new OperatorStop('writer_active',3,{busy});
   if(ctx.track)ctx.track('unknown');
-  await batch(binding,migrationSql().map(sql=>[sql,[]]));
+  try{await batch(binding,migrationSql().map(sql=>[sql,[]]));}
+  catch{
+   // The batch is atomic and the file guards itself (exactly v29 with the started tables). Read the state before saying anything about the outcome; never retry.
+   let after=null;
+   try{after=await readState(binding);}catch{after=null;}
+   const untouched=Boolean(after)&&after.schemaVersion===29&&after.tables.present===0;
+   if(ctx.track)ctx.track(untouched?'none':'unknown');
+   throw new OperatorStop(untouched?'statement_failed':'write_uncertain',3,{schemaVersion:after?.schemaVersion??null,tables:after?.tables??null});
+  }
   const after=await readState(binding);
   const m=marker0(after);
   if(after.schemaVersion!==30||after.tables.present!==after.tables.expected||!m||m.mode!=='r2'||m.writes!=='open'||m.generation!==0||m.cas!==1||after.counts.run+after.counts.body+after.counts.film+after.counts.receipt+after.counts.ingest!==0)throw new OperatorStop('readback_mismatch',3);
@@ -483,7 +500,7 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
 const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--sync-etag':'syncEtag','--sync-sha256':'syncSha256','--ingest-etag':'ingestEtag','--ingest-sha256':'ingestSha256','--frozen-sync-etag':'frozenSyncEtag','--frozen-ingest-etag':'frozenIngestEtag','--workflow-instance-id':'workflowInstanceId','--workflow-liveness':'workflowLiveness','--deployed-version-id':'deployedVersionId'};
 const H0_FLAGS=['workflowInstanceId','workflowLiveness','deployedVersionId'];
 const IDENTITY_FLAGS=['syncEtag','syncSha256','ingestEtag','ingestSha256'];
-const NEEDS={hold:['generation',...H0_FLAGS],'release-abort':['generation'],import:['generation',...IDENTITY_FLAGS],activate:['generation',...IDENTITY_FLAGS],release:['generation',...IDENTITY_FLAGS],'hold-rollback':['generation',...H0_FLAGS],'export-rollback':['generation','frozenSyncEtag','frozenIngestEtag'],'revert-authority':['generation'],'release-rolled-back':['generation',...IDENTITY_FLAGS],apply:H0_FLAGS};
+const NEEDS={hold:['generation',...H0_FLAGS],'release-abort':['generation'],import:['generation',...IDENTITY_FLAGS],activate:['generation',...IDENTITY_FLAGS],release:['generation',...IDENTITY_FLAGS],'hold-rollback':['generation',...H0_FLAGS],'export-rollback':['generation','frozenSyncEtag','frozenIngestEtag'],'revert-authority':['generation'],'release-rolled-back':['generation',...IDENTITY_FLAGS],apply:[]};
 export function parseArgs(argv){
  const args=argv.slice(2),parsed={};
  const commands=args.filter(arg=>arg.startsWith('--')&&COMMANDS.includes(arg.slice(2)));
