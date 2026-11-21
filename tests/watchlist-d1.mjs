@@ -63,17 +63,17 @@ const drain=async(made,at)=>{for(;;){const todo=await Watchlist.pendingEffects(m
  const legacy=path.join(root,'legacy.sqlite');sqlite(legacy,chain('0030_epg_checkpoint_authority.sql'));
  assert.deepEqual(await Watchlist.readAuthority(d1Standin(legacy)),{state:'legacy'},'tables absent below version 31: the EPG generation serves');
  const noTables=path.join(root,'notables.sqlite');sqlite(noTables,chain('0030_epg_checkpoint_authority.sql')+"UPDATE schema_contract SET version=31 WHERE id=1;");
- assert.deepEqual(await Watchlist.readAuthority(d1Standin(noTables)),{state:'closed'},'version 31 without the tables is closed');
- assert.deepEqual(await Watchlist.readAuthority({}),{state:'closed'},'a missing binding is closed');
+ assert.deepEqual(await Watchlist.readAuthority(d1Standin(noTables)),{state:'closed',reason:'contradiction'},'version 31 without the tables is closed');
+ assert.deepEqual(await Watchlist.readAuthority({}),{state:'closed',reason:'contradiction'},'a missing binding is closed');
  assert.deepEqual(await Watchlist.readAuthority({WATCHLIST_DB_OPTIONAL:'standin'}),{state:'legacy'},'the explicit local stand-in only');
- assert.deepEqual(await Watchlist.readAuthority({WATCHLIST_DB_OPTIONAL:'on',DB:d1Standin(noTables)}),{state:'closed'},'any other value of the selector is not a stand-in');
+ assert.deepEqual(await Watchlist.readAuthority({WATCHLIST_DB_OPTIONAL:'on',DB:d1Standin(noTables)}),{state:'closed',reason:'contradiction'},'any other value of the selector is not a stand-in');
  const epg=open({},{marker:''});
  assert.deepEqual(await Watchlist.readAuthority(epg.db),{state:'epg',writes:'open',generation:0});
  assert.deepEqual(await Watchlist.readAuthority(open().db),{state:'d1',writes:'open',generation:1});
  const held=open({},{marker:"UPDATE watchlist_authority SET mode='d1',generation=2,writes='held' WHERE id=1;"});
  assert.deepEqual(await Watchlist.readAuthority(held.db),{state:'d1',writes:'held',generation:2});
  const gone=open({},{marker:'DROP TRIGGER watchlist_cas_required;DELETE FROM watchlist_cas;'});
- assert.deepEqual(await Watchlist.readAuthority(gone.db),{state:'closed'},'a deleted fence row is closed');
+ assert.deepEqual(await Watchlist.readAuthority(gone.db),{state:'closed',reason:'contradiction'},'a deleted fence row is closed');
  // at `epg` the repository neither serves nor writes: no R2/EPG fallback in either direction
  assert.deepEqual(await Watchlist.readCurrent(epg.db),{ok:false,reason:'closed'});
  assert.equal((await Watchlist.publishSnapshot(epg.db,list(2),scan(),ctx())).reason,'closed');
@@ -83,6 +83,21 @@ const drain=async(made,at)=>{for(;;){const todo=await Watchlist.pendingEffects(m
  const d1=open();
  assert.equal((await Watchlist.pinForEpg(d1.db)).reason,'watchlist_snapshot_absent','no snapshot at all: fail closed, a D1 fault and not a Letterboxd one');
  assert.equal((await Watchlist.readCurrent(d1.db)).reason,'absent');
+}
+
+// ===== 2b. review: held, moved and storage errors are distinct reasons =====
+{
+ const held=open({},{marker:"UPDATE watchlist_authority SET mode='d1',generation=2,writes='held' WHERE id=1;"});
+ assert.equal((await Watchlist.readCurrent(held.db)).reason,'held','a held authority is refused by the reader itself, not only by its caller');
+ assert.equal((await Watchlist.pinForEpg(held.db)).reason,'watchlist_writes_held');
+ const live=open();
+ await publish(live,list(2),'g');
+ assert.equal((await Watchlist.readCurrent(live.db,{generation:1})).ok,true);
+ assert.equal((await Watchlist.readCurrent(live.db,{generation:7})).reason,'moved','a generation the caller did not see is a move');
+ assert.equal((await Watchlist.readCurrent(live.db,{generation:1})).snapshot.authority.generation,1);
+ assert.equal((await Watchlist.pinForEpg(live.db,{generation:3})).reason,'watchlist_authority_moved');
+ const flaky=d1Standin(live.file,{onQuery:async()=>{throw new Error('D1 DB is overloaded');}});
+ assert.deepEqual(await Watchlist.readAuthority(flaky),{state:'closed',reason:'unavailable'},'a storage error is retryable, never a contradiction');
 }
 
 // ===== 3. publish, read, 1-for-1, no-op (T6, T10) =====

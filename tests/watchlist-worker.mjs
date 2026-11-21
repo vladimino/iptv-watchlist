@@ -109,12 +109,24 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
  await seed(made,[film(2),film(9),film(1)]);
  const generation={updatedAt:T,films:[{id:'lb1',title:'Film 1',shows:[{start:1,end:2}]},{id:'lb2',title:'Film 2',shows:[]},{id:'lb3',title:'Film 3',shows:[{start:3,end:4}]}]};
  const programme={films:generation.films,catalogFilms:[{id:'tmdb_90',tmdbId:90,shows:[{start:5,end:6}]}]};
+ // The verified canonical identity source (Film/Person reader in d1 mode); a record may carry `identityBlocked`.
+ let metaRecords={lb9:{tmdbId:90}},metaMode='d1',stillCalls=0;
+ context.CanonicalCatalogReader={catalogReaderGate:async()=>({mode:metaMode}),catalogMetadataFromD1:async()=>metaRecords,catalogReaderStill:async()=>{stillCalls++;}};
  records.set('metadata.json',{lb9:{tmdbId:90}});
  const doc=await run('composeWatchlistRead')(env,generation,programme);
  assert.deepEqual(plain(doc.films.map(item=>item.id)),['lb2','lb9','lb1'],'membership and order from the snapshot');
  assert.equal(doc.films[1].shows.length,1,'a new film with a read identity and a stored confirmed show joins at once');
  assert.deepEqual(plain(doc.removed.map(item=>item.id)),['lb3'],'a removal is membership-only');
  assert.equal(doc.snapshot.version,1);assert.deepEqual(plain(puts),[],'a read composes and writes nothing');
+ assert.equal(stillCalls>0,true,'the identity read is fenced by the Film/Person reader\'s own check');
+ // P1: a Letterboxd claim in conflict (`identityBlocked`) is not an identity; it never attaches another Film\'s shows
+ metaRecords={lb9:{tmdbId:90,identityBlocked:true}};
+ const blocked=await run('composeWatchlistRead')(env,generation,programme);
+ assert.deepEqual(plain(blocked.films[1].shows),[],'a blocked claim attaches no shows');assert.equal(blocked.films[1].scheduleKnown,false);
+ // P1: a non-d1 Film/Person mode serves unverified metadata.json: never an identity
+ metaRecords={lb9:{tmdbId:90}};metaMode='r2';
+ assert.deepEqual(plain((await run('composeWatchlistRead')(env,generation,programme)).films[1].shows),[],'an unverified cache record is no identity evidence');
+ metaMode='d1';
  // the programme composition compares membership, not length (1-for-1)
  const report={runId:'r1',updatedAt:T,films:generation.films,watchlistCount:3};
  const merged=run('programmeWithWatchlist')(structuredClone(report),doc);
@@ -124,7 +136,30 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
  // refusals: held, closed and absent never fall back to the EPG generation
  const held=database("UPDATE watchlist_authority SET mode='d1',generation=2,writes='held' WHERE id=1;");
  const e1=await run('composeWatchlistRead')({DB:held.db,BUCKET:bucket},generation,programme).then(()=>null,error=>error);
- assert.equal(e1.code,'watchlist_writes_held');assert.equal(e1.temporary,true,'a degraded read may answer, from the standalone mirror (ADR 0186 decision 8.6)');
+ assert.equal(e1.code,'watchlist_writes_held');assert.equal(e1.watchlistAuthority,true);assert.notEqual(e1.temporary,true,'a held authority is structural: it never degrades into a mirror (review P1)');
+ // the SAME database moves between requests: there is no cache, the next request sees the new state (review P1, no per-state database objects)
+ const same=database('');const sameEnv={DB:same.db,BUCKET:bucket};
+ assert.equal((await run('composeWatchlistRead')(sameEnv,generation,programme)).films.length,3,'marker epg: the generation document');
+ sqlite(same.file,D1);await seed(same,[film(2),film(9),film(1)]);
+ assert.deepEqual(plain((await run('composeWatchlistRead')(sameEnv,generation,programme)).films.map(item=>item.id)),['lb2','lb9','lb1'],'epg -> d1 on the same binding is seen at once, never the legacy list');
+ sqlite(same.file,"UPDATE watchlist_authority SET writes='held',generation=2");
+ assert.equal(await code(run('composeWatchlistRead')(sameEnv,generation,programme)),'watchlist_writes_held','d1/open -> d1/held on the same binding is refused at once');
+ // a marker move AFTER the composition and before the answer is caught by the route's final fence
+ sqlite(same.file,"UPDATE watchlist_authority SET writes='open',generation=3");
+ const box={};await run('composeWatchlistRead')(sameEnv,generation,programme,box);
+ await run('watchlistStill')(sameEnv,box);
+ sqlite(same.file,"UPDATE watchlist_authority SET writes='held',generation=4");
+ assert.equal(await code(run('watchlistStill')(sameEnv,box)),'watchlist_authority_moved','a hold between the read and the response is never answered');
+ sqlite(same.file,"UPDATE watchlist_authority SET writes='open',generation=5");
+ assert.equal(await code(run('watchlistStill')(sameEnv,box)),'watchlist_authority_moved','a new generation is a move too');
+ const legacyBox={};const legacyEnv={DB:database('').db,BUCKET:bucket};
+ await run('composeWatchlistRead')(legacyEnv,generation,programme,legacyBox);
+ sqlite(legacyEnv.DB&&path.join(root,'db-'+(copies-1)+'.sqlite'),D1);
+ assert.equal(await code(run('watchlistStill')(legacyEnv,legacyBox)),'watchlist_authority_moved','an epg -> d1 switch between the read and the response is never answered from the EPG list');
+ // a storage error of the marker read is a retryable fault, a contradiction is not
+ const failing=database(D1);const flaky=d1Standin(failing.file,{onQuery:async()=>{throw new Error('D1 DB is overloaded');}});
+ const transient=await run('composeWatchlistRead')({DB:flaky,BUCKET:bucket},generation,programme).then(()=>null,error=>error);
+ assert.deepEqual([transient.code,transient.temporary],['watchlist_unavailable',true]);
  const none=database(D1);
  assert.equal(await code(run('composeWatchlistRead')({DB:none.db,BUCKET:bucket},generation,programme)),'watchlist_snapshot_absent');
 }

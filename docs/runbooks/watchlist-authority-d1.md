@@ -9,7 +9,7 @@ Status: **dormant.** [ADR 0186](../adr/0186-letterboxd-sync-and-independent-watc
 | Tables absent, `schema_contract` below 31, or no D1 binding | no `watchlist_%` table | Today's behavior: the generation's `watchlist` document is the membership and the EPG run fetches Letterboxd. |
 | Marker `epg` (writes `open` or `held`) | `SELECT mode, generation, writes FROM watchlist_authority` | The same as above. The repository serves and writes nothing. |
 | Marker `d1`, writes `open` | same | The snapshot is the only membership. The EPG run copies one snapshot and makes no Letterboxd request. Readers compose snapshot membership with the generation's show rows. |
-| Marker `d1`, writes `held` | same | Readers and the EPG run refuse (`watchlist_writes_held`); no fallback to the EPG generation. |
+| Marker `d1`, writes `held` | same | Readers and the EPG run refuse (`watchlist_writes_held`, a typed 503); no fallback to the EPG generation and no mirror answer. The marker is read fresh at every request and re-checked before the answer. |
 | Anything else | version 31 without the tables, a deleted or unknown marker, a missing fence row, an unreadable schema | **Closed**: refused (`watchlist_authority_closed`), never read from the EPG generation or R2. |
 
 ## Read-only checks (L0, `SELECT` only)
@@ -32,6 +32,7 @@ Staged rows of an attempt that was never promoted are garbage of an interrupted 
 | `watchlist_snapshot_absent` | marker `d1`, version 0 | The bootstrap import was not done. Stop; do not fall back to the EPG generation. |
 | `watchlist_unavailable` | D1 fault, or a snapshot that fails its count/digest check | Read-only investigation first; never repair by hand. |
 | `watchlist_writes_held` / `watchlist_authority_closed` | hold fence, or a contradicting marker state | Owner procedure only. |
+| `watchlist_authority_moved` | the marker (state, writes or generation) changed between the read and the response | A retryable 409; the next request sees the new state. |
 | `effects_pending` (repository) | a no-op scan found undrained causal effects | The Workflow drains them oldest version first and then advances success (AIR-570). |
 | `admission_ledger_full` | `watchlist_admission_pending` at its cap | A visible hold, never a silent drop. Owner action on the pending ids. |
 

@@ -164,27 +164,43 @@ async function degradedSnapshot(env,error,route){
  for(const item of snapshot.rejected)if(item.reason!=='absent')degradedEvent('mirror_validation_failed',{route,reason:item.reason,key:item.key});
  return snapshot;
 }
+// ADR 0186: the answer of a read route to a Watchlist authority fault. A move is a retryable 409; a temporary fault (a D1 storage error) continues to the degraded path, which accepts only a validated
+// standalone Watchlist mirror; every other fault (held, closed, absent, malformed) is a typed 503 and never degrades into another source.
+function watchlistRouteFault(error){
+ if(!error?.watchlistAuthority)return null;
+ if(error.code==='watchlist_authority_moved')return json({error:'watchlist_authority_moved',retry:true},409);
+ if(error.temporary===true)return null;
+ return json({error:'storage_unavailable',reason:error.code},503);
+}
 // GET /api/programme from the mirrors. D1-owned overlays (localized titles, owner reviews) are not applied: they are not read here.
 async function degradedProgrammeResponse(env,error){
  const snapshot=await degradedSnapshot(env,error,'programme');
  if(!snapshot)return null;
  let body;
  if(snapshot.programme){
-  const watchlist=snapshot.joined==='best_effort'?snapshot.watchlist.doc:null;
+  // ADR 0186 decision 8.6: with a Watchlist authority fault the root watchlist is never joined to the programme as a same-run pair; the programme answers alone.
+  const watchlist=snapshot.joined==='best_effort'&&!error?.watchlistAuthority?snapshot.watchlist.doc:null;
   body={...programmeWithWatchlist(JSON.parse(JSON.stringify(snapshot.programme.doc)),watchlist&&JSON.parse(JSON.stringify(watchlist))),publishedAt:snapshot.programme.asOf};
  }else{
-  // A watchlist alone has no schedule: `shows` are unknown (not empty) and the page labels them so.
+  // A watchlist alone has no schedule: `shows` are unknown (not empty) and the page labels them so. Not for a Watchlist authority fault: membership is never rebuilt from a mirror here.
+  if(error?.watchlistAuthority){degradedEvent('mirror_fallback_unusable',{route:'programme',reason:'watchlist_authority_fault'});return null;}
   const stamp=snapshot.watchlist.doc.updatedAt??snapshot.watchlist.asOf;
   if(!stamp){degradedEvent('mirror_fallback_unusable',{route:'programme',reason:'no_snapshot_time'});return null;}
   const films=snapshot.watchlist.doc.films.map(film=>({...film,shows:Array.isArray(film.shows)?film.shows:[]}));
   body={runId:null,updatedAt:stamp,publishedAt:snapshot.watchlist.asOf,films,watchlistCount:films.length,scheduleUnavailable:true};
  }
- return degradedResponse(body,snapshot,error,'programme');
+ return degradedResponse(body,error?.watchlistAuthority?{...snapshot,joined:'none'}:snapshot,error,'programme');
 }
 async function degradedWatchlistResponse(env,error){
  const snapshot=await degradedSnapshot(env,error,'watchlist');
  if(!snapshot)return null;
- const body=snapshot.watchlist?{...snapshot.watchlist.doc}:{updatedAt:snapshot.programme.doc.updatedAt??null,films:snapshot.programme.doc.films};
+ let body;
+ if(error?.watchlistAuthority){
+  // ADR 0186 decision 8.6: only a validated STANDALONE current Watchlist mirror (labelled with its snapshot version and success time) may answer; membership is never built from a programme or an EPG copy.
+  const doc=snapshot.watchlist?.doc;
+  if(!(doc&&doc.source==='watchlist_authority'&&Number.isInteger(doc.snapshotVersion)&&typeof doc.lastSuccessAt==='string')){degradedEvent('mirror_fallback_unusable',{route:'watchlist',reason:'no_standalone_watchlist_mirror'});return null;}
+  body={...doc};
+ }else body=snapshot.watchlist?{...snapshot.watchlist.doc}:{updatedAt:snapshot.programme.doc.updatedAt??null,films:snapshot.programme.doc.films};
  return degradedResponse(body,snapshot,error,'watchlist');
 }
 // The film page of a verified TMDB movie from the mirrors (C1). Never a 404/410/409: an identity the mirrors cannot prove is `null` here and the caller keeps its typed 503.
@@ -1108,47 +1124,72 @@ async function recordCheckpointIngestFailure(env,attempt,lastSuccessAt){
  }catch{try{console.log(JSON.stringify({event:'epg_ingest_failure_dropped',reason:'unavailable'}));}catch{}}
 }
 // ADR 0186 (AIR-569), DORMANT. The Watchlist is a D1 authority only while the watchlist marker says `d1` (open). With the tables absent (schema below 31), the marker `epg` or no D1 binding, the published
-// EPG generation serves the membership and the EPG run fetches Letterboxd exactly as before. `closed` (an unreadable or contradicting state) and a `held` marker are refused and never fall back to the EPG
-// generation. The marker is read at most once per two seconds per binding by readers; the EPG run start reads it fresh.
-const watchlistMarks=new WeakMap();
-function watchlistError(code,temporary=false){const error=new Error(code);error.code=code;error.status=503;if(temporary)error.temporary=true;return error;}
-async function watchlistAuthorityState(env,{fresh=false}={}){
+// EPG generation serves the membership and the EPG run fetches Letterboxd exactly as before. A `held` marker, a contradicting state and an unreadable snapshot are refused and never fall back to the EPG
+// generation. The marker is read FRESH at every request boundary (no cache), the snapshot read is fenced on the generation it saw, and the route re-reads the marker after its last async step
+// (`watchlistStill`), so a switch or a hold between the first read and the answer is never served as the old state.
+function watchlistError(code,{temporary=false}={}){const error=new Error(code);error.code=code;error.status=503;error.watchlistAuthority=true;if(temporary)error.temporary=true;return error;}
+// A storage error of the marker read is a retryable fault; every other refusal is structural.
+function watchlistClosed(gate){return watchlistError(gate.reason==='unavailable'?'watchlist_unavailable':'watchlist_authority_closed',{temporary:gate.reason==='unavailable'});}
+async function watchlistAuthorityState(env){
  if(typeof WatchlistD1==='undefined')return {state:'legacy'};
  const db=WatchlistD1.bindingOf(env);
  if(!db&&env?.WATCHLIST_DB_OPTIONAL!=='standin'&&!env?.DB)return {state:'legacy'};
- const now=Date.now(),cached=db&&!fresh?watchlistMarks.get(db):null;
- if(cached&&now-cached.at<2000)return cached.value;
  const gate=await WatchlistD1.readAuthority(env);
- const value=gate.state==='d1'?{state:'d1',writes:gate.writes,generation:gate.generation}:gate.state==='epg'||gate.state==='legacy'?{state:'epg'}:{state:'closed'};
- if(db)watchlistMarks.set(db,{at:now,value});
- return value;
+ if(gate.state==='legacy')return {state:'legacy'};
+ if(gate.state==='d1'||gate.state==='epg')return {state:gate.state,writes:gate.writes,generation:gate.generation};
+ return {state:'closed',reason:gate.reason};
+}
+const watchlistSameGate=(a,b)=>a.state===b.state&&a.writes===b.writes&&a.generation===b.generation;
+// The last async boundary of a read route: the marker must still be what the composition saw. A move is a retryable 409, never an answer in the old state.
+async function watchlistStill(env,box){
+ if(!box?.gate)return;
+ const now=await watchlistAuthorityState(env);
+ if(!watchlistSameGate(box.gate,now))throw watchlistError('watchlist_authority_moved');
 }
 // The one read of the EPG run start: the ordered list and the pin of the last COMPLETE snapshot. No wait, no Letterboxd call, no TTL; fail-closed only when no snapshot exists or it is unreadable.
 // -> null (legacy: fetch Letterboxd as before) | {films,run,observedAt}
 async function epgSnapshotPin(env){
- const gate=await watchlistAuthorityState(env,{fresh:true});
+ const gate=await watchlistAuthorityState(env);
  if(gate.state==='epg'||gate.state==='legacy')return null;
- if(gate.state!=='d1')throw watchlistError('watchlist_authority_closed',true);
- if(gate.writes!=='open')throw watchlistError('watchlist_writes_held',true);
- const out=await WatchlistD1.pinForEpg(env);
- if(!out.ok)throw watchlistError(out.reason,out.reason==='watchlist_unavailable');
+ if(gate.state!=='d1')throw watchlistClosed(gate);
+ if(gate.writes!=='open')throw watchlistError('watchlist_writes_held');
+ const out=await WatchlistD1.pinForEpg(env,{generation:gate.generation});
+ if(!out.ok)throw watchlistError(out.reason);
  return {films:out.films,observedAt:out.pin.watchlistObservedAt,run:{version:out.pin.watchlistVersion,snapshotId:out.pin.watchlistSnapshotId,lastSuccessAt:out.pin.watchlistLastSuccessAt,listSha256:out.pin.watchlistListSha256,...(out.warning?{warning:out.warning}:{})}};
 }
 // The reader seam (ADR 0186 decision 6): membership and order from the CURRENT snapshot, stored shows from the pinned generation. `legacy` is the document the caller loaded as before and is returned
-// unchanged unless the marker is `d1`. A read-time composition: it writes nothing and never changes the programme generation (ADR 0107). A lid with no stored record is identified through the metadata
-// cache only; an identity that cannot be read leaves the film with no shows (unknown), never a false empty-availability fact.
-async function composeWatchlistRead(env,legacy,programme=null){
+// unchanged unless the marker is `d1`. A read-time composition: it writes nothing and never changes the programme generation (ADR 0107). `box` receives the marker state the answer rests on, for the
+// final fence of the route (`watchlistStill`). A lid with no stored record is identified only through a VERIFIED canonical identity: the Film/Person reader must be in `d1` mode, the record must not
+// be `identityBlocked` (a conflicting Letterboxd claim) and the reader's own fence must still hold. Anything else leaves the film with no shows (unknown), never a false empty-availability fact.
+async function composeWatchlistRead(env,legacy,programme=null,box=null){
  const gate=await watchlistAuthorityState(env);
+ if(box)box.gate=gate;
  if(gate.state==='epg'||gate.state==='legacy')return legacy;
- if(gate.state!=='d1')throw watchlistError('watchlist_authority_closed',true);
- if(gate.writes!=='open')throw watchlistError('watchlist_writes_held',true);
- const out=await WatchlistD1.readCurrent(env);
- if(!out.ok)throw watchlistError(out.reason==='absent'?'watchlist_snapshot_absent':'watchlist_unavailable',out.reason!=='absent');
+ if(gate.state!=='d1')throw watchlistClosed(gate);
+ if(gate.writes!=='open')throw watchlistError('watchlist_writes_held');
+ const out=await WatchlistD1.readCurrent(env,{generation:gate.generation});
+ if(!out.ok){
+  if(out.reason==='absent')throw watchlistError('watchlist_snapshot_absent');
+  if(out.reason==='held')throw watchlistError('watchlist_writes_held');
+  if(out.reason==='moved')throw watchlistError('watchlist_authority_moved');
+  if(out.reason==='closed')throw watchlistError('watchlist_authority_closed');
+  throw watchlistError('watchlist_unavailable',{temporary:out.reason==='unavailable'});
+ }
  const stored=new Set((legacy?.films||[]).map(film=>String(film.id)));
  const added=out.snapshot.films.filter(film=>!stored.has(film.lid)).map(film=>film.lid);
  const identity=new Map();
- if(added.length){try{const read=await catalogMetadataRead(env,added);for(const lid of added){const record=read.records?.[lid];if(record?.tmdbId!=null)identity.set(lid,record.tmdbId);}}catch{}}
- return WatchlistComposition.composeWatchlist({snapshot:out.snapshot,generation:{watchlist:legacy,programme},identityByLid:identity}).doc;
+ if(added.length){
+  try{
+   const read=await catalogMetadataRead(env,added);
+   if(read.gate?.mode==='d1'){
+    for(const lid of added){const record=read.records?.[lid];if(record?.tmdbId!=null&&record.identityBlocked!==true)identity.set(lid,record.tmdbId);}
+    await catalogMetadataFinish(env,read.gate);
+   }
+  }catch{identity.clear();}
+ }
+ const doc=WatchlistComposition.composeWatchlist({snapshot:out.snapshot,generation:{watchlist:legacy,programme},identityByLid:identity}).doc;
+ await watchlistStill(env,{gate});
+ return doc;
 }
 async function beginSync(env){
  // ADR 0185: every attempt has an id and a start time taken before the fetch; the ingest status is ordered by them, not by when an attempt finishes.
@@ -2588,7 +2629,7 @@ async fetch(request,env,execution){
     const pinned=await pinEpg(env);
     const data=await loadJSON(pinned,'programme.json');
     if(!data)return json({error:'Первое обновление ещё выполняется'},503);
-    const watchlist=await composeWatchlistRead(env,await loadJSON(pinned,'watchlist.json'),data);
+    const wbox={},watchlist=await composeWatchlistRead(env,await loadJSON(pinned,'watchlist.json'),data,wbox);
     const titles=await localizedTitleStore(env,pinned,gate,[...(data?.films||[]),...(watchlist?.films||[])]);
     const reviews=await publishedOwnerReviews(pinned);
     if(!reviews.ok){if(reviews.temporary){const degraded=await degradedProgrammeResponse(env,{code:'owner_review_unavailable',temporary:true});if(degraded)return degraded;}return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);}
@@ -2603,8 +2644,9 @@ async fetch(request,env,execution){
     const publishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(sync,data):null;
     if(publishedAt)presented.publishedAt=publishedAt;else delete presented.publishedAt;
     degradedRecovered('programme');
+    await watchlistStill(env,wbox);
     return await titleReadFinish(env,gate,json(presented));
-   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);if(isTemporaryReadFault(error)){const degraded=await degradedProgrammeResponse(env,error);if(degraded)return degraded;}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);{const faulted=watchlistRouteFault(error);if(faulted)return faulted;}if(isTemporaryReadFault(error)){const degraded=await degradedProgrammeResponse(env,error);if(degraded)return degraded;}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){
    try{
@@ -2613,14 +2655,15 @@ async fetch(request,env,execution){
     let data=await loadJSON(pinned,'watchlist.json');
     const report=await loadJSON(pinned,'programme.json');
     if(pinned.epgPin?.authority!=='d1'&&report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};
-    data=await composeWatchlistRead(env,data,report);
+    const wbox={};data=await composeWatchlistRead(env,data,report,wbox);
     if(!data)return await titleReadFinish(env,gate,json({films:[]}));
     const titles=await localizedTitleStore(env,pinned,gate,data?.films||[]);
     const reviews=await publishedOwnerReviews(pinned);
     if(!reviews.ok){if(reviews.temporary){const degraded=await degradedWatchlistResponse(env,{code:'owner_review_unavailable',temporary:true});if(degraded)return degraded;}return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);}
     degradedRecovered('watchlist');
+    await watchlistStill(env,wbox);
     return await titleReadFinish(env,gate,json(presentLocalized(data,titles,reviews.body)));
-   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);if(isTemporaryReadFault(error)){const degraded=await degradedWatchlistResponse(env,error);if(degraded)return degraded;}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);{const faulted=watchlistRouteFault(error);if(faulted)return faulted;}if(isTemporaryReadFault(error)){const degraded=await degradedWatchlistResponse(env,error);if(degraded)return degraded;}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
   {const permanent=/^\/api\/catalog\/film\/([^/]+)$/.exec(url.pathname);if(permanent&&request.method==='GET'){let id;try{id=decodeURIComponent(permanent[1]);}catch{id='';}return await catalogFilmRoute(env,id);}}

@@ -31,23 +31,24 @@ async function many(db,sql,params=[]){return (await db.prepare(sql).bind(...para
 async function sha256(text){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(byte=>byte.toString(16).padStart(2,'0')).join('');}
 const iso=ms=>new Date(ms).toISOString();
 
-// -> {state:'legacy'} | {state:'epg'|'d1',writes,generation} | {state:'closed'}
+// -> {state:'legacy'} | {state:'epg'|'d1',writes,generation} | {state:'closed',reason:'unavailable'|'contradiction'}
+//    `unavailable` is a storage error (a retryable D1 fault); `contradiction` is a state that cannot be served (structural, never retried into another source).
 export async function readAuthority(source){
  const db=database(source);
  const standin=source?.WATCHLIST_DB_OPTIONAL==='standin';
- if(!db||typeof db.prepare!=='function')return standin?{state:'legacy'}:{state:'closed'};
+ if(!db||typeof db.prepare!=='function')return standin?{state:'legacy'}:{state:'closed',reason:'contradiction'};
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+')')).map(row=>row.name);}
- catch{return {state:'closed'};}
+ catch{return {state:'closed',reason:'unavailable'};}
  if(!names.length){
   let version=null;
-  try{version=Number((await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version);}catch{return standin?{state:'legacy'}:{state:'closed'};}
-  return Number.isFinite(version)&&version<SCHEMA_VERSION?{state:'legacy'}:(standin?{state:'legacy'}:{state:'closed'});
+  try{version=Number((await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version);}catch{return standin?{state:'legacy'}:{state:'closed',reason:'unavailable'};}
+  return Number.isFinite(version)&&version<SCHEMA_VERSION?{state:'legacy'}:(standin?{state:'legacy'}:{state:'closed',reason:'contradiction'});
  }
- if(TABLES.some(name=>!names.includes(name)))return {state:'closed'};
+ if(TABLES.some(name=>!names.includes(name)))return {state:'closed',reason:'contradiction'};
  let row;
- try{row=await one(db,MARKER_SQL);}catch{return {state:'closed'};}
- if(!row||Number(row.cas)!==1||(row.mode!=='epg'&&row.mode!=='d1')||(row.writes!=='open'&&row.writes!=='held')||!Number.isInteger(Number(row.generation)))return {state:'closed'};
+ try{row=await one(db,MARKER_SQL);}catch{return {state:'closed',reason:'unavailable'};}
+ if(!row||Number(row.cas)!==1||(row.mode!=='epg'&&row.mode!=='d1')||(row.writes!=='open'&&row.writes!=='held')||!Number.isInteger(Number(row.generation)))return {state:'closed',reason:'contradiction'};
  return {state:row.mode,writes:row.writes,generation:Number(row.generation)};
 }
 
@@ -95,10 +96,11 @@ export function staleness(lastSuccessAt,now=Date.now()){
 }
 
 // The current snapshot, assembled and verified, in ONE read batch (marker, pointer, snapshot row, members), so they are one view.
-// -> {ok:true,snapshot} | {ok:false,reason:'closed'|'absent'|'malformed'|'unavailable'}
+// -> {ok:true,snapshot} | {ok:false,reason:'closed'|'held'|'moved'|'absent'|'malformed'|'unavailable'}
 //    snapshot = {version,snapshotId,observedAt,committedAt,lastSuccessAt,listSha256,filmCount,films:[{ordinal,lid,title,year,url}],stale,ageMs,current}
-// `closed`: the marker is not `d1` (this reader never answers for another mode). `absent`: version 0, nothing was ever promoted or imported.
-export async function readCurrent(source,{now=Date.now()}={}){
+// `closed`: the marker is not `d1` (this reader never answers for another mode). `held`: writes are held (an import fence): refused, never served. `moved`: `generation` was given and the marker
+// carries another one (the authority changed between the caller's check and this read). `absent`: version 0, nothing was ever promoted or imported.
+export async function readCurrent(source,{now=Date.now(),generation=null}={}){
  const db=database(source);
  if(!db||typeof db.batch!=='function')return {ok:false,reason:'unavailable'};
  let parts;
@@ -111,6 +113,8 @@ export async function readCurrent(source,{now=Date.now()}={}){
  }catch{return {ok:false,reason:'unavailable'};}
  const [marker,current,snapshot,members]=parts.map(part=>part.results||[]);
  if(!marker[0]||marker[0].mode!=='d1'||Number(marker[0].cas)!==1)return {ok:false,reason:'closed'};
+ if(marker[0].writes!=='open')return {ok:false,reason:'held'};
+ if(generation!==null&&Number(marker[0].generation)!==generation)return {ok:false,reason:'moved'};
  if(!current[0])return {ok:false,reason:'malformed'};
  const pointer=currentOf(current[0]);
  if(pointer.version===0||!pointer.snapshotId)return {ok:false,reason:'absent'};
@@ -122,15 +126,15 @@ export async function readCurrent(source,{now=Date.now()}={}){
   const films=members.map(filmOf);
   if(await listDigest(films)!==pointer.listSha256)return {ok:false,reason:'malformed'};
   const age=staleness(pointer.lastSuccessAt,now);
-  return {ok:true,snapshot:{version:pointer.version,snapshotId:pointer.snapshotId,observedAt:row.observed_at,committedAt:row.committed_at,lastSuccessAt:pointer.lastSuccessAt,listSha256:pointer.listSha256,filmCount:pointer.filmCount,films,stale:age.stale,ageMs:age.ageMs,current:pointer}};
+  return {ok:true,snapshot:{version:pointer.version,snapshotId:pointer.snapshotId,observedAt:row.observed_at,committedAt:row.committed_at,lastSuccessAt:pointer.lastSuccessAt,listSha256:pointer.listSha256,filmCount:pointer.filmCount,films,stale:age.stale,ageMs:age.ageMs,current:pointer,authority:{generation:Number(marker[0].generation),writes:'open'}}};
  }catch{return {ok:false,reason:'malformed'};}
 }
 
 // The one read of the EPG run start (ADR 0186 decision 6): the ordered list to copy into the run and the three pin fields. It never waits, never calls Letterboxd and has no TTL.
 // Fail-closed only when no snapshot exists or it is unreadable (a D1 fault, not a Letterboxd one). -> {ok:true,films,pin,warning} | {ok:false,reason}
-export async function pinForEpg(source,{now=Date.now()}={}){
- const out=await readCurrent(source,{now});
- if(!out.ok)return {ok:false,reason:out.reason==='absent'?'watchlist_snapshot_absent':'watchlist_unavailable'};
+export async function pinForEpg(source,{now=Date.now(),generation=null}={}){
+ const out=await readCurrent(source,{now,generation});
+ if(!out.ok)return {ok:false,reason:out.reason==='absent'?'watchlist_snapshot_absent':out.reason==='held'?'watchlist_writes_held':out.reason==='moved'?'watchlist_authority_moved':'watchlist_unavailable'};
  const s=out.snapshot;
  return {ok:true,films:s.films.map(toEpgFilm),pin:{watchlistVersion:s.version,watchlistSnapshotId:s.snapshotId,watchlistLastSuccessAt:s.lastSuccessAt,watchlistObservedAt:s.observedAt,watchlistListSha256:s.listSha256},warning:s.stale?'watchlist_stale':null,ageMs:s.ageMs};
 }

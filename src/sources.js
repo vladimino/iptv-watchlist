@@ -468,7 +468,8 @@ function programmeWithWatchlist(report,watchlist){
  // ADR 0186 (AIR-569): a composed document carries its snapshot; equal lengths are then never equal membership (a 1-for-1 replacement keeps the count).
  if(!watchlist?.snapshot&&report.films.length===report.watchlistCount||!watchlist?.films){for(const film of report.films)film.availableUntil=availabilityDeadline(film);return withholdPolicyExcludedProgrammeFilms(report);}
  const scheduled=new Map(report.films.map(f=>[String(f.id),f]));
- const films=watchlist.films.map(f=>withAvailability({...f,...scheduled.get(String(f.id)),shows:scheduled.get(String(f.id))?.shows||[]}));
+ // ADR 0186 review: a composed member that is new to the programme keeps the shows its composition joined from a stored confirmed slot; they are not overwritten by an empty list.
+ const films=watchlist.films.map(f=>withAvailability({...f,...scheduled.get(String(f.id)),shows:scheduled.get(String(f.id))?.shows||f.shows||[]}));
  return withholdPolicyExcludedProgrammeFilms({...report,films,people:peopleCatalog(films)});
 }
 function withholdPolicyExcludedProgrammeFilms(report){
