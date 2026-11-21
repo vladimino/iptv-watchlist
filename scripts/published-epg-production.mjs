@@ -37,28 +37,59 @@ export class OperatorStop extends Error{
  }
 }
 
+// Splits a migration file into single statements, the way D1's REST batch needs them (one entry per statement). Lexically aware: single-quoted strings
+// (with '' escapes), double-quoted identifiers, `--` line comments and block comments are never searched for keywords or `;`, and comments are dropped.
+// A `;` ends a statement only at depth 0, where BEGIN and CASE open and END closes: the trigger bodies contain `CASE ... END` expressions, whose END
+// closes the CASE and not the trigger.
 export function migrationStatements(text){
- const source=String(text).split('\n').filter(line=>!/^\s*--/.test(line)).join('\n');
+ const source=String(text);
  const statements=[];
- let current='', quote=false;
- for(let index=0;index<source.length;index++){
-  const character=source[index];
-  if(character==="'"){
-   if(quote&&source[index+1]==="'"){current+="''";index++;continue;}
-   quote=!quote;
-   current+=character;
+ let current='',depth=0,index=0;
+ const flushWord=word=>{
+  const upper=word.toUpperCase();
+  if(upper==='BEGIN'||upper==='CASE')depth++;
+  else if(upper==='END'&&depth>0)depth--;
+ };
+ while(index<source.length){
+  const character=source[index],next=source[index+1];
+  if(character==="'"||character==='"'){
+   let end=index+1;
+   while(end<source.length){
+    if(source[end]===character){if(source[end+1]===character){end+=2;continue;}break;}
+    end++;
+   }
+   current+=source.slice(index,Math.min(end+1,source.length));
+   index=end+1;
    continue;
   }
-  if(character===';'&&!quote){
-   const opens=(current.match(/\bBEGIN\b/gi)||[]).length;
-   const closes=(current.match(/\bEND\b/gi)||[]).length;
-   if(opens>closes){current+=character;continue;}
+  if(character==='-'&&next==='-'){
+   while(index<source.length&&source[index]!=='\n')index++;
+   continue;
+  }
+  if(character==='/'&&next==='*'){
+   const end=source.indexOf('*/',index+2);
+   index=end<0?source.length:end+2;
+   current+=' ';
+   continue;
+  }
+  if(/[A-Za-z_]/.test(character)){
+   let end=index+1;
+   while(end<source.length&&/[A-Za-z0-9_]/.test(source[end]))end++;
+   const word=source.slice(index,end);
+   flushWord(word);
+   current+=word;
+   index=end;
+   continue;
+  }
+  if(character===';'&&depth===0){
    const sql=current.trim();
    if(sql)statements.push(sql);
    current='';
+   index++;
    continue;
   }
   current+=character;
+  index++;
  }
  const tail=current.trim();
  if(tail)statements.push(tail);
