@@ -7,7 +7,9 @@
 //   activate       epg/held  G -> d1/held  G+1   the same proofs as `hold`, re-asserted in the switching batch
 //   release        d1/held   G -> d1/open  G     the snapshot is servable and unchanged since the pins
 //   hold-rollback  d1/open   G -> d1/held  G+1   first step of the data rollback: Letterboxd mode closed, no EPG step, snapshot intact
-// The data rollback export and the return to `epg` are a separate, later operator step.
+//   revert-authority     d1/held G -> epg/held G+1  AFTER the rollback export: the published generation's watchlist part equals the snapshot in membership and order
+//   release-rolled-back  epg/held G -> epg/open G   the EPG owns the Watchlist again; backing out of nothing else is checked (the EPG may have published its own list since)
+// The rollback export itself writes the published generation through the EPG writer path (`PublishedEpg.saveWatchlist`, a staged commit compare-and-swapped on the EPG generation); it is not a marker transition.
 import {livenessGuard} from './watchlist-bootstrap.js';
 
 const GUARD=expression=>'INSERT INTO watchlist_cas (id, ok) SELECT 1, '+expression+' WHERE 1 ON CONFLICT(id) DO UPDATE SET ok=excluded.ok';
@@ -19,6 +21,8 @@ export const TRANSITIONS=Object.freeze({
  activate:{from:{mode:'epg',writes:'held'},to:{mode:'d1',writes:'held'},bump:true,needs:['snapshotImport','source','liveness','checkpoint','letterboxdClosed']},
  release:{from:{mode:'d1',writes:'held'},to:{mode:'d1',writes:'open'},bump:false,needs:['snapshotImport','checkpoint','letterboxdClosed']},
  'hold-rollback':{from:{mode:'d1',writes:'open'},to:{mode:'d1',writes:'held'},bump:true,needs:['snapshotCurrent','liveness','letterboxdClosed']},
+ 'revert-authority':{from:{mode:'d1',writes:'held'},to:{mode:'epg',writes:'held'},bump:true,needs:['snapshotCurrent','exportParity','liveness','letterboxdClosed']},
+ 'release-rolled-back':{from:{mode:'epg',writes:'held'},to:{mode:'epg',writes:'open'},bump:false,needs:['letterboxdClosed']},
 });
 
 // facts: what the operator read and verified, re-asserted inside the batch.
@@ -51,6 +55,12 @@ export function transitionStatements(name,{generation,facts={}}){
   if(!source||!source.programmeRunId||!Number.isInteger(source.epgGeneration)||!snap?.runId||snap.runId!==source.programmeRunId)throw new Error('cutover_source');
   // The published generation is the one the import came from: same run and EPG generation, certified complete, and its stored member rows still count the list.
   parts.push(["(SELECT COUNT(*) FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=? AND generation=? AND finalized_run_id=programme_run_id)=1 AND (SELECT COUNT(*) FROM published_epg_member WHERE programme_run_id=? AND kind='watchlist')=? AND (SELECT run_id FROM watchlist_snapshot WHERE snapshot_id=?)=?",[source.programmeRunId,source.epgGeneration,source.programmeRunId,snap.count,snap.snapshotId,source.programmeRunId]]);
+ }
+ if(need('exportParity')){
+  const parity=facts.parity;
+  if(!parity||!parity.programmeRunId||!Number.isInteger(parity.epgGeneration)||!snap)throw new Error('cutover_parity');
+  // The published generation's watchlist part equals the pinned snapshot in membership AND order, at the exact generation the export produced: the EPG owns the list it is about to read again.
+  parts.push(["(SELECT COUNT(*) FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=? AND generation=?)=1 AND (SELECT COUNT(*) FROM published_epg_member WHERE programme_run_id=? AND kind='watchlist')=? AND (SELECT COUNT(*) FROM published_epg_member m JOIN watchlist_member w ON w.snapshot_id=? AND w.ordinal=m.ordinal AND w.lid=m.film_id WHERE m.programme_run_id=? AND m.kind='watchlist')=?",[parity.programmeRunId,parity.epgGeneration,parity.programmeRunId,snap.count,snap.snapshotId,parity.programmeRunId,snap.count]]);
  }
  if(need('checkpoint')){
   // ADR 0186 decision 8.3 / O4: the EPG checkpoint cutover is completed first. The forward path switches only with the checkpoint authority `d1` and `open`, and re-asserts it here;

@@ -6,7 +6,7 @@ import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-se
 import {D1Error} from '../scripts/d1-backfill.mjs';
 import * as Boot from '../scripts/watchlist-bootstrap-production.mjs';
 import * as Op from '../scripts/watchlist-cutover-production.mjs';
-import {listDigest,normalizeFilms,readCurrent,pinForEpg,readAuthority} from '../src/watchlist-d1.js';
+import {listDigest,normalizeFilms,readCurrent,pinForEpg,readAuthority,publishSnapshot} from '../src/watchlist-d1.js';
 import {membershipDigest} from '../src/watchlist-bootstrap.js';
 import {transitionStatements,TRANSITIONS} from '../src/watchlist-cutover.js';
 
@@ -16,7 +16,7 @@ const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA fore
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);return r.stdout.trim()?JSON.parse(r.stdout):[];};
 const NOW=Date.parse('2026-11-21T18:00:00.000Z');
 const RUN='run-20261121';
-const FILMS=Array.from({length:30},(_,i)=>({id:'film-'+i,title:'Film '+i,year:1980+i,url:'https://letterboxd.com/film/film-'+i+'/'}));
+const FILMS=Array.from({length:30},(_,i)=>({id:'film-'+i,title:'Film '+i,year:1980+i,url:'https://letterboxd.com/film/film-'+i+'/',...(i===0?{tmdbId:'123',directors:[{id:'d1',name:'Director'}]}:{})}));
 const esc=text=>text.replace(/'/g,"''");
 const SHA=await listDigest(normalizeFilms(FILMS));
 const MEMBERS=await membershipDigest(normalizeFilms(FILMS));
@@ -28,7 +28,7 @@ async function imported(){
  const text=JSON.stringify({films:FILMS,updatedAt:'2026-11-21T16:11:45.255Z'});const half=Math.floor(text.length/2);
  sqlite(file,"INSERT INTO published_epg_generation (programme_run_id, phase, published_at, payload_sha256, created_at) VALUES ('"+RUN+"','published','2026-11-21T16:11:45.255Z','"+'a'.repeat(64)+"','2026-11-21T16:00:00.000Z');"
   +"UPDATE published_epg_authority SET mode='d1', cutover='open', programme_run_id='"+RUN+"', generation=515, finalized_run_id='"+RUN+"', finalized_at='2026-11-21T16:11:45.255Z' WHERE id=1;"
-  +"INSERT INTO published_epg_document (programme_run_id, kind, ordinal, payload_json) VALUES ('"+RUN+"','watchlist',0,'"+esc(text.slice(0,half))+"'),('"+RUN+"','watchlist',1,'"+esc(text.slice(half))+"');"
+  +"INSERT INTO published_epg_document (programme_run_id, kind, ordinal, payload_json) VALUES ('"+RUN+"','watchlist',0,'"+esc(text.slice(0,half))+"'),('"+RUN+"','watchlist',1,'"+esc(text.slice(half))+"'),('"+RUN+"','programme',0,'"+esc(JSON.stringify({updatedAt:'2026-11-21T16:11:45.255Z',films:[],watchlistCount:30}))+"');"
   +FILMS.map((f,i)=>"INSERT INTO published_epg_member (programme_run_id, kind, ordinal, film_id) VALUES ('"+RUN+"','watchlist',"+i+",'"+f.id+"');").join(''));
  const db=d1Standin(file);
  const done=await Boot.execute('bootstrap',{binding:db,args:{run:RUN,epgGeneration:515,count:30,membersSha256:MEMBERS,sha256:SHA},now:NOW,ctx:{snapshotId:'snap-1'}});
@@ -48,6 +48,8 @@ const marker=file=>rows(file,'SELECT mode, writes, generation FROM watchlist_aut
 const pointer=file=>rows(file,'SELECT version, snapshot_id, list_sha256, film_count, effects_drained_version, revision FROM watchlist_current')[0];
 const counts=file=>rows(file,"SELECT (SELECT COUNT(*) FROM watchlist_staging) AS staging,(SELECT COUNT(*) FROM watchlist_snapshot) AS snapshot,(SELECT COUNT(*) FROM watchlist_member) AS member,(SELECT COUNT(*) FROM watchlist_change) AS change,(SELECT COUNT(*) FROM watchlist_effect) AS effect,(SELECT COUNT(*) FROM watchlist_admission_pending) AS pending")[0];
 const run=(env,command,args,extra={})=>Op.execute(command,{binding:env.db,args,now:NOW,ctx:trackedCtx(),...extra});
+// A guard tripped in the batch reaches the operator as a statement error of the D1 API; the stand-in throws a plain error.
+const asStmt=env=>({prepare:sql=>env.db.prepare(sql),batch:statements=>asStatement(()=>env.db.batch(statements))});
 const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statements=>{sqlite(env.file,mutate);return asStatement(()=>env.db.batch(statements));}});
 
 // ===== 1. arguments =====
@@ -71,13 +73,19 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  assert.equal(Op.parseArgs(A('--release','--target','iptv','--confirm','release','--expect-generation','2','--expect-run',RUN,'--expect-count','30','--expect-members-sha256',MEMBERS,'--expect-sha256',SHA,'--expect-snapshot-id',snapshotId)).command,'release');
  assert.throws(()=>Op.parseArgs(A('--release','--target','iptv','--confirm','release','--expect-generation','2','--expect-count','30','--expect-sha256',SHA,'--expect-snapshot-id',snapshotId)),e=>e.reason==='usage','release needs the full import pins');
  assert.equal(Op.parseArgs(A('--hold-rollback','--target','iptv','--confirm','hold-rollback','--expect-generation','2','--expect-count','30','--expect-sha256',SHA,'--expect-snapshot-id',snapshotId,'--expect-version','1','--expect-revision','2')).command,'hold-rollback');
+ const rb=['--target','iptv','--expect-generation','3','--expect-count','30','--expect-sha256',SHA,'--expect-snapshot-id',snapshotId,'--expect-version','2','--expect-revision','5','--expect-run',RUN,'--expect-epg-generation','515'];
+ for(const command of ['export-rollback','revert-authority'])assert.equal(Op.parseArgs(A('--'+command,'--target','iptv','--confirm',command,...rb.slice(2))).command,command,command);
+ assert.throws(()=>Op.parseArgs(A('--export-rollback','--target','iptv','--confirm','export-rollback','--expect-generation','3')),e=>e.reason==='usage','the export needs every pin');
+ assert.throws(()=>Op.parseArgs(A('--revert-authority','--target','iptv','--confirm','revert-authority',...rb.slice(2).filter(x=>x!=='515'&&x!=='--expect-epg-generation'))),e=>e.reason==='usage','the revert needs the EPG generation the export produced');
+ assert.equal(Op.parseArgs(A('--release-rolled-back','--target','iptv','--confirm','release-rolled-back','--expect-generation','4')).command,'release-rolled-back');
+ assert.throws(()=>Op.parseArgs(A('--release-rolled-back','--target','iptv','--confirm','release-rolled-back','--expect-generation','4','--expect-count','30')),e=>e.reason==='usage');
  const r=spawnSync(process.execPath,['scripts/watchlist-cutover-production.mjs'],{encoding:'utf8'});assert.equal(r.status,0);
  assert.deepEqual(JSON.parse(r.stdout),{configured:false,writes:false,writeState:'none'});
 }
 
 // ===== 2. the plan: what each transition may write =====
 {
- const facts={snapshot:{snapshotId,sha256:SHA,count:30,revision:2,version:1,runId:RUN},source:{programmeRunId:RUN,epgGeneration:515},liveness:{controlRevision:-1,leaseRevision:-1,liveAfterIso:'2026-11-21T17:59:45.000Z'},checkpoint:{mode:'d1'},letterboxd:{revision:-1}};
+ const facts={snapshot:{snapshotId,sha256:SHA,count:30,revision:2,version:1,runId:RUN},source:{programmeRunId:RUN,epgGeneration:515},liveness:{controlRevision:-1,leaseRevision:-1,liveAfterIso:'2026-11-21T17:59:45.000Z'},checkpoint:{mode:'d1'},letterboxd:{revision:-1},parity:{programmeRunId:RUN,epgGeneration:516}};
  for(const name of Object.keys(TRANSITIONS)){
   const plan=transitionStatements(name,{generation:0,facts});
   const sql=plan.statements.map(([text])=>text).join('\n');
@@ -279,5 +287,94 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  const live=await imported();
  const counter=await Op.execute('hold',{binding:{prepare:sql=>live.db.prepare(sql),batch:async s=>{const r=await live.db.batch(s);sqlite(live.file,"UPDATE discovery_authority SET generation=generation+500; UPDATE ratings_domain_authority SET generation=generation+30; UPDATE published_epg_authority SET watchlist_generation=watchlist_generation+1");return r;}},args:g0,now:NOW,ctx:trackedCtx()});
  assert.equal(counter.writeState,'committed','natural counters of other domains do not read as drift');
+}
+
+// ===== 7. the data rollback: hold, export through the EPG writer path, revert, release =====
+{
+ // A Letterboxd scan promoted a newer snapshot (version 2) after the release: one film replaced, one reordered. The export must carry it into the published generation.
+ const forward=async()=>{
+  const env=await imported();
+  await run(env,'hold',{generation:0,...FORWARD});await run(env,'activate',{generation:1,...FORWARD});await run(env,'release',{generation:2,...RELEASE});
+  const next=FILMS.map(f=>({id:f.id,title:f.title,year:f.year,url:f.url}));next[3]={id:'film-new',title:'A New Film',year:2024,url:'https://letterboxd.com/film/film-new/'};[next[7],next[8]]=[next[8],next[7]];
+  const published=await publishSnapshot(env.db,next,{scanId:'scan-2',observedAt:'2026-11-21T20:00:00.000Z',completedAt:'2026-11-21T20:00:30.000Z',runId:'lb-run-2'},{snapshotId:'snap-2',now:NOW});
+  assert.equal(published.ok,true,JSON.stringify(published));
+  const ptr=pointer(env.file);
+  const snap2={count:30,sha256:ptr.list_sha256,snapshotId:'snap-2',version:Number(ptr.version),revision:Number(ptr.revision)};
+  return {env,next,snap2};
+ };
+ const {env,next,snap2}=await forward();
+ assert.equal(snap2.version,2);
+ const publishedAuth=()=>rows(env.file,'SELECT generation, programme_run_id FROM published_epg_authority')[0];
+ const storedFilms=()=>JSON.parse(rows(env.file,"SELECT payload_json FROM published_epg_document WHERE programme_run_id='"+RUN+"' AND kind='watchlist' ORDER BY ordinal").map(r=>r.payload_json).join('')).films;
+ // before the hold the export is refused: the marker is d1/open
+ const exportArgs={generation:3,...snap2,run:RUN,epgGeneration:515};
+ await stop(run(env,'export-rollback',{...exportArgs,generation:2}),'state_mismatch');
+ await run(env,'hold-rollback',{generation:2,...snap2});assert.deepEqual(marker(env.file),{mode:'d1',writes:'held',generation:3});
+ // refusals change nothing
+ const before=JSON.stringify(storedFilms());
+ await stop(run(env,'export-rollback',{...exportArgs,epgGeneration:514}),'published_moved');
+ await stop(run(env,'export-rollback',{...exportArgs,revision:snap2.revision+1}),'pin_mismatch');
+ await stop(run(env,'export-rollback',{...exportArgs,sha256:'d'.repeat(64)}),'pin_mismatch');
+ await stop(run(env,'export-rollback',{...exportArgs,run:'run-other'}),'published_moved');
+ assert.equal(JSON.stringify(storedFilms()),before,'refusals wrote nothing');
+ // the export writes through the EPG writer path: one generation bump, the new list, other film fields kept
+ states.length=0;
+ const exported=await run(env,'export-rollback',exportArgs);
+ assert.equal(exported.writeState,'committed');assert.deepEqual(states,['unknown','committed']);assert.equal(exported.published.generation,516);
+ assert.deepEqual(publishedAuth(),{generation:516,programme_run_id:RUN});
+ assert.deepEqual(storedFilms().map(f=>f.id),next.map(f=>f.id),'order and membership of the snapshot');
+ assert.equal(storedFilms().find(f=>f.id==='film-0').tmdbId,'123','a field of an existing stored film is kept');
+ assert.equal(await listDigest(normalizeFilms(storedFilms())),snap2.sha256,'digest parity');
+ assert.deepEqual(rows(env.file,"SELECT film_id FROM published_epg_member WHERE programme_run_id='"+RUN+"' AND kind='watchlist' ORDER BY ordinal").map(r=>r.film_id),next.map(f=>f.id),'member rows');
+ assert.equal(rows(env.file,"SELECT payload_json FROM published_epg_document WHERE programme_run_id='"+RUN+"' AND kind='programme'")[0].payload_json.includes('watchlistCount'),true,'the programme document is untouched');
+ assert.deepEqual(marker(env.file),{mode:'d1',writes:'held',generation:3},'the export moves no marker');
+ // idempotent: an equal list at the produced generation is a receipt, nothing written
+ const again=await run(env,'export-rollback',{...exportArgs,epgGeneration:516});assert.equal(again.outcome,'already_exported');assert.equal(again.writes,false);assert.equal(publishedAuth().generation,516);
+ // the revert needs the parity at the exact generation the export produced
+ const revertArgs={generation:3,...snap2,run:RUN,epgGeneration:516};
+ await stop(Op.execute('revert-authority',{binding:asStmt(env),args:{...revertArgs,epgGeneration:515},now:NOW,ctx:trackedCtx()}),'predicate_refused');
+ sqlite(env.file,"UPDATE published_epg_member SET film_id='film-zzz' WHERE programme_run_id='"+RUN+"' AND kind='watchlist' AND ordinal=0");
+ await stop(Op.execute('revert-authority',{binding:asStmt(env),args:revertArgs,now:NOW,ctx:trackedCtx()}),'predicate_refused');assert.deepEqual(marker(env.file),{mode:'d1',writes:'held',generation:3},'a broken parity blocks the revert');
+ sqlite(env.file,"UPDATE published_epg_member SET film_id='film-0' WHERE programme_run_id='"+RUN+"' AND kind='watchlist' AND ordinal=0");
+ // a live EPG step blocks the revert
+ sqlite(env.file,"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','"+JSON.stringify({schemaVersion:1,holder:'h',expiresAt:'2026-11-21T19:00:00.000Z',released:false})+"',1,'2026-11-21T17:50:00.000Z')");
+ await stop(run(env,'revert-authority',revertArgs),'writer_active');
+ sqlite(env.file,"DELETE FROM epg_orchestration_document WHERE key='lease'");
+ const reverted=await run(env,'revert-authority',revertArgs);assert.deepEqual(reverted.marker,{mode:'epg',writes:'held',generation:4});
+ assert.deepEqual(await readAuthority(env.db),{state:'epg',writes:'held',generation:4});
+ const opened=await run(env,'release-rolled-back',{generation:4});assert.deepEqual(opened.marker,{mode:'epg',writes:'open',generation:4});
+ assert.deepEqual(await readAuthority(env.db),{state:'epg',writes:'open',generation:4},'the EPG owns the Watchlist again');
+ // the snapshots stay as inert history
+ assert.equal(rows(env.file,'SELECT COUNT(*) AS n FROM watchlist_snapshot')[0].n,2);
+ // a Letterboxd mode that is not closed blocks every rollback step
+ const open2=await forward();
+ sqlite(open2.env.file,"INSERT INTO letterboxd_sync_mode (id, mode, epoch, changed_at, revision, write_id) VALUES (1,'cloudflare',1,'2026-11-21T10:00:00.000Z',1,'w')");
+ await stop(run(open2.env,'hold-rollback',{generation:2,...open2.snap2}),'letterboxd_not_closed');
+}
+// export: failures
+{
+ const {env,snap2}=await (async()=>{
+  const e=await imported();await run(e,'hold',{generation:0,...FORWARD});await run(e,'activate',{generation:1,...FORWARD});await run(e,'release',{generation:2,...RELEASE});
+  const ptr=pointer(e.file);return {env:e,snap2:{count:30,sha256:ptr.list_sha256,snapshotId:'snap-1',version:Number(ptr.version),revision:Number(ptr.revision)}};
+ })();
+ await run(env,'hold-rollback',{generation:2,...snap2});
+ // the published list already equals the snapshot (nothing advanced): a receipt, no write
+ const args={generation:3,...snap2,run:RUN,epgGeneration:515};
+ assert.equal((await run(env,'export-rollback',args)).outcome,'already_exported');
+ // make the snapshot differ so a write is needed
+ sqlite(env.file,"UPDATE published_epg_document SET payload_json=replace(payload_json,'Film 11','Film Eleven') WHERE kind='watchlist'");
+ // an unproven transport outcome is write_uncertain and never retried
+ let attempts=0;
+ const timing={prepare:sql=>env.db.prepare(sql),batch:async()=>{attempts++;throw new D1Error('write_uncertain','response lost');}};
+ states.length=0;
+ await stop(Op.execute('export-rollback',{binding:timing,args,now:NOW,ctx:trackedCtx()}),'write_uncertain');
+ assert.equal(states.at(-1),'unknown');assert.equal(attempts,1,'no retry');
+ const cli=await Op.runWatchlistCutoverProduction({argv:['node','x','--export-rollback','--target','iptv','--confirm','export-rollback','--expect-generation','3','--expect-run',RUN,'--expect-epg-generation','515','--expect-count','30','--expect-sha256',snap2.sha256,'--expect-snapshot-id','snap-1','--expect-version',String(snap2.version),'--expect-revision',String(snap2.revision)],deps:{binding:timing},now:()=>NOW});
+ assert.equal(cli.exit,3);assert.equal(cli.result.reason,'write_uncertain');assert.equal(cli.result.retry,false);assert.equal(cli.result.writes,null);
+ // the EPG generation moves under the export: nothing is committed over the other writer
+ const racing={prepare:sql=>env.db.prepare(sql),batch:async s=>{sqlite(env.file,"UPDATE published_epg_authority SET generation=generation+1");return asStatement(()=>env.db.batch(s));}};
+ const lostCas=await stop(Op.execute('export-rollback',{binding:racing,args,now:NOW,ctx:trackedCtx()}),'write_uncertain');
+ assert.equal(rows(env.file,"SELECT payload_json FROM published_epg_document WHERE kind='watchlist' ORDER BY ordinal").map(r=>r.payload_json).join('').includes('Film Eleven'),true,'the document was not replaced over the other writer');
+ void lostCas;
 }
 console.log('watchlist cutover: ok');
