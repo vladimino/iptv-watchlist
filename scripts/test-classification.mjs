@@ -1275,6 +1275,9 @@ export const FILES={
  "prediction-start-diagnostics.mjs": {
   "suite": "core"
  },
+ "prediction-start-ledger-seal.mjs": {
+  "suite": "core"
+ },
  "prediction-step-timing.mjs": {
   "suite": "split",
   "note": "The logical-clock timer contract stays in core. Real hrtime overhead is scenario prediction-step-timing-overhead."

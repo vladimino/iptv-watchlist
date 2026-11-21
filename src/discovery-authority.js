@@ -183,7 +183,11 @@ export async function readAdmissionsById(env,ids){
  const wanted=[...new Set((ids||[]).map(String).filter(Boolean))];
  const opened=await readAuthority(env);
  if(!opened.ready)return {handled:false};
- if(opened.transfer==='loading'&&!await loadingIsLedgerSeal(env))throw failed('discovery_incomplete');
+ let sealing=false;
+ if(opened.transfer==='loading'){
+  if(!await loadingIsLedgerSeal(env))throw failed('discovery_incomplete');
+  sealing=true;
+ }
  const films=new Map();
  for(let at=0;at<wanted.length;at+=ADMISSION_IDS_PER_QUERY){
   const slice=wanted.slice(at,at+ADMISSION_IDS_PER_QUERY);
@@ -193,6 +197,12 @@ export async function readAdmissionsById(env,ids){
    films.set(String(row.film_id),film);
   }
  }
+ // AIR-574: the same bounded close as `routeRead` and `readFilmAdmission`. The slices are separate statements, so a catalog replacement (or an ABA through `loading` back to `committed`, which moves the
+ // transfer epoch) or a programme change between them must not return a transient absence as a genuine one: a caller settles an absent film out of the persisted queue. Generation-only progress
+ // (continuation, status, Workflow writes, seal batches) is not a fence here, and an ordinary seal stays open.
+ const closedGate=await readAuthority(env);
+ closeReadFence(opened,closedGate,{sealing,generationFence:false});
+ if(sealing&&!await loadingIsLedgerSeal(env))throw failed('discovery_fence');
  return {handled:true,films};
 }
 export function ownsKey(key){
