@@ -3,11 +3,12 @@
 // there is no second schema and no second writer. Without a ready repository the phase fails closed (`disabled`, nothing fetched, nothing committed).
 //
 // Repository contract (AIR-569 implements it; tests use a mock):
-//   ready(env)                          -> {ready: boolean}
-//   drainEffects(env, {now})            -> {drained: boolean, code?}   causal effects of promoted snapshots, oldest version first (decision 1)
-//   commitScan(env, {members, scan})    -> {outcome: 'committed'|'no_change', version, lastSuccessAt, total, baseline, added[], removed[]}
-//   recordAttempt(env, {outcome, at, slotKey, code})  -> void          `last_attempt_*` only; never lowers last_success_at
-//   admitNew(env, {limit, now})         -> {resolved, pending}         the bounded admission ledger step (decision 5), optional
+//   ready(ctx)                          -> {ready: boolean}
+//   drainEffects(ctx, {now})            -> {drained: boolean, code?}   causal effects of promoted snapshots, oldest version first (decision 1)
+//   commitScan(ctx, {members, scan})    -> {outcome: 'committed'|'no_change', version, lastSuccessAt, total, baseline, added[], removed[]}
+//   recordAttempt(ctx, {outcome, at, slotKey, code})  -> void          `last_attempt_*` only; never lowers last_success_at
+//   admitNew(ctx, {limit, now})         -> {resolved, pending}         the bounded admission ledger step (decision 5), optional
+// `ctx` is the phase context ({env, slotKey, runId, epoch, now, deadline}); the repository adapter reads the Workflow epoch from it.
 // `fetchPage(url)` returns the page HTML or throws an error with `status` (403, 429, 5xx) for the Letterboxd HTTP outcome; `parse(html)` returns
 // {films:[{id,...}], total, next}. Neither is created here: the cutover injects the real ones, tests inject fixtures.
 export const MAX_PAGES = 100;
@@ -56,21 +57,21 @@ export function watchlistPhase({repository, fetchPage, parse, firstUrl, username
   return {
     async run(ctx) {
       const at = () => new Date(ctx.now()).toISOString();
-      const ready = repository && typeof repository.ready === 'function' ? await repository.ready(ctx.env).catch(() => ({ready: false})) : {ready: false};
+      const ready = repository && typeof repository.ready === 'function' ? await repository.ready(ctx).catch(() => ({ready: false})) : {ready: false};
       if (!ready.ready) return {done: true, outcome: 'disabled', at: at(), reason: 'watchlist_repository_absent'};
-      const attempt = async (outcome, code) => { try { await repository.recordAttempt(ctx.env, {outcome, at: at(), slotKey: ctx.slotKey, code: code ?? null}); } catch { /* the slot Event still reports the outcome */ } };
+      const attempt = async (outcome, code) => { try { await repository.recordAttempt(ctx, {outcome, at: at(), slotKey: ctx.slotKey, code: code ?? null}); } catch { /* the slot Event still reports the outcome */ } };
       // Pending causal effects of earlier versions first, oldest first. A persistent failure is a visible outcome, not a silent skip.
-      const drain = await repository.drainEffects(ctx.env, {now: ctx.now()}).catch(() => ({drained: false, code: 'effects_failed'}));
+      const drain = await repository.drainEffects(ctx, {now: ctx.now()}).catch(() => ({drained: false, code: 'effects_failed'}));
       if (!drain.drained) { await attempt('error', drain.code || 'effects_pending'); return {done: true, outcome: 'error', at: at(), reason: drain.code || 'effects_pending'}; }
       let scanned;
       try { scanned = await scanWatchlist({fetchPage, parse, firstUrl, username}); }
       catch (error) { const failure = classifyScanFailure(error); await attempt(failure.outcome, failure.reason); return {done: true, outcome: failure.outcome, at: at(), reason: failure.reason}; }
       let committed;
-      try { committed = await repository.commitScan(ctx.env, {members: scanned.members, scan: {scanId: ctx.runId + ':watchlist', slotKey: ctx.slotKey, runId: ctx.runId, observedAt: at()}}); }
+      try { committed = await repository.commitScan(ctx, {members: scanned.members, scan: {scanId: ctx.runId + ':watchlist', slotKey: ctx.slotKey, runId: ctx.runId, observedAt: at()}}); }
       catch (error) { await attempt('error', String(error?.code || 'commit_failed').slice(0, 60)); return {done: true, outcome: 'error', at: at(), reason: String(error?.code || 'commit_failed').slice(0, 60)}; }
       // Admission of new ids is a separate, bounded, deduplicated step: its failure never undoes the committed snapshot (decision 5).
       let admission = null;
-      if (typeof repository.admitNew === 'function') admission = await repository.admitNew(ctx.env, {limit: 3, now: ctx.now()}).catch(() => ({resolved: 0, pending: null, error: true}));
+      if (typeof repository.admitNew === 'function') admission = await repository.admitNew(ctx, {limit: 3, now: ctx.now()}).catch(() => ({resolved: 0, pending: null, error: true}));
       const outcome = committed.outcome === 'committed' ? 'committed' : 'no_change';
       return {done: true, outcome, at: at(), snapshotVersion: committed.version ?? null, lastSuccessAt: committed.lastSuccessAt ?? at(), total: committed.total ?? scanned.total, baseline: committed.baseline === true,
         added: committed.added || [], removed: committed.removed || [], addedCount: (committed.added || []).length, removedCount: (committed.removed || []).length, admission};

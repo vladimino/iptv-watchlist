@@ -46,7 +46,8 @@ export function classifyThrown(error) {
   return 'step_failed';
 }
 // The guard statement: ok = 0 (CHECK ok = 1) aborts the whole batch when the mode row no longer admits this epoch.
-const fenceGuard = (env, epoch) => dbOf(env).prepare("INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id = 1 AND mode = 'cloudflare' AND epoch = ?) THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok").bind(epoch);
+export const FENCE_GUARD_SQL = "INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id = 1 AND mode = 'cloudflare' AND epoch = ?) THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok";
+const fenceGuard = (env, epoch) => dbOf(env).prepare(FENCE_GUARD_SQL).bind(epoch);
 
 const emptyMode = () => ({mode: 'external', target: null, from: null, epoch: 0, drain: null, quarantine: null, changedAt: null, revision: 0, writeId: null, stored: false});
 export async function readMode(env) {

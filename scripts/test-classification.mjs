@@ -1365,6 +1365,9 @@ export const FILES={
  "letterboxd-sync-watchlist.mjs": {
   "suite": "core"
  },
+ "letterboxd-sync-repository.mjs": {
+  "suite": "core"
+ },
  "ratings-queue-v2.mjs": {
   "suite": "core"
  },
