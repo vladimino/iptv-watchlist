@@ -7,6 +7,7 @@ EPG discovery drops obvious series episodes and TV shows before any TMDB Movies 
 | Step | Input | Effect |
 | --- | --- | --- |
 | EPG scan (`scanEPG`) | Raw programme `<title>` and the programme XML | A programme with one reliable watchlist/catalog match is never screened. Otherwise a screened programme is counted in `filteredNonMovies` and does not enter the discovery ledger. |
+| Channel policy (`scanEPG`, before the title is read) | `epg_channel_policy` map, when `EPG_CHANNEL_POLICY` is `on` | A programme on a `deny_all` channel is dropped before Film matching, so neither a Film show nor a screening count nor a candidate exists for it. On `known_only` only a reliably identified Film is kept; every other programme is skipped, so the title rule never sees it. See [Channel policy](candidate-discovery.md#channel-policy-in-the-epg-scan). |
 | Discovery cheap pass (`resolveDiscoveryChunk`) | Ledger candidate title | Stores `{status:'excluded_nonfilm', reason}` for a screened candidate. A `verified` decision or a candidate with `confirmedTmdbId` is never screened. |
 | Actionability (`resolutionActionability`) and counts (`discoveryCounts`) | Candidate and stored decision | A candidate the current rule screens is not actionable and counts as `rejectedNonfilm`. |
 | Ledger canonicalization | Merged candidate | A verified decision is carried over first; otherwise the current rule decides. |

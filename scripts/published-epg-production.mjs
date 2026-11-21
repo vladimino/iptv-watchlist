@@ -331,6 +331,7 @@ export function trackProductionWrites(adapter, ctx){
   describe:()=>adapter.describe(),
   get:(sql,params)=>adapter.get(sql,params),
   all:(sql,params)=>adapter.all(sql,params),
+  readBatch:statements=>adapter.readBatch(statements),
   run:(sql,params)=>attempt(()=>adapter.run(sql,params)),
   executeRendered:statements=>attempt(()=>adapter.executeRendered(statements)),
  };

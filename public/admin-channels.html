@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Каналы</title>
-  <meta name="description" content="Страница владельца: каналы EPG, категории, M3U-импорт с предпросмотром и ручные политики. Политика пока только сохраняется, в EPG не применяется.">
+  <meta name="description" content="Страница владельца: каналы EPG, категории, M3U-импорт с предпросмотром и ручные политики.">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/admin.css">
@@ -17,9 +17,9 @@
     <a class="return-home" data-return-home href="/">На главную</a>
     <section class="page-heading">
       <div>
-        <p class="eyebrow">ВЛАДЕЛЕЦ · ПОЛИТИКА СОХРАНЯЕТСЯ, В EPG НЕ ПРИМЕНЯЕТСЯ</p>
+        <p class="eyebrow" id="channels-eyebrow">ВЛАДЕЛЕЦ · СОСТОЯНИЕ ВКЛЮЧЕНИЯ ПОЛИТИКИ ЗАГРУЖАЕТСЯ</p>
         <h1>Каналы</h1>
-        <p class="admin-intro">Категория канала и политика сканирования: <b>deny_all</b>, <b>discover</b> или <b>known_only</b>. Приоритет: ручная политика, затем категория владельца, затем категория провайдера, иначе known_only. Сохранение и импорт не запускают EPG, Discovery и TMDB: изменения вступят в силу только со следующей естественной генерацией EPG после отдельно одобренного включения.</p>
+        <p class="admin-intro">Категория канала и политика сканирования: <b>deny_all</b>, <b>discover</b> или <b>known_only</b>. Приоритет: ручная политика, затем категория владельца, затем категория провайдера, иначе known_only. Сохранение и импорт не запускают EPG, Discovery и TMDB: запись только меняет сохранённую политику, а момент её применения указан в состоянии ниже.</p>
       </div>
     </section>
     <div class="admin-workspace">

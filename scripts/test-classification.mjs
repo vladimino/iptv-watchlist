@@ -613,6 +613,9 @@ export const FILES={
  "epg-channel-d1.mjs": {
   "suite": "core"
  },
+ "epg-channel-policy.mjs": {
+  "suite": "core"
+ },
  "epg-checkpoint-production.mjs": {
   "suite": "core"
  },
@@ -623,6 +626,12 @@ export const FILES={
   "suite": "core"
  },
  "migration-index-docs.mjs": {
+  "suite": "core"
+ },
+ "watchlist-bootstrap.mjs": {
+  "suite": "core"
+ },
+ "watchlist-cutover.mjs": {
   "suite": "core"
  },
  "migration-statements.mjs": {
