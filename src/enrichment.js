@@ -1063,12 +1063,16 @@ async function deliverPendingEvents(env,now=Date.now()){
 // AIR-548 (ADR 0180): a real `batch_start` that a live runner lease turns away leaves ONE neutral Event of the refused request, `presentation: "batch_v2_skipped"`. It is not a run: no runId of its own, no
 // counts, no lease, queue or film is touched for it. Its identity is the request's `X-Request-Id` (the id is stable under replay and different for another request, so no two requests are merged by time or
 // guess), and it is parked create-only in `enrichment/stop-events/skipped-<requestId>.json`, so a repeated write reads the first record back (same `at`, same journal key) and a failed journal write is retried
-// by the existing outbox. Best-effort by construction: it never throws and never changes the `already_running` answer. Only `already_running` is recorded; `409` refusals, `noop`, `catalog_held` and the rest are not.
+// by the existing outbox. Best-effort by construction: it never throws and never changes the `already_running` answer. `already_running` and (AIR-575, ADR 0190) `catalog_held` are recorded; `409` refusals, `noop` and the rest are not.
 const BATCH_V2_SKIPPED='batch_v2_skipped';
 const SKIPPED_EVENT_PREFIX=STOP_EVENT_PREFIX+'skipped-';
-function skippedStartEvent({requestId,body,holder,at}){
- const event={id:'enrichment-skipped-'+requestId,type:'enrichment',at,stage:'skipped',protocol:BATCH_PROTOCOL,presentation:BATCH_V2_SKIPPED,reason:'already_running',requestId};
+// AIR-575 (ADR 0190): the same neutral Event also records a real start the Worker refused with `prediction_catalog_held` (`reason: "catalog_held"`, `cause` the Discovery code that refused the read). It has no holder.
+function skippedStartEvent({requestId,body,holder,at,reason='already_running',cause=null}){
+ const held=reason==='catalog_held';
+ const event={id:'enrichment-skipped-'+requestId,type:'enrichment',at,stage:'skipped',protocol:BATCH_PROTOCOL,presentation:BATCH_V2_SKIPPED,reason:held?'catalog_held':'already_running',requestId};
+ if(held&&CATALOG_HELD_CODES.includes(cause))event.cause=cause;
  if(body?.trigger==='scheduled'||body?.trigger==='manual')event.trigger=body.trigger;
+ if(held)return event;
  if(isText(holder?.runId,100)&&SAFE_LOG_ID.test(holder.runId))event.holderRunId=holder.runId;
  if(Number.isFinite(holder?.expiresAt)){const age=Math.round(Date.parse(at)-(holder.expiresAt-RUNNER_LEASE_TTL));if(Number.isFinite(age)&&age>=0&&age<=7*86400000)event.holderAgeMs=age;}
  return event;
@@ -1084,14 +1088,14 @@ async function clearEventOutbox(env,key){
 // item and marks it). If the index cannot be written the record is parked and delivered once; it is deleted again only when a `head` of the journal key proves the item absent. An unknown outcome
 // (the head fails too) keeps the record, which is replay-safe. The Event is lost only when the journal AND the index are both down (a stated limitation, ADR 0180). A park that fails after the index entry writes
 // nothing: the entry, whose record is `absent`, leaves the index at the next sweep.
-async function recordSkippedStart(env,{requestId,body,holder}){
+async function recordSkippedStart(env,{requestId,body,holder,reason,cause}){
  try{
   const id=safeRequestId(requestId)||crypto.randomUUID(),key=SKIPPED_EVENT_PREFIX+id+'.json';
   let record=await loadJSON(env,key);
   if(record?.delivered)return true;
   const indexed=await noteEventOutbox(env,key),created=!record;
   if(!record){
-   record={event:skippedStartEvent({requestId:id,body,holder,at:new Date().toISOString()})};
+   record={event:skippedStartEvent({requestId:id,body,holder,reason,cause,at:new Date().toISOString()})};
    try{const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key)||record;}
    catch{return false;}
   }
@@ -2779,8 +2783,18 @@ async function priorityOnlyRebaseCause(env,pre,again){
 // What a start did, for the step-timing line: counters only (no ids, keys or payloads). `tally` is one request's own object.
 async function batchStartRoute(env,body,requestId){
  const tally={preflights:0,refreshRounds:0,scannedFilms:0,settledFilms:0};
- try{return await batchStartWork(env,body,requestId,tally);}
+ try{const response=await batchStartWork(env,body,requestId,tally);await recordCatalogHeldStart(env,{body,requestId,response});return response;}
  finally{noteStep(env,()=>tally);}
+}
+// AIR-575 (ADR 0190). Every real start the Worker refuses with HTTP 503 `prediction_catalog_held` (the global gate, the queue refresh, the revalidation under the lease and the persist step all answer the same body)
+// leaves one neutral skipped Event of that request, recorded at this single exit so no refusal path can be missed or counted twice. A dry run writes nothing. Best effort: it never throws and never changes the 503.
+async function recordCatalogHeldStart(env,{body,requestId,response}){
+ try{
+  if(body?.dryRun===true||response?.status!==503)return;
+  const data=await response.clone().json();
+  if(data?.code!=='prediction_catalog_held'||!CATALOG_HELD_CODES.includes(data.cause))return;
+  await recordSkippedStart(env,{requestId,body,reason:'catalog_held',cause:data.cause});
+ }catch{/* the refusal is unchanged */}
 }
 // ADR 0188. A keyed real start (invocationKey present, not a dry run) claims the runner lease before its heavy preflights and joins its own live run when the same invocation repeats the
 // start. A start without a key, and every dry run, takes the unchanged path. The key is reduced to a hash here and never travels further: no log, row or diagnostic carries it.
