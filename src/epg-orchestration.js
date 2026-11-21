@@ -103,6 +103,12 @@ const EpgOrchestration=(()=>{
   if(code==='epg_step_fenced'&&error?.detail==='lease_expired')return 'step_lease_expired';
   if(code==='published_epg_fence'||code==='epg_step_fenced')return 'epoch_mismatch';
   if(code==='epg_step_unreadable')return 'd1_unavailable';
+  // ADR 0185: a stale writer, an unreadable or malformed checkpoint and an unknown write outcome are never retried blind.
+  if(code==='epg_checkpoint_conflict')return 'epoch_mismatch';
+  if(code==='epg_checkpoint_unavailable')return 'd1_unavailable';
+  if(code==='epg_checkpoint_malformed')return 'checkpoint_malformed';
+  if(code==='epg_checkpoint_indeterminate')return 'evidence_unreadable';
+  if(code==='epg_checkpoint_writes_held')return 'authority_held';
   if(code==='discovery_seal_unfinished')return 'evidence_contradictory';
   if(code==='published_epg_unavailable'||code==='write_contention')return 'd1_unavailable';
   if(code==='published_epg_not_authoritative')return 'authority_held';

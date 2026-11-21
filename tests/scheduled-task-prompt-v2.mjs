@@ -320,3 +320,15 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  const rep=buildReport([p1,p2]);assert.equal(rep.perSize[0].comparableFilms,m.films.length);assert.equal(rep.perSize[1].comparableFilms,0,'nothing of the stale pass is compared');assert.equal(rep.perSize[1].excluded.staleProfile,2);assert.equal(rep.perSize[1].stoppedReason,'profile_moved');assert.ok(rep.unknown.includes('profile_moved'));
 }
 console.log('scheduled-task-prompt-v2 ok');
+
+// AIR-560: the S10 trial candidate is the canonical S5 prompt with only manifestSize=5 -> 10 (all occurrences); nothing is installed.
+{
+ const s10doc=fs.readFileSync('docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2-s10-candidate.md','utf8');
+ const m=s10doc.match(/---BEGIN PROMPT S10---\n([\s\S]*?)\n---END PROMPT S10---/);assert.ok(m,'S10 candidate block present');
+ const s10=m[1],hdr=s10doc.match(/\*\*Text below:\*\* (\d+) characters, (\d+) UTF-8 bytes, SHA-256 `([0-9a-f]{64})`/);
+ assert.ok(hdr&&s10.length===Number(hdr[1])&&Buffer.byteLength(s10,'utf8')===Number(hdr[2])&&sha(s10)===hdr[3],'S10 header matches text');
+ assert.equal(prompt.split('manifestSize=5').length-1,3,'S5 has three manifestSize=5 occurrences');
+ assert.equal(s10,prompt.split('manifestSize=5').join('manifestSize=10'),'S10 differs from S5 only by manifestSize');
+ assert.ok(s10.includes('generationSize=1')&&s10.includes('submitBatchSize=5')&&!s10.includes('manifestSize=5'),'other batch params unchanged');
+ assert.ok(s10doc.includes(sha(prompt)),'S5 rollback hash recorded');
+}

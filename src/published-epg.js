@@ -497,6 +497,35 @@ async function stageCommit(db,spec,options){
  return readAuthority(db);
 }
 
+// ADR 0185. The EPG checkpoint marker is `d1` when the checkpoint rows are the authority of `stage=complete`. Only then the certificate also requires the checkpoint
+// to be complete with its queue attempted (`epg_checkpoint_run.queue_attempted`), so no route can certify before its queue attempt. A verified absence of the
+// tables (the checkpoint migration is not applied) is false; an unreadable answer throws.
+async function checkpointD1(db){
+ let row;
+ try{row=await one(db,'SELECT mode FROM epg_checkpoint_authority WHERE id=1');}
+ catch(error){if(/no such table/i.test(String(error?.message||error)))return false;throw failed('published_epg_unavailable',error);}
+ return row?.mode==='d1';
+}
+const CHECKPOINT_COMPLETE_SQL=" AND EXISTS (SELECT 1 FROM epg_checkpoint_run WHERE id=1 AND run_id=? AND stage='complete' AND queue_attempted=1)";
+const CERTIFY_UPDATE_SQL="UPDATE published_epg_authority SET finalized_run_id=?, finalized_at=COALESCE(finalized_at,?) WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=? AND madrid_run_key IS ? AND (finalized_run_id IS NULL OR finalized_run_id=?)";
+// ADR 0185 decision 4. The certificate update and the pause clear WITHOUT their own fences and WITHOUT the abort-on-mismatch statement after the update, for
+// the single completion batch of the D1 checkpoint (which carries the mode-revision and step-lease fences itself). The update is conditional: when it matches
+// nothing (the pointer is on another run, the Madrid day differs) the batch still commits the completion and the certificate stays owed.
+// The caller proves the column is present (`certPresent`) and the pause table (`pause`) before it asks.
+export function certifyUpdateStatements(input={}){
+ const id=typeof input.programmeRunId==='string'?input.programmeRunId:'';
+ if(!id)throw failed('published_epg_programme');
+ const day=/^\d{4}-\d{2}-\d{2}$/.test(input.madridRunKey||'')?input.madridRunKey:null;
+ if(!day)throw failed('published_epg_certify_day');
+ const stamp=new Date(input.now??Date.now()).toISOString();
+ return [
+  [CERTIFY_UPDATE_SQL+CHECKPOINT_COMPLETE_SQL,[id,stamp,id,day,id,id]],
+  ...(input.pause===false?[]:[[PAUSE_CLEAR_CERT_SQL,[id]]]),
+ ];
+}
+export async function certificateColumnPresent(env){const db=database(env);if(!db)throw failed('published_epg_unavailable');try{return await certPresent(db);}catch(error){throw failed('published_epg_unavailable',error);}}
+export async function pauseTablePresent(env){const db=database(env);if(!db)throw failed('published_epg_unavailable');try{return await pausePresent(db);}catch(error){throw failed('published_epg_unavailable',error);}}
+
 // ADR 0175. The completion certificate of the published run, read only. `column: 'absent'` is a verified absence (today's behaviour); an unreadable
 // answer throws, so no caller reads it as absence.
 export async function readCertificate(env){
@@ -527,11 +556,12 @@ export async function certifyRun(env,input={}){
  const day=/^\d{4}-\d{2}-\d{2}$/.test(input.madridRunKey||'')?input.madridRunKey:null;
  if(!day)throw failed('published_epg_certify_day');
  const pause=await pausePresent(db);
+ const checkpoint=await checkpointD1(db);
  await fenced(db,[
   ...epgFenceStatements(fence),
   ["UPDATE published_epg_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM epg_orchestration_document WHERE key='lease' AND json_extract(body,'$.holder')=? AND json_extract(body,'$.modeRevision') IS ? AND COALESCE(json_extract(body,'$.released'),0)=0 AND json_extract(body,'$.expiresAt')>?)=1 THEN 1 ELSE 0 END WHERE id=1",[step.holder,step.modeRevision??null,input.leaseBound]],
   [FENCE_SQL,[]],
-  ['UPDATE published_epg_authority SET finalized_run_id=?, finalized_at=COALESCE(finalized_at,?) WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND programme_run_id=? AND madrid_run_key IS ? AND (finalized_run_id IS NULL OR finalized_run_id=?)',[id,stamp,id,day,id]],
+  [CERTIFY_UPDATE_SQL+(checkpoint?CHECKPOINT_COMPLETE_SQL:''),checkpoint?[id,stamp,id,day,id,id]:[id,stamp,id,day,id]],
   [FENCE_SQL,[]],
   ...(pause?[[PAUSE_CLEAR_CERT_SQL,[id]]]:[]),
  ]);

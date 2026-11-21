@@ -226,6 +226,8 @@ sequenceDiagram
     Note over EPG,D1: Hourly ensure certifies a complete but uncertified run. No Workflow, no control or sync.json write.
 ```
 
+**Accepted design (dormant, [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md)):** if the run checkpoint moves to D1 and its marker is `d1`, the two steps "sync.json stage complete in R2" and "Certify batch" in the diagram above become one fenced batch (the certificate stays conditional and non-aborting), and the crash window between them no longer exists for runs completed in that mode. The single-call completion route would use the same operation and attempt the queue refresh before it. The diagram above is unchanged because it describes current behavior; the hourly repair `certifyComplete` stays for runs completed before an activation.
+
 ### Seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), implemented by AIR-484; production acceptance awaits a natural run)
 
 **State:** the diagram is implemented in `src/epg-orchestration.js`; it has not yet run in production. The successor is the next series id (a terminal Workflow id cannot be created again) and is **not** claimed to get a fresh isolate. After ADR 0145 the producing instance stores `epg/seal/<runId>/publication.json` (no catalog) with `run.seal.layout: 2` and `publicationEtag` beside the ledger `etag`, then saves `sync.json` at `stage: seal`. A leftover `payload.json` run is finished by the legacy reader. A pending claim, even of a previous Madrid day, takes priority over today's start.

@@ -64,7 +64,7 @@ const d1Db=(film='open',options={})=>{const made=database(film,SEED,options);sql
 
 // ===== 1. the migration =====
 const m29='0029_started_authority.sql';
-assert.ok(names.includes(m29)&&names.at(-1)===m29,'0029 is the latest migration');
+assert.ok(names.includes(m29),'0029 exists');
 const v28=path.join(root,'v28.sqlite');sqlite(v28,names.filter(name=>name<m29).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
 assert.equal(rows(v28,'SELECT version FROM schema_contract WHERE id=1')[0].version,28);
 {
