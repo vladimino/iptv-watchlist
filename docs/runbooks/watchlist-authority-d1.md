@@ -38,4 +38,4 @@ Staged rows of an attempt that was never promoted are garbage of an interrupted 
 
 ## Boundary
 
-The EPG run of a `d1` cutover carries `watchlistSnapshot` and skips the scan, retention, removal hand-over and `watchlist` Event; a run created before a cutover finishes with today's tail because the decision is keyed on the run, not on the marker. The root `watchlist.json` mirror writer, the Events and the Workflow stay with AIR-570 and AIR-571.
+The EPG run of a `d1` cutover carries `watchlistSnapshot` and skips the scan, retention, removal hand-over and `watchlist` Event; a run created before a cutover finishes with today's tail because the decision is keyed on the run, not on the marker. With the marker `d1` the EPG no longer writes or compares the root `watchlist.json` mirror (a regression test pins it); the writer of that mirror, the Events and the Workflow stay with AIR-570 and AIR-571. A pinned run starts at the `epg` stage and never calls Letterboxd, and the prediction queue reads the current snapshot membership.

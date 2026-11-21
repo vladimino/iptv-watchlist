@@ -148,4 +148,38 @@ async function call(pathname,made,{fail=null,failBatch=null,message='D1 DB is ov
  const p=await call('/api/programme',epgMade,{after:async text=>{if(!flipped&&/owner_review/i.test(text)){flipped=true;d1Standin(epgMade.file).sql("UPDATE watchlist_authority SET mode='d1',generation=1");}}});
  assert.equal(flipped,true);assert.equal(p.status,409,'epg -> d1 during the request is never answered from the EPG list');
 }
+
+// ===== 6. review: the EPG never overwrites the standalone root watchlist.json mirror in d1 mode =====
+{
+ const standalone={updatedAt:PAST,source:'watchlist_authority',snapshotId:'snap',snapshotVersion:9,lastSuccessAt:PAST,films:[member('w1','Hot Film'),member('new1','New Film')]};
+ const programme={runId:RUN2,updatedAt:PAST,watchlistCount:1,films:[w1],stats:{}};
+ const epgCopy={updatedAt:PAST,films:[w1]};
+ const rootOf=bucket=>JSON.parse(bucket.objects.get('watchlist.json').text);
+ const generationKey='epg/generations/'+RUN2+'/watchlist.json';
+ // d1: the root mirror is left alone, the generation-addressed copy is written, the call still succeeds, and a repair finds nothing to write
+ const made=await arrange();
+ put(made.bucket,'watchlist.json',standalone);
+ const env={DB:made.db,BUCKET:made.bucket};
+ assert.equal(await PublishedEpg.writeMirrors(env,{programmeRunId:RUN2,programme,watchlist:epgCopy,phase:'published'}),true);
+ assert.equal(rootOf(made.bucket).source,'watchlist_authority','the EPG did not overwrite the independent root mirror');assert.equal(rootOf(made.bucket).snapshotVersion,9);
+ assert.ok(made.bucket.objects.has(generationKey),'the generation-addressed copy stays EPG-owned');
+ assert.deepEqual(JSON.parse(made.bucket.objects.get(generationKey).text),epgCopy);
+ const repaired=await PublishedEpg.repairMirrors(env);
+ assert.equal(rootOf(made.bucket).snapshotVersion,9,'the hourly repair does not touch it either');assert.equal(typeof repaired.mirrored,'boolean');
+ // an unreadable marker fails closed: the root write is skipped
+ const flaky=d1Standin(made.file,{onQuery:async text=>{if(/FROM watchlist_authority/.test(text))throw new Error('D1 DB is overloaded');}});
+ await PublishedEpg.writeMirrors({DB:flaky,BUCKET:made.bucket},{programmeRunId:RUN2,programme,watchlist:epgCopy,phase:'published'});
+ assert.equal(rootOf(made.bucket).snapshotVersion,9,'a storage error never lets the EPG write the root mirror');
+ // marker epg (and the tables absent): today's behavior, the EPG writes the root mirror
+ const legacy=await arrange({marker:'',snapshot:false});
+ put(legacy.bucket,'watchlist.json',standalone);
+ assert.equal(await PublishedEpg.writeMirrors({DB:legacy.db,BUCKET:legacy.bucket},{programmeRunId:RUN2,programme,watchlist:epgCopy,phase:'published'}),true);
+ assert.deepEqual(rootOf(legacy.bucket),epgCopy,'marker epg: the EPG owns the root mirror, unchanged');
+ const noTables=path.join(root,'w-notables.sqlite');fs.copyFileSync(scenario.dbFile,noTables);
+ const old=d1Standin(noTables);old.sql("DROP TABLE watchlist_admission_pending;DROP TABLE watchlist_effect;DROP TABLE watchlist_change;DROP TABLE watchlist_member;DROP TABLE watchlist_snapshot;DROP TABLE watchlist_staging;DROP TABLE watchlist_current;DROP TABLE watchlist_cas;DROP TABLE watchlist_authority;");
+ const bare=new Bucket();
+ await PublishedEpg.publishGeneration({DB:old,BUCKET:bare},{programmeRunId:RUN2,phase:'published',expectedProgrammeRunId:'22222222-2222-4222-8222-222222222222',programme,watchlist:epgCopy},{now:NOW});
+ assert.equal(await PublishedEpg.writeMirrors({DB:old,BUCKET:bare},{programmeRunId:RUN2,programme,watchlist:epgCopy,phase:'published'}),true);
+ assert.deepEqual(rootOf(bare),epgCopy,'tables absent: the EPG owns the root mirror, unchanged');
+}
 console.log('watchlist-routes: ok');

@@ -1191,6 +1191,13 @@ async function composeWatchlistRead(env,legacy,programme=null,box=null){
  await watchlistStill(env,{gate});
  return doc;
 }
+// ADR 0186: the prediction queue's membership (priority and hot/cold classification) is the CURRENT Watchlist snapshot when the marker is `d1`; programme and show facts stay with the pinned generation.
+// null = the marker is not `d1`: the caller keeps the generation's membership. The same refusals as every reader (held, closed, absent, malformed); read-only, it starts no Discovery or EPG writer.
+async function watchlistQueueMembership(env,source){
+ const legacy={updatedAt:source?.updatedAt??null,films:Array.isArray(source?.films)?source.films:[]};
+ const doc=await composeWatchlistRead(env,legacy,source,null);
+ return doc===legacy?null:{films:doc.films};
+}
 async function beginSync(env){
  // ADR 0185: every attempt has an id and a start time taken before the fetch; the ingest status is ordered by them, not by when an attempt finishes.
  const attempt={id:crypto.randomUUID(),startedAt:new Date().toISOString()};
@@ -1215,7 +1222,8 @@ async function beginSync(env){
  if(films.size!==total)throw new Error(`Incomplete watchlist: ${films.size}/${total}`);
  const verify=parseWatchlist(await getHTML(sources.watchlist));if(verify.total!==total||verify.films.some((f,i)=>f.id!==[...films.values()][i]?.id))throw new Error('Watchlist changed during synchronization; retry');
  }
- const working=await MetadataCache.loadMetadataWorkingSet(env);const cache=working.records;const now=Date.now();const all=[...films.values()].map(f=>MetadataCache.mergeWatchlistFilm(f,cache[f.id]));const pending=all.filter(f=>MetadataCache.metadataPending(f,now)).map(f=>f.id);
+ const working=await MetadataCache.loadMetadataWorkingSet(env);const cache=working.records;const now=Date.now();const all=[...films.values()].map(f=>MetadataCache.mergeWatchlistFilm(f,cache[f.id]));// ADR 0186: the metadata stage fetches every not-fresh member's Letterboxd page. A run pinned to a Watchlist snapshot never does: it starts at `epg`, and the canonical metadata and admission path belongs to the Letterboxd Sync (AIR-570).
+ const pending=snapshotPin?[]:all.filter(f=>MetadataCache.metadataPending(f,now)).map(f=>f.id);
  const gate=await ratingsGate(env);
  if(gate.active&&current)await flushRemovalHandover(env,current);
  const carried=!gate.active&&current?{...(current.removalRefs?{removalRefs:current.removalRefs}:{}),...(current.removalLookups?{removalLookups:current.removalLookups}:{})}:{};
@@ -2267,7 +2275,7 @@ async function sealPublishStep(env,run,lease,deadline=Infinity){
   {name:'copy',phase:'publish_copy',work:async()=>{try{await copyEpgGeneration(env,run.runId);return 'ok';}catch{return 'failed';}}},
   {name:'intent',phase:'publish_intent',work:async()=>{
    await queueCommittedDiscovery(env,run);
-   if(run.seal.units.mirrors!=='ok')await saveJSON(env,'watchlist.json',{updatedAt:report?.updatedAt,films:payload.watchlist?.films||run.watchlist});
+   if(run.seal.units.mirrors!=='ok'&&!run.watchlistSnapshot)await saveJSON(env,'watchlist.json',{updatedAt:report?.updatedAt,films:payload.watchlist?.films||run.watchlist});
    await saveJSON(env,'uncertain.json',{updatedAt:report?.updatedAt,items:payload.uncertain});
    return 'ok';
   }},
@@ -2575,7 +2583,7 @@ async function epgSync(env,run){
  if(await sealedPublishAvailable(env)){const publication=await PublishedEpg.currentGeneration(env);if(publication)return await tracedPhase(run.runId,'seal_stage',()=>stageSealedGeneration(env,run,{holder:discoveryHolder,meta:{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist,uncertain:result.uncertain,publication}));}
  let published;try{published=await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,discoveryHolder,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);
- if(!published?.authoritative||!published.mirrored)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
+ if((!published?.authoritative||!published.mirrored)&&!run.watchlistSnapshot)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
 }
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {

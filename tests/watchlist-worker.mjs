@@ -27,7 +27,7 @@ const bucket={
  list:async()=>({objects:[],truncated:false}),
 };
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,WeakMap,JSON,TextEncoder,TextDecoder,Uint8Array,atob,encodeURIComponent,decodeURIComponent,crypto:webcrypto,console:{...console,log:()=>{}},setTimeout});
-vm.runInContext("globalThis.MetadataCache={loadMetadataWorkingSet:async()=>({records:{}}),mergeWatchlistFilm:(film,cached)=>({...film,...(cached||{})}),metadataPending:()=>false};",context);
+vm.runInContext("globalThis.MetadataCache={loadMetadataWorkingSet:async()=>({records:{}}),mergeWatchlistFilm:(film,cached)=>({...film,...(cached||{})}),metadataPending:()=>globalThis.__pending===true};",context);
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);vm.runInContext(fs.readFileSync('src/sources.js','utf8'),context);
 vm.runInContext(scoped('src/epg-checkpoint-d1.js','EpgCheckpointD1'),context);
 vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy'),context);
@@ -41,7 +41,7 @@ const stubs=(fail=null)=>{
  context.sourceConfig=()=>({watchlist:'https://letterboxd.example/u/watchlist/',letterboxdUsername:'u'});
  context.requirePausePresence=async()=>false;context.sealedPublishAvailable=async()=>false;context.ratingsGate=async()=>({active:false});
 };
-const reset=()=>{records.clear();puts=[];fetches=[];stubs();};
+const reset=()=>{records.clear();puts=[];fetches=[];stubs();context.__pending=false;};
 const step=(extra={})=>({epgStep:{holder:'h1',modeRevision:1},epgFence:{revision:1},...extra});
 const plain=value=>JSON.parse(JSON.stringify(value));
 const code=promise=>promise.then(()=>null,error=>error.code||String(error.message));
@@ -86,6 +86,42 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
  await run('beginSync')(step(oldEnv));
  assert.deepEqual(fetches,[]);assert.equal(records.get('sync.json').watchlistSnapshot.warning,'watchlist_stale');assert.equal(records.get('sync.json').watchlist.length,2);
  assert.equal(pinned,3);
+}
+
+// ===== 2b. review: the pinned run never fetches Letterboxd, not even in the metadata stage =====
+{
+ const made=database(D1);const env={DB:made.db,BUCKET:bucket};reset();
+ await seed(made,[film(1),film(2)]);
+ context.__pending=true;stubs('Letterboxd HTTP 503');
+ const started=await run('beginSync')(step(env));
+ assert.deepEqual(fetches,[],'a failing Letterboxd is never reached');
+ assert.equal(started.stage,'epg','members with a not-fresh cache do not send the pinned run to the metadata stage');
+ assert.equal(started.remaining,0);assert.deepEqual(plain(records.get('sync.json').pending),[]);assert.equal(records.get('sync.json').watchlist.length,2);
+ // the legacy branch is unchanged: pending members still start at `metadata`
+ const legacy=database('');const legacyEnv={DB:legacy.db,BUCKET:bucket};reset();context.__pending=true;stubs();
+ const old=await run('beginSync')(step(legacyEnv));
+ assert.equal(old.stage,'metadata');assert.equal(old.remaining,2);assert.ok(fetches.length>0);
+ context.__pending=false;
+}
+
+// ===== 2c. review: the prediction queue takes the CURRENT snapshot membership =====
+{
+ const made=database(D1);const env={DB:made.db,BUCKET:bucket};reset();
+ const source={runId:'r1',updatedAt:T,films:[{id:'lb1',title:'One',tmdbId:'1',shows:[{start:1,end:2}]},{id:'lb2',title:'Two',tmdbId:'2',shows:[]},{id:'lb3',title:'Three',tmdbId:'3',shows:[{start:3,end:4}]}]};
+ // marker epg: null, the generation membership stays (the caller keeps its own source)
+ const epg=database('');
+ assert.equal(await run('watchlistQueueMembership')({DB:epg.db,BUCKET:bucket},source),null);
+ // marker d1: a 1-for-1 replacement between two EPG runs (lb2 out, lb9 in) changes the queue's membership at once
+ await seed(made,[film(1),film(9),film(3)]);
+ const before=plain(records.size);
+ const membership=await run('watchlistQueueMembership')(env,source);
+ assert.deepEqual(plain(membership.films.map(item=>item.id)),['lb1','lb9','lb3'],'membership from the snapshot');
+ assert.equal(membership.films[0].shows.length,1,'show facts come from the pinned generation record');assert.equal(membership.films[0].tmdbId,'1');
+ assert.equal(membership.films.length,3);assert.deepEqual(plain(puts),[],'reading the membership writes nothing and starts no Discovery or EPG writer');
+ assert.equal(plain(records.size),before);
+ // held: refused like every reader
+ const held=database("UPDATE watchlist_authority SET mode='d1',generation=2,writes='held' WHERE id=1;");
+ assert.equal(await code(run('watchlistQueueMembership')({DB:held.db,BUCKET:bucket},source)),'watchlist_writes_held');
 }
 
 // ===== 3. d1 refusals are D1 faults, never an ingest failure, never Letterboxd, never the EPG generation =====
