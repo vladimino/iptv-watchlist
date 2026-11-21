@@ -5,7 +5,7 @@ import {spawnSync} from 'node:child_process';
 import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-session.mjs';
 import * as Op from '../scripts/epg-checkpoint-production.mjs';
 import * as Checkpoint from '../src/epg-checkpoint-d1.js';
-import {createD1Adapter} from '../scripts/d1-backfill.mjs';import {createPublishedBinding} from '../scripts/published-epg-production.mjs';
+import {createD1Adapter} from '../scripts/d1-backfill.mjs';import {createPublishedBinding,trackProductionWrites} from '../scripts/published-epg-production.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-ckpt-op-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -156,7 +156,8 @@ function restBinding(file,log=[]){
   }catch(error){return answer(400,{success:false,errors:[{message:String(error.message).slice(0,200)}]});}
  };
  const adapter=createD1Adapter({target:{endpoint:'https://rest.invalid',accountId:'a',apiToken:'t',maxBatchStatements:200,maxBatchBytes:4<<20},databaseId:'db',fetchImpl,retries:0,sleep:async()=>{}});
- return createPublishedBinding(adapter);
+ // The operator never hands the raw adapter to the binding: it wraps it to track write outcomes, and that wrapper must pass reads through too.
+ return createPublishedBinding(trackProductionWrites(adapter,{writeState:'none'}));
 }
 
 async function sequence(upTo){
