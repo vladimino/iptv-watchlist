@@ -287,7 +287,7 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
   const before=st(file);
   assert.equal(sqlite(file,'DROP TABLE film_retention_scan').status,0);
   assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),31);
-  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'m:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')}),error=>error.code==='film_person_unavailable'&&/film_retention_scan_missing_at_schema_30/.test(String(error.cause?.message)));
+  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'m:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')}),error=>error.code==='film_person_unavailable'&&/film_retention_scan_missing_at_schema_31/.test(String(error.cause?.message)));
   assert.deepEqual(st(file),before,'nothing was written');
   await assert.rejects(()=>FA.readRetentionWatermark(envOf(file)),error=>error.code==='film_person_unavailable');
  }
