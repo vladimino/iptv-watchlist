@@ -1,5 +1,5 @@
 // AIR-575 (ADR 0189): a real batch v2 `batch_start` the Worker refuses with HTTP 503 `prediction_catalog_held` leaves exactly one neutral `batch_v2_skipped` Event
-// (`reason: catalog_held`, `cause`), on every refusal path (global gate, preflight, revalidation under the lease). It is not a run: no run, lease, queue or film changes, no stop Event.
+// (`reason: catalog_held`, `cause`), on every refusal path (global gate, preflight, queue refresh, revalidation under the lease, persist step). It is not a run: no run, lease, queue or film changes, no stop Event.
 // Covered: both causes, one Event per request id, a replay is one journal item, two request ids are two Events, dry run / 409 / a genuine `already_running` / a successful start
 // write no catalog_held Event, a journal outage never changes the 503 and the outbox recovers the Event, the answer body is unchanged. Local stand-ins only.
 import vm from 'node:vm';import assert from 'node:assert/strict';
@@ -82,6 +82,29 @@ assert.deepEqual(orphans(),[]);
  assert.equal(held().filter(e=>e.requestId==='req-held-lease').length,1,'the refusal under the lease is recorded once');assert.equal(held().find(e=>e.requestId==='req-held-lease').cause,'discovery_incomplete');
  assert.equal(runs(),runsBefore,'no run was created');
  const next=await start('req-held-after');assert.equal(next.data.status,'running','the released lease lets the next start run');assert.equal((await api('complete',{runId:next.data.runId,reason:'quota'})).status,200);}
+
+// 4b. The two remaining producers of the same body (review of PR #859): the queue refresh before the lease, and a refusal with stage `queue_refresh` inside the persist step after the lease.
+{const stops=()=>journal().filter(e=>e.type==='enrichment'&&e.presentation!=='batch_v2_skipped').length,runs=()=>JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),leaseRow=()=>JSON.stringify(sql(w.file,'SELECT * FROM prediction_lease'));
+ const logged=[];const warn=console.warn;
+ // (a) batchRefreshQueue refuses: the first preflight is marked stale so the real route takes its refresh branch, and the refresh answers the Discovery code. No lease was taken.
+ {const preflight=ctx.batchPreflight,refresh=ctx.batchRefreshQueue;let first=true,refreshCalls=0;
+  ctx.batchPreflight=async(...args)=>{const r=await preflight(...args);if(first&&!r.response){first=false;return {...r,stale:'revision'};}return r;};
+  ctx.batchRefreshQueue=async()=>{refreshCalls++;throw Object.assign(new Error('held'),{code:'discovery_fence'});};
+  const count=held().length,runsBefore=runs(),leaseBefore=leaseRow(),stopsBefore=stops();let refused;
+  try{refused=await start('req-held-refresh');}finally{ctx.batchPreflight=preflight;ctx.batchRefreshQueue=refresh;}
+  assert.equal(refreshCalls,1,'the refresh branch was really taken');assert.equal(refused.status,503,JSON.stringify(refused.data).slice(0,160));assert.equal(refused.data.code,'prediction_catalog_held');assert.equal(refused.data.cause,'discovery_fence');assert.ok(!refused.data.runId);
+  const events=held().filter(e=>e.requestId==='req-held-refresh');assert.equal(held().length,count+1,'exactly one Event');assert.equal(events.length,1);assert.equal(events[0].cause,'discovery_fence');assert.equal(events[0].reason,'catalog_held');
+  assert.equal(runs(),runsBefore,'no run');assert.equal(leaseRow(),leaseBefore,'no lease was taken');assert.equal(stops(),stopsBefore,'no stop or terminal Event');}
+ // (b) batchPersistRun: the lease is held and the run is being saved when the refusal (stage queue_refresh) arrives. The lease is released, no run is saved, the answer and cause are kept.
+ {const save=ctx.savePredictionRun;let saves=0;
+  ctx.savePredictionRun=async()=>{saves++;throw Object.assign(new Error('held'),{code:'discovery_incomplete',stage:'queue_refresh'});};
+  const count=held().length,runsBefore=runs(),stopsBefore=stops();let refused;console.warn=(...a)=>{logged.push(a.join(' '));};
+  try{refused=await start('req-held-persist');}finally{ctx.savePredictionRun=save;console.warn=warn;}
+  assert.equal(saves,1,'the persist step was really reached');assert.equal(refused.status,503,JSON.stringify(refused.data).slice(0,160));assert.equal(refused.data.code,'prediction_catalog_held');assert.equal(refused.data.cause,'discovery_incomplete');assert.ok(!refused.data.runId,'no run id is claimed');
+  const events=held().filter(e=>e.requestId==='req-held-persist');assert.equal(held().length,count+1,'exactly one Event');assert.equal(events.length,1);assert.equal(events[0].cause,'discovery_incomplete');
+  assert.equal(runs(),runsBefore,'no run was saved');assert.equal(stops(),stopsBefore,'no fabricated stop or terminal Event');
+  const next=await start('req-held-after-persist');assert.equal(next.data.status,'running','the lease was released: no orphan lease');assert.equal((await api('complete',{runId:next.data.runId,reason:'quota'})).status,200);}
+}
 
 // 5. The journal is down: the 503 is unchanged, the record is parked and noted, a later start delivers it once; the index and the journal both down lose only this one Event.
 {blocked=key=>key.startsWith('events/items/');
