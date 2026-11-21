@@ -420,13 +420,17 @@ export async function readModel(env, {now = Date.now(), watchlistLastSuccessAt =
   const slot = byKey.get(current.key) || null;
   const lastClosed = slots.find(item => item.closedAt) || null;
   const lastSuccess = type => (slots.filter(item => item.closedAt && (type === 'ratings' ? ['finished', 'noop'].includes(item.ratings.outcome) : ['committed', 'no_change'].includes(item.watchlist.outcome))).map(item => type === 'ratings' ? item.ratings.at : item.watchlist.at).sort().pop()) || null;
-  const stale = ts => ts && now - Date.parse(ts) > LIMITS.watchlistStaleMs;
+  // No success at all is stale once the executor has been active for the freshness bound (never-success must not hide).
+  const activeFor = mode.mode === 'cloudflare' && mode.changedAt ? now - Date.parse(mode.changedAt) : 0;
+  const stale = ts => ts ? now - Date.parse(ts) > LIMITS.watchlistStaleMs : activeFor > LIMITS.watchlistStaleMs;
   const lwl = watchlistLastSuccessAt || lastSuccess('watchlist'), lrt = ratingsLastSuccessAt || lastSuccess('ratings');
   const missedRecent = slots.filter(item => item.status === 'skipped_missed').length;
+  // An earlier slot still unclosed after ITS window ended is invisible behind the newer slot: look at every recent slot, not only the current one.
+  const overdue = slots.filter(item => !item.closedAt && item.key !== current.key && nextSlot(item.key).dueAt <= now).map(item => item.key);
   let health = 'external';
   if (mode.mode === 'cloudflare') {
     if (mode.quarantine) health = 'quarantined';
-    else if (slot && !slot.closedAt && now > current.windowEndsAt) health = 'stalled';
+    else if (overdue.length || (slot && !slot.closedAt && now > current.windowEndsAt)) health = 'stalled';
     else if (!slot && now - current.dueAt > LIMITS.startupGraceMs) health = 'late';
     else if (lastClosed && lastClosed.status === 'error') health = 'failed';
     else if (missedRecent) health = 'missed';
@@ -439,11 +443,11 @@ export async function readModel(env, {now = Date.now(), watchlistLastSuccessAt =
     nextSlot: {key: nextSlot(current.key).key, dueAt: iso(nextSlot(current.key).dueAt)},
     sources: {
       ratings: {lastSuccessAt: lrt, lastOutcome: lastClosed?.ratings.outcome ?? null},
-      watchlist: {lastSuccessAt: lwl, lastOutcome: lastClosed?.watchlist.outcome ?? null, stale: !!stale(lwl), warning: stale(lwl) ? 'watchlist_stale' : null}
+      watchlist: {lastSuccessAt: lwl, lastOutcome: lastClosed?.watchlist.outcome ?? null, stale: !!stale(lwl), warning: stale(lwl) ? (lwl ? 'watchlist_stale' : 'watchlist_never_succeeded') : null}
     },
     reconciliation: {lastOutcome: lastClosed?.reconciliation ?? null},
     recent: slots.map(item => ({key: item.key, status: item.status, ratings: item.ratings.outcome, watchlist: item.watchlist.outcome, reconciliation: item.reconciliation, closedAt: item.closedAt})),
-    eventsPending: pendingEvents, missedRecent, quarantine: mode.quarantine, health, sideEffects: 'none'
+    eventsPending: pendingEvents, missedRecent, overdueSlots: overdue, quarantine: mode.quarantine, health, sideEffects: 'none'
   };
 }
 

@@ -261,6 +261,20 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  m=await Sync.readModel(e,{now:T('2026-11-21T15:50:00Z')});assert.equal(m.sources.ratings.lastSuccessAt,'2026-11-21T09:42:00.000Z');assert.equal(m.sources.watchlist.lastSuccessAt,'2026-11-21T09:43:00.000Z');assert.equal(m.health,'failed');
  const before=f.db.sql("SELECT (SELECT COUNT(*) FROM letterboxd_slot) a,(SELECT SUM(revision) FROM letterboxd_slot) r")[0];await Sync.readModel(e,{now:T('2026-11-21T15:51:00Z')});assert.deepEqual(f.db.sql("SELECT (SELECT COUNT(*) FROM letterboxd_slot) a,(SELECT SUM(revision) FROM letterboxd_slot) r")[0],before,'a read writes nothing');
 }
+// 10b. Review fixes: an earlier slot left unclosed after ITS window is `stalled` even though a newer slot is waiting; a source that never succeeded warns once the executor has been active 24 h.
+{
+ const f=fresh(),wf=workflow(),e=env({db:f.db,wf});await activate(e);
+ const st=await Sync.ensure(e,{now:T('2026-11-21T09:40:00Z')});assert.equal(st.slot,'2026-11-21T1030');
+ // The 10:30 slot stays claimed and unclosed. Later, 16:35 is inside the 16:30 slot's window and 10:30's window ended at 16:30.
+ const later=T('2026-11-21T16:35:00Z');
+ const m=await Sync.readModel(e,{now:later});
+ assert.deepEqual(m.overdueSlots,['2026-11-21T1030']);assert.equal(m.health,'stalled','an overdue earlier slot is not hidden behind the newer one');
+ assert.equal(m.slot.key,'2026-11-21T1630');
+ // Never succeeded: active for over 24 h with no successful Watchlist run.
+ const day2=await Sync.readModel(e,{now:T('2026-11-22T10:00:00Z')});
+ assert.equal(day2.sources.watchlist.stale,true);assert.equal(day2.sources.watchlist.warning,'watchlist_never_succeeded');
+ const fresh1=await Sync.readModel(e,{now:T('2026-11-21T12:00:00Z')});assert.equal(fresh1.sources.watchlist.warning,null,'not yet 24 h');
+}
 // 11. The module reads no EPG, Discovery or resolver state and names no cron.
 {
  const text=fs.readFileSync('src/letterboxd-sync.js','utf8');

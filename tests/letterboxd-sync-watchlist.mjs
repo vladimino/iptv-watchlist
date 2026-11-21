@@ -46,6 +46,13 @@ function repo(over={}){
   assert.ok(!r.log.some(x=>Array.isArray(x)&&x[0]==='commit'),name+': nothing committed');
   assert.deepEqual(r.log.find(x=>Array.isArray(x)&&x[0]==='attempt'),['attempt','incomplete',reason],name);
  }
+ // Review fix: a repeated page 1 that is a strict prefix (or empty) with the same total is a change, not a pass.
+ for(const keep of [2,0]){
+  const short=site({films:ids(7),mutate:(h,l,t)=>({list:(h.n===1&&h.call>3)?l.slice(0,keep):l,total:t})});
+  const r=repo(),out=await run(r,short);
+  assert.equal(out.outcome,'incomplete','repeat page 1 with '+keep+' of 3 ids');assert.equal(out.reason,'page1_changed');
+  assert.ok(!r.log.some(x=>Array.isArray(x)&&x[0]==='commit'),'nothing committed');
+ }
  // The pagination URL must match the account path.
  const bad={calls:[],fetchPage:async u=>({n:1}),parse:()=>({films:[{id:'a'}],total:2,next:'/evil/watchlist/page/2/'})};
  assert.equal((await run(repo(),bad)).reason,'pagination_url');

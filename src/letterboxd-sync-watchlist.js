@@ -18,11 +18,12 @@ const err = (code, extra = {}) => Object.assign(new Error(code), {code, ...extra
 // the pagination URL matches the account path, and a repeat read of page 1 agrees (the rules of `beginSync` today, moved into the phase).
 export async function scanWatchlist({fetchPage, parse, firstUrl, username, maxPages = MAX_PAGES}) {
   const members = new Map();
-  let url = firstUrl, pages = 0, total = null;
+  let url = firstUrl, pages = 0, total = null, firstPage = null;
   const pathPattern = new RegExp('^/' + String(username).replace(/[^a-zA-Z0-9_-]/g, '') + '/watchlist/page/\\d+/$');
   while (url) {
     const page = parse(await fetchPage(url));
     pages++;
+    if (pages === 1) firstPage = page.films.map(film => film.id);
     if (pages > maxPages) throw err('incomplete', {reason: 'page_limit'});
     if (!Number.isInteger(page.total)) throw err('incomplete', {reason: 'total_missing'});
     if (total === null) total = page.total;
@@ -38,7 +39,8 @@ export async function scanWatchlist({fetchPage, parse, firstUrl, username, maxPa
   if (members.size !== total) throw err('incomplete', {reason: 'count_mismatch'});
   const list = [...members.values()];
   const repeat = parse(await fetchPage(firstUrl));
-  if (repeat.total !== total || repeat.films.some((film, index) => film.id !== list[index]?.id)) throw err('incomplete', {reason: 'page1_changed'});
+  // The repeated first page must equal the original one exactly: the same count and the same ids in the same order (a shortened or empty repeat is a change).
+  if (repeat.total !== total || repeat.films.length !== firstPage.length || repeat.films.some((film, index) => film.id !== firstPage[index])) throw err('incomplete', {reason: 'page1_changed'});
   return {members: list, total, pages};
 }
 
