@@ -38,7 +38,10 @@ const bucket=makeBucket();
 const env={DB:db,BUCKET:bucket,LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://epg.test/x.xml',METADATA_CACHE_DB_OPTIONAL:'standin'};
 const wf={instances:new Map(),created:[],async create({id,params}){if(this.instances.has(id))throw new Error('already exists');this.instances.set(id,{status:'running',params});this.created.push(id);},async get(id){if(!this.instances.has(id))throw new Error('not found');return {status:async()=>({status:this.instances.get(id).status})};}};
 env.LETTERBOXD_WORKFLOW=wf;
-const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,Math,TextEncoder,TextDecoder,Uint8Array,atob,btoa,encodeURIComponent,decodeURIComponent,structuredClone,crypto:webcrypto,setTimeout,clearTimeout,console:{log(){},error:(...a)=>process.stderr.write(a.join(' ')+'\n'),warn(){}},ASSETS:{},fetch:fakeFetch});
+// The Worker's own clock reads (`Date.now()`, `new Date()`) are frozen before every fixed time of this test, so the result does not depend on the day it runs (it once failed the moment the wall clock passed the fixed 2026-11-21 slot times).
+const FROZEN=Date.parse('2026-11-21T00:00:00Z');
+const FrozenDate=class extends Date{constructor(...args){super(...(args.length?args:[FROZEN]));}static now(){return FROZEN;}};
+const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date:FrozenDate,Intl,Map,Set,JSON,Math,TextEncoder,TextDecoder,Uint8Array,atob,btoa,encodeURIComponent,decodeURIComponent,structuredClone,crypto:webcrypto,setTimeout,clearTimeout,console:{log(){},error:(...a)=>process.stderr.write(a.join(' ')+'\n'),warn(){}},ASSETS:{},fetch:fakeFetch});
 vm.runInContext(source.replace(/export \{[^}]+\};/g,'').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 const run=code=>vm.runInContext(code,context);
 const G=name=>run(name);
@@ -46,7 +49,7 @@ const G=name=>run(name);
 // 1. The bundle has the ports and the control plane; the Watchlist phase and the three effect writers are the real ones.
 assert.equal(typeof G('letterboxdPorts'),'function');
 const ports=G('letterboxdPorts')(env);
-assert.deepEqual(Object.keys(ports).sort(),['handover','ratings','reconcile','watchlist'],'every phase has a real adapter and the handover proof is read from live state');
+assert.deepEqual(Object.keys(ports).sort(),['effects','handover','handoverGuards','ratings','reconcile','watchlist'],'every phase has a real adapter, the handover proof is read from live state and pinned at the commit, and the causal effects are read');
 assert.equal(typeof ports.watchlist.run,'function');
 const LetterboxdSync=G('LetterboxdSync');
 // Supported ratings storage (version 2 queue and a merge-form Diary cursor), seeded into the D1-owned ratings documents exactly as a migrated production store holds them.
@@ -66,14 +69,112 @@ const step={async do(name,fn){return fn();},async sleepUntil(){}};
 // (`switching`) the legacy Ratings entry is fenced, Ratings is closed and drained, the Watchlist authority is an open d1 and all phases exist, so `complete` is admitted.
 {
  assert.equal((await ports.handover(env)).legacyFenced,false,'no Letterboxd switch yet: the legacy entry is not fenced');
+ // AIR-571 D (review): a legacy Ratings request ADMITTED while the Letterboxd mode was `external` must not commit after the mode moved. Its fence carries the Letterboxd mode revision it saw, and every authoritative
+ // commit asserts it in its own batch: the same write that goes through before the close is rejected after it, with the data untouched.
+ {
+  const gate=await run("RatingsOrchestration.externalGate(__env,'start')");
+  assert.equal(gate.reason,null);assert.equal(Number.isInteger(gate.fence.letterboxdRevision),true,'the admission records the Letterboxd mode revision');
+  const attempt=()=>run("(async()=>{const cur=await LetterboxdRatings.readDocument(__env,'letterboxd/diary/state.json');const fenced={...__env,ratingsFence:"+JSON.stringify(gate.fence)+"};try{const saved=await LetterboxdRatings.writeDocument(fenced,'letterboxd/diary/state.json',cur.object,{...cur.value,probe:Math.random()});return saved?'written':'refused:fenced';}catch(error){return 'refused:'+(error.code||error.message);}})()");
+  assert.equal(await attempt(),'written','before the close the admitted request commits');
+  const gate2=await run("RatingsOrchestration.externalGate(__env,'start')");Object.assign(gate,{fence:gate2.fence});
+  assert.equal(await attempt(),'written');
+  await LetterboxdSync.switchMode(env,{action:'close_admission',target:'cloudflare'},ports,T('2026-11-21T09:39:00Z'));
+  const afterClose=await attempt();
+  assert.match(afterClose,/^refused:/,'after the Letterboxd mode moved, an already admitted legacy request commits nothing');
+  // Review (TOCTOU at admission): the fence decision and the pin come from ONE read of the Letterboxd row. The row moves right AFTER that read (a close lands at the worst moment): the request was admitted
+  // as `external` at revision R, and its commit is refused, on both legacy entry points; and there is no second read that could pick up the new owner's revision.
+  {
+   db.sql('DELETE FROM letterboxd_sync_mode');
+   const modeReads=[];let mutateAfterRead=null;
+   const watched=new Proxy(db,{get(target,key){if(key==='prepare')return sql=>{const prepared=target.prepare(sql);if(!/letterboxd_sync_mode/.test(sql)||!/^\s*SELECT/i.test(sql))return prepared;modeReads.push(sql);return {bind:(...params)=>{const bound=prepared.bind(...params);return {...bound,async first(){const row=await bound.first();if(mutateAfterRead){const fn=mutateAfterRead;mutateAfterRead=null;fn();}return row;}};},async first(){const row=await prepared.first();if(mutateAfterRead){const fn=mutateAfterRead;mutateAfterRead=null;fn();}return row;}};};const value=target[key];return typeof value==='function'?value.bind(target):value;}});
+   const watchedEnv={...env,DB:watched};context.__watched=watchedEnv;
+   for(const action of ['start','step']){
+    modeReads.length=0;
+    const gate=await run("RatingsOrchestration.externalGate(__watched,'"+action+"',{runId:'x'})");
+    assert.equal(gate.reason,null);assert.equal(modeReads.length,1,'one read of the Letterboxd row decides the fence AND returns the pin ('+action+')');
+    assert.equal(gate.fence.letterboxdRevision,0);
+   }
+   for(const [name,mutate] of [['the epoch closes (revision moves)',()=>db.sql("INSERT INTO letterboxd_sync_mode (id,mode,target,from_mode,epoch,changed_at,revision,write_id) VALUES (1,'switching','cloudflare','external',1,'2030-01-01T00:00:00.000Z',1,'w')")],['the mode flips without a revision move',null]]){
+    db.sql('DELETE FROM letterboxd_sync_mode');
+    if(!mutate){db.sql("INSERT INTO letterboxd_sync_mode (id,mode,epoch,changed_at,revision,write_id) VALUES (1,'external',0,'2030-01-01T00:00:00.000Z',5,'w')");}
+    modeReads.length=0;
+    mutateAfterRead=mutate||(()=>db.sql("UPDATE letterboxd_sync_mode SET mode='switching',target='cloudflare',from_mode='external' WHERE id=1"));
+    const gate=await run("RatingsOrchestration.externalGate(__watched,'start')");
+    assert.equal(gate.reason,null,name+': admitted by the read it saw');assert.equal(modeReads.length,1);
+    gate.fence;Object.assign(globalThis,{});
+    const attempted=await run("(async()=>{const cur=await LetterboxdRatings.readDocument(__env,'letterboxd/diary/state.json');const fenced={...__env,ratingsFence:"+JSON.stringify(gate.fence)+"};const saved=await LetterboxdRatings.writeDocument(fenced,'letterboxd/diary/state.json',cur.object,{...cur.value,probe:Math.random()});return saved?'written':'refused:fenced';})()");
+    assert.equal(attempted,'refused:fenced',name+': the stale request commits nothing against the new owner');
+   }
+  }
+  db.sql('DELETE FROM letterboxd_sync_mode');// the owner's real abort is covered in letterboxd-sync.mjs; here the row returns to its absent default for the sections below
+ }
  await LetterboxdSync.switchMode(env,{action:'close_admission',target:'cloudflare'},ports,T('2026-11-21T09:39:00Z'));
  const proof=await ports.handover(env);
  assert.deepEqual(JSON.parse(JSON.stringify(proof)),{ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:true,ratingsPhase:true});
  // A Ratings mode that is not closed refuses, whatever else holds.
  const ratingsOpen=await (async()=>{await run("LetterboxdRatings.writeDocument(__env,'letterboxd/ratings/executor.json',null,{schemaVersion:1,mode:'cloudflare',epoch:1,drain:null})");const p=await ports.handover(env);await run("LetterboxdRatings.readDocument(__env,'letterboxd/ratings/executor.json').then(r=>LetterboxdRatings.writeDocument(__env,'letterboxd/ratings/executor.json',r.object,{schemaVersion:1,mode:'external',epoch:2,drain:null}))");return p;})();
  assert.equal(ratingsOpen.ratingsClosed,false,'a Ratings executor that is still cloudflare is not closed');
- const done=await LetterboxdSync.switchMode(env,{action:'complete'},ports,T('2026-11-21T09:39:00Z'));
+ // The proof is read outside the commit and PINNED at it (AIR-571 D): the guards of the real port assert the Watchlist marker and the stored etags of the Ratings mode, control and run records in the same
+ // batch as the mode write. A fact that changes after the proof was read aborts the completion; once it is as read again, the same completion goes through.
+ {
+  const proofNow=await ports.handover(env);
+  const guards=await ports.handoverGuards(env,proofNow);
+  assert.equal(Array.isArray(guards)&&guards.length,1,'the real port pins the facts of its proof');
+  assert.match(guards[0][0],/watchlist_authority/);assert.match(guards[0][0],/ratings_document/);assert.match(guards[0][0],/ratings_domain_authority/);
+  assert.equal(await ports.handoverGuards(env,{...proofNow}),null,'a proof copied without its captured evidence cannot be pinned');
+  assert.equal(await ports.handoverGuards(env),null,'no proof, no pins');
+  const before=await LetterboxdSync.readMode(env);
+  const asOwner={expectEpoch:before.epoch,expectRevision:before.revision};
+  const now=T('2026-11-21T09:39:00Z');
+  // a fact moves AFTER the proof was read and BEFORE the guards are built (the real race): the guards still pin what the proof saw, so the commit is refused and nothing is written
+  const moving=mutate=>({handover:async e=>{const proof=await ports.handover(e);mutate();return proof;},handoverGuards:ports.handoverGuards,effects:ports.effects});
+  for(const [name,mutate,restore] of [
+   ['the Watchlist marker generation',()=>db.sql("UPDATE watchlist_authority SET generation=generation+1 WHERE id=1"),()=>db.sql("UPDATE watchlist_authority SET generation=generation-1 WHERE id=1")],
+   ['the Ratings domain generation (any Ratings commit)',()=>db.sql("UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1"),()=>db.sql("UPDATE ratings_domain_authority SET generation=generation-1 WHERE id=1")],
+   ['the Ratings run record etag',()=>db.sql("UPDATE ratings_document SET etag='moved' WHERE key='letterboxd/ratings/run.json' AND part=0"),null],
+  ]){
+   const hadRun=db.sql("SELECT 1 AS x FROM ratings_document WHERE key='letterboxd/ratings/run.json' AND part=0").length>0;
+   if(!hadRun&&!restore){continue;}
+   const result=await LetterboxdSync.switchMode(env,{action:'complete',...asOwner},moving(mutate),now);
+   if(restore)restore();
+   assert.equal(result.refused,'handover_changed',name+' '+JSON.stringify(result));
+   assert.equal((await LetterboxdSync.readMode(env)).mode,'switching','nothing was written');
+  }
+  // the proof itself is unstable when a fact moves WHILE it is read: it reads as false, never as a partly proven handover
+  {
+   let calls=0;
+   const flaky=new Proxy(db,{get(target,key){if(key==='prepare')return sql=>{const prepared=target.prepare(sql);if(/FROM ratings_domain_authority/.test(sql)&&++calls===2)target.sql("UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1");return prepared;};const value=target[key];return typeof value==='function'?value.bind(target):value;}});
+   const unstable=await ports.handover({...env,DB:flaky});
+   db.sql("UPDATE ratings_domain_authority SET generation=generation-1 WHERE id=1");
+   assert.equal(Object.values(JSON.parse(JSON.stringify(unstable))).every(value=>value===false),true,'a proof whose facts moved while it was read is false');
+  }
+  // a watchlist marker that is not an open d1 cannot be pinned: the port returns null and the handover is refused
+  db.sql("UPDATE watchlist_authority SET writes='held' WHERE id=1");
+  assert.equal(await ports.handoverGuards(env,await ports.handover(env)),null);
+  db.sql("UPDATE watchlist_authority SET writes='open' WHERE id=1");
+ }
+ const modeNow=await LetterboxdSync.readMode(env);
+ const done=await LetterboxdSync.switchMode(env,{action:'complete',expectEpoch:modeNow.epoch,expectRevision:modeNow.revision},ports,T('2026-11-21T09:39:00Z'));
  assert.equal(done.completed,true,JSON.stringify(done));
+}
+// 2a. The owner's control route (AIR-571 D): a read-only status and one command with its confirmation and pins, through the real Worker.
+{
+ const get=async()=>{const response=await context.worker.fetch(new Request('https://iptv.example/api/letterboxd/sync/mode'),env,{waitUntil(){}});return {status:response.status,body:await response.json()};};
+ const post=async body=>{const response=await context.worker.fetch(new Request('https://iptv.example/api/letterboxd/sync/mode',{method:'POST',body:JSON.stringify(body)}),env,{waitUntil(){}});return {status:response.status,body:await response.json()};};
+ const status=await get();
+ assert.equal(status.status,200);assert.equal(status.body.readable,true);assert.equal(status.body.mode.mode,'cloudflare');assert.equal(status.body.sideEffects,'none');
+ assert.equal(status.body.legacyFenced,true);assert.equal(status.body.letterboxdWriters,1);assert.equal(typeof status.body.effects.drained,'boolean');
+ assert.equal(status.body.handover.ratingsClosed,true,'the proof is read from live state');
+ const rowBefore=await LetterboxdSync.readMode(env);
+ assert.equal((await get()).body.mode.revision,rowBefore.revision,'the status wrote nothing');
+ // no confirmation / no pins: refused before anything runs
+ assert.deepEqual((await post({action:'close_admission',target:'external'})).body,{error:'Missing confirm'});
+ assert.equal((await post({action:'close_admission',target:'external'})).status,400);
+ assert.deepEqual((await post({action:'complete',confirm:'complete',expectEpoch:rowBefore.epoch,expectRevision:rowBefore.revision})).body.refused,'not_switching');
+ // a stale pin is refused and writes nothing
+ const stale=await post({action:'close_admission',target:'external',confirm:'close_admission',expectEpoch:rowBefore.epoch+5,expectRevision:rowBefore.revision});
+ assert.equal(stale.status,200);assert.deepEqual([stale.body.refused,stale.body.pin],['pin_mismatch','epoch']);
+ assert.equal((await LetterboxdSync.readMode(env)).revision,rowBefore.revision,'a stale pin changed nothing');
 }
 // 2b. Active: the same status and monitor facts now carry the slot read model, read only.
 {
