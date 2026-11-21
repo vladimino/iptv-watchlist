@@ -260,6 +260,13 @@ async function mcpCallTool(params,protocolVersion,env,execution){
   if(args.filmId!==undefined&&(typeof args.filmId!=='string'||!/^[A-Za-z0-9_-]{1,80}$/.test(args.filmId)))return {result:mcpToolError('"filmId" must be 1–80 letters, digits, "_" or "-".')};
   try{
    const replied=await ownedBatchManifest(env,args.runId,{part:args.part||'envelope',filmId:args.filmId});
+   // ADR 0193 (AIR-573): a manifest that is not ready yet is a normal wait, not a failure. Only this one answer (HTTP 409 with code `manifest_pending` from the underlying read, which is unchanged) is
+   // reported to the caller as a successful tool result: no `isError`, no `error`, an explicit `kind: 'pending'` that cannot be mistaken for an envelope, and the original `retryAfterMs`. Every other
+   // refusal (start_refused, start_failed, lease_lost, unknown_run, invalid arguments, storage errors) keeps its error shape, and `mcpPayload` still treats every other 409 as an error.
+   if(replied.status===409&&replied.body?.code==='manifest_pending'){
+    const waiting={httpStatus:200,kind:'pending',status:'manifest_pending',code:'manifest_pending',retryAfterMs:Number.isFinite(replied.body.retryAfterMs)&&replied.body.retryAfterMs>0?replied.body.retryAfterMs:5000};
+    return {result:{content:[{type:'text',text:JSON.stringify(waiting)}]}};
+   }
    const answered=mcpPayload(replied.status,replied.body);
    if(answered.result&&!answered.result.isError){const {structuredContent,...result}=answered.result;return {result};}
    return answered;
