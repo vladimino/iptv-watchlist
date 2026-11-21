@@ -131,17 +131,77 @@ const manifestKey=id=>'enrichment/batch-manifest/'+id+'.json';
  assert.ok(![...w.records.keys()].some(k=>k.startsWith('enrichment/sources/')||k.startsWith('enrichment/batch-manifest/')),'no source and no manifest were published');
 }
 
-// 10. Takeover after conversion, before the persist side effects: ownership is checked, nothing is published by the superseded handler.
+// 10. Takeover at every persist boundary (ADR 0188): the lease is replaced by a foreign holder right after an operation completed and before the next ownership check. The superseded handler
+// answers `start_claim_lost`, writes no stop Event, step or manifest, leaves the new holder untouched, and D1 commits are fenced by the commit guard.
+{
+ const foreign=epoch=>({owner:'foreign-run',runId:'foreign-run',heartbeatAt:new Date().toISOString(),expiresAt:Date.now()+15*60000,epoch,phase:'run',keyHash:'f'.repeat(64),argsHash:'e'.repeat(64)});
+ const boundary=async(name,match,expect)=>{
+  const w=await world();const other=foreign(9);let done=false,seen=0;const put=w.env.BUCKET.put.bind(w.env.BUCKET);
+  w.env.BUCKET.put=async(key,...a)=>{const result=await put(key,...a);if(!done&&match(w,String(key),++seen)){done=true;setLease(w,other);}return result;};
+  const r=await batch(w,{invocationKey:KEY});
+  assert.ok(done,name+': the takeover was injected');
+  assert.equal(r.status,409,name+' '+JSON.stringify(r.data).slice(0,200));assert.equal(r.data.code,'start_claim_lost',name);
+  assert.deepEqual(leaseDoc(w),other,name+': the new holder\'s lease is untouched (not released, not converted, no gate)');
+  const keys=[...w.records.keys()];
+  assert.ok(!keys.some(k=>k.startsWith('enrichment/stop-events/')),name+': no stop Event');
+  assert.ok(!keys.some(k=>k.startsWith('enrichment/batch-manifest/')),name+': the manifest was never published');
+  expect(w,keys);
+ };
+ const gateLive=w=>{const d=leaseDoc(w);return d.phase==='run'&&!!d.submitGate;};
+ // B0: right after the persist gate is set, before anything else of the persist: nothing is written at all.
+ await boundary('B0 gate set',(w,key)=>key==='enrichment/runner-lease.json'&&gateLive(w),(w,keys)=>{
+  assert.equal(runs(w),0);assert.ok(!keys.some(k=>k.startsWith('enrichment/run-diagnostics/')||k.startsWith('enrichment/sources/')||k==='enrichment/latest-run.json'),'B0: no diagnostics row, no source, no latest-run');
+ });
+ // B1: right after the prediction writer lease was taken, before the sources: no source, no run, no latest-run.
+ await boundary('B1 writer lease',(w,key,n)=>key==='enrichment/writer-lease.json',(w,keys)=>{
+  assert.equal(runs(w),0);assert.ok(!keys.some(k=>k.startsWith('enrichment/sources/')||k==='enrichment/latest-run.json'),'B1: no source, no latest-run');
+ });
+ // B2: right after the sources, before the run save: the guarded run commit rolls back (no run row, no latest-run).
+ await boundary('B2 run save',(w,key)=>key.startsWith('enrichment/sources/'),(w,keys)=>{
+  assert.equal(runs(w),0,'B2: the guarded run save committed nothing');assert.ok(!keys.includes('enrichment/latest-run.json'),'B2: no latest-run overwrite');
+ });
+ // B3: right after the run was saved and started (while it still owned the lease), before the drain and the manifest: no manifest, and no stop Event for the run.
+ await boundary('B3 drain and manifest',(w,key,n)=>key==='enrichment/latest-run.json'&&sql(w.file,'SELECT count(*) AS n FROM prediction_run')[0].n>=1&&(w.__latest=(w.__latest||0)+1)>=2,(w,keys)=>{
+  assert.ok(keys.includes('enrichment/latest-run.json'),'B3: the run committed while the handler still owned the lease');
+ });
+ // B4: a staged row is drained (here dropped as stale) under the start's own gate; the takeover comes right after the drain wrote, before the manifest write: still no manifest.
+ {
+  const w=await world();w.records.set('enrichment/batch-stage.json',{items:[{filmId:'stale-film-1'}]});
+  const other=foreign(11);let done=false;const put=w.env.BUCKET.put.bind(w.env.BUCKET);
+  w.env.BUCKET.put=async(key,...a)=>{const result=await put(key,...a);if(!done&&String(key)==='enrichment/batch-stage.json'){done=true;setLease(w,other);}return result;};
+  const r=await batch(w,{invocationKey:KEY});
+  assert.ok(done,'B4: the staged row was drained and the takeover injected');assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.code,'start_claim_lost');
+  assert.deepEqual(leaseDoc(w),other,'B4: the new holder is untouched');assert.ok(![...w.records.keys()].some(k=>k.startsWith('enrichment/batch-manifest/')||k.startsWith('enrichment/stop-events/')),'B4: no manifest, no stop Event');
+ }
+}
+
+// 10b. The frozen answer, the stored copy and a joined answer all carry the converted 15 minute expiry, consistent with the lease in D1.
 {
  const w=await world();
- const foreign={owner:'foreign-run',runId:'foreign-run',heartbeatAt:new Date().toISOString(),expiresAt:Date.now()+15*60000,epoch:9,phase:'run',keyHash:'f'.repeat(64),argsHash:'e'.repeat(64)};
- let hijacked=false;const put=w.env.BUCKET.put.bind(w.env.BUCKET);
- w.env.BUCKET.put=async(...a)=>{if(!hijacked){const row=sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0];if(row&&JSON.parse(row.d).phase==='run'){hijacked=true;setLease(w,foreign);}}return put(...a);};
- const r=await batch(w,{invocationKey:KEY});
- assert.ok(hijacked,'the conversion happened before the takeover');
- assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'lease_lost');
- assert.equal(runs(w),0,'a superseded handler never publishes a run');assert.deepEqual(leaseDoc(w),foreign);
- assert.ok(![...w.records.keys()].some(k=>k.startsWith('enrichment/sources/')||k.startsWith('enrichment/batch-manifest/')),'no source and no manifest');
+ const first=await batch(w,{invocationKey:KEY});assert.equal(first.data.status,'running');
+ const lease=leaseDoc(w),stored=w.records.get(manifestKey(first.data.runId)),joined=await batch(w,{invocationKey:KEY});
+ assert.ok(first.data.lease.expiresAt>Date.now()+14*60000,'the original answer carries the run expiry, not the 180 s claim expiry');
+ assert.equal(stored.lease.expiresAt,first.data.lease.expiresAt,'the stored answer is the one the owner returned');assert.equal(joined.data.lease.expiresAt,first.data.lease.expiresAt,'a joined answer carries the same expiry');
+ assert.ok(Math.abs(lease.expiresAt-first.data.lease.expiresAt)<60000,'consistent with the authoritative lease in D1 (later gate and heartbeat renewals only extend it)');
+ assert.equal(first.data.lease.ttlMs,15*60000);
+ const run=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+first.data.runId+"'")[0].d);
+ assert.equal(run.keyHash,lease.keyHash,'the run carries the key hash (ADR 0188)');assert.equal(run.argsHash,lease.argsHash,'the run carries the argument hash');
+ assert.equal(lease.submitGate,undefined,'the persist gate was cleared');
+}
+
+// 10c. The join re-reads the holder immediately before it returns: a client submit (or a takeover) between the first lease read and the manifest read closes the window.
+{
+ const w=await world();
+ const first=await batch(w,{invocationKey:KEY});assert.equal(first.data.status,'running');
+ let done=false;const get=w.env.BUCKET.get.bind(w.env.BUCKET);
+ w.env.BUCKET.get=async(key,...a)=>{if(!done&&String(key)===manifestKey(first.data.runId)){done=true;setLease(w,{...leaseDoc(w),clientSubmitAt:new Date().toISOString()});}return get(key,...a);};
+ const raced=await batch(w,{invocationKey:KEY});
+ assert.ok(done,'the submit was injected between the lease read and the manifest read');assert.equal(raced.data.status,'already_running','the closed window is refused even though the manifest was stored');
+ w.env.BUCKET.get=get;
+ // a takeover between the same two reads
+ const w2=await world();const f2=await batch(w2,{invocationKey:KEY});let done2=false;const get2=w2.env.BUCKET.get.bind(w2.env.BUCKET);
+ w2.env.BUCKET.get=async(key,...a)=>{if(!done2&&String(key)===manifestKey(f2.data.runId)){done2=true;setLease(w2,{owner:'foreign-run',runId:'foreign-run',heartbeatAt:new Date().toISOString(),expiresAt:Date.now()+15*60000,epoch:5});}return get2(key,...a);};
+ const raced2=await batch(w2,{invocationKey:KEY});assert.ok(done2);assert.notEqual(raced2.data.status,'running','a join never returns a manifest of a run whose lease changed hands');
 }
 
 // 11. The read-only manifest tool answers `manifest_pending`, never unknown, while the start is preparing, and `invocationKey` is accepted (and validated) by prediction_batch_start itself.
