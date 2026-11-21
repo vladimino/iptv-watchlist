@@ -2603,6 +2603,22 @@ async function letterboxdTmdbOf(env,lids){
  for(const lid of lids){const id=records[lid]?.tmdbId;map.set(lid,id==null?null:String(id));}
  return map;
 }
+// The EVIDENCE the owner's mode switch needs before the Letterboxd writer is admitted (O5): read from the live state, never asserted. Ratings is closed (its own mode is neither `cloudflare` nor
+// `switching`) and drained (no step lease live, no instance live), the legacy `ratings_sync_start`/`ratings_sync_step` entry answers `external_writer_fenced` (that happens while the Letterboxd mode is
+// `switching`, which `complete` requires), the Watchlist authority is an open `d1` and the three phase ports exist. Any unreadable piece is false.
+async function letterboxdHandover(env,now=Date.now()){
+ const proof={ratingsClosed:false,ratingsDrained:false,legacyFenced:false,watchlistRepository:false,ratingsPhase:false};
+ try{
+  const mode=await RatingsOrchestration.readMode(env);
+  proof.ratingsClosed=!mode.malformed&&mode.record?.mode==='external';
+  proof.ratingsDrained=(await RatingsOrchestration.drainState(env,now))==='verified';
+  const gates=await Promise.all(['start','step'].map(action=>RatingsOrchestration.externalGate(env,action)));
+  proof.legacyFenced=gates.every(gate=>gate.reason==='external_writer_fenced');
+ }catch{/* an unreadable piece stays false */}
+ try{const authority=await WatchlistD1.readAuthority(env);proof.watchlistRepository=authority?.state==='d1'&&authority.writes==='open';}catch{/* false */}
+ try{const ports=letterboxdPorts(env);proof.ratingsPhase=!!(ports.ratings&&ports.reconcile&&ports.watchlist);}catch{/* false */}
+ return proof;
+}
 function letterboxdPorts(env){
  const sources=sourceConfig(env);
  const effects=LetterboxdSyncEffects.effectWriters({
@@ -2615,7 +2631,7 @@ function letterboxdPorts(env){
  });
  const repository=LetterboxdSyncRepository.watchlistRepository(WatchlistD1,{epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],effectWriters:effects});
  const fenceGuard=epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]];
- return {ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername})};
+ return {handover:e=>letterboxdHandover(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername})};
 }
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {

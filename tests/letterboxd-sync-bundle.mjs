@@ -45,7 +45,7 @@ const G=name=>run(name);
 // 1. The bundle has the ports and the control plane; the Watchlist phase and the three effect writers are the real ones.
 assert.equal(typeof G('letterboxdPorts'),'function');
 const ports=G('letterboxdPorts')(env);
-assert.deepEqual(Object.keys(ports).sort(),['ratings','reconcile','watchlist'],'every phase has a real adapter');
+assert.deepEqual(Object.keys(ports).sort(),['handover','ratings','reconcile','watchlist'],'every phase has a real adapter and the handover proof is read from live state');
 assert.equal(typeof ports.watchlist.run,'function');
 const LetterboxdSync=G('LetterboxdSync');
 // Supported ratings storage (version 2 queue and a merge-form Diary cursor), seeded into the D1-owned ratings documents exactly as a migrated production store holds them.
@@ -54,14 +54,18 @@ await run("LetterboxdRatings.writeDocument(__env,'enrichment/removal-rating-look
 await run("LetterboxdRatings.writeDocument(__env,'letterboxd/diary/state.json',null,{schemaVersion:2,coverage:{newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false},resumePage:null,writer:{runId:'ratings-storage-migrate',step:'migrate'}})");
 const step={async do(name,fn){return fn();},async sleepUntil(){}};
 
-// 2. Activation is refused: the ratings phase, the legacy fence and the handover are not provable here, so the Workflow can not be admitted.
+// 2. Activation is decided by LIVE evidence, nothing is injected: while the Letterboxd mode is not switching the legacy entry is not fenced, so the switch is refused; once admission is closed
+// (`switching`) the legacy Ratings entry is fenced, Ratings is closed and drained, the Watchlist authority is an open d1 and all phases exist, so `complete` is admitted.
 {
- await LetterboxdSync.switchMode(env,{action:'close_admission',target:'cloudflare'},{},T('2026-11-21T09:39:00Z'));
- const refused=await LetterboxdSync.switchMode(env,{action:'complete'},{},T('2026-11-21T09:39:00Z'));
- assert.equal(refused.refused,'handover_not_proven');
- // For this offline run the owner's handover proof is injected, exactly as the cutover will supply it.
- const done=await LetterboxdSync.switchMode(env,{action:'complete'},{handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:true,ratingsPhase:true})},T('2026-11-21T09:39:00Z'));
- assert.equal(done.completed,true);
+ assert.equal((await ports.handover(env)).legacyFenced,false,'no Letterboxd switch yet: the legacy entry is not fenced');
+ await LetterboxdSync.switchMode(env,{action:'close_admission',target:'cloudflare'},ports,T('2026-11-21T09:39:00Z'));
+ const proof=await ports.handover(env);
+ assert.deepEqual(JSON.parse(JSON.stringify(proof)),{ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:true,ratingsPhase:true});
+ // A Ratings mode that is not closed refuses, whatever else holds.
+ const ratingsOpen=await (async()=>{await run("LetterboxdRatings.writeDocument(__env,'letterboxd/ratings/executor.json',null,{schemaVersion:1,mode:'cloudflare',epoch:1,drain:null})");const p=await ports.handover(env);await run("LetterboxdRatings.readDocument(__env,'letterboxd/ratings/executor.json').then(r=>LetterboxdRatings.writeDocument(__env,'letterboxd/ratings/executor.json',r.object,{schemaVersion:1,mode:'external',epoch:2,drain:null}))");return p;})();
+ assert.equal(ratingsOpen.ratingsClosed,false,'a Ratings executor that is still cloudflare is not closed');
+ const done=await LetterboxdSync.switchMode(env,{action:'complete'},ports,T('2026-11-21T09:39:00Z'));
+ assert.equal(done.completed,true,JSON.stringify(done));
 }
 async function slot(now){
  const started=await LetterboxdSync.ensure(env,{now});
