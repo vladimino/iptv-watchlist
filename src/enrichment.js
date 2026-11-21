@@ -1063,10 +1063,10 @@ async function deliverPendingEvents(env,now=Date.now()){
 // AIR-548 (ADR 0180): a real `batch_start` that a live runner lease turns away leaves ONE neutral Event of the refused request, `presentation: "batch_v2_skipped"`. It is not a run: no runId of its own, no
 // counts, no lease, queue or film is touched for it. Its identity is the request's `X-Request-Id` (the id is stable under replay and different for another request, so no two requests are merged by time or
 // guess), and it is parked create-only in `enrichment/stop-events/skipped-<requestId>.json`, so a repeated write reads the first record back (same `at`, same journal key) and a failed journal write is retried
-// by the existing outbox. Best-effort by construction: it never throws and never changes the `already_running` answer. `already_running` and (AIR-575, ADR 0189) `catalog_held` are recorded; `409` refusals, `noop` and the rest are not.
+// by the existing outbox. Best-effort by construction: it never throws and never changes the `already_running` answer. `already_running` and (AIR-575, ADR 0190) `catalog_held` are recorded; `409` refusals, `noop` and the rest are not.
 const BATCH_V2_SKIPPED='batch_v2_skipped';
 const SKIPPED_EVENT_PREFIX=STOP_EVENT_PREFIX+'skipped-';
-// AIR-575 (ADR 0189): the same neutral Event also records a real start the Worker refused with `prediction_catalog_held` (`reason: "catalog_held"`, `cause` the Discovery code that refused the read). It has no holder.
+// AIR-575 (ADR 0190): the same neutral Event also records a real start the Worker refused with `prediction_catalog_held` (`reason: "catalog_held"`, `cause` the Discovery code that refused the read). It has no holder.
 function skippedStartEvent({requestId,body,holder,at,reason='already_running',cause=null}){
  const held=reason==='catalog_held';
  const event={id:'enrichment-skipped-'+requestId,type:'enrichment',at,stage:'skipped',protocol:BATCH_PROTOCOL,presentation:BATCH_V2_SKIPPED,reason:held?'catalog_held':'already_running',requestId};
@@ -2781,7 +2781,7 @@ async function batchStartRoute(env,body,requestId){
  try{const response=await batchStartWork(env,body,requestId,tally);await recordCatalogHeldStart(env,{body,requestId,response});return response;}
  finally{noteStep(env,()=>tally);}
 }
-// AIR-575 (ADR 0189). Every real start the Worker refuses with HTTP 503 `prediction_catalog_held` (the global gate, the queue refresh, the revalidation under the lease and the persist step all answer the same body)
+// AIR-575 (ADR 0190). Every real start the Worker refuses with HTTP 503 `prediction_catalog_held` (the global gate, the queue refresh, the revalidation under the lease and the persist step all answer the same body)
 // leaves one neutral skipped Event of that request, recorded at this single exit so no refusal path can be missed or counted twice. A dry run writes nothing. Best effort: it never throws and never changes the 503.
 async function recordCatalogHeldStart(env,{body,requestId,response}){
  try{

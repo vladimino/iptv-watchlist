@@ -1,4 +1,4 @@
-// AIR-575 (ADR 0189): a real batch v2 `batch_start` the Worker refuses with HTTP 503 `prediction_catalog_held` leaves exactly one neutral `batch_v2_skipped` Event
+// AIR-575 (ADR 0190): a real batch v2 `batch_start` the Worker refuses with HTTP 503 `prediction_catalog_held` leaves exactly one neutral `batch_v2_skipped` Event
 // (`reason: catalog_held`, `cause`), on every refusal path (global gate, preflight, queue refresh, revalidation under the lease, persist step). It is not a run: no run, lease, queue or film changes, no stop Event.
 // Covered: both causes, one Event per request id, a replay is one journal item, two request ids are two Events, dry run / 409 / a genuine `already_running` / a successful start
 // write no catalog_held Event, a journal outage never changes the 503 and the outbox recovers the Event, the answer body is unchanged. Local stand-ins only.

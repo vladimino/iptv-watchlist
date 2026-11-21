@@ -2693,7 +2693,7 @@ function predictionDetailsHTML(details){
 function skippedStartHTML(event){
  const safe=v=>typeof v==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(v)?v:null,ageMs=Number.isFinite(event.holderAgeMs)&&event.holderAgeMs>=0?event.holderAgeMs:null;
  const trigger=event.trigger==='scheduled'?'по расписанию':event.trigger==='manual'?'вручную':null,holder=safe(event.holderRunId),request=safe(event.requestId);
- // AIR-575 (ADR 0189): a start refused because the catalog was held by an EPG publication. Fixed sentences chosen by two known codes; nothing else from the stored event is printed.
+ // AIR-575 (ADR 0190): a start refused because the catalog was held by an EPG publication. Fixed sentences chosen by two known codes; nothing else from the stored event is printed.
  if(event.reason==='catalog_held'){
   const cause=event.cause==='discovery_fence'||event.cause==='discovery_incomplete'?event.cause:null;
   const why=cause==='discovery_fence'?'каталог временно закрыт для чтения':cause==='discovery_incomplete'?'каталог ещё загружается':'каталог временно недоступен';

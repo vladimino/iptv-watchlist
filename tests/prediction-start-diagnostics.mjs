@@ -1,5 +1,5 @@
 // AIR-417 / AIR-424 / AIR-431 on batch runner v2 (ADR 0167; D1 prediction authority, as production runs it). A catalog that an EPG publication holds or loads
-// is a wait at start, not a storage failure: the start answers 503 prediction_catalog_held, takes no lease, creates no run and writes no stop or run Event (AIR-575, ADR 0189: it leaves exactly one neutral skipped Event of the refused attempt). A run that
+// is a wait at start, not a storage failure: the start answers 503 prediction_catalog_held, takes no lease, creates no run and writes no stop or run Event (AIR-575, ADR 0190: it leaves exactly one neutral skipped Event of the refused attempt). A run that
 // already owns its manifest reads no catalog: its batch submit and its completion are untouched by a held catalog, and an identical replay is already_current.
 // The stage failure lines of the retired v5 start (diagnosedStart) are gone with it. Local stand-ins only.
 import assert from 'node:assert/strict';

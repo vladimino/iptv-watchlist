@@ -230,7 +230,7 @@ const unknownTypeHTML=vm.runInContext('eventHTML(unknownType)',context);assert.m
  html=card({...base,trigger:'manual'});assert.match(html,/\(вручную\)/);
  html=card({...base,trigger:undefined,holderRunId:undefined,holderAgeMs:undefined});assert.match(html,/Попытка запуска отклонена/);assert.doesNotMatch(html,/по расписанию|вручную|Выполняется пакет|работает \d/,'absent fields are not guessed');
  html=card({...base,requestId:'<img src=x onerror=alert(1)>',holderRunId:'"><script>',holderAgeMs:-5});assert.doesNotMatch(html,/<img|<script|onerror/,'unsafe ids are dropped, never printed');assert.doesNotMatch(html,/работает -/,'a negative age is not shown');
- // AIR-575 (ADR 0189): a start refused because the catalog was held is the same neutral card with its own fixed sentence; the cause is read through a fixed list, never printed as stored.
+ // AIR-575 (ADR 0190): a start refused because the catalog was held is the same neutral card with its own fixed sentence; the cause is read through a fixed list, never printed as stored.
  {const heldBase={id:'enrichment-skipped-req-h',type:'enrichment',at:'2026-11-21T16:05:00.000Z',stage:'skipped',protocol:'batch_v2',presentation:'batch_v2_skipped',reason:'catalog_held',cause:'discovery_incomplete',requestId:'req-h',trigger:'scheduled'};
   let held=card(heldBase);
   assert.match(held,/Запуск прогнозов пропущен: каталог временно недоступен/);assert.match(held,/Попытка запуска \(по расписанию\) отклонена: каталог ещё загружается\. Фильмы не обрабатывались\./);
