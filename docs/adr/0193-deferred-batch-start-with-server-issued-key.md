@@ -1,6 +1,6 @@
 # ADR 0193: A Scheduled Task starts a prediction run with a server-issued key and a fast receipt; the heavy preparation runs in a Cloudflare Workflow and is read back as an immutable manifest
 
-**Status:** Proposed (the target direction is approved by the Product Owner in the AIR-573 handoff of 2026-11-21; the concrete choices below await review and acceptance)  
+**Status:** Accepted 2026-11-21 (owner-approved direction and simultaneous rollout, final independent review of PR #872; natural production acceptance remains separate and pending)  
 **Original decision date:** 2026-11-21 (direction); the concrete design is recorded with the implementation PR  
 **Recorded at:** 2026-11-21  
 **Approval source:** The Product Owner's handoff comment on [AIR-573](https://trello.com/c/4pD66DLd#comment-6b01d7b358e86c3c2baa6752), 2026-11-21 17:41 UTC: approved a fast asynchronous start with a server-side idempotency key and a later readback of the prepared manifest, replacing the long synchronous start for Scheduled Tasks, with all four existing Tasks moved together after delivery.  
@@ -31,7 +31,7 @@ Confirmed from the AIR-573 traces of 21 Nov 2026 (Europe/Madrid), recorded on th
 9. **Observability.** The start's step-timing line carries counters `deferredAccepted`, `deferredReplay`, `deferredUnavailable` next to the ADR 0188 ones; the Workflow step logs one sanitized `prediction_start_prepared` line (phase, code, `prepareMs`, preflights, refresh rounds, claim renewals; no key, no payload). **Repeated orphan starts become one more reason of the shared AIR-556 verdict** (`predictionStallAssessment`, used by the Footer and the Monitor, not a second monitor): with eligible work, at least three ownerless starts since the last confirmed progress (a start turned away with `already_running`, or a run abandoned without a film; a run still `running` is not counted) and at least 20 minutes without progress give `no_progress` with `reason: 'repeated_orphan_starts'`. The existing 60-minute rule is unchanged. A `start=200`, an `accepted` receipt or an `already_running` is never progress.
 10. **Compatibility and rollback.** The synchronous start, the synchronous keyed start of ADR 0188, a keyless start and `dryRun` are unchanged and remain until the Tasks are moved. Rollback is a prompt change back to the synchronous start plus, if wanted, a code revert; the Workflow definition then stays inert. No schema change, no feature flag, no migration.
 
-Not decided here: the Task prompt change and the rollout order (owner and Controller, after delivery; the minimal prompt delta is in [the delta note](../reference/scheduled-task-prompts/hourly-predictions-batch-v2-deferred-start-delta.md)), any manual run, lease reset, flag or schedule change, the manifest size, the recovery ranking, the S7 research and AIR-574/575.
+The Controller installed the approved delta on all four enabled Tasks together after delivery; see [rollout evidence](../evidence/prediction/air-573-deferred-start-rollout-2026-11-21.md). Not authorized by this ADR: any manual run, lease reset, flag or schedule change, the manifest size, the recovery ranking, the S7 research and AIR-574/575.
 
 ## Alternatives considered
 
@@ -68,5 +68,5 @@ Code only: no schema, no flag, no data migration. The Workflow definition create
 
 ## Follow-ups
 
-- Task prompt change for all four Tasks after delivery (Controller); natural acceptance and owner acceptance on AIR-573.
+- Task prompt change for all four Tasks delivered and read back; natural productive-run acceptance and owner acceptance on AIR-573 remain open.
 - Renumbering of this ADR if another open change takes the same number before this one merges.

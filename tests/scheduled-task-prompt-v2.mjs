@@ -15,6 +15,7 @@ const file='docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2.md
 const doc=fs.readFileSync(file,'utf8');
 const block=(name)=>{const m=doc.match(new RegExp('---BEGIN '+name+'---\\n([\\s\\S]*?)\\n---END '+name+'---'));assert.ok(m,name+' markers present');return m[1];};
 const prompt=block('PROMPT'),dry=block('DRY RUN PROMPT');
+const syncS5=fs.readFileSync('docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2-synchronous-s5.md','utf8').match(/---BEGIN PROMPT---\n([\s\S]*?)\n---END PROMPT---/)[1];
 const sha=text=>createHash('sha256').update(text).digest('hex');
 
 // 1. Headers state the real length and SHA-256 of both texts.
@@ -22,14 +23,18 @@ const stated=doc.match(/\*\*Text below:\*\* (\d+) characters, SHA-256 `([0-9a-f]
 assert.ok(stated&&statedDry,'headers state length and hash');
 assert.equal(prompt.length,Number(stated[1]));assert.equal(sha(prompt),stated[2]);
 // AIR-451: uniform installed Saved Task reports and human-readable minute-based registry titles.
-assert.equal(Buffer.byteLength(prompt,'utf8'),69358,'AIR-544 installed prompt UTF-8 byte count after the TTL-wording cleanup');
-assert.equal(sha(prompt),'54e0e7eeb6bb628ca00a6b6a195eaf984a9483443446cf5f206f0e91b30be860','installed AIR-544 prompt hash after the TTL-wording cleanup');
+assert.equal(Buffer.byteLength(prompt,'utf8'),71184,'AIR-573 installed deferred S5 bytes');
+assert.equal(Buffer.byteLength(syncS5,'utf8'),69358,'frozen synchronous S5 bytes');
+assert.equal(sha(syncS5),'54e0e7eeb6bb628ca00a6b6a195eaf984a9483443446cf5f206f0e91b30be860','frozen synchronous S5 hash');
+const outsideStart=text=>{const start=text.indexOf('\n2. '),end=text.indexOf('\n3. Генерация отдельно от submit.');assert.ok(start>=0&&end>start);return [text.slice(0,start),text.slice(end)];};
+assert.deepEqual(outsideStart(prompt),outsideStart(syncS5),'only steps 2/2a changed');
+assert.equal(sha(prompt),'1c5e1ecb8216f1629fd216addfea5a64764e77bed40a92c4d2c5ed1676d804cd','installed AIR-573 prompt hash');
 const previousHeartbeat='не реже, чем раз в 10 минут (TTL 15 минут)',step1Heartbeat='не реже, чем раз в 5 минут (TTL 12 минут)',currentHeartbeat='не реже, чем раз в 5 минут';
 assert.equal(prompt.split(currentHeartbeat).length-1,1,'the installed heartbeat phrase occurs once');
 assert.ok(!prompt.includes('TTL 12')&&!prompt.includes('TTL 15'),'the installed prompt names no lease TTL');
 assert.equal(prompt.split(previousHeartbeat).length-1,0,'the old heartbeat phrase is no longer installed');
-assert.equal(sha(prompt.replace(currentHeartbeat,step1Heartbeat)),'59208a479175bcb829ca979f69c3f7370e9abc3b545978f899efbb128e17b4e7','reversing the TTL-wording cleanup reproduces the step-1 installed text');
-assert.equal(sha(prompt.replace(currentHeartbeat,previousHeartbeat)),'ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520','the ONLY installed change since AIR-476 is the heartbeat phrase');
+assert.equal(sha(syncS5.replace(currentHeartbeat,step1Heartbeat)),'59208a479175bcb829ca979f69c3f7370e9abc3b545978f899efbb128e17b4e7','reversing the TTL-wording cleanup reproduces the step-1 installed text');
+assert.equal(sha(syncS5.replace(currentHeartbeat,previousHeartbeat)),'ccfd5c1cbeb43cfe5b6fba0b173f880d31237eeb04e9dde6d2552e1f000da520','the only pre-deferred change since AIR-476 is the heartbeat phrase');
 assert.ok(prompt.includes('6а. EVIDENCE-AWARE SCORING')&&prompt.includes('matchSignals — ТОЛЬКО обоснованные положительные попадания'),'approved positive-only matchSignals scoring policy must be installed');
 assert.ok(prompt.includes('unknown НИКОГДА не превращай в минус')&&prompt.includes('Не повышай оценку автоматически'),'unknown and no-optimism guard retained');
 assert.ok(prompt.includes('**Основания оценки:**'),'human-readable evidence justification added to Saved Task report');
@@ -62,7 +67,7 @@ const step3b=text=>text.split('\n').filter(l=>l.startsWith('3б. '));
 assert.equal(step3b(prompt).length,1);assert.equal(step3b(dry).length,0,'the frozen A/B procedure does not inherit a new production-only research gate');
 for(const needle of ['ОБЯЗАТЕЛЬНО сделай ВТОРОЙ','OPEN — НЕ READ','concreteExecutionFinding','gateStatus=limited','gateStatus=blocked','временного аудита','НЕ поля fingerprint','search_snippet'])assert.ok(step3b(prompt)[0].includes(needle),'S5-C quality gate: '+needle);
 for(const needle of ['РУЧНУЮ проверку','rules.execution.fields','opposition_competence','НЕ strong','research.attempts','МАССИВ','sources[].usedFor','1–120 Unicode','prediction_batch_validate','Buffer, TextEncoder','НЕ заменяет','не прекращай весь run'])assert.ok(prompt.includes(needle),'production manual closed-schema guard: '+needle);
-const promptWithoutApprovedDecisionRef=prompt.replace('7а. DURABLE HOLD (ADR 0157, AIR-510).','7а. DURABLE HOLD.');
+const promptWithoutApprovedDecisionRef=prompt.replace('7а. DURABLE HOLD (ADR 0157, AIR-510).','7а. DURABLE HOLD.').replace('2. DEFERRED START (ADR 0193).','2. DEFERRED START.');
 for(const [name,value] of [['production',promptWithoutApprovedDecisionRef],['A/B dry-run',dry]])assert.ok(!/\b(?:AIR-\d+|ADR[ -]?\d+|S5-C)\b/.test(value),name+' executable prompt must not inherit unrelated historical ticket/decision IDs');
 assert.ok(/Для операций с IPTV используй ТОЛЬКО/.test(prompt)&&/для исследования фильмов используй доступные web search/i.test(prompt),'IPTV MCP boundary must allow independent film research');
 assert.ok(/не второй поисковый проход/i.test(prompt),'research gate must not duplicate the search budget');
@@ -71,16 +76,18 @@ assert.ok(/gateStatus=blocked \(при этом assessment\.research\.status=not
 for(const val of [prompt,dry])assert.ok(/attempted_found, но snippets сами по себе НЕ дают substantive quality gate/.test(val)&&/web_research в sources ЗАПРЕЩЁН/.test(val),'web_research snippets imply attempted_found, not substantive research and not blocked');
 assert.ok(!/другой v2 Task или ещё не выключенный legacy/.test(prompt),'scheduled prompt cannot assume historic enabled state');
 assert.ok(!/FROZEN_MANIFEST|tmdb_800815|5bd010a00102b73a9c8bd24ef67cb56ca17f86918aca7d4715de20752e5dca7e/.test(prompt),'production uses only the live batch manifest, never frozen S5-C test inputs');
-assert.ok(/prediction_batch_start\(\{trigger:'scheduled', manifestSize\}\)/.test(prompt),'production starts its own scheduled batch manifest');
+assert.ok(prompt.includes('prediction_batch_key({})')&&prompt.includes("prediction_batch_start({trigger:'scheduled',manifestSize,deferred:true,invocationKey})"),'production uses issued key and deferred start');
+for(const needle of ['phase=accepting','start_refused','start_failed','start_finished','deferred_start_ambiguous','manifest_pending','тем же ключом','180 с'])assert.ok(prompt.includes(needle),'deferred start contract: '+needle);
 assert.ok(prompt.includes("prediction_batch_manifest({runId,part:'envelope'})")&&prompt.includes("prediction_batch_manifest({runId,part:'profile'})")&&prompt.includes("prediction_batch_manifest({runId,part:'contract'})")&&prompt.includes("prediction_batch_manifest({runId,part:'film',filmId})"),'owned-run fallback fetches individual manifest parts, not a second start');
-assert.ok(prompt.includes("неизвестен runId")||prompt.includes("отсутствии достоверного runId"),'fallback fails closed if run identity is lost');
+assert.ok(prompt.includes("runId неизвестен")||prompt.includes("отсутствии достоверного runId"),'fallback fails closed if run identity is lost');
 assert.ok(!/runId:['"]dry-run['"]|dryRun:true|\{\{FROZEN_MANIFEST\}\}/.test(prompt),'production never invokes dry-run transport or synthetic S5-C runId');
 assert.ok(/prediction_batch_submit\(\{runId,epoch,items\}\)/.test(prompt),'production submit uses the owned live runId and epoch');
 // AIR-510: observed external-termination only. A recovered manifest must proceed; an unrecoverable manifest read error is api_error.
-const reconstructionInstruction=prompt.split('\n').find(line=>line.startsWith('2а. Восстановление'));
+const reconstructionInstruction=prompt.split('\n').find(line=>line.startsWith('2а. READBACK'));
 const stopInstruction=prompt.split('\n').find(line=>line.startsWith('10. Остановки'));
-assert.ok(reconstructionInstruction?.includes('После полного успешного восстановления ОБЯЗАТЕЛЬНО продолжай с шага 3'),'valid reconstruction cannot voluntarily stop');
+assert.ok(reconstructionInstruction?.includes('После полного успешного readback ОБЯЗАТЕЛЬНО продолжай с шага 3'),'valid reconstruction cannot voluntarily stop');
 assert.ok(reconstructionInstruction?.includes("reason:'api_error'"),'owned failed readback reports an observed API failure');
+assert.ok(reconstructionInstruction.indexOf("prediction_batch_manifest({runId,part:'envelope'})")<reconstructionInstruction.indexOf('prediction_heartbeat({runId})')&&reconstructionInstruction.indexOf('prediction_heartbeat({runId})')<reconstructionInstruction.indexOf("prediction_batch_manifest({runId,part:'profile'})"),'read envelope, heartbeat, remaining parts');
 assert.ok(!reconstructionInstruction.includes("reason:'external_termination'"),'failed readback is not classified as external termination');
 assert.ok(stopInstruction?.includes('external_termination разрешён ТОЛЬКО при явном'),'external termination requires observed signal');
 assert.ok(stopInstruction?.includes('НЕЛЬЗЯ выбирать external_termination'),'voluntary early exit is forbidden');
@@ -128,7 +135,7 @@ const calls=text=>new Set([...text.matchAll(/\b((?:prediction|enrichment|epg|rat
 const RETIRED=new Set(['prediction_start','prediction_next','prediction_submit','prediction_validate']);
 for(const t of RETIRED)assert.ok(!tools.has(t),t+' is retired and not registered');
 const forbiddenOf=text=>text.split('\n').find(l=>l.startsWith('ЗАПРЕЩЕНО:'));
-const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_manifest','prediction_batch_validate','prediction_batch_hold','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_validate','prediction_batch_submit']);
+const SCHEDULED_ALLOWED=new Set(['prediction_batch_key','prediction_batch_start','prediction_batch_manifest','prediction_batch_validate','prediction_batch_hold','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_validate','prediction_batch_submit']);
 for(const [text,allowed,forbidden] of [[prompt,SCHEDULED_ALLOWED,['prediction_start','prediction_next','prediction_submit','prediction_validate','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']],[dry,DRY_ALLOWED,['prediction_batch_start','prediction_start','prediction_next','prediction_submit','prediction_validate','prediction_heartbeat','prediction_complete','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']]]){
  const line=forbiddenOf(text);assert.ok(line,'forbidden list present');
  for(const t of forbidden){assert.ok(tools.has(t)||RETIRED.has(t),t+' is a real or a retired tool');assert.ok(line.includes(t),t+' is forbidden');}
@@ -321,16 +328,16 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
 }
 console.log('scheduled-task-prompt-v2 ok');
 
-// AIR-560: the S10 trial candidate is the canonical S5 prompt with only manifestSize=5 -> 10 (all occurrences); nothing is installed.
+// AIR-560: the S10 trial candidate is the frozen synchronous S5 prompt with only manifestSize=5 -> 10 (all occurrences); nothing is installed.
 {
  const s10doc=fs.readFileSync('docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2-s10-candidate.md','utf8');
  const m=s10doc.match(/---BEGIN PROMPT S10---\n([\s\S]*?)\n---END PROMPT S10---/);assert.ok(m,'S10 candidate block present');
  const s10=m[1],hdr=s10doc.match(/\*\*Text below:\*\* (\d+) characters, (\d+) UTF-8 bytes, SHA-256 `([0-9a-f]{64})`/);
  assert.ok(hdr&&s10.length===Number(hdr[1])&&Buffer.byteLength(s10,'utf8')===Number(hdr[2])&&sha(s10)===hdr[3],'S10 header matches text');
- assert.equal(prompt.split('manifestSize=5').length-1,3,'S5 has three manifestSize=5 occurrences');
- assert.equal(s10,prompt.split('manifestSize=5').join('manifestSize=10'),'S10 differs from S5 only by manifestSize');
+ assert.equal(syncS5.split('manifestSize=5').length-1,3,'S5 has three manifestSize=5 occurrences');
+ assert.equal(s10,syncS5.split('manifestSize=5').join('manifestSize=10'),'S10 differs from S5 only by manifestSize');
  assert.ok(s10.includes('generationSize=1')&&s10.includes('submitBatchSize=5')&&!s10.includes('manifestSize=5'),'other batch params unchanged');
- assert.ok(s10doc.includes(sha(prompt)),'S5 rollback hash recorded');
+ assert.ok(s10doc.includes(sha(syncS5)),'S5 rollback hash recorded');
 }
 
 
@@ -341,8 +348,8 @@ console.log('scheduled-task-prompt-v2 ok');
  assert.ok(match,'S7 executable candidate block exists');
  const s7=match[1],hdr=docS7.match(/\*\*Text below:\*\* (\d+) characters, (\d+) UTF-8 bytes, SHA-256 `([0-9a-f]{64})`/);
  assert.ok(hdr,'S7 candidate includes recorded integrity metadata');
- assert.equal(prompt.split('manifestSize=5').length-1,3,'S5 has three manifest references');
- assert.equal(s7,prompt.replaceAll('manifestSize=5','manifestSize=7'),'only the three manifest-size references differ');
+ assert.equal(syncS5.split('manifestSize=5').length-1,3,'S5 has three manifest references');
+ assert.equal(s7,syncS5.replaceAll('manifestSize=5','manifestSize=7'),'only the three manifest-size references differ');
  assert.equal(s7.split('manifestSize=7').length-1,3,'S7 candidate updates all three occurrences');
  assert.ok(!s7.includes('manifestSize=5'),'S7 contains no stale S5 manifest value');
  assert.equal(s7.length,Number(hdr[1]),'S7 character length');
@@ -350,5 +357,5 @@ console.log('scheduled-task-prompt-v2 ok');
  assert.equal(sha(s7),hdr[3],'S7 candidate SHA-256');
  assert.equal(sha(s7),'e91956a14b23a0fff1eec404b11e6f5f1fbcc3bf897f81c3f5293d381def6bcd','reviewed AIR-560 S7 candidate hash');
  for(const unchanged of ['generationSize=1','submitBatchSize=5','3б. RESEARCH QUALITY GATE','3в. RESEARCH AUDIT','3г. SOURCE SELECTION GATE','6а. EVIDENCE-AWARE SCORING','prediction_batch_hold({runId,epoch,items})'])assert.ok(s7.includes(unchanged),'S7 retains contract: '+unchanged);
- assert.ok(docS7.includes(sha(prompt)),'original S5 SHA-256 recorded for rollback');
+ assert.ok(docS7.includes(sha(syncS5)),'original S5 SHA-256 recorded for rollback');
 }

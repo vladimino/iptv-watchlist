@@ -1,6 +1,6 @@
 # Prompt delta — deferred start of the Predictions batch v2 Tasks (ADR 0193)
 
-**Status: proposal for the Controller, not an installed prompt.** The installed prompt of the four enabled Tasks (`:00/:15/:30/:45`) is the one snapshotted in [`hourly-predictions-batch-v2.md`](hourly-predictions-batch-v2.md); it is unchanged by the Worker delivery. This note is the **smallest change** of that prompt that moves a Task from the synchronous start to the deferred start of [ADR 0193](../../adr/0193-deferred-batch-start-with-server-issued-key.md). It does not touch the research protocol, the scoring rules, `manifestSize=5`, `generationSize=1`, `submitBatchSize=5`, the schedule, the timezone or the enabled state. The executor of the Worker change does not edit Tasks; the owner and the Controller do, after delivery and after reading the real tool schema.
+**Status: rollout reference, implemented on 21 November 2026 UTC.** The installed prompt of the four enabled Tasks (`:00/:15/:30/:45`) is the one snapshotted in [`hourly-predictions-batch-v2.md`](hourly-predictions-batch-v2.md); the former synchronous text is preserved in [hourly-predictions-batch-v2-synchronous-s5.md](hourly-predictions-batch-v2-synchronous-s5.md). This note describes the change from the synchronous start to the deferred start of [ADR 0193](../../adr/0193-deferred-batch-start-with-server-issued-key.md). It does not touch the research protocol, the scoring rules, `manifestSize=5`, `generationSize=1`, `submitBatchSize=5`, the schedule, the timezone or the enabled state. The executor of the Worker change does not edit Tasks; the owner and the Controller do, after delivery and after reading the real tool schema.
 
 Before any edit, the Controller reads the live tool list (`prediction_batch_key` and `prediction_batch_start.deferred` must be present), the registry prompts of all four Tasks, and removes the temporary `:15` probe. The four Tasks move together.
 
@@ -36,7 +36,7 @@ Before any edit, the Controller reads the live tool list (`prediction_batch_key`
 
 ## What the Controller must check
 
-- The four prompts differ only by this delta and stay byte-identical to each other; record the new length and SHA-256 in the snapshot note when installed.
+- The four prompts differ only by this delta and stay byte-identical to each other; the installed length and SHA-256 are pinned in the snapshot and rollout evidence.
 - `tests/scheduled-task-prompt-v2.mjs` pins the *installed* snapshot; it changes only when the snapshot file is replaced after a verified install.
 - The temporary probe and any one-Task pilot are not used; the entry `:48` stays disabled.
 - The installed MCP instructions, the tool descriptions and the runner contract say that a deferred start answers a receipt and that the manifest is read with `prediction_batch_manifest`; read the live `tools/list` before the edit.
