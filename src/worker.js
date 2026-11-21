@@ -31,6 +31,16 @@ async function viewIndexD1Version(env){
  return 'd1:p'+prediction.generation+'.q'+prediction.queueGeneration+'.r'+ratings.generation;
 }
 const loadJSON=async(env,key,options=null)=>{
+ if(EPG_CHECKPOINT_KEYS.has(key)){
+  const gate=await epgCheckpointState(env);
+  if(gate.state==='closed')throw checkpointError('unavailable');
+  if(gate.state==='d1'){
+   if(key==='sync.json')return loadCheckpointRun(env);
+   const ingest=await EpgCheckpointD1.readIngest(env);
+   if(!ingest.ok)throw checkpointError('unavailable');
+   return ingest.status;
+  }
+ }
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
   const routed=await DiscoveryAuthority.routeRead(env,key,options);
   if(routed.handled)return routed.value;
@@ -839,8 +849,46 @@ async function putStoredJson(env,key,text){
  if((key==='titles.json'||key==='people.json')&&await frozenCanonicalMirrorsLocked(env))return {skipped:'canonical_mirror_frozen'};
  return env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'}});
 }
+// ADR 0185. The EPG run checkpoint and the ingest status are a D1 authority only while the checkpoint marker says `d1`. With the tables absent (schema below 30) or the
+// marker `r2` the R2 objects serve exactly as before; `closed` (an unreadable or contradicting state) refuses, never R2. The marker is read at most once per two seconds per
+// database binding: every write in d1 mode is also fenced by the authority generation inside its batch, and the cutover procedure drains the writers before it switches.
+const EPG_CHECKPOINT_KEYS=new Set(['sync.json','watchlist-ingest.json']);
+const checkpointMarks=new WeakMap();
+async function epgCheckpointState(env){
+ if(typeof EpgCheckpointD1==='undefined')return {state:'r2',writes:'open'};
+ const binding=EpgCheckpointD1.bindingOf(env),db=binding&&typeof binding==='object'?binding:null,now=Date.now(),cached=db?checkpointMarks.get(db):null;
+ if(cached&&now-cached.at<2000)return cached.value;
+ const gate=await EpgCheckpointD1.readAuthority(env);
+ const value=gate.state==='d1'?{state:'d1',writes:gate.writes}:gate.state==='r2'?{state:'r2',writes:gate.writes}:gate.state==='legacy'?{state:'r2',writes:'open'}:{state:'closed'};
+ if(db)checkpointMarks.set(db,{at:now,value});
+ return value;
+}
+function checkpointError(reason){const error=new Error('epg_checkpoint_'+reason);error.code='epg_checkpoint_'+reason;return error;}
+async function loadCheckpointRun(env){
+ const out=await EpgCheckpointD1.loadRun(env);
+ if(!out.ok)throw checkpointError(out.reason==='malformed'?'malformed':'unavailable');
+ return out.run;
+}
+// The fence of one checkpoint write: the step the Workflow or the external path holds, never a fence-less fallback.
+function checkpointStep(env){
+ if(!env?.epgStep||env.epgFence==null)throw checkpointError('unfenced');
+ const now=Date.now(),margin=typeof EpgOrchestration!=='undefined'?EpgOrchestration.BOUNDARY_MARGIN_MS:0;
+ return {step:env.epgStep,fence:env.epgFence,leaseBound:new Date(now+margin).toISOString(),now};
+}
 const saveJSON=async(env,key,value)=>{
  await epgStepGuard(env);
+ if(EPG_CHECKPOINT_KEYS.has(key)){
+  const gate=await epgCheckpointState(env);
+  if(gate.state==='closed')throw checkpointError('unavailable');
+  if(gate.state==='r2'&&gate.writes==='held')throw checkpointError('writes_held');
+  if(gate.state==='d1'){
+   // The ingest status is written only by run creation and by the failure recorder; a run reaches `complete` only through completeCheckpointRun.
+   if(key!=='sync.json')throw checkpointError('route');
+   const out=await EpgCheckpointD1.saveRun(env,value,checkpointStep(env));
+   if(!out.ok)throw checkpointError(out.reason);
+   return {etag:'d1'};
+  }
+ }
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
   const routed=await DiscoveryAuthority.routeWrite(env,key,value);
   if(routed.handled)return;
@@ -1052,7 +1100,17 @@ async function setStarted(env,body){
   return json({error:committed.reason==='writes_held'?STARTED_READ_ONLY:STARTED_UNAVAILABLE},503);
  }
 }
+// A failure of the ingest never masks the error that caused it: a superseded failure (an older attempt) and a storage error are logged and dropped.
+async function recordCheckpointIngestFailure(env,attempt,lastSuccessAt){
+ try{
+  const out=await EpgCheckpointD1.recordIngestFailure(env,{attempt,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});
+  if(!out.ok||!out.applied){try{console.log(JSON.stringify({event:'epg_ingest_failure_dropped',reason:out.ok?'superseded_failure':out.reason}));}catch{}}
+ }catch{try{console.log(JSON.stringify({event:'epg_ingest_failure_dropped',reason:'unavailable'}));}catch{}}
+}
 async function beginSync(env){
+ // ADR 0185: every attempt has an id and a start time taken before the fetch; the ingest status is ordered by them, not by when an attempt finishes.
+ const attempt={id:crypto.randomUUID(),startedAt:new Date().toISOString()};
+ const checkpointD1=(await epgCheckpointState(env)).state==='d1';
  const current=await loadJSON(env,'sync.json');
  // ADR 0092: an unfinished ledger seal is durable state, not a freshness question. Its run is returned whatever its age, so a cancelled step is resumed by the same runId and never replaced by a new run.
  if(current?.stage==='seal')return {runId:current.runId,stage:current.stage,remaining:current.remaining,seal:current.seal?.phase||null};
@@ -1073,8 +1131,8 @@ async function beginSync(env){
  if(gate.active&&current)await flushRemovalHandover(env,current);
  const carried=!gate.active&&current?{...(current.removalRefs?{removalRefs:current.removalRefs}:{}),...(current.removalLookups?{removalLookups:current.removalLookups}:{})}:{};
  const lastEpgPublishedAt=typeof epgCarriedPublishedAt==='function'?epgCarriedPublishedAt(current):null;
- const startedNow=new Date();const run={runId:crypto.randomUUID(),startedAt:startedNow.toISOString(),...(typeof OrchestrationPolicy!=='undefined'&&pausePresent?{runKey:OrchestrationPolicy.madridDayKey(startedNow.getTime())}:{}),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...carried,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{}),...(lastEpgPublishedAt?{lastEpgPublishedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
- }catch(e){const previous=await loadJSON(env,'sync.json'),ingest=await loadJSON(env,'watchlist-ingest.json'),lastSuccessAt=previous?.stage==='complete'&&!previous.error?previous.updatedAt:ingest?.lastSuccessAt||null;await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});throw e;}
+ const startedNow=new Date();const run={runId:crypto.randomUUID(),startedAt:startedNow.toISOString(),...(typeof OrchestrationPolicy!=='undefined'&&pausePresent?{runKey:OrchestrationPolicy.madridDayKey(startedNow.getTime())}:{}),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...carried,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{}),...(lastEpgPublishedAt?{lastEpgPublishedAt}:{})};if(checkpointD1){const created=await EpgCheckpointD1.createRun(env,run,{...checkpointStep(env),attempt});if(!created.ok)throw checkpointError(created.reason);}else{await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});}return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
+ }catch(e){const previous=await loadJSON(env,'sync.json'),ingest=await loadJSON(env,'watchlist-ingest.json'),lastSuccessAt=previous?.stage==='complete'&&!previous.error?previous.updatedAt:ingest?.lastSuccessAt||null;if(checkpointD1)await recordCheckpointIngestFailure(env,attempt,lastSuccessAt);else await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});throw e;}
 }
 // AIR-533: one sanitized `metadata_sync_breakdown` per step on EVERY outcome (`ok`, `incomplete` for an unsettled canonical step, `handled_error`, `thrown`):
 // milliseconds and counts only, no Film id. It observes the step and changes none of its results, retries or exceptions.
@@ -1327,7 +1385,17 @@ async function finishSyncPersist(env,run,report){
  do{scan=await persistScan(env,run,report);}while(scan==='continue');
  await persistEvents(env,run,report);
 }
-async function finishSync(env,run,report){await finishSyncPersist(env,run,report);await prepareEpgCompletion(env,run,report);run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);await flushEpgEvent(env,run);await flushWatchlistEvent(env,run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=(String(e.message)+(e?.guard?':'+String(e.guard):'')).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
+async function finishSync(env,run,report){
+ // ADR 0185: in d1 mode this route attempts the queue refresh BEFORE completion, like the seal route, so the one completion operation can certify. Its error stays best-effort.
+ if((await epgCheckpointState(env)).state==='d1'){
+  await finishSyncPersist(env,run,report);await prepareEpgCompletion(env,run,report);
+  try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=(String(e.message)+(e?.guard?':'+String(e.guard):'')).slice(0,160);}
+  run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;
+  const certificate=await completeCheckpointRun(env,run);
+  await flushEpgEvent(env,run);await flushWatchlistEvent(env,run);
+  return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,...(certificate?{certificate}:{})};
+ }
+ await finishSyncPersist(env,run,report);await prepareEpgCompletion(env,run,report);run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);await flushEpgEvent(env,run);await flushWatchlistEvent(env,run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=(String(e.message)+(e?.guard?':'+String(e.guard):'')).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 // AIR-212: opens the discovery series for the generation this run has just published, before the commit's
 // memory-heavy tail (finishSync, the prediction queue, ratings). queueDiscovery is idempotent and fenced: it
 // refuses a generation that is no longer the published one, keeps a live writer and keeps the progress of a
@@ -2158,6 +2226,30 @@ async function certifyCompletedRun(env,run){
   return 'owed';
  }
 }
+// ADR 0185 decision 4. In `d1` mode this is the ONLY way a run reaches `complete`, for both routes (sealQueueStep and finishSync), and both call it after the
+// queue refresh was attempted. One D1 batch completes the checkpoint, removes the film rows and, when the certificate column and the pause table exist, certifies
+// the run and clears the pause (a conditional update: a non-matching certificate still lets the run complete). Never throws for the certificate: the outcome is
+// `certified`, `absent` (no certificate column), `skipped` (no pause table or no frozen day) or `owed`. A refused or failed completion throws, as a failed save does.
+async function completeCheckpointRun(env,run){
+ const step=checkpointStep(env);
+ let certify=[],outcome='skipped';
+ try{
+  if(typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.certifyUpdateStatements==='function'){
+   const day=await publicationRunKey(env,run,run.runId);
+   if(day){
+    if(!await PublishedEpg.certificateColumnPresent(env))outcome='absent';
+    else{certify=PublishedEpg.certifyUpdateStatements({programmeRunId:run.runId,madridRunKey:day,now:step.now,pause:await PublishedEpg.pauseTablePresent(env)});outcome='owed';}
+   }
+  }
+ }catch{certify=[];outcome='owed';}
+ const out=await EpgCheckpointD1.completeRun(env,run,{...step,queueAttempted:true,certify});
+ if(!out.ok)throw checkpointError(out.reason);
+ if(outcome==='owed'){
+  try{const read=await PublishedEpg.readCertificate(env);outcome=read.column==='present'&&read.finalizedRunId===run.runId?'certified':'owed';}catch{outcome='owed';}
+ }
+ try{epgPhase(run.runId,'seal_certify','exit',{outcome});}catch{}
+ return outcome;
+}
 async function sealQueueStep(env,run,deadline=Infinity){
  const payload=await sealPayload(env,run);
  const report=payload.report;
@@ -2167,10 +2259,12 @@ async function sealQueueStep(env,run,deadline=Infinity){
  if(!out.done)return await sealCheckpoint(env,run,out);
  await prepareEpgCompletion(env,run,report);
  run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;delete run.seal;
- await saveJSON(env,'sync.json',run);
  // ADR 0175 decision 4: the certificate comes after the durable `complete` save and before the event flushes below. A failure never stops the flushes; the
- // run stays certificate-owed and `EpgOrchestration.certifyComplete` repairs it from the hourly `ensure`.
- const certificate=await certifyCompletedRun(env,run);
+ // run stays certificate-owed and `EpgOrchestration.certifyComplete` repairs it from the hourly `ensure`. ADR 0185: with the checkpoint in D1 the complete save and
+ // the certificate are ONE batch (completeCheckpointRun) and the separate certify call is not made.
+ let certificate;
+ if((await epgCheckpointState(env)).state==='d1')certificate=await completeCheckpointRun(env,run);
+ else{await saveJSON(env,'sync.json',run);certificate=await certifyCompletedRun(env,run);}
  await flushEpgEvent(env,run);
  await flushWatchlistEvent(env,run);
  if(run.ratingsPipeline==='separate'&&run.removalRefs&&await watchlistEventStored(env,run)&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
