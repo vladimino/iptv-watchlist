@@ -74,24 +74,50 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  assert.deepEqual(JSON.parse(r.stdout),{configured:false,writes:false,writeState:'none'});
 }
 
-// ===== 2. apply: schema 29 only, drain proof first, marker r2/open/0 readback =====
+// ===== 2. apply: schema only; none of the cutover evidence; refuses only an executing EPG step =====
 {
- const env={...open('0029_started_authority.sql'),r2:bucket(frozen)};
- await stop(call('hold',{generation:0,...EV},env),'schema_unexpected');
- for(const [options,failure] of [[{lease:'live'},'step_lease_live'],[{phase:'running'},'orchestration_not_done'],[{nextWake:'2026-11-20T18:10:00.000Z'},'next_start_too_close'],[{nextWake:'2026-11-20T17:00:00.000Z'},'next_start_too_close'],[{control:{runKey:'2026-11-19'}},'control_not_current_day'],[{control:{runId:'another-run'}},'run_identity_mismatch'],[{pause:'paused'},'discovery_pause_not_clear'],[{finalized:null},'run_identity_mismatch']]){
-  const bad={...open('0029_started_authority.sql',options),r2:bucket(frozen)};
-  const error=await stop(call('apply',{...EV},bad),'drain_refused');
-  assert.ok(error.details.failures.includes(failure),failure);
-  assert.equal(rows(bad.file,'SELECT version FROM schema_contract')[0].version,29,'a refused apply changes nothing');
+ // The schema-only apply copies nothing and switches nothing, so it needs no completed run of today, no Workflow evidence, no R2 identity and no matching version.
+ assert.equal(Op.parseArgs(['node','x','--apply','--target','iptv','--confirm','apply']).command,'apply','apply parses without any evidence flag');
+ const states=[];const trackedCtx=()=>({track:state=>states.push(state)});
+ const NEXT_DAY=Date.parse('2026-11-21T08:00:00.000Z');
+ for(const options of [{},{control:{runKey:'2026-11-19',versionId:'an-older-version',runId:'another-run'}},{nextWake:'2026-11-21T08:10:00.000Z',pause:'paused'},{finalized:null},{control:{instanceId:'another-instance'}}]){
+  const env={...open('0029_started_authority.sql',options),r2:bucket(frozen)};
+  let r2Calls=0;
+  const counted={head:async()=>{r2Calls++;throw new Error('R2 must not be read');},get:async()=>{r2Calls++;throw new Error('R2 must not be read');}};
+  states.length=0;
+  const result=await Op.execute('apply',{},{binding:env.db,readStore:counted,now:NEXT_DAY,ctx:trackedCtx()});
+  assert.equal(result.writeState,'committed');assert.deepEqual(result.marker,{mode:'r2',writes:'open',generation:0,cas:1});
+  assert.equal(rows(env.file,'SELECT version FROM schema_contract')[0].version,30);
+  assert.equal(r2Calls,0,'apply never reads R2');assert.equal(env.r2.puts.length,0,'apply never writes R2');
+  assert.deepEqual(counts(env.file),{run:0,body:0,film:0,ingest:0},'apply copies nothing');
+  assert.equal(states.at(-1),'committed');
+  // the cutover gates are untouched: with a stale run, version or no evidence a hold is still refused
+  await stop(Op.execute('hold',{generation:0,...EV},{binding:env.db,readStore:env.r2.read,now:NEXT_DAY}),'drain_refused');
  }
- const seal=bucket({...frozen,'sync.json':JSON.stringify({...JSON.parse(SYNC),stage:'seal',seal:{phase:'ledger'},completedAt:undefined})});
- await stop(call('apply',{...EV},{...open('0029_started_authority.sql'),r2:seal}),'drain_refused');
- const result=await call('apply',{...EV},env);
- assert.equal(result.writeState,'committed');assert.deepEqual(result.marker,{mode:'r2',writes:'open',generation:0,cas:1});
- assert.equal(rows(env.file,'SELECT version FROM schema_contract')[0].version,30);
- await stop(call('apply',{...EV},env),'already_applied');
+ // the one liveness rule: no executing EPG step
+ for(const [options,busy] of [[{lease:'live'},'step_lease_live'],[{phase:'running'},'epg_phase_running'],[{phase:'starting'},'epg_phase_starting'],[{phase:'waiting'},'epg_phase_waiting']]){
+  const env={...open('0029_started_authority.sql',options),r2:bucket(frozen)};
+  states.length=0;
+  const error=await stop(Op.execute('apply',{},{binding:env.db,now:NOW,ctx:trackedCtx()}),'writer_active');
+  assert.equal(error.details.busy,busy);
+  assert.equal(rows(env.file,'SELECT version FROM schema_contract')[0].version,29,'a refused apply changes nothing');
+  assert.equal(states.length,0,'refused before any write');
+ }
+ // wrong or partial schema
+ const applied=open('0029_started_authority.sql');await Op.execute('apply',{},{binding:applied.db,now:NOW});
+ await stop(Op.execute('apply',{},{binding:applied.db,now:NOW}),'already_applied');
+ await stop(Op.execute('apply',{},{binding:open('0028_filter_preset_authority.sql').db,now:NOW}),'schema_unexpected');
+ const partial=open('0029_started_authority.sql');sqlite(partial.file,'CREATE TABLE epg_checkpoint_cas (id INTEGER PRIMARY KEY)');
+ await stop(Op.execute('apply',{},{binding:partial.db,now:NOW}),'partial_schema');
+ // a failing statement: the file guards itself (exactly v29 with the started tables); the batch is atomic and the outcome is read back, never retried
+ const broken=open('0029_started_authority.sql');sqlite(broken.file,'DROP TABLE started_mark');
+ states.length=0;
+ await stop(Op.execute('apply',{},{binding:broken.db,now:NOW,ctx:trackedCtx()}),'statement_failed');
+ assert.equal(rows(broken.file,'SELECT version FROM schema_contract')[0].version,29,'the failed apply left schema 29');
+ assert.equal(rows(broken.file,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'epg_checkpoint%'")[0].n,0,'and no table');
+ assert.equal(states.at(-1),'none','the write state of a rolled-back apply is none');
  const v28={...open('0028_filter_preset_authority.sql'),r2:bucket(frozen)};
- await stop(call('apply',{...EV},v28),'schema_unexpected');
+ await stop(call('hold',{generation:0,...EV},v28),'schema_unexpected');
 }
 
 // ===== 3. status measures, writes nothing, prints no payload =====
