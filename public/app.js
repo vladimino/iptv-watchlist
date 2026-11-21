@@ -2693,6 +2693,14 @@ function predictionDetailsHTML(details){
 function skippedStartHTML(event){
  const safe=v=>typeof v==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(v)?v:null,ageMs=Number.isFinite(event.holderAgeMs)&&event.holderAgeMs>=0?event.holderAgeMs:null;
  const trigger=event.trigger==='scheduled'?'по расписанию':event.trigger==='manual'?'вручную':null,holder=safe(event.holderRunId),request=safe(event.requestId);
+ // AIR-575 (ADR 0189): a start refused because the catalog was held by an EPG publication. Fixed sentences chosen by two known codes; nothing else from the stored event is printed.
+ if(event.reason==='catalog_held'){
+  const cause=event.cause==='discovery_fence'||event.cause==='discovery_incomplete'?event.cause:null;
+  const why=cause==='discovery_fence'?'публикация программы держит каталог':cause==='discovery_incomplete'?'каталог ещё загружается после публикации программы':'каталог временно недоступен';
+  const held=[`<p class="event-note">Попытка запуска${trigger?` (${trigger})`:''} отклонена: ${why}. Фильмы не обрабатывались, очередь не менялась. Следующий запуск повторит попытку.</p>`];
+  if(request)held.push(`<p class="event-note">Запрос: <code>${escapeHTML(request)}</code>. Код: <code>prediction_catalog_held</code>${cause?` · причина: <code>${cause}</code>`:''}.</p>`);
+  return `<p>Запуск прогнозов пропущен: каталог временно недоступен</p>${held.join('')}`;
+ }
  const lines=[`<p class="event-note">Попытка запуска${trigger?` (${trigger})`:''} отклонена: уже работает другой пакет. Фильмы не обрабатывались, очередь не менялась.</p>`];
  if(holder)lines.push(`<p class="event-note">Выполняется пакет <code>${escapeHTML(holder.slice(0,8))}</code>${ageMs!==null?` · работает ${Math.max(0,Math.round(ageMs/60000))} мин`:''}.</p>`);
  if(request)lines.push(`<p class="event-note">Запрос: <code>${escapeHTML(request)}</code>. Код: <code>already_running</code>.</p>`);
