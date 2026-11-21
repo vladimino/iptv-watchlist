@@ -161,8 +161,8 @@ async function observation(factKey, fact, value, observedAt, source) {
   assert.equal(created.rating.value, 4);
   assert.equal(created.watched.value, true);
   assert.equal(created.rating.source, 'letterboxd_export');
-  assert.equal(read(Facts.FACTS_KEYS.viewIndex).rateonly.actualRating, 4);
-  assert.equal(read(Facts.FACTS_KEYS.viewIndex).tmdb_9001.actualRating, 4);
+  // AIR-558: the projection goes to D1 ratings_view only; no raw view-index object is written.
+  assert.equal(read(Facts.FACTS_KEYS.viewIndex), undefined);
   assert.equal(read(Facts.recordKey(newerKey)).rating.value, 5, 'a newer stored rating is kept');
   assert.equal(read(Facts.recordKey(keepKey)).rating.value, 3, 'an already current rating is kept');
   assert.equal(read(Facts.recordKey('lb-clash')), undefined, 'an alias conflict is not written');
@@ -197,7 +197,7 @@ async function observation(factKey, fact, value, observedAt, source) {
   const rolled = await send('/api/admin/letterboxd-archive/rollback', {json: {confirmation: rollbackIssued.body.confirmation}});
   assert.equal(rolled.status, 200, JSON.stringify(rolled.body));
   assert.equal(read(Facts.recordKey('tmdb-9001')).rating.value, 5, 'a later observation survives rollback');
-  assert.equal(read(Facts.FACTS_KEYS.viewIndex).rateonly.actualRating, 5);
+  assert.equal(read(Facts.FACTS_KEYS.viewIndex), undefined); // AIR-558: no raw view-index write
   assert.equal(rolled.body.rollback.superseded > 0, true);
 }
 

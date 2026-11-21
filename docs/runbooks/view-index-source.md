@@ -1,49 +1,48 @@
-# View index read source: selector, switch, rollback and retirement
+# View index read source: retired selector, binding removal and recovery boundary
 
-This runbook describes the temporary read selector `VIEW_INDEX_SOURCE` of `enrichment/view-index.json` ([ADR 0183](../adr/0183-view-index-membership-from-d1-rows.md), [contract](../reference/domain/view-index-read-model.md#read-source-selector), [flag register](../reference/feature-flags.md)). It grants **no authorization**: setting the binding, comparing production data, retiring the raw writers or deleting the raw object are separate owner-approved operations (L3, with holdpoints) under [authorization and escalation](../process/authorization-and-escalation.md). Deploying code never changes the selector.
+This page is **no longer an operating runbook for a selector**. The temporary read selector `VIEW_INDEX_SOURCE` of the view index ([ADR 0183](../adr/0183-view-index-membership-from-d1-rows.md)) is retired by [ADR 0189](../adr/0189-retire-view-index-selector-and-raw-object.md): the view index is always derived from D1 ([contract](../reference/domain/view-index-read-model.md), [flag register](../reference/feature-flags.md)). The page is kept for its name, which other documents link to. It grants **no authorization**: removing the Cloudflare binding, deleting the raw R2 object or running any production read is a separate owner-approved operation under [authorization and escalation](../process/authorization-and-escalation.md).
 
-## What the selector does
+## History in brief
 
-| Value | Reads | Raw object | Raw writers |
-| --- | --- | --- | --- |
-| absent, empty or anything but exactly `d1` | The raw object, then the D1 overlays (the long-standing behavior) | Read | Write |
-| `d1` | D1 only: the union of the film ids of `prediction_pointer`, `prediction_fingerprint` and `ratings_view`, with each entry built by the overlay rule and the compiled seed laid over it afterwards | **Not read** | **Still write**, so the object stays current |
+ADR 0183 made the view index derivable from `prediction_pointer`, `prediction_fingerprint` and `ratings_view` and added the selector (`r2` by default, `d1` optional) while every raw writer kept the R2 object `enrichment/view-index.json` current, so `r2` was a complete rollback. After the owner's acceptance of the D1 read source, ADR 0189 retired the selector, the raw read paths and the raw writers in code. The dated verification of the rollout and of the retirement is in the [evidence note](../evidence/d1-migration/air-558-view-index-selector-retirement-2026-11-21.md); this page does not assert the production value of the binding.
 
-Because the raw writers are not behind the selector, the read path can be switched back at any time with no data to restore. Reads never write: every `d1` read is a `SELECT`, and the refusals below are not retried against the raw object.
+## Outcome of the retirement
 
-## Preflight (read-only, L0)
+| Aspect | State |
+| --- | --- |
+| Reads | D1 only (`derivedViewIndex`). A prediction domain that is not `d1`, a ratings domain that is not `d1` and open, a missing database binding or a table above 20,000 rows refuses with the domain's own code (503); there is no raw fallback |
+| Raw writers | Removed: `updateViewIndex`, `ensureInitialRatings`, the mood backfill, the fingerprint-view backfill and the Letterboxd compare-and-swap writers. `POST /api/enrichment/moods/backfill` and `POST /api/enrichment/fingerprint-view/backfill` answer `410 Gone` |
+| `VIEW_INDEX_SOURCE` | Retired in the `feature_flags` registry (`retired: true`, `effective: null`). A set binding is inert; absence is the target state; `r2` is **no rollback** |
+| Raw object `enrichment/view-index.json` | Not deleted by the code change, and not used. It is stale from the first deploy of the retirement on |
+| Operator Letterboxd scripts | Require `--view-index-d1 <file>` from `scripts/view-index-d1-export.mjs`; no raw fallback |
 
-1. Read the live binding with the MCP tool `feature_flags` (`VIEW_INDEX_SOURCE`: `state`, `raw`, `valid`, `effective`). A code default, an earlier comment or a deployment alone does not establish the binding.
-2. Read the authority markers and the schema version with `SELECT` only: `prediction_domain_authority` must be `d1` (`writes` `open` or `held`), `ratings_domain_authority` must be `d1` and `open`, `schema_contract.version` at least the prediction and ratings contracts. Under `d1` any other state refuses.
-3. Read the table sizes (`SELECT COUNT(*)` of the three tables). Each table is capped at 20,000 rows; a table above it refuses. Record the margin.
-4. A fresh parity comparison of the raw object's key set against the three tables is a **new owner-authorized read-only operation** (the one approved in the ADR was used on a single instant): run `scripts/view-index-membership-parity.mjs` on the exported key sets and review `removedKeys`, `newKeys`, the forecast and feature gains and the seed categories with the owner before the switch.
+## Binding removal (owner-approved settings change)
 
-## Switch (owner-approved L3 plan, holdpoints)
+Preflight (read-only):
 
-1. Record the before-state on permitted read-only routes: the footer counts (`collection`, `recommendations`, `coverage`), the number of Finds candidates and the Admin health `viewIndex.entries`.
-2. Set the Worker binding `VIEW_INDEX_SOURCE` to exactly `d1` in the Cloudflare Worker settings (`keep_vars: true` keeps a dashboard variable across deploys, so the value stays until it is removed). Do not set it from a script or a request.
-3. Verify the effective setting with `feature_flags` (`effective: d1`), then the same routes as in step 1 and compare. Differences must be exactly the classified ones. Watch the Worker's request outcomes, CPU and memory in Workers Observability for the routes that build the view (`/api/enrichment/view`, `/api/enrichment/footer/status`, `/api/catalog/available`, `/api/admin/limbo`, `/api/admin/health`); a `503` with `prediction_domain_*` or `ratings_domain_*` is a refusal, not an outage of the selector.
-4. Hold for the stabilization the plan names before any retirement step.
+1. Read `feature_flags` (`VIEW_INDEX_SOURCE`): `state`, `raw`, `valid`, `issue`, `effective`. While the binding is set it reads `issue: retired` and `effective: null`. A code default, a comment or a deployment does not establish the binding.
+2. Confirm the deployed version is one that carries the retirement (the registry entry is `retired: true`), so that a stale binding changes nothing.
 
-## Rollback
+Removal is a Cloudflare Worker settings change by the owner (`keep_vars: true` keeps a dashboard variable across deploys, so it stays until it is removed). Readback: `feature_flags` returns `state: absent`, `raw: null`, `effective: null`. The removal changes no behavior, because the Worker already ignores the binding. Record the observation in the [feature flag ledger](../reference/feature-flags.md) with the authorizing card.
 
-Set `VIEW_INDEX_SOURCE` to `r2` or remove the binding, then read `feature_flags` again (`effective: r2`) and the routes above. The raw object was kept current by its writers, so there is nothing to restore and no cache to clear: the next request reads the raw object. A code rollback does not change the binding; the binding is restored explicitly. After the writers are retired (below) this rollback no longer exists, so that step has its own gate.
+## Loss of the simple rollback and the recovery boundary
 
-## Refusals under `d1`
+Setting `VIEW_INDEX_SOURCE` to `r2` or removing the binding no longer restores anything; there is no longer a raw read path to switch back to. A code rollback to a version that reads the selector finds a raw object that is stale from the first deploy of the retirement on, and it must not be used as a source unless it is rebuilt from D1. Returning to the raw object is not a routine: it needs an **owner-approved plan** that restores the code, sets the binding and rebuilds the object from D1 (a D1 to R2 export), none of which exists as a script or a procedure today. Code rollback does not revert R2 or D1 data ([deployment runbook](deployment.md)).
+
+## Refusals
+
+The refusals of the D1 derivation are the former `d1` ones and are the only failure modes of the read path:
 
 | Code | Meaning | Action |
 | --- | --- | --- |
-| `prediction_domain_not_authoritative` | No database binding, or the prediction marker is not `d1` | Fix the authority or roll back; never read around it |
-| `prediction_domain_unavailable` | Marker or schema unreadable, or a stored row is malformed | Read the marker; roll back if it persists |
-| `prediction_domain_budget` (`guard: overlay_rows`) | A prediction table holds more than 20,000 rows | Roll back and review the cap |
-| `ratings_domain_not_authoritative` | The ratings cutover is `held`, or the schema is not installed | Resolve the cutover or roll back |
+| `prediction_domain_not_authoritative` | No database binding, or the prediction marker is not `d1` | Fix the authority; never read around it |
+| `prediction_domain_unavailable` | Marker or schema unreadable, or a stored row is malformed | Read the marker; investigate |
+| `prediction_domain_budget` (`guard: overlay_rows`) | A prediction table holds more than 20,000 rows | Review the cap |
+| `ratings_domain_not_authoritative` | The ratings cutover is `held`, or the schema is not installed | Resolve the cutover |
 | `ratings_domain_unavailable` | The ratings marker is unreadable or the table is over the cap | As above |
 
-## Reads that are not behind the selector
+## Remaining separate owner decisions
 
-- `GET /api/enrichment/diagnostics/export` returns the raw bytes and the ETag of the stored object as an audit record.
-- The operator Letterboxd scripts and `scripts/r2-snapshot-export.mjs` read a snapshot of the raw object by default. It is current while the raw writers run. The scripts accept `--view-index-d1 <file>` instead ([contract](../reference/domain/view-index-read-model.md#read-source-selector)); the file comes from `scripts/view-index-d1-export.mjs`, a read-only D1 export (`SELECT` only, refuses unless the prediction and ratings domains are authoritative, no retry, private never-overwritten output). **Running the export against production is a separate owner-approved read operation**, like the snapshot export; the script and its tests grant nothing. After the writers are retired the raw object of a snapshot is stale, so every use of these tools must pass the D1 export.
-
-## Retirement (separately authorized, after stabilization)
-
-In order, each with its own owner decision: (0) the operator tools run with `--view-index-d1` for every real use (the default raw input is stale once the writers stop); (1) a code change that stops the raw writers (`updateViewIndex`, `ensureInitialRatings`, the mood and fingerprint backfills and the Letterboxd compare-and-swap writers) and removes the raw read path and the selector; (2) removal of the `VIEW_INDEX_SOURCE` binding from the Worker settings and a readback that it is absent (`feature_flags` `state: absent`); (3) retirement of the raw object under an owner-approved R2 operation. The flag-removal card links the rollout card as a native prerequisite, as the [feature flag lifecycle](../process/agent-workflow.md#feature-flag-lifecycle-plan-test-switch-remove) requires.
+- Removal of the `VIEW_INDEX_SOURCE` binding, with the `feature_flags` readback above.
+- Retirement of the raw object under an owner-approved R2 operation (the object and snapshot copies of it remain until then).
+- Running `scripts/view-index-d1-export.mjs` against production is a separate owner-approved read operation, like the snapshot export; the script and its tests grant nothing.

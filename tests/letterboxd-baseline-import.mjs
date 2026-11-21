@@ -1,3 +1,4 @@
+import {installRawViewProjection} from './letterboxd-view-double.mjs';
 import assert from 'node:assert/strict';
 import {createHash,webcrypto} from 'node:crypto';
 import fs from 'node:fs';
@@ -8,6 +9,7 @@ import vm from 'node:vm';
 import {deflateRawSync} from 'node:zlib';
 import {archiveGeneratedAt,crc32,readZip} from '../src/letterboxd-zip.js';
 import {loadVerifiedPlan,plan,planItem,remote} from '../scripts/letterboxd-baseline-import.mjs';
+import {writeD1Input} from './view-index-d1-input.mjs';// AIR-558
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 // A minimal ZIP writer for invented test files: stored or deflated entries, optional corruptions.
@@ -47,7 +49,7 @@ function bucket(){
   async put(key,value,options={}){if(fail&&fail(key)){fail=null;throw new Error('injected failure: '+key);}const c=options.onlyIf||{};if(c.etagDoesNotMatch==='*'&&records.has(key)||c.etagMatches&&c.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));puts++;return {etag:etags.get(key)};}};
 }
 const ctx=vm.createContext({crypto:webcrypto,TextEncoder,console,Date,JSON,Map,Set,Response,Request,URL});
-const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);
+const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);installRawViewProjection(ctx); // AIR-558
 const workerFetch=env=>async(url,init)=>{const request=new Request(url,init),response=await F.handleBaselineRequest(request,env,new URL(url).pathname);return {ok:response.ok,status:response.status,json:()=>response.json()};};
 
 const scratch=await mkdtemp(path.join(os.tmpdir(),'iptv-lb-baseline-'));
@@ -66,29 +68,32 @@ try{
  for(const [key,value] of Object.entries(values)){const bytes=Buffer.from(JSON.stringify(value)),file='objects/'+sha256(Buffer.from(key))+'.bin';await writeFile(path.join(snapshotDir,file),bytes);entries.push({key,file,size:bytes.length,sha256:sha256(bytes)});}
  await writeFile(path.join(snapshotDir,'manifest.json'),JSON.stringify({schemaVersion:1,source:{kind:'cloudflare-r2-s3',bucket:'iptv',readOnly:true},status:'consistent_fenced',noGoReasons:[],fence:{ok:true,keys:[]},changes:[],baselineIdentity:{programmeRunId:'run-test'},objects:entries}));
  const output=path.join(scratch,'out'),now=Date.parse('2026-10-27T00:00:00Z');
+ const d1Main=await writeD1Input(path.join(scratch,'d1-input'),{});// AIR-558: the snapshot above holds no raw view-index, so the D1 input is the empty index
 
  // Plan (offline): only accepted films; private rows stay in plan.jsonl, the report carries counts only.
- const report=await plan({zip:zipPath,snapshot:snapshotDir,output,now});
+ const report=await plan({zip:zipPath,snapshot:snapshotDir,viewIndexFile:d1Main,output,now});
  assert.deepEqual(report.planned,{films:2,chunks:1,watched:2,rated:1,notRated:1,watchlist:1});assert.equal(report.unresolved,1);assert.equal(report.generatedAtSource,'archive_name');
  const reportText=fs.readFileSync(path.join(output,'report.json'),'utf8');for(const secret of ['Invented','Ab1','Cd2','Zz9','4.5'])assert.ok(!reportText.includes(secret),'report leaks '+secret);
  const origin=JSON.parse(fs.readFileSync(path.join(output,'origin.json'),'utf8'));
  assert.equal(origin.generatedAt,'2026-10-26T13:48:00.000Z');assert.equal(origin.archiveSha256,sha256(fs.readFileSync(zipPath)));assert.equal(origin.files['watched.csv'],sha256(exportFiles['watched.csv']));
  // ADR 0183: the same plan from a D1-derived view index (replacing the snapshot's raw object): the identity is recorded and the accepted films are the same.
  {
-  const d1File=path.join(scratch,'view-index.d1.json');
-  await writeFile(d1File,JSON.stringify({schema:'view-index-d1-export@1',source:'d1_derived',readAt:'2026-11-20T15:00:00.000Z',database:{id:null},counts:{keys:1},index:{Ab1:{actualRating:4.5}}}));
+  const d1File=await writeD1Input(path.join(scratch,'d1-input'),{Ab1:{actualRating:4.5}});// AIR-558
   const viaD1=await plan({zip:zipPath,snapshot:snapshotDir,viewIndexFile:d1File,output:path.join(scratch,'out-d1'),now});
   assert.deepEqual(viaD1.planned,report.planned,'the D1 input leaves the accepted films as they are');
   await assert.rejects(plan({zip:zipPath,snapshot:snapshotDir,viewIndexFile:path.join(scratch,'absent.json'),output:path.join(scratch,'out-d1b'),now}),/could not be read/);
  }
+ // AIR-558: omitting the option is refused (ReconcileError, exit 2) and the snapshot's raw view-index is never read as a fallback.
+ await assert.rejects(plan({zip:zipPath,snapshot:snapshotDir,output:path.join(scratch,'out-none'),now}),error=>error.name==='ReconcileError'&&error.exitCode===2&&/--view-index-d1/.test(error.message));
+ assert.equal(fs.existsSync(path.join(scratch,'out-none','report.json')),false);
  // Archive name and time rules.
  const renamed=path.join(scratch,'export.zip');await writeFile(renamed,zip(exportFiles));
- await assert.rejects(plan({zip:renamed,snapshot:snapshotDir,output:path.join(scratch,'o2'),now}),/--generated-at/);
- assert.equal((await plan({zip:renamed,snapshot:snapshotDir,output:path.join(scratch,'o3'),generatedAt:'2026-10-26T13:48:00Z',now})).generatedAtSource,'owner_declared');
- await assert.rejects(plan({zip:renamed,snapshot:snapshotDir,output:path.join(scratch,'o4'),generatedAt:'2027-01-01T00:00:00Z',now}),/future/);
- await assert.rejects(plan({zip:zipPath,snapshot:snapshotDir,output:path.resolve('tests','private-out'),now}),/outside the Git repository/);
+ await assert.rejects(plan({zip:renamed,snapshot:snapshotDir,viewIndexFile:d1Main,output:path.join(scratch,'o2'),now}),/--generated-at/);
+ assert.equal((await plan({zip:renamed,snapshot:snapshotDir,viewIndexFile:d1Main,output:path.join(scratch,'o3'),generatedAt:'2026-10-26T13:48:00Z',now})).generatedAtSource,'owner_declared');
+ await assert.rejects(plan({zip:renamed,snapshot:snapshotDir,viewIndexFile:d1Main,output:path.join(scratch,'o4'),generatedAt:'2027-01-01T00:00:00Z',now}),/future/);
+ await assert.rejects(plan({zip:zipPath,snapshot:snapshotDir,viewIndexFile:d1Main,output:path.resolve('tests','private-out'),now}),/outside the Git repository/);
  // Tampering: the archive or the plan must still match origin.json.
- const tamperedDir=path.join(scratch,'tamper');await plan({zip:zipPath,snapshot:snapshotDir,output:tamperedDir,now});
+ const tamperedDir=path.join(scratch,'tamper');await plan({zip:zipPath,snapshot:snapshotDir,viewIndexFile:d1Main,output:tamperedDir,now});
  fs.appendFileSync(path.join(tamperedDir,'plan.jsonl'),'\n');await assert.rejects(loadVerifiedPlan({zip:zipPath,output:tamperedDir,now}),/plan.jsonl differs/);
  const other=path.join(scratch,'letterboxd-demo-user-2026-10-26-13-48-utc-copy');await mkdir(other);const otherZip=path.join(other,'letterboxd-demo-user-2026-10-26-13-48-utc.zip');
  await writeFile(otherZip,zip({...exportFiles,'ratings.csv':exportFiles['ratings.csv'].replace('4.5','3')}));await assert.rejects(loadVerifiedPlan({zip:otherZip,output,now}),/differs from origin.json/);
@@ -135,11 +140,13 @@ try{
  summary=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(on),env:{},now});
  assert.equal(summary.failed,null);assert.deepEqual(summary.totals,{restored:4,superseded:1});
  assert.equal(b.records.get(F.recordKey('tmdb-949')).rating.value,2);assert.equal(b.records.get(F.recordKey('tmdb-949')).watched,undefined);
- const restored=b.records.get('enrichment/view-index.json');assert.equal(restored.Cd2.actualRating,3,'the legacy view value comes back');assert.equal(restored.Cd2.watched,undefined);assert.equal(restored.Ab1.actualRating,2);
+ // AIR-558: the raw view-index before-image restore is gone (a removed film's legacy view value no longer comes back through the facts); only the projection of the remaining records is asserted.
+ const restored=b.records.get('enrichment/view-index.json');assert.equal(restored.Ab1.actualRating,2);
  const again=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(on),env:{},now});assert.equal(again.failed,null);
  // Rollback is crash-recoverable: a failure after the fact writes and before the view restoration, and a failure between two
  // records, both converge on retry with the same counts; an owner edit made between attempts is kept.
- for(const failAt of ['view','record']){
+ // AIR-558: the 'view' crash point (after the fact writes, before the raw view restoration) no longer exists: the rollback has no raw view write. Only the record crash point remains.
+ for(const failAt of ['record']){
   const bx=bucket(),onx={BUCKET:bx};
   await bx.put('enrichment/view-index.json',JSON.stringify({Cd2:{actualRating:3}}));
   await remote({mode:'commit',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});
@@ -148,11 +155,11 @@ try{
   const broken=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now}).catch(error=>({error}));
   assert.ok(broken.error||broken.failed,failAt+' failure surfaces');
   assert.equal(bx.records.has('letterboxd/imports/'+sha+'/chunks/0.rollback.json'),false,'no success marker after a failure');
-  if(failAt==='view')assert.equal(bx.records.get('enrichment/view-index.json').Cd2.actualRating,null,'the crash left the imported view value');
   const done=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});
   assert.equal(done.failed,null);assert.deepEqual(done.totals,{restored:5,superseded:0},failAt);
-  const viewAfter=bx.records.get('enrichment/view-index.json');assert.equal(viewAfter.Cd2.actualRating,3,failAt+': the legacy view value is restored');assert.equal(viewAfter.Cd2.watched,undefined);
-  assert.equal(viewAfter.Ab1.actualRating,undefined);assert.equal(bx.records.get(F.recordKey('lb-Cd2')).rating,undefined);
+  const viewAfter=bx.records.get('enrichment/view-index.json');// AIR-558: no raw view-index before-image restore any more (the legacy Cd2 view value is not brought back).
+  // AIR-558: the projection keeps a prior view value when a fact is absent and no raw restore clears it, so the Ab1 view value is no longer asserted removed.
+  assert.equal(bx.records.get(F.recordKey('lb-Cd2')).rating,undefined);
   const repeat=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});assert.equal(repeat.failed,null);
  }
  {

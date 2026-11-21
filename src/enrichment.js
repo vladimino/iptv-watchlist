@@ -13,7 +13,6 @@ function mapRawMood(raw){const normalized=normalizeRawMood(raw);if(Object.hasOwn
 function moodPresentationGroups(mapping){return (mapping||[]).filter(item=>item.status==='mapped'&&item.ids.length).map(item=>item.ids);}
 function canonicalMoodFacet(fingerprint,prediction){const rawLabels=[...new Set([...(fingerprint?.moodLabels||[]),...(prediction?.moodLabels||[])])],mapping=rawLabels.map(mapRawMood);return {mappingVersion:MOOD_MAPPING_VERSION,rawLabels,moodIds:[...new Set(mapping.flatMap(m=>m.ids))].sort(),mapping,unmapped: mapping.filter(m=>m.status==='unmapped').map(m=>m.raw)};}
 function moodDiagnostics(index){const raw=new Map(),canonicalCounts={};let films=0;for(const item of Object.values(index||{})){const facet=canonicalMoodFacet(item.fingerprint,item.prediction);if(!facet.rawLabels.length)continue;films++;for(const id of facet.moodIds)canonicalCounts[id]=(canonicalCounts[id]||0)+1;for(const m of facet.mapping){const entry=raw.get(m.raw)||{...m,filmCount:0};entry.filmCount++;raw.set(m.raw,entry);}}const mappings=[...raw.values()].sort((a,b)=>b.filmCount-a.filmCount||a.raw.localeCompare(b.raw,'ru'));return {mappingVersion:MOOD_MAPPING_VERSION,vocabulary:MOOD_LABELS,groups:MOOD_GROUPS,films,rawVariants:mappings.length,canonicalOptions:Object.keys(canonicalCounts).length,canonicalCounts,mappings,unmapped:mappings.filter(m=>m.status==='unmapped'),mechanicOnly:mappings.filter(m=>m.status==='mechanic_only')};}
-async function moodBackfill(env,body){if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>100))return json({error:'Invalid limit'},400);const cursor=body.cursor||undefined;if(cursor&&typeof cursor!=='string')return json({error:'Invalid cursor'},400);const page=await env.BUCKET.list({prefix:ENRICHMENT_KEY+'films/',limit:Math.min(body.limit||12,12),...(cursor?{cursor}:{})});const ids=[...new Set(page.objects.filter(o=>/\/(fingerprint|predictions)\.json$/.test(o.key)).map(o=>decodeURIComponent(o.key.split('/')[2])))];const patches=await Promise.all(ids.map(async id=>{const state=await readFilmState(env,id),facet={...canonicalMoodFacet(state.fingerprint,state.predictions?.current),historyMoodFacets:(state.predictions?.history||[]).map(p=>({generatedAt:p.generatedAt||null,...canonicalMoodFacet(null,p)}))};return {id,fingerprint:state.fingerprint,prediction:state.predictions?.current,facet};}));const index=await mergeStoredJSON(env,ENRICHMENT_KEY+'view-index.json',{},current=>{if(!patches.length)return null;for(const patch of patches)current[patch.id]={...(current[patch.id]||{}),...(patch.fingerprint?{fingerprintHash:patch.fingerprint.fingerprintHash,fingerprint:fingerprintFacet(patch.fingerprint),impactFeatures:fingerprintImpactFacet(patch.fingerprint)}:{}),...(patch.prediction?{prediction:patch.prediction}:{}),moodFacet:patch.facet};return current;});const result={mappingVersion:MOOD_MAPPING_VERSION,checked:ids.length,nextCursor:page.truncated?page.cursor:null,done:!page.truncated};if(result.done)await saveJSON(env,ENRICHMENT_KEY+'diagnostics/moods.json',{...moodDiagnostics(index),completedAt:new Date().toISOString()});return json(result);}
 
 // Independent R2 namespace: no enrichment write touches programme, watchlist or sync.
 const FINGERPRINT_SCHEMA_VERSION=1;
@@ -419,20 +418,6 @@ async function mergeStoredJSON(env,key,empty,apply){
  }
  throw new Error('Stored JSON changed during write');
 }
-async function updateViewIndex(env,id,changes){
- const key=ENRICHMENT_KEY+'view-index.json';
- for(let attempt=0;attempt<5;attempt++){
-  const object=await env.BUCKET.get(key),current=object?await object.json():{};
-  const next=cloneJSON(current);next[id]={...(next[id]||{}),...changes};next[id].moodFacet=canonicalMoodFacet(next[id].fingerprint,next[id].prediction);
-  const saved=await env.BUCKET.put(key,JSON.stringify(next),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
-  if(saved!==null)return next;
- }
- throw new Error('Stored JSON changed during write');
-}
-// Writers that already mutate the view index persist a missing compiled seed. GET /api/enrichment/view overlays in memory and does not call this.
-async function ensureInitialRatings(env){
- return mergeStoredJSON(env,ENRICHMENT_KEY+'view-index.json',{},index=>applyRatingsSeed(index)?index:null);
-}
 function parsePersonalRating(html,filmUrl,username){
  for(const script of html.matchAll(/<script\b[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)){
   let value;try{value=JSON.parse(script[1].replace(/\/\*[\s\S]*?\*\//g,''));}catch{continue;}
@@ -733,7 +718,7 @@ async function settleRemovalRefs(env,{ids=null,limit=20,now=Date.now(),checkedBe
 }
 async function freezeDiagnosticSnapshot(env){
  const existing=await loadJSON(env,diagnosticSnapshotKey);if(existing)return {snapshot:existing,created:false};
- const [programme,index,profile]=await Promise.all([loadJSON(env,'programme.json'),ensureInitialRatings(env),loadJSON(env,profileKey)]);
+ const [programme,index,profile]=await Promise.all([loadJSON(env,'programme.json'),readViewIndex(env),loadJSON(env,profileKey)]);
  if(!programme?.films?.length)return {error:'No programme snapshot'};
  const unique=eligibleEnrichmentFilms(programme),states=await Promise.all(unique.map(f=>readFilmState(env,f.id)));
  const actuals=await Promise.all(unique.map(f=>loadJSON(env,filmKey(f.id)+'actual.json')));
@@ -1516,7 +1501,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null,opt
  const showsSignature=await currentShowsSignature(pinned,report);
  const source=await consistentQueueReport(pinned,report);
  const [profile,storedIndex,catalog,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned),loadJSON(env,'sync.json')]);
- const index=typeof PredictionD1==='undefined'||(typeof viewIndexIsD1==='function'&&viewIndexIsD1(env))?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
+ const index=storedIndex;
  if(!profile)return null;
  const recovery=await predictionRecoveryOverlay(env);let recoveryDenied=0;
  const safeSource=source&&Array.isArray(source.films)?source:{runId:source?.runId||null,films:[]};
@@ -2271,34 +2256,12 @@ function footerMetadataProjection(metadata){
 // When a d1 authority owns a fact, its overlay drops that fact from every R2 entry and lays the D1 value over it, so the R2 copy is not kept at all
 // (prediction facts while predictions are d1; watched, rating and watchlist while ratings are ready). The authority is read again after the overlays:
 // one that moved in between fails the read (the index is then unknown, never counted from a half-dropped copy).
-const FOOTER_PREDICTION_FIELDS=['prediction','fingerprintHash','impactFeatures'],FOOTER_RATING_FIELDS=['watched','actualRating','watchlist'];
 async function footerViewIndex(env){
- // ADR 0183: with the D1 source selected the index is derived from D1 and the raw object is never read. The authority is checked again after the read.
- if(typeof viewIndexIsD1==='function'&&viewIndexIsD1(env)){
-  const derived=await derivedViewIndex(env,{moodFacet:null});
-  const stillOpen=(await PredictionD1.readPredictionAuthority(env?.DB??null,env))?.mode==='d1'&&(await RatingsD1.readRatingsAuthority(env?.DB??null,env))?.ready===true;
-  if(!stillOpen){const error=new Error('footer_index_authority_moved');error.code='footer_index_authority_moved';throw error;}
-  return footerIndexProjection(Object.fromEntries(Object.entries(derived).map(([id,item])=>[id,footerPick(item,FOOTER_INDEX_FIELDS)])));
- }
- const predictionsD1=async()=>typeof PredictionD1!=='undefined'&&typeof PredictionD1.readPredictionAuthority==='function'&&(await PredictionD1.readPredictionAuthority(env?.DB??null,env))?.mode==='d1';
- const ratingsReady=async()=>typeof RatingsD1!=='undefined'&&typeof RatingsD1.readRatingsAuthority==='function'&&(await RatingsD1.readRatingsAuthority(env?.DB??null,env))?.ready===true;
- const dropPredictions=await predictionsD1(),dropRatings=await ratingsReady();
- const fields=FOOTER_INDEX_FIELDS.filter(field=>!(dropPredictions&&FOOTER_PREDICTION_FIELDS.includes(field))&&!(dropRatings&&FOOTER_RATING_FIELDS.includes(field)));
- const key=ENRICHMENT_KEY+'view-index.json',object=await env.BUCKET.get(key);
- let index=null;
- if(object){
-  if(typeof forEachJsonObjectEntries==='function'&&typeof ledgerStreamable==='function'&&ledgerStreamable(object)){
-   index={};
-   await forEachJsonObjectEntries(ledgerChunks(object),(id,item)=>{index[id]=footerPick(item,fields);});
-  }else{
-   const whole=await object.json();
-   index=footerPlainObject(whole)?Object.fromEntries(Object.entries(whole).map(([id,item])=>[id,footerPick(item,fields)])):whole;
-  }
- }
- if(typeof PredictionD1!=='undefined')index=await PredictionD1.overlayIndex(env,index,null);
- if(typeof RatingsD1!=='undefined')index=await RatingsD1.overlayView(env,index);
- if(dropPredictions&&!await predictionsD1()||dropRatings&&!await ratingsReady()){const error=new Error('footer_index_authority_moved');error.code='footer_index_authority_moved';throw error;}
- return footerIndexProjection(index);
+ // ADR 0183 / AIR-558: the index is always derived from D1 and the raw object is never read. The authority is checked again after the read.
+ const derived=await derivedViewIndex(env,{moodFacet:null});
+ const stillOpen=(await PredictionD1.readPredictionAuthority(env?.DB??null,env))?.mode==='d1'&&(await RatingsD1.readRatingsAuthority(env?.DB??null,env))?.ready===true;
+ if(!stillOpen){const error=new Error('footer_index_authority_moved');error.code='footer_index_authority_moved';throw error;}
+ return footerIndexProjection(Object.fromEntries(Object.entries(derived).map(([id,item])=>[id,footerPick(item,FOOTER_INDEX_FIELDS)])));
 }
 // A block computed from sources that were read: a malformed stored record (a queue without `pending`, a run without `selectedIds`) leaves that block
 // unknown and names it in `degraded`; it does not turn the whole footer into a 502.
@@ -3171,7 +3134,7 @@ async function batchSubmitItem(env,ctx,item){
   if(recorded.outcome==='validation_failure'){const failure=run.failures[id]||{};return {result:{filmId:id,status:'validation_failure',error:failure.kind||'parse_error',retryable:true,retryAt:failure.retryAt,...(failure.validation?{validation:failure.validation}:{}),assessment:sent?'not_applicable':'not_sent',replayed:true}};}
   return {result:{filmId:id,status:recorded.outcome,assessment:replayAssessment,replayed:true,...(recorded.compatibility?{compatibility:recorded.compatibility}:{})}};
  }
- let failureStage='storage_error',validationStage=null,reportedBy=null,issues=null,claimed=null,deferredIndex=null,result=null;
+ let failureStage='storage_error',validationStage=null,reportedBy=null,issues=null,claimed=null,result=null;
  try{
   const state=await readFilmState(env,id);let fingerprint=state.fingerprint;const genres=source[id]?.genres,stored=state.predictions?.current;
   // The crash window: the prediction was committed by this run but its result was not recorded. The stored record carries this run id and the model fields the request carries.
@@ -3189,11 +3152,10 @@ async function batchSubmitItem(env,ctx,item){
   const usable=f=>freshness.fingerprintUsable(f,genres,id);
   if(item.fingerprint&&!usable(fingerprint)){
    const found=fingerprintIssues(item.fingerprint,source[id]);if(found.length){failureStage='parse_error';validationStage='fingerprint_schema';reportedBy='worker';issues=found;throw new Error('Invalid fingerprint');}
-   fingerprint=await batchGuardedCommit(env,ctx,()=>writeFingerprint(guarded,id,item.fingerprint,fingerprint,'generated',undefined,FINGERPRINT_PROMPT_VERSION,false));deferredIndex=fingerprintIndexPatch(fingerprint);
+   fingerprint=await batchGuardedCommit(env,ctx,()=>writeFingerprint(guarded,id,item.fingerprint,fingerprint,'generated',undefined,FINGERPRINT_PROMPT_VERSION));
   }
   if(!usable(fingerprint)){failureStage='parse_error';validationStage='fingerprint_missing';reportedBy='worker';issues=[{path:'fingerprint',code:'required'}];throw new Error('Current fingerprint required');}
   if(freshness.state(stored,fingerprint,genres,id)){
-   await updateViewIndex(env,id,{prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});deferredIndex=null;
    run.results[id] ||= 'already_current';delete run.failures[id];run.submitted[id]={outcome:'already_current',inputDigest:digest,assessment:item.assessment!==undefined?'not_applicable':'not_sent',committedAt:new Date().toISOString()};result={filmId:id,status:'already_current',assessment:item.assessment!==undefined?'not_applicable':'not_sent'};
   }else{
    const found=predictionIssues(item.prediction);if(found.length){failureStage='parse_error';validationStage='prediction_schema';reportedBy='worker';issues=found;throw new Error('Invalid prediction');}
@@ -3207,7 +3169,6 @@ async function batchSubmitItem(env,ctx,item){
    if(change){
     const verdict=freshness.work(generated,fingerprint,genres);compatibility=batchCompatibilityOf(verdict);
     if(compatibility!=='compatible'){
-     if(deferredIndex){await updateViewIndex(env,id,deferredIndex);deferredIndex=null;}
      run.submitted[id]={outcome:'needs_regeneration',inputDigest:digest,compatibility,assessment:item.assessment!==undefined?'not_applicable':'not_sent',committedAt:new Date().toISOString()};
      return {result:{filmId:id,status:'needs_regeneration',compatibility,assessment:item.assessment!==undefined?'not_applicable':'not_sent',...(verdict?.reason?{reason:verdict.reason}:{})},regenerate:id};
     }
@@ -3216,10 +3177,9 @@ async function batchSubmitItem(env,ctx,item){
    // Order: version object, assessment object, guarded D1 commit. A failure here leaves unreferenced objects and an unchanged pointer; the same body replays.
    let assessmentStatus='not_sent';
    // A collision with an object of other content is deterministic, not a storage failure: the film is a conflict, nothing is overwritten and the pointer does not move.
-   if(item.assessment!==undefined){try{assessmentStatus=await writePredictionAssessment(env,id,pointer,{recordedAt:at,runId:run.runId,trigger:generated.trigger,predictionGeneratedAt:at,tasteProfile:{version:run.tasteProfileVersion,hash:run.tasteProfileHash},fingerprintHash:fingerprint.fingerprintHash},item.assessment);}catch(error){if(error instanceof AssessmentConflict){if(deferredIndex){await updateViewIndex(env,id,deferredIndex);deferredIndex=null;}return {result:{filmId:id,status:'conflict',assessment:'conflict'}};}throw error;}}
+   if(item.assessment!==undefined){try{assessmentStatus=await writePredictionAssessment(env,id,pointer,{recordedAt:at,runId:run.runId,trigger:generated.trigger,predictionGeneratedAt:at,tasteProfile:{version:run.tasteProfileVersion,hash:run.tasteProfileHash},fingerprintHash:fingerprint.fingerprintHash},item.assessment);}catch(error){if(error instanceof AssessmentConflict){return {result:{filmId:id,status:'conflict',assessment:'conflict'}};}throw error;}}
    if(old)history.push({...old,replacedAt:at});
    await batchGuardedCommit(env,ctx,()=>saveJSON(guarded,filmKey(id)+'predictions.json',{current:prediction,history}));
-   await updateViewIndex(env,id,{prediction,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});deferredIndex=null;
    delete run.failures[id];const outcome=old?'recalculated':'created';run.results[id]=outcome;run.submitted[id]={outcome,inputDigest:digest,assessment:assessmentStatus,...(compatibility?{compatibility}:{}),committedAt:at};
    rememberBatchEventFilm(run,id,source,{group:'success',status:outcome,rating:submitted.predictedRating,source:compactEventSource(item.assessment)});
    result={filmId:id,status:outcome,assessment:assessmentStatus,...(compatibility?{compatibility}:{})};
@@ -3228,7 +3188,6 @@ async function batchSubmitItem(env,ctx,item){
   return {result,settled:true};
  }catch(error){
   if(error instanceof BatchGateLost)return {result:{filmId:id,status:'blocked',reason:error.status},stop:error.status};
-  if(deferredIndex){try{await updateViewIndex(env,id,deferredIndex);}catch{/* the failure being recorded is the item's own */}deferredIndex=null;}
   const at=new Date().toISOString(),retryable=failureStage==='parse_error',previous=await loadJSON(env,predictionQueueKey),attempts=(previous?.retries?.[id]?.attempts||0)+1,retryAt=Date.now()+Math.min(6*3600000,3600000*2**(attempts-1));
   const validation=validationStage?{stage:validationStage,reportedBy,issues,...(claimed?{claimed}:{})}:null;
   if(!retryable)return {result:{filmId:id,status:'blocked',reason:'storage_error'},stop:'storage_error'};
@@ -3704,11 +3663,10 @@ async function loadGenreCatalog(env){
  }
  return loadJSON(env,'epg/discovered-films.json');
 }
-async function enrichmentView(env){const [profile,stored]=await Promise.all([loadJSON(env,profileKey),readViewIndex(env)]),index=typeof PredictionD1==='undefined'||(typeof viewIndexIsD1==='function'&&viewIndexIsD1(env))?stored:await PredictionD1.overlayIndex(env,stored,canonicalMoodFacet),freshness=await predictionFreshness(env,profile);
+async function enrichmentView(env){const [profile,stored]=await Promise.all([loadJSON(env,profileKey),readViewIndex(env)]),index=stored,freshness=await predictionFreshness(env,profile);
  // Genres feed only the selective rules, so the programme and catalog are read only when one of them is on.
  const films=freshness.needsGenres?await (async()=>{const pinned=await pinEpg(env),[report,catalog]=await Promise.all([loadJSON(pinned,'programme.json'),loadGenreCatalog(pinned)]);return new Map(allEnrichmentFilms(report||{films:[]},catalog).map(f=>[String(f.id),f]));})():null;return {moodVocabulary:{version:MOOD_MAPPING_VERSION,labels:MOOD_LABELS,groups:MOOD_GROUPS},profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,compatibility:{profileMode:freshness.mode,fingerprintMode:freshness.fingerprintMode,...fingerprintTarget()},films:Object.fromEntries(Object.entries(index||{}).map(([id,item])=>{const p=item.prediction,f=item.fingerprint,facet=canonicalMoodFacet(f,p);return [id,{moodIds:facet.moodIds,moodGroups:moodPresentationGroups(facet.mapping),fingerprint:f&&f.fingerprintHash===item.fingerprintHash?{plotMechanics:f.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(f.execution)}:null,prediction:p?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodIds:facet.moodIds,...(Object.hasOwn(p,'confidenceAssessment')?{confidenceAssessment:p.confidenceAssessment,fingerprintHash:p.fingerprintHash??null}:{}),stale:!freshness.indexed(item,films?.get(id))}:null,actualRating:item.actualRating??null,watched:item.watched===true?true:item.watched===false?false:null}];}))};}
 
-async function backfillFingerprintView(env,body){const [index,report,catalog]=await Promise.all([ensureInitialRatings(env),loadJSON(env,'programme.json'),loadJSON(env,'epg/discovered-films.json')]),ids=[...new Set([...Object.keys(index),...allEnrichmentFilms(report||{films:[]},catalog).map(f=>String(f.id))])].sort(),cursor=String(body.cursor||'');if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>100))return json({error:'Invalid limit'},400);const selected=ids.filter(id=>id>cursor).slice(0,body.limit||80),fingerprints=await Promise.all(selected.map(id=>loadJSON(env,filmKey(id)+'fingerprint.json')));let added=0,updated=0;const patches=[];for(let i=0;i<selected.length;i++){const id=selected[i],facet=fingerprintFacet(fingerprints[i]),impact=fingerprintImpactFacet(fingerprints[i]);const previousFacet=index[id]?.fingerprint;if(!facet||previousFacet?.fingerprintHash===facet.fingerprintHash&&Object.hasOwn(previousFacet,'execution')&&index[id]?.impactFeatures?.fingerprintHash===facet.fingerprintHash)continue;patches.push({id,facet,impact});index[id]?.fingerprint?updated++:added++;}if(patches.length)await mergeStoredJSON(env,ENRICHMENT_KEY+'view-index.json',{},current=>{for(const patch of patches)current[patch.id]={...(current[patch.id]||{}),fingerprintHash:patch.facet.fingerprintHash,fingerprint:patch.facet,impactFeatures:patch.impact};return current;});return json({checked:selected.length,added,updated,nextCursor:selected.length&&ids.some(id=>id>selected.at(-1))?selected.at(-1):null});}
 const predictionBenchmarkKey=id=>ENRICHMENT_KEY+'benchmarks/'+encodeURIComponent(id)+'.json';
 async function predictionBenchmarkStart(env){
  const [profile,index,report,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,'programme.json'),loadJSON(env,'epg/discovered-films.json')]);if(!profile)return json({error:'No profile'},409);
@@ -3776,14 +3734,13 @@ async function generationRecordAcceptable(env,stored,record){
 // 'partial' (with `fields`) or 'restored'; `previous` is the record being replaced.
 // `indexNow: false` (AIR-442) leaves the view-index entry to the caller, which must write it or flush `fingerprintIndexPatch(value)`; `submit` does, so one film costs one index read and write.
 const fingerprintIndexPatch=value=>({fingerprintHash:value.fingerprintHash,fingerprint:fingerprintFacet(value),impactFeatures:fingerprintImpactFacet(value)});
-async function writeFingerprint(env,id,content,previous,produced,fields,promptVersion=FINGERPRINT_PROMPT_VERSION,indexNow=true){
+async function writeFingerprint(env,id,content,previous,produced,fields,promptVersion=FINGERPRINT_PROMPT_VERSION){
  const at=new Date().toISOString(),body={...content,filmId:id};body.fingerprintHash=await contentHash({...content,filmId:id});
  const value={...body,generatedAt:at,invalidatedAt:null,fingerprintPromptVersion:promptVersion,produced,...(fields?{fields}:{}),previous:fingerprintIdentity(previous)};
  await putCreateOnly(env,fingerprintBodyKey(id,body.fingerprintHash),body);
  const record={filmId:id,...fingerprintIdentity(value),generatedAt:at,produced,...(fields?{fields}:{}),previous:value.previous};
  await putCreateOnly(env,fingerprintGenerationKey(id,record),record,stored=>generationRecordAcceptable(env,stored,record));
  await saveJSON(env,filmKey(id)+'fingerprint.json',value);
- if(indexNow)await updateViewIndex(env,id,fingerprintIndexPatch(value));
  return value;
 }
 // The stored generation records of a film with their bodies, newest first; empty for a film whose fingerprints predate the writer. The whole prefix is
@@ -4060,7 +4017,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
   const group=url.searchParams.get('group')||'global';
   if(group==='global'){
   try{
-   const keys=['enrichment/diagnostics/baseline.json','enrichment/diagnostics/rating-observations.json','enrichment/view-index.json','enrichment/profile/current.json','epg/discovered-films.json','programme.json','watchlist.json','metadata.json','titles.json'];
+   const keys=['enrichment/diagnostics/baseline.json','enrichment/diagnostics/rating-observations.json','enrichment/profile/current.json','epg/discovered-films.json','programme.json','watchlist.json','metadata.json','titles.json'];
    const filmPersonGate=typeof CanonicalCatalogReader==='undefined'?null:await CanonicalCatalogReader.catalogReaderGate(env);
    const frozen=new Set(['metadata.json','titles.json']);
    const records=await Promise.all(keys.map(async key=>{
@@ -4110,7 +4067,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentComplete(env,body,requestId)),'complete',requestId);
  if(path==='/api/enrichment/status'&&request.method==='GET')return json(await enrichmentStatus(env));
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
- if(path==='/api/enrichment/moods/backfill'&&request.method==='POST')return predictionWriter(env,()=>moodBackfill(env,body));
+ if(path==='/api/enrichment/moods/backfill'&&request.method==='POST')return json({error:'gone',detail:'The mood backfill is retired (AIR-558): the view index is derived from D1 at read and holds no stored mood facet to backfill.'},410);
  if(path==='/api/enrichment/schema'&&request.method==='GET')return json(enrichmentSchemaDocument());
  if(path==='/api/enrichment/view'&&request.method==='GET'){
   try{return json(await enrichmentView(env));}
@@ -4121,7 +4078,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
    throw error;
   }
  }
- if(path==='/api/enrichment/fingerprint-view/backfill'&&request.method==='POST')return backfillFingerprintView(env,body);
+ if(path==='/api/enrichment/fingerprint-view/backfill'&&request.method==='POST')return json({error:'gone',detail:'The fingerprint view backfill is retired (AIR-558): the view index is derived from D1 at read.'},410);
  if(path==='/api/enrichment/actual-ratings'&&request.method==='PUT'){if(!Array.isArray(body.items)||body.items.length>100)return json({error:'Expected items (max 100)'},400);const results=[];for(const item of body.items){const id=String(item?.filmId||''),rating=item?.rating;if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!(rating===null||Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0)){results.push({filmId:id,error:'Invalid film or rating'});continue;}const updatedAt=new Date().toISOString();const facts=await LetterboxdFacts.recordFilmFacts(env,id,{rating},{observedAt:updatedAt,source:'owner'});if(facts.conflict){results.push({filmId:id,error:'Identity conflict; recorded for review'});continue;}if(!facts.accepted||facts.record.rating?.value!==rating){results.push({filmId:id,status:'older',rating:facts.record.rating?.value??null});continue;}await saveActualMirror(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',updatedAt});results.push({filmId:id,status:'saved'});}return json({results});}
  if(path==='/api/enrichment/ratings/backfill'&&request.method==='POST')return ratingsBackfill(env,body);
  return json({error:'Not found'},404);

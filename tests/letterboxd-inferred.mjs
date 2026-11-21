@@ -1,4 +1,5 @@
 // AIR-388 (ADR 0104): the inferred identity policy of a personal Letterboxd export. Invented films only; no network, no R2, no D1.
+import {installRawViewProjection} from './letterboxd-view-double.mjs';
 import assert from 'node:assert/strict';
 import {createHash,webcrypto} from 'node:crypto';
 import fs from 'node:fs';
@@ -9,6 +10,7 @@ import {spawnSync} from 'node:child_process';
 import vm from 'node:vm';
 import {deflateRawSync} from 'node:zlib';
 import {crc32} from '../src/letterboxd-zip.js';
+import {writeD1Input} from './view-index-d1-input.mjs';// AIR-558
 import {INFERRED_METHOD,INFERRED_STATUS,METHODS,REVIEW_REASONS,STATUSES,buildIndex,matchExport} from '../src/letterboxd-match.js';
 import {archiveAdmissionsFromDocument} from '../src/enrichment-projection.js';
 import {EXPORT_FILES} from '../src/letterboxd-export.js';
@@ -129,7 +131,7 @@ function bucket(){
   async put(key,value,options={}){const c=options.onlyIf||{};if(c.etagDoesNotMatch==='*'&&records.has(key)||c.etagMatches&&c.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));puts++;return {etag:etags.get(key)};}};
 }
 const ctx=vm.createContext({crypto:webcrypto,TextEncoder,console,Date,JSON,Map,Set,Response,Request,URL});
-const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);
+const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);installRawViewProjection(ctx); // AIR-558
 const workerFetch=env=>async(url,init)=>{const request=new Request(url,init),response=await F.handleBaselineRequest(request,env,new URL(url).pathname);return {ok:response.ok,status:response.status,json:()=>response.json()};};
 const post=(env,kind,body)=>F.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),env,'/api/letterboxd/baseline/'+kind);
 
@@ -148,13 +150,14 @@ try{
  for(const [key,value] of Object.entries(values)){const bytes=Buffer.from(JSON.stringify(value)),file='objects/'+sha256(Buffer.from(key))+'.bin';await writeFile(path.join(snapshotDir,file),bytes);entries.push({key,file,size:bytes.length,sha256:sha256(bytes)});}
  await writeFile(path.join(snapshotDir,'manifest.json'),JSON.stringify({schemaVersion:1,source:{kind:'cloudflare-r2-s3',bucket:'iptv',readOnly:true},status:'consistent_fenced',noGoReasons:[],fence:{ok:true,keys:[]},changes:[],baselineIdentity:{programmeRunId:'run-test'},objects:entries}));
  const now=Date.parse('2026-11-09T00:00:00Z');
+ const d1Main=await writeD1Input(path.join(scratch,'d1-input'),{});// AIR-558: the snapshot holds no raw view-index; the D1 input is the empty index
 
  // The default plan is the old plan: verified only, no review counts, no inferred item.
- const plain=await plan({zip:zipPath,snapshot:snapshotDir,output:path.join(scratch,'plain'),now});
+ const plain=await plan({zip:zipPath,viewIndexFile:d1Main,snapshot:snapshotDir,output:path.join(scratch,'plain'),now});
  assert.equal(plain.identityPolicy,'verified_only');assert.equal(plain.inferred,0);assert.deepEqual(plain.review,{});assert.equal(plain.planned.films,1);
  assert.equal(JSON.parse(fs.readFileSync(path.join(scratch,'plain','origin.json'),'utf8')).identityPolicy,'verified_only');
  // With the switch: the inferred film joins, the drift film is only counted for review, nothing leaks into the report.
- const out=path.join(scratch,'inferred'),report=await plan({zip:zipPath,snapshot:snapshotDir,output:out,includeInferred:true,now});
+ const out=path.join(scratch,'inferred'),report=await plan({zip:zipPath,viewIndexFile:d1Main,snapshot:snapshotDir,output:out,includeInferred:true,now});
  assert.equal(report.identityPolicy,'inferred_included');assert.equal(report.inferred,1);assert.equal(report.planned.films,2);assert.deepEqual(report.review,{year_drift:1});
  assert.equal(report.matchStatus.inferred,1);assert.equal(report.matchStatus.unmatched,1);
  const text=fs.readFileSync(path.join(out,'report.json'),'utf8');for(const secret of ['Invented','Aa1','Aa3','Zz9','Drift'])assert.ok(!text.includes(secret),'report leaks '+secret);
@@ -271,7 +274,7 @@ try{
  const resultsDoc=(results,binding=bind)=>JSON.stringify({schemaVersion:1,...(binding?{binding}:{}),results});
  await writeFile(resultsPath,resultsDoc({Nw1:sr(801,'Brand New A',2015),Nw2:sr(101,'Foreign Title B',2001),Nw3:sr(802,'Dup Seen C',2016),Nw4:sr(802,'Dup Seen C',2016),Nw5:sr(108,'Same As Accepted E',2015),Nw6:{decision:'review',reason:'no_match'},Nw7:{decision:'blocked',reason:'http_429'},Nw8:{decision:'error',reason:'http_503'}}));
  const outB2=path.join(scratch,'planB2'),now2=Date.parse('2026-11-09T00:00:00Z');
- const repB2=await plan({zip:zipB2,catalogDir:catDir,tmdbResults:resultsPath,includeInferred:true,output:outB2,now:now2});
+ const repB2=await plan({zip:zipB2,viewIndexFile:d1Main,catalogDir:catDir,tmdbResults:resultsPath,includeInferred:true,output:outB2,now:now2});
  assert.equal(repB2.identityPolicy,'inferred_included');assert.equal(repB2.filmsToCreate,1,'only the movie the catalog does not hold is created');
  assert.equal(repB2.inferred,2);assert.deepEqual(repB2.search,{decided:2,review:{tmdb_duplicate_in_export:2,tmdb_already_accepted:1,no_match:1},pending:1,errors:1,blocked:1});
  assert.equal(repB2.planned.films,3);   // Vv1 verified + the two search-decided films
@@ -283,11 +286,11 @@ try{
  const originB2=JSON.parse(fs.readFileSync(path.join(outB2,'origin.json'),'utf8'));
  assert.equal(originB2.tmdbResultsSha256,sha256(fs.readFileSync(resultsPath,'utf8')));assert.equal(originB2.snapshot.status,'live_catalog_read');assert.equal(originB2.snapshot.baselineIdentity.catalogFilms,Object.keys(catalog).length);
  // The input contract: exactly one identity source, results only for an inferred plan, and nothing the plan does not understand
- await assert.rejects(plan({zip:zipB2,snapshot:snapshotDir,catalogDir:catDir,output:path.join(scratch,'x1'),now:now2}),/exactly one/);
- await assert.rejects(plan({zip:zipB2,output:path.join(scratch,'x2'),now:now2}),/exactly one/);
- await assert.rejects(plan({zip:zipB2,catalogDir:catDir,tmdbResults:resultsPath,output:path.join(scratch,'x3'),now:now2}),/--include-inferred/);
+ await assert.rejects(plan({zip:zipB2,viewIndexFile:d1Main,snapshot:snapshotDir,catalogDir:catDir,output:path.join(scratch,'x1'),now:now2}),/exactly one/);
+ await assert.rejects(plan({zip:zipB2,viewIndexFile:d1Main,output:path.join(scratch,'x2'),now:now2}),/exactly one/);
+ await assert.rejects(plan({zip:zipB2,viewIndexFile:d1Main,catalogDir:catDir,tmdbResults:resultsPath,output:path.join(scratch,'x3'),now:now2}),/--include-inferred/);
 const strange=path.join(scratch,'strange.json');
- const refuse=async(doc,pattern,name)=>{await writeFile(strange,doc);await assert.rejects(plan({zip:zipB2,catalogDir:catDir,tmdbResults:strange,includeInferred:true,output:path.join(scratch,'x-'+name),now:now2}),pattern,name);};
+ const refuse=async(doc,pattern,name)=>{await writeFile(strange,doc);await assert.rejects(plan({zip:zipB2,viewIndexFile:d1Main,catalogDir:catDir,tmdbResults:strange,includeInferred:true,output:path.join(scratch,'x-'+name),now:now2}),pattern,name);};
  await refuse(resultsDoc({Nw1:{decision:'inferred_new',tmdb:'abc',title:'Brand New A',year:2015,basis:'tmdb_search_original_title_exact_year_unique'}}),/does not understand/,'badid');
  await refuse(JSON.stringify({schemaVersion:2,results:{}}),/unknown schema/,'schema');
  // Review blocker 1: a well-formed numeric TMDB id whose title or year is not the export film's is refused by the planner itself
@@ -305,7 +308,7 @@ const strange=path.join(scratch,'strange.json');
  await refuse(resultsDoc({Nw6:{decision:'review',reason:'made_up'}}),/does not understand/,'reason');
  await refuse(resultsDoc({Nw6:{decision:'surprise'}}),/does not understand/,'decision');
  // results need a catalog directory, not a snapshot
- await assert.rejects(plan({zip:zipB2,snapshot:snapshotDir,tmdbResults:resultsPath,includeInferred:true,output:path.join(scratch,'x-snap'),now:now2}),/--catalog-dir/);
+ await assert.rejects(plan({zip:zipB2,viewIndexFile:d1Main,snapshot:snapshotDir,tmdbResults:resultsPath,includeInferred:true,output:path.join(scratch,'x-snap'),now:now2}),/--catalog-dir/);
 
   // The route: admission before the facts, the receipt entry, the projector's reading, replay, conflict, unlink keeps the Film
  const shaB2=sha256(fs.readFileSync(zipB2)),originBody={archiveSha256:shaB2,generatedAt:'2026-11-08T15:00:00.000Z',generatedAtSource:'archive_name'};

@@ -1,3 +1,4 @@
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import {scoped} from '../scripts/bundle-scope.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -20,6 +21,7 @@ const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Dat
 vm.runInContext(['src/domain/film-person.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js'].map(file=>fs.readFileSync(file,'utf8')).join('\n'),ctx);
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+installViewIndexFixture(ctx);
 vm.runInContext(`globalThis.seedFilm=async(env,id,input,prediction)=>{
   const state=await readFilmState(env,id),profile=await loadJSON(env,profileKey);let fingerprint=state.fingerprint;
   if(input)fingerprint=await writeFingerprint(env,id,input,fingerprint,'generated',undefined,FINGERPRINT_PROMPT_VERSION,false);
@@ -27,9 +29,10 @@ vm.runInContext(`globalThis.seedFilm=async(env,id,input,prediction)=>{
   const generated={...pickPrediction(prediction),filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:'seed',trigger:'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})};
   const stored={...generated,...(await writePredictionVersion(env,id,generated))},history=[...(state.predictions?.history||[])];if(old)history.push({...old,replacedAt:at});
   await saveJSON(env,filmKey(id)+'predictions.json',{current:stored,history});
-  await updateViewIndex(env,id,{prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});
+  // AIR-558: no raw view-index writer exists; the fixture object stands in for the derived index.
+  {const key='enrichment/view-index.json',got=await env.BUCKET.get(key),index=got?await got.json():{};index[id]={...(index[id]||{}),prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)};await env.BUCKET.put(key,JSON.stringify(index));}
   return old?'recalculated':'created';};
-globalThis.restoreImpactFacet=async(env,id)=>{const state=await readFilmState(env,id);await updateViewIndex(env,id,{impactFeatures:fingerprintImpactFacet(state.fingerprint)});};`,ctx);
+globalThis.restoreImpactFacet=async(env,id)=>{const state=await readFilmState(env,id);{const key='enrichment/view-index.json',got=await env.BUCKET.get(key),index=got?await got.json():{};index[id]={...(index[id]||{}),impactFeatures:fingerprintImpactFacet(state.fingerprint)};await env.BUCKET.put(key,JSON.stringify(index));}};`,ctx);
 vm.runInContext('globalThis.T={seedFilm,restoreImpactFacet,fingerprintImpactFacet,EXECUTION,GENERAL_EXECUTION};',ctx);
 const T=ctx.T;
 const api=async(path,method='GET',body)=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:response.status,data:await response.json()};};

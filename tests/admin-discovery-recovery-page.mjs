@@ -5,6 +5,7 @@
 // read beside the receipt; cancel and refusals keep the owner in control; focus follows the step.
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {bundleAdmin} from '../src/admin/bundle.js';
@@ -121,6 +122,7 @@ vm.runInContext(scoped('src/domain/discovery-identity-review.js', 'DiscoveryIden
 vm.runInContext(scoped('src/domain/discovery-recovery.js', 'DiscoveryRecovery'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/worker.js', 'utf8').replace('export default', 'globalThis.worker='), workerContext);
+installViewIndexFixture(workerContext);
 const env = {BUCKET: memory};
 workerContext.env = env;
 const RUN = '11111111-1111-4111-8111-111111111111', H = 3600000, D = 86400000;

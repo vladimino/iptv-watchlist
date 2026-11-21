@@ -23,30 +23,17 @@ async function get(pathname){
  assert.equal(response.status,200,pathname);
  return response.json();
 }
-const storedIndex=await (await bucket.get('enrichment/view-index.json')).json();
-storedIndex['movie-1'].watched=true;
-storedIndex['movie-2'].watched=false;
-storedIndex['movie-2'].actualRating=3;
-await bucket.put('enrichment/view-index.json',JSON.stringify(storedIndex));
 const programme=await get('/api/programme');
 assert.deepEqual(programme.films.map(film=>film.title),['Movie1','Movie2','Movie3']);
 const watchlist=await get('/api/watchlist');
 assert.deepEqual(watchlist.films.map(film=>film.title),['Movie1','Movie2','Movie3']);
 const started=await get('/api/started');
 assert.deepEqual(started.ids,['movie-1']);
-const view=await get('/api/enrichment/view');
-assert.equal(view.films.films,undefined);
-assert.equal(view.films['movie-1'].actualRating,4.5);
-assert.deepEqual(view.films['movie-1'].moodIds,['tense']);
-assert.deepEqual(view.films['movie-1'].fingerprint.plotMechanics,['heist']);
-assert.equal(view.films['movie-1'].watched,true);
-assert.equal(view.films['movie-2'].watched,false);
-assert.equal(view.films['movie-2'].actualRating,3);
-assert.equal(view.films['movie-2'].prediction.predictedRating,4);
-assert.deepEqual(view.films['movie-2'].fingerprint.plotMechanics,['rescue']);
-assert.equal(view.films['movie-2'].prediction.stale,false);
-assert.deepEqual(view.films['movie-2'].moodIds,['light']);
-assert.deepEqual(view.films['movie-2'].prediction.moodIds,['light']);
+// AIR-558: the view index is derived from D1 only and local dev has no authoritative D1 (a D1 that satisfies the ratings contract also forces the published EPG
+// authority, ADR 0162), so the view refuses instead of reading the raw object. A D1 importer for the local stack is a separate follow-up.
+const viewRefusal=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),env);
+assert.ok([502,503].includes(viewRefusal.status),'view refuses without an authoritative D1');
+assert.equal((await viewRefusal.json()).films,undefined);
 const overview=await get('/api/admin/overview');
 assert.equal(overview.snapshot.programmeRunId,'local-fixture');
 assert.deepEqual(overview.counts,{films:3,people:3});
@@ -66,18 +53,10 @@ for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show
 moodDb.sql("UPDATE prediction_domain_authority SET mode='d1'");
 const features=JSON.stringify({fingerprintHash:'d1-tense',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,invalidatedAt:null,generatedAt:'2026-11-01T00:00:00.000Z',produced:null,previous:null,plotMechanics:['heist'],moodLabels:['tense'],execution:{pace:'fast'}});
 moodDb.sql("INSERT INTO prediction_fingerprint (film_id,fingerprint_hash,schema_version,prompt_version,generated_at,invalidated_at,r2_key,content_sha256,features_json) VALUES ('movie-2','d1-tense',1,1,'2026-11-01T00:00:00.000Z',NULL,'enrichment/films/movie-2/fingerprints/d1-tense.json','abc','"+features.replaceAll("'","''")+"')");
-const overlaidResponse=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),standins({BUCKET:bucket,DB:moodDb})); // ADR 0162: a schema below 8 is the published EPG's local stand-in only when it is opted in
-assert.equal(overlaidResponse.status,200);
-const overlaid=await overlaidResponse.json();
-assert.deepEqual(overlaid.films['movie-2'].moodIds,['tense']);
-assert.equal(overlaid.films['movie-2'].prediction,null);
-assert.deepEqual(overlaid.films['movie-2'].fingerprint.plotMechanics,['heist']);
-assert.equal(overlaid.films['movie-2'].watched,false);
-assert.equal(overlaid.films['movie-2'].actualRating,3);
-assert.equal(overlaid.films['movie-1'].watched,true);
-assert.equal(overlaid.films['movie-1'].actualRating,4.5);
-assert.equal(overlaid.films['movie-1'].fingerprint,null);
-assert.equal(overlaid.films['movie-1'].prediction,null);
+// AIR-558: a prediction-only D1 (schema below 8) is no longer enough for the view: the ratings domain is not authoritative, so it refuses; the raw object is not a fallback.
+const overlaidResponse=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),standins({BUCKET:bucket,DB:moodDb}));
+assert.ok([502,503].includes(overlaidResponse.status));
+assert.equal((await overlaidResponse.json()).films,undefined);
 const closed=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,PREDICTION_DB_REQUIRED:'on'});
 assert.notEqual(closed.status,200);
 const closedBody=await closed.json();
@@ -93,7 +72,9 @@ assert.equal(wrongBody.films,undefined);
 assert.match(wrongBody.error,/prediction_domain_unavailable/);
 const blocked=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:emptyDb});
 assert.equal(blocked.status,502);
-assert.match((await blocked.json()).error,/published_epg_unavailable/);
+// AIR-558: the view now stops at the ratings domain before the published EPG gate is reached.
+assert.match((await blocked.json()).error,/published_epg_unavailable|ratings_domain_not_authoritative/);
 const localEmpty=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),standins({BUCKET:bucket,DB:emptyDb}));
-assert.equal(localEmpty.status,200);
-console.log('Local API: programme, started, and enrichment view match the fixture catalog');
+// AIR-558: with the stand-ins on, an empty D1 still has no authoritative ratings domain, so the view refuses rather than reading the raw object.
+assert.ok([502,503].includes(localEmpty.status));
+console.log('Local API: programme, started and admin match the fixture catalog; the view refuses without an authoritative D1');

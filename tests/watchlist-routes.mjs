@@ -31,6 +31,8 @@ const MIRROR=key=>key==='programme.json'||key==='watchlist.json'||/^epg\/(genera
 async function arrange({canonical='trusted',snapshot=true,marker="UPDATE watchlist_authority SET mode='d1',generation=1 WHERE id=1;",mirrors=null}={}){
  const file=path.join(root,'w'+(counter++)+'.sqlite');fs.copyFileSync(scenario.dbFile,file);
  const db=d1Standin(file);db.sql(OPEN);
+ // AIR-558: the view index (read by GET /api/catalog/available) is derived from D1, so the ratings domain the scenario template drops is installed again here, open.
+ {const lines=fs.readFileSync('migrations/0010_ratings_authority.sql','utf8').split('\n');db.sql([...lines.slice(53,84),...lines.slice(92,95)].join('\n'));}db.sql("UPDATE ratings_domain_authority SET mode='d1', cutover='open'");
  const bucket=new Bucket();
  for(const [key,item] of scenario.snapshot)if(!MIRROR(key))bucket.objects.set(key,{text:item.text,customMetadata:{}});
  const programme={runId:RUN2,updatedAt:PAST,watchlistCount:1,films:[w1],catalogFilms:[{id:'tmdb_90',tmdbId:'90',shows:[SHOW]}],stats:{}};

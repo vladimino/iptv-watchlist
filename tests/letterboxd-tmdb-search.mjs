@@ -6,6 +6,7 @@ import path from 'node:path';
 import {DEFAULT_MAX_REQUESTS,MAX_RPS,REVIEW_REASONS,SEARCH_BASIS,runSearches,searchUrl,selectFromSearch} from '../src/letterboxd-tmdb-search.js';
 import {main,tmdbSearchFn,unmatchedFilms} from '../scripts/letterboxd-tmdb-search.mjs';
 import {loadCatalogDir} from '../scripts/letterboxd-reconcile.mjs';
+import {writeD1Input} from './view-index-d1-input.mjs';// AIR-558
 
 const hit=(id,original,date,extra={})=>({id,title:extra.title??original,original_title:original,release_date:date});
 
@@ -121,20 +122,21 @@ try{
  await writeFile(path.join(catalogDir,'catalog.json'),JSON.stringify({tmdb_101:{id:'tmdb_101',tmdbId:'101',canonicalIdentity:'tmdb:101',title:'Known Film',original:'Known Film',year:2001,aliases:[]}}));
  await writeFile(path.join(catalogDir,'links.json'),'{}');
  await writeFile(path.join(catalogDir,'provenance.json'),JSON.stringify({source:'live_catalog_read',readAt:'2026-11-08T16:16:32.058Z'}));
+ const d1Main=await writeD1Input(path.join(scratch,'d1-input'),{Kk1:{actualRating:4}});// AIR-558: the mandatory D1-derived view index
 
  // loadCatalogDir refuses a directory that would pass as complete when it is not
- const bad=async(mutate,pattern)=>{const dir=path.join(scratch,'bad'+Math.random().toString(36).slice(2));await mkdir(dir);for(const name of ['catalog.json','links.json','provenance.json'])await writeFile(path.join(dir,name),await readFile(path.join(catalogDir,name)));await mutate(dir);await assert.rejects(loadCatalogDir(dir),pattern);};
+ const bad=async(mutate,pattern)=>{const dir=path.join(scratch,'bad'+Math.random().toString(36).slice(2));await mkdir(dir);for(const name of ['catalog.json','links.json','provenance.json'])await writeFile(path.join(dir,name),await readFile(path.join(catalogDir,name)));await mutate(dir);await assert.rejects(loadCatalogDir(dir,{viewIndexFile:d1Main}),pattern);};
  await bad(dir=>rm(path.join(dir,'catalog.json')),/no catalog\.json/);
  await bad(dir=>rm(path.join(dir,'provenance.json')),/no provenance\.json/);
  await bad(dir=>writeFile(path.join(dir,'catalog.json'),'{}'),/non-empty/);
  await bad(dir=>writeFile(path.join(dir,'provenance.json'),JSON.stringify({source:'snapshot',readAt:'x'})),/live_catalog_read/);
  await bad(dir=>writeFile(path.join(dir,'links.json'),'[]'),/links\.json must be an object/);
- const loaded=await loadCatalogDir(catalogDir);assert.equal(loaded.status,'live_catalog_read');assert.equal(loaded.baselineIdentity.catalogFilms,1);assert.deepEqual(loaded.missing,['metadata.json','watchlist.json','programme.json','view-index.json']);
+ const loaded=await loadCatalogDir(catalogDir,{viewIndexFile:d1Main});assert.equal(loaded.status,'live_catalog_read');assert.equal(loaded.baselineIdentity.catalogFilms,1);assert.deepEqual(loaded.missing,['metadata.json','watchlist.json','programme.json']);// AIR-558: the view index comes from the D1 input, so the raw object is no longer listed as missing
 
- const found=await unmatchedFilms({exportDir,catalogDir});
+ const found=await unmatchedFilms({exportDir,catalogDir,viewIndexFile:d1Main});
  assert.deepEqual(found.films.map(f=>f.code),['Uu1','Uu2','Uu3']);assert.equal(found.total,4);
 
- const base=['--export',exportDir,'--catalog-dir',catalogDir,'--output',outputDir];
+ const base=['--export',exportDir,'--catalog-dir',catalogDir,'--output',outputDir,'--view-index-d1',d1Main];
  const dry=await main([...base,'--dry-run'],{env:{}});
  assert.equal(dry.dryRun,true);assert.equal(dry.requestsWouldBeMade,3);assert.equal(dry.unmatched,3);
  assert.ok(!JSON.stringify(dry).includes('Secret'));
@@ -146,7 +148,7 @@ try{
  await assert.rejects(main([...base,'--max-requests','1501'],{env:{}}),/--max-requests/);
  await assert.rejects(main([...base,'--rps','5'],{env:{}}),/--rps/);
  await assert.rejects(main(['--export',exportDir],{env:{}}),/required/);
- await assert.rejects(main([...base.slice(0,4),'--output','tests/private-out'],{env:{}}),/absolute|outside/);
+ await assert.rejects(main([...base.slice(0,4),'--output','tests/private-out','--view-index-d1',d1Main],{env:{}}),/absolute|outside/);
 
  // a stub TMDB: one unique movie, one year drift, then a 429 that ends the run
  const seen=[];
@@ -173,8 +175,8 @@ try{
  const dry2=await main([...base,'--dry-run'],{env:{}});assert.equal(dry2.requestsUsed,3);assert.equal(dry2.requestsWouldBeMade,0);assert.equal(dry2.alreadyAttempted,3);
  // --auth proxy: the environment injects the Authorization header, so the tool needs no token and sends none; the default still refuses
  {
-  const outProxy=path.join(scratch,'out-proxy'),proxy=['--export',exportDir,'--catalog-dir',catalogDir,'--output',outProxy,'--auth','proxy'];
-  await assert.rejects(main([...proxy.slice(0,6),'--auth','nonsense'],{env:{}}),/--auth must be token or proxy/);
+  const outProxy=path.join(scratch,'out-proxy'),proxy=['--export',exportDir,'--catalog-dir',catalogDir,'--output',outProxy,'--auth','proxy','--view-index-d1',d1Main];
+  await assert.rejects(main([...proxy.slice(0,6),'--auth','nonsense','--view-index-d1',d1Main],{env:{}}),/--auth must be token or proxy/);
   // a 401 (the proxy did not apply a credential): one request, that film not recorded, stop
   const seenP=[];
   const denied=await main(proxy,{env:{},fetchImpl:async(url,init)=>{seenP.push(init.headers);return new Response('no',{status:401});},sleep:async()=>{},now:()=>1});
@@ -188,7 +190,7 @@ try{
   assert.equal(JSON.stringify(okP).includes('tok'),false);
   // the default mode still sends the bearer header
   const tokenSeen=[];
-  await main(['--export',exportDir,'--catalog-dir',catalogDir,'--output',path.join(scratch,'out-token')],{env:{TMDB_READ_TOKEN:'tok-x'},fetchImpl:async(url,init)=>{tokenSeen.push(init.headers.Authorization);return new Response(JSON.stringify({results:[]}),{status:200});},sleep:async()=>{},now:()=>1});
+  await main(['--export',exportDir,'--catalog-dir',catalogDir,'--output',path.join(scratch,'out-token'),'--view-index-d1',d1Main],{env:{TMDB_READ_TOKEN:'tok-x'},fetchImpl:async(url,init)=>{tokenSeen.push(init.headers.Authorization);return new Response(JSON.stringify({results:[]}),{status:200});},sleep:async()=>{},now:()=>1});
   assert.ok(tokenSeen.length>0&&tokenSeen.every(h=>h==='Bearer tok-x'));
  }
  // the file is bound to its export: another export (or catalog read) is refused, never reused
@@ -202,17 +204,22 @@ try{
 
  // ADR 0183: a D1-derived view index is an explicit input; the results file is bound to its digest and never reused with another view index.
  {
-  const d1File=path.join(scratch,'view-index.d1.json');
-  await writeFile(d1File,JSON.stringify({schema:'view-index-d1-export@1',source:'d1_derived',readAt:'2026-11-20T15:00:00.000Z',database:{id:null},counts:{keys:1},index:{Zz9:{actualRating:4}}}));
+  const d1File=await writeD1Input(path.join(scratch,'d1-input'),{Zz9:{actualRating:4}});// AIR-558
   const withInput=await unmatchedFilms({exportDir,catalogDir,viewIndexFile:d1File});
   assert.equal(withInput.viewIndex.source,'d1_derived');assert.equal(withInput.provenance.viewIndex.keys,1);
-  assert.equal((await unmatchedFilms({exportDir,catalogDir})).viewIndex,null,'without the option there is no D1 input');
+  // AIR-558: omitting the option is refused (ReconcileError, exit 2) and nothing falls back to a raw view-index.
+  await assert.rejects(unmatchedFilms({exportDir,catalogDir}),error=>error.name==='ReconcileError'&&error.exitCode===2&&/--view-index-d1/.test(error.message));
+  await assert.rejects(main(['--export',exportDir,'--catalog-dir',catalogDir,'--output',path.join(scratch,'out-none'),'--dry-run'],{env:{}}),error=>error.exitCode===2&&/--view-index-d1/.test(error.message));
+  await assert.rejects(stat(path.join(scratch,'out-none','tmdb-results.json')));
+  await writeFile(path.join(catalogDir,'view-index.json'),JSON.stringify({POISON:{actualRating:1}}));
+  await assert.rejects(unmatchedFilms({exportDir,catalogDir}),/--view-index-d1/,'a raw view-index.json in the catalog directory is not a fallback');
+  await rm(path.join(catalogDir,'view-index.json'));
   const none=async()=>new Response(JSON.stringify({results:[]}),{status:200});
   const out=path.join(scratch,'out-d1');
   await main(['--export',exportDir,'--catalog-dir',catalogDir,'--output',out,'--view-index-d1',d1File],{env:{TMDB_READ_TOKEN:'tok-x'},fetchImpl:none,sleep:async()=>{},now:()=>1});
   const results=JSON.parse(await readFile(path.join(out,'tmdb-results.json'),'utf8'));
   assert.equal(results.binding.viewIndexSha256,withInput.viewIndex.sha256,'the results are bound to the D1 input');
-  await assert.rejects(main(['--export',exportDir,'--catalog-dir',catalogDir,'--output',out],{env:{TMDB_READ_TOKEN:'tok-x'},fetchImpl:none,sleep:async()=>{},now:()=>1}),/another export or catalog read/);
+  await assert.rejects(main(['--export',exportDir,'--catalog-dir',catalogDir,'--output',out,'--view-index-d1',d1Main],{env:{TMDB_READ_TOKEN:'tok-x'},fetchImpl:none,sleep:async()=>{},now:()=>1}),/another export or catalog read/);
   await assert.rejects(main(['--export',exportDir,'--catalog-dir',catalogDir,'--output',path.join(scratch,'out-d1b'),'--view-index-d1',path.join(os.tmpdir(),'absent-view-index.json')],{env:{TMDB_READ_TOKEN:'tok-x'},fetchImpl:none,sleep:async()=>{},now:()=>1}),/could not be read/);
  }
 }finally{await rm(scratch,{recursive:true,force:true});}

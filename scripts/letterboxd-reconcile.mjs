@@ -57,7 +57,8 @@ export function withViewIndexInput(loaded,input){
  const missing=loaded.missing.filter(key=>key!=='enrichment/view-index.json'&&key!=='view-index.json');
  return {...loaded,objects:{...loaded.objects,viewIndex:input.index},missing,baselineIdentity:{...(loaded.baselineIdentity??{}),viewIndex:input.identity}};
 }
-const withInput=async(loaded,viewIndexFile)=>viewIndexFile?withViewIndexInput(loaded,await loadViewIndexInput(viewIndexFile)):loaded;
+// AIR-558: the D1-derived input is mandatory. The raw object of a snapshot is stale once the raw writers are gone, so a missing option is a usage error, never a silent read of it.
+const withInput=async(loaded,viewIndexFile)=>{if(!viewIndexFile)throw new ReconcileError('--view-index-d1 <absolute file> is required: the view index is derived from D1 and the raw object of a snapshot is stale (scripts/view-index-d1-export.mjs makes the file)',2);return withViewIndexInput(loaded,await loadViewIndexInput(viewIndexFile));};
 
 export async function loadSnapshot(directory,{viewIndexFile=null}={}){
  let manifest;
