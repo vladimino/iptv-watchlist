@@ -230,6 +230,16 @@ const unknownTypeHTML=vm.runInContext('eventHTML(unknownType)',context);assert.m
  html=card({...base,trigger:'manual'});assert.match(html,/\(вручную\)/);
  html=card({...base,trigger:undefined,holderRunId:undefined,holderAgeMs:undefined});assert.match(html,/Попытка запуска отклонена/);assert.doesNotMatch(html,/по расписанию|вручную|Выполняется пакет|работает \d/,'absent fields are not guessed');
  html=card({...base,requestId:'<img src=x onerror=alert(1)>',holderRunId:'"><script>',holderAgeMs:-5});assert.doesNotMatch(html,/<img|<script|onerror/,'unsafe ids are dropped, never printed');assert.doesNotMatch(html,/работает -/,'a negative age is not shown');
+ // AIR-575 (ADR 0190): a start refused because the catalog was held is the same neutral card with its own fixed sentence; the cause is read through a fixed list, never printed as stored.
+ {const heldBase={id:'enrichment-skipped-req-h',type:'enrichment',at:'2026-11-21T16:05:00.000Z',stage:'skipped',protocol:'batch_v2',presentation:'batch_v2_skipped',reason:'catalog_held',cause:'discovery_incomplete',requestId:'req-h',trigger:'scheduled'};
+  let held=card(heldBase);
+  assert.match(held,/Запуск прогнозов пропущен: каталог временно недоступен/);assert.match(held,/Попытка запуска \(по расписанию\) отклонена: каталог ещё загружается\. Фильмы не обрабатывались\./);
+  assert.match(held,/Запрос: <code>req-h<\/code>\. Код: <code>prediction_catalog_held<\/code> · причина: <code>discovery_incomplete<\/code>/);assert.match(held,/data-event-id="enrichment-skipped-req-h"/);
+  assert.doesNotMatch(held,/предыдущий ещё выполняется|Выполняется пакет|already_running|Пакет прогнозов|Обработано|Осталось|error|ошиб/i,'neutral, and not the lease-refusal text');
+  assert.match(card({...heldBase,cause:'discovery_fence'}),/отклонена: каталог временно закрыт для чтения\. Фильмы не обрабатывались\./);
+  for(const cause of ['discovery_incomplete','discovery_fence',undefined])assert.doesNotMatch(card({...heldBase,cause}),/очеред|lease|публикаци|EPG|Следующий запуск|не менял/i,'the card asserts only the refusal and unprocessed films: nothing about the queue, the lease, an EPG publication or the next start');
+  held=card({...heldBase,cause:'<script>alert(1)</script>',requestId:'"><img src=x onerror=alert(1)>',trigger:undefined});
+  assert.match(held,/каталог временно недоступен\./);assert.doesNotMatch(held,/<script|<img|onerror|по расписанию|вручную|причина:/,'an unknown cause and an unsafe id are never printed, an absent trigger is not guessed');}
  // an older skipped Event is never the baseline of a later queue comparison
  context.run1={id:'a',type:'enrichment',at:'2026-11-20T09:00:00.000Z',added:1,updated:0,remaining:10,stage:'complete'};
  context.run2={id:'b',type:'enrichment',at:'2026-11-20T11:00:00.000Z',added:1,updated:0,remaining:20,stage:'complete'};

@@ -1,4 +1,4 @@
-# ADR 0189: The EPG scan applies one pinned Channel policy snapshot behind an owner flag, fail-closed, and registers XMLTV-only channels after the scan
+# ADR 0191: The EPG scan applies one pinned Channel policy snapshot behind an owner flag, fail-closed, and registers XMLTV-only channels after the scan
 
 **Status:** Proposed  
 **Original decision date:** 2026-11-21  

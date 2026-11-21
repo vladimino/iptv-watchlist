@@ -622,6 +622,12 @@ export const FILES={
  "watchlist-authority-production.mjs": {
   "suite": "core"
  },
+ "letterboxd-sync-control-production.mjs": {
+  "suite": "core"
+ },
+ "migration-index-docs.mjs": {
+  "suite": "core"
+ },
  "migration-statements.mjs": {
   "suite": "core"
  },
@@ -991,6 +997,9 @@ export const FILES={
  "prediction-skipped-event.mjs": {
   "suite": "core"
  },
+ "prediction-catalog-held-event.mjs": {
+  "suite": "core"
+ },
  "ratings-diary-identity.mjs": {
   "suite": "core"
  },
@@ -1276,6 +1285,9 @@ export const FILES={
   "suite": "core"
  },
  "prediction-start-diagnostics.mjs": {
+  "suite": "core"
+ },
+ "prediction-start-ledger-seal.mjs": {
   "suite": "core"
  },
  "prediction-step-timing.mjs": {
