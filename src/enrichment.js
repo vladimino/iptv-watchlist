@@ -2430,10 +2430,15 @@ async function diagnosticHistory(env,limit=10){
 // next, submit and complete of an owned run answer the same 503, keep the lease and do not stop. `cause` is the Discovery code that refused the read.
 const CATALOG_HELD_CODES=['discovery_fence','discovery_incomplete'];
 const catalogHeldResponse=(cause,extra={})=>json({status:'blocked',reason:'catalog_held',code:'prediction_catalog_held',cause,...extra,...scheduledRunFields()},503);
+// AIR-574: the gate names the three Discovery states apart. (`gate.held` is defensive: `readAuthority` refuses a real held cutover itself with `discovery_unavailable`, ADR 0162.) A held cutover and a loading transfer that is a catalog replacement (a pending admission, or no ledger handoff) still hold the catalog.
+// A `loading` ledger seal (an EPG publication moving the ledger, ADR 0091) does not: the admission lookups and the catalog read both stay open under it (`readAdmissionsById`, `SEAL_SAFE_KEYS`),
+// so a start whose selection was already read from a consistent queue must not be refused by it. Every read keeps its own fence, and the lease-time preflight repeats them.
 async function catalogHeldCause(env){
  if(typeof DiscoveryAuthority==='undefined')return null;
  const gate=await DiscoveryAuthority.readAuthority(env);
- return gate.held?'discovery_fence':gate.ready&&gate.transfer==='loading'?'discovery_incomplete':null;
+ if(gate.held)return 'discovery_fence';
+ if(!gate.ready||gate.transfer!=='loading')return null;
+ return await DiscoveryAuthority.loadingIsLedgerSeal(env)?null:'discovery_incomplete';
 }
 function catalogHeldQueueError(error){return CATALOG_HELD_CODES.includes(error?.code)&&error.stage==='queue_refresh'?error:null;}
 function ownedCatalogHeld(boundary,error,requestId,runId,extra={}){

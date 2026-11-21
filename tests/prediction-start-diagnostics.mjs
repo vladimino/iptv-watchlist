@@ -30,9 +30,28 @@ for(const [gate,cause] of GATES){
  assert.equal(lines().length,0,cause+': a wait is not a failed boundary');
 }
 
+// 1b. AIR-574. The REAL Discovery states, not a stubbed gate. A ledger seal (an EPG publication moving the ledger: transfer `loading` for another programme, no pending admission) is not a catalog
+// replacement: the trusted films are selected from the consistent queue and the start must run (the 21 Nov 2026 RCA: preflight selected 5 films, then the global gate refused with 0 films processed).
+// A catalog replacement (a pending admission under `loading`) still holds, and refuses without a lease, a run, an Event or a queue change.
+const setTransfer=(state,run)=>sql(w.file,"UPDATE discovery_transfer SET state='"+state+"', programme_run_id="+(run?"'"+run+"'":'NULL')+' WHERE id=1');
+const pending=JSON.stringify({id:'tmdb_9001',title:'tmdb_9001',tmdbId:'9001',canonicalIdentity:'tmdb:9001',shows:[]});
+setTransfer('loading','seal-run');
+sql(w.file,"INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES ('tmdb_9001','9001','movie','tmdb:9001','tmdb_9001','seal-run',1,'pending','"+pending+"')");
+{
+ logs.length=0;const leaseWas=JSON.stringify(leaseRow()),runsWas=runCount(),eventsWas=eventKeys(),queueWas=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue'));
+ const replacing=await w.api('batch/start',START);
+ assert.equal(replacing.status,503);assert.equal(replacing.data.code,'prediction_catalog_held');assert.equal(replacing.data.cause,'discovery_incomplete','a catalog replacement still holds');
+ assert.equal(JSON.stringify(leaseRow()),leaseWas,'replacement: no lease');assert.equal(runCount(),runsWas,'replacement: no run');assert.deepEqual(eventKeys(),eventsWas,'replacement: no Event');
+ assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),queueWas,'replacement: the queue is untouched');
+}
+sql(w.file,"DELETE FROM discovery_admission WHERE film_id='tmdb_9001'");
+// The ledger seal alone (the pending admission gone): the start is not refused by the global gate. Section 2 then runs its whole run under the seal.
+logs.length=0;
+
 // 2. After the publication the start runs; a held catalog then reaches neither the batch submit nor its identical replay, nor the completion.
 logs.length=0;
-const running=(await w.api('batch/start',START)).data;assert.equal(running.status,'running');
+const underSeal=await w.api('batch/start',START);assert.equal(underSeal.status,200,'a ledger seal does not refuse a start with a trusted selection: '+JSON.stringify(underSeal.data).slice(0,200));
+const running=underSeal.data;assert.equal(running.status,'running');assert.equal(running.films.length,2,'the selected films are delivered');
 const [first,second]=running.films.map(f=>f.filmId);
 const payload={runId:running.runId,epoch:running.lease.epoch,items:[{filmId:first,fingerprint:w.fingerprint,prediction:w.prediction}]};
 const beforeEvents=eventKeys();
@@ -48,4 +67,5 @@ assert.equal(held.status,200);assert.equal(held.data.results[0].status,'created'
 const finished=await withGate(GATES[0][0],()=>w.api('complete',{runId:running.runId,reason:'manifest_spent'}));
 assert.equal(finished.status,200,JSON.stringify(finished.data).slice(0,200));assert.equal(runRow(running.runId).status,'complete');
 assert.equal(lines().length,0,'no failed boundary');
+setTransfer('idle',null);
 console.log('prediction start diagnostics (batch v2): a held or loading catalog is a lease-free 503 wait at start; an owned manifest submits, replays and completes untouched by a held catalog passed');
