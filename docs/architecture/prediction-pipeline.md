@@ -123,6 +123,7 @@ sequenceDiagram
     alt A live holder exists
         MCP-->>Task: same key and arguments: the same receipt. Otherwise already_running
     else Claim taken
+        MCP->>Store: Write the create-only attempt marker first
         MCP->>WF: Create the instance (id is the run id)
         MCP-->>Task: accepted receipt (runId, epoch, preparing)
         WF->>Lease: Renew the claim at each stage, convert under the same epoch
