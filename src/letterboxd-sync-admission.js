@@ -9,7 +9,7 @@ const SLUG = /^https:\/\/letterboxd\.com\/film\/([a-z0-9-]{1,200})\/$/;
 const NOT_NOW = new Set(['forbidden', 'rate_limited', 'challenge', 'timeout', 'fetch_failed', 'oversized', 'tmdb_unavailable', 'deferred', 'unavailable']);
 const HOUR = 3600000;
 
-export function admissionStep({repository, identity, epochGuard}) {
+export function admissionStep({repository, identity, epochGuard, fenceEnv = env => env}) {
   return async (ctx, {limit = STEP_LIMIT, now = ctx.now()} = {}) => {
     const guards = typeof epochGuard === 'function' && Number.isInteger(ctx?.epoch) ? [epochGuard(ctx.epoch)] : null;
     if (!guards) return {resolved: 0, pending: null, terminal: 0, error: 'epoch_guard_absent'};
@@ -35,7 +35,7 @@ export function admissionStep({repository, identity, epochGuard}) {
     }
     if (items.length) {
       let out;
-      try { out = await identity.resolve(ctx.env, items, {clock: ctx.now, remaining: () => Math.max(0, ctx.deadline - ctx.now())}); }
+      try { out = await identity.resolve(fenceEnv(ctx.env, ctx.epoch), items, {clock: ctx.now, remaining: () => Math.max(0, ctx.deadline - ctx.now())}); }
       catch { return {resolved, pending: due.pending, terminal, error: 'identity_check_failed'}; }
       const stored = await identity.readIdentity(ctx.env).catch(() => ({films: {}}));
       const links = await identity.diaryLinks(ctx.env, items.map(item => item.lid)).catch(() => new Map());

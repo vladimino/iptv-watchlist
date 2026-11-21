@@ -2629,8 +2629,9 @@ function letterboxdPorts(env){
   tmdbOf:letterboxdTmdbOf,
   removalRef:(e,snapshot)=>LetterboxdSync.slotEventRef(e,snapshot.slotKey,snapshot.runId),
   epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],
+  fenceEnv:(e,epoch)=>LetterboxdSync.fencedEnv(e,epoch),
  });
- const admitNew=LetterboxdSyncAdmission.admissionStep({repository:WatchlistD1,epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],identity:{MAX_ATTEMPTS:LetterboxdDiaryIdentity.MAX_ATTEMPTS,resolve:(e,items,opts)=>LetterboxdDiaryIdentity.resolve(e,items,opts),readIdentity:e=>LetterboxdFacts.readDiaryIdentity(e),diaryLinks:(e,lids)=>LetterboxdFacts.diaryLinks(e,lids)}});
+ const admitNew=LetterboxdSyncAdmission.admissionStep({repository:WatchlistD1,epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],fenceEnv:(e,epoch)=>LetterboxdSync.fencedEnv(e,epoch),identity:{MAX_ATTEMPTS:LetterboxdDiaryIdentity.MAX_ATTEMPTS,resolve:(e,items,opts)=>LetterboxdDiaryIdentity.resolve(e,items,opts),readIdentity:e=>LetterboxdFacts.readDiaryIdentity(e),diaryLinks:(e,lids)=>LetterboxdFacts.diaryLinks(e,lids)}});
  const repository=LetterboxdSyncRepository.watchlistRepository(WatchlistD1,{epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],effectWriters:effects,admitNew});
  const fenceGuard=epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]];
  const describeFilms=async(e,{added,removed})=>{

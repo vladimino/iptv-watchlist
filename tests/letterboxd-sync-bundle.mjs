@@ -179,4 +179,23 @@ run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
  const perSlot=new Map();for(const k of keys){const slotKey=bucket.records.get(k).slot;perSlot.set(slotKey,(perSlot.get(slotKey)||0)+1);}
  for(const [k,count] of perSlot)assert.equal(count,2,'exactly two keys for '+k);
 }
+// 9. Review (stale writer): the owner closes admission WHILE an effect's side effect is in flight. A new promotion leaves effects pending; then the real facts module is made to flip the mode between the effect's
+// entry and its commit. The commit goes through the fenced env, so the stale writer changes NOTHING (the ratings documents are byte-identical), no effect receipt is recorded, and the effect stays pending.
+{
+ list=['f0','f1','f2','f8'];
+ await slot(T('2026-11-23T03:40:00Z'));
+ const pendingBefore=db.sql("SELECT COUNT(*) AS n FROM watchlist_effect WHERE status='pending'")[0].n;
+ assert.ok(pendingBefore>=1,'the promotion left causal effects pending');
+ const docs=()=>JSON.stringify(db.sql("SELECT key,part,etag FROM ratings_document ORDER BY key,part"));
+ const before=docs();
+ let flipped=0;
+ context.__flipMode=()=>{flipped++;const r=sqliteSync(['-bail',file],{input:"UPDATE letterboxd_sync_mode SET mode='switching', target='external', from_mode='cloudflare', epoch=epoch+1;"});if(r.status!==0)throw new Error(r.stderr);};
+ run("(()=>{const original=LetterboxdFacts.applyWatchlistScan;LetterboxdFacts.applyWatchlistScan=async(e,a)=>{__flipMode();return original(e,a);};})()");
+ const drain=await ports.watchlist.run({env,slotKey:'2026-11-23T1030',runId:'stale',epoch:1,now:()=>T('2026-11-23T09:40:00Z'),deadline:T('2026-11-23T15:00:00Z')});
+ assert.equal(flipped,1,'the mode flipped between the effect entry and its commit');
+ assert.equal(drain.outcome,'error','the stale step ends as an error');
+ assert.equal(docs(),before,'ZERO stale mutations: no ratings document changed');
+ assert.equal(db.sql("SELECT COUNT(*) AS n FROM watchlist_effect WHERE status='pending'")[0].n,pendingBefore,'no receipt was recorded for the stale effect');
+ assert.equal(db.sql('SELECT mode FROM letterboxd_sync_mode')[0].mode,'switching');
+}
 console.log('letterboxd-sync-bundle ok');

@@ -6,7 +6,9 @@
 export const RETENTION_SLICES_PER_CALL = 24;
 
 export function effectWriters(deps) {
-  const {repository, facts, retention, removal, tmdbOf, removalRef, epochGuard} = deps;
+  const {repository, facts, retention, removal, tmdbOf, removalRef, epochGuard, fenceEnv = env => env} = deps;
+  // Every authoritative write below goes through the Letterboxd epoch-fenced env (see `fencedEnv`); reads keep the plain env.
+  const writeEnv = ctx => fenceEnv(ctx.env, ctx.epoch);
   // The TMDB ids only enrich: a cache outage must not hold the facts (identity stays a Film fact, the facts module links by Letterboxd id), but it does hold retention, which needs them.
   const tmdbForFacts = (env, lids) => tmdbOf(env, lids).catch(() => new Map());
   const snapshotOf = async (ctx, effect) => {
@@ -19,7 +21,7 @@ export function effectWriters(deps) {
       const snapshot = await snapshotOf(ctx, effect);
       if (!snapshot) return null;
       const tmdb = await tmdbForFacts(ctx.env, snapshot.films.map(film => film.lid));
-      await facts.applyWatchlistScan(ctx.env, {scanId: snapshot.scanId, observedAt: snapshot.observedAt, films: snapshot.films.map(film => ({id: film.lid, tmdbId: tmdb.get(film.lid) ?? null}))});
+      await facts.applyWatchlistScan(writeEnv(ctx), {scanId: snapshot.scanId, observedAt: snapshot.observedAt, films: snapshot.films.map(film => ({id: film.lid, tmdbId: tmdb.get(film.lid) ?? null}))});
       return 'facts:' + snapshot.scanId;
     },
     // Retention transitions (ADR 0173): the listed films are `watchlist: true`, the departed ones `watchlist: false`, from the durable change rows, never from a membership diff.
@@ -27,7 +29,7 @@ export function effectWriters(deps) {
     async retention(ctx, effect) {
       const snapshot = await snapshotOf(ctx, effect);
       if (!snapshot) return null;
-      if (!(await retention.writerOpen(ctx.env))) return 'retention:writer_closed:' + snapshot.scanId;
+      if (!(await retention.writerOpen(writeEnv(ctx)))) return 'retention:writer_closed:' + snapshot.scanId;
       const changes = await repository.readChanges(ctx.env, effect.snapshotId);
       if (!changes.ok) return null;
       let tmdb;
@@ -38,7 +40,7 @@ export function effectWriters(deps) {
       for (let pass = 0; pass < RETENTION_SLICES_PER_CALL && cursor < queue.length; pass++) {
         const room = Math.max(0, retention.UNIT_CAP - intent.length);
         const slice = queue.slice(cursor, cursor + room);
-        const out = await retention.apply(ctx.env, {event: 'watchlist:' + snapshot.scanId + ':' + cursor, retentions: slice, intent, limit: retention.UNIT_CAP});
+        const out = await retention.apply(writeEnv(ctx), {event: 'watchlist:' + snapshot.scanId + ':' + cursor, retentions: slice, intent, limit: retention.UNIT_CAP});
         intent = retention.carry(out);
         if (!retention.settled(out)) return null;
         cursor += slice.length;
@@ -62,7 +64,7 @@ export function effectWriters(deps) {
       if (films.length !== changes.removed.length) return null;
       const ref = await removalRef(ctx.env, snapshot);
       if (!ref) return null;
-      await removal.enqueue(ctx.env, films, ref);
+      await removal.enqueue(writeEnv(ctx), films, ref);
       // An id removed before its Film was resolved is not retried any more (`superseded`); a returning id reopens through a later promotion. Part of this effect, so a failure holds it.
       if (typeof repository.supersedeAdmissions === 'function' && typeof epochGuard === 'function') {
         const superseded = await repository.supersedeAdmissions(ctx.env, {lids: changes.removed.map(item => item.lid), now: ctx.now()}, {guards: [epochGuard(ctx.epoch)]});

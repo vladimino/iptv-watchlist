@@ -95,6 +95,26 @@ const pendingOf=async env=>(await WatchlistD1.pendingEffects(env)).effects;
  assert.deepEqual(await WatchlistD1.readSnapshot(env,'nope'),{ok:false,reason:'absent'});
  assert.deepEqual(await WatchlistD1.snapshotIdOfVersion(env,7),{ok:false,reason:'absent'});
 }
+const NOW0=Date.parse('2026-11-21T12:00:00Z');
+// 3b. Review: every AUTHORITATIVE write of an effect goes through the epoch-fenced env (facts, the retention writer-open check and apply, the removal enqueue); reads keep the plain env.
+{
+ const {db}=open(),env={DB:db};
+ await publish(env,[film(0),film(1)],'s1','2026-11-21T09:40:00.000Z');await publish(env,[film(0)],'s2','2026-11-21T15:40:00.000Z');
+ const seen=[];
+ const fenceEnv=(e,epoch)=>({...e,fenced:true,epoch});
+ const epochGuard=()=>['INSERT INTO watchlist_cas (id, ok) SELECT 1, 1 WHERE 1 ON CONFLICT(id) DO UPDATE SET ok=excluded.ok',[]];
+ const d={epochGuard,
+  facts:{applyWatchlistScan:async(e)=>{seen.push(['facts',e.fenced===true,e.epoch]);return {};}},
+  retention:{UNIT_CAP:2,writerOpen:async(e)=>{seen.push(['open',e.fenced===true]);return true;},work:()=>[{lid:'f0',watchlist:true}],apply:async(e)=>{seen.push(['apply',e.fenced===true]);return {state:'ok'};},carry:()=>[],settled:()=>true},
+  removal:{enqueue:async(e)=>{seen.push(['enqueue',e.fenced===true]);}},
+  tmdbOf:async(e)=>{seen.push(['tmdb',e.fenced===true]);return new Map();}};
+ const writers=effectWriters({repository:WatchlistD1,facts:d.facts,retention:d.retention,removal:d.removal,tmdbOf:d.tmdbOf,removalRef:async(e,s)=>({eventKey:'events/items/0000000000001-x.json',sourceRunId:s.runId,at:s.observedAt}),epochGuard:d.epochGuard,fenceEnv});
+ for(let i=0;i<20;i++){const next=(await WatchlistD1.pendingEffects(env)).effects[0];if(!next)break;const receipt=await writers[next.effect]({env,epoch:7,now:()=>NOW0},next);assert.ok(receipt);await WatchlistD1.completeEffect(env,{snapshotId:next.snapshotId,effect:next.effect,receipt},{now:NOW0,guards:[d.epochGuard()]});}
+ for(const [kind,fenced] of seen)if(kind!=='tmdb')assert.equal(fenced,true,kind+' ran with the fenced env');
+ assert.ok(seen.some(x=>x[0]==='facts')&&seen.some(x=>x[0]==='apply')&&seen.some(x=>x[0]==='enqueue'),'every writer ran');
+ assert.ok(seen.filter(x=>x[0]==='tmdb').every(x=>x[1]===false),'a read keeps the plain env');
+ assert.ok(seen.filter(x=>x[0]==='facts').every(x=>x[2]===7),'the epoch of the step is the one fenced');
+}
 // 4. The module holds no SQL and does not name EPG, Discovery, Film or show tables.
 {
  const text=fs.readFileSync('src/letterboxd-sync-effects.js','utf8');

@@ -23,7 +23,8 @@ export function ratingsSlotPhase({ratings, fenceGuard, phase}) {
     async run(ctx) {
       const at = () => new Date(ctx.now()).toISOString();
       const now = ctx.now();
-      const env = {...ctx.env, ratingsFence: {guard: fenceGuard(ctx.epoch), hard: true}};
+      // Ratings documents assert the epoch in their own batch (`ratingsFence.guard`); canonical Film/Person writes the pipeline may make (the rated-only bridge) assert it through the `letterboxd` producer fence.
+      const env = {...ctx.env, ratingsFence: {guard: fenceGuard(ctx.epoch), hard: true}, producerFence: {kind: 'letterboxd', epoch: ctx.epoch}};
       let run = await ratings.readRun(env);
       const own = run && run.slotKey === ctx.slotKey ? run : null;
       if (phase === 'removal' && !own) return {done: true, outcome: 'skipped', at: at(), reason: 'no_slot_run'};

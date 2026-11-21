@@ -1389,6 +1389,9 @@ export const FILES={
  "letterboxd-sync-admission.mjs": {
   "suite": "core"
  },
+ "letterboxd-sync-fence.mjs": {
+  "suite": "core"
+ },
  "ratings-queue-v2.mjs": {
   "suite": "core"
  },

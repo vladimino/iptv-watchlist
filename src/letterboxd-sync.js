@@ -47,6 +47,9 @@ export function classifyThrown(error) {
 }
 // The guard statement: ok = 0 (CHECK ok = 1) aborts the whole batch when the mode row no longer admits this epoch.
 export const FENCE_GUARD_SQL = "INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id = 1 AND mode = 'cloudflare' AND epoch = ?) THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok";
+// The env of every authoritative write of a Letterboxd step: the Ratings documents (facts, removal queue, Diary identity) assert the epoch in their own batch through `ratingsFence.guard`, and the canonical
+// Film/Person writers assert it in theirs through the `letterboxd` producer fence. A stale instance whose mode moved mid-step therefore commits nothing, not merely a receipt that is refused later.
+export const fencedEnv = (env, epoch) => ({...env, ratingsFence: {guard: [FENCE_GUARD_SQL, [epoch]], hard: true}, producerFence: {kind: 'letterboxd', epoch}});
 const fenceGuard = (env, epoch) => dbOf(env).prepare(FENCE_GUARD_SQL).bind(epoch);
 
 const emptyMode = () => ({mode: 'external', target: null, from: null, epoch: 0, drain: null, quarantine: null, changedAt: null, revision: 0, writeId: null, stored: false});

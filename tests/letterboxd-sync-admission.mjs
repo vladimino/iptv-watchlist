@@ -101,6 +101,13 @@ const step=(env,id)=>admissionStep({repository:WatchlistD1,identity:id,epochGuar
  assert.deepEqual([ledger(db).f0.state,ledger(db).f1.state],['superseded','resolved'],'f0 left before it resolved; f1 keeps its resolution');
  assert.equal(ledger(db).f5.state,'pending','a newly added id is pending');
 }
+// 7b. Review: the identity check (its Ratings documents and canonical admission) runs with the epoch-fenced env; the ledger settle carries the guard as before.
+{
+ const {db}=open(),env={DB:db};await publish(env,[film(0)],'s1','2026-11-21T09:40:00.000Z');
+ let seen=null;const id=identity({});const resolve=id.resolve;id.resolve=async(e,items,opts)=>{seen=e;return resolve(e,items,opts);};
+ await admissionStep({repository:WatchlistD1,identity:id,epochGuard,fenceEnv:(e,epoch)=>({...e,fenced:true,epoch})})(ctx(env),{});
+ assert.deepEqual([seen.fenced,seen.epoch],[true,1]);
+}
 // 8. Module hygiene: no SQL, no table, no EPG or Discovery state of its own.
 {
  const text=fs.readFileSync('src/letterboxd-sync-admission.js','utf8');

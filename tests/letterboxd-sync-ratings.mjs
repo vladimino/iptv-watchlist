@@ -31,6 +31,7 @@ const ports=p=>({diary:ratingsSlotPhase({ratings:p.api,fenceGuard:guard,phase:'d
  out=await removal.run(ctx());assert.deepEqual([out.done,out.outcome],[true,'done']);
  // every pipeline call carried the Letterboxd epoch guard, hard, in the env
  assert.ok(p.state.envs.every(env=>env.ratingsFence?.hard===true&&env.ratingsFence.guard[1][0]===4),'every pipeline write rides the mode-epoch guard');
+ assert.ok(p.state.envs.every(env=>env.producerFence?.kind==='letterboxd'&&env.producerFence.epoch===4),'canonical writes the pipeline makes carry the producer fence too');
 }
 // 2. Phase 3 does nothing without this slot's run, and never starts one.
 {
