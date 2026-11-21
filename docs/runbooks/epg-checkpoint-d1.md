@@ -65,4 +65,6 @@ An unknown outcome is classified from the write receipt: a receipt for the write
 
 An unknown outcome of an export write is reported with an immediate read of both objects and the marker (classified `observed`, or `unclassified` when the objects cannot be read); the next export call reads both objects again before any write and resumes only the missing object, or stops on a foreign ETag. A readback that cannot be read after the writes is `readback_unreadable`, never success.
 
+The migration file is split into one statement per batch entry by a lexical splitter (quotes and comments are not searched; `BEGIN` and `CASE` open and `END` closes, so a `CASE ... END` inside a trigger body does not end the trigger), and a test executes every statement of the migration chain on its own.
+
 Each transition is one batch: a guard that aborts the batch when the full expected state does not hold, the update, and a fence on the number of changed rows. After a hold, wait longer than the two-second marker cache before capturing the R2 identity. A mid-run incident has no command here; see the plan evidence for the accepted limitation.

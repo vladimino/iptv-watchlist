@@ -604,6 +604,9 @@ export const FILES={
  "epg-checkpoint-production.mjs": {
   "suite": "core"
  },
+ "migration-statements.mjs": {
+  "suite": "core"
+ },
  "epg-commit-durable-enqueue.mjs": {
   "suite": "core"
  },
