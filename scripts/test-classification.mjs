@@ -616,6 +616,9 @@ export const FILES={
  "epg-checkpoint-production.mjs": {
   "suite": "core"
  },
+ "watchlist-authority-production.mjs": {
+  "suite": "core"
+ },
  "migration-statements.mjs": {
   "suite": "core"
  },
