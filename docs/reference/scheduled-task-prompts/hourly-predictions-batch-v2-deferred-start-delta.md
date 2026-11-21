@@ -12,27 +12,32 @@ Before any edit, the Controller reads the live tool list (`prediction_batch_key`
 
 | Answer | Task action |
 | --- | --- |
-| `accepted` (`phase: "preparing"` or `"ready"`) | keep `runId` and `epoch`; go to step 4 |
+| `accepted`, `phase: "preparing"` or `"ready"` | keep `runId` and `epoch`; go to step 4 |
+| `accepted`, `phase: "accepting"` (`next: "repeat_start"`) | the first request has not confirmed its dispatch: wait `retryAfterMs` (1 s) and send the **same** start again (at most 5 times) |
 | `already_running` | success (another Task holds the slot): do not adopt the `runId`, no `prediction_complete`, end. Do **not** call `prediction_batch_key` again to retry |
-| `deferred_start_unavailable` (HTTP 503) | nothing was accepted; report the `code`, end |
+| `start_refused`, `start_failed` (HTTP 409, `outcomeCode`) | this invocation's attempt already ended (a retry of a start whose answer was lost): no run exists; report the code, end |
+| `start_finished` (HTTP 409) | this invocation's run already finished or its lease expired; end, no `prediction_complete` |
+| `deferred_start_ambiguous` (HTTP 503) | the platform could not confirm the dispatch: send the **same** start again after `retryAfterMs` (at most 3 times), then end |
+| `deferred_start_unavailable` (HTTP 503) | definitely not accepted: send the **same** start again once after 5 s; if it repeats, report the `code` and end |
 | `invalid_deferred_key`, `deferred_not_dry_run` (HTTP 400) | a prompt defect; report the `code`, end |
-| transport error or no answer | send the **same** `prediction_batch_start` again with the **same** `invocationKey` (at most 3 attempts, 5 s apart); the answer is the same receipt, never a second run. After 3 attempts, end and report |
+| transport error or no answer | send the **same** `prediction_batch_start` again with the **same** `invocationKey` (at most 3 attempts, 5 s apart); the answer is the same receipt or the typed result, never a second run. After 3 attempts, end and report |
 
-4. **Read the manifest.** Call `prediction_batch_manifest({runId})` (the envelope), and repeat it after the answer's `retryAfterMs` (2 s) while the answer is `manifest_pending`, for at most 3 minutes. Do not start again, and do not call `prediction_batch_key`.
+4. **Read the manifest.** Call `prediction_batch_manifest({runId})` (the envelope) and repeat it every `retryAfterMs` (5 s) while the answer is `manifest_pending`, for at most 3 minutes (about 36 calls; if the scheduler cannot make that many calls, end the execution: the run expires by itself within 180 s and nothing else is needed). Do not start again, and do not call `prediction_batch_key`.
 
 | Answer | Task action |
 | --- | --- |
-| the envelope (`kind: "envelope"`) | the manifest is ready: read `profile`, `contract` and each `film` part as before (the v2 prompt already does this after a truncated start), then go to step 5 |
-| `manifest_pending` | wait `retryAfterMs`, ask again (bounded) |
+| the envelope (`kind: "envelope"`) | the manifest is ready: go to step 5 |
+| `manifest_pending` (HTTP 409) | wait `retryAfterMs`, ask again (bounded) |
 | `start_refused` (`outcomeCode`: `noop`, `quota`, `retry_backoff`, `manifest_too_large`, `prediction_catalog_held`, …) | no run exists; report the code, end (the same outcomes the synchronous table lists) |
-| `start_failed` (`outcomeCode`: `start_claim_lost`, `storage_error`) | no run exists or it was abandoned; report the code, end, no `prediction_complete` |
+| `start_failed` (`outcomeCode`: `start_claim_lost`, `storage_error`, `start_lost`) | no run exists or it was abandoned; report the code, end, no `prediction_complete` |
 | `unknown_run`, `lease_lost` | the run is no longer ours; end, no `prediction_complete` |
 
-5. **Heartbeat immediately** after the envelope: `prediction_heartbeat({runId})`. A prepared run holds a short 180 s lease until its first heartbeat or submit; a Task that waits longer loses the run. Everything after this point (generation, `prediction_batch_validate`, hold, `prediction_batch_submit` with `lease.epoch`, further heartbeats, `prediction_complete`) is unchanged; `lease.epoch` is the `epoch` of the receipt and of the envelope.
+5. **Heartbeat immediately after the envelope and before reading the remaining parts**: `prediction_heartbeat({runId})`, and check that it succeeded. The preparation holds a short 180 s lease until the first heartbeat; a Task that waits longer loses the run. If the answer is `busy` (`prediction_writer_busy`: the preparation is finishing), repeat it after 2 s (at most 5 times); if it answers `lease_lost`, end. Then read `profile`, `contract` and each `film` part (the v2 prompt already does this after a truncated start). Everything after this point (generation, `prediction_batch_validate`, hold, `prediction_batch_submit` with `lease.epoch`, further heartbeats, `prediction_complete`) is unchanged; `lease.epoch` is the `epoch` of the receipt and of the envelope.
 
 ## What the Controller must check
 
 - The four prompts differ only by this delta and stay byte-identical to each other; record the new length and SHA-256 in the snapshot note when installed.
 - `tests/scheduled-task-prompt-v2.mjs` pins the *installed* snapshot; it changes only when the snapshot file is replaced after a verified install.
 - The temporary probe and any one-Task pilot are not used; the entry `:48` stays disabled.
+- The installed MCP instructions, the tool descriptions and the runner contract say that a deferred start answers a receipt and that the manifest is read with `prediction_batch_manifest`; read the live `tools/list` before the edit.
 - Rollback is the previous prompt text (synchronous start); the Worker supports both until the Tasks are moved.

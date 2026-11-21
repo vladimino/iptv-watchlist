@@ -901,22 +901,33 @@ const INVOCATION_KEY_PATTERN=/^[A-Za-z0-9._:-]{16,128}$/;
 const DEFERRED_KEY_PATTERN=/^dk1\.[0-9a-f]{32}$/;
 const READY_LEASE_TTL_MS=180000;
 const START_OUTCOME_PREFIX=ENRICHMENT_KEY+'batch-start/';
+// The run id of a deferred start is derived from the hash of its issued key, so a retry of the same invocation finds its attempt, its terminal outcome and its manifest without any index, and no new
+// invocation can reuse it (fresh executions use fresh keys). The attempt marker is written once, only after the Workflow instance is known to exist.
+const DEFERRED_RUN_PATTERN=/^dk-[0-9a-f]{32}$/;
+const deferredRunIdOf=keyHash=>'dk-'+keyHash.slice(0,32);
+const START_ATTEMPT_PREFIX=START_OUTCOME_PREFIX+'attempt/';
+const START_POLL_MS=5000;
+// While a deferred run is still being prepared (`prep`) the claim, the persist gate and every renewal made by the preparation hold the short lease; only a renewal by the client (a heartbeat,
+// `clientAckAt`) restores the full TTL. A start without `prep` (ordinary, keyless, synchronous keyed) is unchanged.
+const leaseTtlOf=old=>old?.prep&&!old?.clientAckAt?READY_LEASE_TTL_MS:RUNNER_LEASE_TTL;
 // The correlation fields of a lease: they survive every renewal, heartbeat, gate write and conversion, and only a release drops them (ADR 0188 section 3).
-const leaseCorrelation=old=>{const out={};if(old?.phase)out.phase=old.phase;if(old?.keyHash)out.keyHash=old.keyHash;if(old?.argsHash)out.argsHash=old.argsHash;if(old?.clientSubmitAt)out.clientSubmitAt=old.clientSubmitAt;return out;};
+const leaseCorrelation=old=>{const out={};if(old?.phase)out.phase=old.phase;if(old?.keyHash)out.keyHash=old.keyHash;if(old?.argsHash)out.argsHash=old.argsHash;if(old?.clientSubmitAt)out.clientSubmitAt=old.clientSubmitAt;if(old?.deferred)out.deferred=true;if(old?.prep)out.prep=true;if(old?.clientAckAt)out.clientAckAt=old.clientAckAt;return out;};
 // The lease value carries `epoch`, the ownership epoch of batch runner v2 (ADR 0122): set once when a run acquires or takes over the lease and kept by every
 // renewal, heartbeat, checkpoint and release, so the next acquire increments it. It is never the CAS revision (the D1 row token or the object etag), which
 // changes on every write and stays inside the Worker. A renewal that loses the compare-and-swap to another write of the same lease is read again and retried a
 // bounded number of times; it becomes `lease_lost` only when the lease read afterwards names another holder, or has expired.
 const RUNNER_LEASE_ATTEMPTS=3;
 const previousEpochOf=lease=>Number.isInteger(lease?.epoch)&&lease.epoch>=0?lease.epoch:null;
-async function runnerLease(env,runId,operation='renew',claim=null){
+async function runnerLease(env,runId,operation='renew',claim=null,expectEpoch=null){
  let epochSeen=null;
  for(let attempt=1;;attempt++){
   const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,RUNNER_LEASE_KEY),object=head?head.object:await env.BUCKET.get(RUNNER_LEASE_KEY),old=head?head.value:(object?await object.json():null),now=Date.now();
   if(operation==='acquire'&&old?.expiresAt>now)return {status:'already_running',runId:old.runId,expiresAt:old.expiresAt};
   if(operation!=='acquire'&&(!old||old.runId!==runId||old.expiresAt<=now))return {status:'lease_lost',runId:old?.runId||null};
+  // A release that names its epoch never touches the lease of another epoch of the same run id (a deferred run id is derived from its key).
+  if(operation==='release'&&expectEpoch!==null&&previousEpochOf(old)!==expectEpoch)return {status:'lease_lost',runId:old?.runId||null,reason:'epoch'};
   const previousEpoch=previousEpochOf(old),epoch=operation==='acquire'?(previousEpoch??0)+1:previousEpoch;epochSeen=previousEpoch;
-  const value={owner:runId,runId,heartbeatAt:new Date(now).toISOString(),expiresAt:operation==='release'?0:now+(operation==='acquire'&&claim?START_CLAIM_TTL_MS:RUNNER_LEASE_TTL),...(epoch!==null?{epoch}:{}),...(operation!=='acquire'&&old?.submitGate?{submitGate:old.submitGate}:{}),...(operation==='acquire'&&claim?{phase:'claim',keyHash:claim.keyHash,argsHash:claim.argsHash}:operation==='renew'?leaseCorrelation(old):{})};
+  const value={owner:runId,runId,heartbeatAt:new Date(now).toISOString(),expiresAt:operation==='release'?0:now+(operation==='acquire'&&claim?START_CLAIM_TTL_MS:RUNNER_LEASE_TTL),...(epoch!==null?{epoch}:{}),...(operation!=='acquire'&&old?.submitGate?{submitGate:old.submitGate}:{}),...(operation==='acquire'&&claim?{phase:'claim',keyHash:claim.keyHash,argsHash:claim.argsHash,...(claim.deferred?{deferred:true,prep:true}:{})}:operation==='renew'?{...leaseCorrelation(old),clientAckAt:new Date(now).toISOString()}:{})};
   const saved=head?await PredictionD1.writeLease(env,head,value):await env.BUCKET.put(RUNNER_LEASE_KEY,JSON.stringify(value),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
   if(saved===null){
    if(operation!=='acquire'&&attempt<RUNNER_LEASE_ATTEMPTS)continue;
@@ -2825,8 +2836,13 @@ async function recordCatalogHeldStart(env,{body,requestId,response}){
 const startArgsOf=body=>({scope:body.scope,mode:body.mode||'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',manifestSize:resolveManifestSize(body).size,capacity:body.capacity||null});
 const claimRenewed=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>old.phase==='claim'?{value:{...old,heartbeatAt:new Date(now).toISOString(),expiresAt:now+START_CLAIM_TTL_MS}}:{refuse:{status:'owned'}});
 const claimConverted=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>old.phase==='claim'?{value:{...old,phase:'run',heartbeatAt:new Date(now).toISOString(),expiresAt:now+(claim.deferred?READY_LEASE_TTL_MS:RUNNER_LEASE_TTL)}}:{refuse:{status:'owned'}});
-// A prepared deferred run stays on the short lease until its first heartbeat or submit renews it to the full TTL (every renewal already does); the persist's own gate extended it, so it is cut back here.
-const readyLeaseShortened=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>old.phase==='run'&&!old.clientSubmitAt&&!old.submitGate?{value:{...old,expiresAt:Math.min(Number(old.expiresAt)||0,now+READY_LEASE_TTL_MS)}}:{refuse:{status:'owned'}});
+// The readiness boundary of a deferred run (ADR 0193): ONE owner-fenced lease edit removes the persist gate and the preparation mark and keeps the short expiry unless the client already renewed
+// (an acknowledged renewal is never shortened). The manifest is not served before this edit has happened (`ownedBatchManifest` answers pending while `prep` is set).
+const startReady=(env,claim,token)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>{
+ if(old.submitGate?.token!==token)return {refuse:{status:'gate_lost'}};
+ const {submitGate,prep,...rest}=old;void submitGate;void prep;
+ return {value:{...rest,heartbeatAt:new Date(now).toISOString(),expiresAt:old.clientAckAt?old.expiresAt:now+READY_LEASE_TTL_MS}};
+});
 // A same-key repeat of the live run: the stored start answer if it exists, else a bounded wait and then `start_pending`. It writes nothing and never extends a TTL. The holder is read again
 // immediately before anything is returned: the current lease must still be live, still carry this key and argument hash, and no client submit may have closed the window (ADR 0188).
 async function batchJoin(env,live,tally,ids,refuse){
@@ -2845,36 +2861,81 @@ async function batchJoin(env,live,tally,ids,refuse){
 }
 // ---- ADR 0193: deferred start. The start accepts a bounded claim and answers a compact receipt within seconds; the heavy preparation runs in a Cloudflare Workflow instance (one per run id) that
 // does not depend on the MCP request's lifetime, and the caller reads the immutable manifest through `prediction_batch_manifest`. ----
-const startReceipt=(runId,epoch,phase,extra={})=>({status:'accepted',protocol:BATCH_PROTOCOL,deferred:true,runId,epoch:epoch??null,phase,retryAfterMs:2000,read:{tool:'prediction_batch_manifest',part:'envelope',pendingCode:'manifest_pending'},...extra,...scheduledRunFields()});
-// A repeat of an accepted deferred start with the same key and arguments: the same receipt, never a second preparation and never a wait.
-async function batchReceiptFor(env,live,tally){
- tally.deferredReplay=1;
- const stored=await loadJSON(env,ENRICHMENT_KEY+'batch-manifest/'+live.runId+'.json');
- return json(startReceipt(live.runId,live.epoch,usableBatchManifest(stored)?'ready':'preparing'));
+const startReceipt=(runId,epoch,phase,extra={})=>({status:'accepted',protocol:BATCH_PROTOCOL,deferred:true,runId,epoch:epoch??null,phase,next:phase==='accepting'?'repeat_start':'poll_manifest',retryAfterMs:phase==='accepting'?1000:START_POLL_MS,read:{tool:'prediction_batch_manifest',part:'envelope',pendingCode:'manifest_pending'},...extra,...scheduledRunFields()});
+// The typed answers of an invocation whose attempt ended without a run: the same words the readback uses. A retry never launches a second preparation for the same key.
+const startOutcomeAnswer=(outcome,runId)=>json({status:'blocked',reason:outcome.phase==='refused'?'start_refused':'start_failed',code:outcome.phase==='refused'?'start_refused':'start_failed',outcomeCode:outcome.code||null,outcomeReason:outcome.reason||null,runId,...scheduledRunFields()},409);
+// Create-only records under enrichment/batch-start/: the terminal outcome of a run and the marker that its Workflow instance exists. A replayed or stale instance never overwrites either.
+async function writeCreateOnly(env,key,doc){try{await env.BUCKET.put(key,JSON.stringify({at:new Date().toISOString(),...doc}),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});}catch{/* the claim and the lease still tell the truth; the reader then answers pending or a typed loss */}}
+const writeStartOutcome=(env,runId,doc)=>writeCreateOnly(env,START_OUTCOME_PREFIX+runId+'.json',{runId,...doc});
+const writeStartAttempt=(env,runId,doc)=>writeCreateOnly(env,START_ATTEMPT_PREFIX+runId+'.json',{runId,...doc});
+// Whether a Workflow instance with this id exists: 'yes', 'no' (the platform says it is not found) or 'unknown' (anything else, including a missing `get`).
+async function startInstanceState(binding,id){
+ if(typeof binding?.get!=='function')return 'unknown';
+ try{await binding.get(id);return 'yes';}
+ catch(error){return /not[ _.-]?found|does not exist/i.test(String(error?.message||error))?'no':'unknown';}
 }
-// Create-only: a run has one terminal outcome, and a replayed or stale instance must never overwrite it (a `ready` outcome stays `ready`).
-async function writeStartOutcome(env,runId,doc){try{await env.BUCKET.put(START_OUTCOME_PREFIX+runId+'.json',JSON.stringify({runId,at:new Date().toISOString(),...doc}),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});}catch{/* the claim and the lease still tell the truth; the reader then answers pending */}}
-async function acceptDeferredStart(env,clean,requestId,tally,{runId,taken,keyHash,argsHash}){
- const release=()=>runnerLease(env,runId,'release').catch(()=>null);
- const binding=env?.PREDICTION_START_WORKFLOW;
- if(!binding||typeof binding.create!=='function'){tally.deferredUnavailable=1;await release();return json({status:'blocked',reason:'deferred_start_unavailable',code:'deferred_start_unavailable',...scheduledRunFields()},503);}
- const {deferred,...body}=clean;void deferred;
- try{
-  await binding.create({id:runId,params:{runId,epoch:taken.epoch,keyHash,argsHash,recoveredRunId:taken.recoveredRunId||null,requestId:SAFE_LOG_ID.test(String(requestId))?requestId:null,body}});
- }catch(error){
-  // Nothing was accepted. An instance that was created although the answer was lost finds its claim released and ends before any side effect.
-  tally.deferredUnavailable=1;logPredictionFailure('start',error,requestId,runId);await release();
-  return json({status:'blocked',reason:'deferred_start_unavailable',code:'deferred_start_unavailable',...scheduledRunFields()},503);
+// A repeat of an invocation whose own attempt is live: the same receipt, never a second preparation and never a wait. The holder is read again after the records, so a takeover between the reads is refused.
+async function batchReceiptFor(env,live,tally,refuse){
+ tally.deferredReplay=1;
+ const [attempt,stored]=await Promise.all([loadJSON(env,START_ATTEMPT_PREFIX+live.runId+'.json'),loadJSON(env,ENRICHMENT_KEY+'batch-manifest/'+live.runId+'.json')]);
+ const current=await loadJSON(env,RUNNER_LEASE_KEY);
+ if(!(current?.runId===live.runId&&Number(current.expiresAt)>Date.now()&&current.keyHash===live.keyHash&&current.argsHash===live.argsHash&&!current.clientSubmitAt))return refuse();
+ // `accepting`: the first request has not confirmed its dispatch yet (no attempt marker): repeat the same start. `ready`: stored and served (the readiness edit removed `prep`).
+ const phase=!attempt?'accepting':(usableBatchManifest(stored)&&!current.prep)?'ready':'preparing';
+ return json(startReceipt(live.runId,current.epoch,phase));
+}
+// The deferred start of one invocation (the key was issued by the server). Order matters: the terminal outcome, then a live attempt of the same key, then the attempt marker, and only then a new claim.
+async function deferredStart(env,clean,requestId,tally,{keyHash,argsHash}){
+ const runId=deferredRunIdOf(keyHash),binding=env?.PREDICTION_START_WORKFLOW,bound=!!binding&&typeof binding.create==='function';
+ const unavailable=(code,extra={})=>{tally.deferredUnavailable=1;return json({status:'blocked',reason:code,code,...extra,...scheduledRunFields()},503);};
+ const refuse=async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId});
+ const [outcome,live]=await Promise.all([loadJSON(env,START_OUTCOME_PREFIX+runId+'.json'),loadJSON(env,RUNNER_LEASE_KEY)]);
+ if(outcome&&(outcome.phase==='refused'||outcome.phase==='failed'))return startOutcomeAnswer(outcome,runId);
+ const own=live?.runId===runId&&Number(live.expiresAt)>Date.now()?live:null;
+ if(own){
+  if(own.argsHash!==argsHash){tally.keyArgsMismatch=1;return (await batchTurnedAway(env,clean,tally,requestId,{reason:'key_args_mismatch'}))||refuse();}
+  if(own.clientSubmitAt)return refuse();
+  return batchReceiptFor(env,own,tally,refuse);
  }
+ // A `ready` outcome without a live lease: the run finished or its short lease expired. Nothing is started again for this key.
+ if(outcome&&outcome.phase==='ready')return json({status:'blocked',reason:'start_finished',code:'start_finished',runId,...scheduledRunFields()},409);
+ // An attempt that was dispatched, with no live holder and no outcome: it ended unrecorded. Recorded once as failed, never dispatched again.
+ if(await loadJSON(env,START_ATTEMPT_PREFIX+runId+'.json')){
+  await writeStartOutcome(env,runId,{phase:'failed',code:'start_claim_lost'});
+  return startOutcomeAnswer((await loadJSON(env,START_OUTCOME_PREFIX+runId+'.json'))||{phase:'failed',code:'start_claim_lost'},runId);
+ }
+ if(!bound)return unavailable('deferred_start_unavailable');
+ forgetAuthority(env);
+ const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash,deferred:true})));
+ if(taken.status!=='owned'){
+  const holder=await loadJSON(env,RUNNER_LEASE_KEY);
+  if(holder?.runId===runId&&Number(holder.expiresAt)>Date.now()&&holder.keyHash===keyHash&&holder.argsHash===argsHash&&!holder.clientSubmitAt)return batchReceiptFor(env,holder,tally,refuse);
+  return (await batchTurnedAway(env,clean,tally,requestId))||json(taken);
+ }
+ tally.keyed=1;
+ const {deferred,...body}=clean;void deferred;
+ const params={runId,keyHash,argsHash,recoveredRunId:taken.recoveredRunId||null,requestId:SAFE_LOG_ID.test(String(requestId))?requestId:null,body};
+ let dispatched='yes';
+ try{await binding.create({id:runId,params});}
+ catch(error){
+  logPredictionFailure('start',error,requestId,runId);
+  // An error from `create` is not proof that nothing was created: the instance identity is the run id, so ask the platform. Only a definite "not found" releases the claim; an instance that exists keeps it
+  // (it may already be preparing), and an unknown answer keeps it too and says so, bounded by the 180 s claim.
+  dispatched=await startInstanceState(binding,runId);
+  if(dispatched==='no'){await runnerLease(env,runId,'release',null,taken.epoch).catch(()=>null);return unavailable('deferred_start_unavailable');}
+ }
+ await writeStartAttempt(env,runId,{argsHash,epoch:taken.epoch});
+ if(dispatched==='unknown')return unavailable('deferred_start_ambiguous',{runId,retryAfterMs:1000});
  tally.deferredAccepted=1;
  return json(startReceipt(runId,taken.epoch,'preparing',{lease:{epoch:taken.epoch,claimTtlMs:START_CLAIM_TTL_MS,readyTtlMs:READY_LEASE_TTL_MS,ttlMs:RUNNER_LEASE_TTL}}));
 }
 // The Workflow side: one durable step prepares the run exactly as a synchronous keyed start would (same preflights, revalidation, fencing and persist), then records a small terminal outcome.
-// No retry: a repeated preparation could only duplicate work; a failure ends with the claim released and a typed outcome.
+// No retry: a repeated preparation could only duplicate work; a failure ends with the claim released and a typed outcome. The instance is the only one for its run id, so it adopts the live claim of
+// that run id (the epoch is the claim's, read here), and a claim that is not live, or not this key's, ends it before any side effect.
 async function predictionStartPrepare(env,payload){
  const started=Date.now();
- const runId=payload?.runId,epoch=payload?.epoch;
- if(!isText(runId,100)||!Number.isInteger(epoch)||!isObject(payload?.body)||!/^[0-9a-f]{64}$/.test(String(payload.keyHash))||!/^[0-9a-f]{64}$/.test(String(payload.argsHash)))return {phase:'failed',code:'invalid_payload'};
+ const runId=payload?.runId;
+ if(!isText(runId,100)||!DEFERRED_RUN_PATTERN.test(runId)||!isObject(payload?.body)||!/^[0-9a-f]{64}$/.test(String(payload.keyHash))||!/^[0-9a-f]{64}$/.test(String(payload.argsHash))||runId!==deferredRunIdOf(payload.keyHash))return {phase:'failed',code:'invalid_payload'};
  const tally={preflights:0,refreshRounds:0,scannedFilms:0,settledFilms:0,keyed:1,deferred:1};
  const finish=async(phase,extra={})=>{
   const outcome={phase,...extra};
@@ -2883,14 +2944,15 @@ async function predictionStartPrepare(env,payload){
   return outcome;
  };
  const lease=await loadJSON(env,RUNNER_LEASE_KEY);
- if(!(lease?.runId===runId&&lease.epoch===epoch&&lease.phase==='claim'&&Number(lease.expiresAt)>Date.now()&&lease.keyHash===payload.keyHash&&lease.argsHash===payload.argsHash))return finish('failed',{code:'start_claim_lost'});
+ if(!(lease?.runId===runId&&Number.isInteger(lease.epoch)&&lease.phase==='claim'&&Number(lease.expiresAt)>Date.now()&&lease.keyHash===payload.keyHash&&lease.argsHash===payload.argsHash))return finish('failed',{code:'start_claim_lost'});
+ const epoch=lease.epoch;
  const claim={runId,epoch,keyHash:payload.keyHash,argsHash:payload.argsHash,lease:{...lease,status:'owned',...(payload.recoveredRunId?{recoveredRunId:payload.recoveredRunId}:{})},converted:false,deferred:true};
  let response=null,failure=null;
  const requestId=payload.requestId||crypto.randomUUID();
  try{response=await batchStartCore(env,payload.body,requestId,tally,claim);}
  catch(error){failure=error;logPredictionFailure('start',error,payload.requestId,runId);}
- finally{if(!claim.converted)await runnerLease(env,runId,'release').catch(()=>null);}
- if(failure){if(claim.converted)await runnerLease(env,runId,'release').catch(()=>null);return finish('failed',{code:'storage_error'});}
+ finally{if(!claim.converted)await runnerLease(env,runId,'release',null,epoch).catch(()=>null);}
+ if(failure){if(claim.converted)await runnerLease(env,runId,'release',null,epoch).catch(()=>null);return finish('failed',{code:'storage_error'});}
  // AIR-575 / ADR 0190: the preparation does not pass the route exit that records a `prediction_catalog_held` refusal, so the same neutral skipped Event is recorded here, from the same answer.
  await recordCatalogHeldStart(env,{body:payload.body,requestId,response}).catch(()=>null);
  const data=await response.clone().json().catch(()=>null);
@@ -2909,6 +2971,7 @@ async function batchStartWork(env,body,requestId,tally){
  const {invocationKey,...clean}=body;
  if(clean.dryRun===true)return batchStartCore(env,clean,requestId,tally,null);
  const keyHash=await contentHash({purpose:'iptv-batch-start-key',key:invocationKey}),argsHash=await contentHash(startArgsOf(clean));
+ if(clean.deferred===true)return deferredStart(env,clean,requestId,tally,{keyHash,argsHash});
  const runId=crypto.randomUUID();
  forgetAuthority(env);
  const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash})));
@@ -2916,12 +2979,11 @@ async function batchStartWork(env,body,requestId,tally){
   const live=await loadJSON(env,RUNNER_LEASE_KEY);
   if(live?.runId&&live.expiresAt>Date.now()&&live.keyHash===keyHash){
    if(live.argsHash!==argsHash){tally.keyArgsMismatch=1;const refused=await batchTurnedAway(env,clean,tally,requestId,{reason:'key_args_mismatch'});if(refused)return refused;}
-   else if(!live.clientSubmitAt)return clean.deferred===true?batchReceiptFor(env,live,tally):batchJoin(env,live,tally,{keyHash,argsHash},async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId:live.runId}));
+   else if(!live.clientSubmitAt)return batchJoin(env,live,tally,{keyHash,argsHash},async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId:live.runId}));
   }
   return (await batchTurnedAway(env,clean,tally,requestId))||json(taken);
  }
  tally.keyed=1;
- if(clean.deferred===true)return acceptDeferredStart(env,clean,requestId,tally,{runId,taken,keyHash,argsHash});
  const claim={runId,epoch:taken.epoch,keyHash,argsHash,lease:taken,converted:false};
  // Every exit that did not become a run releases the claim (a release of a claim already taken over is refused by the lease's own run and epoch check).
  try{return await batchStartCore(env,clean,requestId,tally,claim);}
@@ -3046,11 +3108,12 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
  const fence=work=>claimed?batchGuardedCommit(env,gateCtx,work):work();
  const renewGate=async()=>{if(claimed){const renewed=await batchGateRenew(env,runId,lease.epoch,token);return renewed.status==='owned'||renewed.status==='busy';}return true;};
  // Every check is also a renewal of the 60 s gate (and the lease), so a long persist never loses its own gate by the clock; a gate that is gone or held by another token is a loss.
- // A check is a cheap read of the gate while it is young (the gate lives 60 s) and a renewal once it is older than 20 s, so the persist does not pay a lease write per check.
+ // A deferred preparation (only) checks with a cheap read of the gate while it is young (the gate lives 60 s) and renews once it is older than 20 s, so it does not pay a lease write per check; the
+ // synchronous keyed start renews at every check.
  let gateRenewedAt=Date.now();
  const held=async()=>{
   if(!claimed)return true;
-  if(Date.now()-gateRenewedAt<20000){const state=await batchGateHeld(env,gateCtx);if(state==='held')return true;if(state!=='gate_lost')return false;}
+  if(claim?.deferred&&Date.now()-gateRenewedAt<20000){const state=await batchGateHeld(env,gateCtx);if(state==='held')return true;if(state!=='gate_lost')return false;}
   const ok=await renewGate();if(ok)gateRenewedAt=Date.now();return ok;
  };
  const clearGate=async()=>{if(claimed){try{await batchGateClear(env,runId,lease.epoch,token);}catch{/* the gate expires by itself */}}};
@@ -3093,8 +3156,12 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
     const startAnswer=drained.committed.length||droppedIds.length?{...answer,drained:{committed:drained.committed.length,dropped:droppedIds.length,committedIds:drained.committed,droppedIds,droppedReasons:drained.dropped.filter(row=>row&&typeof row==='object')}}:answer;
     if(!await held())return superseded();
     await saveJSON(env,ENRICHMENT_KEY+'batch-manifest/'+run.runId+'.json',startAnswer);
-    await clearGate();
-    if(claim?.deferred)await readyLeaseShortened(env,claim).catch(()=>null);
+    if(claim?.deferred){
+     // The readiness boundary: one owner-fenced edit ends the preparation (gate and `prep` removed, short expiry kept unless the client already renewed). It is the last write; the manifest is not served
+     // before it. If it does not happen the start fails typed and the lease is released, never left on a longer TTL.
+     const ready=await startReady(env,claim,token);
+     if(ready.status!=='owned')return ready.status==='lease_lost'||ready.status==='gate_lost'?superseded():storageError();
+    }else await clearGate();
     noteStep(env,()=>({manifestFilms:manifest.films,manifestBytes:batchBytes(startAnswer),drainedCommitted:drained.committed.length,drainedDropped:drained.dropped.length}));
     return json(startAnswer);
    }));
@@ -3112,7 +3179,7 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
   }
  },'start',requestId,claimed?{fence:held}:{});
  const data=await response.clone().json();
- if(data.code==='start_claim_lost'||data.code==='start_storage_error'){await clearGate();return response;}
+ if(data.code==='start_claim_lost'||data.code==='start_storage_error'){if(!claim?.deferred)await clearGate();return response;}
  if(data.status!=='running'){attempt.status=data.status==='already_running'?'completed':data.status==='noop'?'idle':'blocked';attempt.completedAt=new Date().toISOString();attempt.stopReason=data.stopReason||data.reason||(data.error?'storage_error':null);await diagnosticCheckpoint(env,attempt,{startResult:['already_running','blocked','noop'].includes(data.status)?data.status:'error',leaseAcquiredAt:attempt.leaseAcquiredAt||null,lastHeartbeatAt:attempt.lastHeartbeatAt||null});}
  return response;
 }
@@ -3228,16 +3295,16 @@ const batchGateSet=(env,runId,epoch,token,requestId,bodyHash,internal=false)=>ru
  if(gate&&gate.expiresAt>now)return {refuse:{status:'in_flight',retryAfterMs:Math.max(1000,gate.expiresAt-now)}};
  const at=new Date(now).toISOString();
  // ADR 0188: the first genuine client submit closes the join window, once and for good. Heartbeat, renewals and the internal staged drain never set the marker.
- return {value:{...old,...(internal||old.clientSubmitAt?{}:{clientSubmitAt:at}),heartbeatAt:at,expiresAt:now+RUNNER_LEASE_TTL,submitGate:{token,requestId:String(requestId||'').slice(0,100),bodyHash,startedAt:at,expiresAt:now+BATCH_GATE_TTL_MS}}};
+ return {value:{...old,...(internal||old.clientSubmitAt?{}:{clientSubmitAt:at}),heartbeatAt:at,expiresAt:now+leaseTtlOf(old),submitGate:{token,requestId:String(requestId||'').slice(0,100),bodyHash,startedAt:at,expiresAt:now+BATCH_GATE_TTL_MS}}};
 });
 const batchGateRenew=(env,runId,epoch,token)=>runnerLeaseEdit(env,runId,epoch,(old,now)=>{
  if(old.submitGate?.token!==token||old.submitGate.expiresAt<=now)return {refuse:{status:'gate_lost',runId}};
- return {value:{...old,heartbeatAt:new Date(now).toISOString(),expiresAt:now+RUNNER_LEASE_TTL,submitGate:{...old.submitGate,expiresAt:now+BATCH_GATE_TTL_MS}}};
+ return {value:{...old,heartbeatAt:new Date(now).toISOString(),expiresAt:now+leaseTtlOf(old),submitGate:{...old.submitGate,expiresAt:now+BATCH_GATE_TTL_MS}}};
 });
 const batchGateClear=(env,runId,epoch,token)=>runnerLeaseEdit(env,runId,epoch,(old,now)=>{
  if(old.submitGate?.token!==token)return {refuse:{status:'owned'}};
  const {submitGate,...rest}=old;
- return {value:{...rest,heartbeatAt:new Date(now).toISOString(),expiresAt:now+RUNNER_LEASE_TTL}};
+ return {value:{...rest,heartbeatAt:new Date(now).toISOString(),expiresAt:now+leaseTtlOf(old)}};
 });
 // The scope of the change between the run's profile and the current one, read from the current profile's own lineage (the declared impact of every link after the run's version).
 // An absent link, a broken chain or an undeclared impact is `global`: nothing is kept on a guess.
@@ -3536,7 +3603,7 @@ async function savePredictionRun(env,run){await saveJSON(env,runKey(run.runId),r
 function enrichmentSchemaDocument(){return {profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:GENERAL_EXECUTION,moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS},strengths:'short string array',risks:'short string array',confidence:CONFIDENCE,sourceBasis:SOURCE_BASIS,sourceRefs:'URL or model_knowledge',evidence:'optional; see contract.fingerprint.evidence. Omitting the key keeps a legacy fingerprint'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:CONFIDENCE,matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS}},contract:schemaContract(),rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film','Check the fingerprint and prediction against contract before prediction_batch_submit: every required execution dimension present, every enum value from its list (payoff and ending_quality use weak, mixed, strong, unknown, not medium; hero_vulnerability uses low, mixed, high, unknown), moodLabels 2–4 labels. A rejected item returns results[].validation.issues with the field path and code.']};}
 // GET /api/enrichment/runner (and the enrichment_runner MCP tool): the live runner contract. Since ADR 0167 batch runner v2 is the only protocol; the one-film
 // v5 start/next/submit routes and tools are retired. pipelineVersion stays the stored run format of the shared run records, unchanged by the retirement.
-function predictionRunnerContract(){return {pipelineVersion:5,protocol:BATCH_PROTOCOL,retiredProtocols:['v5'],leaseTtlMs:RUNNER_LEASE_TTL,heartbeat:'/api/enrichment/heartbeat',complete:'/api/enrichment/complete',read:'/api/enrichment/runner',itemFailures:{reportVia:'batch submit items[].failure {kind, reason}',allowedKinds:['parse_error','validation_error'],retryable:true,retryBaseMs:3600000,validation:{preflight:'prediction_batch_validate (read-only) or GET /api/enrichment/schema contract',reportedVia:'batch submit results[].validation {stage, reportedBy, issues[{path, code}]}',issueCodes:ISSUE_CODES}},batchRunner:{version:BATCH_RUNNER.version,protocol:BATCH_PROTOCOL,start:'/api/enrichment/batch/start',submit:'/api/enrichment/batch/submit',hold:'/api/enrichment/batch/hold',manifestFormat:BATCH_MANIFEST_FORMAT,...batchLimits(),requires:{predictionAuthority:'d1'}},instructions:['Batch start returns already_running: exit immediately, do not adopt its runId.','One batch start returns the whole manifest with the profile, schema and metadata; generate, validate, hold and submit its films in groups of at most 10 with the runId and lease epoch.','Lease TTL is 15 minutes. Heartbeat before model calls and at least every 5 minutes during long calls; every start, hold and submit also renews it.','Malformed or invalid per-film output: submit {filmId,failure:{kind,reason}} and continue. Never complete for one item failure.','Complete with reason manifest_spent once every manifest film is settled while ready films remain in the queue; omit reason when the queue is empty; otherwise pass the real systemic stop reason.','A formed response does not prove the client received it. Send or read X-Request-Id. On an external or systemic stop, complete may include fault {origin, failedStep, providerErrorCode, httpStatus, receivedRequestId}. Omit fault when the cause is unknown. A fault on a normal completion is rejected.']};}
+function predictionRunnerContract(){return {pipelineVersion:5,protocol:BATCH_PROTOCOL,retiredProtocols:['v5'],leaseTtlMs:RUNNER_LEASE_TTL,heartbeat:'/api/enrichment/heartbeat',complete:'/api/enrichment/complete',read:'/api/enrichment/runner',itemFailures:{reportVia:'batch submit items[].failure {kind, reason}',allowedKinds:['parse_error','validation_error'],retryable:true,retryBaseMs:3600000,validation:{preflight:'prediction_batch_validate (read-only) or GET /api/enrichment/schema contract',reportedVia:'batch submit results[].validation {stage, reportedBy, issues[{path, code}]}',issueCodes:ISSUE_CODES}},batchRunner:{version:BATCH_RUNNER.version,protocol:BATCH_PROTOCOL,start:'/api/enrichment/batch/start',submit:'/api/enrichment/batch/submit',hold:'/api/enrichment/batch/hold',manifestFormat:BATCH_MANIFEST_FORMAT,...batchLimits(),requires:{predictionAuthority:'d1'}},instructions:['Batch start returns already_running: exit immediately, do not adopt its runId.','One batch start returns the whole manifest with the profile, schema and metadata (a deferred start returns a receipt instead and the manifest is read with prediction_batch_manifest once ready, ADR 0193); generate, validate, hold and submit its films in groups of at most 10 with the runId and lease epoch.','Lease TTL is 15 minutes. Heartbeat before model calls and at least every 5 minutes during long calls; every start, hold and submit also renews it.','Malformed or invalid per-film output: submit {filmId,failure:{kind,reason}} and continue. Never complete for one item failure.','Complete with reason manifest_spent once every manifest film is settled while ready films remain in the queue; omit reason when the queue is empty; otherwise pass the real systemic stop reason.','A formed response does not prove the client received it. Send or read X-Request-Id. On an external or systemic stop, complete may include fault {origin, failedStep, providerErrorCode, httpStatus, receivedRequestId}. Omit fault when the cause is unknown. A fault on a normal completion is rejected.']};}
 function runSummary(r){return {runId:r.runId,processed:Object.values(r.results||{}).filter(x=>x!=='failed').length,batchCount:r.batchCount||1,lastHeartbeatAt:r.lastHeartbeatAt||null,hotRemaining:r.hotRemaining??null,coldRemaining:r.coldRemaining??null,stopReason:r.stopReason||null,sourceProgrammeRunId:r.sourceProgrammeRunId,tasteProfileVersion:r.tasteProfileVersion,tasteProfileHash:r.tasteProfileHash,fingerprintSchemaVersion:r.fingerprintSchemaVersion,predictionPromptVersion:r.predictionPromptVersion,eligibleCount:r.eligibleCount,selectedCount:r.selectedIds.length,batchSize:r.batchSize??r.selectedIds.length,adaptivePlan:r.adaptivePlan||null,deadlineAt:r.deadlineAt||null,status:r.status,trigger:r.trigger||'manual',startedAt:r.createdAt,finishedAt:r.completedAt||null,checked:Object.keys(r.results||{}).length,added:Object.values(r.results||{}).filter(x=>x==='created').length,updated:Object.values(r.results||{}).filter(x=>x==='recalculated').length,failed:Object.keys(r.failures||{}).length,hotProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='hot').length,coldProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='cold').length};}
 async function checkedRun(env,id){if(!isText(id,100))return null;return loadJSON(env,runKey(id));}
 // AIR-510: a truncated MCP start text is not a usable manifest. The already-owned run keeps the exact start answer; this read returns it without a second prediction_batch_start.
@@ -3728,18 +3795,25 @@ async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
  if(!isText(runId,100))return {status:400,body:{error:'Invalid runId',code:'invalid_run_id'}};
  if(!['envelope','profile','contract','film','hold','item'].includes(part))return {status:400,body:{error:'Invalid part',code:'invalid_part'}};
  if((part==='film'||part==='item')&&(typeof filmId!=='string'||!filmId))return {status:400,body:{error:'filmId required',code:'invalid_film_id'}};
+ // ADR 0193: the run id of a deferred start is derived from its key. Its terminal outcome wins over any partial run row, and an invocation whose preparation never produced a run, an outcome or a live
+// claim is a typed loss, never `unknown_run`.
+ const deferredRun=DEFERRED_RUN_PATTERN.test(runId);
+ if(deferredRun){
+  const outcome=await loadJSON(env,START_OUTCOME_PREFIX+runId+'.json');
+  if(outcome&&(outcome.phase==='refused'||outcome.phase==='failed'))return {status:409,body:{error:'start_not_ready',code:outcome.phase==='refused'?'start_refused':'start_failed',outcomeCode:outcome.code||null,reason:outcome.reason||null,runId}};
+ }
  const run=await checkedRun(env,runId);
  if(!run){
   // ADR 0188: a keyed start still preparing its run answers pending, not unknown.
-  // ADR 0193: a deferred start that ended without a run leaves a small typed outcome (the claim is released by then).
-  const outcome=await loadJSON(env,START_OUTCOME_PREFIX+runId+'.json');
-  if(outcome&&(outcome.phase==='refused'||outcome.phase==='failed'))return {status:409,body:{error:'start_not_ready',code:outcome.phase==='refused'?'start_refused':'start_failed',outcomeCode:outcome.code||null,reason:outcome.reason||null,runId}};
   const claimed=await loadJSON(env,RUNNER_LEASE_KEY);
-  if(claimed?.runId===runId&&Number(claimed.expiresAt)>Date.now())return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:2000}};
+  if(claimed?.runId===runId&&Number(claimed.expiresAt)>Date.now())return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:START_POLL_MS}};
+  if(deferredRun)return {status:409,body:{error:'start_not_ready',code:'start_failed',outcomeCode:'start_lost',reason:null,runId}};
   return {status:404,body:{error:'Unknown run',code:'unknown_run'}};
  }
  const lease=await loadJSON(env,RUNNER_LEASE_KEY);
  if(!(lease?.runId===runId&&Number(lease.expiresAt)>Date.now()))return {status:409,body:{error:'lease_lost',code:'lease_lost'}};
+ // A deferred run is served only after its readiness edit: while the preparation mark is set the answer is pending, whatever is already stored.
+ if(deferredRun&&lease.prep)return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:START_POLL_MS}};
  if(run.protocol!==BATCH_PROTOCOL)return {status:409,body:{error:'wrong_protocol',code:'wrong_protocol'}};
  if(run.status!=='running')return {status:409,body:{error:'Run already complete',code:'run_not_running'}};
  if(part==='hold'||part==='item'){
@@ -3748,7 +3822,7 @@ async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
   return {status:200,body:held};
  }
  const stored=await loadJSON(env,ENRICHMENT_KEY+'batch-manifest/'+runId+'.json');
- if(stored==null)return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:2000}};
+ if(stored==null)return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:START_POLL_MS}};
  if(!usableBatchManifest(stored))return {status:409,body:{error:'manifest_unavailable',code:'manifest_unavailable'}};
  const body=batchManifestPartBody(stored,part,filmId);
  if(body==null)return {status:404,body:{error:'Unknown film',code:'unknown_film'}};
