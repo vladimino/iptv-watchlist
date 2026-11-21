@@ -896,7 +896,7 @@ const START_CLAIM_TTL_MS=180000;
 // ADR 0188: how long a same-key repeat waits for the owner request's stored start answer before it answers `start_pending`. Unproven by the traces; natural runs are the proof.
 const JOIN_WAIT_MS=10000;
 const INVOCATION_KEY_PATTERN=/^[A-Za-z0-9._:-]{16,128}$/;
-// ADR 0191 (deferred start). The key a Task uses for a deferred start is issued by the server (`prediction_batch_key`), never composed by the model. A short lease covers a prepared run until its first
+// ADR 0193 (deferred start). The key a Task uses for a deferred start is issued by the server (`prediction_batch_key`), never composed by the model. A short lease covers a prepared run until its first
 // heartbeat or submit: a caller that disappears after the receipt blocks the runner for minutes, not for the ordinary 15.
 const DEFERRED_KEY_PATTERN=/^dk1\.[0-9a-f]{32}$/;
 const READY_LEASE_TTL_MS=180000;
@@ -1954,7 +1954,7 @@ const PREDICTION_NO_PROGRESS_MS=60*60000;
 // A run whose lease is still live counts as running for this long; past it the run is not evidence of progress and the clock above decides.
 const PREDICTION_ACTIVE_RUN_MAX_MS=60*60000;
 const predictionProgressStalled=ageMs=>ageMs==null||ageMs>=PREDICTION_NO_PROGRESS_MS;
-// ADR 0191 / AIR-573. The same verdict, earlier, when the silence is not quiet but a chain of ownerless starts: attempts turned away with `already_running` and runs that were abandoned without a single
+// ADR 0193 / AIR-573. The same verdict, earlier, when the silence is not quiet but a chain of ownerless starts: attempts turned away with `already_running` and runs that were abandoned without a single
 // film, all since the last confirmed progress. Three such attempts and at least 20 minutes without progress are repeated orphan starts; one overlap between two Tasks, or a run that is still working, is not.
 // It is one more reason of the one shared verdict (Footer and Monitor), not a second monitor.
 const PREDICTION_ORPHAN_START_LIMIT=3;
@@ -2058,7 +2058,7 @@ function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
  for(const fact of facts){if(isInterrupt(fact))consecutiveInterrupts++;else break;}
  if(hardUnresolved)return integrationEntry('predictions','capability','degraded','prediction_blocked',lastSuccessAt,integrationTime(lastHard.endedAt||lastHard.startedAt)||lastFailureAt);
  if(consecutiveInterrupts>=2&&workLeft)return integrationEntry('predictions','capability','degraded','prediction_runs_interrupted',lastSuccessAt,lastFailureAt);
- // ADR 0191: repeated orphan starts (turned-away attempts and runs abandoned without a film) after a quiet stretch are an interruption chain even when no run record is the newest fact.
+ // ADR 0193: repeated orphan starts (turned-away attempts and runs abandoned without a film) after a quiet stretch are an interruption chain even when no run record is the newest fact.
  if(workLeft&&orphanStarts>=PREDICTION_ORPHAN_START_LIMIT&&lastSuccessAt&&now-Date.parse(lastSuccessAt)>=PREDICTION_ORPHAN_MIN_IDLE_MS)return integrationEntry('predictions','capability','degraded','prediction_runs_interrupted',lastSuccessAt,lastFailureAt);
  const progressAge=lastSuccessAt?now-Date.parse(lastSuccessAt):null;
  const latestAge=latest.at?now-Date.parse(latest.at):null;
@@ -2843,7 +2843,7 @@ async function batchJoin(env,live,tally,ids,refuse){
  tally.joined=1;tally.startPending=1;
  return json({status:'start_pending',runId:live.runId,epoch:live.epoch??null,retryAfterMs:2000,...scheduledRunFields()});
 }
-// ---- ADR 0191: deferred start. The start accepts a bounded claim and answers a compact receipt within seconds; the heavy preparation runs in a Cloudflare Workflow instance (one per run id) that
+// ---- ADR 0193: deferred start. The start accepts a bounded claim and answers a compact receipt within seconds; the heavy preparation runs in a Cloudflare Workflow instance (one per run id) that
 // does not depend on the MCP request's lifetime, and the caller reads the immutable manifest through `prediction_batch_manifest`. ----
 const startReceipt=(runId,epoch,phase,extra={})=>({status:'accepted',protocol:BATCH_PROTOCOL,deferred:true,runId,epoch:epoch??null,phase,retryAfterMs:2000,read:{tool:'prediction_batch_manifest',part:'envelope',pendingCode:'manifest_pending'},...extra,...scheduledRunFields()});
 // A repeat of an accepted deferred start with the same key and arguments: the same receipt, never a second preparation and never a wait.
@@ -2886,10 +2886,13 @@ async function predictionStartPrepare(env,payload){
  if(!(lease?.runId===runId&&lease.epoch===epoch&&lease.phase==='claim'&&Number(lease.expiresAt)>Date.now()&&lease.keyHash===payload.keyHash&&lease.argsHash===payload.argsHash))return finish('failed',{code:'start_claim_lost'});
  const claim={runId,epoch,keyHash:payload.keyHash,argsHash:payload.argsHash,lease:{...lease,status:'owned',...(payload.recoveredRunId?{recoveredRunId:payload.recoveredRunId}:{})},converted:false,deferred:true};
  let response=null,failure=null;
- try{response=await batchStartCore(env,payload.body,payload.requestId||crypto.randomUUID(),tally,claim);}
+ const requestId=payload.requestId||crypto.randomUUID();
+ try{response=await batchStartCore(env,payload.body,requestId,tally,claim);}
  catch(error){failure=error;logPredictionFailure('start',error,payload.requestId,runId);}
  finally{if(!claim.converted)await runnerLease(env,runId,'release').catch(()=>null);}
  if(failure){if(claim.converted)await runnerLease(env,runId,'release').catch(()=>null);return finish('failed',{code:'storage_error'});}
+ // AIR-575 / ADR 0190: the preparation does not pass the route exit that records a `prediction_catalog_held` refusal, so the same neutral skipped Event is recorded here, from the same answer.
+ await recordCatalogHeldStart(env,{body:payload.body,requestId,response}).catch(()=>null);
  const data=await response.clone().json().catch(()=>null);
  if(data?.status==='running')return finish('ready',{epoch});
  if(data?.code==='start_claim_lost')return finish('failed',{code:'start_claim_lost'});
@@ -3728,7 +3731,7 @@ async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
  const run=await checkedRun(env,runId);
  if(!run){
   // ADR 0188: a keyed start still preparing its run answers pending, not unknown.
-  // ADR 0191: a deferred start that ended without a run leaves a small typed outcome (the claim is released by then).
+  // ADR 0193: a deferred start that ended without a run leaves a small typed outcome (the claim is released by then).
   const outcome=await loadJSON(env,START_OUTCOME_PREFIX+runId+'.json');
   if(outcome&&(outcome.phase==='refused'||outcome.phase==='failed'))return {status:409,body:{error:'start_not_ready',code:outcome.phase==='refused'?'start_refused':'start_failed',outcomeCode:outcome.code||null,reason:outcome.reason||null,runId}};
   const claimed=await loadJSON(env,RUNNER_LEASE_KEY);

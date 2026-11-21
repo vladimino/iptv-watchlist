@@ -1,7 +1,7 @@
 # AIR-573: deferred batch start, offline measurements and checks
 
 **Capture:** 21 November 2026 (UTC), offline. The real Worker bundle over a sqlite D1 stand-in and an in-memory R2; the Workflow binding is a stand-in that only records the created instance, so the preparation is run (or not run) by the test. Six films, `manifestSize=5`. No production read or write, no Scheduled Task, no model, no Workflow instance.  
-**Scope:** [ADR 0191](../../adr/0191-deferred-batch-start-with-server-issued-key.md) on top of [PR #854](https://github.com/vladimino/iptv-watchlist/pull/854) (ADR 0188). Tests: `tests/prediction-batch-start-deferred.mjs`, `tests/prediction-batch-start-keyed.mjs`, `tests/prediction-orphan-start-signal.mjs`.  
+**Scope:** [ADR 0193](../../adr/0193-deferred-batch-start-with-server-issued-key.md) on top of [PR #854](https://github.com/vladimino/iptv-watchlist/pull/854) (ADR 0188). Tests: `tests/prediction-batch-start-deferred.mjs`, `tests/prediction-batch-start-keyed.mjs`, `tests/prediction-orphan-start-signal.mjs`.  
 **Verdict:** Offline PASS of the protocol and its safety properties. **Production latency, Workflow instance start delay and concurrency limits are not measured**; the natural runs after the Tasks are moved are the proof.
 
 ## Phase cost (D1 round trips, R2 operations, stand-in wall time)

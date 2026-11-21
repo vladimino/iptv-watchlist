@@ -1,4 +1,4 @@
-// ADR 0191 (AIR-573): deferred start. A server-issued key (`prediction_batch_key`), a fast receipt from `prediction_batch_start({deferred:true})`, the heavy preparation in a Workflow instance, and
+// ADR 0193 (AIR-573): deferred start. A server-issued key (`prediction_batch_key`), a fast receipt from `prediction_batch_start({deferred:true})`, the heavy preparation in a Workflow instance, and
 // readback through `prediction_batch_manifest`. Offline: the real Worker over a sqlite D1 stand-in and an in-memory R2; the Workflow binding is a stand-in that only records the created instance,
 // so a test runs (or never runs) the preparation itself and the receipt is shown to be independent of it. No production call, no Scheduled Task, no model.
 import assert from 'node:assert/strict';
@@ -147,5 +147,17 @@ const world=async(n=6,{workflow=true}={})=>{
  assert.equal(dump(w.file),before);assert.equal(w.instances.length,0);
  const sync=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',manifestSize:5,invocationKey:'task-s5-q15:2026-11-21T13'});assert.equal(sync.data.status,'running','the synchronous keyed start still works');
  const bad=await w.tool('prediction_batch_start',{trigger:'scheduled',deferred:true,invocationKey:'short'});assert.equal(bad.isError,true);assert.match(JSON.stringify(bad),/prediction_batch_key/);
+}
+// 11. A preparation refused with `prediction_catalog_held` still leaves the neutral AIR-575 skipped Event (the Workflow does not pass the route exit that records it), once, and no run.
+{
+ const w=await world();const key=await w.key();
+ const r=await w.start(key);assert.equal(r.data.status,'accepted');
+ const Authority=w.ctx.DiscoveryAuthority;w.ctx.DiscoveryAuthority={...Authority,readAuthority:async()=>({held:false,ready:true,transfer:'loading'})};
+ let outcome;try{outcome=await w.prepare(w.instances[0]);}finally{w.ctx.DiscoveryAuthority=Authority;}
+ assert.equal(outcome.phase,'refused',JSON.stringify(outcome));assert.equal(outcome.code,'prediction_catalog_held');
+ const held=[...w.records].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v).filter(e=>e.presentation==='batch_v2_skipped'&&e.reason==='catalog_held');
+ assert.equal(held.length,1,'one neutral skipped Event');assert.equal(held[0].cause,'discovery_incomplete');assert.ok(!JSON.stringify(held[0]).includes(key),'the key never reaches the Event');
+ assert.equal(runs(w),0);assert.equal(leaseDoc(w).expiresAt,0,'the claim was released');
+ const read=await w.tool('prediction_batch_manifest',{runId:r.data.runId});assert.match(JSON.stringify(read),/start_refused/);
 }
 console.log('prediction-batch-start-deferred: ok');

@@ -105,7 +105,7 @@ The optional per-film assessment ([ADR 0132](../adr/0132-prediction-assessment-a
 The diagram above is one invocation. Four independent hourly Tasks run it (`:00`, `:15`, `:30`, `:45` Europe/Madrid) with `manifestSize=5`, `generationSize=1`, `submitBatchSize=5`; the flow, overlap and `already_running` handling are in [scheduling and orchestration](scheduling-and-orchestration.md#four-independent-hourly-predictions-v2-tasks). The live Task registry, not this page, is the authority for which Tasks are enabled; the per-film research, `assessment` and validation rules are the same in every Task. Selection stays queue-ordered: each short run takes the next five eligible films, and films left unsubmitted stay queued for a later start.
 
 
-### Deferred start for Scheduled Tasks ([ADR 0191](../adr/0191-deferred-batch-start-with-server-issued-key.md), Proposed)
+### Deferred start for Scheduled Tasks ([ADR 0193](../adr/0193-deferred-batch-start-with-server-issued-key.md), Proposed)
 
 The synchronous start of the diagram above takes 75–90 s in production, longer than a Scheduled Task reliably waits, so the Tasks move to a **deferred start**. The Task first asks the Worker for a key (`prediction_batch_key`, stateless: no lease, no run, no storage). The start then answers a receipt within seconds after taking the ADR 0188 claim and creating a Workflow instance; the preparation (the same keyed start of ADR 0188, with its fencing) runs in that instance and ends in an immutable stored manifest or a typed final outcome; the Task reads the manifest through the existing `prediction_batch_manifest` parts and heartbeats at once, because a prepared run holds only a 180 s lease until its first heartbeat or submit.
 
