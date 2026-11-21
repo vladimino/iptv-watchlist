@@ -55,7 +55,7 @@ async function world({durations,decision,movieRuntime=96,failFetch=false,fillers
  const taken=await Authority.acquireLease(setup,{programmeRunId:null});
  setup.discoveryLease=taken.lease;
  const item={key:observed.normalized+'|2001',title:observed.title,normalizedTitle:observed.normalized,year:2001,durations:[...durations],duration:durations[0],shows:durations.map((minutes,index)=>({channelId:'c'+index,channel:'C'+index,start:START+index*4*3600000,end:START+index*4*3600000+minutes*MIN})),seenInLatestSnapshot:true,lastAiring:START};
- const extraItems=extras.map((extra,index)=>({key:extra.normalized+'|2001',title:extra.title,normalizedTitle:extra.normalized,year:2001,durations:[...extra.durations],duration:extra.durations[0],shows:extra.durations.map((minutes,at)=>({channelId:'x'+index+'c'+at,channel:'X'+index+'C'+at,start:START+(index+1)*2*3600000+at*4*3600000,end:START+(index+1)*2*3600000+at*4*3600000+minutes*MIN})),seenInLatestSnapshot:true,lastAiring:START}));
+ const extraItems=extras.map((extra,index)=>({key:extra.normalized+'|2001',title:extra.title,normalizedTitle:extra.normalized,year:2001,durations:[...extra.durations],duration:extra.durations[0],shows:extra.durations.map((minutes,at)=>({channelId:'x'+index+'c'+at,channel:'X'+index+'C'+at,start:START+(index+1)*MIN+at*4*3600000,end:START+(index+1)*MIN+at*4*3600000+minutes*MIN})),seenInLatestSnapshot:true,lastAiring:START}));
  await Authority.ingestLedger(setup,{programmeRunId:RUN,handoff:true,lease:taken.lease,items:(async function*(){yield item;for(const extraItem of extraItems)yield extraItem;for(let index=0;index<fillers;index++)yield {key:'filler '+index+'|2005',title:'Filler '+index,normalizedTitle:'filler '+index,year:2005,durations:[100],duration:100,shows:[{channelId:'f',channel:'F',start:START+index*1000,end:START+index*1000+100*MIN}],seenInLatestSnapshot:true,lastAiring:START+index*1000+1};})()});
  sql(file,`INSERT INTO published_epg_generation (programme_run_id, phase, published_at, payload_sha256, created_at) VALUES ('${RUN}','published','2026-11-15T10:00:00Z','x','2026-11-15T10:00:00Z')`);
  sql(file,`INSERT INTO published_epg_member (programme_run_id, kind, ordinal, film_id) VALUES ('${RUN}','programme',0,'member-1')`);
@@ -83,10 +83,11 @@ async function world({durations,decision,movieRuntime=96,failFetch=false,fillers
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
  for(const name of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(name,'utf8'),context);
  const report={films:catalog&&!watchlist?[]:[{id:'member-1',tmdbId:'101',title:'Film R',original:'Film R',year:2001,runtime:cachedRuntime,canonicalIdentity:'tmdb:101',shows:[]}]};
- const chunk=async()=>{
+ const chunk=async(options={})=>{
   const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
   try{
-   sql(file,"DELETE FROM discovery_status");
+   if(!options.keep)sql(file,"DELETE FROM discovery_status");
+   if(options.prior)sql(file,`UPDATE discovery_status SET programme_run_id='${RUN}', payload_json='${JSON.stringify(options.prior)}' WHERE id=1`);
    return await context.resolveDiscoveryChunk(env,report,24,lease.lease);
   }finally{await Authority.releaseLease(env,lease.lease);}
  };
@@ -303,12 +304,14 @@ const legacyCatalog=extra=>({id:'tmdb_101',tmdbId:'101',title:'Film R',original:
  assert.deepEqual(decisionOf(file,'series r|2001').failedDurations,[96]);
 }
 
-// P. The legacy cohort of a page is bounded: at most four decisions are revalidated before the candidates (a fixture of five would need five Films, so the bound is pinned in the source).
+// P. The legacy cohort of a chunk is bounded: at most four decisions are revalidated before the candidates, found by their own keyset read (not by the replay or touch pages).
 {
  const source=fs.readFileSync('src/discovery.js','utf8');
  assert.match(source,/const PAGED_LEGACY_REVALIDATION_KEYS=4;/);
- assert.match(source,/if\(revalidatedFirst\.size>=PAGED_LEGACY_REVALIDATION_KEYS\)break;/);
- assert.doesNotMatch(source,/callCap|PAGED_REVALIDATION_RESERVE/,'no call quota is held back any more: the cohort goes first instead');
+ assert.match(source,/want:PAGED_LEGACY_REVALIDATION_KEYS/);
+ assert.match(source,/selectLegacyAliasObservations/);
+ assert.doesNotMatch(source,/callCap|PAGED_REVALIDATION_RESERVE/,'no call quota is held back: the cohort goes first instead');
+ assert.doesNotMatch(source,/if\(revalidatedFirst\.size>=PAGED_LEGACY_REVALIDATION_KEYS\)break;/,'the cohort no longer walks driftSeen');
 }
 
 // Q. AIR-503 priority. A drifted decision that is NOT in the legacy class sorts before the legacy one and candidates are plentiful. The legacy decision is revalidated first (its detail
@@ -340,6 +343,89 @@ const legacyCatalog=extra=>({id:'tmdb_101',tmdbId:'101',title:'Film R',original:
  assert.equal(result.tmdbCalls<=16,true,String(result.tmdbCalls));
  assert.equal(result.tmdbCalls>1,true,'the candidates got the time that was left');
  assert.equal(result.error??null,null,'the chunk ends normally, with its checkpoint');
+}
+
+// AIR-503 handoff of 21 Nov 2026: the cohort must not depend on the replay page meeting the touch page. Helpers for several legacy Films.
+const LETTERS=['Альфа','Браво','Чарлі','Дельта','Ехо','Фокстрот','Гольф','Готель'];
+const listed=(id,uk)=>({id,title:'Film L'+id,original_title:'Film L'+id,release_date:'2001-05-01',runtime:96,genres:[{id:18,name:'Drama'}],credits:{crew:[],cast:[]},translations:{translations:uk?[{iso_639_1:'uk',data:{title:uk}}]:[]},alternative_titles:{titles:[]}});
+const legacyExtra=(index,{listedTitle=true}={})=>{
+ const id=String(300+index),title=LETTERS[index-1];
+ return {extra:{title,normalized:title.toLowerCase(),durations:[96],decision:unanchored({filmId:'tmdb_'+id,tmdbId:id,identitySource:'known_epg_alias'}),
+   catalog:{id:'tmdb_'+id,tmdbId:id,title:'Film L'+id,original:'Film L'+id,year:2001,runtime:96,canonicalIdentity:'tmdb:'+id,aliases:['Film L'+id,title]}},
+  id,key:title.toLowerCase()+'|2001',movie:listed(Number(id),listedTitle?title:null)};
+};
+const statusOf=file=>JSON.parse(sql(file,"SELECT payload_json FROM discovery_status WHERE id=1")[0].payload_json);
+const showsOf=file=>sql(file,"SELECT film_id, match_reason FROM published_epg_show");
+
+// S. The touch page misses the legacy keys. Forty verified keys sort before them, so the 38-key touch page never reaches them and the replay and touch pages cannot meet on them.
+// The cohort has its own read: both legacy keys are revalidated in the one chunk. (On the previous implementation neither is, because candidateByKey comes from the touch page.)
+{
+ const first=legacyExtra(1),second=legacyExtra(2);
+ const plain=Array.from({length:40},(_,n)=>({title:'Aa '+n,normalized:'aa'+String(n).padStart(2,'0'),durations:[90],decision:verified({anchor:[90]})}));
+ const {file,chunk}=await world({durations:[90],decision:verified({anchor:[90]}),extras:[...plain,first.extra,second.extra],movies:{[first.id]:first.movie,[second.id]:second.movie}});
+ const result=await chunk();
+ assert.equal(result.revalidation.revalidated,2,JSON.stringify(result.revalidation));
+ for(const item of [first,second]){
+  assert.deepEqual(decisionOf(file,item.key).anchor,[96],item.key);
+  assert.deepEqual(admissionOf(file,'tmdb_'+item.id).movieTitles,['Film L'+item.id,item.extra.title]);
+ }
+ assert.equal(result.tmdbCalls<=16,true,String(result.tmdbCalls));
+}
+
+// T. The replay is resting (a lap just ended), so `driftSeen` is empty: the previous implementation revalidated nothing. The cohort does not need it. The diagnostics say what was
+// eligible, attempted and deferred, so a natural run can tell "not considered" from "TMDB refused".
+{
+ const {file,chunk}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Фільм Р',normalized:'фільм р'},catalog:legacyCatalog(),
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}}],alternatives:[]}});
+ const result=await chunk({keep:true,prior:{schemaVersion:2,programmeRunId:RUN,replayAfter:'',replayLapAt:new Date().toISOString()}});
+ assert.equal(result.revalidation.revalidated,1,JSON.stringify(result.revalidation));
+ assert.deepEqual(decisionOf(file,'фільм р|2001').anchor,[96]);
+ const legacy=statusOf(file).legacyRevalidation;
+ assert.equal(legacy.eligible,1);assert.equal(legacy.attempted,1);assert.equal(legacy.deferred,0);assert.equal(legacy.scanned>=1,true);
+ assert.equal(legacy.totals.attempted,1);
+ assert.equal(Object.keys(legacy).length<=8,true,'the payload is bounded');
+}
+
+// U. Nine legacy keys and a cap of four per chunk, the replay resting (so only the cohort pass works), the status kept between chunks so the cursor is exercised. Every key gets its attempt and a terminal outcome across three chunks,
+// no key is asked twice, each chunk stays within sixteen calls and four keys, and the lap closes.
+{
+ const items=[1,2,3,4,5,6,7,8].map(index=>legacyExtra(index));
+ const {file,chunk,fetched}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Фільм Р',normalized:'фільм р'},catalog:legacyCatalog(),
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}}],alternatives:[]},extras:items.map(item=>item.extra),movies:Object.fromEntries(items.map(item=>[item.id,item.movie]))});
+ const keys=['фільм р|2001',...items.map(item=>item.key)];
+ const anchored=()=>keys.filter(key=>(decisionOf(file,key).anchor||[]).length>0).length;
+ const attempts=[],expected=[4,8,9];
+ for(let round=0;round<3;round++){
+  const result=await chunk(round===0?{keep:true,prior:{schemaVersion:2,programmeRunId:RUN,replayAfter:'',replayLapAt:new Date().toISOString()}}:{keep:true});
+  assert.equal(anchored(),expected[round],'keys with a terminal outcome after chunk '+(round+1)+': '+anchored());
+  assert.equal(result.tmdbCalls<=16,true,String(result.tmdbCalls));
+  const legacy=statusOf(file).legacyRevalidation;
+  assert.equal(legacy.attempted<=4,true,'at most four keys per chunk: '+legacy.attempted);
+  attempts.push(legacy.attempted);
+ }
+ for(const key of keys)assert.deepEqual(decisionOf(file,key).anchor,[96],'a terminal outcome for '+key);
+ assert.equal(movieCalls(fetched),9,'every key was asked once and none twice: '+movieCalls(fetched));
+ assert.deepEqual(attempts,[4,4,1],'four, four, one: '+JSON.stringify(attempts));
+ assert.equal(statusOf(file).legacyRevalidation.totals.attempted,9);
+}
+
+// V. The movie authority decides. Under a resting replay one legacy key's title is listed by TMDB and another's is not (a series title, a namesake): the first gets its anchor and
+// `movieTitles`; the second fails the detail gate, is written to `failedDurations`, gets no anchor, no provenance and no show.
+{
+ const ok=legacyExtra(1),refused=legacyExtra(2,{listedTitle:false});
+ const {file,chunk}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Фільм Р',normalized:'фільм р'},catalog:legacyCatalog(),
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}}],alternatives:[]},extras:[ok.extra,refused.extra],movies:{[ok.id]:ok.movie,[refused.id]:refused.movie}});
+ const result=await chunk({keep:true,prior:{schemaVersion:2,programmeRunId:RUN,replayAfter:'',replayLapAt:new Date().toISOString()}});
+ assert.equal(result.revalidation.revalidated,2,JSON.stringify(result.revalidation));assert.equal(result.revalidation.revalidation_failed,1,JSON.stringify(result.revalidation));
+ assert.deepEqual(decisionOf(file,ok.key).anchor,[96]);
+ assert.deepEqual(admissionOf(file,'tmdb_'+ok.id).movieTitles,['Film L'+ok.id,'Альфа']);
+ const refusedDecision=decisionOf(file,refused.key);
+ assert.deepEqual(refusedDecision.failedDurations,[96],'the refusal is a recorded outcome, not silence');
+ assert.equal(refusedDecision.anchor===undefined||refusedDecision.anchor.length===0,true);assert.equal(refusedDecision.status,'verified');
+ assert.equal(admissionOf(file,'tmdb_'+refused.id).movieTitles,undefined);
+ assert.equal(showsOf(file).some(row=>row.film_id==='tmdb_'+refused.id),false,'no false Film assignment for the refused title');
+ const legacy=statusOf(file).legacyRevalidation;
+ assert.equal(legacy.attempted,3);assert.equal(legacy.eligible,3);
 }
 
 console.log('discovery revalidation ok');

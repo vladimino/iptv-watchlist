@@ -21,6 +21,8 @@ const PAGED_BUDGET_BACKOFF_MS=300000;
 const PAGED_TMDB_CALLS=16;
 // AIR-503 (owner decision, 20 Nov 2026): at most this many legacy alias decisions of a page are revalidated BEFORE the candidates that have no decision (one TMDB detail call each), so they get their calls and their time slice under any candidate pressure.
 const PAGED_LEGACY_REVALIDATION_KEYS=4;
+// A full lap of the legacy cohort that found nothing to revalidate rests this long before the next lap (a lap is a few small keyset reads).
+const PAGED_LEGACY_RELAP_MS=15*60*1000;
 const PAGED_WALK_CONCURRENCY=4;
 // The cheap pass writes at most this many decisions and Film touches per chunk; the rest waits for the next one.
 const PAGED_CHEAP_GROUP=4;
@@ -851,6 +853,11 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const replayAfter=sameRun&&typeof last?.replayAfter==='string'?last.replayAfter:'';
  const replayLapAt=sameRun&&typeof last?.replayLapAt==='string'&&Number.isFinite(Date.parse(last.replayLapAt))?last.replayLapAt:null;
  const replayResting=!replayAfter&&!!replayLapAt&&Date.now()-Date.parse(replayLapAt)<PAGED_REPLAY_RELAP_MS;
+ // AIR-503: the legacy alias cohort has its own cursor and lap clock, independent of the touch and replay pages.
+ const legacyAfter=sameRun&&typeof last?.legacyAfter==='string'?last.legacyAfter:'';
+ const legacyLapAt=sameRun&&typeof last?.legacyLapAt==='string'&&Number.isFinite(Date.parse(last.legacyLapAt))?last.legacyLapAt:null;
+ const legacyResting=!legacyAfter&&!!legacyLapAt&&Date.now()-Date.parse(legacyLapAt)<PAGED_LEGACY_RELAP_MS;
+ const legacyTotals=sameRun&&last?.legacyRevalidation?.totals&&typeof last.legacyRevalidation.totals==='object'?last.legacyRevalidation.totals:{};
  const watchlist=report.films||[],knownTmdb=new Map(watchlist.filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)])),aliasIndex=new Map();
  const indexFilm=film=>{if(!film?.tmdbId)return;for(const alias of new Set([film.title,film.original,...(film.aliases||[])])){const key=epgTitleParts(alias).normalizedTitle;if(!key)continue;const entries=aliasIndex.get(key)||new Map();entries.set(String(film.tmdbId),film);aliasIndex.set(key,entries);}};
  const cheap={decisions:new Map(),decisionTotal:0,films:new Set(),before:new Map()};
@@ -1103,26 +1110,41 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    }
  };
 
- // AIR-503 (owner decision, 20 Nov 2026), pass 1. A verified `known_epg_alias` decision of a catalog-only Film whose observed title the movie authority has not given the Film (the scan
- // no longer confirms its slots) is revalidated BEFORE the candidates that have no decision, at most PAGED_LEGACY_REVALIDATION_KEYS per chunk and only while a request and its writes still
- // fit. With thousands of candidates they used every call and all the time of the chunk, so the revalidation after them never ran. Provenance still comes only from the movie-detail
- // gate inside revalidateDrift; this pass changes which work goes first, not what counts as evidence. Every other drifted decision keeps its place after the candidates (pass 2).
- if(!error&&typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.planRevalidation==='function'){
-  for(const [key,entry] of [...driftSeen].sort((a,b)=>String(a[0]).localeCompare(String(b[0])))){
-   if(revalidatedFirst.size>=PAGED_LEGACY_REVALIDATION_KEYS)break;
-   const previous=decisions[key],observed=candidateByKey.get(key);
-   if(!observed||previous?.status!=='verified'||previous.identitySource!=='known_epg_alias'||knownTmdb.has(String(previous.tmdbId)))continue;
-   const catalog=films['tmdb_'+previous.tmdbId];
-   if(!catalog||movieTitleKeys(catalog).has(observed.normalizedTitle))continue;
-   const plan=DiscoveryAuthority.planRevalidation(previous,[...entry.minutes]);
-   if(!plan.eligible||plan.exhausted||!plan.todo.length)continue;
-   if(Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(3)>persistLimit())break;
-   revalidatedFirst.add(key);revalidation.observations++;
-   const outcome=await revalidateDrift(key,previous,observed,plan);
+ // AIR-503 (owner decision, 20 Nov 2026; handoff of 21 Nov 2026), pass 1. A verified `known_epg_alias` decision of a catalog-only Film whose observed title the movie authority has not
+ // given the Film (the scan no longer confirms its slots) is revalidated BEFORE the candidates that have no decision, at most PAGED_LEGACY_REVALIDATION_KEYS per chunk and only while a
+ // request and its writes still fit. The cohort comes from its own keyset read (`selectLegacyAliasObservations`), not from `driftSeen` and `candidateByKey`: those are the replay page and
+ // the touch page, two independent cursors that meet by chance, and a resting replay has no drifts at all. Provenance still comes only from the movie-detail gate inside revalidateDrift;
+ // this pass changes which work goes first and how it is found, not what counts as evidence. Every other drifted decision keeps its place after the candidates (pass 2).
+ const legacy={eligible:0,attempted:0,deferred:0,scanned:0,queries:0,resting:legacyResting,lapComplete:false};
+ let nextLegacyAfter=legacyAfter,nextLegacyLapAt=legacyLapAt;
+ if(!error&&!legacyResting&&typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.planRevalidation==='function'&&typeof DiscoveryAuthority.selectLegacyAliasObservations==='function'&&Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(3)<=persistLimit()){
+  const legacyPlans=new Map();
+  const picked=await inPhase('revalidation',()=>guarded(()=>DiscoveryAuthority.selectLegacyAliasObservations(env,{after:legacyAfter,now:Date.now(),want:PAGED_LEGACY_REVALIDATION_KEYS,shouldStop:()=>Date.now()>=walkDeadline,beforeQuery:heartbeat,
+   accept:(observed,previous,minutes)=>{
+    if(previous?.status!=='verified'||previous.identitySource!=='known_epg_alias'||knownTmdb.has(String(previous.tmdbId)))return false;
+    const catalog=films['tmdb_'+previous.tmdbId];
+    if(!catalog||movieTitleKeys(catalog).has(observed.normalizedTitle))return false;
+    const plan=DiscoveryAuthority.planRevalidation(previous,minutes);
+    if(!plan.eligible||plan.exhausted||!plan.todo.length)return false;
+    legacyPlans.set(observed.key,plan);return true;
+   }})));
+  if(!picked)return programmeChanged();
+  legacy.scanned=picked.scanned;legacy.queries=picked.queries;legacy.eligible=picked.rows.length;legacy.lapComplete=picked.lapComplete;
+  nextLegacyAfter=picked.after;
+  if(picked.lapComplete&&picked.rows.length===0)nextLegacyLapAt=new Date().toISOString();
+  let lastHandled=legacyAfter;
+  for(const row of picked.rows){
+   const key=row.candidate.key,plan=legacyPlans.get(key);
+   if(Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(3)>persistLimit()){legacy.deferred++;revalidation.deferred++;nextLegacyAfter=lastHandled;break;}
+   decisions[key]=row.decision;
+   revalidatedFirst.add(key);revalidation.observations++;legacy.attempted++;
+   const outcome=await revalidateDrift(key,row.decision,row.candidate,plan);
    if(outcome==='changed')return programmeChanged();
-   if(outcome==='break')break;
+   if(outcome==='break'){legacy.deferred++;nextLegacyAfter=lastHandled;break;}
+   lastHandled=key;
   }
  }
+ legacy.totals={attempted:(Number(legacyTotals.attempted)||0)+legacy.attempted,deferred:(Number(legacyTotals.deferred)||0)+legacy.deferred,scannedLaps:(Number(legacyTotals.scannedLaps)||0)+(legacy.lapComplete?1:0)};
  if(!error)for(const candidate of pending){
   // Start a candidate only if a request and its two writes still fit before the durable-write deadline.
   if(tmdbCalls>=PAGED_TMDB_CALLS||Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(2)>persistLimit())break;
@@ -1256,7 +1278,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  }
  if(!selected.items.length&&remaining===0)nextAfter=selected.after||'';
  const nextTouchAfter=selected.touches.length?selected.touchAfter||touchAfter:touchAfter;
- const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',replayLapAt:nextReplayLapAt,replayStats,timings};
+ const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',replayLapAt:nextReplayLapAt,legacyAfter:nextLegacyAfter,legacyLapAt:nextLegacyLapAt,legacyRevalidation:legacy,replayStats,timings};
  try{await fence();}catch(e){throw lost(e,'final');}
  // `preCommitMs` is what the stored status carries: the time up to its own write. The status write, the continuation
  // checkpoint and the total through that checkpoint are measured after the writes and reach only the returned
