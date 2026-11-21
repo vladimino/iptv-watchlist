@@ -214,7 +214,7 @@ for(const name of ['prediction_queue_overview','prediction_film_diagnostics','pr
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
 }
-for(const name of ['epg_sync_start','epg_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','epg_workflow_rollover']){
+for(const name of ['epg_sync_start','epg_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','epg_workflow_rollover','letterboxd_claim_backfill']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,false,name);
 }
 // AIR-537: the owner-only Film/Person prepared-to-open operator is retired; neither the listing nor the instructions may name it.

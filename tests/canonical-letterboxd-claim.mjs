@@ -400,6 +400,7 @@ assert.equal(LETTERBOXD_CLAIM_ACTIVATED,false,'the activation constant ships off
 {
  const worker=fs.readFileSync(path.join(SRC,'worker.js'),'utf8');
  assert.ok(!/canonical-letterboxd-claim/.test(worker),'src/worker.js does not import the claim module');
- for(const file of fs.readdirSync(SRC).filter(name=>name.endsWith('.js')&&name!=='canonical-letterboxd-claim.js'))assert.ok(!/canonical-letterboxd-claim/.test(fs.readFileSync(path.join(SRC,file),'utf8')),file+' does not import the claim module');
+ // The owner-only backfill operator (tests/letterboxd-claim-backfill.mjs) is the ONLY module that imports the claim module; no other module reaches it by path.
+ for(const file of fs.readdirSync(SRC).filter(name=>name.endsWith('.js')&&name!=='canonical-letterboxd-claim.js'&&name!=='letterboxd-claim-backfill.js'))assert.ok(!/canonical-letterboxd-claim/.test(fs.readFileSync(path.join(SRC,file),'utf8')),file+' does not import the claim module');
 }
 console.log('canonical letterboxd claim: ok');
