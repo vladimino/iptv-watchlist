@@ -10,7 +10,7 @@ import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
-import {createD1Adapter} from './d1-backfill.mjs';
+import {createD1Adapter,D1Error} from './d1-backfill.mjs';
 import {createPublishedBinding,migrationStatements,normalize,OperatorStop,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
 import {applyBusy} from './epg-checkpoint-production.mjs';
 
@@ -116,11 +116,14 @@ export async function execute(command,{binding,now,ctx={}}){
  const statements=migrationSql();
  if(ctx.track)ctx.track('unknown');
  try{await binding.batch(statements.map(sql=>binding.prepare(sql).bind()));}
- catch{
+ catch(error){
   // The batch is atomic and the file guards itself (exactly v32). Read the state before saying anything about the outcome; never retry.
+  // Only a PROVEN rejection (the D1 API answered with a statement error) may end as "not applied". A lost response, a timeout, a transient HTTP write answer or any unproven
+  // receipt stays write_uncertain even when the immediate read still shows v32 and no object: the request may still be executing or the commit may not be visible yet.
   let after=null;
   try{after=await readState(binding);}catch{after=null;}
-  const untouched=Boolean(after)&&after.schemaVersion===32&&nothingPresent(after);
+  const rejected=error instanceof D1Error&&error.kind==='statement';
+  const untouched=rejected&&Boolean(after)&&after.schemaVersion===32&&nothingPresent(after);
   if(ctx.track)ctx.track(untouched?'none':'unknown');
   throw new OperatorStop(untouched?'statement_failed':'write_uncertain',3,{schemaVersion:after?.schemaVersion??null,objects:after?view(after).objects:null});
  }

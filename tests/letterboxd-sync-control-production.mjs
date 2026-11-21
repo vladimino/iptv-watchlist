@@ -3,6 +3,7 @@
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-session.mjs';
+import {D1Error} from '../scripts/d1-backfill.mjs';
 import * as Op from '../scripts/letterboxd-sync-control-production.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-lb-ctl-op-'));
@@ -105,6 +106,20 @@ const v=file=>rows(file,'SELECT version FROM schema_contract')[0].version;
  const guarding={prepare:sql=>guarded.db.prepare(sql),batch:async s=>{sqlite(guarded.file,"UPDATE schema_contract SET version=33 WHERE id=1");return guarded.db.batch(s);}};
  await stop(Op.execute('apply',{binding:guarding,now:NOW,ctx:trackedCtx()}),'write_uncertain');
  assert.equal(rows(guarded.file,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name IN ('letterboxd_sync_mode','letterboxd_slot')")[0].n,0,'nothing was created');
+ // a transport-uncertain write (lost response / timeout) with an apparently untouched readback stays write_uncertain: no downgrade to "not applied", retry:false at the CLI boundary
+ const unproven=open();let unprovenBatches=0;
+ const timing={prepare:sql=>unproven.db.prepare(sql),batch:async()=>{unprovenBatches++;throw new D1Error('write_uncertain','response lost');}};
+ states.length=0;
+ const uncertain=await stop(Op.execute('apply',{binding:timing,now:NOW,ctx:trackedCtx()}),'write_uncertain');
+ assert.equal(v(unproven.file),32,'the readback still shows v32');assert.equal(states.at(-1),'unknown','the write state is unknown, not none');assert.equal(unprovenBatches,1,'no retry');
+ const cli=await Op.runLetterboxdSyncControlProduction({argv:['node','x','--apply','--target','iptv','--confirm','apply'],deps:{binding:timing},now:()=>NOW});
+ assert.equal(cli.exit,3);assert.equal(cli.result.reason,'write_uncertain');assert.equal(cli.result.writeState,'unknown');assert.equal(cli.result.writes,null);assert.equal(cli.result.retry,false,'the CLI reports retry:false');
+ void uncertain;
+ // a proven statement rejection that rolled back is the only "not applied" outcome
+ const rejectedEnv=open();
+ const rejecting={prepare:sql=>rejectedEnv.db.prepare(sql),batch:async()=>{throw new D1Error('statement','rejected');}};
+ states.length=0;
+ await stop(Op.execute('apply',{binding:rejecting,now:NOW,ctx:trackedCtx()}),'statement_failed');assert.equal(states.at(-1),'none');
  // a lost reply after a real commit: the state is read back and reported as write_uncertain, never retried
  const lost=open();let batches=0;
  const losing={prepare:sql=>lost.db.prepare(sql),batch:async s=>{batches++;await lost.db.batch(s);throw new Error('lost reply');}};
