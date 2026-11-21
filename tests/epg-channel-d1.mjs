@@ -53,6 +53,7 @@ bad("INSERT INTO epg_channel_category VALUES ('a','A','discover',0,1);INSERT INT
 bad("INSERT INTO epg_channel_category VALUES ('a','A','discover',0,1);INSERT INTO epg_channel (channel_id,source_id,revision) VALUES ('ch001','tvg_1',1),('ch002','tvg_1',1)");
 bad("UPDATE schema_contract SET version=30 WHERE id=1");
 bad("UPDATE epg_channel_cas SET ok=0 WHERE id=1");
+bad("UPDATE epg_channel_revision SET import_revision=9 WHERE id=1");
 
 // ===== 2. dormant: no source file, bundle step or route reaches the tables =====
 const holders=[];
@@ -126,14 +127,15 @@ assert.deepEqual(policyOf('ch002'),{policy:'deny_all',basis:'category',degraded:
 assert.equal(snap.channels.get('ch002').overrideNote,null);
 // the read is four statements for any number of channels, and a lookup afterwards touches no database
 const counting=fresh();let seen=0;const spy=d1Standin(counting.file,{onQuery:()=>{seen++;}});
-const big=Channel.planImport({groups:[{name:'G',policy:'discover'}],entries:Array.from({length:600},(_,index)=>({sourceId:'tvg_'+(index+1),name:'n'+index,group:'G'}))});
-assert.equal((await Channel.commitImport(spy,{expectedRevision:0,sourceSha256:SHA('b'),plan:big,now:T})).ok,true,'600 channels commit in one batch');
+const big=Channel.planImport({groups:[{name:'G',policy:'discover'}],entries:Array.from({length:2103},(_,index)=>({sourceId:'tvg_'+(index+1),name:'n'+index,group:'G'}))});
+assert.equal((await Channel.commitImport(spy,{expectedRevision:0,sourceSha256:SHA('b'),plan:big,now:T})).ok,true,'2103 channels (the audited baseline) commit in one batch');
 seen=0;const bigSnap=await Channel.readSnapshot(spy);
-assert.equal(bigSnap.channels.size,600);
-assert.ok(seen<=5,'one snapshot read is a bounded number of statements ('+seen+'), not one per channel');
-seen=0;for(let index=1;index<=600;index++)bigSnap.lookup.policyFor('ch'+String(index).padStart(3,'0'));bigSnap.lookup.policyFor('ch9999');
+assert.equal(bigSnap.channels.size,2103);
+assert.equal(seen,5,'one snapshot read is one table-existence query plus four data queries ('+seen+'), not one per channel');
+seen=0;for(let index=1;index<=2103;index++)bigSnap.lookup.policyFor('ch'+String(index).padStart(3,'0'));bigSnap.lookup.policyFor('ch9999');
 assert.equal(seen,0,'no per-channel D1 read in a scan loop');
 assert.equal(spy.calls.batches,1);
+assert.ok(spy.calls.statements<=200,'one bounded batch of '+spy.calls.statements+' statements for 2103 channels (15 per statement)');
 
 // ===== 6. revision compare-and-swap and idempotence =====
 const {file:f2,db:d2}=fresh();
@@ -144,6 +146,17 @@ assert.deepEqual(await Channel.setOverride(d2,{expectedRevision:5,channelId:'ch0
 const again=await Channel.commitImport(d2,{expectedRevision:1,sourceSha256:SHA('a'),plan,now:T});
 assert.deepEqual(again,{ok:true,revision:1,unchanged:true},'the same import digest at the current revision writes nothing');
 assert.equal(rows(f2,'SELECT revision FROM epg_channel_revision')[0].revision,1);
+// the same provider files with a CHANGED category policy are not a no-op: the no-op key is the digest of the whole normalized plan, never the caller's source digest
+{
+ const {db:dp,file:fp}=fresh();
+ await Channel.commitImport(dp,{expectedRevision:0,sourceSha256:SHA('a'),plan,now:T});
+ const flipped=Channel.planImport({groups:GROUPS.map(group=>group.name==='Movies'?{...group,policy:'deny_all'}:group),entries:ENTRIES});
+ assert.deepEqual(await Channel.commitImport(dp,{expectedRevision:1,sourceSha256:SHA('a'),plan:flipped,now:T}),{ok:true,revision:2},'same source digest, changed policy: written');
+ const after=await Channel.readSnapshot(dp);
+ assert.deepEqual(after.lookup.policyFor('ch001'),{policy:'deny_all',basis:'category',degraded:false},'Movies discover to deny_all applies');
+ assert.equal(rows(fp,'SELECT source_sha256 FROM epg_channel_revision')[0].source_sha256,SHA('a'),'the source digest stays provenance');
+ assert.deepEqual(await Channel.commitImport(dp,{expectedRevision:2,sourceSha256:SHA('d'),plan:flipped,now:T}),{ok:true,revision:2,unchanged:true},'an identical whole plan is a no-op whatever the source digest');
+}
 // two writers on one revision: exactly one wins and the loser changes nothing
 const results=await Promise.all([
  Channel.setOverride(d2,{expectedRevision:1,channelId:'ch001',policy:'deny_all',now:T}),
@@ -158,7 +171,7 @@ for(const input of [{policy:'allow'},{channelId:'tvg_1'},{note:5}])assert.deepEq
 assert.deepEqual(await Channel.commitImport(d2,{expectedRevision:2,sourceSha256:'short',plan,now:T}),{ok:false,reason:'invalid'});
 assert.deepEqual(await Channel.commitImport(d2,{expectedRevision:2,sourceSha256:SHA('d'),plan:{ok:false},now:T}),{ok:false,reason:'invalid'},'a refused plan is never committed');
 
-// an import keeps overrides, drops unlisted unoverridden channels and unclassifies unlisted overridden ones
+// an import never deletes a channel: an unlisted one is kept unclassified (known_only, or its override) and reads listed:false
 const {file:f3,db:d3}=fresh();
 await Channel.commitImport(d3,{expectedRevision:0,sourceSha256:SHA('a'),plan,now:T});
 await Channel.setOverride(d3,{expectedRevision:1,channelId:'ch002',policy:'discover',note:'keep me',now:T});
@@ -166,12 +179,23 @@ await Channel.setOverride(d3,{expectedRevision:2,channelId:'ch1259',policy:'know
 const next=Channel.planImport({groups:[{name:'Movies',policy:'deny_all'},{name:'Kids',policy:'discover'}],entries:[{sourceId:'tvg_1',name:'Film One',group:'movies'},{sourceId:'tvg_5',name:'Cartoons',group:'Kids'}]});
 assert.deepEqual(await Channel.commitImport(d3,{expectedRevision:3,sourceSha256:SHA('e'),plan:next,now:T}),{ok:true,revision:4});
 snap=await Channel.readSnapshot(d3);
-assert.deepEqual([...snap.channels.keys()].sort(),['ch001','ch002','ch005','ch1259'],'ch009 had no override and is gone; ch002 and ch1259 keep theirs');
-assert.deepEqual(policyOf('ch001'),{policy:'deny_all',basis:'category',degraded:false},'a changed category policy applies');
+assert.equal(snap.ok,true);assert.equal(snap.importRevision,4);
+assert.deepEqual([...snap.channels.keys()].sort(),['ch001','ch002','ch005','ch009','ch1259'],'no channel is deleted for being missing from the new source');
+assert.deepEqual([...snap.channels.values()].map(channel=>[channel.channelId,channel.listed]).sort(),[['ch001',true],['ch002',false],['ch005',true],['ch009',false],['ch1259',false]],'absence is exposed as listed:false');
+assert.deepEqual(policyOf('ch009'),{policy:'known_only',basis:'unclassified',degraded:false},'an unlisted, unoverridden channel is unclassified known_only');
+assert.equal(snap.channels.get('ch009').categoryKey,null);
 assert.deepEqual(policyOf('ch002'),{policy:'discover',basis:'override',degraded:false},'the override survived an import that no longer lists the channel');
 assert.equal(snap.channels.get('ch002').categoryKey,null);assert.equal(snap.channels.get('ch002').overrideNote,'keep me');
+assert.deepEqual(policyOf('ch001'),{policy:'deny_all',basis:'category',degraded:false},'a changed category policy applies');
 assert.deepEqual(policyOf('ch005'),{policy:'discover',basis:'category',degraded:false});
-assert.deepEqual([...snap.categories.keys()],['movies','kids'],'categories the import no longer declares are removed');
+assert.deepEqual([...snap.categories.keys()],['movies','kids'],'categories the import no longer declares are removed (no channel references them)');
+assert.equal(rows(f3,'SELECT channel_count FROM epg_channel_revision')[0].channel_count,5,'the stored count includes retained channels');
+// a channel listed again is listed again
+const back=Channel.planImport({groups:[{name:'Movies',policy:'deny_all'}],entries:[{sourceId:'tvg_9',name:'Loose',group:'Movies'},{sourceId:'tvg_1',name:'Film One',group:'Movies'}]});
+assert.equal((await Channel.commitImport(d3,{expectedRevision:4,sourceSha256:SHA('f'),plan:back,now:T})).ok,true);
+snap=await Channel.readSnapshot(d3);
+assert.equal(snap.channels.get('ch009').listed,true);assert.deepEqual(policyOf('ch009'),{policy:'deny_all',basis:'category',degraded:false});
+assert.equal(snap.channels.get('ch005').listed,false);
 
 // ===== 7. fail-safe states: never discover =====
 const degraded=(result,reason)=>{assert.equal(result.ok,false);assert.equal(result.reason,reason);assert.equal(result.lookup.degraded,true);assert.deepEqual(result.lookup.policyFor('ch001'),{policy:'known_only',basis:'unavailable',degraded:true});};
@@ -186,8 +210,9 @@ for(const [label,sql] of [
  ['a channel row lost','DELETE FROM epg_channel WHERE channel_id=\'ch001\';'],
  ['a category row lost','PRAGMA foreign_keys=OFF;DELETE FROM epg_channel_category WHERE category_key=\'movies\';'],
  ['a row from a future revision','UPDATE epg_channel SET revision=99 WHERE channel_id=\'ch001\';'],
- ['rows with revision 0 marker','UPDATE epg_channel_revision SET revision=0;'],
+ ['rows with revision 0 marker','UPDATE epg_channel_revision SET revision=0, import_revision=0;'],
  ['a channel naming a missing category','PRAGMA foreign_keys=OFF;UPDATE epg_channel SET category_key=\'ghost\' WHERE channel_id=\'ch001\';'],
+ ['a channel last seen in a future import','UPDATE epg_channel SET last_seen_revision=99 WHERE channel_id=\'ch001\';'],
  ['the marker row deleted','DELETE FROM epg_channel_revision;'],
 ]){
  const torn=fresh();await Channel.commitImport(torn.db,{expectedRevision:0,sourceSha256:SHA('a'),plan,now:T});sqlite(torn.file,sql);
@@ -213,5 +238,14 @@ assert.equal(rows(lost.file,'SELECT override_policy FROM epg_channel WHERE chann
 const rival=fresh();await Channel.commitImport(rival.db,{expectedRevision:0,sourceSha256:SHA('a'),plan,now:T});
 const sneaky={prepare:sql=>rival.db.prepare(sql),batch:async()=>{await Channel.setOverride(rival.db,{expectedRevision:1,channelId:'ch002',policy:'discover',now:T});throw new Error('reply lost');}};
 assert.equal((await Channel.setOverride(sneaky,{expectedRevision:1,channelId:'ch001',policy:'deny_all',now:T})).ok,false,'another writer won that revision');
+// the competitor wrote the SAME policy for the SAME channel with another note: that is not our request, so no success is claimed
+{
+ const twin=fresh();await Channel.commitImport(twin.db,{expectedRevision:0,sourceSha256:SHA('a'),plan,now:T});
+ const racer={prepare:sql=>twin.db.prepare(sql),batch:async()=>{await Channel.setOverride(twin.db,{expectedRevision:1,channelId:'ch001',policy:'deny_all',note:'someone else',now:T});throw new Error('reply lost');}};
+ assert.deepEqual(await Channel.setOverride(racer,{expectedRevision:1,channelId:'ch001',policy:'deny_all',note:'mine',now:T}),{ok:false,reason:'conflict'},'same policy, different note: not acknowledged');
+ assert.equal(rows(twin.file,"SELECT override_note FROM epg_channel WHERE channel_id='ch001'")[0].override_note,'someone else');
+ const racerAt={prepare:sql=>twin.db.prepare(sql),batch:async()=>{await Channel.setOverride(twin.db,{expectedRevision:2,channelId:'ch001',policy:'deny_all',note:'mine',now:'2026-11-21T09:00:00.000Z'});throw new Error('reply lost');}};
+ assert.equal((await Channel.setOverride(racerAt,{expectedRevision:2,channelId:'ch001',policy:'deny_all',note:'mine',now:T})).ok,false,'same policy and note, different time: not acknowledged');
+}
 
 console.log('EPG Channel authority: guarded inert migration v31, show keys untouched, provider id normalization, override > category > known_only, one bounded snapshot and no per-channel reads, revision CAS, fail-safe known_only states, lost-reply classification, nothing in src reaches the tables.');

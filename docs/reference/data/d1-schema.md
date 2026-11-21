@@ -457,9 +457,9 @@ Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures
 
 | Table | Holds |
 | --- | --- |
-| `epg_channel_revision` | One row (`id=1`): `revision` of the whole snapshot, `source_sha256` of the import it came from, `category_count`, `channel_count` (the counts of the stored rows) and `updated_at`. |
+| `epg_channel_revision` | One row (`id=1`): `revision` of the whole snapshot, `import_revision` (the revision of the latest import, never above `revision`), `source_sha256` (provenance of the provider files), `plan_sha256` (digest of the whole normalized import plan, the key of an idempotent re-import), `category_count`, `channel_count` (the counts of the stored rows, retained channels included) and `updated_at`. |
 | `epg_channel_cas` | The batch fence (`id=1`, `ok=1`), not a switch. A write sets `ok=changes()` after its revision swap, so a swap that changed nothing aborts the whole batch. |
 | `epg_channel_category` | `category_key` (primary key, normalized provider group), `name`, `policy` (`deny_all`, `discover` or `known_only`), `position`, `revision`. |
-| `epg_channel` | `channel_id` (primary key, the XMLTV id as the show tables carry it), `source_id` (provider spelling, unique), `name`, `category_key` (nullable, references the category), `override_policy`, `override_note`, `override_at` (an override has a policy and a time together), `revision`. Index `epg_channel_by_category`. |
+| `epg_channel` | `channel_id` (primary key, the XMLTV id as the show tables carry it), `source_id` (provider spelling, unique), `name`, `category_key` (nullable, references the category), `override_policy`, `override_note`, `override_at` (an override has a policy and a time together), `revision`, `last_seen_revision` (the import that last listed the channel; below `import_revision` means absent from the latest import, and the row is kept). Index `epg_channel_by_category`. |
 
 There is no foreign key to `published_epg_show` or `discovery_observation_show`: historical shows keep their own keys. The effective policy is never stored; it is derived as owner override, then category policy, then `known_only`.

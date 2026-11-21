@@ -166,9 +166,9 @@ Channels get their own D1 tables with a provider category, a per-category policy
 ```mermaid
 flowchart TD
     m3u["M3U groups and tvg ids<br/>(source of classification)"]
-    plan["Pure import plan:<br/>tvg_1259 to ch1259, tvg_1 to ch001;<br/>duplicate or unknown group refuses the plan"]
+    plan["Pure import plan:<br/>tvg_1259 to ch1259, tvg_1 to ch001;<br/>duplicate or unknown group refuses the plan;<br/>unlisted channels are kept, never deleted"]
     tables[("D1 channel tables, one snapshot revision:<br/>category policy, owner override")]
-    snapshot["One bounded snapshot read:<br/>four statements, then in-memory lookup"]
+    snapshot["One bounded snapshot read:<br/>one existence check and four data queries,<br/>then in-memory lookup"]
     derive{"Effective policy"}
     override["owner override"]
     category["category policy"]
@@ -182,7 +182,7 @@ flowchart TD
     override --> reader
     category --> reader
     fallback --> reader
-    shows -.->|"channel_id matches by id only, never by name"| snapshot
+    shows -.->|"channel_id of a show is the lookup key, by id only, never by name"| reader
     classDef future fill:#fff3de,stroke:#a56c2b,color:#42300e
     class reader future
 ```

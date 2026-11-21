@@ -20,25 +20,43 @@ Today a channel is only a string. `published_epg_show.channel_id` and `discovery
 2. **Three things stay apart.** The *provider category* is `epg_channel.category_key`. The *policy* is `epg_channel_category.policy` or `epg_channel.override_policy`, each limited to `deny_all`, `discover` or `known_only`. The *provenance* is `epg_channel_revision.source_sha256` for the classification and `override_at` / `override_note` for an override. The **effective policy is never stored**; it is derived, in one place, as `owner_override > category.policy > known_only`.
 3. **Single source of truth.** Classification and policy live only in these rows. A snapshot is one revision: every committed write adds one, a write names the revision it read (compare-and-swap in one fenced batch), and the row counts in the revision row let a reader prove it read every row. A read takes the revision, the categories, the channels and the revision again, and retries once when it moved.
 4. **Fail safe, never `discover`.** An unknown channel id, a channel without a category and an empty snapshot are `known_only`. An unavailable database, absent tables, a torn or incomplete snapshot are reported explicitly (`ok:false` with a reason) and their lookup answers `known_only` with `degraded:true`. A missing authority never widens what Discovery may admit.
-5. **One read per scan.** A consumer reads one snapshot (four statements for any number of channels) and looks policies up in memory. There is no per-channel D1 read and no slot-database lookup in a scan loop.
+5. **One read per scan.** A consumer reads one snapshot (one table-existence query plus four data queries, for any number of channels) and looks policies up in memory. There is no per-channel D1 read and no slot-database lookup in a scan loop.
 6. **Identity is the provider id, never the name.** `tvg_<n>` normalizes to the XMLTV id `ch<n>` with at least three digits (`tvg_1259` is `ch1259`, `tvg_1` is `ch001`). A malformed id, a leading-zero spelling, a duplicate normalized id or a group nobody declared is a **source error** that refuses the whole import. A channel is never matched to another by its display name.
 7. **Film–Show–Channel boundary.** Shows keep their own keys and are never rewritten for this entity. There is **no foreign key** from `epg_channel` to `published_epg_show` or `discovery_observation_show`: a historical show may name a channel with no row, and a channel row may have no show.
-8. **Imports keep owner decisions.** An import replaces classification and category policy from one source digest, keeps every override (a channel the import no longer lists keeps its override and loses its category), removes unlisted channels that have no override, and writes nothing when the same digest is already stored at the current revision.
+8. **An import never deletes a channel.** An import replaces classification and category policy from one source. A channel the import no longer lists is **kept**, loses its category (so it is `known_only` unless it has an override) and reads `listed:false` (`last_seen_revision` below `import_revision`), for a later admin diff. Every override survives. The import is a no-op only when the digest of the **whole normalized plan** (categories, policies, channels), computed by the repository and not supplied by the caller, equals the stored one at the current revision; the provider-file digest is provenance only, so a changed category policy over the same files is always written.
+9. **A lost reply is success only for the exact request.** After a failed batch the stored state counts as ours only when it matches the request exactly: the whole-plan digest for an import, policy, note and time for an override. Another writer's override with the same policy and different metadata is reported as a conflict.
 
 ## Not decided
 
-- Whether a later activation needs a mode marker and a `held` state like the other domains; this ADR deliberately adds none because nothing reads the tables.
+- Whether a later activation needs a staged or `held` authority (see alternative B). This ADR adds no marker because nothing reads the tables; that is a delivery choice for the dormant schema, not an owner decision about activation.
 - The exact scan semantics of `deny_all`, `discover` and `known_only` and their metrics (a later change).
 - The admin surface, the M3U fetching and the first production import, and any change to the active Discovery ledger.
-- Whether an owner override may create a channel the import never listed (this schema refuses it).
+- Whether an owner override may create a channel the import never listed (this schema refuses it; see alternative C).
+- Retention of channels that stay unlisted for a long time (kept indefinitely today); a later cleanup would be its own decision.
 
 ## Alternatives considered
 
-Not documented beyond the owner policy: storing the effective policy per channel (rejected here because it can drift from the category and the override), and a foreign key to the show tables (rejected because it would constrain historical rows).
+These compare the choices this schema embodies. The owner has agreed the policy values and the precedence rule; the choices below are the executor's proposal and **have not been decided by the owner**.
+
+**A. Channels missing from a new import: retain or delete.**
+- *Retain (chosen in this proposal).* Keeps every override and the agreed rule that an import never deletes channels, so a provider glitch or a partial M3U cannot erase owner decisions. Cost: rows accumulate and an unlisted channel needs a `listed` signal; the unclassified fallback is `known_only`.
+- *Delete the unlisted channels without an override.* Keeps the table equal to the latest source. Cost: a short or damaged source silently removes channels and their history, which the successor admin work explicitly rules out.
+
+**B. Authority marker: none, or staged/held.**
+- *No marker while dormant (chosen in this proposal).* Nothing reads the tables, so a marker would gate nothing and applying the migration is trivially inert.
+- *A staged marker (`dormant`/`open`) with `held` writes, like the other domains.* Gives an import fence and an explicit activation step. Cost: a switch with no reader today; it can be added by a later migration when a reader exists, at the price of one more schema change.
+
+**C. Override on a channel the import never listed: refuse or create.**
+- *Refuse (chosen in this proposal).* A channel exists only through an import, so provider id and category always come from one source.
+- *Create on override.* Lets the owner pre-decide a channel before the provider lists it. Cost: a channel row with no provider id, which the unique `source_id` and the id normalization do not cover.
+
+**D. Effective policy: derived or stored.** Derived (chosen): one rule in one place, no drift between category, override and a cached value. Stored: faster per-row reads. Cost: it can disagree with its inputs, and the read is already one in-memory snapshot.
+
+**E. Foreign key to the show tables.** None (chosen): history keeps its keys and a show may name a channel with no row. A foreign key would constrain or rewrite historical rows.
 
 ## Consequences
 
-The scan can apply one consistent policy snapshot without changing any show key. A new revision row is a single point of contention for writers, which is acceptable for an owner-controlled, low-frequency import and override surface. The module and tables are dormant; consumers must be added behind a separate approval.
+The scan can apply one consistent policy snapshot without changing any show key. Retained unlisted channels make the table a superset of the latest source, so a consumer must read `listed` where absence matters. A new revision row is a single point of contention for writers, which is acceptable for an owner-controlled, low-frequency import and override surface. The module and tables are dormant; consumers must be added behind a separate approval.
 
 ## Recovery and migration boundary
 

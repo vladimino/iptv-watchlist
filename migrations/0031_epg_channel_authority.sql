@@ -13,6 +13,9 @@
 --  - provenance: epg_channel_revision.source_sha256 (the import the rows came from) and override_at / override_note per override.
 -- epg_channel_revision is the one revision of the whole snapshot (the marker is NOT an authority switch): every committed write adds
 -- one, a write names the revision it read (compare-and-swap), and category_count / channel_count let a reader prove it read every row.
+-- import_revision is the revision of the latest import and plan_sha256 the digest of that import's whole normalized plan (categories,
+-- policies, channels); source_sha256 is only the provenance of the provider files. A channel with last_seen_revision < import_revision
+-- is absent from the latest import: it is KEPT (never deleted for being missing), unclassified, and so known_only unless it has an override.
 -- epg_channel_cas is the batch fence, not a switch (same pattern as filter_preset_cas and started_cas).
 -- channel_id is the XMLTV id as published_epg_show.channel_id and discovery_observation_show.channel_id carry it (ch001, ch1259).
 -- source_id is the provider id as the M3U spells it (tvg_1, tvg_1259). There is NO foreign key to the historical show tables:
@@ -33,6 +36,8 @@ CREATE TABLE epg_channel_revision (
  id INTEGER PRIMARY KEY CHECK (id = 1),
  revision INTEGER NOT NULL CHECK (revision >= 0),
  source_sha256 TEXT CHECK (source_sha256 IS NULL OR length(source_sha256) = 64),
+ plan_sha256 TEXT CHECK (plan_sha256 IS NULL OR length(plan_sha256) = 64),
+ import_revision INTEGER NOT NULL CHECK (import_revision >= 0 AND import_revision <= revision),
  category_count INTEGER NOT NULL CHECK (category_count >= 0),
  channel_count INTEGER NOT NULL CHECK (channel_count >= 0),
  updated_at TEXT
@@ -60,6 +65,7 @@ CREATE TABLE epg_channel (
  override_note TEXT,
  override_at TEXT,
  revision INTEGER NOT NULL CHECK (revision >= 1),
+ last_seen_revision INTEGER NOT NULL CHECK (last_seen_revision >= 1),
  UNIQUE (source_id),
  CHECK (
   (override_policy IS NULL AND override_note IS NULL AND override_at IS NULL)
@@ -77,7 +83,7 @@ BEGIN
  SELECT RAISE(ABORT, 'schema_contract_downgrade');
 END;
 
-INSERT INTO epg_channel_revision (id, revision, source_sha256, category_count, channel_count, updated_at) VALUES (1, 0, NULL, 0, 0, NULL);
+INSERT INTO epg_channel_revision (id, revision, source_sha256, plan_sha256, import_revision, category_count, channel_count, updated_at) VALUES (1, 0, NULL, NULL, 0, 0, 0, NULL);
 INSERT INTO epg_channel_cas (id, ok) VALUES (1, 1);
 
 UPDATE schema_contract
