@@ -14,7 +14,7 @@ const SRC=process.env.BACKFILL_SRC?path.resolve(process.env.BACKFILL_SRC):path.r
 const load=name=>import(pathToFileURL(path.join(SRC,name)).href);
 const B=await load('letterboxd-claim-backfill.js');
 const {mutateFilm}=await load('canonical-mutations.js');
-const {handleLetterboxdClaimBackfillTool:tool,deriveBackfillCohort,cohortDigest,BACKFILL_MAX}=B;
+const {handleLetterboxdClaimBackfillTool:tool,deriveBackfillCohort,cohortDigest,findDuplicateTargets,BACKFILL_MAX}=B;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-lb-claim-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -91,7 +91,7 @@ const world=(n=3,{extra=null}={})=>{
  return file;
 };
 const call=(file,args,options)=>tool(envOf(file,options),args,{now:()=>T});
-const applyArgs=(dry,extra={})=>({mode:'apply',confirmGo:true,requestId:'req-backfill-0001',expectedFilmPersonGeneration:dry.expect.filmPersonGeneration,expectedRatingsGeneration:dry.expect.ratingsGeneration,expectedProgrammeRunId:dry.expect.programmeRunId,expectedCount:dry.expect.count,expectedDigest:dry.expect.digest,...extra});
+const applyArgs=(dry,extra={})=>({mode:'apply',confirmGo:true,requestId:'req-backfill-0001',expectedFilmPersonGeneration:dry.expect.filmPersonGeneration,expectedRatingsGeneration:dry.expect.ratingsGeneration,expectedProgrammeRunId:dry.expect.programmeRunId,expectedPublicationGeneration:dry.expect.publicationGeneration,expectedWatchlistGeneration:dry.expect.watchlistGeneration,expectedCount:dry.expect.count,expectedDigest:dry.expect.digest,...extra});
 
 // 1. dry_run: the cohort is the server's, the answer holds counts, reasons, generations and the digest, never a lid or a movie mapping, and nothing is written.
 {
@@ -137,6 +137,10 @@ const applyArgs=(dry,extra={})=>({mode:'apply',confirmGo:true,requestId:'req-bac
  await refuse('digest mismatch',applyArgs(dry,{expectedDigest:'0'.repeat(64)}),409,'pins_mismatch');
  await refuse('Film/Person generation mismatch',applyArgs(dry,{expectedFilmPersonGeneration:dry.expect.filmPersonGeneration+1}),409,'pins_mismatch');
  await refuse('Ratings generation mismatch',applyArgs(dry,{expectedRatingsGeneration:dry.expect.ratingsGeneration+1}),409,'pins_mismatch');
+ await refuse('publication generation mismatch (same run)',applyArgs(dry,{expectedPublicationGeneration:dry.expect.publicationGeneration+1}),409,'pins_mismatch');
+ await refuse('watchlist generation mismatch (same run)',applyArgs(dry,{expectedWatchlistGeneration:dry.expect.watchlistGeneration+1}),409,'pins_mismatch');
+ await refuse('no publication generation pin',{...applyArgs(dry),expectedPublicationGeneration:undefined},400,'invalid_expected_publication_generation');
+ await refuse('no watchlist generation pin',{...applyArgs(dry),expectedWatchlistGeneration:undefined},400,'invalid_expected_watchlist_generation');
  await refuse('programme run mismatch',applyArgs(dry,{expectedProgrammeRunId:'run-2'}),409,'pins_mismatch');
  await refuse('count mismatch',applyArgs(dry,{expectedCount:2}),409,'pins_mismatch');
  const mism=await call(file,applyArgs(dry,{expectedCount:2,expectedDigest:'1'.repeat(64)}));assert.deepEqual(mism.body.mismatched.sort(),['count','digest']);
@@ -170,7 +174,7 @@ const unsafe=async(name,build,reason,decision='unsafe')=>{
  const file=build();const before=dump(file);
  const dry=await call(file,{mode:'dry_run'});
  assert.equal(dry.body.decision,decision,name);assert.ok(dry.body.blockers.some(item=>item.reason===reason),name+': '+JSON.stringify(dry.body.blockers));
- const pins=dry.body.expect||{filmPersonGeneration:2,ratingsGeneration:1,programmeRunId:'run-1',count:1,digest:'a'.repeat(64)};
+ const pins=dry.body.expect||{filmPersonGeneration:2,ratingsGeneration:1,programmeRunId:'run-1',publicationGeneration:0,watchlistGeneration:0,count:1,digest:'a'.repeat(64)};
  const out=await call(file,applyArgs({expect:pins}));
  assert.equal(out.status,409,name);assert.equal(out.body.writes,0,name);assert.equal(dump(file),before,name+': zero writes');
 };
@@ -188,7 +192,7 @@ await unsafe('the publication held',()=>world(3,{extra:file=>assert.equal(sqlite
  for(const stage of ['held','r2']){
   const file=database(stage);const before=dump(file);
   const dry=await call(file,{mode:'dry_run'});assert.ok(['unsafe','unknown'].includes(dry.body.decision),stage);assert.equal(dry.status,200);
-  assert.equal((await call(file,applyArgs({expect:{filmPersonGeneration:2,ratingsGeneration:1,programmeRunId:'run-1',count:1,digest:'a'.repeat(64)}}))).status,409);
+  assert.equal((await call(file,applyArgs({expect:{filmPersonGeneration:2,ratingsGeneration:1,programmeRunId:'run-1',publicationGeneration:0,watchlistGeneration:0,count:1,digest:'a'.repeat(64)}}))).status,409);
   assert.equal(dump(file),before);
  }
 }
@@ -211,6 +215,81 @@ await unsafe('the publication held',()=>world(3,{extra:file=>assert.equal(sqlite
  assert.ok(!JSON.stringify(out.body).includes('L2'));
  // the state moved: the same request cannot be replayed blindly, a new dry run decides
  assert.equal((await call(file,applyArgs(dry))).status,409);
+}
+
+// 5b. the default mode is the read-only dry_run: an omitted mode never writes, and only an explicit 'apply' can.
+{
+ const file=world(3),before=dump(file);
+ for(const args of [{},{mode:undefined},{confirmGo:true,requestId:'req-backfill-0001'}]){
+  const out=await call(file,args);assert.equal(out.status,200);assert.equal(out.body.mode,'dry_run',JSON.stringify(args));assert.equal(out.body.sideEffects,'none');
+ }
+ assert.equal(dump(file),before,'an omitted mode writes nothing');
+ assert.equal((await call(file,{mode:'apply'})).status,400,'an explicit apply still needs confirmGo and every pin');
+}
+
+// 5c. the publication pin includes both generations: a same-run publication or watchlist save moves a generation without a new run id.
+{
+ const file=world(3),dry=(await call(file,{mode:'dry_run'})).body;
+ assert.equal(typeof dry.expect.publicationGeneration,'number');assert.equal(typeof dry.expect.watchlistGeneration,'number');assert.equal(dry.publication.generation,dry.expect.publicationGeneration);
+ const before=dump(file);
+ assert.equal(sqlite(file,"UPDATE published_epg_authority SET generation=generation+1 WHERE id=1").status,0);
+ const moved=await call(file,applyArgs(dry));assert.equal(moved.status,409);assert.deepEqual(moved.body.mismatched,['publicationGeneration']);assert.equal(moved.body.writes,0);assert.equal(dump(file),before);
+ const fresh=(await call(file,{mode:'dry_run'})).body;
+ assert.equal(sqlite(file,"UPDATE published_epg_authority SET watchlist_generation=watchlist_generation+1 WHERE id=1").status,0);
+ const watch=await call(file,applyArgs(fresh));assert.equal(watch.status,409);assert.deepEqual(watch.body.mismatched,['watchlistGeneration']);assert.equal(dump(file),before);
+}
+
+// 5d. two candidates for one Film: the candidate-level proof refuses ambiguous aliases (two lids on one key), so no GO is offered and nothing is written; the pure finder also catches a shared Film or movie id.
+{
+ const file=world(3,{extra:file=>{const index=getDoc(file,'letterboxd/facts/links.json');index['letterboxd:L2']='tmdb-1';putDoc(file,'letterboxd/facts/links.json',index);}});
+ const before=dump(file),dry=await call(file,{mode:'dry_run'});
+ assert.equal(dry.body.decision,'unsafe');assert.ok(dry.body.blockers.some(item=>item.reason==='ratings_link_ambiguous'),JSON.stringify(dry.body.blockers));
+ const out=await call(file,applyArgs({expect:dry.body.expect||{filmPersonGeneration:2,ratingsGeneration:1,programmeRunId:'run-1',publicationGeneration:0,watchlistGeneration:0,count:1,digest:'a'.repeat(64)}}));
+ assert.equal(out.status,409);assert.equal(out.body.writes,0);assert.equal(dump(file),before,'no applicable GO, zero writes');
+ assert.deepEqual(findDuplicateTargets([{lid:'A',tmdb:'1',filmId:'film:tmdb:1'},{lid:'B',tmdb:'2',filmId:'film:tmdb:1'},{lid:'C',tmdb:'3',filmId:'film:tmdb:3'}]).map(pair=>pair.lid),['A','B'],'a shared Film');
+ assert.deepEqual(findDuplicateTargets([{lid:'A',tmdb:'1',filmId:'film:tmdb:1'},{lid:'B',tmdb:'1',filmId:'film:tmdb:2'}]).map(pair=>pair.lid),['A','B'],'a shared movie id');
+ assert.deepEqual(findDuplicateTargets([{lid:'A',tmdb:'1',filmId:'film:tmdb:1'},{lid:'B',tmdb:'2',filmId:'film:tmdb:2'}]),[]);
+}
+
+// 5e. race tests at controlled points: a marker or the publication moving between the scan and the writes. `moveAt(n, change)` runs `change` just before the n-th read of the publication marker (the three reads of one apply are: start of the scan, end of the scan, immediately before the first write; then one before each pair).
+const PUBLICATION_READ=/FROM published_epg_authority WHERE id=1/;
+const movingAt=(file,n,change)=>{let seen=0;return {onQuery:async text=>{if(PUBLICATION_READ.test(text)&&++seen===n)change(file);}};};
+const bumpPublication=file=>assert.equal(sqlite(file,"UPDATE published_epg_authority SET generation=generation+1 WHERE id=1").status,0);
+const unchanged=(file,before,name)=>{assert.deepEqual(lidsOf(file).filter(lid=>/^L\d$/.test(lid)),[],name+': no claim');assert.equal(receipts(file).length,0,name+': no receipt');assert.equal(revision(file,FID(1)),0,name+': no revision');assert.equal(dump(file),before,name+': dump unchanged');};
+{ // during the scan: the answer is `unknown` and carries no usable pins
+ const file=world(3),before=dump(file);
+ const out=await call(file,{mode:'dry_run'},movingAt(file,2,bumpPublication));
+ assert.equal(out.body.decision,'unknown');assert.ok(out.body.blockers.some(item=>item.reason==='state_moved_during_read'));assert.equal(out.body.expect,null);assert.equal(dump(file),before);
+}
+{ // after the scan, immediately before the first write: refused, zero writes
+ const file=world(3),dry=(await call(file,{mode:'dry_run'})).body,before=dump(file);
+ const out=await call(file,applyArgs(dry),movingAt(file,3,bumpPublication));
+ assert.equal(out.status,409);assert.equal(out.body.reason,'state_moved');assert.equal(out.body.writes,0);unchanged(file,before,'moved before the first write');
+}
+// inside the first fenced batch (after the pre-write check and the pair's own plan): the pinned guards fail the whole batch, no claim, receipt or revision
+for(const [name,change] of [
+ ['the publication generation moved',bumpPublication],
+ ['the watchlist generation moved',file=>assert.equal(sqlite(file,"UPDATE published_epg_authority SET watchlist_generation=watchlist_generation+1 WHERE id=1").status,0)],
+ ['the Ratings generation moved',file=>assert.equal(sqlite(file,"UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1").status,0)],
+ ['the Ratings domain held',file=>assert.equal(sqlite(file,"UPDATE ratings_domain_authority SET cutover='held' WHERE id=1").status,0)],
+ ['the Film/Person marker held',file=>assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0)],
+]){
+ const file=world(3),dry=(await call(file,{mode:'dry_run'})).body,before=dump(file);let step=0;
+ const out=await call(file,applyArgs(dry),{onBatch:async()=>{step++;if(step===1)change(file);}});
+ assert.equal(out.status,200);assert.equal(out.body.ok,false);assert.equal(out.body.outcome,'partial',name);assert.equal(out.body.writes,0,name);assert.equal(out.body.counts.written,0,name);assert.equal(out.body.counts.notAttempted,2,name+': the rest is not attempted');
+ assert.equal(rows(file,"SELECT value FROM film_external_id WHERE scheme='letterboxd' AND value IN ('L1','L2','L3')").length,0,name+': no claim');assert.equal(revision(file,FID(1)),0,name);
+}
+{ // after the first pair is written: a move before the second pair stops the run there (pre-pair check), the first stays, the rest is not attempted
+ const file=world(3),dry=(await call(file,{mode:'dry_run'})).body;
+ const out=await call(file,applyArgs(dry),movingAt(file,5,bumpPublication));
+ assert.equal(out.body.counts.written,1);assert.equal(out.body.counts.notAttempted,2);assert.equal(out.body.items[1].reason,'state_moved');assert.equal(out.body.outcome,'partial');
+ assert.deepEqual(rows(file,"SELECT value FROM film_external_id WHERE scheme='letterboxd' AND value IN ('L1','L2','L3') ORDER BY value").map(item=>item.value),['L1']);
+}
+{ // inside the second pair's fenced write batch (each pair is a receipt batch then a write batch: batches 1 and 2, then 3 and 4): the pinned guards refuse it, the first stays
+ const file=world(3),dry=(await call(file,{mode:'dry_run'})).body;let step=0;
+ const out=await call(file,applyArgs(dry),{onBatch:async()=>{step++;if(step===4)bumpPublication(file);}});
+ assert.equal(out.body.counts.written,1);assert.equal(out.body.writes,1);assert.equal(out.body.counts.notAttempted,1);assert.equal(out.body.outcome,'partial');
+ assert.deepEqual(rows(file,"SELECT value FROM film_external_id WHERE scheme='letterboxd' AND value IN ('L1','L2','L3') ORDER BY value").map(item=>item.value),['L1']);
 }
 
 // 6. static boundary: the operator reads no R2, fetches nothing, schedules nothing, takes no id from the caller and writes only through the claim writer.

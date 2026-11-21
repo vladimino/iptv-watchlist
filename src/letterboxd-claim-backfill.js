@@ -39,40 +39,59 @@ async function ratingsMarker(db){
 }
 async function publicationMarker(db){
  try{
-  const row=await one(db,'SELECT mode,cutover,programme_run_id AS run FROM published_epg_authority WHERE id=1');
-  return row?{mode:row.mode,cutover:row.cutover,programmeRunId:row.run??null}:null;
+  const row=await one(db,'SELECT mode,cutover,programme_run_id AS run,generation,watchlist_generation AS watchlist FROM published_epg_authority WHERE id=1');
+  return row?{mode:row.mode,cutover:row.cutover,programmeRunId:row.run??null,generation:Number(row.generation),watchlistGeneration:Number(row.watchlist)}:null;
  }catch(error){
   if(/no such table/i.test(String(error?.message||error)))return null;
   throw failed('film_person_unavailable',error);
  }
 }
 
-// Read-only. {decision:'eligible'|'already_current'|'unsafe'|'unknown', blockers:[{reason,count}], authorities, publication, counts, expect, pairs}. `pairs` is for the caller's own use inside the trusted process and is never put into a response.
+// The candidates that share a Film or a movie id with another candidate (pure).
+export function findDuplicateTargets(pairs){
+ const byFilm=new Map(),byMovie=new Map();
+ for(const pair of pairs){byFilm.set(pair.filmId,(byFilm.get(pair.filmId)||0)+1);byMovie.set(pair.tmdb,(byMovie.get(pair.tmdb)||0)+1);}
+ return pairs.filter(pair=>byFilm.get(pair.filmId)>1||byMovie.get(pair.tmdb)>1);
+}
+// The three authorities of the frozen snapshot, read as one record: the Film/Person marker, the Ratings marker and the publication (run id AND both generations: a new publication or a watchlist save moves a generation without changing the run id).
+async function readMarkers(env,db){
+ const gate=await readAuthority(env);
+ const ratings=await ratingsMarker(db),publication=await publicationMarker(db);
+ return {filmPerson:{state:gate.state,generation:Number(gate.generation)},ratings,publication};
+}
+const sameMarkers=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+const guardsOf=markers=>[
+ {sql:"EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?)",params:[markers.filmPerson.generation]},
+ {sql:"EXISTS (SELECT 1 FROM ratings_domain_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?)",params:[markers.ratings.generation]},
+ {sql:"EXISTS (SELECT 1 FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=? AND generation=? AND watchlist_generation=?)",params:[markers.publication.programmeRunId,markers.publication.generation,markers.publication.watchlistGeneration]},
+];
+
+// Read-only. {decision:'eligible'|'already_current'|'unsafe'|'unknown', blockers:[{reason,count}], authorities, publication, counts, expect, pairs, markers}. `pairs` and `markers` are for the caller's own use inside the trusted process and never go into a response.
 export async function deriveBackfillCohort(env){
  const db=database(env);
- const out={decision:'unsafe',blockers:[],authorities:{filmPerson:null,ratings:null},publication:null,counts:{cohort:0,pass:0,conflict:0,not_proved:0,already:0,unresolved:0},expect:null,pairs:[]};
+ const out={decision:'unsafe',blockers:[],authorities:{filmPerson:null,ratings:null},publication:null,counts:{cohort:0,pass:0,conflict:0,not_proved:0,already:0,unresolved:0,duplicate:0},expect:null,pairs:[],markers:null};
  const reasons={};
  const stop=(decision,reason)=>{out.decision=decision;bump(reasons,reason);out.blockers=blockerList(reasons);return out;};
  if(!db)return stop('unknown','film_person_unavailable');
- let gate;
- try{gate=await readAuthority(env);}
+ let markers;
+ try{markers=await readMarkers(env,db);}
  catch(error){return stop(['film_person_held','film_person_not_open'].includes(error?.code)?'unsafe':'unknown',error?.code||'film_person_unavailable');}
- out.authorities.filmPerson={state:gate.state,generation:Number(gate.generation)};
- if(gate.state!=='open')return stop('unsafe','film_person_not_open');
- let ratings,publication;
- try{ratings=await ratingsMarker(db);publication=await publicationMarker(db);}
- catch(error){return stop('unknown',error?.code||'film_person_unavailable');}
- out.authorities.ratings=ratings;out.publication=publication?{mode:publication.mode,cutover:publication.cutover,programmeRunId:publication.programmeRunId}:null;
+ const {ratings,publication}=markers;
+ out.authorities.filmPerson=markers.filmPerson;out.authorities.ratings=ratings;
+ out.publication=publication?{mode:publication.mode,cutover:publication.cutover,programmeRunId:publication.programmeRunId,generation:publication.generation,watchlistGeneration:publication.watchlistGeneration}:null;
+ if(markers.filmPerson.state!=='open')return stop('unsafe','film_person_not_open');
  if(!ratings||ratings.mode!=='d1'||ratings.cutover!=='open')return stop('unsafe','ratings_not_authoritative');
  if(!publication||publication.mode!=='d1'||publication.cutover!=='open'||typeof publication.programmeRunId!=='string'||!RUN_ID.test(publication.programmeRunId))return stop('unsafe','publication_not_authoritative');
+ out.markers=markers;
+ const pins=pairs=>({filmPersonGeneration:markers.filmPerson.generation,ratingsGeneration:ratings.generation,programmeRunId:publication.programmeRunId,publicationGeneration:publication.generation,watchlistGeneration:publication.watchlistGeneration,count:pairs.length});
  let candidates;
  try{candidates=(await many(db,CANDIDATE_SQL,[publication.programmeRunId,BACKFILL_MAX+1])).map(row=>String(row.lid));}
  catch(error){return stop('unknown',error?.code||'film_person_unavailable');}
  out.counts.cohort=candidates.length;
  if(!candidates.length){
   out.decision='already_current';
-  out.expect={filmPersonGeneration:out.authorities.filmPerson.generation,ratingsGeneration:ratings.generation,programmeRunId:publication.programmeRunId,count:0,digest:await cohortDigest([])};
-  return out;
+  out.expect={...pins([]),digest:await cohortDigest([])};
+  return await settle(out,env,db,markers,reasons);
  }
  if(candidates.length>BACKFILL_MAX)return stop('unsafe','cohort_over_limit');
  // The movie id of each lid comes from the AUTHORITATIVE Ratings link index (the key the lid maps to and the one `tmdb:<n>` alias that maps to the same key); the planner then proves the whole link and the canonical side.
@@ -88,14 +107,25 @@ export async function deriveBackfillCohort(env){
   let plan;
   try{plan=await planLetterboxdClaim(env,{lid,tmdb:movies[0]});}
   catch(error){bump(reasons,error?.code||'unclassified');unknown=true;continue;}
-  if(plan.verdict==='pass'&&!plan.already){out.counts.pass++;resolved.push({lid,tmdb:movies[0]});}
+  if(plan.verdict==='pass'&&!plan.already){out.counts.pass++;resolved.push({lid,tmdb:movies[0],filmId:plan.filmId});}
   else if(plan.verdict==='pass'){out.counts.already++;bump(reasons,'already_current');}
   else{out.counts[plan.verdict]++;bump(reasons,plan.reason);unsafe=true;}
  }
- out.blockers=blockerList(reasons);
- out.pairs=resolved;
- out.expect={filmPersonGeneration:out.authorities.filmPerson.generation,ratingsGeneration:ratings.generation,programmeRunId:publication.programmeRunId,count:resolved.length,digest:await cohortDigest(resolved)};
+ // One Film holds ONE trusted Letterboxd lid: two candidates that target the same Film (or the same movie id) cannot both be written, so the whole cohort is refused before any GO instead of leaving a partial one.
+ const duplicated=findDuplicateTargets(resolved);
+ if(duplicated.length){out.counts.duplicate=duplicated.length;bump(reasons,'cohort_duplicate_target',duplicated.length);unsafe=true;}
+ out.pairs=resolved.map(({lid,tmdb})=>({lid,tmdb}));
+ out.expect={...pins(resolved),digest:await cohortDigest(resolved)};
  out.decision=unknown?'unknown':unsafe||out.counts.already?'unsafe':'eligible';
+ return await settle(out,env,db,markers,reasons);
+}
+// The snapshot must still be the one read at the start: a moved marker or publication during the scan makes every pin stale, so the answer is `unknown` and carries no usable `expect`.
+async function settle(out,env,db,markers,reasons){
+ let again;
+ try{again=await readMarkers(env,db);}
+ catch(error){out.decision='unknown';bump(reasons,error?.code||'film_person_unavailable');out.blockers=blockerList(reasons);out.expect=null;out.pairs=[];return out;}
+ out.blockers=blockerList(reasons);
+ if(!sameMarkers(markers,again)){out.decision='unknown';bump(reasons,'state_moved_during_read');out.blockers=blockerList(reasons);out.expect=null;out.pairs=[];}
  return out;
 }
 
@@ -110,39 +140,52 @@ async function sideCounts(db){
  return out;
 }
 
-// args: {mode:'dry_run'|'apply', confirmGo?, requestId?, expectedFilmPersonGeneration?, expectedRatingsGeneration?, expectedProgrammeRunId?, expectedCount?, expectedDigest?}. Returns {status, body}.
+// args: {mode?:'dry_run'|'apply' (omitted means dry_run: only an explicit 'apply' can write), confirmGo?, requestId?, expectedFilmPersonGeneration?, expectedRatingsGeneration?, expectedProgrammeRunId?, expectedPublicationGeneration?,
+// expectedWatchlistGeneration?, expectedCount?, expectedDigest?}. Returns {status, body}.
+const PIN_NAMES=['filmPersonGeneration','ratingsGeneration','programmeRunId','publicationGeneration','watchlistGeneration','count','digest'];
 export async function handleLetterboxdClaimBackfillTool(env,args={},{now}={}){
  if(!args||typeof args!=='object'||Array.isArray(args))return {status:400,body:{ok:false,reason:'invalid'}};
- if(args.mode!=='dry_run'&&args.mode!=='apply')return {status:400,body:{ok:false,reason:'invalid_mode'}};
+ const mode=args.mode===undefined?'dry_run':args.mode;
+ if(mode!=='dry_run'&&mode!=='apply')return {status:400,body:{ok:false,reason:'invalid_mode'}};
  if(args.confirmGo!==undefined&&typeof args.confirmGo!=='boolean')return {status:400,body:{ok:false,reason:'invalid_confirm'}};
- if(args.mode==='dry_run'){
+ if(mode==='dry_run'){
   const cohort=await deriveBackfillCohort(env);
   return {status:200,body:{ok:true,mode:'dry_run',sideEffects:'none',...publicView(cohort)}};
  }
  if(args.confirmGo!==true)return {status:400,body:{ok:false,reason:'confirm_required'}};
  if(typeof args.requestId!=='string'||!BACKFILL_REQUEST_ID.test(args.requestId))return {status:400,body:{ok:false,reason:'invalid_request_id'}};
- if(!Number.isInteger(args.expectedFilmPersonGeneration)||args.expectedFilmPersonGeneration<0)return {status:400,body:{ok:false,reason:'invalid_expected_film_person_generation'}};
- if(!Number.isInteger(args.expectedRatingsGeneration)||args.expectedRatingsGeneration<0)return {status:400,body:{ok:false,reason:'invalid_expected_ratings_generation'}};
+ const generation=value=>Number.isInteger(value)&&value>=0;
+ if(!generation(args.expectedFilmPersonGeneration))return {status:400,body:{ok:false,reason:'invalid_expected_film_person_generation'}};
+ if(!generation(args.expectedRatingsGeneration))return {status:400,body:{ok:false,reason:'invalid_expected_ratings_generation'}};
  if(typeof args.expectedProgrammeRunId!=='string'||!RUN_ID.test(args.expectedProgrammeRunId))return {status:400,body:{ok:false,reason:'invalid_expected_programme_run_id'}};
+ if(!generation(args.expectedPublicationGeneration))return {status:400,body:{ok:false,reason:'invalid_expected_publication_generation'}};
+ if(!generation(args.expectedWatchlistGeneration))return {status:400,body:{ok:false,reason:'invalid_expected_watchlist_generation'}};
  if(!Number.isInteger(args.expectedCount)||args.expectedCount<1||args.expectedCount>BACKFILL_MAX)return {status:400,body:{ok:false,reason:'invalid_expected_count'}};
  if(typeof args.expectedDigest!=='string'||!HEX64.test(args.expectedDigest))return {status:400,body:{ok:false,reason:'invalid_expected_digest'}};
+ const wanted={filmPersonGeneration:args.expectedFilmPersonGeneration,ratingsGeneration:args.expectedRatingsGeneration,programmeRunId:args.expectedProgrammeRunId,publicationGeneration:args.expectedPublicationGeneration,watchlistGeneration:args.expectedWatchlistGeneration,count:args.expectedCount,digest:args.expectedDigest};
  // The cohort and every proof are derived AGAIN, right now; nothing is written unless it equals the pins.
  const cohort=await deriveBackfillCohort(env);
  if(cohort.decision!=='eligible')return {status:409,body:{ok:false,reason:'not_eligible',writes:0,...publicView(cohort)}};
- const wanted={filmPersonGeneration:args.expectedFilmPersonGeneration,ratingsGeneration:args.expectedRatingsGeneration,programmeRunId:args.expectedProgrammeRunId,count:args.expectedCount,digest:args.expectedDigest};
- const mismatched=Object.keys(wanted).filter(name=>cohort.expect[name]!==wanted[name]);
+ const mismatched=PIN_NAMES.filter(name=>cohort.expect[name]!==wanted[name]);
  if(mismatched.length)return {status:409,body:{ok:false,reason:'pins_mismatch',writes:0,mismatched,...publicView(cohort)}};
  const db=database(env);
+ // The pins are checked ONCE MORE immediately before the first write (the scan above made several reads): zero writes if any authority or the publication moved since. After the first write the same snapshot is asserted before every pair and,
+ // through the extra guards, INSIDE every fenced batch, so a pair never lands under a state the owner did not approve.
+ const frozen=cohort.markers;
+ const holds=async()=>{try{return sameMarkers(frozen,await readMarkers(env,db));}catch{return false;}};
+ if(!(await holds()))return {status:409,body:{ok:false,reason:'state_moved',writes:0,...publicView(cohort)}};
  let before;
  try{before=await sideCounts(db);}catch(error){return {status:503,body:{ok:false,reason:error?.code||'film_person_unavailable',writes:0}};}
  // One stable event for this frozen cohort and request: the same request replays idempotently (receipts) and never writes twice.
  const event='backfill:'+args.requestId+':'+cohort.expect.digest.slice(0,16);
+ const extraGuards=guardsOf(frozen);
  const counts={written:0,already:0,refused:0,unknown:0,deferred:0,failed:0,notAttempted:0};
- const items=[];let stopped=false;
+ const items=[];let stopped=null;
  for(const pair of cohort.pairs){
-  if(stopped){counts.notAttempted++;items.push({state:'not_attempted',reason:null});continue;}
+  if(stopped){counts.notAttempted++;items.push({state:'not_attempted',reason:stopped});continue;}
+  if(!(await holds())){stopped='state_moved';counts.notAttempted++;items.push({state:'not_attempted',reason:'state_moved'});continue;}
   try{
-   const result=await applyLetterboxdClaim(env,{event,lid:pair.lid,tmdb:pair.tmdb,now});
+   const result=await applyLetterboxdClaim(env,{event,lid:pair.lid,tmdb:pair.tmdb,now,extraGuards});
    if(result.state==='written')counts.written++;
    else if(result.state==='already')counts.already++;
    else if(result.state==='refused')counts.refused++;
@@ -150,9 +193,9 @@ export async function handleLetterboxdClaimBackfillTool(env,args={},{now}={}){
    else counts.deferred++;
    items.push({state:result.state,reason:result.reason||null});
    // Any outcome that is not a proved claim stops the run: no blind retry, no attempt on the rest.
-   if(result.state!=='written'&&result.state!=='already')stopped=true;
+   if(result.state!=='written'&&result.state!=='already')stopped='previous_pair_not_proved';
   }catch(error){
-   counts.failed++;items.push({state:'failed',reason:error?.code||'unclassified'});stopped=true;
+   counts.failed++;items.push({state:'failed',reason:error?.code||'unclassified'});stopped='previous_pair_failed';
   }
  }
  // Authoritative readback: the reader that served the 404 now finds each proved pair, the cohort that is still missing, and the rows that must not move.
@@ -168,5 +211,5 @@ export async function handleLetterboxdClaimBackfillTool(env,args={},{now}={}){
  const proved=counts.written+counts.already;
  const unexpected=delta.film_external_id!==counts.written||delta.film_alias!==0||delta.ratings_view!==0||(delta.started_mark!==null&&delta.started_mark!==0);
  const complete=proved===cohort.pairs.length&&found===proved&&remaining===0&&!unexpected;
- return {status:200,body:{ok:complete,mode:'apply',outcome:complete?'complete':'partial',requestId:args.requestId,digest:cohort.expect.digest,counts,items,readback:{found,remaining,delta,unexpectedChange:unexpected},authorities:cohort.authorities,publication:cohort.publication}};
+ return {status:200,body:{ok:complete,mode:'apply',outcome:complete?'complete':'partial',writes:counts.written,requestId:args.requestId,digest:cohort.expect.digest,counts,items,readback:{found,remaining,delta,unexpectedChange:unexpected},authorities:cohort.authorities,publication:cohort.publication}};
 }
