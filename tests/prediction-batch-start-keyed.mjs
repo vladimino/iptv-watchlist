@@ -175,6 +175,46 @@ const manifestKey=id=>'enrichment/batch-manifest/'+id+'.json';
  }
 }
 
+// 10a. Exceptional exits of a claimed start never reach the unfenced stop recorder (ADR 0188). A normal Error is injected into a persist R2 write; with a foreign takeover at the same moment the
+// handler answers `start_claim_lost`, and as the real owner it releases its own lease and answers a bounded recoverable `start_storage_error`. Either way: no stop Event, no stop record, no
+// `latest-run` overwrite, no manifest. Both with the run record not existing yet (sources) and existing (manifest).
+{
+ const foreign=()=>({owner:'foreign-run',runId:'foreign-run',heartbeatAt:new Date().toISOString(),expiresAt:Date.now()+15*60000,epoch:13,phase:'run',keyHash:'f'.repeat(64),argsHash:'e'.repeat(64)});
+ const faulty=async(name,match,takeover,expect)=>{
+  const w=await world();const other=foreign();let hit=false;const put=w.env.BUCKET.put.bind(w.env.BUCKET);
+  w.env.BUCKET.put=async(key,...a)=>{if(!hit&&match(String(key))){hit=true;if(takeover)setLease(w,other);throw new Error('r2 unavailable');}return put(key,...a);};
+  const r=await batch(w,{invocationKey:KEY});
+  assert.ok(hit,name+': the fault was injected');
+  const keys=[...w.records.keys()];
+  assert.ok(!keys.some(k=>k.startsWith('enrichment/stop-events/')),name+': no stop Event or stop record');assert.ok(!keys.some(k=>k.startsWith('enrichment/batch-manifest/')),name+': no manifest');
+  expect(w,r,other);
+ };
+ const latest=w=>{const row=sql(w.file,'SELECT document_json AS d FROM prediction_run WHERE latest=1')[0];return row?JSON.parse(row.d):null;};
+ // run record does not exist yet (the sources write fails)
+ await faulty('F1 takeover, no run record',k=>k.startsWith('enrichment/sources/'),true,(w,r,other)=>{
+  assert.equal(r.status,409);assert.equal(r.data.code,'start_claim_lost');assert.deepEqual(leaseDoc(w),other);assert.equal(runs(w),0);assert.equal(latest(w),null,'no latest-run');
+ });
+ await faulty('F2 real owner, no run record',k=>k.startsWith('enrichment/sources/'),false,(w,r)=>{
+  assert.equal(r.status,502);assert.equal(r.data.code,'start_storage_error');assert.equal(r.data.recoverable,true);assert.equal(leaseDoc(w).expiresAt,0,'the owner released its own lease');assert.equal(runs(w),0);assert.equal(latest(w),null);
+ });
+ // run record exists (the manifest write fails): it stays exactly as committed while owned, never marked stopped
+ await faulty('F3 takeover, run exists',k=>k.startsWith('enrichment/batch-manifest/'),true,(w,r,other)=>{
+  assert.equal(r.status,409);assert.equal(r.data.code,'start_claim_lost');assert.deepEqual(leaseDoc(w),other);assert.equal(runs(w),1);assert.equal(latest(w).status,'running','the run record was not rewritten as stopped');
+ });
+ await faulty('F4 real owner, run exists',k=>k.startsWith('enrichment/batch-manifest/'),false,(w,r)=>{
+  assert.equal(r.status,502);assert.equal(r.data.code,'start_storage_error');assert.equal(leaseDoc(w).expiresAt,0);assert.equal(latest(w).status,'running');
+ });
+}
+
+// 10d. The R2 `latest-run.json` is a non-authoritative mirror written after the D1 commit: a reader in D1 mode never sees a stale or out-of-order mirror object.
+{
+ const w=await world();
+ const first=await batch(w,{invocationKey:KEY});assert.equal(first.data.status,'running');
+ w.records.set('enrichment/latest-run.json',{runId:'stale-mirror-run',status:'running',createdAt:'2020-01-01T00:00:00.000Z',selectedIds:[],results:{},failures:{}});
+ const res=await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/status'),w.env);const text=await res.text();
+ assert.equal(res.status,200);assert.ok(!text.includes('stale-mirror-run'),'status reads the D1 run, not the R2 mirror object');assert.ok(text.includes(first.data.runId),'status names the D1 latest run');
+}
+
 // 10b. The frozen answer, the stored copy and a joined answer all carry the converted 15 minute expiry, consistent with the lease in D1.
 {
  const w=await world();

@@ -1319,13 +1319,20 @@ async function observedPrediction(env,body,work,stage,requestId,opts={}){
  await safeAppendStep(env,traceId,entered);
  let response,data;try{response=await work();data=await response.clone().json();}catch(error){
   logPredictionFailure(stage,error,correlation,traceId);
+  // ADR 0188: an exception in a claimed start never reaches the unfenced stop recorder. The fence says whether this handler still owns the run: if not, it answers `start_claim_lost`; if it does,
+  // it releases its own (fenced) lease and answers a bounded recoverable `start_storage_error`. Neither writes a run, a stop Event, a step, a retry or `latest-run`.
+  if(typeof opts.fence==='function'){
+   const mine=await Promise.resolve().then(()=>opts.fence()).catch(()=>false);
+   if(mine&&body?.runId)await runnerLease(env,body.runId,'release').catch(()=>null);
+   return withPredictionCorrelation(json(mine?{status:'blocked',reason:'storage_error',error:'storage_error',code:'start_storage_error',runId:body?.runId||null,recoverable:true,...scheduledRunFields()}:{status:'blocked',reason:'start_claim_lost',code:'start_claim_lost',runId:body?.runId||null,...scheduledRunFields()},mine?502:409),correlation);
+  }
   const id=stopId();
   await safeAppendStep(env,traceId||id,predictionStep({step:stage,requestId:correlation,attemptedAt,outcome:'failed',httpStatus:502,elapsedMs:Date.now()-started,errorClass:'storage_error'}));
   const stop=await recordRunStop(env,id,'storage_error',stopFallback());
   return withPredictionCorrelation(json({...stop,error:'storage_error'},502),correlation);
  }
  // A superseded keyed start is not a stop of anything and records nothing.
- if(opts.fence&&data.code==='start_claim_lost')return response;
+ if(opts.fence&&(data.code==='start_claim_lost'||data.code==='start_storage_error'))return response;
  const normal=['queue_empty','eligible_queue_empty','retry_backoff'];
  // A start that cannot write the previous run's retries took no lease and created no run: it is not a stop of anything.
  const stop=data.code==='prediction_retry_heal_pending'||data.code==='prediction_catalog_held'||data.recoverable===true?null:data.status==='lease_lost'?'lease_lost':data.mustComplete&&!normal.includes(data.stopReason)?data.stopReason:data.status==='blocked'&&data.reason!=='retry_backoff'?data.reason:response.status>=500?'storage_error':response.status===409&&data.error?.includes('Profile changed')?'profile_changed':stage==='start'&&response.status===409&&data.error?'model_unavailable':null;
@@ -2962,10 +2969,19 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
    }));
    if(result.status>=400)await runnerLease(env,runId,'release');
    return result;
-  }catch(error){if(error instanceof BatchGateLost)return superseded();await runnerLease(env,runId,'release');if(CATALOG_HELD_CODES.includes(error?.code)&&error?.stage==='queue_refresh'){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
+  }catch(error){
+   if(error instanceof BatchGateLost)return superseded();
+   // Ownership is decided before the release: after a release the same check would always say "lost".
+   const stillOwner=claimed?await held().catch(()=>false):true;
+   await runnerLease(env,runId,'release');
+   if(!stillOwner)return superseded();
+   if(CATALOG_HELD_CODES.includes(error?.code)&&error?.stage==='queue_refresh'){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}
+   if(claimed){logPredictionFailure('start',error,requestId,runId);return json({status:'blocked',reason:'storage_error',error:'storage_error',code:'start_storage_error',runId,recoverable:true,...scheduledRunFields()},502);}
+   throw error;
+  }
  },'start',requestId,claimed?{fence:held}:{});
  const data=await response.clone().json();
- if(data.code==='start_claim_lost'){await clearGate();return response;}
+ if(data.code==='start_claim_lost'||data.code==='start_storage_error'){await clearGate();return response;}
  if(data.status!=='running'){attempt.status=data.status==='already_running'?'completed':data.status==='noop'?'idle':'blocked';attempt.completedAt=new Date().toISOString();attempt.stopReason=data.stopReason||data.reason||(data.error?'storage_error':null);await diagnosticCheckpoint(env,attempt,{startResult:['already_running','blocked','noop'].includes(data.status)?data.status:'error',leaseAcquiredAt:attempt.leaseAcquiredAt||null,lastHeartbeatAt:attempt.lastHeartbeatAt||null});}
  return response;
 }
