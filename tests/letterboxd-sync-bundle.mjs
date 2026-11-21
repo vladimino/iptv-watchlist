@@ -54,6 +54,13 @@ await run("LetterboxdRatings.writeDocument(__env,'enrichment/removal-rating-look
 await run("LetterboxdRatings.writeDocument(__env,'letterboxd/diary/state.json',null,{schemaVersion:2,coverage:{newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false},resumePage:null,writer:{runId:'ratings-storage-migrate',step:'migrate'}})");
 const step={async do(name,fn){return fn();},async sleepUntil(){}};
 
+// 1b. Dormant: with no mode row the status and the monitor carry nothing of the executor (today's behavior), and a stale-safe read never fails them.
+{
+ const status0=await run('LetterboxdRatings.status(__env,'+T('2026-11-21T09:30:00Z')+')');
+ assert.equal(status0.letterboxdSync,null,'no Letterboxd mode row: the Ratings status is unchanged');
+ const facts0=await run('Monitor.collect(__env,'+T('2026-11-21T09:30:00Z')+',null)');
+ assert.ok(!('letterboxd' in facts0),'a dormant executor adds no monitor stream');
+}
 // 2. Activation is decided by LIVE evidence, nothing is injected: while the Letterboxd mode is not switching the legacy entry is not fenced, so the switch is refused; once admission is closed
 // (`switching`) the legacy Ratings entry is fenced, Ratings is closed and drained, the Watchlist authority is an open d1 and all phases exist, so `complete` is admitted.
 {
@@ -66,6 +73,13 @@ const step={async do(name,fn){return fn();},async sleepUntil(){}};
  assert.equal(ratingsOpen.ratingsClosed,false,'a Ratings executor that is still cloudflare is not closed');
  const done=await LetterboxdSync.switchMode(env,{action:'complete'},ports,T('2026-11-21T09:39:00Z'));
  assert.equal(done.completed,true,JSON.stringify(done));
+}
+// 2b. Active: the same status and monitor facts now carry the slot read model, read only.
+{
+ const model=await run('LetterboxdRatings.status(__env,'+T('2026-11-21T09:45:00Z')+').then(s=>s.letterboxdSync)');
+ assert.equal(model.mode,'cloudflare');assert.equal(model.sideEffects,'none');assert.equal(model.slot.key,'2026-11-21T1030');
+ const facts=await run('Monitor.collect(__env,'+T('2026-11-21T09:45:00Z')+',null)');
+ assert.equal(facts.letterboxd.mode,'cloudflare');
 }
 async function slot(now){
  const started=await LetterboxdSync.ensure(env,{now});

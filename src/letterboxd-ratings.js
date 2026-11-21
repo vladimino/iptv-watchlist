@@ -511,7 +511,12 @@ const LetterboxdRatings=(()=>{
    removal:{schemaVersion:queue?.schemaVersion??null,lookupEnabled:true,entries:entries.length,pending:entries.filter(entry=>entry.state==='pending').length,unresolved:entries.reduce((n,entry)=>n+removalUnresolvedRefs(entry),0),unresolvedEntries:entries.filter(entry=>removalUnresolvedRefs(entry)>0).length,
     refIssues:Object.fromEntries(REMOVAL_REF_ISSUES.map(issue=>[issue,entries.reduce((n,entry)=>n+(entry.refs||[]).filter(ref=>ref.resolved!==true&&ref.issue===issue).length,0)])),
     legacy:entries.filter(entry=>entry.legacy===true).length,expired:entries.filter(entry=>entry.state==='expired').length,droppedRefs:queue?.droppedRefs||0,pausedUntil:queue?.pausedUntil&&Date.parse(queue.pausedUntil)>now?queue.pausedUntil:null},
-   freshness:freshnessOf(run),orchestration:await orchestrationOf(env,now),readAt:iso(now),sideEffects:'none'};
+   freshness:freshnessOf(run),orchestration:await orchestrationOf(env,now),letterboxdSync:await letterboxdSyncOf(env,now),readAt:iso(now),sideEffects:'none'};
+ }
+ // ADR 0186: the Letterboxd Sync slot model next to the Ratings one: null while the executor is dormant (no mode row), so today's status is unchanged. Read only; a failed read is reported, never thrown.
+ async function letterboxdSyncOf(env,now){
+  if(typeof LetterboxdSync==='undefined'||!env?.DB)return null;
+  try{const model=await LetterboxdSync.readModel(env,{now});return model.mode==='external'&&model.health==='external'?null:model;}catch{return {mode:null,health:'unreadable',sideEffects:'none'};}
  }
  // The executor read model (ADR 0089 decision 7). A failed read is reported, never thrown into the status.
  async function orchestrationOf(env,now){
