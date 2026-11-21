@@ -17,8 +17,8 @@ let dbCount=0;
 function fresh({schema=true}={}){
  const file=path.join(root,'t'+(dbCount++)+'.db');
  const run=sql=>{const r=sqliteSync(['-bail',file],{input:sql});if(r.status!==0)throw new Error(r.stderr);};
- run("CREATE TABLE schema_contract(id INTEGER PRIMARY KEY, version INTEGER NOT NULL, note TEXT); INSERT INTO schema_contract VALUES(1,31,'t');");
- if(schema)run(fs.readFileSync('migrations/0032_letterboxd_sync_control.sql','utf8'));
+ run("CREATE TABLE schema_contract(id INTEGER PRIMARY KEY, version INTEGER NOT NULL, note TEXT); INSERT INTO schema_contract VALUES(1,32,'t');");
+ if(schema)run(fs.readFileSync('migrations/0033_letterboxd_sync_control.sql','utf8'));
  return {file,db:d1Standin(file),run};
 }
 function bucket(){

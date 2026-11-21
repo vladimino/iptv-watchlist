@@ -1,8 +1,8 @@
--- Schema v32: the Letterboxd Sync Workflow control plane (ADR 0186, Accepted; AIR-570). Owner of these tables: the Letterboxd Sync executor only.
+-- Schema v33: the Letterboxd Sync Workflow control plane (ADR 0186, Accepted; AIR-570). Owner of these tables: the Letterboxd Sync executor only.
 -- INERT: this file is in the repository and is NOT applied to any database by a deploy. Applying it to production D1 is a separate owner GO (AIR-571).
 -- Applying it writes no row: the mode table starts EMPTY, and an absent mode row means `external`, epoch 0, so `LetterboxdOrchestration.ensure` creates nothing.
--- It follows a complete version 31 and refuses anything else before a table is created: the first statement inserts a second schema_contract row and aborts the file.
--- It follows 0031, the Watchlist authority of the parallel work, which must merge first; the watchlist_* tables are NOT here.
+-- It follows a complete version 32 and refuses anything else before a table is created: the first statement inserts a second schema_contract row and aborts the file.
+-- It follows 0032 (the EPG Channel authority) and 0031 (the Watchlist authority); the watchlist_* and epg_channel_* tables are NOT here.
 -- letterboxd_sync_mode: the executor mode (external | switching | cloudflare) and its epoch fence, plus the domain quarantine. Only the owner's mode switch writes it.
 -- letterboxd_sync_fence: the batch fence, not a switch. A guard upserts it with ok = 0 when the mode row no longer admits the caller's epoch, which trips CHECK (ok = 1) and aborts the whole batch.
 -- letterboxd_slot: one row per Madrid slot (04:30, 10:30, 16:30, 22:30): the control record (series, instance, epoch, phase, retry budget, quarantine) and the three independent outcomes.
@@ -10,7 +10,7 @@
 
 INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
-WHERE NOT EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 31);
+WHERE NOT EXISTS (SELECT 1 FROM schema_contract WHERE id = 1 AND version = 32);
 
 CREATE TABLE letterboxd_sync_mode (
  id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -102,4 +102,4 @@ BEGIN
  SELECT RAISE(ABORT, 'schema_contract_downgrade');
 END;
 
-UPDATE schema_contract SET version = 32, note = 'letterboxd sync control plane (ADR 0186, inert)' WHERE id = 1 AND version = 31;
+UPDATE schema_contract SET version = 33, note = 'letterboxd sync control plane (ADR 0186, inert)' WHERE id = 1 AND version = 32;
