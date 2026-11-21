@@ -469,7 +469,7 @@ Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures
 
 ## EPG Channel authority (schema v31, dormant; not applied)
 
-`migrations/0031_epg_channel_authority.sql` follows a complete version 30 (the three EPG checkpoint tables present) and refuses anything else before a table is created. It is not applied by a deploy and no Worker path reads or writes these tables ([ADR 0187](../../adr/0187-epg-channel-authority.md), Proposed; contract in [EPG Channel](../domain/epg-channel.md)). It creates four STRICT tables, one index and two seed rows (the revision row at revision 0 and the fence row), and no marker.
+`migrations/0031_epg_channel_authority.sql` follows a complete version 30 (the three EPG checkpoint tables present) and refuses anything else before a table is created. It is not applied by a deploy and no Worker path reads or writes these tables ([ADR 0187](../../adr/0187-epg-channel-authority.md), Accepted design, dormant implementation; contract in [EPG Channel](../domain/epg-channel.md)). It creates four STRICT tables, one index and two seed rows (the revision row at revision 0 and the fence row), and no marker.
 
 | Table | Holds |
 | --- | --- |

@@ -1,6 +1,6 @@
 # EPG Channel contract
 
-A **Channel** is an XMLTV channel with a provider category, an optional owner category and a scan policy, stored in D1 independently of the shows that name it. The decision is [ADR 0187](../../adr/0187-epg-channel-authority.md) (Proposed); the schema is in the [D1 schema reference](../data/d1-schema.md#epg-channel-authority-schema-v31-dormant-not-applied) and the module is `src/epg-channel-d1.js`. **Nothing in the Worker reads these tables yet**: the contract is dormant until a separately approved change reads one snapshot.
+A **Channel** is an XMLTV channel with a provider category, an optional owner category and a scan policy, stored in D1 independently of the shows that name it. The decision is [ADR 0187](../../adr/0187-epg-channel-authority.md) (Accepted design, dormant implementation); the schema is in the [D1 schema reference](../data/d1-schema.md#epg-channel-authority-schema-v31-dormant-not-applied) and the module is `src/epg-channel-d1.js`. **Nothing in the Worker reads these tables yet**: the contract is dormant until a separately approved change reads one snapshot. That future consumer precomputes an in-memory `Map<channelId, {policy, basis}>` once per scan revision and does one lookup per show.
 
 ## Policies
 

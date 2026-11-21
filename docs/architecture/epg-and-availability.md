@@ -184,7 +184,7 @@ flowchart TD
 
 There is no hard TTL. The run fails closed only when no snapshot exists or it cannot be read, which is a D1 fault and not a Letterboxd one. The EPG remains the only writer of the programme generation ([ADR 0142](../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 3); the generation's watchlist part becomes a copy of the pinned snapshot, and the scan, retention and removal-event steps leave the EPG commit tail. The immediate join is a read-time composition and writes nothing.
 
-## Channel policy (dormant contract, [ADR 0187](../adr/0187-epg-channel-authority.md), Proposed)
+## Channel policy (dormant contract, [ADR 0187](../adr/0187-epg-channel-authority.md), Accepted design, dormant implementation)
 
 Channels get their own D1 tables with a provider category, a per-category policy and an optional owner override. **No scan reads them today**; the diagram shows the contract a later, separately approved reader would use, and it changes nothing in the publication flow above. The contract is in [EPG Channel](../reference/domain/epg-channel.md).
 
