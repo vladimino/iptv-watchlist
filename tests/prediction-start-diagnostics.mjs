@@ -1,5 +1,5 @@
 // AIR-417 / AIR-424 / AIR-431 on batch runner v2 (ADR 0167; D1 prediction authority, as production runs it). A catalog that an EPG publication holds or loads
-// is a wait at start, not a storage failure: the start answers 503 prediction_catalog_held, takes no lease, creates no run and writes no Event. A run that
+// is a wait at start, not a storage failure: the start answers 503 prediction_catalog_held, takes no lease, creates no run and writes no stop or run Event (AIR-575, ADR 0189: it leaves exactly one neutral skipped Event of the refused attempt). A run that
 // already owns its manifest reads no catalog: its batch submit and its completion are untouched by a held catalog, and an identical replay is already_current.
 // The stage failure lines of the retired v5 start (diagnosedStart) are gone with it. Local stand-ins only.
 import assert from 'node:assert/strict';
@@ -12,7 +12,10 @@ const lines=()=>logs.filter(l=>l.includes('prediction_boundary_failed')).map(l=>
 const START={scope:'watchlist_all',mode:'queued',trigger:'scheduled',capacity:{remainingPercent:100},manifestSize:2};
 const leaseRow=()=>sql(w.file,"SELECT expires_at AS e, document_json AS d FROM prediction_lease WHERE name='runner'")[0]||null;
 const runCount=()=>sql(w.file,'SELECT COUNT(*) AS n FROM prediction_run')[0].n;
-const eventKeys=()=>[...w.records.keys()].filter(key=>key.startsWith('events/')||key.includes('stop-events/')).sort();
+// A skipped attempt (AIR-575) is its own neutral Event: it is not a stop or a run Event, so the checks below exclude it and a separate check counts it.
+const isSkipped=key=>key.includes('-enrichment-skipped-')||key.includes('stop-events/skipped-');
+const eventKeys=()=>[...w.records.keys()].filter(key=>(key.startsWith('events/')||key.includes('stop-events/'))&&!isSkipped(key)).sort();
+const skippedKeys=()=>[...w.records.keys()].filter(key=>key.includes('stop-events/skipped-')).sort();
 const versionKeys=filmId=>[...w.records.keys()].filter(key=>key.includes('/'+filmId+'/predictions/versions/'));
 const runRow=id=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+id+"'")[0].d);
 // A held (discovery_fence) or loading (discovery_incomplete) Discovery authority, as an EPG publication sets it.
@@ -21,13 +24,14 @@ const GATES=[[{held:true,ready:true,transfer:'idle'},'discovery_fence'],[{held:f
 
 // 1. The gate is checked before the lease: a held or loading authority answers the wait without a lease, a run, an Event or a queue change.
 for(const [gate,cause] of GATES){
- logs.length=0;const leaseWas=JSON.stringify(leaseRow()),runsWas=runCount(),eventsWas=eventKeys(),queueWas=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue'));
+ logs.length=0;const skippedWas=skippedKeys().length,leaseWas=JSON.stringify(leaseRow()),runsWas=runCount(),eventsWas=eventKeys(),queueWas=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue'));
  const held=await withGate(gate,()=>w.api('batch/start',START));
  assert.equal(held.status,503,cause);assert.equal(held.data.status,'blocked');assert.equal(held.data.reason,'catalog_held');assert.equal(held.data.code,'prediction_catalog_held');assert.equal(held.data.cause,cause);
  assert.ok(!held.data.error,'not a storage_error');
  assert.equal(JSON.stringify(leaseRow()),leaseWas,cause+': no lease was taken');assert.equal(runCount(),runsWas,cause+': no run');
  assert.deepEqual(eventKeys(),eventsWas,cause+': no stop Event');assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),queueWas,cause+': the queue is untouched');
  assert.equal(lines().length,0,cause+': a wait is not a failed boundary');
+ assert.equal(skippedKeys().length,skippedWas+1,cause+': exactly one skipped Event of the refused attempt');
 }
 
 // 2. After the publication the start runs; a held catalog then reaches neither the batch submit nor its identical replay, nor the completion.
