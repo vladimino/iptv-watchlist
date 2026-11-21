@@ -21,7 +21,7 @@ const SHA=char=>char.repeat(64);
 
 // ===== 1. the migration: latest, guarded, additive, inert =====
 const m32='0032_epg_channel_authority.sql';
-assert.ok(names.at(-1)===m32&&names.at(-2)==='0031_watchlist_authority.sql','0032 follows 0031 and is the latest migration');
+assert.ok(names.includes(m32)&&names[names.indexOf(m32)-1]==='0031_watchlist_authority.sql','0032 follows 0031 (later migrations may follow it)');
 const upTo=number=>names.filter(name=>Number(name.slice(0,4))<=number);
 const v31=path.join(root,'v31.sqlite');sqlite(v31,upTo(31).map(read).join('\n'));
 const v30=path.join(root,'v30.sqlite');sqlite(v30,upTo(30).map(read).join('\n'));

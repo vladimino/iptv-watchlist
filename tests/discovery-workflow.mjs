@@ -353,7 +353,7 @@ const indexWrite=build.slice(build.indexOf("writeAtomic('dist/server/index.js'")
 assert.match(indexWrite,/src\/discovery-workflow\.js/);
 assert.doesNotMatch(indexWrite,/cloudflare:workers/);
 assert.match(build,/import \{ WorkflowEntrypoint \} from 'cloudflare:workers'/);
-assert.match(build,/export \{ runDiscoveryWorkflow, reconcileDiscoveryWorkflow(, runRatingsWorkflow)?(, runEpgWorkflow)?(, runProducerWorkflow)? \}/);
+assert.match(build,/export \{ runDiscoveryWorkflow, reconcileDiscoveryWorkflow(, runRatingsWorkflow)?(, runEpgWorkflow)?(, runProducerWorkflow)?(, runLetterboxdWorkflow)? \}/);
 
 async function fireCron(environment=env){
  const pending=[];

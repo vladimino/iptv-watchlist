@@ -20,7 +20,7 @@ assert.doesNotMatch(build,/export class EpgDiagnosticWorkflow/,'the bundle entry
 for(const gone of ['src/epg-diagnostic.js','src/epg-diagnostic-run.js','src/epg-replay.js','scripts/epg-diagnostic-provision.mjs','diagnostic-migrations'])assert.equal(fs.existsSync(gone),false,gone+' is retired and must not return');
 assert.doesNotMatch(build,/epg-diagnostic|epg-replay|runEpgDiagnosticWorkflow/,'build.mjs concatenates and exports no canary module');
 const entry=build.slice(build.indexOf("writeAtomic('dist/server/workflow-entry.js'"));
-assert.deepEqual([...entry.matchAll(/export class (\w+)/g)].map(match=>match[1]),['DiscoveryWorkflow','RatingsWorkflow','EpgWorkflow','ProducerWorkflow'],'only the production Workflow classes are exported');
+assert.deepEqual([...entry.matchAll(/export class (\w+)/g)].map(match=>match[1]),['DiscoveryWorkflow','RatingsWorkflow','EpgWorkflow','ProducerWorkflow','LetterboxdWorkflow'],'only the production Workflow classes are exported');
 // (scripts/test-classification.mjs legitimately names this guard file, so it is the one exclusion.) The marker the canary used to share is now an offline-fixture-only name; no source may mention the canary identifiers again.
 const CANARY=/EpgDiagnostic|EpgReplay|epgDiagnostic|epg-diagnostic|EPG_DIAGNOSTIC|iptv-epg-diagnostic|epg_diagnostic/;
 for(const dir of ['src','scripts','public'])for(const file of fs.readdirSync(dir,{recursive:true,withFileTypes:true}))if(file.isFile()&&/\.(m?js|json|sql)$/.test(file.name)&&file.name!=='test-classification.mjs'){

@@ -1374,6 +1374,33 @@ export const FILES={
  "ratings-orchestration.mjs": {
   "suite": "core"
  },
+ "letterboxd-sync.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-watchlist.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-repository.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-effects.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-bundle.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-ratings.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-monitor.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-admission.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-fence.mjs": {
+  "suite": "core"
+ },
  "ratings-queue-v2.mjs": {
   "suite": "core"
  },

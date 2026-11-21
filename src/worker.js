@@ -2596,6 +2596,52 @@ async function epgSync(env,run){
  await queueCommittedDiscovery(env,run);
  if((!published?.authoritative||!published.mirrored)&&await epgMayWriteWatchlistRoot(env,run))await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
 }
+// AIR-570 (ADR 0186): the phase ports of the dormant Letterboxd Sync Workflow, assembled from the modules already in this scope. Nothing here runs unless the Letterboxd mode row says `cloudflare`
+// (the owner's switch refuses that without a proven handover). A port a deployment cannot supply stays absent and fails closed.
+async function letterboxdTmdbOf(env,lids){
+ const working=await MetadataCache.loadMetadataWorkingSet(env),records=working?.records||{},map=new Map();
+ for(const lid of lids){const id=records[lid]?.tmdbId;map.set(lid,id==null?null:String(id));}
+ return map;
+}
+// The EVIDENCE the owner's mode switch needs before the Letterboxd writer is admitted (O5): read from the live state, never asserted. Ratings is closed (its own mode is neither `cloudflare` nor
+// `switching`) and drained (no step lease live, no instance live), the legacy `ratings_sync_start`/`ratings_sync_step` entry answers `external_writer_fenced` (that happens while the Letterboxd mode is
+// `switching`, which `complete` requires), the Watchlist authority is an open `d1` and the three phase ports exist. Any unreadable piece is false.
+async function letterboxdHandover(env,now=Date.now()){
+ const proof={ratingsClosed:false,ratingsDrained:false,legacyFenced:false,watchlistRepository:false,ratingsPhase:false};
+ try{
+  const mode=await RatingsOrchestration.readMode(env);
+  proof.ratingsClosed=!mode.malformed&&mode.record?.mode==='external';
+  proof.ratingsDrained=(await RatingsOrchestration.drainState(env,now))==='verified';
+  const gates=await Promise.all(['start','step'].map(action=>RatingsOrchestration.externalGate(env,action)));
+  proof.legacyFenced=gates.every(gate=>gate.reason==='external_writer_fenced');
+ }catch{/* an unreadable piece stays false */}
+ try{const authority=await WatchlistD1.readAuthority(env);proof.watchlistRepository=authority?.state==='d1'&&authority.writes==='open';}catch{/* false */}
+ try{const ports=letterboxdPorts(env);proof.ratingsPhase=!!(ports.ratings&&ports.reconcile&&ports.watchlist);}catch{/* false */}
+ return proof;
+}
+function letterboxdPorts(env){
+ const sources=sourceConfig(env);
+ const effects=LetterboxdSyncEffects.effectWriters({
+  repository:WatchlistD1,
+  facts:LetterboxdFacts,
+  retention:{UNIT_CAP:CanonicalRatedAdmission.UNIT_CAP,writerOpen:e=>CanonicalRatedAdmission.ratedAdmissionWriterOpen(e),work:a=>CanonicalRatedAdmission.watchlistRetentionWork(a),apply:(e,a)=>CanonicalRatedAdmission.applyRatedAdmissionRetention(e,a),carry:o=>CanonicalRatedAdmission.carryRatedAdmissionIntent(o),settled:o=>CanonicalRatedAdmission.ratedAdmissionSliceSettled(o)},
+  removal:{enqueue:(e,films,ref)=>enqueueRemovalRefs(e,films,ref)},
+  tmdbOf:letterboxdTmdbOf,
+  removalRef:(e,snapshot)=>LetterboxdSync.slotEventRef(e,snapshot.slotKey,snapshot.runId),
+  epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],
+  fenceEnv:(e,epoch)=>LetterboxdSync.fencedEnv(e,epoch),
+ });
+ const admitNew=LetterboxdSyncAdmission.admissionStep({repository:WatchlistD1,epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],fenceEnv:(e,epoch)=>LetterboxdSync.fencedEnv(e,epoch),identity:{MAX_ATTEMPTS:LetterboxdDiaryIdentity.MAX_ATTEMPTS,resolve:(e,items,opts)=>LetterboxdDiaryIdentity.resolve(e,items,opts),readIdentity:e=>LetterboxdFacts.readDiaryIdentity(e),diaryLinks:(e,lids)=>LetterboxdFacts.diaryLinks(e,lids)}});
+ const repository=LetterboxdSyncRepository.watchlistRepository(WatchlistD1,{epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],effectWriters:effects,admitNew});
+ const fenceGuard=epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]];
+ const describeFilms=async(e,{added,removed})=>{
+  const working=await MetadataCache.loadMetadataWorkingSet(e).catch(()=>null),records=working?.records||{};
+  const known=film=>({...film,...(records[film.id]||{}),id:film.id,title:film.title||records[film.id]?.title,year:film.year??records[film.id]?.year});
+  const rated=await storedRemovalRatings(e,{type:'watchlist',removed:removed.map(film=>eventRemovedFilm(known(film)))}).catch(()=>null);
+  return {added:added.map(film=>eventFilm(known(film))),removed:rated?.event?.removed||removed.map(film=>eventRemovedFilm(known(film)))};
+ };
+ return {handover:e=>letterboxdHandover(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
+}
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {
 // AIR-308 (ADR 0155): the cron trigger does not call the D1 enrichment projector. D1_ENRICHMENT_WRITE is ignored.
