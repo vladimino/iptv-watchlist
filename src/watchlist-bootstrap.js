@@ -36,6 +36,13 @@ export function livenessOf(records,nowMs){
 const SQL_CONTROL_VALID="json_type(body)='object' AND json_extract(body,'$.schemaVersion')=1 AND json_type(body,'$.budget.consecutive')='integer' AND json_type(body,'$.budget.total')='integer' AND json_extract(body,'$.phase') IN ('idle','starting','running','waiting','done','stopped')";
 const SQL_LEASE_VALID="json_type(body)='object' AND json_type(body,'$.holder')='text' AND length(json_extract(body,'$.holder'))>0 AND json_type(body,'$.expiresAt')='text' AND substr(json_extract(body,'$.expiresAt'),11,1)='T' AND substr(json_extract(body,'$.expiresAt'),-1)='Z' AND datetime(json_extract(body,'$.expiresAt')) IS NOT NULL AND json_type(body,'$.released') IN ('true','false')";
 
+// The EPG liveness proof as one batch guard [sql, params]. Both records are pinned by revision (absence included); a PRESENT record must satisfy its contract (invalid or NULL-valued is
+// unknown, not idle: COALESCE(valid,0)<>1 selects it) and then must not show an active phase or a live lease (expiry plus the margin, after `liveAfterIso`).
+export function livenessGuard(liveness){
+ if(!liveness||!Number.isInteger(liveness.controlRevision)||!Number.isInteger(liveness.leaseRevision)||typeof liveness.liveAfterIso!=='string')throw new Error('bootstrap_liveness');
+ return [GUARD("NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key='control' AND COALESCE(("+SQL_CONTROL_VALID+"),0)<>1) AND NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key='lease' AND COALESCE(("+SQL_LEASE_VALID+"),0)<>1) AND COALESCE((SELECT revision FROM epg_orchestration_document WHERE key='control'),-1)=? AND COALESCE((SELECT revision FROM epg_orchestration_document WHERE key='lease'),-1)=? AND NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key='control' AND json_extract(body,'$.phase') IN ('starting','running','waiting')) AND NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key='lease' AND json_extract(body,'$.released')=0 AND json_extract(body,'$.expiresAt')>?)"),[liveness.controlRevision,liveness.leaseRevision,liveness.liveAfterIso]];
+}
+
 // Membership and order only: SHA-256 of the lines `ordinal<TAB>id<NEWLINE>`. It is what the owner can reproduce from the authoritative `GET /api/watchlist` response, because the
 // route localizes titles at read time (presentLocalized) while ids and order stay those of the published generation. The raw payload digest (`listDigest`, titles included) is a
 // separate pin bound to the exact generation, never compared with the presented titles.
@@ -67,9 +74,8 @@ export function bootstrapStatements({films,pin,snapshotId,at,generation,revision
   [GUARD("(SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=0 AND snapshot_id IS NULL AND revision=?)"),[revision]],
   [GUARD('(SELECT COUNT(*) FROM watchlist_staging)+(SELECT COUNT(*) FROM watchlist_snapshot)+(SELECT COUNT(*) FROM watchlist_member)+(SELECT COUNT(*) FROM watchlist_change)+(SELECT COUNT(*) FROM watchlist_effect)+(SELECT COUNT(*) FROM watchlist_admission_pending)=0'),[]],
   // The source is still the pinned published generation: same run, same EPG generation, and the stored member rows still count the pinned list.
-  // No EPG writer holds a step at the commit. Both records are pinned by revision (absence included); a PRESENT record must satisfy its contract (invalid or NULL-valued is
-  // unknown, not idle: COALESCE(valid,0)<>1 selects it) and then must not show an active phase or a live lease (expiry plus the margin after `liveAfterIso`).
-  [GUARD("NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key='control' AND COALESCE(("+SQL_CONTROL_VALID+"),0)<>1) AND NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key='lease' AND COALESCE(("+SQL_LEASE_VALID+"),0)<>1) AND COALESCE((SELECT revision FROM epg_orchestration_document WHERE key='control'),-1)=? AND COALESCE((SELECT revision FROM epg_orchestration_document WHERE key='lease'),-1)=? AND NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key='control' AND json_extract(body,'$.phase') IN ('starting','running','waiting')) AND NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key='lease' AND json_extract(body,'$.released')=0 AND json_extract(body,'$.expiresAt')>?)"),[liveness.controlRevision,liveness.leaseRevision,liveness.liveAfterIso]],
+  // No EPG writer holds a step at the commit (see livenessGuard).
+  livenessGuard(liveness),
   [GUARD("(SELECT COUNT(*) FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=? AND generation=? AND finalized_run_id=programme_run_id)=1 AND (SELECT COUNT(*) FROM published_epg_member WHERE programme_run_id=? AND kind='watchlist')=?"),[pin.programmeRunId,pin.epgGeneration,pin.programmeRunId,count]],
   ['INSERT INTO watchlist_staging (snapshot_id, attempt_id, run_id, slot_key, expected_count, expected_sha256, started_at) VALUES (?,?,?,NULL,?,?,?)',[snapshotId,snapshotId,pin.programmeRunId,count,pin.sha256,at]],
  ];
