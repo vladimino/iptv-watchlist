@@ -677,7 +677,7 @@ async function mirrorObject(bucket,key,value){
 // ADR 0186 (AIR-569): once the Watchlist is its own D1 authority (marker `d1`) the root `watchlist.json` mirror belongs to the Letterboxd Sync and its reconcile, and the EPG must never overwrite it with an
 // EPG-pinned copy. The generation-addressed copy `epg/generations/<run>/watchlist.json` stays EPG-owned. Absent tables (`no such table`) mean the marker does not exist: the EPG owns the root mirror, as before.
 // Any other storage error fails closed (the root write is skipped; the next repair retries).
-async function watchlistRootOwned(env){
+export async function watchlistRootOwned(env){
  try{const row=await one(database(env),'SELECT mode FROM watchlist_authority WHERE id=1');return row?.mode==='d1';}
  catch(error){return !/no such table/i.test(String(error?.message||error));}
 }

@@ -31,7 +31,7 @@ vm.runInContext("globalThis.MetadataCache={loadMetadataWorkingSet:async()=>({rec
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);vm.runInContext(fs.readFileSync('src/sources.js','utf8'),context);
 vm.runInContext(scoped('src/epg-checkpoint-d1.js','EpgCheckpointD1'),context);
 vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy'),context);
-vm.runInContext(scoped('src/domain/watchlist-composition.js','WatchlistComposition'),context);vm.runInContext(scoped('src/watchlist-d1.js','WatchlistD1'),context);
+vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),context);vm.runInContext(scoped('src/domain/watchlist-composition.js','WatchlistComposition'),context);vm.runInContext(scoped('src/watchlist-d1.js','WatchlistD1'),context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
 vm.runInContext(fs.readFileSync('src/epg-orchestration.js','utf8'),context);
 const run=code=>vm.runInContext(code,context);
@@ -198,6 +198,21 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
  assert.deepEqual([transient.code,transient.temporary],['watchlist_unavailable',true]);
  const none=database(D1);
  assert.equal(await code(run('composeWatchlistRead')({DB:none.db,BUCKET:bucket},generation,programme)),'watchlist_snapshot_absent');
+}
+
+// ===== 4b. review 2: the root-mirror fallback asks the CURRENT authority =====
+{
+ const made=database('');const env={DB:made.db,BUCKET:bucket};reset();
+ const mayWrite=runPin=>run('epgMayWriteWatchlistRoot')(env,runPin);
+ assert.equal(await mayWrite({}),true,'marker epg: today\'s fallback is unchanged');
+ assert.equal(await mayWrite({watchlistSnapshot:{version:1}}),false,'a pinned run never writes the root');
+ // an OLD run (started with the marker epg, no pin) survives epg -> d1 on the same binding: it must stop writing
+ sqlite(made.file,D1);
+ assert.equal(await mayWrite({}),false,'epg -> d1 while the run is in flight: the unpinned run is fenced by the current authority');
+ const flaky=d1Standin(made.file,{onQuery:async()=>{throw new Error('D1 DB is overloaded');}});
+ assert.equal(await run('epgMayWriteWatchlistRoot')({DB:flaky,BUCKET:bucket},{}),false,'an unreadable marker fails closed');
+ const legacy=path.join(root,'legacy-fence.sqlite');fs.copyFileSync(legacyBase,legacy);
+ assert.equal(await run('epgMayWriteWatchlistRoot')({DB:d1Standin(legacy),BUCKET:bucket},{}),true,'tables absent: unchanged');
 }
 
 // ===== 5. the EPG commit tail does not own the scan or the watchlist Event when pinned =====

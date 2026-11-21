@@ -827,7 +827,8 @@ async function catalogAvailableRoute(env){
  const publication=await epgPublication(env);
  const pinnedRunId=publication.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
  const generationCopy=name=>catalogGenerationCopy(env,publication,pinnedRunId,name);
- const watchlistLoad=Promise.resolve(publication.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json')).then(document=>composeWatchlistRead(env,document,null));
+ const wbox={};
+ const watchlistLoad=Promise.resolve(publication.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json')).then(document=>composeWatchlistRead(env,document,null,wbox));
  let programme,catalog,watchlist,index,profile,metadata,titleExclusion,metaGate=null;
  try{
   [programme,catalog,watchlist,index,profile,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadFindsTitleExclusion(env,now)]);
@@ -836,6 +837,9 @@ async function catalogAvailableRoute(env){
  }catch(error){
   const refused=discoveryUserReadRefusal(error)||titleReadRefusal(error);
   if(refused)return refused;
+  // ADR 0186: a Watchlist authority fault keeps its typed answer (409 moved, 503 otherwise); there is no mirror for this route.
+  const faulted=watchlistRouteFault(error)||(error?.watchlistAuthority?json({error:'storage_unavailable',reason:error.code},503):null);
+  if(faulted)return faulted;
   throw error;
  }
  if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
@@ -844,8 +848,8 @@ async function catalogAvailableRoute(env){
  // The ratings seed is applied to an in-memory copy. GET /api/enrichment/view uses the same overlay and neither persists it.
  const seeded=overlayRatingsSeed(index);
  const freshness=await predictionFreshness(env,profile);
- try{await catalogMetadataFinish(env,metaGate);}
- catch(error){const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
+ try{await catalogMetadataFinish(env,metaGate);await watchlistStill(env,wbox);}
+ catch(error){const refused=titleReadRefusal(error)||watchlistRouteFault(error);if(refused)return refused;throw error;}
  return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,completedOnly:publication.authority==='d1'&&!!pinnedRunId,now,titleExclusion,freshness,watchedMarkEnabled:true}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
@@ -1193,6 +1197,13 @@ async function composeWatchlistRead(env,legacy,programme=null,box=null){
 }
 // ADR 0186: the prediction queue's membership (priority and hot/cold classification) is the CURRENT Watchlist snapshot when the marker is `d1`; programme and show facts stay with the pinned generation.
 // null = the marker is not `d1`: the caller keeps the generation's membership. The same refusals as every reader (held, closed, absent, malformed); read-only, it starts no Discovery or EPG writer.
+// ADR 0186 (review 2): every EPG fallback write of the root `watchlist.json` asks the CURRENT authority, never the run's start-time pin: an EPG run started with the marker `epg` and still in flight after
+// `epg -> d1` must not write its historical list over the Watchlist's own root mirror. A pinned run never writes it; an unreadable marker fails closed (no write).
+async function epgMayWriteWatchlistRoot(env,run){
+ if(run?.watchlistSnapshot)return false;
+ if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.watchlistRootOwned!=='function')return true;
+ return !(await PublishedEpg.watchlistRootOwned(env));
+}
 async function watchlistQueueMembership(env,source){
  const legacy={updatedAt:source?.updatedAt??null,films:Array.isArray(source?.films)?source.films:[]};
  const doc=await composeWatchlistRead(env,legacy,source,null);
@@ -2275,7 +2286,7 @@ async function sealPublishStep(env,run,lease,deadline=Infinity){
   {name:'copy',phase:'publish_copy',work:async()=>{try{await copyEpgGeneration(env,run.runId);return 'ok';}catch{return 'failed';}}},
   {name:'intent',phase:'publish_intent',work:async()=>{
    await queueCommittedDiscovery(env,run);
-   if(run.seal.units.mirrors!=='ok'&&!run.watchlistSnapshot)await saveJSON(env,'watchlist.json',{updatedAt:report?.updatedAt,films:payload.watchlist?.films||run.watchlist});
+   if(run.seal.units.mirrors!=='ok'&&await epgMayWriteWatchlistRoot(env,run))await saveJSON(env,'watchlist.json',{updatedAt:report?.updatedAt,films:payload.watchlist?.films||run.watchlist});
    await saveJSON(env,'uncertain.json',{updatedAt:report?.updatedAt,items:payload.uncertain});
    return 'ok';
   }},
@@ -2583,7 +2594,7 @@ async function epgSync(env,run){
  if(await sealedPublishAvailable(env)){const publication=await PublishedEpg.currentGeneration(env);if(publication)return await tracedPhase(run.runId,'seal_stage',()=>stageSealedGeneration(env,run,{holder:discoveryHolder,meta:{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist,uncertain:result.uncertain,publication}));}
  let published;try{published=await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,discoveryHolder,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);
- if((!published?.authoritative||!published.mirrored)&&!run.watchlistSnapshot)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
+ if((!published?.authoritative||!published.mirrored)&&await epgMayWriteWatchlistRoot(env,run))await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
 }
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {
@@ -2654,7 +2665,7 @@ async fetch(request,env,execution){
     degradedRecovered('programme');
     await watchlistStill(env,wbox);
     return await titleReadFinish(env,gate,json(presented));
-   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);{const faulted=watchlistRouteFault(error);if(faulted)return faulted;}if(isTemporaryReadFault(error)){const degraded=await degradedProgrammeResponse(env,error);if(degraded)return degraded;}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);{const faulted=watchlistRouteFault(error);if(faulted)return faulted;}if(isTemporaryReadFault(error)){const degraded=await degradedProgrammeResponse(env,error);if(degraded)return degraded;if(error?.watchlistAuthority)return json({error:'storage_unavailable',reason:error.code},503);}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){
    try{
@@ -2671,7 +2682,7 @@ async fetch(request,env,execution){
     degradedRecovered('watchlist');
     await watchlistStill(env,wbox);
     return await titleReadFinish(env,gate,json(presentLocalized(data,titles,reviews.body)));
-   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);{const faulted=watchlistRouteFault(error);if(faulted)return faulted;}if(isTemporaryReadFault(error)){const degraded=await degradedWatchlistResponse(env,error);if(degraded)return degraded;}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);{const faulted=watchlistRouteFault(error);if(faulted)return faulted;}if(isTemporaryReadFault(error)){const degraded=await degradedWatchlistResponse(env,error);if(degraded)return degraded;if(error?.watchlistAuthority)return json({error:'storage_unavailable',reason:error.code},503);}const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
   {const permanent=/^\/api\/catalog\/film\/([^/]+)$/.exec(url.pathname);if(permanent&&request.method==='GET'){let id;try{id=decodeURIComponent(permanent[1]);}catch{id='';}return await catalogFilmRoute(env,id);}}

@@ -103,6 +103,8 @@ async function call(pathname,made,{fail=null,failBatch=null,message='D1 DB is ov
   assert.equal(r.body.films,undefined,route+' builds no membership');
   assert.deepEqual(r.bucket.gets.filter(MIRROR),[],route+': no mirror object was read for a structural refusal');
  }
+ const finds=await call('/api/catalog/available',await arrange({marker:held,mirrors}));
+ assert.equal(finds.status,503,'/api/catalog/available: held is a typed 503');assert.equal(finds.body.reason,'watchlist_writes_held');assert.equal(finds.body.films,undefined);
  // the same for a contradicting marker (a deleted fence row)
  const closed=await arrange({marker:"UPDATE watchlist_authority SET mode='d1',generation=1;DROP TRIGGER watchlist_cas_required;DELETE FROM watchlist_cas;",snapshot:false,mirrors});
  const c=await call('/api/watchlist',closed);
@@ -122,9 +124,9 @@ async function call(pathname,made,{fail=null,failBatch=null,message='D1 DB is ov
   put(bucket,'watchlist.json',{updatedAt:PAST,films:[w1]});
  };
  const noStandalone=await call('/api/watchlist',await arrange({mirrors:epgOnly}),{failBatch:transient});
- assert.notEqual(noStandalone.status,200,'an EPG copy or a programme is not a Watchlist mirror');assert.equal(noStandalone.body?.source,undefined);assert.equal(noStandalone.body?.films,undefined);
+ assert.equal(noStandalone.status,503,'no eligible standalone mirror: the typed refusal, not a generic 502');assert.equal(noStandalone.body.error,'storage_unavailable');assert.equal(noStandalone.body.reason,'watchlist_unavailable');assert.equal(noStandalone.body.source,undefined);assert.equal(noStandalone.body.films,undefined);
  const missing=await call('/api/watchlist',await arrange({mirrors:bucket=>{put(bucket,'programme.json',{runId:RUN2,updatedAt:PAST,watchlistCount:1,films:[w1],stats:{}});}}),{failBatch:transient});
- assert.notEqual(missing.status,200,'only a programme exists: membership is never synthesized from it');assert.equal(missing.body?.films,undefined);
+ assert.equal(missing.status,503,'only a programme exists: membership is never synthesized from it, the typed refusal answers');assert.equal(missing.body.reason,'watchlist_unavailable');assert.equal(missing.body.films,undefined);
  const standalone={updatedAt:PAST,source:'watchlist_authority',snapshotId:'snap',snapshotVersion:4,lastSuccessAt:PAST,films:[member('w1','Hot Film'),member('new1','New Film')]};
  const ok=await call('/api/watchlist',await arrange({mirrors:bucket=>{epgOnly(bucket);put(bucket,'watchlist.json',standalone);}}),{failBatch:transient});
  assert.equal(ok.status,200);assert.equal(ok.body.source,'mirror');assert.equal(ok.body.snapshotVersion,4,'labelled with its snapshot version');assert.equal(ok.body.lastSuccessAt,PAST);
@@ -133,7 +135,10 @@ async function call(pathname,made,{fail=null,failBatch=null,message='D1 DB is ov
  const prog=await call('/api/programme',await arrange({mirrors:bucket=>{epgOnly(bucket);put(bucket,'watchlist.json',standalone);}}),{failBatch:transient});
  assert.equal(prog.status,200);assert.equal(prog.body.source,'mirror');assert.equal(prog.body.joined,'none','the standalone root mirror is not a same-run pair');assert.deepEqual(prog.body.films.map(film=>film.id),['w1']);
  const only=await call('/api/programme',await arrange({mirrors:bucket=>{put(bucket,'watchlist.json',standalone);}}),{failBatch:transient});
- assert.notEqual(only.status,200);assert.equal(only.body?.scheduleUnavailable,undefined);
+ assert.equal(only.status,503);assert.equal(only.body.reason,'watchlist_unavailable');assert.equal(only.body.scheduleUnavailable,undefined);
+ // the temporary fault with no eligible mirror on the other reader routes: exact typed status too
+ const finds=await call('/api/catalog/available',await arrange(),{failBatch:transient});
+ assert.equal(finds.status,503,'GET /api/catalog/available keeps the typed refusal');assert.equal(finds.body.reason,'watchlist_unavailable');
 }
 
 // ===== 5. P1: the marker moves after the read and before the response =====
@@ -181,5 +186,26 @@ async function call(pathname,made,{fail=null,failBatch=null,message='D1 DB is ov
  await PublishedEpg.publishGeneration({DB:old,BUCKET:bare},{programmeRunId:RUN2,phase:'published',expectedProgrammeRunId:'22222222-2222-4222-8222-222222222222',programme,watchlist:epgCopy},{now:NOW});
  assert.equal(await PublishedEpg.writeMirrors({DB:old,BUCKET:bare},{programmeRunId:RUN2,programme,watchlist:epgCopy,phase:'published'}),true);
  assert.deepEqual(rootOf(bare),epgCopy,'tables absent: the EPG owns the root mirror, unchanged');
+}
+
+// ===== 7. review 2: an in-flight pre-switch EPG run never writes its list over the standalone root =====
+{
+ const standalone={updatedAt:PAST,source:'watchlist_authority',snapshotId:'snap',snapshotVersion:9,lastSuccessAt:PAST,films:[member('w1','Hot Film')]};
+ const worker=fs.readFileSync('src/worker.js','utf8');
+ // every direct EPG write of the root key is behind the current-authority fence (no start-time pin alone)
+ const sites=[...worker.matchAll(/saveJSON\(env,'watchlist\.json'/g)];
+ assert.equal(sites.length,3);
+ for(const site of sites){
+  const line=worker.slice(worker.lastIndexOf('\n',site.index)+1,worker.indexOf('\n',site.index));
+  assert.match(line,/epgMayWriteWatchlistRoot|PublishedEpg\.saveWatchlist|if\(!saved\)/,'a root watchlist write without the current-authority fence: '+line.slice(0,120));
+ }
+ // behavior of the fence itself on one binding: an OLD run (no pin) after epg -> d1, and a storage error
+ const made=await arrange({marker:'',snapshot:false});
+ const owned=await PublishedEpg.watchlistRootOwned({DB:made.db,BUCKET:made.bucket});
+ assert.equal(owned,false,'marker epg: the EPG owns the root');
+ d1Standin(made.file).sql("UPDATE watchlist_authority SET mode='d1',generation=1");
+ assert.equal(await PublishedEpg.watchlistRootOwned({DB:d1Standin(made.file),BUCKET:made.bucket}),true,'epg -> d1 on the same database: the old run no longer owns it');
+ const flaky=d1Standin(made.file,{onQuery:async()=>{throw new Error('D1 DB is overloaded');}});
+ assert.equal(await PublishedEpg.watchlistRootOwned({DB:flaky,BUCKET:made.bucket}),true,'a storage error fails closed');
 }
 console.log('watchlist-routes: ok');
