@@ -159,7 +159,7 @@ flowchart LR
 
 The page keeps the last good authoritative result only in memory. A saved-copy answer never replaces it, but any failed refresh makes the page read-only until an authoritative read succeeds; the normal source and the write actions return only then. The write fence is global, but the loss of present-tense claims is scoped to the data being rendered: a saved programme, or one film that came from a saved copy, keeps its historical schedule without archive, on-air, soon or last-chance claims, while a separately valid authoritative programme keeps its availability even when another film is shown from a mirror. When D1 answers again, films shown from a saved copy are asked again.
 
-## Proposed design: the EPG reads one Watchlist snapshot ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Proposed, not implemented)
+## Accepted design (not implemented): the EPG reads one Watchlist snapshot ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
 
 Today `beginSync` fetches the Letterboxd watchlist and a fetch failure prevents the run. The proposal moves membership into its own D1 authority written only by the Letterboxd Sync; the EPG takes **one** read of the last committed snapshot when the run starts and is then self-contained. The diagram is the future path; the shaded nodes do not exist, and with the Watchlist marker `epg` or absent the fetch above is the only path.
 
