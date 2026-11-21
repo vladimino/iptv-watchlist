@@ -728,11 +728,29 @@ export function rootFence(text){
  const match=/\n(\t+)\n([ \t]{64})$/.exec(String(text));
  return match?{generation:match[1].length-1,nonce:match[2]}:null;
 }
-// -> true when an EPG-side root write may proceed
+// -> true when an EPG-side root write may proceed. The same contract as `WatchlistD1.readAuthority` (src/watchlist-d1.js): the legacy case is the schema BELOW the Watchlist migration (a stored schema_contract version under 31)
+// with NONE of its tables; a partial table set, a schema at or above 31 without the tables, a missing or invalid marker row, a missing fence row and any unreadable answer are all closed. A test pins these two constants
+// to the ones of src/watchlist-d1.js.
+export const WATCHLIST_ROOT_SCHEMA_VERSION=31;
+export const WATCHLIST_ROOT_TABLES=Object.freeze(['watchlist_authority','watchlist_cas','watchlist_current','watchlist_staging','watchlist_snapshot','watchlist_member','watchlist_change','watchlist_effect','watchlist_admission_pending']);
 async function watchlistRootWritable(env){
+ const db=database(env);
+ // The explicit local stand-in (no D1 at all, as WatchlistD1.readAuthority) keeps today's behavior.
+ const standin=env?.WATCHLIST_DB_OPTIONAL==='standin';
+ if(!db||typeof db.prepare!=='function')return standin;
+ let present;
+ try{
+  const rows=await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+WATCHLIST_ROOT_TABLES.map(name=>"'"+name+"'").join(',')+')');
+  present=rows.map(row=>row.name);
+ }catch{return false;}
+ if(!present.length){
+  // No Watchlist table at all: legacy ONLY when the stored schema is below the Watchlist migration; at or above it the tables are missing, which is a contradiction and closed.
+  if(standin)return true;
+  try{const version=Number((await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version);return Number.isFinite(version)&&version<WATCHLIST_ROOT_SCHEMA_VERSION;}catch{return false;}
+ }
+ if(WATCHLIST_ROOT_TABLES.some(name=>!present.includes(name)))return false;
  let row;
- try{row=await one(database(env),'SELECT mode, writes, generation, (SELECT COUNT(*) FROM watchlist_cas WHERE id=1) AS cas FROM watchlist_authority WHERE id=1');}
- catch(error){return /no such table/i.test(String(error?.message||error))&&/watchlist_authority/i.test(String(error?.message||error));}
+ try{row=await one(db,'SELECT mode, writes, generation, (SELECT COUNT(*) FROM watchlist_cas WHERE id=1) AS cas FROM watchlist_authority WHERE id=1');}catch{return false;}
  return !!row&&row.mode==='epg'&&row.writes==='open'&&Number.isInteger(Number(row.generation))&&Number(row.cas)===1;
 }
 export async function watchlistRootOwned(env){return !(await watchlistRootWritable(env));}

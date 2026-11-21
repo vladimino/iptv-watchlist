@@ -43,6 +43,7 @@ const rootDoc=store=>JSON.parse(store.objects.get('watchlist.json').text);
 const rootEtag=store=>store.objects.get('watchlist.json')?.etag??null;
 const same=(doc,expected)=>PublishedEpg.rootSemantic(doc)===PublishedEpg.rootSemantic(expected);
 const rootText=store=>store.objects.get('watchlist.json').text;
+const rows1=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8'});return JSON.parse(r.stdout)[0].version;};
 // The operator's fence for a held generation (what `fence-root` writes): the same list, a fresh nonce, the generation.
 const fence=(store,generation,expectedEtag=rootEtag(store))=>{
  const doc=rootDoc(store);const text=PublishedEpg.serializeRoot(doc,{fenceGeneration:generation});
@@ -91,10 +92,17 @@ for(const marker of ['epg/held','d1/open','d1/held']){
  assert.equal((await PublishedEpg.putWatchlistRoot({DB:gone.db,BUCKET:bucket()},A)).blocked,true,'a missing marker row is not a legacy schema');
  const noCas=open();sqlite(noCas.file,'DROP TRIGGER watchlist_cas_required;DELETE FROM watchlist_cas');
  assert.equal((await PublishedEpg.putWatchlistRoot({DB:noCas.db,BUCKET:bucket()},A)).blocked,true,'a missing fence row blocks');
- // another missing table is not "the schema is absent"
- const other=open();
- const wrongTable=d1Standin(other.file,{onQuery:async text=>{if(/FROM watchlist_authority/.test(text))throw new Error('no such table: watchlist_cas');}});
- assert.equal((await PublishedEpg.putWatchlistRoot({DB:wrongTable,BUCKET:bucket()},A)).blocked,true,'only the absence of the marker table is the legacy case');
+ // the legacy case is the maintained contract of WatchlistD1.readAuthority: schema BELOW 31 with none of the tables. A partial table set, or an installed schema (v33) without the marker table or without any
+ // Watchlist table, is closed and blocks
+ const partial=open();sqlite(partial.file,'DROP TABLE watchlist_admission_pending');
+ assert.equal((await PublishedEpg.putWatchlistRoot({DB:partial.db,BUCKET:bucket()},A)).blocked,true,'a partial table set blocks');
+ const noAuthority=open();sqlite(noAuthority.file,'DROP TRIGGER watchlist_cas_required;DROP TABLE watchlist_authority');
+ assert.equal(Number(rows1(noAuthority.file,'SELECT version FROM schema_contract')),33);
+ assert.equal((await PublishedEpg.putWatchlistRoot({DB:noAuthority.db,BUCKET:bucket()},A)).blocked,true,'schema v33 with the authority table missing is not a legacy database');
+ const noTables=open();sqlite(noTables.file,'PRAGMA foreign_keys=OFF;'+['watchlist_admission_pending','watchlist_effect','watchlist_change','watchlist_member','watchlist_snapshot','watchlist_staging','watchlist_current','watchlist_cas','watchlist_authority'].map(name=>'DROP TABLE '+name).join(';'));
+ assert.equal((await PublishedEpg.putWatchlistRoot({DB:noTables.db,BUCKET:bucket()},A)).blocked,true,'schema v33 with no Watchlist table at all is a contradiction, not a legacy database');
+ // the genuine legacy database (schema v30, no Watchlist table) still admits the writer
+ assert.equal((await PublishedEpg.putWatchlistRoot({DB:open({upTo:'0030'}).db,BUCKET:bucket()},A)).blocked,false,'a genuine pre-0031 database stays writable');
 }
 
 // ===== 3. the fence order: the marker is read AFTER the object, and the put is conditional on that read =====
@@ -195,6 +203,21 @@ for(const marker of ['epg/held','d1/open','d1/held']){
  for(const file of fs.readdirSync('src').filter(name=>name.endsWith('.js')&&name!=='published-epg.js'&&name!=='worker.js')){
   const text=read('src/'+file);
   assert.equal(/(?:saveJSON|put|putStoredJson|putStable)\([^)]*['"]watchlist\.json['"]/.test(text),false,file+' writes the root watchlist mirror');
+ }
+}
+// ===== 7. the legacy predicate is the maintained Watchlist authority contract =====
+{
+ const WatchlistD1=await import('../src/watchlist-d1.js');
+ assert.equal(PublishedEpg.WATCHLIST_ROOT_SCHEMA_VERSION,WatchlistD1.SCHEMA_VERSION,'the same schema threshold as WatchlistD1.readAuthority');
+ const source=fs.readFileSync('src/watchlist-d1.js','utf8');
+ const declared=JSON.parse(/const TABLES=(\[[^\]]*\]);/.exec(source)[1].replace(/'/g,'"'));
+ assert.deepEqual([...PublishedEpg.WATCHLIST_ROOT_TABLES],declared,'the same table set as WatchlistD1');
+ // and the same answer on the cases the two must agree on
+ for(const [label,prepare] of [['epg/open',e=>e],['epg/held',e=>{setMarker(e.file,'epg/held');return e;}],['d1/open',e=>{setMarker(e.file,'d1/open');return e;}],['no marker row',e=>{sqlite(e.file,'DELETE FROM watchlist_authority');return e;}],['partial',e=>{sqlite(e.file,'DROP TABLE watchlist_effect');return e;}]]){
+  const e=prepare(open());
+  const authority=await WatchlistD1.readAuthority(e.db);
+  const writable=!(await PublishedEpg.watchlistRootOwned({DB:e.db}));
+  assert.equal(writable,authority.state==='epg'&&authority.writes==='open'||authority.state==='legacy',label+': the root predicate agrees with the Watchlist authority contract');
  }
 }
 console.log('watchlist root fence: ok');
