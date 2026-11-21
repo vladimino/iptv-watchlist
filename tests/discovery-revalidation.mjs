@@ -485,4 +485,25 @@ const hopsUntilStop=async(context,env,limit)=>{
  assert.equal(legacy.pending,false);assert.equal(legacy.attempted,0);
 }
 
+// AA. AIR-503, second review of 21 Nov 2026: a skipped durable write is not a handled key. Through the REAL hop, a resting replay and one eligible alias whose provenance write does not land:
+// the hop must not complete (no anchor, no failed duration and no provenance exist), the cursor and the lap stay open, and after the write works the next hop stores both and completes.
+{
+ const skip={value:true};
+ const wrapped={...Authority,upsertAdmissions:(target,films,context)=>skip.value&&Object.values(films).some(film=>(film.movieTitles||[]).includes('Фільм Р'))?Promise.resolve({written:[],refused:[],skipped:[]}):Authority.upsertAdmissions(target,films,context)};
+ const {file,env,context}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Фільм Р',normalized:'фільм р'},catalog:legacyCatalog(),authority:wrapped,
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}}],alternatives:[]}});
+ sql(file,`UPDATE discovery_status SET programme_run_id='${RUN}', payload_json='${JSON.stringify(resting())}' WHERE id=1`);
+ const before=JSON.stringify(decisionOf(file,'фільм р|2001'));
+ const first=await context.advanceDiscovery(env,{});
+ assert.equal(first.stage,'partial',JSON.stringify(first.discovery));assert.equal(first.discovery.nextAction,'continue','the Workflow must hop again');assert.equal(first.legacyPending,true);
+ assert.equal(JSON.stringify(decisionOf(file,'фільм р|2001')),before,'nothing durable changed');
+ assert.equal(statusOf(file).legacyRevalidation.lapComplete,false);assert.equal(statusOf(file).legacyRevalidation.deferred,1);
+ skip.value=false;
+ const second=await context.advanceDiscovery(env,{});
+ assert.equal(second.stage,'complete',JSON.stringify(second.discovery));assert.equal(second.discovery.nextAction,'stop');
+ assert.deepEqual(decisionOf(file,'фільм р|2001').anchor,[96]);
+ assert.deepEqual(admissionOf(file,'tmdb_101').movieTitles,['Film R','Фільм Р']);
+ assert.equal(statusOf(file).legacyRevalidation.lapComplete,true);
+}
+
 console.log('discovery revalidation ok');

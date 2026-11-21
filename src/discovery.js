@@ -1054,7 +1054,9 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  };
  const preview={},now=Date.now(),tmdbStarted=Date.now();
  // One revalidation of a drifted, verified observation: one detail call, then provenance (when a catalog-only Film lacks the titles), then the decision. Returns what the caller does next:
- // 'continue' (this key is done or skipped), 'break' (budget, lease-free stop or error: stop revalidating this chunk) or 'changed' (the programme moved).
+ // 'done' (a durable outcome was written: the decision with its anchor and/or failedDurations), 'skipped' (nothing durable was written: an admission or a decision write did not land, or no
+ // duration was evaluated; the key stays eligible), 'break' (budget or error: stop revalidating this chunk) or 'changed' (the programme moved). A caller may treat 'skipped' as handled only
+ // where retrying is not its job (the ordinary drift of pass 2); the cohort sweep keeps the key and the lap open.
  const revalidation={observations:0,revalidated:0,revalidation_failed:0,revalidation_exhausted:0,deferred:0};
  const revalidatedFirst=new Set();
  const revalidateDrift=async(key,previous,candidate,plan)=>{
@@ -1079,7 +1081,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
      }else if(rescored.status==='accepted'&&rescored.acceptedTmdbId!=null)proposed=String(rescored.acceptedTmdbId);
      (confirmed?reconfirmed:failed).push(duration);
     }
-    if(!reconfirmed.length&&!failed.length)return 'continue';
+    if(!reconfirmed.length&&!failed.length)return 'skipped';
     const next=DiscoveryAuthority.decisionAfterRevalidation(previous,{reconfirmed,failed,proposedTmdbId:proposed},{evidenceKey:candidateEvidence(candidate),checkedAt:new Date().toISOString(),provenance:{authority:'tmdb_detail',searchHit:false,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null}});
     // A duration that the movie authority reconfirmed alone is independent evidence: record that movie's own titles as the Film's provenance (one fenced admission write).
     // The provenance is written BEFORE the decision that makes the duration an anchor. The anchor ends the drift that triggers this revalidation, so a decision stored first and a
@@ -1092,19 +1094,19 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
      await heartbeat();
      const stored=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,{[catalogKey]:recorded},{lease,canonicalDeadline:canonicalLimit()}))));
      if(!stored)return 'changed';
-     if(!stored.written.includes(catalogKey)){revalidation.deferred++;return 'continue';}
+     if(!stored.written.includes(catalogKey)){revalidation.deferred++;return 'skipped';}
      films[catalogKey]=recorded;indexFilm(recorded);
     }
     await heartbeat();
     const wrote=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[key]:{previous,next}},{lease}))));
     if(!wrote)return 'changed';
-    if(!wrote.written.includes(key))return 'continue';
+    if(!wrote.written.includes(key))return 'skipped';
     decisions[key]=next;
     revalidation.revalidated+=reconfirmed.length;revalidation.revalidation_failed+=failed.length;
     if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)revalidation.revalidation_exhausted++;
     if(reconfirmed.length&&Date.now()+writeEstimate(1)<=persistLimit())await assignSlots(key,'revalidation_assignment');
     if(generationCollision)return 'changed';
-    return 'continue';
+    return 'done';
    }catch(e){
     if(e?.name==='BudgetExhaustedError'){revalidation.deferred++;return 'break';}
     if(e?.name==='LeaseLostError'){e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt:'revalidation'};throw e;}
@@ -1137,17 +1139,21 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   legacyRan=true;
   legacy.scanned=picked.scanned;legacy.queries=picked.queries;legacy.eligible=picked.rows.length;legacy.lapComplete=picked.lapComplete;
   nextLegacyAfter=picked.after;
-  let lastHandled=legacyAfter;
+  let lastHandled=legacyAfter,holdAfter=null;
   for(const row of picked.rows){
    const key=row.candidate.key,plan=legacyPlans.get(key);
-   if(Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(3)>persistLimit()){legacy.deferred++;revalidation.deferred++;nextLegacyAfter=lastHandled;legacyCurtailed=true;break;}
+   if(Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(3)>persistLimit()){legacy.deferred++;revalidation.deferred++;if(holdAfter===null)holdAfter=lastHandled;legacyCurtailed=true;break;}
    decisions[key]=row.decision;
    revalidatedFirst.add(key);revalidation.observations++;legacy.attempted++;
    const outcome=await revalidateDrift(key,row.decision,row.candidate,plan);
    if(outcome==='changed')return programmeChanged();
-   if(outcome==='break'){legacy.deferred++;nextLegacyAfter=lastHandled;legacyCurtailed=true;break;}
-   lastHandled=key;
+   if(outcome==='break'){legacy.deferred++;if(holdAfter===null)holdAfter=lastHandled;legacyCurtailed=true;break;}
+   // A write that did not land is no outcome: the key keeps the cursor and the lap open, so a later chunk asks again (bounded by the sweep cap). The keys after it still get their turn,
+   // and their durable outcomes remove them from the filter, so the retry does not repeat them.
+   if(outcome==='skipped'){legacy.deferred++;if(holdAfter===null)holdAfter=lastHandled;legacyCurtailed=true;continue;}
+   if(holdAfter===null)lastHandled=key;
   }
+  if(holdAfter!==null)nextLegacyAfter=holdAfter;
   // The lap is complete only when the read reached the end of the cohort and nothing was curtailed; the next lap then waits PAGED_LEGACY_RELAP_MS.
   if(legacyCurtailed){legacy.lapComplete=false;}
   else if(picked.lapComplete)nextLegacyLapAt=new Date().toISOString();
