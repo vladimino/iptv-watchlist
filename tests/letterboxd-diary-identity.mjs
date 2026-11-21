@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
+import {installRawViewProjection} from './letterboxd-view-double.mjs';
 
 const records = new Map(), etags = new Map(); let rev = 0; const fail = {view: 0, identity: null};
 const bucket = {
@@ -38,6 +39,7 @@ const run = file => vm.runInContext(fs.readFileSync(file, 'utf8').replace(/^expo
 run('src/domain/tmdb-tv-identity.js'); run('src/sources.js');
 vm.runInContext(scoped('src/letterboxd-match.js', 'LetterboxdMatch') + '\n' + scopedReplacing('src/letterboxd-identity.js', 'LetterboxdIdentity', 'const normTitle=LetterboxdMatch.normTitle;\n') + '\n' + scoped('src/domain/letterboxd-rated-admission.js', 'LetterboxdRatedAdmission'), ctx);
 for (const file of ['src/letterboxd-facts.js', 'src/letterboxd-rated-candidates.js', process.env.DIARY_IDENTITY_SRC || 'src/letterboxd-diary-identity.js']) run(file);
+installRawViewProjection(ctx); // AIR-558
 const Facts = vm.runInContext('LetterboxdFacts', ctx), Identity = vm.runInContext('LetterboxdDiaryIdentity', ctx);
 const env = {BUCKET: bucket, TMDB_API_READ_ACCESS_TOKEN: 'fixture-token'};
 

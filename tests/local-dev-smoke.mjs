@@ -63,12 +63,9 @@ async function assertFixtureSite(currentPort){
  assert.deepEqual(programme.films.map(film=>film.title),['Movie1','Movie2','Movie3']);
  const started=await getJson(currentPort,'/api/started');
  assert.deepEqual(started.ids,['movie-1']);
- const view=await getJson(currentPort,'/api/enrichment/view');
- assert.equal(view.films['movie-1'].actualRating,4.5);
- assert.deepEqual(view.films['movie-1'].moodIds,['tense']);
- assert.equal(view.films['movie-2'].prediction.predictedRating,4);
- assert.equal(view.films['movie-2'].prediction.stale,false);
- assert.deepEqual(view.films['movie-2'].moodIds,['light']);
+ // AIR-558: the view index is D1-derived and local dev has no authoritative D1, so the view refuses (no raw fallback).
+ const view=await fetch(`http://127.0.0.1:${currentPort}/api/enrichment/view`);
+ assert.ok([502,503].includes(view.status),'enrichment view refuses locally');
 }
 async function getJson(currentPort,pathname){
  const response=await fetch(`http://127.0.0.1:${currentPort}${pathname}`);

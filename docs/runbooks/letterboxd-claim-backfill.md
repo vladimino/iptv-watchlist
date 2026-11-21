@@ -46,4 +46,4 @@ Run only after the owner's exact GO. Re-run the preflight immediately before: a 
 
 ## Rollback and recovery
 
-Code rollback does not remove written claims. A claim written by mistake is corrected through the owner-review and unlink routes; the receipt and the fixed provenance are the audit trail. Do not delete rows by hand.
+Code rollback does not remove written claims. A claim written by mistake is corrected case by case after a separate owner decision (the baseline `unlink` route is retired, [ADR 0192](../adr/0192-retire-view-index-selector-and-raw-object.md)); the receipt and the fixed provenance are the audit trail. Do not delete rows by hand.

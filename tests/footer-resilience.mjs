@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {nonFunctional} from './suite-gate.mjs';
 import {webcrypto} from 'node:crypto';
 import {d1Standin} from './d1-standin.mjs';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import {scoped,scopedEpgPriority,scopedDiscoveryAuthority} from '../scripts/bundle-scope.mjs';
 import * as PublishedEpgModule from '../src/published-epg.js';
 
@@ -37,6 +38,7 @@ function worldFor({d1=true}={}){
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);
  if(d1){vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);vm.runInContext(scopedEpgPriority(),world);vm.runInContext(scopedDiscoveryAuthority(),world);}
  for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),world);
+ installViewIndexFixture(world); // AIR-558: the view index is derived from D1 in production; the fixture object stands in for it
  return world;
 }
 const fetches=[];
@@ -142,9 +144,11 @@ const NULL_COVERAGE=['confirmedFilmsTotal','currentPredictionsTotal','windowFilm
  assert.equal(Object.hasOwn(r.body,'degraded'),false);
  // B2: a catalog or a programme that is simply absent is not an empty collection with 0 films and 100% coverage.
  for(const [label,over,name] of [['catalog absent',{'epg/discovered-films.json':undefined},'catalog_missing'],['programme absent',{'programme.json':undefined},'programme_missing']]){
-  r=await footer(r2,r2Files(over));
+  // AIR-558: the view index is always derived from D1, so it is never "absent": an index that cannot be derived is the degraded source `index` (the derivation throws).
+  const unavailable=name==='index_missing';if(unavailable)vm.runInContext("footerViewIndex=async()=>{throw Object.assign(new Error('view_index_d1_unavailable'),{code:'view_index_d1_unavailable'});}",r2);
+  r=await footer(r2,r2Files(over));if(unavailable)installViewIndexFixture(r2);
   assert.equal(r.status,200,label);
-  assert.ok(r.body.degraded.includes(name),label+': named in degraded: '+JSON.stringify(r.body.degraded));
+  assert.ok(r.body.degraded.includes(unavailable?'index':name),label+': named in degraded: '+JSON.stringify(r.body.degraded));
   for(const key of NULL_COVERAGE)assert.equal(r.body.coverage[key],null,label+': coverage.'+key+' is unknown, not 0 or 100');
   assert.equal(r.body.collection.state,'unknown',label+': the collection is unknown');
   assert.equal(r.body.recommendations.newUnseen.state,'unknown',label+': the new-film count is unknown');
@@ -161,9 +165,11 @@ const NULL_COVERAGE=['confirmedFilmsTotal','currentPredictionsTotal','windowFilm
  }
  // An absent view index or taste profile is not a measured "0 current predictions" either.
  for(const [label,over,name] of [['view index absent',{'enrichment/view-index.json':undefined},'index_missing'],['taste profile absent',{'enrichment/profile/current.json':undefined},'profile_missing']]){
-  r=await footer(r2,r2Files(over));
+  // AIR-558: the view index is always derived from D1, so it is never "absent": an index that cannot be derived is the degraded source `index` (the derivation throws).
+  const unavailable=name==='index_missing';if(unavailable)vm.runInContext("footerViewIndex=async()=>{throw Object.assign(new Error('view_index_d1_unavailable'),{code:'view_index_d1_unavailable'});}",r2);
+  r=await footer(r2,r2Files(over));if(unavailable)installViewIndexFixture(r2);
   assert.equal(r.status,200,label);
-  assert.ok(r.body.degraded.includes(name),label+': named in degraded: '+JSON.stringify(r.body.degraded));
+  assert.ok(r.body.degraded.includes(unavailable?'index':name),label+': named in degraded: '+JSON.stringify(r.body.degraded));
   for(const key of NULL_COVERAGE)assert.equal(r.body.coverage[key],null,label+': coverage.'+key+' is unknown, not 0 of N');
   // The collection counts facts, not predictions: it needs the view index but not the taste profile.
   assert.equal(r.body.collection.state,name==='index_missing'?'unknown':'ok',label+': the collection follows the view index');

@@ -68,6 +68,8 @@ export async function runParity(){
   const items=first.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
   await w.api('batch/submit',{runId:first.data.runId,epoch:first.data.lease.epoch,items});
   await w.api('complete',{runId:first.data.runId,reason:'manifest_spent'});
+  // AIR-558: a submit no longer writes the raw view index; the fixture seam stands in for the D1 derivation, so seed it with what the submit stored.
+  w.records.set('enrichment/view-index.json',Object.fromEntries(sql(w.file,'SELECT film_id, taste_profile_version AS tv, taste_profile_hash AS th, fingerprint_hash AS fh, fingerprint_schema_version AS fs, prediction_prompt_version AS pp FROM prediction_pointer').map(r=>[r.film_id,{fingerprintHash:r.fh,prediction:{...w.prediction,tasteProfileVersion:r.tv,tasteProfileHash:r.th,fingerprintHash:r.fh,fingerprintSchemaVersion:r.fs,predictionPromptVersion:r.pp}}])));
   await setProfile(w,2);await reconcile(w);
   await scenario('prediction_only',w,()=>batch(w,{manifestSize:20}));}
  return {results,metrics};

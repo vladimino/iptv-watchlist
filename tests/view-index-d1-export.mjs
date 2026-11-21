@@ -137,9 +137,8 @@ const fixedNow=()=>new Date('2026-11-20T15:00:00.000Z');
  write('links.json',{});
  write('view-index.json',{Q7a1:{actualRating:1},stale_raw_only:{actualRating:5}});
  const file=path.join(root,'view-index.d1.json');fs.writeFileSync(file,JSON.stringify(doc)+'\n');
- const raw=await loadCatalogDir(dir);
- assert.deepEqual(raw.missing,['metadata.json','watchlist.json','programme.json'],'without the option the raw object is the input, as before');
- assert.deepEqual(Object.keys(raw.objects.viewIndex),['Q7a1','stale_raw_only']);
+ // AIR-558: without the option the call is refused (ReconcileError, exit 2): the raw object is never the input any more.
+ await assert.rejects(loadCatalogDir(dir),error=>error instanceof ReconcileError&&error.exitCode===2&&/--view-index-d1/.test(error.message));
  const loaded=await loadCatalogDir(dir,{viewIndexFile:file});
  assert.deepEqual(loaded.objects.viewIndex,doc.index,'the D1 export replaces the raw object entirely: nothing is merged');
  assert.equal(Object.hasOwn(loaded.objects.viewIndex,'stale_raw_only'),false);

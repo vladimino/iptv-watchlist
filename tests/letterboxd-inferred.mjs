@@ -1,4 +1,5 @@
 // AIR-388 (ADR 0104): the inferred identity policy of a personal Letterboxd export. Invented films only; no network, no R2, no D1.
+import {installRawViewProjection} from './letterboxd-view-double.mjs';
 import assert from 'node:assert/strict';
 import {createHash,webcrypto} from 'node:crypto';
 import fs from 'node:fs';
@@ -9,11 +10,12 @@ import {spawnSync} from 'node:child_process';
 import vm from 'node:vm';
 import {deflateRawSync} from 'node:zlib';
 import {crc32} from '../src/letterboxd-zip.js';
+import {writeD1Input} from './view-index-d1-input.mjs';// AIR-558
 import {INFERRED_METHOD,INFERRED_STATUS,METHODS,REVIEW_REASONS,STATUSES,buildIndex,matchExport} from '../src/letterboxd-match.js';
 import {archiveAdmissionsFromDocument} from '../src/enrichment-projection.js';
 import {EXPORT_FILES} from '../src/letterboxd-export.js';
 import {exportDigest} from '../scripts/letterboxd-reconcile.mjs';
-import {plan,planItem,remote,unlinkFilm} from '../scripts/letterboxd-baseline-import.mjs';
+import {plan,planItem,remote} from '../scripts/letterboxd-baseline-import.mjs';
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const by=(rows,code)=>rows.find(row=>row.code===code);
@@ -129,7 +131,7 @@ function bucket(){
   async put(key,value,options={}){const c=options.onlyIf||{};if(c.etagDoesNotMatch==='*'&&records.has(key)||c.etagMatches&&c.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));puts++;return {etag:etags.get(key)};}};
 }
 const ctx=vm.createContext({crypto:webcrypto,TextEncoder,console,Date,JSON,Map,Set,Response,Request,URL});
-const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);
+const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);installRawViewProjection(ctx); // AIR-558
 const workerFetch=env=>async(url,init)=>{const request=new Request(url,init),response=await F.handleBaselineRequest(request,env,new URL(url).pathname);return {ok:response.ok,status:response.status,json:()=>response.json()};};
 const post=(env,kind,body)=>F.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),env,'/api/letterboxd/baseline/'+kind);
 
@@ -148,13 +150,14 @@ try{
  for(const [key,value] of Object.entries(values)){const bytes=Buffer.from(JSON.stringify(value)),file='objects/'+sha256(Buffer.from(key))+'.bin';await writeFile(path.join(snapshotDir,file),bytes);entries.push({key,file,size:bytes.length,sha256:sha256(bytes)});}
  await writeFile(path.join(snapshotDir,'manifest.json'),JSON.stringify({schemaVersion:1,source:{kind:'cloudflare-r2-s3',bucket:'iptv',readOnly:true},status:'consistent_fenced',noGoReasons:[],fence:{ok:true,keys:[]},changes:[],baselineIdentity:{programmeRunId:'run-test'},objects:entries}));
  const now=Date.parse('2026-11-09T00:00:00Z');
+ const d1Main=await writeD1Input(path.join(scratch,'d1-input'),{});// AIR-558: the snapshot holds no raw view-index; the D1 input is the empty index
 
  // The default plan is the old plan: verified only, no review counts, no inferred item.
- const plain=await plan({zip:zipPath,snapshot:snapshotDir,output:path.join(scratch,'plain'),now});
+ const plain=await plan({zip:zipPath,viewIndexFile:d1Main,snapshot:snapshotDir,output:path.join(scratch,'plain'),now});
  assert.equal(plain.identityPolicy,'verified_only');assert.equal(plain.inferred,0);assert.deepEqual(plain.review,{});assert.equal(plain.planned.films,1);
  assert.equal(JSON.parse(fs.readFileSync(path.join(scratch,'plain','origin.json'),'utf8')).identityPolicy,'verified_only');
  // With the switch: the inferred film joins, the drift film is only counted for review, nothing leaks into the report.
- const out=path.join(scratch,'inferred'),report=await plan({zip:zipPath,snapshot:snapshotDir,output:out,includeInferred:true,now});
+ const out=path.join(scratch,'inferred'),report=await plan({zip:zipPath,viewIndexFile:d1Main,snapshot:snapshotDir,output:out,includeInferred:true,now});
  assert.equal(report.identityPolicy,'inferred_included');assert.equal(report.inferred,1);assert.equal(report.planned.films,2);assert.deepEqual(report.review,{year_drift:1});
  assert.equal(report.matchStatus.inferred,1);assert.equal(report.matchStatus.unmatched,1);
  const text=fs.readFileSync(path.join(out,'report.json'),'utf8');for(const secret of ['Invented','Aa1','Aa3','Zz9','Drift'])assert.ok(!text.includes(secret),'report leaks '+secret);
@@ -196,64 +199,24 @@ try{
  const stored=[...b2.records.values()].find(value=>value?.links?.letterboxd==='Qq1');
  assert.equal(stored.identity,undefined);assert.equal(stored.rating.value,3);
 
- // ---- Review blocker 1: a wrong inferred link can be corrected per film, and a rollback no longer leaves it behind ----
+ // ---- AIR-558 (ADR 0192): the per-film unlink and the chunk rollback are retired; the forward import keeps the alias guard ----
  const linksOf=bk=>bk.records.get('letterboxd/facts/links.json')||{};
  const factRecord=(bk,factKey)=>bk.records.get(F.recordKey(factKey));
- // The CLI corrects one film of the committed plan and leaves the rest of its chunk alone.
  const rollbackEnv={BUCKET:bucket()};
  const commitAll=await remote({mode:'commit',zip:zipPath,output:out,endpoint:'https://site.example',fetchImpl:workerFetch(rollbackEnv),env:{},now});
  assert.equal(commitAll.failed,null);
  assert.equal(linksOf(rollbackEnv.BUCKET)['letterboxd:Aa1'],'tmdb-101');assert.equal(linksOf(rollbackEnv.BUCKET)['letterboxd:Vv1']!==undefined,true);
- await assert.rejects(unlinkFilm({zip:zipPath,output:out,endpoint:'https://site.example',lid:'Vv1',fetchImpl:workerFetch(rollbackEnv),env:{},now}),/not an inferred item/);
- await assert.rejects(unlinkFilm({zip:zipPath,output:out,endpoint:'https://site.example',lid:'Nope1',fetchImpl:workerFetch(rollbackEnv),env:{},now}),/not an inferred item/);
- const one=await unlinkFilm({zip:zipPath,output:out,endpoint:'https://site.example',lid:'Aa1',fetchImpl:workerFetch(rollbackEnv),env:{},now});
- assert.equal(one.failed,null);assert.equal(one.unlinked,true);assert.equal(one.facts.restored,2);
- assert.equal(linksOf(rollbackEnv.BUCKET)['letterboxd:Aa1'],undefined,'the alias is gone');
- assert.equal(linksOf(rollbackEnv.BUCKET)['letterboxd:Vv1']!==undefined,true,'a verified link is untouched');
- const afterOne=factRecord(rollbackEnv.BUCKET,'tmdb-101');
- assert.equal(afterOne.identity,undefined);assert.equal(afterOne.links.letterboxd,null);assert.equal(afterOne.links.tmdb,'101');assert.equal(afterOne.rating,undefined,'its rating is reversed');
- assert.ok(factRecord(rollbackEnv.BUCKET,Object.values(linksOf(rollbackEnv.BUCKET))[0]),'other records stay');
- // A repeat changes nothing; the same code can now be linked to the corrected movie without an alias conflict.
- const putsBeforeRepeat=rollbackEnv.BUCKET.puts;
- const repeat=await unlinkFilm({zip:zipPath,output:out,endpoint:'https://site.example',lid:'Aa1',fetchImpl:workerFetch(rollbackEnv),env:{},now});
- assert.equal(repeat.failed,null);assert.equal(repeat.unlinked,false);
+ // Both retired routes answer the ordinary 404 and write nothing; the inferred link and its facts stay.
+ const putsRetired=rollbackEnv.BUCKET.puts;
+ for(const action of ['rollback','unlink']){const retired=await post(rollbackEnv,action,{origin,chunk:0,lid:'Aa1'});assert.equal(retired.status,404,action);assert.equal((await retired.json()).error,'Not found');}
+ assert.equal(rollbackEnv.BUCKET.puts,putsRetired);assert.equal(linksOf(rollbackEnv.BUCKET)['letterboxd:Aa1'],'tmdb-101');assert.equal(factRecord(rollbackEnv.BUCKET,'tmdb-101').identity.kind,'inferred');
+ await assert.rejects(remote({mode:'rollback',zip:zipPath,output:out,endpoint:'https://site.example',fetchImpl:workerFetch(rollbackEnv),env:{},now}),/Unknown mode/);
  const fixedOrigin={...origin,archiveSha256:'c'.repeat(64)};
- const fixed=await post(rollbackEnv,'commit',{origin:fixedOrigin,chunk:0,items:[{lid:'Aa1',tmdb:'202',facts:{watched:true},effectiveOn:{},identity:'inferred'}]});
- assert.equal(fixed.status,200);const fixedBody=await fixed.json();assert.equal(fixedBody.conflicts,0,'no alias conflict after the correction');
- assert.equal(linksOf(rollbackEnv.BUCKET)['letterboxd:Aa1'],'tmdb-202');
- assert.deepEqual(factRecord(rollbackEnv.BUCKET,'tmdb-202').identity,{kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:'c'.repeat(64)});
  // Without the correction the same re-import is an alias conflict: counted, never written.
  const stuck={BUCKET:bucket()};
  await post(stuck,'commit',{origin,chunk:0,items:[{lid:'Aa1',tmdb:'101',facts:{watched:true},effectiveOn:{},identity:'inferred'}]});
  const blocked=await (await post(stuck,'commit',{origin:fixedOrigin,chunk:0,items:[{lid:'Aa1',tmdb:'202',facts:{watched:true},effectiveOn:{},identity:'inferred'}]})).json();
  assert.equal(blocked.conflicts,1);
-
- // A chunk rollback now undoes the inferred links of that chunk too and keeps a verified link.
- const whole={BUCKET:bucket()};
- assert.equal((await remote({mode:'commit',zip:zipPath,output:out,endpoint:'https://site.example',fetchImpl:workerFetch(whole),env:{},now})).failed,null);
- const rolled=await remote({mode:'rollback',zip:zipPath,output:out,endpoint:'https://site.example',fetchImpl:workerFetch(whole),env:{},now});
- assert.equal(rolled.failed,null);
- assert.equal(linksOf(whole.BUCKET)['letterboxd:Aa1'],undefined);assert.equal(linksOf(whole.BUCKET)['letterboxd:Vv1']!==undefined,true);
- assert.equal(factRecord(whole.BUCKET,'tmdb-101').identity,undefined);assert.equal(factRecord(whole.BUCKET,'tmdb-101').links.letterboxd,null);
- const replayRollback=await remote({mode:'rollback',zip:zipPath,output:out,endpoint:'https://site.example',fetchImpl:workerFetch(whole),env:{},now});
- assert.equal(replayRollback.failed,null);
-
- // A later observation is kept: the unlink reverses only what is still this import's, and still clears the inferred link.
- const later={BUCKET:bucket()},early={...origin,archiveSha256:'d'.repeat(64)},newer={origin:{archiveSha256:'e'.repeat(64),generatedAt:'2026-11-08T14:30:00.000Z',generatedAtSource:'archive_name'},chunk:0,items:[{lid:'Aa1',tmdb:'101',facts:{watched:true,rating:5},effectiveOn:{},identity:'inferred'}]};
- await post(later,'commit',{origin:early,chunk:0,items:[{lid:'Aa1',tmdb:'101',facts:{watched:true,rating:3},effectiveOn:{},identity:'inferred'},{lid:'Bb2',tmdb:'102',facts:{watched:true},effectiveOn:{},identity:'inferred'}]});
- assert.equal((await post(later,'commit',newer)).status,200);
- assert.equal(factRecord(later.BUCKET,'tmdb-101').rating.value,5);
- const unlink=body=>post(later,'unlink',body);
- const kept=await (await unlink({origin:early,chunk:0,lid:'Aa1'})).json();
- assert.equal(kept.unlinked,true);assert.ok(kept.facts.superseded>=1,'the newer rating is superseded, not reversed');
- assert.equal(factRecord(later.BUCKET,'tmdb-101').rating.value,5);assert.equal(factRecord(later.BUCKET,'tmdb-101').identity,undefined);
- assert.equal(linksOf(later.BUCKET)['letterboxd:Bb2'],'tmdb-102','the other film of the chunk is untouched');
- assert.equal(factRecord(later.BUCKET,'tmdb-102').identity.kind,'inferred');
- // Refusals: a film that is not an inferred entry of that chunk, and a chunk with no receipt.
- assert.equal((await unlink({origin:early,chunk:0,lid:'Zz1'})).status,409);
- assert.equal((await unlink({origin:early,chunk:7,lid:'Aa1'})).status,409);
- assert.equal((await unlink({origin:early,chunk:0,lid:'bad lid!'})).status,400);
- assert.equal((await post(later,'unlink',{origin:early,chunk:0})).status,400);
 
  // ---- B2 (ADR 0105): a plan from a live catalog directory plus TMDB search results; Film admission through the receipt ----
  const catDir=path.join(scratch,'catalog-live');await mkdir(catDir);
@@ -271,7 +234,7 @@ try{
  const resultsDoc=(results,binding=bind)=>JSON.stringify({schemaVersion:1,...(binding?{binding}:{}),results});
  await writeFile(resultsPath,resultsDoc({Nw1:sr(801,'Brand New A',2015),Nw2:sr(101,'Foreign Title B',2001),Nw3:sr(802,'Dup Seen C',2016),Nw4:sr(802,'Dup Seen C',2016),Nw5:sr(108,'Same As Accepted E',2015),Nw6:{decision:'review',reason:'no_match'},Nw7:{decision:'blocked',reason:'http_429'},Nw8:{decision:'error',reason:'http_503'}}));
  const outB2=path.join(scratch,'planB2'),now2=Date.parse('2026-11-09T00:00:00Z');
- const repB2=await plan({zip:zipB2,catalogDir:catDir,tmdbResults:resultsPath,includeInferred:true,output:outB2,now:now2});
+ const repB2=await plan({zip:zipB2,viewIndexFile:d1Main,catalogDir:catDir,tmdbResults:resultsPath,includeInferred:true,output:outB2,now:now2});
  assert.equal(repB2.identityPolicy,'inferred_included');assert.equal(repB2.filmsToCreate,1,'only the movie the catalog does not hold is created');
  assert.equal(repB2.inferred,2);assert.deepEqual(repB2.search,{decided:2,review:{tmdb_duplicate_in_export:2,tmdb_already_accepted:1,no_match:1},pending:1,errors:1,blocked:1});
  assert.equal(repB2.planned.films,3);   // Vv1 verified + the two search-decided films
@@ -283,11 +246,11 @@ try{
  const originB2=JSON.parse(fs.readFileSync(path.join(outB2,'origin.json'),'utf8'));
  assert.equal(originB2.tmdbResultsSha256,sha256(fs.readFileSync(resultsPath,'utf8')));assert.equal(originB2.snapshot.status,'live_catalog_read');assert.equal(originB2.snapshot.baselineIdentity.catalogFilms,Object.keys(catalog).length);
  // The input contract: exactly one identity source, results only for an inferred plan, and nothing the plan does not understand
- await assert.rejects(plan({zip:zipB2,snapshot:snapshotDir,catalogDir:catDir,output:path.join(scratch,'x1'),now:now2}),/exactly one/);
- await assert.rejects(plan({zip:zipB2,output:path.join(scratch,'x2'),now:now2}),/exactly one/);
- await assert.rejects(plan({zip:zipB2,catalogDir:catDir,tmdbResults:resultsPath,output:path.join(scratch,'x3'),now:now2}),/--include-inferred/);
+ await assert.rejects(plan({zip:zipB2,viewIndexFile:d1Main,snapshot:snapshotDir,catalogDir:catDir,output:path.join(scratch,'x1'),now:now2}),/exactly one/);
+ await assert.rejects(plan({zip:zipB2,viewIndexFile:d1Main,output:path.join(scratch,'x2'),now:now2}),/exactly one/);
+ await assert.rejects(plan({zip:zipB2,viewIndexFile:d1Main,catalogDir:catDir,tmdbResults:resultsPath,output:path.join(scratch,'x3'),now:now2}),/--include-inferred/);
 const strange=path.join(scratch,'strange.json');
- const refuse=async(doc,pattern,name)=>{await writeFile(strange,doc);await assert.rejects(plan({zip:zipB2,catalogDir:catDir,tmdbResults:strange,includeInferred:true,output:path.join(scratch,'x-'+name),now:now2}),pattern,name);};
+ const refuse=async(doc,pattern,name)=>{await writeFile(strange,doc);await assert.rejects(plan({zip:zipB2,viewIndexFile:d1Main,catalogDir:catDir,tmdbResults:strange,includeInferred:true,output:path.join(scratch,'x-'+name),now:now2}),pattern,name);};
  await refuse(resultsDoc({Nw1:{decision:'inferred_new',tmdb:'abc',title:'Brand New A',year:2015,basis:'tmdb_search_original_title_exact_year_unique'}}),/does not understand/,'badid');
  await refuse(JSON.stringify({schemaVersion:2,results:{}}),/unknown schema/,'schema');
  // Review blocker 1: a well-formed numeric TMDB id whose title or year is not the export film's is refused by the planner itself
@@ -305,9 +268,9 @@ const strange=path.join(scratch,'strange.json');
  await refuse(resultsDoc({Nw6:{decision:'review',reason:'made_up'}}),/does not understand/,'reason');
  await refuse(resultsDoc({Nw6:{decision:'surprise'}}),/does not understand/,'decision');
  // results need a catalog directory, not a snapshot
- await assert.rejects(plan({zip:zipB2,snapshot:snapshotDir,tmdbResults:resultsPath,includeInferred:true,output:path.join(scratch,'x-snap'),now:now2}),/--catalog-dir/);
+ await assert.rejects(plan({zip:zipB2,viewIndexFile:d1Main,snapshot:snapshotDir,tmdbResults:resultsPath,includeInferred:true,output:path.join(scratch,'x-snap'),now:now2}),/--catalog-dir/);
 
-  // The route: admission before the facts, the receipt entry, the projector's reading, replay, conflict, unlink keeps the Film
+  // The route: admission before the facts, the receipt entry, the projector's reading, replay, conflict
  const shaB2=sha256(fs.readFileSync(zipB2)),originBody={archiveSha256:shaB2,generatedAt:'2026-11-08T15:00:00.000Z',generatedAtSource:'archive_name'};
  const adm={BUCKET:bucket()},admKey='letterboxd/admissions/verified-films.json';
  const nw1=itemsB2.find(item=>item.lid==='Nw1'),nw2=itemsB2.find(item=>item.lid==='Nw2');
@@ -333,9 +296,7 @@ const strange=path.join(scratch,'strange.json');
  // a code already bound to another movie is a conflict: counted, no admission and no facts
  const clash=await (await post(adm,'commit',{origin:{...originBody,archiveSha256:'9'.repeat(64)},chunk:0,items:[{lid:'Nw1',tmdb:'803',facts:{watched:true},effectiveOn:{},identity:'inferred',admit:{title:'Other Movie',year:2015}}]})).json();
  assert.equal(clash.conflicts,1);assert.ok(!('tmdb_803' in adm.BUCKET.records.get(admKey).films));assert.equal(linksOf(adm.BUCKET)['letterboxd:Nw1'],'tmdb-801');
- // the per-film correction removes the link and the facts; the admitted Film stays (one Film, never deleted by an unlink)
- const fix=await unlinkFilm({zip:zipB2,output:outB2,endpoint:'https://site.example',lid:'Nw1',fetchImpl:workerFetch(adm),env:{},now:now2});
- assert.equal(fix.failed,null);assert.equal(fix.unlinked,true);assert.equal(linksOf(adm.BUCKET)['letterboxd:Nw1'],undefined);assert.ok(adm.BUCKET.records.get(admKey).films.tmdb_801,'the admission stays');
+ assert.ok(adm.BUCKET.records.get(admKey).films.tmdb_801,'the admission stays');
 
  // Review blocker 2: a code that already aliases another movie admits nothing: the link conflict is judged BEFORE the admission
  {

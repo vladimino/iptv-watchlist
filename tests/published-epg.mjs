@@ -26,7 +26,8 @@ assert.doesNotMatch(fs.readFileSync('src/discovery.js','utf8'),/env\.DB\b/);
 assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/published-epg\.js','PublishedEpg'\)/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/PublishedEpg\.publishGeneration\(env,/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/PredictionD1\.routeRead\(env,key,options\)/);
-assert.match(fs.readFileSync('src/worker.js','utf8'),/PredictionD1\.overlayIndex\(env,value,canonicalMoodFacet\)/);
+// AIR-558: the raw view-index overlay is gone; the index is derived from D1 rows.
+assert.match(fs.readFileSync('src/worker.js','utf8'),/PredictionD1\.derivedIndex\(env,moodFacet\)/);
 assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/prediction-d1\.js','PredictionD1'\)/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/published_epg_unavailable/);
 const worker=fs.readFileSync('src/worker.js','utf8');

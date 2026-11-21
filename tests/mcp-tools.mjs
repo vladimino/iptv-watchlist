@@ -1,3 +1,4 @@
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -32,6 +33,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);vm.runInContext(scoped('src/metadata-cache.js','MetadataCache'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/mcp.js','src/continuation.js','src/worker.js']){
  vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 }
+installViewIndexFixture(context);
 const encode=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
 async function accessJwt(){
  const now=Math.floor(Date.now()/1000);
@@ -238,6 +240,8 @@ assert.equal((await tool(syncEnv,'epg_sync_start',{},{execution})).body.result.s
 const metadata=await tool(syncEnv,'epg_sync_step',{runId:syncRunId},{execution});
 assert.equal(metadata.body.result.isError,undefined,JSON.stringify(metadata.body));
 assert.equal(metadata.body.result.structuredContent.stage,'epg');
+// AIR-558: this world has no D1 ratings domain, and a Letterboxd projection into the view index now refuses unless RatingsD1 owns it; stand in a domain that owns nothing else and accepts the projection.
+vm.runInContext("globalThis.RatingsD1={ratingsMutableKey:()=>false,ratingsReady:async()=>false,readOwned:async()=>({owned:false}),casOwned:async()=>({owned:false}),projectView:async()=>({owned:true,changed:0}),putOwned:async()=>({owned:false}),routeRead:async()=>({handled:false}),ratingsGate:async()=>({ok:true}),readRatingsAuthority:async()=>({ready:false,mode:'r2'})}",context);
 const committed=await tool(syncEnv,'epg_sync_step',{runId:syncRunId},{execution});
 assert.equal(committed.body.result.isError,undefined,JSON.stringify(committed.body));
 assert.equal(committed.body.result.structuredContent.stage,'complete');
@@ -269,6 +273,7 @@ assert.equal(follow.body.result.structuredContent.discovery.reason,'delegated');
 assert.equal(follow.body.result.structuredContent.delegated,true);
 assert.equal(fetches.filter(href=>href.includes('letterboxd.com')).length,letterboxdCalls,'discovery does not retry Letterboxd');
 assert.equal(background.length,0);
+vm.runInContext('delete globalThis.RatingsD1',context);
 
 const predictionFields=Object.fromEntries(Object.entries(vm.runInContext('EXECUTION',context)).map(([key,values])=>[key,values.includes('unknown')?'unknown':values[0]]));
 const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['investigation'],execution:predictionFields,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']};
