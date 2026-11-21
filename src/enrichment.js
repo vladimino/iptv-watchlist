@@ -891,20 +891,27 @@ function safePredictionReason(value){
 }
 const RUNNER_LEASE_KEY=ENRICHMENT_KEY+'runner-lease.json';
 const RUNNER_LEASE_TTL=15*60000;
+// ADR 0188: a keyed real start claims the runner lease before its heavy preflights. The claim is short and renewed at every stage boundary; it becomes the run's lease (same epoch) before the first persist side effect.
+const START_CLAIM_TTL_MS=180000;
+// ADR 0188: how long a same-key repeat waits for the owner request's stored start answer before it answers `start_pending`. Unproven by the traces; natural runs are the proof.
+const JOIN_WAIT_MS=10000;
+const INVOCATION_KEY_PATTERN=/^[A-Za-z0-9._:-]{16,128}$/;
+// The correlation fields of a lease: they survive every renewal, heartbeat, gate write and conversion, and only a release drops them (ADR 0188 section 3).
+const leaseCorrelation=old=>{const out={};if(old?.phase)out.phase=old.phase;if(old?.keyHash)out.keyHash=old.keyHash;if(old?.argsHash)out.argsHash=old.argsHash;if(old?.clientSubmitAt)out.clientSubmitAt=old.clientSubmitAt;return out;};
 // The lease value carries `epoch`, the ownership epoch of batch runner v2 (ADR 0122): set once when a run acquires or takes over the lease and kept by every
 // renewal, heartbeat, checkpoint and release, so the next acquire increments it. It is never the CAS revision (the D1 row token or the object etag), which
 // changes on every write and stays inside the Worker. A renewal that loses the compare-and-swap to another write of the same lease is read again and retried a
 // bounded number of times; it becomes `lease_lost` only when the lease read afterwards names another holder, or has expired.
 const RUNNER_LEASE_ATTEMPTS=3;
 const previousEpochOf=lease=>Number.isInteger(lease?.epoch)&&lease.epoch>=0?lease.epoch:null;
-async function runnerLease(env,runId,operation='renew'){
+async function runnerLease(env,runId,operation='renew',claim=null){
  let epochSeen=null;
  for(let attempt=1;;attempt++){
   const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,RUNNER_LEASE_KEY),object=head?head.object:await env.BUCKET.get(RUNNER_LEASE_KEY),old=head?head.value:(object?await object.json():null),now=Date.now();
   if(operation==='acquire'&&old?.expiresAt>now)return {status:'already_running',runId:old.runId,expiresAt:old.expiresAt};
   if(operation!=='acquire'&&(!old||old.runId!==runId||old.expiresAt<=now))return {status:'lease_lost',runId:old?.runId||null};
   const previousEpoch=previousEpochOf(old),epoch=operation==='acquire'?(previousEpoch??0)+1:previousEpoch;epochSeen=previousEpoch;
-  const value={owner:runId,runId,heartbeatAt:new Date(now).toISOString(),expiresAt:operation==='release'?0:now+RUNNER_LEASE_TTL,...(epoch!==null?{epoch}:{}),...(operation!=='acquire'&&old?.submitGate?{submitGate:old.submitGate}:{})};
+  const value={owner:runId,runId,heartbeatAt:new Date(now).toISOString(),expiresAt:operation==='release'?0:now+(operation==='acquire'&&claim?START_CLAIM_TTL_MS:RUNNER_LEASE_TTL),...(epoch!==null?{epoch}:{}),...(operation!=='acquire'&&old?.submitGate?{submitGate:old.submitGate}:{}),...(operation==='acquire'&&claim?{phase:'claim',keyHash:claim.keyHash,argsHash:claim.argsHash}:operation==='renew'?leaseCorrelation(old):{})};
   const saved=head?await PredictionD1.writeLease(env,head,value):await env.BUCKET.put(RUNNER_LEASE_KEY,JSON.stringify(value),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
   if(saved===null){
    if(operation!=='acquire'&&attempt<RUNNER_LEASE_ATTEMPTS)continue;
@@ -1190,7 +1197,7 @@ function logPredictionFailure(boundary,error,requestId,runId){
 // parallel are not summed as if sequential: `busyMs` is the union of their intervals, `overlapMs` what the sum exceeds it by, and
 // `unattributedMs` the rest of the wall time (compute, scheduling, the awaits between calls). A failure of any of this is swallowed.
 const STEP_TIMER=Symbol('predictionStepTimer');
-const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','leaseRefusedAtAcquire','liveLeaseAgeMs','drainedCommitted','drainedDropped','priorityLagAccepted','priorityRebased'];
+const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','leaseRefusedAtAcquire','liveLeaseAgeMs','drainedCommitted','drainedDropped','priorityLagAccepted','priorityRebased','keyed','joined','startPending','keyArgsMismatch','claimRenewals','claimLost'];
 const STEP_STAGES=['preflight','turned_away','idle','settle_previous','catalog_gate','queue_refresh','preflight_refreshed','runner_lease','preflight_lease','persist'],STEP_STAGE_CAP=16;
 const STEP_OPS_CAP=4000,STEP_CLASS_CAP=40;
 const STEP_TABLE=/\b(?:from|into|update|join)\s+["`]?([a-z_][a-z0-9_]{0,59})["`]?/i;
@@ -1428,9 +1435,11 @@ async function settleRunRetries(env,run,trigger){
  try{if(run.mode==='queued'&&!await mutatePredictionQueue(env,queue=>recordRunRetries(queue,run)?queue:null,trigger))return false;}catch{return false;}
  delete run.retryHeal;return true;
 }
-async function settlePreviousRun(env){
- const lease=await loadJSON(env,RUNNER_LEASE_KEY);if(!lease?.runId||lease.expiresAt>Date.now())return null;
- const run=await checkedRun(env,lease.runId);if(run?.retryHeal!=='pending')return null;
+async function settlePreviousRun(env,heldRunId=null){
+ // A keyed start already holds the lease as a claim, so the previous holder is the one its acquire recovered (ADR 0188), not the lease record.
+ let previousId=heldRunId;
+ if(!previousId){const lease=await loadJSON(env,RUNNER_LEASE_KEY);if(!lease?.runId||lease.expiresAt>Date.now())return null;previousId=lease.runId;}
+ const run=await checkedRun(env,previousId);if(run?.retryHeal!=='pending')return null;
  if(await settleRunRetries(env,run,'start_retries')){await saveJSON(env,runKey(run.runId),run);return null;}
  return json({status:'blocked',reason:'retry_heal_pending',code:'prediction_retry_heal_pending',pendingRunId:run.runId,...scheduledRunFields()},503);
 }
@@ -2544,6 +2553,7 @@ function validateBatchStartBody(body){
  if(body.trigger!==undefined&&body.trigger!=='scheduled'&&body.trigger!=='manual')return json({error:'Invalid trigger'},400);
  if(body.capacity!==undefined&&(!isObject(body.capacity)||body.capacity.remainingPercent!==undefined&&(!Number.isFinite(body.capacity.remainingPercent)||body.capacity.remainingPercent<0||body.capacity.remainingPercent>100)))return json({error:'Invalid capacity'},400);
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
+ if(body.invocationKey!==undefined&&(typeof body.invocationKey!=='string'||!INVOCATION_KEY_PATTERN.test(body.invocationKey)))return json({error:'Invalid invocationKey'},400);
  const size=resolveManifestSize(body);if(size.error)return size.error;
  if(body.pin!==undefined){
   if(body.dryRun!==true)return json({error:'pin is accepted only with dryRun'},400);
@@ -2670,7 +2680,7 @@ async function batchRefreshQueue(env,body,pre,tally=null){
  return {queue,settled};
 }
 // A live runner lease turns a real start away; it is recorded as a start attempt and nothing else is written.
-async function batchTurnedAway(env,body,tally=null,requestId=null){
+async function batchTurnedAway(env,body,tally=null,requestId=null,extra={}){
  const live=await loadJSON(env,RUNNER_LEASE_KEY);
  if(!(live?.runId&&live.expiresAt>Date.now()))return null;
  if(tally){tally.leaseRefused=1;tally.liveLeaseAgeMs=Math.max(0,Math.round(Date.now()-(live.expiresAt-RUNNER_LEASE_TTL)));}
@@ -2678,7 +2688,7 @@ async function batchTurnedAway(env,body,tally=null,requestId=null){
  turned.diagnosticStartedAt=turned.createdAt;turned.completedAt=turned.createdAt;
  await diagnosticCheckpoint(env,turned,{startResult:'already_running'});
  await recordSkippedStart(env,{requestId,body,holder:live});
- return json({status:'already_running',runId:live.runId,expiresAt:live.expiresAt});
+ return json({status:'already_running',runId:live.runId,expiresAt:live.expiresAt,...extra});
 }
 // Nothing eligible, or no capacity: the ordinary idle outcome of a start (`noop`, or `blocked` for `quota` and `retry_backoff`). No lease is taken and no run exists, so it is not passed
 // through the stop recorder, which would manufacture a stopped run, a stop Event and a `latest-run` for it. The attempt is recorded and the queue's `lastBatch` is kept, as a v5 start does.
@@ -2751,10 +2761,56 @@ async function batchStartRoute(env,body,requestId){
  try{return await batchStartWork(env,body,requestId,tally);}
  finally{noteStep(env,()=>tally);}
 }
+// ADR 0188. A keyed real start (invocationKey present, not a dry run) claims the runner lease before its heavy preflights and joins its own live run when the same invocation repeats the
+// start. A start without a key, and every dry run, takes the unchanged path. The key is reduced to a hash here and never travels further: no log, row or diagnostic carries it.
+const startArgsOf=body=>({scope:body.scope,mode:body.mode||'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',manifestSize:resolveManifestSize(body).size,capacity:body.capacity||null});
+const claimRenewed=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>old.phase==='claim'?{value:{...old,heartbeatAt:new Date(now).toISOString(),expiresAt:now+START_CLAIM_TTL_MS}}:{refuse:{status:'owned'}});
+const claimConverted=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>old.phase==='claim'?{value:{...old,phase:'run',heartbeatAt:new Date(now).toISOString(),expiresAt:now+RUNNER_LEASE_TTL}}:{refuse:{status:'owned'}});
+const startOwnedCheck=async(env,runId,epoch)=>{const held=await runnerLeaseEdit(env,runId,epoch,()=>({refuse:{status:'held'}}));return held.status==='held'||held.status==='busy';};
+// A same-key repeat of the live run: the stored start answer if it exists, else a bounded wait and then `start_pending`. It writes nothing and never extends a TTL.
+async function batchJoin(env,live,tally){
+ tally.joined=1;
+ const until=Date.now()+JOIN_WAIT_MS,key=ENRICHMENT_KEY+'batch-manifest/'+live.runId+'.json';
+ for(;;){
+  const stored=await loadJSON(env,key);
+  if(usableBatchManifest(stored))return json(stored);
+  if(Date.now()>=until)break;
+  await new Promise(resolve=>setTimeout(resolve,1000));
+  const current=await loadJSON(env,RUNNER_LEASE_KEY);
+  if(!(current?.runId===live.runId&&current.expiresAt>Date.now()&&!current.clientSubmitAt))return batchBlocked('start_owner_lost',{runId:live.runId});
+ }
+ tally.startPending=1;
+ return json({status:'start_pending',runId:live.runId,epoch:live.epoch??null,retryAfterMs:2000,...scheduledRunFields()});
+}
 async function batchStartWork(env,body,requestId,tally){
  const bad=validateBatchStartBody(body);if(bad)return bad;
  const notD1=await batchRequiresD1(env);if(notD1)return notD1;
+ if(typeof body.invocationKey!=='string')return batchStartCore(env,body,requestId,tally,null);
+ const {invocationKey,...clean}=body;
+ if(clean.dryRun===true)return batchStartCore(env,clean,requestId,tally,null);
+ const keyHash=await contentHash({purpose:'iptv-batch-start-key',key:invocationKey}),argsHash=await contentHash(startArgsOf(clean));
+ const runId=crypto.randomUUID();
+ forgetAuthority(env);
+ const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash})));
+ if(taken.status!=='owned'){
+  const live=await loadJSON(env,RUNNER_LEASE_KEY);
+  if(live?.runId&&live.expiresAt>Date.now()&&live.keyHash===keyHash){
+   if(live.argsHash!==argsHash){tally.keyArgsMismatch=1;const refused=await batchTurnedAway(env,clean,tally,requestId,{reason:'key_args_mismatch'});if(refused)return refused;}
+   else if(!live.clientSubmitAt)return batchJoin(env,live,tally);
+  }
+  return (await batchTurnedAway(env,clean,tally,requestId))||json(taken);
+ }
+ tally.keyed=1;
+ const claim={runId,epoch:taken.epoch,keyHash,argsHash,lease:taken,converted:false};
+ // Every exit that did not become a run releases the claim (a release of a claim already taken over is refused by the lease's own run and epoch check).
+ try{return await batchStartCore(env,clean,requestId,tally,claim);}
+ finally{if(!claim.converted)await runnerLease(env,runId,'release').catch(()=>null);}
+}
+async function batchStartCore(env,body,requestId,tally,claim){
+ // The claim's renewal at a stage boundary: a lost claim ends the start before any side effect.
+ const renewClaim=async()=>{if(!claim)return null;tally.claimRenewals=(tally.claimRenewals||0)+1;const renewed=await claimRenewed(env,claim);if(renewed.status==='owned'||renewed.status==='busy')return null;tally.claimLost=1;return batchBlocked('start_claim_lost');};
  const dryRun=body.dryRun===true;let pre=await timedStage(env,'preflight',()=>batchPreflight(env,body,tally));if(pre.response)return pre.response;
+ {const lost=await renewClaim();if(lost)return lost;}
  if(dryRun){
   // A dry run reads and writes nothing: it never rebuilds the queue, so a queue that fails the advance gate is refused.
   if(pre.stale)return batchBlocked('queue_stale',{cause:pre.stale,dryRun:true});
@@ -2766,7 +2822,8 @@ async function batchStartWork(env,body,requestId,tally){
  // Precedence of a real start: an overlapping run first, then an idle outcome, then the size refusal. A live runner lease (an earlier v2 run, or a stored legacy v5 run still holding it) turns the attempt away with
  // `already_running` before anything else, naming the holder: an overlapping trigger never reports an independent start result, and it writes nothing to the queue, the run, the lease or
  // the films. It is recorded as a start attempt, like every start attempt.
- const turned=await timedStage(env,'turned_away',()=>batchTurnedAway(env,body,tally,requestId));if(turned)return turned;
+ // A keyed start already holds the lease as its own claim, so the live-lease check would refuse it against itself.
+ const turned=claim?null:await timedStage(env,'turned_away',()=>batchTurnedAway(env,body,tally,requestId));if(turned)return turned;
  // Nothing to deliver, or no capacity, on a current queue: the idle outcome of a start (before the size refusal, so `remainingPercent: 0` is `quota`, not a size error).
  forgetAuthority(env);
  // AIR-529: a known priority-due queue is reconciled before it can be idle (an empty or exhausted queue plus a new assignment in the same generation would otherwise answer `noop` on every start). A zero-quota start stays the
@@ -2776,7 +2833,7 @@ async function batchStartWork(env,body,requestId,tally){
  if(pre.manifest&&pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre);
  // The guards a start runs before it takes the lease (as the retired v5 start did): the previous run's retries, and a held catalog.
  forgetAuthority(env);
- const unsettled=await timedStage(env,'settle_previous',()=>atStage('settle_previous',()=>settlePreviousRun(env)));if(unsettled)return unsettled;
+ const unsettled=await timedStage(env,'settle_previous',()=>atStage('settle_previous',()=>settlePreviousRun(env,claim?claim.lease.recoveredRunId||null:null)));if(unsettled)return unsettled;
  const held=await timedStage(env,'catalog_gate',()=>atStage('catalog_gate',()=>catalogHeldCause(env)));if(held)return catalogHeldResponse(held);
  let queueRefreshed=false,queueSettled=0;
  if(pre.stale||pre.priorityDue||pre.selection.skipped.missingAdmission.length||pre.selection.skipped.alreadyCurrent.length){
@@ -2790,13 +2847,14 @@ async function batchStartWork(env,body,requestId,tally){
   if(pre.stale||pre.priorityCause==='shows_signature_unreadable')return batchBlocked('queue_changed',{queueRefreshed:true,cause:pre.stale?'stale':'priority'});
   if(pre.priorityDue)tally.priorityLagAccepted=1;
   if(pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre,{queueRefreshed:true,...(queueSettled?{queueSettled}:{})});
+  {const lost=await renewClaim();if(lost)return lost;}
  }
  // After the refresh the baseline can be idle too (the queue was stale, or every selected film was already current).
  {const idle=await timedStage(env,'idle',()=>batchIdle(env,body,pre));if(idle)return idle;}
- const runId=crypto.randomUUID(),attemptAt=new Date().toISOString();
+ const runId=claim?claim.runId:crypto.randomUUID(),attemptAt=new Date().toISOString();
  const attempt={runId,createdAt:attemptAt,diagnosticStartedAt:attemptAt,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
  forgetAuthority(env);
- const lease=await timedStage(env,'runner_lease',()=>atStage('runner_lease',()=>runnerLease(env,runId,'acquire')));
+ const lease=claim?claim.lease:await timedStage(env,'runner_lease',()=>atStage('runner_lease',()=>runnerLease(env,runId,'acquire')));
  if(lease.status!=='owned'){
   // Not a refusal of the manifest: the attempt is recorded as every start attempt is. A competing start that won the lease after the early check is counted like the early refusal; the holder's age is known only when the answer carries its expiry (a lost compare-and-swap does not).
   if(lease.status==='already_running'){tally.leaseRefused=1;tally.leaseRefusedAtAcquire=1;if(Number.isFinite(lease.expiresAt))tally.liveLeaseAgeMs=Math.max(0,Math.round(Date.now()-(lease.expiresAt-RUNNER_LEASE_TTL)));}
@@ -2811,6 +2869,7 @@ async function batchStartWork(env,body,requestId,tally){
  let answer;
  try{
   forgetAuthority(env);
+  {const lost=await renewClaim();if(lost)return lost;}
   const again=await timedStage(env,'preflight_lease',()=>batchPreflight(env,body,tally));
   if(again.response){await runnerLease(env,runId,'release');return again.response;}
   // AIR-542: `stale`, an unreadable signature, a revision or manifest change not proven to be a re-rank (priorityOnlyRebaseCause), and any such change that coexists with a genuine
@@ -2825,11 +2884,22 @@ async function batchStartWork(env,body,requestId,tally){
   if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes){await runnerLease(env,runId,'release');return batchOverflow({...exact,bytes:batchBytes(answer)},{queueRefreshed,...(queueSettled?{queueSettled}:{})});}
   pre={...again,manifest:exact,answer};
  }catch(error){await runnerLease(env,runId,'release');if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
- return timedStage(env,'persist',()=>batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt}));
+ // The claim becomes the run's lease under the same epoch immediately before the first persist side effect; a claim that was taken over ends the start here with nothing written.
+ if(claim){
+  let converted=null;
+  for(let attempt=1;attempt<=3;attempt++){converted=await timedStage(env,'claim_convert',()=>claimConverted(env,claim));if(converted.status!=='busy')break;}
+  if(converted.status==='busy'){return batchBlocked('start_claim_contended');}
+  if(converted.status!=='owned'){tally.claimLost=1;return batchBlocked('start_claim_lost');}
+  claim.converted=true;
+ }
+ return timedStage(env,'persist',()=>batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt,claimed:!!claim}));
 }
 // After the lease is held and the snapshot revalidated: this run's diagnostics row, pending Events, recovery of the one previous lease holder, and the run itself. Historic diagnostic settlement is complete, not start.
-async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt}){
+async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt,claimed=false}){
  const {profile,report,queue,selection}=pre,plan=adaptivePredictionBatch(queue,body.capacity);
+ // A claimed start checks ownership before every side effect of the persist; a superseded handler publishes no diagnostics row, source, run, drain or manifest.
+ const superseded=()=>json({status:'lease_lost',runId,code:'start_claim_lost'},409);
+ if(claimed&&!await startOwnedCheck(env,runId,lease.epoch))return superseded();
  const response=await observedPrediction(env,{...body,runId,diagnosticRunId:runId,protocol:BATCH_PROTOCOL},async()=>{
   attempt.leaseAcquiredAt=lease.heartbeatAt;attempt.lastHeartbeatAt=lease.heartbeatAt;
   const previousRun=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):null;
@@ -2847,14 +2917,16 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
     const selectionKind=Object.fromEntries(selected.map(item=>[item.filmId,item.lane]));
     const baseline=Object.fromEntries(selected.map(item=>[item.filmId,item.state.predictions?.current?.generatedAt||null]));
     const run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,protocol:BATCH_PROTOCOL,epoch:lease.epoch??null,manifestHash:manifest.hash,manifestBytes:batchBytes(answer),manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,status:'running',mode:'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,diagnosticStartedAt:attempt.diagnosticStartedAt,leaseAcquiredAt:lease.heartbeatAt||createdAt,startResult:attempt.startResult||(recovered?.recoverable?'recovered_stale_lease':'running'),lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,fingerprintRegistryDigest:manifest.body.contract.registryDigest,eligibleCount:(queue.hotCount||0)+(queue.coldCount||0),batchSize:selected.length,adaptivePlan:plan,selectedIds:[...newIds],batchIds:[...newIds],selectionKind,baseline,failures:{},results:{}};
+    if(claimed&&!await startOwnedCheck(env,runId,lease.epoch))return superseded();
     const sources=Object.fromEntries(selected.map(item=>[item.filmId,modelMetadata(item.film)]));
     await saveJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json',sources);
     await atStage('run_save',()=>savePredictionRun(env,run));
     await atStage('runner_started',()=>runnerStarted(env,run,queue,null));
     let drained={committed:[],dropped:[]};
+    if(claimed&&!await startOwnedCheck(env,runId,lease.epoch))return superseded();
     if(stagedItems.length){
      const token=crypto.randomUUID();
-     const gated=await batchGateSet(env,run.runId,run.epoch,token,requestId,'stage-drain');
+     const gated=await batchGateSet(env,run.runId,run.epoch,token,requestId,'stage-drain',true);
      if(gated.status==='owned'){
       try{drained=await drainBatchStage(env,run,{token,requestId,epoch:run.epoch},profile);}
       finally{try{await batchGateClear(env,run.runId,run.epoch,token);}catch{/* gate expires */}}
@@ -2981,11 +3053,12 @@ async function runnerLeaseEdit(env,runId,epoch,edit){
 // The gate is owned by a **token the Worker generates for each call**, never by the caller-supplied X-Request-Id: the id is kept only for the logs. While any gate is live, no
 // second acquisition succeeds, whatever its id or body; renew, clear and the D1 commit guard all compare the token, so a superseded handler can neither commit nor clear the
 // gate of its replacement.
-const batchGateSet=(env,runId,epoch,token,requestId,bodyHash)=>runnerLeaseEdit(env,runId,epoch,(old,now)=>{
+const batchGateSet=(env,runId,epoch,token,requestId,bodyHash,internal=false)=>runnerLeaseEdit(env,runId,epoch,(old,now)=>{
  const gate=old.submitGate;
  if(gate&&gate.expiresAt>now)return {refuse:{status:'in_flight',retryAfterMs:Math.max(1000,gate.expiresAt-now)}};
  const at=new Date(now).toISOString();
- return {value:{...old,heartbeatAt:at,expiresAt:now+RUNNER_LEASE_TTL,submitGate:{token,requestId:String(requestId||'').slice(0,100),bodyHash,startedAt:at,expiresAt:now+BATCH_GATE_TTL_MS}}};
+ // ADR 0188: the first genuine client submit closes the join window, once and for good. Heartbeat, renewals and the internal staged drain never set the marker.
+ return {value:{...old,...(internal||old.clientSubmitAt?{}:{clientSubmitAt:at}),heartbeatAt:at,expiresAt:now+RUNNER_LEASE_TTL,submitGate:{token,requestId:String(requestId||'').slice(0,100),bodyHash,startedAt:at,expiresAt:now+BATCH_GATE_TTL_MS}}};
 });
 const batchGateRenew=(env,runId,epoch,token)=>runnerLeaseEdit(env,runId,epoch,(old,now)=>{
  if(old.submitGate?.token!==token||old.submitGate.expiresAt<=now)return {refuse:{status:'gate_lost',runId}};
@@ -3486,7 +3559,12 @@ async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
  if(!['envelope','profile','contract','film','hold','item'].includes(part))return {status:400,body:{error:'Invalid part',code:'invalid_part'}};
  if((part==='film'||part==='item')&&(typeof filmId!=='string'||!filmId))return {status:400,body:{error:'filmId required',code:'invalid_film_id'}};
  const run=await checkedRun(env,runId);
- if(!run)return {status:404,body:{error:'Unknown run',code:'unknown_run'}};
+ if(!run){
+  // ADR 0188: a keyed start still preparing its run answers pending, not unknown.
+  const claimed=await loadJSON(env,RUNNER_LEASE_KEY);
+  if(claimed?.runId===runId&&Number(claimed.expiresAt)>Date.now())return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:2000}};
+  return {status:404,body:{error:'Unknown run',code:'unknown_run'}};
+ }
  const lease=await loadJSON(env,RUNNER_LEASE_KEY);
  if(!(lease?.runId===runId&&Number(lease.expiresAt)>Date.now()))return {status:409,body:{error:'lease_lost',code:'lease_lost'}};
  if(run.protocol!==BATCH_PROTOCOL)return {status:409,body:{error:'wrong_protocol',code:'wrong_protocol'}};
@@ -3497,6 +3575,7 @@ async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
   return {status:200,body:held};
  }
  const stored=await loadJSON(env,ENRICHMENT_KEY+'batch-manifest/'+runId+'.json');
+ if(stored==null)return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:2000}};
  if(!usableBatchManifest(stored))return {status:409,body:{error:'manifest_unavailable',code:'manifest_unavailable'}};
  const body=batchManifestPartBody(stored,part,filmId);
  if(body==null)return {status:404,body:{error:'Unknown film',code:'unknown_film'}};

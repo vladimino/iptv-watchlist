@@ -100,6 +100,8 @@ The optional per-film assessment ([ADR 0132](../adr/0132-prediction-assessment-a
 
 ### Multi-Task use of batch v2
 
+**Keyed start and early claim (ADR 0188, additive, not drawn above).** A `prediction_batch_start` that carries an `invocationKey` takes the runner lease as a short `claim` (180 s, renewed at each stage boundary) right after the cheap guards, converts it to the run's lease under the same epoch immediately before the first persist side effect, and releases it on every exit that creates no run. A repeat of the same invocation (same key hash and argument hash, live holder, no client `batch_submit` yet) joins: it returns the stored manifest, or `start_pending` within 10 s, and never writes. Everything else, and every start without a key, behaves as drawn. The behaviour is dormant until the Task prompts send a deterministic key.
+
 The diagram above is one invocation. Four independent hourly Tasks run it (`:00`, `:15`, `:30`, `:45` Europe/Madrid) with `manifestSize=5`, `generationSize=1`, `submitBatchSize=5`; the flow, overlap and `already_running` handling are in [scheduling and orchestration](scheduling-and-orchestration.md#four-independent-hourly-predictions-v2-tasks). The live Task registry, not this page, is the authority for which Tasks are enabled; the per-film research, `assessment` and validation rules are the same in every Task. Selection stays queue-ordered: each short run takes the next five eligible films, and films left unsubmitted stay queued for a later start.
 
 
