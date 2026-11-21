@@ -418,7 +418,7 @@ function closeReadFence(opened,closed,{sealing=false,generationFence=true}={}){
 }
 // `loading` is a ledger seal, and not a catalog, decision or segment load in progress, only when the ledger is mid-handoff
 // (retiring rows, or a transfer for another programme) and no admission is pending.
-async function loadingIsLedgerSeal(env){
+export async function loadingIsLedgerSeal(env){
  if(!await ledgerSealLoading(env))return false;
  const pending=await one(database(env),"SELECT 1 AS n FROM discovery_admission WHERE state='pending' LIMIT 1");
  return !pending;
