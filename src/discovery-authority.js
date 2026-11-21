@@ -179,6 +179,15 @@ export async function readFilmAdmission(env,tmdbId){
 // 20 films must not fail because an unrelated Discovery chunk moved the generation between two statements. It fails closed like
 // `routeRead` for a held cutover or a catalog/decision load in progress; `{handled:false}` means "not D1 authority" (R2 serves).
 export const ADMISSION_IDS_PER_QUERY=80;
+// The close of a by-id read needs only the fields `closeReadFence` compares, so it is one statement (a full `readAuthority` is several round trips and a start reads by id more than once). It keeps the
+// ADR 0162 refusal of a marker that is not d1/open.
+async function readFenceState(env){
+ let row;
+ try{row=await one(database(env),'SELECT a.mode AS mode, a.cutover AS cutover, a.programme_run_id AS programmeRunId, t.state AS transfer, t.batches AS transferBatches FROM discovery_authority a JOIN discovery_transfer t ON t.id=1 WHERE a.id=1');}
+ catch(error){throw failed('discovery_unavailable',error);}
+ if(!row||row.mode!=='d1'||row.cutover!=='open'||!['idle','loading','committed'].includes(row.transfer))throw failed('discovery_unavailable');
+ return {ready:true,programmeRunId:row.programmeRunId??null,transfer:row.transfer,transferBatches:Number(row.transferBatches)};
+}
 export async function readAdmissionsById(env,ids){
  const wanted=[...new Set((ids||[]).map(String).filter(Boolean))];
  const opened=await readAuthority(env);
@@ -200,7 +209,7 @@ export async function readAdmissionsById(env,ids){
  // AIR-574: the same bounded close as `routeRead` and `readFilmAdmission`. The slices are separate statements, so a catalog replacement (or an ABA through `loading` back to `committed`, which moves the
  // transfer epoch) or a programme change between them must not return a transient absence as a genuine one: a caller settles an absent film out of the persisted queue. Generation-only progress
  // (continuation, status, Workflow writes, seal batches) is not a fence here, and an ordinary seal stays open.
- const closedGate=await readAuthority(env);
+ const closedGate=await readFenceState(env);
  closeReadFence(opened,closedGate,{sealing,generationFence:false});
  if(sealing&&!await loadingIsLedgerSeal(env))throw failed('discovery_fence');
  return {handled:true,films};
