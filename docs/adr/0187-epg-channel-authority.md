@@ -31,7 +31,7 @@ Today a channel is only a string. `published_epg_show.channel_id` and `discovery
 
 Accepting this design does not authorize any of the following; each is separately scoped and owner-gated where noted:
 
-- Applying migration 0031 to production D1, the first import from the M3U and XMLTV sources, and the real Cloudflare D1 capacity and performance preflight (the production migration card).
+- Applying Channel migration 0032 (`0032_epg_channel_authority.sql`) to production D1 under its own L3 approval, the first import from the M3U and XMLTV sources, and the real Cloudflare D1 capacity and performance preflight (the production migration card).
 - Reading the snapshot in a scan: the exact semantics of `deny_all`, `discover` and `known_only`, their metrics, and the in-memory precomputation described in decision 5 (the scan policy card).
 - The admin surface for classification, overrides and the diff of unlisted channels, and any change to the active Discovery ledger.
 - Activation of any reader. A staged or `held` authority marker is not part of this schema (alternative B); if a reader later needs one, it is added by its own migration and decision.
