@@ -580,6 +580,15 @@ export const FILES={
  "enrichment.mjs": {
   "suite": "core"
  },
+ "watchlist-composition.mjs": {
+  "suite": "core"
+ },
+ "watchlist-d1.mjs": {
+  "suite": "core"
+ },
+ "watchlist-worker.mjs": {
+  "suite": "core"
+ },
  "epg-checkpoint-worker.mjs": {
   "suite": "core"
  },

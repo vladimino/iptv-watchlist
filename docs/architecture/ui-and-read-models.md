@@ -129,3 +129,7 @@ flowchart LR
     cp --> proj --> footerApi --> footerUi
     cp -->|"delivered event objects"| eventsApi --> eventsUi
 ```
+
+## Watchlist membership reader seam (ADR 0186, dormant, AIR-569)
+
+`composeWatchlistRead` is the one seam in front of `GET /api/watchlist`, `GET /api/programme`, the Finds read (`/api/catalog/available`) and the permanent film page. With the Watchlist marker `epg`, absent or no D1 binding it returns the generation's `watchlist` document unchanged. With `d1` it returns the composition of the **current snapshot membership** and the pinned generation's stored records and shows (`WatchlistComposition.composeWatchlist`), reading the metadata cache only for ids with no stored record. It is read-only (ADR 0107): a read never writes, repairs or moves the programme generation. A held, closed or absent authority is refused with a `temporary` error where it is D1-unavailable, so the degraded-read rule of ADR 0177 applies, and never falls back to the EPG generation as membership. The composed document is additive (`snapshot`, `removed`). Nothing in this section is active in production until the separate owner cutover.
