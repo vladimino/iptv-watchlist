@@ -25,6 +25,7 @@ import {createS3Store,InstallError,readInstallCredentials} from './r2-s3-store.m
 import {readCredentials} from './r2-snapshot-export.mjs';
 import {BATCH_BYTES,BATCH_STATEMENTS,createPublishedBinding,migrationStatements,normalize,OperatorStop,PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
 import * as Checkpoint from '../src/epg-checkpoint-d1.js';
+import {EPG_SCHEDULE,nextDailyDue} from '../src/domain/orchestration-policy.js';
 
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 export const MIGRATION_PATH=path.join(ROOT,'migrations/0030_epg_checkpoint_authority.sql');
@@ -52,6 +53,8 @@ export async function readState(binding){
   const present=TABLES.filter(name=>names.includes(name));
   const state={schemaVersion:Number.isFinite(version)?version:null,tables:{present:present.length,expected:TABLES.length},marker:null,run:null,ingest:null,counts:null,orchestration:{},pause:null,published:null};
   if(present.length===TABLES.length){
+   const triggers=(await many(binding,"SELECT name FROM sqlite_master WHERE type='trigger' AND name IN ('epg_checkpoint_cas_required','epg_checkpoint_run_order')")).length;
+   state.triggers={present:triggers,expected:2};
    state.marker=await one(binding,'SELECT mode, generation, writes, (SELECT COUNT(*) FROM epg_checkpoint_cas WHERE id=1) AS cas FROM epg_checkpoint_authority WHERE id=1');
    state.run=await one(binding,'SELECT run_id, run_key, started_at, stage, seal_phase, queue_attempted, completed_at, has_error, revision, last_write_id, body_chunks, body_chars, body_sha256, watchlist_present, film_count, film_list_sha256 FROM epg_checkpoint_run WHERE id=1');
    state.ingest=await one(binding,'SELECT schema_version, last_success_at, failed_at, code, consecutive_failures, revision FROM epg_ingest_status WHERE id=1');
@@ -94,7 +97,7 @@ export function measure(syncObject,ingestObject){
 const madridDay=ms=>new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(ms));
 // `evidence` is what this tool cannot read with its D1 and R2 credentials: the terminal state of the EPG Workflow instance and the deployed Worker version,
 // read by the operator through a documented read-only path (MCP `epg_status` owner.liveness and instanceId, the deployed version id). Without it the proof fails.
-export function drainProof(state,{run,now,evidence={},journal={owed:false}}){
+export function drainProof(state,{run,now,evidence={},journal={owed:false},nextStart=nextStartAfter(now)}){
  const failures=[];
  const today=madridDay(now);
  const lease=state.orchestration.lease?.body;
@@ -102,7 +105,11 @@ export function drainProof(state,{run,now,evidence={},journal={owed:false}}){
  else if(lease.released!==true&&Date.parse(lease.expiresAt)>now)failures.push('step_lease_live');
  const control=state.orchestration.control?.body;
  if(!control||control.phase!=='done')failures.push('orchestration_not_done');
- else if(control.nextWakeAt!=null&&!(Date.parse(control.nextWakeAt)-now>=NEXT_START_MARGIN_MS))failures.push('next_start_too_close');
+
+ // The next start must be known and at least the margin away; an unknown or past one refuses. A control record that names its own wake time must agree.
+ if(!Number.isFinite(nextStart))failures.push('next_start_unknown');
+ else if(nextStart-now<NEXT_START_MARGIN_MS)failures.push('next_start_too_close');
+ else if(control?.nextWakeAt!=null&&!(Date.parse(control.nextWakeAt)-now>=NEXT_START_MARGIN_MS))failures.push('next_start_too_close');
  if(state.pause?.state!=='clear')failures.push('discovery_pause_not_clear');
  const published=state.published;
  if(!run||run.stage!=='complete')failures.push('run_not_complete');
@@ -164,10 +171,25 @@ export function applyBusy(state,now){
  return null;
 }
 
+// The checkpoint contract of migration 0030, which later migrations (0031, 0032, ...) keep: every table, both triggers, the fence row and a readable marker. The commands
+// after `--apply` need exactly this at any schema version from 30 on; a schema below 30, a missing or partial table set, a missing trigger or fence row or marker refuses.
+export function checkpointSchemaReady(state){
+ return Number.isInteger(state.schemaVersion)&&state.schemaVersion>=30
+  &&state.tables.present===state.tables.expected
+  &&state.triggers?.present===state.triggers?.expected&&state.triggers?.present>0
+  &&Boolean(state.marker)&&Number(state.marker.cas)===1&&['r2','d1'].includes(state.marker.mode)&&['open','held'].includes(state.marker.writes);
+}
+
+// The next natural EPG start after `now`, from the same schedule definition the Worker uses (EPG_SCHEDULE, 17:00 Europe/Madrid, daylight saving aware). It is not read from the
+// control record (`nextWakeAt` is null once the day's run is done) nor from `epg_status.dueAt` (that is today's due time, in the past after the run). null when it cannot be computed.
+export function nextStartAfter(now){
+ try{const next=nextDailyDue(now,EPG_SCHEDULE);return Number.isFinite(next)&&next>now?next:null;}catch{return null;}
+}
+
 // ---- the migration -------------------------------------------------------------------------------------------------------
 export function applyDecision(state){
  if(state.tables.present&&state.tables.present!==state.tables.expected)return 'partial_schema';
- if(state.tables.present===state.tables.expected)return state.schemaVersion===30?'already_applied':'partial_schema';
+ if(state.tables.present===state.tables.expected)return state.schemaVersion>=30?'already_applied':'partial_schema';
  if(state.schemaVersion!==29)return 'schema_unexpected';
  return 'apply';
 }
@@ -347,7 +369,7 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
  if(command==='status'){
   const objects=await readObjects();
   const run=objects||state.marker?.mode==='d1'?await currentRun(binding,state,objects?.sync).catch(()=>null):null;
-  return {operation:'status',writes:false,writeState:'none',schemaVersion:state.schemaVersion,tables:state.tables,marker:marker0(state),run:state.run?{runId:state.run.run_id,stage:state.run.stage,revision:Number(state.run.revision),completedAt:state.run.completed_at,bodySha256:state.run.body_sha256}:null,counts:state.counts,ingest:state.ingest,orchestration:{mode:state.orchestration.mode?.body?.mode??null,phase:state.orchestration.control?.body?.phase??null,nextWakeAt:state.orchestration.control?.body?.nextWakeAt??null,leaseReleased:state.orchestration.lease?.body?.released??null,leaseExpiresAt:state.orchestration.lease?.body?.expiresAt??null},pause:state.pause?.state??null,published:state.published,r2:objects?{sync:publicIdentity(objects.sync),ingest:publicIdentity(objects.ingest),measure:measure(objects.sync,objects.ingest)}:'not_configured',drain:objects||state.marker?.mode==='d1'?await proofOf(run):'not_evaluated'};
+  return {operation:'status',writes:false,writeState:'none',schemaVersion:state.schemaVersion,tables:state.tables,marker:marker0(state),run:state.run?{runId:state.run.run_id,stage:state.run.stage,revision:Number(state.run.revision),completedAt:state.run.completed_at,bodySha256:state.run.body_sha256}:null,counts:state.counts,ingest:state.ingest,orchestration:{mode:state.orchestration.mode?.body?.mode??null,phase:state.orchestration.control?.body?.phase??null,nextWakeAt:state.orchestration.control?.body?.nextWakeAt??null,leaseReleased:state.orchestration.lease?.body?.released??null,leaseExpiresAt:state.orchestration.lease?.body?.expiresAt??null},pause:state.pause?.state??null,published:state.published,nextStart:(()=>{const next=nextStartAfter(clock);return next===null?null:{at:iso(next),inMinutes:Math.floor((next-clock)/60000)};})(),r2:objects?{sync:publicIdentity(objects.sync),ingest:publicIdentity(objects.ingest),measure:measure(objects.sync,objects.ingest)}:'not_configured',drain:objects||state.marker?.mode==='d1'?await proofOf(run):'not_evaluated'};
  }
  if(command==='apply'){
   const decision=applyDecision(state);
@@ -372,7 +394,7 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
   if(ctx.track)ctx.track('committed');
   return {operation:'apply',writes:true,writeState:'committed',schemaVersion:30,marker:m};
  }
- if(state.schemaVersion!==30||state.tables.present!==state.tables.expected)throw new OperatorStop('schema_unexpected',3);
+ if(!checkpointSchemaReady(state))throw new OperatorStop('schema_unexpected',3);
  if(command==='hold'){
   requireMarker(state,'r2','open',generation);
   const objects=await readObjects();
