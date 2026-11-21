@@ -40,7 +40,7 @@ The loader reads two kinds of input and nothing else (see `SOURCE_KEYS`, `STATE_
 | Input | Exact object | Used for |
 | --- | --- | --- |
 | R2 `letterboxd/admissions/verified-films.json` | the rated-archive receipts (`RATED_RECEIPT_KEY`) | the 708 `film_rated_admission` rows (each entry accepted by `verifiedAdmission`) |
-| R2 `enrichment/view-index.json` (retired afterwards: stale from the first deploy of [ADR 0190](../adr/0190-retire-view-index-selector-and-raw-object.md) on) | the view index | the 398 `film_retention` rows (the `watchlist` fact per Letterboxd id) |
+| R2 `enrichment/view-index.json` (retired afterwards: stale from the first deploy of [ADR 0192](../adr/0192-retire-view-index-selector-and-raw-object.md) on) | the view index | the 398 `film_retention` rows (the `watchlist` fact per Letterboxd id) |
 | R2 `identity/tmdb-retirements.json` | the owner retirement decisions (`RETIREMENTS_KEY`) | the 4 `tmdb_retirement_decision` rows (whole object validated by `prepareRetirementImport`) |
 | D1 `schema_contract`, `film_person_authority`, `film_person_baseline` | one `SELECT` each | the gate: schema at least 16, marker `prepared` / `open`, baseline `verified`, the generation and reference the plan pins |
 | D1 `film_external_id` (schemes `tmdb` and `letterboxd`), `film_redirect` | `SELECT` ordered, no `LIMIT` | the identity each row stands on: the Film that holds the movie id (trusted, not conflicting) or the Letterboxd id, not a redirect source |

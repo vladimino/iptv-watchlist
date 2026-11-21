@@ -1,4 +1,4 @@
-# ADR 0190: The D1-derived view index is the only view index; the read selector and the raw object's readers and writers are retired
+# ADR 0192: The D1-derived view index is the only view index; the read selector and the raw object's readers and writers are retired
 
 **Status:** Proposed (code delivered in the AIR-558 pull request; production not changed)  
 **Original decision date:** 2026-11-21  
