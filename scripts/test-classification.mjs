@@ -1374,6 +1374,9 @@ export const FILES={
  "letterboxd-sync-effects.mjs": {
   "suite": "core"
  },
+ "letterboxd-sync-bundle.mjs": {
+  "suite": "core"
+ },
  "ratings-queue-v2.mjs": {
   "suite": "core"
  },

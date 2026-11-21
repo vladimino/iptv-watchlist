@@ -1,0 +1,112 @@
+// AIR-570 / ADR 0186. The BUNDLED Worker (dist/server/index.js, built here) runs one whole Letterboxd Sync slot through the REAL adapters: the real `letterboxdPorts`, the real `WatchlistD1`
+// repository on the full migration chain, the real facts module and the real removal queue, with a fake Letterboxd (HTML pages), a fake R2 bucket and the sqlite D1 stand-in. Offline: no
+// network, no Cloudflare, nothing applied to production. It proves the wiring the reviewer asked for: `letterboxdPorts` exists in the bundle, a first slot publishes version 1, the next slot drains
+// its causal effects with real writers and publishes a 1-for-1 replacement, the removal reaches the real queue, exactly two Events per slot exist, and the mode switch still refuses without proof.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import vm from 'node:vm';
+import {spawnSync} from 'node:child_process';
+import {webcrypto} from 'node:crypto';
+import {sqliteSync} from './sqlite-session.mjs';
+import {d1Standin} from './d1-standin.mjs';
+import {makeBucket} from './ratings-harness.mjs';
+
+const T=s=>Date.parse(s);
+const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-lbbundle-'));
+process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
+// Build into a private copy of the worker bundle: the same build script, its own output directory is not configurable, so build in place (atomic) and read the result.
+const built=spawnSync(process.execPath,['build.mjs'],{encoding:'utf8',maxBuffer:1<<26});
+assert.equal(built.status,0,built.stderr);
+const source=fs.readFileSync('dist/server/index.js','utf8');
+
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n');
+const file=path.join(root,'db.sqlite');
+{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain+"\nUPDATE watchlist_authority SET mode='d1',generation=1 WHERE id=1;\nUPDATE ratings_domain_authority SET mode='d1',cutover='open' WHERE id=1;\nUPDATE metadata_cache_authority SET mode='d1' WHERE id=1;"});assert.equal(r.status,0,r.stderr);}
+const db=d1Standin(file);
+
+// A fake Letterboxd: a watchlist of `list` ids in pages of 3.
+let list=['f0','f1','f2','f3'];
+const poster=id=>`<div data-component-class="LazyPoster" data-item-name="Film ${id} (2001)" data-item-link="/film/${id}/" data-postered-identifier='{"lid":"${id}"}'></div>`;
+const page=n=>{const per=3,items=list.slice((n-1)*per,n*per),last=n*per>=list.length;return `<span class="js-watchlist-count">${list.length}</span>${items.map(poster).join('')}${last?'':`<a class="next" href="/me/watchlist/page/${n+1}/">Next</a>`}`;};
+const fetched=[];
+const fakeFetch=async url=>{fetched.push(String(url));const m=/\/me\/watchlist\/(?:page\/(\d+)\/)?$/.exec(String(url));if(!m)return new Response('not found',{status:404});return new Response(page(Number(m[1]||1)),{status:200});};
+
+const bucket=makeBucket();
+const env={DB:db,BUCKET:bucket,LETTERBOXD_USERNAME:'me',EPG_XML_URL:'https://epg.test/x.xml',METADATA_CACHE_DB_OPTIONAL:'standin'};
+const wf={instances:new Map(),created:[],async create({id,params}){if(this.instances.has(id))throw new Error('already exists');this.instances.set(id,{status:'running',params});this.created.push(id);},async get(id){if(!this.instances.has(id))throw new Error('not found');return {status:async()=>({status:this.instances.get(id).status})};}};
+env.LETTERBOXD_WORKFLOW=wf;
+const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,Math,TextEncoder,TextDecoder,Uint8Array,atob,btoa,encodeURIComponent,decodeURIComponent,structuredClone,crypto:webcrypto,setTimeout,clearTimeout,console:{log(){},error:(...a)=>process.stderr.write(a.join(' ')+'\n'),warn(){}},ASSETS:{},fetch:fakeFetch});
+vm.runInContext(source.replace(/export \{[^}]+\};/g,'').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
+const run=code=>vm.runInContext(code,context);
+const G=name=>run(name);
+
+// 1. The bundle has the ports and the control plane; the Watchlist phase and the three effect writers are the real ones.
+assert.equal(typeof G('letterboxdPorts'),'function');
+const ports=G('letterboxdPorts')(env);
+assert.deepEqual(Object.keys(ports).sort(),['watchlist'],'only the phases that have a real adapter are supplied; the others stay absent and fail closed');
+assert.equal(typeof ports.watchlist.run,'function');
+const LetterboxdSync=G('LetterboxdSync');
+const step={async do(name,fn){return fn();},async sleepUntil(){}};
+
+// 2. Activation is refused: the ratings phase, the legacy fence and the handover are not provable here, so the Workflow can not be admitted.
+{
+ await LetterboxdSync.switchMode(env,{action:'close_admission',target:'cloudflare'},{},T('2026-11-21T09:39:00Z'));
+ const refused=await LetterboxdSync.switchMode(env,{action:'complete'},{},T('2026-11-21T09:39:00Z'));
+ assert.equal(refused.refused,'handover_not_proven');
+ // For this offline run the owner's handover proof is injected, exactly as the cutover will supply it.
+ const done=await LetterboxdSync.switchMode(env,{action:'complete'},{handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:true,ratingsPhase:true})},T('2026-11-21T09:39:00Z'));
+ assert.equal(done.completed,true);
+}
+async function slot(now){
+ const started=await LetterboxdSync.ensure(env,{now});
+ const done={run:async()=>({done:true,outcome:'finished'})};
+ const result=await LetterboxdSync.run(env,{slotKey:started.slot,series:0,epoch:1},step,{now:()=>now+60000,ports:{...ports,ratings:done,reconcile:{run:async()=>({done:true,outcome:'done'})}}});
+ return {started,result};
+}
+const rowOf=key=>db.sql("SELECT watchlist_outcome AS w,status FROM letterboxd_slot WHERE slot_key='"+key+"'")[0];
+
+// 3. Slot 1 scans the fake Letterboxd (2 pages + the repeat of page 1) and publishes version 1 through the real repository.
+{
+ const r=await slot(T('2026-11-21T09:40:00Z'));
+ assert.equal(r.result.reason,'complete');assert.equal(rowOf('2026-11-21T1030').w,'committed');
+ assert.equal(db.sql('SELECT version,film_count FROM watchlist_current')[0].film_count,4);
+ assert.equal(fetched.length,3,'page 1, page 2 and the repeat read of page 1');
+}
+// The Film/Person marker of this stand-in is the default `r2`, which the canonical writer refuses; opening it needs a verified baseline (a separate, owner-gated state). The retention effect is
+// therefore exercised here on the documented closed-writer path (the same `facts_only` the EPG scan took); its open-writer behaviour has its own test (letterboxd-sync-effects.mjs).
+run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
+// 4. Slot 2: the same list is a no-op AFTER version 1's causal effects were drained by the real writers (facts in the real store).
+{
+ fetched.length=0;
+ const r=await slot(T('2026-11-21T15:40:00Z'));
+ assert.equal(rowOf('2026-11-21T1630').w,'no_change');
+ assert.equal(db.sql('SELECT effects_drained_version AS v FROM watchlist_current')[0].v,1);
+ assert.equal(db.sql("SELECT COUNT(*) AS n FROM watchlist_effect WHERE status='done'")[0].n,3);
+ const docs=db.sql("SELECT key FROM ratings_document").map(r=>r.key);
+ assert.ok(docs.some(k=>/watchlist/i.test(k)),'the real facts module wrote the watchlist scan summary into the ratings documents: '+docs.join(','));
+}
+// 5. Slot 3: a 1-for-1 replacement (f3 out, f9 in) is version 2 and the Event carries both; its removal effect is drained by slot 4 into the REAL removal queue.
+{
+ list=['f0','f1','f2','f9'];
+ await slot(T('2026-11-21T21:40:00Z'));
+ assert.equal(rowOf('2026-11-21T2230').w,'committed');assert.equal(db.sql('SELECT version FROM watchlist_current')[0].version,2);
+ const events=[...bucket.records.entries()].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v);
+ const wl=events.find(e=>e.type==='watchlist'&&e.slot==='2026-11-21T2230');
+ assert.equal(wl.addedCount,1);assert.equal(wl.removedCount,1);
+ await slot(T('2026-11-22T03:40:00Z')); // the 22:30 slot's window; the next slot drains version 2's effects
+ const next=await LetterboxdSync.ensure(env,{now:T('2026-11-22T04:40:00Z')});
+ assert.ok(next.slot);
+ const queue=db.sql("SELECT key,body FROM ratings_document").find(r=>/removal/i.test(r.key));
+ assert.ok(queue,'the real removal-lookup queue received the removed film');
+ assert.match(String(queue.body),/f3/);
+}
+// 6. Exactly two Events per closed slot, whatever the outcome; never a third.
+{
+ const events=[...bucket.records.entries()].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v).filter(e=>/^lbsync-/.test(e.id));
+ const per=new Map();for(const e of events)per.set(e.slot,(per.get(e.slot)||0)+1);
+ for(const [slotKey,count] of per)assert.equal(count,2,slotKey);
+ assert.ok(per.size>=3);
+}
+console.log('letterboxd-sync-bundle ok');

@@ -162,6 +162,17 @@ export async function deliverEvents(env, {now = Date.now(), limit = LIMITS.event
   return {delivered, failed, pending: rows.length - delivered};
 }
 
+// The reference of a slot's own `watchlist` Event for the removal hand-over: its object key, run and time. null until the Event object exists in R2 (delivered), so the removal queue never
+// points at an Event that is not there yet. Read only.
+export async function slotEventRef(env, slotKey, sourceRunId = null) {
+  let row;
+  try { row = await first(env, "SELECT event_key, at, status FROM letterboxd_slot_event WHERE slot_key = ? AND type = 'watchlist'", slotKey); } catch { return null; }
+  if (!row || row.status !== 'delivered') return null;
+  const key = eventObjectKey(row.at, row.event_key);
+  try { const object = await env.BUCKET.get(key); if (!object) return null; } catch { return null; }
+  return {eventKey: key, sourceRunId, at: row.at};
+}
+
 // ---- the owner's mode switch (same three-step pattern as ADR 0090 decision 4) ---------------------------------------------
 async function instanceStatus(binding, id) {
   if (!binding || typeof binding.get !== 'function') return 'unknown';

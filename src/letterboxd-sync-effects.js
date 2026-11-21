@@ -7,6 +7,8 @@ export const RETENTION_SLICES_PER_CALL = 24;
 
 export function effectWriters(deps) {
   const {repository, facts, retention, removal, tmdbOf, removalRef} = deps;
+  // The TMDB ids only enrich: a cache outage must not hold the facts (identity stays a Film fact, the facts module links by Letterboxd id), but it does hold retention, which needs them.
+  const tmdbForFacts = (env, lids) => tmdbOf(env, lids).catch(() => new Map());
   const snapshotOf = async (ctx, effect) => {
     const read = await repository.readSnapshot(ctx.env, effect.snapshotId);
     return read.ok ? read.snapshot : null;
@@ -16,7 +18,7 @@ export function effectWriters(deps) {
     async scan_facts(ctx, effect) {
       const snapshot = await snapshotOf(ctx, effect);
       if (!snapshot) return null;
-      const tmdb = await tmdbOf(ctx.env, snapshot.films.map(film => film.lid));
+      const tmdb = await tmdbForFacts(ctx.env, snapshot.films.map(film => film.lid));
       await facts.applyWatchlistScan(ctx.env, {scanId: snapshot.scanId, observedAt: snapshot.observedAt, films: snapshot.films.map(film => ({id: film.lid, tmdbId: tmdb.get(film.lid) ?? null}))});
       return 'facts:' + snapshot.scanId;
     },
@@ -28,7 +30,8 @@ export function effectWriters(deps) {
       if (!(await retention.writerOpen(ctx.env))) return 'retention:writer_closed:' + snapshot.scanId;
       const changes = await repository.readChanges(ctx.env, effect.snapshotId);
       if (!changes.ok) return null;
-      const tmdb = await tmdbOf(ctx.env, snapshot.films.map(film => film.lid));
+      let tmdb;
+      try { tmdb = await tmdbOf(ctx.env, snapshot.films.map(film => film.lid)); } catch { return null; }
       const listed = snapshot.films.map(film => ({lid: film.lid, tmdbId: tmdb.get(film.lid) ?? undefined}));
       const queue = retention.work({listed, departed: changes.removed.map(item => item.lid), observedAt: snapshot.observedAt, scanId: snapshot.scanId});
       let cursor = 0, intent = [];

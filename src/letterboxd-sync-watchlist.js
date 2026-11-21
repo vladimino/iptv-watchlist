@@ -47,9 +47,13 @@ export async function scanWatchlist({fetchPage, parse, firstUrl, username, maxPa
 // The Letterboxd HTTP outcome of a failed fetch, by class only (no message is stored).
 export function classifyScanFailure(error) {
   if (error?.code === 'incomplete') return {outcome: 'incomplete', reason: error.reason || 'incomplete'};
-  if (error?.status === 429) return {outcome: 'rate_limited', reason: 'http_429'};
-  if (error?.status === 403) return {outcome: 'unavailable', reason: 'http_403'};
-  if (Number.isInteger(error?.status) && error.status >= 500) return {outcome: 'unavailable', reason: 'http_5xx'};
+  // `getHTML` reports the HTTP status in its message ("Source HTTP 429: /path"); a typed `status` wins when present. Only the number is read, the message is never stored.
+  const typed = Number.isInteger(error?.status) ? error.status : null;
+  const parsed = /^Source HTTP (\d{3}):/.exec(String(error?.message || ''));
+  const status = typed ?? (parsed ? Number(parsed[1]) : null);
+  if (status === 429) return {outcome: 'rate_limited', reason: 'http_429'};
+  if (status === 403) return {outcome: 'unavailable', reason: 'http_403'};
+  if (Number.isInteger(status) && status >= 500) return {outcome: 'unavailable', reason: 'http_5xx'};
   return {outcome: 'unavailable', reason: 'network_error'};
 }
 
