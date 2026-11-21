@@ -625,6 +625,9 @@ export const FILES={
  "migration-index-docs.mjs": {
   "suite": "core"
  },
+ "watchlist-bootstrap.mjs": {
+  "suite": "core"
+ },
  "migration-statements.mjs": {
   "suite": "core"
  },
