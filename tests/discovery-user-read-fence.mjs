@@ -15,7 +15,7 @@ import {nonFunctional} from './suite-gate.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-user-read-fence-'));
 let databases=0;
-const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const lit=value=>"'"+String(value).replace(/'/g,"''")+"'";
 const RUN='11111111-1111-4111-8111-111111111111';
 const ORIGIN='https://iptv.vladimino.workers.dev';

@@ -303,7 +303,7 @@ export function writeSynthetic(file,targets,{root=process.cwd()}={}){
  const layout=buildLayout(targets);
  const migrations=path.join(root,'migrations');
  // The catalog is the schema the harness is pinned to. A later file that production has not applied (0022, AIR-459) is not part of it.
- const chain=fs.readdirSync(migrations).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql'&&Number(name.slice(0,4))<=CAPS.schemaVersion).sort();
+ const chain=fs.readdirSync(migrations).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=CAPS.schemaVersion).sort();
  sqlite(file,chain.map(name=>fs.readFileSync(path.join(migrations,name),'utf8')).join('\n'));
  const t=layout.targets;
  const clock=q(t.clock);

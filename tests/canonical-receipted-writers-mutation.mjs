@@ -108,7 +108,7 @@ try{
  for(const [name,file,from] of MUTANTS)assert.equal(text(file).split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in src/'+file);
  // One shared template database (the whole migration chain), built once.
  const template=path.join(dir,'template.sqlite');
- const chain=fs.readdirSync('migrations').filter(file=>/^\d{4}_.*\.sql$/.test(file)&&file!=='0032_letterboxd_sync_control.sql').sort();
+ const chain=fs.readdirSync('migrations').filter(file=>/^\d{4}_.*\.sql$/.test(file)).sort();
  assert.equal(sqliteSync(['-bail',template],{input:chain.map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26}).status,0);
  // AIR-374: a mutant first runs only the section (and writer) of tests/canonical-receipted-writers.mjs that killed it when the hints were learned (HINTS: mutant name to [section, writer]);
  // a mutant that passes that run is run against the WHOLE file before it is called a survivor, so a stale or wrong hint costs time and never hides a survivor. Every distinct lean run of the

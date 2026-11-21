@@ -21,7 +21,7 @@ const PREDICTION_D1="\nUPDATE prediction_domain_authority SET mode='d1' WHERE id
 const PREDICTION_BARE="\n"+['prediction_domain_intent','prediction_run','prediction_lease','prediction_queue','prediction_lineage','prediction_pointer','prediction_fingerprint','prediction_profile','prediction_domain_cas','prediction_domain_authority'].map(name=>'DROP TABLE IF EXISTS '+name+';').join('\n');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-catalog-film-'));
 let databases=0;const seen=[];
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql'&&Number(name.slice(0,4))<=11).sort();
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=11).sort();
 const migrated=()=>{
  const file=path.join(root,'film-'+(databases++)+'.sqlite');
  const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
@@ -207,7 +207,7 @@ const base={
 
 // ---- 3c. A D1-published generation: the GET never repairs the R2 mirrors, writes D1 or asks a provider ----
 {
- const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').map(name=>name.slice(0,-4)).sort();
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).map(name=>name.slice(0,-4)).sort();
  const mkdb=name=>{
   const file=path.join(root,name+'.sqlite');const statementsSeen=[];
   const db=d1Standin(file,{onQuery:async text=>{statementsSeen.push(text);}});
@@ -449,7 +449,7 @@ r=await ask(fake({marker:OPEN,external:own,admissions:[{...adm,tmdb:'301'}]}));a
 // ---- 3f. AIR-475: a retained canonical Film opens by its permanent TMDB id at d1/open, with no Discovery record, no rated admission, no programme and no watchlist ----
 {
  vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
- const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
  const base=path.join(root,'retained-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+RATINGS_D1+PREDICTION_D1);
  const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
@@ -534,7 +534,7 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
 // ---- 3g. AIR-475 production acceptance: the permanent page shows the owner's rating and watched mark, the stored forecast and its fingerprint of a retained Film, found through the verified D1 lid ----
 {
  vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
- const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
  const base=path.join(root,'alias-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+RATINGS_D1+PREDICTION_BARE);
  const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
@@ -581,7 +581,7 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:1272837','f
 // the R2 view index lacks the key (or is missing altogether), D1 overrides stale R2 display data, an unrated film with only a D1 forecast shows its forecast, a contested lid exposes nothing, and the history agrees ----
 {
  vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
- const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
  const base=path.join(root,'domains-base.sqlite');sql(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+RATINGS_D1);
  const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";

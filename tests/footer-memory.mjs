@@ -20,7 +20,7 @@ import {nonFunctional} from './suite-gate.mjs';
 
 const IMPORT='const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-footer-memory-'));
-const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
 const OPEN="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";
 const T='2026-11-16T10:00:00.000Z',now=Date.now(),H=3600000,G1='22222222-2222-4222-8222-222222222222';

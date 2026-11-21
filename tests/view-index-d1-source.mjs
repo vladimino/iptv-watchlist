@@ -12,7 +12,7 @@ import {PREDICTION_OVERLAY_PAGE,PREDICTION_OVERLAY_ROWS} from '../src/prediction
 import {compareMembership} from '../scripts/view-index-membership-parity.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-view-index-d1-'));
-const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const IMPORT='const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n';
 const KEY='enrichment/view-index.json';
 const q=value=>"'"+String(value).replace(/'/g,"''")+"'";

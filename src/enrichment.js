@@ -1502,7 +1502,9 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null,opt
  // ADR 0142: completed-only ranking is a live D1 published pin whose run matches the completed programme, not the mere presence of the PublishedEpg module (the Worker always bundles it; currentGeneration null is the R2 path).
  const completedOnly=authoritative&&pinned?.epgPin?.authority==='d1'&&!!pinned.epgPin.programmeRunId&&safeSource.runId===pinned.epgPin.programmeRunId;
  const completed=completedOnly?completedShowsByTmdb(safeSource):new Map();
- const membership=authoritative?safeSource:Array.isArray(watchlistDoc?.films)?{films:watchlistDoc.films}:{films:safeSource.films};
+ // ADR 0186 (AIR-569): with the Watchlist marker `d1` the queue's membership is the current snapshot, not the membership of the completed EPG generation (the undefined function is the legacy path).
+ const currentMembership=authoritative&&typeof watchlistQueueMembership==='function'?await watchlistQueueMembership(env,safeSource):null;
+ const membership=authoritative?(currentMembership||safeSource):Array.isArray(watchlistDoc?.films)?{films:watchlistDoc.films}:{films:safeSource.films};
  const films=allEnrichmentFilms(membership,catalog).map(film=>authoritative?withCompletedShows(film,completed,safeSource.runId,completedOnly):{...film,shows:[],epgLastAiring:null});
  const watchlistIds=new Set(eligibleEnrichmentFilms(membership).map(f=>String(f.id)));
  if(capture)capture.films=films;

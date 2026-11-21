@@ -11,7 +11,7 @@ let databases=0;
 export const sql=(file,text)=>{const result=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(result.stderr);const out=(result.stdout||'').trim();return out?JSON.parse(out):[];};
 export function migrated(){
  const file=path.join(root,'flow-'+(databases++)+'.sqlite');
- const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
  if(result.status!==0)throw new Error(result.stderr||'migration failed');
  return file;

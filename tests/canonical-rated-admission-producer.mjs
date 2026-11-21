@@ -27,7 +27,7 @@ const sqlite=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
 const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const template=path.join(root,'template.sqlite');
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 assert.equal(sqlite(template,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
 // A real schema 24 database (the chain up to 0024, without 0025 and later), for the pre-migration behaviour.
 const template24=path.join(root,'template24.sqlite');
@@ -286,8 +286,8 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
   await applyRatedAdmissionRetention(envOf(file),{event:'m:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
   const before=st(file);
   assert.equal(sqlite(file,'DROP TABLE film_retention_scan').status,0);
-  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),30);
-  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'m:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')}),error=>error.code==='film_person_unavailable'&&/film_retention_scan_missing_at_schema_30/.test(String(error.cause?.message)));
+  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),31);
+  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'m:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')}),error=>error.code==='film_person_unavailable'&&/film_retention_scan_missing_at_schema_31/.test(String(error.cause?.message)));
   assert.deepEqual(st(file),before,'nothing was written');
   await assert.rejects(()=>FA.readRetentionWatermark(envOf(file)),error=>error.code==='film_person_unavailable');
  }

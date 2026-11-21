@@ -70,7 +70,7 @@ assert.throws(()=>K.step('x','y','DROP TABLE a',''),/read-only SELECT/);
 assert.throws(()=>K.step('x','y','SELECT 1; DROP TABLE a',''),/read-only SELECT/);
 assert.throws(()=>K.prerequisiteTables(text.replace("   'film_person_cas',\n","")),/six tables, found 5/);
 
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const v19=path.join(root,'v19.sqlite');
 run(v19,chain.filter(name=>Number(name.slice(0,4))<=19).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+
  "\nUPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;");

@@ -231,7 +231,7 @@ assert.equal(ctx.compareHistoryEvents({type:'diary_viewing',at:'2026-09-20',atPr
 // marker only): never a title, year or slug; a conflict, a redirect, a held marker and a missing claim each say what they are. Local stand-ins only; nothing here writes.
 {
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-film-history-'));
- const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
  const base=path.join(root,'base.sqlite');sqlite(base,names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
  // ADR 0162: a ratings marker that is not d1/open is refused. Sections that test the history itself use a database without the ratings

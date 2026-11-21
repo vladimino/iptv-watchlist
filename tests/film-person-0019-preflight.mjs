@@ -53,7 +53,7 @@ assert.throws(()=>K.step('x','y','DROP TABLE a',''),/read-only SELECT/);
 assert.throws(()=>K.step('x','y','SELECT 1; DROP TABLE a',''),/read-only SELECT/);
 assert.throws(()=>K.prerequisiteTables(text.replace(",\n   'projector_window'\n",'\n')),/eight tables, found 7/);
 
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const v18=path.join(root,'v18.sqlite');
 run(v18,chain.filter(name=>Number(name.slice(0,4))<=18).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+
  `\nUPDATE film_person_baseline SET state='loading',reference='${REF}' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;`);

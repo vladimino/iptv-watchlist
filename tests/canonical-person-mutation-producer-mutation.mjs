@@ -65,7 +65,7 @@ try{
  for(const [name,file,from] of MUTANTS)assert.equal(text(file).split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in src/'+file);
  // One shared template database (the whole migration chain), built once.
  const template=path.join(dir,'template.sqlite');
- const chain=fs.readdirSync('migrations').filter(file=>/^\d{4}_.*\.sql$/.test(file)&&file!=='0032_letterboxd_sync_control.sql').sort();
+ const chain=fs.readdirSync('migrations').filter(file=>/^\d{4}_.*\.sql$/.test(file)).sort();
  assert.equal(sqliteSync(['-bail',template],{input:chain.map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26}).status,0);
  const run=(env)=>new Promise(resolve=>{
   const child=spawn(process.execPath,['tests/canonical-person-mutation-producer.mjs'],{env:{...process.env,EPG_TEMPLATE:template,...env},stdio:['ignore','ignore','pipe']});

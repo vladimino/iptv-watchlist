@@ -256,7 +256,7 @@ if(on('6')){
   assert.ok(UNITS[kind],'a registered kind names its unit module: '+kind);
   assert.ok(bundle.includes(UNITS[kind]),'a registered operation needs its unit in the Worker bundle: '+kind);
  }
- const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql');
+ const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name));
  const introduced=migrations.some(name=>fs.readFileSync('migrations/'+name,'utf8').includes(RECEIPTS_PROTOCOL.table));
  assert.ok(introduced,'migration 0019 exists in the repository (applied in production, schema 19)');
  for(const item of PRODUCER_WIRING)for(const kind of item.requires)assert.ok(OPERATION_KINDS.includes(kind),kind+' is a receipts operation kind');

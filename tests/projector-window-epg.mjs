@@ -25,7 +25,7 @@ const call=code=>vm.runInContext(code,context);
 vm.runInContext(fs.readFileSync('src/discovery-workflow.js','utf8'),context);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-window-epg-'));
 // The window protocol is this file's subject. The EPG-priority pause (0022, tests/epg-priority-gate.mjs) is a different gate and would refuse the Discovery-role acquires below by the wall clock.
-const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql'&&Number(name.slice(0,4))<=21).sort();
+const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=21).sort();
 const file=path.join(root,'e.sqlite');
 {const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+files.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr);}
 const db=d1Standin(file);
@@ -220,7 +220,7 @@ await Authority.releaseProjectorWindow(env,{owner:'p1'});
 // 3. ADR 0135 (AIR-459), table PRESENT (0022 applied to a throwaway file): a live Discovery lease is a collision, not a fault of the publication, so the publication paths answer it as the
 // structured, non-failure `ResolverBusy` (kind `lease_held`, with the holder's expiry). With the table absent (every case above) the generic error is unchanged: that is the inert boundary.
 {
- const all=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+ const all=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const file22=path.join(root,'e22.sqlite');
  const made=sqliteSync(['-bail',file22],{input:'PRAGMA foreign_keys=ON;\n'+all.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
  if(made.status!==0)throw new Error(made.stderr||'migration failed');
@@ -246,7 +246,7 @@ await Authority.releaseProjectorWindow(env,{owner:'p1'});
 // 4. Unreadable presence is not absence (review of #605). Schema 22 with the authority read failing: no new run is started and no publication stamps a NULL day; the structured busy is not
 // invented either. Schema 21 (verified absent) keeps going exactly as before: no presence error and no `runKey` on a run.
 {
- const all=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+ const all=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const build=(name,upTo)=>{
   const f=path.join(root,name);
   const made=sqliteSync(['-bail',f],{input:'PRAGMA foreign_keys=ON;\n'+all.filter(n=>Number(n.slice(0,4))<=upTo).map(n=>fs.readFileSync('migrations/'+n,'utf8')).join('\n'),encoding:'utf8'});

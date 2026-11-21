@@ -16,7 +16,7 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-priority-gate-'));
-const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 let databases=0;
 // The write fence reads the DATABASE clock (`PRIORITY_DB_NOW_SQL`). The stand-in replaces it with the frozen test clock when the statement is built, and `crossAt` moves both the
 // database clock and `Date.now()` to a later instant AFTER the Worker's pre-read and BEFORE the batch runs: a deterministic read-to-write boundary crossing.

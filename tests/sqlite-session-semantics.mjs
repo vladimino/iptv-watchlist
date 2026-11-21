@@ -175,7 +175,7 @@ const same=(file,input,json=false)=>{
 // AIR-374: the schema copy is for the repository's own migration files only. A script with the same prefix and more than 2000 characters that seeds data, or reads random(), CURRENT_TIMESTAMP or strftime('now'),
 // is executed on every new database; the approved chain is still recognised (and copied).
 {
- const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
  const chain='PRAGMA foreign_keys=ON;\n'+names.map(name=>fs.readFileSync(path.join('migrations',name),'utf8')).join('\n');
  assert.equal(approvedMigrationChain(chain),true,'the whole migration chain is approved');
  assert.equal(approvedMigrationChain('PRAGMA foreign_keys=ON;\n'+fs.readFileSync(path.join('migrations',names[0]),'utf8')),true,'a single migration is approved');

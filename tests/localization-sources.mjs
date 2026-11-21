@@ -12,7 +12,7 @@ import {resolveLocalization,loadLocalizationInputs,readLocalization,compareLocal
 import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-localization-sources-'));
-const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort().map(name=>name.replace(/\.sql$/,''));
+const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
 const NEW='0014_localization_source';
 assert.ok(names.includes(NEW),'0014 exists');
 const chain=names.filter(name=>name<NEW);

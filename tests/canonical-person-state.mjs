@@ -21,7 +21,7 @@ const {recordPersonState,recordLocalizationConflicts,planPersonState,planConflic
 const only=process.env.CANON_PERSON_STATE_ONLY?new Set(process.env.CANON_PERSON_STATE_ONLY.split(',')):null;
 const on=number=>!only||only.has(String(number));
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-person-state-'));
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort().map(name=>name.replace(/\.sql$/,''));
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
 const sqlite=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
 const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];

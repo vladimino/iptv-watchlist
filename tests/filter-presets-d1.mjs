@@ -16,7 +16,7 @@ process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}}
 const run=(file,text)=>sqliteSync(['-bail',file],{input:text,encoding:'utf8',maxBuffer:1<<26});
 const rowsOf=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);return r.stdout.trim()?JSON.parse(r.stdout):[];};
 const read=name=>fs.readFileSync('migrations/'+name,'utf8');
-const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const m28='0028_filter_preset_authority.sql';
 assert.ok(files.includes(m28));
 

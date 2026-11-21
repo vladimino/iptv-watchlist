@@ -17,10 +17,10 @@ process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}}
 const sqlite=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
 const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
-const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const template=path.join(root,'t.sqlite');
 assert.equal(sqlite(template,chainFiles.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
-assert.equal(Number(one(template,'SELECT version FROM schema_contract WHERE id=1')),30,'the whole chain: 0023, 0024 (dormant prediction recovery intent), 0025 (retention scan watermark), 0026 (EPG run certificate), 0027 (identity revoke intent kind) then 0028 (dormant Filter presets authority) then 0029 (dormant Started marks authority) then 0030 (dormant EPG checkpoint authority)');
+assert.equal(Number(one(template,'SELECT version FROM schema_contract WHERE id=1')),31,'the whole chain: 0023, 0024 (dormant prediction recovery intent), 0025 (retention scan watermark), 0026 (EPG run certificate), 0027 (identity revoke intent kind) then 0028 (dormant Filter presets authority) then 0029 (dormant Started marks authority) then 0030 (dormant EPG checkpoint authority) then 0031 (dormant Watchlist authority)');
 assert.equal(Number(one(template,'SELECT COUNT(*) FROM canonical_producer_chain')),0);
 const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
 let n=0;

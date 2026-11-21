@@ -77,7 +77,7 @@ class AuditBucket extends MemoryBucket{
 const hashOf=file=>fs.existsSync(file)?crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex'):'none';
 
 // ---- scenarios ----
-const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
+const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const G='22222222-2222-4222-8222-222222222222',PAST=new Date(Date.now()-3600000).toISOString();
 const film={id:'w1',tmdbId:'42',title:'Hot Film',original:'Hot Film',year:2020,runtime:100,genres:[],directors:[{id:'director/one',name:'One',original:'One'}],actors:[],shows:[]};
 const programme=runId=>({runId,updatedAt:PAST,watchlistCount:1,films:[film],stats:{}});

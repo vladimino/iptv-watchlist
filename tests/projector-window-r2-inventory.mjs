@@ -116,7 +116,7 @@ const FILE_SITES={
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
  // ADR 0145: +1 r2 put of `epg/seal/<runId>/publication.json` in `stageSealedGeneration` and +1 dynamic delete of that key in `sealQueueStep`
  // (the leftover `payload.json` delete stays). Neither object is a projector input; both sit on the publication path that already takes the lease.
- 'src/worker.js':{r2:16,wrapper:57,dynamic:19}, // AIR-513: flushWatchlistEvent (including the failed-put mark) and the seal completion flush save sync.json, not a projector input. AIR-79: -1 wrapper, the saveJSON(env,'sync.json',run) of the removed ratingsPhase
+ 'src/worker.js':{r2:16,wrapper:58,dynamic:19}, // AIR-569: +1 wrapper, the run record sync.json saved when a Watchlist-pinned run replaces its events by the epg event alone, not a projector input. AIR-513: flushWatchlistEvent (including the failed-put mark) and the seal completion flush save sync.json, not a projector input. AIR-79: -1 wrapper, the saveJSON(env,'sync.json',run) of the removed ratingsPhase
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
 assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');
@@ -214,6 +214,7 @@ for(const name of notDiscovery)assert.ok(inputs.has(name),'the projector reads '
 const naming=set=>[...set.keys()].filter(key=>notDiscovery.some(name=>set.get(key).d.body.includes("'"+name+"'"))).sort();
 const NAMING={
  'loadJSON@src/worker.js':'a read of published documents and other JSON; it does not write',
+ 'catalogMetadataRead@src/worker.js':'AIR-569: a READ of the canonical metadata (D1 reader in d1 mode, else the metadata.json mirror) for the identity of a new Watchlist member; it writes nothing',
  'putStoredJson@src/worker.js':'frozen titles.json/people.json put after epgStepGuard; other keys are ordinary R2 JSON',
  'writeMirrors@src/published-epg.js':'writes those mirrors from the D1 document, idempotently',
  'persistWatchlist@src/worker.js':'publication path, under the lease',
