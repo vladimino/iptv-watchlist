@@ -601,6 +601,9 @@ export const FILES={
  "epg-checkpoint-d1.mjs": {
   "suite": "core"
  },
+ "epg-channel-d1.mjs": {
+  "suite": "core"
+ },
  "epg-checkpoint-production.mjs": {
   "suite": "core"
  },
