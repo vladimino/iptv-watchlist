@@ -640,7 +640,9 @@ async function replacePart(env,target,kind,programme,watchlist,options){
  const key=kind==='watchlist'?WATCHLIST_KEY:PROGRAMME_KEY;
  if(env.BUCKET&&typeof env.BUCKET.put==='function'&&typeof env.BUCKET.get==='function'){
   try{
-   await putStable(env.BUCKET,key,body);
+   // The root watchlist goes through the guarded writer; the programme root and the generation-addressed copies are independent of the Watchlist marker.
+   if(key===WATCHLIST_KEY)await putWatchlistRoot(env,body);
+   else await putStable(env.BUCKET,key,body);
    await putStable(env.BUCKET,generationObjectKey(target,key),body);
   }catch{/* The D1 commit stands. A later read repairs the mirror. */}
  }
@@ -686,9 +688,29 @@ async function mirrorObject(bucket,key,value){
 // ADR 0186 (AIR-569): once the Watchlist is its own D1 authority (marker `d1`) the root `watchlist.json` mirror belongs to the Letterboxd Sync and its reconcile, and the EPG must never overwrite it with an
 // EPG-pinned copy. The generation-addressed copy `epg/generations/<run>/watchlist.json` stays EPG-owned. Absent tables (`no such table`) mean the marker does not exist: the EPG owns the root mirror, as before.
 // Any other storage error fails closed (the root write is skipped; the next repair retries).
+// AIR-571 (C3): the EPG may write the root mirror only while the marker is `epg` AND `open`. `d1` is the Watchlist's own mirror; `held` is the cutover window (hold, switch, rollback), in which no EPG-side writer starts a root write.
 export async function watchlistRootOwned(env){
- try{const row=await one(database(env),'SELECT mode FROM watchlist_authority WHERE id=1');return row?.mode==='d1';}
+ try{const row=await one(database(env),'SELECT mode, writes FROM watchlist_authority WHERE id=1');return row?.mode==='d1'||row?.writes==='held';}
  catch(error){return !/no such table/i.test(String(error?.message||error));}
+}
+// The ONE writer of the root `watchlist.json` on the EPG side (every EPG-side path goes through it: the part replacement, the mirror writer and its repair, and the Worker's fallback tail). Order matters and is the fence:
+// (1) read the object and take its etag, (2) read the marker AFTER that read, (3) put only if the etag is still the one read. A writer that read before a flip fails (3) once the operator has changed the etag with its
+// fence write; a writer that reads after the fence sees the marker `held` or `d1` at (2) and stops. A plain re-check of the mode before the PUT is not enough, because the PUT itself is not conditional on the marker.
+// -> {blocked:true} (the marker is not `epg`/`open`, or unreadable: nothing was written) | {blocked:false,etag} (written, or already equal) | {blocked:false,etag:null} (a lost compare-and-swap or an object without an etag)
+export async function putWatchlistRoot(env,value){
+ const bucket=env?.BUCKET;
+ if(!bucket||typeof bucket.put!=='function'||typeof bucket.get!=='function')return {blocked:false,etag:null};
+ const text=JSON.stringify(value);
+ const current=await bucket.get(WATCHLIST_KEY);
+ if(await watchlistRootOwned(env))return {blocked:true,etag:null};
+ if(current){
+  if(await objectText(current)===text)return {blocked:false,etag:current.etag??null};
+  if(!current.etag)return {blocked:false,etag:null};
+  const saved=await bucket.put(WATCHLIST_KEY,text,{...JSON_PUT,onlyIf:{etagMatches:current.etag}});
+  return {blocked:false,etag:saved?.etag??null};
+ }
+ const saved=await bucket.put(WATCHLIST_KEY,text,{...JSON_PUT,onlyIf:{etagDoesNotMatch:'*'}});
+ return {blocked:false,etag:saved?.etag??null};
 }
 export async function writeMirrors(env,input){
  const db=database(env);
@@ -702,10 +724,10 @@ export async function writeMirrors(env,input){
   if(!programmeCopy||!rootProgramme)return false;
   let watchlistEtag=null;
   if(input.watchlist){
-   const rootOwned=await watchlistRootOwned(env);
-   if(!rootOwned)watchlistEtag=await putStable(bucket,WATCHLIST_KEY,input.watchlist);
+   const root=await putWatchlistRoot(env,input.watchlist);
+   if(!root.blocked)watchlistEtag=root.etag;
    const watchlistCopy=await putStable(bucket,generationObjectKey(input.programmeRunId,'watchlist.json'),input.watchlist);
-   if((!rootOwned&&!watchlistEtag)||!watchlistCopy)return false;
+   if((!root.blocked&&!watchlistEtag)||!watchlistCopy)return false;
   }
   let pointerEtag=authority.mirrorEtag;
   if(input.phase!=='withheld'){

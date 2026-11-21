@@ -909,6 +909,11 @@ const saveJSON=async(env,key,value)=>{
    return {etag:'d1'};
   }
  }
+ if(key==='watchlist.json'&&typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.putWatchlistRoot==='function'&&env?.BUCKET&&typeof env.BUCKET.put==='function'&&typeof env.BUCKET.get==='function'){
+  // AIR-571 (C3): the root watchlist mirror has ONE guarded writer (read the object, check the marker AFTER the read, conditional put). Every fallback tail reaches it through here.
+  const out=await PublishedEpg.putWatchlistRoot(env,value);
+  return out.blocked?{skipped:'watchlist_root_not_writable'}:{etag:out.etag};
+ }
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
   const routed=await DiscoveryAuthority.routeWrite(env,key,value);
   if(routed.handled)return;

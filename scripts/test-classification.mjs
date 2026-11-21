@@ -634,6 +634,9 @@ export const FILES={
  "watchlist-cutover.mjs": {
   "suite": "core"
  },
+ "watchlist-root-fence.mjs": {
+  "suite": "core"
+ },
  "migration-statements.mjs": {
   "suite": "core"
  },

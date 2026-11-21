@@ -14,22 +14,28 @@
 //                   (version, revision) and the published run and EPG generation read before
 //   revert-authority     d1/held G -> epg/held G+1   pins as export-rollback, with the EPG generation the export PRODUCED (read back: membership and order parity inside the batch)
 //   release-rolled-back  epg/held G -> epg/open G
+//   fence-root      epg/held G (no D1 write)  changes the ETAG of the root watchlist.json mirror in R2 (a conditional re-serialization of the same list), so that no EPG-side root writer that read the object
+//                   before the fence can still write it; pins: the generation and the etag read before. `activate` then requires the etag the fence produced (--expect-root-etag)
 //
 // Not here: the Ratings close, the Letterboxd mode switch, the root mirror reconciliation, the binding and the cron.
 import {pathToFileURL} from 'node:url';
 import {createD1Adapter,D1Error} from './d1-backfill.mjs';
-import {createPublishedBinding,normalize,OperatorStop,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
+import {createPublishedBinding,normalize,OperatorStop,PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
+import {createS3Store,InstallError,readInstallCredentials} from './r2-s3-store.mjs';
+import {readCredentials} from './r2-snapshot-export.mjs';
 import {readState as readBase,verifyImported} from './watchlist-bootstrap-production.mjs';
 import {LEASE_MARGIN_MS,livenessOf,membershipDigest} from '../src/watchlist-bootstrap.js';
 import {listDigest,normalizeFilms} from '../src/watchlist-d1.js';
 import * as PublishedEpg from '../src/published-epg.js';
 import {exportGuards,TRANSITIONS,transitionStatements} from '../src/watchlist-cutover.js';
 
-export const COMMANDS=['status',...Object.keys(TRANSITIONS),'export-rollback'];
-const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--expect-run':'run','--expect-epg-generation':'epgGeneration','--expect-count':'count','--expect-members-sha256':'membersSha256','--expect-sha256':'sha256','--expect-snapshot-id':'snapshotId','--expect-version':'version','--expect-revision':'revision'};
+export const COMMANDS=['status',...Object.keys(TRANSITIONS),'export-rollback','fence-root'];
+export const ROOT_KEY='watchlist.json';
+const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--expect-run':'run','--expect-epg-generation':'epgGeneration','--expect-count':'count','--expect-members-sha256':'membersSha256','--expect-sha256':'sha256','--expect-snapshot-id':'snapshotId','--expect-version':'version','--expect-revision':'revision','--expect-root-etag':'rootEtag'};
 const NEEDS={
  hold:['generation','run','epgGeneration','count','membersSha256','sha256','snapshotId'],
- activate:['generation','run','epgGeneration','count','membersSha256','sha256','snapshotId'],
+ activate:['generation','run','epgGeneration','count','membersSha256','sha256','snapshotId','rootEtag'],
+ 'fence-root':['generation','rootEtag'],
  release:['generation','run','count','membersSha256','sha256','snapshotId'],
  'release-abort':['generation'],
  'hold-rollback':['generation','count','sha256','snapshotId','version','revision'],
@@ -154,8 +160,48 @@ export async function exportRollback(binding,state,args,clock,ctx={}){
  return {operation:'export-rollback',writes:true,writeState:'committed',published:{programmeRunId:after.published.programme_run_id,generation:Number(after.published.generation)},next:'revert-authority with --expect-epg-generation '+Number(after.published.generation)};
 }
 
+
+// ---- the root mirror fence ---------------------------------------------------------------------------------------------------
+// The root `watchlist.json` mirror is written by EPG-side writers with a conditional put on the etag they read (see PublishedEpg.putWatchlistRoot). In `epg`/`held` no writer starts a new root write, but one
+// that passed the marker check earlier is still in flight and its put would succeed. The fence removes it without a wait and without a lease: the operator rewrites the SAME list, re-serialized with one trailing
+// newline toggled, by a conditional put on the etag it read, so the etag changes and every in-flight conditional put fails. Content equivalence (the parsed list) is checked before and after.
+export async function fenceRoot(state,args,{readStore,writeStoreFactory,ctx={}}){
+ const m=markerOf(state);
+ if(m.mode!=='epg'||m.writes!=='held'||m.generation!==args.generation)throw new OperatorStop('state_mismatch',3,{marker:m});
+ if(!readStore||!writeStoreFactory)throw new OperatorStop('root_store_required',2);
+ let object;
+ try{object=await readStore.get(ROOT_KEY);}catch{throw new OperatorStop('root_unreadable',3);}
+ if(!object)throw new OperatorStop('root_absent',3);
+ if(object.etag!==args.rootEtag)throw new OperatorStop('root_moved',3,{root:{etag:object.etag}});
+ const text=await object.text();
+ let parsed;
+ try{parsed=JSON.parse(text);}catch{parsed=null;}
+ if(!parsed||typeof parsed!=='object'||!Array.isArray(parsed.films))throw new OperatorStop('root_unreadable',3);
+ const fenced=text.endsWith('\n')?text.slice(0,-1):text+'\n';
+ const store=writeStoreFactory(new Set([ROOT_KEY]));
+ if(ctx.track)ctx.track('unknown');
+ let saved,failure=null;
+ try{saved=await store.put(ROOT_KEY,fenced,{onlyIf:{etagMatches:args.rootEtag},httpMetadata:{contentType:'application/json'}});}catch(error){failure=error;}
+ let after=null;
+ try{after=await readStore.get(ROOT_KEY);}catch{after=null;}
+ const afterText=after?await after.text():null;
+ const reached=Boolean(after)&&afterText===fenced&&after.etag!==args.rootEtag;
+ if(failure||!saved){
+  // A lost conditional put (another writer changed the object first) wrote nothing; an exception is unproven and is never retried.
+  if(!failure&&saved==null&&after&&after.etag!==args.rootEtag&&!reached){if(ctx.track)ctx.track('none');throw new OperatorStop('root_moved',3,{root:{etag:after.etag}});}
+  if(!failure&&saved==null&&after&&after.etag===args.rootEtag){if(ctx.track)ctx.track('none');throw new OperatorStop('root_moved',3,{root:{etag:after.etag}});}
+  if(ctx.track)ctx.track('unknown');
+  throw new OperatorStop('write_uncertain',3,{root:after?{etag:after.etag,fenced:reached}:null});
+ }
+ let equivalent=false;
+ try{equivalent=Boolean(after)&&JSON.stringify(JSON.parse(afterText))===JSON.stringify(parsed);}catch{equivalent=false;}
+ if(!reached||!equivalent)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',root:after?{etag:after.etag}:null});
+ if(ctx.track)ctx.track('committed');
+ return {operation:'fence-root',writes:true,writeState:'committed',root:{etag:after.etag,previousEtag:args.rootEtag},marker:m,next:'activate with --expect-root-etag '+after.etag};
+}
+
 // ---- one transition ------------------------------------------------------------------------------------------------------------
-export async function execute(command,{binding,args={},now,ctx={}}){
+export async function execute(command,{binding,args={},now,ctx={},readStore=null,writeStoreFactory=null}){
  const clock=typeof now==='function'?now():now;
  const state=await readState(binding);
  if(state.tables.present!==state.tables.expected||state.schemaVersion<31||!state.marker||Number(state.marker.cas)!==1)throw new OperatorStop('schema_unready',3);
@@ -165,6 +211,7 @@ export async function execute(command,{binding,args={},now,ctx={}}){
   return {operation:'status',writes:false,writeState:'none',...view(state),snapshot:current.ok?{ok:true,runId:current.runId,membersSha256:current.membersSha256}:{ok:false,reason:current.reason},epgBusy:live.ok?live.busy:'unknown'};
  }
  if(command==='export-rollback')return exportRollback(binding,state,args,clock,ctx);
+ if(command==='fence-root')return fenceRoot(state,args,{readStore,writeStoreFactory,ctx});
  const spec=TRANSITIONS[command];
  if(!spec)throw new OperatorStop('usage',2);
  const m=markerOf(state);
@@ -194,6 +241,14 @@ export async function execute(command,{binding,args={},now,ctx={}}){
    const undrained=await effectsPending(binding,state);
    if(undrained)throw new OperatorStop('effects_pending',3,undrained);
   }
+ }
+ if(command==='activate'){
+  // C3: the root watchlist mirror is fenced before the switch. The etag the fence produced is the etag the root still has: any EPG-side writer that read the object earlier would lose its conditional put, and
+  // a later one finds the marker `held`. A root that moved again means a writer got through, so the fence is repeated, never assumed.
+  if(!readStore)throw new OperatorStop('root_store_required',2);
+  let object;
+  try{object=await readStore.head(ROOT_KEY);}catch{throw new OperatorStop('root_unreadable',3);}
+  if(!object||object.etag!==args.rootEtag)throw new OperatorStop('root_fence_mismatch',3,{root:object?{etag:object.etag}:null});
  }
  if(spec.needs.includes('exportParity')){
   // The proof is read here and bound inside the batch: a certified run at the pinned generation, the stored list equal to the snapshot (normalized digest, title, year and url included, and the member
@@ -285,10 +340,28 @@ export function parseArgs(argv){
  const digit=(key,pattern)=>{if(parsed[key]!==undefined){if(!pattern.test(parsed[key]))throw new OperatorStop('usage',2);out[key]=Number(parsed[key]);}};
  digit('generation',/^\d{1,9}$/);digit('epgGeneration',/^\d{1,9}$/);digit('count',/^\d{1,5}$/);digit('version',/^\d{1,9}$/);digit('revision',/^\d{1,9}$/);
  for(const key of ['sha256','membersSha256'])if(parsed[key]!==undefined){if(!/^[0-9a-f]{64}$/.test(parsed[key]))throw new OperatorStop('usage',2);out[key]=parsed[key];}
+ if(parsed.rootEtag!==undefined){if(!/^[A-Za-z0-9._\-]{1,100}$/.test(parsed.rootEtag))throw new OperatorStop('usage',2);out.rootEtag=parsed.rootEtag;}
  for(const key of ['run','snapshotId'])if(parsed[key]!==undefined){if(!parsed[key]||parsed[key].length>100)throw new OperatorStop('usage',2);out[key]=parsed[key];}
  // only the pins of the command are accepted
  for(const key of Object.keys(out))if(!NEEDS[command].includes(key))throw new OperatorStop('usage',2);
  return {command,args:out};
+}
+
+function readStoreOf(env,fetchImpl){
+ let credentials;
+ try{credentials=readCredentials(env);}catch(error){throw normalize(error);}
+ if(credentials.accountId!==PRODUCTION_ACCOUNT_ID)throw new OperatorStop('account_mismatch',3);
+ if(credentials.bucket!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('bucket_identity',3);
+ return createS3Store({credentials,fetchImpl});
+}
+function writeStoreFactoryOf(env,fetchImpl){
+ return allowed=>{
+  let credentials;
+  try{credentials=readInstallCredentials(env);}catch(error){throw error instanceof InstallError?new OperatorStop('configuration',2):normalize(error);}
+  if(credentials.accountId!==PRODUCTION_ACCOUNT_ID)throw new OperatorStop('account_mismatch',3);
+  if(credentials.bucket!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('bucket_identity',3);
+  return createS3Store({credentials,fetchImpl,allowedWrites:allowed});
+ };
 }
 
 export async function runWatchlistCutoverProduction({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,now=()=>Date.now(),deps=null}={}){
@@ -297,8 +370,8 @@ export async function runWatchlistCutoverProduction({argv=process.argv,env=proce
  try{
   const parsed=parseArgs(argv);
   if(parsed.report)return {exit:0,result:parsed.report};
-  let binding,target=null;
-  if(deps)({binding}=deps);
+  let binding,target=null,readStore=null,writeStoreFactory=null;
+  if(deps)({binding,readStore=null,writeStoreFactory=null}=deps);
   else{
    target=productionTarget(env);
    const adapter=trackProductionWrites(createD1Adapter({target,databaseId:PRODUCTION_DATABASE_ID,fetchImpl}),{writeState:'none'});
@@ -306,8 +379,9 @@ export async function runWatchlistCutoverProduction({argv=process.argv,env=proce
    if(described.uuid!==PRODUCTION_DATABASE_ID||described.name!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_identity_mismatch',3);
    binding=createPublishedBinding(adapter);
    if(parsed.command!=='status')ctx.bookmark=await readBookmark(target,fetchImpl);
+   if(['activate','fence-root'].includes(parsed.command)){readStore=readStoreOf(env,fetchImpl);if(parsed.command==='fence-root')writeStoreFactory=writeStoreFactoryOf(env,fetchImpl);}
   }
-  const result=await execute(parsed.command,{binding,args:parsed.args,now,ctx:{track}});
+  const result=await execute(parsed.command,{binding,args:parsed.args,now,ctx:{track},readStore,writeStoreFactory});
   let bookmarkAfter=null;
   if(result.writes&&target)try{bookmarkAfter=await readBookmark(target,fetchImpl);}catch{bookmarkAfter=null;}
   return {exit:0,result:{...result,...(ctx.bookmark?{bookmarkBefore:ctx.bookmark}:{}),...(bookmarkAfter?{bookmarkAfter}:{})}};
