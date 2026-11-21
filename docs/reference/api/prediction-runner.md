@@ -140,7 +140,7 @@ The run's films are selected once: hot first, cold only while no hot film is out
 
 | Readback | Meaning |
 | --- | --- |
-| `prediction_batch_manifest` → `409 manifest_pending` + `retryAfterMs` (5000) | the claim is live, or the preparation mark is still set (the manifest is stored but **not served** before the readiness edit): poll again |
+| `prediction_batch_manifest` → `409 manifest_pending` + `retryAfterMs` (5000) at the HTTP level of the read; the MCP tool returns it as a **successful** result `{httpStatus: 200, kind: "pending", status/code: "manifest_pending", retryAfterMs}` (no `error`, no `isError`) | the claim is live, or the preparation mark is still set (the manifest is stored but **not served** before the readiness edit): poll again |
 | `prediction_batch_manifest` → the envelope and parts | ready: the manifest is the same immutable stored answer as a synchronous start |
 | `prediction_batch_manifest` → `409 start_refused` (`outcomeCode`, `reason`) | final: the start was refused (`noop`, `quota`, `manifest_too_large`, `prediction_catalog_held`, …); no run exists |
 | `prediction_batch_manifest` → `409 start_failed` (`outcomeCode`) | final: `start_claim_lost`, `storage_error`, or `start_lost` (no run, no outcome and no live claim); the terminal outcome wins over a partial run row |
