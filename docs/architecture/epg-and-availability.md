@@ -166,20 +166,23 @@ Channels get their own D1 tables with a provider category, a per-category policy
 ```mermaid
 flowchart TD
     m3u["M3U groups and tvg ids<br/>(source of classification)"]
-    plan["Pure import plan:<br/>tvg_1259 to ch1259, tvg_1 to ch001;<br/>duplicate or unknown group refuses the plan;<br/>unlisted channels are kept, never deleted"]
-    tables[("D1 channel tables, one snapshot revision:<br/>category policy, owner override")]
+    plan["Pure import plan: M3U tvg ids and XMLTV ids,<br/>tvg_1259 to ch1259, tvg_1 to ch001;<br/>duplicate or unknown group refuses the plan;<br/>unlisted channels are kept, never deleted"]
+    tables[("D1 channel tables, one snapshot revision:<br/>provider category, owner category, owner override")]
     snapshot["One bounded snapshot read:<br/>one existence check and four data queries,<br/>then in-memory lookup"]
     derive{"Effective policy"}
-    override["owner override"]
-    category["category policy"]
-    fallback["known_only:<br/>unknown, unclassified, empty or unavailable"]
+    override["owner policy override"]
+    ownercat["owner category policy"]
+    category["provider category policy"]
+    fallback["known_only:<br/>unknown, unclassified (incl. XMLTV-only), empty or unavailable"]
     reader["Future scan consumer (not implemented)"]
     shows["published_epg_show and discovery_observation_show:<br/>own keys, no foreign key to channels"]
     m3u --> plan -->|"fenced batch at the expected revision"| tables --> snapshot --> derive
     derive -->|"has override"| override
-    derive -->|"has category"| category
+    derive -->|"has owner category"| ownercat
+    derive -->|"has provider category"| category
     derive -->|"otherwise"| fallback
     override --> reader
+    ownercat --> reader
     category --> reader
     fallback --> reader
     shows -.->|"channel_id of a show is the lookup key, by id only, never by name"| reader

@@ -94,7 +94,7 @@ assert.equal(Channel.planImport({groups:'x',entries:[]}).ok,false);
 const manyErrors=Channel.planImport({groups:GROUPS,entries:Array.from({length:200},()=>({sourceId:'bad'}))});
 assert.equal(manyErrors.errors.length,Channel.IMPORT_ERROR_CAP,'the error list is bounded');
 
-// ===== 5. the snapshot: precedence override > category > known_only, fallbacks, one bounded read =====
+// ===== 5. the snapshot: precedence owner override > owner category > provider category > known_only, XMLTV-only channels, fallbacks, one bounded read =====
 let copies=0;
 const fresh=(options={})=>{const file=path.join(root,'db-'+(copies++)+'.sqlite');fs.copyFileSync(base,file);return {file,db:d1Standin(file,options)};};
 const {file:f1,db:d1}=fresh();
@@ -127,15 +127,16 @@ assert.deepEqual(policyOf('ch002'),{policy:'deny_all',basis:'category',degraded:
 assert.equal(snap.channels.get('ch002').overrideNote,null);
 // the read is four statements for any number of channels, and a lookup afterwards touches no database
 const counting=fresh();let seen=0;const spy=d1Standin(counting.file,{onQuery:()=>{seen++;}});
-const big=Channel.planImport({groups:[{name:'G',policy:'discover'}],entries:Array.from({length:2103},(_,index)=>({sourceId:'tvg_'+(index+1),name:'n'+index,group:'G'}))});
-assert.equal((await Channel.commitImport(spy,{expectedRevision:0,sourceSha256:SHA('b'),plan:big,now:T})).ok,true,'2103 channels (the audited baseline) commit in one batch');
+const big=Channel.planImport({groups:[{name:'G',policy:'discover'}],entries:Array.from({length:2103},(_,index)=>({sourceId:'tvg_'+(index+1),name:'n'+index,group:'G'})),xmltvChannels:[...Array.from({length:1340},(_,index)=>({channelId:'ch'+String(index+1).padStart(3,'0'),name:'x'+index})),...Array.from({length:15},(_,index)=>({channelId:'ch'+(5001+index),name:'only'+index}))]});
+assert.equal((await Channel.commitImport(spy,{expectedRevision:0,sourceSha256:SHA('b'),plan:big,now:T})).ok,true,'2118 channels (2103 M3U plus 15 XMLTV-only, the audited baseline) commit in one batch');
 seen=0;const bigSnap=await Channel.readSnapshot(spy);
-assert.equal(bigSnap.channels.size,2103);
+assert.equal(bigSnap.channels.size,2118);
+assert.equal([...bigSnap.channels.values()].filter(channel=>channel.origin==='xmltv').length,15);
 assert.equal(seen,5,'one snapshot read is one table-existence query plus four data queries ('+seen+'), not one per channel');
 seen=0;for(let index=1;index<=2103;index++)bigSnap.lookup.policyFor('ch'+String(index).padStart(3,'0'));bigSnap.lookup.policyFor('ch9999');
 assert.equal(seen,0,'no per-channel D1 read in a scan loop');
 assert.equal(spy.calls.batches,1);
-assert.ok(spy.calls.statements<=200,'one bounded batch of '+spy.calls.statements+' statements for 2103 channels (15 per statement)');
+assert.ok(spy.calls.statements<=200,'one bounded batch of '+spy.calls.statements+' statements for 2118 channels (14 per statement)');
 
 // ===== 6. revision compare-and-swap and idempotence =====
 const {file:f2,db:d2}=fresh();
@@ -197,6 +198,76 @@ snap=await Channel.readSnapshot(d3);
 assert.equal(snap.channels.get('ch009').listed,true);assert.deepEqual(policyOf('ch009'),{policy:'deny_all',basis:'category',degraded:false});
 assert.equal(snap.channels.get('ch005').listed,false);
 
+// ===== 6b. XMLTV-only channels, the owner category and the four-step precedence =====
+{
+ const xplan=Channel.planImport({groups:GROUPS,entries:ENTRIES,xmltvChannels:[{channelId:'ch001',name:'x'},{channelId:'ch5000',name:'Only XMLTV'},{channelId:'ch5001'}]});
+ assert.equal(xplan.ok,true);
+ assert.deepEqual(xplan.channels.map(channel=>[channel.channelId,channel.sourceId,channel.origin]).filter(row=>['ch001','ch5000','ch5001'].includes(row[0])),[['ch001','tvg_1','m3u'],['ch5000',null,'xmltv'],['ch5001',null,'xmltv']],'an XMLTV id an M3U entry normalizes to is the same channel; the others have no provider id');
+ assert.equal(xplan.channels.find(channel=>channel.channelId==='ch001').name,'Film One','the M3U name wins for a matched channel');
+ const codes=(xmltvChannels)=>{const r=Channel.planImport({groups:GROUPS,entries:ENTRIES,xmltvChannels});assert.equal(r.ok,false);return r.errors.map(error=>error.code);};
+ assert.deepEqual(codes([{channelId:'tvg_5000'}]),['invalid_channel_id']);
+ assert.deepEqual(codes([{channelId:'ch5000'},{channelId:'ch5000'}]),['duplicate_channel_id'],'a duplicate XMLTV id is a source error');
+ assert.equal(Channel.planImport({groups:GROUPS,entries:ENTRIES,xmltvChannels:'x'}).ok,false);
+ const {file:fx,db:dx}=fresh();
+ assert.deepEqual(await Channel.commitImport(dx,{expectedRevision:0,sourceSha256:SHA('a'),plan:xplan,now:T}),{ok:true,revision:1});
+ let sx=await Channel.readSnapshot(dx);
+ assert.equal(sx.ok,true);
+ const only=sx.channels.get('ch5000');
+ assert.deepEqual([only.sourceId,only.origin,only.categoryKey,only.listed],[null,'xmltv',null,true],'persisted without a provider id, unclassified, listed');
+ assert.deepEqual(sx.lookup.policyFor('ch5000'),{policy:'known_only',basis:'unclassified',degraded:false},'XMLTV-only is known_only until classified');
+ assert.notEqual(rows(fx,"SELECT origin FROM epg_channel WHERE channel_id='ch001'")[0].origin,'xmltv');
+ // owner category on an XMLTV-only channel, and on an M3U one (provider category stays untouched)
+ assert.deepEqual(await Channel.setOwnerCategory(dx,{expectedRevision:1,channelId:'ch5000',categoryKey:'movies',note:'owner',now:T}),{ok:true,revision:2});
+ assert.deepEqual(await Channel.setOwnerCategory(dx,{expectedRevision:2,channelId:'ch002',categoryKey:'movies',now:T}),{ok:true,revision:3});
+ sx=await Channel.readSnapshot(dx);
+ assert.deepEqual(sx.lookup.policyFor('ch5000'),{policy:'discover',basis:'owner_category',degraded:false},'owner category policy applies to an XMLTV-only channel');
+ assert.deepEqual(sx.lookup.policyFor('ch002'),{policy:'discover',basis:'owner_category',degraded:false},'owner category beats the provider category (news, deny_all)');
+ assert.equal(sx.channels.get('ch002').categoryKey,'news','the provider category is a separate field and is untouched');
+ assert.equal(sx.channels.get('ch5000').ownerCategoryNote,'owner');
+ // precedence: owner policy override > owner category > provider category > known_only
+ assert.deepEqual(await Channel.setOverride(dx,{expectedRevision:3,channelId:'ch002',policy:'deny_all',now:T}),{ok:true,revision:4});
+ sx=await Channel.readSnapshot(dx);
+ assert.deepEqual(sx.lookup.policyFor('ch002'),{policy:'deny_all',basis:'override',degraded:false},'an owner policy override beats the owner category');
+ // an import never resets the owner category, and keeps the category it points at even when the import stops declaring it
+ const shrunk=Channel.planImport({groups:[{name:'News',policy:'deny_all'}],entries:[{sourceId:'tvg_2',name:'Film One',group:'News'}],xmltvChannels:[{channelId:'ch5000'}]});
+ assert.deepEqual(await Channel.commitImport(dx,{expectedRevision:4,sourceSha256:SHA('b'),plan:shrunk,now:T}),{ok:true,revision:5});
+ sx=await Channel.readSnapshot(dx);
+ assert.equal(sx.ok,true);
+ assert.equal(sx.channels.get('ch5000').ownerCategoryKey,'movies','the import did not reset the owner category');
+ assert.deepEqual(sx.lookup.policyFor('ch5000'),{policy:'discover',basis:'owner_category',degraded:false},'its category (Movies) is retained although the import no longer declares it');
+ assert.ok(sx.categories.has('movies')&&sx.categories.has('news'));
+ assert.equal(sx.channels.get('ch001').listed,false);assert.deepEqual(sx.lookup.policyFor('ch001'),{policy:'known_only',basis:'unclassified',degraded:false});
+ // a channel first registered from XMLTV that M3U lists later gets its provider id and keeps its registration origin
+ const later=Channel.planImport({groups:GROUPS,entries:[{sourceId:'tvg_5000',name:'Now in M3U',group:'News'}],xmltvChannels:[{channelId:'ch5000'}]});
+ assert.deepEqual(await Channel.commitImport(dx,{expectedRevision:5,sourceSha256:SHA('c'),plan:later,now:T}),{ok:true,revision:6});
+ sx=await Channel.readSnapshot(dx);
+ assert.deepEqual([sx.channels.get('ch5000').sourceId,sx.channels.get('ch5000').origin,sx.channels.get('ch5000').categoryKey],['tvg_5000','xmltv','news'],'provider id and category arrive, the registration origin stays');
+ assert.deepEqual(sx.lookup.policyFor('ch5000'),{policy:'discover',basis:'owner_category',degraded:false});
+ // clearing, refusals and CAS
+ assert.deepEqual(await Channel.setOwnerCategory(dx,{expectedRevision:6,channelId:'ch5000',categoryKey:null,now:T}),{ok:true,revision:7});
+ sx=await Channel.readSnapshot(dx);
+ assert.deepEqual(sx.lookup.policyFor('ch5000'),{policy:'deny_all',basis:'category',degraded:false},'clearing returns the provider category policy');
+ assert.deepEqual(await Channel.setOwnerCategory(dx,{expectedRevision:7,channelId:'ch5000',categoryKey:'ghost',now:T}),{ok:false,reason:'unknown_category'});
+ assert.deepEqual(await Channel.setOwnerCategory(dx,{expectedRevision:7,channelId:'ch9999',categoryKey:'news',now:T}),{ok:false,reason:'unknown_channel'});
+ assert.deepEqual(await Channel.setOwnerCategory(dx,{expectedRevision:3,channelId:'ch5000',categoryKey:'news',now:T}),{ok:false,reason:'conflict'});
+ assert.deepEqual(await Channel.setOwnerCategory(dx,{expectedRevision:7,channelId:'tvg_1',categoryKey:'news',now:T}),{ok:false,reason:'invalid'});
+ // the plan digest covers the XMLTV registration: the same M3U with one more XMLTV-only channel is not a no-op
+ const {db:dd}=fresh();await Channel.commitImport(dd,{expectedRevision:0,sourceSha256:SHA('a'),plan,now:T});
+ assert.deepEqual(await Channel.commitImport(dd,{expectedRevision:1,sourceSha256:SHA('a'),plan:Channel.planImport({groups:GROUPS,entries:ENTRIES,xmltvChannels:[{channelId:'ch5000'}]}),now:T}),{ok:true,revision:2});
+ // lost reply: another writer assigned the same category with a different note
+ const dual=fresh();await Channel.commitImport(dual.db,{expectedRevision:0,sourceSha256:SHA('a'),plan,now:T});
+ const racer={prepare:sql=>dual.db.prepare(sql),batch:async()=>{await Channel.setOwnerCategory(dual.db,{expectedRevision:1,channelId:'ch001',categoryKey:'news',note:'theirs',now:T});throw new Error('reply lost');}};
+ assert.deepEqual(await Channel.setOwnerCategory(racer,{expectedRevision:1,channelId:'ch001',categoryKey:'news',note:'mine',now:T}),{ok:false,reason:'conflict'},'same category, different note: not acknowledged');
+ // constraints of the new columns
+ const badx=sql=>{const copy=path.join(root,'badx-'+(badCopies++)+'.sqlite');fs.copyFileSync(base,copy);assert.notEqual(run(copy,sql).status,0,sql);};
+ badx("INSERT INTO epg_channel (channel_id,source_id,origin,revision,last_seen_revision) VALUES ('ch001',NULL,'m3u',1,1)");
+ badx("INSERT INTO epg_channel (channel_id,source_id,origin,revision,last_seen_revision) VALUES ('ch001',NULL,'other',1,1)");
+ badx("INSERT INTO epg_channel_category VALUES ('a','A','discover',0,1);INSERT INTO epg_channel (channel_id,origin,revision,last_seen_revision,owner_category_key) VALUES ('ch001','xmltv',1,1,'a')");
+ badx("INSERT INTO epg_channel (channel_id,origin,revision,last_seen_revision,owner_category_key,owner_category_at) VALUES ('ch001','xmltv',1,1,'missing','t')");
+ const okx=path.join(root,'okx.sqlite');fs.copyFileSync(base,okx);
+ assert.equal(run(okx,"INSERT INTO epg_channel (channel_id,origin,revision,last_seen_revision) VALUES ('ch001','xmltv',1,1),('ch002','xmltv',1,1)").status,0,'several channels without a provider id coexist (NULL source_id is not unique-constrained)');
+}
+
 // ===== 7. fail-safe states: never discover =====
 const degraded=(result,reason)=>{assert.equal(result.ok,false);assert.equal(result.reason,reason);assert.equal(result.lookup.degraded,true);assert.deepEqual(result.lookup.policyFor('ch001'),{policy:'known_only',basis:'unavailable',degraded:true});};
 degraded(await Channel.readSnapshot(undefined),'unavailable');
@@ -248,4 +319,4 @@ assert.equal((await Channel.setOverride(sneaky,{expectedRevision:1,channelId:'ch
  assert.equal((await Channel.setOverride(racerAt,{expectedRevision:2,channelId:'ch001',policy:'deny_all',note:'mine',now:T})).ok,false,'same policy and note, different time: not acknowledged');
 }
 
-console.log('EPG Channel authority: guarded inert migration v31, show keys untouched, provider id normalization, override > category > known_only, one bounded snapshot and no per-channel reads, revision CAS, fail-safe known_only states, lost-reply classification, nothing in src reaches the tables.');
+console.log('EPG Channel authority: guarded inert migration v31, show keys untouched, provider id normalization, XMLTV-only channels, owner policy override > owner category > provider category > known_only, one bounded snapshot and no per-channel reads, revision CAS, fail-safe known_only states, lost-reply classification, nothing in src reaches the tables.');
