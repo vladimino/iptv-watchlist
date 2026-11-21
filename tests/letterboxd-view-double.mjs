@@ -7,22 +7,6 @@ import {installViewIndexFixture} from './view-index-fixture.mjs';
 const SOURCE=`globalThis.RatingsD1={
  ratingsMutableKey:()=>false,
  async routeRead(){return {handled:false};},async ratingsReady(){return false;},async viewItems(env,keys,facts){return facts;},
- async reverseView(env,reversals){
-  const key='enrichment/view-index.json',field={rating:'actualRating',watched:'watched',watchlist:'watchlist'};
-  for(let attempt=0;attempt<5;attempt++){
-   const object=await env.BUCKET.get(key),index=object?await object.json():{};let changed=0;
-   for(const {fact,links,before} of reversals)for(const id of LetterboxdFacts.projectionIds(links)){
-    if(!index[id])continue;
-    const item={...index[id]},prior=before?.[id]||{};
-    if(Object.hasOwn(prior,field[fact]))item[field[fact]]=prior[field[fact]];else delete item[field[fact]];
-    if(JSON.stringify(item)!==JSON.stringify(index[id])){index[id]=item;changed++;}
-   }
-   if(!changed)return {owned:true,changed:0};
-   const stored=await env.BUCKET.put(key,JSON.stringify(index),object?{onlyIf:{etagMatches:object.etag}}:{onlyIf:{etagDoesNotMatch:'*'}});
-   if(stored!==null)return {owned:true,changed};
-  }
-  throw new Error('write_contention');
- },
  async projectView(env,records){
   const key='enrichment/view-index.json';let changed=0;
   for(let attempt=0;attempt<5;attempt++){

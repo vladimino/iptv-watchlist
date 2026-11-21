@@ -60,4 +60,4 @@ OR within the selected mood ids and AND across filter families are unchanged. Me
 
 ## Sidecars
 
-`POST /api/enrichment/moods/backfill` is retired and answers `410 Gone`: the view index is derived from D1 at read and holds no stored mood facet to patch, and no per-film `mood-facet.json` is written (nothing reads one). The diagnostics object `enrichment/diagnostics/moods.json` may stay on version 1. The view recomputes `moodFacet` at read, and the page uses the view.
+The former `POST /api/enrichment/moods/backfill` route no longer exists and answers an ordinary 404: the view index is derived from D1 at read and holds no stored mood facet to patch, and no per-film `mood-facet.json` is written (nothing reads one). The diagnostics object `enrichment/diagnostics/moods.json` may stay on version 1. The view recomputes `moodFacet` at read, and the page uses the view.

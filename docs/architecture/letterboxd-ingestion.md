@@ -113,7 +113,7 @@ The preview's baseline is always `unknown`: the import stores per-chunk receipts
 
 ## Confirmed archive apply
 
-**Accepted ([ADR 0068](../adr/0068-letterboxd-archive-confirmed-apply.md)).** This is not the preview path above. After the owner has read the proposal, two further requests can record one chunk of films the preview fully compared, at most 50. Each request uploads the ZIP again. The first stores only the issued confirmation. The second is the only one that calls the baseline commit. Rollback is the same two-step shape and sends no ZIP. The archive is still stored nowhere. A rating row is a watched and rated fact whether or not the diary lists that film. A newer stored fact is kept.
+**Accepted ([ADR 0068](../adr/0068-letterboxd-archive-confirmed-apply.md)).** This is not the preview path above. After the owner has read the proposal, two further requests can record one chunk of films the preview fully compared, at most 50. Each request uploads the ZIP again. The first stores only the issued confirmation. The second is the only one that calls the baseline commit. There is no rollback: the baseline rollback, the per-film unlink and the archive rollback capability are retired ([ADR 0192](../adr/0192-retire-view-index-selector-and-raw-object.md)), and a later correction is a separate forward operation. The archive is still stored nowhere. A rating row is a watched and rated fact whether or not the diary lists that film. A newer stored fact is kept.
 
 ```mermaid
 sequenceDiagram
@@ -154,13 +154,6 @@ sequenceDiagram
         Worker-->>Page: written, already applied, or skipped because newer
     else The fresh comparison no longer matches
         Worker-->>Page: refusal, no fact write
-    end
-    opt The owner later rolls this chunk back
-        Owner->>Page: «Подтвердить откат», then «Откатить»
-        Page->>Worker: JSON only, no ZIP
-        Worker->>R2: baseline rollback from the receipt's origin
-        Worker->>D1: reverse only the rolled-back fields in ratings_view
-        Note over Worker,R2: A later observation stays
     end
     Note over Worker,R2: The ZIP is not stored. Confirm never starts the commit.<br/>A running commit with no receipt resumes its own plan, not a fresh scope
     Note over Page: The preview request above is unchanged and still writes nothing

@@ -89,7 +89,7 @@ for(const [file,text] of texts)for(const m of text.matchAll(/([A-Za-z_$][A-Za-z0
 const FILE_SITES={
  'src/admin/discovery-recovery.js':{r2:11,wrapper:0,dynamic:9},
  'src/admin/film-title-route.js':{r2:1,wrapper:0,dynamic:0},
- 'src/admin/letterboxd-archive-apply.js':{r2:3,wrapper:0,dynamic:1},
+ 'src/admin/letterboxd-archive-apply.js':{r2:2,wrapper:0,dynamic:1}, // AIR-558: -1 write, the candidates-rollback marker of the retired archive rollback
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
  'src/catalog-poster-weekly.js':{r2:2,wrapper:0,dynamic:1},   // ADR 0179 (AIR-543): the weekly poster checkpoint (epg/catalog-poster-weekly.json) and the immutable catalog_posters events (events/items/<reverse-timestamp>-<id>.json); neither is a projector input
  'src/letterboxd-sync.js':{r2:1,wrapper:0,dynamic:1},   // ADR 0186: the create-only put of a slot Event (events/items/..., not a projector input)

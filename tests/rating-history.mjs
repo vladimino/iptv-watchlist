@@ -93,8 +93,8 @@ const kinds=record=>JSON.parse(JSON.stringify((record.ratingHistory||[]).map(ent
  assert.equal(alien().ratingHistory.length,4);
 }
 
-// Baseline import: a pre-existing export rating is first_observed with the export as source; a rollback is recorded after it,
-// and the same observation committed again after the rollback is recorded again.
+// Baseline import: a pre-existing export rating is first_observed with the export as source; a legacy rolled_back entry is still read
+// and the same observation applied again after it is recorded again.
 {
  const b=bucket(),env={BUCKET:b};
  const origin={archiveSha256:'a'.repeat(64),generatedAt:at(0),generatedAtSource:'archive_name'};
@@ -107,14 +107,12 @@ const kinds=record=>JSON.parse(JSON.stringify((record.ratingHistory||[]).map(ent
  assert.deepEqual(kinds(heat()),['first_observed:2','changed:3']);
  await F.commitBaselineChunk(env,body);
  assert.equal(alien().ratingHistory.length,1,'a replayed commit adds nothing');
- await F.rollbackBaselineChunk(env,{origin,chunk:0});
- assert.equal(alien().rating,undefined);assert.deepEqual(kinds(alien()),['first_observed:4.5','rolled_back:null']);
- assert.equal(heat().rating.value,2);assert.deepEqual(kinds(heat()),['first_observed:2','changed:3','rolled_back:2']);
- assert.equal(heat().ratingHistory[2].observationId,heat().ratingHistory[1].observationId,'the rollback names the observation it reversed');
- assert.match(heat().ratingHistory[2].at,/^\d{4}-\d{2}-\d{2}T/);
- await F.rollbackBaselineChunk(env,{origin,chunk:0});
- assert.equal(heat().ratingHistory.length,3,'a repeated rollback adds nothing');
+ // AIR-558: the rollback writer is gone; a historical `rolled_back` entry (written before) is still read and a later re-application is recorded after it.
+ assert.equal(F.rollbackBaselineChunk,undefined);
  const record=structuredClone(heat()),again=record.ratingHistory[1].observationId;
+ record.rating=structuredClone(record.rating);record.rating.replaced=null;
+ record.ratingHistory=[...record.ratingHistory,{kind:'rolled_back',recordedAt:at(1),observationId:again,at:at(1),restored:{value:2,observedAt:at(-1),source:'letterboxd_film_page',observationId:record.ratingHistory[0].observationId}}];
+ record.rating={...record.ratingHistory[0],value:2,observationId:record.ratingHistory[0].observationId};
  const replay=await F.observation({factKey:heatKey,fact:'rating',value:3,observedAt:at(0),source:'letterboxd_export',sourceRef:'a'.repeat(64)});
  assert.equal(replay.observationId,again);
  F.applyObservation(record,'rating',replay);
@@ -182,4 +180,4 @@ const kinds=record=>JSON.parse(JSON.stringify((record.ratingHistory||[]).map(ent
  assert.equal(stored().ratingHistory.length,5);
 }
 
-console.log('Rating history: first observation, change, confirmation, repeat, older, null, scan floor, absence, concurrent CAS, crash replay, export pre-existing, rollback and re-apply, convergence union with overlaps, re-application and repeated merges, a diary return to a previous value passed');
+console.log('Rating history: first observation, change, confirmation, repeat, older, null, scan floor, absence, concurrent CAS, crash replay, export pre-existing, legacy rolled_back read and re-apply, convergence union with overlaps, re-application and repeated merges, a diary return to a previous value passed');

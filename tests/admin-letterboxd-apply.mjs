@@ -1,5 +1,5 @@
 // Confirmed apply of a previewed Letterboxd archive. Synthetic archives only. The preview writes nothing; confirm stores
-// the issued confirmation and not the ZIP; commit writes facts only after that confirmation; a later observation survives rollback.
+// the issued confirmation and not the ZIP; commit writes facts only after that confirmation; a later observation survives a replay (the rollback is retired, AIR-558).
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {loadArchiveWorker} from './fixtures/letterboxd-archive-worker.mjs';
@@ -190,15 +190,16 @@ async function observation(factKey, fact, value, observedAt, source) {
   const later = await Facts.recordObservations(env, 'tmdb-9001', {letterboxd: 'rateonly', tmdb: '9001'}, [{fact: 'rating', observation: await observation('tmdb-9001', 'rating', 5, '2026-10-30T00:00:00.000Z', 'owner')}]);
   await Facts.projectRecords(env, [later.record]);
   assert.equal(read(Facts.recordKey('tmdb-9001')).rating.value, 5);
-  const rollbackKey = 'rollback-key-000001';
-  const rollbackIssued = await send('/api/admin/letterboxd-archive/rollback-confirm', {json: {archiveSha256: seen.body.archive.sha256, chunk: 0, idempotencyKey: rollbackKey, accepted: true}});
-  assert.equal(rollbackIssued.status, 200, JSON.stringify(rollbackIssued.body));
-  assert.equal(rollbackIssued.body.writes, false);
-  const rolled = await send('/api/admin/letterboxd-archive/rollback', {json: {confirmation: rollbackIssued.body.confirmation}});
-  assert.equal(rolled.status, 200, JSON.stringify(rolled.body));
-  assert.equal(read(Facts.recordKey('tmdb-9001')).rating.value, 5, 'a later observation survives rollback');
+  // AIR-558 (ADR 0192): the archive rollback is retired. Both routes answer the ordinary 404 and write nothing; the later observation and the receipt stay.
+  const putsRetired = calls.length;
+  for (const retired of ['rollback-confirm', 'rollback']) {
+    const gone = await send('/api/admin/letterboxd-archive/' + retired, {json: {archiveSha256: seen.body.archive.sha256, chunk: 0, idempotencyKey: 'rollback-key-000001', accepted: true}});
+    assert.equal(gone.status, 404, retired);
+    assert.equal(gone.body.error, 'not_found');
+  }
+  assert.equal(calls.length, putsRetired, 'the retired routes touch no storage');
+  assert.equal(read(Facts.recordKey('tmdb-9001')).rating.value, 5, 'the later observation stays');
   assert.equal(read(Facts.FACTS_KEYS.viewIndex), undefined); // AIR-558: no raw view-index write
-  assert.equal(rolled.body.rollback.superseded > 0, true);
 }
 
 // 2. A tampered archive, a moved generation and a changed fact never reach the commit.
@@ -288,7 +289,7 @@ async function observation(factKey, fact, value, observedAt, source) {
   assert.deepEqual(calls, []);
   const empty = await send('/api/admin/letterboxd-archive/apply', {form: new FormData(), access: ''});
   assert.equal(empty.status, 403);
-  const huge = await send('/api/admin/letterboxd-archive/rollback', {json: {confirmation: {}}, access: 'x'.repeat(9000)});
+  const huge = await send('/api/admin/letterboxd-archive/identity-status', {json: {archiveSha256: 'ab'.repeat(32)}, access: 'x'.repeat(9000)});
   assert.equal(huge.status, 403);
   calls = [];
   const half = {BUCKET: {async get() {calls.push('get'); throw new Error('should not read');}}};
@@ -307,8 +308,8 @@ async function observation(factKey, fact, value, observedAt, source) {
   assert.equal(broken.body.error, 'archive_invalid');
   assert.equal(calls.some(call => call.startsWith('get:') || call.startsWith('put:')), false);
   const missing = await send('/api/admin/letterboxd-archive/rollback-confirm', {json: {archiveSha256: 'ab'.repeat(32), chunk: 0, idempotencyKey: 'rollback-key-missing1', accepted: true}});
-  assert.equal(missing.status, 409);
-  assert.equal(missing.body.refusal, 'not_eligible');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.error, 'not_found');
 }
 
 // 5. The same scope requested later returns the original issuance. The expiry does not move.

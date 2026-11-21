@@ -95,8 +95,8 @@ try{
  {
   const output=out('occupied'),b=bucket(),env=gates(b);await plan({...fx,output,chunkSize:3,now});
   await remote({mode:'commit',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env),env:{},now});
-  await remote({mode:'rollback',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env),env:{},now,fromChunk:2});
-  const names=['origin.json','plan.jsonl','report.json','commit.json','rollback.json'],before=Object.fromEntries(names.map(name=>[name,fs.readFileSync(path.join(output,name),'utf8')]));
+  await remote({mode:'validate',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env),env:{},now,fromChunk:2});
+  const names=['origin.json','plan.jsonl','report.json','commit.json','validate.json'],before=Object.fromEntries(names.map(name=>[name,fs.readFileSync(path.join(output,name),'utf8')]));
   const fewer=await fixture(7,5);// the same archive bytes, a snapshot that accepts five films
   assert.equal(sha256(fs.readFileSync(fewer.zip)),sha256(fs.readFileSync(fx.zip)));
   for(const attempt of [{...fewer,chunkSize:3},{...fx,chunkSize:3},{...fx,chunkSize:4},{...(await fixture(6)),chunkSize:3}])
@@ -175,20 +175,21 @@ try{
   const origin=JSON.parse(fs.readFileSync(path.join(output,'origin.json'),'utf8')),originBody={archiveSha256:sha,generatedAt:origin.generatedAt,generatedAtSource:origin.generatedAtSource};
   const duplicate=await handle(env,endpoint+'/api/letterboxd/baseline/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({origin:originBody,chunk:0,items:[{lid:lid(0),facts:{watched:true}},{lid:lid(0),facts:{watched:true}}]})});
   assert.equal(duplicate.status,400);
-  // --from-chunk/--to-chunk bound a run; rollback walks the chunks in reverse and resumes after a dropped connection.
+  // --from-chunk/--to-chunk bound a run; a run walks the chunks in order and resumes after a dropped connection (AIR-558: the reverse rollback walk is retired).
   const seen=[];summary=await remote({mode:'validate',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env,seen),env:{},now,fromChunk:1,toChunk:1});
   assert.deepEqual(seen,[1]);assert.equal(summary.chunksRequested,1);
-  const rollbackSeen=[];let drop=true;
-  const droppingRollback=async(url,init)=>{if(drop&&JSON.parse(init.body).chunk===1){drop=false;throw new TypeError('fetch failed',{cause:{code:'UND_ERR_SOCKET'}});}return workerFetch(env,rollbackSeen)(url,init);};
-  summary=await remote({mode:'rollback',zip:fx.zip,output,endpoint,fetchImpl:droppingRollback,env:{},now});
-  assert.equal(summary.failed.chunk,1);assert.deepEqual(rollbackSeen,[2]);
-  summary=await remote({mode:'rollback',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env,rollbackSeen),env:{},now});
-  assert.equal(summary.failed,null);assert.deepEqual(rollbackSeen,[2,2,1,0]);assert.deepEqual(summary.totals,{restored:facts(7),superseded:0});
-  for(let i=0;i<7;i++){const record=b.records.get(F.recordKey('lb-'+lid(i)));assert.equal(record?.watched,undefined,'rolled back '+i);}
+  await assert.rejects(remote({mode:'rollback',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env),env:{},now}),/Unknown mode/);
+  const resumeSeen=[];let drop=true;
+  const dropping=async(url,init)=>{if(drop&&JSON.parse(init.body).chunk===1){drop=false;throw new TypeError('fetch failed',{cause:{code:'UND_ERR_SOCKET'}});}return workerFetch(env,resumeSeen)(url,init);};
+  summary=await remote({mode:'validate',zip:fx.zip,output,endpoint,fetchImpl:dropping,env:{},now});
+  assert.equal(summary.failed.chunk,1);assert.deepEqual(resumeSeen,[0]);
+  summary=await remote({mode:'validate',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env,resumeSeen),env:{},now});
+  assert.equal(summary.failed,null);assert.deepEqual(resumeSeen,[0,0,1,2]);assert.deepEqual(summary.totals,{unchanged:facts(7)});
+  for(let i=0;i<7;i++){const record=b.records.get(F.recordKey('lb-'+lid(i)));assert.equal(record?.watched?.value,true,'still written '+i);}
  }
 
  // A legacy plan (schema 1, no chunkSize, chunks of 200) as the earlier tool wrote it still validates, commits, replays and
- // rolls back with its own chunking. A new plan of the same archive with another size is refused: in the legacy plan's
+ // resumes with its own chunking. A new plan of the same archive with another size is refused: in the legacy plan's
  // directory by the tool, in a fresh directory by the Worker (chunk_conflict), so the old receipts stay unambiguous.
  {
   fx=await fixture(401);const output=out('legacy');await plan({...fx,output,now});
@@ -208,8 +209,8 @@ try{
   const fresh=out('legacy-resized');await plan({...fx,output:fresh,now});
   summary=await remote({mode:'commit',zip:fx.zip,output:fresh,endpoint,fetchImpl:workerFetch(env),env:{},now});
   assert.deepEqual([summary.failed.chunk,summary.failed.status,summary.failed.error],[0,409,'chunk_conflict']);assert.equal(b.puts,putsBefore);
-  summary=await remote({mode:'rollback',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env),env:{},now});
-  assert.equal(summary.failed,null);assert.deepEqual(summary.totals,{restored:facts(401),superseded:0});
+  summary=await remote({mode:'validate',zip:fx.zip,output,endpoint,fetchImpl:workerFetch(env),env:{},now});
+  assert.equal(summary.failed,null);assert.deepEqual(summary.totals,{unchanged:facts(401)});
  }
 }finally{await rm(scratch,{recursive:true,force:true});}
 console.log('Letterboxd baseline chunks: bounded plan chunk size, CLI size rules, chunk boundaries, one size per plan, one plan per directory with nothing overwritten, network error and unreadable answer reported without a crash, timeout mid-chunk resumed from the intent, replay and unchanged reruns, bounded runs, resumable reverse rollback, legacy 200-film plans kept and not mixed passed');

@@ -84,16 +84,8 @@ await assert.rejects(F.observation({factKey:'k',fact:'watched',value:true,observ
  assert.equal(F.applyObservation(record,'rating',await obs('rating',3,4,'letterboxd_film_page','page'),{floor}).outcome,'older');
  assert.equal(F.applyObservation(record,'rating',await obs('rating',3,6,'letterboxd_film_page','page'),{floor}).outcome,'replaces');
 }
-// Rollback restores the before-image only while the export's observation is current; overlay merges by the order.
+// Overlay merges by the order (AIR-558: the rollback restore of a before-image is retired).
 {
- const record=F.emptyRecord('tmdb-1',{tmdb:'1'}),first=await obs('rating',3,0,'letterboxd_films_list','s'),exported=await obs('rating',4,1,'letterboxd_export','zip');
- F.applyObservation(record,'rating',first);F.applyObservation(record,'rating',exported);
- const copy=structuredClone(record);
- assert.equal(F.rollbackFact(copy,'rating',exported.observationId),'restored');assert.equal(copy.rating.value,3);
- F.applyObservation(record,'rating',await obs('rating',5,2,'owner','edit'));
- assert.equal(F.rollbackFact(record,'rating',exported.observationId),'superseded');assert.equal(record.rating.value,5);
- const only=F.emptyRecord('tmdb-1',{tmdb:'1'});F.applyObservation(only,'watched',await obs('watched',true,0,'letterboxd_export','zip'));
- assert.equal(F.rollbackFact(only,'watched',only.watched.observationId),'restored');assert.equal(only.watched,undefined);
  const source=F.emptyRecord('lb-a',{letterboxd:'a'}),target=F.emptyRecord('tmdb-1',{tmdb:'1'});
  F.applyObservation(source,'watched',await obs('watched',true,0));F.applyObservation(target,'rating',await obs('rating',4,1));
  const merged=F.overlay(source,target);assert.equal(merged.watched.value,true);assert.equal(merged.rating.value,4);
@@ -251,4 +243,4 @@ for(const stale of [undefined,'on','off','On',{token:'x'}]){
  assert.equal(results[0].status,'older');assert.equal(records.get('enrichment/films/heat/actual.json').rating,4,'a rejected edit does not touch actual.json');
  assert.ok(records.has(F.recordKey('lb-heat')),'the stale off binding did not bring back the legacy writer');
 }
-console.log('Letterboxd facts: order and ties, null and before-image, rollback and overlay, alias index and CAS retry, redirects and fences, films-list and watchlist summaries, floor, staged publication and crash resume with the stage context, conflict registry, facts-first owner edit, writers inert to the retired switch passed');
+console.log('Letterboxd facts: order and ties, null and before-image, overlay, alias index and CAS retry, redirects and fences, films-list and watchlist summaries, floor, staged publication and crash resume with the stage context, conflict registry, facts-first owner edit, writers inert to the retired switch passed');

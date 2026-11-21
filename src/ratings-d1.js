@@ -290,63 +290,6 @@ export async function projectView(env,records){
  return {owned:true,changed:statements.length};
 }
 
-// AIR-558: reversal of removed facts (baseline rollback / unlink). The facts layer decides WHAT was reversed: each reversal is {factKey, fact: rating|watched|watchlist, links, before: {aliasId: {actualRating?, watched?, watchlist?}}}
-// and is only passed when the remaining record no longer carries that fact (a surviving or newer observation was already projected by projectView and wins). Per alias id and per reversed field only, the
-// ratings_view row returns to its before-image, or to the table's own unknown encoding (watched/watchlist NULL, rating_known 0 and actual_rating NULL). A row another film's record projected last (fact_key differs) is untouched.
-const REVERSE_FIELD={rating:'actualRating',watched:'watched',watchlist:'watchlist'};
-export async function reverseView(env,reversals){
- const gate=await requireOpen(env,'d1');
- if(!gate.open)return {owned:false,changed:0};
- const list=(reversals||[]).filter(item=>item&&item.factKey&&item.links&&REVERSE_FIELD[item.fact]);
- const wanted=new Map();
- for(const item of list)for(const id of projectionIds(item.links)){
-  const entry=wanted.get(id)||{factKey:item.factKey,fields:new Map()};
-  if(entry.factKey!==item.factKey)continue;
-  entry.fields.set(item.fact,item.before?.[id]||{});wanted.set(id,entry);
- }
- if(!wanted.size)return {owned:true,changed:0};
- if(wanted.size>200)throw failed('ratings_domain_unavailable');
-// Write-time conditionality (owner review P1): the candidates only say what a rollback removed. Each attempt snapshots the ratings_view rows, then reads the CURRENT authoritative fact record of every film and reverses a field only
-// while that record still does not carry the fact; every row update is a compare-and-set on the snapshot (fact_key and all value columns plus updated_at) followed by the fence, so a projection or owner mark committed after the
-// SELECT aborts the whole batch and the attempt is retried from fresh rows and records. Unrelated fields are written from the snapshot the CAS proves current.
- const ids=[...wanted.keys()];
- for(let attempt=0;attempt<3;attempt++){
-  const existing=new Map((await many(gate.db,'SELECT alias_id, fact_key, watched, actual_rating, watchlist, rating_known, updated_at FROM ratings_view WHERE alias_id IN ('+ids.map(()=>'?').join(',')+')',ids)).map(row=>[row.alias_id,row]));
-  const present=new Map(),guards=[];
-  for(const factKey of new Set([...wanted.values()].map(entry=>entry.factKey))){
-   const owned=await readOwned(env,'letterboxd/facts/films/'+factKey+'.json');
-   if(!owned.owned)return {owned:false,changed:0};
-   present.set(factKey,owned.value||{});
-   // The fact document is fenced at the exact etag it was read at (or at absence): a commit of that fact after this read, even one whose projection is a no-op, aborts the batch.
-   const docKey='letterboxd/facts/films/'+factKey+'.json';
-   guards.push(owned.etag?["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND EXISTS (SELECT 1 FROM ratings_document WHERE key=? AND part=0 AND etag=?)",[docKey,owned.etag]]:["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND NOT EXISTS (SELECT 1 FROM ratings_document WHERE key=?)",[docKey]],[FENCE_SQL,[]]);
-  }
-  const now=new Date().toISOString(),statements=[];
-  for(const [id,entry] of wanted){
-   const prior=existing.get(id);
-   if(!prior||prior.fact_key!==entry.factKey)continue;
-   const record=present.get(entry.factKey);
-   let watched=prior.watched??null,watchlist=prior.watchlist??null,known=Number(prior.rating_known),actual=prior.actual_rating??null;
-   for(const [fact,before] of entry.fields){
-    if(record[fact])continue;
-    const field=REVERSE_FIELD[fact],has=Object.hasOwn(before,field),value=before[field];
-    if(fact==='watched')watched=has&&(value===true||value===false)?(value?1:0):null;
-    else if(fact==='watchlist')watchlist=has&&(value===true||value===false)?(value?1:0):null;
-    else if(has){known=1;actual=value??null;}
-    else{known=0;actual=null;}
-   }
-   if((prior.watched??null)===watched&&(prior.watchlist??null)===watchlist&&Number(prior.rating_known)===known&&(prior.actual_rating??null)===actual)continue;
-   statements.push(['UPDATE ratings_view SET watched=?, actual_rating=?, watchlist=?, rating_known=?, updated_at=? WHERE alias_id=? AND fact_key=? AND updated_at IS ? AND watched IS ? AND watchlist IS ? AND rating_known=? AND actual_rating IS ?',[watched,actual,watchlist,known,now,id,entry.factKey,prior.updated_at??null,prior.watched??null,prior.watchlist??null,Number(prior.rating_known),prior.actual_rating??null]],[FENCE_SQL,[]]);
-  }
-  if(!statements.length)return {owned:true,changed:0};
-  const batch=[["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND mode='d1' AND cutover='open'",[]],[FENCE_SQL,[]],...epochFence(env),...guards,...statements,["UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1 AND mode='d1' AND cutover='open'",[]]];
-  try{await fenced(gate.db,batch);}
-  catch(error){if(error?.code==='ratings_domain_fence')continue;throw error;}
-  return {owned:true,changed:statements.length/2};
- }
- throw failed('write_contention');
-}
-
 async function overlayViewRows(db){
  const rows=[];let after='',total=0;
  for(;;){

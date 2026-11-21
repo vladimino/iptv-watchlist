@@ -135,43 +135,13 @@ try{
  assert.equal(summary.chunksDone,1);assert.equal(b.puts,putsAfter);
  const conflicting=await F.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({origin:{archiveSha256:sha,generatedAt:origin.generatedAt,generatedAtSource:'archive_name'},chunk:0,items:[{lid:'Ab1',facts:{watchlist:true}}]})}),on,'/api/letterboxd/baseline/commit');
  assert.equal(conflicting.status,409);
- // Rollback: an owner edit made after the import survives; everything else returns to the before-images.
- await F.recordFilmFacts(on,'Ab1',{rating:2},{observedAt:'2026-10-27T00:00:00.000Z',source:'owner'});
- summary=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(on),env:{},now});
- assert.equal(summary.failed,null);assert.deepEqual(summary.totals,{restored:4,superseded:1});
- assert.equal(b.records.get(F.recordKey('tmdb-949')).rating.value,2);assert.equal(b.records.get(F.recordKey('tmdb-949')).watched,undefined);
- // AIR-558: the raw view-index before-image restore is gone (a removed film's legacy view value no longer comes back through the facts); only the projection of the remaining records is asserted.
- const restored=b.records.get('enrichment/view-index.json');assert.equal(restored.Ab1.actualRating,2);assert.equal(restored.Cd2.actualRating,3,'the legacy view value comes back');assert.equal(restored.Cd2.watched,undefined);
- const again=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(on),env:{},now});assert.equal(again.failed,null);
- // Rollback is crash-recoverable: a failure after the fact writes and before the view restoration, and a failure between two
- // records, both converge on retry with the same counts; an owner edit made between attempts is kept.
- // The 'view' crash point (after the fact writes, before the view reversal) and the record crash point both converge on retry.
- for(const failAt of ['view','record']){
-  const bx=bucket(),onx={BUCKET:bx};
-  await bx.put('enrichment/view-index.json',JSON.stringify({Cd2:{actualRating:3}}));
-  await remote({mode:'commit',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});
-  let views=0;
-  bx.failOnce(failAt==='view'?key=>key==='enrichment/view-index.json'&&++views===1:key=>key===F.recordKey('tmdb-949'));
-  const broken=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now}).catch(error=>({error}));
-  assert.ok(broken.error||broken.failed,failAt+' failure surfaces');
-  assert.equal(bx.records.has('letterboxd/imports/'+sha+'/chunks/0.rollback.json'),false,'no success marker after a failure');
-  const done=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});
-  assert.equal(done.failed,null);assert.deepEqual(done.totals,{restored:5,superseded:0},failAt);
-  const viewAfter=bx.records.get('enrichment/view-index.json');assert.equal(viewAfter.Cd2.actualRating,3,failAt+': the legacy view value is restored');assert.equal(viewAfter.Cd2.watched,undefined);
-  assert.equal(viewAfter.Ab1.actualRating,undefined);
-  assert.equal(bx.records.get(F.recordKey('lb-Cd2')).rating,undefined);
-  const repeat=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});assert.equal(repeat.failed,null);
+ // AIR-558 (ADR 0192): rollback and unlink are retired end to end: the CLI refuses the mode and the Worker route answers the ordinary 404, writing nothing.
+ await assert.rejects(remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(on),env:{},now}),/Unknown mode/);
+ for(const action of ['rollback','unlink']){
+  const putsRetired=b.puts,retired=await F.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({origin:{archiveSha256:sha,generatedAt:origin.generatedAt,generatedAtSource:'archive_name'},chunk:0,lid:'Ab1'})}),on,'/api/letterboxd/baseline/'+action);
+  assert.equal(retired.status,404,action);assert.equal((await retired.json()).error,'Not found');assert.equal(b.puts,putsRetired,action+' writes nothing');
  }
- {
-  const bx=bucket(),onx={BUCKET:bx};
-  await remote({mode:'commit',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});
-  bx.failOnce(key=>key===F.recordKey('tmdb-949'));
-  await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now}).catch(()=>{});
-  await F.recordFilmFacts(onx,'Ab1',{rating:1},{observedAt:'2026-10-27T00:00:00.000Z',source:'owner'});
-  const done=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});
-  assert.deepEqual(done.totals,{restored:4,superseded:1});assert.equal(bx.records.get(F.recordKey('tmdb-949')).rating.value,1,'the owner edit between attempts is kept');
-  assert.equal(bx.records.get('enrichment/view-index.json').Ab1.actualRating,1);
- }
+ assert.equal(F.rollbackBaselineChunk,undefined);assert.equal(F.unlinkBaselineFilm,undefined);
  // The summary floor: an export older than the latest films-list scan does not override it.
  const b2=bucket(),on2={BUCKET:b2};
  await F.applyFilmsListScan(on2,{scanId:'s1',observedAt:'2026-10-26T20:00:00.000Z',films:{Ab1:3},total:1},{watchlistFilms:[{id:'Ab1',tmdbId:'949'}]});
@@ -192,4 +162,4 @@ try{
   assert.equal((await post(bad)).status,400,JSON.stringify(bad).slice(0,80));
  assert.equal((await F.handleBaselineRequest(new Request('https://site.example/api/letterboxd/baseline/validate',{method:'GET'}),on,'/api/letterboxd/baseline/validate')).status,405);
 }finally{await rm(scratch,{recursive:true,force:true});}
-console.log('Letterboxd baseline import: ZIP reader and archive name, plan of accepted films, private outputs, origin binding and tamper refusal, route with no switch (stale baseline and facts bindings inert), validate without writes, crash-safe idempotent commit, chunk conflict, rollback with superseded owner edit and view before-image, crash-recoverable rollback, both gates required, summary floor, strict input passed');
+console.log('Letterboxd baseline import: ZIP reader and archive name, plan of accepted films, private outputs, origin binding and tamper refusal, route with no switch (stale baseline and facts bindings inert), validate without writes, crash-safe idempotent commit, chunk conflict, retired rollback and unlink (CLI mode refused, Worker routes 404), both gates required, summary floor, strict input passed');

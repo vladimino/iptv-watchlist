@@ -6,7 +6,7 @@
 **Approval source:** the owner's decision comment on the [AIR-388 card](https://trello.com/c/fFvwYLjM#comment-6af092e25b9e2259c53d3e52) (2026-11-08 15:18 UTC): pragmatic identity matching is accepted, the chance of a collision is negligible and can be fixed per film, and defensive mechanisms that only get in the way are not wanted. This is a decision about code and contracts. It is **not** authorization for any production read or write, snapshot, network request, import, flag, Task or cutover.  
 **Related work:** [AIR-388](https://trello.com/c/fFvwYLjM); [AIR-185](https://trello.com/c/PKvrDGKZ) (rejected: Letterboxd challenge, no verified decision); [AIR-187](https://trello.com/c/JWCpAsY3); [AIR-340](https://trello.com/c/zWxj3laC); [AIR-387](https://trello.com/c/bhazAstV); [ADR 0009](0009-canonical-film-person-identity.md), [ADR 0087](0087-rated-archive-film-admission.md)  
 **Supersedes:** None. It adds one narrow exception to the matcher's "a title and year agreement is never accepted" rule and changes no earlier Accepted record.  
-**Superseded by:** None
+**Superseded by:** [ADR 0192](0192-retire-view-index-selector-and-raw-object.md) in part (2026-11-21): the per-film unlink and the chunk rollback of decision 4 (retired; a mistaken identity is repaired case by case after a separate owner decision); every other decision stays
 
 ## Context
 
