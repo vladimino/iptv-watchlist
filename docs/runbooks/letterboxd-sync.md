@@ -8,14 +8,14 @@ The code is dormant. With the mode table empty or `external` nothing is created,
 
 ## Observing (read-only)
 
-- The read model of `LetterboxdSync.readModel` (mode, epoch, current and next slot, per-source `lastSuccessAt`, health, pending Events). It writes nothing.
+- `status().letterboxdSync` of the Ratings status and the `letterboxd` monitor stream (the read model: mode, epoch, current and next slot, overdue slots, per-source `lastSuccessAt`, health, pending Events). Both are absent while no mode row exists. They write nothing.
 - A slot row's `status` and its three outcomes; a pending `letterboxd_slot_event` row means an Event is owed, not that the scan failed.
-- `late`: a due slot was never claimed (the `:30` tick did not run or `ensure` is refusing). `stalled`: a slot is unclosed past its window. `missed`: a slot was recorded `skipped_missed`. `failed`: the last closed slot errored in both sources. `watchlist_stale`: no complete scan for 24 hours.
+- `late`: a due slot was never claimed (the `:30` tick did not run or `ensure` is refusing). `stalled`: an earlier slot is still unclosed after its own window ended. `missed`: a slot was recorded `skipped_missed`. `failed`: the last closed slot errored in both sources. `watchlist_stale`: no complete scan for 24 hours; `watchlist_never_succeeded`: none at all since the executor started 24 hours ago.
 
 ## Activation order (for the cutover plan, not performed here)
 
 1. Apply the migration (preflight, one apply, readback). The mode table stays empty.
-2. Prove the handover: the Ratings writer is closed and drained, the legacy `ratings_sync_start` and `ratings_sync_step` entry is fenced, the Watchlist repository is ready and the ratings phase port is supplied. `complete` refuses with `handover_not_proven` and the list of what is missing until all four hold.
+2. The handover proof is read from live state by `letterboxdHandover`: the Ratings executor is closed and drained, the legacy `ratings_sync_start` and `ratings_sync_step` entry is fenced (true while the Letterboxd mode is `switching`), the Watchlist authority is an open `d1`, and the three phase ports exist. `complete` refuses with `handover_not_proven` and the list of what is missing until all hold. The switch has no HTTP route yet; the cutover plan names how it is invoked.
 3. `close_admission` with target `cloudflare` (the epoch moves and the legacy Ratings entry is fenced at once), then `complete` once the drain is verified.
 4. Add the Workflow binding and the `30 * * * *` cron in the deployment that the cutover approves; observe the first slot, never force one.
 
