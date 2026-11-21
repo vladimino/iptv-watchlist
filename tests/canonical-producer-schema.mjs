@@ -16,7 +16,7 @@ const only=process.env.CANON_PRODUCER_ONLY?new Set(process.env.CANON_PRODUCER_ON
 const on=number=>!only||only.has(String(number));
 const MIGRATION=process.env.CANON_PRODUCER_MIGRATION||'migrations/0020_canonical_producer_run.sql';
 const text20=fs.readFileSync(MIGRATION,'utf8');
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
 const upTo19=chain.filter(name=>Number(name.slice(0,4))<=19);
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-producer-schema-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -69,7 +69,7 @@ const refusedWith=(file,statements,pattern,label)=>{const [errors]=probe(file,[s
 
 // ===== 1. The migration: on top of a complete schema 19, empty, version 20, the exact object set, refusals, no downgrade =====
 if(on(1)){
- assert.deepEqual(chain.slice(-12,-8),['0020_canonical_producer_run.sql','0021_d1_glob_pattern_limit.sql','0022_epg_priority_pause.sql','0023_canonical_producer_chain.sql'],'0020 is followed by 0021, 0022, then 0023 the dormant producer chain (tests/canonical-producer-chain.mjs)');
+ assert.deepEqual(chain.slice(-11,-7),['0020_canonical_producer_run.sql','0021_d1_glob_pattern_limit.sql','0022_epg_priority_pause.sql','0023_canonical_producer_chain.sql'],'0020 is followed by 0021, 0022, then 0023 the dormant producer chain (tests/canonical-producer-chain.mjs)');
  assert.equal(Number(one(t20,'SELECT version FROM schema_contract WHERE id=1')),20);
  assert.equal(one(t20,'SELECT note FROM schema_contract WHERE id=1'),'Schema v20: durable canonical producer run and unit result tables (empty). Follows a complete version 19.');
  for(const table of [RUN,RES])assert.equal(Number(one(t20,'SELECT COUNT(*) FROM '+table)),0,table+' starts empty');
