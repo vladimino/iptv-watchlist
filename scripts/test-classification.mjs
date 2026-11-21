@@ -1383,6 +1383,9 @@ export const FILES={
  "letterboxd-sync-monitor.mjs": {
   "suite": "core"
  },
+ "letterboxd-sync-admission.mjs": {
+  "suite": "core"
+ },
  "ratings-queue-v2.mjs": {
   "suite": "core"
  },

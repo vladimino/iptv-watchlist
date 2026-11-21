@@ -123,6 +123,16 @@ run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
  assert.ok(queue,'the real removal-lookup queue received the removed film');
  assert.match(String(queue.body),/f3/);
 }
+// 5b. The real admission step ran through the real identity bridge: the ids added by the promotions are in the durable ledger. With the canonical catalog reader closed (the default marker here) the bridge
+// defers them WITHOUT any source request, so the rows stay pending and unchanged; nothing was guessed and no Film was admitted from a title.
+{
+ const rows=db.sql('SELECT lid,state,attempts FROM watchlist_admission_pending ORDER BY lid');
+ assert.ok(rows.length>=5,'the ledger holds the added ids: '+rows.map(r=>r.lid).join(','));
+ assert.ok(rows.every(r=>r.state==='pending'||r.state==='superseded'),'nothing resolved without a verified identity');
+ assert.ok(rows.filter(r=>r.state==='pending').every(r=>r.attempts===0),'a deferral is not an attempt');
+ assert.deepEqual(fetched.filter(u=>/boxd\.it|themoviedb|\/film\/[a-z0-9-]+\/$/.test(u)&&!/\/demo-user\/film\//.test(u)),[],'no identity check reached the source for an unverifiable id (the member-page lookup of a removed film is the removal reconciliation, not admission)');
+ assert.equal(rows.find(r=>r.lid==='f3')?.state,'superseded','f3 left the Watchlist before it resolved');
+}
 // 6. Exactly two Events per closed slot, whatever the outcome; never a third.
 {
  const events=[...bucket.records.entries()].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v).filter(e=>/^lbsync-/.test(e.id));

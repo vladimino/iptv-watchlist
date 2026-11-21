@@ -6,7 +6,7 @@
 export const RETENTION_SLICES_PER_CALL = 24;
 
 export function effectWriters(deps) {
-  const {repository, facts, retention, removal, tmdbOf, removalRef} = deps;
+  const {repository, facts, retention, removal, tmdbOf, removalRef, epochGuard} = deps;
   // The TMDB ids only enrich: a cache outage must not hold the facts (identity stays a Film fact, the facts module links by Letterboxd id), but it does hold retention, which needs them.
   const tmdbForFacts = (env, lids) => tmdbOf(env, lids).catch(() => new Map());
   const snapshotOf = async (ctx, effect) => {
@@ -63,6 +63,11 @@ export function effectWriters(deps) {
       const ref = await removalRef(ctx.env, snapshot);
       if (!ref) return null;
       await removal.enqueue(ctx.env, films, ref);
+      // An id removed before its Film was resolved is not retried any more (`superseded`); a returning id reopens through a later promotion. Part of this effect, so a failure holds it.
+      if (typeof repository.supersedeAdmissions === 'function' && typeof epochGuard === 'function') {
+        const superseded = await repository.supersedeAdmissions(ctx.env, {lids: changes.removed.map(item => item.lid), now: ctx.now()}, {guards: [epochGuard(ctx.epoch)]});
+        if (!superseded.ok) return null;
+      }
       return 'removal:' + snapshot.scanId + ':' + films.length;
     }
   };

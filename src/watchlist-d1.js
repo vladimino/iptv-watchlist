@@ -397,6 +397,54 @@ export async function recordEffectAttempt(source,{snapshotId,effect},ctx={}){
  return outcome==='ok'?{ok:true}:{ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
 }
 
+// ---- the admission ledger (ADR 0186 decision 5) ---------------------------------------------------------------------------
+// The due rows of the durable ledger of Letterboxd ids that still need a Film: `pending` and due (`next_retry_at` null or past), oldest first-seen version first, bounded. Read only.
+// -> {ok:true,rows:[{lid,firstSeenSnapshotId,firstSeenVersion,attempts,lastReason}],pending} | {ok:false,reason}
+export async function dueAdmissions(source,{now=Date.now(),limit=3}={}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ const cap=Math.min(Math.max(Number.isInteger(limit)?limit:3,1),20);
+ try{
+  const rows=await many(db,"SELECT lid, first_seen_snapshot_id, first_seen_version, attempts, last_reason FROM watchlist_admission_pending WHERE state='pending' AND (next_retry_at IS NULL OR next_retry_at<=?) ORDER BY first_seen_version, lid LIMIT ?",[iso(now),cap]);
+  const total=Number((await one(db,"SELECT COUNT(*) AS n FROM watchlist_admission_pending WHERE state='pending'"))?.n);
+  return {ok:true,rows:rows.map(row=>({lid:row.lid,firstSeenSnapshotId:row.first_seen_snapshot_id,firstSeenVersion:Number(row.first_seen_version),attempts:Number(row.attempts),lastReason:row.last_reason})),pending:total};
+ }catch{return {ok:false,reason:'unavailable'};}
+}
+// One ledger transition of a `pending` row: still pending with a new retry time (a rate limit does not count an attempt: the caller passes the unchanged count), `resolved` with the writer's receipt
+// reference, or `terminal` (no further automatic retry). Guarded by the authority and the caller's own guards. A row that is no longer pending is left alone (`already`).
+// -> {ok:true,state} | {ok:true,already:true} | {ok:false,reason}
+export async function settleAdmission(source,{lid,state,attempts,nextRetryAt=null,reason=null,resolvedBy=null,now=Date.now()},ctx={}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ if(typeof lid!=='string'||!lid||!['pending','resolved','terminal'].includes(state)||!Number.isInteger(attempts)||attempts<0)return {ok:false,reason:'shape'};
+ if(state==='resolved'&&(typeof resolvedBy!=='string'||!resolvedBy||resolvedBy.length>200))return {ok:false,reason:'shape'};
+ if(nextRetryAt!==null&&!Number.isFinite(Date.parse(nextRetryAt)))return {ok:false,reason:'shape'};
+ const extra=callerGuards(ctx);
+ if(!extra)return {ok:false,reason:'shape'};
+ const gate=await readAuthority(db);
+ if(gate.state!=='d1')return {ok:false,reason:'closed'};
+ if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
+ const outcome=await fenced(db,[authorityGuard(gate.generation),...extra,
+  ["UPDATE watchlist_admission_pending SET state=?, attempts=?, next_retry_at=?, last_reason=?, resolved_by=?, updated_at=? WHERE lid=? AND state='pending'",[state,attempts,state==='pending'?nextRetryAt:null,reason==null?null:String(reason).slice(0,60),state==='resolved'?resolvedBy:null,iso(now),lid]]]);
+ if(outcome!=='ok')return {ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
+ try{const row=await one(db,'SELECT state FROM watchlist_admission_pending WHERE lid=?',[lid]);return row?.state===state?{ok:true,state}:{ok:true,already:true};}catch{return {ok:false,reason:'unavailable'};}
+}
+// An id that left the Watchlist before it was resolved is `superseded` (not retried); a returning id reopens through the next promotion's ledger insert. -> {ok:true} | {ok:false,reason}
+export async function supersedeAdmissions(source,{lids,now=Date.now()},ctx={}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ if(!Array.isArray(lids)||lids.some(lid=>typeof lid!=='string'||!lid)||lids.length>50)return {ok:false,reason:'shape'};
+ if(!lids.length)return {ok:true};
+ const extra=callerGuards(ctx);
+ if(!extra)return {ok:false,reason:'shape'};
+ const gate=await readAuthority(db);
+ if(gate.state!=='d1')return {ok:false,reason:'closed'};
+ if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
+ const outcome=await fenced(db,[authorityGuard(gate.generation),...extra,
+  ["UPDATE watchlist_admission_pending SET state='superseded', next_retry_at=NULL, updated_at=? WHERE state='pending' AND lid IN ("+lids.map(()=>'?').join(',')+')',[iso(now),...lids]]]);
+ return outcome==='ok'?{ok:true}:{ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
+}
+
 // ---- retention ------------------------------------------------------------------------------------------------------------
 // The newest `keepSnapshots` promoted snapshots (with members, changes and effects) stay; older ones are deleted, but never a snapshot whose causal effects are not all done and never the current
 // pointer. Bounded per call. -> {ok:true,removed} | {ok:false,reason}
