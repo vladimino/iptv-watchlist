@@ -1037,6 +1037,64 @@ export async function selectActionableObservations(env,options={}){
  return {programmeRunId:opened.programmeRunId,items,touches,after:cursor,touchAfter:touchCursor,wrapped,touchWrapped,queries,remaining,waitingRetry,nextRetryAt,complete};
 }
 
+// AIR-503 (owner decision, 20 Nov 2026; handoff of 21 Nov 2026). The legacy alias revalidation must not depend on the replay page and the touch page of a chunk meeting by
+// chance: those are two independent cursors, a resting replay has no drifts at all, and a touch page holds 38 of thousands of verified keys. This is its own bounded, keyset-paged
+// read of the current-window verified rows whose decision came from an alias (`known_epg_alias`). For each row it computes, with the same rule the replay uses (`slotEligibility`
+// over `confirmedSlots` or the observation's confirmed id), the whole minutes of the slots that no rule makes eligible. `accept` is the caller's filter (it knows the Film
+// records); the read stops when `want` rows are accepted or the page budget is spent, and `after` is the last key it examined, so the next chunk resumes there and every key is
+// reached once per lap. It reads only, behind the same generation fence as the candidate walk.
+export const LEGACY_ALIAS_PAGE=40;
+export const LEGACY_ALIAS_QUERIES=2;
+const LEGACY_ALIAS_FROM=`${TOUCH_FROM}
+ AND json_extract(d.payload_json,'$.identitySource')='known_epg_alias'`;
+export const LEGACY_ALIAS_PAGE_SQL='SELECT o.observation_key, o.payload_json, o.confirmed_tmdb_id, d.payload_json AS decision_json '+LEGACY_ALIAS_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?';
+export async function selectLegacyAliasObservations(env,options={}){
+ const opened=await readAuthority(env);
+ if(!opened.ready)throw failed('discovery_not_authoritative');
+ if(opened.transfer==='loading')throw failed('discovery_incomplete');
+ const now=Number.isFinite(options.now)?options.now:Date.now();
+ const from=now-72*3600000,to=now+24*3600000;
+ const want=Math.max(1,Math.min(8,Number.isInteger(options.want)&&options.want>0?options.want:4));
+ const pageSize=Math.min(LEGACY_ALIAS_PAGE,Math.max(1,Number.isInteger(options.pageSize)&&options.pageSize>0?options.pageSize:LEGACY_ALIAS_PAGE));
+ const maxQueries=Math.max(1,Math.min(4,Number.isInteger(options.maxQueries)&&options.maxQueries>0?options.maxQueries:LEGACY_ALIAS_QUERIES));
+ const accept=typeof options.accept==='function'?options.accept:()=>true;
+ const startAfter=typeof options.after==='string'?options.after:'';
+ const db=database(env);
+ const accepted=[];
+ let cursor=startAfter,wrapped=false,lapComplete=false,queries=0,scanned=0,examined=0;
+ while(accepted.length<want&&queries<maxQueries){
+  if(options.shouldStop&&options.shouldStop())break;
+  if(options.beforeQuery)await options.beforeQuery({query:queries,after:cursor,phase:'legacy_alias'});
+  const rows=await many(db,LEGACY_ALIAS_PAGE_SQL,[from,to,cursor,pageSize]);
+  queries++;
+  if(!rows.length){
+   if(!cursor||wrapped){lapComplete=true;break;}
+   cursor='';wrapped=true;continue;
+  }
+  const shows=await loadPageShows(env,cursor,rows[rows.length-1].observation_key,pageKeySet(rows));
+  let stopped=false;
+  for(const row of rows){
+   // After the wrap the read has come back to where it started: the lap is complete, and a key that was accepted before the wrap is not accepted twice.
+   if(wrapped&&startAfter&&row.observation_key>startAfter){lapComplete=true;stopped=true;break;}
+   if(accepted.some(item=>item.candidate.key===row.observation_key))continue;
+   cursor=row.observation_key;scanned++;examined++;
+   const candidate=observationFromRow(row,shows.get(row.observation_key)||[]);
+   const decision=decisionFromRow({payload_json:row.decision_json});
+   const confirmation=Array.isArray(candidate.confirmedSlots)?candidate:{confirmedTmdbId:row.confirmed_tmdb_id};
+   const minutes=[...new Set(candidate.shows.map(show=>({show,slot:{start:show.start,end:show.end}})).filter(({show,slot})=>!slotEligibility(decision,slot,slotScanConfirmation(confirmation,{channelId:show.channelId,start:show.start})).eligible).map(({slot})=>slotMinutes(slot.start,slot.end)).filter(value=>Number.isFinite(value)))];
+   if(accept(candidate,decision,minutes)){accepted.push({candidate,decision,minutes});if(accepted.length>=want){stopped=true;break;}}
+  }
+  if(stopped)break;
+  if(rows.length<pageSize){
+   if(wrapped||!startAfter){lapComplete=true;break;}
+   cursor='';wrapped=true;
+  }
+ }
+ const closed=await readAuthority(env);
+ if(!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
+ return {programmeRunId:opened.programmeRunId,rows:accepted,after:lapComplete?'':cursor,wrapped,lapComplete,queries,scanned};
+}
+
 // ADR 0092. The ledger seal is a resumable job instead of one request. `discovery_seal` (schema 12) holds its identity
 // and cursor; every batch of observation rows moves the cursor in the SAME D1 batch (compare-and-set on `cursor_items`),
 // so a request that dies leaves the rows and the cursor agreeing. The batch itself is idempotent (an upsert and a

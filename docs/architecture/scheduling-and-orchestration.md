@@ -226,7 +226,7 @@ sequenceDiagram
     Note over EPG,D1: Hourly ensure certifies a complete but uncertified run. No Workflow, no control or sync.json write.
 ```
 
-**Accepted design (not implemented, [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md)):** if the run checkpoint moves to D1 and its marker is `d1`, the two steps "sync.json stage complete in R2" and "Certify batch" in the diagram above become one fenced batch (the certificate stays conditional and non-aborting), and the crash window between them no longer exists for runs completed in that mode. The single-call completion route would use the same operation and attempt the queue refresh before it. The diagram above is unchanged because it describes current behavior; the hourly repair `certifyComplete` stays for runs completed before an activation.
+**Accepted design (dormant, [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md)):** if the run checkpoint moves to D1 and its marker is `d1`, the two steps "sync.json stage complete in R2" and "Certify batch" in the diagram above become one fenced batch (the certificate stays conditional and non-aborting), and the crash window between them no longer exists for runs completed in that mode. The single-call completion route would use the same operation and attempt the queue refresh before it. The diagram above is unchanged because it describes current behavior; the hourly repair `certifyComplete` stays for runs completed before an activation.
 
 ### Seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), implemented by AIR-484; production acceptance awaits a natural run)
 
@@ -532,3 +532,29 @@ flowchart TD
 ```
 
 The unfinished-run backoff is 30 minutes by default (`Retry-After` is honoured), the retry cap is six attempts, and a busy resolver lease or EPG priority is recorded as `deferredBusy` and resumed on a later firing without holding the lease. A checkpoint write that loses its compare-and-swap leaves the guarded D1 hydration idempotent; the next firing re-reads D1 and the negative index. The R2 checkpoint is one object with version-aware compare-and-swap and needs no D1 migration. Rollback removes the cron entry and its dispatch by pull request; stored posters and index entries stay.
+
+## Accepted design (not implemented): one Letterboxd Sync Workflow with four daily slots ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
+
+Today the Ratings run is one daily Workflow at 17:00 Europe/Madrid and the Watchlist is fetched inside the EPG run (the sections above). The proposal separates the two user sources from the EPG and Discovery. The diagram is the **future** flow; the shaded nodes do not exist in production, no cron or binding is changed by the proposal, and with the Watchlist marker `epg` or absent the current flows above are the only path.
+
+```mermaid
+flowchart TD
+    cron["New cron 30 * * * * UTC<br/>calls only the Letterboxd ensure"]
+    claim["ensure: claim the latest due slot by CAS<br/>04:30 10:30 16:30 22:30 Madrid<br/>a missed slot is recorded, never run late"]
+    wf["One LetterboxdWorkflow instance per slot"]
+    diary["1 Diary and Ratings<br/>ratings outcome"]
+    scan["2 Complete Watchlist scan<br/>commit, or no-op, or incomplete<br/>watchlist outcome"]
+    recon["3 Removal reconciliation<br/>operational result only"]
+    ev["Two create-only Events per run:<br/>ratings and watchlist"]
+    snap[("Proposed Watchlist authority<br/>current pointer, snapshot, members")]
+    epg["EPG Workflow 17:00<br/>one snapshot read, no Letterboxd call"]
+    cron --> claim --> wf --> diary --> scan --> recon
+    diary --> ev
+    scan --> ev
+    scan -->|"one fenced batch"| snap
+    snap -->|"read once at run start"| epg
+    classDef proposed fill:#fff3de,stroke:#a56c2b,color:#42300e
+    class cron,claim,wf,diary,scan,recon,ev,snap proposed
+```
+
+The four wall times are never inside the Madrid DST gap or fold, so a day has exactly four slots on every date; the spacing is 5 or 7 real hours across a changeover. A slot is eligible from its due instant until the next slot's due instant, and no retry crosses that boundary. Diary and Watchlist outcomes are independent (a Diary outage does not stop the scan, a Watchlist outage does not unconfirm Ratings). The mode document, epoch fence and three-step switch of [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md) apply, and the Ratings writer is closed, drained and fenced (the legacy start and step entry points included, not only the `external` mode) before the Letterboxd one is opened, so two Diary writers never coexist; the old 17:00 contract is retired only in a later cleanup, and the shared hourly cron stays. Neither the EPG, Discovery nor the EPG-priority pause gates a Letterboxd step, and the Letterboxd cron does not call them.

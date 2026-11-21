@@ -194,6 +194,9 @@ export const FILES={
  "canonical-film-external-ids-producer.mjs": {
   "suite": "core"
  },
+ "letterboxd-claim-backfill.mjs": {
+  "suite": "core"
+ },
  "canonical-letterboxd-claim.mjs": {
   "suite": "core"
  },
@@ -575,6 +578,18 @@ export const FILES={
   "suite": "core"
  },
  "enrichment.mjs": {
+  "suite": "core"
+ },
+ "epg-checkpoint-worker.mjs": {
+  "suite": "core"
+ },
+ "epg-checkpoint-certificate.mjs": {
+  "suite": "core"
+ },
+ "epg-checkpoint-d1.mjs": {
+  "suite": "core"
+ },
+ "epg-checkpoint-production.mjs": {
   "suite": "core"
  },
  "epg-commit-durable-enqueue.mjs": {

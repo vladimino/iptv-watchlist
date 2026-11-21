@@ -9,6 +9,7 @@ export const STANDIN_FLAGS=Object.freeze({
  DISCOVERY_DB_OPTIONAL:'standin',
  FILM_PERSON_DB_OPTIONAL:'standin',
  STARTED_DB_OPTIONAL:'standin',
+ EPG_CHECKPOINT_DB_OPTIONAL:'standin',
 });
 export const standins=(env={})=>({...env,...STANDIN_FLAGS});
 export const strict=(env={})=>{const out={...env};for(const name of Object.keys(STANDIN_FLAGS))delete out[name];return out;};
