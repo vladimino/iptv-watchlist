@@ -38,6 +38,15 @@ CREATE TABLE epg_checkpoint_cas (
  ok INTEGER NOT NULL CHECK (ok = 1)
 ) STRICT;
 
+-- The singleton fence row must exist. Every guard of the repository is an upsert of it (never an UPDATE that could match nothing), the marker read answers `closed`
+-- without it, and this trigger refuses a delete; a restore that bypasses the trigger is still caught by the other two.
+CREATE TRIGGER epg_checkpoint_cas_required
+BEFORE DELETE ON epg_checkpoint_cas
+FOR EACH ROW
+BEGIN
+ SELECT RAISE(ABORT, 'epg_checkpoint_cas_required');
+END;
+
 CREATE TABLE epg_checkpoint_run (
  id INTEGER PRIMARY KEY CHECK (id = 1),
  run_id TEXT NOT NULL CHECK (length(run_id) BETWEEN 1 AND 100),

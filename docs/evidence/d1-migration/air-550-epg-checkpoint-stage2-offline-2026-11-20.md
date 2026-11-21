@@ -25,6 +25,11 @@ All offline: a sqlite D1 stand-in over the real migration chain (each batch one 
 
 Local results (this session): the three new files pass; `epg-run-certificate` and `canonical-rated-admission-producer` pass after their pinned text and schema number were updated; the core suite result on the final tree is recorded in the pull request.
 
+## Independent review of the first delivery (HEAD `6eb2cd0f`) and its fixes
+
+- **Fence fail-open (P1).** The first delivery guarded with `UPDATE epg_checkpoint_cas … WHERE id=1`, which matches no row when the singleton row is missing, so a stale write could commit. Every guard is now an upsert of the row (`INSERT … ON CONFLICT DO UPDATE`), the marker read answers `closed` without the row, and the migration adds a trigger that refuses its deletion. `tests/epg-checkpoint-d1.mjs` section 12 deletes the row after the marker was read and shows that a stale revision, a stale generation, a lost lease, a run creation, a completion, the sweep and an ingest failure all refuse and change no row; the same test fails (a stale write commits) when the old `UPDATE` form is substituted.
+- **Completion time (P2).** The typed `completed_at` and the body's `completedAt` are one value: `completeRun` copies a missing value (from `updatedAt`, else the clock) into the body and refuses a malformed one, `saveRun` refuses any change or removal of it after completion (`completion_time`), `loadRun` refuses a complete run whose two values differ. Section 13 covers each.
+
 ## Resolutions of the ADR's open questions
 
 - **O1.** `EpgOrchestration.externalGate` answers `external_writer_fenced` in mode `cloudflare`, a fence in mode `external` (and then `beginExternalStep` takes a step lease), and no fence only when the orchestration tables do not exist at all, which cannot be a database that has the v30 checkpoint tables. So "no step, no write" never refuses a legitimate path in `d1` mode.

@@ -362,4 +362,97 @@ const created=async(count=3,extra={},options={})=>{const made=open(options);cons
  assert.equal((await Checkpoint.createRun(made.db,makeRun('run-wide',1),{...ctx(),attempt:attempt('again')})).reason,'shape');
 }
 
+// ===== 12. the fence row is a prerequisite that is enforced, not assumed (review of the first delivery) =====
+{
+ const snapshot=file=>JSON.stringify([rows(file,'SELECT * FROM epg_checkpoint_run'),rows(file,'SELECT * FROM epg_checkpoint_body'),rows(file,'SELECT run_id,ordinal,film_id,body_sha256 FROM epg_checkpoint_film ORDER BY run_id,ordinal'),rows(file,'SELECT * FROM epg_checkpoint_receipt'),rows(file,'SELECT * FROM epg_ingest_status')]);
+ const dropSentinel=file=>sqlite(file,'DROP TRIGGER IF EXISTS epg_checkpoint_run_order;DROP TRIGGER IF EXISTS epg_checkpoint_cas_required;DELETE FROM epg_checkpoint_cas');
+ // the trigger refuses a delete; with the row gone the marker read is closed, never d1
+ const guarded=await created(3);
+ refuses(guarded.file,'DELETE FROM epg_checkpoint_cas',/epg_checkpoint_cas_required/);
+ dropSentinel(guarded.file);
+ assert.deepEqual(await Checkpoint.readAuthority(guarded.db),{state:'closed'},'a missing fence row is closed');
+ assert.deepEqual(await Checkpoint.loadRun(guarded.db),{ok:false,reason:'closed'});
+ assert.deepEqual(await Checkpoint.readIngest(guarded.db),{ok:false,reason:'closed'});
+ // the row is deleted AFTER the marker was read: a stale revision must still refuse and write nothing at all
+ const stale=await created(4);
+ const read=(await Checkpoint.loadRun(stale.db)).run;
+ const winner=(await Checkpoint.loadRun(stale.db)).run;winner.cursor=1;assert.equal((await Checkpoint.saveRun(stale.db,winner,ctx())).ok,true);
+ dropSentinel(stale.file);
+ const before=snapshot(stale.file);
+ read.cursor=9;read.watchlist[0].title='changed';
+ const out=await Checkpoint.saveRun(stale.db,read,ctx());
+ assert.equal(out.ok,false);assert.equal(out.reason,'conflict');
+ assert.equal(snapshot(stale.file),before,'no body, film, receipt, run or ingest row changed');
+ // a stale generation with the row gone
+ const generation=await created(2);
+ const loaded=(await Checkpoint.loadRun(generation.db)).run;loaded.cursor=3;
+ sqlite(generation.file,"UPDATE epg_checkpoint_authority SET generation=7 WHERE id=1");dropSentinel(generation.file);
+ const snap=snapshot(generation.file);
+ assert.equal((await Checkpoint.saveRun(generation.db,loaded,ctx())).reason,'conflict');assert.equal(snapshot(generation.file),snap);
+ // a stale lease with the row gone
+ const lease=await created(2);
+ const heldRun=(await Checkpoint.loadRun(lease.db)).run;heldRun.cursor=4;
+ sqlite(lease.file,"UPDATE epg_orchestration_document SET body=json_set(body,'$.holder','other') WHERE key='lease'");dropSentinel(lease.file);
+ const leaseSnap=snapshot(lease.file);
+ assert.equal((await Checkpoint.saveRun(lease.db,heldRun,ctx())).reason,'conflict');assert.equal(snapshot(lease.file),leaseSnap);
+ // run creation: the previous run's revision moves and the row is deleted between the read-back and the switch
+ const creating=await created(3);
+ let armed=true;
+ const hook=d1Standin(creating.file,{onBatch:async batch=>{if(armed&&batch.some(item=>/^UPDATE epg_checkpoint_run SET run_id/.test(item.text))){armed=false;sqlite(creating.file,'DROP TRIGGER IF EXISTS epg_checkpoint_run_order;DROP TRIGGER IF EXISTS epg_checkpoint_cas_required;UPDATE epg_checkpoint_run SET revision=revision+1;DELETE FROM epg_checkpoint_cas');}}});
+ const createdBefore=snapshot(creating.file);
+ const made=await Checkpoint.createRun(hook,makeRun('run-2',2),{...ctx(),attempt:attempt('a2','2026-11-20T10:05:00.000Z')});
+ assert.equal(made.ok,false);
+ const after=JSON.parse(snapshot(creating.file));
+ assert.equal(after[0][0].run_id,'run-1','the previous run is still current');assert.equal(after[3].length,JSON.parse(createdBefore)[3].length,'no receipt');assert.deepEqual(after[4],JSON.parse(createdBefore)[4],'the ingest row did not change');
+ // completion: a stale revision with the row gone leaves the working set and the certify statements alone
+ const completing=await created(2);
+ const run=(await Checkpoint.loadRun(completing.db)).run;
+ sqlite(completing.file,"CREATE TABLE probe (id INTEGER PRIMARY KEY)");
+ sqlite(completing.file,'DROP TRIGGER IF EXISTS epg_checkpoint_run_order;UPDATE epg_checkpoint_run SET revision=revision+1');dropSentinel(completing.file);
+ run.stage='complete';delete run.watchlist;delete run.pending;
+ const filmsBefore=counts(completing.file).film;
+ const refused=await Checkpoint.completeRun(completing.db,run,{...ctx(),queueAttempted:true,certify:[["INSERT INTO probe (id) VALUES (1)",[]]]});
+ assert.equal(refused.ok,false);assert.equal(counts(completing.file).film,filmsBefore);assert.equal(rows(completing.file,'SELECT COUNT(*) AS n FROM probe')[0].n,0);assert.equal(runRow(completing.file).stage,'metadata');
+ // the sweep and the ingest failure with a moved generation and the row gone
+ const sweeping=await created(2);
+ sqlite(sweeping.file,"INSERT INTO epg_checkpoint_film (run_id,ordinal,film_id,body,body_sha256) VALUES ('ghost',0,'g','{}','"+'5'.repeat(64)+"')");
+ const gate=await Checkpoint.readAuthority(sweeping.db);assert.equal(gate.state,'d1');
+ sqlite(sweeping.file,"UPDATE epg_orchestration_document SET body=json_set(body,'$.holder','other') WHERE key='lease'");dropSentinel(sweeping.file);
+ assert.equal((await Checkpoint.gcOrphans(sweeping.db,ctx())).ok,false);assert.equal(rows(sweeping.file,"SELECT COUNT(*) AS n FROM epg_checkpoint_film WHERE run_id='ghost'")[0].n,1,'nothing was swept');
+ const ingesting=open();
+ let moved=true;
+ const flip=d1Standin(ingesting.file,{onBatch:async()=>{if(moved){moved=false;sqlite(ingesting.file,'DROP TRIGGER IF EXISTS epg_checkpoint_cas_required;UPDATE epg_checkpoint_authority SET generation=9;DELETE FROM epg_checkpoint_cas');}}});
+ const failed=await Checkpoint.recordIngestFailure(flip,{attempt:attempt('x','2026-11-20T10:07:00.000Z'),code:'watchlist_failed',failedAt:T,lastSuccessAt:null,now:NOW});
+ assert.equal(failed.ok,false);assert.equal(rows(ingesting.file,'SELECT COUNT(*) AS n FROM epg_ingest_status')[0].n,0,'no ingest row was written');
+}
+
+// ===== 13. the completion time is one value in two places =====
+{
+ const made=await created(2);
+ const run=(await Checkpoint.loadRun(made.db)).run;
+ run.stage='complete';delete run.watchlist;delete run.pending;run.completedAt='not a date';
+ assert.equal((await Checkpoint.completeRun(made.db,run,{...ctx(),queueAttempted:true})).reason,'shape','a malformed completion time is refused');
+ run.completedAt=42;assert.equal((await Checkpoint.completeRun(made.db,run,{...ctx(),queueAttempted:true})).reason,'shape');
+ assert.equal(runRow(made.file).stage,'metadata');
+ // a missing completion time takes updatedAt and is copied into the body, so the body and the typed column agree
+ delete run.completedAt;run.updatedAt='2026-11-20T10:30:00.000Z';
+ assert.equal((await Checkpoint.completeRun(made.db,run,{...ctx(),queueAttempted:true})).ok,true);
+ assert.equal(run.completedAt,'2026-11-20T10:30:00.000Z');assert.equal(runRow(made.file).completed_at,'2026-11-20T10:30:00.000Z');
+ const served=(await Checkpoint.loadRun(made.db)).run;assert.equal(served.completedAt,'2026-11-20T10:30:00.000Z');
+ // after completion the time cannot change, in the body any more than in the column
+ const later=(await Checkpoint.loadRun(made.db)).run;later.completedAt='2026-11-21T00:00:00.000Z';
+ assert.equal((await Checkpoint.saveRun(made.db,later,ctx())).reason,'completion_time');
+ const removed=(await Checkpoint.loadRun(made.db)).run;delete removed.completedAt;
+ assert.equal((await Checkpoint.saveRun(made.db,removed,ctx())).reason,'completion_time');
+ const same=(await Checkpoint.loadRun(made.db)).run;same.epgEventPending=[];same.updatedAt='2026-11-22T00:00:00.000Z';
+ assert.equal((await Checkpoint.saveRun(made.db,same,ctx())).ok,true,'any other field may change at the same stage');
+ assert.equal((await Checkpoint.loadRun(made.db)).run.completedAt,'2026-11-20T10:30:00.000Z');
+ // a stored divergence between the two places is not served
+ sqlite(made.file,"DROP TRIGGER IF EXISTS epg_checkpoint_run_order;UPDATE epg_checkpoint_run SET completed_at='2026-11-20T11:00:00.000Z'");
+ assert.deepEqual(await Checkpoint.loadRun(made.db),{ok:false,reason:'malformed'});
+ // an existing valid completion time is kept as given
+ const kept=await created(1);
+ const k=(await Checkpoint.loadRun(kept.db)).run;k.stage='complete';delete k.watchlist;delete k.pending;k.completedAt='2026-11-20T09:00:00.000Z';k.updatedAt='2026-11-20T09:00:00.000Z';
+ assert.equal((await Checkpoint.completeRun(kept.db,k,{...ctx(),queueAttempted:true})).ok,true);assert.equal(runRow(kept.file).completed_at,'2026-11-20T09:00:00.000Z');
+}
 console.log('EPG checkpoint repository (ADR 0185): migration and triggers, authority states, create/load/save, fences, receipts and unknown outcomes, watchlist completeness, completion, ingest ordering, orphan sweep, budgets');

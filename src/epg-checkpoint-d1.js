@@ -17,7 +17,11 @@
 const FENCE='UPDATE epg_checkpoint_cas SET ok=changes() WHERE id=1';
 const TABLES=['epg_checkpoint_authority','epg_checkpoint_cas','epg_checkpoint_run','epg_checkpoint_body','epg_checkpoint_film','epg_checkpoint_receipt','epg_ingest_status'];
 export const LIMITS={statementChars:90000,bodyChars:900000,filmChars:90000,stageBatch:50,receipts:16,failureCap:1000,gcBatch:200,gcPasses:5};
-const MARKER_SQL='SELECT mode, generation, writes FROM epg_checkpoint_authority WHERE id=1';
+// The marker read also proves the singleton fence row exists: without it the domain is closed.
+const MARKER_SQL='SELECT mode, generation, writes, (SELECT COUNT(*) FROM epg_checkpoint_cas WHERE id=1) AS cas FROM epg_checkpoint_authority WHERE id=1';
+// ADR 0185. EVERY guard of a batch is an upsert of the fence row, never an UPDATE of it: an UPDATE that matches no row (the row was deleted by a partial restore or by
+// corruption) passes silently, while the upsert re-creates the row and evaluates `CHECK (ok = 1)` on both paths, so a failing condition aborts the batch whatever the table holds.
+const GUARD=expression=>'INSERT INTO epg_checkpoint_cas (id, ok) SELECT 1, '+expression+' WHERE 1 ON CONFLICT(id) DO UPDATE SET ok=excluded.ok';
 const RUN_SQL='SELECT run_id, run_key, started_at, stage, seal_phase, queue_attempted, completed_at, has_error, revision, body_chunks, body_chars, body_sha256, watchlist_present, film_count, film_list_sha256 FROM epg_checkpoint_run WHERE id=1';
 const STAGES=['metadata','epg','seal','complete'];
 // The state of a loaded or created run that the next save compares against. Keyed by the run object the caller holds.
@@ -47,7 +51,7 @@ export async function readAuthority(source){
  if(TABLES.some(name=>!names.includes(name)))return {state:'closed'};
  let row;
  try{row=await one(db,MARKER_SQL);}catch{return {state:'closed'};}
- if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.writes!=='open'&&row.writes!=='held')||!Number.isInteger(Number(row.generation)))return {state:'closed'};
+ if(!row||Number(row.cas)!==1||(row.mode!=='r2'&&row.mode!=='d1')||(row.writes!=='open'&&row.writes!=='held')||!Number.isInteger(Number(row.generation)))return {state:'closed'};
  return {state:row.mode,writes:row.writes,generation:Number(row.generation)};
 }
 
@@ -83,7 +87,7 @@ export async function loadRun(source){
  try{parts=await db.batch([MARKER_SQL,RUN_SQL,'SELECT seq, text FROM epg_checkpoint_body ORDER BY seq','SELECT run_id, ordinal, film_id, body, body_sha256 FROM epg_checkpoint_film WHERE run_id=(SELECT run_id FROM epg_checkpoint_run WHERE id=1) ORDER BY ordinal'].map(sql=>db.prepare(sql).bind()));}
  catch{return {ok:false,reason:'unavailable'};}
  const [marker,run,bodyRows,filmRows]=parts.map(part=>part.results||[]);
- if(!marker[0]||marker[0].mode!=='d1')return {ok:false,reason:'closed'};
+ if(!marker[0]||marker[0].mode!=='d1'||Number(marker[0].cas)!==1)return {ok:false,reason:'closed'};
  const generation=Number(marker[0].generation);
  // Film rows of no run are garbage of an interrupted creation and are ignored; a body with no run row is not.
  if(!run[0]){return bodyRows.length?{ok:false,reason:'malformed'}:{ok:true,run:null,generation};}
@@ -95,6 +99,8 @@ export async function loadRun(source){
   const body=JSON.parse(text);
   if(!body||typeof body!=='object'||Array.isArray(body)||'watchlist' in body)return {ok:false,reason:'malformed'};
   if(body.runId!==row.run_id||body.stage!==row.stage||(body.startedAt??null)!==row.started_at||(body.runKey??null)!==(row.run_key??null)||(row.stage==='seal'?body.seal?.phase:null)!==(row.seal_phase??null)||(body.error?1:0)!==Number(row.has_error))return {ok:false,reason:'malformed'};
+  // The completion time is stored twice (the typed column and the body) and must be the same value: a complete run whose body says otherwise is not served.
+  if(row.stage==='complete'&&body.completedAt!==row.completed_at)return {ok:false,reason:'malformed'};
   const present=Number(row.watchlist_present)===1;
   let films=null;
   if(present){
@@ -119,9 +125,9 @@ function stepContext(ctx){
 function guards(sc,generation){
  const rev=sc.fence.revision;
  return [
-  ["UPDATE epg_checkpoint_cas SET ok=(SELECT COUNT(*) FROM epg_checkpoint_authority WHERE id=1 AND mode='d1' AND writes='open' AND generation=?) WHERE id=1",[generation]],
-  ["UPDATE epg_checkpoint_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM epg_orchestration_document WHERE key='mode' AND (? IS NULL OR revision=?))=? THEN 1 ELSE 0 END WHERE id=1",[rev,rev,rev===null?0:1]],
-  ["UPDATE epg_checkpoint_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM epg_orchestration_document WHERE key='lease' AND json_extract(body,'$.holder')=? AND json_extract(body,'$.modeRevision') IS ? AND COALESCE(json_extract(body,'$.released'),0)=0 AND json_extract(body,'$.expiresAt')>?)=1 THEN 1 ELSE 0 END WHERE id=1",[sc.step.holder,sc.step.modeRevision??null,sc.leaseBound]],
+  [GUARD("(SELECT COUNT(*) FROM epg_checkpoint_authority WHERE id=1 AND mode='d1' AND writes='open' AND generation=?)"),[generation]],
+  [GUARD("CASE WHEN (SELECT COUNT(*) FROM epg_orchestration_document WHERE key='mode' AND (? IS NULL OR revision=?))=? THEN 1 ELSE 0 END"),[rev,rev,rev===null?0:1]],
+  [GUARD("CASE WHEN (SELECT COUNT(*) FROM epg_orchestration_document WHERE key='lease' AND json_extract(body,'$.holder')=? AND json_extract(body,'$.modeRevision') IS ? AND COALESCE(json_extract(body,'$.released'),0)=0 AND json_extract(body,'$.expiresAt')>?)=1 THEN 1 ELSE 0 END"),[sc.step.holder,sc.step.modeRevision??null,sc.leaseBound]],
  ];
 }
 async function fenced(db,statements){
@@ -191,6 +197,7 @@ export async function saveRun(source,run,ctx){
  if(!base)return {ok:false,reason:'unbased'};
  if(run.runId!==base.runId||(run.startedAt??null)!==base.startedAt||(run.runKey??null)!==base.runKey)return {ok:false,reason:'identity'};
  if(run.stage==='complete'&&base.stage!=='complete')return {ok:false,reason:'complete_route'};
+ if(base.stage==='complete'&&run.completedAt!==base.completedAt)return {ok:false,reason:'completion_time'};
  if(!STAGES.includes(run.stage)||(run.stage==='seal'&&typeof run.seal?.phase!=='string'))return {ok:false,reason:'shape'};
  const body=await bodyOf(run);
  if(!body)return {ok:false,reason:'budget'};
@@ -235,7 +242,11 @@ export async function completeRun(source,run,ctx){
  if(run.runId!==base.runId||(run.startedAt??null)!==base.startedAt||(run.runKey??null)!==base.runKey)return {ok:false,reason:'identity'};
  if(base.stage==='complete')return {ok:false,reason:'already_complete'};
  if(run.stage!=='complete')return {ok:false,reason:'shape'};
- const completedAt=typeof run.completedAt==='string'&&Number.isFinite(Date.parse(run.completedAt))?run.completedAt:(typeof run.updatedAt==='string'&&Number.isFinite(Date.parse(run.updatedAt))?run.updatedAt:iso(ctx.now??Date.now()));
+ // The completion time lives in the typed column AND in the body, as the same value. A present but malformed `completedAt` is refused; a missing one (the legacy record
+ // without the field) takes `updatedAt`, else the clock, and is copied into the body before it is serialized.
+ if(run.completedAt!==undefined&&run.completedAt!==null&&(typeof run.completedAt!=='string'||!Number.isFinite(Date.parse(run.completedAt))))return {ok:false,reason:'shape'};
+ const completedAt=run.completedAt??(typeof run.updatedAt==='string'&&Number.isFinite(Date.parse(run.updatedAt))?run.updatedAt:iso(ctx.now??Date.now()));
+ run.completedAt=completedAt;
  const body=await bodyOf(run);
  if(!body)return {ok:false,reason:'budget'};
  const now=iso(ctx.now??Date.now()),writeId=writeIdOf(),revision=base.revision+1;
@@ -312,7 +323,7 @@ export async function createRun(source,run,ctx){
  if(!filmRowsOk(staged,mine.length)||staged.some((row,index)=>row.film_id!==mine[index].id||row.body_sha256!==mine[index].sha)||await listDigest(staged)!==films.listSha)return {ok:false,reason:'malformed'};
  const now=iso(ctx.now??Date.now()),writeId=writeIdOf(),expected=previous?Number(previous.revision):0,revision=expected+1;
  const count=mine.length;
- const shape=['UPDATE epg_checkpoint_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM epg_checkpoint_film WHERE run_id=?)=? AND (SELECT COALESCE(MIN(ordinal),0) FROM epg_checkpoint_film WHERE run_id=?)=0 AND (SELECT COALESCE(MAX(ordinal),-1) FROM epg_checkpoint_film WHERE run_id=?)=?-1 AND (SELECT COUNT(DISTINCT film_id) FROM epg_checkpoint_film WHERE run_id=?)=? THEN 1 ELSE 0 END WHERE id=1',[run.runId,count,run.runId,run.runId,count,run.runId,count]];
+ const shape=[GUARD('CASE WHEN (SELECT COUNT(*) FROM epg_checkpoint_film WHERE run_id=?)=? AND (SELECT COALESCE(MIN(ordinal),0) FROM epg_checkpoint_film WHERE run_id=?)=0 AND (SELECT COALESCE(MAX(ordinal),-1) FROM epg_checkpoint_film WHERE run_id=?)=?-1 AND (SELECT COUNT(DISTINCT film_id) FROM epg_checkpoint_film WHERE run_id=?)=? THEN 1 ELSE 0 END'),[run.runId,count,run.runId,run.runId,count,run.runId,count]];
  const columns=[run.runId,run.runKey??null,run.startedAt,run.stage,run.stage==='seal'?run.seal.phase:null,run.error?1:0,revision,writeId,body.chunks.length,body.text.length,body.sha,count,films.listSha,now];
  const write=previous
   ?['UPDATE epg_checkpoint_run SET run_id=?, run_key=?, started_at=?, stage=?, seal_phase=?, queue_attempted=0, completed_at=NULL, has_error=?, revision=?, last_write_id=?, body_chunks=?, body_chars=?, body_sha256=?, watchlist_present=1, film_count=?, film_list_sha256=?, updated_at=? WHERE id=1 AND run_id=? AND revision=?',[...columns,previous.run_id,expected]]
@@ -342,7 +353,7 @@ export async function readIngest(source){
  if(!db)return {ok:false,reason:'unavailable'};
  let gate,row;
  try{gate=await one(db,MARKER_SQL);row=await one(db,'SELECT last_success_at, failed_at, code, consecutive_failures FROM epg_ingest_status WHERE id=1');}catch{return {ok:false,reason:'unavailable'};}
- if(!gate||gate.mode!=='d1')return {ok:false,reason:'closed'};
+ if(!gate||gate.mode!=='d1'||Number(gate.cas)!==1)return {ok:false,reason:'closed'};
  if(!row)return {ok:true,status:null};
  return {ok:true,status:{schemaVersion:1,...(row.code?{code:row.code}:{}),failedAt:row.failed_at??null,lastSuccessAt:row.last_success_at??null,consecutiveFailures:Number(row.consecutive_failures)}};
 }
@@ -360,7 +371,7 @@ export async function recordIngestFailure(source,{attempt,code,failedAt,lastSucc
  const stamp=iso(now??Date.now()),success=lastSuccessAt??null;
  const mine='(excluded.failure_attempt_started_at, excluded.failure_attempt_id)';
  const outcome=await fenced(db,[
-  ["UPDATE epg_checkpoint_cas SET ok=(SELECT COUNT(*) FROM epg_checkpoint_authority WHERE id=1 AND mode='d1' AND writes='open' AND generation=?) WHERE id=1",[gate.generation]],
+  [GUARD("(SELECT COUNT(*) FROM epg_checkpoint_authority WHERE id=1 AND mode='d1' AND writes='open' AND generation=?)"),[gate.generation]],
   ['INSERT INTO epg_ingest_status (id, schema_version, last_success_at, failed_at, code, consecutive_failures, failure_attempt_id, failure_attempt_started_at, revision, updated_at) VALUES (1,1,?,?,?,1,?,?,1,?) ON CONFLICT(id) DO UPDATE SET last_success_at=NULLIF(MAX(COALESCE(last_success_at,\'\'),COALESCE(excluded.last_success_at,\'\')),\'\'), failed_at=excluded.failed_at, code=excluded.code, consecutive_failures=MIN(consecutive_failures+1,'+LIMITS.failureCap+'), failure_attempt_id=excluded.failure_attempt_id, failure_attempt_started_at=excluded.failure_attempt_started_at, revision=revision+1, updated_at=excluded.updated_at WHERE '+mine+' > (COALESCE(success_attempt_started_at,\'\'), COALESCE(success_attempt_id,\'\')) AND '+mine+' > (COALESCE(failure_attempt_started_at,\'\'), COALESCE(failure_attempt_id,\'\'))',[success,failedAt,code.slice(0,60),attempt.id,attempt.startedAt,stamp]],
  ]);
  // A guard that fails means the authority moved (a hold or a flip) between the read and the write: nothing was written.

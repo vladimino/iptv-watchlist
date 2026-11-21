@@ -10,12 +10,12 @@ Status: **dormant.** [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md) (Acc
 | Marker `r2`, writes `open` | `SELECT mode, generation, writes FROM epg_checkpoint_authority` | The R2 objects serve. |
 | Marker `r2`, writes `held` | same | Reads serve R2; every write of either key is refused (`epg_checkpoint_writes_held`). This is the import fence. |
 | Marker `d1`, writes `open` | same | The rows are the only authority; R2 is neither read nor written for these keys. |
-| Anything else | version 30 without the tables, a deleted or unknown marker, an unreadable schema, no binding | **Closed**: the key is refused (`epg_checkpoint_unavailable`), never read from R2. Only the local stand-in `EPG_CHECKPOINT_DB_OPTIONAL` serves R2, and only for a database that has no checkpoint table at all. |
+| Anything else | version 30 without the tables, a deleted or unknown marker, **a missing fence row** (`SELECT COUNT(*) FROM epg_checkpoint_cas`), an unreadable schema, no binding | **Closed**: the key is refused (`epg_checkpoint_unavailable`), never read from R2. Only the local stand-in `EPG_CHECKPOINT_DB_OPTIONAL` serves R2, and only for a database that has no checkpoint table at all. |
 
 ## Read-only checks (L0, `SELECT` only)
 
 ```sql
-SELECT mode, generation, writes FROM epg_checkpoint_authority;
+SELECT mode, generation, writes, (SELECT COUNT(*) FROM epg_checkpoint_cas) AS fence_rows FROM epg_checkpoint_authority;
 SELECT run_id, stage, seal_phase, queue_attempted, completed_at, has_error, revision, watchlist_present, film_count FROM epg_checkpoint_run;
 SELECT COUNT(*) AS rows_of_current_run FROM epg_checkpoint_film WHERE run_id = (SELECT run_id FROM epg_checkpoint_run);
 SELECT COUNT(*) AS orphan_rows FROM epg_checkpoint_film WHERE run_id NOT IN (SELECT run_id FROM epg_checkpoint_run);
@@ -31,10 +31,10 @@ Orphan rows belong to an interrupted run creation. They are harmless to every re
 | --- | --- | --- |
 | `epg_checkpoint_conflict` | A fence refused the write: the authority generation moved, the step lease was lost or expired, the mode revision moved, or the run revision is not the one read. Nothing was written. | The step stops (class `epoch_mismatch`). The next action re-reads the run. Do not reset a lease or restart a Workflow to make it pass. |
 | `epg_checkpoint_unavailable` | The marker, the schema or D1 could not be read, or a batch failed for a storage reason. | Transient storage failure (class `d1_unavailable`) or a closed state; read the marker. Never fall back to the R2 object. |
-| `epg_checkpoint_malformed` | A stored run failed its own check: a missing, extra, duplicated or reordered film row, a digest, count or chunk mismatch, a typed column that contradicts the body. | Unsafe evidence (class `checkpoint_malformed`, a domain quarantine for the owner). Do not edit rows. The cause is a writer that bypassed the repository or a restore; recovery is an owner-approved correction. |
+| `epg_checkpoint_malformed` | A stored run failed its own check: a missing, extra, duplicated or reordered film row, a digest, count or chunk mismatch, a typed column that contradicts the body, a complete run whose body `completedAt` differs from the typed completion time. | Unsafe evidence (class `checkpoint_malformed`, a domain quarantine for the owner). Do not edit rows. The cause is a writer that bypassed the repository or a restore; recovery is an owner-approved correction. |
 | `epg_checkpoint_indeterminate` | A write whose outcome cannot be told from its receipt: the run revision advanced beyond the retained receipts, or the receipt revisions have a gap. | Unsafe evidence (class `evidence_unreadable`). The batch is **never** replayed. The next action derives what remains from the durable state (the seal units are idempotent); an owner clears the quarantine as for other unsafe evidence. |
 | `epg_checkpoint_unfenced` | A write had no step lease. | A programming error or a path outside a step; nothing was written. |
-| `epg_checkpoint_complete_route`, `_unbased`, `_identity`, `_shape`, `_budget` | A caller tried to complete a run through the generic save, saved an object that was never loaded, changed the run identity or the watchlist membership, or exceeded a size cap. | Nothing was written. A defect in the caller, not a data problem. |
+| `epg_checkpoint_complete_route`, `_completion_time`, `_unbased`, `_identity`, `_shape`, `_budget` | A caller tried to complete a run through the generic save, saved an object that was never loaded, changed the run identity or the watchlist membership, or exceeded a size cap. | Nothing was written. A defect in the caller, not a data problem. |
 
 An unknown outcome is classified from the write receipt: a receipt for the write's id means applied; no receipt with the revision unchanged, or advanced by at most 16 with consecutive receipts, means not applied; anything else is indeterminate. A single read of the latest run row never proves that a write did not happen.
 
