@@ -112,7 +112,7 @@ assert.ok(liveFilms.length>0);
  const tools=vm.runInContext('MCP_TOOLS',w.ctx),named=n=>tools.find(t=>t.name===n);
  for(const n of ['prediction_heartbeat','prediction_complete']){const p=named(n).inputSchema.properties||{};assert.ok(!('dryRun' in p)&&!('pin' in p)&&!('manifestHash' in p),n+' has no dry-run argument');}
  for(const n of ['prediction_start','prediction_next','prediction_submit','prediction_validate'])assert.equal(named(n),undefined,n+' is retired');
- assert.deepEqual(Object.keys(named('prediction_batch_start').inputSchema.properties).sort(),['capacity','dryRun','invocationKey','manifestSize','pin','trigger']);
+ assert.deepEqual(Object.keys(named('prediction_batch_start').inputSchema.properties).sort(),['capacity','deferred','dryRun','invocationKey','manifestSize','pin','trigger']);
  const contract=vm.runInContext('predictionRunnerContract()',w.ctx);assert.equal(contract.pipelineVersion,5);assert.equal(contract.protocol,'batch_v2');assert.ok(!('modelBatching' in contract),'no v5 model batching is advertised');
 }
 console.log('prediction-dry-run-isolation ok');

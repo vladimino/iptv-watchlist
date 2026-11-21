@@ -219,15 +219,22 @@ const manifestKey=id=>'enrichment/batch-manifest/'+id+'.json';
  // `when(doc)` says which lease write to hit; `how` is 'throw' or 'contend'; `takeover` replaces the lease with a foreign holder at the same moment.
  const scenario=async(name,when,how,takeover)=>{
   const w=await world();const other=foreign();let fired=0;
+  const peek=()=>{try{return leaseDoc(w);}catch{return {};}}; // the lease row does not exist before the first claim
   // 'contend': the lease write of the targeted step loses its compare-and-swap three times (RUNNER_LEASE_ATTEMPTS) while the lease is still this run's (a CHECK failure is a CAS loss to the D1 adapter).
   // 'throw': the write fails with an ordinary storage error.
-  w.hooks.write=statements=>{
-   if(!leaseWrite(statements))return;const doc=leaseDoc(w);if(!when(doc)||fired>=(how==='contend'?3:1))return;fired++;
+  // 'readthrow': the first READ of the lease after the gate was set fails (a check of the gate is a read while the gate is young).
+  if(how==='readthrow')w.hooks.query=text=>{
+   if(fired>=1||!/^\s*SELECT .*FROM prediction_lease WHERE name='runner'/is.test(text))return;const doc=peek();if(!when(doc))return;fired++;
+   if(takeover)setLease(w,other);
+   throw new Error('d1 unavailable');
+  };
+  else w.hooks.write=statements=>{
+   if(!leaseWrite(statements))return;const doc=peek();if(!when(doc)||fired>=(how==='contend'?3:1))return;fired++;
    if(how==='contend')throw new Error('CHECK constraint failed: prediction_domain_cas');
    if(takeover)setLease(w,other);
    throw new Error('d1 unavailable');
   };
-  const r=await batch(w,{invocationKey:KEY});w.hooks.write=null;
+  const r=await batch(w,{invocationKey:KEY});w.hooks.write=null;w.hooks.query=null;
   assert.ok(fired>=1,name+': the failure was injected');
   nothing(w,name);
   if(takeover){assert.equal(r.status,409,name+' '+JSON.stringify(r.data).slice(0,200));assert.equal(r.data.code,'start_claim_lost',name);assert.deepEqual(leaseDoc(w),other,name+': the foreign holder is untouched');}
@@ -238,8 +245,8 @@ const manifestKey=id=>'enrichment/batch-manifest/'+id+'.json';
  await scenario('G1 gate set throws',gateSetting,'throw',false);
  await scenario('G2 gate set throws, takeover',gateSetting,'throw',true);
  await scenario('G3 gate set CAS contention',gateSetting,'contend',false);
- await scenario('G4 first fence renew throws',firstRenew,'throw',false);
- await scenario('G5 first fence renew throws, takeover',firstRenew,'throw',true);
+ await scenario('G4 first fence check throws',firstRenew,'readthrow',false);
+ await scenario('G5 first fence check throws, takeover',firstRenew,'readthrow',true);
 }
 
 // 10d. The R2 `latest-run.json` is a non-authoritative mirror written after the D1 commit: a reader in D1 mode never sees a stale or out-of-order mirror object.

@@ -55,6 +55,11 @@
       "name": "iptv-producer",
       "binding": "PRODUCER_WORKFLOW",
       "class_name": "ProducerWorkflow"
+    },
+    {
+      "name": "iptv-prediction-start",
+      "binding": "PREDICTION_START_WORKFLOW",
+      "class_name": "PredictionStartWorkflow"
     }
   ]
 }
