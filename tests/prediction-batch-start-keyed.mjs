@@ -206,6 +206,42 @@ const manifestKey=id=>'enrichment/batch-manifest/'+id+'.json';
  });
 }
 
+// 10e. Failures AFTER the claim became the 15 minute run lease but BEFORE observedPrediction owns the cleanup (ADR 0188): the persist gate cannot be set (a thrown error, bounded CAS contention) and
+// the very first fence/renew throws. A still-owned failure releases its own lease and answers a bounded recoverable `start_storage_error`; a superseded handler leaves the foreign holder untouched
+// and answers `start_claim_lost`. Neither writes a run, diagnostics row, stop Event, manifest or `latest-run`.
+{
+ const foreign=()=>({owner:'foreign-run',runId:'foreign-run',heartbeatAt:new Date().toISOString(),expiresAt:Date.now()+15*60000,epoch:21,phase:'run',keyHash:'f'.repeat(64),argsHash:'e'.repeat(64)});
+ const leaseWrite=statements=>statements.some(item=>/UPDATE prediction_lease/i.test(item.text));
+ const nothing=(w,name)=>{
+  const keys=[...w.records.keys()];
+  assert.equal(runs(w),0,name+': no run');assert.ok(!keys.some(k=>k.startsWith('enrichment/run-diagnostics/')||k.startsWith('enrichment/stop-events/')||k.startsWith('enrichment/batch-manifest/')||k.startsWith('enrichment/sources/')||k==='enrichment/latest-run.json'),name+': no diagnostics, stop Event, manifest, source or latest-run');
+ };
+ // `when(doc)` says which lease write to hit; `how` is 'throw' or 'contend'; `takeover` replaces the lease with a foreign holder at the same moment.
+ const scenario=async(name,when,how,takeover)=>{
+  const w=await world();const other=foreign();let fired=0;
+  // 'contend': the lease write of the targeted step loses its compare-and-swap three times (RUNNER_LEASE_ATTEMPTS) while the lease is still this run's (a CHECK failure is a CAS loss to the D1 adapter).
+  // 'throw': the write fails with an ordinary storage error.
+  w.hooks.write=statements=>{
+   if(!leaseWrite(statements))return;const doc=leaseDoc(w);if(!when(doc)||fired>=(how==='contend'?3:1))return;fired++;
+   if(how==='contend')throw new Error('CHECK constraint failed: prediction_domain_cas');
+   if(takeover)setLease(w,other);
+   throw new Error('d1 unavailable');
+  };
+  const r=await batch(w,{invocationKey:KEY});w.hooks.write=null;
+  assert.ok(fired>=1,name+': the failure was injected');
+  nothing(w,name);
+  if(takeover){assert.equal(r.status,409,name+' '+JSON.stringify(r.data).slice(0,200));assert.equal(r.data.code,'start_claim_lost',name);assert.deepEqual(leaseDoc(w),other,name+': the foreign holder is untouched');}
+  else{assert.equal(r.status,502,name+' '+JSON.stringify(r.data).slice(0,200));assert.equal(r.data.code,'start_storage_error',name);assert.equal(r.data.recoverable,true);assert.equal(leaseDoc(w).expiresAt,0,name+': the converted lease was released, not stranded for 15 minutes');}
+ };
+ const gateSetting=doc=>doc.phase==='run'&&!doc.submitGate;
+ const firstRenew=doc=>doc.phase==='run'&&!!doc.submitGate;
+ await scenario('G1 gate set throws',gateSetting,'throw',false);
+ await scenario('G2 gate set throws, takeover',gateSetting,'throw',true);
+ await scenario('G3 gate set CAS contention',gateSetting,'contend',false);
+ await scenario('G4 first fence renew throws',firstRenew,'throw',false);
+ await scenario('G5 first fence renew throws, takeover',firstRenew,'throw',true);
+}
+
 // 10d. The R2 `latest-run.json` is a non-authoritative mirror written after the D1 commit: a reader in D1 mode never sees a stale or out-of-order mirror object.
 {
  const w=await world();

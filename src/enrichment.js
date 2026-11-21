@@ -1315,17 +1315,22 @@ async function observedPrediction(env,body,work,stage,requestId,opts={}){
  const stopFallback=extra=>({start:stage==='start',trigger:body?.trigger,...(body?.protocol===BATCH_PROTOCOL?{protocol:BATCH_PROTOCOL}:{}),...extra});
  const entered=predictionStep({step:stage,requestId:correlation,attemptedAt,outcome:'entered'});
  // ADR 0188: a claimed start passes a fence; a handler that no longer holds its gate writes no step, no stop and no run (the answer below is `start_claim_lost`).
- if(typeof opts.fence==='function'&&!await opts.fence())return json({status:'blocked',reason:'start_claim_lost',code:'start_claim_lost',runId:body?.runId||null,...scheduledRunFields()},409);
+ // Ownership is read through the fence; a fence that itself throws is "unknown", which is treated as still ours for the release (the release is fenced by the run id, so it cannot touch another holder) and answered as a recoverable storage error.
+ const fenceState=async()=>{try{return {mine:!!await opts.fence(),unknown:false};}catch{return {mine:false,unknown:true};}};
+ const fencedAnswer=async(state)=>{
+  // A fence that threw says nothing: read the lease itself. Another live holder means superseded (nothing is released); an unreadable or still-ours lease is treated as ours.
+  if(state.unknown&&body?.runId){try{const current=await loadJSON(env,RUNNER_LEASE_KEY);if(current?.runId&&current.runId!==body.runId&&Number(current.expiresAt)>Date.now())state={mine:false,unknown:false};}catch{/* unreadable: still treated as ours */}}
+  const ours=state.mine||state.unknown;
+  if(ours&&body?.runId)await runnerLease(env,body.runId,'release').catch(()=>null);
+  return withPredictionCorrelation(json(ours?{status:'blocked',reason:'storage_error',error:'storage_error',code:'start_storage_error',runId:body?.runId||null,recoverable:true,...scheduledRunFields()}:{status:'blocked',reason:'start_claim_lost',code:'start_claim_lost',runId:body?.runId||null,...scheduledRunFields()},ours?502:409),correlation);
+ };
+ if(typeof opts.fence==='function'){const state=await fenceState();if(!state.mine)return fencedAnswer(state);}
  await safeAppendStep(env,traceId,entered);
  let response,data;try{response=await work();data=await response.clone().json();}catch(error){
   logPredictionFailure(stage,error,correlation,traceId);
   // ADR 0188: an exception in a claimed start never reaches the unfenced stop recorder. The fence says whether this handler still owns the run: if not, it answers `start_claim_lost`; if it does,
   // it releases its own (fenced) lease and answers a bounded recoverable `start_storage_error`. Neither writes a run, a stop Event, a step, a retry or `latest-run`.
-  if(typeof opts.fence==='function'){
-   const mine=await Promise.resolve().then(()=>opts.fence()).catch(()=>false);
-   if(mine&&body?.runId)await runnerLease(env,body.runId,'release').catch(()=>null);
-   return withPredictionCorrelation(json(mine?{status:'blocked',reason:'storage_error',error:'storage_error',code:'start_storage_error',runId:body?.runId||null,recoverable:true,...scheduledRunFields()}:{status:'blocked',reason:'start_claim_lost',code:'start_claim_lost',runId:body?.runId||null,...scheduledRunFields()},mine?502:409),correlation);
-  }
+  if(typeof opts.fence==='function')return fencedAnswer(await fenceState());
   const id=stopId();
   await safeAppendStep(env,traceId||id,predictionStep({step:stage,requestId:correlation,attemptedAt,outcome:'failed',httpStatus:502,elapsedMs:Date.now()-started,errorClass:'storage_error'}));
   const stop=await recordRunStop(env,id,'storage_error',stopFallback());
@@ -2815,6 +2820,7 @@ async function batchStartWork(env,body,requestId,tally){
  const claim={runId,epoch:taken.epoch,keyHash,argsHash,lease:taken,converted:false};
  // Every exit that did not become a run releases the claim (a release of a claim already taken over is refused by the lease's own run and epoch check).
  try{return await batchStartCore(env,clean,requestId,tally,claim);}
+ catch(error){if(claim.converted)await runnerLease(env,runId,'release').catch(()=>null);throw error;}
  finally{if(!claim.converted)await runnerLease(env,runId,'release').catch(()=>null);}
 }
 async function batchStartCore(env,body,requestId,tally,claim){
@@ -2917,7 +2923,20 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
  // is inert: no lease, run record, `latest-run` or Event refers to it. A superseded handler writes no stop Event and no step (`observedPrediction` fence) and answers `start_claim_lost`.
  const token=claimed?crypto.randomUUID():null;
  const superseded=()=>json({status:'blocked',reason:'start_claim_lost',code:'start_claim_lost',runId,...scheduledRunFields()},409);
- if(claimed){const gated=await batchGateSet(env,runId,lease.epoch,token,requestId,'start-persist',true);if(gated.status!=='owned')return superseded();}
+ const storageError=()=>json({status:'blocked',reason:'storage_error',error:'storage_error',code:'start_storage_error',runId,recoverable:true,...scheduledRunFields()},502);
+ // The converted lease is live (15 minutes) from here on, so every exit before `observedPrediction` takes over releases it, fenced by the run id: still ours -> a bounded recoverable error,
+ // superseded -> the other holder is left untouched. Nothing here goes through the legacy stop recorder.
+ const leaveOwned=async error=>{
+  if(error)logPredictionFailure('start',error,requestId,runId);
+  let mine=true;try{const current=await loadJSON(env,RUNNER_LEASE_KEY);mine=current?.runId===runId&&Number(current.expiresAt)>Date.now();}catch{mine=true;}
+  await runnerLease(env,runId,'release').catch(()=>null);
+  return mine?storageError():superseded();
+ };
+ if(claimed){
+  let gated;try{gated=await batchGateSet(env,runId,lease.epoch,token,requestId,'start-persist',true);}catch(error){return leaveOwned(error);}
+  if(gated.status==='busy')return leaveOwned(null);
+  if(gated.status!=='owned')return superseded();
+ }
  const wenv=claimed?{...env,[BATCH_COMMIT_GUARD]:{runId,epoch:lease.epoch,token}}:env,gateCtx={run:{runId},epoch:lease.epoch,token,guarded:wenv};
  const fence=work=>claimed?batchGuardedCommit(env,gateCtx,work):work();
  const renewGate=async()=>{if(claimed){const renewed=await batchGateRenew(env,runId,lease.epoch,token);return renewed.status==='owned'||renewed.status==='busy';}return true;};
