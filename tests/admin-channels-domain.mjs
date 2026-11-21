@@ -17,6 +17,16 @@ assert.deepEqual(A.parseM3u(null).entries, []);
 assert.equal(A.parseM3u('a\n'.repeat(10), {maxLines: 3}).truncated, true);
 assert.ok(A.unsafeValue('rtsp://x') && A.unsafeValue('x&token=1') && A.unsafeValue('password=abc') && !A.unsafeValue('Sport 1 HD') && !A.unsafeValue('Token Film'));
 
+// a dropped programme entry makes the whole file a blocked, incomplete source (never a silent partial import)
+const clean = A.parseM3u('#EXTINF:-1 tvg-id="tvg_1" group-title="G",One\nhttp://h/1\n');
+assert.deepEqual(A.importBlockers(clean), []);
+assert.deepEqual(A.importBlockers(A.parseM3u('#EXTINF:-1 tvg-id="tvg_1" group-title="G",One\nhttp://h/1\n#EXTINF:-1 group-title="G",No id\nhttp://h/2\n')), [{code: 'missing_tvg_id', count: 1}], 'one entry without tvg-id blocks the file');
+assert.deepEqual(A.importBlockers(A.parseM3u('#EXTINF:-1 tvg-id="tvg_1",One\n#EXTINF:-1 tvg-id="tvg_2",Two\nhttp://h/2\n')).map(b => b.code), ['orphan_extinf']);
+assert.deepEqual(A.importBlockers(A.parseM3u('#EXTINF:-1 tvg-id="tvg_1",http://leak\nhttp://h/1\n')).map(b => b.code), ['unsafe_value', 'no_channels']);
+assert.deepEqual(A.importBlockers(A.parseM3u('')).map(b => b.code), ['no_channels']);
+assert.deepEqual(A.importBlockers(A.parseM3u('a\n'.repeat(10), {maxLines: 3})).map(b => b.code), ['truncated', 'no_channels']);
+assert.deepEqual(A.importBlockers(null), [{code: 'unreadable', count: 1}]);
+
 // validate
 const ok = A.validateSubmission({groups: [{name: 'G', policy: 'discover'}], entries: [{sourceId: 'tvg_1', name: null, group: null}]});
 assert.equal(ok.ok, true);
@@ -33,7 +43,7 @@ assert.deepEqual(A.effectiveOf(mk('ch001', {categoryKey: 'a'}), cats), {policy: 
 assert.deepEqual(A.effectiveOf(mk('ch001', {categoryKey: 'a', ownerCategoryKey: 'b'}), cats), {policy: 'deny_all', basis: 'owner_category'});
 assert.deepEqual(A.effectiveOf(mk('ch001', {categoryKey: 'a', ownerCategoryKey: 'b', overridePolicy: 'known_only'}), cats), {policy: 'known_only', basis: 'override'});
 const views = [mk('ch001', {categoryKey: 'a'}), mk('ch002', {origin: 'xmltv', sourceId: null}), mk('ch003', {categoryKey: 'b', listed: false})].map(c => A.channelView(c, cats, new Map([['ch001', {shows: 2, lastStartMs: 5}]])));
-assert.deepEqual(views[0].lastSeenInEpg, {shows: 2, lastStartMs: 5}); assert.equal(views[1].lastSeenInEpg, null);
+assert.deepEqual(views[0].publishedFilmShows, {shows: 2, lastStartMs: 5}); assert.equal(views[1].publishedFilmShows, null, 'no published Film show is reported as that, not as absence from the EPG');
 const ids = f => A.filterChannels(views, f).map(v => v.channelId);
 assert.deepEqual(ids({queue: 'unclassified'}), ['ch002']);
 assert.deepEqual(ids({category: 'a'}), ['ch001']); assert.deepEqual(ids({category: 'none'}), ['ch002']);

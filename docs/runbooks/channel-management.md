@@ -9,13 +9,14 @@ Owner procedure for classifying EPG channels with the [Channel admin](../referen
 
 ## Classify one channel
 
+0. A row shows only *published Film shows* of the channel: "no published Film shows" does not mean the channel is off air.
 1. Open the unclassified queue (tick "Только неклассифицированные"). An XMLTV-only channel appears there until it is classified; it is `known_only` meanwhile.
-2. Pick an owner category (a durable assignment an import never changes) or a manual policy override (wins over every category), add a note, press the matching save button. Clearing means choosing the empty option and saving.
+2. Pick an owner category (a durable assignment an import never changes) or a manual policy override (wins over every category), add the note of that decision (the category and the policy have separate notes), press the matching save button. Clearing means choosing the empty option and saving.
 3. The row shows the effective policy and its basis: manual override, owner category, provider category or unclassified. The saved decision survives every later import.
 
 ## Import a new playlist
 
-1. Choose the `.m3u`/`.m3u8` file. It is parsed in the browser; nothing is uploaded yet. Entries without a `tvg-id` are skipped and counted. A name or group that looks like a URL or a secret blocks the import: fix the file.
+1. Choose the `.m3u`/`.m3u8` file. It is parsed in the browser; nothing is uploaded yet. The import is **all or nothing**: a file with any `#EXTINF` without a `tvg-id`, any `#EXTINF` without a stream line, a name or group that looks like a URL or a secret, or an over-long file is blocked and no preview is offered. Do not import a partial or damaged download as complete; fix or re-download the file. There is no partial-import mode.
 2. Set the policy of each group (new groups default to `known_only`; known groups show the stored policy).
 3. "Проверить разницу" sends only normalized `{id, name, group}` entries and shows: new, renamed, changed category, absent from the file, conflicts with owner decisions, category changes. It writes nothing.
 4. Tick the confirmation and press "Записать импорт". The receipt shows the new revision. A channel absent from the file is **kept** without its provider category; owner categories and overrides are untouched.

@@ -38,6 +38,16 @@ assert.doesNotMatch(client + page, /rawPlaylist|rawText/, 'the raw playlist is n
 // The commit button exists only after a preview and stays disabled until the checkbox is ticked.
 assert.match(page, /id="channels-commit-btn" class="admin-refresh" disabled/);
 assert.match(page, /event\.target\.id === 'channels-confirm'\) channelsEl\('#channels-commit-btn'\)\.disabled = !event\.target\.checked/);
+// A partial or damaged playlist can never be imported: the page asks the pure module and renders no preview button when anything blocks.
+assert.match(page, /EpgChannelAdmin\.importBlockers\(parsed\)/);
+assert.match(page, /\(blocking \? '' : `<h3>Политика групп<\/h3>[\s\S]*id="channels-preview-btn"/, 'the preview button exists only when nothing blocks');
+assert.doesNotMatch(page, /missingId|orphan\b.*warn|Предупреждения/, 'a dropped entry is no longer a mere warning');
+// The category note and the policy note are independent decisions with independent inputs.
+assert.match(page, /data-field="category-note"[^>]*value="\$\{channelsEscape\(row\.ownerCategoryNote \|\| ''\)\}"/);
+assert.match(page, /data-field="policy-note"[^>]*value="\$\{channelsEscape\(row\.overrideNote \|\| ''\)\}"/);
+assert.match(page, /action === 'save-policy' \? '\[data-field=policy-note\]' : '\[data-field=category-note\]'/);
+assert.doesNotMatch(page, /overrideNote \|\| row\.ownerCategoryNote|data-field=note/, 'one shared note input is gone');
+assert.match(page, /нет опубликованных показов фильмов \(это не значит, что канал не в эфире\)/, 'presence is labelled as published Film shows');
 // Nothing starts on open but the one read.
 assert.equal((page.match(/\bgetChannels\(/g) || []).length, 1);
 assert.match(page, /channelsInit\(\);\s*$/);

@@ -18,6 +18,7 @@ const CHANNEL_STATUS={invalid:400,unknown_channel:404,unknown_category:400,confl
 
 function channelError(error,status,extra){return json({error,...(extra||{})},status);}
 function channelNow(){return new Date().toISOString();}
+// Published FILM-show presence: published_epg_show carries only the shows matched to a Film. A channel without such a row is NOT proven absent from the raw XMLTV schedule.
 async function channelPresence(db){
  try{
   const rows=(await db.prepare('SELECT channel_id AS channelId, COUNT(*) AS shows, MAX(start_ms) AS lastStartMs FROM published_epg_show WHERE programme_run_id=(SELECT programme_run_id FROM published_epg_authority WHERE id=1) GROUP BY channel_id').all()).results||[];

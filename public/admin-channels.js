@@ -66,7 +66,7 @@ function channelsItemHtml(row) {
   const owner = row.ownerCategory ? row.ownerCategory.key : '';
   const categoryOptions = '<option value="">— без категории владельца —</option>' + cats.map(c => `<option value="${channelsEscape(c.key)}"${c.key === owner ? ' selected' : ''}>${channelsEscape(c.name)} · ${c.policy}</option>`).join('');
   const policies = ['', 'discover', 'deny_all', 'known_only'].map(p => `<option value="${p}"${(row.overridePolicy || '') === p ? ' selected' : ''}>${p || '— без ручной политики —'}</option>`).join('');
-  const presence = row.lastSeenInEpg ? `${row.lastSeenInEpg.shows} показов, последний ${channelsDate(row.lastSeenInEpg.lastStartMs)}` : 'в опубликованном EPG не встречался';
+  const presence = row.publishedFilmShows ? `опубликованных показов фильмов: ${row.publishedFilmShows.shows}, последний ${channelsDate(row.publishedFilmShows.lastStartMs)}` : 'нет опубликованных показов фильмов (это не значит, что канал не в эфире)';
   const basis = {override: 'ручная политика', owner_category: 'категория владельца', category: 'категория провайдера', unclassified: 'не классифицирован'}[row.effective.basis];
   return `<li class="channels-item" data-channel="${channelsEscape(row.channelId)}">
     <header><h3>${channelsEscape(row.name || row.channelId)}</h3><span class="muted">${channelsEscape(row.channelId)}${row.sourceId ? ' · ' + channelsEscape(row.sourceId) : ' · только XMLTV'}</span>
@@ -74,9 +74,10 @@ function channelsItemHtml(row) {
     <div class="muted">Категория провайдера: ${row.category ? channelsEscape(row.category.name) : 'нет'}${row.ownerCategory ? ' · владельца: ' + channelsEscape(row.ownerCategory.name) : ''} · ${presence}</div>
     <div class="channels-edit">
       <label class="limbo-field">Категория владельца<select data-field="category">${categoryOptions}</select></label>
-      <label class="limbo-field">Ручная политика<select data-field="policy">${policies}</select></label>
-      <label class="limbo-field">Заметка<input type="text" data-field="note" maxlength="500" value="${channelsEscape(row.overrideNote || row.ownerCategoryNote || '')}"></label>
+      <label class="limbo-field">Заметка к категории<input type="text" data-field="category-note" maxlength="500" value="${channelsEscape(row.ownerCategoryNote || '')}"></label>
       <button type="button" class="admin-more" data-action="save-category">Сохранить категорию</button>
+      <label class="limbo-field">Ручная политика<select data-field="policy">${policies}</select></label>
+      <label class="limbo-field">Заметка к политике<input type="text" data-field="policy-note" maxlength="500" value="${channelsEscape(row.overrideNote || '')}"></label>
       <button type="button" class="admin-more" data-action="save-policy">Сохранить политику</button>
     </div></li>`;
 }
@@ -106,7 +107,7 @@ async function channelsSave(node, action) {
   if (channelsState.busy) return;
   const li = node.closest('.channels-item');
   const channelId = li.dataset.channel;
-  const note = li.querySelector('[data-field=note]').value.trim() || null;
+  const note = li.querySelector(action === 'save-policy' ? '[data-field=policy-note]' : '[data-field=category-note]').value.trim() || null;
   const fields = {channelId, note, expectedRevision: channelsState.data.revision, requestId: channelsRequestId()};
   channelsState.busy = true;
   node.disabled = true;
@@ -137,16 +138,19 @@ function channelsRenderParsed() {
   preview.hidden = true;
   preview.innerHTML = '';
   if (!parsed) {box.hidden = true; box.innerHTML = ''; return;}
-  const i = parsed.issues;
-  const blocking = i.unsafe > 0 || parsed.entries.length === 0 || parsed.truncated;
-  const warn = [];
-  if (i.missingId) warn.push(`без tvg-id пропущено: ${i.missingId}`);
-  if (i.orphan) warn.push(`без строки потока: ${i.orphan}`);
+  const blockers = EpgChannelAdmin.importBlockers(parsed);
+  const blocking = blockers.length > 0;
+  const TEXT = {
+    missing_tvg_id: n => `${n} записей #EXTINF без tvg-id`,
+    orphan_extinf: n => `${n} записей #EXTINF без строки потока`,
+    unsafe_value: n => `${n} записей, где имя или группа похожи на ссылку или секрет`,
+    truncated: () => 'файл слишком длинный',
+    no_channels: () => 'в файле нет каналов с tvg-id',
+    unreadable: () => 'файл не удалось прочитать',
+  };
   box.hidden = false;
-  box.innerHTML = `<p><b>${parsed.entries.length}</b> каналов, <b>${parsed.groups.length}</b> групп.${warn.length ? ' Предупреждения: ' + warn.join(', ') + '.' : ''}</p>` +
-    (i.unsafe ? `<p class="admin-state admin-state-error" role="alert">В ${i.unsafe} записях имя или группа похожи на ссылку или секрет. Импорт заблокирован: исправь файл.</p>` : '') +
-    (parsed.truncated ? '<p class="admin-state admin-state-error" role="alert">Файл слишком длинный. Импорт заблокирован.</p>' : '') +
-    (parsed.entries.length === 0 ? '<p class="admin-state admin-state-error" role="alert">В файле нет каналов с tvg-id.</p>' : '') +
+  box.innerHTML = `<p><b>${parsed.entries.length}</b> каналов, <b>${parsed.groups.length}</b> групп.</p>` +
+    (blocking ? `<div class="admin-state admin-state-error" role="alert"><b>Импорт заблокирован: файл неполный или повреждён.</b> Частичный файл нельзя принять за полный: каналы, которых в нём нет, потеряли бы категорию. Исправь файл и выбери его заново.<ul>${blockers.map(b => `<li>${channelsEscape(TEXT[b.code](b.count))}</li>`).join('')}</ul>${parsed.examples.length ? '<p class="muted">Первые строки файла с проблемой: ' + parsed.examples.map(e => e.line).join(', ') + '.</p>' : ''}</div>` : '') +
     (blocking ? '' : `<h3>Политика групп</h3><p class="muted">Новые группы по умолчанию known_only; у известных подставлена сохранённая политика.</p><div class="channels-groups">${parsed.groups.map((g, n) => `<label><span>${channelsEscape(g)}</span><select data-group="${n}">${['known_only', 'discover', 'deny_all'].map(p => `<option value="${p}"${p === channelsStoredPolicy(g) ? ' selected' : ''}>${p}</option>`).join('')}</select></label>`).join('')}</div><button type="button" id="channels-preview-btn" class="admin-refresh">Проверить разницу</button>`);
 }
 function channelsSubmission() {

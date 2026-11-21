@@ -167,6 +167,12 @@ const batchesOf = db => db.calls.batches;
   const list = await call(env, '');
   assert.deepEqual([list.body.available, list.body.revision, list.body.importRevision, list.body.totals.channels, list.body.totals.byPolicy], [true, 1, 1, 3, {deny_all: 2, discover: 1, known_only: 0}]);
   assert.equal(list.body.presence.available, true);
+  // published FILM-show presence: a channel with one published Film show reports it; a channel without one reports null (not "absent from the EPG")
+  sqlite(file, "PRAGMA foreign_keys=OFF; UPDATE published_epg_authority SET programme_run_id='run-1' WHERE id=1; INSERT INTO published_epg_show (programme_run_id,film_id,channel_id,start_ms) VALUES ('run-1','f1','ch001',1700000000000);");
+  const withShow = Object.fromEntries((await call(env, '')).body.channels.map(c => [c.channelId, c]));
+  assert.deepEqual(withShow.ch001.publishedFilmShows, {shows: 1, lastStartMs: 1700000000000});
+  assert.equal(withShow.ch002.publishedFilmShows, null, 'a channel with no published Film show');
+  assert.equal(withShow.ch001.lastSeenInEpg, undefined, 'the old misleading field name is gone');
 }
 
 // ===== 5. owner decisions survive an import; unlisted channels are kept; XMLTV-only channels are shown and unclassified =====
@@ -233,6 +239,14 @@ const batchesOf = db => db.calls.batches;
   assert.equal(after.ch777.ownerCategory.name, 'Movies'); assert.equal(after.ch777.listed, true, 'a registered XMLTV channel stays listed');
   assert.equal(after.ch002.name, 'News HD'); assert.deepEqual(after.ch002.effective, {policy: 'discover', basis: 'category'});
   assert.deepEqual((await call(env, '?source=unlisted')).body.channels.map(c => c.channelId), ['ch1259']);
+  // the override note and the owner-category note are independent decisions: saving one never rewrites the other
+  r = await decide('/category', {channelId: 'ch001', categoryKey: 'news', note: 'category note'});
+  assert.equal(r.status, 200);
+  const notes = rows(file, "SELECT override_policy, override_note, owner_category_key, owner_category_note FROM epg_channel WHERE channel_id='ch001'")[0];
+  assert.deepEqual(notes, {override_policy: 'deny_all', override_note: 'manual', owner_category_key: 'news', owner_category_note: 'category note'});
+  r = await decide('/override', {channelId: 'ch001', policy: 'discover', note: 'policy note'});
+  assert.equal(r.status, 200);
+  assert.deepEqual(rows(file, "SELECT override_note, owner_category_note FROM epg_channel WHERE channel_id='ch001'")[0], {override_note: 'policy note', owner_category_note: 'category note'});
   // clearing a decision
   r = await decide('/override', {channelId: 'ch001', policy: null});
   assert.equal(r.status, 200);

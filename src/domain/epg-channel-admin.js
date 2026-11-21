@@ -15,8 +15,9 @@ const URL_LIKE=/[a-z][a-z0-9+.-]*:\/\//i;
 const SECRET_LIKE=/(?:^|[\s?&;,])(?:token|password|passwd|secret|api[_-]?key|auth|username|user|pass)\s*=/i;
 export function unsafeValue(text){return typeof text==='string'&&(URL_LIKE.test(text)||SECRET_LIKE.test(text));}
 // -> {entries:[{sourceId,name,group}], groups:[name in first-seen order], issues:{missingId,orphan,unsafe,total}, examples:[{line,reason}]}
-// `missingId` and `orphan` entries are dropped and counted (they can never match a channel). `unsafe` (a name or group that looks like a URL or a credential)
-// drops the entry and is BLOCKING for the caller: dropping a listed channel would unlist it.
+// An entry without a tvg-id, an orphan EXTINF (no stream line) and an unsafe name or group are dropped from `entries` and counted. ANY of them makes the file an
+// incomplete source: `importBlockers` refuses the ordinary preview and import, because importing a partial file as complete would unlist and unclassify the
+// channels it lost (ADR 0187: a source error refuses the whole import). A partial-import mode, if ever wanted, needs its own explicit owner-approved workflow.
 export function parseM3u(text,{maxLines=200000}={}){
  const out={entries:[],groups:[],issues:{missingId:0,orphan:0,unsafe:0,total:0},examples:[],truncated:false};
  if(typeof text!=='string')return out;
@@ -52,6 +53,19 @@ export function parseM3u(text,{maxLines=200000}={}){
   finish(index+1); // a stream line: closes the entry and is dropped here
  }
  if(pending)note('orphan',limit);
+ return out;
+}
+
+// -> [{code, count}] one per reason the file cannot be imported as a complete playlist; empty when it can.
+export function importBlockers(parsed){
+ const out=[];
+ if(!parsed||!Array.isArray(parsed.entries))return [{code:'unreadable',count:1}];
+ const i=parsed.issues||{};
+ if(i.missingId)out.push({code:'missing_tvg_id',count:i.missingId});
+ if(i.orphan)out.push({code:'orphan_extinf',count:i.orphan});
+ if(i.unsafe)out.push({code:'unsafe_value',count:i.unsafe});
+ if(parsed.truncated)out.push({code:'truncated',count:1});
+ if(!parsed.entries.length)out.push({code:'no_channels',count:0});
  return out;
 }
 
@@ -99,13 +113,14 @@ export function effectiveOf(channel,categories){
 }
 export function channelView(channel,categories,presence){
  const named=key=>{const c=key==null?null:categories.get(key);return c?{key:c.categoryKey,name:c.name,policy:c.policy}:null;};
+ // Published Film-show presence only: published_epg_show holds the shows the programme matched to a Film, not every XMLTV programme of the channel.
  const seen=presence&&presence.get?presence.get(channel.channelId):null;
  return {
   channelId:channel.channelId,sourceId:channel.sourceId??null,origin:channel.origin,name:channel.name??null,listed:channel.listed!==false,
   category:named(channel.categoryKey),ownerCategory:named(channel.ownerCategoryKey),ownerCategoryNote:channel.ownerCategoryNote??null,ownerCategoryAt:channel.ownerCategoryAt??null,
   overridePolicy:channel.overridePolicy??null,overrideNote:channel.overrideNote??null,overrideAt:channel.overrideAt??null,
   effective:effectiveOf(channel,categories),
-  lastSeenInEpg:seen?{shows:seen.shows,lastStartMs:seen.lastStartMs}:null,
+  publishedFilmShows:seen?{shows:seen.shows,lastStartMs:seen.lastStartMs}:null,
  };
 }
 // rows: channelView results. filters: q (id, provider id or name, case-insensitive), category (key), policy, source ('m3u'|'xmltv'|'unlisted'), queue ('unclassified').
