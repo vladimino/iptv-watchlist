@@ -674,6 +674,13 @@ async function mirrorObject(bucket,key,value){
  const text=await objectText(object);
  return {match:text===JSON.stringify(value),etag:object.etag??null};
 }
+// ADR 0186 (AIR-569): once the Watchlist is its own D1 authority (marker `d1`) the root `watchlist.json` mirror belongs to the Letterboxd Sync and its reconcile, and the EPG must never overwrite it with an
+// EPG-pinned copy. The generation-addressed copy `epg/generations/<run>/watchlist.json` stays EPG-owned. Absent tables (`no such table`) mean the marker does not exist: the EPG owns the root mirror, as before.
+// Any other storage error fails closed (the root write is skipped; the next repair retries).
+export async function watchlistRootOwned(env){
+ try{const row=await one(database(env),'SELECT mode FROM watchlist_authority WHERE id=1');return row?.mode==='d1';}
+ catch(error){return !/no such table/i.test(String(error?.message||error));}
+}
 export async function writeMirrors(env,input){
  const db=database(env);
  const authority=await readAuthority(db);
@@ -686,9 +693,10 @@ export async function writeMirrors(env,input){
   if(!programmeCopy||!rootProgramme)return false;
   let watchlistEtag=null;
   if(input.watchlist){
-   watchlistEtag=await putStable(bucket,WATCHLIST_KEY,input.watchlist);
+   const rootOwned=await watchlistRootOwned(env);
+   if(!rootOwned)watchlistEtag=await putStable(bucket,WATCHLIST_KEY,input.watchlist);
    const watchlistCopy=await putStable(bucket,generationObjectKey(input.programmeRunId,'watchlist.json'),input.watchlist);
-   if(!watchlistEtag||!watchlistCopy)return false;
+   if((!rootOwned&&!watchlistEtag)||!watchlistCopy)return false;
   }
   let pointerEtag=authority.mirrorEtag;
   if(input.phase!=='withheld'){
@@ -718,7 +726,9 @@ export async function repairMirrors(env){
  const watchlistMirror=await mirrorObject(bucket,WATCHLIST_KEY,watchlist);
  const programmeCopy=await mirrorObject(bucket,generationObjectKey(run,'programme.json'),programme);
  const watchlistCopy=await mirrorObject(bucket,generationObjectKey(run,'watchlist.json'),watchlist);
- const aligned=pointer.match&&pointer.etag===current.mirrorEtag&&programmeMirror.match&&watchlistMirror.match&&watchlistMirror.etag===current.mirrorWatchlistEtag&&programmeCopy.match&&watchlistCopy.match;
+ // With the Watchlist marker `d1` the root watchlist mirror is not this writer's to compare or write.
+ const rootOwned=await watchlistRootOwned(env);
+ const aligned=pointer.match&&pointer.etag===current.mirrorEtag&&programmeMirror.match&&(rootOwned||(watchlistMirror.match&&watchlistMirror.etag===current.mirrorWatchlistEtag))&&programmeCopy.match&&watchlistCopy.match;
  if(aligned)return {mirrored:true,aligned:true,wrote:false,authority:current};
  const mirrored=await writeMirrors(env,{programmeRunId:run,programme,watchlist,phase:'published'});
  return {mirrored,aligned:false,wrote:!!mirrored,authority:await readAuthority(env)};

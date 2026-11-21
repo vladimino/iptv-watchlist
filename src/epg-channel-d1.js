@@ -1,4 +1,4 @@
-// EPG Channel authority (schema v31, migrations/0031_epg_channel_authority.sql, ADR 0187). DORMANT: nothing in the Worker imports or bundles this
+// EPG Channel authority (schema v32, migrations/0032_epg_channel_authority.sql, ADR 0187). DORMANT: nothing in the Worker imports or bundles this
 // module, no table it names is read by a scan, and applying the migration activates nothing. It is a storage and contract module only; tests load it
 // as an ES module.
 //

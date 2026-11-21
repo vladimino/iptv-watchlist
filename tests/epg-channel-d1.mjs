@@ -1,4 +1,4 @@
-// EPG Channel authority (schema v31, src/epg-channel-d1.js, ADR 0187). Offline only: the real migration chain on a sqlite D1 stand-in. No production database,
+// EPG Channel authority (schema v32, src/epg-channel-d1.js, ADR 0187). Offline only: the real migration chain on a sqlite D1 stand-in. No production database,
 // bucket or Worker is opened. Proves: the migration is guarded and inert, the policy precedence, the one-snapshot read, the revision compare-and-swap, the
 // fail-safe states, the provider id normalization and that the existing show keys and the scan path are untouched.
 import assert from 'node:assert/strict';
@@ -20,16 +20,16 @@ const T='2026-11-21T08:00:00.000Z';
 const SHA=char=>char.repeat(64);
 
 // ===== 1. the migration: latest, guarded, additive, inert =====
-const m31='0031_epg_channel_authority.sql';
-assert.ok(names.at(-1)===m31&&names.at(-2)==='0030_epg_checkpoint_authority.sql','0031 follows 0030 and is the latest migration');
+const m32='0032_epg_channel_authority.sql';
+assert.ok(names.at(-1)===m32&&names.at(-2)==='0031_watchlist_authority.sql','0032 follows 0031 and is the latest migration');
 const upTo=number=>names.filter(name=>Number(name.slice(0,4))<=number);
+const v31=path.join(root,'v31.sqlite');sqlite(v31,upTo(31).map(read).join('\n'));
 const v30=path.join(root,'v30.sqlite');sqlite(v30,upTo(30).map(read).join('\n'));
-const v29=path.join(root,'v29.sqlite');sqlite(v29,upTo(29).map(read).join('\n'));
 const showSchema=file=>JSON.stringify(rows(file,"SELECT name, sql FROM sqlite_master WHERE name IN ('published_epg_show','discovery_observation_show','published_epg_show_by_generation') ORDER BY name"));
-const before=showSchema(v30);
-const base=path.join(root,'base.sqlite');fs.copyFileSync(v30,base);
-const applied=run(base,read(m31));assert.equal(applied.status,0,'0031 applies on a complete schema 30: '+applied.stderr);
-assert.equal(rows(base,'SELECT version FROM schema_contract WHERE id=1')[0].version,31);
+const before=showSchema(v31);
+const base=path.join(root,'base.sqlite');fs.copyFileSync(v31,base);
+const applied=run(base,read(m32));assert.equal(applied.status,0,'0032 applies on a complete schema 31: '+applied.stderr);
+assert.equal(rows(base,'SELECT version FROM schema_contract WHERE id=1')[0].version,32);
 assert.equal(rows(base,'SELECT COUNT(*) AS n FROM schema_contract')[0].n,1);
 assert.equal(showSchema(base),before,'the published EPG show and Discovery observation show tables (and their keys) are unchanged');
 assert.deepEqual(rows(base,'SELECT revision,source_sha256,category_count,channel_count FROM epg_channel_revision'),[{revision:0,source_sha256:null,category_count:0,channel_count:0}],'one empty revision row');
@@ -37,13 +37,13 @@ assert.equal(rows(base,'SELECT COUNT(*) AS n FROM epg_channel')[0].n+rows(base,'
 assert.equal(rows(base,"SELECT COUNT(*) AS n FROM pragma_foreign_key_list('epg_channel') WHERE \"table\" IN ('published_epg_show','discovery_observation_show')")[0].n,0,'no foreign key to the historical show tables');
 assert.equal(rows(base,"SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name LIKE 'epg_channel%' AND name NOT IN ('epg_channel','epg_channel_category','epg_channel_revision','epg_channel_cas')")[0].n,0);
 // refusals before any table is created
-for(const [label,file,setup] of [['schema 29',v29,''],['schema 30 without the checkpoint tables',v30,'DROP TABLE epg_checkpoint_run;']]){
+for(const [label,file,setup] of [['schema 30',v30,''],['schema 31 without the Watchlist tables',v31,'DROP TABLE watchlist_current;']]){
  const copy=path.join(root,'g-'+label.replace(/\W+/g,'-')+'.sqlite');fs.copyFileSync(file,copy);
  if(setup)sqlite(copy,'PRAGMA foreign_keys=OFF;'+setup);
- assert.notEqual(run(copy,read(m31)).status,0,label+': refused');
+ assert.notEqual(run(copy,read(m32)).status,0,label+': refused');
  assert.equal(rows(copy,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name='epg_channel'")[0].n,0,label+': no table created');
 }
-{const again31=path.join(root,'again.sqlite');fs.copyFileSync(base,again31);assert.notEqual(run(again31,read(m31)).status,0,'a second apply is refused');}
+{const again31=path.join(root,'again.sqlite');fs.copyFileSync(base,again31);assert.notEqual(run(again31,read(m32)).status,0,'a second apply is refused');}
 // constraints: values, uniqueness, override consistency, downgrade
 let badCopies=0;
 const bad=sql=>{const copy=path.join(root,'bad-'+(badCopies++)+'.sqlite');fs.copyFileSync(base,copy);assert.notEqual(run(copy,sql).status,0,sql);};
@@ -319,4 +319,4 @@ assert.equal((await Channel.setOverride(sneaky,{expectedRevision:1,channelId:'ch
  assert.equal((await Channel.setOverride(racerAt,{expectedRevision:2,channelId:'ch001',policy:'deny_all',note:'mine',now:T})).ok,false,'same policy and note, different time: not acknowledged');
 }
 
-console.log('EPG Channel authority: guarded inert migration v31, show keys untouched, provider id normalization, XMLTV-only channels, owner policy override > owner category > provider category > known_only, one bounded snapshot and no per-channel reads, revision CAS, fail-safe known_only states, lost-reply classification, nothing in src reaches the tables.');
+console.log('EPG Channel authority: guarded inert migration v32, show keys untouched, provider id normalization, XMLTV-only channels, owner policy override > owner category > provider category > known_only, one bounded snapshot and no per-channel reads, revision CAS, fail-safe known_only states, lost-reply classification, nothing in src reaches the tables.');

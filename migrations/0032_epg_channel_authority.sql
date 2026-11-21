@@ -1,10 +1,10 @@
--- Schema v31: EPG Channel authority (AIR-561). Channel, provider category and per-category policy as their own D1 entity.
+-- Schema v32: EPG Channel authority (AIR-561). Channel, provider category and per-category policy as their own D1 entity.
 -- INERT: this file is in the repository and is NOT applied to any database by a deploy. Applying it to production D1 and every later
 -- step (import, activation, reading the policy in a scan) are separate owner GOs. Nothing in the Worker reads these tables, so
 -- applying this file changes no EPG, Discovery or scan behavior. There is deliberately NO mode marker: the tables are a contract
 -- that stays unused until a later, separately approved change reads one policy snapshot.
--- It follows a complete version 30 (the EPG checkpoint tables present) and refuses anything else before a table is created: the first
--- statement inserts a second schema_contract row and so aborts the file. The version becomes 31 and never goes down.
+-- It follows a complete version 31 (the Watchlist authority tables present) and refuses anything else before a table is created: the first
+-- statement inserts a second schema_contract row and so aborts the file. The version becomes 32 and never goes down.
 --
 -- Four things are kept apart and never merged into one column:
 --  - provider category: epg_channel.category_key, the M3U group the channel was classified into (NULL = not classified); an import writes it;
@@ -28,10 +28,10 @@ INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
 WHERE NOT EXISTS (
  SELECT 1 FROM schema_contract
- WHERE id = 1 AND version = 30
+ WHERE id = 1 AND version = 31
  AND (
   SELECT COUNT(*) FROM sqlite_master
-  WHERE type = 'table' AND name IN ('epg_checkpoint_authority', 'epg_checkpoint_cas', 'epg_checkpoint_run')
+  WHERE type = 'table' AND name IN ('watchlist_authority', 'watchlist_cas', 'watchlist_current')
  ) = 3
 );
 
@@ -100,6 +100,6 @@ INSERT INTO epg_channel_revision (id, revision, source_sha256, plan_sha256, impo
 INSERT INTO epg_channel_cas (id, ok) VALUES (1, 1);
 
 UPDATE schema_contract
-SET version = 31,
-    note = 'Schema v31: EPG Channel authority tables, no marker and no reader. Version 31 follows a complete version 30.'
-WHERE id = 1 AND version = 30;
+SET version = 32,
+    note = 'Schema v32: EPG Channel authority tables, no marker and no reader. Version 32 follows a complete version 31.'
+WHERE id = 1 AND version = 31;

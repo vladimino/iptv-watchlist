@@ -16,7 +16,7 @@ Today a channel is only a string. `published_epg_show.channel_id` and `discovery
 
 ## Decision
 
-1. **Channel is a D1 entity.** Three tables hold it (schema v31): `epg_channel_category` (provider category with its policy), `epg_channel` (one row per XMLTV channel id, with an optional provider id, an optional provider category, an optional owner category and an optional owner policy override) and `epg_channel_revision` (the one snapshot revision, the source digest and row counts), plus the batch fence `epg_channel_cas`. There is **no mode marker**: nothing reads the tables until a later, separately approved change does.
+1. **Channel is a D1 entity.** Three tables hold it (schema v32): `epg_channel_category` (provider category with its policy), `epg_channel` (one row per XMLTV channel id, with an optional provider id, an optional provider category, an optional owner category and an optional owner policy override) and `epg_channel_revision` (the one snapshot revision, the source digest and row counts), plus the batch fence `epg_channel_cas`. There is **no mode marker**: nothing reads the tables until a later, separately approved change does.
 2. **Four things stay apart.** The *provider category* is `epg_channel.category_key`, written only by an import. The *owner category* is `epg_channel.owner_category_key`, a durable owner assignment that an import never writes or resets. The *policy* is `epg_channel_category.policy` or `epg_channel.override_policy`, each limited to `deny_all`, `discover` or `known_only`. The *provenance* is `epg_channel_revision.source_sha256` for the provider files, `epg_channel.origin` (`m3u` or `xmltv`, the source that first registered the channel), and `override_at` / `override_note` and `owner_category_at` / `owner_category_note` for the owner decisions. The **effective policy is never stored**; it is derived, in one place, as `owner policy override > owner category policy > provider category policy > known_only`.
 3. **Single source of truth.** Classification and policy live only in these rows. A snapshot is one revision: every committed write adds one, a write names the revision it read (compare-and-swap in one fenced batch), and the row counts in the revision row let a reader prove it read every row. A read takes the revision, the categories, the channels and the revision again, and retries once when it moved.
 4. **Fail safe, never `discover`.** An unknown channel id, a channel without any category (including one registered from XMLTV alone) and an empty snapshot are `known_only`. An unavailable database, absent tables, a torn or incomplete snapshot are reported explicitly (`ok:false` with a reason) and their lookup answers `known_only` with `degraded:true`. A missing authority never widens what Discovery may admit.
@@ -50,7 +50,7 @@ These compare the choices this schema embodies. The Product Owner approved the c
 - *A staged marker (`dormant`/`open`) with `held` writes, like the other domains.* Gives an import fence and an explicit activation step. Cost: a switch with no reader today; it can be added by a later migration when a reader exists, at the price of one more schema change.
 
 **C. Override on a channel the import never listed: refuse or create.**
-- *Refuse (chosen, approved as C1).* A channel exists only through an import, so provider id and category always come from one source.
+- *Refuse (chosen, approved as C1).* Any Channel must originate from at least one of the trusted M3U or XMLTV sources, and neither owner update (policy override or owner category) creates an unknown Channel.
 - *Create on override.* Lets the owner pre-decide a channel before the provider lists it. Cost: a channel row with no provider id, which the unique `source_id` and the id normalization do not cover.
 
 **F. Channels only XMLTV lists (the 15 of the audit baseline): persist or keep implicit.** The Product Owner chose to persist them (approved as F).
@@ -71,7 +71,7 @@ The scan can apply one consistent policy snapshot without changing any show key.
 
 ## Recovery and migration boundary
 
-The migration `0031_epg_channel_authority.sql` is **not applied by a deploy**; it follows a complete version 30 and refuses anything else before a table is created. Rollback of the code is a revert with no storage mutation. Applying the migration, importing and activating a reader are separate owner-approved steps; this ADR authorizes none of them.
+The migration `0032_epg_channel_authority.sql` is **not applied by a deploy**; it follows a complete version 31 and refuses anything else before a table is created. Rollback of the code is a revert with no storage mutation. Applying the migration, importing and activating a reader are separate owner-approved steps; this ADR authorizes none of them.
 
 ## Evidence
 
