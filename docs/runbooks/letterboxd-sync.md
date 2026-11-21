@@ -37,6 +37,26 @@ The operator `scripts/watchlist-bootstrap-production.mjs` imports the current pu
 - **Holdpoint (d) revalidates.** Between the import and the marker switch the EPG may publish a newer generation. The hold/switch step must re-read the published generation and compare it with the snapshot's run (and re-import, with a new owner decision, if they differ) instead of assuming it cannot advance.
 - **Rollback:** none by code. The snapshot is inert while the marker is `epg`; there is no delete path (immutability triggers). A wrong import is handled by the owner-approved data procedure, not by this operator.
 
+## Holdpoint (d): the Watchlist marker transitions (prepared, not performed)
+
+The operator `scripts/watchlist-cutover-production.mjs` moves the Watchlist marker. It is owner-only, needs its own owner GO **per command**, and runs only after the bootstrap import (holdpoint c) and the prerequisite O4. It writes the marker row and nothing else: not the pointer, a snapshot, a member or a journal row, not the EPG, R2, a flag or another domain. Every transition is ONE batch with an explicit `--confirm <command>`, the expected generation, the verified facts re-asserted inside the batch, an independent readback, no retry and no repair.
+
+| Command | Transition | Pins |
+| --- | --- | --- |
+| `hold` | `epg`/`open` G to `epg`/`held` G+1 | the five bootstrap pins and `--expect-snapshot-id` |
+| `release-abort` | `epg`/`held` G to `epg`/`open` G (back out before the switch) | the generation only |
+| `activate` | `epg`/`held` G to `d1`/`held` G+1 | the same pins as `hold` |
+| `release` | `d1`/`held` G to `d1`/`open` G | `--expect-snapshot-id`, `--expect-count`, `--expect-sha256` |
+| `hold-rollback` | `d1`/`open` G to `d1`/`held` G+1 (first step of the data rollback) | the snapshot pins plus `--expect-version` and `--expect-revision` of the current pointer |
+
+Use `node scripts/watchlist-cutover-production.mjs --target iptv` (`status`, the default) first: it is read-only and prints the marker, the pointer, whether the snapshot is whole, the EPG liveness, the checkpoint authority and the Letterboxd mode. A write is `node scripts/watchlist-cutover-production.mjs --<command> --target iptv --confirm <command> --expect-generation <G> <pins>`.
+
+- **Facts verified before and re-asserted in the batch.** The marker is exactly the expected mode, writes and generation. For `hold` and `activate` the pointer is the bootstrap import (version 1, effects drained, the pinned revision, every member present) and the published generation is still the source of the import: the same run and EPG generation, certified complete, the same member count; the full read-only proof of the bootstrap operator is repeated. For `release` and `hold-rollback` the pointer and its snapshot are the pinned ones. The EPG liveness proof (the contract of the bootstrap section: control and lease valid, no active phase, no live lease, revisions pinned) is part of `hold`, `activate` and `hold-rollback`. The independent EPG checkpoint authority must be `open` in the mode read (never in the middle of its own cutover). The Letterboxd mode row is absent or `external`, pinned by revision, so there is no new writer. `release-abort` needs only the marker, so backing out is never blocked by an unreadable EPG record.
+- **Order and windows.** `hold` to `activate` is a short window: between them the EPG may start a daily run, and `activate` then refuses under the liveness proof; back out with `release-abort` and retry. In `d1`/`held` the EPG start fails closed and the snapshot is refused, never read as the EPG generation. `activate` re-reads the published generation, so a publication after the bootstrap is refused (`source_moved`) and needs a new owner decision (a new import), never a silent switch.
+- **Readback.** The marker equals the target; the pointer, the row counts of every watchlist table, the checkpoint authority, the Letterboxd mode and the stable fields (mode, cutover) of the other domains are unchanged; live counters are never compared. A Time Travel bookmark is read before and after.
+- **Stop conditions.** Any refusal changes nothing (`state_mismatch`, `pin_mismatch`, `snapshot_inconsistent`, `source_moved`, `checkpoint_not_settled`, `letterboxd_not_closed`, `writer_active`, `liveness_unknown`). A transport or unproven outcome, or a marker moved by another writer, is `write_uncertain` (writeState `unknown`, `retry:false`); only a proven rejected statement with the marker untouched is `predicate_refused`. Nothing is retried or repaired without a separate GO.
+- **Not here.** The data rollback export into the published generation, the return to `epg`, the Ratings close, the Letterboxd mode switch, the Workflow binding and the cron are separate steps with their own operators and GOs. A code revert does not undo a marker.
+
 ## Rollback
 
 Close admission with target `external` and complete: the epoch moves, a stale instance is refused, and exactly one legacy Ratings writer is admitted again. Code rollback does not revert D1 rows, slots, outbox rows, the mode row or Events already written.

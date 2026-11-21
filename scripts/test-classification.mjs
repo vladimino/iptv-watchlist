@@ -628,6 +628,9 @@ export const FILES={
  "watchlist-bootstrap.mjs": {
   "suite": "core"
  },
+ "watchlist-cutover.mjs": {
+  "suite": "core"
+ },
  "migration-statements.mjs": {
   "suite": "core"
  },

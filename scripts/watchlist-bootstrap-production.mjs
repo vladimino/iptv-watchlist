@@ -108,7 +108,7 @@ export function pinProblems(state,source,args){
 // A read-only proof that an existing import is complete and still the import of the CURRENT source. It validates the snapshot row, the staging row, every member row (count,
 // order, digest), the absence of unexpected rows and the pointer; then the published source against the pins. Nothing is written. `verified_equal` is a receipt of equality only:
 // it is never an authorization for the next holdpoint.
-export async function verifyImported(binding,state,args){
+export async function verifyImported(binding,state,args,{requireSource=true}={}){
  const problems=[];
  const p=state.pointer,c=state.counts;
  if(Number(p.version)!==1||!p.snapshot_id)return {ok:false,reason:'already_bootstrapped',problems:['pointer_version']};
@@ -124,6 +124,7 @@ export async function verifyImported(binding,state,args){
  if(problems.length)return {ok:false,reason:'snapshot_inconsistent',problems};
  // The pins describe the import that was approved; they must equal it and the current published source must still be that source.
  if(args.run!==snap.run_id||args.sha256!==p.list_sha256||args.count!==Number(p.film_count)||args.membersSha256!==await membershipDigest(stored))return {ok:false,reason:'already_bootstrapped',problems:['pins_differ']};
+ if(!requireSource)return {ok:true};
  const pub=state.published;
  if(!pub||pub.mode!=='d1'||pub.cutover!=='open'||pub.programme_run_id!==snap.run_id||Number(pub.generation)!==args.epgGeneration||pub.finalized_run_id!==pub.programme_run_id)return {ok:false,reason:'source_moved',problems:['published'],published:pub?{programmeRunId:pub.programme_run_id,generation:Number(pub.generation)}:null};
  const source=await sourceOf(state);
