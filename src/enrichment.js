@@ -896,6 +896,11 @@ const START_CLAIM_TTL_MS=180000;
 // ADR 0188: how long a same-key repeat waits for the owner request's stored start answer before it answers `start_pending`. Unproven by the traces; natural runs are the proof.
 const JOIN_WAIT_MS=10000;
 const INVOCATION_KEY_PATTERN=/^[A-Za-z0-9._:-]{16,128}$/;
+// ADR 0191 (deferred start). The key a Task uses for a deferred start is issued by the server (`prediction_batch_key`), never composed by the model. A short lease covers a prepared run until its first
+// heartbeat or submit: a caller that disappears after the receipt blocks the runner for minutes, not for the ordinary 15.
+const DEFERRED_KEY_PATTERN=/^dk1\.[0-9a-f]{32}$/;
+const READY_LEASE_TTL_MS=180000;
+const START_OUTCOME_PREFIX=ENRICHMENT_KEY+'batch-start/';
 // The correlation fields of a lease: they survive every renewal, heartbeat, gate write and conversion, and only a release drops them (ADR 0188 section 3).
 const leaseCorrelation=old=>{const out={};if(old?.phase)out.phase=old.phase;if(old?.keyHash)out.keyHash=old.keyHash;if(old?.argsHash)out.argsHash=old.argsHash;if(old?.clientSubmitAt)out.clientSubmitAt=old.clientSubmitAt;return out;};
 // The lease value carries `epoch`, the ownership epoch of batch runner v2 (ADR 0122): set once when a run acquires or takes over the lease and kept by every
@@ -1197,7 +1202,7 @@ function logPredictionFailure(boundary,error,requestId,runId){
 // parallel are not summed as if sequential: `busyMs` is the union of their intervals, `overlapMs` what the sum exceeds it by, and
 // `unattributedMs` the rest of the wall time (compute, scheduling, the awaits between calls). A failure of any of this is swallowed.
 const STEP_TIMER=Symbol('predictionStepTimer');
-const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','leaseRefusedAtAcquire','liveLeaseAgeMs','drainedCommitted','drainedDropped','priorityLagAccepted','priorityRebased','keyed','joined','startPending','keyArgsMismatch','claimRenewals','claimLost'];
+const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','leaseRefusedAtAcquire','liveLeaseAgeMs','drainedCommitted','drainedDropped','priorityLagAccepted','priorityRebased','keyed','joined','startPending','keyArgsMismatch','claimRenewals','claimLost','deferredAccepted','deferredReplay','deferredUnavailable'];
 const STEP_STAGES=['preflight','turned_away','idle','settle_previous','catalog_gate','queue_refresh','preflight_refreshed','runner_lease','preflight_lease','persist'],STEP_STAGE_CAP=16;
 const STEP_OPS_CAP=4000,STEP_CLASS_CAP=40;
 const STEP_TABLE=/\b(?:from|into|update|join)\s+["`]?([a-z_][a-z0-9_]{0,59})["`]?/i;
@@ -1945,9 +1950,15 @@ const PREDICTION_NO_PROGRESS_MS=60*60000;
 // A run whose lease is still live counts as running for this long; past it the run is not evidence of progress and the clock above decides.
 const PREDICTION_ACTIVE_RUN_MAX_MS=60*60000;
 const predictionProgressStalled=ageMs=>ageMs==null||ageMs>=PREDICTION_NO_PROGRESS_MS;
+// ADR 0191 / AIR-573. The same verdict, earlier, when the silence is not quiet but a chain of ownerless starts: attempts turned away with `already_running` and runs that were abandoned without a single
+// film, all since the last confirmed progress. Three such attempts and at least 20 minutes without progress are repeated orphan starts; one overlap between two Tasks, or a run that is still working, is not.
+// It is one more reason of the one shared verdict (Footer and Monitor), not a second monitor.
+const PREDICTION_ORPHAN_START_LIMIT=3;
+const PREDICTION_ORPHAN_MIN_IDLE_MS=20*60000;
+const PREDICTION_ORPHAN_WINDOW_MS=2*60*60000;
 // The pure verdict both surfaces rely on. `sinceMs` is the last confirmed progress (a productive batch, or a drained run that proved an empty
 // queue); heartbeat, `already_running`, a queue recount and a noop wake-up are never passed as progress. Unknown input is `unknown`, never healthy.
-function predictionStallAssessment({now,sinceMs=null,eligibleNow=null,nextRetryAtMs=null,activeStartedAtMs=null,activeRun=false,observedSinceMs=null}){
+function predictionStallAssessment({now,sinceMs=null,eligibleNow=null,nextRetryAtMs=null,activeStartedAtMs=null,activeRun=false,observedSinceMs=null,orphanStarts=0}){
  if(!Number.isInteger(eligibleNow))return {state:'unknown',reason:'queue_unreadable',idleMs:null};
  if(eligibleNow===0)return {state:Number.isFinite(nextRetryAtMs)&&nextRetryAtMs>now?'waiting':'idle',reason:eligibleNow===0?'no_eligible_work':null,idleMs:null};
  // An unknown start is not trusted as young: a lease without a provable start never hides a long silence.
@@ -1956,6 +1967,7 @@ function predictionStallAssessment({now,sinceMs=null,eligibleNow=null,nextRetryA
  const base=known?sinceMs:Number.isFinite(observedSinceMs)?observedSinceMs:null;
  if(base===null)return {state:'unknown',reason:'no_progress_evidence',idleMs:null};
  const idleMs=Math.max(0,now-base);
+ if(Number.isInteger(orphanStarts)&&orphanStarts>=PREDICTION_ORPHAN_START_LIMIT&&idleMs>=PREDICTION_ORPHAN_MIN_IDLE_MS)return {state:'no_progress',reason:'repeated_orphan_starts',idleMs,sinceKnown:known,orphanStarts};
  if(predictionProgressStalled(idleMs))return {state:'no_progress',reason:known?'no_productive_batch':'no_progress_evidence',idleMs,sinceKnown:known};
  return {state:known?'ok':'unknown',reason:known?null:'no_progress_evidence',idleMs,sinceKnown:known};
 }
@@ -1971,7 +1983,7 @@ function predictionRunFact(row,now){
  const status=row.status||row.state||null;
  const startedAt=integrationTime(row.startedAt||row.createdAt||row.diagnosticStartedAt);
  const endedAt=integrationTime(row.endedAt||row.completedAt||row.finishedAt);
- return {runId:row.runId||null,status,reason,added,updated,failed,startedAt,endedAt,at:endedAt||startedAt};
+ return {runId:row.runId||null,status,reason,added,updated,failed,startedAt,endedAt,at:endedAt||startedAt,startResult:typeof row.startResult==='string'?row.startResult:null};
 }
 function predictionFactMs(fact){const at=integrationTime(fact?.endedAt||fact?.startedAt||fact?.at);return at?Date.parse(at):NaN;}
 // The run history as the Footer and the Monitor both read it: normalized facts newest first and the classifiers that decide what counts as progress.
@@ -1991,6 +2003,7 @@ function predictionRunEvidence({run,recentRuns,now}){
   if(!known.endedAt&&fact.endedAt){known.endedAt=fact.endedAt;known.at=fact.endedAt;}
   if(!known.reason&&fact.reason)known.reason=fact.reason;
   if(!known.status&&fact.status)known.status=fact.status;
+  if(!known.startResult&&fact.startResult)known.startResult=fact.startResult;
  };
  for(const row of recentRuns||[])push(row);
  push(run);
@@ -2007,7 +2020,10 @@ function predictionRunEvidence({run,recentRuns,now}){
   return ['external_termination','lease_expired','lease_lost','time_budget','already_running','runner_aborted'].includes(fact.reason);
  };
  const lastProgress=facts.find(isProgress)||null;
- return {facts,isHard,isComplete,isDrained,isProgress,isFailedOnly,isInterrupt,lastProgress,lastProgressAt:lastProgress?integrationTime(lastProgress.endedAt||lastProgress.startedAt):null};
+ // Ownerless starts since the last confirmed progress, inside a bounded window: a start turned away with `already_running`, or a run abandoned without a film (a run still `running` is working, not abandoned).
+ const progressMs=lastProgress?predictionFactMs(lastProgress):-Infinity;
+ const orphanStarts=facts.filter(fact=>{const at=predictionFactMs(fact);return Number.isFinite(at)&&at>progressMs&&now-at<=PREDICTION_ORPHAN_WINDOW_MS&&!isProgress(fact)&&(fact.startResult==='already_running'||(isInterrupt(fact)&&fact.status!=='running'&&(fact.added||0)===0&&(fact.updated||0)===0));}).length;
+ return {facts,isHard,isComplete,isDrained,isProgress,isFailedOnly,isInterrupt,lastProgress,orphanStarts,lastProgressAt:lastProgress?integrationTime(lastProgress.endedAt||lastProgress.startedAt):null};
 }
 // What the Monitor needs from the queue, the lease and the run history, read through the same helpers the Footer uses (queue slices, retry budget).
 function predictionProgressFacts({queue,runs,latestRun,lease,now}){
@@ -2017,13 +2033,13 @@ function predictionProgressFacts({queue,runs,latestRun,lease,now}){
  // The start of the run that holds the lease: its own record, else its diagnostic checkpoint; a lease for another or an unreadable run has no provable start.
  const owned=activeRun?(latestRun?.runId===lease.runId?latestRun.createdAt:(runs||[]).find(row=>row?.runId===lease.runId)?.startedAt):null;
  const startedMs=Date.parse(owned||'');
- return {slices,lastProgressAt:evidence.lastProgressAt,activeRun,activeStartedAtMs:Number.isFinite(startedMs)?startedMs:null,runHistoryEmpty:!evidence.facts.length};
+ return {slices,lastProgressAt:evidence.lastProgressAt,orphanStarts:evidence.orphanStarts,activeRun,activeStartedAtMs:Number.isFinite(startedMs)?startedMs:null,runHistoryEmpty:!evidence.facts.length};
 }
 function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
  const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
  if(live){const startedMs=Date.parse(run?.createdAt||'');if(Number.isFinite(startedMs)&&now-startedMs<PREDICTION_ACTIVE_RUN_MAX_MS)return integrationEntry('predictions','capability','running','running',null,null);}
- const {facts,isHard,isComplete,isDrained,isProgress,isFailedOnly,isInterrupt}=predictionRunEvidence({run,recentRuns,now});
+ const {facts,isHard,isComplete,isDrained,isProgress,isFailedOnly,isInterrupt,orphanStarts}=predictionRunEvidence({run,recentRuns,now});
  if(!facts.length)return integrationEntry('predictions','capability','unknown','no_data',null,null);
  const slices=predictionQueueSlices(queue,now);
  const queueReadable=Number.isInteger(slices.eligibleNow)||Number.isInteger(slices.outstanding);
@@ -2038,6 +2054,8 @@ function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
  for(const fact of facts){if(isInterrupt(fact))consecutiveInterrupts++;else break;}
  if(hardUnresolved)return integrationEntry('predictions','capability','degraded','prediction_blocked',lastSuccessAt,integrationTime(lastHard.endedAt||lastHard.startedAt)||lastFailureAt);
  if(consecutiveInterrupts>=2&&workLeft)return integrationEntry('predictions','capability','degraded','prediction_runs_interrupted',lastSuccessAt,lastFailureAt);
+ // ADR 0191: repeated orphan starts (turned-away attempts and runs abandoned without a film) after a quiet stretch are an interruption chain even when no run record is the newest fact.
+ if(workLeft&&orphanStarts>=PREDICTION_ORPHAN_START_LIMIT&&lastSuccessAt&&now-Date.parse(lastSuccessAt)>=PREDICTION_ORPHAN_MIN_IDLE_MS)return integrationEntry('predictions','capability','degraded','prediction_runs_interrupted',lastSuccessAt,lastFailureAt);
  const progressAge=lastSuccessAt?now-Date.parse(lastSuccessAt):null;
  const latestAge=latest.at?now-Date.parse(latest.at):null;
  if(workLeft&&predictionProgressStalled(progressAge)){
@@ -2570,6 +2588,12 @@ function validateBatchStartBody(body){
  if(body.capacity!==undefined&&(!isObject(body.capacity)||body.capacity.remainingPercent!==undefined&&(!Number.isFinite(body.capacity.remainingPercent)||body.capacity.remainingPercent<0||body.capacity.remainingPercent>100)))return json({error:'Invalid capacity'},400);
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
  if(body.invocationKey!==undefined&&(typeof body.invocationKey!=='string'||!INVOCATION_KEY_PATTERN.test(body.invocationKey)))return json({error:'Invalid invocationKey'},400);
+ if(body.deferred!==undefined&&typeof body.deferred!=='boolean')return json({error:'Invalid deferred'},400);
+ if(body.deferred===true){
+  // A deferred start needs the key the server issued; it is never a dry run and never a pin.
+  if(typeof body.invocationKey!=='string'||!DEFERRED_KEY_PATTERN.test(body.invocationKey))return json({error:'A deferred start needs the invocationKey issued by prediction_batch_key',code:'invalid_deferred_key'},400);
+  if(body.dryRun===true||body.pin!==undefined)return json({error:'deferred is not accepted with dryRun or pin',code:'deferred_not_dry_run'},400);
+ }
  const size=resolveManifestSize(body);if(size.error)return size.error;
  if(body.pin!==undefined){
   if(body.dryRun!==true)return json({error:'pin is accepted only with dryRun'},400);
@@ -2781,7 +2805,9 @@ async function batchStartRoute(env,body,requestId){
 // start. A start without a key, and every dry run, takes the unchanged path. The key is reduced to a hash here and never travels further: no log, row or diagnostic carries it.
 const startArgsOf=body=>({scope:body.scope,mode:body.mode||'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',manifestSize:resolveManifestSize(body).size,capacity:body.capacity||null});
 const claimRenewed=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>old.phase==='claim'?{value:{...old,heartbeatAt:new Date(now).toISOString(),expiresAt:now+START_CLAIM_TTL_MS}}:{refuse:{status:'owned'}});
-const claimConverted=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>old.phase==='claim'?{value:{...old,phase:'run',heartbeatAt:new Date(now).toISOString(),expiresAt:now+RUNNER_LEASE_TTL}}:{refuse:{status:'owned'}});
+const claimConverted=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>old.phase==='claim'?{value:{...old,phase:'run',heartbeatAt:new Date(now).toISOString(),expiresAt:now+(claim.deferred?READY_LEASE_TTL_MS:RUNNER_LEASE_TTL)}}:{refuse:{status:'owned'}});
+// A prepared deferred run stays on the short lease until its first heartbeat or submit renews it to the full TTL (every renewal already does); the persist's own gate extended it, so it is cut back here.
+const readyLeaseShortened=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>old.phase==='run'&&!old.clientSubmitAt&&!old.submitGate?{value:{...old,expiresAt:Math.min(Number(old.expiresAt)||0,now+READY_LEASE_TTL_MS)}}:{refuse:{status:'owned'}});
 // A same-key repeat of the live run: the stored start answer if it exists, else a bounded wait and then `start_pending`. It writes nothing and never extends a TTL. The holder is read again
 // immediately before anything is returned: the current lease must still be live, still carry this key and argument hash, and no client submit may have closed the window (ADR 0188).
 async function batchJoin(env,live,tally,ids,refuse){
@@ -2798,6 +2824,62 @@ async function batchJoin(env,live,tally,ids,refuse){
  tally.joined=1;tally.startPending=1;
  return json({status:'start_pending',runId:live.runId,epoch:live.epoch??null,retryAfterMs:2000,...scheduledRunFields()});
 }
+// ---- ADR 0191: deferred start. The start accepts a bounded claim and answers a compact receipt within seconds; the heavy preparation runs in a Cloudflare Workflow instance (one per run id) that
+// does not depend on the MCP request's lifetime, and the caller reads the immutable manifest through `prediction_batch_manifest`. ----
+const startReceipt=(runId,epoch,phase,extra={})=>({status:'accepted',protocol:BATCH_PROTOCOL,deferred:true,runId,epoch:epoch??null,phase,retryAfterMs:2000,read:{tool:'prediction_batch_manifest',part:'envelope',pendingCode:'manifest_pending'},...extra,...scheduledRunFields()});
+// A repeat of an accepted deferred start with the same key and arguments: the same receipt, never a second preparation and never a wait.
+async function batchReceiptFor(env,live,tally){
+ tally.deferredReplay=1;
+ const stored=await loadJSON(env,ENRICHMENT_KEY+'batch-manifest/'+live.runId+'.json');
+ return json(startReceipt(live.runId,live.epoch,usableBatchManifest(stored)?'ready':'preparing'));
+}
+// Create-only: a run has one terminal outcome, and a replayed or stale instance must never overwrite it (a `ready` outcome stays `ready`).
+async function writeStartOutcome(env,runId,doc){try{await env.BUCKET.put(START_OUTCOME_PREFIX+runId+'.json',JSON.stringify({runId,at:new Date().toISOString(),...doc}),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});}catch{/* the claim and the lease still tell the truth; the reader then answers pending */}}
+async function acceptDeferredStart(env,clean,requestId,tally,{runId,taken,keyHash,argsHash}){
+ const release=()=>runnerLease(env,runId,'release').catch(()=>null);
+ const binding=env?.PREDICTION_START_WORKFLOW;
+ if(!binding||typeof binding.create!=='function'){tally.deferredUnavailable=1;await release();return json({status:'blocked',reason:'deferred_start_unavailable',code:'deferred_start_unavailable',...scheduledRunFields()},503);}
+ const {deferred,...body}=clean;void deferred;
+ try{
+  await binding.create({id:runId,params:{runId,epoch:taken.epoch,keyHash,argsHash,recoveredRunId:taken.recoveredRunId||null,requestId:SAFE_LOG_ID.test(String(requestId))?requestId:null,body}});
+ }catch(error){
+  // Nothing was accepted. An instance that was created although the answer was lost finds its claim released and ends before any side effect.
+  tally.deferredUnavailable=1;logPredictionFailure('start',error,requestId,runId);await release();
+  return json({status:'blocked',reason:'deferred_start_unavailable',code:'deferred_start_unavailable',...scheduledRunFields()},503);
+ }
+ tally.deferredAccepted=1;
+ return json(startReceipt(runId,taken.epoch,'preparing',{lease:{epoch:taken.epoch,claimTtlMs:START_CLAIM_TTL_MS,readyTtlMs:READY_LEASE_TTL_MS,ttlMs:RUNNER_LEASE_TTL}}));
+}
+// The Workflow side: one durable step prepares the run exactly as a synchronous keyed start would (same preflights, revalidation, fencing and persist), then records a small terminal outcome.
+// No retry: a repeated preparation could only duplicate work; a failure ends with the claim released and a typed outcome.
+async function predictionStartPrepare(env,payload){
+ const started=Date.now();
+ const runId=payload?.runId,epoch=payload?.epoch;
+ if(!isText(runId,100)||!Number.isInteger(epoch)||!isObject(payload?.body)||!/^[0-9a-f]{64}$/.test(String(payload.keyHash))||!/^[0-9a-f]{64}$/.test(String(payload.argsHash)))return {phase:'failed',code:'invalid_payload'};
+ const tally={preflights:0,refreshRounds:0,scannedFilms:0,settledFilms:0,keyed:1,deferred:1};
+ const finish=async(phase,extra={})=>{
+  const outcome={phase,...extra};
+  await writeStartOutcome(env,runId,outcome);
+  try{console.log(JSON.stringify({event:'prediction_start_prepared',runId:SAFE_LOG_ID.test(runId)?runId:null,requestId:SAFE_LOG_ID.test(String(payload.requestId))?payload.requestId:null,phase,code:SAFE_LOG_ID.test(String(extra.code))?extra.code:null,prepareMs:Date.now()-started,preflights:tally.preflights,refreshRounds:tally.refreshRounds,scannedFilms:tally.scannedFilms,settledFilms:tally.settledFilms,claimRenewals:tally.claimRenewals||0}));}catch{/* a log never changes the outcome */}
+  return outcome;
+ };
+ const lease=await loadJSON(env,RUNNER_LEASE_KEY);
+ if(!(lease?.runId===runId&&lease.epoch===epoch&&lease.phase==='claim'&&Number(lease.expiresAt)>Date.now()&&lease.keyHash===payload.keyHash&&lease.argsHash===payload.argsHash))return finish('failed',{code:'start_claim_lost'});
+ const claim={runId,epoch,keyHash:payload.keyHash,argsHash:payload.argsHash,lease:{...lease,status:'owned',...(payload.recoveredRunId?{recoveredRunId:payload.recoveredRunId}:{})},converted:false,deferred:true};
+ let response=null,failure=null;
+ try{response=await batchStartCore(env,payload.body,payload.requestId||crypto.randomUUID(),tally,claim);}
+ catch(error){failure=error;logPredictionFailure('start',error,payload.requestId,runId);}
+ finally{if(!claim.converted)await runnerLease(env,runId,'release').catch(()=>null);}
+ if(failure){if(claim.converted)await runnerLease(env,runId,'release').catch(()=>null);return finish('failed',{code:'storage_error'});}
+ const data=await response.clone().json().catch(()=>null);
+ if(data?.status==='running')return finish('ready',{epoch});
+ if(data?.code==='start_claim_lost')return finish('failed',{code:'start_claim_lost'});
+ if(data?.code==='start_storage_error')return finish('failed',{code:'storage_error'});
+ return finish('refused',{code:SAFE_LOG_ID.test(String(data?.code||data?.status))?String(data?.code||data?.status):'refused',reason:SAFE_LOG_ID.test(String(data?.reason))?data.reason:null});
+}
+async function runPredictionStartWorkflow(env,payload,step){
+ return step.do('prepare',{retries:{limit:0,delay:'1 second',backoff:'constant'},timeout:'4 minutes'},()=>predictionStartPrepare(env,payload));
+}
 async function batchStartWork(env,body,requestId,tally){
  const bad=validateBatchStartBody(body);if(bad)return bad;
  const notD1=await batchRequiresD1(env);if(notD1)return notD1;
@@ -2812,11 +2894,12 @@ async function batchStartWork(env,body,requestId,tally){
   const live=await loadJSON(env,RUNNER_LEASE_KEY);
   if(live?.runId&&live.expiresAt>Date.now()&&live.keyHash===keyHash){
    if(live.argsHash!==argsHash){tally.keyArgsMismatch=1;const refused=await batchTurnedAway(env,clean,tally,requestId,{reason:'key_args_mismatch'});if(refused)return refused;}
-   else if(!live.clientSubmitAt)return batchJoin(env,live,tally,{keyHash,argsHash},async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId:live.runId}));
+   else if(!live.clientSubmitAt)return clean.deferred===true?batchReceiptFor(env,live,tally):batchJoin(env,live,tally,{keyHash,argsHash},async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId:live.runId}));
   }
   return (await batchTurnedAway(env,clean,tally,requestId))||json(taken);
  }
  tally.keyed=1;
+ if(clean.deferred===true)return acceptDeferredStart(env,clean,requestId,tally,{runId,taken,keyHash,argsHash});
  const claim={runId,epoch:taken.epoch,keyHash,argsHash,lease:taken,converted:false};
  // Every exit that did not become a run releases the claim (a release of a claim already taken over is refused by the lease's own run and epoch check).
  try{return await batchStartCore(env,clean,requestId,tally,claim);}
@@ -2941,7 +3024,13 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
  const fence=work=>claimed?batchGuardedCommit(env,gateCtx,work):work();
  const renewGate=async()=>{if(claimed){const renewed=await batchGateRenew(env,runId,lease.epoch,token);return renewed.status==='owned'||renewed.status==='busy';}return true;};
  // Every check is also a renewal of the 60 s gate (and the lease), so a long persist never loses its own gate by the clock; a gate that is gone or held by another token is a loss.
- const held=()=>renewGate();
+ // A check is a cheap read of the gate while it is young (the gate lives 60 s) and a renewal once it is older than 20 s, so the persist does not pay a lease write per check.
+ let gateRenewedAt=Date.now();
+ const held=async()=>{
+  if(!claimed)return true;
+  if(Date.now()-gateRenewedAt<20000){const state=await batchGateHeld(env,gateCtx);if(state==='held')return true;if(state!=='gate_lost')return false;}
+  const ok=await renewGate();if(ok)gateRenewedAt=Date.now();return ok;
+ };
  const clearGate=async()=>{if(claimed){try{await batchGateClear(env,runId,lease.epoch,token);}catch{/* the gate expires by itself */}}};
  const response=await observedPrediction(env,{...body,runId,diagnosticRunId:runId,protocol:BATCH_PROTOCOL},async()=>{
   if(!await held())return superseded();
@@ -2983,6 +3072,7 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
     if(!await held())return superseded();
     await saveJSON(env,ENRICHMENT_KEY+'batch-manifest/'+run.runId+'.json',startAnswer);
     await clearGate();
+    if(claim?.deferred)await readyLeaseShortened(env,claim).catch(()=>null);
     noteStep(env,()=>({manifestFilms:manifest.films,manifestBytes:batchBytes(startAnswer),drainedCommitted:drained.committed.length,drainedDropped:drained.dropped.length}));
     return json(startAnswer);
    }));
@@ -3619,6 +3709,9 @@ async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
  const run=await checkedRun(env,runId);
  if(!run){
   // ADR 0188: a keyed start still preparing its run answers pending, not unknown.
+  // ADR 0191: a deferred start that ended without a run leaves a small typed outcome (the claim is released by then).
+  const outcome=await loadJSON(env,START_OUTCOME_PREFIX+runId+'.json');
+  if(outcome&&(outcome.phase==='refused'||outcome.phase==='failed'))return {status:409,body:{error:'start_not_ready',code:outcome.phase==='refused'?'start_refused':'start_failed',outcomeCode:outcome.code||null,reason:outcome.reason||null,runId}};
   const claimed=await loadJSON(env,RUNNER_LEASE_KEY);
   if(claimed?.runId===runId&&Number(claimed.expiresAt)>Date.now())return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:2000}};
   return {status:404,body:{error:'Unknown run',code:'unknown_run'}};

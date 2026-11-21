@@ -66,6 +66,10 @@ See [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP security contract]
 
 No diagnostic binding, route or Workflow class exists: removed by AIR-457 ([ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md)), code deleted by AIR-521 ([ADR 0161](../adr/0160-delete-epg-diagnostic-canary-code.md)). The Worker keeps the production D1 `DB`, R2 `BUCKET` and the Discovery, Ratings, EPG and Producer Workflows.
 
+## Prediction start Workflow binding (ADR 0191)
+
+`wrangler.jsonc` declares Workflow `iptv-prediction-start` (`PREDICTION_START_WORKFLOW`, class `PredictionStartWorkflow`, [ADR 0191](../adr/0191-deferred-batch-start-with-server-issued-key.md), Proposed). Deployment creates the definition only; no instance exists until a Task sends a deferred `prediction_batch_start`. An instance is created per run id by the start request and runs one non-retried step `prepare` (the keyed start of [ADR 0188](../adr/0188-idempotent-keyed-batch-start-and-early-start-claim.md) with its claim and fencing) with a 4 minute timeout. It writes only what a synchronous keyed start writes, plus one create-only outcome record `enrichment/batch-start/<runId>.json`. It is not a Cron job, not a scheduler and not a second prediction pipeline; the Task remains the only caller. Without the binding a deferred start answers `503 deferred_start_unavailable` and releases its claim.
+
 ## Ratings Workflow binding (AIR-347)
 
 `wrangler.jsonc` declares Workflow `iptv-ratings` (`RATINGS_WORKFLOW`, class `RatingsWorkflow`). Deployment creates the resource only; no instance exists until `ensure` runs in `cloudflare` mode. It also declares Workflow `iptv-epg` (`EPG_WORKFLOW`, class `EpgWorkflow`, [ADR 0100](../adr/0100-epg-cloudflare-workflow-executor.md)). **Current:** EPG mode is `cloudflare` (epoch 1); migration `0017` is applied; hourly `ensure` creates or attaches instances. A deploy still creates no instance by itself. **Historical:** before the owner switch the binding was inert, mode `external`, and a deploy did not apply `0017`.

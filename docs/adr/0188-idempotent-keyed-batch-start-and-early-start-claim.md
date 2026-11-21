@@ -6,7 +6,7 @@
 **Approval source:** The Product Owner accepted ADR 0188 on 2026-11-21 (Europe/Madrid) in the AIR-573 session and asked for the implementation; the earlier design GO on [AIR-573](https://trello.com/c/4pD66DLd) of 2026-11-21 (Europe/Madrid): variants A and B together, ADR first, no change to Task prompts by the Executor (the owner and the Controller change them).  
 **Related work:** [AIR-573](https://trello.com/c/4pD66DLd) (P0 incident); predecessors [AIR-468](../evidence/prediction/air-468-batch-start-rca-2026-11-14.md) and [AIR-486](https://trello.com/c/rmLnAabx) ([evidence](../evidence/prediction/air-486-batch-start-settle-move-2026-11-15.md)); health contract [AIR-556](https://trello.com/c/ZjqzW7EB); [AIR-560](https://trello.com/c/NZ70Dzom) stays open and independent.  
 **Supersedes:** None. It refines the "an overlapping start never adopts a foreign run" rule of [ADR 0122](0122-prediction-batch-runner-v2-dual-protocol.md): that rule stays for every caller without the key and for every other key.  
-**Superseded by:** None
+**Superseded by:** In part [ADR 0191](0191-deferred-batch-start-with-server-issued-key.md) (the caller-composed key and its validation gate, and the synchronous join as the Tasks' protocol); the claim, fencing and join rules stay
 
 ## Context
 
