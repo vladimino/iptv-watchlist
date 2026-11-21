@@ -33,7 +33,7 @@ CREATE TABLE letterboxd_sync_fence (
 ) STRICT;
 
 CREATE TABLE letterboxd_slot (
- slot_key TEXT PRIMARY KEY CHECK (slot_key GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9][0-9][0-9]'),
+ slot_key TEXT PRIMARY KEY CHECK (length(slot_key) = 15 AND slot_key GLOB '[0-9][0-9][0-9][0-9]-*T[0-9][0-9][0-9][0-9]'),
  due_at TEXT NOT NULL,
  series INTEGER NOT NULL CHECK (series >= 0),
  instance_id TEXT CHECK (instance_id IS NULL OR length(instance_id) <= 100),

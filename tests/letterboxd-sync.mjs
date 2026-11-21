@@ -267,4 +267,35 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  assert.doesNotMatch(text,/discovery_lease|epg_checkpoint|epg_priority|resolver_lease|published_epg_|DiscoveryContinuation|EpgOrchestration/i);
  assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/LETTERBOXD|30 \* \* \* \*/,'no binding or cron in this change');
 }
+// 12. T17 / T30: the legacy Ratings writer is FENCED (not merely `external`) while the Letterboxd Sync owns or takes over the Diary; both Workflows can never write.
+// Loaded the way the Worker bundle loads them: one scope, the real ratings-orchestration source, the real Sync, a D1 stand-in.
+{
+ const {scoped,scopedImports}=await import('../scripts/bundle-scope.mjs');
+ const vm=await import('node:vm');
+ const stub="const LetterboxdRatings={readDocument:async(env,key)=>/executor/.test(key)&&globalThis.__ratingsCloudflare?{object:{etag:'m'},value:{schemaVersion:1,mode:'cloudflare',epoch:1,drain:null}}:{object:null,value:null},writeDocument:async()=>({etag:'x'}),KEYS:{run:'r'},readRun:async()=>null,start:async()=>({created:false}),step:async()=>({}),reconcileEvent:async()=>null};\n";
+ const code=scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+stub+scopedImports('src/domain/letterboxd-slots.js','LetterboxdSlots','const {madridDayKey,madridInstant}=OrchestrationPolicy;')+'\n'+scopedImports('src/letterboxd-sync.js','LetterboxdSync','const {applyFailure,cooldownMs}=OrchestrationPolicy;\nconst {latestDueSlot,nextSlot,previousSlot,slotInstanceId,slotEventKey,parseSlotKey}=LetterboxdSlots;')+'\n'+fs.readFileSync('src/ratings-orchestration.js','utf8')+'\n;({RatingsOrchestration,LetterboxdSync})';
+ const ctx={console,crypto,Date,Promise,Math,Object,Array,JSON,Number,String,Error,RegExp,Intl,Map,Set};
+ const mods=vm.runInNewContext(code,ctx);
+ const {RatingsOrchestration,LetterboxdSync}=mods;
+ const f=fresh(),wf=workflow(),e={DB:f.db,BUCKET:bucket(),LETTERBOXD_WORKFLOW:wf,RATINGS_WORKFLOW:{create:async()=>{throw new Error('must not create');}}};
+ // Inert: with no Letterboxd mode row the legacy gate is exactly today's.
+ assert.equal((await RatingsOrchestration.externalGate(e,'start')).reason,null);
+ assert.equal((await RatingsOrchestration.externalGate(e,'step')).reason,null);
+ // Taking over: the switch is open, so both legacy entries are refused.
+ await LetterboxdSync.switchMode(e,{action:'close_admission',target:'cloudflare'},{},T('2026-11-21T09:39:00Z'));
+ assert.equal((await RatingsOrchestration.externalGate(e,'start')).reason,'external_writer_fenced');
+ assert.equal((await RatingsOrchestration.externalGate(e,'step')).reason,'external_writer_fenced');
+ assert.equal((await RatingsOrchestration.externalGate(e,'status')).reason,null,'reads stay open');
+ await LetterboxdSync.switchMode(e,{action:'complete'},{handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:true,ratingsPhase:true})});
+ assert.equal((await RatingsOrchestration.externalGate(e,'step')).reason,'external_writer_fenced');
+ // The 17:00 ratings due creates nothing while the Letterboxd mode is cloudflare, even if the ratings mode document says cloudflare (never two Diary writers).
+ ctx.__ratingsCloudflare=true;
+ const mode=await RatingsOrchestration.ensure(e,{now:T('2026-11-21T16:05:00Z')});assert.equal(mode.reason,'letterboxd_sync_active');assert.equal(mode.started,false);
+ const stale=await RatingsOrchestration.admit(e,{runKey:'2026-11-21',series:0,epoch:1,id:'x'});assert.equal(stale.reason,'external_writer_fenced','a stale ratings instance is refused');
+ ctx.__ratingsCloudflare=false;
+ // Rollback: back to external re-opens exactly the legacy writer.
+ await LetterboxdSync.switchMode(e,{action:'close_admission',target:'external'});
+ await LetterboxdSync.switchMode(e,{action:'complete'});
+ assert.equal((await RatingsOrchestration.externalGate(e,'start')).reason,null,'rollback restores the single legacy writer');
+}
 console.log('letterboxd-sync ok');

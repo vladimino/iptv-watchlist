@@ -17,6 +17,8 @@ const RatingsOrchestration=(()=>{
  const STEP_CAP=200,SLEEP_FLOOR_MS=1000,PAUSE_MS=6*3600000,DRAIN_MARGIN_MS=3*60000,CONTROL_ATTEMPTS=4,ALIVE=['running','waiting','queued','paused'],ENDED=['complete','errored','terminated','absent'];
  const iso=ms=>new Date(ms).toISOString();
  const policy=()=>OrchestrationPolicy;
+ // Absent module or schema means the Letterboxd Sync is inert, never a fence.
+ const letterboxdFence=async env=>typeof LetterboxdSync==='undefined'?{fenced:false}:LetterboxdSync.writerFence(env).catch(()=>({fenced:true,reason:'evidence_unreadable'}));
  const ratings=()=>LetterboxdRatings;
  const instanceId=(runKey,series)=>'ratings_'+String(runKey).replace(/-/g,'')+'_'+series;
  const emptyControl=()=>({schemaVersion:1,runKey:null,series:0,instanceId:null,epoch:null,phase:'idle',runId:null,checkpoint:null,budget:policy().emptyBudget(),cooldownUntil:null,quarantine:null,failure:null,lastDurableProgressAt:null,nextWakeAt:null,lastStep:null,doneAt:null,updatedAt:null});
@@ -166,6 +168,9 @@ const RatingsOrchestration=(()=>{
   if(mode.malformed)return {reason:'evidence_unreadable',fence:null};
   if(mode.record.mode==='switching')return {reason:'switch_in_progress',fence:null};
   if(mode.record.mode==='cloudflare')return {reason:'external_writer_fenced',fence:null};
+  // AIR-570 / ADR 0186 O5: `external` is not a sufficient fence. While the Letterboxd Sync owns (or is taking over) the Diary, the legacy entry points are refused.
+  const letterboxd=await letterboxdFence(env);
+  if(letterboxd.fenced)return {reason:'external_writer_fenced',fence:null};
   return {reason:null,fence:{key:MODE_KEY,etag:mode.etag??null}};
  }
 
@@ -177,6 +182,7 @@ const RatingsOrchestration=(()=>{
   if(mode.record.mode==='switching')return {ok:false,reason:'switch_in_progress'};
   if(mode.record.mode!=='cloudflare')return {ok:false,reason:'not_cloudflare'};
   if(mode.record.epoch!==epoch)return {ok:false,reason:'epoch_mismatch'};
+  if((await letterboxdFence(env)).fenced)return {ok:false,reason:'external_writer_fenced',unsafe:true};
   const authority=await authorityState(env);
   if(authority.error)return {ok:false,reason:'d1_unavailable',transient:true};
   if(!authority.ready)return {ok:false,reason:'authority_held',unsafe:true};
@@ -329,6 +335,7 @@ const RatingsOrchestration=(()=>{
   if(mode.record.mode==='switching')return {started:false,reason:'switch_in_progress'};
   if(mode.record.mode!=='cloudflare')return {started:false,reason:'external'};
   if(typeof env?.RATINGS_WORKFLOW?.create!=='function')return {started:false,reason:'workflow_unavailable'};
+  if((await letterboxdFence(env)).fenced)return {started:false,reason:'letterboxd_sync_active'};
   const authority=await authorityState(env);
   if(authority.error)return {started:false,reason:'d1_unavailable'};
   if(!authority.ready)return {started:false,reason:'authority_held'};

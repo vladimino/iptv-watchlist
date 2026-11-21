@@ -233,6 +233,7 @@ export async function clearQuarantine(env, now = Date.now()) {
 }
 // The legacy ratings entry points ask this: is the Letterboxd Sync the (future) Diary writer? `cloudflare` and `switching` fence them.
 export async function writerFence(env) {
+  if (!dbOf(env)) return {fenced: false, reason: null};
   let mode;
   try { mode = await readMode(env); } catch (error) { return error.code === 'schema_absent' ? {fenced: false, reason: null} : {fenced: true, reason: 'evidence_unreadable'}; }
   if (mode.malformed) return {fenced: true, reason: 'evidence_unreadable'};
