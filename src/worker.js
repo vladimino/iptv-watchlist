@@ -895,6 +895,13 @@ function checkpointStep(env){
  const now=Date.now(),margin=typeof EpgOrchestration!=='undefined'?EpgOrchestration.BOUNDARY_MARGIN_MS:0;
  return {step:env.epgStep,fence:env.epgFence,leaseBound:new Date(now+margin).toISOString(),now};
 }
+// AIR-571 (C3): the root `watchlist.json` mirror is written by ONE guarded function (PublishedEpg.putWatchlistRoot: read the object, check the Watchlist marker AFTER the read, conditional put by etag).
+// null = there is no object-store binding to guard (the local stand-in): the caller keeps its own storage path.
+async function saveWatchlistRoot(env,value){
+ if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.putWatchlistRoot!=='function'||!PublishedEpg.hasBucket(env))return null;
+ const out=await PublishedEpg.putWatchlistRoot(env,value);
+ return out.blocked?{skipped:'watchlist_root_not_writable'}:{etag:out.etag};
+}
 const saveJSON=async(env,key,value)=>{
  await epgStepGuard(env);
  if(EPG_CHECKPOINT_KEYS.has(key)){
@@ -909,10 +916,10 @@ const saveJSON=async(env,key,value)=>{
    return {etag:'d1'};
   }
  }
- if(key==='watchlist.json'&&typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.putWatchlistRoot==='function'&&env?.BUCKET&&typeof env.BUCKET.put==='function'&&typeof env.BUCKET.get==='function'){
-  // AIR-571 (C3): the root watchlist mirror has ONE guarded writer (read the object, check the marker AFTER the read, conditional put). Every fallback tail reaches it through here.
-  const out=await PublishedEpg.putWatchlistRoot(env,value);
-  return out.blocked?{skipped:'watchlist_root_not_writable'}:{etag:out.etag};
+ if(key==='watchlist.json'){
+  // AIR-571 (C3): the root watchlist mirror has ONE guarded writer. Every fallback tail reaches it through here.
+  const routed=await saveWatchlistRoot(env,value);
+  if(routed)return routed;
  }
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
   const routed=await DiscoveryAuthority.routeWrite(env,key,value);

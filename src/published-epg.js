@@ -307,6 +307,7 @@ export async function readShows(env,programmeRunId){
 }
 // AIR-531: is there a D1 binding to read at all (the worker never names the binding itself).
 export function hasDatabase(env){return !!database(env);}
+export function hasBucket(env){return !!env?.BUCKET&&typeof env.BUCKET.put==='function'&&typeof env.BUCKET.get==='function';}
 // AIR-531: one indexed point read for the HTML permalink status: is this film id a member (programme or watchlist) of the pinned published generation?
 // Read-only; the caller treats any failure as "unknown", never as "absent".
 export async function isMember(env,programmeRunId,filmId){
