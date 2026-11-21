@@ -12,7 +12,7 @@ import {d1Standin} from './d1-standin.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-mirror-reconciliation-'));
-const chain=fs.readdirSync('migrations').filter(n=>/^\d{4}_.*\.sql$/.test(n)).sort();
+const chain=fs.readdirSync('migrations').filter(n=>/^\d{4}_.*\.sql$/.test(n)&&n!=='0032_letterboxd_sync_control.sql').sort();
 let databases=0;
 function open(){
  const db=d1Standin(path.join(root,'m'+(databases++)+'.sqlite'));

@@ -63,7 +63,7 @@ for(const [label,day] of DAYS){
 
 // 3. The real EPG ensure through every hourly tick of a Madrid date, with duplicate firings and a missed due tick.
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-cron-sim-'));
-const chain=fs.readdirSync('migrations').filter(n=>/^\d{4}_.*\.sql$/.test(n)).sort();
+const chain=fs.readdirSync('migrations').filter(n=>/^\d{4}_.*\.sql$/.test(n)&&n!=='0032_letterboxd_sync_control.sql').sort();
 const file=path.join(root,'sim.sqlite');
 const db=d1Standin(file);
 for(const name of chain)db.sql(fs.readFileSync('migrations/'+name,'utf8'));

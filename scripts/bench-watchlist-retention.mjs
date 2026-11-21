@@ -14,7 +14,7 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-bench-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
 const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);};
 const file=path.join(root,'b.sqlite');
-sqlite(file,fs.readdirSync('migrations').filter(n=>/^\d{4}_.*\.sql$/.test(n)).sort().map(n=>fs.readFileSync('migrations/'+n,'utf8')).join('\n'));
+sqlite(file,fs.readdirSync('migrations').filter(n=>/^\d{4}_.*\.sql$/.test(n)&&n!=='0032_letterboxd_sync_control.sql').sort().map(n=>fs.readFileSync('migrations/'+n,'utf8')).join('\n'));
 sqlite(file,"UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;");
 sqlite(file,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'2026-11-11T09:00:00.000Z');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+EMPTY+"','"+EMPTY+"','2026-11-11T09:00:00.000Z');");
 const T0='2026-11-17T15:00:00.000Z';

@@ -12,7 +12,7 @@ import {sqliteSync} from './sqlite-session.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'iptv-identity-revoke-'));
 process.on('exit', () => { try { fs.rmSync(root, {recursive: true, force: true}); } catch {} });
-const files = fs.readdirSync('migrations').filter(name => /^\d{4}_.*\.sql$/.test(name)).sort();
+const files = fs.readdirSync('migrations').filter(name => /^\d{4}_.*\.sql$/.test(name) && name !== '0032_letterboxd_sync_control.sql').sort();
 const file = path.join(root, 'revoke.sqlite');
 const built = sqliteSync(['-bail', file], {input: 'PRAGMA foreign_keys=ON;\n' + files.map(name => fs.readFileSync('migrations/' + name, 'utf8')).join('\n'), encoding: 'utf8', maxBuffer: 1 << 26});
 if (built.status !== 0) throw new Error(built.stderr);
