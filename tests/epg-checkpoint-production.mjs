@@ -194,6 +194,16 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  await stop(call('release-rolled-back',{generation:4,...image},env),'identity_mismatch');
  assert.deepEqual(marker(env.file),{mode:'r2',writes:'held',generation:4});
  env.r2.objects.get('watchlist-ingest.json').etag=image.ingestEtag;
+ // the dangerous case: a foreign writer changes an object after the revert and the caller presents the NEW fingerprints; the retained D1 rows are the proof
+ const foreign=env.r2.objects.get('sync.json'),goodText=foreign.text,goodEtag=foreign.etag;
+ foreign.text=goodText.replace('"remaining":0','"remaining":0,"x":1');foreign.etag='foreign-1';
+ const fresh=identity(env);
+ assert.notEqual(fresh.syncSha256,image.syncSha256);
+ await stop(call('release-rolled-back',{generation:4,...fresh},env),'export_mismatch');
+ assert.deepEqual(marker(env.file),{mode:'r2',writes:'held',generation:4},'the marker stays held');
+ foreign.text=goodText;foreign.etag=goodEtag;
+ const retained=await Op.retainedDocuments(env.db);
+ assert.equal(sha(retained.syncText),image.syncSha256);assert.equal(sha(retained.ingestText),image.ingestSha256,'the retained rows reproduce the exported image');
  const reopened=await call('release-rolled-back',{generation:4,...image},env);
  assert.deepEqual(reopened.marker,{mode:'r2',writes:'open',generation:4});
  assert.deepEqual(await Checkpoint.readAuthority(env.db),{state:'r2',writes:'open',generation:4});
@@ -256,11 +266,30 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  // the run is certified under another programme run
  const other=base();sqlite(other.file,"UPDATE published_epg_authority SET programme_run_id='other', finalized_run_id='other'");
  const differently=await stop(call('hold',{generation:0,...EV},other),'drain_refused');assert.ok(differently.details.failures.includes('run_identity_mismatch'));
- // event debt on the completed run
- const debt=bucket({...frozen,'sync.json':JSON.stringify({...JSON.parse(SYNC),epgEventPending:{type:'epg'}})});
- await refused(EV,'event_debt',{env:{...base(),r2:debt}});
- const wlEvent=bucket({...frozen,'sync.json':JSON.stringify({...JSON.parse(SYNC),events:[{type:'watchlist',at:'2026-11-20T16:11:45.255Z'}]})});
- await refused(EV,'event_debt',{env:{...base(),r2:wlEvent}});
+ // event debt: the bounded semantics of the orchestrator, never the mere presence of a retained `events` array
+ const WL={id:'w1',type:'watchlist',at:'2026-11-20T16:11:45.255Z'};
+ const WL_KEY=Op.journalKey(WL);
+ assert.match(WL_KEY,/^events\/items\/\d{13}-w1\.json$/);
+ const withRun=(extra,objects={})=>({...base(),r2:bucket({...frozen,'sync.json':JSON.stringify({...JSON.parse(SYNC),...extra}),...objects})});
+ // positive: a normal completed natural run keeps events:[watchlist, epg] after the successful flush, and its journal object exists
+ const normal=withRun({watchlistEventFixed:true,events:[WL,{id:'e1',type:'epg',at:'2026-11-20T16:11:45.255Z'}]},{[WL_KEY]:'{}'});
+ assert.equal((await call('status',{...EV},normal)).drain.ok,true,'a retained events array with its journal object is not debt');
+ const accepted=await call('hold',{generation:0,...EV},normal);assert.deepEqual(accepted.marker,{mode:'r2',writes:'held',generation:1});
+ // a retained error with a valid completion receipt is history, not debt
+ assert.equal((await call('status',{...EV},withRun({error:'earlier attempt',completedAt:'2026-11-20T16:11:45.255Z'}))).drain.ok,true);
+ // negative: real debt
+ await refused(EV,'event_debt',{env:withRun({epgEventPending:{type:'epg'}})});
+ await refused(EV,'event_debt',{env:withRun({watchlistEventPending:true})});
+ await refused(EV,'event_debt',{env:withRun({watchlistRemovalFilms:['f1']})});
+ await refused(EV,'event_debt',{env:withRun({removalRefs:[{ref:'r',films:['f1']}]})});
+ await refused(EV,'event_debt',{env:withRun({removalLookups:['f1']})});
+ await refused(EV,'event_debt',{env:withRun({ratingPending:['f1']})});
+ await refused(EV,'event_debt',{env:withRun({watchlistEventFixed:true,events:[WL]})},'the fixed event whose journal object is missing');
+ await refused(EV,'completion_receipt_unproven',{env:withRun({error:'x',completedAt:'not a date'})});
+ const unreadable=withRun({watchlistEventFixed:true,events:[WL]},{[WL_KEY]:'{}'});
+ const head=unreadable.r2.read.head;
+ const brokenRead={...unreadable.r2.read,async head(key){if(key===WL_KEY)throw new Error('down');return head(key);}};
+ const failed=await stop(Op.execute('hold',{generation:0,...EV},{binding:unreadable.db,readStore:brokenRead,now:NOW}),'drain_refused');assert.ok(failed.details.failures.includes('event_debt_unreadable'),'an unreadable journal check is fail-closed');
  // drift between the status read and the hold: each record the proof was read from is re-asserted inside the marker batch
  const drift=async mutate=>{
   const env=base();

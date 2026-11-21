@@ -94,7 +94,7 @@ export function measure(syncObject,ingestObject){
 const madridDay=ms=>new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(ms));
 // `evidence` is what this tool cannot read with its D1 and R2 credentials: the terminal state of the EPG Workflow instance and the deployed Worker version,
 // read by the operator through a documented read-only path (MCP `epg_status` owner.liveness and instanceId, the deployed version id). Without it the proof fails.
-export function drainProof(state,{run,now,evidence={}}){
+export function drainProof(state,{run,now,evidence={},journal={owed:false}}){
  const failures=[];
  const today=madridDay(now);
  const lease=state.orchestration.lease?.body;
@@ -108,9 +108,11 @@ export function drainProof(state,{run,now,evidence={}}){
  if(!run||run.stage!=='complete')failures.push('run_not_complete');
  else{
   if(run.watchlist!==undefined)failures.push('complete_run_has_watchlist');
-  if(run.error)failures.push('run_has_error');
+  // A retained `error` is the history of an earlier attempt of the same run (the orchestrator says so); the proof is the completion receipt.
+  if(!completionReceipt(run))failures.push('completion_receipt_unproven');
   if(run.runKey!==today)failures.push('run_not_current_day');
-  if(run.epgEventPending!==undefined||(Array.isArray(run.events)&&run.events.some(event=>event?.type==='watchlist')))failures.push('event_debt');
+  if(pendingDebt(run)||journal.owed)failures.push('event_debt');
+  if(journal.unreadable)failures.push('event_debt_unreadable');
  }
  if(control&&control.runKey!==today)failures.push('control_not_current_day');
  // One identity everywhere: the checkpoint run, the control record, the published programme and its certificate.
@@ -122,6 +124,30 @@ export function drainProof(state,{run,now,evidence={}}){
   if(!control||!control.versionId||evidence.deployedVersionId!==control.versionId)failures.push('workflow_version_mismatch');
  }
  return {ok:failures.length===0,failures};
+}
+// The bounded event-owed semantics of the orchestrator (`journalOwed`, `handoverOwed`): explicit pending marks, an unfinished hand-over, and, once the watchlist
+// event is fixed, the absence of its journal object. A retained `events` array alone is NOT debt: the Worker keeps it after a successful flush.
+export function pendingDebt(run){
+ if(run?.epgEventPending||run?.watchlistEventPending)return true;
+ if(Array.isArray(run?.watchlistRemovalFilms)&&run.watchlistRemovalFilms.length)return true;
+ const refs=Array.isArray(run?.removalRefs)?run.removalRefs:run?.removalRefs?[run.removalRefs]:[];
+ if(refs.some(item=>Array.isArray(item?.films)&&item.films.length&&item.ref))return true;
+ if(Array.isArray(run?.removalLookups)&&run.removalLookups.length)return true;
+ return Array.isArray(run?.ratingPending)&&run.ratingPending.length>0&&(!run.ratingAttempt||run.ratingAttempt.state==='started');
+}
+export const journalKey=event=>event&&Number.isFinite(Date.parse(event.at))?'events/items/'+String(9999999999999-Date.parse(event.at)).padStart(13,'0')+'-'+event.id+'.json':null;
+// Whether the fixed watchlist event's journal object exists in R2 (a HEAD, read-only). -> {owed} | {unreadable:true}
+export async function journalState(run,store){
+ if(!run?.watchlistEventFixed)return {owed:false};
+ const key=journalKey((run.events||[]).find(item=>item?.type==='watchlist'));
+ if(!key)return {owed:false};
+ if(!store)return {unreadable:true};
+ try{return {owed:!(await store.head(key))};}catch{return {unreadable:true};}
+}
+// The completion receipt the orchestrator accepts: `completedAt` when the record has the field (it must parse), else `updatedAt` only when no `error` is on the run.
+export function completionReceipt(run){
+ const receipt=Object.prototype.hasOwnProperty.call(run,'completedAt')?run.completedAt:(run.error?null:run.updatedAt);
+ return typeof receipt==='string'&&Number.isFinite(Date.parse(receipt))?receipt:null;
 }
 // What a mutation must still find true inside its own batch: the exact records the proof was read from.
 export function proofFacts(state,evidence){
@@ -212,7 +238,7 @@ export function importPlan({syncText,ingestText,generation,now,writeId=randomUUI
  if(run.stage!=='complete')throw new OperatorStop('run_not_complete',3);
  if(run.watchlist!==undefined)throw new OperatorStop('complete_run_has_watchlist',3);
  if(run.runKey!==undefined&&run.runKey!==null&&(typeof run.runKey!=='string'||!GLOB_DAY.test(run.runKey)))throw new OperatorStop('source_invalid',3,{key:KEYS.sync});
- const completedAt=run.completedAt??(typeof run.updatedAt==='string'&&Number.isFinite(Date.parse(run.updatedAt))?run.updatedAt:null);
+ const completedAt=completionReceipt(run);
  if(typeof completedAt!=='string'||!Number.isFinite(Date.parse(completedAt)))throw new OperatorStop('source_invalid',3,{key:KEYS.sync});
  const body={...run,completedAt};
  const text=JSON.stringify(body);
@@ -258,6 +284,17 @@ export async function verifyImported(binding,expected){
  return mismatches;
 }
 
+// The export image reconstructed from the retained D1 rows in ANY marker mode (the rows are kept after a revert). Verifies the body chunks against the run row.
+export async function retainedDocuments(binding){
+ const run=await one(binding,'SELECT run_id, stage, completed_at, body_chunks, body_chars, body_sha256, watchlist_present FROM epg_checkpoint_run WHERE id=1');
+ if(!run||run.stage!=='complete'||Number(run.watchlist_present)!==0)throw new OperatorStop('retained_rows_unusable',3);
+ const rows=await many(binding,'SELECT seq, text FROM epg_checkpoint_body ORDER BY seq');
+ const text=rows.map(row=>row.text).join('');
+ if(rows.length!==Number(run.body_chunks)||rows.some((row,index)=>Number(row.seq)!==index)||text.length!==Number(run.body_chars)||sha256(text)!==run.body_sha256)throw new OperatorStop('retained_rows_unusable',3);
+ const ingest=await one(binding,'SELECT last_success_at, failed_at, code FROM epg_ingest_status WHERE id=1');
+ if(!ingest)throw new OperatorStop('retained_rows_unusable',3);
+ return {syncText:text,ingestText:JSON.stringify({schemaVersion:1,...(ingest.code?{code:ingest.code}:{}),failedAt:ingest.failed_at??null,lastSuccessAt:ingest.last_success_at??null})};
+}
 // ---- rollback export -----------------------------------------------------------------------------------------------------
 // The two R2 documents a rolled-back Worker would read, derived from the D1 rows (a complete run only). Never the raw rows of another run.
 export async function exportDocuments(binding){
@@ -297,17 +334,18 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
  const state=await readState(binding);
  const generation=args.generation;
  const readObjects=async()=>readStore?{sync:await readObject(readStore,KEYS.sync),ingest:await readObject(readStore,KEYS.ingest)}:null;
+ const proofOf=async(run)=>drainProof(state,{run,now:clock,evidence,journal:await journalState(run,readStore)});
  if(command==='status'){
   const objects=await readObjects();
   const run=objects||state.marker?.mode==='d1'?await currentRun(binding,state,objects?.sync).catch(()=>null):null;
-  return {operation:'status',writes:false,writeState:'none',schemaVersion:state.schemaVersion,tables:state.tables,marker:marker0(state),run:state.run?{runId:state.run.run_id,stage:state.run.stage,revision:Number(state.run.revision),completedAt:state.run.completed_at,bodySha256:state.run.body_sha256}:null,counts:state.counts,ingest:state.ingest,orchestration:{mode:state.orchestration.mode?.body?.mode??null,phase:state.orchestration.control?.body?.phase??null,nextWakeAt:state.orchestration.control?.body?.nextWakeAt??null,leaseReleased:state.orchestration.lease?.body?.released??null,leaseExpiresAt:state.orchestration.lease?.body?.expiresAt??null},pause:state.pause?.state??null,published:state.published,r2:objects?{sync:publicIdentity(objects.sync),ingest:publicIdentity(objects.ingest),measure:measure(objects.sync,objects.ingest)}:'not_configured',drain:objects||state.marker?.mode==='d1'?drainProof(state,{run,now:clock,evidence}):'not_evaluated'};
+  return {operation:'status',writes:false,writeState:'none',schemaVersion:state.schemaVersion,tables:state.tables,marker:marker0(state),run:state.run?{runId:state.run.run_id,stage:state.run.stage,revision:Number(state.run.revision),completedAt:state.run.completed_at,bodySha256:state.run.body_sha256}:null,counts:state.counts,ingest:state.ingest,orchestration:{mode:state.orchestration.mode?.body?.mode??null,phase:state.orchestration.control?.body?.phase??null,nextWakeAt:state.orchestration.control?.body?.nextWakeAt??null,leaseReleased:state.orchestration.lease?.body?.released??null,leaseExpiresAt:state.orchestration.lease?.body?.expiresAt??null},pause:state.pause?.state??null,published:state.published,r2:objects?{sync:publicIdentity(objects.sync),ingest:publicIdentity(objects.ingest),measure:measure(objects.sync,objects.ingest)}:'not_configured',drain:objects||state.marker?.mode==='d1'?await proofOf(run):'not_evaluated'};
  }
  if(command==='apply'){
   const decision=applyDecision(state);
   if(decision!=='apply')throw new OperatorStop(decision,3);
   const objects=await readObjects();
   if(!objects)throw new OperatorStop('source_missing',3);
-  const proof=drainProof(state,{run:await currentRun(binding,state,objects.sync),now:clock,evidence});
+  const proof=await proofOf(await currentRun(binding,state,objects.sync));
   if(!proof.ok)throw new OperatorStop('drain_refused',3,{failures:proof.failures});
   if(ctx.track)ctx.track('unknown');
   await batch(binding,migrationSql().map(sql=>[sql,[]]));
@@ -322,7 +360,7 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
   requireMarker(state,'r2','open',generation);
   const objects=await readObjects();
   if(!objects)throw new OperatorStop('source_missing',3);
-  const proof=drainProof(state,{run:await currentRun(binding,state,objects.sync),now:clock,evidence});
+  const proof=await proofOf(await currentRun(binding,state,objects.sync));
   if(!proof.ok)throw new OperatorStop('drain_refused',3,{failures:proof.failures});
   const done=await transition(binding,'hold',{generation,now:clock,proof:proofFacts(state,evidence)},ctx);
   return {...done,writes:true,writeState:'committed',waitBeforeCapture:'longer than the 2 s marker cache'};
@@ -338,6 +376,9 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
   const objects=await readObjects();
   requireIdentity(objects?.sync,args.syncEtag,args.syncSha256,KEYS.sync);
   requireIdentity(objects?.ingest,args.ingestEtag,args.ingestSha256,KEYS.ingest);
+  // The caller's fingerprints say what the operator saw; they are not the proof. The proof is the export image reconstructed from the retained D1 rows.
+  const retained=await retainedDocuments(binding);
+  if(objects.sync.sha256!==sha256(retained.syncText)||objects.ingest.sha256!==sha256(retained.ingestText))throw new OperatorStop('export_mismatch',3,{r2:{sync:publicIdentity(objects.sync),ingest:publicIdentity(objects.ingest)}});
   const done=await transition(binding,command,{generation,now:clock},ctx);
   return {...done,writes:true,writeState:'committed',r2:{sync:publicIdentity(objects.sync),ingest:publicIdentity(objects.ingest)}};
  }
@@ -392,7 +433,7 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
  if(command==='hold-rollback'){
   requireMarker(state,'d1','open',generation);
   const run=await currentRun(binding,state,null);
-  const proof=drainProof(state,{run,now:clock,evidence});
+  const proof=await proofOf(run);
   if(!proof.ok)throw new OperatorStop('drain_refused',3,{failures:proof.failures});
   const done=await transition(binding,'hold-rollback',{generation,now:clock,proof:proofFacts(state,evidence)},ctx);
   return {...done,writes:true,writeState:'committed'};
