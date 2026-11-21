@@ -8,6 +8,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import * as RatingsD1 from '../src/ratings-d1.js';
+import * as PredictionD1 from '../src/prediction-d1.js';
 import {d1Standin} from './d1-standin.mjs';
 import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,SEPARATE,g} from './ratings-harness.mjs';
 
@@ -19,17 +20,20 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-air-419-'));
 let n=0;
 const migrations=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority'];
 function openDb(){
- const db=d1Standin(path.join(root,'r-'+(n++)+'.sqlite'));
+ const writeBatches={n:0};// AIR-558: the derived view reads through read-only SELECT batches; only a write batch counts
+ const db=d1Standin(path.join(root,'r-'+(n++)+'.sqlite'),{onBatch:async statements=>{if(!statements.every(item=>/^\s*SELECT/i.test(item.text)))writeBatches.n++;}});db.writeBatches=writeBatches;
  for(const name of migrations)db.sql(fs.readFileSync('migrations/'+name+'.sql','utf8'));
  db.sql(fs.readFileSync('migrations/0010_ratings_authority.sql','utf8'));
  db.sql("UPDATE ratings_domain_authority SET mode='d1', cutover='open'");
+ db.sql("UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");// AIR-558: the view index is derived from both D1 domains
  return db;
 }
 function world(){
  const db=openDb(),{clock,FakeDate,crypto}=makeClock(Date.parse('2026-11-10T16:01:00.000Z')),bucket=makeBucket(),net=makeNetwork();
- const ctx=loadContext({net,clock,FakeDate,crypto,extra:{RatingsD1}});
+ const ctx=loadContext({net,clock,FakeDate,crypto,extra:{RatingsD1,PredictionD1}});
  const env=baseEnv(bucket,{...SEPARATE,DB:db,RATINGS_DB_REQUIRED:'on'});
- bucket.set('enrichment/view-index.json',{[LID]:{prediction:PREDICTION},[OTHER]:{prediction:{predictedRating:2.5,probability4Plus:0.1}}});
+ // AIR-558: the predictions of the derived view index are prediction_pointer rows, not a raw view-index object.
+ for(const [id,display] of [[LID,PREDICTION],[OTHER,{predictedRating:2.5,probability4Plus:0.1}]])db.sql("INSERT INTO prediction_pointer (film_id, r2_key, content_sha256, updated_at, display_json) VALUES ('"+id+"','pv/"+id+"','s"+id+"','2026-11-01T00:00:00.000Z','"+JSON.stringify(display)+"')");
  bucket.set('programme.json',{runId:'run-air-419',updatedAt:'2026-11-10T16:00:00.000Z',watchlistCount:2,films:[FILM,OTHER_FILM],stats:{}});
  bucket.set('watchlist.json',{updatedAt:'2026-11-10T16:00:00.000Z',films:[FILM,OTHER_FILM]});
  return {db,bucket,ctx,env,Facts:g(ctx,'LetterboxdFacts'),worker:g(ctx,'worker')};
@@ -74,7 +78,7 @@ function fillView(db,count){
  assert.equal(String(written.changes[0].tmdb),TMDB);
  const aliases=db.sql("SELECT alias_id, actual_rating, rating_known, watched FROM ratings_view WHERE alias_id IN ('1Vuo','tmdb_10750') ORDER BY alias_id");
  assert.deepEqual(aliases.map(row=>[row.alias_id,row.actual_rating,row.rating_known,row.watched]),[[LID,3.5,1,1],[ALIAS,3.5,1,1]]);
- const writesBefore=bucket.writes().length,batchesBefore=db.calls.batches;
+ const writesBefore=bucket.writes().length,batchesBefore=db.writeBatches.n;
  const data=await viewGet(worker,env);
  assert.equal(data.films[LID].actualRating,3.5);
  assert.equal(data.films[LID].watched,true);
@@ -83,7 +87,7 @@ function fillView(db,count){
  const html=renderCard(FILM,data.films);
  assertActualAndForecast(html,3.5,4);
  assert.equal(bucket.writes().length,writesBefore,'GET view writes no R2 object');
- assert.equal(db.calls.batches,batchesBefore,'GET view writes no D1 batch');
+ assert.equal(db.writeBatches.n,batchesBefore,'GET view writes no D1 batch');
  const again=await viewGet(worker,env);
  assert.equal(again.films[LID].actualRating,3.5);
  assert.equal(JSON.stringify(again.films[LID]),JSON.stringify(data.films[LID]));

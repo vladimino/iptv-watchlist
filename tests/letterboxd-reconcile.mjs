@@ -9,6 +9,7 @@ import path from 'node:path';
 import {CsvError,parseCsv,parseExport,parseRating} from '../src/letterboxd-export.js';
 import {buildIndex,lidHypothesis,matchExport,normTitle} from '../src/letterboxd-match.js';
 import {reconcile,loadSnapshot} from '../scripts/letterboxd-reconcile.mjs';
+import {writeD1Input} from './view-index-d1-input.mjs';// AIR-558
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const scratch=await mkdtemp(path.join(os.tmpdir(),'lbx-reconcile-'));
@@ -151,6 +152,7 @@ const exportDir=path.join(scratch,'export'),snapshotDir=path.join(scratch,'snaps
 await mkdir(exportDir,{recursive:true});
 for(const [name,text] of Object.entries({'watched.csv':watched,'ratings.csv':ratings,'watchlist.csv':watchlist,'diary.csv':diary,'profile.csv':'Username\nprivate-invented\n'}))await writeFile(path.join(exportDir,name),text);
 await writeSnapshot(snapshotDir,objects);
+const d1Main=await writeD1Input(path.join(scratch,'d1-input'),objects['enrichment/view-index.json']);// AIR-558: the same index the snapshot's raw view-index holds
 const cli=args=>spawnSync(process.execPath,['scripts/letterboxd-reconcile.mjs',...args],{encoding:'utf8'});
 const names=[...Object.values(film).map(([,name])=>name),'Quarter Star','Conflicted Rating','Diary Entry','private-invented'];
 const codes=[...Object.values(film).map(([code])=>code),'Q7l2','Q7m3','Q7x1','zz9'];
@@ -161,10 +163,10 @@ function assertPrivate(text){
 }
 
 const outA=path.join(scratch,'out-a'),outB=path.join(scratch,'out-b');
-const runA=cli(['--export',exportDir,'--snapshot',snapshotDir,'--output',outA]);
+const runA=cli(['--export',exportDir,'--snapshot',snapshotDir,'--view-index-d1',d1Main,'--output',outA]);
 assert.equal(runA.status,0,runA.stderr);
 assertPrivate(runA.stdout);
-const runB=cli(['--export',exportDir,'--snapshot',snapshotDir,'--output',outB]);
+const runB=cli(['--export',exportDir,'--snapshot',snapshotDir,'--view-index-d1',d1Main,'--output',outB]);
 assert.equal(runB.status,0,runB.stderr);
 const reportText=await readFile(path.join(outA,'report.json'),'utf8');
 assert.equal(reportText,await readFile(path.join(outB,'report.json'),'utf8'),'report is deterministic');
@@ -204,14 +206,14 @@ assert.equal(cli(['--export',path.join(repoRoot,'tests'),'--output',path.join(sc
 
 // A snapshot that is not a fenced consistent cut, or whose bytes differ from the manifest, is refused.
 const noGo=path.join(scratch,'snapshot-no-go');await writeSnapshot(noGo,objects,{status:'no_go',noGoReasons:['source_changed']});
-const runF=cli(['--export',exportDir,'--snapshot',noGo,'--output',path.join(scratch,'out-f')]);
+const runF=cli(['--export',exportDir,'--snapshot',noGo,'--view-index-d1',d1Main,'--output',path.join(scratch,'out-f')]);
 assert.equal(runF.status,3);assert.equal(existsSync(path.join(scratch,'out-f','report.json')),false);
 const tampered=path.join(scratch,'snapshot-tampered'),entries=await writeSnapshot(tampered,objects);
 await writeFile(path.join(tampered,entries.find(entry=>entry.key==='watchlist.json').file),'{"films":[]}');
-assert.equal(cli(['--export',exportDir,'--snapshot',tampered,'--output',path.join(scratch,'out-g')]).status,3);
+assert.equal(cli(['--export',exportDir,'--snapshot',tampered,'--view-index-d1',d1Main,'--output',path.join(scratch,'out-g')]).status,3);
 // Absent snapshot keys are reported, not invented.
 const partial=path.join(scratch,'snapshot-partial');await writeSnapshot(partial,{'watchlist.json':objects['watchlist.json']});
-const runH=cli(['--export',exportDir,'--snapshot',partial,'--output',path.join(scratch,'out-h')]);
+const runH=cli(['--export',exportDir,'--snapshot',partial,'--view-index-d1',d1Main,'--output',path.join(scratch,'out-h')]);
 assert.equal(runH.status,0,runH.stderr);
 const partialReport=JSON.parse(await readFile(path.join(scratch,'out-h','report.json'),'utf8'));
 assert.ok(partialReport.matching.snapshot.missingKeys.includes('epg/discovered-films.json'));
@@ -224,17 +226,27 @@ assert.equal(runI.status,1);assert.match(runI.stderr,/watched\.csv: Unterminated
 // ADR 0183: a D1-derived view index replaces the raw object of the snapshot, entirely and bound by digest.
 {
  const d1Index={Q7a1:{actualRating:4.5},tmdb_602:{actualRating:4},tmdb_701:{actualRating:3.5},stale_only_in_d1:{actualRating:2}};
- const d1File=path.join(scratch,'view-index.d1.json');
- await writeFile(d1File,JSON.stringify({schema:'view-index-d1-export@1',source:'d1_derived',readAt:'2026-11-20T15:00:00.000Z',database:{id:null},counts:{keys:Object.keys(d1Index).length},index:d1Index}));
- const rawLoaded=await loadSnapshot(snapshotDir),d1Loaded=await loadSnapshot(snapshotDir,{viewIndexFile:d1File});
- assert.deepEqual(Object.keys(rawLoaded.objects.viewIndex),['Q7a1','tmdb_602','tmdb_701'],'the raw object is the input without the option');
+ const d1File=await writeD1Input(path.join(scratch,'d1-input'),d1Index);
+ const rawLoaded={objects:{viewIndex:objects['enrichment/view-index.json']}};// AIR-558: the raw object is no longer loadable as an input; its keys are only the reference
+ const d1Loaded=await loadSnapshot(snapshotDir,{viewIndexFile:d1File});
+ assert.deepEqual(Object.keys(rawLoaded.objects.viewIndex),['Q7a1','tmdb_602','tmdb_701']);
  assert.deepEqual(d1Loaded.objects.viewIndex,d1Index,'the D1 export replaces it: nothing is merged');
  assert.equal(d1Loaded.baselineIdentity.viewIndex.source,'d1_derived');assert.equal(d1Loaded.baselineIdentity.viewIndex.sha256,sha256(Buffer.from(await readFile(d1File,'utf8'))));
- assert.equal(d1Loaded.status,rawLoaded.status,'the fenced snapshot identity is untouched');
+ assert.equal(d1Loaded.status,'consistent_fenced','the fenced snapshot identity is untouched');
  const report=await reconcile({exportDir,snapshotDir,outputDir:path.join(scratch,'out-d1'),viewIndexFile:d1File});
  assert.equal(report.matching.snapshot.baselineIdentity.viewIndex.source,'d1_derived','the option reaches the loader and the report records the input');
  assert.equal(report.matching.snapshot.baselineIdentity.viewIndex.keys,4);
  assert.equal(JSON.stringify(report).includes('stale_only_in_d1'),false,'no id of the input leaves in the aggregate report');
+}
+
+// AIR-558: omitting --view-index-d1 is refused (exit 2 / ReconcileError) and the snapshot's raw view-index is never read as a fallback.
+{
+ const refused=cli(['--export',exportDir,'--snapshot',snapshotDir,'--output',path.join(scratch,'out-no-input')]);
+ assert.equal(refused.status,2,refused.stderr);assert.match(refused.stderr,/--view-index-d1/);assert.equal(existsSync(path.join(scratch,'out-no-input','report.json')),false);
+ await assert.rejects(loadSnapshot(snapshotDir),error=>error.name==='ReconcileError'&&error.exitCode===2&&/--view-index-d1/.test(error.message));
+ const noRaw=path.join(scratch,'snapshot-no-raw-view');const {'enrichment/view-index.json':_raw,...withoutRaw}=objects;await writeSnapshot(noRaw,{...withoutRaw,'enrichment/view-index.json':{POISON:{actualRating:1}}});
+ await assert.rejects(reconcile({exportDir,snapshotDir:noRaw,outputDir:path.join(scratch,'out-no-raw')}),error=>error.exitCode===2&&!/POISON/.test(error.message));
+ const ok=await loadSnapshot(noRaw,{viewIndexFile:d1Main});assert.equal(Object.hasOwn(ok.objects.viewIndex,'POISON'),false,'the raw object is not merged');
 }
 
 await rm(scratch,{recursive:true,force:true});

@@ -1,3 +1,4 @@
+import {installRawViewProjection} from './letterboxd-view-double.mjs';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {createHash,webcrypto} from 'node:crypto';
@@ -7,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import {crc32} from '../src/letterboxd-zip.js';
+import {writeD1Input} from './view-index-d1-input.mjs';// AIR-558
 import {DEFAULT_CHUNK_SIZE,LEGACY_CHUNK_SIZE,MAX_CHUNK_SIZE,loadVerifiedPlan,plan,remote} from '../scripts/letterboxd-baseline-import.mjs';
 
 // Chunking of the baseline import: bounded plan chunk sizes, the legacy 200-film plans, client-side network failures and
@@ -31,7 +33,7 @@ function bucket(){
   async put(key,value,options={}){if(fail&&fail(key))throw new Error('injected failure');const c=options.onlyIf||{};if(c.etagDoesNotMatch==='*'&&records.has(key)||c.etagMatches&&c.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));puts++;return {etag:etags.get(key)};}};
 }
 const ctx=vm.createContext({crypto:webcrypto,TextEncoder,console,Date,JSON,Map,Set,Response,Request,URL});
-const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);
+const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);installRawViewProjection(ctx); // AIR-558
 const handle=(env,url,init)=>F.handleBaselineRequest(new Request(url,init),env,new URL(url).pathname);
 const workerFetch=(env,seen=[])=>async(url,init)=>{const body=JSON.parse(init.body);seen.push(body.chunk);const response=await handle(env,url,init);return {ok:response.ok,status:response.status,json:()=>response.json()};};
 const gates=b=>({BUCKET:b});
@@ -55,7 +57,8 @@ try{
   const watchlist={films:films.slice(0,stored).map(i=>({id:lid(i),title:'Invented Film '+i,original:'Invented Film '+i,year:2000}))},bytes=Buffer.from(JSON.stringify(watchlist)),file='objects/'+sha256(Buffer.from('watchlist.json'))+'.bin';
   await writeFile(path.join(dir,'snapshot',file),bytes);
   await writeFile(path.join(dir,'snapshot','manifest.json'),JSON.stringify({schemaVersion:1,source:{kind:'cloudflare-r2-s3',bucket:'iptv',readOnly:true},status:'consistent_fenced',noGoReasons:[],fence:{ok:true,keys:[]},changes:[],baselineIdentity:{programmeRunId:'run-test'},objects:[{key:'watchlist.json',file,size:bytes.length,sha256:sha256(bytes)}]}));
-  return {zip:zipPath,snapshot:path.join(dir,'snapshot')};
+  const viewIndexFile=await writeD1Input(path.join(dir,'d1-input'),{});// AIR-558: the snapshot holds no raw view-index; the D1 input is the empty index
+  return {zip:zipPath,snapshot:path.join(dir,'snapshot'),viewIndexFile};
  }
  const out=name=>path.join(scratch,'out-'+name);
  const chunkSizes=async output=>(await loadVerifiedPlan({zip:fx.zip,output,now})).chunks.map(items=>items.length);
@@ -69,9 +72,9 @@ try{
  const cli=args=>spawnSync(process.execPath,['scripts/letterboxd-baseline-import.mjs',...args],{encoding:'utf8'});
  let run=cli(['commit','--zip',fx.zip,'--output',out('cli'),'--endpoint',endpoint,'--chunk-size','10']);
  assert.equal(run.status,2);assert.match(run.stderr,/--chunk-size is a plan option/);
- run=cli(['plan','--zip',fx.zip,'--snapshot',fx.snapshot,'--output',out('cli'),'--chunk-size','101']);
+ run=cli(['plan','--zip',fx.zip,'--snapshot',fx.snapshot,'--view-index-d1',fx.viewIndexFile,'--output',out('cli'),'--chunk-size','101']);
  assert.equal(run.status,2);assert.match(run.stderr,/1\.\.100/);
- run=cli(['plan','--zip',fx.zip,'--snapshot',fx.snapshot,'--output',out('cli'),'--chunk-size','3']);
+ run=cli(['plan','--zip',fx.zip,'--snapshot',fx.snapshot,'--view-index-d1',fx.viewIndexFile,'--output',out('cli'),'--chunk-size','3']);
  assert.equal(run.status,0,run.stderr);assert.equal(JSON.parse(run.stdout).chunkSize,3);assert.equal(JSON.parse(run.stdout).planned.chunks,3);
 
  // Boundaries: N = k·size, k·size − 1 and k·size + 1 films; order and identity of the films survive chunking.
@@ -104,7 +107,7 @@ try{
   await plan({...fewer,output:out('fewer'),chunkSize:3,now});assert.deepEqual((await loadVerifiedPlan({zip:fewer.zip,output:out('fewer'),now})).chunks.map(items=>items.length),[3,2]);
   // A directory holding only a result file, or a stray plan file, is occupied too.
   for(const name of ['validate.json','plan.jsonl']){const dir=out('stray-'+name);await mkdir(dir);await writeFile(path.join(dir,name),'{}');await assert.rejects(plan({...fx,output:dir,chunkSize:3,now}),new RegExp('\\('+name.replace('.','\\.')+'\\)'));assert.equal(fs.existsSync(path.join(dir,'origin.json')),false);}
-  run=cli(['plan','--zip',fewer.zip,'--snapshot',fewer.snapshot,'--output',output,'--chunk-size','3']);
+  run=cli(['plan','--zip',fewer.zip,'--snapshot',fewer.snapshot,'--view-index-d1',fewer.viewIndexFile,'--output',output,'--chunk-size','3']);
   assert.equal(run.status,2);assert.match(run.stderr,/plan into a new empty directory/);
  }
 

@@ -105,6 +105,7 @@ function setup({start=T0,pages=1}={}){
  const ownedKeys=new Set([MODE,CONTROL]);
  const ownedStub={ratingsMutableKey:key=>ownedKeys.has(key),ratingsGate:async()=>({ready:authority.ready,generation:1,error:authority.error}),
   async readOwned(env,key){if(!authority.ready)throw Object.assign(new Error('held'),{code:'ratings_domain_not_authoritative'});const object=await bucket.get(key);return {owned:true,value:object?await object.json():null,etag:object?.etag??null};},
+  projectView:async(env,records)=>({owned:true,changed:records.length}),// AIR-558: the facts projection is D1-owned; this stub owns it and drops it
   chain:Promise.resolve(),
   putOwned(env,key,previous,value){const run=this.chain.then(()=>this.commit(env,key,previous,value));this.chain=run.catch(()=>{});return run;},
   async commit(env,key,previous,value){

@@ -1,3 +1,4 @@
+import {installRawViewProjection} from './letterboxd-view-double.mjs';
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
 
 // A CAS bucket that can be told to lose the next conditional write to a concurrent writer.
@@ -14,7 +15,7 @@ function bucket(){
   async delete(key){records.delete(key);},async list(){return {objects:[],truncated:false};}};
 }
 const ctx=vm.createContext({crypto:webcrypto,TextEncoder,console,Date,JSON,Map,Set});
-const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);
+const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);installRawViewProjection(ctx); // AIR-558
 const at=hours=>new Date(Date.UTC(2026,9,26,12)+hours*3600000).toISOString();
 const obs=(fact,value,hours,source='letterboxd_export',ref='x')=>F.observation({factKey:'tmdb-1',fact,value,observedAt:at(hours),source,sourceRef:ref});
 
@@ -183,7 +184,7 @@ for(const stale of [undefined,'on','off','On',{token:'x'}]){
  const listing='<h1 title="1&nbsp;films">Watched</h1><li class="griditem"><div data-postered-identifier=\'{&quot;lid&quot;:&quot;seen&quot;}\'></div></li>';
  const ctx2=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,TextEncoder,Uint8Array,AbortSignal,crypto:webcrypto,console,setTimeout:fn=>fn(),fetch:async()=>({ok:true,status:200,text:async()=>listing}),ASSETS:{},INITIAL_PERSONAL_RATINGS:{}});
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx2);
- for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx2);
+ for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx2);installRawViewProjection(ctx2);
  await b.put('enrichment/view-index.json',JSON.stringify({kept:{actualRating:4}}));
  ctx2.env={LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://example.test/epg.xml',BUCKET:b,...(stale===undefined?{}:{LETTERBOXD_FACTS:stale})};
  ctx2.report={runId:'r1',films:[film('kept'),film('seen')]};
@@ -239,7 +240,7 @@ for(const stale of [undefined,'on','off','On',{token:'x'}]){
  const b=bucket(),records=b.records;
  const ctx3=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,TextEncoder,Uint8Array,AbortSignal,crypto:webcrypto,console,setTimeout:fn=>fn(),fetch:async()=>{throw new Error('no network');},ASSETS:{},INITIAL_PERSONAL_RATINGS:{}});
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx3);
- for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx3);
+ for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx3);installRawViewProjection(ctx3);
  const env={BUCKET:b,LETTERBOXD_FACTS:'off',LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://example.test/epg.xml'};
  const put=async items=>{const r=await ctx3.worker.fetch(new Request('https://site.example/api/enrichment/actual-ratings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({items})}),env);return (await r.json()).results;};
  let results=await put([{filmId:'heat',rating:4}]);assert.equal(results[0].status,'saved');

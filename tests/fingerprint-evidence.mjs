@@ -8,12 +8,14 @@ import {webcrypto} from 'node:crypto';
 import {fingerprintContentHash, fingerprintPointerAgrees} from '../src/prediction-d1.js';
 import * as PredictionD1 from '../src/prediction-d1.js';
 import {flowWorld} from './prediction-d1-flow-lib.mjs';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 
 const records=new Map(),etags=new Map();let revision=0;
 const env={BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key)),text:async()=>JSON.stringify(records.get(key))}:null},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};},list:async()=>({objects:[],truncated:false})}};
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+installViewIndexFixture(ctx);
 const call=code=>vm.runInContext(code,ctx),plain=value=>JSON.parse(JSON.stringify(value));
 const issuesOf=(fingerprint,metadata)=>plain(call('fingerprintIssues')(fingerprint,metadata));
 const codes=(fingerprint,metadata)=>issuesOf(fingerprint,metadata).map(issue=>issue.path+' '+issue.code);
@@ -232,6 +234,8 @@ assert.notEqual(reusedBundle.confidenceAssessment.fingerprintHash,'ff'.repeat(32
 const reusedVersion=await versionOf(ids[0]);
 assert.equal(reusedVersion.body.confidenceAssessment.fingerprintHash,legacyPointer.fingerprintHash);
 assert.equal(reusedVersion.body.fingerprintHash,legacyPointer.fingerprintHash);
+// AIR-558: a submit no longer writes the view index (it is derived from D1); the fixture entry stands in for that derivation of the stored film.
+records.set('enrichment/view-index.json',{[ids[1]]:{prediction:records.get('enrichment/films/'+ids[1]+'/predictions.json').current,fingerprintHash:storedPointer.fingerprintHash,impactFeatures:call('fingerprintImpactFacet')(storedBody)}});
 const viewed=(await api('view',undefined,'GET')).data.films[ids[1]].prediction;
 assert.equal(viewed.confidenceAssessment.fingerprintHash,storedPointer.fingerprintHash);
 assert.equal(viewed.fingerprintHash,storedPointer.fingerprintHash);

@@ -2,10 +2,13 @@
 // failed, heartbeat and queue counters while a run is live; no start, resume or progress Event (a v2 run has one terminal Event, ADR 0146); a silent overlapping
 // trigger; and a final Event whose coverage shares the footer's canonical semantics. Local stand-ins only.
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 const w=await flowWorld({films:4});const records=w.records,ctx=w.ctx,env=w.env;
 env.BUCKET.list=async({prefix='',limit=1000}={})=>({objects:[...records.keys()].filter(key=>key.startsWith(prefix)).sort().slice(0,limit).map(key=>({key})),truncated:false});
-async function api(path,body,method='POST'){const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:r.status,data:await r.json()};}
+// AIR-558: the view index is derived from D1 in production; the test seam reads a plain fixture, so a committed submit mirrors the stored state into that fixture (what the D1 derivation would show).
+const mirror=async ids=>{const index=records.get('enrichment/view-index.json')||{};for(const id of ids){const state=await vm.runInContext('readFilmState',ctx)(env,id);if(state.predictions?.current&&state.fingerprint)index[id]={prediction:state.predictions.current,fingerprintHash:state.fingerprint.fingerprintHash,fingerprint:vm.runInContext('fingerprintFacet',ctx)(state.fingerprint,true),impactFeatures:vm.runInContext('fingerprintImpactFacet',ctx)(state.fingerprint)};}records.set('enrichment/view-index.json',index);};
+async function api(path,body,method='POST'){const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);if(path==='batch/submit'&&r.status===200)await mirror((body.items||[]).filter(i=>i.prediction).map(i=>i.filmId));return {status:r.status,data:await r.json()};}
 const allEvents=()=>[...records].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v),events=()=>allEvents().filter(e=>e.presentation!=='batch_v2_skipped'),status=async()=>(await api('status',undefined,'GET')).data;
 const setRun=(id,edit)=>{const doc=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+id+"'")[0].d);edit(doc);sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE run_id='"+id+"'");};
 const COVERAGE=['confirmedFilmsTotal','currentPredictionsTotal','windowFilmsTotal','windowCurrentPredictions','cacheOffWindowTotal','pendingOffWindowTotal'];

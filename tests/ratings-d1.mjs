@@ -29,7 +29,7 @@ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+'\
 assert.equal(ratingsStatements().length,9);
 assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/ratings-d1\.js','RatingsD1'\)/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/RatingsD1\.routeRead\(env,key\)/);
-assert.match(fs.readFileSync('src/worker.js','utf8'),/RatingsD1\.overlayView\(env,value\)/);
+assert.match(fs.readFileSync('src/worker.js','utf8'),/RatingsD1\.overlayView\(env,base\)/);
 assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"RATINGS_DB_REQUIRED": "on"/);
 assert.match(fs.readFileSync('src/letterboxd-ratings.js','utf8'),/RatingsD1\.putOwned/);
 assert.match(fs.readFileSync('src/letterboxd-diary.js','utf8'),/RatingsD1\.readOwned/);

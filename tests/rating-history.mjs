@@ -16,6 +16,11 @@ function bucket(){
 }
 const ctx=vm.createContext({crypto:webcrypto,TextEncoder,console,Date,JSON,Map,Set});
 const F=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',ctx);
+// AIR-558: the view index is D1-derived and the projection is D1-owned. This test is about the record's history, so a stand-in owns the projection and keeps it in the fake bucket's
+// view-index object (the injected projection failure below hits that put), and the derived reads come from the same object.
+vm.runInContext(`const VI='enrichment/view-index.json',viewOf=async env=>{const o=await env.BUCKET.get(VI);return o?await o.json():{};};
+derivedViewIndex=async env=>viewOf(env);viewIndexD1Version=async env=>{const o=await env.BUCKET.get(VI);return o?.etag??'none';};
+globalThis.RatingsD1={ratingsMutableKey:()=>false,projectView:async(env,records)=>{const index=await viewOf(env);let changed=0;for(const r of records)for(const id of [...(r.links?.letterboxd?[String(r.links.letterboxd)]:[]),...(r.links?.tmdb?['tmdb_'+r.links.tmdb]:[])]){const item={...(index[id]||{})};if(r.rating)item.actualRating=r.rating.value;if(r.watched)item.watched=r.watched.value;if(r.watchlist)item.watchlist=r.watchlist.value;if(JSON.stringify(item)!==JSON.stringify(index[id]||{})){index[id]=item;changed++;}}if(changed)await env.BUCKET.put(VI,JSON.stringify(index));return {owned:true,changed};}};`,ctx);
 const at=hours=>new Date(Date.UTC(2026,9,26,12)+hours*3600000).toISOString();
 const obs=(fact,value,hours,source='letterboxd_film_page',ref='r')=>F.observation({factKey:'tmdb-1',fact,value,observedAt:at(hours),source,sourceRef:ref});
 const kinds=record=>JSON.parse(JSON.stringify((record.ratingHistory||[]).map(entry=>entry.kind+":"+JSON.stringify(entry.kind==="rolled_back"?entry.restored?.value??null:entry.value))));

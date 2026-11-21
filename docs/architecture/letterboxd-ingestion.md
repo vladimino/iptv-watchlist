@@ -34,7 +34,7 @@ The EPG commit does not read Diary and does not look up films ([ADR 0074](../adr
 
 Diary page 1 and the member-page lookups run on the separate ratings run ([scheduling](scheduling-and-orchestration.md#the-separate-ratings-pipeline), [contract](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline)). The Diary phase is the viewing history of [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md). On a run it always reads the first diary page only ([ADR 0067](../adr/0067-diary-recent-window.md)); `LETTERBOXD_DIARY_HISTORY` is retired and unread ([ADR 0075](../adr/0075-retire-letterboxd-diary-history-switch.md), Accepted 2026-11-01). Every film on that page becomes a watched fact, and a rating fact where the page shows a rating. The removal lookup of [ADR 0043](../adr/0043-removal-rating-lookup-queue.md) runs on that same run for films the Diary did not rate. A confirmed stored rating for a film the current Diary page did not list is not requested again, including after a new removal reference reopens the entry. A film that page lists without a rating is still looked up. A null or absent rating is not watched. `REMOVAL_RATING_LOOKUP` is retired and unread ([ADR 0077](../adr/0077-retire-removal-rating-lookup-switch.md), Proposed 2026-11-01). A rated legacy entry is linked to existing removal events of the same film id by that run, one page of `events/items/` per removal step ([ADR 0071](../adr/0071-legacy-removal-event-link.md), Accepted 2026-10-31). The EPG commit does not list those events. The 31-page public films list is not scanned.
 
-The owner-triggered `POST /api/enrichment/ratings/refresh` of AIR-64 is **retired** ([ADR 0040](../adr/0040-retire-ratings-only-refresh.md)): it answers `410 Gone` before it parses the body, so no value of `RATINGS_REFRESH` opens it, and it neither calls Letterboxd nor touches R2. Ratings reach the view index through the EPG commit shown above, the per-film lookup and the owner edit. The objects the refresh wrote under `enrichment/ratings/` stay in R2 untouched, and `GET /api/enrichment/ratings/status` still reads them; `enabled` is always `false`. Writers of `enrichment/view-index.json` keep their ETag retries.
+The owner-triggered `POST /api/enrichment/ratings/refresh` of AIR-64 is **retired** ([ADR 0040](../adr/0040-retire-ratings-only-refresh.md)): it answers `410 Gone` before it parses the body, so no value of `RATINGS_REFRESH` opens it, and it neither calls Letterboxd nor touches R2. Ratings reach the view index through the EPG commit shown above, the per-film lookup and the owner edit. The objects the refresh wrote under `enrichment/ratings/` stay in R2 untouched, and `GET /api/enrichment/ratings/status` still reads them; `enabled` is always `false`. The derived view index has no writer of its own; the projection is the `ratings_view` write of the ratings domain.
 
 ## Watched, rating and watchlist as separate facts
 
@@ -54,7 +54,7 @@ flowchart TD
     merge{"Greater than the stored<br/>observation (time, source, id)?"}
     facts[("R2 fact record per film:<br/>watched, rating, watchlist,<br/>provenance")]
     keep["Keep stored value"]
-    index[("view-index.json: actualRating, watched<br/>under lid and tmdb_n")]
+    index[("ratings_view in D1: actualRating, watched<br/>under lid and tmdb_n; view index derived")]
     finds["Finds: exclude watched or rated;<br/>actual rating over prediction"]
     builder["Offline builder: watched films<br/>without accepted identity,<br/>unique name and year"]
     list[("R2 display-exclusion list<br/>private, placed by the owner")]
@@ -147,7 +147,7 @@ sequenceDiagram
         Note over Worker,R2: Own fact writes are not a new scope.<br/>A newer unrelated observation is kept
     else The fresh comparison still matches
         Worker->>R2: mark the action running
-        Worker->>R2: baseline commit of this chunk:<br/>intent, facts, view index, receipt
+        Worker->>R2: baseline commit of this chunk:<br/>intent, facts, ratings projection, receipt
         Worker->>R2: put the action receipt beside it
         Worker-->>Page: written, already applied, or skipped because newer
     else The fresh comparison no longer matches

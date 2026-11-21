@@ -7,6 +7,7 @@
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 const w=await flowWorld({films:3});const records=w.records,ctx=w.ctx,env=w.env;ctx.env=env;
+vm.runInContext('footerViewIndex=async function(env){const derived=await derivedViewIndex(env,{moodFacet:null});return footerIndexProjection(Object.fromEntries(Object.entries(derived).map(([id,item])=>[id,footerPick(item,FOOTER_INDEX_FIELDS)])));}',ctx);// AIR-558: the footer index is derived from the prediction domain's own D1 rows (this world has no ratings authority to check)
 let revision=0;{const bucket=env.BUCKET,put=bucket.put;bucket.put=async(key,value,options)=>{const saved=await put.call(bucket,key,value,options);if(saved)revision++;return saved;};}
 const call=code=>vm.runInContext(code,ctx),plain=value=>JSON.parse(JSON.stringify(value));
 async function api(path,body,method='POST'){const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),env);return {status:r.status,data:await r.json()};}

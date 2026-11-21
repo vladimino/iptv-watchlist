@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 
 const records=new Map(),etags=new Map();let revision=0,puts=[],raceOnce=null;
 const bucket={
@@ -24,6 +25,7 @@ vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8'),context);
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),context);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+installViewIndexFixture(context);context.RatingsD1=new Proxy({projectView:async(env,recs)=>{const o=await env.BUCKET.get('enrichment/view-index.json'),index=o?await o.json():{};let changed=0;for(const record of recs)for(const id of Facts.projectionIds(record.links)){const item={...(index[id]||{})};if(record.rating)item.actualRating=record.rating.value;if(record.watched)item.watched=record.watched.value;if(record.watchlist)item.watchlist=record.watchlist.value;if(JSON.stringify(item)!==JSON.stringify(index[id]||{})){index[id]=item;changed++;}}if(changed)await env.BUCKET.put('enrichment/view-index.json',JSON.stringify(index));return {owned:true,changed};},ratingsMutableKey:()=>false},{get:(t,n)=>n in t?t[n]:async()=>({owned:false,handled:false,changed:0})});// AIR-558: no raw view-index projection; a ratings-domain stand-in applies the old projection to the fixture
 const worker=context.worker,constant=name=>vm.runInContext(name,context),Facts=constant('LetterboxdFacts');
 const VIEW=constant('ENRICHMENT_KEY')+'view-index.json',ORIGIN='https://iptv.vladimino.workers.dev',G1='11111111-1111-4111-8111-111111111111',G2='22222222-2222-4222-8222-222222222222';
 // No switch: FINDS_WATCHED_MARK (ADR 0042) and LETTERBOXD_FACTS (ADR 0055) are retired; the mark is always available.

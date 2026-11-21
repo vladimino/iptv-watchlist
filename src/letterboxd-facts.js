@@ -137,17 +137,16 @@ function recordRatingChange(record,incoming,effective){
 
  // ---- Storage. While the ratings marker is r2, every write is an R2 compare-and-swap.
  // Once it is d1 and cutover open, the same keys are D1 documents and do not fall back (ADR 0084).
- // The stored object as it is, for the compare-and-swap writers: they must read and write the raw object whatever the view index read selector says.
+ // The stored object as it is, for the compare-and-swap writers (the view index is not one of them: AIR-558).
  async function readRawJSON(env,key){
   if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {value:owned.value,etag:owned.etag};}
   const object=await env.BUCKET.get(key);let value=object?await object.json():null;
-  if(key===FACTS_KEYS.viewIndex&&typeof RatingsD1!=='undefined')value=await RatingsD1.overlayView(env,value);
   return {value,etag:object?.etag??null};
  }
- // The reader of the scans and the Diary projection. ADR 0183: with the D1 source selected the view index is the ratings_view aliases only (this path has only ever
+ // The reader of the scans and the Diary projection. ADR 0183 / AIR-558: the view index is the ratings_view aliases only (this path has only ever
  // applied the ratings overlay, never the prediction one) and the raw object is not read; the version is the D1 token. Writers do not use this: see casJSON.
  async function readJSON(env,key){
-  if(key===FACTS_KEYS.viewIndex&&typeof viewIndexIsD1==='function'&&viewIndexIsD1(env))return {value:await derivedViewIndex(env,{ratingsOnly:true}),etag:await viewIndexD1Version(env)};
+  if(key===FACTS_KEYS.viewIndex)return {value:await derivedViewIndex(env,{ratingsOnly:true}),etag:await viewIndexD1Version(env)};
   return readRawJSON(env,key);
  }
  async function casJSON(env,key,empty,apply){
@@ -155,6 +154,7 @@ function recordRatingChange(record,incoming,effective){
    try{const owned=await RatingsD1.casOwned(env,key,empty,apply);if(owned.owned)return owned.result;}
    catch(error){if(error.code==='write_contention')throw new FactsError('write_contention','Stored JSON changed during write: '+key);throw error;}
   }
+  if(key===FACTS_KEYS.viewIndex)throw new FactsError('view_index_not_owned','The view index has no raw store; it is written only through the D1 ratings domain');
   for(let attempt=0;attempt<5;attempt++){
    const {value,etag}=await readRawJSON(env,key),current=value??clone(empty),next=await apply(clone(current),etag);
    if(next==null)return {value:current,changed:false};
@@ -233,20 +233,9 @@ function recordRatingChange(record,incoming,effective){
  // The view index is a projection of records under every id of the film; it is never the source of a fact.
  async function projectRecords(env,records){
   if(typeof RatingsD1!=='undefined'){const projected=await RatingsD1.projectView(env,records);if(projected.owned)return {changed:projected.changed};}
-  if(!records.length)return {changed:0};
-  let changed=0;
-  await casJSON(env,FACTS_KEYS.viewIndex,{},index=>{
-   changed=0;
-   for(const record of records)for(const id of projectionIds(record.links)){
-    const item={...(index[id]||{})};
-    if(record.rating)item.actualRating=record.rating.value;
-    if(record.watched)item.watched=record.watched.value;
-    if(record.watchlist)item.watchlist=record.watchlist.value;
-    if(JSON.stringify(item)!==JSON.stringify(index[id]||{})){index[id]=item;changed++;}
-   }
-   return changed?index:null;
-  });
-  return {changed};
+  // AIR-558: the view index has no raw object any more, so a ratings domain that does not own the projection (marker not d1 and open) projects nothing. The
+  // facts stay the source of truth and the callers keep their gates (a held domain is reported as blocked); the former raw projection was invisible there.
+  return {changed:0};
  }
 
  // Stores a complete scan summary only if it is newer than the stored one. Returns the summary it replaced.
@@ -805,18 +794,8 @@ function recordRatingChange(record,incoming,effective){
    for(const [fact,result] of outcome){if(result==='superseded')counts.superseded++;else{counts.restored++;if(result==='removed')removed.push({factKey,fact,links:record.links});}}
   }
   await projectRecords(env,[...records.values()]);
-  if(removed.length)await casJSON(env,FACTS_KEYS.viewIndex,{},view=>{
-   let changed=false;
-   for(const {factKey,fact,links} of removed){
-    if(records.get(factKey)?.[fact])continue;
-    for(const id of projectionIds(links)){
-     const field=VIEW_FIELDS[fact],prior=viewBefore?.[id]||{},item={...(view[id]||{})};
-     if(Object.hasOwn(prior,field))item[field]=prior[field];else delete item[field];
-     if(JSON.stringify(item)!==JSON.stringify(view[id]||{})){view[id]=item;changed=true;}
-    }
-   }
-   return changed?view:null;
-  });
+  // AIR-558: the former raw view-index restore of `removed` fields is gone. Under the D1 ratings domain it was invisible (the overlay drops those fields from a raw
+  // entry), and projectRecords above already projects the remaining records into ratings_view.
   return {counts,records};
  }
 

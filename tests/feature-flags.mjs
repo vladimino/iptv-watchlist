@@ -217,16 +217,11 @@ assert.doesNotMatch(fs.readFileSync('src/feature-flags.js','utf8'),/Object\.(key
 
 console.log('Feature flags (ADR 0039): feature_flags lists the registered flags absent and set, literal values only for known tokens, shape-only reports for secrets, near misses, objects and over-long values, retired tokens and selectors including the inert enrichment window and bulk selectors, unmet requirements, effective modes equal to every active consumer, registry parity with the reference and the checker, no storage, no env enumeration, arguments refused and the Access JWT required passed');
 
-// ADR 0183: the temporary view index read selector. Only exactly `d1` selects the D1 source; every other value, absent included, is the default `r2` (the dormant state).
+// AIR-558: the ADR 0183 view index read selector is retired. Whatever the binding holds, the flag reports retired with no effective mode; absence is the target state.
 {
  const selector=async value=>(await flags(value===undefined?{}:{VIEW_INDEX_SOURCE:value})).report.flags.find(item=>item.name==='VIEW_INDEX_SOURCE');
  const absent=await selector(undefined);
- assert.deepEqual([absent.state,absent.valid,absent.issue,absent.effective],['absent',true,null,'r2'],'absent is r2');
- const on=await selector('d1');
- assert.deepEqual([on.state,on.raw,on.valid,on.issue,on.effective],['set','d1',true,null,'d1'],'d1 selects the D1 source');
- const r2=await selector('r2');
- assert.deepEqual([r2.raw,r2.valid,r2.effective],['r2',true,'r2']);
- for(const bad of ['D1',' d1','on','d1,r2','']){const item=await selector(bad);assert.equal(item.effective,'r2',JSON.stringify(bad)+' stays on the raw object');assert.equal(item.valid,false,JSON.stringify(bad)+' is reported invalid');}
- const modes=(await selector(undefined)).modes??null;
- assert.ok(modes===null||(modes.includes('r2')&&modes.includes('d1')));
+ assert.deepEqual([absent.state,absent.valid,absent.issue,absent.effective],['absent',true,null,null],'absent is the target state and has no effective mode');
+ for(const value of ['d1','r2']){const item=await selector(value);assert.deepEqual([item.state,item.raw,item.valid,item.issue,item.effective],['set',value,false,'retired',null],value+' is retired and inert');}
+ for(const bad of ['D1',' d1','on','d1,r2','']){const item=await selector(bad);assert.equal(item.effective,null,JSON.stringify(bad)+' has no effective mode');}
 }

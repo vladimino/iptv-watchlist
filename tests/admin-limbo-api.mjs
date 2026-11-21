@@ -4,6 +4,7 @@
 // pin, missing evidence, a changing generation, partial pages, and no bucket listing, no write, no outbound request.
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {createHash} from 'node:crypto';
@@ -29,7 +30,7 @@ let gets=[],heads=[],puts=[],lists=0,fetches=[];
 const streams={opened:[],consumed:[],cancelled:[]};
 const bucket={
  async get(key){
-  gets.push(key);
+  if(key!=='enrichment/view-index.json')gets.push(key); // AIR-558: the view index is D1-derived, never an R2 read
   if(!records.has(key))return null;
   const text=JSON.stringify(records.get(key)),etag=etags.get(key);
   streams.opened.push(key);
@@ -66,6 +67,9 @@ vm.runInContext(fs.readFileSync('src/letterboxd-rated-candidates.js','utf8'),con
 vm.runInContext(scoped('src/domain/identity-work-inventory.js','IdentityWorkInventory'),context);
 vm.runInContext(fs.readFileSync('src/admin/identity-work.js','utf8'),context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
+installViewIndexFixture(context);
+// AIR-558: the real token is a D1 read (D1 stays up when R2 fails); the seam's token opens an R2 body, so cancel it and tolerate an R2 outage.
+vm.runInContext("viewIndexD1Version=async function(env){let object=null;try{object=await env.BUCKET.get('enrichment/view-index.json');}catch{}try{await object?.body?.cancel?.();}catch{}return 'fixture:'+(object?.etag??'none');}",context);
 const worker=context.worker;
 const resetCache=()=>vm.runInContext('ADMIN_SNAPSHOT_CACHE=null;ADMIN_LIMBO_CACHE=null',context);
 
@@ -122,7 +126,7 @@ const openStreams=()=>streams.opened.length-streams.consumed.length-streams.canc
 const resetStreams=()=>{streams.opened.length=0;streams.consumed.length=0;streams.cancelled.length=0;};
 const call=async(path,init)=>{const response=await worker.fetch(new Request('https://iptv.example'+path,init),env,{waitUntil(){throw new Error('background work on a GET');}});assert.equal(openStreams(),0,'every opened R2 body is consumed or cancelled after '+path);return {status:response.status,body:await response.json()};};
 const manifestKey=run=>DI.observationIndexManifestKey(run);
-const SNAPSHOT_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json',QUEUE,INDEX,POINTER,manifestKey(G1)];
+const SNAPSHOT_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json',QUEUE,POINTER,manifestKey(G1)];
 const byId=(r,id)=>r.body.items.find(item=>item.id===id);
 const q=object=>'?'+new URLSearchParams(object).toString();
 
@@ -331,12 +335,8 @@ assert.equal(r.body.context.some(issue=>issue.subsystem==='prediction_queue'),fa
 assert.equal(r.body.items.some(item=>item.subsystem==='prediction'),false,'without the queue no prediction state is observed');
 assert.ok((await walkAll('/api/admin/limbo?limit=25')).some(item=>item.id==='metadata/stale/film:film:stale2'),'the programme part still answers');
 r=await call('/api/admin/limbo');
-assert.match(r.body.pin,/\|\|index-1\|$/,'a missing queue is an empty version in the pin');
-seed({index:false});
-r=await call('/api/admin/limbo');
-assert.equal(r.body.snapshot.indexPresent,false);
-const noIndex=(await walkAll('/api/admin/limbo?limit=25')).find(item=>item.id==='prediction/incomplete/film:film:stalled4');
-assert.deepEqual([noIndex.cause,noIndex.progress.status,noIndex.reason],['unknown','unknown','work_queued'],'without the index the prediction has no clock and is not called stalled');
+assert.match(r.body.pin,/\|\|fixture%3Aindex-1\|$/,'a missing queue is an empty version in the pin');
+// AIR-558: an absent view-index object is no longer a state (the D1-derived index is always present, possibly empty), so the indexPresent=false assertions were removed.
 
 // 9. Unavailable programme and storage: the same codes as the admin read.
 seed();records.delete(POINTER);resetCache();
@@ -672,7 +672,6 @@ r=await call('/api/admin/limbo');assert.equal(r.body.coverage.observations.avail
  context.derivedViewIndex=async()=>{derivedCalls++;return indexOf();};
  context.viewIndexD1Version=async()=>token;
  try{
-  env.VIEW_INDEX_SOURCE='d1';
   seed({index:false});
   r=await call('/api/admin/limbo');
   assert.equal(r.status,200,JSON.stringify(r.body));
@@ -687,12 +686,8 @@ r=await call('/api/admin/limbo');assert.equal(r.body.coverage.observations.avail
   r=await call('/api/admin/limbo?pin='+encodeURIComponent(pinD));
   assert.equal(r.status,409);assert.equal(r.body.error,'stale_pin','a committed prediction or ratings write moves the pin');
   assert.equal(gets.includes(INDEX),false,'still no raw read');
-  for(const value of ['D1',' d1','on','r2','']){
-   env.VIEW_INDEX_SOURCE=value;seed();derivedCalls=0;
-   r=await call('/api/admin/limbo');
-   assert.equal(r.status,200);assert.ok(gets.includes(INDEX),JSON.stringify(value)+' keeps the raw object');assert.equal(derivedCalls,0,JSON.stringify(value)+' does not derive');
-  }
- }finally{context.derivedViewIndex=realDerived;context.viewIndexD1Version=realVersion;delete env.VIEW_INDEX_SOURCE;resetCache();}
+  // AIR-558: the VIEW_INDEX_SOURCE selector is retired; there is no raw-object fallback to assert any more.
+ }finally{context.derivedViewIndex=realDerived;context.viewIndexD1Version=realVersion;resetCache();}
 }
 
 console.log('Admin limbo API: reads, causes, filters, pages, stale pin, projection lag, changing generation, missing objects, warm isolate and the observation index passed');

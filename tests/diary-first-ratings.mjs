@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 
 const USER='fixture';
 const records=new Map(),etags=new Map(),writes=[],requests=[];let revision=0,failFactsFor=null;
@@ -22,6 +23,7 @@ const ctx=vm.createContext({Response,Request,Headers,URL,Date,Map,Set,JSON,TextE
  fetch:async url=>{url=String(url);requests.push(url);const page=site.get(url);if(typeof page==='function')return page();if(page!=null)return respond(200,page);return respond(404,'');}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/letterboxd-ratings.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+installViewIndexFixture(ctx);ctx.RatingsD1=new Proxy({projectView:async(env,recs)=>{const o=await env.BUCKET.get('enrichment/view-index.json'),index=o?await o.json():{};let changed=0;for(const record of recs)for(const id of vm.runInContext('LetterboxdFacts',ctx).projectionIds(record.links)){const item={...(index[id]||{})};if(record.rating)item.actualRating=record.rating.value;if(record.watched)item.watched=record.watched.value;if(record.watchlist)item.watchlist=record.watchlist.value;if(JSON.stringify(item)!==JSON.stringify(index[id]||{})){index[id]=item;changed++;}}if(changed)await env.BUCKET.put('enrichment/view-index.json',JSON.stringify(index));return {owned:true,changed};},ratingsMutableKey:()=>false},{get:(t,n)=>n in t?t[n]:async()=>({owned:false,handled:false,changed:0})});// AIR-558: a ratings-domain stand-in applies the old raw projection to the fixture (no raw view-index writer any more)
 const D=vm.runInContext('LetterboxdDiary',ctx);
 const env={LETTERBOXD_USERNAME:USER,EPG_XML_URL:'https://epg.test/guide.xml',BUCKET:bucket,LETTERBOXD_DIARY_HISTORY:'on'};
 const plain=value=>JSON.parse(JSON.stringify(value));
