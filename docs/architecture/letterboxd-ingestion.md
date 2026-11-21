@@ -163,6 +163,6 @@ sequenceDiagram
     Note over Page: The preview request above is unchanged and still writes nothing
 ```
 
-## Proposed ingestion: one Letterboxd Sync ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Proposed, not implemented)
+## Accepted design (not implemented): one Letterboxd Sync ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
 
 The proposal replaces the daily Ratings run and the Watchlist fetch inside the EPG run by one Workflow that runs four Madrid slots a day (Diary and Ratings, then a complete Watchlist scan, then removal reconciliation). An incomplete scan publishes nothing and removes nothing; the last successful snapshot stays authoritative. Ratings and Watchlist keep separate outcomes and separate `lastSuccessAt`, and each run leaves one `ratings` and one `watchlist` Event. The current flows above are unchanged until a separate cutover.
