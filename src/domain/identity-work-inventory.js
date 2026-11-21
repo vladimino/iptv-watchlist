@@ -130,6 +130,11 @@ export function filmRows(items) {
   });
 }
 
+// The SQL filter of the ledger lane for a query: pushed into the source BEFORE any page limit, so a filtered work list is complete through paging. `blocked` names no ledger state: no rows, never everything.
+export function admissionFilter(query) {
+  if (query.disposition === null) return query.includeResolved ? 'all' : 'open';
+  return {needs_owner_review: 'owner_review', waiting: 'waiting', retryable: 'retryable', resolved: 'history'}[query.disposition] ?? 'none';
+}
 // The Watchlist admission ledger (ADR 0186 decision 5): one row per Letterboxd id that still needs a Film, as the Letterboxd Sync keeps it. A terminal row (attempts or age exhausted) needs an owner decision; a pending one
 // is retryable once its retry time has come and waiting before; resolved and superseded rows are resolved (history). It carries no Film link: the identity stays a Film fact.
 export function admissionDisposition(row, nowMs) {
@@ -228,6 +233,12 @@ export function decodeCursor(raw, {key, limit}) {
   if (payload.lane === 'letterboxd_rated_candidate') {
     if (typeof payload.after !== 'string' || (payload.sha !== null && !HEX64.test(String(payload.sha))) || (payload.etag !== null && typeof payload.etag !== 'string')) return {error: 'stale_cursor'};
     return {pin: payload.pin, nowMs: payload.nowMs, cursor: {lane: payload.lane, sha: payload.sha, after: payload.after, etag: payload.etag}};
+  }
+  // The Watchlist admission ledger is paged by KEYSET over a mutable D1 source: the position is the (first-seen version, lid) of the last row READ, and `gen` is the Watchlist authority generation of the page that minted it
+  // (null before the first read), so a cursor never crosses an authority switch.
+  if (payload.lane === 'watchlist_admission') {
+    if (!Number.isInteger(payload.version) || payload.version < -1 || typeof payload.lid !== 'string' || (payload.gen !== null && !Number.isInteger(payload.gen))) return {error: 'stale_cursor'};
+    return {pin: payload.pin, nowMs: payload.nowMs, cursor: {lane: payload.lane, version: payload.version, lid: payload.lid, gen: payload.gen}};
   }
   if (!Number.isInteger(payload.index) || payload.index < -1 || !Number.isInteger(payload.total) || typeof payload.id !== 'string') return {error: 'stale_cursor'};
   return {pin: payload.pin, nowMs: payload.nowMs, cursor: {lane: payload.lane, index: payload.index, total: payload.total, id: payload.id}};

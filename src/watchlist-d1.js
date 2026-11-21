@@ -399,28 +399,46 @@ export async function recordEffectAttempt(source,{snapshotId,effect},ctx={}){
 
 // ---- the admission ledger (ADR 0186 decision 5) ---------------------------------------------------------------------------
 // The due rows of the durable ledger of Letterboxd ids that still need a Film: `pending` and due (`next_retry_at` null or past), oldest first-seen version first, bounded. Read only.
-// -> {ok:true,rows:[{lid,firstSeenSnapshotId,firstSeenVersion,firstSeenAt,attempts,lastReason}],pending,currentVersion} | {ok:false,reason}
-export async function dueAdmissions(source,{now=Date.now(),limit=3}={}){
+// `ageBefore` (an ISO time) and `ageVersions` select, REGARDLESS of their retry time, the pending rows whose first-seen snapshot is older than the age bound (committed before `ageBefore`; when that snapshot is
+// already pruned, first seen at least `ageVersions` versions ago): they are returned as `aged` so the age bound cannot be postponed by a retry time in the future.
+// `firstSeenAt` is the commit time of the snapshot that first listed the id; it is null when that snapshot was already pruned (then `currentVersion` still bounds its age by versions).
+// -> {ok:true,rows:[{lid,firstSeenSnapshotId,firstSeenVersion,firstSeenAt,attempts,lastReason}],aged:[...same shape],pending,currentVersion} | {ok:false,reason}
+export async function dueAdmissions(source,{now=Date.now(),limit=3,ageBefore=null,ageVersions=null,agedLimit=20}={}){
  const db=database(source);
  if(!db)return {ok:false,reason:'unavailable'};
  const cap=Math.min(Math.max(Number.isInteger(limit)?limit:3,1),20);
+ const shape=row=>({lid:row.lid,firstSeenSnapshotId:row.first_seen_snapshot_id,firstSeenVersion:Number(row.first_seen_version),firstSeenAt:row.first_seen_at??null,attempts:Number(row.attempts),lastReason:row.last_reason});
+ const COLUMNS='a.lid AS lid, a.first_seen_snapshot_id AS first_seen_snapshot_id, a.first_seen_version AS first_seen_version, a.attempts AS attempts, a.last_reason AS last_reason, s.committed_at AS first_seen_at';
  try{
-  // `firstSeenAt` is the commit time of the snapshot that first listed the id; it is null when that snapshot was already pruned (then `currentVersion` still bounds its age by versions).
-  const rows=await many(db,"SELECT a.lid AS lid, a.first_seen_snapshot_id AS first_seen_snapshot_id, a.first_seen_version AS first_seen_version, a.attempts AS attempts, a.last_reason AS last_reason, s.committed_at AS first_seen_at FROM watchlist_admission_pending a LEFT JOIN watchlist_snapshot s ON s.snapshot_id=a.first_seen_snapshot_id WHERE a.state='pending' AND (a.next_retry_at IS NULL OR a.next_retry_at<=?) ORDER BY a.first_seen_version, a.lid LIMIT ?",[iso(now),cap]);
+  const rows=await many(db,"SELECT "+COLUMNS+" FROM watchlist_admission_pending a LEFT JOIN watchlist_snapshot s ON s.snapshot_id=a.first_seen_snapshot_id WHERE a.state='pending' AND (a.next_retry_at IS NULL OR a.next_retry_at<=?) ORDER BY a.first_seen_version, a.lid LIMIT ?",[iso(now),cap]);
   const total=Number((await one(db,"SELECT COUNT(*) AS n FROM watchlist_admission_pending WHERE state='pending'"))?.n);
   const version=Number((await one(db,'SELECT version FROM watchlist_current WHERE id=1'))?.version);
-  return {ok:true,rows:rows.map(row=>({lid:row.lid,firstSeenSnapshotId:row.first_seen_snapshot_id,firstSeenVersion:Number(row.first_seen_version),firstSeenAt:row.first_seen_at??null,attempts:Number(row.attempts),lastReason:row.last_reason})),pending:total,currentVersion:Number.isInteger(version)?version:null};
+  let aged=[];
+  if(typeof ageBefore==='string'&&Number.isFinite(Date.parse(ageBefore))&&Number.isInteger(ageVersions)&&ageVersions>0&&Number.isInteger(version)){
+   aged=(await many(db,"SELECT "+COLUMNS+" FROM watchlist_admission_pending a LEFT JOIN watchlist_snapshot s ON s.snapshot_id=a.first_seen_snapshot_id WHERE a.state='pending' AND ((s.committed_at IS NOT NULL AND s.committed_at<?) OR (s.committed_at IS NULL AND a.first_seen_version<=?)) ORDER BY a.first_seen_version, a.lid LIMIT ?",[ageBefore,version-ageVersions,Math.min(Math.max(Number.isInteger(agedLimit)?agedLimit:20,1),50)])).map(shape);
+  }
+  return {ok:true,rows:rows.map(shape),aged,pending:total,currentVersion:Number.isInteger(version)?version:null};
  }catch{return {ok:false,reason:'unavailable'};}
 }
-// The ledger as the owner's identity work inventory reads it (ADR 0170): every row with the title and year of the film as its first-seen snapshot listed it, oldest first, bounded. Read only.
-// -> {ok:true,rows:[{lid,state,attempts,nextRetryAt,lastReason,resolvedBy,firstSeenSnapshotId,firstSeenVersion,firstSeenAt,updatedAt,title,year}],truncated} | {ok:false,reason}
-export async function admissionInventory(source,{limit=1000}={}){
+// The ledger as the owner's identity work inventory reads it (ADR 0170): rows with the title and year of the film as its first-seen snapshot listed it, in keyset order (first-seen version, lid), READ PAGE BY PAGE.
+// The filter is part of the SQL, never applied after a LIMIT: `filter` is one of `owner_review` (terminal), `waiting` (pending, retry time in the future), `retryable` (pending, due), `history` (resolved and
+// superseded), `open` (pending and terminal) or `all`, and `after` is the keyset position `{version, lid}` of the last row of the previous page (null: the start). A page is `limit` rows; `more` says another page exists.
+// `generation` is the Watchlist authority generation read in the same call, so a cursor can refuse to cross an authority switch. Read only.
+// -> {ok:true,rows:[{lid,state,attempts,nextRetryAt,lastReason,resolvedBy,firstSeenSnapshotId,firstSeenVersion,firstSeenAt,updatedAt,title,year}],more,generation} | {ok:false,reason}
+export const ADMISSION_FILTERS=['owner_review','waiting','retryable','history','open','all'];
+export async function admissionInventory(source,{filter='open',after=null,limit=25,now=Date.now()}={}){
  const db=database(source);
  if(!db)return {ok:false,reason:'unavailable'};
- const cap=Math.min(Math.max(Number.isInteger(limit)?limit:1000,1),1000);
+ if(!ADMISSION_FILTERS.includes(filter))return {ok:false,reason:'shape'};
+ if(after!==null&&!(Number.isInteger(after?.version)&&after.version>=0&&typeof after.lid==='string'))return {ok:false,reason:'shape'};
+ const cap=Math.min(Math.max(Number.isInteger(limit)?limit:25,1),100);
+ const where={owner_review:"a.state='terminal'",waiting:"a.state='pending' AND a.next_retry_at IS NOT NULL AND a.next_retry_at>?",retryable:"a.state='pending' AND (a.next_retry_at IS NULL OR a.next_retry_at<=?)",history:"a.state IN ('resolved','superseded')",open:"a.state IN ('pending','terminal')",all:'1=1'}[filter];
+ const params=filter==='waiting'||filter==='retryable'?[iso(now)]:[];
  try{
-  const rows=await many(db,"SELECT a.lid AS lid, a.state AS state, a.attempts AS attempts, a.next_retry_at AS next_retry_at, a.last_reason AS last_reason, a.resolved_by AS resolved_by, a.first_seen_snapshot_id AS first_seen_snapshot_id, a.first_seen_version AS first_seen_version, a.updated_at AS updated_at, s.committed_at AS first_seen_at, m.title AS title, m.year AS year FROM watchlist_admission_pending a LEFT JOIN watchlist_snapshot s ON s.snapshot_id=a.first_seen_snapshot_id LEFT JOIN watchlist_member m ON m.snapshot_id=a.first_seen_snapshot_id AND m.lid=a.lid ORDER BY a.first_seen_version, a.lid LIMIT ?",[cap+1]);
-  return {ok:true,truncated:rows.length>cap,rows:rows.slice(0,cap).map(row=>({lid:row.lid,state:row.state,attempts:Number(row.attempts),nextRetryAt:row.next_retry_at??null,lastReason:row.last_reason??null,resolvedBy:row.resolved_by??null,firstSeenSnapshotId:row.first_seen_snapshot_id,firstSeenVersion:Number(row.first_seen_version),firstSeenAt:row.first_seen_at??null,updatedAt:row.updated_at,title:row.title??null,year:row.year==null?null:Number(row.year)}))};
+  const gate=await one(db,'SELECT generation FROM watchlist_authority WHERE id=1');
+  const keyset=after?' AND (a.first_seen_version>? OR (a.first_seen_version=? AND a.lid>?))':'';
+  const rows=await many(db,"SELECT a.lid AS lid, a.state AS state, a.attempts AS attempts, a.next_retry_at AS next_retry_at, a.last_reason AS last_reason, a.resolved_by AS resolved_by, a.first_seen_snapshot_id AS first_seen_snapshot_id, a.first_seen_version AS first_seen_version, a.updated_at AS updated_at, s.committed_at AS first_seen_at, m.title AS title, m.year AS year FROM watchlist_admission_pending a LEFT JOIN watchlist_snapshot s ON s.snapshot_id=a.first_seen_snapshot_id LEFT JOIN watchlist_member m ON m.snapshot_id=a.first_seen_snapshot_id AND m.lid=a.lid WHERE "+where+keyset+" ORDER BY a.first_seen_version, a.lid LIMIT ?",[...params,...(after?[after.version,after.version,after.lid]:[]),cap+1]);
+  return {ok:true,more:rows.length>cap,generation:Number(gate?.generation??0),rows:rows.slice(0,cap).map(row=>({lid:row.lid,state:row.state,attempts:Number(row.attempts),nextRetryAt:row.next_retry_at??null,lastReason:row.last_reason??null,resolvedBy:row.resolved_by??null,firstSeenSnapshotId:row.first_seen_snapshot_id,firstSeenVersion:Number(row.first_seen_version),firstSeenAt:row.first_seen_at??null,updatedAt:row.updated_at,title:row.title??null,year:row.year==null?null:Number(row.year)}))};
  }catch{return {ok:false,reason:'unavailable'};}
 }
 // One ledger transition of a `pending` row: still pending with a new retry time (a rate limit does not count an attempt: the caller passes the unchanged count), `resolved` with the writer's receipt

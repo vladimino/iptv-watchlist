@@ -17,19 +17,16 @@ export function admissionStep({repository, identity, epochGuard, fenceEnv = env 
   return async (ctx, {limit = STEP_LIMIT, now = ctx.now()} = {}) => {
     const guards = typeof epochGuard === 'function' && Number.isInteger(ctx?.epoch) ? [epochGuard(ctx.epoch)] : null;
     if (!guards) return {resolved: 0, pending: null, terminal: 0, error: 'epoch_guard_absent'};
-    const due = await repository.dueAdmissions(ctx.env, {now, limit: Math.min(limit, STEP_LIMIT)});
+    const due = await repository.dueAdmissions(ctx.env, {now, limit: Math.min(limit, STEP_LIMIT), ageBefore: new Date(now - AGE_MAX_MS).toISOString(), ageVersions: AGE_MAX_VERSIONS});
     if (!due.ok) return {resolved: 0, pending: null, terminal: 0, error: 'ledger_unreadable'};
-    if (!due.rows.length) return {resolved: 0, pending: due.pending, terminal: 0};
-    // Aged rows are terminal now, before any source request: bounded age wins over everything else.
-    const aged = row => row.firstSeenAt && Number.isFinite(Date.parse(row.firstSeenAt)) ? now - Date.parse(row.firstSeenAt) > AGE_MAX_MS : (Number.isInteger(due.currentVersion) && due.currentVersion - row.firstSeenVersion >= AGE_MAX_VERSIONS);
+    // Aged rows are terminal now, before any source request, whatever their retry time or attempts: the bounded age wins over everything else, so a retry time in the future cannot postpone it.
     let terminal = 0;
-    const live = [];
-    for (const row of due.rows) {
-      if (!aged(row)) { live.push(row); continue; }
+    const agedLids = new Set();
+    for (const row of due.aged || []) {
       const result = await repository.settleAdmission(ctx.env, {lid: row.lid, state: 'terminal', attempts: row.attempts, reason: 'age_exceeded', now}, {guards});
-      if (result.ok) terminal++; else live.push(row);
+      if (result.ok) { terminal++; agedLids.add(row.lid); }
     }
-    due.rows = live;
+    due.rows = due.rows.filter(row => !agedLids.has(row.lid));
     if (!due.rows.length) return {resolved: 0, pending: Math.max(0, (due.pending ?? 0) - terminal), terminal};
     // The film slug of each id comes from the snapshot that first listed it (its member URL), never from a title.
     const items = [], slugless = [];

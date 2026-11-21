@@ -185,7 +185,7 @@ Measured production sizes are in the [dated measurement](../../evidence/letterbo
 
 ## The Watchlist admission lane
 
-`watchlist_admission` lists the durable ledger of Letterboxd ids that still need a Film (`watchlist_admission_pending`, [ADR 0186](../../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md)), one row per id, read from D1 (at most 1000 rows, one SELECT, joined to the first-seen snapshot for the title, year and age). Key `wla:<lid>`; `shortCode` is the Letterboxd id; `status` is the ledger state; `reason` is the last bounded reason code.
+`watchlist_admission` lists the durable ledger of Letterboxd ids that still need a Film (`watchlist_admission_pending`, [ADR 0186](../../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md)), one row per id, read from D1 and joined to the first-seen snapshot for the title, year and age. Key `wla:<lid>`; `shortCode` is the Letterboxd id; `status` is the ledger state; `reason` is the last bounded reason code.
 
 | Ledger state | `disposition` |
 | --- | --- |
@@ -194,4 +194,6 @@ Measured production sizes are in the [dated measurement](../../evidence/letterbo
 | `pending`, due | `retryable` |
 | `resolved`, `superseded` | `resolved` (shown only with `include=resolved`) |
 
-The row never carries a `film` link: identity stays a Film fact. The lane is served as an in-memory lane (index and total cursor). `coverage.watchlist_admission` is `complete`, `partial` (more than 1000 rows) or `unavailable` with a reason (tables absent or the repository unreadable), never an empty queue. The route writes nothing.
+**The filter is part of the SQL, before any page limit.** The requested `disposition` and `include` become one source filter (`owner_review`, `waiting`, `retryable`, `history`, `open` or `all`; `blocked` names no ledger state and yields no rows), so a work list is complete however many historical `resolved`/`superseded` rows (which have no cap) precede a row. The lane is paged by **keyset** over `(first-seen version, lid)`: the cursor carries the position of the last row read and the **Watchlist authority generation** of the page that minted it, and a cursor from another generation is `stale_cursor`. A page may hold fewer rows than the limit only because the title search (`q`) is applied to the page read; the cursor still continues, so nothing is skipped and nothing repeats while rows change between pages.
+
+The row never carries a `film` link: identity stays a Film fact. `coverage.watchlist_admission` is `complete` (this was the last page), `partial` with reason `more_pages` (another page exists; the answer carries `nextCursor`) or `unavailable` with a reason (tables absent or the repository unreadable), never an empty queue. The route writes nothing.

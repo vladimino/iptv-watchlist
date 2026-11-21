@@ -213,6 +213,34 @@ run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
  assert.ok(all.body.rows.some(r=>r.status==='superseded'&&r.disposition==='resolved'),'a superseded row appears with include=resolved');
  assert.equal(JSON.stringify(db.sql('SELECT lid,state,attempts FROM watchlist_admission_pending ORDER BY lid')),before,'the route changed nothing');
 }
+// 8c. Review (owner visibility is complete): behind 1100 historical resolved/superseded rows the NEWEST terminal row is still listed by the real route with `type=watchlist_admission&disposition=needs_owner_review`
+// (the filter is in SQL before any page limit), a full walk of the ledger lane by cursor loses and repeats nothing, a cursor does not cross a Watchlist authority switch, and the route writes nothing.
+{
+ const sqlRun=text=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
+ sqlRun("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1100) INSERT INTO watchlist_admission_pending (lid, first_seen_snapshot_id, first_seen_version, state, attempts, next_retry_at, last_reason, resolved_by, updated_at) SELECT 'h'||printf('%05d',i), 'gone', 1, CASE WHEN i%2=0 THEN 'resolved' ELSE 'superseded' END, 1, NULL, NULL, CASE WHEN i%2=0 THEN 'identity:603' ELSE NULL END, '2026-11-01T00:00:00.000Z' FROM n;");
+ sqlRun("INSERT INTO watchlist_admission_pending (lid, first_seen_snapshot_id, first_seen_version, state, attempts, next_retry_at, last_reason, resolved_by, updated_at) VALUES ('newest-terminal','gone',9999,'terminal',6,NULL,'age_exceeded',NULL,'2026-11-21T09:00:00.000Z');");
+ const call=async query=>{context.__req=new Request('https://iptv.example/api/admin/identity-work'+query);context.__url=new URL(context.__req.url);context.__env=env;const response=await run('adminIdentityWorkRoute(__req,__env,__url)');return {status:response.status,body:await response.json()};};
+ const snapshot=()=>JSON.stringify(db.sql('SELECT lid,state,attempts,next_retry_at FROM watchlist_admission_pending ORDER BY lid'));
+ const before=snapshot();
+ const owner=await call('?type=watchlist_admission&disposition=needs_owner_review');
+ assert.equal(owner.status,200);
+ const keys=owner.body.rows.map(r=>r.key);
+ assert.ok(keys.includes('wla:newest-terminal'),'the newest terminal row is reachable behind 1100 historical rows: '+keys.join(','));
+ assert.ok(owner.body.rows.every(r=>r.disposition==='needs_owner_review'),'only owner-review rows');
+ assert.ok(owner.body.rows.length>=1&&owner.body.coverage.watchlist_admission.state==='complete','no false empty worklist, no unexplained partial coverage');
+ // A paged walk with include=resolved: every ledger row exactly once.
+ let cursor=null,seen=[],pages=0;
+ for(;pages<60;pages++){const page=await call('?type=watchlist_admission&include=resolved&limit=25'+(cursor?'&cursor='+encodeURIComponent(cursor):''));assert.equal(page.status,200,JSON.stringify(page.body));seen.push(...page.body.rows.map(r=>r.key));cursor=page.body.nextCursor;if(!cursor)break;}
+ const expected=db.sql('SELECT lid FROM watchlist_admission_pending ORDER BY first_seen_version, lid').map(r=>'wla:'+r.lid);
+ assert.deepEqual(seen,expected,'the cursor walk visits every ledger row exactly once, in keyset order');
+ // A cursor minted under another Watchlist authority generation is refused, not silently continued.
+ const first=await call('?type=watchlist_admission&include=resolved&limit=25');
+ sqlRun("UPDATE watchlist_authority SET generation=generation+1;");
+ const crossed=await call('?type=watchlist_admission&include=resolved&limit=25&cursor='+encodeURIComponent(first.body.nextCursor));
+ assert.equal(crossed.status,400);assert.equal(crossed.body.error,'stale_cursor');
+ sqlRun("UPDATE watchlist_authority SET generation=generation-1;");
+ assert.equal(snapshot(),before,'the route and the whole walk changed nothing');
+}
 // 9. Review (stale writer): the owner closes admission WHILE an effect's side effect is in flight. A new promotion leaves effects pending; then the real facts module is made to flip the mode between the effect's
 // entry and its commit. The commit goes through the fenced env, so the stale writer changes NOTHING (the ratings documents are byte-identical), no effect receipt is recorded, and the effect stays pending.
 {

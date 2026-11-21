@@ -60,6 +60,7 @@ function iwRowsHtml(rows){
 function iwLaneSummary(name,entry){
  if(!entry)return '';
  const label=name==='film'?'Фильмы':name==='watchlist_admission'?'Новые фильмы Watchlist':'Наблюдения EPG';
+ if(name==='watchlist_admission'&&entry.state==='partial')return '<li><b>'+label+':</b> есть ещё страницы; нажмите «Показать ещё» (выборка идёт постранично и полностью, без потери строк)'+(Number.isInteger(entry.observed)?'; на этой странице '+entry.observed:'')+'.</li>';
  if(entry.state==='unavailable')return '<li><b>'+label+':</b> не прочитаны ('+iwEscape(entry.reason||'недоступно')+'). Это не значит, что их нет.</li>';
  return '<li><b>'+label+':</b> '+(entry.state==='partial'?'частичное покрытие: источник перечисляет только записи, которые он уже знает':iwEscape(entry.state))+(Number.isInteger(entry.observed)?'; прочитано '+entry.observed:'')+'.</li>';
 }

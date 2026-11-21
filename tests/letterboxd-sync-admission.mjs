@@ -134,6 +134,45 @@ const step=(env,id)=>admissionStep({repository:WatchlistD1,identity:id,epochGuar
  const id=identity();await step(env,id);
  assert.equal(ledger(db).f0.state,'terminal');assert.equal(ledger(db).f0.last_reason,'age_exceeded');assert.ok(!id.calls.resolve.flat().includes('f0:film-0'));
 }
+// 7d. Review (age bound): a pending row already past the age bound whose retry time is in the FUTURE still becomes terminal today (it is selected regardless of its retry time); a deferral still uses no attempt.
+{
+ const {db,file}=open(),env={DB:db};
+ await publish(env,[film(0),film(1)],'old','2026-11-01T09:40:00.000Z');
+ const sql=text=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
+ sql("UPDATE watchlist_admission_pending SET next_retry_at='2026-11-22T12:00:00.000Z', attempts=1 WHERE lid='f0';");
+ sql("UPDATE watchlist_admission_pending SET next_retry_at='2026-11-22T12:00:00.000Z', attempts=0, last_reason='deferred' WHERE lid='f1';");
+ const id=identity();const out=await step(env,id);
+ assert.deepEqual([ledger(db).f0.state,ledger(db).f0.last_reason,ledger(db).f1.state,ledger(db).f1.last_reason],['terminal','age_exceeded','terminal','age_exceeded'],'both are older than the bound: terminal although neither is due');
+ assert.deepEqual([ledger(db).f0.attempts,ledger(db).f1.attempts],[1,0],'terminal by age uses no attempt');
+ assert.equal(id.calls.resolve.length,0,'no source request for an aged row');assert.equal(out.terminal,2);
+ // A young row with a future retry stays untouched (not due, not aged).
+ const {db:db2,file:file2}=open(),env2={DB:db2};
+ await publish(env2,[film(0)],'young','2026-11-20T09:40:00.000Z');
+ const r=sqliteSync(['-bail',file2],{input:"UPDATE watchlist_admission_pending SET next_retry_at='2026-11-22T12:00:00.000Z' WHERE lid='f0';"});assert.equal(r.status,0);
+ const id2=identity();await step(env2,id2);assert.equal(ledger(db2).f0.state,'pending');assert.equal(id2.calls.resolve.length,0);
+}
+// 7e. Review (owner visibility): the inventory read filters IN SQL and pages by keyset, so a terminal row behind more than a thousand historical rows is reachable and a full walk loses and repeats nothing.
+{
+ const {db,file}=open(),env={DB:db};
+ await publish(env,[film(0)],'s1','2026-11-21T08:00:00.000Z');
+ const sql=text=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
+ // 1100 old resolved/superseded rows (versions 1..), then one NEWER terminal row (version 2), plus pending rows
+ sql("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1100) INSERT INTO watchlist_admission_pending (lid, first_seen_snapshot_id, first_seen_version, state, attempts, next_retry_at, last_reason, resolved_by, updated_at) SELECT 'h'||printf('%05d',i), 'gone', 1, CASE WHEN i%2=0 THEN 'resolved' ELSE 'superseded' END, 1, NULL, NULL, CASE WHEN i%2=0 THEN 'identity:603' ELSE NULL END, '2026-11-01T00:00:00.000Z' FROM n;");
+ sql("INSERT INTO watchlist_admission_pending (lid, first_seen_snapshot_id, first_seen_version, state, attempts, next_retry_at, last_reason, resolved_by, updated_at) VALUES ('t-new','gone',2,'terminal',3,NULL,'age_exceeded',NULL,'2026-11-21T00:00:00.000Z');");
+ const owner=await WatchlistD1.admissionInventory(env,{filter:'owner_review',limit:25,now:NOW});
+ assert.deepEqual([owner.ok,owner.rows.map(r=>r.lid),owner.more],[true,['t-new'],false],'the terminal row is reachable behind 1100 historical rows, with no false empty list');
+ const open_=await WatchlistD1.admissionInventory(env,{filter:'open',limit:100,now:NOW});
+ assert.ok(open_.rows.every(r=>r.state==='pending'||r.state==='terminal'),'resolved and superseded are not in the open list');
+ assert.ok(open_.rows.some(r=>r.lid==='t-new')&&open_.rows.some(r=>r.lid==='f0'));
+ // A full keyset walk of every row: no gap, no repeat, stable order.
+ const seen=[];let after=null,pages=0,generation=null;
+ for(;;){const page=await WatchlistD1.admissionInventory(env,{filter:'all',after,limit:100,now:NOW});assert.equal(page.ok,true);generation??=page.generation;assert.equal(page.generation,generation);seen.push(...page.rows.map(r=>r.lid));pages++;if(!page.more)break;const last=page.rows.at(-1);after={version:last.firstSeenVersion,lid:last.lid};}
+ const all=db.sql('SELECT lid FROM watchlist_admission_pending ORDER BY first_seen_version, lid').map(r=>r.lid);
+ assert.deepEqual(seen,all,'the walk visits every row exactly once, in keyset order');assert.ok(pages>=12);
+ const history=await WatchlistD1.admissionInventory(env,{filter:'history',limit:100,now:NOW});assert.ok(history.rows.every(r=>r.state==='resolved'||r.state==='superseded'));
+ assert.deepEqual(await WatchlistD1.admissionInventory(env,{filter:'nope'}),{ok:false,reason:'shape'});
+ assert.deepEqual(await WatchlistD1.admissionInventory(env,{filter:'all',after:{version:'x',lid:'a'}}),{ok:false,reason:'shape'});
+}
 // 8. Module hygiene: no SQL, no table, no EPG or Discovery state of its own.
 {
  const text=fs.readFileSync('src/letterboxd-sync-admission.js','utf8');

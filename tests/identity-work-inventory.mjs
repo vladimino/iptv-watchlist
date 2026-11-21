@@ -158,8 +158,16 @@ assert.deepEqual(['unknown_type', 'unknown_disposition', 'unknown_include', 'inv
   assert.deepEqual(W.filterRows(resolved, q('disposition=needs_owner_review')).map(r => r.key), ['wla:f2']);
   assert.deepEqual(W.filterRows(resolved, q('q=heat&include=resolved')).length, 2, 'the title is searchable');
   // a cursor of this lane is a memory-lane cursor
-  const cur = W.encodeCursor({lane: 'watchlist_admission', index: 0, total: 2, id: 'wla:f1', key: q('').key, limit: 25, pin: 'I1|x|y', nowMs: NOW});
-  assert.deepEqual(W.decodeCursor(cur, {key: q('').key, limit: 25}).cursor, {lane: 'watchlist_admission', index: 0, total: 2, id: 'wla:f1'});
+  // the ledger lane is a KEYSET lane over a mutable D1 source: (first-seen version, lid) of the last row read plus the authority generation
+  const cur = W.encodeCursor({lane: 'watchlist_admission', version: 4, lid: 'f1', gen: 2, key: q('').key, limit: 25, pin: 'I1|x|y', nowMs: NOW});
+  assert.deepEqual(W.decodeCursor(cur, {key: q('').key, limit: 25}).cursor, {lane: 'watchlist_admission', version: 4, lid: 'f1', gen: 2});
+  const start = W.encodeCursor({lane: 'watchlist_admission', version: -1, lid: '', gen: null, key: q('').key, limit: 25, pin: 'I1|x|y', nowMs: NOW});
+  assert.deepEqual(W.decodeCursor(start, {key: q('').key, limit: 25}).cursor, {lane: 'watchlist_admission', version: -1, lid: '', gen: null});
+  for (const bad of [{version: 'x', lid: 'a', gen: 1}, {version: 1, lid: 5, gen: 1}, {version: 1, lid: 'a', gen: 'g'}, {version: -2, lid: 'a', gen: 1}]) {
+    assert.equal(W.decodeCursor(W.encodeCursor({lane: 'watchlist_admission', ...bad, key: q('').key, limit: 25, pin: 'I1|x|y', nowMs: NOW}), {key: q('').key, limit: 25}).error, 'stale_cursor');
+  }
+  // the SQL filter a query implies is decided BEFORE any page limit
+  assert.deepEqual(['', 'include=resolved', 'disposition=needs_owner_review', 'disposition=waiting', 'disposition=retryable', 'disposition=resolved', 'disposition=blocked'].map(x => W.admissionFilter(q(x))), ['open', 'all', 'owner_review', 'waiting', 'retryable', 'history', 'none']);
   assert.deepEqual(W.admissionRows(null, {nowMs: NOW}), []);
 }
 console.log('identity-work-inventory: ok');

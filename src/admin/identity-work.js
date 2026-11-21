@@ -62,12 +62,6 @@ async function identityWorkReadAdmissions(env,sha){
   return rows.length>IDENTITY_WORK_ADMISSION_CAP?null:rows;
  }catch{return null;}
 }
-// The Watchlist admission ledger (D1, read only, at most 1000 rows). null means the ledger could not be read; absent tables are an unavailable lane, never an empty queue.
-async function identityWorkAdmissions(env){
- if(typeof WatchlistD1==='undefined')return {error:'repository_unavailable'};
- try{const read=await WatchlistD1.admissionInventory(env,{limit:1000});return read.ok?{rows:read.rows,truncated:read.truncated===true}:{error:read.reason||'unavailable'};}
- catch{return {error:'unavailable'};}
-}
 async function identityWorkLimbo(env,hasPin,nowMs){
  let snapshot;
  try{snapshot=await adminLimboLoad(env,hasPin);}
@@ -108,7 +102,7 @@ async function adminIdentityWorkRoute(request,env,url){
  const wantsMemory=IdentityWorkInventory.laneEnabled(query,'film')||IdentityWorkInventory.laneEnabled(query,'epg_observation');
  const wantsCandidates=IdentityWorkInventory.laneEnabled(query,'letterboxd_rated_candidate');
  const wantsAdmissions=IdentityWorkInventory.laneEnabled(query,'watchlist_admission');
- const admissions=wantsAdmissions?await identityWorkAdmissions(env):null;
+ let admissionCoverage=null;
  const limbo=wantsMemory?await identityWorkLimbo(env,pin!==null||decoded!==null,nowMs):null;
  const registryRead=wantsCandidates?await identityWorkReadRegistry(env):{state:'not_read',registry:null,etag:null,token:'not_read'};
  const currentPin=identityWorkPinOf(registryRead.token,limbo&&!limbo.error?limbo.pin:(limbo?'unavailable':''));
@@ -117,7 +111,7 @@ async function adminIdentityWorkRoute(request,env,url){
  const listing=wantsCandidates?await identityWorkListArchives(env):null;
  const order=wantsCandidates?identityWorkOrder(registryRead,listing,query.archive):[];
  const lanes=IdentityWorkInventory.IDENTITY_LANES.filter(lane=>IdentityWorkInventory.laneEnabled(query,lane));
- const startOf=lane=>lane==='letterboxd_rated_candidate'?{lane,sha:null,after:'',etag:null}:{lane,index:-1,total:0,id:''};
+ const startOf=lane=>lane==='letterboxd_rated_candidate'?{lane,sha:null,after:'',etag:null}:lane==='watchlist_admission'?{lane,version:-1,lid:'',gen:null}:{lane,index:-1,total:0,id:''};
  const position=decoded?decoded.cursor:startOf(lanes[0]);
  let laneAt=lanes.indexOf(position.lane);
  if(laneAt<0)return adminError('stale_cursor',400);
@@ -125,6 +119,22 @@ async function adminIdentityWorkRoute(request,env,url){
  let next=null,page={archiveSha256:null,state:'not_read',reason:null,documentEtag:null,indexed:null,admissions:null};
  for(;laneAt<lanes.length;laneAt++){
   const lane=lanes[laneAt],same=lane===position.lane,after=lanes[laneAt+1]||null;
+  if(lane==='watchlist_admission'){
+   // The ledger lane: the filter is part of the SQL and the page is a keyset page, so an owner-review row is reachable whatever the history behind it (ADR 0186 decision 5, ADR 0170).
+   if(limit-rows.length<=0){next=startOf(lane);break;}
+   const filter=IdentityWorkInventory.admissionFilter(query);
+   if(filter==='none'){admissionCoverage={state:'complete',observed:0};continue;}
+   const place=same?position:startOf(lane);
+   let read;
+   try{read=typeof WatchlistD1==='undefined'?{ok:false,reason:'repository_unavailable'}:await WatchlistD1.admissionInventory(env,{filter,after:place.version>=0?{version:place.version,lid:place.lid}:null,limit:limit-rows.length,now:nowMs});}catch{read={ok:false,reason:'unavailable'};}
+   if(!read.ok){admissionCoverage={state:'unavailable',reason:read.reason||'unavailable'};continue;}
+   if(place.gen!==null&&place.gen!==read.generation)return adminError('stale_cursor',400);
+   const served=IdentityWorkInventory.filterRows(IdentityWorkInventory.admissionRows(read.rows,{nowMs}),query);
+   rows.push(...served);
+   admissionCoverage={state:read.more?'partial':'complete',reason:read.more?'more_pages':null,observed:served.length};
+   if(read.more){const last=read.rows[read.rows.length-1];next={lane,version:last.firstSeenVersion,lid:last.lid,gen:read.generation};break;}
+   continue;
+  }
   if(lane!=='letterboxd_rated_candidate'){
    const source=lane==='watchlist_admission'?(admissions&&!admissions.error?IdentityWorkInventory.admissionRows(admissions.rows,{nowMs}):[]):limbo&&!limbo.error?(lane==='film'?IdentityWorkInventory.filmRows(limbo.items):IdentityWorkInventory.observationRows(limbo.items)):[];
    const laneRows=IdentityWorkInventory.filterRows(IdentityWorkInventory.sortLaneRows(source),query);
@@ -164,7 +174,7 @@ async function adminIdentityWorkRoute(request,env,url){
  const coverage={};
  if(IdentityWorkInventory.laneEnabled(query,'film'))coverage.film=identityWorkLaneCoverage('film',limbo);
  if(IdentityWorkInventory.laneEnabled(query,'epg_observation'))coverage.epg_observation=identityWorkLaneCoverage('epg_observation',limbo);
- if(wantsAdmissions)coverage.watchlist_admission=admissions&&!admissions.error?{state:admissions.truncated?'partial':'complete',observed:admissions.rows.length}:{state:'unavailable',reason:admissions?.error??'not_read'};
+ if(wantsAdmissions&&admissionCoverage)coverage.watchlist_admission=admissionCoverage;
  if(wantsCandidates){
   const registryUsable=registryRead.state==='present'||registryRead.state==='absent';
   const enumeration=registryUsable?LetterboxdImportRegistry.enumerate(registryRead.registry,listing)
