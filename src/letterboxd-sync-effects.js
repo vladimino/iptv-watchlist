@@ -1,0 +1,66 @@
+// AIR-570 / ADR 0186 decision 1. The three CAUSAL effect writers of a promoted Watchlist snapshot: `scan_facts`, `retention` and `removal_enqueue`. Each is applied by the Letterboxd Sync
+// (never by the EPG), idempotent through its own key, and returns a receipt string; `null` means "not applied", which holds the drain (the effect stays pending and is counted).
+// All collaborators are injected: the Watchlist repository (`readSnapshot`, `snapshotIdOfVersion`, `readChanges`), the facts module, the rated-admission retention surface, the removal-queue
+// enqueue, the metadata-cache TMDB lookup and the check that the slot's `watchlist` Event object exists. The Worker supplies the real ones (src/worker.js `letterboxdPorts`).
+// Membership removal is MEMBERSHIP ONLY (owner decision O3): none of these writers deletes a Film, a show or a rating, and none infers a watched state or a reason.
+export const RETENTION_SLICES_PER_CALL = 24;
+
+export function effectWriters(deps) {
+  const {repository, facts, retention, removal, tmdbOf, removalRef} = deps;
+  const snapshotOf = async (ctx, effect) => {
+    const read = await repository.readSnapshot(ctx.env, effect.snapshotId);
+    return read.ok ? read.snapshot : null;
+  };
+  return {
+    // The facts of the scan: one observation of every listed film (ADR 0024), keyed by the scan id of the snapshot so a replay is the same scan.
+    async scan_facts(ctx, effect) {
+      const snapshot = await snapshotOf(ctx, effect);
+      if (!snapshot) return null;
+      const tmdb = await tmdbOf(ctx.env, snapshot.films.map(film => film.lid));
+      await facts.applyWatchlistScan(ctx.env, {scanId: snapshot.scanId, observedAt: snapshot.observedAt, films: snapshot.films.map(film => ({id: film.lid, tmdbId: tmdb.get(film.lid) ?? null}))});
+      return 'facts:' + snapshot.scanId;
+    },
+    // Retention transitions (ADR 0173): the listed films are `watchlist: true`, the departed ones `watchlist: false`, from the durable change rows, never from a membership diff.
+    // With the canonical rated-admission writer closed the transition is skipped, exactly as the EPG scan did (`facts_only`); the receipt says so.
+    async retention(ctx, effect) {
+      const snapshot = await snapshotOf(ctx, effect);
+      if (!snapshot) return null;
+      if (!(await retention.writerOpen(ctx.env))) return 'retention:writer_closed:' + snapshot.scanId;
+      const changes = await repository.readChanges(ctx.env, effect.snapshotId);
+      if (!changes.ok) return null;
+      const tmdb = await tmdbOf(ctx.env, snapshot.films.map(film => film.lid));
+      const listed = snapshot.films.map(film => ({lid: film.lid, tmdbId: tmdb.get(film.lid) ?? undefined}));
+      const queue = retention.work({listed, departed: changes.removed.map(item => item.lid), observedAt: snapshot.observedAt, scanId: snapshot.scanId});
+      let cursor = 0, intent = [];
+      for (let pass = 0; pass < RETENTION_SLICES_PER_CALL && cursor < queue.length; pass++) {
+        const room = Math.max(0, retention.UNIT_CAP - intent.length);
+        const slice = queue.slice(cursor, cursor + room);
+        const out = await retention.apply(ctx.env, {event: 'watchlist:' + snapshot.scanId + ':' + cursor, retentions: slice, intent, limit: retention.UNIT_CAP});
+        intent = retention.carry(out);
+        if (!retention.settled(out)) return null;
+        cursor += slice.length;
+      }
+      return cursor >= queue.length && intent.length === 0 ? 'retention:' + snapshot.scanId + ':' + queue.length : null;
+    },
+    // The hand-over of the removed films to the Ratings lookup queue, referencing the slot's own `watchlist` Event. It only schedules the rating lookup (O3). It is not applied
+    // before that Event object exists, because the queue patches a late rating onto the Event by its key; an absent Event holds the effect until delivery.
+    async removal_enqueue(ctx, effect) {
+      const snapshot = await snapshotOf(ctx, effect);
+      if (!snapshot) return null;
+      const changes = await repository.readChanges(ctx.env, effect.snapshotId);
+      if (!changes.ok) return null;
+      if (!changes.removed.length) return 'removal:none:' + snapshot.scanId;
+      const previousId = await repository.snapshotIdOfVersion(ctx.env, snapshot.prevVersion);
+      if (!previousId.ok) return null;
+      const previous = await repository.readSnapshot(ctx.env, previousId.snapshotId);
+      if (!previous.ok) return null;
+      const byLid = new Map(previous.snapshot.films.map(film => [film.lid, film]));
+      const films = changes.removed.map(item => byLid.get(item.lid)).filter(Boolean).map(film => ({id: film.lid, url: film.url}));
+      if (films.length !== changes.removed.length) return null;
+      const ref = await removalRef(ctx.env, snapshot);
+      if (!ref) return null;
+      await removal.enqueue(ctx.env, films, ref);
+      return 'removal:' + snapshot.scanId + ':' + films.length;
+    }
+  };
+}

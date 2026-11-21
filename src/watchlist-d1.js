@@ -148,6 +148,29 @@ export async function readChanges(source,snapshotId){
  return {ok:true,added:rows.filter(row=>row.kind==='added').map(row=>({lid:row.lid,ordinal:Number(row.ordinal)})),removed:rows.filter(row=>row.kind==='removed').map(row=>({lid:row.lid,prevOrdinal:Number(row.prev_ordinal)}))};
 }
 
+// The ordered members and header of ONE promoted snapshot (not only the current one): the causal effects of an older version are applied after a newer one was promoted, so they need their own list.
+// Read only. -> {ok:true,snapshot:{snapshotId,version,scanId,observedAt,committedAt,slotKey,runId,films}} | {ok:false,reason:'absent'|'malformed'|'unavailable'}
+export async function readSnapshot(source,snapshotId){
+ const db=database(source);
+ if(!db||typeof snapshotId!=='string'||!snapshotId)return {ok:false,reason:'unavailable'};
+ let head,rows;
+ try{
+  head=await one(db,'SELECT snapshot_id, version, scan_id, observed_at, committed_at, film_count, list_sha256, prev_version, slot_key, run_id FROM watchlist_snapshot WHERE snapshot_id=?',[snapshotId]);
+  if(!head)return {ok:false,reason:'absent'};
+  rows=await many(db,'SELECT ordinal, lid, title, year, url FROM watchlist_member WHERE snapshot_id=? ORDER BY ordinal',[snapshotId]);
+ }catch{return {ok:false,reason:'unavailable'};}
+ if(!membersOk(rows,Number(head.film_count)))return {ok:false,reason:'malformed'};
+ const films=rows.map(filmOf);
+ if(await listDigest(films)!==head.list_sha256)return {ok:false,reason:'malformed'};
+ return {ok:true,snapshot:{snapshotId:head.snapshot_id,version:Number(head.version),scanId:head.scan_id,observedAt:head.observed_at,committedAt:head.committed_at,prevVersion:Number(head.prev_version),slotKey:head.slot_key,runId:head.run_id,films}};
+}
+// The id of the promoted snapshot of one version (the predecessor named by `prevVersion`). -> {ok:true,snapshotId} | {ok:false,reason:'absent'|'unavailable'}
+export async function snapshotIdOfVersion(source,version){
+ const db=database(source);
+ if(!db||!Number.isInteger(version)||version<1)return {ok:false,reason:'absent'};
+ try{const row=await one(db,'SELECT snapshot_id FROM watchlist_snapshot WHERE version=?',[version]);return row?{ok:true,snapshotId:row.snapshot_id}:{ok:false,reason:'absent'};}catch{return {ok:false,reason:'unavailable'};}
+}
+
 // ---- the fenced batch ----------------------------------------------------------------------------------------------------
 // `extra` = the caller's own guards, [sql, params] pairs that INSERT into watchlist_cas through GUARD (the Workflow mode epoch of AIR-570). Statements with more than 100 binds are refused.
 async function fenced(db,statements){
