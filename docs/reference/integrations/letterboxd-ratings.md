@@ -181,6 +181,10 @@ The status adds a read-only `orchestration` object (`mode` external/switching/cl
 
 The legacy `ratings_sync_start` and `ratings_sync_step` entry points are refused with `external_writer_fenced` while the Letterboxd Sync mode is `switching` or `cloudflare`, in addition to the Ratings own mode. The Ratings `ensure` creates no instance (`letterboxd_sync_active`) and a Ratings instance's admission is refused. With no Letterboxd mode row (the default) every one of these paths is exactly as described above. Reads stay open.
 
+## Runs started by a Letterboxd Sync slot
+
+A ratings-pipeline run started by a slot of the Letterboxd Sync carries `slotKey` on its record. Such a run (a) writes no `ratings` Event through the pipeline: the slot's own outbox is the single Event source, so no Event is duplicated; (b) records no EPG generation pin and reads no EPG state at start; (c) is split between two phases of the slot, the Diary part (phase 1) and the removal lookups (phase 3), with the Watchlist scan between them; (d) commits every write in a batch that carries the Letterboxd mode-epoch guard (`env.ratingsFence.guard`, tripping a `CHECK` that the pipeline reports as `ratings_domain_fence`). A run of an earlier slot that did not finish is stepped to its end before a new run starts. Runs without a `slotKey` are exactly as above.
+
 ## Accepted design (not implemented): the Letterboxd Sync run ([ADR 0186](../../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
 
 The contract below is a design. The current Ratings pipeline above is unchanged until the Letterboxd Workflow is accepted, delivered and activated by a separate owner-approved cutover.
