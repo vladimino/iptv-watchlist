@@ -40,8 +40,17 @@ function channelsFilters() {
   return {q: channelsEl('#channels-q').value.trim(), category: channelsEl('#channels-category').value, policy: channelsEl('#channels-policy').value, source: channelsEl('#channels-source').value, queue: channelsEl('#channels-queue').checked ? 'unclassified' : ''};
 }
 
+function channelsRenderActivation(activation) {
+  const view = EpgChannelAdmin.activationView(activation);
+  channelsEl('#channels-eyebrow').textContent = view.eyebrow;
+  return view;
+}
+function channelsSavedClause() {
+  return EpgChannelAdmin.activationView(channelsState.data && channelsState.data.activation).saved;
+}
 function channelsRenderStatus() {
   const data = channelsState.data;
+  channelsRenderActivation(data && data.activation);
   const body = channelsEl('#channels-status-body');
   if (!data || !data.available) {
     body.textContent = 'Схема Channel (миграция 0032) ещё не применена в этой базе: чтение и запись отключены, ничего не создаётся неявно. Первое применение и первый импорт — отдельный шаг владельца.';
@@ -50,7 +59,7 @@ function channelsRenderStatus() {
     return;
   }
   const t = data.totals;
-  body.innerHTML = `<b>Ревизия ${data.revision}</b> (последний импорт — ${data.importRevision}${data.empty ? ', данных ещё нет' : ''}). Политика <b>сохранена, но не применяется</b>: ни один скан пока не читает политику каналов; изменение вступит в силу со следующей естественной генерацией EPG после отдельно одобренного включения.<br>` +
+  body.innerHTML = `<b>Ревизия ${data.revision}</b> (последний импорт — ${data.importRevision}${data.empty ? ', данных ещё нет' : ''}). ${EpgChannelAdmin.activationView(data.activation).status}<br>` +
     `Каналов ${t.channels} · неклассифицированных ${t.unclassified} · нет в последнем импорте ${t.unlisted} · ручных политик ${t.overrides} · итог: discover ${t.byPolicy.discover}, deny_all ${t.byPolicy.deny_all}, known_only ${t.byPolicy.known_only}` +
     (data.presence.available ? '' : '<br><span class="muted">Последние показы в EPG сейчас недоступны.</span>');
   channelsEl('#channels-import').hidden = false;
@@ -93,6 +102,7 @@ async function channelsLoad({append = false, keep = 0} = {}) {
   const limit = append ? CHANNELS_PAGE_SIZE : Math.min(Math.max(keep, CHANNELS_PAGE_SIZE), 200);
   const result = await getChannels({...channelsFilters(), offset, limit});
   if (!result.ok) {
+    channelsRenderActivation(result.body && result.body.activation);
     channelsEl('#channels-status-body').textContent = channelsErrorText(result);
     return false;
   }
@@ -121,7 +131,7 @@ async function channelsSave(node, action) {
     if (result.error === 'stale_revision' || result.error === 'readback_failed' || result.error === 'storage_unavailable' || result.error === 'network') await channelsLoad({keep: channelsState.items.length});
     return;
   }
-  channelsMessage((result.body.changed ? 'Сохранено' : 'Уже сохранено в таком виде, запись не понадобилась') + `: ревизия ${result.body.revision}. В EPG не применено.`, false);
+  channelsMessage((result.body.changed ? 'Сохранено' : 'Уже сохранено в таком виде, запись не понадобилась') + `: ревизия ${result.body.revision}. ${channelsSavedClause()}`, false);
   await channelsLoad({keep: channelsState.items.length});
 }
 
@@ -213,7 +223,7 @@ async function channelsCommit(button) {
     return;
   }
   const r = result.body;
-  channelsMessage(`${r.idempotent ? 'Этот набор уже был сохранён' : 'Импорт записан'}: ревизия ${r.revision}, каналов ${r.receipt.channels}, категорий ${r.receipt.categories}. Квитанция ${r.receipt.requestId}. В EPG не применено.`, false);
+  channelsMessage(`${r.idempotent ? 'Этот набор уже был сохранён' : 'Импорт записан'}: ревизия ${r.revision}, каналов ${r.receipt.channels}, категорий ${r.receipt.categories}. Квитанция ${r.receipt.requestId}. ${channelsSavedClause()}`, false);
   channelsState.parsed = null; channelsState.preview = null; channelsState.importRequestId = null;
   channelsEl('#channels-file').value = '';
   channelsRenderParsed();

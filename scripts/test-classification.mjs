@@ -613,6 +613,9 @@ export const FILES={
  "epg-channel-d1.mjs": {
   "suite": "core"
  },
+ "epg-channel-policy.mjs": {
+  "suite": "core"
+ },
  "epg-checkpoint-production.mjs": {
   "suite": "core"
  },
