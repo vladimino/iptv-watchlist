@@ -1,6 +1,6 @@
 // EPG Channel authority (schema v32, migrations/0032_epg_channel_authority.sql, ADR 0187). Since AIR-562 the Worker bundles this module for the owner-only
-// Channel admin (src/admin/channels.js). The scan path (scanEPG, Discovery) still does NOT read it and applying the migration activates nothing: it is a storage
-// and contract module, and the policy it stores is staged, never active, until a separately approved reader exists. Tests load it as an ES module.
+// Channel admin (src/admin/channels.js). Since AIR-564 the scan path reads it through materializePolicies, but only while the Worker flag EPG_CHANNEL_POLICY is `on` (default off): until
+// that separately approved activation the policy it stores is staged and no scan reads it. Tests load it as an ES module.
 //
 // Effective policy of a channel:  owner policy override > owner category policy > provider category policy > 'known_only'.  It is derived here and never stored.
 //  - a channel without an override takes the policy of the category the owner assigned to it, else of the category the provider (M3U) classified it into;
@@ -282,4 +282,79 @@ export async function setOwnerCategory(source,{expectedRevision,channelId,catego
   return {ok:false,reason:'unavailable'};
  }
  return {ok:true,revision};
+}
+
+// ---- scan consumer (AIR-564, ADR 0187 decision 5) ---------------------------------------------------------------------------------------------
+// One consistent snapshot (one revision) is materialized ONCE into an in-memory Map<channelId,{policy,basis}> for every channel it holds; the scan then does a single
+// Map lookup per EPG show: no D1 read and no policy derivation per show, and a running scan never mixes revisions. The digest covers the revision and every
+// (channelId, policy, basis), sorted, so the applied policy is reproducible from the event. An id the map does not hold is `known_only` with basis `unknown`.
+// -> {ok:true,revision,digest,map,size} | {ok:false,reason:'unavailable'|'absent'|'incomplete'|'empty'}. An empty snapshot (revision 0) is refused too: it would
+// silently turn every channel into known_only, and activation needs the imported snapshot.
+export async function materializePolicies(source){
+ const snapshot=await readSnapshot(source);
+ if(!snapshot.ok)return {ok:false,reason:snapshot.reason};
+ if(snapshot.empty||!snapshot.channels.size)return {ok:false,reason:'empty'};
+ const map=new Map();
+ for(const channelId of [...snapshot.channels.keys()].sort()){const {policy,basis}=snapshot.lookup.policyFor(channelId);map.set(channelId,Object.freeze({policy,basis}));}
+ const text=JSON.stringify([snapshot.revision,[...map].map(([channelId,{policy,basis}])=>[channelId,policy,basis])]);
+ const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));
+ return {ok:true,revision:snapshot.revision,digest:[...bytes].map(byte=>byte.toString(16).padStart(2,'0')).join(''),map,size:map.size};
+}
+
+// Registers the XMLTV channel ids the snapshot does not hold: origin `xmltv`, no provider id, no category, so the effective policy stays `known_only` and the
+// channel shows in the admin unclassified queue. Idempotent and bounded: an id already present (from M3U or an earlier registration) is never re-created or
+// modified (ON CONFLICT DO NOTHING), identity is the XMLTV id and never the name, and nothing is written when every id exists. It adds one revision (compare-and-swap
+// on a fresh marker read, retried on a lost race) and changes no policy, override or classification, so a scan that pinned an earlier revision is unaffected.
+// `channels` is [{channelId,name}] from the trusted XMLTV feed. A malformed id is skipped and counted. A lost reply is success only when every new id is stored as `xmltv`.
+// -> {ok:true,registered,present,invalid,revision} | {ok:false,reason:'invalid'|'empty'|'conflict'|'capacity'|'unavailable'}
+export async function registerXmltvChannels(source,{channels,now}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ if(!Array.isArray(channels)||typeof now!=='string')return {ok:false,reason:'invalid'};
+ const wanted=new Map();let invalid=0;
+ for(const item of channels){
+  if(!item||!isChannelId(item.channelId)){invalid++;continue;}
+  if(!wanted.has(item.channelId))wanted.set(item.channelId,typeof item.name==='string'&&item.name.trim()?item.name.trim().slice(0,200):null);
+ }
+ for(let attempt=0;attempt<3;attempt++){
+  const marker=await readMarker(db);
+  if(!marker)return {ok:false,reason:'unavailable'};
+  if(marker.revision<1)return {ok:false,reason:'empty'};
+  const ids=[...wanted.keys()],known=new Set();
+  try{for(let start=0;start<ids.length;start+=50){const chunk=ids.slice(start,start+50);for(const row of await many(db,'SELECT channel_id FROM epg_channel WHERE channel_id IN ('+chunk.map(()=>'?').join(',')+')',chunk))known.add(row.channel_id);}}
+  catch{return {ok:false,reason:'unavailable'};}
+  const fresh=ids.filter(id=>!known.has(id));
+  if(!fresh.length)return {ok:true,registered:0,present:ids.length,invalid,revision:marker.revision};
+  if(marker.channelCount+fresh.length>MAX_CHANNELS)return {ok:false,reason:'capacity'};
+  const revision=marker.revision+1;
+  const statements=[
+   ['UPDATE epg_channel_revision SET revision=?, updated_at=? WHERE id=1 AND revision=?',[revision,now,marker.revision]],
+   [FENCE_SQL,[]],
+  ];
+  for(let start=0;start<fresh.length;start+=CHANNEL_CHUNK){
+   const chunk=fresh.slice(start,start+CHANNEL_CHUNK);
+   statements.push([
+    'INSERT INTO epg_channel (channel_id,source_id,origin,name,category_key,revision,last_seen_revision) VALUES '+chunk.map(()=>"(?,NULL,'xmltv',?,NULL,?,(SELECT import_revision FROM epg_channel_revision WHERE id=1))").join(',')+' ON CONFLICT(channel_id) DO NOTHING',
+    chunk.flatMap(id=>[id,wanted.get(id),revision]),
+   ]);
+  }
+  statements.push(['UPDATE epg_channel_revision SET channel_count=(SELECT COUNT(*) FROM epg_channel) WHERE id=1',[]]);
+  const outcome=await fenced(db,statements);
+  if(outcome==='ok')return {ok:true,registered:fresh.length,present:ids.length-fresh.length,invalid,revision};
+  if(outcome==='conflict')return {ok:false,reason:'conflict'};
+  // The reply may be lost after the batch committed: ours only when the marker moved to the next revision and every new id is stored as an xmltv registration at it.
+  const after=await readMarker(db);
+  if(after&&after.revision===revision){
+   // Every new id (the set is bounded by MAX_CHANNELS) must be stored as an xmltv registration at exactly this revision, and the marker count must equal the previous count plus the new ids.
+   try{
+    let stored=0;
+    for(let start=0;start<fresh.length;start+=50){const chunk=fresh.slice(start,start+50);stored+=(await many(db,'SELECT channel_id FROM epg_channel WHERE origin=\'xmltv\' AND revision=? AND channel_id IN ('+chunk.map(()=>'?').join(',')+')',[revision,...chunk])).length;}
+    if(stored===fresh.length&&after.channelCount===marker.channelCount+fresh.length)return {ok:true,registered:fresh.length,present:ids.length-fresh.length,invalid,revision};
+   }catch{return {ok:false,reason:'unavailable'};}
+   return {ok:false,reason:'conflict'};
+  }
+  if(after&&after.revision!==marker.revision)continue;
+  return {ok:false,reason:'unavailable'};
+ }
+ return {ok:false,reason:'conflict'};
 }

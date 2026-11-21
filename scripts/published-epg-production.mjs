@@ -141,6 +141,11 @@ export function createPublishedBinding(adapter){
    }
    if(!texts.length)return;
    if(texts.length>BATCH_STATEMENTS||bytes>BATCH_BYTES)throw new OperatorStop('batch_too_large',3);
+   // The repository reads (loadRun, readIngest) go through db.batch of SELECTs and need each statement's rows back.
+   if(texts.every(text=>/^\s*select\b/i.test(text))){
+    const rows=await adapter.readBatch(texts);
+    return rows.map(results=>({success:true,results}));
+   }
    await adapter.executeRendered(texts);
   },
  };
@@ -326,6 +331,7 @@ export function trackProductionWrites(adapter, ctx){
   describe:()=>adapter.describe(),
   get:(sql,params)=>adapter.get(sql,params),
   all:(sql,params)=>adapter.all(sql,params),
+  readBatch:statements=>adapter.readBatch(statements),
   run:(sql,params)=>attempt(()=>adapter.run(sql,params)),
   executeRendered:statements=>attempt(()=>adapter.executeRendered(statements)),
  };

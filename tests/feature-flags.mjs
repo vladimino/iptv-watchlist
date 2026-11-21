@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['LIFECYCLE_LOCALIZATION','DISCOVERY_LEDGER_MODE','DISCOVERY_EXECUTOR','REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','D1_ENRICHMENT_WRITE','D1_ENRICHMENT_WINDOW','D1_ENRICHMENT_BULK','MONITOR','MONITOR_TRANSPORT','VIEW_INDEX_SOURCE','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
+const REGISTERED=['LIFECYCLE_LOCALIZATION','DISCOVERY_LEDGER_MODE','DISCOVERY_EXECUTOR','REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','D1_ENRICHMENT_WRITE','D1_ENRICHMENT_WINDOW','D1_ENRICHMENT_BULK','MONITOR','EPG_CHANNEL_POLICY','MONITOR_TRANSPORT','VIEW_INDEX_SOURCE','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -224,4 +224,14 @@ console.log('Feature flags (ADR 0039): feature_flags lists the registered flags 
  assert.deepEqual([absent.state,absent.valid,absent.issue,absent.effective],['absent',true,null,null],'absent is the target state and has no effective mode');
  for(const value of ['d1','r2']){const item=await selector(value);assert.deepEqual([item.state,item.raw,item.valid,item.issue,item.effective],['set',value,false,'retired',null],value+' is retired and inert');}
  for(const bad of ['D1',' d1','on','d1,r2','']){const item=await selector(bad);assert.equal(item.effective,null,JSON.stringify(bad)+' has no effective mode');}
+}
+
+// The Channel policy activation: only exactly `on` activates; absent or any other value leaves the scan as it was.
+{
+ const policy=async value=>(await flags(value===undefined?{}:{EPG_CHANNEL_POLICY:value})).report.flags.find(item=>item.name==='EPG_CHANNEL_POLICY');
+ const absent=await policy(undefined);
+ assert.deepEqual([absent.state,absent.valid,absent.issue,absent.effective],['absent',true,null,'off'],'absent is off');
+ const on=await policy('on');
+ assert.deepEqual([on.state,on.raw,on.valid,on.issue,on.effective],['set','on',true,null,'on'],'on activates');
+ for(const bad of ['ON',' on','yes','true','']){const item=await policy(bad);assert.equal(item.effective,'off',JSON.stringify(bad)+' stays off');assert.equal(item.valid,false,JSON.stringify(bad)+' is reported invalid');}
 }

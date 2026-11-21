@@ -21,6 +21,7 @@ const table = [
   [terminal({stage: 'complete', delta: {failed: 2}}), 'warning', 'complete with per-film failures'],
   [terminal({stage: 'complete', failed: 1}), 'warning', 'failures on the event itself'],
   [{type: 'enrichment', presentation: 'batch_v2_skipped', stage: 'skipped', reason: 'already_running'}, 'warning', 'skipped start (AIR-548)'],
+  [{type: 'enrichment', presentation: 'batch_v2_skipped', stage: 'skipped', reason: 'catalog_held', cause: 'discovery_incomplete'}, 'warning', 'start refused for a held catalog (AIR-575): a warning, not an error or an interruption'],
   [terminal({stage: 'partial', stopReason: 'quota'}), 'warning', 'quota'],
   [terminal({stage: 'partial', stopReason: 'time_budget'}), 'warning', 'time budget'],
   [terminal({stage: 'partial', reason: 'api_error'}), 'error', 'api_error via reason'],
