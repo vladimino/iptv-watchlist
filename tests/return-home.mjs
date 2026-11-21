@@ -106,10 +106,10 @@ const R = vm.runInContext('ReturnHome', helperContext);
     assert.doesNotMatch(html, /К программе|К списку|К фильмам/, name + ': no competing old button');
     assert.ok(html.indexOf('src="/return-home.js"') > 0 && html.indexOf('src="/return-home.js"') < html.search(/src="\/admin[^"]*\.js"/), name + ': the helper loads before the page script');
   }
-  for (const file of ['public/admin.html', 'public/admin-letterboxd.html', 'public/admin-limbo.html', 'public/admin-identity.html', 'public/admin-posters.html']) {
+  for (const file of ['public/admin.html', 'public/admin-letterboxd.html', 'public/admin-limbo.html', 'public/admin-identity.html', 'public/admin-posters.html', 'public/admin-channels.html']) {
     const nav = fs.readFileSync(file, 'utf8').match(/<nav class="admin-views"[\s\S]*?<\/nav>/)[0];
     const anchors = nav.match(/<a [^>]*>/g);
-    assert.equal(anchors.length, 6, file);
+    assert.equal(anchors.length, 7, file);
     for (const anchor of anchors) assert.match(anchor, /data-return-carry/, file + ': ' + anchor + ' keeps the target through the sections');
   }
   assert.match(fs.readFileSync('public/admin-actions.html', 'utf8'), /<a class="admin-home" href="\/admin" data-return-carry>К данным<\/a>/);

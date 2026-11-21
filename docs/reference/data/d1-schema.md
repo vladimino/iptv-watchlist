@@ -480,7 +480,7 @@ Compare-and-swap uses `revision`; the writer's `write_id` is read back to tell t
 
 ## EPG Channel authority (schema v32, dormant; not applied)
 
-`migrations/0032_epg_channel_authority.sql` follows a complete version 31 (the Watchlist authority tables present) and refuses anything else before a table is created. It is not applied by a deploy and no Worker path reads or writes these tables ([ADR 0187](../../adr/0187-epg-channel-authority.md), Accepted design, dormant implementation; contract in [EPG Channel](../domain/epg-channel.md)). It creates four STRICT tables, one index and two seed rows (the revision row at revision 0 and the fence row), and no marker.
+`migrations/0032_epg_channel_authority.sql` follows a complete version 31 (the Watchlist authority tables present) and refuses anything else before a table is created. It is not applied by a deploy. No scan reads these tables; the only Worker code that reads or writes them is the owner-only [Channel admin](../api/admin.md#channels-api-admin-channels), which refuses with 503 or `available:false` while they are absent and never creates them ([ADR 0187](../../adr/0187-epg-channel-authority.md), Accepted design, dormant implementation; contract in [EPG Channel](../domain/epg-channel.md)). It creates four STRICT tables, one index and two seed rows (the revision row at revision 0 and the fence row), and no marker.
 
 | Table | Holds |
 | --- | --- |

@@ -59,6 +59,15 @@ export const FILES={
  "admin-limbo-page.mjs": {
   "suite": "core"
  },
+ "admin-channels-api.mjs": {
+  "suite": "core"
+ },
+ "admin-channels-domain.mjs": {
+  "suite": "core"
+ },
+ "admin-channels-page.mjs": {
+  "suite": "core"
+ },
  "admin-posters-api.mjs": {
   "suite": "core"
  },

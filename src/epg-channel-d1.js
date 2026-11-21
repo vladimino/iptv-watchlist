@@ -1,6 +1,6 @@
-// EPG Channel authority (schema v32, migrations/0032_epg_channel_authority.sql, ADR 0187). DORMANT: nothing in the Worker imports or bundles this
-// module, no table it names is read by a scan, and applying the migration activates nothing. It is a storage and contract module only; tests load it
-// as an ES module.
+// EPG Channel authority (schema v32, migrations/0032_epg_channel_authority.sql, ADR 0187). Since AIR-562 the Worker bundles this module for the owner-only
+// Channel admin (src/admin/channels.js). The scan path (scanEPG, Discovery) still does NOT read it and applying the migration activates nothing: it is a storage
+// and contract module, and the policy it stores is staged, never active, until a separately approved reader exists. Tests load it as an ES module.
 //
 // Effective policy of a channel:  owner policy override > owner category policy > provider category policy > 'known_only'.  It is derived here and never stored.
 //  - a channel without an override takes the policy of the category the owner assigned to it, else of the category the provider (M3U) classified it into;
@@ -159,7 +159,7 @@ async function readMarker(db){
 
 // Digest of the WHOLE normalized plan: categories with their policies and positions, and every channel. It is computed here, never taken from the caller,
 // so the no-op below can never keep a stale category policy. `sourceSha256` is provenance of the provider files and decides nothing.
-async function planDigest(plan){
+export async function planDigest(plan){
  const channels=[...plan.channels].sort((left,right)=>left.channelId<right.channelId?-1:left.channelId>right.channelId?1:0);
  const text=JSON.stringify([plan.categories.map(c=>[c.categoryKey,c.name,c.policy,c.position]),channels.map(c=>[c.channelId,c.sourceId??null,c.origin,c.name,c.categoryKey])]);
  const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));
