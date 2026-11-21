@@ -91,7 +91,7 @@ async function world({durations,decision,movieRuntime=96,failFetch=false,fillers
    return await context.resolveDiscoveryChunk(env,report,24,lease.lease);
   }finally{await Authority.releaseLease(env,lease.lease);}
  };
- return {file,env,chunk,fetched,item};
+ return {file,env,chunk,fetched,item,context};
 }
 const decisionOf=(file,key='film r|2001')=>JSON.parse(sql(file,`SELECT payload_json FROM discovery_decision WHERE observation_key='${key}'`)[0].payload_json);
 const admissionOf=(file,id)=>JSON.parse(sql(file,`SELECT payload_json FROM discovery_admission WHERE film_id='${id}'`)[0].payload_json);
@@ -383,7 +383,7 @@ const showsOf=file=>sql(file,"SELECT film_id, match_reason FROM published_epg_sh
  const legacy=statusOf(file).legacyRevalidation;
  assert.equal(legacy.eligible,1);assert.equal(legacy.attempted,1);assert.equal(legacy.deferred,0);assert.equal(legacy.scanned>=1,true);
  assert.equal(legacy.totals.attempted,1);
- assert.equal(Object.keys(legacy).length<=8,true,'the payload is bounded');
+ assert.equal(Object.keys(legacy).length<=12&&Object.keys(legacy.totals).length<=5,true,'the payload is bounded');
 }
 
 // U. Nine legacy keys and a cap of four per chunk, the replay resting (so only the cohort pass works), the status kept between chunks so the cursor is exercised. Every key gets its attempt and a terminal outcome across three chunks,
@@ -426,6 +426,63 @@ const showsOf=file=>sql(file,"SELECT film_id, match_reason FROM published_epg_sh
  assert.equal(showsOf(file).some(row=>row.film_id==='tmdb_'+refused.id),false,'no false Film assignment for the refused title');
  const legacy=statusOf(file).legacyRevalidation;
  assert.equal(legacy.attempted,3);assert.equal(legacy.eligible,3);
+}
+
+// W, X, Y, Z. AIR-503, review of 21 Nov 2026: the sweep must be part of the series, through the REAL hop (`advanceDiscovery`, the call the Workflow makes, which runs the chunk, computes
+// `continuationAfterChunk` and returns the contract), not through chunks the test calls by hand. No ordinary candidate remains and the replay is resting, which is the case in which the series used to
+// end after the first four keys.
+const resting=()=>({schemaVersion:2,programmeRunId:RUN,replayAfter:'',replayLapAt:new Date().toISOString()});
+const hopsUntilStop=async(context,env,limit)=>{
+ const hops=[];
+ for(let hop=0;hop<limit;hop++){
+  const out=await context.advanceDiscovery(env,{});
+  hops.push({stage:out.stage,next:out.discovery&&out.discovery.nextAction,pending:out.legacyPending,calls:out.tmdbCalls});
+  if(!out.discovery||out.discovery.nextAction!=='continue')break;
+ }
+ return hops;
+};
+// W. Nine eligible aliases: the series continues after the first four and completes after the ninth.
+{
+ const items=[1,2,3,4,5,6,7,8].map(index=>legacyExtra(index));
+ const {file,env,context,fetched,chunk}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Фільм Р',normalized:'фільм р'},catalog:legacyCatalog(),
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}}],alternatives:[]},extras:items.map(item=>item.extra),movies:Object.fromEntries(items.map(item=>[item.id,item.movie]))});
+ sql(file,`UPDATE discovery_status SET programme_run_id='${RUN}', payload_json='${JSON.stringify(resting())}' WHERE id=1`);
+ const hops=await hopsUntilStop(context,env,8);
+ assert.deepEqual(hops.map(hop=>hop.next),['continue','continue','stop'],JSON.stringify(hops));
+ assert.deepEqual(hops.map(hop=>hop.stage),['partial','partial','complete'],JSON.stringify(hops));
+ assert.deepEqual(hops.map(hop=>hop.pending),[true,true,false]);
+ assert.equal(hops.every(hop=>hop.calls<=16),true);
+ const keys=['фільм р|2001',...items.map(item=>item.key)];
+ for(const key of keys)assert.deepEqual(decisionOf(file,key).anchor,[96],'a terminal outcome for '+key);
+ assert.equal(movieCalls(fetched),9,'every key was asked once: '+movieCalls(fetched));
+ const legacy=statusOf(file).legacyRevalidation;
+ assert.equal(legacy.pending,false);assert.equal(legacy.lapComplete,true);assert.equal(legacy.capReached,false);assert.equal(legacy.totals.attempted,9);assert.equal(legacy.totals.sweepChunks,2);
+ // Y. The lap rests: a chunk of the same run after the lap does not scan or ask TMDB again, and the series stays complete.
+ const after=await chunk({keep:true});
+ assert.equal(after.stage,'complete');
+ assert.equal(statusOf(file).legacyRevalidation.resting,true);assert.equal(statusOf(file).legacyRevalidation.scanned,0);
+ assert.equal(movieCalls(fetched),9,'no key is asked twice after the lap');
+}
+// X. The cap. A run that has already spent 40 sweep chunks completes at once, with the eligible keys unattempted, and says so (`capReached`): the loop is bounded and the stop is visible.
+{
+ const items=[1,2,3].map(index=>legacyExtra(index));
+ const {file,env,context,fetched}=await world({durations:[96],decision:unanchored({filmId:'tmdb_101',identitySource:'known_epg_alias'}),observed:{title:'Фільм Р',normalized:'фільм р'},catalog:legacyCatalog(),
+  movieTitles:{translations:[{iso_639_1:'uk',data:{title:'Фільм Р'}}],alternatives:[]},extras:items.map(item=>item.extra),movies:Object.fromEntries(items.map(item=>[item.id,item.movie]))});
+ sql(file,`UPDATE discovery_status SET programme_run_id='${RUN}', payload_json='${JSON.stringify({...resting(),legacyRevalidation:{totals:{sweepChunks:40}}})}' WHERE id=1`);
+ const hops=await hopsUntilStop(context,env,4);
+ assert.deepEqual(hops.map(hop=>hop.stage),['complete'],JSON.stringify(hops));
+ assert.equal(movieCalls(fetched),0,'the cap stops the sweep');
+ const legacy=statusOf(file).legacyRevalidation;
+ assert.equal(legacy.capReached,true);assert.equal(legacy.pending,false);assert.equal(legacy.attempted,0);
+ assert.equal((decisionOf(file,'фільм р|2001').anchor||[]).length,0);
+}
+// Z. Without a cohort the completion semantics are unchanged: one hop, complete, and the lap rests.
+{
+ const {file,env,context}=await world({durations:[90],decision:verified({anchor:[90]})});
+ const hops=await hopsUntilStop(context,env,4);
+ assert.deepEqual(hops.map(hop=>hop.stage),['complete'],JSON.stringify(hops));
+ const legacy=statusOf(file).legacyRevalidation;
+ assert.equal(legacy.pending,false);assert.equal(legacy.attempted,0);
 }
 
 console.log('discovery revalidation ok');

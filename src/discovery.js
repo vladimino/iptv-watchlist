@@ -23,6 +23,9 @@ const PAGED_TMDB_CALLS=16;
 const PAGED_LEGACY_REVALIDATION_KEYS=4;
 // A full lap of the legacy cohort that found nothing to revalidate rests this long before the next lap (a lap is a few small keyset reads).
 const PAGED_LEGACY_RELAP_MS=15*60*1000;
+// Owner decision, 21 Nov 2026: while a lap of the legacy cohort is unfinished the Discovery run stays `partial` (the Workflow continues), bounded by the lap itself and by this many
+// sweep chunks per programme run. Reaching the cap lets the run complete and is reported (`capReached`), never silently.
+const PAGED_LEGACY_SWEEP_CHUNKS=40;
 const PAGED_WALK_CONCURRENCY=4;
 // The cheap pass writes at most this many decisions and Film touches per chunk; the rest waits for the next one.
 const PAGED_CHEAP_GROUP=4;
@@ -1115,9 +1118,11 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // request and its writes still fit. The cohort comes from its own keyset read (`selectLegacyAliasObservations`), not from `driftSeen` and `candidateByKey`: those are the replay page and
  // the touch page, two independent cursors that meet by chance, and a resting replay has no drifts at all. Provenance still comes only from the movie-detail gate inside revalidateDrift;
  // this pass changes which work goes first and how it is found, not what counts as evidence. Every other drifted decision keeps its place after the candidates (pass 2).
- const legacy={eligible:0,attempted:0,deferred:0,scanned:0,queries:0,resting:legacyResting,lapComplete:false};
- let nextLegacyAfter=legacyAfter,nextLegacyLapAt=legacyLapAt;
- if(!error&&!legacyResting&&typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.planRevalidation==='function'&&typeof DiscoveryAuthority.selectLegacyAliasObservations==='function'&&Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(3)<=persistLimit()){
+ const sweepBefore=Number(legacyTotals.sweepChunks)||0;
+ const legacy={eligible:0,attempted:0,deferred:0,scanned:0,queries:0,resting:legacyResting,lapComplete:false,pending:false,capReached:!legacyResting&&sweepBefore>=PAGED_LEGACY_SWEEP_CHUNKS};
+ let nextLegacyAfter=legacyAfter,nextLegacyLapAt=legacyLapAt,legacyRan=false,legacyCurtailed=false;
+ const legacyCapable=typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.planRevalidation==='function'&&typeof DiscoveryAuthority.selectLegacyAliasObservations==='function';
+ if(!error&&!legacyResting&&!legacy.capReached&&typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.planRevalidation==='function'&&typeof DiscoveryAuthority.selectLegacyAliasObservations==='function'&&Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(3)<=persistLimit()){
   const legacyPlans=new Map();
   const picked=await inPhase('revalidation',()=>guarded(()=>DiscoveryAuthority.selectLegacyAliasObservations(env,{after:legacyAfter,now:Date.now(),want:PAGED_LEGACY_REVALIDATION_KEYS,shouldStop:()=>Date.now()>=walkDeadline,beforeQuery:heartbeat,
    accept:(observed,previous,minutes)=>{
@@ -1129,22 +1134,28 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     legacyPlans.set(observed.key,plan);return true;
    }})));
   if(!picked)return programmeChanged();
+  legacyRan=true;
   legacy.scanned=picked.scanned;legacy.queries=picked.queries;legacy.eligible=picked.rows.length;legacy.lapComplete=picked.lapComplete;
   nextLegacyAfter=picked.after;
-  if(picked.lapComplete&&picked.rows.length===0)nextLegacyLapAt=new Date().toISOString();
   let lastHandled=legacyAfter;
   for(const row of picked.rows){
    const key=row.candidate.key,plan=legacyPlans.get(key);
-   if(Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(3)>persistLimit()){legacy.deferred++;revalidation.deferred++;nextLegacyAfter=lastHandled;break;}
+   if(Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(3)>persistLimit()){legacy.deferred++;revalidation.deferred++;nextLegacyAfter=lastHandled;legacyCurtailed=true;break;}
    decisions[key]=row.decision;
    revalidatedFirst.add(key);revalidation.observations++;legacy.attempted++;
    const outcome=await revalidateDrift(key,row.decision,row.candidate,plan);
    if(outcome==='changed')return programmeChanged();
-   if(outcome==='break'){legacy.deferred++;nextLegacyAfter=lastHandled;break;}
+   if(outcome==='break'){legacy.deferred++;nextLegacyAfter=lastHandled;legacyCurtailed=true;break;}
    lastHandled=key;
   }
+  // The lap is complete only when the read reached the end of the cohort and nothing was curtailed; the next lap then waits PAGED_LEGACY_RELAP_MS.
+  if(legacyCurtailed){legacy.lapComplete=false;}
+  else if(picked.lapComplete)nextLegacyLapAt=new Date().toISOString();
  }
- legacy.totals={attempted:(Number(legacyTotals.attempted)||0)+legacy.attempted,deferred:(Number(legacyTotals.deferred)||0)+legacy.deferred,scannedLaps:(Number(legacyTotals.scannedLaps)||0)+(legacy.lapComplete?1:0)};
+ // The sweep is pending while a lap is unfinished and the cap is not reached. A chunk that could not even start the read for lack of time still counts as a sweep chunk, so the cap
+ // bounds every path. (An error ends the series through its own stage; a resting cohort or a reached cap is not pending.)
+ legacy.pending=legacyCapable&&!legacyResting&&!legacy.capReached&&!(legacyRan&&legacy.lapComplete&&!legacyCurtailed);
+ legacy.totals={attempted:(Number(legacyTotals.attempted)||0)+legacy.attempted,deferred:(Number(legacyTotals.deferred)||0)+legacy.deferred,scannedLaps:(Number(legacyTotals.scannedLaps)||0)+(legacy.lapComplete?1:0),sweepChunks:sweepBefore+(legacy.pending?1:0)};
  if(!error)for(const candidate of pending){
   // Start a candidate only if a request and its two writes still fit before the durable-write deadline.
   if(tmdbCalls>=PAGED_TMDB_CALLS||Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(2)>persistLimit())break;
@@ -1278,7 +1289,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  }
  if(!selected.items.length&&remaining===0)nextAfter=selected.after||'';
  const nextTouchAfter=selected.touches.length?selected.touchAfter||touchAfter:touchAfter;
- const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',replayLapAt:nextReplayLapAt,legacyAfter:nextLegacyAfter,legacyLapAt:nextLegacyLapAt,legacyRevalidation:legacy,replayStats,timings};
+ const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||replayRun.complete===false||remaining==null||remaining>0||waitingRetry>0||(legacy.pending&&!error)?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,deferred,waitingRetry,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,replayAfter:replayRun.after||'',replayLapAt:nextReplayLapAt,legacyAfter:nextLegacyAfter,legacyLapAt:nextLegacyLapAt,legacyRevalidation:legacy,legacyPending:!!(legacy.pending&&!error),replayStats,timings};
  try{await fence();}catch(e){throw lost(e,'final');}
  // `preCommitMs` is what the stored status carries: the time up to its own write. The status write, the continuation
  // checkpoint and the total through that checkpoint are measured after the writes and reach only the returned
@@ -1746,7 +1757,7 @@ function continuationAfterChunk(result,budget,hopId,at,programmeRunId){
  }
  if(result.stage==='backoff'||result.retryAt&&!result.checked)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??programmeRunId??null};
  if(result.retryAt)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:Math.max(0,budget-1),nextCatchUpAt:result.retryAt,retryAt:result.retryAt,programmeRunId:result.programmeRunId??null};
- if(result.remaining===0&&!(result.cheapRemaining>0)&&!(result.deferred>0)&&!(result.waitingRetry>0)&&!result.error)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
+ if(result.remaining===0&&!(result.cheapRemaining>0)&&!(result.deferred>0)&&!(result.waitingRetry>0)&&!result.legacyPending&&!result.error)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
  if(budget<=1)return {stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null};
  return {stage:'paused',reason:null,at,hopId,remainingChunks:budget-1,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
 }
