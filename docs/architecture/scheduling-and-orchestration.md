@@ -533,7 +533,7 @@ flowchart TD
 
 The unfinished-run backoff is 30 minutes by default (`Retry-After` is honoured), the retry cap is six attempts, and a busy resolver lease or EPG priority is recorded as `deferredBusy` and resumed on a later firing without holding the lease. A checkpoint write that loses its compare-and-swap leaves the guarded D1 hydration idempotent; the next firing re-reads D1 and the negative index. The R2 checkpoint is one object with version-aware compare-and-swap and needs no D1 migration. Rollback removes the cron entry and its dispatch by pull request; stored posters and index entries stay.
 
-## Proposed design: one Letterboxd Sync Workflow with four daily slots ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Proposed, not implemented)
+## Accepted design (not implemented): one Letterboxd Sync Workflow with four daily slots ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
 
 Today the Ratings run is one daily Workflow at 17:00 Europe/Madrid and the Watchlist is fetched inside the EPG run (the sections above). The proposal separates the two user sources from the EPG and Discovery. The diagram is the **future** flow; the shaded nodes do not exist in production, no cron or binding is changed by the proposal, and with the Watchlist marker `epg` or absent the current flows above are the only path.
 
