@@ -1,4 +1,6 @@
-# EPG Channel policy in the scan: offline evidence
+# EPG Channel policy in the scan: offline evidence of the first delivery
+
+> **Historical.** This records the first, dormant delivery (pull request #858: refuse publication on a bad snapshot, publish-phase registration, scaled continuity floor). [ADR 0191](../adr/0191-epg-channel-policy-in-the-scan.md) replaced those three choices; the results below are not evidence of the current implementation. See [the modes evidence](epg-channel-policy-modes-offline-2026-11-21.md).
 
 **Date:** 21 Nov 2026 (UTC). **Scope:** repository change and offline tests only. No production database, bucket, Worker, EPG, Discovery or TMDB was read or written, no flag was set, and nothing was deployed.
 

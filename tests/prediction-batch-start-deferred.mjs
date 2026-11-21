@@ -66,7 +66,19 @@ const world=async(n=6,{workflow=true}={})=>{
  const lease=leaseDoc(w);assert.equal(lease.phase,'claim');assert.equal(lease.runId,r.data.runId);assert.equal(lease.deferred,true);assert.equal(lease.prep,true);assert.match(lease.keyHash,/^[0-9a-f]{64}$/);assert.ok(lease.expiresAt<Date.now()+181000,'a claim, not a 15 minute lease');
  assert.equal(runs(w),0,'nothing was prepared');assert.ok(![...w.records.keys()].some(k=>k.startsWith('enrichment/batch-manifest/')||k.startsWith('enrichment/sources/')),'no source, no manifest');
  assert.ok(!dump(w.file).includes(key)&&!JSON.stringify([...w.records.entries()]).includes(key),'the key is stored nowhere');
- const pending=await w.read(r.data.runId);assert.equal(pending.isError,true);assert.match(JSON.stringify(pending),/manifest_pending/);
+ // a pending readback is a normal wait for the caller: a successful tool result, machine-distinguishable from an envelope, with the original retryAfterMs, no `error`, no `isError`, and it writes nothing
+ const snapshot=dump(w.file),records=JSON.stringify([...w.records.entries()]);
+ for(let i=0;i<3;i++){
+  const pending=await w.read(r.data.runId);assert.equal(pending.isError,undefined,JSON.stringify(pending).slice(0,200));assert.equal(pending.structuredContent,undefined);
+  const body=JSON.parse(pending.content[0].text);assert.deepEqual(body,{httpStatus:200,kind:'pending',status:'manifest_pending',code:'manifest_pending',retryAfterMs:5000});assert.equal(body.error,undefined);assert.notEqual(body.kind,'envelope');
+ }
+ assert.equal(dump(w.file),snapshot,'a pending readback writes no D1 row, renews no lease and dispatches nothing');assert.equal(JSON.stringify([...w.records.entries()]),records,'and writes no record');assert.equal(w.instances.length,1);
+ // the underlying read keeps its HTTP-level contract: 409 manifest_pending
+ const raw=await w.ctx.ownedBatchManifest(w.env,r.data.runId,{part:'envelope'});assert.equal(raw.status,409);assert.equal(raw.body.code,'manifest_pending');assert.equal(raw.body.retryAfterMs,5000);
+ // every real refusal keeps its error shape
+ const unknown=await w.read('no-such-run');assert.equal(unknown.isError,true);assert.match(JSON.stringify(unknown),/unknown_run/);
+ const invalid=await w.tool('prediction_batch_manifest',{runId:'bad id!'});assert.equal(invalid.isError,true);
+ const badPart=await w.read(r.data.runId,{part:'nope'});assert.equal(badPart.isError,true);
 }
 
 // 3. A repeat with the same key and arguments returns the same receipt; anything else is refused; no second instance, no new epoch.
@@ -105,6 +117,7 @@ const world=async(n=6,{workflow=true}={})=>{
  w.env.BUCKET.put=async(k,...a)=>{const res=await put(k,...a);if(String(k)===manifestKey(r.data.runId)&&seen===null){const read=await w.read(r.data.runId);seen=JSON.stringify(read);}return res;};
  const outcome=await w.prepare(w.instances[0]);assert.equal(outcome.phase,'ready');
  assert.match(seen,/manifest_pending/,'right after the manifest was stored and before the readiness edit it is still pending: '+seen);
+ assert.doesNotMatch(seen,/isError/,'and it is a normal wait, not an error: '+seen);assert.match(seen,/kind.{1,8}pending/);
  const after=await w.read(r.data.runId);assert.equal(after.isError,undefined,'served after the readiness edit');
 }
 

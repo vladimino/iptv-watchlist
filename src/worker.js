@@ -992,27 +992,34 @@ async function enrichRecentRemovalRatings(env,ratings,observedAt){
   }while(cursor);
  }catch{}
 }
-// AIR-564: the Channel policy of one EPG scan. EPG_CHANNEL_POLICY off (the default) -> null and nothing below changes. on -> ONE snapshot read, materialized into an in-memory
-// map; an unavailable, torn, absent or empty snapshot throws, so the scan never publishes with a silent discover.
+// AIR-564 (ADR 0191): the Channel policy mode of one EPG scan. EPG_CHANNEL_POLICY not exactly `on` -> `legacy` and nothing below changes. `on` -> ONE snapshot read, materialized into an
+// in-memory map: `filtered` when it is available, non-empty and consistent; `degraded` otherwise (every channel known_only, a warning, no applied revision or digest). A Channel
+// authority failure never blocks the EPG and never publishes a silent discover; other mandatory failures keep their earlier behaviour.
 async function loadEpgChannelPolicy(env){
- if(env?.EPG_CHANNEL_POLICY!=='on')return null;
- const policy=await EpgChannelD1.materializePolicies(env);
- if(!policy.ok)throw new Error('EPG channel policy snapshot unavailable ('+policy.reason+'): publication refused');
- return policy;
+ if(env?.EPG_CHANNEL_POLICY!=='on')return {mode:'legacy'};
+ let policy;
+ try{policy=await EpgChannelD1.materializePolicies(env);}catch{policy={ok:false,reason:'unavailable'};}
+ return policy.ok?{mode:'filtered',revision:policy.revision,digest:policy.digest,map:policy.map}:{mode:'degraded',reason:policy.reason};
 }
-// The XMLTV channel ids the pinned snapshot does not hold are registered by this one bounded, idempotent publish-phase writer (origin xmltv, no category, known_only).
-// A failure never fails the scan and never changes the policy it applied; the outcome is kept on the run and the next scan retries. `registered` is claimed only on success.
-async function registerEpgChannels(env,run,channelPolicy,newChannels){
- if(!channelPolicy||!newChannels?.length){if(channelPolicy)run.channelRegistration={ok:true,registered:0,detected:0};return;}
- let outcome;
- try{outcome=await tracedPhase(run.runId,'channel_register',()=>EpgChannelD1.registerXmltvChannels(env,{channels:newChannels,now:new Date().toISOString()}),value=>({ok:value.ok,registered:value.registered??0,reason:value.reason}));}
- catch(error){outcome={ok:false,reason:'unavailable'};}
- run.channelRegistration=outcome.ok?{ok:true,registered:outcome.registered,detected:newChannels.length,invalid:outcome.invalid}:{ok:false,registered:0,detected:newChannels.length,reason:outcome.reason};
+// The declared XMLTV channels the pinned snapshot lacks are registered by one bounded, idempotent, best-effort batch at the declaration boundary of the single scan pass (origin xmltv, no
+// category, known_only). It is not tied to the publication: rows written stay even if the EPG later fails. A failure never fails the scan and never changes the pinned policy; the
+// outcome (detected vs registered) is kept for the event and the next natural scan retries.
+function epgDeclarationRegistrar(env,holder){
+ return async ({channels})=>{
+  if(!channels.length){holder.value={ok:true,detected:0,registered:0};return;}
+  let outcome;
+  try{outcome=await EpgChannelD1.registerXmltvChannels(env,{channels,now:new Date().toISOString()});}catch{outcome={ok:false,reason:'unavailable'};}
+  holder.value=outcome.ok?{ok:true,detected:channels.length,registered:outcome.registered,invalid:outcome.invalid}:{ok:false,detected:channels.length,registered:0,reason:outcome.reason};
+ };
 }
 function epgPolicyEventFields(report){
  const policy=report.stats?.policy;
  if(!policy?.applied)return {};
- return {channels:{...policy.channels},programmes:{unclassified:policy.unclassified,filteredDenyAll:policy.filteredDenyAll,skippedKnownOnly:policy.skippedKnownOnly,discoveryEligible:policy.discoveryEligible,raw:report.stats.scanned},policy:{revision:policy.revision??null,digest:policy.digest??null,href:'/admin/channels'}};
+ const degraded=policy.mode==='degraded',registration=policy.registration||null;
+ const fields={channels:{...policy.channels,...(degraded?{}:{registered:registration?.registered??0})},programmes:{unclassified:policy.unclassified,filteredDenyAll:policy.filteredDenyAll,skippedKnownOnly:policy.skippedKnownOnly,discoveryEligible:policy.discoveryEligible,raw:report.stats.scanned},policy:{mode:policy.mode,...(degraded?{reason:policy.reason??null}:{revision:policy.revision??null,digest:policy.digest??null}),href:'/admin/channels'}};
+ if(degraded)fields.warning={code:'channel_policy_degraded',reason:policy.reason??null};
+ else if(registration&&!registration.ok)fields.warning={code:'channel_registration_failed',reason:registration.reason??null};
+ return fields;
 }
 function epgEvent(report,id){const cutoff=Date.parse(report.updatedAt);const archive=f=>f.shows.some(s=>s.start>=cutoff-72*3600000&&s.start<cutoff),future=f=>f.shows.some(s=>s.start>=cutoff&&s.start<cutoff+24*3600000);return {id,type:'epg',at:report.updatedAt,films:report.stats.uniqueFilms??report.films.filter(f=>f.shows?.length).length,archive:report.films.filter(archive).length,future:report.films.filter(future).length,broadcasts:report.films.reduce((n,f)=>n+f.shows.length,0),...epgPolicyEventFields(report)};}
 function watchlistEvent(before,after,oldReport,report,id){const oldIds=new Set((before?.films||[]).map(f=>String(f.id))),newIds=new Set(after.films.map(f=>String(f.id)));return {id,type:'watchlist',at:after.updatedAt,total:after.films.length,baseline:!before,added:before?after.films.filter(f=>!oldIds.has(String(f.id))).map(f=>eventFilm(f,eventTitles(report))):[],removed:before?before.films.filter(f=>!newIds.has(String(f.id))).map(f=>eventRemovedFilm(f,eventTitles(oldReport))):[]};}
@@ -2598,10 +2605,10 @@ async function epgSync(env,run){
  applyEpgLocalization(run.watchlist,people);
  // AIR-263: the source fetch and the scan are one traced phase; an error logs `error` and rethrows unchanged.
  const sources=sourceConfig(env);
- const channelPolicy=await loadEpgChannelPolicy(env);
- const scanned=await tracedPhase(run.runId,'epg_input_scan',async()=>{const now=Date.now(),r=await fetch(sources.epg,{signal:AbortSignal.timeout(110000)});if(!r.ok)throw new Error('EPG HTTP '+r.status);const cache=await loadJSON(env,'epg/discovered-films.json')||{},watchlistTmdb=new Set(run.watchlist.map(f=>String(f.tmdbId)));const result=await scanEPG(r.body,[...run.watchlist,...Object.values(cache).filter(f=>!watchlistTmdb.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now,{policies:channelPolicy?.map||null});return {now,cache,result};},value=>({policy:value.result.stats.policy?channelPolicy.revision:undefined,films:value.result.films.length,discovery:value.result.discovery?.length??0,catalog:Object.keys(value.cache).length}));
+ const channelPolicy=await loadEpgChannelPolicy(env),registration={value:null};
+ const scanned=await tracedPhase(run.runId,'epg_input_scan',async()=>{const now=Date.now(),r=await fetch(sources.epg,{signal:AbortSignal.timeout(110000)});if(!r.ok)throw new Error('EPG HTTP '+r.status);const cache=await loadJSON(env,'epg/discovered-films.json')||{},watchlistTmdb=new Set(run.watchlist.map(f=>String(f.tmdbId)));const result=await scanEPG(r.body,[...run.watchlist,...Object.values(cache).filter(f=>!watchlistTmdb.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now,{policies:channelPolicy.map||null,degraded:channelPolicy.mode==='degraded',onDeclarations:epgDeclarationRegistrar(env,registration)});return {now,cache,result};},value=>({policyMode:value.result.stats.policyMode,policyRevision:channelPolicy.revision,films:value.result.films.length,discovery:value.result.discovery?.length??0,catalog:Object.keys(value.cache).length}));
  const now=scanned.now,result=scanned.result;let cache=scanned.cache;if(result.stats.epgEnd<now-72*3600000)throw new Error('EPG does not cover the current window');
- if(channelPolicy&&result.stats.policy)result.stats.policy={...result.stats.policy,revision:channelPolicy.revision,digest:channelPolicy.digest};
+ if(result.stats.policy){if(channelPolicy.mode==='filtered')result.stats.policy={...result.stats.policy,revision:channelPolicy.revision,digest:channelPolicy.digest,registration:registration.value};else if(channelPolicy.mode==='degraded')result.stats.policy={...result.stats.policy,reason:channelPolicy.reason};}
  let previous=await loadJSON(env,'programme.json');assertEPGContinuity(result,previous,run.watchlist.length,now);
  const byId=new Map();for(const film of result.films){film.shows=dedupeShows(film.shows).sort((a,b)=>a.start-b.start);byId.set(String(film.id),film);}
  const films=run.watchlist.map(f=>withAvailability({...f,...byId.get(String(f.id)),shows:byId.get(String(f.id))?.shows||[]}));
@@ -2621,7 +2628,6 @@ async function epgSync(env,run){
  const liveCatalog=typeof PublishedEpg!=='undefined'?await PublishedEpg.currentGeneration(env):null;
  const pending={'discovered-films.json':replaceCatalogAvailability(cache,discoveryHolder.discovery,run.runId,{writeAvailability:!liveCatalog}).catalog,'programme.json':report};
  cache=null;
- await registerEpgChannels(env,run,channelPolicy,result.newChannels);
  if(await sealedPublishAvailable(env)){const publication=await PublishedEpg.currentGeneration(env);if(publication)return await tracedPhase(run.runId,'seal_stage',()=>stageSealedGeneration(env,run,{holder:discoveryHolder,meta:{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist,uncertain:result.uncertain,publication}));}
  let published;try{published=await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,discoveryHolder,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);

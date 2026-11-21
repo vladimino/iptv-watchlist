@@ -64,7 +64,7 @@ assert.ok(/scoped\('src\/epg-channel-d1\.js','EpgChannelD1'\)/.test(fs.readFileS
 {const worker=fs.readFileSync('src/worker.js','utf8');
  assert.ok(!/epg_channel/.test(worker),'the Worker never names the tables');
  assert.deepEqual([...worker.matchAll(/EpgChannelD1\.(\w+)/g)].map(match=>match[1]).sort(),['materializePolicies','registerXmltvChannels'],'the Worker body calls only the policy reader and the XMLTV registration writer');
- assert.ok(/if\(env\?\.EPG_CHANNEL_POLICY!=='on'\)return null;/.test(worker),'the reader is gated by EPG_CHANNEL_POLICY=on and does nothing otherwise');
+ assert.ok(/if\(env\?\.EPG_CHANNEL_POLICY!=='on'\)return \{mode:'legacy'\};/.test(worker),'the reader is gated by EPG_CHANNEL_POLICY=on and does nothing otherwise (legacy)');
  assert.ok(!/epg_channel|EpgChannel/.test(fs.readFileSync('src/sources.js','utf8')),'scanEPG never reads D1: it receives the in-memory map');}
 
 // ===== 3. identity: tvg_1259 -> ch1259, tvg_1 -> ch001 =====

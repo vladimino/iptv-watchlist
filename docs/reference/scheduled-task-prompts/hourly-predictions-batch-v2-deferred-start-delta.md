@@ -27,7 +27,7 @@ Before any edit, the Controller reads the live tool list (`prediction_batch_key`
 | Answer | Task action |
 | --- | --- |
 | the envelope (`kind: "envelope"`) | the manifest is ready: go to step 5 |
-| `manifest_pending` (HTTP 409) | wait `retryAfterMs`, ask again (bounded) |
+| `manifest_pending` (the underlying read is HTTP 409; the MCP tool reports it as a **successful** result `{httpStatus: 200, kind: "pending", code: "manifest_pending", retryAfterMs}`, never as `isError`) | a normal wait, not a failure: wait `retryAfterMs`, ask again (bounded) |
 | `start_refused` (`outcomeCode`: `noop`, `quota`, `retry_backoff`, `manifest_too_large`, `prediction_catalog_held`, …) | no run exists; report the code, end (the same outcomes the synchronous table lists) |
 | `start_failed` (`outcomeCode`: `start_claim_lost`, `storage_error`, `start_lost`) | no run exists or it was abandoned; report the code, end, no `prediction_complete` |
 | `unknown_run`, `lease_lost` | the run is no longer ours; end, no `prediction_complete` |

@@ -295,7 +295,8 @@ const manifestKey=id=>'enrichment/batch-manifest/'+id+'.json';
  const tool=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
  w.records.delete(manifestKey(first.data.runId));
  const pending=await tool('prediction_batch_manifest',{runId:first.data.runId});
- assert.equal(pending.isError,true);assert.match(JSON.stringify(pending),/manifest_pending/,JSON.stringify(pending).slice(0,300));assert.doesNotMatch(JSON.stringify(pending),/unknown_run|manifest_unavailable/);
+ // the synchronous keyed variant: the same normal wait (a successful tool result of kind pending), never unknown_run and never an error
+ assert.equal(pending.isError,undefined,JSON.stringify(pending).slice(0,300));assert.match(JSON.stringify(pending),/manifest_pending/,JSON.stringify(pending).slice(0,300));assert.match(JSON.stringify(pending),/kind.{1,8}pending/);assert.doesNotMatch(JSON.stringify(pending),/unknown_run|manifest_unavailable/);
  // the run is not saved yet either: the claim holds the lease under the future run id
  sql(w.file,"DELETE FROM prediction_run WHERE run_id='"+first.data.runId+"'");w.records.delete('enrichment/runs/'+first.data.runId+'.json');
  const preparing=await tool('prediction_batch_manifest',{runId:first.data.runId});assert.match(JSON.stringify(preparing),/manifest_pending/,JSON.stringify(preparing).slice(0,300));
