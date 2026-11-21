@@ -134,8 +134,8 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
 }
 
 // ===== 4. the full forward sequence: hold, import, activate, release; every contract is exact =====
-{
- const env={...open('0030_epg_checkpoint_authority.sql'),r2:bucket(frozen)};
+async function sequence(upTo){
+ const env={...open(upTo),r2:bucket(frozen)};
  await stop(call('hold',{generation:1,...EV},env),'state_mismatch');
  await stop(call('import',{generation:0,...identity(env)},env),'state_mismatch');
  await stop(call('activate',{generation:0,...identity(env)},env),'state_mismatch');
@@ -234,6 +234,8 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  assert.deepEqual(reopened.marker,{mode:'r2',writes:'open',generation:4});
  assert.deepEqual(await Checkpoint.readAuthority(env.db),{state:'r2',writes:'open',generation:4});
 }
+// The same forward and rollback sequence on every schema level that keeps the 0030 contract: 30, 31 (the Watchlist authority) and the latest.
+for(const upTo of ['0030_epg_checkpoint_authority.sql','0031_watchlist_authority.sql','9999'])await sequence(upTo);
 
 // ===== 6. abort before activation: release-abort only with empty tables =====
 {
@@ -378,6 +380,75 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  const lost=allowed=>({...env2.r2.write(allowed),async put(){down=true;throw new Error('lost reply');}});
  const unclassified=await stop(Op.execute('export-rollback',{generation:3,frozenSyncEtag:id2.syncEtag,frozenIngestEtag:id2.ingestEtag},{binding:env2.db,readStore:flaky2,writeStoreFactory:lost,now:NOW}),'write_uncertain');
  assert.equal(unclassified.details.classification,'unclassified');assert.equal(unclassified.details.observed,'unreadable');
+}
+
+// ===== 9. schema gates after the apply: any schema from 30 on that keeps the 0030 contract; nothing else =====
+{
+ const refused=async(label,mutate,command='hold')=>{
+  const env={...open('9999'),r2:bucket(frozen)};
+  mutate(env.file);
+  await stop(Op.execute(command,{generation:0,...EV},{binding:env.db,readStore:env.r2.read,now:NOW}),'schema_unexpected');
+  const after=marker(env.file);
+  if(after&&after.mode==='r2')assert.deepEqual(after,{mode:'r2',writes:'open',generation:0},label+': nothing changed');
+ };
+ await refused('a missing trigger',file=>sqlite(file,'DROP TRIGGER epg_checkpoint_run_order'));
+ await refused('the other trigger',file=>sqlite(file,'DROP TRIGGER epg_checkpoint_cas_required'));
+ await refused('a missing table',file=>sqlite(file,'DROP TABLE epg_ingest_status'));
+ await refused('no marker row',file=>sqlite(file,'DELETE FROM epg_checkpoint_authority'));
+ await refused('an unreadable marker mode',file=>sqlite(file,'PRAGMA ignore_check_constraints=ON;UPDATE epg_checkpoint_authority SET mode=\'x\''),'import');
+ await refused('a schema below 30 that still has the tables',file=>sqlite(file,'DROP TRIGGER schema_contract_no_downgrade;UPDATE schema_contract SET version=29 WHERE id=1'));
+ await refused('a schema below 30 without the tables',file=>sqlite(file,'DROP TRIGGER schema_contract_no_downgrade;UPDATE schema_contract SET version=29 WHERE id=1;DROP TABLE epg_ingest_status'),'activate');
+ // the apply knows an installed contract at every level
+ for(const upTo of ['0030_epg_checkpoint_authority.sql','0031_watchlist_authority.sql','9999']){
+  const installed=open(upTo);
+  await stop(Op.execute('apply',{},{binding:installed.db,now:NOW}),'already_applied');
+ }
+ // a status read at the latest schema reports it and is still read-only
+ const latest=open('9999');
+ const status=await Op.execute('status',{...EV},{binding:latest.db,readStore:bucket(frozen).read,now:NOW});
+ assert.equal(status.writes,false);assert.equal(status.schemaVersion,Number(names.at(-1).slice(0,4)));assert.ok(status.schemaVersion>=32);
+}
+
+// ===== 10. the next EPG start comes from the shared schedule and is fail-closed =====
+{
+ const at=text=>Date.parse(text);const iso=ms=>new Date(ms).toISOString();
+ // the daily due time is 17:00 Europe/Madrid: 16:00 UTC in winter, 15:00 UTC in summer; once today's has passed the next start is tomorrow's, never today's (in the past)
+ assert.equal(iso(Op.nextStartAfter(at('2026-11-20T18:00:00Z'))),'2026-11-21T16:00:00.000Z');
+ assert.equal(iso(Op.nextStartAfter(at('2026-11-21T16:00:00Z'))),'2026-11-22T16:00:00.000Z','at the due instant the next start is tomorrow');
+ assert.equal(iso(Op.nextStartAfter(at('2026-11-21T15:59:59Z'))),'2026-11-21T16:00:00.000Z');
+ assert.equal(iso(Op.nextStartAfter(at('2026-07-10T10:00:00Z'))),'2026-07-10T15:00:00.000Z','summer');
+ assert.equal(iso(Op.nextStartAfter(at('2026-07-10T16:00:00Z'))),'2026-07-11T15:00:00.000Z');
+ // daylight saving: 29 Mar 2026 (clocks forward) and 25 Oct 2026 (clocks back)
+ assert.equal(iso(Op.nextStartAfter(at('2026-03-28T16:30:00Z'))),'2026-03-29T15:00:00.000Z');
+ assert.equal(iso(Op.nextStartAfter(at('2026-10-24T16:30:00Z'))),'2026-10-25T16:00:00.000Z');
+ const spring=at('2026-03-29T14:45:00Z'),autumn=at('2026-10-25T15:45:00Z');
+ assert.equal(Op.nextStartAfter(spring)-spring,15*60000,'spring: 15 minutes to the start (a fixed 16:00 UTC rule would say 75)');
+ assert.equal(Op.nextStartAfter(autumn)-autumn,15*60000,'autumn: 15 minutes to the start (a fixed 15:00 UTC rule would say it had passed)');
+ // the proof: unknown, expired and too close refuse; a start far enough away passes
+ const env={...open('9999'),r2:bucket(frozen)};
+ const state=await Op.readState(env.db);
+ const run=JSON.parse(SYNC);
+ const failures=nextStart=>Op.drainProof(state,{run,now:NOW,evidence:EV,nextStart}).failures;
+ assert.ok(failures(null).includes('next_start_unknown'));
+ assert.ok(failures(Number.NaN).includes('next_start_unknown'));
+ assert.ok(failures(undefined).includes('next_start_unknown')===false,'an omitted value takes the computed start');
+ assert.ok(failures(NOW-1).includes('next_start_too_close'),'an expired start is not a margin');
+ assert.ok(failures(NOW+10*60000).includes('next_start_too_close'));
+ assert.ok(failures(NOW+29*60000).includes('next_start_too_close'));
+ assert.equal(failures(NOW+31*60000).some(code=>code.startsWith('next_start')),false);
+ assert.equal(Op.drainProof(state,{run,now:NOW,evidence:EV}).ok,true,'the same-day state with the computed start passes');
+ // the command: refused 15 minutes before the due time, with every other gate passing
+ const early={...open('9999'),r2:bucket(frozen)};
+ const tooClose=await stop(Op.execute('hold',{generation:0,...EV},{binding:early.db,readStore:early.r2.read,now:at('2026-11-20T15:45:00Z')}),'drain_refused');
+ assert.deepEqual(tooClose.details.failures,['next_start_too_close'],'only the margin refuses');
+ assert.deepEqual(marker(early.file),{mode:'r2',writes:'open',generation:0});
+ // after today's due time the next start is tomorrow's, so a hold is possible
+ const later={...open('9999'),r2:bucket(frozen)};
+ const held=await Op.execute('hold',{generation:0,...EV},{binding:later.db,readStore:later.r2.read,now:at('2026-11-20T16:30:00Z')});
+ assert.deepEqual(held.marker,{mode:'r2',writes:'held',generation:1});
+ // the status shows the computed start
+ const shown=await Op.execute('status',{...EV},{binding:env.db,readStore:env.r2.read,now:NOW});
+ assert.equal(shown.nextStart.at,'2026-11-21T16:00:00.000Z');assert.equal(shown.nextStart.inMinutes,22*60);
 }
 
 // ===== 8. the script never deletes or resets: no such statement exists in it =====
