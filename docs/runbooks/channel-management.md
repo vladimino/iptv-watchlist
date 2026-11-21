@@ -5,7 +5,7 @@ Owner procedure for classifying EPG channels with the [Channel admin](../referen
 ## Before you start
 
 - The page must show a revision, not "схема ещё не применена". If it shows the latter, stop: applying the schema is not part of this runbook.
-- Read the banner: the revision is the one every save is pinned to. A save on a stale page is refused (409) and the list reloads; repeat the change on the new revision.
+- Read the banner: it says whether the scan policy is enabled, staged or unknown (from the API state, never assumed), and the revision is the one every save is pinned to. A save on a stale page is refused (409) and the list reloads; repeat the change on the new revision.
 
 ## Classify one channel
 

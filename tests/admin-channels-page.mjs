@@ -16,7 +16,22 @@ const bundle = bundleAdmin([scoped('src/domain/epg-channel-admin.js', 'EpgChanne
 for (const id of ['channels-status-body', 'channels-message', 'channels-import', 'channels-file', 'channels-parsed', 'channels-preview', 'channels-list-section', 'channels-filters', 'channels-q', 'channels-category', 'channels-policy', 'channels-source', 'channels-queue', 'channels-items', 'channels-more']) assert.match(html, new RegExp(`id="${id}"`), id);
 assert.match(html, /<a href="\/admin\/channels" aria-current="page" data-return-carry>Каналы<\/a>/);
 assert.match(html, /<script src="\/admin-channels\.js"><\/script>/);
-assert.match(html, /не применяется/, 'the banner says the policy is staged, not applied');
+assert.doesNotMatch(html, /не применяется|вступят в силу/, 'the static banner claims neither state: the page renders the API activation state');
+assert.match(html, /id="channels-eyebrow"[^>]*>[^<]*ЗАГРУЖАЕТСЯ/, 'until the read answers, the banner says the state is loading');
+{
+ const Admin = await import('../src/domain/epg-channel-admin.js');
+ const off = Admin.activationView({state: 'not_active'}), on = Admin.activationView({state: 'active'});
+ assert.equal(off.mode, 'off'); assert.match(off.eyebrow, /В EPG НЕ ПРИМЕНЯЕТСЯ/); assert.match(off.saved, /не применено/);
+ assert.equal(on.mode, 'on'); assert.match(on.eyebrow, /ВКЛЮЧЕНА/); assert.doesNotMatch(on.eyebrow + on.status + on.saved, /не применя|не читает|не включён/, 'the enabled state never says the policy is off');
+ assert.match(on.saved, /следующей естественной генерацией/); assert.match(on.status, /событии «Обновлён EPG»/, 'enabled-for-next-scan is told apart from the revision the last generation applied');
+ for (const bad of [undefined, null, {}, {state: 'weird'}, 'active', 7]) {
+  const view = Admin.activationView(bad);
+  assert.equal(view.mode, 'unknown', String(JSON.stringify(bad)) + ' is unknown'); assert.match(view.eyebrow, /НЕИЗВЕСТНО/); assert.match(view.status, /не считайте/);
+ }
+ assert.doesNotMatch(page, /В EPG не применено|не применяется, ни один скан/, 'the page script hard-codes no staged wording: receipts use the API state');
+ assert.match(page, /channelsSavedClause\(\)[\s\S]*channelsSavedClause\(\)/, 'both the save and the import receipt use the activation clause');
+ assert.match(page, /channelsRenderActivation\(result\.body && result\.body\.activation\)/, 'a failed read renders the state it carried, or unknown');
+}
 assert.match(html, /не запускают EPG, Discovery и TMDB/);
 assert.doesNotMatch(html, /fetch\(|\/api\//);
 assert.match(build, /assets\['\/admin\/channels'\]/);
