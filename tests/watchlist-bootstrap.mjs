@@ -64,7 +64,7 @@ const counts=file=>rows(file,"SELECT (SELECT COUNT(*) FROM watchlist_staging) AS
 // ===== 2. the plan: statements, batch size, no side-effect rows =====
 {
  const films=normalizeFilms(FILMS);
- const plan=bootstrapStatements({films,pin:{programmeRunId:RUN,epgGeneration:515,count:40,sha256:SHA,observedAt:'2026-11-21T16:11:45.255Z'},snapshotId:'snap-1',at:'2026-11-21T18:00:00.000Z',generation:0,revision:1,liveness:{controlRevision:-1,leaseRevision:-1,nowIso:'2026-11-21T18:00:00.000Z'}});
+ const plan=bootstrapStatements({films,pin:{programmeRunId:RUN,epgGeneration:515,count:40,sha256:SHA,observedAt:'2026-11-21T16:11:45.255Z'},snapshotId:'snap-1',at:'2026-11-21T18:00:00.000Z',generation:0,revision:1,liveness:{controlRevision:-1,leaseRevision:-1,liveAfterIso:'2026-11-21T17:59:45.000Z'}});
  const sql=plan.statements.map(([text])=>text).join('\n');
  assert.equal(plan.statements.filter(([text])=>/INSERT INTO watchlist_member/.test(text)).length,Math.ceil(40/BOOTSTRAP_MEMBERS_PER_STATEMENT));
  assert.equal(plan.statements.every(([,params])=>params.length<=100),true,'no statement exceeds the 100 bound values of D1');
@@ -212,36 +212,50 @@ const counts=file=>rows(file,"SELECT (SELECT COUNT(*) FROM watchlist_staging) AS
  assert.deepEqual((await stop(Op.execute('bootstrap',{binding:open().db,args:{...ARGS,epgGeneration:516},now:NOW}),'pin_mismatch')).details.problems,['epg_generation']);
 }
 
-// ===== 7. the EPG liveness proof is part of the batch =====
+// ===== 7. the EPG liveness proof is part of the batch, and a present record must satisfy its contract =====
 {
- const lease=(released,expires)=>"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','{\"schemaVersion\":1,\"holder\":\"h\",\"expiresAt\":\""+expires+"\",\"released\":"+released+"}',1,'2026-11-21T17:59:00.000Z')";
- // a lease appears after the preflight, the published generation and run id do not move: zero imported rows
- const late=open();
- const acquiring={prepare:sql=>late.db.prepare(sql),batch:async s=>{sqlite(late.file,lease(false,'2026-11-21T19:00:00.000Z'));return asStatement(()=>late.db.batch(s));}};
- states.length=0;
- await stop(Op.execute('bootstrap',{binding:acquiring,args:ARGS,now:NOW,ctx:trackedCtx()}),'statement_failed');
- assert.deepEqual(counts(late.file),{staging:0,snapshot:0,member:0,change:0,effect:0,pending:0},'a lease acquired inside the window: nothing imported');assert.equal(states.at(-1),'none');
+ // Realistic records, shaped like src/epg-orchestration.js writes them (emptyControl and the step lease record).
+ const control=(phase,extra={})=>JSON.stringify({schemaVersion:1,runKey:'2026-11-21',series:0,instanceId:'epg_20261121_0',epoch:1,phase,runId:RUN,checkpoint:null,budget:{consecutive:0,total:0,fingerprint:null,lastFailureAt:null},cooldownUntil:null,quarantine:null,failure:null,lastDurableProgressAt:null,nextWakeAt:null,lastStep:null,publishedRunId:RUN,doneAt:'2026-11-21T16:11:45.255Z',updatedAt:'2026-11-21T16:11:45.255Z',...extra});
+ const lease=(released,expiresAt)=>JSON.stringify({schemaVersion:1,holder:'epg_20261121_0',kind:'epg',modeRevision:2,acquiredAt:'2026-11-21T16:00:00.000Z',expiresAt,released});
+ const insert=(key,body,revision=1)=>"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('"+key+"','"+esc(body)+"',"+revision+",'2026-11-21T17:59:00.000Z');";
+ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statements=>{sqlite(env.file,mutate);return asStatement(()=>env.db.batch(statements));}});
+ const none={staging:0,snapshot:0,member:0,change:0,effect:0,pending:0};
+ // a lease appears after the preflight; the published run id and generation do not move: zero imported rows
+ const late=open();states.length=0;
+ await stop(Op.execute('bootstrap',{binding:wrap(late,insert('lease',lease(false,'2026-11-21T19:00:00.000Z'))),args:ARGS,now:NOW,ctx:trackedCtx()}),'statement_failed');
+ assert.deepEqual(counts(late.file),none,'a lease acquired inside the window: nothing imported');assert.equal(states.at(-1),'none');
  // the control record enters a running phase after the preflight
  const running=open();
- const entering={prepare:sql=>running.db.prepare(sql),batch:async s=>{sqlite(running.file,"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('control','{\"phase\":\"running\"}',1,'2026-11-21T17:59:00.000Z')");return asStatement(()=>running.db.batch(s));}};
- await stop(Op.execute('bootstrap',{binding:entering,args:ARGS,now:NOW}),'statement_failed');assert.equal(counts(running.file).member,0);
+ await stop(Op.execute('bootstrap',{binding:wrap(running,insert('control',control('running'))),args:ARGS,now:NOW}),'statement_failed');assert.deepEqual(counts(running.file),none);
  // a record that was present at the preflight and changes revision inside the window
- const bumped=open();sqlite(bumped.file,lease(true,'2026-11-21T10:00:00.000Z'));
- const bumping={prepare:sql=>bumped.db.prepare(sql),batch:async s=>{sqlite(bumped.file,"UPDATE epg_orchestration_document SET revision=2 WHERE key='lease'");return asStatement(()=>bumped.db.batch(s));}};
- await stop(Op.execute('bootstrap',{binding:bumping,args:ARGS,now:NOW}),'statement_failed');assert.equal(counts(bumped.file).member,0);
- // a released lease and a done control are idle: the import commits and its guards hold at commit time
- const idle=open();sqlite(idle.file,lease(true,'2026-11-21T10:00:00.000Z')+";INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('control','{\"phase\":\"done\"}',3,'2026-11-21T17:00:00.000Z')");
+ const bumped=open();sqlite(bumped.file,insert('lease',lease(true,'2026-11-21T16:16:29.753Z')));
+ await stop(Op.execute('bootstrap',{binding:wrap(bumped,"UPDATE epg_orchestration_document SET revision=2 WHERE key='lease'"),args:ARGS,now:NOW}),'statement_failed');assert.deepEqual(counts(bumped.file),none);
+ // realistic idle records: a released lease and a done control. The import commits and the in-batch proof holds.
+ const idle=open();sqlite(idle.file,insert('lease',lease(true,'2026-11-21T16:16:29.753Z'))+insert('control',control('done'),3));
  assert.equal((await Op.execute('bootstrap',{binding:idle.db,args:ARGS,now:NOW})).writeState,'committed');
- // a liveness record that is not an object is unknown, not idle: refused before any write; and inside the batch the same shape aborts it
- const malformed=open();sqlite(malformed.file,"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('control','\"not an object\"',1,'2026-11-21T17:00:00.000Z')");
- await stop(Op.execute('bootstrap',{binding:malformed.db,args:ARGS,now:NOW}),'liveness_unknown');assert.equal(counts(malformed.file).member,0);
- const poisoned=open();
- const poisoning={prepare:sql=>poisoned.db.prepare(sql),batch:async s=>{sqlite(poisoned.file,"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','[]',1,'2026-11-21T17:59:00.000Z')");return asStatement(()=>poisoned.db.batch(s));}};
- await stop(Op.execute('bootstrap',{binding:poisoning,args:ARGS,now:NOW}),'statement_failed');assert.equal(counts(poisoned.file).member,0,'a non-object record inside the window fails the batch closed');
- // a lease without an expiry counts as live
- const open_ended=open();
- const noExpiry={prepare:sql=>open_ended.db.prepare(sql),batch:async s=>{sqlite(open_ended.file,"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','{\"holder\":\"h\",\"released\":false}',1,'2026-11-21T17:59:00.000Z')");return asStatement(()=>open_ended.db.batch(s));}};
- await stop(Op.execute('bootstrap',{binding:noExpiry,args:ARGS,now:NOW}),'statement_failed');assert.equal(counts(open_ended.file).member,0);
+ // an expired, unreleased lease past the margin is idle too; an unreleased one inside the margin is live
+ const expired=open();sqlite(expired.file,insert('lease',lease(false,'2026-11-21T17:00:00.000Z')));
+ assert.equal((await Op.execute('bootstrap',{binding:expired.db,args:ARGS,now:NOW})).writeState,'committed');
+ const margin=open();sqlite(margin.file,insert('lease',lease(false,'2026-11-21T17:59:50.000Z')));
+ assert.equal((await stop(Op.execute('bootstrap',{binding:margin.db,args:ARGS,now:NOW}),'writer_active')).details.busy,'step_lease_live','within the 15 s margin after expiry the lease still counts as live');
+ // valid JSON that is not a valid record: unknown, refused before any write (the same record inside the window aborts the batch)
+ const invalidControls={'empty object':'{}','unknown phase':control('unexpected'),'no budget':JSON.stringify({schemaVersion:1,phase:'done'}),'wrong schemaVersion':control('done',{schemaVersion:2}),'string budget counts':control('done',{budget:{consecutive:'0',total:0}}),'a string':'"x"','an array':'[]','null':'null'};
+ for(const [label,body] of Object.entries(invalidControls)){
+  const before=open();sqlite(before.file,insert('control',body));
+  await stop(Op.execute('bootstrap',{binding:before.db,args:ARGS,now:NOW}),'liveness_unknown');assert.deepEqual(counts(before.file),none,'control '+label+' (preflight)');
+  const inside=open();
+  await stop(Op.execute('bootstrap',{binding:wrap(inside,insert('control',body)),args:ARGS,now:NOW}),'statement_failed');assert.deepEqual(counts(inside.file),none,'control '+label+' (inside the batch)');
+ }
+ const invalidLeases={'released only':'{"released":true}','released as a string':JSON.stringify({schemaVersion:1,holder:'h',expiresAt:'2026-11-21T19:00:00.000Z',released:'false'}),'invalid expiry':lease(false,'garbage'),'offset expiry':lease(false,'2026-11-21T20:00:00+01:00'),'no expiry':JSON.stringify({schemaVersion:1,holder:'h',released:false}),'no holder':JSON.stringify({schemaVersion:1,expiresAt:'2026-11-21T19:00:00.000Z',released:false}),'an array':'[]'};
+ for(const [label,body] of Object.entries(invalidLeases)){
+  const before=open();sqlite(before.file,insert('lease',body));
+  await stop(Op.execute('bootstrap',{binding:before.db,args:ARGS,now:NOW}),'liveness_unknown');assert.deepEqual(counts(before.file),none,'lease '+label+' (preflight)');
+  const inside=open();
+  await stop(Op.execute('bootstrap',{binding:wrap(inside,insert('lease',body)),args:ARGS,now:NOW}),'statement_failed');assert.deepEqual(counts(inside.file),none,'lease '+label+' (inside the batch)');
+ }
+ // status reports the unknown liveness instead of an idle writer
+ const unknown=open();sqlite(unknown.file,insert('control','{}'));
+ assert.equal((await Op.execute('status',{binding:unknown.db,now:NOW})).decision,'liveness_unknown');
 }
 
 // ===== 8. an existing import is verified read-only before any receipt =====

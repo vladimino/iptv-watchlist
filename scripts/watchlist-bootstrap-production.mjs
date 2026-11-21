@@ -19,9 +19,8 @@ import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {createD1Adapter,D1Error} from './d1-backfill.mjs';
 import {createPublishedBinding,normalize,OperatorStop,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
-import {applyBusy} from './epg-checkpoint-production.mjs';
 import {listDigest} from '../src/watchlist-d1.js';
-import {bootstrapStatements,membershipDigest,sourceList} from '../src/watchlist-bootstrap.js';
+import {bootstrapStatements,LEASE_MARGIN_MS,livenessOf,membershipDigest,sourceList} from '../src/watchlist-bootstrap.js';
 
 export const COMMANDS=['status','bootstrap','digest'];
 const WATCHLIST_TABLES=['watchlist_authority','watchlist_cas','watchlist_current','watchlist_staging','watchlist_snapshot','watchlist_member','watchlist_change','watchlist_effect','watchlist_admission_pending'];
@@ -91,8 +90,8 @@ export function decision(state){
  const pub=state.published;
  if(!pub||pub.mode!=='d1'||pub.cutover!=='open'||!pub.programme_run_id)return 'published_unavailable';
  if(pub.finalized_run_id!==pub.programme_run_id)return 'published_not_certified';
- // Fail closed on a liveness record that cannot be read as an object: a missing record is idle, a record of another shape is unknown.
- for(const key of ['control','lease']){const body=state.orchestration[key]?.body;if(state.orchestration[key]&&(body===null||typeof body!=='object'||Array.isArray(body)))return 'liveness_unknown';}
+ // Fail closed: a missing record is idle, a present record that does not satisfy the EPG record contract (known phase, schemaVersion and budget; holder, parseable expiry and boolean released) is unknown.
+ if(!livenessOf({control:state.orchestration.control,lease:state.orchestration.lease},0).ok)return 'liveness_unknown';
  return 'ready';
 }
 
@@ -159,7 +158,7 @@ export async function execute(command,{binding,args={},now,ctx={}}){
  const verdict=decision(state);
  let source=null;
  if(verdict==='ready'||verdict==='already_bootstrapped'){source=verdict==='ready'?await sourceOf(state):null;}
- if(command==='status')return {operation:'status',writes:false,writeState:'none',decision:verdict,...view(state),source:source?source.ok?{count:source.films.length,sha256:source.digest,membersSha256:source.membersSha256,epgGeneration:state.published?Number(state.published.generation):null}:{problem:source.reason}:null,epgBusy:applyBusy({orchestration:state.orchestration},clock)};
+ if(command==='status')return {operation:'status',writes:false,writeState:'none',decision:verdict,...view(state),source:source?source.ok?{count:source.films.length,sha256:source.digest,membersSha256:source.membersSha256,epgGeneration:state.published?Number(state.published.generation):null}:{problem:source.reason}:null,epgBusy:livenessOf({control:state.orchestration.control,lease:state.orchestration.lease},clock).busy??null};
  if(command!=='bootstrap')throw new OperatorStop('usage',2);
  if(verdict==='already_bootstrapped'){
   // An import that already exists is verified read-only, never trusted from the pointer alone. Equal and current: a receipt, nothing written. Anything else is refused with its reason.
@@ -171,11 +170,12 @@ export async function execute(command,{binding,args={},now,ctx={}}){
  if(!source.ok)throw new OperatorStop(source.reason,3);
  const problems=pinProblems(state,source,args);
  if(problems.length)throw new OperatorStop('pin_mismatch',3,{problems});
- const busy=applyBusy({orchestration:state.orchestration},clock);
- if(busy)throw new OperatorStop('writer_active',3,{busy});
+ const live=livenessOf({control:state.orchestration.control,lease:state.orchestration.lease},clock);
+ if(!live.ok)throw new OperatorStop('liveness_unknown',3,{reason:live.reason});
+ if(live.busy)throw new OperatorStop('writer_active',3,{busy:live.busy});
  const snapshotId=ctx.snapshotId??randomUUID();
  const pin={programmeRunId:state.published.programme_run_id,epgGeneration:Number(state.published.generation),count:source.films.length,sha256:source.digest,observedAt:iso(Date.parse(state.published.finalized_at||'')||clock)};
- const plan=bootstrapStatements({films:source.films,pin,snapshotId,at:iso(clock),generation:Number(state.marker.generation),revision:Number(state.pointer.revision),liveness:{controlRevision:state.orchestration.control?.revision??-1,leaseRevision:state.orchestration.lease?.revision??-1,nowIso:iso(clock)}});
+ const plan=bootstrapStatements({films:source.films,pin,snapshotId,at:iso(clock),generation:Number(state.marker.generation),revision:Number(state.pointer.revision),liveness:{controlRevision:state.orchestration.control?.revision??-1,leaseRevision:state.orchestration.lease?.revision??-1,liveAfterIso:iso(clock-LEASE_MARGIN_MS)}});
  if(ctx.track)ctx.track('unknown');
  try{await binding.batch(plan.statements.map(([sql,params])=>binding.prepare(sql).bind(...params)));}
  catch(error){
