@@ -137,13 +137,13 @@ export async function planLetterboxdClaim(env,{lid,tmdb}={}){
 }
 
 // The re-plan of a receipt retry: a FRESH proof from the current stores, or null when the source no longer proves exactly this claim for the same Film (the receipt then ends as a moved source, never a write from a stale proof).
-export async function replanLetterboxdClaim(env,{lid,tmdb,filmId,now}){
+export async function replanLetterboxdClaim(env,{lid,tmdb,filmId,now,extraGuards=[]}){
  const fresh=await planLetterboxdClaim(env,{lid,tmdb});
- return fresh.verdict==='pass'&&!fresh.already&&fresh.filmId===filmId?claimInput(fresh,(typeof now==='function'?now:()=>now||new Date().toISOString())()):null;
+ return fresh.verdict==='pass'&&!fresh.already&&fresh.filmId===filmId?claimInput(fresh,(typeof now==='function'?now:()=>now||new Date().toISOString())(),extraGuards):null;
 }
 
-function claimInput(plan,at){
- return {id:plan.filmId,at,schemes:['letterboxd'],addOnly:true,guards:plan.guards,
+function claimInput(plan,at,extraGuards=[]){
+ return {id:plan.filmId,at,schemes:['letterboxd'],addOnly:true,guards:[...plan.guards,...extraGuards],
   externalIds:[{scheme:'letterboxd',value:plan.lid,trusted:true,conflicting:false,provenance:{source:LETTERBOXD_CLAIM_SOURCE,tmdb:plan.tmdb,adr:'0184'}}]};
 }
 
@@ -151,14 +151,16 @@ function claimInput(plan,at){
 // `event` is the stable source event (the producer's run or the backfill's frozen cohort id), bound into the request id; the same event, Film and content is the same request (idempotent replay). The proof is re-planned from the CURRENT
 // stores on every receipt retry (a stale proof is never replayed: a source that no longer proves the claim ends the receipt as a moved source), and the write-time guards are asserted inside the batch. An applied receipt is not evidence of a
 // claim: `written` is returned only when the readback finds the trusted claim now stored; an applied receipt without the claim (a lid removed after an earlier run of the same event) is `unknown`, never a success.
-export async function applyLetterboxdClaim(env,{event,lid,tmdb,now}={}){
+// `extraGuards` ([{sql,params}], at most 5) are the caller's frozen-state pins (an operator's approved generations), asserted INSIDE the same fenced batch next to the planner's own guards; one that does not hold writes nothing.
+export async function applyLetterboxdClaim(env,{event,lid,tmdb,now,extraGuards=[]}={}){
  if(typeof event!=='string'||!event.trim())throw failed('film_person_invalid');
  const clock=typeof now==='function'?now:()=>now||new Date().toISOString();
  const plan=await planLetterboxdClaim(env,{lid,tmdb});
  if(plan.verdict!=='pass')return {state:'refused',...plan};
  if(plan.already)return {state:'already',...plan};
- const input=claimInput(plan,clock());
- const replan=()=>replanLetterboxdClaim(env,{lid,tmdb,filmId:plan.filmId,now:clock});
+ if(!Array.isArray(extraGuards)||extraGuards.length>5)throw failed('film_person_invalid');
+ const input=claimInput(plan,clock(),extraGuards);
+ const replan=()=>replanLetterboxdClaim(env,{lid,tmdb,filmId:plan.filmId,now:clock,extraGuards});
  const outcome=await applyFilmExternalIds(env,{origin:LETTERBOXD_CLAIM_ORIGIN,event,input,replan,now:clock});
  const {guards:_guards,...shown}=plan;
  if(outcome.state==='absent'||outcome.state==='skipped')return {state:'refused',...shown,verdict:'not_proved',reason:outcome.state==='absent'?'film_absent':'film_person_route_not_open',outcomeState:outcome.state,requestId:outcome.requestId??null};

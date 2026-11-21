@@ -154,6 +154,14 @@ The publication after the catalog is three bounded steps (`publish`, `finalize`,
 
 Film/Person is served only at marker `d1` / cutover `open`; `held` is the fail-closed forward-fix gate. An installed `r2` or `prepared` marker, a partial or missing `film_person_*` schema and every marker, baseline or fence read error are refused (`film_person_unavailable`) before any R2 read or D1 write. The frozen `titles.json` / `people.json` mirrors are never a fallback or restore source; the immutable sources and R2 mirrors stay as before. The local stand-in is the explicit `FILM_PERSON_DB_OPTIONAL=standin` flag for a domain that is not installed at all. No migration, SQL CHECK constraint or production marker changes. Evidence: [AIR-79 Film/Person D1-only slice](../evidence/d1-migration/air-79-film-person-d1-only-2026-11-18.md).
 
+## Accepted design (not implemented): the Watchlist authority ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
+
+| Domain | Authority today | Proposed authority |
+| --- | --- | --- |
+| Watchlist membership, order, version, last successful scan | The published EPG generation (`published_epg_document`, `published_epg_member`) and its R2 mirror `watchlist.json`, written by the EPG run | A new D1 domain behind marker `watchlist_authority` (inserted as `epg`; `d1` after a separate owner-approved cutover): a current pointer, immutable snapshot versions (newest eight kept) and member rows staged per attempt, a change list, a per-snapshot causal-effects journal (facts, retention, removal queue), a slot Event outbox and a mirror that reconciles to the current snapshot and a durable pending-admission ledger, written only by the Letterboxd Sync through one stage-verify-switch batch; the generation keeps a copy of the pinned version |
+
+It is a design: no migration file exists, nothing is applied, the marker does not exist in production, and a code rollback would not revert any of it. Cutover (a bootstrap import of the current published watchlist, then the marker switch) and data rollback (an export back into the generation's watchlist part) are separate owner-gated procedures.
+
 ## EPG Channel policy tables (schema v31, dormant; not applied)
 
 `migrations/0031_epg_channel_authority.sql` follows a complete version 30 and refuses anything else before a table is created. It is not applied by a deploy. It adds the Channel, provider category and per-category policy tables and one snapshot revision with its batch fence, with no authority marker: no code path reads them, so applying the file changes no EPG, Discovery or scan behavior. Authority, if it is ever activated, is a later decision with its own owner approval ([ADR 0187](../adr/0187-epg-channel-authority.md), Proposed). The show tables keep their keys; the new tables have no foreign key to them. Code rollback does not revert an applied schema.
