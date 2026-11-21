@@ -1377,6 +1377,9 @@ export const FILES={
  "letterboxd-sync-bundle.mjs": {
   "suite": "core"
  },
+ "letterboxd-sync-ratings.mjs": {
+  "suite": "core"
+ },
  "ratings-queue-v2.mjs": {
   "suite": "core"
  },

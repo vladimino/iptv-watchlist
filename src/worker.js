@@ -2597,7 +2597,7 @@ async function epgSync(env,run){
  if((!published?.authoritative||!published.mirrored)&&await epgMayWriteWatchlistRoot(env,run))await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
 }
 // AIR-570 (ADR 0186): the phase ports of the dormant Letterboxd Sync Workflow, assembled from the modules already in this scope. Nothing here runs unless the Letterboxd mode row says `cloudflare`
-// (the owner's switch refuses that without a proven handover). The Watchlist phase is complete; a phase with no port stays absent and fails closed.
+// (the owner's switch refuses that without a proven handover). A port a deployment cannot supply stays absent and fails closed.
 async function letterboxdTmdbOf(env,lids){
  const working=await MetadataCache.loadMetadataWorkingSet(env),records=working?.records||{},map=new Map();
  for(const lid of lids){const id=records[lid]?.tmdbId;map.set(lid,id==null?null:String(id));}
@@ -2614,7 +2614,8 @@ function letterboxdPorts(env){
   removalRef:(e,snapshot)=>LetterboxdSync.slotEventRef(e,snapshot.slotKey,snapshot.runId),
  });
  const repository=LetterboxdSyncRepository.watchlistRepository(WatchlistD1,{epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],effectWriters:effects});
- return {watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername})};
+ const fenceGuard=epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]];
+ return {ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername})};
 }
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {

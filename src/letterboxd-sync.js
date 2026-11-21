@@ -393,7 +393,7 @@ export async function run(env, payload, step, hooks = {}) {
     return moved ? {ok: true, runId: moved.runId || ('lbrun-' + key + '-' + series)} : {ok: false, reason: 'write_conflict'};
   });
   if (!entry.ok) return {stopped: true, reason: entry.reason, slotKey: key};
-  const ctx = {slotKey: key, series, epoch, runId: entry.runId, now, deadline: nextDue - LIMITS.deadlineMarginMs, env};
+  const ctx = {slotKey: key, series, epoch, runId: entry.runId, now, clock: hooks.clock || now, deadline: nextDue - LIMITS.deadlineMarginMs, env};
   const advance = fields => step.do(nameOf('mark'), async () => {
     const adm = await admit(env, {slotKey: key, series, epoch});
     if (!adm.ok || adm.slot.closedAt) return {ok: false, reason: adm.reason || 'complete'};

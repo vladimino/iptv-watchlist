@@ -11,7 +11,7 @@ import {spawnSync} from 'node:child_process';
 import {webcrypto} from 'node:crypto';
 import {sqliteSync} from './sqlite-session.mjs';
 import {d1Standin} from './d1-standin.mjs';
-import {makeBucket} from './ratings-harness.mjs';
+import {makeBucket,diaryPage,diaryRow} from './ratings-harness.mjs';
 
 const T=s=>Date.parse(s);
 const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-lbbundle-'));
@@ -29,12 +29,12 @@ const db=d1Standin(file);
 // A fake Letterboxd: a watchlist of `list` ids in pages of 3.
 let list=['f0','f1','f2','f3'];
 const poster=id=>`<div data-component-class="LazyPoster" data-item-name="Film ${id} (2001)" data-item-link="/film/${id}/" data-postered-identifier='{"lid":"${id}"}'></div>`;
-const page=n=>{const per=3,items=list.slice((n-1)*per,n*per),last=n*per>=list.length;return `<span class="js-watchlist-count">${list.length}</span>${items.map(poster).join('')}${last?'':`<a class="next" href="/me/watchlist/page/${n+1}/">Next</a>`}`;};
+const page=n=>{const per=3,items=list.slice((n-1)*per,n*per),last=n*per>=list.length;return `<span class="js-watchlist-count">${list.length}</span>${items.map(poster).join('')}${last?'':`<a class="next" href="/demo-user/watchlist/page/${n+1}/">Next</a>`}`;};
 const fetched=[];
-const fakeFetch=async url=>{fetched.push(String(url));const m=/\/me\/watchlist\/(?:page\/(\d+)\/)?$/.exec(String(url));if(!m)return new Response('not found',{status:404});return new Response(page(Number(m[1]||1)),{status:200});};
+const fakeFetch=async url=>{fetched.push(String(url));if(/\/demo-user\/diary\//.test(String(url)))return new Response(diaryPage([diaryRow('f0',0,'2026-11-20','100001')],false),{status:200});const m=/\/demo-user\/watchlist\/(?:page\/(\d+)\/)?$/.exec(String(url));if(!m)return new Response('not found',{status:404});return new Response(page(Number(m[1]||1)),{status:200});};
 
 const bucket=makeBucket();
-const env={DB:db,BUCKET:bucket,LETTERBOXD_USERNAME:'me',EPG_XML_URL:'https://epg.test/x.xml',METADATA_CACHE_DB_OPTIONAL:'standin'};
+const env={DB:db,BUCKET:bucket,LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://epg.test/x.xml',METADATA_CACHE_DB_OPTIONAL:'standin'};
 const wf={instances:new Map(),created:[],async create({id,params}){if(this.instances.has(id))throw new Error('already exists');this.instances.set(id,{status:'running',params});this.created.push(id);},async get(id){if(!this.instances.has(id))throw new Error('not found');return {status:async()=>({status:this.instances.get(id).status})};}};
 env.LETTERBOXD_WORKFLOW=wf;
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,Math,TextEncoder,TextDecoder,Uint8Array,atob,btoa,encodeURIComponent,decodeURIComponent,structuredClone,crypto:webcrypto,setTimeout,clearTimeout,console:{log(){},error:(...a)=>process.stderr.write(a.join(' ')+'\n'),warn(){}},ASSETS:{},fetch:fakeFetch});
@@ -45,9 +45,13 @@ const G=name=>run(name);
 // 1. The bundle has the ports and the control plane; the Watchlist phase and the three effect writers are the real ones.
 assert.equal(typeof G('letterboxdPorts'),'function');
 const ports=G('letterboxdPorts')(env);
-assert.deepEqual(Object.keys(ports).sort(),['watchlist'],'only the phases that have a real adapter are supplied; the others stay absent and fail closed');
+assert.deepEqual(Object.keys(ports).sort(),['ratings','reconcile','watchlist'],'every phase has a real adapter');
 assert.equal(typeof ports.watchlist.run,'function');
 const LetterboxdSync=G('LetterboxdSync');
+// Supported ratings storage (version 2 queue and a merge-form Diary cursor), seeded into the D1-owned ratings documents exactly as a migrated production store holds them.
+context.__env=env;
+await run("LetterboxdRatings.writeDocument(__env,'enrichment/removal-rating-lookups.json',null,{schemaVersion:2,films:{},droppedRefs:0,migratedAt:'2026-10-31T00:00:00.000Z'})");
+await run("LetterboxdRatings.writeDocument(__env,'letterboxd/diary/state.json',null,{schemaVersion:2,coverage:{newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false},resumePage:null,writer:{runId:'ratings-storage-migrate',step:'migrate'}})");
 const step={async do(name,fn){return fn();},async sleepUntil(){}};
 
 // 2. Activation is refused: the ratings phase, the legacy fence and the handover are not provable here, so the Workflow can not be admitted.
@@ -61,8 +65,7 @@ const step={async do(name,fn){return fn();},async sleepUntil(){}};
 }
 async function slot(now){
  const started=await LetterboxdSync.ensure(env,{now});
- const done={run:async()=>({done:true,outcome:'finished'})};
- const result=await LetterboxdSync.run(env,{slotKey:started.slot,series:0,epoch:1},step,{now:()=>now+60000,ports:{...ports,ratings:done,reconcile:{run:async()=>({done:true,outcome:'done'})}}});
+ const result=await LetterboxdSync.run(env,{slotKey:started.slot,series:0,epoch:1},step,{now:()=>now+60000,ports});
  return {started,result};
 }
 const rowOf=key=>db.sql("SELECT watchlist_outcome AS w,status FROM letterboxd_slot WHERE slot_key='"+key+"'")[0];
@@ -72,7 +75,7 @@ const rowOf=key=>db.sql("SELECT watchlist_outcome AS w,status FROM letterboxd_sl
  const r=await slot(T('2026-11-21T09:40:00Z'));
  assert.equal(r.result.reason,'complete');assert.equal(rowOf('2026-11-21T1030').w,'committed');
  assert.equal(db.sql('SELECT version,film_count FROM watchlist_current')[0].film_count,4);
- assert.equal(fetched.length,3,'page 1, page 2 and the repeat read of page 1');
+ assert.equal(fetched.filter(u=>/watchlist/.test(u)).length,3,'page 1, page 2 and the repeat read of page 1');
 }
 // The Film/Person marker of this stand-in is the default `r2`, which the canonical writer refuses; opening it needs a verified baseline (a separate, owner-gated state). The retention effect is
 // therefore exercised here on the documented closed-writer path (the same `facts_only` the EPG scan took); its open-writer behaviour has its own test (letterboxd-sync-effects.mjs).
@@ -108,5 +111,22 @@ run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
  const per=new Map();for(const e of events)per.set(e.slot,(per.get(e.slot)||0)+1);
  for(const [slotKey,count] of per)assert.equal(count,2,slotKey);
  assert.ok(per.size>=3);
+}
+// 7. The real Ratings and reconciliation phases ran for every slot, the pipeline wrote NO Event of its own (only the slot outbox did), and the Diary writes are fenced by the Letterboxd epoch.
+{
+ const slots=db.sql("SELECT slot_key,status,ratings_outcome AS r,reconciliation_outcome AS c FROM letterboxd_slot WHERE closed_at IS NOT NULL");
+ assert.ok(slots.length>=3);
+ for(const row of slots){assert.equal(row.r,'finished',row.slot_key+' ratings');assert.equal(row.c,'done',row.slot_key+' reconciliation');}
+ const runDoc=db.sql("SELECT body FROM ratings_document WHERE key='letterboxd/ratings/run.json'");
+ const run=JSON.parse(runDoc.map(r=>r.body).join(''));
+ assert.ok(run.slotKey&&/^\d{4}-\d{2}-\d{2}T\d{4}$/.test(run.slotKey),'the pipeline run carries the slot key');
+ assert.equal(run.state,'finished');
+ const eventIds=[...bucket.records.entries()].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v.id);
+ assert.ok(eventIds.length>0&&eventIds.every(id=>/^lbsync-/.test(id)),'no ratings Event of the pipeline: '+eventIds.join(','));
+ // A stale epoch: the Diary phase refuses and the run document is untouched.
+ const before=JSON.stringify(db.sql("SELECT key,etag FROM ratings_document WHERE key='letterboxd/ratings/run.json'"));
+ const stale=await G('letterboxdPorts')(env).ratings.run({env,slotKey:'2026-11-23T0430',runId:'x',epoch:99,now:()=>T('2026-11-23T04:40:00Z')}).then(()=>'resolved',()=>'rejected');
+ assert.equal(stale,'rejected','a stale epoch is refused');
+ assert.equal(JSON.stringify(db.sql("SELECT key,etag FROM ratings_document WHERE key='letterboxd/ratings/run.json'")),before,'nothing was written');
 }
 console.log('letterboxd-sync-bundle ok');
