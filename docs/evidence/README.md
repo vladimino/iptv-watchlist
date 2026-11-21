@@ -6,6 +6,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 
 | Area | Reports and decisions |
 | --- | --- |
+| [AIR-549 / AIR-497: canonical Film and published Watchlist parity audit](d1-migration/air-549-canonical-watchlist-film-parity-audit-2026-11-21.md) | 21 Nov 2026, read-only production D1 and Cloudflare Workflow inspection: 395 published members, nine TMDB-owned canonical metadata/membership gaps, 113 of 113 Producer Workflow instances errored, unsafe raw-id planner; no repair or production write |
 | [Mutable R2 inventory and disposition brief](d1-migration/air-546-mutable-r2-inventory-2026-11-20.md) | Source-pinned inventory, live schema/authority readback, proposed migrate/retain decisions and explicit remaining closure gates; no migration authorized |
 | [AIR-550 stage 2: EPG checkpoint in D1, dormant repository, offline evidence](d1-migration/air-550-epg-checkpoint-stage2-offline-2026-11-20.md) | 20 Nov 2026, repository change and offline tests; no production read or write; resolutions of the ADR's open questions and the limits of the sqlite stand-in |
 | [AIR-551: EPG checkpoint D1 cutover, read-only preflight and proposed L3 plan](d1-migration/air-551-epg-checkpoint-preflight-and-l3-plan-2026-11-21.md) | 21 Nov 2026 07:20-07:30 UTC, L0 observation only (three D1 `SELECT`s, read-only MCP tools); schema 29, checkpoint R2-authoritative, EPG `complete` and idle; the missing operator tooling and a holdpoint plan H-1 to H6 proposed for owner decision. Nothing applied. |
