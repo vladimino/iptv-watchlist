@@ -45,5 +45,6 @@ for(const name of names){
 }
 assert.ok(statementCount>300,'the whole chain was executed statement by statement ('+statementCount+')');
 assert.deepEqual(schema(parts),schema(whole),'the schema built statement by statement equals the schema built from the whole files');
-assert.equal(JSON.parse(sqliteSync(['-json',parts],{input:'SELECT version FROM schema_contract WHERE id=1;',encoding:'utf8'}).stdout)[0].version,30);
+// The schema version is that of the last migration file: a later migration must not break this test.
+assert.equal(JSON.parse(sqliteSync(['-json',parts],{input:'SELECT version FROM schema_contract WHERE id=1;',encoding:'utf8'}).stdout)[0].version,Number(names.at(-1).slice(0,4)));
 console.log('migration statements: '+statementCount+' statements of '+names.length+' migrations execute one by one and build the same schema');
