@@ -212,6 +212,7 @@ for(const name of notDiscovery)assert.ok(inputs.has(name),'the projector reads '
 const naming=set=>[...set.keys()].filter(key=>notDiscovery.some(name=>set.get(key).d.body.includes("'"+name+"'"))).sort();
 const NAMING={
  'loadJSON@src/worker.js':'a read of published documents and other JSON; it does not write',
+ 'catalogMetadataRead@src/worker.js':'AIR-569: a READ of the canonical metadata (D1 reader in d1 mode, else the metadata.json mirror) for the identity of a new Watchlist member; it writes nothing',
  'putStoredJson@src/worker.js':'frozen titles.json/people.json put after epgStepGuard; other keys are ordinary R2 JSON',
  'writeMirrors@src/published-epg.js':'writes those mirrors from the D1 document, idempotently',
  'persistWatchlist@src/worker.js':'publication path, under the lease',
