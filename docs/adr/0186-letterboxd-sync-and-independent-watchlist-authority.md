@@ -1,9 +1,9 @@
 # ADR 0186: One four-slot Letterboxd Sync Workflow writes the Watchlist, which becomes its own D1 authority that the EPG only reads
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-21 (design; the target below is the Product Owner's directive recorded on the card, the mechanism is proposed here)  
 **Recorded at:** 2026-11-21  
-**Approval source:** Not yet given for the ADR as a whole. The owner's directions on the open questions O2 to O5 are recorded in the [owner review of PR #835](https://github.com/vladimino/iptv-watchlist/pull/835#pullrequestreview-6003982126) and are applied below; that review states they are **not** a final approval, do not accept this ADR and authorize no merge, implementation or production operation. The owner's target (four Letterboxd Sync runs, an independent EPG at 17:00, two separate user Events, no propagation of Discovery or EPG failures to the user sources) is recorded on [AIR-568](https://trello.com/c/UjY7WXFf). This record becomes Accepted only after independent review and an explicit owner decision, because it changes data authority, orchestration and publication.  
+**Approval source:** Explicit Product Owner acceptance on 2026-11-21 ([AIR-568 approval record](https://trello.com/c/UjY7WXFf#comment-6b0152a40dd583638b2bf965)) after [independent technical PASS]((https://github.com/vladimino/iptv-watchlist/pull/835#pullrequestreview-6004037676)) and the consolidated [O2-O5 decisions](https://github.com/vladimino/iptv-watchlist/pull/835#pullrequestreview-6003982126). This is approval of the architecture and docs-only PR, **not** authorization for implementation, production migration/bootstrap, cron/Workflow activation, flag changes, data authority cutover or other AIR-571 operations.  
 **Related work:** [AIR-568](https://trello.com/c/UjY7WXFf) (this design); successors [AIR-569](https://trello.com/c/yaXv2oj6) (D1 Watchlist authority and readers), [AIR-570](https://trello.com/c/JSXgFWzp) (one Letterboxd Workflow and two Events), [AIR-571](https://trello.com/c/b6UrtwUG) (controlled production cutover); integration boundaries [AIR-550](https://trello.com/c/xMTEtaLp), [AIR-551](https://trello.com/c/YAVPlcAe), [AIR-552](https://trello.com/c/Hk2dJf2U); [AIR-532](https://trello.com/c/mGPwomMX); [ADR 0142](0142-epg-owned-generation-addressed-discovery-slots.md); [ADR 0090](0090-ratings-cloudflare-workflow-executor.md); [ADR 0101](0101-ratings-logical-due-time-1700.md); [ADR 0185](0185-epg-checkpoint-d1-authority.md); [ADR 0173](0173-watchlist-retention-observed-at-is-state-start.md); [ADR 0089](0089-shared-orchestration-reliability-contract.md); [ADR 0166](0166-diary-rated-only-identity-bridge.md); [ADR 0184](0184-ratings-confirmed-letterboxd-claim-on-existing-film.md); [ADR 0107](0107-get-head-read-side-effect-boundary.md); [ADR 0177](0177-read-only-mirror-fallback-for-film-and-programme.md); [ADR 0170](0170-unified-identity-work-inventory.md)  
 **Supersedes:** None. It **qualifies** (the older records are not edited): decisions 3 and 10 of ADR 0142 (who writes the watchlist part and the watchlist tail) for the `d1` Watchlist mode only; decision 1 of ADR 0090 and ADR 0101 (one daily Ratings run at 17:00) once the Letterboxd Workflow is active; the ingest status and the `watchlist`, `ratedAdmissionScan`, `removalRefs` and `removalLookups` parts of the checkpoint described by ADR 0185 for the `d1` Watchlist mode; the writer (not the semantics) of the scan watermark of ADR 0173, and the programme/watchlist pairing rule of ADR 0177 (decision 8.6). Each qualification takes effect only when this record is Accepted **and** its implementation is delivered, activated and accepted.  
 **Superseded by:** None
@@ -24,7 +24,7 @@ Confirmed from code on `main` `5d80240` (21 Nov 2026). Production behavior, run 
 
 **Not established:** how long the Watchlist scan takes in production; how many statements a 700-row snapshot commit needs on D1 (to be measured offline, as ADR 0185 did); whether the account allows a fourth cron trigger on this Worker (the repository shows three; the platform limit was not verified here, see open question O1).
 
-## Decision (proposed; not implemented)
+## Decision (accepted design; not implemented)
 
 Nothing here is active, no schema is applied, no cron or binding is changed by this record.
 
@@ -214,7 +214,7 @@ The migration apply, the bootstrap import, the marker switch, the Ratings close,
 | Option | For | Against | Verdict |
 | --- | --- | --- | --- |
 | **A. Keep the EPG generation as the Watchlist authority and add a Letterboxd step to the EPG run** | No new authority | The user source stays coupled to the EPG and Discovery; one slot a day; a Letterboxd outage still blocks the programme | Rejected |
-| **B. New D1 Watchlist authority, separate publication, EPG reads one snapshot (this ADR)** | Failure isolation; four slots; bounded rows; self-contained EPG run; rollback has an export path | One more marker, three tables, a bootstrap and a four-way EPG test matrix | **Recommended** |
+| **B. New D1 Watchlist authority, separate publication, EPG reads one snapshot (this ADR)** | Failure isolation; four slots; bounded rows; self-contained EPG run; rollback has an export path | One more marker, several D1 tables, a bootstrap and a four-way EPG test matrix | **Selected; accepted design** |
 | **C. Shared publication: the Letterboxd Workflow republishes the programme generation after each commit** | One visible list | Breaks ADR 0142 decision 3 (only the EPG moves the generation), multiplies generation churn, re-couples to the Discovery pause | Rejected |
 | **D. Two Workflows (Ratings and Watchlist), each on four slots** | Smaller units | Two orderings, doubled Letterboxd traffic at one instant, a shared `429` budget split | Rejected; owner target is one Sync |
 | **E. Use the existing hourly cron tick instead of a new `:30` cron** | No new trigger | The hourly tick would run EPG, Discovery and monitor work and a Letterboxd failure could not be isolated from them; the owner asked for a Letterboxd-only cron | Not chosen; revisit only if O1 shows the trigger limit blocks `:30` |
@@ -237,14 +237,14 @@ Reversible: all code, until the marker is `d1`. Not reverted by code rollback: m
 
 ## Evidence
 
-- **Original decision:** owner target on [AIR-568](https://trello.com/c/UjY7WXFf); this record has no approval yet.
+- **Original target and final approval:** owner target on [AIR-568](https://trello.com/c/UjY7WXFf); explicit owner acceptance on 2026-11-21 ([approval record](https://trello.com/c/UjY7WXFf#comment-6b0152a40dd583638b2bf965)) after [technical PASS](https://github.com/vladimino/iptv-watchlist/pull/835#pullrequestreview-6004037676). Implementation and production activation are separately gated.
 - **Implementation:** none; [AIR-569](https://trello.com/c/yaXv2oj6) and [AIR-570](https://trello.com/c/JSXgFWzp) after acceptance, [AIR-571](https://trello.com/c/b6UrtwUG) for the cutover.
 - **Dated verification:** code reading of `main` `5d80240` on 2026-11-21 (`src/worker.js` `beginSync`, `persistWatchlist`, `persistScan`; `src/published-epg.js` `saveWatchlist`; `src/sources.js` `parseWatchlist`; `src/domain/orchestration-policy.js` schedules and `madridInstant`; `src/ratings-orchestration.js`; `wrangler.jsonc` crons and Workflows). No production read was made.
 - **Uncertainty:** scan duration and statement budget of a snapshot commit; the platform cron-trigger limit for this account; how the live Ratings run time of day compares with the 17:00 constant (the text of ADR 0090 records 17:30 at its acceptance, ADR 0101 moved it to 17:00); the unmeasured size of the effects journal and the per-attempt staging cleanup under D1 limits; whether any lease or marker read by the rated-admission writer would block a Letterboxd step (to be confirmed in AIR-570 against the invariant of decision 2).
 
 ### Open questions and owner directions
 
-The owner's directions on O2 to O5 (review of PR #835) are applied above. They are product and architecture directions for revising this Proposed record; they do **not** accept it. A separate, explicit owner-level architecture acceptance follows re-review of these edits.
+The owner's O2-O5 decisions ([consolidated review](https://github.com/vladimino/iptv-watchlist/pull/835#pullrequestreview-6003982126)) are incorporated above. After independent re-review and the editorial fixes, the Product Owner explicitly **accepted this architecture** on 2026-11-21 ([approval record](https://trello.com/c/UjY7WXFf#comment-6b0152a40dd583638b2bf965)). O1 remains a deployment-time configuration verification. This acceptance covers the architecture and docs-only PR, not implementation or any separately owner-gated production operation.
 
 - **O1 (open).** Is a fourth cron trigger (`30 * * * *`) allowed on this Worker and account? The independent review does not expect a paid account to constrain it; the real deployment configuration is verified at cutover. If it is not allowed, option E returns, with `ensure` isolated inside the hourly tick.
 - **O2 (decided, A).** No mass-change guard; every complete and validated scan is published; counts go to the Event and the monitor; an incomplete scan never removes (decision 1).
