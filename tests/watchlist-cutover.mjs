@@ -526,13 +526,17 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
   const fenced=await Op.execute('fence-root',{binding:e.db,args:{generation:1,rootEtag:before},now:NOW,ctx:trackedCtx(),readStore:e.store,writeStoreFactory:e.writeFactory});
   assert.equal(fenced.writeState,'committed');assert.deepEqual(states,['unknown','committed']);
   assert.notEqual(fenced.root.etag,before,'the etag changed');assert.equal(fenced.root.previousEtag,before);assert.match(fenced.next,/--expect-root-etag/);
-  assert.deepEqual(JSON.parse(text(e)),original,'the parsed list is the same');assert.equal(text(e).endsWith('\n'),true);
+  assert.equal(fenced.root.fenceGeneration,1,'the fence is written for the held generation');
+  assert.equal(PublishedEpg.rootSemantic(text(e)),PublishedEpg.rootSemantic(original),'the list is the same, the token ignored');
+  assert.deepEqual(JSON.parse(text(e)),original,'a JSON reader sees the same document');
+  assert.deepEqual(PublishedEpg.rootFence(text(e)),{nonce:fenced.root.nonce,generation:1});
   assert.equal(e.store.log.filter(l=>l==='put watchlist.json').length,1);
   // a repeat with the etag read before is a lost compare-and-swap: root_moved, nothing written
   states.length=0;
   await stop(Op.execute('fence-root',{binding:e.db,args:{generation:1,rootEtag:before},now:NOW,ctx:trackedCtx(),readStore:e.store,writeStoreFactory:e.writeFactory}),'root_moved');
   assert.equal(e.store.log.filter(l=>l==='put watchlist.json').length,1);
   // activate needs the etag the fence produced
+  // a bare current etag is not a proof of a fence: the activate that skips `fence-root` (here the etag the root had before the fence) is refused
   await stop(Op.execute('activate',{binding:e.db,args:{generation:1,...FORWARD,rootEtag:before},now:NOW,readStore:e.store}),'root_fence_mismatch');
   await stop(Op.execute('activate',{binding:e.db,args:{generation:1,...FORWARD,rootEtag:fenced.root.etag},now:NOW}),'root_store_required');
   assert.deepEqual(marker(e.file),{mode:'epg',writes:'held',generation:1},'a refused activate moved nothing');
@@ -542,7 +546,21 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
   const e2=await held();
   const f2=await Op.execute('fence-root',{binding:e2.db,args:{generation:1,rootEtag:e2.store.etag('watchlist.json')},now:NOW,readStore:e2.store,writeStoreFactory:e2.writeFactory});
   e2.store.objects.set('watchlist.json',{text:'{"films":[],"updatedAt":"x"}',etag:md5('{"films":[],"updatedAt":"x"}')});
-  await stop(Op.execute('activate',{binding:e2.db,args:{generation:1,...FORWARD,rootEtag:f2.root.etag},now:NOW,readStore:e2.store}),'root_fence_mismatch');
+  await stop(Op.execute('activate',{binding:e2.db,args:{generation:1,...FORWARD,rootEtag:f2.root.etag},now:NOW,readStore:e2.store}),'root_not_fenced');
+  // a second fence over the changed root is a new representation and activates
+  const f3=await Op.execute('fence-root',{binding:e2.db,args:{generation:1,rootEtag:e2.store.etag('watchlist.json')},now:NOW,readStore:e2.store,writeStoreFactory:e2.writeFactory});
+  assert.notEqual(f3.root.nonce,f2.root.nonce,'every fence has its own nonce');
+  assert.equal((await Op.execute('activate',{binding:e2.db,args:{generation:1,...FORWARD,rootEtag:f3.root.etag},now:NOW,readStore:e2.store})).writeState,'committed');
+  // the bypass: hold, then activate with the CURRENT etag and no fence at all
+  const e4=await held();
+  await stop(Op.execute('activate',{binding:e4.db,args:{generation:1,...FORWARD,rootEtag:e4.store.etag('watchlist.json')},now:NOW,readStore:e4.store}),'root_not_fenced');
+  assert.deepEqual(marker(e4.file),{mode:'epg',writes:'held',generation:1},'the bypass moved nothing');
+  // the proof of an earlier hold is not reusable: abort, hold again (a new generation), activate with the first fence
+  const f4=await Op.execute('fence-root',{binding:e4.db,args:{generation:1,rootEtag:e4.store.etag('watchlist.json')},now:NOW,readStore:e4.store,writeStoreFactory:e4.writeFactory});
+  await run(e4,'release-abort',{generation:1});await run(e4,'hold',{generation:1,...FORWARD});
+  assert.deepEqual(marker(e4.file),{mode:'epg',writes:'held',generation:2});
+  const stale=await stop(Op.execute('activate',{binding:e4.db,args:{generation:2,...FORWARD,rootEtag:f4.root.etag},now:NOW,readStore:e4.store}),'root_not_fenced');
+  assert.deepEqual(stale.details,{fence:{generation:1},expected:2},'the proof of the earlier generation is refused');
  }
  // refusals
  {

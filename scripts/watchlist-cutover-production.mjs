@@ -163,8 +163,9 @@ export async function exportRollback(binding,state,args,clock,ctx={}){
 
 // ---- the root mirror fence ---------------------------------------------------------------------------------------------------
 // The root `watchlist.json` mirror is written by EPG-side writers with a conditional put on the etag they read (see PublishedEpg.putWatchlistRoot). In `epg`/`held` no writer starts a new root write, but one
-// that passed the marker check earlier is still in flight and its put would succeed. The fence removes it without a wait and without a lease: the operator rewrites the SAME list, re-serialized with one trailing
-// newline toggled, by a conditional put on the etag it read, so the etag changes and every in-flight conditional put fails. Content equivalence (the parsed list) is checked before and after.
+// that passed the marker check earlier is still in flight and its put would succeed. The fence removes it without a wait and without a lease: the operator rewrites the SAME list with a new whitespace-suffix token (a fresh
+// nonce and the held generation, invisible to JSON readers) by a conditional put on the etag it read. The representation is never reused (every root write on every side carries a fresh nonce), so no etag read before the fence can match again,
+// and `activate` accepts only a fence of its own generation. Content equivalence (the list, the token ignored) is checked before and after.
 export async function fenceRoot(state,args,{readStore,writeStoreFactory,ctx={}}){
  const m=markerOf(state);
  if(m.mode!=='epg'||m.writes!=='held'||m.generation!==args.generation)throw new OperatorStop('state_mismatch',3,{marker:m});
@@ -176,28 +177,27 @@ export async function fenceRoot(state,args,{readStore,writeStoreFactory,ctx={}})
  const text=await object.text();
  let parsed;
  try{parsed=JSON.parse(text);}catch{parsed=null;}
- if(!parsed||typeof parsed!=='object'||!Array.isArray(parsed.films))throw new OperatorStop('root_unreadable',3);
- const fenced=text.endsWith('\n')?text.slice(0,-1):text+'\n';
+ if(!parsed||typeof parsed!=='object'||Array.isArray(parsed)||!Array.isArray(parsed.films))throw new OperatorStop('root_unreadable',3);
+ // The fence representation is NEW: the same list with a fresh nonce and the held generation. It can never equal an earlier representation, so no etag read before it can match again.
+ const fenced=PublishedEpg.serializeRoot(parsed,{fenceGeneration:m.generation});
  const store=writeStoreFactory(new Set([ROOT_KEY]));
  if(ctx.track)ctx.track('unknown');
  let saved,failure=null;
  try{saved=await store.put(ROOT_KEY,fenced,{onlyIf:{etagMatches:args.rootEtag},httpMetadata:{contentType:'application/json'}});}catch(error){failure=error;}
- let after=null;
- try{after=await readStore.get(ROOT_KEY);}catch{after=null;}
- const afterText=after?await after.text():null;
+ let after=null,afterText=null;
+ try{after=await readStore.get(ROOT_KEY);afterText=after?await after.text():null;}catch{after=null;}
  const reached=Boolean(after)&&afterText===fenced&&after.etag!==args.rootEtag;
  if(failure||!saved){
   // A lost conditional put (another writer changed the object first) wrote nothing; an exception is unproven and is never retried.
-  if(!failure&&saved==null&&after&&after.etag!==args.rootEtag&&!reached){if(ctx.track)ctx.track('none');throw new OperatorStop('root_moved',3,{root:{etag:after.etag}});}
-  if(!failure&&saved==null&&after&&after.etag===args.rootEtag){if(ctx.track)ctx.track('none');throw new OperatorStop('root_moved',3,{root:{etag:after.etag}});}
+  if(!failure&&saved==null&&after&&!reached){if(ctx.track)ctx.track('none');throw new OperatorStop('root_moved',3,{root:{etag:after.etag}});}
   if(ctx.track)ctx.track('unknown');
   throw new OperatorStop('write_uncertain',3,{root:after?{etag:after.etag,fenced:reached}:null});
  }
- let equivalent=false;
- try{equivalent=Boolean(after)&&JSON.stringify(JSON.parse(afterText))===JSON.stringify(parsed);}catch{equivalent=false;}
- if(!reached||!equivalent)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',root:after?{etag:after.etag}:null});
+ const equivalent=PublishedEpg.rootSemantic(afterText)!==null&&PublishedEpg.rootSemantic(afterText)===PublishedEpg.rootSemantic(parsed);
+ const fence=PublishedEpg.rootFence(afterText);
+ if(!reached||!equivalent||!fence||fence.generation!==m.generation)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',root:after?{etag:after.etag}:null});
  if(ctx.track)ctx.track('committed');
- return {operation:'fence-root',writes:true,writeState:'committed',root:{etag:after.etag,previousEtag:args.rootEtag},marker:m,next:'activate with --expect-root-etag '+after.etag};
+ return {operation:'fence-root',writes:true,writeState:'committed',root:{etag:after.etag,previousEtag:args.rootEtag,fenceGeneration:fence.generation,nonce:fence.nonce},marker:m,next:'activate with --expect-root-etag '+after.etag};
 }
 
 // ---- one transition ------------------------------------------------------------------------------------------------------------
@@ -243,12 +243,15 @@ export async function execute(command,{binding,args={},now,ctx={},readStore=null
   }
  }
  if(command==='activate'){
-  // C3: the root watchlist mirror is fenced before the switch. The etag the fence produced is the etag the root still has: any EPG-side writer that read the object earlier would lose its conditional put, and
-  // a later one finds the marker `held`. A root that moved again means a writer got through, so the fence is repeated, never assumed.
+  // C3: the root watchlist mirror must be fenced FOR THIS held authority generation. The fence is a token inside the object (a fresh nonce and the generation it was written for), so a bare current etag is
+  // not a proof: an operator that skips `fence-root`, or reuses the proof of an earlier hold (a different generation), is refused. The etag is the one the fence produced and the root must still have it.
   if(!readStore)throw new OperatorStop('root_store_required',2);
-  let object;
-  try{object=await readStore.head(ROOT_KEY);}catch{throw new OperatorStop('root_unreadable',3);}
-  if(!object||object.etag!==args.rootEtag)throw new OperatorStop('root_fence_mismatch',3,{root:object?{etag:object.etag}:null});
+  let object,rootText;
+  try{object=await readStore.get(ROOT_KEY);rootText=object?await object.text():null;}catch{throw new OperatorStop('root_unreadable',3);}
+  if(!object)throw new OperatorStop('root_absent',3);
+  const fence=PublishedEpg.rootFence(rootText);
+  if(!fence||fence.generation!==args.generation)throw new OperatorStop('root_not_fenced',3,{fence:fence?{generation:fence.generation}:null,expected:args.generation});
+  if(object.etag!==args.rootEtag)throw new OperatorStop('root_fence_mismatch',3,{root:{etag:object.etag}});
  }
  if(spec.needs.includes('exportParity')){
   // The proof is read here and bound inside the batch: a certified run at the pinned generation, the stored list equal to the snapshot (normalized digest, title, year and url included, and the member
