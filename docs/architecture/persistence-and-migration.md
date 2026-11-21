@@ -151,7 +151,7 @@ The publication after the catalog is three bounded steps (`publish`, `finalize`,
 
 Film/Person is served only at marker `d1` / cutover `open`; `held` is the fail-closed forward-fix gate. An installed `r2` or `prepared` marker, a partial or missing `film_person_*` schema and every marker, baseline or fence read error are refused (`film_person_unavailable`) before any R2 read or D1 write. The frozen `titles.json` / `people.json` mirrors are never a fallback or restore source; the immutable sources and R2 mirrors stay as before. The local stand-in is the explicit `FILM_PERSON_DB_OPTIONAL=standin` flag for a domain that is not installed at all. No migration, SQL CHECK constraint or production marker changes. Evidence: [AIR-79 Film/Person D1-only slice](../evidence/d1-migration/air-79-film-person-d1-only-2026-11-18.md).
 
-## Proposed domain: the Watchlist authority ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Proposed, not implemented)
+## Accepted design (not implemented): the Watchlist authority ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
 
 | Domain | Authority today | Proposed authority |
 | --- | --- | --- |
