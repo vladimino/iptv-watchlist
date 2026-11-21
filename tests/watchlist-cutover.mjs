@@ -33,11 +33,14 @@ async function imported(){
  const db=d1Standin(file);
  const done=await Boot.execute('bootstrap',{binding:db,args:{run:RUN,epgGeneration:515,count:30,membersSha256:MEMBERS,sha256:SHA},now:NOW,ctx:{snapshotId:'snap-1'}});
  assert.equal(done.writeState,'committed');
+ // O4: the forward path needs the EPG checkpoint authority cut over to d1 and open first.
+ sqlite(file,"UPDATE epg_checkpoint_authority SET mode='d1'");
  return {file,db};
 }
 const snapshotId='snap-1';
 const FORWARD={run:RUN,epgGeneration:515,count:30,membersSha256:MEMBERS,sha256:SHA,snapshotId};
 const CURRENT={count:30,sha256:SHA,snapshotId};
+const RELEASE={run:RUN,count:30,membersSha256:MEMBERS,sha256:SHA,snapshotId};
 const stop=async(promise,reason)=>{try{await promise;}catch(error){assert.equal(error.reason,reason,String(error.reason));return error;}assert.fail('expected '+reason);};
 const asStatement=async run=>{try{return await run();}catch(error){throw new D1Error('statement',String(error?.message||error));}};
 const states=[];const trackedCtx=()=>({track:state=>states.push(state)});
@@ -65,7 +68,8 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
   assert.throws(()=>Op.parseArgs(A(...full)),e=>e.reason==='usage','every pin of activate is required: '+drop);
  }
  assert.equal(Op.parseArgs(A('--hold','--target','iptv','--confirm','hold','--expect-generation','0',...pins)).command,'hold');
- assert.equal(Op.parseArgs(A('--release','--target','iptv','--confirm','release','--expect-generation','2','--expect-count','30','--expect-sha256',SHA,'--expect-snapshot-id',snapshotId)).command,'release');
+ assert.equal(Op.parseArgs(A('--release','--target','iptv','--confirm','release','--expect-generation','2','--expect-run',RUN,'--expect-count','30','--expect-members-sha256',MEMBERS,'--expect-sha256',SHA,'--expect-snapshot-id',snapshotId)).command,'release');
+ assert.throws(()=>Op.parseArgs(A('--release','--target','iptv','--confirm','release','--expect-generation','2','--expect-count','30','--expect-sha256',SHA,'--expect-snapshot-id',snapshotId)),e=>e.reason==='usage','release needs the full import pins');
  assert.equal(Op.parseArgs(A('--hold-rollback','--target','iptv','--confirm','hold-rollback','--expect-generation','2','--expect-count','30','--expect-sha256',SHA,'--expect-snapshot-id',snapshotId,'--expect-version','1','--expect-revision','2')).command,'hold-rollback');
  const r=spawnSync(process.execPath,['scripts/watchlist-cutover-production.mjs'],{encoding:'utf8'});assert.equal(r.status,0);
  assert.deepEqual(JSON.parse(r.stdout),{configured:false,writes:false,writeState:'none'});
@@ -73,7 +77,7 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
 
 // ===== 2. the plan: what each transition may write =====
 {
- const facts={snapshot:{snapshotId,sha256:SHA,count:30,revision:2,version:1,runId:RUN},source:{programmeRunId:RUN,epgGeneration:515},liveness:{controlRevision:-1,leaseRevision:-1,liveAfterIso:'2026-11-21T17:59:45.000Z'},checkpoint:{mode:'r2'},letterboxd:{revision:-1}};
+ const facts={snapshot:{snapshotId,sha256:SHA,count:30,revision:2,version:1,runId:RUN},source:{programmeRunId:RUN,epgGeneration:515},liveness:{controlRevision:-1,leaseRevision:-1,liveAfterIso:'2026-11-21T17:59:45.000Z'},checkpoint:{mode:'d1'},letterboxd:{revision:-1}};
  for(const name of Object.keys(TRANSITIONS)){
   const plan=transitionStatements(name,{generation:0,facts});
   const sql=plan.statements.map(([text])=>text).join('\n');
@@ -89,6 +93,7 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  assert.deepEqual(transitionStatements('hold-rollback',{generation:6,facts}).target,{mode:'d1',writes:'held',generation:7});
  assert.throws(()=>transitionStatements('hold',{generation:0,facts:{...facts,liveness:undefined}}),/bootstrap_liveness/,'the liveness proof is required');
  assert.throws(()=>transitionStatements('hold',{generation:0,facts:{...facts,checkpoint:undefined}}),/cutover_checkpoint/);
+ assert.throws(()=>transitionStatements('activate',{generation:0,facts:{...facts,checkpoint:{mode:'r2'}}}),/cutover_checkpoint/,'the plan never accepts an r2 checkpoint on the forward path');
  assert.throws(()=>transitionStatements('hold',{generation:0,facts:{...facts,source:{programmeRunId:'other',epgGeneration:515}}}),/cutover_source/);
  assert.throws(()=>transitionStatements('nope',{generation:0}),/cutover_usage/);
 }
@@ -116,7 +121,7 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  assert.equal((await readCurrent(env.db,{now:NOW})).reason,'held','a held d1 marker refuses the snapshot');
  assert.equal((await pinForEpg(env.db,{now:NOW})).ok,false,'the EPG start has no list while held (it fails closed)');
  // release
- const released=await run(env,'release',{generation:3,...CURRENT});assert.deepEqual(released.marker,{mode:'d1',writes:'open',generation:3});
+ const released=await run(env,'release',{generation:3,...RELEASE});assert.deepEqual(released.marker,{mode:'d1',writes:'open',generation:3});
  const current=await readCurrent(env.db,{now:NOW});
  assert.equal(current.ok,true);assert.equal(current.snapshot.listSha256,SHA);assert.deepEqual(current.snapshot.films.map(f=>f.lid),FILMS.map(f=>f.id),'order parity');
  const pin=await pinForEpg(env.db,{now:NOW});assert.equal(pin.ok,true);assert.equal(pin.films.length,30);
@@ -142,7 +147,7 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  assert.deepEqual((await refuse(await imported(),'hold',{...g0,membersSha256:'e'.repeat(64)},'already_bootstrapped','members pin')).details.problems,['pins_differ']);
  await refuse(await imported(),'hold',{...g0,generation:5},'state_mismatch','generation');
  await refuse(await imported(),'activate',g0,'state_mismatch','activate needs epg/held');
- await refuse(await imported(),'release',{generation:0,...CURRENT},'state_mismatch','release needs d1/held');
+ await refuse(await imported(),'release',{generation:0,...RELEASE},'state_mismatch','release needs d1/held');
  await refuse(await imported(),'hold-rollback',{generation:0,...CURRENT,version:1,revision:2},'state_mismatch','rollback needs d1/open');
  // the imported snapshot must be whole
  const tampered=await imported();sqlite(tampered.file,"DROP TRIGGER watchlist_member_immutable;DELETE FROM watchlist_member WHERE snapshot_id='snap-1' AND ordinal=4");
@@ -165,6 +170,30 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  assert.equal((await refuse(lease,'hold',g0,'writer_active','live lease')).details.busy,'step_lease_live');
  const unknown=await imported();sqlite(unknown.file,"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('control','{}',1,'2026-11-21T17:50:00.000Z')");
  await refuse(unknown,'hold',g0,'liveness_unknown','invalid control record');
+ // O4: the forward path never switches with the EPG checkpoint still on R2
+ const r2=await imported();sqlite(r2.file,"UPDATE epg_checkpoint_authority SET mode='r2'");
+ await refuse(r2,'hold',g0,'checkpoint_not_d1','checkpoint r2/open');
+ // the import must be whole before the release: a scan journal row or a missing staging receipt appeared after the activation
+ {
+  const dirty=await imported();await run(dirty,'hold',g0);await run(dirty,'activate',{generation:1,...FORWARD});
+  sqlite(dirty.file,"INSERT INTO watchlist_change (snapshot_id, kind, lid, ordinal, prev_ordinal) VALUES ('snap-1','added','film-1',1,NULL)");
+  assert.equal((await refuse(dirty,'release',{generation:2,...RELEASE},'snapshot_inconsistent','dirty journal')).details.problems.includes('rows'),true);
+  const effect=await imported();await run(effect,'hold',g0);await run(effect,'activate',{generation:1,...FORWARD});
+  sqlite(effect.file,"INSERT INTO watchlist_effect (snapshot_id, effect, status, receipt, attempts, done_at) VALUES ('snap-1','scan_facts','pending',NULL,0,NULL)");
+  await refuse(effect,'release',{generation:2,...RELEASE},'snapshot_inconsistent','an effect row');
+  const pendingRow=await imported();await run(pendingRow,'hold',g0);await run(pendingRow,'activate',{generation:1,...FORWARD});
+  sqlite(pendingRow.file,"INSERT INTO watchlist_admission_pending (lid, first_seen_snapshot_id, first_seen_version, state, attempts, next_retry_at, last_reason, resolved_by, updated_at) VALUES ('film-1','snap-1',1,'pending',0,NULL,NULL,NULL,'2026-11-21T17:59:00.000Z')");
+  await refuse(pendingRow,'release',{generation:2,...RELEASE},'snapshot_inconsistent','an admission row');
+  const receipt=await imported();await run(receipt,'hold',g0);await run(receipt,'activate',{generation:1,...FORWARD});
+  sqlite(receipt.file,"PRAGMA foreign_keys=OFF;DELETE FROM watchlist_staging WHERE snapshot_id='snap-1'");
+  await refuse(receipt,'release',{generation:2,...RELEASE},'snapshot_inconsistent','a missing staging receipt');
+  const wrongRun=await imported();await run(wrongRun,'hold',g0);await run(wrongRun,'activate',{generation:1,...FORWARD});
+  await refuse(wrongRun,'release',{generation:2,...RELEASE,run:'run-other'},'already_bootstrapped','pins of another import');
+  // the old EPG source may have moved on: the release only needs the import itself
+  const moved=await imported();await run(moved,'hold',g0);await run(moved,'activate',{generation:1,...FORWARD});
+  sqlite(moved.file,"INSERT INTO published_epg_generation (programme_run_id, phase, published_at, payload_sha256, created_at) VALUES ('run-next','published','2026-11-22T16:11:45.255Z','"+'b'.repeat(64)+"','2026-11-22T16:00:00.000Z');UPDATE published_epg_authority SET programme_run_id='run-next', generation=516, finalized_run_id='run-next'");
+  assert.equal((await run(moved,'release',{generation:2,...RELEASE})).writeState,'committed','a moved old source does not block the release of an intact import');
+ }
  // release-abort needs no pin and no liveness: only the marker
  const abortable=await imported();await run(abortable,'hold',g0);sqlite(abortable.file,"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('control','{}',1,'2026-11-21T17:50:00.000Z')");
  assert.equal((await run(abortable,'release-abort',{generation:1})).writeState,'committed','backing out is never blocked by an unreadable EPG record');
@@ -188,6 +217,9 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  await race('a running control record',"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('control','"+JSON.stringify({schemaVersion:1,phase:'running',budget:{consecutive:0,total:0}})+"',1,'2026-11-21T17:59:00.000Z')");
  await race('the pointer revision moves',"UPDATE watchlist_current SET revision=revision+1");
  await race('the published generation moves',"UPDATE published_epg_authority SET generation=516");
+ await race('the checkpoint authority moves back to r2',"UPDATE epg_checkpoint_authority SET mode='r2'");
+ await race('a scan journal row appears',"INSERT INTO watchlist_change (snapshot_id, kind, lid, ordinal, prev_ordinal) VALUES ('snap-1','added','film-1',1,NULL)");
+ await race('the staging receipt changes',"PRAGMA foreign_keys=OFF;UPDATE watchlist_staging SET expected_count=29");
  await race('the checkpoint is held',"UPDATE epg_checkpoint_authority SET writes='held'");
  await race('the Letterboxd mode appears',"INSERT INTO letterboxd_sync_mode (id, mode, epoch, changed_at, revision, write_id) VALUES (1,'cloudflare',1,'2026-11-21T17:59:00.000Z',1,'w')");
  await race('the marker generation moves',"UPDATE watchlist_authority SET generation=generation+1",'hold',g0,null,'write_uncertain');
@@ -196,12 +228,17 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  // the same for the later steps
  const step=async env=>{await run(env,'hold',g0);await run(env,'activate',{generation:1,...FORWARD});};
  {
-  const env=await imported();await step(env);
-  await stop(Op.execute('release',{binding:wrap(env,"UPDATE epg_checkpoint_authority SET writes='held'"),args:{generation:2,...CURRENT},now:NOW}),'predicate_refused');
-  assert.deepEqual(marker(env.file),{mode:'d1',writes:'held',generation:2});
+  const releaseRace=async(label,mutate)=>{
+   const env=await imported();await step(env);
+   await stop(Op.execute('release',{binding:wrap(env,mutate),args:{generation:2,...RELEASE},now:NOW}),'predicate_refused');
+   assert.deepEqual(marker(env.file),{mode:'d1',writes:'held',generation:2},label+': the release did not happen');
+  };
+  await releaseRace('the checkpoint is held',"UPDATE epg_checkpoint_authority SET writes='held'");
+  await releaseRace('a row appears inside the release window',"INSERT INTO watchlist_change (snapshot_id, kind, lid, ordinal, prev_ordinal) VALUES ('snap-1','added','film-1',1,NULL)");
+  await releaseRace('the checkpoint authority moves back to r2',"UPDATE epg_checkpoint_authority SET mode='r2'");
  }
  {
-  const env=await imported();await step(env);await run(env,'release',{generation:2,...CURRENT});
+  const env=await imported();await step(env);await run(env,'release',{generation:2,...RELEASE});
   const args={generation:2,...CURRENT,version:1,revision:Number(pointer(env.file).revision)};
   await stop(Op.execute('hold-rollback',{binding:wrap(env,"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','"+JSON.stringify({schemaVersion:1,holder:'h',expiresAt:'2026-11-21T19:00:00.000Z',released:false})+"',1,'2026-11-21T17:59:00.000Z')"),args,now:NOW}),'predicate_refused');
   assert.deepEqual(marker(env.file),{mode:'d1',writes:'open',generation:2},'the rollback hold does not start under a live EPG step');

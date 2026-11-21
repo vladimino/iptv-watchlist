@@ -8,7 +8,7 @@
 //   hold            epg/open  G -> epg/held G+1    pins: run, EPG generation, count, both digests, snapshot id (the bootstrap receipt)
 //   release-abort   epg/held  G -> epg/open G
 //   activate        epg/held  G -> d1/held  G+1    the same pins; re-asserted in the batch
-//   release         d1/held   G -> d1/open  G      pins: snapshot id, count, raw digest (the source may have moved; the snapshot must not)
+//   release         d1/held   G -> d1/open  G      pins: run, count, both digests, snapshot id (the import must be whole; the old source may have moved on)
 //   hold-rollback   d1/open   G -> d1/held  G+1    pins: snapshot id, count, raw digest of the CURRENT snapshot, its version and its revision
 //
 // Not here: the rollback export into the published generation, the return to `epg`, the Ratings close, the Letterboxd mode switch, the binding and the cron.
@@ -25,7 +25,7 @@ const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generatio
 const NEEDS={
  hold:['generation','run','epgGeneration','count','membersSha256','sha256','snapshotId'],
  activate:['generation','run','epgGeneration','count','membersSha256','sha256','snapshotId'],
- release:['generation','count','sha256','snapshotId'],
+ release:['generation','run','count','membersSha256','sha256','snapshotId'],
  'release-abort':['generation'],
  'hold-rollback':['generation','count','sha256','snapshotId','version','revision'],
 };
@@ -90,13 +90,19 @@ export async function execute(command,{binding,args={},now,ctx={}}){
     const proof=await verifyImported(binding,state,{run:args.run,epgGeneration:args.epgGeneration,count:args.count,membersSha256:args.membersSha256,sha256:args.sha256});
     if(!proof.ok)throw new OperatorStop(proof.reason,3,{problems:proof.problems,...(proof.published?{published:proof.published}:{})});
     facts.source={programmeRunId:args.run,epgGeneration:args.epgGeneration};
-   }else if(body.membersSha256!==undefined&&args.membersSha256!==undefined&&body.membersSha256!==args.membersSha256)throw new OperatorStop('pin_mismatch',3,{problems:['members_sha256']});
+   }else{
+    // `release`: the full import proof (snapshot, staging receipt, every member, no journal rows, the pins) without requiring the old EPG source to remain current.
+    const proof=await verifyImported(binding,state,{run:args.run,count:args.count,membersSha256:args.membersSha256,sha256:args.sha256},{requireSource:false});
+    if(!proof.ok)throw new OperatorStop(proof.reason,3,{problems:proof.problems});
+   }
   }else if(Number(p.version)!==args.version||Number(p.revision)!==args.revision)throw new OperatorStop('pin_mismatch',3,{problems:['pointer']});
  }
  if(spec.needs.includes('checkpoint')){
   const c=state.checkpoint;
   if(!c||c.writes!=='open'||!['r2','d1'].includes(c.mode))throw new OperatorStop('checkpoint_not_settled',3,{checkpoint:c?{mode:c.mode,writes:c.writes}:null});
-  facts.checkpoint={mode:c.mode};
+  // O4: the EPG checkpoint cutover comes first. The forward path never switches with the checkpoint still on R2.
+  if(c.mode!=='d1')throw new OperatorStop('checkpoint_not_d1',3,{checkpoint:{mode:c.mode,writes:c.writes}});
+  facts.checkpoint={mode:'d1'};
  }
  if(spec.needs.includes('letterboxdClosed')){
   const lb=letterboxdFact(state);

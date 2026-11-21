@@ -39,7 +39,12 @@ export function transitionStatements(name,{generation,facts={}}){
   if(!snap||!snap.snapshotId||!/^[0-9a-f]{64}$/.test(snap.sha256||'')||!Number.isInteger(snap.count)||!Number.isInteger(snap.revision)||!Number.isInteger(snap.version))throw new Error('cutover_snapshot');
   // The pointer is the pinned one (same revision: nothing moved it) and its snapshot still has every member. The forward path pins the bootstrap import: version 1 with its effects drained.
   parts.push(["(SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=? AND snapshot_id=? AND list_sha256=? AND film_count=? AND revision=?"+(need('snapshotImport')?' AND effects_drained_version=version':'')+")=1 AND (SELECT COUNT(*) FROM watchlist_member WHERE snapshot_id=?)=? AND (SELECT COUNT(*) FROM watchlist_snapshot WHERE snapshot_id=? AND version=? AND list_sha256=? AND film_count=?)=1",[snap.version,snap.snapshotId,snap.sha256,snap.count,snap.revision,snap.snapshotId,snap.count,snap.snapshotId,snap.version,snap.sha256,snap.count]]);
-  if(need('snapshotImport')&&snap.version!==1)throw new Error('cutover_snapshot');
+  if(need('snapshotImport')){
+   if(snap.version!==1)throw new Error('cutover_snapshot');
+   // The import-only row invariants, at commit time: one staging receipt of the import, one snapshot, exactly the pinned members, and NO change, effect or pending-admission row. A scan journal
+   // that appeared (or a missing receipt) means this is not the bootstrap import any more.
+   parts.push(["(SELECT COUNT(*) FROM watchlist_staging)=1 AND (SELECT COUNT(*) FROM watchlist_staging WHERE snapshot_id=? AND expected_sha256=? AND expected_count=?)=1 AND (SELECT COUNT(*) FROM watchlist_snapshot)=1 AND (SELECT COUNT(*) FROM watchlist_member)=? AND (SELECT COUNT(*) FROM watchlist_change)=0 AND (SELECT COUNT(*) FROM watchlist_effect)=0 AND (SELECT COUNT(*) FROM watchlist_admission_pending)=0",[snap.snapshotId,snap.sha256,snap.count,snap.count]]);
+  }
  }
  if(need('source')){
   const source=facts.source;
@@ -48,9 +53,10 @@ export function transitionStatements(name,{generation,facts={}}){
   parts.push(["(SELECT COUNT(*) FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=? AND generation=? AND finalized_run_id=programme_run_id)=1 AND (SELECT COUNT(*) FROM published_epg_member WHERE programme_run_id=? AND kind='watchlist')=? AND (SELECT run_id FROM watchlist_snapshot WHERE snapshot_id=?)=?",[source.programmeRunId,source.epgGeneration,source.programmeRunId,snap.count,snap.snapshotId,source.programmeRunId]]);
  }
  if(need('checkpoint')){
-  if(!facts.checkpoint||!['r2','d1'].includes(facts.checkpoint.mode))throw new Error('cutover_checkpoint');
-  // An independent authority is never in the middle of its own cutover: it is `open` in the mode the operator read.
-  parts.push(["(SELECT COUNT(*) FROM epg_checkpoint_authority WHERE id=1 AND mode=? AND writes='open')=1",[facts.checkpoint.mode]]);
+  // ADR 0186 decision 8.3 / O4: the EPG checkpoint cutover is completed first. The forward path switches only with the checkpoint authority `d1` and `open`, and re-asserts it here;
+  // `r2`, a held marker and a mode that changed after the read all abort the batch.
+  if(!facts.checkpoint||facts.checkpoint.mode!=='d1')throw new Error('cutover_checkpoint');
+  parts.push(["(SELECT COUNT(*) FROM epg_checkpoint_authority WHERE id=1 AND mode='d1' AND writes='open')=1",[]]);
  }
  if(need('letterboxdClosed')){
   if(!facts.letterboxd||!Number.isInteger(facts.letterboxd.revision))throw new Error('cutover_letterboxd');
