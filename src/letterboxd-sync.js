@@ -361,12 +361,18 @@ export async function modeStatus(env, ports = {}) {
     sideEffects: 'none'
   };
 }
-// AIR-571 D. The revision of the mode row as a pin for a LEGACY Ratings admission: the legacy entry asserts it in the batch of every authoritative commit it makes, so a Letterboxd mode change (close, complete, abort)
-// after the admission rejects the commit of an already admitted request. null = the schema is absent (the Letterboxd Sync is inert: nothing to pin) or the row could not be read (the admission is refused by the caller).
-export async function modeRevisionPin(env) {
-  const mode = await readMode(env);
-  if (mode.malformed) throw Object.assign(new Error('mode malformed'), {code: 'evidence_unreadable'});
-  return mode.schemaAbsent ? null : (mode.revision ?? 0);
+// AIR-571 D. ONE read of the mode row that both decides whether the legacy Ratings entry is fenced and returns the exact revision it saw, so the admission and its pin can never come from two different reads.
+// {fenced, reason, revision}: `revision` is the pin (0 = no row yet) and is only returned for a mode that does NOT fence the legacy entry (`external` or absent); null = the schema is absent (the Letterboxd
+// Sync is inert: nothing to pin); `undefined` is never returned. An unreadable or malformed row is fenced.
+export async function legacyAdmission(env) {
+  if (!dbOf(env)) return {fenced: false, reason: null, revision: null};
+  let mode;
+  try { mode = await readMode(env); } catch (error) { return error.code === 'schema_absent' ? {fenced: false, reason: null, revision: null} : {fenced: true, reason: 'evidence_unreadable', revision: null}; }
+  if (mode.malformed) return {fenced: true, reason: 'evidence_unreadable', revision: null};
+  if (mode.schemaAbsent) return {fenced: false, reason: null, revision: null};
+  if (mode.mode === 'switching') return {fenced: true, reason: 'letterboxd_switch_in_progress', revision: null};
+  if (mode.mode === 'cloudflare') return {fenced: true, reason: 'letterboxd_sync_active', revision: null};
+  return {fenced: false, reason: null, revision: mode.revision ?? 0};
 }
 export async function clearQuarantine(env, now = Date.now()) {
   const mode = await readMode(env);

@@ -81,6 +81,31 @@ const step={async do(name,fn){return fn();},async sleepUntil(){}};
   await LetterboxdSync.switchMode(env,{action:'close_admission',target:'cloudflare'},ports,T('2026-11-21T09:39:00Z'));
   const afterClose=await attempt();
   assert.match(afterClose,/^refused:/,'after the Letterboxd mode moved, an already admitted legacy request commits nothing');
+  // Review (TOCTOU at admission): the fence decision and the pin come from ONE read of the Letterboxd row. The row moves right AFTER that read (a close lands at the worst moment): the request was admitted
+  // as `external` at revision R, and its commit is refused, on both legacy entry points; and there is no second read that could pick up the new owner's revision.
+  {
+   db.sql('DELETE FROM letterboxd_sync_mode');
+   const modeReads=[];let mutateAfterRead=null;
+   const watched=new Proxy(db,{get(target,key){if(key==='prepare')return sql=>{const prepared=target.prepare(sql);if(!/FROM letterboxd_sync_mode/.test(sql)||!/^\s*SELECT/i.test(sql))return prepared;modeReads.push(sql);return {bind:(...params)=>{const bound=prepared.bind(...params);return {...bound,async first(){const row=await bound.first();if(mutateAfterRead){const fn=mutateAfterRead;mutateAfterRead=null;fn();}return row;}};},async first(){const row=await prepared.first();if(mutateAfterRead){const fn=mutateAfterRead;mutateAfterRead=null;fn();}return row;}};};const value=target[key];return typeof value==='function'?value.bind(target):value;}});
+   const watchedEnv={...env,DB:watched};context.__watched=watchedEnv;
+   for(const action of ['start','step']){
+    modeReads.length=0;
+    const gate=await run("RatingsOrchestration.externalGate(__watched,'"+action+"',{runId:'x'})");
+    assert.equal(gate.reason,null);assert.equal(modeReads.length,1,'one read of the Letterboxd row decides the fence AND returns the pin ('+action+')');
+    assert.equal(gate.fence.letterboxdRevision,0);
+   }
+   for(const [name,mutate] of [['the epoch closes (revision moves)',()=>db.sql("INSERT INTO letterboxd_sync_mode (id,mode,target,from_mode,epoch,changed_at,revision,write_id) VALUES (1,'switching','cloudflare','external',1,'2030-01-01T00:00:00.000Z',1,'w')")],['the mode flips without a revision move',null]]){
+    db.sql('DELETE FROM letterboxd_sync_mode');
+    if(!mutate){db.sql("INSERT INTO letterboxd_sync_mode (id,mode,epoch,changed_at,revision,write_id) VALUES (1,'external',0,'2030-01-01T00:00:00.000Z',5,'w')");}
+    modeReads.length=0;
+    mutateAfterRead=mutate||(()=>db.sql("UPDATE letterboxd_sync_mode SET mode='switching',target='cloudflare',from_mode='external' WHERE id=1"));
+    const gate=await run("RatingsOrchestration.externalGate(__watched,'start')");
+    assert.equal(gate.reason,null,name+': admitted by the read it saw');assert.equal(modeReads.length,1);
+    gate.fence;Object.assign(globalThis,{});
+    const attempted=await run("(async()=>{const cur=await LetterboxdRatings.readDocument(__env,'letterboxd/diary/state.json');const fenced={...__env,ratingsFence:"+JSON.stringify(gate.fence)+"};const saved=await LetterboxdRatings.writeDocument(fenced,'letterboxd/diary/state.json',cur.object,{...cur.value,probe:Math.random()});return saved?'written':'refused:fenced';})()");
+    assert.equal(attempted,'refused:fenced',name+': the stale request commits nothing against the new owner');
+   }
+  }
   db.sql('DELETE FROM letterboxd_sync_mode');// the owner's real abort is covered in letterboxd-sync.mjs; here the row returns to its absent default for the sections below
  }
  await LetterboxdSync.switchMode(env,{action:'close_admission',target:'cloudflare'},ports,T('2026-11-21T09:39:00Z'));

@@ -207,7 +207,8 @@ function epochFence(env){
  // AIR-571 D: the Letterboxd mode revision the admission saw. A close, completion or abort of the Letterboxd mode after the admission rejects this commit, so an already admitted legacy request cannot write over the new owner.
  if(fence.letterboxdRevision!==undefined){
   if(!Number.isInteger(fence.letterboxdRevision))throw failed('ratings_domain_fence');
-  statements.push(["UPDATE ratings_domain_cas SET ok=CASE WHEN COALESCE((SELECT revision FROM letterboxd_sync_mode WHERE id=1),0)=? THEN 1 ELSE 0 END WHERE id=1",[fence.letterboxdRevision]]);
+  // Both the revision AND the mode: the row is still the `external` one that was read (an absent row only for the initial default, revision 0).
+  statements.push(["UPDATE ratings_domain_cas SET ok=CASE WHEN COALESCE((SELECT revision FROM letterboxd_sync_mode WHERE id=1),0)=? AND (NOT EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id=1) OR (SELECT mode FROM letterboxd_sync_mode WHERE id=1)='external') THEN 1 ELSE 0 END WHERE id=1",[fence.letterboxdRevision]]);
  }
  return statements;
 }
