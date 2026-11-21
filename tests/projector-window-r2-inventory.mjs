@@ -92,6 +92,7 @@ const FILE_SITES={
  'src/admin/letterboxd-archive-apply.js':{r2:3,wrapper:0,dynamic:1},
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
  'src/catalog-poster-weekly.js':{r2:2,wrapper:0,dynamic:1},   // ADR 0179 (AIR-543): the weekly poster checkpoint (epg/catalog-poster-weekly.json) and the immutable catalog_posters events (events/items/<reverse-timestamp>-<id>.json); neither is a projector input
+ 'src/letterboxd-sync.js':{r2:1,wrapper:0,dynamic:1},   // ADR 0186: the create-only put of a slot Event (events/items/..., not a projector input)
  'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0118: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)
  'src/discovery.js':{r2:8,wrapper:15,dynamic:3},
  // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
