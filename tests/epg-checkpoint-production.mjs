@@ -5,6 +5,7 @@ import {spawnSync} from 'node:child_process';
 import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-session.mjs';
 import * as Op from '../scripts/epg-checkpoint-production.mjs';
 import * as Checkpoint from '../src/epg-checkpoint-d1.js';
+import {createD1Adapter} from '../scripts/d1-backfill.mjs';import {createPublishedBinding} from '../scripts/published-epg-production.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-ckpt-op-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -138,6 +139,26 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
 }
 
 // ===== 4. the full forward sequence: hold, import, activate, release; every contract is exact =====
+// The production operator talks to D1 over REST, where a {batch} answers one result object per statement. The sqlite stand-in above
+// returns rows from db.batch directly, which hid a binding that dropped them (AIR-551 H4a). This fetch serves the REST shape from the same file.
+function restBinding(file,log=[]){
+ const fetchImpl=async(url,init)=>{
+  const body=JSON.parse(init.body);
+  const entries=body.batch||[{sql:body.sql}];
+  log.push({batch:Boolean(body.batch),selects:entries.every(e=>/^\s*select\b/i.test(e.sql))});
+  const answer=(status,payload)=>({ok:status<400,status,json:async()=>payload});
+  try{
+   if(entries.every(e=>/^\s*select\b/i.test(e.sql))){
+    return answer(200,{success:true,result:entries.map(e=>({success:true,results:rows(file,e.sql.replace(/;+\s*$/,'')),meta:{rows_written:0}}))});
+   }
+   sqlite(file,'BEGIN;\n'+entries.map(e=>e.sql).join('\n')+'\nCOMMIT;');
+   return answer(200,{success:true,result:entries.map(()=>({success:true,results:[],meta:{rows_written:1}}))});
+  }catch(error){return answer(400,{success:false,errors:[{message:String(error.message).slice(0,200)}]});}
+ };
+ const adapter=createD1Adapter({target:{endpoint:'https://rest.invalid',accountId:'a',apiToken:'t',maxBatchStatements:200,maxBatchBytes:4<<20},databaseId:'db',fetchImpl,retries:0,sleep:async()=>{}});
+ return createPublishedBinding(adapter);
+}
+
 async function sequence(upTo){
  const env={...open(upTo),r2:bucket(frozen)};
  await stop(call('hold',{generation:1,...EV},env),'state_mismatch');
@@ -561,4 +582,21 @@ for(const upTo of ['0030_epg_checkpoint_authority.sql','0031_watchlist_authority
  assert.equal(/\bepg_orchestration_document\b[^;]*\b(UPDATE|DELETE|INSERT)\b/i.test(source.replace(/SELECT[^'"]*epg_orchestration_document/g,'')),false,'the lease and control documents are only read');
  assert.equal(/watchOrchestration|resetLease|terminate|\.rollover/i.test(source),false);
 }
+// Regression: the whole forward path and the read-back of every command over the REST-shaped binding.
+{
+ const env={...open(),r2:bucket(frozen)};
+ const log=[];const rest={...env,db:restBinding(env.file,log)};
+ await call('hold',{generation:0,...EV},rest);
+ await call('import',{generation:1,...identity(rest)},rest);
+ const activated=await call('activate',{generation:1,...identity(rest)},rest);
+ assert.deepEqual(activated.marker,{mode:'d1',writes:'held',generation:2},'activate reads the run back through the REST binding');
+ const loaded=await Checkpoint.loadRun(rest.db);
+ assert.equal(loaded.ok,true);assert.equal(loaded.run.stage,'complete');
+ const ingest=await Checkpoint.readIngest(rest.db);assert.ok(ingest);
+ const released=await call('release',{generation:2,...identity(rest)},rest);
+ assert.deepEqual(released.marker,{mode:'d1',writes:'open',generation:2});
+ assert.ok(log.some(e=>e.batch&&e.selects),'the repository reads went out as read-only batches');
+ await assert.rejects(()=>restBinding(env.file).batch([{text:"SELECT 1; DELETE FROM epg_checkpoint_run"}]),e=>e.code==='statement'||e.reason==='batch_too_large'||/SELECT/.test(String(e.message)),'a batch that is not SELECT-only never takes the read path');
+}
+
 console.log('epg-checkpoint-production: ok');
