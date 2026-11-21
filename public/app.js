@@ -588,7 +588,13 @@ function eventPresentationStatus(event){
  switch(event.type){
   // A recorded user or publication action: the event exists only because the write committed. `success` is the success of that action, not a claim
   // about changed data: a watchlist with no diff or a baseline, and a taste profile of `scope=identity`, are still successful commits.
-  case 'epg':case 'watchlist':case 'started':case 'unstarted':case 'taste_profile':return 'success';
+  case 'epg':{
+   // A published generation is a successful publication, except when its structured warning says the Channel policy did not do its job: a degraded generation did not apply the
+   // blacklist, a failed registration left the declared channels unregistered (ADR 0191). Only these two codes; ordinary unknown or unclassified channels are never a warning.
+   const code=event.warning&&typeof event.warning==='object'?event.warning.code:null;
+   return code==='channel_policy_degraded'||code==='channel_registration_failed'?'warning':'success';
+  }
+  case 'watchlist':case 'started':case 'unstarted':case 'taste_profile':return 'success';
   case 'enrichment':{
    if(event.presentation==='batch_v2_skipped')return 'warning';
    const terminal=event.presentation==='batch_v2_terminal',stage=event.stage;

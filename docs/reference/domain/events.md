@@ -154,6 +154,7 @@ The events screen and the compact feed show one result marker per event: icon, r
 | Type, subtype and evidence | Result |
 | --- | --- |
 | `epg` (a published generation) | success |
+| `epg` with `warning.code` `channel_policy_degraded` (the Channel policy was not applied, the blacklist did not act) or `channel_registration_failed` | warning |
 | `watchlist` (a committed list; also `added=[]`/`removed=[]` and `baseline`) | success |
 | `started`, `unstarted` (a saved owner mark) | success |
 | `taste_profile` (a published current pointer; any `scope`, including `identity`) | success |
