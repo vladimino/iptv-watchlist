@@ -46,7 +46,7 @@ const G=name=>run(name);
 // 1. The bundle has the ports and the control plane; the Watchlist phase and the three effect writers are the real ones.
 assert.equal(typeof G('letterboxdPorts'),'function');
 const ports=G('letterboxdPorts')(env);
-assert.deepEqual(Object.keys(ports).sort(),['handover','ratings','reconcile','watchlist'],'every phase has a real adapter and the handover proof is read from live state');
+assert.deepEqual(Object.keys(ports).sort(),['effects','handover','handoverGuards','ratings','reconcile','watchlist'],'every phase has a real adapter, the handover proof is read from live state and pinned at the commit, and the causal effects are read');
 assert.equal(typeof ports.watchlist.run,'function');
 const LetterboxdSync=G('LetterboxdSync');
 // Supported ratings storage (version 2 queue and a merge-form Diary cursor), seeded into the D1-owned ratings documents exactly as a migrated production store holds them.
@@ -72,8 +72,46 @@ const step={async do(name,fn){return fn();},async sleepUntil(){}};
  // A Ratings mode that is not closed refuses, whatever else holds.
  const ratingsOpen=await (async()=>{await run("LetterboxdRatings.writeDocument(__env,'letterboxd/ratings/executor.json',null,{schemaVersion:1,mode:'cloudflare',epoch:1,drain:null})");const p=await ports.handover(env);await run("LetterboxdRatings.readDocument(__env,'letterboxd/ratings/executor.json').then(r=>LetterboxdRatings.writeDocument(__env,'letterboxd/ratings/executor.json',r.object,{schemaVersion:1,mode:'external',epoch:2,drain:null}))");return p;})();
  assert.equal(ratingsOpen.ratingsClosed,false,'a Ratings executor that is still cloudflare is not closed');
- const done=await LetterboxdSync.switchMode(env,{action:'complete'},ports,T('2026-11-21T09:39:00Z'));
+ // The proof is read outside the commit and PINNED at it (AIR-571 D): the guards of the real port assert the Watchlist marker and the stored etags of the Ratings mode, control and run records in the same
+ // batch as the mode write. A fact that changes after the proof was read aborts the completion; once it is as read again, the same completion goes through.
+ {
+  const guards=await ports.handoverGuards(env);
+  assert.equal(Array.isArray(guards)&&guards.length,1,'the real port pins the facts of its proof');
+  assert.match(guards[0][0],/watchlist_authority/);assert.match(guards[0][0],/ratings_document/);
+  const before=await LetterboxdSync.readMode(env);
+  // the Watchlist marker moves to another generation after the proof was read (it is still an open d1, so the proof itself reads as proven): the guard pins the generation it read
+  db.sql("UPDATE watchlist_authority SET generation=generation+1 WHERE id=1");
+  const stale=await LetterboxdSync.switchMode(env,{action:'complete',expectEpoch:before.epoch,expectRevision:before.revision},{handover:ports.handover,handoverGuards:async()=>guards,effects:ports.effects},T('2026-11-21T09:39:00Z'));
+  db.sql("UPDATE watchlist_authority SET generation=generation-1 WHERE id=1");
+  assert.equal(stale.refused,'handover_changed',JSON.stringify(stale));
+  assert.equal((await LetterboxdSync.readMode(env)).mode,'switching','nothing was written');
+  // a watchlist marker that is not an open d1 cannot be pinned: the port returns null and the handover is refused
+  db.sql("UPDATE watchlist_authority SET writes='held' WHERE id=1");
+  assert.equal(await ports.handoverGuards(env),null);
+  db.sql("UPDATE watchlist_authority SET writes='open' WHERE id=1");
+ }
+ const modeNow=await LetterboxdSync.readMode(env);
+ const done=await LetterboxdSync.switchMode(env,{action:'complete',expectEpoch:modeNow.epoch,expectRevision:modeNow.revision},ports,T('2026-11-21T09:39:00Z'));
  assert.equal(done.completed,true,JSON.stringify(done));
+}
+// 2a. The owner's control route (AIR-571 D): a read-only status and one command with its confirmation and pins, through the real Worker.
+{
+ const get=async()=>{const response=await context.worker.fetch(new Request('https://iptv.example/api/letterboxd/sync/mode'),env,{waitUntil(){}});return {status:response.status,body:await response.json()};};
+ const post=async body=>{const response=await context.worker.fetch(new Request('https://iptv.example/api/letterboxd/sync/mode',{method:'POST',body:JSON.stringify(body)}),env,{waitUntil(){}});return {status:response.status,body:await response.json()};};
+ const status=await get();
+ assert.equal(status.status,200);assert.equal(status.body.readable,true);assert.equal(status.body.mode.mode,'cloudflare');assert.equal(status.body.sideEffects,'none');
+ assert.equal(status.body.legacyFenced,true);assert.equal(status.body.letterboxdWriters,1);assert.equal(typeof status.body.effects.drained,'boolean');
+ assert.equal(status.body.handover.ratingsClosed,true,'the proof is read from live state');
+ const rowBefore=await LetterboxdSync.readMode(env);
+ assert.equal((await get()).body.mode.revision,rowBefore.revision,'the status wrote nothing');
+ // no confirmation / no pins: refused before anything runs
+ assert.deepEqual((await post({action:'close_admission',target:'external'})).body,{error:'Missing confirm'});
+ assert.equal((await post({action:'close_admission',target:'external'})).status,400);
+ assert.deepEqual((await post({action:'complete',confirm:'complete',expectEpoch:rowBefore.epoch,expectRevision:rowBefore.revision})).body.refused,'not_switching');
+ // a stale pin is refused and writes nothing
+ const stale=await post({action:'close_admission',target:'external',confirm:'close_admission',expectEpoch:rowBefore.epoch+5,expectRevision:rowBefore.revision});
+ assert.equal(stale.status,200);assert.deepEqual([stale.body.refused,stale.body.pin],['pin_mismatch','epoch']);
+ assert.equal((await LetterboxdSync.readMode(env)).revision,rowBefore.revision,'a stale pin changed nothing');
 }
 // 2b. Active: the same status and monitor facts now carry the slot read model, read only.
 {

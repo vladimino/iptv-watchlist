@@ -2650,6 +2650,32 @@ async function letterboxdHandover(env,now=Date.now()){
  try{const ports=letterboxdPorts(env);proof.ratingsPhase=!!(ports.ratings&&ports.reconcile&&ports.watchlist);}catch{/* false */}
  return proof;
 }
+// AIR-571 D. The handover proof is read outside the commit; these are its pins, asserted in the SAME batch that writes the mode row (a guard is an upsert of the letterboxd_sync_fence row, CHECK ok = 1): the
+// Watchlist authority is `d1`/`open` at the generation read, and the Ratings mode, control and run records are the documents that were read (their stored etags, absence included), so a Ratings step, a mode change
+// or a lease taken after the proof aborts the completion. null = a fact could not be read or pinned: the proof stays unprotected and the handover is refused.
+async function letterboxdHandoverGuards(env){
+ try{
+  const db=WatchlistD1.bindingOf(env);
+  if(!db||typeof db.prepare!=='function')return null;
+  const authority=await WatchlistD1.readAuthority(env);
+  if(authority?.state!=='d1'||authority.writes!=='open'||!Number.isInteger(authority.generation))return null;
+  const keys=[RatingsOrchestration.MODE_KEY,RatingsOrchestration.CONTROL_KEY,LetterboxdRatings.KEYS.run];
+  const read=await db.prepare('SELECT key, etag FROM ratings_document WHERE part=0 AND key IN (?,?,?)').bind(...keys).all();
+  const etags=new Map((read.results||[]).map(row=>[row.key,row.etag]));
+  const expression="(SELECT COUNT(*) FROM watchlist_authority WHERE id=1 AND mode='d1' AND writes='open' AND generation=?)=1"+keys.map(()=>" AND COALESCE((SELECT etag FROM ratings_document WHERE key=? AND part=0),'')=?").join('');
+  const params=[authority.generation,...keys.flatMap(key=>[key,etags.get(key)??''])];
+  return [["INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN "+expression+" THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok",params]];
+ }catch{return null;}
+}
+// AIR-571 D. The durable causal effects of the current snapshot (facts, retention, removal queue): done before a running writer is closed. Mirror delivery, Events and pending admission are not part of it.
+async function letterboxdEffectsState(env){
+ const db=WatchlistD1.bindingOf(env);
+ if(!db||typeof db.prepare!=='function')return {unproven:true};
+ const row=await db.prepare("SELECT version, effects_drained_version AS drainedVersion, (SELECT COUNT(*) FROM watchlist_effect WHERE status<>'done') AS pending FROM watchlist_current WHERE id=1").first();
+ if(!row)return {unproven:true};
+ const version=Number(row.version),drainedVersion=Number(row.drainedVersion),pending=Number(row.pending);
+ return {drained:drainedVersion===version&&pending===0,pending,version,drainedVersion};
+}
 function letterboxdPorts(env){
  const sources=sourceConfig(env);
  const effects=LetterboxdSyncEffects.effectWriters({
@@ -2671,7 +2697,7 @@ function letterboxdPorts(env){
   const rated=await storedRemovalRatings(e,{type:'watchlist',removed:removed.map(film=>eventRemovedFilm(known(film)))}).catch(()=>null);
   return {added:added.map(film=>eventFilm(known(film))),removed:rated?.event?.removed||removed.map(film=>eventRemovedFilm(known(film)))};
  };
- return {handover:e=>letterboxdHandover(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
+ return {handover:e=>letterboxdHandover(e||env),handoverGuards:e=>letterboxdHandoverGuards(e||env),effects:e=>letterboxdEffectsState(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
 }
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {
@@ -2714,6 +2740,9 @@ async fetch(request,env,execution){
   if(url.pathname==='/api/monitor/status'&&request.method==='GET')return json(await Monitor.status(env));
   if(url.pathname==='/api/monitor/test'&&request.method==='POST')return json(await Monitor.test(env));
   if(url.pathname==='/api/epg/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await EpgOrchestration.handle(env,body);return json(reply.body,reply.status);}
+  // AIR-571 D: the owner's Letterboxd Sync mode control, the same pattern and the same Access protection as the Ratings executor route. GET is read-only; POST takes one command with its confirmation and pins.
+  if(typeof LetterboxdSync!=='undefined'&&url.pathname==='/api/letterboxd/sync/mode'&&request.method==='GET')return json(await LetterboxdSync.modeStatus(env,letterboxdPorts(env)));
+  if(typeof LetterboxdSync!=='undefined'&&url.pathname==='/api/letterboxd/sync/mode'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdSync.handle(env,body,letterboxdPorts(env));return json(reply.body,reply.status);}
   if(url.pathname==='/api/letterboxd/ratings/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await RatingsOrchestration.handle(env,body);return json(reply.body,reply.status);}
   if(['/api/letterboxd/ratings/start','/api/letterboxd/ratings/step'].includes(url.pathname)&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdRatings.handle(env,url.pathname.slice('/api/letterboxd/ratings/'.length),body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/events'&&request.method==='GET'){const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}

@@ -61,7 +61,8 @@ export async function readMode(env) {
   if (!MODES.includes(row.mode) || !Number.isInteger(row.epoch)) return {...emptyMode(), malformed: true};
   return {mode: row.mode, target: row.target, from: row.from_mode, epoch: row.epoch, drain: row.drain, quarantine: row.quarantine_reason ? {reason: row.quarantine_reason, at: row.quarantined_at} : null, changedAt: row.changed_at, revision: row.revision, writeId: row.write_id, stored: true};
 }
-async function writeMode(env, expected, next) {
+// `guards`: [sql, params] statements asserted in the SAME batch before the write (each an upsert of the CHECK (ok = 1) fence row). A tripped guard aborts the write and surfaces as `handover_changed`.
+async function writeMode(env, expected, next, {guards = []} = {}) {
   const writeId = uuid();
   const db = dbOf(env);
   const quarantine = next.quarantine || {};
@@ -69,7 +70,12 @@ async function writeMode(env, expected, next) {
   const statement = expected.stored
     ? db.prepare('UPDATE letterboxd_sync_mode SET mode = ?, target = ?, from_mode = ?, epoch = ?, drain = ?, quarantine_reason = ?, quarantined_at = ?, changed_at = ?, revision = revision + 1, write_id = ? WHERE id = 1 AND revision = ?').bind(...binds, expected.revision)
     : db.prepare('INSERT INTO letterboxd_sync_mode (id, mode, target, from_mode, epoch, drain, quarantine_reason, quarantined_at, changed_at, revision, write_id) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)').bind(...binds);
-  try { await batch(env, [statement]); } catch (error) { if (error.code !== 'write_contention') throw error; return false; }
+  const guardStatements = guards.map(([sql, params]) => db.prepare(sql).bind(...params));
+  try { await batch(env, [...guardStatements, statement]); } catch (error) {
+    if (guardStatements.length && error.code === 'epoch_mismatch') throw Object.assign(new Error('handover changed'), {code: 'handover_changed'});
+    if (error.code !== 'write_contention') throw error;
+    return false;
+  }
   const after = await readMode(env);
   return after.writeId === writeId;
 }
@@ -233,16 +239,45 @@ export async function handoverState(env, ports) {
   }
   return {ratingsClosed: false, ratingsDrained: false, legacyFenced: false, watchlistRepository: false, ratingsPhase: false};
 }
-export async function switchMode(env, {action, target} = {}, ports = {}, now = Date.now()) {
+// What must hold before a RUNNING writer is closed (reverse handover, O5): the durable causal effects of the current snapshot (facts, retention, removal queue) are all done, because once the epoch is
+// closed the Letterboxd writer is fenced and nothing could drain them. `ports.effects(env)` returns {drained: boolean, pending?: number, version?: number, drainedVersion?: number}. Mirror delivery, Events and
+// pending identity admission are NOT part of this gate. Default: not provable, so the close is refused.
+export async function effectsState(env, ports) {
+  if (ports?.effects) {
+    try { return await ports.effects(env); } catch { return {error: true}; }
+  }
+  return {drained: false, unproven: true};
+}
+const HANDOVER_NAMES = ['ratingsClosed', 'ratingsDrained', 'legacyFenced', 'watchlistRepository', 'ratingsPhase'];
+// The pins of an owner command: the epoch and the revision of the mode row the owner read (revision 0 = no row yet). A command that names a pin is refused when the row moved. Direct callers may omit them; the owner route requires both.
+function pinMismatch(mode, {expectEpoch, expectRevision}) {
+  if (expectEpoch !== undefined && mode.epoch !== expectEpoch) return 'epoch';
+  if (expectRevision !== undefined && (mode.revision ?? 0) !== expectRevision) return 'revision';
+  return null;
+}
+const modeView = mode => ({mode: mode.mode, target: mode.target, epoch: mode.epoch, revision: mode.revision ?? 0});
+export async function switchMode(env, {action, target, expectEpoch, expectRevision} = {}, ports = {}, now = Date.now()) {
   for (let attempt = 0; attempt < LIMITS.controlAttempts; attempt++) {
     const mode = await readMode(env);
     if (mode.malformed) return {action, refused: 'evidence_unreadable'};
+    const pin = pinMismatch(mode, {expectEpoch, expectRevision});
+    // A stale pin is never retried: the owner reads the row again and decides.
+    if (pin) return {action, refused: 'pin_mismatch', pin, ...modeView(mode)};
     if (action === 'close_admission') {
       if (mode.mode === 'switching') return {action, refused: 'switch_open', mode: mode.mode, target: mode.target, epoch: mode.epoch};
       if (mode.mode === target) return {action, refused: 'already_in_mode', mode: mode.mode, epoch: mode.epoch};
       if (!['external', 'cloudflare'].includes(target)) return {action, refused: 'invalid_target'};
+      if (mode.mode === 'cloudflare' && target === 'external') {
+        // Reverse handover: no running writer is closed over undrained causal effects (never a silent discard).
+        const effects = await effectsState(env, ports);
+        if (effects.error) return {action, refused: 'effects_unreadable'};
+        if (effects.unproven) return {action, refused: 'effects_unproven'};
+        if (effects.drained !== true) return {action, refused: 'effects_pending', pending: effects.pending ?? null, version: effects.version ?? null, drainedVersion: effects.drainedVersion ?? null};
+      }
       const next = {mode: 'switching', from: mode.mode, target, epoch: mode.epoch + 1, drain: null, changedAt: iso(now), quarantine: mode.quarantine};
       if (await writeMode(env, mode, next)) return {action, closed: true, mode: 'switching', target, epoch: next.epoch};
+      // Contention with another owner: the row moved between the read and the write. With pins this is a stale pin, never a blind retry.
+      if (expectEpoch !== undefined || expectRevision !== undefined) return {action, refused: 'pin_mismatch', pin: 'revision'};
       continue;
     }
     if (action === 'complete') {
@@ -252,18 +287,61 @@ export async function switchMode(env, {action, target} = {}, ports = {}, now = D
         if (mode.drain !== drain) await writeMode(env, mode, {...mode, drain, changedAt: mode.changedAt});
         return {action, refused: 'drain_not_verified', drain, mode: 'switching', target: mode.target, epoch: mode.epoch};
       }
+      let guards = [];
       if (mode.target === 'cloudflare') {
         const handover = await handoverState(env, ports);
-        const missing = ['ratingsClosed', 'ratingsDrained', 'legacyFenced', 'watchlistRepository', 'ratingsPhase'].filter(name => handover[name] !== true);
+        const missing = HANDOVER_NAMES.filter(name => handover[name] !== true);
         if (handover.error || missing.length) return {action, refused: 'handover_not_proven', missing: handover.error ? ['unreadable'] : missing, mode: 'switching', target: mode.target, epoch: mode.epoch};
+        // The proof is read OUTSIDE the commit; it is protected AT the commit: the facts it rests on (the Ratings mode and its drain records, the Watchlist marker) are pinned in the same batch as the mode write.
+        // A port that cannot pin its facts leaves the proof unprotected, and an unprotected proof does not complete a handover.
+        try { guards = ports?.handoverGuards ? await ports.handoverGuards(env, handover) : null; } catch { guards = null; }
+        if (!Array.isArray(guards) || !guards.length) return {action, refused: 'handover_unprotected', mode: 'switching', target: mode.target, epoch: mode.epoch};
       }
       const next = {mode: mode.target, from: mode.from, target: null, epoch: mode.epoch, drain: 'verified', changedAt: iso(now), quarantine: mode.quarantine};
-      if (await writeMode(env, mode, next)) return {action, completed: true, mode: next.mode, epoch: next.epoch, drain: 'verified'};
+      let written;
+      try { written = await writeMode(env, mode, next, {guards}); } catch (error) {
+        if (error.code === 'handover_changed') return {action, refused: 'handover_changed', mode: 'switching', target: mode.target, epoch: mode.epoch};
+        throw error;
+      }
+      if (written) return {action, completed: true, mode: next.mode, epoch: next.epoch, drain: 'verified'};
+      if (expectEpoch !== undefined || expectRevision !== undefined) return {action, refused: 'pin_mismatch', pin: 'revision'};
+      continue;
+    }
+    if (action === 'abort') {
+      // Recovery from an open switch back to the mode it started from. The epoch was already raised by the close, so a writer of the old epoch stays fenced; no writer is admitted by an abort, and the
+      // legacy entry reopens only when the mode is `external` again. The row is the only thing it writes.
+      if (mode.mode !== 'switching') return {action, refused: 'not_switching', mode: mode.mode, epoch: mode.epoch};
+      if (!['external', 'cloudflare'].includes(mode.from)) return {action, refused: 'evidence_unreadable'};
+      const next = {mode: mode.from, from: mode.from, target: null, epoch: mode.epoch, drain: null, changedAt: iso(now), quarantine: mode.quarantine};
+      if (await writeMode(env, mode, next)) return {action, aborted: true, mode: next.mode, epoch: next.epoch};
+      if (expectEpoch !== undefined || expectRevision !== undefined) return {action, refused: 'pin_mismatch', pin: 'revision'};
       continue;
     }
     return {action, refused: 'unknown_action'};
   }
   return {action, refused: 'write_contention'};
+}
+// The owner's read-only view before any command: the row and its pins, the drain of the executor's instances, the handover proof, the causal effects and the writers it leaves. Writes nothing.
+export async function modeStatus(env, ports = {}) {
+  let mode;
+  try { mode = await readMode(env); } catch (error) { return {readable: false, reason: classifyThrown(error), sideEffects: 'none'}; }
+  if (mode.malformed) return {readable: false, reason: 'evidence_unreadable', sideEffects: 'none'};
+  const drain = await drainState(env);
+  const handover = await handoverState(env, ports);
+  const effects = await effectsState(env, ports);
+  const fence = await writerFence(env);
+  const admitted = mode.mode === 'cloudflare' ? 1 : 0;
+  return {
+    readable: true,
+    mode: {...modeView(mode), from: mode.from, drain: mode.drain, quarantine: mode.quarantine},
+    drain,
+    handover: handover.error ? {error: true} : Object.fromEntries(HANDOVER_NAMES.map(name => [name, handover[name] === true])),
+    effects: effects.error ? {error: true} : effects.unproven ? {unproven: true} : {drained: effects.drained === true, pending: effects.pending ?? null, version: effects.version ?? null, drainedVersion: effects.drainedVersion ?? null},
+    legacyFenced: fence.fenced,
+    // The Letterboxd side of "exactly one writer": the Ratings side is read from the Ratings mode (handover.ratingsClosed).
+    letterboxdWriters: admitted,
+    sideEffects: 'none'
+  };
 }
 export async function clearQuarantine(env, now = Date.now()) {
   const mode = await readMode(env);
@@ -499,13 +577,21 @@ export async function readModel(env, {now = Date.now(), watchlistLastSuccessAt =
   };
 }
 
-export const ACTIONS = {close_admission: {target: v => v === 'cloudflare' || v === 'external'}, complete: {}, clear_quarantine: {}};
+// The owner route takes a command with an explicit confirmation (the action name) and the pins of the row it read. The pins are mandatory here.
+const pinCheck = v => Number.isInteger(v) && v >= 0 && v <= 2147483647;
+export const ACTIONS = {
+  close_admission: {target: v => v === 'cloudflare' || v === 'external', confirm: v => v === 'close_admission', expectEpoch: pinCheck, expectRevision: pinCheck},
+  complete: {confirm: v => v === 'complete', expectEpoch: pinCheck, expectRevision: pinCheck},
+  abort: {confirm: v => v === 'abort', expectEpoch: pinCheck, expectRevision: pinCheck},
+  clear_quarantine: {confirm: v => v === 'clear_quarantine'}
+};
+const REQUIRED = {close_admission: ['target', 'confirm', 'expectEpoch', 'expectRevision'], complete: ['confirm', 'expectEpoch', 'expectRevision'], abort: ['confirm', 'expectEpoch', 'expectRevision'], clear_quarantine: ['confirm']};
 export function validate(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return 'Invalid request';
   const fields = ACTIONS[body.action];
   if (!fields) return 'Unknown action';
   for (const key of Object.keys(body)) if (key !== 'action' && !Object.hasOwn(fields, key)) return 'Unknown field';
-  if (body.action === 'close_admission' && body.target === undefined) return 'Missing target';
+  for (const key of REQUIRED[body.action]) if (body[key] === undefined) return 'Missing ' + key;
   for (const [key, check] of Object.entries(fields)) if (body[key] !== undefined && !check(body[key])) return 'Invalid ' + key;
   return null;
 }
