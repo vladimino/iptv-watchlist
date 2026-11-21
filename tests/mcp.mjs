@@ -78,7 +78,7 @@ assert.deepEqual(await result(rpc(6,'ping')),{});
 
 // Tool discovery keeps the two probes read-only. Domain tools are covered in tests/mcp-tools.mjs.
 const {tools}=await result(rpc(7,'tools/list'));
-assert.deepEqual(tools.map(tool=>tool.name),['probe_read','probe_echo','feature_flags','epg_status','epg_pipeline_status','enrichment_schema','enrichment_profile','enrichment_runner','enrichment_queue','enrichment_status','prediction_queue_overview','prediction_film_diagnostics','prediction_batch_validate','prediction_pending','prediction_hot_parity','prediction_batch_manifest','epg_sync_start','epg_sync_step','ratings_sync_status','ratings_sync_start','ratings_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','epg_workflow_rollover']);
+assert.deepEqual(tools.map(tool=>tool.name),['probe_read','probe_echo','feature_flags','epg_status','epg_pipeline_status','enrichment_schema','enrichment_profile','enrichment_runner','enrichment_queue','enrichment_status','prediction_queue_overview','prediction_film_diagnostics','prediction_batch_validate','prediction_pending','prediction_hot_parity','prediction_batch_manifest','epg_sync_start','epg_sync_step','ratings_sync_status','ratings_sync_start','ratings_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','epg_workflow_rollover','letterboxd_claim_backfill']);
 const probes=tools.filter(tool=>tool.name.startsWith('probe_'));
 for(const tool of probes){
  assert.equal(tool.inputSchema.type,'object');assert.equal(tool.inputSchema.additionalProperties,false);
@@ -202,6 +202,22 @@ assert.equal((await result(rpc(30,'tools/call',{name:'epg_workflow_rollover',arg
 assert.equal(epgRolloverCalls,1,'a valid owner assertion reaches it');
 delete context.handleEpgRolloverTool;
 assert.match((await result(rpc(31,'tools/call',{name:'epg_workflow_rollover',arguments:{mode:'dry_run'}}))).content[0].text,/unavailable/);
+// AIR-559: the owner-only Letterboxd claim backfill operator sits behind the same Access gate; a denied caller never reaches it, a foreign argument (a lid, a movie id, SQL, a URL) is refused first, and a missing operator is unavailable.
+let claimBackfillCalls=0;context.LetterboxdClaimBackfill={handleLetterboxdClaimBackfillTool:async()=>{claimBackfillCalls++;return {status:200,body:{ok:true}};}};
+for(const [label,options] of denied){
+ for(const args of [{mode:'dry_run'},{mode:'apply',confirmGo:true,requestId:'denied-request-1',expectedFilmPersonGeneration:2,expectedRatingsGeneration:3,expectedProgrammeRunId:'run',expectedCount:1,expectedDigest:'a'.repeat(64)}]){
+  response=await mcp(rpc(28,'tools/call',{name:'letterboxd_claim_backfill',arguments:args}),options);
+  assert.equal(response.status,403,'claim backfill '+label);
+ }
+}
+assert.equal(claimBackfillCalls,0,'no denied claim backfill call reaches the operator');
+for(const foreign of [{lid:'AAA1'},{tmdb:'1'},{filmId:'film:tmdb:1'},{sql:'select 1'},{url:'https://example.com'},{pairs:[{lid:'AAA1',tmdb:'1'}]},{key:'letterboxd/facts/links.json'}])
+ assert.equal((await result(rpc(29,'tools/call',{name:'letterboxd_claim_backfill',arguments:{mode:'dry_run',...foreign}}))).isError,true,'a foreign argument is refused before the operator: '+Object.keys(foreign));
+assert.equal(claimBackfillCalls,0);
+assert.equal((await result(rpc(30,'tools/call',{name:'letterboxd_claim_backfill',arguments:{mode:'dry_run'}}))).structuredContent.ok,true);
+assert.equal(claimBackfillCalls,1,'a valid owner assertion reaches it');
+delete context.LetterboxdClaimBackfill;
+assert.match((await result(rpc(31,'tools/call',{name:'letterboxd_claim_backfill',arguments:{mode:'dry_run'}}))).content[0].text,/unavailable/);
 assert.deepEqual(await result(rpc(28,'ping'),{jwt:await accessJwt({claims:{aud:AUD}})}),{});
 assert.deepEqual(await result(rpc(29,'ping'),{jwt:await accessJwt({claims:{exp:now-30}})}),{});
 assert.deepEqual(await result(rpc(30,'ping'),{environment:{...env,MCP_ACCESS_TEAM_DOMAIN:TEAM+'/'}}),{});
