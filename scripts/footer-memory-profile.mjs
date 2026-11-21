@@ -66,7 +66,7 @@ if (process.argv.includes('--build')) {
   const profileKey = 'enrichment/profile/versions/7.json'; put(profileKey, profile);
   put('sync.json', {stage: 'complete', runId: G1, completedAt: T, updatedAt: T});
 
-  const names = fs.readdirSync(path.join(cwd, 'migrations')).filter(name => /^\d{4}_.*\.sql$/.test(name)).sort();
+  const names = fs.readdirSync(path.join(cwd, 'migrations')).filter(name => /^\d{4}_.*\.sql$/.test(name) && name !== '0032_letterboxd_sync_control.sql').sort();
   const sqlite = input => {const r = sqliteSync(['-bail', file], {input: 'PRAGMA foreign_keys=ON;\n' + input, encoding: 'utf8', maxBuffer: 1 << 28}); if (r.status !== 0) throw new Error(r.stderr);};
   sqlite(names.map(name => fs.readFileSync(path.join(cwd, 'migrations', name), 'utf8')).join('\n'));
   const q = s => s == null ? 'NULL' : "'" + String(s).replace(/'/g, "''") + "'";
