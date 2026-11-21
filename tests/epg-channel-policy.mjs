@@ -75,8 +75,31 @@ assert.equal(policy.filteredDenyAll,2,'two ch002 programmes in the window');
 assert.equal(policy.skippedKnownOnly,3,'unknown Gamma on ch003, ch004 and ch005');
 assert.equal(policy.discoveryEligible,2,'ch001 programmes: Alpha, Gamma');
 assert.equal(policy.unclassified,2,'the ch004 (unknown) and ch005 (unclassified) programmes only');
-assert.deepEqual(plain(policy.channels),{total:5,discover:1,denyAll:1,knownOnly:3,new:1,unclassified:2});
+assert.deepEqual(plain(policy.channels),{total:5,discover:1,denyAll:1,knownOnly:3,new:1,unclassified:2,undeclared:0});
 assert.deepEqual(plain(result.newChannels),[{channelId:'ch004',name:'Новый'}],'a channel absent from the snapshot is reported by id, never matched by name');
+
+// ADR 0142 decision 1 on known_only: a skipped competing record still invalidates the slot, in both orders; an identical replay is still one owner
+const slotKeys=r=>ids(r).films.filter(entry=>entry.endsWith('@ch003'));
+const known=programme('Alpha Film 2001',9,'ch003'),unknown=programme('Unknown Zed 2012',9,'ch003');
+for(const [label,order] of [['known first',[known,unknown]],['unknown first',[unknown,known]]]){
+ const r=await scan(order,watchlist,policies);
+ assert.equal(r.stats.duplicate_slot,1,label+': the two owners conflict');
+ assert.deepEqual(slotKeys(r),[],label+': the known Film is discarded with the unknown record');
+ assert.equal(ids(r).discovery.filter(entry=>entry.startsWith('unknown zed')).length,0,label+': the skipped record is never a candidate');
+}
+const replay=await scan([known,known,programme('Unknown Zed 2012',12,'ch003'),programme('Unknown Zed 2012',12,'ch003')],watchlist,policies);
+assert.equal(replay.stats.duplicate_slot,0,'identical replays stay one owner');
+assert.deepEqual(slotKeys(replay),['a@ch003']);
+const unfiltered=await scan([known,unknown],watchlist,new Map([['ch003',{policy:'discover',basis:'override'}]]));
+assert.equal(unfiltered.stats.duplicate_slot,1,'the same conflict as the discover path');
+
+// declared channels are tracked apart from programme coverage
+{const xml='<tv><channel id="ch001"><display-name>Кино</display-name></channel><channel id="ch007"><display-name>Без программы</display-name></channel><channel id="ch008"><display-name>DE: Feed</display-name></channel>'+programme('Alpha Film 2001',3,'ch001')+programme('Alpha Film 2001',3,'ch099')+'</tv>';
+ context.stream=Readable.toWeb(Readable.from([Buffer.from(xml)]));context.now=now;context.watchlist=watchlist;context.options={policies};
+ const r=await vm.runInContext('scanEPG(stream,watchlist,now,options)',context);
+ assert.deepEqual(plain(r.newChannels),[{channelId:'ch007',name:'Без программы'}],'a declared channel with no programme is reported; a country-prefixed label and an undeclared programme id are not');
+ assert.equal(r.stats.policy.channels.undeclared,1,'the undeclared programme channel is counted, classified known_only and never registered');
+ assert.equal(r.stats.policy.channels.total,3);}
 
 // ===== 3. one Map lookup per programme, no per-programme database access =====
 class CountingMap extends Map{get(key){CountingMap.reads++;return super.get(key);}}
@@ -142,6 +165,15 @@ assert.equal((await Channel.readSnapshot(db)).revision,2);
 assert.deepEqual(plain([...(await Channel.materializePolicies(db)).map].filter(([id])=>id<='ch003')),plain([...pinned.map]),'existing classification is preserved');
 // an earlier pinned map is a value: registration cannot change what a running scan uses
 assert.equal(pinned.map.has('ch004'),false);
+// a lost reply on a batch of more than 50 ids: success only when EVERY id is stored; a missing later id is a conflict
+{const many=Array.from({length:60},(_,i)=>({channelId:'ch'+String(300+i),name:'Bulk '+i}));
+ const lost=async missing=>{const target=await imported();const real=target;
+  const racer={prepare:sql=>real.prepare(sql),batch:async statements=>{await real.batch(statements);if(missing)await real.prepare("DELETE FROM epg_channel WHERE channel_id='ch359'").run();throw new Error('reply lost');}};
+  return {target,outcome:await Channel.registerXmltvChannels(racer,{channels:many,now:T})};};
+ const whole=await lost(false);
+ assert.deepEqual(whole.outcome,{ok:true,registered:60,present:0,invalid:0,revision:2},'every id stored: the lost reply is ours');
+ const partial=await lost(true);
+ assert.deepEqual(partial.outcome,{ok:false,reason:'conflict'},'a missing id beyond the first 50 is not claimed');}
 // an empty snapshot refuses registration and a failed batch claims nothing
 assert.deepEqual(await Channel.registerXmltvChannels(fresh(),{channels:feedChannels,now:T}),{ok:false,reason:'empty'});
 assert.equal((await Channel.registerXmltvChannels(db,{channels:'x',now:T})).ok,false);

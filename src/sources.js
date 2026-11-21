@@ -359,13 +359,13 @@ async function scanEPG(stream,watchlist,now,options={}){
  const UNKNOWN_POLICY={policy:'known_only',basis:'unknown'};
  const policyCounts={inWindow:0,filteredDenyAll:0,skippedKnownOnly:0,discoveryEligible:0,unclassified:0};
  const index=new Map();for(const film of watchlist){for(const title of new Set([...(film.catalogOnly?[film.title,film.original]:[]),...(film.aliases||[film.original]),...(film.movieTitles||[])].map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}
- const rawDiscovery=new Set(),filteredNonMovies=new Set();const channels=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map(),slotOwners=new Map(),conflictedSlots=new Map(),showMeta=new WeakMap();let scanned=0,min=Infinity,max=-Infinity,kept=0,identityCollision=0,buffer='',complete=false,bytes=0;
+ const rawDiscovery=new Set(),filteredNonMovies=new Set();const channels=new Map(),declared=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map(),slotOwners=new Map(),conflictedSlots=new Map(),showMeta=new WeakMap();let scanned=0,min=Infinity,max=-Infinity,kept=0,identityCollision=0,buffer='',complete=false,bytes=0;
  const reader=stream.getReader(),decoder=new TextDecoder();
  // ADR 0142 decision 1: one owner per (channel, start). The same owner again is ignored; a second owner discards both records after the stream.
  const claimSlot=(channelId,startAt,owner,title,channel)=>{const slot=channelId+':'+startAt,held=slotOwners.get(slot);if(held===undefined){slotOwners.set(slot,owner);return 'new';}if(held===owner)return 'same';if(!conflictedSlots.has(slot))conflictedSlots.set(slot,{title,channel,start:startAt,reason:'duplicate_slot'});return 'conflict';};
  try{while(true){const {done,value}=await reader.read();if(done){buffer+=decoder.decode();break;}bytes+=value.length;if(bytes>400000000)throw new Error('EPG exceeds supported size');buffer+=decoder.decode(value,{stream:true});
  while(true){const start=buffer.search(/<(?:channel|programme)\s/);if(start<0){if(buffer.includes('</tv>'))complete=true;buffer=buffer.slice(-1000);break;}if(start>0)buffer=buffer.slice(start);const type=buffer.startsWith('<channel ')?'channel':'programme',end=buffer.indexOf('</'+type+'>');if(end<0){if(buffer.length>1000000)throw new Error('EPG record exceeds limit');break;}const xml=buffer.slice(0,end+type.length+3);buffer=buffer.slice(end+type.length+3);
- if(type==='channel'){channels.set(attr(xml,'id'),field(xml,'display-name'));continue;}
+ if(type==='channel'){channels.set(attr(xml,'id'),field(xml,'display-name'));declared.set(attr(xml,'id'),field(xml,'display-name'));continue;}
  scanned++;const startAt=xmlTime(attr(xml,'start')),endAt=xmlTime(attr(xml,'stop'));if(!Number.isFinite(startAt)||!Number.isFinite(endAt)||endAt<=startAt)continue;min=Math.min(min,startAt);max=Math.max(max,startAt);const channelId=attr(xml,'channel'),channel=channels.get(channelId)||channelId;if(/^[A-Z]{2}:/.test(channel))continue;const c=coverage.get(channelId)||{name:channel,min:startAt,max:endAt};c.min=Math.min(c.min,startAt);c.max=Math.max(c.max,endAt);coverage.set(channelId,c);
  // Retention/display horizon (7 days) is separate from the hot processing horizon (24 hours): days 2-7 keep only shows that match a
  // reliable non-catalog watchlist film. Discovery, uncertain matches and the raw candidate counts never see them.
@@ -377,7 +377,9 @@ async function scanEPG(stream,watchlist,now,options={}){
  if(decision.films.length===1&&decision.films[0].catalogOnly&&!movieTitleKeys(decision.films[0]).has(key))decision={films:[],reason:'alias_without_movie_provenance'};
  const valid=decision.films;
  if(startAt>=now+EPG_HOT_FUTURE_MS&&(valid.length!==1||valid[0]?.catalogOnly))continue;
- if(channelPolicy==='known_only'&&valid.length!==1){policyCounts.skippedKnownOnly++;continue;}
+ // ADR 0142 decision 1 holds whatever the policy admits: a skipped record on a known_only channel still claims its slot for the owner the discover path would use (same non-film and shape rules),
+ // so a competing known Film on the same (channel, start) conflicts and both are discarded after the stream. The record itself never becomes a candidate.
+ if(channelPolicy==='known_only'&&valid.length!==1){policyCounts.skippedKnownOnly++;if(!nonFilmEPGReason(title,xml)&&duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160)claimSlot(channelId,startAt,'o:'+key+'|'+(titleYear||''),title,channel);continue;}
  kept++;
  // A single reliable watchlist/catalog match is a known Film and is never screened out by its title.
  if(startAt<now+EPG_HOT_FUTURE_MS&&duration>=55&&duration<=300)rawDiscovery.add(key+'|'+(titleYear||''));if(valid.length!==1&&nonFilmEPGReason(title,xml)){if(duration>=55&&duration<=300)filteredNonMovies.add(key+'|'+(titleYear||''));continue;}
@@ -398,14 +400,19 @@ async function scanEPG(stream,watchlist,now,options={}){
    candidate.categories=[...new Set(metas.flatMap(meta=>meta.categories||[]))].slice(0,8);}
   }
  for(const candidate of discovery.values())applySlotConfirmation(candidate,candidate.shows.map(show=>showMeta.get(show)));
- const policyChannels=policies?channelPolicyCounts(coverage,policies):{channels:null,newChannels:[]};
+ const policyChannels=policies?channelPolicyCounts(coverage,declared,policies):{channels:null,newChannels:[]};
  return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,identityCollision,duplicate_slot:conflictedSlots.size,discoveryCandidates:discovery.size,rawCandidates:rawDiscovery.size,filteredNonMovies:filteredNonMovies.size,...(policies?{policy:{applied:true,...policyCounts,channels:policyChannels.channels}}:{})},newChannels:policyChannels.newChannels,uncertain:[...uncertain.values(),...conflictedSlots.values()].slice(0,100)};
 }
 
-// Per-channel counters of the channels the feed schedules (the coverage keys), by effective policy; `new` = no row in the pinned snapshot, `unclassified` = no category and no override.
-function channelPolicyCounts(coverage,policies){
- const counts={channels:{total:0,discover:0,denyAll:0,knownOnly:0,new:0,unclassified:0},newChannels:[]};
- for(const [channelId,item] of coverage){const found=policies.get(channelId)||{policy:'known_only',basis:'unknown'};counts.channels.total++;if(found.policy==='discover')counts.channels.discover++;else if(found.policy==='deny_all')counts.channels.denyAll++;else counts.channels.knownOnly++;if(found.basis==='unknown'){counts.channels.new++;counts.newChannels.push({channelId,name:item.name});}if(found.basis==='unknown'||found.basis==='unclassified')counts.channels.unclassified++;}
+// Per-channel counters by effective policy over the channels the feed DECLARES (<channel>) plus any channel it schedules without a declaration. `new` = a declared id the pinned
+// snapshot does not hold (registered after the scan, by id, never by name); `undeclared` = a scheduled id no <channel> declares: it is classified like any unknown id (`known_only`) but is
+// not trusted for registration. `unclassified` = no category and no override. A declared channel whose display name is a country-prefixed feed label (`XX:`) is skipped, as its programmes are.
+function channelPolicyCounts(coverage,declared,policies){
+ const counts={channels:{total:0,discover:0,denyAll:0,knownOnly:0,new:0,unclassified:0,undeclared:0},newChannels:[]};
+ const ids=new Map();
+ for(const [channelId,name] of declared){if(typeof channelId!=='string'||!channelId||/^[A-Z]{2}:/.test(name||''))continue;ids.set(channelId,{name:name||channelId,declared:true});}
+ for(const [channelId,item] of coverage)if(!ids.has(channelId))ids.set(channelId,{name:item.name,declared:false});
+ for(const [channelId,item] of ids){const found=policies.get(channelId)||{policy:'known_only',basis:'unknown'};counts.channels.total++;if(found.policy==='discover')counts.channels.discover++;else if(found.policy==='deny_all')counts.channels.denyAll++;else counts.channels.knownOnly++;if(!item.declared)counts.channels.undeclared++;if(found.basis==='unknown'&&item.declared){counts.channels.new++;counts.newChannels.push({channelId,name:item.name});}if(found.basis==='unknown'||found.basis==='unclassified')counts.channels.unclassified++;}
  return counts;
 }
 async function loadPeopleNameIndex(films){

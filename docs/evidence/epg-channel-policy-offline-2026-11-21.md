@@ -15,6 +15,9 @@
 | An empty, absent or unavailable snapshot is refused; the reader is gated by `EPG_CHANNEL_POLICY=on` and read before the scan | Pass | same, sections 5 and 6 |
 | XMLTV registration: origin `xmltv`, no category, `known_only`, no duplicate ids, an M3U channel is never re-created, a repeat is a no-op, existing classification and owner overrides preserved, a pinned map is unaffected | Pass | same, section 5 |
 | The `epg` event carries the counters, revision and digest only when a policy was applied; an older event renders unchanged; only a same-origin link is rendered | Pass | same, sections 6 and 7 |
+| A skipped `known_only` record still conflicts with a known Film on the same slot, in both orders; identical replays stay one owner (review finding P1) | Pass | same, section 2 |
+| A declared channel with no programme is reported for registration; an undeclared programme id and a country-prefixed label are not (P2) | Pass | same, section 2 |
+| A lost reply on more than 50 ids is claimed only when every id is stored; a missing later id is a conflict (P2). Each regression was shown to fail with its fix reverted | Pass | same, section 5 |
 | No policy given: the scan result equals the earlier behaviour | Pass | same, section 1 |
 
 ## What was not done

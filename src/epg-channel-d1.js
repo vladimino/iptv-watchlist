@@ -345,9 +345,11 @@ export async function registerXmltvChannels(source,{channels,now}){
   // The reply may be lost after the batch committed: ours only when the marker moved to the next revision and every new id is stored as an xmltv registration at it.
   const after=await readMarker(db);
   if(after&&after.revision===revision){
+   // Every new id (the set is bounded by MAX_CHANNELS) must be stored as an xmltv registration at exactly this revision, and the marker count must equal the previous count plus the new ids.
    try{
-    const stored=await many(db,'SELECT channel_id FROM epg_channel WHERE origin=\'xmltv\' AND revision=? AND channel_id IN ('+fresh.slice(0,50).map(()=>'?').join(',')+')',[revision,...fresh.slice(0,50)]);
-    if(stored.length===Math.min(fresh.length,50))return {ok:true,registered:fresh.length,present:ids.length-fresh.length,invalid,revision};
+    let stored=0;
+    for(let start=0;start<fresh.length;start+=50){const chunk=fresh.slice(start,start+50);stored+=(await many(db,'SELECT channel_id FROM epg_channel WHERE origin=\'xmltv\' AND revision=? AND channel_id IN ('+chunk.map(()=>'?').join(',')+')',[revision,...chunk])).length;}
+    if(stored===fresh.length&&after.channelCount===marker.channelCount+fresh.length)return {ok:true,registered:fresh.length,present:ids.length-fresh.length,invalid,revision};
    }catch{return {ok:false,reason:'unavailable'};}
    return {ok:false,reason:'conflict'};
   }
