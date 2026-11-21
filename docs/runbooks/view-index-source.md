@@ -25,7 +25,7 @@ Preflight (read-only):
 1. Read `feature_flags` (`VIEW_INDEX_SOURCE`): `state`, `raw`, `valid`, `issue`, `effective`. While the binding is set it reads `issue: retired` and `effective: null`. A code default, a comment or a deployment does not establish the binding.
 2. Confirm the deployed version is one that carries the retirement (the registry entry is `retired: true`), so that a stale binding changes nothing.
 
-The owner is ready to remove the binding once the deployed version ignores it; that needs its own GO. Removal is a Cloudflare Worker settings change by the owner (`keep_vars: true` keeps a dashboard variable across deploys, so it stays until it is removed). Readback: `feature_flags` returns `state: absent`, `raw: null`, `effective: null`. The removal changes no behavior, because the Worker already ignores the binding. Record the observation in the [feature flag ledger](../reference/feature-flags.md) with the authorizing card.
+The binding was removed by the owner after the deployed version ignored it (2026-11-21; the readback `state: absent`, `raw: null`, `effective: null` is recorded in the [dated evidence](../evidence/d1-migration/air-558-view-index-selector-retirement-2026-11-21.md#production-release-and-binding-removal-appended-2026-11-21-utc) and the [feature flag ledger](../reference/feature-flags.md#production-configuration-evidence-ledger)); the procedure below stays for a binding that appears again. A removal needs its own GO. Removal is a Cloudflare Worker settings change by the owner (`keep_vars: true` keeps a dashboard variable across deploys, so it stays until it is removed). Readback: `feature_flags` returns `state: absent`, `raw: null`, `effective: null`. The removal changes no behavior, because the Worker already ignores the binding. Record the observation in the [feature flag ledger](../reference/feature-flags.md) with the authorizing card.
 
 ## Loss of the simple rollback and the recovery boundary
 
@@ -45,7 +45,7 @@ The refusals of the D1 derivation are the former `d1` ones and are the only fail
 
 ## Remaining separate owner decisions
 
-- Removal of the `VIEW_INDEX_SOURCE` binding, with the `feature_flags` readback above.
+- Done: removal of the `VIEW_INDEX_SOURCE` binding, with the `feature_flags` readback above (see the dated evidence). No decision is pending for it.
 - Retirement of the raw object under an owner-approved R2 operation (the object and snapshot copies of it remain until then; not decided here).
 - A mistaken Letterboxd identity is repaired case by case after a separate owner decision; no rollback or unlink exists.
 - Running `scripts/view-index-d1-export.mjs` against production is a separate owner-approved read operation, like the snapshot export; the script and its tests grant nothing.

@@ -45,11 +45,11 @@ Archive preview, confirm and commit; validate, replay and resume of an interrupt
 ## What remains
 
 - The raw R2 object `enrichment/view-index.json` is **not deleted** and still exists in the bucket and in snapshot exports. It is stale from the first deploy of this change on and is not a source.
-- The Cloudflare binding `VIEW_INDEX_SOURCE` is **not removed** by this change (`keep_vars: true`). The owner is ready to remove it after the deployed version ignores it; that needs a separate GO and a `feature_flags` readback of `state: absent`.
+- The Cloudflare binding `VIEW_INDEX_SOURCE` was **not removed by the code change** (`keep_vars: true`); the owner removed it afterwards as a separate action, read back as absent (section below).
 - `scripts/r2-snapshot-export.mjs` still copies the bucket, raw object included.
 - The local development store (`scripts/local-store.mjs`, `scripts/local-fixtures.mjs`) still writes a stand-in `enrichment/view-index.json`; the Worker never reads it. **Local development degrades:** `/api/enrichment/view`, Finds and the footer refuse locally with `502` or `503`, because the view index is derived from D1 and local development has no authoritative D1 (AIR-576, unchanged).
 - The simple rollback to `r2` is gone and no D1 to R2 rebuild is developed or planned.
-- Dated verification is pending: post-merge CI and deploy, and the `feature_flags` readback after the binding removal. The residual HTTP 5xx and `exceededMemory` risk accepted on AIR-552 is neither caused nor cured by this change and needs its own RCA.
+- Dated verification of the release and the binding removal is recorded in the section below (appended 2026-11-21, after delivery). The residual HTTP 5xx and `exceededMemory` risk accepted on AIR-552 is neither caused nor cured by this change and needs its own RCA.
 
 ## Verification
 
@@ -66,3 +66,20 @@ Not independently verified here: that every one of the retired names has no rema
 ## Documentation updated
 
 [View index contract](../../reference/domain/view-index-read-model.md), [feature flag contract](../../reference/feature-flags.md), [view index source runbook](../../runbooks/view-index-source.md) (retired as an operating runbook), [enrichment](../../reference/api/enrichment.md), [admin](../../reference/api/admin.md) and [admin actions](../../reference/api/admin-actions.md) API references, [Letterboxd user facts](../../reference/integrations/letterboxd-user-facts.md), [baseline import runbook](../../runbooks/letterboxd-baseline-import.md), the [Letterboxd ingestion](../../architecture/letterboxd-ingestion.md) sequence and [UI read models](../../architecture/ui-and-read-models.md) pages, and the ADR register (partial supersession notes on ADR 0023, 0053, 0068 and 0104). Dated evidence and archive files were left untouched as historical records, including [the field audit](air-552-view-index-field-audit-2026-11-20.md) and [the read source implementation](air-552-d1-read-source-implementation-2026-11-20.md).
+
+## Production release and binding removal (appended 2026-11-21, UTC)
+
+This section is a dated record added after delivery. The sections above describe the repository change as reviewed and are not rewritten. Sources: the Controller's and the owner's records on [AIR-558](https://trello.com/c/eSs4w27U) ([release comment](https://trello.com/c/eSs4w27U#comment-6b0206a1559105b36222070d), [handoff comment](https://trello.com/c/eSs4w27U#comment-6b0207ca1deca2ba5a9ca85d)), not a new production read by this change.
+
+| Item | Recorded value |
+| --- | --- |
+| Pull request | [#865](https://github.com/vladimino/iptv-watchlist/pull/865), squash commit `7f989b63452650095919451b436b1d5f60709f4f`, `main` at the same commit |
+| CI and deploy | [Run 44949097196](https://github.com/vladimino/iptv-watchlist/actions/runs/44949097196) on that commit: `Test and build`, `Test shard 2 of 3`, `Test shard 3 of 3` and `Deploy to Cloudflare` completed with success |
+| Deployed version | Worker `iptv` version `bb05bf88-54b3-4b67-9c30-f2a8cc283990`, uploaded and deployed 21:00:56 UTC by the deploy log; Cloudflare deployment `49dffb84-7ea1-43cd-82bf-82da91a51e05` of 21:00:53 UTC with 100% traffic and the annotation of #865 |
+| Readback on the released version | Owner-only MCP `feature_flags`: `VIEW_INDEX_SOURCE` `state: set`, `raw: d1`, `valid: false`, `issue: retired`, `effective: null`, `retired: true`. The binding was inert |
+| D1 after the deploy (read-only, `changed_db: false`) | schema 33; prediction authority `d1`, writes `held`, generation 35940; ratings authority `d1`, cutover `open`, generation 4220; `prediction_pointer`, `prediction_fingerprint` and `ratings_view` rows 5350, 5350 and 4497, unchanged by the deploy |
+| Binding removal | Done by the owner in the Cloudflare Worker `iptv` settings after the release, authorized on AIR-558. The exact time of the action is **unknown**; the readback below was recorded on AIR-558 at 21:06 UTC, after the release readback of 21:01 UTC |
+| Readback after the removal | Owner-only MCP `feature_flags` (independent of the owner's action): `state: absent`, `raw: null`, `effective: null`, `retired: true`, `valid: true`, `issue: null` |
+| Raw R2 object | `enrichment/view-index.json` retained, not read and not written by the Worker; no R2 or D1 operation was performed for this retirement beyond the ordinary deploy |
+
+Limitations. The `feature_flags` tool reads the Worker bindings only; it does not show when the binding was removed and does not prove any live route behavior. No live HTTP call to a retired route (a `404`) and no production UI check was made for this record, and none is claimed. The binding removal changed no behavior, because the released version already ignored the binding. A new stabilization window is not required by the owner. The residual HTTP 5xx and `exceededMemory` risk accepted on [AIR-552](https://trello.com/c/Hk2dJf2U) is neither caused nor cured by this change and remains for its own RCA.
