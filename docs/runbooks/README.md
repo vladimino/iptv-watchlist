@@ -11,7 +11,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Film/Person `prepared` loader: rated admission, retention and TMDB retirement](film-person-prepared-loader.md) (AIR-374 P5; historical, tooling retired in AIR-537 slice 2)
 - [Production monitor and incident response](monitoring.md)
 - [Mirror fallback diagnostics: reading a saved-copy answer, the Worker events and why a failure was not degraded (read-only, ADR 0177)](mirror-fallback-diagnostics.md)
-- [EPG Channel migration 0032 and the first import: owner GOs, preconditions, readback, rollback (proposed, not applied)](channel-0032-apply.md)
+- [EPG Channel migration 0032 and the first import: owner GOs, preconditions, readback, rollback (0032 applied; first import pending)](channel-0032-apply.md)
 - [Channel management: owner `/admin/channels`, staged policy and M3U import (owner page, no scan effect)](channel-management.md)
 - [Local development setup](local-setup.md)
 - [Recovery procedures](recovery/README.md), including [D1 authority and recovery](recovery/d1-authority-and-time-travel.md)

@@ -1,6 +1,6 @@
-# EPG Channel migration 0032 and the first Channel import: owner GOs, preconditions, readback and rollback (proposed, not applied)
+# EPG Channel migration 0032 and the first Channel import: owner GOs, preconditions, readback and rollback (0032 applied; first import pending)
 
-**Status:** proposed L3 plan for [AIR-563](https://trello.com/c/TzDy1d4b). Nothing here is applied or authorized. Production D1 `iptv` was on schema 31 on 21 Nov 2026 14:xx UTC (read-only check: one `schema_contract` row, the v30 and v31 tables present, no `epg_channel*` table, `published_epg_authority` `d1`/`open`). Contract: [EPG Channel](../reference/domain/epg-channel.md), [ADR 0187](../adr/0187-epg-channel-authority.md). Page: [Channel management](channel-management.md). Two separate owner GOs follow; the first import is not covered by the schema GO.
+**Status:** holdpoint 1 (schema 0032) was applied to production D1 `iptv` on 21 Nov 2026 under an owner GO ([evidence](../evidence/d1-migration/air-563-0032-apply-2026-11-21.md)); production is on schema 32 with empty Channel tables. Holdpoint 2 (the first import) is not performed and is not authorized by that GO. The plan below is the one that was followed for [AIR-563](https://trello.com/c/TzDy1d4b). Contract: [EPG Channel](../reference/domain/epg-channel.md), [ADR 0187](../adr/0187-epg-channel-authority.md). Page: [Channel management](channel-management.md). Two separate owner GOs follow; the first import is not covered by the schema GO.
 
 ## What this does, and does not
 
