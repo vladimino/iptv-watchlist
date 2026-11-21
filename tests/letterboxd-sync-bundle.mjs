@@ -38,7 +38,10 @@ const bucket=makeBucket();
 const env={DB:db,BUCKET:bucket,LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://epg.test/x.xml',METADATA_CACHE_DB_OPTIONAL:'standin'};
 const wf={instances:new Map(),created:[],async create({id,params}){if(this.instances.has(id))throw new Error('already exists');this.instances.set(id,{status:'running',params});this.created.push(id);},async get(id){if(!this.instances.has(id))throw new Error('not found');return {status:async()=>({status:this.instances.get(id).status})};}};
 env.LETTERBOXD_WORKFLOW=wf;
-const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,Math,TextEncoder,TextDecoder,Uint8Array,atob,btoa,encodeURIComponent,decodeURIComponent,structuredClone,crypto:webcrypto,setTimeout,clearTimeout,console:{log(){},error:(...a)=>process.stderr.write(a.join(' ')+'\n'),warn(){}},ASSETS:{},fetch:fakeFetch});
+// The Worker's own clock reads (`Date.now()`, `new Date()`) are frozen before every fixed time of this test, so the result does not depend on the day it runs (it once failed the moment the wall clock passed the fixed 2026-11-21 slot times).
+const FROZEN=Date.parse('2026-11-21T00:00:00Z');
+const FrozenDate=class extends Date{constructor(...args){super(...(args.length?args:[FROZEN]));}static now(){return FROZEN;}};
+const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date:FrozenDate,Intl,Map,Set,JSON,Math,TextEncoder,TextDecoder,Uint8Array,atob,btoa,encodeURIComponent,decodeURIComponent,structuredClone,crypto:webcrypto,setTimeout,clearTimeout,console:{log(){},error:(...a)=>process.stderr.write(a.join(' ')+'\n'),warn(){}},ASSETS:{},fetch:fakeFetch});
 vm.runInContext(source.replace(/export \{[^}]+\};/g,'').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 const run=code=>vm.runInContext(code,context);
 const G=name=>run(name);
