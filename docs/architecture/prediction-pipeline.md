@@ -105,6 +105,40 @@ The optional per-film assessment ([ADR 0132](../adr/0132-prediction-assessment-a
 The diagram above is one invocation. Four independent hourly Tasks run it (`:00`, `:15`, `:30`, `:45` Europe/Madrid) with `manifestSize=5`, `generationSize=1`, `submitBatchSize=5`; the flow, overlap and `already_running` handling are in [scheduling and orchestration](scheduling-and-orchestration.md#four-independent-hourly-predictions-v2-tasks). The live Task registry, not this page, is the authority for which Tasks are enabled; the per-film research, `assessment` and validation rules are the same in every Task. Selection stays queue-ordered: each short run takes the next five eligible films, and films left unsubmitted stay queued for a later start.
 
 
+### Deferred start for Scheduled Tasks ([ADR 0193](../adr/0193-deferred-batch-start-with-server-issued-key.md), Proposed)
+
+The synchronous start of the diagram above takes 75–90 s in production, longer than a Scheduled Task reliably waits, so the Tasks move to a **deferred start**. The Task first asks the Worker for a key (`prediction_batch_key`, stateless: no lease, no run, no storage). The start then answers a receipt within seconds after taking the ADR 0188 claim and creating a Workflow instance; the preparation (the same keyed start of ADR 0188, with its fencing) runs in that instance and ends in an immutable stored manifest or a typed final outcome; the Task reads the manifest through the existing `prediction_batch_manifest` parts and heartbeats at once, because the preparation holds only a 180 s lease until the client's first heartbeat or submit. The run id is derived from the issued key and one attempt per key is enforced by a create-only marker written before the Workflow instance is created, so a retry whose receipt was lost finds its attempt, its terminal outcome or its live claim and never starts a second preparation (a claim that finds the marker already written releases itself and dispatches nothing); the manifest is stored before, but served only after, one owner-fenced readiness edit of the lease.
+
+```mermaid
+sequenceDiagram
+    actor Task as Scheduled Task
+    participant MCP as Worker MCP tools
+    participant Lease as Runner lease (claim, then run)
+    participant WF as Workflow iptv-prediction-start
+    participant Store as R2 manifest and outcome
+    Task->>MCP: prediction_batch_key
+    MCP-->>Task: dk1 key (nothing stored)
+    Task->>MCP: prediction_batch_start deferred with the key
+    MCP->>Lease: Take the 180 s claim (key hash, argument hash)
+    alt A live holder exists
+        MCP-->>Task: same key and arguments: the same receipt. Otherwise already_running
+    else Claim taken
+        MCP->>Store: Write the create-only attempt marker first
+        MCP->>WF: Create the instance (id is the run id)
+        MCP-->>Task: accepted receipt (runId, epoch, preparing)
+        WF->>Lease: Renew the claim at each stage, convert under the same epoch
+        WF->>Store: Fenced persist, then the manifest or a terminal outcome
+        WF->>Lease: Hold the 180 s lease throughout, then one fenced readiness edit
+    end
+    loop Until ready, refused or failed
+        Task->>MCP: prediction_batch_manifest runId
+        MCP-->>Task: manifest_pending, the envelope, start_refused or start_failed
+    end
+    Task->>MCP: prediction_heartbeat renews to the full TTL, then generate and submit as before
+```
+
+A caller that disappears after the receipt blocks the runner for about 3 minutes, not 15, and the next start recovers the abandoned run through the existing `recovered_stale_lease` path. The synchronous start, the keyed synchronous start and `dryRun` stay for the transition. Offline cost (see [the evidence](../evidence/prediction/air-573-deferred-start-offline-2026-11-21.md)): the key 0 D1 and 0 R2 operations, the receipt 5 D1 and 4 R2, readback 4 D1 and 2 R2; the preparation is off the caller's path.
+
 ## Queue writes
 
 The prediction runner is one of several writers of the queue object `enrichment/prediction-queue.json`. Every writer, with or without a lease, goes through the same conditional write ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31).

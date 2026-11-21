@@ -1179,6 +1179,12 @@ export const FILES={
  "prediction-batch-start-parity.mjs": {
   "suite": "core"
  },
+ "prediction-orphan-start-signal.mjs": {
+  "suite": "core"
+ },
+ "prediction-batch-start-deferred.mjs": {
+  "suite": "core"
+ },
  "prediction-batch-start-keyed.mjs": {
   "suite": "split",
   "note": "Join, claim fencing, pending and refusal semantics stay in core. The runner-clock bound of the join wait is scenario prediction-batch-start-keyed-join-bound."
