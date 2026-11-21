@@ -13,12 +13,12 @@ Before any edit, the Controller reads the live tool list (`prediction_batch_key`
 | Answer | Task action |
 | --- | --- |
 | `accepted`, `phase: "preparing"` or `"ready"` | keep `runId` and `epoch`; go to step 4 |
-| `accepted`, `phase: "accepting"` (`next: "repeat_start"`) | the first request has not confirmed its dispatch: wait `retryAfterMs` (1 s) and send the **same** start again (at most 5 times) |
+| `accepted`, `phase: "accepting"` (`next: "repeat_start"`) | the first request has claimed but not yet written its attempt marker: wait `retryAfterMs` (1 s) and send the **same** start again (at most 5 times) |
 | `already_running` | success (another Task holds the slot): do not adopt the `runId`, no `prediction_complete`, end. Do **not** call `prediction_batch_key` again to retry |
 | `start_refused`, `start_failed` (HTTP 409, `outcomeCode`) | this invocation's attempt already ended (a retry of a start whose answer was lost): no run exists; report the code, end |
 | `start_finished` (HTTP 409) | this invocation's run already finished or its lease expired; end, no `prediction_complete` |
 | `deferred_start_ambiguous` (HTTP 503) | the platform could not confirm the dispatch: send the **same** start again after `retryAfterMs` (at most 3 times), then end |
-| `deferred_start_unavailable` (HTTP 503) | definitely not accepted: send the **same** start again once after 5 s; if it repeats, report the `code` and end |
+| `deferred_start_unavailable` (HTTP 503) | not accepted; the invocation is one-shot (a retry of a possibly dispatched key is the typed `start_failed`): report the `code` and end, the next execution takes a fresh key |
 | `invalid_deferred_key`, `deferred_not_dry_run` (HTTP 400) | a prompt defect; report the `code`, end |
 | transport error or no answer | send the **same** `prediction_batch_start` again with the **same** `invocationKey` (at most 3 attempts, 5 s apart); the answer is the same receipt or the typed result, never a second run. After 3 attempts, end and report |
 

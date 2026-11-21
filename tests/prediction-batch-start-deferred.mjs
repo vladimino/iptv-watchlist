@@ -62,7 +62,7 @@ const world=async(n=6,{workflow=true}={})=>{
  assert.ok(JSON.stringify(r.data).length<1500,'a compact receipt');
  assert.ok(w.stats.queries+w.stats.batches-queries<60,'the receipt costs a claim, not a preparation: '+(w.stats.queries+w.stats.batches-queries)+' D1 round trips');
  assert.equal(w.instances.length,1);assert.equal(w.instances[0].id,r.data.runId);assert.equal(w.instances[0].params.body.invocationKey,undefined,'the key is not in the instance payload');assert.ok(!JSON.stringify(w.instances[0].params).includes(key));
- assert.ok(w.records.get(attemptKey(r.data.runId)),'the attempt marker exists once the instance is known to exist');assert.equal(w.records.get(attemptKey(r.data.runId)).argsHash.length,64);
+ assert.ok(w.records.get(attemptKey(r.data.runId)),'the attempt marker is written before the dispatch');assert.equal(w.records.get(attemptKey(r.data.runId)).argsHash.length,64);
  const lease=leaseDoc(w);assert.equal(lease.phase,'claim');assert.equal(lease.runId,r.data.runId);assert.equal(lease.deferred,true);assert.equal(lease.prep,true);assert.match(lease.keyHash,/^[0-9a-f]{64}$/);assert.ok(lease.expiresAt<Date.now()+181000,'a claim, not a 15 minute lease');
  assert.equal(runs(w),0,'nothing was prepared');assert.ok(![...w.records.keys()].some(k=>k.startsWith('enrichment/batch-manifest/')||k.startsWith('enrichment/sources/')),'no source, no manifest');
  assert.ok(!dump(w.file).includes(key)&&!JSON.stringify([...w.records.entries()]).includes(key),'the key is stored nowhere');
@@ -160,11 +160,13 @@ const world=async(n=6,{workflow=true}={})=>{
  const w=await world(6,{workflow:false});const r=await w.start(await w.key());assert.equal(r.status,503);assert.equal(r.data.code,'deferred_start_unavailable');assert.equal(peek(w).phase,undefined,'no claim was taken');assert.equal(runs(w),0);
 }
 {
+ // a definite "not found" ends this one-shot attempt typed: the claim is released, the same key gets the typed failure and is never dispatched again; the next execution uses a fresh key
  const w=await world();const key=await w.key();
  w.mode.create='throw-not-created';
  const r=await w.start(key);assert.equal(r.status,503,JSON.stringify(r.data));assert.equal(r.data.code,'deferred_start_unavailable');assert.equal(leaseDoc(w).expiresAt,0,'definitely not created: the claim was released');
- assert.ok(![...w.records.keys()].some(k=>k.startsWith('enrichment/batch-start/')),'no attempt marker and no outcome: the invocation may start again');
- w.mode.create='ok';const retry=await w.start(key);assert.equal(retry.data.status,'accepted','the same key may start once the platform accepts');assert.equal(w.instances.length,1);
+ const runKeys=[...w.records.keys()].filter(k=>k.startsWith('enrichment/batch-start/'));assert.equal(runKeys.length,2,'the attempt marker and the typed failed outcome');
+ w.mode.create='ok';const retry=await w.start(key);assert.equal(retry.status,409);assert.equal(retry.data.code,'start_failed');assert.equal(retry.data.outcomeCode,'deferred_start_unavailable');assert.equal(w.instances.length,0,'never dispatched again for the same key');
+ const fresh=await w.start(await w.key());assert.equal(fresh.data.status,'accepted','a fresh execution with a fresh key starts');
 }
 {
  const w=await world();const key=await w.key();
@@ -184,31 +186,78 @@ const world=async(n=6,{workflow=true}={})=>{
  const read=await w.read(r.data.runId);assert.match(JSON.stringify(read),/start_failed/);
 }
 
-// 10. Interleavings of the first request: a repeat while `create` is pending is `accepting` (repeat the start, do not poll); a request that dies between the claim and the dispatch leaves a claim that
-// expires, and the same key then dispatches once; a takeover between the repeat's reads is refused.
+// 10. Interleavings of the first request. The attempt marker is written BEFORE the dispatch: a repeat while `create` is pending already sees `preparing`; a request that dies after the marker (during
+// create) leaves an attempt that ends typed and is never dispatched again; a request that dies between the claim and the marker never reached the platform, so its claim expires and the same key dispatches once.
 {
  const w=await world();const key=await w.key();
  w.mode.create='pending';let release;w.pending=new Promise(resolve=>{release=resolve;});
  const firstRequest=w.start(key);
  await new Promise(resolve=>setTimeout(resolve,50));
- const second=await w.start(key);assert.equal(second.status,200,JSON.stringify(second.data).slice(0,200));assert.equal(second.data.phase,'accepting');assert.equal(second.data.next,'repeat_start');assert.equal(second.data.retryAfterMs,1000);
+ const second=await w.start(key);assert.equal(second.status,200,JSON.stringify(second.data).slice(0,200));assert.equal(second.data.phase,'preparing');assert.equal(second.data.next,'poll_manifest');
  release();const first=await firstRequest;assert.equal(first.data.phase,'preparing');
- const third=await w.start(key);assert.equal(third.data.phase,'preparing');assert.equal(third.data.next,'poll_manifest');assert.equal(w.instances.length,1);
+ const third=await w.start(key);assert.equal(third.data.phase,'preparing');assert.equal(w.instances.length,1);
 }
 {
  const w=await world();const key=await w.key();
  w.mode.create='hang';void w.start(key);
  await new Promise(resolve=>setTimeout(resolve,50));
- assert.equal(leaseDoc(w).phase,'claim');assert.equal(w.instances.length,0,'the first request never reached the platform');
+ assert.equal(leaseDoc(w).phase,'claim');assert.equal(w.instances.length,0,'the first request never completed its dispatch');
  setLease(w,{...leaseDoc(w),expiresAt:Date.now()-1});w.mode.create='ok';
- const retry=await w.start(key);assert.equal(retry.status,200,JSON.stringify(retry.data).slice(0,200));assert.equal(retry.data.phase,'preparing');assert.equal(w.instances.length,1,'dispatched once');assert.equal(retry.data.epoch,2,'a new claim of the same attempt');
+ const retry=await w.start(key);assert.equal(retry.status,409,JSON.stringify(retry.data).slice(0,200));assert.equal(retry.data.code,'start_failed');assert.equal(retry.data.outcomeCode,'start_claim_lost');assert.equal(w.instances.length,0,'a possibly dispatched attempt is never dispatched again');
+}
+{
+ // a request that dies between the claim and the marker: no marker, so the attempt never reached the platform. A repeat meanwhile is `accepting`; after the claim expires the same key dispatches once.
+ const w=await world();const key=await w.key();
+ const put=w.env.BUCKET.put.bind(w.env.BUCKET);let hang=true;
+ w.env.BUCKET.put=async(k,...a)=>{if(hang&&String(k).startsWith('enrichment/batch-start/attempt/'))return new Promise(()=>{});return put(k,...a);};
+ void w.start(key);
+ await new Promise(resolve=>setTimeout(resolve,50));
+ const meanwhile=await w.start(key);assert.equal(meanwhile.data.phase,'accepting');assert.equal(meanwhile.data.next,'repeat_start');assert.equal(meanwhile.data.retryAfterMs,1000);assert.equal(w.instances.length,0);
+ setLease(w,{...leaseDoc(w),expiresAt:Date.now()-1});hang=false;
+ const retry=await w.start(key);assert.equal(retry.status,200,JSON.stringify(retry.data).slice(0,200));assert.equal(retry.data.phase,'preparing');assert.equal(retry.data.epoch,2,'a new claim of an attempt that never reached the platform');assert.equal(w.instances.length,1,'dispatched once');
  const outcome=await w.prepare(w.instances[0]);assert.equal(outcome.phase,'ready',JSON.stringify(outcome));assert.equal(leaseDoc(w).epoch,2);
+}
+{
+ // the marker cannot be written: nothing was dispatched, the claim is released, and the same key may start
+ const w=await world();const key=await w.key();
+ const put=w.env.BUCKET.put.bind(w.env.BUCKET);let fail=true;
+ w.env.BUCKET.put=async(k,...a)=>{if(fail&&String(k).startsWith('enrichment/batch-start/attempt/'))throw new Error('r2 unavailable');return put(k,...a);};
+ const r=await w.start(key);assert.equal(r.status,503);assert.equal(r.data.code,'deferred_start_unavailable');assert.equal(leaseDoc(w).expiresAt,0);assert.equal(w.instances.length,0);
+ fail=false;const retry=await w.start(key);assert.equal(retry.data.status,'accepted');assert.equal(w.instances.length,1);
+}
+{
+ // THE RACE OF THE REVIEW: a repeat B reads no outcome and no marker, pauses; the first attempt A runs to its end (refused, releases, outcome written) and its receipt is lost; B resumes. B must not
+ // keep a lease, must not dispatch, and must answer A's typed result.
+ const w=await world();const key=await w.key();
+ let paused=false,inA=false;const get=w.env.BUCKET.get.bind(w.env.BUCKET);
+ w.env.BUCKET.get=async(k,...a)=>{
+  if(!paused&&!inA&&String(k).startsWith('enrichment/batch-start/attempt/')){
+   paused=true;inA=true;
+   const stale=await get(k,...a);
+   const first=await w.start(key,{capacity:{remainingPercent:0}});assert.equal(first.data.status,'accepted');
+   const ended=await w.prepare(w.instances[0]);assert.equal(ended.phase,'refused',JSON.stringify(ended));
+   inA=false;return stale;
+  }
+  return get(k,...a);
+ };
+ const b=await w.start(key,{capacity:{remainingPercent:0}});
+ assert.ok(paused);assert.equal(b.status,409,JSON.stringify(b.data).slice(0,300));assert.equal(b.data.code,'start_refused','the original attempt\'s typed result');assert.equal(w.instances.length,1,'no second dispatch');
+ assert.equal(leaseDoc(w).expiresAt,0,'no retained lease: B released its own claim');assert.equal(leaseDoc(w).epoch,2,'B did claim a new epoch and released exactly that one');assert.equal(runs(w),0);
+}
+{
+ // a delayed handler of an earlier epoch can neither release nor prepare against a later epoch of the same run id
+ const w=await world();const key=await w.key();const r=await w.start(key);
+ setLease(w,{...leaseDoc(w),epoch:2});
+ const lost=await w.ctx.runnerLease(w.env,r.data.runId,'release',null,1);assert.equal(lost.status,'lease_lost');assert.equal(lost.reason,'epoch');
+ assert.equal(leaseDoc(w).epoch,2);assert.ok(leaseDoc(w).expiresAt>Date.now(),'the later epoch was not released');
+ const stale=await w.prepare(w.instances[0]);assert.equal(stale.phase,'failed');assert.equal(stale.code,'start_claim_lost');assert.equal(leaseDoc(w).epoch,2);assert.equal(runs(w),0,'an instance dispatched with epoch 1 does nothing against epoch 2');
+ const ok=await w.ctx.runnerLease(w.env,r.data.runId,'release',null,2);assert.equal(ok.status,'owned');assert.equal(leaseDoc(w).expiresAt,0);
 }
 {
  const w=await world();const key=await w.key();const r=await w.start(key);
  let done=false;const get=w.env.BUCKET.get.bind(w.env.BUCKET);
  w.env.BUCKET.get=async(k,...a)=>{if(!done&&String(k)===attemptKey(r.data.runId)){done=true;setLease(w,foreignLease());}return get(k,...a);};
- const raced=await w.start(key);assert.ok(done);assert.equal(raced.data.status,'already_running','a takeover between the reads is refused, not answered with a receipt');
+ const raced=await w.start(key);assert.ok(done);assert.notEqual(raced.data.status,'accepted','a takeover between the reads is never answered with a receipt');assert.ok(raced.data.status==='already_running'||raced.data.code==='start_failed',JSON.stringify(raced.data).slice(0,200));assert.equal(w.instances.length,1);
 }
 
 // 11. The readiness boundary under failure: a crash after the run was saved and before the manifest; between the manifest and the readiness edit; the first heartbeat racing readiness; an outcome write that fails.
@@ -254,27 +303,27 @@ const world=async(n=6,{workflow=true}={})=>{
  const read=await w.read(r.data.runId);assert.equal(read.isError,true);assert.match(JSON.stringify(read),/start_failed/);assert.match(JSON.stringify(read),/start_lost/);assert.doesNotMatch(JSON.stringify(read),/unknown_run/,'no run, no live claim and no outcome is a typed loss');
 }
 
-// 12. The actual caller path of a Task, end to end: key -> receipt -> envelope -> heartbeat -> profile, contract, film -> a valid submit and its replay -> complete, with the persisted versions.
+// 12. The actual caller path of a Task at S5 (five films): key -> receipt -> envelope -> heartbeat -> profile, contract and every film -> valid submit and its idempotent replay -> complete.
 {
- const w=await world(3);const key=await w.key();
- const r=await w.start(key,{manifestSize:1});assert.equal(r.data.status,'accepted');
+ const w=await world(6);const key=await w.key();
+ const r=await w.start(key);assert.equal(r.data.status,'accepted');
  await w.prepare(w.instances[0]);
  const envelope=JSON.parse((await w.read(r.data.runId)).content[0].text);assert.equal(envelope.kind,'envelope');
  const beat=await w.api('heartbeat',{runId:r.data.runId});assert.equal(beat.status,200,JSON.stringify(beat.data).slice(0,200));
  const profile=JSON.parse((await w.read(r.data.runId,{part:'profile'})).content[0].text);const contract=JSON.parse((await w.read(r.data.runId,{part:'contract'})).content[0].text);
- const filmParts=envelope.parts.filter(part=>part.kind==='film');assert.equal(filmParts.length,1);
- const film=JSON.parse((await w.read(r.data.runId,{part:'film',filmId:filmParts[0].filmId})).content[0].text);
- assert.ok(profile&&contract&&film);
- const item={filmId:filmParts[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction};
- const sub=await w.api('batch/submit',{runId:r.data.runId,epoch:r.data.epoch,items:[item]});assert.equal(sub.status,200,JSON.stringify(sub.data).slice(0,300));
- assert.equal(sub.data.results[0].status,'created',JSON.stringify(sub.data.results[0]));
- const replay=await w.api('batch/submit',{runId:r.data.runId,epoch:r.data.epoch,items:[item]});assert.equal(replay.status,200);assert.equal(replay.data.results[0].replayed,true,'an identical replay is idempotent');
+ const filmParts=envelope.parts.filter(part=>part.kind==='film');assert.equal(filmParts.length,5,'S5: five films');
+ const films=[];for(const part of filmParts)films.push(JSON.parse((await w.read(r.data.runId,{part:'film',filmId:part.filmId})).content[0].text));
+ assert.ok(profile&&contract&&films.length===5);
+ const items=filmParts.map(part=>({filmId:part.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
+ const sub=await w.api('batch/submit',{runId:r.data.runId,epoch:r.data.epoch,items});assert.equal(sub.status,200,JSON.stringify(sub.data).slice(0,300));
+ assert.deepEqual(sub.data.results.map(x=>x.status),['created','created','created','created','created'],JSON.stringify(sub.data.results));
+ const replay=await w.api('batch/submit',{runId:r.data.runId,epoch:r.data.epoch,items});assert.equal(replay.status,200);assert.ok(replay.data.results.every(x=>x.replayed===true),'an identical replay is idempotent');
  const done=await w.api('complete',{runId:r.data.runId,reason:'manifest_spent'});assert.equal(done.status,200,JSON.stringify(done.data).slice(0,300));
  const run=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+r.data.runId+"'")[0].d);
  assert.equal(run.status,'complete');assert.ok(run.tasteProfileVersion!==undefined&&run.fingerprintSchemaVersion!==undefined&&run.predictionPromptVersion!==undefined,'the persisted run carries the profile, schema and prompt versions');assert.equal(run.keyHash.length,64);
- assert.equal(sql(w.file,'SELECT count(*) AS n FROM prediction_pointer')[0].n,1,'one prediction is current (the persisted pointer)');
+ assert.equal(sql(w.file,'SELECT count(*) AS n FROM prediction_pointer')[0].n,5,'five predictions are current (the persisted pointers)');
  assert.equal(leaseDoc(w).expiresAt,0,'the lease is released at completion');
- const retry=await w.start(key,{manifestSize:1});assert.equal(retry.status,409);assert.equal(retry.data.code,'start_finished');assert.equal(w.instances.length,1,'the finished invocation is never started again');
+ const retry=await w.start(key);assert.equal(retry.status,409);assert.equal(retry.data.code,'start_finished');assert.equal(w.instances.length,1,'the finished invocation is never started again');
 }
 
 // 13. A preparation refused with `prediction_catalog_held` still leaves the neutral AIR-575 skipped Event (the Workflow does not pass the route exit that records it), once, and no run.

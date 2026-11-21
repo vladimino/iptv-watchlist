@@ -107,7 +107,7 @@ The diagram above is one invocation. Four independent hourly Tasks run it (`:00`
 
 ### Deferred start for Scheduled Tasks ([ADR 0193](../adr/0193-deferred-batch-start-with-server-issued-key.md), Proposed)
 
-The synchronous start of the diagram above takes 75–90 s in production, longer than a Scheduled Task reliably waits, so the Tasks move to a **deferred start**. The Task first asks the Worker for a key (`prediction_batch_key`, stateless: no lease, no run, no storage). The start then answers a receipt within seconds after taking the ADR 0188 claim and creating a Workflow instance; the preparation (the same keyed start of ADR 0188, with its fencing) runs in that instance and ends in an immutable stored manifest or a typed final outcome; the Task reads the manifest through the existing `prediction_batch_manifest` parts and heartbeats at once, because the preparation holds only a 180 s lease until the client's first heartbeat or submit. The run id is derived from the issued key, so a retry whose receipt was lost finds its attempt, its terminal outcome or its live claim and never starts a second preparation; the manifest is stored before, but served only after, one owner-fenced readiness edit of the lease.
+The synchronous start of the diagram above takes 75–90 s in production, longer than a Scheduled Task reliably waits, so the Tasks move to a **deferred start**. The Task first asks the Worker for a key (`prediction_batch_key`, stateless: no lease, no run, no storage). The start then answers a receipt within seconds after taking the ADR 0188 claim and creating a Workflow instance; the preparation (the same keyed start of ADR 0188, with its fencing) runs in that instance and ends in an immutable stored manifest or a typed final outcome; the Task reads the manifest through the existing `prediction_batch_manifest` parts and heartbeats at once, because the preparation holds only a 180 s lease until the client's first heartbeat or submit. The run id is derived from the issued key and one attempt per key is enforced by a create-only marker written before the Workflow instance is created, so a retry whose receipt was lost finds its attempt, its terminal outcome or its live claim and never starts a second preparation (a claim that finds the marker already written releases itself and dispatches nothing); the manifest is stored before, but served only after, one owner-fenced readiness edit of the lease.
 
 ```mermaid
 sequenceDiagram
@@ -127,7 +127,7 @@ sequenceDiagram
         MCP-->>Task: accepted receipt (runId, epoch, preparing)
         WF->>Lease: Renew the claim at each stage, convert under the same epoch
         WF->>Store: Fenced persist, then the manifest or a terminal outcome
-        WF->>Lease: Cut the run lease back to 180 s until the first heartbeat
+        WF->>Lease: Hold the 180 s lease throughout, then one fenced readiness edit
     end
     loop Until ready, refused or failed
         Task->>MCP: prediction_batch_manifest runId
