@@ -188,3 +188,7 @@ Ratings production is Cloudflare-owned: `orchestration.mode=cloudflare`, epoch `
 ## Worker monitor and the external drift Task (AIR-349)
 
 The Worker's own monitor ([ADR 0095](../adr/0095-cloudflare-native-production-monitor.md)) checks the stored result of each stream independently of ChatGPT and is inert unless `MONITOR` is `on`. The external «IPTV Scheduled Task Drift» checks only the enabled state, schedule, prompt boundaries and recorded execution outcomes of the one producing ChatGPT Task, the hourly Predictions Task. It performs no Worker health check. See the [monitor API](api/monitor.md).
+
+## Cloudflare cron and the Letterboxd Sync
+
+No Cloudflare cron or ChatGPT Scheduled Task exists for the Letterboxd Sync. The control plane is in the repository and inert: the cron `30 * * * *` that would call only `LetterboxdOrchestration.ensure` is **not** in `wrangler.jsonc`, there is no Workflow binding, and the existing crons do not call it. Adding the trigger and binding is a separate owner-approved production cutover. The ChatGPT Task registry is unaffected.

@@ -185,3 +185,34 @@ flowchart TD
 ```
 
 There is no hard TTL. The run fails closed only when no snapshot exists or it cannot be read, which is a D1 fault and not a Letterboxd one. The EPG remains the only writer of the programme generation ([ADR 0142](../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 3); the generation's watchlist part becomes a copy of the pinned snapshot, and the scan, retention and removal-event steps leave the EPG commit tail. The immediate join is a read-time composition and writes nothing.
+
+## Channel policy (dormant contract, [ADR 0187](../adr/0187-epg-channel-authority.md), Accepted design, dormant implementation)
+
+Channels get their own D1 tables with a provider category, a per-category policy and an optional owner override. **No scan reads them today**; the owner-only `/admin/channels` page (AIR-562) imports an M3U, edits owner categories and overrides and shows the staged revision, so what it stores is staged policy and changes nothing in the publication flow or in Discovery. The diagram shows the contract a later, separately approved reader would use, and it changes nothing in the publication flow above. The contract is in [EPG Channel](../reference/domain/epg-channel.md).
+
+```mermaid
+flowchart TD
+    m3u["M3U groups and tvg ids<br/>(source of classification)"]
+    plan["Pure import plan: M3U tvg ids and XMLTV ids,<br/>tvg_1259 to ch1259, tvg_1 to ch001;<br/>duplicate or unknown group refuses the plan;<br/>unlisted channels are kept, never deleted"]
+    tables[("D1 channel tables, one snapshot revision:<br/>provider category, owner category, owner override")]
+    snapshot["One bounded snapshot read:<br/>one existence check and four data queries,<br/>then in-memory lookup"]
+    derive{"Effective policy"}
+    override["owner policy override"]
+    ownercat["owner category policy"]
+    category["provider category policy"]
+    fallback["known_only:<br/>unknown, unclassified (incl. XMLTV-only), empty or unavailable"]
+    reader["Future scan consumer (not implemented)"]
+    shows["published_epg_show and discovery_observation_show:<br/>own keys, no foreign key to channels"]
+    m3u --> plan -->|"fenced batch at the expected revision"| tables --> snapshot --> derive
+    derive -->|"has override"| override
+    derive -->|"has owner category"| ownercat
+    derive -->|"has provider category"| category
+    derive -->|"otherwise"| fallback
+    override --> reader
+    ownercat --> reader
+    category --> reader
+    fallback --> reader
+    shows -.->|"channel_id of a show is the lookup key, by id only, never by name"| reader
+    classDef future fill:#fff3de,stroke:#a56c2b,color:#42300e
+    class reader future
+```

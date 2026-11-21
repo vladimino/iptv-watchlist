@@ -11,6 +11,7 @@ export const PREFIX_ROUTES={
  '/api/admin/health':['/api/admin/health'],
  '/api/admin/limbo':['/api/admin/limbo','/api/admin/limbo?cause=backoff&subsystem=prediction&kind=film&age=14&limit=5'],
  '/api/admin/identity-work':['/api/admin/identity-work','/api/admin/identity-work?type=letterboxd_rated_candidate&limit=5'],
+ '/api/admin/channels/':['/api/admin/channels','/api/admin/channels?q=sport&queue=unclassified&limit=5'],
  '/api/admin/posters':['/api/admin/posters','/api/admin/posters?limit=3&cursor=a'],
  '/api/admin/prediction-recovery':['/api/admin/prediction-recovery?film=w1'],
  '/api/admin/prediction-recovery-intent/':['/api/admin/prediction-recovery-intent/preview?films=w1,w2&mode=prediction_only','/api/admin/prediction-recovery-intent/preview?films=w1&mode=fingerprint_and_prediction&ttlHours=24','/api/admin/prediction-recovery-intent/cohort?id=pr_000000000000000000000000'],
@@ -29,7 +30,7 @@ export const SAMPLES=['/api/enrichment/pipeline/status?view=operational','/api/e
 // A query a route needs to reach its real code (without it the route answers 400).
 export const QUERY={'/api/enrichment/history':'?filmId=w1','/api/letterboxd/diary':'?filmId=w1'};
 // Static pages: assets, never storage.
-export const PAGES=['/','/admin','/admin/health','/admin/limb','/admin/limbo','/admin/identity','/admin/posters','/admin/letterboxd','/admin/actions','/events','/film/w1','/styles.css','/app.js','/admin.js','/return-home.js','/status-footer.js'];
+export const PAGES=['/','/admin','/admin/health','/admin/limb','/admin/limbo','/admin/identity','/admin/posters','/admin/channels','/admin/letterboxd','/admin/actions','/events','/film/w1','/styles.css','/app.js','/admin.js','/return-home.js','/status-footer.js'];
 // MCP: every tool in tools/list is one of these. A read tool is called with these arguments in every scenario; a write tool is never called (it writes by contract).
 export const MCP_READ_TOOLS={
  probe_read:{},probe_echo:{arguments:{text:'audit'}},feature_flags:{},epg_status:{},epg_pipeline_status:{},enrichment_schema:{},enrichment_profile:{},enrichment_runner:{},enrichment_queue:{},enrichment_status:{},

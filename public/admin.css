@@ -445,3 +445,20 @@
 @media(max-width:800px){.iw-form{flex-direction:column;align-items:stretch}.iw-actions{flex-direction:column}.iw-actions .admin-refresh,.iw-actions .admin-more{width:100%}.iw-inline{display:block;width:100%;margin:8px 0 0}}
 /* AIR-131: the start of the group page (worklist, title search) and the entry link of the identity queue. */
 .group-picks{list-style:none;margin:8px 0;padding:0;display:grid;gap:8px}.group-picks .admin-hit{overflow-wrap:anywhere}.group-start{margin:0 0 20px}.group-start h3{margin:0 0 6px;font-size:16px}.group-advanced{margin:12px 0}.iw-group-entry{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:10px 0 0}
+
+/* AIR-562: Channel admin */
+.channels-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;align-items:end;margin:12px 0}
+.channels-filters select,.channels-filters input[type=search],.channels-item select,.channels-item input[type=text],#channels-file{width:100%;box-sizing:border-box;background:var(--surface);color:var(--text);border:1px solid #465044;border-radius:8px;padding:8px;font:inherit}
+.channels-check{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--muted)}
+.channels-items{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.channels-item{border:1px solid var(--line);border-radius:10px;padding:12px;display:grid;gap:8px;min-width:0}
+.channels-item header{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline}
+.channels-item h3{margin:0;font-size:16px;overflow-wrap:anywhere}
+.channels-chip{display:inline-block;border:1px solid #465044;border-radius:999px;padding:1px 9px;font-size:12px;color:var(--muted)}
+.channels-chip-discover{border-color:var(--lime);color:var(--lime)}
+.channels-chip-deny_all{border-color:#88665b;color:#ffcfbd}
+.channels-edit{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;align-items:end}
+.channels-diff ul{margin:4px 0 12px;padding-left:18px;max-height:220px;overflow:auto}
+.channels-groups{display:grid;gap:6px;margin:8px 0}
+.channels-groups label{display:grid;grid-template-columns:minmax(0,1fr) 9rem;gap:8px;align-items:center;font-size:14px;overflow-wrap:anywhere}
+@media(max-width:800px){.channels-groups label{grid-template-columns:minmax(0,1fr)}}

@@ -59,6 +59,15 @@ export const FILES={
  "admin-limbo-page.mjs": {
   "suite": "core"
  },
+ "admin-channels-api.mjs": {
+  "suite": "core"
+ },
+ "admin-channels-domain.mjs": {
+  "suite": "core"
+ },
+ "admin-channels-page.mjs": {
+  "suite": "core"
+ },
  "admin-posters-api.mjs": {
   "suite": "core"
  },
@@ -599,6 +608,9 @@ export const FILES={
   "suite": "core"
  },
  "epg-checkpoint-d1.mjs": {
+  "suite": "core"
+ },
+ "epg-channel-d1.mjs": {
   "suite": "core"
  },
  "epg-checkpoint-production.mjs": {
@@ -1360,6 +1372,33 @@ export const FILES={
   "suite": "core"
  },
  "ratings-orchestration.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-watchlist.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-repository.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-effects.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-bundle.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-ratings.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-monitor.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-admission.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-fence.mjs": {
   "suite": "core"
  },
  "ratings-queue-v2.mjs": {

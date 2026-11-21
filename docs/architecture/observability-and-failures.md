@@ -74,6 +74,10 @@ For pipelines moved to Cloudflare executors, [ADR 0089](../adr/0089-shared-orche
 
 No live operations are introduced by this page.
 
+## Letterboxd Sync read model (dormant)
+
+`LetterboxdSync.readModel` reads only (no write, no repair): mode and epoch, the current slot with its window, the next slot, `sources.ratings` and `sources.watchlist` each with their own `lastSuccessAt` and last outcome, the Watchlist `watchlist_stale` warning above 24 hours, the outcome of reconciliation (operational only), the last eight slots, the count of pending slot Events and the derived health (`late`, `stalled`, `failed`, `missed`, `quarantined`). It is served as `status().letterboxdSync` and as the `letterboxd` monitor stream (issues `letterboxd_ratings_failed`, `letterboxd_watchlist_failed`, `letterboxd_ratings_rate_limited` and `letterboxd_watchlist_rate_limited` per source, `letterboxd_slot_late`, `letterboxd_slot_stalled`, `letterboxd_slot_missed`, `letterboxd_slots_failed`, `letterboxd_quarantined`, `letterboxd_unreadable`, `letterboxd_watchlist_stale`, `letterboxd_events_backlog`), only while the executor is `switching` or `cloudflare`. Exactly two Events per slot (`ratings`, `watchlist`) come from the slot outbox, whatever the outcome.
+
 ## Ratings orchestration read model (AIR-347)
 
 `ratings_sync_status.orchestration` is implemented and read-only: health idle/healthy/waiting/cooldown/stalled/quarantined/failed_permanent, stall threshold two hours after the 17:30 Madrid due time. A failed read yields `health: unknown` and does not break the status.

@@ -4,7 +4,7 @@
 // Nothing here retries, resets, merges or writes; `disposition` is a read-side label, not an action.
 
 export const IDENTITY_WORK_VERSION = 1;
-export const IDENTITY_LANES = ['film', 'epg_observation', 'letterboxd_rated_candidate'];
+export const IDENTITY_LANES = ['film', 'epg_observation', 'watchlist_admission', 'letterboxd_rated_candidate'];
 export const IDENTITY_DISPOSITIONS = ['retryable', 'blocked', 'needs_owner_review', 'waiting', 'resolved'];
 export const IDENTITY_LIMIT_MAX = 25;
 export const IDENTITY_LIMIT_DEFAULT = 25;
@@ -130,6 +130,35 @@ export function filmRows(items) {
   });
 }
 
+// The SQL filter of the ledger lane for a query: pushed into the source BEFORE any page limit, so a filtered work list is complete through paging. `blocked` names no ledger state: no rows, never everything.
+export function admissionFilter(query) {
+  if (query.disposition === null) return query.includeResolved ? 'all' : 'open';
+  return {needs_owner_review: 'owner_review', waiting: 'waiting', retryable: 'retryable', resolved: 'history'}[query.disposition] ?? 'none';
+}
+// The Watchlist admission ledger (ADR 0186 decision 5): one row per Letterboxd id that still needs a Film, as the Letterboxd Sync keeps it. A terminal row (attempts or age exhausted) needs an owner decision; a pending one
+// is retryable once its retry time has come and waiting before; resolved and superseded rows are resolved (history). It carries no Film link: the identity stays a Film fact.
+export function admissionDisposition(row, nowMs) {
+  if (row?.state === 'terminal') return {disposition: 'needs_owner_review', reason: row.lastReason ?? 'terminal'};
+  if (row?.state === 'resolved' || row?.state === 'superseded') return {disposition: 'resolved', reason: row.lastReason ?? row.state};
+  const due = row?.nextRetryAt == null || (Number.isFinite(Date.parse(row.nextRetryAt)) && Date.parse(row.nextRetryAt) <= nowMs);
+  return {disposition: due ? 'retryable' : 'waiting', reason: row?.lastReason ?? null};
+}
+export function admissionRows(items, {nowMs}) {
+  const rows = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item || typeof item.lid !== 'string' || !item.lid) continue;
+    const verdict = admissionDisposition(item, nowMs);
+    rows.push({
+      key: 'wla:' + item.lid, type: 'watchlist_admission', status: item.state ?? null, reason: verdict.reason, disposition: verdict.disposition,
+      title: typeof item.title === 'string' && item.title ? item.title : null, year: Number.isInteger(item.year) ? item.year : null, shortCode: item.lid, archiveSha256: null,
+      provenance: [{source: 'watchlist_snapshot', ref: String(item.firstSeenSnapshotId ?? '')}],
+      observedAt: item.firstSeenAt ?? null, lastProgressAt: typeof item.updatedAt === 'string' ? item.updatedAt : null, ageMs: ageOf(nowMs, item.firstSeenAt),
+      film: null, observedHints: [], source: {attempts: Number.isInteger(item.attempts) ? item.attempts : null, nextRetryAt: item.nextRetryAt ?? null, firstSeenVersion: item.firstSeenVersion ?? null, resolvedBy: item.resolvedBy ?? null},
+    });
+  }
+  return rows;
+}
+
 export function observationRows(items) {
   const rows = [];
   for (const item of Array.isArray(items) ? items : []) {
@@ -204,6 +233,12 @@ export function decodeCursor(raw, {key, limit}) {
   if (payload.lane === 'letterboxd_rated_candidate') {
     if (typeof payload.after !== 'string' || (payload.sha !== null && !HEX64.test(String(payload.sha))) || (payload.etag !== null && typeof payload.etag !== 'string')) return {error: 'stale_cursor'};
     return {pin: payload.pin, nowMs: payload.nowMs, cursor: {lane: payload.lane, sha: payload.sha, after: payload.after, etag: payload.etag}};
+  }
+  // The Watchlist admission ledger is paged by KEYSET over a mutable D1 source: the position is the (first-seen version, lid) of the last row READ, and `gen` is the Watchlist authority generation of the page that minted it
+  // (null before the first read), so a cursor never crosses an authority switch.
+  if (payload.lane === 'watchlist_admission') {
+    if (!Number.isInteger(payload.version) || payload.version < -1 || typeof payload.lid !== 'string' || (payload.gen !== null && !Number.isInteger(payload.gen))) return {error: 'stale_cursor'};
+    return {pin: payload.pin, nowMs: payload.nowMs, cursor: {lane: payload.lane, version: payload.version, lid: payload.lid, gen: payload.gen}};
   }
   if (!Number.isInteger(payload.index) || payload.index < -1 || !Number.isInteger(payload.total) || typeof payload.id !== 'string') return {error: 'stale_cursor'};
   return {pin: payload.pin, nowMs: payload.nowMs, cursor: {lane: payload.lane, index: payload.index, total: payload.total, id: payload.id}};
