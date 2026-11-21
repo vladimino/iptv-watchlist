@@ -628,6 +628,12 @@ export const FILES={
  "watchlist-authority-production.mjs": {
   "suite": "core"
  },
+ "letterboxd-sync-control-production.mjs": {
+  "suite": "core"
+ },
+ "migration-index-docs.mjs": {
+  "suite": "core"
+ },
  "migration-statements.mjs": {
   "suite": "core"
  },

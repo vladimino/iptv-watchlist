@@ -17,6 +17,7 @@
 //   revert-authority d1/held G -> r2/held G+1      (d) only after both objects read back equal to the D1 rows; D1 rows are kept
 //   release-rolled-back r2/held G -> r2/open G     (e)
 import {createHash,randomUUID} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
@@ -25,6 +26,7 @@ import {createS3Store,InstallError,readInstallCredentials} from './r2-s3-store.m
 import {readCredentials} from './r2-snapshot-export.mjs';
 import {BATCH_BYTES,BATCH_STATEMENTS,createPublishedBinding,migrationStatements,normalize,OperatorStop,PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
 import * as Checkpoint from '../src/epg-checkpoint-d1.js';
+import {EPG_SCHEDULE,nextDailyDue} from '../src/domain/orchestration-policy.js';
 
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 export const MIGRATION_PATH=path.join(ROOT,'migrations/0030_epg_checkpoint_authority.sql');
@@ -52,6 +54,8 @@ export async function readState(binding){
   const present=TABLES.filter(name=>names.includes(name));
   const state={schemaVersion:Number.isFinite(version)?version:null,tables:{present:present.length,expected:TABLES.length},marker:null,run:null,ingest:null,counts:null,orchestration:{},pause:null,published:null};
   if(present.length===TABLES.length){
+   const triggers=(await many(binding,"SELECT name FROM sqlite_master WHERE type='trigger' AND name IN ('epg_checkpoint_cas_required','epg_checkpoint_run_order')")).length;
+   state.triggers={present:triggers,expected:2};
    state.marker=await one(binding,'SELECT mode, generation, writes, (SELECT COUNT(*) FROM epg_checkpoint_cas WHERE id=1) AS cas FROM epg_checkpoint_authority WHERE id=1');
    state.run=await one(binding,'SELECT run_id, run_key, started_at, stage, seal_phase, queue_attempted, completed_at, has_error, revision, last_write_id, body_chunks, body_chars, body_sha256, watchlist_present, film_count, film_list_sha256 FROM epg_checkpoint_run WHERE id=1');
    state.ingest=await one(binding,'SELECT schema_version, last_success_at, failed_at, code, consecutive_failures, revision FROM epg_ingest_status WHERE id=1');
@@ -92,9 +96,25 @@ export function measure(syncObject,ingestObject){
 
 // ---- the drain proof (pure) -------------------------------------------------------------------------------------------------
 const madridDay=ms=>new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(ms));
-// `evidence` is what this tool cannot read with its D1 and R2 credentials: the terminal state of the EPG Workflow instance and the deployed Worker version,
-// read by the operator through a documented read-only path (MCP `epg_status` owner.liveness and instanceId, the deployed version id). Without it the proof fails.
-export function drainProof(state,{run,now,evidence={},journal={owed:false}}){
+// The commit that introduced the D1 routing of the checkpoint (the merge of the dormant implementation). A deployed Worker built from this commit or a descendant knows the
+// checkpoint tables and routes by the marker; an older one would read and write the frozen R2 objects after an activation.
+export const ROUTING_COMMIT='28f6737b2f970a166437c384e0ad3aa2ae525504';
+export const WORKFLOW_STATUSES=Object.freeze(['paused','queued','rollingBack','running','waiting','waitingForPause']);
+// Local git proof, never an answer from the operator: `commit` exists here and `ancestor` is an ancestor of it (or equal). Anything unknown or ambiguous is `ok:false`.
+export function commitContains(commit,ancestor=ROUTING_COMMIT,cwd=ROOT){
+ if(!/^[0-9a-f]{40}$/.test(String(commit||'')))return {ok:false,reason:'commit_invalid'};
+ const git=args=>spawnSync('git',args,{cwd,encoding:'utf8'});
+ if(git(['cat-file','-e',commit+'^{commit}']).status!==0)return {ok:false,reason:'commit_unknown_locally'};
+ if(git(['cat-file','-e',ancestor+'^{commit}']).status!==0)return {ok:false,reason:'routing_commit_unknown_locally'};
+ const result=git(['merge-base','--is-ancestor',ancestor,commit]);
+ return result.status===0?{ok:true}:{ok:false,reason:result.status===1?'not_a_descendant':'git_error'};
+}
+// `evidence` is what this tool cannot read with its D1 and R2 credentials, gathered by the operator with the Cloudflare GETs of the runbook: the terminal state of the EPG Workflow
+// instance, the complete inventory of the non-terminal instances (every status, every page), and the current deployment (one version at 100%, the commit it was built from).
+// The deployed version is NOT required to equal the version the finished instance ran: a finished instance is not made dangerous by a later deploy. What is required instead is that nothing
+// that could write is running and that the deployed Worker is built from a commit that contains the D1 routing (`commitContainsRouting`, computed here with git, not asserted).
+// The historical `control.versionId` is kept as immutable evidence and pinned by the compare-and-swap of the marker batch.
+export function drainProof(state,{run,now,evidence={},journal={owed:false},nextStart=nextStartAfter(now),importable}){
  const failures=[];
  const today=madridDay(now);
  const lease=state.orchestration.lease?.body;
@@ -102,7 +122,11 @@ export function drainProof(state,{run,now,evidence={},journal={owed:false}}){
  else if(lease.released!==true&&Date.parse(lease.expiresAt)>now)failures.push('step_lease_live');
  const control=state.orchestration.control?.body;
  if(!control||control.phase!=='done')failures.push('orchestration_not_done');
- else if(control.nextWakeAt!=null&&!(Date.parse(control.nextWakeAt)-now>=NEXT_START_MARGIN_MS))failures.push('next_start_too_close');
+ if(state.orchestration.mode?.body?.mode!=='cloudflare')failures.push('orchestration_mode_not_cloudflare');
+ // The next start must be known and at least the margin away; an unknown or past one refuses. A control record that names its own wake time is checked as a second, additional minimum margin (it is not required to equal the schedule).
+ if(!Number.isFinite(nextStart))failures.push('next_start_unknown');
+ else if(nextStart-now<NEXT_START_MARGIN_MS)failures.push('next_start_too_close');
+ else if(control?.nextWakeAt!=null&&!(Date.parse(control.nextWakeAt)-now>=NEXT_START_MARGIN_MS))failures.push('next_start_too_close');
  if(state.pause?.state!=='clear')failures.push('discovery_pause_not_clear');
  const published=state.published;
  if(!run||run.stage!=='complete')failures.push('run_not_complete');
@@ -114,17 +138,37 @@ export function drainProof(state,{run,now,evidence={},journal={owed:false}}){
   if(pendingDebt(run)||journal.owed)failures.push('event_debt');
   if(journal.unreadable)failures.push('event_debt_unreadable');
  }
+ if(importable===false)failures.push('r2_checkpoint_not_importable');
  if(control&&control.runKey!==today)failures.push('control_not_current_day');
  // One identity everywhere: the checkpoint run, the control record, the published programme and its certificate.
  if(!published||!published.programme_run_id||published.finalized_run_id!==published.programme_run_id||!run||!control||run.runId!==control.runId||control.runId!==published.programme_run_id)failures.push('run_identity_mismatch');
- if(!evidence.workflowInstanceId||!evidence.workflowLiveness||!evidence.deployedVersionId)failures.push('workflow_evidence_missing');
+ // The Workflow instance: named, terminal, and the one the control record names.
+ if(!evidence.workflowInstanceId||!evidence.workflowLiveness)failures.push('workflow_evidence_missing');
  else{
   if(!control||evidence.workflowInstanceId!==control.instanceId)failures.push('workflow_instance_mismatch');
   if(evidence.workflowLiveness!=='finished')failures.push('workflow_not_terminal');
-  if(!control||!control.versionId||evidence.deployedVersionId!==control.versionId)failures.push('workflow_version_mismatch');
  }
+ // The historical version is evidence, pinned in the batch; it must be known, but it is not compared with the current deployment.
+ if(!control||typeof control.versionId!=='string'||!control.versionId)failures.push('control_version_unknown');
+ // The current deployment: one version at 100%, built from a commit that contains the D1 routing.
+ if(!evidence.deployedVersionId||!evidence.deployedCommit||evidence.deploymentVersions===undefined||evidence.deploymentPercentage===undefined)failures.push('deployment_evidence_missing');
+ else{
+  if(String(evidence.deploymentVersions)!=='1'||String(evidence.deploymentPercentage)!=='100')failures.push('deployment_not_single_full');
+  if(evidence.commitContainsRouting!==true)failures.push('deployed_commit_incompatible');
+ }
+ // No instance that could write: every non-terminal status was listed, completely, and none was found.
+ const checked=String(evidence.instancesChecked??'').split(',').map(item=>item.trim()).filter(Boolean).sort();
+ if(checked.length!==WORKFLOW_STATUSES.length||checked.some((item,index)=>item!==WORKFLOW_STATUSES[index])||evidence.instancesTotal===undefined||!/^\d+$/.test(String(evidence.instancesTotal)))failures.push('instances_inventory_incomplete');
+ else if(Number(evidence.instancesTotal)!==0)failures.push('workflow_instances_active');
  return {ok:failures.length===0,failures};
 }
+// What a mutation must still find true inside its own batch: the exact records the proof was read from. The version pinned is the one the control record itself carries
+// (immutable history), so a deploy after the proof does not move it and a rewrite of the record does.
+export function proofFacts(state){
+ const control=state.orchestration.control,lease=state.orchestration.lease;
+ return {controlRevision:control?.revision??-1,leaseRevision:lease?.revision??-1,runKey:control?.body?.runKey??'',runId:control?.body?.runId??'',instanceId:control?.body?.instanceId??'',versionId:control?.body?.versionId??'',programmeRunId:state.published?.programme_run_id??''};
+}
+
 // The bounded event-owed semantics of the orchestrator (`journalOwed`, `handoverOwed`): explicit pending marks, an unfinished hand-over, and, once the watchlist
 // event is fixed, the absence of its journal object. A retained `events` array alone is NOT debt: the Worker keeps it after a successful flush.
 export function pendingDebt(run){
@@ -149,11 +193,6 @@ export function completionReceipt(run){
  const receipt=Object.prototype.hasOwnProperty.call(run,'completedAt')?run.completedAt:(run.error?null:run.updatedAt);
  return typeof receipt==='string'&&Number.isFinite(Date.parse(receipt))?receipt:null;
 }
-// What a mutation must still find true inside its own batch: the exact records the proof was read from.
-export function proofFacts(state,evidence){
- const control=state.orchestration.control,lease=state.orchestration.lease;
- return {controlRevision:control?.revision??-1,leaseRevision:lease?.revision??-1,runKey:control?.body?.runKey??'',runId:control?.body?.runId??'',instanceId:control?.body?.instanceId??'',versionId:evidence.deployedVersionId??'',programmeRunId:state.published?.programme_run_id??''};
-}
 
 // The only liveness rule of the schema-only apply: no executing EPG step. A live step lease, or a control record that says a step is starting, running or waiting, refuses.
 export function applyBusy(state,now){
@@ -164,10 +203,25 @@ export function applyBusy(state,now){
  return null;
 }
 
+// The checkpoint contract of migration 0030, which later migrations (0031, 0032, ...) keep: every table, both triggers, the fence row and a readable marker. The commands
+// after `--apply` need exactly this at any schema version from 30 on; a schema below 30, a missing or partial table set, a missing trigger or fence row or marker refuses.
+export function checkpointSchemaReady(state){
+ return Number.isInteger(state.schemaVersion)&&state.schemaVersion>=30
+  &&state.tables.present===state.tables.expected
+  &&state.triggers?.present===state.triggers?.expected&&state.triggers?.present>0
+  &&Boolean(state.marker)&&Number(state.marker.cas)===1&&['r2','d1'].includes(state.marker.mode)&&['open','held'].includes(state.marker.writes);
+}
+
+// The next natural EPG start after `now`, from the same schedule definition the Worker uses (EPG_SCHEDULE, 17:00 Europe/Madrid, daylight saving aware). It is not read from the
+// control record (`nextWakeAt` is null once the day's run is done) nor from `epg_status.dueAt` (that is today's due time, in the past after the run). null when it cannot be computed.
+export function nextStartAfter(now){
+ try{const next=nextDailyDue(now,EPG_SCHEDULE);return Number.isFinite(next)&&next>now?next:null;}catch{return null;}
+}
+
 // ---- the migration -------------------------------------------------------------------------------------------------------
 export function applyDecision(state){
  if(state.tables.present&&state.tables.present!==state.tables.expected)return 'partial_schema';
- if(state.tables.present===state.tables.expected)return state.schemaVersion===30?'already_applied':'partial_schema';
+ if(state.tables.present===state.tables.expected)return state.schemaVersion>=30?'already_applied':'partial_schema';
  if(state.schemaVersion!==29)return 'schema_unexpected';
  return 'apply';
 }
@@ -339,15 +393,23 @@ async function currentRun(binding,state,syncObject){
 
 export async function execute(command,args,{binding,readStore,writeStoreFactory,now,ctx={}}){
  const clock=typeof now==='function'?now():now;
- const evidence={workflowInstanceId:args.workflowInstanceId,workflowLiveness:args.workflowLiveness,deployedVersionId:args.deployedVersionId};
+ const contains=ctx.commitContains||commitContains;
+ const evidence={workflowInstanceId:args.workflowInstanceId,workflowLiveness:args.workflowLiveness,deployedVersionId:args.deployedVersionId,deployedCommit:args.deployedCommit,deploymentVersions:args.deploymentVersions,deploymentPercentage:args.deploymentPercentage,instancesChecked:args.instancesChecked,instancesTotal:args.instancesTotal,
+  // Computed here with git from the commit the operator names; absent or unknown evidence is not "compatible".
+  commitContainsRouting:args.deployedCommit?contains(args.deployedCommit).ok===true:undefined};
  const state=await readState(binding);
  const generation=args.generation;
  const readObjects=async()=>readStore?{sync:await readObject(readStore,KEYS.sync),ingest:await readObject(readStore,KEYS.ingest)}:null;
- const proofOf=async(run)=>drainProof(state,{run,now:clock,evidence,journal:await journalState(run,readStore)});
+ // A stored R2 checkpoint that the import would refuse must stop the hold before it freezes anything: the same validation as the import, run without a write.
+ const importableOf=objects=>{
+  if(!objects?.sync||!objects?.ingest)return false;
+  try{importPlan({syncText:objects.sync.text,ingestText:objects.ingest.text,generation:0,now:clock});return true;}catch{return false;}
+ };
+ const proofOf=async(run,importable)=>drainProof(state,{run,now:clock,evidence,journal:await journalState(run,readStore),importable});
  if(command==='status'){
   const objects=await readObjects();
   const run=objects||state.marker?.mode==='d1'?await currentRun(binding,state,objects?.sync).catch(()=>null):null;
-  return {operation:'status',writes:false,writeState:'none',schemaVersion:state.schemaVersion,tables:state.tables,marker:marker0(state),run:state.run?{runId:state.run.run_id,stage:state.run.stage,revision:Number(state.run.revision),completedAt:state.run.completed_at,bodySha256:state.run.body_sha256}:null,counts:state.counts,ingest:state.ingest,orchestration:{mode:state.orchestration.mode?.body?.mode??null,phase:state.orchestration.control?.body?.phase??null,nextWakeAt:state.orchestration.control?.body?.nextWakeAt??null,leaseReleased:state.orchestration.lease?.body?.released??null,leaseExpiresAt:state.orchestration.lease?.body?.expiresAt??null},pause:state.pause?.state??null,published:state.published,r2:objects?{sync:publicIdentity(objects.sync),ingest:publicIdentity(objects.ingest),measure:measure(objects.sync,objects.ingest)}:'not_configured',drain:objects||state.marker?.mode==='d1'?await proofOf(run):'not_evaluated'};
+  return {operation:'status',writes:false,writeState:'none',schemaVersion:state.schemaVersion,tables:state.tables,marker:marker0(state),run:state.run?{runId:state.run.run_id,stage:state.run.stage,revision:Number(state.run.revision),completedAt:state.run.completed_at,bodySha256:state.run.body_sha256}:null,counts:state.counts,ingest:state.ingest,orchestration:{mode:state.orchestration.mode?.body?.mode??null,phase:state.orchestration.control?.body?.phase??null,nextWakeAt:state.orchestration.control?.body?.nextWakeAt??null,leaseReleased:state.orchestration.lease?.body?.released??null,leaseExpiresAt:state.orchestration.lease?.body?.expiresAt??null},pause:state.pause?.state??null,published:state.published,nextStart:(()=>{const next=nextStartAfter(clock);return next===null?null:{at:iso(next),inMinutes:Math.floor((next-clock)/60000)};})(),r2:objects?{sync:publicIdentity(objects.sync),ingest:publicIdentity(objects.ingest),measure:measure(objects.sync,objects.ingest),importable:importableOf(objects)}:'not_configured',drain:objects||state.marker?.mode==='d1'?await proofOf(run,state.marker?.mode==='d1'?undefined:importableOf(objects)):'not_evaluated'};
  }
  if(command==='apply'){
   const decision=applyDecision(state);
@@ -372,14 +434,14 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
   if(ctx.track)ctx.track('committed');
   return {operation:'apply',writes:true,writeState:'committed',schemaVersion:30,marker:m};
  }
- if(state.schemaVersion!==30||state.tables.present!==state.tables.expected)throw new OperatorStop('schema_unexpected',3);
+ if(!checkpointSchemaReady(state))throw new OperatorStop('schema_unexpected',3);
  if(command==='hold'){
   requireMarker(state,'r2','open',generation);
   const objects=await readObjects();
   if(!objects)throw new OperatorStop('source_missing',3);
-  const proof=await proofOf(await currentRun(binding,state,objects.sync));
+  const proof=await proofOf(await currentRun(binding,state,objects.sync),importableOf(objects));
   if(!proof.ok)throw new OperatorStop('drain_refused',3,{failures:proof.failures});
-  const done=await transition(binding,'hold',{generation,now:clock,proof:proofFacts(state,evidence)},ctx);
+  const done=await transition(binding,'hold',{generation,now:clock,proof:proofFacts(state)},ctx);
   return {...done,writes:true,writeState:'committed',waitBeforeCapture:'longer than the 2 s marker cache'};
  }
  if(command==='release-abort'){
@@ -452,7 +514,7 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
   const run=await currentRun(binding,state,null);
   const proof=await proofOf(run);
   if(!proof.ok)throw new OperatorStop('drain_refused',3,{failures:proof.failures});
-  const done=await transition(binding,'hold-rollback',{generation,now:clock,proof:proofFacts(state,evidence)},ctx);
+  const done=await transition(binding,'hold-rollback',{generation,now:clock,proof:proofFacts(state)},ctx);
   return {...done,writes:true,writeState:'committed'};
  }
  if(command==='export-rollback'||command==='revert-authority'){
@@ -497,8 +559,8 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
 }
 
 // ---- CLI ---------------------------------------------------------------------------------------------------------------
-const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--sync-etag':'syncEtag','--sync-sha256':'syncSha256','--ingest-etag':'ingestEtag','--ingest-sha256':'ingestSha256','--frozen-sync-etag':'frozenSyncEtag','--frozen-ingest-etag':'frozenIngestEtag','--workflow-instance-id':'workflowInstanceId','--workflow-liveness':'workflowLiveness','--deployed-version-id':'deployedVersionId'};
-const H0_FLAGS=['workflowInstanceId','workflowLiveness','deployedVersionId'];
+const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--sync-etag':'syncEtag','--sync-sha256':'syncSha256','--ingest-etag':'ingestEtag','--ingest-sha256':'ingestSha256','--frozen-sync-etag':'frozenSyncEtag','--frozen-ingest-etag':'frozenIngestEtag','--workflow-instance-id':'workflowInstanceId','--workflow-liveness':'workflowLiveness','--deployed-version-id':'deployedVersionId','--deployed-commit':'deployedCommit','--deployment-versions':'deploymentVersions','--deployment-percentage':'deploymentPercentage','--instances-checked':'instancesChecked','--instances-total':'instancesTotal'};
+const H0_FLAGS=['workflowInstanceId','workflowLiveness','deployedVersionId','deployedCommit','deploymentVersions','deploymentPercentage','instancesChecked','instancesTotal'];
 const IDENTITY_FLAGS=['syncEtag','syncSha256','ingestEtag','ingestSha256'];
 const NEEDS={hold:['generation',...H0_FLAGS],'release-abort':['generation'],import:['generation',...IDENTITY_FLAGS],activate:['generation',...IDENTITY_FLAGS],release:['generation',...IDENTITY_FLAGS],'hold-rollback':['generation',...H0_FLAGS],'export-rollback':['generation','frozenSyncEtag','frozenIngestEtag'],'revert-authority':['generation'],'release-rolled-back':['generation',...IDENTITY_FLAGS],apply:[]};
 export function parseArgs(argv){
