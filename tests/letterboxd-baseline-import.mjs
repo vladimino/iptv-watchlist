@@ -141,12 +141,12 @@ try{
  assert.equal(summary.failed,null);assert.deepEqual(summary.totals,{restored:4,superseded:1});
  assert.equal(b.records.get(F.recordKey('tmdb-949')).rating.value,2);assert.equal(b.records.get(F.recordKey('tmdb-949')).watched,undefined);
  // AIR-558: the raw view-index before-image restore is gone (a removed film's legacy view value no longer comes back through the facts); only the projection of the remaining records is asserted.
- const restored=b.records.get('enrichment/view-index.json');assert.equal(restored.Ab1.actualRating,2);
+ const restored=b.records.get('enrichment/view-index.json');assert.equal(restored.Ab1.actualRating,2);assert.equal(restored.Cd2.actualRating,3,'the legacy view value comes back');assert.equal(restored.Cd2.watched,undefined);
  const again=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(on),env:{},now});assert.equal(again.failed,null);
  // Rollback is crash-recoverable: a failure after the fact writes and before the view restoration, and a failure between two
  // records, both converge on retry with the same counts; an owner edit made between attempts is kept.
- // AIR-558: the 'view' crash point (after the fact writes, before the raw view restoration) no longer exists: the rollback has no raw view write. Only the record crash point remains.
- for(const failAt of ['record']){
+ // The 'view' crash point (after the fact writes, before the view reversal) and the record crash point both converge on retry.
+ for(const failAt of ['view','record']){
   const bx=bucket(),onx={BUCKET:bx};
   await bx.put('enrichment/view-index.json',JSON.stringify({Cd2:{actualRating:3}}));
   await remote({mode:'commit',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});
@@ -157,8 +157,8 @@ try{
   assert.equal(bx.records.has('letterboxd/imports/'+sha+'/chunks/0.rollback.json'),false,'no success marker after a failure');
   const done=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});
   assert.equal(done.failed,null);assert.deepEqual(done.totals,{restored:5,superseded:0},failAt);
-  const viewAfter=bx.records.get('enrichment/view-index.json');// AIR-558: no raw view-index before-image restore any more (the legacy Cd2 view value is not brought back).
-  // AIR-558: the projection keeps a prior view value when a fact is absent and no raw restore clears it, so the Ab1 view value is no longer asserted removed.
+  const viewAfter=bx.records.get('enrichment/view-index.json');assert.equal(viewAfter.Cd2.actualRating,3,failAt+': the legacy view value is restored');assert.equal(viewAfter.Cd2.watched,undefined);
+  assert.equal(viewAfter.Ab1.actualRating,undefined);
   assert.equal(bx.records.get(F.recordKey('lb-Cd2')).rating,undefined);
   const repeat=await remote({mode:'rollback',zip:zipPath,output,endpoint:'https://site.example',fetchImpl:workerFetch(onx),env:{},now});assert.equal(repeat.failed,null);
  }

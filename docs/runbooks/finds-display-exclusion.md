@@ -23,7 +23,7 @@ The Finds section can hide watched Letterboxd export films that have no accepted
 1. **Rehearse.** `node tests/finds-title-exclusion.mjs` runs the builder against an invented export, plan and snapshot, and the read path against every case of the ADR, with an in-memory bucket.
 2. **Build (offline; owner approval to use the real export).** Run:
    ```bash
-   node scripts/letterboxd-display-exclusion.mjs build --zip <zip> --plan <plan dir> --snapshot <snapshot> --output <file>
+   node scripts/letterboxd-display-exclusion.mjs build --zip <zip> --plan <plan dir> --snapshot <snapshot> --view-index-d1 <D1 export file> --output <file>
    ```
    Standard output gives `counts`: `exportFilms` (watched or rated), `withIdentity`, `droppedNoYear`, `droppedNoName`, `droppedExportNamesake`, `keptExportNamesake` and `entries`. Compare them with the [identity alternatives evidence](../evidence/letterboxd/air-193-identity-alternatives-2026-10-27.md) and with the list currently in R2 before going on. The builder always writes the `strict_original_exact_year_v2` tag.
 3. **Preflight (owner approval for each production read).** On a fresh verified snapshot or an approved read-only check, measure on the current generation:

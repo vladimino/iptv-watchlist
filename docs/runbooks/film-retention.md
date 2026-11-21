@@ -4,7 +4,7 @@ A Film admitted by a Letterboxd watchlist boolean stays in the catalog after it 
 
 ## What a deploy does
 
-The reader and, until AIR-537 slice 3 removed it, the enrichment projector shared one admission rule. The projector read the raw `enrichment/view-index.json` as an optional object (retired since: [ADR 0189](../adr/0189-retire-view-index-selector-and-raw-object.md)); the lifecycle reader still applies the same rule. Absent facts admit nobody. Only a Letterboxd lid whose `watchlist` fact is `true` or `false` contributes.
+The reader and, until AIR-537 slice 3 removed it, the enrichment projector shared one admission rule. The projector read the raw `enrichment/view-index.json` as an optional object (retired since: [ADR 0190](../adr/0190-retire-view-index-selector-and-raw-object.md)); the lifecycle reader still applies the same rule. Absent facts admit nobody. Only a Letterboxd lid whose `watchlist` fact is `true` or `false` contributes.
 
 `D1_ENRICHMENT_WRITE` is already `on`. A deploy of this rule makes the next projector cron apply the wider view under the existing lease, batch and query budget. A Film the view newly contains is upserted. A Film the view no longer contains is marked absent, and `releaseFilm` removes watchlist membership only. One cron does not drain a large set; later crons continue. There is no new flag and no separate import command.
 

@@ -123,7 +123,8 @@ sequenceDiagram
     participant Access as Cloudflare Access
     participant Worker as Worker apply routes
     participant R2 as Authoritative R2
-    Owner->>Page: After the preview, click «Подтвердить партию N»
+    participant D1 as Authoritative D1<br/>(ratings_view)
+    Owner->>Page: After the preview, click    Owner->>Page: After the preview, click «Подтвердить партию N»
     Page->>Access: POST apply-confirm, same ZIP, same origin, session cookie
     Access->>Worker: Owner request
     Worker->>Worker: Assertion present, Origin, action header,<br/>then the preview's ZIP limits
@@ -147,7 +148,8 @@ sequenceDiagram
         Note over Worker,R2: Own fact writes are not a new scope.<br/>A newer unrelated observation is kept
     else The fresh comparison still matches
         Worker->>R2: mark the action running
-        Worker->>R2: baseline commit of this chunk:<br/>intent, facts, ratings projection, receipt
+        Worker->>R2: baseline commit of this chunk:<br/>intent, facts, receipt
+        Worker->>D1: project the facts into ratings_view<br/>(the derived view index reads these rows)
         Worker->>R2: put the action receipt beside it
         Worker-->>Page: written, already applied, or skipped because newer
     else The fresh comparison no longer matches
@@ -157,6 +159,7 @@ sequenceDiagram
         Owner->>Page: «Подтвердить откат», then «Откатить»
         Page->>Worker: JSON only, no ZIP
         Worker->>R2: baseline rollback from the receipt's origin
+        Worker->>D1: reverse only the rolled-back fields in ratings_view
         Note over Worker,R2: A later observation stays
     end
     Note over Worker,R2: The ZIP is not stored. Confirm never starts the commit.<br/>A running commit with no receipt resumes its own plan, not a fresh scope

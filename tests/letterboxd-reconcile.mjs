@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {CsvError,parseCsv,parseExport,parseRating} from '../src/letterboxd-export.js';
 import {buildIndex,lidHypothesis,matchExport,normTitle} from '../src/letterboxd-match.js';
-import {reconcile,loadSnapshot} from '../scripts/letterboxd-reconcile.mjs';
+import {reconcile,loadSnapshot,loadCatalogDir} from '../scripts/letterboxd-reconcile.mjs';
 import {writeD1Input} from './view-index-d1-input.mjs';// AIR-558
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
@@ -247,6 +247,25 @@ assert.equal(runI.status,1);assert.match(runI.stderr,/watched\.csv: Unterminated
  const noRaw=path.join(scratch,'snapshot-no-raw-view');const {'enrichment/view-index.json':_raw,...withoutRaw}=objects;await writeSnapshot(noRaw,{...withoutRaw,'enrichment/view-index.json':{POISON:{actualRating:1}}});
  await assert.rejects(reconcile({exportDir,snapshotDir:noRaw,outputDir:path.join(scratch,'out-no-raw')}),error=>error.exitCode===2&&!/POISON/.test(error.message));
  const ok=await loadSnapshot(noRaw,{viewIndexFile:d1Main});assert.equal(Object.hasOwn(ok.objects.viewIndex,'POISON'),false,'the raw object is not merged');
+}
+
+// AIR-558: with a valid D1 export the raw view-index of a snapshot or catalog directory is never opened: absent, checksum-corrupt, malformed or blob-less raw entries cannot fail the run.
+{
+ const viewKey='enrichment/view-index.json',viewFile='objects/'+sha256(Buffer.from(viewKey))+'.bin';
+ const absent=path.join(scratch,'snapshot-raw-absent');const {[viewKey]:_gone,...rest}=objects;await writeSnapshot(absent,rest);
+ assert.equal(Object.hasOwn((await loadSnapshot(absent,{viewIndexFile:d1Main})).objects.viewIndex,'tmdb_602'),true,'absent raw entry: the D1 export is the index');
+ const corrupt=path.join(scratch,'snapshot-raw-corrupt');await writeSnapshot(corrupt,objects);await writeFile(path.join(corrupt,viewFile),'{not json, wrong checksum');
+ assert.ok((await loadSnapshot(corrupt,{viewIndexFile:d1Main})).objects.viewIndex,'corrupt raw blob is not opened');
+ const blobless=path.join(scratch,'snapshot-raw-blobless');await writeSnapshot(blobless,objects);await rm(path.join(blobless,viewFile));
+ assert.ok((await loadSnapshot(blobless,{viewIndexFile:d1Main})).objects.viewIndex,'a manifest entry whose blob is missing is not opened');
+ // The export is resolved before any snapshot file is opened: a missing or invalid export fails on its own, even for a snapshot that does not exist.
+ await assert.rejects(loadSnapshot(path.join(scratch,'no-such-snapshot')),error=>error.exitCode===2&&/--view-index-d1/.test(error.message));
+ await assert.rejects(loadSnapshot(path.join(scratch,'no-such-snapshot'),{viewIndexFile:path.join(scratch,'no-such-export.json')}),error=>error.exitCode===2&&/--view-index-d1/.test(error.message));
+ // The catalog directory: a malformed view-index.json beside it is never parsed.
+ const cat=path.join(scratch,'catalog-dir');await mkdir(cat,{recursive:true});
+ await writeFile(path.join(cat,'provenance.json'),JSON.stringify({source:'live_catalog_read',readAt:'2026-11-21T00:00:00Z'}));await writeFile(path.join(cat,'catalog.json'),JSON.stringify({tmdb_1:{title:'x'}}));await writeFile(path.join(cat,'links.json'),'{}');await writeFile(path.join(cat,'view-index.json'),'{ malformed');
+ const loadedCat=await loadCatalogDir(cat,{viewIndexFile:d1Main});assert.ok(loadedCat.objects.viewIndex&&!loadedCat.missing.includes('view-index.json'));
+ await assert.rejects(loadCatalogDir(cat),error=>error.exitCode===2&&/--view-index-d1/.test(error.message));
 }
 
 await rm(scratch,{recursive:true,force:true});

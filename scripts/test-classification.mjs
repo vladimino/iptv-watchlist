@@ -1426,6 +1426,9 @@ export const FILES={
  "ratings-run.mjs": {
   "suite": "core"
  },
+ "ratings-view-reversal-d1.mjs": {
+  "suite": "core"
+ },
  "ratings.mjs": {
   "suite": "core"
  },

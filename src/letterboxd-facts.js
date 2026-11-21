@@ -794,8 +794,14 @@ function recordRatingChange(record,incoming,effective){
    for(const [fact,result] of outcome){if(result==='superseded')counts.superseded++;else{counts.restored++;if(result==='removed')removed.push({factKey,fact,links:record.links});}}
   }
   await projectRecords(env,[...records.values()]);
-  // AIR-558: the former raw view-index restore of `removed` fields is gone. Under the D1 ratings domain it was invisible (the overlay drops those fields from a raw
-  // entry), and projectRecords above already projects the remaining records into ratings_view.
+  // AIR-558: the D1 projection keeps prior fields when a fact is absent, so a removed fact is cleared (or returned to its before-image) explicitly, per field and alias, unless the record holds that fact again.
+  const reversals=[];
+  for(const {factKey,fact,links} of removed){
+   if(records.get(factKey)?.[fact])continue;
+   const before={};for(const id of projectionIds(links))before[id]=viewBefore?.[id]||{};
+   reversals.push({factKey,fact,links,before});
+  }
+  if(reversals.length&&typeof RatingsD1!=='undefined'&&typeof RatingsD1.reverseView==='function')await RatingsD1.reverseView(env,reversals);
   return {counts,records};
  }
 

@@ -1,10 +1,10 @@
 # View index selector and raw object retirement: delivery evidence
 
-**Date:** 2026-11-21 UTC. **Source tree:** `main` `668d069` plus the AIR-558 change (uncommitted at the time of writing; the pull request carries the exact tested SHA). **Work:** [AIR-558](https://trello.com/c/eSs4w27U); decision [ADR 0189](../../adr/0189-retire-view-index-selector-and-raw-object.md) (Proposed until the owner merges); executes the retirement step that [ADR 0183](../../adr/0183-view-index-membership-from-d1-rows.md) deferred; read-source rollout accepted by the owner on [AIR-552](https://trello.com/c/Hk2dJf2U).
+**Date:** 2026-11-21 UTC. **Source tree:** `main` `668d069` plus the AIR-558 change (uncommitted at the time of writing; the pull request carries the exact tested SHA). **Work:** [AIR-558](https://trello.com/c/eSs4w27U); decision [ADR 0190](../../adr/0190-retire-view-index-selector-and-raw-object.md) (Proposed until the owner merges); executes the retirement step that [ADR 0183](../../adr/0183-view-index-membership-from-d1-rows.md) deferred; read-source rollout accepted by the owner on [AIR-552](https://trello.com/c/Hk2dJf2U).
 
 ## Scope and evidence boundary
 
-Repository change and documentation only. **No production operation was performed for this report: no read, no write, no flag or binding change, no migration, no R2 operation, no deploy.** Statements about production in this note are limited to what ADR 0189 records: the owner set the selector to `d1` on 20 November 2026 and accepted the rollout on 21 November 2026. The current production value of the `VIEW_INDEX_SOURCE` binding was not read for this report and is not asserted.
+Repository change and documentation only. **No production operation was performed for this report: no read, no write, no flag or binding change, no migration, no R2 operation, no deploy.** Statements about production in this note are limited to what ADR 0190 records: the owner set the selector to `d1` on 20 November 2026 and accepted the rollout on 21 November 2026. The current production value of the `VIEW_INDEX_SOURCE` binding was not read for this report and is not asserted.
 
 ## Delivered in code
 
