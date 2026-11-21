@@ -91,8 +91,12 @@ export function measure(syncObject,ingestObject){
 }
 
 // ---- the drain proof (pure) -------------------------------------------------------------------------------------------------
-export function drainProof(state,{run,now}){
+const madridDay=ms=>new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(ms));
+// `evidence` is what this tool cannot read with its D1 and R2 credentials: the terminal state of the EPG Workflow instance and the deployed Worker version,
+// read by the operator through a documented read-only path (MCP `epg_status` owner.liveness and instanceId, the deployed version id). Without it the proof fails.
+export function drainProof(state,{run,now,evidence={}}){
  const failures=[];
+ const today=madridDay(now);
  const lease=state.orchestration.lease?.body;
  if(!lease)failures.push('lease_unreadable');
  else if(lease.released!==true&&Date.parse(lease.expiresAt)>now)failures.push('step_lease_live');
@@ -100,10 +104,29 @@ export function drainProof(state,{run,now}){
  if(!control||control.phase!=='done')failures.push('orchestration_not_done');
  else if(control.nextWakeAt!=null&&!(Date.parse(control.nextWakeAt)-now>=NEXT_START_MARGIN_MS))failures.push('next_start_too_close');
  if(state.pause?.state!=='clear')failures.push('discovery_pause_not_clear');
- if(!state.published||!state.published.programme_run_id||state.published.finalized_run_id!==state.published.programme_run_id)failures.push('certificate_not_matching');
+ const published=state.published;
  if(!run||run.stage!=='complete')failures.push('run_not_complete');
- else if(run.watchlist!==undefined)failures.push('complete_run_has_watchlist');
+ else{
+  if(run.watchlist!==undefined)failures.push('complete_run_has_watchlist');
+  if(run.error)failures.push('run_has_error');
+  if(run.runKey!==today)failures.push('run_not_current_day');
+  if(run.epgEventPending!==undefined||(Array.isArray(run.events)&&run.events.some(event=>event?.type==='watchlist')))failures.push('event_debt');
+ }
+ if(control&&control.runKey!==today)failures.push('control_not_current_day');
+ // One identity everywhere: the checkpoint run, the control record, the published programme and its certificate.
+ if(!published||!published.programme_run_id||published.finalized_run_id!==published.programme_run_id||!run||!control||run.runId!==control.runId||control.runId!==published.programme_run_id)failures.push('run_identity_mismatch');
+ if(!evidence.workflowInstanceId||!evidence.workflowLiveness||!evidence.deployedVersionId)failures.push('workflow_evidence_missing');
+ else{
+  if(!control||evidence.workflowInstanceId!==control.instanceId)failures.push('workflow_instance_mismatch');
+  if(evidence.workflowLiveness!=='finished')failures.push('workflow_not_terminal');
+  if(!control||!control.versionId||evidence.deployedVersionId!==control.versionId)failures.push('workflow_version_mismatch');
+ }
  return {ok:failures.length===0,failures};
+}
+// What a mutation must still find true inside its own batch: the exact records the proof was read from.
+export function proofFacts(state,evidence){
+ const control=state.orchestration.control,lease=state.orchestration.lease;
+ return {controlRevision:control?.revision??-1,leaseRevision:lease?.revision??-1,runKey:control?.body?.runKey??'',runId:control?.body?.runId??'',instanceId:control?.body?.instanceId??'',versionId:evidence.deployedVersionId??'',programmeRunId:state.published?.programme_run_id??''};
 }
 
 // ---- the migration -------------------------------------------------------------------------------------------------------
@@ -121,25 +144,28 @@ export function migrationSql(){
 
 // ---- transitions (section 3a of the plan): one guarded UPDATE of the marker each --------------------------------------------
 const NO_LIVE_LEASE="NOT EXISTS (SELECT 1 FROM epg_orchestration_document WHERE key='lease' AND COALESCE(json_extract(body,'$.released'),0)=0 AND json_extract(body,'$.expiresAt')>?)";
-const ORCH_DONE="(SELECT json_extract(body,'$.phase') FROM epg_orchestration_document WHERE key='control')='done'";
+// The durable H0 facts, re-asserted in the batch that moves the marker: a record that changed after the proof was read aborts the batch.
+const H0_RECORDS="(SELECT COUNT(*) FROM epg_orchestration_document WHERE key='control' AND revision=? AND json_extract(body,'$.phase')='done' AND json_extract(body,'$.runKey')=? AND json_extract(body,'$.runId')=? AND json_extract(body,'$.instanceId')=? AND json_extract(body,'$.versionId')=?)=1 AND (SELECT COUNT(*) FROM epg_orchestration_document WHERE key='lease' AND revision=?)=1 AND (SELECT COUNT(*) FROM published_epg_authority WHERE programme_run_id=? AND finalized_run_id=programme_run_id)=1 AND (SELECT COUNT(*) FROM discovery_epg_priority WHERE state='clear')=1";
+const H0=(ctx)=>[NO_LIVE_LEASE+' AND '+H0_RECORDS,[iso(ctx.now),ctx.proof.controlRevision,ctx.proof.runKey,ctx.proof.runId,ctx.proof.instanceId,ctx.proof.versionId,ctx.proof.leaseRevision,ctx.proof.programmeRunId]];
 const EMPTY="(SELECT COUNT(*) FROM epg_checkpoint_run)=0 AND (SELECT COUNT(*) FROM epg_checkpoint_body)=0 AND (SELECT COUNT(*) FROM epg_checkpoint_film)=0 AND (SELECT COUNT(*) FROM epg_checkpoint_receipt)=0 AND (SELECT COUNT(*) FROM epg_ingest_status)=0";
 const HAS_RUN='(SELECT COUNT(*) FROM epg_checkpoint_run)=1';
 const authority=(mode,writes)=>"(SELECT COUNT(*) FROM epg_checkpoint_authority WHERE id=1 AND mode='"+mode+"' AND writes='"+writes+"' AND generation=?)=1";
+const withH0=(mode,writes,extra='')=>ctx=>{const [expression,params]=H0(ctx);return [authority(mode,writes)+(extra?' AND '+extra:'')+' AND '+expression,[ctx.generation,...params]];};
 export const TRANSITIONS={
- hold:{from:{mode:'r2',writes:'open'},to:{mode:'r2',writes:'held'},bump:true,predicate:()=>[authority('r2','open')+' AND '+NO_LIVE_LEASE+' AND '+ORCH_DONE,['G','NOW']]},
- 'release-abort':{from:{mode:'r2',writes:'held'},to:{mode:'r2',writes:'open'},bump:false,predicate:()=>[authority('r2','held')+' AND '+EMPTY,['G']]},
- activate:{from:{mode:'r2',writes:'held'},to:{mode:'d1',writes:'held'},bump:true,predicate:ctx=>[authority('r2','held')+' AND '+HAS_RUN+" AND (SELECT body_sha256 FROM epg_checkpoint_run)=? AND (SELECT stage FROM epg_checkpoint_run)='complete'",['G',ctx.bodySha256]]},
- release:{from:{mode:'d1',writes:'held'},to:{mode:'d1',writes:'open'},bump:false,predicate:()=>[authority('d1','held')+' AND '+HAS_RUN,['G']]},
- 'hold-rollback':{from:{mode:'d1',writes:'open'},to:{mode:'d1',writes:'held'},bump:true,predicate:()=>[authority('d1','open')+' AND '+HAS_RUN+" AND (SELECT stage FROM epg_checkpoint_run)='complete' AND (SELECT queue_attempted FROM epg_checkpoint_run)=1 AND "+NO_LIVE_LEASE+' AND '+ORCH_DONE+' AND (SELECT COUNT(*) FROM published_epg_authority WHERE finalized_run_id=programme_run_id AND programme_run_id IS NOT NULL)=1',['G','NOW']]},
- 'revert-authority':{from:{mode:'d1',writes:'held'},to:{mode:'r2',writes:'held'},bump:true,predicate:()=>[authority('d1','held'),['G']]},
- 'release-rolled-back':{from:{mode:'r2',writes:'held'},to:{mode:'r2',writes:'open'},bump:false,predicate:()=>[authority('r2','held'),['G']]},
+ hold:{from:{mode:'r2',writes:'open'},to:{mode:'r2',writes:'held'},bump:true,predicate:withH0('r2','open')},
+ 'release-abort':{from:{mode:'r2',writes:'held'},to:{mode:'r2',writes:'open'},bump:false,predicate:ctx=>[authority('r2','held')+' AND '+EMPTY,[ctx.generation]]},
+ activate:{from:{mode:'r2',writes:'held'},to:{mode:'d1',writes:'held'},bump:true,predicate:ctx=>[authority('r2','held')+' AND '+HAS_RUN+" AND (SELECT body_sha256 FROM epg_checkpoint_run)=? AND (SELECT stage FROM epg_checkpoint_run)='complete'",[ctx.generation,ctx.bodySha256]]},
+ release:{from:{mode:'d1',writes:'held'},to:{mode:'d1',writes:'open'},bump:false,predicate:ctx=>[authority('d1','held')+' AND '+HAS_RUN+" AND (SELECT body_sha256 FROM epg_checkpoint_run)=?",[ctx.generation,ctx.bodySha256]]},
+ 'hold-rollback':{from:{mode:'d1',writes:'open'},to:{mode:'d1',writes:'held'},bump:true,predicate:withH0('d1','open',HAS_RUN+" AND (SELECT stage FROM epg_checkpoint_run)='complete' AND (SELECT queue_attempted FROM epg_checkpoint_run)=1")},
+ 'revert-authority':{from:{mode:'d1',writes:'held'},to:{mode:'r2',writes:'held'},bump:true,predicate:ctx=>[authority('d1','held'),[ctx.generation]]},
+ 'release-rolled-back':{from:{mode:'r2',writes:'held'},to:{mode:'r2',writes:'open'},bump:false,predicate:ctx=>[authority('r2','held'),[ctx.generation]]},
 };
-export function transitionStatements(name,{generation,now,bodySha256}){
+export function transitionStatements(name,{generation,now,bodySha256,proof}){
  const spec=TRANSITIONS[name];
  if(!spec)throw new OperatorStop('usage',2);
  if(!Number.isInteger(generation)||generation<0)throw new OperatorStop('usage',2);
- const [expression,slots]=spec.predicate({bodySha256});
- const params=slots.map(slot=>slot==='G'?generation:slot==='NOW'?iso(now):slot);
+ if((name==='hold'||name==='hold-rollback')&&!proof)throw new OperatorStop('drain_refused',3);
+ const [expression,params]=spec.predicate({generation,now,bodySha256,proof});
  return [
   [...GUARD(expression),params],
   ['UPDATE epg_checkpoint_authority SET mode=?, writes=?, generation=? WHERE id=1 AND mode=? AND writes=? AND generation=?',[spec.to.mode,spec.to.writes,spec.bump?generation+1:generation,spec.from.mode,spec.from.writes,generation]],
@@ -147,13 +173,13 @@ export function transitionStatements(name,{generation,now,bodySha256}){
  ];
 }
 // Run one transition. The marker is read first and must equal the expected state; after the batch it is read back. An unknown outcome is reported, never replayed.
-export async function transition(binding,name,{generation,now,bodySha256},ctx={}){
+export async function transition(binding,name,{generation,now,bodySha256,proof},ctx={}){
  const spec=TRANSITIONS[name];
  const before=await one(binding,'SELECT mode, writes, generation, (SELECT COUNT(*) FROM epg_checkpoint_cas WHERE id=1) AS cas FROM epg_checkpoint_authority WHERE id=1');
  if(!before||Number(before.cas)!==1)throw new OperatorStop('marker_unreadable',3);
  if(before.mode!==spec.from.mode||before.writes!==spec.from.writes||Number(before.generation)!==generation)throw new OperatorStop('state_mismatch',3,{marker:{mode:before.mode,writes:before.writes,generation:Number(before.generation)}});
  const target={mode:spec.to.mode,writes:spec.to.writes,generation:spec.bump?generation+1:generation};
- const statements=transitionStatements(name,{generation,now,bodySha256});
+ const statements=transitionStatements(name,{generation,now,bodySha256,proof});
  if(ctx.track)ctx.track('unknown');
  let error=null;
  try{await batch(binding,statements);}catch(caught){error=caught;}
@@ -241,8 +267,9 @@ export async function exportDocuments(binding){
  const ingest=await Checkpoint.readIngest(binding);
  if(!ingest.ok)throw new OperatorStop('export_source_'+ingest.reason,3);
  const syncText=JSON.stringify(loaded.run);
- const {consecutiveFailures,...document}=ingest.status??{};
- const ingestText=ingest.status?JSON.stringify(document):null;
+ if(!ingest.status)throw new OperatorStop('export_source_ingest_absent',3);
+ const {consecutiveFailures,...document}=ingest.status;
+ const ingestText=JSON.stringify(document);
  return {syncText,ingestText};
 }
 
@@ -266,20 +293,21 @@ async function currentRun(binding,state,syncObject){
 
 export async function execute(command,args,{binding,readStore,writeStoreFactory,now,ctx={}}){
  const clock=typeof now==='function'?now():now;
+ const evidence={workflowInstanceId:args.workflowInstanceId,workflowLiveness:args.workflowLiveness,deployedVersionId:args.deployedVersionId};
  const state=await readState(binding);
  const generation=args.generation;
  const readObjects=async()=>readStore?{sync:await readObject(readStore,KEYS.sync),ingest:await readObject(readStore,KEYS.ingest)}:null;
  if(command==='status'){
   const objects=await readObjects();
   const run=objects||state.marker?.mode==='d1'?await currentRun(binding,state,objects?.sync).catch(()=>null):null;
-  return {operation:'status',writes:false,writeState:'none',schemaVersion:state.schemaVersion,tables:state.tables,marker:marker0(state),run:state.run?{runId:state.run.run_id,stage:state.run.stage,revision:Number(state.run.revision),completedAt:state.run.completed_at,bodySha256:state.run.body_sha256}:null,counts:state.counts,ingest:state.ingest,orchestration:{mode:state.orchestration.mode?.body?.mode??null,phase:state.orchestration.control?.body?.phase??null,nextWakeAt:state.orchestration.control?.body?.nextWakeAt??null,leaseReleased:state.orchestration.lease?.body?.released??null,leaseExpiresAt:state.orchestration.lease?.body?.expiresAt??null},pause:state.pause?.state??null,published:state.published,r2:objects?{sync:publicIdentity(objects.sync),ingest:publicIdentity(objects.ingest),measure:measure(objects.sync,objects.ingest)}:'not_configured',drain:objects||state.marker?.mode==='d1'?drainProof(state,{run,now:clock}):'not_evaluated'};
+  return {operation:'status',writes:false,writeState:'none',schemaVersion:state.schemaVersion,tables:state.tables,marker:marker0(state),run:state.run?{runId:state.run.run_id,stage:state.run.stage,revision:Number(state.run.revision),completedAt:state.run.completed_at,bodySha256:state.run.body_sha256}:null,counts:state.counts,ingest:state.ingest,orchestration:{mode:state.orchestration.mode?.body?.mode??null,phase:state.orchestration.control?.body?.phase??null,nextWakeAt:state.orchestration.control?.body?.nextWakeAt??null,leaseReleased:state.orchestration.lease?.body?.released??null,leaseExpiresAt:state.orchestration.lease?.body?.expiresAt??null},pause:state.pause?.state??null,published:state.published,r2:objects?{sync:publicIdentity(objects.sync),ingest:publicIdentity(objects.ingest),measure:measure(objects.sync,objects.ingest)}:'not_configured',drain:objects||state.marker?.mode==='d1'?drainProof(state,{run,now:clock,evidence}):'not_evaluated'};
  }
  if(command==='apply'){
   const decision=applyDecision(state);
   if(decision!=='apply')throw new OperatorStop(decision,3);
   const objects=await readObjects();
   if(!objects)throw new OperatorStop('source_missing',3);
-  const proof=drainProof(state,{run:await currentRun(binding,state,objects.sync),now:clock});
+  const proof=drainProof(state,{run:await currentRun(binding,state,objects.sync),now:clock,evidence});
   if(!proof.ok)throw new OperatorStop('drain_refused',3,{failures:proof.failures});
   if(ctx.track)ctx.track('unknown');
   await batch(binding,migrationSql().map(sql=>[sql,[]]));
@@ -294,22 +322,32 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
   requireMarker(state,'r2','open',generation);
   const objects=await readObjects();
   if(!objects)throw new OperatorStop('source_missing',3);
-  const proof=drainProof(state,{run:await currentRun(binding,state,objects.sync),now:clock});
+  const proof=drainProof(state,{run:await currentRun(binding,state,objects.sync),now:clock,evidence});
   if(!proof.ok)throw new OperatorStop('drain_refused',3,{failures:proof.failures});
-  const done=await transition(binding,'hold',{generation,now:clock},ctx);
+  const done=await transition(binding,'hold',{generation,now:clock,proof:proofFacts(state,evidence)},ctx);
   return {...done,writes:true,writeState:'committed',waitBeforeCapture:'longer than the 2 s marker cache'};
  }
- if(command==='release-abort'||command==='release-rolled-back'){
+ if(command==='release-abort'){
   requireMarker(state,'r2','held',generation);
   const done=await transition(binding,command,{generation,now:clock},ctx);
   return {...done,writes:true,writeState:'committed'};
+ }
+ if(command==='release-rolled-back'){
+  // Reopens writes on the R2 objects: both must be exactly the image the export wrote (the fingerprints the export reported), read fresh now.
+  requireMarker(state,'r2','held',generation);
+  const objects=await readObjects();
+  requireIdentity(objects?.sync,args.syncEtag,args.syncSha256,KEYS.sync);
+  requireIdentity(objects?.ingest,args.ingestEtag,args.ingestSha256,KEYS.ingest);
+  const done=await transition(binding,command,{generation,now:clock},ctx);
+  return {...done,writes:true,writeState:'committed',r2:{sync:publicIdentity(objects.sync),ingest:publicIdentity(objects.ingest)}};
  }
  if(command==='import'){
   requireMarker(state,'r2','held',generation);
   const objects=await readObjects();
   requireIdentity(objects?.sync,args.syncEtag,args.syncSha256,KEYS.sync);
-  if(objects.ingest)requireIdentity(objects.ingest,args.ingestEtag,args.ingestSha256,KEYS.ingest);
-  const plan=importPlan({syncText:objects.sync.text,ingestText:objects.ingest?.text??null,generation,now:clock});
+  // Both keys are part of the approved H0 identity. A key that disappeared since is never a reason to import without it.
+  requireIdentity(objects?.ingest,args.ingestEtag,args.ingestSha256,KEYS.ingest);
+  const plan=importPlan({syncText:objects.sync.text,ingestText:objects.ingest.text,generation,now:clock});
   if(ctx.track)ctx.track('unknown');
   try{await batch(binding,plan.statements);}catch{
    // The receipt of THIS import (its own write id) is the only proof that the batch landed; rows from an earlier import prove nothing about this one.
@@ -327,8 +365,8 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
   if(!state.run)throw new OperatorStop('import_missing',3);
   const objects=await readObjects();
   requireIdentity(objects?.sync,args.syncEtag,args.syncSha256,KEYS.sync);
-  if(objects.ingest)requireIdentity(objects.ingest,args.ingestEtag,args.ingestSha256,KEYS.ingest);
-  const plan=importPlan({syncText:objects.sync.text,ingestText:objects.ingest?.text??null,generation,now:clock,writeId:state.run.last_write_id});
+  requireIdentity(objects?.ingest,args.ingestEtag,args.ingestSha256,KEYS.ingest);
+  const plan=importPlan({syncText:objects.sync.text,ingestText:objects.ingest.text,generation,now:clock,writeId:state.run.last_write_id});
   const mismatches=await verifyImported(binding,plan.expected);
   if(mismatches.length)throw new OperatorStop('parity_mismatch',3,{mismatches});
   const done=await transition(binding,'activate',{generation,now:clock,bodySha256:plan.expected.bodySha256},ctx);
@@ -338,17 +376,25 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
  }
  if(command==='release'){
   requireMarker(state,'d1','held',generation);
+  if(!state.run)throw new OperatorStop('import_missing',3);
+  // Reopens writes on the D1 rows: the frozen R2 images are unchanged and the rows still equal them (typed columns, body, receipt, ingest), read fresh now.
+  const objects=await readObjects();
+  requireIdentity(objects?.sync,args.syncEtag,args.syncSha256,KEYS.sync);
+  requireIdentity(objects?.ingest,args.ingestEtag,args.ingestSha256,KEYS.ingest);
+  const plan=importPlan({syncText:objects.sync.text,ingestText:objects.ingest.text,generation,now:clock,writeId:state.run.last_write_id});
+  const mismatches=await verifyImported(binding,plan.expected);
+  if(mismatches.length)throw new OperatorStop('parity_mismatch',3,{mismatches});
   const loaded=await Checkpoint.loadRun(binding);
   if(!loaded.ok||!loaded.run)throw new OperatorStop('checkpoint_'+(loaded.reason||'absent'),3);
-  const done=await transition(binding,'release',{generation,now:clock},ctx);
+  const done=await transition(binding,'release',{generation,now:clock,bodySha256:plan.expected.bodySha256},ctx);
   return {...done,writes:true,writeState:'committed'};
  }
  if(command==='hold-rollback'){
   requireMarker(state,'d1','open',generation);
   const run=await currentRun(binding,state,null);
-  const proof=drainProof(state,{run,now:clock});
+  const proof=drainProof(state,{run,now:clock,evidence});
   if(!proof.ok)throw new OperatorStop('drain_refused',3,{failures:proof.failures});
-  const done=await transition(binding,'hold-rollback',{generation,now:clock},ctx);
+  const done=await transition(binding,'hold-rollback',{generation,now:clock,proof:proofFacts(state,evidence)},ctx);
   return {...done,writes:true,writeState:'committed'};
  }
  if(command==='export-rollback'||command==='revert-authority'){
@@ -361,8 +407,8 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
     const done=await transition(binding,'revert-authority',{generation,now:clock},ctx);
     return {...done,writes:true,writeState:'committed',d1Rows:'retained, inactive'};
   }
-  if(!args.frozenSyncEtag||(target.ingest!==null&&!args.frozenIngestEtag))throw new OperatorStop('usage',2);
-  const store=writeStoreFactory?writeStoreFactory(new Set(docs.ingestText==null?[KEYS.sync]:[KEYS.sync,KEYS.ingest])):null;
+  if(!args.frozenSyncEtag||!args.frozenIngestEtag)throw new OperatorStop('usage',2);
+  const store=writeStoreFactory?writeStoreFactory(new Set([KEYS.sync,KEYS.ingest])):null;
   if(!store)throw new OperatorStop('configuration',2);
   const written=[];
   const one_=async(key,text,digest,frozen,object)=>{
@@ -371,13 +417,20 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
    if(ctx.track)ctx.track('unknown');
    let result;
    try{result=await store.put(key,text,{onlyIf:{etagMatches:frozen}});}
-   catch{throw new OperatorStop('write_uncertain',3,{key});}
+   catch{
+    // Unknown outcome: read both objects and the marker right now and report them. Nothing is replayed; the next export call reads again before any write.
+    let observed='unreadable';
+    try{const seen=await readObjects();observed={sync:publicIdentity(seen.sync),ingest:publicIdentity(seen.ingest),syncEqualsExport:seen.sync?.sha256===target.sync,ingestEqualsExport:seen.ingest?.sha256===target.ingest};}catch{observed='unreadable';}
+    const after=await one(binding,'SELECT mode, writes, generation FROM epg_checkpoint_authority WHERE id=1');
+    throw new OperatorStop('write_uncertain',3,{key,observed,marker:after?{mode:after.mode,writes:after.writes,generation:Number(after.generation)}:null,classification:observed==='unreadable'?'unclassified':'observed'});
+   }
    if(!result)throw new OperatorStop('foreign_writer',3,{key});
    written.push(key);return 'written';
   };
   const results={sync:await one_(KEYS.sync,docs.syncText,target.sync,args.frozenSyncEtag,current.sync)};
   if(docs.ingestText!=null)results.ingest=await one_(KEYS.ingest,docs.ingestText,target.ingest,args.frozenIngestEtag,current.ingest);
-  const after=await readObjects();
+  let after;
+  try{after=await readObjects();}catch{throw new OperatorStop('readback_unreadable',3,{results,written});}
   if(after.sync?.sha256!==target.sync||(target.ingest!==null&&after.ingest?.sha256!==target.ingest))throw new OperatorStop('readback_mismatch',3,{results});
   if(ctx.track)ctx.track(written.length?'committed':'none');
   return {operation:'export-rollback',writes:written.length>0,writeState:written.length?'committed':'none',results,r2:{sync:publicIdentity(after.sync),ingest:publicIdentity(after.ingest)},d1Rows:'retained, inactive'};
@@ -386,8 +439,10 @@ export async function execute(command,args,{binding,readStore,writeStoreFactory,
 }
 
 // ---- CLI ---------------------------------------------------------------------------------------------------------------
-const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--sync-etag':'syncEtag','--sync-sha256':'syncSha256','--ingest-etag':'ingestEtag','--ingest-sha256':'ingestSha256','--frozen-sync-etag':'frozenSyncEtag','--frozen-ingest-etag':'frozenIngestEtag'};
-const NEEDS={hold:['generation'],'release-abort':['generation'],import:['generation','syncEtag','syncSha256'],activate:['generation','syncEtag','syncSha256'],release:['generation'],'hold-rollback':['generation'],'export-rollback':['generation','frozenSyncEtag'],'revert-authority':['generation'],'release-rolled-back':['generation'],apply:[]};
+const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--sync-etag':'syncEtag','--sync-sha256':'syncSha256','--ingest-etag':'ingestEtag','--ingest-sha256':'ingestSha256','--frozen-sync-etag':'frozenSyncEtag','--frozen-ingest-etag':'frozenIngestEtag','--workflow-instance-id':'workflowInstanceId','--workflow-liveness':'workflowLiveness','--deployed-version-id':'deployedVersionId'};
+const H0_FLAGS=['workflowInstanceId','workflowLiveness','deployedVersionId'];
+const IDENTITY_FLAGS=['syncEtag','syncSha256','ingestEtag','ingestSha256'];
+const NEEDS={hold:['generation',...H0_FLAGS],'release-abort':['generation'],import:['generation',...IDENTITY_FLAGS],activate:['generation',...IDENTITY_FLAGS],release:['generation',...IDENTITY_FLAGS],'hold-rollback':['generation',...H0_FLAGS],'export-rollback':['generation','frozenSyncEtag','frozenIngestEtag'],'revert-authority':['generation'],'release-rolled-back':['generation',...IDENTITY_FLAGS],apply:H0_FLAGS};
 export function parseArgs(argv){
  const args=argv.slice(2),parsed={};
  const commands=args.filter(arg=>arg.startsWith('--')&&COMMANDS.includes(arg.slice(2)));

@@ -12,14 +12,16 @@ const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA fore
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);return r.stdout.trim()?JSON.parse(r.stdout):[];};
 const chain=upTo=>names.filter(name=>name<=upTo).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n');
 const sha=text=>createHash('sha256').update(text).digest('hex');
-const NOW=Date.parse('2026-11-21T08:00:00.000Z');
+// 18:00 UTC on 20 Nov: after the natural run completed (16:12 UTC) and the same Madrid day, which is the H0 boundary of the plan.
+const NOW=Date.parse('2026-11-20T18:00:00.000Z');
+const EV={workflowInstanceId:'epg_20261120_1',workflowLiveness:'finished',deployedVersionId:'v-1'};
 const RUN='84821d8a-0000-4000-8000-000000000001';
 const SYNC=JSON.stringify({runId:RUN,startedAt:'2026-11-20T16:00:05.000Z',runKey:'2026-11-20',updatedAt:'2026-11-20T16:11:45.255Z',stage:'complete',remaining:0,failures:[],events:[],completedAt:'2026-11-20T16:11:45.255Z'});
 const INGEST=JSON.stringify({schemaVersion:1,failedAt:null,lastSuccessAt:'2026-11-20T16:11:45.255Z'});
 let copies=0;
-function seed(file,{lease='released',phase='done',nextWake='2026-11-21T16:00:00.000Z',pause='clear',finalized=RUN}={}){
+function seed(file,{lease='released',phase='done',nextWake='2026-11-21T16:00:00.000Z',pause='clear',finalized=RUN,control={}}={}){
  const leaseBody=lease==='released'?{schemaVersion:1,holder:'h',modeRevision:2,expiresAt:'2026-11-20T16:16:29.753Z',released:true}:{schemaVersion:1,holder:'h',modeRevision:2,expiresAt:'2026-11-21T09:00:00.000Z',released:false};
- sqlite(file,"DELETE FROM epg_orchestration_document;INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('mode','{\"schemaVersion\":1,\"mode\":\"cloudflare\",\"epoch\":1,\"drain\":\"verified\"}',2,'2026-11-08T00:00:00.000Z'),('control','"+JSON.stringify({schemaVersion:1,phase,nextWakeAt:nextWake,runId:RUN}).replace(/'/g,"''")+"',5,'2026-11-20T16:11:56.000Z'),('lease','"+JSON.stringify(leaseBody)+"',9,'2026-11-20T16:11:56.000Z');UPDATE discovery_epg_priority SET state='"+pause+"', owed_day_key="+(pause==='clear'?'NULL':"'2026-11-20'")+";UPDATE published_epg_authority SET programme_run_id='"+RUN+"', finalized_run_id="+(finalized?"'"+finalized+"'":'NULL')+";");
+ sqlite(file,"DELETE FROM epg_orchestration_document;INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('mode','{\"schemaVersion\":1,\"mode\":\"cloudflare\",\"epoch\":1,\"drain\":\"verified\"}',2,'2026-11-08T00:00:00.000Z'),('control','"+JSON.stringify({schemaVersion:1,phase,nextWakeAt:nextWake,runId:RUN,runKey:'2026-11-20',instanceId:'epg_20261120_1',versionId:'v-1',...control}).replace(/'/g,"''")+"',5,'2026-11-20T16:11:56.000Z'),('lease','"+JSON.stringify(leaseBody)+"',9,'2026-11-20T16:11:56.000Z');UPDATE discovery_epg_priority SET state='"+pause+"', owed_day_key="+(pause==='clear'?'NULL':"'2026-11-20'")+";UPDATE published_epg_authority SET programme_run_id='"+RUN+"', finalized_run_id="+(finalized?"'"+finalized+"'":'NULL')+";");
 }
 function open(upTo='9999',options={}){
  const file=path.join(root,'db-'+(copies++)+'.sqlite');
@@ -75,48 +77,49 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
 // ===== 2. apply: schema 29 only, drain proof first, marker r2/open/0 readback =====
 {
  const env={...open('0029_started_authority.sql'),r2:bucket(frozen)};
- await stop(call('hold',{generation:0},env),'schema_unexpected');
- for(const [options,failure] of [[{lease:'live'},'step_lease_live'],[{phase:'running'},'orchestration_not_done'],[{nextWake:'2026-11-21T08:10:00.000Z'},'next_start_too_close'],[{nextWake:'2026-11-21T07:00:00.000Z'},'next_start_too_close'],[{pause:'paused'},'discovery_pause_not_clear'],[{finalized:null},'certificate_not_matching']]){
+ await stop(call('hold',{generation:0,...EV},env),'schema_unexpected');
+ for(const [options,failure] of [[{lease:'live'},'step_lease_live'],[{phase:'running'},'orchestration_not_done'],[{nextWake:'2026-11-20T18:10:00.000Z'},'next_start_too_close'],[{nextWake:'2026-11-20T17:00:00.000Z'},'next_start_too_close'],[{control:{runKey:'2026-11-19'}},'control_not_current_day'],[{control:{runId:'another-run'}},'run_identity_mismatch'],[{pause:'paused'},'discovery_pause_not_clear'],[{finalized:null},'run_identity_mismatch']]){
   const bad={...open('0029_started_authority.sql',options),r2:bucket(frozen)};
-  const error=await stop(call('apply',{},bad),'drain_refused');
+  const error=await stop(call('apply',{...EV},bad),'drain_refused');
   assert.ok(error.details.failures.includes(failure),failure);
   assert.equal(rows(bad.file,'SELECT version FROM schema_contract')[0].version,29,'a refused apply changes nothing');
  }
  const seal=bucket({...frozen,'sync.json':JSON.stringify({...JSON.parse(SYNC),stage:'seal',seal:{phase:'ledger'},completedAt:undefined})});
- await stop(call('apply',{},{...open('0029_started_authority.sql'),r2:seal}),'drain_refused');
- const result=await call('apply',{},env);
+ await stop(call('apply',{...EV},{...open('0029_started_authority.sql'),r2:seal}),'drain_refused');
+ const result=await call('apply',{...EV},env);
  assert.equal(result.writeState,'committed');assert.deepEqual(result.marker,{mode:'r2',writes:'open',generation:0,cas:1});
  assert.equal(rows(env.file,'SELECT version FROM schema_contract')[0].version,30);
- await stop(call('apply',{},env),'already_applied');
+ await stop(call('apply',{...EV},env),'already_applied');
  const v28={...open('0028_filter_preset_authority.sql'),r2:bucket(frozen)};
- await stop(call('apply',{},v28),'schema_unexpected');
+ await stop(call('apply',{...EV},v28),'schema_unexpected');
 }
 
 // ===== 3. status measures, writes nothing, prints no payload =====
 {
  const env={...open('9999'),r2:bucket(frozen)};
- const status=await call('status',{},env);
+ const status=await call('status',{...EV},env);
  assert.equal(status.writes,false);assert.deepEqual(status.marker,{mode:'r2',writes:'open',generation:0,cas:1});
  assert.equal(status.drain.ok,true);assert.equal(status.r2.measure.stage,'complete');assert.equal(status.r2.measure.watchlist,null,'a complete run has no film figure');
  assert.equal(JSON.stringify(status).includes(RUN+'","startedAt'),false);assert.equal(JSON.stringify(status).includes('updatedAt":"2026'),false,'no raw payload');
  assert.equal(status.r2.sync.sha256,sha(SYNC_RAW));
  const mid=bucket({...frozen,'sync.json':JSON.stringify({runId:'r',startedAt:'2026-11-21T16:00:00.000Z',stage:'metadata',watchlist:[{id:'a',t:'xx'},{id:'b',t:'xxxxxxxx'}],pending:[]})});
- const measured=await call('status',{},{...open('9999'),r2:mid});
+ const measured=await call('status',{...EV},{...open('9999'),r2:mid});
  assert.equal(measured.r2.measure.watchlist.films,2);assert.ok(measured.r2.measure.watchlist.maxFilmChars>=16);assert.ok(measured.drain.failures.includes('run_not_complete'));
 }
 
 // ===== 4. the full forward sequence: hold, import, activate, release; every contract is exact =====
 {
  const env={...open('9999'),r2:bucket(frozen)};
- await stop(call('hold',{generation:1},env),'state_mismatch');
+ await stop(call('hold',{generation:1,...EV},env),'state_mismatch');
  await stop(call('import',{generation:0,...identity(env)},env),'state_mismatch');
  await stop(call('activate',{generation:0,...identity(env)},env),'state_mismatch');
  await stop(call('release',{generation:0},env),'state_mismatch');
- await stop(call('hold',{generation:0},env,{now:Date.parse('2026-11-21T15:45:00.000Z')}),'drain_refused');
+ await stop(call('hold',{generation:0,...EV},env,{now:Date.parse('2026-11-20T23:40:00.000Z')}),'drain_refused');
+ await stop(call('hold',{generation:0,...EV},env,{now:Date.parse('2026-11-21T08:00:00.000Z')}),'drain_refused');
  assert.deepEqual(marker(env.file),{mode:'r2',writes:'open',generation:0});
- const held=await call('hold',{generation:0},env);
+ const held=await call('hold',{generation:0,...EV},env);
  assert.deepEqual(held.marker,{mode:'r2',writes:'held',generation:1});
- await stop(call('hold',{generation:0},env),'state_mismatch');
+ await stop(call('hold',{generation:0,...EV},env),'state_mismatch');
  // identity: another object, a changed ETag or a changed digest refuses; tables stay empty
  const id=identity(env);
  await stop(call('import',{generation:1,...id,syncEtag:'other'},env),'identity_mismatch');
@@ -143,16 +146,19 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  const loaded=await Checkpoint.loadRun(env.db);assert.equal(loaded.ok,true);assert.equal(loaded.run.runId,RUN);assert.equal(loaded.run.stage,'complete');
  assert.deepEqual((await Checkpoint.readIngest(env.db)).status,{schemaVersion:1,failedAt:null,lastSuccessAt:'2026-11-20T16:11:45.255Z',consecutiveFailures:0});
  await stop(call('activate',{generation:1,...id},env),'state_mismatch');
- const released=await call('release',{generation:2},env);
+ assert.throws(()=>Op.parseArgs(['node','x','--release','--target','iptv','--confirm','release','--expect-generation','2']),e=>e.reason==='usage','release needs both frozen identities');
+ await stop(call('release',{generation:2},env),'identity_mismatch');
+ await stop(call('release',{generation:2,...id,syncSha256:'0'.repeat(64)},env),'identity_mismatch');
+ const released=await call('release',{generation:2,...id},env);
  assert.deepEqual(released.marker,{mode:'d1',writes:'open',generation:2});
  assert.equal(env.r2.puts.length,0,'the forward sequence never writes R2');
  // a later D1 write (the next natural run would do this): the ingest status moves on, so the D1 state no longer equals the frozen image
  sqlite(env.file,"UPDATE epg_ingest_status SET last_success_at='2026-11-21T16:12:00.000Z', revision=revision+1");
  env.cutover={id};
  // ===== 5. rollback: hold, export (conditional), revert, release; D1 rows are kept =====
- await stop(call('hold-rollback',{generation:1},env),'state_mismatch');
- await stop(call('hold-rollback',{generation:2},{...env,db:d1Standin(env.file)},{now:Date.parse('2026-11-21T15:50:00.000Z')}),'drain_refused');
- const rolled=await call('hold-rollback',{generation:2},env);
+ await stop(call('hold-rollback',{generation:1,...EV},env),'state_mismatch');
+ await stop(call('hold-rollback',{generation:2,...EV},{...env,db:d1Standin(env.file)},{now:Date.parse('2026-11-21T08:00:00.000Z')}),'drain_refused');
+ const rolled=await call('hold-rollback',{generation:2,...EV},env);
  assert.deepEqual(rolled.marker,{mode:'d1',writes:'held',generation:3});
  await stop(call('revert-authority',{generation:3},env),'export_not_verified');
  assert.deepEqual(marker(env.file),{mode:'d1',writes:'held',generation:3},'the marker does not move before the export is read back');
@@ -161,7 +167,10 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  assert.equal(env.r2.puts.length,0);
  // partial export: the first PUT lands, the second loses its reply -> reported, never replayed blind
  env.r2.fail(1);
- await stop(call('export-rollback',{generation:3,frozenSyncEtag:id.syncEtag,frozenIngestEtag:id.ingestEtag},env),'write_uncertain');
+ const uncertain=await stop(call('export-rollback',{generation:3,frozenSyncEtag:id.syncEtag,frozenIngestEtag:id.ingestEtag},env),'write_uncertain');
+ assert.equal(uncertain.details.classification,'observed','the first uncertain outcome comes with an immediate read of both objects and the marker');
+ assert.equal(uncertain.details.observed.syncEqualsExport,true);assert.equal(uncertain.details.observed.ingestEqualsExport,false);
+ assert.deepEqual(uncertain.details.marker,{mode:'d1',writes:'held',generation:3});
  assert.deepEqual(env.r2.puts,['sync.json']);
  await stop(call('revert-authority',{generation:3},env),'export_not_verified');
  env.r2.fail(99);
@@ -176,7 +185,16 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  assert.deepEqual(reverted.marker,{mode:'r2',writes:'held',generation:4});
  assert.deepEqual(counts(env.file),{run:1,body:1,film:0,ingest:1},'no rollback step deletes a D1 row');
  await stop(call('release-abort',{generation:4},env),'predicate_refused');
- const reopened=await call('release-rolled-back',{generation:4},env);
+ // (e) reopens writes only on the exported image, read fresh: a changed or an incomplete image is refused before the CAS.
+ const image=identity(env);
+ assert.throws(()=>Op.parseArgs(['node','x','--release-rolled-back','--target','iptv','--confirm','release-rolled-back','--expect-generation','4']),e=>e.reason==='usage');
+ await stop(call('release-rolled-back',{generation:4},env),'identity_mismatch');
+ await stop(call('release-rolled-back',{generation:4,...image,ingestSha256:'0'.repeat(64)},env),'identity_mismatch');
+ env.r2.objects.get('watchlist-ingest.json').etag='moved';
+ await stop(call('release-rolled-back',{generation:4,...image},env),'identity_mismatch');
+ assert.deepEqual(marker(env.file),{mode:'r2',writes:'held',generation:4});
+ env.r2.objects.get('watchlist-ingest.json').etag=image.ingestEtag;
+ const reopened=await call('release-rolled-back',{generation:4,...image},env);
  assert.deepEqual(reopened.marker,{mode:'r2',writes:'open',generation:4});
  assert.deepEqual(await Checkpoint.readAuthority(env.db),{state:'r2',writes:'open',generation:4});
 }
@@ -184,7 +202,7 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
 // ===== 6. abort before activation: release-abort only with empty tables =====
 {
  const env={...open('9999'),r2:bucket(frozen)};
- await call('hold',{generation:0},env);
+ await call('hold',{generation:0,...EV},env);
  const back=await call('release-abort',{generation:1},env);
  assert.deepEqual(back.marker,{mode:'r2',writes:'open',generation:1});
 }
@@ -202,10 +220,109 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  const legacy=JSON.parse(SYNC);delete legacy.completedAt;
  assert.equal(plan(JSON.stringify(legacy)).expected.completedAt,legacy.updatedAt,'a missing completion time takes updatedAt, as completeRun does');
  assert.equal(plan(SYNC,null).expected.ingest,null);
+ // A missing ingest object is never imported as 'no status': the standard cutover needs both identities, and a key that vanished after H0 refuses.
  const none={...open('9999'),r2:bucket({'sync.json':SYNC_RAW})};
- await call('hold',{generation:0},none);
- const noIngest=await call('import',{generation:1,syncEtag:none.r2.objects.get('sync.json').etag,syncSha256:sha(SYNC_RAW)},none);
- assert.equal(noIngest.ingestImported,false);
+ await call('hold',{generation:0,...EV},none);
+ const idNone={syncEtag:none.r2.objects.get('sync.json').etag,syncSha256:sha(SYNC_RAW)};
+ await stop(call('import',{generation:1,...idNone,ingestEtag:'x',ingestSha256:'y'},none),'source_missing');
+ assert.deepEqual(counts(none.file),{run:0,body:0,film:0,ingest:0});
+ assert.throws(()=>Op.parseArgs(['node','x','--import','--target','iptv','--confirm','import','--expect-generation','1','--sync-etag','a','--sync-sha256','b']),e=>e.reason==='usage');
+ // presence at H0, absence at activation and at release
+ const lost={...open('9999'),r2:bucket(frozen)};
+ await call('hold',{generation:0,...EV},lost);
+ const idLost=identity(lost);
+ await call('import',{generation:1,...idLost},lost);
+ lost.r2.objects.delete('watchlist-ingest.json');
+ await stop(call('activate',{generation:1,...idLost},lost),'source_missing');
+ assert.deepEqual(marker(lost.file),{mode:'r2',writes:'held',generation:1});
+}
+
+// ===== 7b. H0 evidence and the mutation boundary =====
+{
+ const base=()=>({...open('9999'),r2:bucket(frozen)});
+ const refused=async(args,failure,options={})=>{const env=options.env??base();const error=await stop(call('hold',{generation:0,...args},env),'drain_refused');assert.ok(error.details.failures.includes(failure),failure+' in '+error.details.failures);assert.deepEqual(marker(env.file),{mode:'r2',writes:'open',generation:0});};
+ await refused({},'workflow_evidence_missing');
+ await refused({...EV,workflowLiveness:undefined},'workflow_evidence_missing');
+ await refused({...EV,workflowLiveness:'running'},'workflow_not_terminal');
+ await refused({...EV,workflowLiveness:'unknown'},'workflow_not_terminal');
+ await refused({...EV,workflowInstanceId:'epg_20261119_1'},'workflow_instance_mismatch');
+ await refused({...EV,deployedVersionId:'v-2'},'workflow_version_mismatch','an instance on an older version than the deployed one');
+ const noVersion=base();sqlite(noVersion.file,"UPDATE epg_orchestration_document SET body=json_remove(body,'$.versionId') WHERE key='control'");
+ await refused(EV,'workflow_version_mismatch',{env:noVersion});
+ const prevDay=base();
+ // yesterday's run at today's Madrid time
+ const yesterday=await stop(call('hold',{generation:0,...EV},prevDay,{now:Date.parse('2026-11-21T08:00:00.000Z')}),'drain_refused');
+ assert.ok(yesterday.details.failures.includes('run_not_current_day')&&yesterday.details.failures.includes('control_not_current_day'));
+ // the run is certified under another programme run
+ const other=base();sqlite(other.file,"UPDATE published_epg_authority SET programme_run_id='other', finalized_run_id='other'");
+ const differently=await stop(call('hold',{generation:0,...EV},other),'drain_refused');assert.ok(differently.details.failures.includes('run_identity_mismatch'));
+ // event debt on the completed run
+ const debt=bucket({...frozen,'sync.json':JSON.stringify({...JSON.parse(SYNC),epgEventPending:{type:'epg'}})});
+ await refused(EV,'event_debt',{env:{...base(),r2:debt}});
+ const wlEvent=bucket({...frozen,'sync.json':JSON.stringify({...JSON.parse(SYNC),events:[{type:'watchlist',at:'2026-11-20T16:11:45.255Z'}]})});
+ await refused(EV,'event_debt',{env:{...base(),r2:wlEvent}});
+ // drift between the status read and the hold: each record the proof was read from is re-asserted inside the marker batch
+ const drift=async mutate=>{
+  const env=base();
+  const state=await Op.readState(env.db);
+  const proof=Op.proofFacts(state,EV);
+  mutate(env.file);
+  const error=await stop(Op.transition(env.db,'hold',{generation:0,now:NOW,proof}),'predicate_refused');
+  assert.deepEqual(marker(env.file),{mode:'r2',writes:'open',generation:0},'the batch aborted whole');
+  return error;
+ };
+ await drift(file=>sqlite(file,"UPDATE epg_orchestration_document SET revision=revision+1 WHERE key='control'"));
+ await drift(file=>sqlite(file,"UPDATE epg_orchestration_document SET revision=revision+1 WHERE key='lease'"));
+ await drift(file=>sqlite(file,"UPDATE epg_orchestration_document SET body=json_set(body,'$.released',json('false'),'$.expiresAt','2026-11-21T09:00:00.000Z') WHERE key='lease'"));
+ await drift(file=>sqlite(file,"UPDATE epg_orchestration_document SET body=json_set(body,'$.runKey','2026-11-19') WHERE key='control'"));
+ await drift(file=>sqlite(file,"UPDATE epg_orchestration_document SET body=json_set(body,'$.versionId','v-0') WHERE key='control'"));
+ await drift(file=>sqlite(file,"UPDATE discovery_epg_priority SET state='paused', owed_day_key='2026-11-20'"));
+ await drift(file=>sqlite(file,"UPDATE published_epg_authority SET finalized_run_id='x'"));
+ // a transition cannot be built for a hold without its proof
+ assert.throws(()=>Op.transitionStatements('hold',{generation:0,now:NOW}),e=>e.reason==='drain_refused');
+}
+
+// ===== 7c. release (b): the rows still equal the frozen image, and the frozen image is unchanged =====
+{
+ const make=async()=>{const env={...open('9999'),r2:bucket(frozen)};await call('hold',{generation:0,...EV},env);const id=identity(env);await call('import',{generation:1,...id},env);await call('activate',{generation:1,...id},env);return {env,id};};
+ {
+  const {env,id}=await make();
+  env.r2.objects.get('sync.json').etag='moved';
+  await stop(call('release',{generation:2,...id},env),'identity_mismatch');
+  env.r2.objects.get('sync.json').etag=id.syncEtag;
+  sqlite(env.file,"UPDATE epg_ingest_status SET last_success_at='2026-11-21T00:00:00.000Z'");
+  const error=await stop(call('release',{generation:2,...id},env),'parity_mismatch');assert.ok(error.details.mismatches.includes('ingest'));
+  sqlite(env.file,"UPDATE epg_ingest_status SET last_success_at='2026-11-20T16:11:45.255Z'");
+  sqlite(env.file,"DELETE FROM epg_checkpoint_receipt");
+  assert.ok((await stop(call('release',{generation:2,...id},env),'parity_mismatch')).details.mismatches.includes('receipt'));
+  assert.deepEqual(marker(env.file),{mode:'d1',writes:'held',generation:2},'writes stay held');
+ }
+}
+
+// ===== 7d. an unreadable readback after the writes is reported, never read as success =====
+{
+ const env={...open('9999'),r2:bucket(frozen)};
+ await call('hold',{generation:0,...EV},env);const id=identity(env);await call('import',{generation:1,...id},env);await call('activate',{generation:1,...id},env);await call('release',{generation:2,...id},env);
+ sqlite(env.file,"UPDATE epg_ingest_status SET last_success_at='2026-11-21T16:12:00.000Z', revision=revision+1");
+ await call('hold-rollback',{generation:2,...EV},env);
+ let broken=false;
+ const base=env.r2.read;
+ const flaky={...base,async head(key){if(broken&&env.r2.puts.length>=2)throw new Error('unreadable');return base.head(key);}};
+ const spy=env.r2.write;
+ const writer=allowed=>{const store=spy(allowed);return {...store,async put(key,text,options){const result=await store.put(key,text,options);if(key==='watchlist-ingest.json')broken=true;return result;}};};
+ const error=await stop(Op.execute('export-rollback',{generation:3,frozenSyncEtag:id.syncEtag,frozenIngestEtag:id.ingestEtag},{binding:env.db,readStore:flaky,writeStoreFactory:writer,now:NOW}),'readback_unreadable');
+ assert.deepEqual(error.details.written,['sync.json','watchlist-ingest.json']);
+ assert.deepEqual(marker(env.file),{mode:'d1',writes:'held',generation:3},'the marker does not move without a verified readback');
+ // an unknown PUT outcome whose objects cannot be read is reported as unclassified
+ const env2={...open('9999'),r2:bucket(frozen)};
+ await call('hold',{generation:0,...EV},env2);const id2=identity(env2);await call('import',{generation:1,...id2},env2);await call('activate',{generation:1,...id2},env2);await call('release',{generation:2,...id2},env2);
+ sqlite(env2.file,"UPDATE epg_ingest_status SET last_success_at='2026-11-21T16:12:00.000Z', revision=revision+1");
+ await call('hold-rollback',{generation:2,...EV},env2);
+ let down=false;
+ const flaky2={...env2.r2.read,async head(key){if(down)throw new Error('unreadable');return env2.r2.read.head(key);}};
+ const lost=allowed=>({...env2.r2.write(allowed),async put(){down=true;throw new Error('lost reply');}});
+ const unclassified=await stop(Op.execute('export-rollback',{generation:3,frozenSyncEtag:id2.syncEtag,frozenIngestEtag:id2.ingestEtag},{binding:env2.db,readStore:flaky2,writeStoreFactory:lost,now:NOW}),'write_uncertain');
+ assert.equal(unclassified.details.classification,'unclassified');assert.equal(unclassified.details.observed,'unreadable');
 }
 
 // ===== 8. the script never deletes or resets: no such statement exists in it =====

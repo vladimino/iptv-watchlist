@@ -50,15 +50,19 @@ An unknown outcome is classified from the write receipt: a receipt for the write
 
 | Command | Marker transition | Refuses unless |
 | --- | --- | --- |
-| `--apply` | none (schema 29 to 30, marker `r2/open/0`) | schema is exactly 29, tables absent, drain proof |
-| `--hold` | `r2/open/G` to `r2/held/G+1` | expected generation, drain proof (lease released or expired, orchestration `phase=done`, run `complete`, pause `clear`, certificate matching, next start at least 30 min away) |
+| `--apply` | none (schema 29 to 30, marker `r2/open/0`) | schema is exactly 29, tables absent, the same-day drain proof below |
+| `--hold` | `r2/open/G` to `r2/held/G+1` | expected generation and the same-day drain proof below; the control, lease and certificate records it was read from are re-asserted inside the marker batch, so a record that moved after the read aborts it |
 | `--release-abort` | `r2/held/G` to `r2/open/G` | the checkpoint tables hold no rows |
-| `--import` | none | `r2/held/G`, empty tables, the R2 identity (ETag, SHA-256) equal to the one passed in, a complete run without watchlist |
+| `--import` | none | `r2/held/G`, empty tables, **both** R2 identities (ETag, SHA-256 of `sync.json` and of `watchlist-ingest.json`) equal to the ones passed in (a key that disappeared refuses), a complete run without watchlist |
 | `--activate` | `r2/held/G` to `d1/held/G+1` | import parity read back against the R2 objects (every typed column, the body, the receipt, the ingest row) |
-| `--release` | `d1/held/G` to `d1/open/G` | the D1 run loads and verifies |
-| `--hold-rollback` | `d1/open/G` to `d1/held/G+1` | drain proof on the D1 run (idle `complete` boundary with a matching certificate); never mid-run |
+| `--release` | `d1/held/G` to `d1/open/G` | both frozen R2 images still have the identities passed in, the D1 rows still equal them (typed columns, body, receipt, ingest) and the run loads |
+| `--hold-rollback` | `d1/open/G` to `d1/held/G+1` | the same-day drain proof on the D1 run (idle `complete` boundary with a matching certificate), re-asserted inside the batch; never mid-run |
 | `--export-rollback` | none | `d1/held/G`; each R2 object is written with a conditional PUT on its frozen ETag, then read back; an object already equal is skipped; any other ETag is a foreign writer and stops |
 | `--revert-authority` | `d1/held/G` to `r2/held/G+1` | both R2 objects read back byte-equal to the documents derived from the D1 rows; the D1 rows stay as inactive recovery evidence |
-| `--release-rolled-back` | `r2/held/G` to `r2/open/G` | the marker only (retained D1 rows are accepted) |
+| `--release-rolled-back` | `r2/held/G` to `r2/open/G` | both R2 objects read fresh and equal to the export image whose identities the export reported (retained D1 rows are accepted) |
+
+**Same-day drain proof.** It needs the Madrid day of the run and of the control record to be the current Madrid day, one run id in the checkpoint run, the control record, the published programme and its certificate, a released or expired lease, `phase=done`, a clear Discovery pause, no event debt (`epgEventPending`, an unflushed watchlist event) and no error on the run, and a next start at least 30 minutes away. The tool cannot read the Workflow with its credentials, so the operator passes `--workflow-instance-id`, `--workflow-liveness finished` and `--deployed-version-id`, read through a documented read-only path (`epg_status` owner and liveness, the deployed version id). The instance id must equal the control record's, the liveness must be `finished`, and the deployed version must equal the version the instance ran. Without that evidence the proof fails; it is never inferred from `phase=done`.
+
+An unknown outcome of an export write is reported with an immediate read of both objects and the marker (classified `observed`, or `unclassified` when the objects cannot be read); the next export call reads both objects again before any write and resumes only the missing object, or stops on a foreign ETag. A readback that cannot be read after the writes is `readback_unreadable`, never success.
 
 Each transition is one batch: a guard that aborts the batch when the full expected state does not hold, the update, and a fence on the number of changed rows. After a hold, wait longer than the two-second marker cache before capturing the R2 identity. A mid-run incident has no command here; see the plan evidence for the accepted limitation.
