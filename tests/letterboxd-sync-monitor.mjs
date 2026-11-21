@@ -20,8 +20,21 @@ for(const [health,key] of [['late','letterboxd_slot_late'],['stalled','letterbox
 {
  let r=Policy.evaluateLetterboxd(model({sources:{watchlist:{stale:true,warning:'watchlist_stale'}}}),NOW);assert.deepEqual([r.state,keys(r)],['degraded',['letterboxd_watchlist_stale']]);assert.match(r.issues[0].message,/24 hours/);
  r=Policy.evaluateLetterboxd(model({sources:{watchlist:{stale:true,warning:'watchlist_never_succeeded'}}}),NOW);assert.match(r.issues[0].message,/since the executor started/);
- // A failing Diary does not alert by itself: only the Watchlist is a stale source (Ratings health is the slot health).
- r=Policy.evaluateLetterboxd(model({sources:{ratings:{lastSuccessAt:null},watchlist:{stale:false}}}),NOW);assert.equal(r.state,'healthy');
+ // Each source signals on its own (review): a failing Diary alerts while the Watchlist succeeded, and the reverse; neither rewrites the other's success.
+ const src=(ratings,watchlist)=>model({sources:{ratings:{lastSuccessAt:'2026-11-21T09:00:00.000Z',lastOutcome:ratings},watchlist:{lastSuccessAt:'2026-11-21T09:00:00.000Z',lastOutcome:watchlist,stale:false,warning:null}}});
+ r=Policy.evaluateLetterboxd(src('error','committed'),NOW);assert.deepEqual([r.state,keys(r)],['degraded',['letterboxd_ratings_failed']]);assert.match(r.issues[0].message,/Ratings \(error\)/);
+ r=Policy.evaluateLetterboxd(src('finished','incomplete'),NOW);assert.deepEqual([r.state,keys(r)],['degraded',['letterboxd_watchlist_failed']]);assert.match(r.issues[0].message,/Watchlist \(incomplete\)/);
+ r=Policy.evaluateLetterboxd(src('finished','unavailable'),NOW);assert.deepEqual(keys(r),['letterboxd_watchlist_failed']);
+ r=Policy.evaluateLetterboxd(src('blocked','no_change'),NOW);assert.deepEqual(keys(r),['letterboxd_ratings_failed']);
+ r=Policy.evaluateLetterboxd(src('finished','interrupted'),NOW);assert.deepEqual(keys(r),['letterboxd_watchlist_failed']);
+ r=Policy.evaluateLetterboxd(src('error','error'),NOW);assert.deepEqual(keys(r),['letterboxd_ratings_failed','letterboxd_watchlist_failed'],'both sources failing are two signals');
+ // success, no-op and a rate limit: no actionable signal; a rate limit is recorded as delayed and never alerts
+ for(const [a,b] of [['finished','committed'],['noop','no_change'],['finished','no_change']]){r=Policy.evaluateLetterboxd(src(a,b),NOW);assert.deepEqual([r.state,keys(r)],['healthy',[]],a+'/'+b);}
+ r=Policy.evaluateLetterboxd(src('rate_limited','committed'),NOW);assert.deepEqual([r.state,keys(r),r.issues[0].severity],['delayed',['letterboxd_ratings_rate_limited'],'delayed']);
+ assert.equal(Policy.planAlerts(r.issues,null,NOW+1).sends.length,0,'a rate limit is never sent');
+ // The partial failure is confirmed over snapshots and then sent through the shared planner; the successful source stays untouched.
+ const bad=Policy.evaluateLetterboxd(src('error','committed'),NOW);
+ let plan=Policy.planAlerts(bad.issues,null,NOW);plan=Policy.planAlerts(bad.issues,plan.state,NOW+60000);assert.equal(plan.sends[0].key,'letterboxd_ratings_failed');
 }
 // 3. A pending Event backlog is actionable only past a day of slots.
 assert.equal(Policy.evaluateLetterboxd(model({eventsPending:7}),NOW).state,'healthy');
