@@ -113,6 +113,7 @@ async function withReverse(wrapper, run) {
 // (B) after reverseView's SELECT, before its batch: another writer projects a newer observation. The CAS aborts the batch, the retry re-reads and keeps it.
 for (const [name, facts, check] of [
   ['unrelated field (watchlist)', {watchlist: true}, v => {assert.equal(v.watchlist, true, 'watchlist written in between is preserved'); assert.equal(v.actualRating, undefined); assert.equal(v.watched, undefined);}],
+  ['same value (rating 4.5 again)', {rating: 4.5}, v => {assert.equal(v.actualRating, 4.5, 'a newer observation with the same value survives'); assert.equal(v.watched, undefined);}],
   ['same field (rating)', {rating: 2}, v => {assert.equal(v.actualRating, 2, 'newer rating written in between survives'); assert.equal(v.watched, undefined);}],
 ]) {
   const {env, hooks} = fresh();

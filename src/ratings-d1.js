@@ -312,11 +312,14 @@ export async function reverseView(env,reversals){
  const ids=[...wanted.keys()];
  for(let attempt=0;attempt<3;attempt++){
   const existing=new Map((await many(gate.db,'SELECT alias_id, fact_key, watched, actual_rating, watchlist, rating_known, updated_at FROM ratings_view WHERE alias_id IN ('+ids.map(()=>'?').join(',')+')',ids)).map(row=>[row.alias_id,row]));
-  const present=new Map();
+  const present=new Map(),guards=[];
   for(const factKey of new Set([...wanted.values()].map(entry=>entry.factKey))){
    const owned=await readOwned(env,'letterboxd/facts/films/'+factKey+'.json');
    if(!owned.owned)return {owned:false,changed:0};
    present.set(factKey,owned.value||{});
+   // The fact document is fenced at the exact etag it was read at (or at absence): a commit of that fact after this read, even one whose projection is a no-op, aborts the batch.
+   const docKey='letterboxd/facts/films/'+factKey+'.json';
+   guards.push(owned.etag?["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND EXISTS (SELECT 1 FROM ratings_document WHERE key=? AND part=0 AND etag=?)",[docKey,owned.etag]]:["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND NOT EXISTS (SELECT 1 FROM ratings_document WHERE key=?)",[docKey]],[FENCE_SQL,[]]);
   }
   const now=new Date().toISOString(),statements=[];
   for(const [id,entry] of wanted){
@@ -336,7 +339,7 @@ export async function reverseView(env,reversals){
    statements.push(['UPDATE ratings_view SET watched=?, actual_rating=?, watchlist=?, rating_known=?, updated_at=? WHERE alias_id=? AND fact_key=? AND updated_at IS ? AND watched IS ? AND watchlist IS ? AND rating_known=? AND actual_rating IS ?',[watched,actual,watchlist,known,now,id,entry.factKey,prior.updated_at??null,prior.watched??null,prior.watchlist??null,Number(prior.rating_known),prior.actual_rating??null]],[FENCE_SQL,[]]);
   }
   if(!statements.length)return {owned:true,changed:0};
-  const batch=[["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND mode='d1' AND cutover='open'",[]],[FENCE_SQL,[]],...epochFence(env),...statements,["UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1 AND mode='d1' AND cutover='open'",[]]];
+  const batch=[["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND mode='d1' AND cutover='open'",[]],[FENCE_SQL,[]],...epochFence(env),...guards,...statements,["UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1 AND mode='d1' AND cutover='open'",[]]];
   try{await fenced(gate.db,batch);}
   catch(error){if(error?.code==='ratings_domain_fence')continue;throw error;}
   return {owned:true,changed:statements.length/2};
