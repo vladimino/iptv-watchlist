@@ -108,20 +108,33 @@ run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
  const docs=db.sql("SELECT key FROM ratings_document").map(r=>r.key);
  assert.ok(docs.some(k=>/watchlist/i.test(k)),'the real facts module wrote the watchlist scan summary into the ratings documents: '+docs.join(','));
 }
-// 5. Slot 3: a 1-for-1 replacement (f3 out, f9 in) is version 2 and the Event carries both; its removal effect is drained by slot 4 into the REAL removal queue.
+// 5. Slot 3: a 1-for-1 replacement (f3 out, f9 in) is version 2 and the Event carries both. Its removal effect is applied IN THE SAME RUN (before phase 3): the REAL removal queue holds f3 with a reference to this slot's own
+// Event key, and the member-page lookup of f3 happens in that very slot (the accepted sequence), even though the Event object is only stored when the slot closes.
 {
  list=['f0','f1','f2','f9'];
+ const lookupsBefore=fetched.filter(u=>/\/demo-user\/film\/f3\//.test(u)).length;
  await slot(T('2026-11-21T21:40:00Z'));
  assert.equal(rowOf('2026-11-21T2230').w,'committed');assert.equal(db.sql('SELECT version FROM watchlist_current')[0].version,2);
  const events=[...bucket.records.entries()].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v);
  const wl=events.find(e=>e.type==='watchlist'&&e.slot==='2026-11-21T2230');
  assert.equal(wl.addedCount,1);assert.equal(wl.removedCount,1);
- await slot(T('2026-11-22T03:40:00Z')); // the 22:30 slot's window; the next slot drains version 2's effects
- const next=await LetterboxdSync.ensure(env,{now:T('2026-11-22T04:40:00Z')});
- assert.ok(next.slot);
  const queue=db.sql("SELECT key,body FROM ratings_document").find(r=>/removal/i.test(r.key));
  assert.ok(queue,'the real removal-lookup queue received the removed film');
  assert.match(String(queue.body),/f3/);
+ assert.match(String(queue.body),/"lastResult":"fact"/,'f3 had a confirmed rating in the fact store: phase 3 reconciled it from that fact in the same run, with no request');
+ const eventKey=[...bucket.records.keys()].find(k=>/lbsync-20261121T2230-watchlist/.test(k));
+ assert.ok(eventKey,'the slot Event was delivered');
+ assert.ok(String(queue.body).includes(eventKey),'the removal reference names exactly the key the slot Event was stored under');
+}
+// 5c. A removed film with NO stored rating is looked up by phase 3 of the SAME slot: f2 leaves at 03:40, and its member page is requested in that very run.
+{
+ list=['f0','f1','f9'];
+ const lookups=()=>fetched.filter(u=>/\/demo-user\/film\/f2\//.test(u)).length;
+ const before=lookups();
+ await slot(T('2026-11-22T03:40:00Z'));
+ assert.equal(rowOf('2026-11-22T0430').w,'committed');
+ assert.ok(lookups()>before,'the removed, unrated film was looked up in the slot that observed its removal');
+ assert.ok(db.sql("SELECT key,body FROM ratings_document WHERE key='enrichment/removal-rating-lookups.json'").map(r=>r.body).join('').includes('"f2"'),'f2 is in the real removal queue');
 }
 // 5b. The real admission step ran through the real identity bridge: the ids added by the promotions are in the durable ledger. With the canonical catalog reader closed (the default marker here) the bridge
 // defers them WITHOUT any source request, so the rows stay pending and unchanged; nothing was guessed and no Film was admitted from a title.
@@ -183,7 +196,8 @@ run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
 // entry and its commit. The commit goes through the fenced env, so the stale writer changes NOTHING (the ratings documents are byte-identical), no effect receipt is recorded, and the effect stays pending.
 {
  list=['f0','f1','f2','f8'];
- await slot(T('2026-11-23T03:40:00Z'));
+ const promoted=await ports.watchlist.run({env,slotKey:'2026-11-23T0430',runId:'promote',epoch:1,now:()=>T('2026-11-23T03:40:00Z'),deadline:T('2026-11-23T09:00:00Z')});
+ assert.equal(promoted.outcome,'committed','a new promotion (its effects are not applied yet)');
  const pendingBefore=db.sql("SELECT COUNT(*) AS n FROM watchlist_effect WHERE status='pending'")[0].n;
  assert.ok(pendingBefore>=1,'the promotion left causal effects pending');
  const docs=()=>JSON.stringify(db.sql("SELECT key,part,etag FROM ratings_document ORDER BY key,part"));
@@ -191,9 +205,9 @@ run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
  let flipped=0;
  context.__flipMode=()=>{flipped++;const r=sqliteSync(['-bail',file],{input:"UPDATE letterboxd_sync_mode SET mode='switching', target='external', from_mode='cloudflare', epoch=epoch+1;"});if(r.status!==0)throw new Error(r.stderr);};
  run("(()=>{const original=LetterboxdFacts.applyWatchlistScan;LetterboxdFacts.applyWatchlistScan=async(e,a)=>{__flipMode();return original(e,a);};})()");
- const drain=await ports.watchlist.run({env,slotKey:'2026-11-23T1030',runId:'stale',epoch:1,now:()=>T('2026-11-23T09:40:00Z'),deadline:T('2026-11-23T15:00:00Z')});
+ const drain=await ports.watchlist.afterRecorded({env,slotKey:'2026-11-23T0430',runId:'stale',epoch:1,now:()=>T('2026-11-23T03:50:00Z'),deadline:T('2026-11-23T09:00:00Z')});
  assert.equal(flipped,1,'the mode flipped between the effect entry and its commit');
- assert.equal(drain.outcome,'error','the stale step ends as an error');
+ assert.equal(drain.drained,false,'the stale step applied nothing');
  assert.equal(docs(),before,'ZERO stale mutations: no ratings document changed');
  assert.equal(db.sql("SELECT COUNT(*) AS n FROM watchlist_effect WHERE status='pending'")[0].n,pendingBefore,'no receipt was recorded for the stale effect');
  assert.equal(db.sql('SELECT mode FROM letterboxd_sync_mode')[0].mode,'switching');

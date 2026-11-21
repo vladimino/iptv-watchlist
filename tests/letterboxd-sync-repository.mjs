@@ -58,10 +58,10 @@ const slotRows=(f,key)=>f.db.sql("SELECT watchlist_outcome,status FROM letterbox
  const r1=await slotRun(env,{now:T('2026-11-21T09:40:00Z'),list:[film(0),film(1),film(2),film(3)]});
  assert.equal(r1.result.reason,'complete');assert.equal(slotRows(f,'2026-11-21T1030').watchlist_outcome,'committed');
  assert.equal(f.db.sql('SELECT version,film_count FROM watchlist_current')[0].version,1);
- assert.deepEqual(receipts.splice(0),[],'no effects are drained before the first publication');
+ assert.deepEqual(receipts.splice(0),['scan_facts:1','retention:1','removal_enqueue:1'],'the effects of a promotion are applied in the same run, in order (before phase 3)');
  // 2. The next slot first drains version 1's causal effects (scan_facts, retention, removal_enqueue), in order, then scans: an unchanged list is a no-op.
  const r2=await slotRun(env,{now:T('2026-11-21T15:40:00Z'),list:[film(0),film(1),film(2),film(3)]});
- assert.deepEqual(receipts.splice(0),['scan_facts:1','retention:1','removal_enqueue:1']);
+ assert.deepEqual(receipts.splice(0),[],'nothing is left to drain: a no-op slot applies nothing and writes no snapshot');
  assert.equal(slotRows(f,'2026-11-21T1630').watchlist_outcome,'no_change');assert.equal(f.db.sql('SELECT version,effects_drained_version FROM watchlist_current')[0].effects_drained_version,1);
  assert.equal(f.db.sql('SELECT version FROM watchlist_current')[0].version,1,'a no-op writes no snapshot');
  // 3. T6: a 1-for-1 replacement (same count, one out, one in) is a new version with one added and one removed; the Event carries both.
@@ -72,15 +72,17 @@ const slotRows=(f,key)=>f.db.sql("SELECT watchlist_outcome,status FROM letterbox
  // 4. Exactly two Events per slot, three slots, never a third.
  assert.equal(b.map.size,6);
 }
-// 5. A missing effect writer holds the drain AND the scan (nothing is marked done without a receipt); the slot still emits both Events honestly.
+// 5. A missing effect writer holds the drain AND the next scan (nothing is marked done without a receipt); the slot still emits both Events honestly, and a later slot with the writer drains and publishes.
 {
  const f=open(),b=bucket(),wf=workflow(),env={DB:f.db,BUCKET:b,LETTERBOXD_WORKFLOW:wf};
  await Sync.switchMode(env,{action:'close_admission',target:'cloudflare'},{},T('2026-11-21T09:39:00Z'));await Sync.switchMode(env,{action:'complete'},GOOD,T('2026-11-21T09:39:00Z'));
- await slotRun(env,{now:T('2026-11-21T09:40:00Z'),list:[film(0),film(1)]});
- const held=await slotRun(env,{now:T('2026-11-21T15:40:00Z'),list:[film(0),film(5)],effectWriters:{scan_facts:writers.scan_facts}});
- assert.equal(slotRows(f,'2026-11-21T1630').watchlist_outcome,'error');
- assert.equal(f.db.sql("SELECT COUNT(*) AS n FROM watchlist_effect WHERE status='pending'")[0].n,2,'retention and removal_enqueue stay pending, the facts were applied in order');
- assert.equal(f.db.sql('SELECT version FROM watchlist_current')[0].version,1,'the scan was held: no new version while an older effect is undone');
+ const partial={scan_facts:writers.scan_facts};
+ await slotRun(env,{now:T('2026-11-21T09:40:00Z'),list:[film(0),film(1)],effectWriters:partial});
+ assert.equal(slotRows(f,'2026-11-21T1030').watchlist_outcome,'committed','the scan itself committed');
+ assert.equal(f.db.sql("SELECT COUNT(*) AS n FROM watchlist_effect WHERE status='pending'")[0].n,2,'retention and removal_enqueue stay pending, the facts were applied');
+ await slotRun(env,{now:T('2026-11-21T15:40:00Z'),list:[film(0),film(5)],effectWriters:partial});
+ assert.equal(slotRows(f,'2026-11-21T1630').watchlist_outcome,'error','the next scan is held while an older effect is undone');
+ assert.equal(f.db.sql('SELECT version FROM watchlist_current')[0].version,1,'no new version while an older effect is undone');
  assert.equal(b.map.size,4,'both slots emitted two Events');
  // The writer comes back: the next slot drains in order and then publishes.
  await slotRun(env,{now:T('2026-11-21T21:40:00Z'),list:[film(0),film(5)]});

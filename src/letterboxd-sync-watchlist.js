@@ -61,6 +61,12 @@ export function classifyScanFailure(error) {
 // It never reads Discovery, EPG or resolver state (decision 2). The slot's attempt is made once per run; the next slot is the retry.
 export function watchlistPhase({repository, fetchPage, parse, firstUrl, username, describe = null}) {
   return {
+    // Called by the Workflow once the phase outcome and its time are recorded on the slot: applies the causal effects of the snapshot just promoted (and any older pending one), oldest first, so a removal reaches the
+    // Ratings queue in the same run. No Letterboxd request, no scan. -> {drained, code?}
+    async afterRecorded(ctx) {
+      if (!repository || typeof repository.drainEffects !== 'function') return {drained: false, code: 'repository_absent'};
+      return repository.drainEffects(ctx, {now: ctx.now()});
+    },
     async run(ctx) {
       const at = () => new Date(ctx.now()).toISOString();
       const ready = repository && typeof repository.ready === 'function' ? await repository.ready(ctx).catch(() => ({ready: false})) : {ready: false};

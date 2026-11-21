@@ -192,15 +192,15 @@ export async function deliverEvents(env, {now = Date.now(), limit = LIMITS.event
   return {delivered, failed, pending: rows.length - delivered};
 }
 
-// The reference of a slot's own `watchlist` Event for the removal hand-over: its object key, run and time. null until the Event object exists in R2 (delivered), so the removal queue never
-// points at an Event that is not there yet. Read only.
+// The reference of a slot's own `watchlist` Event for the removal hand-over: its object key, run and time. The key is DETERMINISTIC (the slot's Event key and the frozen time of the Watchlist phase, which the
+// slot row records before reconciliation starts), so the removal queue can point at the Event before it is delivered: an Event not yet stored is the queue's tolerated `event_missing` waiting state, and the
+// slot close freezes exactly this key and time. null only while the phase time is unknown. Read only.
 export async function slotEventRef(env, slotKey, sourceRunId = null) {
   let row;
-  try { row = await first(env, "SELECT event_key, at, status FROM letterboxd_slot_event WHERE slot_key = ? AND type = 'watchlist'", slotKey); } catch { return null; }
-  if (!row || row.status !== 'delivered') return null;
-  const key = eventObjectKey(row.at, row.event_key);
-  try { const object = await env.BUCKET.get(key); if (!object) return null; } catch { return null; }
-  return {eventKey: key, sourceRunId, at: row.at};
+  try { row = await first(env, "SELECT s.watchlist_at AS phase_at, e.at AS event_at FROM letterboxd_slot s LEFT JOIN letterboxd_slot_event e ON e.slot_key = s.slot_key AND e.type = 'watchlist' WHERE s.slot_key = ?", slotKey); } catch { return null; }
+  const at = row?.event_at || row?.phase_at;
+  if (!at || !Number.isFinite(Date.parse(at))) return null;
+  return {eventKey: eventObjectKey(at, slotEventKey(slotKey, 'watchlist')), sourceRunId, at};
 }
 
 // ---- the owner's mode switch (same three-step pattern as ADR 0090 decision 4) ---------------------------------------------
@@ -435,6 +435,11 @@ export async function run(env, payload, step, hooks = {}) {
   // Phase 2. Attempted once per run; a Diary failure or rate limit does not cancel it, and its failure does not undo phase 1 (T8).
   const watchlist = await runPhase(env, ports.watchlist, ctx, 'watchlist', WATCHLIST_OUTCOMES, step, nameOf);
   await advance({phase: 'reconciliation', watchlist_outcome: watchlist.outcome, watchlist_at: watchlist.at});
+  // Between the scan and the reconciliation: the causal effects of the snapshot this run just promoted are applied NOW, so the films it removed are in the Ratings queue before phase 3 looks them up (the accepted
+  // sequence). Best effort and bounded: an effect that cannot be applied stays pending and is retried by the next run; it never fails the slot.
+  if (isPort(ports.watchlist) && typeof ports.watchlist.afterRecorded === 'function' && watchlist.outcome === 'committed') {
+    await step.do(nameOf('effects'), () => ports.watchlist.afterRecorded(ctx).catch(() => ({drained: false}))).catch(() => null);
+  }
   // Phase 3. Operational only: it never changes an Event outcome and never creates a third Event.
   const reconcile = await runPhase(env, ports.reconcile, ctx, 'reconcile', ['done', 'deferred', 'error', 'skipped'], step, nameOf);
   // The AIR-361 contract is complete only when the run ended, which phase 3 does; either phase may hand it over.

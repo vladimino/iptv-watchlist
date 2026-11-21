@@ -170,6 +170,19 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  const order=[];const mk=name=>({run:async()=>{order.push(name);return {done:true,outcome:name==='reconcile'?'done':name==='ratings'?'finished':'no_change'};}});
  await wholeRun({ratings:mk('ratings'),watchlist:mk('watchlist'),reconcile:mk('reconcile')});assert.deepEqual(order,['ratings','watchlist','reconcile']);
 }
+// 5c2. Review: the effects of the snapshot a run just promoted are applied BETWEEN the scan and the reconciliation, only after a commit, and a failing hook never fails the slot.
+{
+ const order=[];
+ const mk=name=>({run:async()=>{order.push(name);return {done:true,outcome:name==='reconcile'?'done':name==='ratings'?'finished':'committed'};}});
+ const watchlist={...mk('watchlist'),afterRecorded:async()=>{order.push('effects');return {drained:true};}};
+ await wholeRun({ratings:mk('ratings'),watchlist,reconcile:mk('reconcile')});
+ assert.deepEqual(order,['ratings','watchlist','effects','reconcile'],'effects run after the scan is recorded and before phase 3');
+ const none=[];const noCommit={run:async()=>{none.push('w');return {done:true,outcome:'no_change'};},afterRecorded:async()=>{none.push('effects');}};
+ await wholeRun({ratings:okPort('finished'),watchlist:noCommit});assert.deepEqual(none,['w'],'no commit, no effects step');
+ const failing={...mk('watchlist'),afterRecorded:async()=>{throw new Error('boom');}};
+ const r=await wholeRun({ratings:okPort('finished'),watchlist:failing,reconcile:okPort('done')});assert.equal(r.result.reason,'complete','a failing effects hook never fails the slot');
+ assert.equal(r.b.map.size,2);
+}
 // 5d. Multi-action phase with a wake, and the deadline: no retry crosses the next slot's due instant.
 {
  const f=fresh(),wf=workflow(),e=env({db:f.db,wf});await activate(e);
