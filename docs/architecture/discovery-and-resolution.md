@@ -154,3 +154,7 @@ flowchart TD
     core -->|"real poster_path"| d1
     core -->|"absent again: new 90-day hold"| neg
 ```
+
+## Accepted design (not implemented): Discovery and the Letterboxd Sync ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
+
+Discovery keeps its lease, the EPG-priority pause and its own admissions. The proposal adds a one-way isolation rule: a Letterboxd Sync step never reads the Discovery lease, the resolver lease or the pause, so a held lease or a closed pause cannot delay a Watchlist or Ratings run, and Discovery never reads Letterboxd run state. A Film that Discovery admits and a Film the Letterboxd Sync admits meet only in the canonical Film writers, which use compare-and-swap and receipts, so two concurrent admissions of one Film yield one Film and an idempotent second writer. Discovery stays a reader of the Watchlist snapshot membership and writes no membership.

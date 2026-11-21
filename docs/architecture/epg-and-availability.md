@@ -158,3 +158,28 @@ flowchart LR
 ```
 
 The page keeps the last good authoritative result only in memory. A saved-copy answer never replaces it, but any failed refresh makes the page read-only until an authoritative read succeeds; the normal source and the write actions return only then. The write fence is global, but the loss of present-tense claims is scoped to the data being rendered: a saved programme, or one film that came from a saved copy, keeps its historical schedule without archive, on-air, soon or last-chance claims, while a separately valid authoritative programme keeps its availability even when another film is shown from a mirror. When D1 answers again, films shown from a saved copy are asked again.
+
+## Accepted design (not implemented): the EPG reads one Watchlist snapshot ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
+
+Today `beginSync` fetches the Letterboxd watchlist and a fetch failure prevents the run. The proposal moves membership into its own D1 authority written only by the Letterboxd Sync; the EPG takes **one** read of the last committed snapshot when the run starts and is then self-contained. The diagram is the future path; the shaded nodes do not exist, and with the Watchlist marker `epg` or absent the fetch above is the only path.
+
+```mermaid
+flowchart TD
+    snap[("Proposed Watchlist authority<br/>current pointer + snapshot versions")]
+    begin["beginSync at 17:00 Madrid<br/>one read, count and digest verified<br/>no wait for the 16:30 slot, no Letterboxd call"]
+    run["Run copies the ordered list<br/>records version, snapshot id, lastSuccessAt"]
+    stale{"older than 24 hours?"}
+    warn["watchlist_stale warning on the run,<br/>status, read model and monitor<br/>the run still proceeds"]
+    gen[("Programme generation<br/>programme + watchlist COPY of the pinned version")]
+    reader["Readers: current snapshot membership<br/>plus the generation's show rows"]
+    join["New Film joins with shows at once only with<br/>trusted identity and a stored confirmed slot<br/>otherwise at the next scan"]
+    snap --> begin --> run --> stale
+    stale -->|yes| warn --> gen
+    stale -->|no| gen
+    snap --> reader
+    gen --> reader --> join
+    classDef proposed fill:#fff3de,stroke:#a56c2b,color:#42300e
+    class snap,begin,run,warn,reader,join proposed
+```
+
+There is no hard TTL. The run fails closed only when no snapshot exists or it cannot be read, which is a D1 fault and not a Letterboxd one. The EPG remains the only writer of the programme generation ([ADR 0142](../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 3); the generation's watchlist part becomes a copy of the pinned snapshot, and the scan, retention and removal-event steps leave the EPG commit tail. The immediate join is a read-time composition and writes nothing.
