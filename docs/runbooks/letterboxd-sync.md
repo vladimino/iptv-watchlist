@@ -14,7 +14,7 @@ The code is dormant. With the mode table empty or `external` nothing is created,
 
 ## Activation order (for the cutover plan, not performed here)
 
-1. Apply the migration (preflight, one apply, readback). The mode table stays empty.
+1. Apply the migration `0033_letterboxd_sync_control.sql` (schema 33, after `0031` and `0032`, both applied). The owner-run operator is `node scripts/letterboxd-sync-control-production.mjs --target iptv` (read-only `status` by default); `--apply --target iptv --confirm apply` makes one atomic batch and an independent readback, and needs its own owner GO. The mode table stays empty.
 2. The handover proof is read from live state by `letterboxdHandover`: the Ratings executor is closed and drained, the legacy `ratings_sync_start` and `ratings_sync_step` entry is fenced (true while the Letterboxd mode is `switching`), the Watchlist authority is an open `d1`, and the three phase ports exist. `complete` refuses with `handover_not_proven` and the list of what is missing until all hold. The switch has no HTTP route yet; the cutover plan names how it is invoked.
 3. `close_admission` with target `cloudflare` (the epoch moves and the legacy Ratings entry is fenced at once), then `complete` once the drain is verified.
 4. Add the Workflow binding and the `30 * * * *` cron in the deployment that the cutover approves; observe the first slot, never force one.
