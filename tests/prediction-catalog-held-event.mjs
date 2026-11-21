@@ -106,6 +106,19 @@ assert.deepEqual(orphans(),[]);
   const next=await start('req-held-after-persist');assert.equal(next.data.status,'running','the lease was released: no orphan lease');assert.equal((await api('complete',{runId:next.data.runId,reason:'quota'})).status,200);}
 }
 
+// 4c. A keyed start (ADR 0188 / AIR-573) takes the lease as its own claim before the preflight. A held catalog refuses it with the same 503, the claim is released, and the attempt leaves
+// the same one Event (the key is never stored in it); a repeat of the same request id is still one item, and the very same key then starts normally once the catalog is free.
+{const KEY='air575-keyed-start-0001',runs=()=>JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),runsBefore=runs(),count=held().length;
+ const refused=await withGate(GATES[1][0],()=>start('req-held-keyed',{invocationKey:KEY}));
+ assert.equal(refused.status,503,JSON.stringify(refused.data).slice(0,160));assert.equal(refused.data.code,'prediction_catalog_held');assert.equal(refused.data.cause,'discovery_incomplete');
+ const events=held().filter(e=>e.requestId==='req-held-keyed');assert.equal(held().length,count+1,'exactly one Event');assert.equal(events.length,1);assert.equal(events[0].cause,'discovery_incomplete');
+ assert.ok(!JSON.stringify(events[0]).includes(KEY)&&!('invocationKey' in events[0])&&!('keyHash' in events[0]),'the key never reaches the Event');
+ assert.equal(runs(),runsBefore,'no run');
+ const replay=await withGate(GATES[1][0],()=>start('req-held-keyed',{invocationKey:KEY}));assert.equal(replay.status,503);assert.equal(held().filter(e=>e.requestId==='req-held-keyed').length,1,'a replayed request id is one item');
+ const ok=await start('req-held-keyed-ok',{invocationKey:KEY});assert.equal(ok.status,200);assert.equal(ok.data.status,'running','the claim was released: the same key starts once the catalog is free');
+ assert.equal(held().filter(e=>e.requestId==='req-held-keyed-ok').length,0,'a successful keyed start writes no catalog_held Event');
+ assert.equal((await api('complete',{runId:ok.data.runId,reason:'quota'})).status,200);}
+
 // 5. The journal is down: the 503 is unchanged, the record is parked and noted, a later start delivers it once; the index and the journal both down lose only this one Event.
 {blocked=key=>key.startsWith('events/items/');
  const out=await withGate(GATES[1][0],()=>start('req-held-outage'));assert.equal(out.status,503);assert.equal(out.data.code,'prediction_catalog_held','a journal outage never changes the answer');
