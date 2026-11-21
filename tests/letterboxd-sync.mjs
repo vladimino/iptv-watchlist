@@ -34,7 +34,7 @@ const okPort=(outcome,extra={})=>({run:async()=>({done:true,outcome,...extra})})
 const env=({db,bucket:b=bucket(),wf=workflow()})=>({DB:db,BUCKET:b,LETTERBOXD_WORKFLOW:wf});
 // The ports of a proven handover: the proof, a guard that pins its facts at the commit (a passing one here), and drained causal effects.
 const PASS=['INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, 1 WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok',[]];
-const GOOD={handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:true,ratingsPhase:true}),handoverGuards:async()=>[['INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, 1 WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok',[]]],effects:async()=>({drained:true,pending:0,guard:PASS}),legacyEntrySafe:async()=>true};
+const GOOD={handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:true,ratingsPhase:true}),handoverGuards:async()=>[['INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, 1 WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok',[]]],effects:async()=>({drained:true,pending:0,guard:PASS})};
 async function activate(e,ports=GOOD,now=T('2026-11-21T09:39:00Z')){
  assert.equal((await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'},ports,now)).closed,true);
  const done=await Sync.switchMode(e,{action:'complete'},ports,now);assert.equal(done.completed,true,JSON.stringify(done));return done;
@@ -403,19 +403,17 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
   // the commit did land, so the same pins are now stale (the owner reads again before deciding)
   assert.equal((await Sync.switchMode(e,{action:'close_admission',target:'external',...pins},GOOD,NOW)).refused,'pin_mismatch');
   const switching=await read(e);const reverse={expectEpoch:switching.epoch,expectRevision:switching.revision};
-  // completing (or aborting) toward `external` reopens the legacy entry: refused while the Watchlist is not back on the inert authority, and the entry stays fenced
-  const unsafe={...GOOD,legacyEntrySafe:async()=>false};
-  assert.equal((await Sync.switchMode(e,{action:'complete',...reverse},unsafe,NOW)).refused,'watchlist_rollback_pending');
-  assert.equal((await Sync.switchMode(e,{action:'complete',...reverse},{...GOOD,legacyEntrySafe:async()=>{throw new Error('x');}},NOW)).refused,'watchlist_rollback_pending');
-  assert.equal((await Sync.switchMode(e,{action:'complete',...reverse},{handover:GOOD.handover},NOW)).refused,'watchlist_rollback_pending','no port, no proof');
-  assert.equal((await Sync.writerFence(e)).fenced,true);assert.equal((await read(e)).revision,switching.revision,'a refusal wrote nothing');
-  // a refused completion never writes the drain observation
-   const done=await Sync.switchMode(e,{action:'complete',...reverse},GOOD,NOW);assert.equal(done.completed,true);assert.equal((await Sync.writerFence(e)).fenced,false);
-  // the abort toward `external` has the same condition
-  await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);
-  const open=await read(e);
-  assert.equal((await Sync.switchMode(e,{action:'abort',expectEpoch:open.epoch,expectRevision:open.revision},unsafe,NOW)).refused,'watchlist_rollback_pending');
-  assert.equal((await Sync.switchMode(e,{action:'abort',expectEpoch:open.epoch,expectRevision:open.revision},GOOD,NOW)).aborted,true);
+  // the reverse completion needs no Watchlist state: the legacy entry is fenced by the Watchlist state itself (legacyAdmission), proven against the real rollback operator in watchlist-cutover.mjs
+  const done=await Sync.switchMode(e,{action:'complete',...reverse},GOOD,NOW);assert.equal(done.completed,true);assert.equal((await Sync.writerFence(e)).fenced,false,'no Watchlist table here: the mode row alone decides');
+  // an abort back to `cloudflare` re-admits the writer, so it needs the proof AND its pins at the commit (a partial Watchlist rollback in between refuses it); an abort toward `external` admits nothing
+  await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await Sync.switchMode(e,{action:'complete'},GOOD,NOW);
+  await Sync.switchMode(e,{action:'close_admission',target:'external'},GOOD,NOW);
+  const open=await read(e);const abortPins={expectEpoch:open.epoch,expectRevision:open.revision};
+  assert.equal((await Sync.switchMode(e,{action:'abort',...abortPins},{...GOOD,handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:false,ratingsPhase:true})},NOW)).refused,'handover_not_proven');
+  assert.equal((await Sync.switchMode(e,{action:'abort',...abortPins},{handover:GOOD.handover,handoverGuards:async()=>[]},NOW)).refused,'handover_unprotected');
+  const movedAbort=await Sync.switchMode(e,{action:'abort',...abortPins},{...GOOD,handoverGuards:async()=>[trip]},NOW);
+  assert.equal(movedAbort.refused,'handover_changed');assert.equal((await read(e)).revision,open.revision,'nothing written');
+  assert.equal((await Sync.switchMode(e,{action:'abort',...abortPins},GOOD,NOW)).aborted,true);
  }
  // abort: recovery from an open switch back to the mode it started from, in both directions, one writer at a time
  {

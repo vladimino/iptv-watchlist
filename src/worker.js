@@ -2696,11 +2696,6 @@ async function letterboxdEffectsState(env){
  const drained=drainedVersion===version&&pending===0;
  return {drained,pending,version,drainedVersion,guard:["INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN (SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=? AND effects_drained_version=version)=1 AND (SELECT COUNT(*) FROM watchlist_effect WHERE status<>'done')=0 THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok",[version]]};
 }
-// AIR-571 D. The legacy Ratings entry may reopen (reverse completion or an abort toward `external`) only when the Watchlist is back on the inert `epg` authority with writes open: the legacy writer rewrites the root mirror.
-async function letterboxdLegacyEntrySafe(env){
- const authority=await WatchlistD1.readAuthority(env);
- return authority?.state==='epg'&&authority.writes==='open';
-}
 function letterboxdPorts(env){
  const sources=sourceConfig(env);
  const effects=LetterboxdSyncEffects.effectWriters({
@@ -2722,7 +2717,7 @@ function letterboxdPorts(env){
   const rated=await storedRemovalRatings(e,{type:'watchlist',removed:removed.map(film=>eventRemovedFilm(known(film)))}).catch(()=>null);
   return {added:added.map(film=>eventFilm(known(film))),removed:rated?.event?.removed||removed.map(film=>eventRemovedFilm(known(film)))};
  };
- return {handover:e=>letterboxdHandover(e||env),handoverGuards:(e,handover)=>letterboxdHandoverGuards(e||env,handover),legacyEntrySafe:e=>letterboxdLegacyEntrySafe(e||env),effects:e=>letterboxdEffectsState(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
+ return {handover:e=>letterboxdHandover(e||env),handoverGuards:(e,handover)=>letterboxdHandoverGuards(e||env,handover),effects:e=>letterboxdEffectsState(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
 }
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {

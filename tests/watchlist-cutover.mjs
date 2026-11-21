@@ -11,6 +11,7 @@ import {createHash} from 'node:crypto';
 import {listDigest,normalizeFilms,readCurrent,pinForEpg,readAuthority,publishSnapshot,completeEffect,EFFECTS} from '../src/watchlist-d1.js';
 import {membershipDigest} from '../src/watchlist-bootstrap.js';
 import {transitionStatements,exportGuards,TRANSITIONS} from '../src/watchlist-cutover.js';
+import * as LbSync from '../src/letterboxd-sync.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-wl-cut-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -611,5 +612,39 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
   await run(e,'release',{generation:2,...RELEASE});
   assert.equal((await PublishedEpg.putWatchlistRoot({DB:e.db,BUCKET:e.store},newer)).blocked,true,'d1/open: the root belongs to the Watchlist');
  }
+}
+
+// ===== 10. review (PR #879): the reverse handover and the C2 rollback operator are executable in ONE order =====
+// Forward cutover, the Letterboxd writer admitted, then the reverse: close the writer (effects drained, asserted at the commit), complete to `external` (the rollback operator requires it), the legacy Ratings
+// entry staying fenced by the Watchlist state through hold-rollback, export, revert and release, and open only at epg/open. The real operator, the real D1 switch and the real legacy gate; the only ports are the
+// Ratings-side proof the Worker reads from the Ratings documents (not the subject here) and the effects read, which uses the Worker's own SQL.
+{
+ const env=await imported();
+ await run(env,'hold',{generation:0,...FORWARD});await run(env,'activate',{generation:1,...FORWARD});await run(env,'release',{generation:2,...RELEASE});
+ const pass=['INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, 1 WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok',[]];
+ const effects=async e=>{const row=rows(env.file,"SELECT version, effects_drained_version AS drainedVersion, (SELECT COUNT(*) FROM watchlist_effect WHERE status<>'done') AS pending FROM watchlist_current WHERE id=1")[0];
+  return {drained:row.drainedVersion===row.version&&row.pending===0,pending:row.pending,version:row.version,drainedVersion:row.drainedVersion,guard:["INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN (SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=? AND effects_drained_version=version)=1 AND (SELECT COUNT(*) FROM watchlist_effect WHERE status<>'done')=0 THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok",[row.version]]};};
+ const ports={handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:true,ratingsPhase:true}),handoverGuards:async()=>[pass],effects};
+ const lb=env.db?{DB:env.db}:null;const T0=NOW;
+ const fenced=async()=>(await LbSync.writerFence(lb));
+ assert.equal((await fenced()).fenced,false,'before any switch the legacy entry is open whatever the Watchlist marker says (dormant behavior)');
+ assert.equal((await LbSync.switchMode(lb,{action:'close_admission',target:'cloudflare'},ports,T0)).closed,true);
+ assert.equal((await fenced()).reason,'letterboxd_switch_in_progress');
+ assert.equal((await LbSync.switchMode(lb,{action:'complete'},ports,T0)).completed,true);
+ assert.equal((await fenced()).reason,'letterboxd_sync_active');
+ // the reverse: close the running writer, complete to external. The rollback operator then runs, and the legacy entry is still fenced.
+ assert.equal((await LbSync.switchMode(lb,{action:'close_admission',target:'external'},ports,T0)).closed,true);
+ await stop(run(env,'hold-rollback',{generation:2,...CURRENT,version:1,revision:Number(pointer(env.file).revision)}),'letterboxd_not_closed');
+ assert.equal((await LbSync.switchMode(lb,{action:'complete'},ports,T0)).completed,true,'completing toward external needs no Watchlist state');
+ assert.equal((await fenced()).reason,'watchlist_rollback_pending','external, but the Watchlist is still the d1 authority: the legacy entry stays fenced');
+ const ptr=pointer(env.file);const snap={count:30,sha256:ptr.list_sha256,snapshotId:ptr.snapshot_id,version:Number(ptr.version),revision:Number(ptr.revision)};
+ await run(env,'hold-rollback',{generation:2,...snap});assert.deepEqual(marker(env.file),{mode:'d1',writes:'held',generation:3});assert.equal((await fenced()).reason,'watchlist_rollback_pending');
+ const exported=await run(env,'export-rollback',{generation:3,...snap,run:RUN,epgGeneration:515});
+ const epgGeneration=exported.published?.generation??515;
+ await run(env,'revert-authority',{generation:3,...snap,run:RUN,epgGeneration});assert.deepEqual(marker(env.file),{mode:'epg',writes:'held',generation:4});assert.equal((await fenced()).reason,'watchlist_rollback_pending');
+ await run(env,'release-rolled-back',{generation:4});assert.deepEqual(marker(env.file),{mode:'epg',writes:'open',generation:4});
+ assert.equal((await fenced()).fenced,false,'only at epg/open does the legacy entry open again: exactly one writer');
+ // the admission read is ONE statement and returns the pin only for an admitted state
+ const admitted=await LbSync.legacyAdmission(lb);assert.deepEqual([admitted.fenced,admitted.watchlistGuard,Number.isInteger(admitted.revision)],[false,true,true]);
 }
 console.log('watchlist cutover: ok');

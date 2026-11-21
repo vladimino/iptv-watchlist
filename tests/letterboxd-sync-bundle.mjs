@@ -49,7 +49,7 @@ const G=name=>run(name);
 // 1. The bundle has the ports and the control plane; the Watchlist phase and the three effect writers are the real ones.
 assert.equal(typeof G('letterboxdPorts'),'function');
 const ports=G('letterboxdPorts')(env);
-assert.deepEqual(Object.keys(ports).sort(),['effects','handover','handoverGuards','legacyEntrySafe','ratings','reconcile','watchlist'],'every phase has a real adapter, the handover proof is read from live state and pinned at the commit, and the causal effects are read');
+assert.deepEqual(Object.keys(ports).sort(),['effects','handover','handoverGuards','ratings','reconcile','watchlist'],'every phase has a real adapter, the handover proof is read from live state and pinned at the commit, and the causal effects are read');
 assert.equal(typeof ports.watchlist.run,'function');
 const LetterboxdSync=G('LetterboxdSync');
 // Supported ratings storage (version 2 queue and a merge-form Diary cursor), seeded into the D1-owned ratings documents exactly as a migrated production store holds them.
@@ -86,7 +86,7 @@ const step={async do(name,fn){return fn();},async sleepUntil(){}};
   {
    db.sql('DELETE FROM letterboxd_sync_mode');
    const modeReads=[];let mutateAfterRead=null;
-   const watched=new Proxy(db,{get(target,key){if(key==='prepare')return sql=>{const prepared=target.prepare(sql);if(!/FROM letterboxd_sync_mode/.test(sql)||!/^\s*SELECT/i.test(sql))return prepared;modeReads.push(sql);return {bind:(...params)=>{const bound=prepared.bind(...params);return {...bound,async first(){const row=await bound.first();if(mutateAfterRead){const fn=mutateAfterRead;mutateAfterRead=null;fn();}return row;}};},async first(){const row=await prepared.first();if(mutateAfterRead){const fn=mutateAfterRead;mutateAfterRead=null;fn();}return row;}};};const value=target[key];return typeof value==='function'?value.bind(target):value;}});
+   const watched=new Proxy(db,{get(target,key){if(key==='prepare')return sql=>{const prepared=target.prepare(sql);if(!/letterboxd_sync_mode/.test(sql)||!/^\s*SELECT/i.test(sql))return prepared;modeReads.push(sql);return {bind:(...params)=>{const bound=prepared.bind(...params);return {...bound,async first(){const row=await bound.first();if(mutateAfterRead){const fn=mutateAfterRead;mutateAfterRead=null;fn();}return row;}};},async first(){const row=await prepared.first();if(mutateAfterRead){const fn=mutateAfterRead;mutateAfterRead=null;fn();}return row;}};};const value=target[key];return typeof value==='function'?value.bind(target):value;}});
    const watchedEnv={...env,DB:watched};context.__watched=watchedEnv;
    for(const action of ['start','step']){
     modeReads.length=0;

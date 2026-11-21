@@ -208,7 +208,7 @@ function epochFence(env){
  if(fence.letterboxdRevision!==undefined){
   if(!Number.isInteger(fence.letterboxdRevision))throw failed('ratings_domain_fence');
   // Both the revision AND the mode: the row is still the `external` one that was read (an absent row only for the initial default, revision 0).
-  statements.push(["UPDATE ratings_domain_cas SET ok=CASE WHEN COALESCE((SELECT revision FROM letterboxd_sync_mode WHERE id=1),0)=? AND (NOT EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id=1) OR (SELECT mode FROM letterboxd_sync_mode WHERE id=1)='external') THEN 1 ELSE 0 END WHERE id=1",[fence.letterboxdRevision]]);
+  statements.push(["UPDATE ratings_domain_cas SET ok=CASE WHEN COALESCE((SELECT revision FROM letterboxd_sync_mode WHERE id=1),0)=? AND (NOT EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id=1) OR (SELECT mode FROM letterboxd_sync_mode WHERE id=1)='external')"+(fence.watchlistGuard===true?" AND (COALESCE((SELECT epoch FROM letterboxd_sync_mode WHERE id=1),0)=0 OR (SELECT COUNT(*) FROM watchlist_authority WHERE id=1 AND mode='epg' AND writes='open')=1)":"")+" THEN 1 ELSE 0 END WHERE id=1",[fence.letterboxdRevision]]);
  }
  return statements;
 }
