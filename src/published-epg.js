@@ -30,6 +30,12 @@ function epgFenceStatements(fence){
  if(!(fence.revision===null||(Number.isInteger(fence.revision)&&fence.revision>=1)))throw failed('published_epg_fence');
  return [["UPDATE published_epg_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM epg_orchestration_document WHERE key='mode' AND (? IS NULL OR revision=?))=? THEN 1 ELSE 0 END WHERE id=1",[fence.revision,fence.revision,fence.revision===null?0:1]]];
 }
+// The optional commit guard of a replace: an array of [sql, params] (at most 8 statements, at most 100 bound values each). Anything else is a fence failure, never silently ignored.
+function commitGuards(guards){
+ if(guards==null)return [];
+ if(!Array.isArray(guards)||guards.length>8||!guards.every(item=>Array.isArray(item)&&typeof item[0]==='string'&&Array.isArray(item[1])&&item[1].length<=100))throw failed('published_epg_fence');
+ return guards;
+}
 const RESERVED_STATEMENTS=3;
 const TABLES=['published_epg_authority','published_epg_cas','published_epg_generation','published_epg_document','published_epg_member','published_epg_show','published_epg_stage','published_epg_stage_chunk','published_epg_stage_row'];
 
@@ -444,8 +450,11 @@ async function commitReplace(db,stage,claim,authority,kind,now,ttl){
    ['DELETE FROM published_epg_member WHERE programme_run_id=? AND kind=\'programme\'',[stage.target]],
    ['DELETE FROM published_epg_show WHERE programme_run_id=?',[stage.target]],
   ];
+// A caller-supplied commit guard (AIR-571 rollback export): extra statements that abort the WHOLE commit batch when their own fence row says so (each is an upsert of a CHECK (ok = 1) fence row),
+ // asserted in the same transaction as the replacement. Absent for every other caller, whose batch is byte for byte what it was.
  await fenced(db,[
   ...epgFenceStatements(stage.epgFence),
+  ...commitGuards(stage.guards),
   claimStillHeld(stage,claim,now,ttl),
   [FENCE_SQL,[]],
   ['UPDATE published_epg_authority SET generation=generation+1, watchlist_generation=CASE WHEN ?=\'watchlist\' THEN watchlist_generation+1 ELSE watchlist_generation END WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND programme_run_id=?',[kind,generation,stage.target]],
@@ -479,7 +488,7 @@ async function stageCommit(db,spec,options){
   await validate(db,{...stage,owner},claim,now,ttl);
   if(typeof options.afterValidate==='function')await options.afterValidate({db,stage:{...stage,owner},claim,now});
   try{
-   if(spec.replace)await commitReplace(db,{...stage,owner,epgFence:options.epgFence??null},claim,authority,spec.replace,now,ttl);
+   if(spec.replace)await commitReplace(db,{...stage,owner,epgFence:options.epgFence??null,guards:options.guards??null},claim,authority,spec.replace,now,ttl);
    else await commitPublish(db,{...stage,owner,epgFence:options.epgFence??null},claim,authority,spec.expected,now,ttl);
   }catch(error){
    if(error?.code==='published_epg_fence'){

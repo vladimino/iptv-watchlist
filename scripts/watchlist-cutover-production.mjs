@@ -23,7 +23,7 @@ import {readState as readBase,verifyImported} from './watchlist-bootstrap-produc
 import {LEASE_MARGIN_MS,livenessOf,membershipDigest} from '../src/watchlist-bootstrap.js';
 import {listDigest,normalizeFilms} from '../src/watchlist-d1.js';
 import * as PublishedEpg from '../src/published-epg.js';
-import {TRANSITIONS,transitionStatements} from '../src/watchlist-cutover.js';
+import {exportGuards,TRANSITIONS,transitionStatements} from '../src/watchlist-cutover.js';
 
 export const COMMANDS=['status',...Object.keys(TRANSITIONS),'export-rollback'];
 const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--expect-run':'run','--expect-epg-generation':'epgGeneration','--expect-count':'count','--expect-members-sha256':'membersSha256','--expect-sha256':'sha256','--expect-snapshot-id':'snapshotId','--expect-version':'version','--expect-revision':'revision'};
@@ -67,6 +67,15 @@ export async function verifyCurrent(binding,state){
  return {ok:true,runId:snap.run_id,membersSha256:await membershipDigest(stored)};
 }
 
+// The causal effects of the current snapshot (facts, retention, removal queue) are all done before the writer is closed: once the mode is `external` and the authority is `epg`, nothing could drain them.
+// Mirror delivery, Events and pending identity admission are NOT part of this check. -> null | {drainedVersion,version,pending}
+export async function effectsPending(binding,state){
+ const p=state.pointer;
+ const pending=Number((await one(binding,"SELECT COUNT(*) AS n FROM watchlist_effect WHERE status<>'done'"))?.n);
+ if(Number(p.effects_drained_version)===Number(p.version)&&pending===0)return null;
+ return {drainedVersion:Number(p.effects_drained_version),version:Number(p.version),pending};
+}
+
 const view=state=>({schemaVersion:state.schemaVersion,marker:markerOf(state),pointer:pointerOf(state),counts:state.counts,published:state.published?{programmeRunId:state.published.programme_run_id,generation:Number(state.published.generation),certified:state.published.finalized_run_id===state.published.programme_run_id}:null,checkpoint:state.checkpoint?{mode:state.checkpoint.mode,writes:state.checkpoint.writes}:null,letterboxd:{rows:state.letterboxd?.rows?.length??0,closed:letterboxdFact(state)?.closed??null},liveness:state.orchestration?livenessOf({control:state.orchestration.control,lease:state.orchestration.lease},0).ok?'valid':'unknown':null});
 
 
@@ -82,6 +91,8 @@ export async function exportRollback(binding,state,args,clock,ctx={}){
  const p=state.pointer;
  if(p.snapshot_id!==args.snapshotId||p.list_sha256!==args.sha256||Number(p.film_count)!==args.count)throw new OperatorStop('pin_mismatch',3,{problems:['snapshot']});
  if(Number(p.version)!==args.version||Number(p.revision)!==args.revision)throw new OperatorStop('pin_mismatch',3,{problems:['pointer']});
+ const undrained=await effectsPending(binding,state);
+ if(undrained)throw new OperatorStop('effects_pending',3,undrained);
  const lb=letterboxdFact(state);
  if(!lb||!lb.closed)throw new OperatorStop('letterboxd_not_closed',3);
  const live=livenessOf({control:state.orchestration.control,lease:state.orchestration.lease},clock);
@@ -100,20 +111,33 @@ export async function exportRollback(binding,state,args,clock,ctx={}){
  const films=members.map(row=>{const film={...(byId.get(row.lid)||{}),id:row.lid,title:row.title,url:row.url};if(row.year===null)delete film.year;else film.year=Number(row.year);return film;});
  const document={...stored,films};
  if(await listDigest(normalizeFilms(films))!==p.list_sha256)throw new OperatorStop('export_digest',3);
+ // The commit guard travels INTO the staged writer: it is asserted in the same transaction as the replacement (marker d1/held at G, the pinned pointer with its effects done, the Letterboxd
+ // mode and its revision, the liveness proof, the certified pinned publication), so a change during the multi-batch staging aborts the replacement. The binding is wrapped to count the batches
+ // the writer actually sends: a staged commit writes its claim, chunks and validation before the final replacement.
+ const guards=exportGuards({generation:args.generation,facts:{snapshot:{snapshotId:p.snapshot_id,sha256:p.list_sha256,count:Number(p.film_count),revision:Number(p.revision),version:Number(p.version)},published:{programmeRunId:args.run,epgGeneration:args.epgGeneration},letterboxd:{revision:lb.revision},liveness:{controlRevision:state.orchestration.control?.revision??-1,leaseRevision:state.orchestration.lease?.revision??-1,liveAfterIso:iso(clock-LEASE_MARGIN_MS)}}});
+ const sent={started:0,completed:0,rejected:false};
+ // The writer wraps a batch error in its own error type; the proven rejection (a statement error of the D1 API) is read here, from the original error.
+ const tracked={prepare:sql=>binding.prepare(sql),batch:async statements=>{sent.started++;let result;try{result=await binding.batch(statements);}catch(error){sent.rejected=error instanceof D1Error&&error.kind==='statement';throw error;}sent.completed++;return result;}};
  if(ctx.track)ctx.track('unknown');
  let outcome,failure=null;
- try{outcome=await PublishedEpg.saveWatchlist(binding,document,{expectedGeneration:args.epgGeneration,owner:ctx.owner});}catch(error){failure=error;}
+ try{outcome=await PublishedEpg.saveWatchlist(tracked,document,{expectedGeneration:args.epgGeneration,owner:ctx.owner,guards});}catch(error){failure=error;}
  let after=null;
  try{after=await readState(binding);}catch{after=null;}
  const moved=Boolean(after?.published)&&after.published.programme_run_id===args.run&&Number(after.published.generation)===args.epgGeneration+1;
  const unchanged=Boolean(after?.published)&&after.published.programme_run_id===args.run&&Number(after.published.generation)===args.epgGeneration;
+ // The generation moving by one is OUR replacement only if the stored list is the snapshot; another writer's commit also moves it.
+ const ours=moved&&Boolean(after?.source)&&await listDigest(normalizeFilms(after.source.films)||[])===p.list_sha256;
  if(failure||outcome!==true){
-  // `false` is a lost compare-and-swap (the generation moved or the claim was lost): nothing was committed. An exception is unproven unless the readback shows an untouched generation AND the error is a proven rejection.
-  const rejected=failure instanceof D1Error&&failure.kind==='statement';
-  const notApplied=!failure&&outcome===false&&unchanged;
-  const provenRejected=rejected&&unchanged;
-  if(ctx.track)ctx.track(notApplied||provenRejected?'none':'unknown');
-  throw new OperatorStop(notApplied||provenRejected?'export_refused':'write_uncertain',3,{published:after?.published?{programmeRunId:after.published.programme_run_id,generation:Number(after.published.generation)}:null,...(moved?{reachedByUnknownOutcome:true}:{})});
+  // Two different facts. (1) Was the AUTHORITATIVE list replaced? The generation says: unchanged means no. (2) Were any database writes made? A staged commit writes its claim, chunks and validation in earlier
+  // batches, and a cleanup can fail, so an unchanged generation does NOT prove writeState none. `none` only when no batch completed and the failure is a proven rejection (or no batch was sent at all).
+  const rejected=sent.rejected||(failure instanceof D1Error&&failure.kind==='statement');
+  const noWrites=sent.completed===0&&(sent.started===0||rejected);
+  let stage=null;
+  try{stage=(await many(binding,"SELECT programme_run_id AS id, state FROM published_epg_stage WHERE programme_run_id LIKE ?",[args.run+'#watchlist#%'])).map(row=>({id:row.id,state:row.state}));}catch{stage=null;}
+  const authoritative=unchanged?'unchanged':ours?'replaced':moved?'moved_by_another_writer':'unknown';
+  if(ctx.track)ctx.track(noWrites&&unchanged?'none':'unknown');
+  const reason=unchanged&&(outcome===false||(rejected&&sent.completed>=0))?'export_refused':'write_uncertain';
+  throw new OperatorStop(reason,3,{authoritative,batches:{started:sent.started,completed:sent.completed},stage,published:after?.published?{programmeRunId:after.published.programme_run_id,generation:Number(after.published.generation)}:null,...(ours?{reachedByUnknownOutcome:true}:{})});
  }
  if(!after||!moved)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch'});
  // Readback: the stored list equals the snapshot (digest, membership and order), the programme document and everything else did not move.
@@ -165,9 +189,26 @@ export async function execute(command,{binding,args={},now,ctx={}}){
     const proof=await verifyImported(binding,state,{run:args.run,count:args.count,membersSha256:args.membersSha256,sha256:args.sha256},{requireSource:false});
     if(!proof.ok)throw new OperatorStop(proof.reason,3,{problems:proof.problems});
    }
-  }else if(Number(p.version)!==args.version||Number(p.revision)!==args.revision)throw new OperatorStop('pin_mismatch',3,{problems:['pointer']});
+  }else{
+   if(Number(p.version)!==args.version||Number(p.revision)!==args.revision)throw new OperatorStop('pin_mismatch',3,{problems:['pointer']});
+   const undrained=await effectsPending(binding,state);
+   if(undrained)throw new OperatorStop('effects_pending',3,undrained);
+  }
  }
- if(spec.needs.includes('exportParity'))facts.parity={programmeRunId:args.run,epgGeneration:args.epgGeneration};
+ if(spec.needs.includes('exportParity')){
+  // The proof is read here and bound inside the batch: a certified run at the pinned generation, the stored list equal to the snapshot (normalized digest, title, year and url included, and the member
+  // order), and the stored payload digest of the generation, which any later replacement changes.
+  const pub=state.published;
+  if(!pub||pub.mode!=='d1'||pub.cutover!=='open'||pub.programme_run_id!==args.run||Number(pub.generation)!==args.epgGeneration)throw new OperatorStop('published_moved',3,{published:pub?{programmeRunId:pub.programme_run_id,generation:Number(pub.generation)}:null});
+  if(pub.finalized_run_id!==pub.programme_run_id)throw new OperatorStop('published_not_certified',3);
+  const document=state.source;
+  const rows=await many(binding,'SELECT lid FROM watchlist_member WHERE snapshot_id=? ORDER BY ordinal',[args.snapshotId]);
+  const normalized=document&&Array.isArray(document.films)?normalizeFilms(document.films):null;
+  if(!normalized||await listDigest(normalized)!==p.list_sha256||JSON.stringify(state.sourceMembers)!==JSON.stringify(rows.map(row=>row.lid)))throw new OperatorStop('parity_mismatch',3,{problems:['document_digest']});
+  const generation=await one(binding,'SELECT payload_sha256 FROM published_epg_generation WHERE programme_run_id=?',[args.run]);
+  if(!generation||!/^[0-9a-f]{64}$/.test(generation.payload_sha256||''))throw new OperatorStop('published_moved',3);
+  facts.parity={programmeRunId:args.run,epgGeneration:args.epgGeneration,payloadSha256:generation.payload_sha256};
+ }
  if(spec.needs.includes('checkpoint')){
   const c=state.checkpoint;
   if(!c||c.writes!=='open'||!['r2','d1'].includes(c.mode))throw new OperatorStop('checkpoint_not_settled',3,{checkpoint:c?{mode:c.mode,writes:c.writes}:null});
