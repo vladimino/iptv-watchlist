@@ -263,3 +263,7 @@ The reader's `*.lifecycle.json` sidecars are **computed views**, not permission 
 - Owner admin search, quality queues, and a later live read API use the contract in [admin read boundaries](admin-read-contract.md). That page does not add a route or change this domain.
 - **Do not rewrite historical evidence.** Material new architecture choices need future ADRs; current reference and historical audit have different jobs.
 
+
+## Proposed contract: admission of a new Letterboxd watchlist id ([ADR 0186](../../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Proposed, not implemented)
+
+A new Letterboxd id in a committed Watchlist snapshot is either **admitted** with a verified TMDB identity through the canonical Film writers (compare-and-swap, receipts) or kept **unresolved** with a reason and a retry time. Resolution uses the bounded same-run check (film page and TMDB movie agree; at most three ids per step) and never guesses from a title or year. Concurrent writers of one Film produce one Film and idempotent receipts. A watched or rated fact may explain a removal and is never the proven cause. A Film joins the visible watchlist with its showings before the next EPG scan only with a trusted identity and a stored confirmed show row in the current generation.
