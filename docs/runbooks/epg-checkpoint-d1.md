@@ -1,6 +1,6 @@
 # EPG checkpoint in D1: states, checks and recovery (dormant)
 
-Status: **dormant.** [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md) (Accepted) puts the EPG run checkpoint `sync.json` and the ingest status `watchlist-ingest.json` behind `epg_checkpoint_authority`. The migration file and the code are in the repository; nothing here applies the schema, imports an object or switches the marker. Every operation that changes the state of production (apply `0030`, hold, import, activation, rollback export, retirement of the R2 arm) is a separate owner-approved step with its own plan; no tool for them exists yet. This page is what an operator needs to read the state and to recover **without** making anything worse. The schema is in the [D1 schema reference](../reference/data/d1-schema.md#epg-checkpoint-authority-schema-v30-dormant-not-applied), the write contract in the [orchestration reference](../reference/orchestration-reliability.md).
+Status: **dormant.** [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md) (Accepted) puts the EPG run checkpoint `sync.json` and the ingest status `watchlist-ingest.json` behind `epg_checkpoint_authority`. The migration file and the code are in the repository; nothing here applies the schema, imports an object or switches the marker. Every operation that changes the state of production (apply `0030`, hold, import, activation, rollback export, retirement of the R2 arm) is a separate owner-approved step with its own plan. The [operator script](#operator-script) implements each one as a named command; having the script is not an approval to run it. This page is what an operator needs to read the state and to recover **without** making anything worse. The schema is in the [D1 schema reference](../reference/data/d1-schema.md#epg-checkpoint-authority-schema-v30-dormant-not-applied), the write contract in the [orchestration reference](../reference/orchestration-reliability.md).
 
 ## What the Worker does in each state
 
@@ -43,3 +43,22 @@ An unknown outcome is classified from the write receipt: a receipt for the write
 - **Code rollback reverts no row, marker or schedule.** After an activation, a Worker version that does not know the tables would read the frozen R2 objects; going back to such a version is allowed only after the data rollback below.
 - **Data rollback** (planned by the ADR, to be written into the cutover plan and approved by the owner before any use): hold writes, export the current run and the ingest status to the R2 objects with a conditional write against the frozen object's ETag, read back byte and digest parity, set the marker to `r2` with the next generation, release. There is no silent lease reset or force release on any path.
 - **Completion and certificate.** In `d1` mode a run reaches `complete` only through one batch that also certifies it and clears the EPG-priority pause; a certificate that did not match leaves the run complete and `certificate: owed`, repaired by the hourly `certifyComplete` (see the [monitoring runbook](monitoring.md) for the debt). The old order (complete in R2, then certificate) applies only while the marker is `r2`.
+
+## Operator script
+
+`scripts/epg-checkpoint-production.mjs` is the only supported tool for the state changes below. It is read-only (`status`) unless a command flag, `--target iptv` and `--confirm <the command name>` are all given. It needs the D1 operator credentials of the other production scripts and, for R2, the read-only snapshot credentials (and the install credentials for `export-rollback` only). It prints sizes, ETags and SHA-256 digests, never a payload, and it **never retries**: after an unknown outcome it reads the marker (or the R2 objects) and reports. It never deletes a D1 row, never touches the lease or control documents, never starts or restarts a Workflow and never starts an EPG run.
+
+| Command | Marker transition | Refuses unless |
+| --- | --- | --- |
+| `--apply` | none (schema 29 to 30, marker `r2/open/0`) | schema is exactly 29, tables absent, drain proof |
+| `--hold` | `r2/open/G` to `r2/held/G+1` | expected generation, drain proof (lease released or expired, orchestration `phase=done`, run `complete`, pause `clear`, certificate matching, next start at least 30 min away) |
+| `--release-abort` | `r2/held/G` to `r2/open/G` | the checkpoint tables hold no rows |
+| `--import` | none | `r2/held/G`, empty tables, the R2 identity (ETag, SHA-256) equal to the one passed in, a complete run without watchlist |
+| `--activate` | `r2/held/G` to `d1/held/G+1` | import parity read back against the R2 objects (every typed column, the body, the receipt, the ingest row) |
+| `--release` | `d1/held/G` to `d1/open/G` | the D1 run loads and verifies |
+| `--hold-rollback` | `d1/open/G` to `d1/held/G+1` | drain proof on the D1 run (idle `complete` boundary with a matching certificate); never mid-run |
+| `--export-rollback` | none | `d1/held/G`; each R2 object is written with a conditional PUT on its frozen ETag, then read back; an object already equal is skipped; any other ETag is a foreign writer and stops |
+| `--revert-authority` | `d1/held/G` to `r2/held/G+1` | both R2 objects read back byte-equal to the documents derived from the D1 rows; the D1 rows stay as inactive recovery evidence |
+| `--release-rolled-back` | `r2/held/G` to `r2/open/G` | the marker only (retained D1 rows are accepted) |
+
+Each transition is one batch: a guard that aborts the batch when the full expected state does not hold, the update, and a fence on the number of changed rows. After a hold, wait longer than the two-second marker cache before capturing the R2 identity. A mid-run incident has no command here; see the plan evidence for the accepted limitation.

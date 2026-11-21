@@ -145,7 +145,7 @@ function parseArgs(argv){
  return {command, confirm};
 }
 
-function productionTarget(env){
+export function productionTarget(env){
  const accountId=String(env.D1_BACKFILL_ACCOUNT_ID||'').trim();
  const apiToken=String(env.D1_BACKFILL_API_TOKEN||'').trim();
  const configuredId=String(env.D1_BACKFILL_DATABASE_ID||'').trim();
@@ -166,7 +166,7 @@ function productionEndpoint(env){
  return endpoint;
 }
 
-function normalize(error){
+export function normalize(error){
  if(error instanceof OperatorStop)return error;
  let current=error;
  for(let depth=0;depth<6&&current;depth++){
@@ -190,7 +190,7 @@ function normalize(error){
  return new OperatorStop('failed',1);
 }
 
-async function readBookmark(target, fetchImpl){
+export async function readBookmark(target, fetchImpl){
  const url=target.endpoint+'/accounts/'+target.accountId+'/d1/database/'+PRODUCTION_DATABASE_ID+'/time_travel/bookmark';
  let response;
  try{response=await fetchImpl(url,{method:'GET',headers:{Authorization:'Bearer '+target.apiToken},redirect:'error'});}
@@ -284,7 +284,7 @@ function assertIdle(writers){
  if(writers.sync==='active'||writers.resolver==='active'||writers.projection==='active')throw new OperatorStop('writer_active',3,{writers});
 }
 
-function trackProductionWrites(adapter, ctx){
+export function trackProductionWrites(adapter, ctx){
  async function attempt(run){
   ctx.writeState='unknown';
   await run();
