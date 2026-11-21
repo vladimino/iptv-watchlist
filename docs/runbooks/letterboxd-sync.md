@@ -26,3 +26,5 @@ Close admission with target `external` and complete: the epoch moves, a stale in
 ## Do not
 
 Do not delete or edit a slot or outbox row to "retry" it; do not start a slot manually; do not set the Ratings mode to `external` and call that a fence. A pending Event is delivered by `ensure` and by the next run.
+
+The dated read-only preflight, the gap analysis and the proposed holdpoints of the production cutover are in the [cutover GO/no-GO package](../evidence/d1-migration/air-571-go-no-go-package-2026-11-21.md). It authorizes nothing: every holdpoint needs its own owner GO.
