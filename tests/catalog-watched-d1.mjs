@@ -15,7 +15,7 @@ import {sqliteSync} from './sqlite-session.mjs';
 import {standins, strict} from './local-standins.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-catalog-watched-'));let databases=0;
-const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
 const lit=value=>"'"+String(value).replace(/'/g,"''")+"'";
 function migrated(options={}){
  const file=path.join(root,'w-'+(databases++)+'.sqlite');

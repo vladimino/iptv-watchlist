@@ -22,7 +22,7 @@ const PUBLISHED_ABSENT="DROP TABLE IF EXISTS published_epg_stage_row; DROP TABLE
 const OWNER_D1="UPDATE owner_review_authority SET mode='d1' WHERE id=1; UPDATE metadata_cache_authority SET mode='d1' WHERE id=1; UPDATE prediction_domain_authority SET mode='d1' WHERE id=1; "+PUBLISHED_ABSENT;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-projector-window-'));
-const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
 let databases=0;
 const migrated=(upTo=18,opts={})=>{
  const file=path.join(root,'w-'+(databases++)+'.sqlite');

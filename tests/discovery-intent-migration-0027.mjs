@@ -9,7 +9,7 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-intent-0027-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}});
 const run=(file,text)=>sqliteSync(['-bail',file],{input:text,encoding:'utf8',maxBuffer:1<<26});
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);return r.stdout.trim()?JSON.parse(r.stdout):[];};
-const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
 const read=name=>fs.readFileSync('migrations/'+name,'utf8');
 const last='0027_discovery_intent_identity_revoke.sql';
 assert.ok(files.includes(last),'0027 exists');

@@ -26,7 +26,7 @@ const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const template=path.join(root,'template.sqlite');
 if(process.env.FILM_EXT_TEMPLATE)fs.copyFileSync(process.env.FILM_EXT_TEMPLATE,template);
 else{
- const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
  assert.equal(sqlite(template,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
 }
 const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";

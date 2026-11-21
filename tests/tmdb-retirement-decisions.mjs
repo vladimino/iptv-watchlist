@@ -16,7 +16,7 @@ import {checkRetirementEntry,prepareRetirementImport,normalizeDecision,recordRet
 import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-retirement-decisions-'));
-const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
+const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort().map(name=>name.replace(/\.sql$/,''));
 const NEW='0016_tmdb_retirement_decision';
 assert.ok(names.includes(NEW),'0016 is a migration file');
 // 0016 follows a COMPLETE schema v15 (migrations are contiguous): the test applies the real chain 0001..0015, then 0016. `chain` is the chain

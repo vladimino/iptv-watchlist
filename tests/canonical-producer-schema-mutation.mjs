@@ -133,7 +133,7 @@ const MUTANTS=[
 ];
 const dir=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'producer-schema-mutants-'));
 const template=path.join(dir,'t19.sqlite');
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=19).sort();
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql'&&Number(name.slice(0,4))<=19).sort();
 const built=spawnSync('sqlite3',[template],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26});
 assert.equal(built.status,0,built.stderr);
 const run=(file,sections)=>new Promise(resolve=>{

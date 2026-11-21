@@ -34,7 +34,7 @@ context.DiscoveryAuthority=Authority;
 vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),context);
 const call=code=>vm.runInContext(code,context);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-seal-profile-'));
-const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
 
 let heldBytes=()=>0;
 const phases=new Map();let current='setup';

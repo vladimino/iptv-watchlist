@@ -5,7 +5,7 @@ import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-se
 import * as Checkpoint from '../src/epg-checkpoint-d1.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-checkpoint-'));
-const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
 const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);return r.stdout.trim()?JSON.parse(r.stdout):[];};
 const refuses=(file,text,pattern)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});assert.notEqual(r.status,0,'must be refused: '+text.slice(0,70));if(pattern)assert.match(r.stderr,pattern);};

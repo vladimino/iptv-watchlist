@@ -106,7 +106,7 @@ const showsOf=i=>[0,1,2].map(j=>({channelId:'ch'+((i+j)%150),channel:'Канал
 async function prepare(dir,opts){
  fs.rmSync(dir,{recursive:true,force:true});fs.mkdirSync(dir,{recursive:true});
  const file=path.join(dir,'d1.sqlite');
- const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
  const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+migrations.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
  if(r.status!==0)throw new Error(r.stderr);
  sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");

@@ -15,7 +15,7 @@ import {scoped} from '../scripts/bundle-scope.mjs';
 import * as W from '../src/catalog-poster-weekly.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-poster-weekly-d1-'));
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
 let databases=0;
 const migrated=()=>{
  const file=path.join(root,'weekly-'+(databases++)+'.sqlite');

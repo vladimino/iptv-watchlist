@@ -25,7 +25,7 @@ import {sqliteSync} from '../tests/sqlite-session.mjs';
 
 const SELF=fileURLToPath(import.meta.url),REPO=path.resolve(path.dirname(SELF),'..');
 const MIB=1024*1024;
-const CHAIN=fs.readdirSync(path.join(REPO,'migrations')).filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const CHAIN=fs.readdirSync(path.join(REPO,'migrations')).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
 const RUN=n=>'00000000-0000-4000-8000-'+String(n).padStart(12,'0');
 const POINTER='epg/discovery-archive/v1/current.json',GENERATION_POINTER='epg/published-generation.json';
 

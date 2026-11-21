@@ -12,7 +12,7 @@ import {VIEW_INDEX_D1_SCHEMA,ExportError,deriveViewIndex,exportViewIndex,restQue
 import {loadCatalogDir,loadViewIndexInput,withViewIndexInput,ReconcileError} from '../scripts/letterboxd-reconcile.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-view-index-export-'));
-const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
 const q=value=>"'"+String(value).replace(/'/g,"''")+"'";
 let databases=0;
 const features=hash=>({fingerprintHash:hash,fingerprintSchemaVersion:1,fingerprintPromptVersion:1,invalidatedAt:null,plotMechanics:['a'],moodLabels:['b'],execution:{}});

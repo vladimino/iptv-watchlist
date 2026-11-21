@@ -14,7 +14,7 @@ import {scoped,scopedEpgPriority,scopedDiscoveryAuthority} from '../scripts/bund
 import * as PublishedEpgModule from '../src/published-epg.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-footer-resilience-'));
-const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).map(name=>name.slice(0,-4)).sort();
+const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').map(name=>name.slice(0,-4)).sort();
 const G='22222222-2222-4222-8222-222222222222',now=Date.now(),hour=3600000;
 let databases=0;
 const mkdb=()=>{

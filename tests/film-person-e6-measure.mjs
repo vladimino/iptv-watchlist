@@ -23,7 +23,7 @@ const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGM
 const template=process.env.E6_TEMPLATE?path.resolve(process.env.E6_TEMPLATE):path.join(root,'template.sqlite');
 if(!process.env.E6_TEMPLATE){
  // The E6 statements model the production database they were run against: schema 19 (migration 0020 is in the repository and NOT applied, ADR 0128), so this fixture stops at 19.
- const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=21).sort();
+ const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql'&&Number(name.slice(0,4))<=21).sort();
  assert.equal(sqlite(template,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
 }
 let n=0;

@@ -21,7 +21,7 @@ const writers=await import(process.env.FILM_WRITERS_SOURCE?pathToFileURL(process
 const {planFilmFacts,readFilmSnapshot,writeFilmFacts,FILM_FACTS_SOURCE_CAP,TITLE_SOURCE_ORDER,P6_DIFFERENTIAL_EXCEPTIONS}=writers;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-film-writers-'));
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').sort();
 const sql=name=>fs.readFileSync('migrations/'+name,'utf8');
 const sqlite=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
 const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};

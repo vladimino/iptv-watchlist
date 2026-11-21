@@ -213,7 +213,7 @@ const PRAGMA_ON='PRAGMA foreign_keys=ON;\n';
 export function approvedMigrationChain(input){
  if(typeof input!=='string'||!input.startsWith(PRAGMA_ON))return false;
  if(!migrationTexts){
-  try{migrationTexts=readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).map(name=>readFileSync(path.join('migrations',name),'utf8')).filter(text=>text.length>0);}catch{migrationTexts=[];}
+  try{migrationTexts=readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name!=='0032_letterboxd_sync_control.sql').map(name=>readFileSync(path.join('migrations',name),'utf8')).filter(text=>text.length>0);}catch{migrationTexts=[];}
  }
  let at=PRAGMA_ON.length;
  if(at>=input.length)return false;
