@@ -100,13 +100,40 @@ const bounded = (value, depth = 0) => {
   if (typeof value === 'object') return Object.fromEntries(Object.entries(value).slice(0, 30).map(([k, v]) => [k.slice(0, 60), bounded(v, depth + 1)]));
   return null;
 };
+// A film of the `watchlist` Event keeps the identity contract of the existing Events Log (`id`, `title`, `year`, optional trusted `tmdb`, and for a removed film its stored confirmed rating); anything else is dropped.
+const FILM_CAP = 100;
+const eventFilmOf = film => {
+  if (!film || typeof film !== 'object') return null;
+  const id = String(film.id ?? '');
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(id)) return null;
+  const out = {id, title: String(film.title ?? '').slice(0, 200), year: Number.isInteger(film.year) ? film.year : null};
+  if (film.tmdb != null) out.tmdb = String(film.tmdb).slice(0, 20);
+  if (Number.isFinite(film.rating)) out.rating = film.rating;
+  if (typeof film.ratingObservedAt === 'string') out.ratingObservedAt = film.ratingObservedAt.slice(0, 40);
+  if (Array.isArray(film.explainedBy)) out.explainedBy = film.explainedBy.filter(item => item === 'watched' || item === 'rated');
+  return out;
+};
+const filmsOf = list => (Array.isArray(list) ? list : []).map(eventFilmOf).filter(Boolean).slice(0, FILM_CAP);
+// The `ratings` Event keeps its AIR-361 contract: the groups the pipeline built (state, cause, coverage, diary, removal, details) are frozen as they are, only bounded in size (the details go first).
+const RATINGS_CONTRACT = ['runId', 'trigger', 'state', 'cause', 'coverage', 'diary', 'removal', 'details'];
+const PAYLOAD_CHARS = 18000;
+function fitPayload(payload) {
+  if (JSON.stringify(payload).length <= PAYLOAD_CHARS) return payload;
+  const slim = {...payload, details: null, detailsDropped: true};
+  if (JSON.stringify(slim).length <= PAYLOAD_CHARS) return slim;
+  return {...slim, diary: null, removal: null, contractDropped: true};
+}
 export function slotEventPayloads(slot, {ratings, watchlist, closedAt}) {
   const at = closedAt;
   const ratingsAt = ratings?.at || at, watchlistAt = watchlist?.at || at;
   const rOutcome = ratings?.outcome || 'error', wOutcome = watchlist?.outcome || 'error';
+  const contract = {};
+  if (ratings?.event && typeof ratings.event === 'object') for (const key of RATINGS_CONTRACT) if (ratings.event[key] !== undefined) contract[key] = ratings.event[key];
+  const added = filmsOf(watchlist?.added), removed = filmsOf(watchlist?.removed);
+  const addedCount = watchlist?.addedCount ?? (watchlist?.added?.length ?? 0), removedCount = watchlist?.removedCount ?? (watchlist?.removed?.length ?? 0);
   return {
-    ratings: {at: ratingsAt, payload: {type: 'ratings', slot: slot.key, status: RATINGS_STATUS[rOutcome] || 'error', outcome: rOutcome, at: ratingsAt, runId: slot.runId ?? null, counts: bounded(ratings?.counts ?? null), reason: ratings?.reason ? String(ratings.reason).slice(0, 60) : null}},
-    watchlist: {at: watchlistAt, payload: {type: 'watchlist', slot: slot.key, status: WATCHLIST_STATUS[wOutcome] || 'error', outcome: wOutcome, at: watchlistAt, snapshotVersion: watchlist?.snapshotVersion ?? null, lastSuccessAt: watchlist?.lastSuccessAt ?? null, total: watchlist?.total ?? null, baseline: watchlist?.baseline === true, added: bounded(watchlist?.added ?? []), removed: bounded(watchlist?.removed ?? []), addedCount: watchlist?.addedCount ?? (watchlist?.added?.length ?? 0), removedCount: watchlist?.removedCount ?? (watchlist?.removed?.length ?? 0), reason: watchlist?.reason ? String(watchlist.reason).slice(0, 60) : null}}
+    ratings: {at: ratingsAt, payload: fitPayload({type: 'ratings', slot: slot.key, status: RATINGS_STATUS[rOutcome] || 'error', outcome: rOutcome, at: ratingsAt, ...contract, runId: contract.runId ?? slot.runId ?? null, counts: bounded(ratings?.counts ?? null), reason: ratings?.reason ? String(ratings.reason).slice(0, 60) : null})},
+    watchlist: {at: watchlistAt, payload: fitPayload({type: 'watchlist', slot: slot.key, status: WATCHLIST_STATUS[wOutcome] || 'error', outcome: wOutcome, at: watchlistAt, snapshotVersion: watchlist?.snapshotVersion ?? null, lastSuccessAt: watchlist?.lastSuccessAt ?? null, total: watchlist?.total ?? null, baseline: watchlist?.baseline === true, added, removed, addedCount, removedCount, reason: watchlist?.reason ? String(watchlist.reason).slice(0, 60) : null})}
   };
 }
 
@@ -407,12 +434,14 @@ export async function run(env, payload, step, hooks = {}) {
   await advance({phase: 'reconciliation', watchlist_outcome: watchlist.outcome, watchlist_at: watchlist.at});
   // Phase 3. Operational only: it never changes an Event outcome and never creates a third Event.
   const reconcile = await runPhase(env, ports.reconcile, ctx, 'reconcile', ['done', 'deferred', 'error', 'skipped'], step, nameOf);
+  // The AIR-361 contract is complete only when the run ended, which phase 3 does; either phase may hand it over.
+  const ratingsFinal = {...ratings, event: ratings.event || reconcile.event || null};
   const closed = await step.do(nameOf('close'), async () => {
     const adm = await admit(env, {slotKey: key, series, epoch});
     if (!adm.ok) return {closed: false, reason: adm.reason};
     if (adm.slot.closedAt) return {closed: true, again: true};
     const status = [ratings.outcome, watchlist.outcome].includes('interrupted') ? 'interrupted' : (ratings.outcome === 'error' && ['error', 'unavailable'].includes(watchlist.outcome)) ? 'error' : 'finished';
-    const result = await closeSlot(env, adm.slot, {status, ratings, watchlist, reconciliation: ['done', 'deferred', 'error', 'skipped'].includes(reconcile.outcome) ? reconcile.outcome : 'deferred', epoch, now: now()}).catch(error => ({closed: false, reason: classifyThrown(error)}));
+    const result = await closeSlot(env, adm.slot, {status, ratings: ratingsFinal, watchlist, reconciliation: ['done', 'deferred', 'error', 'skipped'].includes(reconcile.outcome) ? reconcile.outcome : 'deferred', epoch, now: now()}).catch(error => ({closed: false, reason: classifyThrown(error)}));
     return {closed: result.closed === true, status, reason: result.reason};
   });
   // Delivery follows the close but never gates it: a pending Event is delivered by this call, by a later run or by `ensure`.

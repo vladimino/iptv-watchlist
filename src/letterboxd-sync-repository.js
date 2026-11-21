@@ -45,8 +45,18 @@ export function watchlistRepository(WatchlistD1, {epochGuard, effectWriters = {}
       if (!result.ok) throw Object.assign(new Error(result.reason), {code: String(result.reason).slice(0, 60)});
       const current = await WatchlistD1.readCurrent(ctx.env, {now: ctx.now()});
       const snapshot = current.ok ? current.snapshot : null;
+      // The films of the diff keep their identity (`id`, `title`, `year`, `url`), from the scan list for the added ones and from the PREDECESSOR snapshot for the removed ones, so the Event never loses a title.
+      const filmOf = (film, lid) => ({id: String(film?.id ?? film?.lid ?? lid), title: film?.title ?? '', year: film?.year ?? null, url: film?.url ?? null});
+      const byLid = new Map(members.map(member => [String(member.id ?? member.lid), member]));
+      const addedFilms = (result.added || []).map(lid => filmOf(byLid.get(lid), lid));
+      let removedFilms = (result.removed || []).map(lid => filmOf(null, lid));
+      if (removedFilms.length && result.version > 1) {
+        const previousId = await WatchlistD1.snapshotIdOfVersion(ctx.env, result.version - 1);
+        const previous = previousId.ok ? await WatchlistD1.readSnapshot(ctx.env, previousId.snapshotId) : {ok: false};
+        if (previous.ok) { const prev = new Map(previous.snapshot.films.map(film => [film.lid, film])); removedFilms = removedFilms.map(film => filmOf(prev.get(film.id), film.id)); }
+      }
       return {outcome: result.outcome, version: result.version, lastSuccessAt: snapshot?.lastSuccessAt ?? null, total: members.length, baseline: result.version === 1 && (result.removed || []).length === 0 && result.outcome === 'committed' && (result.added || []).length === members.length,
-        added: (result.added || []).map(lid => ({lid})), removed: (result.removed || []).map(lid => ({lid}))};
+        added: addedFilms, removed: removedFilms};
     },
     async recordAttempt(ctx, {outcome, at, code}) {
       const g = guards(ctx);

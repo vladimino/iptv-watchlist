@@ -13,6 +13,8 @@ function outcomeOfError(run, now) {
   return {outcome: 'error', reason: 'network_error'};
 }
 const countsOf = run => ({diaryPages: run?.checkpoint?.diaryPagesRead ?? 0, removalChecked: run?.checkpoint?.removalChecked ?? 0});
+// The AIR-361 Event contract of a finished or failed run (state, cause, coverage, diary, removal, details), built by the pipeline itself so it cannot drift; null while the run is still going.
+const eventOf = (ratings, run) => { try { return typeof ratings.ratingsEventOf === 'function' ? ratings.ratingsEventOf(run, {slotOwned: true}) : null; } catch { return null; } };
 
 // `phase` is 'diary' (stop when the Diary part is done) or 'removal' (run to the end of the run).
 export function ratingsSlotPhase({ratings, fenceGuard, phase}) {
@@ -25,10 +27,10 @@ export function ratingsSlotPhase({ratings, fenceGuard, phase}) {
       let run = await ratings.readRun(env);
       const own = run && run.slotKey === ctx.slotKey ? run : null;
       if (phase === 'removal' && !own) return {done: true, outcome: 'skipped', at: at(), reason: 'no_slot_run'};
-      if (own?.state === 'finished') return {done: true, outcome: phase === 'diary' ? 'finished' : 'done', at: at(), counts: countsOf(own)};
+      if (own?.state === 'finished') return {done: true, outcome: phase === 'diary' ? 'finished' : 'done', at: at(), counts: countsOf(own), event: eventOf(ratings, own)};
       if (own?.state === 'error' || own?.state === 'unknown') {
         const failed = outcomeOfError(own, now);
-        return {done: true, ...failed, outcome: phase === 'removal' ? (failed.outcome === 'blocked' || failed.outcome === 'rate_limited' ? 'deferred' : 'error') : failed.outcome, at: at(), counts: countsOf(own)};
+        return {done: true, ...failed, outcome: phase === 'removal' ? (failed.outcome === 'blocked' || failed.outcome === 'rate_limited' ? 'deferred' : 'error') : failed.outcome, at: at(), counts: countsOf(own), event: eventOf(ratings, own)};
       }
       // The Diary part is done once the run moved to its removal phase; phase 1 ends there and leaves the run for phase 3.
       if (own?.state === 'running' && own.phase === 'removal' && phase === 'diary') return {done: true, outcome: 'finished', at: at(), counts: countsOf(own)};

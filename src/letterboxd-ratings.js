@@ -103,10 +103,11 @@ const LetterboxdRatings=(()=>{
  // to a day). Only when more than EVENT_PENDING_MAX outcomes are owed at once (two months of daily runs with the Events Log
  // unreachable) is the oldest discarded, and `eventsDropped` on the run record counts it, so the loss is visible.
  const EVENT_PENDING_MAX=60,EVENT_RETRY_BASE_MS=15*MIN_MS,EVENT_RETRY_MAX_MS=24*60*MIN_MS;
- function ratingsEventOf(run){
+ function ratingsEventOf(run,{slotOwned=false}={}){
   if(!run?.runId||!EVENT_STATES.includes(run.state))return null;
   // AIR-570 / ADR 0186: a run started by a Letterboxd Sync slot reports through the slot's own `ratings` Event (the slot outbox), never through this pipeline: one Event source, no duplicate.
-  if(run.slotKey)return null;
+  // The Sync itself asks for the same AIR-361 contract with `slotOwned` and freezes it into its outbox row.
+  if(run.slotKey&&!slotOwned)return null;
   const ended=Date.parse(run.finishedAt||run.closedAt||'');if(!Number.isFinite(ended))return null;
   const n=value=>Number.isInteger(value)&&value>=0?value:0,diary=run.diary||null,counts=diary?.counts||{},facts=diary?.facts||{},lookup=run.removal?.lookup||{};
   const cause=EVENT_CAUSES.includes(run.cause)?run.cause:null;

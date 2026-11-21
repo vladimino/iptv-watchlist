@@ -5,7 +5,7 @@
 // Repository contract (AIR-569 implements it; tests use a mock):
 //   ready(ctx)                          -> {ready: boolean}
 //   drainEffects(ctx, {now})            -> {drained: boolean, code?}   causal effects of promoted snapshots, oldest version first (decision 1)
-//   commitScan(ctx, {members, scan})    -> {outcome: 'committed'|'no_change', version, lastSuccessAt, total, baseline, added[], removed[]}
+//   commitScan(ctx, {members, scan})    -> {outcome: 'committed'|'no_change', version, lastSuccessAt, total, baseline, added[], removed[]}   films are {id, title, year, url}
 //   recordAttempt(ctx, {outcome, at, slotKey, code})  -> void          `last_attempt_*` only; never lowers last_success_at
 //   admitNew(ctx, {limit, now})         -> {resolved, pending}         the bounded admission ledger step (decision 5), optional
 // `ctx` is the phase context ({env, slotKey, runId, epoch, now, deadline}); the repository adapter reads the Workflow epoch from it.
@@ -59,7 +59,7 @@ export function classifyScanFailure(error) {
 
 // The phase port for `LetterboxdSync.run`. One call is one whole bounded action: the scan is at most 100 page fetches and a single repository call.
 // It never reads Discovery, EPG or resolver state (decision 2). The slot's attempt is made once per run; the next slot is the retry.
-export function watchlistPhase({repository, fetchPage, parse, firstUrl, username}) {
+export function watchlistPhase({repository, fetchPage, parse, firstUrl, username, describe = null}) {
   return {
     async run(ctx) {
       const at = () => new Date(ctx.now()).toISOString();
@@ -78,9 +78,14 @@ export function watchlistPhase({repository, fetchPage, parse, firstUrl, username
       // Admission of new ids is a separate, bounded, deduplicated step: its failure never undoes the committed snapshot (decision 5).
       let admission = null;
       if (typeof repository.admitNew === 'function') admission = await repository.admitNew(ctx, {limit: 3, now: ctx.now()}).catch(() => ({resolved: 0, pending: null, error: true}));
+      // The Event's films: identity (id, title, year, trusted tmdb) and, for a removed film, the confirmed rating the fact store already holds. Stored facts only; a failure leaves the plain films.
+      let added = committed.added || [], removed = committed.removed || [];
+      if (typeof describe === 'function' && (added.length || removed.length)) {
+        try { const described = await describe(ctx.env, {added, removed}); if (Array.isArray(described?.added)) added = described.added; if (Array.isArray(described?.removed)) removed = described.removed; } catch { /* keep the plain films */ }
+      }
       const outcome = committed.outcome === 'committed' ? 'committed' : 'no_change';
       return {done: true, outcome, at: at(), snapshotVersion: committed.version ?? null, lastSuccessAt: committed.lastSuccessAt ?? at(), total: committed.total ?? scanned.total, baseline: committed.baseline === true,
-        added: committed.added || [], removed: committed.removed || [], addedCount: (committed.added || []).length, removedCount: (committed.removed || []).length, admission};
+        added, removed, addedCount: (committed.added || []).length, removedCount: (committed.removed || []).length, admission};
     }
   };
 }

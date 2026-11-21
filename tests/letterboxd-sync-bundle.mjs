@@ -31,7 +31,7 @@ let list=['f0','f1','f2','f3'];
 const poster=id=>`<div data-component-class="LazyPoster" data-item-name="Film ${id} (2001)" data-item-link="/film/${id}/" data-postered-identifier='{"lid":"${id}"}'></div>`;
 const page=n=>{const per=3,items=list.slice((n-1)*per,n*per),last=n*per>=list.length;return `<span class="js-watchlist-count">${list.length}</span>${items.map(poster).join('')}${last?'':`<a class="next" href="/demo-user/watchlist/page/${n+1}/">Next</a>`}`;};
 const fetched=[];
-const fakeFetch=async url=>{fetched.push(String(url));if(/\/demo-user\/diary\//.test(String(url)))return new Response(diaryPage([diaryRow('f0',0,'2026-11-20','100001')],false),{status:200});const m=/\/demo-user\/watchlist\/(?:page\/(\d+)\/)?$/.exec(String(url));if(!m)return new Response('not found',{status:404});return new Response(page(Number(m[1]||1)),{status:200});};
+const fakeFetch=async url=>{fetched.push(String(url));if(/\/demo-user\/diary\//.test(String(url)))return new Response(diaryPage([diaryRow('f0',8,'2026-11-20','100001'),diaryRow('f3',8,'2026-11-19','100002')],false),{status:200});const m=/\/demo-user\/watchlist\/(?:page\/(\d+)\/)?$/.exec(String(url));if(!m)return new Response('not found',{status:404});return new Response(page(Number(m[1]||1)),{status:200});};
 
 const bucket=makeBucket();
 const env={DB:db,BUCKET:bucket,LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://epg.test/x.xml',METADATA_CACHE_DB_OPTIONAL:'standin'};
@@ -156,5 +156,27 @@ run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
  const stale=await G('letterboxdPorts')(env).ratings.run({env,slotKey:'2026-11-23T0430',runId:'x',epoch:99,now:()=>T('2026-11-23T04:40:00Z')}).then(()=>'resolved',()=>'rejected');
  assert.equal(stale,'rejected','a stale epoch is refused');
  assert.equal(JSON.stringify(db.sql("SELECT key,etag FROM ratings_document WHERE key='letterboxd/ratings/run.json'")),before,'nothing was written');
+}
+// 8. Review: the two Events keep their business contracts, through the REAL `GET /api/events`: the `watchlist` Event lists films with `id`, `title` and `year` (never `id: "undefined"`), the removed film carries
+// its stored confirmed rating, and the `ratings` Event carries the AIR-361 groups (state, diary, removal, details) frozen from the real pipeline run, including the newly rated film. Exactly two keys per slot.
+{
+ const response=await context.worker.fetch(new Request('https://iptv.example/api/events'),env,{waitUntil(){}});
+ assert.equal(response.status,200);
+ const body=await response.json();
+ const events=body.events||body.items||body;
+ assert.ok(Array.isArray(events),'the events list: '+JSON.stringify(Object.keys(body)));
+ const mine=events.filter(e=>/^lbsync-/.test(String(e.id)));
+ assert.ok(mine.length>=6,'the slot Events are listed: '+mine.length);
+ assert.ok(!mine.some(e=>e.id==='undefined'||(e.added||[]).concat(e.removed||[]).some(f=>f.id==='undefined'||f.id==null)),'no film lost its identity');
+ const replacement=mine.find(e=>e.type==='watchlist'&&e.slot==='2026-11-21T2230');
+ assert.deepEqual((replacement.added||[]).map(f=>[f.id,f.title,f.year]),[['f9','Film f9',2001]]);
+ assert.equal(replacement.removed.length,1);assert.equal(replacement.removed[0].id,'f3');assert.equal(replacement.removed[0].title,'Film f3');assert.equal(replacement.removed[0].rating,4,'the removed film shows the confirmed rating the fact store held');
+ const first=mine.find(e=>e.type==='ratings'&&e.slot==='2026-11-21T1030');
+ assert.equal(first.state,'finished');assert.ok(first.diary&&first.diary.rows>=2,'the Diary group of the contract');assert.ok(first.removal,'the removal group of the contract');assert.ok(first.details,'the details of the films the run changed');
+ assert.equal(first.diary.added,2,'both newly rated Diary films were recorded');assert.equal(first.diary.written,2);
+ assert.ok(first.at&&first.runId&&first.trigger,'the contract identity fields');
+ const keys=[...bucket.records.keys()].filter(k=>k.startsWith('events/items/')&&/lbsync-/.test(k));
+ const perSlot=new Map();for(const k of keys){const slotKey=bucket.records.get(k).slot;perSlot.set(slotKey,(perSlot.get(slotKey)||0)+1);}
+ for(const [k,count] of perSlot)assert.equal(count,2,'exactly two keys for '+k);
 }
 console.log('letterboxd-sync-bundle ok');
