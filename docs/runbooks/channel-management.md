@@ -32,6 +32,10 @@ Owner procedure for classifying EPG channels with the [Channel admin](../referen
 
 Code rollback hides the page and the routes and changes no stored data. To undo a decision, clear it on the page; to undo an import, import the previous playlist (a new revision). Neither touches EPG authority.
 
+## Dry run before activation
+
+Before the owner sets the flag, the offline harness `scripts/epg-channel-policy-dry-run.mjs` is run on the real inputs (see its header for every argument): a local copy of the XMLTV feed with the time it was taken, the effective Channel policies (`--snapshot-rows` from the five read-only `SELECT` statements of the snapshot reader, or `--policies`), the watchlist and the discovered-films cache. It runs one feed through `legacy`, `filtered` and `degraded`, calls no D1 writer, and prints numbers only. The verdict must be PASS with `lateDeclared` 0; a BLOCKED answer names the missing input and nothing is substituted. Keep the feed, the playlist, the film inputs and every slot key out of the repository, pull requests and Trello; only the numbers the card asks for go back. The exact checks and the way to obtain each input are in the [dated dry-run status](../evidence/epg-channel-policy-real-feed-dry-run-2026-11-21.md).
+
 ## Activation and verification of the scan policy (owner decision)
 
 Activation is the owner setting the Worker variable `EPG_CHANNEL_POLICY` to `on` ([flag contract](../reference/feature-flags.md)). A deploy never does it, and nobody starts an EPG, Discovery or TMDB run to hurry it: the first effect is the next natural EPG sync.

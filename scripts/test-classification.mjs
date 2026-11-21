@@ -625,6 +625,9 @@ export const FILES={
  "epg-channel-policy.mjs": {
   "suite": "core"
  },
+ "epg-channel-policy-dry-run.mjs": {
+  "suite": "core"
+ },
  "epg-checkpoint-production.mjs": {
   "suite": "core"
  },
