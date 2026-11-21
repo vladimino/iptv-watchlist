@@ -456,7 +456,7 @@ Deleting `migrations/0001_schema_v1.sql`, `tests/d1-schema.mjs`, `tests/fixtures
 **Design only: no migration file exists and nothing is applied.** The migration takes the next free number on `main` at implementation. Table and column names are proposals that the implementation may refine.
 
 - `watchlist_authority`: one row, `mode` `epg` or `d1` (inserted as `epg`), `generation`, `writes` `open` or `held`; fence table `watchlist_cas`.
-- `watchlist_current`: one row with `version`, `snapshot_id`, `list_sha256`, `film_count`, `last_success_at`, `last_success_run`, `last_success_slot`, `last_attempt_at`, `last_attempt_outcome`, `effects_drained_version`, `revision`.
+- `watchlist_current`: one row with `version`, `snapshot_id`, `list_sha256`, `film_count`, `last_success_at`, `last_success_run`, `last_success_slot`, `last_attempt_at`, `last_attempt_outcome`, `effects_drained_version` (causal effects only), `mirror_delivered_snapshot_id`, `mirror_attempts`, `mirror_next_retry_at`, `revision`.
 - `watchlist_staging`: one row per scan attempt (`snapshot_id` primary key, `attempt_id`, `run_id`, `slot_key`, `expected_count`, `expected_sha256`, `started_at`); it names no version.
 - `watchlist_snapshot`: one row per promoted attempt (`snapshot_id` primary key, `version` unique and assigned only by the switch batch, `scan_id`, `observed_at`, `committed_at`, `film_count`, `list_sha256`, `prev_version`, `slot_key`, `run_id`).
 - `watchlist_member`: `(snapshot_id, ordinal)` primary key, `lid` unique per `snapshot_id`, `title`, `year`, `url`; no TMDB id.
