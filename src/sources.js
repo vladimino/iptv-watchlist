@@ -348,14 +348,20 @@ function applySlotConfirmation(candidate,metas){
 // (its title, its original title or `movieTitles`, which a TMDB detail read records). An alias without that provenance still counts as a
 // competitor in `knownSlotDecision`, but it never confirms: the slot stays an ordinary discovery observation for the resolver.
 function movieTitleKeys(film){return new Set([film?.title,film?.original,...(film?.movieTitles||[])].map(value=>value?epgTitleParts(value).normalizedTitle:'').filter(Boolean));}
-// AIR-564 (ADR 0187 decision 5): `options.policies` is the in-memory Map<channelId,{policy,basis}> a consumer materialized once from ONE Channel snapshot
-// (null/absent = no channel policy, the earlier behaviour byte for byte). Each in-window programme does one Map lookup by its channel id, before Film matching
+// AIR-564 (ADR 0187 decision 5, ADR 0191): the scan has three modes. `legacy` (no `options.policies`, no `options.degraded`) is the earlier behaviour byte for byte.
+// `filtered`: `options.policies` is the in-memory Map<channelId,{policy,basis}> a consumer materialized once from ONE Channel snapshot. `degraded`: `options.degraded`
+// is true because that snapshot is unavailable, absent, empty or torn; every channel is then `known_only` (no unknown candidate, no silent discover, no applied revision).
+// `options.onDeclarations({channels})` is awaited once, at the boundary between the `<channel>` declarations and the first `<programme>` of the same single pass (best effort,
+// never fatal): the declared ids the pinned Map does not hold. Declarations after that boundary are only counted (`lateDeclared`). Each in-window programme does one Map lookup by its channel id, before Film matching
 // and before the discovery build: `deny_all` ignores the slot even for a known Film; `known_only` keeps only a reliably identified Film (a single watchlist
 // match, or a catalog Film the slot confirms by a movie title, ADR 0142/0158) and creates no unknown candidate, uncertain entry or TMDB lookup; `discover`
 // is the unchanged pipeline. An id the Map does not hold is `known_only`. The policy of a channel never depends on the title, so the same Film on another
 // allowed channel is untouched. `stats` keeps the raw input counters (`scanned`, `coverage`) and adds the post-filter policy counters.
 async function scanEPG(stream,watchlist,now,options={}){
- const policies=options&&options.policies instanceof Map?options.policies:null;
+ const degraded=Boolean(options&&options.degraded);
+ const policies=degraded?new Map():options&&options.policies instanceof Map?options.policies:null;
+ const mode=degraded?'degraded':policies?'filtered':'legacy';
+ let boundaryDone=false,boundaryDeclared=null;
  const UNKNOWN_POLICY={policy:'known_only',basis:'unknown'};
  const policyCounts={inWindow:0,filteredDenyAll:0,skippedKnownOnly:0,discoveryEligible:0,unclassified:0};
  const index=new Map();for(const film of watchlist){for(const title of new Set([...(film.catalogOnly?[film.title,film.original]:[]),...(film.aliases||[film.original]),...(film.movieTitles||[])].map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}
@@ -366,12 +372,13 @@ async function scanEPG(stream,watchlist,now,options={}){
  try{while(true){const {done,value}=await reader.read();if(done){buffer+=decoder.decode();break;}bytes+=value.length;if(bytes>400000000)throw new Error('EPG exceeds supported size');buffer+=decoder.decode(value,{stream:true});
  while(true){const start=buffer.search(/<(?:channel|programme)\s/);if(start<0){if(buffer.includes('</tv>'))complete=true;buffer=buffer.slice(-1000);break;}if(start>0)buffer=buffer.slice(start);const type=buffer.startsWith('<channel ')?'channel':'programme',end=buffer.indexOf('</'+type+'>');if(end<0){if(buffer.length>1000000)throw new Error('EPG record exceeds limit');break;}const xml=buffer.slice(0,end+type.length+3);buffer=buffer.slice(end+type.length+3);
  if(type==='channel'){channels.set(attr(xml,'id'),field(xml,'display-name'));declared.set(attr(xml,'id'),field(xml,'display-name'));continue;}
+ if(!boundaryDone){boundaryDone=true;boundaryDeclared=new Set(declared.keys());if(policies&&!degraded&&typeof options.onDeclarations==='function'){const absent=[...declared].filter(([id,name])=>typeof id==='string'&&id&&!/^[A-Z]{2}:/.test(name||'')&&!policies.has(id)).map(([channelId,name])=>({channelId,name:name||channelId}));try{await options.onDeclarations({channels:absent});}catch{/* best effort: registration never fails the scan */}}}
  scanned++;const startAt=xmlTime(attr(xml,'start')),endAt=xmlTime(attr(xml,'stop'));if(!Number.isFinite(startAt)||!Number.isFinite(endAt)||endAt<=startAt)continue;min=Math.min(min,startAt);max=Math.max(max,startAt);const channelId=attr(xml,'channel'),channel=channels.get(channelId)||channelId;if(/^[A-Z]{2}:/.test(channel))continue;const c=coverage.get(channelId)||{name:channel,min:startAt,max:endAt};c.min=Math.min(c.min,startAt);c.max=Math.max(c.max,endAt);coverage.set(channelId,c);
  // Retention/display horizon (7 days) is separate from the hot processing horizon (24 hours): days 2-7 keep only shows that match a
  // reliable non-catalog watchlist film. Discovery, uncertain matches and the raw candidate counts never see them.
  if(startAt<now-72*3600000||startAt>=now+EPG_RETAIN_FUTURE_MS)continue;
  let channelPolicy='discover';
- if(policies){policyCounts.inWindow++;const found=policies.get(channelId)||UNKNOWN_POLICY;channelPolicy=found.policy;if(found.basis==='unknown'||found.basis==='unclassified')policyCounts.unclassified++;if(channelPolicy==='deny_all'){policyCounts.filteredDenyAll++;continue;}if(channelPolicy==='discover')policyCounts.discoveryEligible++;}
+ if(policies){policyCounts.inWindow++;const found=policies.get(channelId)||UNKNOWN_POLICY;channelPolicy=found.policy;if(!degraded&&(found.basis==='unknown'||found.basis==='unclassified'))policyCounts.unclassified++;if(channelPolicy==='deny_all'){policyCounts.filteredDenyAll++;continue;}if(channelPolicy==='discover')policyCounts.discoveryEligible++;}
  const title=field(xml,'title'),parts=epgTitleParts(title),titleYear=parts.year,key=parts.normalizedTitle,candidates=index.get(key)||[];const duration=(endAt-startAt)/60000;
  let decision=knownSlotDecision(candidates,titleYear,duration);
  if(decision.films.length===1&&decision.films[0].catalogOnly&&!movieTitleKeys(decision.films[0]).has(key))decision={films:[],reason:'alias_without_movie_provenance'};
@@ -400,19 +407,21 @@ async function scanEPG(stream,watchlist,now,options={}){
    candidate.categories=[...new Set(metas.flatMap(meta=>meta.categories||[]))].slice(0,8);}
   }
  for(const candidate of discovery.values())applySlotConfirmation(candidate,candidate.shows.map(show=>showMeta.get(show)));
- const policyChannels=policies?channelPolicyCounts(coverage,declared,policies):{channels:null,newChannels:[]};
- return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,identityCollision,duplicate_slot:conflictedSlots.size,discoveryCandidates:discovery.size,rawCandidates:rawDiscovery.size,filteredNonMovies:filteredNonMovies.size,...(policies?{policy:{applied:true,...policyCounts,channels:policyChannels.channels}}:{})},newChannels:policyChannels.newChannels,uncertain:[...uncertain.values(),...conflictedSlots.values()].slice(0,100)};
+ const policyChannels=policies?channelPolicyCounts(coverage,declared,policies,degraded,boundaryDeclared):{channels:null,newChannels:[],lateDeclared:0};
+ return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,identityCollision,duplicate_slot:conflictedSlots.size,discoveryCandidates:discovery.size,rawCandidates:rawDiscovery.size,filteredNonMovies:filteredNonMovies.size,policyMode:mode,...(policies?{policy:{applied:true,mode,...policyCounts,lateDeclared:policyChannels.lateDeclared,channels:policyChannels.channels}}:{})},newChannels:policyChannels.newChannels,uncertain:[...uncertain.values(),...conflictedSlots.values()].slice(0,100)};
 }
 
 // Per-channel counters by effective policy over the channels the feed DECLARES (<channel>) plus any channel it schedules without a declaration. `new` = a declared id the pinned
 // snapshot does not hold (registered after the scan, by id, never by name); `undeclared` = a scheduled id no <channel> declares: it is classified like any unknown id (`known_only`) but is
 // not trusted for registration. `unclassified` = no category and no override. A declared channel whose display name is a country-prefixed feed label (`XX:`) is skipped, as its programmes are.
-function channelPolicyCounts(coverage,declared,policies){
- const counts={channels:{total:0,discover:0,denyAll:0,knownOnly:0,new:0,unclassified:0,undeclared:0},newChannels:[]};
+function channelPolicyCounts(coverage,declared,policies,degraded,boundaryDeclared){
+ const counts={channels:{total:0,discover:0,denyAll:0,knownOnly:0,new:0,unclassified:0,undeclared:0},newChannels:[],lateDeclared:0};
  const ids=new Map();
  for(const [channelId,name] of declared){if(typeof channelId!=='string'||!channelId||/^[A-Z]{2}:/.test(name||''))continue;ids.set(channelId,{name:name||channelId,declared:true});}
  for(const [channelId,item] of coverage)if(!ids.has(channelId))ids.set(channelId,{name:item.name,declared:false});
- for(const [channelId,item] of ids){const found=policies.get(channelId)||{policy:'known_only',basis:'unknown'};counts.channels.total++;if(found.policy==='discover')counts.channels.discover++;else if(found.policy==='deny_all')counts.channels.denyAll++;else counts.channels.knownOnly++;if(!item.declared)counts.channels.undeclared++;if(found.basis==='unknown'&&item.declared){counts.channels.new++;counts.newChannels.push({channelId,name:item.name});}if(found.basis==='unknown'||found.basis==='unclassified')counts.channels.unclassified++;}
+ let lateDeclared=0;
+ for(const [channelId,item] of ids){const found=policies.get(channelId)||{policy:'known_only',basis:'unknown'};if(degraded){counts.channels.total++;counts.channels.knownOnly++;if(!item.declared)counts.channels.undeclared++;continue;}counts.channels.total++;if(found.policy==='discover')counts.channels.discover++;else if(found.policy==='deny_all')counts.channels.denyAll++;else counts.channels.knownOnly++;if(!item.declared)counts.channels.undeclared++;if(found.basis==='unknown'&&item.declared){counts.channels.new++;counts.newChannels.push({channelId,name:item.name});if(boundaryDeclared&&!boundaryDeclared.has(channelId))lateDeclared++;}if(found.basis==='unknown'||found.basis==='unclassified')counts.channels.unclassified++;}
+ counts.lateDeclared=lateDeclared;
  return counts;
 }
 async function loadPeopleNameIndex(films){
@@ -565,17 +574,15 @@ async function localizeFilmTitles(films,cache,mode){
  if(mode!=='on'&&mode!=='shadow'){legacy(films,cache);return {compared:0,mismatched:0};}
  return branchState(films,cache,mode,legacy,domain);
 }
-// Share of the in-window programmes a policy let through (not deny_all); 1 when nothing was in window.
-function policyKeptShare(stats){const total=stats.policy.inWindow||0;return total>0?Math.max(total-(stats.policy.filteredDenyAll||0),1)/total:1;}
 function assertEPGContinuity(result,previous,watchlistCount,now){
  if(result.stats.epgEnd<now+8*3600000)throw new Error('EPG horizon is too short for the next update');
  if(!previous?.stats)return;
  const old=previous.stats,ratio=watchlistCount/(previous.watchlistCount||watchlistCount);
  if(old.scanned>10000&&result.stats.scanned<old.scanned*.65)throw new Error('EPG has too few programmes compared with the last good update');
  if(old.channels>100&&result.coverage.length<old.channels*.65)throw new Error('EPG has too few channels compared with the last good update');
- // AIR-564: raw counters (`scanned`, channels) are compared raw to raw. The broadcast floor compares post-filter output, so it is scaled by the share of in-window
- // programmes the channel policy still lets through, relative to the share the last good update already had (1 when it had no policy): the expected shrinkage
- // of a first filtered generation (about a third of the raw records in the 20 Nov 2026 audit) is not a feed fault, and a further collapse still is.
- const kept=result.stats.policy?.applied?policyKeptShare(result.stats):1,was=old.policy?.applied?policyKeptShare(old):1,scale=Math.min(1,kept/was);
- if(ratio>.8&&ratio<1.2&&old.broadcasts>100&&result.films.reduce((n,f)=>n+f.shows.length,0)<old.broadcasts*.35*scale)throw new Error('EPG has too few matching broadcasts compared with the last good update');
+ // ADR 0191: every raw and horizon check above and below runs in every mode. The minimum-broadcasts check compares only generations of the SAME mode (legacy, filtered or
+ // degraded; a report without the field is legacy), so the expected shrinkage after a mode change is not a feed fault; a revision, category or override change inside one mode
+ // never exempts it, and there is no dynamic coefficient. The baseline is the last PUBLISHED generation, never a failed attempt.
+ const sameMode=(result.stats.policyMode||'legacy')===(old.policyMode||'legacy');
+ if(sameMode&&ratio>.8&&ratio<1.2&&old.broadcasts>100&&result.films.reduce((n,f)=>n+f.shows.length,0)<old.broadcasts*.35)throw new Error('EPG has too few matching broadcasts compared with the last good update');
 }
