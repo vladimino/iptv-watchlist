@@ -106,7 +106,7 @@ export function drainProof(state,{run,now,evidence={},journal={owed:false},nextS
  const control=state.orchestration.control?.body;
  if(!control||control.phase!=='done')failures.push('orchestration_not_done');
 
- // The next start must be known and at least the margin away; an unknown or past one refuses. A control record that names its own wake time must agree.
+ // The next start must be known and at least the margin away; an unknown or past one refuses. A control record that names its own wake time is checked as a second, additional minimum margin (it is not required to equal the schedule).
  if(!Number.isFinite(nextStart))failures.push('next_start_unknown');
  else if(nextStart-now<NEXT_START_MARGIN_MS)failures.push('next_start_too_close');
  else if(control?.nextWakeAt!=null&&!(Date.parse(control.nextWakeAt)-now>=NEXT_START_MARGIN_MS))failures.push('next_start_too_close');
@@ -189,7 +189,8 @@ export function nextStartAfter(now){
 // ---- the migration -------------------------------------------------------------------------------------------------------
 export function applyDecision(state){
  if(state.tables.present&&state.tables.present!==state.tables.expected)return 'partial_schema';
- if(state.tables.present===state.tables.expected)return state.schemaVersion>=30?'already_applied':'partial_schema';
+ // A complete table set is `already_applied` only with the whole contract (both triggers, the fence row, a readable marker) at schema 30 or later; anything less is a damaged install.
+ if(state.tables.present===state.tables.expected)return checkpointSchemaReady(state)?'already_applied':'partial_schema';
  if(state.schemaVersion!==29)return 'schema_unexpected';
  return 'apply';
 }

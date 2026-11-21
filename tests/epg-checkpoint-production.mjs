@@ -403,6 +403,11 @@ for(const upTo of ['0030_epg_checkpoint_authority.sql','0031_watchlist_authority
   const installed=open(upTo);
   await stop(Op.execute('apply',{},{binding:installed.db,now:NOW}),'already_applied');
  }
+ // a complete table set without the whole contract is a damaged install, not `already_applied`
+ for(const [label,mutate] of [['no marker row',file=>sqlite(file,'DELETE FROM epg_checkpoint_authority')],['a missing trigger',file=>sqlite(file,'DROP TRIGGER epg_checkpoint_run_order')],['the other trigger',file=>sqlite(file,'DROP TRIGGER epg_checkpoint_cas_required')]]){
+  const damaged=open('9999');mutate(damaged.file);
+  await stop(Op.execute('apply',{},{binding:damaged.db,now:NOW}),'partial_schema');
+ }
  // a status read at the latest schema reports it and is still read-only
  const latest=open('9999');
  const status=await Op.execute('status',{...EV},{binding:latest.db,readStore:bucket(frozen).read,now:NOW});
