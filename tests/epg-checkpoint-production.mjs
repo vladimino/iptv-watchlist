@@ -23,7 +23,7 @@ function seed(file,{lease='released',phase='done',nextWake='2026-11-21T16:00:00.
  const leaseBody=lease==='released'?{schemaVersion:1,holder:'h',modeRevision:2,expiresAt:'2026-11-20T16:16:29.753Z',released:true}:{schemaVersion:1,holder:'h',modeRevision:2,expiresAt:'2026-11-21T09:00:00.000Z',released:false};
  sqlite(file,"DELETE FROM epg_orchestration_document;INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('mode','{\"schemaVersion\":1,\"mode\":\"cloudflare\",\"epoch\":1,\"drain\":\"verified\"}',2,'2026-11-08T00:00:00.000Z'),('control','"+JSON.stringify({schemaVersion:1,phase,nextWakeAt:nextWake,runId:RUN,runKey:'2026-11-20',instanceId:'epg_20261120_1',versionId:'v-1',...control}).replace(/'/g,"''")+"',5,'2026-11-20T16:11:56.000Z'),('lease','"+JSON.stringify(leaseBody)+"',9,'2026-11-20T16:11:56.000Z');UPDATE discovery_epg_priority SET state='"+pause+"', owed_day_key="+(pause==='clear'?'NULL':"'2026-11-20'")+";UPDATE published_epg_authority SET programme_run_id='"+RUN+"', finalized_run_id="+(finalized?"'"+finalized+"'":'NULL')+";");
 }
-function open(upTo='9999',options={}){
+function open(upTo='0030_epg_checkpoint_authority.sql',options={}){
  const file=path.join(root,'db-'+(copies++)+'.sqlite');
  sqlite(file,chain(upTo));
  seed(file,options);
@@ -96,20 +96,20 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
 
 // ===== 3. status measures, writes nothing, prints no payload =====
 {
- const env={...open('9999'),r2:bucket(frozen)};
+ const env={...open('0030_epg_checkpoint_authority.sql'),r2:bucket(frozen)};
  const status=await call('status',{...EV},env);
  assert.equal(status.writes,false);assert.deepEqual(status.marker,{mode:'r2',writes:'open',generation:0,cas:1});
  assert.equal(status.drain.ok,true);assert.equal(status.r2.measure.stage,'complete');assert.equal(status.r2.measure.watchlist,null,'a complete run has no film figure');
  assert.equal(JSON.stringify(status).includes(RUN+'","startedAt'),false);assert.equal(JSON.stringify(status).includes('updatedAt":"2026'),false,'no raw payload');
  assert.equal(status.r2.sync.sha256,sha(SYNC_RAW));
  const mid=bucket({...frozen,'sync.json':JSON.stringify({runId:'r',startedAt:'2026-11-21T16:00:00.000Z',stage:'metadata',watchlist:[{id:'a',t:'xx'},{id:'b',t:'xxxxxxxx'}],pending:[]})});
- const measured=await call('status',{...EV},{...open('9999'),r2:mid});
+ const measured=await call('status',{...EV},{...open('0030_epg_checkpoint_authority.sql'),r2:mid});
  assert.equal(measured.r2.measure.watchlist.films,2);assert.ok(measured.r2.measure.watchlist.maxFilmChars>=16);assert.ok(measured.drain.failures.includes('run_not_complete'));
 }
 
 // ===== 4. the full forward sequence: hold, import, activate, release; every contract is exact =====
 {
- const env={...open('9999'),r2:bucket(frozen)};
+ const env={...open('0030_epg_checkpoint_authority.sql'),r2:bucket(frozen)};
  await stop(call('hold',{generation:1,...EV},env),'state_mismatch');
  await stop(call('import',{generation:0,...identity(env)},env),'state_mismatch');
  await stop(call('activate',{generation:0,...identity(env)},env),'state_mismatch');
@@ -211,7 +211,7 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
 
 // ===== 6. abort before activation: release-abort only with empty tables =====
 {
- const env={...open('9999'),r2:bucket(frozen)};
+ const env={...open('0030_epg_checkpoint_authority.sql'),r2:bucket(frozen)};
  await call('hold',{generation:0,...EV},env);
  const back=await call('release-abort',{generation:1},env);
  assert.deepEqual(back.marker,{mode:'r2',writes:'open',generation:1});
@@ -231,14 +231,14 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  assert.equal(plan(JSON.stringify(legacy)).expected.completedAt,legacy.updatedAt,'a missing completion time takes updatedAt, as completeRun does');
  assert.equal(plan(SYNC,null).expected.ingest,null);
  // A missing ingest object is never imported as 'no status': the standard cutover needs both identities, and a key that vanished after H0 refuses.
- const none={...open('9999'),r2:bucket({'sync.json':SYNC_RAW})};
+ const none={...open('0030_epg_checkpoint_authority.sql'),r2:bucket({'sync.json':SYNC_RAW})};
  await call('hold',{generation:0,...EV},none);
  const idNone={syncEtag:none.r2.objects.get('sync.json').etag,syncSha256:sha(SYNC_RAW)};
  await stop(call('import',{generation:1,...idNone,ingestEtag:'x',ingestSha256:'y'},none),'source_missing');
  assert.deepEqual(counts(none.file),{run:0,body:0,film:0,ingest:0});
  assert.throws(()=>Op.parseArgs(['node','x','--import','--target','iptv','--confirm','import','--expect-generation','1','--sync-etag','a','--sync-sha256','b']),e=>e.reason==='usage');
  // presence at H0, absence at activation and at release
- const lost={...open('9999'),r2:bucket(frozen)};
+ const lost={...open('0030_epg_checkpoint_authority.sql'),r2:bucket(frozen)};
  await call('hold',{generation:0,...EV},lost);
  const idLost=identity(lost);
  await call('import',{generation:1,...idLost},lost);
@@ -249,7 +249,7 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
 
 // ===== 7b. H0 evidence and the mutation boundary =====
 {
- const base=()=>({...open('9999'),r2:bucket(frozen)});
+ const base=()=>({...open('0030_epg_checkpoint_authority.sql'),r2:bucket(frozen)});
  const refused=async(args,failure,options={})=>{const env=options.env??base();const error=await stop(call('hold',{generation:0,...args},env),'drain_refused');assert.ok(error.details.failures.includes(failure),failure+' in '+error.details.failures);assert.deepEqual(marker(env.file),{mode:'r2',writes:'open',generation:0});};
  await refused({},'workflow_evidence_missing');
  await refused({...EV,workflowLiveness:undefined},'workflow_evidence_missing');
@@ -313,7 +313,7 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
 
 // ===== 7c. release (b): the rows still equal the frozen image, and the frozen image is unchanged =====
 {
- const make=async()=>{const env={...open('9999'),r2:bucket(frozen)};await call('hold',{generation:0,...EV},env);const id=identity(env);await call('import',{generation:1,...id},env);await call('activate',{generation:1,...id},env);return {env,id};};
+ const make=async()=>{const env={...open('0030_epg_checkpoint_authority.sql'),r2:bucket(frozen)};await call('hold',{generation:0,...EV},env);const id=identity(env);await call('import',{generation:1,...id},env);await call('activate',{generation:1,...id},env);return {env,id};};
  {
   const {env,id}=await make();
   env.r2.objects.get('sync.json').etag='moved';
@@ -330,7 +330,7 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
 
 // ===== 7d. an unreadable readback after the writes is reported, never read as success =====
 {
- const env={...open('9999'),r2:bucket(frozen)};
+ const env={...open('0030_epg_checkpoint_authority.sql'),r2:bucket(frozen)};
  await call('hold',{generation:0,...EV},env);const id=identity(env);await call('import',{generation:1,...id},env);await call('activate',{generation:1,...id},env);await call('release',{generation:2,...id},env);
  sqlite(env.file,"UPDATE epg_ingest_status SET last_success_at='2026-11-21T16:12:00.000Z', revision=revision+1");
  await call('hold-rollback',{generation:2,...EV},env);
@@ -343,7 +343,7 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  assert.deepEqual(error.details.written,['sync.json','watchlist-ingest.json']);
  assert.deepEqual(marker(env.file),{mode:'d1',writes:'held',generation:3},'the marker does not move without a verified readback');
  // an unknown PUT outcome whose objects cannot be read is reported as unclassified
- const env2={...open('9999'),r2:bucket(frozen)};
+ const env2={...open('0030_epg_checkpoint_authority.sql'),r2:bucket(frozen)};
  await call('hold',{generation:0,...EV},env2);const id2=identity(env2);await call('import',{generation:1,...id2},env2);await call('activate',{generation:1,...id2},env2);await call('release',{generation:2,...id2},env2);
  sqlite(env2.file,"UPDATE epg_ingest_status SET last_success_at='2026-11-21T16:12:00.000Z', revision=revision+1");
  await call('hold-rollback',{generation:2,...EV},env2);
