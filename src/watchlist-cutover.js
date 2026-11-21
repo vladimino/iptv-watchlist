@@ -7,7 +7,9 @@
 //   activate       epg/held  G -> d1/held  G+1   the same proofs as `hold`, re-asserted in the switching batch
 //   release        d1/held   G -> d1/open  G     the snapshot is servable and unchanged since the pins
 //   hold-rollback  d1/open   G -> d1/held  G+1   first step of the data rollback: Letterboxd mode closed, no EPG step, snapshot intact
-// The data rollback export and the return to `epg` are a separate, later operator step.
+//   revert-authority     d1/held G -> epg/held G+1  AFTER the rollback export: the published generation's watchlist part equals the snapshot in membership and order
+//   release-rolled-back  epg/held G -> epg/open G   the EPG owns the Watchlist again; backing out of nothing else is checked (the EPG may have published its own list since)
+// The rollback export itself writes the published generation through the EPG writer path (`PublishedEpg.saveWatchlist`, a staged commit compare-and-swapped on the EPG generation); it is not a marker transition.
 import {livenessGuard} from './watchlist-bootstrap.js';
 
 const GUARD=expression=>'INSERT INTO watchlist_cas (id, ok) SELECT 1, '+expression+' WHERE 1 ON CONFLICT(id) DO UPDATE SET ok=excluded.ok';
@@ -19,6 +21,8 @@ export const TRANSITIONS=Object.freeze({
  activate:{from:{mode:'epg',writes:'held'},to:{mode:'d1',writes:'held'},bump:true,needs:['snapshotImport','source','liveness','checkpoint','letterboxdClosed']},
  release:{from:{mode:'d1',writes:'held'},to:{mode:'d1',writes:'open'},bump:false,needs:['snapshotImport','checkpoint','letterboxdClosed']},
  'hold-rollback':{from:{mode:'d1',writes:'open'},to:{mode:'d1',writes:'held'},bump:true,needs:['snapshotCurrent','liveness','letterboxdClosed']},
+ 'revert-authority':{from:{mode:'d1',writes:'held'},to:{mode:'epg',writes:'held'},bump:true,needs:['snapshotCurrent','exportParity','liveness','letterboxdClosed']},
+ 'release-rolled-back':{from:{mode:'epg',writes:'held'},to:{mode:'epg',writes:'open'},bump:false,needs:['letterboxdClosed']},
 });
 
 // facts: what the operator read and verified, re-asserted inside the batch.
@@ -27,18 +31,16 @@ export const TRANSITIONS=Object.freeze({
 //   liveness:   {controlRevision, leaseRevision, liveAfterIso}
 //   checkpoint: {mode}  the independent EPG checkpoint authority is writes `open` in the mode read (never in the middle of its own cutover)
 //   letterboxd: {revision}  the mode document row revision, or -1 when absent; the mode must be `external` (no new writer) or the row absent
-export function transitionStatements(name,{generation,facts={}}){
- const spec=TRANSITIONS[name];
- if(!spec)throw new Error('cutover_usage');
- if(!Number.isInteger(generation)||generation<0)throw new Error('cutover_generation');
- const parts=[["(SELECT COUNT(*) FROM watchlist_authority WHERE id=1 AND mode=? AND writes=? AND generation=?)=1",[spec.from.mode,spec.from.writes,generation]]];
- const guards=[];
- const need=key=>spec.needs.includes(key);
+function buildParts(needs,from,generation,facts){
+ const parts=[["(SELECT COUNT(*) FROM watchlist_authority WHERE id=1 AND mode=? AND writes=? AND generation=?)=1",[from.mode,from.writes,generation]]];
+ const need=key=>needs.includes(key);
  const snap=facts.snapshot;
  if(need('snapshotImport')||need('snapshotCurrent')){
   if(!snap||!snap.snapshotId||!/^[0-9a-f]{64}$/.test(snap.sha256||'')||!Number.isInteger(snap.count)||!Number.isInteger(snap.revision)||!Number.isInteger(snap.version))throw new Error('cutover_snapshot');
   // The pointer is the pinned one (same revision: nothing moved it) and its snapshot still has every member. The forward path pins the bootstrap import: version 1 with its effects drained.
-  parts.push(["(SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=? AND snapshot_id=? AND list_sha256=? AND film_count=? AND revision=?"+(need('snapshotImport')?' AND effects_drained_version=version':'')+")=1 AND (SELECT COUNT(*) FROM watchlist_member WHERE snapshot_id=?)=? AND (SELECT COUNT(*) FROM watchlist_snapshot WHERE snapshot_id=? AND version=? AND list_sha256=? AND film_count=?)=1",[snap.version,snap.snapshotId,snap.sha256,snap.count,snap.revision,snap.snapshotId,snap.count,snap.snapshotId,snap.version,snap.sha256,snap.count]]);
+  // The rollback path pins the current snapshot AND requires its durable causal effects to be done (below): once the writer is closed and the authority is `epg`, nothing could drain them.
+  parts.push(["(SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=? AND snapshot_id=? AND list_sha256=? AND film_count=? AND revision=?"+(need('snapshotImport')||need('snapshotCurrent')?' AND effects_drained_version=version':'')+")=1 AND (SELECT COUNT(*) FROM watchlist_member WHERE snapshot_id=?)=? AND (SELECT COUNT(*) FROM watchlist_snapshot WHERE snapshot_id=? AND version=? AND list_sha256=? AND film_count=?)=1",[snap.version,snap.snapshotId,snap.sha256,snap.count,snap.revision,snap.snapshotId,snap.count,snap.snapshotId,snap.version,snap.sha256,snap.count]]);
+  if(need('snapshotCurrent'))parts.push(["(SELECT COUNT(*) FROM watchlist_effect WHERE status<>'done')=0",[]]);
   if(need('snapshotImport')){
    if(snap.version!==1)throw new Error('cutover_snapshot');
    // The import-only row invariants, at commit time: one staging receipt of the import, one snapshot, exactly the pinned members, and NO change, effect or pending-admission row. A scan journal
@@ -52,6 +54,20 @@ export function transitionStatements(name,{generation,facts={}}){
   // The published generation is the one the import came from: same run and EPG generation, certified complete, and its stored member rows still count the list.
   parts.push(["(SELECT COUNT(*) FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=? AND generation=? AND finalized_run_id=programme_run_id)=1 AND (SELECT COUNT(*) FROM published_epg_member WHERE programme_run_id=? AND kind='watchlist')=? AND (SELECT run_id FROM watchlist_snapshot WHERE snapshot_id=?)=?",[source.programmeRunId,source.epgGeneration,source.programmeRunId,snap.count,snap.snapshotId,source.programmeRunId]]);
  }
+ if(need('publishedCertified')){
+  const published=facts.published;
+  if(!published||!published.programmeRunId||!Number.isInteger(published.epgGeneration))throw new Error('cutover_published');
+  // The export commits over a certified, current publication: the pinned run at the pinned EPG generation (the writer's own compare-and-swap repeats the generation).
+  parts.push(["(SELECT COUNT(*) FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=? AND generation=? AND finalized_run_id=programme_run_id)=1",[published.programmeRunId,published.epgGeneration]]);
+ }
+ if(need('exportParity')){
+  const parity=facts.parity;
+  if(!parity||!parity.programmeRunId||!Number.isInteger(parity.epgGeneration)||!/^[0-9a-f]{64}$/.test(parity.payloadSha256||'')||!snap)throw new Error('cutover_parity');
+  // The published generation's watchlist part equals the pinned snapshot at the exact generation the export produced. The operator compared the normalized document digest (title, year, url included)
+  // and the member order outside; the batch binds that proof: the run is certified, the generation and the stored payload digest of the generation are the ones read, and the member rows
+  // still join the snapshot on ordinal and id. A replacement after the read changes the generation and the payload digest and aborts the batch.
+  parts.push(["(SELECT COUNT(*) FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=? AND generation=? AND finalized_run_id=programme_run_id)=1 AND (SELECT payload_sha256 FROM published_epg_generation WHERE programme_run_id=?)=? AND (SELECT COUNT(*) FROM published_epg_member WHERE programme_run_id=? AND kind='watchlist')=? AND (SELECT COUNT(*) FROM published_epg_member m JOIN watchlist_member w ON w.snapshot_id=? AND w.ordinal=m.ordinal AND w.lid=m.film_id WHERE m.programme_run_id=? AND m.kind='watchlist')=?",[parity.programmeRunId,parity.epgGeneration,parity.programmeRunId,parity.payloadSha256,parity.programmeRunId,snap.count,snap.snapshotId,parity.programmeRunId,snap.count]]);
+ }
  if(need('checkpoint')){
   // ADR 0186 decision 8.3 / O4: the EPG checkpoint cutover is completed first. The forward path switches only with the checkpoint authority `d1` and `open`, and re-asserts it here;
   // `r2`, a held marker and a mode that changed after the read all abort the batch.
@@ -63,12 +79,31 @@ export function transitionStatements(name,{generation,facts={}}){
   // No new writer: the Letterboxd mode row is absent or `external`, and it is the row that was read (revision pinned, absence included).
   parts.push(["NOT EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE mode<>'external') AND COALESCE((SELECT revision FROM letterboxd_sync_mode WHERE id=1),-1)=?",[facts.letterboxd.revision]]);
  }
- const statements=[[GUARD(parts.map(([sql])=>'('+sql+')').join(' AND ')),parts.flatMap(([,params])=>params)]];
- if(need('liveness'))statements.push(livenessGuard(facts.liveness));
+ return parts;
+}
+const guardStatement=parts=>[GUARD(parts.map(([sql])=>'('+sql+')').join(' AND ')),parts.flatMap(([,params])=>params)];
+
+export function transitionStatements(name,{generation,facts={}}){
+ const spec=TRANSITIONS[name];
+ if(!spec)throw new Error('cutover_usage');
+ if(!Number.isInteger(generation)||generation<0)throw new Error('cutover_generation');
+ const statements=[guardStatement(buildParts(spec.needs,spec.from,generation,facts))];
+ if(spec.needs.includes('liveness'))statements.push(livenessGuard(facts.liveness));
  statements.push(
   ['UPDATE watchlist_authority SET mode=?, writes=?, generation=? WHERE id=1 AND mode=? AND writes=? AND generation=?',[spec.to.mode,spec.to.writes,spec.bump?generation+1:generation,spec.from.mode,spec.from.writes,generation]],
   [FENCE,[]],
  );
  if(statements.some(([,params])=>params.length>100))throw new Error('cutover_params');
  return {statements,target:{mode:spec.to.mode,writes:spec.to.writes,generation:spec.bump?generation+1:generation}};
+}
+
+// The commit guard of the rollback export, asserted INSIDE the staged writer's final replacement batch (PublishedEpg `guards` option), not before it: the marker is `d1`/`held` at the generation
+// read, the pointer and snapshot are the pinned ones with their causal effects done, the Letterboxd mode is closed and pinned, no EPG step holds the liveness proof and the publication is the pinned
+// certified run at the pinned generation. A change at any point of the multi-batch staging aborts the replacement and nothing authoritative is written.
+export const EXPORT_GUARD_NEEDS=Object.freeze(['snapshotCurrent','publishedCertified','letterboxdClosed']);
+export function exportGuards({generation,facts={}}){
+ if(!Number.isInteger(generation)||generation<0)throw new Error('cutover_generation');
+ const guards=[guardStatement(buildParts(EXPORT_GUARD_NEEDS,{mode:'d1',writes:'held'},generation,facts)),livenessGuard(facts.liveness)];
+ if(guards.some(([,params])=>params.length>100))throw new Error('cutover_params');
+ return guards;
 }
