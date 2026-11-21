@@ -1,6 +1,6 @@
 # Channel management (`/admin/channels`)
 
-Owner procedure for classifying EPG channels with the [Channel admin](../reference/api/admin.md#channels-api-admin-channels). The contract is [EPG Channel](../reference/domain/epg-channel.md) and [ADR 0187](../adr/0187-epg-channel-authority.md). **Everything saved here is staged policy: no scan reads it and nothing here starts EPG, Discovery or TMDB.** Applying migration `0032` to production, the first import and any reader that makes the policy active are separate owner-approved operations ([AIR-563](https://trello.com/c/TzDy1d4b) applies the schema and runs the first import; the scan consumer is [AIR-564](https://trello.com/c/omIQl2Lh)). Until the schema exists the page says so and writes nothing.
+Owner procedure for classifying EPG channels with the [Channel admin](../reference/api/admin.md#channels-api-admin-channels). The contract is [EPG Channel](../reference/domain/epg-channel.md) and [ADR 0187](../adr/0187-epg-channel-authority.md). **Everything saved here is staged policy while the Worker flag `EPG_CHANNEL_POLICY` is off: no scan reads it and nothing here starts EPG, Discovery or TMDB.** Applying migration `0032` to production, the first import and any reader that makes the policy active are separate owner-approved operations ([AIR-563](https://trello.com/c/TzDy1d4b) applies the schema and runs the first import; the scan consumer is [AIR-564](https://trello.com/c/omIQl2Lh)). Until the schema exists the page says so and writes nothing.
 
 ## Before you start
 
@@ -31,3 +31,12 @@ Owner procedure for classifying EPG channels with the [Channel admin](../referen
 ## Rollback
 
 Code rollback hides the page and the routes and changes no stored data. To undo a decision, clear it on the page; to undo an import, import the previous playlist (a new revision). Neither touches EPG authority.
+
+## Activation and verification of the scan policy (owner decision)
+
+Activation is the owner setting the Worker variable `EPG_CHANNEL_POLICY` to `on` ([flag contract](../reference/feature-flags.md)). A deploy never does it, and nobody starts an EPG, Discovery or TMDB run to hurry it: the first effect is the next natural EPG sync.
+
+1. Before setting it, read the Channel revision on the page and confirm the snapshot is the imported one (not empty). With `on` an empty or unreadable snapshot makes the sync fail and keep the previous generation.
+2. After the next natural EPG sync, read the new `epg` event (events screen): `policy.revision` must equal the revision you read, `channels` and `programmes` must show the expected `deny_all` and `known_only` counters, and `channels.new` lists the XMLTV ids the sync registered; they appear in the unclassified queue of this page.
+3. With read-only checks confirm that the current published generation holds no show of a `deny_all` channel and that Discovery gained no candidate from a `known_only` channel.
+4. If the sync failed, the previous generation is still published: read the error, fix the snapshot, and wait for the next natural run. To go back, set the variable to `off` (or remove it); the next natural sync publishes unfiltered again. A rollback of the code does not undo a filtered generation that was already published.
