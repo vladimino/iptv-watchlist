@@ -332,3 +332,23 @@ console.log('scheduled-task-prompt-v2 ok');
  assert.ok(s10.includes('generationSize=1')&&s10.includes('submitBatchSize=5')&&!s10.includes('manifestSize=5'),'other batch params unchanged');
  assert.ok(s10doc.includes(sha(prompt)),'S5 rollback hash recorded');
 }
+
+
+// AIR-560 iteration 2: S7 is a one-variable manifest-size candidate, not a live Task change.
+{
+ const docS7=fs.readFileSync('docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2-s7-candidate.md','utf8');
+ const match=docS7.match(/---BEGIN PROMPT S7---\n([\s\S]*?)\n---END PROMPT S7---/);
+ assert.ok(match,'S7 executable candidate block exists');
+ const s7=match[1],hdr=docS7.match(/\*\*Text below:\*\* (\d+) characters, (\d+) UTF-8 bytes, SHA-256 `([0-9a-f]{64})`/);
+ assert.ok(hdr,'S7 candidate includes recorded integrity metadata');
+ assert.equal(prompt.split('manifestSize=5').length-1,3,'S5 has three manifest references');
+ assert.equal(s7,prompt.replaceAll('manifestSize=5','manifestSize=7'),'only the three manifest-size references differ');
+ assert.equal(s7.split('manifestSize=7').length-1,3,'S7 candidate updates all three occurrences');
+ assert.ok(!s7.includes('manifestSize=5'),'S7 contains no stale S5 manifest value');
+ assert.equal(s7.length,Number(hdr[1]),'S7 character length');
+ assert.equal(Buffer.byteLength(s7,'utf8'),Number(hdr[2]),'S7 UTF-8 byte length');
+ assert.equal(sha(s7),hdr[3],'S7 candidate SHA-256');
+ assert.equal(sha(s7),'e91956a14b23a0fff1eec404b11e6f5f1fbcc3bf897f81c3f5293d381def6bcd','reviewed AIR-560 S7 candidate hash');
+ for(const unchanged of ['generationSize=1','submitBatchSize=5','3б. RESEARCH QUALITY GATE','3в. RESEARCH AUDIT','3г. SOURCE SELECTION GATE','6а. EVIDENCE-AWARE SCORING','prediction_batch_hold({runId,epoch,items})'])assert.ok(s7.includes(unchanged),'S7 retains contract: '+unchanged);
+ assert.ok(docS7.includes(sha(prompt)),'original S5 SHA-256 recorded for rollback');
+}
