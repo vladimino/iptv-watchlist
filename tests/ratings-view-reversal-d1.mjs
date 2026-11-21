@@ -19,10 +19,11 @@ function bucket() {
   };
 }
 function fresh() {
-  const db = d1Standin(path.join(root, 'r' + (n++) + '.sqlite'));
+  const hooks = {};
+  const db = d1Standin(path.join(root, 'r' + (n++) + '.sqlite'), {onBatch: statements => hooks.onBatch?.(statements)});
   for (const name of fs.readdirSync('migrations').filter(file => file.endsWith('.sql')).sort()) db.sql(fs.readFileSync('migrations/' + name, 'utf8'));
   db.sql("UPDATE ratings_domain_authority SET mode='d1', cutover='open', generation=3");
-  return {db, env: {DB: db, BUCKET: bucket()}};
+  return {db, hooks, env: {DB: db, BUCKET: bucket()}};
 }
 const ctx = vm.createContext({crypto: webcrypto, TextEncoder, console, Date, JSON, Map, Set, RatingsD1, structuredClone});
 const F = vm.runInContext(fs.readFileSync('src/letterboxd-facts.js', 'utf8') + '\nLetterboxdFacts', ctx);
@@ -87,6 +88,63 @@ const IDS = ['Ab1', 'tmdb_949'];
   v = await view(other.env);
   for (const id of IDS) assert.equal(v[id].actualRating, 2, id + ': the newer rating is kept');
   for (const id of IDS) assert.equal(v[id].watched, undefined, id + ': watched (only the export) is cleared');
+}
+
+// Interleavings (owner review P1): a newer observation commits between the reversal decision and the projection write; the authoritative view must keep it.
+const realReverse = RatingsD1.reverseView;
+const item = {lid: 'Ab1', tmdb: '949', facts: {watched: true, rating: 4.5}, effectiveOn: {watched: '2024-05-01'}};
+const LATER = '2026-10-27T00:00:00.000Z';
+async function withReverse(wrapper, run) {
+  ctx.RatingsD1 = {...RatingsD1, reverseView: wrapper};
+  try {return await run();} finally {ctx.RatingsD1 = RatingsD1;}
+}
+// (A) between the rollback's fact CAS and reverseView: a newer observation of the SAME fact is committed and projected.
+{
+  const {env} = fresh();
+  await F.commitBaselineChunk(env, body([item]));
+  await withReverse(async (e, reversals) => {
+    assert.ok(reversals.some(r => r.fact === 'rating'), 'the stale decision still says the rating was removed');
+    await F.recordFilmFacts(env, 'Ab1', {rating: 2}, {observedAt: LATER, source: 'owner'});
+    return realReverse(e, reversals);
+  }, () => F.rollbackBaselineChunk(env, body([item])));
+  const v = await view(env);
+  for (const id of IDS) {assert.equal(v[id].actualRating, 2, id + ': the newer same-fact observation survives'); assert.equal(v[id].watched, undefined, id + ': the removed watched is cleared');}
+}
+// (B) after reverseView's SELECT, before its batch: another writer projects a newer observation. The CAS aborts the batch, the retry re-reads and keeps it.
+for (const [name, facts, check] of [
+  ['unrelated field (watchlist)', {watchlist: true}, v => {assert.equal(v.watchlist, true, 'watchlist written in between is preserved'); assert.equal(v.actualRating, undefined); assert.equal(v.watched, undefined);}],
+  ['same field (rating)', {rating: 2}, v => {assert.equal(v.actualRating, 2, 'newer rating written in between survives'); assert.equal(v.watched, undefined);}],
+]) {
+  const {env, hooks} = fresh();
+  await F.commitBaselineChunk(env, body([item]));
+  let fired = 0, batches = 0;
+  await withReverse(async (e, reversals) => {
+    hooks.onBatch = async statements => {
+      if (!statements.some(s => /UPDATE ratings_view SET/.test(s.text))) return;
+      batches++;
+      if (fired++) return;
+      hooks.onBatch = null;
+      await F.recordFilmFacts(env, 'Ab1', facts, {observedAt: LATER, source: 'owner'});
+      hooks.onBatch = async s => {if (s.some(x => /UPDATE ratings_view SET/.test(x.text))) batches++;};
+    };
+    return realReverse(e, reversals);
+  }, () => F.rollbackBaselineChunk(env, body([item])));
+  assert.ok(batches >= 2, name + ': the aborted batch was retried');
+  const v = await view(env);
+  for (const id of IDS) check(v[id]);
+}
+// (C) the alias row belongs to a different fact_key (before the SELECT, and moved between SELECT and batch): untouched.
+for (const moveAt of ['before', 'during']) {
+  const {db, env, hooks} = fresh();
+  await F.commitBaselineChunk(env, body([item]));
+  const move = () => db.sql("UPDATE ratings_view SET fact_key='lb-other' WHERE alias_id='tmdb_949'");
+  await withReverse(async (e, reversals) => {
+    if (moveAt === 'before') move();
+    if (moveAt === 'during') hooks.onBatch = statements => {if (statements.some(s => /UPDATE ratings_view SET/.test(s.text))) {hooks.onBatch = null; move();}};
+    return realReverse(e, reversals);
+  }, () => F.rollbackBaselineChunk(env, body([item])));
+  assert.deepEqual(db.sql("SELECT fact_key, watched, actual_rating, rating_known FROM ratings_view WHERE alias_id='tmdb_949'"), [{fact_key: 'lb-other', watched: 1, actual_rating: 4.5, rating_known: 1}], moveAt + ': the moved alias is untouched');
+  assert.deepEqual(db.sql("SELECT watched, actual_rating, rating_known FROM ratings_view WHERE alias_id='Ab1'"), [{watched: null, actual_rating: null, rating_known: 0}], moveAt + ': the film alias is still reversed');
 }
 
 // A marker that is not d1/open: reverseView refuses like projectView (nothing written).
