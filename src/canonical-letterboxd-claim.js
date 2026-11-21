@@ -192,3 +192,57 @@ export async function applyLetterboxdClaims(env,{event,items=[],now,dryRun=false
  }
  return {dryRun:!!dryRun,...counts,results};
 }
+
+// ---- Producer wiring (ADR 0184 decision 5) ----
+// ACTIVATION GATE. The call sites of the Ratings flows hand their proven pairs to `ensureLetterboxdClaims`, which does NOTHING until this constant is true. It is an in-code constant, not a Cloudflare variable or flag: turning it on is
+// ONE reviewed line in a separate activation change that needs the owner's explicit GO, so a merge of the wiring writes nothing in production. Tests pass `enabled` explicitly.
+export const LETTERBOXD_CLAIM_ACTIVATED=false;
+
+// The pairs a flow has JUST made durable on the Ratings side (the fact record and the link index) and, for an admitted Film, the D1 admission. Never throws into the caller: the rating fact, the Diary fact and the Event do not wait
+// for the claim and never fail because of it. {state:'inactive'|'complete'|'incomplete'|'skipped', requested, written, already, refused, unknown, deferred, overflow, failed, results?}. At most LETTERBOXD_CLAIM_UNIT_CAP pairs are
+// attempted per call; the rest are `overflow` (the next ordinary run of the same flow offers them again, and `already` makes a repeat free). `event` is stable per pair (`link:<lid>:<tmdb>`), never a timestamp.
+export const LETTERBOXD_CLAIM_OFFER_MAX=200;
+export async function ensureLetterboxdClaims(env,{pairs=[],enabled=LETTERBOXD_CLAIM_ACTIVATED,now}={}){
+ if(enabled!==true)return {state:'inactive',requested:0,written:0,already:0,refused:0,unknown:0,deferred:0,overflow:0,failed:0,unattempted:[],results:[]};
+ const seen=new Set(),all=[];
+ for(const pair of Array.isArray(pairs)?pairs:[]){
+  const lid=typeof pair?.lid==='string'?pair.lid:'',tmdb=pair?.tmdb==null?'':String(pair.tmdb);
+  if(!LID.test(lid)||lid.startsWith('tmdb_')||!TMDB.test(tmdb)||seen.has(lid))continue;
+  seen.add(lid);all.push({lid,tmdb});
+ }
+ // The whole call has a fixed budget: ONE ordering read, then at most LETTERBOXD_CLAIM_UNIT_CAP full proofs (each a bounded number of reads and at most one fenced batch). Everything beyond is `overflow` (offered again by the next ordinary run).
+ const list=all.slice(0,LETTERBOXD_CLAIM_OFFER_MAX),beyond=all.slice(LETTERBOXD_CLAIM_OFFER_MAX);
+ const out={state:'complete',requested:all.length,written:0,already:0,refused:0,unknown:0,deferred:0,overflow:0,failed:0,unattempted:[],results:[]};
+ // ONE batched read ORDERS the offer: lids that no trusted claim holds yet go first. It is never evidence and never declares `already`: every attempted pair, held or not, gets the full read-only proof of `planLetterboxdClaim`.
+ let held=new Set();
+ const db=database(env);
+ if(db&&list.length){
+  try{held=new Set((await many(db,"SELECT value FROM film_external_id WHERE scheme='letterboxd' AND trusted=1 AND conflicting=0 AND value IN (SELECT value FROM json_each(?))",[JSON.stringify(list.map(pair=>pair.lid))])).map(row=>String(row.value)));}catch{held=new Set();}
+ }
+ const ordered=[...list.filter(pair=>!held.has(pair.lid)),...list.filter(pair=>held.has(pair.lid))];
+ const attempt=ordered.slice(0,LETTERBOXD_CLAIM_UNIT_CAP),rest=ordered.slice(LETTERBOXD_CLAIM_UNIT_CAP);
+ // `unattempted`: the lids whose claim was not attempted and may still lack one (a lid already held by a trusted claim that did not fit is not listed: it needs nothing). A caller that keeps a retry state keeps it for these.
+ const unattempted=[...rest.filter(pair=>!held.has(pair.lid)),...beyond].map(pair=>pair.lid);
+ out.overflow=rest.length+beyond.length;
+ let stopped=false;
+ for(const pair of attempt){
+  if(stopped){unattempted.push(pair.lid);out.overflow++;continue;}
+  try{
+   const result=await applyLetterboxdClaim(env,{event:'link:'+pair.lid+':'+pair.tmdb,lid:pair.lid,tmdb:pair.tmdb,now});
+   if(result.state==='written')out.written++;
+   else if(result.state==='already')out.already++;
+   else if(result.state==='refused')out.refused++;
+   else if(result.state==='unknown')out.unknown++;
+   else out.deferred++;
+   out.results.push({lid:pair.lid,state:result.state,verdict:result.verdict||null,reason:result.reason||null});
+  }catch(error){
+   // A held or unreadable authority, a moved generation or a read failure: nothing was written for this pair, the flow goes on, the next ordinary run offers it again.
+   out.failed++;
+   out.results.push({lid:pair.lid,state:'failed',verdict:null,reason:error?.code||'unclassified'});
+   if(error?.code==='film_person_not_open'||error?.code==='film_person_held'||error?.code==='film_person_unavailable')stopped=true;
+  }
+ }
+ out.unattempted=unattempted;
+ if(out.refused||out.unknown||out.deferred||out.failed||out.overflow)out.state='incomplete';
+ return out;
+}

@@ -18,7 +18,7 @@ const M=await load('canonical-letterboxd-claim.js');
 const {mutateFilm}=await load('canonical-mutations.js');
 const {filmExternalIdsDigest,filmExternalIdsContent}=await load('canonical-film-external-ids-producer.js');
 const {catalogStartedFilm}=await load('canonical-catalog-reader.js');
-const {planLetterboxdClaim,replanLetterboxdClaim,applyLetterboxdClaim,applyLetterboxdClaims,LETTERBOXD_CLAIM_ORIGIN,LETTERBOXD_CLAIM_UNIT_CAP}=M;
+const {ensureLetterboxdClaims,LETTERBOXD_CLAIM_OFFER_MAX,LETTERBOXD_CLAIM_ACTIVATED,planLetterboxdClaim,replanLetterboxdClaim,applyLetterboxdClaim,applyLetterboxdClaims,LETTERBOXD_CLAIM_ORIGIN,LETTERBOXD_CLAIM_UNIT_CAP}=M;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-lb-claim-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -317,6 +317,84 @@ await refusal('movie projection row carries another key',file=>{seedFilm(file,1)
 await raced('the Film loses its trusted tmdb claim after the plan',file=>assert.equal(sqlite(file,"DELETE FROM film_external_id WHERE film_id='"+FID(1)+"' AND scheme='tmdb'").status,0));
 await raced('the Film gains a second trusted tmdb value after the plan',file=>assert.equal(sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('"+FID(1)+"','tmdb','5',1,0,NULL)").status,0));
 await raced('the Film trusted tmdb claim is downgraded after the plan',file=>assert.equal(sqlite(file,"UPDATE film_external_id SET trusted=0 WHERE film_id='"+FID(1)+"' AND scheme='tmdb'").status,0));
+
+// 13. Producer wiring (ADR 0184 decision 5): the gate is off in code, `ensureLetterboxdClaims` writes nothing until it is on, never throws into a flow, is bounded and idempotent.
+assert.equal(LETTERBOXD_CLAIM_ACTIVATED,false,'the activation constant ships off');
+{
+ const file=proved(),env=envOf(file),before=dump(file);
+ const off=await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'}]});
+ assert.equal(off.state,'inactive');assert.equal(dump(file),before,'inactive: not one statement writes');
+ const offExplicit=await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:false});assert.equal(offExplicit.state,'inactive');
+ assert.equal(dump(file),before);
+ const on=await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'},{lid:'AAA1',tmdb:'1'},{lid:'tmdb_1',tmdb:'1'},{lid:'bad id',tmdb:'1'},{lid:'ZZZ',tmdb:'x'},null],enabled:true,now:()=>T});
+ assert.deepEqual([on.state,on.requested,on.written,on.already,on.refused],['complete',1,1,0,0],'duplicates and malformed pairs are dropped');
+ assert.deepEqual(pairs(file),['letterboxd:AAA1','tmdb:1']);
+ const again=await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:true,now:()=>T});
+ assert.deepEqual([again.state,again.written,again.already],['complete',0,1]);
+ assert.equal(receipts(file).length,1,'a repeat adds no receipt');assert.equal(revision(file),1,'a repeat adds no revision');
+}
+// A refusal is reported honestly and never turns into a trusted claim; the flow is not failed.
+{
+ const file=database();seedFilm(file,1);seedRatings(file,'AAA1',1,{lidKey:'tmdb-9'});seedFilm(file,2);seedRatings(file,'BBB2',2);
+ const out=await ensureLetterboxdClaims(envOf(file),{pairs:[{lid:'AAA1',tmdb:'1'},{lid:'BBB2',tmdb:'2'}],enabled:true,now:()=>T});
+ assert.deepEqual([out.state,out.written,out.refused],['incomplete',1,1]);
+ assert.deepEqual(pairs(file),['tmdb:1'],'the unproven pair writes nothing');assert.deepEqual(pairs(file,2),['letterboxd:BBB2','tmdb:2']);
+}
+// Bounded: at most LETTERBOXD_CLAIM_UNIT_CAP full proofs per call, unclaimed lids first (one batched ordering read, never evidence); the rest is `overflow`; a held lid is NOT declared `already` without the full proof.
+{
+ const file=database();const all=[];
+ for(let k=1;k<=LETTERBOXD_CLAIM_UNIT_CAP+2;k++){seedFilm(file,k);seedRatings(file,'L'+k,k);all.push({lid:'L'+k,tmdb:String(k)});}
+ const env=envOf(file);
+ const first=await ensureLetterboxdClaims(env,{pairs:all,enabled:true,now:()=>T});
+ assert.deepEqual([first.state,first.written,first.overflow],['incomplete',LETTERBOXD_CLAIM_UNIT_CAP,2]);
+ assert.deepEqual(first.unattempted.sort(),['L'+(LETTERBOXD_CLAIM_UNIT_CAP+1),'L'+(LETTERBOXD_CLAIM_UNIT_CAP+2)].sort(),'the not-attempted unclaimed lids are listed for a caller that keeps a retry state');
+ const second=await ensureLetterboxdClaims(env,{pairs:all,enabled:true,now:()=>T});
+ assert.deepEqual([second.written,second.already,second.overflow,second.unattempted.length],[2,LETTERBOXD_CLAIM_UNIT_CAP-2,2,0],'unclaimed first, then proofs of held lids up to the cap; a held lid that did not fit needs nothing and is not listed');
+ assert.ok(second.results.filter(result=>result.state==='already').every(result=>result.verdict==='pass'&&result.reason==='already'),'`already` comes from the full read-only proof');
+ assert.equal(receipts(file).length,LETTERBOXD_CLAIM_UNIT_CAP+2);
+}
+// A still-trusted claim is NOT `already` when its proof is gone: a removed Ratings link, a competing claim or a retirement is reported `refused`, never success.
+{
+ const file=proved(),env=envOf(file);
+ assert.equal((await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:true,now:()=>T})).written,1);
+ const index=getDoc(file,'letterboxd/facts/links.json');delete index['letterboxd:AAA1'];putDoc(file,'letterboxd/facts/links.json',index);
+ const stale=await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:true,now:()=>T});
+ assert.deepEqual([stale.already,stale.refused,stale.state],[0,1,'incomplete']);assert.equal(stale.results[0].reason,'ratings_link_absent');
+ const file2=proved(),env2=envOf(file2);
+ await ensureLetterboxdClaims(env2,{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:true,now:()=>T});
+ seedFilm(file2,2);assert.equal(sqlite(file2,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('"+FID(2)+"','letterboxd','AAA1',0,0,NULL)").status,0);
+ const competing=await ensureLetterboxdClaims(env2,{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:true,now:()=>T});
+ assert.deepEqual([competing.already,competing.refused],[0,1]);assert.equal(competing.results[0].reason,'lid_claimed_elsewhere');
+}
+// The D1 read budget of a call does not grow with the input: a large offer costs the same number of statements as one of the cap (one ordering read, then at most the cap of full proofs), and the cutoff is reported as overflow.
+{
+ const count=async size=>{
+  const file=database();let queries=0;
+  const env=envOf(file,{onQuery:async()=>{queries++;}});
+  const offer=Array.from({length:size},(_,i)=>({lid:'Z'+i,tmdb:String(1000+i)}));
+  const out=await ensureLetterboxdClaims(env,{pairs:offer,enabled:true,now:()=>T});
+  return {queries,out};
+ };
+ const small=await count(LETTERBOXD_CLAIM_UNIT_CAP),large=await count(LETTERBOXD_CLAIM_OFFER_MAX+50);
+ assert.equal(large.queries,small.queries,'statements do not grow with the offer');
+ assert.equal(large.out.requested,LETTERBOXD_CLAIM_OFFER_MAX+50);assert.equal(large.out.overflow,LETTERBOXD_CLAIM_OFFER_MAX+50-LETTERBOXD_CLAIM_UNIT_CAP,'every cut-off pair is overflow');
+ assert.equal(large.out.unattempted.length,large.out.overflow,'and listed, none processed silently');assert.equal(large.out.results.length,LETTERBOXD_CLAIM_UNIT_CAP);
+}
+// A held or unreadable authority never throws into the flow: nothing is written, the pair is reported `failed`, and the next ordinary run offers it again.
+{
+ const file=database('held');seedFilm(file,1);seedRatings(file,'AAA1',1);const before=dump(file);
+ const out=await ensureLetterboxdClaims(envOf(file),{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:true,now:()=>T});
+ assert.deepEqual([out.state,out.failed,out.written],['incomplete',1,0]);assert.equal(dump(file),before);
+}
+// Static: the three flows reach the claim only through the guarded global, after their durable steps, inside a try; the rated-candidate path is deliberately NOT wired (its rating link carries no `letterboxd:<code>` alias).
+{
+ const diary=fs.readFileSync(path.join(SRC,'letterboxd-diary-identity.js'),'utf8'),facts=fs.readFileSync(path.join(SRC,'letterboxd-facts.js'),'utf8'),rated=fs.readFileSync(path.join(SRC,'letterboxd-rated-candidates.js'),'utf8');
+ for(const text of [diary,facts])assert.ok(/typeof CanonicalLetterboxdClaim[!=]=='undefined'/.test(text),'guarded by typeof');
+ assert.ok(diary.indexOf('updateDiaryIdentity(env,{set,clear')<diary.indexOf('ensureLetterboxdClaims'),'Diary: the claim step follows the durable pending document');
+ assert.ok(facts.indexOf('await projectRecords(env,records);')<facts.indexOf('await ensureChunkClaims(env,items,films);'),'import: the claim step follows the facts, the link and the read-back');
+ assert.ok(facts.indexOf("importKey(sha,chunk,'receipt'),null,current=>current?null:next")<facts.indexOf('await ensureChunkClaims(env,items,films);'),'import: the claim step follows the committed chunk receipt');
+ assert.ok(!/CanonicalLetterboxdClaim|ensureLetterboxdClaims/.test(rated),'rated candidates are not wired');
+}
 
 // 10. Dormancy: the Worker bundle does not import the module yet (producer activation is separate from the accepted ADR).
 {
