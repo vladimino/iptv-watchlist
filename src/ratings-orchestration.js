@@ -35,7 +35,9 @@ const RatingsOrchestration=(()=>{
   const ok=typeof value==='object'&&!Array.isArray(value)&&value.schemaVersion===1&&value.budget&&Number.isInteger(value.budget.consecutive)&&Number.isInteger(value.budget.total);
   return {record:ok?value:null,etag:object?.etag??null,stored:true,malformed:!ok};
  }
- const fencedEnv=(env,etag)=>({...env,ratingsFence:{key:MODE_KEY,etag,hard:true}});
+ const fencedEnv=(env,etag,letterboxdRevision=null)=>({...env,ratingsFence:{key:MODE_KEY,etag,hard:true,...(Number.isInteger(letterboxdRevision)?{letterboxdRevision}:{})}});
+ // AIR-571 D: the Letterboxd mode revision an admission saw (null while the Letterboxd schema is absent). An unreadable row is `undefined`: the caller refuses.
+ const letterboxdPin=async env=>{if(typeof LetterboxdSync==='undefined'||typeof LetterboxdSync.modeRevisionPin!=='function')return null;try{return await LetterboxdSync.modeRevisionPin(env);}catch{return undefined;}};
  async function authorityState(env){
   if(typeof RatingsD1==='undefined')return {ready:false,error:false};
   const gate=await RatingsD1.ratingsGate(env);
@@ -171,7 +173,10 @@ const RatingsOrchestration=(()=>{
   // AIR-570 / ADR 0186 O5: `external` is not a sufficient fence. While the Letterboxd Sync owns (or is taking over) the Diary, the legacy entry points are refused.
   const letterboxd=await letterboxdFence(env);
   if(letterboxd.fenced)return {reason:'external_writer_fenced',fence:null};
-  return {reason:null,fence:{key:MODE_KEY,etag:mode.etag??null}};
+  // AIR-571 D: an admitted legacy request must not commit after the Letterboxd mode moved. The revision seen here is asserted in the batch of every authoritative commit (ratings-d1 epochFence).
+  const pin=await letterboxdPin(env);
+  if(pin===undefined)return {reason:'evidence_unreadable',fence:null};
+  return {reason:null,fence:{key:MODE_KEY,etag:mode.etag??null,...(Number.isInteger(pin)?{letterboxdRevision:pin}:{})}};
  }
 
  // ---- admission and one executor action ---------------------------------------------------------------------
@@ -189,7 +194,9 @@ const RatingsOrchestration=(()=>{
   const control=await readControl(env);
   if(control.malformed)return {ok:false,reason:'checkpoint_malformed',unsafe:true};
   if(control.record.instanceId!==id||control.record.series!==series||control.record.runKey!==runKey)return {ok:false,reason:'not_owner'};
-  return {ok:true,modeEtag:mode.etag,control:control.record,controlEtag:control.etag,controlStored:control.stored};
+  const pin=await letterboxdPin(env);
+  if(pin===undefined)return {ok:false,reason:'evidence_unreadable',unsafe:true};
+  return {ok:true,modeEtag:mode.etag,letterboxdRevision:pin,control:control.record,controlEtag:control.etag,controlStored:control.stored};
  }
  const checkpointKey=run=>run?[run.state,run.phase,run.checkpoint?.diaryPagesRead??0,run.checkpoint?.diaryNextPage??null,run.checkpoint?.removalChecked??0,run.checkpoint?.legacyPagesLinked??0].join('|'):null;
  // Durable progress is a counter that moved forward in the same run, never a restart or a changed run state.
@@ -236,7 +243,7 @@ const RatingsOrchestration=(()=>{
  }
 
  async function writeControl(env,adm,next,attemptsLeft=CONTROL_ATTEMPTS){
-  const fe=fencedEnv(env,adm.modeEtag);
+  const fe=fencedEnv(env,adm.modeEtag,adm.letterboxdRevision);
   const saved=await ratings().writeDocument(fe,CONTROL_KEY,adm.controlStored?{etag:adm.controlEtag}:null,next);
   return saved!==null;
  }
@@ -254,7 +261,7 @@ const RatingsOrchestration=(()=>{
   if(dayOf(now)!==runKey)return {kind:'stop',reason:'day_rolled'};
   const cooling=Date.parse(control.cooldownUntil||'');
   if(Number.isFinite(cooling)&&cooling>now)return {kind:'sleep',until:cooling,reason:'cooldown'};
-  const fe=fencedEnv(env,adm.modeEtag);
+  const fe=fencedEnv(env,adm.modeEtag,adm.letterboxdRevision);
   const began=clock();
   let outcome;
   try{outcome=await drive(fe,control,{now,clock});}

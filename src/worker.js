@@ -2637,8 +2637,30 @@ async function letterboxdTmdbOf(env,lids){
 // The EVIDENCE the owner's mode switch needs before the Letterboxd writer is admitted (O5): read from the live state, never asserted. Ratings is closed (its own mode is neither `cloudflare` nor
 // `switching`) and drained (no step lease live, no instance live), the legacy `ratings_sync_start`/`ratings_sync_step` entry answers `external_writer_fenced` (that happens while the Letterboxd mode is
 // `switching`, which `complete` requires), the Watchlist authority is an open `d1` and the three phase ports exist. Any unreadable piece is false.
+// AIR-571 D. The facts a handover proof rests on, read as ONE unit: the Watchlist marker (state, writes, generation), the Ratings domain authority (mode, cutover, generation: every authoritative Ratings commit bumps it)
+// and the stored etags (absence included) of the Ratings mode, control and run documents. null = any of them could not be read.
+async function letterboxdHandoverFacts(env){
+ try{
+  const db=WatchlistD1.bindingOf(env);
+  if(!db||typeof db.prepare!=='function')return null;
+  const authority=await WatchlistD1.readAuthority(env);
+  if(!authority||!Number.isInteger(authority.generation))return null;
+  const keys=[RatingsOrchestration.MODE_KEY,RatingsOrchestration.CONTROL_KEY,LetterboxdRatings.KEYS.run];
+  const read=await db.prepare('SELECT key, etag FROM ratings_document WHERE part=0 AND key IN (?,?,?)').bind(...keys).all();
+  const etags=new Map((read.results||[]).map(row=>[row.key,row.etag]));
+  const ratings=await db.prepare('SELECT mode, cutover, generation FROM ratings_domain_authority WHERE id=1').first();
+  if(!ratings||!Number.isInteger(ratings.generation))return null;
+  return {watchlist:{state:authority.state,writes:authority.writes,generation:authority.generation},ratings:{mode:ratings.mode,cutover:ratings.cutover,generation:ratings.generation},keys,etags:keys.map(key=>etags.get(key)??'')};
+ }catch{return null;}
+}
+const sameFacts=(a,b)=>!!a&&!!b&&JSON.stringify(a)===JSON.stringify(b);
+// The EVIDENCE the owner's mode switch needs before the Letterboxd writer is admitted (O5): read from the live state, never asserted. Ratings is closed (its own mode is neither `cloudflare` nor
+// `switching`) and drained (no step lease live, no instance live), the legacy `ratings_sync_start`/`ratings_sync_step` entry answers `external_writer_fenced` (that happens while the Letterboxd mode is
+// `switching`, which `complete` requires), the Watchlist authority is an open `d1` and the three phase ports exist. Any unreadable piece is false. The facts are read BEFORE and AFTER the proof and must be identical: a
+// fact that moved while the proof was read makes the whole proof false, and the identical facts are returned as `evidence`, the only thing the commit guards are built from.
 async function letterboxdHandover(env,now=Date.now()){
  const proof={ratingsClosed:false,ratingsDrained:false,legacyFenced:false,watchlistRepository:false,ratingsPhase:false};
+ const before=await letterboxdHandoverFacts(env);
  try{
   const mode=await RatingsOrchestration.readMode(env);
   proof.ratingsClosed=!mode.malformed&&mode.record?.mode==='external';
@@ -2648,33 +2670,36 @@ async function letterboxdHandover(env,now=Date.now()){
  }catch{/* an unreadable piece stays false */}
  try{const authority=await WatchlistD1.readAuthority(env);proof.watchlistRepository=authority?.state==='d1'&&authority.writes==='open';}catch{/* false */}
  try{const ports=letterboxdPorts(env);proof.ratingsPhase=!!(ports.ratings&&ports.reconcile&&ports.watchlist);}catch{/* false */}
+ const after=await letterboxdHandoverFacts(env);
+ if(!sameFacts(before,after)||before.ratings.mode!=='d1'||before.ratings.cutover!=='open'){for(const name of Object.keys(proof))proof[name]=false;return proof;}
+ Object.defineProperty(proof,'evidence',{value:before,enumerable:false});
  return proof;
 }
-// AIR-571 D. The handover proof is read outside the commit; these are its pins, asserted in the SAME batch that writes the mode row (a guard is an upsert of the letterboxd_sync_fence row, CHECK ok = 1): the
-// Watchlist authority is `d1`/`open` at the generation read, and the Ratings mode, control and run records are the documents that were read (their stored etags, absence included), so a Ratings step, a mode change
-// or a lease taken after the proof aborts the completion. null = a fact could not be read or pinned: the proof stays unprotected and the handover is refused.
-async function letterboxdHandoverGuards(env){
- try{
-  const db=WatchlistD1.bindingOf(env);
-  if(!db||typeof db.prepare!=='function')return null;
-  const authority=await WatchlistD1.readAuthority(env);
-  if(authority?.state!=='d1'||authority.writes!=='open'||!Number.isInteger(authority.generation))return null;
-  const keys=[RatingsOrchestration.MODE_KEY,RatingsOrchestration.CONTROL_KEY,LetterboxdRatings.KEYS.run];
-  const read=await db.prepare('SELECT key, etag FROM ratings_document WHERE part=0 AND key IN (?,?,?)').bind(...keys).all();
-  const etags=new Map((read.results||[]).map(row=>[row.key,row.etag]));
-  const expression="(SELECT COUNT(*) FROM watchlist_authority WHERE id=1 AND mode='d1' AND writes='open' AND generation=?)=1"+keys.map(()=>" AND COALESCE((SELECT etag FROM ratings_document WHERE key=? AND part=0),'')=?").join('');
-  const params=[authority.generation,...keys.flatMap(key=>[key,etags.get(key)??''])];
-  return [["INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN "+expression+" THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok",params]];
- }catch{return null;}
+// AIR-571 D. The pins of the proof, built from the evidence the proof itself captured (never from a new read): the Watchlist authority is `d1`/`open` at the generation read, the Ratings domain authority is `d1`/`open`
+// at the generation read (so a Ratings commit after the proof aborts the completion) and the Ratings mode, control and run documents have the stored etags that were read. They are asserted in the SAME batch that
+// writes the mode row. null = no evidence: the proof stays unprotected and the handover is refused.
+async function letterboxdHandoverGuards(env,handover){
+ const facts=handover?.evidence;
+ if(!facts||facts.watchlist.state!=='d1'||facts.watchlist.writes!=='open')return null;
+ const expression="(SELECT COUNT(*) FROM watchlist_authority WHERE id=1 AND mode='d1' AND writes='open' AND generation=?)=1 AND (SELECT COUNT(*) FROM ratings_domain_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?)=1"+facts.keys.map(()=>" AND COALESCE((SELECT etag FROM ratings_document WHERE key=? AND part=0),'')=?").join('');
+ const params=[facts.watchlist.generation,facts.ratings.generation,...facts.keys.flatMap((key,index)=>[key,facts.etags[index]])];
+ return [["INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN "+expression+" THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok",params]];
 }
 // AIR-571 D. The durable causal effects of the current snapshot (facts, retention, removal queue): done before a running writer is closed. Mirror delivery, Events and pending admission are not part of it.
+// `guard` re-asserts exactly what was read, at the version read, in the batch that closes the epoch: a promotion committed after the read (a new version or a new undone effect) aborts the close.
 async function letterboxdEffectsState(env){
  const db=WatchlistD1.bindingOf(env);
  if(!db||typeof db.prepare!=='function')return {unproven:true};
  const row=await db.prepare("SELECT version, effects_drained_version AS drainedVersion, (SELECT COUNT(*) FROM watchlist_effect WHERE status<>'done') AS pending FROM watchlist_current WHERE id=1").first();
  if(!row)return {unproven:true};
  const version=Number(row.version),drainedVersion=Number(row.drainedVersion),pending=Number(row.pending);
- return {drained:drainedVersion===version&&pending===0,pending,version,drainedVersion};
+ const drained=drainedVersion===version&&pending===0;
+ return {drained,pending,version,drainedVersion,guard:["INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN (SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=? AND effects_drained_version=version)=1 AND (SELECT COUNT(*) FROM watchlist_effect WHERE status<>'done')=0 THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok",[version]]};
+}
+// AIR-571 D. The legacy Ratings entry may reopen (reverse completion or an abort toward `external`) only when the Watchlist is back on the inert `epg` authority with writes open: the legacy writer rewrites the root mirror.
+async function letterboxdLegacyEntrySafe(env){
+ const authority=await WatchlistD1.readAuthority(env);
+ return authority?.state==='epg'&&authority.writes==='open';
 }
 function letterboxdPorts(env){
  const sources=sourceConfig(env);
@@ -2697,7 +2722,7 @@ function letterboxdPorts(env){
   const rated=await storedRemovalRatings(e,{type:'watchlist',removed:removed.map(film=>eventRemovedFilm(known(film)))}).catch(()=>null);
   return {added:added.map(film=>eventFilm(known(film))),removed:rated?.event?.removed||removed.map(film=>eventRemovedFilm(known(film)))};
  };
- return {handover:e=>letterboxdHandover(e||env),handoverGuards:e=>letterboxdHandoverGuards(e||env),effects:e=>letterboxdEffectsState(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
+ return {handover:e=>letterboxdHandover(e||env),handoverGuards:(e,handover)=>letterboxdHandoverGuards(e||env,handover),legacyEntrySafe:e=>letterboxdLegacyEntrySafe(e||env),effects:e=>letterboxdEffectsState(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
 }
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {
