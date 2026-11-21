@@ -10,17 +10,22 @@
 //   activate        epg/held  G -> d1/held  G+1    the same pins; re-asserted in the batch
 //   release         d1/held   G -> d1/open  G      pins: run, count, both digests, snapshot id (the import must be whole; the old source may have moved on)
 //   hold-rollback   d1/open   G -> d1/held  G+1    pins: snapshot id, count, raw digest of the CURRENT snapshot, its version and its revision
+//   export-rollback d1/held   G (no marker move)   writes the CURRENT snapshot into the published generation's watchlist part through the EPG writer path; pins: the snapshot + pointer
+//                   (version, revision) and the published run and EPG generation read before
+//   revert-authority     d1/held G -> epg/held G+1   pins as export-rollback, with the EPG generation the export PRODUCED (read back: membership and order parity inside the batch)
+//   release-rolled-back  epg/held G -> epg/open G
 //
-// Not here: the rollback export into the published generation, the return to `epg`, the Ratings close, the Letterboxd mode switch, the binding and the cron.
+// Not here: the Ratings close, the Letterboxd mode switch, the root mirror reconciliation, the binding and the cron.
 import {pathToFileURL} from 'node:url';
 import {createD1Adapter,D1Error} from './d1-backfill.mjs';
 import {createPublishedBinding,normalize,OperatorStop,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
 import {readState as readBase,verifyImported} from './watchlist-bootstrap-production.mjs';
 import {LEASE_MARGIN_MS,livenessOf,membershipDigest} from '../src/watchlist-bootstrap.js';
-import {listDigest} from '../src/watchlist-d1.js';
-import {TRANSITIONS,transitionStatements} from '../src/watchlist-cutover.js';
+import {listDigest,normalizeFilms} from '../src/watchlist-d1.js';
+import * as PublishedEpg from '../src/published-epg.js';
+import {exportGuards,TRANSITIONS,transitionStatements} from '../src/watchlist-cutover.js';
 
-export const COMMANDS=['status',...Object.keys(TRANSITIONS)];
+export const COMMANDS=['status',...Object.keys(TRANSITIONS),'export-rollback'];
 const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--expect-run':'run','--expect-epg-generation':'epgGeneration','--expect-count':'count','--expect-members-sha256':'membersSha256','--expect-sha256':'sha256','--expect-snapshot-id':'snapshotId','--expect-version':'version','--expect-revision':'revision'};
 const NEEDS={
  hold:['generation','run','epgGeneration','count','membersSha256','sha256','snapshotId'],
@@ -28,6 +33,9 @@ const NEEDS={
  release:['generation','run','count','membersSha256','sha256','snapshotId'],
  'release-abort':['generation'],
  'hold-rollback':['generation','count','sha256','snapshotId','version','revision'],
+ 'export-rollback':['generation','count','sha256','snapshotId','version','revision','run','epgGeneration'],
+ 'revert-authority':['generation','count','sha256','snapshotId','version','revision','run','epgGeneration'],
+ 'release-rolled-back':['generation'],
 };
 const iso=ms=>new Date(ms).toISOString();
 async function one(binding,sql,params=[]){return (await binding.prepare(sql).bind(...params).first())??null;}
@@ -59,7 +67,92 @@ export async function verifyCurrent(binding,state){
  return {ok:true,runId:snap.run_id,membersSha256:await membershipDigest(stored)};
 }
 
+// The causal effects of the current snapshot (facts, retention, removal queue) are all done before the writer is closed: once the mode is `external` and the authority is `epg`, nothing could drain them.
+// Mirror delivery, Events and pending identity admission are NOT part of this check. -> null | {drainedVersion,version,pending}
+export async function effectsPending(binding,state){
+ const p=state.pointer;
+ const pending=Number((await one(binding,"SELECT COUNT(*) AS n FROM watchlist_effect WHERE status<>'done'"))?.n);
+ if(Number(p.effects_drained_version)===Number(p.version)&&pending===0)return null;
+ return {drainedVersion:Number(p.effects_drained_version),version:Number(p.version),pending};
+}
+
 const view=state=>({schemaVersion:state.schemaVersion,marker:markerOf(state),pointer:pointerOf(state),counts:state.counts,published:state.published?{programmeRunId:state.published.programme_run_id,generation:Number(state.published.generation),certified:state.published.finalized_run_id===state.published.programme_run_id}:null,checkpoint:state.checkpoint?{mode:state.checkpoint.mode,writes:state.checkpoint.writes}:null,letterboxd:{rows:state.letterboxd?.rows?.length??0,closed:letterboxdFact(state)?.closed??null},liveness:state.orchestration?livenessOf({control:state.orchestration.control,lease:state.orchestration.lease},0).ok?'valid':'unknown':null});
+
+
+// ---- the rollback export: the current snapshot into the published generation, through the EPG writer path ------------------------------------
+// ADR 0186 decision 8.5. Only in d1/held (after `hold-rollback`). The EPG writer path is `PublishedEpg.saveWatchlist`: a staged commit that replaces the watchlist part (document chunks and
+// member rows) and moves the EPG generation by exactly one, compare-and-swapped on the generation read here. It does not write the programme, the shows or the R2 mirrors (a named
+// writer reconciles them later); the root watchlist mirror belongs to the EPG again only after `revert-authority`.
+export async function exportRollback(binding,state,args,clock,ctx={}){
+ const m=markerOf(state);
+ if(m.mode!=='d1'||m.writes!=='held'||m.generation!==args.generation)throw new OperatorStop('state_mismatch',3,{marker:m});
+ const body=await verifyCurrent(binding,state);
+ if(!body.ok)throw new OperatorStop(body.reason,3,{problems:body.problems});
+ const p=state.pointer;
+ if(p.snapshot_id!==args.snapshotId||p.list_sha256!==args.sha256||Number(p.film_count)!==args.count)throw new OperatorStop('pin_mismatch',3,{problems:['snapshot']});
+ if(Number(p.version)!==args.version||Number(p.revision)!==args.revision)throw new OperatorStop('pin_mismatch',3,{problems:['pointer']});
+ const undrained=await effectsPending(binding,state);
+ if(undrained)throw new OperatorStop('effects_pending',3,undrained);
+ const lb=letterboxdFact(state);
+ if(!lb||!lb.closed)throw new OperatorStop('letterboxd_not_closed',3);
+ const live=livenessOf({control:state.orchestration.control,lease:state.orchestration.lease},clock);
+ if(!live.ok)throw new OperatorStop('liveness_unknown',3,{reason:live.reason});
+ if(live.busy)throw new OperatorStop('writer_active',3,{busy:live.busy});
+ const pub=state.published;
+ if(!pub||pub.mode!=='d1'||pub.cutover!=='open'||pub.programme_run_id!==args.run||pub.finalized_run_id!==pub.programme_run_id)throw new OperatorStop('published_moved',3,{published:pub?{programmeRunId:pub.programme_run_id,generation:Number(pub.generation)}:null});
+ // The snapshot as the list (members in order). The stored document keeps every other field of a film it already has; the snapshot owns id, title, year and url.
+ const members=await many(binding,'SELECT ordinal, lid, title, year, url FROM watchlist_member WHERE snapshot_id=? ORDER BY ordinal',[p.snapshot_id]);
+ const stored=state.source;
+ if(!stored||!Array.isArray(stored.films))throw new OperatorStop('source_unreadable',3);
+ const equalNow=await listDigest(normalizeFilms(stored.films)||[])===p.list_sha256&&JSON.stringify(state.sourceMembers)===JSON.stringify(members.map(row=>row.lid));
+ if(equalNow&&Number(pub.generation)===args.epgGeneration)return {operation:'export-rollback',writes:false,writeState:'none',outcome:'already_exported',receipt:'verified_equal',published:{programmeRunId:pub.programme_run_id,generation:Number(pub.generation)}};
+ if(Number(pub.generation)!==args.epgGeneration)throw new OperatorStop('published_moved',3,{published:{programmeRunId:pub.programme_run_id,generation:Number(pub.generation)}});
+ const byId=new Map(stored.films.map(film=>[film?.id,film]));
+ const films=members.map(row=>{const film={...(byId.get(row.lid)||{}),id:row.lid,title:row.title,url:row.url};if(row.year===null)delete film.year;else film.year=Number(row.year);return film;});
+ const document={...stored,films};
+ if(await listDigest(normalizeFilms(films))!==p.list_sha256)throw new OperatorStop('export_digest',3);
+ // The commit guard travels INTO the staged writer: it is asserted in the same transaction as the replacement (marker d1/held at G, the pinned pointer with its effects done, the Letterboxd
+ // mode and its revision, the liveness proof, the certified pinned publication), so a change during the multi-batch staging aborts the replacement. The binding is wrapped to count the batches
+ // the writer actually sends: a staged commit writes its claim, chunks and validation before the final replacement.
+ const guards=exportGuards({generation:args.generation,facts:{snapshot:{snapshotId:p.snapshot_id,sha256:p.list_sha256,count:Number(p.film_count),revision:Number(p.revision),version:Number(p.version)},published:{programmeRunId:args.run,epgGeneration:args.epgGeneration},letterboxd:{revision:lb.revision},liveness:{controlRevision:state.orchestration.control?.revision??-1,leaseRevision:state.orchestration.lease?.revision??-1,liveAfterIso:iso(clock-LEASE_MARGIN_MS)}}});
+ const sent={started:0,completed:0,rejected:false};
+ // The writer wraps a batch error in its own error type; the proven rejection (a statement error of the D1 API) is read here, from the original error.
+ const tracked={prepare:sql=>binding.prepare(sql),batch:async statements=>{sent.started++;let result;try{result=await binding.batch(statements);}catch(error){sent.rejected=error instanceof D1Error&&error.kind==='statement';throw error;}sent.completed++;return result;}};
+ if(ctx.track)ctx.track('unknown');
+ let outcome,failure=null;
+ try{outcome=await PublishedEpg.saveWatchlist(tracked,document,{expectedGeneration:args.epgGeneration,owner:ctx.owner,guards});}catch(error){failure=error;}
+ let after=null;
+ try{after=await readState(binding);}catch{after=null;}
+ const moved=Boolean(after?.published)&&after.published.programme_run_id===args.run&&Number(after.published.generation)===args.epgGeneration+1;
+ const unchanged=Boolean(after?.published)&&after.published.programme_run_id===args.run&&Number(after.published.generation)===args.epgGeneration;
+ // The generation moving by one is OUR replacement only if the stored list is the snapshot; another writer's commit also moves it.
+ const ours=moved&&Boolean(after?.source)&&await listDigest(normalizeFilms(after.source.films)||[])===p.list_sha256;
+ if(failure||outcome!==true){
+  // Two different facts. (1) Was the AUTHORITATIVE list replaced? The generation says: unchanged means no. (2) Were any database writes made? A staged commit writes its claim, chunks and validation in earlier
+  // batches, and a cleanup can fail, so an unchanged generation does NOT prove writeState none. `none` only when no batch completed and the failure is a proven rejection (or no batch was sent at all).
+  const rejected=sent.rejected||(failure instanceof D1Error&&failure.kind==='statement');
+  const noWrites=sent.completed===0&&(sent.started===0||rejected);
+  let stage=null;
+  try{stage=(await many(binding,"SELECT programme_run_id AS id, state FROM published_epg_stage WHERE programme_run_id LIKE ?",[args.run+'#watchlist#%'])).map(row=>({id:row.id,state:row.state}));}catch{stage=null;}
+  const authoritative=unchanged?'unchanged':ours?'replaced':moved?'moved_by_another_writer':'unknown';
+  if(ctx.track)ctx.track(noWrites&&unchanged?'none':'unknown');
+  const reason=unchanged&&(outcome===false||(rejected&&sent.completed>=0))?'export_refused':'write_uncertain';
+  throw new OperatorStop(reason,3,{authoritative,batches:{started:sent.started,completed:sent.completed},stage,published:after?.published?{programmeRunId:after.published.programme_run_id,generation:Number(after.published.generation)}:null,...(ours?{reachedByUnknownOutcome:true}:{})});
+ }
+ if(!after||!moved)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch'});
+ // Readback: the stored list equals the snapshot (digest, membership and order), the programme document and everything else did not move.
+ const problems=[];
+ const documentAfter=after.source;
+ if(!documentAfter||await listDigest(normalizeFilms(documentAfter.films)||[])!==p.list_sha256)problems.push('document_digest');
+ if(JSON.stringify(after.sourceMembers)!==JSON.stringify(members.map(row=>row.lid)))problems.push('member_rows');
+ if(JSON.stringify(markerOf(after))!==JSON.stringify(m))problems.push('marker_moved');
+ if(JSON.stringify(pointerOf(after))!==JSON.stringify(pointerOf(state)))problems.push('pointer_moved');
+ if(JSON.stringify(after.counts)!==JSON.stringify(state.counts))problems.push('rows_moved');
+ for(const table of Object.keys(state.markers))if(table!=='published_epg_authority'&&state.markers[table]!==after.markers[table])problems.push('marker_changed:'+table);
+ if(problems.length)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',problems});
+ if(ctx.track)ctx.track('committed');
+ return {operation:'export-rollback',writes:true,writeState:'committed',published:{programmeRunId:after.published.programme_run_id,generation:Number(after.published.generation)},next:'revert-authority with --expect-epg-generation '+Number(after.published.generation)};
+}
 
 // ---- one transition ------------------------------------------------------------------------------------------------------------
 export async function execute(command,{binding,args={},now,ctx={}}){
@@ -71,6 +164,7 @@ export async function execute(command,{binding,args={},now,ctx={}}){
   const live=livenessOf({control:state.orchestration.control,lease:state.orchestration.lease},clock);
   return {operation:'status',writes:false,writeState:'none',...view(state),snapshot:current.ok?{ok:true,runId:current.runId,membersSha256:current.membersSha256}:{ok:false,reason:current.reason},epgBusy:live.ok?live.busy:'unknown'};
  }
+ if(command==='export-rollback')return exportRollback(binding,state,args,clock,ctx);
  const spec=TRANSITIONS[command];
  if(!spec)throw new OperatorStop('usage',2);
  const m=markerOf(state);
@@ -95,7 +189,25 @@ export async function execute(command,{binding,args={},now,ctx={}}){
     const proof=await verifyImported(binding,state,{run:args.run,count:args.count,membersSha256:args.membersSha256,sha256:args.sha256},{requireSource:false});
     if(!proof.ok)throw new OperatorStop(proof.reason,3,{problems:proof.problems});
    }
-  }else if(Number(p.version)!==args.version||Number(p.revision)!==args.revision)throw new OperatorStop('pin_mismatch',3,{problems:['pointer']});
+  }else{
+   if(Number(p.version)!==args.version||Number(p.revision)!==args.revision)throw new OperatorStop('pin_mismatch',3,{problems:['pointer']});
+   const undrained=await effectsPending(binding,state);
+   if(undrained)throw new OperatorStop('effects_pending',3,undrained);
+  }
+ }
+ if(spec.needs.includes('exportParity')){
+  // The proof is read here and bound inside the batch: a certified run at the pinned generation, the stored list equal to the snapshot (normalized digest, title, year and url included, and the member
+  // order), and the stored payload digest of the generation, which any later replacement changes.
+  const pub=state.published;
+  if(!pub||pub.mode!=='d1'||pub.cutover!=='open'||pub.programme_run_id!==args.run||Number(pub.generation)!==args.epgGeneration)throw new OperatorStop('published_moved',3,{published:pub?{programmeRunId:pub.programme_run_id,generation:Number(pub.generation)}:null});
+  if(pub.finalized_run_id!==pub.programme_run_id)throw new OperatorStop('published_not_certified',3);
+  const document=state.source;
+  const rows=await many(binding,'SELECT lid FROM watchlist_member WHERE snapshot_id=? ORDER BY ordinal',[args.snapshotId]);
+  const normalized=document&&Array.isArray(document.films)?normalizeFilms(document.films):null;
+  if(!normalized||await listDigest(normalized)!==p.list_sha256||JSON.stringify(state.sourceMembers)!==JSON.stringify(rows.map(row=>row.lid)))throw new OperatorStop('parity_mismatch',3,{problems:['document_digest']});
+  const generation=await one(binding,'SELECT payload_sha256 FROM published_epg_generation WHERE programme_run_id=?',[args.run]);
+  if(!generation||!/^[0-9a-f]{64}$/.test(generation.payload_sha256||''))throw new OperatorStop('published_moved',3);
+  facts.parity={programmeRunId:args.run,epgGeneration:args.epgGeneration,payloadSha256:generation.payload_sha256};
  }
  if(spec.needs.includes('checkpoint')){
   const c=state.checkpoint;
