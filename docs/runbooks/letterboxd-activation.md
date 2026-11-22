@@ -2,6 +2,8 @@
 
 **Status (22 Nov 2026): prepared, NOT performed, NOT authorized.** This page is the executable plan the owner can approve operation by operation. Nothing on it is authorized by a deploy, by the merge of the code it describes or by this page. Every operation below needs its own explicit owner GO, naming the operation, the target, the pins and the window; a GO for one operation is not a GO for the next. The prerequisite **O4** ([AIR-551](https://trello.com/c/YAVPlcAe) Done, with a natural EPG run observed after the checkpoint cutover) must hold before B. Decisions and rationale: [ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md) (O1, O4, O5, decisions 1, 3 and 8). The earlier no-GO package and its findings: [go/no-go package](../evidence/d1-migration/air-571-go-no-go-package-2026-11-21.md). The commands and refusals of each operator: [Letterboxd Sync runbook](letterboxd-sync.md).
 
+**Request templates and the live preflight of 22 Nov 2026:** [GO packets B to F2, the read-only preflight and the scratch QA proposal](../evidence/d1-migration/air-571-go-packets-and-scratch-qa-proposal-2026-11-22.md).
+
 ## Rules that apply to every step
 
 - **Windows.** No operation or deployment of this plan between **16:30 and 17:00 Europe/Madrid** (the 16:30 Letterboxd slot, the 17:00 daily EPG and its pinned last-good snapshot). No two authority cutovers share a window: B and C do not share a window with each other, with the AIR-551 activation or with any EPG, Ratings, Discovery or Predictions cutover. Madrid time is stated with UTC in every receipt.
