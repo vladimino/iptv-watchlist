@@ -1425,6 +1425,18 @@ async function sealedMemberTmdb(db,run){
  sealedMembers={db,run,map};
  return map;
 }
+// AIR-579. The rows an observation key holds in the published run, read at ITS OWN slot coordinates. The caller only ever looks up its own slots
+// (`channel:start`), so selecting by `start_ms` over the existing `(programme_run_id, start_ms)` index returns every row it can use, while the former
+// `programme_run_id` + `basis` + `match_reason` statement had no usable index and walked every row of the run (about 20 k) per call, twice per observation.
+// The `basis` and `match_reason` predicates are kept, so the map holds exactly the rows of the former statement that lie at these start times.
+export async function heldSlotRows(db,run,key,slots){
+ const starts=[...new Set(slots.map(slot=>slot.startMs))],held=new Map();
+ for(let index=0;index<starts.length;index+=BIND_CAP-3){
+  const chunk=starts.slice(index,index+BIND_CAP-3);
+  for(const item of await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=? AND start_ms IN ("+marks(chunk.length)+")",[run,key,...chunk]))held.set(item.channel_id+':'+item.start_ms,item.film_id);
+ }
+ return held;
+}
 export async function assignObservationSlots(env,spec,context={}){
  const lease=context.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
@@ -1452,7 +1464,7 @@ export async function assignObservationSlots(env,spec,context={}){
  let payload=null;try{payload=observation.payload_json?JSON.parse(observation.payload_json):null;}catch{payload=null;}
  const confirmation=payload&&Array.isArray(payload.confirmedSlots)?payload:{confirmedTmdbId:observation.confirmed_tmdb_id};
  const slots=(await many(db,"SELECT channel_id, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key=? ORDER BY ordinal",[key])).map(item=>({channelId:item.channel_id,startMs:item.start_ms,endMs:item.end_ms}));
- const held=new Map((await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=?",[run,key])).map(item=>[item.channel_id+':'+item.start_ms,item.film_id]));
+ const held=await heldSlotRows(db,run,key,slots);
  const pending=[];
  for(const slot of slots){
   if(held.get(slot.channelId+':'+slot.startMs)===film){outcomes.present++;continue;}
@@ -1471,7 +1483,7 @@ export async function assignObservationSlots(env,spec,context={}){
   ]);
   gate={...gate,generation:gate.generation+1};
  }
- const after=new Map((await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=?",[run,key])).map(item=>[item.channel_id+':'+item.start_ms,item.film_id]));
+ const after=await heldSlotRows(db,run,key,pending);
  for(const slot of pending){
   if(after.get(slot.channelId+':'+slot.startMs)===film){outcomes.assigned++;result.assigned.push({channelId:slot.channelId,startMs:slot.startMs});continue;}
   const holder=await one(db,'SELECT film_id FROM published_epg_show WHERE programme_run_id=? AND channel_id=? AND start_ms=?',[run,slot.channelId,slot.startMs]);

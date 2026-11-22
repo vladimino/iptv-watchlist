@@ -445,6 +445,9 @@ export const FILES={
  "admin-identity-group-page.mjs": {
   "suite": "core"
  },
+ "discovery-held-slot-read.mjs": {
+  "suite": "core"
+ },
  "discovery-identity-group.mjs": {
   "suite": "core"
  },
