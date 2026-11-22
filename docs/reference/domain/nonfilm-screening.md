@@ -37,15 +37,15 @@ XMLTV `<category>` is copied onto the discovery candidate (`categories`, at most
 | Form | Rule | Reason in `serialFiltered` |
 | --- | --- | --- |
 | Season-pipe-episode pair | `<Title> 2|5 <Name>`, `<Title> (2|1)`: two digit groups around a vertical bar after at least two letters | `season_pipe_episode` |
-| Mini-series label | the label `мини-сериал` (any dash) after at least one letter of a title; the bare word is a title | `mini_series_label` |
+| Mini-series label | the label `мини-сериал` (any dash) as a **trailing descriptor**: it ends the title and follows a closing parenthesis, a colon or a dash (`<Title> (2026) мини-сериал`, `<Title>: мини-сериал`). The bare word, an inflected form (`минисериалов`, `мини-сериале`) and a title that only contains the label are titles | `mini_series_label` |
 | Ordinal episode | `N-я серия`, `N-я - M-я серии`: `N`, or the upper bound of a range, of **7 or more**; a stem (the title before the marker) with at least one letter, **no year** in it, and **not a known Film title** in the index | `ordinal_episode` |
-| `<Title> S-EE` | `<Title> 2-07`: a placeholder description (empty or equal to the title), a valid duration of at most 80 minutes in every airing, no catalog or per-slot confirmation, and the same stem in **at least two distinct programmes of the same scan** | `dash_season_episode` |
+| `<Title> S-EE` | `<Title> 2-07`: a placeholder description (empty or equal to the title), a valid duration of at most 80 minutes in every airing, no catalog or per-slot confirmation, a whole title that is **not** a known Film title (such a programme never enters the pass), and the same stem in **at least two distinct programmes of the same scan** | `dash_season_episode` |
 
 Fail-safe rules that keep a film out of the screen:
 
 - Ordinals 1 to 6 stay candidates: a multi-part film is aired in parts.
 - The ordinal form runs only when the scan input holds at least one catalog Film. An empty or unavailable catalog would make every stem look unknown and never permits a screen.
-- A programme with one reliable watchlist or catalog match is never screened, and neither is one whose whole title is a known Film title that only the year or the duration refused.
+- A programme with one reliable watchlist or catalog match is never screened, and neither is one whose whole title is a known Film title that only the year or the duration refused. This holds for every form, the same-scan `S-EE` pass included.
 - A missing description, duration or identity is never a reason to screen: the `S-EE` form needs a valid duration and a repeat, and a singleton stem in a scan is kept.
 - On a `known_only` channel a programme that one of these forms would screen does not claim its slot, like any other screened non-film, so a competing known Film on the same channel and start is kept.
 

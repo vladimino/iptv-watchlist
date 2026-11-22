@@ -11,11 +11,19 @@ A scan-only screen with four forms, the reliable-match precedence unchanged, and
 | Form | Guard |
 | --- | --- |
 | `<Title> 2\|5 <Name>` season-pipe-episode pair | none beyond the form and two letters of title |
-| `мини-сериал` label after a title | the bare word is a title |
+| trailing `мини-сериал` label (after a closing parenthesis, a colon or a dash, ending the title) | the bare word, an inflected form and a title that merely contains it are titles |
 | ordinal `N-я серия` with `N` (or a range's upper bound) at least 7 | stem without a year, stem not a known Film title, catalog present in the scan input |
-| `<Title> S-EE` | placeholder description, valid duration of at most 80 minutes, same stem in at least two distinct programmes **of the same scan** |
+| `<Title> S-EE` | placeholder description, valid duration of at most 80 minutes, a whole title that is not a known Film title, same stem in at least two distinct programmes **of the same scan** |
 
 Left out on purpose, with the numbers the audit measured: ordinals 1 to 6 (127 proven rows), the abbreviated `<Title>", N сезон, K с.` form (23 proven rows, one singleton), `<Title> 2 сезон`, series labels other than `мини-сериал`, and every `S-EE` singleton of a scan (the 8 unproven singletons of the audit).
+
+## Corrections after the first independent review
+
+Two false-positive paths were found at the first head and closed; the replay was repeated and its numbers did not change.
+
+- **Deferred `S-EE` pass and a known whole title.** The immediate screen exempted a programme whose whole title is a known Film title; the same-scan pass did not, so a catalog Film titled like one member of a placeholder pair, refused only by its runtime, could have been dropped together with its sibling. The pass now never collects such a programme. An end-to-end `scanEPG` fixture with a catalog Film refused by runtime pins it, and a replay case does the same.
+- **Overbroad label.** The label pattern matched inside inflected words (`минисериалов`, `мини-сериале`). It is now a trailing descriptor only. Negative titles are pinned in the pure rule and in the scan fixture.
+- The earlier replay exempted a known whole title for every form, which production did only for the immediate screen; production now matches it for every form, so the replay and the scan agree. On the pinned ledger neither path was exercised: 472 of the 5,009 candidates have a whole title that is a known catalog title and none of them has a serial form, and the 20 label rows all end in the label.
 
 ## Replay method
 

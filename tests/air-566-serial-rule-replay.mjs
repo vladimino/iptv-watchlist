@@ -51,6 +51,11 @@ assert.equal(result.withCatalogGuard.trustedIdentityHits,1);
 assert.equal(result.verifiedControls.productionHitsWithGuard,0);assert.equal(result.verifiedControls.dashStemPossible,1);
 assert.equal(result.withCatalogGuard.exposure.in_backoff,result.withCatalogGuard.hits);
 
+// The whole-title precedence holds for every form, the deferred S-EE pass included: a catalog Film titled like one member of a placeholder pair leaves the other a singleton.
+const knownDash=replay({cohort,history:[],verified,catalog:[...catalog,{t:'Дзета 1-01',o:null,al:null,mt:null}]},rule,now);
+const knownReasons=Object.fromEntries(cohort.map(item=>[item.t,knownDash.decisions.get(item.ok)||null]));
+assert.equal(knownReasons['Дзета 1-01'],null);assert.equal(knownReasons['Дзета 1-02'],null);
+
 // An empty catalog index leaves the ordinal form on in the replay only because the replay passes an index; the production scan gates the form on a
 // catalog being present (tests/serial-episode-screening.mjs). The replay with an unrelated catalog keeps every stem unknown.
 const unknown=replay({cohort,history:[],verified,catalog:[{t:'Пустой',o:null,al:null,mt:null}]},rule,now);
