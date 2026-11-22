@@ -47,10 +47,18 @@ export function watchlistRepository(WatchlistD1, {epochGuard, scanGuard = null, 
     async commitScan(ctx, {members, scan}) {
       const g = promotionGuards(ctx);
       if (!g) throw Object.assign(new Error('epoch guard'), {code: 'epoch_guard_absent'});
-      const publish = () => WatchlistD1.publishSnapshot(ctx.env, members, {...scan, completedAt: scan.observedAt}, {now: ctx.now(), guards: g});
-      let result = await publish();
-      // A `conflict` is a definite rejection (the pointer moved by one under the batch: the mirror bookkeeping, an attempt record): nothing was written, and ONE replay reads the pointer again. `indeterminate` is never replayed.
-      if (!result.ok && result.reason === 'conflict') result = await publish();
+      const publish = guards => WatchlistD1.publishSnapshot(ctx.env, members, {...scan, completedAt: scan.observedAt}, {now: ctx.now(), guards});
+      const pin = await WatchlistD1.pointerPin(ctx.env);
+      let result = await publish(g);
+      // ONE replay, and only for a PROVEN bookkeeping-only contention: the pointer's revision moved (the mirror bookkeeping, an attempt record) while its version, snapshot id, success time and the authority generation are exactly
+      // what this scan started from. The replay carries that original pin in its own batch, so it commits only if nothing else moved. A superseded scan (another promotion or a freshness-only change), an unrelated guard
+      // rejection and `indeterminate` are never replayed: replaying an older list would promote it over a newer one.
+      if (!result.ok && result.reason === 'conflict' && pin) {
+        const after = await WatchlistD1.pointerPin(ctx.env);
+        if (after && after.generation === pin.generation && after.version === pin.version && after.snapshotId === pin.snapshotId && after.lastSuccessAt === pin.lastSuccessAt && after.revision > pin.revision) {
+          result = await publish([...g, WatchlistD1.pointerGuard(pin)]);
+        }
+      }
       if (!result.ok) throw Object.assign(new Error(result.reason), {code: String(result.reason).slice(0, 60)});
       const current = await WatchlistD1.readCurrent(ctx.env, {now: ctx.now()});
       const snapshot = current.ok ? current.snapshot : null;

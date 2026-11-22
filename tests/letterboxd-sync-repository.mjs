@@ -156,20 +156,54 @@ const slotRows=(f,key)=>f.db.sql("SELECT watchlist_outcome,status FROM letterbox
  const closed=await Sync.switchMode(env,{action:'close_admission',target:'external',expectEpoch:mode.epoch,expectRevision:mode.revision},ports,NOW0);
  assert.equal(closed.closed,true,JSON.stringify(closed));
 }
-// 9. AIR-571 M1: a pointer compare-and-swap lost to the mirror bookkeeping (a definite `conflict`) is replayed ONCE; an `indeterminate` answer never is.
+// 9. AIR-571 M1 (review of PR #883): a scan whose pointer compare-and-swap loses is replayed ONCE only for a PROVEN bookkeeping-only contention, with the original pin carried into the replay. A competing promotion, a
+// freshness-only change and an unknown outcome are never replayed (replaying an older list would promote it over a newer one). Real repository, real race injected between the scan's read and its final batch.
 {
- const f=open();
- const ctx={env:{DB:f.db},epoch:1,now:()=>T('2026-11-21T09:40:00Z'),slotKey:'2026-11-21T1030',runId:'r'};
- const calls=[];
- const flaky=(reasons)=>({...WatchlistD1,publishSnapshot:async(...args)=>{calls.push(1);const reason=reasons.shift();return reason?{ok:false,reason}:WatchlistD1.publishSnapshot(...args);}});
+ const finalBatch=statements=>statements.some(item=>/UPDATE watchlist_current SET version=/.test(item.text));
+ function hooked(hook){
+  const file=path.join(root,'db-'+(copies++)+'.sqlite');fs.copyFileSync(base,file);
+  const sql=text=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
+  sql("UPDATE watchlist_authority SET mode='d1',generation=1 WHERE id=1;INSERT INTO letterboxd_sync_mode (id,mode,epoch,changed_at,revision,write_id) VALUES (1,'cloudflare',1,'2026-11-21T00:00:00.000Z',1,'w');");
+  const state={armed:false,batches:0};
+  const db=d1Standin(file,{onBatch:async statements=>{if(!state.armed||!finalBatch(statements))return;state.batches++;if(state.batches===1)await hook({sql,db:state.db});}});
+  state.db=db;
+  return {file,sql,db,state};
+ }
+ const scanOf=(id,at)=>({scanId:id,observedAt:at});
  const guard={epochGuard:e=>[Sync.FENCE_GUARD_SQL,[e]]};
- f.sql("INSERT INTO letterboxd_sync_mode (id,mode,epoch,changed_at,revision,write_id) VALUES (1,'cloudflare',1,'2026-11-21T00:00:00.000Z',1,'w');");
- const once=watchlistRepository(flaky(['conflict']),guard);
- const committed=await once.commitScan(ctx,{members:[film(0),film(1)],scan:{scanId:'m1',observedAt:'2026-11-21T09:40:00.000Z'}});
- assert.equal(committed.outcome,'committed');assert.equal(calls.length,2,'one replay after a conflict');
- calls.length=0;
- await assert.rejects(()=>watchlistRepository(flaky(['conflict','conflict']),guard).commitScan(ctx,{members:[film(0),film(2)],scan:{scanId:'m2',observedAt:'2026-11-21T09:41:00.000Z'}}),e=>e.code==='conflict');assert.equal(calls.length,2,'never more than one replay');
- calls.length=0;
- await assert.rejects(()=>watchlistRepository(flaky(['indeterminate']),guard).commitScan(ctx,{members:[film(0),film(3)],scan:{scanId:'m3',observedAt:'2026-11-21T09:42:00.000Z'}}),e=>e.code==='indeterminate');assert.equal(calls.length,1,'an unknown outcome is never replayed');
+ const base1=async f=>{const r=await WatchlistD1.publishSnapshot(f.db,[film(0),film(1)],{scanId:'s0',observedAt:'2026-11-21T09:00:00.000Z',completedAt:'2026-11-21T09:00:00.000Z'},{now:T('2026-11-21T09:00:00Z')});assert.equal(r.ok,true);for(const effect of WatchlistD1.EFFECTS)await WatchlistD1.completeEffect(f.db,{snapshotId:r.snapshotId,effect,receipt:'r'},{now:T('2026-11-21T09:00:00Z')});};
+ const ctxOf=f=>({env:{DB:f.db},epoch:1,now:()=>T('2026-11-21T10:00:00Z'),slotKey:'2026-11-21T1030',runId:'r'});
+ const version=f=>f.db.sql('SELECT version, last_success_at, mirror_attempts FROM watchlist_current')[0];
+ // (a) mirror bookkeeping moves the revision under the scan's final batch: nothing else moved, so ONE pinned replay commits THIS scan's list
+ {
+  const f=hooked(async({sql})=>{sql("UPDATE watchlist_current SET mirror_attempts=mirror_attempts+1, revision=revision+1");});
+  await base1(f);f.state.armed=true;
+  const out=await watchlistRepository(WatchlistD1,guard).commitScan(ctxOf(f),{members:[film(0),film(2)],scan:scanOf('a1','2026-11-21T10:00:00.000Z')});
+  assert.equal(out.outcome,'committed');assert.equal(f.state.batches,2,'exactly one replay');assert.equal(version(f).version,2);
+  assert.deepEqual(f.db.sql('SELECT lid FROM watchlist_member WHERE snapshot_id=(SELECT snapshot_id FROM watchlist_current) ORDER BY ordinal').map(r=>r.lid),['f0','f2'],'this scan list, promoted once');
+ }
+ // (b) a competing PROMOTION commits between the scan's read and its final batch: no replay of the older list, the newer one stays
+ {
+  const f=hooked(async({db})=>{f.state.armed=false;const r=await WatchlistD1.publishSnapshot(db,[film(0),film(9)],{scanId:'b2',observedAt:'2026-11-21T10:00:30.000Z',completedAt:'2026-11-21T10:00:30.000Z'},{now:T('2026-11-21T10:00:30Z')});assert.equal(r.ok,true);for(const effect of WatchlistD1.EFFECTS)await WatchlistD1.completeEffect(db,{snapshotId:r.snapshotId,effect,receipt:'r'},{now:T('2026-11-21T10:00:30Z')});});
+  await base1(f);f.state.armed=true;
+  await assert.rejects(()=>watchlistRepository(WatchlistD1,guard).commitScan(ctxOf(f),{members:[film(0),film(2)],scan:scanOf('a2','2026-11-21T10:00:00.000Z')}),e=>e.code==='conflict');
+  assert.equal(version(f).version,2,'only the competing promotion: the older scan did not become a third version');
+  assert.deepEqual(f.db.sql('SELECT lid FROM watchlist_member WHERE snapshot_id=(SELECT snapshot_id FROM watchlist_current) ORDER BY ordinal').map(r=>r.lid),['f0','f9']);
+ }
+ // (c) a competing no_change scan moves only the freshness: no replay either (the pointer is not what this scan started from)
+ {
+  const f=hooked(async({db})=>{f.state.armed=false;const r=await WatchlistD1.publishSnapshot(db,[film(0),film(1)],{scanId:'c2',observedAt:'2026-11-21T10:00:30.000Z',completedAt:'2026-11-21T10:00:30.000Z'},{now:T('2026-11-21T10:00:30Z')});assert.equal(r.outcome,'no_change');});
+  await base1(f);f.state.armed=true;
+  await assert.rejects(()=>watchlistRepository(WatchlistD1,guard).commitScan(ctxOf(f),{members:[film(0),film(2)],scan:scanOf('a3','2026-11-21T10:00:00.000Z')}),e=>e.code==='conflict');
+  assert.equal(version(f).version,1);assert.equal(version(f).last_success_at,'2026-11-21T10:00:30.000Z','the newer freshness stays');
+ }
+ // (d) an unrelated rejection with an unchanged pointer is not a bookkeeping contention: no replay
+ {
+  const f=hooked(async()=>{});await base1(f);
+  let calls=0;const real=WatchlistD1.publishSnapshot;
+  await assert.rejects(()=>watchlistRepository({...WatchlistD1,publishSnapshot:async()=>{calls++;return {ok:false,reason:'conflict'};}},guard).commitScan(ctxOf(f),{members:[film(0),film(2)],scan:scanOf('a4','2026-11-21T10:00:00.000Z')}),e=>e.code==='conflict');
+  assert.equal(calls,1,'an unchanged pointer proves nothing: no replay');
+  calls=0;await assert.rejects(()=>watchlistRepository({...WatchlistD1,publishSnapshot:async()=>{calls++;return {ok:false,reason:'indeterminate'};}},guard).commitScan(ctxOf(f),{members:[film(0),film(3)],scan:scanOf('a5','2026-11-21T10:00:01.000Z')}),e=>e.code==='indeterminate');assert.equal(calls,1);
+ }
 }
 console.log('letterboxd-sync-repository ok');

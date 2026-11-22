@@ -46,8 +46,10 @@ export async function reconcileMirror(env, {epoch, now = Date.now(), deps}) {
     const state = mirrorState(pointer, now);
     if (state.state === 'delivered') return {outcome: 'delivered', nothingOwed: true};
     if (pointer.mirrorNextRetryAt && Date.parse(pointer.mirrorNextRetryAt) > now) return {outcome: 'backoff', nextRetryAt: pointer.mirrorNextRetryAt, attempts: pointer.mirrorAttempts};
-    const written = await PublishedEpg.putStandaloneWatchlistRoot(env, mirrorDocument(snapshot), {generation: authority.generation, epoch});
+    const written = await PublishedEpg.putStandaloneWatchlistRoot(env, mirrorDocument(snapshot), {generation: authority.generation, epoch, target: {snapshotId: snapshot.snapshotId, lastSuccessAt: snapshot.lastSuccessAt}});
     if (written.blocked) return {outcome: 'blocked'};
+    // The target moved while this pass ran (a newer scan promoted, or only its freshness moved): nothing was written and nothing is recorded; the next tick owes the new target.
+    if (written.reason === 'target_moved') return {outcome: 'moved'};
     const target = {snapshotId: snapshot.snapshotId, lastSuccessAt: snapshot.lastSuccessAt, generation: authority.generation, now};
     if (written.proven === true) {
       // Acknowledged only if the pinned target, the generation and the epoch still hold in the batch itself.

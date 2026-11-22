@@ -254,8 +254,8 @@ export async function recordAttempt(source,{at,outcome,now,guards}){
 
 // ---- mirror delivery bookkeeping (AIR-571 M1, ADR 0186 decision 1a) --------------------------------------------------------------
 // `mirror_delivered_snapshot_id` holds the DELIVERY TOKEN `<snapshot_id>|<last_success_at>` of the last root `watchlist.json` the mirror reconcile proved stored: a no_change scan moves `last_success_at` without a new
-// snapshot id, and the root carries that freshness, so the token is what is owed, not the snapshot id alone. The debt is always ONE target, the current pointer. These writes raise `revision` by one like every write of the pointer (the table's trigger requires it, so a scan's pointer compare-and-swap that read the
-// row just before loses to it and is retried once by the repository adapter) and carry the authority guard, so they only land while the marker is `d1`/`open` at the generation the reconcile read.
+// snapshot id, and the root carries that freshness, so the token is what is owed, not the snapshot id alone. The debt is always ONE target, the current pointer. These writes raise `revision` by one like every write of the pointer (the table's trigger requires it); they happen only while the target is still owed, so a repeated acknowledgement changes nothing. A scan whose pointer compare-and-swap loses to one is replayed by the
+// repository adapter only when the pointer proves bookkeeping-only contention (see pointerPin). They carry the authority guard, so they only land while the marker is `d1`/`open` at the generation the reconcile read.
 export const mirrorToken=(snapshotId,lastSuccessAt)=>String(snapshotId)+'|'+String(lastSuccessAt);
 // outcome 'delivered' (proved stored) | 'failed' (attempts+1 and the next retry time, compare-and-swap on the attempts read). -> {ok:true} | {ok:false,reason:'closed'|'writes_held'|'moved'|'conflict'|'shape'|'unavailable'}
 export async function recordMirror(source,{outcome,snapshotId,lastSuccessAt,generation,attempts=0,nextRetryAt=null,now,guards}){
@@ -270,13 +270,30 @@ export async function recordMirror(source,{outcome,snapshotId,lastSuccessAt,gene
  if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
  if(gate.generation!==generation)return {ok:false,reason:'moved'};
  const at=iso(now??Date.now());
+ const token=mirrorToken(snapshotId,lastSuccessAt);
+ // The target must still be the CURRENT pointer (a guard, so a stale pass records nothing), and the bookkeeping applies only while the target is still OWED: an already delivered target is an idempotent no-op
+ // (no row change, so no revision bump and no contention with a scan), and a late failure never records debt after a successful acknowledgement of the same target.
+ const targetGuard=[GUARD('(SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND snapshot_id=? AND last_success_at=?)'),[snapshotId,lastSuccessAt]];
  const update=outcome==='delivered'
-  ?['UPDATE watchlist_current SET mirror_delivered_snapshot_id=?, mirror_attempts=0, mirror_next_retry_at=NULL, revision=revision+1, updated_at=? WHERE id=1 AND snapshot_id=? AND last_success_at=?',[mirrorToken(snapshotId,lastSuccessAt),at,snapshotId,lastSuccessAt]]
-  :['UPDATE watchlist_current SET mirror_attempts=mirror_attempts+1, mirror_next_retry_at=?, revision=revision+1, updated_at=? WHERE id=1 AND snapshot_id=? AND last_success_at=? AND mirror_attempts=?',[nextRetryAt,at,snapshotId,lastSuccessAt,attempts]];
- const result=await fenced(db,[authorityGuard(generation),...extra,update,[FENCE,[]]]);
+  ?['UPDATE watchlist_current SET mirror_delivered_snapshot_id=?, mirror_attempts=0, mirror_next_retry_at=NULL, revision=revision+1, updated_at=? WHERE id=1 AND snapshot_id=? AND last_success_at=? AND mirror_delivered_snapshot_id IS NOT ?',[token,at,snapshotId,lastSuccessAt,token]]
+  :['UPDATE watchlist_current SET mirror_attempts=mirror_attempts+1, mirror_next_retry_at=?, revision=revision+1, updated_at=? WHERE id=1 AND snapshot_id=? AND last_success_at=? AND mirror_attempts=? AND mirror_delivered_snapshot_id IS NOT ?',[nextRetryAt,at,snapshotId,lastSuccessAt,attempts,token]];
+ const result=await fenced(db,[authorityGuard(generation),...extra,targetGuard,update]);
  if(result==='conflict')return {ok:false,reason:'conflict'};
  return result==='ok'?{ok:true}:{ok:false,reason:'unavailable'};
 }
+
+// The exact pointer a scan started from, and the guard that re-asserts it in the batch of a replay (AIR-571 M1 review): {version, snapshotId, lastSuccessAt, revision, generation} | null.
+export async function pointerPin(source){
+ const db=database(source);
+ if(!db)return null;
+ try{
+  const gate=await readAuthority(db);
+  if(gate.state!=='d1'||gate.writes!=='open')return null;
+  const row=await one(db,'SELECT version, snapshot_id, last_success_at, revision FROM watchlist_current WHERE id=1');
+  return row?{version:Number(row.version),snapshotId:row.snapshot_id??null,lastSuccessAt:row.last_success_at??null,revision:Number(row.revision),generation:gate.generation}:null;
+ }catch{return null;}
+}
+export const pointerGuard=pin=>[GUARD('(SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=? AND snapshot_id IS ? AND last_success_at IS ?)'),[pin.version,pin.snapshotId,pin.lastSuccessAt]];
 
 // ---- publication ---------------------------------------------------------------------------------------------------------
 // ADR 0186 decision 1: a complete scan result becomes the new snapshot, or a no-op. The caller proves completeness (every page, total, repeat read of page 1); this function never decides it.

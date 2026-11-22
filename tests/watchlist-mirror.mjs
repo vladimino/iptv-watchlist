@@ -171,8 +171,47 @@ const pointer=f=>f.db.sql('SELECT version, snapshot_id, last_success_at, mirror_
  const f=open(),b=store();
  assert.equal((await PublishedEpg.putWatchlistRoot({DB:f.db,BUCKET:b},{updatedAt:'x',films:[]})).blocked,true,'d1/open: the root belongs to the Watchlist');
  const e=open({marker:'epg'});const eb=store();
- assert.equal((await PublishedEpg.putStandaloneWatchlistRoot({DB:e.db,BUCKET:eb},{updatedAt:'x',films:[]},{generation:1,epoch:1})).blocked,true);assert.equal(eb.puts,0);
- assert.equal((await PublishedEpg.putStandaloneWatchlistRoot({DB:f.db,BUCKET:b},{updatedAt:'x',films:[]},{generation:2,epoch:1})).blocked,true,'another generation');
+ assert.equal((await PublishedEpg.putStandaloneWatchlistRoot({DB:e.db,BUCKET:eb},{updatedAt:'x',films:[]},{generation:1,epoch:1,target:{snapshotId:'s',lastSuccessAt:'t'}})).blocked,true);assert.equal(eb.puts,0);
+ assert.equal((await PublishedEpg.putStandaloneWatchlistRoot({DB:f.db,BUCKET:b},{updatedAt:'x',films:[]},{generation:2,epoch:1,target:{snapshotId:'s',lastSuccessAt:'t'}})).blocked,true,'another generation');
+}
+
+// 8b. Review (PR #883): the guard after the etag read pins the exact current TARGET, not only ownership. Pass A captured V1 and stalls before its root read; V2 is promoted, written AND acknowledged by pass B; A then
+// resumes and reads B's NEW etag. A must write nothing: V2 stays stored, D1 still says V2 is delivered, and the next reconcile owes nothing wrong. Repeated for a freshness-only (no_change) change.
+{
+ for(const [label,next,expectedVersion] of [['a new snapshot',films(0,1,3),2],['a no_change freshness',films(0,1,2),1]]){
+  const f=open(),b=store();
+  await scan(f,films(0,1,2),'2026-11-21T09:40:00.000Z');
+  // A: the pass starts with target V1, then stalls inside its first root read
+  let inner=null;
+  b.onGet=async()=>{b.onGet=null;
+   await scan(f,next,'2026-11-21T15:40:00.000Z');
+   inner=await reconcile(f,b,'2026-11-21T15:41:00Z');   // B: promotes, writes and ACKNOWLEDGES the newer target
+  };
+  const a=await reconcile(f,b,'2026-11-21T09:41:00Z');
+  assert.equal(inner.outcome,'written',label+': B delivered the newer target');
+  assert.equal(a.outcome,'moved',label+': A found the target moved: '+JSON.stringify(a));
+  assert.equal(rootDoc(b).lastSuccessAt,'2026-11-21T15:40:00.000Z',label+': the newer root is still stored');assert.equal(rootDoc(b).snapshotVersion,expectedVersion);
+  assert.equal(pointer(f).mirror_delivered_snapshot_id,pointer(f).snapshot_id+'|2026-11-21T15:40:00.000Z',label+': D1 says the newer target is delivered, and it IS stored');
+  assert.equal((await reconcile(f,b,'2026-11-21T15:50:00Z')).outcome,'delivered');assert.equal(b.puts,1,label+': only B wrote; A wrote nothing');
+ }
+}
+
+// 8c. Review (PR #883): bookkeeping applies only while the target is still owed. A late failure after a successful acknowledgement of the same target records nothing, and a duplicate success is an idempotent no-op.
+{
+ const f=open();await scan(f,films(0,1),'2026-11-21T09:40:00.000Z');
+ const p0=pointer(f);const target={snapshotId:p0.snapshot_id,lastSuccessAt:p0.last_success_at,generation:1,now:T('2026-11-21T09:41:00Z')};
+ // two passes read attempts = 0; B proves delivery first
+ assert.equal((await WatchlistD1.recordMirror(f.db,{...target,outcome:'delivered'})).ok,true);
+ const delivered=pointer(f);assert.equal(delivered.mirror_attempts,0);
+ // A's earlier failure arrives late: nothing is recorded (no debt, no backoff on a delivered target, no revision move)
+ assert.equal((await WatchlistD1.recordMirror(f.db,{...target,outcome:'failed',attempts:0,nextRetryAt:'2026-11-21T09:50:00.000Z'})).ok,true);
+ assert.deepEqual(pointer(f),delivered,'a late failure after a successful acknowledgement changes nothing');
+ // a second successful acknowledgement of the same token leaves the revision unchanged
+ assert.equal((await WatchlistD1.recordMirror(f.db,{...target,outcome:'delivered'})).ok,true);
+ assert.equal(pointer(f).revision,delivered.revision,'duplicate success: no revision bump, no contention with a scan');
+ // a stale target is refused outright (the pointer moved)
+ await scan(f,films(0,1,2),'2026-11-21T10:00:00.000Z');
+ assert.equal((await WatchlistD1.recordMirror(f.db,{...target,outcome:'delivered'})).ok,false);
 }
 
 // 9. The Letterboxd ensure: the reconcile runs BEFORE any early return on a finished slot, its failure never blocks Events or a new slot, and an absent port changes nothing.
