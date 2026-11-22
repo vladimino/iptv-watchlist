@@ -4,7 +4,7 @@
 // operator applies printed SQL only under an owner GO, inside the AIR-554 cutover plan (legacy writers closed, import verified under that exclusion, then the marker flip).
 //
 //   node scripts/prediction-aux-d1-import.mjs report <export>     (default dry run: counts, digests, states, blockers; writes nothing)
-//   node scripts/prediction-aux-d1-import.mjs sql    <export>     (guarded SQL: import only into EMPTY tables while the marker is r2, generation 0)
+//   node scripts/prediction-aux-d1-import.mjs sql    <export>     (guarded SQL: import only into EMPTY tables while the marker reads closed)
 //   node scripts/prediction-aux-d1-import.mjs digest <export>     (the per-family digests only)
 //   node scripts/prediction-aux-d1-import.mjs verify <export>     (guarded SQL that checks the IMPORTED rows against the export, row by row, byte by byte, with child totals, and aborts on any difference)
 //   node scripts/prediction-aux-d1-import.mjs preflight <export>  (read-only SELECTs of the exported run ids against D1's prediction_run: finds true orphan sources before activation)
@@ -137,11 +137,12 @@ export async function planReport(plan){
  };
 }
 
-// Guarded SQL. The first statement aborts the whole file unless the marker is still r2 at generation 0 and every auxiliary table is empty (an import never merges into existing history).
+// Guarded SQL. The first statement aborts the whole file unless the marker reads `closed` (ADR 0195: the import runs under the admission close, never while the old writers are admitted) and every
+// auxiliary table is empty (an import never merges into existing history).
 // Every statement is one line and holds at most one piece, so none exceeds the D1 statement budget.
 export function planSql(plan){
  const empty=['prediction_batch_stage','prediction_run_source_head','prediction_run_manifest','prediction_event_outbox'].map(table=>'(SELECT count(*)=0 FROM '+table+')').join('*');
- const lines=["UPDATE prediction_aux_cas SET ok=(SELECT count(*) FROM prediction_aux_authority WHERE id=1 AND mode='r2' AND generation=0)*"+empty+' WHERE id=1;'];
+ const lines=["UPDATE prediction_aux_cas SET ok=(SELECT count(*) FROM prediction_aux_authority WHERE id=1 AND mode='closed')*"+empty+' WHERE id=1;'];
  const stamp='1970-01-01T00:00:00.000Z';
  for(const r of plan.stage)lines.push('INSERT INTO prediction_batch_stage (film_id, position, item_digest, held_by_run_id, held_at, body_bytes, item_json) VALUES ('+[sqlq(r.filmId),r.position,sqlq(r.itemDigest),sqlq(r.heldByRunId),sqlq(r.heldAt),r.bodyBytes,sqlq(r.itemJson)].join(', ')+');');
  if(plan.stage.length)lines.push('UPDATE prediction_batch_stage_head SET item_count='+plan.stageHead.itemCount+', total_bytes='+plan.stageHead.totalBytes+', revision=1, updated_at='+sqlq(plan.stageHead.updatedAt)+' WHERE id=1 AND revision=0;');

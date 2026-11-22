@@ -110,14 +110,49 @@ export async function readAuxAuthority(db,env,hint={}){
      row=names.includes('prediction_aux_authority')?await one(db,'SELECT mode, generation FROM prediction_aux_authority WHERE id=1'):null;
     }
    }catch(error){throw failed('prediction_aux_unavailable',error);}
-   if(names.length!==TABLES.length||!row||(row.mode!=='r2'&&row.mode!=='d1'))throw failed('prediction_aux_unavailable');
-   result={mode:row.mode,proof:row.mode==='d1'?'d1':'explicit_r2',installed:true,generation:Number(row.generation),version:Number(version),ready:row.mode==='d1'};
+   if(names.length!==TABLES.length||!row||(row.mode!=='r2'&&row.mode!=='closed'&&row.mode!=='d1'))throw failed('prediction_aux_unavailable');
+   result={mode:row.mode,proof:row.mode==='d1'?'d1':row.mode==='closed'?'closed':'explicit_r2',installed:true,generation:Number(row.generation),version:Number(version),ready:row.mode==='d1'};
   }
  }
  if(scope)scope.aux=result;
  return result;
 }
-// The caller needs the D1 branch: returns the authority when d1, null when proved r2 (the caller runs its R2 code), throws when unavailable.
+// ADR 0195. The state an entry point must refuse in: the marker reads `closed` (every legacy writer of the four R2 families is shut out; the R2 objects are still the data and are still read).
+export function auxClosed(authority){return authority?.mode==='closed';}
+// The gate immediately before an R2 PUT or delete of one of the four families. It reads the marker FRESH (never the request scope: a request that read r2 earlier must not carry that into its
+// write) and refuses with a typed error unless the marker proves `r2` or proves the tables are not installed. closed and d1 both refuse (after d1 the Worker never writes these objects
+// again); an unavailable marker refuses too (never read as r2). The one residual is a PUT already past this check; it is bounded by one object-store operation (ADR 0195).
+export async function guardR2Write(db,env){
+ const required=env?.PREDICTION_DB_REQUIRED==='on';
+ if(db==null){if(required)throw failed('prediction_aux_unavailable');return {mode:'r2',proof:'not_installed'};}
+ let version,row=null,names=[];
+ try{
+  version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;
+  if(version!=null&&Number(version)>=AUX_CONTRACT){
+   // One round trip once the schema is at or above 0034: the table inventory and the marker row in one batch (the same shape as readAuxAuthority).
+   const inventory="SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")";
+   if(typeof db.batch==='function'&&binding(db)){
+    const out=await db.batch([db.prepare(inventory).bind(),db.prepare('SELECT mode, generation FROM prediction_aux_authority WHERE id=1').bind()]);
+    names=(out[0].results||[]).map(item=>item.name);row=out[1]?.results?.[0]??null;
+   }
+   else{
+    names=(await many(db,inventory)).map(item=>item.name);
+    row=names.includes('prediction_aux_authority')?await one(db,'SELECT mode, generation FROM prediction_aux_authority WHERE id=1'):null;
+   }
+  }
+ }catch(error){
+  if(/no such table/i.test(String(error?.message||error))&&!required&&version==null)return {mode:'r2',proof:'not_installed'};
+  throw failed('prediction_aux_unavailable',error);
+ }
+ if(version==null){if(required)throw failed('prediction_aux_unavailable');return {mode:'r2',proof:'not_installed'};}
+ if(Number(version)<AUX_CONTRACT)return {mode:'r2',proof:'not_installed'};
+ if(names.length!==TABLES.length||!row)throw failed('prediction_aux_unavailable');
+ if(row.mode==='r2')return {mode:'r2',proof:'explicit_r2',generation:Number(row.generation)};
+ if(row.mode==='closed')throw failed('prediction_aux_closed',undefined,'closed');
+ if(row.mode==='d1')throw failed('prediction_aux_closed',undefined,'d1');
+ throw failed('prediction_aux_unavailable');
+}
+// The caller needs the D1 branch: returns the authority when d1, null when proved r2 or closed (the caller runs its R2 code; a closed marker refuses at the entry and at the PUT), throws when unavailable.
 export async function auxD1(db,env,hint={}){
  const authority=await readAuxAuthority(db,env,hint);
  return authority.mode==='d1'?authority:null;

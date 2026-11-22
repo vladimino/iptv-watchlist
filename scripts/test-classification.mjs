@@ -1033,6 +1033,9 @@ export const FILES={
  "prediction-skipped-event.mjs": {
   "suite": "core"
  },
+ "prediction-aux-closed.mjs": {
+  "suite": "core"
+ },
  "prediction-aux-d1.mjs": {
   "suite": "core"
  },

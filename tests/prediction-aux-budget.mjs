@@ -25,7 +25,8 @@ for(const size of [5,7,10]){
  // migration applied, marker r2: the same R2 code and the same writes; the marker read is the only extra, read-only
  assert.deepEqual(opsOf(marker.t),opsOf(legacy.t),'S'+size+': marker r2 does exactly the legacy R2 operations');
  assert.equal(marker.t.d1.writeStatements,legacy.t.d1.writeStatements,'S'+size+': marker r2 writes the same D1 rows');
- assert.ok(marker.t.d1.calls<=Math.ceil(legacy.t.d1.calls*1.06),'S'+size+': the dormant marker read stays within 6 % of the legacy D1 calls ('+marker.t.d1.calls+' vs '+legacy.t.d1.calls+')');
+ // ADR 0195: while the marker is r2 with the tables installed, every R2 PUT of the four families re-reads the marker (the admission gate): one more read-only D1 call per guarded PUT. 8 % covers the marker read (AIR-553) and the gate; it is paid only between the apply of 0034 and the close, never at closed or d1.
+ assert.ok(marker.t.d1.calls<=Math.ceil(legacy.t.d1.calls*1.08),'S'+size+': the dormant marker read and the admission gate stay within 8 % of the legacy D1 calls ('+marker.t.d1.calls+' vs '+legacy.t.d1.calls+')');
  // the D1 arm: no R2 object of the four families, fewer R2 operations in total
  assert.ok(legacy.t.r2.auxOps>0,'the legacy arm does use R2 for the families');
  assert.equal(d1.t.r2.auxOps,0,'S'+size+': the D1 arm touches no R2 object of the families');

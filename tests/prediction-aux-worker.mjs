@@ -173,7 +173,7 @@ const deferred=async()=>{
  const w=await flowWorld({films:4,aux:'d1'});
  const Aux=await import('../src/prediction-aux-d1.js');
  const event=id=>({id:'enrichment-skipped-'+id,type:'enrichment',at:'2026-11-22T10:00:00.000Z',stage:'skipped'});
- const admit=id=>Aux.admitOutbox(w.db,{mode:'d1',generation:1},{kind:'skipped',identity:id,event:event(id),journalKey:'events/items/'+id+'.json',fence:'target'});
+ const admit=id=>Aux.admitOutbox(w.db,{mode:'d1',generation:2},{kind:'skipped',identity:id,event:event(id),journalKey:'events/items/'+id+'.json',fence:'target'});
  const [a,b,c]=await Promise.all([admit('same'),admit('same'),admit('other')]);
  assert.equal(Number(sql(w.file,"SELECT count(*) AS n FROM prediction_event_outbox WHERE event_key='skipped:same'")[0].n),1,'two identical requests resolve to ONE row in the database');assert.equal(count(w,'prediction_event_outbox'),2);
  assert.equal(a.row.at,b.row.at,'both see the first `at`');assert.equal(a.row.journalKey,b.row.journalKey);assert.ok(c.row);
