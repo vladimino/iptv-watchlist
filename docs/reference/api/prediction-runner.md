@@ -205,3 +205,9 @@ There is one protocol and no feature flag; clients that omit `manifestSize` get 
 ## Operator procedure
 
 External ChatGPT Tasks, schedule timing and troubleshooting are documented in [prediction operations](../../runbooks/prediction-operations.md); this page defines the runner protocol, idempotency and queue semantics. A caller must not infer task execution from code deployment.
+
+## Auxiliary state storage (ADR 0194, dormant)
+
+The request and response contracts of `batch_start`, `batch_hold`, `batch_submit`, `heartbeat`, `complete` and the manifest readback are **unchanged**; `manifestHash` is unchanged. Where the held stage, the run sources, the persisted manifest and the event outbox live depends on the marker `prediction_aux_authority`: `r2` (production today) keeps the R2 objects; `d1` serves them from D1 only; an unavailable authority is `502 prediction_aux_unavailable`. The manifest is create-only (an equal replay is a no-op, other bytes are a conflict, never an overwrite); the readback of one part verifies the pieces that cover it; the live `hold` and `item` reads come from the transferable stage, not from the manifest. See [schema v34](../data/d1-schema.md), the [runbook](../../runbooks/prediction-aux-state-cutover.md) and [ADR 0194](../../adr/0194-prediction-auxiliary-state-d1-checkpoint-and-outbox.md).
+
+Implementation notes that refine the ADR text (the lease document carries no protocol field): the protocol of a run is checked on the run row once it exists (manifest and drain writes); the first source write of a start, which precedes the run row, is guarded by the runner lease alone. A writer-lease guard is enforced where the writer owner is threaded from the writer lease (the authorized start's delivery, submit and complete); stop-event and delivery mutations elsewhere use the marker plus a compare-and-swap on the target row's own state.

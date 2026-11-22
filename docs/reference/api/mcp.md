@@ -200,3 +200,5 @@ This repository change does not modify Cloudflare Access. Each item below must b
 
 
 For approved operator procedures see [MCP connection and verification](../../runbooks/mcp-connectivity.md), and for the original unattended-authorization checklist see [the AIR-62 historical record](../../archive/superseded/mcp-air-62-checklist.md).
+
+**Auxiliary-state backing (ADR 0194, dormant).** `prediction_batch_manifest` reads its parts from R2 objects while the marker `prediction_aux_authority` is `r2` (production today) and from D1 pieces, each verified against its digest, once an owner has activated `d1`; the argument and answer shapes are the same. It remains a pure read in both cases.

@@ -69,3 +69,7 @@ AIR-374 P4b (slice 2) gates `GET /api/programme` and `GET /api/watchlist` by the
 - **Fixing a baseline writer:** delete its entry in the same PR that moves the write to its owner writer. The audit then fails on any effect of that read. An entry the audit cannot reproduce fails the test as stale.
 - **A new writing read** is not added to the baseline: it needs an ADR change.
 - **A scenario that a fix needs** (for example the ratings domain on D1) is added to `SCENARIOS` in `tests/get-write-audit-lib.mjs`; the harness test shows how the instruments are verified.
+
+## Auxiliary prediction state reads (ADR 0194, dormant)
+
+The manifest part readback and the outbox status read the auxiliary D1 tables only (pieces by run, rows by identity or by an index) and write nothing: no row, no object, no lease. The marker read is held for the request. They add no writing read to the baseline.
