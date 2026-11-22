@@ -21,7 +21,7 @@ export function migrated(upTo=Infinity){
  return file;
 }
 // `extra(n)` adds fields to film n (for example genres or a synopsis that fingerprint evidence cites).
-// AIR-553: `aux:'d1'` flips the auxiliary-state marker (stage, sources, manifest, outbox in D1) and gives the Worker scope the PredictionAux module; `aux:'r2'` gives the module with the marker at r2
+// AIR-553: `aux:'closed'` sets the marker to closed (ADR 0196); `aux:'d1'` goes r2 -> closed -> d1 (the only chain the schema allows) and flips the auxiliary-state marker (stage, sources, manifest, outbox in D1) and gives the Worker scope the PredictionAux module; `aux:'r2'` gives the module with the marker at r2
 // (the production default before the activation); without the option the module is absent, as in every older test.
 export async function flowWorld({scope=true,films=40,extra=null,aux=null,schema=Infinity,rowStats=null}={}){
  const hooks={write:null,query:null};
@@ -35,7 +35,8 @@ export async function flowWorld({scope=true,films=40,extra=null,aux=null,schema=
  const file=migrated(schema);
  sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
  sql(file,"UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
- if(aux==='d1')sql(file,"UPDATE prediction_aux_authority SET mode='d1', generation=1, activated_at='2026-11-22T10:00:00.000Z' WHERE id=1");
+ if(aux==='closed'||aux==='d1')sql(file,"UPDATE prediction_aux_authority SET mode='closed', generation=1 WHERE id=1");
+ if(aux==='d1')sql(file,"UPDATE prediction_aux_authority SET mode='d1', generation=2, activated_at='2026-11-22T10:00:00.000Z' WHERE id=1");
  // A D1 round trip is a statement run on its own (`queries`) or a batch (`batches`); a batch of reads is not seen by `onQuery`.
  const stats={queries:0,batches:0,writeBatches:0};
  // hooks.query(text) sees every statement, run on its own or inside a batch (a test can count or react to the statements it cares about).

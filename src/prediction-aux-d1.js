@@ -110,14 +110,73 @@ export async function readAuxAuthority(db,env,hint={}){
      row=names.includes('prediction_aux_authority')?await one(db,'SELECT mode, generation FROM prediction_aux_authority WHERE id=1'):null;
     }
    }catch(error){throw failed('prediction_aux_unavailable',error);}
-   if(names.length!==TABLES.length||!row||(row.mode!=='r2'&&row.mode!=='d1'))throw failed('prediction_aux_unavailable');
-   result={mode:row.mode,proof:row.mode==='d1'?'d1':'explicit_r2',installed:true,generation:Number(row.generation),version:Number(version),ready:row.mode==='d1'};
+   if(names.length!==TABLES.length||!row||(row.mode!=='r2'&&row.mode!=='closed'&&row.mode!=='d1'))throw failed('prediction_aux_unavailable');
+   result={mode:row.mode,proof:row.mode==='d1'?'d1':row.mode==='closed'?'closed':'explicit_r2',installed:true,generation:Number(row.generation),version:Number(version),ready:row.mode==='d1'};
   }
  }
  if(scope)scope.aux=result;
  return result;
 }
-// The caller needs the D1 branch: returns the authority when d1, null when proved r2 (the caller runs its R2 code), throws when unavailable.
+// ADR 0196. The state an entry point must refuse in: the marker reads `closed` (every legacy writer of the four R2 families is shut out; the R2 objects are still the data and are still read).
+export function auxClosed(authority){return authority?.mode==='closed';}
+// The gate immediately before an R2 PUT or delete of one of the four families. It reads the marker FRESH (never the request scope: a request that read r2 earlier must not carry that into its
+// write) and refuses with a typed error unless the marker proves `r2` or proves the tables are not installed. closed and d1 both refuse (after d1 the Worker never writes these objects
+// again); an unavailable marker refuses too (never read as r2). The one residual is a PUT already past this check; it is bounded by one object-store operation (ADR 0196).
+export async function guardR2Write(db,env){
+ const required=env?.PREDICTION_DB_REQUIRED==='on';
+ if(db==null){if(required)throw failed('prediction_aux_unavailable');return {mode:'r2',proof:'not_installed'};}
+ let version,row=null,names=[];
+ try{
+  version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;
+  if(version!=null&&Number(version)>=AUX_CONTRACT){
+   // One round trip once the schema is at or above 0034: the table inventory and the marker row in one batch (the same shape as readAuxAuthority).
+   const inventory="SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")";
+   if(typeof db.batch==='function'&&binding(db)){
+    const out=await db.batch([db.prepare(inventory).bind(),db.prepare('SELECT mode, generation FROM prediction_aux_authority WHERE id=1').bind()]);
+    names=(out[0].results||[]).map(item=>item.name);row=out[1]?.results?.[0]??null;
+   }
+   else{
+    names=(await many(db,inventory)).map(item=>item.name);
+    row=names.includes('prediction_aux_authority')?await one(db,'SELECT mode, generation FROM prediction_aux_authority WHERE id=1'):null;
+   }
+  }
+ }catch(error){
+  if(/no such table/i.test(String(error?.message||error))&&!required&&version==null)return {mode:'r2',proof:'not_installed'};
+  throw failed('prediction_aux_unavailable',error);
+ }
+ if(version==null){if(required)throw failed('prediction_aux_unavailable');return {mode:'r2',proof:'not_installed'};}
+ if(Number(version)<AUX_CONTRACT)return {mode:'r2',proof:'not_installed'};
+ if(names.length!==TABLES.length||!row)throw failed('prediction_aux_unavailable');
+ if(row.mode==='r2')return {mode:'r2',proof:'explicit_r2',generation:Number(row.generation)};
+ if(row.mode==='closed')throw failed('prediction_aux_closed',undefined,'closed');
+ if(row.mode==='d1')throw failed('prediction_aux_closed',undefined,'d1');
+ throw failed('prediction_aux_unavailable');
+}
+// ADR 0196. The identity of the R2 objects of the four families at one boundary of the cutover (the close, the export, immediately before the flip, after it) is (key, ETag, size): a key set alone
+// misses a late PUT that overwrites an object that already exists (the stage and the outbox index are rewritten in place). `objects` is a list of {key, etag, size}; any other shape, a missing field or a
+// duplicate key is NOT comparable and refuses, never reads as "unchanged".
+export function auxListingIdentity(objects){
+ if(!Array.isArray(objects))throw failed('prediction_aux_listing_invalid',undefined,'not_a_list');
+ const seen=new Map();
+ for(const item of objects){
+  if(!item||typeof item.key!=='string'||!item.key||typeof item.etag!=='string'||!item.etag||!Number.isSafeInteger(item.size)||item.size<0)throw failed('prediction_aux_listing_invalid',undefined,'bad_object');
+  if(seen.has(item.key))throw failed('prediction_aux_listing_invalid',undefined,'duplicate_key');
+  seen.set(item.key,{key:item.key,etag:item.etag,size:item.size});
+ }
+ return [...seen.values()].sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);
+}
+export function compareAuxListings(before,after){
+ const a=new Map(auxListingIdentity(before).map(item=>[item.key,item])),b=new Map(auxListingIdentity(after).map(item=>[item.key,item]));
+ const added=[...b.keys()].filter(key=>!a.has(key)).sort(),removed=[...a.keys()].filter(key=>!b.has(key)).sort();
+ const changed=[...a.keys()].filter(key=>b.has(key)&&(a.get(key).etag!==b.get(key).etag||a.get(key).size!==b.get(key).size)).sort().map(key=>({key,before:a.get(key),after:b.get(key)}));
+ return {same:!added.length&&!removed.length&&!changed.length,added,removed,changed};
+}
+// The flip refuses on any difference between the listing at the close (or the export) and the one immediately before the flip. null = nothing changed; otherwise a typed refusal the operator prints.
+export function auxFlipRefusal(before,after){
+ const diff=compareAuxListings(before,after);
+ return diff.same?null:{code:'prediction_aux_listing_changed',added:diff.added,removed:diff.removed,changed:diff.changed.map(item=>item.key)};
+}
+// The caller needs the D1 branch: returns the authority when d1, null when proved r2 or closed (the caller runs its R2 code; a closed marker refuses at the entry and at the PUT), throws when unavailable.
 export async function auxD1(db,env,hint={}){
  const authority=await readAuxAuthority(db,env,hint);
  return authority.mode==='d1'?authority:null;

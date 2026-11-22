@@ -991,6 +991,42 @@ async function auxAuthority(env){
  if(base.mode!=='d1')return null;
  return PredictionAux.auxD1(auxDb(env),env,{version:base.version});
 }
+// ---- ADR 0196 (amends ADR 0194 decision 1): the admission gate of the cutover. While the marker reads `closed` NO request of any origin (Task, manual MCP or HTTP, Workflow step, the lease-free skipped, delivery
+// and acknowledgement paths) may write one of the four R2 families, and the routes that would make one answer a typed refusal before they start. `closed` is not an authority and not unavailable: reads keep
+// serving the R2 objects, which stay the data until d1. The gate is the bucket the request holds: every put or delete of a key of those families first reads the marker FRESH (never the request scope), so a
+// request that read r2 at its start still refuses at its own write. What it cannot do is recall a PUT already past that read: that residual is one object-store operation, bounded by the drain wait of the
+// cutover plan, never "none". ----
+const AUX_BUCKET_GUARDED=Symbol.for('iptv.prediction.auxGuardedBucket');
+const auxR2Family=key=>typeof key==='string'&&(key===BATCH_STAGE_KEY||key===EVENT_OUTBOX_KEY||key.startsWith(ENRICHMENT_KEY+'sources/')||key.startsWith(ENRICHMENT_KEY+'batch-manifest/')||key.startsWith(START_EVENT_PREFIX)||key.startsWith(STOP_EVENT_PREFIX));
+async function auxR2WriteGate(env,keys){
+ if(!(Array.isArray(keys)?keys:[keys]).some(auxR2Family))return;
+ if(typeof PredictionAux==='undefined')return;
+ // The proof is read AT the PUT, from the database, and nothing from the request scope is used: not the marker, not the schema version (a request that read schema 33 at its start must not carry that
+ // negative proof across the apply of 0034 and a close; review of PR 893). Before 0034 the guard is one `schema_contract` read, once installed two; the cost is stated in ADR 0196.
+ await PredictionAux.guardR2Write(auxDb(env),env);
+}
+function auxGuardedEnv(env){
+ if(!env?.BUCKET||typeof PredictionAux==='undefined'||typeof PredictionD1==='undefined'||env.BUCKET[AUX_BUCKET_GUARDED])return env;
+ const bucket=env.BUCKET;
+ const guarded=new Proxy(bucket,{get(target,prop){
+  if(prop===AUX_BUCKET_GUARDED)return true;
+  const value=target[prop];
+  if(typeof value!=='function')return value;
+  if(prop==='put')return async(key,...rest)=>{await auxR2WriteGate(env,key);return bucket.put(key,...rest);};
+  if(prop==='delete')return async keys=>{await auxR2WriteGate(env,keys);return bucket.delete(keys);};
+  return value.bind(target);
+ }});
+ return {...env,BUCKET:guarded};
+}
+// The typed refusal of a route that would write one of the families. null when the marker is not closed (r2, d1, not installed); an unavailable marker throws as it does for every aux read.
+async function auxClosedRefusal(env){
+ if(typeof PredictionAux==='undefined'||typeof PredictionD1==='undefined')return null;
+ const base=await PredictionD1.readPredictionAuthority(env?.DB??null,env);
+ if(base.mode!=='d1')return null;
+ const authority=await PredictionAux.readAuxAuthority(auxDb(env),env,{version:base.version});
+ if(!PredictionAux.auxClosed(authority))return null;
+ return json({status:'blocked',error:'The prediction auxiliary state is closed for a cutover',code:'prediction_aux_closed',reason:'prediction_aux_closed',retryable:false},503,{'Retry-After':'60'});
+}
 const AUX_SOURCE_KEY=/^enrichment\/sources\/([A-Za-z0-9_-]{1,100})\.json$/,AUX_MANIFEST_KEY=/^enrichment\/batch-manifest\/([A-Za-z0-9_-]{1,100})\.json$/;
 const auxKeyKind=key=>typeof key!=='string'?null:key===ENRICHMENT_KEY+'batch-stage.json'?'stage':AUX_SOURCE_KEY.test(key)?'source':AUX_MANIFEST_KEY.test(key)?'manifest':null;
 const auxGuardOf=env=>env?.[BATCH_COMMIT_GUARD]||null;
@@ -3786,6 +3822,8 @@ async function timedBatchStep(env,step,body,requestId,work){
  try{timer=createStepTimer();timed=stepTimedEnv(env,timer);}catch{timer=null;timed=env;}
  // The authority marker only, never the object scope: reads in this request reuse the marker until the request's own database writes (the lease acquire is the first), so the post-lease preflight reads it afresh.
  try{if(typeof PredictionD1!=='undefined'&&typeof PredictionD1.scopeRequest==='function')timed=PredictionD1.scopeRequest(timed);}catch{/* an unscoped start reads the marker every time */}
+ // ADR 0196: the bucket every writer of this request holds refuses a write of the four families while the marker is closed (built AFTER the scope so its marker reads share the request's).
+ timed=auxGuardedEnv(timed);
  let status=null;
  try{const response=await work(timed);status=response&&typeof response.status==='number'?response.status:null;return response;}
  catch(error){status=0;throw error;}
@@ -4537,9 +4575,9 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/runner'&&request.method==='GET')return json(predictionRunnerContract());
  if(path==='/api/enrichment/heartbeat'&&request.method==='POST')return timedBatchStep(env,'batch_heartbeat',body,requestId,timed=>taskOwnerGate(timed,body,()=>observedPrediction(timed,body,()=>predictionWriter(timed,()=>runnerHeartbeat(timed,body)),'heartbeat',requestId)));
  // batchSubmit takes the gate, then the step recorder and the writer lease, for a real call; a dry run takes none of them and writes nothing at all.
- if(path==='/api/enrichment/batch/submit'&&request.method==='POST')return timedBatchStep(env,'batch_submit',body,requestId,timed=>batchSubmit(timed,body,requestId));
- if(path==='/api/enrichment/batch/hold'&&request.method==='POST')return timedBatchStep(env,'batch_hold',body,requestId,timed=>batchHold(timed,body));
- if(path==='/api/enrichment/batch/start'&&request.method==='POST')return timedBatchStep(env,'batch_start',body,requestId,timed=>batchStartRoute(timed,body,requestId));
+ if(path==='/api/enrichment/batch/submit'&&request.method==='POST')return timedBatchStep(env,'batch_submit',body,requestId,async timed=>(body?.dryRun===true?null:await auxClosedRefusal(timed))||batchSubmit(timed,body,requestId));
+ if(path==='/api/enrichment/batch/hold'&&request.method==='POST')return timedBatchStep(env,'batch_hold',body,requestId,async timed=>(await auxClosedRefusal(timed))||batchHold(timed,body));
+ if(path==='/api/enrichment/batch/start'&&request.method==='POST')return timedBatchStep(env,'batch_start',body,requestId,async timed=>(body?.dryRun===true?null:await auxClosedRefusal(timed))||batchStartRoute(timed,body,requestId));
  if(path==='/api/enrichment/runs'&&request.method==='GET'){const text=url.searchParams.get('limit')||'10';if(!/^\d+$/.test(text)||Number(text)<1||Number(text)>100)return json({error:'Invalid limit (1–100)'},400);return json(await diagnosticHistory(env,Number(text)));}
  if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');let queue;try{queue=await refreshPredictionQueue(env,report,'manual_reconcile');}catch(e){if(e?.name==='PredictionQueueConflictError')return json({error:'Prediction queue changed during write; read it again',code:e.code},409);throw e;}return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}
  if(path==='/api/enrichment/queue/status'&&request.method==='GET')return json(await queueStatus(env)||{status:'not_initialized',pendingCount:null,...scheduledRunFields()});
@@ -4547,7 +4585,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
   try{return json(await footerStatus(env));}
   catch(error){const refused=canonicalCatalogReadRefusal(error);if(refused)return refused;throw error;}
  }
- if(path==='/api/enrichment/complete'&&request.method==='POST')return timedBatchStep(env,'batch_complete',body,requestId,timed=>taskOwnerGate(timed,body,()=>observedPrediction(timed,body,()=>predictionWriter(timed,owned=>enrichmentComplete(owned,body,requestId)),'complete',requestId)));
+ if(path==='/api/enrichment/complete'&&request.method==='POST')return timedBatchStep(env,'batch_complete',body,requestId,async timed=>(await auxClosedRefusal(timed))||taskOwnerGate(timed,body,()=>observedPrediction(timed,body,()=>predictionWriter(timed,owned=>enrichmentComplete(owned,body,requestId)),'complete',requestId)));
  if(path==='/api/enrichment/status'&&request.method==='GET')return json(await enrichmentStatus(env));
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/schema'&&request.method==='GET')return json(enrichmentSchemaDocument());

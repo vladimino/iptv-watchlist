@@ -11,10 +11,10 @@ const count=(w,table)=>Number(sql(w.file,'SELECT count(*) AS n FROM '+table)[0].
 function world({flip=true}={}){
  const file=migrated();
  sql(file,"UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
- if(flip)sql(file,"UPDATE prediction_aux_authority SET mode='d1', generation=1, activated_at='"+stamp+"' WHERE id=1");
+ if(flip){sql(file,"UPDATE prediction_aux_authority SET mode='closed', generation=1 WHERE id=1");sql(file,"UPDATE prediction_aux_authority SET mode='d1', generation=2, activated_at='"+stamp+"' WHERE id=1");};
  const calls={queries:[],batches:0};
  const db=d1Standin(file,{onQuery:text=>calls.queries.push(text),onBatch:statements=>{calls.batches++;for(const item of statements)calls.queries.push(item.text);}});
- const authority={mode:'d1',generation:flip?1:0};
+ const authority={mode:'d1',generation:flip?2:0};
  sql(file,"INSERT OR REPLACE INTO prediction_lease (name,token,expires_at,document_json) VALUES ('runner','tk0',"+(Date.now()+3600000)+",'"+JSON.stringify({runId:'r1',epoch:1})+"')");
  return {file,db,calls,authority};
 }
@@ -28,7 +28,7 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
  assert.equal(await Aux.auxD1(w.db,{PREDICTION_DB_REQUIRED:'on'}),null,'r2 gives no D1 branch');
  const d=world();
  const live=await Aux.readAuxAuthority(d.db,{PREDICTION_DB_REQUIRED:'on'});
- assert.equal(live.mode,'d1');assert.equal(live.proof,'d1');assert.equal(live.generation,1);
+ assert.equal(live.mode,'d1');assert.equal(live.proof,'d1');assert.equal(live.generation,2);
  // proved not installed: a schema version below the migration (the version comes from the caller's own read, no extra D1 call)
  const none=await Aux.readAuxAuthority({prepare(){throw new Error('must not be asked');}},{PREDICTION_DB_REQUIRED:'on'},{version:33});
  assert.equal(none.proof,'not_installed');assert.equal(none.mode,'r2');
@@ -41,9 +41,9 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
  await refuses('prediction_aux_unavailable',()=>Aux.readAuxAuthority(noRow,{PREDICTION_DB_REQUIRED:'on'},{version:34}));
  // d1 -> r2 and a delete of the marker are refused by the database, a generation never goes down
  const t=sqlText=>{try{sql(d.file,sqlText);return 'ok';}catch(error){return String(error.message);}};
- assert.match(t("UPDATE prediction_aux_authority SET mode='r2', activated_at=NULL"),/prediction_aux_authority_one_way/);
+ assert.match(t("UPDATE prediction_aux_authority SET mode='r2', activated_at=NULL"),/prediction_aux_authority_(one_way|chain)/);
  assert.match(t('DELETE FROM prediction_aux_authority'),/prediction_aux_authority_keep/);
- assert.match(t('UPDATE prediction_aux_authority SET generation=0'),/prediction_aux_authority_one_way/);
+ assert.match(t('UPDATE prediction_aux_authority SET generation=0'),/prediction_aux_authority_(one_way|chain)/);
 }
 
 // ---- 2. Held stage: rows, aggregate cap on the head, CAS on the revision ----

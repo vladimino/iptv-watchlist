@@ -21,11 +21,14 @@ for(const size of [5,7,10]){
  // the REAL pre-migration arm (this revision's Worker with the module present, schema 33) does exactly what production does today: no extra D1 call, statement, row or R2 operation
  const opsOf=t=>({get:t.r2.get,head:t.r2.head,put:t.r2.put,list:t.r2.list,delete:t.r2.delete,auxOps:t.r2.auxOps});
  assert.deepEqual(opsOf(shipped.t),opsOf(legacy.t),'S'+size+': the shipped Worker before migration 0034 does exactly the legacy R2 operations');
- for(const k of ['calls','batches','statements','writeStatements','rowsRead','rowsWritten'])assert.equal(shipped.t.d1[k],legacy.t.d1[k],'S'+size+': before migration 0034 there is NO D1 overhead ('+k+')');
+ // ADR 0196: the admission gate reads the schema version at each guarded R2 PUT (it never trusts a request-scoped proof; review of PR 893), so before 0034 the extra is READ-ONLY and small: no more batch, no more write statement, no more row written.
+ for(const k of ['batches','writeStatements','rowsWritten'])assert.equal(shipped.t.d1[k],legacy.t.d1[k],'S'+size+': before migration 0034 the gate writes nothing more to D1 ('+k+')');
+ assert.ok(shipped.t.d1.calls-legacy.t.d1.calls<=6,'S'+size+': before migration 0034 the gate adds at most 6 read-only D1 calls to a cycle ('+(shipped.t.d1.calls-legacy.t.d1.calls)+')');
  // migration applied, marker r2: the same R2 code and the same writes; the marker read is the only extra, read-only
  assert.deepEqual(opsOf(marker.t),opsOf(legacy.t),'S'+size+': marker r2 does exactly the legacy R2 operations');
  assert.equal(marker.t.d1.writeStatements,legacy.t.d1.writeStatements,'S'+size+': marker r2 writes the same D1 rows');
- assert.ok(marker.t.d1.calls<=Math.ceil(legacy.t.d1.calls*1.06),'S'+size+': the dormant marker read stays within 6 % of the legacy D1 calls ('+marker.t.d1.calls+' vs '+legacy.t.d1.calls+')');
+ // ADR 0196: while the marker is r2 with the tables installed, every R2 PUT of the four families re-reads the marker (the admission gate): one more read-only D1 call per guarded PUT. 8 % covers the marker read (AIR-553) and the gate; it is paid only between the apply of 0034 and the close, never at closed or d1.
+ assert.ok(marker.t.d1.calls<=Math.ceil(legacy.t.d1.calls*1.08),'S'+size+': the dormant marker read and the admission gate stay within 8 % of the legacy D1 calls ('+marker.t.d1.calls+' vs '+legacy.t.d1.calls+')');
  // the D1 arm: no R2 object of the four families, fewer R2 operations in total
  assert.ok(legacy.t.r2.auxOps>0,'the legacy arm does use R2 for the families');
  assert.equal(d1.t.r2.auxOps,0,'S'+size+': the D1 arm touches no R2 object of the families');
