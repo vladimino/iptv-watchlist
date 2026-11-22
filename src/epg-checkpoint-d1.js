@@ -1,7 +1,9 @@
-// ADR 0185 (Accepted), AIR-550 stage 2. The EPG run checkpoint (`sync.json`) and the watchlist ingest status (`watchlist-ingest.json`) in D1
-// (schema v30, migrations/0030_epg_checkpoint_authority.sql). DORMANT: nothing activates it. The Worker routes the two keys here only while the
-// marker is `d1`; with the tables absent or the marker `r2` the R2 objects serve exactly as before. This module is storage only: it never reads
-// or writes R2, never decides a stage, never builds an event. The Worker bundle wraps it as `EpgCheckpointD1`; tests load it as an ES module.
+// ADR 0185 (Accepted), AIR-550 stage 2; ADR 0197 (AIR-551 H6). The EPG run checkpoint (`sync.json`) and the watchlist ingest status
+// (`watchlist-ingest.json`) in D1 (schema v30, migrations/0030_epg_checkpoint_authority.sql). D1 is the authority since the cutover of 21 Nov 2026
+// (marker `d1`). The Worker routes the two keys here only while the marker is `d1`; production is closed (never R2) when the marker is `r2`, the
+// tables are absent or any state is unreadable. Only the explicit local stand-in `EPG_CHECKPOINT_DB_OPTIONAL=standin` serves the R2 objects, for
+// development and tests. This module is storage only: it never reads or writes R2, never decides a stage, never builds an event. The Worker bundle
+// wraps it as `EpgCheckpointD1`; tests load it as an ES module.
 //
 // Authority (one marker row, epg_checkpoint_authority, independent of every other domain). AIR-551 H6: the R2 arm is retired for production.
 //  - `d1`: the rows serve and R2 is never read or written (writes `open`, or `held` as the fence of a controlled operation).
