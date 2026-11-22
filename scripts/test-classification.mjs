@@ -1530,6 +1530,10 @@ export const FILES={
  "run-tests-runner.mjs": {
   "suite": "core"
  },
+ "scheduled-task-s7-taskid-candidates.mjs": {
+  "suite": "core",
+  "note": "Offline exact candidate prompt integrity: SHA-256, fixed task ownership, and a three-occurrence S5-to-S7 change. No runtime, throughput or latency measurement."
+ },
  "scheduled-task-prompt-v2.mjs": {
   "suite": "core"
  },
