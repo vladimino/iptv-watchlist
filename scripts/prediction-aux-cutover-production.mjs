@@ -4,18 +4,17 @@
 // no flag, no Scheduled Task, no Access, no other authority marker). Modeled on the verified 0033 operator (scripts/letterboxd-sync-control-production.mjs).
 //
 //   status    read-only: target, schema version, aux tables present, the marker (mode, generation), the exact row counts of the four families, the live runner lease, the other domains' mode/cutover;
-//             with --sql-file also the sizing of an import file against the measured D1 batch limits. Never writes.
+//             with --converted <dir> also the SQL the operator DERIVES from that converted tree (pins, statement count, bytes against the measured D1 batch limits). Never writes.
 //   apply     schema 33 and none of the 0034 objects -> ONE atomic D1 batch of migrations/0034 (pinned by --migration-sha256), then an independent readback (schema 34, marker r2 at generation 0, empty tables).
 //   close     marker r2 at exactly --generation G, empty aux tables -> marker closed at G+1 (admission of every legacy writer refused by the Worker, ADR 0196). Prints the generation N the import must name.
-//   import    marker closed at exactly --generation N, empty aux tables -> the importer's guarded SQL (--sql-file, pinned by --sql-sha256) as ONE atomic batch. The first statement must be EXACTLY the importer's guard
-//             for N and every other statement one of its exact insert or stage-head forms: a statement that touches the marker, or any other shape, is refused before anything is sent. A file over the measured
-//             D1 batch limits is REFUSED with the numbers (import_too_large): no chunking is attempted; a resumable import would be its own reviewed contract.
-//   verify    marker closed at N -> the importer's verification SQL (--sql-file, --sql-sha256): aborts on any difference between the rows and the export. Idempotent (it only moves the aux fence row).
-//   flip      marker closed at N, the D1 counts equal to the importer's report (--report), the importer's EXACT verification of the dataset (--verify-sql-file, hash-pinned, checked to be the verification of THAT
-//             report) executed INSIDE the same atomic batch as the marker update (a differing byte aborts the batch before the marker moves), two converter captures (--capture-before: at the close;
-//             --capture-now: a fresh cut just before the flip; each the output directory of one converter run) from the same expected source, two distinct cuts, the last one fresh, whose (key, ETag, size)
-//             identity is equal, a report that matches the export the captures describe, and a RELEASE the owner passes after reading it: without --release the command refuses and prints the exact release
-//             string, which binds N, the final capture, the verified counts and digests and the verification SQL. Then marker d1 at N+1. Irreversible: d1 is one-way.
+//   import    marker closed at exactly --generation N, empty aux tables -> the importer's guarded SQL as ONE atomic batch. The SQL is NEVER read from a file: it is derived from --converted (a converter
+//             output directory whose tree objects are re-hashed against its own identity.json) and pinned by --sql-sha256 (the hash `status` printed). Statement shapes are re-checked (the guard for N first,
+//             then exact insert or stage-head forms; anything touching the marker is refused). Over the measured D1 batch limits: REFUSED with the numbers (import_too_large), no chunking.
+//   verify    marker closed at N -> the importer's canonical row-level verification (planVerifySql) derived from --converted, pinned by --sql-sha256. Idempotent.
+//   flip      marker closed at N; D1 counts and outbox states equal the report DERIVED from the converted tree (--capture-before: the converted output taken at the close); the canonical verification
+//             (pinned by --verify-sql-sha256) executed INSIDE the same atomic batch as the marker update (a differing byte aborts the batch before the marker moves); --capture-now: a fresh cut just before
+//             the flip; same expected source, two distinct cuts, the last one fresh, equal (key, ETag, size) identity; and a RELEASE the owner passes after reading it (without --release the command
+//             refuses and prints it; it binds N, the final capture, the counts and digests and the verification SQL). Then marker d1 at N+1. Irreversible: d1 is one-way.
 //   reopen    marker closed at N and the aux tables still EMPTY -> marker r2 at N+1. Refused once an import exists (the tables refuse delete: that is an owner restore, never this command).
 //
 // Every write command needs `--target iptv --confirm <command>`. An unknown outcome is read back and reported as write_uncertain: NEVER retried. A refusal before any statement is sent changes nothing.
