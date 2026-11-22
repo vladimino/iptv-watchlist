@@ -1,9 +1,9 @@
 # ADR 0200: The auxiliary cutover may take its R2 cut over the Predictions auxiliary scope only, with a scope-specific consistency proof
 
-**Status:** Proposed (2026-11-22; the owner approved the **implementation** as an offline code stage on [AIR-554](https://trello.com/c/UrS1gflv) the same day; acceptance of this decision follows the independent review of the pull request and does not approve any production export)  
+**Status:** Accepted (2026-11-22; [explicit owner decision](https://trello.com/c/UrS1gflv#comment-6b034f80d61396dfb0e88069) after review of the ADR and the offline implementation in [PR #916](https://github.com/vladimino/iptv-watchlist/pull/916); no production action authorized)  
 **Original decision date:** 2026-11-22  
 **Recorded at:** 2026-11-22  
-**Approval source:** [AIR-554 owner GO "реализация узкого scoped export"](https://trello.com/c/UrS1gflv) based on the NO-GO blocker B1 of the [readiness evidence](../evidence/prediction/air-554-cutover-readiness-readback-2026-11-22.md) and the [independent review of PR 912](https://github.com/vladimino/iptv-watchlist/pull/912#pullrequestreview-6013799631)  
+**Approval source:** [explicit ADR 0200 acceptance](https://trello.com/c/UrS1gflv#comment-6b034f80d61396dfb0e88069); earlier [offline implementation approval](https://trello.com/c/UrS1gflv) addressed NO-GO blocker B1 of the [readiness evidence](../evidence/prediction/air-554-cutover-readiness-readback-2026-11-22.md)  
 **Related work:** [AIR-554](https://trello.com/c/UrS1gflv), [AIR-579](https://trello.com/c/OlcWhyM7) (the independent D1 load analysis)  
 **Supersedes:** None  
 **Amends:** [ADR 0194](0194-prediction-auxiliary-state-d1-checkpoint-and-outbox.md) and [ADR 0196](0196-prediction-aux-admission-closed-state.md) only in **how the two listings of the cutover are taken**; the marker, the closed gate, the import and the residual risk of ADR 0196 are unchanged  
