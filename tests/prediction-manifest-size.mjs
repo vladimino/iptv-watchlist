@@ -7,6 +7,7 @@ import vm from 'node:vm';
 import fs from 'node:fs';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const dump=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const sha=async text=>[...new Uint8Array(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,'0')).join('');
@@ -167,7 +168,7 @@ for(const [size,films,expected] of [[undefined,40,40],[1,40,1],[5,40,5],[10,40,1
 {
  const w=await ready(25);await reconcile(w);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- w.call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text)};};
+ w.call=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text)};};
  const badSize=await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:0});assert.equal(badSize.isError,true);
  const badPin=await w.call('prediction_batch_start',{trigger:'manual',dryRun:true,manifestSize:2,pin:{filmIds:['tmdb_1','tmdb_2','tmdb_3']}});assert.equal(badPin.isError,true);
  const start=await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5});assert.ok(!start.isError,JSON.stringify(start.data).slice(0,200));

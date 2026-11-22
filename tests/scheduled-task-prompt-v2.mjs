@@ -10,6 +10,7 @@ import {sqliteSync} from './sqlite-session.mjs';
 import {check} from './json-schema-lite.mjs';
 import * as PredictionD1 from '../src/prediction-d1.js';
 import {buildReport} from '../scripts/prediction-ab-report.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const file='docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2.md';
 const doc=fs.readFileSync(file,'utf8');
@@ -196,7 +197,7 @@ const validSample=x=>check(schema.$defs.sample,x),validResult=x=>check(schema.$d
 async function world(films){
  const w=await flowWorld({films});assert.equal((await w.api('queue/reconcile',{})).status,200);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- w.call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text),structured:res.structuredContent,textBytes:new TextEncoder().encode(res.content[0].text).length};};
+ w.call=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text),structured:res.structuredContent,textBytes:new TextEncoder().encode(res.content[0].text).length};};
  return w;
 }
 const hex=h=>/^[0-9a-f]{8,64}$/.test(String(h))?String(h):sha(String(h)).slice(0,16); // the flow world's stand-in profile hash is 'p'; production hashes are hex
@@ -262,7 +263,7 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  assert.ok(startText.indexOf('"films":')<startText.indexOf('"contract":'),'films are retained if the tool text is cut from the end');
  assert.ok(start.textBytes<48*1024,'a five-film manifest text stays inside the client-visible budget');
  const runId=manifest.runId;let epoch=manifest.lease.epoch;
- assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5})).data.status,'already_running','a second start never adopts the run');
+ assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5,taskId:'task15'})).data.status,'already_running','a second start of another Task never adopts the run');
  const ids=manifest.films.map(f=>f.filmId),badParse=ids[1],badContent=ids[3];
  const itemFor=id=>id===badParse?{filmId:id,failure:{kind:'parse_error',reason:'json_unparseable'}}:id===badContent?{filmId:id,fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}}:{filmId:id,fingerprint:w.fingerprint,prediction:w.prediction};
  const generationSize=1,submitBatchSize=5,seen={};let flushes=0,preflights=0,flagged=[],buffer=[],submitItems=null;

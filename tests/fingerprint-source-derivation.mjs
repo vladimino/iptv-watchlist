@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
@@ -136,7 +137,7 @@ function reference(f){
 {
  const {flowWorld}=await import('./prediction-d1-flow-lib.mjs');
  const {sqliteSync}=await import('./sqlite-session.mjs');
- const mkWorld=async()=>{const w=await flowWorld({films:6});assert.equal((await w.api('queue/reconcile',{})).status,200);vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);w.call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text)};};return w;};
+ const mkWorld=async()=>{const w=await flowWorld({films:6});assert.equal((await w.api('queue/reconcile',{})).status,200);vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);w.call=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text)};};return w;};
  const evidence={plotMechanics:{heist:[item('web_research',['https://example.com/a'])],investigation:[item('model_knowledge',['model_knowledge'])]}};
  const expectedAgg={sourceBasis:'mixed',sourceRefs:['https://example.com/a','model_knowledge']};
  const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
@@ -201,7 +202,7 @@ function reference(f){
  // through prediction_batch_validate and the dry-run submit on the real handlers
  const w=await flowWorld({films:4});assert.equal((await w.api('queue/reconcile',{})).status,200);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- const call2=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);return JSON.parse(r.result.content[0].text);};
+ const call2=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);return JSON.parse(r.result.content[0].text);};
  const m=(await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',dryRun:true})).data,id=m.films[0].filmId;
  for(const bad of nonMaps){
   const v=await call2('prediction_batch_validate',{items:[{filmId:id,fingerprint:fp({evidence:bad}),prediction}]});

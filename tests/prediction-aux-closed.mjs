@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {migrated,sql,flowWorld} from './prediction-d1-flow-lib.mjs';
 import {d1Standin} from './d1-standin.mjs';
+import {withTaskId} from './prediction-task-id-lib.mjs';
 import * as Aux from '../src/prediction-aux-d1.js';
 
 const stamp='2026-11-22T10:00:00.000Z';
@@ -58,7 +59,8 @@ const attempt=(file,text)=>{try{sql(file,text);return 'ok';}catch(error){return 
 // ---- 3. The Worker at closed: every entry that would write one of the families is refused before it starts; reads and heartbeats still answer; nothing is written anywhere ----
 {
  const w=await flowWorld({films:8,aux:'r2'});
- const {start}=await w.reconcileAndStart({manifestSize:4});
+ // A labelled run (ADR 0195 of the Task labels): the MCP readback sends the same label, as the standing Task does.
+ const {start}=await w.reconcileAndStart({manifestSize:4,trigger:'scheduled',taskId:'task00'});
  assert.equal(start.status,200,JSON.stringify(start.data).slice(0,200));
  const runId=start.data.runId,epoch=start.data.lease.epoch;
  const filmId=start.data.films[0].filmId;
@@ -77,7 +79,7 @@ const attempt=(file,text)=>{try{sql(file,text);return 'ok';}catch(error){return 
  const beat=await w.api('heartbeat',{runId,epoch});assert.notEqual(beat.data?.code,'prediction_aux_closed');
  // the reads: the manifest part of the run prepared before the close is still served, from the R2 object that is still the data
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- w.ctx.__a={name:'prediction_batch_manifest',args:{runId,part:'envelope'}};w.ctx.__env=w.env;
+ w.ctx.__a={name:'prediction_batch_manifest',args:withTaskId('prediction_batch_manifest',{runId,part:'envelope'})};w.ctx.__env=w.env;
  const read=(await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;
  assert.equal(read.isError,undefined,JSON.stringify(read).slice(0,300));assert.equal(JSON.parse(read.content[0].text).manifestHash,start.data.manifestHash,'a closed marker serves the read from R2');
  // the reopen: the same marker back at r2 (a higher generation) admits the writers again with no change of data

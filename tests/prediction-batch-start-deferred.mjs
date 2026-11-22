@@ -4,8 +4,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {flowWorld, sql,labelStarts} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
+labelStarts();// ADR 0195: the runs of this test are started as a standing Task starts them, with its label
 
 const dump=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const leaseDoc=w=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);
@@ -33,7 +35,7 @@ const world=async(n=6,{workflow=true}={})=>{
   async get(id){if(w.mode.get==='unknown')throw new Error('rpc broke');if(w.instances.some(item=>item.id===id))return {id};throw new Error('instance.not_found');},
  };
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- w.tool=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
+ w.tool=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
  w.key=async()=>{const res=await w.tool('prediction_batch_key',{});assert.equal(res.isError,undefined,JSON.stringify(res).slice(0,200));return JSON.parse(res.content[0].text).invocationKey;};
  w.start=(key,body={})=>w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',manifestSize:5,deferred:true,invocationKey:key,...body});
  w.prepare=async(instance)=>w.ctx.runPredictionStartWorkflow(w.env,instance.params,stepStub);
@@ -74,7 +76,7 @@ const world=async(n=6,{workflow=true}={})=>{
  }
  assert.equal(dump(w.file),snapshot,'a pending readback writes no D1 row, renews no lease and dispatches nothing');assert.equal(JSON.stringify([...w.records.entries()]),records,'and writes no record');assert.equal(w.instances.length,1);
  // the underlying read keeps its HTTP-level contract: 409 manifest_pending
- const raw=await w.ctx.ownedBatchManifest(w.env,r.data.runId,{part:'envelope'});assert.equal(raw.status,409);assert.equal(raw.body.code,'manifest_pending');assert.equal(raw.body.retryAfterMs,5000);
+ const raw=await w.ctx.ownedBatchManifest(w.env,r.data.runId,{part:'envelope',taskId:'task00'});assert.equal(raw.status,409);assert.equal(raw.body.code,'manifest_pending');assert.equal(raw.body.retryAfterMs,5000);
  // every real refusal keeps its error shape
  const unknown=await w.read('no-such-run');assert.equal(unknown.isError,true);assert.match(JSON.stringify(unknown),/unknown_run/);
  const invalid=await w.tool('prediction_batch_manifest',{runId:'bad id!'});assert.equal(invalid.isError,true);
@@ -89,7 +91,7 @@ const world=async(n=6,{workflow=true}={})=>{
  assert.equal(again.status,200);assert.equal(again.data.runId,first.data.runId);assert.equal(again.data.epoch,first.data.epoch);assert.equal(again.data.phase,'preparing');assert.equal(w.instances.length,1,'no second preparation');assert.equal(leaseDoc(w).epoch,1);
  const other=await w.start(await w.key());assert.equal(other.data.status,'already_running');assert.equal(other.data.runId,first.data.runId);
  const mismatch=await w.start(key,{manifestSize:3});assert.equal(mismatch.data.status,'already_running');assert.equal(mismatch.data.reason,'key_args_mismatch');
- const keyless=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled'});assert.equal(keyless.data.status,'already_running');
+ const keyless=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',taskId:'task15'});assert.equal(keyless.data.status,'already_running');
  assert.equal(w.instances.length,1);assert.equal(leaseDoc(w).runId,first.data.runId,'nobody adopted the run');
 }
 
