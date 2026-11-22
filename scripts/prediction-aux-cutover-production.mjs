@@ -7,12 +7,15 @@
 //             with --sql-file also the sizing of an import file against the measured D1 batch limits. Never writes.
 //   apply     schema 33 and none of the 0034 objects -> ONE atomic D1 batch of migrations/0034 (pinned by --migration-sha256), then an independent readback (schema 34, marker r2 at generation 0, empty tables).
 //   close     marker r2 at exactly --generation G, empty aux tables -> marker closed at G+1 (admission of every legacy writer refused by the Worker, ADR 0196). Prints the generation N the import must name.
-//   import    marker closed at exactly --generation N, empty aux tables -> the importer's guarded SQL (--sql-file, pinned by --sql-sha256, first statement pinned to N) as ONE atomic batch. A file over the measured
+//   import    marker closed at exactly --generation N, empty aux tables -> the importer's guarded SQL (--sql-file, pinned by --sql-sha256) as ONE atomic batch. The first statement must be EXACTLY the importer's guard
+//             for N and every other statement one of its exact insert or stage-head forms: a statement that touches the marker, or any other shape, is refused before anything is sent. A file over the measured
 //             D1 batch limits is REFUSED with the numbers (import_too_large): no chunking is attempted; a resumable import would be its own reviewed contract.
 //   verify    marker closed at N -> the importer's verification SQL (--sql-file, --sql-sha256): aborts on any difference between the rows and the export. Idempotent (it only moves the aux fence row).
-//   flip      marker closed at N, the D1 counts equal to the importer's report (--report), the R2 listing identity (key, ETag, size) immediately before the flip equal to the one at the close
-//             (--listing-before, --listing-now: identity.json of the converter), and a RELEASE the owner passes after reading it: without --release the command refuses and prints the exact release string,
-//             which binds N, the listing identity and the verified counts. Then marker d1 at N+1 in ONE guarded batch. Irreversible: d1 is one-way.
+//   flip      marker closed at N, the D1 counts equal to the importer's report (--report), the importer's EXACT verification of the dataset (--verify-sql-file, hash-pinned, checked to be the verification of THAT
+//             report) executed INSIDE the same atomic batch as the marker update (a differing byte aborts the batch before the marker moves), two converter captures (--capture-before: at the close;
+//             --capture-now: a fresh cut just before the flip; each the output directory of one converter run) from the same expected source, two distinct cuts, the last one fresh, whose (key, ETag, size)
+//             identity is equal, a report that matches the export the captures describe, and a RELEASE the owner passes after reading it: without --release the command refuses and prints the exact release
+//             string, which binds N, the final capture, the verified counts and digests and the verification SQL. Then marker d1 at N+1. Irreversible: d1 is one-way.
 //   reopen    marker closed at N and the aux tables still EMPTY -> marker r2 at N+1. Refused once an import exists (the tables refuse delete: that is an owner restore, never this command).
 //
 // Every write command needs `--target iptv --confirm <command>`. An unknown outcome is read back and reported as write_uncertain: NEVER retried. A refusal before any statement is sent changes nothing.
@@ -21,8 +24,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createD1Adapter,D1Error} from './d1-backfill.mjs';
-import {BATCH_BYTES,BATCH_STATEMENTS,createPublishedBinding,migrationStatements,normalize,OperatorStop,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
+import {BATCH_BYTES,BATCH_STATEMENTS,PRODUCTION_ACCOUNT_ID,createPublishedBinding,migrationStatements,normalize,OperatorStop,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
 import {AUX_TABLES,auxFlipRefusal} from '../src/prediction-aux-d1.js';
+import {importGuardStatement} from './prediction-aux-d1-import.mjs';
 
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 export const MIGRATION_PATH=path.join(ROOT,'migrations/0034_prediction_aux_authority.sql');
@@ -91,12 +95,29 @@ export function importDecision(state,{generation}){return precondition(state,'cl
 export function verifyDecision(state,{generation}){return precondition(state,'closed',generation)||'verify';}
 export function reopenDecision(state,{generation}){return precondition(state,'closed',generation)||(empty(state)?'reopen':'tables_not_empty');}
 export const expectedCounts=report=>({stage:report?.stage?.items,sources:report?.sources?.runs,revisions:report?.sources?.revisions,manifests:report?.manifests?.count,pieces:report?.manifests?.pieces,outbox:report?.outbox?.total});
-// The release the owner passes to flip: it binds the closure generation, the listing identity of the moment and the verified counts, so it cannot be reused for another state.
-export function flipRelease({generation,listingNow,report}){
- const identity=JSON.stringify([...listingNow].map(({key,etag,size})=>({key,etag,size})).sort((a,b)=>a.key<b.key?-1:1));
- return sha256('air554-flip|'+generation+'|'+sha256(identity)+'|'+sha256(JSON.stringify([expectedCounts(report),report?.outbox?.byState??{}]))).slice(0,16);
+// What the importer's report must say for each table the verification asserts a total for.
+const reportTotals=report=>({prediction_batch_stage:report?.stage?.items,prediction_run_source_head:report?.sources?.runs,prediction_run_source_revision:report?.sources?.revisions,prediction_run_manifest:report?.manifests?.count,prediction_run_manifest_piece:report?.manifests?.pieces,prediction_event_outbox:report?.outbox?.total});
+const digestsOf=report=>[report?.stage?.digest??null,report?.sources?.digest??null,report?.manifests?.digest??null,report?.outbox?.digest??null];
+export const DEFAULT_SOURCE={kind:'cloudflare-r2-s3',bucket:'iptv',accountId:PRODUCTION_ACCOUNT_ID};
+export const MAX_CAPTURE_AGE_MS=15*60*1000;
+// The release the owner passes to flip. It binds the closure generation, the listing identity of the final capture, the verified counts and digests of the report and the verification SQL, so it cannot be reused
+// for another state, another export or another verification.
+export function flipRelease({generation,capture,report,verifySha256}){
+ return sha256(['air554-flip',generation,capture.identitySha256,sha256(JSON.stringify([expectedCounts(report),report?.outbox?.byState??{},digestsOf(report)])),verifySha256].join('|')).slice(0,16);
 }
-export function flipDecision(state,{generation,report,listingBefore,listingNow,release}){
+// A capture is the output directory of one converter run: identity.json (key, ETag, size) and converter-report.json (what was cut, where, when). Neither is trusted for its own sake: the identity must hash to
+// the report's recorded digest, the cut must be a consistent fenced one from the expected source, and the two captures of a flip must be two distinct cuts, the last one fresh.
+function captureProblem(capture,source){
+ const report=capture?.report;
+ if(!report||report.schemaVersion!==1||!Array.isArray(capture.identity)||typeof capture.identitySha256!=='string')return 'capture_invalid';
+ if(report.snapshot?.status!=='consistent_fenced')return 'capture_not_consistent';
+ const found=report.snapshot?.source||{};
+ if(found.kind!==source.kind||found.bucket!==source.bucket||found.accountId!==source.accountId)return 'capture_source_mismatch';
+ if(report.converted?.identitySha256!==capture.identitySha256)return 'capture_identity_mismatch';
+ if(!Number.isFinite(Date.parse(report.snapshot?.finishedAt)))return 'capture_invalid';
+ return null;
+}
+export function flipDecision(state,{generation,report,before,now,verify,release,clock,source=DEFAULT_SOURCE,maxAgeMs=MAX_CAPTURE_AGE_MS}){
  const bad=precondition(state,'closed',generation);if(bad)return {reason:bad};
  const want=expectedCounts(report);
  if(Object.values(want).some(value=>!Number.isSafeInteger(value)))return {reason:'report_invalid'};
@@ -105,25 +126,65 @@ export function flipDecision(state,{generation,report,listingBefore,listingNow,r
  const byState=report.outbox.byState||{};
  const states=[...new Set([...Object.keys(byState),...Object.keys(state.outboxByState||{})])].filter(name=>(state.outboxByState?.[name]??0)!==(byState[name]??0));
  if(states.length)return {reason:'outbox_states_differ',details:{states}};
- let refusal;try{refusal=auxFlipRefusal(listingBefore,listingNow);}catch{return {reason:'listing_invalid'};}
+ // The exact verification of the approved dataset travels INSIDE the flip batch, so it cannot be skipped; here it must be the verification of THIS report.
+ if(!verify)return {reason:'verify_required'};
+ const wantTotals=reportTotals(report),wrong=Object.keys(wantTotals).filter(table=>verify.totals[table]!==wantTotals[table]);
+ if(wrong.length)return {reason:'verify_not_for_report',details:{tables:wrong}};
+ for(const [name,capture] of [['before',before],['now',now]]){const problem=captureProblem(capture,source);if(problem)return {reason:problem,details:{capture:name}};}
+ // The report must come from the export the captures describe: the objects of each family it counts are the objects the converter copied.
+ const families=before.report.converted?.families||{};
+ const fromExport={sources:families.source?.objects??0,manifests:families.manifest?.objects??0,outbox:families.event?.objects??0};
+ if(want.sources!==fromExport.sources||want.manifests!==fromExport.manifests||want.outbox!==fromExport.outbox)return {reason:'report_not_from_export',details:{report:{sources:want.sources,manifests:want.manifests,outbox:want.outbox},export:fromExport}};
+ const finishedBefore=Date.parse(before.report.snapshot.finishedAt),finishedNow=Date.parse(now.report.snapshot.finishedAt);
+ if(!(finishedNow>finishedBefore))return {reason:'captures_not_distinct'};
+ if(!(clock>=finishedNow)||clock-finishedNow>maxAgeMs)return {reason:'capture_not_fresh',details:{ageMs:clock-finishedNow,maxAgeMs}};
+ let refusal;try{refusal=auxFlipRefusal(before.identity,now.identity);}catch{return {reason:'listing_invalid'};}
  if(refusal)return {reason:'listing_changed',details:refusal};
- const expected=flipRelease({generation,listingNow,report});
+ const expected=flipRelease({generation,capture:now,report,verifySha256:verify.sha256});
  if(release===undefined)return {reason:'release_required',details:{release:expected}};
  if(release!==expected)return {reason:'release_mismatch'};
  return {reason:null,release:expected};
 }
 
-// ---- SQL the operator accepts from a file: the importer's own guarded SQL and nothing that could touch another domain ----
-const ALLOWED_TARGET=new RegExp('^(?:INSERT\\s+INTO|UPDATE)\\s+('+AUX_TABLES.join('|')+')\\b','i');
-export function importFile(text,{generation,pin,expectGuard,limits={}}){
+// ---- SQL the operator accepts from a file: the SHAPES the importer prints, nothing else. A hash the caller supplies is only a checksum; what protects the marker is that no statement may touch it. ----
+// Review of PR 897: a prefix check (INSERT or UPDATE of an aux table) let `UPDATE prediction_aux_authority SET mode='d1' ...` through, which would have activated the irreversible state without --flip and
+// without the owner's release. Every statement must now be one of the importer's exact forms (string literals masked first), and only the first statement of an import may name the marker, as the exact guard.
+const DATA_TABLES=['prediction_batch_stage','prediction_run_source_head','prediction_run_source_revision','prediction_run_source_piece','prediction_run_manifest','prediction_run_manifest_piece','prediction_event_outbox'];
+const stripLiterals=statement=>statement.replace(/'(?:[^']|'')*'/g,'?');
+const VALUE='(?:\\?|-?\\d+|NULL)';
+const INSERT_SHAPE=new RegExp('^INSERT INTO ('+DATA_TABLES.join('|')+') \\([a-z_, ]+\\) VALUES \\('+VALUE+'(?:, ?'+VALUE+')*\\)$');
+const HEAD_SHAPE=/^UPDATE prediction_batch_stage_head SET item_count=\d+, total_bytes=\d+, revision=1, updated_at=(?:\?|NULL) WHERE id=1 AND revision=0$/;
+const CONDITION='[a-z_]+(?:=| IS )'+VALUE;
+const VERIFY_SHAPE=new RegExp('^UPDATE prediction_aux_cas SET ok=\\(SELECT count\\(\\*\\)=(\\d+) FROM ('+DATA_TABLES.join('|')+')(?: WHERE '+CONDITION+'(?: AND '+CONDITION+')*)?\\) WHERE id=1$');
+const TOTAL_SHAPE=new RegExp('^UPDATE prediction_aux_cas SET ok=\\(SELECT count\\(\\*\\)=(\\d+) FROM ('+DATA_TABLES.join('|')+')\\) WHERE id=1$');
+// kind 'import': the exact importer guard first, then inserts and the stage head only. kind 'verify': only the importer's read-back assertions. Returns the statements, the sizing and, for verify, the totals asserted.
+export function checkedSql(text,{kind,generation,pin,limits={}}){
+ if(typeof text!=='string'||!text.trim())throw new OperatorStop('sql_empty',3);
  if(sha256(text)!==pin)throw new OperatorStop('sql_sha256_mismatch',3);
- const statements=migrationStatements(text);
+ const statements=migrationStatements(text).map(sql=>sql.trim());
  if(!statements.length)throw new OperatorStop('sql_empty',3);
- for(const sql of statements)if(!ALLOWED_TARGET.test(sql.trimStart()))throw new OperatorStop('sql_refused',3,{reason:'a statement outside the auxiliary tables'});
- if(expectGuard&&!new RegExp("^UPDATE prediction_aux_cas SET ok=\\(SELECT count\\(\\*\\) FROM prediction_aux_authority WHERE id=1 AND mode='closed' AND generation="+generation+"\\)").test(statements[0].trimStart()))throw new OperatorStop('sql_generation_mismatch',3,{expected:generation});
+ const totals={};
+ statements.forEach((sql,index)=>{
+  if(kind==='import'&&index===0){
+   // Not a guard at all: refused. A guard for another closure (or with any other text): a generation mismatch.
+   if(!/^UPDATE prediction_aux_cas SET ok=\(SELECT count\(\*\) FROM prediction_aux_authority WHERE id=1 AND mode='closed' AND generation=\d+\)/.test(sql))throw new OperatorStop('sql_refused',3,{reason:'the first statement is not the importer guard',statement:0});
+   const named=Number.isSafeInteger(generation)?generation:Number(/AND generation=(\d+)\)/.exec(sql)?.[1]);
+   if(!Number.isSafeInteger(named)||sql!==importGuardStatement(named)||(Number.isSafeInteger(generation)&&named!==generation))throw new OperatorStop('sql_generation_mismatch',3,{expected:generation??null});
+   return;
+  }
+  const masked=stripLiterals(sql);
+  if(kind==='import'){
+   if(!INSERT_SHAPE.test(masked)&&!HEAD_SHAPE.test(masked))throw new OperatorStop('sql_refused',3,{reason:'a statement that is not an importer insert or stage head update',statement:index});
+   return;
+  }
+  const match=VERIFY_SHAPE.exec(masked);
+  if(!match)throw new OperatorStop('sql_refused',3,{reason:'a statement that is not an importer verification assertion',statement:index});
+  const total=TOTAL_SHAPE.exec(masked);
+  if(total)totals[total[2]]=Number(total[1]);
+ });
  const bytes=statements.reduce((sum,sql)=>sum+Buffer.byteLength(sql,'utf8'),0);
  const maxStatements=limits.statements??BATCH_STATEMENTS,maxBytes=limits.bytes??BATCH_BYTES;
- return {statements,sizing:{statements:statements.length,bytes,maxStatementBytes:Math.max(...statements.map(sql=>Buffer.byteLength(sql,'utf8'))),maxStatements,maxBytes,fits:statements.length<=maxStatements&&bytes<=maxBytes}};
+ return {statements,totals,sha256:sha256(text),sizing:{statements:statements.length,bytes,maxStatementBytes:Math.max(...statements.map(sql=>Buffer.byteLength(sql,'utf8'))),maxStatements,maxBytes,fits:statements.length<=maxStatements&&bytes<=maxBytes}};
 }
 
 async function write(binding,statements,{ctx,untouched}){
@@ -150,8 +211,9 @@ export async function execute(command,{binding,now,ctx={},params={},limits={}}){
   const out={operation:'status',writes:false,writeState:'none',migrationSha256:migrationSha256(),decisions:{apply:applyDecision(state)},...view(state),otherDomains:state.invariants};
   if(state.installed&&state.marker){const g=state.marker.generation;out.decisions={...out.decisions,close:closeDecision(state,{generation:g}),import:importDecision(state,{generation:g}),reopen:reopenDecision(state,{generation:g})};}
   if(params.sqlText!==undefined){
-   try{out.importFile={sha256:sha256(params.sqlText),...importFile(params.sqlText,{generation:params.generation,pin:sha256(params.sqlText),expectGuard:Number.isSafeInteger(params.generation),limits}).sizing};}
-   catch(error){if(error instanceof OperatorStop)out.importFile={sha256:sha256(params.sqlText),refused:error.reason,...(error.details||{})};else throw error;}
+   const pin=sha256(params.sqlText);
+   try{out.importFile={sha256:pin,...checkedSql(params.sqlText,{kind:'import',generation:params.generation,pin,limits}).sizing};}
+   catch(error){if(error instanceof OperatorStop)out.importFile={sha256:pin,refused:error.reason,...(error.details||{})};else throw error;}
   }
   return out;
  }
@@ -191,8 +253,8 @@ export async function execute(command,{binding,now,ctx={},params={},limits={}}){
   const generation=params.generation;
   const decision=(command==='import'?importDecision:verifyDecision)(state,{generation});
   if(decision!==command)throw new OperatorStop(decision,3);
-  const file=importFile(params.sqlText??'',{generation,pin:params.sqlSha256,expectGuard:command==='import',limits});
-  if(!file.sizing.fits)throw new OperatorStop('import_too_large',3,{...file.sizing,note:'no chunking is attempted; a resumable import is a separate reviewed contract'});
+  const file=checkedSql(params.sqlText,{kind:command,generation,pin:params.sqlSha256,limits});
+  if(!file.sizing.fits)throw new OperatorStop(command+'_too_large',3,{...file.sizing,note:'no chunking is attempted; a resumable import is a separate reviewed contract'});
   await write(binding,file.statements.map(sql=>binding.prepare(sql).bind()),{ctx:track,untouched:after=>command==='import'?empty(after):true});
   const after=await readback(binding,track),problems=[];
   if(!markerIs(after,'closed',generation))problems.push('marker');
@@ -204,28 +266,35 @@ export async function execute(command,{binding,now,ctx={},params={},limits={}}){
  }
  if(command==='flip'){
   const generation=params.generation;
-  const decision=flipDecision(state,{generation,report:params.report,listingBefore:params.listingBefore,listingNow:params.listingNow,release:params.release});
+  // The verification SQL is checked and sized BEFORE anything else is decided, because it travels inside the flip batch.
+  let verify=null;
+  if(params.verifyText!==undefined){
+   verify=checkedSql(params.verifyText,{kind:'verify',generation,pin:params.verifySha256,limits});
+   if(verify.sizing.statements+2>verify.sizing.maxStatements||verify.sizing.bytes>verify.sizing.maxBytes)throw new OperatorStop('verify_too_large',3,{...verify.sizing,note:'the flip needs the whole verification in one batch with the marker update'});
+  }
+  const decision=flipDecision(state,{generation,report:params.report,before:params.captureBefore,now:params.captureNow,verify,release:params.release,clock,source:params.source,maxAgeMs:params.maxCaptureAgeMs});
   if(decision.reason)throw new OperatorStop(decision.reason,3,decision.details||{});
   const want=expectedCounts(params.report);
   const activatedAt=new Date(clock).toISOString();
   const guard=binding.prepare("UPDATE prediction_aux_cas SET ok=(SELECT count(*) FROM prediction_aux_authority WHERE id=1 AND mode='closed' AND generation=?)*"+['stage','sources','revisions','manifests','pieces','outbox'].map((key,index)=>'(SELECT count(*)=? FROM '+FAMILY_TABLES[index]+')').join('*')+' WHERE id=1').bind(generation,want.stage,want.sources,want.revisions,want.manifests,want.pieces,want.outbox);
   const flip=binding.prepare("UPDATE prediction_aux_authority SET mode='d1', generation=?, activated_at=? WHERE id=1 AND mode='closed' AND generation=?").bind(generation+1,activatedAt,generation);
-  await write(binding,[guard,flip],{ctx:track,untouched:after=>markerIs(after,'closed',generation)});
+  // One atomic batch: the importer's exact verification of the approved dataset, the guard, then the flip. A byte of the imported rows that differs from the export aborts the whole batch before the marker moves.
+  await write(binding,[...verify.statements.map(sql=>binding.prepare(sql).bind()),guard,flip],{ctx:track,untouched:after=>markerIs(after,'closed',generation)});
   const after=await readback(binding,track),problems=[];
   if(!markerIs(after,'d1',generation+1)||after.marker.activatedAt!==activatedAt)problems.push('marker');
   for(const key of Object.keys(want))if(after.counts[key]!==want[key])problems.push('counts_changed:'+key);
   changedInvariants(before,after).forEach(name=>problems.push('mode_changed:'+name));
   if(problems.length)mismatch(track,problems,after);
   track.track?.('committed');
-  return {operation:'flip',writes:true,writeState:'committed',irreversible:true,release:decision.release,before:view(before),after:view(after)};
+  return {operation:'flip',writes:true,writeState:'committed',irreversible:true,release:decision.release,verifiedInBatch:{statements:verify.sizing.statements,sha256:verify.sha256},before:view(before),after:view(after)};
  }
  throw new OperatorStop('usage',2);
 }
 
 // ---- CLI -----------------------------------------------------------------------------------------------------------------
-const OPTIONS={'--target':'target','--confirm':'confirm','--generation':'generation','--migration-sha256':'migrationSha256','--sql-file':'sqlFile','--sql-sha256':'sqlSha256','--report':'report','--listing-before':'listingBefore','--listing-now':'listingNow','--release':'release'};
-const REQUIRED={status:[],apply:['migrationSha256'],close:['generation'],reopen:['generation'],import:['generation','sqlFile','sqlSha256'],verify:['generation','sqlFile','sqlSha256'],flip:['generation','report','listingBefore','listingNow']};
-const ALLOWED={status:['sqlFile','generation'],apply:['migrationSha256'],close:['generation'],reopen:['generation'],import:['generation','sqlFile','sqlSha256'],verify:['generation','sqlFile','sqlSha256'],flip:['generation','report','listingBefore','listingNow','release']};
+const OPTIONS={'--target':'target','--confirm':'confirm','--generation':'generation','--migration-sha256':'migrationSha256','--sql-file':'sqlFile','--sql-sha256':'sqlSha256','--report':'report','--capture-before':'captureBefore','--capture-now':'captureNow','--verify-sql-file':'verifySqlFile','--verify-sql-sha256':'verifySha256','--release':'release'};
+const REQUIRED={status:[],apply:['migrationSha256'],close:['generation'],reopen:['generation'],import:['generation','sqlFile','sqlSha256'],verify:['generation','sqlFile','sqlSha256'],flip:['generation','report','captureBefore','captureNow','verifySqlFile','verifySha256']};
+const ALLOWED={status:['sqlFile','generation'],apply:['migrationSha256'],close:['generation'],reopen:['generation'],import:['generation','sqlFile','sqlSha256'],verify:['generation','sqlFile','sqlSha256'],flip:['generation','report','captureBefore','captureNow','verifySqlFile','verifySha256','release']};
 export function parseArgs(argv){
  const args=argv.slice(2);
  const commands=args.filter(arg=>arg.startsWith('--')&&COMMANDS.includes(arg.slice(2)));
@@ -254,17 +323,25 @@ export function parseArgs(argv){
   if(!/^(0|[1-9]\d{0,8})$/.test(parsed.generation))throw new OperatorStop('usage',2);
   parsed.generation=Number(parsed.generation);
  }
- for(const name of ['migrationSha256','sqlSha256'])if(parsed[name]!==undefined&&!/^[0-9a-f]{64}$/.test(parsed[name]))throw new OperatorStop('usage',2);
+ for(const name of ['migrationSha256','sqlSha256','verifySha256'])if(parsed[name]!==undefined&&!/^[0-9a-f]{64}$/.test(parsed[name]))throw new OperatorStop('usage',2);
  return {command,params:parsed};
+}
+// One converter output directory: identity.json (key, ETag, size, SHA-256 of each object) and converter-report.json.
+export function readCapture(directory){
+ const read=(file)=>{try{return fs.readFileSync(path.resolve(file),'utf8');}catch{throw new OperatorStop('file_unreadable',2);}};
+ const json=(text)=>{try{return JSON.parse(text);}catch{throw new OperatorStop('file_invalid',2);}};
+ const identityText=read(path.join(directory,'identity.json'));
+ return {identity:json(identityText),identityText,identitySha256:sha256(identityText),report:json(read(path.join(directory,'converter-report.json')))};
 }
 function loadParams(params){
  const out={...params};
  const read=(file)=>{try{return fs.readFileSync(path.resolve(file),'utf8');}catch{throw new OperatorStop('file_unreadable',2);}};
- const json=(file)=>{try{return JSON.parse(read(file));}catch(error){if(error instanceof OperatorStop)throw error;throw new OperatorStop('file_invalid',2);}};
+ const json=(text)=>{try{return JSON.parse(text);}catch{throw new OperatorStop('file_invalid',2);}};
  if(out.sqlFile!==undefined)out.sqlText=read(out.sqlFile);
- if(out.report!==undefined)out.report=json(out.report);
- if(out.listingBefore!==undefined)out.listingBefore=json(out.listingBefore);
- if(out.listingNow!==undefined)out.listingNow=json(out.listingNow);
+ if(out.verifySqlFile!==undefined)out.verifyText=read(out.verifySqlFile);
+ if(out.report!==undefined)out.report=json(read(out.report));
+ // A capture is the output directory of one converter run (identity.json and converter-report.json), never a loose file.
+ for(const name of ['captureBefore','captureNow'])if(out[name]!==undefined)out[name]=readCapture(out[name]);
  return out;
 }
 
