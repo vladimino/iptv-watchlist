@@ -26,7 +26,7 @@ sequenceDiagram
     opt Task start (taskId present, ADR 0195): early claim before any preflight
         MCP->>Queue: Claim the runner lease first (short claim, same ownership epoch, taskId stored on the lease)
         alt A live lease of the SAME taskId, same arguments, same epoch
-            MCP-->>Client: The same stored manifest, or start_pending (runId, epoch, retryAfterMs) while the first start still prepares it; no new run, no write
+            MCP-->>Client: The same stored manifest, or start_pending (runId, epoch, retryAfterMs) while the first start still prepares it, no new run and no write
         else A live lease of another taskId, or of a run without one
             MCP-->>Client: already_running, names the holder, nothing assigned, no manifest
         else Same taskId, other start arguments
