@@ -2754,6 +2754,8 @@ const BATCH_RUNNER={version:2,maxManifestFilms:100,maxManifestBytes:256*1024,gen
 const BATCH_STAGE_KEY=ENRICHMENT_KEY+'batch-stage.json';
 // Films read to fill one manifest when some queued films are already current or have lost their admission: bounded so a start never walks the whole queue.
 const BATCH_SCAN_LIMIT=300;
+// Recovery probing has its own bound inside the shared one: films that never become manifest items (a moved pointer, a vanished admission) cannot use the budget the ordinary fill needs.
+const RECOVERY_SCAN_LIMIT=100;
 const BATCH_PLACEHOLDER_RUN='00000000-0000-4000-8000-000000000000';
 const wrongProtocolResponse=()=>json({error:'This run belongs to another protocol',code:'wrong_protocol'},409);
 const batchBlocked=(code,extra={})=>json({status:'blocked',reason:code,code,...extra,...scheduledRunFields()},409);
@@ -2827,18 +2829,19 @@ async function batchSelection(env,{profile,report,queue,pin=null,limit=BATCH_RUN
  // pin and is never reordered. A candidate that turns out current or without admission is skipped and does not use a slot.
  const recoverySlots=pin?0:recoveryBatchSlots(cap);
  const candidates=pin||!(overlay?.size>0)?null:queueRecoveryCandidates(queue,overlay,Date.now(),exclude);
- let recoveryTaken=0;
+ let recoveryTaken=0,probed=0;
  if(candidates&&recoverySlots>0){
-  const tried=new Set(),pool=candidates.ids.slice();
-  while(recoveryTaken<recoverySlots&&pool.length&&scanned<BATCH_SCAN_LIMIT){
-   const chunk=pool.splice(0,Math.min(recoverySlots-recoveryTaken,BATCH_SCAN_LIMIT-scanned));
-   scanned+=chunk.length;
+  const pool=candidates.ids.slice(),unresolvedNot=new Set();
+  while(recoveryTaken<recoverySlots&&pool.length&&probed<RECOVERY_SCAN_LIMIT&&scanned<BATCH_SCAN_LIMIT){
+   const chunk=pool.splice(0,Math.min(recoverySlots-recoveryTaken,RECOVERY_SCAN_LIMIT-probed,BATCH_SCAN_LIMIT-scanned));
+   scanned+=chunk.length;probed+=chunk.length;
    const result=await take(chunk,true);
    recoveryTaken+=result.added;
-   const back=new Set(result.deferred);
-   chunk.forEach(id=>{if(!back.has(id))tried.add(id);});
+   result.deferred.forEach(id=>unresolvedNot.add(id));
   }
-  if(tried.size)rest=rest.filter(id=>!tried.has(id));
+  // The quota is a cap on recovery films in the whole manifest: every other candidate (read or not) leaves the ordinary fill. Only a film read and found not to be unresolved recovery work stays ordinary.
+  const candidateSet=new Set(candidates.ids);
+  rest=rest.filter(id=>!candidateSet.has(id)||unresolvedNot.has(id));
  }
  // The ordinary queue fills every remaining slot with the unchanged hot-first order. The migration share (ADR 0035) applies to these slots: a recovery film carries no migration work, so it neither
  // uses nor widens that share. Read only as many film payloads as the client-requested cap needs: do not load a full 100-film payload set when the caller asked for five.
@@ -2851,7 +2854,7 @@ async function batchSelection(env,{profile,report,queue,pin=null,limit=BATCH_RUN
   await take(chunk,false);
  }
  // Counts only, never a film id or a payload: read-only diagnostics of what the recovery slots did.
- const recovery=candidates?{target:recoverySlots,selected:recoveryTaken,ordinary:items.length-recoveryTaken,active:candidates.counts.active,eligible:candidates.counts.eligible,deferredByRetry:candidates.counts.deferredByRetry,retryExhausted:candidates.counts.retryExhausted,notQueued:candidates.counts.notQueued,noCandidates:candidates.ids.length===0}:null;
+ const recovery=candidates?{target:recoverySlots,selected:recoveryTaken,probed,ordinary:items.length-recoveryTaken,active:candidates.counts.active,eligible:candidates.counts.eligible,deferredByRetry:candidates.counts.deferredByRetry,retryExhausted:candidates.counts.retryExhausted,notQueued:candidates.counts.notQueued,noCandidates:candidates.ids.length===0}:null;
  return {items,skipped,notEligible,eligible:{hot:queue.priorityCount||0,cold:queue.coldRemaining??0,ready:ready.length},manifestSize:cap,scanned,...(recovery?{recovery}:{})};
 }
 // The manifest body, serialized once for its size and its hash. `runId` and `lease` are placeholders in a preflight (same width as the real values).
@@ -2885,7 +2888,7 @@ function batchStartAnswer(fields){
 const batchBytes=value=>new TextEncoder().encode(JSON.stringify(batchStartAnswer(value))).length;
 // The fields that follow the manifest in the answer. A preflight measures the answer with the widest values these can take, so a manifest that passes it cannot grow past the
 // limit when the real values are added; the exact answer is measured again before anything is persisted and before it is sent.
-const batchPlaceholderExtras=(selection,dryRun)=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:99999999,queueRefreshed:true,queueSettled:99999999,eligible:{hot:99999999,cold:99999999,ready:99999999},skipped:{missingAdmission:99999999,alreadyCurrent:99999999},pendingCount:99999999,hotRemaining:99999999,coldRemaining:99999999,drained:{committed:99999999,dropped:99999999},...(selection.recovery?{recovery:{target:99999999,selected:99999999,ordinary:99999999,active:99999999,eligible:{hot:99999999,cold:99999999},deferredByRetry:99999999,retryExhausted:99999999,notQueued:99999999,noCandidates:false}}:{}),...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
+const batchPlaceholderExtras=(selection,dryRun)=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:99999999,queueRefreshed:true,queueSettled:99999999,eligible:{hot:99999999,cold:99999999,ready:99999999},skipped:{missingAdmission:99999999,alreadyCurrent:99999999},pendingCount:99999999,hotRemaining:99999999,coldRemaining:99999999,drained:{committed:99999999,dropped:99999999},...(selection.recovery?{recovery:{target:99999999,selected:99999999,probed:99999999,ordinary:99999999,active:99999999,eligible:{hot:99999999,cold:99999999},deferredByRetry:99999999,retryExhausted:99999999,notQueued:99999999,noCandidates:false}}:{}),...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
 const batchRealExtras=(selection,queue,{queueRefreshed,queueSettled,dryRun})=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:selection.items.length,queueRefreshed,...(queueSettled?{queueSettled}:{}),eligible:selection.eligible,skipped:{missingAdmission:selection.skipped.missingAdmission.length,alreadyCurrent:selection.skipped.alreadyCurrent.length},pendingCount:queue.pending.length,hotRemaining:queue.priorityCount??null,coldRemaining:queue.coldRemaining??null,...(selection.recovery?{recovery:selection.recovery}:{}),...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
 // Read-only. Reads the profile, the programme, the stored queue (and its own generation, the revision a later step compares) and the films; heals, rebuilds, settles and takes nothing.
 // A queue that fails the advance gate is reported `stale`. `bytes` is the size of the whole answer with placeholder values for the fields only the real start knows.

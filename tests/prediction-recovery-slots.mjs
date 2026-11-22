@@ -17,14 +17,14 @@ const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHER
 const COLD=8,FILMS=24,FLOOD=12,FAR=Date.now()+30*864e5;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 // tmdb_1..8 are cold (their showings are 30 days away), tmdb_9..22 hot; tmdb_23 has a conflicting claim and tmdb_24 is retired (never used here).
-async function world(){
- const w=await flowWorld({films:FILMS,extra:n=>n<=COLD?{shows:[{start:FAR}]}:{}});
+async function world(films=FILMS,cold=COLD){
+ const w=await flowWorld({films,extra:n=>n<=cold?{shows:[{start:FAR}]}:{}});
  Object.assign(w.ctx,{PredictionRecoveryIntent:Intent,FilmPersonAuthority,CanonicalCatalogReader,Headers,Uint32Array,DataView,atob,btoa,structuredClone,TextDecoder,ASSETS:{},INITIAL_PERSONAL_RATINGS:{},FILM_TITLE_DICTIONARY:[],PERSON_NAME_DICTIONARY:[]});
  for(const [file,name] of [['src/domain/admin-query.js','AdminQuery'],['src/domain/data-health.js','DataHealth'],['src/domain/limbo-inventory.js','LimboInventory'],['src/domain/prediction-recovery.js','PredictionRecovery']])vm.runInContext(scoped(file,name),w.ctx);
  for(const file of ['src/admin/owner-reviews.js','src/admin/read.js','src/admin/limbo.js','src/prediction-diagnostics.js','src/admin/prediction-recovery.js','src/admin/prediction-recovery-intent.js'])vm.runInContext(fs.readFileSync(file,'utf8'),w.ctx);
  sql(w.file,VERIFY);
  sql(w.file,"UPDATE prediction_domain_authority SET writes='held' WHERE id=1");
- const ids=Array.from({length:FILMS},(_,i)=>i+1);
+ const ids=Array.from({length:films},(_,i)=>i+1);
  sql(w.file,'INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES '+ids.map(n=>`('film:tmdb:${n}',1,'tmdb:${n}','Orig','${T}')`).join(','));
  sql(w.file,'INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES '+ids.map(n=>`('film:tmdb:${n}','tmdb','${n}',1,0,NULL)`).join(','));
  w.admin=async(path,{method='GET',body=null}={})=>{
@@ -61,12 +61,12 @@ async function scoreAll(w){
  assert.deepEqual([...queueDoc(w).hotPending,...queueDoc(w).coldPending],[],'every admitted film is current');
 }
 // Every film scored once by the ordinary runner, then FLOOD hot films that were never predicted (they would fill every ordinary slot).
-async function floodedWorld(){
- const w=await world();
+async function floodedWorld(films=FILMS,cold=COLD){
+ const w=await world(films,cold);
  assert.equal((await w.api('queue/reconcile',{})).status,200);
  await scoreAll(w);
  const now=Date.now(),film=k=>({id:'tmdb_'+k,title:'tmdb_'+k,original:'tmdb_'+k,year:2020,tmdbId:String(k),canonicalIdentity:'tmdb:'+k,genres:[],actors:[],directors:[],shows:[{start:now}]});
- for(let k=101;k<=100+FLOOD;k++)sql(w.file,"INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES ('tmdb_"+k+"','"+k+"','movie','tmdb:"+k+"','tmdb_"+k+"','p1',1,'current','"+JSON.stringify(film(k))+"')");
+ for(let k=201;k<=200+FLOOD;k++)sql(w.file,"INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES ('tmdb_"+k+"','"+k+"','movie','tmdb:"+k+"','tmdb_"+k+"','p1',1,'current','"+JSON.stringify(film(k))+"')");
  assert.equal((await w.api('queue/reconcile',{})).status,200);
  return w;
 }
@@ -127,7 +127,7 @@ async function confirm(w,films,{mode='prediction_only',ttlHours=72,reconcile=tru
  const baseline=await start(w,5,{dryRun:true});
  const before=queueDoc(w);
  assert.equal(queueDoc(w).recoveryRevision,1);
- assert.deepEqual(baseline.recovery,{target:2,selected:2,ordinary:3,active:8,eligible:{hot:0,cold:8},deferredByRetry:0,retryExhausted:0,notQueued:0,noCandidates:false});
+ assert.deepEqual(baseline.recovery,{target:2,selected:2,probed:2,ordinary:3,active:8,eligible:{hot:0,cold:8},deferredByRetry:0,retryExhausted:0,notQueued:0,noCandidates:false});
  const m=await start(w,5);
  assert.deepEqual(ids(m).slice(0,2).sort(),n([1,2]).sort(),'the two recovery slots go to the cold cohort films');
  assert.deepEqual(m.films.slice(0,2).map(f=>f.lane),['cold','cold'],'the true lane is kept');
@@ -209,15 +209,16 @@ async function confirm(w,films,{mode='prediction_only',ttlHours=72,reconcile=tru
  assert.equal(few.films.length,10);assert.equal(few.films[0].filmId,'tmdb_5');
 }
 
-// 7. Fewer ordinary films than ordinary slots. With no hot film left the cold lane is the ordinary queue, so the recovery films are also ordinary there; with the hot lane held back by retry backoff the
-// ordinary queue offers nothing, and the manifest holds only the recovery quota: it is never widened.
+// 7. Fewer ordinary films than ordinary slots. The recovery quota is a cap on recovery films in the whole manifest: with no hot film left (the cold lane is the ordinary queue) and with the hot lane held back
+// by retry backoff the manifest is shorter, it is never widened.
 {
  const w=await world();
  assert.equal((await w.api('queue/reconcile',{})).status,200);
  await scoreAll(w);
  await confirm(w,n([1,2,3,4,5,6,7,8]));
  const plain=await start(w,10,{dryRun:true});
- assert.deepEqual([plain.recovery.target,plain.recovery.selected,plain.recovery.ordinary,plain.films.length],[4,4,4,8],'the ordinary cold lane adds the other four cohort films by the ordinary order');
+ assert.deepEqual([plain.recovery.target,plain.recovery.selected,plain.recovery.ordinary,plain.films.length],[4,4,0,4],'the cap holds for the whole manifest: the other four cohort films, also in the ordinary cold lane, are not added by the ordinary fill');
+ assert.equal(plain.films.filter(f=>n([1,2,3,4,5,6,7,8]).includes(f.filmId)).length,4,'never more recovery films than recovery slots');
 }
 {
  const w=await floodedWorld();
@@ -282,16 +283,16 @@ async function confirm(w,films,{mode='prediction_only',ttlHours=72,reconcile=tru
 {
  const w=await floodedWorld();
  await confirm(w,n([1,2,3,4]));
- const pinIds=n([101,102,103]);
+ const pinIds=n([201,202,203]);
  const pinned=await start(w,5,{dryRun:true,pin:{filmIds:pinIds}});
  assert.deepEqual(ids(pinned),pinIds,'the pin order is kept and nothing is added');
  assert.equal('recovery' in pinned,false);
  // A pin is not a recovery call: cold recovery films stay outside it while the hot lane is not empty (the unchanged pin rule), and hot recovery films keep the pin order.
- const pinnedCold=await start(w,5,{dryRun:true,pin:{filmIds:n([4,101,3])}});
- assert.deepEqual(ids(pinnedCold),n([101]),'a pin gives a cold recovery film no extra way in');
+ const pinnedCold=await start(w,5,{dryRun:true,pin:{filmIds:n([4,201,3])}});
+ assert.deepEqual(ids(pinnedCold),n([201]),'a pin gives a cold recovery film no extra way in');
  await confirm(w,n([9,10]));
- const pinnedHot=await start(w,5,{dryRun:true,pin:{filmIds:n([10,101,9])}});
- assert.deepEqual(ids(pinnedHot),n([10,101,9]),'the pin order is kept: no recovery reordering and no extra film');
+ const pinnedHot=await start(w,5,{dryRun:true,pin:{filmIds:n([10,201,9])}});
+ assert.deepEqual(ids(pinnedHot),n([10,201,9]),'the pin order is kept: no recovery reordering and no extra film');
  assert.equal('recovery' in pinnedHot,false);
  const dry=await start(w,5,{dryRun:true}),real=await start(w,5);
  assert.deepEqual(ids(dry),ids(real));assert.equal(dry.manifestHash,real.manifestHash,'the dry run and the real start are the same manifest');
@@ -306,5 +307,20 @@ async function confirm(w,films,{mode='prediction_only',ttlHours=72,reconcile=tru
   assert.ok(m.films.length<=size&&new Set(ids(m)).size===m.films.length);
   assert.equal(m.films.filter(f=>f.lane==='cold').length,Math.max(0,size>=2?Math.max(1,Math.floor(size*0.4)):0),'N='+size);
  }
+}
+
+// 12. Recovery probing is bounded on its own (RECOVERY_SCAN_LIMIT): 110 active, queued recovery candidates whose admissions are gone never become items, yet the ordinary fill still gets
+// its scan budget and a full ordinary manifest; the diagnostics count the probes.
+{
+ const w=await floodedWorld(130,110);
+ const all=Array.from({length:110},(_,i)=>i+1);
+ for(let at=0;at<110;at+=50)await confirm(w,n(all.slice(at,at+50)));
+ sql(w.file,"DELETE FROM discovery_admission WHERE film_id IN ("+n(all).map(id=>"'"+id+"'").join(',')+")");
+ const m=await start(w,5,{dryRun:true});
+ assert.equal(m.films.length,5,'a full ordinary manifest despite the unusable recovery candidates');
+ assert.ok(m.films.every(f=>f.lane==='hot'&&Number(f.filmId.slice(5))>110),'the ordinary hot films');
+ assert.deepEqual([m.recovery.active,m.recovery.target,m.recovery.selected,m.recovery.probed,m.recovery.ordinary],[110,2,0,100,5],'at most RECOVERY_SCAN_LIMIT (100) recovery probes');
+ assert.equal(vm.runInContext('RECOVERY_SCAN_LIMIT',w.ctx),100);
+ assert.ok(vm.runInContext('RECOVERY_SCAN_LIMIT',w.ctx)<vm.runInContext('BATCH_SCAN_LIMIT',w.ctx),'the shared bound keeps room for the ordinary fill');
 }
 console.log('prediction recovery slots: ok');
