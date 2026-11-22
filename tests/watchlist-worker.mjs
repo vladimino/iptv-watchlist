@@ -13,7 +13,7 @@ const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+'
 const chain=upTo=>names.filter(name=>name<=upTo).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n');
 const base=path.join(root,'base.sqlite');sqlite(base,chain('0031_watchlist_authority.sql'));
 const legacyBase=path.join(root,'legacy.sqlite');sqlite(legacyBase,chain('0030_epg_checkpoint_authority.sql'));
-// One hour before the run, never a fixed date: a fixed `T` made every snapshot "older than 24 h" (`watchlist_stale`) once the clock passed it, and this file went red on main at 10:00 UTC on 22 Nov 2026.
+// An hour before the run, so the snapshot never ages past the 24 h staleness bound on the day the test runs (a fixed date went stale on 22 Nov 2026 10:00 UTC)
 const T=new Date(Math.floor(Date.now()/1000)*1000-3600000).toISOString();
 const DOCS="INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('mode','{\"schemaVersion\":1,\"mode\":\"external\",\"target\":null,\"epoch\":0,\"drain\":null}',1,'"+T+"');INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','{\"holder\":\"h1\",\"kind\":\"executor\",\"modeRevision\":1,\"released\":false,\"expiresAt\":\"2099-01-01T00:00:00.000Z\"}',1,'"+T+"');";
 let copies=0;
