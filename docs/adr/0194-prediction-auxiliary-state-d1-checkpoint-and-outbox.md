@@ -1,9 +1,9 @@
 # ADR 0194: The batch_v2 auxiliary state (held stage, run sources, persisted manifest, event outbox) moves to D1 as one fenced cohort, built dormant behind its own authority marker
 
-**Status:** Proposed (design decision brief for [AIR-553](https://trello.com/c/ouMIBO00), revised after the independent design review of [PR #881](https://github.com/vladimino/iptv-watchlist/pull/881) at HEAD `78318d2`; the owner recorded a **preliminary** selection A / 2A / 3A / 4B; final acceptance, implementation and merge are not approved)  
-**Original decision date:** not decided yet (storage disposition of these key families accepted by the owner on 2026-11-20 in [AIR-546](https://trello.com/c/1dRSJEbp); the concrete contract below is not)  
+**Status:** Accepted (2026-11-22; [owner approval of 2026-11-22](https://github.com/vladimino/iptv-watchlist/pull/881#issuecomment-7075433159) following [independent design review at `607c6946`](https://github.com/vladimino/iptv-watchlist/pull/881#pullrequestreview-6010784233); authorizes dormant AIR-553 delivery, not AIR-554 production cutover)  
+**Original decision date:** 2026-11-22 (prior storage disposition accepted on 2026-11-20 in [AIR-546](https://trello.com/c/1dRSJEbp))  
 **Recorded at:** 2026-11-21, revised 2026-11-22  
-**Approval source:** disposition per key family: [AIR-546 evidence ledger](../evidence/d1-migration/air-546-mutable-r2-inventory-2026-11-20.md), accepted in the [AIR-275](https://trello.com/c/4x7hH0gI) closeout plan. Preliminary selection of the decisions below: the [design review of PR #881](https://github.com/vladimino/iptv-watchlist/pull/881#pullrequestreview-6010747739) (authorization to revise this proposal only).  
+**Approval source:** [AIR-546 evidence ledger](../evidence/d1-migration/air-546-mutable-r2-inventory-2026-11-20.md) and [AIR-275](https://trello.com/c/4x7hH0gI) storage disposition; [owner approval of 2026-11-22](https://github.com/vladimino/iptv-watchlist/pull/881#issuecomment-7075433159) of A / 2A / 3A / 4B and comparative performance acceptance after [independent design review at `607c6946`](https://github.com/vladimino/iptv-watchlist/pull/881#pullrequestreview-6010784233).  
 **Related work:** [AIR-553](https://trello.com/c/ouMIBO00) (this design and the dormant implementation), [AIR-554](https://trello.com/c/UrS1gflv) (controlled cutover, separate owner L3 plan), [AIR-547](https://trello.com/c/99faXisC) (maintained docs); builds on [ADR 0122](0122-prediction-batch-runner-v2-dual-protocol.md), [0132](0132-prediction-assessment-artifact.md), [0136](0136-prediction-batch-manifest-size-and-spent-complete.md), [0146](0146-batch-v2-single-terminal-prediction-event.md), [0157](0157-batch-candidate-hold-and-honest-complete.md), [0162](0162-d1-only-authority-retire-rollback-toolchain.md), [0167](0167-retire-prediction-runner-v5.md), [0180](0180-skipped-predictions-start-is-a-neutral-event.md), [0188](0188-idempotent-keyed-batch-start-and-early-start-claim.md), [0189](0189-h0-checks-compatible-deployment-not-version-equality.md), [0190](0190-catalog-held-start-is-a-skipped-event.md) and [0193](0193-deferred-batch-start-with-server-issued-key.md) (its Proposed metadata is not touched here)  
 **Supersedes:** None (no accepted decision is rewritten; this ADR only moves where the state lives)  
 **Superseded by:** None
@@ -26,7 +26,7 @@ Confirmed from `main` at `bfbc373` (21 Nov 2026), by reading `src/enrichment.js`
 
 Constraint carried from [AGENTS.md](../../AGENTS.md): the production default stays the current R2 path until a separate owner-approved activation (AIR-554); deploying code must need no new schema, create no second writer and enable no D1 live path.
 
-## Decision (proposed; preliminary owner selection A / 2A / 3A / 4B)
+## Decision (accepted; owner selection A / 2A / 3A / 4B)
 
 ### 1. One cohort, one marker, and what counts as "proved r2"
 
@@ -124,7 +124,7 @@ Source: the design review of PR #881 (owner selection). Atomicity and fewer cros
 
 ## Alternatives considered
 
-- **A. All four families inline in D1 (recommended; preliminary owner selection).** For: one store, so marker, lease/epoch/gate guard and readiness commit **atomically**; no unknown-PUT outcome, orphan blob or pointer/body disagreement; the crash matrix collapses to "the batch happened or it did not". Against: unbounded historical growth under 2A (indexed, measured, not archived); a 256 KiB body is up to several byte-capped pieces per write; speed is unproven until the plan above is run.
+- **A. All four families inline in D1 (accepted owner selection).** For: one store, so marker, lease/epoch/gate guard and readiness commit **atomically**; no unknown-PUT outcome, orphan blob or pointer/body disagreement; the crash matrix collapses to "the batch happened or it did not". Against: unbounded historical growth under 2A (indexed, measured, not archived); a 256 KiB body is up to several byte-capped pieces per write; speed is unproven until the plan above is run.
 - **B. D1 pointer plus immutable content-addressed R2 body for sources and manifest; D1 payload for stage and outbox.** For: no D1 growth for the large bodies. Against: reintroduces the cross-store window (payload then pointer, unknown PUT outcome, orphans needing a sweep, a pointer committed over an unreadable body); readiness stops being atomic; `sources` is rewritten by hold/resume, so each revision would be a new blob; R2 stays on the critical path of the 180 s preparation. It is the fallback if A shows a material regression the architecture causes.
 - **C. Leave manifest and sources in R2 with a create-only PUT and a digest check; move only stage and outbox.** Contradicts the accepted AIR-546 disposition and leaves a split authority for the run. Rejected.
 - **D. Aux tables under the existing `prediction_domain_authority` marker.** The dormant schema could not be applied without touching the live prediction fence. Rejected.
@@ -145,14 +145,14 @@ Reversible: the whole change until the migration is applied and the marker is fl
 
 ## Evidence
 
-- **Original decision:** AIR-546 disposition ([ledger](../evidence/d1-migration/air-546-mutable-r2-inventory-2026-11-20.md)); preliminary selection: the PR #881 design review.
+- **Original decision:** AIR-546 disposition ([ledger](../evidence/d1-migration/air-546-mutable-r2-inventory-2026-11-20.md)); final decision: [owner approval of 2026-11-22](https://github.com/vladimino/iptv-watchlist/pull/881#issuecomment-7075433159), following [independent design review at `607c6946`](https://github.com/vladimino/iptv-watchlist/pull/881#pullrequestreview-6010784233).
 - **Implementation:** none; this ADR precedes it.
 - **Dated verification:** code read of `main` at `bfbc373` on 2026-11-21; no production read or write was made; no measurement was taken. Offline numbers quoted from the AIR-573 evidence note.
 - **Uncertainty:** sizes of sources and of a full stage; D1 rows written and latency per cycle; growth under 2A; behaviour of the lease guard for a late runner after the flip. All are closed by the plan above, not by this ADR.
 
-## Preliminary owner selection (not final acceptance)
+## Final owner decision (2026-11-22)
 
-1. Storage shape: **A**. 2. Retention: **2A** as in decision 8. 3. Deferred-start receipts: **3A**, stay in R2. 4. Skipped-event cap: **4B**, 256 active pending. Final acceptance of the ADR, implementation approval and merge remain separate owner decisions after independent review of the updated HEAD.
+1. Storage shape: **A**. 2. Retention: **2A** as in decision 8. 3. Deferred-start receipts: **3A**, stay in R2. 4. Skipped-event cap: **4B**, 256 active pending. The owner accepts the ADR and authorizes merge of PR #881 after the required checks and dormant implementation of AIR-553. Production cutover, migration apply, import and other production mutations remain outside this authorization.
 
 ## Follow-ups
 
