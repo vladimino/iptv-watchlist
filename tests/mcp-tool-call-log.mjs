@@ -95,6 +95,20 @@ const listed=(await result(rpc(6,'tools/list'))).tools.map(tool=>tool.name);
 assert.ok(listed.length>20);
 for(const name of ['probe_read','epg_status','prediction_pending','prediction_queue_overview']){assert.ok(listed.includes(name),name);}
 
+// A real tool exception emits one typed failure record, without the thrown message or arguments.
+// The public HTTP contract remains the original generic Internal error (500).
+const originalCallTool=context.mcpCallTool;
+context.mcpCallTool=async()=>{throw new Error(CANARY);};
+lines.length=0;
+const crashed=await mcp(rpc(10,'tools/call',{name:'probe_echo',arguments:{text:CANARY}}));
+assert.equal(crashed.status,500);
+assert.equal((await crashed.json()).error.code,-32603);
+assert.equal(toolLines().length,1);
+assert.equal(toolLines()[0].tool,'probe_echo');
+assert.equal(toolLines()[0].outcome,'failed');
+assert.ok(lines.every(line=>!line.includes(CANARY)),'a thrown message must not be logged');
+context.mcpCallTool=originalCallTool;
+
 // The log changes no response: a call answers the same with a logger that throws.
 const throwing={...capture,log(){throw new Error('log sink down');}};
 context.console=throwing;
