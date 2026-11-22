@@ -120,6 +120,72 @@ const attempt=(file,text)=>{try{sql(file,text);return 'ok';}catch(error){return 
  assert.deepEqual(auxKeys(w),after,'after the close only the request already in flight could land');
 }
 
+// ---- 5a. (review of #893, P2) The identity that is compared at a boundary is (key, ETag, size), not the key set: a late PUT that REWRITES an existing object keeps every key name ----
+{
+ const w=await flowWorld({films:8,aux:'r2'});
+ const {start}=await w.reconcileAndStart({manifestSize:4});assert.equal(start.status,200,JSON.stringify(start.data).slice(0,200));
+ const runId=start.data.runId,epoch=start.data.lease.epoch;
+ const items=n=>start.data.films.slice(n,n+1).map(f=>({filmId:f.filmId,...(f.plan==='prediction_only'?{}:{fingerprint:w.fingerprint}),prediction:w.prediction}));
+ assert.equal((await w.api('batch/hold',{runId,epoch,items:items(0)})).status,200,'a first hold creates the stage object');
+ // an existing outbox index object (a pending skipped record), so there is a second pre-existing family object besides the stage
+ await w.env.BUCKET.put('enrichment/event-outbox.json',JSON.stringify({pending:{'enrichment/stop-events/skipped-aaaaaaaa.json':{since:'2026-11-22T10:00:00.000Z',attempts:0,lastAttemptAt:null,quarantined:false}}}));
+ const inventory=async()=>{const out=[];for(const key of auxKeys(w)){const object=await w.env.BUCKET.get(key);out.push({key,etag:object.etag,size:object.size});}return out;};
+ const names=list=>list.map(item=>item.key).sort();
+ const atClose=await inventory();
+ assert.ok(atClose.some(i=>i.key==='enrichment/batch-stage.json')&&atClose.some(i=>i.key==='enrichment/event-outbox.json'),'both rewritten-in-place families exist before the close');
+ assert.equal(Aux.auxFlipRefusal(atClose,await inventory()),null,'an unchanged inventory does not refuse the flip');
+ sql(w.file,"UPDATE prediction_aux_authority SET mode='closed', generation=1");
+ // (1) a PUT already past the gate rewrites the stage: the second hold is paused at its stage PUT, the marker closes, the PUT lands
+ const put=w.env.BUCKET.put;let release=null,reached=null;const waiting=new Promise(resolve=>{reached=resolve;});const gate=new Promise(resolve=>{release=resolve;});
+ w.env.BUCKET.put=async(key,...rest)=>{if(key==='enrichment/batch-stage.json'&&release){reached();await gate;}return put(key,...rest);};
+ sql(w.file,"UPDATE prediction_aux_authority SET mode='r2', generation=2");   // the second hold is admitted at r2 (before the close) ...
+ const held=w.api('batch/hold',{runId,epoch,items:items(1)});
+ await waiting;
+ sql(w.file,"UPDATE prediction_aux_authority SET mode='closed', generation=3");   // ... and the marker closes while its stage PUT is in flight
+ const closedInventory=await inventory();
+ release();assert.equal((await held).status,200,'the in-flight hold completes: the gate cannot recall a PUT past its read');
+ w.env.BUCKET.put=put;
+ const afterLanding=await inventory();
+ assert.deepEqual(names(afterLanding),names(closedInventory),'the key NAMES are unchanged: a key-set comparison would call this stable');
+ const refusal=Aux.auxFlipRefusal(closedInventory,afterLanding);
+ assert.ok(refusal,'the identity comparison sees the rewrite');assert.equal(refusal.code,'prediction_aux_listing_changed');assert.deepEqual(refusal.changed,['enrichment/batch-stage.json']);assert.deepEqual(refusal.added,[]);
+ // (2) the same SIZE, different bytes, in an existing object: the ETag still differs
+ const outbox=JSON.stringify(w.records.get('enrichment/event-outbox.json')),flipped=outbox.replace('"attempts":0','"attempts":1');assert.equal(flipped.length,outbox.length);assert.notEqual(flipped,outbox);
+ const before=await inventory();
+ await put('enrichment/event-outbox.json',flipped);
+ const after=await inventory();
+ assert.equal(after.find(i=>i.key==='enrichment/event-outbox.json').size,before.find(i=>i.key==='enrichment/event-outbox.json').size,'same size');
+ assert.deepEqual(Aux.auxFlipRefusal(before,after).changed,['enrichment/event-outbox.json'],'a same-size rewrite is still a different object (ETag)');
+ // (3) a removed object and an object added are refused too; a malformed or duplicated listing is never read as unchanged
+ assert.deepEqual(Aux.auxFlipRefusal(before,before.slice(1)).removed,[before[0].key]);
+ assert.equal(Aux.auxFlipRefusal(before,[...before,{key:'enrichment/sources/new.json',etag:'e9',size:3}]).added[0],'enrichment/sources/new.json');
+ assert.throws(()=>Aux.auxFlipRefusal(before,[{key:'k',etag:'e'}]),error=>error.code==='prediction_aux_listing_invalid');
+ assert.throws(()=>Aux.auxFlipRefusal(before,[...before,before[0]]),error=>error.code==='prediction_aux_listing_invalid');
+ assert.throws(()=>Aux.auxFlipRefusal(before,null),error=>error.code==='prediction_aux_listing_invalid');
+}
+
+// ---- 5b. (review of #893, P1) A request that read SCHEMA 33 must not carry that negative proof to its PUT: migration 0034 is installed and the marker closed while the request is still running ----
+{
+ const w=await flowWorld({films:8,aux:'r2',schema:33});
+ const {start}=await w.reconcileAndStart({manifestSize:3});assert.equal(start.status,200,JSON.stringify(start.data).slice(0,200));
+ const before=auxKeys(w).map(key=>key+'|'+JSON.stringify(w.records.get(key)).length).sort();
+ assert.ok(before.length>0,'at schema 33 the legacy start wrote its R2 objects');
+ assert.equal(sql(w.file,"SELECT count(*) AS n FROM sqlite_master WHERE name='prediction_aux_authority'")[0].n,0,'the aux tables are not installed yet');
+ // A lease-free path with no D1 write before its R2 write (a skipped start refused by the live lease): the schema is read as 33 at the entry; 0034 is installed and the marker closed
+ // exactly when the request reads its (absent) skipped record, i.e. just before its first PUT. Nothing in between writes D1, so the request scope is never invalidated.
+ let installed=false;
+ const get=w.env.BUCKET.get;
+ w.env.BUCKET.get=async(key,...rest)=>{
+  if(!installed&&key.startsWith('enrichment/stop-events/skipped-')){installed=true;sql(w.file,fs.readFileSync('migrations/0034_prediction_aux_authority.sql','utf8'));sql(w.file,"UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");sql(w.file,"UPDATE prediction_aux_authority SET mode='closed', generation=1");}
+  return get(key,...rest);
+ };
+ const rival=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',taskId:'task15',capacity:{remainingPercent:100}});
+ assert.equal(installed,true,'0034 was installed and the marker closed during the request');
+ assert.equal(rival.data.status,'already_running','the refusal answer of the request is unchanged (a failed park never changes it)');
+ assert.deepEqual(auxKeys(w).map(key=>key+'|'+JSON.stringify(w.records.get(key)).length).sort(),before,'no R2 object of the families was written or rewritten after the close');
+ assert.equal(auxKeys(w).some(key=>key.startsWith('enrichment/stop-events/skipped-')),false,'the skipped record was refused at its PUT');
+}
+
 // ---- 6. At d1 nothing of the families is written to R2 even by a caller that still holds an r2 branch (defence in depth) ----
 {
  const w=await flowWorld({films:6,aux:'d1'});

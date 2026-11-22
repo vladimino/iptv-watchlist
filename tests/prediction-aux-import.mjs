@@ -43,18 +43,28 @@ const tables=['prediction_batch_stage','prediction_run_source_head','prediction_
  const before=tables.map(t=>count(w.file,t));assert.deepEqual(before,tables.map(()=>0));
  assert.deepEqual(await planReport(await buildPlan(exported)),report,'a repeated dry run gives the same counts and digests');
  // apply the guarded SQL while the marker is r2 and the tables are empty; a second apply aborts whole
- const text=planSql(plan);
+ const text=planSql(plan,1);
  assert.throws(()=>applySql(w.file,text),/CHECK constraint failed: ok/,'the import refuses to run while the marker is r2: the old writers are still admitted');
+ // The plan is bound to the closure it was prepared for. A reopen admits the old writers again (closed -> r2) and a second close raises the generation: the stale plan must refuse, a plan for the
+ // new closure imports (review of PR 893: mode=closed alone would let a stale export land under a later closure).
  sql(w.file,"UPDATE prediction_aux_authority SET mode='closed', generation=1 WHERE id=1");
- applySql(w.file,text);
- assert.throws(()=>applySql(w.file,text),/CHECK constraint failed: ok/,'an import never merges into existing history');
+ sql(w.file,"UPDATE prediction_aux_authority SET mode='r2', generation=2 WHERE id=1");
+ sql(w.file,"UPDATE prediction_aux_authority SET mode='closed', generation=3 WHERE id=1");
+ assert.throws(()=>applySql(w.file,text),/CHECK constraint failed: ok/,'a plan bound to closure 1 refuses under the closure at generation 3, with the tables still empty');
+ assert.deepEqual(tables.map(t=>count(w.file,t)),tables.map(()=>0),'and it changed nothing');
+ assert.throws(()=>planSql(plan),/generation/,'a plan without its closure generation is not printed');
+ assert.throws(()=>planSql(plan,0),/generation/);assert.throws(()=>planSql(plan,1.5),/generation/);
+ const bound=planSql(plan,3);
+ assert.match(bound.split('\n')[0],/mode='closed' AND generation=3\)/,'the first statement pins the exact generation');
+ applySql(w.file,bound);
+ assert.throws(()=>applySql(w.file,bound),/CHECK constraint failed: ok/,'an import never merges into existing history');
  assert.equal(count(w.file,'prediction_batch_stage'),2);assert.equal(count(w.file,'prediction_run_manifest'),1);assert.equal(count(w.file,'prediction_event_outbox'),2);
  // counts and digests of the rows equal the plan
  const stored=await Aux.readManifest(w.db,runId);assert.equal(JSON.stringify(stored),JSON.stringify(exported['enrichment/batch-manifest/'+runId+'.json']),'the manifest is the exact persisted response');
  assert.equal(JSON.stringify((await Aux.readSource(w.db,runId)).value),JSON.stringify(exported['enrichment/sources/'+runId+'.json']));
  const stage=await Aux.readStage(w.db);assert.deepEqual(stage.items.map(i=>i.filmId),exported['enrichment/batch-stage.json'].items.map(i=>i.filmId));assert.equal(stage.totalBytes,report.stage.totalBytes);
  // flip the marker (the owner's AIR-554 step, simulated) and read the same parts through the Worker: byte-equal to what the R2 path served
- sql(w.file,"UPDATE prediction_aux_authority SET mode='closed', generation=1 WHERE id=1");sql(w.file,"UPDATE prediction_aux_authority SET mode='d1', generation=2, activated_at='2026-11-22T10:00:00.000Z' WHERE id=1");
+ sql(w.file,"UPDATE prediction_aux_authority SET mode='d1', generation=4, activated_at='2026-11-22T10:00:00.000Z' WHERE id=1");
  for(const [name,args] of [['envelope',{part:'envelope'}],['profile',{part:'profile'}],['contract',{part:'contract'}],['film',{part:'film',filmId:start.data.films[0].filmId}],['hold',{part:'hold'}]]){
   // a completed run answers `run_not_running` for a manifest part; the parity of the stored bytes is the readManifestPart/readManifest comparison above, and the hold part is a live stage read
   if(name==='hold')assert.deepEqual((await Aux.readStage(w.db)).items.map(i=>i.filmId).sort(),parts.hold.filmIds.sort(),'the hold read agrees');
@@ -94,7 +104,7 @@ const tables=['prediction_batch_stage','prediction_run_source_head','prediction_
  assert.equal(by['start:run-old'].kind,'start');
  assert.deepEqual(plan.orphanIndexEntries,['enrichment/stop-events/gone.json'],'an index entry without a record is reported, not imported');
  assert.equal(by['stop:run-a'].journalKey,'events/items/'+String(9999999999999-Date.parse(at(1))).padStart(13,'0')+'-enrichment-run-a.json','the journal key is derived exactly as the Worker derives it');
- const file=migrated();sql(file,"UPDATE prediction_aux_authority SET mode='closed', generation=1 WHERE id=1");applySql(file,planSql(plan));
+ const file=migrated();sql(file,"UPDATE prediction_aux_authority SET mode='closed', generation=1 WHERE id=1");applySql(file,planSql(plan,1));
  const states=Object.fromEntries(sql(file,'SELECT event_key AS k, state FROM prediction_event_outbox').map(r=>[r.k,r.state]));
  assert.deepEqual(states,{'stop:run-a':'delivered','stop:run-b':'superseded','stop:run-c':'pending','stop:run-d':'quarantined','skipped:req-1':'pending','start:run-old':'delivered'});
  assert.equal(count(file,'prediction_event_outbox_counter')&&sql(file,'SELECT active_pending AS n FROM prediction_event_outbox_counter')[0].n,1,'the skipped counter follows the imported rows');
@@ -124,8 +134,10 @@ const tables=['prediction_batch_stage','prediction_run_source_head','prediction_
  const bad=path.join(dir,'bad.json'),good=path.join(dir,'good.json');
  fs.writeFileSync(bad,JSON.stringify(cases['stage unreadable']));fs.writeFileSync(good,JSON.stringify({'enrichment/stop-events/run-a.json':{event:{id:'enrichment-run-a',at:'2026-11-10T10:00:00.000Z'},delivered:true}}));
  const run=(...args)=>spawnSync(process.execPath,['scripts/prediction-aux-d1-import.mjs',...args],{encoding:'utf8'});
- const blocked=run('sql',bad);assert.equal(blocked.status,2);assert.equal(blocked.stdout,'');assert.match(blocked.stderr,/BLOCKER/);
- const ok=run('sql',good);assert.equal(ok.status,0);assert.match(ok.stdout,/^UPDATE prediction_aux_cas SET ok=/);assert.ok(ok.stdout.split('\n').every(line=>line.length<110000),'every statement fits the D1 budget');
+ const blocked=run('sql',bad,'--generation','1');assert.equal(blocked.status,2);assert.equal(blocked.stdout,'');assert.match(blocked.stderr,/BLOCKER/);
+ const noGen=run('sql',good);assert.equal(noGen.status,2,'sql without --generation prints nothing');assert.equal(noGen.stdout,'');assert.match(noGen.stderr,/--generation/);
+ for(const wrong of ['0','abc','1.5'])assert.equal(run('sql',good,'--generation',wrong).status,2,'--generation '+wrong+' is refused');
+ const ok=run('sql',good,'--generation','7');assert.equal(ok.status,0);assert.match(ok.stdout.split('\n')[0],/mode='closed' AND generation=7\)/);assert.match(ok.stdout,/^UPDATE prediction_aux_cas SET ok=/);assert.ok(ok.stdout.split('\n').every(line=>line.length<110000),'every statement fits the D1 budget');
  const dry=run('report',good);assert.equal(dry.status,0);assert.equal(JSON.parse(dry.stdout).outbox.total,1);assert.doesNotMatch(dry.stdout,/INSERT INTO/);
  assert.equal(run('nope',good).status,1);
  // a directory export mirrors the keys
@@ -165,7 +177,7 @@ const tables=['prediction_batch_stage','prediction_run_source_head','prediction_
   const source=Object.fromEntries(films.map(f=>[f.filmId,f.modelMetadata]));
   const objects={'enrichment/batch-manifest/ru.json':answer,'enrichment/sources/ru.json':source,'enrichment/stop-events/ru.json':{event:{id:'enrichment-ru',at:'2026-11-10T10:00:00.000Z',title:"прерван '🎬'"},delivered:true}};
   const plan=await buildPlan(objects);assert.deepEqual(plan.blockers,[]);
-  const text=planSql(plan);assert.ok(text.split('\n').every(line=>Buffer.byteLength(line,'utf8')<=100*1024),'every statement fits the byte budget');
+  const text=planSql(plan,1);assert.ok(text.split('\n').every(line=>Buffer.byteLength(line,'utf8')<=100*1024),'every statement fits the byte budget');
   const file=closedFile();applySql(file,text);
   // verify passes on the imported rows
   applySql(file,planVerifySql(plan));
@@ -199,7 +211,7 @@ const tables=['prediction_batch_stage','prediction_run_source_head','prediction_
   'enrichment/stop-events/skipped-q1.json':{event:{id:'enrichment-skipped-q1',at:'2026-11-10T11:00:00.000Z'}},
   'enrichment/event-outbox.json':{pending:{'enrichment/stop-events/skipped-q1.json':{since:'2026-11-10T11:05:00.000Z',attempts:2,lastAttemptAt:'2026-11-10T11:30:00.000Z',quarantined:false}}}};
  const plan=await buildPlan(objects);assert.deepEqual(plan.blockers,[]);
- const text=planSql(plan),verify=planVerifySql(plan);
+ const text=planSql(plan,1),verify=planVerifySql(plan);
  const imported=()=>{const f=closedFile();applySql(f,text);applySql(f,verify);return f;};   // the clean import passes its own verification
  const tamper=(name,statements,pattern=/CHECK constraint failed: ok/)=>{const f=imported();for(const st of statements)sql(f,st);assert.throws(()=>applySql(f,verify),pattern,name);};
  const total=Number(sql(imported(),'SELECT piece_count AS n FROM prediction_run_manifest')[0].n);assert.ok(total>=2,'the manifest spans several pieces');
@@ -229,7 +241,7 @@ const tables=['prediction_batch_stage','prediction_run_source_head','prediction_
  const plan=await buildPlan(objects);assert.deepEqual(plan.blockers,[],'a source-only export is history, not a blocker');
  const report=await planReport(plan);assert.equal(report.runRowPreflight.runIds,2);assert.match(report.runRowPreflight.note,/orphan/);
  const pre=planRunPreflightSql(plan);assert.deepEqual(pre.ids,['orphan-run','real-run']);assert.match(pre.sql,/^SELECT run_id FROM prediction_run WHERE run_id IN \('orphan-run','real-run'\)/);assert.doesNotMatch(pre.sql,/INSERT|UPDATE|DELETE/,'the preflight is read-only');
- const f=migrated();sql(f,"UPDATE prediction_aux_authority SET mode='closed', generation=1 WHERE id=1");applySql(f,planSql(plan));
+ const f=migrated();sql(f,"UPDATE prediction_aux_authority SET mode='closed', generation=1 WHERE id=1");applySql(f,planSql(plan,1));
  const db=(await import('./d1-standin.mjs')).d1Standin(f);
  sql(f,"INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES ('real-run',0,'2026-11-10T00:00:00.000Z','{\"runId\":\"real-run\"}')");
  assert.deepEqual((await Aux.readSource(db,'real-run')).value,{f1:{title:'B'}},'a source with its run row reads back');

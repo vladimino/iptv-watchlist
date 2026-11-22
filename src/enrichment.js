@@ -1000,12 +1000,9 @@ const AUX_BUCKET_GUARDED=Symbol.for('iptv.prediction.auxGuardedBucket');
 const auxR2Family=key=>typeof key==='string'&&(key===BATCH_STAGE_KEY||key===EVENT_OUTBOX_KEY||key.startsWith(ENRICHMENT_KEY+'sources/')||key.startsWith(ENRICHMENT_KEY+'batch-manifest/')||key.startsWith(START_EVENT_PREFIX)||key.startsWith(STOP_EVENT_PREFIX));
 async function auxR2WriteGate(env,keys){
  if(!(Array.isArray(keys)?keys:[keys]).some(auxR2Family))return;
- if(typeof PredictionAux==='undefined'||typeof PredictionD1==='undefined')return;
- const base=await PredictionD1.readPredictionAuthority(env?.DB??null,env);
- if(base.mode!=='d1')return;
- // Before migration 0034 the request-scoped read already proves the tables are not installed: no extra round trip. Once installed, every guarded PUT re-reads the marker.
- const known=await PredictionAux.readAuxAuthority(auxDb(env),env,{version:base.version});
- if(!known.installed)return;
+ if(typeof PredictionAux==='undefined')return;
+ // The proof is read AT the PUT, from the database, and nothing from the request scope is used: not the marker, not the schema version (a request that read schema 33 at its start must not carry that
+ // negative proof across the apply of 0034 and a close; review of PR 893). Before 0034 the guard is one `schema_contract` read, once installed two; the cost is stated in ADR 0196.
  await PredictionAux.guardR2Write(auxDb(env),env);
 }
 function auxGuardedEnv(env){

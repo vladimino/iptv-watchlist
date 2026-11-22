@@ -19,19 +19,24 @@
 | Worker at closed: start, hold, submit and complete answer 503 `prediction_aux_closed`; **zero R2 object and zero D1 row, lease or run change**; `dryRun`, heartbeat and the manifest part read still answer; the reopen admits the writers again | pass |
 | A request that read `r2` at its start and sees the marker move to `closed` mid-request is refused at its own source PUT: no R2 object of the families is written | pass |
 | **Residual, as a test:** a PUT already past the gate does land after the close; the listing of the families changes, so a listing at the close and a later one detects it; a request started after the close is refused at the entry | pass |
+| **Stale schema-33 scope (review of PR 893, P1):** a lease-free skipped request that read schema 33 at its entry sees `0034` installed and the marker closed just before its first PUT: no R2 object is written or rewritten and its answer is unchanged | pass (fails on the previous request-scoped gate) |
+| **Identity, not key names (review, P2):** an in-flight PUT that rewrites `batch-stage.json` keeps every key name; a same-size rewrite of `event-outbox.json` keeps name and size; `auxFlipRefusal` refuses both by ETag/size, and refuses added, removed, malformed and duplicated listings | pass |
+| **Stale plan (review, P1):** an import plan bound to closure 1 refuses under the closure at generation 3 after `closed → r2 → closed`, the tables stay empty; a plan without `--generation` prints nothing | pass |
 | At `d1` a whole start writes no R2 object of the families | pass |
 
 Mutation check: removing the gate before the bucket PUT makes the mid-request test fail ("its own write was refused"); restoring it passes.
 
 ## Cost (exact counts, offline cycles of the AIR-553 benchmark library; not Cloudflare latency)
 
-| Cycle | Legacy D1 calls | Schema 33 with the module | Marker `r2` installed, without the gate | Marker `r2` installed, with the gate |
-| --- | --- | --- | --- | --- |
-| S5 | 302 | 302 (0 %) | +4.3 % | 323 (+7.0 %) |
-| S7 | 372 | 372 (0 %) | +4.3 % | 396 (+6.5 %) |
-| S10 | 450 | 450 (0 %) | +4.2 % | 477 (+6.0 %) |
+The gate reads its proof at each guarded R2 PUT from the database and uses nothing from the request scope (review of PR 893: a request-scoped "tables not installed" proof could be carried across the apply of `0034` and a close). A request that is already running therefore pays a read per guarded PUT even before `0034`.
 
-R2 operations are unchanged (S5 100 puts in every r2 arm). Before migration 0034 the gate costs nothing (the request-scoped read already proves the tables are not installed). Once the tables are installed and the marker is `r2`, each guarded put pays one read-only D1 round trip; at `closed` and `d1` the families write nothing to R2. The aux budget test limit moved from 6 % to 8 % for this reason.
+| Cycle | Legacy D1 calls | Schema 33 with the module (gate reads the version) | Marker `r2` installed, without the gate | Marker `r2` installed, with the gate |
+| --- | --- | --- | --- | --- |
+| S5 | 304 | 308 (+4, +1.3 %) | +4.3 % | 325 (+6.9 %) |
+| S7 | 374 | 378 (+4, +1.1 %) | +4.3 % | 398 (+6.4 %) |
+| S10 | 452 | 456 (+4, +0.9 %) | +4.2 % | 479 (+6.0 %) |
+
+Batches, write statements and rows written are identical to the legacy arm at schema 33: the added calls are read-only. R2 operations are unchanged. At `closed` and `d1` the four families write nothing to R2. The aux budget test now allows at most 6 extra read-only calls before `0034` and 8 % with the tables installed. (The legacy column moved from 302/372/450 to 304/374/452 with the AIR-573 Task-label change merged from `main`.)
 
 ## What the platform allows (Cloudflare documentation, read 22 Nov 2026)
 

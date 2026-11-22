@@ -152,6 +152,30 @@ export async function guardR2Write(db,env){
  if(row.mode==='d1')throw failed('prediction_aux_closed',undefined,'d1');
  throw failed('prediction_aux_unavailable');
 }
+// ADR 0196. The identity of the R2 objects of the four families at one boundary of the cutover (the close, the export, immediately before the flip, after it) is (key, ETag, size): a key set alone
+// misses a late PUT that overwrites an object that already exists (the stage and the outbox index are rewritten in place). `objects` is a list of {key, etag, size}; any other shape, a missing field or a
+// duplicate key is NOT comparable and refuses, never reads as "unchanged".
+export function auxListingIdentity(objects){
+ if(!Array.isArray(objects))throw failed('prediction_aux_listing_invalid',undefined,'not_a_list');
+ const seen=new Map();
+ for(const item of objects){
+  if(!item||typeof item.key!=='string'||!item.key||typeof item.etag!=='string'||!item.etag||!Number.isSafeInteger(item.size)||item.size<0)throw failed('prediction_aux_listing_invalid',undefined,'bad_object');
+  if(seen.has(item.key))throw failed('prediction_aux_listing_invalid',undefined,'duplicate_key');
+  seen.set(item.key,{key:item.key,etag:item.etag,size:item.size});
+ }
+ return [...seen.values()].sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);
+}
+export function compareAuxListings(before,after){
+ const a=new Map(auxListingIdentity(before).map(item=>[item.key,item])),b=new Map(auxListingIdentity(after).map(item=>[item.key,item]));
+ const added=[...b.keys()].filter(key=>!a.has(key)).sort(),removed=[...a.keys()].filter(key=>!b.has(key)).sort();
+ const changed=[...a.keys()].filter(key=>b.has(key)&&(a.get(key).etag!==b.get(key).etag||a.get(key).size!==b.get(key).size)).sort().map(key=>({key,before:a.get(key),after:b.get(key)}));
+ return {same:!added.length&&!removed.length&&!changed.length,added,removed,changed};
+}
+// The flip refuses on any difference between the listing at the close (or the export) and the one immediately before the flip. null = nothing changed; otherwise a typed refusal the operator prints.
+export function auxFlipRefusal(before,after){
+ const diff=compareAuxListings(before,after);
+ return diff.same?null:{code:'prediction_aux_listing_changed',added:diff.added,removed:diff.removed,changed:diff.changed.map(item=>item.key)};
+}
 // The caller needs the D1 branch: returns the authority when d1, null when proved r2 or closed (the caller runs its R2 code; a closed marker refuses at the entry and at the PUT), throws when unavailable.
 export async function auxD1(db,env,hint={}){
  const authority=await readAuxAuthority(db,env,hint);

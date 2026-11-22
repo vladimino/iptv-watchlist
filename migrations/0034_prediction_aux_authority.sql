@@ -10,7 +10,7 @@
 -- every legacy writer refused, reads served from R2, a pre-activation state) and d1. mode d1 is one-way: a trigger refuses
 -- d1 -> r2 and deleting the row, and the generation never goes down. prediction_aux_cas is the batch fence, not a switch: a guard sets ok to the count of
 -- rows that prove the caller's facts, and ok <> 1 aborts the whole batch (the same pattern as prediction_domain_cas).
--- The data tables carry no marker trigger: the writers assert the marker generation inside their own batch, and the offline importer asserts mode r2.
+-- The data tables carry no marker trigger: the writers assert the marker generation inside their own batch, and the offline importer asserts mode `closed` at the exact generation of the closure its export belongs to (ADR 0196).
 -- Source revisions, pieces, manifests and manifest pieces are insert-only (triggers refuse update and delete): history is retained (ADR 0194 decision 8).
 -- The outbox row is never deleted; settled rows are terminal; only the payload of a settled row may be compacted to NULL (identity, original `at`,
 -- journal key and digest stay). The skipped-event cap (256 active pending) is a counter row maintained by triggers with CHECK <= 256.
