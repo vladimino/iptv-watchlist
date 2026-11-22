@@ -70,7 +70,7 @@ const batchesOf = db => db.calls.batches;
   const {env} = fresh(v31);
   let r = await call(env, '');
   assert.equal(r.status, 200); assert.deepEqual([r.body.available, r.body.reason], [false, 'absent']);
-  assert.equal(r.body.activation.state, 'not_active');
+  assert.equal(r.body.activation.state, 'active', 'AIR-565: the policy is always applied, no flag state');
   r = await post(env, '/import', importBody(0));
   assert.equal(r.status, 503); assert.equal(r.body.error, 'channel_authority_unavailable'); assert.equal(r.body.reason, 'absent');
   assert.equal(rows(fresh(v31).file, "SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'epg_channel%'")[0].n, 0, 'nothing is created implicitly');
@@ -154,7 +154,7 @@ const batchesOf = db => db.calls.batches;
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.deepEqual([r.body.ok, r.body.changed, r.body.idempotent, r.body.revision, r.body.previousRevision], [true, true, false, 1, 0]);
   assert.deepEqual([r.body.receipt.channels, r.body.receipt.categories, r.body.receipt.requestId], [3, 3, id(0)]);
-  assert.equal(r.body.activation.state, 'not_active');
+  assert.equal(r.body.activation.state, 'active', 'AIR-565: the policy is always applied, no flag state');
   assert.equal(batchesOf(db), 1);
   assert.deepEqual(rows(file, 'SELECT channel_id, source_id, category_key FROM epg_channel ORDER BY channel_id'), [{channel_id: 'ch001', source_id: 'tvg_1', category_key: 'movies'}, {channel_id: 'ch002', source_id: 'tvg_2', category_key: 'news'}, {channel_id: 'ch1259', source_id: 'tvg_1259', category_key: 'sport'}]);
   // a lost reply retried with the OLD revision: the stored plan is exactly this one, so it is a no-op success

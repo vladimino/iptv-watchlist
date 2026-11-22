@@ -188,15 +188,13 @@ There is no hard TTL. The run fails closed only when no snapshot exists or it ca
 
 ## Channel policy in the EPG scan ([ADR 0187](../adr/0187-epg-channel-authority.md), [ADR 0191](../adr/0191-epg-channel-policy-in-the-scan.md))
 
-Channels have their own D1 tables with a provider category, a per-category policy and an optional owner override; the owner-only `/admin/channels` page imports an M3U and edits owner categories and overrides. The Worker flag `EPG_CHANNEL_POLICY` selects the scan mode. **`legacy`** (flag not `on`, the default): what the tables store is staged and changes nothing in the publication flow or in Discovery. **`filtered`** (flag `on`, one available, non-empty, consistent snapshot): each EPG sync reads it once before the feed is fetched, materializes an in-memory `Map<channelId, {policy, basis}>`, and `scanEPG` looks each in-window programme up once, before Film matching: `deny_all` ignores it, `known_only` keeps only a reliably identified Film, `discover` runs the unchanged pipeline. **`degraded`** (flag `on`, snapshot unavailable, absent, empty or torn): every channel is `known_only`, no unknown candidate is created, the event warns and claims no revision, and the EPG is published anyway; a Channel authority failure never blocks the EPG. In `filtered` mode the declared XMLTV channels the snapshot lacks are registered by one best-effort batch at the boundary between the declarations and the first programme of the same single pass; it is not tied to the publication and its failure never fails the scan. The mode is stored in the published generation and the continuity guard compares the minimum broadcasts only between generations of the same mode. The `epg` event carries the policy counters, the mode and, when filtered, the revision and digest of the applied map. The diagram shows the contract and the scan flow.
+Channels have their own D1 tables with a provider category, a per-category policy and an optional owner override; the owner-only `/admin/channels` page imports an M3U and edits owner categories and overrides. Since [ADR 0198](../adr/0198-retire-epg-channel-policy-flag.md) the policy is applied to every EPG scan unconditionally: no Worker variable selects the mode and an unfiltered `legacy` scan can no longer be started (older published generations and events that carry no mode still read as `legacy`). **`filtered`** (one available, non-empty, consistent snapshot): each EPG sync reads it once before the feed is fetched, materializes an in-memory `Map<channelId, {policy, basis}>`, and `scanEPG` looks each in-window programme up once, before Film matching: `deny_all` ignores it, `known_only` keeps only a reliably identified Film, `discover` runs the unchanged pipeline. **`degraded`** (snapshot unavailable, absent, empty or torn): every channel is `known_only`, no unknown candidate is created, the event warns and claims no revision, and the EPG is published anyway; a Channel authority failure never blocks the EPG. In `filtered` mode the declared XMLTV channels the snapshot lacks are registered by one best-effort batch at the boundary between the declarations and the first programme of the same single pass; it is not tied to the publication and its failure never fails the scan. The mode is stored in the published generation and the continuity guard compares the minimum broadcasts only between generations of the same mode. The `epg` event carries the policy counters, the mode and, when filtered, the revision and digest of the applied map. The diagram shows the contract and the scan flow.
 
 ```mermaid
 flowchart TD
     m3u["M3U groups and tvg ids<br/>(source of classification)"]
     plan["Pure import plan: M3U tvg ids and XMLTV ids,<br/>tvg_1259 to ch1259, tvg_1 to ch001;<br/>duplicate or unknown group refuses the plan;<br/>unlisted channels are kept, never deleted"]
     tables[("D1 channel tables, one snapshot revision:<br/>provider category, owner category, owner override")]
-    gate{"EPG_CHANNEL_POLICY is on?"}
-    legacy["legacy mode:<br/>policy not read, scan, event and guard as before"]
     snapshot{"One bounded snapshot read per sync:<br/>available, non-empty, consistent?"}
     degraded["degraded mode:<br/>every channel known_only, no unknown candidate,<br/>warning in the event, no revision claimed,<br/>EPG still published"]
     filtered["filtered mode:<br/>in-memory map pinned for the whole scan"]
@@ -209,9 +207,7 @@ flowchart TD
     event["Immutable epg event and published generation:<br/>mode, post-filter counts, counters, warnings,<br/>revision and digest only when filtered"]
     guard["Continuity guard: raw, coverage and horizon checks always;<br/>minimum broadcasts only between generations of the same mode"]
     shows["published_epg_show and discovery_observation_show:<br/>own keys, no foreign key to channels"]
-    m3u --> plan -->|"fenced batch at the expected revision"| tables --> gate
-    gate -->|"no"| legacy
-    gate -->|"yes"| snapshot
+    m3u --> plan -->|"fenced batch at the expected revision"| tables --> snapshot
     snapshot -->|"no"| degraded
     snapshot -->|"yes"| filtered --> derive --> scan
     degraded --> scan

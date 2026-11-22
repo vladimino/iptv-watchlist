@@ -226,12 +226,10 @@ console.log('Feature flags (ADR 0039): feature_flags lists the registered flags 
  for(const bad of ['D1',' d1','on','d1,r2','']){const item=await selector(bad);assert.equal(item.effective,null,JSON.stringify(bad)+' has no effective mode');}
 }
 
-// The Channel policy activation: only exactly `on` activates; absent or any other value leaves the scan as it was.
+// AIR-565: the Channel policy switch is retired: any value (or none) is inert, `on` and `off` alike, and the readback of an absent binding shows retired.
 {
  const policy=async value=>(await flags(value===undefined?{}:{EPG_CHANNEL_POLICY:value})).report.flags.find(item=>item.name==='EPG_CHANNEL_POLICY');
  const absent=await policy(undefined);
- assert.deepEqual([absent.state,absent.valid,absent.issue,absent.effective],['absent',true,null,'off'],'absent is off');
- const on=await policy('on');
- assert.deepEqual([on.state,on.raw,on.valid,on.issue,on.effective],['set','on',true,null,'on'],'on activates');
- for(const bad of ['ON',' on','yes','true','']){const item=await policy(bad);assert.equal(item.effective,'off',JSON.stringify(bad)+' stays off');assert.equal(item.valid,false,JSON.stringify(bad)+' is reported invalid');}
+ assert.deepEqual([absent.state,absent.valid,absent.issue,absent.effective,absent.retired],['absent',true,null,null,true],'absent reads back retired and inert');
+ for(const value of ['on','off']){const item=await policy(value);assert.deepEqual([item.state,item.raw,item.valid,item.issue,item.effective],['set',value,false,'retired',null],value+' is retired and inert');}
 }

@@ -20,8 +20,8 @@ assert.doesNotMatch(html, /не применяется|вступят в сил�
 assert.match(html, /id="channels-eyebrow"[^>]*>[^<]*ЗАГРУЖАЕТСЯ/, 'until the read answers, the banner says the state is loading');
 {
  const Admin = await import('../src/domain/epg-channel-admin.js');
- const off = Admin.activationView({state: 'not_active'}), on = Admin.activationView({state: 'active'});
- assert.equal(off.mode, 'off'); assert.match(off.eyebrow, /В EPG НЕ ПРИМЕНЯЕТСЯ/); assert.match(off.saved, /не применено/);
+ const on = Admin.activationView({state: 'active'});
+ assert.equal(Admin.activationView({state: 'not_active'}).mode, 'unknown', 'AIR-565: the retired staged state is no longer a known state');
  assert.equal(on.mode, 'on'); assert.match(on.eyebrow, /ВКЛЮЧЕНА/); assert.doesNotMatch(on.eyebrow + on.status + on.saved, /не применя|не читает|не включён/, 'the enabled state never says the policy is off');
  assert.match(on.saved, /следующей естественной генерацией/); assert.match(on.status, /событии «Обновлён EPG»/, 'enabled-for-next-scan is told apart from the revision the last generation applied');
  for (const bad of [undefined, null, {}, {state: 'weird'}, 'active', 7]) {
