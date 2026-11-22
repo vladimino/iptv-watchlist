@@ -139,6 +139,25 @@ sequenceDiagram
 
 A caller that disappears after the receipt blocks the runner for about 3 minutes, not 15, and the next start recovers the abandoned run through the existing `recovered_stale_lease` path. The synchronous start, the keyed synchronous start and `dryRun` stay for the transition. Offline cost (see [the evidence](../evidence/prediction/air-573-deferred-start-offline-2026-11-21.md)): the key 0 D1 and 0 R2 operations, the receipt 5 D1 and 4 R2, readback 4 D1 and 2 R2; the preparation is off the caller's path.
 
+
+### Auxiliary state: stage, sources, manifest and outbox ([ADR 0194](../adr/0194-prediction-auxiliary-state-d1-checkpoint-and-outbox.md), Accepted; **dormant**, production authority is still the R2 objects)
+
+The held stage, the run sources, the persisted manifest and the event outbox have a D1 implementation behind their own marker `prediction_aux_authority` ([AIR-553](https://trello.com/c/ouMIBO00)). **Production authority today is unchanged: the R2 objects.** The diagram shows the two branches and the fail-closed case; the D1 branch is code delivered and offline-tested, not activated, and its migration `0034` is not applied to production by a deploy. The cutover is the separate owner plan [AIR-554](https://trello.com/c/UrS1gflv); see the [runbook](../runbooks/prediction-aux-state-cutover.md) and the [offline evidence](../evidence/prediction/air-553-aux-state-d1-dormant-offline-2026-11-22.md).
+
+```mermaid
+flowchart LR
+  req["Runner request or Workflow preparation"] --> marker{"Aux marker read once per request"}
+  marker -->|"r2, or schema older than 34 (production today)"| legacy["R2 objects: stage, sources, manifest, stop and start events, event-outbox index"]
+  marker -->|"d1 (after a separate owner activation)"| rows["D1 rows: stage and head, source revisions, manifest and pieces, event outbox"]
+  marker -->|"unreadable, partial or unknown"| closed["prediction_aux_unavailable: fail closed, no R2 read or write"]
+  legacy --> journal[("Events journal in R2")]
+  rows --> journal
+  rows -. "same D1 batch" .-> lease["Runner lease guard and prediction marker"]
+  rows -. "stay in R2" .-> receipts[("Deferred-start receipts in R2")]
+```
+
+With the marker at `d1`: every auxiliary write is one D1 batch that asserts the marker generation (and, for run-owned writes, the runner lease with its gate token where one exists); the readiness edit of a deferred run and its manifest rows are one batch; a drain settles a staged row in the same batch as the film's prediction; a part of the manifest is read from the pieces that cover it and verified against per-piece digests; a skipped request without the lease is admitted by one insert on its identity, capped at 256 active pending records. The Events journal and the deferred-start receipts stay R2 objects.
+
 ## Queue writes
 
 The prediction runner is one of several writers of the queue object `enrichment/prediction-queue.json`. Every writer, with or without a lease, goes through the same conditional write ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31).

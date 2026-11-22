@@ -1024,6 +1024,21 @@ export const FILES={
  "prediction-skipped-event.mjs": {
   "suite": "core"
  },
+ "prediction-aux-d1.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-worker.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-import.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-budget.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-bench-lib.mjs": {
+  "suite": "core"
+ },
  "prediction-catalog-held-event.mjs": {
   "suite": "core"
  },
