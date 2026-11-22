@@ -411,6 +411,12 @@ run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
  db.sql("UPDATE letterboxd_sync_mode SET mode='cloudflare',target=NULL,from_mode='external'");
  before=created();await fire('30 * * * *',T('2026-12-01T09:35:00Z'));assert.equal(created(),before+1,'cloudflare: one instance for the current slot');
  await fire('30 * * * *',T('2026-12-01T09:36:00Z'));assert.equal(created(),before+1,'a duplicate firing creates no second instance');
+ // the canary hold: through the real Worker dispatch only the named slot is created; the next days' slots wait for the owner's open_schedule
+ db.sql("UPDATE letterboxd_sync_mode SET drain='canary:2026-12-03T1030'");
+ const held=created();await fire('30 * * * *',T('2026-12-02T09:35:00Z'));assert.equal(created(),held,'canary hold: a slot of another day is not created');
+ await fire('30 * * * *',T('2026-12-03T09:35:00Z'));assert.equal(created(),held+1,'the canary slot is created');
+ await fire('30 * * * *',T('2026-12-03T15:35:00Z'));assert.equal(created(),held+1,'and nothing after it until open_schedule');
+ db.sql("UPDATE letterboxd_sync_mode SET drain=NULL");
  // another cron expression never reaches the Letterboxd ensure
  const marker=created();await fire('24 3 * * *',T('2026-12-01T15:35:00Z'));assert.equal(created(),marker);
  // restore the state the file ended in

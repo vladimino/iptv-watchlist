@@ -55,10 +55,17 @@ export const FENCE_GUARD_SQL = "INSERT INTO letterboxd_sync_fence (id, ok) SELEC
 // AIR-571 D2. Drain mode: the mode row stays `cloudflare` at the same epoch and carries the marker `drain = 'scan_stopped'` (the existing free-text column, no schema change). While it is set NO new Watchlist scan starts and no
 // promotion commits (the guard below rides in the promotion batch, so a scan that began before the marker cannot publish after it), while the causal effects of the current snapshot and the Diary/Ratings phase continue.
 export const SCAN_STOPPED = 'scan_stopped';
-export const SCAN_GUARD_SQL = "INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id = 1 AND mode = 'cloudflare' AND epoch = ? AND (drain IS NULL OR drain <> 'scan_stopped')) THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok";
+// AIR-571 E: the CANARY HOLD, in the same free-text column (no schema): `canary:<slotKey>` lets `ensure` claim ONLY that Madrid slot and nothing after it, until the owner's explicit `open_schedule` command (the second gate
+// before the full four-slot schedule). The two markers compose: `scan_stopped+canary:<slotKey>` is draining under a canary hold. Grammar: null | 'verified' (full schedule) | 'scan_stopped' | 'canary:<slot>' | 'scan_stopped+canary:<slot>'.
+export const CANARY_PREFIX = 'canary:';
+const SLOT_KEY_TEXT = '\\d{4}-\\d{2}-\\d{2}T\\d{4}';
+export const isDraining = drain => typeof drain === 'string' && (drain === SCAN_STOPPED || drain.startsWith(SCAN_STOPPED + '+'));
+export const canaryOf = drain => { const match = new RegExp('(?:^|\\+)canary:(' + SLOT_KEY_TEXT + ')$').exec(String(drain ?? '')); return match ? match[1] : null; };
+const holdPart = (draining, canary) => [draining ? SCAN_STOPPED : null, canary ? CANARY_PREFIX + canary : null].filter(Boolean).join('+') || null;
+export const SCAN_GUARD_SQL = "INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id = 1 AND mode = 'cloudflare' AND epoch = ? AND (drain IS NULL OR (drain <> 'scan_stopped' AND drain NOT LIKE 'scan_stopped+%'))) THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok";
 export async function scanOpen(env) {
   const mode = await readMode(env);
-  return {open: !mode.malformed && mode.mode === 'cloudflare' && mode.drain !== SCAN_STOPPED, drain: mode.drain ?? null};
+  return {open: !mode.malformed && mode.mode === 'cloudflare' && !isDraining(mode.drain), drain: mode.drain ?? null};
 }
 export const fencedEnv = (env, epoch) => ({...env, ratingsFence: {guard: [FENCE_GUARD_SQL, [epoch]], hard: true}, producerFence: {kind: 'letterboxd', epoch}});
 const fenceGuard = (env, epoch) => dbOf(env).prepare(FENCE_GUARD_SQL).bind(epoch);
@@ -282,7 +289,7 @@ async function proveAdmission(env, ports, mode) {
   if (!Array.isArray(guards) || !guards.length) return {refused: {refused: 'handover_unprotected'}};
   return {guards};
 }
-export async function switchMode(env, {action, target, expectEpoch, expectRevision} = {}, ports = {}, now = Date.now()) {
+export async function switchMode(env, {action, target, slot, expectEpoch, expectRevision} = {}, ports = {}, now = Date.now()) {
   for (let attempt = 0; attempt < LIMITS.controlAttempts; attempt++) {
     const mode = await readMode(env);
     if (mode.malformed) return {action, refused: 'evidence_unreadable'};
@@ -296,7 +303,7 @@ export async function switchMode(env, {action, target, expectEpoch, expectRevisi
       let guards = [];
       if (mode.mode === 'cloudflare' && target === 'external') {
         // Reverse handover: scanning must already be stopped (`drain`), so the effects proof below cannot be overtaken by a promotion, and no running writer is closed over undrained causal effects (never a silent discard).
-        if (mode.drain !== SCAN_STOPPED) return {action, refused: 'drain_not_started', mode: mode.mode, epoch: mode.epoch};
+        if (!isDraining(mode.drain)) return {action, refused: 'drain_not_started', mode: mode.mode, epoch: mode.epoch};
         const effects = await effectsState(env, ports);
         if (effects.error) return {action, refused: 'effects_unreadable'};
         if (effects.unproven) return {action, refused: 'effects_unproven'};
@@ -305,7 +312,8 @@ export async function switchMode(env, {action, target, expectEpoch, expectRevisi
         if (!Array.isArray(effects.guard) || typeof effects.guard[0] !== 'string') return {action, refused: 'effects_unprotected'};
         guards = [effects.guard];
       }
-      const next = {mode: 'switching', from: mode.mode, target, epoch: mode.epoch + 1, drain: null, changedAt: iso(now), quarantine: mode.quarantine};
+      // A canary hold survives a switching episode (so an abort back to `cloudflare` cannot silently open the full schedule): it is carried in the drain column of the switching row.
+      const next = {mode: 'switching', from: mode.mode, target, epoch: mode.epoch + 1, drain: holdPart(false, canaryOf(mode.drain)), changedAt: iso(now), quarantine: mode.quarantine};
       const result = await writeMode(env, mode, next, {guards});
       if (result.outcome === 'applied') return {action, closed: true, mode: 'switching', target, epoch: next.epoch};
       if (result.outcome === 'uncertain') return UNCERTAIN(action);
@@ -336,12 +344,29 @@ export async function switchMode(env, {action, target, expectEpoch, expectRevisi
     if (action === 'drain' || action === 'resume') {
       // Drain mode on the running writer: only `cloudflare` (a writer exists), same epoch, one row write. `resume` is the recovery (scans open again).
       if (mode.mode !== 'cloudflare') return {action, refused: 'not_running', mode: mode.mode, epoch: mode.epoch};
-      const draining = mode.drain === SCAN_STOPPED;
+      const draining = isDraining(mode.drain);
       if (action === 'drain' && draining) return {action, refused: 'already_draining', mode: mode.mode, epoch: mode.epoch};
       if (action === 'resume' && !draining) return {action, refused: 'not_draining', mode: mode.mode, epoch: mode.epoch};
-      const next = {...mode, drain: action === 'drain' ? SCAN_STOPPED : null, changedAt: iso(now)};
+      const next = {...mode, drain: holdPart(action === 'drain', canaryOf(mode.drain)), changedAt: iso(now)};
       const result = await writeMode(env, mode, next);
       if (result.outcome === 'applied') return {action, [action === 'drain' ? 'draining' : 'resumed']: true, mode: mode.mode, epoch: mode.epoch};
+      if (result.outcome === 'uncertain') return UNCERTAIN(action);
+      if (expectEpoch !== undefined || expectRevision !== undefined) return {action, refused: 'pin_mismatch', pin: 'revision'};
+      continue;
+    }
+    if (action === 'canary' || action === 'open_schedule') {
+      // The two gates around the first natural slot. `canary` (slot, confirm, pins) lets `ensure` claim ONLY that Madrid slot; `open_schedule` (confirm, pins) removes the hold, the explicit owner decision before the full
+      // four-slot schedule. Same epoch, one row write; draining is preserved. Set the canary BEFORE the cron is deployed so no tick can claim a slot first.
+      if (mode.mode !== 'cloudflare') return {action, refused: 'not_running', mode: mode.mode, epoch: mode.epoch};
+      const held = canaryOf(mode.drain);
+      if (action === 'canary') {
+        if (!parseSlotKey(slot)) return {action, refused: 'invalid_slot'};
+        if (held) return {action, refused: 'canary_active', canary: held};
+        if (String(slot) < latestDueSlot(now).key) return {action, refused: 'slot_in_past', slot};
+      } else if (!held) return {action, refused: 'no_canary', mode: mode.mode, epoch: mode.epoch};
+      const next = {...mode, drain: holdPart(isDraining(mode.drain), action === 'canary' ? slot : null), changedAt: iso(now)};
+      const result = await writeMode(env, mode, next);
+      if (result.outcome === 'applied') return {action, [action === 'canary' ? 'canary' : 'scheduleOpen']: action === 'canary' ? slot : true, mode: mode.mode, epoch: mode.epoch};
       if (result.outcome === 'uncertain') return UNCERTAIN(action);
       if (expectEpoch !== undefined || expectRevision !== undefined) return {action, refused: 'pin_mismatch', pin: 'revision'};
       continue;
@@ -359,7 +384,7 @@ export async function switchMode(env, {action, target, expectEpoch, expectRevisi
         if (proof.refused) return {action, ...proof.refused, mode: 'switching', target: mode.target, epoch: mode.epoch};
         guards = proof.guards;
       }
-      const next = {mode: mode.from, from: mode.from, target: null, epoch: mode.epoch, drain: null, changedAt: iso(now), quarantine: mode.quarantine};
+      const next = {mode: mode.from, from: mode.from, target: null, epoch: mode.epoch, drain: mode.from === 'cloudflare' ? holdPart(false, canaryOf(mode.drain)) : null, changedAt: iso(now), quarantine: mode.quarantine};
       const result = await writeMode(env, mode, next, {guards});
       if (result.outcome === 'applied') return {action, aborted: true, mode: next.mode, epoch: next.epoch};
       if (result.outcome === 'uncertain') return UNCERTAIN(action);
@@ -386,7 +411,8 @@ export async function modeStatus(env, ports = {}) {
     mode: {...modeView(mode), from: mode.from, drain: mode.drain, quarantine: mode.quarantine},
     drain,
     handover: handover.error ? {error: true} : Object.fromEntries(HANDOVER_NAMES.map(name => [name, handover[name] === true])),
-    scanning: mode.mode === 'cloudflare' ? (mode.drain === SCAN_STOPPED ? 'stopped' : 'open') : null,
+    scanning: mode.mode === 'cloudflare' ? (isDraining(mode.drain) ? 'stopped' : 'open') : null,
+    canary: mode.mode === 'cloudflare' ? canaryOf(mode.drain) : null,
     effects: effects.error ? {error: true} : effects.unproven ? {unproven: true} : {drained: effects.drained === true, pending: effects.pending ?? null, version: effects.version ?? null, drainedVersion: effects.drainedVersion ?? null},
     legacyFenced: fence.fenced,
     // The Letterboxd side of "exactly one writer": the Ratings side is read from the Ratings mode (handover.ratingsClosed).
@@ -486,7 +512,11 @@ export async function ensure(env, {now = Date.now(), random = Math.random, ports
   // the Events or a new slot: its outcome is only reported.
   if (typeof ports?.mirror?.reconcile === 'function') delivery = {...delivery, mirror: await ports.mirror.reconcile(env, {epoch: mode.epoch, now}).catch(() => ({outcome: 'unreadable', reason: 'exception'}))};
   const current = latestDueSlot(now);
-  const missed = await recordMissed(env, mode, current, now).catch(() => 0);
+  // AIR-571 E: the canary hold. Only the named slot may be claimed; every other slot is neither started nor recorded as missed, until the owner's `open_schedule`.
+  const hold = canaryOf(mode.drain);
+  if (hold && current.key !== hold) return {started: false, reason: 'canary_hold', canary: hold, slot: current.key, delivery, missed: 0};
+  // Under the hold the slots before the canary were never meant to run: they are not recorded as missed (no skipped Events); after `open_schedule` the missed floor is that command's time.
+  const missed = hold ? 0 : await recordMissed(env, mode, current, now).catch(() => 0);
   let existing = await readSlot(env, current.key);
   if (existing) {
     if (existing.closedAt) return {started: false, reason: 'complete', slot: current.key, delivery, missed};
@@ -676,9 +706,11 @@ export const ACTIONS = {
   abort: {confirm: v => v === 'abort', expectEpoch: pinCheck, expectRevision: pinCheck},
   drain: {confirm: v => v === 'drain', expectEpoch: pinCheck, expectRevision: pinCheck},
   resume: {confirm: v => v === 'resume', expectEpoch: pinCheck, expectRevision: pinCheck},
+  canary: {confirm: v => v === 'canary', slot: v => typeof v === 'string' && !!parseSlotKey(v), expectEpoch: pinCheck, expectRevision: pinCheck},
+  open_schedule: {confirm: v => v === 'open_schedule', expectEpoch: pinCheck, expectRevision: pinCheck},
   clear_quarantine: {confirm: v => v === 'clear_quarantine'}
 };
-const REQUIRED = {close_admission: ['target', 'confirm', 'expectEpoch', 'expectRevision'], complete: ['confirm', 'expectEpoch', 'expectRevision'], abort: ['confirm', 'expectEpoch', 'expectRevision'], drain: ['confirm', 'expectEpoch', 'expectRevision'], resume: ['confirm', 'expectEpoch', 'expectRevision'], clear_quarantine: ['confirm']};
+const REQUIRED = {close_admission: ['target', 'confirm', 'expectEpoch', 'expectRevision'], complete: ['confirm', 'expectEpoch', 'expectRevision'], abort: ['confirm', 'expectEpoch', 'expectRevision'], drain: ['confirm', 'expectEpoch', 'expectRevision'], resume: ['confirm', 'expectEpoch', 'expectRevision'], canary: ['confirm', 'slot', 'expectEpoch', 'expectRevision'], open_schedule: ['confirm', 'expectEpoch', 'expectRevision'], clear_quarantine: ['confirm']};
 export function validate(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return 'Invalid request';
   const fields = ACTIONS[body.action];

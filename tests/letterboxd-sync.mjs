@@ -496,4 +496,49 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  await rawSwitch(pe,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await rawSwitch(pe,{action:'abort'},GOOD,NOW);
  const afterSwitch=await Sync.writerFence(pe);assert.deepEqual([afterSwitch.fenced,afterSwitch.reason],[true,'watchlist_schema_absent']);
 }
+// 12. AIR-571 E (review of PR #887): the CANARY HOLD. Only the named Madrid slot may be claimed until the owner's explicit `open_schedule`; the hold survives drain, resume and an abort; nothing is recorded for the held slots.
+{
+ const NOW=T('2026-11-22T00:00:00Z');
+ const {db}=fresh(),wf=workflow(),b=bucket(),e=env({db,wf,bucket:b});
+ const read=async()=>Sync.readMode(e);
+ const pins=async()=>{const m=await read();return {expectEpoch:m.epoch,expectRevision:m.revision};};
+ const slotRows=()=>db.sql('SELECT slot_key, status FROM letterboxd_slot ORDER BY slot_key');
+ assert.equal((await rawSwitch(e,{action:'canary',slot:'2026-11-22T1630',...await pins()},GOOD,NOW)).refused,'not_running');
+ await sw(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await sw(e,{action:'complete'},GOOD,NOW);
+ assert.equal((await rawSwitch(e,{action:'open_schedule',...await pins()},GOOD,NOW)).refused,'no_canary');
+ assert.equal((await rawSwitch(e,{action:'canary',slot:'not-a-slot',...await pins()},GOOD,NOW)).refused,'invalid_slot');
+ // a slot already past is refused (the first natural slot must still lie ahead)
+ assert.equal((await rawSwitch(e,{action:'canary',slot:'2026-11-21T1030',...await pins()},GOOD,T('2026-11-22T09:35:00Z'))).refused,'slot_in_past');
+ const set=await rawSwitch(e,{action:'canary',slot:'2026-11-22T1630',...await pins()},GOOD,NOW);assert.deepEqual([set.canary,set.epoch],['2026-11-22T1630',1]);
+ assert.equal((await rawSwitch(e,{action:'canary',slot:'2026-11-22T2230',...await pins()},GOOD,NOW)).refused,'canary_active');
+ assert.equal((await Sync.modeStatus(e,GOOD)).canary,'2026-11-22T1630');
+ // before the canary slot: nothing is claimed, created or recorded (not even as missed)
+ const before=await Sync.ensure(e,{now:T('2026-11-22T09:35:00Z')});
+ assert.deepEqual([before.started,before.reason,before.canary],[false,'canary_hold','2026-11-22T1630']);assert.deepEqual(slotRows(),[]);assert.equal(wf.created.length,0);
+ // the canary slot itself is claimed and created ONCE
+ const canary=await Sync.ensure(e,{now:T('2026-11-22T15:35:00Z')});assert.equal(canary.started,true);assert.equal(canary.slot,'2026-11-22T1630');assert.equal(wf.created.length,1);
+ // the hold persists after the canary: the next slot is NOT started and NOT recorded: the owner's gate is explicit
+ const after=await Sync.ensure(e,{now:T('2026-11-22T21:35:00Z')});
+ assert.deepEqual([after.started,after.reason],[false,'canary_hold']);assert.equal(wf.created.length,1);assert.deepEqual(slotRows().map(r=>r.slot_key),['2026-11-22T1630']);
+ // drain and resume keep the hold; the scan guard still trips while draining under a canary
+ const d=await rawSwitch(e,{action:'drain',...await pins()},GOOD,NOW);assert.equal(d.draining,true);assert.equal((await read()).drain,'scan_stopped+canary:2026-11-22T1630');
+ assert.equal((await Sync.scanOpen(e)).open,false);
+ const trips=async sql=>{try{await db.batch([db.prepare(sql).bind(1)]);return false;}catch{return true;}};
+ assert.equal(await trips(Sync.SCAN_GUARD_SQL),true,'draining under a canary stops promotions');assert.equal(await trips(Sync.FENCE_GUARD_SQL),false);
+ assert.equal((await rawSwitch(e,{action:'resume',...await pins()},GOOD,NOW)).resumed,true);assert.equal((await read()).drain,'canary:2026-11-22T1630','resume restores the canary hold, never the full schedule');
+ assert.equal(await trips(Sync.SCAN_GUARD_SQL),false);
+ // an abort back to cloudflare after a reverse close keeps the hold (the carried marker)
+ await rawSwitch(e,{action:'drain',...await pins()},GOOD,NOW);
+ assert.equal((await rawSwitch(e,{action:'close_admission',target:'external',...await pins()},GOOD,NOW)).closed,true);
+ assert.equal((await read()).drain,'canary:2026-11-22T1630','the hold is carried through the switching episode');
+ assert.equal((await rawSwitch(e,{action:'abort',...await pins()},GOOD,NOW)).aborted,true);assert.equal((await read()).drain,'canary:2026-11-22T1630','an abort never opens the full schedule');
+ // the explicit gate: open_schedule removes the hold; the next slot is then claimed by the natural tick
+ const opened=await rawSwitch(e,{action:'open_schedule',...await pins()},GOOD,NOW);assert.equal(opened.scheduleOpen,true);assert.equal((await read()).drain,null);
+ const next=await Sync.ensure(e,{now:T('2026-11-22T21:36:00Z')});assert.equal(next.started,true);assert.equal(next.slot,'2026-11-22T2230');assert.equal(wf.created.length,2);
+ // the owner route validates the commands
+ assert.equal(Sync.validate({action:'canary',confirm:'canary',slot:'2026-11-23T0430',expectEpoch:1,expectRevision:2}),null);
+ assert.equal(Sync.validate({action:'canary',confirm:'canary',expectEpoch:1,expectRevision:2}),'Missing slot');assert.equal(Sync.validate({action:'canary',confirm:'canary',slot:'tomorrow',expectEpoch:1,expectRevision:2}),'Invalid slot');
+ assert.equal(Sync.validate({action:'open_schedule',confirm:'open_schedule',expectEpoch:1,expectRevision:2}),null);assert.equal(Sync.validate({action:'open_schedule',confirm:'canary',expectEpoch:1,expectRevision:2}),'Invalid confirm');
+ assert.equal(Sync.validate({action:'open_schedule',confirm:'open_schedule',slot:'2026-11-23T0430',expectEpoch:1,expectRevision:2}),'Unknown field');
+}
 console.log('letterboxd-sync ok');

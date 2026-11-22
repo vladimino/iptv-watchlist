@@ -655,6 +655,9 @@ export const FILES={
  "letterboxd-qa-matrix.mjs": {
   "suite": "core"
  },
+ "letterboxd-film-admission-race.mjs": {
+  "suite": "core"
+ },
  "migration-statements.mjs": {
   "suite": "core"
  },
