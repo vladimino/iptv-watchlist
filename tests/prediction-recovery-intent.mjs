@@ -190,11 +190,11 @@ const key=n=>'owner-key-'+String(n).padStart(8,'0');
  assert.equal(p.data.films[0].plan,'fingerprint_and_prediction');
  const ok=await w.admin('confirm',{method:'POST',body:{films:['tmdb_2'],mode:'fingerprint_and_prediction',ttlHours:72,scopeHash:p.data.scopeHash,idempotencyKey:key(3)}});
  assert.equal(ok.status,201,JSON.stringify(ok.data));assert.ok(intents(w)[0].fingerprint_token);
- // A never-predicted film admitted meanwhile is ordered before the recovered one (missing predictions first; the intent changes no priority).
+ // A never-predicted film admitted meanwhile: the intent changes no stored priority (same lane and rank below), but the batch gives the recovered film a recovery slot ahead of it (ADR 0197).
  const now=Date.now(),film={id:'tmdb_9',title:'tmdb_9',original:'tmdb_9',year:2020,tmdbId:'9',canonicalIdentity:'tmdb:9',genres:[],actors:[],directors:[],shows:[{start:now}]};
  sql(w.file,"INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES ('tmdb_9','9','movie','tmdb:9','tmdb_9','p1',1,'current','"+JSON.stringify(film)+"')");
  const m=await start(w);
- assert.deepEqual(m.films.map(f=>f.filmId),['tmdb_9','tmdb_2']);
+ assert.deepEqual(m.films.map(f=>f.filmId),['tmdb_2','tmdb_9'],'the recovery slot is filled first, the ordinary queue fills the rest');
  assert.equal(m.films.find(f=>f.filmId==='tmdb_2').plan,'fingerprint_and_prediction','the stored fingerprint is not offered for reuse');
  const q=queueDoc(w);assert.deepEqual(q.priority.tmdb_2.rank,q.priority.tmdb_9.rank,'the same ordinary lane and rank');
  const s=await submitAll(w,m,{...w.prediction,predictedRating:2.5});
