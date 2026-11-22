@@ -26,7 +26,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createD1Adapter,D1Error} from './d1-backfill.mjs';
 import {BATCH_BYTES,BATCH_STATEMENTS,PRODUCTION_ACCOUNT_ID,createPublishedBinding,migrationStatements,normalize,OperatorStop,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
 import {AUX_TABLES,auxFlipRefusal} from '../src/prediction-aux-d1.js';
-import {importGuardStatement} from './prediction-aux-d1-import.mjs';
+import {buildPlan,importGuardStatement,planReport,planSql,planVerifySql,readExport} from './prediction-aux-d1-import.mjs';
 
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 export const MIGRATION_PATH=path.join(ROOT,'migrations/0034_prediction_aux_authority.sql');
@@ -210,10 +210,15 @@ export async function execute(command,{binding,now,ctx={},params={},limits={}}){
  if(command==='status'){
   const out={operation:'status',writes:false,writeState:'none',migrationSha256:migrationSha256(),decisions:{apply:applyDecision(state)},...view(state),otherDomains:state.invariants};
   if(state.installed&&state.marker){const g=state.marker.generation;out.decisions={...out.decisions,close:closeDecision(state,{generation:g}),import:importDecision(state,{generation:g}),reopen:reopenDecision(state,{generation:g})};}
-  if(params.sqlText!==undefined){
-   const pin=sha256(params.sqlText);
-   try{out.importFile={sha256:pin,...checkedSql(params.sqlText,{kind:'import',generation:params.generation,pin,limits}).sizing};}
-   catch(error){if(error instanceof OperatorStop)out.importFile={sha256:pin,refused:error.reason,...(error.details||{})};else throw error;}
+  if(params.converted){
+   // What the owner reads BEFORE a write command: the report, the digests and the hashes of the SQL the operator will derive itself from this tree (the pins of `--import`, `--verify` and `--flip`).
+   const c=params.converted,verifyText=planVerifySql(c.plan),verifySha=sha256(verifyText);
+   out.converted={tree:c.directory,report:{stage:c.report.stage,sources:c.report.sources,manifests:c.report.manifests,outbox:c.report.outbox},identitySha256:c.capture.identitySha256,verifySha256:verifySha,verify:checkedSql(verifyText,{kind:'verify',pin:verifySha,limits}).sizing};
+   if(Number.isSafeInteger(params.generation)){
+    const text=planSql(c.plan,params.generation),pin=sha256(text);
+    try{out.converted.import={generation:params.generation,sha256:pin,...checkedSql(text,{kind:'import',generation:params.generation,pin,limits}).sizing};}
+    catch(error){if(error instanceof OperatorStop)out.converted.import={generation:params.generation,refused:error.reason};else throw error;}
+   }
   }
   return out;
  }
@@ -253,7 +258,10 @@ export async function execute(command,{binding,now,ctx={},params={},limits={}}){
   const generation=params.generation;
   const decision=(command==='import'?importDecision:verifyDecision)(state,{generation});
   if(decision!==command)throw new OperatorStop(decision,3);
-  const file=checkedSql(params.sqlText,{kind:command,generation,pin:params.sqlSha256,limits});
+  if(!params.converted)throw new OperatorStop('converted_required',2);
+  // The SQL is DERIVED from the converted tree (never read from a file the caller supplies); the pin is the owner's confirmation of what `status` printed for exactly this tree.
+  const text=command==='import'?planSql(params.converted.plan,generation):planVerifySql(params.converted.plan);
+  const file=checkedSql(text,{kind:command,generation,pin:params.sqlSha256,limits});
   if(!file.sizing.fits)throw new OperatorStop(command+'_too_large',3,{...file.sizing,note:'no chunking is attempted; a resumable import is a separate reviewed contract'});
   await write(binding,file.statements.map(sql=>binding.prepare(sql).bind()),{ctx:track,untouched:after=>command==='import'?empty(after):true});
   const after=await readback(binding,track),problems=[];
@@ -266,15 +274,15 @@ export async function execute(command,{binding,now,ctx={},params={},limits={}}){
  }
  if(command==='flip'){
   const generation=params.generation;
-  // The verification SQL is checked and sized BEFORE anything else is decided, because it travels inside the flip batch.
-  let verify=null;
-  if(params.verifyText!==undefined){
-   verify=checkedSql(params.verifyText,{kind:'verify',generation,pin:params.verifySha256,limits});
-   if(verify.sizing.statements+2>verify.sizing.maxStatements||verify.sizing.bytes>verify.sizing.maxBytes)throw new OperatorStop('verify_too_large',3,{...verify.sizing,note:'the flip needs the whole verification in one batch with the marker update'});
-  }
-  const decision=flipDecision(state,{generation,report:params.report,before:params.captureBefore,now:params.captureNow,verify,release:params.release,clock,source:params.source,maxAgeMs:params.maxCaptureAgeMs});
+  // The dataset, the report and the verification are all derived from the converted tree of the capture taken at the close (its files were checked against that capture's identity when it was loaded).
+  const converted=params.captureBefore;
+  if(!converted?.plan||!converted?.report)throw new OperatorStop('converted_required',2);
+  const report=converted.report;
+  const verify=checkedSql(planVerifySql(converted.plan),{kind:'verify',generation,pin:params.verifySha256,limits});
+  if(verify.sizing.statements+2>verify.sizing.maxStatements||verify.sizing.bytes>verify.sizing.maxBytes)throw new OperatorStop('verify_too_large',3,{...verify.sizing,note:'the flip needs the whole verification in one batch with the marker update'});
+  const decision=flipDecision(state,{generation,report,before:converted.capture,now:params.captureNow,verify,release:params.release,clock,source:params.source,maxAgeMs:params.maxCaptureAgeMs});
   if(decision.reason)throw new OperatorStop(decision.reason,3,decision.details||{});
-  const want=expectedCounts(params.report);
+  const want=expectedCounts(report);
   const activatedAt=new Date(clock).toISOString();
   const guard=binding.prepare("UPDATE prediction_aux_cas SET ok=(SELECT count(*) FROM prediction_aux_authority WHERE id=1 AND mode='closed' AND generation=?)*"+['stage','sources','revisions','manifests','pieces','outbox'].map((key,index)=>'(SELECT count(*)=? FROM '+FAMILY_TABLES[index]+')').join('*')+' WHERE id=1').bind(generation,want.stage,want.sources,want.revisions,want.manifests,want.pieces,want.outbox);
   const flip=binding.prepare("UPDATE prediction_aux_authority SET mode='d1', generation=?, activated_at=? WHERE id=1 AND mode='closed' AND generation=?").bind(generation+1,activatedAt,generation);
@@ -292,9 +300,9 @@ export async function execute(command,{binding,now,ctx={},params={},limits={}}){
 }
 
 // ---- CLI -----------------------------------------------------------------------------------------------------------------
-const OPTIONS={'--target':'target','--confirm':'confirm','--generation':'generation','--migration-sha256':'migrationSha256','--sql-file':'sqlFile','--sql-sha256':'sqlSha256','--report':'report','--capture-before':'captureBefore','--capture-now':'captureNow','--verify-sql-file':'verifySqlFile','--verify-sql-sha256':'verifySha256','--release':'release'};
-const REQUIRED={status:[],apply:['migrationSha256'],close:['generation'],reopen:['generation'],import:['generation','sqlFile','sqlSha256'],verify:['generation','sqlFile','sqlSha256'],flip:['generation','report','captureBefore','captureNow','verifySqlFile','verifySha256']};
-const ALLOWED={status:['sqlFile','generation'],apply:['migrationSha256'],close:['generation'],reopen:['generation'],import:['generation','sqlFile','sqlSha256'],verify:['generation','sqlFile','sqlSha256'],flip:['generation','report','captureBefore','captureNow','verifySqlFile','verifySha256','release']};
+const OPTIONS={'--target':'target','--confirm':'confirm','--generation':'generation','--migration-sha256':'migrationSha256','--converted':'converted','--sql-sha256':'sqlSha256','--capture-before':'captureBefore','--capture-now':'captureNow','--verify-sql-sha256':'verifySha256','--release':'release'};
+const REQUIRED={status:[],apply:['migrationSha256'],close:['generation'],reopen:['generation'],import:['generation','converted','sqlSha256'],verify:['generation','converted','sqlSha256'],flip:['generation','captureBefore','captureNow','verifySha256']};
+const ALLOWED={status:['converted','generation'],apply:['migrationSha256'],close:['generation'],reopen:['generation'],import:['generation','converted','sqlSha256'],verify:['generation','converted','sqlSha256'],flip:['generation','captureBefore','captureNow','verifySha256','release']};
 export function parseArgs(argv){
  const args=argv.slice(2);
  const commands=args.filter(arg=>arg.startsWith('--')&&COMMANDS.includes(arg.slice(2)));
@@ -333,15 +341,31 @@ export function readCapture(directory){
  const identityText=read(path.join(directory,'identity.json'));
  return {identity:json(identityText),identityText,identitySha256:sha256(identityText),report:json(read(path.join(directory,'converter-report.json')))};
 }
-function loadParams(params){
+const walk=(directory,base=directory)=>fs.readdirSync(directory,{withFileTypes:true}).flatMap(entry=>{const full=path.join(directory,entry.name);return entry.isDirectory()?walk(full,base):[path.relative(base,full).split(path.sep).join('/')];});
+// The dataset the import, the verification and the report are all DERIVED from. Review of PR 897: a verification SQL or a report supplied by the caller (with a hash the caller computes) proves nothing, so the
+// operator takes none: it reads the converter's `tree/` itself, requires every file to be exactly the object the capture recorded (SHA-256 and size, no extra, no missing), builds the importer's own plan and
+// derives the import SQL, the exact verification SQL and the report from it. A plan with a blocker is refused.
+export async function loadConverted(directory){
+ const capture=readCapture(directory);
+ const tree=path.join(directory,'tree');
+ let files;
+ try{files=walk(tree);}catch{throw new OperatorStop('file_unreadable',2);}
+ const recorded=new Map(capture.identity.map(item=>[item.key,item]));
+ if(files.length!==recorded.size||files.some(key=>!recorded.has(key)))throw new OperatorStop('tree_not_from_capture',3,{reason:'the files of the tree are not the objects the capture recorded'});
+ for(const [key,item] of recorded){
+  const bytes=fs.readFileSync(path.join(tree,...key.split('/')));
+  if(bytes.length!==item.size||sha256(bytes)!==item.sha256)throw new OperatorStop('tree_not_from_capture',3,{reason:'an object of the tree differs from the capture',keyDigest:sha256(key).slice(0,12)});
+ }
+ const plan=await buildPlan(readExport(tree));
+ if(plan.blockers.length)throw new OperatorStop('converted_blocked',3,{blockers:plan.blockers.map(item=>item.code)});
+ const report=await planReport(plan);
+ return {directory,capture,plan,report,verifyText:planVerifySql(plan),importText:generation=>planSql(plan,generation)};
+}
+async function loadParams(params){
  const out={...params};
- const read=(file)=>{try{return fs.readFileSync(path.resolve(file),'utf8');}catch{throw new OperatorStop('file_unreadable',2);}};
- const json=(text)=>{try{return JSON.parse(text);}catch{throw new OperatorStop('file_invalid',2);}};
- if(out.sqlFile!==undefined)out.sqlText=read(out.sqlFile);
- if(out.verifySqlFile!==undefined)out.verifyText=read(out.verifySqlFile);
- if(out.report!==undefined)out.report=json(read(out.report));
- // A capture is the output directory of one converter run (identity.json and converter-report.json), never a loose file.
- for(const name of ['captureBefore','captureNow'])if(out[name]!==undefined)out[name]=readCapture(out[name]);
+ if(out.converted!==undefined)out.converted=await loadConverted(out.converted);
+ if(out.captureBefore!==undefined)out.captureBefore=await loadConverted(out.captureBefore);
+ if(out.captureNow!==undefined)out.captureNow=readCapture(out.captureNow);
  return out;
 }
 
@@ -351,7 +375,7 @@ export async function runPredictionAuxCutoverProduction({argv=process.argv,env=p
  try{
   const parsed=parseArgs(argv);
   if(parsed.report)return {exit:0,result:parsed.report};
-  const params=loadParams(parsed.params);
+  const params=await loadParams(parsed.params);
   let binding,adapterTarget=null;
   if(deps)({binding}=deps);
   else{

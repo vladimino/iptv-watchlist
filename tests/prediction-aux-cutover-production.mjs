@@ -58,8 +58,8 @@ const fenceObjects=()=>({
  'enrichment/latest-run.json':json({runId:'enrichment-run-9'})
 });
 const legacyBytes=Object.fromEntries(Object.entries(objects).map(([key,value])=>[key,json(value)]));
-async function openBucket(extra={}){
- const bucket=fakeBucket({...fenceObjects(),...legacyBytes,...extra},{pageSize:4});
+async function openBucket(extra={},legacy=legacyBytes){
+ const bucket=fakeBucket({...fenceObjects(),...legacy,...extra},{pageSize:4});
  const endpoint=await bucket.start();
  return {bucket,credentials:readCredentials(envFor(endpoint))};
 }
@@ -71,7 +71,9 @@ async function capture(opened){
  return {dir:output,...Op.readCapture(output)};
 }
 const clockAfter=cap=>Date.parse(cap.report.snapshot.finishedAt)+60000;
-const flipParams=(release,extra={})=>({generation:1,report,verifyText,verifySha256:sha256(verifyText),release,source:SOURCE,...extra});
+// The verification the operator DERIVES from a converted tree (the only verification it will run): its pin is the owner's confirmation of what `status` printed.
+const pinOf=conv=>sha256(conv.verifyText);
+const flipParams=(conv,release,extra={})=>({generation:1,captureBefore:conv,verifySha256:pinOf(conv),release,source:SOURCE,...extra});
 
 // ===== 1. arguments =====
 {
@@ -86,15 +88,17 @@ const flipParams=(release,extra={})=>({generation:1,report,verifyText,verifySha2
  assert.throws(()=>Op.parseArgs(A('--close','--target','iptv','--confirm','close','--generation','1.5')),e=>e.reason==='usage');
  assert.throws(()=>Op.parseArgs(A('--apply','--target','iptv','--confirm','apply')),e=>e.reason==='usage','the migration pin is required');
  assert.throws(()=>Op.parseArgs(A('--apply','--target','iptv','--confirm','apply','--migration-sha256','abc')),e=>e.reason==='usage');
- assert.throws(()=>Op.parseArgs(A('--import','--target','iptv','--confirm','import','--generation','1','--sql-file','x')),e=>e.reason==='usage','the SQL pin is required');
+ assert.throws(()=>Op.parseArgs(A('--import','--target','iptv','--confirm','import','--generation','1','--converted','x')),e=>e.reason==='usage','the SQL pin is required');
  assert.throws(()=>Op.parseArgs(A('--status','--apply','--target','iptv','--confirm','apply')),e=>e.reason==='usage');
  assert.throws(()=>Op.parseArgs(A('--close','--target','iptv','--confirm','close','--generation','0','--release','x')),e=>e.reason==='usage','an option the command does not take');
- assert.throws(()=>Op.parseArgs(A('--flip','--target','iptv','--confirm','flip','--generation','1','--report','r','--capture-before','a','--capture-now','b')),e=>e.reason==='usage','the verification SQL and its pin are required by the flip');
- assert.throws(()=>Op.parseArgs(A('--flip','--target','iptv','--confirm','flip','--generation','1','--report','r','--listing-before','a','--listing-now','b','--verify-sql-file','v','--verify-sql-sha256','0'.repeat(64))),e=>e.reason==='usage','loose listing files are not an input any more');
- const flipArgs=A('--flip','--target','iptv','--confirm','flip','--generation','1','--report','r','--capture-before','a','--capture-now','b','--verify-sql-file','v','--verify-sql-sha256','0'.repeat(64));
- assert.equal(Op.parseArgs(flipArgs).command,'flip');assert.equal(Op.parseArgs([...flipArgs,'--release','abc']).params.release,'abc');
  assert.throws(()=>Op.parseArgs(A('--target','iptv','--confirm','status')),e=>e.reason==='usage');
  assert.throws(()=>Op.parseArgs(A('--wipe','--target','iptv')),e=>e.reason==='usage','no other command exists');
+ // The SQL and the report are DERIVED from the converted tree: no option can carry a file of SQL or a report any more (review of PR 897)
+ for(const option of ['--sql-file','--verify-sql-file','--report','--listing-before','--listing-now'])assert.throws(()=>Op.parseArgs(A('--import','--target','iptv','--confirm','import','--generation','1','--converted','x','--sql-sha256','0'.repeat(64),option,'f')),e=>e.reason==='usage',option+' is not an input');
+ for(const option of ['--sql-file','--verify-sql-file','--report'])assert.throws(()=>Op.parseArgs(A('--flip','--target','iptv','--confirm','flip','--generation','1','--capture-before','a','--capture-now','b','--verify-sql-sha256','0'.repeat(64),option,'f')),e=>e.reason==='usage',option+' is not an input of the flip');
+ assert.throws(()=>Op.parseArgs(A('--flip','--target','iptv','--confirm','flip','--generation','1','--capture-before','a','--capture-now','b')),e=>e.reason==='usage','the verification pin is required by the flip');
+ const flipArgs=A('--flip','--target','iptv','--confirm','flip','--generation','1','--capture-before','a','--capture-now','b','--verify-sql-sha256','0'.repeat(64));
+ assert.equal(Op.parseArgs(flipArgs).command,'flip');assert.equal(Op.parseArgs([...flipArgs,'--release','abc']).params.release,'abc');
  const ok=Op.parseArgs(A('--close','--target','iptv','--confirm','close','--generation','0'));assert.equal(ok.command,'close');assert.equal(ok.params.generation,0);
  assert.equal(Op.parseArgs(A('--target','iptv')).command,'status');
  const cli=spawnSync(process.execPath,['scripts/prediction-aux-cutover-production.mjs'],{encoding:'utf8'});assert.equal(cli.status,0);
@@ -103,7 +107,10 @@ const flipParams=(release,extra={})=>({generation:1,report,verifyText,verifySha2
  assert.ok([2,3].includes(refused.exit),'without the production target in the environment nothing is attempted');assert.equal(refused.result.writeState,'none');
 }
 
-// ===== 2. status is read-only and says what each step would do =====
+// ===== 2. status is read-only, prints the pins of what the operator will derive, and says what each step would do =====
+const opened=await openBucket();
+const capBefore=await capture(opened);                 // the cut taken at the close
+const convBefore=await Op.loadConverted(capBefore.dir);
 {
  const env=scratch();const before=fs.readFileSync(env.file);
  const status=await run('status',env);
@@ -112,12 +119,39 @@ const flipParams=(release,extra={})=>({generation:1,report,verifyText,verifySha2
  assert.match(status.migrationSha256,/^[0-9a-f]{64}$/);assert.equal(status.migrationSha256,Op.migrationSha256());
  assert.ok(fs.readFileSync(env.file).equals(before),'status changed no byte of the database');
  assert.equal(states.length,0,'no write was tracked');
- // the sizing of an import file is reported without sending anything
- const sized=await run('status',env,{sqlText:sqlFor(1),generation:1});
- assert.equal(sized.importFile.fits,true);assert.ok(sized.importFile.statements>=10);assert.equal(sized.importFile.sha256,sha256(sqlFor(1)));
- const tooBig=await Op.execute('status',{binding:env.db,now:NOW,ctx:ctxOf(),params:{sqlText:sqlFor(1),generation:1},limits:{statements:5}});
- assert.equal(tooBig.importFile.fits,false,'the measured batch limits are reported');assert.equal(tooBig.importFile.maxStatements,5);
- assert.equal((await run('status',env,{sqlText:'DROP TABLE film;',generation:1})).importFile.refused,'sql_refused');
+ // the dataset the operator derives from the converted tree: the SAME plan the importer builds from the original objects
+ assert.equal(convBefore.verifyText,planVerifySql(plan),'the verification is the importer\'s canonical one for this dataset');
+ assert.equal(sqlFor(1),planSql(plan,1));assert.deepEqual(convBefore.report.stage.items,report.stage.items);assert.equal(JSON.stringify(convBefore.report),JSON.stringify(report));
+ assert.ok(convBefore.verifyText.split("\n").filter(Boolean).length>6,'row-level comparisons, not only totals');
+ assert.match(convBefore.verifyText,/item_json=/);assert.match(convBefore.verifyText,/AND text=/);assert.match(convBefore.verifyText,/event_id=/);
+ const printed=await run('status',env,{converted:convBefore,generation:1});
+ assert.equal(printed.converted.verifySha256,sha256(planVerifySql(plan)));assert.equal(printed.converted.import.sha256,sha256(planSql(plan,1)));assert.equal(printed.converted.import.fits,true);assert.ok(printed.converted.import.statements>=10);
+ assert.equal(printed.converted.identitySha256,capBefore.identitySha256);assert.equal(printed.converted.report.manifests.count,report.manifests.count);
+ const tooBig=await Op.execute('status',{binding:env.db,now:NOW,ctx:ctxOf(),params:{converted:convBefore,generation:1},limits:{statements:5}});
+ assert.equal(tooBig.converted.import.fits,false,'the measured batch limits are reported');assert.equal(tooBig.converted.import.maxStatements,5);
+ assert.ok(fs.readFileSync(env.file).equals(before),'status with a converted tree changed nothing');
+}
+
+// ===== 2b. the converted tree is the evidence: it must be exactly what the capture recorded =====
+{
+ const clone=()=>{const dir=tmp();fs.cpSync(capBefore.dir,dir,{recursive:true});return dir;};
+ const key='enrichment/batch-stage.json';
+ const tamperSame=clone();const file=path.join(tamperSame,'tree',...key.split('/'));const bytes=fs.readFileSync(file);bytes[bytes.length-5]=bytes[bytes.length-5]^1;fs.writeFileSync(file,bytes);
+ await stop(Op.loadConverted(tamperSame),'tree_not_from_capture');                      // same length, other bytes
+ const extra=clone();fs.writeFileSync(path.join(extra,'tree','enrichment','sources','extra.json'),'{}');
+ await stop(Op.loadConverted(extra),'tree_not_from_capture');                           // an object the capture never recorded
+ const missing=clone();fs.rmSync(path.join(missing,'tree',...key.split('/')));
+ await stop(Op.loadConverted(missing),'tree_not_from_capture');                         // an object that is gone
+ const short=clone();fs.writeFileSync(path.join(short,'tree',...key.split('/')),fs.readFileSync(path.join(short,'tree',...key.split('/'))).subarray(0,10));
+ await stop(Op.loadConverted(short),'tree_not_from_capture');
+ const blocked=clone();fs.writeFileSync(path.join(blocked,'tree','enrichment','batch-manifest','bad.json'),'{not json');
+ const sums=JSON.parse(fs.readFileSync(path.join(blocked,'identity.json'),'utf8'));const b=fs.readFileSync(path.join(blocked,'tree','enrichment','batch-manifest','bad.json'));
+ fs.writeFileSync(path.join(blocked,'identity.json'),JSON.stringify([...sums,{key:'enrichment/batch-manifest/bad.json',etag:'e',size:b.length,sha256:sha256(b)}])+'\n');
+ await stop(Op.loadConverted(blocked),'converted_blocked');                             // consistent with its capture, but the importer cannot read it
+ // a verification or a report dropped next to the tree is simply never read
+ const decoy=clone();fs.writeFileSync(path.join(decoy,'verify.sql'),"UPDATE prediction_aux_authority SET mode='d1', generation=2 WHERE id=1;\n");fs.writeFileSync(path.join(decoy,'report.json'),'{"stage":{"items":0}}');
+ assert.equal((await Op.loadConverted(decoy)).verifyText,convBefore.verifyText);
+ await stop(Op.loadConverted(path.join(tmp(),'nothing')),'file_unreadable');
 }
 
 // ===== 3. apply: pinned, atomic, read back; a stale or partial state is refused =====
@@ -160,15 +194,15 @@ const env=scratch();
 const otherModes=()=>JSON.stringify(sql(env.file,"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%\\_authority' ESCAPE '\\' AND name<>'prediction_aux_authority' ORDER BY name").map(row=>[row.name,sql(env.file,'SELECT mode FROM '+row.name+' LIMIT 1')[0]?.mode]));
 const modesBefore=otherModes();
 await run('apply',env,{migrationSha256:Op.migrationSha256()});
-const opened=await openBucket();
-const capBefore=await capture(opened);          // the cut taken at the close
+const importParams=(generation=1,extra={})=>({generation,converted:convBefore,sqlSha256:sha256(planSql(plan,generation)),...extra});
+const verifyParams=(generation=1,extra={})=>({generation,converted:convBefore,sqlSha256:pinOf(convBefore),...extra});
 let release;
 {
  // close: pinned to the generation the marker holds
  await stop(run('close',env,{generation:3}),'generation_mismatch');
- await stop(run('import',env,{generation:1,sqlText:sqlFor(1),sqlSha256:sha256(sqlFor(1))}),'marker_is_r2');
- await stop(run('flip',env,{...flipParams(),generation:0,captureBefore:capBefore,captureNow:capBefore}),'marker_is_r2');
- await stop(run('verify',env,{generation:0,sqlText:verifyText,sqlSha256:sha256(verifyText)}),'marker_is_r2');
+ await stop(run('import',env,importParams()),'marker_is_r2');
+ await stop(run('flip',env,{...flipParams(convBefore),generation:0,captureNow:capBefore}),'marker_is_r2');
+ await stop(run('verify',env,verifyParams(0)),'marker_is_r2');
  const closed=await run('close',env,{generation:0});
  assert.equal(closed.after.marker.mode,'closed');assert.equal(closed.importGeneration,1);assert.deepEqual(marker(env.file),{mode:'closed',generation:1,at:null});
  await stop(run('close',env,{generation:0}),'marker_is_closed');
@@ -176,188 +210,201 @@ let release;
  // the closed marker reaches the Worker's own readers as `closed` (the gate of ADR 0196)
  const Aux=await import('../src/prediction-aux-d1.js');
  assert.equal((await Aux.readAuxAuthority(env.db,{PREDICTION_DB_REQUIRED:'on'})).mode,'closed');
- // import: the SQL pin, the generation pin, only the importer's exact shapes, the measured batch limits
- await stop(run('import',env,{generation:1,sqlText:sqlFor(1),sqlSha256:'0'.repeat(64)}),'sql_sha256_mismatch');
- await stop(run('import',env,{generation:2,sqlText:sqlFor(2),sqlSha256:sha256(sqlFor(2))}),'generation_mismatch');
- await stop(run('import',env,{generation:1,sqlText:sqlFor(7),sqlSha256:sha256(sqlFor(7))}),'sql_generation_mismatch');
- const big=await stop(run('import',env,{generation:1,sqlText:sqlFor(1),sqlSha256:sha256(sqlFor(1))},{limits:{statements:5}}),'import_too_large');
+ // import: the SQL is derived from the tree; the pin must be the hash of exactly that SQL for exactly that closure
+ await stop(run('import',env,importParams(1,{sqlSha256:'0'.repeat(64)})),'sql_sha256_mismatch');
+ await stop(run('import',env,importParams(2)),'generation_mismatch');
+ await stop(run('import',env,importParams(1,{sqlSha256:sha256(planSql(plan,7))})),'sql_sha256_mismatch');   // another closure's SQL has another hash
+ const big=await stop(run('import',env,importParams(),{limits:{statements:5}}),'import_too_large');
  assert.equal(big.details.maxStatements,5);assert.ok(big.details.statements>5);assert.match(big.details.note,/no chunking/);
  assert.equal(count(env.file,'prediction_batch_stage'),0,'nothing was sent after a refusal');
- const imported=await run('import',env,{generation:1,sqlText:sqlFor(1),sqlSha256:sha256(sqlFor(1))});
+ const imported=await run('import',env,importParams());
  assert.equal(imported.writeState,'committed');assert.equal(imported.after.counts.stage,report.stage.items);assert.equal(imported.after.counts.sources,report.sources.runs);assert.equal(imported.after.counts.manifests,report.manifests.count);assert.equal(imported.after.counts.outbox,report.outbox.total);
- await stop(run('import',env,{generation:1,sqlText:sqlFor(1),sqlSha256:sha256(sqlFor(1))}),'tables_not_empty');
+ await stop(run('import',env,importParams()),'tables_not_empty');
  await stop(run('reopen',env,{generation:1}),'tables_not_empty');
  await stop(run('close',env,{generation:1}),'marker_is_closed');
- const verified=await run('verify',env,{generation:1,sqlText:verifyText,sqlSha256:sha256(verifyText)});assert.equal(verified.writeState,'committed');
- await stop(run('verify',env,{generation:1,sqlText:verifyText,sqlSha256:'0'.repeat(64)}),'sql_sha256_mismatch');
+ const verified=await run('verify',env,verifyParams());assert.equal(verified.writeState,'committed');
+ await stop(run('verify',env,verifyParams(1,{sqlSha256:'0'.repeat(64)})),'sql_sha256_mismatch');
 
- // ---- flip ----
+ // ---- the decisions, one reason at a time (the state is the real one after the import) ----
  const capNow=await capture(opened);              // a fresh cut just before the flip: nothing changed in the bucket
- const base={...flipParams(undefined),captureBefore:capBefore,captureNow:capNow};
  const at=clockAfter(capNow);
- const flipRun=(params,extra={})=>Op.execute('flip',{binding:env.db,now:at,ctx:ctxOf(),params:params,...extra});
- await stop(flipRun({...base,generation:2}),'generation_mismatch');
- await stop(flipRun({...base,report:{...report,manifests:{...report.manifests,count:report.manifests.count+1}}}),'counts_differ');
- await stop(flipRun({...base,report:{...report,outbox:{...report.outbox,byState:{...report.outbox.byState,pending:(report.outbox.byState.pending||0)+1}}}}),'outbox_states_differ');
- await stop(flipRun({...base,report:{stage:{}}}),'report_invalid');
- // the verification travels inside the flip: it cannot be skipped, it must be the verification of THIS report, and its hash is a checksum only
- await stop(flipRun({...base,verifyText:undefined,verifySha256:undefined}),'verify_required');
+ const state=await Op.readState(env.db,at);
+ const checked=Op.checkedSql(convBefore.verifyText,{kind:'verify',pin:pinOf(convBefore)});
+ const d=(extra={})=>Op.flipDecision(state,{generation:1,report,before:capBefore,now:capNow,verify:checked,clock:at,source:SOURCE,...extra});
+ assert.equal(d({generation:2}).reason,'generation_mismatch');
+ assert.equal(d({report:{...report,manifests:{...report.manifests,count:report.manifests.count+1}}}).reason,'counts_differ');
+ assert.equal(d({report:{...report,outbox:{...report.outbox,byState:{...report.outbox.byState,pending:(report.outbox.byState.pending||0)+1}}}}).reason,'outbox_states_differ');
+ assert.equal(d({report:{stage:{}}}).reason,'report_invalid');
+ assert.equal(d({verify:null}).reason,'verify_required');
  const other=await buildPlan(Object.fromEntries(Object.entries(objects).filter(([key])=>!key.includes('batch-stage'))));
- const otherVerify=planVerifySql(other);
- await stop(flipRun({...base,verifyText:otherVerify,verifySha256:sha256(otherVerify)}),'verify_not_for_report');
- await stop(flipRun({...base,verifySha256:'0'.repeat(64)}),'sql_sha256_mismatch');
- // the evidence is two real, distinct, fresh, consistent cuts of the expected source
- await stop(flipRun({...base,captureNow:capBefore}),'captures_not_distinct');
- await stop(Op.execute('flip',{binding:env.db,now:at+3600000,ctx:ctxOf(),params:base}),'capture_not_fresh');
- await stop(flipRun({...base,source:{...SOURCE,bucket:'other'}}),'capture_source_mismatch');
- const inconsistent=structuredClone(capNow);inconsistent.report.snapshot.status='no_go';
- await stop(flipRun({...base,captureNow:inconsistent}),'capture_not_consistent');
- const tampered={...capNow,identityText:capNow.identityText.replace('"size":','"size":1'),identitySha256:sha256(capNow.identityText.replace('"size":','"size":1'))};
- await stop(flipRun({...base,captureNow:tampered}),'capture_identity_mismatch');
- await stop(flipRun({...base,captureNow:{identity:'x'}}),'capture_invalid');
- // a report that is not the report of the export the captures describe (counts equal to D1, different export): refused
+ assert.equal(d({verify:Op.checkedSql(planVerifySql(other),{kind:'verify',pin:sha256(planVerifySql(other))})}).reason,'verify_not_for_report');
  const foreign=await openBucket({'enrichment/sources/another-run.json':json({tmdb_1:{modelMetadata:{}}})});
- const capForeign=await capture(foreign);
- const foreignNow=await capture(foreign);
- await stop(flipRun({...base,captureBefore:capForeign,captureNow:foreignNow}),'report_not_from_export');
- await foreign.bucket.stop();
- // a fabricated zero-count report: the verification of the real dataset is not the verification of it
- const zero={...report,stage:{...report.stage,items:0},sources:{...report.sources,runs:0,revisions:0},manifests:{count:0,pieces:0,digest:report.manifests.digest},outbox:{...report.outbox,total:0,byState:{}}};
- await stop(flipRun({...base,report:zero}),'counts_differ');
- // a late write for real: a legacy PUT lands in the bucket after the close (the same key, other bytes, same length); the next fresh cut sees another ETag and the flip is refused
+ const capForeign=await capture(foreign);const capForeignNow=await capture(foreign);await foreign.bucket.stop();
+ assert.equal(d({before:capForeign,now:capForeignNow}).reason,'report_not_from_export');
+ assert.equal(d({now:capBefore}).reason,'captures_not_distinct');
+ assert.equal(d({clock:at+3600000}).reason,'capture_not_fresh');
+ assert.equal(d({source:{...SOURCE,bucket:'other'}}).reason,'capture_source_mismatch');
+ const inconsistent=structuredClone(capNow);inconsistent.report.snapshot.status='no_go';assert.equal(d({now:inconsistent}).reason,'capture_not_consistent');
+ const edited=capNow.identityText.replace('"size":','"size":1');assert.equal(d({now:{...capNow,identityText:edited,identitySha256:sha256(edited)}}).reason,'capture_identity_mismatch');
+ assert.equal(d({now:{identity:'x'}}).reason,'capture_invalid');
+ assert.equal(d().reason,'release_required');
+
+ // ---- flip through the operator ----
+ const base={...flipParams(convBefore),captureNow:capNow};
+ const flipRun=(params,extra={})=>Op.execute('flip',{binding:env.db,now:at,ctx:ctxOf(),params,...extra});
+ await stop(flipRun({...base,generation:2}),'generation_mismatch');
+ await stop(flipRun({...base,verifySha256:'0'.repeat(64)}),'sql_sha256_mismatch');
+ await stop(flipRun({...base,captureBefore:undefined}),'converted_required');
+ await stop(flipRun({...base,captureNow:convBefore.capture}),'captures_not_distinct');
+ await stop(Op.execute('flip',{binding:env.db,now:at+3600000,ctx:ctxOf(),params:base}),'capture_not_fresh');
+ // a late write for real: a legacy PUT lands in the bucket after the close (the same key, other bytes, the same length); the next fresh cut sees another ETag and the flip is refused
  const key=Object.keys(legacyBytes).find(k=>k.startsWith('enrichment/stop-events/')),text=legacyBytes[key];
  const flippedText=text.replace(/"at":"(\d{4})/,(m,y)=>'"at":"'+(Number(y)===2026?'2025':'2026'));assert.equal(flippedText.length,text.length);assert.notEqual(flippedText,text);
  await opened.bucket.put(key,flippedText);
  const capLate=await capture(opened);
  const late=await stop(Op.execute('flip',{binding:env.db,now:clockAfter(capLate),ctx:ctxOf(),params:{...base,captureNow:capLate}}),'listing_changed');
  assert.deepEqual(late.details.changed,[key],'the landing is seen by ETag even though the key set and the size are unchanged');
- await opened.bucket.put(key,text);                // the object is back to what was exported (a new ETag): the cut taken at the close is now stale
+ await opened.bucket.put(key,text);                // the object is back to what was exported (a new ETag): the cut taken at the close is stale now
  const capBack=await capture(opened);
  await stop(Op.execute('flip',{binding:env.db,now:clockAfter(capBack),ctx:ctxOf(),params:{...base,captureNow:capBack}}),'listing_changed');
- // the owner re-takes the cut at the close and the final one: two clean captures
+ // the owner re-takes the cut at the close and the final one: two clean captures of the same bytes that were imported
  const capClose=await capture(opened),capFinal=await capture(opened);
- const clean={...base,captureBefore:capClose,captureNow:capFinal};
+ const convClose=await Op.loadConverted(capClose.dir);
+ assert.equal(convClose.verifyText,convBefore.verifyText,'the same dataset derives the same verification');
+ const clean={...flipParams(convClose),captureNow:capFinal};
  const atFinal=clockAfter(capFinal);
  // without the release the flip prints the exact release and writes nothing; a wrong release is refused
  const needed=await stop(Op.execute('flip',{binding:env.db,now:atFinal,ctx:ctxOf(),params:clean}),'release_required');
- release=needed.details.release;assert.match(release,/^[0-9a-f]{16}$/);assert.equal(release,Op.flipRelease({generation:1,capture:capFinal,report,verifySha256:sha256(verifyText)}));
+ release=needed.details.release;assert.match(release,/^[0-9a-f]{16}$/);assert.equal(release,Op.flipRelease({generation:1,capture:capFinal,report,verifySha256:pinOf(convClose)}));
  await stop(Op.execute('flip',{binding:env.db,now:atFinal,ctx:ctxOf(),params:{...clean,release:'0'.repeat(16)}}),'release_mismatch');
- assert.notEqual(Op.flipRelease({generation:1,capture:capLate,report,verifySha256:sha256(verifyText)}),release,'the release binds the final capture');
- assert.notEqual(Op.flipRelease({generation:2,capture:capFinal,report,verifySha256:sha256(verifyText)}),release,'and the generation');
- assert.notEqual(Op.flipRelease({generation:1,capture:capFinal,report,verifySha256:sha256(otherVerify)}),release,'and the verification SQL');
+ assert.notEqual(Op.flipRelease({generation:1,capture:capLate,report,verifySha256:pinOf(convClose)}),release,'the release binds the final capture');
+ assert.notEqual(Op.flipRelease({generation:2,capture:capFinal,report,verifySha256:pinOf(convClose)}),release,'and the generation');
+ assert.notEqual(Op.flipRelease({generation:1,capture:capFinal,report,verifySha256:sha256('other')}),release,'and the verification SQL');
  assert.deepEqual(marker(env.file),{mode:'closed',generation:1,at:null},'every refusal left the marker closed');
  // the flip itself: the verification and the marker update in ONE guarded batch, irreversible
  const flipped=await Op.execute('flip',{binding:env.db,now:atFinal,ctx:ctxOf(),params:{...clean,release}});
  assert.equal(flipped.writeState,'committed');assert.equal(flipped.irreversible,true);assert.equal(flipped.after.marker.mode,'d1');assert.equal(flipped.after.marker.generation,2);assert.equal(flipped.after.marker.activatedAt,new Date(atFinal).toISOString());
- assert.equal(flipped.verifiedInBatch.sha256,sha256(verifyText));assert.ok(flipped.verifiedInBatch.statements>10);
+ assert.equal(flipped.verifiedInBatch.sha256,pinOf(convClose));assert.ok(flipped.verifiedInBatch.statements>10);
  assert.equal(marker(env.file).mode,'d1');
  assert.equal((await Aux.readAuxAuthority(env.db,{PREDICTION_DB_REQUIRED:'on'})).mode,'d1');
  // after d1 nothing moves back: every command is refused, and the schema itself refuses the marker
- for(const [command,params] of [['close',{generation:2}],['import',{generation:2,sqlText:sqlFor(2),sqlSha256:sha256(sqlFor(2))}],['reopen',{generation:2}]])await stop(run(command,env,params),'marker_is_d1');
+ for(const [command,params] of [['close',{generation:2}],['import',importParams(2)],['reopen',{generation:2}]])await stop(run(command,env,params),'marker_is_d1');
  await stop(Op.execute('flip',{binding:env.db,now:atFinal,ctx:ctxOf(),params:{...clean,generation:2,release}}),'marker_is_d1');
  assert.throws(()=>sql(env.file,"UPDATE prediction_aux_authority SET mode='r2', generation=9, activated_at=NULL"),/prediction_aux_authority/);
  assert.equal(otherModes(),modesBefore,'no other domain changed its mode or cutover');
  assert.equal(sql(env.file,'SELECT version FROM schema_contract')[0].version,34);
- await opened.bucket.stop();
 }
 
-// ===== 4b. the SQL a file may carry: the importer's exact shapes, never the marker (review of PR 897, P1) =====
+// ===== 4b. the SQL a file may carry: the importer's exact shapes, never the marker (review of PR 897, P1); and the operator derives its SQL, it never reads any =====
 {
  const e=scratch();await run('apply',e,{migrationSha256:Op.migrationSha256()});await run('close',e,{generation:0});
- const untouched=()=>fs.readFileSync(e.file);const before=untouched();
- const refuse=async(command,text,reason='sql_refused')=>{
-  const params={generation:1,sqlText:text,sqlSha256:sha256(text)};
-  await stop(run(command,e,params),reason);
-  assert.ok(untouched().equals(before),command+': no byte of the database changed');assert.deepEqual(marker(e.file),{mode:'closed',generation:1,at:null});
- };
+ const bytes=()=>fs.readFileSync(e.file);const before=bytes();
+ const importGuard=generation=>importGuardStatement(generation)+';\n';
  const activate="UPDATE prediction_aux_authority SET mode='d1', generation=2, activated_at='2026-11-22T14:00:00.000Z' WHERE id=1;\n";
- await refuse('verify',activate);                                              // the bypass of the review: a verify file that activates
- await refuse('verify',verifyText+activate);
- await refuse('verify',activate+verifyText);
- await refuse('import',sqlFor(1)+activate);                                    // an import file that appends the activation after its own guard
- await refuse('import',importGuard(1)+activate);
- await refuse('import',importGuard(1)+"INSERT INTO prediction_aux_authority (id, mode, generation, activated_at) VALUES (2, 'd1', 3, '2026-11-22T14:00:00.000Z');\n");
- await refuse('import',sqlFor(1)+"UPDATE prediction_aux_cas SET ok=1 WHERE id=1;\n");
- await refuse('import',sqlFor(1)+"DELETE FROM prediction_event_outbox;\n");
- await refuse('import',sqlFor(1)+"DROP TRIGGER prediction_aux_authority_chain;\n");
- await refuse('import',sqlFor(1)+"INSERT INTO prediction_event_outbox_counter (kind, active_pending) VALUES ('x', 1);\n");
- await refuse('import',sqlFor(1)+"INSERT INTO prediction_batch_stage (film_id) SELECT film_id FROM film;\n");
- await refuse('verify',verifyText+"UPDATE prediction_aux_cas SET ok=1 WHERE id=1;\n");
- await refuse('verify',verifyText+"UPDATE prediction_aux_cas SET ok=(SELECT count(*)=0 FROM prediction_aux_authority) WHERE id=1;\n");
- await refuse('import','','sql_empty');                                         // empty
- await refuse('verify','   \n','sql_empty');
- // a literal that merely CONTAINS the words is data, not a statement: the importer's own file with such a document still passes the shape check
+ const refuse=(kind,text,reason='sql_refused')=>{try{Op.checkedSql(text,{kind,generation:1,pin:sha256(text)});}catch(error){assert.equal(error.reason,reason,JSON.stringify(text.slice(0,60)));return;}assert.fail('expected '+reason);};
+ refuse('verify',activate);refuse('verify',convBefore.verifyText+activate);refuse('verify',activate+convBefore.verifyText);
+ refuse('import',sqlFor(1)+activate);refuse('import',importGuard(1)+activate);
+ refuse('import',importGuard(1)+"INSERT INTO prediction_aux_authority (id, mode, generation, activated_at) VALUES (2, 'd1', 3, '2026-11-22T14:00:00.000Z');\n");
+ refuse('import',sqlFor(1)+"UPDATE prediction_aux_cas SET ok=1 WHERE id=1;\n");refuse('import',sqlFor(1)+"DELETE FROM prediction_event_outbox;\n");refuse('import',sqlFor(1)+"DROP TRIGGER prediction_aux_authority_chain;\n");
+ refuse('import',sqlFor(1)+"INSERT INTO prediction_event_outbox_counter (kind, active_pending) VALUES ('x', 1);\n");refuse('import',sqlFor(1)+"INSERT INTO prediction_batch_stage (film_id) SELECT film_id FROM film;\n");
+ refuse('verify',convBefore.verifyText+"UPDATE prediction_aux_cas SET ok=1 WHERE id=1;\n");refuse('verify',convBefore.verifyText+"UPDATE prediction_aux_cas SET ok=(SELECT count(*)=0 FROM prediction_aux_authority) WHERE id=1;\n");
+ refuse('import','','sql_empty');refuse('verify','   \n','sql_empty');refuse('import','DROP TABLE film;','sql_refused');refuse('import',importGuard(2)+'','sql_generation_mismatch');
+ // a literal that merely CONTAINS the words is data, not a statement
  const sneaky=await buildPlan({...objects,'enrichment/sources/sneaky-run.json':{title:"'; UPDATE prediction_aux_authority SET mode='d1'; --",note:"prediction_aux_authority"}});
- const sneakySql=planSql(sneaky,1);
- const ok=await Op.execute('status',{binding:e.db,now:NOW,ctx:ctxOf(),params:{sqlText:sneakySql,generation:1}});assert.equal(ok.importFile.fits,true,'a document that names the marker is still data');
- const imported=await run('import',e,{generation:1,sqlText:sneakySql,sqlSha256:sha256(sneakySql)});assert.equal(imported.writeState,'committed');assert.deepEqual(marker(e.file),{mode:'closed',generation:1,at:null},'the quoted text moved nothing');
- // the sizing report of status refuses the same inputs
- const sized=await Op.execute('status',{binding:e.db,now:NOW,ctx:ctxOf(),params:{sqlText:sqlFor(1)+activate,generation:1}});assert.equal(sized.importFile.refused,'sql_refused');
+ const checkedSneaky=Op.checkedSql(planSql(sneaky,1),{kind:'import',generation:1,pin:sha256(planSql(sneaky,1))});assert.ok(checkedSneaky.sizing.fits,'a document that names the marker is still data');
+ // defence in depth: even a hand-built converted object cannot make the operator run SQL of its own. The operator re-derives the SQL from the plan and ignores any text carried next to it.
+ const evil={...convBefore,importText:()=>activate,verifyText:activate};
+ const imported=await run('import',e,importParams(1,{converted:evil}));assert.equal(imported.writeState,'committed','the derived SQL ran, not the text carried next to it');
+ assert.deepEqual(marker(e.file),{mode:'closed',generation:1,at:null},'the marker did not move');
+ assert.equal(imported.sqlSha256,sha256(planSql(plan,1)));
+ void before;void bytes;
 }
 
-// ===== 4c. the flip needs the verification INSIDE its batch: same-count corruption, a skipped verification and an empty database cannot flip =====
+// ===== 4c. the flip needs the verification INSIDE its batch: same-count corruption, a forged totals-only text, an empty database and a fabricated report cannot flip =====
 {
  const setup=async()=>{
   const e=scratch();await run('apply',e,{migrationSha256:Op.migrationSha256()});await run('close',e,{generation:0});
-  const o=await openBucket();const before=await capture(o);
-  return {e,o,before};
+  const o=await openBucket();const before=await capture(o);const conv=await Op.loadConverted(before.dir);
+  return {e,o,before,conv};
  };
  const proven=e=>({prepare:s=>e.db.prepare(s),async batch(statements){try{await e.db.batch(statements);}catch(error){throw new D1Error('statement',String(error.message));}}});
- const flipOf=async(e,o,before,{binding,params={}}={})=>{
-  const now=await capture(o);const at=clockAfter(now);
-  const base={...flipParams(undefined),captureBefore:before,captureNow:now,...params};
-  const needed=await stop(Op.execute('flip',{binding:e.db,now:at,ctx:ctxOf(),params:base}),'release_required');
+ const flipOf=async(s,{binding,before,params={}}={})=>{
+  const now=await capture(s.o);const at=clockAfter(now);
+  const base={...flipParams(before??s.conv),captureNow:now,...params};
+  const needed=await stop(Op.execute('flip',{binding:s.e.db,now:at,ctx:ctxOf(),params:base}),'release_required');
   const full={...base,release:needed.details.release};
-  return {at,full,run:()=>Op.execute('flip',{binding:binding??e.db,now:at,ctx:ctxOf(),params:full})};
+  return {at,full,run:()=>Op.execute('flip',{binding:binding??s.e.db,now:at,ctx:ctxOf(),params:full})};
  };
  // (1) a corrupted piece with every count and state unchanged: the verification aborts the batch, the marker stays closed
  {
-  const {e,o,before}=await setup();
-  await run('import',e,{generation:1,sqlText:sqlFor(1),sqlSha256:sha256(sqlFor(1))});
-  const totals=JSON.stringify([count(e.file,'prediction_run_source_piece'),count(e.file,'prediction_run_manifest_piece'),count(e.file,'prediction_event_outbox')]);
+  const s=await setup();const {e}=s;
+  await run('import',e,{generation:1,converted:s.conv,sqlSha256:sha256(planSql(plan,1))});
+  const totals=()=>JSON.stringify([count(e.file,'prediction_run_source_piece'),count(e.file,'prediction_run_manifest_piece'),count(e.file,'prediction_event_outbox')]);const t0=totals();
   sql(e.file,'DROP TRIGGER prediction_run_source_piece_no_update');
   sql(e.file,"UPDATE prediction_run_source_piece SET text=substr(text,1,5)||CASE substr(text,6,1) WHEN 'x' THEN 'y' ELSE 'x' END||substr(text,7) WHERE rowid=(SELECT min(rowid) FROM prediction_run_source_piece)");
-  assert.equal(JSON.stringify([count(e.file,'prediction_run_source_piece'),count(e.file,'prediction_run_manifest_piece'),count(e.file,'prediction_event_outbox')]),totals,'same counts, same states');
-  const f=await flipOf(e,o,before,{binding:proven(e)});
+  assert.equal(totals(),t0,'same counts, same states');
+  const f=await flipOf(s,{binding:proven(e)});
   states.length=0;
   const failed=await stop(f.run(),'statement_failed');
   assert.equal(failed.details.state.marker.mode,'closed');assert.deepEqual(marker(e.file),{mode:'closed',generation:1,at:null},'a corrupted byte aborted the flip before the marker moved');assert.equal(states.at(-1),'none');
-  await o.bucket.stop();
+  // the review's forgery: a short totals-only "verification" carried next to the tree, with its own hash, is simply not what the operator runs
+  const totalsOnly=Object.entries({prediction_batch_stage:report.stage.items,prediction_run_source_head:report.sources.runs,prediction_run_source_revision:report.sources.revisions,prediction_run_manifest:report.manifests.count,prediction_run_manifest_piece:report.manifests.pieces,prediction_event_outbox:report.outbox.total}).map(([table,n])=>'UPDATE prediction_aux_cas SET ok=(SELECT count(*)='+n+' FROM '+table+') WHERE id=1;').join('\n')+'\n';
+  assert.ok(Op.checkedSql(totalsOnly,{kind:'verify',pin:sha256(totalsOnly)}),'such a file is well-formed (that is why it must never be accepted from a caller)');
+  const forged={...s.conv,verifyText:totalsOnly};
+  {const now=await capture(s.o);await stop(Op.execute('flip',{binding:e.db,now:clockAfter(now),ctx:ctxOf(),params:{...flipParams(forged),verifySha256:sha256(totalsOnly),captureNow:now}}),'sql_sha256_mismatch','the pin of the forged text is not the pin of the derived verification');}
+  await s.o.bucket.stop();
  }
  // (2) a corrupted outbox event with the same counts and states
  {
-  const {e,o,before}=await setup();
-  await run('import',e,{generation:1,sqlText:sqlFor(1),sqlSha256:sha256(sqlFor(1))});
+  const s=await setup();const {e}=s;
+  await run('import',e,{generation:1,converted:s.conv,sqlSha256:sha256(planSql(plan,1))});
   sql(e.file,'DROP TRIGGER prediction_event_outbox_settled_terminal');sql(e.file,'DROP TRIGGER prediction_event_outbox_identity');
   sql(e.file,"UPDATE prediction_event_outbox SET event_json=replace(event_json,'\"id\":\"','\"id\":\"z') WHERE rowid=(SELECT min(rowid) FROM prediction_event_outbox)");
-  const f=await flipOf(e,o,before,{binding:proven(e)});
+  const f=await flipOf(s,{binding:proven(e)});
   await stop(f.run(),'statement_failed');assert.equal(marker(e.file).mode,'closed');
-  await o.bucket.stop();
+  await s.o.bucket.stop();
  }
- // (3) no import at all (an empty database) with the real report, verification and captures: the verification fails inside the batch
+ // (3) no import at all, and a fabricated empty report: neither flips
  {
-  const {e,o,before}=await setup();
-  const early=await capture(o);
-  await stop(Op.execute('flip',{binding:e.db,now:clockAfter(early),ctx:ctxOf(),params:{...flipParams(undefined),captureBefore:before,captureNow:early}}),'counts_differ');   // the counts of an empty database do not match the report
-  // a zero-count fabricated report with the real verification and captures
-  const zero={...report,stage:{...report.stage,items:0},sources:{...report.sources,runs:0,revisions:0},manifests:{count:0,pieces:0,digest:report.manifests.digest},outbox:{...report.outbox,total:0,byState:{}}};
-  const now=await capture(o);
-  await stop(Op.execute('flip',{binding:e.db,now:clockAfter(now),ctx:ctxOf(),params:{...flipParams(undefined),captureBefore:before,captureNow:now,report:zero}}),'verify_not_for_report');
-  // even the empty plan's own (honest) verification does not pass with captures of a non-empty export: the report is not the export's
-  const emptyPlan=await buildPlan({});const emptyReport=await planReport(emptyPlan),emptyVerify=planVerifySql(emptyPlan);
-  await stop(Op.execute('flip',{binding:e.db,now:clockAfter(now),ctx:ctxOf(),params:{...flipParams(undefined),report:emptyReport,verifyText:emptyVerify,verifySha256:sha256(emptyVerify),captureBefore:before,captureNow:now}}),'report_not_from_export');
+  const s=await setup();const {e}=s;
+  const early=await capture(s.o);
+  await stop(Op.execute('flip',{binding:e.db,now:clockAfter(early),ctx:ctxOf(),params:{...flipParams(s.conv),captureNow:early}}),'counts_differ');   // an empty database does not match the dataset's report
+  const emptyPlan=await buildPlan({});
+  const fabricated={...s.conv,plan:emptyPlan,verifyText:planVerifySql(emptyPlan),report:await planReport(emptyPlan)};          // an honest empty plan (zero counts, its own empty verification) presented with the captures of a non-empty export
+  await stop(Op.execute('flip',{binding:e.db,now:clockAfter(early),ctx:ctxOf(),params:{...flipParams(fabricated),captureNow:early}}),'report_not_from_export');
   assert.equal(marker(e.file).mode,'closed');
-  await o.bucket.stop();
+  await s.o.bucket.stop();
  }
- // (4) the verification is part of the batch even when the rest is perfect: with a flip whose verification is skipped, nothing flips
- {
-  const {e,o,before}=await setup();
-  await run('import',e,{generation:1,sqlText:sqlFor(1),sqlSha256:sha256(sqlFor(1))});
-  const now=await capture(o);
-  await stop(Op.execute('flip',{binding:e.db,now:clockAfter(now),ctx:ctxOf(),params:{...flipParams(undefined),captureBefore:before,captureNow:now,verifyText:undefined,verifySha256:undefined,release:'0'.repeat(16)}}),'verify_required');
-  assert.equal(marker(e.file).mode,'closed');
-  await o.bucket.stop();
- }
+}
+
+// ===== 4d. a legacy PUT the REAL Worker admitted BEFORE the close, paused, then resumed AFTER the operator's close and the cut: the flip is refused =====
+{
+ const w=await flowWorld({films:8,aux:'r2'});
+ const {start}=await w.reconcileAndStart({manifestSize:4});assert.equal(start.status,200);
+ const wRun=start.data.runId,epoch=start.data.lease.epoch;
+ const item=n=>start.data.films.slice(n,n+1).map(f=>({filmId:f.filmId,...(f.plan==='prediction_only'?{}:{fingerprint:w.fingerprint}),prediction:w.prediction}));
+ assert.equal((await w.api('batch/hold',{runId:wRun,epoch,items:item(0)})).status,200,'the first hold writes the stage object');
+ // the second hold passes the Worker's marker read and is PAUSED at its stage PUT (admitted at r2)
+ const raw=w.env.BUCKET.put;let release=null,reached=null;const waiting=new Promise(resolve=>{reached=resolve;});const gate=new Promise(resolve=>{release=resolve;});
+ w.env.BUCKET.put=async(key,...rest)=>{if(key==='enrichment/batch-stage.json'&&release){reached();await gate;}return raw(key,...rest);};
+ const held=w.api('batch/hold',{runId:wRun,epoch,items:item(1)});await waiting;
+ // the operator closes admission on the SAME database the Worker uses, and the cut at the close is taken while that PUT is still in flight
+ const closed=await Op.execute('close',{binding:w.db,now:NOW,ctx:ctxOf(),params:{generation:0}});assert.equal(closed.after.marker.mode,'closed');
+ const seed=()=>Object.fromEntries([...w.records.entries()].filter(([k])=>auxExportFamily(k)).map(([k,v])=>[k,json(v)]));
+ const o1=await openBucket({},seed());const capClose=await capture(o1);await o1.bucket.stop();
+ const convClose=await Op.loadConverted(capClose.dir);
+ // the Worker's write path now refuses everything new (the gate of ADR 0196) while the old PUT lands
+ const refused=await w.api('batch/hold',{runId:wRun,epoch,items:item(2)});assert.equal(refused.status,503);assert.equal(refused.data.code,'prediction_aux_closed');
+ release();assert.equal((await held).status,200,'the PUT admitted before the close completes');w.env.BUCKET.put=raw;
+ // the owner imports and verifies the dataset of the cut taken at the close
+ await Op.execute('import',{binding:w.db,now:NOW,ctx:ctxOf(),params:{generation:1,converted:convClose,sqlSha256:sha256(planSql(convClose.plan,1))}});
+ await Op.execute('verify',{binding:w.db,now:NOW,ctx:ctxOf(),params:{generation:1,converted:convClose,sqlSha256:pinOf(convClose)}});
+ // the final cut sees the object the paused PUT rewrote (same key, another ETag and size): the flip is refused, the marker stays closed
+ const o2=await openBucket({},seed());const capFinal=await capture(o2);await o2.bucket.stop();
+ const stopped=await stop(Op.execute('flip',{binding:w.db,now:clockAfter(capFinal),ctx:ctxOf(),params:{...flipParams(convClose),captureNow:capFinal}}),'listing_changed');
+ assert.deepEqual(stopped.details.changed,['enrichment/batch-stage.json'],'the resumed PUT is seen even though no key name changed');
+ assert.equal(sql(w.file,'SELECT mode FROM prediction_aux_authority')[0].mode,'closed');
+ // the interleaving where the PUT lands AFTER the final cut cannot be seen by any inventory: that is the residual of ADR 0196, stated and not claimed as fenced
 }
 
 // ===== 5. reopen (the abort path) only before an import; a changed row fails verify =====
@@ -367,14 +414,15 @@ let release;
  const reopened=await run('reopen',e,{generation:1});assert.equal(reopened.after.marker.mode,'r2');assert.equal(reopened.after.marker.generation,2);
  await stop(run('reopen',e,{generation:2}),'marker_is_r2');
  await run('close',e,{generation:2});assert.equal(marker(e.file).generation,3);
- await stop(run('import',e,{generation:1,sqlText:sqlFor(1),sqlSha256:sha256(sqlFor(1))}),'generation_mismatch','a plan of the first closure refuses under the later one');
- const second=await run('import',e,{generation:3,sqlText:sqlFor(3),sqlSha256:sha256(sqlFor(3))});assert.equal(second.writeState,'committed');
+ await stop(run('import',e,{generation:1,converted:convBefore,sqlSha256:sha256(planSql(plan,1))}),'generation_mismatch','a plan of the first closure refuses under the later one');
+ await stop(run('import',e,{generation:3,converted:convBefore,sqlSha256:sha256(planSql(plan,1))}),'sql_sha256_mismatch');
+ const second=await run('import',e,{generation:3,converted:convBefore,sqlSha256:sha256(planSql(plan,3))});assert.equal(second.writeState,'committed');
  // a changed imported row: verify fails as a proven statement error (statement_failed) and nothing is retried
  sql(e.file,'DROP TRIGGER prediction_event_outbox_settled_terminal');sql(e.file,'DROP TRIGGER prediction_event_outbox_identity');
  sql(e.file,"UPDATE prediction_event_outbox SET attempts=attempts+3 WHERE rowid=(SELECT min(rowid) FROM prediction_event_outbox)");
  const proven={prepare:s=>e.db.prepare(s),async batch(statements){try{await e.db.batch(statements);}catch(error){throw new D1Error('statement',String(error.message));}}};
  states.length=0;
- const failed=await stop(Op.execute('verify',{binding:proven,now:NOW,ctx:ctxOf(),params:{generation:3,sqlText:verifyText,sqlSha256:sha256(verifyText)}}),'statement_failed');
+ const failed=await stop(Op.execute('verify',{binding:proven,now:NOW,ctx:ctxOf(),params:{generation:3,converted:convBefore,sqlSha256:pinOf(convBefore)}}),'statement_failed');
  assert.equal(failed.details.state.marker.mode,'closed');assert.equal(states.at(-1),'none');
 }
 
@@ -383,6 +431,6 @@ let release;
  const source=fs.readFileSync('scripts/prediction-aux-cutover-production.mjs','utf8').split('\n').filter(line=>!line.trim().startsWith('//')).join('\n');   // the code, not the header comments
  assert.doesNotMatch(source,/BUCKET|r2-snapshot|wrangler|child_process|execSync|execFile|\bspawn|R2_SNAPSHOT_|ChatGPT|Scheduled/);
  assert.doesNotMatch(source,/prepare\((?:"|')\s*(?:INSERT|DELETE|DROP|ALTER)/i,'the operator prepares no row write itself: it runs the migration, the importer\'s checked SQL and its own marker statements');
- for(const forbidden of ['prediction_domain_authority SET','published_epg_authority SET','feature_flags'])assert.equal(source.includes(forbidden),false,forbidden);
+ for(const forbidden of ['prediction_domain_authority SET','published_epg_authority SET','feature_flags','sqlFile','--sql-file','sqlText'])assert.equal(source.includes(forbidden),false,forbidden);
 }
 console.log('prediction aux cutover production: ok');
