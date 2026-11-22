@@ -39,7 +39,9 @@ const input={root,xmltv:feedPath,policies,watchlist,catalog,now,feedFetchedAt:fe
 // ===== 1. input contract: nothing is invented =====
 assert.deepEqual(combinedFilms(watchlist,catalog).map(f=>[f.id,!!f.catalogOnly]),[['a',false],['c',true]],'the combined input is the Worker one: catalogOnly, no tmdbId overlap');
 assert.equal(parsePolicies([['ch001',{policy:'deny_all',basis:'category'}]]).revision,null,'a bare array has no revision');
-assert.equal(parsePolicies({revision:4,digest:'0'.repeat(64),entries:policyEntries}).digestChecked,false,'a stated digest that does not match is reported');
+assert.throws(()=>parsePolicies({revision:4,digest:'0'.repeat(64),entries:policyEntries}),Blocked,'a stated digest that does not match is BLOCKED, not recorded');
+assert.throws(()=>parsePolicies({digest:stated,entries:policyEntries}),Blocked,'a digest stated without a revision cannot be verified: BLOCKED');
+assert.equal(parsePolicies({revision:4,entries:policyEntries}).digestChecked,null,'no stated digest, nothing to check');
 assert.equal(policies.digestChecked,true);assert.equal(policies.digest,stated);
 for(const bad of [[],{entries:[]},null,[['ch001',{policy:'allow',basis:'x'}]],[['ch001',{policy:'discover'}]],[['ch001',{policy:'discover',basis:'x'}],['ch001',{policy:'deny_all',basis:'x'}]]])assert.throws(()=>parsePolicies(bad),Blocked,'unusable policies are BLOCKED');
 const blocked=async(overrides,pattern)=>assert.rejects(()=>dryRun({...input,...overrides}),error=>error instanceof Blocked&&pattern.test(error.message));
@@ -49,6 +51,9 @@ await blocked({now:NaN},/--now is required/);
 await blocked({feedFetchedAt:NaN},/provenance/);
 await blocked({watchlist:[]},/non-empty watchlist/);
 await blocked({watchlist:null},/non-empty watchlist/);
+await blocked({catalog:undefined},/catalog input is required/);
+await blocked({catalog:null},/catalog input is required/);
+assert.equal((await dryRun({...input,catalog:{}})).inputs.catalogFilms,0,'an explicitly supplied empty catalog is accepted and counted as empty');
 
 // the snapshot rows go through the repository's own reader: owner override > owner category > provider category > known_only
 {const category=(key,policy,position)=>({category_key:key,name:key,policy,position,revision:1});
@@ -105,6 +110,13 @@ const failing=(result,id)=>result.checks.filter(c=>!c.pass).map(c=>c.id).include
 assert.equal(judge(()=>{}).verdict,'PASS');
 assert.ok(failing(judge(runs=>runs.filtered.slots.set('f|a|ch002|1',{channelId:'ch002',kind:'film'})),'filtered_no_deny_all_shows'),'a surviving deny_all slot fails');
 assert.ok(failing(judge(runs=>runs.filtered.slots.set('c|k|ch003|1',{channelId:'ch003',kind:'candidate',confirmed:false})),'filtered_no_unknown_candidates_from_known_only'),'an unconfirmed candidate on a known_only channel fails');
+// a catalog-confirmed slot must survive known_only: losing one is NOT an explained loss
+{const confirmedKey=[...material.runs.filtered.slots].find(([,slot])=>slot.kind==='candidate'&&slot.confirmed&&policies.map.get(slot.channelId)?.policy==='known_only')?.[0];
+ assert.ok(confirmedKey,'the synthetic feed has a catalog-confirmed slot on a known_only channel');
+ const result=judge(runs=>runs.filtered.slots.delete(confirmedKey));
+ assert.ok(failing(result,'filtered_slot_differences_explained'),'losing a confirmed catalog slot on known_only fails');
+ assert.equal(result.checks.find(c=>c.id==='filtered_slot_differences_explained').lost.unexplained,1);
+ assert.equal(judge(()=>{}).checks.find(c=>c.id==='filtered_slot_differences_explained').lost.knownOnlyCandidate,material.runs.legacy.slots.size-material.runs.filtered.slots.size-judge(()=>{}).checks.find(c=>c.id==='filtered_slot_differences_explained').lost.denyAll,'unconfirmed known_only candidates are still the explained loss');}
 assert.ok(failing(judge(runs=>runs.filtered.slots.set('c|k|ch001|9',{channelId:'ch001',kind:'candidate',confirmed:false})),'filtered_slot_differences_explained'),'a gained slot fails');
 assert.ok(failing(judge(runs=>{const [key]=[...runs.filtered.slots.keys()].filter(k=>k.startsWith('f|')&&runs.filtered.slots.get(k).channelId==='ch001');runs.filtered.slots.delete(key);}),'filtered_slot_differences_explained'),'an unexplained lost slot fails');
 assert.ok(failing(judge(runs=>runs.filtered.batches.push(['ch004'])),'declaration_boundary'),'a second registration batch fails');
@@ -135,8 +147,11 @@ const cli=args=>spawnSync(process.execPath,['scripts/epg-channel-policy-dry-run.
 const full=['--xmltv',feedPath,'--policies',polFile,'--watchlist',watchFile,'--catalog',catFile,'--now','2026-11-21T12:00:00Z','--feed-fetched-at','2026-11-21T11:55:00Z'];
 const ok=cli(full);assert.equal(ok.status,0,ok.stderr);assert.equal(JSON.parse(ok.stdout).verdict,'PASS');
 const viaRows=cli(full.map((v,i)=>v==='--policies'?'--snapshot-rows':full[i-1]==='--policies'?rowsFile:v));assert.equal(viaRows.status,0,viaRows.stderr);assert.equal(JSON.parse(viaRows.stdout).inputs.policiesRevision,4,'--snapshot-rows works from the SELECT rows');
+const emptyCatalog=cli(full.map(v=>v===catFile?write('emptycatalog.json',{}):v));assert.equal(emptyCatalog.status,0,emptyCatalog.stderr);assert.equal(JSON.parse(emptyCatalog.stdout).inputs.catalogFilms,0);
 const lateRun=cli(full.map(value=>value===feedPath?latePath:value));assert.equal(lateRun.status,1);assert.equal(JSON.parse(lateRun.stdout).verdict,'FAIL');
 for(const [label,args] of [
+ ['no catalog',full.filter((v,i)=>!(v==='--catalog'||full[i-1]==='--catalog'))],
+ ['mismatching digest',full.map(v=>v===polFile?write('baddigest.json',{revision:4,digest:'0'.repeat(64),entries:policyEntries}):v)],
  ['no feed',full.filter((v,i)=>!(v==='--xmltv'||full[i-1]==='--xmltv'))],
  ['no now',full.filter((v,i)=>!(v==='--now'||full[i-1]==='--now'))],
  ['no provenance',full.filter((v,i)=>!(v==='--feed-fetched-at'||full[i-1]==='--feed-fetched-at'))],

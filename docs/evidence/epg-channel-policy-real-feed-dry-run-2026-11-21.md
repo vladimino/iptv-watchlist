@@ -14,6 +14,8 @@
 
 How the D1 inputs were read: 22 `SELECT` statements through a REST shim that refuses everything but a single `SELECT` (the repository readers run unchanged over it), with the Cloudflare D1 API token the environment holds for the backfill operator, used for those reads only on the owner's decision. No statement wrote, and the repository's own write paths cannot run on the shim (it has no batch). One metadata-only `HEAD` of one R2 object checked that the read-only R2 credential works; no R2 object was downloaded. Inputs were kept outside the checkout and are not in the repository, a pull request or Trello.
 
+The run was repeated on the same captured files after the review tightened the harness (the unconfirmed-only classifier, a required catalog input, a rejected mismatching policy digest): the verdict and every number are identical, so the 563 `known_only` losses are verified unconfirmed, not assumed.
+
 **Limits of the inputs.** The feed (20 Nov) is older than the policies, watchlist and catalog (22 Nov); the watchlist is the published document of the last generation, not the exact `run.watchlist` of a past sync; the catalog is the current one, not the catalog as of the feed. These mismatches affect which films are known, not the policy logic under test.
 
 ## Result
@@ -23,7 +25,7 @@ How the D1 inputs were read: 22 `SELECT` statements through a REST shim that ref
 | `legacy_unchanged` | PASS: no policy fields, no registrar call |
 | `filtered_no_deny_all_shows` | PASS: **0** surviving film or candidate slots on a `deny_all` channel (catalog-confirmed ones included) |
 | `filtered_no_unknown_candidates_from_known_only` | PASS: **0** unconfirmed candidate slots on a non-`discover` channel |
-| `filtered_slot_differences_explained` | PASS: 44 343 slots in `legacy`, 29 765 in `filtered`; **0 gained**; lost 14 578 = 14 015 on `deny_all` channels + 563 unconfirmed `known_only` candidates; **0 unexplained** |
+| `filtered_slot_differences_explained` | PASS: 44 343 slots in `legacy`, 29 765 in `filtered`; **0 gained**; lost 14 578 = 14 015 on `deny_all` channels + 563 candidates that are **unconfirmed** on `known_only` channels (the classifier counts a lost candidate as explained only when `!confirmed`; a catalog-confirmed slot lost on `known_only` is unexplained); **0 unexplained** |
 | `declaration_boundary` | PASS: one batch; **15** declared channels absent from the snapshot offered before the first programme, all 15 valid ids, 0 malformed; **`lateDeclared` 0**; 0 undeclared programme channels; the pinned map unchanged |
 | `degraded_all_known_only` | PASS: 1 322 channels all `known_only`, 0 unconfirmed candidate slots, 0 registrar calls, no revision or digest; 14 known-film slots on `deny_all` channels are admitted (the accepted trade-off) |
 | `raw_counters_equal_across_modes` | PASS: 368 324 programmes read, 1 306 channels with programmes, the same feed window in all three modes |
@@ -52,7 +54,7 @@ How the D1 inputs were read: 22 `SELECT` statements through a REST shim that ref
 
 ## The harness
 
-`scripts/epg-channel-policy-dry-run.mjs` runs the same feed, film input and `now` through the three modes and prints numbers and booleans only (no title, slot key, channel id, URL or path); exit 0 PASS, 1 FAIL, 2 BLOCKED (a missing or unusable input is named, never substituted). `tests/epg-channel-policy-dry-run.mjs` proves the harness on a small synthetic feed (the input contract, the three modes, the declaration boundary including late and interleaved late declarations, the guard matrix and its controls, a verdict that fails on doctored results, numbers-only output); those tests are not evidence about the real feed. Reverting the `deny_all` skip, the `known_only` skip or the declaration boundary in the scanner turns that test red.
+`scripts/epg-channel-policy-dry-run.mjs` runs the same feed, film input and `now` through the three modes and prints numbers and booleans only (no title, slot key, channel id, URL or path); exit 0 PASS, 1 FAIL, 2 BLOCKED (a missing or unusable input is named, never substituted: the catalog is required, an explicitly supplied empty one is accepted, and a stated policy digest that does not match the recomputed one, or that has no revision to check, is BLOCKED). `tests/epg-channel-policy-dry-run.mjs` proves the harness on a small synthetic feed (the input contract including the required catalog and the digest check, the three modes, the declaration boundary including late and interleaved late declarations, the guard matrix and its controls, a verdict that fails on doctored results including a lost catalog-confirmed `known_only` slot, numbers-only output); those tests are not evidence about the real feed. Reverting the `deny_all` skip, the `known_only` skip or the declaration boundary in the scanner turns that test red.
 
 ## Readiness
 

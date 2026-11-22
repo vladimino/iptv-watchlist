@@ -10,9 +10,9 @@
 //                    src/epg-channel-d1.js: the sqlite_master check, the marker, the categories, the channels, the marker again). The repository's own reader derives the effective
 //                    policy of every channel, so the harness never re-implements the precedence.
 //   --policies       the effective Channel policies: [["ch001",{"policy":"discover","basis":"category"}], ...] or {revision, digest, entries:[...]} (the Map
-//                    `materializePolicies` returns, read-only). With a revision the digest is recomputed and compared when one is given.
+//                    `materializePolicies` returns, read-only). A stated digest is recomputed from the revision and entries; a mismatch, or a digest without a revision, is BLOCKED.
 //   --watchlist      the watchlist films array (or {films}), as `run.watchlist` in the Worker.
-//   --catalog        the discovered-films cache (object or array); combined with the watchlist exactly as the Worker does (catalogOnly, no tmdbId overlap).
+//   --catalog        REQUIRED: the discovered-films cache (object or array; an explicitly supplied empty one is accepted, omitting it is BLOCKED); combined with the watchlist exactly as the Worker does (catalogOnly, no tmdbId overlap).
 //   --now            the instant the scan treats as "now" (its window is relative to it). --feed-fetched-at: when the feed copy was taken (provenance).
 // Output: one JSON document of NUMBERS and booleans only (no title, slot key, channel id or URL) and a verdict. Exit 0 PASS, 1 FAIL, 2 BLOCKED (a missing or unusable input).
 // Keep a real run's output out of GitHub, Trello and logs beyond the counters the card asks for. This script is a harness, not evidence: its own tests use a small synthetic feed.
@@ -54,7 +54,9 @@ export function parsePolicies(raw){
  const revision=raw&&!Array.isArray(raw)&&Number.isInteger(raw.revision)?raw.revision:null;
  const digest=revision===null?null:mapDigest(revision,map);
  const stated=raw&&!Array.isArray(raw)&&typeof raw.digest==='string'?raw.digest:null;
- return {revision,digest,map,digestChecked:stated===null||digest===null?null:stated===digest};
+ if(stated!==null&&digest===null)throw new Blocked('policies: a digest is stated without a revision, so it cannot be verified');
+ if(stated!==null&&stated!==digest)throw new Blocked('policies: the stated digest does not match the one recomputed from the entries');
+ return {revision,digest,map,digestChecked:stated===null?null:true};
 }
 
 // The rows of the snapshot's SELECTs -> {revision, digest, map, digestChecked:null}, through the repository's own reader (`materializePolicies`) over a read-only stand-in that
@@ -143,7 +145,7 @@ export function evaluate({runs,policies,pinnedUnchanged,matrix,now,watchlistCoun
  for(const [key,slot] of legacy.slots){
   if(filtered.slots.has(key))continue;
   const p=policy(slot.channelId).policy;
-  if(p==='deny_all')lost.denyAll++;else if(p==='known_only'&&slot.kind==='candidate')lost.knownOnlyCandidate++;else lost.unexplained++;
+  if(p==='deny_all')lost.denyAll++;else if(p==='known_only'&&slot.kind==='candidate'&&!slot.confirmed)lost.knownOnlyCandidate++;else lost.unexplained++;   // a catalog-confirmed slot must survive known_only: losing one is never explained
  }
  for(const key of filtered.slots.keys())if(!legacy.slots.has(key))gained++;
  add('filtered_slot_differences_explained',lost.unexplained===0&&gained===0,{legacySlots:legacy.slots.size,filteredSlots:filtered.slots.size,lost,gained});
@@ -185,6 +187,7 @@ export async function dryRun({root,xmltv,policies,watchlist,catalog,now,feedFetc
  if(!Number.isFinite(now))throw new Blocked('now: --now is required: the scan window is relative to it');
  if(!Number.isFinite(feedFetchedAt))throw new Blocked('feed-fetched-at: when the feed copy was taken is required (provenance)');
  if(!Array.isArray(watchlist)||!watchlist.length)throw new Blocked('watchlist: a non-empty watchlist is required; an empty one would silently skip the broadcast check');
+ if(catalog===undefined||catalog===null||typeof catalog!=='object')throw new Blocked('catalog: the catalog input is required (an explicitly supplied empty catalog is accepted; omitting it is not)');
  const films=combinedFilms(watchlist,catalog);
  const bytes=fs.readFileSync(xmltv);
  const runs=await runModes({root,xmltv,policies,films,now});
@@ -211,7 +214,8 @@ async function main(){
   if((!args.policies&&!args['snapshot-rows'])||!args.watchlist)throw new Blocked('usage: --xmltv <file> (--policies <json> | --snapshot-rows <json>) --watchlist <json> [--catalog <json>] --now <iso> --feed-fetched-at <iso>');
   const policies=args['snapshot-rows']?await policiesFromRows(readJson(args['snapshot-rows'],'snapshot-rows')):parsePolicies(readJson(args.policies,'policies'));
   const watchRaw=readJson(args.watchlist,'watchlist'),watchlist=Array.isArray(watchRaw)?watchRaw:watchRaw.films;
-  const catalog=args.catalog?readJson(args.catalog,'catalog'):{};
+  if(!args.catalog)throw new Blocked('catalog: --catalog is required (an explicitly supplied empty catalog is accepted; omitting it is not)');
+  const catalog=readJson(args.catalog,'catalog');
   const report=await dryRun({root,xmltv:args.xmltv,policies,watchlist,catalog,now:Date.parse(args.now),feedFetchedAt:Date.parse(args['feed-fetched-at'])});
   console.log(JSON.stringify(report,null,1));
   process.exitCode=report.verdict==='PASS'?0:1;
