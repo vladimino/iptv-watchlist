@@ -177,7 +177,7 @@ const statement = (sql, params) => {
   return {sql, bind: (...next) => statement(sql, next), async all() {return {success: true, results: rows(), meta: {}};}, async first(column) {const row = rows()[0] ?? null; return column && row ? row[column] : row;}, async run() {check(); return {success: true, meta: {}};}, async raw() {return rows().map(row => Object.values(row));}};
 };
 const db = {prepare: sql => statement(sql, []), async batch(list) {return Promise.all(list.map(item => item.all()));}, async exec() {throw new Error('no exec from a GET');}};
-// The profile serves the run checkpoint (`sync.json`) from its R2 object: that is the local stand-in, since production reads only the D1 checkpoint (ADR 0197).
+// The profile serves the run checkpoint (`sync.json`) from its R2 object: that is the local stand-in, since production reads only the D1 checkpoint (ADR 0199).
 const env = {BUCKET: bucket, DB: db, PREDICTION_DB_REQUIRED: 'on', EPG_CHECKPOINT_DB_OPTIONAL: 'standin'};
 
 if (REQUESTS === 0) {quiet(JSON.stringify({statuses: [200], requests: 0, baselineHeapMB: +(v8.getHeapStatistics().used_heap_size / 1e6).toFixed(1)})); fs.rmSync(work, {force: true}); process.exit(0);}

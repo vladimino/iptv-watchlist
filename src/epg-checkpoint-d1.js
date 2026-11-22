@@ -1,4 +1,4 @@
-// ADR 0185 (Accepted), AIR-550 stage 2; ADR 0197 (AIR-551 H6). The EPG run checkpoint (`sync.json`) and the watchlist ingest status
+// ADR 0185 (Accepted), AIR-550 stage 2; ADR 0199 (AIR-551 H6). The EPG run checkpoint (`sync.json`) and the watchlist ingest status
 // (`watchlist-ingest.json`) in D1 (schema v30, migrations/0030_epg_checkpoint_authority.sql). D1 is the authority since the cutover of 21 Nov 2026
 // (marker `d1`). The Worker routes the two keys here only while the marker is `d1`; production is closed (never R2) when the marker is `r2`, the
 // tables are absent or any state is unreadable. Only the explicit local stand-in `EPG_CHECKPOINT_DB_OPTIONAL=standin` serves the R2 objects, for

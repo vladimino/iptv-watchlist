@@ -30,7 +30,7 @@ flowchart TD
     stale -->|no| reject
 ```
 
-## The run checkpoint in D1 ([ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md) and [ADR 0197](../adr/0197-retire-the-epg-checkpoint-r2-arm.md); D1-authoritative since 21 Nov 2026)
+## The run checkpoint in D1 ([ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md) and [ADR 0199](../adr/0199-retire-the-epg-checkpoint-r2-arm.md); D1-authoritative since 21 Nov 2026)
 
 The run checkpoint `sync.json` and the ingest status `watchlist-ingest.json` are D1 rows behind their own marker, `d1` / `open` / generation 2 since the controlled cutover of 21 Nov 2026 ([evidence](../evidence/d1-migration/air-551-checkpoint-cutover-2026-11-21.md)); the first natural run on D1 (22 Nov 2026) is accepted ([evidence](../evidence/d1-migration/air-551-h5-natural-run-2026-11-22.md)). Every step saves through one fenced batch; the R2 objects are a frozen image that is neither read nor written, and production fails closed (never R2) when the marker is not `d1`.
 

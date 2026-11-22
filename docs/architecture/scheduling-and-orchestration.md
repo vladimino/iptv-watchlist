@@ -230,7 +230,7 @@ sequenceDiagram
     Note over EPG,D1: Hourly ensure certifies a complete but uncertified run. No Workflow, no control or sync.json write.
 ```
 
-**Current (D1-authoritative since 21 Nov 2026, [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md), [ADR 0197](../adr/0197-retire-the-epg-checkpoint-r2-arm.md)):** the run checkpoint is in D1 and its marker is `d1`, so the two steps "sync.json stage complete in R2" and "Certify batch" in the diagram above are one fenced batch (the certificate stays conditional and non-aborting), and the crash window between them no longer exists for runs completed in this mode. The single-call completion route uses the same operation and attempts the queue refresh before it. The diagram above draws that single batch; the hourly repair `certifyComplete` stays for a certificate that did not match.
+**Current (D1-authoritative since 21 Nov 2026, [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md), [ADR 0199](../adr/0199-retire-the-epg-checkpoint-r2-arm.md)):** the run checkpoint is in D1 and its marker is `d1`, so the two steps "sync.json stage complete in R2" and "Certify batch" in the diagram above are one fenced batch (the certificate stays conditional and non-aborting), and the crash window between them no longer exists for runs completed in this mode. The single-call completion route uses the same operation and attempts the queue refresh before it. The diagram above draws that single batch; the hourly repair `certifyComplete` stays for a certificate that did not match.
 
 ### Seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), implemented by AIR-484; production acceptance awaits a natural run)
 
