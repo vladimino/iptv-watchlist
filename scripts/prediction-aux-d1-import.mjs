@@ -6,7 +6,8 @@
 //   node scripts/prediction-aux-d1-import.mjs report <export>     (default dry run: counts, digests, states, blockers; writes nothing)
 //   node scripts/prediction-aux-d1-import.mjs sql    <export>     (guarded SQL: import only into EMPTY tables while the marker is r2, generation 0)
 //   node scripts/prediction-aux-d1-import.mjs digest <export>     (the per-family digests only)
-//   node scripts/prediction-aux-d1-import.mjs verify <export>     (guarded SQL that checks the IMPORTED rows against the export, row by row, and aborts on any difference)
+//   node scripts/prediction-aux-d1-import.mjs verify <export>     (guarded SQL that checks the IMPORTED rows against the export, row by row, byte by byte, with child totals, and aborts on any difference)
+//   node scripts/prediction-aux-d1-import.mjs preflight <export>  (read-only SELECTs of the exported run ids against D1's prediction_run: finds true orphan sources before activation)
 //
 // Exit codes: 0 ok, 1 usage, 2 blocker (nothing is printed as SQL). A source the Worker could not read is a blocker: it never becomes an empty or partial import. Blockers: an unreadable or malformed
 // pending index or index entry, an object under an event prefix whose key is not one the Worker writes, a manifest without its source, any statement over the D1 byte budget (checked on the exact
@@ -114,7 +115,7 @@ export async function buildPlan(objects){
  if(activeSkipped>Aux.AUX_LIMITS.skippedCap)blocker(blockers,'skipped_over_cap','outbox',activeSkipped);
  plan.outbox.sort((a,b)=>a.eventKey.localeCompare(b.eventKey));
  // every statement that would be sent must fit the D1 statement budget, measured on its exact UTF-8 text (quotes double, multi-byte characters count their bytes)
- for(const line of planSql(plan).split('\n'))if(Buffer.byteLength(line,'utf8')>Aux.AUX_LIMITS.statementBytes)blocker(blockers,'statement_over_budget',line.slice(0,120),Buffer.byteLength(line,'utf8'));
+ for(const line of [...planSql(plan).split('\n'),...planVerifySql(plan).split('\n')])if(Buffer.byteLength(line,'utf8')>Aux.AUX_LIMITS.statementBytes)blocker(blockers,'statement_over_budget',line.slice(0,120),Buffer.byteLength(line,'utf8'));
  plan.sources.sort((a,b)=>a.runId.localeCompare(b.runId));plan.manifests.sort((a,b)=>a.runId.localeCompare(b.runId));
  return plan;
 }
@@ -130,6 +131,7 @@ export async function planReport(plan){
   outbox:{total:plan.outbox.length,byState:outbox,skippedActivePending:plan.outbox.filter(r=>r.kind==='skipped'&&r.state==='pending').length,digest:await digest(plan.outbox.map(r=>[r.eventKey,r.eventId,r.at,r.journalKey,r.state,r.attempts,r.since,r.settledAt,r.payloadDigest]))},
   orphanIndexEntries:plan.orphanIndexEntries.length,
   ignoredIndexEntries:plan.ignoredIndexEntries||0,
+  runRowPreflight:{runIds:planRunPreflightSql(plan).ids.length,note:'run `preflight` against D1 (read-only): a source or manifest whose run id has no prediction_run row is a true orphan; the Worker reader refuses it (source_without_run), so classify it for preservation or as an activation blocker'},
   ignoredObjects:plan.ignored,
   writes:'none (a dry run reads a local export and prints; it opens no database)',
  };
@@ -159,33 +161,52 @@ export function planSql(plan){
 // writes only the fence row. Source pieces compare their bytes; manifest pieces their stored digests and lengths; the outbox its identity, state and digest.
 export function planVerifySql(plan){
  const eq=(count,where)=>"UPDATE prediction_aux_cas SET ok=(SELECT count(*)="+count+" FROM "+where+") WHERE id=1;";
+ const nul=value=>value===null||value===undefined?'NULL':sqlq(value);
  const lines=[];
- for(const r of plan.stage)lines.push(eq(1,"prediction_batch_stage WHERE film_id="+sqlq(r.filmId)+" AND position="+r.position+" AND item_digest="+sqlq(r.itemDigest)+" AND body_bytes="+r.bodyBytes+" AND item_json="+sqlq(r.itemJson)));
+ for(const r of plan.stage)lines.push(eq(1,"prediction_batch_stage WHERE film_id="+sqlq(r.filmId)+" AND position="+r.position+" AND item_digest="+sqlq(r.itemDigest)+" AND held_by_run_id IS "+nul(r.heldByRunId)+" AND body_bytes="+r.bodyBytes+" AND item_json="+sqlq(r.itemJson)));
  lines.push(eq(plan.stage.length,'prediction_batch_stage'));
  for(const r of plan.sources){
   lines.push(eq(1,"prediction_run_source_head WHERE run_id="+sqlq(r.runId)+" AND current_revision=1 AND source_hash="+sqlq(r.hash)));
   lines.push(eq(1,"prediction_run_source_revision WHERE run_id="+sqlq(r.runId)+" AND revision=1 AND source_hash="+sqlq(r.hash)+" AND bytes="+r.bytes+" AND piece_count="+r.pieces.length));
   r.pieces.forEach((piece,i)=>lines.push(eq(1,"prediction_run_source_piece WHERE run_id="+sqlq(r.runId)+" AND revision=1 AND piece_no="+i+" AND text="+sqlq(piece))));
+  // child totals PER RUN: no extra revision and no extra piece of any revision may hide behind the checked ones
+  lines.push(eq(1,"prediction_run_source_revision WHERE run_id="+sqlq(r.runId)));
+  lines.push(eq(r.pieces.length,"prediction_run_source_piece WHERE run_id="+sqlq(r.runId)));
  }
  lines.push(eq(plan.sources.length,'prediction_run_source_head'));
+ lines.push(eq(plan.sources.length,'prediction_run_source_revision'));
+ lines.push(eq(plan.sources.reduce((n,r)=>n+r.pieces.length,0),'prediction_run_source_piece'));
  for(const r of plan.manifests){
-  lines.push(eq(1,"prediction_run_manifest WHERE run_id="+sqlq(r.runId)+" AND manifest_hash="+sqlq(r.manifestHash)+" AND payload_digest="+sqlq(r.payloadDigest)+" AND selected_ids="+sqlq(r.selectedIds)+" AND bytes="+r.bytes+" AND piece_count="+r.pieces.length+" AND part_index="+sqlq(r.partIndex)));
-  r.pieces.forEach((piece,i)=>lines.push(eq(1,"prediction_run_manifest_piece WHERE run_id="+sqlq(r.runId)+" AND piece_no="+i+" AND piece_digest="+sqlq(r.digests[i])+" AND length(CAST(text AS BLOB))="+Buffer.byteLength(piece,'utf8'))));
+  lines.push(eq(1,"prediction_run_manifest WHERE run_id="+sqlq(r.runId)+" AND manifest_hash="+sqlq(r.manifestHash)+" AND payload_digest="+sqlq(r.payloadDigest)+" AND selected_ids="+sqlq(r.selectedIds)+" AND drained_json IS "+nul(r.drainedJson)+" AND bytes="+r.bytes+" AND piece_count="+r.pieces.length+" AND part_index="+sqlq(r.partIndex)));
+  // the actual bytes of every piece (not its stored digest alone): a different string of the same length cannot pass
+  r.pieces.forEach((piece,i)=>lines.push(eq(1,"prediction_run_manifest_piece WHERE run_id="+sqlq(r.runId)+" AND piece_no="+i+" AND piece_digest="+sqlq(r.digests[i])+" AND text="+sqlq(piece))));
+  lines.push(eq(r.pieces.length,"prediction_run_manifest_piece WHERE run_id="+sqlq(r.runId)));
  }
  lines.push(eq(plan.manifests.length,'prediction_run_manifest'));
- for(const r of plan.outbox)lines.push(eq(1,"prediction_event_outbox WHERE event_key="+sqlq(r.eventKey)+" AND kind="+sqlq(r.kind)+" AND event_id="+sqlq(r.eventId)+" AND at="+sqlq(r.at)+" AND journal_key="+sqlq(r.journalKey)+" AND state="+sqlq(r.state)+" AND attempts="+r.attempts+" AND since="+sqlq(r.since)+" AND payload_digest="+sqlq(r.payloadDigest)+" AND event_json="+sqlq(r.eventJson)));
+ lines.push(eq(plan.manifests.reduce((n,r)=>n+r.pieces.length,0),'prediction_run_manifest_piece'));
+ for(const r of plan.outbox)lines.push(eq(1,"prediction_event_outbox WHERE event_key="+sqlq(r.eventKey)+" AND kind="+sqlq(r.kind)+" AND event_id="+sqlq(r.eventId)+" AND at="+sqlq(r.at)+" AND journal_key="+sqlq(r.journalKey)+" AND run_id IS "+nul(r.runId)+" AND state="+sqlq(r.state)+" AND attempts="+r.attempts+" AND since="+sqlq(r.since)+" AND last_attempt_at IS "+nul(r.lastAttemptAt)+" AND settled_at IS "+nul(r.settledAt)+" AND payload_digest="+sqlq(r.payloadDigest)+" AND payload_compacted=0 AND event_json="+sqlq(r.eventJson)));
  lines.push(eq(plan.outbox.length,'prediction_event_outbox'));
  return lines.join('\n')+'\n';
 }
+// A read-only preflight for AIR-554: the run ids of the exported sources and manifests, as SELECTs over `prediction_run` (chunks of 100 ids). A legacy start wrote the R2 source object BEFORE the D1 run row, so a
+// crash can leave a source with no run; the Worker's source reader refuses a head without its run row (`source_without_run`), so the importer's acceptance of such a source is NOT reader parity. The operator runs
+// these SELECTs (no write, no live check is made here), takes the ids that are missing from the answer as true orphans and classifies each for preservation outside the Worker's readers or as an activation blocker.
+export function planRunPreflightSql(plan){
+ const ids=[...new Set([...plan.sources.map(r=>r.runId),...plan.manifests.map(r=>r.runId)])].sort();
+ const out=[];
+ for(let i=0;i<ids.length;i+=100)out.push("SELECT run_id FROM prediction_run WHERE run_id IN ("+ids.slice(i,i+100).map(sqlq).join(',')+") ORDER BY run_id;");
+ return {ids,sql:out.length?out.join('\n')+'\n':''};
+}
 async function main(argv){
  const [command,target]=argv;
- if(!['report','sql','digest','verify'].includes(command)||!target){process.stderr.write('usage: prediction-aux-d1-import.mjs report|sql|digest|verify <r2-export>\n');return 1;}
+ if(!['report','sql','digest','verify','preflight'].includes(command)||!target){process.stderr.write('usage: prediction-aux-d1-import.mjs report|sql|digest|verify|preflight <r2-export>\n');return 1;}
  let plan;
  try{plan=await buildPlan(readExport(target));}catch(error){process.stderr.write('BLOCKER: '+error.message+'\n');return 2;}
  const report=await planReport(plan);
  if(plan.blockers.length){process.stderr.write('BLOCKER: '+JSON.stringify(plan.blockers)+'\n');if(command==='report')process.stdout.write(JSON.stringify(report,null,1)+'\n');return 2;}
  if(command==='sql')process.stdout.write(planSql(plan));
  else if(command==='verify')process.stdout.write(planVerifySql(plan));
+ else if(command==='preflight')process.stdout.write(planRunPreflightSql(plan).sql);
  else if(command==='digest')process.stdout.write(JSON.stringify({stage:report.stage.digest,sources:report.sources.digest,manifests:report.manifests.digest,outbox:report.outbox.digest})+'\n');
  else process.stdout.write(JSON.stringify(report,null,1)+'\n');
  return 0;

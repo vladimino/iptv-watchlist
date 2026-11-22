@@ -206,8 +206,7 @@ const deferred=async()=>{
  sql(w.file,"UPDATE prediction_lease SET expires_at=1, document_json=json_set(document_json,'$.expiresAt',1) WHERE name='runner'");
  const second=await w.reconcileAndStart({manifestSize:2});assert.equal(second.start.status,200,JSON.stringify(second.start.data).slice(0,200));
  assert.notEqual(second.start.data.runId,first.start.data.runId);
- const rows=outbox(w).filter(r=>r.k==='stop:'+first.start.data.runId);assert.ok(rows.length<=1);
- assert.ok(rows.every(r=>r.state==='superseded'||r.state==='delivered'),'the predecessor has no live pending stop: '+JSON.stringify(rows.map(r=>r.state)));
+ assert.equal(outbox(w).filter(r=>r.k==='stop:'+first.start.data.runId).length,0,'an expired predecessor has no terminal Event row (no expired-stop Event)');
  assert.deepEqual(auxKeys(w),[]);
 }
 // ---- 7. A stale holder cannot write the stage: an expired lease at the hold fails closed ----
@@ -288,17 +287,48 @@ const mcp=w=>{vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('expo
  }
 }
 {
- // R2: a terminal write is refused by the compare-and-swap on the run's OWN row when a successor already recovered it: the stop is superseded, never delivered as the run's own
+ // R2: an expired predecessor is recovered by a successor; a LATE completion of the predecessor is refused (lease lost, continued by the successor) and changes nothing: no outbox row, no journal item, the
+ // predecessor stays interrupted and bound to its successor
  const w=await flowWorld({films:6,aux:'d1'});
  const first=await w.reconcileAndStart({manifestSize:2});assert.equal(first.start.status,200);
  sql(w.file,"UPDATE prediction_lease SET expires_at=1, document_json=json_set(document_json,'$.expiresAt',1) WHERE name='runner'");
  const second=await w.reconcileAndStart({manifestSize:2});assert.equal(second.start.status,200);
- assert.equal(runDoc(w,first.start.data.runId).recoveredByRunId,second.start.data.runId,'the predecessor carries the successor');
- const row=outbox(w).find(r=>r.k==='stop:'+first.start.data.runId);assert.ok(!row||row.state!=='delivered'||true);
- // a late terminal write for the predecessor: its outbox row (if any) becomes superseded, the journal gets no second terminal Event for it
- const late=await w.api('complete',{runId:first.start.data.runId,reason:'external_termination'});
- assert.ok(late.status===409||late.status===200,'a late completion of a recovered run is refused or superseded: '+late.status);
- const after=outbox(w).find(r=>r.k==='stop:'+first.start.data.runId);assert.ok(!after||['superseded','pending','delivered'].includes(after.state));
+ const A=first.start.data.runId,B=second.start.data.runId;
+ assert.equal(runDoc(w,A).status,'interrupted');assert.equal(runDoc(w,A).recoveredByRunId,B,'the predecessor carries the successor');
+ assert.equal(outbox(w).filter(r=>r.k==='stop:'+A).length,0,'recovery of an expired lease emits no terminal Event for the predecessor');
+ const rowsBefore=JSON.stringify(outbox(w)),journalBefore=journal(w).slice().sort();
+ const late=await w.api('complete',{runId:A,reason:'external_termination'});
+ assert.equal(late.status,409);assert.equal(late.data.status,'lease_lost');assert.equal(late.data.continuedByRunId,B);
+ assert.equal(JSON.stringify(outbox(w)),rowsBefore,'the late completion wrote no outbox row');
+ assert.deepEqual(journal(w).slice().sort(),journalBefore,'and no journal item (no duplicate terminal Event)');
+ assert.equal(runDoc(w,A).status,'interrupted');assert.equal(runDoc(w,A).recoveredByRunId,B);
+}
+{
+ // R2: the target compare-and-swap race: a successor recovers the run BETWEEN the completion's read and its terminal batch. The batch is refused as a whole (no run transition, no outbox row), the answer is
+ // `superseded`, the journal gets nothing, and the run row is exactly what the successor wrote
+ const w=await flowWorld({films:6,aux:'d1'});
+ const a=await w.reconcileAndStart({manifestSize:2});assert.equal(a.start.status,200);
+ const A=a.start.data.runId;
+ let raced=false;
+ w.hooks.write=statements=>{
+  if(raced||!statements.some(item=>/INSERT INTO prediction_event_outbox/.test(item.text)))return;
+  raced=true;sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify({...runDoc(w,A),recoveredByRunId:'successor-run'})+"' WHERE run_id='"+A+"'");
+ };
+ const done=await w.api('complete',{runId:A,reason:'external_termination'});
+ w.hooks.write=null;
+ assert.ok(raced,'the successor won the race at the terminal batch');
+ assert.equal(done.status,200);assert.equal(done.data.status,'superseded');assert.equal(done.data.continuedByRunId,'successor-run');assert.equal(done.data.mustComplete,false);
+ assert.equal(outbox(w).filter(r=>r.k==='stop:'+A).length,0,'the refused batch left no outbox row');assert.equal(journal(w).length,0,'and no journal item');
+ assert.equal(runDoc(w,A).status,'running','no terminal transition landed');assert.equal(runDoc(w,A).recoveredByRunId,'successor-run','the run row is what the successor wrote');
+ // a pending stop row that already exists for such a run is superseded (target state), not delivered as its own
+ const pending=await flowWorld({films:6,aux:'d1'});
+ const p=await pending.reconcileAndStart({manifestSize:2});const P=p.start.data.runId;
+ pending.hooks.write=statements=>{if(statements.some(item=>/UPDATE prediction_event_outbox SET state=/.test(item.text)))throw new Error('hold the journal acknowledgement');};
+ await pending.api('complete',{runId:P,reason:'external_termination'});pending.hooks.write=null;
+ assert.equal(outbox(pending).find(r=>r.k==='stop:'+P).state,'pending','the stop is parked and its acknowledgement is lost');
+ sql(pending.file,"UPDATE prediction_run SET document_json='"+JSON.stringify({...runDoc(pending,P),recoveredByRunId:'successor-run'})+"' WHERE run_id='"+P+"'");
+ const next=await pending.reconcileAndStart({manifestSize:2});assert.equal(next.start.status,200,JSON.stringify(next.start.data).slice(0,200));
+ assert.equal(outbox(pending).find(r=>r.k==='stop:'+P).state,'superseded','once the target run carries its successor, the pending stop is superseded');
 }
 {
  // R3: a drain settles a staged row by the digest it observed; a replacement hold that arrives while the film's prediction commits is kept

@@ -10,7 +10,7 @@ import {execFileSync,spawnSync} from 'node:child_process';
 import {flowWorld,sql,migrated} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as Aux from '../src/prediction-aux-d1.js';
-import {buildPlan,planReport,planSql,planVerifySql,readExport} from '../scripts/prediction-aux-d1-import.mjs';
+import {buildPlan,planReport,planSql,planVerifySql,planRunPreflightSql,readExport} from '../scripts/prediction-aux-d1-import.mjs';
 
 const applySql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+text+'COMMIT;',encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr.trim());};
 const exportOf=w=>Object.fromEntries([...w.records.entries()].map(([key,value])=>[key,structuredClone(value)]));
@@ -183,5 +183,55 @@ const tables=['prediction_batch_stage','prediction_run_source_head','prediction_
   // the import itself refuses non-empty tables (no merge, not resumable)
   assert.throws(()=>applySql(extra,text),/CHECK constraint failed: ok/);
  }
+}
+
+// ---- 5. Review round 2: verify is byte parity, not metadata parity; orphan sources have an explicit preflight ----
+{
+ const films=Array.from({length:10},(_,n)=>({filmId:'v'+n,lane:'cold',plan:'prediction_only',modelMetadata:{title:'Фильм '+n,synopsis:('🎬 ёж ').repeat(2200)}}));
+ const answer={status:'running',runId:'rv',protocol:'batch_v2',lease:{epoch:2},manifestHash:'c'.repeat(64),films,profile:{version:1,hash:'p',body:{a:1}},contract:{x:1},drained:{committed:2,committedIds:['x1','x2']}};
+ const objects={'enrichment/batch-manifest/rv.json':answer,'enrichment/sources/rv.json':Object.fromEntries(films.map(f=>[f.filmId,f.modelMetadata])),
+  'enrichment/stop-events/rv.json':{event:{id:'enrichment-rv',at:'2026-11-10T10:00:00.000Z'},delivered:true},
+  'enrichment/stop-events/skipped-q1.json':{event:{id:'enrichment-skipped-q1',at:'2026-11-10T11:00:00.000Z'}},
+  'enrichment/event-outbox.json':{pending:{'enrichment/stop-events/skipped-q1.json':{since:'2026-11-10T11:05:00.000Z',attempts:2,lastAttemptAt:'2026-11-10T11:30:00.000Z',quarantined:false}}}};
+ const plan=await buildPlan(objects);assert.deepEqual(plan.blockers,[]);
+ const text=planSql(plan),verify=planVerifySql(plan);
+ const imported=()=>{const f=migrated();applySql(f,text);applySql(f,verify);return f;};   // the clean import passes its own verification
+ const tamper=(name,statements,pattern=/CHECK constraint failed: ok/)=>{const f=imported();for(const st of statements)sql(f,st);assert.throws(()=>applySql(f,verify),pattern,name);};
+ const total=Number(sql(imported(),'SELECT piece_count AS n FROM prediction_run_manifest')[0].n);assert.ok(total>=2,'the manifest spans several pieces');
+ // a different string of the SAME length with the stored digest kept: only a byte comparison catches it (the digest and the byte length still match)
+ tamper('same-length manifest piece corruption',["DROP TRIGGER prediction_run_manifest_piece_no_update","UPDATE prediction_run_manifest_piece SET text='['||substr(text,2) WHERE run_id='rv' AND piece_no=0"]);
+ tamper('same-length source piece corruption',["DROP TRIGGER prediction_run_source_piece_no_update","UPDATE prediction_run_source_piece SET text='['||substr(text,2) WHERE run_id='rv' AND piece_no=0"]);
+ // retained metadata: drained_json, settled_at, run_id, last_attempt_at, payload_compacted, held_by_run_id
+ tamper('changed drained metadata',["DROP TRIGGER prediction_run_manifest_no_update","UPDATE prediction_run_manifest SET drained_json='{\"committed\":9}' WHERE run_id='rv'"]);
+ const loosen=["DROP TRIGGER prediction_event_outbox_identity","DROP TRIGGER prediction_event_outbox_settled_terminal"];
+ tamper('changed settled_at',[...loosen,"UPDATE prediction_event_outbox SET settled_at='2026-11-11T00:00:00.000Z' WHERE event_key='stop:rv'"]);
+ tamper('changed run_id',[...loosen,"UPDATE prediction_event_outbox SET run_id='other' WHERE event_key='stop:rv'"]);
+ tamper('changed last_attempt_at',[...loosen,"UPDATE prediction_event_outbox SET last_attempt_at='2026-11-12T00:00:00.000Z' WHERE event_key='skipped:q1'"]);
+ tamper('compacted without verification',[...loosen,"UPDATE prediction_event_outbox SET payload_compacted=1, event_json=NULL, state='delivered', settled_at='2026-11-10T11:00:00.000Z' WHERE event_key='skipped:q1'"]);
+ // extra child rows hide nowhere: an extra revision, an extra source piece, an extra manifest piece of the run
+ tamper('extra source revision',["INSERT INTO prediction_run_source_revision (run_id,revision,source_hash,bytes,piece_count,created_at) VALUES ('rv',2,'"+'d'.repeat(64)+"',1,1,'2026-11-10T00:00:00.000Z')"]);
+ tamper('extra source piece',["INSERT INTO prediction_run_source_piece (run_id,revision,piece_no,text) VALUES ('rv',1,99,'x')"]);
+ tamper('extra manifest piece',["INSERT INTO prediction_run_manifest_piece (run_id,piece_no,piece_digest,text) VALUES ('rv',99,'"+'e'.repeat(64)+"','x')"]);
+ tamper('extra orphan run (totals)',["INSERT INTO prediction_run_source_piece (run_id,revision,piece_no,text) VALUES ('orphan',1,0,'x')"]);
+ // and the whole imported history reads back through the Worker's own readers
+ const f=imported();const db=(await import('./d1-standin.mjs')).d1Standin(f);
+ assert.equal(JSON.stringify(await Aux.readManifest(db,'rv')),JSON.stringify(answer));
+}
+{
+ // orphan source history: the legacy start wrote R2 sources/<run> BEFORE the D1 run row, so a crash leaves a source with no run. The importer accepts it (it is history), the Worker's reader refuses it
+ // (`source_without_run`): the import is NOT unconditional reader parity, and the read-only preflight names the run ids to check against D1's prediction_run before activation.
+ const objects={'enrichment/sources/orphan-run.json':{f1:{title:'A'}},'enrichment/sources/real-run.json':{f1:{title:'B'}}};
+ const plan=await buildPlan(objects);assert.deepEqual(plan.blockers,[],'a source-only export is history, not a blocker');
+ const report=await planReport(plan);assert.equal(report.runRowPreflight.runIds,2);assert.match(report.runRowPreflight.note,/orphan/);
+ const pre=planRunPreflightSql(plan);assert.deepEqual(pre.ids,['orphan-run','real-run']);assert.match(pre.sql,/^SELECT run_id FROM prediction_run WHERE run_id IN \('orphan-run','real-run'\)/);assert.doesNotMatch(pre.sql,/INSERT|UPDATE|DELETE/,'the preflight is read-only');
+ const f=migrated();applySql(f,planSql(plan));
+ const db=(await import('./d1-standin.mjs')).d1Standin(f);
+ sql(f,"INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES ('real-run',0,'2026-11-10T00:00:00.000Z','{\"runId\":\"real-run\"}')");
+ assert.deepEqual((await Aux.readSource(db,'real-run')).value,{f1:{title:'B'}},'a source with its run row reads back');
+ await assert.rejects(()=>Aux.readSource(db,'orphan-run'),error=>error.code==='prediction_aux_corrupt'&&error.detail==='source_without_run','a true orphan is refused by the reader: the documented limitation');
+ const answered=sql(f,pre.sql.split('\n')[0].replace(/;$/,''));assert.deepEqual(answered.map(r=>r.run_id),['real-run'],'the preflight answer: the ids missing from it are the true orphans');
+ // the CLI prints the same read-only SELECT
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'aux-orphan-'));const file=path.join(dir,'e.json');fs.writeFileSync(file,JSON.stringify(objects));
+ const cli=spawnSync(process.execPath,['scripts/prediction-aux-d1-import.mjs','preflight',file],{encoding:'utf8'});assert.equal(cli.status,0);assert.equal(cli.stdout,pre.sql);
 }
 console.log('prediction aux import: ok');
