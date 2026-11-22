@@ -189,13 +189,14 @@ async function readAuthorityNow(db,env){
 // batch, so a marker that moved in the meantime fails that write closed (`prediction_domain_cas`) instead of landing it; what a read inside the same
 // request can miss is a change that happened after the marker was read and before the request's next write, for at most the length of the request.
 const REQUEST_SCOPES=new WeakMap();
+const REQUEST_SCOPE_KEY=Symbol.for('iptv.requestScope');
 // A statement counts as a read only if it is a plain SELECT, one statement, with nothing before it. SQLite lets a WITH statement end in an UPDATE, INSERT or DELETE
 // (with RETURNING it can be run through first() or all()), a PRAGMA can set as well as read, and a comment can hide either; every other shape, and every statement the
 // scope did not prepare itself, is treated as a write and drops the held answer.
 const READ_ONLY_SQL=/^select\b[^;]*;?\s*$/i;
 function scopedDatabase(database,scope){
  const statements=new WeakMap();
- const forget=()=>{scope.read=null;};
+ const forget=()=>{scope.read=null;scope.aux=null;};
  const statementOf=(statement,sql)=>{
   const reads=typeof sql==='string'&&READ_ONLY_SQL.test(sql.trimStart());
   const proxy=new Proxy(statement,{get(target,prop){
@@ -213,6 +214,8 @@ function scopedDatabase(database,scope){
   return proxy;
  };
  const proxy=new Proxy(database,{get(target,prop){
+  // AIR-553: the request scope is readable by name, so the auxiliary-state module can hold its one marker read in it (dropped by `forget` like this module's own).
+  if(prop===REQUEST_SCOPE_KEY)return scope;
   const value=Reflect.get(target,prop,target);
   if(typeof value!=='function')return value;
   if(prop==='prepare')return sql=>statementOf(value.call(target,sql),sql);
@@ -235,7 +238,7 @@ export function scopeRequest(env){
  return {...env,DB:scopedDatabase(database,{read:null})};
 }
 // A request that is about to write (or to take the lease) asks for the marker afresh, so the generation its fenced write carries is the current one, not the one an earlier read of the request saw.
-export function forgetRequestAuthority(env){const scope=REQUEST_SCOPES.get(env?.DB);if(scope)scope.read=null;}
+export function forgetRequestAuthority(env){const scope=REQUEST_SCOPES.get(env?.DB);if(scope){scope.read=null;scope.aux=null;}}
 export async function readPredictionAuthority(db,env){
  const scope=REQUEST_SCOPES.get(db);
  if(!scope)return readAuthorityNow(db,env);
