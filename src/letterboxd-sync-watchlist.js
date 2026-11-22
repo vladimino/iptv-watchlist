@@ -59,7 +59,7 @@ export function classifyScanFailure(error) {
 
 // The phase port for `LetterboxdSync.run`. One call is one whole bounded action: the scan is at most 100 page fetches and a single repository call.
 // It never reads Discovery, EPG or resolver state (decision 2). The slot's attempt is made once per run; the next slot is the retry.
-export function watchlistPhase({repository, fetchPage, parse, firstUrl, username, describe = null}) {
+export function watchlistPhase({repository, fetchPage, parse, firstUrl, username, describe = null, scanOpen = null}) {
   return {
     // Called by the Workflow once the phase outcome and its time are recorded on the slot: applies the causal effects of the snapshot just promoted (and any older pending one), oldest first, so a removal reaches the
     // Ratings queue in the same run. No Letterboxd request, no scan. -> {drained, code?}
@@ -75,6 +75,11 @@ export function watchlistPhase({repository, fetchPage, parse, firstUrl, username
       // Pending causal effects of earlier versions first, oldest first. A persistent failure is a visible outcome, not a silent skip.
       const drain = await repository.drainEffects(ctx, {now: ctx.now()}).catch(() => ({drained: false, code: 'effects_failed'}));
       if (!drain.drained) { await attempt('error', drain.code || 'effects_pending'); return {done: true, outcome: 'error', at: at(), reason: drain.code || 'effects_pending'}; }
+      // AIR-571 D2: in drain mode the effects above are applied but no new scan starts (nothing is fetched, nothing is recorded as an attempt).
+      if (typeof scanOpen === 'function') {
+        const open = await scanOpen(ctx.env).catch(() => ({open: false}));
+        if (open?.open !== true) return {done: true, outcome: 'disabled', at: at(), reason: 'draining'};
+      }
       let scanned;
       try { scanned = await scanWatchlist({fetchPage, parse, firstUrl, username}); }
       catch (error) { const failure = classifyScanFailure(error); await attempt(failure.outcome, failure.reason); return {done: true, outcome: failure.outcome, at: at(), reason: failure.reason}; }

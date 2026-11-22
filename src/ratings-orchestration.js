@@ -18,7 +18,6 @@ const RatingsOrchestration=(()=>{
  const iso=ms=>new Date(ms).toISOString();
  const policy=()=>OrchestrationPolicy;
  // Absent module or schema means the Letterboxd Sync is inert, never a fence.
- const letterboxdFence=async env=>typeof LetterboxdSync==='undefined'?{fenced:false}:LetterboxdSync.writerFence(env).catch(()=>({fenced:true,reason:'evidence_unreadable'}));
  const ratings=()=>LetterboxdRatings;
  const instanceId=(runKey,series)=>'ratings_'+String(runKey).replace(/-/g,'')+'_'+series;
  const emptyControl=()=>({schemaVersion:1,runKey:null,series:0,instanceId:null,epoch:null,phase:'idle',runId:null,checkpoint:null,budget:policy().emptyBudget(),cooldownUntil:null,quarantine:null,failure:null,lastDurableProgressAt:null,nextWakeAt:null,lastStep:null,doneAt:null,updatedAt:null});
@@ -340,12 +339,15 @@ const RatingsOrchestration=(()=>{
   if(mode.record.mode==='switching')return {started:false,reason:'switch_in_progress'};
   if(mode.record.mode!=='cloudflare')return {started:false,reason:'external'};
   if(typeof env?.RATINGS_WORKFLOW?.create!=='function')return {started:false,reason:'workflow_unavailable'};
-  if((await letterboxdFence(env)).fenced)return {started:false,reason:'letterboxd_sync_active'};
+  // AIR-571 D2: the same single admission read as the step admission supplies the pin of every authoritative write of this tick (the hourly Event reconcile and the control record claims).
+  const lbAdmission=await letterboxdAdmission(env);
+  if(lbAdmission.fenced)return {started:false,reason:'letterboxd_sync_active'};
+  const fenceOf=()=>fencedEnv(env,mode.etag,lbAdmission.revision,lbAdmission.watchlistGuard);
   const authority=await authorityState(env);
   if(authority.error)return {started:false,reason:'d1_unavailable'};
   if(!authority.ready)return {started:false,reason:'authority_held'};
   // AIR-361: the hourly tick also delivers a Ratings result event that an earlier terminal commit could not put (idempotent, bounded).
-  await ratings().reconcileEvent(fencedEnv(env,mode.etag),now).catch(()=>null);
+  await ratings().reconcileEvent(fenceOf(),now).catch(()=>null);
   const {dayKey,due,dueAt}=policy().dailyDue(now);
   if(!due)return {started:false,reason:'not_due',dueAt:iso(dueAt)};
   const stored=await readControl(env);
@@ -367,7 +369,7 @@ const RatingsOrchestration=(()=>{
     const code=status==='errored'?'instance_errored':status==='absent'?'create_uncertain':'instance_terminated';
     const applied=policy().applyFailure(control.budget,{code},{now,phase:control.checkpoint?.phase??null,checkpoint:control.checkpoint?.key??null,random});
     control={...control,budget:applied.budget,cooldownUntil:applied.cooldownUntil,failure:{class:'transient',code},quarantine:applied.quarantine?{...applied.quarantine,at:iso(now)}:null,phase:'stopped',stopReason:code,updatedAt:iso(now)};
-    const fe=fencedEnv(env,mode.etag);
+    const fe=fenceOf();
     if(await ratings().writeDocument(fe,CONTROL_KEY,stored.stored?{etag:stored.etag}:null,control)===null)return {started:false,reason:'write_conflict'};
     if(applied.quarantine)return {started:false,reason:'quarantined',scope:'run'};
     return {started:false,reason:'cooldown',until:applied.cooldownUntil,recorded:code};
@@ -377,7 +379,7 @@ const RatingsOrchestration=(()=>{
   }
   const id=instanceId(dayKey,series);
   const next={...emptyControl(),...carry,schemaVersion:1,runKey:dayKey,series,instanceId:id,epoch:mode.record.epoch,phase:'starting',budget,updatedAt:iso(now)};
-  const fe=fencedEnv(env,mode.etag);
+  const fe=fenceOf();
   // The receipt of the claim is the control record naming this run key, series and epoch.
   if(await ratings().writeDocument(fe,CONTROL_KEY,stored.stored?{etag:stored.etag}:null,next)===null)return {started:false,reason:'write_conflict'};
   try{
