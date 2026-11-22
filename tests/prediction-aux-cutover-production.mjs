@@ -433,4 +433,5 @@ let release;
  assert.doesNotMatch(source,/prepare\((?:"|')\s*(?:INSERT|DELETE|DROP|ALTER)/i,'the operator prepares no row write itself: it runs the migration, the importer\'s checked SQL and its own marker statements');
  for(const forbidden of ['prediction_domain_authority SET','published_epg_authority SET','feature_flags','sqlFile','--sql-file','sqlText'])assert.equal(source.includes(forbidden),false,forbidden);
 }
+await opened.bucket.stop();
 console.log('prediction aux cutover production: ok');
