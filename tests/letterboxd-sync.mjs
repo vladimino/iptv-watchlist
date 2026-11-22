@@ -541,4 +541,97 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  assert.equal(Sync.validate({action:'open_schedule',confirm:'open_schedule',expectEpoch:1,expectRevision:2}),null);assert.equal(Sync.validate({action:'open_schedule',confirm:'canary',expectEpoch:1,expectRevision:2}),'Invalid confirm');
  assert.equal(Sync.validate({action:'open_schedule',confirm:'open_schedule',slot:'2026-11-23T0430',expectEpoch:1,expectRevision:2}),'Unknown field');
 }
+// 13. AIR-571 E (second review of PR #887): the canary hold is RECOVERABLE and every return to `cloudflare` through the owner route is FAIL-CLOSED. A retarget replaces a SETTLED hold in one pinned write (never opening the full schedule);
+// an in-progress canary is preserved; and the completion chooses the canary slot BEFORE admission, so no tick can claim an unapproved slot between two owner commands (the cron may already be deployed).
+{
+ const {db}=fresh(),wf=workflow(),b=bucket(),e=env({db,wf,bucket:b});
+ const read=async()=>Sync.readMode(e);
+ const post=async(body,now)=>{const m=await read();const pinned={...body,confirm:body.confirm??body.action,expectEpoch:m.epoch,expectRevision:m.revision};const out=await Sync.handle(e,pinned,GOOD);return out.body;};
+ const rowsOf=()=>db.sql('SELECT slot_key, status, closed_at FROM letterboxd_slot ORDER BY slot_key');
+ const T0=T('2026-11-22T00:00:00Z');
+ // the owner route refuses a completion toward cloudflare without a canary slot: nothing is written, the mode stays `switching`
+ await rawSwitch(e,{action:'close_admission',target:'cloudflare'},GOOD,T0);
+ const noSlot=await Sync.handle(e,{action:'complete',confirm:'complete',expectEpoch:(await read()).epoch,expectRevision:(await read()).revision},GOOD);
+ assert.equal(noSlot.body.refused,'canary_required');assert.equal((await read()).mode,'switching');
+ assert.equal((await post({action:'complete',slot:'bad'},T0)).error,'Invalid slot');
+ const past=await Sync.handle(e,{action:'complete',confirm:'complete',slot:'2020-01-01T0430',expectEpoch:(await read()).epoch,expectRevision:(await read()).revision},GOOD);assert.equal(past.body.refused,'slot_in_past');
+ // with the slot, the completion and the hold are ONE row write: a tick between two commands cannot exist
+ const done=await Sync.handle(e,{action:'complete',confirm:'complete',slot:'2026-11-22T1030',expectEpoch:(await read()).epoch,expectRevision:(await read()).revision},GOOD);
+ assert.deepEqual([done.body.completed,done.body.canary,(await read()).drain],[true,'2026-11-22T1030','canary:2026-11-22T1030']);
+ const blocked=await Sync.ensure(e,{now:T('2026-11-22T03:35:00Z')});assert.deepEqual([blocked.started,blocked.reason],[false,'canary_hold']);
+ // a canary that is pending or in progress is preserved: the retarget is refused with the reason, nothing is written
+ const rev=(await read()).revision;
+ let r=await post({action:'canary',slot:'2026-11-22T1630'},T0);assert.deepEqual([r.refused,r.why],['canary_active','canary_pending']);
+ assert.equal((await post({action:'canary',slot:'2026-11-22T1030'},T0)).refused,'same_slot');
+ const run1=await Sync.ensure(e,{now:T('2026-11-22T09:35:00Z')});assert.equal(run1.started,true);
+ r=await Sync.handle(e,{action:'canary',confirm:'canary',slot:'2026-11-22T2230',expectEpoch:(await read()).epoch,expectRevision:(await read()).revision},GOOD,T('2026-11-22T10:00:00Z'));
+ assert.equal(r.body.refused,'canary_active');assert.equal(r.body.why,'canary_in_progress','a running canary is preserved');assert.equal((await read()).drain,'canary:2026-11-22T1030');
+ // inside the instance's window it stays; after the window with the instance still LIVE the retarget is refused too; once the instance ended it is a FAILED/EXPIRED canary and the retarget works
+ const live=await rawSwitch(e,{action:'canary',slot:'2026-11-22T2230',...await (async()=>{const m=await read();return {expectEpoch:m.epoch,expectRevision:m.revision};})()},GOOD,T('2026-11-22T16:00:00Z'));
+ assert.deepEqual([live.refused,live.why],['canary_active','canary_instance_live']);
+ wf.instances.get('lbsync_20261122_1030_0').status='terminated';
+ const retarget=await rawSwitch(e,{action:'canary',slot:'2026-11-22T2230',...await (async()=>{const m=await read();return {expectEpoch:m.epoch,expectRevision:m.revision};})()},GOOD,T('2026-11-22T16:00:00Z'));
+ assert.deepEqual([retarget.canary,(await read()).drain],['2026-11-22T2230','canary:2026-11-22T2230'],'replaced in ONE write: the hold was never absent');
+ // the non-target slot stays blocked after the retarget, the new canary starts, and nothing else does
+ const between=await Sync.ensure(e,{now:T('2026-11-22T16:05:00Z')});assert.deepEqual([between.started,between.reason],[false,'canary_hold']);
+ const second=await Sync.ensure(e,{now:T('2026-11-22T21:35:00Z')});assert.equal(second.started,true);assert.equal(second.slot,'2026-11-22T2230');
+ // a slot that already has a row cannot be named again
+ assert.equal((await rawSwitch(e,{action:'canary',slot:'2026-11-22T1030',...await (async()=>{const m=await read();return {expectEpoch:m.epoch,expectRevision:m.revision};})()},GOOD,T('2026-11-22T22:00:00Z'))).refused,'slot_in_past');
+ // a MISSED canary (never claimed, window ended): the replacement works the same way
+ {
+  const f2=fresh(),wf2=workflow(),e2=env({db:f2.db,wf:wf2,bucket:bucket()});
+  const m2=()=>Sync.readMode(e2);
+  await rawSwitch(e2,{action:'close_admission',target:'cloudflare'},GOOD,T0);
+  assert.equal((await Sync.handle(e2,{action:'complete',confirm:'complete',slot:'2026-11-22T1030',expectEpoch:(await m2()).epoch,expectRevision:(await m2()).revision},GOOD)).body.completed,true);
+  const pend=await rawSwitch(e2,{action:'canary',slot:'2026-11-22T2230',expectEpoch:(await m2()).epoch,expectRevision:(await m2()).revision},GOOD,T('2026-11-22T12:00:00Z'));assert.deepEqual([pend.refused,pend.why],['canary_active','canary_pending']);
+  const ok=await rawSwitch(e2,{action:'canary',slot:'2026-11-22T2230',expectEpoch:(await m2()).epoch,expectRevision:(await m2()).revision},GOOD,T('2026-11-22T16:00:00Z'));assert.equal(ok.canary,'2026-11-22T2230','the missed canary is replaced');
+  assert.equal(f2.db.sql('SELECT COUNT(*) AS n FROM letterboxd_slot')[0].n,0,'nothing was claimed or recorded for the missed slot');
+ }
+ // a FAILED canary (closed with errors): the replacement works and the failed slot is not re-run
+ {
+  const f3=fresh(),wf3=workflow(),e3=env({db:f3.db,wf:wf3,bucket:bucket()});
+  const m3=()=>Sync.readMode(e3);
+  await rawSwitch(e3,{action:'close_admission',target:'cloudflare'},GOOD,T0);
+  await Sync.handle(e3,{action:'complete',confirm:'complete',slot:'2026-11-22T1030',expectEpoch:(await m3()).epoch,expectRevision:(await m3()).revision},GOOD);
+  const started=await Sync.ensure(e3,{now:T('2026-11-22T09:35:00Z')});assert.equal(started.started,true);
+  const failed=await Sync.run(e3,{slotKey:started.slot,series:0,epoch:1},step(),{now:()=>T('2026-11-22T09:41:00Z'),ports:{ratings:okPort('error'),watchlist:okPort('unavailable')}});assert.equal(failed.status,'error');
+  const ok=await rawSwitch(e3,{action:'canary',slot:'2026-11-22T1630',expectEpoch:(await m3()).epoch,expectRevision:(await m3()).revision},GOOD,T('2026-11-22T10:00:00Z'));assert.equal(ok.canary,'2026-11-22T1630','a closed (failed) canary is settled: the retarget is allowed');
+  const held=await Sync.ensure(e3,{now:T('2026-11-22T10:05:00Z')});assert.deepEqual([held.started,held.reason],[false,'canary_hold']);
+ }
+ // RE-ENTRY with the cron already deployed: open the schedule, hand the writer back, then return to cloudflare. Every step of the way no slot is claimable without an owner-pinned canary.
+ {
+  const f4=fresh(),wf4=workflow(),e4=env({db:f4.db,wf:wf4,bucket:bucket()});
+  const m4=()=>Sync.readMode(e4);
+  const owner=async(body)=>{const m=await m4();return (await Sync.handle(e4,{...body,confirm:body.confirm??body.action,expectEpoch:m.epoch,expectRevision:m.revision},GOOD)).body;};
+  await rawSwitch(e4,{action:'close_admission',target:'cloudflare'},GOOD,T0);
+  assert.equal((await owner({action:'complete',slot:'2026-11-22T1030'})).completed,true);
+  assert.equal((await owner({action:'open_schedule'})).scheduleOpen,true);
+  assert.equal((await m4()).drain,null,'the schedule was opened by the owner');
+  // the reverse handover (drain, close toward external, complete toward external), then the forward one again
+  assert.equal((await owner({action:'drain'})).draining,true);
+  assert.equal((await owner({action:'close_admission',target:'external'})).closed,true);
+  assert.equal((await owner({action:'complete'})).completed,true);
+  assert.equal((await owner({action:'close_admission',target:'cloudflare'})).closed,true);
+  const attempt=await owner({action:'complete'});assert.equal(attempt.refused,'canary_required','the completion cannot reopen the schedule: it needs the canary slot');assert.equal((await m4()).mode,'switching');
+  const failedBetween=await Sync.ensure(e4,{now:T('2026-11-23T03:35:00Z')});assert.equal(failedBetween.started,false,'a tick during the switch claims nothing');
+  // an abort back to cloudflare after an interrupted reverse close ends in the CLOSED hold (no canary was set): nothing is claimable until the owner pins one
+  assert.equal((await owner({action:'abort'})).aborted,true);
+  assert.equal((await m4()).mode,'external');
+ }
+ {
+  const f5=fresh(),wf5=workflow(),e5=env({db:f5.db,wf:wf5,bucket:bucket()});
+  const m5=()=>Sync.readMode(e5);
+  const owner=async(body)=>{const m=await m5();return (await Sync.handle(e5,{...body,confirm:body.confirm??body.action,expectEpoch:m.epoch,expectRevision:m.revision},GOOD)).body;};
+  await rawSwitch(e5,{action:'close_admission',target:'cloudflare'},GOOD,T0);await rawSwitch(e5,{action:'complete'},GOOD,T0);   // a running writer WITHOUT any hold (state of an earlier plain completion)
+  assert.equal((await m5()).drain,'verified');
+  assert.equal((await owner({action:'drain'})).draining,true);
+  assert.equal((await owner({action:'close_admission',target:'external'})).closed,true);
+  assert.equal((await owner({action:'abort'})).aborted,true);
+  assert.equal((await m5()).drain,'canary:none','an abort back to cloudflare through the owner route ends in the closed hold');
+  const tick=await Sync.ensure(e5,{now:T('2026-11-22T09:35:00Z')});assert.deepEqual([tick.started,tick.reason,tick.canary],[false,'canary_hold','none']);assert.equal(f5.db.sql('SELECT COUNT(*) AS n FROM letterboxd_slot')[0].n,0);
+  assert.equal((await owner({action:'open_schedule'})).refused,'canary_not_set','the closed hold cannot be opened: only `canary` leads to an admitted slot');
+  const pinned=await owner({action:'canary',slot:'2026-11-22T1630'});assert.equal(pinned.canary,'2026-11-22T1630');
+  const again=await Sync.ensure(e5,{now:T('2026-11-22T15:35:00Z')});assert.equal(again.started,true);assert.equal(again.slot,'2026-11-22T1630');
+ }
+}
 console.log('letterboxd-sync ok');

@@ -56,9 +56,9 @@ export const FENCE_GUARD_SQL = "INSERT INTO letterboxd_sync_fence (id, ok) SELEC
 // promotion commits (the guard below rides in the promotion batch, so a scan that began before the marker cannot publish after it), while the causal effects of the current snapshot and the Diary/Ratings phase continue.
 export const SCAN_STOPPED = 'scan_stopped';
 // AIR-571 E: the CANARY HOLD, in the same free-text column (no schema): `canary:<slotKey>` lets `ensure` claim ONLY that Madrid slot and nothing after it, until the owner's explicit `open_schedule` command (the second gate
-// before the full four-slot schedule). The two markers compose: `scan_stopped+canary:<slotKey>` is draining under a canary hold. Grammar: null | 'verified' (full schedule) | 'scan_stopped' | 'canary:<slot>' | 'scan_stopped+canary:<slot>'.
+// before the full four-slot schedule). `canary:none` is the CLOSED hold: it matches no slot, so nothing is claimed until the owner pins a canary (every return to `cloudflare` through the owner route ends in a hold, never in the full schedule). The two markers compose: `scan_stopped+canary:<slotKey>` is draining under a canary hold. Grammar: null | 'verified' (full schedule) | 'scan_stopped' | 'canary:<slot>' | 'scan_stopped+canary:<slot>'.
 export const CANARY_PREFIX = 'canary:';
-const SLOT_KEY_TEXT = '\\d{4}-\\d{2}-\\d{2}T\\d{4}';
+const SLOT_KEY_TEXT = '(?:\\d{4}-\\d{2}-\\d{2}T\\d{4}|none)';
 export const isDraining = drain => typeof drain === 'string' && (drain === SCAN_STOPPED || drain.startsWith(SCAN_STOPPED + '+'));
 export const canaryOf = drain => { const match = new RegExp('(?:^|\\+)canary:(' + SLOT_KEY_TEXT + ')$').exec(String(drain ?? '')); return match ? match[1] : null; };
 const holdPart = (draining, canary) => [draining ? SCAN_STOPPED : null, canary ? CANARY_PREFIX + canary : null].filter(Boolean).join('+') || null;
@@ -277,6 +277,18 @@ function pinMismatch(mode, {expectEpoch, expectRevision}) {
   return null;
 }
 const modeView = mode => ({mode: mode.mode, target: mode.target, epoch: mode.epoch, revision: mode.revision ?? 0});
+// Is a previous canary SETTLED, so that a replacement may be pinned without ever opening the full schedule? `none` (the closed hold) is settled; a slot that was never claimed is settled only after its window ended
+// (the latest due slot can then no longer be it, so no tick can claim it); a closed slot is settled; a claimed, unclosed slot is in progress inside its window, and after the window its instance must have ended.
+async function canarySettled(env, held, now) {
+  if (held === 'none') return {settled: true};
+  const windowEnd = nextSlot(held).dueAt;
+  const slot = await readSlot(env, held);
+  if (!slot) return now >= windowEnd ? {settled: true} : {settled: false, why: 'canary_pending'};
+  if (slot.closedAt) return {settled: true};
+  if (now < windowEnd) return {settled: false, why: 'canary_in_progress'};
+  const status = slot.instanceId ? await instanceStatus(env.LETTERBOXD_WORKFLOW, slot.instanceId) : 'absent';
+  return ENDED.includes(status) ? {settled: true} : {settled: false, why: 'canary_instance_live'};
+}
 // The proof that admits the Letterboxd writer (a forward completion, or an abort back to `cloudflare`): all five parts, read as ONE unit by the port, and its pins for the commit batch. {guards} or {refused}.
 async function proveAdmission(env, ports, mode) {
   const handover = await handoverState(env, ports);
@@ -333,9 +345,20 @@ export async function switchMode(env, {action, target, slot, expectEpoch, expect
         if (proof.refused) return {action, ...proof.refused, mode: 'switching', target: mode.target, epoch: mode.epoch};
         guards = proof.guards;
       }
-      const next = {mode: mode.target, from: mode.from, target: null, epoch: mode.epoch, drain: 'verified', changedAt: iso(now), quarantine: mode.quarantine};
+      // Entering `cloudflare` through the owner route is FAIL-CLOSED: the canary slot is chosen BEFORE admission and written in the same row write as the completion, so no tick can claim a slot between the two commands (even with the
+      // cron already deployed). `ports.requireCanary` is set by the owner route (`handle`); a direct internal caller without it keeps the plain completion.
+      let admitted = 'verified';
+      if (mode.target === 'cloudflare') {
+        if (slot !== undefined || ports?.requireCanary === true) {
+          if (slot === undefined) return {action, refused: 'canary_required', mode: 'switching', target: mode.target, epoch: mode.epoch};
+          if (!parseSlotKey(slot)) return {action, refused: 'invalid_slot'};
+          if (String(slot) < latestDueSlot(now).key) return {action, refused: 'slot_in_past', slot};
+          admitted = CANARY_PREFIX + slot;
+        }
+      }
+      const next = {mode: mode.target, from: mode.from, target: null, epoch: mode.epoch, drain: admitted, changedAt: iso(now), quarantine: mode.quarantine};
       const result = await writeMode(env, mode, next, {guards});
-      if (result.outcome === 'applied') return {action, completed: true, mode: next.mode, epoch: next.epoch, drain: 'verified'};
+      if (result.outcome === 'applied') return {action, completed: true, mode: next.mode, epoch: next.epoch, drain: admitted, ...(admitted !== 'verified' ? {canary: admitted.slice(CANARY_PREFIX.length)} : {})};
       if (result.outcome === 'uncertain') return UNCERTAIN(action);
       if (result.guarded && guards.length) { const again = await readMode(env); if (again.revision === mode.revision && again.epoch === mode.epoch) return {action, refused: 'handover_changed', mode: 'switching', target: mode.target, epoch: mode.epoch}; }
       if (expectEpoch !== undefined || expectRevision !== undefined) return {action, refused: 'pin_mismatch', pin: 'revision'};
@@ -361,9 +384,17 @@ export async function switchMode(env, {action, target, slot, expectEpoch, expect
       const held = canaryOf(mode.drain);
       if (action === 'canary') {
         if (!parseSlotKey(slot)) return {action, refused: 'invalid_slot'};
-        if (held) return {action, refused: 'canary_active', canary: held};
         if (String(slot) < latestDueSlot(now).key) return {action, refused: 'slot_in_past', slot};
+        if (held) {
+          // RETARGET: replacing a hold is allowed only when the previous canary is settled (never claimed and expired, closed, or the closed hold `none`); an in-progress canary is preserved. The hold is replaced in ONE
+          // pinned row write, so the full schedule is never open in between.
+          if (held === slot) return {action, refused: 'same_slot', canary: held};
+          const settled = await canarySettled(env, held, now);
+          if (!settled.settled) return {action, refused: 'canary_active', why: settled.why, canary: held};
+        }
+        if (await readSlot(env, slot)) return {action, refused: 'slot_used', slot};
       } else if (!held) return {action, refused: 'no_canary', mode: mode.mode, epoch: mode.epoch};
+      else if (held === 'none') return {action, refused: 'canary_not_set', mode: mode.mode, epoch: mode.epoch};
       const next = {...mode, drain: holdPart(isDraining(mode.drain), action === 'canary' ? slot : null), changedAt: iso(now)};
       const result = await writeMode(env, mode, next);
       if (result.outcome === 'applied') return {action, [action === 'canary' ? 'canary' : 'scheduleOpen']: action === 'canary' ? slot : true, mode: mode.mode, epoch: mode.epoch};
@@ -384,7 +415,7 @@ export async function switchMode(env, {action, target, slot, expectEpoch, expect
         if (proof.refused) return {action, ...proof.refused, mode: 'switching', target: mode.target, epoch: mode.epoch};
         guards = proof.guards;
       }
-      const next = {mode: mode.from, from: mode.from, target: null, epoch: mode.epoch, drain: mode.from === 'cloudflare' ? holdPart(false, canaryOf(mode.drain)) : null, changedAt: iso(now), quarantine: mode.quarantine};
+      const next = {mode: mode.from, from: mode.from, target: null, epoch: mode.epoch, drain: mode.from === 'cloudflare' ? (holdPart(false, canaryOf(mode.drain)) ?? (ports?.requireCanary === true ? CANARY_PREFIX + 'none' : null)) : null, changedAt: iso(now), quarantine: mode.quarantine};
       const result = await writeMode(env, mode, next, {guards});
       if (result.outcome === 'applied') return {action, aborted: true, mode: next.mode, epoch: next.epoch};
       if (result.outcome === 'uncertain') return UNCERTAIN(action);
@@ -702,7 +733,7 @@ export async function readModel(env, {now = Date.now(), watchlistLastSuccessAt =
 const pinCheck = v => Number.isInteger(v) && v >= 0 && v <= 2147483647;
 export const ACTIONS = {
   close_admission: {target: v => v === 'cloudflare' || v === 'external', confirm: v => v === 'close_admission', expectEpoch: pinCheck, expectRevision: pinCheck},
-  complete: {confirm: v => v === 'complete', expectEpoch: pinCheck, expectRevision: pinCheck},
+  complete: {confirm: v => v === 'complete', slot: v => typeof v === 'string' && !!parseSlotKey(v), expectEpoch: pinCheck, expectRevision: pinCheck},
   abort: {confirm: v => v === 'abort', expectEpoch: pinCheck, expectRevision: pinCheck},
   drain: {confirm: v => v === 'drain', expectEpoch: pinCheck, expectRevision: pinCheck},
   resume: {confirm: v => v === 'resume', expectEpoch: pinCheck, expectRevision: pinCheck},
@@ -725,6 +756,7 @@ export async function handle(env, body, ports = {}) {
   if (error) return {status: 400, body: {error}};
   try {
     if (body.action === 'clear_quarantine') return {status: 200, body: await clearQuarantine(env)};
-    return {status: 200, body: await switchMode(env, body, ports)};
+    // The owner route is fail-closed: every return to `cloudflare` ends in a canary hold, never in the full schedule.
+    return {status: 200, body: await switchMode(env, body, {...ports, requireCanary: true})};
   } catch (thrown) { return {status: 200, body: {action: body.action, refused: classifyThrown(thrown)}}; }
 }
