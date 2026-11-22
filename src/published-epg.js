@@ -776,6 +776,52 @@ export async function putWatchlistRoot(env,value){
  const saved=await bucket.put(WATCHLIST_KEY,serializeRoot(value),{...JSON_PUT,onlyIf:{etagDoesNotMatch:'*'}});
  return {blocked:false,etag:saved?.etag??null};
 }
+// AIR-571 (M1). The ONE writer of the standalone root `watchlist.json` once the Watchlist is its own authority (marker `d1`/`open`): the Letterboxd mirror reconcile. It is the mirror image of putWatchlistRoot: the EPG-side
+// writer refuses a `d1` marker, this one refuses everything else. The document is the standalone mirror of the current snapshot (`source: watchlist_authority`, `snapshotId`, `snapshotVersion`, `lastSuccessAt`).
+// Order, the fence: (1) the guard (marker positively `d1`/`open` at the generation the caller read, the Letterboxd mode `cloudflare` at the caller's epoch) BEFORE any object I/O; (2) read the object and its etag;
+// (3) the guard AGAIN after that read; (4) a stored list that is already semantically equal is delivered without a write; (5) a put conditional on the etag read, with a fresh token (nonce) so no representation is
+// ever reused; (6) a PROOF: the object is read back and must be semantically the wanted document, because the answer of a put is not proof (a lost reply may be a committed write or not). A put that threw, a
+// refused condition or an unreadable readback is `proven: false`: the caller records a failed attempt and never acknowledges delivery.
+// -> {blocked:true} | {blocked:false,proven:true,etag,wrote} | {blocked:false,proven:false,reason}
+async function standaloneRootWritable(env,{generation,epoch}){
+ const db=database(env);
+ if(!db||typeof db.prepare!=='function')return false;
+ try{
+  const marker=await one(db,'SELECT mode, writes, generation, (SELECT COUNT(*) FROM watchlist_cas WHERE id=1) AS cas FROM watchlist_authority WHERE id=1');
+  if(!marker||marker.mode!=='d1'||marker.writes!=='open'||Number(marker.generation)!==generation||Number(marker.cas)!==1)return false;
+  const mode=await one(db,'SELECT mode, epoch FROM letterboxd_sync_mode WHERE id=1');
+  return !!mode&&mode.mode==='cloudflare'&&Number(mode.epoch)===epoch;
+ }catch{return false;}
+}
+export async function putStandaloneWatchlistRoot(env,document,{generation,epoch}){
+ const bucket=env?.BUCKET;
+ if(!bucket||typeof bucket.put!=='function'||typeof bucket.get!=='function'||!Number.isInteger(generation)||!Number.isInteger(epoch))return {blocked:false,proven:false,reason:'bucket_unavailable'};
+ const wanted=rootSemantic(document);
+ if(wanted===null)return {blocked:false,proven:false,reason:'document_invalid'};
+ if(!(await standaloneRootWritable(env,{generation,epoch})))return {blocked:true};
+ let current;
+ try{current=await bucket.get(WATCHLIST_KEY);}catch{return {blocked:false,proven:false,reason:'root_unreadable'};}
+ if(!(await standaloneRootWritable(env,{generation,epoch})))return {blocked:true};
+ if(current){
+  let stored=null;
+  try{stored=rootSemantic(await objectText(current));}catch{return {blocked:false,proven:false,reason:'root_unreadable'};}
+  if(stored!==null&&stored===wanted)return {blocked:false,proven:true,etag:current.etag??null,wrote:false};
+  if(!current.etag)return {blocked:false,proven:false,reason:'root_without_etag'};
+ }
+ let putFailed=false;
+ try{
+  const saved=await bucket.put(WATCHLIST_KEY,serializeRoot(document),{...JSON_PUT,onlyIf:current?{etagMatches:current.etag}:{etagDoesNotMatch:'*'}});
+  if(saved==null)putFailed=true;
+ }catch{putFailed=true;}
+ // The proof, whatever the put said.
+ let after;
+ try{after=await bucket.get(WATCHLIST_KEY);}catch{return {blocked:false,proven:false,reason:'readback_unreadable'};}
+ if(!after)return {blocked:false,proven:false,reason:putFailed?'put_refused':'readback_absent'};
+ let text=null;
+ try{text=await objectText(after);}catch{return {blocked:false,proven:false,reason:'readback_unreadable'};}
+ if(rootSemantic(text)!==wanted)return {blocked:false,proven:false,reason:putFailed?'put_refused':'readback_mismatch'};
+ return {blocked:false,proven:true,etag:after.etag??null,wrote:!putFailed};
+}
 export async function writeMirrors(env,input){
  const db=database(env);
  const authority=await readAuthority(db);

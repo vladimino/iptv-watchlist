@@ -47,7 +47,10 @@ export function watchlistRepository(WatchlistD1, {epochGuard, scanGuard = null, 
     async commitScan(ctx, {members, scan}) {
       const g = promotionGuards(ctx);
       if (!g) throw Object.assign(new Error('epoch guard'), {code: 'epoch_guard_absent'});
-      const result = await WatchlistD1.publishSnapshot(ctx.env, members, {...scan, completedAt: scan.observedAt}, {now: ctx.now(), guards: g});
+      const publish = () => WatchlistD1.publishSnapshot(ctx.env, members, {...scan, completedAt: scan.observedAt}, {now: ctx.now(), guards: g});
+      let result = await publish();
+      // A `conflict` is a definite rejection (the pointer moved by one under the batch: the mirror bookkeeping, an attempt record): nothing was written, and ONE replay reads the pointer again. `indeterminate` is never replayed.
+      if (!result.ok && result.reason === 'conflict') result = await publish();
       if (!result.ok) throw Object.assign(new Error(result.reason), {code: String(result.reason).slice(0, 60)});
       const current = await WatchlistD1.readCurrent(ctx.env, {now: ctx.now()});
       const snapshot = current.ok ? current.snapshot : null;

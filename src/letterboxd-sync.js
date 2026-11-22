@@ -12,7 +12,7 @@ import {latestDueSlot, nextSlot, previousSlot, slotInstanceId, slotEventKey, par
 export const MODES = ['external', 'switching', 'cloudflare'];
 export const ALIVE = ['running', 'waiting', 'queued', 'paused'];
 export const ENDED = ['complete', 'errored', 'terminated', 'absent'];
-export const LIMITS = {stepCap: 200, sleepFloorMs: 1000, deadlineMarginMs: 5 * 60000, startupGraceMs: 15 * 60000, eventBatch: 4, eventAttempts: 12, missedBack: 4, watchlistStaleMs: 24 * 3600000, controlAttempts: 4};
+export const LIMITS = {stepCap: 200, sleepFloorMs: 1000, deadlineMarginMs: 5 * 60000, startupGraceMs: 15 * 60000, eventBatch: 4, eventAttempts: 12, missedBack: 4, watchlistStaleMs: 24 * 3600000, mirrorStaleMs: 2 * 3600000, mirrorStaleAttempts: 3, controlAttempts: 4};
 export const RATINGS_OUTCOMES = ['finished', 'rate_limited', 'blocked', 'error', 'interrupted', 'skipped_missed', 'noop'];
 export const WATCHLIST_OUTCOMES = ['committed', 'no_change', 'incomplete', 'unavailable', 'rate_limited', 'error', 'interrupted', 'skipped_missed', 'disabled'];
 const TERMINAL = ['finished', 'error', 'interrupted', 'skipped_missed'];
@@ -469,7 +469,7 @@ const createError = error => /already exists|already_exists|duplicate/i.test(Str
 
 // The hourly-at-:30 entry. At most a few reads and one create. Inert unless the mode is `cloudflare`. Duplicate firings are safe: the slot row
 // is claimed by primary key before the create, and a second create attaches to the same deterministic instance id.
-export async function ensure(env, {now = Date.now(), random = Math.random} = {}) {
+export async function ensure(env, {now = Date.now(), random = Math.random, ports = null} = {}) {
   let mode;
   try { mode = await readMode(env); } catch { return {started: false, reason: 'mode_unreadable'}; }
   if (mode.malformed) return {started: false, reason: 'evidence_unreadable'};
@@ -478,7 +478,10 @@ export async function ensure(env, {now = Date.now(), random = Math.random} = {})
   if (mode.quarantine) return {started: false, reason: 'quarantined', scope: 'domain'};
   if (typeof env?.LETTERBOXD_WORKFLOW?.create !== 'function') return {started: false, reason: 'workflow_unavailable'};
   // Delivery and repair first, so a backlog never depends on a new slot being claimable.
-  const delivery = await deliverEvents(env, {now}).catch(() => ({delivered: 0, failed: 0, pending: 0}));
+  let delivery = await deliverEvents(env, {now}).catch(() => ({delivered: 0, failed: 0, pending: 0}));
+  // AIR-571 M1: the independent reconcile of the root watchlist mirror, BEFORE any early return on a finished or running slot. Bounded (one target, one pass), never throws, never gates a scan, the causal effects,
+  // the Events or a new slot: its outcome is only reported.
+  if (typeof ports?.mirror?.reconcile === 'function') delivery = {...delivery, mirror: await ports.mirror.reconcile(env, {epoch: mode.epoch, now}).catch(() => ({outcome: 'unreadable', reason: 'exception'}))};
   const current = latestDueSlot(now);
   const missed = await recordMissed(env, mode, current, now).catch(() => 0);
   let existing = await readSlot(env, current.key);
@@ -638,6 +641,14 @@ export async function readModel(env, {now = Date.now(), watchlistLastSuccessAt =
     else if (missedRecent) health = 'missed';
     else health = slot?.closedAt ? 'healthy' : 'waiting';
   } else if (mode.mode === 'switching') health = 'switching';
+  // AIR-571 M1: the root mirror's own health (`mirror_stale` is independent of the slot health). Read only; a failed read is reported as unreadable.
+  const mirror = await first(env, 'SELECT snapshot_id, last_success_at, mirror_delivered_snapshot_id, mirror_attempts, mirror_next_retry_at FROM watchlist_current WHERE id = 1').then(row => {
+    if (!row || !row.snapshot_id || !row.last_success_at) return {state: 'none', stale: false};
+    const target = row.snapshot_id + '|' + row.last_success_at;
+    const owed = row.mirror_delivered_snapshot_id !== target;
+    const stale = owed && (now - Date.parse(row.last_success_at) > LIMITS.mirrorStaleMs || row.mirror_attempts >= LIMITS.mirrorStaleAttempts);
+    return {state: owed ? (stale ? 'stale' : 'owed') : 'delivered', stale, attempts: row.mirror_attempts, nextRetryAt: row.mirror_next_retry_at ?? null, warning: stale ? 'mirror_stale' : null};
+  }).catch(error => (error?.code === 'schema_absent' ? null : {state: 'unreadable', stale: false}));
   const pendingEvents = await first(env, "SELECT COUNT(*) AS n FROM letterboxd_slot_event WHERE status = 'pending'").then(row => row?.n ?? 0).catch(() => null);
   return {
     mode: mode.mode, epoch: mode.epoch, ...(mode.mode === 'switching' ? {target: mode.target, drain: mode.drain} : {}),
@@ -648,6 +659,7 @@ export async function readModel(env, {now = Date.now(), watchlistLastSuccessAt =
       watchlist: {lastSuccessAt: lwl, lastOutcome: lastClosed?.watchlist.outcome ?? null, stale: !!stale(lwl), warning: stale(lwl) ? (lwl ? 'watchlist_stale' : 'watchlist_never_succeeded') : null}
     },
     reconciliation: {lastOutcome: lastClosed?.reconciliation ?? null},
+    mirror,
     recent: slots.map(item => ({key: item.key, status: item.status, ratings: item.ratings.outcome, watchlist: item.watchlist.outcome, reconciliation: item.reconciliation, closedAt: item.closedAt})),
     eventsPending: pendingEvents, missedRecent, overdueSlots: overdue, quarantine: mode.quarantine, health, sideEffects: 'none'
   };

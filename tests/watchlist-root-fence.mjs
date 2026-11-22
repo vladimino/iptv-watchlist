@@ -196,7 +196,7 @@ for(const marker of ['epg/held','d1/open','d1/held']){
  const read=file=>fs.readFileSync(file,'utf8');
  const published=read('src/published-epg.js'),worker=read('src/worker.js');
  assert.equal(/putStable\((?:env\.BUCKET|bucket),WATCHLIST_KEY/.test(published),false,'no unguarded putStable of the root key');
- assert.equal((published.match(/bucket\.put\(WATCHLIST_KEY/g)||[]).length,2,'the two puts of the root key are the ones inside putWatchlistRoot');
+ assert.equal((published.match(/bucket\.put\(WATCHLIST_KEY/g)||[]).length,3,'the three puts of the root key: two inside putWatchlistRoot (EPG side) and one inside putStandaloneWatchlistRoot (Watchlist side, AIR-571 M1)');
  assert.match(worker,/if\(key==='watchlist\.json'\)\{[^}]*saveWatchlistRoot\(env,value\)/,'saveJSON routes the root key through the guarded writer');
  assert.match(worker,/async function saveWatchlistRoot\(env,value\)\{[^}]*PublishedEpg\.putWatchlistRoot\(env,value\)/,'the router calls the one guarded writer');
  assert.equal([...worker.matchAll(/saveJSON\(env,'watchlist\.json'/g)].length,3,'the three fallback sites are the inventory');

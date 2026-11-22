@@ -156,4 +156,20 @@ const slotRows=(f,key)=>f.db.sql("SELECT watchlist_outcome,status FROM letterbox
  const closed=await Sync.switchMode(env,{action:'close_admission',target:'external',expectEpoch:mode.epoch,expectRevision:mode.revision},ports,NOW0);
  assert.equal(closed.closed,true,JSON.stringify(closed));
 }
+// 9. AIR-571 M1: a pointer compare-and-swap lost to the mirror bookkeeping (a definite `conflict`) is replayed ONCE; an `indeterminate` answer never is.
+{
+ const f=open();
+ const ctx={env:{DB:f.db},epoch:1,now:()=>T('2026-11-21T09:40:00Z'),slotKey:'2026-11-21T1030',runId:'r'};
+ const calls=[];
+ const flaky=(reasons)=>({...WatchlistD1,publishSnapshot:async(...args)=>{calls.push(1);const reason=reasons.shift();return reason?{ok:false,reason}:WatchlistD1.publishSnapshot(...args);}});
+ const guard={epochGuard:e=>[Sync.FENCE_GUARD_SQL,[e]]};
+ f.sql("INSERT INTO letterboxd_sync_mode (id,mode,epoch,changed_at,revision,write_id) VALUES (1,'cloudflare',1,'2026-11-21T00:00:00.000Z',1,'w');");
+ const once=watchlistRepository(flaky(['conflict']),guard);
+ const committed=await once.commitScan(ctx,{members:[film(0),film(1)],scan:{scanId:'m1',observedAt:'2026-11-21T09:40:00.000Z'}});
+ assert.equal(committed.outcome,'committed');assert.equal(calls.length,2,'one replay after a conflict');
+ calls.length=0;
+ await assert.rejects(()=>watchlistRepository(flaky(['conflict','conflict']),guard).commitScan(ctx,{members:[film(0),film(2)],scan:{scanId:'m2',observedAt:'2026-11-21T09:41:00.000Z'}}),e=>e.code==='conflict');assert.equal(calls.length,2,'never more than one replay');
+ calls.length=0;
+ await assert.rejects(()=>watchlistRepository(flaky(['indeterminate']),guard).commitScan(ctx,{members:[film(0),film(3)],scan:{scanId:'m3',observedAt:'2026-11-21T09:42:00.000Z'}}),e=>e.code==='indeterminate');assert.equal(calls.length,1,'an unknown outcome is never replayed');
+}
 console.log('letterboxd-sync-repository ok');

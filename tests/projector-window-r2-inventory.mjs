@@ -111,9 +111,9 @@ const FILE_SITES={
  'src/monitor.js':{r2:1,wrapper:0,dynamic:0},
  'src/owner-review-d1.js':{r2:1,wrapper:0,dynamic:0}, // ADR 0162: -1 r2, the env.BUCKET.put of the retired mode-r2 commit; only the mirror put after a d1 commit remains
  'src/prediction-d1.js':{r2:3,wrapper:0,dynamic:0}, // ADR 0162: -2 r2, the mirror put of the retired revert toolchain (putSent) and its repair write; the D1 mirror put and the stand-in queue and lease puts remain
- // AIR-571 (C3): the root `watchlist.json` mirror has one guarded writer, putWatchlistRoot (two direct conditional puts of the root key: the first write of an absent object and the compare-and-swap of an existing one);
+ // AIR-571 (C3, M1 adds putStandaloneWatchlistRoot with one more direct conditional put: r2 5): the root `watchlist.json` mirror has one guarded writer, putWatchlistRoot (two direct conditional puts of the root key: the first write of an absent object and the compare-and-swap of an existing one);
  // the two former putStable calls of that key (replacePart, writeMirrors) go through it, so wrapper and dynamic sites each lose one and the direct puts gain two.
- 'src/published-epg.js':{r2:4,wrapper:7,dynamic:7},
+ 'src/published-epg.js':{r2:5,wrapper:7,dynamic:7},
  // AIR-410: +1 for writeDiscoveryEvent, the create-only put of one `discovery` Events Log entry (events/items/..., not a projector input).
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
  // ADR 0145: +1 r2 put of `epg/seal/<runId>/publication.json` in `stageSealedGeneration` and +1 dynamic delete of that key in `sealQueueStep`
@@ -128,7 +128,7 @@ const INPUT_WRITERS={
  // AIR-558: the three view-index mergeStoredJSON sites (ratings and removal view-index maintenance) are removed with the raw writers; D1 owns the view index.
  "src/metadata-cache.js|bucket.put|MIRROR_KEY":{count:1,owner:'metadata cache R2 mirror, its own domain'},
  "src/owner-review-d1.js|bucket.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
- "src/published-epg.js|bucket.put|WATCHLIST_KEY":{count:2,owner:'the one guarded writer of the root watchlist.json mirror (AIR-571 C3: read, marker check after the read, conditional put); the Watchlist marker decides who may write it'},
+ "src/published-epg.js|bucket.put|WATCHLIST_KEY":{count:3,owner:'the guarded writers of the root watchlist.json mirror: putWatchlistRoot (EPG side, two puts, AIR-571 C3) and putStandaloneWatchlistRoot (Watchlist side, one put, AIR-571 M1); the Watchlist marker decides which of them may write'},
  "src/worker.js|saveCanonicalMirror|'people.json'":{count:2,owner:'metadata and EPG sync Persons, re-gated at put'},
  "src/worker.js|saveCanonicalMirror|'titles.json'":{count:2,owner:'metadata and EPG sync titles, re-gated at put'},
  "src/worker.js|saveJSON|'watchlist.json'":{count:3,owner:'EPG publication and watchlist persistence, under the publication lease'},

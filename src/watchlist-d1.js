@@ -252,6 +252,32 @@ export async function recordAttempt(source,{at,outcome,now,guards}){
  return result==='ok'?{ok:true}:{ok:false,reason:'unavailable'};
 }
 
+// ---- mirror delivery bookkeeping (AIR-571 M1, ADR 0186 decision 1a) --------------------------------------------------------------
+// `mirror_delivered_snapshot_id` holds the DELIVERY TOKEN `<snapshot_id>|<last_success_at>` of the last root `watchlist.json` the mirror reconcile proved stored: a no_change scan moves `last_success_at` without a new
+// snapshot id, and the root carries that freshness, so the token is what is owed, not the snapshot id alone. The debt is always ONE target, the current pointer. These writes raise `revision` by one like every write of the pointer (the table's trigger requires it, so a scan's pointer compare-and-swap that read the
+// row just before loses to it and is retried once by the repository adapter) and carry the authority guard, so they only land while the marker is `d1`/`open` at the generation the reconcile read.
+export const mirrorToken=(snapshotId,lastSuccessAt)=>String(snapshotId)+'|'+String(lastSuccessAt);
+// outcome 'delivered' (proved stored) | 'failed' (attempts+1 and the next retry time, compare-and-swap on the attempts read). -> {ok:true} | {ok:false,reason:'closed'|'writes_held'|'moved'|'conflict'|'shape'|'unavailable'}
+export async function recordMirror(source,{outcome,snapshotId,lastSuccessAt,generation,attempts=0,nextRetryAt=null,now,guards}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ if(!['delivered','failed'].includes(outcome)||typeof snapshotId!=='string'||!snapshotId||typeof lastSuccessAt!=='string'||!Number.isInteger(generation)||!Number.isInteger(attempts)||attempts<0)return {ok:false,reason:'shape'};
+ if(outcome==='failed'&&!(typeof nextRetryAt==='string'&&Number.isFinite(Date.parse(nextRetryAt))))return {ok:false,reason:'shape'};
+ const extra=callerGuards({guards});
+ if(!extra)return {ok:false,reason:'shape'};
+ const gate=await readAuthority(db);
+ if(gate.state!=='d1')return {ok:false,reason:'closed'};
+ if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
+ if(gate.generation!==generation)return {ok:false,reason:'moved'};
+ const at=iso(now??Date.now());
+ const update=outcome==='delivered'
+  ?['UPDATE watchlist_current SET mirror_delivered_snapshot_id=?, mirror_attempts=0, mirror_next_retry_at=NULL, revision=revision+1, updated_at=? WHERE id=1 AND snapshot_id=? AND last_success_at=?',[mirrorToken(snapshotId,lastSuccessAt),at,snapshotId,lastSuccessAt]]
+  :['UPDATE watchlist_current SET mirror_attempts=mirror_attempts+1, mirror_next_retry_at=?, revision=revision+1, updated_at=? WHERE id=1 AND snapshot_id=? AND last_success_at=? AND mirror_attempts=?',[nextRetryAt,at,snapshotId,lastSuccessAt,attempts]];
+ const result=await fenced(db,[authorityGuard(generation),...extra,update,[FENCE,[]]]);
+ if(result==='conflict')return {ok:false,reason:'conflict'};
+ return result==='ok'?{ok:true}:{ok:false,reason:'unavailable'};
+}
+
 // ---- publication ---------------------------------------------------------------------------------------------------------
 // ADR 0186 decision 1: a complete scan result becomes the new snapshot, or a no-op. The caller proves completeness (every page, total, repeat read of page 1); this function never decides it.
 // `scan` = {scanId, observedAt, runId?, slotKey?, completedAt?}; `ctx` = {now?, guards?, attemptId?, snapshotId?}. `films` = the ordered list of the scan.
