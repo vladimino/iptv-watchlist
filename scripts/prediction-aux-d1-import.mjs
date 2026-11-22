@@ -9,6 +9,7 @@
 //   node scripts/prediction-aux-d1-import.mjs verify <export>     (guarded SQL that checks the IMPORTED rows against the export, row by row, byte by byte, with child totals, and aborts on any difference)
 //   node scripts/prediction-aux-d1-import.mjs preflight <export>  (read-only SELECTs of the exported run ids against D1's prediction_run: finds true orphan sources before activation)
 //
+// `<export>` is the `tree` directory written by scripts/prediction-aux-export-convert.mjs from a verified `consistent_fenced` production R2 snapshot (or one JSON file of key to document).
 // Exit codes: 0 ok, 1 usage, 2 blocker (nothing is printed as SQL). A source the Worker could not read is a blocker: it never becomes an empty or partial import. Blockers: an unreadable or malformed
 // pending index or index entry, an object under an event prefix whose key is not one the Worker writes, a manifest without its source, any statement over the D1 byte budget (checked on the exact
 // UTF-8 text that would be sent), a stage over its caps, a record without a valid time, more than 256 active pending skipped records, a duplicate identity.
@@ -26,6 +27,22 @@ import * as Aux from '../src/prediction-aux-d1.js';
 const STAGE_KEY='enrichment/batch-stage.json',OUTBOX_KEY='enrichment/event-outbox.json';
 const SOURCE=/^enrichment\/sources\/([A-Za-z0-9_-]{1,100})\.json$/,MANIFEST=/^enrichment\/batch-manifest\/([A-Za-z0-9_-]{1,100})\.json$/;
 const EVENT=/^enrichment\/(stop|start)-events\/(skipped-)?([A-Za-z0-9_-]{1,100})\.json$/;
+// AIR-554 (ADR 0196): the one place that says which R2 objects belong to the four families (and the pending index). The converter from the R2 snapshot manifest uses it, so the objects it hands over
+// are exactly the ones this importer reads. An object under an event prefix that is NOT a key the Worker writes is still handed over (family `event`): the importer must see it and block on it.
+// The shapes the importer actually consumes. A key inside a family prefix that does NOT have one of these shapes (an unknown source or manifest name, a backup copy, a non-JSON file) is never
+// silently ignored: the converter refuses it and the importer blocks on it (review of PR 896, no-loss parity).
+export function auxConsumableKey(key){
+ return typeof key==='string'&&(key===STAGE_KEY||key===OUTBOX_KEY||SOURCE.test(key)||MANIFEST.test(key)||EVENT.test(key));
+}
+export function auxExportFamily(key){
+ if(typeof key!=='string')return null;
+ if(key===STAGE_KEY)return 'stage';
+ if(key===OUTBOX_KEY)return 'outbox';
+ if(key.startsWith('enrichment/sources/'))return 'source';
+ if(key.startsWith('enrichment/batch-manifest/'))return 'manifest';
+ if(key.startsWith('enrichment/stop-events/')||key.startsWith('enrichment/start-events/'))return 'event';
+ return null;
+}
 const ITEM_KEYS=['filmId','fingerprint','prediction','failure','inputHash','assessment'];
 const pick=item=>Object.fromEntries(ITEM_KEYS.filter(key=>item[key]!==undefined).map(key=>[key,item[key]]));
 const sqlq=value=>value===null||value===undefined?'NULL':typeof value==='number'?String(value):"'"+String(value).replace(/'/g,"''")+"'";
@@ -38,7 +55,7 @@ export function readExport(target){
  const stat=fs.statSync(target);
  if(stat.isFile()){const data=JSON.parse(fs.readFileSync(target,'utf8'));if(!isObject(data))throw Object.assign(new Error('the export is not an object of key to document'),{blocker:true});return data;}
  const out={};
- const walk=dir=>{for(const name of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,name.name);if(name.isDirectory())walk(full);else if(name.name.endsWith('.json')){const key=path.relative(target,full).split(path.sep).join('/');try{out[key]=JSON.parse(fs.readFileSync(full,'utf8'));}catch{out[key]=Symbol.for('unreadable');}}}};
+ const walk=dir=>{for(const name of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,name.name);if(name.isDirectory())walk(full);else{const key=path.relative(target,full).split(path.sep).join('/');if(name.name.endsWith('.json')){try{out[key]=JSON.parse(fs.readFileSync(full,'utf8'));}catch{out[key]=Symbol.for('unreadable');}}else if(auxExportFamily(key))out[key]=Symbol.for('unreadable');}}};
  walk(target);
  return out;
 }
@@ -75,7 +92,12 @@ export async function buildPlan(objects){
    if(!isObject(value)||value.runId!==match[1]||!Array.isArray(value.films)||!value.films.length||!isObject(value.lease)||!Number.isInteger(value.lease.epoch)||typeof value.manifestHash!=='string'||!isObject(value.profile)||!isObject(value.contract)){blocker(blockers,'manifest_unusable',key);continue;}
    plan.manifests.push(await Aux.buildManifestRecord(match[1],value));
   }
-  else if(!EVENT.test(key)&&key!==STAGE_KEY&&key!==OUTBOX_KEY)plan.ignored++;
+  else if(!EVENT.test(key)&&key!==STAGE_KEY&&key!==OUTBOX_KEY){
+   // a key of a family that the importer does not consume is a blocker (an event key is judged below), never an ignored object
+   const family=auxExportFamily(key);
+   if(family&&family!=='event')blocker(blockers,family+'_key_unknown',key);
+   else if(!family)plan.ignored++;
+  }
  }
  // outbox: the records plus the pending index. An index that exists but cannot be read is a blocker: it carries attempts, quarantine and `since`, and an empty index would lose them silently.
  let index={};const indexed=new Set();
