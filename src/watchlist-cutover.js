@@ -7,7 +7,9 @@
 //   activate       epg/held  G -> d1/held  G+1   the same proofs as `hold`, re-asserted in the switching batch
 //   release        d1/held   G -> d1/open  G     the snapshot is servable and unchanged since the pins
 //   hold-rollback  d1/open   G -> d1/held  G+1   first step of the data rollback: Letterboxd mode closed, no EPG step, snapshot intact
-//   revert-authority     d1/held G -> epg/held G+1  AFTER the rollback export: the published generation's watchlist part equals the snapshot in membership and order
+//   revert-authority     d1/held G -> epg/held G+1  AFTER the rollback export: the published generation's watchlist part equals the snapshot in membership and order. The operator also proves (outside, from R2)
+//                        that the root watchlist.json carries this generation's fence and the restored legacy document (`fence-root-rollback`). Both this transition and `activate` INVALIDATE the mirror delivery receipt
+//                        (`mirror_delivered_snapshot_id`, attempts, retry time of watchlist_current): the token is history, not proof of the object, because the EPG can replace the root while the token stays.
 //   release-rolled-back  epg/held G -> epg/open G   the EPG owns the Watchlist again; backing out of nothing else is checked (the EPG may have published its own list since)
 // The rollback export itself writes the published generation through the EPG writer path (`PublishedEpg.saveWatchlist`, a staged commit compare-and-swapped on the EPG generation); it is not a marker transition.
 import {livenessGuard} from './watchlist-bootstrap.js';
@@ -18,10 +20,10 @@ const FENCE='UPDATE watchlist_cas SET ok=changes() WHERE id=1';
 export const TRANSITIONS=Object.freeze({
  hold:{from:{mode:'epg',writes:'open'},to:{mode:'epg',writes:'held'},bump:true,needs:['snapshotImport','source','liveness','checkpoint','letterboxdClosed']},
  'release-abort':{from:{mode:'epg',writes:'held'},to:{mode:'epg',writes:'open'},bump:false,needs:[]},
- activate:{from:{mode:'epg',writes:'held'},to:{mode:'d1',writes:'held'},bump:true,needs:['snapshotImport','source','liveness','checkpoint','letterboxdClosed']},
+ activate:{from:{mode:'epg',writes:'held'},to:{mode:'d1',writes:'held'},bump:true,invalidateMirror:true,needs:['snapshotImport','source','liveness','checkpoint','letterboxdClosed']},
  release:{from:{mode:'d1',writes:'held'},to:{mode:'d1',writes:'open'},bump:false,needs:['snapshotImport','checkpoint','letterboxdClosed']},
  'hold-rollback':{from:{mode:'d1',writes:'open'},to:{mode:'d1',writes:'held'},bump:true,needs:['snapshotCurrent','liveness','letterboxdClosed']},
- 'revert-authority':{from:{mode:'d1',writes:'held'},to:{mode:'epg',writes:'held'},bump:true,needs:['snapshotCurrent','exportParity','liveness','letterboxdClosed']},
+ 'revert-authority':{from:{mode:'d1',writes:'held'},to:{mode:'epg',writes:'held'},bump:true,invalidateMirror:true,needs:['snapshotCurrent','exportParity','liveness','letterboxdClosed']},
  'release-rolled-back':{from:{mode:'epg',writes:'held'},to:{mode:'epg',writes:'open'},bump:false,needs:['letterboxdClosed']},
 });
 
@@ -90,6 +92,7 @@ export function transitionStatements(name,{generation,facts={}}){
  const statements=[guardStatement(buildParts(spec.needs,spec.from,generation,facts))];
  if(spec.needs.includes('liveness'))statements.push(livenessGuard(facts.liveness));
  statements.push(
+  ...(spec.invalidateMirror?[['UPDATE watchlist_current SET mirror_delivered_snapshot_id=NULL, mirror_attempts=0, mirror_next_retry_at=NULL, revision=revision+1 WHERE id=1 AND (mirror_delivered_snapshot_id IS NOT NULL OR mirror_attempts<>0 OR mirror_next_retry_at IS NOT NULL)',[]]]:[]),
   ['UPDATE watchlist_authority SET mode=?, writes=?, generation=? WHERE id=1 AND mode=? AND writes=? AND generation=?',[spec.to.mode,spec.to.writes,spec.bump?generation+1:generation,spec.from.mode,spec.from.writes,generation]],
   [FENCE,[]],
  );

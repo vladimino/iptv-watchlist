@@ -31,6 +31,17 @@ export function d1Standin(file,{onBatch=null,maxBinds=null,latencyMs=0,onQuery=n
    if(onBatch)await onBatch(statements);
    // A batch of reads only (ADR 0106's prefetch) answers with the rows of each statement, in order, as D1 does; a write batch is still one transaction.
    if(statements.every(item=>/^\s*SELECT/i.test(item.text)))return statements.map(item=>({success:true,results:rows(item.text)}));
+   // A write batch that also contains SELECT statements (for example `SELECT changes()` after an UPDATE, as D1 allows) answers with the rows of each SELECT, in order, like D1's per-statement results.
+   const selects=statements.map((item,index)=>/^\s*SELECT/i.test(item.text)?index:-1).filter(index=>index>=0);
+   if(selects.length){
+    const out=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+statements.map(item=>item.text+';').join('\n')+'\nCOMMIT;'});
+    if(out.status!==0)throw new Error(out.stderr.trim()||'sqlite failed');
+    // sqlite prints one JSON array per SELECT that returned rows, in order; a SELECT with no row prints nothing, so every SELECT of these batches must return a row.
+    const arrays=[];const text=String(out.stdout||'').trim();
+    if(text){let depth=0,start=0;for(let i=0;i<text.length;i++){const c=text[i];if(c==='[')depth++;if(c===']'){depth--;if(depth===0){arrays.push(JSON.parse(text.slice(start,i+1)));start=i+1;while(/\s/.test(text[start]||''))start++;i=start-1;}}}}
+    let next=0;
+    return statements.map((item,index)=>selects.includes(index)?{success:true,results:arrays[next++]||[]}:{success:true});
+   }
    sqlite('BEGIN;\n'+statements.map(item=>item.text+';').join('\n')+'\nCOMMIT;');
    return statements.map(()=>({success:true}));
   },
