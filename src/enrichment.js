@@ -1346,10 +1346,16 @@ function createStepTimer(now=Date.now){
  }catch{truncated=true;}};
  const note=fields=>{try{for(const name of STEP_NOTES){const value=fields?.[name];if(Number.isSafeInteger(value)&&value>=0)notes[name]=value;}}catch{/* a note never changes the step */}};
  // A stage is a named sequential section of one step: its wall time and how many R2 and D1 calls finished inside it. Names come from the closed STEP_STAGES list.
+ // A stage that runs INSIDE another (AIR-553: `event_delivery` and `manifest_ready` inside `persist`) is subtracted from the outer one, so the sections stay exclusive and their sums never exceed the totals.
+ const open=[];
  const stage=async(name,work)=>{
-  const from=now(),r2=total.r2.n,d1=total.d1.n;
+  const from=now(),r2=total.r2.n,d1=total.d1.n,frame={ms:0,r2:0,d1:0};open.push(frame);
   try{return await work();}
-  finally{try{if(STEP_STAGES.includes(name)&&stages.length<STEP_STAGE_CAP)stages.push({stage:name,ms:Math.max(0,now()-from),r2:total.r2.n-r2,d1:total.d1.n-d1});else truncated=true;}catch{truncated=true;}}
+  finally{open.pop();try{
+   const ms=Math.max(0,now()-from),r2n=total.r2.n-r2,d1n=total.d1.n-d1;
+   if(open.length){const parent=open[open.length-1];parent.ms+=ms;parent.r2+=r2n;parent.d1+=d1n;}
+   if(STEP_STAGES.includes(name)&&stages.length<STEP_STAGE_CAP)stages.push({stage:name,ms:Math.max(0,ms-frame.ms),r2:Math.max(0,r2n-frame.r2),d1:Math.max(0,d1n-frame.d1)});else truncated=true;
+  }catch{truncated=true;}}
  };
  const summary=(step,fields)=>{
   const wallMs=Math.max(0,now()-started),busyMs=union(ops.map(([a,b])=>[a,b])),r2Busy=union(ops.filter(o=>o[2]==='r2').map(([a,b])=>[a,b])),d1Busy=union(ops.filter(o=>o[2]==='d1').map(([a,b])=>[a,b])),summed=total.r2.ms+total.d1.ms;
