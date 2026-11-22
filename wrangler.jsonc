@@ -20,7 +20,7 @@
     "cpu_ms": 120000
   },
   "triggers": {
-    "crons": ["0 * * * *", "1-59/2 * * * *", "24 3 * * *"]
+    "crons": ["0 * * * *", "1-59/2 * * * *", "24 3 * * *", "30 * * * *"]
   },
   "d1_databases": [
     {
@@ -55,6 +55,11 @@
       "name": "iptv-producer",
       "binding": "PRODUCER_WORKFLOW",
       "class_name": "ProducerWorkflow"
+    },
+    {
+      "name": "iptv-letterboxd",
+      "binding": "LETTERBOXD_WORKFLOW",
+      "class_name": "LetterboxdWorkflow"
     },
     {
       "name": "iptv-prediction-start",
