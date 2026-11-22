@@ -13,7 +13,7 @@ const slots=[
 ];
 const count=(text,needle)=>text.split(needle).length-1;
 const promptBlock=md=>{
-  const start='---BEGIN PROMPT---\\n',end='\\n---END PROMPT---';
+  const start='---BEGIN PROMPT---\n',end='\n---END PROMPT---';
   assert.equal(count(md,start),1,'exactly one start marker');
   assert.equal(count(md,end),1,'exactly one end marker');
   const a=md.indexOf(start)+start.length,b=md.indexOf(end,a);
@@ -24,8 +24,8 @@ const candidates=[];
 for(const {slot,s5,s7} of slots){
   const path=`docs/reference/scheduled-task-prompts/air-560-s7-taskid-${slot}-candidate.md`;
   const md=readFileSync(path,'utf8'),text=promptBlock(md);
-  const s5Meta=md.match(/Live S5 executable prompt: (\\d+) JavaScript characters, (\\d+) UTF-8 bytes, SHA-256 \`([0-9a-f]{64})\`/);
-  const s7Meta=md.match(/S7 executable text below:\\*\\* (\\d+) JavaScript characters, (\\d+) UTF-8 bytes, SHA-256 \`([0-9a-f]{64})\`/);
+  const s5Meta=md.match(/Live S5 executable prompt: (\d+) JavaScript characters, (\d+) UTF-8 bytes, SHA-256 \`([0-9a-f]{64})\`/);
+  const s7Meta=md.match(/S7 executable text below:\*\* (\d+) JavaScript characters, (\d+) UTF-8 bytes, SHA-256 \`([0-9a-f]{64})\`/);
   assert.ok(s5Meta&&s7Meta,'both complete identity declarations');
   assert.deepEqual([Number(s5Meta[1]),Number(s5Meta[2]),s5Meta[3]],[47027,71016,s5],`task${slot} live S5 identity`);
   assert.deepEqual([Number(s7Meta[1]),Number(s7Meta[2]),s7Meta[3]],[47027,71016,s7],`task${slot} S7 candidate identity`);
