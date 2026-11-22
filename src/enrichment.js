@@ -1712,7 +1712,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null,opt
  const membership=authoritative?(currentMembership||safeSource):Array.isArray(watchlistDoc?.films)?{films:watchlistDoc.films}:{films:safeSource.films};
  const catalogFilms=allEnrichmentFilms(membership,catalog),queueIds=new Set(catalogFilms.map(f=>String(f.id)));
  // ADR 0201: an active recovery intent names a stored id; its catalog film carries it, so the index, the intent and the manifest agree on one key.
- const storedAliases=await storedIdCatalogAliases(env,recovery.activeIds().filter(id=>!queueIds.has(id))),aliasOf=new Map([...storedAliases].map(([id,key])=>[key,id]));
+ const recovered=recovery.ready&&typeof PredictionRecoveryIntent!=='undefined'&&typeof PredictionRecoveryIntent.readRecoveredIds==='function'?await PredictionRecoveryIntent.readRecoveredIds(env):[],storedAliases=await storedIdCatalogAliases(env,recovered.filter(id=>!queueIds.has(id))),aliasOf=new Map([...storedAliases].map(([id,key])=>[key,id]));
  const films=catalogFilms.map(film=>aliasOf.has(String(film.id))?{...film,id:aliasOf.get(String(film.id))}:film).map(film=>authoritative?withCompletedShows(film,completed,safeSource.runId,completedOnly):{...film,shows:[],epgLastAiring:null});
  const watchlistIds=new Set(eligibleEnrichmentFilms(membership).map(f=>String(f.id)));
  if(capture)capture.films=films;
@@ -1921,16 +1921,20 @@ async function currentPredictionQueue(env,report,profile,trigger,{force=false,fa
 }
 // ADR 0201 (AIR-478). A film the owner watched leaves the watchlist, so the admitted catalog holds it under `tmdb_<n>` while its prediction state
 // stays under the stored Letterboxd id. For the stored ids the caller names (never a scan), the trusted canonical Film bridge (no title or year
-// matching) gives the catalog id of the same Film. Absent, retired, conflicting or unreadable identity yields no alias: the film stays unadmitted.
-const STORED_LID=/^[A-Za-z0-9]{1,16}$/;
+// matching) gives the catalog id of the same Film. A verified negative (absent, retired, conflicting identity; a Film/Person store that is not
+// authoritative) yields no alias: the film stays unadmitted. Any other failure (an unavailable read, a moved generation) is thrown, never turned into absence.
+const STORED_ALIAS_ID=/^[A-Za-z0-9_-]{1,80}$/,STORED_ALIAS_CONCURRENCY=8;
 async function storedIdCatalogAliases(env,ids){
  const aliases=new Map();
  if(typeof CanonicalCatalogReader==='undefined'||typeof CanonicalCatalogReader.catalogFilmIdentityBridge!=='function')return aliases;
- for(const id of [...new Set((ids||[]).map(String))].filter(id=>STORED_LID.test(id)&&!id.startsWith('tmdb_')).slice(0,100)){
-  try{
-   const identity=await CanonicalCatalogReader.catalogFilmIdentityBridge(env,id);
+ const wanted=[...new Set((ids||[]).map(String))].filter(id=>STORED_ALIAS_ID.test(id)&&!id.startsWith('tmdb_'));
+ for(let at=0;at<wanted.length;at+=STORED_ALIAS_CONCURRENCY){
+  await Promise.all(wanted.slice(at,at+STORED_ALIAS_CONCURRENCY).map(async id=>{
+   let identity;
+   try{identity=await CanonicalCatalogReader.catalogFilmIdentityBridge(env,id);}
+   catch(error){if(error?.code==='canonical_read_not_authoritative'||error?.code==='canonical_read_invalid')return;throw error;}
    if(identity?.state==='ok'&&identity.lid===id&&/^[1-9]\d{0,11}$/.test(String(identity.tmdb??'')))aliases.set(id,'tmdb_'+identity.tmdb);
-  }catch{}
+  }));
  }
  return aliases;
 }

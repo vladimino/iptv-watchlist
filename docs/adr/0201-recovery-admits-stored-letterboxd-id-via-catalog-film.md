@@ -17,8 +17,10 @@ A film the owner has watched leaves the watchlist. The admitted catalog (D1 `dis
 
 1. **The stored id stays the key of prediction state.** No state, pointer, fingerprint or lineage is renamed or copied.
 2. **One alias rule.** For a stored Letterboxd id the canonical Film bridge (`catalogFilmIdentityBridge`, trusted claims only, no title or year matching) must answer `ok` with `lid` equal to that id and a trusted TMDB id. The catalog id is then `tmdb_<tmdb>`. Absent, retired, conflicting or unreadable identity yields no alias and the film stays outside admission.
-3. **Three consumers use the rule, and only for ids the caller names.** The recovery preview admits through the alias; the queue builder presents the catalog film under the stored id for each active recovery intent, so the index, the intent overlay and the manifest agree on one key; `readFilmsById` resolves a stored id that has no catalog entry of its own through the alias. No scan of the catalog or of lifetime Films is added.
-4. **Not decided or changed.** Admission of films with no current catalog entry (retention-only) is not added. Nothing is added to the watchlist, no Discovery observation is created, the retry budget is never reset, and confirming an intent stays a separate owner action.
+3. **Three consumers use the rule, and only for ids the caller names.** The recovery preview admits through the alias. The queue builder presents the catalog film under the stored id for **every film an owner cohort ever named** (active, settled or cancelled; capped at 1000, over the cap the rebuild fails), so the index, the intent overlay and the manifest agree on one key and the film is never turned back into a second `tmdb_<n>` film when its intent expires. `readFilmsById` resolves a stored id that has no catalog entry of its own through the alias. No scan of the catalog or of lifetime Films is added.
+4. **Fail closed.** A verified negative (absent, retired, conflicting identity, or a Film/Person store that is not authoritative) yields no alias. Every other failure of the bridge read is thrown: a rebuild that cannot read identity saves no queue, so it cannot stamp the current recovery revision on a queue that lacks an owner-approved film.
+5. **Bounds.** Stored ids follow the canonical bridge's own shape (up to 80 characters of letters, digits, underscore, hyphen); the bridge is read eight ids at a time. The per-rebuild cost is up to one bridge read per cohort film and is not measured on production; it runs only on a queue rebuild, not per request.
+6. **Not decided or changed.** Admission of films with no current catalog entry (retention-only) is not added. Nothing is added to the watchlist, no Discovery observation is created, the retry budget is never reset, and confirming an intent stays a separate owner action.
 
 ## Alternatives considered
 
@@ -27,7 +29,7 @@ A film the owner has watched leaves the watchlist. The admitted catalog (D1 `dis
 
 ## Consequences
 
-The alias costs one bridge read per active intent per queue rebuild (bounded by the active-intent cap). A film whose identity cannot be read is simply not aliased.
+The alias costs one bridge read per active intent per queue rebuild (bounded by the active-intent cap). A film with a verified negative identity is not aliased; an unreadable identity fails the rebuild (retried by the next start).
 
 ## Recovery and migration boundary
 
@@ -38,7 +40,7 @@ Code only; no data written. Reverting the code restores the previous preview and
 - **Original decision:** [AIR-478](https://trello.com/c/IbsSCRce)
 - **Implementation:** the pull request that adds this ADR
 - **Dated verification:** read-only D1 queries on 2026-11-22 (all 11 Films trusted, all with a current admission row)
-- **Uncertainty:** why the preview of 2026-11-22 marked four `tmdb_*` ids `not_admitted` is not established; a repeated owner-only preview is needed.
+- **Uncertainty:** why the preview of 2026-11-22 marked four `tmdb_*` ids `not_admitted` is not established; this change does **not** fix them and does not close all 11. A repeated owner-only preview after a corrected deployment is needed.
 
 ## Follow-ups
 

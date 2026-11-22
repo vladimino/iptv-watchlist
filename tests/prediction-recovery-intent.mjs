@@ -56,8 +56,8 @@ import * as CanonicalCatalogReader from '../src/canonical-catalog-reader.js';
 // 2. The real Worker code over D1.
 const T='2026-11-17T10:00:00.000Z';
 const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1";
-async function world(films=6){
- const w=await flowWorld({films});
+async function world(films=6,options={}){
+ const w=await flowWorld({films,...options});
  Object.assign(w.ctx,{PredictionRecoveryIntent:Intent,FilmPersonAuthority,CanonicalCatalogReader,Headers,Uint32Array,DataView,atob,btoa,structuredClone,TextDecoder,
   ASSETS:{},INITIAL_PERSONAL_RATINGS:{},FILM_TITLE_DICTIONARY:[],PERSON_NAME_DICTIONARY:[]});
  for(const [file,name] of [['src/domain/admin-query.js','AdminQuery'],['src/domain/data-health.js','DataHealth'],['src/domain/limbo-inventory.js','LimboInventory'],['src/domain/prediction-recovery.js','PredictionRecovery']])vm.runInContext(scoped(file,name),w.ctx);
@@ -92,8 +92,8 @@ const revision=w=>sql(w.file,'SELECT revision FROM prediction_recovery_revision'
 const domainImage=w=>JSON.stringify(['prediction_pointer','prediction_fingerprint','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_authority'].map(t=>sql(w.file,'SELECT * FROM '+t)));
 const r2Image=w=>JSON.stringify([...w.records.entries()].sort(([a],[b])=>a.localeCompare(b)));
 // Every film scored once by the ordinary runner.
-async function scoredWorld(films=6){
- const w=await world(films);
+async function scoredWorld(films=6,options={}){
+ const w=await world(films,options);
  assert.equal((await w.api('queue/reconcile',{})).status,200);
  const m=await start(w);assert.equal(m.films.length,films);
  const s=await submitAll(w,m);assert.ok(s.results.every(x=>x.status==='created'));
@@ -128,16 +128,66 @@ const key=n=>'owner-key-'+String(n).padStart(8,'0');
  assert.equal((await w.admin('preview',{method:'POST',body:{}})).status,405);
 }
 
-// 2a'. ADR 0201: a stored Letterboxd id is admitted through the catalog film of the same trusted canonical Film, never by title or year.
+// 2a'. ADR 0201: a stored Letterboxd id is admitted through the catalog film of the same trusted canonical Film, never by title or year, and the
+// recovery runs end to end under the stored key. The fixture scores tmdb_3 normally, then moves its state to the stored id LIDX (the production
+// shape: the state under the Letterboxd id, the catalog film under tmdb_3).
+async function lidWorld(){
+ // Film 3 is scored while it is a watchlist film under its Letterboxd id; then it leaves the watchlist and the admitted catalog holds it as tmdb_3.
+ const w=await scoredWorld(6,{extra:n=>n===3?{id:'LIDX'}:{}});
+ assert.equal(sql(w.file,"SELECT count(*) n FROM prediction_pointer WHERE film_id='LIDX'")[0].n,1,'the state is under the stored id');
+ sql(w.file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:LIDX',1,'tmdb:3','Orig','${T}');UPDATE film_external_id SET film_id='film:LIDX' WHERE film_id='film:tmdb:3' AND scheme='tmdb';INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:LIDX','letterboxd','LIDX',1,0,NULL)`);
+ sql(w.file,`UPDATE discovery_admission SET film_id='tmdb_3', observation_key='tmdb_3', payload_json=replace(payload_json,'"id":"LIDX"','"id":"tmdb_3"') WHERE film_id='LIDX'`);
+ return w;
+}
 {
- const w=await scoredWorld(6);
- sql(w.file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:LIDX',1,'tmdb:3','Orig','${T}');UPDATE film_external_id SET film_id='film:LIDX' WHERE film_id='film:tmdb:3' AND scheme='tmdb';INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:LIDX','letterboxd','LIDX',1,0,NULL),('film:LIDY','letterboxd','LIDY',1,0,NULL)`.replace(",('film:LIDY','letterboxd','LIDY',1,0,NULL)",''));
+ const w=await lidWorld();
  const r=await w.admin('preview?films=LIDX,LIDZ&mode=prediction_only');
  assert.equal(r.status,200,JSON.stringify(r.data));
  const by=Object.fromEntries(r.data.films.map(f=>[f.filmId,f]));
- assert.notEqual(by.LIDX.reason,'not_admitted','the catalog film of the same trusted Film admits the stored Letterboxd id');
- assert.equal(by.LIDX.canonicalFilmId,'film:LIDX');
- assert.equal(by.LIDZ.reason,'not_admitted','an id with no trusted canonical Film stays outside admission');
+ assert.deepEqual([by.LIDX.outcome,by.LIDX.reason],['eligible','eligible'],'the stored Letterboxd id is eligible through the catalog film of its Film');
+ assert.equal(by.LIDX.canonicalFilmId,'film:LIDX');assert.equal(by.LIDX.tmdb,'3');
+ assert.deepEqual([by.LIDZ.outcome,by.LIDZ.reason],['blocked','not_admitted'],'an id with no trusted canonical Film stays outside admission');
+ const body={films:['LIDX'],mode:'prediction_only',ttlHours:72,scopeHash:r.data.scopeHash,idempotencyKey:key(7)};
+ const preview=await w.admin('preview?films=LIDX&mode=prediction_only');body.scopeHash=preview.data.scopeHash;
+ const ok=await w.admin('confirm',{method:'POST',body});assert.equal(ok.status,201,JSON.stringify(ok.data));
+ const lineageBefore=history(w).length;
+ const m=await start(w);
+ assert.deepEqual(m.films.map(f=>f.filmId),['LIDX'],'the recovery manifest names the stored id and nothing else');
+ assert.equal(queueDoc(w).recovery.denied,1);
+ const s=await submitAll(w,m,{...w.prediction,predictedRating:4});
+ assert.deepEqual(s.results.map(x=>[x.filmId,x.status]),[['LIDX','recalculated']]);
+ await complete(w,m);
+ assert.equal(history(w).length,lineageBefore+1,'the replaced version is kept in the immutable lineage');
+ assert.ok(history(w).some(h=>h.film_id==='LIDX'),'under the stored id');
+ assert.equal(sql(w.file,"SELECT count(*) n FROM prediction_pointer WHERE film_id='tmdb_3'")[0].n,0,'no second prediction under the catalog key');
+ // After the intent is settled the queue still keys the film by its stored id: it is never turned back into a second tmdb_3 film.
+ // The TTL ends (the intent leaves the overlay) and a later cohort of the owner moves the revision: the queue is rebuilt without the intent.
+ const RealDate=Date;w.ctx.Date=class extends RealDate{constructor(...args){args.length?super(...args):super(RealDate.now()+8*86400000);}static now(){return RealDate.now()+8*86400000;}};// eight days later: past the 72 h TTL
+ sql(w.file,'UPDATE prediction_recovery_revision SET revision=revision+1 WHERE id=1');
+ const again=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled'});
+ assert.equal(again.status,200,JSON.stringify(again.data).slice(0,300));
+ assert.deepEqual((again.data.films||[]).map(f=>f.filmId),[],'a settled film is not queued again under the catalog key');
+ assert.ok(![...queueDoc(w).hotPending,...queueDoc(w).coldPending].includes('tmdb_3'));
+}
+// A conflicting claim refuses the alias (no admission), and an unreadable Film read fails the rebuild closed instead of dropping the film.
+{
+ const w=await lidWorld();
+ sql(w.file,"UPDATE film_external_id SET conflicting=1 WHERE film_id='film:LIDX' AND scheme='letterboxd'");
+ const r=await w.admin('preview?films=LIDX&mode=prediction_only');
+ assert.notEqual(r.data.films[0].outcome,'eligible','a conflicting identity is never admitted through an alias');
+}
+{
+ const w=await lidWorld();
+ const preview=await w.admin('preview?films=LIDX&mode=prediction_only');
+ assert.equal((await w.admin('confirm',{method:'POST',body:{films:['LIDX'],mode:'prediction_only',ttlHours:72,scopeHash:preview.data.scopeHash,idempotencyKey:key(8)}})).status,201);
+ const failedRead=Object.assign(new Error('canonical_read_unavailable'),{code:'canonical_read_unavailable'});
+ const original=w.ctx.CanonicalCatalogReader.catalogFilmIdentityBridge;
+ w.ctx.CanonicalCatalogReader={...w.ctx.CanonicalCatalogReader,catalogFilmIdentityBridge:async()=>{throw failedRead;}};
+ const queueBefore=JSON.stringify(queueDoc(w));
+ const r=await w.api('queue/reconcile',{});
+ assert.notEqual(r.status,200,'an unavailable identity read fails the rebuild: it is not an absence');
+ assert.equal(JSON.stringify(queueDoc(w)),queueBefore,'and no queue is saved without the owner-approved film');
+ w.ctx.CanonicalCatalogReader={...w.ctx.CanonicalCatalogReader,catalogFilmIdentityBridge:original};
 }
 
 // 2b. Confirm, replay, conflict; the ordinary runner re-scores exactly the cohort; the intent is satisfied; nothing loops.

@@ -179,6 +179,25 @@ export async function readOverlay(env,nowMs=Date.now()){
   activeIds:()=>[...modes.keys()],confirmedAtOf:filmId=>confirmed.get(filmId)??null});
 }
 
+// ADR 0201. The stored ids of every film an owner cohort ever named (active, settled or cancelled): such a film keeps its stored key in the queue
+// after the intent ends, so a satisfied or expired intent never turns it back into a second `tmdb_<n>` film. Bounded and explicit: over the cap, or a
+// store that cannot be read, throws; an absent migration (the dormant store) is none.
+export const RECOVERED_IDS_LIMIT=1000;
+export async function readRecoveredIds(env){
+ const db=database(env);
+ if(!db||typeof db.prepare!=='function')return [];
+ let rows;
+ try{rows=(await db.prepare('SELECT DISTINCT film_id AS filmId FROM prediction_recovery_intent ORDER BY film_id LIMIT ?').bind(RECOVERED_IDS_LIMIT+1).all()).results||[];}
+ catch(error){
+  let installed;
+  try{installed=await readInstalled(db);}catch(inner){throw inner?.code?inner:failed('recovery_unavailable',inner);}
+  if(!installed)return [];
+  throw failed('recovery_unavailable',error);
+ }
+ if(rows.length>RECOVERED_IDS_LIMIT||!rows.every(row=>typeof row?.filmId==='string'&&FILM_ID.test(row.filmId)))throw failed('recovery_unavailable');
+ return rows.map(row=>row.filmId);
+}
+
 // Read only. For the requested ids: the D1 pointer and fingerprint tokens, each film's active intent and the recovery revision.
 // `installed:false` when migration 0024 is not applied.
 export async function readFilmRows(env,filmIds){
