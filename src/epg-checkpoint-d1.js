@@ -3,12 +3,11 @@
 // marker is `d1`; with the tables absent or the marker `r2` the R2 objects serve exactly as before. This module is storage only: it never reads
 // or writes R2, never decides a stage, never builds an event. The Worker bundle wraps it as `EpgCheckpointD1`; tests load it as an ES module.
 //
-// Authority (one marker row, epg_checkpoint_authority, independent of every other domain):
-//  - `legacy` (the R2 objects serve) only when the database proves it is pre-migration: the tables are absent AND schema_contract answers a
-//    version below 30. A missing binding, an unreadable schema_contract or version 30 without the tables is `closed`. The one exception is
-//    the explicit local stand-in `EPG_CHECKPOINT_DB_OPTIONAL=standin`, never set in production.
-//  - mode r2 -> `r2`: the R2 objects serve (writes `held` is the import fence); mode d1 -> `d1`: the rows serve and R2 is never read or written.
-//  - any other state with the tables present, or a storage error -> `closed`. Never R2.
+// Authority (one marker row, epg_checkpoint_authority, independent of every other domain). AIR-551 H6: the R2 arm is retired for production.
+//  - `d1`: the rows serve and R2 is never read or written (writes `open`, or `held` as the fence of a controlled operation).
+//  - `legacy` / `r2` (the R2 objects serve) exist ONLY for the explicit local stand-in `EPG_CHECKPOINT_DB_OPTIONAL=standin`, never set in production:
+//    no binding, tables absent or the marker `r2`. Without the stand-in the same inputs are `closed`.
+//  - any other state with the tables present, a missing or unreadable marker, or a storage error -> `closed`. Never R2.
 //
 // Every checkpoint write is ONE D1 batch: authority fence (mode d1, writes open, the generation read), the EPG mode revision, the step lease (holder,
 // mode revision, not released, expiry beyond `leaseBound`) INSIDE the batch, then a compare-and-swap on (run_id, revision) followed by a fence
@@ -35,7 +34,7 @@ async function many(db,sql,params=[]){return (await db.prepare(sql).bind(...para
 async function sha256(text){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(byte=>byte.toString(16).padStart(2,'0')).join('');}
 const iso=ms=>new Date(ms).toISOString();
 
-// -> {state:'legacy'} | {state:'r2'|'d1',writes,generation} | {state:'closed'}
+// -> {state:'d1',writes,generation} | {state:'legacy'} | {state:'r2',writes,generation} (the last two only with the local stand-in) | {state:'closed'}
 export async function readAuthority(source){
  const db=database(source);
  const standin=source?.EPG_CHECKPOINT_DB_OPTIONAL==='standin';
@@ -43,15 +42,14 @@ export async function readAuthority(source){
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('epg_checkpoint_authority','epg_checkpoint_cas','epg_checkpoint_run','epg_checkpoint_body','epg_checkpoint_film','epg_checkpoint_receipt','epg_ingest_status')")).map(row=>row.name);}
  catch{return {state:'closed'};}
- if(!names.length){
-  let version=null;
-  try{version=Number((await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version);}catch{return standin?{state:'legacy'}:{state:'closed'};}
-  return Number.isFinite(version)&&version<30?{state:'legacy'}:(standin?{state:'legacy'}:{state:'closed'});
- }
+ // The tables are absent: only the local stand-in serves R2. Production never does, whatever the schema version says.
+ if(!names.length)return standin?{state:'legacy'}:{state:'closed'};
  if(TABLES.some(name=>!names.includes(name)))return {state:'closed'};
  let row;
  try{row=await one(db,MARKER_SQL);}catch{return {state:'closed'};}
  if(!row||Number(row.cas)!==1||(row.mode!=='r2'&&row.mode!=='d1')||(row.writes!=='open'&&row.writes!=='held')||!Number.isInteger(Number(row.generation)))return {state:'closed'};
+ // Marker `r2` is the retired arm: production fails closed on it instead of serving the frozen R2 objects.
+ if(row.mode==='r2'&&!standin)return {state:'closed'};
  return {state:row.mode,writes:row.writes,generation:Number(row.generation)};
 }
 

@@ -24,7 +24,8 @@ sequenceDiagram
         Daily->>MCP: epg_sync_step
         MCP->>EPG: Advance one bounded step
         EPG->>D1: Read or publish fenced generation
-        EPG->>R2: Store checkpoint and mirrors
+        EPG->>D1: Save the checkpoint (fenced batch)
+        EPG->>R2: Store mirrors
         MCP-->>Daily: stage and nextAction
     end
     alt External Discovery executor
@@ -222,14 +223,14 @@ sequenceDiagram
     D1-->>Disc: stale_generation, no lease
     Disc->>D1: Published programme id acquire
     D1-->>Disc: epg_priority, awaiting_complete
-    Note over EPG: finalize, queue attempted, then sync.json stage complete in R2
-    EPG->>D1: Certify batch: mode revision and step lease fence, CAS on run and day, pause clear
+    Note over EPG: finalize, queue attempted, then one completion batch
+    EPG->>D1: Complete and certify batch: mode revision and step lease fence, checkpoint complete, CAS on run and day, pause clear
     Disc->>D1: Published programme id acquire
     D1-->>Disc: admitted
     Note over EPG,D1: Hourly ensure certifies a complete but uncertified run. No Workflow, no control or sync.json write.
 ```
 
-**Accepted design (dormant, [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md)):** if the run checkpoint moves to D1 and its marker is `d1`, the two steps "sync.json stage complete in R2" and "Certify batch" in the diagram above become one fenced batch (the certificate stays conditional and non-aborting), and the crash window between them no longer exists for runs completed in that mode. The single-call completion route would use the same operation and attempt the queue refresh before it. The diagram above is unchanged because it describes current behavior; the hourly repair `certifyComplete` stays for runs completed before an activation.
+**Current (D1-authoritative since 21 Nov 2026, [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md), [ADR 0197](../adr/0197-retire-the-epg-checkpoint-r2-arm.md)):** the run checkpoint is in D1 and its marker is `d1`, so the two steps "sync.json stage complete in R2" and "Certify batch" in the diagram above are one fenced batch (the certificate stays conditional and non-aborting), and the crash window between them no longer exists for runs completed in this mode. The single-call completion route uses the same operation and attempts the queue refresh before it. The diagram above draws that single batch; the hourly repair `certifyComplete` stays for a certificate that did not match.
 
 ### Seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), implemented by AIR-484; production acceptance awaits a natural run)
 
@@ -242,7 +243,7 @@ sequenceDiagram
     participant C as D1 control document
     participant S as Successor instance
     participant H as Hourly ensure
-    P->>R2: Store publication.json and save sync.json at stage seal
+    P->>R2: Store publication.json (the D1 checkpoint is saved at stage seal)
     P->>C: CAS claim, next series, no failure recorded
     P->>S: create() with the next series id
     Note over P: Ends normally. Takes no more step leases.
