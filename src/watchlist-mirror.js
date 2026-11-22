@@ -54,12 +54,14 @@ export async function reconcileMirror(env, {epoch, now = Date.now(), deps}) {
     if (written.proven === true) {
       // Acknowledged only if the pinned target, the generation and the epoch still hold in the batch itself.
       const ack = await WatchlistD1.recordMirror(env, {...target, outcome: 'delivered', guards: [[epochGuardSql, [epoch]]]});
-      if (ack.ok) return {outcome: written.wrote ? 'written' : 'delivered', etag: written.etag ?? null};
+      if (ack.ok && ack.applied !== null) return {outcome: written.wrote ? 'written' : 'delivered', etag: written.etag ?? null, acknowledged: ack.applied === true};
+      if (ack.ok) return {outcome: 'uncertain', reason: 'ack_result_unreadable'};
       return {outcome: 'uncertain', reason: 'ack_' + ack.reason};
     }
     const attempts = pointer.mirrorAttempts ?? 0;
     const failed = await WatchlistD1.recordMirror(env, {...target, outcome: 'failed', attempts, nextRetryAt: new Date(now + backoffMs(attempts + 1)).toISOString(), guards: [[epochGuardSql, [epoch]]]});
-    return {outcome: 'failed', reason: written.reason, recorded: failed.ok === true};
+    // `recorded` is true only for an attempt that was newly recorded: an already delivered target (a late failure) or a lost compare-and-swap is not.
+    return {outcome: 'failed', reason: written.reason, recorded: failed.ok === true && failed.applied === true};
   } catch { return {outcome: 'unreadable', reason: 'exception'}; }
 }
 // The Letterboxd mode epoch guard as a batch statement (an upsert of the fence row of the Letterboxd control plane would be the wrong table here: the Watchlist batch fences with its own table). This asserts the
