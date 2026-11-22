@@ -14,8 +14,9 @@ const T=s=>Date.parse(s);
 
 // A counting wrapper of the real D1 binding: it forwards every call and counts what the production code sends.
 function counted(db){
- const stats={prepares:0,reads:0,runs:0,batches:0,statements:0,maxStatementsPerBatch:0,maxBinds:0,maxSqlChars:0,rowsWritten:0,rowsRead:0,hook:null};
- const wrapBound=(sql,bound)=>({_s:bound,
+ const stats={byGroup:{},prepares:0,reads:0,runs:0,batches:0,statements:0,maxStatementsPerBatch:0,maxBinds:0,maxSqlChars:0,rowsWritten:0,rowsRead:0,hook:null};
+ const groupOf=sql=>{const m=/^\s*(INSERT(?: OR \w+)? INTO|UPDATE|DELETE FROM)\s+(\w+)/i.exec(sql);return m?m[1].toUpperCase().replace(/ OR \w+/,'').replace(' INTO','')+' '+m[2]:'other';};
+ const wrapBound=(sql,bound)=>({_s:bound,_sql:sql,
   first:async(...a)=>{stats.reads++;const r=await bound.first(...a);return r;},
   all:async()=>{stats.reads++;const r=await bound.all();stats.rowsRead+=Number(r?.meta?.rows_read||0);return r;},
   run:async()=>{stats.runs++;const r=await bound.run();stats.rowsWritten+=Number(r?.meta?.rows_written||0);return r;},
@@ -32,7 +33,7 @@ function counted(db){
    stats.batches++;stats.statements+=statements.length;stats.maxStatementsPerBatch=Math.max(stats.maxStatementsPerBatch,statements.length);
    if(stats.hook){const hook=stats.hook;stats.hook=null;await hook(db);}
    const out=await db.batch(statements.map(x=>x._s||x));
-   for(const r of out){stats.rowsWritten+=Number(r?.meta?.rows_written||0);stats.rowsRead+=Number(r?.meta?.rows_read||0);}
+   out.forEach((r,i)=>{const w=Number(r?.meta?.rows_written||0);stats.rowsWritten+=w;stats.rowsRead+=Number(r?.meta?.rows_read||0);const g=groupOf(statements[i]?._sql||'');const e=stats.byGroup[g]||(stats.byGroup[g]={statements:0,rowsWritten:0});e.statements++;e.rowsWritten+=w;});
    return out;
   },
   exec:s=>db.exec(s)}};
@@ -116,7 +117,7 @@ const routes={
   const par=result.ok&&result.outcome!=='refused'?await parity({DB:env.DB},expected):null;
   const s=c.stats;
   return {step,ok:result.ok,outcome:result.outcome,reason:result.reason,version:result.version,added:result.added?.length,removed:result.removed?.length,
-   d1:{prepares:s.prepares,singleReads:s.reads,runs:s.runs,roundtrips:s.reads+s.runs+s.batches,batches:s.batches,statements:s.statements,maxStatementsPerBatch:s.maxStatementsPerBatch,maxBindParams:s.maxBinds,maxSqlChars:s.maxSqlChars,rowsWrittenMeta:s.rowsWritten,rowsReadMeta:s.rowsRead},
+   byGroup:Object.fromEntries(Object.entries(s.byGroup).sort((a,b)=>b[1].rowsWritten-a[1].rowsWritten)),d1:{prepares:s.prepares,singleReads:s.reads,runs:s.runs,roundtrips:s.reads+s.runs+s.batches,batches:s.batches,statements:s.statements,maxStatementsPerBatch:s.maxStatementsPerBatch,maxBindParams:s.maxBinds,maxSqlChars:s.maxSqlChars,rowsWrittenMeta:s.rowsWritten,rowsReadMeta:s.rowsRead},
    rowsInserted:Object.fromEntries(TABLES.map(t=>[t,after[t]-before[t]])),settled,parity:par,workerWallMsCoarse:wallMs};
  },
  // CAS: a competing promotion (refusal) and bookkeeping-only contention (pinned replay) through the real adapter and the real binding
