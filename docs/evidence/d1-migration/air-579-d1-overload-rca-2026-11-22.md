@@ -1,19 +1,20 @@
 # AIR-579: D1 load burst of 22 Nov 2026 (16:00-18:15 UTC), read-only root-cause analysis
 
-Observation 18:5x UTC, 22 Nov 2026 (19:5x Madrid). **Read-only**: the D1 analytics GraphQL (`d1QueriesAdaptiveGroups`) and the Workflows and deployments `GET` endpoints through the Cloudflare API connector, repository inspection, and `EXPLAIN QUERY PLAN` on a **scratch sqlite database built from `migrations/` only** (no production database, no production rows). No D1 write, index, schema, flag, cron, Task, Workflow, lease, R2 or manual run. Counts, durations and query shapes only; no keys, payloads or tokens.
+Observation 18:44-18:56 UTC, 22 Nov 2026 (19:44-19:56 Madrid); the last analytics bucket read is 18:45 UTC. **Read-only**: the D1 analytics GraphQL (`d1QueriesAdaptiveGroups`), the Workflows, deployments and versions `GET` endpoints through the Cloudflare API connector, repository inspection at `main` `92a57de`, and `EXPLAIN QUERY PLAN` on a **scratch sqlite database built from `migrations/` only** (empty tables; no production database or rows). No D1 write, index, schema, flag, cron, Task, Workflow, lease, R2 or manual run. Counts, durations and query shapes only; no keys, payloads or tokens.
 
-This page is an RCA with a verdict. It is **not a fix** and promises no latency change. Code changes below are proposals for separate cards.
+This page is an RCA with a verdict. It is **not a fix** and promises no latency change. Code changes below are proposals for separate cards. Each statement is marked **observed** (read from analytics, Workflows or deployments), **inferred** (from code or plans) or **unattributed**.
 
 ## Verdict
 
-1. **A temporary burst, not a sustained regression.** From 16:00 to about 18:15 UTC the database ran at 17-47 k queries per 15 minutes (reference 0.7-4 k) and 20-36 M rows read per bucket (reference at most 6 M). It returned to 3.1 k queries / 3.3 M rows (18:30) and 2.3 k / 1.4 M (18:45). Data read up to 18:54 UTC; the next natural EPG run is the next trigger to watch.
-2. **Trigger: an EPG run at about 16:00-16:03 UTC followed by Discovery catch-up.** The 16:00 bucket holds 197 k rows written (the EPG publication). The `iptv-epg` Workflow has instances at 16:0x; `iptv-ratings` ran at 16:00. `iptv-discovery` created 13, 8 and 3 instances in the 16, 17 and 18 UTC hours, all `complete`. Discovery is held until the EPG run is certified complete and then catches up ([ADR 0175](../../adr/0175-epg-priority-holds-until-run-complete.md)); the burst is that catch-up working through the new programme. The last Discovery instance of the burst was created at 18:13:52 UTC.
-3. **No code deployment explains 16:00.** The six newest deployments are all between 17:50 and 18:47 UTC (docs commits, AIR-571, AIR-551); earlier ones were not enumerated. The Letterboxd Workflow had no instance yet.
-4. **The single largest query (176 M rows) is not Worker code.** The text does not exist in `src/`, `scripts/` or `tests/`. It is an ad-hoc diagnostic (a join of the active Discovery ledger with the Channel policy, seven executions between 16:45 and 17:30, one of them 176 M rows / 17.5 s in the 17:00 bucket), consistent in time and subject with the AIR-567 identity audit after the Channel blacklist. It is a cost of a diagnostic, not of the system. It is **not** the cause of the two Predictions errors (see below).
-5. **The two `no such column` errors are an independent defect of ad-hoc probes, not an overload effect and not a code-version drift.** Both statements are absent from the repository and name columns that do not exist: `SELECT id,stage,programme_run_id,revision FROM discovery_checkpoint` (29 x at 16:00; the table has `id, programme_run_id, generation, hop_id, payload_json`, migration 0011) and a `film` read with `film_id` (12 x at 18:00; the key column is `id`). Nothing in the Worker issues them.
-6. **Predictions link: plausible contention, not proven.** Both Task errors fall inside the burst, but the heartbeat CPU-limit reset (slot `:30`, finished 17:34:57 UTC) is **not** explained by the 176 M query (17:00-17:05). In the minutes before it the top time consumers were Discovery reads (see the window table). The `D1 DB is overloaded` at 18:10 UTC coincides with the heaviest wall-time bucket of the burst (18:00: 103 s of query time per 15 minutes) and a loop of 120 whole-catalog reads in seven minutes. D1 executes a database's queries serially, so many 100-400 ms reads queue every other caller, including the Predictions heartbeat. This is consistent, not a measured causal chain: per-request queue wait is not exposed by analytics.
+1. **Observed: a temporary burst, not a sustained regression.** From 16:00 to about 18:15 UTC the database ran at 17-47 k queries per 15 minutes (reference 0.7-4 k) and 20-36 M rows read per bucket (reference at most 6.1 M, plus one 193 M bucket). It returned to 3.1 k queries / 3.3 M rows (18:30) and 2.3 k / 1.4 M (18:45). The next natural EPG run is the next point to check.
+2. **Probable, not established: the burst follows an EPG run and the Discovery catch-up that [ADR 0175](../../adr/0175-epg-priority-holds-until-run-complete.md) schedules after it.** Observed: the 16:00 bucket holds 197,057 rows written, a D1-wide aggregate that analytics cannot attribute to a caller; the `iptv-epg` Workflow has two instances created at 16:0x UTC (the newest at 16:03:13), `iptv-ratings` one at 16:00:29; `iptv-discovery` created 13, 8 and 3 instances in the 16, 17 and 18 UTC hours (24 in all, every one `complete`), the last at 18:13:52. The timing fits a catch-up that ended with the burst, but no Worker log or per-request attribution was read, so the writer of the 197 k rows and the exact callers below stay **unattributed**.
+3. **Deployments (observed from the versions list, UTC).** The last version before the onset is `95c1f8a6` at 13:59 (a prompt-catalog change); the next is `f458bbaf` at 16:23 (a test change). **No deployment lies between 14:00 and 16:23**, so the onset at 16:00 was not preceded by a deploy within two hours. That is all this shows: it does not exclude an effect of earlier code or of data, and the sustained phase overlaps later versions: 16:30 (`67a86c55`, Predictions recovery slots), 16:43 (docs), 16:54 (`91877bce`, AIR-565 Channel policy in the scan, no change of the volume already seen at 16:15-16:45), 17:00 (a variable binding deleted), then documentation and AIR-571/AIR-551 versions from 17:25. The earlier question whether code changed around 16:00 is answered only for the 14:00-16:23 interval.
+4. **The 176 M-row statement is not in the repository (inferred; origin unattributed).** Its text does not exist in `src/`, `scripts/` or `tests/`; it joins the active Discovery ledger with the Channel policy (seven executions between 16:45 and 17:30; one of 176 M rows / 17.5 s in the 17:00-17:05 bucket). The subject matches the AIR-565/AIR-567 work of that afternoon, but the caller is not established and it is not claimed to be a person or a session.
+5. **Inferred: the two `no such column` errors are statements the repository does not contain and that name columns the schema does not have**: `SELECT id,stage,programme_run_id,revision FROM discovery_checkpoint` (29 x at 16:00; the table has `id, programme_run_id, generation, hop_id, payload_json`, migration 0011) and a `film` read with `film_id` (12 x at 18:00; the key column is `id`, migration 0001). They are not an overload effect (a missing column does not depend on load) and no Worker code version issues them; their caller is unattributed.
+6. **Predictions link: plausible, not proven.** Both Task errors fall inside the burst. The heartbeat CPU-limit reset (slot `:30`, finished 17:34:57) is **not** explained by the 176 M statement (17:00-17:05): in 17:28-17:35 the largest signatures took 1.5-3.6 s each in total. The `D1 DB is overloaded` at 18:10 UTC coincides with the heaviest wall-time bucket (18:00: 103 s of query time) and 120 whole-catalog reads in seven minutes. D1 executes one database's queries serially, so many 100-400 ms reads can queue other callers, including the heartbeat; this is a mechanism consistent with the timing, not a measured chain (per-request queue wait is not in analytics).
+7. **Unattributed read amplification (first follow-up).** The 120 `discovery_admission` catalog reads in seven minutes (about 400 ms and 12 k rows each; 48.5 s in total) are the largest wall-time item before the 18:10 overload. The code shows the SQL source (`readCatalog`, `src/discovery-authority.js:1768`) and that any read of the key `epg/discovered-films.json` through the generic loader reaches it (`src/worker.js:41`). Candidate callers found by tracing: the Discovery catalog-poster step (`src/discovery.js:481-486`), the enrichment genre and status views (`src/enrichment.js:4234-4244`, `:4248`, `:4252`), and the published-key read (`src/worker.js:812`). **Which of them ran 120 times, and why, is not established.** Verifying the caller from the Worker logs comes before any fix; a cache, projection or paging change is not proven as the root fix.
 
-## Time series (15-minute buckets, UTC)
+## Time series (15-minute buckets, UTC; observed)
 
 | Bucket | Queries | Rows read | Rows written | Query time | `sqlite_master` probes |
 | --- | --- | --- | --- | --- | --- |
@@ -26,52 +27,77 @@ This page is an RCA with a verdict. It is **not a fix** and promises no latency 
 | 18:15 | 6,474 | 15.0 M | 676 | 25 s | 844 |
 | 18:30 / 18:45 | 3.1 k / 2.3 k | 3.3 / 1.4 M | 165 / 397 | 35 / 7 s | 428 / 274 |
 
-Windows by wall time (top consumers):
+Per-bucket totals are far below the 900 s of a bucket even in the worst bucket (103 s), yet the 18:10 overload happened inside it: **a bucket total does not show the damage; accumulated time of one repeated signature inside a few minutes does.**
 
-| Window | Top by total query time |
+| Window (observed) | Top signatures by total query time |
 | --- | --- |
-| 17:28-17:35 (before the CPU-limit reset) | admission join `NOT EXISTS film_external_id` 60 x 3.6 s; `published_epg_show` by key 65 x 1.7 s; active-ledger show and observation reads 52 x 1.7 s each |
-| 18:05-18:12 (before the overload) | **whole-catalog `discovery_admission` read 120 x, 48.5 s total (about 400 ms and 12 k rows each)**; ledger observation read 56 x 14.6 s; `published_epg_show` by key 120 x |
+| 17:28-17:35 (before the CPU-limit reset) | admission join with `NOT EXISTS film_external_id` 60 x 3.6 s; `published_epg_show` by key 65 x 1.7 s; active-ledger show reads 52 x 1.7 s; observation join 52 x 1.5 s |
+| 18:05-18:12 (before the overload) | whole-catalog `discovery_admission` read 120 x 48.5 s; ledger observation read 56 x 14.6 s; `published_epg_show` by key 120 x 4.1 s |
 
-## Ranked hotspots (16:00-19:00 UTC, by rows read; plans from the scratch chain at schema 34)
+## Hotspots, 16:00-19:00 UTC
 
-| # | Signature (shape) | Executions | Rows read | Total ms | Code | Plan and cause |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | Channel-policy join over `discovery_observation` / `_show` | 1 (+13 smaller) | 176 M (+7.5 M) | 17.5 k | **none: ad-hoc diagnostic** | Whole-table aggregate by design; not a production path |
-| 2 | `COUNT(*) ... residence='archive' AND observation_key NOT IN (active)` | 341 | 45.3 M (133 k each) | 12.7 k | `ledgerArchive`, `src/discovery-authority.js:784`, called from the ledger read (`:861`, `:876`, `:882`) | Covering index on `(residence, observation_key)`, but the subquery counts the whole archive: cost grows with the archive, about 2 per minute; the count is informational |
-| 3 | `DELETE FROM published_epg_show WHERE programme_run_id=(...) AND basis='discovery' AND match_reason=?` and the matching `SELECT ... match_reason=?` before and after | 1,039 and 685 | 20.5 M and 13.5 M (about 19.7 k each) | 34.6 k and 20.6 k | `src/discovery-authority.js:22`, `:1455`, `:1474` | Only index is `published_epg_show_by_generation(programme_run_id, start_ms)`: the engine **searches by run and scans every row of the run** for `basis` and `match_reason`. One delete and two selects **per film key** (N+1) |
-| 4 | `film_external_id` lookups by `(scheme,value)` or `film_id IN json_each` | 685 + 505 + 1,245 + 1,998 | 9.4 + 6.9 + 19.0 + 14.9 M | 1.5-7 k each | `src/discovery-authority.js`, canonical producers | Plan is `SCAN film_external_id`: the primary key starts with `film_id` and the only `(scheme,value)` index is **partial** (`trusted=1 AND conflicting=0`), which these statements (they read untrusted rows too) cannot use. About 13.7 k rows per lookup; the table size was not read |
-| 5 | `SELECT film_id, payload_json, ... FROM discovery_admission WHERE state='current' ORDER BY film_id` | 422 (120 in 7 minutes at 18:05) | 5.1 M | **166 s** | `readCatalog`, `src/discovery-authority.js:1768`, behind the read of `epg/discovered-films.json` | Full catalog with JSON payloads on each read (cap 20,000 rows); long wall time, few rows. Largest wall-time contributor to the overload window |
-| 6 | Admission join `NOT EXISTS film_external_id ...` | 671 | 16.2 M | 37.3 k | `src/canonical-discovery-admission-producer.js:199` | Inherits #4 per row |
-| 7 | Gate introspection `SELECT name FROM sqlite_master ... LIKE 'discovery\_%'` (and `published_epg%`, `film_person_*`) | 16,624 / 4,610 / 3,490 | 12.3 / 1.7 / 1.3 M | 6.9 / 1.5 / 1.1 k | `src/discovery-authority.js:373`, `src/published-epg.js`, `src/film-person-authority.js` | `SCAN sqlite_master` per request: cheap each (about 740 rows) but about 90 per minute at the peak and 10x the reference; it follows the number of Discovery calls |
-| 8 | Active ledger reads (`discovery_observation_show WHERE source_key='active'`, observation join, counts) | 396 + 223 + 144 + 125 + 220 + 1,782 | 10.7 + 2.1 + 5.9 + 3.4 + 3.0 + 3.2 M | 34 s and below | Discovery chunk | Proportional to the ledger; part of catch-up |
+Two rankings, because rows read and wall time order the signatures differently. Executions, rows and times are observed; call sites and plans are inferred.
 
-Not supported by the evidence: a missing index on `epg_channel` or `epg_channel_category` (both have `epg_channel_by_category` and `_by_owner_category`, the tables are capped at 4,000 and 100 rows, and `src/epg-channel-d1.js` has no reader in the Worker scan path); a schema or code regression at 16:00.
+**By total rows read** (a family's rows are summed where it is one call pattern):
+
+| # | Signature (shape) | Executions | Rows read | Code | Cause |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Channel-policy join over the active ledger | 1 (plus 13 smaller) | 176 M (plus 7.5 M) | none found | Whole-table aggregate by shape; not a production path |
+| 2 | `film_external_id`, four signatures (below) | 685 + 505 + 1,245 + 1,998 | 9.4 + 6.9 + 19.0 + 14.9 = 50.2 M | `src/discovery-authority.js`, canonical producers | Three of the four can only scan; see the plan table |
+| 3 | `COUNT(*) ... residence='archive' AND observation_key NOT IN (active)` | 341 | 45.3 M (133 k each) | `ledgerArchive`, `src/discovery-authority.js:784`, from the ledger read (`:861`, `:876`, `:882`) | Covering index `(residence, observation_key)` but the count walks the whole archive; about 2 per minute; the count is informational |
+| 4 | `published_epg_show` delete and the by-key selects before and after | 1,039 + 685 | 20.5 + 13.5 M | `src/discovery-authority.js:22`, `:1455`, `:1474` | Only index is `(programme_run_id, start_ms)`: one delete and two selects per film key (N+1), each reading the rows of the whole run (about 19.7 k) for `basis` and `match_reason` |
+| 5 | Admission join `NOT EXISTS film_external_id ...` | 671 | 16.2 M | `src/canonical-discovery-admission-producer.js:199` | Inherits the `film_external_id` lookup per row |
+| 6 | Gate introspection `sqlite_master` (`discovery\_%`, `published_epg%`, `film_person_*`) | 16,624 + 4,610 + 3,490 | 12.3 + 1.7 + 1.3 M | `src/discovery-authority.js:373`, `src/published-epg.js`, `src/film-person-authority.js` | `SCAN sqlite_master` per request: cheap each, about 90 per minute at the peak, follows the number of Discovery calls |
+| 7 | Active-ledger reads (show rows, observation join, counts, decision joins) | 396 + 223 + 144 + 125 + 220 + 1,782 | 10.7 + 2.1 + 5.9 + 3.4 + 3.0 + 3.2 M | Discovery chunk | Proportional to the ledger; part of the catch-up |
+
+**By total wall time:** whole-catalog `discovery_admission` read, 422 executions, **166 s**, 5.1 M rows (unattributed caller, verdict 7); admission join 37.3 s; `published_epg_show` delete 34.6 s; active-ledger show reads 34.0 s; `published_epg_show` selects 20.6 s and 29.4 s; observation joins 20.7 s and 13.7 s; archive count 12.7 s.
+
+### `film_external_id`: four distinct signatures
+
+Plans are from the scratch chain at the current schema with **empty tables**. They show which index a statement *can* use. The production planner may choose otherwise; rows per execution are the production evidence.
+
+| Signature (shape) | Scratch plan | Rows per execution (observed) | Reading |
+| --- | --- | --- | --- |
+| `scheme='tmdb' AND value=?` | `SCAN film_external_id` | about 13.7 k | No usable index: the primary key starts with `film_id`; the only `(scheme,value)` index is partial (`trusted=1 AND conflicting=0`) and the statement also reads untrusted rows |
+| `(scheme='tmdb' AND value=?) OR (scheme='letterboxd' AND value=?)` | `SCAN film_external_id` | about 13.6 k | Same cause |
+| `scheme IN (...) AND value IN (SELECT value FROM json_each(?))` | `SCAN film_external_id` | about 15.3 k | Same cause; the list size does not matter |
+| `scheme IN (...) AND film_id IN (SELECT value FROM json_each(?))` | **`SEARCH` by the primary-key index** `(film_id, scheme)` | about 7.4 k | **Not a scan.** The rows follow the number of ids per call; the remedy is the batch size, not a `(scheme,value)` index |
+
+A `(scheme,value)` index would serve the first three only; the fourth needs a different remedy. The empty scratch database cannot establish the production plan or the table size, which was not read.
+
+Not supported by the evidence: a missing index on `epg_channel` or `epg_channel_category` (the migration has indexes on both foreign keys, the tables are capped at 4,000 and 100 rows, and `src/epg-channel-d1.js` has no reader on the Worker scan path in this snapshot).
 
 ## Not done or not established
 
-- The Worker logs were not read; the per-request caller of each signature is traced from code, not from log correlation. The Discovery chunk and projection call chain that reads `discovered-films.json` repeatedly should be confirmed by the Discovery owner.
-- Row counts of `film_external_id`, `discovery_admission`, `published_epg_show` and the ledger tables were not read; plans come from the empty scratch chain and the rows-per-execution figures.
-- Per-request D1 queue time and the exact failing request of the two Predictions errors are not available from analytics.
-- Who ran the diagnostics (#1 and the two `no such column` probes) is not established; only that the Worker does not.
+- No Worker log was read, so every caller named above is a candidate from code, not a correlated request.
+- The writer of the 197 k rows of the 16:00 bucket is unattributed.
+- Row counts of the tables were not read; plans come from the empty scratch chain plus rows per execution.
+- Per-request D1 queue time and the exact failing request of the two Predictions errors are not available.
+- The origin of the 176 M statement and of the two `no such column` statements is not established.
+- Versions older than the 13:59 one were listed but not compared; the check of 14:00-16:23 is the interval the evidence supports.
 
-## Proposed gate for AIR-554 (for the owner to accept; the figures are measurements, not thresholds set here)
+## Proposed gate for AIR-554 (for the owner to accept; nothing here is a threshold already set)
 
-Cutover stays **NO-GO until the gate holds**; this page does not lift it. A proportionate gate, tied to observed errors and the measured import:
+The cutover stays **NO-GO** and this page lifts nothing. A bucket total or a momentary empty Workflow list does not protect a longer import: the 18:00 bucket (103 s of 900 s) contained the overload, and the next Workflow, the 15-minute Predictions slot (a slot starts about five minutes before its nominal time) or the 03:24 UTC EPG run can start inside the window. The gate therefore has a fresh preflight, measured criteria against the observed pattern, and an overlap and abort rule. It uses no historical QPS.
 
-1. No Predictions run, Worker log or analytics error with `D1 DB is overloaded` or `exceeded its CPU time limit` in the 60 minutes before the window.
-2. The last EPG run is certified complete and no `iptv-discovery` or `iptv-epg` instance is live or queued, so a Discovery catch-up is not running (the burst above is tied to that state, not to a time of day).
-3. The latest three 15-minute analytics buckets show no query above a few seconds of single-statement time and total query time per bucket well below the bucket length; a recorded bucket, not an inherited threshold. Historical 500-2,000 queries per bucket is a reference, not a requirement.
-4. The measured cost of the import batch (rows read and written, duration; up to 2,000 statements, 8 MiB) from a scratch rehearsal on the real export is accepted by the owner against the headroom read in step 3.
-5. Abort rule during the window: any overload or CPU-limit error stops new steps and follows the run sheet's stop path.
+**Fresh preflight, repeated within 10 minutes before the first step (read-only):**
+
+1. Errors: no `D1 DB is overloaded` and no `exceeded its CPU time limit` in any Predictions run, Worker log or analytics error row in the previous 60 minutes.
+2. Quiet signal: `epg_pipeline_status` reports `discovery.nextAction: stop` (the catch-up of the last EPG commit is finished); no `iptv-epg` or `iptv-discovery` instance is queued, running or paused, and none was created in the last 30 minutes.
+3. Repeated-read pattern, measured on the last three complete 15-minute buckets plus the open one: no single signature has more than 50 executions in any 7-minute span at a mean above 200 ms (the 18:05 pattern: 120 executions, about 404 ms); the largest signature's accumulated time in any 7-minute span is recorded and compared with the same figure of the quietest hour of that day (a measurement taken at preflight, not an inherited constant); rows read per bucket are not above the maximum of that day's non-burst buckets.
+4. A tail check: the 17:28-17:35 window shows the CPU-limit reset can occur without a single dominant signature, so criteria 1 and 3 together decide, and the gate is **not** satisfied by a quiet bucket total alone.
+
+**Overlap rule:** the window starts after a Predictions slot has finished (registry and `prediction_queue_overview`) and the planned duration `T_imp + T_ver` measured on a scratch rehearsal of the real export must fit before the next slot's start (the owner accepts a longer window only through the owner's own decision on a Task pause, which this page does not request). A window inside 03:24 UTC to the end of the Discovery catch-up is excluded.
+
+**Abort rule during the window:** re-read criteria 1-3 at each step boundary; any overload or CPU-limit error from the import, a Predictions run, a live Workflow instance of `iptv-epg`, `iptv-discovery` or `iptv-prediction-start`, or a single signature crossing criterion 3 stops new steps and follows the run sheet stop path. A stop is read-only until the owner decides.
 
 ## Proposed separate cards (none implemented here; each needs an owner decision)
 
-1. **Discovery/EPG:** replace the per-key `published_epg_show` delete and selects (hotspot 3) with a set-based statement or an index covering `(programme_run_id, basis, match_reason)`; an index is a migration and an L3 apply.
-2. **Platform:** an index serving `film_external_id(scheme, value)` for all trust states, or a rewritten lookup (hotspot 4); a migration.
-3. **Discovery:** stop reading the whole admission catalog per call (hotspot 5): cache within the chunk, project, or page.
-4. **Discovery:** bound or cache `ledgerArchive` (hotspot 2), and cache the gate introspection per isolate (hotspot 7).
-5. **Process:** a cost guard for ad-hoc production diagnostics (read `EXPLAIN` on the scratch chain first, bound by `LIMIT` or a row estimate) so one statement cannot read 176 M rows.
-6. Re-check after the next natural EPG run: the same analytics, to see whether the burst repeats with the same duration.
+1. **First, Discovery/Platform: attribute the 120 whole-catalog reads** from the Worker logs (verdict 7) before choosing a cache, projection or paging fix.
+2. **Discovery/EPG:** replace the per-key `published_epg_show` delete and selects (hotspot 4) with a set-based statement or an index covering `(programme_run_id, basis, match_reason)`; an index is a migration and an L3 apply.
+3. **Platform:** for the three `film_external_id` signatures that scan, an index serving `(scheme, value)` for all trust states, or a rewrite; for the `film_id IN json_each` signature, review the batch size. A migration needs its own GO.
+4. **Discovery:** bound or cache `ledgerArchive` (hotspot 3) and cache the gate introspection per isolate (hotspot 6).
+5. **Process:** a read-cost review for ad-hoc production diagnostics: bounded predicates and ranges, a query-shape and cardinality review, `EXPLAIN` on the scratch chain first, and an explicit read-cost budget. An outer `LIMIT` is **not** a guard: it does not bound the rows an aggregate, a `COUNT(*)`, a join or an `ORDER BY` reads, so it would not have prevented the 176 M-row scan.
+6. Re-check after the next natural EPG run with the same analytics, to see whether the burst repeats with the same duration.
 
 Documentation impact: this evidence page and its index entries only. No runtime, architecture, security, integration or deployment change.
