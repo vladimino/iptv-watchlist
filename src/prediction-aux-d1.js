@@ -197,10 +197,19 @@ export async function readSource(db,runId){
 }
 // Writes the next revision of a run's sources. The first write creates revision 1; a rewrite may only add films or repeat equal entries (a changed entry of an existing film is a
 // conflict: the original model input is preserved); an identical document writes nothing. The head moves by compare-and-swap in the same batch as the revision and its pieces.
-export async function writeSource(db,authority,runId,source,{guard=null,writer=null,now=Date.now,extra=[]}={}){
+export async function writeSource(db,authority,runId,source,{guard=null,writer=null,now=Date.now,extra=[],create=false}={}){
+ // `create` (the start's first write of a run it just created): the batch itself proves there is no head yet, so the read is skipped; a refusal falls back to the full path below (a replay).
+ if(create){
+  try{return await writeSourceAt(db,authority,runId,source,null,{guard,writer,now,extra});}
+  catch(error){if(error.code!=='prediction_aux_cas')throw error;}
+ }
  const current=await readSource(db,runId);
  const hash=await sha256(source);
  if(current&&current.hash===hash)return {revision:current.revision,hash,written:false};
+ return writeSourceAt(db,authority,runId,source,current,{guard,writer,now,extra},hash);
+}
+async function writeSourceAt(db,authority,runId,source,current,{guard,writer,now,extra},knownHash){
+ const hash=knownHash||await sha256(source);
  if(current)for(const [filmId,entry] of Object.entries(current.value))if(filmId in source&&await sha256(source[filmId])!==await sha256(entry))throw failed('prediction_aux_conflict',undefined,'source_conflict');
  if(current)for(const filmId of Object.keys(current.value))if(!(filmId in source))throw failed('prediction_aux_conflict',undefined,'source_conflict');
  const text=JSON.stringify(source),pieces=splitPieces(text),revision=(current?.revision||0)+1,stamp=new Date(now()).toISOString();
@@ -241,14 +250,18 @@ export async function existingManifestDigest(db,runId){return (await one(db,'SEL
 // after the manifest rows and under the same guards, so "ready" is never declared before a durable manifest.
 export async function writeManifest(db,authority,runId,answer,{guard=null,writer=null,now=Date.now,extra=[],prep=false}={}){
  const record=await buildManifestRecord(runId,answer);
- const present=await existingManifestDigest(db,runId);
- if(present){
+ const guards=()=>guardsFor(authority,guard,{run:true,writer,prep});
+ // Insert first: the primary key refuses a second manifest of the run, so the common case costs one batch; only a refusal reads the stored digest to tell a replay (same bytes: a no-op, the
+ // extra statements still commit under the guards) from a conflict (other bytes: never an overwrite).
+ try{await runBatch(db,[...guards(),...manifestStatements(record,new Date(now()).toISOString()),...extra]);return {written:true,payloadDigest:record.payloadDigest};}
+ catch(error){
+  if(error.code!=='prediction_aux_cas')throw error;
+  const present=await existingManifestDigest(db,runId);
+  if(!present)throw error;
   if(present.digest!==record.payloadDigest)throw failed('prediction_aux_conflict',undefined,'manifest_conflict');
-  if(extra.length)await runBatch(db,[...guardsFor(authority,guard,{run:true,writer,prep}),...extra]);
+  if(extra.length)await runBatch(db,[...guards(),...extra]);
   return {written:false,payloadDigest:record.payloadDigest};
  }
- await runBatch(db,[...guardsFor(authority,guard,{run:true,writer,prep}),...manifestStatements(record,new Date(now()).toISOString()),...extra]);
- return {written:true,payloadDigest:record.payloadDigest};
 }
 async function loadIndex(db,runId){
  const row=await one(db,'SELECT manifest_hash AS manifestHash, payload_digest AS payloadDigest, selected_ids AS selectedIds, drained_json AS drainedJson, bytes, piece_count AS pieceCount, part_index AS partIndex FROM prediction_run_manifest WHERE run_id=?',[runId]);
@@ -316,8 +329,7 @@ export async function readOutboxRow(db,eventKey){return parseOutboxRow(await one
 // that one insert (the counter CHECK); the refusal is counted, bounded, and the caller keeps its original answer.
 export async function admitOutbox(db,authority,{kind,identity,event,journalKey,runId=null,guard=null,writer=null,now=Date.now}){
  const eventKey=outboxKey(kind,identity);
- const existing=await readOutboxRow(db,eventKey);
- if(existing)return {admitted:false,row:existing};
+ // No read first: `ON CONFLICT DO NOTHING` on the identity inserts nothing (and fires no counter trigger) for an existing record, so a replay, also at capacity, costs the same one batch.
  const stamp=new Date(now()).toISOString();
  const at=typeof event?.at==='string'&&/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(event.at)&&event.at.length===24?event.at:stamp;
  const text=JSON.stringify(event),digest=await sha256(event);

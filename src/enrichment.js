@@ -976,7 +976,7 @@ async function auxRouteWrite(env,key,value){
  const kind=auxKeyKind(key);if(!kind)return {handled:false};
  const aux=await auxAuthority(env);if(!aux)return {handled:false};
  const options={guard:auxGuardOf(env),writer:env?.[WRITER_OWNER]||null};
- if(kind==='source')await PredictionAux.writeSource(env.DB,aux,AUX_SOURCE_KEY.exec(key)[1],value,options);
+ if(kind==='source')await PredictionAux.writeSource(env.DB,aux,AUX_SOURCE_KEY.exec(key)[1],value,{...options,create:options.guard?.create===true});
  else if(kind==='manifest')await PredictionAux.writeManifest(env.DB,aux,AUX_MANIFEST_KEY.exec(key)[1],value,options);
  else throw new Error('prediction_aux_stage_write_route');
  return {handled:true};
@@ -3231,7 +3231,7 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
     if(claimed){run.keyHash=claim.keyHash;run.argsHash=claim.argsHash;}
     if(!await held())return superseded();
     const sources=Object.fromEntries(selected.map(item=>[item.filmId,modelMetadata(item.film)]));
-    await saveJSON({...env,[BATCH_COMMIT_GUARD]:{runId:run.runId,epoch:lease.epoch,token:claimed?token:null}},ENRICHMENT_KEY+'sources/'+run.runId+'.json',sources);
+    await saveJSON({...env,[BATCH_COMMIT_GUARD]:{runId:run.runId,epoch:lease.epoch,token:claimed?token:null,create:true}},ENRICHMENT_KEY+'sources/'+run.runId+'.json',sources);
     await atStage('run_save',()=>fence(()=>savePredictionRun(wenv,run)));
     await atStage('runner_started',()=>fence(()=>runnerStarted(wenv,run,queue,null)));
     let drained={committed:[],dropped:[]};
@@ -3907,6 +3907,8 @@ async function auxManifestPart(env,aux,run,runId,part,filmId){
  return {status:200,body:{kind:part,runId,manifestHash:got.manifestHash,[part]:got.value}};
 }
 async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
+ // A part readback writes nothing, so the per-request authority marker scope (the same one the observed steps use) is safe here: the marker and the auxiliary marker are read once for the request, not once per key.
+ try{if(typeof PredictionD1!=='undefined'&&typeof PredictionD1.scopeRequest==='function')env=PredictionD1.scopeRequest(env);}catch{/* an unscoped readback reads the markers every time */}
  if(!isText(runId,100))return {status:400,body:{error:'Invalid runId',code:'invalid_run_id'}};
  if(!['envelope','profile','contract','film','hold','item'].includes(part))return {status:400,body:{error:'Invalid part',code:'invalid_part'}};
  if((part==='film'||part==='item')&&(typeof filmId!=='string'||!filmId))return {status:400,body:{error:'filmId required',code:'invalid_film_id'}};

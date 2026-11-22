@@ -196,7 +196,8 @@ const REQUEST_SCOPE_KEY=Symbol.for('iptv.requestScope');
 const READ_ONLY_SQL=/^select\b[^;]*;?\s*$/i;
 function scopedDatabase(database,scope){
  const statements=new WeakMap();
- const forget=()=>{scope.read=null;scope.aux=null;};
+ // `scope.aux` (AIR-553) is NOT dropped here: the auxiliary marker changes only by an owner flip, never inside a request, and every auxiliary write asserts the generation it read inside its own batch, so a stale read fails closed.
+ const forget=()=>{scope.read=null;};
  const statementOf=(statement,sql)=>{
   const reads=typeof sql==='string'&&READ_ONLY_SQL.test(sql.trimStart());
   const proxy=new Proxy(statement,{get(target,prop){

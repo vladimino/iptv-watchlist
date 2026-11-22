@@ -1027,6 +1027,12 @@ export const FILES={
  "prediction-aux-import.mjs": {
   "suite": "core"
  },
+ "prediction-aux-budget.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-bench-lib.mjs": {
+  "suite": "core"
+ },
  "prediction-catalog-held-event.mjs": {
   "suite": "core"
  },
