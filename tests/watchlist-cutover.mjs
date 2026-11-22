@@ -77,6 +77,11 @@ const run=async(env,command,args,extra={})=>{
   const fenced=await Op.execute('fence-root',{binding:env.db,args:{generation:args.generation,rootEtag:env.store.etag('watchlist.json')},now:NOW,readStore:env.store,writeStoreFactory:env.writeFactory});
   args={...args,rootEtag:fenced.root.etag};
  }
+ if(command==='revert-authority'&&args.rootEtag===undefined){
+  // the reverse fence of the confirmed publication comes first (AIR-571 M2)
+  const fenced=await Op.execute('fence-root-rollback',{binding:env.db,args:{generation:args.generation,run:args.run,epgGeneration:args.epgGeneration,rootEtag:env.store.etag('watchlist.json')},now:NOW,readStore:env.store,writeStoreFactory:env.writeFactory});
+  args={...args,rootEtag:fenced.root.etag};
+ }
  return Op.execute(command,{binding:env.db,args,now:NOW,ctx:trackedCtx(),readStore:env.store,writeStoreFactory:env.writeFactory,...extra});
 };
 // A guard tripped in the batch reaches the operator as a statement error of the D1 API; the stand-in throws a plain error.
@@ -106,7 +111,11 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  assert.throws(()=>Op.parseArgs(A('--release','--target','iptv','--confirm','release','--expect-generation','2','--expect-count','30','--expect-sha256',SHA,'--expect-snapshot-id',snapshotId)),e=>e.reason==='usage','release needs the full import pins');
  assert.equal(Op.parseArgs(A('--hold-rollback','--target','iptv','--confirm','hold-rollback','--expect-generation','2','--expect-count','30','--expect-sha256',SHA,'--expect-snapshot-id',snapshotId,'--expect-version','1','--expect-revision','2')).command,'hold-rollback');
  const rb=['--target','iptv','--expect-generation','3','--expect-count','30','--expect-sha256',SHA,'--expect-snapshot-id',snapshotId,'--expect-version','2','--expect-revision','5','--expect-run',RUN,'--expect-epg-generation','515'];
- for(const command of ['export-rollback','revert-authority'])assert.equal(Op.parseArgs(A('--'+command,'--target','iptv','--confirm',command,...rb.slice(2))).command,command,command);
+ assert.equal(Op.parseArgs(A('--export-rollback','--target','iptv','--confirm','export-rollback',...rb.slice(2))).command,'export-rollback');
+ assert.equal(Op.parseArgs(A('--revert-authority','--target','iptv','--confirm','revert-authority',...rb.slice(2),'--expect-root-etag','abc')).command,'revert-authority');
+ assert.throws(()=>Op.parseArgs(A('--revert-authority','--target','iptv','--confirm','revert-authority',...rb.slice(2))),e=>e.reason==='usage','the revert needs the etag the reverse fence produced');
+ assert.equal(Op.parseArgs(A('--fence-root-rollback','--target','iptv','--confirm','fence-root-rollback','--expect-generation','3','--expect-run',RUN,'--expect-epg-generation','516','--expect-root-etag','abc')).command,'fence-root-rollback');
+ assert.throws(()=>Op.parseArgs(A('--fence-root-rollback','--target','iptv','--confirm','fence-root-rollback','--expect-generation','3','--expect-run',RUN,'--expect-epg-generation','516')),e=>e.reason==='usage');
  assert.throws(()=>Op.parseArgs(A('--export-rollback','--target','iptv','--confirm','export-rollback','--expect-generation','3')),e=>e.reason==='usage','the export needs every pin');
  assert.throws(()=>Op.parseArgs(A('--revert-authority','--target','iptv','--confirm','revert-authority',...rb.slice(2).filter(x=>x!=='515'&&x!=='--expect-epg-generation'))),e=>e.reason==='usage','the revert needs the EPG generation the export produced');
  assert.equal(Op.parseArgs(A('--release-rolled-back','--target','iptv','--confirm','release-rolled-back','--expect-generation','4')).command,'release-rolled-back');
@@ -122,7 +131,10 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
   const plan=transitionStatements(name,{generation:0,facts});
   const sql=plan.statements.map(([text])=>text).join('\n');
   const tables=[...new Set([...sql.matchAll(/(?:INSERT INTO|(?<!DO )UPDATE|DELETE FROM)\s+([a-z_]+)/gi)].map(match=>match[1]))].sort();
-  assert.deepEqual(tables,['watchlist_authority','watchlist_cas'],name+' writes the marker and the fence only');
+  // `activate` and `revert-authority` also invalidate the mirror delivery receipt (the token is history, not proof of the object, once the root can be replaced by the EPG): the pointer's mirror columns and nothing else of it.
+  const invalidates=['activate','revert-authority'].includes(name);
+  assert.deepEqual(tables,invalidates?['watchlist_authority','watchlist_cas','watchlist_current']:['watchlist_authority','watchlist_cas'],name+' writes the marker, the fence'+(invalidates?' and the mirror receipt':' only'));
+  if(invalidates)assert.match(sql,/UPDATE watchlist_current SET mirror_delivered_snapshot_id=NULL, mirror_attempts=0, mirror_next_retry_at=NULL, revision=revision\+1 WHERE id=1/);
   assert.equal(plan.statements.every(([,params])=>params.length<=100),true);
   assert.equal(plan.statements.at(-1)[0],'UPDATE watchlist_cas SET ok=changes() WHERE id=1');
  }
@@ -512,7 +524,8 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
   sqlite(e.file,"UPDATE published_epg_authority SET finalized_run_id='"+RUN+"'");
   // a replacement between the read and the commit: the stored payload digest and the generation are pinned in the batch
   const racing={prepare:sql=>e.db.prepare(sql),batch:async b=>{sqlite(e.file,"UPDATE published_epg_generation SET payload_sha256='"+'9'.repeat(64)+"' WHERE programme_run_id='"+RUN+"'");return asStatement(()=>e.db.batch(b));}};
-  await stop(Op.execute('revert-authority',{binding:racing,args:revert,now:NOW,ctx:trackedCtx()}),'predicate_refused');assert.deepEqual(marker(e.file),{mode:'d1',writes:'held',generation:3});
+  const reverseFence=await Op.execute('fence-root-rollback',{binding:e.db,args:{generation:revert.generation,run:revert.run,epgGeneration:revert.epgGeneration,rootEtag:e.store.etag('watchlist.json')},now:NOW,readStore:e.store,writeStoreFactory:e.writeFactory});
+  await stop(Op.execute('revert-authority',{binding:racing,args:{...revert,rootEtag:reverseFence.root.etag},now:NOW,ctx:trackedCtx(),readStore:e.store}),'predicate_refused');assert.deepEqual(marker(e.file),{mode:'d1',writes:'held',generation:3});
  }
 }
 
@@ -648,5 +661,78 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  assert.equal((await fenced()).fenced,false,'only at epg/open does the legacy entry open again: exactly one writer');
  // the admission read is ONE statement and returns the pin only for an admitted state
  const admitted=await LbSync.legacyAdmission(lb);assert.deepEqual([admitted.fenced,admitted.watchlistGuard,Number.isInteger(admitted.revision)],[false,true,true]);
+}
+
+// ===== 11. M2: the reverse root fence, the proof in revert-authority and the invalidation of the mirror delivery receipt =====
+{
+ const prepared=async()=>{
+  const env=await imported();
+  await run(env,'hold',{generation:0,...FORWARD});await run(env,'activate',{generation:1,...FORWARD});await run(env,'release',{generation:2,...RELEASE});
+  const next=FILMS.map(f=>({id:f.id,title:f.title,year:f.year,url:f.url}));next[3]={id:'film-new',title:'A New Film',year:2024,url:'https://letterboxd.com/film/film-new/'};
+  const published=await publishSnapshot(env.db,next,{scanId:'scan-2',observedAt:'2026-11-21T20:00:00.000Z',completedAt:'2026-11-21T20:00:30.000Z',runId:'lb-run-2'},{snapshotId:'snap-2',now:NOW});assert.equal(published.ok,true);
+  for(const effect of EFFECTS)await completeEffect(env.db,{snapshotId:'snap-2',effect,receipt:'done'},{now:NOW});
+  // the D1-side mirror delivered the standalone root of this snapshot (the receipt that M2 must invalidate), the root is that standalone document
+  const ptr=pointer(env.file);
+  const standalone={updatedAt:'2026-11-21T20:00:30.000Z',films:next.map(f=>({id:f.id,title:f.title,year:f.year,url:f.url})),snapshotId:'snap-2',snapshotVersion:2,lastSuccessAt:'2026-11-21T20:00:30.000Z',source:'watchlist_authority'};
+  env.store.objects.set('watchlist.json',{text:PublishedEpg.serializeRoot(standalone),etag:md5(PublishedEpg.serializeRoot(standalone))});
+  sqlite(env.file,"UPDATE watchlist_current SET mirror_delivered_snapshot_id='snap-2|2026-11-21T20:00:30.000Z', mirror_attempts=2, mirror_next_retry_at='2026-11-21T21:00:00.000Z', revision=revision+1");
+  const p2=pointer(env.file);
+  const snap2={count:30,sha256:p2.list_sha256,snapshotId:'snap-2',version:Number(p2.version),revision:Number(p2.revision)};
+  await run(env,'hold-rollback',{generation:2,...snap2});
+  const snapAfter=pointer(env.file);const pins={count:30,sha256:snapAfter.list_sha256,snapshotId:'snap-2',version:Number(snapAfter.version),revision:Number(snapAfter.revision)};
+  const exported=await run(env,'export-rollback',{generation:3,...pins,run:RUN,epgGeneration:515});
+  return {env,next,pins,epgGeneration:exported.published.generation,standalone};
+ };
+ const {env,next,pins,epgGeneration,standalone}=await prepared();
+ const args={generation:3,run:RUN,epgGeneration};
+ const rootText=()=>env.store.objects.get('watchlist.json').text;
+ const before=env.store.etag('watchlist.json');
+ // refusals write nothing
+ await stop(Op.execute('fence-root-rollback',{binding:env.db,args:{...args,generation:2,rootEtag:before},now:NOW,readStore:env.store,writeStoreFactory:env.writeFactory}),'state_mismatch');
+ await stop(Op.execute('fence-root-rollback',{binding:env.db,args:{...args,rootEtag:'0'.repeat(32)},now:NOW,readStore:env.store,writeStoreFactory:env.writeFactory}),'root_moved');
+ await stop(Op.execute('fence-root-rollback',{binding:env.db,args:{...args,epgGeneration:epgGeneration-1,rootEtag:before},now:NOW,readStore:env.store,writeStoreFactory:env.writeFactory}),'published_moved');
+ await stop(Op.execute('fence-root-rollback',{binding:env.db,args:{...args,rootEtag:before},now:NOW}),'root_store_required');
+ assert.equal(env.store.etag('watchlist.json'),before,'refusals wrote nothing');
+ // a mirror writer that read the standalone root BEFORE the fence (an in-flight D1-side pass) holds an etag the fence destroys
+ const fencedRun=await Op.execute('fence-root-rollback',{binding:env.db,args:{...args,rootEtag:before},now:NOW,readStore:env.store,writeStoreFactory:env.writeFactory,ctx:trackedCtx()});
+ assert.equal(fencedRun.writeState,'committed');assert.equal(fencedRun.root.fenceGeneration,3);
+ assert.equal(await env.store.put('watchlist.json',JSON.stringify(standalone),{onlyIf:{etagMatches:before}}),null,'the stale mirror writer cannot put with the etag it read before the fence');
+ // the root is the LEGACY document of the confirmed publication (never a standalone mirror document a programme could be paired with)
+ const stored=JSON.parse(rootText().split('\n')[0]);
+ assert.equal('source' in stored,false);assert.equal('snapshotVersion' in stored,false);assert.equal('snapshotId' in stored,false);
+ assert.deepEqual(stored.films.map(f=>f.id),next.map(f=>f.id),'membership and order of the confirmed publication');
+ assert.equal(PublishedEpg.rootFence(rootText()).generation,3);
+ assert.equal(marker(env.file).writes,'held','the fence moves no marker');
+ // revert-authority re-proves the fence, the etag and the document
+ const fencedEtag=fencedRun.root.etag;
+ const revert={generation:3,...pins,run:RUN,epgGeneration};
+ await stop(Op.execute('revert-authority',{binding:env.db,args:{...revert,rootEtag:before},now:NOW,ctx:trackedCtx(),readStore:env.store}),'root_fence_mismatch');
+ // a fence of another generation is not a proof
+ env.store.objects.set('watchlist.json',{text:PublishedEpg.serializeRoot(stored,{fenceGeneration:2}),etag:'x-gen2'});
+ await stop(Op.execute('revert-authority',{binding:env.db,args:{...revert,rootEtag:'x-gen2'},now:NOW,ctx:trackedCtx(),readStore:env.store}),'root_not_fenced');
+ // a fenced root that is not the confirmed publication's document is refused
+ env.store.objects.set('watchlist.json',{text:PublishedEpg.serializeRoot(standalone,{fenceGeneration:3}),etag:'x-standalone'});
+ await stop(Op.execute('revert-authority',{binding:env.db,args:{...revert,rootEtag:'x-standalone'},now:NOW,ctx:trackedCtx(),readStore:env.store}),'root_not_restored');
+ // a root without any fence
+ env.store.objects.set('watchlist.json',{text:JSON.stringify(stored),etag:'x-plain'});
+ await stop(Op.execute('revert-authority',{binding:env.db,args:{...revert,rootEtag:'x-plain'},now:NOW,ctx:trackedCtx(),readStore:env.store}),'root_not_fenced');
+ assert.deepEqual(marker(env.file),{mode:'d1',writes:'held',generation:3},'no failed proof moved the marker');
+ // restore the real fence and revert: the marker returns and the historical delivery receipt is INVALIDATED in the same batch (the EPG can replace the root while the token would stay)
+ const refenced=await Op.execute('fence-root-rollback',{binding:env.db,args:{...args,rootEtag:env.store.etag('watchlist.json')},now:NOW,readStore:env.store,writeStoreFactory:env.writeFactory});
+ const receiptBefore=pointer(env.file);
+ sqlite(env.file,"UPDATE watchlist_current SET mirror_delivered_snapshot_id='snap-2|2026-11-21T20:00:30.000Z', mirror_attempts=2, mirror_next_retry_at='2026-11-21T21:00:00.000Z', revision=revision+1");
+ const withReceipt=rows(env.file,'SELECT mirror_delivered_snapshot_id AS d, mirror_attempts AS a, mirror_next_retry_at AS r, revision FROM watchlist_current')[0];
+ assert.equal(withReceipt.d,'snap-2|2026-11-21T20:00:30.000Z');
+ // the pinned pointer revision moved with the test's own bookkeeping write: re-pin it
+ const pinsNow={...pins,revision:Number(withReceipt.revision)};
+ const reverted=await Op.execute('revert-authority',{binding:env.db,args:{generation:3,...pinsNow,run:RUN,epgGeneration,rootEtag:refenced.root.etag},now:NOW,ctx:trackedCtx(),readStore:env.store});
+ assert.deepEqual(reverted.marker,{mode:'epg',writes:'held',generation:4});
+ const cleared=rows(env.file,'SELECT mirror_delivered_snapshot_id AS d, mirror_attempts AS a, mirror_next_retry_at AS r, revision FROM watchlist_current')[0];
+ assert.deepEqual([cleared.d,cleared.a,cleared.r],[null,0,null],'the delivery receipt is invalidated when ownership returns');assert.equal(Number(cleared.revision),Number(withReceipt.revision)+1);
+ // the EPG owns the root again and may replace it legitimately; the old token no longer claims anything
+ await run(env,'release-rolled-back',{generation:4});
+ const replaced=await PublishedEpg.putWatchlistRoot({DB:env.db,BUCKET:env.store},{updatedAt:'2026-11-22T05:00:00.000Z',films:[{id:'epg-film',title:'E',year:2000,url:'u'}]});
+ assert.equal(replaced.blocked,false,'epg/open: the EPG writer may replace the root');
+ void receiptBefore;
 }
 console.log('watchlist cutover: ok');

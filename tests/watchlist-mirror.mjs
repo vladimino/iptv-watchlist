@@ -204,14 +204,26 @@ const pointer=f=>f.db.sql('SELECT version, snapshot_id, last_success_at, mirror_
  assert.equal((await WatchlistD1.recordMirror(f.db,{...target,outcome:'delivered'})).ok,true);
  const delivered=pointer(f);assert.equal(delivered.mirror_attempts,0);
  // A's earlier failure arrives late: nothing is recorded (no debt, no backoff on a delivered target, no revision move)
- assert.equal((await WatchlistD1.recordMirror(f.db,{...target,outcome:'failed',attempts:0,nextRetryAt:'2026-11-21T09:50:00.000Z'})).ok,true);
+ const late=await WatchlistD1.recordMirror(f.db,{...target,outcome:'failed',attempts:0,nextRetryAt:'2026-11-21T09:50:00.000Z'});
+ assert.deepEqual([late.ok,late.applied,late.reason],[true,false,'already_delivered'],'a late failure on a delivered target is reported as a no-op, never as a recorded attempt');
  assert.deepEqual(pointer(f),delivered,'a late failure after a successful acknowledgement changes nothing');
  // a second successful acknowledgement of the same token leaves the revision unchanged
- assert.equal((await WatchlistD1.recordMirror(f.db,{...target,outcome:'delivered'})).ok,true);
+ const dup=await WatchlistD1.recordMirror(f.db,{...target,outcome:'delivered'});assert.deepEqual([dup.ok,dup.applied],[true,false]);
  assert.equal(pointer(f).revision,delivered.revision,'duplicate success: no revision bump, no contention with a scan');
  // a stale target is refused outright (the pointer moved)
  await scan(f,films(0,1,2),'2026-11-21T10:00:00.000Z');
  assert.equal((await WatchlistD1.recordMirror(f.db,{...target,outcome:'delivered'})).ok,false);
+}
+
+// 8d. Review (PR #883, carried into M2): the replay pin is ONE read of the pointer and the authority, and its guard asserts the original generation too.
+{
+ const f=open();await scan(f,films(0,1),'2026-11-21T09:40:00.000Z');
+ const pin=await WatchlistD1.pointerPin(f.db);
+ assert.deepEqual([pin.version,pin.generation,typeof pin.snapshotId,typeof pin.lastSuccessAt,Number.isInteger(pin.revision)],[1,1,'string','string',true]);
+ const run=async()=>{try{await f.db.batch([f.db.prepare(WatchlistD1.pointerGuard(pin)[0]).bind(...WatchlistD1.pointerGuard(pin)[1])]);return true;}catch{return false;}};
+ assert.equal(await run(),true);
+ f.sql("UPDATE watchlist_authority SET generation=2");assert.equal(await run(),false,'a marker transition after the pin refuses the replay even when the pointer did not move');
+ f.sql("UPDATE watchlist_authority SET generation=1,writes='held'");assert.equal(await WatchlistD1.pointerPin(f.db),null,'a held marker has no pin');
 }
 
 // 9. The Letterboxd ensure: the reconcile runs BEFORE any early return on a finished slot, its failure never blocks Events or a new slot, and an absent port changes nothing.

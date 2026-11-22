@@ -271,6 +271,10 @@ export async function recordMirror(source,{outcome,snapshotId,lastSuccessAt,gene
  if(gate.generation!==generation)return {ok:false,reason:'moved'};
  const at=iso(now??Date.now());
  const token=mirrorToken(snapshotId,lastSuccessAt);
+ // Diagnostics: an already delivered target is reported as such (`applied:false`), never as a newly recorded attempt or acknowledgement. The batch below still re-asserts everything.
+ let seen=null;
+ try{seen=await one(db,'SELECT snapshot_id, last_success_at, mirror_delivered_snapshot_id FROM watchlist_current WHERE id=1');}catch{return {ok:false,reason:'unavailable'};}
+ if(seen&&seen.snapshot_id===snapshotId&&seen.last_success_at===lastSuccessAt&&seen.mirror_delivered_snapshot_id===token)return {ok:true,applied:false,reason:'already_delivered'};
  // The target must still be the CURRENT pointer (a guard, so a stale pass records nothing), and the bookkeeping applies only while the target is still OWED: an already delivered target is an idempotent no-op
  // (no row change, so no revision bump and no contention with a scan), and a late failure never records debt after a successful acknowledgement of the same target.
  const targetGuard=[GUARD('(SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND snapshot_id=? AND last_success_at=?)'),[snapshotId,lastSuccessAt]];
@@ -279,7 +283,7 @@ export async function recordMirror(source,{outcome,snapshotId,lastSuccessAt,gene
   :['UPDATE watchlist_current SET mirror_attempts=mirror_attempts+1, mirror_next_retry_at=?, revision=revision+1, updated_at=? WHERE id=1 AND snapshot_id=? AND last_success_at=? AND mirror_attempts=? AND mirror_delivered_snapshot_id IS NOT ?',[nextRetryAt,at,snapshotId,lastSuccessAt,attempts,token]];
  const result=await fenced(db,[authorityGuard(generation),...extra,targetGuard,update]);
  if(result==='conflict')return {ok:false,reason:'conflict'};
- return result==='ok'?{ok:true}:{ok:false,reason:'unavailable'};
+ return result==='ok'?{ok:true,applied:true}:{ok:false,reason:'unavailable'};
 }
 
 // The exact pointer a scan started from, and the guard that re-asserts it in the batch of a replay (AIR-571 M1 review): {version, snapshotId, lastSuccessAt, revision, generation} | null.
@@ -287,13 +291,14 @@ export async function pointerPin(source){
  const db=database(source);
  if(!db)return null;
  try{
-  const gate=await readAuthority(db);
-  if(gate.state!=='d1'||gate.writes!=='open')return null;
-  const row=await one(db,'SELECT version, snapshot_id, last_success_at, revision FROM watchlist_current WHERE id=1');
-  return row?{version:Number(row.version),snapshotId:row.snapshot_id??null,lastSuccessAt:row.last_success_at??null,revision:Number(row.revision),generation:gate.generation}:null;
+  // ONE read of the pointer and the authority: they are the same instant, never two reads that could straddle a transition.
+  const row=await one(db,"SELECT c.version AS version, c.snapshot_id AS snapshot_id, c.last_success_at AS last_success_at, c.revision AS revision, a.mode AS mode, a.writes AS writes, a.generation AS generation, (SELECT COUNT(*) FROM watchlist_cas WHERE id=1) AS cas FROM watchlist_current c, watchlist_authority a WHERE c.id=1 AND a.id=1");
+  if(!row||row.mode!=='d1'||row.writes!=='open'||Number(row.cas)!==1)return null;
+  return {version:Number(row.version),snapshotId:row.snapshot_id??null,lastSuccessAt:row.last_success_at??null,revision:Number(row.revision),generation:Number(row.generation)};
  }catch{return null;}
 }
-export const pointerGuard=pin=>[GUARD('(SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=? AND snapshot_id IS ? AND last_success_at IS ?)'),[pin.version,pin.snapshotId,pin.lastSuccessAt]];
+// The guard of a replay: the pointer is still the one the scan started from AND the authority is still the same open generation (so a replay can never commit across a marker transition).
+export const pointerGuard=pin=>[GUARD("CASE WHEN (SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=? AND snapshot_id IS ? AND last_success_at IS ?)=1 AND (SELECT COUNT(*) FROM watchlist_authority WHERE id=1 AND mode='d1' AND writes='open' AND generation=?)=1 THEN 1 ELSE 0 END"),[pin.version,pin.snapshotId,pin.lastSuccessAt,pin.generation]];
 
 // ---- publication ---------------------------------------------------------------------------------------------------------
 // ADR 0186 decision 1: a complete scan result becomes the new snapshot, or a no-op. The caller proves completeness (every page, total, repeat read of page 1); this function never decides it.

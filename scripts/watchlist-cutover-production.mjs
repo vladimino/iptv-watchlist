@@ -16,6 +16,10 @@
 //   release-rolled-back  epg/held G -> epg/open G
 //   fence-root      epg/held G (no D1 write)  changes the ETAG of the root watchlist.json mirror in R2 (a conditional re-serialization of the same list), so that no EPG-side root writer that read the object
 //                   before the fence can still write it; pins: the generation and the etag read before. `activate` then requires the etag the fence produced (--expect-root-etag)
+//   fence-root-rollback  d1/held G (no D1 write)  the REVERSE fence (AIR-571 M2): after `export-rollback`, rewrites the root watchlist.json as the legacy document of the confirmed EPG publication (the one the export
+//                   produced) with a generation-specific fence token and a fresh nonce, by a conditional put on the etag read before, then proves it by readback. Any D1-side mirror writer that read the object before
+//                   the fence cannot put again (its etag is gone) and a later one finds the marker held. `revert-authority` requires the etag this produced (--expect-root-etag) and re-proves the fence,
+//                   the document and the etag before the marker returns to `epg`. `revert-authority` and `activate` also INVALIDATE the mirror delivery receipt in watchlist_current
 //
 // Not here: the Ratings close, the Letterboxd mode switch, the root mirror reconciliation, the binding and the cron.
 import {pathToFileURL} from 'node:url';
@@ -29,7 +33,7 @@ import {listDigest,normalizeFilms} from '../src/watchlist-d1.js';
 import * as PublishedEpg from '../src/published-epg.js';
 import {exportGuards,TRANSITIONS,transitionStatements} from '../src/watchlist-cutover.js';
 
-export const COMMANDS=['status',...Object.keys(TRANSITIONS),'export-rollback','fence-root'];
+export const COMMANDS=['status',...Object.keys(TRANSITIONS),'export-rollback','fence-root','fence-root-rollback'];
 export const ROOT_KEY='watchlist.json';
 const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generation':'generation','--expect-run':'run','--expect-epg-generation':'epgGeneration','--expect-count':'count','--expect-members-sha256':'membersSha256','--expect-sha256':'sha256','--expect-snapshot-id':'snapshotId','--expect-version':'version','--expect-revision':'revision','--expect-root-etag':'rootEtag'};
 const NEEDS={
@@ -40,7 +44,8 @@ const NEEDS={
  'release-abort':['generation'],
  'hold-rollback':['generation','count','sha256','snapshotId','version','revision'],
  'export-rollback':['generation','count','sha256','snapshotId','version','revision','run','epgGeneration'],
- 'revert-authority':['generation','count','sha256','snapshotId','version','revision','run','epgGeneration'],
+ 'revert-authority':['generation','count','sha256','snapshotId','version','revision','run','epgGeneration','rootEtag'],
+ 'fence-root-rollback':['generation','run','epgGeneration','rootEtag'],
  'release-rolled-back':['generation'],
 };
 const iso=ms=>new Date(ms).toISOString();
@@ -200,6 +205,72 @@ export async function fenceRoot(state,args,{readStore,writeStoreFactory,ctx={}})
  return {operation:'fence-root',writes:true,writeState:'committed',root:{etag:after.etag,previousEtag:args.rootEtag,fenceGeneration:fence.generation,nonce:fence.nonce},marker:m,next:'activate with --expect-root-etag '+after.etag};
 }
 
+// ---- the REVERSE root fence (AIR-571 M2) ----------------------------------------------------------------------------------------
+// In `d1`/`held` the root `watchlist.json` is the standalone mirror of the Watchlist authority. Before the marker may return to `epg`, the root must (a) become the legacy document of the CONFIRMED EPG publication (the
+// generation the rollback export produced, never a standalone document that a programme could be paired with) and (b) carry a fence token of THIS held generation with a fresh nonce, so that no D1-side mirror writer that
+// read the object before the fence can write again: its conditional put needs an etag that no longer exists, and a later one finds the marker held. The document is rebuilt from the stored published watchlist part
+// (`state.source`), proven equal to the pinned snapshot in membership, order and digest, and verified by readback. No D1 write.
+function exportParityProof(state,args,p,rows){
+ const pub=state.published;
+ if(!pub||pub.mode!=='d1'||pub.cutover!=='open'||pub.programme_run_id!==args.run||Number(pub.generation)!==args.epgGeneration)throw new OperatorStop('published_moved',3,{published:pub?{programmeRunId:pub.programme_run_id,generation:Number(pub.generation)}:null});
+ if(pub.finalized_run_id!==pub.programme_run_id)throw new OperatorStop('published_not_certified',3);
+ const document=state.source;
+ return document;
+}
+export async function fenceRootRollback(binding,state,args,clock,{readStore,writeStoreFactory,ctx={}}){
+ const m=markerOf(state);
+ if(m.mode!=='d1'||m.writes!=='held'||m.generation!==args.generation)throw new OperatorStop('state_mismatch',3,{marker:m});
+ if(!readStore||!writeStoreFactory)throw new OperatorStop('root_store_required',2);
+ const lb=letterboxdFact(state);
+ if(!lb||!lb.closed)throw new OperatorStop('letterboxd_not_closed',3);
+ const live=livenessOf({control:state.orchestration.control,lease:state.orchestration.lease},clock);
+ if(!live.ok)throw new OperatorStop('liveness_unknown',3,{reason:live.reason});
+ if(live.busy)throw new OperatorStop('writer_active',3,{busy:live.busy});
+ const p=state.pointer;
+ const rows=p?await many(binding,'SELECT lid FROM watchlist_member WHERE snapshot_id=? ORDER BY ordinal',[p.snapshot_id]):[];
+ const document=exportParityProof(state,args,p,rows);
+ const normalized=document&&Array.isArray(document.films)?normalizeFilms(document.films):null;
+ if(!p||!normalized||await listDigest(normalized)!==p.list_sha256||JSON.stringify(state.sourceMembers)!==JSON.stringify(rows.map(row=>row.lid)))throw new OperatorStop('parity_mismatch',3,{problems:['document_digest']});
+ let object;
+ try{object=await readStore.get(ROOT_KEY);}catch{throw new OperatorStop('root_unreadable',3);}
+ if(args.rootEtag==='absent'){if(object)throw new OperatorStop('root_moved',3,{root:{etag:object.etag}});}
+ else{
+  if(!object)throw new OperatorStop('root_absent',3);
+  if(object.etag!==args.rootEtag)throw new OperatorStop('root_moved',3,{root:{etag:object.etag}});
+ }
+ // The restored legacy document: the confirmed publication's watchlist part exactly as stored, never a standalone mirror document (no snapshotId, snapshotVersion or source).
+ const fenced=PublishedEpg.serializeRoot(document,{fenceGeneration:m.generation});
+ const store=writeStoreFactory(new Set([ROOT_KEY]));
+ if(ctx.track)ctx.track('unknown');
+ let saved,failure=null;
+ try{saved=await store.put(ROOT_KEY,fenced,{onlyIf:object?{etagMatches:args.rootEtag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});}catch(error){failure=error;}
+ let after=null,afterText=null;
+ try{after=await readStore.get(ROOT_KEY);afterText=after?await after.text():null;}catch{after=null;}
+ const reached=Boolean(after)&&afterText===fenced&&(args.rootEtag==='absent'||after.etag!==args.rootEtag);
+ if(failure||!saved){
+  if(!failure&&saved==null&&after&&!reached){if(ctx.track)ctx.track('none');throw new OperatorStop('root_moved',3,{root:{etag:after.etag}});}
+  if(ctx.track)ctx.track('unknown');
+  throw new OperatorStop('write_uncertain',3,{root:after?{etag:after.etag,fenced:reached}:null});
+ }
+ const fence=PublishedEpg.rootFence(afterText);
+ const equivalent=PublishedEpg.rootSemantic(afterText)!==null&&PublishedEpg.rootSemantic(afterText)===PublishedEpg.rootSemantic(document);
+ if(!reached||!equivalent||!fence||fence.generation!==m.generation)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',root:after?{etag:after.etag}:null});
+ if(ctx.track)ctx.track('committed');
+ return {operation:'fence-root-rollback',writes:true,writeState:'committed',root:{etag:after.etag,previousEtag:args.rootEtag,fenceGeneration:fence.generation,nonce:fence.nonce},marker:m,next:'revert-authority with --expect-root-etag '+after.etag};
+}
+// `revert-authority` re-proves the reverse fence before the marker returns: the root carries THIS generation's fence, is the etag the fence produced and is semantically the confirmed publication's document.
+async function proveReverseFence(state,args,readStore){
+ if(!readStore)throw new OperatorStop('root_store_required',2);
+ let object,rootText;
+ try{object=await readStore.get(ROOT_KEY);rootText=object?await object.text():null;}catch{throw new OperatorStop('root_unreadable',3);}
+ if(!object)throw new OperatorStop('root_absent',3);
+ const fence=PublishedEpg.rootFence(rootText);
+ if(!fence||fence.generation!==args.generation)throw new OperatorStop('root_not_fenced',3,{fence:fence?{generation:fence.generation}:null,expected:args.generation});
+ if(object.etag!==args.rootEtag)throw new OperatorStop('root_fence_mismatch',3,{root:{etag:object.etag}});
+ const document=state.source;
+ if(!document||PublishedEpg.rootSemantic(rootText)===null||PublishedEpg.rootSemantic(rootText)!==PublishedEpg.rootSemantic(document))throw new OperatorStop('root_not_restored',3);
+}
+
 // ---- one transition ------------------------------------------------------------------------------------------------------------
 export async function execute(command,{binding,args={},now,ctx={},readStore=null,writeStoreFactory=null}){
  const clock=typeof now==='function'?now():now;
@@ -212,6 +283,7 @@ export async function execute(command,{binding,args={},now,ctx={},readStore=null
  }
  if(command==='export-rollback')return exportRollback(binding,state,args,clock,ctx);
  if(command==='fence-root')return fenceRoot(state,args,{readStore,writeStoreFactory,ctx});
+ if(command==='fence-root-rollback')return fenceRootRollback(binding,state,args,clock,{readStore,writeStoreFactory,ctx});
  const spec=TRANSITIONS[command];
  if(!spec)throw new OperatorStop('usage',2);
  const m=markerOf(state);
@@ -267,6 +339,8 @@ export async function execute(command,{binding,args={},now,ctx={},readStore=null
   if(!generation||!/^[0-9a-f]{64}$/.test(generation.payload_sha256||''))throw new OperatorStop('published_moved',3);
   facts.parity={programmeRunId:args.run,epgGeneration:args.epgGeneration,payloadSha256:generation.payload_sha256};
  }
+ // The reverse root fence is proven after the publication parity (the document it must equal) and before anything is written.
+ if(command==='revert-authority')await proveReverseFence(state,args,readStore);
  if(spec.needs.includes('checkpoint')){
   const c=state.checkpoint;
   if(!c||c.writes!=='open'||!['r2','d1'].includes(c.mode))throw new OperatorStop('checkpoint_not_settled',3,{checkpoint:c?{mode:c.mode,writes:c.writes}:null});
@@ -301,16 +375,26 @@ export async function execute(command,{binding,args={},now,ctx={},readStore=null
   throw new OperatorStop(untouched?'predicate_refused':'write_uncertain',3,{marker:after?markerOf(after):null,...(reached?{reachedByUnknownOutcome:true}:{})});
  }
  if(!after||!reached)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',marker:after?markerOf(after):null});
- const problems=readbackProblems(state,after);
+ const problems=readbackProblems(state,after,{invalidate:Boolean(spec.invalidateMirror)});
+ if(spec.invalidateMirror){
+  let receipt=null;
+  try{receipt=await one(binding,'SELECT mirror_delivered_snapshot_id AS d, mirror_attempts AS a, mirror_next_retry_at AS r FROM watchlist_current WHERE id=1');}catch{receipt=null;}
+  if(!receipt||receipt.d!==null||Number(receipt.a)!==0||receipt.r!==null)problems.push('mirror_receipt_not_cleared');
+ }
  if(problems.length)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',problems,...view(after)});
  if(ctx.track)ctx.track('committed');
  return {operation:command,writes:true,writeState:'committed',before:m,marker:plan.target,after:view(after)};
 }
 
 // After a transition only the marker moved: the pointer, the snapshot rows and the journal are as read, and the STABLE fields of the other domains are unchanged (never whole-row digests of live counters).
-export function readbackProblems(before,after){
+export function readbackProblems(before,after,{invalidate=false}={}){
  const problems=[];
- if(JSON.stringify(pointerOf(before))!==JSON.stringify(pointerOf(after)))problems.push('pointer_moved');
+ // A transition that invalidates the mirror delivery receipt (activate, revert-authority) raises the pointer revision by exactly one; every other pointer field is unchanged.
+ const strip=pointer=>{if(!pointer)return pointer;const {revision,...rest}=pointer;return rest;};
+ if(invalidate){
+  const b=pointerOf(before),a=pointerOf(after);
+  if(JSON.stringify(strip(b))!==JSON.stringify(strip(a))||!(a.revision===b.revision||a.revision===b.revision+1))problems.push('pointer_moved');
+ }else if(JSON.stringify(pointerOf(before))!==JSON.stringify(pointerOf(after)))problems.push('pointer_moved');
  if(JSON.stringify(before.counts)!==JSON.stringify(after.counts))problems.push('rows_moved');
  for(const table of Object.keys(before.markers))if(before.markers[table]!==after.markers[table])problems.push('marker_changed:'+table);
  if(JSON.stringify(before.checkpoint)!==JSON.stringify(after.checkpoint))problems.push('checkpoint_changed');
@@ -382,7 +466,7 @@ export async function runWatchlistCutoverProduction({argv=process.argv,env=proce
    if(described.uuid!==PRODUCTION_DATABASE_ID||described.name!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_identity_mismatch',3);
    binding=createPublishedBinding(adapter);
    if(parsed.command!=='status')ctx.bookmark=await readBookmark(target,fetchImpl);
-   if(['activate','fence-root'].includes(parsed.command)){readStore=readStoreOf(env,fetchImpl);if(parsed.command==='fence-root')writeStoreFactory=writeStoreFactoryOf(env,fetchImpl);}
+   if(['activate','fence-root','fence-root-rollback','revert-authority'].includes(parsed.command)){readStore=readStoreOf(env,fetchImpl);if(['fence-root','fence-root-rollback'].includes(parsed.command))writeStoreFactory=writeStoreFactoryOf(env,fetchImpl);}
   }
   const result=await execute(parsed.command,{binding,args:parsed.args,now,ctx:{track},readStore,writeStoreFactory});
   let bookmarkAfter=null;
