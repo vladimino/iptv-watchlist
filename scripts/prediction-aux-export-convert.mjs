@@ -121,7 +121,9 @@ export async function convertSnapshot({snapshot,output,afterVerify=null}){
   fs.writeFileSync(path.join(target,'identity.json'),identityText,{flag:'wx',mode:0o600});
   const report={
    schemaVersion:1,
-   snapshot:{status:verified.status,objects:verified.objects,bytes:verified.bytes,aggregateSha256:verified.aggregateSha256,startedAt:manifest.startedAt??null,finishedAt:manifest.finishedAt??null},
+   snapshot:{status:verified.status,objects:verified.objects,bytes:verified.bytes,aggregateSha256:verified.aggregateSha256,startedAt:manifest.startedAt??null,finishedAt:manifest.finishedAt??null,
+    // Where the cut was taken (the exporter's own record of the source): the cutover operator requires the two captures it compares to name the same source.
+    source:{kind:manifest.source?.kind??null,bucket:manifest.source?.bucket??null,accountId:manifest.source?.accountId??null}},
    converted:{objects:identity.length,bytes:identity.reduce((sum,item)=>sum+item.size,0),skippedObjects:manifest.objects.length-identity.length,families,identitySha256:sha(identityText)},
    input:'tree',
    next:['node scripts/prediction-aux-d1-import.mjs report <output-dir>/tree','node scripts/prediction-aux-d1-import.mjs digest <output-dir>/tree','node scripts/prediction-aux-d1-import.mjs preflight <output-dir>/tree','node scripts/prediction-aux-d1-import.mjs sql <output-dir>/tree --generation N','node scripts/prediction-aux-d1-import.mjs verify <output-dir>/tree']

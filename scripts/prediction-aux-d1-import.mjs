@@ -163,10 +163,14 @@ export async function planReport(plan){
 // old writers are admitted, and an export taken under one closure cannot be imported under a later one: the reopen `closed -> r2 -> closed` raises the generation) and every auxiliary table is empty
 // (an import never merges into existing history). The generation is never assumed: the caller (the cutover operator) reads it from the marker after the close and passes it.
 // Every statement is one line and holds at most one piece, so none exceeds the D1 statement budget.
+// The first statement of every import file, exactly. The owner-only operator compares the file's first statement with this text (never with a prefix), so an import file cannot carry a different guard.
+export function importGuardStatement(generation){
+ const empty=['prediction_batch_stage','prediction_run_source_head','prediction_run_manifest','prediction_event_outbox'].map(table=>'(SELECT count(*)=0 FROM '+table+')').join('*');
+ return "UPDATE prediction_aux_cas SET ok=(SELECT count(*) FROM prediction_aux_authority WHERE id=1 AND mode='closed' AND generation="+generation+")*"+empty+' WHERE id=1';
+}
 export function planSql(plan,generation){
  if(!Number.isSafeInteger(generation)||generation<1)throw Object.assign(new Error('planSql needs the generation of the closed marker the export belongs to (an integer, 1 or more)'),{blocker:true});
- const empty=['prediction_batch_stage','prediction_run_source_head','prediction_run_manifest','prediction_event_outbox'].map(table=>'(SELECT count(*)=0 FROM '+table+')').join('*');
- const lines=["UPDATE prediction_aux_cas SET ok=(SELECT count(*) FROM prediction_aux_authority WHERE id=1 AND mode='closed' AND generation="+generation+")*"+empty+' WHERE id=1;'];
+ const lines=[importGuardStatement(generation)+';'];
  const stamp='1970-01-01T00:00:00.000Z';
  for(const r of plan.stage)lines.push('INSERT INTO prediction_batch_stage (film_id, position, item_digest, held_by_run_id, held_at, body_bytes, item_json) VALUES ('+[sqlq(r.filmId),r.position,sqlq(r.itemDigest),sqlq(r.heldByRunId),sqlq(r.heldAt),r.bodyBytes,sqlq(r.itemJson)].join(', ')+');');
  if(plan.stage.length)lines.push('UPDATE prediction_batch_stage_head SET item_count='+plan.stageHead.itemCount+', total_bytes='+plan.stageHead.totalBytes+', revision=1, updated_at='+sqlq(plan.stageHead.updatedAt)+' WHERE id=1 AND revision=0;');

@@ -9,6 +9,12 @@ Applies to ChatGPT, Cursor and other agents working on this repository. Read [th
 - [ADR register](docs/adr/README.md) — durable decisions, rationale and boundaries; [technical references](docs/reference/README.md) — maintained APIs and domain contracts.
 - [Runbooks](docs/runbooks/README.md), [process](docs/process/README.md), [evidence](docs/evidence/README.md), [archive](docs/archive/README.md). Historical measurements and superseded procedures are not runtime authority.
 
+## Cloudflare account tier and resource budgeting
+
+- The production Cloudflare account uses **Workers Paid**, as [confirmed by the owner](https://trello.com/c/b6UrtwUG#comment-6b0315fe15c18113d92314f2). Treat Paid, **not Free**, as the capacity and cost baseline for technical planning. Do not impose Free-only D1 daily write quotas, Free quota percentages, or extra QA/optimization gates justified by Free pricing.
+- D1 `rows_written` includes index writes. An estimated or observed write count is a measurement, **not automatically a GO/NO-GO threshold**. Do not optimize snapshot writes or reject a rollout to meet an arbitrary per-run write ceiling. Introduce a resource budget or optimization only for a demonstrated Paid-plan allowance/charge, current account usage, runtime limit, performance problem or correctness risk, with proportional evidence and owner approval where material.
+- Paid pricing does not remove actual D1 SQL/binding/batch constraints, Worker runtime limits, correctness tests, domain authority fences, or explicit owner authorization for production mutations. Verify current provider limits and account telemetry when they materially affect a decision; revise the billing baseline only if the owner reports a plan change or authoritative billing evidence contradicts it.
+
 ## Collaboration and delivery
 
 - Roles are capability-based, not ChatGPT/Cursor-specific: Product Owner decides intent, material trade-offs and final product acceptance; Planner chooses approved ready work; Executor implements; Independent Reviewer checks; Delivery Controller handles approved merge, CI/CD, evidence and Trello. See [authorization](docs/process/authorization-and-escalation.md).

@@ -234,11 +234,13 @@ const worker=fs.readFileSync('src/worker.js','utf8');
 const helpers=/async function loadEpgChannelPolicy\(env\)\{[\s\S]*?\n\}\n/.exec(worker)[0]+/function epgDeclarationRegistrar\(env,holder\)\{[\s\S]*?\n\}\n/.exec(worker)[0];
 const load=(stub)=>vm.runInNewContext(helpers+';({loadEpgChannelPolicy,epgDeclarationRegistrar})',{EpgChannelD1:stub,Date,Error});
 {const never={materializePolicies:async()=>{throw new Error('must not be read');}};
- for(const value of [undefined,'off','ON',' on','true'])assert.deepEqual(plain(await load(never).loadEpgChannelPolicy({EPG_CHANNEL_POLICY:value})),{mode:'legacy'},JSON.stringify(value)+' is legacy and reads nothing');
- const ok=await load({materializePolicies:async()=>({ok:true,revision:4,digest:'d'.repeat(64),map:new Map([['ch001',{policy:'discover',basis:'category'}]])})}).loadEpgChannelPolicy({EPG_CHANNEL_POLICY:'on'});
+ // AIR-565: an absent, `off` or `on` binding changes nothing; the snapshot is always read and an unfiltered scan cannot be selected.
+ for(const value of [undefined,'off','on','ON','true'])assert.notEqual((await load({materializePolicies:async()=>({ok:false,reason:'absent'})}).loadEpgChannelPolicy(value===undefined?{}:{EPG_CHANNEL_POLICY:value})).mode,'legacy','binding '+JSON.stringify(value)+' never yields legacy');
+ for(const env of [undefined,null,{}])assert.equal((await load({materializePolicies:async()=>({ok:false,reason:'absent'})}).loadEpgChannelPolicy(env)).mode,'degraded','no env degrades, never legacy');
+ const ok=await load({materializePolicies:async()=>({ok:true,revision:4,digest:'d'.repeat(64),map:new Map([['ch001',{policy:'discover',basis:'category'}]])})}).loadEpgChannelPolicy({});
  assert.equal(ok.mode,'filtered');assert.equal(ok.revision,4);assert.equal(ok.map.size,1);
- for(const reason of ['empty','absent','incomplete','unavailable'])assert.deepEqual(plain(await load({materializePolicies:async()=>({ok:false,reason})}).loadEpgChannelPolicy({EPG_CHANNEL_POLICY:'on'})),{mode:'degraded',reason},reason+' degrades instead of refusing');
- assert.deepEqual(plain(await load({materializePolicies:async()=>{throw new Error('boom');}}).loadEpgChannelPolicy({EPG_CHANNEL_POLICY:'on'})),{mode:'degraded',reason:'unavailable'},'a throwing reader degrades');
+ for(const reason of ['empty','absent','incomplete','unavailable'])assert.deepEqual(plain(await load({materializePolicies:async()=>({ok:false,reason})}).loadEpgChannelPolicy({})),{mode:'degraded',reason},reason+' degrades instead of refusing');
+ assert.deepEqual(plain(await load({materializePolicies:async()=>{throw new Error('boom');}}).loadEpgChannelPolicy({})),{mode:'degraded',reason:'unavailable'},'a throwing reader degrades');
  // the registrar records detected vs registered, never throws
  const holder={value:null};
  await load({registerXmltvChannels:async(env,{channels})=>({ok:true,registered:channels.length-1,invalid:1})}).epgDeclarationRegistrar({},holder)({channels:[{channelId:'ch1'},{channelId:'ch2'}]});
@@ -253,7 +255,7 @@ assert.ok(!/publication refused/.test(worker),'a Channel snapshot failure never 
 assert.ok(worker.indexOf('loadEpgChannelPolicy(env)')<worker.indexOf("tracedPhase(run.runId,'epg_input_scan'"),'the snapshot is read once, before the scan');
 assert.ok(/onDeclarations:epgDeclarationRegistrar\(env,registration\)/.test(worker)&&!/registerEpgChannels/.test(worker),'registration is the declaration-boundary callback of the single scan pass, not a publish step');
 const registry=fs.readFileSync('src/feature-flags.js','utf8');
-assert.ok(/name:'EPG_CHANNEL_POLICY',modes:\['off','on'\],default:'off'/.test(registry),'the flag is registered, default off');
+assert.ok(/name:'EPG_CHANNEL_POLICY',modes:\[\],default:null,tokens:\['off','on'\],retired:true,effective:\(\)=>null/.test(registry),'AIR-565: the flag is registered as retired and inert');
 
 // ===== 7. the event carries mode, counters and warnings; old events render unchanged =====
 const policyEvent=/function epgPolicyEventFields\(report\)\{[\s\S]*?\n\}/.exec(worker)[0];

@@ -17,7 +17,8 @@ import * as Aux from '../src/prediction-aux-d1.js';
 labelStarts();
 
 const sha256=bytes=>createHash('sha256').update(bytes).digest('hex');
-const tmp=()=>fs.mkdtempSync(path.join(os.tmpdir(),'aux-convert-'));
+const made=[];process.on('exit',()=>{for(const dir of made)try{fs.rmSync(dir,{recursive:true,force:true});}catch{/* best effort */}});
+const tmp=()=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),'aux-convert-'));made.push(dir);return dir;};
 const noSleep=async()=>{};
 const refusal=async(promise,code)=>{try{await promise;}catch(error){assert.ok(error instanceof Refusal,'a typed refusal, got '+error);assert.equal(error.code,code,JSON.stringify(error.detail));return error;}assert.fail('expected the refusal '+code);};
 const applySql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+text+'COMMIT;',encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr.trim());};
