@@ -50,7 +50,7 @@ The code is already in `main` and dormant. What the deployment changes is config
 
 ## Offline evidence that backs each holdpoint
 
-The offline matrix (the four authority combinations, an EPG run in flight at the marker flip with a failing mirror, a 16:30 run delayed past 17:00, a stale snapshot, an unknown admission, concurrent Discovery and Ratings admissions, T21 and T24, the two independent Events) and the resource measurements are listed with their honest scope (surrogate versus Cloudflare runtime) in the dated evidence of the QA slice, linked from the [Letterboxd Sync runbook](letterboxd-sync.md) when it is delivered. Until then this plan is not complete for a GO.
+The offline matrix (the four authority combinations, an EPG step in flight at the marker flip with a failing mirror, a 16:30 slot delayed past 17:00, a stale snapshot, an unknown admission, a live Discovery lease, T21 and T24, the two independent Events) and the resource measurements, with their honest scope (surrogate versus Cloudflare runtime) and the one open gap (a race of the Letterboxd and Discovery admissions of one new Film), are in [the dated QA evidence](../evidence/d1-migration/air-571-offline-qa-2026-11-22.md). The Cloudflare runtime measurement of a whole slot is NOT done: it needs a scratch Cloudflare environment under its own owner-approved plan, so this plan is complete for review but its holdpoint F resource claims stay unmeasured until then.
 
 ## Do not
 

@@ -35,7 +35,7 @@ Offline evidence for the activation plan ([activation runbook](../../runbooks/le
 | Rows inserted | 700 members, 200 changes, 100 pending admissions, 3 effects, 1 staging, 1 snapshot = about 1,005, plus pointer updates; 1,305 when 300 ids are added | Yes (D1 billing is by rows written: the free plan allows 100,000 rows written per day, the paid plan 50 million per month; four slots of at most about 1,300 rows are far below both) |
 | A `no_change` scan | 1 batch, 4 statements, no row inserted | Yes |
 | Worker-side list work (normalize and SHA-256 of the 700-film list) | about 0.5 ms in Node | **Order of magnitude only** (Node, not workerd) |
-| List payload size | about 77 KB for 700 films (arithmetic from the serialized list) | Estimate; the Worker limit is 128 MB of memory |
+| List payload size | about 84 KB for 700 films (the serialized length of the generated list, 86,471 bytes) | Estimate; the Worker limit is 128 MB of memory |
 | Wall time and process CPU of the whole promotion | 36 to 53 ms wall, 23 to 41 ms process CPU | **No**: the stand-in spawns a sqlite process per call; Cloudflare D1 latency and workerd CPU are different |
 | Heap deltas | not meaningful (garbage collection noise; negative values observed) | No |
 
