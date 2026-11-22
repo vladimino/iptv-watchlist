@@ -1,9 +1,9 @@
 # ADR 0201: Prediction recovery admits a stored Letterboxd id through the catalog film of the same trusted canonical Film
 
-**Status:** Proposed (owner chose option C for the 11 `not_admitted` films and then the stored-id key approach on 2026-11-22 in the [AIR-478 thread](https://trello.com/c/IbsSCRce); this ADR awaits independent review and explicit owner acceptance)  
+**Status:** Accepted (owner accepted the specific ADR 0201 policy on 2026-11-22, [AIR-478 approval](https://trello.com/c/IbsSCRce#comment-6b035c44069a7189e49e66c7), after [independent technical PASS](https://github.com/vladimino/iptv-watchlist/pull/921#pullrequestreview-6014573269))  
 **Original decision date:** 2026-11-22  
 **Recorded at:** 2026-11-22  
-**Approval source:** [AIR-478 owner decision C](https://trello.com/c/IbsSCRce) (direction only; no production operation authorized)  
+**Approval source:** [AIR-478 owner acceptance of ADR 0201](https://trello.com/c/IbsSCRce#comment-6b035c44069a7189e49e66c7); [earlier direction C](https://trello.com/c/IbsSCRce) (code architecture only; no production operation authorized)  
 **Related work:** [AIR-478](https://trello.com/c/IbsSCRce)  
 **Supersedes:** None  
 **Amends:** [ADR 0165](0165-scoped-prediction-recovery-intent.md) decision 6 only for stored Letterboxd ids whose Film is already in the admitted catalog; the rest of decision 6 is unchanged  
@@ -29,7 +29,7 @@ A film the owner has watched leaves the watchlist. The admitted catalog (D1 `dis
 
 ## Consequences
 
-The alias costs one bridge read per active intent per queue rebuild (bounded by the active-intent cap). A film with a verified negative identity is not aliased; an unreadable identity fails the rebuild (retried by the next start).
+The alias costs up to one bridge read per historically cohort-named Film on each queue rebuild (bounded by the distinct recovered-id cap of 1000). A film with a verified negative identity is not aliased; an unreadable identity fails the rebuild (retried by the next start).
 
 ## Recovery and migration boundary
 
