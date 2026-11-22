@@ -35,7 +35,7 @@ node scripts/prediction-aux-d1-import.mjs preflight <r2-export> > aux-preflight.
 
 ## Cutover handoff for AIR-554 (the invariant, not the procedure)
 
-AIR-554 chooses the bounded procedure and its holdpoints under its own owner plan. The invariant it must meet ([ADR 0194](../adr/0194-prediction-auxiliary-state-d1-checkpoint-and-outbox.md) decision 1): a marker pre-read is not a cross-store fence, and D1 cannot fence an R2 object. So, before the marker flips:
+AIR-554 chooses the bounded procedure and its holdpoints under its own owner plan; the proposed (not approved) plan is the [AIR-554 preflight and L3 plan](../evidence/prediction/air-554-aux-cutover-plan-2026-11-22.md). The invariant it must meet ([ADR 0194](../adr/0194-prediction-auxiliary-state-d1-checkpoint-and-outbox.md) decision 1): a marker pre-read is not a cross-store fence, and D1 cannot fence an R2 object. So, before the marker flips:
 
 1. admission of **all** legacy auxiliary writers is closed: the runner and the deferred Workflow instances, but also the lease-free writers (the skipped-event park, index entry, delivery and acknowledgement of an ordinary HTTP request) and every request that read `r2` earlier;
 2. in-flight old-authority mutations are drained or proven unable to land (a live runner lease, a deferred instance in `preparing`, pending outbox records and the held stage are preconditions to list, drain or preserve);
