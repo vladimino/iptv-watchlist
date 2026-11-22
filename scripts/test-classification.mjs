@@ -448,6 +448,9 @@ export const FILES={
  "discovery-catalog-read-census.mjs": {
   "suite": "core"
  },
+ "discovery-chunk-catalog-read-census.mjs": {
+  "suite": "core"
+ },
  "discovery-held-slot-read.mjs": {
   "suite": "core"
  },
