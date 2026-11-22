@@ -652,6 +652,9 @@ export const FILES={
  "watchlist-mirror.mjs": {
   "suite": "core"
  },
+ "letterboxd-qa-matrix.mjs": {
+  "suite": "core"
+ },
  "migration-statements.mjs": {
   "suite": "core"
  },

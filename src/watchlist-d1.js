@@ -16,7 +16,7 @@ const FENCE='UPDATE watchlist_cas SET ok=changes() WHERE id=1';
 const TABLES=['watchlist_authority','watchlist_cas','watchlist_current','watchlist_staging','watchlist_snapshot','watchlist_member','watchlist_change','watchlist_effect','watchlist_admission_pending'];
 export const SCHEMA_VERSION=31;
 export const EFFECTS=['scan_facts','retention','removal_enqueue'];
-export const LIMITS={stageBatch:50,maxFilms:5000,keepSnapshots:8,stagingGuardMs:30*60000,gcBatch:200,pendingCap:500,staleMs:24*3600000,textChars:500,pruneBatch:200};
+export const LIMITS={inChunk:90,stageBatch:50,maxFilms:5000,keepSnapshots:8,stagingGuardMs:30*60000,gcBatch:200,pendingCap:500,staleMs:24*3600000,textChars:500,pruneBatch:200};
 // The marker read also proves the singleton fence row exists: without it the domain is closed.
 const MARKER_SQL='SELECT mode, generation, writes, (SELECT COUNT(*) FROM watchlist_cas WHERE id=1) AS cas FROM watchlist_authority WHERE id=1';
 const CURRENT_SQL='SELECT version, snapshot_id, list_sha256, film_count, last_success_at, last_success_run, last_success_slot, last_attempt_at, last_attempt_outcome, effects_drained_version, mirror_delivered_snapshot_id, mirror_attempts, mirror_next_retry_at, revision FROM watchlist_current WHERE id=1';
@@ -357,8 +357,9 @@ export async function publishSnapshot(source,films,scan,ctx={}){
  // Only ids that do not already have a row add to the ledger; a returning id continues its own row.
  let fresh=0;
  if(added.length){
-  let existing;
-  try{existing=new Set((await many(db,'SELECT lid FROM watchlist_admission_pending WHERE lid IN ('+added.map(()=>'?').join(',')+')',added.map(item=>item.lid))).map(row=>row.lid));}catch{return {ok:false,reason:'unavailable'};}
+  // D1 allows 100 bound parameters per statement: the read is chunked (a promotion that adds more than 99 ids in one scan would otherwise fail on a real D1 with "too many SQL variables", found by the AIR-571 resource QA).
+  const existing=new Set();
+  try{for(let from=0;from<added.length;from+=LIMITS.inChunk){const chunk=added.slice(from,from+LIMITS.inChunk);for(const row of await many(db,'SELECT lid FROM watchlist_admission_pending WHERE lid IN ('+chunk.map(()=>'?').join(',')+')',chunk.map(item=>item.lid)))existing.add(row.lid);}}catch{return {ok:false,reason:'unavailable'};}
   fresh=added.filter(item=>!existing.has(item.lid)).length;
  }
  if(pendingNow+fresh>LIMITS.pendingCap)return {ok:false,reason:'admission_ledger_full'};
