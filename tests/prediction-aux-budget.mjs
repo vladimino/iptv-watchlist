@@ -2,7 +2,7 @@
 // five, heartbeat, complete) over the same seeded queue, profile and catalog; this test compares EXACT counts only: it never asserts a latency, and local timings are not Cloudflare latency (the paired
 // wall-clock measurement is the non-functional benchmark, docs/evidence/prediction/air-553-*). A budget here is a regression guard on counts, not an acceptance threshold on speed.
 import assert from 'node:assert/strict';
-import {arm,cycle,total,rowCounts,seedHistory,ARMS} from './prediction-aux-bench-lib.mjs';
+import {arm,cycle,total,rowCounts,seedHistory,ARMS,r2Ops,costPerFilm} from './prediction-aux-bench-lib.mjs';
 import {sql} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
@@ -14,24 +14,30 @@ for(const size of [5,7,10]){
  }
 }
 for(const size of [5,7,10]){
- const [legacy,marker,d1]=ARMS.map(name=>results[size+':'+name]);
- // no extra model work: the same films are committed by every arm
- assert.equal(legacy.run.committed,size);assert.equal(marker.run.committed,size);assert.equal(d1.run.committed,size);
- // the dormant arms are the R2 code: identical R2 operations, identical D1 writes; the marker read is the only extra, and it is read-only
+ const [legacy,shipped,marker,d1]=ARMS.map(name=>results[size+':'+name]);
+ // no extra model work: the same films are committed by every arm, through the same number of requests (counted once, key issuance and every readback included)
+ for(const r of [legacy,shipped,marker,d1]){assert.equal(r.run.committed,size);assert.equal(r.t.requests,legacy.t.requests,'S'+size+': the Task makes the same requests in every arm');}
+ for(const phase of ['key','receipt','prepare','readback','submit','heartbeat','complete'])assert.ok(legacy.w.metrics[phase]&&d1.w.metrics[phase],'S'+size+': phase '+phase+' is measured in the arms');
+ // the REAL pre-migration arm (this revision's Worker with the module present, schema 33) does exactly what production does today: no extra D1 call, statement, row or R2 operation
  const opsOf=t=>({get:t.r2.get,head:t.r2.head,put:t.r2.put,list:t.r2.list,delete:t.r2.delete,auxOps:t.r2.auxOps});
+ assert.deepEqual(opsOf(shipped.t),opsOf(legacy.t),'S'+size+': the shipped Worker before migration 0034 does exactly the legacy R2 operations');
+ for(const k of ['calls','batches','statements','writeStatements','rowsRead','rowsWritten'])assert.equal(shipped.t.d1[k],legacy.t.d1[k],'S'+size+': before migration 0034 there is NO D1 overhead ('+k+')');
+ // migration applied, marker r2: the same R2 code and the same writes; the marker read is the only extra, read-only
  assert.deepEqual(opsOf(marker.t),opsOf(legacy.t),'S'+size+': marker r2 does exactly the legacy R2 operations');
  assert.equal(marker.t.d1.writeStatements,legacy.t.d1.writeStatements,'S'+size+': marker r2 writes the same D1 rows');
- assert.ok(marker.t.d1.calls<=Math.ceil(legacy.t.d1.calls*1.10),'S'+size+': the dormant marker read stays within 10 % of the legacy D1 calls ('+marker.t.d1.calls+' vs '+legacy.t.d1.calls+')');
+ assert.ok(marker.t.d1.calls<=Math.ceil(legacy.t.d1.calls*1.06),'S'+size+': the dormant marker read stays within 6 % of the legacy D1 calls ('+marker.t.d1.calls+' vs '+legacy.t.d1.calls+')');
  // the D1 arm: no R2 object of the four families, fewer R2 operations in total
  assert.ok(legacy.t.r2.auxOps>0,'the legacy arm does use R2 for the families');
  assert.equal(d1.t.r2.auxOps,0,'S'+size+': the D1 arm touches no R2 object of the families');
- const r2ops=t=>t.r2.get+t.r2.head+t.r2.put+t.r2.list+t.r2.delete;
- assert.ok(r2ops(d1.t)<r2ops(legacy.t),'S'+size+': fewer R2 operations ('+r2ops(d1.t)+' vs '+r2ops(legacy.t)+')');
- assert.ok(legacy.t.r2.auxOps-d1.t.r2.auxOps===legacy.t.r2.auxOps);
- // D1 cost of the move: a bounded increase, written down so a regression is visible (measured about +16 % calls, +14 % write statements, +15 % written bytes)
- assert.ok(d1.t.d1.calls<=Math.ceil(legacy.t.d1.calls*1.25),'S'+size+': D1 calls within +25 % of the legacy cycle ('+d1.t.d1.calls+' vs '+legacy.t.d1.calls+')');
- assert.ok(d1.t.d1.writeStatements<=Math.ceil(legacy.t.d1.writeStatements*1.25),'S'+size+': D1 write statements ('+d1.t.d1.writeStatements+' vs '+legacy.t.d1.writeStatements+')');
+ assert.ok(r2Ops(d1.t)<r2Ops(legacy.t),'S'+size+': fewer R2 operations ('+r2Ops(d1.t)+' vs '+r2Ops(legacy.t)+')');
+ // D1 cost of the move, written down so a regression is visible (measured about +15 % calls, +9 % write statements, +12 % rows written, +18 % rows returned); counts only, never a latency
+ assert.ok(d1.t.d1.calls<=Math.ceil(legacy.t.d1.calls*1.20),'S'+size+': D1 calls within +20 % of the legacy cycle ('+d1.t.d1.calls+' vs '+legacy.t.d1.calls+')');
+ assert.ok(d1.t.d1.writeStatements<=Math.ceil(legacy.t.d1.writeStatements*1.20),'S'+size+': D1 write statements ('+d1.t.d1.writeStatements+' vs '+legacy.t.d1.writeStatements+')');
+ assert.ok(d1.t.d1.rowsWritten<=Math.ceil(legacy.t.d1.rowsWritten*1.25),'S'+size+': rows written ('+d1.t.d1.rowsWritten+' vs '+legacy.t.d1.rowsWritten+')');
+ assert.ok(d1.t.d1.rowsRead<=Math.ceil(legacy.t.d1.rowsRead*1.35),'S'+size+': rows returned ('+d1.t.d1.rowsRead+' vs '+legacy.t.d1.rowsRead+')');
  assert.ok(d1.t.d1.writeBytes<=Math.ceil(legacy.t.d1.writeBytes*1.30),'S'+size+': D1 written bytes ('+d1.t.d1.writeBytes+' vs '+legacy.t.d1.writeBytes+')');
+ // an estimate of the storage cost of a committed film, under the stated price table: present for every arm and never an acceptance threshold
+ for(const r of [legacy,shipped,marker,d1])assert.ok(costPerFilm(r.t,r.run.committed)>0);
  // every statement fits the D1 statement budget (100 KiB); no statement is anywhere near the bind limit by construction (assertStatements refuses)
  assert.ok(d1.t.d1.maxStatementBytes<=100*1024,'S'+size+': largest statement '+d1.t.d1.maxStatementBytes);
 }
@@ -63,6 +69,15 @@ for(const name of ARMS)assert.ok(results['5:'+name].w.metrics.receipt.d1.calls<=
   'outbox of a run':"SELECT event_key FROM prediction_event_outbox WHERE run_id='hist-000001' AND state='pending' ORDER BY event_key LIMIT 20",
  };
  for(const [name,text] of Object.entries(hot)){const p=plan(text);assert.ok(!/\bSCAN prediction_(run_manifest|run_manifest_piece|run_source_piece|run_source_head|event_outbox)\b/.test(p),name+' must not scan a history table: '+p);assert.match(p,/SEARCH|USING/,name+': '+p);}
+ // the status read of an aged database: counters, not a walk of the retained history; its queries never touch the outbox table itself except one indexed row
+ {
+  const Aux=await import('../src/prediction-aux-d1.js');
+  const before=aged.stats.queries+aged.stats.batches;
+  const status=await Aux.outboxStatus(aged.db);
+  assert.ok(aged.stats.queries+aged.stats.batches-before<=4,'the status read is at most four D1 calls');
+  assert.equal(status.states.delivered,300+1,'the counters follow the retained rows (300 seeded history rows and this cycle)');
+  for(const [name,text] of Object.entries({counts:'SELECT state, n FROM prediction_event_outbox_state_count',oldest:"SELECT since FROM prediction_event_outbox WHERE state='pending' ORDER BY since, event_key LIMIT 1",skipped:"SELECT active_pending FROM prediction_event_outbox_counter WHERE kind='skipped'"})){const p=plan(text);assert.ok(!/\bSCAN prediction_event_outbox\b/.test(p),'status '+name+' must not scan the outbox: '+p);}
+ }
  // growth is by rows, never by a rewrite: a second cycle adds rows and rewrites none of the history
  assert.equal(sql(aged.file,"SELECT count(*) AS n FROM prediction_run_manifest WHERE run_id LIKE 'hist-%'")[0].n,300);
 }

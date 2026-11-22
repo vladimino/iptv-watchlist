@@ -1,18 +1,19 @@
 // AIR-553 / ADR 0194: the paired whole-cycle benchmark of the batch_v2 auxiliary state, R2 (baseline) against D1 (candidate), on ONE revision. Non-functional evidence: it never fails on a latency, and it
 // is NOT run by the core suite. It runs the cycle of tests/prediction-aux-bench-lib.mjs (receipt, preparation, bounded readback, submits in groups of five, heartbeat, complete) for the S5, S7 and S10
-// workloads (manifestSize 5, 7, 10; generationSize 1; submitBatchSize 5, as the Task prompts have them), in three arms over the same seeded queue, profile and catalog, repeated in alternating order.
+// workloads (manifestSize 5, 7, 10; generationSize 1; submitBatchSize 5, as the Task prompts have them), in FOUR arms over the same seeded queue, profile and catalog, repeated in alternating order:
+// legacy (schema 33, module absent: production today), shipped33 (schema 33, module present: this revision's Worker before the migration), r2marker (migration applied, marker r2) and d1.
 //   node scripts/prediction-aux-benchmark.mjs [--pairs 12] [--aged 1000] [--json]
 // Counts (R2 operations, D1 calls, batches, statements, written statements and bytes) are exact and repeatable. Wall time is the LOCAL stand-in: a sqlite process per D1 statement and an in-memory R2. It
 // penalizes D1 calls and makes R2 free, so it is NOT Cloudflare latency and must not be read as a prediction of it; it is reported only because the card asks for the distribution, with its caveat.
-import {arm,cycle,total,rowCounts,fileBytes,seedHistory,ARMS} from '../tests/prediction-aux-bench-lib.mjs';
+import {arm,cycle,total,rowCounts,fileBytes,seedHistory,ARMS,PRICES,r2Ops,costPerFilm} from '../tests/prediction-aux-bench-lib.mjs';
 import {sql} from '../tests/prediction-d1-flow-lib.mjs';
 
 const flag=(name,fallback)=>{const i=process.argv.indexOf('--'+name);return i>=0?Number(process.argv[i+1]):fallback;};
 const PAIRS=flag('pairs',12),AGED=flag('aged',1000),SIZES=[5,7,10];
 const nearest=(values,p)=>{const sorted=[...values].sort((a,b)=>a-b);return sorted.length?sorted[Math.min(sorted.length-1,Math.max(0,Math.ceil(p*sorted.length)-1))]:null;};
 const stat=values=>({n:values.length,p50:Math.round(nearest(values,.5)*10)/10,p95:Math.round(nearest(values,.95)*10)/10});
-const r2ops=t=>t.r2.get+t.r2.head+t.r2.put+t.r2.list+t.r2.delete;
-const out={revision:null,pairs:PAIRS,workloads:{},aged:{},scenarios:{},growth:{},caveat:'Local sqlite and in-memory R2 stand-ins: wall time is not Cloudflare latency; counts are exact.'};
+const r2ops=r2Ops;
+const out={revision:null,pairs:PAIRS,prices:PRICES,pricesNote:'illustrative public list prices as recalled (USD per million); an estimate under stated assumptions, not billed telemetry and not an acceptance threshold; the account plan decides',workloads:{},aged:{},scenarios:{},growth:{},caveat:'Local sqlite and in-memory R2 stand-ins: wall time is not Cloudflare latency; counts are exact.'};
 
 // 1. Normal cycles: alternate the arm order each pair so drift does not favour an arm.
 for(const size of SIZES){
@@ -23,7 +24,7 @@ for(const size of SIZES){
    const w=await arm(name);const run=await cycle(w,{manifestSize:size});const t=total(w);
    samples[name].ms.push(t.ms);
    for(const [phase,m] of Object.entries(w.metrics))(samples[name].phases[phase]??=[]).push(m.ms);
-   samples[name].counts={films:run.films,committed:run.committed,d1Calls:t.d1.calls,d1Batches:t.d1.batches,d1Statements:t.d1.statements,d1WriteStatements:t.d1.writeStatements,d1WriteBytes:t.d1.writeBytes,d1MaxStatementBytes:t.d1.maxStatementBytes,r2Ops:r2ops(t),r2Get:t.r2.get,r2Put:t.r2.put,r2AuxOps:t.r2.auxOps,r2PutBytes:t.r2.putBytes,phases:Object.fromEntries(Object.entries(w.metrics).map(([phase,m])=>[phase,{d1Calls:m.d1.calls,r2Ops:m.r2.get+m.r2.head+m.r2.put+m.r2.list+m.r2.delete,r2AuxOps:m.r2.auxOps}]))};
+   samples[name].counts={films:run.films,committed:run.committed,requests:t.requests,d1RowsReadReturned:t.d1.rowsRead,d1RowsWritten:t.d1.rowsWritten,estimatedUsdPerCommittedFilm:costPerFilm(t,run.committed),d1Calls:t.d1.calls,d1Batches:t.d1.batches,d1Statements:t.d1.statements,d1WriteStatements:t.d1.writeStatements,d1WriteBytes:t.d1.writeBytes,d1MaxStatementBytes:t.d1.maxStatementBytes,r2Ops:r2ops(t),r2Get:t.r2.get,r2Put:t.r2.put,r2AuxOps:t.r2.auxOps,r2PutBytes:t.r2.putBytes,phases:Object.fromEntries(Object.entries(w.metrics).map(([phase,m])=>[phase,{requests:m.requests,d1Calls:m.d1.calls,d1RowsReadReturned:m.d1.rowsRead,d1RowsWritten:m.d1.rowsWritten,r2Ops:m.r2.get+m.r2.head+m.r2.put+m.r2.list+m.r2.delete,r2AuxOps:m.r2.auxOps}]))};
   }
  }
  out.workloads['S'+size]=Object.fromEntries(ARMS.map(name=>[name,{...samples[name].counts,wallMs:stat(samples[name].ms),phaseWallMs:Object.fromEntries(Object.entries(samples[name].phases).map(([phase,v])=>[phase,stat(v)]))}]));
@@ -79,9 +80,10 @@ else{
  const pct=(a,b)=>b?((a-b)/b*100>=0?'+':'')+((a-b)/b*100).toFixed(1)+' %':'n/a';
  for(const [size,arms] of Object.entries(out.workloads)){
   console.log('\n## '+size+' ('+PAIRS+' paired cycles per arm; counts exact, wall time local)');
-  console.log('| arm | D1 calls | D1 batches | D1 statements | D1 write stmts | D1 written bytes | R2 ops | R2 aux ops | wall p50 ms | wall p95 ms |');console.log('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
-  for(const name of ARMS){const a=arms[name];console.log('| '+name+' | '+[a.d1Calls,a.d1Batches,a.d1Statements,a.d1WriteStatements,a.d1WriteBytes,a.r2Ops,a.r2AuxOps,a.wallMs.p50,a.wallMs.p95].join(' | ')+' |');}
-  const l=arms.legacy,d=arms.d1;console.log('d1 vs legacy: D1 calls '+pct(d.d1Calls,l.d1Calls)+', write statements '+pct(d.d1WriteStatements,l.d1WriteStatements)+', written bytes '+pct(d.d1WriteBytes,l.d1WriteBytes)+', R2 ops '+pct(d.r2Ops,l.r2Ops)+'.');
+  console.log('| arm | requests | D1 calls | D1 statements | D1 write stmts | D1 rows returned | D1 rows written | R2 ops | R2 aux ops | est. USD per committed film | wall p50 ms | wall p95 ms |');console.log('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
+  for(const name of ARMS){const a=arms[name];console.log('| '+name+' | '+[a.requests,a.d1Calls,a.d1Statements,a.d1WriteStatements,a.d1RowsReadReturned,a.d1RowsWritten,a.r2Ops,a.r2AuxOps,(a.estimatedUsdPerCommittedFilm*1e6).toFixed(2)+'e-6',a.wallMs.p50,a.wallMs.p95].join(' | ')+' |');}
+  console.log('\nPer phase (requests / D1 calls / R2 ops; wall p50/p95 ms, local):');for(const name of ARMS){const a=arms[name];console.log('- '+name+': '+Object.entries(a.phases).map(([phase,c])=>phase+' '+c.requests+'/'+c.d1Calls+'/'+c.r2Ops+' ('+(a.phaseWallMs[phase]?a.phaseWallMs[phase].p50+'/'+a.phaseWallMs[phase].p95:'-')+')').join(', '));}
+  const l=arms.legacy,d=arms.d1,sh=arms.shipped33,mk=arms.r2marker;console.log('shipped33 vs legacy: D1 calls '+pct(sh.d1Calls,l.d1Calls)+', R2 ops '+pct(sh.r2Ops,l.r2Ops)+'. r2marker vs legacy: D1 calls '+pct(mk.d1Calls,l.d1Calls)+'. d1 vs legacy: D1 calls '+pct(d.d1Calls,l.d1Calls)+', write statements '+pct(d.d1WriteStatements,l.d1WriteStatements)+', rows written '+pct(d.d1RowsWritten,l.d1RowsWritten)+', rows returned '+pct(d.d1RowsReadReturned,l.d1RowsReadReturned)+', R2 ops '+pct(d.r2Ops,l.r2Ops)+', est. cost per film '+pct(d.estimatedUsdPerCommittedFilm,l.estimatedUsdPerCommittedFilm)+'.');
  }
  console.log('\n'+JSON.stringify({aged:out.aged,growth:out.growth,scenarios:out.scenarios},null,1));
 }

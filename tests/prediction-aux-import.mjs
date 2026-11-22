@@ -10,7 +10,7 @@ import {execFileSync,spawnSync} from 'node:child_process';
 import {flowWorld,sql,migrated} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as Aux from '../src/prediction-aux-d1.js';
-import {buildPlan,planReport,planSql,readExport} from '../scripts/prediction-aux-d1-import.mjs';
+import {buildPlan,planReport,planSql,planVerifySql,readExport} from '../scripts/prediction-aux-d1-import.mjs';
 
 const applySql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+text+'COMMIT;',encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr.trim());};
 const exportOf=w=>Object.fromEntries([...w.records.entries()].map(([key,value])=>[key,structuredClone(value)]));
@@ -127,5 +127,61 @@ const tables=['prediction_batch_stage','prediction_run_source_head','prediction_
  const tree=path.join(dir,'tree');fs.mkdirSync(path.join(tree,'enrichment/stop-events'),{recursive:true});fs.writeFileSync(path.join(tree,'enrichment/stop-events/run-a.json'),JSON.stringify({event:{id:'enrichment-run-a',at:'2026-11-10T10:00:00.000Z'},delivered:true}));
  assert.deepEqual(Object.keys(readExport(tree)),['enrichment/stop-events/run-a.json']);
  void execFileSync;
+}
+
+// ---- 4. Review round: strict index, unknown keys, incomplete export, byte budgets with adversarial Unicode, verify mode ----
+{
+ const ev=(id,at='2026-11-10T10:00:00.000Z')=>({event:{id,at},delivered:false});
+ const blockerCodes=async objects=>(await buildPlan(objects)).blockers.map(b=>b.code);
+ // a pending index that exists but cannot be read must NOT become an empty index (it carries attempts, quarantine and since)
+ for(const [name,index] of [['not an object',[1]],['pending is an array',{pending:[]}],['pending missing',{updatedAt:'x'}],['a string',"x"]])assert.ok((await blockerCodes({'enrichment/stop-events/run-a.json':ev('e-a'),'enrichment/event-outbox.json':index})).includes('outbox_index_unreadable'),name);
+ // an index entry with unreadable fields is a blocker; a non-event entry is ignored by the legacy contract and only counted
+ const entries=await blockerCodes({'enrichment/stop-events/run-a.json':ev('e-a'),'enrichment/event-outbox.json':{pending:{'enrichment/stop-events/run-a.json':{attempts:-1,since:'x',quarantined:'yes'}}}});
+ assert.ok(entries.includes('outbox_index_entry_invalid'));
+ const withNoise=await buildPlan({'enrichment/stop-events/run-a.json':ev('e-a'),'enrichment/event-outbox.json':{pending:{'enrichment/stop-events/run-a.json':{attempts:2,since:'2026-11-10T10:05:00.000Z',quarantined:false},'unrelated/thing.json':{since:'x'}}}});
+ assert.deepEqual(withNoise.blockers,[]);assert.equal((await planReport(withNoise)).ignoredIndexEntries,1);
+ // unknown content under an event prefix is a blocker, not a silent skip
+ for(const key of ['enrichment/stop-events/sub/dir.json','enrichment/stop-events/run a.json','enrichment/start-events/skipped-x.json','enrichment/stop-events/README.txt'])assert.ok((await blockerCodes({[key]:ev('e-x')})).length>0,key+' is a blocker, never skipped');
+ // an unreadable file of a directory export (not JSON) is a blocker
+ {const dir=fs.mkdtempSync(path.join(os.tmpdir(),'aux-bad-'));fs.mkdirSync(path.join(dir,'enrichment'),{recursive:true});fs.writeFileSync(path.join(dir,'enrichment/event-outbox.json'),'{not json');const bad=await buildPlan(readExport(dir));assert.ok(bad.blockers.some(b=>b.code==='outbox_index_unreadable'));}
+ // an incomplete export: a manifest without its source
+ const manifest={runId:'r1',lease:{epoch:1},manifestHash:'a'.repeat(64),films:[{filmId:'f1'}],profile:{body:{}},contract:{}};
+ assert.ok((await blockerCodes({'enrichment/batch-manifest/r1.json':manifest})).includes('source_missing_for_manifest'));
+ assert.deepEqual(await blockerCodes({'enrichment/batch-manifest/r1.json':manifest,'enrichment/sources/r1.json':{f1:{}}}),[]);
+ // byte budget on the EXACT statement text: 56 KiB of quotes is within the stage cap but its SQL literal doubles the quotes past 100 KiB
+ const quote={filmId:'q1',itemDigest:'digest-quote',prediction:{n:"'".repeat(54000)},origin:{runId:'r'}};
+ const over=await buildPlan({'enrichment/batch-stage.json':{items:[quote]}});
+ assert.ok(over.blockers.some(b=>b.code==='statement_over_budget'),'an oversized literal is refused before any SQL is printed: '+JSON.stringify(over.blockers.map(b=>b.code)));
+ assert.equal(spawnSync(process.execPath,['scripts/prediction-aux-d1-import.mjs','sql',(()=>{const f=path.join(os.tmpdir(),'aux-quote-'+process.pid+'.json');fs.writeFileSync(f,JSON.stringify({'enrichment/batch-stage.json':{items:[quote]}}));return f;})()],{encoding:'utf8'}).status,2);
+ // adversarial Unicode through the whole path: a manifest and a source full of 4-byte characters and quotes are cut by bytes, applied, verified and read back byte-equal
+ {
+  const films=Array.from({length:12},(_,n)=>({filmId:'u'+n,lane:'cold',plan:'prediction_only',modelMetadata:{title:"Фильм '"+n+"' 🎬",synopsis:("🎬'ёж ").repeat(2500)}}));
+  const answer={status:'running',runId:'ru',protocol:'batch_v2',lease:{epoch:3},manifestHash:'b'.repeat(64),films,profile:{version:1,hash:'p',body:{a:"'"}},contract:{x:1},drained:{committed:0}};
+  const source=Object.fromEntries(films.map(f=>[f.filmId,f.modelMetadata]));
+  const objects={'enrichment/batch-manifest/ru.json':answer,'enrichment/sources/ru.json':source,'enrichment/stop-events/ru.json':{event:{id:'enrichment-ru',at:'2026-11-10T10:00:00.000Z',title:"прерван '🎬'"},delivered:true}};
+  const plan=await buildPlan(objects);assert.deepEqual(plan.blockers,[]);
+  const text=planSql(plan);assert.ok(text.split('\n').every(line=>Buffer.byteLength(line,'utf8')<=100*1024),'every statement fits the byte budget');
+  const file=migrated();applySql(file,text);
+  // verify passes on the imported rows
+  applySql(file,planVerifySql(plan));
+  const db=(await import('./d1-standin.mjs')).d1Standin(file);
+  assert.equal(JSON.stringify(await Aux.readManifest(db,'ru')),JSON.stringify(answer),'byte-equal manifest after the import');
+  sql(file,"UPDATE prediction_run_manifest SET bytes=bytes WHERE 0");   // (a no-op; the tables refuse real updates)
+  sql(file,"INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES ('ru',0,'2026-11-10T10:00:00.000Z','{\"runId\":\"ru\"}')");
+  assert.deepEqual((await Aux.readSource(db,'ru')).value,source,'byte-equal sources after the import');
+  // a difference is caught by verify: another state in the outbox and a changed piece
+  sql(file,"UPDATE prediction_aux_authority SET mode='r2' WHERE 0");
+  sql(file,"DROP TRIGGER prediction_event_outbox_settled_terminal");sql(file,"DROP TRIGGER prediction_event_outbox_identity");
+  sql(file,"UPDATE prediction_event_outbox SET attempts=3 WHERE event_key='stop:ru'");
+  assert.throws(()=>applySql(file,planVerifySql(plan)),/CHECK constraint failed: ok/,'verify aborts on a changed outbox row');
+  sql(file,"UPDATE prediction_event_outbox SET attempts=0 WHERE event_key='stop:ru'");applySql(file,planVerifySql(plan));
+  sql(file,"DROP TRIGGER prediction_run_source_piece_no_update");sql(file,"UPDATE prediction_run_source_piece SET text=substr(text,1,5)||'X'||substr(text,7) WHERE run_id='ru' AND piece_no=0");
+  assert.throws(()=>applySql(file,planVerifySql(plan)),/CHECK constraint failed: ok/,'verify aborts on a changed source piece');
+  // an extra row in the tables is also a difference (the totals)
+  const extra=migrated();applySql(extra,text);sql(extra,"INSERT INTO prediction_event_outbox (event_key,kind,event_id,at,journal_key,run_id,state,attempts,since,payload_digest,payload_compacted,event_json) VALUES ('stop:zz','stop','z','2026-11-10T10:00:00.000Z','j','zz','pending',0,'2026-11-10T10:00:00.000Z','"+'c'.repeat(64)+"',0,'{}')");
+  assert.throws(()=>applySql(extra,planVerifySql(plan)),/CHECK constraint failed: ok/,'verify aborts on an extra row');
+  // the import itself refuses non-empty tables (no merge, not resumable)
+  assert.throws(()=>applySql(extra,text),/CHECK constraint failed: ok/);
+ }
 }
 console.log('prediction aux import: ok');

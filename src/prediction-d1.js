@@ -484,6 +484,10 @@ async function saveFingerprint(env,filmId,value,authority){
 const COMMIT_EXTRA=Symbol.for('iptv.prediction.commitExtra');
 // `env[COMMIT_EXTRA]` = {filmId, statements}: statements that commit with that film's prediction batch and nowhere else.
 function extraStatements(env,filmId){const extra=env?.[COMMIT_EXTRA];return extra&&extra.filmId===filmId&&Array.isArray(extra.statements)?extra.statements:[];}
+// AIR-553: the same hook for a RUN write. `env[COMMIT_EXTRA]` = {runId, statements} commits with that run's (non-elect) save: the source revision bound to the run, the terminal Event's outbox row.
+// `pre` run BEFORE the run row is written (a compare-and-swap on the target's previous state); `statements` run after it.
+function extraRunStatements(env,runId){const extra=env?.[COMMIT_EXTRA];return extra&&extra.runId===runId&&Array.isArray(extra.statements)?extra.statements:[];}
+function extraRunPre(env,runId){const extra=env?.[COMMIT_EXTRA];return extra&&extra.runId===runId&&Array.isArray(extra.pre)?extra.pre:[];}
 function pointerColumns(record){
  return [record?.tasteProfileVersion??null,record?.tasteProfileHash??null,record?.fingerprintHash??null,record?.fingerprintSchemaVersion??null,record?.predictionPromptVersion??null,typeof record?.predictedRating==='number'?record.predictedRating:null,record?.r2Key,record?.contentSha256,record?.generatedAt||record?.updatedAt||record?.replacedAt||null];
 }
@@ -558,11 +562,13 @@ async function saveRun(env,run,authority,elect){
   ['UPDATE prediction_domain_authority SET generation=? WHERE id=1 AND mode=\'d1\' AND generation=?',[next,authority.generation]],
   [FENCE_SQL,[]],
   ...guardStatements(env),
+  ...(elect?[]:extraRunPre(env,runId)),
  ];
  if(elect){
   statements.push(['UPDATE prediction_run SET latest=0 WHERE latest=1',[]]);
   statements.push(['INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES (?,1,?,?) ON CONFLICT(run_id) DO UPDATE SET latest=1, updated_at=excluded.updated_at, document_json=excluded.document_json',[runId,at,text]]);
  }else statements.push(['INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES (?,0,?,?) ON CONFLICT(run_id) DO UPDATE SET updated_at=excluded.updated_at, document_json=excluded.document_json',[runId,at,text]]);
+ if(!elect)statements.push(...extraRunStatements(env,runId));
  await fenced(env.DB,statements);
  await mirror(env.BUCKET,'enrichment/runs/'+runId+'.json',run);
  if(elect)await mirror(env.BUCKET,LATEST_KEY,run);

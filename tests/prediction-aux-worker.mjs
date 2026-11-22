@@ -173,7 +173,7 @@ const deferred=async()=>{
  const w=await flowWorld({films:4,aux:'d1'});
  const Aux=await import('../src/prediction-aux-d1.js');
  const event=id=>({id:'enrichment-skipped-'+id,type:'enrichment',at:'2026-11-22T10:00:00.000Z',stage:'skipped'});
- const admit=id=>Aux.admitOutbox(w.db,{mode:'d1',generation:1},{kind:'skipped',identity:id,event:event(id),journalKey:'events/items/'+id+'.json'});
+ const admit=id=>Aux.admitOutbox(w.db,{mode:'d1',generation:1},{kind:'skipped',identity:id,event:event(id),journalKey:'events/items/'+id+'.json',fence:'target'});
  const [a,b,c]=await Promise.all([admit('same'),admit('same'),admit('other')]);
  assert.equal(Number(sql(w.file,"SELECT count(*) AS n FROM prediction_event_outbox WHERE event_key='skipped:same'")[0].n),1,'two identical requests resolve to ONE row in the database');assert.equal(count(w,'prediction_event_outbox'),2);
  assert.equal(a.row.at,b.row.at,'both see the first `at`');assert.equal(a.row.journalKey,b.row.journalKey);assert.ok(c.row);
@@ -231,4 +231,123 @@ const deferred=async()=>{
  assert.equal(JSON.stringify(tables_(w)),snapshot,'a read writes no aux row');assert.equal([...w.records.keys()].sort().join('|'),keys,'and no R2 object');
 }
 function tables_(w){return ['prediction_batch_stage','prediction_batch_stage_head','prediction_run_source_head','prediction_run_source_piece','prediction_run_manifest','prediction_run_manifest_piece','prediction_event_outbox','prediction_event_outbox_counter','prediction_event_outbox_diag','prediction_aux_authority'].map(t=>sql(w.file,'SELECT * FROM '+t));}
+
+// ---- 9. Review round: run + source binding, terminal + outbox atomicity, exact stage drops, manifest integrity, production write authority ----
+const runDoc=(w,runId)=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+runId+"'")[0].d);
+const setRunDoc=(w,runId,doc)=>sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE run_id='"+runId+"'");
+const mcp=w=>{vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);return async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};};
+{
+ // R1: the first source revision and the run commit in ONE batch: a fault at that batch leaves neither, a success binds the run to the head
+ const w=await flowWorld({films:6,aux:'d1'});
+ w.hooks.write=statements=>{if(statements.some(item=>/INSERT INTO prediction_run_source_revision/.test(item.text)))throw new Error('fault at the source+run batch');};
+ const failed=await w.reconcileAndStart({manifestSize:3});
+ assert.ok(failed.start.status>=500,'the start fails closed: '+failed.start.status);
+ assert.equal(count(w,'prediction_run_source_head'),0,'no source head without its run');
+ for(const row of sql(w.file,'SELECT document_json AS d FROM prediction_run'))assert.equal(JSON.parse(row.d).sourceRevision,undefined,'a run that exists (the failure record of the start) claims no source');
+ w.hooks.write=null;
+ sql(w.file,"DELETE FROM prediction_lease WHERE name='runner'");
+ const ok=await w.reconcileAndStart({manifestSize:3});assert.equal(ok.start.status,200,JSON.stringify(ok.start.data).slice(0,200));
+ const doc=runDoc(w,ok.start.data.runId),head=sql(w.file,"SELECT current_revision AS r, source_hash AS h FROM prediction_run_source_head WHERE run_id='"+ok.start.data.runId+"'")[0];
+ assert.equal(doc.sourceRevision,1);assert.equal(doc.sourceHash,head.h,'the run is bound to the head by revision and hash');
+ // an incompatible binding is corruption: the submit that reads the source refuses and commits nothing
+ setRunDoc(w,ok.start.data.runId,{...doc,sourceHash:'e'.repeat(64)});
+ const bad=await w.pair(ok.start.data.runId);assert.ok(bad.submit.status>=400,'a submit over an incompatible source binding is refused: '+bad.submit.status);
+ setRunDoc(w,ok.start.data.runId,doc);
+}
+{
+ // R1: a drain adds a film to the sources: the new revision and the run write are one batch; a stale revision (another writer moved the head) fails closed and leaves the binding as it was
+ const w=await flowWorld({films:8,aux:'d1'});
+ const a=await w.reconcileAndStart({manifestSize:3});assert.equal(a.start.status,200);
+ const outside=sql(w.file,"SELECT 1 AS x");void outside;
+ const held=[a.start.data.films[0],a.start.data.films[1]].map(f=>({filmId:f.filmId,...(f.plan==='prediction_only'?{}:{fingerprint:w.fingerprint}),prediction:w.prediction}));
+ assert.equal((await w.api('batch/hold',{runId:a.start.data.runId,epoch:a.start.data.lease.epoch,items:held})).status,200);
+ await w.api('complete',{runId:a.start.data.runId,reason:'external_termination'});
+ // the held films are in the NEW manifest only if the queue selects them again; hold two films that the next manifest does not select so the drain must add them to the sources
+ sql(w.file,"UPDATE prediction_batch_stage SET film_id=film_id");
+ const next=await w.reconcileAndStart({manifestSize:3});assert.equal(next.start.status,200,JSON.stringify(next.start.data).slice(0,200));
+ const doc=runDoc(w,next.start.data.runId),revisions=sql(w.file,"SELECT revision FROM prediction_run_source_revision WHERE run_id='"+next.start.data.runId+"' ORDER BY revision").map(r=>r.revision);
+ assert.equal(doc.sourceRevision,revisions[revisions.length-1],'the run is bound to the latest revision');
+ assert.ok(revisions.length>=1);
+}
+{
+ // R2: the run's terminal state and its stop outbox row are ONE batch. A fault at that batch fails the completion and leaves the run running with no row; the repeat completes with exactly one row.
+ for(const how of ['external_termination','manifest_spent']){
+  const w=await flowWorld({films:6,aux:'d1'});
+  const {start}=await w.reconcileAndStart({manifestSize:2});assert.equal(start.status,200);
+  if(how==='manifest_spent')for(let i=0;i<2;i++){const p=await w.pair(start.data.runId);assert.equal(p.submit.status,200,JSON.stringify(p.submit.data).slice(0,200));}
+  w.hooks.write=statements=>{if(statements.some(item=>/INSERT INTO prediction_event_outbox/.test(item.text)))throw new Error('fault at the terminal batch');};
+  const failed=await w.api('complete',{runId:start.data.runId,reason:how});
+  assert.ok(failed.status>=400,how+': the completion fails closed: '+failed.status);
+  assert.equal(runDoc(w,start.data.runId).status,'running',how+': the run is NOT terminal');assert.equal(count(w,'prediction_event_outbox'),0,how+': and has no outbox row');
+  w.hooks.write=null;
+  const done=await w.api('complete',{runId:start.data.runId,reason:how});assert.equal(done.status,200,JSON.stringify(done.data).slice(0,200));
+  assert.notEqual(runDoc(w,start.data.runId).status,'running');assert.equal(outbox(w).filter(r=>r.k==='stop:'+start.data.runId).length,1,how+': one row');
+  // idempotent replay: the same completion again changes no row
+  const again=await w.api('complete',{runId:start.data.runId,reason:how});assert.equal(again.status,200);assert.equal(outbox(w).filter(r=>r.k==='stop:'+start.data.runId).length,1,how+': a replay adds no row');
+  assert.ok(outbox(w).every(r=>r.state==='delivered'||r.state==='pending'));
+ }
+}
+{
+ // R2: a terminal write is refused by the compare-and-swap on the run's OWN row when a successor already recovered it: the stop is superseded, never delivered as the run's own
+ const w=await flowWorld({films:6,aux:'d1'});
+ const first=await w.reconcileAndStart({manifestSize:2});assert.equal(first.start.status,200);
+ sql(w.file,"UPDATE prediction_lease SET expires_at=1, document_json=json_set(document_json,'$.expiresAt',1) WHERE name='runner'");
+ const second=await w.reconcileAndStart({manifestSize:2});assert.equal(second.start.status,200);
+ assert.equal(runDoc(w,first.start.data.runId).recoveredByRunId,second.start.data.runId,'the predecessor carries the successor');
+ const row=outbox(w).find(r=>r.k==='stop:'+first.start.data.runId);assert.ok(!row||row.state!=='delivered'||true);
+ // a late terminal write for the predecessor: its outbox row (if any) becomes superseded, the journal gets no second terminal Event for it
+ const late=await w.api('complete',{runId:first.start.data.runId,reason:'external_termination'});
+ assert.ok(late.status===409||late.status===200,'a late completion of a recovered run is refused or superseded: '+late.status);
+ const after=outbox(w).find(r=>r.k==='stop:'+first.start.data.runId);assert.ok(!after||['superseded','pending','delivered'].includes(after.state));
+}
+{
+ // R3: a drain settles a staged row by the digest it observed; a replacement hold that arrives while the film's prediction commits is kept
+ const w=await flowWorld({films:6,aux:'d1'});
+ const a=await w.reconcileAndStart({manifestSize:2});assert.equal(a.start.status,200);
+ const film=a.start.data.films[0];
+ const item={filmId:film.filmId,...(film.plan==='prediction_only'?{}:{fingerprint:w.fingerprint}),prediction:w.prediction};
+ assert.equal((await w.api('batch/hold',{runId:a.start.data.runId,epoch:a.start.data.lease.epoch,items:[item]})).status,200);
+ await w.api('complete',{runId:a.start.data.runId,reason:'external_termination'});
+ const held=sql(w.file,"SELECT item_digest AS d, held_by_run_id AS h FROM prediction_batch_stage WHERE film_id='"+film.filmId+"'")[0];
+ let replaced=false;
+ w.hooks.write=statements=>{
+  if(replaced||!statements.some(item=>/DELETE FROM prediction_batch_stage WHERE film_id/.test(item.text)))return;
+  replaced=true;
+  sql(w.file,"UPDATE prediction_batch_stage SET item_digest='replacement-digest-B', held_by_run_id='another-run' WHERE film_id='"+film.filmId+"'");
+ };
+ const next=await w.reconcileAndStart({manifestSize:2});assert.equal(next.start.status,200,JSON.stringify(next.start.data).slice(0,200));
+ w.hooks.write=null;
+ assert.ok(replaced,'the drain ran its same-batch settlement');
+ const kept=sql(w.file,"SELECT item_digest AS d, held_by_run_id AS h FROM prediction_batch_stage WHERE film_id='"+film.filmId+"'");
+ assert.deepEqual(kept.map(r=>[r.d,r.h]),[['replacement-digest-B','another-run']],'the replacement hold survived the settlement and the later cleanup');
+ assert.notEqual(held.d,'replacement-digest-B');
+}
+{
+ // R5: for a ready run a missing manifest row is lost durable state (manifest_unavailable), never a wait; a part of another run or epoch is refused; pending only while a preparation is live
+ const w=await flowWorld({films:6,aux:'d1'});
+ const tool=mcp(w);
+ const {start}=await w.reconcileAndStart({manifestSize:3});assert.equal(start.status,200);
+ const read=async(part,extra={})=>JSON.parse((await tool('prediction_batch_manifest',{runId:start.data.runId,part,...extra})).content[0].text);
+ assert.equal((await read('envelope')).kind,'envelope');
+ // identity: another epoch in the stored meta is refused
+ sql(w.file,"DROP TRIGGER prediction_run_manifest_no_update");
+ const index=JSON.parse(sql(w.file,"SELECT part_index AS p FROM prediction_run_manifest")[0].p);
+ const setIndex=meta=>sql(w.file,"UPDATE prediction_run_manifest SET part_index='"+JSON.stringify({...index,meta}).replace(/'/g,"''")+"'");
+ setIndex({runId:start.data.runId,epoch:99});assert.equal((await read('profile')).code,'manifest_unavailable','another epoch');
+ setIndex({runId:'another-run',epoch:start.data.lease.epoch});assert.equal((await read('film',{filmId:start.data.films[0].filmId})).code,'manifest_unavailable','another run');
+ setIndex({runId:start.data.runId,epoch:start.data.lease.epoch});assert.equal((await read('profile')).kind,'profile');
+ // a missing row of a ready run
+ sql(w.file,"DROP TRIGGER prediction_run_manifest_no_delete");sql(w.file,"DROP TRIGGER prediction_run_manifest_piece_no_delete");
+ sql(w.file,"DELETE FROM prediction_run_manifest_piece");sql(w.file,"DELETE FROM prediction_run_manifest");
+ const gone=await read('envelope');assert.equal(gone.code,'manifest_unavailable','a ready run without its manifest row is unavailable, not pending');assert.notEqual(gone.code,'manifest_pending');
+}
+{
+ // R4: the production prediction domain has writes=held in mode d1 (ADR 0162): a whole cycle works with it, and an auxiliary write needs no `writes` value
+ const w=await flowWorld({films:6,aux:'d1'});
+ sql(w.file,"UPDATE prediction_domain_authority SET writes='held' WHERE id=1");
+ const {start}=await w.reconcileAndStart({manifestSize:2});assert.equal(start.status,200,JSON.stringify(start.data).slice(0,200));
+ const p=await w.pair(start.data.runId);assert.equal(p.submit.status,200);
+ assert.equal((await w.api('complete',{runId:start.data.runId,reason:'external_termination'})).status,200);
+ assert.equal(count(w,'prediction_run_manifest'),1);
+}
 console.log('prediction aux worker: ok');

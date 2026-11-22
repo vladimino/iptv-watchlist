@@ -3,7 +3,7 @@
 -- INERT: this file is in the repository and is NOT applied to any database by a deploy. Applying it to production D1, the import and the
 -- activation (the marker flip) are separate owner GOs (AIR-554). The inserted marker is mode `r2`, generation 0: the Worker keeps running the
 -- R2 code exactly as before. Applying this file copies nothing and switches nothing. It writes no row except the marker, the fence, the stage head,
--- the outbox counter and the diagnostic row.
+-- the outbox counters and the diagnostic row.
 -- It follows a complete version 33 and refuses anything else before a table is created: the first statement inserts a second schema_contract row and
 -- so aborts the file. The version becomes 34 and never goes down.
 -- prediction_aux_authority is its OWN marker, not a column of prediction_domain_authority (ADR 0194 decision 1). mode d1 is one-way: a trigger refuses
@@ -136,6 +136,12 @@ CREATE TABLE prediction_event_outbox_counter (
  active_pending INTEGER NOT NULL CHECK (active_pending BETWEEN 0 AND 256)
 ) STRICT;
 
+-- One counter per state, moved by triggers in the statement that inserts or settles a row: the status read is four rows and never walks the retained outbox history.
+CREATE TABLE prediction_event_outbox_state_count (
+ state TEXT PRIMARY KEY CHECK (state IN ('pending', 'delivered', 'superseded', 'quarantined')),
+ n INTEGER NOT NULL CHECK (n >= 0)
+) STRICT;
+
 CREATE TABLE prediction_event_outbox_diag (
  id INTEGER PRIMARY KEY CHECK (id = 1),
  cap_refusals INTEGER NOT NULL CHECK (cap_refusals >= 0),
@@ -255,6 +261,22 @@ BEGIN
  SELECT RAISE(ABORT, 'prediction_aux_outbox_settled');
 END;
 
+CREATE TRIGGER prediction_event_outbox_count_in
+AFTER INSERT ON prediction_event_outbox
+FOR EACH ROW
+BEGIN
+ UPDATE prediction_event_outbox_state_count SET n = n + 1 WHERE state = NEW.state;
+END;
+
+CREATE TRIGGER prediction_event_outbox_count_move
+AFTER UPDATE OF state ON prediction_event_outbox
+FOR EACH ROW
+WHEN OLD.state <> NEW.state
+BEGIN
+ UPDATE prediction_event_outbox_state_count SET n = n - 1 WHERE state = OLD.state;
+ UPDATE prediction_event_outbox_state_count SET n = n + 1 WHERE state = NEW.state;
+END;
+
 CREATE TRIGGER prediction_event_outbox_skipped_in
 AFTER INSERT ON prediction_event_outbox
 FOR EACH ROW
@@ -291,6 +313,7 @@ INSERT INTO prediction_aux_authority (id, mode, generation, activated_at) VALUES
 INSERT INTO prediction_aux_cas (id, ok) VALUES (1, 1);
 INSERT INTO prediction_batch_stage_head (id, item_count, total_bytes, revision, updated_at) VALUES (1, 0, 0, 0, NULL);
 INSERT INTO prediction_event_outbox_counter (kind, active_pending) VALUES ('skipped', 0);
+INSERT INTO prediction_event_outbox_state_count (state, n) VALUES ('pending', 0), ('delivered', 0), ('superseded', 0), ('quarantined', 0);
 INSERT INTO prediction_event_outbox_diag (id, cap_refusals, last_refusal_at) VALUES (1, 0, NULL);
 
 UPDATE schema_contract

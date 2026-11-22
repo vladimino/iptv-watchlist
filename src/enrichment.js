@@ -958,6 +958,8 @@ async function runnerProgress(env,run,queue,final=false){
 const WRITER_OWNER=Symbol.for('iptv.prediction.writerOwner');
 // Worker modules never name the database binding; the auxiliary-state module owns it (tests/d1-backfill.mjs).
 const auxDb=env=>PredictionAux.databaseOf(env);
+// The fence class of an outbox write is explicit: the writer lease the caller holds (owner threaded from `predictionWriter`), else the target row's own state.
+const auxFence=env=>({writer:env?.[WRITER_OWNER]||null,fence:env?.[WRITER_OWNER]?'writer':'target'});
 async function auxAuthority(env){
  if(typeof PredictionAux==='undefined'||typeof PredictionD1==='undefined')return null;
  const base=await PredictionD1.readPredictionAuthority(env?.DB??null,env);
@@ -989,12 +991,12 @@ async function auxFlushRow(env,aux,row){
  if(!row)return false;
  if(row.compacted||row.state==='delivered'||row.state==='superseded')return true;
  for(let attempt=0;attempt<3;attempt++){
-  try{await writeEvent(env,row.event);await PredictionAux.settleOutbox(auxDb(env),aux,row.eventKey,'delivered',{writer:env[WRITER_OWNER]||null});return true;}catch{/* tried again */}
+  try{await writeEvent(env,row.event);await PredictionAux.settleOutbox(auxDb(env),aux,row.eventKey,'delivered',auxFence(env));return true;}catch{/* tried again */}
  }
  return false;
 }
 async function auxPark(env,aux,kind,identity,event,runId){
- const out=await PredictionAux.admitOutbox(auxDb(env),aux,{kind,identity,event,journalKey:auxJournalKey(event),runId,writer:env[WRITER_OWNER]||null});
+ const out=await PredictionAux.admitOutbox(auxDb(env),aux,{kind,identity,event,journalKey:auxJournalKey(event),runId,...auxFence(env)});
  return out.row;
 }
 // The legacy record shape of a stop row (`{event, delivered, superseded}`): a settled row whose payload was compacted never rebuilds an Event, the run keeps its own.
@@ -1005,17 +1007,17 @@ async function auxDeliverPending(env,aux,now=Date.now()){
   const latest=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json');
   // A batch_v2 stop whose record was never parked (the process ended between the run record and the park) is admitted from the run's own event; an existing identity is a no-op.
   if(isBatchV2Run(latest)&&isText(latest?.runId,100)&&latest.event&&['complete','partial'].includes(latest.status))await auxPark(env,aux,'stop',latest.runId,latest.event,latest.runId);
-  const rows=await PredictionAux.pendingOutbox(auxDb(env),{runId:isText(latest?.runId,100)?latest.runId:null,limit:PredictionAux.AUX_LIMITS.drainLimit});
-  for(const row of rows){
+  const snapshot=await PredictionAux.drainSnapshot(auxDb(env),{runId:isText(latest?.runId,100)?latest.runId:null,limit:PredictionAux.AUX_LIMITS.drainLimit});
+  for(const row of snapshot.pending){
    report.checked++;let result='failed';
    try{
     if(row.kind==='stop'&&row.event&&!(row.event.presentation===BATCH_V2_SKIPPED||row.event.stage==='complete')){const stop=await recordRunStop(env,row.event.runId,row.event.reason,{outbox:true});result=stop.status==='superseded'||stop.eventPending===false?'delivered':'failed';}
     else result=await auxFlushRow(env,aux,row)?'delivered':'failed';
    }catch{}
    if(result==='delivered')report.delivered++;
-   else{report.failed++;try{if(await PredictionAux.failOutbox(auxDb(env),aux,row,{writer:env[WRITER_OWNER]||null})==='quarantined')report.quarantined++;}catch{/* the next start counts it */}}
+   else{report.failed++;try{if(await PredictionAux.failOutbox(auxDb(env),aux,row,auxFence(env))==='quarantined')report.quarantined++;}catch{/* the next start counts it */}}
   }
-  try{await PredictionAux.compactSettled(auxDb(env),aux);}catch{/* compaction is retried by the next start; it never blocks a delivery */}
+  if(snapshot.compactable.length){try{await PredictionAux.compactSettled(auxDb(env),aux,{keys:snapshot.compactable});}catch{/* compaction is retried by the next start; it never blocks a delivery */}}
  }catch{report.failed++;}
  if(report.checked||report.failed||report.quarantined)logEventOutbox(report);
  return report;
@@ -1024,7 +1026,7 @@ async function auxRecordSkipped(env,aux,{requestId,body,holder,reason,cause}){
  try{
   const id=safeRequestId(requestId)||crypto.randomUUID();
   const event=skippedStartEvent({requestId:id,body,holder,reason,cause,at:new Date().toISOString()});
-  const out=await PredictionAux.admitOutbox(auxDb(env),aux,{kind:'skipped',identity:id,event,journalKey:auxJournalKey(event)});
+  const out=await PredictionAux.admitOutbox(auxDb(env),aux,{kind:'skipped',identity:id,event,journalKey:auxJournalKey(event),fence:'target'});
   if(out.refused==='cap'){logEventOutbox({skippedCapRefused:1});return false;}
   return await auxFlushRow(env,aux,out.row);
  }catch{return false;}
@@ -1066,7 +1068,7 @@ async function recordRunStop(env,id,reason,fallback={}){
  const aux=await auxAuthority(env);
  let run=await checkedRun(env,id)||{runId:id,mode:'queued',trigger:fallback.trigger==='scheduled'?'scheduled':'manual',createdAt:new Date().toISOString(),selectedIds:[],results:{},failures:{}};
  if(fallback.protocol===BATCH_PROTOCOL&&run.protocol!==BATCH_PROTOCOL)run.protocol=BATCH_PROTOCOL;
- if(run.recoveredByRunId){if(aux){const row=await PredictionAux.readOutboxRow(auxDb(env),PredictionAux.outboxKey('stop',id));if(row&&(row.state==='pending'||row.state==='quarantined'))await PredictionAux.settleOutbox(auxDb(env),aux,row.eventKey,'superseded',{writer:env[WRITER_OWNER]||null});}else{const pending=await loadJSON(env,STOP_EVENT_PREFIX+id+'.json');if(pending&&!pending.delivered)await saveJSON(env,STOP_EVENT_PREFIX+id+'.json',{...pending,delivered:true,superseded:true});}return {status:'superseded',runId:id,continuedByRunId:run.recoveredByRunId,mustComplete:false};}
+ if(run.recoveredByRunId){if(aux){const row=await PredictionAux.readOutboxRow(auxDb(env),PredictionAux.outboxKey('stop',id));if(row&&(row.state==='pending'||row.state==='quarantined'))await PredictionAux.settleOutbox(auxDb(env),aux,row.eventKey,'superseded',{...auxFence(env),supersededRun:id});}else{const pending=await loadJSON(env,STOP_EVENT_PREFIX+id+'.json');if(pending&&!pending.delivered)await saveJSON(env,STOP_EVENT_PREFIX+id+'.json',{...pending,delivered:true,superseded:true});}return {status:'superseded',runId:id,continuedByRunId:run.recoveredByRunId,mustComplete:false};}
  const settled=await settleRunRetries(env,run,'stop_retries'),key=STOP_EVENT_PREFIX+id+'.json',existing=aux?auxStopRecord(await PredictionAux.readOutboxRow(auxDb(env),PredictionAux.outboxKey('stop',id)),run):await loadJSON(env,key);let record=existing;
  if(!record){let queue=null;try{queue=await loadJSON(env,predictionQueueKey);}catch{}const summary=runSummary(run),at=run.event?.at||run.completedAt||new Date().toISOString();
  const snapshot=await predictionEventSnapshot(env,queue,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),v2=batchV2EventFields(run);
@@ -1075,12 +1077,23 @@ async function recordRunStop(env,id,reason,fallback={}){
  const states=isBatchV2Run(run)?await Promise.all((run.selectedIds||[]).map(fid=>readFilmState(env,fid))):[];
  await recoverBatchEventFilms(env,run,sources||{},states);
  const event=withBatchV2EventDetails({remaining:queue?(queue.priorityCount||0)+(queue.coldRemaining||0):null,id:run.event?.id||'enrichment-'+id,type:'enrichment',runId:id,at,queueSchemaVersion:6,stage:'partial',title:v2.presentation?'Пакет прогнозов прерван':'Прогнозы приостановлены',reason:systemicReason(reason),stopReason:systemicReason(reason),trigger:run.trigger,added:summary.added,updated:summary.updated,failed:summary.failed,checked:summary.checked,processed:summary.processed,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,batchCount:summary.batchCount,batchesProcessed:predictionBatchesProcessed(run),hotRemaining:queue?.priorityCount??fallback.hotRemaining??run.hotRemaining??null,coldRemaining:queue?.coldRemaining??fallback.coldRemaining??run.coldRemaining??null,delta,snapshot,...v2},run,sources);
- if(aux)record=auxStopRecord(await auxPark(env,aux,'stop',id,event,id),run);
+ // ADR 0194 decisions 2 and 6: with the outbox in D1 the terminal Event's identity is NOT parked first; it commits in the SAME batch as the run's terminal transition below (plus the compare-and-swap that
+ // the run was not recovered by a successor meanwhile), so a run is never terminal without its durable outbox row. The journal delivery follows and is retried independently.
+ if(aux)record={event,admission:await PredictionAux.outboxAdmission(aux,{kind:'stop',identity:id,event,journalKey:auxJournalKey(event),runId:id,writer:env?.[WRITER_OWNER]||null})};
  else{record={event};const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key);}
  }
  run.status='partial';run.reason=record.event.reason;run.stopReason=record.event.reason;run.completedAt=record.event.at;run.event=record.event;run.counts={created:record.event.added,recalculated:record.event.updated,failed:record.event.failed,pending:(record.event.hotRemaining||0)+(record.event.coldRemaining||0)};
  if(fallback.callerFault&&!run.callerFault)run.callerFault=fallback.callerFault;
- await saveJSON(env,runKey(id),run);await diagnosticCheckpoint(env,run);const latest=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json');if(!latest||latest.runId===id||fallback.start)await saveJSON(env,ENRICHMENT_KEY+'latest-run.json',run);
+ if(aux){
+  try{await saveJSON({...env,[COMMIT_EXTRA_KEY]:{runId:id,pre:[PredictionAux.runNotSupersededGuard(id)],statements:record.admission?.statements||[]}},runKey(id),run);}
+  catch(error){
+   // The CAS refused: a successor recovered this run meanwhile. The decision is made against the run's own row now, not against the earlier read.
+   if(error?.code==='prediction_aux_cas'||error?.code==='prediction_domain_cas'){const fresh=await checkedRun(env,id);if(fresh?.recoveredByRunId){const row=await PredictionAux.readOutboxRow(auxDb(env),PredictionAux.outboxKey('stop',id));if(row&&(row.state==='pending'||row.state==='quarantined'))await PredictionAux.settleOutbox(auxDb(env),aux,row.eventKey,'superseded',{...auxFence(env),supersededRun:id});return {status:'superseded',runId:id,continuedByRunId:fresh.recoveredByRunId,mustComplete:false};}}
+   throw error;
+  }
+  if(record.admission)record=auxStopRecord(await PredictionAux.readOutboxRow(auxDb(env),record.admission.eventKey),run);
+ }else await saveJSON(env,runKey(id),run);
+ await diagnosticCheckpoint(env,run);const latest=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json');if(!latest||latest.runId===id||fallback.start)await saveJSON(env,ENRICHMENT_KEY+'latest-run.json',run);
  const written=aux?await auxFlushRow(env,aux,record.row):await flushStopEvent(env,record,key);if(!written&&!aux&&!fallback.outbox)await noteEventOutbox(env,key);await runnerLease(env,id,'release');return {...record.event,status:'partial',mustComplete:true,eventPending:!written,counts:run.counts,...(settled?{}:{retryHeal:'pending'})};
 }
 // AIR-416 (ADR 0107): delivery of a run's start and stop events to the Events Log belongs to the Predictions writer, never to a read. The durable record of an
@@ -1297,7 +1310,7 @@ function logPredictionFailure(boundary,error,requestId,runId){
 // `unattributedMs` the rest of the wall time (compute, scheduling, the awaits between calls). A failure of any of this is swallowed.
 const STEP_TIMER=Symbol('predictionStepTimer');
 const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','leaseRefusedAtAcquire','liveLeaseAgeMs','drainedCommitted','drainedDropped','priorityLagAccepted','priorityRebased','keyed','joined','startPending','keyArgsMismatch','claimRenewals','claimLost','deferredAccepted','deferredReplay','deferredUnavailable'];
-const STEP_STAGES=['preflight','turned_away','idle','settle_previous','catalog_gate','queue_refresh','preflight_refreshed','runner_lease','preflight_lease','persist'],STEP_STAGE_CAP=16;
+const STEP_STAGES=['preflight','turned_away','idle','settle_previous','catalog_gate','queue_refresh','preflight_refreshed','runner_lease','preflight_lease','persist','event_delivery','terminal_event','manifest_ready'],STEP_STAGE_CAP=16;
 const STEP_OPS_CAP=4000,STEP_CLASS_CAP=40;
 const STEP_TABLE=/\b(?:from|into|update|join)\s+["`]?([a-z_][a-z0-9_]{0,59})["`]?/i;
 function stepKeyClass(key){
@@ -3057,7 +3070,7 @@ async function predictionStartPrepare(env,payload){
  return finish('refused',{code:SAFE_LOG_ID.test(String(data?.code||data?.status))?String(data?.code||data?.status):'refused',reason:SAFE_LOG_ID.test(String(data?.reason))?data.reason:null});
 }
 async function runPredictionStartWorkflow(env,payload,step){
- return step.do('prepare',{retries:{limit:0,delay:'1 second',backoff:'constant'},timeout:'4 minutes'},()=>predictionStartPrepare(env,payload));
+ return step.do('prepare',{retries:{limit:0,delay:'1 second',backoff:'constant'},timeout:'4 minutes'},()=>timedBatchStep(env,'batch_prepare',{runId:payload?.runId},payload?.requestId,timed=>predictionStartPrepare(timed,payload)));
 }
 async function batchStartWork(env,body,requestId,tally){
  const bad=validateBatchStartBody(body);if(bad)return bad;
@@ -3220,9 +3233,9 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
   await diagnosticCheckpoint(env,attempt,{state:'running',startResult:attempt.startResult});
   try{
    const result=await atStage('writer_lease',()=>predictionWriter(env,async owned=>{
-    await deliverPendingEvents(owned);
+    await timedStage(owned,'event_delivery',()=>deliverPendingEvents(owned));
     const previous=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),recovered=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):previous?.status==='running'?previous:null;
-    if(recovered&&['running','interrupted'].includes(recovered.status)){recovered.status='interrupted';recovered.recoverable=true;recovered.reason='lease_expired';recovered.stopReason='lease_expired';recovered.completedAt=new Date().toISOString();recovered.recoveredByRunId=runId;if(!await held())return superseded();await fence(()=>saveJSON(wenv,runKey(recovered.runId),recovered));await diagnosticCheckpoint(env,recovered);}
+    if(recovered&&['running','interrupted'].includes(recovered.status)){recovered.status='interrupted';recovered.recoverable=true;recovered.reason='lease_expired';recovered.stopReason='lease_expired';recovered.completedAt=new Date().toISOString();recovered.recoveredByRunId=runId;if(!await held())return superseded();{const aux=await auxAuthority(env);await fence(()=>saveJSON(aux?{...wenv,[COMMIT_EXTRA_KEY]:{runId:recovered.runId,pre:[PredictionAux.runNotSupersededGuard(recovered.runId)],statements:[]}}:wenv,runKey(recovered.runId),recovered));}await diagnosticCheckpoint(env,recovered);}
     const manifest=pre.manifest,selected=selection.items,createdAt=new Date().toISOString();
     const stagedDoc=await loadJSON(env,BATCH_STAGE_KEY);
     const stagedItems=Array.isArray(stagedDoc?.items)?stagedDoc.items:[];
@@ -3233,8 +3246,18 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
     if(claimed){run.keyHash=claim.keyHash;run.argsHash=claim.argsHash;}
     if(!await held())return superseded();
     const sources=Object.fromEntries(selected.map(item=>[item.filmId,modelMetadata(item.film)]));
+    // ADR 0194 decision 4: with the sources in D1 the first revision, its head and the run's binding (`sourceRevision`, `sourceHash`) commit in the run's OWN batch, under the runner-lease fence; a crash
+    // between "source" and "run" cannot leave one without the other. The legacy path writes the R2 source object and then the run, as before.
+    const auxSource=await auxAuthority(env);
+    if(auxSource){
+     const plan=await PredictionAux.planSource(auxDb(env),auxSource,run.runId,sources,{create:true});
+     run.sourceRevision=plan.revision;run.sourceHash=plan.hash;
+     const fenced=PredictionAux.guardsFor(auxSource,{runId:run.runId,epoch:lease.epoch,token:claimed?token:null},{fence:'run'});
+     await atStage('run_save',()=>fence(()=>savePredictionRun({...wenv,[COMMIT_EXTRA_KEY]:{runId:run.runId,statements:[...fenced,...plan.statements]}},run)));
+    }else{
     await saveJSON({...env,[BATCH_COMMIT_GUARD]:{runId:run.runId,epoch:lease.epoch,token:claimed?token:null,create:true}},ENRICHMENT_KEY+'sources/'+run.runId+'.json',sources);
     await atStage('run_save',()=>fence(()=>savePredictionRun(wenv,run)));
+    }
     await atStage('runner_started',()=>fence(()=>runnerStarted(wenv,run,queue,null)));
     let drained={committed:[],dropped:[]};
     if(!await held())return superseded();
@@ -3253,10 +3276,10 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
     const auxMarker=claim?.deferred?await auxAuthority(env):null;
     if(auxMarker){
      // ADR 0194 decision 5: with the auxiliary state in D1 the manifest rows and the readiness edit are ONE guarded batch, so `ready` is never declared before a durable, readable manifest.
-     const ready=await auxStartReadyWithManifest(env,auxMarker,claim,token,startAnswer);
+     const ready=await timedStage(env,'manifest_ready',()=>auxStartReadyWithManifest(env,auxMarker,claim,token,startAnswer));
      if(ready.status!=='owned')return ready.status==='lease_lost'||ready.status==='gate_lost'?superseded():storageError();
     }else{
-    await saveJSON({...env,[BATCH_COMMIT_GUARD]:{runId:run.runId,epoch:lease.epoch,token:claimed?token:null}},ENRICHMENT_KEY+'batch-manifest/'+run.runId+'.json',startAnswer);
+    await timedStage(env,'manifest_ready',()=>saveJSON({...env,[BATCH_COMMIT_GUARD]:{runId:run.runId,epoch:lease.epoch,token:claimed?token:null}},ENRICHMENT_KEY+'batch-manifest/'+run.runId+'.json',startAnswer));
     if(claim?.deferred){
      // The readiness boundary: one owner-fenced edit ends the preparation (gate and `prep` removed, short expiry kept unless the client already renewed). It is the last write; the manifest is not served
      // before it. If it does not happen the start fails typed and the lease is released, never left on a longer TTL.
@@ -3597,6 +3620,8 @@ async function batchSubmitLocked(env,body,run,requestId,token){
  // Every authoritative write this call makes (film commits, the run record, retry records, the queue settlement, the progress record) goes through `guarded`: its D1 batch carries the guard.
  const ctx={run,freshness,change,source,epoch:body.epoch,token,requestId,guarded:{...env,[BATCH_COMMIT_GUARD]:{runId:run.runId,epoch:body.epoch,token}}};
  const saveRun=()=>batchGuardedCommit(env,ctx,()=>savePredictionRun(ctx.guarded,run));
+ // ADR 0194 decision 3: with the stage in D1 the held rows this submit may settle are the ones it OBSERVES now (film, digest, holder); a hold that arrives later is never deleted by this submit.
+ const observedStage=await (async()=>{const a=await auxAuthority(env);if(!a)return null;return new Map((await PredictionAux.readStage(auxDb(env))).items.map(item=>[item.filmId,item]));})();
  const results=[],regenerate=[];let stop=null;
  const lost=()=>stop==='gate_lost'||stop==='lease_lost';
  // A progress Event that an earlier holder checkpointed but did not publish is published first.
@@ -3654,7 +3679,7 @@ async function batchSubmitLocked(env,body,run,requestId,token){
  if(stop&&['gate_lost','lease_lost'].includes(stop))return json({...answer,status:stop},409);
  // A storage failure after processing began carries the results and is recoverable by replaying the same body: it is not a stop of the run (a persistent failure is ended by `complete`).
  if(stop==='storage_error')return json({...answer,error:'storage_error',recoverable:true},502);
- if(!lost())await dropStagedFilmIds(ctx.guarded,results.filter(r=>SETTLED_STATUSES.includes(r.status)||r.status==='validation_failure').map(r=>r.filmId));
+ if(!lost()){const settledIds=results.filter(r=>SETTLED_STATUSES.includes(r.status)||r.status==='validation_failure').map(r=>r.filmId);if(observedStage)await dropStagedRows(ctx.guarded,settledIds.map(id=>observedStage.get(id)));else await dropStagedFilmIds(ctx.guarded,settledIds);}
  return json(answer);
 }
 // A dry run reads and writes nothing: no lease, gate, run, queue or storage write. It validates each item with the same validators against the current contract and profile, and reports
@@ -3738,6 +3763,15 @@ function batchManifestPartBody(stored,part,filmId){
  return undefined;
 }
 function heldItemBody(item){return batchPick(item,BATCH_ITEM_KEYS);}
+// ADR 0194 decision 3: with the stage in D1 a drop names the rows the caller OBSERVED (film, digest, holder), never a film id alone, so a replacement hold of the same film survives; the legacy stage
+// drops by film id as it always did.
+async function dropStagedRows(env,rows){
+ const list=(rows||[]).filter(Boolean);
+ if(!list.length)return;
+ const aux=await auxAuthority(env);
+ if(aux){await PredictionAux.dropStageRows(auxDb(env),aux,list.map(row=>({filmId:row.filmId,itemDigest:row.itemDigest,heldByRunId:row.origin?.runId??null})),{guard:auxGuardOf(env),writer:env?.[WRITER_OWNER]||null});return;}
+ await dropStagedFilmIds(env,list.map(row=>row.filmId));
+}
 async function dropStagedFilmIds(env,ids){
  const remove=new Set((ids||[]).filter(Boolean));
  if(!remove.size)return;
@@ -3768,7 +3802,16 @@ async function drainBatchStage(env,run,gate,profile){
  const queue=await loadJSON(env,predictionQueueKey);
  const ctx={run,freshness,change:null,source,epoch:gate.epoch,token:gate.token,requestId:gate.requestId,guarded:{...env,[BATCH_COMMIT_GUARD]:{runId:run.runId,epoch:gate.epoch,token:gate.token}}};
  const saveRun=()=>batchGuardedCommit(env,ctx,()=>savePredictionRun(ctx.guarded,run));
- const saveSources=()=>saveJSON(ctx.guarded,ENRICHMENT_KEY+'sources/'+run.runId+'.json',source);
+ // With the sources in D1 a new revision commits WITH the run write (the run's binding moves in the same batch); the legacy path writes the R2 object.
+ const saveSources=async()=>{
+  const a=await auxAuthority(env);
+  if(!a){await saveJSON(ctx.guarded,ENRICHMENT_KEY+'sources/'+run.runId+'.json',source);return;}
+  const plan=await PredictionAux.planSource(auxDb(env),a,run.runId,source);
+  if(!plan.written)return;
+  run.sourceRevision=plan.revision;run.sourceHash=plan.hash;
+  ctx.guarded[COMMIT_EXTRA_KEY]={runId:run.runId,statements:[...PredictionAux.guardsFor(a,{runId:run.runId,epoch:gate.epoch,token:gate.token},{fence:'run'}),...plan.statements]};
+  try{await saveRun();}finally{delete ctx.guarded[COMMIT_EXTRA_KEY];}
+ };
  for(const row of rows){
   const id=row.filmId,stale=stageOriginStale(row,profile,registry);
   if(stale){dropped.push({filmId:id,reason:stale});remove.add(id);continue;}
@@ -3786,7 +3829,7 @@ async function drainBatchStage(env,run,gate,profile){
   const item=heldItemBody(row);
   // ADR 0194 decision 2: with the stage in D1 the staged row's deletion commits in the same batch as the film's prediction (extra statements of that batch), never as a separate later step.
   const settleAux=row.itemDigest?await auxAuthority(env):null;
-  ctx.guarded[COMMIT_EXTRA_KEY]=settleAux?{filmId:id,statements:PredictionAux.stageSettleStatements(settleAux,id,row.itemDigest)}:undefined;
+  ctx.guarded[COMMIT_EXTRA_KEY]=settleAux?{filmId:id,statements:PredictionAux.stageSettleStatements(settleAux,id,row.itemDigest,row.origin?.runId??null)}:undefined;
   let outcome;try{outcome=await batchSubmitItem(env,ctx,item);}finally{delete ctx.guarded[COMMIT_EXTRA_KEY];}
   if(outcome.stop||DRAIN_KEEP_ON_STAGE.has(outcome.result?.status)){
    run.selectedIds=run.selectedIds.filter(filmId=>filmId!==id);
@@ -3811,7 +3854,7 @@ async function drainBatchStage(env,run,gate,profile){
    await atStage('queue_refresh',async()=>{const report=await loadJSON(env,'programme.json'),stored=await currentPredictionQueue(env,report,current,'batch_progress');if(!stored||!settled.length)return stored;return await batchGuardedCommit(env,ctx,async()=>await mutatePredictionQueue(ctx.guarded,guardedSettle(await advanceContext(env,report,current,stored),settled,'batch_progress'),'batch_progress',stored))||stored;});
   }catch{/* the next submit of this run repeats settlement */}
  }
- if(remove.size)await dropStagedFilmIds(ctx.guarded,[...remove]);
+ if(remove.size)await dropStagedRows(ctx.guarded,[...remove].map(id=>rows.find(row=>row.filmId===id)));
  return {committed,dropped};
 }
 async function ownedBatchHoldPart(env,runId,part,filmId){
@@ -3895,22 +3938,25 @@ function assembleOwnedBatchManifest(envelope,profilePart,contractPart,filmParts)
 }
 // ADR 0194 decision 5: one bounded part, read from the pieces that cover it and verified against their digests, then checked against the DURABLE run identity (the manifest hash and the epoch), never against the
 // mutable `run.selectedIds` (which can also carry committed drained held ids). A corrupt, short or mismatching manifest is `manifest_unavailable`, fail closed.
-async function auxManifestPart(env,aux,run,runId,part,filmId){
+async function auxManifestPart(env,aux,run,runId,part,filmId,preparing){
  const unavailable={status:409,body:{error:'manifest_unavailable',code:'manifest_unavailable'}};
  let got;
  try{got=await PredictionAux.readManifestPart(auxDb(env),runId,part,filmId);}catch(error){if(error?.code==='prediction_aux_corrupt')return unavailable;throw error;}
- if(got===null)return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:START_POLL_MS}};
+ // Pending only while a preparation (the claim's `prep` mark or the persist gate) is live; for a ready run a missing row is lost durable state, never a wait.
+ if(got===null)return preparing?{status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:START_POLL_MS}}:unavailable;
  if(got===undefined)return {status:404,body:{error:'Unknown film',code:'unknown_film'}};
  if(got.manifestHash!==run.manifestHash)return unavailable;
+ // Every part carries the identity the manifest was stored under: it must be this run and this epoch.
+ if(!got.meta||got.meta.runId!==runId||(Number.isInteger(run.epoch)&&got.meta.epoch!==run.epoch))return unavailable;
  if(part==='envelope'){
   if(Number.isInteger(run.epoch)&&Number.isInteger(got.envelope?.lease?.epoch)&&got.envelope.lease.epoch!==run.epoch)return unavailable;
   return {status:200,body:{kind:'envelope',...got.envelope,parts:[{kind:'profile'},{kind:'contract'},...got.filmIds.map((id,index)=>({kind:'film',index,filmId:id}))]}};
  }
  return {status:200,body:{kind:part,runId,manifestHash:got.manifestHash,[part]:got.value}};
 }
-async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
- // A part readback writes nothing, so the per-request authority marker scope (the same one the observed steps use) is safe here: the marker and the auxiliary marker are read once for the request, not once per key.
- try{if(typeof PredictionD1!=='undefined'&&typeof PredictionD1.scopeRequest==='function')env=PredictionD1.scopeRequest(env);}catch{/* an unscoped readback reads the markers every time */}
+// A part readback writes nothing, so it runs as a timed step with the per-request authority marker scope (the markers are read once for the request, not once per key) and its own `prediction_step_timing` line.
+async function ownedBatchManifest(env,runId,opts={}){return timedBatchStep(env,'batch_manifest',{runId},null,timed=>ownedBatchManifestRead(timed,runId,opts));}
+async function ownedBatchManifestRead(env,runId,{part='envelope',filmId}={}){
  if(!isText(runId,100))return {status:400,body:{error:'Invalid runId',code:'invalid_run_id'}};
  if(!['envelope','profile','contract','film','hold','item'].includes(part))return {status:400,body:{error:'Invalid part',code:'invalid_part'}};
  if((part==='film'||part==='item')&&(typeof filmId!=='string'||!filmId))return {status:400,body:{error:'filmId required',code:'invalid_film_id'}};
@@ -3940,7 +3986,7 @@ async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
   if(held==null)return {status:404,body:{error:'Unknown held film',code:'unknown_film'}};
   return {status:200,body:held};
  }
- {const aux=await auxAuthority(env);if(aux)return auxManifestPart(env,aux,run,runId,part,filmId);}
+ {const aux=await auxAuthority(env);if(aux)return auxManifestPart(env,aux,run,runId,part,filmId,Boolean(lease?.prep||lease?.submitGate));}
  const stored=await loadJSON(env,ENRICHMENT_KEY+'batch-manifest/'+runId+'.json');
  if(stored==null)return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:START_POLL_MS}};
  if(!usableBatchManifest(stored))return {status:409,body:{error:'manifest_unavailable',code:'manifest_unavailable'}};
@@ -3998,7 +4044,17 @@ async function enrichmentComplete(env,body,requestId){
  }
  applyRetrySnapshot(run,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null);
  await recoverBatchEventFilms(env,run,source,states);
- const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),v2=batchV2EventFields(run),failedCount=run.counts.failed||0,title=v2.presentation?(run.status==='complete'?(failedCount?'Пакет прогнозов обработан с ошибками':'Пакет прогнозов обработан'):'Пакет прогнозов прерван'):undefined,event=withBatchV2EventDetails({id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,...(run.manifestSize!==undefined?{manifestSize:run.manifestSize}:{}),selectedCount:run.selectedIds.length,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,protocol:run.protocol||null,...(title?{title}:{}),...v2,...scheduledRunFields()},run,source);run.event=event;await savePredictionRun(env,run);if(isBatchV2Run(run))await parkAndFlushRunEvent(env,event,run.runId);else await writeEvent(env,event);await runnerLease(env,run.runId,'release');await settleExpiredDiagnostics(env);return json({runId:run.runId,status:run.status,counts:run.counts,...event});
+ const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),v2=batchV2EventFields(run),failedCount=run.counts.failed||0,title=v2.presentation?(run.status==='complete'?(failedCount?'Пакет прогнозов обработан с ошибками':'Пакет прогнозов обработан'):'Пакет прогнозов прерван'):undefined,event=withBatchV2EventDetails({id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,...(run.manifestSize!==undefined?{manifestSize:run.manifestSize}:{}),selectedCount:run.selectedIds.length,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,protocol:run.protocol||null,...(title?{title}:{}),...v2,...scheduledRunFields()},run,source);run.event=event;
+ await timedStage(env,'terminal_event',async()=>{
+  // ADR 0194 decision 6: with the outbox in D1 the run's completion and its terminal Event's outbox row are ONE batch; an admission failure fails the completion (the caller repeats it) instead of being swallowed.
+  const aux=isBatchV2Run(run)?await auxAuthority(env):null;
+  if(aux){
+   const admission=await PredictionAux.outboxAdmission(aux,{kind:'stop',identity:run.runId,event,journalKey:auxJournalKey(event),runId:run.runId,writer:env?.[WRITER_OWNER]||null});
+   await savePredictionRun({...env,[COMMIT_EXTRA_KEY]:{runId:run.runId,pre:[PredictionAux.runNotSupersededGuard(run.runId)],statements:admission.statements}},run);
+   await auxFlushRow(env,aux,await PredictionAux.readOutboxRow(auxDb(env),admission.eventKey));
+  }else{await savePredictionRun(env,run);if(isBatchV2Run(run))await parkAndFlushRunEvent(env,event,run.runId);else await writeEvent(env,event);}
+ });
+ await runnerLease(env,run.runId,'release');await settleExpiredDiagnostics(env);return json({runId:run.runId,status:run.status,counts:run.counts,...event});
 }
 async function enrichmentStatus(env){const recent=(await diagnosticHistory(env,20)).runs;const [profile,run,report,queue,discoveryRead,lease,eventOutbox]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovery-status.json').then(value=>({value}),()=>({value:null,unavailable:true})),loadJSON(env,RUNNER_LEASE_KEY),eventOutboxStatus(env)]);const summary=run?runSummary(run):null,state=run?.status==='running'?(lease?.runId===run.runId&&lease.expiresAt>Date.now()?'running':'blocked'):run?.status==='partial'?'blocked':run?.status==='complete'?'completed':'idle',live={state,runId:run?.runId||null,startedAt:run?.createdAt||null,lastHeartbeatAt:state==='running'&&lease&&lease.runId===run?.runId?lease.heartbeatAt:run?.lastHeartbeatAt||null,added:summary?.added||0,failed:summary?.failed||0,hotRemaining:queue?.hotRemaining??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:state==='running'?run.batchSize??null:null};return {...live,diagnostics:compactDiagnostics(recent.find(row=>row.runId===run?.runId)||recent[0]||null),live,currentRun:state==='running'?live:null,recentRuns:recent.filter(r=>r.state!=='running').slice(0,10),profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,compatibility:{profileMode:PREDICTION_PROFILE_MODE,fingerprintMode:PREDICTION_FINGERPRINT_MODE},lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:queue?(queue.hotCount||0)+(queue.coldCount||0):report?eligibleEnrichmentFilms(report).length:0,pendingCount:queue?.pendingCount??null,discovery:discoveryRead.value||null,...(discoveryRead.unavailable?{discoveryStatus:'unavailable'}:{}),queue,eventOutbox};}
 async function loadGenreCatalog(env){
@@ -4402,7 +4458,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/benchmark/start'&&request.method==='POST')return predictionWriter(env,()=>predictionBenchmarkStart(env));
  if(path==='/api/enrichment/benchmark/trial'&&request.method==='POST')return predictionWriter(env,()=>predictionBenchmarkTrial(env,body));
  if(path==='/api/enrichment/runner'&&request.method==='GET')return json(predictionRunnerContract());
- if(path==='/api/enrichment/heartbeat'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>runnerHeartbeat(env,body)),'heartbeat',requestId);
+ if(path==='/api/enrichment/heartbeat'&&request.method==='POST')return timedBatchStep(env,'batch_heartbeat',body,requestId,timed=>observedPrediction(timed,body,()=>predictionWriter(timed,()=>runnerHeartbeat(timed,body)),'heartbeat',requestId));
  // batchSubmit takes the gate, then the step recorder and the writer lease, for a real call; a dry run takes none of them and writes nothing at all.
  if(path==='/api/enrichment/batch/submit'&&request.method==='POST')return timedBatchStep(env,'batch_submit',body,requestId,timed=>batchSubmit(timed,body,requestId));
  if(path==='/api/enrichment/batch/hold'&&request.method==='POST')return timedBatchStep(env,'batch_hold',body,requestId,timed=>batchHold(timed,body));
@@ -4414,7 +4470,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
   try{return json(await footerStatus(env));}
   catch(error){const refused=canonicalCatalogReadRefusal(error);if(refused)return refused;throw error;}
  }
- if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,owned=>enrichmentComplete(owned,body,requestId)),'complete',requestId);
+ if(path==='/api/enrichment/complete'&&request.method==='POST')return timedBatchStep(env,'batch_complete',body,requestId,timed=>observedPrediction(timed,body,()=>predictionWriter(timed,owned=>enrichmentComplete(owned,body,requestId)),'complete',requestId));
  if(path==='/api/enrichment/status'&&request.method==='GET')return json(await enrichmentStatus(env));
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/schema'&&request.method==='GET')return json(enrichmentSchemaDocument());
