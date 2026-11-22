@@ -641,4 +641,63 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  }
  }finally{Date.now=realNow;}
 }
+// 14. AIR-571 (22 Nov 2026): an EARLIER retarget of a hold that cannot have been claimed yet. The owner chose the first evening slot after the hold had been set on the next morning's: while the held slot is still before its own
+// due instant and has no slot row, the canary may move to a strictly earlier, valid, unused slot in ONE pinned write (epoch unchanged, revision +1, the full schedule never open). Everything else keeps the settled rule.
+{
+ const realNow=Date.now;Date.now=()=>T('2026-11-22T18:30:00Z');
+ try{
+  const NOW=T('2026-11-22T18:30:00Z');
+  const mk=async slot=>{
+   const f=fresh(),wf=workflow(),e=env({db:f.db,wf,bucket:bucket()});const read=()=>Sync.readMode(e);
+   await rawSwitch(e,{action:'close_admission',target:'cloudflare'},GOOD,T('2026-11-22T18:00:00Z'));
+   const done=await Sync.handle(e,{action:'complete',confirm:'complete',slot,expectEpoch:(await read()).epoch,expectRevision:(await read()).revision},GOOD);
+   assert.equal(done.body.canary,slot);
+   const pins=async()=>{const m=await read();return {expectEpoch:m.epoch,expectRevision:m.revision};};
+   const slotRows=()=>f.db.sql('SELECT COUNT(*) AS n FROM letterboxd_slot')[0].n;
+   const insertRow=(key,dueAt)=>f.db.sql("INSERT INTO letterboxd_slot (slot_key,due_at,series,instance_id,epoch,status,phase,budget_consecutive,budget_total,updated_at,revision,write_id) VALUES ('"+key+"','"+dueAt+"',0,'inst',1,'claimed','starting',0,0,'2026-11-22T18:00:00.000Z',1,'w')");
+   return {f,wf,e,read,pins,slotRows,insertRow};
+  };
+  // A. the held 2026-11-23T1030 was never claimed and is before its due: the retarget to 2026-11-22T2230 works in ONE write
+  {
+   const A=await mk('2026-11-23T1030');const before=await A.read();assert.equal(A.slotRows(),0);
+   const ok=await rawSwitch(A.e,{action:'canary',slot:'2026-11-22T2230',...await A.pins()},GOOD,NOW);
+   assert.deepEqual([ok.canary,ok.epoch],['2026-11-22T2230',before.epoch]);
+   const after=await A.read();assert.deepEqual([after.drain,after.epoch,after.revision,after.mode],['canary:2026-11-22T2230',before.epoch,before.revision+1,'cloudflare'],'one write: the hold was never absent, the epoch is unchanged');
+   assert.equal(A.slotRows(),0,'nothing was claimed or recorded');
+   // the full schedule is still closed: another slot is held back, the new canary is claimed once at its own tick, and the old held slot is not claimable
+   const held=await Sync.ensure(A.e,{now:T('2026-11-22T18:35:00Z')});assert.deepEqual([held.started,held.reason],[false,'canary_hold']);
+   const wrong=await Sync.ensure(A.e,{now:T('2026-11-22T21:00:00Z')});assert.deepEqual([wrong.started,wrong.reason],[false,'canary_hold'],'before its due instant nothing starts');
+   const claimed=await Sync.ensure(A.e,{now:T('2026-11-22T21:35:00Z')});assert.deepEqual([claimed.started,claimed.slot],[true,'2026-11-22T2230']);
+   assert.equal(A.slotRows(),1);
+   const again=await Sync.ensure(A.e,{now:T('2026-11-22T21:50:00Z')});assert.notEqual(again.started,true,'the same slot is not started twice');assert.equal(A.slotRows(),1);
+   // a later natural slot of the old hold is still refused while the new canary is pending/in progress
+   const later=await rawSwitch(A.e,{action:'canary',slot:'2026-11-23T1030',...await A.pins()},GOOD,T('2026-11-22T21:40:00Z'));assert.equal(later.refused,'canary_active');
+  }
+  // B. a LATER target is still refused while the held slot is pending (the settled rule is unchanged)
+  {
+   const B=await mk('2026-11-22T2230');
+   const r=await rawSwitch(B.e,{action:'canary',slot:'2026-11-23T1030',...await B.pins()},GOOD,NOW);assert.deepEqual([r.refused,r.why],['canary_active','canary_pending']);
+   assert.equal((await B.read()).drain,'canary:2026-11-22T2230');
+  }
+  // C. the held slot already has a row (claimed): no earlier retarget; D. the target is in the past; E. the target already has a row; F. the same slot
+  {
+   const C=await mk('2026-11-23T1030');C.insertRow('2026-11-23T1030','2026-11-23T09:30:00.000Z');const rev=(await C.read()).revision;
+   const r=await rawSwitch(C.e,{action:'canary',slot:'2026-11-22T2230',...await C.pins()},GOOD,NOW);assert.equal(r.refused,'canary_active','a claimed old hold blocks the earlier retarget');
+   assert.equal((await C.read()).revision,rev,'nothing was written');
+   const D=await mk('2026-11-23T1030');
+   assert.equal((await rawSwitch(D.e,{action:'canary',slot:'2026-11-22T0430',...await D.pins()},GOOD,NOW)).refused,'slot_in_past');
+   D.insertRow('2026-11-22T2230','2026-11-22T21:30:00.000Z');
+   assert.equal((await rawSwitch(D.e,{action:'canary',slot:'2026-11-22T2230',...await D.pins()},GOOD,NOW)).refused,'slot_used');
+   assert.equal((await rawSwitch(D.e,{action:'canary',slot:'2026-11-23T1030',...await D.pins()},GOOD,NOW)).refused,'same_slot');
+   assert.equal((await D.read()).drain,'canary:2026-11-23T1030','every refusal left the hold as it was');
+  }
+  // G. the earlier retarget needs its pins like every owner command, and never works on the closed hold `none` or after the held slot is due
+  {
+   const G=await mk('2026-11-23T1030');
+   const stale=await rawSwitch(G.e,{action:'canary',slot:'2026-11-22T2230',expectEpoch:1,expectRevision:999},GOOD,NOW);assert.equal(stale.refused,'pin_mismatch');
+   const due=await rawSwitch(G.e,{action:'canary',slot:'2026-11-23T0430',...await G.pins()},GOOD,T('2026-11-23T09:35:00Z'));
+   assert.equal(due.refused,'slot_in_past','a target earlier than the latest due slot is past: the held slot, once due, can no longer be retargeted earlier');
+  }
+ }finally{Date.now=realNow;}
+}
 console.log('letterboxd-sync ok');
