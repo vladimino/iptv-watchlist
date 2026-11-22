@@ -1,6 +1,6 @@
 # AIR-571: Watchlist bootstrap import (B) and authority activation (C1 and C2)
 
-Date: 22 Nov 2026, about 16:48 to 17:10 UTC (17:48 to 18:10 Madrid, UTC+01:00). Owner GO on the card, per operation: "GO на B", "GO на C1+C2", then "да, откатывай" and "еще одна попытка активации, сделай все шаги еще раз". The operators are `scripts/watchlist-bootstrap-production.mjs` and `scripts/watchlist-cutover-production.mjs`; every command ran once, with an explicit `--confirm`, fresh pins read by `status` just before, and no retry. Times below are rounded to the minute where the operator output carries no timestamp; the Time Travel bookmarks are exact. Evidence only: nothing here authorizes a further operation.
+Date: 22 Nov 2026 (Madrid is UTC+01:00). **Operations:** the bootstrap import B about 16:48 to 16:50 UTC (17:48 to 17:50 Madrid); the first C1 attempt and its back-out after 16:50 and before 17:08 UTC; the second C1 and C2 pass from 17:08:04 UTC (the `status` that opened it) to about 17:10 UTC, by the machine clock. **Later read-only validation:** the independent readbacks right after each step, and one `GET /api/watchlist` after the switch, before 17:27 UTC; the exact time of that request was not recorded. The rounded times in the AIR-571 card comments (up to about 17:16 and 17:25 UTC) were estimates, not receipts. Owner GO per operation on the card: "GO на B", "GO на C1+C2", then "да, откатывай" and "еще одна попытка активации, сделай все шаги еще раз". The operators are `scripts/watchlist-bootstrap-production.mjs` and `scripts/watchlist-cutover-production.mjs`; every command ran with an explicit `--confirm`, fresh pins read by `status` just before it, and **no automatic retry**. There was **one owner-authorized repeat**: the first `fence-root` was repeated once with the same etag after the owner chose that option on the card (both attempts are in the table). Evidence only: nothing here authorizes a further operation.
 
 ## Result
 
@@ -40,7 +40,7 @@ After B, after the abort and after C2: the operator `status` in a separate proce
 
 ## Not proven and open
 
-- The natural EPG run after the switch (03:24 UTC, 04:24 Madrid on 23 Nov 2026) reading the D1 snapshot; its result is the acceptance of the EPG side.
+- The first natural daily EPG run after the switch: **17:00 Europe/Madrid on 23 Nov 2026, 16:00 UTC** (`EPG_SCHEDULE` in `src/domain/orchestration-policy.js`); its result, reading the D1 snapshot, is the acceptance of the EPG side. The Worker cron tick `24 3 * * *` is not the daily EPG due time.
 - The root `watchlist.json` carries the generation 2 fence (the same list); its delivery to the D1 snapshot's mirror belongs to the root mirror reconcile after D2/E.
 - D1 (close the Ratings executor), D2, E (binding and cron), F1, F2: not performed, each needs its own owner GO and fresh pins.
 - The cause of the first two `write_uncertain` outcomes. A follow-up could make the operator print the error class without secrets.
