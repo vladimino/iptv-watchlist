@@ -544,6 +544,9 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
 // 13. AIR-571 E (second review of PR #887): the canary hold is RECOVERABLE and every return to `cloudflare` through the owner route is FAIL-CLOSED. A retarget replaces a SETTLED hold in one pinned write (never opening the full schedule);
 // an in-progress canary is preserved; and the completion chooses the canary slot BEFORE admission, so no tick can claim an unapproved slot between two owner commands (the cron may already be deployed).
 {
+ // The owner route (`handle`) reads the wall clock for the slot_in_past refusal; freeze it at the section's day so the fixed 2026-11-22 slots stay in the future on any real day (the section went red on 22 Nov 2026 after 10:30 UTC)
+ const realNow=Date.now;Date.now=()=>T('2026-11-22T00:00:00Z');
+ try{
  const {db}=fresh(),wf=workflow(),b=bucket(),e=env({db,wf,bucket:b});
  const read=async()=>Sync.readMode(e);
  const post=async(body,now)=>{const m=await read();const pinned={...body,confirm:body.confirm??body.action,expectEpoch:m.epoch,expectRevision:m.revision};const out=await Sync.handle(e,pinned,GOOD);return out.body;};
@@ -633,5 +636,6 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
   const pinned=await owner({action:'canary',slot:'2026-11-22T1630'});assert.equal(pinned.canary,'2026-11-22T1630');
   const again=await Sync.ensure(e5,{now:T('2026-11-22T15:35:00Z')});assert.equal(again.started,true);assert.equal(again.slot,'2026-11-22T1630');
  }
+ }finally{Date.now=realNow;}
 }
 console.log('letterboxd-sync ok');
