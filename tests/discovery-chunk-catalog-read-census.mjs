@@ -1,5 +1,5 @@
 // AIR-579: census of the whole-catalog reads of one Discovery chunk (the statement `... FROM discovery_admission WHERE state='current' ORDER BY film_id`, `readCatalog`).
-// The real chunk code (`resolveDiscoveryChunk`, which routes to the paged chunk above READ_CAP) runs over a D1 stand-in at the real schema and every statement is seen. Local sqlite only.
+// `resolveDiscoveryChunk` runs with a D1 stand-in migrated through 0011, not the current production schema. `refreshPredictionQueue` is stubbed and `CanonicalDiscoveryAdmission` is absent, so this measures direct chunk reads, not all production collaborators. Local sqlite only.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
