@@ -9,13 +9,12 @@
 export const SUBMISSION_LIMITS=Object.freeze({entries:4000,groups:100,sourceId:20,name:200,group:120,note:500,bodyBytes:1048576});
 export const PREVIEW_ITEM_CAP=200;
 
-// What the page says about activation, from the API's `activation.state` and nothing else: 'active' (the Worker flag EPG_CHANNEL_POLICY is on), 'not_active' (staged only) or anything
-// else, including a missing or failed read, which is `unknown` and claims neither. `saved` is the clause appended to a save or import receipt. With the flag on, a saved revision applies
+// What the page says about activation, from the API's `activation.state` and nothing else: 'active' (every scan applies the policy, unconditionally since AIR-565) or anything
+// else, including a missing or failed read, which is `unknown` and claims neither. `saved` is the clause appended to a save or import receipt. A saved revision applies
 // to the NEXT natural EPG generation; which revision the last generation already applied is in its `epg` event (policy.revision), not on this page.
 export function activationView(activation){
  const state=activation&&typeof activation==='object'?activation.state:null;
  if(state==='active')return {mode:'on',eyebrow:'ВЛАДЕЛЕЦ · ПОЛИТИКА ВКЛЮЧЕНА: ПРИМЕНИТСЯ СО СЛЕДУЮЩЕЙ ГЕНЕРАЦИЕЙ EPG',status:'Политика <b>включена</b>: каждая естественная генерация EPG читает один снимок политики. Сохранённая ревизия применится со следующей генерацией; какая ревизия уже применена последней генерацией — указано в её событии «Обновлён EPG».',saved:'Применится со следующей естественной генерацией EPG.'};
- if(state==='not_active')return {mode:'off',eyebrow:'ВЛАДЕЛЕЦ · ПОЛИТИКА СОХРАНЯЕТСЯ, В EPG НЕ ПРИМЕНЯЕТСЯ',status:'Политика <b>сохранена, но не применяется</b>: флаг EPG_CHANNEL_POLICY не включён, ни один скан не читает политику каналов. После включения владельцем она применится со следующей естественной генерацией EPG.',saved:'В EPG не применено.'};
  return {mode:'unknown',eyebrow:'ВЛАДЕЛЕЦ · СОСТОЯНИЕ ВКЛЮЧЕНИЯ ПОЛИТИКИ НЕИЗВЕСТНО',status:'Состояние включения политики не получено: не считайте, что она применяется или что не применяется.',saved:'Состояние включения политики неизвестно.'};
 }
 const POLICY_SET=['deny_all','discover','known_only'];
