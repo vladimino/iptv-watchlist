@@ -34,6 +34,13 @@ export function watchlistRepository(WatchlistD1, {epochGuard, scanGuard = null, 
         if (typeof writer !== 'function') return {drained: false, code: 'effect_writer_absent'};
         let receipt;
         try { receipt = await writer(ctx, next); } catch { receipt = null; }
+        // A long effect (the retention of a list larger than one call) answers its RESUME POINT instead of a receipt: it is kept on the pending row, and the loop continues from it while the writer says there is more.
+        if (receipt && typeof receipt === 'object' && typeof receipt.progress === 'string' && receipt.progress) {
+          const kept = await WatchlistD1.recordEffectAttempt(ctx.env, {snapshotId: next.snapshotId, effect: next.effect, progress: receipt.progress}, {now, guards: g}).catch(() => null);
+          if (!kept?.ok) return {drained: false, code: 'effect_failed'};
+          if (receipt.more === true) continue;
+          return {drained: false, code: 'effect_failed'};
+        }
         if (typeof receipt !== 'string' || !receipt) {
           await WatchlistD1.recordEffectAttempt(ctx.env, next, {now, guards: g}).catch(() => null);
           return {drained: false, code: 'effect_failed'};

@@ -410,9 +410,9 @@ export async function pendingEffects(source,{limit=EFFECTS.length*4}={}){
  const db=database(source);
  if(!db)return {ok:false,reason:'unavailable'};
  let rows;
- try{rows=await many(db,"SELECT e.snapshot_id AS snapshotId, s.version AS version, e.effect AS effect, e.attempts AS attempts FROM watchlist_effect e JOIN watchlist_snapshot s ON s.snapshot_id=e.snapshot_id WHERE e.status='pending' ORDER BY s.version, CASE e.effect WHEN 'scan_facts' THEN 1 WHEN 'retention' THEN 2 ELSE 3 END LIMIT ?",[Math.max(1,Math.min(200,limit))]);}
+ try{rows=await many(db,"SELECT e.snapshot_id AS snapshotId, s.version AS version, e.effect AS effect, e.attempts AS attempts, e.receipt AS progress FROM watchlist_effect e JOIN watchlist_snapshot s ON s.snapshot_id=e.snapshot_id WHERE e.status='pending' ORDER BY s.version, CASE e.effect WHEN 'scan_facts' THEN 1 WHEN 'retention' THEN 2 ELSE 3 END LIMIT ?",[Math.max(1,Math.min(200,limit))]);}
  catch{return {ok:false,reason:'unavailable'};}
- return {ok:true,effects:rows.map(row=>({snapshotId:row.snapshotId,version:Number(row.version),effect:row.effect,attempts:Number(row.attempts)}))};
+ return {ok:true,effects:rows.map(row=>({snapshotId:row.snapshotId,version:Number(row.version),effect:row.effect,attempts:Number(row.attempts),progress:typeof row.progress==='string'&&row.progress?row.progress:null}))};
 }
 // Marks one effect done with the writer's receipt. Strictly in version order: refused when a lower version still has a pending effect, and, inside a version, when an earlier effect
 // (scan_facts, then retention, then removal_enqueue) is pending. `effects_drained_version` advances in the same batch that marks the last effect of a version done.
@@ -446,16 +446,20 @@ export async function completeEffect(source,{snapshotId,effect,receipt},ctx={}){
  return {ok:true,drained:Number(row?.effects_drained_version)>=version};
 }
 // Counts a failed attempt of one effect without changing its status. -> {ok:true} | {ok:false,reason}
-export async function recordEffectAttempt(source,{snapshotId,effect},ctx={}){
+// `progress` (optional, 1..200 chars) is the writer's resume point of a long effect: it is kept in the pending row's `receipt` column (a pending effect has no receipt yet; `completeEffect` overwrites it with the final one),
+// so an effect larger than one call can continue where it stopped instead of restarting from its beginning.
+export async function recordEffectAttempt(source,{snapshotId,effect,progress},ctx={}){
  const db=database(source);
  if(!db)return {ok:false,reason:'unavailable'};
  if(typeof snapshotId!=='string'||!EFFECTS.includes(effect))return {ok:false,reason:'shape'};
+ const resume=progress==null?undefined:progress;
+ if(resume!==undefined&&(typeof resume!=='string'||!resume||resume.length>200))return {ok:false,reason:'shape'};
  const extra=callerGuards(ctx);
  if(!extra)return {ok:false,reason:'shape'};
  const gate=await readAuthority(db);
  if(gate.state!=='d1')return {ok:false,reason:'closed'};
  if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
- const outcome=await fenced(db,[authorityGuard(gate.generation),...extra,['UPDATE watchlist_effect SET attempts=attempts+1 WHERE snapshot_id=? AND effect=? AND status=\'pending\'',[snapshotId,effect]]]);
+ const outcome=await fenced(db,[authorityGuard(gate.generation),...extra,resume===undefined?['UPDATE watchlist_effect SET attempts=attempts+1 WHERE snapshot_id=? AND effect=? AND status=\'pending\'',[snapshotId,effect]]:['UPDATE watchlist_effect SET attempts=attempts+1, receipt=? WHERE snapshot_id=? AND effect=? AND status=\'pending\'',[resume,snapshotId,effect]]]);
  return outcome==='ok'?{ok:true}:{ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
 }
 
