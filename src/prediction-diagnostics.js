@@ -29,6 +29,16 @@ async function loadPredictionDiagnosticSnapshot(env,filmId){
   completedOnly:pinned?.epgPin?.authority==='d1',
  };
 }
+// AIR-579. The stored queue and nothing else, for the one diagnostic that reads nothing else: `predictionPendingPage` takes only `queue` and `queueStatus` of a snapshot (every
+// helper it calls is a function of the queue and the clock). The full snapshot above also reads the profile, the view index, the programme, the whole Discovery catalog
+// (`readCatalog`, a 12 k-row read of every admission payload) and the published generation, none of which a pending page consumes. The queue is read the same way as in the full
+// snapshot (the same pin, the same key, the same `recorded` / `not_recorded` / `unavailable` status), so the page is identical for the same stored queue.
+async function loadPredictionQueueSnapshot(env){
+ let pinned=env;
+ try{pinned=await pinEpg(env);}catch{pinned=env;}
+ try{const value=await loadJSON(pinned,predictionQueueKey);return {queue:value,queueStatus:value==null?'not_recorded':'recorded'};}
+ catch{return {queue:null,queueStatus:'unavailable'};}
+}
 function predictionDiagnosticOutstanding(queue){
  if(!Array.isArray(queue?.hotPending)||!Array.isArray(queue?.coldPending))return null;
  const seen=new Set(),ids=[];

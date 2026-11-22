@@ -289,7 +289,7 @@ async function mcpCallTool(params,protocolVersion,env,execution){
    if(params.name==='prediction_pending'){
     const query=predictionPendingQuery(args);
     if(query.error)return {result:mcpToolError(query.error)};
-    const page=predictionPendingPage(await loadPredictionDiagnosticSnapshot(env),args,now);
+    const page=predictionPendingPage(await loadPredictionQueueSnapshot(env),args,now);
     if(page.error)return {result:mcpToolError(page.error)};
     return mcpPayload(200,page);
    }

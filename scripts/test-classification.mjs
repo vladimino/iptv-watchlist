@@ -1289,6 +1289,9 @@ export const FILES={
  "prediction-diagnostics.mjs": {
   "suite": "core"
  },
+ "prediction-pending-queue-only.mjs": {
+  "suite": "core"
+ },
  "prediction-domain-production.mjs": {
   "suite": "core"
  },

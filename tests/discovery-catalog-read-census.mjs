@@ -15,11 +15,15 @@ world.hooks.query=text=>{if(CATALOG.test(text))reads++;};
 const census=async fn=>{reads=0;await fn();return reads;};
 const get=path=>world.ctx.worker.fetch(new Request('https://site.example'+path),world.env,{waitUntil(){}}).then(response=>response.text());
 const snapshot=vm.runInContext('loadPredictionDiagnosticSnapshot',world.ctx);
+const queueSnapshot=vm.runInContext('loadPredictionQueueSnapshot',world.ctx);
 
 const result={
- // The three read-only MCP diagnostics (prediction_queue_overview, prediction_pending, prediction_film_diagnostics) share this snapshot: one whole-catalog read each.
+ // The full diagnostic snapshot (prediction_queue_overview and prediction_film_diagnostics, and two admin recovery pages): one whole-catalog read each. This census calls the shared
+ // loader, not the MCP route, and not a Discovery chunk.
  diagnosticSnapshot:await census(()=>snapshot(world.env,null)),
  diagnosticSnapshotOneFilm:await census(()=>snapshot(world.env,'tmdb_1')),
+ // `prediction_pending` (AIR-579) reads the stored queue only: the before figure of this entry is the line above, the after figure is 0 (see tests/prediction-pending-queue-only.mjs).
+ pendingQueueSnapshot:await census(()=>queueSnapshot(world.env)),
  enrichmentView:await census(()=>get('/api/enrichment/view')),
  catalogAvailable:await census(()=>get('/api/catalog/available')),
  pipelineStatus:await census(()=>get('/api/enrichment/pipeline/status')),
@@ -42,7 +46,7 @@ result.complete=await census(()=>world.api('complete',{runId:run,epoch,reason:'m
 console.log(JSON.stringify(result));
 
 assert.deepEqual(result,{
- diagnosticSnapshot:1,diagnosticSnapshotOneFilm:1,enrichmentView:1,catalogAvailable:1,pipelineStatus:1,
+ diagnosticSnapshot:1,diagnosticSnapshotOneFilm:1,pendingQueueSnapshot:0,enrichmentView:1,catalogAvailable:1,pipelineStatus:1,
  programme:0,enrichmentStatus:0,queueStatus:0,status:0,runner:0,queueReconcile:1,reconcileAndStart:2,
  heartbeat:0,manifestPart:0,submitOneFilm:0,complete:0,
 },'whole-catalog reads per entry point (a change must be deliberate and recorded in the AIR-579 evidence)');
