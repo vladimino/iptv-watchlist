@@ -24,10 +24,12 @@ The exporter stores the whole bucket as `objects/<sha256 of the key>.bin` plus `
 | Refused, with nothing left behind: no manifest, no-go status, a change between listings, a fence that did not hold, a missing object file, a changed object (same length, other bytes), a truncated object, a duplicated entry, a weak or missing ETag, metadata naming another key or size | pass (12 cases) |
 | Hashed again AT the copy: a file changed (same length and shorter) after the snapshot verified is refused and removed | pass |
 | Path guards: relative, inside the repository, overlapping the snapshot, a non-empty output directory (untouched); an existing empty directory is accepted and left empty on a refusal; unsafe key segments (`..`, `.`, empty, backslash, NUL) | pass |
+| **Real location (review of PR 896, P1):** an output that is a symlink (to an empty directory of the repository, to a directory outside it, or dangling), a symlinked parent that leads into the repository (new target, deep new target), a snapshot reached through a link into the repository: all refused, **nothing written into the repository**; a parent link that stays outside the repository is accepted; the CLI refuses the same way | pass |
+| **No silent loss (review, P1):** `enrichment/sources/run.backup.json`, `sources/run.bin`, `sources/sub/run.json`, `batch-manifest/run.v2.json`, `batch-manifest/run.bin`, `stop-events/x.bin`, an unknown event name, `start-events/y.json.bak` are refused by the converter (`unconsumed_key`) and, in a plain tree without the converter, are importer blockers (`*_key_unknown`, non-JSON files included), `ignoredObjects` stays 0 and no SQL is printed | pass |
 | A malformed document and an unknown event key are handed over unchanged; the importer blocks (exit 2, no SQL) | pass |
 | The converter names no network, credential, database or bucket binding; its stdout carries counts and digests, never a document body | pass |
 
-Mutation checks (each makes the test fail, restoring it passes): no consistency check; no hash at the copy; copying every object.
+Mutation checks (each makes the test fail, restoring it passes): no consistency check; no hash at the copy; copying every object; accepting unconsumed keys in the converter; ignoring unknown family keys in the importer; a lexical-only path check.
 
 ## Not covered, on purpose
 

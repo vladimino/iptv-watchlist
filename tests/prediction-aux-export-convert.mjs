@@ -159,16 +159,69 @@ const rawBytes=key=>Buffer.from(bucket.items.get(key).bytes);
  assert.equal(spawnSync(process.execPath,['scripts/prediction-aux-export-convert.mjs',snapshot,path.join(tmp(),'o'),'extra'],{encoding:'utf8'}).status,1);
 }
 
-// ---- 3. A malformed document is handed over unchanged and stops the importer, never an empty or partial import; an unknown event key is handed over too ----
+// ---- 3. A malformed document is handed over unchanged and stops the importer; a key the importer would not consume is refused by the converter AND blocked by the importer (review of PR 896) ----
 {
- const {directory:bad}=await snapshotOf(bucketObjects({extra:{'enrichment/batch-manifest/bad-run.json':'{not json','enrichment/stop-events/unexpected name.json':json({event:{id:'x',at:'2026-11-10T10:00:00.000Z'}})}}));
+ const {directory:bad}=await snapshotOf(bucketObjects({extra:{'enrichment/batch-manifest/bad-run.json':'{not json'}}));
  const output=path.join(tmp(),'out');const report=await convertSnapshot({snapshot:bad,output});
  const tree=path.join(output,'tree');
  assert.equal(fs.readFileSync(path.join(tree,'enrichment/batch-manifest/bad-run.json'),'utf8'),'{not json','the malformed bytes are not rewritten or dropped');
- assert.ok(fs.existsSync(path.join(tree,'enrichment/stop-events/unexpected name.json')),'an event key the Worker never writes is handed over');
- assert.ok(report.converted.objects>Object.keys(objects).filter(auxExportFamily).length);
+ assert.equal(report.converted.objects,Object.keys(objects).filter(auxExportFamily).length+1);
  const blocked=runImporter('report',tree);assert.equal(blocked.status,2,'the importer blocks');assert.match(blocked.stderr,/BLOCKER/);
  assert.equal(runImporter('sql',tree,'--generation','1').stdout,'','and prints no SQL');
+}
+// Every selected key must have a shape the importer consumes. Forms the review named, and the other prefixes: none is copied, counted or left to be ignored.
+const UNCONSUMED=['enrichment/sources/run.backup.json','enrichment/sources/run.bin','enrichment/sources/sub/run.json','enrichment/batch-manifest/run.v2.json','enrichment/batch-manifest/run.bin','enrichment/stop-events/x.bin','enrichment/stop-events/unexpected name.json','enrichment/start-events/y.json.bak','enrichment/batch-stage.json.bak'];
+for(const key of UNCONSUMED){
+ if(auxExportFamily(key)===null){assert.equal(key,'enrichment/batch-stage.json.bak','only the stage backup is outside every family prefix');continue;}
+ const {directory:odd}=await snapshotOf(bucketObjects({extra:{[key]:json({unexpected:true})}}));
+ const output=path.join(tmp(),'out');
+ await refusal(convertSnapshot({snapshot:odd,output}),'unconsumed_key');absent(output);
+ fs.rmSync(odd,{recursive:true,force:true});
+}
+// The importer does not depend on the converter for that: the same shapes in a plain tree are blockers (including non-JSON files), never ignored objects, and no SQL is printed.
+{
+ const tree=tmp();
+ const put=(key,text)=>{fs.mkdirSync(path.dirname(path.join(tree,key)),{recursive:true});fs.writeFileSync(path.join(tree,key),text);};
+ for(const [key,value] of Object.entries(legacy))put(key,json(value));
+ assert.equal(runImporter('report',tree).status,0,'the clean tree reports');
+ for(const key of UNCONSUMED.filter(auxExportFamily)){
+  const copy=tmp();fs.cpSync(tree,copy,{recursive:true});
+  fs.mkdirSync(path.dirname(path.join(copy,key)),{recursive:true});fs.writeFileSync(path.join(copy,key),key.endsWith('.json')?json({unexpected:true}):'raw bytes');
+  const report=runImporter('report',copy);assert.equal(report.status,2,key+': the importer blocks');assert.match(report.stderr,/_key_unknown/,key);
+  assert.equal(runImporter('sql',copy,'--generation','1').stdout,'',key+': no SQL is printed');
+ }
+ const plan=await buildPlan({...Object.fromEntries(Object.entries(legacy)),'enrichment/sources/run.backup.json':{a:1}});
+ assert.ok(plan.blockers.some(item=>item.code==='source_key_unknown'),'a source name the importer does not consume is a blocker, not ignoredObjects');
+ assert.equal((await planReport(plan)).ignoredObjects,0);
+}
+
+// ---- 3b. The private output boundary is the REAL location, not the spelling of the path (review of PR 896) ----
+{
+ const inside=fs.mkdtempSync(path.join(path.resolve('tests'),'_converter-link-'));   // an empty directory of this public repository
+ try{
+  const outsideDir=tmp();
+  const link=path.join(outsideDir,'link');fs.symlinkSync(inside,link);
+  await refusal(convertSnapshot({snapshot,output:link}),'path_symlink');
+  assert.deepEqual(fs.readdirSync(inside),[],'a symlinked output wrote nothing into the repository');
+  // a symlinked PARENT that leads into the repository, for a new target
+  const parentLink=path.join(outsideDir,'parent');fs.symlinkSync(inside,parentLink);
+  await refusal(convertSnapshot({snapshot,output:path.join(parentLink,'new')}),'path_inside_repository');
+  await refusal(convertSnapshot({snapshot,output:path.join(parentLink,'deep','er','new')}),'path_inside_repository');
+  assert.deepEqual(fs.readdirSync(inside),[],'a symlinked parent wrote nothing into the repository either');
+  // a symlink to an empty directory OUTSIDE the repository is still refused as the target itself (no link is ever followed for the output), a link as a parent that stays outside is fine
+  const away=tmp();const awayLink=path.join(outsideDir,'away');fs.symlinkSync(away,awayLink);
+  await refusal(convertSnapshot({snapshot,output:awayLink}),'path_symlink');assert.deepEqual(fs.readdirSync(away),[],'and nothing was written through it');
+  const ok=await convertSnapshot({snapshot,output:path.join(awayLink,'out')});assert.ok(ok.converted.objects>0);assert.ok(fs.existsSync(path.join(away,'out','tree')),'a parent link that stays outside the repository is accepted');
+  // a dangling link on the way is not a location
+  const dangling=path.join(outsideDir,'dangling');fs.symlinkSync(path.join(outsideDir,'nowhere'),dangling);
+  await refusal(convertSnapshot({snapshot,output:dangling}),'path_symlink');
+  await refusal(convertSnapshot({snapshot,output:path.join(dangling,'out')}),'path_unresolvable');
+  // the snapshot may not be reached through a link into the repository either
+  const snapLink=path.join(outsideDir,'snap');fs.symlinkSync(path.resolve('tests'),snapLink);
+  await refusal(convertSnapshot({snapshot:snapLink,output:path.join(tmp(),'o')}),'path_inside_repository');
+  // the CLI refuses the same way and creates nothing
+  const cli=spawnSync(process.execPath,['scripts/prediction-aux-export-convert.mjs',snapshot,link],{encoding:'utf8'});assert.equal(cli.status,2);assert.match(cli.stderr,/path_symlink/);assert.deepEqual(fs.readdirSync(inside),[]);
+ }finally{fs.rmSync(inside,{recursive:true,force:true});}
 }
 
 // ---- 4. The pure file of the converter names no write to a database, a bucket or the network ----

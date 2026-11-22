@@ -11,6 +11,8 @@
 //   <output-dir>/identity.json            [{key, etag, size, sha256}] sorted by key: the identity the cutover compares at every boundary (auxFlipRefusal compares key, ETag and size)
 //   <output-dir>/converter-report.json    counts, bytes and digests per family, the snapshot's own digest; written LAST, so its presence marks a complete conversion
 //
+// The output directory is judged by where it REALLY is (symlinks resolved; the output itself may not be a symlink; a path that resolves into the repository is refused), and a key of the four families that the
+// importer would not consume (an unknown name, a backup copy, a non-JSON file) is refused here, never copied and counted as if it were imported.
 // A snapshot is refused (exit 2, nothing left behind) unless verifyProductionSnapshot passes (every object re-hashed against the manifest, totals equal) AND its status is `consistent_fenced` with no
 // NO-GO reason, no change between the listings and a fence that held. Every copied object is read once, hashed again at the moment of the copy and compared with the manifest's size and SHA-256; its
 // metadata must name the same key and size and carry a strong ETag; a key that could leave the tree is refused; a duplicate, a missing or a changed object is a refusal. The bytes are never parsed or
@@ -20,18 +22,37 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {verifyProductionSnapshot,STATUS_CONSISTENT} from './r2-snapshot-export.mjs';
-import {auxExportFamily} from './prediction-aux-d1-import.mjs';
+import {auxExportFamily,auxConsumableKey} from './prediction-aux-d1-import.mjs';
 
 const REPO_ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const sha=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 export class Refusal extends Error{constructor(code,detail={}){super(code);this.name='Refusal';this.code=code;this.detail=detail;}}
 const refuse=(code,detail)=>{throw new Refusal(code,detail);};
 
-function outside(directory,name){
+// Where a directory REALLY is, not where its text says: the nearest existing ancestor is resolved through the filesystem (every symlink on the way), the rest is appended. A path that ends up inside the
+// repository is refused, whatever its spelling or the symlink that leads there (review of PR 896: a link in /tmp to an empty directory of this public repository would have received the private bodies).
+// The output directory itself must not be a symlink at all; a dangling link anywhere on the way is not a location.
+function locate(directory,name,{allowSymlinkTarget}){
  if(typeof directory!=='string'||!path.isAbsolute(directory))refuse('path_not_absolute',{name});
- const resolved=path.resolve(directory);
- if(resolved===REPO_ROOT||resolved.startsWith(REPO_ROOT+path.sep))refuse('path_inside_repository',{name});
- return resolved;
+ const lexical=path.resolve(directory);
+ let probe=lexical;const rest=[];
+ for(;;){
+  const stat=fs.lstatSync(probe,{throwIfNoEntry:false});
+  if(stat){
+   if(stat.isSymbolicLink()&&probe===lexical&&!allowSymlinkTarget)refuse('path_symlink',{name});
+   break;
+  }
+  const parent=path.dirname(probe);
+  if(parent===probe)break;
+  rest.unshift(path.basename(probe));probe=parent;
+ }
+ let base;
+ try{base=fs.realpathSync(probe);}catch{refuse('path_unresolvable',{name});}
+ const real=path.join(base,...rest);
+ let repository;
+ try{repository=fs.realpathSync(REPO_ROOT);}catch{repository=REPO_ROOT;}
+ if(real===repository||real.startsWith(repository+path.sep)||lexical===REPO_ROOT||lexical.startsWith(REPO_ROOT+path.sep))refuse('path_inside_repository',{name});
+ return real;
 }
 // The key becomes a path inside the tree: every segment must be a plain name.
 export function safeSegments(key){
@@ -43,7 +64,7 @@ const strongEtag=etag=>typeof etag==='string'&&etag.length>0&&!/^W\//.test(etag)
 
 // `afterVerify` is a test seam only (it runs between the verification of the snapshot and the copy, to prove that the bytes are hashed again AT the copy); the CLI never passes it.
 export async function convertSnapshot({snapshot,output,afterVerify=null}){
- const source=outside(snapshot,'snapshot'),target=outside(output,'output');
+ const source=locate(snapshot,'snapshot',{allowSymlinkTarget:true}),target=locate(output,'output',{allowSymlinkTarget:false});
  if(target===source||target.startsWith(source+path.sep)||source.startsWith(target+path.sep))refuse('paths_overlap');
  // 1. The snapshot must verify and must be a consistent fenced cut.
  let verified;
@@ -62,6 +83,8 @@ export async function convertSnapshot({snapshot,output,afterVerify=null}){
   if(seen.has(entry.key))refuse('duplicate_key',{keyDigest:sha(entry.key).slice(0,12)});
   seen.add(entry.key);
   const segments=safeSegments(entry.key);
+  // A key of a family that the importer would not consume (an unknown name, a backup copy, a non-JSON file) is refused here: the importer must never be the only thing between a selected object and a silent loss.
+  if(!auxConsumableKey(entry.key))refuse('unconsumed_key',{family,keyDigest:sha(entry.key).slice(0,12)});
   if(entry.metadata?.key!==entry.key||entry.metadata?.size!==entry.size)refuse('metadata_mismatch',{family,keyDigest:sha(entry.key).slice(0,12)});
   if(!strongEtag(entry.metadata?.etag))refuse('etag_missing_or_weak',{family,keyDigest:sha(entry.key).slice(0,12)});
   if(!Number.isSafeInteger(entry.size)||entry.size<0||typeof entry.sha256!=='string'||!/^[0-9a-f]{64}$/.test(entry.sha256)||typeof entry.file!=='string')refuse('entry_invalid',{family,keyDigest:sha(entry.key).slice(0,12)});
@@ -78,6 +101,8 @@ export async function convertSnapshot({snapshot,output,afterVerify=null}){
  else{fs.mkdirSync(target,{recursive:true,mode:0o700});created=true;}
  const tree=path.join(target,'tree');
  try{
+  // The directory exists now: its real location must still be the one that was checked (nothing swapped it for a link in between).
+  if(fs.realpathSync(target)!==target)refuse('path_changed',{name:'output'});
   fs.mkdirSync(tree,{mode:0o700});
   const identity=[],families={};
   for(const {entry,family,segments,file} of selected){

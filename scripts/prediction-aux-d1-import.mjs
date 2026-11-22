@@ -29,6 +29,11 @@ const SOURCE=/^enrichment\/sources\/([A-Za-z0-9_-]{1,100})\.json$/,MANIFEST=/^en
 const EVENT=/^enrichment\/(stop|start)-events\/(skipped-)?([A-Za-z0-9_-]{1,100})\.json$/;
 // AIR-554 (ADR 0196): the one place that says which R2 objects belong to the four families (and the pending index). The converter from the R2 snapshot manifest uses it, so the objects it hands over
 // are exactly the ones this importer reads. An object under an event prefix that is NOT a key the Worker writes is still handed over (family `event`): the importer must see it and block on it.
+// The shapes the importer actually consumes. A key inside a family prefix that does NOT have one of these shapes (an unknown source or manifest name, a backup copy, a non-JSON file) is never
+// silently ignored: the converter refuses it and the importer blocks on it (review of PR 896, no-loss parity).
+export function auxConsumableKey(key){
+ return typeof key==='string'&&(key===STAGE_KEY||key===OUTBOX_KEY||SOURCE.test(key)||MANIFEST.test(key)||EVENT.test(key));
+}
 export function auxExportFamily(key){
  if(typeof key!=='string')return null;
  if(key===STAGE_KEY)return 'stage';
@@ -50,7 +55,7 @@ export function readExport(target){
  const stat=fs.statSync(target);
  if(stat.isFile()){const data=JSON.parse(fs.readFileSync(target,'utf8'));if(!isObject(data))throw Object.assign(new Error('the export is not an object of key to document'),{blocker:true});return data;}
  const out={};
- const walk=dir=>{for(const name of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,name.name);if(name.isDirectory())walk(full);else if(name.name.endsWith('.json')){const key=path.relative(target,full).split(path.sep).join('/');try{out[key]=JSON.parse(fs.readFileSync(full,'utf8'));}catch{out[key]=Symbol.for('unreadable');}}}};
+ const walk=dir=>{for(const name of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,name.name);if(name.isDirectory())walk(full);else{const key=path.relative(target,full).split(path.sep).join('/');if(name.name.endsWith('.json')){try{out[key]=JSON.parse(fs.readFileSync(full,'utf8'));}catch{out[key]=Symbol.for('unreadable');}}else if(auxExportFamily(key))out[key]=Symbol.for('unreadable');}}};
  walk(target);
  return out;
 }
@@ -87,7 +92,12 @@ export async function buildPlan(objects){
    if(!isObject(value)||value.runId!==match[1]||!Array.isArray(value.films)||!value.films.length||!isObject(value.lease)||!Number.isInteger(value.lease.epoch)||typeof value.manifestHash!=='string'||!isObject(value.profile)||!isObject(value.contract)){blocker(blockers,'manifest_unusable',key);continue;}
    plan.manifests.push(await Aux.buildManifestRecord(match[1],value));
   }
-  else if(!EVENT.test(key)&&key!==STAGE_KEY&&key!==OUTBOX_KEY)plan.ignored++;
+  else if(!EVENT.test(key)&&key!==STAGE_KEY&&key!==OUTBOX_KEY){
+   // a key of a family that the importer does not consume is a blocker (an event key is judged below), never an ignored object
+   const family=auxExportFamily(key);
+   if(family&&family!=='event')blocker(blockers,family+'_key_unknown',key);
+   else if(!family)plan.ignored++;
+  }
  }
  // outbox: the records plus the pending index. An index that exists but cannot be read is a blocker: it carries attempts, quarantine and `since`, and an empty index would lose them silently.
  let index={};const indexed=new Set();
