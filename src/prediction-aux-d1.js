@@ -7,7 +7,8 @@ export const AUX_CONTRACT=34;
 export const AUX_LIMITS={stageItems:10,stageBytes:56*1024,statementBytes:100*1024,bindLimit:100,pieceChars:40000,skippedCap:256,compactMs:14*86400000,compactLimit:20,drainLimit:20,quarantineAfter:8,stageAttempts:5};
 const SCOPE=Symbol.for('iptv.requestScope');
 export const databaseOf=env=>env?.DB??null;
-const TABLES=['prediction_aux_authority','prediction_aux_cas','prediction_batch_stage_head','prediction_batch_stage','prediction_run_source_head','prediction_run_source_revision','prediction_run_source_piece','prediction_run_manifest','prediction_run_manifest_piece','prediction_event_outbox','prediction_event_outbox_counter','prediction_event_outbox_state_count','prediction_event_outbox_diag'];
+export const AUX_TABLES=['prediction_aux_authority','prediction_aux_cas','prediction_batch_stage_head','prediction_batch_stage','prediction_run_source_head','prediction_run_source_revision','prediction_run_source_piece','prediction_run_manifest','prediction_run_manifest_piece','prediction_event_outbox','prediction_event_outbox_counter','prediction_event_outbox_state_count','prediction_event_outbox_diag'];
+const TABLES=AUX_TABLES;
 const encoder=new TextEncoder();
 
 // `guard` names which budget refused. Codes: prediction_aux_unavailable (the authority or the database cannot answer), prediction_aux_cas (a fence or a revision moved: nothing was written),
