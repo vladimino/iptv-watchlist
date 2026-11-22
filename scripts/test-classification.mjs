@@ -102,6 +102,9 @@ export const FILES={
  "air-376-small-fixes.mjs": {
   "suite": "core"
  },
+ "air-566-residual-nonfilm-audit.mjs": {
+  "suite": "core"
+ },
  "air-86-replay.mjs": {
   "suite": "core"
  },
@@ -1025,6 +1028,21 @@ export const FILES={
   "suite": "core"
  },
  "prediction-skipped-event.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-d1.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-worker.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-import.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-budget.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-bench-lib.mjs": {
   "suite": "core"
  },
  "prediction-catalog-held-event.mjs": {

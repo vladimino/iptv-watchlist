@@ -74,6 +74,7 @@ const loadJSON=async(env,key,options=null)=>{
   else{const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(pointer){const generation=await pointer.json();if(generation?.phase==='published'&&generation.programmeRunId){const object=await env.BUCKET.get(epgGenerationKey(generation.programmeRunId,staged));if(object)return storedJSON(object,key,options);}}}
  }
  if(typeof PredictionD1!=='undefined'){const routed=await PredictionD1.routeRead(env,key,options);if(routed.handled)return routed.value;}
+ if(typeof PredictionAux!=='undefined'){const routed=await auxRouteRead(env,key);if(routed.handled)return routed.value;}
  if(typeof RatingsD1!=='undefined'){const routed=await RatingsD1.routeRead(env,key);if(routed.handled)return routed.value;}
  if(key===VIEW_INDEX_KEY)return derivedViewIndex(env);
  const o=await env.BUCKET.get(key);
@@ -923,6 +924,7 @@ const saveJSON=async(env,key,value)=>{
   const routed=await PredictionD1.saveMutable(env,key,value);
   if(routed?.handled)return {etag:'d1'};
  }
+ if(typeof PredictionAux!=='undefined'){const routed=await auxRouteWrite(env,key,value);if(routed.handled)return {etag:'d1'};}
  const saved=await putStoredJson(env,key,JSON.stringify(value));
  if(saved?.skipped==='canonical_mirror_frozen')return saved;
  return saved;

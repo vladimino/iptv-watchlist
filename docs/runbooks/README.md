@@ -17,6 +17,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Recovery procedures](recovery/README.md), including [D1 authority and recovery](recovery/d1-authority-and-time-travel.md)
 - [MCP connection and read-only smoke](mcp-connectivity.md)
 - [Prediction Scheduled Tasks and safe diagnostics](prediction-operations.md)
+- [Prediction auxiliary state in D1: checkpoint and outbox recovery, offline import and the AIR-554 handoff (dormant)](prediction-aux-state-cutover.md)
 - [Batch runner v2 dry-run A/B procedure](prediction-batch-v2-dry-run-ab.md) (proposed, owner-gated)
 - [Scheduled Task drift monitor: triage and owner gates](scheduled-task-drift.md)
 - [Taste-profile publication procedure (owner approval required)](taste-profile-publication.md)

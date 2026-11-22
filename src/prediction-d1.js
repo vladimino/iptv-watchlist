@@ -189,12 +189,14 @@ async function readAuthorityNow(db,env){
 // batch, so a marker that moved in the meantime fails that write closed (`prediction_domain_cas`) instead of landing it; what a read inside the same
 // request can miss is a change that happened after the marker was read and before the request's next write, for at most the length of the request.
 const REQUEST_SCOPES=new WeakMap();
+const REQUEST_SCOPE_KEY=Symbol.for('iptv.requestScope');
 // A statement counts as a read only if it is a plain SELECT, one statement, with nothing before it. SQLite lets a WITH statement end in an UPDATE, INSERT or DELETE
 // (with RETURNING it can be run through first() or all()), a PRAGMA can set as well as read, and a comment can hide either; every other shape, and every statement the
 // scope did not prepare itself, is treated as a write and drops the held answer.
 const READ_ONLY_SQL=/^select\b[^;]*;?\s*$/i;
 function scopedDatabase(database,scope){
  const statements=new WeakMap();
+ // `scope.aux` (AIR-553) is NOT dropped here: the auxiliary marker changes only by an owner flip, never inside a request, and every auxiliary write asserts the generation it read inside its own batch, so a stale read fails closed.
  const forget=()=>{scope.read=null;};
  const statementOf=(statement,sql)=>{
   const reads=typeof sql==='string'&&READ_ONLY_SQL.test(sql.trimStart());
@@ -213,6 +215,8 @@ function scopedDatabase(database,scope){
   return proxy;
  };
  const proxy=new Proxy(database,{get(target,prop){
+  // AIR-553: the request scope is readable by name, so the auxiliary-state module can hold its one marker read in it (dropped by `forget` like this module's own).
+  if(prop===REQUEST_SCOPE_KEY)return scope;
   const value=Reflect.get(target,prop,target);
   if(typeof value!=='function')return value;
   if(prop==='prepare')return sql=>statementOf(value.call(target,sql),sql);
@@ -235,7 +239,7 @@ export function scopeRequest(env){
  return {...env,DB:scopedDatabase(database,{read:null})};
 }
 // A request that is about to write (or to take the lease) asks for the marker afresh, so the generation its fenced write carries is the current one, not the one an earlier read of the request saw.
-export function forgetRequestAuthority(env){const scope=REQUEST_SCOPES.get(env?.DB);if(scope)scope.read=null;}
+export function forgetRequestAuthority(env){const scope=REQUEST_SCOPES.get(env?.DB);if(scope){scope.read=null;scope.aux=null;}}
 export async function readPredictionAuthority(db,env){
  const scope=REQUEST_SCOPES.get(db);
  if(!scope)return readAuthorityNow(db,env);
@@ -477,6 +481,13 @@ async function saveFingerprint(env,filmId,value,authority){
  ]);
  await mirror(env.BUCKET,'enrichment/films/'+encodeURIComponent(filmId)+'/fingerprint.json',value);
 }
+const COMMIT_EXTRA=Symbol.for('iptv.prediction.commitExtra');
+// `env[COMMIT_EXTRA]` = {filmId, statements}: statements that commit with that film's prediction batch and nowhere else.
+function extraStatements(env,filmId){const extra=env?.[COMMIT_EXTRA];return extra&&extra.filmId===filmId&&Array.isArray(extra.statements)?extra.statements:[];}
+// AIR-553: the same hook for a RUN write. `env[COMMIT_EXTRA]` = {runId, statements} commits with that run's (non-elect) save: the source revision bound to the run, the terminal Event's outbox row.
+// `pre` run BEFORE the run row is written (a compare-and-swap on the target's previous state); `statements` run after it.
+function extraRunStatements(env,runId){const extra=env?.[COMMIT_EXTRA];return extra&&extra.runId===runId&&Array.isArray(extra.statements)?extra.statements:[];}
+function extraRunPre(env,runId){const extra=env?.[COMMIT_EXTRA];return extra&&extra.runId===runId&&Array.isArray(extra.pre)?extra.pre:[];}
 function pointerColumns(record){
  return [record?.tasteProfileVersion??null,record?.tasteProfileHash??null,record?.fingerprintHash??null,record?.fingerprintSchemaVersion??null,record?.predictionPromptVersion??null,typeof record?.predictedRating==='number'?record.predictedRating:null,record?.r2Key,record?.contentSha256,record?.generatedAt||record?.updatedAt||record?.replacedAt||null];
 }
@@ -507,6 +518,8 @@ async function savePredictions(env,filmId,bundle,authority){
   if(typeof record?.replacedAt!=='string'||!record.replacedAt)throw failed('prediction_domain_unlinked');
   statements.push(['INSERT INTO prediction_lineage (film_id,replaced_at,predicted_rating,taste_profile_version,fingerprint_hash,r2_key,content_sha256,display_json) VALUES (?,?,?,?,?,?,?,?)',[filmId,record.replacedAt,record.predictedRating??null,record.tasteProfileVersion??null,record.fingerprintHash??null,record.r2Key,record.contentSha256,JSON.stringify({...displayOf(record),replacedAt:record.replacedAt})]]);
  }
+ // AIR-553 (ADR 0194 decision 2): the drain of the held stage names the staged row it settles; the row's deletion commits in THIS batch, under the same guards as the film's prediction.
+ statements.push(...extraStatements(env,filmId));
  await fenced(env.DB,statements);
  await mirror(env.BUCKET,'enrichment/films/'+encodeURIComponent(filmId)+'/predictions.json',bundle);
 }
@@ -549,16 +562,20 @@ async function saveRun(env,run,authority,elect){
   ['UPDATE prediction_domain_authority SET generation=? WHERE id=1 AND mode=\'d1\' AND generation=?',[next,authority.generation]],
   [FENCE_SQL,[]],
   ...guardStatements(env),
+  ...(elect?[]:extraRunPre(env,runId)),
  ];
  if(elect){
   statements.push(['UPDATE prediction_run SET latest=0 WHERE latest=1',[]]);
   statements.push(['INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES (?,1,?,?) ON CONFLICT(run_id) DO UPDATE SET latest=1, updated_at=excluded.updated_at, document_json=excluded.document_json',[runId,at,text]]);
  }else statements.push(['INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES (?,0,?,?) ON CONFLICT(run_id) DO UPDATE SET updated_at=excluded.updated_at, document_json=excluded.document_json',[runId,at,text]]);
+ if(!elect)statements.push(...extraRunStatements(env,runId));
  await fenced(env.DB,statements);
  await mirror(env.BUCKET,'enrichment/runs/'+runId+'.json',run);
  if(elect)await mirror(env.BUCKET,LATEST_KEY,run);
 }
-async function saveLease(env,name,value,previousToken,authority){
+// The statements of one lease write, without running them: the generation bump, the fence and the insert or the token-guarded update. AIR-553 composes them with the
+// auxiliary manifest rows into ONE batch (the readiness edit of a deferred start); saveLease runs exactly these statements, so a lease written either way is the same lease.
+export function leaseStatements(authority,name,value,previousToken){
  const token=crypto.randomUUID();
  const next=authority.generation+1;
  const text=JSON.stringify(value);
@@ -568,6 +585,11 @@ async function saveLease(env,name,value,previousToken,authority){
  ];
  if(previousToken==null)statements.push(['INSERT INTO prediction_lease (name,token,expires_at,document_json) VALUES (?,?,?,?)',[name,token,Number(value?.expiresAt)||0,text]]);
  else statements.push(['UPDATE prediction_lease SET token=?, expires_at=?, document_json=? WHERE name=? AND token=?',[token,Number(value?.expiresAt)||0,text,name,previousToken]]);
+ return {token,statements};
+}
+export async function mirrorLease(env,name,value){await mirror(env.BUCKET,name==='writer'?WRITER_KEY:RUNNER_KEY,value);}
+async function saveLease(env,name,value,previousToken,authority){
+ const {token,statements}=leaseStatements(authority,name,value,previousToken);
  await fenced(env.DB,statements);
  await mirror(env.BUCKET,name==='writer'?WRITER_KEY:RUNNER_KEY,value);
  return token;
