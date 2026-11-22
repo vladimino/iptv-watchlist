@@ -256,6 +256,21 @@ const pointer=f=>f.db.sql('SELECT version, snapshot_id, last_success_at, mirror_
  assert.equal(raced.outcome,'failed');assert.equal(raced.recorded,false,'a competing acknowledgement won: the failure was not recorded');
 }
 
+// 8f. The affected-row decoder accepts only an explicit numeric 0 or 1: null, a string or a missing result is unproven (never coerced to 0), and the reconcile reports an unreadable acknowledgement as `uncertain`.
+{
+ const f=open();await scan(f,films(0,1),'2026-11-21T09:40:00.000Z');
+ const p0=pointer(f);
+ const lying=value=>({prepare:f.db.prepare.bind(f.db),batch:async statements=>{const out=await f.db.batch(statements);if(statements.some(item=>/SELECT changes\(\)/.test(item.text)))out[out.length-1]={success:true,results:value===undefined?[]:[{changed:value}]};return out;}});
+ for(const value of [null,'1',2,-1,undefined]){
+  f.sql("UPDATE watchlist_current SET mirror_delivered_snapshot_id=NULL, mirror_attempts=0, mirror_next_retry_at=NULL, revision=revision+1");
+  const r=await WatchlistD1.recordMirror(lying(value),{snapshotId:p0.snapshot_id,lastSuccessAt:p0.last_success_at,generation:1,outcome:'delivered',now:T('2026-11-21T09:41:00Z')});
+  assert.deepEqual([r.ok,r.applied,r.reason],[true,null,'result_unreadable'],'changed='+String(value)+' is unproven');
+ }
+ f.sql("UPDATE watchlist_current SET mirror_delivered_snapshot_id=NULL, mirror_attempts=0, mirror_next_retry_at=NULL, revision=revision+1");
+ const b=store();const out=await Mirror.reconcileMirror({DB:lying(null),BUCKET:b},{epoch:1,now:T('2026-11-21T09:42:00Z'),deps});
+ assert.deepEqual([out.outcome,out.reason],['uncertain','ack_result_unreadable']);
+}
+
 // 9. The Letterboxd ensure: the reconcile runs BEFORE any early return on a finished slot, its failure never blocks Events or a new slot, and an absent port changes nothing.
 {
  const f=open(),b=store();await scan(f,films(0,1),'2026-11-21T09:40:00.000Z');
