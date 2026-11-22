@@ -12,6 +12,9 @@ import {latestDueSlot, nextSlot, previousSlot, slotInstanceId, slotEventKey, par
 export const MODES = ['external', 'switching', 'cloudflare'];
 export const ALIVE = ['running', 'waiting', 'queued', 'paused'];
 export const ENDED = ['complete', 'errored', 'terminated', 'absent'];
+// AIR-571 E: the independent cron of the Letterboxd Sync `ensure`, at minute 30 UTC (a Madrid `:30` in CET and CEST). The Worker dispatches it in `scheduled`; the cron itself is NOT in wrangler.jsonc until the owner's
+// activation GO (the three existing triggers are unchanged), so this constant and the dispatch are dormant until then.
+export const CRON = '30 * * * *';
 export const LIMITS = {stepCap: 200, sleepFloorMs: 1000, deadlineMarginMs: 5 * 60000, startupGraceMs: 15 * 60000, eventBatch: 4, eventAttempts: 12, missedBack: 4, watchlistStaleMs: 24 * 3600000, mirrorStaleMs: 2 * 3600000, mirrorStaleAttempts: 3, controlAttempts: 4};
 export const RATINGS_OUTCOMES = ['finished', 'rate_limited', 'blocked', 'error', 'interrupted', 'skipped_missed', 'noop'];
 export const WATCHLIST_OUTCOMES = ['committed', 'no_change', 'incomplete', 'unavailable', 'rate_limited', 'error', 'interrupted', 'skipped_missed', 'disabled'];

@@ -293,8 +293,9 @@ export async function recordMirror(source,{outcome,snapshotId,lastSuccessAt,gene
   if(/CHECK constraint failed|UNIQUE constraint failed|FOREIGN KEY|watchlist_current_regress|PRIMARY KEY/i.test(message))return {ok:false,reason:'conflict'};
   return {ok:false,reason:'unavailable'};
  }
- const changed=Number(results?.[results.length-1]?.results?.[0]?.changed);
- if(!Number.isInteger(changed))return {ok:true,applied:null,reason:'result_unreadable'};
+ // Only an explicit numeric 0 or 1 is a result: null, a string or anything else is unproven (never coerced to 0).
+ const changed=results?.[results.length-1]?.results?.[0]?.changed;
+ if(typeof changed!=='number'||(changed!==0&&changed!==1))return {ok:true,applied:null,reason:'result_unreadable'};
  return changed>0?{ok:true,applied:true}:{ok:true,applied:false,reason:'not_owed'};
 }
 

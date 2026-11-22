@@ -24,6 +24,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Letterboxd claim backfill: read-only preflight, L3 plan and readback (owner approval required, ADR 0184 Accepted)](letterboxd-claim-backfill.md)
 - [Letterboxd baseline import (owner approval required)](letterboxd-baseline-import.md)
 - [Letterboxd Sync: slots, observation, activation order and rollback (dormant; owner approval required for every production step)](letterboxd-sync.md)
+- [Letterboxd Sync activation runbook: holdpoints B to F, preflight, the activation deployment and rollback (prepared, not authorized)](letterboxd-activation.md)
 - [Letterboxd Diary viewing history: activation, observation and rollback (owner approval required to switch on)](letterboxd-diary-history.md)
 - [Finds display-only title exclusion: build, placement and switch (owner approval required)](finds-display-exclusion.md)
 - [Immutable prediction versions: the writer and the completed historical materialization](prediction-versions.md)
