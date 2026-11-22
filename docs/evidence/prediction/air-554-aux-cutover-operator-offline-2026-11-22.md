@@ -34,3 +34,13 @@ One run: **7 statements, 16,009 bytes** (largest statement 11,730 bytes) against
 ## Not covered, on purpose
 
 A real production export and the scratch rehearsal on it (needs the owner's separate authorization); the real import's size; any production apply, close, import, verify, flip or reopen; the drain wait; the performance baseline. Nothing here authorizes a production operation.
+
+## Review round 2 (22 Nov 2026, head `47a9e88`; docs `5e2d397`)
+
+Offline scratch only; no production data, credential, migration, marker, flag or Task.
+
+- The operator accepts no SQL file and no report file. `--converted <dir>` is one converter output directory; its `tree/` objects are re-hashed against its own `identity.json` (`tree_not_from_capture`), and the import SQL (`planSql`), the canonical row-level verification (`planVerifySql`) and the report (`planReport`) are derived from the rebuilt plan. A totals-only text carried next to the tree is never executed; a same-count corruption of a source piece or an outbox event aborts the flip with the marker still `closed`.
+- The paused legacy write is exercised on the real Worker over the shared scratch database (`tests/prediction-aux-cutover-production.mjs`, section 4d): a `batch/hold` paused at its R2 PUT after the marker read, the close and the cut while it is in flight, the resumed PUT, import and verify, and the final cut refuses the flip as `listing_changed` for `enrichment/batch-stage.json`. A PUT landing after the final capture cannot be seen by an inventory (ADR 0196 residual, unchanged).
+- Mutation checks re-run on this head, each fails the test: verification left out of the flip batch; tree bytes not re-hashed; tree file set not compared.
+- Test runtime ~10 s; the test now stops its scratch bucket and removes its scratch directories at exit.
+- Limits unchanged: a fully fabricated, internally consistent converted directory is not detectable offline; real import size is unmeasured.
