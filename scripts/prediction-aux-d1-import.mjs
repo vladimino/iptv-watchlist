@@ -9,6 +9,7 @@
 //   node scripts/prediction-aux-d1-import.mjs verify <export>     (guarded SQL that checks the IMPORTED rows against the export, row by row, byte by byte, with child totals, and aborts on any difference)
 //   node scripts/prediction-aux-d1-import.mjs preflight <export>  (read-only SELECTs of the exported run ids against D1's prediction_run: finds true orphan sources before activation)
 //
+// `<export>` is the `tree` directory written by scripts/prediction-aux-export-convert.mjs from a verified `consistent_fenced` production R2 snapshot (or one JSON file of key to document).
 // Exit codes: 0 ok, 1 usage, 2 blocker (nothing is printed as SQL). A source the Worker could not read is a blocker: it never becomes an empty or partial import. Blockers: an unreadable or malformed
 // pending index or index entry, an object under an event prefix whose key is not one the Worker writes, a manifest without its source, any statement over the D1 byte budget (checked on the exact
 // UTF-8 text that would be sent), a stage over its caps, a record without a valid time, more than 256 active pending skipped records, a duplicate identity.
@@ -26,6 +27,17 @@ import * as Aux from '../src/prediction-aux-d1.js';
 const STAGE_KEY='enrichment/batch-stage.json',OUTBOX_KEY='enrichment/event-outbox.json';
 const SOURCE=/^enrichment\/sources\/([A-Za-z0-9_-]{1,100})\.json$/,MANIFEST=/^enrichment\/batch-manifest\/([A-Za-z0-9_-]{1,100})\.json$/;
 const EVENT=/^enrichment\/(stop|start)-events\/(skipped-)?([A-Za-z0-9_-]{1,100})\.json$/;
+// AIR-554 (ADR 0196): the one place that says which R2 objects belong to the four families (and the pending index). The converter from the R2 snapshot manifest uses it, so the objects it hands over
+// are exactly the ones this importer reads. An object under an event prefix that is NOT a key the Worker writes is still handed over (family `event`): the importer must see it and block on it.
+export function auxExportFamily(key){
+ if(typeof key!=='string')return null;
+ if(key===STAGE_KEY)return 'stage';
+ if(key===OUTBOX_KEY)return 'outbox';
+ if(key.startsWith('enrichment/sources/'))return 'source';
+ if(key.startsWith('enrichment/batch-manifest/'))return 'manifest';
+ if(key.startsWith('enrichment/stop-events/')||key.startsWith('enrichment/start-events/'))return 'event';
+ return null;
+}
 const ITEM_KEYS=['filmId','fingerprint','prediction','failure','inputHash','assessment'];
 const pick=item=>Object.fromEntries(ITEM_KEYS.filter(key=>item[key]!==undefined).map(key=>[key,item[key]]));
 const sqlq=value=>value===null||value===undefined?'NULL':typeof value==='number'?String(value):"'"+String(value).replace(/'/g,"''")+"'";

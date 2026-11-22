@@ -37,7 +37,8 @@ The approval covers the listed read-only planning, export and manifest-verificat
    Behind an HTTPS proxy (for example a cloud container that sets `HTTPS_PROXY`), start Node with `NODE_USE_ENV_PROXY=1`. Without it Node's built-in `fetch` ignores the proxy and the run fails as `network` before the first request reaches R2. A machine with direct access needs no setting.
 5. **Verify independently.** `node scripts/r2-snapshot-export.mjs --output /absolute/private/snapshot --verify` re-reads every stored object against the manifest, recomputes the aggregate SHA-256 and re-checks the source identity, status and fence record. Exit 3 means the manifest itself records a NO-GO.
 6. **On NO-GO.** Do not import. Re-run during a quieter interval; the opening listing is taken again and unchanged objects are reused. If the proof cannot be produced within a reasonable number of attempts, the alternative is a short, separately approved freeze of the Scheduled Tasks for the export window; this page does not grant it.
-7. **Afterwards.** The owner revokes or keeps the credential as decided; the snapshot directory stays private. The [backfill executor](d1-backfill.md) consumes the manifest; it refuses one whose status is not `consistent_fenced`.
+7. **Predictions auxiliary state.** The Predictions batch_v2 auxiliary importer does not read this directory directly. `node scripts/prediction-aux-export-convert.mjs /absolute/private/snapshot /absolute/private/aux-converted` converts a `consistent_fenced` snapshot into the key-mirrored tree it reads ([runbook](prediction-aux-state-cutover.md#getting-the-importer-input-from-the-production-snapshot)).
+8. **Afterwards.** The owner revokes or keeps the credential as decided; the snapshot directory stays private. The [backfill executor](d1-backfill.md) consumes the manifest; it refuses one whose status is not `consistent_fenced`.
 
 ## Rollback
 
