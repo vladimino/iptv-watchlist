@@ -106,6 +106,39 @@ const step={async do(name,fn){return fn();},async sleepUntil(){}};
     assert.equal(attempted,'refused:fenced',name+': the stale request commits nothing against the new owner');
    }
   }
+  // AIR-571 D2 (preactivation QA): the Watchlist clause of the commit guard with REAL marker changes, and the Ratings `ensure` path with the same single admission pin.
+  {
+   const probe=async fence=>run("(async()=>{const cur=await LetterboxdRatings.readDocument(__env,'letterboxd/diary/state.json');const fenced={...__env,ratingsFence:"+JSON.stringify(fence)+"};const saved=await LetterboxdRatings.writeDocument(fenced,'letterboxd/diary/state.json',cur.object,{...cur.value,probe:Math.random()});return saved?'written':'refused:fenced';})()");
+   const marker=db.sql('SELECT mode, writes FROM watchlist_authority')[0];
+   // a reverse handover is complete (epoch 2, external) and the Watchlist is back on the inert authority: the legacy entry is admitted, with the Watchlist clause
+   db.sql("DELETE FROM letterboxd_sync_mode");db.sql("INSERT INTO letterboxd_sync_mode (id,mode,epoch,changed_at,revision,write_id) VALUES (1,'external',2,'2030-01-01T00:00:00.000Z',7,'w')");
+   db.sql("UPDATE watchlist_authority SET mode='epg',writes='open'");
+   const admitted=await run("RatingsOrchestration.externalGate(__env,'start')");
+   assert.equal(admitted.reason,null);assert.deepEqual([admitted.fence.letterboxdRevision,admitted.fence.watchlistGuard],[7,true]);
+   assert.equal(await probe(admitted.fence),'written');
+   for(const [name,change,restore] of [['writes held (a hold)',"UPDATE watchlist_authority SET writes='held'","UPDATE watchlist_authority SET writes='open'"],['the marker moves to d1 (a forward cutover began)',"UPDATE watchlist_authority SET mode='d1'","UPDATE watchlist_authority SET mode='epg'"]]){
+    db.sql(change);
+    assert.equal(await probe(admitted.fence),'refused:fenced','an admitted request commits nothing after: '+name);
+    assert.equal((await run("RatingsOrchestration.externalGate(__env,'start')")).reason,'external_writer_fenced','and a new admission is refused: '+name);
+    db.sql(restore);
+   }
+   // fail closed: the Watchlist authority table is gone after a recorded epoch (a partial schema): never the inert pre-switch state
+   db.sql('ALTER TABLE watchlist_authority RENAME TO watchlist_authority_gone');
+   assert.equal((await run("RatingsOrchestration.externalGate(__env,'start')")).reason,'external_writer_fenced','partial schema after a switch fails closed');
+   db.sql('ALTER TABLE watchlist_authority_gone RENAME TO watchlist_authority');
+   // the Ratings `ensure` tick: the single admission read supplies the pin of its authoritative writes, so a Letterboxd change right after that read refuses the claim
+   await run("LetterboxdRatings.writeDocument(__env,'letterboxd/ratings/executor.json',null,{schemaVersion:1,mode:'cloudflare',epoch:1,drain:null})");
+   const created=[];context.__ens={...env,RATINGS_WORKFLOW:{create:async arg=>{created.push(arg.id);},get:async()=>{throw new Error('not found');}}};
+   const NOWE=T('2026-11-21T20:00:00Z');
+   let moved=false;
+   const racing=new Proxy(db,{get(target,key){if(key==='prepare')return sql=>{const prepared=target.prepare(sql);if(!/letterboxd_sync_mode/.test(sql)||!/^\s*SELECT/i.test(sql))return prepared;const after=async row=>{if(!moved){moved=true;target.sql("UPDATE letterboxd_sync_mode SET mode='switching',target='cloudflare',from_mode='external',revision=revision+1 WHERE id=1");}return row;};return {bind:(...p)=>{const bound=prepared.bind(...p);return {...bound,first:async()=>after(await bound.first())};},first:async()=>after(await prepared.first())};};const value=target[key];return typeof value==='function'?value.bind(target):value;}});
+   context.__ens={...context.__ens,DB:racing};
+   const tick=await run("RatingsOrchestration.ensure(__ens,{now:"+NOWE+"})");
+   assert.equal(tick.started,false,JSON.stringify(tick));assert.equal(created.length,0,'no Ratings instance was created over a moved Letterboxd mode');
+   // restore the module state for the sections below
+   db.sql("DELETE FROM ratings_document WHERE key='letterboxd/ratings/executor.json'");// back to the absent default
+   db.sql("UPDATE watchlist_authority SET mode='"+marker.mode+"',writes='"+marker.writes+"'");
+  }
   db.sql('DELETE FROM letterboxd_sync_mode');// the owner's real abort is covered in letterboxd-sync.mjs; here the row returns to its absent default for the sections below
  }
  await LetterboxdSync.switchMode(env,{action:'close_admission',target:'cloudflare'},ports,T('2026-11-21T09:39:00Z'));

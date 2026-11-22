@@ -49,6 +49,14 @@ export function classifyThrown(error) {
 export const FENCE_GUARD_SQL = "INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id = 1 AND mode = 'cloudflare' AND epoch = ?) THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok";
 // The env of every authoritative write of a Letterboxd step: the Ratings documents (facts, removal queue, Diary identity) assert the epoch in their own batch through `ratingsFence.guard`, and the canonical
 // Film/Person writers assert it in theirs through the `letterboxd` producer fence. A stale instance whose mode moved mid-step therefore commits nothing, not merely a receipt that is refused later.
+// AIR-571 D2. Drain mode: the mode row stays `cloudflare` at the same epoch and carries the marker `drain = 'scan_stopped'` (the existing free-text column, no schema change). While it is set NO new Watchlist scan starts and no
+// promotion commits (the guard below rides in the promotion batch, so a scan that began before the marker cannot publish after it), while the causal effects of the current snapshot and the Diary/Ratings phase continue.
+export const SCAN_STOPPED = 'scan_stopped';
+export const SCAN_GUARD_SQL = "INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id = 1 AND mode = 'cloudflare' AND epoch = ? AND (drain IS NULL OR drain <> 'scan_stopped')) THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok";
+export async function scanOpen(env) {
+  const mode = await readMode(env);
+  return {open: !mode.malformed && mode.mode === 'cloudflare' && mode.drain !== SCAN_STOPPED, drain: mode.drain ?? null};
+}
 export const fencedEnv = (env, epoch) => ({...env, ratingsFence: {guard: [FENCE_GUARD_SQL, [epoch]], hard: true}, producerFence: {kind: 'letterboxd', epoch}});
 const fenceGuard = (env, epoch) => dbOf(env).prepare(FENCE_GUARD_SQL).bind(epoch);
 
@@ -284,7 +292,8 @@ export async function switchMode(env, {action, target, expectEpoch, expectRevisi
       if (!['external', 'cloudflare'].includes(target)) return {action, refused: 'invalid_target'};
       let guards = [];
       if (mode.mode === 'cloudflare' && target === 'external') {
-        // Reverse handover: no running writer is closed over undrained causal effects (never a silent discard).
+        // Reverse handover: scanning must already be stopped (`drain`), so the effects proof below cannot be overtaken by a promotion, and no running writer is closed over undrained causal effects (never a silent discard).
+        if (mode.drain !== SCAN_STOPPED) return {action, refused: 'drain_not_started', mode: mode.mode, epoch: mode.epoch};
         const effects = await effectsState(env, ports);
         if (effects.error) return {action, refused: 'effects_unreadable'};
         if (effects.unproven) return {action, refused: 'effects_unproven'};
@@ -318,6 +327,19 @@ export async function switchMode(env, {action, target, expectEpoch, expectRevisi
       if (result.outcome === 'applied') return {action, completed: true, mode: next.mode, epoch: next.epoch, drain: 'verified'};
       if (result.outcome === 'uncertain') return UNCERTAIN(action);
       if (result.guarded && guards.length) { const again = await readMode(env); if (again.revision === mode.revision && again.epoch === mode.epoch) return {action, refused: 'handover_changed', mode: 'switching', target: mode.target, epoch: mode.epoch}; }
+      if (expectEpoch !== undefined || expectRevision !== undefined) return {action, refused: 'pin_mismatch', pin: 'revision'};
+      continue;
+    }
+    if (action === 'drain' || action === 'resume') {
+      // Drain mode on the running writer: only `cloudflare` (a writer exists), same epoch, one row write. `resume` is the recovery (scans open again).
+      if (mode.mode !== 'cloudflare') return {action, refused: 'not_running', mode: mode.mode, epoch: mode.epoch};
+      const draining = mode.drain === SCAN_STOPPED;
+      if (action === 'drain' && draining) return {action, refused: 'already_draining', mode: mode.mode, epoch: mode.epoch};
+      if (action === 'resume' && !draining) return {action, refused: 'not_draining', mode: mode.mode, epoch: mode.epoch};
+      const next = {...mode, drain: action === 'drain' ? SCAN_STOPPED : null, changedAt: iso(now)};
+      const result = await writeMode(env, mode, next);
+      if (result.outcome === 'applied') return {action, [action === 'drain' ? 'draining' : 'resumed']: true, mode: mode.mode, epoch: mode.epoch};
+      if (result.outcome === 'uncertain') return UNCERTAIN(action);
       if (expectEpoch !== undefined || expectRevision !== undefined) return {action, refused: 'pin_mismatch', pin: 'revision'};
       continue;
     }
@@ -361,6 +383,7 @@ export async function modeStatus(env, ports = {}) {
     mode: {...modeView(mode), from: mode.from, drain: mode.drain, quarantine: mode.quarantine},
     drain,
     handover: handover.error ? {error: true} : Object.fromEntries(HANDOVER_NAMES.map(name => [name, handover[name] === true])),
+    scanning: mode.mode === 'cloudflare' ? (mode.drain === SCAN_STOPPED ? 'stopped' : 'open') : null,
     effects: effects.error ? {error: true} : effects.unproven ? {unproven: true} : {drained: effects.drained === true, pending: effects.pending ?? null, version: effects.version ?? null, drainedVersion: effects.drainedVersion ?? null},
     legacyFenced: fence.fenced,
     // The Letterboxd side of "exactly one writer": the Ratings side is read from the Ratings mode (handover.ratingsClosed).
@@ -386,6 +409,9 @@ export async function legacyAdmission(env) {
     try { mode = await readMode(env); } catch (inner) { return inner.code === 'schema_absent' ? inert : {fenced: true, reason: 'evidence_unreadable', revision: null, watchlistGuard: false}; }
     if (mode.malformed) return {fenced: true, reason: 'evidence_unreadable', revision: null, watchlistGuard: false};
     if (mode.schemaAbsent) return inert;
+    // The mode table exists, so the missing table is the Watchlist authority. Before the first switch (epoch 0) that is the inert pre-cutover state; once an epoch was ever recorded it is a partial schema after a switch and
+    // the legacy entry fails closed (never the test-only inert fallback).
+    if (mode.stored && mode.epoch > 0) return {fenced: true, reason: 'watchlist_schema_absent', revision: null, watchlistGuard: false};
     row = {mode: mode.stored ? mode.mode : null, epoch: mode.epoch, revision: mode.revision, w_mode: undefined, w_writes: undefined};
   }
   const stored = row.mode !== null && row.mode !== undefined;
@@ -633,9 +659,11 @@ export const ACTIONS = {
   close_admission: {target: v => v === 'cloudflare' || v === 'external', confirm: v => v === 'close_admission', expectEpoch: pinCheck, expectRevision: pinCheck},
   complete: {confirm: v => v === 'complete', expectEpoch: pinCheck, expectRevision: pinCheck},
   abort: {confirm: v => v === 'abort', expectEpoch: pinCheck, expectRevision: pinCheck},
+  drain: {confirm: v => v === 'drain', expectEpoch: pinCheck, expectRevision: pinCheck},
+  resume: {confirm: v => v === 'resume', expectEpoch: pinCheck, expectRevision: pinCheck},
   clear_quarantine: {confirm: v => v === 'clear_quarantine'}
 };
-const REQUIRED = {close_admission: ['target', 'confirm', 'expectEpoch', 'expectRevision'], complete: ['confirm', 'expectEpoch', 'expectRevision'], abort: ['confirm', 'expectEpoch', 'expectRevision'], clear_quarantine: ['confirm']};
+const REQUIRED = {close_admission: ['target', 'confirm', 'expectEpoch', 'expectRevision'], complete: ['confirm', 'expectEpoch', 'expectRevision'], abort: ['confirm', 'expectEpoch', 'expectRevision'], drain: ['confirm', 'expectEpoch', 'expectRevision'], resume: ['confirm', 'expectEpoch', 'expectRevision'], clear_quarantine: ['confirm']};
 export function validate(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return 'Invalid request';
   const fields = ACTIONS[body.action];

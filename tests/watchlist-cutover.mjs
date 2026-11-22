@@ -633,6 +633,8 @@ const wrap=(env,mutate)=>({prepare:sql=>env.db.prepare(sql),batch:async statemen
  assert.equal((await LbSync.switchMode(lb,{action:'complete'},ports,T0)).completed,true);
  assert.equal((await fenced()).reason,'letterboxd_sync_active');
  // the reverse: close the running writer, complete to external. The rollback operator then runs, and the legacy entry is still fenced.
+ assert.equal((await LbSync.switchMode(lb,{action:'close_admission',target:'external'},ports,T0)).refused,'drain_not_started','scanning is stopped first');
+ assert.equal((await LbSync.switchMode(lb,{action:'drain'},ports,T0)).draining,true);
  assert.equal((await LbSync.switchMode(lb,{action:'close_admission',target:'external'},ports,T0)).closed,true);
  await stop(run(env,'hold-rollback',{generation:2,...CURRENT,version:1,revision:Number(pointer(env.file).revision)}),'letterboxd_not_closed');
  assert.equal((await LbSync.switchMode(lb,{action:'complete'},ports,T0)).completed,true,'completing toward external needs no Watchlist state');

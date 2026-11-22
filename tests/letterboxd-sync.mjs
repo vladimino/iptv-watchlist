@@ -14,11 +14,27 @@ const root=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'iptv-lbsync
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
 const at=ms=>new Date(ms).toISOString(),T=s=>Date.parse(s);
 let dbCount=0;
-function fresh({schema=true}={}){
+// AIR-571 D2: the reverse close needs drain mode first. `sw` is switchMode, plus an automatic `drain` before a reverse close_admission (re-pinned to the row after the drain); `rawSwitch` is the plain command.
+const rawSwitch=Sync.switchMode;
+async function sw(e,body,ports,now){
+ if(body.action==='close_admission'&&body.target==='external'&&!body.noDrain){
+  const mode=await Sync.readMode(e);
+  if(mode.mode==='cloudflare'&&mode.drain!=='scan_stopped'){
+   const drained=await rawSwitch(e,{action:'drain'},{},now);
+   if(!drained.draining)return {action:'close_admission',refused:'test_drain_failed',drained};
+   if(body.expectRevision!==undefined)body={...body,expectRevision:(await Sync.readMode(e)).revision};
+  }
+ }
+ const {noDrain,...rest}=body;
+ return rawSwitch(e,rest,ports,now);
+}
+function fresh({schema=true,watchlist=true}={}){
  const file=path.join(root,'t'+(dbCount++)+'.db');
  const run=sql=>{const r=sqliteSync(['-bail',file],{input:sql});if(r.status!==0)throw new Error(r.stderr);};
  run("CREATE TABLE schema_contract(id INTEGER PRIMARY KEY, version INTEGER NOT NULL, note TEXT); INSERT INTO schema_contract VALUES(1,32,'t');");
  if(schema)run(fs.readFileSync('migrations/0033_letterboxd_sync_control.sql','utf8'));
+ // the Watchlist authority marker of schema 31 (columns the legacy gate reads); inert epg/open as in production
+ if(watchlist)run("CREATE TABLE watchlist_authority (id INTEGER PRIMARY KEY, mode TEXT NOT NULL, writes TEXT NOT NULL, generation INTEGER NOT NULL); INSERT INTO watchlist_authority VALUES (1,'epg','open',0);");
  return {file,db:d1Standin(file),run};
 }
 function bucket(){
@@ -36,8 +52,8 @@ const env=({db,bucket:b=bucket(),wf=workflow()})=>({DB:db,BUCKET:b,LETTERBOXD_WO
 const PASS=['INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, 1 WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok',[]];
 const GOOD={handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:true,ratingsPhase:true}),handoverGuards:async()=>[['INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, 1 WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok',[]]],effects:async()=>({drained:true,pending:0,guard:PASS})};
 async function activate(e,ports=GOOD,now=T('2026-11-21T09:39:00Z')){
- assert.equal((await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'},ports,now)).closed,true);
- const done=await Sync.switchMode(e,{action:'complete'},ports,now);assert.equal(done.completed,true,JSON.stringify(done));return done;
+ assert.equal((await sw(e,{action:'close_admission',target:'cloudflare'},ports,now)).closed,true);
+ const done=await sw(e,{action:'complete'},ports,now);assert.equal(done.completed,true,JSON.stringify(done));return done;
 }
 
 // 1. Pure slots: four per day, DST, keys, ids, window.
@@ -83,19 +99,19 @@ async function activate(e,ports=GOOD,now=T('2026-11-21T09:39:00Z')){
 // 3. Mode switch: refused without a proven handover (O5, T30), allowed with it; fences the legacy writer; epoch bump; rollback.
 {
  const {db}=fresh(),e=env({db});
- const refused=await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'},{},T('2026-11-21T00:00:00Z'));assert.equal(refused.closed,true,JSON.stringify(refused));
- const blocked=await Sync.switchMode(e,{action:'complete'},{},T('2026-11-21T00:00:00Z'));
+ const refused=await sw(e,{action:'close_admission',target:'cloudflare'},{},T('2026-11-21T00:00:00Z'));assert.equal(refused.closed,true,JSON.stringify(refused));
+ const blocked=await sw(e,{action:'complete'},{},T('2026-11-21T00:00:00Z'));
  assert.equal(blocked.refused,'handover_not_proven');assert.deepEqual(blocked.missing.sort(),['legacyFenced','ratingsClosed','ratingsDrained','ratingsPhase','watchlistRepository']);
  assert.equal((await Sync.writerFence(e)).fenced,true,'switching fences the legacy ratings entry');
- const partial=await Sync.switchMode(e,{action:'complete'},{handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:false,watchlistRepository:true,ratingsPhase:true})});
+ const partial=await sw(e,{action:'complete'},{handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:false,watchlistRepository:true,ratingsPhase:true})});
  assert.deepEqual(partial.missing,['legacyFenced'],'an external-mode-only Ratings is not a sufficient fence');
- assert.equal((await Sync.switchMode(e,{action:'complete'},{handover:async()=>{throw new Error('x');}})).refused,'handover_not_proven');
- const done=await Sync.switchMode(e,{action:'complete'},GOOD);assert.equal(done.completed,true);assert.equal(done.epoch,1);
+ assert.equal((await sw(e,{action:'complete'},{handover:async()=>{throw new Error('x');}})).refused,'handover_not_proven');
+ const done=await sw(e,{action:'complete'},GOOD);assert.equal(done.completed,true);assert.equal(done.epoch,1);
  assert.equal((await Sync.writerFence(e)).reason,'letterboxd_sync_active');
- assert.equal((await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'})).refused,'already_in_mode');
+ assert.equal((await sw(e,{action:'close_admission',target:'cloudflare'})).refused,'already_in_mode');
  // Rollback: close to external; the epoch moves so a stale instance is refused.
- assert.equal((await Sync.switchMode(e,{action:'close_admission',target:'external'},GOOD)).epoch,2);
- assert.equal((await Sync.switchMode(e,{action:'complete'},GOOD)).completed,true,'closing to external needs no handover');
+ assert.equal((await sw(e,{action:'close_admission',target:'external'},GOOD)).epoch,2);
+ assert.equal((await sw(e,{action:'complete'},GOOD)).completed,true,'closing to external needs no handover');
  assert.equal((await Sync.writerFence(e)).fenced,false);
  assert.equal(Sync.validate({action:'close_admission'}),'Missing target');assert.equal(Sync.validate({action:'x'}),'Unknown action');assert.equal(Sync.validate({action:'complete',extra:1}),'Unknown field');
  assert.deepEqual((await Sync.handle(e,{action:'complete'})).body,{error:'Missing confirm'},'the owner route needs the confirmation and the pins');
@@ -232,12 +248,12 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
 {
  const f=fresh(),wf=workflow(),b=bucket(),e=env({db:f.db,wf,bucket:b});await activate(e);
  const st=await Sync.ensure(e,{now:T('2026-11-21T09:40:00Z')});
- await Sync.switchMode(e,{action:'close_admission',target:'external'},typeof GOOD==='undefined'?{}:GOOD);
+ await sw(e,{action:'close_admission',target:'external'},typeof GOOD==='undefined'?{}:GOOD);
  const stale=await Sync.run(e,{slotKey:st.slot,series:0,epoch:1},step(),{now:()=>T('2026-11-21T09:41:00Z'),ports:{ratings:okPort('finished'),watchlist:okPort('committed')}});
  assert.equal(stale.stopped,true);assert.equal(stale.reason,'switch_in_progress');assert.equal(b.map.size,0);assert.equal((await Sync.readSlot(e,st.slot)).status,'claimed');
- assert.equal((await Sync.switchMode(e,{action:'complete'},GOOD)).drain,'instance_live','the drain is verified, not assumed');
+ assert.equal((await sw(e,{action:'complete'},GOOD)).drain,'instance_live','the drain is verified, not assumed');
  wf.instances.get('lbsync_20261121_1030_0').status='terminated';
- assert.equal((await Sync.switchMode(e,{action:'complete'},GOOD)).completed,true);
+ assert.equal((await sw(e,{action:'complete'},GOOD)).completed,true);
  const stale2=await Sync.run(e,{slotKey:st.slot,series:0,epoch:1},step(),{now:()=>T('2026-11-21T09:42:00Z'),ports:{}});assert.equal(stale2.reason,'not_cloudflare');
  // Re-activated at epoch 3: the old instance (epoch 1) is refused; a wrong series is refused; an invalid payload is refused.
  await activate(e,GOOD,T('2026-11-21T09:43:00Z'));
@@ -312,11 +328,11 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  assert.equal((await RatingsOrchestration.externalGate(e,'start')).reason,null);
  assert.equal((await RatingsOrchestration.externalGate(e,'step')).reason,null);
  // Taking over: the switch is open, so both legacy entries are refused.
- await LetterboxdSync.switchMode(e,{action:'close_admission',target:'cloudflare'},{},T('2026-11-21T09:39:00Z'));
+ await sw(e,{action:'close_admission',target:'cloudflare'},{},T('2026-11-21T09:39:00Z'));
  assert.equal((await RatingsOrchestration.externalGate(e,'start')).reason,'external_writer_fenced');
  assert.equal((await RatingsOrchestration.externalGate(e,'step')).reason,'external_writer_fenced');
  assert.equal((await RatingsOrchestration.externalGate(e,'status')).reason,null,'reads stay open');
- await LetterboxdSync.switchMode(e,{action:'complete'},typeof GOOD==='undefined'?{}:GOOD);
+ await sw(e,{action:'complete'},typeof GOOD==='undefined'?{}:GOOD);
  assert.equal((await RatingsOrchestration.externalGate(e,'step')).reason,'external_writer_fenced');
  // The 17:00 ratings due creates nothing while the Letterboxd mode is cloudflare, even if the ratings mode document says cloudflare (never two Diary writers).
  ctx.__ratingsCloudflare=true;
@@ -324,8 +340,8 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  const stale=await RatingsOrchestration.admit(e,{runKey:'2026-11-21',series:0,epoch:1,id:'x'});assert.equal(stale.reason,'external_writer_fenced','a stale ratings instance is refused');
  ctx.__ratingsCloudflare=false;
  // Rollback: back to external re-opens exactly the legacy writer.
- await LetterboxdSync.switchMode(e,{action:'close_admission',target:'external'},typeof GOOD==='undefined'?{}:GOOD);
- await LetterboxdSync.switchMode(e,{action:'complete'},GOOD);
+ await sw(e,{action:'close_admission',target:'external'},typeof GOOD==='undefined'?{}:GOOD);
+ await sw(e,{action:'complete'},GOOD);
  assert.equal((await RatingsOrchestration.externalGate(e,'start')).reason,null,'rollback restores the single legacy writer');
 }
 // 10. AIR-571 D: the owner's handover control: pins, a protected proof, drained effects before a running writer is closed, abort, one writer.
@@ -337,98 +353,100 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
   const {db}=fresh(),e=env({db});
   const status0=await Sync.modeStatus(e,GOOD);assert.equal(status0.readable,true);assert.deepEqual([status0.mode.mode,status0.mode.epoch,status0.mode.revision],['external',0,0]);assert.equal(status0.sideEffects,'none');
   assert.equal(status0.letterboxdWriters,0);assert.equal(status0.legacyFenced,false);assert.equal(status0.effects.drained,true);
-  assert.equal((await Sync.switchMode(e,{action:'close_admission',target:'cloudflare',expectEpoch:3,expectRevision:0},GOOD,NOW)).refused,'pin_mismatch','a stale epoch is refused');
-  const stale=await Sync.switchMode(e,{action:'close_admission',target:'cloudflare',expectEpoch:0,expectRevision:7},GOOD,NOW);assert.deepEqual([stale.refused,stale.pin],['pin_mismatch','revision']);
+  assert.equal((await sw(e,{action:'close_admission',target:'cloudflare',expectEpoch:3,expectRevision:0},GOOD,NOW)).refused,'pin_mismatch','a stale epoch is refused');
+  const stale=await sw(e,{action:'close_admission',target:'cloudflare',expectEpoch:0,expectRevision:7},GOOD,NOW);assert.deepEqual([stale.refused,stale.pin],['pin_mismatch','revision']);
   assert.equal((await read(e)).stored,false,'a refused command wrote nothing');
-  const closed=await Sync.switchMode(e,{action:'close_admission',target:'cloudflare',expectEpoch:0,expectRevision:0},GOOD,NOW);assert.equal(closed.closed,true);
+  const closed=await sw(e,{action:'close_admission',target:'cloudflare',expectEpoch:0,expectRevision:0},GOOD,NOW);assert.equal(closed.closed,true);
   // a competing owner: the second command holds the pins of the row the first one changed, and is refused, never retried blindly
-  const second=await Sync.switchMode(e,{action:'close_admission',target:'cloudflare',expectEpoch:0,expectRevision:0},GOOD,NOW);assert.equal(second.refused,'pin_mismatch');
+  const second=await sw(e,{action:'close_admission',target:'cloudflare',expectEpoch:0,expectRevision:0},GOOD,NOW);assert.equal(second.refused,'pin_mismatch');
   assert.equal((await read(e)).epoch,1,'one switch, one epoch bump');
   const after=await read(e);
   // the protected proof: no guards port, an empty list, a throwing port and a tripped guard each leave the handover unfinished and the row untouched
   const proven=GOOD.handover;
   const pins={expectEpoch:after.epoch,expectRevision:after.revision};
-  assert.equal((await Sync.switchMode(e,{action:'complete',...pins},{handover:proven},NOW)).refused,'handover_unprotected','a proof that cannot be pinned does not complete a handover');
-  assert.equal((await Sync.switchMode(e,{action:'complete',...pins},{handover:proven,handoverGuards:async()=>[]},NOW)).refused,'handover_unprotected');
-  assert.equal((await Sync.switchMode(e,{action:'complete',...pins},{handover:proven,handoverGuards:async()=>{throw new Error('x');}},NOW)).refused,'handover_unprotected');
-  const tripped=await Sync.switchMode(e,{action:'complete',...pins},{handover:proven,handoverGuards:async()=>[['INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, 0 WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok',[]]]},NOW);
+  assert.equal((await sw(e,{action:'complete',...pins},{handover:proven},NOW)).refused,'handover_unprotected','a proof that cannot be pinned does not complete a handover');
+  assert.equal((await sw(e,{action:'complete',...pins},{handover:proven,handoverGuards:async()=>[]},NOW)).refused,'handover_unprotected');
+  assert.equal((await sw(e,{action:'complete',...pins},{handover:proven,handoverGuards:async()=>{throw new Error('x');}},NOW)).refused,'handover_unprotected');
+  const tripped=await sw(e,{action:'complete',...pins},{handover:proven,handoverGuards:async()=>[['INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, 0 WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok',[]]]},NOW);
   assert.equal(tripped.refused,'handover_changed','a fact of the proof that changed at the commit aborts the completion');
   assert.equal((await read(e)).mode,'switching','nothing was written');
   // a stale pin on the completion
-  assert.equal((await Sync.switchMode(e,{action:'complete',expectEpoch:0,expectRevision:after.revision},GOOD,NOW)).refused,'pin_mismatch');
-  const done=await Sync.switchMode(e,{action:'complete',...pins},GOOD,NOW);assert.equal(done.completed,true);
+  assert.equal((await sw(e,{action:'complete',expectEpoch:0,expectRevision:after.revision},GOOD,NOW)).refused,'pin_mismatch');
+  const done=await sw(e,{action:'complete',...pins},GOOD,NOW);assert.equal(done.completed,true);
   // exactly one writer: the Letterboxd side is admitted, the legacy entry is fenced
   const running=await Sync.modeStatus(e,GOOD);assert.equal(running.letterboxdWriters,1);assert.equal(running.legacyFenced,true);assert.equal(running.handover.ratingsClosed,true);
  }
  // reverse: no running writer is closed over undrained causal effects; unreadable and unproven effects refuse too
  {
   const {db}=fresh(),e=env({db});
-  await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await Sync.switchMode(e,{action:'complete'},GOOD,NOW);
+  await sw(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await sw(e,{action:'complete'},GOOD,NOW);
+  assert.equal((await rawSwitch(e,{action:'drain'},{},NOW)).draining,true);
   const row=await read(e);const pins={expectEpoch:row.epoch,expectRevision:row.revision};
-  const pending=await Sync.switchMode(e,{action:'close_admission',target:'external',...pins},{effects:async()=>({drained:false,pending:2,version:5,drainedVersion:4})},NOW);
+  const pending=await sw(e,{action:'close_admission',target:'external',...pins},{effects:async()=>({drained:false,pending:2,version:5,drainedVersion:4})},NOW);
   assert.deepEqual([pending.refused,pending.pending,pending.version,pending.drainedVersion],['effects_pending',2,5,4]);
-  assert.equal((await Sync.switchMode(e,{action:'close_admission',target:'external',...pins},{effects:async()=>{throw new Error('d1');}},NOW)).refused,'effects_unreadable');
-  assert.equal((await Sync.switchMode(e,{action:'close_admission',target:'external',...pins},{},NOW)).refused,'effects_unproven','without a port the effects are not provable');
+  assert.equal((await sw(e,{action:'close_admission',target:'external',...pins},{effects:async()=>{throw new Error('d1');}},NOW)).refused,'effects_unreadable');
+  assert.equal((await sw(e,{action:'close_admission',target:'external',...pins},{},NOW)).refused,'effects_unproven','without a port the effects are not provable');
   assert.equal((await Sync.modeStatus(e,{...GOOD,effects:async()=>({drained:false,pending:1,version:2,drainedVersion:1})})).effects.drained,false);
   assert.deepEqual([(await read(e)).mode,(await read(e)).epoch],['cloudflare',1],'a refused close changed nothing and the writer stays admitted');
-  const closed=await Sync.switchMode(e,{action:'close_admission',target:'external',...pins},GOOD,NOW);assert.equal(closed.closed,true);assert.equal(closed.epoch,2);
+  const closed=await sw(e,{action:'close_admission',target:'external',...pins},GOOD,NOW);assert.equal(closed.closed,true);assert.equal(closed.epoch,2);
   assert.equal((await Sync.writerFence(e)).fenced,true,'while switching neither writer is admitted');
  }
  // an unreadable drain of the executor's instances refuses the completion and is recorded, never assumed
  {
   const f=fresh(),wf=workflow(),e=env({db:f.db,wf});
-  await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await Sync.switchMode(e,{action:'complete'},GOOD,NOW);
+  await sw(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await sw(e,{action:'complete'},GOOD,NOW);
   const started=await Sync.ensure(e,{now:T('2026-11-21T09:40:00Z')});assert.ok(started.slot,'a slot instance exists');
-  await Sync.switchMode(e,{action:'close_admission',target:'external'},GOOD,NOW);
+  await sw(e,{action:'close_admission',target:'external'},GOOD,NOW);
   const switching=await read(e);
   wf.get=async()=>{throw new Error('boom');};
-  const unreadable=await Sync.switchMode(e,{action:'complete',expectEpoch:switching.epoch,expectRevision:switching.revision},GOOD,NOW);
+  const unreadable=await sw(e,{action:'complete',expectEpoch:switching.epoch,expectRevision:switching.revision},GOOD,NOW);
   assert.deepEqual([unreadable.refused,unreadable.drain],['drain_not_verified','unreadable']);assert.equal((await read(e)).mode,'switching');assert.equal((await read(e)).revision,switching.revision,'a drain refusal writes nothing');
  }
  // review fixes (PR #879): the effects proof is asserted AT the commit, outcomes are exact, the legacy entry reopens only after a safe Watchlist
  {
   const {db}=fresh(),e=env({db});
-  await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await Sync.switchMode(e,{action:'complete'},GOOD,NOW);
+  await sw(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await sw(e,{action:'complete'},GOOD,NOW);
+  assert.equal((await rawSwitch(e,{action:'drain'},{},NOW)).draining,true);
   const running=await read(e);const pins={expectEpoch:running.epoch,expectRevision:running.revision};
   // a promotion that lands between the effects read and the commit trips the guard carried by the effects port: nothing is written and the answer is not a stale pin
   const trip=['INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, 0 WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok',[]];
-  const raced=await Sync.switchMode(e,{action:'close_admission',target:'external',...pins},{...GOOD,effects:async()=>({drained:true,pending:0,guard:trip})},NOW);
+  const raced=await sw(e,{action:'close_admission',target:'external',...pins},{...GOOD,effects:async()=>({drained:true,pending:0,guard:trip})},NOW);
   assert.equal(raced.refused,'effects_changed');assert.deepEqual([(await read(e)).mode,(await read(e)).revision],['cloudflare',running.revision],'a raced close wrote nothing');
   // a port that cannot pin its proof leaves the close refused
-  assert.equal((await Sync.switchMode(e,{action:'close_admission',target:'external',...pins},{...GOOD,effects:async()=>({drained:true,pending:0})},NOW)).refused,'effects_unprotected');
+  assert.equal((await sw(e,{action:'close_admission',target:'external',...pins},{...GOOD,effects:async()=>({drained:true,pending:0})},NOW)).refused,'effects_unprotected');
   // a lost reply is never a stale pin and never retried: the outcome is unknown
   const lost={...e,DB:{prepare:db.prepare.bind(db),batch:async statements=>{await db.batch(statements);throw new Error('network lost after commit');}}};
-  const uncertain=await Sync.switchMode(lost,{action:'close_admission',target:'external',...pins},GOOD,NOW);
+  const uncertain=await sw(lost,{action:'close_admission',target:'external',...pins},GOOD,NOW);
   assert.deepEqual([uncertain.refused,uncertain.retry],['write_uncertain',false]);
   // the commit did land, so the same pins are now stale (the owner reads again before deciding)
-  assert.equal((await Sync.switchMode(e,{action:'close_admission',target:'external',...pins},GOOD,NOW)).refused,'pin_mismatch');
+  assert.equal((await sw(e,{action:'close_admission',target:'external',...pins},GOOD,NOW)).refused,'pin_mismatch');
   const switching=await read(e);const reverse={expectEpoch:switching.epoch,expectRevision:switching.revision};
   // the reverse completion needs no Watchlist state: the legacy entry is fenced by the Watchlist state itself (legacyAdmission), proven against the real rollback operator in watchlist-cutover.mjs
-  const done=await Sync.switchMode(e,{action:'complete',...reverse},GOOD,NOW);assert.equal(done.completed,true);assert.equal((await Sync.writerFence(e)).fenced,false,'no Watchlist table here: the mode row alone decides');
+  const done=await sw(e,{action:'complete',...reverse},GOOD,NOW);assert.equal(done.completed,true);assert.equal((await Sync.writerFence(e)).fenced,false,'no Watchlist table here: the mode row alone decides');
   // an abort back to `cloudflare` re-admits the writer, so it needs the proof AND its pins at the commit (a partial Watchlist rollback in between refuses it); an abort toward `external` admits nothing
-  await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await Sync.switchMode(e,{action:'complete'},GOOD,NOW);
-  await Sync.switchMode(e,{action:'close_admission',target:'external'},GOOD,NOW);
+  await sw(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await sw(e,{action:'complete'},GOOD,NOW);
+  await sw(e,{action:'close_admission',target:'external'},GOOD,NOW);
   const open=await read(e);const abortPins={expectEpoch:open.epoch,expectRevision:open.revision};
-  assert.equal((await Sync.switchMode(e,{action:'abort',...abortPins},{...GOOD,handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:false,ratingsPhase:true})},NOW)).refused,'handover_not_proven');
-  assert.equal((await Sync.switchMode(e,{action:'abort',...abortPins},{handover:GOOD.handover,handoverGuards:async()=>[]},NOW)).refused,'handover_unprotected');
-  const movedAbort=await Sync.switchMode(e,{action:'abort',...abortPins},{...GOOD,handoverGuards:async()=>[trip]},NOW);
+  assert.equal((await sw(e,{action:'abort',...abortPins},{...GOOD,handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:false,ratingsPhase:true})},NOW)).refused,'handover_not_proven');
+  assert.equal((await sw(e,{action:'abort',...abortPins},{handover:GOOD.handover,handoverGuards:async()=>[]},NOW)).refused,'handover_unprotected');
+  const movedAbort=await sw(e,{action:'abort',...abortPins},{...GOOD,handoverGuards:async()=>[trip]},NOW);
   assert.equal(movedAbort.refused,'handover_changed');assert.equal((await read(e)).revision,open.revision,'nothing written');
-  assert.equal((await Sync.switchMode(e,{action:'abort',...abortPins},GOOD,NOW)).aborted,true);
+  assert.equal((await sw(e,{action:'abort',...abortPins},GOOD,NOW)).aborted,true);
  }
  // abort: recovery from an open switch back to the mode it started from, in both directions, one writer at a time
  {
   const {db}=fresh(),e=env({db});
-  await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);
+  await sw(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);
   const open=await read(e);
-  assert.equal((await Sync.switchMode(e,{action:'abort',expectEpoch:open.epoch,expectRevision:open.revision+1},GOOD,NOW)).refused,'pin_mismatch');
-  const aborted=await Sync.switchMode(e,{action:'abort',expectEpoch:open.epoch,expectRevision:open.revision},GOOD,NOW);
+  assert.equal((await sw(e,{action:'abort',expectEpoch:open.epoch,expectRevision:open.revision+1},GOOD,NOW)).refused,'pin_mismatch');
+  const aborted=await sw(e,{action:'abort',expectEpoch:open.epoch,expectRevision:open.revision},GOOD,NOW);
   assert.deepEqual([aborted.aborted,aborted.mode],[true,'external']);assert.equal((await Sync.writerFence(e)).fenced,false,'the legacy entry reopens: exactly one writer');
   assert.equal((await Sync.modeStatus(e,GOOD)).letterboxdWriters,0);
-  assert.equal((await Sync.switchMode(e,{action:'abort'},GOOD,NOW)).refused,'not_switching');
+  assert.equal((await sw(e,{action:'abort'},GOOD,NOW)).refused,'not_switching');
   // cloudflare -> external -> abort: back to cloudflare, the epoch already moved so an old-epoch writer stays fenced
-  await Sync.switchMode(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await Sync.switchMode(e,{action:'complete'},GOOD,NOW);
-  await Sync.switchMode(e,{action:'close_admission',target:'external'},GOOD,NOW);
-  const switching=await read(e);const back=await Sync.switchMode(e,{action:'abort',expectEpoch:switching.epoch,expectRevision:switching.revision},GOOD,NOW);
+  await sw(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await sw(e,{action:'complete'},GOOD,NOW);
+  await sw(e,{action:'close_admission',target:'external'},GOOD,NOW);
+  const switching=await read(e);const back=await sw(e,{action:'abort',expectEpoch:switching.epoch,expectRevision:switching.revision},GOOD,NOW);
   assert.deepEqual([back.aborted,back.mode,back.epoch],[true,'cloudflare',switching.epoch]);
   assert.equal((await Sync.modeStatus(e,GOOD)).letterboxdWriters,1);
   // the owner route needs the confirmation and the pins on every command
@@ -436,5 +454,46 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
   assert.equal(Sync.validate({action:'close_admission',target:'external',confirm:'close_admission',expectEpoch:1}),'Missing expectRevision');assert.equal(Sync.validate({action:'complete',confirm:'complete',expectEpoch:-1,expectRevision:0}),'Invalid expectEpoch');
   assert.equal(Sync.validate({action:'complete',confirm:'complete',expectEpoch:1,expectRevision:2}),null);assert.equal(Sync.validate({action:'clear_quarantine',confirm:'clear_quarantine'}),null);
  }
+}
+// 11. AIR-571 D2: drain mode. The writer keeps its epoch; new scans and promotions stop, effects and the Diary continue; the reverse close needs the marker.
+{
+ const NOW=T('2026-11-21T00:00:00Z');const read=async e=>Sync.readMode(e);
+ const {db}=fresh(),e=env({db});
+ const pins=async()=>{const m=await read(e);return {expectEpoch:m.epoch,expectRevision:m.revision};};
+ assert.equal((await rawSwitch(e,{action:'drain',...await pins()},GOOD,NOW)).refused,'not_running','no writer, nothing to drain');
+ await sw(e,{action:'close_admission',target:'cloudflare'},GOOD,NOW);
+ assert.equal((await rawSwitch(e,{action:'drain'},GOOD,NOW)).refused,'not_running','a switching mode is not a running writer');
+ await sw(e,{action:'complete'},GOOD,NOW);
+ assert.equal((await Sync.modeStatus(e,GOOD)).scanning,'open');assert.equal((await Sync.scanOpen(e)).open,true);
+ // both guards pass while scanning is open
+ const trips=async sql=>{try{await db.batch([db.prepare(sql).bind(1)]);return false;}catch{return true;}};
+ assert.equal(await trips(Sync.SCAN_GUARD_SQL),false);assert.equal(await trips(Sync.FENCE_GUARD_SQL),false);
+ // the reverse close needs the marker; a stale pin and a competing owner are refused with nothing written
+ const before=await pins();
+ assert.equal((await rawSwitch(e,{action:'close_admission',target:'external',...before},GOOD,NOW)).refused,'drain_not_started');
+ assert.equal((await rawSwitch(e,{action:'drain',expectEpoch:before.expectEpoch,expectRevision:before.expectRevision+3},GOOD,NOW)).refused,'pin_mismatch');
+ const started=await rawSwitch(e,{action:'drain',...before},GOOD,NOW);assert.deepEqual([started.draining,started.epoch],[true,before.expectEpoch],'the epoch does not move: the running writer is not fenced');
+ assert.equal((await rawSwitch(e,{action:'drain',...before},GOOD,NOW)).refused,'pin_mismatch','the second owner holds the old pins');
+ assert.equal((await rawSwitch(e,{action:'drain',...await pins()},GOOD,NOW)).refused,'already_draining');
+ assert.equal((await Sync.modeStatus(e,GOOD)).scanning,'stopped');assert.equal((await Sync.scanOpen(e)).open,false);
+ // a promotion whose batch carries the scan guard (a stale worker that began before the marker) is refused; the effects guard still holds, so the causal effects drain
+ assert.equal(await trips(Sync.SCAN_GUARD_SQL),true,'no promotion after the marker');assert.equal(await trips(Sync.FENCE_GUARD_SQL),false,'effects and the Diary continue under the same epoch');
+ // recovery: resume reopens scanning; and a lost reply is unknown, never retried
+ const marked=await pins();
+ assert.equal((await rawSwitch(e,{action:'resume',...marked},GOOD,NOW)).resumed,true);assert.equal(await trips(Sync.SCAN_GUARD_SQL),false);
+ assert.equal((await rawSwitch(e,{action:'resume',...await pins()},GOOD,NOW)).refused,'not_draining');
+ const lost={...e,DB:{prepare:db.prepare.bind(db),batch:async statements=>{await db.batch(statements);throw new Error('network lost after commit');}}};
+ const uncertain=await rawSwitch(lost,{action:'drain',...await pins()},GOOD,NOW);assert.deepEqual([uncertain.refused,uncertain.retry],['write_uncertain',false]);
+ assert.equal((await Sync.scanOpen(e)).open,false,'the commit did land');
+ // with the marker, the reverse close goes through (effects drained and pinned at the commit); the epoch moves and the writer is fenced
+ const closed=await rawSwitch(e,{action:'close_admission',target:'external',...await pins()},GOOD,NOW);assert.equal(closed.closed,true);
+ assert.equal(await trips(Sync.FENCE_GUARD_SQL),true,'the old epoch is fenced after the close');
+ // the validated owner route
+ assert.equal(Sync.validate({action:'drain',confirm:'drain',expectEpoch:1,expectRevision:2}),null);assert.equal(Sync.validate({action:'drain',confirm:'resume',expectEpoch:1,expectRevision:2}),'Invalid confirm');assert.equal(Sync.validate({action:'resume',confirm:'resume',expectEpoch:1}),'Missing expectRevision');
+ // fail closed: a partial schema after a recorded epoch (no Watchlist table) is never the inert pre-switch state
+ const partial=fresh({watchlist:false});const pe=env({db:partial.db});
+ assert.equal((await Sync.writerFence(pe)).fenced,false,'epoch 0 and no Watchlist table: the dormant default');
+ await rawSwitch(pe,{action:'close_admission',target:'cloudflare'},GOOD,NOW);await rawSwitch(pe,{action:'abort'},GOOD,NOW);
+ const afterSwitch=await Sync.writerFence(pe);assert.deepEqual([afterSwitch.fenced,afterSwitch.reason],[true,'watchlist_schema_absent']);
 }
 console.log('letterboxd-sync ok');

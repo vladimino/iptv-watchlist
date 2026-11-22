@@ -30,6 +30,21 @@ function repo(over={}){
  assert.equal(s.calls.length,4,'three pages plus the repeat read of page 1');
  assert.equal(s.calls[0],s.calls[3]);
 }
+// 1b. AIR-571 D2: in drain mode the effects are applied but no scan starts: nothing is fetched, nothing is committed, no attempt is recorded, and the outcome is an honest `disabled` / `draining`.
+{
+ const s=site({films:ids(7)}),r=repo();
+ const phase=W.watchlistPhase({repository:r,scanOpen:async()=>({open:false}),fetchPage:s.fetchPage,parse:s.parse,firstUrl:'https://letterboxd.com/me/watchlist/',username:'me'});
+ const out=await phase.run({env:{},slotKey:'2026-11-21T1030',runId:'r1',now:()=>T('2026-11-21T10:40:00Z')});
+ assert.deepEqual([out.outcome,out.reason],['disabled','draining']);assert.deepEqual(r.log,['drain']);assert.equal(s.calls.length,0);
+ // an unreadable mode row is not scanning either (fail closed)
+ const r2=repo();const out2=await W.watchlistPhase({repository:r2,scanOpen:async()=>{throw new Error('d1');},fetchPage:s.fetchPage,parse:s.parse,firstUrl:'https://letterboxd.com/me/watchlist/',username:'me'}).run({env:{},slotKey:'2026-11-21T1030',runId:'r1',now:()=>T('2026-11-21T10:40:00Z')});
+ assert.equal(out2.reason,'draining');assert.equal(s.calls.length,0);
+ // the effects drain still follows the snapshot just promoted (afterRecorded is not a scan)
+ assert.deepEqual(await phase.afterRecorded({env:{},now:()=>T('2026-11-21T10:41:00Z')}),{drained:true});
+ // open scanning behaves as before
+ const r3=repo();const out3=await W.watchlistPhase({repository:r3,scanOpen:async()=>({open:true}),fetchPage:s.fetchPage,parse:s.parse,firstUrl:'https://letterboxd.com/me/watchlist/',username:'me'}).run({env:{},slotKey:'2026-11-21T1030',runId:'r1',now:()=>T('2026-11-21T10:40:00Z')});
+ assert.equal(out3.outcome,'committed');
+}
 // 2. T8: every incompleteness is classified, nothing is committed, no removal, and the attempt is recorded.
 {
  const cases={
