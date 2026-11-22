@@ -1,6 +1,6 @@
 # AIR-571: live read-only preflight (holdpoint P), owner GO packets B to F2 and the scratch QA proposal
 
-**Prepared 22 Nov 2026 about 11:05 Madrid (09:05 UTC), BEFORE the natural 17:00 Madrid EPG of the day.** Only read-only observations were made (a D1 `SELECT`, the Cloudflare API `GET`s, the MCP status reads, the repository and Trello reads). No migration, bootstrap, marker or mode change, deploy, cron, Workflow, binding, Task, flag, R2 or D1 write, forced run, or scratch resource. No change is to be made between 16:30 and 17:00 Madrid. **This page authorizes nothing.** Every time-dependent pin and fact below is a placeholder with a rule: re-read it immediately before each future production action. It complements [the activation runbook](../../runbooks/letterboxd-activation.md) (the plan) and [the offline QA evidence](air-571-offline-qa-2026-11-22.md).
+**Prepared 22 Nov 2026 about 10:05 Madrid (09:05 UTC; Madrid is CET, UTC+01:00 on this date), BEFORE the natural 17:00 Madrid EPG of the day.** Only read-only observations were made (a D1 `SELECT`, the Cloudflare API `GET`s, the MCP status reads, the repository and Trello reads). No migration, bootstrap, marker or mode change, deploy, cron, Workflow, binding, Task, flag, R2 or D1 write, forced run, or scratch resource. No change is to be made between 16:30 and 17:00 Madrid. **This page authorizes nothing.** Every time-dependent pin and fact below is a placeholder with a rule: re-read it immediately before each future production action. It complements [the activation runbook](../../runbooks/letterboxd-activation.md) (the plan) and [the offline QA evidence](air-571-offline-qa-2026-11-22.md).
 
 ## 1. Live read-only preflight, holdpoint P
 
@@ -12,8 +12,8 @@
 | Watchlist authority | marker `epg`/`open`/generation **0**; pointer version **0** (no snapshot, 0 snapshots, 0 pending admissions) | dormant, bootstrap not done |
 | Letterboxd mode | no row (`external`, epoch 0) | dormant |
 | EPG checkpoint authority | `d1`/`open` | the checkpoint cutover is done (O4 part 1) |
-| Published EPG | `d1`/`open`, generation **516**, run `7bce173c-2cfe-420d-baaf-efebced1b410`, certified (`finalized_run_id` = run) | the Watchlist source of B (note: generation moved from 515; the pin is re-read at B) |
-| **O4 acceptance** | AIR-551 is in `Верификация`, NOT Done; a natural EPG run completed after the switch is visible (checkpoint 06:29 UTC, generation 516), but the owner's H5 acceptance is pending | **O4 is not satisfied until the owner accepts AIR-551 (Done + H5 with the natural EPG)**: blocker for B onward |
+| Published EPG | `d1`/`open`, generation **516**, run `7bce173c-2cfe-420d-baaf-efebced1b410` (the SAME run imported by AIR-551 H3/H4 on 21 Nov), certified (`finalized_run_id` = run) | the Watchlist source of B (note: the generation moved from 515 to 516 with the same run; the pin is re-read at B). **This is NOT H5**: a later generation of the same run is not a new natural daily EPG run |
+| **O4 acceptance** | AIR-551 is in `Верификация`, NOT Done. The checkpoint authority is `d1`/`open` and a checkpoint observation (06:29 UTC) and published generation 516 are visible, but the post-cutover H5 natural daily EPG run (scheduled for 22 Nov 17:00 Madrid) has NOT happened yet: its completion, finalization and acceptance are **UNPROVEN** | **O4 is not satisfied until the owner accepts AIR-551 (Done + H5 with that natural run)**: blocker for B onward. Generation 516 must not be read as H5 |
 | Discovery | `complete`, no live lease, executor stopped, backlog 0 | recorded as a FACT, not a blocker |
 | Ratings | pipeline `idle`, D1 authority `open`, orchestration `cloudflare` epoch 1 revision per the status; last run 21 Nov 17:00 Madrid finished; next due **22 Nov 17:00 Madrid (16:00 UTC)** | the legacy writer is the daily Ratings Workflow; the D step waits until after that run |
 | Letterboxd read model | `letterboxdSync: null` (dormant) | as expected |
@@ -23,7 +23,7 @@
 
 ### Blockers and prerequisites (the open gates)
 
-1. **O4**: AIR-551 `Верификация` to Done with H5 (the natural EPG after the checkpoint switch accepted by the owner). Until then NO production operation of B to F2 is requested.
+1. **O4**: AIR-551 `Верификация` to Done with H5 (the NATURAL daily EPG run of 22 Nov 17:00 Madrid after the checkpoint switch, which has not happened at the time of this page, and its acceptance by the owner). Until then NO production operation of B to F2 is requested.
 2. **Owner GO per operation**, each naming the operation, the target, the pins, the window and the stop condition (this page is the request template).
 3. **Window**: nothing between 16:30 and 17:00 Madrid; the D step also waits until after the daily Ratings run (17:00 Madrid, about 1 to 4 minutes) and the EPG run, and avoids any other cutover window.
 4. **Canary slot** is chosen by the owner at D2 (not here).
@@ -47,7 +47,9 @@
 
 - **Window:** as B; no EPG step in flight (the operator refuses `writer_active`).
 - **Pins:** the B receipt (`<snapshotId>`, count, both digests, run, EPG generation); the root etag read just before (`<rootEtag>` from the operator's status or an R2 head, read-only).
-- **Commands:** `node scripts/watchlist-cutover-production.mjs --target iptv --hold --confirm hold --expect-generation <G> --expect-run <run> --expect-epg-generation <epgGeneration> --expect-count <count> --expect-members-sha256 <membersSha256> --expect-sha256 <sha256> --expect-snapshot-id <snapshotId>`; then `... --fence-root --confirm fence-root --expect-generation <G+1> --expect-root-etag <rootEtag>`.
+- **Commands (copyable; every `<...>` is a fresh-pin value read at the time of the GO, never a literal):**
+  1. `node scripts/watchlist-cutover-production.mjs --target iptv --hold --confirm hold --expect-generation <G> --expect-run <run> --expect-epg-generation <epgGeneration> --expect-count <count> --expect-members-sha256 <membersSha256> --expect-sha256 <sha256> --expect-snapshot-id <snapshotId>`
+  2. `node scripts/watchlist-cutover-production.mjs --target iptv --fence-root --confirm fence-root --expect-generation <G+1> --expect-root-etag <rootEtag>`
 - **Readback:** marker `epg`/`held`/G+1; the root carries the fence of G+1 and the same list (the operator proves it by readback and returns the new etag).
 - **Stop:** `liveness_unknown`, `writer_active`, `letterboxd_not_closed`, `checkpoint_not_d1`, a moved root.
 - **Recovery:** `--release-abort` (`epg`/`held` back to `epg`/`open`).
@@ -55,7 +57,9 @@
 ### C2: switch and release
 
 - **Pins:** the fence receipt: `<fencedRootEtag>`; the B pins; the generation G+1.
-- **Commands:** `... --activate --confirm activate --expect-generation <G+1> <the same pins> --expect-root-etag <fencedRootEtag>`; then `... --release --confirm release --expect-generation <G+2> --expect-run <run> --expect-count <count> --expect-members-sha256 <membersSha256> --expect-sha256 <sha256> --expect-snapshot-id <snapshotId>`.
+- **Commands (copyable; every `<...>` is a fresh-pin value read at the time of the GO, never a literal):**
+  1. `node scripts/watchlist-cutover-production.mjs --target iptv --activate --confirm activate --expect-generation <G+1> --expect-run <run> --expect-epg-generation <epgGeneration> --expect-count <count> --expect-members-sha256 <membersSha256> --expect-sha256 <sha256> --expect-snapshot-id <snapshotId> --expect-root-etag <fencedRootEtag>`
+  2. `node scripts/watchlist-cutover-production.mjs --target iptv --release --confirm release --expect-generation <G+2> --expect-run <run> --expect-count <count> --expect-members-sha256 <membersSha256> --expect-sha256 <sha256> --expect-snapshot-id <snapshotId>`
 - **Readback:** `d1`/`held` then `d1`/`open`; `GET /api/watchlist` serves the snapshot; the next natural EPG reads it; the mirror delivery receipt is cleared; no second membership writer.
 - **Stop:** `root_not_fenced`, `checkpoint_not_d1`, a digest failure.
 - **Recovery:** the data rollback (section 4 of the activation runbook, `drain` is not needed here because no Letterboxd writer exists yet: `hold-rollback`, `export-rollback`, `fence-root-rollback`, `revert-authority`, `release-rolled-back`).
