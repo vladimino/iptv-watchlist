@@ -289,6 +289,14 @@ async function canarySettled(env, held, now) {
   const status = slot.instanceId ? await instanceStatus(env.LETTERBOXD_WORKFLOW, slot.instanceId) : 'absent';
   return ENDED.includes(status) ? {settled: true} : {settled: false, why: 'canary_instance_live'};
 }
+// An EARLIER retarget of a hold that cannot have been claimed yet (AIR-571, 22 Nov 2026): the owner may move the canary to a strictly earlier slot while the held slot is still BEFORE its own due instant and has no
+// slot row (so no claim, no instance). Such a hold is never `settled` (its window has not even started), and it can only be claimed from its due instant on, so replacing it in ONE pinned write cannot race a tick into
+// the old slot and never opens the full schedule. Every other case keeps the settled rule: a later target, a held slot that is due, claimed or unreadable, and the closed hold `none` are not handled here.
+async function earlierRetarget(env, held, slot, now) {
+  if (!parseSlotKey(held) || String(slot) >= String(held)) return false;
+  if (now >= nextSlot(previousSlot(held).key).dueAt) return false; // the due instant of `held` itself
+  try { return !(await readSlot(env, held)); } catch { return false; }
+}
 // The proof that admits the Letterboxd writer (a forward completion, or an abort back to `cloudflare`): all five parts, read as ONE unit by the port, and its pins for the commit batch. {guards} or {refused}.
 async function proveAdmission(env, ports, mode) {
   const handover = await handoverState(env, ports);
@@ -389,8 +397,10 @@ export async function switchMode(env, {action, target, slot, expectEpoch, expect
           // RETARGET: replacing a hold is allowed only when the previous canary is settled (never claimed and expired, closed, or the closed hold `none`); an in-progress canary is preserved. The hold is replaced in ONE
           // pinned row write, so the full schedule is never open in between.
           if (held === slot) return {action, refused: 'same_slot', canary: held};
-          const settled = await canarySettled(env, held, now);
-          if (!settled.settled) return {action, refused: 'canary_active', why: settled.why, canary: held};
+          if (!(await earlierRetarget(env, held, slot, now))) {
+            const settled = await canarySettled(env, held, now);
+            if (!settled.settled) return {action, refused: 'canary_active', why: settled.why, canary: held};
+          }
         }
         if (await readSlot(env, slot)) return {action, refused: 'slot_used', slot};
       } else if (!held) return {action, refused: 'no_canary', mode: mode.mode, epoch: mode.epoch};

@@ -38,6 +38,12 @@ Both fixes were reviewed independently, merged by the Controller after green exa
 - R2: `sync.json` and `watchlist-ingest.json` ETags unchanged (`a4f27097…`, `77a2d6f7…`).
 - Deployment at release: one version at 100%, created 18:44 UTC; zero non-terminal instances of `iptv-epg`.
 
+## Addenda from the independent review (22 Nov 2026)
+
+- PR #867 (AIR-571, Watchlist bootstrap operator) was also merged during the no-unrelated-deploy window, besides #859 recorded above; the Controller's coordination comment on the card records it. It does not touch the checkpoint operator or its regression.
+- The rollback boundary of the cutover was an idle **complete** run, never mid-run: the drain proof of `--hold-rollback` refused any other state, and no rollback command was run.
+- The first natural run on D1 is observed and accepted in the [H5 record](air-551-h5-natural-run-2026-11-22.md).
+
 ## Limits and residual risk
 
 - **Unproven until the natural run (H5):** the real film count and largest film entry (O2), Worker CPU and memory, and queries per invocation on the D1 path. There is no mid-run rollback; rollback after the run starts is the fenced `--hold-rollback` / `--export-rollback` / `--revert-authority` procedure of the [runbook](../../runbooks/epg-checkpoint-d1.md).

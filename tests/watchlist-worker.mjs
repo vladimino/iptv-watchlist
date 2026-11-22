@@ -52,7 +52,7 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
 // ===== 1. default: inert =====
 {
  for(const [label,marker,from] of [['tables absent (schema 30)','',legacyBase],['marker epg','',base]]){
-  const made=database(marker,{from});const env={DB:made.db,BUCKET:bucket};reset();
+  const made=database(marker,{from});const env={DB:made.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();
   const started=await run('beginSync')(step(env));
   assert.deepEqual(fetches.length>0,true,label+': the EPG run fetches Letterboxd exactly as before');
   assert.equal(started.watchlistCount,2);
@@ -68,7 +68,7 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
 
 // ===== 2. d1: one read of the last complete snapshot, no Letterboxd =====
 {
- const made=database(D1);const env={DB:made.db,BUCKET:bucket};reset();
+ const made=database(D1);const env={DB:made.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();
  await seed(made,[film(5),film(1),film(3)]);
  const started=await run('beginSync')(step(env));
  assert.deepEqual(fetches,[],'no Letterboxd HTTP in the active branch');
@@ -82,7 +82,7 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
  // the run is self-contained: a commit after the read changes the NEXT run only
  const pinned=stored.watchlist.length;
  // a snapshot of any age is read (no hard TTL), with the warning above 24 hours
- const old=database(D1);const oldEnv={DB:old.db,BUCKET:bucket};reset();
+ const old=database(D1);const oldEnv={DB:old.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();
  await seed(old,[film(1),film(2)],Date.parse(T)-30*3600000);
  await run('beginSync')(step(oldEnv));
  assert.deepEqual(fetches,[]);assert.equal(records.get('sync.json').watchlistSnapshot.warning,'watchlist_stale');assert.equal(records.get('sync.json').watchlist.length,2);
@@ -91,7 +91,7 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
 
 // ===== 2b. review: the pinned run never fetches Letterboxd, not even in the metadata stage =====
 {
- const made=database(D1);const env={DB:made.db,BUCKET:bucket};reset();
+ const made=database(D1);const env={DB:made.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();
  await seed(made,[film(1),film(2)]);
  context.__pending=true;stubs('Letterboxd HTTP 503');
  const started=await run('beginSync')(step(env));
@@ -99,7 +99,7 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
  assert.equal(started.stage,'epg','members with a not-fresh cache do not send the pinned run to the metadata stage');
  assert.equal(started.remaining,0);assert.deepEqual(plain(records.get('sync.json').pending),[]);assert.equal(records.get('sync.json').watchlist.length,2);
  // the legacy branch is unchanged: pending members still start at `metadata`
- const legacy=database('');const legacyEnv={DB:legacy.db,BUCKET:bucket};reset();context.__pending=true;stubs();
+ const legacy=database('');const legacyEnv={DB:legacy.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();context.__pending=true;stubs();
  const old=await run('beginSync')(step(legacyEnv));
  assert.equal(old.stage,'metadata');assert.equal(old.remaining,2);assert.ok(fetches.length>0);
  context.__pending=false;
@@ -107,11 +107,11 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
 
 // ===== 2c. review: the prediction queue takes the CURRENT snapshot membership =====
 {
- const made=database(D1);const env={DB:made.db,BUCKET:bucket};reset();
+ const made=database(D1);const env={DB:made.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();
  const source={runId:'r1',updatedAt:T,films:[{id:'lb1',title:'One',tmdbId:'1',shows:[{start:1,end:2}]},{id:'lb2',title:'Two',tmdbId:'2',shows:[]},{id:'lb3',title:'Three',tmdbId:'3',shows:[{start:3,end:4}]}]};
  // marker epg: null, the generation membership stays (the caller keeps its own source)
  const epg=database('');
- assert.equal(await run('watchlistQueueMembership')({DB:epg.db,BUCKET:bucket},source),null);
+ assert.equal(await run('watchlistQueueMembership')({DB:epg.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'},source),null);
  // marker d1: a 1-for-1 replacement between two EPG runs (lb2 out, lb9 in) changes the queue's membership at once
  await seed(made,[film(1),film(9),film(3)]);
  const before=plain(records.size);
@@ -122,27 +122,27 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
  assert.equal(plain(records.size),before);
  // held: refused like every reader
  const held=database("UPDATE watchlist_authority SET mode='d1',generation=2,writes='held' WHERE id=1;");
- assert.equal(await code(run('watchlistQueueMembership')({DB:held.db,BUCKET:bucket},source)),'watchlist_writes_held');
+ assert.equal(await code(run('watchlistQueueMembership')({DB:held.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'},source)),'watchlist_writes_held');
 }
 
 // ===== 3. d1 refusals are D1 faults, never an ingest failure, never Letterboxd, never the EPG generation =====
 {
- const none=database(D1);const env={DB:none.db,BUCKET:bucket};reset();
+ const none=database(D1);const env={DB:none.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();
  assert.equal(await code(run('beginSync')(step(env))),'watchlist_snapshot_absent');
  assert.deepEqual(fetches,[]);assert.ok(!puts.includes('watchlist-ingest.json')&&!puts.includes('sync.json'),'no ingest failure and no run');
  const held=database("UPDATE watchlist_authority SET mode='d1',generation=2,writes='held' WHERE id=1;");reset();
- assert.equal(await code(run('beginSync')(step({DB:held.db,BUCKET:bucket}))),'watchlist_writes_held');assert.deepEqual(fetches,[]);
+ assert.equal(await code(run('beginSync')(step({DB:held.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'}))),'watchlist_writes_held');assert.deepEqual(fetches,[]);
  const closed=database("UPDATE schema_contract SET version=31 WHERE id=1;DROP TRIGGER watchlist_cas_required;DELETE FROM watchlist_cas;");reset();
- assert.equal(await code(run('beginSync')(step({DB:closed.db,BUCKET:bucket}))),'watchlist_authority_closed');assert.deepEqual(fetches,[]);
+ assert.equal(await code(run('beginSync')(step({DB:closed.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'}))),'watchlist_authority_closed');assert.deepEqual(fetches,[]);
  // a corrupt snapshot is unavailable, not served
- const bad=database(D1);const badEnv={DB:bad.db,BUCKET:bucket};reset();await seed(bad,[film(1),film(2)]);
+ const bad=database(D1);const badEnv={DB:bad.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();await seed(bad,[film(1),film(2)]);
  sqlite(bad.file,"DROP TRIGGER watchlist_member_immutable;UPDATE watchlist_member SET title='tampered' WHERE ordinal=0");
  assert.equal(await code(run('beginSync')(step(badEnv))),'watchlist_unavailable');assert.deepEqual(fetches,[]);
 }
 
 // ===== 4. the reader seam =====
 {
- const made=database(D1);const env={DB:made.db,BUCKET:bucket};reset();
+ const made=database(D1);const env={DB:made.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();
  await seed(made,[film(2),film(9),film(1)]);
  const generation={updatedAt:T,films:[{id:'lb1',title:'Film 1',shows:[{start:1,end:2}]},{id:'lb2',title:'Film 2',shows:[]},{id:'lb3',title:'Film 3',shows:[{start:3,end:4}]}]};
  const programme={films:generation.films,catalogFilms:[{id:'tmdb_90',tmdbId:90,shows:[{start:5,end:6}]}]};
@@ -172,10 +172,10 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
  assert.deepEqual(plain(legacyMerged.films.map(item=>item.id)),['lb1','lb2','lb3'],'an uncomposed document keeps today\'s equal-length rule');
  // refusals: held, closed and absent never fall back to the EPG generation
  const held=database("UPDATE watchlist_authority SET mode='d1',generation=2,writes='held' WHERE id=1;");
- const e1=await run('composeWatchlistRead')({DB:held.db,BUCKET:bucket},generation,programme).then(()=>null,error=>error);
+ const e1=await run('composeWatchlistRead')({DB:held.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'},generation,programme).then(()=>null,error=>error);
  assert.equal(e1.code,'watchlist_writes_held');assert.equal(e1.watchlistAuthority,true);assert.notEqual(e1.temporary,true,'a held authority is structural: it never degrades into a mirror (review P1)');
  // the SAME database moves between requests: there is no cache, the next request sees the new state (review P1, no per-state database objects)
- const same=database('');const sameEnv={DB:same.db,BUCKET:bucket};
+ const same=database('');const sameEnv={DB:same.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};
  assert.equal((await run('composeWatchlistRead')(sameEnv,generation,programme)).films.length,3,'marker epg: the generation document');
  sqlite(same.file,D1);await seed(same,[film(2),film(9),film(1)]);
  assert.deepEqual(plain((await run('composeWatchlistRead')(sameEnv,generation,programme)).films.map(item=>item.id)),['lb2','lb9','lb1'],'epg -> d1 on the same binding is seen at once, never the legacy list');
@@ -189,21 +189,21 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
  assert.equal(await code(run('watchlistStill')(sameEnv,box)),'watchlist_authority_moved','a hold between the read and the response is never answered');
  sqlite(same.file,"UPDATE watchlist_authority SET writes='open',generation=5");
  assert.equal(await code(run('watchlistStill')(sameEnv,box)),'watchlist_authority_moved','a new generation is a move too');
- const legacyBox={};const legacyEnv={DB:database('').db,BUCKET:bucket};
+ const legacyBox={};const legacyEnv={DB:database('').db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};
  await run('composeWatchlistRead')(legacyEnv,generation,programme,legacyBox);
  sqlite(legacyEnv.DB&&path.join(root,'db-'+(copies-1)+'.sqlite'),D1);
  assert.equal(await code(run('watchlistStill')(legacyEnv,legacyBox)),'watchlist_authority_moved','an epg -> d1 switch between the read and the response is never answered from the EPG list');
  // a storage error of the marker read is a retryable fault, a contradiction is not
  const failing=database(D1);const flaky=d1Standin(failing.file,{onQuery:async()=>{throw new Error('D1 DB is overloaded');}});
- const transient=await run('composeWatchlistRead')({DB:flaky,BUCKET:bucket},generation,programme).then(()=>null,error=>error);
+ const transient=await run('composeWatchlistRead')({DB:flaky,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'},generation,programme).then(()=>null,error=>error);
  assert.deepEqual([transient.code,transient.temporary],['watchlist_unavailable',true]);
  const none=database(D1);
- assert.equal(await code(run('composeWatchlistRead')({DB:none.db,BUCKET:bucket},generation,programme)),'watchlist_snapshot_absent');
+ assert.equal(await code(run('composeWatchlistRead')({DB:none.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'},generation,programme)),'watchlist_snapshot_absent');
 }
 
 // ===== 4b. review 2: the root-mirror fallback asks the CURRENT authority =====
 {
- const made=database('');const env={DB:made.db,BUCKET:bucket};reset();
+ const made=database('');const env={DB:made.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();
  const mayWrite=runPin=>run('epgMayWriteWatchlistRoot')(env,runPin);
  assert.equal(await mayWrite({}),true,'marker epg: today\'s fallback is unchanged');
  assert.equal(await mayWrite({watchlistSnapshot:{version:1}}),false,'a pinned run never writes the root');
@@ -211,9 +211,9 @@ const seed=async(made,films,at=Date.parse(T))=>{const out=await Watchlist.publis
  sqlite(made.file,D1);
  assert.equal(await mayWrite({}),false,'epg -> d1 while the run is in flight: the unpinned run is fenced by the current authority');
  const flaky=d1Standin(made.file,{onQuery:async()=>{throw new Error('D1 DB is overloaded');}});
- assert.equal(await run('epgMayWriteWatchlistRoot')({DB:flaky,BUCKET:bucket},{}),false,'an unreadable marker fails closed');
+ assert.equal(await run('epgMayWriteWatchlistRoot')({DB:flaky,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'},{}),false,'an unreadable marker fails closed');
  const legacy=path.join(root,'legacy-fence.sqlite');fs.copyFileSync(legacyBase,legacy);
- assert.equal(await run('epgMayWriteWatchlistRoot')({DB:d1Standin(legacy),BUCKET:bucket},{}),true,'tables absent: unchanged');
+ assert.equal(await run('epgMayWriteWatchlistRoot')({DB:d1Standin(legacy),BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'},{}),true,'tables absent: unchanged');
 }
 
 // ===== 5. the EPG commit tail does not own the scan or the watchlist Event when pinned =====

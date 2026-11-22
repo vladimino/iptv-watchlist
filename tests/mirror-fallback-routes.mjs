@@ -36,7 +36,7 @@ async function call(pathname,{init={},fail=null,message='D1 DB is overloaded',mi
  if(mirrors)mirrors(bucket);
  const writes=[];
  const db=d1Standin(file,{onQuery:async text=>{if(/^\s*(INSERT|UPDATE|DELETE|REPLACE)/i.test(text))writes.push(text.slice(0,60));if(fail&&fail(text))throw new Error(typeof message==='function'?message(text):message);}});
- const env={BUCKET:bucket,DB:db,TMDB_API_READ_ACCESS_TOKEN:'t'};
+ const env={BUCKET:bucket,DB:db,TMDB_API_READ_ACCESS_TOKEN:'t',EPG_CHECKPOINT_DB_OPTIONAL:'standin'};
  const events=[];const log=console.log;console.log=(...args)=>{try{events.push(JSON.parse(args[0]));}catch{}};
  let response;try{response=await bundle.worker.fetch(new Request(SITE+pathname,init),env,{waitUntil(){}});}finally{console.log=log;}
  const text=await response.text();let body=null;try{body=JSON.parse(text);}catch{}

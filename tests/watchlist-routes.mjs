@@ -55,7 +55,7 @@ async function arrange({canonical='trusted',snapshot=true,marker="UPDATE watchli
 async function call(pathname,made,{fail=null,failBatch=null,message='D1 DB is overloaded',after=null}={}){
  const writes=[];
  const db=d1Standin(made.file,{onBatch:async statements=>{if(failBatch&&failBatch(statements.map(item=>item.text).join(' ; ')))throw new Error(message);},onQuery:async text=>{if(/^\s*(INSERT|UPDATE|DELETE|REPLACE)/i.test(text))writes.push(text.slice(0,60));if(fail&&fail(text))throw new Error(message);if(after)await after(text);}});
- const env={BUCKET:made.bucket,DB:db,TMDB_API_READ_ACCESS_TOKEN:'t'};
+ const env={BUCKET:made.bucket,DB:db,TMDB_API_READ_ACCESS_TOKEN:'t',EPG_CHECKPOINT_DB_OPTIONAL:'standin'};
  const log=console.log;console.log=()=>{};
  let response;try{response=await bundle.worker.fetch(new Request(SITE+pathname),env,{waitUntil(){}});}finally{console.log=log;}
  const text=await response.text();let body=null;try{body=JSON.parse(text);}catch{}
@@ -166,7 +166,7 @@ async function call(pathname,made,{fail=null,failBatch=null,message='D1 DB is ov
  // d1: the root mirror is left alone, the generation-addressed copy is written, the call still succeeds, and a repair finds nothing to write
  const made=await arrange();
  put(made.bucket,'watchlist.json',standalone);
- const env={DB:made.db,BUCKET:made.bucket};
+ const env={DB:made.db,BUCKET:made.bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};
  assert.equal(await PublishedEpg.writeMirrors(env,{programmeRunId:RUN2,programme,watchlist:epgCopy,phase:'published'}),true);
  assert.equal(rootOf(made.bucket).source,'watchlist_authority','the EPG did not overwrite the independent root mirror');assert.equal(rootOf(made.bucket).snapshotVersion,9);
  assert.ok(made.bucket.objects.has(generationKey),'the generation-addressed copy stays EPG-owned');
