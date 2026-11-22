@@ -1,9 +1,9 @@
 # ADR 0197: A bounded share of each ordinary batch v2 manifest is reserved for owner-confirmed recovery intents
 
-**Status:** Proposed (the policy was approved by the Product Owner on the delivery card; the composition with the fingerprint migration share in decision 4 and the read-time resolution in decision 2 are implementation choices for the independent review to confirm)  
+**Status:** Accepted (2026-11-22; Product Owner explicitly accepted the entire ADR, including decisions A–D, after independent technical review of PR #899)  
 **Original decision date:** 2026-11-22  
 **Recorded at:** 2026-11-22  
-**Approval source:** The "Утверждённая политика" section of [AIR-577](https://trello.com/c/1fuEawPv), 22 Nov 2026 Europe/Madrid.  
+**Approval source:** The "Утверждённая политика" section and [explicit owner acceptance of all ADR 0197 decisions in AIR-577](https://trello.com/c/1fuEawPv), recorded in [PR #899](https://github.com/vladimino/iptv-watchlist/pull/899#issuecomment-7081946459), 22 Nov 2026 Europe/Madrid.  
 **Related work:** [AIR-577](https://trello.com/c/1fuEawPv), [AIR-478](https://trello.com/c/IbsSCRce) (the recovery cohort and its canary), [AIR-477](https://trello.com/c/WhwaXRRl); [ADR 0165](0165-scoped-prediction-recovery-intent.md), [ADR 0035](0035-selective-fingerprint-transition-compatibility.md), [ADR 0195](0195-scheduled-task-id-as-run-owner-label.md)  
 **Supersedes:** None. It adds to [ADR 0165](0165-scoped-prediction-recovery-intent.md) and does not replace any decision of it.  
 **Superseded by:** None
