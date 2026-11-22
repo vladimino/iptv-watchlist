@@ -121,7 +121,7 @@ Answer `200 {status: "running", runId, protocol: "batch_v2", dryRun: false, leas
 
 #### Recovery slots in the manifest
 
-([ADR 0197](../../adr/0197-recovery-slots-in-the-ordinary-batch-manifest.md), Proposed.) An unpinned `batch_start` (a real start, a dry run and the queue refresh's own settlement window) reserves a share of the manifest for films with an active, unexpired, owner-confirmed [recovery intent](admin-actions.md#scoped-prediction-recovery-intent), independent of hot or cold.
+([ADR 0197](../../adr/0197-recovery-slots-in-the-ordinary-batch-manifest.md), Accepted.) An unpinned `batch_start` (a real start, a dry run and the queue refresh's own settlement window) reserves a share of the manifest for films with an active, unexpired, owner-confirmed [recovery intent](admin-actions.md#scoped-prediction-recovery-intent), independent of hot or cold.
 
 - **Quota.** For a manifest size `N` the target is `N >= 2 ? max(1, floor(N * 0.4)) : 0` recovery slots (`RECOVERY_BATCH_SHARE = 0.4`): 5 gives 2 + 3, 7 gives 2 + 5, 10 gives 4 + 6, 15 gives 6 + 9, 20 gives 8 + 12, and `N = 1` keeps the ordinary policy. It is a ceiling on the privileged slots, not a guaranteed throughput.
 - **Candidates.** A film with an active intent that is queued in either lane (its true lane stays in `films[].lane`), not retry-exhausted, not in retry backoff and not already staged. When the film is read, its stored current prediction must still be the exact version the intent denies; a film that is current or whose admission is gone is skipped as before, and one whose stored version moved on takes no recovery slot.
