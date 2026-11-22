@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
-import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {flowWorld, sql,labelStarts} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
@@ -511,7 +511,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const pad='x'.repeat(7000);
  for(let n=1;n<=5;n++)sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+pad+"') WHERE film_id='tmdb_"+n+"'");
  await reconcile(w);
- const r=await batch(w,{manifestSize:5});assert.equal(r.status,200);
+ const r=await batch(w,{manifestSize:5,taskId:'task00'});assert.equal(r.status,200);
  const text=JSON.stringify(r.data);assert.ok(text.length>=40000,'persisted start is a realistic ~42 KiB payload, got '+text.length);
  const sliceAt=Math.min(text.length-1,24000);
  const fromText=w.ctx.parseBatchStartToolText(text.slice(0,sliceAt));
@@ -552,7 +552,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
 // commits those five without A's runId and selects five new films. Ten unique predictions.
 {
  const w=await ready(12);await reconcile(w);
- const a=await batch(w,{manifestSize:5});assert.equal(a.status,200);
+ const a=await batch(w,{manifestSize:5,taskId:'task00'});assert.equal(a.status,200);
  const items=a.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
  w.ctx.__env=w.env;w.ctx.__items=items;
@@ -640,7 +640,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const w=await ready(12);
  setCold(w,['tmdb_6','tmdb_7','tmdb_8','tmdb_9','tmdb_10','tmdb_11','tmdb_12']);
  await reconcile(w);
- const a=await batch(w,{manifestSize:5});assert.equal(a.status,200);
+ const a=await batch(w,{manifestSize:5,taskId:'task00'});assert.equal(a.status,200);
  assert.ok(a.data.films.every(f=>f.lane==='hot'));
  const items=a.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
  assert.equal((await w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items})).status,200);

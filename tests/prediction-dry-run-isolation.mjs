@@ -4,10 +4,11 @@
 import vm from 'node:vm';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
-import {flowWorld} from './prediction-d1-flow-lib.mjs';
+import {flowWorld,labelStarts} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as PredictionD1 from '../src/prediction-d1.js';
 import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
+labelStarts();// ADR 0195: the runs of this test are started as a standing Task starts them, with its label
 
 const dump=f=>{const r=sqliteSync([f,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);

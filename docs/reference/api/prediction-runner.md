@@ -135,7 +135,7 @@ The run's films are selected once: hot first, cold only while no hot film is out
 
 ### Task label and owner-scoped run calls (ADR 0195)
 
-The four standing Tasks send `taskId` (`task00`, `task15`, `task30`, `task45`; closed enum, not a secret, not an identity; Access and the JWT are unchanged). HTTP: `POST /api/enrichment/batch/start` accepts `taskId` only with `trigger: "scheduled"` and never with `invocationKey` or `deferred` (`400 task_id_requires_scheduled`, `400 task_id_with_key`, `400 invalid_task_id`); a dry run ignores it. The MCP tool requires it for a real scheduled start and for every run-scoped call (see [the MCP reference](mcp.md)); the HTTP start without it keeps today's behaviour for owner-run diagnostics.
+The four standing Tasks send `taskId` (`task00`, `task15`, `task30`, `task45`; closed enum, not a secret, not an identity; Access and the JWT are unchanged). HTTP: `POST /api/enrichment/batch/start` accepts `taskId` only with `trigger: "scheduled"` (`400 task_id_requires_scheduled`, `400 invalid_task_id`); a dry run ignores it. With `invocationKey` or `deferred` (ADR 0188 / 0193, dormant) the label is only a correlation stored on the lease and the run: the key still decides the join. The MCP tool requires it for a real scheduled start and for every run-scoped call (see [the MCP reference](mcp.md)); the HTTP start without it keeps today's behaviour for owner-run diagnostics.
 
 | Situation | Answer |
 | --- | --- |
@@ -146,7 +146,7 @@ The four standing Tasks send `taskId` (`task00`, `task15`, `task30`, `task45`; c
 | no live lease (released or expired) | a **new** run and epoch; the earlier run is never restored |
 | heartbeat, hold, submit, complete or manifest read of a **labelled** run with another or no `taskId` | `409 {error: "wrong_owner", code: "wrong_owner"}` with no `status` field and no payload; refused before the step recorder, the writer lease and any write; it never records a stop of the real owner's run |
 | an unknown `taskId` value on any of these | `400 invalid_task_id` |
-| any call of a run **without** a label (manual, keyless, keyed or deferred start) | unchanged: accepted with or without a valid label |
+| any call of a run **without** a label (manual, keyless, keyed or deferred start without `taskId`) | operated only by a caller **without** a label, as before; a call that carries a label is `wrong_owner` (presence must match and the values must be equal), so a Task can neither operate nor read a label-free run. Such a run is therefore not operable through the MCP run tools, which require the label; it stays reachable through the owner-only HTTP routes |
 
 `runId`, `epoch`, the lease compare-and-swap, the submit gate and the commit guard decide every write exactly as before; the label is a correlation, never a replacement. A repeated confirmed submit is handled by the existing server-side idempotency per film, run and `inputDigest`; the label bypasses neither validation nor fencing. Observability: the start step records `taskRepeat: 1` for a same-label repeat, `joined`, `startPending` and `keyArgsMismatch` as for ADR 0188.
 

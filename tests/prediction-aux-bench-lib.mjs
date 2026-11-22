@@ -10,8 +10,9 @@
 // Wall time is the local stand-in (a sqlite process per statement, an in-memory R2) and is NOT Cloudflare latency.
 import fs from 'node:fs';
 import vm from 'node:vm';
-import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {flowWorld, sql,labelStarts} from './prediction-d1-flow-lib.mjs';
 import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
+labelStarts();// ADR 0195: the runs of this test are started as a standing Task starts them, with its label
 
 const AUX_R2=key=>key.startsWith('enrichment/sources/')||key.startsWith('enrichment/batch-manifest/')||key==='enrichment/batch-stage.json'||key.startsWith('enrichment/stop-events/')||key.startsWith('enrichment/start-events/')||key==='enrichment/event-outbox.json';
 const WRITE=/^\s*(INSERT|UPDATE|DELETE|REPLACE)/i;

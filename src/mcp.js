@@ -327,7 +327,7 @@ async function mcpCallTool(params,protocolVersion,env,execution){
   if(args.deferred===true&&(typeof args.invocationKey!=='string'||!/^dk1\.[0-9a-f]{32}$/.test(args.invocationKey)))return {result:mcpToolError('A deferred start needs the "invocationKey" issued by prediction_batch_key.')};
   if(args.invocationKey!==undefined&&(typeof args.invocationKey!=='string'||!/^[A-Za-z0-9._:-]{16,128}$/.test(args.invocationKey)))return {result:mcpToolError('"invocationKey" must be 16 to 128 characters of letters, digits, ".", "_", ":" or "-".')};
   // ADR 0195: a real scheduled start of the standing Tasks carries the Task label; without it (and without the dormant keyed protocol) the call fails closed before any storage access.
-  if(args.taskId!==undefined&&(args.trigger!=='scheduled'||args.invocationKey!==undefined||args.deferred!==undefined))return {result:mcpToolError('"taskId" is accepted only with trigger scheduled and without invocationKey or deferred.')};
+  if(args.taskId!==undefined&&args.trigger!=='scheduled')return {result:mcpToolError('"taskId" is accepted only with trigger scheduled.')};
   if(args.trigger==='scheduled'&&args.dryRun!==true&&args.invocationKey===undefined&&args.taskId===undefined)return {result:mcpToolError('"taskId" is required: send the fixed label of this Task (task00, task15, task30 or task45) on every call of a prediction run.')};
   const manifestCap=args.manifestSize===undefined?100:args.manifestSize;
   if(args.pin!==undefined){

@@ -78,9 +78,9 @@ const submit=(w,taskId,run,items,extra={})=>w.api('batch/submit',{...(taskId?{ta
   ['submit',()=>submit(w,'task15',first.data,[item(w,id)])],
   ['submit useHeld',()=>w.api('batch/submit',{taskId:'task15',runId:first.data.runId,epoch:first.data.lease.epoch,useHeld:true})],
   ['complete',()=>w.api('complete',{taskId:'task15',runId:first.data.runId})],
-  ['heartbeat without label',()=>w.api('heartbeat',{runId:first.data.runId})],
-  ['submit without label',()=>submit(w,null,first.data,[item(w,id)])],
-  ['complete without label',()=>w.api('complete',{runId:first.data.runId})],
+  ['heartbeat without label',()=>w.rawApi('heartbeat',{runId:first.data.runId})],
+  ['submit without label',()=>w.rawApi('batch/submit',{runId:first.data.runId,epoch:first.data.lease.epoch,items:[item(w,id)]})],
+  ['complete without label',()=>w.rawApi('complete',{runId:first.data.runId})],
  ]){
   const r=await call();assert.equal(r.status,409,name+' '+JSON.stringify(r.data).slice(0,200));assert.equal(r.data.code,'wrong_owner',name+' '+JSON.stringify(r.data).slice(0,300));
   assert.ok(!JSON.stringify(r.data).includes('films'),name+' discloses no payload');
@@ -128,8 +128,6 @@ const submit=(w,taskId,run,items,extra={})=>w.api('batch/submit',{...(taskId?{ta
   const r=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',taskId:bad});assert.equal(r.status,400,JSON.stringify(bad));
  }
  assert.equal((await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'manual',taskId:'task00'})).data.code,'task_id_requires_scheduled');
- assert.equal((await batch(w,'task00',{invocationKey:'dk1.'+'a'.repeat(32)})).data.code,'task_id_with_key');
- assert.equal((await batch(w,'task00',{invocationKey:'a'.repeat(20),deferred:undefined})).data.code,'task_id_with_key');
  assert.equal((await w.api('heartbeat',{taskId:'task99',runId:'x'})).status,400,'an unknown label is refused before anything else');
  assert.equal(snapshot(w),before,'refusals write nothing');
  const first=await batch(w,'task30');assert.equal(first.data.status,'running');
@@ -144,8 +142,17 @@ const submit=(w,taskId,run,items,extra={})=>w.api('batch/submit',{...(taskId?{ta
  const dry=await batch(w,'task00',{dryRun:true});assert.equal(dry.status,200,JSON.stringify(dry.data).slice(0,200));assert.equal(dry.data.dryRun,true);assert.equal(runRows(w).length,0);
  assert.equal(sql(w.file,"SELECT count(*) AS n FROM prediction_lease WHERE name='runner'")[0].n,0,'a dry run never claims the lease');
  const manual=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'manual'});assert.equal(manual.data.status,'running');assert.equal(leaseDoc(w).taskId,undefined,'a manual run has no label');
- const beat=await w.api('heartbeat',{runId:manual.data.runId});assert.equal(beat.status,200,'a run without a label is operated by a caller without one');
- assert.equal((await w.api('heartbeat',{taskId:'task00',runId:manual.data.runId})).status,200,'a run without a label has no Task owner: its calls are accepted with or without a valid label');
+ const beat=await w.rawApi('heartbeat',{runId:manual.data.runId});assert.equal(beat.status,200,'a run without a label is operated by a caller without one');
+ // A Task can neither operate nor read a label-free run, whatever run id and epoch it knows: refused, and nothing is written.
+ const id=manual.data.films[0].filmId,before=snapshot(w),vmRead=null;void vmRead;
+ for(const [name,call] of [
+  ['heartbeat',()=>w.rawApi('heartbeat',{taskId:'task00',runId:manual.data.runId})],
+  ['hold',()=>w.rawApi('batch/hold',{taskId:'task00',runId:manual.data.runId,epoch:manual.data.lease.epoch,items:[item(w,id)]})],
+  ['submit',()=>w.rawApi('batch/submit',{taskId:'task15',runId:manual.data.runId,epoch:manual.data.lease.epoch,items:[item(w,id)]})],
+  ['submit useHeld',()=>w.rawApi('batch/submit',{taskId:'task15',runId:manual.data.runId,epoch:manual.data.lease.epoch,useHeld:true})],
+  ['complete',()=>w.rawApi('complete',{taskId:'task45',runId:manual.data.runId})],
+ ]){const r=await call();assert.equal(r.status,409,name);assert.equal(r.data.code,'wrong_owner',name+' '+JSON.stringify(r.data).slice(0,200));}
+ assert.equal(snapshot(w),before,'label-vs-unlabelled refusals wrote nothing');
  assert.equal((await batch(w,'task00')).data.status,'already_running','a labelled start never joins an unlabelled run');
 }
 {
@@ -176,4 +183,24 @@ const submit=(w,taskId,run,items,extra={})=>w.api('batch/submit',{...(taskId?{ta
  // the MCP start of another Task is turned away while the claim lives, and the claim keeps its owner
  const turned=await tool('prediction_batch_start',{trigger:'scheduled',taskId:'task00'});assert.match(JSON.stringify(turned),/already_running/);
  assert.equal(leaseDoc(w).taskId,'task45');
+}
+
+// 10. A label on a keyed start is only a correlation: the key still decides the join, and the run is then operated by that label only; a keyed start without a label stays label-free and is read and
+// operated without one (a Task's label is refused on it, also through the MCP readback).
+{
+ const w=await world();
+ const keyed=await batch(w,'task00',{invocationKey:'task-s5-q15:2026-11-22T10'});assert.equal(keyed.data.status,'running',JSON.stringify(keyed.data).slice(0,200));
+ assert.equal(leaseDoc(w).taskId,'task00');assert.equal(JSON.parse(runRows(w)[0].document_json).taskId,'task00');
+ assert.equal((await w.rawApi('heartbeat',{runId:keyed.data.runId})).data.code,'wrong_owner');
+}
+{
+ const w=await world();
+ const keyless=await batch(w,null,{invocationKey:'task-s5-q15:2026-11-22T10'});assert.equal(keyless.data.status,'running');assert.equal(leaseDoc(w).taskId,undefined);
+ vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
+ const tool=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
+ const before=snapshot(w);
+ for(const [name,args] of [['prediction_batch_manifest',{taskId:'task00',runId:keyless.data.runId}],['prediction_heartbeat',{taskId:'task00',runId:keyless.data.runId}],['prediction_complete',{taskId:'task00',runId:keyless.data.runId}]]){
+  const r=await tool(name,args);assert.equal(r.isError,true,name);assert.match(JSON.stringify(r),/wrong_owner/,name);
+ }
+ assert.equal(snapshot(w),before,'a Task label on a label-free run reads and writes nothing');
 }

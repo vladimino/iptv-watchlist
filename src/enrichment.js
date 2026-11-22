@@ -911,12 +911,13 @@ const taskOwnerGate=async(env,body,work)=>{
  }
  return work();
 };
-// A run-scoped call must come from the owner label of its run: a run started by a Task is operated only by that Task (a caller without a label is refused too); a run without a label has no Task owner.
+// A run-scoped call must come from the owner label of its run: a run started by a Task is operated only by that Task (a caller without a label is refused too); a run without a label is operated only by a caller without one.
 // A foreign or missing label is refused before any write and the answer never names the owner or carries a payload of the run.
 const taskOwnerRefusal=(owner,caller,runId)=>{
  if(caller!==undefined&&!isTaskId(caller))return json({error:'Invalid taskId',code:'invalid_task_id'},400);
- // A run without a label (manual, keyless, keyed or deferred start) is owned by no Task: its calls keep working as before, with or without a valid label. A labelled run is operated only by its own label.
- if(owner==null||owner===caller)return null;
+ // Presence must match and the values must be equal: a labelled run is operated only by its own label, and a run without a label (manual, keyless, keyed or deferred start) only by a caller without one, as before.
+ // A Task can therefore neither operate nor read a label-free run, whatever runId and epoch it knows.
+ if((owner??null)===(caller??null))return null;
  return json({error:'wrong_owner',code:'wrong_owner',reason:'wrong_owner',runId:isText(runId,100)?runId:null,...scheduledRunFields()},409);
 };
 // While a deferred run is still being prepared (`prep`) the claim, the persist gate and every renewal made by the preparation hold the short lease; only a renewal by the client (a heartbeat,
@@ -2711,9 +2712,8 @@ function validateBatchStartBody(body){
  if(body.invocationKey!==undefined&&(typeof body.invocationKey!=='string'||!INVOCATION_KEY_PATTERN.test(body.invocationKey)))return json({error:'Invalid invocationKey'},400);
  if(body.deferred!==undefined&&typeof body.deferred!=='boolean')return json({error:'Invalid deferred'},400);
  if(body.taskId!==undefined){
-  // ADR 0195: a Task label belongs to a scheduled start only, never to a manual one, and never together with the keyed protocols of ADR 0188 / 0193.
+  // ADR 0195: a Task label belongs to a scheduled start only, never to a manual one. With the keyed protocols of ADR 0188 / 0193 it is only a correlation (the key still decides the join).
   if(!isTaskId(body.taskId))return json({error:'Invalid taskId',code:'invalid_task_id'},400);
-  if(body.invocationKey!==undefined||body.deferred!==undefined)return json({error:'taskId is not accepted with invocationKey or deferred',code:'task_id_with_key'},400);
   if(body.trigger!=='scheduled')return json({error:'taskId is accepted only with trigger scheduled',code:'task_id_requires_scheduled'},400);
  }
  if(body.deferred===true){
@@ -3044,7 +3044,7 @@ async function deferredStart(env,clean,requestId,tally,{keyHash,argsHash}){
  if(known)return known;
  if(!bound)return unavailable('deferred_start_unavailable');
  forgetAuthority(env);
- const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash,deferred:true})));
+ const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash,deferred:true,taskId:clean.taskId})));
  if(taken.status!=='owned'){
   const holder=await loadJSON(env,RUNNER_LEASE_KEY);
   if(holder?.runId===runId&&Number(holder.expiresAt)>Date.now()&&holder.keyHash===keyHash&&holder.argsHash===argsHash&&!holder.clientSubmitAt)return batchReceiptFor(env,holder,tally,async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId}));
@@ -3137,7 +3137,7 @@ async function taskStart(env,clean,requestId,tally){
 async function batchStartWork(env,body,requestId,tally){
  const bad=validateBatchStartBody(body);if(bad)return bad;
  const notD1=await batchRequiresD1(env);if(notD1)return notD1;
- if(body.taskId!==undefined){
+ if(body.taskId!==undefined&&body.invocationKey===undefined){
   // A dry run reads and writes nothing and never claims: the label is not used. A real start by a Task takes the owner-labelled path.
   if(body.dryRun===true){const {taskId,...plain}=body;void taskId;return batchStartCore(env,plain,requestId,tally,null);}
   return taskStart(env,body,requestId,tally);
@@ -3149,7 +3149,7 @@ async function batchStartWork(env,body,requestId,tally){
  if(clean.deferred===true)return deferredStart(env,clean,requestId,tally,{keyHash,argsHash});
  const runId=crypto.randomUUID();
  forgetAuthority(env);
- const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash})));
+ const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash,taskId:clean.taskId})));
  if(taken.status!=='owned'){
   const live=await loadJSON(env,RUNNER_LEASE_KEY);
   if(live?.runId&&live.expiresAt>Date.now()&&live.keyHash===keyHash){
@@ -4044,7 +4044,7 @@ async function ownedBatchManifestRead(env,runId,{part='envelope',filmId,taskId}=
   const claimed=await loadJSON(env,RUNNER_LEASE_KEY);
   if(claimed?.runId===runId&&Number(claimed.expiresAt)>Date.now()){
    // ADR 0195: a start still preparing its run is read back only by the Task that holds the claim.
-   if(claimed.taskId&&claimed.taskId!==taskId)return {status:409,body:{error:'wrong_owner',code:'wrong_owner',reason:'wrong_owner',runId}};
+   if((claimed.taskId??null)!==(taskId??null))return {status:409,body:{error:'wrong_owner',code:'wrong_owner',reason:'wrong_owner',runId}};
    return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:START_POLL_MS}};
   }
   if(deferredRun)return {status:409,body:{error:'start_not_ready',code:'start_failed',outcomeCode:'start_lost',reason:null,runId}};

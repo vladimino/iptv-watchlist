@@ -5,9 +5,10 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
-import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {flowWorld, sql,labelStarts} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
+labelStarts();// ADR 0195: the runs of this test are started as a standing Task starts them, with its label
 
 const TEAM='https://probe-team.cloudflareaccess.com';
 const AUD='a1'.repeat(32);
@@ -229,7 +230,6 @@ for(const [name,args] of [
  ['prediction_batch_start',{trigger:'scheduled'}],
  ['prediction_batch_start',{trigger:'scheduled',taskId:'task99'}],
  ['prediction_batch_start',{trigger:'manual',taskId:'task00'}],
- ['prediction_batch_start',{trigger:'scheduled',taskId:'task00',invocationKey:'dk1.'+'a'.repeat(32),deferred:true}],
  ['prediction_batch_manifest',{runId:'run-1'}],['prediction_heartbeat',{runId:'run-1'}],['prediction_complete',{runId:'run-1'}],
  ['prediction_batch_hold',{runId:'run-1',epoch:1,items:[{filmId:'f1'}]}],['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'f1',prediction:{}}]}],
  ['prediction_heartbeat',{taskId:'TASK00',runId:'run-1'}],['enrichment_runner',{taskId:'task99'}],
@@ -338,7 +338,7 @@ const runnerTool=domain((await tool(env(),'enrichment_runner',{})).body.result).
 assert.equal(runnerTool.protocol,'batch_v2');assert.deepEqual(runnerTool.retiredProtocols,['v5']);assert.equal(runnerTool.batchRunner.start,'/api/enrichment/batch/start');
 assert.doesNotMatch(JSON.stringify(runnerTool),/enrichment\/(?:start|next|submit)\b|next\/submit|maxBatchFilms|modelBatching/,'no retired route or v5 field');
 const invalidFlow=await mcpFlow(1);
-const invalidStart=(await invalidFlow.call('prediction_batch_start',{trigger:'manual'})).data;
+const invalidStart=(await invalidFlow.call('prediction_batch_start',{trigger:'scheduled'})).data;
 const {moodLabels:_noMood,...fingerprintWithoutMood}=fingerprint;
 const badFingerprint={...fingerprintWithoutMood,execution:{...predictionFields,payoff:'medium'},strengths:['PAYLOAD-CANARY']};
 const rejected=await invalidFlow.call('prediction_batch_submit',{runId:invalidStart.runId,epoch:invalidStart.lease.epoch,items:[{filmId:invalidStart.films[0].filmId,fingerprint:badFingerprint,prediction}]});
@@ -376,10 +376,10 @@ assert.deepEqual(fetches.filter(url=>url!==TEAM+'/cdn-cgi/access/certs'),[]);
 
 // Overlap, an early completion and a lost lease, on batch v2.
 const conflictFlow=await mcpFlow(2);
-const conflictStart=(await conflictFlow.call('prediction_batch_start',{trigger:'manual'})).data;
+const conflictStart=(await conflictFlow.call('prediction_batch_start',{trigger:'scheduled'})).data;
 assert.equal(conflictStart.status,'running');
 const conflictRunId=conflictStart.runId;
-const adopted=await conflictFlow.call('prediction_batch_start',{trigger:'manual'});
+const adopted=await conflictFlow.call('prediction_batch_start',{trigger:'scheduled',taskId:'task15'});
 assert.equal(adopted.isError,undefined);
 assert.equal(adopted.data.httpStatus,200);
 assert.equal(adopted.data.status,'already_running');
@@ -393,7 +393,7 @@ const lost=await conflictFlow.call('prediction_heartbeat',{runId:conflictRunId})
 assert.equal(lost.isError,true);
 assert.equal(lost.data.httpStatus,409);
 assert.match(JSON.stringify(lost.data),/lease_lost/);
-const restarted=await conflictFlow.call('prediction_batch_start',{trigger:'manual'});
+const restarted=await conflictFlow.call('prediction_batch_start',{trigger:'scheduled'});
 assert.equal(restarted.data.status,'running',JSON.stringify(restarted.data).slice(0,300));
 assert.notEqual(restarted.data.runId,conflictRunId);assert.ok(restarted.data.lease.epoch>conflictStart.lease.epoch,'a takeover raises the epoch');
 {const expired=JSON.parse(sql(conflictFlow.w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+conflictRunId+"'")[0].d);
@@ -473,7 +473,7 @@ assert.ok(diagnosticGets.every(key=>/^(enrichment\/prediction-queue\.json|enrich
 const rejectedFault=await tool(env(),'prediction_complete',{runId:'run-1',fault:{url:'https://evil.example'}});
 assert.equal(rejectedFault.body.result.isError,true);
 const faultFlow=await mcpFlow(1);
-const faultStart=await faultFlow.call('prediction_batch_start',{trigger:'manual'});
+const faultStart=await faultFlow.call('prediction_batch_start',{trigger:'scheduled'});
 assert.equal(faultStart.isError,undefined,JSON.stringify(faultStart.data).slice(0,300));
 const faultRunId=faultStart.data.runId;
 const faultDone=await faultFlow.call('prediction_complete',{runId:faultRunId,reason:'api_error',fault:{origin:'model_provider',failedStep:'submit',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:faultStart.data.requestId}});

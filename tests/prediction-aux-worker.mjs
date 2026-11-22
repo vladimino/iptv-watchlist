@@ -4,8 +4,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {flowWorld, sql,labelStarts} from './prediction-d1-flow-lib.mjs';
 import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
+labelStarts();// ADR 0195: the runs of this test are started as a standing Task starts them, with its label
 
 const AUX_R2=k=>k.startsWith('enrichment/sources/')||k.startsWith('enrichment/batch-manifest/')||k==='enrichment/batch-stage.json'||k.startsWith('enrichment/stop-events/')||k.startsWith('enrichment/start-events/')||k==='enrichment/event-outbox.json';
 const auxKeys=w=>[...w.records.keys()].filter(AUX_R2);
@@ -81,7 +82,7 @@ const stepStub={do:async(name,config,fn)=>fn()};
  const {start}=await w.reconcileAndStart({manifestSize:2});assert.equal(start.status,200);
  const real=w.env.BUCKET.put;let fail=true;
  w.env.BUCKET.put=async(key,...rest)=>{if(fail&&key.startsWith('events/items/'))throw new Error('journal outage');return real(key,...rest);};
- const rival=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',capacity:{remainingPercent:100}});
+ const rival=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',taskId:'task15',capacity:{remainingPercent:100}});
  assert.equal(rival.data.status,'already_running','the refusal answer is unchanged by the outage');
  const skipped=outbox(w).filter(r=>r.k.startsWith('skipped:'));assert.equal(skipped.length,1,'one neutral record');assert.equal(skipped[0].state,'pending');assert.equal(journal(w).length,0);
  assert.equal(count(w,'prediction_run'),1,'a turned-away request touches no run');assert.equal(leaseDoc(w).runId,start.data.runId,'and no lease');
@@ -186,7 +187,7 @@ const deferred=async()=>{
  const real=w.env.BUCKET.put;let down=true;
  w.env.BUCKET.put=async(key,...rest)=>{if(down&&key.startsWith('events/items/'))throw new Error('journal outage');return real(key,...rest);};
  const first=await w.reconcileAndStart({manifestSize:1});assert.equal(first.start.status,200);
- await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',capacity:{remainingPercent:100}});
+ await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',taskId:'task15',capacity:{remainingPercent:100}});
  assert.equal(outbox(w).filter(r=>r.k.startsWith('skipped:')).length,1);
  await w.api('complete',{runId:first.start.data.runId,reason:'external_termination'});
  for(let i=0;i<9;i++){const s=await w.reconcileAndStart({manifestSize:1});if(s.start.status===200)await w.api('complete',{runId:s.start.data.runId,reason:'external_termination'});}

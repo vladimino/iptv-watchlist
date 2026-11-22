@@ -22,11 +22,21 @@ sequenceDiagram
     participant MCP as Worker MCP tools
     participant Queue as Prediction queue and lease
     participant Store as D1 pointers and R2 bodies
-    Client->>MCP: prediction_batch_start with optional manifestSize (1..100, default 100)
+    Client->>MCP: prediction_batch_start with taskId (a standing Task; a manual or diagnostic start sends none) and optional manifestSize (1..100, default 100)
+    opt Task start (taskId present, ADR 0195): early claim before any preflight
+        MCP->>Queue: Claim the runner lease first (short claim, same ownership epoch, taskId stored on the lease)
+        alt A live lease of the SAME taskId, same arguments, same epoch
+            MCP-->>Client: The same stored manifest, or start_pending (runId, epoch, retryAfterMs) while the first start still prepares it; no new run, no write
+        else A live lease of another taskId, or of a run without one
+            MCP-->>Client: already_running, names the holder, nothing assigned, no manifest
+        else Same taskId, other start arguments
+            MCP-->>Client: task_args_mismatch, no write
+        end
+    end
     MCP->>Queue: Read-only preflight: stored queue and its generation, hot first, up to manifestSize films, measure the whole answer
-    alt A live runner lease exists (another v2 run or a stored legacy v5 run)
+    alt A live runner lease exists and this start holds no claim (an unlabelled start: another v2 run or a stored legacy v5 run)
         MCP-->>Client: already_running, names the holder, no manifest, no queue write
-    else No live lease
+    else No live lease, or this start holds its own claim
         alt Nothing eligible or capacity 0 on a current queue
             MCP-->>Client: noop or blocked quota, no lease, no run, no stop Event
         else Queue current and the answer is over the byte limit
@@ -39,10 +49,10 @@ sequenceDiagram
                     MCP-->>Client: manifest_too_large, queue refresh is the only effect
                 end
             end
-            MCP->>Queue: Acquire the one runner lease
+            MCP->>Queue: Acquire the one runner lease (a Task start already holds it from its early claim and converts it, same epoch)
             MCP->>Queue: Revalidate queue generation, select ready films with staged ids excluded from the hot/cold lane, exact answer
             alt Changed, or over the limit with real values
-                MCP->>Queue: Release the lease
+                MCP->>Queue: Release the lease (or the claim of a Task start)
                 MCP-->>Client: queue_changed or manifest_too_large, acquire and release only
             else Unchanged
                 MCP->>Store: Drain transferable stage onto this run (commit fresh, drop stale)
@@ -107,11 +117,11 @@ The diagram above is one invocation. Four independent hourly Tasks run it (`:00`
 
 ### Task label for the standing Tasks ([ADR 0195](../adr/0195-scheduled-task-id-as-run-owner-label.md), Proposed)
 
-The four hourly Tasks carry a fixed label (`task00`, `task15`, `task30`, `task45`) that the Worker stores on the runner lease and the run next to `runId` and `epoch`. A start by a Task claims the lease before the heavy work (the early claim of ADR 0188). A repeat of the **same** label within its live lease and with the same arguments returns the same stored manifest (or `start_pending` while the first start prepares it) and creates no run; another label is `already_running`; a labelled run is operated, read back and completed only by its own label (`wrong_owner` otherwise, before any write). `runId`, the epoch and the compare-and-swap still fence every write; an expired or released lease starts a new run, never the old one. No diagram changes: the sequence of the start above is unchanged, only its owner check and its repeat answer differ, so the Mermaid rendering gate is not triggered by this change. The deferred start below and ADR 0188's per-invocation key remain in code but are no longer the target of the Tasks.
+The four hourly Tasks carry a fixed label (`task00`, `task15`, `task30`, `task45`) that the Worker stores on the runner lease and the run next to `runId` and `epoch`. A start by a Task claims the lease before the heavy work (the early claim of ADR 0188). A repeat of the **same** label within its live lease and with the same arguments returns the same stored manifest (or `start_pending` while the first start prepares it) and creates no run; another label is `already_running`; a labelled run is operated, read back and completed only by its own label (`wrong_owner` otherwise, before any write). `runId`, the epoch and the compare-and-swap still fence every write; an expired or released lease starts a new run, never the old one. The start sequence above shows the early claim and the three Task outcomes; the Mermaid rendering of this page is checked on GitHub itself (see the PR). The deferred start below and ADR 0188's per-invocation key remain in code but are no longer the target of the Tasks.
 
-### Deferred start for Scheduled Tasks ([ADR 0193](../adr/0193-deferred-batch-start-with-server-issued-key.md), Proposed)
+### Deferred start (historical, dormant code: [ADR 0193](../adr/0193-deferred-batch-start-with-server-issued-key.md), superseded in part by [ADR 0195](../adr/0195-scheduled-task-id-as-run-owner-label.md) as the Tasks' protocol)
 
-The synchronous start of the diagram above takes 75–90 s in production, longer than a Scheduled Task reliably waits, so the Tasks move to a **deferred start**. The Task first asks the Worker for a key (`prediction_batch_key`, stateless: no lease, no run, no storage). The start then answers a receipt within seconds after taking the ADR 0188 claim and creating a Workflow instance; the preparation (the same keyed start of ADR 0188, with its fencing) runs in that instance and ends in an immutable stored manifest or a typed final outcome; the Task reads the manifest through the existing `prediction_batch_manifest` parts and heartbeats at once, because the preparation holds only a 180 s lease until the client's first heartbeat or submit. The run id is derived from the issued key and one attempt per key is enforced by a create-only marker written before the Workflow instance is created, so a retry whose receipt was lost finds its attempt, its terminal outcome or its live claim and never starts a second preparation (a claim that finds the marker already written releases itself and dispatches nothing); the manifest is stored before, but served only after, one owner-fenced readiness edit of the lease.
+**Historical, not current guidance:** ADR 0195 replaces this design as the protocol of the four Tasks, which use the fixed `taskId` of the section above; the code below stays available and unchanged but no Task uses it. The synchronous start of the diagram above takes 75–90 s in production, longer than a Scheduled Task reliably waits, so this design moved the Tasks to a **deferred start**. The Task first asks the Worker for a key (`prediction_batch_key`, stateless: no lease, no run, no storage). The start then answers a receipt within seconds after taking the ADR 0188 claim and creating a Workflow instance; the preparation (the same keyed start of ADR 0188, with its fencing) runs in that instance and ends in an immutable stored manifest or a typed final outcome; the Task reads the manifest through the existing `prediction_batch_manifest` parts and heartbeats at once, because the preparation holds only a 180 s lease until the client's first heartbeat or submit. The run id is derived from the issued key and one attempt per key is enforced by a create-only marker written before the Workflow instance is created, so a retry whose receipt was lost finds its attempt, its terminal outcome or its live claim and never starts a second preparation (a claim that finds the marker already written releases itself and dispatches nothing); the manifest is stored before, but served only after, one owner-fenced readiness edit of the lease.
 
 ```mermaid
 sequenceDiagram
