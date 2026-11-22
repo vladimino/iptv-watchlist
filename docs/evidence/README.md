@@ -6,6 +6,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 
 | Area | Reports and decisions |
 | --- | --- |
+| [EPG Channel policy: real-feed offline dry run](epg-channel-policy-real-feed-dry-run-2026-11-21.md) | 22 Nov 2026, **PASS** on the 20 Nov audit feed, the effective Channel policies (revision 1), the published watchlist and the current catalog in `legacy`, `filtered` and `degraded`; 0 surviving `deny_all` slots, `lateDeclared` 0, 15 declared channels offered for registration; registration batch runtime and latency not measured |
 | [EPG Channel policy modes: offline evidence](epg-channel-policy-modes-offline-2026-11-21.md) | 21 Nov 2026, repository change and offline tests of the accepted three-mode design; the full XMLTV dry run on the real feed, D1 timing and any live observation are not done |
 | [EPG Channel policy in the scan: offline evidence of the first delivery](epg-channel-policy-offline-2026-11-21.md) | 21 Nov 2026, historical: the first, dormant delivery that [ADR 0191](../adr/0191-epg-channel-policy-in-the-scan.md) replaced |
 | [Mutable R2 inventory and disposition brief](d1-migration/air-546-mutable-r2-inventory-2026-11-20.md) | Source-pinned inventory, live schema/authority readback, proposed migrate/retain decisions and explicit remaining closure gates; no migration authorized |
