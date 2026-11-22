@@ -22,7 +22,7 @@ sequenceDiagram
     participant MCP as Worker MCP tools
     participant Queue as Prediction queue and lease
     participant Store as D1 pointers and R2 bodies
-    Client->>MCP: prediction_batch_start with taskId (a standing Task; a manual or diagnostic start sends none) and optional manifestSize (1..100, default 100)
+    Client->>MCP: prediction_batch_start with taskId (a standing Task, while a manual or diagnostic start sends none) and optional manifestSize (1..100, default 100)
     opt Task start (taskId present, ADR 0195): early claim before any preflight
         MCP->>Queue: Claim the runner lease first (short claim, same ownership epoch, taskId stored on the lease)
         alt A live lease of the SAME taskId, same arguments, same epoch
