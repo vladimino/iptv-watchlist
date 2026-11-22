@@ -13,6 +13,7 @@
 //
 // The output directory is judged by where it REALLY is (symlinks resolved; the output itself may not be a symlink; a path that resolves into the repository is refused), and a key of the four families that the
 // importer would not consume (an unknown name, a backup copy, a non-JSON file) is refused here, never copied and counted as if it were imported.
+// A scoped snapshot (scripts/r2-snapshot-export.mjs --scope prediction-aux) is accepted when its manifest names exactly the current auxiliary scope and holds nothing outside it; the report records the proof kind.
 // A snapshot is refused (exit 2, nothing left behind) unless verifyProductionSnapshot passes (every object re-hashed against the manifest, totals equal) AND its status is `consistent_fenced` with no
 // NO-GO reason, no change between the listings and a fence that held. Every copied object is read once, hashed again at the moment of the copy and compared with the manifest's size and SHA-256; its
 // metadata must name the same key and size and carry a strong ETag; a key that could leave the tree is refused; a duplicate, a missing or a changed object is a refusal. The bytes are never parsed or
@@ -123,7 +124,9 @@ export async function convertSnapshot({snapshot,output,afterVerify=null}){
    schemaVersion:1,
    snapshot:{status:verified.status,objects:verified.objects,bytes:verified.bytes,aggregateSha256:verified.aggregateSha256,startedAt:manifest.startedAt??null,finishedAt:manifest.finishedAt??null,
     // Where the cut was taken (the exporter's own record of the source): the cutover operator requires the two captures it compares to name the same source.
-    source:{kind:manifest.source?.kind??null,bucket:manifest.source?.bucket??null,accountId:manifest.source?.accountId??null}},
+    source:{kind:manifest.source?.kind??null,bucket:manifest.source?.bucket??null,accountId:manifest.source?.accountId??null},
+    // Which consistency proof the cut carries: the whole bucket (a snapshot without a scope) or the auxiliary scope. The operator requires both captures of a flip to carry the same one.
+    scope:verified.scope??{kind:'full_bucket',digest:null}},
    converted:{objects:identity.length,bytes:identity.reduce((sum,item)=>sum+item.size,0),skippedObjects:manifest.objects.length-identity.length,families,identitySha256:sha(identityText)},
    input:'tree',
    next:['node scripts/prediction-aux-d1-import.mjs report <output-dir>/tree','node scripts/prediction-aux-d1-import.mjs digest <output-dir>/tree','node scripts/prediction-aux-d1-import.mjs preflight <output-dir>/tree','node scripts/prediction-aux-d1-import.mjs sql <output-dir>/tree --generation N','node scripts/prediction-aux-d1-import.mjs verify <output-dir>/tree']

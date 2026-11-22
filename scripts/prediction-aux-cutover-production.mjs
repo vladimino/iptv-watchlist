@@ -25,6 +25,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createD1Adapter,D1Error} from './d1-backfill.mjs';
 import {BATCH_BYTES,BATCH_STATEMENTS,PRODUCTION_ACCOUNT_ID,createPublishedBinding,migrationStatements,normalize,OperatorStop,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
 import {AUX_TABLES,auxFlipRefusal} from '../src/prediction-aux-d1.js';
+import {WHOLE_STORE_SCOPE,PREDICTION_AUX_SCOPE,scopeDigest} from './prediction-aux-scope.mjs';
 import {buildPlan,importGuardStatement,planReport,planSql,planVerifySql,readExport} from './prediction-aux-d1-import.mjs';
 
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
@@ -99,10 +100,19 @@ const reportTotals=report=>({prediction_batch_stage:report?.stage?.items,predict
 const digestsOf=report=>[report?.stage?.digest??null,report?.sources?.digest??null,report?.manifests?.digest??null,report?.outbox?.digest??null];
 export const DEFAULT_SOURCE={kind:'cloudflare-r2-s3',bucket:'iptv',accountId:PRODUCTION_ACCOUNT_ID};
 export const MAX_CAPTURE_AGE_MS=15*60*1000;
-// The release the owner passes to flip. It binds the closure generation, the listing identity of the final capture, the verified counts and digests of the report and the verification SQL, so it cannot be reused
+// The consistency proof a capture carries: the whole bucket (a capture without a scope is the original whole-bucket cut) or the Predictions auxiliary scope, and nothing else. A digest that is not exactly the
+// current definition of the scope it names is `null` (unsupported). The two captures of a flip must carry the same one (review of PR 912: a narrower scope changes the proof, so it travels with the capture).
+export function captureScope(report){
+ const scope=report?.snapshot?.scope;
+ if(scope==null)return {kind:'full_bucket',digest:scopeDigest(WHOLE_STORE_SCOPE)};
+ if(scope.kind==='full_bucket'&&(scope.digest==null||scope.digest===scopeDigest(WHOLE_STORE_SCOPE)))return {kind:'full_bucket',digest:scopeDigest(WHOLE_STORE_SCOPE)};
+ if(scope.kind==='prediction_aux'&&scope.digest===scopeDigest(PREDICTION_AUX_SCOPE))return {kind:'prediction_aux',digest:scope.digest};
+ return null;
+}
+// The release the owner passes to flip. It binds the closure generation, the proof kind, the listing identity of the final capture, the verified counts and digests of the report and the verification SQL, so it cannot be reused
 // for another state, another export or another verification.
 export function flipRelease({generation,capture,report,verifySha256}){
- return sha256(['air554-flip',generation,capture.identitySha256,sha256(JSON.stringify([expectedCounts(report),report?.outbox?.byState??{},digestsOf(report)])),verifySha256].join('|')).slice(0,16);
+ return sha256(['air554-flip',generation,capture.identitySha256,captureScope(capture.report)?.digest??'',sha256(JSON.stringify([expectedCounts(report),report?.outbox?.byState??{},digestsOf(report)])),verifySha256].join('|')).slice(0,16);
 }
 // A capture is the output directory of one converter run: identity.json (key, ETag, size) and converter-report.json (what was cut, where, when). Neither is trusted for its own sake: the identity must hash to
 // the report's recorded digest, the cut must be a consistent fenced one from the expected source, and the two captures of a flip must be two distinct cuts, the last one fresh.
@@ -110,6 +120,7 @@ function captureProblem(capture,source){
  const report=capture?.report;
  if(!report||report.schemaVersion!==1||!Array.isArray(capture.identity)||typeof capture.identitySha256!=='string')return 'capture_invalid';
  if(report.snapshot?.status!=='consistent_fenced')return 'capture_not_consistent';
+ if(!captureScope(report))return 'capture_scope_unsupported';
  const found=report.snapshot?.source||{};
  if(found.kind!==source.kind||found.bucket!==source.bucket||found.accountId!==source.accountId)return 'capture_source_mismatch';
  if(report.converted?.identitySha256!==capture.identitySha256)return 'capture_identity_mismatch';
@@ -130,6 +141,8 @@ export function flipDecision(state,{generation,report,before,now,verify,release,
  const wantTotals=reportTotals(report),wrong=Object.keys(wantTotals).filter(table=>verify.totals[table]!==wantTotals[table]);
  if(wrong.length)return {reason:'verify_not_for_report',details:{tables:wrong}};
  for(const [name,capture] of [['before',before],['now',now]]){const problem=captureProblem(capture,source);if(problem)return {reason:problem,details:{capture:name}};}
+ const scopeBefore=captureScope(before.report),scopeNow=captureScope(now.report);
+ if(scopeBefore.kind!==scopeNow.kind||scopeBefore.digest!==scopeNow.digest)return {reason:'capture_scope_mismatch',details:{before:scopeBefore.kind,now:scopeNow.kind}};
  // The report must come from the export the captures describe: the objects of each family it counts are the objects the converter copied.
  const families=before.report.converted?.families||{};
  const fromExport={sources:families.source?.objects??0,manifests:families.manifest?.objects??0,outbox:families.event?.objects??0};

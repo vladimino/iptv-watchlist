@@ -64,9 +64,9 @@ async function openBucket(extra={},legacy=legacyBytes){
  const endpoint=await bucket.start();
  return {bucket,credentials:readCredentials(envFor(endpoint))};
 }
-async function capture(opened){
+async function capture(opened,{scope=null}={}){
  const snapshot=tmp(),output=path.join(tmp(),'capture');
- await exportProductionSnapshot({directory:snapshot,credentials:opened.credentials,sleep:async()=>{}});
+ await exportProductionSnapshot({directory:snapshot,credentials:opened.credentials,sleep:async()=>{},...(scope?{scope}:{})});
  await convertSnapshot({snapshot,output});
  await new Promise(resolve=>setTimeout(resolve,5));   // two cuts are two distinct moments
  return {dir:output,...Op.readCapture(output)};
@@ -376,6 +376,49 @@ let release;
   assert.equal(marker(e.file).mode,'closed');
   await s.o.bucket.stop();
  }
+}
+
+// ===== 4e. scoped captures (`--scope prediction-aux`, review of PR 912): the whole sequence with scoped cuts, an unrelated writer that no longer matters, and the refusals of a mixed or unsupported proof =====
+{
+ const e=scratch();await run('apply',e,{migrationSha256:Op.migrationSha256()});await run('close',e,{generation:0});
+ const o=await openBucket({'epg/published-generation.json':json({programmeRunId:'p-1'}),'sync.json':json({updatedAt:'t'}),'monitor/state.json':json({tick:1})});
+ const scopedBefore=await capture(o,{scope:'prediction-aux'});
+ assert.equal(scopedBefore.report.snapshot.scope.kind,'prediction_aux');
+ const conv=await Op.loadConverted(scopedBefore.dir);
+ assert.equal(conv.verifyText,convBefore.verifyText,'the scoped tree is the same auxiliary dataset as the whole-bucket one');
+ await run('import',e,{generation:1,converted:conv,sqlSha256:sha256(planSql(conv.plan,1))});await run('verify',e,{generation:1,converted:conv,sqlSha256:pinOf(conv)});
+ // unrelated writers change the bucket between the two cuts: a scoped cut is independent of them, and the flip compares only the auxiliary identity
+ await o.bucket.put('epg/published-generation.json',json({programmeRunId:'p-2'}));await o.bucket.put('sync.json',json({updatedAt:'t2'}));await o.bucket.put('monitor/state.json',json({tick:2}));await o.bucket.put('letterboxd/diary/state.json',json({n:9}));
+ const scopedNow=await capture(o,{scope:'prediction-aux'});
+ const wholeNow=await capture(o);                       // a whole-bucket cut of the same moment (the legacy proof)
+ assert.equal(wholeNow.report.snapshot.scope.kind,'full_bucket');
+ const at=clockAfter(scopedNow);
+ const params=(before,nowCapture,extra={})=>({...flipParams(conv),captureBefore:before,captureNow:nowCapture,...extra});
+ const exec=(p,time=at)=>Op.execute('flip',{binding:e.db,now:time,ctx:ctxOf(),params:p});
+ // a scoped capture next to a whole-bucket one is two different proofs: refused, whichever way round
+ await stop(exec(params(conv,wholeNow)),'capture_scope_mismatch');
+ // an unsupported or edited proof is refused: the digest must be exactly the current definition of the scope it names
+ const edit=(capture,mutate)=>{const copy={...capture,report:structuredClone(capture.report)};mutate(copy.report);return copy;};
+ const decision=(before,nowCap)=>Op.flipDecision(state0,{generation:1,report:conv.report,before,now:nowCap,verify:checkedVerify,clock:at,source:SOURCE});
+ const state0=await Op.readState(e.db,at);
+ const checkedVerify=Op.checkedSql(conv.verifyText,{kind:'verify',pin:pinOf(conv)});
+ assert.equal(decision(edit(scopedBefore,r=>{r.snapshot.scope.digest='0'.repeat(64);}),scopedNow).reason,'capture_scope_unsupported');
+ assert.equal(decision(scopedBefore,edit(scopedNow,r=>{r.snapshot.scope={kind:'everything',digest:null};})).reason,'capture_scope_unsupported');
+ assert.equal(decision(scopedBefore,wholeNow).reason,'capture_scope_mismatch');
+ assert.equal(decision(wholeNow,scopedNow).reason,'capture_scope_mismatch');
+ // a capture without a scope field is the legacy whole-bucket cut and stays valid
+ const legacy=edit(wholeNow,r=>{delete r.snapshot.scope;});
+ assert.equal(Op.captureScope(legacy.report).kind,'full_bucket');assert.equal(Op.captureScope(scopedNow.report).kind,'prediction_aux');assert.equal(Op.captureScope({snapshot:{scope:{kind:'prediction_aux',digest:'x'}}}),null);
+ // the release binds the proof kind
+ const releaseScoped=Op.flipRelease({generation:1,capture:scopedNow,report:conv.report,verifySha256:pinOf(conv)});
+ const releaseWhole=Op.flipRelease({generation:1,capture:edit(scopedNow,r=>{r.snapshot.scope={kind:'full_bucket',digest:null};}),report:conv.report,verifySha256:pinOf(conv)});
+ assert.notEqual(releaseScoped,releaseWhole,'the release is bound to the proof kind of the final capture');
+ // the whole flip with two scoped cuts: release printed, then committed
+ const needed=await stop(exec(params(conv,scopedNow)),'release_required');
+ assert.equal(needed.details.release,releaseScoped);
+ const flipped=await exec(params(conv,scopedNow,{release:needed.details.release}));
+ assert.equal(flipped.writeState,'committed');assert.equal(flipped.after.marker.mode,'d1');
+ await o.bucket.stop();
 }
 
 // ===== 4d. a legacy PUT the REAL Worker admitted BEFORE the close, paused, then resumed AFTER the operator's close and the cut: the flip is refused =====

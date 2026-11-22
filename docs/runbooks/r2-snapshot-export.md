@@ -40,6 +40,18 @@ The approval covers the listed read-only planning, export and manifest-verificat
 7. **Predictions auxiliary state.** The Predictions batch_v2 auxiliary importer does not read this directory directly. `node scripts/prediction-aux-export-convert.mjs /absolute/private/snapshot /absolute/private/aux-converted` converts a `consistent_fenced` snapshot into the key-mirrored tree it reads ([runbook](prediction-aux-state-cutover.md#getting-the-importer-input-from-the-production-snapshot)).
 8. **Afterwards.** The owner revokes or keeps the credential as decided; the snapshot directory stays private. The [backfill executor](d1-backfill.md) consumes the manifest; it refuses one whose status is not `consistent_fenced`.
 
+## Scoped cut for the Predictions auxiliary state (`--scope prediction-aux`)
+
+The default export is the whole bucket and its consistency proof fails when **any** object of the bucket changes. For the Predictions auxiliary cutover ([ADR 0200](../adr/0200-prediction-aux-scoped-export-proof.md), AIR-554) the owner may select a narrower, explicit mode:
+
+```bash
+node scripts/r2-snapshot-export.mjs --plan --output /absolute/private/aux-snapshot --scope prediction-aux
+node scripts/r2-snapshot-export.mjs --output /absolute/private/aux-snapshot --scope prediction-aux --concurrency 4
+node scripts/r2-snapshot-export.mjs --output /absolute/private/aux-snapshot --verify --scope prediction-aux
+```
+
+It lists only the scope prefixes, takes a `HEAD` of the two exact keys, reads only objects of the scope and the two lease keys of its fence, and writes the scope into the manifest. The scope, the proof and what it does not claim are described in the [cutover run sheet](prediction-aux-cutover-run-sheet.md#scope-contract-of-the-scoped-export-implemented-offline-adr-0200-used-only-if-the-owner-selects-it-at-p4); the same procedure, credential rules, approvals and NO-GO handling apply, and an output directory is never shared between the two modes. `--verify` reads the scope from the manifest and refuses a `--scope` that differs. The converter and the operator accept both kinds of snapshot and require the two captures of a flip to carry the same one.
+
 ## Rollback
 
 The command changes nothing outside its output directory. Deleting that directory removes the snapshot; deleting `scripts/r2-snapshot-export.mjs`, `tests/r2-snapshot-export.mjs` and this page removes the tool. Revoking the credential is the owner's Cloudflare action.
