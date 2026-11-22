@@ -226,6 +226,167 @@ export function planRunPreflightSql(plan){
  for(let i=0;i<ids.length;i+=100)out.push("SELECT run_id FROM prediction_run WHERE run_id IN ("+ids.slice(i,i+100).map(sqlq).join(',')+") ORDER BY run_id;");
  return {ids,sql:out.length?out.join('\n')+'\n':''};
 }
+
+// ---- Chunked import, seal, chunked verification and the small flip (AIR-554, ADR 0202 Accepted; migration 0035). Pure SQL generators: nothing here opens a database. ----
+// The import of the real legacy state is 3,998 statements and 36.2 MB, over the D1 batch limits (2,000 statements, 8 MiB), so it is cut into ORDERED CHUNKS OF WHOLE RUNS (a run's source revision with its
+// pieces and head, and its manifest with its pieces, never split), then the outbox rows, then the held stage. Every chunk is ONE atomic batch: a guard first (marker `closed` at the exact generation, no seal, the chunk
+// number is the next one, the plan digest is the one of the receipts already there; chunk 1 also needs the family tables empty), the data statements, and the chunk's own receipt last (primary key
+// (generation, chunk_no): a chunk is exactly-once even if two attempts race or a timed-out batch commits late). The chunk boundaries, the digests and the SQL are a pure function of the plan, the generation
+// and the limits, so a repeat produces the same bytes. The SEAL then freezes the cohort (a trigger on every auxiliary data table refuses writes while it exists and the marker is not `d1`), the canonical verification
+// runs as receipted slices on the sealed data, and the flip is a small batch that asserts the seal, the receipts and the totals.
+export const CHUNK_LIMITS=Object.freeze({statements:1500,bytes:6*1048576});
+const STAMP='1970-01-01T00:00:00.000Z';
+const sha256hex=value=>crypto.createHash('sha256').update(value).digest('hex');
+const FAMILY_TABLE_NAMES=['prediction_batch_stage','prediction_run_source_head','prediction_run_manifest','prediction_event_outbox'];
+const lineBytes=text=>Buffer.byteLength(text,'utf8');
+const byteSum=lines=>lines.reduce((n,line)=>n+lineBytes(line),0);
+const nullable=value=>value===null||value===undefined?'NULL':sqlq(value);
+
+// The data statements of one unit, in the exact text planSql prints.
+function stageUnit(plan){
+ const lines=[];
+ for(const r of plan.stage)lines.push('INSERT INTO prediction_batch_stage (film_id, position, item_digest, held_by_run_id, held_at, body_bytes, item_json) VALUES ('+[sqlq(r.filmId),r.position,sqlq(r.itemDigest),sqlq(r.heldByRunId),sqlq(r.heldAt),r.bodyBytes,sqlq(r.itemJson)].join(', ')+');');
+ if(plan.stage.length)lines.push('UPDATE prediction_batch_stage_head SET item_count='+plan.stageHead.itemCount+', total_bytes='+plan.stageHead.totalBytes+', revision=1, updated_at='+sqlq(plan.stageHead.updatedAt)+' WHERE id=1 AND revision=0;');
+ return lines;
+}
+function sourceUnit(r){
+ const lines=['INSERT INTO prediction_run_source_revision (run_id, revision, source_hash, bytes, piece_count, created_at) VALUES ('+[sqlq(r.runId),1,sqlq(r.hash),r.bytes,r.pieces.length,sqlq(STAMP)].join(', ')+');'];
+ r.pieces.forEach((piece,i)=>lines.push('INSERT INTO prediction_run_source_piece (run_id, revision, piece_no, text) VALUES ('+[sqlq(r.runId),1,i,sqlq(piece)].join(', ')+');'));
+ lines.push('INSERT INTO prediction_run_source_head (run_id, current_revision, source_hash) VALUES ('+[sqlq(r.runId),1,sqlq(r.hash)].join(', ')+');');
+ return lines;
+}
+function manifestUnit(r){
+ const lines=[];
+ for(const [statement,params] of Aux.manifestStatements(r,STAMP)){let n=0;lines.push(statement.replace(/\?/g,()=>sqlq(params[n++]))+';');}
+ return lines;
+}
+const outboxUnit=r=>['INSERT INTO prediction_event_outbox (event_key, kind, event_id, at, journal_key, run_id, state, attempts, since, last_attempt_at, settled_at, payload_digest, payload_compacted, event_json) VALUES ('+[sqlq(r.eventKey),sqlq(r.kind),sqlq(r.eventId),sqlq(r.at),sqlq(r.journalKey),sqlq(r.runId),sqlq(r.state),r.attempts,sqlq(r.since),sqlq(r.lastAttemptAt),sqlq(r.settledAt),sqlq(r.payloadDigest),0,sqlq(r.eventJson)].join(', ')+');'];
+// Ordered units: whole runs (sorted by run id; a source before its manifest), then outbox rows, then the stage.
+export function importUnits(plan){
+ const sources=new Map(plan.sources.map(r=>[r.runId,r])),manifests=new Map(plan.manifests.map(r=>[r.runId,r]));
+ const runIds=[...new Set([...sources.keys(),...manifests.keys()])].sort();
+ const units=[];
+ for(const runId of runIds)units.push({kind:'run',id:runId,lines:[...(sources.has(runId)?sourceUnit(sources.get(runId)):[]),...(manifests.has(runId)?manifestUnit(manifests.get(runId)):[])]});
+ for(const r of plan.outbox)units.push({kind:'outbox',id:r.eventKey,lines:outboxUnit(r)});
+ const stage=stageUnit(plan);if(stage.length)units.push({kind:'stage',id:'stage',lines:stage});
+ return units;
+}
+// The verification assertions of one unit (the canonical ones of planVerifySql, grouped), then the table totals as the last unit.
+function verifyUnitsOf(plan){
+ const eq=(count,where)=>"UPDATE prediction_aux_cas SET ok=(SELECT count(*)="+count+" FROM "+where+") WHERE id=1;";
+ const sources=new Map(plan.sources.map(r=>[r.runId,r])),manifests=new Map(plan.manifests.map(r=>[r.runId,r]));
+ const runIds=[...new Set([...sources.keys(),...manifests.keys()])].sort();
+ const units=[];
+ for(const runId of runIds){
+  const lines=[];
+  const r=sources.get(runId);
+  if(r){
+   lines.push(eq(1,"prediction_run_source_head WHERE run_id="+sqlq(r.runId)+" AND current_revision=1 AND source_hash="+sqlq(r.hash)));
+   lines.push(eq(1,"prediction_run_source_revision WHERE run_id="+sqlq(r.runId)+" AND revision=1 AND source_hash="+sqlq(r.hash)+" AND bytes="+r.bytes+" AND piece_count="+r.pieces.length));
+   r.pieces.forEach((piece,i)=>lines.push(eq(1,"prediction_run_source_piece WHERE run_id="+sqlq(r.runId)+" AND revision=1 AND piece_no="+i+" AND text="+sqlq(piece))));
+   lines.push(eq(1,"prediction_run_source_revision WHERE run_id="+sqlq(r.runId)));
+   lines.push(eq(r.pieces.length,"prediction_run_source_piece WHERE run_id="+sqlq(r.runId)));
+  }
+  const m=manifests.get(runId);
+  if(m){
+   lines.push(eq(1,"prediction_run_manifest WHERE run_id="+sqlq(m.runId)+" AND manifest_hash="+sqlq(m.manifestHash)+" AND payload_digest="+sqlq(m.payloadDigest)+" AND selected_ids="+sqlq(m.selectedIds)+" AND drained_json IS "+nullable(m.drainedJson)+" AND bytes="+m.bytes+" AND piece_count="+m.pieces.length+" AND part_index="+sqlq(m.partIndex)));
+   m.pieces.forEach((piece,i)=>lines.push(eq(1,"prediction_run_manifest_piece WHERE run_id="+sqlq(m.runId)+" AND piece_no="+i+" AND piece_digest="+sqlq(m.digests[i])+" AND text="+sqlq(piece))));
+   lines.push(eq(m.pieces.length,"prediction_run_manifest_piece WHERE run_id="+sqlq(m.runId)));
+  }
+  units.push({kind:'run',id:runId,lines});
+ }
+ for(const r of plan.outbox)units.push({kind:'outbox',id:r.eventKey,lines:[eq(1,"prediction_event_outbox WHERE event_key="+sqlq(r.eventKey)+" AND kind="+sqlq(r.kind)+" AND event_id="+sqlq(r.eventId)+" AND at="+sqlq(r.at)+" AND journal_key="+sqlq(r.journalKey)+" AND run_id IS "+nullable(r.runId)+" AND state="+sqlq(r.state)+" AND attempts="+r.attempts+" AND since="+sqlq(r.since)+" AND last_attempt_at IS "+nullable(r.lastAttemptAt)+" AND settled_at IS "+nullable(r.settledAt)+" AND payload_digest="+sqlq(r.payloadDigest)+" AND payload_compacted=0 AND event_json="+sqlq(r.eventJson))]});
+ const stage=plan.stage.map(r=>eq(1,"prediction_batch_stage WHERE film_id="+sqlq(r.filmId)+" AND position="+r.position+" AND item_digest="+sqlq(r.itemDigest)+" AND held_by_run_id IS "+nullable(r.heldByRunId)+" AND body_bytes="+r.bodyBytes+" AND item_json="+sqlq(r.itemJson)));
+ if(stage.length)units.push({kind:'stage',id:'stage',lines:stage});
+ units.push({kind:'totals',id:'totals',lines:planTotals(plan).map(([table,n])=>eq(n,table))});
+ return units;
+}
+// The totals every table must hold after the import (also what the seal and the flip assert).
+export function planTotals(plan){
+ return [['prediction_batch_stage',plan.stage.length],['prediction_run_source_head',plan.sources.length],['prediction_run_source_revision',plan.sources.length],['prediction_run_source_piece',plan.sources.reduce((n,r)=>n+r.pieces.length,0)],['prediction_run_manifest',plan.manifests.length],['prediction_run_manifest_piece',plan.manifests.reduce((n,r)=>n+r.pieces.length,0)],['prediction_event_outbox',plan.outbox.length]];
+}
+export function planOutboxStates(plan){const out={pending:0,delivered:0,superseded:0,quarantined:0};for(const r of plan.outbox)out[r.state]=(out[r.state]||0)+1;return out;}
+// The digest of the whole dataset to import: the SHA-256 of every data statement in order. It does not depend on the generation or on the chunk limits.
+export function planSha256(plan){
+ const hash=crypto.createHash('sha256');
+ for(const unit of importUnits(plan))for(const line of unit.lines)hash.update(line+'\n');
+ return hash.digest('hex');
+}
+const planClause=(generation,plan)=>"(SELECT count(*)=0 FROM prediction_aux_import_chunk WHERE generation="+generation+" AND plan_sha256<>'"+plan+"')";
+const markerClause=generation=>"(SELECT count(*) FROM prediction_aux_authority WHERE id=1 AND mode='closed' AND generation="+generation+")";
+const noSealClause=generation=>"(SELECT count(*)=0 FROM prediction_aux_seal WHERE generation="+generation+")";
+// The first statement of chunk `chunkNo`, exactly. Its text is a pure function of (generation, chunkNo, plan): the operator compares it, never a prefix.
+export function chunkGuardStatement({generation,chunkNo,plan}){
+ const empty=chunkNo===1?'*'+FAMILY_TABLE_NAMES.map(table=>'(SELECT count(*)=0 FROM '+table+')').join('*'):'';
+ return "UPDATE prediction_aux_cas SET ok="+markerClause(generation)+"*"+noSealClause(generation)+"*(SELECT count(*)="+(chunkNo-1)+" FROM prediction_aux_import_chunk WHERE generation="+generation+")*"+planClause(generation,plan)+empty+" WHERE id=1";
+}
+export const chunkReceiptStatement=({generation,chunkNo,chunkSha,plan,statements,bytes})=>"INSERT INTO prediction_aux_import_chunk (generation, chunk_no, chunk_sha256, plan_sha256, statements, bytes) VALUES ("+[generation,chunkNo,"'"+chunkSha+"'","'"+plan+"'",statements,bytes].join(', ')+");";
+const greedy=(units,fixed,limits)=>{
+ // fixed: the statements every batch carries besides its units (guard and receipt), as a function of the batch number
+ const batches=[];let current=null;
+ for(const unit of units){
+  const unitStatements=unit.lines.length,unitBytes=byteSum(unit.lines);
+  const overhead=fixed(batches.length+1);
+  if(overhead.statements+unitStatements>limits.statements||overhead.bytes+unitBytes>limits.bytes)throw Object.assign(new Error('a unit of the plan does not fit one batch'),{blocker:true,unit:unit.id,unitStatements,unitBytes});
+  if(current){
+   const next=fixed(batches.length+1);
+   if(next.statements+current.statements+unitStatements>limits.statements||next.bytes+current.bytes+unitBytes>limits.bytes){batches.push(current);current=null;}
+  }
+  if(!current)current={units:[],lines:[],statements:0,bytes:0};
+  current.units.push(unit.id);current.lines.push(...unit.lines);current.statements+=unitStatements;current.bytes+=unitBytes;
+ }
+ if(current)batches.push(current);
+ return batches;
+};
+// The import chunks of a plan for one closure generation. `sql` is the whole atomic batch of a chunk: guard, data statements, receipt.
+export function chunkPlan(plan,{generation,limits=CHUNK_LIMITS}){
+ if(!Number.isSafeInteger(generation)||generation<1)throw Object.assign(new Error('chunkPlan needs the generation of the closed marker'),{blocker:true});
+ const planSha=planSha256(plan),units=importUnits(plan);
+ // the guard and the receipt text have a fixed size per chunk number up to the digits of the numbers: measure with a generous number for the budget
+ const reserve=n=>({statements:2,bytes:lineBytes(chunkGuardStatement({generation,chunkNo:n,plan:planSha}))+lineBytes(chunkReceiptStatement({generation,chunkNo:n,chunkSha:'0'.repeat(64),plan:planSha,statements:limits.statements,bytes:limits.bytes}))+8});
+ const batches=greedy(units,reserve,limits);
+ const chunks=batches.map((batch,index)=>{
+  const chunkNo=index+1,chunkSha=sha256hex(batch.lines.join('\n')+'\n');
+  const guard=chunkGuardStatement({generation,chunkNo,plan:planSha});
+  const receipt=chunkReceiptStatement({generation,chunkNo,chunkSha,plan:planSha,statements:batch.statements,bytes:batch.bytes});
+  const sql=[guard,...batch.lines,receipt];
+  return {chunkNo,chunkSha256:chunkSha,dataStatements:batch.statements,dataBytes:batch.bytes,statements:sql.length,bytes:byteSum(sql),units:batch.units.length,first:batch.units[0],sql};
+ });
+ return {planSha256:planSha,generation,limits,chunkCount:chunks.length,chunks};
+}
+// The canonical verification as receipted slices (run on the SEALED data). A slice asserts its rows and, in the same batch and only if every assertion held, inserts its receipt.
+export const sliceGuardStatement=({generation,sliceNo,plan,chunkCount,sliceCount})=>"UPDATE prediction_aux_cas SET ok="+markerClause(generation)+"*(SELECT count(*)=1 FROM prediction_aux_seal WHERE generation="+generation+" AND plan_sha256='"+plan+"' AND chunk_count="+chunkCount+" AND slice_count="+sliceCount+")*(SELECT count(*)="+(sliceNo-1)+" FROM prediction_aux_verify_slice WHERE generation="+generation+")*(SELECT count(*)=0 FROM prediction_aux_verify_slice WHERE generation="+generation+" AND plan_sha256<>'"+plan+"') WHERE id=1";
+export const sliceReceiptStatement=({generation,sliceNo,sliceSha,plan})=>"INSERT INTO prediction_aux_verify_slice (generation, slice_no, slice_sha256, plan_sha256) VALUES ("+[generation,sliceNo,"'"+sliceSha+"'","'"+plan+"'"].join(', ')+");";
+export function slicePlan(plan,{generation,chunkCount,limits=CHUNK_LIMITS}){
+ const planSha=planSha256(plan),units=verifyUnitsOf(plan);
+ const reserve=n=>({statements:2,bytes:lineBytes(sliceGuardStatement({generation,sliceNo:n,plan:planSha,chunkCount,sliceCount:9999}))+lineBytes(sliceReceiptStatement({generation,sliceNo:n,sliceSha:'0'.repeat(64),plan:planSha}))+8});
+ const batches=greedy(units,reserve,limits);
+ const sliceCount=batches.length;
+ const slices=batches.map((batch,index)=>{
+  const sliceNo=index+1,sliceSha=sha256hex(batch.lines.join('\n')+'\n');
+  const sql=[sliceGuardStatement({generation,sliceNo,plan:planSha,chunkCount,sliceCount}),...batch.lines,sliceReceiptStatement({generation,sliceNo,sliceSha,plan:planSha})];
+  return {sliceNo,sliceSha256:sliceSha,dataStatements:batch.statements,dataBytes:batch.bytes,statements:sql.length,bytes:byteSum(sql),sql};
+ });
+ return {planSha256:planSha,generation,sliceCount,slices};
+}
+// The seal batch: its guard asserts the marker, no earlier seal, the receipts 1 to K of the one plan digest, the table totals of the plan and no verification slice yet; then the seal row.
+export function sealStatements(plan,{generation,chunkCount,sliceCount}){
+ const planSha=planSha256(plan);
+ const totals=planTotals(plan).map(([table,n])=>'(SELECT count(*)='+n+' FROM '+table+')').join('*');
+ const guard="UPDATE prediction_aux_cas SET ok="+markerClause(generation)+"*"+noSealClause(generation)+"*(SELECT count(*)="+chunkCount+" FROM prediction_aux_import_chunk WHERE generation="+generation+")*(SELECT max(chunk_no)="+chunkCount+" FROM prediction_aux_import_chunk WHERE generation="+generation+")*"+planClause(generation,planSha)+"*(SELECT count(*)=0 FROM prediction_aux_verify_slice WHERE generation="+generation+")*"+totals+" WHERE id=1";
+ return [guard,"INSERT INTO prediction_aux_seal (generation, plan_sha256, chunk_count, slice_count) VALUES ("+[generation,"'"+planSha+"'",chunkCount,sliceCount].join(', ')+");"];
+}
+// The small flip batch: the guard asserts the marker, the seal (plan, K, M), receipts 1 to K and slices 1 to M of the one plan digest, the table totals and the outbox states; then the marker moves to d1.
+export function flipStatements(plan,{generation,chunkCount,sliceCount,activatedAt}){
+ const planSha=planSha256(plan);
+ const totals=planTotals(plan).map(([table,n])=>'(SELECT count(*)='+n+' FROM '+table+')').join('*');
+ const states=Object.entries(planOutboxStates(plan)).map(([state,n])=>"(SELECT count(*)="+n+" FROM prediction_event_outbox WHERE state='"+state+"')").join('*');
+ const guard="UPDATE prediction_aux_cas SET ok="+markerClause(generation)+"*(SELECT count(*)=1 FROM prediction_aux_seal WHERE generation="+generation+" AND plan_sha256='"+planSha+"' AND chunk_count="+chunkCount+" AND slice_count="+sliceCount+")"
+  +"*(SELECT count(*)="+chunkCount+" FROM prediction_aux_import_chunk WHERE generation="+generation+" AND plan_sha256='"+planSha+"')*(SELECT count(*)="+chunkCount+" FROM prediction_aux_import_chunk WHERE generation="+generation+")*(SELECT max(chunk_no)="+chunkCount+" FROM prediction_aux_import_chunk WHERE generation="+generation+")"
+  +"*(SELECT count(*)="+sliceCount+" FROM prediction_aux_verify_slice WHERE generation="+generation+" AND plan_sha256='"+planSha+"')*(SELECT count(*)="+sliceCount+" FROM prediction_aux_verify_slice WHERE generation="+generation+")*(SELECT max(slice_no)="+sliceCount+" FROM prediction_aux_verify_slice WHERE generation="+generation+")"
+  +"*"+totals+"*"+states+" WHERE id=1";
+ return [guard,"UPDATE prediction_aux_authority SET mode='d1', generation="+(generation+1)+", activated_at='"+activatedAt+"' WHERE id=1 AND mode='closed' AND generation="+generation];
+}
 async function main(argv){
  const [command,target]=argv;
  const at=argv.indexOf('--generation'),generation=at>=0?Number(argv[at+1]):undefined;
@@ -236,6 +397,7 @@ async function main(argv){
  if(plan.blockers.length){process.stderr.write('BLOCKER: '+JSON.stringify(plan.blockers)+'\n');if(command==='report')process.stdout.write(JSON.stringify(report,null,1)+'\n');return 2;}
  if(command==='sql'){if(!Number.isSafeInteger(generation)||generation<1){process.stderr.write('BLOCKER: sql needs --generation N, the generation of the closed marker this export belongs to\n');return 2;}process.stdout.write(planSql(plan,generation));}
  else if(command==='verify')process.stdout.write(planVerifySql(plan));
+ else if(command==='chunks'){if(!Number.isSafeInteger(generation)||generation<1){process.stderr.write('BLOCKER: chunks needs --generation N\n');return 2;}const c=chunkPlan(plan,{generation}),v=slicePlan(plan,{generation,chunkCount:c.chunkCount});process.stdout.write(JSON.stringify({planSha256:c.planSha256,limits:c.limits,chunks:c.chunks.map(x=>({no:x.chunkNo,statements:x.statements,bytes:x.bytes,sha256:x.chunkSha256})),slices:v.slices.map(x=>({no:x.sliceNo,statements:x.statements,bytes:x.bytes,sha256:x.sliceSha256}))},null,1)+'\n');}
  else if(command==='preflight')process.stdout.write(planRunPreflightSql(plan).sql);
  else if(command==='digest')process.stdout.write(JSON.stringify({stage:report.stage.digest,sources:report.sources.digest,manifests:report.manifests.digest,outbox:report.outbox.digest})+'\n');
  else process.stdout.write(JSON.stringify(report,null,1)+'\n');
