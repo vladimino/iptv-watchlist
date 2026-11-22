@@ -563,6 +563,7 @@ const VALUE_FLAGS={'--target':'target','--confirm':'confirm','--expect-generatio
 const H0_FLAGS=['workflowInstanceId','workflowLiveness','deployedVersionId','deployedCommit','deploymentVersions','deploymentPercentage','instancesChecked','instancesTotal'];
 const IDENTITY_FLAGS=['syncEtag','syncSha256','ingestEtag','ingestSha256'];
 const NEEDS={hold:['generation',...H0_FLAGS],'release-abort':['generation'],import:['generation',...IDENTITY_FLAGS],activate:['generation',...IDENTITY_FLAGS],release:['generation',...IDENTITY_FLAGS],'hold-rollback':['generation',...H0_FLAGS],'export-rollback':['generation','frozenSyncEtag','frozenIngestEtag'],'revert-authority':['generation'],'release-rolled-back':['generation',...IDENTITY_FLAGS],apply:[]};
+const RETIRED_AFTER_H6=new Set(['hold-rollback','export-rollback','revert-authority','release-rolled-back']);
 export function parseArgs(argv){
  const args=argv.slice(2),parsed={};
  const commands=args.filter(arg=>arg.startsWith('--')&&COMMANDS.includes(arg.slice(2)));
@@ -585,6 +586,9 @@ export function parseArgs(argv){
  else if(parsed.confirm!==command)throw new OperatorStop('confirm',2);
  if(parsed.generation!==undefined){if(!/^\d{1,9}$/.test(parsed.generation))throw new OperatorStop('usage',2);parsed.generation=Number(parsed.generation);}
  for(const need of NEEDS[command]||[])if(parsed[need]===undefined)throw new OperatorStop('usage',2);
+ // AIR-551 H6: the Worker reads marker `r2` as closed, so a data rollback to the R2 objects would leave production refusing every checkpoint read and write.
+ // The four rollback commands are retired at the command line (recovery is roll-forward in D1); `execute` keeps them for the offline suite only.
+ if(RETIRED_AFTER_H6.has(command))throw new OperatorStop('retired_after_h6',2);
  return {command,args:parsed};
 }
 function readStoreOf(env,fetchImpl){

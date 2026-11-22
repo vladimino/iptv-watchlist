@@ -74,6 +74,14 @@ const identity=env=>({syncEtag:env.r2.objects.get('sync.json').etag,syncSha256:s
  assert.throws(()=>Op.parseArgs(A('--hold','--import','--target','iptv','--confirm','hold','--expect-generation','0')),e=>e.reason==='usage','one command only');
  assert.throws(()=>Op.parseArgs(A('--import','--target','iptv','--confirm','import','--expect-generation','0')),e=>e.reason==='usage','identity is required');
  assert.throws(()=>Op.parseArgs(A('--status','--target','iptv','--confirm','status')),e=>e.reason==='usage');
+ // AIR-551 H6: the four rollback commands refuse at the command line with complete arguments (the Worker reads marker r2 as closed, so a data rollback would lock production).
+ {
+  const H0=['--workflow-instance-id','i','--workflow-liveness','finished','--deployed-version-id','v','--deployed-commit','c','--deployment-versions','1','--deployment-percentage','100','--instances-checked','queued','--instances-total','0'];
+  const ID=['--sync-etag','a','--sync-sha256','b','--ingest-etag','c','--ingest-sha256','d'];
+  const complete={'hold-rollback':['--expect-generation','2',...H0],'export-rollback':['--expect-generation','3','--frozen-sync-etag','a','--frozen-ingest-etag','b'],'revert-authority':['--expect-generation','3'],'release-rolled-back':['--expect-generation','4',...ID]};
+  for(const [command,extra] of Object.entries(complete))assert.throws(()=>Op.parseArgs(['node','x','--'+command,'--target','iptv','--confirm',command,...extra]),e=>e.reason==='retired_after_h6'&&e.exit===2,command);
+  assert.equal(Op.parseArgs(['node','x','--release','--target','iptv','--confirm','release','--expect-generation','2',...ID]).command,'release','the forward commands still parse');
+ }
  assert.equal(Op.parseArgs(A('--target','iptv')).command,'status');
  const r=spawnSync(process.execPath,['scripts/epg-checkpoint-production.mjs'],{encoding:'utf8'});assert.equal(r.status,0);
  assert.deepEqual(JSON.parse(r.stdout),{configured:false,writes:false,writeState:'none'});
@@ -258,7 +266,9 @@ async function sequence(upTo){
  assert.equal(sha(retained.syncText),image.syncSha256);assert.equal(sha(retained.ingestText),image.ingestSha256,'the retained rows reproduce the exported image');
  const reopened=await call('release-rolled-back',{generation:4,...image},env);
  assert.deepEqual(reopened.marker,{mode:'r2',writes:'open',generation:4});
- assert.deepEqual(await Checkpoint.readAuthority(env.db),{state:'r2',writes:'open',generation:4});
+ // AIR-551 H6: the Worker no longer serves the r2 arm. The operator's own sequence still ends at marker r2, but production code reads it as closed.
+ assert.deepEqual(await Checkpoint.readAuthority(env.db),{state:'closed'});
+ assert.deepEqual(await Checkpoint.readAuthority({DB:env.db,EPG_CHECKPOINT_DB_OPTIONAL:'standin'}),{state:'r2',writes:'open',generation:4},'only the local stand-in keeps it');
 }
 // The same forward and rollback sequence on every schema level that keeps the 0030 contract: 30, 31 (the Watchlist authority) and the latest.
 for(const upTo of ['0030_epg_checkpoint_authority.sql','0031_watchlist_authority.sql','9999'])await sequence(upTo);

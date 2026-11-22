@@ -12,7 +12,7 @@ flowchart TD
     readers["Programme / film page / availability readers"]
     window["Availability projection:<br/>past 72h, future 24h for hot"]
     ensure["Hourly ensure: R2 mirrors"]
-    finish["finalize, queue and stage complete:<br/>sync.json complete in R2"]
+    finish["finalize, queue and stage complete:<br/>one fenced D1 batch (checkpoint, certificate)"]
     certificate[("D1 certificate finalized_run_id:<br/>one fenced batch, then Discovery admitted")]
     repair["Hourly ensure certifyComplete:<br/>certify-only repair, no new publication"]
     previous["Prior published generation remains readable"]
@@ -30,30 +30,28 @@ flowchart TD
     stale -->|no| reject
 ```
 
-## The run checkpoint in D1 ([ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md), Accepted; dormant, schema applied)
+## The run checkpoint in D1 ([ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md) and [ADR 0199](../adr/0199-retire-the-epg-checkpoint-r2-arm.md); D1-authoritative since 21 Nov 2026)
 
-Today the run checkpoint `sync.json` and the ingest status `watchlist-ingest.json` are R2 objects written by unconditional PUT after a separate step-lease read (the first diagram). The accepted design moves both behind their own marker. The code and the schema are delivered and **dormant**: the schema is applied with the marker `r2` and empty tables, and nothing switches the marker. The diagram below is the write path that holds **only after a separately approved activation**; the shaded nodes are not an active path: the tables are installed and empty, but with the marker `r2` (or the tables absent) nothing reads or writes them and the dashed arrow is the only path.
+The run checkpoint `sync.json` and the ingest status `watchlist-ingest.json` are D1 rows behind their own marker, `d1` / `open` / generation 2 since the controlled cutover of 21 Nov 2026 ([evidence](../evidence/d1-migration/air-551-checkpoint-cutover-2026-11-21.md)); the first natural run on D1 (22 Nov 2026) is accepted ([evidence](../evidence/d1-migration/air-551-h5-natural-run-2026-11-22.md)). Every step saves through one fenced batch; the R2 objects are a frozen image that is neither read nor written, and production fails closed (never R2) when the marker is not `d1`.
 
 ```mermaid
 flowchart TD
     step["EPG step holding the step lease"]
     batch["One D1 batch per save:<br/>1 authority fence (d1, open, generation)<br/>2 step fence (mode revision, live lease)<br/>3 run compare-and-swap (run_id, revision)<br/>4 body and changed film rows"]
-    run[("Proposed D1 checkpoint:<br/>run row, body chunks, film rows")]
-    ingest[("Proposed D1 ingest status")]
+    run[("D1 checkpoint:<br/>run row, body chunks, film rows")]
+    ingest[("D1 ingest status")]
     done["completeRun, the only completion route:<br/>queue attempted, then one batch:<br/>stage complete, film rows removed,<br/>certificate, pause clear"]
     cert[("published_epg_authority:<br/>finalized_run_id")]
     flush["Event flushes after the batch"]
-    r2["R2 sync.json and watchlist-ingest.json:<br/>authority today (marker r2),<br/>frozen image after activation"]
+    r2["R2 sync.json and watchlist-ingest.json:<br/>frozen image, unread and unwritten"]
     step --> batch --> run
     batch -.->|"run creation also records ingest success"| ingest
     run --> done --> cert
     done --> flush
-    step -.->|"marker r2 or absent: unconditional PUT"| r2
-    classDef proposed fill:#fff3de,stroke:#a56c2b,color:#42300e
-    class batch,run,ingest,done proposed
+    r2 ~~~ step
 ```
 
-A save is refused, and writes nothing, when the authority generation, the step lease, the run revision or the stage order does not match; a run can reach `complete` only through the one completion operation, which both the seal route and the single-call route use, so the order queue attempted, then complete, then certificate holds on every route. Completion, certificate and pause clear are one batch only in `d1` mode; the certificate update is conditional so a non-matching certificate still lets the run complete and the hourly repair certifies it. In `r2` mode the order stays: complete in R2, certificate, then flushes.
+A save is refused, and writes nothing, when the authority generation, the step lease, the run revision or the stage order does not match; a run can reach `complete` only through the one completion operation, which both the seal route and the single-call route use, so the order queue attempted, then complete, then certificate holds on every route. Completion, certificate and pause clear are one batch; the certificate update is conditional so a non-matching certificate still lets the run complete and the hourly repair certifies it. A marker that is not `d1` (`r2`, tables absent, unreadable) is closed: the checkpoint routes answer `epg_checkpoint_unavailable` and nothing falls back to R2. Recovery is roll-forward in D1, not an export to the R2 objects.
 
 Prediction scoring does not read this publication as permission to run. Hot and cold order use a completed snapshot of these shows, or last-known completed priority for 36 hours, and an unsealed generation does not block the prediction queue ([ADR 0154](../adr/0154-prediction-eligibility-independent-of-epg.md)).
 
