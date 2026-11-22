@@ -827,7 +827,7 @@ function indexedFingerprintRecord(item){
 // consumer that names the film. An absent module, binding or migration 0024 is the empty overlay: the ordinary rule alone decides. An
 // INSTALLED store that cannot be read (a fault, a partial table set) fails closed: the error reaches the caller, so no rebuild treats a
 // recovery film as current and no queue write drops its retry record on that answer.
-const NO_RECOVERY_OVERLAY=Object.freeze({ready:false,revision:null,size:0,deniesPrediction:()=>false,deniesFingerprint:()=>false,modeOf:()=>null});
+const NO_RECOVERY_OVERLAY=Object.freeze({ready:false,revision:null,size:0,deniesPrediction:()=>false,deniesFingerprint:()=>false,modeOf:()=>null,activeIds:()=>[],confirmedAtOf:()=>null});
 async function predictionRecoveryOverlay(env){
  if(typeof PredictionRecoveryIntent==='undefined')return NO_RECOVERY_OVERLAY;
  return PredictionRecoveryIntent.readOverlay(env,Date.now());
@@ -841,7 +841,7 @@ async function predictionFreshness(env,profile){
  const verdict=(prediction,fingerprint,genres)=>predictionTransitionCompatibility(prediction,fingerprint,{genres},profile,FINGERPRINT_TRANSITIONS,fingerprintTarget(),modes,transitionOptions);
  const fingerprintVerdict=(fingerprint,genres)=>fingerprintCompatibility(fingerprint,{genres},FINGERPRINT_TRANSITIONS,fingerprintTarget(),fingerprintMode,transitionOptions);
  // `filmId` (optional) lets the recovery overlay deny that film's exact stored version; without it the ordinary rule alone answers.
- return {mode,fingerprintMode,needsGenres:true,registryDigest:registry.registry,target:fingerprintTarget(),recovery:{ready:recovery.ready,revision:recovery.revision,size:recovery.size},
+ return {mode,fingerprintMode,needsGenres:true,registryDigest:registry.registry,target:fingerprintTarget(),recovery:{ready:recovery.ready,revision:recovery.revision,size:recovery.size},overlay:recovery,
   state:(prediction,fingerprint,genres,filmId)=>!!profile&&!!prediction&&!recovery.deniesPrediction(filmId,prediction)&&predictionCompatibilityFresh(verdict(prediction,fingerprint,genres)),
   indexed:(item,film)=>!!profile&&!!item?.prediction&&!recovery.deniesPrediction(film?.id==null?undefined:String(film.id),item.prediction)&&predictionCompatibilityFresh(verdict(item.prediction,indexedFingerprintRecord(item),film?.genres)),
   // The evaluator's own verdict for an indexed item ({outcome:'current'|'compatible'|'stale',reason}); the film page shows its reason, it never re-derives one from a version number.
@@ -2545,6 +2545,32 @@ function queueBatchIds(queue,ready,slots){
  for(const id of ready){if(taken.length>=slots)break;if(queue.work?.[id]?.migration){if(migration>=cap)continue;migration++;}taken.push(id);}
  return taken;
 }
+// Recovery slots (ADR 0197). A batch of N films reserves at most RECOVERY_BATCH_SHARE of its slots for owner-confirmed recovery intents (ADR 0165), independent of hot/cold:
+// N>=2 gives max(1,floor(N*0.4)) target slots, N=1 keeps the ordinary policy. It is a ceiling on the privileged slots, not a throughput promise; slots the recovery queue cannot fill go back to the ordinary queue.
+const RECOVERY_BATCH_SHARE=0.4;
+function recoveryBatchSlots(size){
+ if(!Number.isInteger(size)||size<2)return 0;
+ return Math.min(size,Math.max(1,Math.floor(Math.round(size*RECOVERY_BATCH_SHARE*1e6)/1e6)));
+}
+// The films that may take a recovery slot now, in order, plus the counts a read-only diagnostic shows. A candidate has an active, unexpired intent (the overlay read of this very selection),
+// and it is ready: queued in either lane, not retry-exhausted, not in retry backoff, not excluded. The queue's `work` map is not consulted (it is kept only for hot and watchlist films); whether the intent is still
+// unresolved is decided when the film is read: its stored current prediction must still be the exact version the intent denies.
+// Order: the owner's confirmation time of its cohort (oldest first), then the film's position in the stored queue (hot lane, then cold lane), then the film id. Nothing here changes the stored queue.
+function queueRecoveryCandidates(queue,overlay,now=Date.now(),exclude=new Set()){
+ const counts={active:0,eligible:{hot:0,cold:0},deferredByRetry:0,retryExhausted:0,notQueued:0},position=new Map(),ids=[];
+ [...(queue.hotPending||[]),...(queue.coldPending||queue.pending||[])].forEach((id,index)=>{if(!position.has(id))position.set(id,index);});
+ for(const id of overlay?.activeIds?.()||[]){
+  if(exclude.has(id))continue;
+  counts.active++;
+  if(retryBudgetExhausted(queue.retries?.[id])){counts.retryExhausted++;continue;}
+  if(!position.has(id)){counts.notQueued++;continue;}
+  if(queue.retries?.[id]?.retryAt>now){counts.deferredByRetry++;continue;}
+  counts.eligible[queue.priority?.[id]?.hot?'hot':'cold']++;ids.push(id);
+ }
+ const confirmed=id=>overlay.confirmedAtOf?.(id)??null;
+ ids.sort((a,b)=>{const x=confirmed(a),y=confirmed(b);return (x===y?0:x===null?1:y===null?-1:x<y?-1:1)||position.get(a)-position.get(b)||(a<b?-1:a>b?1:0);});
+ return {ids,counts};
+}
 const RUN_DIAGNOSTICS_PREFIX=ENRICHMENT_KEY+'run-diagnostics/';
 const RUN_DIAGNOSTICS_SETTLE_KEY=ENRICHMENT_KEY+'run-diagnostics-settle.json';
 const RUN_DIAGNOSTICS_SETTLE_LIMIT=10;
@@ -2728,6 +2754,8 @@ const BATCH_RUNNER={version:2,maxManifestFilms:100,maxManifestBytes:256*1024,gen
 const BATCH_STAGE_KEY=ENRICHMENT_KEY+'batch-stage.json';
 // Films read to fill one manifest when some queued films are already current or have lost their admission: bounded so a start never walks the whole queue.
 const BATCH_SCAN_LIMIT=300;
+// Recovery probing has its own bound inside the shared one: films that never become manifest items (a moved pointer, a vanished admission) cannot use the budget the ordinary fill needs.
+const RECOVERY_SCAN_LIMIT=100;
 const BATCH_PLACEHOLDER_RUN='00000000-0000-4000-8000-000000000000';
 const wrongProtocolResponse=()=>json({error:'This run belongs to another protocol',code:'wrong_protocol'},409);
 const batchBlocked=(code,extra={})=>json({status:'blocked',reason:code,code,...extra,...scheduledRunFields()},409);
@@ -2781,22 +2809,53 @@ async function batchSelection(env,{profile,report,queue,pin=null,limit=BATCH_RUN
   if(pin){rest=[];for(const id of [...new Set(pin.filmIds.map(String))]){if(exclude.has(id))continue;if(retryBudgetExhausted(queue.retries?.[id]))notEligible.push({filmId:id,reason:'retry_exhausted'});else if(!queued.has(id))notEligible.push({filmId:id,reason:'not_queued'});else if(!readySet.has(id))notEligible.push({filmId:id,reason:'retry_backoff'});else rest.push(id);}}
  else rest=ready.slice();
  let scanned=0;
- // Read only as many film payloads as the client-requested cap needs: do not load a full 100-film payload set when the caller asked for five.
+ const overlay=freshness.overlay;
+ // One chunk of film ids: read their payloads and stored states, and keep each film that still needs work. Returns how many films it added to the manifest.
+ // `recoverySlot` films must still carry the exact version their intent denies; a film whose stored version moved on (satisfied) or that has none is not recovery work: it is returned in `deferred`
+ // and left to the ordinary queue.
+ const take=async(chunk,recoverySlot)=>{
+  const found=await readFilmsById(env,report,chunk),states=await Promise.all(chunk.map(id=>found.has(id)?readFilmStateCurrent(env,id):null));
+  let added=0;const deferred=[];
+  chunk.forEach((id,i)=>{
+   const film=found.get(id);if(!film){skipped.missingAdmission.push(id);return;}
+   const state=states[i];if(freshness.state(state.predictions?.current,state.fingerprint,film.genres,id)){skipped.alreadyCurrent.push(id);return;}
+   if(recoverySlot&&!(state.predictions?.current&&overlay.deniesPrediction(id,state.predictions.current))){deferred.push(id);return;}
+   const plan=freshness.fingerprintUsable(state.fingerprint,film.genres,id)?'prediction_only':'fingerprint_and_prediction';
+   items.push({filmId:id,lane:queue.priority?.[id]?.hot?'hot':'cold',plan,film,state,recoverySlot});added++;
+  });
+  return {added,deferred};
+ };
+ // Recovery slots first (ADR 0197): up to recoveryBatchSlots(cap) films with an active owner-confirmed intent, from both lanes, before the ordinary hot-first order. A pinned call keeps the
+ // pin and is never reordered. A candidate that turns out current or without admission is skipped and does not use a slot.
+ const recoverySlots=pin?0:recoveryBatchSlots(cap);
+ const candidates=pin||!(overlay?.size>0)?null:queueRecoveryCandidates(queue,overlay,Date.now(),exclude);
+ let recoveryTaken=0,probed=0;
+ if(candidates&&recoverySlots>0){
+  const pool=candidates.ids.slice(),unresolvedNot=new Set();
+  while(recoveryTaken<recoverySlots&&pool.length&&probed<RECOVERY_SCAN_LIMIT&&scanned<BATCH_SCAN_LIMIT){
+   const chunk=pool.splice(0,Math.min(recoverySlots-recoveryTaken,RECOVERY_SCAN_LIMIT-probed,BATCH_SCAN_LIMIT-scanned));
+   scanned+=chunk.length;probed+=chunk.length;
+   const result=await take(chunk,true);
+   recoveryTaken+=result.added;
+   result.deferred.forEach(id=>unresolvedNot.add(id));
+  }
+  // The quota is a cap on recovery films in the whole manifest: every other candidate (read or not) leaves the ordinary fill. Only a film read and found not to be unresolved recovery work stays ordinary.
+  const candidateSet=new Set(candidates.ids);
+  rest=rest.filter(id=>!candidateSet.has(id)||unresolvedNot.has(id));
+ }
+ // The ordinary queue fills every remaining slot with the unchanged hot-first order. The migration share (ADR 0035) applies to these slots: a recovery film carries no migration work, so it neither
+ // uses nor widens that share. Read only as many film payloads as the client-requested cap needs: do not load a full 100-film payload set when the caller asked for five.
  while(items.length<cap&&rest.length&&scanned<BATCH_SCAN_LIMIT){
   const slots=cap-items.length;
   let chunk;
   if(pin)chunk=rest.splice(0,slots);
   else{chunk=queueBatchIds(queue,rest,slots);if(!chunk.length)break;const taken=new Set(chunk);rest=rest.filter(id=>!taken.has(id));}
   scanned+=chunk.length;
-  const found=await readFilmsById(env,report,chunk),states=await Promise.all(chunk.map(id=>found.has(id)?readFilmStateCurrent(env,id):null));
-  chunk.forEach((id,i)=>{
-   const film=found.get(id);if(!film){skipped.missingAdmission.push(id);return;}
-   const state=states[i];if(freshness.state(state.predictions?.current,state.fingerprint,film.genres,id)){skipped.alreadyCurrent.push(id);return;}
-   const plan=freshness.fingerprintUsable(state.fingerprint,film.genres,id)?'prediction_only':'fingerprint_and_prediction';
-   items.push({filmId:id,lane:queue.priority?.[id]?.hot?'hot':'cold',plan,film,state});
-  });
+  await take(chunk,false);
  }
- return {items,skipped,notEligible,eligible:{hot:queue.priorityCount||0,cold:queue.coldRemaining??0,ready:ready.length},manifestSize:cap,scanned};
+ // Counts only, never a film id or a payload: read-only diagnostics of what the recovery slots did.
+ const recovery=candidates?{target:recoverySlots,selected:recoveryTaken,probed,ordinary:items.length-recoveryTaken,active:candidates.counts.active,eligible:candidates.counts.eligible,deferredByRetry:candidates.counts.deferredByRetry,retryExhausted:candidates.counts.retryExhausted,notQueued:candidates.counts.notQueued,noCandidates:candidates.ids.length===0}:null;
+ return {items,skipped,notEligible,eligible:{hot:queue.priorityCount||0,cold:queue.coldRemaining??0,ready:ready.length},manifestSize:cap,scanned,...(recovery?{recovery}:{})};
 }
 // The manifest body, serialized once for its size and its hash. `runId` and `lease` are placeholders in a preflight (same width as the real values).
 const batchFilmInputHash=async film=>(await contentHash({filmId:film.filmId,lane:film.lane,plan:film.plan,modelMetadata:film.modelMetadata,fingerprintHash:film.fingerprint?.fingerprintHash||null})).slice(0,24);
@@ -2829,8 +2888,8 @@ function batchStartAnswer(fields){
 const batchBytes=value=>new TextEncoder().encode(JSON.stringify(batchStartAnswer(value))).length;
 // The fields that follow the manifest in the answer. A preflight measures the answer with the widest values these can take, so a manifest that passes it cannot grow past the
 // limit when the real values are added; the exact answer is measured again before anything is persisted and before it is sent.
-const batchPlaceholderExtras=(selection,dryRun)=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:99999999,queueRefreshed:true,queueSettled:99999999,eligible:{hot:99999999,cold:99999999,ready:99999999},skipped:{missingAdmission:99999999,alreadyCurrent:99999999},pendingCount:99999999,hotRemaining:99999999,coldRemaining:99999999,drained:{committed:99999999,dropped:99999999},...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
-const batchRealExtras=(selection,queue,{queueRefreshed,queueSettled,dryRun})=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:selection.items.length,queueRefreshed,...(queueSettled?{queueSettled}:{}),eligible:selection.eligible,skipped:{missingAdmission:selection.skipped.missingAdmission.length,alreadyCurrent:selection.skipped.alreadyCurrent.length},pendingCount:queue.pending.length,hotRemaining:queue.priorityCount??null,coldRemaining:queue.coldRemaining??null,...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
+const batchPlaceholderExtras=(selection,dryRun)=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:99999999,queueRefreshed:true,queueSettled:99999999,eligible:{hot:99999999,cold:99999999,ready:99999999},skipped:{missingAdmission:99999999,alreadyCurrent:99999999},pendingCount:99999999,hotRemaining:99999999,coldRemaining:99999999,drained:{committed:99999999,dropped:99999999},...(selection.recovery?{recovery:{target:99999999,selected:99999999,probed:99999999,ordinary:99999999,active:99999999,eligible:{hot:99999999,cold:99999999},deferredByRetry:99999999,retryExhausted:99999999,notQueued:99999999,noCandidates:false}}:{}),...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
+const batchRealExtras=(selection,queue,{queueRefreshed,queueSettled,dryRun})=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:selection.items.length,queueRefreshed,...(queueSettled?{queueSettled}:{}),eligible:selection.eligible,skipped:{missingAdmission:selection.skipped.missingAdmission.length,alreadyCurrent:selection.skipped.alreadyCurrent.length},pendingCount:queue.pending.length,hotRemaining:queue.priorityCount??null,coldRemaining:queue.coldRemaining??null,...(selection.recovery?{recovery:selection.recovery}:{}),...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
 // Read-only. Reads the profile, the programme, the stored queue (and its own generation, the revision a later step compares) and the films; heals, rebuilds, settles and takes nothing.
 // A queue that fails the advance gate is reported `stale`. `bytes` is the size of the whole answer with placeholder values for the fields only the real start knows.
 async function batchPreflight(env,body,tally=null){
