@@ -8,11 +8,11 @@ What was done: S3 `ListObjectsV2`, `HeadObject` and `GetObject` on bucket `iptv`
 
 | Attempt | Start (UTC) | Result | Duration | Note |
 | --- | --- | --- | --- | --- |
-| 1 | 20:46:20 | NO-GO `inventory_changed`, `fence_changed` | 7 min 37 s | a scheduled Task run (slot `:45`) wrote one manifest, one source, one stop event, rewrote the held stage and changed both lease objects during the cut; the cold pass downloaded 1,941 objects |
+| 1 | 20:46:20 | NO-GO `inventory_changed`, `fence_changed` | 7 min 37 s (rejected near-cold attempt) | a scheduled Task run (slot `:45`) wrote one manifest, one source, one stop event, rewrote the held stage and changed both lease objects during the cut; the cold pass downloaded 1,941 objects |
 | 2 | 20:54:21 | NO-GO `inventory_changed`, `fence_changed` | 2 min 19 s | the next Task run (slot `:00`) started and wrote one source and changed both leases; 1,943 verified checkpoints reused |
 | 3 | 21:01:04 | **`consistent_fenced`** | 2 min 21 s | started right after a run finished (20:58:55, runner lease released); 1,943 of 1,947 objects reused from checkpoints, each with a conditional `HEAD` |
 
-Attempt 3: 1,947 objects, 34,789,837 bytes, aggregate SHA-256 `478bfba55db567c48a5f57aff5da2a83d699f610ed72d4e0508633359440090e`, requests: list 8, head 1,959, get 4. The independent `--verify` returned the same status, counts, bytes and aggregate. Cold cut time is therefore about 7.6 min and warm cut time about 2.3 min on this session's network path at concurrency 4; concurrency 16 was not tried.
+Attempt 3: 1,947 objects, 34,789,837 bytes, aggregate SHA-256 `478bfba55db567c48a5f57aff5da2a83d699f610ed72d4e0508633359440090e`, requests: list 8, head 1,959, get 4. The independent `--verify` returned the same status, counts, bytes and aggregate. **Only the warm duration is a measurement:** a successful cut with 1,943 of 1,947 objects reused took about 2.3 min on this session's network path at concurrency 4. The 7 min 37 s of attempt 1 is the duration of a rejected, near-cold attempt (1,941 objects downloaded, then NO-GO), not the duration of a successful full cold cut, so the **cold `T_cut` of a successful cut is unmeasured** and stays an open input of P3. Concurrency 16 was not tried.
 
 ## Conversion and importer reports
 
