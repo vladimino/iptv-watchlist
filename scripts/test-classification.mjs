@@ -102,6 +102,9 @@ export const FILES={
  "air-376-small-fixes.mjs": {
   "suite": "core"
  },
+ "air-566-residual-nonfilm-audit.mjs": {
+  "suite": "core"
+ },
  "air-86-replay.mjs": {
   "suite": "core"
  },
