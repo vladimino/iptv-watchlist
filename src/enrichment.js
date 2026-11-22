@@ -411,7 +411,7 @@ function cloneJSON(value){return JSON.parse(JSON.stringify(value));}
 async function mergeStoredJSON(env,key,empty,apply){
  if(auxKeyKind(key)==='stage'){
   const aux=await auxAuthority(env);
-  if(aux)return PredictionAux.mergeStage(env.DB,aux,apply,{measure:item=>new TextEncoder().encode(JSON.stringify(heldItemBody(item))).length,guard:auxGuardOf(env),writer:env?.[WRITER_OWNER]||null});
+  if(aux)return PredictionAux.mergeStage(auxDb(env),aux,apply,{measure:item=>new TextEncoder().encode(JSON.stringify(heldItemBody(item))).length,guard:auxGuardOf(env),writer:env?.[WRITER_OWNER]||null});
  }
  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){try{const owned=await RatingsD1.casOwned(env,key,empty,async current=>apply(current));if(owned.owned)return owned.result.value;}catch(error){if(error.code==='write_contention')throw new Error('Stored JSON changed during write');throw error;}}
  for(let attempt=0;attempt<5;attempt++){
@@ -956,11 +956,13 @@ async function runnerProgress(env,run,queue,final=false){
 // DORMANT: while the marker is `r2` (or the schema is older than migration 0034) `auxAuthority` answers null and every function below keeps its R2 code unchanged. When the marker is `d1` the four
 // families are served from D1 only: an unavailable authority throws (never a read of the R2 object). The Events journal (`events/items/*`) and the deferred-start receipts stay R2.
 const WRITER_OWNER=Symbol.for('iptv.prediction.writerOwner');
+// Worker modules never name the database binding; the auxiliary-state module owns it (tests/d1-backfill.mjs).
+const auxDb=env=>PredictionAux.databaseOf(env);
 async function auxAuthority(env){
  if(typeof PredictionAux==='undefined'||typeof PredictionD1==='undefined')return null;
  const base=await PredictionD1.readPredictionAuthority(env?.DB??null,env);
  if(base.mode!=='d1')return null;
- return PredictionAux.auxD1(env.DB,env,{version:base.version});
+ return PredictionAux.auxD1(auxDb(env),env,{version:base.version});
 }
 const AUX_SOURCE_KEY=/^enrichment\/sources\/([A-Za-z0-9_-]{1,100})\.json$/,AUX_MANIFEST_KEY=/^enrichment\/batch-manifest\/([A-Za-z0-9_-]{1,100})\.json$/;
 const auxKeyKind=key=>typeof key!=='string'?null:key===ENRICHMENT_KEY+'batch-stage.json'?'stage':AUX_SOURCE_KEY.test(key)?'source':AUX_MANIFEST_KEY.test(key)?'manifest':null;
@@ -968,16 +970,16 @@ const auxGuardOf=env=>env?.[BATCH_COMMIT_GUARD]||null;
 async function auxRouteRead(env,key){
  const kind=auxKeyKind(key);if(!kind)return {handled:false};
  const aux=await auxAuthority(env);if(!aux)return {handled:false};
- if(kind==='stage'){const stage=await PredictionAux.readStage(env.DB);return {handled:true,value:{items:stage.items,updatedAt:stage.updatedAt}};}
- if(kind==='source'){const got=await PredictionAux.readSource(env.DB,AUX_SOURCE_KEY.exec(key)[1]);return {handled:true,value:got?got.value:null};}
- return {handled:true,value:await PredictionAux.readManifest(env.DB,AUX_MANIFEST_KEY.exec(key)[1])};
+ if(kind==='stage'){const stage=await PredictionAux.readStage(auxDb(env));return {handled:true,value:{items:stage.items,updatedAt:stage.updatedAt}};}
+ if(kind==='source'){const got=await PredictionAux.readSource(auxDb(env),AUX_SOURCE_KEY.exec(key)[1]);return {handled:true,value:got?got.value:null};}
+ return {handled:true,value:await PredictionAux.readManifest(auxDb(env),AUX_MANIFEST_KEY.exec(key)[1])};
 }
 async function auxRouteWrite(env,key,value){
  const kind=auxKeyKind(key);if(!kind)return {handled:false};
  const aux=await auxAuthority(env);if(!aux)return {handled:false};
  const options={guard:auxGuardOf(env),writer:env?.[WRITER_OWNER]||null};
- if(kind==='source')await PredictionAux.writeSource(env.DB,aux,AUX_SOURCE_KEY.exec(key)[1],value,{...options,create:options.guard?.create===true});
- else if(kind==='manifest')await PredictionAux.writeManifest(env.DB,aux,AUX_MANIFEST_KEY.exec(key)[1],value,options);
+ if(kind==='source')await PredictionAux.writeSource(auxDb(env),aux,AUX_SOURCE_KEY.exec(key)[1],value,{...options,create:options.guard?.create===true});
+ else if(kind==='manifest')await PredictionAux.writeManifest(auxDb(env),aux,AUX_MANIFEST_KEY.exec(key)[1],value,options);
  else throw new Error('prediction_aux_stage_write_route');
  return {handled:true};
 }
@@ -987,12 +989,12 @@ async function auxFlushRow(env,aux,row){
  if(!row)return false;
  if(row.compacted||row.state==='delivered'||row.state==='superseded')return true;
  for(let attempt=0;attempt<3;attempt++){
-  try{await writeEvent(env,row.event);await PredictionAux.settleOutbox(env.DB,aux,row.eventKey,'delivered',{writer:env[WRITER_OWNER]||null});return true;}catch{/* tried again */}
+  try{await writeEvent(env,row.event);await PredictionAux.settleOutbox(auxDb(env),aux,row.eventKey,'delivered',{writer:env[WRITER_OWNER]||null});return true;}catch{/* tried again */}
  }
  return false;
 }
 async function auxPark(env,aux,kind,identity,event,runId){
- const out=await PredictionAux.admitOutbox(env.DB,aux,{kind,identity,event,journalKey:auxJournalKey(event),runId,writer:env[WRITER_OWNER]||null});
+ const out=await PredictionAux.admitOutbox(auxDb(env),aux,{kind,identity,event,journalKey:auxJournalKey(event),runId,writer:env[WRITER_OWNER]||null});
  return out.row;
 }
 // The legacy record shape of a stop row (`{event, delivered, superseded}`): a settled row whose payload was compacted never rebuilds an Event, the run keeps its own.
@@ -1003,7 +1005,7 @@ async function auxDeliverPending(env,aux,now=Date.now()){
   const latest=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json');
   // A batch_v2 stop whose record was never parked (the process ended between the run record and the park) is admitted from the run's own event; an existing identity is a no-op.
   if(isBatchV2Run(latest)&&isText(latest?.runId,100)&&latest.event&&['complete','partial'].includes(latest.status))await auxPark(env,aux,'stop',latest.runId,latest.event,latest.runId);
-  const rows=await PredictionAux.pendingOutbox(env.DB,{runId:isText(latest?.runId,100)?latest.runId:null,limit:PredictionAux.AUX_LIMITS.drainLimit});
+  const rows=await PredictionAux.pendingOutbox(auxDb(env),{runId:isText(latest?.runId,100)?latest.runId:null,limit:PredictionAux.AUX_LIMITS.drainLimit});
   for(const row of rows){
    report.checked++;let result='failed';
    try{
@@ -1011,9 +1013,9 @@ async function auxDeliverPending(env,aux,now=Date.now()){
     else result=await auxFlushRow(env,aux,row)?'delivered':'failed';
    }catch{}
    if(result==='delivered')report.delivered++;
-   else{report.failed++;try{if(await PredictionAux.failOutbox(env.DB,aux,row,{writer:env[WRITER_OWNER]||null})==='quarantined')report.quarantined++;}catch{/* the next start counts it */}}
+   else{report.failed++;try{if(await PredictionAux.failOutbox(auxDb(env),aux,row,{writer:env[WRITER_OWNER]||null})==='quarantined')report.quarantined++;}catch{/* the next start counts it */}}
   }
-  try{await PredictionAux.compactSettled(env.DB,aux);}catch{/* compaction is retried by the next start; it never blocks a delivery */}
+  try{await PredictionAux.compactSettled(auxDb(env),aux);}catch{/* compaction is retried by the next start; it never blocks a delivery */}
  }catch{report.failed++;}
  if(report.checked||report.failed||report.quarantined)logEventOutbox(report);
  return report;
@@ -1022,7 +1024,7 @@ async function auxRecordSkipped(env,aux,{requestId,body,holder,reason,cause}){
  try{
   const id=safeRequestId(requestId)||crypto.randomUUID();
   const event=skippedStartEvent({requestId:id,body,holder,reason,cause,at:new Date().toISOString()});
-  const out=await PredictionAux.admitOutbox(env.DB,aux,{kind:'skipped',identity:id,event,journalKey:auxJournalKey(event)});
+  const out=await PredictionAux.admitOutbox(auxDb(env),aux,{kind:'skipped',identity:id,event,journalKey:auxJournalKey(event)});
   if(out.refused==='cap'){logEventOutbox({skippedCapRefused:1});return false;}
   return await auxFlushRow(env,aux,out.row);
  }catch{return false;}
@@ -1064,8 +1066,8 @@ async function recordRunStop(env,id,reason,fallback={}){
  const aux=await auxAuthority(env);
  let run=await checkedRun(env,id)||{runId:id,mode:'queued',trigger:fallback.trigger==='scheduled'?'scheduled':'manual',createdAt:new Date().toISOString(),selectedIds:[],results:{},failures:{}};
  if(fallback.protocol===BATCH_PROTOCOL&&run.protocol!==BATCH_PROTOCOL)run.protocol=BATCH_PROTOCOL;
- if(run.recoveredByRunId){if(aux){const row=await PredictionAux.readOutboxRow(env.DB,PredictionAux.outboxKey('stop',id));if(row&&(row.state==='pending'||row.state==='quarantined'))await PredictionAux.settleOutbox(env.DB,aux,row.eventKey,'superseded',{writer:env[WRITER_OWNER]||null});}else{const pending=await loadJSON(env,STOP_EVENT_PREFIX+id+'.json');if(pending&&!pending.delivered)await saveJSON(env,STOP_EVENT_PREFIX+id+'.json',{...pending,delivered:true,superseded:true});}return {status:'superseded',runId:id,continuedByRunId:run.recoveredByRunId,mustComplete:false};}
- const settled=await settleRunRetries(env,run,'stop_retries'),key=STOP_EVENT_PREFIX+id+'.json',existing=aux?auxStopRecord(await PredictionAux.readOutboxRow(env.DB,PredictionAux.outboxKey('stop',id)),run):await loadJSON(env,key);let record=existing;
+ if(run.recoveredByRunId){if(aux){const row=await PredictionAux.readOutboxRow(auxDb(env),PredictionAux.outboxKey('stop',id));if(row&&(row.state==='pending'||row.state==='quarantined'))await PredictionAux.settleOutbox(auxDb(env),aux,row.eventKey,'superseded',{writer:env[WRITER_OWNER]||null});}else{const pending=await loadJSON(env,STOP_EVENT_PREFIX+id+'.json');if(pending&&!pending.delivered)await saveJSON(env,STOP_EVENT_PREFIX+id+'.json',{...pending,delivered:true,superseded:true});}return {status:'superseded',runId:id,continuedByRunId:run.recoveredByRunId,mustComplete:false};}
+ const settled=await settleRunRetries(env,run,'stop_retries'),key=STOP_EVENT_PREFIX+id+'.json',existing=aux?auxStopRecord(await PredictionAux.readOutboxRow(auxDb(env),PredictionAux.outboxKey('stop',id)),run):await loadJSON(env,key);let record=existing;
  if(!record){let queue=null;try{queue=await loadJSON(env,predictionQueueKey);}catch{}const summary=runSummary(run),at=run.event?.at||run.completedAt||new Date().toISOString();
  const snapshot=await predictionEventSnapshot(env,queue,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),v2=batchV2EventFields(run);
  let sources=null;try{sources=await loadJSON(env,ENRICHMENT_KEY+'sources/'+id+'.json');}catch{}
@@ -1207,7 +1209,7 @@ async function recordSkippedStart(env,{requestId,body,holder,reason,cause}){
 async function eventOutboxStatus(env){
  try{
   const aux=await auxAuthority(env);
-  if(aux){const status=await PredictionAux.outboxStatus(env.DB);return {pending:status.states.pending||0,quarantined:status.states.quarantined||0,oldestSince:status.oldestPendingSince,maxAttempts:EVENT_OUTBOX_ATTEMPTS,skippedActivePending:status.skippedActivePending,skippedCap:status.skippedCap,capRefusals:status.capRefusals};}
+  if(aux){const status=await PredictionAux.outboxStatus(auxDb(env));return {pending:status.states.pending||0,quarantined:status.states.quarantined||0,oldestSince:status.oldestPendingSince,maxAttempts:EVENT_OUTBOX_ATTEMPTS,skippedActivePending:status.skippedActivePending,skippedCap:status.skippedCap,capRefusals:status.capRefusals};}
  }catch{return {pending:null,quarantined:null,oldestSince:null,maxAttempts:EVENT_OUTBOX_ATTEMPTS};}
  try{
   const index=await loadJSON(env,EVENT_OUTBOX_KEY),entries=Object.entries(isObject(index?.pending)?index.pending:{}).filter(([key])=>eventOutboxKey(key));
@@ -2909,7 +2911,7 @@ async function auxStartReadyWithManifest(env,aux,claim,token,answer){
   const {submitGate,prep,...rest}=old;void submitGate;void prep;
   const value={...rest,heartbeatAt:new Date(now).toISOString(),expiresAt:old.clientAckAt?old.expiresAt:now+READY_LEASE_TTL_MS};
   const {statements}=PredictionD1.leaseStatements(head,'runner',value,head.token);
-  try{await PredictionAux.writeManifest(env.DB,aux,claim.runId,answer,{guard:{runId:claim.runId,epoch:claim.epoch,token},prep:true,extra:statements});}
+  try{await PredictionAux.writeManifest(auxDb(env),aux,claim.runId,answer,{guard:{runId:claim.runId,epoch:claim.epoch,token},prep:true,extra:statements});}
   catch(error){if(error?.code==='prediction_aux_cas'||error?.code==='prediction_domain_cas'){if(attempt<RUNNER_LEASE_ATTEMPTS)continue;return {status:'busy'};}throw error;}
   await PredictionD1.mirrorLease(env,'runner',value);
   return {status:'owned',value};
@@ -3896,7 +3898,7 @@ function assembleOwnedBatchManifest(envelope,profilePart,contractPart,filmParts)
 async function auxManifestPart(env,aux,run,runId,part,filmId){
  const unavailable={status:409,body:{error:'manifest_unavailable',code:'manifest_unavailable'}};
  let got;
- try{got=await PredictionAux.readManifestPart(env.DB,runId,part,filmId);}catch(error){if(error?.code==='prediction_aux_corrupt')return unavailable;throw error;}
+ try{got=await PredictionAux.readManifestPart(auxDb(env),runId,part,filmId);}catch(error){if(error?.code==='prediction_aux_corrupt')return unavailable;throw error;}
  if(got===null)return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:START_POLL_MS}};
  if(got===undefined)return {status:404,body:{error:'Unknown film',code:'unknown_film'}};
  if(got.manifestHash!==run.manifestHash)return unavailable;
