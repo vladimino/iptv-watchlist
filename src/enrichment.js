@@ -990,8 +990,8 @@ function auxGuardedEnv(env){
   if(prop===AUX_BUCKET_GUARDED)return true;
   const value=target[prop];
   if(typeof value!=='function')return value;
-  if(prop==='put')return async(key,...rest)=>{await auxR2WriteGate(env,key);return target.put(key,...rest);};
-  if(prop==='delete')return async keys=>{await auxR2WriteGate(env,keys);return target.delete(keys);};
+  if(prop==='put')return async(key,...rest)=>{await auxR2WriteGate(env,key);return bucket.put(key,...rest);};
+  if(prop==='delete')return async keys=>{await auxR2WriteGate(env,keys);return bucket.delete(keys);};
   return value.bind(target);
  }});
  return {...env,BUCKET:guarded};
