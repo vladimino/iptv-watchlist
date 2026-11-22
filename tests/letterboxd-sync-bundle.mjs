@@ -49,7 +49,7 @@ const G=name=>run(name);
 // 1. The bundle has the ports and the control plane; the Watchlist phase and the three effect writers are the real ones.
 assert.equal(typeof G('letterboxdPorts'),'function');
 const ports=G('letterboxdPorts')(env);
-assert.deepEqual(Object.keys(ports).sort(),['effects','handover','handoverGuards','ratings','reconcile','watchlist'],'every phase has a real adapter, the handover proof is read from live state and pinned at the commit, and the causal effects are read');
+assert.deepEqual(Object.keys(ports).sort(),['effects','handover','handoverGuards','mirror','ratings','reconcile','watchlist'],'every phase has a real adapter, the handover proof is read from live state and pinned at the commit, and the causal effects are read');
 assert.equal(typeof ports.watchlist.run,'function');
 const LetterboxdSync=G('LetterboxdSync');
 // Supported ratings storage (version 2 queue and a merge-form Diary cursor), seeded into the D1-owned ratings documents exactly as a migrated production store holds them.

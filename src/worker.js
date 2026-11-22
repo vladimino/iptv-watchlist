@@ -2723,7 +2723,7 @@ function letterboxdPorts(env){
   const rated=await storedRemovalRatings(e,{type:'watchlist',removed:removed.map(film=>eventRemovedFilm(known(film)))}).catch(()=>null);
   return {added:added.map(film=>eventFilm(known(film))),removed:rated?.event?.removed||removed.map(film=>eventRemovedFilm(known(film)))};
  };
- return {handover:e=>letterboxdHandover(e||env),handoverGuards:(e,handover)=>letterboxdHandoverGuards(e||env,handover),effects:e=>letterboxdEffectsState(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,scanOpen:e=>LetterboxdSync.scanOpen(e),fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
+ return {mirror:{reconcile:(e,arg)=>WatchlistMirror.reconcileMirror(e||env,{...arg,deps:{WatchlistD1,PublishedEpg}})},handover:e=>letterboxdHandover(e||env),handoverGuards:(e,handover)=>letterboxdHandoverGuards(e||env,handover),effects:e=>letterboxdEffectsState(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,scanOpen:e=>LetterboxdSync.scanOpen(e),fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
 }
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {

@@ -646,6 +646,9 @@ export const FILES={
  "watchlist-root-fence.mjs": {
   "suite": "core"
  },
+ "watchlist-mirror.mjs": {
+  "suite": "core"
+ },
  "migration-statements.mjs": {
   "suite": "core"
  },
