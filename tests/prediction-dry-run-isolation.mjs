@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {flowWorld} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as PredictionD1 from '../src/prediction-d1.js';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const dump=f=>{const r=sqliteSync([f,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
@@ -15,7 +16,7 @@ const WRITE=/^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)\b/i;
 async function world(films){
  const w=await flowWorld({films});assert.equal((await w.api('queue/reconcile',{})).status,200);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- w.call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text)};};
+ w.call=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text)};};
  return w;
 }
 // From here on any attempt to write is counted and fails.
@@ -38,7 +39,7 @@ assert.equal((await w.call('prediction_complete',{runId:first.data.runId,reason:
 const live=await w.call('prediction_batch_start',{trigger:'scheduled'});assert.equal(live.isError,false);assert.equal(live.data.status,'running','a live run holds the lease during every dry run below');
 const liveFilms=live.data.films.map(f=>f.filmId);
 for(const route of ['next','submit']){const r=await w.api(route,{runId:live.data.runId,items:[],batchSize:1});assert.equal(r.status,404,'the retired v5 '+route+' route is gone (ADR 0167)');}
-assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled'})).data.status,'already_running');
+assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled',taskId:'task15'})).data.status,'already_running');
 // the one frozen manifest, taken by a dry-run start (still allowed to run before the faults, it writes nothing anyway)
 const freeze=await w.call('prediction_batch_start',{trigger:'manual',dryRun:true});assert.equal(freeze.isError,false,JSON.stringify(freeze.data).slice(0,200));
 const frozen=freeze.data,frozenFilms=frozen.films.map(f=>f.filmId);
@@ -112,7 +113,7 @@ assert.ok(liveFilms.length>0);
  const tools=vm.runInContext('MCP_TOOLS',w.ctx),named=n=>tools.find(t=>t.name===n);
  for(const n of ['prediction_heartbeat','prediction_complete']){const p=named(n).inputSchema.properties||{};assert.ok(!('dryRun' in p)&&!('pin' in p)&&!('manifestHash' in p),n+' has no dry-run argument');}
  for(const n of ['prediction_start','prediction_next','prediction_submit','prediction_validate'])assert.equal(named(n),undefined,n+' is retired');
- assert.deepEqual(Object.keys(named('prediction_batch_start').inputSchema.properties).sort(),['capacity','deferred','dryRun','invocationKey','manifestSize','pin','trigger']);
+ assert.deepEqual(Object.keys(named('prediction_batch_start').inputSchema.properties).sort(),['capacity','deferred','dryRun','invocationKey','manifestSize','pin','taskId','trigger']);
  const contract=vm.runInContext('predictionRunnerContract()',w.ctx);assert.equal(contract.pipelineVersion,5);assert.equal(contract.protocol,'batch_v2');assert.ok(!('modelBatching' in contract),'no v5 model batching is advertised');
 }
 console.log('prediction-dry-run-isolation ok');

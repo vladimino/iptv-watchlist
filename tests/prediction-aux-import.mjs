@@ -11,6 +11,7 @@ import {flowWorld,sql,migrated} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as Aux from '../src/prediction-aux-d1.js';
 import {buildPlan,planReport,planSql,planVerifySql,planRunPreflightSql,readExport} from '../scripts/prediction-aux-d1-import.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const applySql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+text+'COMMIT;',encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr.trim());};
 const exportOf=w=>Object.fromEntries([...w.records.entries()].map(([key,value])=>[key,structuredClone(value)]));
@@ -23,7 +24,7 @@ const tables=['prediction_batch_stage','prediction_run_source_head','prediction_
  const {start}=await w.reconcileAndStart({manifestSize:4});assert.equal(start.status,200,JSON.stringify(start.data).slice(0,200));
  const runId=start.data.runId;
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- const tool=async(args)=>{w.ctx.__a={name:'prediction_batch_manifest',args};w.ctx.__env=w.env;const r=(await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;assert.equal(r.isError,undefined,JSON.stringify(r).slice(0,200));return JSON.parse(r.content[0].text);};
+ const tool=async(args)=>{w.ctx.__a={name:'prediction_batch_manifest',args:withTaskId('prediction_batch_manifest',args)};w.ctx.__env=w.env;const r=(await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;assert.equal(r.isError,undefined,JSON.stringify(r).slice(0,200));return JSON.parse(r.content[0].text);};
  const paired=await w.pair(runId);assert.equal(paired.submit.status,200);
  const left=start.data.films.slice(1,3).map(f=>({filmId:f.filmId,...(f.plan==='prediction_only'?{}:{fingerprint:w.fingerprint}),prediction:w.prediction}));
  assert.equal((await w.api('batch/hold',{runId,epoch:start.data.lease.epoch,items:left})).status,200);

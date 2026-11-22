@@ -1221,6 +1221,13 @@ export const FILES={
  "prediction-batch-start-deferred.mjs": {
   "suite": "core"
  },
+ "prediction-task-id-lib.mjs": {
+  "suite": "core"
+ },
+ "prediction-task-id.mjs": {
+  "suite": "split",
+  "note": "Owner-label, join, fencing and refusal semantics stay in core. The runner-clock bound of the join wait is scenario prediction-task-id-join-bound."
+ },
  "prediction-batch-start-keyed.mjs": {
   "suite": "split",
   "note": "Join, claim fencing, pending and refusal semantics stay in core. The runner-clock bound of the join wait is scenario prediction-batch-start-keyed-join-bound."

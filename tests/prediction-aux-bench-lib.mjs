@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const AUX_R2=key=>key.startsWith('enrichment/sources/')||key.startsWith('enrichment/batch-manifest/')||key==='enrichment/batch-stage.json'||key.startsWith('enrichment/stop-events/')||key.startsWith('enrichment/start-events/')||key==='enrichment/event-outbox.json';
 const WRITE=/^\s*(INSERT|UPDATE|DELETE|REPLACE)/i;
@@ -49,7 +50,7 @@ export async function arm(name,{films=40,seed=null}={}){
  w.instances=[];
  w.env.PREDICTION_START_WORKFLOW={async create({id,params}){w.instances.push({id,params});return {id};},async get(id){if(w.instances.some(item=>item.id===id))return {id};throw new Error('instance.not_found');}};
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- w.tool=async(toolName,args)=>{const m=at();if(m)m.requests++;w.ctx.__a={name:toolName,args};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
+ w.tool=async(toolName,args)=>{const m=at();if(m)m.requests++;w.ctx.__a={name:toolName,args:withTaskId(toolName,args)};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
  w.step={do:async(name2,config,fn)=>fn()};
  await w.api('queue/reconcile',{});
  w.arm=name;

@@ -7,6 +7,7 @@ import {scoped} from '../scripts/bundle-scope.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const TEAM='https://probe-team.cloudflareaccess.com';
 const AUD='a1'.repeat(32);
@@ -174,18 +175,18 @@ for(const route of ['start','next','submit']){
 
 {
  const big=Array.from({length:10},(_,i)=>({filmId:'film-'+i,fingerprint:{strengths:Array.from({length:8},()=>'s'.repeat(380)),risks:Array.from({length:8},()=>'r'.repeat(380))},prediction:{}}));
- const environment=env(),refused=await tool(environment,'prediction_batch_submit',{runId:'run-1',epoch:1,items:big});
+ const environment=env(),refused=await tool(environment,'prediction_batch_submit',{taskId:'task00',runId:'run-1',epoch:1,items:big});
  assert.equal(refused.body.result.isError,true);assert.match(refused.body.result.content[0].text,/over the 57344 byte limit of one call/);assert.match(refused.body.result.content[0].text,/Nothing was submitted: split the group/);assert.equal(environment.BUCKET.objects.size,0,'nothing was read or written');
- const fits=await tool(env(),'prediction_batch_submit',{runId:'run-1',epoch:1,items:big.slice(0,3)});assert.ok(!/byte limit of one call/.test(JSON.stringify(fits.body.result.content)),'a smaller group passes the size check and reaches the Worker');
+ const fits=await tool(env(),'prediction_batch_submit',{taskId:'task00',runId:'run-1',epoch:1,items:big.slice(0,3)});assert.ok(!/byte limit of one call/.test(JSON.stringify(fits.body.result.content)),'a smaller group passes the size check and reaches the Worker');
 }
 const mismatch=await tool(env(),'epg_sync_step',{runId:'missing-run'});
 assert.deepEqual(domain(mismatch.body.result),{status:409,body:{error:'Run id mismatch'}});
 assert.equal(mismatch.body.result.isError,true);
-const unknown=await tool(env(),'prediction_complete',{runId:'missing-run'});
+const unknown=await tool(env(),'prediction_complete',{taskId:'task00',runId:'missing-run'});
 assert.equal(unknown.body.result.structuredContent.httpStatus,404);
 assert.equal(unknown.body.result.isError,true);
 // A batch start without the D1 prediction authority (this R2-only environment) refuses and writes nothing: v2 is the only runner (ADR 0167).
-{const environment=env(),started=await tool(environment,'prediction_batch_start',{trigger:'scheduled',capacity:{remainingPercent:40}});
+{const environment=env(),started=await tool(environment,'prediction_batch_start',{trigger:'scheduled',taskId:'task00',capacity:{remainingPercent:40}});
 assert.equal(started.body.result.isError,true);
 assert.equal(JSON.parse(started.body.result.content[0].text).httpStatus,409);
 assert.match(started.body.result.content[0].text,/batch_runner_requires_d1/);
@@ -216,6 +217,28 @@ for(const name of ['prediction_queue_overview','prediction_film_diagnostics','pr
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
 }
+// ADR 0195: the Task label is a closed enum of the four standing Tasks and is required by every run-scoped tool (a dry-run check, validation and the read-only status tools do not need it).
+for(const name of ['prediction_batch_manifest','prediction_batch_hold','prediction_batch_submit','prediction_heartbeat','prediction_complete']){
+ const schema=tools.find(item=>item.name===name).inputSchema;
+ assert.deepEqual(schema.properties.taskId.enum,['task00','task15','task30','task45'],name);assert.ok(schema.required.includes('taskId'),name+' requires taskId');
+}
+assert.deepEqual(tools.find(item=>item.name==='prediction_batch_start').inputSchema.properties.taskId.enum,['task00','task15','task30','task45']);
+assert.ok(!tools.find(item=>item.name==='prediction_batch_start').inputSchema.required.includes('taskId'),'a dry run or the keyed protocols need no label; a real scheduled start does (checked by the handler)');
+for(const name of ['prediction_batch_validate','enrichment_runner','enrichment_status','enrichment_queue'])assert.ok(!(tools.find(item=>item.name===name).inputSchema.required||[]).includes('taskId'),name+' does not require ownership');
+for(const [name,args] of [
+ ['prediction_batch_start',{trigger:'scheduled'}],
+ ['prediction_batch_start',{trigger:'scheduled',taskId:'task99'}],
+ ['prediction_batch_start',{trigger:'manual',taskId:'task00'}],
+ ['prediction_batch_start',{trigger:'scheduled',taskId:'task00',invocationKey:'dk1.'+'a'.repeat(32),deferred:true}],
+ ['prediction_batch_manifest',{runId:'run-1'}],['prediction_heartbeat',{runId:'run-1'}],['prediction_complete',{runId:'run-1'}],
+ ['prediction_batch_hold',{runId:'run-1',epoch:1,items:[{filmId:'f1'}]}],['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'f1',prediction:{}}]}],
+ ['prediction_heartbeat',{taskId:'TASK00',runId:'run-1'}],['enrichment_runner',{taskId:'task99'}],
+]){
+ const environment=env(),refused=await tool(environment,name,args);
+ assert.equal(refused.body.result.isError,true,name+' '+JSON.stringify(args));assert.match(refused.body.result.content[0].text,/taskId/,name);
+ assert.equal(environment.BUCKET.objects.size,0,name+' refused before any storage access');
+}
+assert.ok(!(await tool(env(),'prediction_batch_start',{trigger:'scheduled',dryRun:true})).body.result.content[0].text.includes('"taskId" is required'),'a scheduled dry run needs no label');
 for(const name of ['epg_sync_start','epg_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','epg_workflow_rollover','letterboxd_claim_backfill']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,false,name);
 }
@@ -284,7 +307,7 @@ const dumpDb=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer
 async function mcpFlow(films){
  const w=await flowWorld({films});assert.equal((await w.api('queue/reconcile',{})).status,200);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- const call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);assert.equal(r.error,undefined,name);const res=r.result;return {isError:res.isError,data:JSON.parse(res.content[0].text)};};
+ const call=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);assert.equal(r.error,undefined,name);const res=r.result;return {isError:res.isError,data:JSON.parse(res.content[0].text)};};
  return {w,call};
 }
 const happyFlow=await mcpFlow(1);

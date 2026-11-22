@@ -7,6 +7,7 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const dump=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const sha=async text=>[...new Uint8Array(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,'0')).join('');
@@ -518,7 +519,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const stored=w.records.get('enrichment/batch-manifest/'+r.data.runId+'.json');
  assert.ok(stored);assert.ok(JSON.stringify(stored).length>=40000);assert.equal(stored.manifestHash,r.data.manifestHash);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- const call=async(args)=>{w.ctx.__a={name:'prediction_batch_manifest',args};w.ctx.__env=w.env;const res=(await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;assert.equal(res.isError,undefined,JSON.stringify(res).slice(0,200));assert.equal(res.structuredContent,undefined);const body=JSON.parse(res.content[0].text);assert.ok(res.content[0].text.length<24000,'part stays under the observed truncation cut, '+body.kind+'='+res.content[0].text.length);return body;};
+ const call=async(args)=>{w.ctx.__a={name:'prediction_batch_manifest',args:withTaskId('prediction_batch_manifest',args)};w.ctx.__env=w.env;const res=(await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;assert.equal(res.isError,undefined,JSON.stringify(res).slice(0,200));assert.equal(res.structuredContent,undefined);const body=JSON.parse(res.content[0].text);assert.ok(res.content[0].text.length<24000,'part stays under the observed truncation cut, '+body.kind+'='+res.content[0].text.length);return body;};
  const envelope=await call({runId:r.data.runId});assert.equal(envelope.kind,'envelope');assert.equal(w.ctx.usableBatchManifest(envelope),false);
  const profile=await call({runId:r.data.runId,part:'profile'});
  const contract=await call({runId:r.data.runId,part:'contract'});
@@ -571,7 +572,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const conflictPred={...w.prediction,predictedRating:w.prediction.predictedRating===3.5?4:3.5};
  const conflict=await w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items:[{...left[0],prediction:conflictPred}]});
  assert.equal(conflict.status,409);assert.equal(conflict.data.code,'hold_conflict');
- w.ctx.__a={name:'prediction_batch_manifest',args:{runId:a.data.runId,part:'hold'}};
+ w.ctx.__a={name:'prediction_batch_manifest',args:withTaskId('prediction_batch_manifest',{runId:a.data.runId,part:'hold'})};
  const holdPart=JSON.parse((await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result.content[0].text);
  assert.equal(holdPart.kind,'hold');assert.equal(holdPart.filmIds.length,5);
  const lost=await w.api('complete',{runId:a.data.runId,reason:'external_termination'});

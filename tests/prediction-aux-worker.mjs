@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const AUX_R2=k=>k.startsWith('enrichment/sources/')||k.startsWith('enrichment/batch-manifest/')||k==='enrichment/batch-stage.json'||k.startsWith('enrichment/stop-events/')||k.startsWith('enrichment/start-events/')||k==='enrichment/event-outbox.json';
 const auxKeys=w=>[...w.records.keys()].filter(AUX_R2);
@@ -39,7 +40,7 @@ const stepStub={do:async(name,config,fn)=>fn()};
  assert.equal(row.h,start.data.manifestHash,'the external manifestHash is unchanged');assert.deepEqual(JSON.parse(row.ids),start.data.films.map(f=>f.filmId));
  // bounded part readback through the real MCP tool, equal to the start answer
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- const tool=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
+ const tool=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
  const part=async(args)=>{const r=await tool('prediction_batch_manifest',{runId,...args});assert.equal(r.isError,undefined,JSON.stringify(r).slice(0,300));return JSON.parse(r.content[0].text);};
  const envelope=await part({part:'envelope'});
  assert.equal(envelope.kind,'envelope');assert.equal(envelope.manifestHash,start.data.manifestHash);assert.equal(envelope.parts.filter(p=>p.kind==='film').length,start.data.films.length);
@@ -110,7 +111,7 @@ const deferred=async()=>{
  const w=await flowWorld({films:6,aux:'d1'});await w.api('queue/reconcile',{});
  w.instances=[];w.env.PREDICTION_START_WORKFLOW={async create({id,params}){w.instances.push({id,params});return {id};},async get(id){if(w.instances.some(item=>item.id===id))return {id};throw new Error('instance.not_found');}};
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- w.tool=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
+ w.tool=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
  const issued=await w.tool('prediction_batch_key',{});const key=JSON.parse(issued.content[0].text).invocationKey;
  const r=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',manifestSize:3,deferred:true,invocationKey:key});
  assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));w.runId=r.data.runId;
@@ -223,7 +224,7 @@ const deferred=async()=>{
  const w=await flowWorld({films:6,aux:'d1'});
  const {start}=await w.reconcileAndStart({manifestSize:3});assert.equal(start.status,200);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- const tool=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
+ const tool=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
  const snapshot=JSON.stringify(tables_(w)),keys=[...w.records.keys()].sort().join('|');
  for(const part of ['envelope','profile','contract','hold'])await tool('prediction_batch_manifest',{runId:start.data.runId,part});
  await tool('prediction_batch_manifest',{runId:start.data.runId,part:'film',filmId:start.data.films[0].filmId});
@@ -234,7 +235,7 @@ function tables_(w){return ['prediction_batch_stage','prediction_batch_stage_hea
 // ---- 9. Review round: run + source binding, terminal + outbox atomicity, exact stage drops, manifest integrity, production write authority ----
 const runDoc=(w,runId)=>JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+runId+"'")[0].d);
 const setRunDoc=(w,runId,doc)=>sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE run_id='"+runId+"'");
-const mcp=w=>{vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);return async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};};
+const mcp=w=>{vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);return async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};};
 {
  // R1: the first source revision and the run commit in ONE batch: a fault at that batch leaves neither, a success binds the run to the head
  const w=await flowWorld({films:6,aux:'d1'});
