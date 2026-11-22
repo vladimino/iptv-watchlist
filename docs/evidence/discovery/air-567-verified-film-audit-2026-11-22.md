@@ -2,7 +2,7 @@
 
 [AIR-567](https://trello.com/c/gDgSn2M7) · 22 November 2026, read on the afternoon of that day (UTC; the prediction queue snapshot used below is 17:30:20Z) · L0/L1 read-only. Aggregates only: no programme title, observation key, TMDB title or description is in this report. Nothing was applied: no D1 or R2 write, no `catalog_policy_exclude`, no identity correction, no TMDB, EPG, Discovery, Task or flag action. The owner-review list is private and is not in this repository.
 
-**Verdict.** The verified Film catalog is **not damaged by the Channel blacklist** and the audit found **no evidenced wrong TMDB identity and no evidenced unwanted type among the current admissions**. All 12,035 distinct verified TMDB ids still have a trusted canonical Film; the Channel policy removed *shows*, not identities. A deny-only history exists for 418 Films, and for every one of them the Film, the current admission and (where present) the rating and watchlist facts are intact. Across all 17,46x verified decisions the independent tests (year, runtime, alias collision, genre/type) leave **one uncertain identity** and **four informational duration outliers**; none is caused by a `deny_all` channel. No corrective operation is proposed as a batch. What the stored data **cannot** show (adult content, sports recordings, a feature-genre concert) is listed as UNKNOWN below.
+**Verdict.** The verified Film catalog is **not damaged by the Channel blacklist** and the audit found **no evidenced wrong TMDB identity and no evidenced unwanted type among the current admissions**. All 12,035 distinct verified TMDB ids still have a trusted canonical Film; the Channel policy removed *shows*, not identities. A deny-only history exists for 418 Films, and for every one of them the Film link, the current admission and (where present) the rating and watchlist facts are present today (historical parity was not compared and is UNKNOWN). Across all 17,46x verified decisions the independent tests (year, runtime, alias collision, genre/type) leave **one uncertain identity** and **four informational duration outliers**; none is caused by a `deny_all` channel. No corrective operation is proposed as a batch. What the stored data **cannot** show (adult content, sports recordings, a feature-genre concert) is listed as UNKNOWN below.
 
 ## Pin
 
@@ -26,7 +26,22 @@ The ledger moves while Discovery runs: verified decisions read 17,462 and later 
 | Verified TMDB ids with a trusted, non-conflicting canonical Film (`film_external_id`) | **12,035 of 12,035** |
 | Of them: on the watchlist / rated admission / watchlist retention | 25 / 328 / 46 |
 
-Explainable exceptions, 19 decisions: 18 verified TMDB ids have **no admission row at all** (not superseded, no row), and one decision carries a legacy short `film_id` while the admission of the same TMDB id uses `tmdb_<id>`. Ten of the 19 are generation-1 imported decisions (`known_alias_year_runtime` or `known_epg_alias`, no observation row left) and nine are `tmdb_detail` decisions. **All 18 without an admission are canonical Films on the watchlist and carry a watchlist retention row**, so none is catalog-only. The audit did not read the code path that decides when a watchlist Film needs no admission, so the cause is not stated; the observation is that none of the 19 is an unprotected orphan.
+Explainable exceptions, 19 decisions: 18 verified TMDB ids have **no admission row at all** (not superseded, no row), and one decision carries a legacy short `film_id` while the admission of the same TMDB id uses `tmdb_<id>`. Ten of the 19 are generation-1 imported decisions (`known_alias_year_runtime`; nine of the ten have no observation row left) and nine are `tmdb_detail` decisions. **All 18 without an admission are canonical Films on the watchlist and carry a watchlist retention row**, so none is catalog-only. The audit did not read the code path that decides when a watchlist Film needs no admission, so the cause is not stated; the observation is that none of the 19 is an unprotected orphan.
+
+### Census reconciliation (one bounded `COUNT`, read 22 November 2026 17:52:14Z, Discovery generation 297536)
+
+The year and runtime tests in section 3 ran on **earlier reads** and cover only decisions that have an admission; the ledger had grown by the time of this count, so the totals differ across reads. At this one read, every verified decision falls in exactly one row:
+
+| Group (one read) | Decisions |
+| --- | ---: |
+| `verified` total | 17,526 |
+| With an admission (all `current`; 0 `superseded`) | 17,507 |
+| of which with an observation row (the runtime denominator) | 17,394 |
+| of which with no observation row (the year test's "no observation row" bucket) | 113 |
+| With no admission | 19 |
+| of which with an observation row | 10 |
+
+How the earlier census reconciles: the year test inner-joined decisions to admissions, so it excludes the no-admission decisions and its `unknown` bucket (one side of the year missing) contains **none** of them. Its 17,451 decisions equal the runtime test's 17,338 (decisions with an admission **and** an observation row, so a duration exists) plus the 113 with an admission and no observation row. The runtime test skips those 113 because they have no stored duration to test; they appear only in the year table's own bucket. The 19 no-admission decisions are in **neither** test. The 17,451 and 17,338 were read earlier than this count: the ledger gained verified decisions in between (17,462 to 17,526), and no-admission decisions read 18 (plus the one legacy `film_id` case) earlier and 19 here, so the counts of different reads are not additive.
 
 ## 2. The 20 November "178 verified deny-only" baseline
 
@@ -54,7 +69,7 @@ There is **no active verified observation with a `deny_all` slot**. The 558 deny
 | On the watchlist | 0 |
 | Rated admission | 6 |
 
-**The disappearance of a `deny_all` show is not the deletion of a Film identity or of a user fact.** For these 418 Films the admission, the canonical Film and the 6 rated admissions are unchanged by the policy; the Channel policy only decides which slots Discovery and the scan take. The 192 Films with no other evidence are catalog-only: they keep their identity and have no current show. Whether the 192 sit in the prediction queue was **not** read per Film (one sample query timed out and was not repeated); the queue as a whole covers the catalog (12,404 Films), so they are expected in the cold lane, but this is UNKNOWN for them.
+**The disappearance of a `deny_all` show is not the deletion of a Film identity or of a user fact.** For these 418 Films the admission, the canonical Film link and the 6 rated admissions are all present today; the Channel policy only decides which slots Discovery and the scan take. The 192 Films with no other evidence are catalog-only: they keep their identity and have no current show. Whether the 192 sit in the prediction queue was **not** read per Film (one sample query timed out and was not repeated); the queue as a whole covers the catalog (12,404 Films), so they are expected in the cold lane, but this is UNKNOWN for them.
 
 ## 3. (b) Wrong TMDB identity: independent tests
 
@@ -102,8 +117,8 @@ The 14 `current` cards without a feature genre were read privately: all 14 are n
 | Surface | Effect of a `deny_all` show disappearing |
 | --- | --- |
 | Finds (published generation) | The Film loses that slot only; 0 `deny_all` rows are published (AIR-565); 108 of the 418 Films still publish through permitted slots |
-| Permanent Film pages and Film/Person facts | Unchanged: every one of the 12,035 verified ids has its canonical Film |
-| User facts | Ratings (328 rated admissions among verified ids), watchlist (25), retention (46) unchanged; none of the 25 watchlist Films has a deny-only history |
+| Permanent Film pages and Film/Person facts | **Currently linked:** every one of the 12,035 verified ids has a trusted canonical Film link today. `film_person`/Person rows and Film metadata were **not** audited and no before-the-blacklist snapshot exists, so historical parity is UNKNOWN |
+| User facts | **Currently present:** 328 rated admissions, 25 watchlist Films and 46 retention rows among verified ids; none of the 25 watchlist Films has a deny-only history. No pre-filter baseline was read, so before/after parity is UNKNOWN; `ratings_document` was not read |
 | Prediction queue | Catalog-wide (12,404 Films); a Film with a current admission stays queued whether or not it has a show; per-Film lane for the 192 not read |
 
 ## 6. UNKNOWN and limits
