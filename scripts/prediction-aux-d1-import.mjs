@@ -1,0 +1,145 @@
+// Offline import / dry run of the batch_v2 auxiliary prediction state, R2 -> D1 (AIR-553; ADR 0194 decision 10). It reads a LOCAL export of the R2 objects
+// (a directory that mirrors the keys, or one JSON file {"<key>": <document>, ...}), builds the rows the Worker itself writes (the same functions of
+// src/prediction-aux-d1.js) and prints a report or guarded SQL to stdout. It opens no database, no bucket and no network connection and applies NOTHING: the
+// operator applies printed SQL only under an owner GO, inside the AIR-554 cutover plan (legacy writers closed, import verified under that exclusion, then the marker flip).
+//
+//   node scripts/prediction-aux-d1-import.mjs report <export>     (default dry run: counts, digests, states, blockers; writes nothing)
+//   node scripts/prediction-aux-d1-import.mjs sql    <export>     (guarded SQL: import only into EMPTY tables while the marker is r2, generation 0)
+//   node scripts/prediction-aux-d1-import.mjs digest <export>     (the per-family digests only)
+//
+// Exit codes: 0 ok, 1 usage, 2 blocker (nothing is printed as SQL). A source the Worker could not read is a blocker: it never becomes an empty or partial import.
+// Mapping (deterministic, no clock): stage rows keep their order; every run's sources become revision 1 and every manifest a create-only manifest (all history is kept);
+// every stop/start/skipped record becomes one outbox row: delivered and superseded as settled (settled_at = the event's own time, so an old record is compactable at once and its identity stays),
+// an undelivered record as pending (or quarantined with its attempts and since, from the pending index), `since` = the index entry's, else the event's `at`.
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import * as Aux from '../src/prediction-aux-d1.js';
+
+const STAGE_KEY='enrichment/batch-stage.json',OUTBOX_KEY='enrichment/event-outbox.json';
+const SOURCE=/^enrichment\/sources\/([A-Za-z0-9_-]{1,100})\.json$/,MANIFEST=/^enrichment\/batch-manifest\/([A-Za-z0-9_-]{1,100})\.json$/;
+const EVENT=/^enrichment\/(stop|start)-events\/(skipped-)?([A-Za-z0-9_-]{1,100})\.json$/;
+const ITEM_KEYS=['filmId','fingerprint','prediction','failure','inputHash','assessment'];
+const pick=item=>Object.fromEntries(ITEM_KEYS.filter(key=>item[key]!==undefined).map(key=>[key,item[key]]));
+const sqlq=value=>value===null||value===undefined?'NULL':typeof value==='number'?String(value):"'"+String(value).replace(/'/g,"''")+"'";
+const isObject=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
+const journalKey=event=>'events/items/'+String(9999999999999-Date.parse(event.at)).padStart(13,'0')+'-'+event.id+'.json';
+const sha=text=>crypto.createHash('sha256').update(text).digest('hex');
+const blocker=(list,code,key,detail)=>list.push({code,key,...(detail?{detail}:{})});
+
+export function readExport(target){
+ const stat=fs.statSync(target);
+ if(stat.isFile()){const data=JSON.parse(fs.readFileSync(target,'utf8'));if(!isObject(data))throw Object.assign(new Error('the export is not an object of key to document'),{blocker:true});return data;}
+ const out={};
+ const walk=dir=>{for(const name of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,name.name);if(name.isDirectory())walk(full);else if(name.name.endsWith('.json')){const key=path.relative(target,full).split(path.sep).join('/');try{out[key]=JSON.parse(fs.readFileSync(full,'utf8'));}catch{out[key]=Symbol.for('unreadable');}}}};
+ walk(target);
+ return out;
+}
+
+export async function buildPlan(objects){
+ const blockers=[],plan={stage:[],sources:[],manifests:[],outbox:[],blockers,orphanIndexEntries:[],ignored:0};
+ // held stage
+ const stage=objects[STAGE_KEY];
+ if(stage!==undefined){
+  if(!isObject(stage)||!Array.isArray(stage.items))blocker(blockers,'stage_unreadable',STAGE_KEY);
+  else{
+   const sizes=stage.items.map(item=>new TextEncoder().encode(JSON.stringify(pick(item))).length),total=Aux.stageDocBytes(sizes);
+   if(stage.items.length>Aux.AUX_LIMITS.stageItems)blocker(blockers,'stage_too_many_items',STAGE_KEY,stage.items.length);
+   if(total>Aux.AUX_LIMITS.stageBytes)blocker(blockers,'stage_over_byte_cap',STAGE_KEY,total);
+   const seen=new Set();
+   stage.items.forEach((item,index)=>{
+    if(!isObject(item)||typeof item.filmId!=='string'||!item.filmId||seen.has(item.filmId)||typeof item.itemDigest!=='string'||item.itemDigest.length<8){blocker(blockers,'stage_item_invalid',STAGE_KEY,index);return;}
+    seen.add(item.filmId);
+    plan.stage.push({filmId:item.filmId,position:index,itemDigest:item.itemDigest,heldByRunId:item.origin?.runId??null,heldAt:item.stagedAt||null,bodyBytes:sizes[index],itemJson:JSON.stringify(item)});
+   });
+   plan.stageHead={itemCount:plan.stage.length,totalBytes:total,updatedAt:stage.updatedAt||null};
+  }
+ }
+ // sources (every historical run) and manifests
+ for(const key of Object.keys(objects).sort()){
+  const value=objects[key];
+  let match;
+  if((match=SOURCE.exec(key))){
+   if(!isObject(value)){blocker(blockers,'source_unreadable',key);continue;}
+   const text=JSON.stringify(value),pieces=Aux.splitPieces(text);
+   plan.sources.push({runId:match[1],hash:await Aux.sha256(value),bytes:new TextEncoder().encode(text).length,pieces});
+  }
+  else if((match=MANIFEST.exec(key))){
+   if(!isObject(value)||value.runId!==match[1]||!Array.isArray(value.films)||!value.films.length||!isObject(value.lease)||!Number.isInteger(value.lease.epoch)||typeof value.manifestHash!=='string'||!isObject(value.profile)||!isObject(value.contract)){blocker(blockers,'manifest_unusable',key);continue;}
+   plan.manifests.push(await Aux.buildManifestRecord(match[1],value));
+  }
+  else if(!EVENT.test(key)&&key!==STAGE_KEY&&key!==OUTBOX_KEY)plan.ignored++;
+ }
+ // outbox: the records plus the pending index
+ const index=isObject(objects[OUTBOX_KEY]?.pending)?objects[OUTBOX_KEY].pending:{},indexed=new Set();
+ const seenKeys=new Set();
+ for(const key of Object.keys(objects).sort()){
+  const match=EVENT.exec(key);if(!match)continue;
+  const record=objects[key];
+  if(!isObject(record)||!isObject(record.event)||typeof record.event.id!=='string'||!record.event.id||typeof record.event.at!=='string'||!/^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(record.event.at)||record.event.at.length!==24){blocker(blockers,'event_record_unreadable',key);continue;}
+  const kind=match[2]?'skipped':match[1],identity=match[3];
+  if(match[2]&&match[1]!=='stop'){blocker(blockers,'event_record_unreadable',key);continue;}
+  const eventKey=Aux.outboxKey(kind,identity);
+  if(seenKeys.has(eventKey)){blocker(blockers,'event_identity_duplicate',key);continue;}
+  seenKeys.add(eventKey);
+  const entry=isObject(index[key])?index[key]:null;if(entry)indexed.add(key);
+  const settled=!!record.delivered;
+  const state=settled?(record.superseded?'superseded':'delivered'):entry?.quarantined?'quarantined':'pending';
+  plan.outbox.push({eventKey,kind,eventId:record.event.id,at:record.event.at,journalKey:journalKey(record.event),runId:kind==='skipped'?null:(identity),state,attempts:Number.isInteger(entry?.attempts)?entry.attempts:0,since:typeof entry?.since==='string'&&entry.since.length>=20?entry.since:record.event.at,lastAttemptAt:typeof entry?.lastAttemptAt==='string'?entry.lastAttemptAt:null,settledAt:settled?record.event.at:null,payloadDigest:await Aux.sha256(record.event),eventJson:JSON.stringify(record.event)});
+ }
+ for(const key of Object.keys(index))if(!indexed.has(key)&&EVENT.test(key))plan.orphanIndexEntries.push(key);
+ const activeSkipped=plan.outbox.filter(row=>row.kind==='skipped'&&row.state==='pending').length;
+ if(activeSkipped>Aux.AUX_LIMITS.skippedCap)blocker(blockers,'skipped_over_cap','outbox',activeSkipped);
+ plan.outbox.sort((a,b)=>a.eventKey.localeCompare(b.eventKey));
+ plan.sources.sort((a,b)=>a.runId.localeCompare(b.runId));plan.manifests.sort((a,b)=>a.runId.localeCompare(b.runId));
+ return plan;
+}
+
+export async function planReport(plan){
+ const outbox={};for(const row of plan.outbox)outbox[row.state]=(outbox[row.state]||0)+1;
+ const digest=async rows=>sha(JSON.stringify(rows));
+ return {
+  blockers:plan.blockers,
+  stage:{items:plan.stage.length,totalBytes:plan.stageHead?.totalBytes??0,digest:await digest(plan.stage.map(r=>[r.filmId,r.position,r.itemDigest,r.bodyBytes,sha(r.itemJson)]))},
+  sources:{runs:plan.sources.length,revisions:plan.sources.length,bytes:plan.sources.reduce((n,r)=>n+r.bytes,0),digest:await digest(plan.sources.map(r=>[r.runId,r.hash]))},
+  manifests:{count:plan.manifests.length,pieces:plan.manifests.reduce((n,r)=>n+r.pieces.length,0),digest:await digest(plan.manifests.map(r=>[r.runId,r.manifestHash,r.payloadDigest]))},
+  outbox:{total:plan.outbox.length,byState:outbox,skippedActivePending:plan.outbox.filter(r=>r.kind==='skipped'&&r.state==='pending').length,digest:await digest(plan.outbox.map(r=>[r.eventKey,r.eventId,r.at,r.journalKey,r.state,r.attempts,r.since,r.settledAt,r.payloadDigest]))},
+  orphanIndexEntries:plan.orphanIndexEntries.length,
+  ignoredObjects:plan.ignored,
+  writes:'none (a dry run reads a local export and prints; it opens no database)',
+ };
+}
+
+// Guarded SQL. The first statement aborts the whole file unless the marker is still r2 at generation 0 and every auxiliary table is empty (an import never merges into existing history).
+// Every statement is one line and holds at most one piece, so none exceeds the D1 statement budget.
+export function planSql(plan){
+ const empty=['prediction_batch_stage','prediction_run_source_head','prediction_run_manifest','prediction_event_outbox'].map(table=>'(SELECT count(*)=0 FROM '+table+')').join('*');
+ const lines=["UPDATE prediction_aux_cas SET ok=(SELECT count(*) FROM prediction_aux_authority WHERE id=1 AND mode='r2' AND generation=0)*"+empty+' WHERE id=1;'];
+ const stamp='1970-01-01T00:00:00.000Z';
+ for(const r of plan.stage)lines.push('INSERT INTO prediction_batch_stage (film_id, position, item_digest, held_by_run_id, held_at, body_bytes, item_json) VALUES ('+[sqlq(r.filmId),r.position,sqlq(r.itemDigest),sqlq(r.heldByRunId),sqlq(r.heldAt),r.bodyBytes,sqlq(r.itemJson)].join(', ')+');');
+ if(plan.stage.length)lines.push('UPDATE prediction_batch_stage_head SET item_count='+plan.stageHead.itemCount+', total_bytes='+plan.stageHead.totalBytes+', revision=1, updated_at='+sqlq(plan.stageHead.updatedAt)+' WHERE id=1 AND revision=0;');
+ for(const r of plan.sources){
+  lines.push('INSERT INTO prediction_run_source_revision (run_id, revision, source_hash, bytes, piece_count, created_at) VALUES ('+[sqlq(r.runId),1,sqlq(r.hash),r.bytes,r.pieces.length,sqlq(stamp)].join(', ')+');');
+  r.pieces.forEach((piece,i)=>lines.push('INSERT INTO prediction_run_source_piece (run_id, revision, piece_no, text) VALUES ('+[sqlq(r.runId),1,i,sqlq(piece)].join(', ')+');'));
+  lines.push('INSERT INTO prediction_run_source_head (run_id, current_revision, source_hash) VALUES ('+[sqlq(r.runId),1,sqlq(r.hash)].join(', ')+');');
+ }
+ for(const r of plan.manifests){
+  for(const [statement,params] of Aux.manifestStatements(r,stamp)){let n=0;lines.push(statement.replace(/\?/g,()=>sqlq(params[n++]))+';');}
+ }
+ for(const r of plan.outbox)lines.push('INSERT INTO prediction_event_outbox (event_key, kind, event_id, at, journal_key, run_id, state, attempts, since, last_attempt_at, settled_at, payload_digest, payload_compacted, event_json) VALUES ('+[sqlq(r.eventKey),sqlq(r.kind),sqlq(r.eventId),sqlq(r.at),sqlq(r.journalKey),sqlq(r.runId),sqlq(r.state),r.attempts,sqlq(r.since),sqlq(r.lastAttemptAt),sqlq(r.settledAt),sqlq(r.payloadDigest),0,sqlq(r.eventJson)].join(', ')+');');
+ return lines.join('\n')+'\n';
+}
+
+async function main(argv){
+ const [command,target]=argv;
+ if(!['report','sql','digest'].includes(command)||!target){process.stderr.write('usage: prediction-aux-d1-import.mjs report|sql|digest <r2-export>\n');return 1;}
+ let plan;
+ try{plan=await buildPlan(readExport(target));}catch(error){process.stderr.write('BLOCKER: '+error.message+'\n');return 2;}
+ const report=await planReport(plan);
+ if(plan.blockers.length){process.stderr.write('BLOCKER: '+JSON.stringify(plan.blockers)+'\n');if(command==='report')process.stdout.write(JSON.stringify(report,null,1)+'\n');return 2;}
+ if(command==='sql')process.stdout.write(planSql(plan));
+ else if(command==='digest')process.stdout.write(JSON.stringify({stage:report.stage.digest,sources:report.sources.digest,manifests:report.manifests.digest,outbox:report.outbox.digest})+'\n');
+ else process.stdout.write(JSON.stringify(report,null,1)+'\n');
+ return 0;
+}
+if(process.argv[1]&&path.resolve(process.argv[1])===path.resolve(new URL(import.meta.url).pathname))process.exitCode=await main(process.argv.slice(2));

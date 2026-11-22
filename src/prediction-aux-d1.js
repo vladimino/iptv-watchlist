@@ -327,7 +327,9 @@ export async function admitOutbox(db,authority,{kind,identity,event,journalKey,r
   if(error.code==='prediction_aux_cas'&&kind==='skipped'&&await countsAsCapRefusal(db,eventKey)){await noteCapRefusal(db,authority,stamp);return {admitted:false,refused:'cap',row:null};}
   throw error;
  }
- return {admitted:true,row:await readOutboxRow(db,eventKey)};
+ // `admitted` is a best-effort signal (the stored row carries this call's own stamp); the row itself is the truth, and a concurrent identical identity resolves in the database to ONE row.
+ const row=await readOutboxRow(db,eventKey);
+ return {admitted:!!row&&row.since===stamp&&row.payloadDigest===digest,row};
 }
 async function countsAsCapRefusal(db,eventKey){
  const counter=await one(db,"SELECT active_pending AS n FROM prediction_event_outbox_counter WHERE kind='skipped'");

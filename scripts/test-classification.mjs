@@ -1024,6 +1024,9 @@ export const FILES={
  "prediction-aux-worker.mjs": {
   "suite": "core"
  },
+ "prediction-aux-import.mjs": {
+  "suite": "core"
+ },
  "prediction-catalog-held-event.mjs": {
   "suite": "core"
  },

@@ -153,4 +153,82 @@ const deferred=async()=>{
  const lease=leaseDoc(w);
  assert.equal(count(w,'prediction_run_manifest'),1,'the manifest landed after the re-read');assert.equal(lease.prep,undefined);assert.ok(lease.clientAckAt,'the acknowledgement is preserved');assert.equal(lease.expiresAt,ack,'and so is its expiry');
 }
+
+// ---- 6. Fault matrix of the outbox: acknowledgement failure, concurrent identity, bounded drain to quarantine, recovery supersedes ----
+{
+ const w=await flowWorld({films:6,aux:'d1'});
+ const {start}=await w.reconcileAndStart({manifestSize:2});assert.equal(start.status,200);
+ // the journal answers but the acknowledgement (the settle batch) is lost: the row stays pending, a replay rewrites the same journal item and then settles it; nothing duplicates
+ let failSettle=true;const seenSettle=[];
+ w.hooks.write=statements=>{if(failSettle&&statements.some(item=>/UPDATE prediction_event_outbox SET state=/.test(item.text))){seenSettle.push(1);throw new Error('D1 unavailable for the acknowledgement');}};
+ const done=await w.api('complete',{runId:start.data.runId,reason:'external_termination'});
+ assert.equal(done.status,200,JSON.stringify(done.data).slice(0,200));assert.equal(done.data.eventPending,true,'the caller learns the event is pending');
+ assert.equal(outbox(w)[0].state,'pending');assert.equal(journal(w).length,1,'the journal item exists although the acknowledgement was lost');
+ failSettle=false;w.hooks.write=null;
+ const again=await w.reconcileAndStart({manifestSize:2});assert.equal(again.start.status,200);
+ assert.equal(outbox(w).find(r=>r.k==='stop:'+start.data.runId).state,'delivered');assert.equal(journal(w).length,1,'a replay never duplicates the journal item');
+}
+{
+ // the same request identity admitted twice at once is ONE row (the loser owns no lease); a distinct identity is another row
+ const w=await flowWorld({films:4,aux:'d1'});
+ const Aux=await import('../src/prediction-aux-d1.js');
+ const event=id=>({id:'enrichment-skipped-'+id,type:'enrichment',at:'2026-11-22T10:00:00.000Z',stage:'skipped'});
+ const admit=id=>Aux.admitOutbox(w.db,{mode:'d1',generation:1},{kind:'skipped',identity:id,event:event(id),journalKey:'events/items/'+id+'.json'});
+ const [a,b,c]=await Promise.all([admit('same'),admit('same'),admit('other')]);
+ assert.equal(Number(sql(w.file,"SELECT count(*) AS n FROM prediction_event_outbox WHERE event_key='skipped:same'")[0].n),1,'two identical requests resolve to ONE row in the database');assert.equal(count(w,'prediction_event_outbox'),2);
+ assert.equal(a.row.at,b.row.at,'both see the first `at`');assert.equal(a.row.journalKey,b.row.journalKey);assert.ok(c.row);
+}
+{
+ // a delivery that keeps failing is counted per start, quarantined at the 8th attempt, visible in status, and never starves a later event
+ const w=await flowWorld({films:6,aux:'d1'});
+ const Aux=await import('../src/prediction-aux-d1.js');
+ const real=w.env.BUCKET.put;let down=true;
+ w.env.BUCKET.put=async(key,...rest)=>{if(down&&key.startsWith('events/items/'))throw new Error('journal outage');return real(key,...rest);};
+ const first=await w.reconcileAndStart({manifestSize:1});assert.equal(first.start.status,200);
+ await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',capacity:{remainingPercent:100}});
+ assert.equal(outbox(w).filter(r=>r.k.startsWith('skipped:')).length,1);
+ await w.api('complete',{runId:first.start.data.runId,reason:'external_termination'});
+ for(let i=0;i<9;i++){const s=await w.reconcileAndStart({manifestSize:1});if(s.start.status===200)await w.api('complete',{runId:s.start.data.runId,reason:'external_termination'});}
+ const states=Object.fromEntries(outbox(w).map(r=>[r.k,r]));
+ const quarantined=Object.values(states).filter(r=>r.state==='quarantined');assert.ok(quarantined.length>=1,'a record that failed eight drains is quarantined: '+JSON.stringify(Object.values(states).map(r=>[r.k,r.state,r.attempts])));
+ assert.ok(quarantined.every(r=>r.attempts>=8));
+ const status=await Aux.outboxStatus(w.db);assert.ok(status.states.quarantined>=1,'quarantine is visible');
+ down=false;
+ const later=await w.reconcileAndStart({manifestSize:1});assert.equal(later.start.status,200);
+ await w.api('complete',{runId:later.start.data.runId,reason:'external_termination'});
+ const last=outbox(w).find(r=>r.k==='stop:'+later.start.data.runId);assert.equal(last.state,'delivered','quarantined rows never take a slot: a later event is delivered');
+ assert.ok(outbox(w).filter(r=>r.state==='quarantined').every(r=>r.j),'quarantined rows keep their payload');
+}
+{
+ // an expired predecessor is recovered under the current writer; its pending stop is superseded, never delivered twice
+ const w=await flowWorld({films:6,aux:'d1'});
+ const first=await w.reconcileAndStart({manifestSize:2});assert.equal(first.start.status,200);
+ sql(w.file,"UPDATE prediction_lease SET expires_at=1, document_json=json_set(document_json,'$.expiresAt',1) WHERE name='runner'");
+ const second=await w.reconcileAndStart({manifestSize:2});assert.equal(second.start.status,200,JSON.stringify(second.start.data).slice(0,200));
+ assert.notEqual(second.start.data.runId,first.start.data.runId);
+ const rows=outbox(w).filter(r=>r.k==='stop:'+first.start.data.runId);assert.ok(rows.length<=1);
+ assert.ok(rows.every(r=>r.state==='superseded'||r.state==='delivered'),'the predecessor has no live pending stop: '+JSON.stringify(rows.map(r=>r.state)));
+ assert.deepEqual(auxKeys(w),[]);
+}
+// ---- 7. A stale holder cannot write the stage: an expired lease at the hold fails closed ----
+{
+ const w=await flowWorld({films:6,aux:'d1'});
+ const {start}=await w.reconcileAndStart({manifestSize:3});assert.equal(start.status,200);
+ const item=start.data.films[0];
+ sql(w.file,"UPDATE prediction_lease SET expires_at=1, document_json=json_set(document_json,'$.expiresAt',1) WHERE name='runner'");
+ const hold=await w.api('batch/hold',{runId:start.data.runId,epoch:start.data.lease.epoch,items:[{filmId:item.filmId,...(item.plan==='prediction_only'?{}:{fingerprint:w.fingerprint}),prediction:w.prediction}]});
+ assert.ok(hold.status>=400,'a hold under an expired lease is refused: '+hold.status);assert.equal(count(w,'prediction_batch_stage'),0);
+}
+// ---- 8. Reads are pure: the manifest part, the hold part and the status write nothing ----
+{
+ const w=await flowWorld({films:6,aux:'d1'});
+ const {start}=await w.reconcileAndStart({manifestSize:3});assert.equal(start.status,200);
+ vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
+ const tool=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
+ const snapshot=JSON.stringify(tables_(w)),keys=[...w.records.keys()].sort().join('|');
+ for(const part of ['envelope','profile','contract','hold'])await tool('prediction_batch_manifest',{runId:start.data.runId,part});
+ await tool('prediction_batch_manifest',{runId:start.data.runId,part:'film',filmId:start.data.films[0].filmId});
+ assert.equal(JSON.stringify(tables_(w)),snapshot,'a read writes no aux row');assert.equal([...w.records.keys()].sort().join('|'),keys,'and no R2 object');
+}
+function tables_(w){return ['prediction_batch_stage','prediction_batch_stage_head','prediction_run_source_head','prediction_run_source_piece','prediction_run_manifest','prediction_run_manifest_piece','prediction_event_outbox','prediction_event_outbox_counter','prediction_event_outbox_diag','prediction_aux_authority'].map(t=>sql(w.file,'SELECT * FROM '+t));}
 console.log('prediction aux worker: ok');
