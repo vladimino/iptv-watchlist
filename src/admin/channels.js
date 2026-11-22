@@ -8,13 +8,12 @@
 // re-validates them (EpgChannelAdmin.validateSubmission, then the repository's planImport). Writes need the same-origin header, the admin action header, a JSON body,
 // an explicit confirm:true and the revision the caller read (compare-and-swap in the repository). Every D1 access fails closed: a missing or incomplete schema 32
 // answers 503 (GET: available:false when the tables are absent) and nothing is created, migrated or imported implicitly.
-// What is stored here is STAGED policy until the owner sets EPG_CHANNEL_POLICY=on: only then does a scan read it (the next natural EPG generation is the first effect). A save or an
+// Since AIR-565 (ADR 0197) every EPG scan reads this policy unconditionally (the retired EPG_CHANNEL_POLICY switch no longer exists); a saved change applies to the next natural EPG generation. A save or an
 // import never starts EPG sync, Discovery, TMDB or any task.
 const CHANNEL_ACTION='epg_channel_admin';
 const CHANNEL_PAGE_DEFAULT=50,CHANNEL_PAGE_MAX=200;
-const CHANNEL_ACTIVATION_OFF={state:'not_active',note:'Staged policy only: the Channel policy flag EPG_CHANNEL_POLICY is not on, so no scan reads it. A change takes effect with the first natural EPG generation after the owner activates it.'};
-const CHANNEL_ACTIVATION_ON={state:'active',note:'EPG_CHANNEL_POLICY is on: every EPG scan reads one snapshot of this policy. A saved change applies to the next natural EPG generation; a running scan keeps its revision.'};
-function channelActivation(env){return env?.EPG_CHANNEL_POLICY==='on'?CHANNEL_ACTIVATION_ON:CHANNEL_ACTIVATION_OFF;}
+const CHANNEL_ACTIVATION={state:'active',note:'Every EPG scan reads one snapshot of this policy. A saved change applies to the next natural EPG generation; a running scan keeps its revision.'};
+function channelActivation(){return CHANNEL_ACTIVATION;}
 const CHANNEL_REQUEST_ID=/^[A-Za-z0-9_-]{8,80}$/;
 const CHANNEL_STATUS={invalid:400,unknown_channel:404,unknown_category:400,conflict:409,unavailable:503};
 

@@ -1,12 +1,12 @@
 # ADR 0191: The EPG scan applies one pinned Channel policy snapshot in three modes behind an owner flag, degrades instead of blocking, and registers declared XMLTV channels at the declaration boundary
 
-**Status:** Accepted  
+**Status:** Accepted; decision 1 (the flag) and the production `legacy` mode are superseded by [ADR 0197](0197-retire-epg-channel-policy-flag.md); decisions 2-7 stand  
 **Original decision date:** 2026-11-21  
 **Recorded at:** 2026-11-21  
 **Approval source:** [Owner decision comment on the AIR-564 card](https://trello.com/c/omIQl2Lh#comment-6b01fc7850556794cccf1892) (21 Nov 2026, Europe/Madrid): options A1, B2, C1, D1 and the clarified E3+ ("да, пожалуй E3+ выглядит самым разумным решением. одобряю"). The accepted combination replaces the first proposal of this ADR (refuse publication on a bad snapshot, publish-phase registration, a dynamic broadcast-floor coefficient).  
 **Related work:** [AIR-564](https://trello.com/c/omIQl2Lh); builds on [ADR 0187](0187-epg-channel-authority.md), [ADR 0142](0142-epg-owned-generation-addressed-discovery-slots.md) and [ADR 0158](0158-epg-title-alias-provenance.md)  
 **Supersedes:** None  
-**Superseded by:** None
+**Superseded by:** [ADR 0197](0197-retire-epg-channel-policy-flag.md) (in part: the activation flag only)
 
 ## Context
 

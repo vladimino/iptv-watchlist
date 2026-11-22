@@ -1,6 +1,5 @@
 // EPG Channel authority (schema v32, migrations/0032_epg_channel_authority.sql, ADR 0187). Since AIR-562 the Worker bundles this module for the owner-only
-// Channel admin (src/admin/channels.js). Since AIR-564 the scan path reads it through materializePolicies, but only while the Worker flag EPG_CHANNEL_POLICY is `on` (default off): until
-// that separately approved activation the policy it stores is staged and no scan reads it. Tests load it as an ES module.
+// Channel admin (src/admin/channels.js). Since AIR-564 the scan path reads it through materializePolicies, unconditionally (AIR-565, ADR 0197: the EPG_CHANNEL_POLICY switch is retired). Tests load it as an ES module.
 //
 // Effective policy of a channel:  owner policy override > owner category policy > provider category policy > 'known_only'.  It is derived here and never stored.
 //  - a channel without an override takes the policy of the category the owner assigned to it, else of the category the provider (M3U) classified it into;

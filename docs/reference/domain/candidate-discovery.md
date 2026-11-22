@@ -97,7 +97,7 @@ The cheap pass touches the Film of a verified observation and, since AIR-503, le
 
 ## Channel policy in the EPG scan
 
-When `EPG_CHANNEL_POLICY` is `on`, `scanEPG` receives an in-memory `Map<channelId, {policy, basis}>` built once from one Channel snapshot ([Channel reference](epg-channel.md), [ADR 0187](../../adr/0187-epg-channel-authority.md)). Each in-window programme does one lookup by its XMLTV channel id (never by name), before Film matching and before any candidate is built:
+On every production EPG scan (the switch `EPG_CHANNEL_POLICY` is retired, [ADR 0197](../../adr/0197-retire-epg-channel-policy-flag.md)), `scanEPG` receives an in-memory `Map<channelId, {policy, basis}>` built once from one Channel snapshot ([Channel reference](epg-channel.md), [ADR 0187](../../adr/0187-epg-channel-authority.md)). Each in-window programme does one lookup by its XMLTV channel id (never by name), before Film matching and before any candidate is built:
 
 | Policy | Effect on a programme |
 | --- | --- |
