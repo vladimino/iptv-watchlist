@@ -128,6 +128,18 @@ const key=n=>'owner-key-'+String(n).padStart(8,'0');
  assert.equal((await w.admin('preview',{method:'POST',body:{}})).status,405);
 }
 
+// 2a'. ADR 0201: a stored Letterboxd id is admitted through the catalog film of the same trusted canonical Film, never by title or year.
+{
+ const w=await scoredWorld(6);
+ sql(w.file,`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:LIDX',1,'tmdb:3','Orig','${T}');UPDATE film_external_id SET film_id='film:LIDX' WHERE film_id='film:tmdb:3' AND scheme='tmdb';INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:LIDX','letterboxd','LIDX',1,0,NULL),('film:LIDY','letterboxd','LIDY',1,0,NULL)`.replace(",('film:LIDY','letterboxd','LIDY',1,0,NULL)",''));
+ const r=await w.admin('preview?films=LIDX,LIDZ&mode=prediction_only');
+ assert.equal(r.status,200,JSON.stringify(r.data));
+ const by=Object.fromEntries(r.data.films.map(f=>[f.filmId,f]));
+ assert.notEqual(by.LIDX.reason,'not_admitted','the catalog film of the same trusted Film admits the stored Letterboxd id');
+ assert.equal(by.LIDX.canonicalFilmId,'film:LIDX');
+ assert.equal(by.LIDZ.reason,'not_admitted','an id with no trusted canonical Film stays outside admission');
+}
+
 // 2b. Confirm, replay, conflict; the ordinary runner re-scores exactly the cohort; the intent is satisfied; nothing loops.
 {
  const w=await scoredWorld(6);

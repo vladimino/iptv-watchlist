@@ -346,7 +346,7 @@ Per-film outcomes, in the order they are checked:
 
 | Outcome | Reasons |
 | --- | --- |
-| `blocked` | `profile_missing`, `film_unreadable`, `not_admitted` (outside the watchlist, programme and admitted catalog: v1 fails closed), `identity_unavailable`, `identity_absent`, `identity_retired` (a redirect), `retry_exhausted` (the budget is never reset), `token_unbindable` |
+| `blocked` | `profile_missing`, `film_unreadable`, `not_admitted` (outside the watchlist, programme and admitted catalog: v1 fails closed; a stored Letterboxd id is admitted through the catalog film `tmdb_<n>` of the same trusted canonical Film, [ADR 0201](../../adr/0201-recovery-admits-stored-letterboxd-id-via-catalog-film.md)), `identity_unavailable`, `identity_absent`, `identity_retired` (a redirect), `retry_exhausted` (the budget is never reset), `token_unbindable` |
 | `conflict` | `identity_conflict` (an untrusted, conflicting or second trusted claim), `identity_mismatch` (the stored typed id is not the Film's trusted claim; no title/year matching), `pointer_absent`, `pointer_mismatch` (the D1 pointer or fingerprint is not the version just read), `active_intent` |
 | `unchanged` | `prediction_absent`, `not_current`: the ordinary rule already queues the film |
 | `eligible` | the version is current, bound and still the D1 pointer |

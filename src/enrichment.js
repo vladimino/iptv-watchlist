@@ -1710,7 +1710,10 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null,opt
  // ADR 0186 (AIR-569): with the Watchlist marker `d1` the queue's membership is the current snapshot, not the membership of the completed EPG generation (the undefined function is the legacy path).
  const currentMembership=authoritative&&typeof watchlistQueueMembership==='function'?await watchlistQueueMembership(env,safeSource):null;
  const membership=authoritative?(currentMembership||safeSource):Array.isArray(watchlistDoc?.films)?{films:watchlistDoc.films}:{films:safeSource.films};
- const films=allEnrichmentFilms(membership,catalog).map(film=>authoritative?withCompletedShows(film,completed,safeSource.runId,completedOnly):{...film,shows:[],epgLastAiring:null});
+ const catalogFilms=allEnrichmentFilms(membership,catalog),queueIds=new Set(catalogFilms.map(f=>String(f.id)));
+ // ADR 0201: an active recovery intent names a stored id; its catalog film carries it, so the index, the intent and the manifest agree on one key.
+ const storedAliases=await storedIdCatalogAliases(env,recovery.activeIds().filter(id=>!queueIds.has(id))),aliasOf=new Map([...storedAliases].map(([id,key])=>[key,id]));
+ const films=catalogFilms.map(film=>aliasOf.has(String(film.id))?{...film,id:aliasOf.get(String(film.id))}:film).map(film=>authoritative?withCompletedShows(film,completed,safeSource.runId,completedOnly):{...film,shows:[],epgLastAiring:null});
  const watchlistIds=new Set(eligibleEnrichmentFilms(membership).map(f=>String(f.id)));
  if(capture)capture.films=films;
  let priorityBasis='completed',priorityProgrammeRunId=safeSource.runId;
@@ -1916,6 +1919,21 @@ async function currentPredictionQueue(env,report,profile,trigger,{force=false,fa
   throw error;
  }
 }
+// ADR 0201 (AIR-478). A film the owner watched leaves the watchlist, so the admitted catalog holds it under `tmdb_<n>` while its prediction state
+// stays under the stored Letterboxd id. For the stored ids the caller names (never a scan), the trusted canonical Film bridge (no title or year
+// matching) gives the catalog id of the same Film. Absent, retired, conflicting or unreadable identity yields no alias: the film stays unadmitted.
+const STORED_LID=/^[A-Za-z0-9]{1,16}$/;
+async function storedIdCatalogAliases(env,ids){
+ const aliases=new Map();
+ if(typeof CanonicalCatalogReader==='undefined'||typeof CanonicalCatalogReader.catalogFilmIdentityBridge!=='function')return aliases;
+ for(const id of [...new Set((ids||[]).map(String))].filter(id=>STORED_LID.test(id)&&!id.startsWith('tmdb_')).slice(0,100)){
+  try{
+   const identity=await CanonicalCatalogReader.catalogFilmIdentityBridge(env,id);
+   if(identity?.state==='ok'&&identity.lid===id&&/^[1-9]\d{0,11}$/.test(String(identity.tmdb??'')))aliases.set(id,'tmdb_'+identity.tmdb);
+  }catch{}
+ }
+ return aliases;
+}
 // Films by id, for the metadata of a batch: the watchlist first, then the admitted catalog films by indexed id lookup (never the whole
 // catalog). Outside D1 authority the R2 catalog serves them.
 async function readFilmsById(env,report,ids,known=undefined){
@@ -1926,7 +1944,18 @@ async function readFilmsById(env,report,ids,known=undefined){
  const authority=typeof DiscoveryAuthority==='undefined'?null:await DiscoveryAuthority.readAdmissionsById(env,rest);
  if(authority?.handled){for(const [id,film] of authority.films)found.set(id,film);}
  else{const catalog=await loadJSON(env,'epg/discovered-films.json')||{};for(const id of rest){const film=catalog[id]||Object.values(catalog).find(f=>String(f?.id)===id);if(film)found.set(id,film);}}
- const still=rest.filter(id=>!found.has(id));
+ let still=rest.filter(id=>!found.has(id));
+ if(still.length){
+  const aliases=await storedIdCatalogAliases(env,still);
+  if(aliases.size){
+   const keys=[...new Set(aliases.values())],viaCatalog=new Map();
+   const authority=typeof DiscoveryAuthority==='undefined'?null:await DiscoveryAuthority.readAdmissionsById(env,keys);
+   if(authority?.handled){for(const [key,film] of authority.films)viaCatalog.set(key,film);}
+   else{const catalog=await loadJSON(env,'epg/discovered-films.json')||{};for(const key of keys){const film=catalog[key]||Object.values(catalog).find(f=>String(f?.id)===key);if(film)viaCatalog.set(key,film);}}
+   for(const [id,key] of aliases){const film=viaCatalog.get(key);if(film)found.set(id,{...film,id});}
+   still=still.filter(id=>!found.has(id));
+  }
+ }
  if(still.length&&!showsAuthoritative(await loadJSON(env,'sync.json'),report&&Array.isArray(report.films)?report:{runId:report?.runId||null,films:[]})){
   const list=await loadJSON(env,'watchlist.json');
   if(Array.isArray(list?.films)){const extra=new Map(eligibleEnrichmentFilms({films:list.films}).map(f=>[String(f.id),f]));for(const id of still){const film=extra.get(id);if(film)found.set(id,film);}}
