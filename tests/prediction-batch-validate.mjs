@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {nonFunctional} from './suite-gate.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const dump=f=>{const r=sqliteSync([f,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
@@ -16,7 +17,7 @@ const w=await flowWorld({films:14});
 sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','A crew plans a robbery and a detective closes in.','$.genres',json('[\"Crime\",\"Thriller\"]'),'$.runtime',120,'$.directors',json('[\"A Director\"]'),'$.actors',json('[\"An Actor\"]'))");
 assert.equal((await w.api('queue/reconcile',{})).status,200);
 vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
-const call=async(name,args,env=w.env)=>{w.ctx.__a={name,args};w.ctx.__env=env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,text:res.content[0].text,data:res.isError?null:JSON.parse(res.content[0].text),structured:res.structuredContent};};
+const call=async(name,args,env=w.env)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,text:res.content[0].text,data:res.isError?null:JSON.parse(res.content[0].text),structured:res.structuredContent};};
 const plain=v=>JSON.parse(JSON.stringify(v));
 const EXECUTION=plain(vm.runInContext('EXECUTION',w.ctx)),GENERAL=plain(vm.runInContext('GENERAL_EXECUTION',w.ctx));
 const item=(basis,refs,confidence='medium')=>({basis,refs,confidence});

@@ -896,11 +896,35 @@ const DEFERRED_RUN_PATTERN=/^dk-[0-9a-f]{32}$/;
 const deferredRunIdOf=keyHash=>'dk-'+keyHash.slice(0,32);
 const START_ATTEMPT_PREFIX=START_OUTCOME_PREFIX+'attempt/';
 const START_POLL_MS=5000;
+// ADR 0195 / AIR-573. The four standing Scheduled Tasks carry a fixed, non-secret `taskId` in their installed prompt (`task00`, `task15`, `task30`, `task45`). It is a logical owner label stored beside the run id
+// and epoch of a run and its lease, never a security identity (Cloudflare Access and the JWT are unchanged) and never a replacement for the run id, the epoch or the compare-and-swap fencing.
+const TASK_IDS=['task00','task15','task30','task45'];
+const isTaskId=value=>typeof value==='string'&&TASK_IDS.includes(value);
+const taskKeyHashOf=taskId=>contentHash({purpose:'iptv-batch-start-task',taskId});
+// The answer carries no `status` field on purpose: `observedPrediction` records a stop for a `blocked` status, and a foreign call must never stop the owner's run.
+// `taskOwnerGate` runs the same refusal BEFORE the step recorder and the writer lease for heartbeat and complete, so a foreign call writes nothing at all (no diagnostics step, no writer lease); the handlers repeat it under the writer.
+const taskOwnerGate=async(env,body,work)=>{
+ if(isObject(body)&&typeof body.runId==='string'&&body.runId.length<=100){
+  const run=await checkedRun(env,body.runId);
+  const refused=run?taskOwnerRefusal(run.taskId,body.taskId,run.runId):(body.taskId!==undefined&&!isTaskId(body.taskId)?taskOwnerRefusal(null,body.taskId,null):null);
+  if(refused)return refused;
+ }
+ return work();
+};
+// A run-scoped call must come from the owner label of its run: a run started by a Task is operated only by that Task (a caller without a label is refused too); a run without a label is operated only by a caller without one.
+// A foreign or missing label is refused before any write and the answer never names the owner or carries a payload of the run.
+const taskOwnerRefusal=(owner,caller,runId)=>{
+ if(caller!==undefined&&!isTaskId(caller))return json({error:'Invalid taskId',code:'invalid_task_id'},400);
+ // Presence must match and the values must be equal: a labelled run is operated only by its own label, and a run without a label (manual, keyless, keyed or deferred start) only by a caller without one, as before.
+ // A Task can therefore neither operate nor read a label-free run, whatever runId and epoch it knows.
+ if((owner??null)===(caller??null))return null;
+ return json({error:'wrong_owner',code:'wrong_owner',reason:'wrong_owner',runId:isText(runId,100)?runId:null,...scheduledRunFields()},409);
+};
 // While a deferred run is still being prepared (`prep`) the claim, the persist gate and every renewal made by the preparation hold the short lease; only a renewal by the client (a heartbeat,
 // `clientAckAt`) restores the full TTL. A start without `prep` (ordinary, keyless, synchronous keyed) is unchanged.
 const leaseTtlOf=old=>old?.prep&&!old?.clientAckAt?READY_LEASE_TTL_MS:RUNNER_LEASE_TTL;
 // The correlation fields of a lease: they survive every renewal, heartbeat, gate write and conversion, and only a release drops them (ADR 0188 section 3).
-const leaseCorrelation=old=>{const out={};if(old?.phase)out.phase=old.phase;if(old?.keyHash)out.keyHash=old.keyHash;if(old?.argsHash)out.argsHash=old.argsHash;if(old?.clientSubmitAt)out.clientSubmitAt=old.clientSubmitAt;if(old?.deferred)out.deferred=true;if(old?.prep)out.prep=true;if(old?.clientAckAt)out.clientAckAt=old.clientAckAt;return out;};
+const leaseCorrelation=old=>{const out={};if(old?.phase)out.phase=old.phase;if(old?.keyHash)out.keyHash=old.keyHash;if(old?.taskId)out.taskId=old.taskId;if(old?.argsHash)out.argsHash=old.argsHash;if(old?.clientSubmitAt)out.clientSubmitAt=old.clientSubmitAt;if(old?.deferred)out.deferred=true;if(old?.prep)out.prep=true;if(old?.clientAckAt)out.clientAckAt=old.clientAckAt;return out;};
 // The lease value carries `epoch`, the ownership epoch of batch runner v2 (ADR 0122): set once when a run acquires or takes over the lease and kept by every
 // renewal, heartbeat, checkpoint and release, so the next acquire increments it. It is never the CAS revision (the D1 row token or the object etag), which
 // changes on every write and stays inside the Worker. A renewal that loses the compare-and-swap to another write of the same lease is read again and retried a
@@ -916,7 +940,7 @@ async function runnerLease(env,runId,operation='renew',claim=null,expectEpoch=nu
   // A release that names its epoch never touches the lease of another epoch of the same run id (a deferred run id is derived from its key).
   if(operation==='release'&&expectEpoch!==null&&previousEpochOf(old)!==expectEpoch)return {status:'lease_lost',runId:old?.runId||null,reason:'epoch'};
   const previousEpoch=previousEpochOf(old),epoch=operation==='acquire'?(previousEpoch??0)+1:previousEpoch;epochSeen=previousEpoch;
-  const value={owner:runId,runId,heartbeatAt:new Date(now).toISOString(),expiresAt:operation==='release'?0:now+(operation==='acquire'&&claim?START_CLAIM_TTL_MS:RUNNER_LEASE_TTL),...(epoch!==null?{epoch}:{}),...(operation!=='acquire'&&old?.submitGate?{submitGate:old.submitGate}:{}),...(operation==='acquire'&&claim?{phase:'claim',keyHash:claim.keyHash,argsHash:claim.argsHash,...(claim.deferred?{deferred:true,prep:true}:{})}:operation==='renew'?{...leaseCorrelation(old),clientAckAt:new Date(now).toISOString()}:{})};
+  const value={owner:runId,runId,heartbeatAt:new Date(now).toISOString(),expiresAt:operation==='release'?0:now+(operation==='acquire'&&claim?START_CLAIM_TTL_MS:RUNNER_LEASE_TTL),...(epoch!==null?{epoch}:{}),...(operation!=='acquire'&&old?.submitGate?{submitGate:old.submitGate}:{}),...(operation==='acquire'&&claim?{phase:'claim',keyHash:claim.keyHash,argsHash:claim.argsHash,...(claim.taskId?{taskId:claim.taskId}:{}),...(claim.deferred?{deferred:true,prep:true}:{})}:operation==='renew'?{...leaseCorrelation(old),clientAckAt:new Date(now).toISOString()}:{})};
   const saved=head?await PredictionD1.writeLease(env,head,value):await env.BUCKET.put(RUNNER_LEASE_KEY,JSON.stringify(value),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
   if(saved===null){
    if(operation!=='acquire'&&attempt<RUNNER_LEASE_ATTEMPTS)continue;
@@ -932,6 +956,7 @@ async function runnerLease(env,runId,operation='renew',claim=null,expectEpoch=nu
 }
 async function runnerHeartbeat(env,body){
  const run=await checkedRun(env,body?.runId);if(!run||run.status!=='running')return json({error:'Unknown or completed run'},409);
+ {const foreign=taskOwnerRefusal(run.taskId,body.taskId,run.runId);if(foreign)return foreign;}
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);
  // A batch v2 run belongs to one ownership epoch; a lease of another epoch is not this run's (ADR 0122).
  if(run.protocol===BATCH_PROTOCOL&&Number.isInteger(run.epoch)&&lease.epoch!==run.epoch)return json({status:'lease_lost',runId:run.runId},409);
@@ -1458,7 +1483,8 @@ async function observedPrediction(env,body,work,stage,requestId,opts={}){
  if(opts.fence&&(data.code==='start_claim_lost'||data.code==='start_storage_error'))return response;
  const normal=['queue_empty','eligible_queue_empty','retry_backoff'];
  // A start that cannot write the previous run's retries took no lease and created no run: it is not a stop of anything.
- const stop=data.code==='prediction_retry_heal_pending'||data.code==='prediction_catalog_held'||data.recoverable===true?null:data.status==='lease_lost'?'lease_lost':data.mustComplete&&!normal.includes(data.stopReason)?data.stopReason:data.status==='blocked'&&data.reason!=='retry_backoff'?data.reason:response.status>=500?'storage_error':response.status===409&&data.error?.includes('Profile changed')?'profile_changed':stage==='start'&&response.status===409&&data.error?'model_unavailable':null;
+ // ADR 0195: a foreign Task's call (`wrong_owner`) is the caller's error, never a stop of the real owner's run.
+ const stop=data.code==='prediction_retry_heal_pending'||data.code==='prediction_catalog_held'||data.code==='wrong_owner'||data.recoverable===true?null:data.status==='lease_lost'?'lease_lost':data.mustComplete&&!normal.includes(data.stopReason)?data.stopReason:data.status==='blocked'&&data.reason!=='retry_backoff'?data.reason:response.status>=500?'storage_error':response.status===409&&data.error?.includes('Profile changed')?'profile_changed':stage==='start'&&response.status===409&&data.error?'model_unavailable':null;
  const errorClass=stop==='lease_lost'||stop==='storage_error'||stop==='format_error_storm'?stop:null;
  const produced=predictionStep({step:stage,requestId:correlation,attemptedAt,completedAt:new Date().toISOString(),outcome:'produced',httpStatus:response.status,elapsedMs:Date.now()-started,errorClass});
  if(stop){const id=stopId();const final=await recordRunStop(env,id,stop,stopFallback(data));await safeAppendStep(env,traceId||id,produced);return withPredictionCorrelation(json({...data,...final,stage:stage==='start'?'blocked':final.stage,status:stage==='start'?'blocked':data.status||'partial'},response.status),correlation);}
@@ -2685,6 +2711,11 @@ function validateBatchStartBody(body){
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
  if(body.invocationKey!==undefined&&(typeof body.invocationKey!=='string'||!INVOCATION_KEY_PATTERN.test(body.invocationKey)))return json({error:'Invalid invocationKey'},400);
  if(body.deferred!==undefined&&typeof body.deferred!=='boolean')return json({error:'Invalid deferred'},400);
+ if(body.taskId!==undefined){
+  // ADR 0195: a Task label belongs to a scheduled start only, never to a manual one. With the keyed protocols of ADR 0188 / 0193 it is only a correlation (the key still decides the join).
+  if(!isTaskId(body.taskId))return json({error:'Invalid taskId',code:'invalid_task_id'},400);
+  if(body.trigger!=='scheduled')return json({error:'taskId is accepted only with trigger scheduled',code:'task_id_requires_scheduled'},400);
+ }
  if(body.deferred===true){
   // A deferred start needs the key the server issued; it is never a dry run and never a pin.
   if(typeof body.invocationKey!=='string'||!DEFERRED_KEY_PATTERN.test(body.invocationKey))return json({error:'A deferred start needs the invocationKey issued by prediction_batch_key',code:'invalid_deferred_key'},400);
@@ -2940,7 +2971,7 @@ async function auxStartReadyWithManifest(env,aux,claim,token,answer){
 // A same-key repeat of the live run: the stored start answer if it exists, else a bounded wait and then `start_pending`. It writes nothing and never extends a TTL. The holder is read again
 // immediately before anything is returned: the current lease must still be live, still carry this key and argument hash, and no client submit may have closed the window (ADR 0188).
 async function batchJoin(env,live,tally,ids,refuse){
- const joinable=async()=>{const current=await loadJSON(env,RUNNER_LEASE_KEY);return current?.runId===live.runId&&Number(current.expiresAt)>Date.now()&&current.keyHash===ids.keyHash&&current.argsHash===ids.argsHash&&!current.clientSubmitAt;};
+ const joinable=async()=>{const current=await loadJSON(env,RUNNER_LEASE_KEY);return current?.runId===live.runId&&Number(current.expiresAt)>Date.now()&&current.keyHash===ids.keyHash&&current.argsHash===ids.argsHash&&(ids.taskId?current.taskId===ids.taskId&&current.epoch===live.epoch:!current.clientSubmitAt);};
  const until=Date.now()+JOIN_WAIT_MS,key=ENRICHMENT_KEY+'batch-manifest/'+live.runId+'.json';
  for(;;){
   const stored=await loadJSON(env,key);
@@ -2951,7 +2982,7 @@ async function batchJoin(env,live,tally,ids,refuse){
  }
  if(!await joinable())return refuse();
  tally.joined=1;tally.startPending=1;
- return json({status:'start_pending',runId:live.runId,epoch:live.epoch??null,retryAfterMs:2000,...scheduledRunFields()});
+ return json({status:'start_pending',runId:live.runId,epoch:live.epoch??null,retryAfterMs:2000,...(ids.taskId?{taskId:ids.taskId,read:{tool:'prediction_batch_manifest',part:'envelope',pendingCode:'manifest_pending'}}:{}),...scheduledRunFields()});
 }
 // ---- ADR 0193: deferred start. The start accepts a bounded claim and answers a compact receipt within seconds; the heavy preparation runs in a Cloudflare Workflow instance (one per run id) that
 // does not depend on the MCP request's lifetime, and the caller reads the immutable manifest through `prediction_batch_manifest`. ----
@@ -3013,7 +3044,7 @@ async function deferredStart(env,clean,requestId,tally,{keyHash,argsHash}){
  if(known)return known;
  if(!bound)return unavailable('deferred_start_unavailable');
  forgetAuthority(env);
- const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash,deferred:true})));
+ const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash,deferred:true,taskId:clean.taskId})));
  if(taken.status!=='owned'){
   const holder=await loadJSON(env,RUNNER_LEASE_KEY);
   if(holder?.runId===runId&&Number(holder.expiresAt)>Date.now()&&holder.keyHash===keyHash&&holder.argsHash===argsHash&&!holder.clientSubmitAt)return batchReceiptFor(env,holder,tally,async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId}));
@@ -3078,9 +3109,39 @@ async function predictionStartPrepare(env,payload){
 async function runPredictionStartWorkflow(env,payload,step){
  return step.do('prepare',{retries:{limit:0,delay:'1 second',backoff:'constant'},timeout:'4 minutes'},()=>timedBatchStep(env,'batch_prepare',{runId:payload?.runId},payload?.requestId,timed=>predictionStartPrepare(timed,payload)));
 }
+// ADR 0195. The scheduled start of one of the four standing Tasks. It reuses the claim, the early lease and the join of ADR 0188, with the Task label as the correlation instead of a per-invocation key:
+//  - another label (or a run without one) holds a live lease: `already_running`, nothing assigned;
+//  - the same label holds it with the same start arguments: the SAME stored manifest (also after the first client submit, while that lease lives), or `start_pending` while the first start still prepares it;
+//  - the same label with other start arguments: an explicit `task_args_mismatch`, not a foreign owner;
+//  - no live lease (released or expired): a new run, never the old one.
+async function taskStart(env,clean,requestId,tally){
+ const taskId=clean.taskId,keyHash=await taskKeyHashOf(taskId),argsHash=await contentHash(startArgsOf(clean));
+ const runId=crypto.randomUUID();
+ forgetAuthority(env);
+ const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash,taskId})));
+ if(taken.status!=='owned'){
+  const live=await loadJSON(env,RUNNER_LEASE_KEY);
+  if(live?.runId&&Number(live.expiresAt)>Date.now()&&live.taskId===taskId){
+   tally.taskRepeat=1;
+   if(live.argsHash!==argsHash){tally.keyArgsMismatch=1;return json({status:'blocked',reason:'task_args_mismatch',code:'task_args_mismatch',runId:live.runId,epoch:live.epoch??null,...scheduledRunFields()},409);}
+   return batchJoin(env,live,tally,{keyHash,argsHash,taskId},async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId:live.runId}));
+  }
+  return (await batchTurnedAway(env,clean,tally,requestId))||json(taken);
+ }
+ tally.keyed=1;
+ const claim={runId,epoch:taken.epoch,keyHash,argsHash,lease:taken,converted:false};
+ try{return await batchStartCore(env,clean,requestId,tally,claim);}
+ catch(error){if(claim.converted)await runnerLease(env,runId,'release').catch(()=>null);throw error;}
+ finally{if(!claim.converted)await runnerLease(env,runId,'release').catch(()=>null);}
+}
 async function batchStartWork(env,body,requestId,tally){
  const bad=validateBatchStartBody(body);if(bad)return bad;
  const notD1=await batchRequiresD1(env);if(notD1)return notD1;
+ if(body.taskId!==undefined&&body.invocationKey===undefined){
+  // A dry run reads and writes nothing and never claims: the label is not used. A real start by a Task takes the owner-labelled path.
+  if(body.dryRun===true){const {taskId,...plain}=body;void taskId;return batchStartCore(env,plain,requestId,tally,null);}
+  return taskStart(env,body,requestId,tally);
+ }
  if(typeof body.invocationKey!=='string')return batchStartCore(env,body,requestId,tally,null);
  const {invocationKey,...clean}=body;
  if(clean.dryRun===true)return batchStartCore(env,clean,requestId,tally,null);
@@ -3088,7 +3149,7 @@ async function batchStartWork(env,body,requestId,tally){
  if(clean.deferred===true)return deferredStart(env,clean,requestId,tally,{keyHash,argsHash});
  const runId=crypto.randomUUID();
  forgetAuthority(env);
- const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash})));
+ const taken=await timedStage(env,'start_claim',()=>atStage('start_claim',()=>runnerLease(env,runId,'acquire',{keyHash,argsHash,taskId:clean.taskId})));
  if(taken.status!=='owned'){
   const live=await loadJSON(env,RUNNER_LEASE_KEY);
   if(live?.runId&&live.expiresAt>Date.now()&&live.keyHash===keyHash){
@@ -3250,6 +3311,7 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
     const baseline=Object.fromEntries(selected.map(item=>[item.filmId,item.state.predictions?.current?.generatedAt||null]));
     const run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,protocol:BATCH_PROTOCOL,epoch:lease.epoch??null,manifestHash:manifest.hash,manifestBytes:batchBytes(answer),manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,status:'running',mode:'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,diagnosticStartedAt:attempt.diagnosticStartedAt,leaseAcquiredAt:lease.heartbeatAt||createdAt,startResult:attempt.startResult||(recovered?.recoverable?'recovered_stale_lease':'running'),lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,fingerprintRegistryDigest:manifest.body.contract.registryDigest,eligibleCount:(queue.hotCount||0)+(queue.coldCount||0),batchSize:selected.length,adaptivePlan:plan,selectedIds:[...newIds],batchIds:[...newIds],selectionKind,baseline,failures:{},results:{}};
     if(claimed){run.keyHash=claim.keyHash;run.argsHash=claim.argsHash;}
+    if(isTaskId(body.taskId))run.taskId=body.taskId;
     if(!await held())return superseded();
     const sources=Object.fromEntries(selected.map(item=>[item.filmId,modelMetadata(item.film)]));
     // ADR 0194 decision 4: with the sources in D1 the first revision, its head and the run's binding (`sourceRevision`, `sourceHash`) commit in the run's OWN batch, under the runner-lease fence; a crash
@@ -3587,6 +3649,7 @@ async function batchSubmit(env,body,requestId){
  const notD1=await batchRequiresD1(env);if(notD1)return notD1;
  if(body.dryRun===true)return batchSubmitDryRun(env,body);
  const run=await checkedRun(env,body.runId);if(!run)return json({error:'Unknown run'},404);
+ {const foreign=taskOwnerRefusal(run.taskId,body.taskId,run.runId);if(foreign)return foreign;}
  if(body.useHeld===true){
   const held=await loadJSON(env,BATCH_STAGE_KEY);
   const owned=(Array.isArray(held?.items)?held.items:[]).filter(item=>run.selectedIds.includes(item.filmId)&&!SETTLED_STATUSES.includes(run.results?.[item.filmId])&&!run.failures?.[item.filmId]);
@@ -3880,6 +3943,7 @@ async function batchHold(env,body){
  if(bytes>BATCH_RUNNER.submitMaxBodyBytes)return json({error:'This group is '+bytes+' bytes, over the '+BATCH_RUNNER.submitMaxBodyBytes+' byte hold limit'},400);
  const notD1=await batchRequiresD1(env);if(notD1)return notD1;
  const run=await checkedRun(env,body.runId);if(!run)return json({error:'Unknown run'},404);
+ {const foreign=taskOwnerRefusal(run.taskId,body.taskId,run.runId);if(foreign)return foreign;}
  if(run.protocol!==BATCH_PROTOCOL)return wrongProtocolResponse();
  if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null},409);
  if(Number.isInteger(run.epoch)&&run.epoch!==body.epoch)return json({error:'Epoch does not match this run',code:'epoch_mismatch',runId:run.runId},409);
@@ -3962,8 +4026,9 @@ async function auxManifestPart(env,aux,run,runId,part,filmId,preparing){
 }
 // A part readback writes nothing, so it runs as a timed step with the per-request authority marker scope (the markers are read once for the request, not once per key) and its own `prediction_step_timing` line.
 async function ownedBatchManifest(env,runId,opts={}){return timedBatchStep(env,'batch_manifest',{runId},null,timed=>ownedBatchManifestRead(timed,runId,opts));}
-async function ownedBatchManifestRead(env,runId,{part='envelope',filmId}={}){
+async function ownedBatchManifestRead(env,runId,{part='envelope',filmId,taskId}={}){
  if(!isText(runId,100))return {status:400,body:{error:'Invalid runId',code:'invalid_run_id'}};
+ if(taskId!==undefined&&!isTaskId(taskId))return {status:400,body:{error:'Invalid taskId',code:'invalid_task_id'}};
  if(!['envelope','profile','contract','film','hold','item'].includes(part))return {status:400,body:{error:'Invalid part',code:'invalid_part'}};
  if((part==='film'||part==='item')&&(typeof filmId!=='string'||!filmId))return {status:400,body:{error:'filmId required',code:'invalid_film_id'}};
  // ADR 0193: the run id of a deferred start is derived from its key. Its terminal outcome wins over any partial run row, and an invocation whose preparation never produced a run, an outcome or a live
@@ -3977,10 +4042,15 @@ async function ownedBatchManifestRead(env,runId,{part='envelope',filmId}={}){
  if(!run){
   // ADR 0188: a keyed start still preparing its run answers pending, not unknown.
   const claimed=await loadJSON(env,RUNNER_LEASE_KEY);
-  if(claimed?.runId===runId&&Number(claimed.expiresAt)>Date.now())return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:START_POLL_MS}};
+  if(claimed?.runId===runId&&Number(claimed.expiresAt)>Date.now()){
+   // ADR 0195: a start still preparing its run is read back only by the Task that holds the claim.
+   if((claimed.taskId??null)!==(taskId??null))return {status:409,body:{error:'wrong_owner',code:'wrong_owner',reason:'wrong_owner',runId}};
+   return {status:409,body:{error:'manifest_pending',code:'manifest_pending',retryAfterMs:START_POLL_MS}};
+  }
   if(deferredRun)return {status:409,body:{error:'start_not_ready',code:'start_failed',outcomeCode:'start_lost',reason:null,runId}};
   return {status:404,body:{error:'Unknown run',code:'unknown_run'}};
  }
+ {const foreign=taskOwnerRefusal(run.taskId,taskId,runId);if(foreign)return {status:foreign.status,body:await foreign.json()};}
  const lease=await loadJSON(env,RUNNER_LEASE_KEY);
  if(!(lease?.runId===runId&&Number(lease.expiresAt)>Date.now()))return {status:409,body:{error:'lease_lost',code:'lease_lost'}};
  // A deferred run is served only after its readiness edit: while the preparation mark is set the answer is pending, whatever is already stored.
@@ -4010,6 +4080,7 @@ async function runContractChanged(run){
 const contractChangedResponse=()=>json({error:'Contract changed; start a new run',code:'contract_changed'},409);
 async function enrichmentComplete(env,body,requestId){
  const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);
+ {const foreign=taskOwnerRefusal(run.taskId,body.taskId,run.runId);if(foreign)return foreign;}
  if(run.status==='complete'||run.status==='partial'){
   const replay=run.event||{id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts};
   if(isBatchV2Run(run))await parkAndFlushRunEvent(env,replay,run.runId);else await writeEvent(env,replay);
@@ -4464,7 +4535,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/benchmark/start'&&request.method==='POST')return predictionWriter(env,()=>predictionBenchmarkStart(env));
  if(path==='/api/enrichment/benchmark/trial'&&request.method==='POST')return predictionWriter(env,()=>predictionBenchmarkTrial(env,body));
  if(path==='/api/enrichment/runner'&&request.method==='GET')return json(predictionRunnerContract());
- if(path==='/api/enrichment/heartbeat'&&request.method==='POST')return timedBatchStep(env,'batch_heartbeat',body,requestId,timed=>observedPrediction(timed,body,()=>predictionWriter(timed,()=>runnerHeartbeat(timed,body)),'heartbeat',requestId));
+ if(path==='/api/enrichment/heartbeat'&&request.method==='POST')return timedBatchStep(env,'batch_heartbeat',body,requestId,timed=>taskOwnerGate(timed,body,()=>observedPrediction(timed,body,()=>predictionWriter(timed,()=>runnerHeartbeat(timed,body)),'heartbeat',requestId)));
  // batchSubmit takes the gate, then the step recorder and the writer lease, for a real call; a dry run takes none of them and writes nothing at all.
  if(path==='/api/enrichment/batch/submit'&&request.method==='POST')return timedBatchStep(env,'batch_submit',body,requestId,timed=>batchSubmit(timed,body,requestId));
  if(path==='/api/enrichment/batch/hold'&&request.method==='POST')return timedBatchStep(env,'batch_hold',body,requestId,timed=>batchHold(timed,body));
@@ -4476,7 +4547,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
   try{return json(await footerStatus(env));}
   catch(error){const refused=canonicalCatalogReadRefusal(error);if(refused)return refused;throw error;}
  }
- if(path==='/api/enrichment/complete'&&request.method==='POST')return timedBatchStep(env,'batch_complete',body,requestId,timed=>observedPrediction(timed,body,()=>predictionWriter(timed,owned=>enrichmentComplete(owned,body,requestId)),'complete',requestId));
+ if(path==='/api/enrichment/complete'&&request.method==='POST')return timedBatchStep(env,'batch_complete',body,requestId,timed=>taskOwnerGate(timed,body,()=>observedPrediction(timed,body,()=>predictionWriter(timed,owned=>enrichmentComplete(owned,body,requestId)),'complete',requestId)));
  if(path==='/api/enrichment/status'&&request.method==='GET')return json(await enrichmentStatus(env));
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/schema'&&request.method==='GET')return json(enrichmentSchemaDocument());

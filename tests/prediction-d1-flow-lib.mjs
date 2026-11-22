@@ -10,6 +10,8 @@ import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-prediction-flow-'));
 let databases=0;
+let LABEL_STARTS=false;
+export const labelStarts=(on=true)=>{LABEL_STARTS=on;};
 export const sql=(file,text)=>{const result=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(result.stderr);const out=(result.stdout||'').trim();return out?JSON.parse(out):[];};
 export function migrated(upTo=Infinity){
  const file=path.join(root,'flow-'+(databases++)+'.sqlite');
@@ -44,7 +46,16 @@ export async function flowWorld({scope=true,films=40,extra=null,aux=null,schema=
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
  for(const f of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(f,'utf8').replace('export default','globalThis.worker='),ctx);
  installViewIndexFixture(ctx);vm.runInContext('derivedViewIndex=async function(env,options){return PredictionD1.derivedIndex(env,options?.moodFacet===undefined?canonicalMoodFacet:options.moodFacet);}',ctx);// AIR-558: the prediction domain is real D1 here, so the derived index is its own rows (no ratings overlay in this world)
- const api=async(route,body)=>{const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),env);return {status:r.status,data:await r.json()};};
+ // ADR 0195: the plain call, exactly as sent (the ownership tests use it for calls without a label).
+ const rawApi=async(route,body)=>{const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),env);return {status:r.status,data:await r.json()};};
+ // A call of a run that carries a Task label sends that label, as the standing Task does; a run without one is called without. A test may opt in (`labelStarts()`) to label its real scheduled starts.
+ const api=async(route,body)=>{
+  if(LABEL_STARTS&&route==='batch/start'&&body&&body.trigger==='scheduled'&&body.dryRun!==true&&body.taskId===undefined)body={...body,taskId:'task00'};
+  if(['heartbeat','complete','batch/hold','batch/submit'].includes(route)&&body&&typeof body.runId==='string'&&body.taskId===undefined&&body.dryRun!==true&&/^[A-Za-z0-9_-]{1,100}$/.test(body.runId)){
+   const rows=sql(file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+body.runId+"'");const label=rows[0]?JSON.parse(rows[0].d).taskId:undefined;if(label)body={...body,taskId:label};
+  }
+  return rawApi(route,body);
+ };
  const now=Date.now(),film=n=>({id:'tmdb_'+n,title:'tmdb_'+n,original:'tmdb_'+n,year:2020,tmdbId:String(n),canonicalIdentity:'tmdb:'+n,genres:[],actors:[],directors:[],shows:[{start:now}],...(extra?extra(n):{})});
  const list=[];for(let n=1;n<=films;n++)list.push(film(n));
  sql(file,"INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES "+list.map(f=>"('"+f.id+"','"+f.tmdbId+"','movie','"+f.canonicalIdentity+"','"+f.id+"','p1',1,'current','"+JSON.stringify(f).replace(/'/g,"''")+"')").join(','));
@@ -57,9 +68,9 @@ export async function flowWorld({scope=true,films=40,extra=null,aux=null,schema=
  const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['heist','investigation'],execution,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']};
  const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
  const manifests=new Map();
- return {records,file,env,db,stats,hooks,api,logs,ctx,fingerprint,prediction,
+ return {records,file,env,db,stats,hooks,api,rawApi,logs,ctx,fingerprint,prediction,
   // Batch runner v2 (the only runner since ADR 0167): rebuild the queue, then one batch start whose answer is the manifest (runId, lease.epoch, films).
-  async reconcileAndStart(body={}){const built=await api('queue/reconcile',{});const start=await api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'manual',capacity:{remainingPercent:100},...body});if(start.status===200&&start.data.runId)manifests.set(start.data.runId,{manifest:start.data,sent:new Set()});return {built,start};},
+  async reconcileAndStart(body={}){const built=await api('queue/reconcile',{});const start=await api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:LABEL_STARTS?'scheduled':'manual',capacity:{remainingPercent:100},...body});if(start.status===200&&start.data.runId)manifests.set(start.data.runId,{manifest:start.data,sent:new Set()});return {built,start};},
   // One film per batch submit: the next manifest film of the run not yet sent. Returns the answer and the D1 round trips of the submit.
   async pair(runId,item={}){
    const held=manifests.get(runId);if(!held)throw new Error('pair: no manifest for run '+runId);

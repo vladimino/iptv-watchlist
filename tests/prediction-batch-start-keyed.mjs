@@ -3,9 +3,11 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
-import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {flowWorld, sql,labelStarts} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {nonFunctional} from './suite-gate.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
+labelStarts();// ADR 0195: the runs of this test are started as a standing Task starts them, with its label
 
 const dump=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const KEY='task-s5-q15:2026-11-21T13';
@@ -292,7 +294,7 @@ const manifestKey=id=>'enrichment/batch-manifest/'+id+'.json';
  const w=await world();
  const first=await batch(w,{invocationKey:KEY});const stored=w.records.get(manifestKey(first.data.runId));
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- const tool=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
+ const tool=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;return (await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;};
  w.records.delete(manifestKey(first.data.runId));
  const pending=await tool('prediction_batch_manifest',{runId:first.data.runId});
  // the synchronous keyed variant: the same normal wait (a successful tool result of kind pending), never unknown_run and never an error
