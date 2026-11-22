@@ -966,7 +966,7 @@ async function auxAuthority(env){
  if(base.mode!=='d1')return null;
  return PredictionAux.auxD1(auxDb(env),env,{version:base.version});
 }
-// ---- ADR 0195 (amends ADR 0194 decision 1): the admission gate of the cutover. While the marker reads `closed` NO request of any origin (Task, manual MCP or HTTP, Workflow step, the lease-free skipped, delivery
+// ---- ADR 0196 (amends ADR 0194 decision 1): the admission gate of the cutover. While the marker reads `closed` NO request of any origin (Task, manual MCP or HTTP, Workflow step, the lease-free skipped, delivery
 // and acknowledgement paths) may write one of the four R2 families, and the routes that would make one answer a typed refusal before they start. `closed` is not an authority and not unavailable: reads keep
 // serving the R2 objects, which stay the data until d1. The gate is the bucket the request holds: every put or delete of a key of those families first reads the marker FRESH (never the request scope), so a
 // request that read r2 at its start still refuses at its own write. What it cannot do is recall a PUT already past that read: that residual is one object-store operation, bounded by the drain wait of the
@@ -3762,7 +3762,7 @@ async function timedBatchStep(env,step,body,requestId,work){
  try{timer=createStepTimer();timed=stepTimedEnv(env,timer);}catch{timer=null;timed=env;}
  // The authority marker only, never the object scope: reads in this request reuse the marker until the request's own database writes (the lease acquire is the first), so the post-lease preflight reads it afresh.
  try{if(typeof PredictionD1!=='undefined'&&typeof PredictionD1.scopeRequest==='function')timed=PredictionD1.scopeRequest(timed);}catch{/* an unscoped start reads the marker every time */}
- // ADR 0195: the bucket every writer of this request holds refuses a write of the four families while the marker is closed (built AFTER the scope so its marker reads share the request's).
+ // ADR 0196: the bucket every writer of this request holds refuses a write of the four families while the marker is closed (built AFTER the scope so its marker reads share the request's).
  timed=auxGuardedEnv(timed);
  let status=null;
  try{const response=await work(timed);status=response&&typeof response.status==='number'?response.status:null;return response;}

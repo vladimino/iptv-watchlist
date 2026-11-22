@@ -1,4 +1,4 @@
-# ADR 0195: The auxiliary prediction marker gets a pre-activation `closed` state that refuses every legacy write of the four R2 families before the object-store PUT
+# ADR 0196: The auxiliary prediction marker gets a pre-activation `closed` state that refuses every legacy write of the four R2 families before the object-store PUT
 
 **Status:** Accepted (2026-11-22; owner approval of the **preparatory implementation only**, recorded on [AIR-554](https://trello.com/c/UrS1gflv) the same day after the [independent review of the proposed plan, PR 889](https://github.com/vladimino/iptv-watchlist/pull/889#pullrequestreview-6011478394); authorizes dormant code, schema text of the still-unapplied `0034` and offline tests, **not** a production apply, import, activation or Task change)  
 **Original decision date:** 2026-11-22  

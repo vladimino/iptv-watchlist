@@ -15,7 +15,7 @@ import {buildPlan,planReport,planSql,planVerifySql,planRunPreflightSql,readExpor
 const applySql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+text+'COMMIT;',encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr.trim());};
 const exportOf=w=>Object.fromEntries([...w.records.entries()].map(([key,value])=>[key,structuredClone(value)]));
 const count=(file,table)=>Number(sql(file,'SELECT count(*) AS n FROM '+table)[0].n);
-const closedFile=()=>{const f=migrated();sql(f,"UPDATE prediction_aux_authority SET mode='closed', generation=1 WHERE id=1");return f;};   // ADR 0195: the import runs only under the admission close
+const closedFile=()=>{const f=migrated();sql(f,"UPDATE prediction_aux_authority SET mode='closed', generation=1 WHERE id=1");return f;};   // ADR 0196: the import runs only under the admission close
 const tables=['prediction_batch_stage','prediction_run_source_head','prediction_run_source_revision','prediction_run_source_piece','prediction_run_manifest','prediction_run_manifest_piece','prediction_event_outbox'];
 
 // ---- 1. End to end: real R2 objects -> plan -> SQL -> D1 rows -> the Worker serves the same bytes ----

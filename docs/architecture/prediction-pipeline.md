@@ -149,7 +149,7 @@ flowchart LR
   req["Runner request or Workflow preparation"] --> marker{"Aux marker read once per request"}
   marker -->|"r2, or schema older than 34 (production today)"| legacy["R2 objects: stage, sources, manifest, stop and start events, event-outbox index"]
   marker -->|"d1 (after a separate owner activation)"| rows["D1 rows: stage and head, source revisions, manifest and pieces, event outbox"]
-  marker -->|"closed (ADR 0195, pre-activation window)"| shut["Entry refused: prediction_aux_closed. Every R2 put or delete of the four families refused after a fresh marker read. Reads still from R2"]
+  marker -->|"closed (ADR 0196, pre-activation window)"| shut["Entry refused: prediction_aux_closed. Every R2 put or delete of the four families refused after a fresh marker read. Reads still from R2"]
   marker -->|"unreadable, partial or unknown"| unavail["prediction_aux_unavailable: fail closed, no R2 read or write"]
   shut -. "reads only" .-> legacy
   legacy --> journal[("Events journal in R2")]
@@ -158,7 +158,7 @@ flowchart LR
   rows -. "stay in R2" .-> receipts[("Deferred-start receipts in R2")]
 ```
 
-The marker has three modes ([ADR 0195](../adr/0195-prediction-aux-admission-closed-state.md)): `r2`, `closed` and `d1`, with the chain `r2` → `closed` → `d1` and `closed` → `r2` before an activation. `closed` is the admission close of the cutover: it is not an authority (the R2 objects stay the data and are read), and it refuses every legacy write of the four families, before the entry and again at the object-store PUT, which re-reads the marker fresh. A PUT already past its read cannot be recalled; the cutover bounds that by listings and refuses the flip on any difference (see the [runbook](../runbooks/prediction-aux-state-cutover.md)).
+The marker has three modes ([ADR 0196](../adr/0196-prediction-aux-admission-closed-state.md)): `r2`, `closed` and `d1`, with the chain `r2` → `closed` → `d1` and `closed` → `r2` before an activation. `closed` is the admission close of the cutover: it is not an authority (the R2 objects stay the data and are read), and it refuses every legacy write of the four families, before the entry and again at the object-store PUT, which re-reads the marker fresh. A PUT already past its read cannot be recalled; the cutover bounds that by listings and refuses the flip on any difference (see the [runbook](../runbooks/prediction-aux-state-cutover.md)).
 
 With the marker at `d1`: every auxiliary write is one D1 batch that asserts the marker generation (and, for run-owned writes, the runner lease with its gate token where one exists); the readiness edit of a deferred run and its manifest rows are one batch; a drain settles a staged row in the same batch as the film's prediction; a part of the manifest is read from the pieces that cover it and verified against per-piece digests; a skipped request without the lease is admitted by one insert on its identity, capped at 256 active pending records. The Events journal and the deferred-start receipts stay R2 objects.
 

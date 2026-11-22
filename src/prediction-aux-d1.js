@@ -117,11 +117,11 @@ export async function readAuxAuthority(db,env,hint={}){
  if(scope)scope.aux=result;
  return result;
 }
-// ADR 0195. The state an entry point must refuse in: the marker reads `closed` (every legacy writer of the four R2 families is shut out; the R2 objects are still the data and are still read).
+// ADR 0196. The state an entry point must refuse in: the marker reads `closed` (every legacy writer of the four R2 families is shut out; the R2 objects are still the data and are still read).
 export function auxClosed(authority){return authority?.mode==='closed';}
 // The gate immediately before an R2 PUT or delete of one of the four families. It reads the marker FRESH (never the request scope: a request that read r2 earlier must not carry that into its
 // write) and refuses with a typed error unless the marker proves `r2` or proves the tables are not installed. closed and d1 both refuse (after d1 the Worker never writes these objects
-// again); an unavailable marker refuses too (never read as r2). The one residual is a PUT already past this check; it is bounded by one object-store operation (ADR 0195).
+// again); an unavailable marker refuses too (never read as r2). The one residual is a PUT already past this check; it is bounded by one object-store operation (ADR 0196).
 export async function guardR2Write(db,env){
  const required=env?.PREDICTION_DB_REQUIRED==='on';
  if(db==null){if(required)throw failed('prediction_aux_unavailable');return {mode:'r2',proof:'not_installed'};}

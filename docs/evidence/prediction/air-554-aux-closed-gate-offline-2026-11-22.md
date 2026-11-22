@@ -1,6 +1,6 @@
 # AIR-554: the auxiliary-state `closed` admission gate, offline evidence
 
-22 November 2026 (Europe/Madrid) · [AIR-554](https://trello.com/c/UrS1gflv) · implements [ADR 0195](../../adr/0195-prediction-aux-admission-closed-state.md) (Accepted; amends [ADR 0194](../../adr/0194-prediction-auxiliary-state-d1-checkpoint-and-outbox.md) decision 1) as **dormant** code. Offline only: the real Worker code over a sqlite D1 stand-in and an in-memory R2, synthetic data. **No production call, no Scheduled Task, no model, no read of production R2.** The Cloudflare limits were read from the public documentation.
+22 November 2026 (Europe/Madrid) · [AIR-554](https://trello.com/c/UrS1gflv) · implements [ADR 0196](../../adr/0196-prediction-aux-admission-closed-state.md) (Accepted; amends [ADR 0194](../../adr/0194-prediction-auxiliary-state-d1-checkpoint-and-outbox.md) decision 1) as **dormant** code. Offline only: the real Worker code over a sqlite D1 stand-in and an in-memory R2, synthetic data. **No production call, no Scheduled Task, no model, no read of production R2.** The Cloudflare limits were read from the public documentation.
 
 ## What was built
 
@@ -35,7 +35,7 @@ R2 operations are unchanged (S5 100 puts in every r2 arm). Before migration 0034
 
 ## What the platform allows (Cloudflare documentation, read 22 Nov 2026)
 
-[Workers limits](https://developers.cloudflare.com/workers/platform/limits/): an incoming HTTP request has no hard wall-time limit while the client stays connected; there is no set time limit on an individual subrequest (R2 and D1 included); `waitUntil()` runs at most 30 seconds after the response or disconnect; a runtime update gives existing requests up to 20 minutes. **There is no platform ceiling for a request already in flight**, so the drain cannot be proven by a time bound alone. ADR 0195 states the residual and bounds it by listings and the flip refusal instead.
+[Workers limits](https://developers.cloudflare.com/workers/platform/limits/): an incoming HTTP request has no hard wall-time limit while the client stays connected; there is no set time limit on an individual subrequest (R2 and D1 included); `waitUntil()` runs at most 30 seconds after the response or disconnect; a runtime update gives existing requests up to 20 minutes. **There is no platform ceiling for a request already in flight**, so the drain cannot be proven by a time bound alone. ADR 0196 states the residual and bounds it by listings and the flip refusal instead.
 
 ## Not covered here, on purpose
 

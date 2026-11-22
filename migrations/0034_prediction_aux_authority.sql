@@ -6,7 +6,7 @@
 -- the outbox counters and the diagnostic row.
 -- It follows a complete version 33 and refuses anything else before a table is created: the first statement inserts a second schema_contract row and
 -- so aborts the file. The version becomes 34 and never goes down.
--- prediction_aux_authority is its OWN marker, not a column of prediction_domain_authority (ADR 0194 decision 1). It has three modes (ADR 0195): r2 (today), closed (admission of
+-- prediction_aux_authority is its OWN marker, not a column of prediction_domain_authority (ADR 0194 decision 1). It has three modes (ADR 0196): r2 (today), closed (admission of
 -- every legacy writer refused, reads served from R2, a pre-activation state) and d1. mode d1 is one-way: a trigger refuses
 -- d1 -> r2 and deleting the row, and the generation never goes down. prediction_aux_cas is the batch fence, not a switch: a guard sets ok to the count of
 -- rows that prove the caller's facts, and ok <> 1 aborts the whole batch (the same pattern as prediction_domain_cas).
@@ -157,7 +157,7 @@ BEGIN
  SELECT RAISE(ABORT, 'prediction_aux_authority_one_way');
 END;
 
--- ADR 0195 (amends ADR 0194 decision 1): the chain is r2 -> closed -> d1, and closed -> r2 (the reopen, only before an activation). d1 is reachable ONLY from closed, so an activation
+-- ADR 0196 (amends ADR 0194 decision 1): the chain is r2 -> closed -> d1, and closed -> r2 (the reopen, only before an activation). d1 is reachable ONLY from closed, so an activation
 -- cannot skip the admission close, and every change of mode raises the generation. While the marker reads closed the Worker refuses every write of the four R2 families (and the
 -- routes that would make one) before the object-store PUT; it still serves the reads. closed is NOT an authority: the R2 objects stay the data until d1.
 CREATE TRIGGER prediction_aux_authority_chain

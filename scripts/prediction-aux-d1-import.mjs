@@ -137,7 +137,7 @@ export async function planReport(plan){
  };
 }
 
-// Guarded SQL. The first statement aborts the whole file unless the marker reads `closed` (ADR 0195: the import runs under the admission close, never while the old writers are admitted) and every
+// Guarded SQL. The first statement aborts the whole file unless the marker reads `closed` (ADR 0196: the import runs under the admission close, never while the old writers are admitted) and every
 // auxiliary table is empty (an import never merges into existing history).
 // Every statement is one line and holds at most one piece, so none exceeds the D1 statement budget.
 export function planSql(plan){

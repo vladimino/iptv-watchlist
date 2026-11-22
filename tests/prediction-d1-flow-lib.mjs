@@ -19,7 +19,7 @@ export function migrated(upTo=Infinity){
  return file;
 }
 // `extra(n)` adds fields to film n (for example genres or a synopsis that fingerprint evidence cites).
-// AIR-553: `aux:'closed'` sets the marker to closed (ADR 0195); `aux:'d1'` goes r2 -> closed -> d1 (the only chain the schema allows) and flips the auxiliary-state marker (stage, sources, manifest, outbox in D1) and gives the Worker scope the PredictionAux module; `aux:'r2'` gives the module with the marker at r2
+// AIR-553: `aux:'closed'` sets the marker to closed (ADR 0196); `aux:'d1'` goes r2 -> closed -> d1 (the only chain the schema allows) and flips the auxiliary-state marker (stage, sources, manifest, outbox in D1) and gives the Worker scope the PredictionAux module; `aux:'r2'` gives the module with the marker at r2
 // (the production default before the activation); without the option the module is absent, as in every older test.
 export async function flowWorld({scope=true,films=40,extra=null,aux=null,schema=Infinity,rowStats=null}={}){
  const hooks={write:null,query:null};

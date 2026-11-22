@@ -1,4 +1,4 @@
-// ADR 0195 (amends ADR 0194 decision 1): the admission gate `closed` of the auxiliary prediction state, over the real migrations (a sqlite D1 stand-in) and the real Worker code with an in-memory R2.
+// ADR 0196 (amends ADR 0194 decision 1): the admission gate `closed` of the auxiliary prediction state, over the real migrations (a sqlite D1 stand-in) and the real Worker code with an in-memory R2.
 // Local stand-ins only; no Cloudflare, no production, no Task, no model.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
