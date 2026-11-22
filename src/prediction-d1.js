@@ -480,6 +480,9 @@ async function saveFingerprint(env,filmId,value,authority){
  ]);
  await mirror(env.BUCKET,'enrichment/films/'+encodeURIComponent(filmId)+'/fingerprint.json',value);
 }
+const COMMIT_EXTRA=Symbol.for('iptv.prediction.commitExtra');
+// `env[COMMIT_EXTRA]` = {filmId, statements}: statements that commit with that film's prediction batch and nowhere else.
+function extraStatements(env,filmId){const extra=env?.[COMMIT_EXTRA];return extra&&extra.filmId===filmId&&Array.isArray(extra.statements)?extra.statements:[];}
 function pointerColumns(record){
  return [record?.tasteProfileVersion??null,record?.tasteProfileHash??null,record?.fingerprintHash??null,record?.fingerprintSchemaVersion??null,record?.predictionPromptVersion??null,typeof record?.predictedRating==='number'?record.predictedRating:null,record?.r2Key,record?.contentSha256,record?.generatedAt||record?.updatedAt||record?.replacedAt||null];
 }
@@ -510,6 +513,8 @@ async function savePredictions(env,filmId,bundle,authority){
   if(typeof record?.replacedAt!=='string'||!record.replacedAt)throw failed('prediction_domain_unlinked');
   statements.push(['INSERT INTO prediction_lineage (film_id,replaced_at,predicted_rating,taste_profile_version,fingerprint_hash,r2_key,content_sha256,display_json) VALUES (?,?,?,?,?,?,?,?)',[filmId,record.replacedAt,record.predictedRating??null,record.tasteProfileVersion??null,record.fingerprintHash??null,record.r2Key,record.contentSha256,JSON.stringify({...displayOf(record),replacedAt:record.replacedAt})]]);
  }
+ // AIR-553 (ADR 0194 decision 2): the drain of the held stage names the staged row it settles; the row's deletion commits in THIS batch, under the same guards as the film's prediction.
+ statements.push(...extraStatements(env,filmId));
  await fenced(env.DB,statements);
  await mirror(env.BUCKET,'enrichment/films/'+encodeURIComponent(filmId)+'/predictions.json',bundle);
 }
@@ -561,7 +566,9 @@ async function saveRun(env,run,authority,elect){
  await mirror(env.BUCKET,'enrichment/runs/'+runId+'.json',run);
  if(elect)await mirror(env.BUCKET,LATEST_KEY,run);
 }
-async function saveLease(env,name,value,previousToken,authority){
+// The statements of one lease write, without running them: the generation bump, the fence and the insert or the token-guarded update. AIR-553 composes them with the
+// auxiliary manifest rows into ONE batch (the readiness edit of a deferred start); saveLease runs exactly these statements, so a lease written either way is the same lease.
+export function leaseStatements(authority,name,value,previousToken){
  const token=crypto.randomUUID();
  const next=authority.generation+1;
  const text=JSON.stringify(value);
@@ -571,6 +578,11 @@ async function saveLease(env,name,value,previousToken,authority){
  ];
  if(previousToken==null)statements.push(['INSERT INTO prediction_lease (name,token,expires_at,document_json) VALUES (?,?,?,?)',[name,token,Number(value?.expiresAt)||0,text]]);
  else statements.push(['UPDATE prediction_lease SET token=?, expires_at=?, document_json=? WHERE name=? AND token=?',[token,Number(value?.expiresAt)||0,text,name,previousToken]]);
+ return {token,statements};
+}
+export async function mirrorLease(env,name,value){await mirror(env.BUCKET,name==='writer'?WRITER_KEY:RUNNER_KEY,value);}
+async function saveLease(env,name,value,previousToken,authority){
+ const {token,statements}=leaseStatements(authority,name,value,previousToken);
  await fenced(env.DB,statements);
  await mirror(env.BUCKET,name==='writer'?WRITER_KEY:RUNNER_KEY,value);
  return token;

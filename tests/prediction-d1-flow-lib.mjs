@@ -4,6 +4,7 @@ import fs from 'node:fs';import vm from 'node:vm';import os from 'node:os';impor
 import {webcrypto} from 'node:crypto';
 import * as Authority from '../src/discovery-authority.js';
 import * as PredictionD1 from '../src/prediction-d1.js';
+import * as PredictionAux from '../src/prediction-aux-d1.js';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
@@ -18,7 +19,9 @@ export function migrated(){
  return file;
 }
 // `extra(n)` adds fields to film n (for example genres or a synopsis that fingerprint evidence cites).
-export async function flowWorld({scope=true,films=40,extra=null}={}){
+// AIR-553: `aux:'d1'` flips the auxiliary-state marker (stage, sources, manifest, outbox in D1) and gives the Worker scope the PredictionAux module; `aux:'r2'` gives the module with the marker at r2
+// (the production default before the activation); without the option the module is absent, as in every older test.
+export async function flowWorld({scope=true,films=40,extra=null,aux=null}={}){
  const hooks={write:null,query:null};
  const records=new Map(),etags=new Map();let revision=0;
  const bucket={
@@ -30,13 +33,14 @@ export async function flowWorld({scope=true,films=40,extra=null}={}){
  const file=migrated();
  sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
  sql(file,"UPDATE prediction_domain_authority SET mode='d1' WHERE id=1");
+ if(aux==='d1')sql(file,"UPDATE prediction_aux_authority SET mode='d1', generation=1, activated_at='2026-11-22T10:00:00.000Z' WHERE id=1");
  // A D1 round trip is a statement run on its own (`queries`) or a batch (`batches`); a batch of reads is not seen by `onQuery`.
  const stats={queries:0,batches:0,writeBatches:0};
  // hooks.query(text) sees every statement, run on its own or inside a batch (a test can count or react to the statements it cares about).
  const db=d1Standin(file,{onQuery:text=>{stats.queries++;if(hooks.query)hooks.query(text);},onBatch:statements=>{stats.batches++;if(hooks.query)for(const item of statements)hooks.query(item.text);if(!statements.every(item=>/^\s*SELECT/i.test(item.text))){stats.writeBatches++;if(hooks.write)hooks.write(statements,stats.writeBatches);}}});
  const env={BUCKET:bucket,DB:db,PREDICTION_DB_REQUIRED:'on'};
  const module=scope?PredictionD1:{...PredictionD1,scopeRequest:undefined};
- const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console:capture,setTimeout,DiscoveryAuthority:Authority,PredictionD1:module,encodeURIComponent,decodeURIComponent});
+ const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console:capture,setTimeout,DiscoveryAuthority:Authority,PredictionD1:module,...(aux?{PredictionAux}:{}),encodeURIComponent,decodeURIComponent});
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
  for(const f of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(f,'utf8').replace('export default','globalThis.worker='),ctx);
  installViewIndexFixture(ctx);vm.runInContext('derivedViewIndex=async function(env,options){return PredictionD1.derivedIndex(env,options?.moodFacet===undefined?canonicalMoodFacet:options.moodFacet);}',ctx);// AIR-558: the prediction domain is real D1 here, so the derived index is its own rows (no ratings overlay in this world)

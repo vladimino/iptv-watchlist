@@ -118,9 +118,9 @@ const FENCE_SQL='UPDATE prediction_aux_cas SET ok=(SELECT count(*) FROM predicti
 export const markerGuard=(authority,mode='d1')=>[FENCE_SQL,[mode,authority.generation]];
 // The runner-lease fence of a run-owned write. With a token (a claimed start, a drain, a submit under its gate) it is the unchanged COMMIT_GUARD predicate; without one (the keyless or
 // synchronous path, where the run's own lease is the fence) it checks runId, epoch and expiry. `run` adds the run row's protocol (the row exists once the run was saved).
-export function leaseGuard(guard,{run=false}={}){
+export function leaseGuard(guard,{run=false,prep=false}={}){
  const token=guard?.token!=null;
- const sql="UPDATE prediction_aux_cas SET ok=(SELECT count(*) FROM prediction_lease WHERE name='runner' AND expires_at>? AND json_extract(document_json,'$.runId')=? AND json_extract(document_json,'$.epoch')=?"+(token?" AND json_extract(document_json,'$.submitGate.token')=?":'')+")*(SELECT count(*) FROM prediction_domain_authority WHERE id=1 AND mode='d1')"+(run?"*(SELECT count(*) FROM prediction_run WHERE run_id=? AND json_extract(document_json,'$.protocol')='batch_v2')":'')+' WHERE id=1';
+ const sql="UPDATE prediction_aux_cas SET ok=(SELECT count(*) FROM prediction_lease WHERE name='runner' AND expires_at>? AND json_extract(document_json,'$.runId')=? AND json_extract(document_json,'$.epoch')=?"+(token?" AND json_extract(document_json,'$.submitGate.token')=?":'')+(prep?" AND json_extract(document_json,'$.prep')=1":'')+")*(SELECT count(*) FROM prediction_domain_authority WHERE id=1 AND mode='d1')"+(run?"*(SELECT count(*) FROM prediction_run WHERE run_id=? AND json_extract(document_json,'$.protocol')='batch_v2')":'')+' WHERE id=1';
  return [sql,[Date.now(),String(guard.runId),Number(guard.epoch),...(token?[String(guard.token)]:[]),...(run?[String(guard.runId)]:[])]];
 }
 // The writer lease the caller holds (a delivery or recovery under the writer lease of an authorized start).
@@ -168,6 +168,16 @@ export async function mergeStage(db,authority,apply,{measure,guard=null,writer=n
   catch(error){if(error.code==='prediction_aux_cas'&&attempt<AUX_LIMITS.stageAttempts-1)continue;if(error.code==='prediction_aux_cas')throw new Error('Stored JSON changed during write');throw error;}
  }
  throw new Error('Stored JSON changed during write');
+}
+
+// The statements that settle ONE staged row inside another batch (the drain: the film's prediction commit): the conditional delete (film, digest) and the head recomputed from the rows themselves,
+// so the count and the aggregate bytes stay exact whatever else changed. A row whose digest differs (a newer hold) stays.
+export function stageSettleStatements(authority,filmId,itemDigest,now=Date.now){
+ return [
+  markerGuard(authority),
+  ['DELETE FROM prediction_batch_stage WHERE film_id=? AND item_digest=?',[String(filmId),String(itemDigest)]],
+  ['UPDATE prediction_batch_stage_head SET item_count=(SELECT count(*) FROM prediction_batch_stage), total_bytes=(SELECT CASE WHEN count(*)=0 THEN 0 ELSE 2+sum(body_bytes)+count(*)-1 END FROM prediction_batch_stage), revision=revision+1, updated_at=? WHERE id=1',[new Date(now()).toISOString()]],
+ ];
 }
 
 // ---- Run sources (decision 4): insert-only revisions, a CAS-advanced head, byte-capped pieces. ----
@@ -229,15 +239,15 @@ export function manifestStatements(record,stamp){
 export async function existingManifestDigest(db,runId){return (await one(db,'SELECT payload_digest AS digest, manifest_hash AS manifestHash FROM prediction_run_manifest WHERE run_id=?',[runId]))??null;}
 // Create-only: the same digest is a no-op (a replay), another digest is a conflict, never an overwrite. `extra` statements (the readiness edit of a deferred start) commit in the SAME batch,
 // after the manifest rows and under the same guards, so "ready" is never declared before a durable manifest.
-export async function writeManifest(db,authority,runId,answer,{guard=null,writer=null,now=Date.now,extra=[]}={}){
+export async function writeManifest(db,authority,runId,answer,{guard=null,writer=null,now=Date.now,extra=[],prep=false}={}){
  const record=await buildManifestRecord(runId,answer);
  const present=await existingManifestDigest(db,runId);
  if(present){
   if(present.digest!==record.payloadDigest)throw failed('prediction_aux_conflict',undefined,'manifest_conflict');
-  if(extra.length)await runBatch(db,[...guardsFor(authority,guard,{run:true,writer}),...extra]);
+  if(extra.length)await runBatch(db,[...guardsFor(authority,guard,{run:true,writer,prep}),...extra]);
   return {written:false,payloadDigest:record.payloadDigest};
  }
- await runBatch(db,[...guardsFor(authority,guard,{run:true,writer}),...manifestStatements(record,new Date(now()).toISOString()),...extra]);
+ await runBatch(db,[...guardsFor(authority,guard,{run:true,writer,prep}),...manifestStatements(record,new Date(now()).toISOString()),...extra]);
  return {written:true,payloadDigest:record.payloadDigest};
 }
 async function loadIndex(db,runId){
@@ -345,8 +355,8 @@ export async function pendingOutbox(db,{runId=null,limit=AUX_LIMITS.drainLimit}=
  return [...first,...rest].slice(0,limit).map(parseOutboxRow);
 }
 export async function outboxStatus(db){
- const [counts,diag,skipped]=await Promise.all([many(db,'SELECT state, count(*) AS n FROM prediction_event_outbox GROUP BY state'),one(db,'SELECT cap_refusals AS capRefusals, last_refusal_at AS lastRefusalAt FROM prediction_event_outbox_diag WHERE id=1'),one(db,"SELECT active_pending AS n FROM prediction_event_outbox_counter WHERE kind='skipped'")]);
- return {states:Object.fromEntries(counts.map(row=>[row.state,Number(row.n)])),skippedActivePending:Number(skipped?.n||0),skippedCap:AUX_LIMITS.skippedCap,capRefusals:Number(diag?.capRefusals||0),lastCapRefusalAt:diag?.lastRefusalAt||null};
+ const [counts,diag,skipped,oldest]=await Promise.all([many(db,'SELECT state, count(*) AS n FROM prediction_event_outbox GROUP BY state'),one(db,'SELECT cap_refusals AS capRefusals, last_refusal_at AS lastRefusalAt FROM prediction_event_outbox_diag WHERE id=1'),one(db,"SELECT active_pending AS n FROM prediction_event_outbox_counter WHERE kind='skipped'"),one(db,"SELECT since FROM prediction_event_outbox WHERE state='pending' ORDER BY since, event_key LIMIT 1")]);
+ return {oldestPendingSince:oldest?.since||null,states:Object.fromEntries(counts.map(row=>[row.state,Number(row.n)])),skippedActivePending:Number(skipped?.n||0),skippedCap:AUX_LIMITS.skippedCap,capRefusals:Number(diag?.capRefusals||0),lastCapRefusalAt:diag?.lastRefusalAt||null};
 }
 // Compaction (decision 8): the payload of a record settled for 14 days or more, by an indexed bounded scan on settled_at. Identity, original `at`, journal key and digest stay; the record is never rebuilt.
 export async function compactSettled(db,authority,{now=Date.now,limit=AUX_LIMITS.compactLimit}={}){
