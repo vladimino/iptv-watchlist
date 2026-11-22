@@ -1,4 +1,4 @@
-# ADR 0201: The auxiliary import and its verification run as ordered, resumable chunks that leave receipts, and the flip checks the receipts instead of re-sending the dataset
+# ADR 0202: The auxiliary import and its verification run as ordered, resumable chunks that leave receipts, and the flip checks the receipts instead of re-sending the dataset
 
 **Status:** Proposed (2026-11-22; the owner asked for this proposal on [AIR-554](https://trello.com/c/UrS1gflv) after the first real export measured the import; acceptance, the choice between the options below and any schema change are separate owner decisions)  
 **Original decision date:** 2026-11-22  

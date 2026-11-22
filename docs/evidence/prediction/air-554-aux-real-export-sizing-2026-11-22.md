@@ -29,7 +29,7 @@ Operator `status --converted` (D1 read-only, hypothetical generation 1):
 | Derived import SQL | 3,998 | 36,211,020 | 2,000 and 8,388,608 |
 | Derived canonical verification | 5,948 | 36,717,514 | 2,000 and 8,388,608 |
 
-The import is about twice over the statement limit and 4.3 times over the byte limit; the verification, which the flip carries inside its single atomic batch, is over by the same factors. The largest run (source plus manifest pieces) is 622,832 bytes, the median run 49,012 bytes, the largest statement 56,743 bytes (the 100 KiB statement limit is respected). At 1,500 statements and 6 MiB per batch the dataset needs 6 import batches and 6 verification batches. The proposal that follows from this is [ADR 0201](../../adr/0201-prediction-aux-resumable-import-with-receipts.md).
+The import is about twice over the statement limit and 4.3 times over the byte limit; the verification, which the flip carries inside its single atomic batch, is over by the same factors. The largest run (source plus manifest pieces) is 622,832 bytes, the median run 49,012 bytes, the largest statement 56,743 bytes (the 100 KiB statement limit is respected). At 1,500 statements and 6 MiB per batch the dataset needs 6 import batches and 6 verification batches. The proposal that follows from this is [ADR 0202](../../adr/0202-prediction-aux-resumable-import-with-receipts.md).
 
 ## State of the data at the cut
 
