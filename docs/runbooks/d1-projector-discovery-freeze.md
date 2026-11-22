@@ -31,7 +31,7 @@ Each one must be quiet, or proven unable to write, for the whole window. The lis
 | 2 | Hourly ChatGPT Scheduled Task (`:20` Europe/Madrid), Stage A discovery catch-up through `epg_sync_step` | ChatGPT scheduler | Owner pauses that exact Task for the window, or accepts that with `external` it will run chunks; **it must be paused** | Registry readback `Automations.peek` by the stable ID in the [scheduled-task contract](../reference/scheduled-tasks.md) |
 | 3 | Daily EPG/watchlist Scheduled Task (17:00 Europe/Madrid) | ChatGPT scheduler | Owner decides: pause it for a window that spans 17:00, or start the window after it completes. It publishes a new generation and writes the sources the projector reads | Registry readback; `epg_status` stage `complete` |
 | 4 | Manual `epg_sync_start`/`epg_sync_step`, resolve and admin discovery-recovery routes | Owner or a session | Nobody calls them; this is a procedural hold, so say so in the owner's GO | Generation stops moving |
-| 5 | Ratings workflow executor | Worker cron `ensure` | Not a Discovery writer; leave untouched. Its independence is a requirement, not something to pause | n/a |
+| 5 | Ratings workflow executor | none (not called by the Worker cron) | Not a Discovery writer; leave untouched | n/a |
 | 6 | Monitor `Monitor.run` | Worker cron | Not a writer of these inputs; leave `MONITOR=on` (the permanent emergency gate). Expect Discovery-stall alerts during the window; the owner decides in the GO whether to acknowledge them | Telegram alerts |
 | 7 | D1 enrichment projector | Worker cron | The only writer left; it is the purpose of the window | `projection_run`, `projection_state` |
 

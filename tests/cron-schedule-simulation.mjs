@@ -131,12 +131,14 @@ for(const [label,day] of DAYS){
 const worker=fs.readFileSync('src/worker.js','utf8');
 const handler=worker.slice(worker.indexOf('async scheduled('),worker.indexOf('async fetch('));
 assert.match(handler,/Promise\.allSettled\(\[/);
-for(const member of ['RatingsOrchestration.ensure(','EpgOrchestration.ensure(','reconcileDiscoveryWorkflow(','Monitor.run(']){
+for(const member of ['EpgOrchestration.ensure(','reconcileDiscoveryWorkflow(','Monitor.run(']){
  assert.ok(handler.includes(member),member+' is a member of the tick');
 }
+// AIR-580: the shared tick no longer calls the legacy Ratings executor, so it can create no `iptv-ratings` Workflow instance; the other members and the shared `:00` cron are unchanged.
+assert.doesNotMatch(handler,/RatingsOrchestration|RATINGS_WORKFLOW/,'the legacy Ratings executor is not a member of the tick');
 assert.doesNotMatch(handler,/runD1EnrichmentProjection/,'AIR-308: the tick does not start the enrichment projector');
 // AIR-482: the Discovery reconcile and its hourly report start alone and the other members start when it settles or after a bounded head start, as a best-effort mitigation (a close still pending at the deadline overlaps the others and is not isolated); a rejected reconcile never blocks the others.
-assert.ok(handler.indexOf('reconcileDiscoveryWorkflow(')<handler.indexOf('RatingsOrchestration.ensure('),'reconcile starts before ratings');
+assert.ok(handler.indexOf('reconcileDiscoveryWorkflow(')<handler.indexOf('EpgOrchestration.ensure('),'reconcile starts before the other members');
 assert.match(handler,/SCHEDULED_RECONCILE_HEAD_MS/);
 assert.doesNotMatch(handler,/lease|acquire/i,'no shared lease between the members');
 
@@ -163,13 +165,13 @@ for(const dir of ['src','scripts']){
   return {starts,waited,timers,get cleared(){return cleared;}};
  };
  let r=await run(()=>Promise.resolve());
- await r.waited;assert.deepEqual(r.starts,['reconcile','ratings','epg','monitor'],'fast success: reconcile first, each member exactly once');assert.equal(r.cleared,1,'the unused head-start timer is cancelled');
+ await r.waited;assert.deepEqual(r.starts,['reconcile','epg','monitor'],'fast success: reconcile first, each member exactly once, no Ratings executor');assert.equal(r.cleared,1,'the unused head-start timer is cancelled');
  r=await run(()=>Promise.reject(new Error('boom')));
- await r.waited;assert.equal(r.starts.length,4,'rejection never blocks the others');assert.equal(r.starts.filter(x=>x==='projector').length,0);
+ await r.waited;assert.equal(r.starts.length,3,'rejection never blocks the others');assert.equal(r.starts.filter(x=>x==='ratings').length,0,'a rejected reconcile starts no Ratings instance');assert.equal(r.starts.filter(x=>x==='projector').length,0);
  let release;r=await run(()=>new Promise(res=>{release=res;}));
  await new Promise(res=>setImmediate(res));assert.deepEqual(r.starts,['reconcile'],'others wait while reconcile is pending');
  assert.equal(r.timers[0].ms,45000,'bounded head start');r.timers[0].fn();
- await new Promise(res=>setImmediate(res));assert.equal(r.starts.length,4,'after the deadline the others start exactly once while reconcile is still pending');
- release();await r.waited;assert.equal(r.starts.length,4,'waitUntil settles after reconcile finishes, no restart');
+ await new Promise(res=>setImmediate(res));assert.equal(r.starts.length,3,'after the deadline the others start exactly once while reconcile is still pending');
+ release();await r.waited;assert.equal(r.starts.length,3,'waitUntil settles after reconcile finishes, no restart');
 }
 console.log('cron-schedule-simulation: ok (configured cron '+current+', compared with the former 37 * * * *)');

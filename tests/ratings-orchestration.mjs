@@ -1,5 +1,5 @@
 // AIR-347 / ADR 0089: the Cloudflare executor of the daily ratings run. The pure policy (Madrid day key, DST, failure classes,
-// budget, health); the owner's mode switch and the external writer's gate; `ensure` under duplicate firings; a whole run
+// budget, health); the owner's mode switch and the external writer's gate; a whole run
 // through the Workflow loop with an injected clock, random source and Workflow binding; the classified failures and the
 // quarantines; the read model; and the epoch fence on a real D1 stand-in. No network and no Cloudflare.
 import fs from 'node:fs';
@@ -133,18 +133,16 @@ async function activate(world,epoch=1){
 const control=world=>world.bucket.value(CONTROL);
 const modeDoc=world=>world.bucket.value(MODE);
 
-// 3. Inert by default: no mode document means external. `ensure` reads one document and creates nothing.
+// 3. Inert by default: no mode document means external. Reading the status writes nothing and the external path is open.
 {
  const w=setup();
- eq(await w.RO.ensure(w.env,{now:w.clock.now}),{started:false,reason:'external'});
  assert.equal(w.workflow.creates.length,0);assert.equal(w.bucket.writes().length,0,'nothing is written');assert.equal(w.net.fetches.length,0);
  const status=plain(await w.R.status(w.env));
  assert.equal(status.orchestration.mode,'external');assert.equal(status.orchestration.epoch,0);assert.equal(status.sideEffects,'none');
  // The external path is open: a start is not fenced.
  assert.equal(plain(await w.R.handle(w.env,'start',{trigger:'manual'})).body.reason,'started');
- // A malformed mode document fails closed on both paths.
+ // A malformed mode document fails closed on the external path.
  const m=setup();m.bucket.set(MODE,{schemaVersion:1,mode:'banana',epoch:0});
- eq(await m.RO.ensure(m.env,{now:m.clock.now}),{started:false,reason:'evidence_unreadable'});
  assert.equal(plain(await m.R.handle(m.env,'start',{trigger:'manual'})).body.reason,'evidence_unreadable');
  assert.equal(m.bucket.writes().length,0);
 }
@@ -162,7 +160,6 @@ const modeDoc=world=>world.bucket.value(MODE);
  const before=JSON.stringify(w.bucket.snapshot()),fetches=w.net.fetches.length;
  const start=plain(await w.R.handle(w.env,'start',{trigger:'scheduled'}));eq(start.body,{runId:null,created:false,nextAction:'stop',reason:'switch_in_progress'});
  const stepReply=plain(await w.R.handle(w.env,'step',{runId:'x'}));assert.equal(stepReply.body.reason,'switch_in_progress');assert.equal(stepReply.body.nextAction,'stop');
- eq(await w.RO.ensure(w.env,{now:w.clock.now}),{started:false,reason:'switch_in_progress'});
  assert.equal(JSON.stringify(w.bucket.snapshot()),before);assert.equal(w.net.fetches.length,fetches);
  assert.equal(plain(await w.R.status(w.env)).orchestration.mode,'switching','reads stay open');
  // T25: a live step lease blocks the completion; the drain state is recorded and the mode stays switching.
@@ -195,55 +192,15 @@ const modeDoc=world=>world.bucket.value(MODE);
  assert.notEqual(plain(await w.R.handle(w.env,'start',{trigger:'manual'})).body.reason,'external_writer_fenced');
 }
 
-// 5. `ensure`: one run per Madrid date under duplicate and overlapping firings (T06), not before 17:00, and across DST (T17).
-{
- const w=setup({start:Date.parse('2026-10-24T14:29:00Z')});
- await activate(w);
- const early=plain(await w.RO.ensure(w.env,{now:w.clock.now}));eq([early.started,early.reason],[false,'not_due']);
- assert.equal(early.dueAt,'2026-10-24T15:00:00.000Z');
- // Two overlapping firings after 17:00: one wins the compare-and-swap on the control record, one create is made.
- w.clock.now=Date.parse('2026-10-24T15:07:00Z');
- const both=plain(await Promise.all([w.RO.ensure(w.env,{now:w.clock.now}),w.RO.ensure(w.env,{now:w.clock.now})]));
- assert.equal(both.filter(item=>item.started).length,1);assert.equal(both.filter(item=>item.reason==='write_conflict').length,1);
- assert.equal(w.workflow.creates.length,1);eq(w.workflow.creates[0],{id:'ratings_20261024_0',params:{runKey:'2026-10-24',series:0,epoch:1}});
- const claimed=control(w);eq([claimed.runKey,claimed.series,claimed.instanceId,claimed.epoch,claimed.phase],['2026-10-24',0,'ratings_20261024_0',1,'starting']);
- // A later firing attaches: the instance is alive, nothing is created.
- const again=plain(await w.RO.ensure(w.env,{now:w.clock.now+H}));eq([again.started,again.reason],[false,'in_progress']);assert.equal(w.workflow.creates.length,1);
- // A lost create response whose instance exists attaches without a second id.
- const lost=setup({start:T0});await activate(lost);
- lost.workflow.failNext=new Error('timeout reading the create response');lost.workflow.instances.set('ratings_20261024_0',{status:'running'});
- const attached=plain(await lost.RO.ensure(lost.env,{now:lost.clock.now}));eq([attached.started,attached.attached],[true,true]);assert.equal(lost.workflow.creates.length,0);
- // A failed create whose instance is absent is a counted transient failure, then a cooldown.
- const uncertain=setup({start:T0});await activate(uncertain);uncertain.workflow.failNext=new Error('platform error');
- eq(plain(await uncertain.RO.ensure(uncertain.env,{now:uncertain.clock.now})).reason,'create_uncertain');
- const doc=control(uncertain);eq([doc.failure.code,doc.budget.consecutive,doc.phase],['create_uncertain',1,'stopped']);
- eq(plain(await uncertain.RO.ensure(uncertain.env,{now:uncertain.clock.now+10*1000})).reason,'cooldown');
- // The DST change days: exactly one run key per Madrid date, and the next date is a new key.
- for(const [day,dueZ] of [['2026-10-25','2026-10-25T16:00:00Z'],['2026-03-29','2026-03-29T15:00:00Z']]){
-  const d=setup({start:Date.parse(dueZ)-1000});await activate(d);
-  assert.equal(plain(await d.RO.ensure(d.env,{now:Date.parse(dueZ)-1000})).reason,'not_due',day);
-  for(const offset of [0,2*H,5*H])await d.RO.ensure(d.env,{now:Date.parse(dueZ)+offset});
-  assert.equal(d.workflow.creates.length,1,day);assert.equal(d.workflow.creates[0].params.runKey,day);
-  await d.RO.ensure(d.env,{now:Date.parse(dueZ)+DAY+MIN});
-  assert.equal(d.workflow.creates.length,2,'the next Madrid date starts its own run');assert.notEqual(d.workflow.creates[1].params.runKey,day);
- }
- // A platform-ended instance with an unfinished run: a counted transient failure, then a successor under the same date.
- const dead=setup({start:T0});await activate(dead);await dead.RO.ensure(dead.env,{now:dead.clock.now});
- dead.workflow.instances.get('ratings_20261024_0').status='terminated';
- const reconciled=plain(await dead.RO.ensure(dead.env,{now:dead.clock.now+MIN}));eq([reconciled.reason,reconciled.recorded],['cooldown','instance_terminated']);
- const successor=plain(await dead.RO.ensure(dead.env,{now:dead.clock.now+3*MIN}));eq([successor.started,successor.series],[true,1]);
- eq(dead.workflow.creates.map(item=>item.id),['ratings_20261024_0','ratings_20261024_1']);
- // An unreadable platform status does nothing.
- dead.workflow.status='throw';eq(plain(await dead.RO.ensure(dead.env,{now:dead.clock.now+4*MIN})).reason,'status_unknown');
- // No D1 ratings authority: nothing starts.
- const held=setup({start:T0});await activate(held);held.authority.ready=false;
- eq(plain(await held.RO.ensure(held.env,{now:held.clock.now})).reason,'mode_unreadable');held.authority.ready=true;held.authority.error=true;
- eq(plain(await held.RO.ensure(held.env,{now:held.clock.now})).reason,'d1_unavailable');
- assert.equal(held.workflow.creates.length,0);
-}
-
 // 6. A whole run through the Workflow loop: Diary page 1 only, durable progress, then the date is done and nothing repeats.
-async function started(w){await activate(w);const result=plain(await w.RO.ensure(w.env,{now:w.clock.now}));assert.equal(result.started,true);return {runKey:result.runKey,series:result.series,epoch:1};}
+// The claim the removed cron `ensure` used to make (AIR-580): the control record naming this run key, series 0 and epoch, and the Workflow instance it created. The run tests below start from it.
+const claimOf=(epoch,now)=>{
+ const runKey=Policy.madridDayKey(now),id='ratings_'+runKey.replace(/-/g,'')+'_0';
+ return {runKey,series:0,epoch,instanceId:id,record:{schemaVersion:1,runKey,series:0,instanceId:id,epoch,phase:'starting',runId:null,checkpoint:null,budget:Policy.emptyBudget(),cooldownUntil:null,quarantine:null,failure:null,lastDurableProgressAt:null,nextWakeAt:null,lastStep:null,doneAt:null,updatedAt:at(now)}};
+};
+const registerInstance=(workflow,c)=>{const params={runKey:c.runKey,series:c.series,epoch:c.epoch};workflow.instances.set(c.instanceId,{params,status:'running'});workflow.creates.push({id:c.instanceId,params});};
+function claim(w,now=w.clock.now){const c=claimOf(modeDoc(w).epoch,now);w.bucket.set(CONTROL,c.record);registerInstance(w.workflow,c);return {runKey:c.runKey,series:c.series,epoch:c.epoch};}
+async function started(w){await activate(w);return claim(w);}
 {
  const w=setup();const payload=await started(w);
  const outcome=plain(await w.RO.run(w.env,payload,w.step,w.hooks));
@@ -251,8 +208,7 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  assert.equal(w.net.diaryFetches().length,1,'Diary page 1 only');
  const doc=control(w);assert.ok(doc.doneAt);eq([doc.phase,doc.budget.consecutive,doc.quarantine,doc.failure],['done',0,null,null]);
  assert.ok(doc.lastDurableProgressAt);assert.equal(plain(w.bucket.value(RUN)).state,'finished');
- // The instance does not create another run once the date is done, and ensure leaves it alone.
- eq(plain(await w.RO.ensure(w.env,{now:w.clock.now+H})),{started:false,reason:'complete'});
+ // The instance does not create another run once the date is done.
  const fetches=w.net.fetches.length;
  eq([plain(await w.RO.act(w.env,{...payload,id:'ratings_20261024_0',now:()=>w.clock.now,random:()=>0.5}))].map(item=>item.kind),['stop']);
  assert.equal(w.net.fetches.length,fetches);
@@ -267,7 +223,7 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  assert.ok(!JSON.stringify(resultEvents[0]).includes('ratings_2026'),'the instance id is not part of the event');
  assert.equal(plain(w.bucket.value(RUN)).ratingsEventAt!==undefined,true);
 }
-// AIR-361: the Events Log is unreachable at the terminal commit; the run still completes and the hourly tick delivers the event once.
+// AIR-361: the Events Log is unreachable at the terminal commit; the run still completes and the idempotent reconcile delivers the event once.
 {
  const w=setup();const payload=await started(w);
  let failing=true;w.bucket.hooks.beforePut=async key=>{if(failing&&key.startsWith('events/items/'))throw new Error('R2 unavailable');};
@@ -275,9 +231,9 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  const listed=()=>[...w.bucket.records.keys()].filter(key=>key.startsWith('events/items/'));
  assert.equal(listed().length,0);assert.equal(plain(w.bucket.value(RUN)).ratingsEventAt,undefined);
  const fetches=w.net.fetches.length;failing=false;
- const tick=plain(await w.RO.ensure(w.env,{now:w.clock.now+H}));eq(tick.reason,'complete');
- assert.equal(listed().length,1,'the hourly tick delivered the event');assert.equal(w.net.fetches.length,fetches,'no Letterboxd request');
- await w.RO.ensure(w.env,{now:w.clock.now+2*H});assert.equal(listed().length,1,'and only once');
+ await w.R.reconcileEvent(w.env,w.clock.now+H);
+ assert.equal(listed().length,1,'the reconcile delivered the event');assert.equal(w.net.fetches.length,fetches,'no Letterboxd request');
+ await w.R.reconcileEvent(w.env,w.clock.now+2*H);assert.equal(listed().length,1,'and only once');
 }
 
 // 7. Read-after-unknown (T02, T04): a run of this date that already finished is the success, whoever wrote the checkpoint.
@@ -298,11 +254,10 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  assert.equal(w.net.diaryFetches().length,1,'one request, no retry inside the run');
  const doc=control(w);eq([doc.failure,doc.budget.consecutive,doc.budget.total,doc.phase,doc.stopReason],[{class:'transient',code:'upstream_blocked'},1,1,'stopped','blocked_until_next_date']);
  assert.equal(doc.quarantine,null);assert.equal(doc.nextWakeAt,at(Policy.nextDailyDue(w.clock.now)));
- eq(plain(await w.RO.ensure(w.env,{now:w.clock.now+H})).reason,'blocked_until_next_date');assert.equal(w.workflow.creates.length,1);
  // The next Madrid date starts with a fresh budget and the diary answers again.
  w.net.diary.set(1,diaryPage([diaryRow('diary-only',8,'2026-10-25','99002')],false));
  const nextDue=Policy.madridInstant('2026-10-25',17,0)+MIN;w.clock.now=nextDue;
- const next=plain(await w.RO.ensure(w.env,{now:nextDue}));eq([next.started,next.runKey,next.series],[true,'2026-10-25',0]);
+ const next=claim(w,nextDue);eq([next.runKey,next.series],['2026-10-25',0]);
  const second=plain(await w.RO.run(w.env,{runKey:'2026-10-25',series:0,epoch:1},w.step,w.hooks));eq(second.reason,'complete');
  eq([control(w).budget.consecutive,control(w).budget.total],[0,0]);
 }
@@ -343,10 +298,9 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  assert.equal(waits.length,4,'four cooldowns before the fifth failure quarantines');
  assert.match(doc.budget.fingerprint,/^transient\|network_error\|/);
  const model=plain(await w.RO.readModel(w.env,w.clock.now));eq([model.health,model.quarantine.scope],['quarantined','run']);
- eq(plain(await w.RO.ensure(w.env,{now:w.clock.now+H})),{started:false,reason:'quarantined',scope:'run'});
  w.net.hang=null;w.net.diary.set(1,diaryPage([diaryRow('diary-only',8,'2026-10-25','99002')],false));
  const nextDay=Policy.madridInstant('2026-10-25',17,0)+MIN;w.clock.now=nextDay;
- eq(plain(await w.RO.ensure(w.env,{now:nextDay})).started,true);
+ claim(w,nextDay);
  assert.equal(plain(await w.RO.run(w.env,{runKey:'2026-10-25',series:0,epoch:1},w.step,w.hooks)).reason,'complete');
 }
 
@@ -356,7 +310,7 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  w.bucket.set(CONTROL,{garbage:true});
  eq(plain(await w.RO.run(w.env,payload,w.step,w.hooks)).reason,'checkpoint_malformed');
  assert.equal(plain(await w.RO.readModel(w.env,w.clock.now)).health,'quarantined');
- eq(plain(await w.RO.ensure(w.env,{now:w.clock.now})).reason,'checkpoint_malformed');assert.equal(w.net.fetches.length,0);
+ assert.equal(w.net.fetches.length,0);
  // Isolation: two interrupted runs at the same checkpoint isolate the pipeline; the executor quarantines the domain and never clears it.
  const iso=setup();const payload2=await started(iso);
  const run0=plain(await iso.R.start(iso.env,{trigger:'scheduled'},iso.clock.now));
@@ -364,7 +318,6 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  const outcome=plain(await iso.RO.run(iso.env,payload2,iso.step,iso.hooks));eq(outcome.reason,'evidence_contradictory');
  eq([control(iso).quarantine.scope,control(iso).failure.class],['domain','unsafe']);
  // A new date does not clear a domain quarantine; the owner's explicit clear does, and runs no step.
- eq(plain(await iso.RO.ensure(iso.env,{now:Policy.madridInstant('2026-10-25',17,0)+MIN})),{started:false,reason:'quarantined',scope:'domain'});
  const fetches=iso.net.fetches.length;
  const cleared=plain(await iso.RO.handle(iso.env,{action:'clear_quarantine'}));eq(cleared.body.cleared,{run:true,control:true});
  assert.equal(iso.net.fetches.length,fetches,'clearing runs no step');assert.equal(iso.bucket.value(RUN).isolation,null);assert.equal(control(iso).quarantine,null);
@@ -452,7 +405,8 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
   const env=baseEnv(bucket,{...SEPARATE,RATINGS_WORKFLOW:workflow,DB:db,RATINGS_DB_REQUIRED:'on'});
   migrated(bucket);
   const modeSaved=await RatingsD1.putOwned({DB:db},MODE,null,{schemaVersion:1,mode:'cloudflare',epoch:1,target:null,drain:null});assert.ok(modeSaved.saved);
-  const claimed=plain(await RO.ensure(env,{now:clock.now}));assert.equal(claimed.started,true);assert.equal(workflow.creates.length,1);
+  const claim0=claimOf(1,clock.now);assert.ok((await RatingsD1.putOwned({DB:db},CONTROL,null,claim0.record)).saved);registerInstance(workflow,claim0);
+  const claimed={started:true,instanceId:claim0.instanceId,runKey:claim0.runKey,series:claim0.series};assert.equal(workflow.creates.length,1);
   const owner={DB:db};
   db.__onBatch=null;
   const id=claimed.instanceId,payload={runKey:claimed.runKey,series:claimed.series,epoch:1,id,now:()=>clock.now,random:()=>0.5};
@@ -517,7 +471,8 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
   // Reverse rollback: after the switch back, the old executor instance is refused and writes nothing; the external path is admitted again.
   const w3=await d1World();
   await w3.RO.switchMode(w3.owner,{action:'close_admission',target:'cloudflare'},w3.clock.now);await w3.RO.switchMode(w3.owner,{action:'complete'},w3.clock.now);
-  const claimed=plain(await w3.RO.ensure(w3.env,{now:w3.clock.now}));assert.equal(claimed.started,true);
+  const claim3=claimOf(1,w3.clock.now);assert.ok((await RatingsD1.putOwned(w3.owner,CONTROL,null,claim3.record)).saved);registerInstance(w3.workflow,claim3);
+  const claimed={started:true,instanceId:claim3.instanceId,runKey:claim3.runKey,series:claim3.series};
   w3.workflow.instances.get(claimed.instanceId).status='terminated';
   await w3.RO.switchMode(w3.env,{action:'close_admission',target:'external'},w3.clock.now);await w3.RO.switchMode(w3.env,{action:'complete'},w3.clock.now+20*MIN);
   eq((await w3.mode()).mode,'external');
@@ -530,7 +485,8 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
   const w=await d1World();
   eq((await w.RO.switchMode(w.owner,{action:'close_admission',target:'cloudflare'},w.clock.now)).closed,true);
   assert.equal((await w.RO.switchMode(w.owner,{action:'complete'},w.clock.now)).completed,true);
-  const claimed=plain(await w.RO.ensure(w.env,{now:w.clock.now}));assert.equal(claimed.started,true);
+  const claimW=claimOf(1,w.clock.now);assert.ok((await RatingsD1.putOwned(w.owner,CONTROL,null,claimW.record)).saved);registerInstance(w.workflow,claimW);
+  const claimed={started:true,instanceId:claimW.instanceId,runKey:claimW.runKey,series:claimW.series};
   w.hook.onBatch=async statements=>{if(!touchesRun(statements))return;w.hook.onBatch=null;w.db.sql("UPDATE ratings_domain_authority SET mode='r2'");};
   const result=plain(await w.RO.act(w.env,{runKey:claimed.runKey,series:claimed.series,epoch:1,id:claimed.instanceId,now:()=>w.clock.now,random:()=>0.5}));
   assert.notEqual(result.kind,'done');
@@ -558,9 +514,9 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
    eq([attempt.reply.body.nextAction,attempt.reply.body.reason??attempt.reply.body.refused],['stop','evidence_unreadable'],label+' '+action);
   }
   assert.equal(w.bucket.writes().length,0,label+': zero R2 writes');assert.equal(JSON.stringify(w.bucket.snapshot()),before,label+': R2 untouched');
-  // The status does not claim external while ownership is unreadable, and ensure creates nothing.
+  // The status does not claim external while ownership is unreadable.
   const status=plain(await w.R.status(w.env));assert.notEqual(status.orchestration?.mode,'external',label);assert.equal(status.orchestration.health,'unknown');
-  assert.notEqual(plain(await w.RO.ensure(w.env,{now:w.clock.now})).started,true);assert.equal(w.workflow.creates.length,0);
+  assert.equal(w.workflow.creates.length,0);
  }
  // 16c. The retired migrate action has no entry path (ADR 0161). The dispatchers route start and step through `handle` only, and
  // `handle` answers 400 for any other action, fenced or not, without a write.
