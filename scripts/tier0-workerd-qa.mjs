@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
-const SAFE = ['PATH', 'HOME', 'LANG', 'TMPDIR', 'NODE_OPTIONS_SAFE'];
+const SAFE = ['PATH', 'LANG', 'TMPDIR'];
 const env = Object.fromEntries(SAFE.filter(k => process.env[k]).map(k => [k, process.env[k]]));
 env.WRANGLER_SEND_METRICS = 'false'; env.CI = '1'; env.NO_COLOR = '1'; env.WRANGLER_HIDE_BANNER = 'true';
 const out = process.argv.includes('--out') ? process.argv[process.argv.indexOf('--out') + 1] : null;
@@ -20,6 +20,10 @@ const FAKE_DB_ID = '00000000-0000-4000-8000-00000000t0t0';
 const PROD_DB_ID = '3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb';
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'air571-tier0-'));
 const persist = path.join(work, 'state');
+// Credential isolation: the child processes get a fresh HOME and XDG dirs inside the private work dir, so no operator Wrangler/Cloudflare auth or config file is visible
+for (const d of ['home', 'xdg-config', 'xdg-data', 'xdg-cache', 'xdg-state']) fs.mkdirSync(path.join(work, d));
+env.HOME = path.join(work, 'home'); env.XDG_CONFIG_HOME = path.join(work, 'xdg-config'); env.XDG_DATA_HOME = path.join(work, 'xdg-data'); env.XDG_CACHE_HOME = path.join(work, 'xdg-cache'); env.XDG_STATE_HOME = path.join(work, 'xdg-state');
+env.APPDATA = path.join(work, 'home'); env.LOCALAPPDATA = path.join(work, 'home');
 const report = {tier: 0, scope: 'local workerd/Miniflare only; no Cloudflare resources', versions: {}, items: {}};
 const log = (...a) => console.error('[tier0]', ...a);
 
@@ -83,6 +87,38 @@ try {
   const stat = spawnSync('sh', ['-c', "ps -eo pid,rss,time,comm | grep -i workerd | head -3"], {encoding: 'utf8'}).stdout.trim();
   report.items.processIndicative = {note: 'host-process figures of workerd, NOT per-isolate CPU/memory; per-isolate CPU and memory are NOT MEASURED (workerd local exposes no honest figure)', ps: stat};
 } finally { await mf.dispose(); }
+// ---- deterministic Tier 0 assertions: a failure makes the command exit nonzero; edge-only items are acknowledged NOT PROVEN, never failures
+const failures = []; const check = (name, ok, detail) => { if (!ok) failures.push(name + (detail === undefined ? '' : ' :: ' + JSON.stringify(detail))); };
+{
+  const it = report.items; const s = it.shape; const L = it.limits; const P = Object.fromEntries(it.promotions.map(p => [p.step, p])); const C = it.cas; const S = it.slot;
+  check('shape: 1 affected row decodes to 1', s?.oneRow?.decoded === 1, s?.oneRow?.decoded); check('shape: 0 affected rows decodes to 0', s?.zeroRows?.decoded === 0, s?.zeroRows?.decoded);
+  check('shape: recordMirror applied false on lost CAS', s?.decoder?.lostCas?.applied === false, s?.decoder?.lostCas);
+  check('shape: recordMirror delivered applied true', s?.decoder?.delivered?.applied === true, s?.decoder?.delivered);
+  check('shape: recordMirror repeat applied false', s?.decoder?.again?.applied === false, s?.decoder?.again);
+  for (const n of [99, 100]) check('limits: ' + n + ' binds accepted', L?.binds?.[n] === 'accepted', L?.binds?.[n]);
+  for (const n of [101, 110, 200]) check('limits: ' + n + ' binds rejected', /^rejected/.test(L?.binds?.[n] || ''), L?.binds?.[n]);
+  for (const n of [100, 308, 500, 1000]) check('limits: batch of ' + n + ' accepted', /^accepted/.test(L?.batch?.[n] || ''), L?.batch?.[n]);
+  check('limits: 100000-char statement accepted', L?.sqlChars?.[100000] === 'accepted'); check('limits: 100500-char statement rejected', /^rejected/.test(L?.sqlChars?.[100500] || ''));
+  const par = p => p?.parity?.ok === true && p.parity.orderEqual === true && p.parity.digestEqual === true;
+  check('promote fill400: committed with parity', P.fill400?.outcome === 'committed' && par(P.fill400) && P.fill400.parity.count === 400, P.fill400);
+  check('promote over full ledger: refused admission_ledger_full with no writes', P.overCapRefusedWhileLedgerFull?.ok === false && P.overCapRefusedWhileLedgerFull.reason === 'admission_ledger_full' && Object.values(P.overCapRefusedWhileLedgerFull.rowsInserted).every(n => n === 0), P.overCapRefusedWhileLedgerFull);
+  check('promote 700: committed with parity', P.grow700AfterSettle?.outcome === 'committed' && par(P.grow700AfterSettle) && P.grow700AfterSettle.parity.count === 700 && P.grow700AfterSettle.added === 300, P.grow700AfterSettle);
+  check('promote replace100: 100 added, 100 removed, parity', P.replace100?.outcome === 'committed' && P.replace100.added === 100 && P.replace100.removed === 100 && par(P.replace100), P.replace100);
+  check('promote noChange: no_change and no inserts', P.noChange?.outcome === 'no_change' && Object.values(P.noChange.rowsInserted).every(n => n === 0) && par(P.noChange), P.noChange);
+  check('promote extra300New: 1000 rows with parity', P.extra300New?.outcome === 'committed' && P.extra300New.added === 300 && par(P.extra300New) && P.extra300New.parity.count === 1000, P.extra300New);
+  for (const p of it.promotions) { if (p.ok) { check('promote ' + p.step + ': at most 90 binds per statement', p.d1.maxBindParams <= 90, p.d1.maxBindParams); check('promote ' + p.step + ': at most 40 roundtrips', p.d1.roundtrips <= 40, p.d1.roundtrips); } }
+  check('cas: control commit', C?.control?.outcome === 'committed', C?.control); check('cas: bookkeeping contention commits after one pinned replay', C?.bookkeepingContention?.result?.outcome === 'committed' && C.bookkeepingContention.batches > C.control.batches, C?.bookkeepingContention);
+  check('cas: competing promotion refused, newer list kept', C?.competingPromotion?.result?.error === 'conflict' && C.competingPromotion.newerListKept === true && C.competingPromotion.olderListPromoted === false, C?.competingPromotion);
+  check('cas: exactly one of two concurrent publishes commits', JSON.stringify([...(C?.concurrentPublishes?.outcomes || [])].sort()) === JSON.stringify(['committed', 'conflict']), C?.concurrentPublishes);
+  check('slot: ran without error', !S?.notProven && !S?.error, S?.notProven || S?.error);
+  check('slot: run finished', S?.stages?.run?.reason === 'complete' && S.stages.run.status === 'finished' && S.slotRow?.status === 'finished' && S.slotRow.watchlist_outcome === 'committed', S?.stages?.run);
+  const mine = (S?.events || []).filter(e => e.slot === S?.stages?.ensure?.slot);
+  check('slot: exactly 2 Events for the slot (ratings and watchlist), both success', mine.length === 2 && mine.every(e => e.status === 'success') && new Set(mine.map(e => e.type)).size === 2, mine);
+  check('slot: root mirror written', S?.rootMirror?.source === 'watchlist_authority' && S.rootMirror.films === 40, S?.rootMirror);
+}
+report.assertions = {failed: failures, passed: failures.length === 0,
+  acknowledgedNotProven: ['per-isolate CPU and memory (workerd local exposes no honest figure)', 'real edge D1 latency and limits (Tier 1)', 'deployed cron and Workflow path (Ratings and reconcile phases are stubbed in the local slot)', 'rows_written gate <= ~1,500 of the scratch proposal: NOT met (2,831..4,537 D1 meta incl. indexes and triggers); needs an explicit owner decision, not asserted here']};
+if (failures.length) { process.exitCode = 1; console.error('[tier0] FAILED assertions:\n - ' + failures.join('\n - ')); } else console.error('[tier0] all Tier 0 assertions passed');
 report.workDir = process.argv.includes('--keep') ? work : '(removed)';
 const text = JSON.stringify(report, null, 1);
 if (out) fs.writeFileSync(out, text); else console.log(text);
