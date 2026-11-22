@@ -33,7 +33,7 @@ sequenceDiagram
             MCP-->>Client: task_args_mismatch, no write
         end
     end
-    MCP->>Queue: Read-only preflight: stored queue and its generation, hot first, up to manifestSize films, measure the whole answer
+    MCP->>Queue: Read-only preflight: stored queue and its generation, recovery slots first then hot first, up to manifestSize films, measure the whole answer
     alt A live runner lease exists and this start holds no claim (an unlabelled start: another v2 run or a stored legacy v5 run)
         MCP-->>Client: already_running, names the holder, no manifest, no queue write
     else No live lease, or this start holds its own claim
@@ -231,3 +231,8 @@ A submit writes no view-index entry: the view index is always derived from the D
 ### Scoped recovery intent is a rebuild input, not a queue writer (ADR 0165, Accepted)
 
 An owner-confirmed recovery intent ([ADR 0165](../adr/0165-scoped-prediction-recovery-intent.md); [contract](../reference/api/admin-actions.md#scoped-prediction-recovery-intent)) is stored in D1 (`prediction_recovery_*`, migration `0024`, applied to production on 18 Nov 2026; [evidence](../evidence/d1-migration/air-478-0024-apply-2026-11-18.md)). It does not appear among the queue writers above because it never writes the queue: the owner-only confirm writes intent rows only, and the freshness rule reads them as one more input of every rebuild and of the runner's per-film checks. A denied version makes the film outstanding at the next ordinary rebuild (the advance gate answers `recovery_changed` when the intent revision moved), so the ordinary lane, priority, retry budget, lease and batch v2 validation apply. The first new version the runner commits satisfies the intent. In the diagram the intent store is a read-only input (dotted): its revision feeds the rebuild decision and its denied versions feed the rebuild; it has no edge into the commit. An installed store that cannot be read, or a partial table set, ends the caller's attempt before any queue write, so a recovery film's retry record is never dropped on an unreadable answer; only the absent migration reads as no intents.
+
+
+### Recovery slots in the batch manifest (ADR 0197, Accepted)
+
+The selection step of the batch start ([ADR 0197](../adr/0197-recovery-slots-in-the-ordinary-batch-manifest.md)) reads the same intent overlay as the freshness rule. Before the ordinary hot-first order it fills at most `max(1, floor(N * 0.4))` of the `N` manifest slots (none for `N = 1`) with films that have an active, owner-confirmed intent and are queued in either lane, oldest confirmed cohort first, each only while its stored version is still the one the intent denies. The ordinary order then fills the remaining slots, with the fingerprint migration share applied to those; the quota is a hard cap, so films with an active intent that did not take a recovery slot stay out of the ordinary fill, and recovery probing has its own read bound. The selection reads the queue and writes nothing: lane, priority, retry records and queue membership are the rebuild's own, and the lease, validation, durable hold, idempotent submit and immutable lineage that follow the manifest are unchanged. Retry backoff and an exhausted budget are never bypassed, a pinned call is not reordered, and an unreadable recovery store ends the start before any manifest. The sequence above shows the preflight; the share is a rule inside its selection step, so no other diagram changes.
