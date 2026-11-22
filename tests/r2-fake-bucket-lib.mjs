@@ -13,7 +13,8 @@ export function fakeBucket(initial,{pageSize=3}={}){
  let revision=0;
  const put=(key,bytes)=>{revision++;items.set(key,{bytes:Buffer.from(bytes),etag:sha256(Buffer.from(bytes)).slice(0,32)+'-'+revision,lastModified:new Date(Date.UTC(2026,9,26,0,0,revision)).toUTCString()});};
  for(const [key,bytes] of Object.entries(initial))put(key,bytes);
- const calls={list:0,head:0,get:0,writes:0,badSignature:0};
+ const options={ignorePrefix:false};   // a misbehaving server that answers a prefixed listing with unrelated keys
+ const calls={list:0,head:0,get:0,writes:0,badSignature:0,listPrefixes:[],touched:[]};
  const hooks=[];
  const escape=text=>text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
  const rfc=value=>encodeURIComponent(value).replace(/[!'()*]/g,character=>'%'+character.charCodeAt(0).toString(16).toUpperCase());
@@ -41,14 +42,15 @@ export function fakeBucket(initial,{pageSize=3}={}){
   if(bucketName!=='iptv'){response.writeHead(404);response.end();return;}
   if(request.method!=='GET'&&request.method!=='HEAD'){calls.writes++;response.writeHead(403);response.end('<Error><Code>AccessDenied</Code></Error>');return;}
   if(key===null){
-   calls.list++;
+   calls.list++;calls.listPrefixes.push(url.searchParams.get('prefix')||'');
    if(url.searchParams.get('list-type')!=='2'){response.writeHead(400);response.end();return;}
-   const keys=[...items.keys()].sort(),start=url.searchParams.has('continuation-token')?Number(Buffer.from(url.searchParams.get('continuation-token'),'base64').toString()):0;
+   const prefix=options.ignorePrefix?'':(url.searchParams.get('prefix')||''),keys=[...items.keys()].filter(item=>item.startsWith(prefix)).sort(),start=url.searchParams.has('continuation-token')?Number(Buffer.from(url.searchParams.get('continuation-token'),'base64').toString()):0;
    const limit=Math.min(pageSize,Number(url.searchParams.get('max-keys')||1000)),selected=keys.slice(start,start+limit),truncated=start+limit<keys.length;
    const body='<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>iptv</Name><KeyCount>'+selected.length+'</KeyCount><MaxKeys>'+limit+'</MaxKeys><IsTruncated>'+truncated+'</IsTruncated>'+(truncated?'<NextContinuationToken>'+Buffer.from(String(start+limit)).toString('base64')+'</NextContinuationToken>':'')+selected.map(item=>{const object=items.get(item);return '<Contents><Key>'+escape(item)+'</Key><LastModified>'+object.lastModified+'</LastModified><ETag>&quot;'+object.etag+'&quot;</ETag><Size>'+object.bytes.length+'</Size><StorageClass>STANDARD</StorageClass></Contents>';}).join('')+'</ListBucketResult>';
    response.writeHead(200,{'Content-Type':'application/xml','Content-Length':Buffer.byteLength(body)});response.end(body);return;
   }
   if(request.method==='HEAD')calls.head++;else calls.get++;
+  calls.touched.push(key);
   const object=items.get(key);
   if(!object){response.writeHead(404);response.end();return;}
   const ifMatch=request.headers['if-match'];
@@ -64,7 +66,7 @@ export function fakeBucket(initial,{pageSize=3}={}){
   response.writeHead(200,{ETag:'"'+(etagOverride||object.etag)+'"','Content-Length':object.bytes.length,'Last-Modified':object.lastModified,'Content-Type':'application/octet-stream'});
   if(request.method==='HEAD')response.end();else response.end(object.bytes);
  });
- return {items,calls,put,hooks,server,
+ return {items,calls,put,hooks,server,options,
   async start(){await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));return 'http://127.0.0.1:'+server.address().port;},
   async stop(){await new Promise(resolve=>server.close(resolve));}};
 }

@@ -90,6 +90,8 @@ Exit 0 of the export is a fenced consistent cut; exit 3 is a NO-GO to read in `r
 
 **Import size.** The synthetic scratch import of one run is 7 statements and 16 KB. A history of up to 489 runs with 39 KB manifests is, by extrapolation only, thousands of statements and tens of MB, likely over the measured limits: the real number comes only from the real private export (`status --converted <dir>`), and if it does not fit, a resumable import is a separate reviewed contract (importer fence, operator and tests), not a silent chunking.
 
+**Scoped captures (ADR 0200).** A snapshot taken with `--scope prediction-aux` is converted exactly like a whole-bucket one; the converter report records the proof kind under `snapshot.scope`. `status`, `--flip` and the release treat the two captures of a flip as one proof: both scoped or both the original whole-bucket cut (a report without a scope is the whole-bucket cut), the same digest, and a digest that is not the current definition of the scope is refused (`capture_scope_unsupported`, `capture_scope_mismatch`). The exporter has no D1 access, so the closed marker is still verified by the operator at the flip.
+
 ## Cutover handoff for AIR-554 (the invariant, not the procedure)
 
 AIR-554 chooses the bounded procedure and its holdpoints under its own owner plan; the proposed (not approved) plan is the [AIR-554 preflight and L3 plan](../evidence/prediction/air-554-aux-cutover-plan-2026-11-22.md). The invariant it must meet ([ADR 0194](../adr/0194-prediction-auxiliary-state-d1-checkpoint-and-outbox.md) decision 1): a marker pre-read is not a cross-store fence, and D1 cannot fence an R2 object. So, before the marker flips:

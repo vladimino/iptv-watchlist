@@ -1059,7 +1059,7 @@ export const FILES={
  },
  "r2-fake-bucket-lib.mjs": {
   "suite": "support",
-  "note": "Fake S3-compatible R2 bucket over loopback HTTP (paged listing, conditional HEAD and GET, signature check, write refusal) shared by tests/r2-snapshot-export.mjs and tests/prediction-aux-export-convert.mjs. Executing this file runs no check."
+  "note": "Fake S3-compatible R2 bucket over loopback HTTP (paged listing, conditional HEAD and GET, signature check, write refusal) shared by tests/r2-snapshot-export.mjs, tests/r2-snapshot-export-scoped.mjs and tests/prediction-aux-export-convert.mjs. Executing this file runs no check."
  },
  "prediction-catalog-held-event.mjs": {
   "suite": "core"
@@ -1438,6 +1438,9 @@ export const FILES={
   "suite": "core"
  },
  "r2-snapshot-export.mjs": {
+  "suite": "core"
+ },
+ "r2-snapshot-export-scoped.mjs": {
   "suite": "core"
  },
  "rating-history.mjs": {
