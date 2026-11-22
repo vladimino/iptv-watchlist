@@ -1137,6 +1137,9 @@ export const FILES={
  "match-hint.mjs": {
   "suite": "core"
  },
+ "mcp-tool-call-log.mjs": {
+  "suite": "core"
+ },
  "mcp-tools.mjs": {
   "suite": "core"
  },
