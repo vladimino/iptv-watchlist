@@ -19,7 +19,8 @@ labelStarts();
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const NOW=Date.parse('2026-11-22T14:00:00.000Z');
-const tmp=()=>fs.mkdtempSync(path.join(os.tmpdir(),'aux-op-'));
+const made=[];process.on('exit',()=>{for(const dir of made)try{fs.rmSync(dir,{recursive:true,force:true});}catch{/* best effort */}});
+const tmp=()=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),'aux-op-'));made.push(dir);return dir;};
 const stop=async(promise,reason)=>{try{await promise;}catch(error){assert.equal(error.reason,reason,String(error.reason)+' '+JSON.stringify(error.details||{}));return error;}assert.fail('expected '+reason);};
 const states=[];const ctxOf=()=>({track:state=>states.push(state)});
 const run=(command,env,params={},extra={})=>Op.execute(command,{binding:env.db,now:NOW,ctx:ctxOf(),params,...extra});
