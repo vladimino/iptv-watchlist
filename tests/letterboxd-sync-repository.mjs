@@ -36,7 +36,8 @@ function site(films,size=3){
 const film=(i,extra={})=>({id:'f'+i,title:'F'+i,year:2000+i,url:'https://letterboxd.com/film/f'+i+'/',...extra});
 const receipts=[];
 const writers={scan_facts:async(ctx,e)=>{receipts.push(e.effect+':'+e.version);return 'r-'+e.effect+'-'+e.version;},retention:async(ctx,e)=>{receipts.push(e.effect+':'+e.version);return 'r-'+e.effect+'-'+e.version;},removal_enqueue:async(ctx,e)=>{receipts.push(e.effect+':'+e.version);return 'r-'+e.effect+'-'+e.version;}};
-const GOOD={handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:true,ratingsPhase:true})};
+// The ports of a proven handover: the proof, a guard that pins its facts at the commit (a passing one here), and drained causal effects.
+const GOOD={handover:async()=>({ratingsClosed:true,ratingsDrained:true,legacyFenced:true,watchlistRepository:true,ratingsPhase:true}),handoverGuards:async()=>[['INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, 1 WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok',[]]],effects:async()=>({drained:true,pending:0})};
 
 async function slotRun(env,{now,list,effectWriters=writers,key=null,epoch=1}){
  const s=site(list);

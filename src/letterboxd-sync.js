@@ -56,12 +56,16 @@ const emptyMode = () => ({mode: 'external', target: null, from: null, epoch: 0, 
 export async function readMode(env) {
   let row;
   try { row = await first(env, 'SELECT mode, target, from_mode, epoch, drain, quarantine_reason, quarantined_at, changed_at, revision, write_id FROM letterboxd_sync_mode WHERE id = 1'); }
-  catch (error) { if (error.code === 'schema_absent') return emptyMode(); throw error; }
+  catch (error) { if (error.code === 'schema_absent') return {...emptyMode(), schemaAbsent: true}; throw error; }
   if (!row) return emptyMode();
   if (!MODES.includes(row.mode) || !Number.isInteger(row.epoch)) return {...emptyMode(), malformed: true};
   return {mode: row.mode, target: row.target, from: row.from_mode, epoch: row.epoch, drain: row.drain, quarantine: row.quarantine_reason ? {reason: row.quarantine_reason, at: row.quarantined_at} : null, changedAt: row.changed_at, revision: row.revision, writeId: row.write_id, stored: true};
 }
-async function writeMode(env, expected, next) {
+// `guards`: [sql, params] statements asserted in the SAME batch before the write (each an upsert of the CHECK (ok = 1) fence row). The batch ends with a fence on `changes()`: a compare-and-swap that
+// matched no row trips the CHECK and rolls the whole batch back. Outcomes: 'applied' (the batch itself proved the row changed), 'rejected' (a proven rejection, nothing written: a lost compare-and-swap, a tripped
+// guard or a key collision; `guarded` tells the two apart), or 'uncertain' (the reply was lost or the storage failed: the write may or may not have committed, never retried blindly).
+const CHANGED_FENCE_SQL = 'INSERT INTO letterboxd_sync_fence (id, ok) SELECT 1, CASE WHEN changes() = 1 THEN 1 ELSE 0 END WHERE true ON CONFLICT (id) DO UPDATE SET ok = excluded.ok';
+async function writeMode(env, expected, next, {guards = []} = {}) {
   const writeId = uuid();
   const db = dbOf(env);
   const quarantine = next.quarantine || {};
@@ -69,10 +73,15 @@ async function writeMode(env, expected, next) {
   const statement = expected.stored
     ? db.prepare('UPDATE letterboxd_sync_mode SET mode = ?, target = ?, from_mode = ?, epoch = ?, drain = ?, quarantine_reason = ?, quarantined_at = ?, changed_at = ?, revision = revision + 1, write_id = ? WHERE id = 1 AND revision = ?').bind(...binds, expected.revision)
     : db.prepare('INSERT INTO letterboxd_sync_mode (id, mode, target, from_mode, epoch, drain, quarantine_reason, quarantined_at, changed_at, revision, write_id) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)').bind(...binds);
-  try { await batch(env, [statement]); } catch (error) { if (error.code !== 'write_contention') throw error; return false; }
-  const after = await readMode(env);
-  return after.writeId === writeId;
+  const guardStatements = guards.map(([sql, params]) => db.prepare(sql).bind(...params));
+  try { await batch(env, [...guardStatements, statement, db.prepare(CHANGED_FENCE_SQL).bind()]); } catch (error) {
+    if (error.code === 'epoch_mismatch') return {outcome: 'rejected', guarded: guardStatements.length > 0};
+    if (error.code === 'write_contention') return {outcome: 'rejected', guarded: false};
+    return {outcome: 'uncertain'};
+  }
+  return {outcome: 'applied', writeId};
 }
+const UNCERTAIN = action => ({action, refused: 'write_uncertain', retry: false});
 
 const slotFrom = row => row ? {
   key: row.slot_key, dueAt: row.due_at, series: row.series, instanceId: row.instance_id, epoch: row.epoch, status: row.status, phase: row.phase, runId: row.run_id,
@@ -233,55 +242,174 @@ export async function handoverState(env, ports) {
   }
   return {ratingsClosed: false, ratingsDrained: false, legacyFenced: false, watchlistRepository: false, ratingsPhase: false};
 }
-export async function switchMode(env, {action, target} = {}, ports = {}, now = Date.now()) {
+// What must hold before a RUNNING writer is closed (reverse handover, O5): the durable causal effects of the current snapshot (facts, retention, removal queue) are all done, because once the epoch is
+// closed the Letterboxd writer is fenced and nothing could drain them. `ports.effects(env)` returns {drained: boolean, pending?: number, version?: number, drainedVersion?: number}. Mirror delivery, Events and
+// pending identity admission are NOT part of this gate. Default: not provable, so the close is refused.
+export async function effectsState(env, ports) {
+  if (ports?.effects) {
+    try { return await ports.effects(env); } catch { return {error: true}; }
+  }
+  return {drained: false, unproven: true};
+}
+const HANDOVER_NAMES = ['ratingsClosed', 'ratingsDrained', 'legacyFenced', 'watchlistRepository', 'ratingsPhase'];
+// The pins of an owner command: the epoch and the revision of the mode row the owner read (revision 0 = no row yet). A command that names a pin is refused when the row moved. Direct callers may omit them; the owner route requires both.
+function pinMismatch(mode, {expectEpoch, expectRevision}) {
+  if (expectEpoch !== undefined && mode.epoch !== expectEpoch) return 'epoch';
+  if (expectRevision !== undefined && (mode.revision ?? 0) !== expectRevision) return 'revision';
+  return null;
+}
+const modeView = mode => ({mode: mode.mode, target: mode.target, epoch: mode.epoch, revision: mode.revision ?? 0});
+// The proof that admits the Letterboxd writer (a forward completion, or an abort back to `cloudflare`): all five parts, read as ONE unit by the port, and its pins for the commit batch. {guards} or {refused}.
+async function proveAdmission(env, ports, mode) {
+  const handover = await handoverState(env, ports);
+  const missing = HANDOVER_NAMES.filter(name => handover[name] !== true);
+  if (handover.error || missing.length) return {refused: {refused: 'handover_not_proven', missing: handover.error ? ['unreadable'] : missing}};
+  // The proof is read OUTSIDE the commit; it is protected AT the commit: the facts it rests on (the Ratings mode and its drain records, the Watchlist marker) are pinned in the same batch as the mode write.
+  // A port that cannot pin its facts leaves the proof unprotected, and an unprotected proof does not admit a writer.
+  let guards;
+  try { guards = ports?.handoverGuards ? await ports.handoverGuards(env, handover) : null; } catch { guards = null; }
+  if (!Array.isArray(guards) || !guards.length) return {refused: {refused: 'handover_unprotected'}};
+  return {guards};
+}
+export async function switchMode(env, {action, target, expectEpoch, expectRevision} = {}, ports = {}, now = Date.now()) {
   for (let attempt = 0; attempt < LIMITS.controlAttempts; attempt++) {
     const mode = await readMode(env);
     if (mode.malformed) return {action, refused: 'evidence_unreadable'};
+    const pin = pinMismatch(mode, {expectEpoch, expectRevision});
+    // A stale pin is never retried: the owner reads the row again and decides.
+    if (pin) return {action, refused: 'pin_mismatch', pin, ...modeView(mode)};
     if (action === 'close_admission') {
       if (mode.mode === 'switching') return {action, refused: 'switch_open', mode: mode.mode, target: mode.target, epoch: mode.epoch};
       if (mode.mode === target) return {action, refused: 'already_in_mode', mode: mode.mode, epoch: mode.epoch};
       if (!['external', 'cloudflare'].includes(target)) return {action, refused: 'invalid_target'};
+      let guards = [];
+      if (mode.mode === 'cloudflare' && target === 'external') {
+        // Reverse handover: no running writer is closed over undrained causal effects (never a silent discard).
+        const effects = await effectsState(env, ports);
+        if (effects.error) return {action, refused: 'effects_unreadable'};
+        if (effects.unproven) return {action, refused: 'effects_unproven'};
+        if (effects.drained !== true) return {action, refused: 'effects_pending', pending: effects.pending ?? null, version: effects.version ?? null, drainedVersion: effects.drainedVersion ?? null};
+        // The read above is not the proof: a promotion may commit between it and the write. The proof is asserted AT the commit, in the batch that closes the epoch (a port that cannot pin it leaves the close refused).
+        if (!Array.isArray(effects.guard) || typeof effects.guard[0] !== 'string') return {action, refused: 'effects_unprotected'};
+        guards = [effects.guard];
+      }
       const next = {mode: 'switching', from: mode.mode, target, epoch: mode.epoch + 1, drain: null, changedAt: iso(now), quarantine: mode.quarantine};
-      if (await writeMode(env, mode, next)) return {action, closed: true, mode: 'switching', target, epoch: next.epoch};
+      const result = await writeMode(env, mode, next, {guards});
+      if (result.outcome === 'applied') return {action, closed: true, mode: 'switching', target, epoch: next.epoch};
+      if (result.outcome === 'uncertain') return UNCERTAIN(action);
+      // Rejected with nothing written: a tripped guard (the effects are no longer drained) or a lost compare-and-swap (the row moved). With pins this is never a blind retry.
+      if (result.guarded && guards.length) { const again = await readMode(env); if (again.revision === mode.revision && again.epoch === mode.epoch) return {action, refused: 'effects_changed'}; }
+      if (expectEpoch !== undefined || expectRevision !== undefined) return {action, refused: 'pin_mismatch', pin: 'revision'};
       continue;
     }
     if (action === 'complete') {
       if (mode.mode !== 'switching') return {action, refused: 'not_switching', mode: mode.mode, epoch: mode.epoch};
+      // Read-only: the drain observation is reported, never written, so a refusal changes nothing.
       const drain = await drainState(env);
-      if (drain !== 'verified') {
-        if (mode.drain !== drain) await writeMode(env, mode, {...mode, drain, changedAt: mode.changedAt});
-        return {action, refused: 'drain_not_verified', drain, mode: 'switching', target: mode.target, epoch: mode.epoch};
-      }
+      if (drain !== 'verified') return {action, refused: 'drain_not_verified', drain, mode: 'switching', target: mode.target, epoch: mode.epoch};
+      let guards = [];
       if (mode.target === 'cloudflare') {
-        const handover = await handoverState(env, ports);
-        const missing = ['ratingsClosed', 'ratingsDrained', 'legacyFenced', 'watchlistRepository', 'ratingsPhase'].filter(name => handover[name] !== true);
-        if (handover.error || missing.length) return {action, refused: 'handover_not_proven', missing: handover.error ? ['unreadable'] : missing, mode: 'switching', target: mode.target, epoch: mode.epoch};
+        const proof = await proveAdmission(env, ports, mode);
+        if (proof.refused) return {action, ...proof.refused, mode: 'switching', target: mode.target, epoch: mode.epoch};
+        guards = proof.guards;
       }
       const next = {mode: mode.target, from: mode.from, target: null, epoch: mode.epoch, drain: 'verified', changedAt: iso(now), quarantine: mode.quarantine};
-      if (await writeMode(env, mode, next)) return {action, completed: true, mode: next.mode, epoch: next.epoch, drain: 'verified'};
+      const result = await writeMode(env, mode, next, {guards});
+      if (result.outcome === 'applied') return {action, completed: true, mode: next.mode, epoch: next.epoch, drain: 'verified'};
+      if (result.outcome === 'uncertain') return UNCERTAIN(action);
+      if (result.guarded && guards.length) { const again = await readMode(env); if (again.revision === mode.revision && again.epoch === mode.epoch) return {action, refused: 'handover_changed', mode: 'switching', target: mode.target, epoch: mode.epoch}; }
+      if (expectEpoch !== undefined || expectRevision !== undefined) return {action, refused: 'pin_mismatch', pin: 'revision'};
+      continue;
+    }
+    if (action === 'abort') {
+      // Recovery from an open switch back to the mode it started from. The epoch was already raised by the close, so a writer of the old epoch stays fenced; no writer is admitted by an abort, and the
+      // legacy entry reopens only when the mode is `external` again. The row is the only thing it writes.
+      if (mode.mode !== 'switching') return {action, refused: 'not_switching', mode: mode.mode, epoch: mode.epoch};
+      if (!['external', 'cloudflare'].includes(mode.from)) return {action, refused: 'evidence_unreadable'};
+      // An abort toward `cloudflare` re-admits the Letterboxd writer, so it needs the same proof, pinned at the commit, as a forward completion: a partial Watchlist rollback in between (the marker no longer an open `d1`)
+      // or any other changed fact refuses it. An abort toward `external` admits no writer: the legacy entry stays fenced by the Watchlist state (see legacyAdmission) until the Watchlist is back on `epg`/`open`.
+      let guards = [];
+      if (mode.from === 'cloudflare') {
+        const proof = await proveAdmission(env, ports, mode);
+        if (proof.refused) return {action, ...proof.refused, mode: 'switching', target: mode.target, epoch: mode.epoch};
+        guards = proof.guards;
+      }
+      const next = {mode: mode.from, from: mode.from, target: null, epoch: mode.epoch, drain: null, changedAt: iso(now), quarantine: mode.quarantine};
+      const result = await writeMode(env, mode, next, {guards});
+      if (result.outcome === 'applied') return {action, aborted: true, mode: next.mode, epoch: next.epoch};
+      if (result.outcome === 'uncertain') return UNCERTAIN(action);
+      if (result.guarded && guards.length) { const again = await readMode(env); if (again.revision === mode.revision && again.epoch === mode.epoch) return {action, refused: 'handover_changed', mode: 'switching', target: mode.target, epoch: mode.epoch}; }
+      if (expectEpoch !== undefined || expectRevision !== undefined) return {action, refused: 'pin_mismatch', pin: 'revision'};
       continue;
     }
     return {action, refused: 'unknown_action'};
   }
   return {action, refused: 'write_contention'};
 }
+// The owner's read-only view before any command: the row and its pins, the drain of the executor's instances, the handover proof, the causal effects and the writers it leaves. Writes nothing.
+export async function modeStatus(env, ports = {}) {
+  let mode;
+  try { mode = await readMode(env); } catch (error) { return {readable: false, reason: classifyThrown(error), sideEffects: 'none'}; }
+  if (mode.malformed) return {readable: false, reason: 'evidence_unreadable', sideEffects: 'none'};
+  const drain = await drainState(env);
+  const handover = await handoverState(env, ports);
+  const effects = await effectsState(env, ports);
+  const fence = await writerFence(env);
+  const admitted = mode.mode === 'cloudflare' ? 1 : 0;
+  return {
+    readable: true,
+    mode: {...modeView(mode), from: mode.from, drain: mode.drain, quarantine: mode.quarantine},
+    drain,
+    handover: handover.error ? {error: true} : Object.fromEntries(HANDOVER_NAMES.map(name => [name, handover[name] === true])),
+    effects: effects.error ? {error: true} : effects.unproven ? {unproven: true} : {drained: effects.drained === true, pending: effects.pending ?? null, version: effects.version ?? null, drainedVersion: effects.drainedVersion ?? null},
+    legacyFenced: fence.fenced,
+    // The Letterboxd side of "exactly one writer": the Ratings side is read from the Ratings mode (handover.ratingsClosed).
+    letterboxdWriters: admitted,
+    sideEffects: 'none'
+  };
+}
+// AIR-571 D. ONE read that both decides whether the legacy Ratings entry is fenced and returns the exact revision it saw, so the admission and its pin can never come from two different reads: one statement reads the mode row AND the
+// Watchlist marker. {fenced, reason, revision, watchlistGuard}: `revision` is the pin (0 = no row yet), returned only for an admitted (`external`) state; null = the Letterboxd schema is absent (inert: nothing to pin).
+// Once the Letterboxd mode has ever been switched (epoch > 0), an `external` mode still fences the legacy entry while the Watchlist is not back on the inert `epg`/`open` authority (a reverse handover is complete, the Watchlist
+// rollback is not): `watchlist_rollback_pending`. Before the first switch (epoch 0, the dormant default) the Watchlist marker is not consulted, so today's behavior is unchanged. `watchlistGuard` tells the commit guard to assert
+// the same Watchlist state in the batch.
+export async function legacyAdmission(env) {
+  const inert = {fenced: false, reason: null, revision: null, watchlistGuard: false};
+  if (!dbOf(env)) return inert;
+  let row;
+  try {
+    row = await first(env, 'SELECT m.mode AS mode, m.epoch AS epoch, m.revision AS revision, w.mode AS w_mode, w.writes AS w_writes FROM (SELECT 1 AS one) LEFT JOIN letterboxd_sync_mode m ON m.id = 1 LEFT JOIN watchlist_authority w ON w.id = 1');
+  } catch (error) {
+    if (error.code !== 'schema_absent') return {fenced: true, reason: 'evidence_unreadable', revision: null, watchlistGuard: false};
+    // One of the two schemas is not applied (an inert state, tests): the mode row alone decides.
+    let mode;
+    try { mode = await readMode(env); } catch (inner) { return inner.code === 'schema_absent' ? inert : {fenced: true, reason: 'evidence_unreadable', revision: null, watchlistGuard: false}; }
+    if (mode.malformed) return {fenced: true, reason: 'evidence_unreadable', revision: null, watchlistGuard: false};
+    if (mode.schemaAbsent) return inert;
+    row = {mode: mode.stored ? mode.mode : null, epoch: mode.epoch, revision: mode.revision, w_mode: undefined, w_writes: undefined};
+  }
+  const stored = row.mode !== null && row.mode !== undefined;
+  if (stored && (!MODES.includes(row.mode) || !Number.isInteger(row.epoch))) return {fenced: true, reason: 'evidence_unreadable', revision: null, watchlistGuard: false};
+  if (stored && row.mode === 'switching') return {fenced: true, reason: 'letterboxd_switch_in_progress', revision: null, watchlistGuard: false};
+  if (stored && row.mode === 'cloudflare') return {fenced: true, reason: 'letterboxd_sync_active', revision: null, watchlistGuard: false};
+  const epoch = stored ? row.epoch : 0;
+  const watchlistKnown = row.w_mode !== undefined;
+  if (epoch > 0 && watchlistKnown && !(row.w_mode === 'epg' && row.w_writes === 'open')) return {fenced: true, reason: 'watchlist_rollback_pending', revision: null, watchlistGuard: false};
+  return {fenced: false, reason: null, revision: stored ? (row.revision ?? 0) : 0, watchlistGuard: watchlistKnown};
+}
 export async function clearQuarantine(env, now = Date.now()) {
   const mode = await readMode(env);
   if (mode.malformed) return {action: 'clear_quarantine', refused: 'evidence_unreadable'};
   if (mode.mode === 'switching') return {action: 'clear_quarantine', refused: 'switch_in_progress'};
   if (!mode.quarantine) return {action: 'clear_quarantine', cleared: false};
-  const ok = await writeMode(env, mode, {...mode, quarantine: null, changedAt: iso(now)});
-  return ok ? {action: 'clear_quarantine', cleared: true} : {action: 'clear_quarantine', refused: 'write_contention'};
+  const result = await writeMode(env, mode, {...mode, quarantine: null, changedAt: iso(now)});
+  if (result.outcome === 'uncertain') return UNCERTAIN('clear_quarantine');
+  return result.outcome === 'applied' ? {action: 'clear_quarantine', cleared: true} : {action: 'clear_quarantine', refused: 'write_contention'};
 }
 // The legacy ratings entry points ask this: is the Letterboxd Sync the (future) Diary writer? `cloudflare` and `switching` fence them.
 export async function writerFence(env) {
-  if (!dbOf(env)) return {fenced: false, reason: null};
-  let mode;
-  try { mode = await readMode(env); } catch (error) { return error.code === 'schema_absent' ? {fenced: false, reason: null} : {fenced: true, reason: 'evidence_unreadable'}; }
-  if (mode.malformed) return {fenced: true, reason: 'evidence_unreadable'};
-  if (mode.mode === 'switching') return {fenced: true, reason: 'letterboxd_switch_in_progress'};
-  if (mode.mode === 'cloudflare') return {fenced: true, reason: 'letterboxd_sync_active'};
-  return {fenced: false, reason: null};
+  const admission = await legacyAdmission(env);
+  return {fenced: admission.fenced, reason: admission.reason};
 }
 
 // ---- admission, claim, ensure ------------------------------------------------------------------------------------------
@@ -499,13 +627,21 @@ export async function readModel(env, {now = Date.now(), watchlistLastSuccessAt =
   };
 }
 
-export const ACTIONS = {close_admission: {target: v => v === 'cloudflare' || v === 'external'}, complete: {}, clear_quarantine: {}};
+// The owner route takes a command with an explicit confirmation (the action name) and the pins of the row it read. The pins are mandatory here.
+const pinCheck = v => Number.isInteger(v) && v >= 0 && v <= 2147483647;
+export const ACTIONS = {
+  close_admission: {target: v => v === 'cloudflare' || v === 'external', confirm: v => v === 'close_admission', expectEpoch: pinCheck, expectRevision: pinCheck},
+  complete: {confirm: v => v === 'complete', expectEpoch: pinCheck, expectRevision: pinCheck},
+  abort: {confirm: v => v === 'abort', expectEpoch: pinCheck, expectRevision: pinCheck},
+  clear_quarantine: {confirm: v => v === 'clear_quarantine'}
+};
+const REQUIRED = {close_admission: ['target', 'confirm', 'expectEpoch', 'expectRevision'], complete: ['confirm', 'expectEpoch', 'expectRevision'], abort: ['confirm', 'expectEpoch', 'expectRevision'], clear_quarantine: ['confirm']};
 export function validate(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return 'Invalid request';
   const fields = ACTIONS[body.action];
   if (!fields) return 'Unknown action';
   for (const key of Object.keys(body)) if (key !== 'action' && !Object.hasOwn(fields, key)) return 'Unknown field';
-  if (body.action === 'close_admission' && body.target === undefined) return 'Missing target';
+  for (const key of REQUIRED[body.action]) if (body[key] === undefined) return 'Missing ' + key;
   for (const [key, check] of Object.entries(fields)) if (body[key] !== undefined && !check(body[key])) return 'Invalid ' + key;
   return null;
 }
