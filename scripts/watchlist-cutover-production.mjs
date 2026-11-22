@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // Owner-only production operator for the Watchlist marker transitions of holdpoint (d) of ADR 0186 decision 8 (AIR-571): hold, switch to `d1`, release, back out, and the first
 // step of the data rollback. Default is read-only `status`. Every transition is ONE guarded D1 batch (src/watchlist-cutover.js) with an explicit `--confirm <command>`, the expected
-// generation, the facts it verified re-asserted inside the batch, an independent readback, no retry and no repair. It writes the marker row and nothing else: no pointer, snapshot,
-// member, journal row, no EPG, R2, flag, Task or other domain. It never calls Letterboxd, the Worker or the API.
+// generation, the facts it verified re-asserted inside the batch, an independent readback, no retry and no repair. A marker transition writes the marker row and nothing else, with ONE exception: `activate` and
+// `revert-authority` also clear the mirror delivery receipt of the pointer (`mirror_delivered_snapshot_id`, attempts, retry time; the pointer revision rises by at most one). No snapshot, member, journal row,
+// flag, Task or other domain. The three non-transition commands write one object each, by a conditional put and a readback: `export-rollback` the EPG publication (through the EPG writer path), `fence-root`
+// and `fence-root-rollback` the root watchlist.json in R2. It never calls Letterboxd, the Worker or the API.
 //
 //   status          read-only: the marker, the pointer, the verified import, the EPG liveness, the checkpoint authority and the Letterboxd mode
 //   hold            epg/open  G -> epg/held G+1    pins: run, EPG generation, count, both digests, snapshot id (the bootstrap receipt)
@@ -116,7 +118,7 @@ export async function exportRollback(binding,state,args,clock,ctx={}){
  const stored=state.source;
  if(!stored||!Array.isArray(stored.films))throw new OperatorStop('source_unreadable',3);
  const equalNow=await listDigest(normalizeFilms(stored.films)||[])===p.list_sha256&&JSON.stringify(state.sourceMembers)===JSON.stringify(members.map(row=>row.lid));
- if(equalNow&&Number(pub.generation)===args.epgGeneration)return {operation:'export-rollback',writes:false,writeState:'none',outcome:'already_exported',receipt:'verified_equal',published:{programmeRunId:pub.programme_run_id,generation:Number(pub.generation)}};
+ if(equalNow&&Number(pub.generation)===args.epgGeneration)return {operation:'export-rollback',writes:false,writeState:'none',outcome:'already_exported',receipt:'verified_equal',published:{programmeRunId:pub.programme_run_id,generation:Number(pub.generation)},next:'fence-root-rollback with --expect-epg-generation '+Number(pub.generation)+' and --expect-root-etag (the etag of the root read just before), then revert-authority with the etag it returns'};
  if(Number(pub.generation)!==args.epgGeneration)throw new OperatorStop('published_moved',3,{published:{programmeRunId:pub.programme_run_id,generation:Number(pub.generation)}});
  const byId=new Map(stored.films.map(film=>[film?.id,film]));
  const films=members.map(row=>{const film={...(byId.get(row.lid)||{}),id:row.lid,title:row.title,url:row.url};if(row.year===null)delete film.year;else film.year=Number(row.year);return film;});
@@ -162,7 +164,7 @@ export async function exportRollback(binding,state,args,clock,ctx={}){
  for(const table of Object.keys(state.markers))if(table!=='published_epg_authority'&&state.markers[table]!==after.markers[table])problems.push('marker_changed:'+table);
  if(problems.length)throw new OperatorStop('write_uncertain',3,{reason:'readback_mismatch',problems});
  if(ctx.track)ctx.track('committed');
- return {operation:'export-rollback',writes:true,writeState:'committed',published:{programmeRunId:after.published.programme_run_id,generation:Number(after.published.generation)},next:'revert-authority with --expect-epg-generation '+Number(after.published.generation)};
+ return {operation:'export-rollback',writes:true,writeState:'committed',published:{programmeRunId:after.published.programme_run_id,generation:Number(after.published.generation)},next:'fence-root-rollback with --expect-epg-generation '+Number(after.published.generation)+' and --expect-root-etag (the etag of the root read just before), then revert-authority with the etag it returns'};
 }
 
 

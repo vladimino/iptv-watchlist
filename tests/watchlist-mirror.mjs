@@ -37,12 +37,12 @@ function store(initial={}){
  return s;
 }
 let copies=0;
-function open({marker='d1',writes='open',mode='cloudflare',epoch=1}={}){
+function open({marker='d1',writes='open',mode='cloudflare',epoch=1,onBatch=null}={}){
  const file=path.join(root,'db-'+(copies++)+'.sqlite');fs.copyFileSync(base,file);
  const sql=text=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
  sql("UPDATE watchlist_authority SET mode='"+marker+"',writes='"+writes+"',generation=1 WHERE id=1;");
  if(mode&&mode!=='switching')sql("INSERT INTO letterboxd_sync_mode (id,mode,epoch,changed_at,revision,write_id) VALUES (1,'"+mode+"',"+epoch+",'2026-11-21T00:00:00.000Z',1,'w');");
- return {file,sql,db:d1Standin(file)};
+ return {file,sql,db:d1Standin(file,onBatch?{onBatch}:{})};
 }
 const films=(...ids)=>ids.map(i=>({id:'f'+i,title:'F'+i,year:2000+i,url:'https://letterboxd.com/film/f'+i+'/'}));
 let scans=0;
@@ -224,6 +224,36 @@ const pointer=f=>f.db.sql('SELECT version, snapshot_id, last_success_at, mirror_
  assert.equal(await run(),true);
  f.sql("UPDATE watchlist_authority SET generation=2");assert.equal(await run(),false,'a marker transition after the pin refuses the replay even when the pointer did not move');
  f.sql("UPDATE watchlist_authority SET generation=1,writes='held'");assert.equal(await WatchlistD1.pointerPin(f.db),null,'a held marker has no pin');
+}
+
+// 8e. Review (PR #884): `applied` is derived from the ACTUAL result of the conditional UPDATE (a trailing `SELECT changes()` in the same batch), never from the early read. A competing successful acknowledgement
+// or a competing failed-attempt compare-and-swap landing between the pre-read and the batch makes the UPDATE match no row: a proven no-op (`applied:false`, `not_owed`), reported by the reconcile as not recorded.
+{
+ const state={armed:null};
+ const f=open({onBatch:async statements=>{if(statements.every(item=>/^\s*SELECT/i.test(item.text)))return;const hook=state.armed;state.armed=null;if(hook)hook(f);}});
+ await scan(f,films(0,1),'2026-11-21T09:40:00.000Z');
+ const p0=pointer(f);const target={snapshotId:p0.snapshot_id,lastSuccessAt:p0.last_success_at,generation:1,now:T('2026-11-21T09:41:00Z')};
+ const token=p0.snapshot_id+'|'+p0.last_success_at;
+ // a normal failure records and says so
+ const normal=await WatchlistD1.recordMirror(f.db,{...target,outcome:'failed',attempts:0,nextRetryAt:'2026-11-21T09:45:00.000Z'});
+ assert.deepEqual([normal.ok,normal.applied],[true,true]);assert.equal(pointer(f).mirror_attempts,1);
+ // competing failed pass: another failure wins the attempts CAS after our pre-read
+ state.armed=g=>g.sql("UPDATE watchlist_current SET mirror_attempts=mirror_attempts+1, mirror_next_retry_at='2026-11-21T09:50:00.000Z', revision=revision+1");
+ const lost=await WatchlistD1.recordMirror(f.db,{...target,outcome:'failed',attempts:1,nextRetryAt:'2026-11-21T09:46:00.000Z'});
+ assert.deepEqual([lost.ok,lost.applied,lost.reason],[true,false,'not_owed'],'the attempts compare-and-swap was lost: not recorded');assert.equal(pointer(f).mirror_attempts,2,'only the winner recorded');
+ // a competing SUCCESSFUL acknowledgement lands between the pre-read and the failed batch: the failure records nothing
+ state.armed=g=>g.sql("UPDATE watchlist_current SET mirror_delivered_snapshot_id='"+token+"', mirror_attempts=0, mirror_next_retry_at=NULL, revision=revision+1");
+ const late=await WatchlistD1.recordMirror(f.db,{...target,outcome:'failed',attempts:2,nextRetryAt:'2026-11-21T09:47:00.000Z'});
+ assert.deepEqual([late.ok,late.applied,late.reason],[true,false,'not_owed']);assert.deepEqual([pointer(f).mirror_attempts,pointer(f).mirror_next_retry_at],[0,null],'no debt on a delivered target');
+ // and a duplicate success that races the same way is a no-op too
+ const revisionNow=pointer(f).revision;
+ const dup=await WatchlistD1.recordMirror(f.db,{...target,outcome:'delivered'});assert.deepEqual([dup.ok,dup.applied],[true,false]);assert.equal(pointer(f).revision,revisionNow);
+ // the reconcile reports a failed pass as `recorded` only when the attempt was newly recorded
+ f.sql("UPDATE watchlist_current SET mirror_delivered_snapshot_id=NULL, revision=revision+1");
+ const bucket=store();bucket.failPut=new Error('r2 outage');
+ state.armed=g=>g.sql("UPDATE watchlist_current SET mirror_delivered_snapshot_id='"+token+"', mirror_attempts=0, mirror_next_retry_at=NULL, revision=revision+1");
+ const raced=await reconcile(f,bucket,'2026-11-21T09:48:00Z');
+ assert.equal(raced.outcome,'failed');assert.equal(raced.recorded,false,'a competing acknowledgement won: the failure was not recorded');
 }
 
 // 9. The Letterboxd ensure: the reconcile runs BEFORE any early return on a finished slot, its failure never blocks Events or a new slot, and an absent port changes nothing.

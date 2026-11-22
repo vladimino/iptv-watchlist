@@ -54,7 +54,8 @@ export async function reconcileMirror(env, {epoch, now = Date.now(), deps}) {
     if (written.proven === true) {
       // Acknowledged only if the pinned target, the generation and the epoch still hold in the batch itself.
       const ack = await WatchlistD1.recordMirror(env, {...target, outcome: 'delivered', guards: [[epochGuardSql, [epoch]]]});
-      if (ack.ok) return {outcome: written.wrote ? 'written' : 'delivered', etag: written.etag ?? null};
+      if (ack.ok && ack.applied !== null) return {outcome: written.wrote ? 'written' : 'delivered', etag: written.etag ?? null, acknowledged: ack.applied === true};
+      if (ack.ok) return {outcome: 'uncertain', reason: 'ack_result_unreadable'};
       return {outcome: 'uncertain', reason: 'ack_' + ack.reason};
     }
     const attempts = pointer.mirrorAttempts ?? 0;

@@ -281,9 +281,21 @@ export async function recordMirror(source,{outcome,snapshotId,lastSuccessAt,gene
  const update=outcome==='delivered'
   ?['UPDATE watchlist_current SET mirror_delivered_snapshot_id=?, mirror_attempts=0, mirror_next_retry_at=NULL, revision=revision+1, updated_at=? WHERE id=1 AND snapshot_id=? AND last_success_at=? AND mirror_delivered_snapshot_id IS NOT ?',[token,at,snapshotId,lastSuccessAt,token]]
   :['UPDATE watchlist_current SET mirror_attempts=mirror_attempts+1, mirror_next_retry_at=?, revision=revision+1, updated_at=? WHERE id=1 AND snapshot_id=? AND last_success_at=? AND mirror_attempts=? AND mirror_delivered_snapshot_id IS NOT ?',[nextRetryAt,at,snapshotId,lastSuccessAt,attempts,token]];
- const result=await fenced(db,[authorityGuard(generation),...extra,targetGuard,update]);
- if(result==='conflict')return {ok:false,reason:'conflict'};
- return result==='ok'?{ok:true,applied:true}:{ok:false,reason:'unavailable'};
+ // `applied` comes from the ACTUAL result of the conditional UPDATE: a trailing `SELECT changes()` in the same batch answers with the affected rows of that very statement. The early read above proves nothing about
+ // the batch (another pass may have acknowledged, or won the attempts compare-and-swap, in between): a batch that succeeded but changed no row is a proven no-op (`applied:false`), and a result that cannot be read
+ // is unproven (`applied:null`), never reported as recorded.
+ const statements=[authorityGuard(generation),...extra,targetGuard,update,['SELECT changes() AS changed',[]]];
+ if(statements.some(([,params])=>params.length>100))return {ok:false,reason:'unavailable'};
+ let results;
+ try{results=await db.batch(statements.map(([sql,params])=>db.prepare(sql).bind(...params)));}
+ catch(error){
+  const message=String(error?.message||error);
+  if(/CHECK constraint failed|UNIQUE constraint failed|FOREIGN KEY|watchlist_current_regress|PRIMARY KEY/i.test(message))return {ok:false,reason:'conflict'};
+  return {ok:false,reason:'unavailable'};
+ }
+ const changed=Number(results?.[results.length-1]?.results?.[0]?.changed);
+ if(!Number.isInteger(changed))return {ok:true,applied:null,reason:'result_unreadable'};
+ return changed>0?{ok:true,applied:true}:{ok:true,applied:false,reason:'not_owed'};
 }
 
 // The exact pointer a scan started from, and the guard that re-asserts it in the batch of a replay (AIR-571 M1 review): {version, snapshotId, lastSuccessAt, revision, generation} | null.
