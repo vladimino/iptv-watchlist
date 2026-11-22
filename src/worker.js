@@ -994,7 +994,7 @@ async function enrichRecentRemovalRatings(env,ratings,observedAt){
   }while(cursor);
  }catch{}
 }
-// AIR-565 (ADR 0197, supersedes the flag of ADR 0191): the Channel policy mode of one EPG scan is unconditional; no Worker variable selects it and an unfiltered `legacy` scan cannot be started.
+// AIR-565 (ADR 0198, supersedes the flag of ADR 0191): the Channel policy mode of one EPG scan is unconditional; no Worker variable selects it and an unfiltered `legacy` scan cannot be started.
 // ONE snapshot read, materialized into an in-memory map: `filtered` when it is available, non-empty and consistent; `degraded` otherwise (every channel known_only, a warning, no applied revision or digest). A Channel
 // authority failure never blocks the EPG and never publishes a silent discover; other mandatory failures keep their earlier behaviour.
 async function loadEpgChannelPolicy(env){

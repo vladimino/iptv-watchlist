@@ -1,4 +1,4 @@
-# ADR 0197: The Channel policy applies to every EPG scan and the `EPG_CHANNEL_POLICY` switch is retired
+# ADR 0198: The Channel policy applies to every EPG scan and the `EPG_CHANNEL_POLICY` switch is retired
 
 **Status:** Accepted  
 **Original decision date:** 2026-11-22  

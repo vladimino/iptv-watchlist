@@ -8,7 +8,7 @@
 // re-validates them (EpgChannelAdmin.validateSubmission, then the repository's planImport). Writes need the same-origin header, the admin action header, a JSON body,
 // an explicit confirm:true and the revision the caller read (compare-and-swap in the repository). Every D1 access fails closed: a missing or incomplete schema 32
 // answers 503 (GET: available:false when the tables are absent) and nothing is created, migrated or imported implicitly.
-// Since AIR-565 (ADR 0197) every EPG scan reads this policy unconditionally (the retired EPG_CHANNEL_POLICY switch no longer exists); a saved change applies to the next natural EPG generation. A save or an
+// Since AIR-565 (ADR 0198) every EPG scan reads this policy unconditionally (the retired EPG_CHANNEL_POLICY switch no longer exists); a saved change applies to the next natural EPG generation. A save or an
 // import never starts EPG sync, Discovery, TMDB or any task.
 const CHANNEL_ACTION='epg_channel_admin';
 const CHANNEL_PAGE_DEFAULT=50,CHANNEL_PAGE_MAX=200;
