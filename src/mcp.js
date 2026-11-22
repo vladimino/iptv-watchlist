@@ -289,7 +289,7 @@ async function mcpCallTool(params,protocolVersion,env,execution){
    if(params.name==='prediction_pending'){
     const query=predictionPendingQuery(args);
     if(query.error)return {result:mcpToolError(query.error)};
-    const page=predictionPendingPage(await loadPredictionDiagnosticSnapshot(env),args,now);
+    const page=predictionPendingPage(await loadPredictionQueueSnapshot(env),args,now);
     if(page.error)return {result:mcpToolError(page.error)};
     return mcpPayload(200,page);
    }
@@ -393,6 +393,16 @@ async function mcpCallTool(params,protocolVersion,env,execution){
  }
  return {error:'Unknown tool'};
 }
+// AIR-579. One structured log line per authorized `tools/call`, so a later read of the Worker logs can attribute D1 and R2 load to MCP tools (the request log names only `POST /mcp`).
+// The line carries the tool NAME, the outcome and the elapsed time, and nothing else: never an argument, a result, an identity or a header. A name that is not a registered tool is logged as
+// `unregistered`, never as the caller's string. It runs after Access verification (an unauthenticated call logs nothing), it never throws into the call and it changes no response.
+function mcpLogToolCall(name,outcome,started){
+ try{
+  const registered=MCP_TOOLS.some(tool=>tool.name===name);
+  const kind=outcome===null?'failed':outcome.error?'rejected':outcome.result?.isError===true?'tool_error':'ok';
+  console.log(JSON.stringify({event:'mcp_tool_call',tool:registered?name:'unregistered',outcome:kind,ms:Math.max(0,Date.now()-started)}));
+ }catch{/* a log line is never part of the call */}
+}
 async function mcpDispatch(message,protocolVersion,env,execution){
  const {id,method}=message,params=message.params===undefined?{}:message.params;
  const ok=result=>({jsonrpc:'2.0',id,result}),fail=(code,text)=>({jsonrpc:'2.0',id,error:{code,message:text}});
@@ -406,7 +416,11 @@ async function mcpDispatch(message,protocolVersion,env,execution){
  if(method==='tools/list')return ok({tools:MCP_TOOLS});
  if(method==='tools/call'){
   if(typeof params.name!=='string'||!params.name)return fail(-32602,'Invalid params: tool name is required');
-  const outcome=await mcpCallTool(params,protocolVersion,env,execution);
+  const started=Date.now();
+  let outcome;
+  try{outcome=await mcpCallTool(params,protocolVersion,env,execution);}
+  catch(error){mcpLogToolCall(params.name,null,started);throw error;}
+  mcpLogToolCall(params.name,outcome,started);
   return outcome.error?fail(-32602,outcome.error):ok(outcome.result);
  }
  return fail(-32601,'Method not found');

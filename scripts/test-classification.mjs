@@ -445,6 +445,12 @@ export const FILES={
  "admin-identity-group-page.mjs": {
   "suite": "core"
  },
+ "discovery-catalog-read-census.mjs": {
+  "suite": "core"
+ },
+ "discovery-chunk-catalog-read-census.mjs": {
+  "suite": "core"
+ },
  "discovery-held-slot-read.mjs": {
   "suite": "core"
  },
@@ -1131,6 +1137,9 @@ export const FILES={
  "match-hint.mjs": {
   "suite": "core"
  },
+ "mcp-tool-call-log.mjs": {
+  "suite": "core"
+ },
  "mcp-tools.mjs": {
   "suite": "core"
  },
@@ -1284,6 +1293,9 @@ export const FILES={
   "suite": "core"
  },
  "prediction-diagnostics.mjs": {
+  "suite": "core"
+ },
+ "prediction-pending-queue-only.mjs": {
   "suite": "core"
  },
  "prediction-domain-production.mjs": {
