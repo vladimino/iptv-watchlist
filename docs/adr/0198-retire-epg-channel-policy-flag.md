@@ -39,8 +39,10 @@ Code rollback is a revert with no storage mutation; it undoes no published gener
 ## Evidence
 
 - **Implementation:** the AIR-565 retirement pull request (`tests/epg-channel-policy.mjs`, `tests/epg-channel-d1.mjs`, `tests/feature-flags.mjs`, `tests/admin-channels-api.mjs`, `tests/admin-channels-page.mjs`).
-- **Uncertainty:** binding removal and its readback are not yet done.
+- **Delivery:** merged as `920ad8a` ([#903](https://github.com/vladimino/iptv-watchlist/pull/903)); the retiring deploy ran before the readback below.
+- **Binding removal:** removed by the owner after the deploy; the `feature_flags` readback of 22 November 2026 17:12:51 UTC shows `state=absent`, `retired=true`, confirmed independently by the reviewer ([dated readback](../evidence/discovery/air-565-ledger-cohort-audit-2026-11-22.md#binding-removal-readback-epg_channel_policy)).
+- **Uncertainty:** none open for the flag. Whether stored `durations` and `rawTitles` of re-entering observations should be rebuilt from the current slots is a separate, undecided question recorded in the same evidence.
 
 ## Follow-ups
 
-Owner removal of the binding and `feature_flags` readback; AIR-565 ledger audit; [AIR-567](https://trello.com/c/gDgSn2M7).
+The verified-Film audit under [AIR-567](https://trello.com/c/gDgSn2M7), including whether any verified re-entry relied on a denied-only duration.
