@@ -105,6 +105,9 @@ export const FILES={
  "air-566-residual-nonfilm-audit.mjs": {
   "suite": "core"
  },
+ "air-566-serial-rule-replay.mjs": {
+  "suite": "core"
+ },
  "air-86-replay.mjs": {
   "suite": "core"
  },
@@ -653,6 +656,12 @@ export const FILES={
   "suite": "core"
  },
  "watchlist-mirror.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-qa-matrix.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-film-admission-race.mjs": {
   "suite": "core"
  },
  "migration-statements.mjs": {
@@ -1524,6 +1533,9 @@ export const FILES={
   "suite": "core"
  },
  "scored-resolution.mjs": {
+  "suite": "core"
+ },
+ "serial-episode-screening.mjs": {
   "suite": "core"
  },
  "search-scopes-ui.mjs": {

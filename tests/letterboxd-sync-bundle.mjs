@@ -396,4 +396,30 @@ run('CanonicalRatedAdmission.ratedAdmissionWriterOpen=async()=>false');
  assert.equal(db.sql("SELECT COUNT(*) AS n FROM watchlist_effect WHERE status='pending'")[0].n,pendingBefore,'no receipt was recorded for the stale effect');
  assert.equal(db.sql('SELECT mode FROM letterboxd_sync_mode')[0].mode,'switching');
 }
+// AIR-571 E (activation plan): the Worker dispatches the independent `:30` cron to the Letterboxd `ensure` and to nothing else. The cron itself is NOT in wrangler.jsonc (the three existing triggers stay), so this
+// dispatch is dormant until the owner's activation GO; with no mode row, or with the mode `external`, it creates nothing.
+{
+ assert.equal(await run('LetterboxdSync.CRON'),'30 * * * *');
+ const fire=async(cron,when)=>{const pending=[];await context.worker.scheduled({cron,scheduledTime:when},env,{waitUntil:p=>pending.push(p)});await Promise.all(pending);};
+ const created=()=>wf.created.length;
+ // not `cloudflare`: nothing is created (dormant default and the closed modes)
+ db.sql("UPDATE letterboxd_sync_mode SET mode='switching',target='cloudflare',from_mode='external'");
+ let before=created();await fire('30 * * * *',T('2026-12-01T09:35:00Z'));assert.equal(created(),before,'switching: no slot');
+ db.sql("UPDATE letterboxd_sync_mode SET mode='external',target=NULL,from_mode='external'");
+ before=created();await fire('30 * * * *',T('2026-12-01T09:35:00Z'));assert.equal(created(),before,'external: no slot');
+ // the running writer: the :30 tick claims and creates the slot instance of its Madrid slot (once: a second firing attaches to the same slot)
+ db.sql("UPDATE letterboxd_sync_mode SET mode='cloudflare',target=NULL,from_mode='external'");
+ before=created();await fire('30 * * * *',T('2026-12-01T09:35:00Z'));assert.equal(created(),before+1,'cloudflare: one instance for the current slot');
+ await fire('30 * * * *',T('2026-12-01T09:36:00Z'));assert.equal(created(),before+1,'a duplicate firing creates no second instance');
+ // the canary hold: through the real Worker dispatch only the named slot is created; the next days' slots wait for the owner's open_schedule
+ db.sql("UPDATE letterboxd_sync_mode SET drain='canary:2026-12-03T1030'");
+ const held=created();await fire('30 * * * *',T('2026-12-02T09:35:00Z'));assert.equal(created(),held,'canary hold: a slot of another day is not created');
+ await fire('30 * * * *',T('2026-12-03T09:35:00Z'));assert.equal(created(),held+1,'the canary slot is created');
+ await fire('30 * * * *',T('2026-12-03T15:35:00Z'));assert.equal(created(),held+1,'and nothing after it until open_schedule');
+ db.sql("UPDATE letterboxd_sync_mode SET drain=NULL");
+ // another cron expression never reaches the Letterboxd ensure
+ const marker=created();await fire('24 3 * * *',T('2026-12-01T15:35:00Z'));assert.equal(created(),marker);
+ // restore the state the file ended in
+ db.sql("UPDATE letterboxd_sync_mode SET mode='switching',target='cloudflare',from_mode='cloudflare'");
+}
 console.log('letterboxd-sync-bundle ok');
