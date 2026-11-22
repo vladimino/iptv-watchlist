@@ -36,16 +36,22 @@ export function effectWriters(deps) {
       try { tmdb = await tmdbOf(ctx.env, snapshot.films.map(film => film.lid)); } catch { return null; }
       const listed = snapshot.films.map(film => ({lid: film.lid, tmdbId: tmdb.get(film.lid) ?? undefined}));
       const queue = retention.work({listed, departed: changes.removed.map(item => item.lid), observedAt: snapshot.observedAt, scanId: snapshot.scanId});
-      let cursor = 0, intent = [];
-      for (let pass = 0; pass < RETENTION_SLICES_PER_CALL && cursor < queue.length; pass++) {
+      // The queue (the listed films, then the departed ones) is deterministic for a snapshot, so a resume point is an index into it; it is kept on the pending effect between calls (`effect.progress`), because a list larger
+      // than one call (24 slices of UNIT_CAP films) would otherwise restart from 0 every time and never finish. An unreadable or out-of-range point starts over (the units are idempotent), it never skips ahead.
+      const resumed = /^retention-cursor:(\d{1,6})$/.exec(String(effect.progress ?? ''));
+      const start = resumed && Number(resumed[1]) <= queue.length ? Number(resumed[1]) : 0;
+      let cursor = start, intent = [];
+      const slicesPerCall = deps.slicesPerCall ?? RETENTION_SLICES_PER_CALL;
+      for (let pass = 0; pass < slicesPerCall && cursor < queue.length; pass++) {
         const room = Math.max(0, retention.UNIT_CAP - intent.length);
         const slice = queue.slice(cursor, cursor + room);
         const out = await retention.apply(writeEnv(ctx), {event: 'watchlist:' + snapshot.scanId + ':' + cursor, retentions: slice, intent, limit: retention.UNIT_CAP});
         intent = retention.carry(out);
-        if (!retention.settled(out)) return null;
+        if (!retention.settled(out)) return cursor > start ? {progress: 'retention-cursor:' + cursor, more: false} : null;
         cursor += slice.length;
       }
-      return cursor >= queue.length && intent.length === 0 ? 'retention:' + snapshot.scanId + ':' + queue.length : null;
+      if (cursor >= queue.length && intent.length === 0) return 'retention:' + snapshot.scanId + ':' + queue.length;
+      return cursor > start ? {progress: 'retention-cursor:' + cursor, more: true} : null;
     },
     // The hand-over of the removed films to the Ratings lookup queue, referencing the slot's own `watchlist` Event. It only schedules the rating lookup (O3). It is not applied
     // before that Event object exists, because the queue patches a late rating onto the Event by its key; an absent Event holds the effect until delivery.

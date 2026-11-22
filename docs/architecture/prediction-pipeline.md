@@ -201,6 +201,7 @@ flowchart TD
     marked["Runner retry: the run record<br/>keeps it marked; the stop, else<br/>the next start, writes it first;<br/>until then no run starts"]
     intents[("D1 recovery intents<br/>and revision (ADR 0165);<br/>no tables until 0024")]
     closed["Installed store unreadable<br/>or partial: fail closed,<br/>this caller writes nothing"]
+    bridge["Canonical Film bridge (D1):<br/>stored id of every owner-cohort film<br/>to its catalogue key (ADR 0201)"]
     runner --> read
     epg --> read
     profile --> read
@@ -222,6 +223,9 @@ flowchart TD
     intents -.->|revision moved:<br/>recovery_changed| kind
     intents -.->|a denied version<br/>is not current| build
     intents -.->|read fails| closed
+    intents -.->|stored ids| bridge
+    bridge -.->|film keeps its<br/>stored id| build
+    bridge -.->|read fails| closed
 ```
 
 The runner's batch submit and `complete` take the left branch only when the stored queue fails the advance gate (another programme, profile, contract or registry); otherwise they read the stored queue and record one change, so a Discovery chunk that moves the Discovery generation cannot fail them ([ADR 0113](../adr/0113-prediction-runner-advances-persisted-queue.md)). A conflict means another writer committed after this one read the queue. While the marker is not `d1`, that commit is the object etag. On schema version 7 or newer while this domain is installed and the marker is still `r2`, the writer records an intent with the generation claim and deletes it only after the put returns. A put that throws keeps the intent. A queue or lease head captured before these tables existed does not put after the marker is `d1`; the caller opens the head again. A load or activation that still sees the intent does not copy the snapshot. When the schema v7 marker is `d1`, the condition is the D1 generation, and the object is the mirror. The writer starts again from the stored queue, so no retry record, batch summary or counter is lost. A writer holding an older programme or profile cannot overwrite a newer queue. A put that throws has an unknown outcome and is not repeated. A runner failure is saved on the run record before the queue write, so a write that fails every attempt leaves it marked, not lost. The run's stop writes it again. If that fails too, the next start writes it before acquiring the runner lease, or starts nothing. Each caller's handling of `prediction_queue_conflict` is in the [runner reference](../reference/api/prediction-runner.md#queue-writes). Leases still serialize runs; they are not what keeps the queue consistent.
@@ -232,6 +236,10 @@ A submit writes no view-index entry: the view index is always derived from the D
 
 An owner-confirmed recovery intent ([ADR 0165](../adr/0165-scoped-prediction-recovery-intent.md); [contract](../reference/api/admin-actions.md#scoped-prediction-recovery-intent)) is stored in D1 (`prediction_recovery_*`, migration `0024`, applied to production on 18 Nov 2026; [evidence](../evidence/d1-migration/air-478-0024-apply-2026-11-18.md)). It does not appear among the queue writers above because it never writes the queue: the owner-only confirm writes intent rows only, and the freshness rule reads them as one more input of every rebuild and of the runner's per-film checks. A denied version makes the film outstanding at the next ordinary rebuild (the advance gate answers `recovery_changed` when the intent revision moved), so the ordinary lane, priority, retry budget, lease and batch v2 validation apply. The first new version the runner commits satisfies the intent. In the diagram the intent store is a read-only input (dotted): its revision feeds the rebuild decision and its denied versions feed the rebuild; it has no edge into the commit. An installed store that cannot be read, or a partial table set, ends the caller's attempt before any queue write, so a recovery film's retry record is never dropped on an unreadable answer; only the absent migration reads as no intents.
 
+
+### A recovered film keeps its stored id as the queue key ([ADR 0201](../adr/0201-recovery-admits-stored-letterboxd-id-via-catalog-film.md), Accepted)
+
+A film the owner watched leaves the watchlist, so the admitted catalogue holds it as `tmdb_<n>` while its prediction pointer, fingerprint and lineage stay under the stored Letterboxd id. During a rebuild the queue reads the stored ids of every film an owner cohort ever named (active, settled or cancelled; at most 1000, over that the rebuild fails closed) and resolves each through the canonical Film bridge (trusted claims only, no title or year matching, eight reads at a time). A verified negative (absent, retired or conflicting identity) leaves the film unaliased; any other read failure is thrown and nothing is saved. The catalogue film is then presented under its stored id, so the derived index, the intent overlay and the manifest agree on one key, and the film is never turned back into a second `tmdb_<n>` film when its intent expires. The same rule admits a stored id in the owner-only preview and resolves its metadata in the batch read (`readFilmsById`). Films with no current catalogue entry are not admitted by it.
 
 ### Recovery slots in the batch manifest (ADR 0197, Accepted)
 

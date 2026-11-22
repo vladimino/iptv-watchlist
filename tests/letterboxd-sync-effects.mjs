@@ -120,4 +120,60 @@ const NOW0=Date.parse('2026-11-21T12:00:00Z');
  const text=fs.readFileSync('src/letterboxd-sync-effects.js','utf8');
  assert.doesNotMatch(text,/\b(SELECT|INSERT|UPDATE|DELETE)\b\s+(INTO|FROM)|prepare\(|BUCKET|env\.DB|published_epg|discovery_|film_(fact|admission)/i);
 }
+// 5. AIR-571 (22 Nov 2026): a LIST LARGER THAN ONE CALL. The retention effect used to restart from its first film on every call, so a list of more than UNIT_CAP x RETENTION_SLICES_PER_CALL films (288 in production, the
+// first real scan had 394) never completed: every call ended `null`, the drain failed before every later scan. The resume point is now kept on the pending effect and the drain continues from it.
+{
+ const GUARD=['INSERT INTO watchlist_cas (id, ok) SELECT 1, 1 WHERE 1 ON CONFLICT(id) DO UPDATE SET ok=excluded.ok',[]];
+ const big=count=>Array.from({length:count},(_,i)=>film(i));
+ const setup=async(count,over={})=>{
+  const {db}=open(),env={DB:db};
+  await publish(env,big(count),'sB','2026-11-22T21:31:28.601Z');
+  const {writers,log}=deps({slicesPerCall:3,...over});   // UNIT_CAP 2 x 3 slices = 6 films per call
+  const repo=watchlistRepository(WatchlistD1,{epochGuard:()=>GUARD,effectWriters:writers});
+  return {env,writers,log,repo};
+ };
+ // a. 14 films, 6 per call: three passes of ONE drain finish it (6, 12, 14), the retention is done, every slice applied exactly once and in order, nothing skipped
+ {
+  const {env,log,repo}=await setup(14);
+  const out=await repo.drainEffects(ctx(env),{now:Date.parse('2026-11-22T21:32:00Z')});
+  assert.deepEqual([out.drained],[true],JSON.stringify(out));
+  const applied=log.filter(x=>x[0]==='retain').map(x=>x[2]).join(',').split(',');
+  assert.deepEqual(applied,big(14).map(f=>f.id+'+'),'every film exactly once, in order');
+  assert.deepEqual((await pendingOf(env)).map(e=>e.effect),[],'all effects done');
+ }
+ // b. the point is kept on the pending row between drains: a drain that stops after one call (passes limited by a failing slice) resumes at the saved index, not at 0
+ {
+  let fail=true;
+  const retention={UNIT_CAP:2,writerOpen:async()=>true,work:({listed,departed})=>[...listed.map(l=>({lid:l.lid,watchlist:true})),...departed.map(l=>({lid:l,watchlist:false}))],carry:()=>[],
+   apply:async(e,arg)=>{if(fail&&arg.retentions.some(r=>r.lid==='f8')){fail=false;return {state:'failed',units:[]};}return {state:'ok',units:arg.retentions};},settled:out=>out.state==='ok'};
+  const {env,repo}=await setup(14,{retention});
+  const first=await repo.drainEffects(ctx(env),{now:Date.parse('2026-11-22T21:32:00Z')});
+  assert.deepEqual([first.drained,first.code],[false,'effect_failed'],'an unsettled slice holds the drain');
+  const kept=(await pendingOf(env)).find(e=>e.effect==='retention');
+  assert.match(kept.progress,/^retention-cursor:\d+$/,'the resume point is kept on the pending effect');assert.ok(kept.attempts>=1);
+  const point=Number(kept.progress.split(':')[1]);assert.ok(point>0&&point<14,'it advanced past the settled slices only');
+  const second=await repo.drainEffects(ctx(env),{now:Date.parse('2026-11-22T21:33:00Z')});
+  assert.equal(second.drained,true,JSON.stringify(second));
+  assert.deepEqual((await pendingOf(env)).map(e=>e.effect),[]);
+ }
+ // c. a list within one call still finishes in one call with the plain receipt (no progress written); an unreadable resume point starts over and never skips ahead
+ {
+  const {env,writers}=await setup(5);
+  const next=(await pendingOf(env)).find(e=>e.effect==='retention');
+  const first=(await pendingOf(env)).find(e=>e.effect==='scan_facts');
+  assert.ok(first);await WatchlistD1.completeEffect(env,{snapshotId:first.snapshotId,effect:'scan_facts',receipt:'f'},{now:Date.parse('2026-11-22T21:32:00Z'),guards:[GUARD]});
+  const bad=await writers.retention(ctx(env),{...next,progress:'garbage'});assert.equal(typeof bad,'string','an unreadable point restarts from 0 and completes');
+  const far=await writers.retention(ctx(env),{...next,progress:'retention-cursor:999999'});assert.equal(typeof far,'string','an out-of-range point restarts from 0');
+ }
+ // d. the real production numbers: UNIT_CAP 12 and RETENTION_SLICES_PER_CALL 24 do not finish 394 films in one call but do in two resumed calls
+ {
+  const {watchlistRetentionWork,UNIT_CAP}=await import('../src/canonical-rated-admission-producer.js');
+  const {effectWriters:real}=await import('../src/letterboxd-sync-effects.js');
+  const films=big(394);let calls=0;
+  const w=real({repository:{readSnapshot:async()=>({ok:true,snapshot:{films:films.map(f=>({lid:f.id})),scanId:'s',observedAt:'2026-11-22T21:31:28.601Z'}}),readChanges:async()=>({ok:true,removed:[],added:[]})},facts:{},removal:{},removalRef:()=>null,epochGuard:()=>[],tmdbOf:async()=>new Map(),
+   retention:{UNIT_CAP,writerOpen:async()=>true,work:watchlistRetentionWork,apply:async()=>{calls++;return {settled:true};},carry:()=>[],settled:()=>true}});
+  const one=await w.retention({env:{},epoch:1},{snapshotId:'x'});assert.deepEqual(one,{progress:'retention-cursor:288',more:true});
+  const two=await w.retention({env:{},epoch:1},{snapshotId:'x',progress:one.progress});assert.equal(two,'retention:s:394');assert.equal(calls,24+9,'288 + 106 films, 33 slices in all');
+ }
+}
 console.log('letterboxd-sync-effects ok');
