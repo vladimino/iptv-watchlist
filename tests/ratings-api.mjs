@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPages,migrated,RUN,SEPARATE,plain,g} from './ratings-harness.mjs';
 
-// ADR 0060 decision 7: the four owner-only endpoints, over HTTP (behind the Worker's Cloudflare Access) and MCP (which
-// also verifies the signed Access JWT).
+// ADR 0060 decision 7, after the retirement of the writer entry points: the only Ratings endpoints left are the read-only
+// status over HTTP (behind the Worker's Cloudflare Access) and MCP (which also verifies the signed Access JWT). The old
+// POST start and step routes and the MCP tools ratings_sync_start and ratings_sync_step answer a plain 404 and an unknown tool.
 const T0=Date.parse('2026-10-31T08:00:00.000Z');
 const eq=(actual,expected,message)=>assert.deepEqual(plain(actual),plain(expected),message);
 const TEAM='https://probe-team.cloudflareaccess.com',AUD='a1'.repeat(32),SITE='https://iptv.example';
@@ -29,68 +30,70 @@ function setup(extra={}){
  };
  return {clock,net,bucket,ctx,env,http,mcp,R:g(ctx,'LetterboxdRatings')};
 }
+
+
 const STATUS='/api/letterboxd/ratings/status',START='/api/letterboxd/ratings/start',STEP='/api/letterboxd/ratings/step',RETIRED='/api/letterboxd/ratings/migrate';
 
 // 1. HTTP with the binding absent, inline, invalid or separate, and unsupported storage: the status reads switch
-// separate and pipeline blocked; start and step answer storage_unsupported and write nothing.
+// separate and pipeline blocked, and writes nothing.
 for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'},{RATINGS_PIPELINE:'separate'}]){
  const {bucket,http,net}=setup(extra);
  const status=await http(STATUS,'GET');
  assert.equal(status.status,200);eq([status.body.switch,status.body.pipeline,status.body.storage,status.body.sideEffects],['separate','blocked',{supported:false,authority:'open',queueV2:false,cursorV2:false},'none'],JSON.stringify(extra));
- eq((await http(START,'POST',{trigger:'manual'})).body,{runId:null,created:false,nextAction:'stop',reason:'storage_unsupported',storage:{supported:false,authority:'open',queueV2:false,cursorV2:false}});
- assert.equal((await http(STEP,'POST',{runId:'00000000-0000-4000-8000-000000000001'})).body.reason,'storage_unsupported');
  assert.equal(bucket.writes().length,0);assert.equal(net.fetches.length,0);
 }
 
-// 2. Malformed input is a 400 before any read; a foreign Origin is refused; other methods are not routes.
+// 2. The retired writer routes are not routes: a plain 404 for every body and method, before any read, write or Letterboxd
+// request, on supported and unsupported storage alike. A foreign Origin and the retired conversion route stay refused.
+for(const supported of [false,true]){
+ const {bucket,http,net}=setup(SEPARATE);
+ if(supported){migrated(bucket);diaryPages(net,{pages:1});}
+ const before=bucket.log.length;
+ for(const path of [START,STEP]){
+  for(const body of [undefined,{},{trigger:'manual'},{trigger:'scheduled'},{runId:'00000000-0000-4000-8000-000000000001'},[]]){
+   assert.equal((await http(path,'POST',body)).status,404,path+' '+JSON.stringify(body)+' supported='+supported);
+  }
+  for(const method of ['GET','PUT','DELETE'])assert.equal((await http(path,method)).status,404,path+' '+method);
+ }
+ assert.equal(bucket.log.length,before,'a retired route reads and writes nothing');assert.equal(bucket.writes().length,0);assert.equal(net.fetches.length,0,'and requests nothing');
+}
 {
  const {bucket,http}=setup(SEPARATE);
- const bad=[[START,'{'],[START,[]],[START,'null'],[START,{}],[START,{trigger:'cron'}],[START,{trigger:'manual',clearIsolation:'yes'}],[START,{trigger:'scheduled',clearIsolation:true}],[START,{trigger:'manual',runId:'x'}],
-  [STEP,{}],[STEP,{runId:'../sync.json'}],[STEP,{runId:'a'.repeat(81)}],[STEP,{runId:1}],[STEP,{runId:'x',limit:5}]];
- for(const [path,body] of bad){const reply=await http(path,'POST',body);assert.equal(reply.status,400,path+' '+JSON.stringify(body));assert.equal(typeof reply.body.error,'string');}
- assert.equal(bucket.log.length,0,'a malformed request reads and writes nothing');
  assert.equal((await http(START,'POST',{trigger:'manual'},{Origin:'https://evil.example'})).status,403);
- assert.equal((await http(START,'GET')).status,404);assert.equal((await http(STATUS,'POST',{})).status,404);
+ assert.equal((await http(STATUS,'POST',{})).status,404);
  // The retired conversion route is gone (ADR 0161): the dispatcher answers its common 404 and reads or writes nothing.
  for(const body of [{mode:'apply'},{mode:'dry_run'},{}])assert.equal((await http(RETIRED,'POST',body)).status,404,RETIRED+JSON.stringify(body));
  assert.equal(bucket.writes().length,0);
 }
 
-// 3. HTTP under separate with supported storage: a run, a mismatched run, a GET status that writes nothing even with a
-// stale run in storage, and a second scheduled start immediately after a finished one.
+// 3. The run engine itself is unchanged: a GET status that writes nothing even with a stale run in storage, and a
+// second scheduled start immediately after a finished one (driven through the module, since no route reaches it).
 {
- const {bucket,http,net,clock,R,env}=setup(SEPARATE);
+ const {bucket,http,net,R,env}=setup(SEPARATE);
  migrated(bucket);diaryPages(net,{pages:1});
- const started=await http(START,'POST',{trigger:'scheduled'});
- assert.equal(started.body.reason,'started');
- eq((await http(STEP,'POST',{runId:'00000000-0000-4000-8000-0000000000ff'})).body.reason,'run_mismatch');
- let reply;do{reply=await http(STEP,'POST',{runId:started.body.runId});}while(reply.body.nextAction==='continue');
- assert.equal(reply.body.reason,'finished');
- const again=await http(START,'POST',{trigger:'scheduled'});
- assert.equal(again.body.reason,'started');assert.equal(again.body.created,true);assert.notEqual(again.body.runId,started.body.runId);
+ const started=plain(await R.start(env,{trigger:'scheduled'}));
+ assert.equal(started.reason,'started');
+ eq(plain(await R.step(env,{runId:'00000000-0000-4000-8000-0000000000ff'})).reason,'run_mismatch');
+ let reply;do{reply=plain(await R.step(env,{runId:started.runId}));}while(reply.nextAction==='continue');
+ assert.equal(reply.reason,'finished');
+ const again=plain(await R.start(env,{trigger:'scheduled'}));
+ assert.equal(again.reason,'started');assert.equal(again.created,true);assert.notEqual(again.runId,started.runId);
  bucket.set(RUN,{...bucket.value(RUN),state:'running',lease:{step:'dead',expiresAt:new Date(Date.now()-1).toISOString()}});
  const writes=bucket.writes().length,fetches=net.fetches.length;
  for(let i=0;i<3;i++){const status=await http(STATUS,'GET');assert.equal(status.body.run.stale,'interrupted');assert.equal(status.body.pipeline,'running');}
  assert.equal(bucket.writes().length,writes,'GET status writes nothing');assert.equal(net.fetches.length,fetches,'and requests nothing');
 }
 
-// 4. MCP: three tools with their annotations and closed schemas; owner-only through the signed Access JWT; the same
-// bodies as HTTP; argument errors are tool errors that write nothing.
+// 4. MCP: only the read-only status tool is left, with its annotation and closed schema; owner-only through the signed
+// Access JWT; the same body as HTTP. The retired writer tools are not listed and calling them by name is an unknown tool.
 {
- const {bucket,mcp,http}=setup(SEPARATE);
+ const {bucket,net,mcp,http}=setup(SEPARATE);
  const list=(await mcp('tools/list')).body.result.tools;
  const tools=Object.fromEntries(list.filter(tool=>tool.name.startsWith('ratings_')).map(tool=>[tool.name,tool]));
- eq(Object.keys(tools),['ratings_sync_status','ratings_sync_start','ratings_sync_step']);
+ eq(Object.keys(tools),['ratings_sync_status']);
  eq(tools.ratings_sync_status.annotations,{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false});
- eq([tools.ratings_sync_start.annotations.readOnlyHint,tools.ratings_sync_start.annotations.openWorldHint],[false,false]);
- eq([tools.ratings_sync_step.annotations.readOnlyHint,tools.ratings_sync_step.annotations.openWorldHint],[false,true]);
- assert.match(tools.ratings_sync_step.description,/first Diary page once per run/);
- assert.match(tools.ratings_sync_step.description,/never requests page 2/);
- assert.match(tools.ratings_sync_step.description,/exact film id/);
- assert.match(tools.ratings_sync_step.description,/does not list events on a step with nothing left to link/);
- assert.doesNotMatch(tools.ratings_sync_step.description,/3 Diary pages|9 per run/);
- assert.doesNotMatch(tools.ratings_sync_start.description,/too_soon|nextStartAt/);
  for(const tool of Object.values(tools)){assert.equal(tool.inputSchema.additionalProperties,false);assert.doesNotMatch(JSON.stringify(tool.inputSchema.properties),/"url"|"key"|"path"|"prefix"|"bucket"|"limit"|"page"/,tool.name);}
+ assert.doesNotMatch(JSON.stringify(list),/ratings_sync_start|ratings_sync_step/,'no listed tool or description advertises the retired writers');
  // Without a valid Access JWT nothing is read or written.
  for(const assertion of [null,'not-a-jwt',token.slice(0,-4)+'AAAA']){
   const reply=await mcp('ratings_sync_status',{},assertion);
@@ -100,15 +103,14 @@ for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'}
  const status=(await mcp('ratings_sync_status',{})).body.result.structuredContent;
  const {httpStatus,...body}=status;
  assert.equal(httpStatus,200);eq({...body,readAt:null},{...(await http(STATUS,'GET')).body,readAt:null},'the same body as GET');
- for(const [name,args] of [['ratings_sync_start',{trigger:'manual',extra:1}],['ratings_sync_start',{}],['ratings_sync_step',{runId:'x/y'}],['ratings_sync_status',{x:1}]]){
-  const reply=(await mcp(name,args)).body.result;assert.equal(reply.isError,true,name+' '+JSON.stringify(args));
+ assert.equal((await mcp('ratings_sync_status',{x:1})).body.result.isError,true,'an argument on the status tool is a tool error');
+ // The retired tools are not tools any more: an unknown tool, with no write, no Letterboxd request and no run.
+ for(const [name,args] of [['ratings_sync_start',{trigger:'manual'}],['ratings_sync_start',{}],['ratings_sync_step',{runId:'00000000-0000-4000-8000-000000000001'}],['ratings_sync_step',{}],['ratings_storage_migrate',{mode:'apply'}]]){
+  const reply=(await mcp(name,args)).body;
+  assert.equal(Boolean(reply.error)||reply.result?.isError===true,true,name+' is refused as an unknown tool');
+  assert.notEqual(reply.result?.structuredContent?.reason,'started',name+' starts nothing');
  }
- assert.equal(bucket.writes().length,0);
- eq((await mcp('ratings_sync_start',{trigger:'manual'})).body.result.structuredContent.reason,'storage_unsupported');
- // The retired tool is not a tool any more: it is not listed, and calling it by name is refused without a write.
- const retired=(await mcp('ratings_storage_migrate',{mode:'apply'})).body;
- assert.equal(Boolean(retired.error)||retired.result?.isError===true,true,'the retired tool is refused');
- assert.equal(bucket.writes().length,0,'the retired tool writes nothing');
+ assert.equal(bucket.writes().length,0,'the retired tools write nothing');assert.equal(net.fetches.length,0,'and request nothing');
 }
 
-console.log('Ratings API (ADR 0060, ADR 0069, ADR 0074): HTTP storage_unsupported for every binding on unsupported storage, the retired conversion route and tool refused without a write, malformed input refused before any read, foreign Origin refused, a run with run_mismatch and a second scheduled start with no minimum interval, GET status side-effect free with a stale run, dry_run writes nothing, and MCP tools with closed schemas and annotations behind the signed Access JWT with the HTTP bodies passed');
+console.log('Ratings API (ADR 0060, ADR 0069, ADR 0074): the read-only status over HTTP and MCP behind Access, the retired POST start and step routes answering 404 without a read or write on any storage, the retired MCP tools unknown and writing nothing, the run engine and a side-effect-free status with a stale run unchanged');

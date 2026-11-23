@@ -71,7 +71,7 @@ With the defaults, a fault that never clears quarantines after cooldowns of abou
 | Allowed write order | Stage data, then switch the D1 pointer, then mirrors and tail | Decisions and catalogue updates, then the checkpoint | D1 documents, event by CAS, then the queue reference resolved |
 | Read-after-unknown | Read the published pointer and the run record | Read the hop status, the diagnostics ring and the continuation | Read the run record, cursor and queue entry |
 | Durable progress | A later stage checkpoint, or the pointer naming this run | A stored checkpoint for the same generation | A forward checkpoint with a higher authority generation, a forward cursor, or a resolved reference |
-| Fenced external path (after the drain is verified) | `epg_sync_start`, `epg_sync_step` | `epg_sync_step` discovery chunk, resolve, interrupted confirm | `ratings_sync_start`, `ratings_sync_step` |
+| Fenced external path (after the drain is verified) | `epg_sync_start`, `epg_sync_step` | `epg_sync_step` discovery chunk, resolve, interrupted confirm | none: the external ratings entry points no longer exist (the engine's start and step gate still answers fenced) |
 
 A fenced call answers `external_writer_fenced` and writes nothing. While the mode is `switching`, both paths answer `switch_in_progress` and write nothing. Read-only status tools stay available in every mode.
 

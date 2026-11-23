@@ -212,6 +212,9 @@ export const FILES={
  "canonical-film-external-ids-producer.mjs": {
   "suite": "core"
  },
+ "discovery-catalog-read-log.mjs": {
+  "suite": "core"
+ },
  "letterboxd-claim-backfill.mjs": {
   "suite": "core"
  },
@@ -656,6 +659,9 @@ export const FILES={
   "suite": "core"
  },
  "migration-index-docs.mjs": {
+  "suite": "core"
+ },
+ "migration-0036-lookup-indexes.mjs": {
   "suite": "core"
  },
  "watchlist-bootstrap.mjs": {
@@ -1562,6 +1568,10 @@ export const FILES={
  },
  "run-tests-runner.mjs": {
   "suite": "core"
+ },
+ "scheduled-task-s10-taskid-candidates.mjs": {
+  "suite": "core",
+  "note": "Offline exact candidate prompt integrity: S7 source and S10 SHA-256, fixed task ownership, and a three-occurrence S7-to-S10 change. No runtime, throughput or latency measurement."
  },
  "scheduled-task-s7-taskid-candidates.mjs": {
   "suite": "core",

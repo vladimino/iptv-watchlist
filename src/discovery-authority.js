@@ -1777,10 +1777,20 @@ export async function upsertAdmissions(env,films,context={}){
  }
  return {written,refused,batches,reads,remaining:entries.length-index,carried};
 }
+// AIR-579. One structured log line per whole-catalog read that RESOLVED: the rows returned, the application elapsed time awaiting the query, and whether the caller's projection was used (`null` when the read was
+// refused as over the cap, where the options are not looked at), and NOTHING else (never a film id, a title, a payload or a key). Workers Logs attach a line to the invocation that wrote it (a route, a cron
+// tick, an MCP call, a Workflow step), so an aggregate of this event by `$metadata.trigger` attributes the whole-catalog reads of a window to their callers without a per-request counter.
+// It is a best-effort sample of the executions, not a count of them: a failed D1 read, an interrupted invocation, a failing log sink or dropped telemetry leaves no line; `rows` is the rows RETURNED (not the
+// D1 billed rows_read) and `ms` the application wall time (not the SQL engine time). It never throws into the read, never inspects the caller's options and changes no result.
+function logCatalogRead(rows,started,projected){
+ try{console.log(JSON.stringify({event:'discovery_catalog_read',rows,ms:Math.max(0,Date.now()-started),projected}));}catch{/* a log line is never part of the read */}
+}
 async function readCatalog(env,gate,options=null){
+ const started=Date.now();
  const rows=await many(database(env),'SELECT film_id, payload_json, canonical_identity, tmdb_id, media_kind FROM discovery_admission WHERE state=\'current\' ORDER BY film_id');
- if(rows.length>READ_CAP)throw failed('discovery_bounded');
+ if(rows.length>READ_CAP){logCatalogRead(rows.length,started,null);throw failed('discovery_bounded');}
  const catalog={},project=typeof options?.project==='function'?options.project:null;
+ logCatalogRead(rows.length,started,project!==null);
  for(const row of rows){
   let film;try{film=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
   if(film.canonicalIdentity!==row.canonical_identity||String(film.tmdbId)!==row.tmdb_id)throw failed('discovery_unavailable');
