@@ -1,6 +1,6 @@
 # Watchlist membership projection, migration 0037: operator, prerequisites, quiet window, readback and the read-only baseline preflight (each production step needs its own owner GO)
 
-**Status:** prepared on 23 Nov 2026 under [AIR-572](https://trello.com/c/ugyHjnc4) for [ADR 0203](../adr/0203-watchlist-membership-letterboxd-single-writer-projection.md) (Accepted, contract A). A read-only check of production D1 `iptv` on 23 Nov 2026 read **schema 35**, neither `0036` index and no `0037` object: `0036` ([runbook](d1-lookup-indexes-0036-apply.md)) is not applied yet, so `0037` cannot be applied before it. **This runbook authorizes no operation.**
+**Status:** prepared on 23 Nov 2026 under [AIR-572](https://trello.com/c/ugyHjnc4) for [ADR 0203](../adr/0203-watchlist-membership-letterboxd-single-writer-projection.md) (Accepted, contract A). **Applied to production D1 `iptv` on 23 Nov 2026 20:07 UTC** under the owner GO, schema 36 to 37, marker `producer` / 0 ([evidence](../evidence/d1-migration/air-572-0037-apply-2026-11-23.md)); `0036` was applied before it ([evidence](../evidence/d1-migration/air-579-0036-apply-2026-11-23.md)). The baseline apply, the marker switch and the Producer hold lift remain separate owner GOs. **This runbook authorizes no further operation.**
 
 ## The operator
 
