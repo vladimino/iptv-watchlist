@@ -99,29 +99,49 @@ export function activationStatements({programmeRunId}={}){
 
 const q=value=>value===undefined?null:value;
 async function predictionModule(){return import(pathToFileURL(path.join(root,'src/prediction-d1.js')).href);}
-// The canonical Film/Person rows of the dummy catalog (the authority the Admin pages, the catalog titles and the identity verdicts read at marker d1): a Film per
-// catalog film with its metadata, TMDB claim and credits, a Person per credited name, and the localization rows behind the provisional title and the cached name.
+// The canonical Film/Person rows (the authority the Admin pages, the catalog titles and the identity verdicts read at marker d1) from the documents a store holds:
+// a Film per programme film with its metadata, TMDB claim and credits, a Person per credited name, and the localization rows behind the provisional titles and
+// the cached names (`titles.json` / `people.json`, the frozen mirrors). Nothing is invented: a film, person, title or name the documents do not hold gets no row.
 // They are written while the marker is still r2 (the guarded activation follows), the way a baseline load fills them.
-export function canonicalStatements(catalog,{at=new Date().toISOString()}={}){
+export function canonicalStatements({films=[],titles={},people:names={}},{at=new Date().toISOString()}={}){
  const statements=[];
- const films=catalog.films||[];
  const people=new Map();
- for(const film of films)for(const role of ['director','actor'])for(const person of film[role+'s']||[])if(!people.has(person.id))people.set(person.id,person);
- for(const person of people.values())statements.push({sql:'INSERT INTO person (id, role_id, contract_version, updated_at) VALUES (?,?,1,?)',params:['person:'+person.id,person.id,at]});
- for(const [id,item] of Object.entries(LOCAL_PEOPLE)){
-  if(!people.has(id))continue;
-  statements.push({sql:"INSERT INTO person_dimension (person_id, dimension, status, source, value, attempts, updated_at) VALUES (?,'localization','provisional','local-fixture',?,0,?)",params:['person:'+id,item.name,at]});
+ const seenFilms=new Set();
+ const list=(Array.isArray(films)?films:[]).filter(film=>film&&film.id!=null&&String(film.id)&&!seenFilms.has(String(film.id))&&seenFilms.add(String(film.id)));
+ for(const film of list)for(const role of ['director','actor'])for(const person of film[role+'s']||[])if(person?.id&&!people.has(String(person.id)))people.set(String(person.id),person);
+ const localization=item=>item&&['provisional','reviewed'].includes(item.status||'provisional');
+ for(const person of people.values())statements.push({sql:'INSERT INTO person (id, role_id, contract_version, updated_at) VALUES (?,?,1,?)',params:['person:'+person.id,String(person.id),at]});
+ for(const [id,item] of Object.entries(names||{})){
+  const name=typeof item?.name==='string'?item.name:'';
+  if(!people.has(id)||!name||!localization(item))continue;
+  statements.push({sql:"INSERT INTO person_dimension (person_id, dimension, status, source, value, attempts, updated_at) VALUES (?,'localization',?,'local-store',?,0,?)",params:['person:'+id,item.status||'provisional',name,at]});
  }
- for(const film of films){
+ const claimed=new Set();
+ for(const film of list){
   const id='film:'+film.id;
-  statements.push({sql:'INSERT INTO film (id, contract_version, canonical_identity, original_title, updated_at) VALUES (?,1,?,?,?)',params:[id,film.tmdbId?'tmdb:'+film.tmdbId:null,q(film.original),at]});
+  const tmdb=film.tmdbId==null||film.tmdbId===''?null:String(film.tmdbId);
+  const trusted=tmdb&&!claimed.has(tmdb);
+  if(trusted)claimed.add(tmdb);
+  statements.push({sql:'INSERT INTO film (id, contract_version, canonical_identity, original_title, updated_at) VALUES (?,1,?,?,?)',params:[id,trusted?'tmdb:'+tmdb:null,q(film.original),at]});
   statements.push({sql:'INSERT INTO film_metadata (film_id, schema_version, year, runtime, synopsis, poster, url, genres_json, people_version, payload_json, updated_at) VALUES (?,1,?,?,?,NULL,NULL,?,1,?,?)',params:[id,q(film.year),q(film.runtime),q(film.synopsis),JSON.stringify(film.genres||[]),JSON.stringify({id:film.id,title:film.title}),at]});
-  if(film.tmdbId)statements.push({sql:"INSERT INTO film_external_id (film_id, scheme, value, trusted, conflicting, provenance_json) VALUES (?,'tmdb',?,1,0,NULL)",params:[id,String(film.tmdbId)]});
-  for(const role of ['director','actor'])(film[role+'s']||[]).forEach((person,ordinal)=>statements.push({sql:'INSERT INTO film_person_credit (film_id, person_id, role, ordinal) VALUES (?,?,?,?)',params:[id,'person:'+person.id,role,ordinal]}));
-  const title=LOCAL_TITLES[film.id];
-  if(title)statements.push({sql:"INSERT INTO film_dimension (film_id, dimension, status, source, provenance_json, value, attempts, updated_at) VALUES (?,'localization','provisional','local-fixture',?,?,0,?)",params:[id,JSON.stringify({sources:title.sources}),title.title,at]});
+  if(trusted)statements.push({sql:"INSERT INTO film_external_id (film_id, scheme, value, trusted, conflicting, provenance_json) VALUES (?,'tmdb',?,1,0,NULL)",params:[id,tmdb]});
+  for(const role of ['director','actor']){
+   const seen=new Set();
+   (film[role+'s']||[]).filter(person=>person?.id&&!seen.has(String(person.id))&&seen.add(String(person.id))).forEach((person,ordinal)=>statements.push({sql:'INSERT INTO film_person_credit (film_id, person_id, role, ordinal) VALUES (?,?,?,?)',params:[id,'person:'+person.id,role,ordinal]}));
+  }
+  const title=titles?.[film.id];
+  if(localization(title)&&typeof title.title==='string'&&title.title)statements.push({sql:"INSERT INTO film_dimension (film_id, dimension, status, source, provenance_json, value, attempts, updated_at) VALUES (?,'localization',?,'local-store',?,?,0,?)",params:[id,title.status||'provisional',JSON.stringify({sources:Array.isArray(title.sources)?title.sources:[]}),title.title,at]});
  }
  return statements;
+}
+// The same rows for a snapshot store, strictly from the documents its own R2 holds: the programme (and watchlist films the programme lacks), titles.json and people.json.
+export async function canonicalRowsFromBucket(bucket,{at=new Date().toISOString()}={}){
+ const read=async key=>{const object=await bucket.get(key);if(!object)return null;try{return await object.json();}catch{return null;}};
+ const programme=await read('programme.json'),watchlist=await read('watchlist.json');
+ if(!Array.isArray(programme?.films))throw new LocalD1Error('programme.json is not a programme.');
+ const known=new Set(programme.films.map(film=>String(film?.id)));
+ const films=[...programme.films,...(Array.isArray(watchlist?.films)?watchlist.films:[]).filter(film=>film&&!known.has(String(film.id)))];
+ return canonicalStatements({films,titles:await read('titles.json')||{},people:await read('people.json')||{}},{at});
 }
 
 // The synthetic rows of the dummy catalog (fixtures/local-site/catalog.json): the ratings view, the active prediction profile, fingerprints and pointers, and the
@@ -180,15 +200,15 @@ export async function publishFromBucket(env){
 
 // Installs the schema and the domains of one local store, then seeds the synthetic rows when a catalog is given. A snapshot store passes `statements` instead
 // (see `readSnapshotSql`): its rows are the operator's own local input.
-export async function installLocalD1(env,{catalog=null,statements=[],at=new Date().toISOString()}={}){
+export async function installLocalD1(env,{catalog=null,statements=[],canonical=[],at=new Date().toISOString()}={}){
  const db=env.DB;
  if(!db)throw new LocalD1Error('The local stack has no D1 binding.');
  const migrated=await applyMigrations(db);
- let rows=statements;
+ let rows=[...canonical,...statements];
  if(catalog){
   const built=await fixtureRows(catalog,{at});
   for(const item of built.objects)await env.BUCKET.put(item.key,JSON.stringify(item.json),{httpMetadata:{contentType:'application/json'}});
-  rows=[...canonicalStatements(catalog,{at}),...built.statements];
+  rows=[...canonicalStatements({films:catalog.films,titles:LOCAL_TITLES,people:LOCAL_PEOPLE},{at}),...built.statements];
  }
  // Rows first, markers after: the guarded transitions of the migrations are the only path to d1, and a marker at d1 refuses the plain writes of a load.
  await run(db,rows);
@@ -214,7 +234,8 @@ export async function readLocalD1Ready(env,{directory=MIGRATIONS_DIRECTORY}={}){
   ];
   for(const [table,where] of checks)if(!await first(db,`SELECT 1 AS ok FROM ${table} WHERE id=1 AND ${where}`))return false;
   const pointer=await first(db,'SELECT programme_run_id FROM published_epg_authority WHERE id=1');
-  return !!await first(db,'SELECT 1 AS ok FROM published_epg_generation WHERE programme_run_id=? AND phase=?',[pointer.programme_run_id,'published']);
+  if(!await first(db,'SELECT 1 AS ok FROM published_epg_generation WHERE programme_run_id=? AND phase=?',[pointer.programme_run_id,'published']))return false;
+  return await bodiesConsistent(env);
  }catch{return false;}
 }
 
@@ -275,4 +296,24 @@ export async function readOperatorRows(file){
 export async function operatorRowsIdentity(file){
  if(!file)return null;
  try{const info=await stat(file);return `${file}:${info.size}:${info.mtimeMs}`;}catch{return null;}
+}
+
+// The immutable R2 bodies the D1 prediction rows name must be present and hash-consistent, or the Worker refuses the view at the first read. The active profile is
+// always checked; the fingerprint and pointer rows are checked up to BODY_CHECK_ROWS each (ordered by film id), so a store of thousands of films is not read in
+// full at every start.
+export const BODY_CHECK_ROWS=500;
+export async function bodiesConsistent(env){
+ const {fingerprintContentHash}=await predictionModule();
+ const check=async row=>{
+  const object=await env.BUCKET.get(row.r2_key);
+  if(!object)return false;
+  try{return await fingerprintContentHash(await object.json())===row.content_sha256;}catch{return false;}
+ };
+ const profile=await first(env.DB,'SELECT r2_key, content_sha256 FROM prediction_profile WHERE active=1');
+ if(!profile||!await check(profile))return false;
+ for(const table of ['prediction_fingerprint','prediction_pointer']){
+  const result=await env.DB.prepare(`SELECT r2_key, content_sha256 FROM ${table} ORDER BY film_id LIMIT ?`).bind(BODY_CHECK_ROWS).all();
+  for(const row of result.results||[])if(!await check(row))return false;
+ }
+ return true;
 }

@@ -10,7 +10,7 @@ import {MemoryBucket} from './memory-bucket.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {loadLocalCatalog} from '../scripts/local-fixtures.mjs';
 import {importFixtures} from '../scripts/local-store.mjs';
-import {applyMigrations,fixtureRows,installLocalD1,LocalD1Error,migrationFiles,migrationsIdentity,operatorRowsIdentity,readLocalD1Ready,readOperatorRows,splitStatements,startedRowsFromBucket} from '../scripts/local-d1.mjs';
+import {applyMigrations,canonicalRowsFromBucket,fixtureRows,installLocalD1,LocalD1Error,migrationFiles,migrationsIdentity,operatorRowsIdentity,readLocalD1Ready,readOperatorRows,splitStatements,startedRowsFromBucket} from '../scripts/local-d1.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-local-d1-'));
 const sqlite=(file,text,json=false)=>{const result=sqliteSync([...(json?['-json']:[]),'-bail',file],{input:text,encoding:'utf8',maxBuffer:1<<26});if(result.status!==0)throw new Error(result.stderr);return result.stdout;};
@@ -101,6 +101,42 @@ try{
   try{sqlite(broken,'PRAGMA foreign_keys=OFF;'+update);}catch(error){assert.fail(label+': '+error.message);}
   assert.equal(await readLocalD1Ready({BUCKET:bucket,DB:d1Standin(broken)}),false,label);
  }
+
+ // 4b. Whole-store reuse: an immutable R2 body that a D1 row names must be present and hash-consistent (a missing profile, a corrupt fingerprint or prediction body).
+ const bodyKeys=[...rows(file,'SELECT r2_key FROM prediction_profile'),...rows(file,'SELECT r2_key FROM prediction_fingerprint'),...rows(file,'SELECT r2_key FROM prediction_pointer')].map(row=>row.r2_key);
+ assert.equal(bodyKeys.length,4);
+ for(const key of bodyKeys){
+  const original=bucket.objects.get(key);
+  bucket.objects.delete(key);
+  assert.equal(await readLocalD1Ready(env),false,'missing body '+key);
+  bucket.objects.set(key,{text:JSON.stringify({tampered:true}),customMetadata:{}});
+  assert.equal(await readLocalD1Ready(env),false,'corrupt body '+key);
+  bucket.objects.set(key,original);
+  assert.equal(await readLocalD1Ready(env),true,'restored body '+key);
+ }
+
+ // 4c. A snapshot store builds its canonical Film/Person rows strictly from its own documents (programme, watchlist, titles.json, people.json).
+ const documents=new MemoryBucket();
+ const put=(key,json)=>documents.put(key,JSON.stringify(json));
+ await put('programme.json',{runId:'r',films:[{id:'a',tmdbId:'11',original:'A',year:2001,runtime:90,genres:['G'],synopsis:'S',directors:[{id:'director/d1',name:'D1'}],actors:[{id:'actor/x',name:'X'},{id:'actor/x',name:'X'}]},{id:'b',tmdbId:'11',original:'B',directors:[],actors:[]}]});
+ await put('watchlist.json',{films:[{id:'a'},{id:'c',title:'C',directors:[],actors:[{id:'actor/y',name:'Y'}]}]});
+ await put('titles.json',{a:{title:'Название',status:'provisional',sources:['https://example.test/a']},b:{title:'skip',status:'resolved'},zzz:{title:'not in the programme',status:'provisional'}});
+ await put('people.json',{'actor/x':{name:'Икс'},'actor/zzz':{name:'Nobody'},'actor/y':{name:'Игрек',status:'reviewed'}});
+ const canonical=await canonicalRowsFromBucket(documents);
+ const into=table=>canonical.filter(item=>new RegExp('INTO '+table+' ').test(item.sql));
+ assert.deepEqual(into('film').map(item=>item.params[0]),['film:a','film:b','film:c'],'programme films, then watchlist films the programme lacks, each once');
+ assert.deepEqual(into('film_external_id').map(item=>[item.params[0],item.params[1]]),[['film:a','11']],'a TMDB id claimed by two films is trusted for the first only');
+ assert.deepEqual(into('person').map(item=>item.params[1]),['director/d1','actor/x','actor/y']);
+ assert.deepEqual(into('film_person_credit').map(item=>item.params.slice(0,3).join('|')),['film:a|person:director/d1|director','film:a|person:actor/x|actor','film:c|person:actor/y|actor'],'a duplicated credit is written once');
+ assert.deepEqual(into('film_dimension').map(item=>[item.params[0],item.params[1],item.params[3]]),[['film:a','provisional','Название']],'only a provisional or reviewed title of a held film');
+ assert.deepEqual(into('person_dimension').map(item=>[item.params[0],item.params[1],item.params[2]]),[['person:actor/x','provisional','Икс'],['person:actor/y','reviewed','Игрек']]);
+ const snapshotFile=fresh();
+ const snapshotEnv={BUCKET:documents,DB:d1Standin(snapshotFile)};
+ await put('enrichment/profile/versions/1.json',{version:1,profileHash:'h'});
+ const profileSha=await fingerprintContentHash({version:1,profileHash:'h'});
+ await installLocalD1(snapshotEnv,{canonical,statements:[{sql:'INSERT INTO prediction_profile (version, profile_hash, active, created_at, r2_key, content_sha256) VALUES (?,?,1,?,?,?)',params:[1,'h','2026-01-01T00:00:00.000Z','enrichment/profile/versions/1.json',profileSha]}]});
+ assert.equal(await readLocalD1Ready(snapshotEnv),true);
+ assert.deepEqual(rows(snapshotFile,"SELECT film_id, value FROM film_dimension WHERE dimension='localization'"),[{film_id:'film:a',value:'Название'}]);
 
  // 5. The fixture rows are built from the catalog alone: no film without data gets a row.
  const built=await fixtureRows({films:[{id:'only-a-title',title:'X'}]},{at:'2026-01-01T00:00:00.000Z'});

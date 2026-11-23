@@ -7,6 +7,7 @@ import {pathToFileURL} from 'node:url';
 import {loadLocalCatalog} from '../scripts/local-fixtures.mjs';
 import {importFixtures} from '../scripts/local-store.mjs';
 import {installLocalD1,splitStatements,migrationFiles} from '../scripts/local-d1.mjs';
+import {importSnapshotStore} from '../scripts/local-store.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 
@@ -115,5 +116,44 @@ const emptyDb=d1Standin(emptyFile);
 const blocked=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:emptyDb});
 assert.equal(blocked.status,502);
 assert.match((await blocked.json()).error,/published_epg_unavailable|ratings_domain_not_authoritative/);
+
+// A private snapshot store end to end: its own R2 documents plus the operator's d1Sql, read through the Worker. The canonical Film/Person rows come from the
+// snapshot's programme, titles.json and people.json, so the localized title, the cached name and the TMDB claim survive the move to the D1 authority.
+{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-local-snap-'));
+ try{
+  const {fingerprintContentHash}=await import('../src/prediction-d1.js');
+  const objects={
+   'programme.json':{runId:'snap',updatedAt:new Date().toISOString(),window:{from:Date.now()-3600000,to:Date.now()+86400000},watchlistCount:1,films:[{id:'snap-1',tmdbId:'900100',title:'Snap1',original:'Snap1',year:2019,runtime:95,genres:['G'],synopsis:'S',directors:[{id:'director/snap-d',name:'SnapD'}],actors:[{id:'actor/snap-a',name:'SnapA'}],shows:[]}],people:{directors:[],actors:[]},stats:{uniqueFilms:0,channels:0}},
+   'watchlist.json':{updatedAt:new Date().toISOString(),films:[{id:'snap-1',tmdbId:'900100',title:'Snap1'}]},
+   'titles.json':{'snap-1':{title:'Снимок',status:'provisional',sources:['https://example.test/snap']}},
+   'people.json':{'actor/snap-a':{name:'Снимок Актёр'}},
+   'enrichment/profile/versions/1.json':{version:1,profileHash:'snap-profile'},
+   'started/snap-1.json':{id:'snap-1',started:true,startedAt:new Date().toISOString()},
+  };
+  fs.mkdirSync(path.join(dir,'entries'));fs.mkdirSync(path.join(dir,'objects'));fs.writeFileSync(path.join(dir,'manifest.json'),'{}\n');
+  let n=0;
+  for(const [key,json] of Object.entries(objects)){const name=String(++n).padStart(4,'0');fs.writeFileSync(path.join(dir,'objects',name+'.json'),JSON.stringify(json));fs.writeFileSync(path.join(dir,'entries',name+'.json'),JSON.stringify({key,file:'objects/'+name+'.json',metadata:{httpMetadata:{contentType:'application/json'}}}));}
+  const sql=path.join(dir,'rows.sql');
+  fs.writeFileSync(sql,"INSERT INTO prediction_profile (version, profile_hash, active, created_at, r2_key, content_sha256) VALUES (1,'snap-profile',1,'2026-10-01T00:00:00.000Z','enrichment/profile/versions/1.json','"+await fingerprintContentHash(objects['enrichment/profile/versions/1.json'])+"');\nINSERT INTO ratings_view (alias_id, fact_key, watched, actual_rating, watchlist, rating_known, updated_at) VALUES ('snap-1','snap:1',1,3.5,NULL,1,'2026-10-01T00:00:00.000Z');\n");
+  const snapFile=path.join(os.tmpdir(),'iptv-local-snapdb-'+process.pid+'.sqlite');
+  fs.rmSync(snapFile,{force:true});
+  const snapEnv={BUCKET:new MemoryBucket(),DB:d1Standin(snapFile)};
+  await importSnapshotStore(snapEnv,dir,{d1Sql:sql});
+  const snapOverview=await get('/api/admin/overview',snapEnv);
+  assert.equal(snapOverview.snapshot.programmeRunId,'snap');
+  assert.equal(snapOverview.queues.find(item=>item.kind==='film'&&item.code==='localization-provisional').count,1,'the snapshot title is a provisional localization in D1');
+  assert.equal(snapOverview.queues.find(item=>item.kind==='film'&&item.code==='identity-unresolved').count,0,'the snapshot TMDB claim is trusted in D1');
+  const snapFilms=await get('/api/admin/films?q=snap',snapEnv);
+  assert.deepEqual(snapFilms.items.map(item=>[item.id,item.identity.status,item.localization.status]),[['film:snap-1','resolved','provisional']]);
+  assert.equal(snapFilms.items[0].canonicalIdentity,'tmdb:900100');
+  const snapPeople=await get('/api/admin/people?q=snap',snapEnv);
+  assert.deepEqual(snapPeople.items.map(item=>[item.id,item.preferred,item.localization.status]),[['person:actor/snap-a','Снимок Актёр','provisional'],['person:director/snap-d',null,'missing']]);
+  assert.equal((await get('/api/started',snapEnv)).ids[0],'snap-1');
+  const snapView=await get('/api/enrichment/view',snapEnv);
+  assert.equal(snapView.films['snap-1'].actualRating,3.5);
+  fs.rmSync(snapFile,{force:true});
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+}
 for(const file of [dbFile,oldFile,r2File,emptyFile])fs.rmSync(file,{force:true});
 console.log('Local API: programme, started, view, Finds, footer and admin read the local D1 and match the fixture catalog; an incomplete D1 refuses');

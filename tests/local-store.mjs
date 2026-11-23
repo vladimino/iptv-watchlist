@@ -67,6 +67,20 @@ try{
  assert.equal(skipped.action,'skip');
  assert.equal(fixtureImports,1);
 
+ // A restart over a broken R2 half is not a reuse: a missing or corrupt immutable body that an active D1 row names imports the store again.
+ const profileKey='enrichment/profile/versions/1.json';
+ const profileBody=stores.get(fixtureDir).bucket.objects.get(profileKey);
+ for(const damage of [()=>stores.get(fixtureDir).bucket.objects.delete(profileKey),()=>stores.get(fixtureDir).bucket.objects.set(profileKey,{text:'{"version":1,"profileHash":"corrupt"}',customMetadata:{}})]){
+  damage();
+  assert.equal(await readStoreReady(envOf(fixtureDir)),false);
+  const reimported=await prepareLocalStore({identity,persistDir:fixtureDir,openStore:open(fixtureDir),importInto:importFixture});
+  assert.equal(reimported.action,'replace','a damaged immutable body re-imports the store');
+  assert.equal(await readStoreReady(envOf(fixtureDir)),true);
+ }
+ const restoredBody=JSON.parse(stores.get(fixtureDir).bucket.objects.get(profileKey).text);
+ assert.deepEqual([restoredBody.version,restoredBody.profileHash],[JSON.parse(profileBody.text).version,'local-fixture'],'the re-import restores the body');
+ fixtureImports=1;
+
  // A migration added after the store was built: the marker names the old chain, so the store is imported again.
  const newer=await prepareLocalStore({identity:{...identity,migrations:'a-later-chain'},persistDir:fixtureDir,openStore:open(fixtureDir),importInto:importFixture});
  assert.equal(newer.action,'replace');
@@ -93,7 +107,7 @@ try{
  });
  assert.equal(snapshotImported.action,'replace');
  assert.match(snapshotImported.message,/Execution values attached for 1 of 1/);
- assert.match(snapshotImported.message,/2 operator rows, 0 started marks, generation snap published/);
+ assert.match(snapshotImported.message,/\d+ canonical Film\/Person rows from the snapshot, 2 operator rows, 0 started marks, generation snap published/);
  const snapshotBucket=stores.get(snapshotDirStore).bucket;
  const fixtureBucket=stores.get(fixtureDir).bucket;
  const snapshotFile=stores.get(snapshotDirStore).file,fixtureFile=stores.get(fixtureDir).file;

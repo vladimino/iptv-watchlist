@@ -2,7 +2,7 @@ import {createHash} from 'node:crypto';
 import {access,mkdir,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {buildLocalFixtures} from './local-fixtures.mjs';
-import {installLocalD1,migrationsIdentity,operatorRowsIdentity,readLocalD1Ready,readOperatorRows,startedRowsFromBucket} from './local-d1.mjs';
+import {canonicalRowsFromBucket,installLocalD1,migrationsIdentity,operatorRowsIdentity,readLocalD1Ready,readOperatorRows,startedRowsFromBucket} from './local-d1.mjs';
 import {isTimeShifted,shiftSnapshotObject,timeMover} from './local-timeshift.mjs';
 
 const general=['plot_engine','pace','stakes','decision_logic','protagonist_competence','opposition_competence','problem_solving','plan_counterplan_strength','multi_party_goals','chemistry','payoff','ending_quality','technical_plausibility'];
@@ -118,8 +118,9 @@ export async function importSnapshotStore(env,snapshot,{shift=null,d1Sql=''}={})
  const rows=await readOperatorRows(d1Sql);
  const r2=await importSnapshot(env.BUCKET,snapshot,{shift});
  const started=await startedRowsFromBucket(env.BUCKET);
- const d1=await installLocalD1(env,{statements:[...rows.statements,...started]});
- return {objects:r2.objects,patched:r2.patched,message:`${r2.message} Local D1 at schema version ${d1.schemaVersion}: ${rows.statements.length} operator rows, ${started.length} started marks, generation ${d1.programmeRunId} published.`};
+ const canonical=await canonicalRowsFromBucket(env.BUCKET);
+ const d1=await installLocalD1(env,{canonical,statements:[...rows.statements,...started]});
+ return {objects:r2.objects,patched:r2.patched,message:`${r2.message} Local D1 at schema version ${d1.schemaVersion}: ${canonical.length} canonical Film/Person rows from the snapshot, ${rows.statements.length} operator rows, ${started.length} started marks, generation ${d1.programmeRunId} published.`};
 }
 export async function prepareLocalStore({refresh=false,identity,persistDir,openStore,importInto}){
  const markerFile=markerPath(persistDir);
