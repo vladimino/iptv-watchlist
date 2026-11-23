@@ -172,7 +172,7 @@ A Film behind a rated-only Diary id is admitted by the existing `applyRatedAdmis
 
 `upsertAdmissions` (the D1 Discovery admission writer) now hands the films it just wrote to the canonical Discovery admission unit. Below the marker `open` that is one marker read, cached per database binding for 60 s, and nothing is written. At `open` the unit admits at most 10 written films per call through one atomic fenced `mutateFilm` batch with the applied receipt, settles the origin's own due receipts and sweeps at most 5 current movie admissions that have no trusted canonical Film, and it never throws into the Discovery chunk. This section is prose only: the Mermaid diagrams above are unchanged. **Current:** the marker is `open`, so this path is the live Discovery admission writer. **Historical:** dormant until `open`.
 
-## Canonical Watchlist membership projection (AIR-582, [ADR 0203](../adr/0203-watchlist-membership-letterboxd-single-writer-projection.md), Proposed)
+## Canonical Watchlist membership projection (AIR-582, [ADR 0203](../adr/0203-watchlist-membership-letterboxd-single-writer-projection.md), Accepted)
 
 **Status:** code delivered **dormant** (schema `0037`, marker `producer`); nothing is applied or switched by a deploy. Until the owner switches the marker to `sync`, the three legacy effects run and the EPG Producer (held) owns `watchlist_film` exactly as before. After the switch, the Letterboxd Sync is the **only** writer of `watchlist_film`: a fourth causal effect `membership` applies each published Watchlist version, a per-film version fence refuses a late older version, ids without a trusted Film go to a durable handoff ledger that never blocks the slot, and the Producer plans and writes no membership.
 
