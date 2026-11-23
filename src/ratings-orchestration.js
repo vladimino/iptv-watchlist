@@ -157,7 +157,7 @@ const RatingsOrchestration=(()=>{
    return {status:200,body:{action:body.action,refused:classifyThrown(error)}};
   }
  }
- // The external path's gate for ratings_sync_start and ratings_sync_step: `switch_in_progress` while admission is closed,
+ // The external path's gate for the Ratings `start` and `step` actions (no route or tool exposes them now; the handover proof still reads it): `switch_in_progress` while admission is closed,
  // `external_writer_fenced` once the switch to Cloudflare has completed, whatever an old Task prompt sends. Reads stay open.
  async function externalGate(env,action,body={}){
   const writes=action==='start'||action==='step';
