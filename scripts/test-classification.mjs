@@ -1575,6 +1575,10 @@ export const FILES={
  "run-tests-runner.mjs": {
   "suite": "core"
  },
+ "scheduled-task-s8-taskid-candidates.mjs": {
+  "suite": "core",
+  "note": "Offline exact candidate prompt integrity: S7 and S10 source and S8 SHA-256, fixed task ownership, and a three-occurrence manifestSize change from either baseline. No runtime, throughput or latency measurement."
+ },
  "scheduled-task-s10-taskid-candidates.mjs": {
   "suite": "core",
   "note": "Offline exact candidate prompt integrity: S7 source and S10 SHA-256, fixed task ownership, and a three-occurrence S7-to-S10 change. No runtime, throughput or latency measurement."
