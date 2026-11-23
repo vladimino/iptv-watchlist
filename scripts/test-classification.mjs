@@ -613,6 +613,9 @@ export const FILES={
  "enrichment.mjs": {
   "suite": "core"
  },
+ "letterboxd-claim-provenance-d1.mjs": {
+  "suite": "core"
+ },
  "letterboxd-view-double.mjs": {
   "suite": "core"
  },

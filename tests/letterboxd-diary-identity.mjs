@@ -311,9 +311,22 @@ assert.equal(out.counts.verified, 1); assert.equal(out.counts.claim, 'complete')
 assert.equal(claimCalls.length, 1); assert.deepEqual(claimCalls[0].pairs, [{lid: 'vMEO', tmdb: '900001'}]);
 assert.deepEqual(claimCalls[0].linked, ['900001'], 'the Ratings link is durable before the claim is requested'); assert.deepEqual(claimCalls[0].pendingKeys, [], 'the pending document is settled first');
 assert.deepEqual(Object.keys(pending()), [], 'a proved claim leaves no pending state');
-// the next ordinary run re-offers an already-linked id (the claim step itself makes a repeat free)
+// AIR-559: the next ordinary run does NOT re-offer an already-linked id without its own pending claim: the link index alone does not say how the pair was made (an inferred
+// title/year import may have left it unmarked), so only a pair this step verified, bridged or repaired, and still unproved, is served again (as `claim_pending`).
 out = await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts());
-assert.equal(claimCalls.length, 2); assert.deepEqual(claimCalls[1].pairs, [{lid: 'vMEO', tmdb: '900001'}]);
+assert.equal(claimCalls.length, 1, 'a proved, already-linked id is not offered again');
+// an id the link index ties to a movie that this step never verified (for example an inferred import's pair) is never offered, on page or off
+reset(); claimCalls.length = 0; await seed('Inf1', 4);
+{const key = await Facts.linkFilm(env, {letterboxd: 'Inf1', tmdb: '900050'}); await Facts.recordObservations(env, key, {letterboxd: 'Inf1', tmdb: '900050'}, []);}
+assert.equal(recordOf('Inf1').links.tmdb, '900050', 'the pair is linked in the index and on the record');
+const requestsBefore = net.calls.length;
+out = await Identity.resolve(env, items(['Inf1', 'fixture-inf-2010']), opts());
+assert.equal(claimCalls.length, 0, 'an index-only link is never offered by the Diary step');
+assert.equal(net.calls.length, requestsBefore, 'and an already-linked id needs no source request');
+// a pending claim whose movie no longer matches the current link is not served
+await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {Inf1: {reason: 'claim_pending', slug: null, tmdb: '900051', attempts: 1, lastAttemptAt: new Date(NOW).toISOString(), nextAttemptAt: new Date(NOW).toISOString()}}}), {});
+out = await Identity.resolve(env, items(['Inf1', 'fixture-inf-2010']), opts({clock: () => NOW + 3600000}));
+assert.equal(claimCalls.length, 0, 'a pending claim for another movie than the current link is not offered');
 // an existing trusted bridge is offered too
 reset(); claimCalls.length = 0; await seed('Brg1', 3); canonical.bridge.Brg1 = {state: 'ok', filmId: 'film:tmdb:900020', tmdb: '900020', lid: 'Brg1'};
 out = await Identity.resolve(env, items(['Brg1', 'fixture-brg-2019']), opts()); assert.equal(out.counts.bridged, 1); assert.deepEqual(claimCalls.map(call => call.pairs), [[{lid: 'Brg1', tmdb: '900020'}]]);

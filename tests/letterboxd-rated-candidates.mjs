@@ -566,6 +566,42 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   assert.equal(read('letterboxd/admissions/verified-films.json').films.tmdb_900016, undefined, 'one short code keeps one movie id across archives');
   assert.equal(read(Facts.recordKey('tmdb-900016')), undefined);
 
+  // AIR-559 (ADR 0184 decision 5), code evidence for why the rated-candidate step is NOT wired to the canonical Letterboxd claim: (a) its verified link is movie-only (`tmdb:<n>`) and its export short code is never written
+  // as a lid, so it has no lid to offer; (b) a movie the authoritative link index already ties to a lid (the only case with a provable pair) is refused by the step itself with `tmdb_already_imported` before any
+  // admission or rating. Even with an ACTIVE claim module in scope nothing reaches it. Offering the short code as a lid would be a new identity decision (ADR 0166 option B), not wiring.
+  {
+    const offers = [];
+    context.CanonicalLetterboxdClaim = {LETTERBOXD_CLAIM_ACTIVATED: true, async ensureLetterboxdClaims(e, {pairs}) {offers.push(pairs); return {state: 'complete'};}};
+    const verifyOne = async (code, name, year, tmdb, idempotency, link = () => {}) => {
+      const sha = await committed([{code, name, year, rating: 4}], idempotency);
+      link(); // `committed` reseeds the bucket, so a prior link is written after it, before the identity step
+      const slug = name.toLowerCase().replace(/ /g, '-');
+      env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+      net.handler = async url => {
+        const address = String(url);
+        if (address === 'https://boxd.it/' + code) return http(301, '', {location: 'https://letterboxd.com/film/' + slug + '/'});
+        if (address === 'https://letterboxd.com/film/' + slug + '/') return http(200, page({code, title: name, year, tmdb, slug}));
+        if (address.startsWith('https://api.themoviedb.org/3/movie/' + tmdb)) return http(200, JSON.stringify({id: Number(tmdb), media_type: 'movie', title: name, original_title: name, release_date: year + '-01-01'}));
+        throw new Error(address);
+      };
+      return send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true}});
+    };
+    let step = await verifyOne('Mm1', 'Claim Movie Only Cut', 2004, '900041', 'rated-key-mm1000001');
+    assert.equal(step.body.verified, true, JSON.stringify(step.body));
+    const index = read(Facts.FACTS_KEYS.links);
+    assert.equal(index['letterboxd:Mm1'], undefined, '(a) the short code is not linked as a lid');
+    assert.equal(read(Facts.recordKey(index['tmdb:900041'])).links.letterboxd, null, '(a) the verified link is movie-only');
+    step = await verifyOne('Nn1', 'Claim Linked Cut', 2005, '900042', 'rated-key-nn1000001', () => {
+      put(Facts.FACTS_KEYS.links, {'letterboxd:LidOn1': 'lb-LidOn1', 'tmdb:900042': 'lb-LidOn1'});
+      put(Facts.recordKey('lb-LidOn1'), {schemaVersion: 1, factKey: 'lb-LidOn1', links: {letterboxd: 'LidOn1', tmdb: '900042'}, redirectTo: null, migrating: null});
+    });
+    assert.equal(step.body.verified, false, JSON.stringify(step.body));
+    assert.equal(step.body.reason, 'tmdb_already_imported', '(b) a lid-linked movie is refused by the step');
+    assert.equal(read('letterboxd/admissions/verified-films.json')?.films?.tmdb_900042, undefined, '(b) nothing admitted');
+    assert.deepEqual(offers, [], 'no claim is ever offered from the rated-candidate step');
+    delete context.CanonicalLetterboxdClaim;
+  }
+
   async function poisoned(code, key, reason, mutate) {
     const sha = await committed([{code, name: 'Enrich Cut', year: 2005, rating: 4}], key);
     env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';

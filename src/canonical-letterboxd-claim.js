@@ -4,7 +4,7 @@
 // WHAT. ONE targeted, fenced claim for an EXISTING Film, and nothing else: no Film is created, no alias, title, rating, membership or Started mark is touched, and no title/year/slug is ever used.
 // PROOF (all independent of the caller; every item must hold, otherwise the verdict is `conflict` or `not_proved` and NOTHING is written):
 //   1. both authorities are served: the Film/Person marker is `d1`/`open` and the ratings domain is `d1`/`open`, and neither generation moved between the first and the last read;
-//   2. the CURRENT, authoritative Ratings link is unambiguous: the facts link index maps `letterboxd:<lid>` and `tmdb:<n>` to the same key, no other alias carries it, and the fact record says the same (this lid, this movie, not redirected, not migrating); `ratings_view` is only a projection (it keeps an alias after an unlink) and can corroborate, never prove;
+//   2. the CURRENT, authoritative Ratings link is unambiguous: the facts link index maps `letterboxd:<lid>` and `tmdb:<n>` to the same key, no other alias carries it, and the fact record says the same (this lid, this movie, not redirected, not migrating, not an inferred title/year link); `ratings_view` is only a projection (it keeps an alias after an unlink) and can corroborate, never prove;
 //   3. canonical TMDB ownership: exactly one trusted, non-conflicting `tmdb` claim for <n> exists, its Film exists, is not a redirect source and its movie id is not retired (the reader's rule);
 //   4. no claim of the lid exists on another Film, no untrusted or conflicting claim of the lid or of the movie id exists anywhere, the Film has no other `letterboxd` claim and no untrusted or conflicting claim of either scheme, and its `canonical_identity` is null or exactly `tmdb:<n>`.
 // The proof that lives in this database is asserted AGAIN inside the fenced batch (write-time guards: ratings generation, retirement, competing claims, canonical identity); the link documents are covered by the ratings generation, which every ratings write bumps.
@@ -67,6 +67,21 @@ async function linkEvidence(env,lid,tmdb){
  if(record.factKey!==undefined&&record.factKey!==key)return {ok:false,verdict:'conflict',reason:'ratings_record_disagrees'};
  if(record.links?.letterboxd!==lid||String(record.links?.tmdb)!==tmdb)return {ok:false,verdict:'conflict',reason:'ratings_record_disagrees'};
  if(record.redirectTo||record.migrating)return {ok:false,verdict:'conflict',reason:'ratings_record_not_settled'};
+ // An INFERRED link (ADR 0104: one unique original title and year in a personal export) is a title/year match, not proof that this lid is this movie: it never yields a trusted claim, whichever flow offers it
+ // (ADR 0184 decision 2b asks for an authoritative link). The import leaves two durable marks, and only it writes them: `identity` on a record that first received its lid from it, and `inferredPairs` (AIR-559),
+ // an append-only list with one entry per exact lid/movie pair it attempted or linked on the record, each written and read back BEFORE the alias. A recorded `identity`, or an entry naming this pair, is refused;
+ // an unknown kind or an unreadable list fails closed. Entries naming other pairs (attempts that conflicted) do not concern this link. LIMIT: a pair linked by the import before AIR-559 on a record that already
+ // held facts and its lid carries neither mark and is NOT detected here; the producers therefore offer only pairs they verified themselves (see the Diary step), and the backfill needs the owner's decision.
+ if(record.identity!=null)return {ok:false,verdict:'not_proved',reason:record.identity?.kind==='inferred'?'ratings_link_inferred':'ratings_link_unverified'};
+ const pairs=record.inferredPairs;
+ if(pairs!==undefined){
+  if(!Array.isArray(pairs))return {ok:false,verdict:'not_proved',reason:'ratings_link_unverified'};
+  for(const entry of pairs){
+   const readable=!!entry&&typeof entry==='object'&&!Array.isArray(entry)&&typeof entry.letterboxd==='string'&&entry.tmdb!=null;
+   if(!readable)return {ok:false,verdict:'not_proved',reason:'ratings_link_unverified'};
+   if(entry.letterboxd===lid&&String(entry.tmdb)===tmdb)return {ok:false,verdict:'not_proved',reason:entry.kind==='inferred'?'ratings_link_inferred':'ratings_link_unverified'};
+  }
+ }
  return {ok:true,factKey:key};
 }
 
