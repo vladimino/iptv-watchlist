@@ -1,6 +1,6 @@
-import {appendFileSync,readdirSync,writeFileSync} from 'node:fs';
+import {appendFileSync,lstatSync,mkdtempSync,readdirSync,realpathSync,rmSync,writeFileSync} from 'node:fs';
 import {spawn,spawnSync} from 'node:child_process';
-import {availableParallelism} from 'node:os';
+import {availableParallelism,tmpdir} from 'node:os';
 import path from 'node:path';
 import {selectSuite} from './test-classification.mjs';
 
@@ -13,6 +13,11 @@ import {selectSuite} from './test-classification.mjs';
 //   npm test -- --jobs 2              at most 2 files at a time (also TEST_JOBS=2)
 //   npm test -- --timeout-ms 120000   per-file limit (also TEST_TIMEOUT_MS), default 300000
 //   npm test -- --shard 1/3           this part of the selected suite only (also TEST_SHARD); CI runs the core suite as three jobs (AIR-418)
+//
+// AIR-583. Every run creates one private temporary root `iptv-run-XXXXXX` inside the OS temp directory and hands it to every test file as TMPDIR, TMP and TEMP
+// (and IPTV_TEST_RUN_ROOT), so what the files and their tools (SQLite, Miniflare, workerd, Wrangler) create in os.tmpdir() lands there. The runner deletes exactly that
+// directory as the last step, after its children are stopped, on pass, failure, timeout and handled SIGINT/SIGTERM, and keeps the exit code. It never globs, never
+// follows a symlink and never touches anything outside the root; SIGKILL and a crash cannot be handled. IPTV_TEST_KEEP_TMP=1 keeps the root for debugging.
 //
 // A failing, timed-out or signalled file is never lost: it is named with its exit code or signal and its full stdout and stderr, the runner
 // stops starting new files, lets the running ones finish and exits non-zero. Files in SERIAL_ONLY run alone, after the parallel phase.
@@ -285,6 +290,40 @@ export const HEAD_LIMIT=1024*1024;
 export const TAIL_LIMIT=3*1024*1024;
 const KILL_GRACE_MS=3000;
 
+// The run root. `parent` is the real path of the directory it was created in; removal re-checks both before it deletes anything.
+export function createRunRoot(base=tmpdir()){
+ const parent=realpathSync(base);
+ return {parent,root:mkdtempSync(path.join(parent,'iptv-run-'))};
+}
+// Files and bytes under `root`, symlinks counted as entries and never followed.
+export function measureTree(root){
+ let files=0,bytes=0;
+ const walk=directory=>{
+  for(const entry of readdirSync(directory,{withFileTypes:true})){
+   const full=path.join(directory,entry.name);
+   if(entry.isDirectory()){walk(full);continue;}
+   files++;
+   try{bytes+=lstatSync(full).size;}catch{}
+  }
+ };
+ walk(root);
+ return {files,bytes};
+}
+// Deletes the run root and nothing else. rmSync removes a symlink inside the tree as a link and does not enter its target. The root itself must still be a
+// real directory (not a symlink) named iptv-run-* directly inside `parent`, otherwise nothing is deleted. Never throws: a failure is returned as `error`.
+export function removeRunRoot({parent,root}){
+ try{
+  if(path.dirname(root)!==parent||!path.basename(root).startsWith('iptv-run-'))return {removed:false,error:`refused: ${root} is not a run root inside ${parent}`};
+  let stat;
+  try{stat=lstatSync(root);}catch(error){if(error.code==='ENOENT')return {removed:true,files:0,bytes:0};throw error;}
+  if(stat.isSymbolicLink()||!stat.isDirectory())return {removed:false,error:`refused: ${root} is not a plain directory`};
+  let counts={files:0,bytes:0};
+  try{counts=measureTree(root);}catch{}
+  rmSync(root,{recursive:true,force:true,maxRetries:3,retryDelay:50});
+  return {removed:true,...counts};
+ }catch(error){return {removed:false,error:String(error.message||error)};}
+}
+
 function option(args,name,env,fallback){
  const index=args.indexOf('--'+name);
  if(index>=0&&index+1<args.length)return args[index+1];
@@ -401,6 +440,18 @@ async function main(){
  const part=shard?` (shard ${shard.index}/${shard.count} of ${plan.suite} files)`:'';
  // One at a time is the previous behaviour: plain name order, and serial-only files are not moved to the end.
  if(jobs===1){plan.parallel=[...plan.parallel,...plan.serial].sort();plan.serial=[];}
+ const keepTmp=process.env.IPTV_TEST_KEEP_TMP==='1';
+ const run=createRunRoot();
+ let cleanup=null;
+ // Idempotent and synchronous, so it also runs from the exit hook (process.exit paths) and the signal fallback.
+ const cleanUp=()=>{
+  if(cleanup)return cleanup;
+  cleanup=keepTmp?{removed:false,kept:true}:removeRunRoot(run);
+  if(cleanup.error)console.error(`Test runner cleanup: could not remove ${run.root}: ${cleanup.error}`);
+  return cleanup;
+ };
+ process.on('exit',cleanUp);
+ const childEnv={...process.env,TMPDIR:run.root,TMP:run.root,TEMP:run.root,IPTV_TEST_RUN_ROOT:run.root,IPTV_TEST_SUITE:suite};
  const running=new Set(),results=[],failures=[];
  let stopping=false,interrupted=null;
  const started=Date.now();
@@ -408,7 +459,7 @@ async function main(){
  function runFile(file){
   return new Promise(resolve=>{
    const began=Date.now();
-   const child=spawn(process.execPath,[path.join(directory,file)],{stdio:['ignore','pipe','pipe'],detached:true,env:{...process.env,IPTV_TEST_SUITE:suite}});
+   const child=spawn(process.execPath,[path.join(directory,file)],{stdio:['ignore','pipe','pipe'],detached:true,env:childEnv});
    const record={file,stdout:'',stderr:'',omitted:0};
    const captures={stdout:capture(),stderr:capture()};
    let timedOut=false,settled=false,killTimer=null;
@@ -471,7 +522,7 @@ async function main(){
  const onSignal=signal=>{
   interrupted=signal;stopping=true;
   for(const entry of running)entry.kill('SIGTERM');
-  setTimeout(()=>{for(const entry of running)entry.kill('SIGKILL');process.exit(signal==='SIGINT'?130:143);},KILL_GRACE_MS).unref();
+  setTimeout(()=>{for(const entry of running)entry.kill('SIGKILL');cleanUp();process.exit(signal==='SIGINT'?130:143);},KILL_GRACE_MS).unref();
  };
  process.on('SIGINT',()=>onSignal('SIGINT'));
  process.on('SIGTERM',()=>onSignal('SIGTERM'));
@@ -480,18 +531,21 @@ async function main(){
  const notStarted=[...await pool(plan.parallel,jobs)];
  if(!stopping)notStarted.push(...await pool(plan.serial,1));else notStarted.push(...plan.serial);
  const wall=Date.now()-started;
+ // Last step of the run: every child is finished and its group killed. The report below is built from what is already in memory.
+ const cleaned=cleanUp();
+ const cleanupLine=cleaned.kept?`Temporary root kept (IPTV_TEST_KEEP_TMP=1): ${run.root}`:cleaned.removed?`Temporary root removed: ${cleaned.files} files, ${cleaned.bytes} bytes.`:`Temporary root NOT removed: ${run.root}`;
 
  const slowest=[...results].sort((a,b)=>b.ms-a.ms).slice(0,10);
  const busy=results.reduce((sum,record)=>sum+record.ms,0);
  process.stdout.write(`\nSlowest files: ${slowest.map(record=>`${record.file} ${seconds(record.ms)}`).join(', ')}\n`);
- process.stdout.write(`Wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${results.length} of ${plan.total} files run${part}, suite ${suite}, jobs ${jobs}.\n`);
+ process.stdout.write(`Wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${results.length} of ${plan.total} files run${part}, suite ${suite}, jobs ${jobs}.\n${cleanupLine}\n`);
  if(process.env.IPTV_TEST_REPORT){
-  const report={suite,shard:shard?`${shard.index}/${shard.count}`:null,wallMs:wall,summedFileMs:busy,jobs,failed:failures.map(record=>record.file),files:results.map(record=>({file:record.file,ms:record.ms,ok:record.ok}))};
+  const report={suite,shard:shard?`${shard.index}/${shard.count}`:null,wallMs:wall,summedFileMs:busy,jobs,failed:failures.map(record=>record.file),cleanup:{removed:Boolean(cleaned.removed),files:cleaned.files??null,bytes:cleaned.bytes??null,error:cleaned.error??null},files:results.map(record=>({file:record.file,ms:record.ms,ok:record.ok}))};
   try{writeFileSync(process.env.IPTV_TEST_REPORT,JSON.stringify(report,null,2));}
   catch(error){console.error(`could not write IPTV_TEST_REPORT: ${error.message}`);}
  }
  if(process.env.GITHUB_STEP_SUMMARY){
-  const lines=[`### Test runner ${suite}${shard?` shard ${shard.index}/${shard.count}`:''}`,'',`${results.length} of ${plan.total} files run, jobs ${jobs}, wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${failures.length} failed.`,'','Wall time is a health metric. It does not gate merge or deploy. A failed file, a per-file timeout and the job timeout still fail this job.','','| Slowest files | Time | Result |','| --- | ---: | --- |',...slowest.map(record=>`| ${record.file} | ${seconds(record.ms)} | ${record.ok?'ok':'FAIL'} |`),''];
+  const lines=[`### Test runner ${suite}${shard?` shard ${shard.index}/${shard.count}`:''}`,'',`${results.length} of ${plan.total} files run, jobs ${jobs}, wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${failures.length} failed. ${cleanupLine}`,'','Wall time is a health metric. It does not gate merge or deploy. A failed file, a per-file timeout and the job timeout still fail this job.','','| Slowest files | Time | Result |','| --- | ---: | --- |',...slowest.map(record=>`| ${record.file} | ${seconds(record.ms)} | ${record.ok?'ok':'FAIL'} |`),''];
   try{appendFileSync(process.env.GITHUB_STEP_SUMMARY,lines.join('\n')+'\n');}catch{}
  }
  // Exit through exitCode, not process.exit(): when stdout or stderr is a pipe (as in CI) process.exit() can cut the report still being written.
