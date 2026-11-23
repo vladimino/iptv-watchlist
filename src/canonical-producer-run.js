@@ -50,7 +50,7 @@ export const ERROR_CLASSES=Object.freeze(Object.fromEntries([
   'owner_review_check_failed',
  ]),
  // UNIT-SPECIFIC execution failures, strike-eligible. The first two are re-planned once, immediately, because the other writer may have moved.
- ...rows(CLASS.UNIT,['film_person_revision_conflict','film_person_precondition','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_identity_conflict','film_person_data_conflict','film_person_redirect_conflict','film_person_retirement_history']),
+ ...rows(CLASS.UNIT,['film_person_revision_conflict','film_person_precondition','film_person_membership_owned','film_person_membership_closed','identity_collision','person_role_collision','credit_ordinal_conflict','film_person_identity_conflict','film_person_data_conflict','film_person_redirect_conflict','film_person_retirement_history']),
  // PERMANENT input refusals: a pure function of the unit's own input, cleared only by a changed unit digest.
  ...rows(CLASS.PERMANENT,['film_person_invalid','film_person_bounded','dictionary_source_ambiguous']),
  // RECOVERABLE prerequisite refusals: they depend on canonical state another writer may legitimately change without the source digest changing.

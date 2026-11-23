@@ -338,7 +338,7 @@ export async function setFilmMembership(env,input){
  // Equal version and the same stored state: nothing to write (a replay, or the reconcile of an already applied version).
  if(fence&&Number(fence.version)===input.version&&Number(fence.member)===(input.member?1:0)&&!!member===input.member)return {id,written:false,reason:'unchanged',revision:expected};
  if(input.guards!==undefined&&(!Array.isArray(input.guards)||input.guards.length>12||input.guards.some(guard=>!guard||typeof guard.sql!=='string'||!guard.sql||!Array.isArray(guard.params)||guard.params.some(value=>value===undefined))))throw failed('film_person_invalid');
- const entities=[{kind:'film',id,expected}];
+ const entities=[{kind:'film',id,expected:expected}];
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]);
  statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM watchlist_membership_authority WHERE id=1 AND mode=? AND generation=?)"),[marker.mode,marker.generation]]);
