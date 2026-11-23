@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {mkdtemp,rm,writeFile} from 'node:fs/promises';
+import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {createServer} from 'node:net';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
@@ -14,24 +14,43 @@ let child;
 try{
  const first=await boot('first');
  assert.match(first.logs,/Imported \d+ dummy objects/);
+ assert.match(first.logs,/Local D1 at schema version \d+: \d+ migrations, \d+ synthetic rows, generation local-fixture published/);
  await assertFixtureSite(port);
  await stop(child);
  child=null;
  await waitForPortFree(port);
  const second=await boot('second');
- assert.match(second.logs,/Local R2 already has the dummy catalog/);
+ assert.match(second.logs,/Local R2 and D1 already have the dummy catalog/);
  assert.doesNotMatch(second.logs,/Imported \d+ dummy objects/);
+ await assertFixtureSite(port);
+ await stop(child);
+ child=null;
+ await waitForPortFree(port);
+ // A store built from an older migration chain (the marker names another one) is imported again, not served.
+ const markerFile=path.join(state,'stores/fixtures/iptv-snapshot.json');
+ const marker=JSON.parse(await readFile(markerFile,'utf8'));
+ assert.match(marker.migrations,/^[0-9a-f]{64}$/);
+ await writeFile(markerFile,JSON.stringify({...marker,migrations:'an-older-chain'}));
+ const third=await boot('third');
+ assert.match(third.logs,/Imported \d+ dummy objects/);
+ await assertFixtureSite(port);
+ await stop(child);
+ child=null;
+ await waitForPortFree(port);
+ // --refresh deletes the selected store (R2 and D1) and imports it again; the site is whole afterwards.
+ const fourth=await boot('fourth',['--refresh']);
+ assert.match(fourth.logs,/Imported \d+ dummy objects/);
  await assertFixtureSite(port);
 }finally{
  if(child)await stop(child);
  await rm(state,{recursive:true,force:true});
 }
-console.log('Local dev smoke: Wrangler fixture GETs and a second start without import passed');
+console.log('Local dev smoke: Wrangler fixture GETs on a real local D1 and R2, a second start without import, a stale-migration import and --refresh passed');
 
-function boot(label){
+function boot(label,args=[]){
  return new Promise((resolve,reject)=>{
   const logs={text:''};
-  child=spawn(process.execPath,[path.join(root,'scripts/local-dev.mjs')],{
+  child=spawn(process.execPath,[path.join(root,'scripts/local-dev.mjs'),...args],{
    cwd:root,
    detached:true,
    stdio:['ignore','pipe','pipe'],
@@ -47,7 +66,7 @@ function boot(label){
    try{
     await waitForProgramme(port);
     const startedAt=Date.now();
-    while(Date.now()-startedAt<5000&&!/Imported \d+ dummy objects|Local R2 already has the dummy catalog/.test(logs.text))await new Promise(resolve=>setTimeout(resolve,50));
+    while(Date.now()-startedAt<5000&&!/Imported \d+ dummy objects|Local R2 and D1 already have the dummy catalog/.test(logs.text))await new Promise(resolve=>setTimeout(resolve,50));
     finish(null,logs.text);
    }catch(error){finish(error);}
   })();
@@ -61,11 +80,34 @@ function boot(label){
 async function assertFixtureSite(currentPort){
  const programme=await getJson(currentPort,'/api/programme');
  assert.deepEqual(programme.films.map(film=>film.title),['Movie1','Movie2','Movie3']);
+ assert.deepEqual((await getJson(currentPort,'/api/watchlist')).films.map(film=>film.title),['Movie1','Movie2','Movie3']);
  const started=await getJson(currentPort,'/api/started');
  assert.deepEqual(started.ids,['movie-1']);
- // AIR-558: the view index is D1-derived and local dev has no authoritative D1, so the view refuses (no raw fallback).
- const view=await fetch(`http://127.0.0.1:${currentPort}/api/enrichment/view`);
- assert.ok([502,503].includes(view.status),'enrichment view refuses locally');
+ // AIR-576: the view, Finds, footer and the admin reads are answered from the local D1 (no 502/503, no raw object).
+ const view=await getJson(currentPort,'/api/enrichment/view');
+ assert.equal(view.profile.version,1);
+ assert.deepEqual(Object.keys(view.films).sort(),['movie-1','movie-2']);
+ assert.equal(view.films['movie-1'].actualRating,4.5);
+ assert.equal(view.films['movie-1'].fingerprint.execution.pace,'fast');
+ assert.equal(view.films['movie-2'].prediction.predictedRating,4);
+ assert.equal(view.films['movie-2'].prediction.stale,false);
+ const available=await getJson(currentPort,'/api/catalog/available');
+ assert.equal(available.programmeRunId,'local-fixture');
+ assert.equal(available.pinned,true);
+ const footer=await getJson(currentPort,'/api/enrichment/footer/status');
+ assert.deepEqual([footer.profile.version,footer.collection.state,footer.collection.total,footer.collection.watched,footer.collection.rated],[1,'ok',3,1,1]);
+ const events=await getJson(currentPort,'/api/events');
+ assert.deepEqual(events.events.map(event=>event.type).sort(),['epg','started','unstarted','watchlist']);
+ const overview=await getJson(currentPort,'/api/admin/overview');
+ assert.equal(overview.snapshot.programmeRunId,'local-fixture');
+ assert.deepEqual(overview.counts,{films:3,people:3});
+ assert.equal(overview.queues.find(item=>item.kind==='film'&&item.code==='localization-provisional').count,1);
+ const films=await getJson(currentPort,'/api/admin/films?q=movie');
+ assert.deepEqual(films.items.map(item=>[item.id,item.identity.status]),[['film:movie-1','resolved'],['film:movie-2','unresolved'],['film:movie-3','unresolved']]);
+ assert.equal((await getJson(currentPort,'/api/admin/people?q=actor')).items.length,2);
+ assert.equal((await getJson(currentPort,'/api/admin/health')).snapshot.programmeRunId,'local-fixture');
+ await getJson(currentPort,'/api/admin/limbo');
+ assert.deepEqual((await getJson(currentPort,'/api/ui/filter-presets')).presets,[]);
 }
 async function getJson(currentPort,pathname){
  const response=await fetch(`http://127.0.0.1:${currentPort}${pathname}`);

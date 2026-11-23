@@ -143,7 +143,7 @@ await assert.rejects(()=>Authority.readAuthority({DB:missing}),error=>error.code
  const broken={prepare(){throw new Error('D1 binding reset');},async batch(){throw new Error('D1 binding reset');}};
  await assert.rejects(()=>Authority.readAuthority({DB:broken,...standin}),unavailable,'a D1 error is not a stand-in');
  assert.match(fs.readFileSync('wrangler.jsonc','utf8').replace(/\/\/.*$/gm,''),/^(?![\s\S]*DISCOVERY_DB_OPTIONAL)/,'wrangler.jsonc never opts in');
- assert.match(fs.readFileSync('scripts/local-dev.mjs','utf8'),/DISCOVERY_DB_OPTIONAL:'standin'/,'the local stack opts in');
+ assert.doesNotMatch(fs.readFileSync('scripts/local-dev.mjs','utf8'),/DISCOVERY_DB_OPTIONAL/,'AIR-576: the local stack runs a real D1 and opts into no stand-in');
 }
 
 const held=migrated();

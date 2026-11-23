@@ -664,6 +664,9 @@ export const FILES={
  "migration-0036-lookup-indexes.mjs": {
   "suite": "core"
  },
+ "d1-lookup-indexes-0036-production.mjs": {
+  "suite": "core"
+ },
  "watchlist-bootstrap.mjs": {
   "suite": "core"
  },
@@ -1128,6 +1131,9 @@ export const FILES={
  "local-api.mjs": {
   "suite": "core"
  },
+ "local-d1.mjs": {
+  "suite": "core"
+ },
  "local-dev-smoke.mjs": {
   "suite": "core"
  },
@@ -1195,6 +1201,9 @@ export const FILES={
   "suite": "core"
  },
  "monitor-policy.mjs": {
+  "suite": "core"
+ },
+ "monitor-canonical-producer.mjs": {
   "suite": "core"
  },
  "monitor-runtime.mjs": {

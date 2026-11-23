@@ -4,16 +4,12 @@ import {fileURLToPath} from 'node:url';
 
 const catalogPath=path.join(path.dirname(fileURLToPath(import.meta.url)),'../fixtures/local-site/catalog.json');
 const localProfile={version:1,profileHash:'local-fixture'};
+// The one provisional title and the one cached person name of the dummy catalog. They are the frozen `titles.json` / `people.json` mirrors in R2 and the
+// localization rows of the canonical Film/Person tables in D1 (scripts/local-d1.mjs), so the owner page shows the same provisional queue from the authority.
+export const LOCAL_TITLES={'movie-2':{title:'Фильм 2',status:'provisional',sources:['https://www.wikidata.org/wiki/Q2']}};
+export const LOCAL_PEOPLE={'actor/actor-2':{name:'Актёр 2',original:'Actor2'}};
 export async function loadLocalCatalog(){return JSON.parse(await readFile(catalogPath,'utf8'));}
-function viewEntry(film){
- const fingerprintHash=`local-fixture:${film.id}`;
- const moodLabels=film.moods||[];
- const fingerprint={plotMechanics:film.mechanics||[],moodLabels,fingerprintHash,execution:film.execution||{}};
- const prediction=film.prediction?{predictedRating:film.prediction.predictedRating,probability4Plus:film.prediction.probability4Plus,confidence:film.prediction.confidence,matchSignals:film.prediction.matchSignals,mainRisk:film.prediction.mainRisk,moodLabels,fingerprintHash,tasteProfileVersion:localProfile.version,tasteProfileHash:localProfile.profileHash,fingerprintSchemaVersion:1,predictionPromptVersion:1}:null;
- // The impact facet binds the entry to its fingerprint, as a submit writes it; the fingerprint rule cannot judge an entry without one.
- const impactFeatures={fingerprintHash,fingerprintSchemaVersion:1,fingerprintPromptVersion:1,invalidatedAt:null,plotMechanics:fingerprint.plotMechanics,execution:fingerprint.execution};
- return [film.id,{actualRating:film.actualRating??null,fingerprintHash,fingerprint,impactFeatures,prediction}];
-}
+// The ratings, predictions, fingerprints and started marks of the dummy catalog are D1 rows (scripts/local-d1.mjs); this file builds only the R2 documents.
 export function buildLocalFixtures(catalog,now=Date.now()){
  const at=new Date(now).toISOString();
  const filmBody=film=>({id:film.id,...(film.tmdbId?{tmdbId:String(film.tmdbId)}:{}),...(film.tmdbLink?{tmdbLink:film.tmdbLink}:{}),title:film.title,original:film.original,year:film.year,runtime:film.runtime,genres:film.genres,synopsis:film.synopsis,directors:film.directors,actors:film.actors,shows:(film.shows||[]).map(show=>{const start=now+show.offsetHours*3600000;return {start,end:start+show.durationHours*3600000,channel:show.channel,channelId:show.channelId};})});
@@ -22,7 +18,6 @@ export function buildLocalFixtures(catalog,now=Date.now()){
  for(const film of films)for(const key of ['directors','actors'])for(const person of film[key]||[])if(!people[key].some(item=>item.id===person.id))people[key].push(person);
  const programme={runId:'local-fixture',updatedAt:at,window:{from:now-72*3600000,to:now+24*3600000},watchlistCount:films.length,films,people,stats:{uniqueFilms:films.filter(film=>film.shows.length).length,channels:1}};
  const watchlist={updatedAt:at,films:films.map(({shows,...film})=>film)};
- const view=Object.fromEntries(catalog.films.filter(film=>film.actualRating!==undefined||film.prediction||film.mechanics||film.moods||film.execution).map(viewEntry));
  // The published generation the Worker pins its readers to: the pointer, the generation copy of the programme and an
  // empty generation catalog, plus the two localization dictionaries the owner admin page reads beside the programme.
  const objects=[
@@ -30,12 +25,11 @@ export function buildLocalFixtures(catalog,now=Date.now()){
   {key:'epg/published-generation.json',json:{phase:'published',programmeRunId:programme.runId,publishedAt:at}},
   {key:`epg/generations/${programme.runId}/programme.json`,json:programme},
   {key:`epg/generations/${programme.runId}/discovered-films.json`,json:{}},
-  {key:'titles.json',json:{'movie-2':{title:'Фильм 2',status:'provisional',sources:['https://www.wikidata.org/wiki/Q2']}}},
-  {key:'people.json',json:{'actor/actor-2':{name:'Актёр 2',original:'Actor2'}}},
+  {key:'titles.json',json:LOCAL_TITLES},
+  {key:'people.json',json:LOCAL_PEOPLE},
   {key:'watchlist.json',json:watchlist},
   {key:'sync.json',json:{runId:'local-fixture',stage:'complete',updatedAt:at}},
   {key:'enrichment/profile/current.json',json:{...localProfile,updatedAt:at}},
-  {key:'enrichment/view-index.json',json:view},
   {key:'events/items/local-fixture-epg.json',json:{id:'local-fixture-epg',type:'epg',at,films:programme.stats.uniqueFilms,archive:1,future:2,broadcasts:films.reduce((count,film)=>count+film.shows.length,0)}},
  ];
  const eventItem=(id,ms,json)=>{objects.push({key:'events/items/'+String(9999999999999-ms).padStart(13,'0')+'-'+id+'.json',json:{...json,id,at:new Date(ms).toISOString()}});};

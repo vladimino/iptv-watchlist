@@ -45,7 +45,7 @@ assert.match(fs.readFileSync('src/admin/person-name-route.js','utf8'),/owner_rev
 assert.doesNotMatch(fs.readFileSync('src/admin/film-title-route.js','utf8'),/programme\.json|titles\.json|people\.json|published-generation|\.prepare\(|D1/);
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/OWNER_REVIEW_DB_OPTIONAL/);
 assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/OWNER_REVIEW_DB_OPTIONAL/);
-assert.match(fs.readFileSync('scripts/local-dev.mjs','utf8'),/OWNER_REVIEW_DB_OPTIONAL:'standin'/);
+assert.doesNotMatch(fs.readFileSync('scripts/local-dev.mjs','utf8'),/OWNER_REVIEW_DB_OPTIONAL/,'AIR-576: the local stack runs a real D1 and opts into no stand-in');
 assert.equal((await readAuthority(null)).failClosed,true);
 assert.equal((await readAuthority({OWNER_REVIEW_DB_OPTIONAL:'standin'})).legacy,true);
 

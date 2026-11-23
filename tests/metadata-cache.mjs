@@ -20,7 +20,7 @@ assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/metadata-cache\.
 // ADR 0162: the explicit stand-in exists only for local development and the harness.
 assert.doesNotMatch(worker,/METADATA_CACHE_DB_OPTIONAL/);
 assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/METADATA_CACHE_DB_OPTIONAL/);
-assert.match(fs.readFileSync('scripts/local-dev.mjs','utf8'),/METADATA_CACHE_DB_OPTIONAL:'standin'/);
+assert.doesNotMatch(fs.readFileSync('scripts/local-dev.mjs','utf8'),/METADATA_CACHE_DB_OPTIONAL/,'AIR-576: the local stack runs a real D1 and opts into no stand-in');
 assert.equal(fs.existsSync('scripts/metadata-cache-authority.mjs'),false,'the offline load, activate and revert operator is retired');
 assert.doesNotMatch(fs.readFileSync('src/d1-enrichment.js','utf8'),/INSERT INTO metadata_cache|UPDATE metadata_cache /);
 
