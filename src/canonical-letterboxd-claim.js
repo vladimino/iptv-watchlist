@@ -68,15 +68,19 @@ async function linkEvidence(env,lid,tmdb){
  if(record.links?.letterboxd!==lid||String(record.links?.tmdb)!==tmdb)return {ok:false,verdict:'conflict',reason:'ratings_record_disagrees'};
  if(record.redirectTo||record.migrating)return {ok:false,verdict:'conflict',reason:'ratings_record_not_settled'};
  // An INFERRED link (ADR 0104: one unique original title and year in a personal export) is a title/year match, not proof that this lid is this movie: it never yields a trusted claim, whichever flow offers it
- // (ADR 0184 decision 2b asks for an authoritative link). The import leaves two durable marks, and only it writes them: `identity` on a record that first received its lid from it, and `pairIdentity` (AIR-559)
- // naming the exact lid and movie of every pair it links, written on the record BEFORE the alias. A recorded `identity`, or a `pairIdentity` that names this pair or is unreadable, is refused; an unknown kind
- // fails closed. A `pairIdentity` that names another pair is a mark left by an inferred attempt that conflicted and is not about this link. LIMIT: a pair linked by the import before AIR-559 on a record that
- // already held facts and its lid carries neither mark and is NOT detected here; the producers therefore offer only pairs they verified themselves (see the Diary step), and the backfill needs the owner's decision.
+ // (ADR 0184 decision 2b asks for an authoritative link). The import leaves two durable marks, and only it writes them: `identity` on a record that first received its lid from it, and `inferredPairs` (AIR-559),
+ // an append-only list with one entry per exact lid/movie pair it attempted or linked on the record, each written and read back BEFORE the alias. A recorded `identity`, or an entry naming this pair, is refused;
+ // an unknown kind or an unreadable list fails closed. Entries naming other pairs (attempts that conflicted) do not concern this link. LIMIT: a pair linked by the import before AIR-559 on a record that already
+ // held facts and its lid carries neither mark and is NOT detected here; the producers therefore offer only pairs they verified themselves (see the Diary step), and the backfill needs the owner's decision.
  if(record.identity!=null)return {ok:false,verdict:'not_proved',reason:record.identity?.kind==='inferred'?'ratings_link_inferred':'ratings_link_unverified'};
- const pair=record.pairIdentity;
- if(pair!=null){
-  const readable=typeof pair==='object'&&!Array.isArray(pair)&&typeof pair.letterboxd==='string'&&pair.tmdb!=null;
-  if(!readable||pair.letterboxd===lid&&String(pair.tmdb)===tmdb)return {ok:false,verdict:'not_proved',reason:readable&&pair.kind==='inferred'?'ratings_link_inferred':'ratings_link_unverified'};
+ const pairs=record.inferredPairs;
+ if(pairs!==undefined){
+  if(!Array.isArray(pairs))return {ok:false,verdict:'not_proved',reason:'ratings_link_unverified'};
+  for(const entry of pairs){
+   const readable=!!entry&&typeof entry==='object'&&!Array.isArray(entry)&&typeof entry.letterboxd==='string'&&entry.tmdb!=null;
+   if(!readable)return {ok:false,verdict:'not_proved',reason:'ratings_link_unverified'};
+   if(entry.letterboxd===lid&&String(entry.tmdb)===tmdb)return {ok:false,verdict:'not_proved',reason:entry.kind==='inferred'?'ratings_link_inferred':'ratings_link_unverified'};
+  }
  }
  return {ok:true,factKey:key};
 }

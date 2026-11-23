@@ -5,7 +5,7 @@
 // (6) an import interrupted after the mark (alias or record batch lost), then another writer completing the record from the index and a replay of the chunk: never provable; (7) a replay of a committed
 // inferred chunk changes nothing; (8) a later independent verification of the same pair does not relabel it (documented limit); (9) a legacy pair linked by the import before AIR-559 (no mark) is NOT
 // detected by the planner (documented limit: the producers do not offer index-only pairs, the backfill needs the owner's decision); (10) an inferred attempt whose link conflicts leaves a mark naming
-// its own pair only.
+// its own pair only; (11) an earlier failed pair never stands in for a later pair of the same lid (append-only entries); (12) an unreadable or full provenance list refuses the link.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -75,7 +75,7 @@ const record = async (env, lid) => {const links = (await RatingsD1.readOwned(env
   const after = await record(env, 'Df1');
   assert.equal(after.links.tmdb, '101', 'the import linked the pair');
   assert.equal(after.identity, undefined, 'the record-level identity rule leaves a Diary-first record unlabelled (ADR 0104 unchanged)');
-  assert.deepEqual({kind: after.pairIdentity?.kind, letterboxd: after.pairIdentity?.letterboxd, tmdb: after.pairIdentity?.tmdb}, {kind: 'inferred', letterboxd: 'Df1', tmdb: '101'}, 'the pair is marked');
+  assert.deepEqual((after.inferredPairs || []).map(({kind, letterboxd, tmdb}) => ({kind, letterboxd, tmdb})), [{kind: 'inferred', letterboxd: 'Df1', tmdb: '101'}], 'the pair is marked');
   assert.deepEqual(await plan(env, 'Df1', '101'), ['not_proved', 'ratings_link_inferred'], 'the planner refuses the inferred pair');
 }
 
@@ -98,7 +98,7 @@ const record = async (env, lid) => {const links = (await RatingsD1.readOwned(env
   assert.deepEqual(await plan(env, 'Pv4', '104'), ['pass', 'proved'], 'precondition: the verified pair is provable');
   await commit(env, [inferred('Pv4', '104')]);
   const after = await record(env, 'Pv4');
-  assert.equal(after.pairIdentity, undefined); assert.equal(after.identity, undefined);
+  assert.equal(after.inferredPairs, undefined); assert.equal(after.identity, undefined);
   assert.deepEqual(await plan(env, 'Pv4', '104'), ['pass', 'proved'], 'an independently linked pair stays provable');
 }
 
@@ -108,7 +108,7 @@ const record = async (env, lid) => {const links = (await RatingsD1.readOwned(env
   await diaryFirst(env, 'Vf5');
   await commit(env, [verified('Vf5', '105')]);
   const after = await record(env, 'Vf5');
-  assert.equal(after.links.tmdb, '105'); assert.equal(after.pairIdentity, undefined);
+  assert.equal(after.links.tmdb, '105'); assert.equal(after.inferredPairs, undefined);
   assert.deepEqual(await plan(env, 'Vf5', '105'), ['pass', 'proved']);
 }
 
@@ -120,14 +120,14 @@ for (const loss of ['record', 'alias']) {
   let seenMark = false;
   fault = text => {
     if (!text.includes('letterboxd/facts/')) return false;
-    if (!seenMark && text.includes('pairIdentity')) {seenMark = true; return false;}
+    if (!seenMark && text.includes('inferredPairs')) {seenMark = true; return false;}
     if (loss === 'alias') return seenMark && text.includes('letterboxd/facts/links.json');
     return seenMark && text.includes('letterboxd/facts/films/') && text.includes('"rating"') && text.includes('letterboxd_export');
   };
   await assert.rejects(() => commit(env, [inferred('Ir6', '106')]), loss + ': the commit fails');
   fault = null;
   const mid = await record(env, 'Ir6');
-  assert.equal(mid.pairIdentity?.tmdb, '106', loss + ': the mark survived the loss');
+  assert.ok(mid.inferredPairs?.some(entry => entry.tmdb === '106'), loss + ': the mark survived the loss');
   assert.notDeepEqual((await plan(env, 'Ir6', '106'))[0], 'pass', loss + ': not provable mid-commit');
   // another writer completes the record from the index (the owner's watched mark resolves the movie alias); then the replay commits the chunk
   if (loss === 'record') {
@@ -154,14 +154,14 @@ for (const loss of ['record', 'alias']) {
 }
 
 // 9. LEGACY: a pair the import linked before AIR-559 on a Diary-first record carries no mark and is NOT detected by the planner. Simulated by the pre-AIR-559 effect: the alias and the record's TMDB id,
-// written by an export observation, with neither `identity` nor `pairIdentity`. This is why the Diary step offers only pairs it verified itself and why a backfill cohort needs the owner's decision.
+// written by an export observation, with neither `identity` nor `inferredPairs`. This is why the Diary step offers only pairs it verified itself and why a backfill cohort needs the owner's decision.
 {
   const {env, film} = setup(); film('109');
   await diaryFirst(env, 'Lg9');
   const key = await Facts.linkFilm(env, {letterboxd: 'Lg9', tmdb: '109'});
   await Facts.recordObservations(env, key, {letterboxd: 'Lg9', tmdb: '109'}, []);
   const legacy = await record(env, 'Lg9');
-  assert.equal(legacy.pairIdentity, undefined); assert.equal(legacy.identity, undefined);
+  assert.equal(legacy.inferredPairs, undefined); assert.equal(legacy.identity, undefined);
   assert.deepEqual(await plan(env, 'Lg9', '109'), ['pass', 'proved'], 'LIMIT: a legacy unmarked inferred pair is not distinguishable from a verified one');
 }
 
@@ -177,6 +177,42 @@ for (const loss of ['record', 'alias']) {
   assert.equal(links['tmdb:110'], links['letterboxd:Ok10'], 'the movie stays with its verified lid');
   assert.deepEqual(await plan(env, 'Ok10', '110'), ['pass', 'proved'], 'the verified pair is not blocked');
   assert.deepEqual(await plan(env, 'Cf10', '110'), ['conflict', 'ratings_link_points_elsewhere']);
+}
+
+// 11. Review of 76072543: an earlier inferred pair A whose alias batch failed must not stand in for a later inferred pair B of the same lid. Each pair keeps its own append-only entry; B is refused too,
+// A's entry is kept unchanged, the mark of B is read back before its alias, and a repeat of B is idempotent.
+{
+  const {env, film} = setup(); film('111'); film('112');
+  await diaryFirst(env, 'Ab11');
+  fault = text => text.includes('letterboxd/facts/links.json') && text.includes('tmdb:111');
+  await assert.rejects(() => commit(env, [inferred('Ab11', '111')]), 'A: the alias batch is lost');
+  fault = null;
+  const afterA = await record(env, 'Ab11');
+  assert.deepEqual(afterA.inferredPairs.map(entry => entry.tmdb), ['111'], 'A left its own entry');
+  assert.equal(afterA.links.tmdb, null, 'A linked nothing');
+  const outB = await commit(env, [inferred('Ab11', '112')], {sha: SHA2});
+  assert.equal(outB.conflicts, 0, 'B links');
+  const afterB = await record(env, 'Ab11');
+  assert.equal(afterB.links.tmdb, '112');
+  assert.deepEqual(afterB.inferredPairs.map(entry => entry.letterboxd + ':' + entry.tmdb + ':' + entry.sourceRef.slice(0, 1)), ['Ab11:111:a', 'Ab11:112:b'], 'B has its own entry; A is kept, not replaced');
+  assert.deepEqual(await plan(env, 'Ab11', '112'), ['not_proved', 'ratings_link_inferred'], 'B is refused');
+  const again = await commit(env, [inferred('Ab11', '112')], {sha: SHA2});
+  assert.equal(again.replay, true);
+  assert.equal((await record(env, 'Ab11')).inferredPairs.length, 2, 'a repeat adds no entry');
+}
+
+// 12. Fail closed at the write boundary: a record whose provenance list is unreadable, or full, is never linked to a new inferred pair (the item is a conflict, nothing aliased).
+for (const bad of ['unreadable', 'full']) {
+  const {env, film} = setup(); film('113');
+  await diaryFirst(env, 'Fc12');
+  const links = (await RatingsD1.readOwned(env, 'letterboxd/facts/links.json')).value;
+  const key = links['letterboxd:Fc12'], recKey = 'letterboxd/facts/films/' + key + '.json';
+  const current = (await RatingsD1.readOwned(env, recKey));
+  const value = {...current.value, inferredPairs: bad === 'unreadable' ? 'x' : Array.from({length: 8}, (_, i) => ({kind: 'inferred', basis: 'b', sourceRef: 'c'.repeat(64), letterboxd: 'Fc12', tmdb: String(900 + i)}))};
+  await RatingsD1.putOwned(env, recKey, current.etag, value);
+  const out = await commit(env, [inferred('Fc12', '113')]);
+  assert.equal(out.conflicts, 1, bad + ': refused');
+  assert.equal((await RatingsD1.readOwned(env, 'letterboxd/facts/links.json')).value['tmdb:113'], undefined, bad + ': no alias');
 }
 
 console.log('letterboxd claim provenance (D1, end to end): ok');

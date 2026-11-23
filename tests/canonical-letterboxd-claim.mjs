@@ -334,15 +334,17 @@ await refusal('unknown recorded identity kind',file=>{seedFilm(file,1);seedRatin
  assert.deepEqual([out.state,out.written,out.already,out.refused],['incomplete',0,0,1]);assert.equal(out.results[0].reason,'ratings_link_inferred');
  assert.equal(dump(file),before,'nothing is written, nothing removed: the stored claim is left for a case-by-case owner decision (ADR 0192)');
 }
-// The PAIR mark (AIR-559, written by the import before the alias): one that names this pair, or is unreadable, is refused; one that names another pair (an inferred attempt that conflicted) is not about this link.
+// The PAIR marks (AIR-559, `inferredPairs`, append-only, written and read back by the import before the alias): an entry naming this pair is refused, among others too; an unreadable list or entry fails
+// closed; entries naming only other pairs (attempts that conflicted) do not block this one.
 const PAIR=(lid,tmdb)=>({kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:'a'.repeat(64),letterboxd:lid,tmdb});
-const withPair=pair=>file=>{seedFilm(file,1);seedRatings(file,'AAA1',1,{key:'lb-AAA1',record:{schemaVersion:1,factKey:'lb-AAA1',links:{letterboxd:'AAA1',tmdb:'1'},pairIdentity:pair,redirectTo:null,migrating:null}});};
-await refusal('pair mark naming this pair (Diary-first record)',withPair(PAIR('AAA1','1')),I,'not_proved','ratings_link_inferred');
-await refusal('pair mark of an unknown kind naming this pair',withPair({...PAIR('AAA1','1'),kind:'guessed'}),I,'not_proved','ratings_link_unverified');
-for(const bad of [{kind:'inferred'},'inferred',['AAA1','1'],{kind:'inferred',letterboxd:'AAA1'}])await refusal('unreadable pair mark '+JSON.stringify(bad),withPair(bad),I,'not_proved','ratings_link_unverified');
+const withPairs=pairs=>file=>{seedFilm(file,1);seedRatings(file,'AAA1',1,{key:'lb-AAA1',record:{schemaVersion:1,factKey:'lb-AAA1',links:{letterboxd:'AAA1',tmdb:'1'},inferredPairs:pairs,redirectTo:null,migrating:null}});};
+await refusal('pair entry naming this pair (Diary-first record)',withPairs([PAIR('AAA1','1')]),I,'not_proved','ratings_link_inferred');
+await refusal('entry naming this pair after an entry of a failed earlier pair',withPairs([PAIR('AAA1','7'),PAIR('AAA1','1')]),I,'not_proved','ratings_link_inferred');
+await refusal('pair entry of an unknown kind naming this pair',withPairs([{...PAIR('AAA1','1'),kind:'guessed'}]),I,'not_proved','ratings_link_unverified');
+for(const bad of ['inferred',{kind:'inferred'},[{kind:'inferred'}],[PAIR('AAA1','7'),'x'],[{kind:'inferred',letterboxd:'AAA1'}]])await refusal('unreadable pair marks '+JSON.stringify(bad),withPairs(bad),I,'not_proved','ratings_link_unverified');
 {
- const file=database();withPair(PAIR('AAA1','2'))(file);
- assert.deepEqual((({verdict,reason})=>[verdict,reason])(await planLetterboxdClaim(envOf(file),I)),['pass','proved'],'a mark naming another pair does not block this one');
+ const file=database();withPairs([PAIR('AAA1','2'),PAIR('ZZZ9','1')])(file);
+ assert.deepEqual((({verdict,reason})=>[verdict,reason])(await planLetterboxdClaim(envOf(file),I)),['pass','proved'],'entries naming only other pairs do not block this one');
 }
 // The inferred mark is part of the fact record, covered by the ratings generation: one that APPEARS between the plan and the batch moves the generation and fails the whole fenced batch.
 await raced('the record becomes an inferred link after the plan',file=>{const record=getDoc(file,'letterboxd/facts/films/tmdb-1.json');record.identity=INFERRED;putDoc(file,'letterboxd/facts/films/tmdb-1.json',record);assert.equal(sqlite(file,"UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1").status,0);});
