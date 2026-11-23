@@ -2048,7 +2048,8 @@ async function fetchUserRead(url){
  await new Promise(resolve=>setTimeout(resolve,ms));
  return fetch(url);
 }
-async function loadCatalog(){
+function loadCatalog(){return heavyTurn('catalog',loadCatalogNow);}
+async function loadCatalogNow(){
  if(findsLoading)return 'busy';
  findsLoading=true;
  try{
@@ -2420,7 +2421,8 @@ async function programmeFailureMessage(response){
  const status=Number.isInteger(response.status)?response.status:'ошибка';
  return `Не удалось загрузить программу (HTTP ${status}). Повторим автоматически.`;
 }
-async function loadProgramme({quiet}={}){
+function loadProgramme(options={}){return heavyTurn('programme',()=>loadProgrammeNow(options));}
+async function loadProgrammeNow({quiet}={}){
  if(programmeLoading)return 'busy';
  programmeLoading=true;
  try{
@@ -2485,14 +2487,37 @@ function requestLiveRefresh(){
  });
 }
 // AIR-586: the four reads that each hold a large part of the catalog in the Worker (programme, view, Finds, footer) go one after the other, never together:
-// sent at once they land in one Worker isolate and their memory adds up past its limit, which fails all of them with 503. The programme comes first, so
-// the page shows it first; the small reads (events, started) still run beside them. Each loader keeps its own failure handling and answers true, false or 'busy'.
+// sent at once they land in one Worker isolate and their memory adds up past its limit, which fails all of them with 503. Every call of the four loaders,
+// wherever it comes from (the first load, a live refresh, the cold retry, a Finds mark, a retry button), takes one shared turn (`heavyTurn`), so at most one
+// of them is in flight at any time. A loader already waiting for its turn is shared, not queued twice (refreshes still coalesce). A turn that has not settled
+// within HEAVY_TURN_MAX_MS lets the next one go, so one hung read cannot stop the page; it is still the one read that may then overlap.
+const HEAVY_TURN_MAX_MS=60000;
+let heavyChain=Promise.resolve(),heavyActive=0;
+const heavyWaiting=new Map();
+function heavyTurn(key,load){
+ const waiting=heavyWaiting.get(key);if(waiting)return waiting;
+ let release;const turn=new Promise(resolve=>{release=resolve;});
+ const previous=heavyChain;heavyChain=turn;heavyActive++;
+ const run=previous.then(()=>{
+  heavyWaiting.delete(key);
+  const started=Promise.resolve().then(load);
+  const timer=typeof setTimeout==='function'?setTimeout(release,HEAVY_TURN_MAX_MS):null;
+  const done=()=>{if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);heavyActive--;release();};
+  started.then(done,done);
+  return started;
+ });
+ heavyWaiting.set(key,run);
+ return run;
+}
+// The footer reader itself stays byte-identical to the admin pages' (public/status-footer.js); on this page it is called through its turn.
+function loadFooterTurn(options={}){return heavyTurn('footer',()=>loadPredictionQueue(options));}
+// The programme comes first, so the page shows it first; the small reads (events, started) still run beside them. Each loader keeps its own failure handling and answers true, false or 'busy'.
 async function loadHeavyReads({quiet=true}={}){
  const done=[];
  done.push(await loadProgramme({quiet}));
  done.push(await loadEnrichment({quiet}));
  done.push(await loadCatalog());
- done.push(await loadPredictionQueue({quiet}));
+ done.push(await loadFooterTurn({quiet}));
  return done;
 }
 async function runLiveRefresh(followUp=false){
@@ -2542,15 +2567,16 @@ async function init(){
  loadStarted();
  loadPresets();
  loadEvents();
- // AIR-586: the remaining large reads one after the other (see loadHeavyReads).
- (async()=>{await loadEnrichment();await loadCatalog();await loadPredictionQueue();})();
+ // AIR-586: the remaining large reads take their turns after the programme (see heavyTurn), in this order.
+ loadEnrichment();loadCatalog();loadFooterTurn();
  startLiveRefresh();
  // A failed first programme read is retried once soon instead of waiting for the next poll; a later success restores the normal view.
  if(coldFailure&&typeof setTimeout==='function')setTimeout(()=>{if(!programmeReady)requestLiveRefresh();},COLD_PROGRAMME_RETRY_MS);
 }
 const COLD_PROGRAMME_RETRY_MS=5000;
 
-async function loadEnrichment(options={}){if(enrichmentLoading)return 'busy';enrichmentLoading=true;try{const response=await fetchUserRead('/api/enrichment/view');if(!response.ok)throw new Error();const data=await response.json();if(!data||typeof data.films!=='object')throw new Error();const key=JSON.stringify(data);if(key===enrichmentKey)return true;enrichmentKey=key;enrichment=data;ratingsLoaded=true;enrichmentUnavailable=false;updateFacetOptions();renderPreservingScroll();return true;}catch{enrichmentUnavailable=true;if(!ratingsLoaded&&!options.quiet)render();return false;}finally{enrichmentLoading=false;}}
+function loadEnrichment(options={}){return heavyTurn('enrichment',()=>loadEnrichmentNow(options));}
+async function loadEnrichmentNow(options={}){if(enrichmentLoading)return 'busy';enrichmentLoading=true;try{const response=await fetchUserRead('/api/enrichment/view');if(!response.ok)throw new Error();const data=await response.json();if(!data||typeof data.films!=='object')throw new Error();const key=JSON.stringify(data);if(key===enrichmentKey)return true;enrichmentKey=key;enrichment=data;ratingsLoaded=true;enrichmentUnavailable=false;updateFacetOptions();renderPreservingScroll();return true;}catch{enrichmentUnavailable=true;if(!ratingsLoaded&&!options.quiet)render();return false;}finally{enrichmentLoading=false;}}
  const FOOTER_RUN_STATUS={idle:'не запускался',running:'выполняется',completed:'завершён',blocked:'приостановлен',interrupted:'прерван'};
 const INTEGRATION_STATE={healthy:'работает',degraded:'требует внимания',failed:'сбой',stale:'давний успех',unknown:'нет данных',off:'выключено',running:'выполняется',waiting:'ожидает'};
 const INTEGRATION_CODE={ok:'',stale:'последний успех давно',no_data:'',running:'',ratings_blocked:'список оценок временно недоступен',ratings_incomplete:'список оценок прочитан не полностью',ratings_rate_limit:'слишком много запросов',ratings_failed:'оценки прочитать не удалось',ratings_pending:'чтение оценок не завершилось, причина неизвестна',watchlist_failed:'watchlist прочитать не удалось',watchlist_stuck:'синхронизация не завершилась',epg_http:'загрузка EPG не удалась',epg_window:'EPG не покрывает текущее окно',epg_parse:'разбор EPG не удался',epg_failed:'обновление EPG не завершилось',epg_unproven:'публикация этого поколения не подтверждена',resolver_waiting:'',resolver_backoff:'распознавание подождёт: слишком много запросов',resolver_unconfigured:'распознавание не настроено',resolver_failed:'распознавание остановилось',resolver_no_recent_progress:'нет подтверждённого выполнения · вероятна внешняя блокировка; проверь Usage',prediction_interrupted:'запуск прерван',prediction_blocked:'прогнозы приостановлены',prediction_runs_interrupted:'часть запусков прервалась',prediction_no_recent_progress:'нет подтверждённого прогресса прогнозов',poster_idle:'',poster_hydrated:'на прошлой неделе найдены новые постеры',poster_first_run:'первая проверка ещё впереди',poster_retry_scheduled:'повторная попытка запланирована',poster_overdue:'еженедельная проверка не выполнена вовремя',poster_stalled:'проверка зависла или отчёт не доставлен',poster_lost:'данные проверки постеров пропали',poster_failed:'проверка постеров не удалась',metadata_attention:'метаданные и локализация требуют внимания'};

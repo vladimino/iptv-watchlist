@@ -996,6 +996,9 @@ export const FILES={
  "get-write-baseline.mjs": {
   "suite": "core"
  },
+ "heavy-read-turns.mjs": {
+  "suite": "core"
+ },
  "identity-work-inventory.mjs": {
   "suite": "core"
  },

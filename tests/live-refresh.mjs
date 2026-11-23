@@ -82,14 +82,15 @@ function flush(){for(const finish of pending.splice(0))finish();}
 // The heavy reads follow one another, so each settles before the next is sent: drain the microtasks between flushes.
 const tickOver=()=>new Promise(resolve=>setImmediate(resolve));
 async function untilIdle(){
- for(let i=0;i<200&&(pending.length||run('liveRunning')||run('livePending')||run('liveCoalesced'));i++){flush();await tickOver();}
+ for(let i=0;i<200&&(pending.length||run('liveRunning')||run('livePending')||run('liveCoalesced')||run('heavyActive')>0);i++){flush();await tickOver();}
  flush();await tickOver();
 }
 function handler(target,type){return listeners[target].get(type)?.[0];}
 
 failed.add('/api/programme');
 const failedProgramme=run('loadProgramme()');
-flush();
+failedProgramme.catch(()=>{});
+await untilIdle();
 // AIR-586: a failed read is not «not ready»: only the route's own first-update answer says that.
 await assert.rejects(failedProgramme,/^Error: Не удалось загрузить программу \(HTTP 503\)\. Повторим автоматически\.$/);
 assert.equal(el('#result-count').textContent,'Программа временно недоступна');
@@ -102,7 +103,8 @@ assert.equal(el('#empty h2').textContent,'Программа не загрузи
 assert.equal(el('#empty p').textContent,'Повторим автоматически. Это не пустая программа.');
 bodies.set('/api/programme',{error:'Первое обновление ещё выполняется'});
 const notReady=run('loadProgramme()');
-flush();
+notReady.catch(()=>{});
+await untilIdle();
 await assert.rejects(notReady,/ещё не готова/,'the route\'s own first-update answer still reads as not ready');
 bodies.delete('/api/programme');
 failed.delete('/api/programme');
@@ -142,7 +144,8 @@ run('stopLiveRefresh()');
 resetTraffic();
 const first=run('runLiveRefresh()');
 const second=run('runLiveRefresh()');
-// AIR-586: the small reads and the programme start at once; the other large reads wait for the one before them.
+// AIR-586: the small reads and the programme start at once (the programme on its shared turn); the other large reads wait for the one before them.
+await tickOver();
 assert.deepEqual([...calls].sort(),['/api/events','/api/programme','/api/started']);
 await untilIdle();
 assert.equal(calls.length,12,'a refresh requested while one is running waits for a single follow-up');
