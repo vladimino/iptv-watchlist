@@ -45,6 +45,30 @@ try{
  await assert.rejects(()=>Authority.routeRead(failing,KEY));
  assert.equal(catalogLines().length,0);
 
+ // The caller's options keep their original semantics: a normal read looks at `options.project` exactly as before (twice: the type check and the value), whatever the accessor does, and an over-cap read never looks at it.
+ {
+  let reads=0;
+  const counting={get project(){reads++;return film=>({id:film.id});}};
+  capture();
+  await Authority.routeRead(world.env,KEY,counting);
+  assert.equal(reads,2,'the original two accesses, none added by the log');assert.equal(catalogLines()[0].projected,true);
+  const throwing={get project(){throw new Error('accessor failure');}};
+  capture();
+  await assert.rejects(()=>Authority.routeRead(world.env,KEY,throwing),error=>error.message==='accessor failure','a throwing accessor fails the read exactly as before');
+  assert.equal(catalogLines().length,0,'and no line is written for it');
+ }
+ // Over the cap: refused as `discovery_bounded` as before, the options are not looked at, one line says `projected: null`.
+ {
+  sql(world.file,"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<20001) INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) SELECT 'big'||i, 'b'||i, 'movie', 'tmdb:b'||i, NULL, 'p1', 1, 'current', '{}' FROM n");
+  let reads=0;
+  const counting={get project(){reads++;return film=>film;}};
+  capture();
+  await assert.rejects(()=>Authority.routeRead(world.env,KEY,counting),error=>error.code==='discovery_bounded');
+  assert.equal(reads,0,'an over-cap read never touches the options');
+  assert.equal(catalogLines().length,1);assert.equal(catalogLines()[0].projected,null);assert.equal(catalogLines()[0].rows,20031);
+  sql(world.file,"DELETE FROM discovery_admission WHERE film_id LIKE 'big%'");
+ }
+
  // The log changes no result: with a console that throws, the read answers the same.
  const before=await Authority.routeRead(world.env,KEY);
  console.log=()=>{throw new Error('log sink down');};
