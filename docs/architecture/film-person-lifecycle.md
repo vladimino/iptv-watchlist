@@ -172,6 +172,36 @@ A Film behind a rated-only Diary id is admitted by the existing `applyRatedAdmis
 
 `upsertAdmissions` (the D1 Discovery admission writer) now hands the films it just wrote to the canonical Discovery admission unit. Below the marker `open` that is one marker read, cached per database binding for 60 s, and nothing is written. At `open` the unit admits at most 10 written films per call through one atomic fenced `mutateFilm` batch with the applied receipt, settles the origin's own due receipts and sweeps at most 5 current movie admissions that have no trusted canonical Film, and it never throws into the Discovery chunk. This section is prose only: the Mermaid diagrams above are unchanged. **Current:** the marker is `open`, so this path is the live Discovery admission writer. **Historical:** dormant until `open`.
 
+## Canonical Watchlist membership projection (AIR-582, [ADR 0203](../adr/0203-watchlist-membership-letterboxd-single-writer-projection.md), Proposed)
+
+**Status:** code delivered **dormant** (schema `0037`, marker `producer`); nothing is applied or switched by a deploy. Until the owner switches the marker to `sync`, the three legacy effects run and the EPG Producer (held) owns `watchlist_film` exactly as before. After the switch, the Letterboxd Sync is the **only** writer of `watchlist_film`: a fourth causal effect `membership` applies each published Watchlist version, a per-film version fence refuses a late older version, ids without a trusted Film go to a durable handoff ledger that never blocks the slot, and the Producer plans and writes no membership.
+
+```mermaid
+flowchart LR
+  scan["Letterboxd scan<br/>complete list"]
+  snap["Watchlist snapshot V<br/>and its change rows"]
+  eff["membership effect of V<br/>version order"]
+  res["Trusted Film resolver<br/>claim or own Film"]
+  fence["Per-film version fence<br/>refuses version below stored"]
+  wf["watchlist_film"]
+  hand["Handoff ledger<br/>unresolved added ids"]
+  rec["Reconcile step<br/>against CURRENT snapshot"]
+  prod["EPG Producer<br/>Film and Person facts only"]
+  cur["watchlist_current<br/>read-time composition"]
+  scan --> snap
+  snap --> eff
+  eff --> res
+  res -->|trusted Film| fence
+  res -->|no trusted Film| hand
+  fence --> wf
+  hand --> rec
+  rec --> res
+  prod -.->|membership input refused in sync mode| wf
+  snap --> cur
+```
+
+The Producer never writes the dotted edge once the marker is `sync`: it plans no `watchlist` key and no release unit, and the Film writer refuses the input. `GET /api/watchlist` and `GET /api/programme` read `watchlist_current` as before. Rollout order and the guarded switch are in [the runbook](../runbooks/watchlist-authority-d1.md#membership-projection-schema-37-adr-0203).
+
 ## Producer Workflow chain
 
 [ADR 0141](../adr/0141-producer-workflow-chain-protocol.md) is implemented: `canonical_producer_chain` (migration `0023`, applied 16 Nov 2026, empty at apply; [evidence](../evidence/d1-migration/air-499-0023-apply-2026-11-16.md)), GATE / RETRY_GATE, CLAIM before `create()`, sealed EPG documents only (`readDocument` / `readMembers`, not the completed programme), a full resumable pass labelled `P:g`, chain-owned receipt reconcile, hand-off / TAKEOVER, and hourly launch only from `reconcileProducerChain`. **Current:** the marker is `open`; `PRODUCER_WORKFLOW` is bound; `reconcileProducerChain` may launch. A first natural pass at `open` is not yet recorded as accepted. **Historical:** launches stayed off while the marker was `prepared`. This section is prose only; the diagrams above are unchanged.

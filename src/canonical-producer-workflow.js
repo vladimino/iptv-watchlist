@@ -69,7 +69,8 @@ function sealedDimension(raw,name){
  };
 }
 export function filmFactsOf(film,watchlisted){
- const facts={watchlist:watchlisted,film:{contractVersion:1,canonicalIdentity:film?.canonicalIdentity||null,originalTitle:film?.original||film?.title||null}};
+ // ADR 0203: `watchlisted === undefined` plans NO membership at all (the key is absent, not false): the Producer then never sets or clears `watchlist_film`.
+ const facts={...(watchlisted===undefined?{}:{watchlist:watchlisted}),film:{contractVersion:1,canonicalIdentity:film?.canonicalIdentity||null,originalTitle:film?.original||film?.title||null}};
  const metadataAt=clockOf(film?.metadataAt);
  if(metadataAt)facts.metadata={schemaVersion:1,year:film.year??null,runtime:film.runtime??null,synopsis:film.synopsis??null,poster:film.poster??null,url:film.url??null,genres:Array.isArray(film.genres)?film.genres:[],peopleVersion:film.peopleVersion??null,payload:{},r2Key:null,contentSha256:null,updatedAt:metadataAt};
  const dimensions={};
@@ -129,6 +130,18 @@ export function guardsOf(raw,decision){
  return out;
 }
 export async function resolveSourceIdentities(env,rawIds){
+ const all=await resolveSourceIdentitiesEach(env,rawIds);
+ if(!all.ok)return all;
+ const {resolved,guards,refused}=all;
+ if(refused.length){
+  const code=refused.some(item=>item.code==='producer_identity_ambiguous')?'producer_identity_ambiguous':refused[0].code;
+  return {ok:false,code,refused:refused.slice(0,20),refusedCount:refused.length};
+ }
+ return {ok:true,resolved,guards};
+}
+// ADR 0203 (AIR-582): the same bounded, read-only resolution, but a refused id does NOT fail the rest: every id is answered on its own (`byId`: {target,guards} or {refused}). The membership projection needs this, because one
+// unresolvable Letterboxd id must never hold the other films of a version. Same reads, same decisions and the same write-time proofs as `resolveSourceIdentities`.
+export async function resolveSourceIdentitiesEach(env,rawIds){
  const unique=[...new Set(rawIds.filter(Boolean))];
  const lids=unique.filter(id=>!DIRECT.test(id));
  if(lids.length>IDENTITY_LOOKUP_CAP)return {ok:false,code:'producer_identity_bounded'};
@@ -155,17 +168,13 @@ export async function resolveSourceIdentities(env,rawIds){
    for(const row of await many(db,"SELECT from_id,to_film_id FROM film_redirect WHERE from_id IN (SELECT value FROM json_each(?))",[chunk]))redirects.set(row.from_id,row.to_film_id);
   }
  }catch{return {ok:false,code:'producer_identity_unreadable'};}
- const resolved=new Map(),refused=[],guards=new Map();
+ const resolved=new Map(),refused=[],guards=new Map(),byId=new Map();
  for(const id of unique){
   const out=resolveIdentity(id,{claims:claims.get(id)||[],films,redirects});
-  if(out.target){resolved.set(id,out.target);const g=guardsOf(id,out);if(g.length){if(!guards.has(out.target))guards.set(out.target,[]);guards.get(out.target).push(...g);}}
-  else refused.push({id,code:out.refused});
+  if(out.target){resolved.set(id,out.target);const g=guardsOf(id,out);byId.set(id,{target:out.target,guards:g});if(g.length){if(!guards.has(out.target))guards.set(out.target,[]);guards.get(out.target).push(...g);}}
+  else{refused.push({id,code:out.refused});byId.set(id,{refused:out.refused});}
  }
- if(refused.length){
-  const code=refused.some(item=>item.code==='producer_identity_ambiguous')?'producer_identity_ambiguous':refused[0].code;
-  return {ok:false,code,refused:refused.slice(0,20),refusedCount:refused.length};
- }
- return {ok:true,resolved,guards};
+ return {ok:true,resolved,guards,refused,byId};
 }
 function peopleOf(film){
  const out=[];
@@ -184,7 +193,7 @@ function uniqueGuards(list=[]){
  for(const guard of list){const key=JSON.stringify(guard);if(!seen.has(key)){seen.add(key);out.push(guard);}}
  return out;
 }
-function planFromSealed({programme,watchlist,watchMembers,previousIds=[],resolved,guards=new Map()}){
+function planFromSealed({programme,watchlist,watchMembers,previousIds=[],resolved,guards=new Map(),membershipOwned=false}){
  const listed=idsOf(watchlist,watchMembers,resolved);
  const byFilm=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){
@@ -196,10 +205,11 @@ function planFromSealed({programme,watchlist,watchMembers,previousIds=[],resolve
   if(seen.has(id))continue;
   seen.add(id);
   const proofs=uniqueGuards(guards.get(id));
-  films.push({id,facts:{...filmFactsOf(byFilm.get(id)||{id},true),...(proofs.length?{guards:proofs}:{})}});
+  films.push({id,facts:{...filmFactsOf(byFilm.get(id)||{id},membershipOwned?undefined:true),...(proofs.length?{guards:proofs}:{})}});
  }
  const listedSet=new Set(listed);
- const departed=[...new Set(previousIds.map(id=>canonicalFilmId(id)).filter(id=>id&&!listedSet.has(id)))].sort();
+ // Under the Letterboxd Sync membership projection (ADR 0203) the Producer releases nothing: removal is the Sync's `membership` effect, never a diff of the EPG copy.
+ const departed=membershipOwned?[]:[...new Set(previousIds.map(id=>canonicalFilmId(id)).filter(id=>id&&!listedSet.has(id)))].sort();
  const personRows=[],persons=[],credits=[],personSeen=new Set();
  for(const item of films){
   const people=peopleOf(byFilm.get(item.id)||{});
@@ -218,6 +228,17 @@ function planFromSealed({programme,watchlist,watchMembers,previousIds=[],resolve
  return {films,departed,persons,credits,personRows};
 }
 
+// The membership marker of schema 37: 'producer' (legacy, also when the table is absent) or 'sync'. Read only. Throws on a storage failure other than an absent table.
+export async function readMembershipMode(env){
+ try{
+  const row=await one(database(env),'SELECT mode FROM watchlist_membership_authority WHERE id=1');
+  if(!row||(row.mode!=='producer'&&row.mode!=='sync'))throw Object.assign(new Error('membership_marker_invalid'),{code:'membership_marker_invalid'});
+  return row.mode;
+ }catch(error){
+  if(/no such table/i.test(String(error?.cause?.message||error?.message||error)))return 'producer';
+  throw error;
+ }
+}
 export async function acquireSealedSnapshot(env,programmeRunId,{previousIds}={}){
  const before=await readPublished(env);
  if(!before?.ready||before.programmeRunId!==programmeRunId)return {ok:false,code:'producer_generation_superseded'};
@@ -225,8 +246,11 @@ export async function acquireSealedSnapshot(env,programmeRunId,{previousIds}={})
  const programme=await readDocument(env,programmeRunId,'programme');
  const watchlist=await readDocument(env,programmeRunId,'watchlist');
  const members=await readMembers(env,programmeRunId,'watchlist');
+ // ADR 0203: who owns membership is read ONCE per snapshot from the marker (schema 37). An absent table is the legacy state; any other read failure fails the snapshot closed, never "legacy".
+ let membershipOwned=false;
+ try{membershipOwned=(await readMembershipMode(env))==='sync';}catch{return {ok:false,code:'producer_membership_marker_unreadable'};}
  let prior=previousIds;
- if(!Array.isArray(prior)){
+ if(!membershipOwned&&!Array.isArray(prior)){
   try{prior=(await many(database(env),'SELECT film_id AS filmId FROM watchlist_film',[])).map(row=>row.filmId);}
   catch{return {ok:false,code:'producer_membership_unreadable'};}
  }
@@ -236,7 +260,7 @@ export async function acquireSealedSnapshot(env,programmeRunId,{previousIds}={})
  // so a refused id is never silently dropped and then mistaken for a departed Film.
  const identity=await resolveSourceIdentities(env,[...new Set([...sourceIdsOf(watchlist,members)])]);
  if(!identity.ok)return {ok:false,code:identity.code,refused:identity.refused,refusedCount:identity.refusedCount};
- const planned=planFromSealed({programme,watchlist,watchMembers:members,previousIds:prior,resolved:identity.resolved,guards:identity.guards});
+ const planned=planFromSealed({programme,watchlist,watchMembers:members,previousIds:prior,resolved:identity.resolved,guards:identity.guards,membershipOwned});
  return {ok:true,generation:g0,programmeRunId,...planned,label:snapshotLabel(programmeRunId,g0),members,watchlist};
 }
 

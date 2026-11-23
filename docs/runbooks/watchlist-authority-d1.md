@@ -40,3 +40,26 @@ Staged rows of an attempt that was never promoted are garbage of an interrupted 
 ## Boundary
 
 The EPG run of a `d1` cutover carries `watchlistSnapshot` and skips the scan, retention, removal hand-over and `watchlist` Event; a run created before a cutover finishes with today's tail because the decision is keyed on the run, not on the marker. With the marker `d1` the EPG no longer writes or compares the root `watchlist.json` mirror (a regression test pins it); the writer of that mirror, the Events and the Workflow stay with AIR-570 and AIR-571. A pinned run starts at the `epg` stage and never calls Letterboxd, and the prediction queue reads the current snapshot membership.
+
+## Membership projection (schema 37, ADR 0203)
+
+[ADR 0203](../adr/0203-watchlist-membership-letterboxd-single-writer-projection.md) is **Proposed**; everything here is dormant until its owner acceptance, and **this runbook authorizes no operation**. Every step below needs its own operation-specific owner GO.
+
+**Read-only checks (`SELECT` only).**
+
+```sql
+SELECT mode, generation, baseline_version FROM watchlist_membership_authority;      -- who writes watchlist_film
+SELECT version, effects_drained_version FROM watchlist_current;                    -- drained = equal
+SELECT state, COUNT(*) AS n FROM watchlist_membership_handoff GROUP BY state;      -- pending / settled / terminal
+SELECT effect, status, COUNT(*) AS n FROM watchlist_effect GROUP BY effect, status; -- membership appears only in sync mode
+SELECT COUNT(*) AS fenced FROM watchlist_film_fence;
+```
+
+**Sequence (each step is a separate GO; deploying the code performs none of them).**
+
+1. Migration `0036`, then `0037` (marker `producer`, generation 0). Until the switch the Worker behaves as before: three effects per promotion, the EPG Producer (held by `PRODUCER_DELIVERY_HOLD`) owns membership.
+2. Baseline: `membershipBaseline(...).dryRun` (read only: counts of add, remove, keep and unresolved), then `apply` repeatedly (25 Film changes per call, idempotent) until it records `baseline_version` equal to the current version. It refuses while effects of the current version are pending and writes membership only, never a Film, claim, show or rating. A new promotion invalidates the proof: rerun.
+3. Switch: `activateMembershipSync` (guarded: marker `producer` at the expected generation, proof equal to the current drained version). The Producer must be held and have no non-terminal chain at that moment. It is roll-forward; there is no switch back here.
+4. The hold lift is a separate, narrow PR of [AIR-572](https://trello.com/c/ugyHjnc4) with its own GO.
+
+The production operator that wires `dryRun`, `apply` and the switch to an owner-only route is **not** part of this change (a follow-up card). When a step fails: `effects_pending` means drain first; `conflict` on the switch means the proof is stale or the generation moved, so re-read; a `terminal` handoff row means an id with no trusted Film after the bounded attempts and needs the baseline operator or an owner decision. Nothing here deletes a Film.

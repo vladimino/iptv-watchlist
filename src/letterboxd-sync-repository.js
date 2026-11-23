@@ -3,7 +3,7 @@
 // Every committing call carries the Workflow's mode-epoch guard, so a stale instance of a closed mode writes nothing (decision 3). The causal effects are applied by
 // INJECTED writers (`effectWriters.scan_facts|retention|removal_enqueue`, each `(ctx, effect, snapshot) -> receipt string`); an effect with no writer holds the drain
 // (`effect_writer_absent`) and the scan, it is never marked done without a receipt. The admission ledger step is injected too (`admitNew`), and is optional.
-export function watchlistRepository(WatchlistD1, {epochGuard, scanGuard = null, effectWriters = {}, admitNew = null} = {}) {
+export function watchlistRepository(WatchlistD1, {epochGuard, scanGuard = null, effectWriters = {}, admitNew = null, reconcileMembership = null} = {}) {
   const guards = ctx => {
     if (typeof epochGuard !== 'function' || !Number.isInteger(ctx?.epoch)) return null;
     const guard = epochGuard(ctx.epoch);
@@ -87,6 +87,8 @@ export function watchlistRepository(WatchlistD1, {epochGuard, scanGuard = null, 
       if (!g) return;
       await WatchlistD1.recordAttempt(ctx.env, {at, outcome: String(outcome).slice(0, 60), now: ctx.now(), guards: g});
     },
-    ...(typeof admitNew === 'function' ? {admitNew: (ctx, arg) => admitNew(ctx, arg)} : {})
+    ...(typeof admitNew === 'function' ? {admitNew: (ctx, arg) => admitNew(ctx, arg)} : {}),
+    // ADR 0203: the bounded reconcile of the membership handoff ledger (a no-op until the membership marker says `sync`). Optional, like the admission step.
+    ...(typeof reconcileMembership === 'function' ? {reconcileMembership: (ctx, arg) => reconcileMembership(ctx, arg)} : {})
   };
 }
