@@ -75,6 +75,27 @@ await refused(file=>sql(file,'DROP TABLE prediction_aux_seal'),'predecessor_inco
 await refused(file=>sql(file,'DROP INDEX film_external_id_one_trusted'),'predecessor_incomplete');
 await refused(file=>{const trigger=sql(file,"SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'prediction_aux_sealed_%' LIMIT 1")[0].name;sql(file,'DROP TRIGGER '+trigger);},'predecessor_incomplete');
 await refused(file=>sql(file,"CREATE TRIGGER prediction_aux_sealed_extra BEFORE INSERT ON prediction_aux_seal BEGIN SELECT 1; END"),'predecessor_incomplete');
+// A count-preserving substitution: one genuine seal trigger replaced by a spurious one with the same prefix stays at 33 names and is still refused.
+await refused(file=>{const trigger=sql(file,"SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'prediction_aux_sealed_%' ORDER BY name LIMIT 1")[0].name;sql(file,'DROP TRIGGER '+trigger);sql(file,"CREATE TRIGGER prediction_aux_sealed_spurious BEFORE INSERT ON prediction_aux_seal BEGIN SELECT 1; END");assert.equal(sql(file,"SELECT count(*) n FROM sqlite_master WHERE type='trigger' AND name LIKE 'prediction_aux_sealed_%'")[0].n,33);},'predecessor_incomplete');
+assert.equal(Op.sealTriggerNames().length,33,'the expected names come from the unchanged 0035 source');
+// A missing Discovery authority singleton is refused, not accepted as a null baseline.
+await refused(file=>{try{sql(file,'DELETE FROM discovery_authority');}catch{sql(file,'PRAGMA foreign_keys=OFF;DROP TRIGGER IF EXISTS discovery_authority_no_delete;DELETE FROM discovery_authority');}},'discovery_authority_missing');
+// The approved bytes are pinned independently of the caller's pin: a shape-compatible alteration cannot be authorized by its own newly computed hash.
+{
+ const original=fs.readFileSync('migrations/0036_epg_discovery_lookup_indexes.sql');
+ assert.ok(Op.approved(original));assert.equal(Op.APPROVED_GIT_BLOB,'2e3b5d7659a7f741a39801e25af6c4e769f7503a');
+ for(const [from,to] of [["SELECT 1, 0, 'refused'","SELECT 1, 0, 'refused2'"],[" WHERE id = 1 AND version = 35\n AND ("," WHERE id = 1 AND version >= 35\n AND ("],["note = 'Schema v36","note = 'Schema v36 altered"],["(programme_run_id, match_reason) WHERE basis = 'discovery'","(programme_run_id, match_reason) WHERE basis = 'discovery' "]]){
+  const text=original.toString('utf8');assert.ok(text.includes(from),from);
+  const changed=Buffer.from(text.replace(from,to));
+  assert.ok(!Op.approved(changed));
+  const own=Op.migrationSha256(changed);
+  const {file,db}=v35();
+  assert.equal((await Op.execute('status',{binding:db,bytes:changed})).decision,'migration_not_approved');
+  await stop(Op.execute('apply',{binding:db,ctx:tracker(),params:{migrationSha256:own},bytes:changed}),'migration_not_approved');
+  assert.equal(db.calls.batches,0);assert.equal(version(file),35);
+  assert.throws(()=>Op.migrationSql(changed),error=>error.reason==='migration_not_approved');
+ }
+}
 // v36 with a missing index (drift) is partial, never "applied".
 {
  const {file,db}=v35();await Op.execute('apply',{binding:db,ctx:tracker(),params:{migrationSha256:sha}});

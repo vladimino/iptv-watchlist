@@ -19,6 +19,12 @@ import {AUX_TABLES} from '../src/prediction-aux-d1.js';
 const ROOT=path.resolve(fileURLToPath(new URL('..',import.meta.url)));
 export const MIGRATION_PATH=path.join(ROOT,'migrations/0036_epg_discovery_lookup_indexes.sql');
 export const RECEIPT_TABLES=['prediction_aux_import_chunk','prediction_aux_seal','prediction_aux_verify_slice'];
+export const RECEIPTS_MIGRATION_PATH=path.join(ROOT,'migrations/0035_prediction_aux_import_receipts.sql');
+// The migration the owner approved, pinned INDEPENDENTLY of the status/apply pin the caller passes: the exact bytes of migrations/0036 (Git blob 2e3b5d7659a7f741a39801e25af6c4e769f7503a on main 652ba65, 23 Nov 2026).
+export const APPROVED_SHA256='1d317a4992b90256592b6a77aa8b55d127f6eb009d46da645db54f29bc398764';
+export const APPROVED_GIT_BLOB='2e3b5d7659a7f741a39801e25af6c4e769f7503a';
+// The 33 seal triggers of 0035, read from the unchanged 0035 source: set equality, not a count.
+export const sealTriggerNames=()=>[...fs.readFileSync(RECEIPTS_MIGRATION_PATH,'utf8').matchAll(/CREATE TRIGGER (prediction_aux_sealed_[a-z_]+)/g)].map(match=>match[1]).sort();
 export const SEAL_TRIGGERS=33;
 export const NEW_INDEXES=['published_epg_show_discovery_by_match','film_external_id_by_scheme_value'];
 export const PREDECESSOR_INDEXES=['published_epg_show_by_generation','film_external_id_one_trusted'];
@@ -28,10 +34,14 @@ const OPTIONS={'--target':'target','--confirm':'confirm','--migration-sha256':'m
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 
 export const migrationBytes=()=>fs.readFileSync(MIGRATION_PATH);
-export const migrationSha256=()=>sha256(migrationBytes());
+const gitBlob=bytes=>createHash('sha1').update(Buffer.concat([Buffer.from('blob '+bytes.length+'\0'),bytes])).digest('hex');
+export const migrationSha256=(bytes=migrationBytes())=>sha256(bytes);
+// Fails closed unless the bytes are exactly the approved file (both pins).
+export const approved=(bytes=migrationBytes())=>sha256(bytes)===APPROVED_SHA256&&gitBlob(bytes)===APPROVED_GIT_BLOB;
 // The statements the Worker's REST batch gets: exactly those migrationStatements() extracts, checked for their shape (guard INSERT, two CREATE INDEX, the version UPDATE).
-export function migrationSql(){
- const statements=migrationStatements(migrationBytes().toString('utf8'));
+export function migrationSql(bytes=migrationBytes()){
+ if(!approved(bytes))throw new OperatorStop('migration_not_approved',3);
+ const statements=migrationStatements(bytes.toString('utf8'));
  const [guard,show,external,update]=statements;
  const shaped=statements.length===EXPECTED_STATEMENTS
   &&/^INSERT INTO schema_contract\b/i.test(guard||'')&&/^CREATE INDEX published_epg_show_discovery_by_match ON published_epg_show \(programme_run_id, match_reason\) WHERE basis = 'discovery'$/.test(show||'')
@@ -52,7 +62,7 @@ export async function readState(binding){
   const state={
    contract,schemaVersion:contract.length===1&&contract[0].id===1?contract[0].version:null,
    auxTables:AUX_TABLES.filter(name=>tables.has(name)).length,receiptTables:RECEIPT_TABLES.filter(name=>tables.has(name)).length,
-   sealTriggers:triggers.filter(name=>name.startsWith('prediction_aux_sealed_')).length,
+   sealTriggers:sealTriggerNames().filter(name=>triggers.includes(name)).length,sealTriggersSpurious:triggers.filter(name=>name.startsWith('prediction_aux_sealed_')&&!sealTriggerNames().includes(name)).length,
    neededTables:NEEDED_TABLES.filter(name=>tables.has(name)).length,predecessorIndexes:PREDECESSOR_INDEXES.filter(name=>indexes.has(name)).length,
    newIndexes:NEW_INDEXES.filter(name=>indexes.has(name)),auxMarker:null,published:null,discovery:null,counts:null,
   };
@@ -70,7 +80,7 @@ export async function readState(binding){
   throw new OperatorStop('unknown_state',3);
  }
 }
-const predecessorComplete=state=>state.auxTables===AUX_TABLES.length&&state.receiptTables===RECEIPT_TABLES.length&&state.sealTriggers===SEAL_TRIGGERS&&state.neededTables===NEEDED_TABLES.length&&state.predecessorIndexes===PREDECESSOR_INDEXES.length;
+const predecessorComplete=state=>state.auxTables===AUX_TABLES.length&&state.receiptTables===RECEIPT_TABLES.length&&state.sealTriggers===SEAL_TRIGGERS&&sealTriggerNames().length===SEAL_TRIGGERS&&state.sealTriggersSpurious===0&&state.neededTables===NEEDED_TABLES.length&&state.predecessorIndexes===PREDECESSOR_INDEXES.length;
 export function applyDecision(state){
  if(state.schemaVersion===null)return 'schema_contract_unexpected';
  if(state.schemaVersion===36)return state.newIndexes.length===NEW_INDEXES.length?'already_applied':'partial_schema';
@@ -79,6 +89,7 @@ export function applyDecision(state){
  if(!predecessorComplete(state))return 'predecessor_incomplete';
  if(state.auxMarker?.mode!=='r2'||state.auxMarker.generation!==0)return 'aux_marker_changed';
  if(!state.published||!state.counts)return 'state_unreadable';
+ if(!state.discovery)return 'discovery_authority_missing';
  return 'apply';
 }
 export const view=state=>state?({schemaVersion:state.schemaVersion,schemaContractRows:state.contract.length,auxTables:state.auxTables+'/'+AUX_TABLES.length,receiptTables:state.receiptTables+'/'+RECEIPT_TABLES.length,sealTriggers:state.sealTriggers+'/'+SEAL_TRIGGERS,neededTables:state.neededTables+'/'+NEEDED_TABLES.length,predecessorIndexes:state.predecessorIndexes+'/'+PREDECESSOR_INDEXES.length,newIndexes:state.newIndexes,auxMarker:state.auxMarker,publishedAuthority:state.published,discoveryAuthority:state.discovery,counts:state.counts}):null;
@@ -118,14 +129,14 @@ async function write(binding,statements,ctx){
  }
 }
 
-export async function execute(command,{binding,ctx={track:()=>{}},params={}}){
+export async function execute(command,{binding,ctx={track:()=>{}},params={},bytes=migrationBytes()}){
  const before=await readState(binding);
- const digest=migrationSha256();
- const decision=applyDecision(before);
- if(command==='status')return {operation:'status',writes:false,writeState:'none',migrationSha256:digest,statements:migrationSql().length,decision,...view(before)};
+ const digest=migrationSha256(bytes);
+ const decision=approved(bytes)?applyDecision(before):'migration_not_approved';
+ if(command==='status')return {operation:'status',writes:false,writeState:'none',migrationSha256:digest,statements:approved(bytes)?migrationSql(bytes).length:null,approvedGitBlob:APPROVED_GIT_BLOB,approvedSha256Match:approved(bytes),decision,...view(before)};
  if(params.migrationSha256!==digest)throw new OperatorStop('migration_sha256_mismatch',3);
  if(decision!=='apply')throw new OperatorStop(decision,3);
- await write(binding,migrationSql().map(sql=>binding.prepare(sql).bind()),ctx);
+ await write(binding,migrationSql(bytes).map(sql=>binding.prepare(sql).bind()),ctx);
  let after,shape;
  try{after=await readState(binding);shape=await readShape(binding);}
  catch{ctx.track('unknown');throw new OperatorStop('write_uncertain',3,{reason:'readback_unreadable'});}
