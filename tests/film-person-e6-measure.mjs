@@ -451,20 +451,20 @@ refused(c=>{c.table_counts[0].results[0].receipt_rows=1;c.receipt_states[0].resu
 {
  const full={queryBudgetPerStep:800,wallMsPerStep:60000,roundTripMs:50,cpuMsPerStep:1000,cpuMsPerUnit:5,changedShare:1,fixedQueries:0,fixedMs:0,fixedCpuMs:0};
  const a=ceilingOf({limits:full,unitsPerRun:100});
- assert.equal(a.status,'complete');assert.equal(a.qUnit,32);
+ assert.equal(a.status,'complete');assert.equal(a.qUnit,33);
  assert.deepEqual(a.ceilings,{query:12,wall:18,cpu:100});
  assert.equal(a.binding,'query');assert.equal(a.proposed,12);assert.equal(a.upperBoundWithoutUnknowns,null);assert.equal(a.stepsPerRun,9);
  assert.equal(a.safety,0.5);
  assert.deepEqual(ceilingOf({limits:{...full,fixedQueries:20},unitsPerRun:1}).ceilings.query,11);
- assert.equal(ceilingOf({limits:{...full,fixedQueries:40}}).ceilings.query,11);
+ assert.equal(ceilingOf({limits:{...full,fixedQueries:40}}).ceilings.query,10);
  assert.equal(ceilingOf({limits:{...full,fixedMs:3000}}).ceilings.wall,16);
  assert.equal(ceilingOf({limits:{...full,fixedCpuMs:100}}).ceilings.cpu,80);
- assert.equal(ceilingOf({limits:{...full,safety:0}}).ceilings.query,25);
+ assert.equal(ceilingOf({limits:{...full,safety:0}}).ceilings.query,24);
  assert.equal(ceilingOf({limits:{...full,cpuMsPerUnit:3}}).ceilings.cpu,166,'the ceiling rounds down');
  assert.equal(ceilingOf({limits:{...full,queryBudgetPerStep:10,fixedQueries:50}}).ceilings.query,0,'a fixed part above the budget leaves no room, never a negative ceiling');
  assert.deepEqual(ceilingOf({limits:{...full,wallMsPerStep:Infinity}}).unknown,['wallMsPerStep']);
  assert.equal(ceilingOf({limits:{...full,safety:0.9}}).ceilings.query,2);
- assert.equal(ceilingOf({limits:{...full,changedShare:0.1}}).qUnit,14);
+ assert.equal(ceilingOf({limits:{...full,changedShare:0.1}}).qUnit,14.1);
  assert.equal(ceilingOf({limits:{...full,changedShare:0}}).ceilings.query,33);
  const wall=ceilingOf({limits:{...full,wallMsPerStep:20000}});assert.equal(wall.binding,'wall');assert.equal(wall.proposed,6);
  const cpu=ceilingOf({limits:{...full,cpuMsPerUnit:100}});assert.equal(cpu.binding,'cpu');assert.equal(cpu.proposed,5);
@@ -474,8 +474,8 @@ refused(c=>{c.table_counts[0].results[0].receipt_rows=1;c.receipt_states[0].resu
  const noCpu=ceilingOf({limits:{queryBudgetPerStep:800,wallMsPerStep:60000,roundTripMs:50,changedShare:1,fixedQueries:0,fixedMs:0,fixedCpuMs:0}});
  assert.equal(noCpu.status,'incomplete');assert.equal(noCpu.proposed,null);assert.equal(noCpu.upperBoundWithoutUnknowns,12);assert.deepEqual(noCpu.unknown,['cpuMsPerStep','cpuMsPerUnit']);assert.equal(noCpu.stepsPerRun,undefined);
  const none=ceilingOf({limits:{}});
- assert.equal(none.status,'incomplete');assert.equal(none.proposed,null);assert.equal(none.upperBoundWithoutUnknowns,null);assert.equal(none.binding,null);assert.equal(none.unknown.length,9);assert.equal(none.qUnit,32);
- const noShare=ceilingOf({limits:{...full,changedShare:undefined}});assert.equal(noShare.status,'incomplete');assert.deepEqual(noShare.unknown,['changedShare']);assert.equal(noShare.qUnit,32);
+ assert.equal(none.status,'incomplete');assert.equal(none.proposed,null);assert.equal(none.upperBoundWithoutUnknowns,null);assert.equal(none.binding,null);assert.equal(none.unknown.length,9);assert.equal(none.qUnit,33);
+ const noShare=ceilingOf({limits:{...full,changedShare:undefined}});assert.equal(noShare.status,'incomplete');assert.deepEqual(noShare.unknown,['changedShare']);assert.equal(noShare.qUnit,33);
  const nullShare=ceilingOf({limits:{...full,changedShare:null}});assert.deepEqual(nullShare.unknown,['changedShare']);
  assert.equal(ceilingOf({limits:{...full,safety:1}}).reason,'safety_out_of_range');
  assert.equal(ceilingOf({limits:{...full,safety:-0.1}}).reason,'safety_out_of_range');

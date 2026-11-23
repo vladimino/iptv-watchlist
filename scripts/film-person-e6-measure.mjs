@@ -29,7 +29,7 @@ export const CAPS=Object.freeze({
 // tests/film-person-e6-measure.mjs asserts these numbers against the code, so a change of the adapter fails that test until the numbers and the runbook are updated.
 export const UNIT_COST=Object.freeze({
  noop:Object.freeze({queries:12,batches:0,roundTrips:12}),
- applied:Object.freeze({queries:30,batches:2,roundTrips:32}),
+ applied:Object.freeze({queries:31,batches:2,roundTrips:33}),
 });
 export const SAFETY_DEFAULT=0.5;
 

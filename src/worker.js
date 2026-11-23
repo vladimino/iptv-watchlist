@@ -2715,8 +2715,12 @@ function letterboxdPorts(env){
   epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],
   fenceEnv:(e,epoch)=>LetterboxdSync.fencedEnv(e,epoch),
  });
+ // ADR 0203 (AIR-582): the fourth effect and the handoff reconcile. Both are inert until the membership marker (schema 37) says `sync`: the effect exists only for a snapshot promoted under it, and the reconcile returns at once otherwise.
+ const membershipDeps={repository:WatchlistD1,resolve:(e,lids)=>CanonicalProducerWorkflow.resolveSourceIdentitiesEach(e,lids),setMembership:(e,input)=>CanonicalFilmWriters.setFilmMembership(e,input),epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],fenceEnv:(e,epoch)=>LetterboxdSync.fencedEnv(e,epoch)};
+ effects.membership=WatchlistMembership.membershipEffect(membershipDeps);
+ const reconcileMembership=WatchlistMembership.membershipReconcile(membershipDeps);
  const admitNew=LetterboxdSyncAdmission.admissionStep({repository:WatchlistD1,epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],fenceEnv:(e,epoch)=>LetterboxdSync.fencedEnv(e,epoch),identity:{MAX_ATTEMPTS:LetterboxdDiaryIdentity.MAX_ATTEMPTS,resolve:(e,items,opts)=>LetterboxdDiaryIdentity.resolve(e,items,opts),readIdentity:e=>LetterboxdFacts.readDiaryIdentity(e),diaryLinks:(e,lids)=>LetterboxdFacts.diaryLinks(e,lids)}});
- const repository=LetterboxdSyncRepository.watchlistRepository(WatchlistD1,{epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],scanGuard:epoch=>[LetterboxdSync.SCAN_GUARD_SQL,[epoch]],effectWriters:effects,admitNew});
+ const repository=LetterboxdSyncRepository.watchlistRepository(WatchlistD1,{epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],scanGuard:epoch=>[LetterboxdSync.SCAN_GUARD_SQL,[epoch]],effectWriters:effects,admitNew,reconcileMembership});
  const fenceGuard=epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]];
  const describeFilms=async(e,{added,removed})=>{
   const working=await MetadataCache.loadMetadataWorkingSet(e).catch(()=>null),records=working?.records||{};

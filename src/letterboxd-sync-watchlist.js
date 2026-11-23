@@ -8,6 +8,7 @@
 //   commitScan(ctx, {members, scan})    -> {outcome: 'committed'|'no_change', version, lastSuccessAt, total, baseline, added[], removed[]}   films are {id, title, year, url}
 //   recordAttempt(ctx, {outcome, at, slotKey, code})  -> void          `last_attempt_*` only; never lowers last_success_at
 //   admitNew(ctx, {limit, now})         -> {resolved, pending}         the bounded admission ledger step (decision 5), optional
+//   reconcileMembership(ctx, {now})     -> {processed, settled, ...}   ADR 0203: the bounded membership handoff reconcile against the CURRENT snapshot, optional, never changes the slot outcome
 // `ctx` is the phase context ({env, slotKey, runId, epoch, now, deadline}); the repository adapter reads the Workflow epoch from it.
 // `fetchPage(url)` returns the page HTML or throws an error with `status` (403, 429, 5xx) for the Letterboxd HTTP outcome; `parse(html)` returns
 // {films:[{id,...}], total, next}. Neither is created here: the cutover injects the real ones, tests inject fixtures.
@@ -89,6 +90,8 @@ export function watchlistPhase({repository, fetchPage, parse, firstUrl, username
       // Admission of new ids is a separate, bounded, deduplicated step: its failure never undoes the committed snapshot (decision 5).
       let admission = null;
       if (typeof repository.admitNew === 'function') admission = await repository.admitNew(ctx, {limit: 3, now: ctx.now()}).catch(() => ({resolved: 0, pending: null, error: true}));
+      // ADR 0203: the bounded reconcile of the canonical membership handoff ledger against the CURRENT snapshot. After the admission step, optional, and its failure or absence never changes the slot outcome.
+      if (typeof repository.reconcileMembership === 'function') await repository.reconcileMembership(ctx, {now: ctx.now()}).catch(() => null);
       // The Event's films: identity (id, title, year, trusted tmdb) and, for a removed film, the confirmed rating the fact store already holds. Stored facts only; a failure leaves the plain films.
       let added = committed.added || [], removed = committed.removed || [];
       if (typeof describe === 'function' && (added.length || removed.length)) {

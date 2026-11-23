@@ -16,6 +16,9 @@ const FENCE='UPDATE watchlist_cas SET ok=changes() WHERE id=1';
 const TABLES=['watchlist_authority','watchlist_cas','watchlist_current','watchlist_staging','watchlist_snapshot','watchlist_member','watchlist_change','watchlist_effect','watchlist_admission_pending'];
 export const SCHEMA_VERSION=31;
 export const EFFECTS=['scan_facts','retention','removal_enqueue'];
+// ADR 0203 (AIR-582): the fourth, OPTIONAL causal effect. It exists only for a snapshot promoted while the membership marker (schema 37) says `sync`; below that state every promotion has exactly the three effects above.
+export const MEMBERSHIP_EFFECT='membership';
+export const ALL_EFFECTS=[...EFFECTS,MEMBERSHIP_EFFECT];
 export const LIMITS={inChunk:90,stageBatch:50,maxFilms:5000,keepSnapshots:8,stagingGuardMs:30*60000,gcBatch:200,pendingCap:500,staleMs:24*3600000,textChars:500,pruneBatch:200};
 // The marker read also proves the singleton fence row exists: without it the domain is closed.
 const MARKER_SQL='SELECT mode, generation, writes, (SELECT COUNT(*) FROM watchlist_cas WHERE id=1) AS cas FROM watchlist_authority WHERE id=1';
@@ -379,9 +382,16 @@ export async function publishSnapshot(source,films,scan,ctx={}){
  if(!membersOk(staged,normalized.length)||await listDigest(staged.map(filmOf))!==digest)return {ok:false,reason:'malformed'};
 
  const count=normalized.length,version=pointer.version+1;
+ // ADR 0203: the effect set of this promotion is decided by the membership marker READ NOW and re-asserted INSIDE the promotion batch, so a switch that lands between this read and the commit aborts the batch whole
+ // (a promotion can never carry the old effect set after the switch, nor the new one before it). An absent marker table (schema below 37) is the legacy three effects with no extra statement.
+ const marker=await readMembershipAuthority(db);
+ if(!marker.ok)return {ok:false,reason:'unavailable'};
+ const effectsFor=marker.present&&marker.mode==='sync'?ALL_EFFECTS:EFFECTS;
+ const markerGuard=marker.present?[[GUARD("(SELECT COUNT(*) FROM watchlist_membership_authority WHERE id=1 AND mode=? AND generation=?)"),[marker.mode,marker.generation]]]:[];
  const statements=[
   authorityGuard(gate.generation),
   ...extra,
+  ...markerGuard,
   // The pointer: compare-and-swap on (version, revision). This is where the next version number is assigned.
   ['UPDATE watchlist_current SET version=?, snapshot_id=?, list_sha256=?, film_count=?, last_success_at=CASE WHEN last_success_at IS NULL OR last_success_at<? THEN ? ELSE last_success_at END, last_success_run=?, last_success_slot=?, last_attempt_at=?, last_attempt_outcome=\'committed\', revision=revision+1, updated_at=? WHERE id=1 AND version=? AND revision=?',[version,snapshotId,digest,count,scan.completedAt??stamp,scan.completedAt??stamp,scan.runId??null,scan.slotKey??null,scan.completedAt??stamp,stamp,pointer.version,pointer.revision]],
   [FENCE,[]],
@@ -390,7 +400,7 @@ export async function publishSnapshot(source,films,scan,ctx={}){
   ['INSERT INTO watchlist_snapshot (snapshot_id, version, scan_id, observed_at, committed_at, film_count, list_sha256, prev_version, slot_key, run_id) VALUES (?,?,?,?,?,?,?,?,?,?)',[snapshotId,version,scan.scanId,scan.observedAt,stamp,count,digest,pointer.version,scan.slotKey??null,scan.runId??null]],
   ...added.map(item=>['INSERT INTO watchlist_change (snapshot_id, kind, lid, ordinal, prev_ordinal) VALUES (?,\'added\',?,?,NULL)',[snapshotId,item.lid,item.ordinal]]),
   ...removed.map(item=>['INSERT INTO watchlist_change (snapshot_id, kind, lid, ordinal, prev_ordinal) VALUES (?,\'removed\',?,NULL,?)',[snapshotId,item.lid,item.prevOrdinal]]),
-  ...EFFECTS.map(effect=>['INSERT INTO watchlist_effect (snapshot_id, effect, status, receipt, attempts, done_at) VALUES (?,?,\'pending\',NULL,0,NULL)',[snapshotId,effect]]),
+  ...effectsFor.map(effect=>['INSERT INTO watchlist_effect (snapshot_id, effect, status, receipt, attempts, done_at) VALUES (?,?,\'pending\',NULL,0,NULL)',[snapshotId,effect]]),
   // A new id enters the ledger once; a returning id continues its row as pending (a superseded or resolved row is re-opened by the new addition).
   ...added.map(item=>['INSERT INTO watchlist_admission_pending (lid, first_seen_snapshot_id, first_seen_version, state, attempts, next_retry_at, last_reason, resolved_by, updated_at) VALUES (?,?,?,\'pending\',0,NULL,NULL,NULL,?) ON CONFLICT(lid) DO UPDATE SET state=\'pending\', first_seen_snapshot_id=excluded.first_seen_snapshot_id, first_seen_version=excluded.first_seen_version, attempts=0, next_retry_at=NULL, last_reason=NULL, resolved_by=NULL, updated_at=excluded.updated_at WHERE state IN (\'superseded\')',[item.lid,snapshotId,version,stamp]]),
  ];
@@ -406,11 +416,11 @@ export async function publishSnapshot(source,films,scan,ctx={}){
 
 // ---- the causal effects journal -------------------------------------------------------------------------------------------
 // The pending causal effects of every promoted snapshot, oldest version first, `limit` rows. Delivery (mirror, Events) is not here. -> {ok:true,effects:[{snapshotId,version,effect,attempts}]} | {ok:false,reason}
-export async function pendingEffects(source,{limit=EFFECTS.length*4}={}){
+export async function pendingEffects(source,{limit=ALL_EFFECTS.length*4}={}){
  const db=database(source);
  if(!db)return {ok:false,reason:'unavailable'};
  let rows;
- try{rows=await many(db,"SELECT e.snapshot_id AS snapshotId, s.version AS version, e.effect AS effect, e.attempts AS attempts, e.receipt AS progress FROM watchlist_effect e JOIN watchlist_snapshot s ON s.snapshot_id=e.snapshot_id WHERE e.status='pending' ORDER BY s.version, CASE e.effect WHEN 'scan_facts' THEN 1 WHEN 'retention' THEN 2 ELSE 3 END LIMIT ?",[Math.max(1,Math.min(200,limit))]);}
+ try{rows=await many(db,"SELECT e.snapshot_id AS snapshotId, s.version AS version, e.effect AS effect, e.attempts AS attempts, e.receipt AS progress FROM watchlist_effect e JOIN watchlist_snapshot s ON s.snapshot_id=e.snapshot_id WHERE e.status='pending' ORDER BY s.version, CASE e.effect WHEN 'scan_facts' THEN 1 WHEN 'retention' THEN 2 WHEN 'removal_enqueue' THEN 3 ELSE 4 END LIMIT ?",[Math.max(1,Math.min(200,limit))]);}
  catch{return {ok:false,reason:'unavailable'};}
  return {ok:true,effects:rows.map(row=>({snapshotId:row.snapshotId,version:Number(row.version),effect:row.effect,attempts:Number(row.attempts),progress:typeof row.progress==='string'&&row.progress?row.progress:null}))};
 }
@@ -420,7 +430,7 @@ export async function pendingEffects(source,{limit=EFFECTS.length*4}={}){
 export async function completeEffect(source,{snapshotId,effect,receipt},ctx={}){
  const db=database(source);
  if(!db)return {ok:false,reason:'unavailable'};
- if(typeof snapshotId!=='string'||!EFFECTS.includes(effect)||typeof receipt!=='string'||!receipt||receipt.length>200)return {ok:false,reason:'shape'};
+ if(typeof snapshotId!=='string'||!ALL_EFFECTS.includes(effect)||typeof receipt!=='string'||!receipt||receipt.length>200)return {ok:false,reason:'shape'};
  const extra=callerGuards(ctx);
  if(!extra)return {ok:false,reason:'shape'};
  const gate=await readAuthority(db);
@@ -429,7 +439,7 @@ export async function completeEffect(source,{snapshotId,effect,receipt},ctx={}){
  let snapshot;
  try{snapshot=await one(db,'SELECT version FROM watchlist_snapshot WHERE snapshot_id=?',[snapshotId]);}catch{return {ok:false,reason:'unavailable'};}
  if(!snapshot)return {ok:false,reason:'shape'};
- const version=Number(snapshot.version),order=EFFECTS.indexOf(effect),earlier=EFFECTS.slice(0,order);
+ const version=Number(snapshot.version),order=ALL_EFFECTS.indexOf(effect),earlier=ALL_EFFECTS.slice(0,order);
  const stamp=iso(ctx.now??Date.now());
  const lowerPending='(SELECT COUNT(*) FROM watchlist_effect e JOIN watchlist_snapshot s ON s.snapshot_id=e.snapshot_id WHERE e.status=\'pending\' AND s.version<?)';
  const earlierPending=earlier.length?'(SELECT COUNT(*) FROM watchlist_effect WHERE snapshot_id=? AND status=\'pending\' AND effect IN ('+earlier.map(()=>'?').join(',')+'))':'0';
@@ -451,7 +461,7 @@ export async function completeEffect(source,{snapshotId,effect,receipt},ctx={}){
 export async function recordEffectAttempt(source,{snapshotId,effect,progress},ctx={}){
  const db=database(source);
  if(!db)return {ok:false,reason:'unavailable'};
- if(typeof snapshotId!=='string'||!EFFECTS.includes(effect))return {ok:false,reason:'shape'};
+ if(typeof snapshotId!=='string'||!ALL_EFFECTS.includes(effect))return {ok:false,reason:'shape'};
  const resume=progress==null?undefined:progress;
  if(resume!==undefined&&(typeof resume!=='string'||!resume||resume.length>200))return {ok:false,reason:'shape'};
  const extra=callerGuards(ctx);
@@ -568,4 +578,121 @@ export async function pruneSnapshots(source,ctx={}){
   removed++;
  }
  return {ok:true,removed};
+}
+
+// ---- the canonical membership projection (ADR 0203, AIR-582, schema 37) ------------------------------------------------------
+// Storage only: the marker of WHO writes `watchlist_film`, the durable non-blocking handoff ledger of Letterboxd ids whose Film is not resolvable yet, and the two guarded steps of the rollout (baseline proof, switch).
+// The writes of `watchlist_film` itself and of its per-film version fence belong to the Film writer (`setFilmMembership`), under the Film/Person marker, never here.
+export const HANDOFF_MAX_ATTEMPTS=12;
+export const HANDOFF_BATCH=50;
+const MEMBERSHIP_CHECK="(SELECT COUNT(*) FROM watchlist_current WHERE id=1 AND version=? AND effects_drained_version=version)";
+// -> {ok:true,present:false} (schema below 37: legacy, the Producer owns membership) | {ok:true,present:true,mode,generation,baselineVersion} | {ok:false}
+export async function readMembershipAuthority(source){
+ const db=database(source);
+ if(!db)return {ok:false};
+ let row;
+ try{row=await one(db,'SELECT mode, generation, baseline_version FROM watchlist_membership_authority WHERE id=1');}
+ catch(error){return /no such table/i.test(String(error?.message||error))?{ok:true,present:false}:{ok:false};}
+ if(!row||(row.mode!=='producer'&&row.mode!=='sync')||!Number.isInteger(Number(row.generation)))return {ok:false};
+ return {ok:true,present:true,mode:row.mode,generation:Number(row.generation),baselineVersion:row.baseline_version==null?null:Number(row.baseline_version)};
+}
+// The current version and the Letterboxd ids of the CURRENT snapshot (the only truth a late reconcile may apply). -> {ok:true,version,snapshotId,lids:Set,effectsDrainedVersion} | {ok:false,reason}
+export async function readCurrentMembers(source){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ try{
+  const pointer=await one(db,CURRENT_SQL);
+  if(!pointer)return {ok:false,reason:'malformed'};
+  const rows=pointer.snapshot_id?await many(db,'SELECT lid FROM watchlist_member WHERE snapshot_id=?',[pointer.snapshot_id]):[];
+  return {ok:true,version:Number(pointer.version),snapshotId:pointer.snapshot_id??null,lids:new Set(rows.map(row=>row.lid)),effectsDrainedVersion:Number(pointer.effects_drained_version)};
+ }catch{return {ok:false,reason:'unavailable'};}
+}
+// Opens (or re-opens) the handoff of ADDED ids that could not be applied now. A pending row keeps its attempts; a settled or terminal one is re-opened by a new addition. -> {ok:true} | {ok:false,reason}
+export async function recordMembershipHandoff(source,{lids,version,reason='unresolved',now=Date.now()},ctx={}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ if(!Array.isArray(lids)||lids.length>HANDOFF_BATCH||lids.some(lid=>typeof lid!=='string'||!lid||lid.length>100)||!Number.isInteger(version)||version<1)return {ok:false,reason:'shape'};
+ if(!lids.length)return {ok:true};
+ const extra=callerGuards(ctx);
+ if(!extra)return {ok:false,reason:'shape'};
+ const gate=await readAuthority(db);
+ if(gate.state!=='d1')return {ok:false,reason:'closed'};
+ if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
+ const stamp=iso(now),why=String(reason).slice(0,60);
+ const outcome=await fenced(db,[authorityGuard(gate.generation),...extra,
+  ...lids.map(lid=>["INSERT INTO watchlist_membership_handoff (lid, first_version, state, attempts, next_retry_at, reason, updated_at) VALUES (?,?,'pending',0,NULL,?,?) ON CONFLICT(lid) DO UPDATE SET state='pending', first_version=excluded.first_version, attempts=0, next_retry_at=NULL, reason=excluded.reason, updated_at=excluded.updated_at WHERE state IN ('settled','terminal')",[lid,version,why,stamp]])]);
+ return outcome==='ok'?{ok:true}:{ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
+}
+// Hands EVERY change row of a version beyond `offset` (in the stored order of `readChanges`: added, then removed) to the durable handoff ledger in ONE set-based statement, without reading, resolving or writing a Film.
+// This is what lets the `membership` effect complete in a bounded number of calls however large a valid version diff is (up to 500 additions, because of the admission ledger cap, and up to 5000 removals), so routine
+// catch-up never starves the next 4/day scan behind the strict drain-before-scan rule. A pending row keeps its state; a settled or terminal one is re-opened. -> {ok:true} | {ok:false,reason}
+export async function handoffVersionRemainder(source,{snapshotId,version,offset,reason='remainder',now=Date.now()},ctx={}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ if(typeof snapshotId!=='string'||!snapshotId||!Number.isInteger(version)||version<1||!Number.isInteger(offset)||offset<0)return {ok:false,reason:'shape'};
+ const extra=callerGuards(ctx);
+ if(!extra)return {ok:false,reason:'shape'};
+ const gate=await readAuthority(db);
+ if(gate.state!=='d1')return {ok:false,reason:'closed'};
+ if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
+ const outcome=await fenced(db,[authorityGuard(gate.generation),...extra,
+  ["INSERT INTO watchlist_membership_handoff (lid, first_version, state, attempts, next_retry_at, reason, updated_at) SELECT lid, ?, 'pending', 0, NULL, ?, ? FROM (SELECT lid FROM watchlist_change WHERE snapshot_id=? ORDER BY kind, COALESCE(ordinal, prev_ordinal) LIMIT -1 OFFSET ?) WHERE true ON CONFLICT(lid) DO UPDATE SET state='pending', first_version=excluded.first_version, attempts=0, next_retry_at=NULL, reason=excluded.reason, updated_at=excluded.updated_at WHERE state IN ('settled','terminal')",[version,String(reason).slice(0,60),iso(now),snapshotId,offset]]]);
+ return outcome==='ok'?{ok:true}:{ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
+}
+// The due pending rows, oldest first. Read only. -> {ok:true,rows:[{lid,firstVersion,attempts,reason}],pending,terminal} | {ok:false,reason}
+export async function dueMembershipHandoffs(source,{now=Date.now(),limit=8}={}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ try{
+  const rows=await many(db,"SELECT lid, first_version, attempts, reason FROM watchlist_membership_handoff WHERE state='pending' AND (next_retry_at IS NULL OR next_retry_at<=?) ORDER BY first_version, lid LIMIT ?",[iso(now),Math.max(1,Math.min(HANDOFF_BATCH,limit))]);
+  const counts=await one(db,"SELECT COALESCE(SUM(state='pending'),0) AS pending, COALESCE(SUM(state='terminal'),0) AS terminal FROM watchlist_membership_handoff");
+  return {ok:true,rows:rows.map(row=>({lid:row.lid,firstVersion:Number(row.first_version),attempts:Number(row.attempts),reason:row.reason??null})),pending:Number(counts?.pending??0),terminal:Number(counts?.terminal??0)};
+ }catch(error){return /no such table/i.test(String(error?.message||error))?{ok:true,rows:[],pending:0,terminal:0}:{ok:false,reason:'unavailable'};}
+}
+// Settles one pending row: `settled` (applied against the current snapshot), `terminal` (bounded attempts spent: waits for the baseline operator or an owner decision, nothing is guessed) or `pending` with a backoff.
+export async function settleMembershipHandoff(source,{lid,state,attempts,nextRetryAt=null,reason=null,now=Date.now()},ctx={}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ if(typeof lid!=='string'||!lid||!['pending','settled','terminal'].includes(state)||!Number.isInteger(attempts)||attempts<0)return {ok:false,reason:'shape'};
+ if(nextRetryAt!==null&&!Number.isFinite(Date.parse(nextRetryAt)))return {ok:false,reason:'shape'};
+ const extra=callerGuards(ctx);
+ if(!extra)return {ok:false,reason:'shape'};
+ const gate=await readAuthority(db);
+ if(gate.state!=='d1')return {ok:false,reason:'closed'};
+ if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
+ const outcome=await fenced(db,[authorityGuard(gate.generation),...extra,
+  ["UPDATE watchlist_membership_handoff SET state=?, attempts=?, next_retry_at=?, reason=?, updated_at=? WHERE lid=? AND state='pending'",[state,attempts,state==='pending'?nextRetryAt:null,reason==null?null:String(reason).slice(0,60),iso(now),lid]]]);
+ return outcome==='ok'?{ok:true}:{ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
+}
+// ROLLOUT STEP 1 (owner GO): records that the one-time baseline reconciliation proved `watchlist_film` equal to Watchlist version `version`. Only while the marker is `producer`, only for the exact current version with every
+// effect drained; the marker row keeps its mode and generation. -> {ok:true} | {ok:false,reason}
+export async function recordMembershipBaseline(source,{version,now=Date.now()},ctx={}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ if(!Number.isInteger(version)||version<0)return {ok:false,reason:'shape'};
+ const extra=callerGuards(ctx);
+ if(!extra)return {ok:false,reason:'shape'};
+ const gate=await readAuthority(db);
+ if(gate.state!=='d1')return {ok:false,reason:'closed'};
+ if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
+ const outcome=await fenced(db,[authorityGuard(gate.generation),...extra,
+  [GUARD("CASE WHEN (SELECT COUNT(*) FROM watchlist_membership_authority WHERE id=1 AND mode='producer')=1 AND "+MEMBERSHIP_CHECK+"=1 THEN 1 ELSE 0 END"),[version]],
+  ["UPDATE watchlist_membership_authority SET baseline_version=?, changed_at=? WHERE id=1 AND mode='producer'",[version,iso(now)]]]);
+ return outcome==='ok'?{ok:true}:{ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
+}
+// ROLLOUT STEP 2 (owner GO): the switch of the writer. Refused unless the marker is `producer` at `expectedGeneration`, the baseline proof names exactly the current version and every effect of it is drained. After it the
+// promotions carry the `membership` effect and the Film writer refuses every Producer membership write. Roll-forward only (there is no switch back in this change). -> {ok:true} | {ok:false,reason}
+export async function activateMembershipSync(source,{expectedGeneration,version,now=Date.now()},ctx={}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ if(!Number.isInteger(expectedGeneration)||expectedGeneration<0||!Number.isInteger(version)||version<1)return {ok:false,reason:'shape'};
+ const extra=callerGuards(ctx);
+ if(!extra)return {ok:false,reason:'shape'};
+ const gate=await readAuthority(db);
+ if(gate.state!=='d1')return {ok:false,reason:'closed'};
+ if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
+ const outcome=await fenced(db,[authorityGuard(gate.generation),...extra,
+  [GUARD("CASE WHEN (SELECT COUNT(*) FROM watchlist_membership_authority WHERE id=1 AND mode='producer' AND generation=? AND baseline_version=?)=1 AND "+MEMBERSHIP_CHECK+"=1 THEN 1 ELSE 0 END"),[expectedGeneration,version,version]],
+  ["UPDATE watchlist_membership_authority SET mode='sync', generation=generation+1, changed_at=? WHERE id=1 AND mode='producer' AND generation=?",[iso(now),expectedGeneration]]]);
+ return outcome==='ok'?{ok:true}:{ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
 }

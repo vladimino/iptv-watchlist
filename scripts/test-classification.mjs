@@ -625,6 +625,9 @@ export const FILES={
  "watchlist-d1.mjs": {
   "suite": "core"
  },
+ "watchlist-membership.mjs": {
+  "suite": "core"
+ },
  "watchlist-routes.mjs": {
   "suite": "core"
  },

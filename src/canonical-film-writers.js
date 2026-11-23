@@ -256,6 +256,10 @@ export async function writeFilmFacts(env,input){
  fenced.text(input.requestId);
  const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});
  const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
+ // ADR 0203 (AIR-582): once the membership marker says `sync`, the Letterboxd Sync `membership` effect is the ONLY writer of `watchlist_film`. A facts input that still carries `watchlist` (set, clear or release) is refused
+ // here, at the writer every Producer path goes through, so a stale plan or a receipt replay can never become a second writer. The marker is also re-asserted INSIDE the batch below while it is `producer`.
+ const membership=input.watchlist!==undefined?await membershipMarker(env):{present:false};
+ if(membership.present&&membership.mode==='sync')throw failed('film_person_membership_owned');
  const snapshot=await readFilmSnapshot(env,id);
  const plan=planFilmFacts(snapshot,input);
  // `requireExisting: true` (AIR-374 P3a, ADR 0127): a producer that must NEVER create a Film. Checked here against the read AND again inside the fenced batch below, so a Film deleted after this read fails the whole batch (receipt tail
@@ -266,6 +270,7 @@ export async function writeFilmFacts(env,input){
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
  if(input.requireExisting===true)statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?)'),[id]]);
+ if(membership.present)statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM watchlist_membership_authority WHERE id=1 AND mode='producer')"),[]]);
  // AIR-572: caller-supplied proof conditions (the Producer's Letterboxd claim / owner / redirect proof of this Film target), asserted INSIDE the same
  // fenced batch, so a claim or redirect that changed after the plan fails the whole batch (receipt tail included) and nothing is written. Same shape and
  // bound as mutateFilm: at most 12, internal code only. Not part of the content digest.
@@ -285,4 +290,66 @@ export async function filmFactsPresent(db,input){
   const snapshot=await readFilmSnapshot(db,input.id);
   return !snapshot.redirect&&planFilmFacts(snapshot,input).noop;
  }catch{return false;}
+}
+
+
+// ---- ADR 0203 (AIR-582): the canonical membership projection of the Letterboxd Sync ------------------------------------------
+// The marker row of schema 37; an absent table is the legacy state (the Producer owns membership). A storage error other than an absent table fails closed (it throws), never "legacy".
+export async function membershipMarker(env){
+ const db=database(env);
+ if(!db)throw failed('film_person_unavailable');
+ try{
+  const row=await one(db,'SELECT mode,generation,baseline_version FROM watchlist_membership_authority WHERE id=1');
+  if(!row||(row.mode!=='producer'&&row.mode!=='sync'))throw failed('film_person_unavailable');
+  return {present:true,mode:row.mode,generation:Number(row.generation),baselineVersion:row.baseline_version==null?null:Number(row.baseline_version)};
+ }catch(error){
+  if(error?.code)throw error;
+  if(/no such table/i.test(String(error?.cause?.message||error?.message||error)))return {present:false};
+  throw failed('film_person_unavailable',error);
+ }
+}
+
+// The fenced write of ONE Film's membership by the Letterboxd Sync (the single writer once the marker is `sync`). It never creates a Film, never touches identity, metadata or credits, and refuses a redirected Film.
+// The per-film VERSION FENCE (watchlist_film_fence) lives in the same batch: a write for Watchlist version V is applied only while no newer version was applied for the Film, so a late effect V can never land over V+1
+// (add -> remove -> add included); the fence row is kept after a removal as a tombstone. An equal version is an idempotent replay. `guards` are the resolver's proofs (claim / owner / redirect), asserted in the batch too.
+// input: {id, member:boolean, version, at, expectedRevision?, guards?, baseline?:true} -> {id, written:boolean, reason?:'stale'|'unchanged', revision}
+export async function setFilmMembership(env,input){
+ const id=fenced.filmId(input?.id),at=fenced.text(input.at);
+ if(typeof input.member!=='boolean'||!Number.isInteger(input.version)||input.version<1)throw failed('film_person_invalid');
+ const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
+ const marker=await membershipMarker(env);
+ // `baseline: true` is the ONE-TIME baseline reconciliation (ADR 0203): it may also run while the marker is still `producer` (before the owner's switch, with the Producer held); every other caller needs `sync`.
+ if(!marker.present||(marker.mode!=='sync'&&!(input.baseline===true&&marker.mode==='producer')))throw failed('film_person_membership_closed');
+ const db=database(env);
+ let film,redirect,revision,fence,member;
+ try{
+  [film,redirect,revision,fence,member]=await Promise.all([
+   one(db,'SELECT id FROM film WHERE id=?',[id]),
+   one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]),
+   one(db,'SELECT revision FROM canonical_revision WHERE kind=? AND id=?',['film',id]),
+   one(db,'SELECT version,member FROM watchlist_film_fence WHERE film_id=?',[id]),
+   one(db,'SELECT 1 AS present FROM watchlist_film WHERE film_id=?',[id]),
+  ]);
+ }catch(error){throw failed('film_person_unavailable',error);}
+ if(!film)throw failed('film_person_precondition');
+ if(redirect)throw failed('film_person_redirect');
+ const expected=input.expectedRevision===undefined?Number(revision?.revision??0):fenced.revisionOf(input.expectedRevision);
+ if(fence&&Number(fence.version)>input.version)return {id,written:false,reason:'stale',revision:expected};
+ // Equal version and the same stored state: nothing to write (a replay, or the reconcile of an already applied version).
+ if(fence&&Number(fence.version)===input.version&&Number(fence.member)===(input.member?1:0)&&!!member===input.member)return {id,written:false,reason:'unchanged',revision:expected};
+ if(input.guards!==undefined&&(!Array.isArray(input.guards)||input.guards.length>12||input.guards.some(guard=>!guard||typeof guard.sql!=='string'||!guard.sql||!Array.isArray(guard.params)||guard.params.some(value=>value===undefined))))throw failed('film_person_invalid');
+ const entities=[{kind:'film',id,expected:expected}];
+ const statements=fenced.head(gate,entities);
+ statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]);
+ statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM watchlist_membership_authority WHERE id=1 AND mode=? AND generation=?)"),[marker.mode,marker.generation]]);
+ for(const guard of input.guards||[])statements.push([fenced.assertSql(guard.sql),guard.params]);
+ // The version fence: refused (the whole batch rolls back) when a NEWER version was applied after the read above.
+ statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM watchlist_film_fence WHERE film_id=? AND version>?)'),[id,input.version]]);
+ statements.push(['INSERT INTO watchlist_film_fence (film_id,version,member,updated_at) VALUES (?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET version=excluded.version,member=excluded.member,updated_at=excluded.updated_at',[id,input.version,input.member?1:0,at]]);
+ statements.push(input.member
+  ?['INSERT INTO watchlist_film (film_id,updated_at) VALUES (?,?) ON CONFLICT(film_id) DO UPDATE SET updated_at=excluded.updated_at',[id,at]]
+  :['DELETE FROM watchlist_film WHERE film_id=?',[id]]);
+ statements.push([fenced.BUMP,['film',id,at]]);
+ await fenced.commit(env,gate,statements,entities,undefined);
+ return {id,written:true,revision:expected+1,member:input.member};
 }
