@@ -352,8 +352,203 @@ fs.unlinkSync(me);`;
       assert.doesNotMatch(result.stdout, /ok   f/);
     }
   }
+
+// AIR-583. Each run owns one temporary root (iptv-run-*) inside the OS temp directory, hands it to its files as TMPDIR/TMP/TEMP and deletes exactly it as the
+// last step: after a pass, a failure, a timeout, a handled SIGTERM and an early failure of `--suite all`, keeping exit code and output. Foreign directories and
+// files, a symlink that points outside, other concurrent runs and an IPTV_TEST_KEEP_TMP root are never removed. All of it runs the real runner on synthetic files.
+{
+  const base = path.join(root, 'temp-base');
+  fs.mkdirSync(base);
+  const foreignDir = path.join(base, 'iptv-foreign-dir');
+  const foreignFile = path.join(base, 'old-file.tmp');
+  fs.mkdirSync(foreignDir);
+  fs.writeFileSync(path.join(foreignDir, 'keep.txt'), 'foreign');
+  fs.writeFileSync(foreignFile, 'old');
+  const outside = path.join(root, 'outside-target');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'precious.txt'), 'precious');
+  const left = () => fs.readdirSync(base).filter(name => name.startsWith('iptv-run-'));
+  const foreignIntact = () => {
+    assert.equal(fs.readFileSync(path.join(foreignDir, 'keep.txt'), 'utf8'), 'foreign', 'a foreign directory beside the run root is untouched');
+    assert.equal(fs.readFileSync(foreignFile, 'utf8'), 'old', 'a pre-existing temp file is untouched');
+    assert.equal(fs.readFileSync(path.join(outside, 'precious.txt'), 'utf8'), 'precious', 'a symlink target outside the root is untouched');
+  };
+  const env = {TMPDIR: base, OUTSIDE: outside};
+  // writes into os.tmpdir(), through a nested directory, a sqlite-like file and a symlink out of the root
+  const writer = (after) => `
+    import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import {spawnSync} from 'node:child_process';
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'iptv-fixture-'));
+    fs.mkdirSync(path.join(dir, 'nested'));
+    fs.writeFileSync(path.join(dir, 'nested', 'db.sqlite'), 'x'.repeat(1000));
+    fs.symlinkSync(process.env.OUTSIDE, path.join(dir, 'escape'));
+    spawnSync(process.execPath, ['-e', "require('fs').writeFileSync(require('path').join(require('os').tmpdir(), 'from-child.tmp'), 'c')"]);
+    console.log('TMP=' + os.tmpdir() + ' ROOT=' + process.env.IPTV_TEST_RUN_ROOT);
+    ${after}`;
+  const rootOf = out => /ROOT=(\S+)/.exec(out)[1];
+
+  // pass: the child sees the root through TMPDIR, TMP and TEMP, and it is gone afterwards
+  let result = await run(['--dir', suite({'p.mjs': writer('')}), '--jobs', '1'], env);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /TMP=\S+\/iptv-run-\w+ ROOT=\S+\/iptv-run-\w+/);
+  assert.equal(path.dirname(rootOf(result.stdout)), fs.realpathSync(base), 'the root is created inside the OS temp directory');
+  assert.match(result.stdout, /Temporary root removed: [1-9]\d* files, [1-9]\d* bytes\./);
+  assert.deepEqual(left(), [], 'nothing of a passing run is left');
+  foreignIntact();
+  for (const variable of ['TMP', 'TEMP']) {
+    const echo = suite({'e.mjs': `console.log('V=' + (process.env.${variable} === process.env.TMPDIR && process.env.TMPDIR === process.env.IPTV_TEST_RUN_ROOT));`});
+    result = await run(['--dir', echo], env);
+    assert.match(result.stdout, /V=true/, variable);
+  }
+
+  // failure: exit code, FAIL line and the child's stderr are kept, the root is removed
+  result = await run(['--dir', suite({'f.mjs': writer("console.error('boom-detail'); process.exit(3);")})], env);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /FAIL f\.mjs .*exit code 3/);
+  assert.match(result.stderr, /boom-detail/);
+  assert.match(result.stdout, /Temporary root removed/);
+  assert.deepEqual(left(), [], 'nothing of a failing run is left');
+  foreignIntact();
+
+  // per-file timeout: the hanging file is killed, the failure is named, the root is removed
+  result = await run(['--dir', suite({'t.mjs': writer('setInterval(() => {}, 1000);')}), '--timeout-ms', '1500'], env);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /FAIL t\.mjs .*timed out after 1500ms/);
+  assert.deepEqual(left(), [], 'nothing of a timed-out run is left');
+  foreignIntact();
+
+  // handled SIGTERM: exit 143, the running file is stopped, the root is removed
+  {
+    const marker = path.join(root, 'sigterm-started');
+    const dir = suite({'h.mjs': writer("fs.writeFileSync(process.env.MARKER, String(process.pid)); setInterval(() => {}, 1000);")});
+    const child = spawn(process.execPath, [runner, '--dir', dir], {stdio: ['ignore', 'pipe', 'pipe'], env: {...process.env, ...env, MARKER: marker}});
+    let stderr = '';
+    child.stderr.on('data', chunk => {stderr += chunk;});
+    const closed = new Promise(resolve => child.on('close', (code, signal) => resolve({code, signal})));
+    for (let i = 0; i < 100 && !fs.existsSync(marker); i++) await sleep(100);
+    assert.ok(fs.existsSync(marker), 'the file started');
+    const filePid = Number(fs.readFileSync(marker, 'utf8'));
+    child.kill('SIGTERM');
+    const end = await closed;
+    assert.equal(end.code, 143, stderr);
+    assert.match(stderr, /Interrupted by SIGTERM/);
+    for (let i = 0; i < 50 && alive(filePid); i++) await sleep(100);
+    assert.equal(alive(filePid), false, 'the running file was stopped');
+    assert.deepEqual(left(), [], 'nothing of an interrupted run is left');
+    foreignIntact();
+  }
+
+  // a signal sent to the --suite all wrapper reaches the running stage: files stopped, root removed, 130/143 kept, no second stage
+  for (const [signal, expected] of [['SIGTERM', 143], ['SIGINT', 130]]) {
+    const marker = path.join(root, 'all-' + signal);
+    const dir = suite({'h.mjs': writer("fs.writeFileSync(process.env.MARKER, String(process.pid)); setInterval(() => {}, 1000);")});
+    const child = spawn(process.execPath, [runner, '--dir', dir, '--suite', 'all'], {stdio: ['ignore', 'pipe', 'pipe'], env: {...process.env, ...env, MARKER: marker}});
+    let stderr = '';
+    child.stderr.on('data', chunk => {stderr += chunk;});
+    const closed = new Promise(resolve => child.on('close', (code, sig) => resolve({code, sig})));
+    for (let i = 0; i < 100 && !fs.existsSync(marker); i++) await sleep(100);
+    assert.ok(fs.existsSync(marker), signal + ': the file started');
+    const filePid = Number(fs.readFileSync(marker, 'utf8'));
+    child.kill(signal);
+    const end = await closed;
+    assert.equal(end.code, expected, `${signal}: ${stderr}`);
+    for (let i = 0; i < 50 && alive(filePid); i++) await sleep(100);
+    assert.equal(alive(filePid), false, signal + ': the running file of the active stage was stopped');
+    assert.deepEqual(left(), [], signal + ': nothing of an interrupted --suite all is left');
+    foreignIntact();
+  }
+
+  // a file that ignores SIGTERM: the runner waits the grace period, kills its group and only then removes the root
+  {
+    const marker = path.join(root, 'stubborn-started');
+    const dir = suite({'x.mjs': writer("process.on('SIGTERM', () => {}); fs.writeFileSync(process.env.MARKER, String(process.pid)); setInterval(() => {}, 1000);")});
+    const child = spawn(process.execPath, [runner, '--dir', dir], {stdio: ['ignore', 'pipe', 'pipe'], env: {...process.env, ...env, MARKER: marker}});
+    let stderr = '';
+    child.stderr.on('data', chunk => {stderr += chunk;});
+    const closed = new Promise(resolve => child.on('close', (code, sig) => resolve({code, sig})));
+    for (let i = 0; i < 100 && !fs.existsSync(marker); i++) await sleep(100);
+    assert.ok(fs.existsSync(marker), 'the stubborn file started');
+    const filePid = Number(fs.readFileSync(marker, 'utf8'));
+    child.kill('SIGTERM');
+    await sleep(500);
+    assert.ok(alive(filePid), 'the stubborn file survives SIGTERM');
+    assert.equal(left().length, 1, 'the root is not removed while its writer is alive');
+    const end = await closed;
+    assert.equal(end.code, 143, stderr);
+    assert.equal(alive(filePid), false, 'the stubborn file was killed');
+    assert.deepEqual(left(), [], 'the root is removed after the forced kill');
+    foreignIntact();
+  }
+
+  // --suite all: an early failure of the core stage still removes its root, and a passing run removes both stages' roots
+  result = await run(['--dir', suite({'a.mjs': writer('process.exit(1);')}), '--suite', 'all'], env);
+  assert.equal(result.code, 1);
+  assert.deepEqual(left(), [], 'nothing of a failing --suite all is left');
+  result = await run(['--dir', suite({'a.mjs': writer('')}), '--suite', 'all'], env);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(left(), [], 'nothing of a passing --suite all is left');
+
+  // two independent runs at the same time never share or delete each other's root
+  {
+    const keeper = `import fs from 'node:fs'; import path from 'node:path'; const file = path.join(process.env.TMPDIR, 'mine-' + process.pid); fs.writeFileSync(file, 'x');
+      await new Promise(resolve => setTimeout(resolve, 1500)); if (!fs.existsSync(file)) {console.error('my file was removed by another run'); process.exit(1);} console.log('ROOT=' + process.env.IPTV_TEST_RUN_ROOT);`;
+    const [one, two] = await Promise.all([run(['--dir', suite({'k.mjs': keeper})], env), run(['--dir', suite({'k.mjs': keeper})], env)]);
+    assert.equal(one.code, 0, one.stderr);
+    assert.equal(two.code, 0, two.stderr);
+    assert.notEqual(rootOf(one.stdout), rootOf(two.stdout), 'each run has its own root');
+    assert.deepEqual(left(), [], 'nothing of two concurrent runs is left');
+    foreignIntact();
+  }
+
+  // --serial and a shard take the same path
+  result = await run(['--dir', suite({'s1.mjs': writer(''), 's2.mjs': writer('')}), '--serial'], env);
+  assert.equal(result.code, 0, result.stderr);
+  result = await run(['--dir', suite({'s1.mjs': writer(''), 's2.mjs': writer('')}), '--shard', '1/2'], env);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(left(), [], 'nothing of a serial or sharded run is left');
+
+  // IPTV_TEST_REPORT records the cleanup, the step summary shows it
+  {
+    const report = path.join(root, 'report.json'), summary = path.join(root, 'summary.md');
+    result = await run(['--dir', suite({'r.mjs': writer('')})], {...env, IPTV_TEST_REPORT: report, GITHUB_STEP_SUMMARY: summary});
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(fs.readFileSync(report, 'utf8'));
+    assert.equal(parsed.cleanup.removed, true);
+    assert.ok(parsed.cleanup.files >= 3 && parsed.cleanup.bytes >= 1000);
+    assert.match(fs.readFileSync(summary, 'utf8'), /Temporary root removed/);
+  }
+
+  // opt-in retention: the root stays (and is reported), the operator removes it
+  result = await run(['--dir', suite({'k.mjs': writer('')})], {...env, IPTV_TEST_KEEP_TMP: '1'});
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /Temporary root kept \(IPTV_TEST_KEEP_TMP=1\)/);
+  assert.equal(left().length, 1, 'the retained root is there');
+  fs.rmSync(path.join(base, left()[0]), {recursive: true, force: true});
+  foreignIntact();
+
+  // the helpers directly: a root that is a symlink, or outside its parent, or not named iptv-run-*, is refused and nothing is deleted
+  {
+    const {createRunRoot, removeRunRoot, measureTree} = await import('../scripts/run-tests.mjs');
+    const made = createRunRoot(base);
+    assert.equal(made.parent, fs.realpathSync(base));
+    fs.writeFileSync(path.join(made.root, 'a'), 'abc');
+    fs.symlinkSync(outside, path.join(made.root, 'link'));
+    assert.deepEqual(measureTree(made.root), {files: 2, bytes: 3 + fs.lstatSync(path.join(made.root, 'link')).size}, 'a symlink is one entry and is not followed');
+    assert.equal(removeRunRoot({parent: made.parent, root: foreignDir}).removed, false, 'a directory that is not a run root is refused');
+    assert.equal(removeRunRoot({parent: made.parent, root: path.join(base, '..', 'outside-target')}).removed, false, 'a directory outside the parent is refused');
+    const linkRoot = path.join(base, 'iptv-run-link');
+    fs.symlinkSync(outside, linkRoot);
+    assert.equal(removeRunRoot({parent: made.parent, root: linkRoot}).removed, false, 'a run root that became a symlink is refused');
+    assert.ok(fs.existsSync(path.join(outside, 'precious.txt')), 'the symlink target survived');
+    fs.unlinkSync(linkRoot);
+    const done = removeRunRoot(made);
+    assert.equal(done.removed, true);
+    assert.equal(fs.existsSync(made.root), false);
+    assert.equal(removeRunRoot(made).removed, true, 'removing twice is harmless');
+    foreignIntact();
+  }
+}
 } finally {
   fs.rmSync(root, {recursive: true, force: true});
 }
 
-console.log('Test runner: output kept per file, exit code, signal and timeout named, no new file after a failure, no orphan, bounded concurrency, serial-only files alone, name order with --serial, shards that cover the suite once and bad options refused passed');
+console.log('Test runner: output kept per file, exit code, signal and timeout named, no new file after a failure, no orphan, bounded concurrency, serial-only files alone, name order with --serial, shards that cover the suite once and bad options refused, and a per-run temporary root removed after pass, failure, timeout, SIGTERM and --suite all without touching foreign files or symlink targets passed');
