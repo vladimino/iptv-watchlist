@@ -249,3 +249,95 @@ export function membershipBaseline(deps){
   }
  };
 }
+
+// ---- the owner-only operator of the baseline apply and the writer switch (ADR 0203 rollout steps 2 and 3; AIR-572) ----------------------------------------------
+// One handler behind the owner-only MCP tool `watchlist_membership_operator` (the /mcp endpoint is Cloudflare Access with the Worker's own owner JWT check). It adds NO writer and NO SQL: it calls the existing
+// `membershipBaseline().apply` (at most `limit` Film membership changes per call, idempotent, version-fenced) and `repository.activateMembershipSync` (guarded switch), under the Letterboxd Sync epoch fence the
+// effects use. Inert without a call. `mode` defaults to `status`; only an explicit `baseline_apply` or `switch` with `confirmGo: true` and the expected pins read from a status call can write.
+//   status            read-only: marker, current Watchlist version and drain, the Sync epoch, the Producer hold and its non-terminal chains, and what a switch would need.
+//   baseline_dry_run  read-only counts of the baseline plan (the same planner the apply uses).
+//   baseline_apply    confirmGo, expectedVersion, expectedMarkerGeneration: one bounded apply; records the baseline proof only when nothing remains for the exact version read with that version fully drained.
+//   switch            confirmGo, expectedVersion, expectedMarkerGeneration: marker `producer` at the expected generation, proof equal to the current drained version, the Producer delivery hold ON and no non-terminal
+//                     Producer chain, then the guarded switch to `sync` (roll-forward only).
+// deps: repository (readMembershipAuthority, readCurrentMembers, recordMembershipHandoff, recordMembershipBaseline, activateMembershipSync), resolve, setMembership, readStored, epochGuard(epoch), fenceEnv(env,epoch),
+// readSyncEpoch(env) -> {ok, mode, epoch}, producerState(env) -> {ok, held, nonTerminal}, now() -> ms.
+export const MEMBERSHIP_OPERATOR_MODES=Object.freeze(['status','baseline_dry_run','baseline_apply','switch']);
+export function membershipOperator(deps){
+ const {repository,readSyncEpoch,producerState,now=()=>Date.now(),limit=25}=deps;
+ const baseline=membershipBaseline({...deps,limit});
+ const reply=(status,body)=>({status,body});
+ const pin=value=>Number.isInteger(value)&&value>=0;
+ async function snapshot(env){
+  const [marker,current,sync,producer]=await Promise.all([
+   repository.readMembershipAuthority(env).catch(()=>({ok:false})),
+   repository.readCurrentMembers(env).catch(()=>({ok:false})),
+   readSyncEpoch(env).catch(()=>({ok:false})),
+   producerState(env).catch(()=>({ok:false}))]);
+  return {marker,current,sync,producer};
+ }
+ const view=s=>({
+  marker:s.marker.ok&&s.marker.present?{mode:s.marker.mode,generation:s.marker.generation,baselineVersion:s.marker.baselineVersion}:null,
+  watchlist:s.current.ok?{version:s.current.version,drainedVersion:s.current.effectsDrainedVersion,drained:s.current.effectsDrainedVersion>=s.current.version}:null,
+  sync:s.sync.ok?{mode:s.sync.mode,epoch:s.sync.epoch}:null,
+  producer:s.producer.ok?{held:s.producer.held===true,nonTerminalChains:s.producer.nonTerminal}:null,
+ });
+ // The reasons a write is refused before any statement. Every pin is re-read here, right before the write; the batches assert the rest themselves.
+ function refusal(s,{expectedVersion,expectedMarkerGeneration},forSwitch){
+  if(!s.marker.ok||!s.marker.present)return 'schema_absent';
+  if(!s.current.ok)return 'watchlist_unreadable';
+  if(!s.sync.ok||s.sync.mode!=='cloudflare'||!Number.isInteger(s.sync.epoch))return 'sync_not_cloudflare';
+  if(s.marker.mode!=='producer')return 'already_switched';
+  if(s.marker.generation!==expectedMarkerGeneration)return 'marker_generation_moved';
+  if(s.current.version!==expectedVersion)return 'version_moved';
+  if(s.current.effectsDrainedVersion<s.current.version)return 'effects_pending';
+  if(forSwitch){
+   if(s.marker.baselineVersion!==expectedVersion)return 'baseline_not_proved';
+   if(!s.producer.ok)return 'producer_unreadable';
+   if(s.producer.held!==true)return 'producer_not_held';
+   if(s.producer.nonTerminal!==0)return 'producer_chain_open';
+  }
+  return null;
+ }
+ return async function handle(env,args={}){
+  if(!args||typeof args!=='object'||Array.isArray(args))return reply(400,{ok:false,reason:'invalid'});
+  const mode=args.mode===undefined?'status':args.mode;
+  if(!MEMBERSHIP_OPERATOR_MODES.includes(mode))return reply(400,{ok:false,reason:'invalid_mode'});
+  if(args.confirmGo!==undefined&&typeof args.confirmGo!=='boolean')return reply(400,{ok:false,reason:'invalid_confirm'});
+  if(mode==='status'){
+   const s=await snapshot(env);
+   const v=view(s);
+   return reply(200,{ok:true,mode,sideEffects:'none',...v,expect:v.marker&&v.watchlist?{expectedVersion:v.watchlist.version,expectedMarkerGeneration:v.marker.generation}:null});
+  }
+  if(mode==='baseline_dry_run'){
+   const out=await baseline.dryRun({env});
+   return out.ok?reply(200,{ok:true,mode,sideEffects:'none',version:out.version,decision:out.decision,counts:out.counts}):reply(409,{ok:false,mode,reason:out.reason,...(out.version!=null?{version:out.version}:{})});
+  }
+  if(args.confirmGo!==true)return reply(400,{ok:false,mode,reason:'confirm_required',writes:0});
+  if(!pin(args.expectedVersion)||args.expectedVersion<1)return reply(400,{ok:false,mode,reason:'invalid_expected_version',writes:0});
+  if(!pin(args.expectedMarkerGeneration))return reply(400,{ok:false,mode,reason:'invalid_expected_marker_generation',writes:0});
+  const s=await snapshot(env);
+  const refused=refusal(s,args,mode==='switch');
+  if(refused)return reply(409,{ok:false,mode,reason:refused,writes:0,...view(s)});
+  const epoch=s.sync.epoch;
+  if(mode==='baseline_apply'){
+   const out=await baseline.apply({env,epoch,now});
+   if(!out.ok)return reply(409,{ok:false,mode,reason:out.reason,writes:out.written??0,...(out.failed!=null?{failed:out.failed}:{})});
+   return reply(200,{ok:true,mode,version:out.version,decision:out.decision,written:out.written,failed:out.failed,remaining:out.remaining,unresolved:out.unresolved,...(out.reason?{reason:out.reason}:{})});
+  }
+  const switched=await repository.activateMembershipSync(env,{expectedGeneration:args.expectedMarkerGeneration,version:args.expectedVersion,now:now()},{guards:[deps.epochGuard(epoch)]});
+  if(!switched.ok)return reply(409,{ok:false,mode,reason:switched.reason,writes:0});
+  const after=await snapshot(env);
+  return reply(200,{ok:true,mode,switched:true,...view(after)});
+ };
+}
+// The two read ports of the operator, as plain bounded reads (one row each), so the Worker and the tests use the same SQL. A chain is NON-TERMINAL while it can still write: pending, active, released, or
+// stopped with an automatically recoverable class (the hourly reconcile would reopen it once the hold is lifted). `held` is the Producer's static delivery hold, passed in by the Worker.
+export const PRODUCER_OPEN_CHAINS_SQL="SELECT COUNT(*) AS n FROM canonical_producer_chain WHERE owner_state IN ('pending','active','released') OR (owner_state='stopped' AND recovery_class IN ('transient','receipt','authority'))";
+export function operatorReads({held}){
+ const first=async(env,sql)=>(await env.DB.prepare(sql).bind().first())??null;
+ return {
+  readSyncEpoch:async env=>{const row=await first(env,'SELECT mode, epoch FROM letterboxd_sync_mode WHERE id=1');return row?{ok:true,mode:row.mode,epoch:Number(row.epoch)}:{ok:false};},
+  producerState:async env=>{const row=await first(env,PRODUCER_OPEN_CHAINS_SQL);return {ok:true,held:held()===true,nonTerminal:Number(row?.n??0)};},
+  readStored:async env=>((await env.DB.prepare('SELECT film_id FROM watchlist_film').bind().all()).results||[]).map(row=>row.film_id),
+ };
+}

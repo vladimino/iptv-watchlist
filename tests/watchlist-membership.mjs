@@ -6,10 +6,12 @@
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';
 import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-session.mjs';
 import * as Watchlist from '../src/watchlist-d1.js';
+import {FENCE_GUARD_SQL,fencedEnv} from '../src/letterboxd-sync.js';
+import * as ProducerChain from '../src/canonical-producer-chain.js';
 import {setFilmMembership,writeFilmFacts,membershipMarker} from '../src/canonical-film-writers.js';
 import {resolveSourceIdentitiesEach,filmFactsOf} from '../src/canonical-producer-workflow.js';
 import {watchlistRepository} from '../src/letterboxd-sync-repository.js';import {watchlistPhase} from '../src/letterboxd-sync-watchlist.js';
-import {membershipEffect,membershipReconcile,membershipBaseline,planBaseline,resolveInChunks,RESOLVE_CHUNK,MEMBERSHIP_EFFECT_MAX_ATTEMPTS,HANDOFF_MAX_ATTEMPTS} from '../src/watchlist-membership.js';
+import {membershipOperator,operatorReads,PRODUCER_OPEN_CHAINS_SQL,membershipEffect,membershipReconcile,membershipBaseline,planBaseline,resolveInChunks,RESOLVE_CHUNK,MEMBERSHIP_EFFECT_MAX_ATTEMPTS,HANDOFF_MAX_ATTEMPTS} from '../src/watchlist-membership.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-watchlist-membership-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -523,6 +525,136 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
  assert.match(pw,/membershipOwned\?undefined:true/);assert.match(pw,/departed=membershipOwned\?\[\]/);
  // the delivery hold is untouched by this change
  assert.match(pw,/export const PRODUCER_DELIVERY_HOLD=true;/);
+}
+// ===== 10. AIR-572: the owner-only operator (MCP tool watchlist_membership_operator) over the REAL ports and the REAL Letterboxd Sync epoch fence =====
+{
+ const syncMode=(file,epoch=5,mode='cloudflare')=>sqlite(file,"INSERT INTO letterboxd_sync_mode (id,mode,target,from_mode,epoch,drain,quarantine_reason,quarantined_at,changed_at,revision,write_id) VALUES (1,'"+mode+"',NULL,NULL,"+epoch+",NULL,NULL,NULL,'"+T+"',1,'w-test')");
+ const operatorOf=(extra={})=>{
+  const reads=operatorReads({held:()=>extra.held??true});
+  return membershipOperator({repository:Watchlist,resolve:(env,lids)=>resolveSourceIdentitiesEach(env,lids),setMembership:(env,input)=>setFilmMembership(env,input),
+   epochGuard:epoch=>[FENCE_GUARD_SQL,[epoch]],fenceEnv:(env,epoch)=>fencedEnv(env,epoch),now:()=>NOW,...reads,...extra});
+ };
+ // A Watchlist at version 1 with drift: lb1 kept, lb2 and lb3 missing, lb9 stale, lb4 without a Film.
+ const world=async({epoch=5,mode='cloudflare'}={})=>{
+  const made=open('producer');
+  for(const i of [1,2,3])addFilm(made.file,'lb'+i);
+  addFilm(made.file,'lb9',{claim:false});
+  await publish(made,list(1,2,3,4));await completeLegacy(made);
+  sqlite(made.file,"INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:lb1','"+T+"'),('film:lb9','"+T+"');");
+  if(mode)syncMode(made.file,epoch,mode);
+  return made;
+ };
+ const pins={expectedVersion:1,expectedMarkerGeneration:0};
+ const marker=async made=>Watchlist.readMembershipAuthority(made.env);
+
+ // No invocation, status and dry run: nothing is written.
+ {
+  const made=await world();const before=made.env.DB.calls.batches;
+  const operator=operatorOf();
+  assert.equal(made.env.DB.calls.batches,before,'building the operator writes nothing');
+  const status=await operator(made.env,{});
+  assert.equal(status.status,200);assert.equal(status.body.mode,'status');assert.equal(status.body.sideEffects,'none');
+  assert.deepEqual(status.body.marker,{mode:'producer',generation:0,baselineVersion:null});
+  assert.deepEqual(status.body.watchlist,{version:1,drainedVersion:1,drained:true});
+  assert.deepEqual(status.body.sync,{mode:'cloudflare',epoch:5});
+  assert.deepEqual(status.body.producer,{held:true,nonTerminalChains:0});
+  assert.deepEqual(status.body.expect,pins);
+  const dry=await operator(made.env,{mode:'baseline_dry_run'});
+  assert.deepEqual(dry.body,{ok:true,mode:'baseline_dry_run',sideEffects:'none',version:1,decision:'drift',counts:{current:4,stored:2,add:2,remove:1,keep:1,unresolved:1}});
+  assert.equal(made.env.DB.calls.batches,before,'status and dry run open no batch');assert.deepEqual(members(made.file),['film:lb1','film:lb9']);
+  // A write mode without confirmGo or with a bad pin, or an unknown mode, refuses before any read of the plan and writes nothing.
+  for(const [args,reason] of [[{mode:'baseline_apply',...pins},'confirm_required'],[{mode:'switch',...pins},'confirm_required'],[{mode:'baseline_apply',confirmGo:true,expectedMarkerGeneration:0},'invalid_expected_version'],
+   [{mode:'baseline_apply',confirmGo:true,expectedVersion:1},'invalid_expected_marker_generation'],[{mode:'apply'},'invalid_mode'],[{mode:'status',confirmGo:'yes'},'invalid_confirm']]){
+   const out=await operator(made.env,args);assert.equal(out.body.ok,false);assert.equal(out.body.reason,reason,JSON.stringify(args));
+  }
+  assert.equal(made.env.DB.calls.batches,before,'refused calls write nothing');
+ }
+ // Baseline: bounded partial apply, repeat, proof; the unresolved id goes to the durable handoff; then the switch.
+ {
+  const made=await world();const operator=operatorOf({limit:1});
+  const a1=await operator(made.env,{mode:'baseline_apply',confirmGo:true,...pins});
+  assert.deepEqual([a1.status,a1.body.decision,a1.body.written,a1.body.remaining,a1.body.unresolved],[200,'partial',1,2,1],'one Film per call');
+  assert.equal((await marker(made)).baselineVersion,null,'no proof while changes remain');
+  const a2=await operator(made.env,{mode:'baseline_apply',confirmGo:true,...pins});assert.equal(a2.body.decision,'partial');
+  const early=await operator(made.env,{mode:'switch',confirmGo:true,...pins});
+  assert.deepEqual([early.status,early.body.reason,early.body.writes],[409,'baseline_not_proved',0],'no switch before the proof');
+  const a3=await operator(made.env,{mode:'baseline_apply',confirmGo:true,...pins});
+  assert.deepEqual([a3.body.decision,a3.body.remaining],['baseline_recorded',0]);
+  assert.deepEqual(members(made.file),['film:lb1','film:lb2','film:lb3'],'drift removed, missing added, the unresolved lb4 not guessed');
+  assert.deepEqual(handoff(made.file).map(row=>[row.lid,row.reason]),[['lb4','baseline_unresolved']]);
+  assert.equal((await marker(made)).baselineVersion,1);
+  const again=await operator(made.env,{mode:'baseline_apply',confirmGo:true,...pins});
+  assert.deepEqual([again.body.decision,again.body.written],['baseline_recorded',0],'idempotent: a repeat writes no Film');
+  // switch refusals, each with zero writes
+  const notHeld=await operatorOf({held:false})(made.env,{mode:'switch',confirmGo:true,...pins});
+  assert.deepEqual([notHeld.body.reason,notHeld.body.writes],['producer_not_held',0]);
+  const openChain=await operatorOf({producerState:async()=>({ok:true,held:true,nonTerminal:2})})(made.env,{mode:'switch',confirmGo:true,...pins});
+  assert.equal(openChain.body.reason,'producer_chain_open');
+  const brokenProducer=await operatorOf({producerState:async()=>{throw new Error('down');}})(made.env,{mode:'switch',confirmGo:true,...pins});
+  assert.equal(brokenProducer.body.reason,'producer_unreadable');
+  const wrongGen=await operator(made.env,{mode:'switch',confirmGo:true,expectedVersion:1,expectedMarkerGeneration:3});
+  assert.equal(wrongGen.body.reason,'marker_generation_moved');
+  assert.equal((await marker(made)).mode,'producer','no refused switch changed the marker');
+  // happy path
+  const sw=await operator(made.env,{mode:'switch',confirmGo:true,...pins});
+  assert.equal(sw.status,200);assert.equal(sw.body.switched,true);assert.deepEqual(sw.body.marker,{mode:'sync',generation:1,baselineVersion:1});
+  const twice=await operator(made.env,{mode:'switch',confirmGo:true,...pins});
+  assert.deepEqual([twice.body.reason,twice.body.writes],['already_switched',0]);
+  const lateBaseline=await operator(made.env,{mode:'baseline_apply',confirmGo:true,expectedVersion:1,expectedMarkerGeneration:1});
+  assert.equal(lateBaseline.body.reason,'already_switched','the baseline belongs to producer mode only');
+ }
+ // A stale proof: a new version after the baseline makes the switch refuse (the proof names the old version).
+ {
+  const made=await world();const operator=operatorOf();
+  assert.equal((await operator(made.env,{mode:'baseline_apply',confirmGo:true,...pins})).body.decision,'baseline_recorded');
+  await publish(made,list(1,2,3));await completeLegacy(made);
+  const stale=await operator(made.env,{mode:'switch',confirmGo:true,...pins});
+  assert.equal(stale.body.reason,'version_moved','the pins of version 1 no longer hold');
+  const fresh=await operator(made.env,{mode:'switch',confirmGo:true,expectedVersion:2,expectedMarkerGeneration:0});
+  assert.equal(fresh.body.reason,'baseline_not_proved','the proof of version 1 is not a proof of version 2');
+  assert.equal((await marker(made)).mode,'producer');
+ }
+ // A Letterboxd slot promotes a new version between the plan and the write: the Film writes of the old version are fenced per film, and the proof is NOT recorded.
+ {
+  const made=await world();let raced=false;
+  const operator=operatorOf({setMembership:async(env,input)=>{if(!raced){raced=true;await publish(made,list(1,2,3));}return setFilmMembership(env,input);}});
+  const out=await operator(made.env,{mode:'baseline_apply',confirmGo:true,...pins});
+  assert.equal(raced,true);
+  assert.notEqual(out.body.decision,'baseline_recorded','a version that moved during the apply is never proved');
+  assert.equal((await marker(made)).baselineVersion,null);
+ }
+ // The Sync epoch moves between the read and the write: every fenced write and the proof are refused, nothing is written.
+ {
+  const made=await world({epoch:5});
+  const operator=operatorOf({setMembership:async(env,input)=>{sqlite(made.file,"UPDATE letterboxd_sync_mode SET epoch=6,revision=revision+1 WHERE id=1");return setFilmMembership(env,input);}});
+  const out=await operator(made.env,{mode:'baseline_apply',confirmGo:true,...pins});
+  assert.deepEqual(members(made.file),['film:lb1','film:lb9'],'no Film membership written under a moved epoch');
+  assert.equal((await marker(made)).baselineVersion,null,'no proof under a moved epoch');
+  assert.ok(out.body.ok===false||out.body.decision!=='baseline_recorded');
+ }
+ // The Sync must be the Cloudflare executor; pending effects and a missing schema refuse before any write.
+ {
+  const external=await world({mode:'external'});
+  assert.equal((await operatorOf()(external.env,{mode:'baseline_apply',confirmGo:true,...pins})).body.reason,'sync_not_cloudflare');
+  const none=await world({mode:null});
+  assert.equal((await operatorOf()(none.env,{mode:'baseline_apply',confirmGo:true,...pins})).body.reason,'sync_not_cloudflare');
+  const busy=await world();await publish(busy,list(1,2));
+  const pending=await operatorOf()(busy.env,{mode:'baseline_apply',confirmGo:true,expectedVersion:2,expectedMarkerGeneration:0});
+  assert.equal(pending.body.reason,'effects_pending');
+  assert.deepEqual(members(busy.file),['film:lb1','film:lb9']);
+ }
+ // The Producer read port counts the chains that can still write (here: a freshly launched, pending chain).
+ {
+  const made=await world();
+  const reads=operatorReads({held:()=>true});
+  assert.deepEqual(await reads.producerState(made.env),{ok:true,held:true,nonTerminal:0});
+  sqlite(made.file,"UPDATE published_epg_authority SET mode='d1',cutover='open',programme_run_id='run-x',generation=1 WHERE id=1");
+  await ProducerChain.launchChain(made.env,{programmeRunId:'run-x',generation:1,at:T,nowMs:NOW});
+  assert.equal((await reads.producerState(made.env)).nonTerminal,1,'a pending chain is non-terminal');
+  assert.match(PRODUCER_OPEN_CHAINS_SQL,/stopped' AND recovery_class IN \('transient','receipt','authority'\)/,'a recoverable stopped chain counts too');
+  const refused=await operatorOf({...reads})(made.env,{mode:'switch',confirmGo:true,...pins});
+  assert.equal(refused.body.reason,'baseline_not_proved');
+ }
 }
 fs.rmSync(root,{recursive:true,force:true});
 console.log('watchlist-membership: ok');
