@@ -391,7 +391,7 @@ assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
  const file=database();
  const sha='4'.repeat(64);
  const empty='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
- const tomorrow='2026-11-17T12:00:00.000Z';
+ const tomorrow=new Date(Date.now()+24*60*60*1000).toISOString(); // a TRUE future due time by the real clock the driver uses (a fixed date went into the past and stopped covering the future-due branch)
  sqlite(file,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+AT+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+empty+"','"+empty+"','"+AT+"');"+
   "INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');"+
   "INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}'),('run-p','watchlist',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}');"+
