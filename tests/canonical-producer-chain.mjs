@@ -461,3 +461,119 @@ function rpcStep(){
  assert.equal(result.state,'stopped');
  assert.equal(result.code,'receipt_state_conflict','a future-due epg receipt still blocks current');
 }
+
+// ---- AIR-572 identity: a bare Letterboxd lid is resolved through trusted claims, never turned into a Film by spelling.
+import {resolveIdentity,resolveSourceIdentities,IDENTITY_LOOKUP_CAP} from '../src/canonical-producer-workflow.js';
+function publish(file,rawIds,{films}={}){
+ const sha='f'.repeat(64);
+ const docFilms=(films||rawIds.map(id=>({id,title:'T '+id}))).map(film=>JSON.stringify(film).replace(/'/g,"''"));
+ const members=rawIds.map((id,ordinal)=>"('run-p','watchlist',"+ordinal+",'"+id+"')").join(',');
+ sqlite(file,"INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');"+
+  "INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[]}'),('run-p','watchlist',0,'{\"films\":["+docFilms.join(',')+"]}');"+
+  (members?"INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES "+members+";":''));
+}
+const addFilm=(file,id)=>sqlite(file,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('"+id+"',1,'"+id+"','"+AT+"')");
+const addClaim=(file,filmId,lid,trusted=1,conflicting=0)=>sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('"+filmId+"','letterboxd','"+lid+"',"+trusted+","+conflicting+")");
+
+// Pure decisions.
+assert.deepEqual(resolveIdentity('tmdb_5'),{target:'film:tmdb:5'});
+assert.deepEqual(resolveIdentity('film:x'),{target:'film:x'});
+assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}]}),{target:'film:tmdb:7'});
+assert.deepEqual(resolveIdentity('lid1',{films:new Set(['film:lid1'])}),{target:'film:lid1'});
+assert.deepEqual(resolveIdentity('lid1',{}),{refused:'producer_identity_unresolved'},'no claim and no existing Film: never created from a spelling');
+assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:0,conflicting:0}]}),{refused:'producer_identity_ambiguous'});
+assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0},{film_id:'film:tmdb:8',trusted:0,conflicting:1}]}),{refused:'producer_identity_ambiguous'});
+assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}],redirects:new Map([['film:tmdb:7','film:tmdb:9']])}),{target:'film:tmdb:9'});
+assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}],redirects:new Map([['film:tmdb:7','film:tmdb:9'],['film:tmdb:9','film:tmdb:10']])}),{refused:'producer_identity_redirect_chain'});
+assert.deepEqual(resolveIdentity('tmdb_5',{redirects:new Map([['film:tmdb:5','film:tmdb:6']])}),{target:'film:tmdb:6'});
+
+// Historical mixed fixture (21.11): 386 canonical film:<lid> + 9 existing film:tmdb:<n> with trusted Letterboxd claims -> 395 unique existing owners, 0 shadow Films.
+{
+ const file=database();
+ const own=Array.from({length:386},(_v,i)=>'own'+String(i).padStart(3,'0'));
+ const claimed=Array.from({length:9},(_v,i)=>'clm'+i);
+ own.forEach(lid=>addFilm(file,'film:'+lid));
+ claimed.forEach((lid,i)=>{addFilm(file,'film:tmdb:'+(100+i));addClaim(file,'film:tmdb:'+(100+i),lid);});
+ const sources=[...own,...claimed];
+ publish(file,sources);
+ const filmsBefore=Number(one(file,'SELECT COUNT(*) FROM film'));
+ const env=envOf(file);
+ const snap=await acquireSealedSnapshot(env,P,{previousIds:[]});
+ assert.equal(snap.ok,true);
+ assert.equal(snap.films.length,395);
+ assert.equal(new Set(snap.films.map(film=>film.id)).size,395,'395 source lids -> 395 unique targets');
+ const ids=new Set(snap.films.map(film=>film.id));
+ claimed.forEach((lid,i)=>{assert.ok(ids.has('film:tmdb:'+(100+i)));assert.ok(!ids.has('film:'+lid),'no shadow target film:'+lid);});
+ own.forEach(lid=>assert.ok(ids.has('film:'+lid)));
+ assert.equal(Number(one(file,'SELECT COUNT(*) FROM film')),filmsBefore,'resolving writes nothing');
+ // Released Films: a previously listed owner that is still listed through its claim is NOT departed.
+ const again=await acquireSealedSnapshot(env,P,{previousIds:['film:tmdb:100','film:gone']});
+ assert.deepEqual(again.departed,['film:gone']);
+ // Duplicate same-owner: a lid and its owner's own tmdb id both listed -> one unit.
+ const file2=database();
+ addFilm(file2,'film:tmdb:5');addClaim(file2,'film:tmdb:5','dup1');
+ publish(file2,['dup1','tmdb_5']);
+ const dup=await acquireSealedSnapshot(envOf(file2),P,{previousIds:[]});
+ assert.deepEqual(dup.films.map(film=>film.id),['film:tmdb:5']);
+}
+
+// Refusals fail the snapshot closed by name; nothing is written and nothing is dropped as departed.
+for(const [label,setup,expected] of [
+ ['unresolved',file=>{},'producer_identity_unresolved'],
+ ['untrusted claim',file=>{addFilm(file,'film:tmdb:5');addClaim(file,'film:tmdb:5','lidx',0,0);},'producer_identity_ambiguous'],
+ ['conflicting claim',file=>{addFilm(file,'film:tmdb:5');addFilm(file,'film:tmdb:6');addClaim(file,'film:tmdb:5','lidx');addClaim(file,'film:tmdb:6','lidx',0,1);},'producer_identity_ambiguous'],
+]){
+ const file=database();
+ setup(file);
+ publish(file,['tmdb_9','lidx']);
+ const filmsBefore=Number(one(file,'SELECT COUNT(*) FROM film'));
+ const snap=await acquireSealedSnapshot(envOf(file),P,{previousIds:['film:tmdb:1']});
+ assert.equal(snap.ok,false,label);
+ assert.equal(snap.code,expected,label);
+ assert.equal(Number(one(file,'SELECT COUNT(*) FROM film')),filmsBefore,label+': no Film created');
+}
+{
+ // Redirect and bounds.
+ const file=database();
+ addFilm(file,'film:tmdb:5');addFilm(file,'film:tmdb:6');addClaim(file,'film:tmdb:5','lidr');
+ sqlite(file,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:5','film:tmdb:6','"+AT+"')");
+ const out=await resolveSourceIdentities(envOf(file),['lidr','tmdb_6']);
+ assert.equal(out.ok,true);
+ assert.equal(out.resolved.get('lidr'),'film:tmdb:6','a claim owner that was merged resolves to the survivor');
+ const many=await resolveSourceIdentities(envOf(file),Array.from({length:IDENTITY_LOOKUP_CAP+1},(_v,i)=>'l'+i));
+ assert.deepEqual([many.ok,many.code],[false,'producer_identity_bounded']);
+ const empty=await resolveSourceIdentities(envOf(file),[]);
+ assert.equal(empty.ok,true);
+ assert.equal(empty.resolved.size,0);
+ const broken=await resolveSourceIdentities({DB:{prepare(){throw new Error('x');}}},['lid']);
+ assert.deepEqual([broken.ok,broken.code],[false,'producer_identity_unreadable']);
+}
+// Whole Workflow on a collision: facts and membership land on the existing owner, no shadow Film is created, the chain completes.
+{
+ const file=database();
+ const empty='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
+ sqlite(file,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+AT+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+empty+"','"+empty+"','"+AT+"')");
+ addFilm(file,'film:tmdb:55');addClaim(file,'film:tmdb:55','collide1');
+ publish(file,['collide1'],{films:[{id:'collide1',title:'Collide'}]});
+ const env=envOf(file);
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('13131313-1313-1313-1313-131313131313'):fn()},{hold:false});
+ assert.equal(result.state,'complete');
+ assert.equal(one(file,'SELECT COUNT(*) FROM film'),1,'no shadow Film');
+ assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='film:collide1'"),0);
+ assert.equal(one(file,'SELECT film_id FROM watchlist_film'),'film:tmdb:55','membership is the existing owner');
+}
+// Whole Workflow on a refusal: the chain is stopped by name on the record and no Film or membership row is written.
+{
+ const file=database();
+ publish(file,['nobody']);
+ const env=envOf(file);
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('14141414-1414-1414-1414-141414141414'):fn()},{hold:false});
+ assert.equal(result.state,'stopped');
+ assert.equal(result.code,'producer_identity_unresolved');
+ assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'stopped');
+ assert.equal(one(file,'SELECT stopped_by FROM canonical_producer_chain'),'producer_identity_unresolved');
+ assert.equal(one(file,'SELECT COUNT(*) FROM film'),0);
+ assert.equal(one(file,'SELECT COUNT(*) FROM watchlist_film'),0);
+}

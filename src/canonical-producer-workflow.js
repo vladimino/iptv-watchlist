@@ -42,9 +42,10 @@ function createError(error){
  return 'uncertain';
 }
 
-function canonicalFilmId(raw){
+function canonicalFilmId(raw,resolved){
  const s=String(raw||'');
  if(!s)return null;
+ if(resolved&&resolved.has(s))return resolved.get(s);
  if(s.startsWith('film:'))return s;
  if(s.startsWith('tmdb_'))return 'film:tmdb:'+s.slice(5);
  if(s.startsWith('tmdb:'))return 'film:'+s;
@@ -81,9 +82,74 @@ export function filmFactsOf(film,watchlisted){
  if(sync.metadataAt||sync.synopsisFetchedAt||sync.peopleNamesVersion!=null||sync.peopleLocalizedAt)facts.sync=sync;
  return facts;
 }
-function idsOf(document,members){
- if(Array.isArray(members)&&members.length)return members.map(row=>canonicalFilmId(row.filmId)).filter(Boolean);
- return (Array.isArray(document?.films)?document.films:[]).map(film=>canonicalFilmId(film.id)).filter(Boolean);
+function sourceIdsOf(document,members){
+ if(Array.isArray(members)&&members.length)return members.map(row=>String(row.filmId||'')).filter(Boolean);
+ return (Array.isArray(document?.films)?document.films:[]).map(film=>String(film?.id||'')).filter(Boolean);
+}
+function idsOf(document,members,resolved){return sourceIdsOf(document,members).map(id=>canonicalFilmId(id,resolved)).filter(Boolean);}
+
+// AIR-572. Identity resolution of the source film ids BEFORE any target is formed. An id with a `film:`/`tmdb_`/`tmdb:` prefix names its
+// Film directly (a one-hop redirect is followed to the survivor). A bare Letterboxd lid is NEVER turned into `film:<lid>` by spelling: it is
+// resolved through the one trusted, non-conflicting `film_external_id` (scheme `letterboxd`) claim, else through an EXISTING Film `film:<lid>`.
+// A lid with a competing/untrusted claim, a redirect chain longer than one hop, or neither a claim nor an existing Film is refused by name:
+// the Producer never creates a second Film from a spelling and never guesses from title or year (a legitimate new Film is admitted by the
+// admission paths, not here). Reads are bounded: at most IDENTITY_LOOKUP_CAP distinct lids in IDENTITY_CHUNK-sized, read-only statements.
+export const IDENTITY_LOOKUP_CAP=1000;
+export const IDENTITY_CHUNK=200;
+const DIRECT=/^(film:|tmdb_|tmdb:)/;
+export function resolveIdentity(raw,{claims=[],films=new Set(),redirects=new Map()}={}){
+ const follow=id=>{
+  if(!redirects.has(id))return {target:id};
+  const next=redirects.get(id);
+  return redirects.has(next)?{refused:'producer_identity_redirect_chain'}:{target:next};
+ };
+ if(DIRECT.test(raw))return follow(canonicalFilmId(raw));
+ const clean=claims.filter(row=>Number(row.trusted)===1&&Number(row.conflicting)===0);
+ const other=claims.length-clean.length;
+ const owners=[...new Set(clean.map(row=>row.film_id))];
+ if(owners.length>1||(owners.length===1&&other>0)||(owners.length===0&&other>0))return {refused:'producer_identity_ambiguous'};
+ if(owners.length===1)return follow(owners[0]);
+ const own='film:'+raw;
+ if(films.has(own))return follow(own);
+ return {refused:'producer_identity_unresolved'};
+}
+export async function resolveSourceIdentities(env,rawIds){
+ const unique=[...new Set(rawIds.filter(Boolean))];
+ const lids=unique.filter(id=>!DIRECT.test(id));
+ if(lids.length>IDENTITY_LOOKUP_CAP)return {ok:false,code:'producer_identity_bounded'};
+ const claims=new Map(),films=new Set(),redirects=new Map();
+ const db=database(env);
+ try{
+  for(let i=0;i<lids.length;i+=IDENTITY_CHUNK){
+   const chunk=JSON.stringify(lids.slice(i,i+IDENTITY_CHUNK));
+   for(const row of await many(db,"SELECT film_id,value,trusted,conflicting FROM film_external_id WHERE scheme='letterboxd' AND value IN (SELECT value FROM json_each(?))",[chunk])){
+    if(!claims.has(row.value))claims.set(row.value,[]);
+    claims.get(row.value).push(row);
+   }
+   for(const row of await many(db,"SELECT id FROM film WHERE id IN (SELECT 'film:'||value FROM json_each(?))",[chunk]))films.add(row.id);
+  }
+  const targets=new Set();
+  for(const id of unique){
+   if(DIRECT.test(id))targets.add(canonicalFilmId(id));
+   else for(const row of claims.get(id)||[])targets.add(row.film_id);
+  }
+  for(const id of lids)targets.add('film:'+id);
+  const list=[...targets];
+  for(let i=0;i<list.length;i+=IDENTITY_CHUNK){
+   const chunk=JSON.stringify(list.slice(i,i+IDENTITY_CHUNK));
+   for(const row of await many(db,"SELECT from_id,to_film_id FROM film_redirect WHERE from_id IN (SELECT value FROM json_each(?))",[chunk]))redirects.set(row.from_id,row.to_film_id);
+  }
+ }catch{return {ok:false,code:'producer_identity_unreadable'};}
+ const resolved=new Map(),refused=[];
+ for(const id of unique){
+  const out=resolveIdentity(id,{claims:claims.get(id)||[],films,redirects});
+  if(out.target)resolved.set(id,out.target);else refused.push({id,code:out.refused});
+ }
+ if(refused.length){
+  const code=refused.some(item=>item.code==='producer_identity_ambiguous')?'producer_identity_ambiguous':refused[0].code;
+  return {ok:false,code,refused:refused.slice(0,20),refusedCount:refused.length};
+ }
+ return {ok:true,resolved};
 }
 function peopleOf(film){
  const out=[];
@@ -97,11 +163,11 @@ function peopleOf(film){
  }
  return out;
 }
-function planFromSealed({programme,watchlist,watchMembers,previousIds=[]}){
- const listed=idsOf(watchlist,watchMembers);
+function planFromSealed({programme,watchlist,watchMembers,previousIds=[],resolved}){
+ const listed=idsOf(watchlist,watchMembers,resolved);
  const byFilm=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){
-  const id=canonicalFilmId(film?.id);
+  const id=canonicalFilmId(film?.id,resolved);
   if(id&&!byFilm.has(id))byFilm.set(id,film);
  }
  const seen=new Set(),films=[];
@@ -111,7 +177,7 @@ function planFromSealed({programme,watchlist,watchMembers,previousIds=[]}){
   films.push({id,facts:filmFactsOf(byFilm.get(id)||{id},true)});
  }
  const listedSet=new Set(listed);
- const departed=[...new Set(previousIds.map(canonicalFilmId).filter(id=>id&&!listedSet.has(id)))].sort();
+ const departed=[...new Set(previousIds.map(id=>canonicalFilmId(id)).filter(id=>id&&!listedSet.has(id)))].sort();
  const personRows=[],persons=[],credits=[],personSeen=new Set();
  for(const item of films){
   const people=peopleOf(byFilm.get(item.id)||{});
@@ -144,7 +210,11 @@ export async function acquireSealedSnapshot(env,programmeRunId,{previousIds}={})
  }
  const after=await readPublished(env);
  if(!after?.ready||after.programmeRunId!==programmeRunId||Number(after.generation)!==g0)return {ok:false,code:'producer_input_superseded'};
- const planned=planFromSealed({programme,watchlist,watchMembers:members,previousIds:prior});
+ // Identity is resolved for the LISTED ids only (programme-only films never become a target); a refusal fails the whole snapshot closed,
+ // so a refused id is never silently dropped and then mistaken for a departed Film.
+ const identity=await resolveSourceIdentities(env,[...new Set([...sourceIdsOf(watchlist,members)])]);
+ if(!identity.ok)return {ok:false,code:identity.code,refused:identity.refused,refusedCount:identity.refusedCount};
+ const planned=planFromSealed({programme,watchlist,watchMembers:members,previousIds:prior,resolved:identity.resolved});
  return {ok:true,generation:g0,programmeRunId,...planned,label:snapshotLabel(programmeRunId,g0),members,watchlist};
 }
 
@@ -271,7 +341,9 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
     if(rebased.state==='rebased'){fence=rebased.fence;rebases++;return work();}
     return {state:'stopped',code:'producer_input_superseded'};
    }
-   return {state:'stopped',code:snap.code};
+   // A named identity refusal stops the chain on the record (visible to the monitor) instead of leaving a lease to expire.
+   if(typeof snap.code==='string'&&snap.code.startsWith('producer_identity_'))await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:snap.code}).catch(()=>{});
+   return {state:'stopped',code:snap.code,...(snap.refused?{refused:snap.refused,refusedCount:snap.refusedCount}:{})};
   }
   fence.inputGeneration=snap.generation;
   if(!stored?.release_pin){
