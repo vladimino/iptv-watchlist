@@ -2,7 +2,7 @@
 
 **Status: PROPOSAL / NOT AUTHORIZED.** This document grants nothing. It is not an ADR, not an approved runbook and not an owner GO. It prepares a reviewable decision for the owner. No source code, test, `wrangler.jsonc`, ADR, registry or Mermaid file is changed by the pull request that carries it, and no Cloudflare, D1, R2, flag, mode or Scheduled Task was changed to write it.
 
-[AIR-580](https://trello.com/c/w0rsARMP) · repository `main` `4d20dfa` · read-only Cloudflare observations of 23 November 2026, about 12:00 UTC. Earlier slices: the [inventory](air-580-legacy-ratings-writer-inventory-2026-11-22.md) (historical; parts of its statuses are superseded by this page), [PR 929](https://github.com/vladimino/iptv-watchlist/pull/929) (the hourly `ensure` call) and [PR 938](https://github.com/vladimino/iptv-watchlist/pull/938) (the HTTP and MCP writer entry points), both merged and deployed.
+[AIR-580](https://trello.com/c/w0rsARMP) · repository `main` `3e617b8d2656ddb652f60edcdd48125f7e6043fb` (the merge of PR 938; every `file:line` below was checked against that exact commit) · read-only Cloudflare observations of 23 November 2026, about 12:00 UTC. Earlier slices: the [inventory](air-580-legacy-ratings-writer-inventory-2026-11-22.md) (historical; parts of its statuses are superseded by this page), [PR 929](https://github.com/vladimino/iptv-watchlist/pull/929) (the hourly `ensure` call) and [PR 938](https://github.com/vladimino/iptv-watchlist/pull/938) (the HTTP and MCP writer entry points), both merged and deployed.
 
 ## Evidence boundary
 
@@ -22,7 +22,7 @@
 | Cron triggers of script `iptv` | exactly four: `0 * * * *`, `1-59/2 * * * *`, `24 3 * * *`, `30 * * * *`. None belongs to the legacy Ratings executor |
 | latest deployment | id `4638b482-3b57-47fb-958c-56e85fd3973d`, 2026-11-23T11:50:55Z, version `812c31ed-9cee-41b8-bf50-cbf54ac44458` at 100%, message "refactor(api): retire the legacy Ratings writer entry points ... (#938)". Every Workflow's `modified_on` moved to 11:50:57Z with that deployment |
 
-### Code and configuration of `main`
+### Code and configuration of `main` `3e617b8`
 
 | Item | Where | Class | Why |
 | --- | --- | --- | --- |
@@ -72,15 +72,35 @@ Prerequisites (all must hold): the owner's decision on section 3; the natural 17
 
 1. **One code and configuration pull request** (never separate): remove `run`, `act`, `admit`, `drive`, `stopInstance`, `runRatingsWorkflow`, the class and its import in `build.mjs`, and the `RATINGS_WORKFLOW` entry; decide and implement `drainState` and `readModel` without the binding; update the listed tests, the three docs and the evidence index. Minimum regressions: the Letterboxd slots still write exactly one ratings Event and one watchlist Event per slot; the owner fences and `externalGate` are unchanged; no `iptv-ratings` instance can be created; `ratings_sync_status` and the monitor read; the handover proof's `ratingsDrained` is `true` for a closed, drained control record and fails closed for a live one; `workflow-entry.js` builds without the class; the shared `:00`, `:30` and fast crons are unchanged. Evidence: `npm ci`, `npm run test:all`, `npm run build`, independent review on the exact HEAD, green pull request CI.
 2. **Approved merge, then the four post-merge jobs** (`Test and build`, `Test shard 2 of 3`, `Test shard 3 of 3`, `Deploy to Cloudflare`) and a read-only readback of the binding list, the Workflow list and the cron list. Deployment alone does not delete the registration.
-3. **A separate resource deletion gate** (owner GO on exact ids, one operation, no retry): the physical removal of the registration `iptv-ratings`, only after step 2 is verified and the owner has decided on exporting the old instance list. Readback of its absence and of the unchanged other five Workflows and four crons.
+3. **A separate resource deletion gate**, with its own request and its own explicit owner GO that nothing in this document or in the code GO grants (see section 5.3): the physical removal of the registration `iptv-ratings`, one operation, no retry, only after step 2 is verified. Readback of its absence and of the unchanged other five Workflows and four crons.
 4. **Rollback and recovery**, stated before approval: step 1 by `git revert` (code only); step 3 cannot be undone by a revert, so the restoration is a reviewed change plus a re-registration, as in option B above.
 
-## 5. Proposed approval text (for the owner to edit; not an approval)
+## 5. Proposed decisions and approval texts (drafts for the owner; none is an approval)
 
-> I authorize AIR-580 to remove the legacy Ratings Workflow body, class and binding `RATINGS_WORKFLOW` in one reviewed code and configuration pull request, with its merge and the four post-merge jobs; and, as a separate later operation, the deletion of the Cloudflare Workflow `iptv-ratings` (id `2d40b865-3402-4104-9540-b15bab00d8cc`) on the script `iptv`, after a read-only readback. I authorize nothing else: not the Letterboxd Sync, the shared crons, any other Workflow, a Scheduled Task, a flag, a mode, D1 or R2.
-> - [ ] I understand and accept that after this the legacy Ratings writer cannot be restored without a reviewed code change and a re-registration of the Workflow (option B), **or**
-> - [ ] I choose option A: keep the Workflow body, class, binding and registration; this authorization is withdrawn.
-> - [ ] Export the 7 completed `ratings_*` instance records before the registration is deleted: yes / no.
+The three parts are independent. Answering one grants nothing in another.
+
+### 5.1 The material decision (section 3): option A or option B
+
+> - [ ] **A.** Keep the legacy Ratings Workflow body, class, binding and registration (inert). Nothing is removed; no code or resource GO follows from this choice.
+> - [ ] **B.** Retire them. I understand and accept that afterwards the legacy Ratings writer cannot be restored without a reviewed code change and a re-registration of the Workflow, and that recovery from a Letterboxd Sync failure is forward-only.
+
+This choice alone authorizes no code change, no merge, no deployment and no resource deletion.
+
+### 5.2 Code and configuration GO (only if B is chosen)
+
+> Given option B, I authorize AIR-580 to remove the legacy Ratings Workflow body, the class `RatingsWorkflow` and the binding `RATINGS_WORKFLOW` in one reviewed code and configuration pull request, with its approved merge, the four post-merge jobs and a read-only readback of the binding, Workflow and cron lists. This text does **not** authorize `workflows delete`, the deletion of the registration `iptv-ratings` or of any instance, the Letterboxd Sync, the shared crons, any other Workflow, a Scheduled Task, a flag, a mode, D1 or R2.
+
+### 5.3 Physical deletion of the registration: a separate future request, NOT authorized by 5.1 or 5.2
+
+Neither 5.1 nor 5.2 permits invoking `workflows delete` or any equivalent. After 5.2 is deployed and verified, the executor must send the owner a new request that contains, read-only and dated on that day:
+
+1. the exact current Workflow name and id (today `iptv-ratings`, `2d40b865-3402-4104-9540-b15bab00d8cc`), re-read, with its class and script;
+2. its instance list and states, and the list of the other Workflows and the cron triggers, confirmed unchanged;
+3. the owner's decision on the seven historical `ratings_*` instance records (export, accept the loss, or keep the registration), because deleting a Workflow also deletes its instances;
+4. the verified post-deploy state (the binding and class gone, the bundle built, the four jobs green, no instance created) and the rollback and recovery statement of section 4;
+5. a single operation, no retry, with a readback of absence and of the unchanged remainder.
+
+Only an explicit owner reply to that later request is a GO for the deletion.
 
 ## 6. Open technical questions (not answered by the sources read)
 
