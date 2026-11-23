@@ -1,5 +1,5 @@
 import {appendFileSync,lstatSync,mkdtempSync,readdirSync,realpathSync,rmSync,writeFileSync} from 'node:fs';
-import {spawn,spawnSync} from 'node:child_process';
+import {spawn} from 'node:child_process';
 import {availableParallelism,tmpdir} from 'node:os';
 import path from 'node:path';
 import {selectSuite} from './test-classification.mjs';
@@ -289,6 +289,17 @@ const MUTATION=/-mutation\.mjs$/;
 export const HEAD_LIMIT=1024*1024;
 export const TAIL_LIMIT=3*1024*1024;
 const KILL_GRACE_MS=3000;
+const FORCE_WAIT_MS=2000;
+// True once no process of any of these process groups exists any more (ESRCH), polled for at most `limit` ms.
+async function groupsGone(pids,limit){
+ const gone=pid=>{try{process.kill(-pid,0);return false;}catch(error){return error.code==='ESRCH';}};
+ const deadline=Date.now()+limit;
+ for(;;){
+  if(pids.every(gone))return true;
+  if(Date.now()>=deadline)return false;
+  await new Promise(resolve=>setTimeout(resolve,50));
+ }
+}
 
 // The run root. `parent` is the real path of the directory it was created in; removal re-checks both before it deletes anything.
 export function createRunRoot(base=tmpdir()){
@@ -427,11 +438,30 @@ async function main(){
   if(shard){console.error('--suite all cannot be combined with --shard');process.exit(2);}
   const rest=[];
   for(let index=0;index<args.length;index++){if(args[index]==='--suite'){index++;continue;}rest.push(args[index]);}
-  const run=name=>spawnSync(process.execPath,[path.resolve(new URL(import.meta.url).pathname),...rest,'--suite',name],{stdio:'inherit',env:{...process.env,TEST_SUITE:name,IPTV_TEST_SUITE:name}});
-  const first=run('core');
-  if((first.status??1)!==0){process.exitCode=first.status??1;return;}
-  const second=run('non-functional');
-  process.exitCode=second.status??1;
+  // The stages run asynchronously, so a SIGINT/SIGTERM sent to this wrapper is forwarded to the active stage, which stops its files, removes its own root and exits
+  // 130/143. The wrapper waits for that exit (a bounded KILL_GRACE_MS plus a second grace, then SIGKILL of the stage) and never starts the next stage.
+  let stage=null,wrapperInterrupted=null;
+  const exitFor=signal=>signal==='SIGINT'?130:143;
+  const runStage=name=>new Promise(resolve=>{
+   const child=spawn(process.execPath,[path.resolve(new URL(import.meta.url).pathname),...rest,'--suite',name],{stdio:'inherit',env:{...process.env,TEST_SUITE:name,IPTV_TEST_SUITE:name}});
+   stage=child;
+   child.on('error',()=>{stage=null;resolve(1);});
+   child.on('close',(code,signal)=>{stage=null;resolve(code??(signal?128+({SIGINT:2,SIGTERM:15,SIGKILL:9}[signal]??1):1));});
+  });
+  const forward=signal=>{
+   wrapperInterrupted=wrapperInterrupted??signal;
+   const active=stage;
+   if(!active)return;
+   try{active.kill(signal);}catch{}
+   setTimeout(()=>{if(stage===active){try{active.kill('SIGKILL');}catch{}}},2*KILL_GRACE_MS+1000).unref();
+  };
+  process.on('SIGINT',()=>forward('SIGINT'));
+  process.on('SIGTERM',()=>forward('SIGTERM'));
+  const first=await runStage('core');
+  if(wrapperInterrupted){console.error(`Interrupted by ${wrapperInterrupted}.`);process.exitCode=exitFor(wrapperInterrupted);return;}
+  if(first!==0){process.exitCode=first;return;}
+  const second=await runStage('non-functional');
+  process.exitCode=wrapperInterrupted?exitFor(wrapperInterrupted):second;
   return;
  }
  let plan;
@@ -469,7 +499,7 @@ async function main(){
    child.stderr.on('data',chunk=>captures.stderr.push(chunk));
    const killGroup=signal=>{try{process.kill(-child.pid,signal);}catch{try{child.kill(signal);}catch{}}};
    const timer=setTimeout(()=>{timedOut=true;killGroup('SIGTERM');killTimer=setTimeout(()=>killGroup('SIGKILL'),KILL_GRACE_MS);},timeoutMs);
-   const entry={child,kill:killGroup};
+   const entry={child,pid:child.pid,kill:killGroup};
    running.add(entry);
    const finish=(code,signal,error)=>{
     if(settled)return;
@@ -522,7 +552,16 @@ async function main(){
  const onSignal=signal=>{
   interrupted=signal;stopping=true;
   for(const entry of running)entry.kill('SIGTERM');
-  setTimeout(()=>{for(const entry of running)entry.kill('SIGKILL');cleanUp();process.exit(signal==='SIGINT'?130:143);},KILL_GRACE_MS).unref();
+  // Forced termination: SIGKILL the owned groups, then delete the root only once every owned group is confirmed gone (bounded wait). A group that is still there
+  // keeps the root, which is logged, because a live writer could still be using it.
+  setTimeout(async()=>{
+   const owned=[...running];
+   for(const entry of owned)entry.kill('SIGKILL');
+   const gone=await groupsGone(owned.map(entry=>entry.pid),FORCE_WAIT_MS);
+   if(!gone){cleanup={removed:false,error:`kept ${run.root}: an owned test process is still running after SIGKILL`};console.error(`Test runner cleanup: ${cleanup.error}`);}
+   cleanUp();
+   process.exit(signal==='SIGINT'?130:143);
+  },KILL_GRACE_MS).unref();
  };
  process.on('SIGINT',()=>onSignal('SIGINT'));
  process.on('SIGTERM',()=>onSignal('SIGTERM'));

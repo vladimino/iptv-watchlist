@@ -437,6 +437,48 @@ fs.unlinkSync(me);`;
     foreignIntact();
   }
 
+  // a signal sent to the --suite all wrapper reaches the running stage: files stopped, root removed, 130/143 kept, no second stage
+  for (const [signal, expected] of [['SIGTERM', 143], ['SIGINT', 130]]) {
+    const marker = path.join(root, 'all-' + signal);
+    const dir = suite({'h.mjs': writer("fs.writeFileSync(process.env.MARKER, String(process.pid)); setInterval(() => {}, 1000);")});
+    const child = spawn(process.execPath, [runner, '--dir', dir, '--suite', 'all'], {stdio: ['ignore', 'pipe', 'pipe'], env: {...process.env, ...env, MARKER: marker}});
+    let stderr = '';
+    child.stderr.on('data', chunk => {stderr += chunk;});
+    const closed = new Promise(resolve => child.on('close', (code, sig) => resolve({code, sig})));
+    for (let i = 0; i < 100 && !fs.existsSync(marker); i++) await sleep(100);
+    assert.ok(fs.existsSync(marker), signal + ': the file started');
+    const filePid = Number(fs.readFileSync(marker, 'utf8'));
+    child.kill(signal);
+    const end = await closed;
+    assert.equal(end.code, expected, `${signal}: ${stderr}`);
+    for (let i = 0; i < 50 && alive(filePid); i++) await sleep(100);
+    assert.equal(alive(filePid), false, signal + ': the running file of the active stage was stopped');
+    assert.deepEqual(left(), [], signal + ': nothing of an interrupted --suite all is left');
+    foreignIntact();
+  }
+
+  // a file that ignores SIGTERM: the runner waits the grace period, kills its group and only then removes the root
+  {
+    const marker = path.join(root, 'stubborn-started');
+    const dir = suite({'x.mjs': writer("process.on('SIGTERM', () => {}); fs.writeFileSync(process.env.MARKER, String(process.pid)); setInterval(() => {}, 1000);")});
+    const child = spawn(process.execPath, [runner, '--dir', dir], {stdio: ['ignore', 'pipe', 'pipe'], env: {...process.env, ...env, MARKER: marker}});
+    let stderr = '';
+    child.stderr.on('data', chunk => {stderr += chunk;});
+    const closed = new Promise(resolve => child.on('close', (code, sig) => resolve({code, sig})));
+    for (let i = 0; i < 100 && !fs.existsSync(marker); i++) await sleep(100);
+    assert.ok(fs.existsSync(marker), 'the stubborn file started');
+    const filePid = Number(fs.readFileSync(marker, 'utf8'));
+    child.kill('SIGTERM');
+    await sleep(500);
+    assert.ok(alive(filePid), 'the stubborn file survives SIGTERM');
+    assert.equal(left().length, 1, 'the root is not removed while its writer is alive');
+    const end = await closed;
+    assert.equal(end.code, 143, stderr);
+    assert.equal(alive(filePid), false, 'the stubborn file was killed');
+    assert.deepEqual(left(), [], 'the root is removed after the forced kill');
+    foreignIntact();
+  }
+
   // --suite all: an early failure of the core stage still removes its root, and a passing run removes both stages' roots
   result = await run(['--dir', suite({'a.mjs': writer('process.exit(1);')}), '--suite', 'all'], env);
   assert.equal(result.code, 1);
