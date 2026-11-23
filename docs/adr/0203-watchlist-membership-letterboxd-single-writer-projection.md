@@ -53,6 +53,24 @@ At no step do an old and a new writer both write: before step 3 the Producer is 
 
 **Not decided here:** the production operator that wires `dryRun`/`apply`/switch to an owner-only route, the actual migration apply, the baseline apply, the switch, the hold lift, a switch back, and the wider Film unification (AIR-554/579).
 
+## Protocol contract options for versions with more than 60 changes (owner decision pending)
+
+Decision 4 implements contract **A**. The review of PR #946 asks for a written comparison with **B**; no choice is presumed here and the record stays `Proposed`.
+
+| | **A. `done` when safely handed off, convergence separate (implemented)** | **B. strict meaning of `done`; allow the next scan while only `membership` is pending (not implemented)** |
+| --- | --- | --- |
+| Meaning of `effects_drained_version` | Weaker for `membership` only: the first 60 changes are applied, the rest is durably owed in `watchlist_membership_handoff`. Unchanged for `scan_facts`, `retention`, `removal_enqueue`. | Unchanged for every effect: drained means every effect fully applied. |
+| Drain-before-scan rule of ADR 0186 | Untouched. One call per version, so no scan is ever starved by this effect. | Must be split into blocking effects (the three legacy ones) and a non-blocking one. Amends the slot contract (`letterboxd-sync-watchlist.js::run`), the no-change branch of `publishSnapshot` (which requires `effects_drained_version = version`) and `completeEffect` ordering. Needs a coordinator-owned design and its own ADR amendment. |
+| Convergence of a large diff | Bounded slice per slot (25 rows against the CURRENT snapshot): about `changes / 25` slots (1,000 removals about 40 slots, 10 days). Idempotent baseline is the fast path. | The effect keeps its own cursor and drains with the other effects each slot, but still 60 changes per call and the shared eight-call allowance, so a large diff also takes many slots; it finishes oldest version first, so a new version's membership waits behind it. |
+| Failure and backlog | A system fault holds the effect only for 6 calls, then hands off; nothing blocks a scan. | A persistent `membership` fault would need its own bound (otherwise it blocks `drained` for ever) and a rule for several versions pending at once. |
+| Safety | Per-film version fence and the handoff reconcile against the CURRENT snapshot make order irrelevant; no id is lost (tested). | Same fence; the extra risk is the amended slot contract and a longer window where `watchlist_current` is ahead of the effect journal. |
+| Visibility | The handoff ledger is the backlog: pending and terminal counts and the oldest `first_version`. The existing Letterboxd monitor counts pending `watchlist_effect` rows only, so it does NOT see this backlog yet. | The backlog is visible as pending `membership` effects in the existing monitor. |
+
+**Open items before acceptance (recommendations, none implemented):**
+1. *Backlog metrics.* Whatever is chosen, A needs the handoff backlog (pending, terminal, oldest `first_version`) added to the Letterboxd monitor stream and to the runbook checks; that is a small, read-only addition.
+2. *Bounded acceleration.* Candidates that add no cron or Workflow: (a) scale the per-slot reconcile step with the backlog up to a D1-budgeted ceiling; (b) run the same bounded step once more after the post-commit drain; (c) the existing idempotent baseline operator, an owner-gated action. None is chosen here; (a) and (b) change the D1 cost per slot and need a measured budget.
+3. *Joint recommendation.* The Letterboxd Sync coordinator and the Product Owner decide between A and B. The implementer's note: A is smaller and keeps ADR 0186 intact, at the cost of the weaker `drained` meaning for one effect and a slow tail for rare very large diffs; B is the stricter contract but a separate, larger change.
+
 ## Alternatives considered
 
 Only the options discussed on [AIR-572](https://trello.com/c/ugyHjnc4) are listed.
