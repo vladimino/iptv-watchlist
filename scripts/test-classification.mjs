@@ -667,6 +667,9 @@ export const FILES={
  "migration-0036-lookup-indexes.mjs": {
   "suite": "core"
  },
+ "d1-lookup-indexes-0036-production.mjs": {
+  "suite": "core"
+ },
  "watchlist-bootstrap.mjs": {
   "suite": "core"
  },

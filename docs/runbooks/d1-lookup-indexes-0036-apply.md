@@ -1,7 +1,19 @@
-# D1 lookup indexes, migration 0036: prerequisites, window, readback and forward-only rollback (prepared, NOT applied; every step needs its own owner GO)
+# D1 lookup indexes, migration 0036: prerequisites, window, readback and forward-only rollback (the apply needs the owner GO recorded on the card and the reviewed operator below)
 
-**Status:** prepared on 23 Nov 2026 under [AIR-579](https://trello.com/c/OlcWhyM7) after the owner approved variant D1 for **offline preparation**. **Nothing here is applied and nothing here is authorized.** This page is the plan an operator would follow after a separate owner GO that names the exact resource and statement. Production D1 `iptv` was last read at schema 33; `0034` and `0035` (AIR-554) are not applied either.
+**Status:** prepared on 23 Nov 2026 under [AIR-579](https://trello.com/c/OlcWhyM7). Production D1 `iptv` was at schema **35** after the AIR-554 P6 apply of `0034` and `0035` on 23 Nov 2026 13:24 UTC ([evidence](../evidence/prediction/air-554-p6-schema-apply-2026-11-23.md)); the earlier wording of this page about schema 33 is historical. The owner gave one conditional GO for the production apply of `0036` only, through the guarded operator below ([card comment of 23 Nov 2026 13:53 Madrid](https://trello.com/c/OlcWhyM7)). The GO covers one apply of the unchanged file through the reviewed operator and nothing else; any deviation is a STOP. Whether the apply has happened is read live (`--status`) and from the dated evidence page, not from this paragraph.
 
+## The operator
+
+`scripts/d1-lookup-indexes-0036-production.mjs` (offline tests: `tests/d1-lookup-indexes-0036-production.mjs`). It pins the production target (account `8d9331889a693d328ef306692adf9d24`, database `iptv`, UUID `3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb`, each checked against Cloudflare before any statement) and reads the token from the private environment, never printing it.
+
+```bash
+node scripts/d1-lookup-indexes-0036-production.mjs --target iptv --status
+node scripts/d1-lookup-indexes-0036-production.mjs --target iptv --apply --confirm apply --migration-sha256 <FULL_SHA256_FROM_STATUS>
+```
+
+- `--status` (the default) only reads: the SHA-256 of the exact bytes of the file, `schema_contract`, the 13 aux tables, 3 receipt tables and 33 `prediction_aux_sealed_*` triggers of `0034`/`0035`, the tables and indexes `0036` needs, the two new index names, the authority rows, the three row-count baselines and the decision (`apply`, `already_applied`, or the refusal reason).
+- `--apply` sends **one** atomic D1 batch of the four statements `migrationStatements()` extracts from the unchanged file (guard, two `CREATE INDEX`, version update). It is never split and never retried (the adapter runs with zero retries and a write is never repeated). It then reads back independently: version 36, `PRAGMA index_list/index_info` of both indexes, the plans of the real `ASSIGNED_ROWS_DELETE` and of a `(scheme, value)` lookup, the three counts and the authority rows unchanged. An unclear answer or any readback mismatch ends as `write_uncertain`: stop, read the state independently, do not re-apply and do not drop an index.
+- The Time Travel bookmark is read before and after an apply.
 ## What this does, and does not
 
 - **Does:** one execution of `migrations/0036_epg_discovery_lookup_indexes.sql`: two non-unique indexes and the version change 35 to 36.
@@ -25,7 +37,7 @@ Each index entry is a D1 `rows_written`. The partial index holds one entry per D
 
 ## The step (one owner GO, no other statement)
 
-Execute `migrations/0036_epg_discovery_lookup_indexes.sql` once. Do not edit it, split it, retry it blindly or run any other DDL beside it. After a failed or partial execution read the state back first and do not re-run (the file cannot run twice: it refuses anything but version 35).
+Execute `migrations/0036_epg_discovery_lookup_indexes.sql` once, through the operator above. Do not edit it, split it, retry it blindly or run any other DDL beside it. After a failed or partial execution read the state back first and do not re-run (the file cannot run twice: it refuses anything but version 35).
 
 ## Readback (all must hold; record it in a dated evidence page)
 
@@ -52,4 +64,4 @@ Dropping **does not** revert the version: the database then stays at schema 36 w
 
 ## What this page does not authorize
 
-The apply of `0034`, `0035` or `0036`, any DDL, any D1 or R2 write, any production read with side effects, a flag, Task, Workflow, cron or sync, and any AIR-554 step. Each needs its own explicit owner GO.
+The apply of `0034` or `0035` (already applied), any apply of `0036` other than the single guarded one above, any DDL, any D1 or R2 write, any production read with side effects, a flag, Task, Workflow, cron or sync, and any AIR-554 step. Each needs its own explicit owner GO.
