@@ -334,6 +334,79 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
  assert.deepEqual([plan.add.map(i=>i.filmId),plan.remove,plan.unresolved.map(i=>i.lid),plan.converged],[['film:a'],['film:z'],['b'],false]);
 }
 
+// ===== 11. review regressions (PR #946, independent review of e247327) =====
+{
+ // P1: two lids name ONE Film; a removal of one lid must not clear a Film the other still lists, in the effect and in the reconcile
+ const made=open('sync');
+ addFilm(made.file,'lb1',{owner:'film:shared'});addFilm(made.file,'lb2',{owner:'film:shared'});
+ const writer=membershipEffect(deps());
+ await publish(made,list(1,2));await drainOne(made,writer);
+ assert.deepEqual(members(made.file),['film:shared']);
+ await publish(made,list(2));await drainOne(made,writer);
+ assert.deepEqual(members(made.file),['film:shared'],'lb1 left but lb2 still resolves to the same Film: it stays a member');
+ await publish(made,list(1,2));await drainOne(made,writer);
+ assert.deepEqual(members(made.file),['film:shared'],'re-adding lb1 keeps it');
+ await publish(made,list());await drainOne(made,writer);
+ assert.deepEqual(members(made.file),[],'only when NO lid of the list resolves to the Film is it cleared');
+ await publish(made,list(1));await drainOne(made,writer);
+ assert.deepEqual(members(made.file),['film:shared'],'and a re-add restores it');
+ // the same through the handoff reconcile: lb2 leaves while lb1 stays listed, but its removal is only handed off
+ const viaHandoff=open('sync');
+ addFilm(viaHandoff.file,'lb1',{owner:'film:shared'});addFilm(viaHandoff.file,'lb2',{owner:'film:shared'});
+ const good=membershipEffect(deps());
+ await publish(viaHandoff,list(1,2));await drainOne(viaHandoff,good);
+ await publish(viaHandoff,list(1));await completeLegacy(viaHandoff);
+ const next=(await Watchlist.pendingEffects(viaHandoff.env)).effects[0];
+ const down=membershipEffect(deps({setMembership:async()=>{throw Object.assign(new Error('x'),{code:'film_person_unavailable'});}}));
+ const receipt=await down(ctxOf(viaHandoff.env),{...next,attempts:MEMBERSHIP_EFFECT_MAX_ATTEMPTS});
+ assert.match(receipt,/:h1$/);
+ await Watchlist.completeEffect(viaHandoff.env,{snapshotId:next.snapshotId,effect:'membership',receipt},{now:NOW,guards:[GUARD]});
+ assert.equal((await membershipReconcile(deps())(ctxOf(viaHandoff.env),{now:NOW})).settled,1);
+ assert.deepEqual(members(viaHandoff.file),['film:shared'],'the reconcile keeps the Film: lb1 is still on the current list');
+ // P1: a whole-batch identity failure never loses an id (added or removed) once the bound is reached
+ const lost=open('sync');addFilm(lost.file,'lb1');addFilm(lost.file,'lb2');
+ await publish(lost,list(1,2));await drainOne(lost,membershipEffect(deps()));
+ await publish(lost,list(2,3));await completeLegacy(lost);
+ addFilm(lost.file,'lb3');
+ const pend=(await Watchlist.pendingEffects(lost.env)).effects[0];
+ const blind=membershipEffect(deps({resolve:async()=>({ok:false,code:'producer_identity_unreadable'})}));
+ for(let attempt=0;attempt<MEMBERSHIP_EFFECT_MAX_ATTEMPTS;attempt++)assert.equal(await blind(ctxOf(lost.env),{...pend,attempts:attempt}),null,'held while the budget lasts');
+ assert.deepEqual(handoff(lost.file).map(row=>row.lid),[],'nothing is recorded before the bound');
+ const exhausted=await blind(ctxOf(lost.env),{...pend,attempts:MEMBERSHIP_EFFECT_MAX_ATTEMPTS});
+ assert.match(exhausted,/:h2$/,'every unprocessed id (the addition lb3 and the removal lb1) is handed off');
+ assert.deepEqual(handoff(lost.file).map(row=>[row.lid,row.state]),[['lb1','pending'],['lb3','pending']]);
+ // a handoff that cannot be recorded holds the effect (never a successful receipt)
+ const unrecordable=membershipEffect(deps({resolve:async()=>({ok:false}),repository:{...Watchlist,recordMembershipHandoff:async()=>({ok:false,reason:'unavailable'})}}));
+ assert.equal(await unrecordable(ctxOf(lost.env),{...pend,attempts:MEMBERSHIP_EFFECT_MAX_ATTEMPTS}),null);
+ await Watchlist.completeEffect(lost.env,{snapshotId:pend.snapshotId,effect:'membership',receipt:exhausted},{now:NOW,guards:[GUARD]});
+ assert.equal((await membershipReconcile(deps())(ctxOf(lost.env),{now:NOW})).settled,2);
+ assert.deepEqual(members(lost.file),['film:lb2','film:lb3'],'both ids were recovered against the CURRENT snapshot: lb1 removed, lb3 added');
+ // P2: every due reconcile attempt uses the budget, transient failures included
+ const flaky=open('sync');addFilm(flaky.file,'lb1');
+ await publish(flaky,list(1));await completeLegacy(flaky);
+ const first=(await Watchlist.pendingEffects(flaky.env)).effects[0];
+ const downEffect=membershipEffect(deps({setMembership:async()=>{throw Object.assign(new Error('x'),{code:'film_person_unavailable'});}}));
+ const handed=await downEffect(ctxOf(flaky.env),{...first,attempts:MEMBERSHIP_EFFECT_MAX_ATTEMPTS});
+ await Watchlist.completeEffect(flaky.env,{snapshotId:first.snapshotId,effect:'membership',receipt:handed},{now:NOW,guards:[GUARD]});
+ const reconcile=membershipReconcile(deps({setMembership:async()=>{throw Object.assign(new Error('x'),{code:'film_person_revision_conflict'});}}));
+ let at=NOW;
+ for(let i=1;i<=HANDOFF_MAX_ATTEMPTS;i++){
+  at+=13*3600000;
+  await reconcile(ctxOf(flaky.env,{now:()=>at}),{now:at});
+  const row=handoff(flaky.file)[0];
+  assert.equal(row.attempts,i,'each due attempt is counted: '+i);
+  assert.equal(row.state,i<HANDOFF_MAX_ATTEMPTS?'pending':'terminal');
+ }
+ assert.equal((await membershipReconcile(deps({resolve:async()=>({ok:false})}))(ctxOf(flaky.env),{now:at+13*3600000})).processed,0,'a terminal row is not due');
+ const blindRows=open('sync');addFilm(blindRows.file,'lb1');
+ await publish(blindRows,list(1));await completeLegacy(blindRows);
+ const f2=(await Watchlist.pendingEffects(blindRows.env)).effects[0];
+ const h2=await membershipEffect(deps({setMembership:async()=>{throw Object.assign(new Error('x'),{code:'film_person_unavailable'});}}))(ctxOf(blindRows.env),{...f2,attempts:MEMBERSHIP_EFFECT_MAX_ATTEMPTS});
+ await Watchlist.completeEffect(blindRows.env,{snapshotId:f2.snapshotId,effect:'membership',receipt:h2},{now:NOW,guards:[GUARD]});
+ await membershipReconcile(deps({resolve:async()=>({ok:false})}))(ctxOf(blindRows.env),{now:NOW});
+ assert.equal(handoff(blindRows.file)[0].attempts,1,'a whole-step identity failure is counted too');
+}
+
 // ===== 10. single writer, proven in the source =====
 {
  const read=file=>fs.readFileSync(file,'utf8');

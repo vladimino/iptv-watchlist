@@ -20,6 +20,15 @@ const BACKOFF_MS=[1*HOUR,3*HOUR,12*HOUR];
 const SOFT=new Set(['film_person_precondition','film_person_redirect','film_person_reference','identity_collision']);
 const TRANSIENT=new Set(['film_person_unavailable','film_person_held','film_person_fence','film_person_revision_conflict','film_person_membership_closed','film_person_bounded']);
 const codeOf=error=>String(error?.code||'');
+// The Films referenced by a list of Letterboxd ids (their resolved targets). Several lids may name ONE Film (`film_external_id` is keyed by film, scheme and value), so a Film leaves the Watchlist only when NO lid of the
+// list still resolves to it. null when the identity reads fail (the caller treats that as a system fault, never as "not referenced").
+async function referencedFilms(deps,env,lids){
+ const out=await deps.resolve(env,lids);
+ if(!out.ok)return null;
+ const films=new Set();
+ for(const item of out.byId.values())if(item&&item.target)films.add(item.target);
+ return films;
+}
 
 // One id, one write. -> {kind:'written'|'stale'|'unchanged'} | {kind:'soft',reason} | {kind:'transient',reason}
 async function applyOne(deps,env,{lid,member,version,at,resolution}){
@@ -65,11 +74,22 @@ export function membershipEffect(deps){
   const handoff=[];
   let written=0,stale=0,skipped=0,transient=null;
   if(!resolved.ok){
-    // The identity reads failed as a whole: a system fault, not a fact about any id.
+    // The identity reads failed as a whole: a system fault, not a fact about any id. After the bound EVERY unprocessed id of this slice (removals too) is handed off for reconcile against the CURRENT snapshot before the
+    // effect may advance or complete; if that cannot be recorded the effect is held (below), nothing is lost.
     transient='identity_unreadable';
+    if(exhausted)for(const item of part)handoff.push({lid:item.lid,reason:'deferred_identity_unreadable'});
   }else{
+    // A removal clears a Film only when no other lid of THIS version's list still resolves to it (two lids may name one Film).
+    let listed;
     for(const item of part){
-      const out=await applyOne(deps,writeEnv,{lid:item.lid,member:item.member,version:snapshot.version,at,resolution:resolved.byId.get(item.lid)});
+      let member=item.member;
+      const resolution=resolved.byId.get(item.lid);
+      if(!member&&resolution&&resolution.target){
+        if(listed===undefined)listed=await referencedFilms(deps,ctx.env,snapshot.films.map(film=>film.lid));
+        if(listed===null){transient='identity_unreadable';if(exhausted){handoff.push({lid:item.lid,reason:'deferred_identity_unreadable'});continue;}break;}
+        if(listed.has(resolution.target))member=true;
+      }
+      const out=await applyOne(deps,writeEnv,{lid:item.lid,member,version:snapshot.version,at,resolution});
       if(out.kind==='written')written++;
       else if(out.kind==='stale')stale++;
       else if(out.kind==='unchanged')skipped++;
@@ -107,22 +127,34 @@ export function membershipReconcile(deps){
   const current=await repository.readCurrentMembers(ctx.env);
   if(!current.ok||current.version<1)return {skipped:true,reason:'current_unreadable'};
   const resolved=await deps.resolve(ctx.env,due.rows.map(row=>row.lid));
-  if(!resolved.ok)return {skipped:true,reason:'identity_unreadable'};
   const writeEnv=fenceEnv(ctx.env,ctx.epoch);
   const at=new Date(now).toISOString();
   let settled=0,terminal=0;
+  // Every due attempt uses the retry budget, whatever failed (a system fault included), so a row can never stay pending for ever at its first attempt count.
+  const retry=async(row,reason)=>{
+   const attempts=row.attempts+1;
+   if(attempts>=maxAttempts){if((await repository.settleMembershipHandoff(ctx.env,{lid:row.lid,state:'terminal',attempts,reason,now},{guards})).ok)terminal++;return;}
+   await repository.settleMembershipHandoff(ctx.env,{lid:row.lid,state:'pending',attempts,nextRetryAt:new Date(now+BACKOFF_MS[Math.min(attempts-1,BACKOFF_MS.length-1)]).toISOString(),reason,now},{guards});
+  };
+  if(!resolved.ok){for(const row of due.rows)await retry(row,'identity_unreadable');return {processed:due.rows.length,settled:0,pending:Math.max(0,due.pending-terminal),terminal:due.terminal+terminal,error:'identity_unreadable'};}
+  let listed;
   for(const row of due.rows){
-   const member=current.lids.has(row.lid);
-   const out=await applyOne(deps,writeEnv,{lid:row.lid,member,version:current.version,at,resolution:resolved.byId.get(row.lid)});
+   const resolution=resolved.byId.get(row.lid);
+   // Desired membership of the Film comes from the WHOLE current snapshot: a lid that left the list does not clear a Film another current lid still resolves to.
+   let member=current.lids.has(row.lid);
+   if(!member&&resolution&&resolution.target){
+    if(listed===undefined)listed=await referencedFilms(deps,ctx.env,[...current.lids]);
+    if(listed===null){await retry(row,'identity_unreadable');continue;}
+    member=listed.has(resolution.target);
+   }
+   const out=await applyOne(deps,writeEnv,{lid:row.lid,member,version:current.version,at,resolution});
    if(out.kind==='written'||out.kind==='stale'||out.kind==='unchanged'){
     if((await repository.settleMembershipHandoff(ctx.env,{lid:row.lid,state:'settled',attempts:row.attempts,reason:out.kind,now},{guards})).ok)settled++;
     continue;
    }
    // A lid that left the Watchlist and still has no Film has nothing to apply: nothing is owed.
    if(!member&&out.kind==='soft'){if((await repository.settleMembershipHandoff(ctx.env,{lid:row.lid,state:'settled',attempts:row.attempts,reason:'not_listed',now},{guards})).ok)settled++;continue;}
-   const attempts=row.attempts+(out.kind==='soft'?1:0);
-   if(attempts>=maxAttempts){if((await repository.settleMembershipHandoff(ctx.env,{lid:row.lid,state:'terminal',attempts,reason:out.reason,now},{guards})).ok)terminal++;continue;}
-   await repository.settleMembershipHandoff(ctx.env,{lid:row.lid,state:'pending',attempts,nextRetryAt:new Date(now+BACKOFF_MS[Math.min(attempts,BACKOFF_MS.length-1)]).toISOString(),reason:out.reason,now},{guards});
+   await retry(row,out.reason);
   }
   return {processed:due.rows.length,settled,pending:Math.max(0,due.pending-settled-terminal),terminal:due.terminal+terminal};
  };
