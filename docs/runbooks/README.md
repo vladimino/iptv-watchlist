@@ -18,6 +18,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [MCP connection and read-only smoke](mcp-connectivity.md)
 - [Prediction Scheduled Tasks and safe diagnostics](prediction-operations.md)
 - [Prediction auxiliary state in D1: checkpoint and outbox recovery, offline import and the AIR-554 handoff (dormant)](prediction-aux-state-cutover.md)
+- [Watchlist membership projection, migration 0037: operator, quiet window, readback and the read-only baseline preflight (prepared, not applied; needs 0036 and its own owner GO)](watchlist-membership-0037-apply.md)
 - [D1 lookup indexes, migration 0036: prerequisites, window, readback and forward-only rollback (prepared, not applied, needs its own owner GO)](d1-lookup-indexes-0036-apply.md)
 - [Predictions auxiliary-state cutover run sheet (AIR-554 proposal, nothing authorized)](prediction-aux-cutover-run-sheet.md)
 - [Batch runner v2 dry-run A/B procedure](prediction-batch-v2-dry-run-ab.md) (proposed, owner-gated)
