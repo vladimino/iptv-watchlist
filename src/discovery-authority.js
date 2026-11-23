@@ -443,7 +443,7 @@ export async function loadingIsLedgerSeal(env){
  return !pending;
 }
 // `options.project` (AIR-519, catalog only) maps each admitted film after its identity is checked, so a reader that needs a few fields never holds
-// every payload whole; without it the catalog is the stored payloads, as before.
+// every payload whole; a projection that answers `undefined` leaves that film out (AIR-586); without it the catalog is the stored payloads, as before.
 export async function routeRead(env,key,options=null){
  if(!ownsKey(key))return {handled:false};
  const opened=await readAuthority(env);
@@ -1793,8 +1793,11 @@ async function readCatalog(env,gate,options=null){
  logCatalogRead(rows.length,started,project!==null);
  for(const row of rows){
   let film;try{film=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
+  // AIR-586: the raw text is released as soon as it is parsed, so a whole-catalog read never holds every payload twice (text and object).
+  row.payload_json=null;
   if(film.canonicalIdentity!==row.canonical_identity||String(film.tmdbId)!==row.tmdb_id)throw failed('discovery_unavailable');
-  if(project){row.payload_json=null;catalog[row.film_id]=project(film);}
+  // A projection that answers `undefined` leaves the film out (AIR-586: a reader that needs a few films keeps only those).
+  if(project){const value=project(film);if(value!==undefined)catalog[row.film_id]=value;}
   else catalog[row.film_id]=film;
  }
  return catalog;

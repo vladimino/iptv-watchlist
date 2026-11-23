@@ -21,6 +21,7 @@ const SCENARIOS={
  'prediction-batch-submit-wall':{file:'prediction-batch-submit.mjs',marker:'ms<15000'},
  'prediction-batch-validate-p95':{file:'prediction-batch-validate.mjs',marker:'p95<100'},
  'prediction-step-timing-overhead':{file:'prediction-step-timing.mjs',marker:'timed-base<0.25'},
+ 'user-reads-memory-production-size':{file:'user-read-memory.mjs',marker:"'--max-old-space-size=92'"},
 };
 
 const names=readdirSync('tests').filter(file=>file.endsWith('.mjs')).sort();

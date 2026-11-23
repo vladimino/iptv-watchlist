@@ -27,7 +27,10 @@ const window={
  location:{href:'https://iptv.example/'},
  history:{state:null,replaceState(_state,_title,url){window.location.href=new URL(url,window.location.href).href;}},
 };
-let timer=null,inFlight=0,maxInFlight=0,programmeVersion=1;
+let timer=null,inFlight=0,maxInFlight=0,heavyInFlight=0,maxHeavyInFlight=0,programmeVersion=1;
+// AIR-586: the four reads that each hold a large part of the catalog in the Worker.
+const HEAVY=new Set(['/api/programme','/api/enrichment/view','/api/catalog/available','/api/enrichment/footer/status']);
+const bodies=new Map();
 const calls=[],pending=[],scrolls=[];
 const failed=new Set();
 const startedIds=['keep'];
@@ -56,9 +59,12 @@ const context=vm.createContext({
   calls.push(path);
   inFlight++;
   maxInFlight=Math.max(maxInFlight,inFlight);
+  const heavy=HEAVY.has(path);
+  if(heavy){heavyInFlight++;maxHeavyInFlight=Math.max(maxHeavyInFlight,heavyInFlight);}
   return new Promise(resolve=>pending.push(()=>{
    inFlight--;
-   resolve({ok:!failed.has(path),status:failed.has(path)?503:200,json:async()=>payload(path)});
+   if(heavy)heavyInFlight--;
+   resolve({ok:!failed.has(path),status:failed.has(path)?503:200,json:async()=>failed.has(path)&&bodies.has(path)?bodies.get(path):payload(path)});
   }));
  },
 });
@@ -71,18 +77,36 @@ const originalRender=context.render;
 context.render=function(...args){paints++;window.scrollY=0;el('.activity-scroll').scrollTop=0;return originalRender.apply(this,args);};
 const originalShortlist=context.renderShortlist;
 context.renderShortlist=function(...args){shortPaints++;return originalShortlist.apply(this,args);};
-function resetTraffic(){calls.length=0;pending.length=0;scrolls.length=0;inFlight=0;maxInFlight=0;}
+function resetTraffic(){calls.length=0;pending.length=0;scrolls.length=0;inFlight=0;maxInFlight=0;heavyInFlight=0;maxHeavyInFlight=0;}
 function flush(){for(const finish of pending.splice(0))finish();}
+// The heavy reads follow one another, so each settles before the next is sent: drain the microtasks between flushes.
+const tickOver=()=>new Promise(resolve=>setImmediate(resolve));
 async function untilIdle(){
- for(let i=0;i<50&&(pending.length||run('liveRunning')||run('livePending')||run('liveCoalesced'));i++){flush();await Promise.resolve();}
+ for(let i=0;i<200&&(pending.length||run('liveRunning')||run('livePending')||run('liveCoalesced')||run('heavyActive')>0);i++){flush();await tickOver();}
+ flush();await tickOver();
 }
 function handler(target,type){return listeners[target].get(type)?.[0];}
 
 failed.add('/api/programme');
 const failedProgramme=run('loadProgramme()');
-flush();
-await assert.rejects(failedProgramme,/ещё не готова/);
+failedProgramme.catch(()=>{});
+await untilIdle();
+// AIR-586: a failed read is not «not ready»: only the route's own first-update answer says that.
+await assert.rejects(failedProgramme,/^Error: Не удалось загрузить программу \(HTTP 503\)\. Повторим автоматически\.$/);
+assert.equal(el('#result-count').textContent,'Программа временно недоступна');
+assert.doesNotMatch(el('#snapshot-updated').textContent,/не готова/,'a transient 503 is not shown as an absent programme');
 assert.equal(run('films.length'),0,'a failed programme read leaves the page without a snapshot');
+// Another read that lands before the retry (the view) renders the grid: the count and the empty state still say the programme did not load, never «0 фильмов».
+run('render()');
+assert.equal(el('#result-count').textContent,'Программа временно недоступна');
+assert.equal(el('#empty h2').textContent,'Программа не загрузилась');
+assert.equal(el('#empty p').textContent,'Повторим автоматически. Это не пустая программа.');
+bodies.set('/api/programme',{error:'Первое обновление ещё выполняется'});
+const notReady=run('loadProgramme()');
+notReady.catch(()=>{});
+await untilIdle();
+await assert.rejects(notReady,/ещё не готова/,'the route\'s own first-update answer still reads as not ready');
+bodies.delete('/api/programme');
 failed.delete('/api/programme');
 const firstProgramme=run('loadProgramme({quiet:true})');
 await untilIdle();
@@ -120,11 +144,14 @@ run('stopLiveRefresh()');
 resetTraffic();
 const first=run('runLiveRefresh()');
 const second=run('runLiveRefresh()');
-assert.equal(calls.length,6);
-assert.equal(maxInFlight,6,'one refresh does not overlap its own requests');
+// AIR-586: the small reads and the programme start at once (the programme on its shared turn); the other large reads wait for the one before them.
+await tickOver();
+assert.deepEqual([...calls].sort(),['/api/events','/api/programme','/api/started']);
 await untilIdle();
 assert.equal(calls.length,12,'a refresh requested while one is running waits for a single follow-up');
-assert.equal(maxInFlight,6);
+assert.equal(maxHeavyInFlight,1,'never two of the large reads at once');
+assert.ok(maxInFlight<=3,'one refresh does not overlap its own requests');
+assert.deepEqual(calls.filter(url=>HEAVY.has(url)).slice(0,4),['/api/programme','/api/enrichment/view','/api/catalog/available','/api/enrichment/footer/status'],'the programme first, then the view, Finds and the footer');
 await first;
 await second;
 run('stopLiveRefresh()');
@@ -214,6 +241,23 @@ await recoveredFooter;
 assert.match(el('#summary-forecast').textContent,/9/);
 assert.equal(el('#status-stale-note').hidden,true,'the next good read removes the stale note');
 assert.equal(Object.hasOwn(el('#status-stale-note').dataset,'failure'),false,'and the failure kind');
+// AIR-586: a warm 503 of the programme keeps the last good snapshot on screen, says the refresh failed, and the next good read restores the normal status.
+const titleBefore=run('films[0].title');
+failed.add('/api/programme');
+const warmFailure=run('runLiveRefresh()');
+await untilIdle();
+await warmFailure;
+assert.equal(run('films[0].title'),titleBefore,'a failed refresh keeps the last programme');
+assert.equal(run('programmeRefreshError'),true);
+assert.equal(el('#connection-badge').textContent,'Ошибка обновления');
+assert.notEqual(el('#result-count').textContent,'Программа временно недоступна','a warm failure is not shown as an absent programme');
+assert.equal(calls.filter(url=>url==='/api/catalog/available').length>0,true,'the other reads still run after a failed programme read');
+failed.delete('/api/programme');
+const warmRecovery=run('runLiveRefresh()');
+await untilIdle();
+await warmRecovery;
+assert.equal(run('programmeRefreshError'),false);
+assert.notEqual(el('#connection-badge').textContent,'Ошибка обновления','the next good read restores the normal status');
 failed.add('/api/events');
 const failedEvents=run('loadEvents()');
 flush();

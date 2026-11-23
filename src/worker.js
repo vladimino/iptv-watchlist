@@ -804,18 +804,37 @@ async function catalogWatchedRoute(request,env,url){
 }
 // The generation's own copy of a published document, strictly pinned: with a published pointer an absent copy fails closed instead of
 // falling back to the shared public keys (the shared `loadJSON` fallback is unchanged for other routes). Shared by the catalog routes.
-async function catalogGenerationCopy(env,publication,pinnedRunId,name){
+// `options.project` (catalog only, AIR-586) is the DiscoveryAuthority projection: applied row by row to a D1 catalog, and to the parsed object of an
+// R2 copy (the explicit local stand-in), so both paths answer the same projected catalog.
+async function catalogGenerationCopy(env,publication,pinnedRunId,name,options=null){
   if(name==='discovered-films.json'&&typeof DiscoveryAuthority!=='undefined'){
    const gate=await DiscoveryAuthority.readAuthority(env);
    if(gate.ready){
     if(!pinnedRunId||gate.programmeRunId!==pinnedRunId)return null;
-    const routed=await DiscoveryAuthority.routeRead(env,epgGenerationKey(pinnedRunId,'discovered-films.json'));
+    const routed=await DiscoveryAuthority.routeRead(env,epgGenerationKey(pinnedRunId,'discovered-films.json'),options);
     if(!routed.handled){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
     return routed.value;
    }
   }
   if(publication.authority==='d1'&&name==='programme.json')return pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'programme',publication.generation):null;
-  const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));return object?object.json():null;
+  const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));
+  const value=object?await object.json():null;
+  return name==='discovered-films.json'?projectCatalogObject(value,options):value;
+}
+// The same projection over a catalog that is already a whole object (an R2 copy): each film mapped, `undefined` left out, anything else unchanged.
+function projectCatalogObject(catalog,options){
+ const project=typeof options?.project==='function'?options.project:null;
+ if(!project||!catalog||typeof catalog!=='object'||Array.isArray(catalog))return catalog;
+ const out={};
+ for(const [id,film] of Object.entries(catalog)){const value=project(film);if(value!==undefined)out[id]=value;}
+ return out;
+}
+// AIR-586. GET /api/programme presents only its own `catalogFilms` entries (`presentCatalogFilms` looks each one up by TMDB id), so it keeps only the
+// catalog films of those TMDB ids instead of every admitted film. The kept records are the stored ones, unchanged: the presentation is the same.
+function programmeCatalogProjection(entries){
+ const wanted=new Set();
+ for(const entry of entries||[])if(entry?.tmdbId!=null)wanted.add(String(entry.tmdbId));
+ return {project:film=>film&&typeof film==='object'&&film.tmdbId!=null&&wanted.has(String(film.tmdbId))?film:undefined};
 }
 async function catalogAvailableRoute(env){
  const now=Date.now();
@@ -826,7 +845,13 @@ async function catalogAvailableRoute(env){
  const watchlistLoad=Promise.resolve(publication.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json')).then(document=>composeWatchlistRead(env,document,null,wbox));
  let programme,catalog,watchlist,index,profile,metadata,titleExclusion,metaGate=null;
  try{
-  [programme,catalog,watchlist,index,profile,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadFindsTitleExclusion(env,now)]);
+  // AIR-586: the programme is read first, so the catalog can keep whole only the films that air in it (`availableCatalogProjection`).
+  const programmeRead=pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json');
+  const others=Promise.all([watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadFindsTitleExclusion(env,now)]);
+  others.catch(()=>{});
+  programme=await programmeRead;
+  const projection=availableCatalogProjection(programme,pinnedRunId||programme?.runId||null,publication.authority==='d1'&&!!pinnedRunId);
+  [catalog,[watchlist,index,profile,titleExclusion]]=await Promise.all([pinnedRunId?catalogGenerationCopy(env,publication,pinnedRunId,'discovered-films.json',projection):loadJSON(env,'epg/discovered-films.json').then(value=>projectCatalogObject(value,projection)),others]);
   const read=await catalogMetadataRead(env,catalogBridgeIds({catalog,programme,watchlist,index}));
   metadata=read.records;metaGate=read.gate;
  }catch(error){
@@ -846,6 +871,23 @@ async function catalogAvailableRoute(env){
  try{await catalogMetadataFinish(env,metaGate);await watchlistStill(env,wbox);}
  catch(error){const refused=titleReadRefusal(error)||watchlistRouteFault(error);if(refused)return refused;throw error;}
  return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,completedOnly:publication.authority==='d1'&&!!pinnedRunId,now,titleExclusion,freshness,watchedMarkEnabled:true}));
+}
+// AIR-586. `catalogAvailable` offers a catalog film only when it has a show in the window: with a D1 published run the shows come from the completed
+// programme (`completedShowsByTmdb`), otherwise from the record's own `shows`. Every other film is only looked at by the identity bridge
+// (`catalogLidTmdb`, `catalogBridgeIds`) and the display title exclusion (`findsTitleSuppressor`), which read the fields of the skeleton below, and is
+// then skipped by the loop before anything else of it is read. Such a film is therefore kept as that skeleton instead of its whole payload. The test
+// here is a superset of the window (any show at all), so a film the response can offer is always kept whole and the response is unchanged.
+const AVAILABLE_SKELETON_FIELDS=['id','tmdbId','canonicalIdentity','title','original','aliases','year'];
+function availableCatalogProjection(programme,programmeRunId,completedOnly){
+ const completed=completedOnly?(programme?.runId===programmeRunId?completedShowsByTmdb(programme):new Map()):null;
+ return {project:film=>{
+  if(!film||typeof film!=='object')return film;
+  const airs=completed?film.tmdbId!=null&&(completed.get(String(film.tmdbId))||[]).length>0:Array.isArray(film.shows)&&film.shows.length>0;
+  if(airs)return film;
+  const skeleton={};
+  for(const field of AVAILABLE_SKELETON_FIELDS)if(Object.hasOwn(film,field))skeleton[field]=film[field];
+  return skeleton;
+ }};
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){
@@ -2749,7 +2791,24 @@ if(typeof CatalogPosterWeekly!=='undefined'&&controller.cron===CatalogPosterWeek
 if(typeof LetterboxdSync!=='undefined'&&controller.cron===LetterboxdSync.CRON){execution.waitUntil(Promise.resolve().then(()=>LetterboxdSync.ensure(env,{now:at,ports:letterboxdPorts(env)})).catch(()=>{}));return;}
 if(typeof DISCOVERY_FAST_CRON==='string'&&controller.cron===DISCOVERY_FAST_CRON){execution.waitUntil(Promise.resolve().then(()=>typeof reconcileDiscoveryRecovery==='function'?reconcileDiscoveryRecovery(env,{now:at}):undefined).catch(()=>{}));return;}
 const reconcile=Promise.resolve().then(()=>typeof reconcileDiscoveryWorkflow==='function'?reconcileDiscoveryWorkflow(env,{scheduled:true,now:at}):undefined);const settled=reconcile.then(()=>{},()=>{});const head=new Promise(resolve=>{const timer=setTimeout(resolve,SCHEDULED_RECONCILE_HEAD_MS);settled.then(()=>{clearTimeout(timer);resolve();});});execution.waitUntil((async()=>{await head;await Promise.allSettled([reconcile,typeof EpgOrchestration==='undefined'?Promise.resolve():EpgOrchestration.ensure(env,{now:Date.now()}),typeof Monitor==='undefined'?Promise.resolve():Monitor.run(env,{now:controller.scheduledTime||Date.now()})]);})());},
-async fetch(request,env,execution){
+async fetch(request,env,execution){return observeUserRead(request,await routeRequest(request,env,execution));}
+};
+// AIR-586. A 503 the Worker answers itself on one of the four user reads of the page (Workers Logs show it with outcome `ok`, unlike an isolate that ran
+// out of memory) writes one line naming its refusal: the path and the codes of its JSON body, each only when it has the shape of an internal code (lower-case
+// letters, digits and underscores), so never a film id, a title, a payload or a message text. Nothing else is logged and the answer is returned unchanged.
+const USER_READ_PATHS=new Set(['/api/programme','/api/enrichment/view','/api/catalog/available','/api/enrichment/footer/status']);
+async function observeUserRead(request,response){
+ try{
+  if(response?.status!==503||request.method!=='GET')return response;
+  const path=new URL(request.url).pathname;
+  if(!USER_READ_PATHS.has(path))return response;
+  let body=null;try{body=await response.clone().json();}catch{body=null;}
+  const code=value=>typeof value==='string'&&/^[a-z][a-z0-9_]{1,63}$/.test(value)?value:null;
+  console.log(JSON.stringify({event:'user_read_refused',path,status:503,code:code(body?.code),reason:code(body?.reason),error:code(body?.error),notReady:body?.error==='Первое обновление ещё выполняется',retryAfter:response.headers.get('Retry-After')!==null}));
+ }catch{/* a log line is never part of the answer */}
+ return response;
+}
+async function routeRequest(request,env,execution){
  const url=new URL(request.url);
  try{
  if(url.pathname==='/mcp')return await mcpRoute(request,env,execution);
@@ -2801,7 +2860,7 @@ async fetch(request,env,execution){
     const merged=programmeWithWatchlist(data,watchlist);
     let catalog=null;
     if(Array.isArray(merged.catalogFilms)&&merged.catalogFilms.length){
-     try{const publication=await epgPublication(env);catalog=await catalogGenerationCopy(env,publication,data.runId||null,'discovered-films.json');}
+     try{const publication=await epgPublication(env);catalog=await catalogGenerationCopy(env,publication,data.runId||null,'discovered-films.json',programmeCatalogProjection(merged.catalogFilms));}
      catch{catalog=null;}
     }
     const presented=presentLocalized(presentCatalogFilms(merged,catalog),titles,reviews.body);
@@ -2863,4 +2922,4 @@ async fetch(request,env,execution){
   console.error(JSON.stringify({event:'route_error',method:request.method,path:url.pathname,code:internalCode(e?.code),message:internalCode(e?.message),name:typeof e?.name==='string'&&/^[A-Za-z]{1,40}$/.test(e.name)?e.name:null}));
   return json({error:e.message},502);
  }
-}};
+}

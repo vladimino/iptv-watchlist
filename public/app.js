@@ -2040,19 +2040,25 @@ function renderFinds(now=nowMs()){
  renderSimilar(now);
  return list;
 }
-async function fetchUserRead(url){
- let response=await fetch(url);
+// AIR-586: `signal` (the large read's turn) cancels the request, the Retry-After wait and the retry alike.
+async function fetchUserRead(url,{signal}={}){
+ const init=signal?{signal}:undefined;
+ let response=await fetch(url,init);
  const retry=response.status===503&&typeof response.headers?.get==='function'?response.headers.get('Retry-After'):null;
  if(retry==null)return response;
  const parsed=Number(retry),ms=Math.min(2000,Math.max(0,Number.isFinite(parsed)?parsed*1000:400));
- await new Promise(resolve=>setTimeout(resolve,ms));
- return fetch(url);
+ await new Promise((resolve,reject)=>{
+  const timer=setTimeout(resolve,ms);
+  if(signal&&typeof signal.addEventListener==='function')signal.addEventListener('abort',()=>{clearTimeout(timer);reject(new Error('aborted'));},{once:true});
+ });
+ return fetch(url,init);
 }
-async function loadCatalog(){
+function loadCatalog(){return heavyTurn('catalog',signal=>loadCatalogNow(signal));}
+async function loadCatalogNow(signal){
  if(findsLoading)return 'busy';
  findsLoading=true;
  try{
-  const response=await fetchUserRead('/api/catalog/available');
+  const response=await fetchUserRead('/api/catalog/available',{signal});
   if(!response.ok)throw new Error();
   const data=await response.json();
   if(!data||!Array.isArray(data.films))throw new Error();
@@ -2093,11 +2099,13 @@ function render(){
   armSoonTick();
   // A rating-based filter restored before the ratings arrive is not an empty result: say they are loading (AIR-585).
   const ratingsPending=!ratingsLoaded&&!enrichmentUnavailable&&(state.minActualRating!==null||state.viewing!=='any'||state.minPrediction!==null||state.minProbability!==null);
-  const emptyTitle=$('#empty h2');if(emptyTitle)emptyTitle.textContent=ratingsPending?'Загружаем оценки и прогнозы…':'Таких фильмов не найдено';
-  const emptyCopy=$('#empty p');if(emptyCopy)emptyCopy.textContent=ratingsPending?'Фильтр по оценкам применится, как только они загрузятся.':enrichmentUnavailable&&!ratingsLoaded?'Прогнозы сейчас недоступны. Это не пустая коллекция.':blackZone()&&state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет.':'Измени название, выбери другой жанр или расширь диапазон лет.';
+  // AIR-586: before a first programme was read, a failed read is not an empty programme: the count and the empty state say it did not load.
+  const programmeMissing=!programmeReady&&programmeRefreshError;
+  const emptyTitle=$('#empty h2');if(emptyTitle)emptyTitle.textContent=programmeMissing?'Программа не загрузилась':ratingsPending?'Загружаем оценки и прогнозы…':'Таких фильмов не найдено';
+  const emptyCopy=$('#empty p');if(emptyCopy)emptyCopy.textContent=programmeMissing?'Повторим автоматически. Это не пустая программа.':ratingsPending?'Фильтр по оценкам применится, как только они загрузятся.':enrichmentUnavailable&&!ratingsLoaded?'Прогнозы сейчас недоступны. Это не пустая коллекция.':blackZone()&&state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет.':'Измени название, выбери другой жанр или расширь диапазон лет.';
   updateProgrammeStatus();
   const shows=visible.reduce((n,f)=>n+periodShows(f).length,0);
-  $('#result-count').textContent=valid?`${visible.length} ${filmWord(visible.length)} · ${shows} ${showWord(shows)}`:!validYear?'Проверь диапазон лет':'Проверь длительность';
+  $('#result-count').textContent=programmeMissing?'Программа временно недоступна':valid?`${visible.length} ${filmWord(visible.length)} · ${shows} ${showWord(shows)}`:!validYear?'Проверь диапазон лет':'Проверь длительность';
   const sortBox=$('#sort');if(sortBox)sortBox.value=state.sort;
  syncSearchControls();
   syncUrl();
@@ -2409,14 +2417,25 @@ async function finishProgrammeUi(){
  programmeReady=true;
  await registerModelTool();
 }
-async function loadProgramme({quiet}={}){
+// AIR-586: only the route's own «first update still running» answer means there is no programme yet. Any other failed read (a 503 of an exceeded Worker,
+// a 409 fence, a 502) is a failed load of a programme that may well exist, and the page says so instead of «not ready».
+const PROGRAMME_NOT_READY='Программа ещё не готова. Попробуй открыть страницу немного позже.';
+async function programmeFailureMessage(response){
+ let body=null;try{body=typeof response.json==='function'?await response.json():null;}catch{body=null;}
+ if(response.status===503&&body&&body.error==='Первое обновление ещё выполняется')return PROGRAMME_NOT_READY;
+ const status=Number.isInteger(response.status)?response.status:'ошибка';
+ return `Не удалось загрузить программу (HTTP ${status}). Повторим автоматически.`;
+}
+function loadProgramme(options={}){return heavyTurn('programme',signal=>loadProgrammeNow({...options,signal}));}
+const PROGRAMME_TIMED_OUT='Программа не загрузилась вовремя. Повторим автоматически.';
+async function loadProgrammeNow({quiet,signal}={}){
  if(programmeLoading)return 'busy';
  programmeLoading=true;
  try{
-  const response=await fetch('/api/programme');
-  if(!response.ok)throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
+  const response=await fetch('/api/programme',signal?{signal}:undefined);
+  if(!response.ok)throw new Error(await programmeFailureMessage(response));
   const data=await response.json();
-  if(!data||!Array.isArray(data.films))throw new Error('Программа ещё не готова. Попробуй открыть страницу немного позже.');
+  if(!data||!Array.isArray(data.films))throw new Error(PROGRAMME_NOT_READY);
   // AIR-541: a saved copy never replaces what is already shown from the authoritative source (the last good result stays in memory); on a cold load it is shown, read-only and labelled.
   if(data.source==='mirror'&&data.readOnly===true){
    if(programmeReady&&degradedSources.get('programme')?.kind!=='mirror'){
@@ -2444,6 +2463,7 @@ async function loadProgramme({quiet}={}){
   renderFinds();
   return true;
  }catch(error){
+  if(signal?.aborted)error=new Error(PROGRAMME_TIMED_OUT);
   programmeRefreshError=true;
   if(programmeReady){
    // A failed refresh leaves the last authoritative result readable but read-only until a refresh succeeds (also without a usable saved copy).
@@ -2473,19 +2493,54 @@ function requestLiveRefresh(){
   return runLiveRefresh();
  });
 }
+// AIR-586: the four reads that each hold a large part of the catalog in the Worker (programme, view, Finds, footer) go one after the other, never together:
+// sent at once they land in one Worker isolate and their memory adds up past its limit, which fails all of them with 503. Every call of the four loaders,
+// wherever it comes from (the first load, a live refresh, the cold retry, a Finds mark, a retry button), takes one shared turn (`heavyTurn`), so at most one
+// of them is in flight at any time. A loader already waiting for its turn is shared, not queued twice (refreshes still coalesce). A read still open after
+// HEAVY_TURN_MAX_MS is cancelled through the turn's AbortController (request, Retry-After wait, retry and body), and the next turn starts only after the
+// loader has settled, so one hung read cannot stop the page and the page never has two large requests open. The footer reader has its own 45 s abort
+// (FOOTER_READ_TIMEOUT_MS) and settles before this bound. A cancelled request ends the browser's side only: it does not prove the Worker stopped working on it.
+const HEAVY_TURN_MAX_MS=60000;
+let heavyChain=Promise.resolve(),heavyActive=0;
+const heavyWaiting=new Map();
+function heavyTurn(key,load){
+ const waiting=heavyWaiting.get(key);if(waiting)return waiting;
+ let release;const turn=new Promise(resolve=>{release=resolve;});
+ const previous=heavyChain;heavyChain=turn;heavyActive++;
+ const run=previous.then(()=>{
+  heavyWaiting.delete(key);
+  const controller=typeof AbortController==='function'?new AbortController():null;
+  const timer=controller&&typeof setTimeout==='function'?setTimeout(()=>controller.abort(),HEAVY_TURN_MAX_MS):null;
+  const started=Promise.resolve().then(()=>load(controller?controller.signal:undefined));
+  const done=()=>{if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);heavyActive--;release();};
+  started.then(done,done);
+  return started;
+ });
+ heavyWaiting.set(key,run);
+ return run;
+}
+// The footer reader itself stays byte-identical to the admin pages' (public/status-footer.js); on this page it is called through its turn.
+function loadFooterTurn(options={}){return heavyTurn('footer',()=>loadPredictionQueue(options));}
+// The programme comes first, so the page shows it first; the small reads (events, started) still run beside them. Each loader keeps its own failure handling and answers true, false or 'busy'.
+async function loadHeavyReads({quiet=true}={}){
+ const done=[];
+ done.push(await loadProgramme({quiet}));
+ done.push(await loadEnrichment({quiet}));
+ done.push(await loadCatalog());
+ done.push(await loadFooterTurn({quiet}));
+ return done;
+}
 async function runLiveRefresh(followUp=false){
  if(document.hidden)return;
  if(liveRunning){livePending=true;return;}
  liveRunning=true;
  try{
-  const done=await Promise.all([
+  const [events,started,heavy]=await Promise.all([
    loadEvents(false,{quiet:true}),
-   loadPredictionQueue({quiet:true}),
-   loadEnrichment({quiet:true}),
-   loadCatalog(),
    loadStarted({quiet:true}),
-   loadProgramme({quiet:true})
+   loadHeavyReads({quiet:true})
   ]);
+  const done=[events,started,...heavy];
   if(!followUp&&done.some(ok=>ok==='busy'))livePending=true;
   refreshTimeSensitiveView();
  }finally{
@@ -2516,18 +2571,22 @@ async function init(){
  if(eventsRequested()){const here=new URL(window.location.href);if((here.pathname.replace(/\/+$/,'')||'/')!=='/events'){window.history.replaceState(window.history.state,'',ReturnHome.withReturn('/events','/'+filmSearchFrom(here.href)));}applyEventsScreen(true);}
  else{const openingFilm=filmIdFromLocation();if(openingFilm)applyFilmScreen(openingFilm);}
  setYearBounds(true);
+ let coldFailure=false;
  try{await loadProgramme();}
- catch(error){showProgrammeUnavailable(error);console.error(error);}
+ catch(error){coldFailure=true;showProgrammeUnavailable(error);console.error(error);}
  loadStarted();
  loadPresets();
  loadEvents();
- loadEnrichment();
- loadCatalog();
- loadPredictionQueue();
+ // AIR-586: the remaining large reads take their turns after the programme (see heavyTurn), in this order.
+ loadEnrichment();loadCatalog();loadFooterTurn();
  startLiveRefresh();
+ // A failed first programme read is retried once soon instead of waiting for the next poll; a later success restores the normal view.
+ if(coldFailure&&typeof setTimeout==='function')setTimeout(()=>{if(!programmeReady)requestLiveRefresh();},COLD_PROGRAMME_RETRY_MS);
 }
+const COLD_PROGRAMME_RETRY_MS=5000;
 
-async function loadEnrichment(options={}){if(enrichmentLoading)return 'busy';enrichmentLoading=true;try{const response=await fetchUserRead('/api/enrichment/view');if(!response.ok)throw new Error();const data=await response.json();if(!data||typeof data.films!=='object')throw new Error();const key=JSON.stringify(data);if(key===enrichmentKey)return true;enrichmentKey=key;enrichment=data;ratingsLoaded=true;enrichmentUnavailable=false;updateFacetOptions();renderPreservingScroll();return true;}catch{enrichmentUnavailable=true;if(!ratingsLoaded&&!options.quiet)render();return false;}finally{enrichmentLoading=false;}}
+function loadEnrichment(options={}){return heavyTurn('enrichment',signal=>loadEnrichmentNow({...options,signal}));}
+async function loadEnrichmentNow(options={}){if(enrichmentLoading)return 'busy';enrichmentLoading=true;try{const response=await fetchUserRead('/api/enrichment/view',{signal:options.signal});if(!response.ok)throw new Error();const data=await response.json();if(!data||typeof data.films!=='object')throw new Error();const key=JSON.stringify(data);if(key===enrichmentKey){if(enrichmentUnavailable){enrichmentUnavailable=false;renderPreservingScroll();}return true;}enrichmentKey=key;enrichment=data;ratingsLoaded=true;enrichmentUnavailable=false;updateFacetOptions();renderPreservingScroll();return true;}catch{enrichmentUnavailable=true;if(!ratingsLoaded&&!options.quiet)render();return false;}finally{enrichmentLoading=false;}}
  const FOOTER_RUN_STATUS={idle:'не запускался',running:'выполняется',completed:'завершён',blocked:'приостановлен',interrupted:'прерван'};
 const INTEGRATION_STATE={healthy:'работает',degraded:'требует внимания',failed:'сбой',stale:'давний успех',unknown:'нет данных',off:'выключено',running:'выполняется',waiting:'ожидает'};
 const INTEGRATION_CODE={ok:'',stale:'последний успех давно',no_data:'',running:'',ratings_blocked:'список оценок временно недоступен',ratings_incomplete:'список оценок прочитан не полностью',ratings_rate_limit:'слишком много запросов',ratings_failed:'оценки прочитать не удалось',ratings_pending:'чтение оценок не завершилось, причина неизвестна',watchlist_failed:'watchlist прочитать не удалось',watchlist_stuck:'синхронизация не завершилась',epg_http:'загрузка EPG не удалась',epg_window:'EPG не покрывает текущее окно',epg_parse:'разбор EPG не удался',epg_failed:'обновление EPG не завершилось',epg_unproven:'публикация этого поколения не подтверждена',resolver_waiting:'',resolver_backoff:'распознавание подождёт: слишком много запросов',resolver_unconfigured:'распознавание не настроено',resolver_failed:'распознавание остановилось',resolver_no_recent_progress:'нет подтверждённого выполнения · вероятна внешняя блокировка; проверь Usage',prediction_interrupted:'запуск прерван',prediction_blocked:'прогнозы приостановлены',prediction_runs_interrupted:'часть запусков прервалась',prediction_no_recent_progress:'нет подтверждённого прогресса прогнозов',poster_idle:'',poster_hydrated:'на прошлой неделе найдены новые постеры',poster_first_run:'первая проверка ещё впереди',poster_retry_scheduled:'повторная попытка запланирована',poster_overdue:'еженедельная проверка не выполнена вовремя',poster_stalled:'проверка зависла или отчёт не доставлен',poster_lost:'данные проверки постеров пропали',poster_failed:'проверка постеров не удалась',metadata_attention:'метаданные и локализация требуют внимания'};

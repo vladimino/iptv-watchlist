@@ -4264,17 +4264,35 @@ async function enrichmentComplete(env,body,requestId){
  await runnerLease(env,run.runId,'release');await settleExpiredDiagnostics(env);return json({runId:run.runId,status:run.status,counts:run.counts,...event});
 }
 async function enrichmentStatus(env){const recent=(await diagnosticHistory(env,20)).runs;const [profile,run,report,queue,discoveryRead,lease,eventOutbox]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovery-status.json').then(value=>({value}),()=>({value:null,unavailable:true})),loadJSON(env,RUNNER_LEASE_KEY),eventOutboxStatus(env)]);const summary=run?runSummary(run):null,state=run?.status==='running'?(lease?.runId===run.runId&&lease.expiresAt>Date.now()?'running':'blocked'):run?.status==='partial'?'blocked':run?.status==='complete'?'completed':'idle',live={state,runId:run?.runId||null,startedAt:run?.createdAt||null,lastHeartbeatAt:state==='running'&&lease&&lease.runId===run?.runId?lease.heartbeatAt:run?.lastHeartbeatAt||null,added:summary?.added||0,failed:summary?.failed||0,hotRemaining:queue?.hotRemaining??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:state==='running'?run.batchSize??null:null};return {...live,diagnostics:compactDiagnostics(recent.find(row=>row.runId===run?.runId)||recent[0]||null),live,currentRun:state==='running'?live:null,recentRuns:recent.filter(r=>r.state!=='running').slice(0,10),profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,compatibility:{profileMode:PREDICTION_PROFILE_MODE,fingerprintMode:PREDICTION_FINGERPRINT_MODE},lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:queue?(queue.hotCount||0)+(queue.coldCount||0):report?eligibleEnrichmentFilms(report).length:0,pendingCount:queue?.pendingCount??null,discovery:discoveryRead.value||null,...(discoveryRead.unavailable?{discoveryStatus:'unavailable'}:{}),queue,eventOutbox};}
+// AIR-586. The view needs a catalog film only for `allEnrichmentFilms` (its id, its TMDB identity and the policy verdict) and the freshness rule (`indexed`
+// reads `id` and `genres`). The verdict is taken on the whole stored film, a film it excludes is left out, and the rest keep `id`, `tmdbId`, `genres` and
+// `genreIds`: on those fields alone the policy can only answer what it answered on the whole film or a verdict that does not exclude (documentary is decided
+// by the genres, concert needs a title, an overview or a category), so `allEnrichmentFilms` keeps exactly the films it kept before.
+const GENRE_CATALOG_PROJECTION={project:film=>{
+ if(!film||typeof film!=='object')return film;
+ if(policyExcludedEnrichmentFilm(film))return undefined;
+ const out={id:film.id,tmdbId:film.tmdbId};
+ if(Object.hasOwn(film,'genres'))out.genres=film.genres;
+ if(Object.hasOwn(film,'genreIds'))out.genreIds=film.genreIds;
+ return out;
+}};
+function projectGenreCatalog(catalog){
+ if(!catalog||typeof catalog!=='object'||Array.isArray(catalog))return catalog;
+ const out={};
+ for(const [id,film] of Object.entries(catalog)){const value=GENRE_CATALOG_PROJECTION.project(film);if(value!==undefined)out[id]=value;}
+ return out;
+}
 async function loadGenreCatalog(env){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
   if(gate.held){const error=new Error('discovery_fence');error.code='discovery_fence';throw error;}
   if(gate.ready){
-   const routed=await DiscoveryAuthority.routeRead(env,'epg/discovered-films.json');
+   const routed=await DiscoveryAuthority.routeRead(env,'epg/discovered-films.json',GENRE_CATALOG_PROJECTION);
    if(!routed.handled){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
    return routed.value;
   }
  }
- return loadJSON(env,'epg/discovered-films.json');
+ return projectGenreCatalog(await loadJSON(env,'epg/discovered-films.json'));
 }
 async function enrichmentView(env){const [profile,stored]=await Promise.all([loadJSON(env,profileKey),readViewIndex(env)]),index=stored,freshness=await predictionFreshness(env,profile);
  // Genres feed only the selective rules, so the programme and catalog are read only when one of them is on.
