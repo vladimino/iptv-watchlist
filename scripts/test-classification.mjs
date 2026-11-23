@@ -108,6 +108,9 @@ export const FILES={
  "air-566-serial-rule-replay.mjs": {
   "suite": "core"
  },
+ "air-579-index-candidates-offline.mjs": {
+  "suite": "core"
+ },
  "air-86-replay.mjs": {
   "suite": "core"
  },

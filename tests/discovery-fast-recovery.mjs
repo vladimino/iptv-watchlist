@@ -189,7 +189,7 @@ assert.deepEqual(eventKeys(),[]);
 fresh();stopped({phase:'uncertain',reason:'start_uncertain',recovery:{attempts:1,reason:'start_uncertain',at:iso,dueAt:new Date(Date.now()+600000).toISOString(),quarantined:false}});
 out=await fast();assert.equal(out.reason,'recovery_waiting');assert.equal(creates.length,0);assert.equal(puts.length,0);
 
-// 10. Isolation: the fast cron entry runs the reconcile only. No EPG, Ratings or Monitor code and no hourly report; the hourly entry still runs all of them.
+// 10. Isolation: the fast cron entry runs the reconcile only. No EPG, Ratings or Monitor code and no hourly report; the hourly entry still runs EPG and Monitor and never the legacy Ratings executor (AIR-580).
 const called={epg:0,ratings:0,monitor:0};
 context.EpgOrchestration={ensure:async()=>{called.epg++;}};context.RatingsOrchestration={ensure:async()=>{called.ratings++;}};context.Monitor={run:async()=>{called.monitor++;}};
 const waits=[];const exec={waitUntil(p){waits.push(p);}};
@@ -198,10 +198,10 @@ await worker.scheduled({cron:FAST,scheduledTime:Date.now()},env,exec);await Prom
 assert.deepEqual(called,{epg:0,ratings:0,monitor:0},'the fast tick touches nothing but Discovery');assert.equal(creates.length,1);assert.deepEqual(eventKeys(),[]);
 waits.length=0;fresh();elect(0);
 await worker.scheduled({cron:'0 * * * *',scheduledTime:Date.now()},env,exec);await Promise.all(waits);
-assert.deepEqual(called,{epg:1,ratings:1,monitor:1},'the hourly entry is unchanged');
+assert.deepEqual(called,{epg:1,ratings:0,monitor:1},'the hourly entry runs EPG and Monitor and not the legacy Ratings executor');
 waits.length=0;
 await worker.scheduled({scheduledTime:Date.now()},env,exec);await Promise.all(waits);
-assert.deepEqual(called,{epg:2,ratings:2,monitor:2},'an entry without a cron string keeps the hourly behaviour');
+assert.deepEqual(called,{epg:2,ratings:0,monitor:2},'an entry without a cron string keeps the hourly behaviour');
 
 // 11. The status readout: waiting, overdue and the five-minute incident threshold.
 fresh();stopped({recovery:{attempts:1,reason:'step_failure',at:iso,dueAt:new Date(Date.now()+600000).toISOString(),quarantined:false}});

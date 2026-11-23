@@ -337,9 +337,8 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  assert.equal((await RatingsOrchestration.externalGate(e,'status')).reason,null,'reads stay open');
  await sw(e,{action:'complete'},typeof GOOD==='undefined'?{}:GOOD);
  assert.equal((await RatingsOrchestration.externalGate(e,'step')).reason,'external_writer_fenced');
- // The 17:00 ratings due creates nothing while the Letterboxd mode is cloudflare, even if the ratings mode document says cloudflare (never two Diary writers).
+ // A stale ratings instance is refused while the Letterboxd mode is cloudflare, even if the ratings mode document says cloudflare (never two Diary writers). The old cron `ensure` is gone (AIR-580).
  ctx.__ratingsCloudflare=true;
- const mode=await RatingsOrchestration.ensure(e,{now:T('2026-11-21T16:05:00Z')});assert.equal(mode.reason,'letterboxd_sync_active');assert.equal(mode.started,false);
  const stale=await RatingsOrchestration.admit(e,{runKey:'2026-11-21',series:0,epoch:1,id:'x'});assert.equal(stale.reason,'external_writer_fenced','a stale ratings instance is refused');
  ctx.__ratingsCloudflare=false;
  // Rollback: back to external re-opens exactly the legacy writer.
