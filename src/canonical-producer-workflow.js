@@ -234,7 +234,9 @@ async function drainEpgReceipts(env,plan,fence){
 export async function runProducerWorkflow(env,payload,step){
  const P=payload?.programmeRunId,epoch=Number(payload?.epoch);
  if(typeof P!=='string'||!P||!Number.isInteger(epoch)||epoch<1)return {state:'invalid'};
- const doStep=typeof step?.do==='function'?step.do.bind(step):(name,fn)=>fn();
+ // AIR-572: `step` is a Cloudflare RPC stub. Its methods are callable but expose no `.bind`/`.call`/`.apply`, so the method is
+ // invoked directly on the stub (`step.do(...)`), never detached or bound. Without a step (an offline run) the callback runs inline.
+ const doStep=(name,fn)=>step&&step.do?step.do(name,fn):fn();
  const totals={calls:0,statements:0,invocations:0,maxCalls:0,maxStatements:0};
  const nonce=await doStep('nonce',async()=>crypto.randomUUID());
  let chain=await readChain(env,P);

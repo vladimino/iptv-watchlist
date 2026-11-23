@@ -262,6 +262,38 @@ assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
  assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'complete');
 }
 
+// AIR-572: a Cloudflare Workflow `step` is an RPC stub whose methods have no `.bind`. The stub below is function-shaped but refuses
+// bind/call/apply, so the former `step.do.bind(step)` fails here exactly as it did in production (113/113 instances `errored`, step_count 0).
+function rpcStep(){
+ const seen=[];
+ const method=(name,impl)=>new Proxy(function(){},{apply:(_t,_this,args)=>impl(...args),get:(target,prop)=>prop==='bind'||prop==='call'||prop==='apply'?undefined:Reflect.get(target,prop)});
+ const stub=new Proxy({},{get:(_t,prop)=>prop==='do'?method('do',(name,fn)=>{seen.push(name);return name==='nonce'?Promise.resolve('12121212-1212-1212-1212-121212121212'):fn();}):undefined});
+ return {stub,seen};
+}
+{
+ const {stub}=rpcStep();
+ assert.equal(typeof stub.do,'function');
+ assert.throws(()=>stub.do.bind(stub),TypeError,'the stub must not expose bind, so the old code path is reproduced');
+ assert.match(fs.readFileSync('src/canonical-producer-workflow.js','utf8').replace(/\/\/.*$/gm,''),/^(?![\s\S]*step\.do\.bind)/,'no detached or bound RPC method remains in the workflow');
+}
+{
+ const file=database();
+ const sha='e'.repeat(64);
+ const empty='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
+ sqlite(file,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+AT+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+empty+"','"+empty+"','"+AT+"');"+
+  "INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');"+
+  "INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}'),('run-p','watchlist',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}');"+
+  "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1')");
+ const env=envOf(file);
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ const {stub,seen}=rpcStep();
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},stub);
+ assert.equal(result.state,'complete','the Workflow runs through an RPC-shaped step');
+ assert.deepEqual(seen.slice(0,2),['nonce','claim'],'the first steps are the nonce and the claim, in order');
+ assert.equal(seen.at(-1),'work');
+ assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'complete');
+}
+
 {
  const file=database();
  const sha='d'.repeat(64);
