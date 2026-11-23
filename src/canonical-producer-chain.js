@@ -245,6 +245,89 @@ export async function supersedeChain(env,{chain,at}={}){
  return {state:'superseded',chain:await readChain(env,chain.programme_run_id)};
 }
 
+// ---- AIR-572: the owner-only terminalization of a STALE Producer chain (MCP tool producer_chain_operator) ------------------------------------------------------------
+// While the static delivery hold is on, `reconcileProducerChain` returns before it supersedes anything, so a chain of an older published run that was still open when the hold
+// shipped stays non-terminal forever and the membership writer switch refuses `producer_chain_open`. This handler lets the owner make exactly the transition the hourly
+// reconcile would make for that chain, through the SAME `supersedeChain` (Film/Person marker fence at the open generation, revision CAS, `changes()=1`). It adds no SQL write and no
+// writer, creates no Workflow instance, touches no lease, epoch, run, receipt, Film, Person or Watchlist row, and never lifts the hold. Inert without a call.
+//   status     (default) read-only: the Film/Person route, the published (P, g), the hold, and at most PRODUCER_CHAIN_OPERATOR_LIMIT open chains, each with its eligibility and expect pins
+//              (`runLinked` says whether the chain ever linked a pass run: its own `run_key`).
+//   supersede  confirmGo, expectedProgrammeRunId, expectedRevision (from status): one chain, only while the hold is on, only when its run is not the published one, it is open (the same
+//              predicate as the switch gate) and no owner lease is live; every fact is re-read right before the write.
+// A chain is OPEN while it can still write: pending, active, released, or stopped with an automatically recoverable class (the switch gate `PRODUCER_OPEN_CHAINS_SQL` of
+// watchlist-membership.js uses the same predicate; tests/producer-chain-operator.mjs checks they agree).
+export const PRODUCER_CHAIN_OPERATOR_MODES=Object.freeze(['status','supersede']);
+export const PRODUCER_CHAIN_OPERATOR_LIMIT=10;
+export const PRODUCER_OPEN_CHAIN_PREDICATE="(owner_state IN ('pending','active','released') OR (owner_state='stopped' AND recovery_class IN ('transient','receipt','authority')))";
+const PROGRAMME_RUN_ID=/^[A-Za-z0-9_.:-]{1,160}$/;
+const isOpenChain=chain=>['pending','active','released'].includes(chain?.owner_state)||(chain?.owner_state==='stopped'&&['transient','receipt','authority'].includes(chain?.recovery_class));
+// Why one chain may not be superseded now, or null. `published` is the {programmeRunId} of the published EPG authority.
+function chainBlocker(chain,published,nowMs){
+ if(!isOpenChain(chain))return chain?.owner_state==='superseded'?'already_superseded':'chain_not_open';
+ if(chain.programme_run_id===published.programmeRunId)return 'current_published_run';
+ if((chain.owner_state==='pending'||chain.owner_state==='active')&&!(Date.parse(chain.lease_expires_at)+CHAIN_BOUNDARY_MARGIN_MS<nowMs))return 'lease_live';
+ return null;
+}
+// deps: held() -> the Producer's static delivery hold (true while held), now() -> ms, supersede (the chain transition; `supersedeChain` unless a test injects one).
+export function producerChainOperator({held,now=()=>Date.now(),supersede=supersedeChain}={}){
+ const reply=(status,body)=>({status,body});
+ async function snapshot(env){
+  const db=database(env);
+  const [route,published,chains]=await Promise.all([
+   routeOf(env).catch(error=>error?.code==='film_person_held'||error?.code==='film_person_unavailable'?{open:false}:null),
+   one(db,'SELECT mode,cutover,programme_run_id AS programmeRunId,generation FROM published_epg_authority WHERE id=1',[]).catch(()=>undefined),
+   many(db,'SELECT '+COLUMNS+' FROM canonical_producer_chain WHERE '+PRODUCER_OPEN_CHAIN_PREDICATE+' ORDER BY created_at,programme_run_id LIMIT ?',[PRODUCER_CHAIN_OPERATOR_LIMIT+1]).catch(()=>null)]);
+  return {route,published:published&&published.mode==='d1'&&published.cutover==='open'&&published.programmeRunId?{programmeRunId:published.programmeRunId,generation:Number(published.generation)}:null,
+   publishedReadable:published!==undefined,chains,held:typeof held==='function'&&held()===true,nowMs:now()};
+ }
+ function refusal(s){
+  if(!s.route)return 'film_person_unreadable';
+  if(!s.route.open)return 'film_person_not_open';
+  if(!s.publishedReadable)return 'published_unreadable';
+  if(!s.published)return 'published_not_open';
+  if(!s.chains)return 'chains_unreadable';
+  if(!s.held)return 'producer_not_held';
+  return null;
+ }
+ const item=(chain,s)=>{
+  const reason=s.published?chainBlocker(chain,s.published,s.nowMs):'published_not_open';
+  return {programmeRunId:chain.programme_run_id,inputGeneration:Number(chain.input_generation),ownerState:chain.owner_state,ownerEpoch:Number(chain.owner_epoch),claimed:chain.claim_nonce!=null,
+   leaseExpiresAt:chain.lease_expires_at,recoveryClass:chain.recovery_class??null,revision:Number(chain.revision),runLinked:chain.run_key!=null,eligible:!reason,...(reason?{reason}:{expect:{expectedProgrammeRunId:chain.programme_run_id,expectedRevision:Number(chain.revision)}})};
+ };
+ const openCount=async env=>Number((await one(database(env),'SELECT COUNT(*) AS n FROM canonical_producer_chain WHERE '+PRODUCER_OPEN_CHAIN_PREDICATE,[]))?.n??0);
+ return async function handle(env,args={}){
+  if(!args||typeof args!=='object'||Array.isArray(args))return reply(400,{ok:false,reason:'invalid'});
+  const mode=args.mode===undefined?'status':args.mode;
+  if(!PRODUCER_CHAIN_OPERATOR_MODES.includes(mode))return reply(400,{ok:false,reason:'invalid_mode'});
+  if(args.confirmGo!==undefined&&typeof args.confirmGo!=='boolean')return reply(400,{ok:false,reason:'invalid_confirm'});
+  if(mode==='status'){
+   const s=await snapshot(env);
+   const items=s.chains?s.chains.slice(0,PRODUCER_CHAIN_OPERATOR_LIMIT).map(chain=>item(chain,s)):null;
+   return reply(200,{ok:true,mode,sideEffects:'none',filmPerson:s.route?{open:s.route.open,...(s.route.open?{generation:s.route.generation}:{})}:null,published:s.published,held:s.held,
+    blocked:refusal(s),chains:items?{items,truncated:s.chains.length>PRODUCER_CHAIN_OPERATOR_LIMIT}:null});
+  }
+  if(args.confirmGo!==true)return reply(400,{ok:false,mode,reason:'confirm_required',writes:0});
+  if(typeof args.expectedProgrammeRunId!=='string'||!PROGRAMME_RUN_ID.test(args.expectedProgrammeRunId))return reply(400,{ok:false,mode,reason:'invalid_expected_programme_run_id',writes:0});
+  if(!Number.isInteger(args.expectedRevision)||args.expectedRevision<1)return reply(400,{ok:false,mode,reason:'invalid_expected_revision',writes:0});
+  const s=await snapshot(env);
+  const refused=refusal(s);
+  if(refused)return reply(409,{ok:false,mode,reason:refused,writes:0});
+  let chain;
+  try{chain=await readChain(env,args.expectedProgrammeRunId);}catch{return reply(409,{ok:false,mode,reason:'chains_unreadable',writes:0});}
+  if(!chain)return reply(409,{ok:false,mode,reason:'chain_not_found',writes:0});
+  if(Number(chain.revision)!==args.expectedRevision&&chain.owner_state!=='superseded')return reply(409,{ok:false,mode,reason:'revision_moved',writes:0,revision:Number(chain.revision)});
+  const blocked=chainBlocker(chain,s.published,s.nowMs);
+  if(blocked)return reply(409,{ok:false,mode,reason:blocked,writes:0});
+  let out;
+  try{out=await supersede(env,{chain,at:new Date(s.nowMs).toISOString()});}
+  catch(error){return reply(409,{ok:false,mode,reason:error?.code||'producer_transport',writes:0});}
+  if(out?.state!=='superseded')return reply(409,{ok:false,mode,reason:out?.reason||'film_person_not_open',writes:0});
+  const after=out.chain;
+  return reply(200,{ok:true,mode,superseded:true,writes:1,chain:after?{programmeRunId:after.programme_run_id,ownerState:after.owner_state,revision:Number(after.revision)}:null,
+   nonTerminalChains:await openCount(env).catch(()=>null)});
+ };
+}
+
 export function parseReleasePin(value){
  if(typeof value!=='string'||!value||value==='empty')return [];
  return value.split(',').filter(id=>id.startsWith('film:'));

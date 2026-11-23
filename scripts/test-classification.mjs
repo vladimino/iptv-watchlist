@@ -1443,6 +1443,9 @@ export const FILES={
  "programme-display-window.mjs": {
   "suite": "core"
  },
+ "producer-chain-operator.mjs": {
+  "suite": "core"
+ },
  "programme-freshness.mjs": {
   "suite": "core"
  },

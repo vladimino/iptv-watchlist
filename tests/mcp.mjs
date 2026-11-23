@@ -78,7 +78,7 @@ assert.deepEqual(await result(rpc(6,'ping')),{});
 
 // Tool discovery keeps the two probes read-only. Domain tools are covered in tests/mcp-tools.mjs.
 const {tools}=await result(rpc(7,'tools/list'));
-assert.deepEqual(tools.map(tool=>tool.name),['probe_read','probe_echo','feature_flags','epg_status','epg_pipeline_status','enrichment_schema','enrichment_profile','enrichment_runner','enrichment_queue','enrichment_status','prediction_queue_overview','prediction_film_diagnostics','prediction_batch_validate','prediction_pending','prediction_hot_parity','prediction_batch_key','prediction_batch_manifest','epg_sync_start','epg_sync_step','ratings_sync_status','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','epg_workflow_rollover','watchlist_membership_operator','letterboxd_claim_backfill']);
+assert.deepEqual(tools.map(tool=>tool.name),['probe_read','probe_echo','feature_flags','epg_status','epg_pipeline_status','enrichment_schema','enrichment_profile','enrichment_runner','enrichment_queue','enrichment_status','prediction_queue_overview','prediction_film_diagnostics','prediction_batch_validate','prediction_pending','prediction_hot_parity','prediction_batch_key','prediction_batch_manifest','epg_sync_start','epg_sync_step','ratings_sync_status','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','epg_workflow_rollover','watchlist_membership_operator','letterboxd_claim_backfill','producer_chain_operator']);
 const probes=tools.filter(tool=>tool.name.startsWith('probe_'));
 for(const tool of probes){
  assert.equal(tool.inputSchema.type,'object');assert.equal(tool.inputSchema.additionalProperties,false);
@@ -237,6 +237,23 @@ assert.equal((await result(rpc(34,'tools/call',{name:'watchlist_membership_opera
 assert.equal(membershipOperatorCalls,1,'a valid owner assertion reaches it');
 delete context.handleWatchlistMembershipOperatorTool;
 assert.match((await result(rpc(35,'tools/call',{name:'watchlist_membership_operator',arguments:{mode:'status'}}))).content[0].text,/unavailable/);
+// AIR-572: the owner-only Producer chain operator sits behind the same Access gate: a denied caller never reaches it (so it cannot supersede a chain), a foreign argument (SQL, a URL, a Film id,
+// a lease or epoch) is refused first, a valid owner call reaches it, and a missing operator is unavailable.
+let chainOperatorCalls=0;context.handleProducerChainOperatorTool=async()=>{chainOperatorCalls++;return {status:200,body:{ok:true}};};
+for(const [label,options] of denied){
+ for(const args of [{mode:'status'},{mode:'supersede',confirmGo:true,expectedProgrammeRunId:'run-old',expectedRevision:22}]){
+  response=await mcp(rpc(36,'tools/call',{name:'producer_chain_operator',arguments:args}),options);
+  assert.equal(response.status,403,'producer chain operator '+label);
+ }
+}
+assert.equal(chainOperatorCalls,0,'no denied producer chain operator call reaches the operator');
+for(const foreign of [{sql:'select 1'},{url:'https://example.com'},{filmId:'film:tmdb:1'},{ownerState:'superseded'},{epoch:1},{leaseExpiresAt:'2026-11-23T00:00:00.000Z'},{hold:false}])
+ assert.equal((await result(rpc(37,'tools/call',{name:'producer_chain_operator',arguments:{mode:'status',...foreign}}))).isError,true,'a foreign argument is refused before the operator: '+Object.keys(foreign));
+assert.equal(chainOperatorCalls,0);
+assert.equal((await result(rpc(38,'tools/call',{name:'producer_chain_operator',arguments:{}}))).structuredContent.ok,true);
+assert.equal(chainOperatorCalls,1,'a valid owner assertion reaches it');
+delete context.handleProducerChainOperatorTool;
+assert.match((await result(rpc(39,'tools/call',{name:'producer_chain_operator',arguments:{mode:'status'}}))).content[0].text,/unavailable/);
 assert.deepEqual(await result(rpc(28,'ping'),{jwt:await accessJwt({claims:{aud:AUD}})}),{});
 assert.deepEqual(await result(rpc(29,'ping'),{jwt:await accessJwt({claims:{exp:now-30}})}),{});
 assert.deepEqual(await result(rpc(30,'ping'),{environment:{...env,MCP_ACCESS_TEAM_DOMAIN:TEAM+'/'}}),{});
