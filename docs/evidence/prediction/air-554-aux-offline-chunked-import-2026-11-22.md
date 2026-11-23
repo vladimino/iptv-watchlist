@@ -10,13 +10,15 @@
 
 ## Sizing (synthetic dataset at the 22 Nov scale, sqlite stand-in)
 
-Whole import 1,621 statements / 36,298,376 bytes becomes 6 chunks of at most 6,089 KiB, 6 verification slices and a flip of 1,740 bytes. A real-size database run took 3 chunks and 3 slices in about 2 s on sqlite. **That is not D1 timing**; chunk, slice and cut durations on D1 are unmeasured, so run-sheet P3 stays open.
+Whole import 1,621 statements / 36,298,376 bytes becomes 6 chunks of at most 6,089 KiB, 6 verification slices and a flip of 1,877 bytes. A real-size database run took 3 chunks and 3 slices in about 2 s on sqlite. **That is not D1 timing**; chunk, slice and cut durations on D1 are unmeasured, so run-sheet P3 stays open.
 
 ## Tests
 
 `tests/prediction-aux-cutover-production.mjs` covers parity, atomic rollback of a partial chunk, concurrent same and different plans, an ambiguous timeout with a late commit, receipt collision and retry, skipped and out-of-order chunks and slices, generation change, late SQL after the seal, refusal of any change to sealed rows, normal Worker writes on every family after `d1`, mismatching totals, bytes and plan, and fail-closed behavior.
 
-Mutation check of the guards (17 mutations): 15 are killed by a test. Two survive by design, because the same property is enforced twice: removing the no-seal clause from the chunk guard (the seal trigger still aborts the write) and removing the seal check from the flip guard (the slice receipts cannot exist without the seal). They are defense in depth and are kept.
+Review round 1 (independent review of `533f792`): the stage head (`item_count`, `total_bytes`, `revision`, `updated_at`), which the Worker's `readStage` cross-checks against the staged rows, is now asserted by the verification, by the seal guard and by the flip guard, and `held_at` of every staged row is part of the byte-level verification. Regressions: each altered head field after the import and before the seal is refused by the seal (operator and in-batch guard), and an altered `held_at` fails the verification. The run sheet's `--import` command no longer names the removed `--sql-sha256`.
+
+Mutation check of the guards (19 mutations): 16 are killed by a test. Three survive by design, because the same property is enforced twice: removing the no-seal clause from the chunk guard (the seal trigger still aborts the write), removing the seal check from the flip guard (the slice receipts cannot exist without the seal), and removing the stage-head condition from the flip guard (the head is frozen by the seal triggers and was already asserted by the seal and the verification). They are defense in depth and are kept.
 
 ## Still needed before any production step (each its own owner decision)
 

@@ -296,10 +296,15 @@ function verifyUnitsOf(plan){
   units.push({kind:'run',id:runId,lines});
  }
  for(const r of plan.outbox)units.push({kind:'outbox',id:r.eventKey,lines:[eq(1,"prediction_event_outbox WHERE event_key="+sqlq(r.eventKey)+" AND kind="+sqlq(r.kind)+" AND event_id="+sqlq(r.eventId)+" AND at="+sqlq(r.at)+" AND journal_key="+sqlq(r.journalKey)+" AND run_id IS "+nullable(r.runId)+" AND state="+sqlq(r.state)+" AND attempts="+r.attempts+" AND since="+sqlq(r.since)+" AND last_attempt_at IS "+nullable(r.lastAttemptAt)+" AND settled_at IS "+nullable(r.settledAt)+" AND payload_digest="+sqlq(r.payloadDigest)+" AND payload_compacted=0 AND event_json="+sqlq(r.eventJson))]});
- const stage=plan.stage.map(r=>eq(1,"prediction_batch_stage WHERE film_id="+sqlq(r.filmId)+" AND position="+r.position+" AND item_digest="+sqlq(r.itemDigest)+" AND held_by_run_id IS "+nullable(r.heldByRunId)+" AND body_bytes="+r.bodyBytes+" AND item_json="+sqlq(r.itemJson)));
+ const stage=plan.stage.map(r=>eq(1,"prediction_batch_stage WHERE film_id="+sqlq(r.filmId)+" AND position="+r.position+" AND item_digest="+sqlq(r.itemDigest)+" AND held_by_run_id IS "+nullable(r.heldByRunId)+" AND held_at IS "+nullable(r.heldAt)+" AND body_bytes="+r.bodyBytes+" AND item_json="+sqlq(r.itemJson)));
  if(stage.length)units.push({kind:'stage',id:'stage',lines:stage});
- units.push({kind:'totals',id:'totals',lines:planTotals(plan).map(([table,n])=>eq(n,table))});
+ units.push({kind:'totals',id:'totals',lines:[...planTotals(plan).map(([table,n])=>eq(n,table)),"UPDATE prediction_aux_cas SET ok="+stageHeadCondition(plan)+" WHERE id=1;"]});
  return units;
+}
+// The stage head the Worker's readStage cross-checks against the rows (item_count, total_bytes) plus the revision and updated_at the import wrote; asserted by the verification, the seal and the flip.
+export function stageHeadCondition(plan){
+ const h=plan.stageHead||{itemCount:0,totalBytes:0,updatedAt:null};
+ return "(SELECT count(*)=1 FROM prediction_batch_stage_head WHERE id=1 AND item_count="+h.itemCount+" AND total_bytes="+h.totalBytes+" AND revision="+(plan.stage.length?1:0)+" AND updated_at IS "+(plan.stage.length?nullable(h.updatedAt):'NULL')+")";
 }
 // The totals every table must hold after the import (also what the seal and the flip assert).
 export function planTotals(plan){
@@ -372,14 +377,14 @@ export function slicePlan(plan,{generation,chunkCount,limits=CHUNK_LIMITS}){
 // The seal batch: its guard asserts the marker, no earlier seal, the receipts 1 to K of the one plan digest, the table totals of the plan and no verification slice yet; then the seal row.
 export function sealStatements(plan,{generation,chunkCount,sliceCount}){
  const planSha=planSha256(plan);
- const totals=planTotals(plan).map(([table,n])=>'(SELECT count(*)='+n+' FROM '+table+')').join('*');
+ const totals=planTotals(plan).map(([table,n])=>'(SELECT count(*)='+n+' FROM '+table+')').join('*')+'*'+stageHeadCondition(plan);
  const guard="UPDATE prediction_aux_cas SET ok="+markerClause(generation)+"*"+noSealClause(generation)+"*(SELECT count(*)="+chunkCount+" FROM prediction_aux_import_chunk WHERE generation="+generation+")*(SELECT max(chunk_no)="+chunkCount+" FROM prediction_aux_import_chunk WHERE generation="+generation+")*"+planClause(generation,planSha)+"*(SELECT count(*)=0 FROM prediction_aux_verify_slice WHERE generation="+generation+")*"+totals+" WHERE id=1";
  return [guard,"INSERT INTO prediction_aux_seal (generation, plan_sha256, chunk_count, slice_count) VALUES ("+[generation,"'"+planSha+"'",chunkCount,sliceCount].join(', ')+");"];
 }
 // The small flip batch: the guard asserts the marker, the seal (plan, K, M), receipts 1 to K and slices 1 to M of the one plan digest, the table totals and the outbox states; then the marker moves to d1.
 export function flipStatements(plan,{generation,chunkCount,sliceCount,activatedAt}){
  const planSha=planSha256(plan);
- const totals=planTotals(plan).map(([table,n])=>'(SELECT count(*)='+n+' FROM '+table+')').join('*');
+ const totals=planTotals(plan).map(([table,n])=>'(SELECT count(*)='+n+' FROM '+table+')').join('*')+'*'+stageHeadCondition(plan);
  const states=Object.entries(planOutboxStates(plan)).map(([state,n])=>"(SELECT count(*)="+n+" FROM prediction_event_outbox WHERE state='"+state+"')").join('*');
  const guard="UPDATE prediction_aux_cas SET ok="+markerClause(generation)+"*(SELECT count(*)=1 FROM prediction_aux_seal WHERE generation="+generation+" AND plan_sha256='"+planSha+"' AND chunk_count="+chunkCount+" AND slice_count="+sliceCount+")"
   +"*(SELECT count(*)="+chunkCount+" FROM prediction_aux_import_chunk WHERE generation="+generation+" AND plan_sha256='"+planSha+"')*(SELECT count(*)="+chunkCount+" FROM prediction_aux_import_chunk WHERE generation="+generation+")*(SELECT max(chunk_no)="+chunkCount+" FROM prediction_aux_import_chunk WHERE generation="+generation+")"

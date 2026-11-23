@@ -233,7 +233,10 @@ const VALUE='(?:\\?|-?\\d+|NULL)';
 const INSERT_SHAPE=new RegExp('^INSERT INTO ('+DATA_TABLES.join('|')+') \\([a-z_, ]+\\) VALUES \\('+VALUE+'(?:, ?'+VALUE+')*\\);?$');
 const HEAD_SHAPE=/^UPDATE prediction_batch_stage_head SET item_count=\d+, total_bytes=\d+, revision=1, updated_at=(?:\?|NULL) WHERE id=1 AND revision=0;?$/;
 const CONDITION='[a-z_]+(?:=| IS )'+VALUE;
-const VERIFY_SHAPE=new RegExp('^UPDATE prediction_aux_cas SET ok=\\(SELECT count\\(\\*\\)=(\\d+) FROM ('+DATA_TABLES.join('|')+')(?: WHERE '+CONDITION+'(?: AND '+CONDITION+')*)?\\) WHERE id=1;?$');
+const ROW_VERIFY=new RegExp('^UPDATE prediction_aux_cas SET ok=\\(SELECT count\\(\\*\\)=(\\d+) FROM ('+DATA_TABLES.join('|')+')(?: WHERE '+CONDITION+'(?: AND '+CONDITION+')*)?\\) WHERE id=1;?$');
+// The stage head the Worker cross-checks against the rows (count, aggregate bytes, revision, updated_at): one exact assertion.
+const HEAD_VERIFY=/^UPDATE prediction_aux_cas SET ok=\(SELECT count\(\*\)=1 FROM prediction_batch_stage_head WHERE id=1 AND item_count=\d+ AND total_bytes=\d+ AND revision=[01] AND updated_at IS (?:\?|NULL)\) WHERE id=1;?$/;
+const VERIFY_SHAPE={test:text=>ROW_VERIFY.test(text)||HEAD_VERIFY.test(text)};
 const receiptShape=table=>new RegExp('^INSERT INTO '+table+' \\([a-z_0-9, ]+\\) VALUES \\('+VALUE+'(?:, ?'+VALUE+')*\\);?$');
 const CHUNK_RECEIPT=receiptShape('prediction_aux_import_chunk'),SLICE_RECEIPT=receiptShape('prediction_aux_verify_slice'),SEAL_ROW=receiptShape('prediction_aux_seal');
 // tested on the text as printed (not the masked one): the modes and the time are fixed literals

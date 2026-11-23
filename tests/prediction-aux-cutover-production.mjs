@@ -554,6 +554,25 @@ let release;
   const seal=sealStatements(plan,{generation:1,chunkCount:K,sliceCount:M});
   await assert.rejects(e.db.batch(seal.map(text=>e.db.prepare(text).bind())),/constraint|CHECK/i);assert.equal(count(e.file,'prediction_aux_seal'),0);
  }
+ // the stage head the Worker's readStage cross-checks (item_count, total_bytes, revision, updated_at), altered after the import and before the seal: the seal refuses
+ for(const [label,change] of [['item_count',"UPDATE prediction_batch_stage_head SET item_count=0"],['total_bytes',"UPDATE prediction_batch_stage_head SET total_bytes=total_bytes+1"],['revision',"UPDATE prediction_batch_stage_head SET revision=revision+1"],['updated_at',"UPDATE prediction_batch_stage_head SET updated_at='1999-01-01T00:00:00.000Z'"]]){
+  const e=await closedScratch();await runS('import',e,pp(convBefore,1));
+  sql(e.file,change);
+  const refused=await runS('seal',e,pp(convBefore,1)).then(()=>null,error=>error);
+  assert.ok(refused,'the seal refuses a stage head or stage row that differs from the plan: '+label);
+  assert.equal(count(e.file,'prediction_aux_seal'),0,label);assert.equal(marker(e.file).mode,'closed',label);
+  // and the in-batch guard refuses even when the operator's own pre-check is bypassed
+  const seal=sealStatements(plan,{generation:1,chunkCount:K,sliceCount:M});
+  await assert.rejects(e.db.batch(seal.map(text=>e.db.prepare(text).bind())),/constraint|CHECK/i,label);
+ }
+ // held_at of a staged row, altered before the seal, is caught by the byte-level verification (a slice fails, the marker never moves)
+ {
+  const e=await closedScratch();await runS('import',e,pp(convBefore,1));
+  sql(e.file,"UPDATE prediction_batch_stage SET held_at='1999-01-01T00:00:00.000Z' WHERE rowid=(SELECT min(rowid) FROM prediction_batch_stage)");
+  await runS('seal',e,pp(convBefore,1));
+  const failed=await runS('verify',e,pp(convBefore,1)).then(()=>null,error=>error);
+  assert.ok(failed,'a differing held_at fails the verification');assert.ok(count(e.file,'prediction_aux_verify_slice')<M);assert.equal(marker(e.file).mode,'closed');
+ }
  // a flip batch built for the right plan cannot commit without the seal or with missing slices (the guard of the batch itself, not the operator's checks)
  {
   const e=await closedScratch();await runS('import',e,pp(convBefore,1));
