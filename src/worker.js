@@ -2779,6 +2779,10 @@ async function handleWatchlistMembershipOperatorTool(env,args){
  return WatchlistMembership.membershipOperator({repository:WatchlistD1,resolve:(e,lids)=>CanonicalProducerWorkflow.resolveSourceIdentitiesEach(e,lids),setMembership:(e,input)=>CanonicalFilmWriters.setFilmMembership(e,input),
   epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],fenceEnv:(e,epoch)=>LetterboxdSync.fencedEnv(e,epoch),...reads})(env,args);
 }
+// AIR-572: the owner-only terminalization of a stale Producer chain (MCP tool producer_chain_operator): the existing `supersedeChain`, only while the static delivery hold is on. Nothing calls it but the owner's tool call.
+async function handleProducerChainOperatorTool(env,args){
+ return CanonicalProducerChain.producerChainOperator({held:()=>CanonicalProducerWorkflow.PRODUCER_DELIVERY_HOLD})(env,args);
+}
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {
 // AIR-308 (ADR 0155): the cron trigger does not call the D1 enrichment projector. D1_ENRICHMENT_WRITE is ignored.
