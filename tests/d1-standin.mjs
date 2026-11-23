@@ -19,7 +19,7 @@ export function d1Standin(file,{onBatch=null,maxBinds=null,latencyMs=0,onQuery=n
  const statement=(sql,params)=>{
   if(maxBinds!=null&&params.length>maxBinds)throw new Error('D1_ERROR: too many SQL variables at offset 0: SQLITE_ERROR');
   if(rewrite)sql=rewrite(sql);
-  let index=0;const text=sql.replace(/\?/g,()=>{if(index>=params.length)throw new Error('missing parameter');return literal(params[index++]);});
+  let index=0;const text=params.length?sql.replace(/\?/g,()=>{if(index>=params.length)throw new Error('missing parameter');return literal(params[index++]);}):sql;
   if(index!==params.length)throw new Error('parameter count');
   // `latencyMs` models D1's round trip so a test can tell a sequential read from a concurrent one; `onQuery` sees each statement before it runs.
   const wait=async()=>{if(latencyMs)await new Promise(resolve=>setTimeout(resolve,latencyMs));if(onQuery)await onQuery(text);};

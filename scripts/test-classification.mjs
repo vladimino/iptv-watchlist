@@ -1128,6 +1128,9 @@ export const FILES={
  "local-api.mjs": {
   "suite": "core"
  },
+ "local-d1.mjs": {
+  "suite": "core"
+ },
  "local-dev-smoke.mjs": {
   "suite": "core"
  },

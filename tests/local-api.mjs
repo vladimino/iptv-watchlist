@@ -6,20 +6,27 @@ import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {loadLocalCatalog} from '../scripts/local-fixtures.mjs';
 import {importFixtures} from '../scripts/local-store.mjs';
+import {installLocalD1,splitStatements,migrationFiles} from '../scripts/local-d1.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
-import {standins} from './local-standins.mjs';
 
 const root=path.resolve(path.dirname(new URL(import.meta.url).pathname),'..');
 const build=spawnSync(process.execPath,[path.join(root,'build.mjs')],{cwd:root,stdio:'inherit'});
 assert.equal(build.status,0);
 const worker=await import(pathToFileURL(path.join(root,'dist/server/index.js')).href);
 const bucket=new MemoryBucket();
-await importFixtures(bucket,await loadLocalCatalog());
-const env=standins({BUCKET:bucket});
+const catalog=await loadLocalCatalog();
+await importFixtures(bucket,catalog);
+// AIR-576: the dev stack's own D1 install over a sqlite3 stand-in (the booted dev server on the real Miniflare D1 and R2 is tests/local-dev-smoke.mjs). No
+// `*_DB_OPTIONAL` stand-in flag is set: these are the strict production paths, so a domain that is empty or invalid cannot pass as healthy.
+const dbFile=path.join(os.tmpdir(),'iptv-local-api-'+process.pid+'.sqlite');
+fs.rmSync(dbFile,{force:true});
+const db=d1Standin(dbFile);
+await installLocalD1({BUCKET:bucket,DB:db},{catalog});
+const env={BUCKET:bucket,DB:db};
 
-async function get(pathname){
- const response=await worker.default.fetch(new Request('http://127.0.0.1'+pathname),env);
+async function get(pathname,environment=env){
+ const response=await worker.default.fetch(new Request('http://127.0.0.1'+pathname),environment);
  assert.equal(response.status,200,pathname);
  return response.json();
 }
@@ -28,12 +35,34 @@ assert.deepEqual(programme.films.map(film=>film.title),['Movie1','Movie2','Movie
 const watchlist=await get('/api/watchlist');
 assert.deepEqual(watchlist.films.map(film=>film.title),['Movie1','Movie2','Movie3']);
 const started=await get('/api/started');
-assert.deepEqual(started.ids,['movie-1']);
-// AIR-558: the view index is derived from D1 only and local dev has no authoritative D1 (a D1 that satisfies the ratings contract also forces the published EPG
-// authority, ADR 0162), so the view refuses instead of reading the raw object. A D1 importer for the local stack is a separate follow-up.
-const viewRefusal=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),env);
-assert.ok([502,503].includes(viewRefusal.status),'view refuses without an authoritative D1');
-assert.equal((await viewRefusal.json()).films,undefined);
+assert.deepEqual(started.ids,['movie-1'],'the started mark is a D1 row');
+
+// The view is derived from D1: the ratings row, the fingerprints and the prediction pointer, each verified against its immutable R2 body.
+const view=await get('/api/enrichment/view');
+assert.equal(view.profile.version,1);
+assert.deepEqual(Object.keys(view.films).sort(),['movie-1','movie-2']);
+assert.equal(view.films['movie-1'].actualRating,4.5);
+assert.equal(view.films['movie-1'].watched,true);
+assert.deepEqual(view.films['movie-1'].fingerprint.plotMechanics,['heist']);
+assert.deepEqual(view.films['movie-1'].moodIds,['tense']);
+assert.equal(view.films['movie-1'].fingerprint.execution.pace,'fast');
+assert.equal(view.films['movie-1'].prediction,null);
+assert.equal(view.films['movie-2'].prediction.predictedRating,4);
+assert.equal(view.films['movie-2'].prediction.probability4Plus,0.7);
+assert.equal(view.films['movie-2'].prediction.stale,false,'the prediction names the active profile');
+assert.equal(view.films['movie-2'].actualRating,null);
+assert.equal(view.films['movie-3'],undefined,'a film without ratings, fingerprint or prediction has no entry');
+
+const available=await get('/api/catalog/available');
+assert.equal(available.programmeRunId,'local-fixture');
+assert.equal(available.pinned,true);
+const footer=await get('/api/enrichment/footer/status');
+assert.deepEqual(footer.profile,{version:1});
+assert.deepEqual([footer.collection.state,footer.collection.total,footer.collection.watched,footer.collection.rated,footer.collection.watchlist],['ok',3,1,1,3]);
+const events=await get('/api/events');
+assert.deepEqual(events.events.map(event=>event.type).sort(),['epg','started','unstarted','watchlist']);
+assert.deepEqual((await get('/api/ui/filter-presets')).presets,[]);
+
 const overview=await get('/api/admin/overview');
 assert.equal(overview.snapshot.programmeRunId,'local-fixture');
 assert.deepEqual(overview.counts,{films:3,people:3});
@@ -46,35 +75,45 @@ const adminPeople=await get('/api/admin/people?q=actor');
 assert.deepEqual(adminPeople.items.map(item=>[item.id,item.preferred,item.localization.status]),[['person:actor/actor-1',null,'missing'],['person:actor/actor-2','Актёр 2','provisional']]);
 const adminDetail=await get('/api/admin/people/person:director/director-1');
 assert.equal(adminDetail.item.original,'Director1');
-const moodFile=path.join(os.tmpdir(),'iptv-local-mood-'+process.pid+'.sqlite');
-fs.rmSync(moodFile,{force:true});
-const moodDb=d1Standin(moodFile);
-for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority'])moodDb.sql(fs.readFileSync(path.join(root,'migrations',name+'.sql'),'utf8').replace(/;\s*$/,''));
-moodDb.sql("UPDATE prediction_domain_authority SET mode='d1'");
-const features=JSON.stringify({fingerprintHash:'d1-tense',fingerprintSchemaVersion:1,fingerprintPromptVersion:1,invalidatedAt:null,generatedAt:'2026-11-01T00:00:00.000Z',produced:null,previous:null,plotMechanics:['heist'],moodLabels:['tense'],execution:{pace:'fast'}});
-moodDb.sql("INSERT INTO prediction_fingerprint (film_id,fingerprint_hash,schema_version,prompt_version,generated_at,invalidated_at,r2_key,content_sha256,features_json) VALUES ('movie-2','d1-tense',1,1,'2026-11-01T00:00:00.000Z',NULL,'enrichment/films/movie-2/fingerprints/d1-tense.json','abc','"+features.replaceAll("'","''")+"')");
-// AIR-558: a prediction-only D1 (schema below 8) is no longer enough for the view: the ratings domain is not authoritative, so it refuses; the raw object is not a fallback.
-const overlaidResponse=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),standins({BUCKET:bucket,DB:moodDb}));
-assert.ok([502,503].includes(overlaidResponse.status));
-assert.equal((await overlaidResponse.json()).films,undefined);
-const closed=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,PREDICTION_DB_REQUIRED:'on'});
-assert.notEqual(closed.status,200);
-const closedBody=await closed.json();
-assert.equal(closedBody.films,undefined);
-assert.match(closedBody.error,/prediction_domain_unavailable/);
+const health=await get('/api/admin/health');
+assert.equal(health.snapshot.programmeRunId,'local-fixture');
+assert.match(health.pin,/d1%3Ap1\.q0\.r1|d1%3A1/,'the health pin carries the D1 generations');
+await get('/api/admin/limbo');
+
+// Refusals: an incomplete or unavailable D1 fails closed, never to the raw object and never to a healthy-looking empty answer.
+const refused=async(label,environment,pathname='/api/enrichment/view')=>{
+ const response=await worker.default.fetch(new Request('http://127.0.0.1'+pathname),environment);
+ assert.ok([409,502,503].includes(response.status),label+' answered '+response.status);
+ const body=await response.json();
+ assert.equal(body.films,undefined,label);
+ return body;
+};
+await refused('no D1 binding',{BUCKET:bucket,PREDICTION_DB_REQUIRED:'on'});
+// A schema older than the prediction and ratings domains (migrations 0001-0007 only), the shape the stand-in flags used to cover.
+const oldFile=path.join(os.tmpdir(),'iptv-local-old-'+process.pid+'.sqlite');
+fs.rmSync(oldFile,{force:true});
+const oldDb=d1Standin(oldFile);
+for(const item of (await migrationFiles()).slice(0,7))for(const statement of splitStatements(item.sql))await oldDb.prepare(statement).run();
+await refused('a schema below the ratings domain',{BUCKET:bucket,DB:oldDb});
+// The same database with a domain marker back on r2: the view stops at the ratings gate.
+const r2File=path.join(os.tmpdir(),'iptv-local-r2-'+process.pid+'.sqlite');
+fs.copyFileSync(dbFile,r2File);
+const r2Db=d1Standin(r2File);
+r2Db.sql("UPDATE prediction_domain_authority SET mode='r2'");
+await refused('prediction domain not authoritative',{BUCKET:bucket,DB:r2Db});
+// A profile or fingerprint row whose immutable body is changed is refused (the Worker verifies the SHA-256 of the body it reads).
+const tamperedBucket=new MemoryBucket();
+await importFixtures(tamperedBucket,catalog);
+for(const [key,item] of bucket.objects)if(!tamperedBucket.objects.has(key))tamperedBucket.objects.set(key,{...item});
+tamperedBucket.objects.set('enrichment/profile/versions/1.json',{text:JSON.stringify({version:1,profileHash:'local-fixture',createdAt:'tampered'}),customMetadata:{}});
+const mismatch=await refused('a changed profile body',{BUCKET:tamperedBucket,DB:db});
+assert.match(mismatch.error,/prediction_domain_body_mismatch/);
+// Reads stay answered with the stand-in absent in production: the published programme itself comes from D1.
 const emptyFile=path.join(os.tmpdir(),'iptv-local-empty-'+process.pid+'.sqlite');
 fs.rmSync(emptyFile,{force:true});
 const emptyDb=d1Standin(emptyFile);
-const wrong=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:emptyDb,PREDICTION_DB_REQUIRED:'on'});
-assert.notEqual(wrong.status,200);
-const wrongBody=await wrong.json();
-assert.equal(wrongBody.films,undefined);
-assert.match(wrongBody.error,/prediction_domain_unavailable/);
 const blocked=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),{BUCKET:bucket,DB:emptyDb});
 assert.equal(blocked.status,502);
-// AIR-558: the view now stops at the ratings domain before the published EPG gate is reached.
 assert.match((await blocked.json()).error,/published_epg_unavailable|ratings_domain_not_authoritative/);
-const localEmpty=await worker.default.fetch(new Request('http://127.0.0.1/api/enrichment/view'),standins({BUCKET:bucket,DB:emptyDb}));
-// AIR-558: with the stand-ins on, an empty D1 still has no authoritative ratings domain, so the view refuses rather than reading the raw object.
-assert.ok([502,503].includes(localEmpty.status));
-console.log('Local API: programme, started and admin match the fixture catalog; the view refuses without an authoritative D1');
+for(const file of [dbFile,oldFile,r2File,emptyFile])fs.rmSync(file,{force:true});
+console.log('Local API: programme, started, view, Finds, footer and admin read the local D1 and match the fixture catalog; an incomplete D1 refuses');

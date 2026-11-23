@@ -327,7 +327,7 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.equal((await readAuthority({...invalidContract,PUBLISHED_EPG_DB_OPTIONAL:'standin'})).mode,'r2');
  assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/PUBLISHED_EPG_DB_OPTIONAL/);
  assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/PUBLISHED_EPG_DB_OPTIONAL/);
- assert.match(fs.readFileSync('scripts/local-dev.mjs','utf8'),/PUBLISHED_EPG_DB_OPTIONAL:'standin'/);
+ assert.doesNotMatch(fs.readFileSync('scripts/local-dev.mjs','utf8'),/PUBLISHED_EPG_DB_OPTIONAL/,'AIR-576: the local stack runs a real D1 and opts into no stand-in');
  assert.equal(advancedFence('d1:3:run-a','d1:4:run-a'),true);
  assert.equal(advancedFence('d1:3:run-a','d1:3:run-a'),false);
  assert.equal(advancedFence('d1:3:run-a','d1:5:run-a'),false);
