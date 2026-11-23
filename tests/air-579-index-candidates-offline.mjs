@@ -1,7 +1,7 @@
 // AIR-579: offline measurement of the two index candidates for the open hotspots of the RCA, on the real schema chain and RCA-sized synthetic data.
 //   1. `ASSIGNED_ROWS_DELETE` (`src/discovery-authority.js`): DELETE FROM published_epg_show WHERE programme_run_id=(...) AND basis='discovery' AND match_reason=?
 //   2. the three `film_external_id` lookups by (scheme, value) that read every trust state.
-// Nothing here is a migration and nothing is applied anywhere: each candidate is created inside a scratch sqlite copy, measured and thrown away. Local only.
+// The baseline is the chain up to 35 (before 0036, which now carries the chosen candidates; tests/migration-0036-lookup-indexes.mjs tests the real file). Nothing here is a migration and nothing is applied anywhere: each candidate is created inside a scratch sqlite copy, measured and thrown away. Local only.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {migrated} from './prediction-d1-flow-lib.mjs';
@@ -13,7 +13,7 @@ const steps=(file,text)=>{const result=sqliteSync([file],{input:'.stats vmstep\n
 const plan=(file,text)=>exec(file,'EXPLAIN QUERY PLAN '+text+';').replace(/\s+/g,' ');
 const copyOf=(file,name)=>{const target=file.replace(/\.sqlite$/,'-'+name+'.sqlite');fs.copyFileSync(file,target);return target;};
 
-const base=migrated();
+const base=migrated(35);
 const RUN='run-now',OLD='run-old',START=Date.parse('2026-11-22T12:00:00Z'),MIN=60000;
 // published_epg_show: RCA size, about 20 k shows in the published run, a quarter of them assigned by Discovery (`basis='discovery'`, `match_reason` = the observation key), plus a historical run that must stay.
 // A Discovery-assigned row (`i%4=0`) belongs to observation key `obs<k>` with `k=(i/4)%1500` and names the ONE film of that key's verified decision (`film<k>`), as ADR 0142 decision 4 requires;
