@@ -197,4 +197,36 @@ const transport=({uuid='3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb',name='iptv'}={})=>
  const out=await Op.runWatchlistMembership0037Production({argv:A('--target','iptv','--apply','--confirm','apply','--migration-sha256',sha),deps:{binding:db}});
  assert.equal(out.exit,0);assert.equal(out.result.writeState,'committed');
 }
+// Review P2: an apply whose batch IS sent and committed but answered ambiguously (HTTP 503) over the real REST adapter returns write_uncertain WITH the pre-write bookmark, and is never retried.
+{
+ const {file}=world();
+ const {sqliteSync}=await import('./sqlite-session.mjs');
+ const run=(text,json=true)=>{const result=sqliteSync([...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(result.status!==0)throw new Error(result.stderr);const out=String(result.stdout||'').trim();return out?JSON.parse(out):[];};
+ const calls=[];let bookmarks=0,writes=0;
+ const ok=result=>new Response(JSON.stringify({success:true,result}),{status:200});
+ const fetchImpl=async(url,init)=>{
+  calls.push({url:String(url),method:init.method});
+  if(String(url).endsWith('/time_travel/bookmark')){bookmarks++;return new Response(JSON.stringify({result:{bookmark:'bm-before-'+bookmarks}}),{status:200});}
+  if(init.method==='GET')return new Response(JSON.stringify({success:true,result:{uuid:'3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb',name:'iptv'}}),{status:200});
+  const body=JSON.parse(init.body);
+  const texts=body.batch?body.batch.map(item=>item.sql):[body.sql];
+  if(texts.every(text=>/^\s*select\b/i.test(text)))return ok(texts.map(text=>({success:true,results:run(text.trim().replace(/;*$/,';')),meta:{rows_written:0}})));
+  writes++;
+  run('BEGIN;\n'+texts.map(text=>text.trim().replace(/;*$/,';')).join('\n')+'\nCOMMIT;',false);
+  return new Response(JSON.stringify({success:false,errors:[{message:'unavailable'}]}),{status:503});
+ };
+ const out=await Op.runWatchlistMembership0037Production({argv:A('--target','iptv','--apply','--confirm','apply','--migration-sha256',sha),env,fetchImpl});
+ assert.notEqual(out.exit,0);
+ assert.equal(out.result.reason,'write_uncertain');assert.equal(out.result.writeState,'unknown');assert.equal(out.result.retry,false);
+ assert.equal(out.result.bookmarkBefore,'bm-before-1','the pre-write bookmark survives the uncertain apply');
+ assert.equal(writes,1,'the write was sent exactly once, never retried');
+ assert.equal(version(file),37,'the batch did commit: the uncertainty is about the reply, not the effect');
+ assert.ok(!JSON.stringify(out).includes('fake-token'),'the token is never printed');
+}
+// A refused apply before any write (pin mismatch) took no bookmark and reports none.
+{
+ const {db}=world();
+ const out=await Op.runWatchlistMembership0037Production({argv:A('--target','iptv','--apply','--confirm','apply','--migration-sha256','0'.repeat(64)),deps:{binding:db}});
+ assert.equal(out.result.reason,'migration_sha256_mismatch');assert.equal(out.result.writeState,'none');assert.equal(out.result.bookmarkBefore,undefined);
+}
 console.log('watchlist-membership-0037-production: ok');

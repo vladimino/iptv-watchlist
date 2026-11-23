@@ -232,7 +232,8 @@ export async function runWatchlistMembership0037Production({argv=process.argv,en
  }catch(error){
   const stop=normalize(error);
   const writeState=ctx.writeState==='committed'||ctx.writeState==='unknown'?ctx.writeState:'none';
-  return {exit:stop.exit,result:{reason:stop.reason,writeState,writes:writeState==='committed'?true:writeState==='unknown'?null:false,...(writeState!=='none'?{retry:false}:{}),...(stop.details&&Object.keys(stop.details).length?{details:stop.details}:{})}};
+  // The pre-write bookmark is the recovery anchor exactly when an apply failed or is uncertain: it is returned whenever it was taken (never a retry, never a second write).
+  return {exit:stop.exit,result:{reason:stop.reason,writeState,writes:writeState==='committed'?true:writeState==='unknown'?null:false,...(writeState!=='none'?{retry:false}:{}),...(stop.details&&Object.keys(stop.details).length?{details:stop.details}:{}),...(ctx.bookmark?{bookmarkBefore:ctx.bookmark}:{})}};
  }
 }
 const invoked=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;
