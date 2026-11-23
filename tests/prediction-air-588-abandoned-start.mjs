@@ -1,9 +1,10 @@
 // AIR-588 (P0 RCA): the Worker side of the 23 Nov 2026 Predictions stop, replayed offline on the real Worker over a sqlite D1 stand-in and an in-memory R2. No production call, no Scheduled Task, no model.
 // Production chain (Cloudflare Workers Observability, 20:33-21:58 UTC): a synchronous labelled `batch_start` of 100-114 s; the ChatGPT MCP client re-initialised at +60 s and repeated the start
-// (`start_pending` after the 10 s join bound), read `prediction_batch_manifest` one to three times (`manifest_pending`), then made no further call; or it made no call at all after the start.
+// (`start_pending` after the 10 s join bound), read `prediction_batch_manifest` one to three times (`manifest_pending`), then made no further call; or it made no call at all after the start; or (as the
+// Task reports of two later runs state) it received an answer it reports as truncated, read one to three ready parts and ended the run.
 // The first start still finished with HTTP 200 and a stored manifest, the abandoned lease turned the other Tasks away as `already_running` until it expired, and the next start opened a new run.
 // What this file pins: every Worker answer in that chain is the documented one (ADR 0188/0195), nothing is lost or committed twice, and the only cost of an abandoned client is the blocked lease window.
-// It does not (and cannot) reproduce why the client stopped polling: that is ChatGPT Task behaviour outside the Worker.
+// It does not (and cannot) reproduce a truncation or why the client stops: that is ChatGPT Task and connector behaviour outside the Worker.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
