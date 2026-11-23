@@ -8,7 +8,7 @@ This report supersedes nothing: the iteration-1 report [air-560-s10-two-hour-tri
 
 ## Experiments, authorization and delivery
 
-Every candidate is one variable: the three occurrences of `manifestSize` in the Task prompt. `taskId` (one fixed label per Task, ADR 0195), `generationSize=1`, `submitBatchSize=5`, research and source gates, scoring, heartbeat, Worker, schedules, lease TTL and enabled states were unchanged. The `:48` Task stayed disabled throughout. Prompts were changed only by owner-authorized `Automations.update(prompt)` on the four existing Tasks, with per-Task and whole-registry readback.
+Each of the S7, S8 and S10 candidates is one variable relative to its predecessor: the three occurrences of `manifestSize` in the Task prompt (S5 is the earlier canonical prompt generation, a different text, and is not part of that one-variable chain). `taskId` (one fixed label per Task, ADR 0195), `generationSize=1`, `submitBatchSize=5`, research and source gates, scoring, heartbeat, Worker, schedules, lease TTL and enabled states were unchanged. The `:48` Task stayed disabled throughout. Prompts were changed only by owner-authorized `Automations.update(prompt)` on the four existing Tasks, with per-Task and whole-registry readback.
 
 | Config | Candidate delivery | Live window start (UTC) | Owner authorization (Madrid time, owner's words abbreviated) | Ended |
 | --- | --- | --- | --- | --- |
@@ -18,7 +18,7 @@ Every candidate is one variable: the three occurrences of `manifestSize` in the 
 | S8 | [PR #949](https://github.com/vladimino/iptv-watchlist/pull/949), merge `f052bcf6b1194bff9dde2f667293732cee9f3788`, post-merge CI/CD run 45221676407 success | 23 Nov 16:58-16:59 (17:59 Madrid) | "да" | rolled back to S7 |
 | S7 (final) | restored from #898 | 23 Nov 19:14-19:15 (20:14-20:15 Madrid) | "надо откатываться на S7" | **current accepted configuration** |
 
-Candidate PRs #898, #940 and #949 are offline-only: snapshots plus integrity tests. The historical S10 of PR #831 predates ADR 0195 and was never used as a source. No `run_now`, manual producer, recovery, lease reset, retry, flag, Worker, Access, R2 or D1 write was made for any trial.
+Candidate PRs #898, #940 and #949 are offline-only: snapshots plus integrity tests. The historical S10 of PR #831 predates ADR 0195 and was never used as a source. The coordinator and the executors initiated no `run_now`, manual producer, recovery, lease reset, retry, flag, Worker, Access, R2 or D1 write for any trial. The one manual action was the **owner's manual rerun of the `task00` Scheduled Task** after the first S8 slot left an orphan start claim (see below); it ended `start_pending` then `unknown_run` and committed nothing.
 
 ## Data sources and measurement method
 
