@@ -1200,6 +1200,9 @@ export const FILES={
  "monitor-policy.mjs": {
   "suite": "core"
  },
+ "monitor-canonical-producer.mjs": {
+  "suite": "core"
+ },
  "monitor-runtime.mjs": {
   "suite": "core"
  },

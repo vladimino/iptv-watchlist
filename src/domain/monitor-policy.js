@@ -16,12 +16,14 @@ export const THRESHOLDS = Object.freeze({
   // Predictions have no threshold here: the one no-progress limit (60 minutes) lives in enrichment.js beside the Footer's use of it, and the monitor
   // passes its verdict in `facts.stall` (AIR-556), so the two surfaces cannot disagree.
   switchStuckMs: 2 * HOUR,            // a mode switch that stays open
+  producerNoProgressMs: 2 * HOUR,     // AIR-572: the canonical Producer has no DURABLE progress for this long after publication or its last progress
 });
 export const ALERT_POLICY = Object.freeze({
   confirmSnapshots: 2,                // degraded issues alert after this many consecutive snapshots; needs_owner at once
   // AIR-556: the prediction no-progress verdict is computed from stored run times, not from a transient read, so one snapshot confirms it. With
   // the 60-minute limit and the hourly Cron tick the alert follows the last confirmed progress by 60 to about 120 minutes (+ cron/Telegram latency).
-  confirmSnapshotsByKey: Object.freeze({predictions_no_progress: 1}),
+  // AIR-572: both Producer verdicts come from stored durable facts (run counters, chain state), so one snapshot confirms them.
+  confirmSnapshotsByKey: Object.freeze({predictions_no_progress: 1, canonical_producer_no_progress: 1, canonical_producer_failed: 1}),
   cooldownMs: Object.freeze({degraded: 6 * HOUR, needs_owner: 2 * HOUR}),
   maxPerIssuePerDay: 8,
 });
@@ -170,6 +172,36 @@ export function evaluateCatalogPosters(facts) {
   return {stream: 'catalog_posters', state: facts.monitor, issues, facts: {state: facts.state, detail: facts.detail ?? null, freshnessAt: facts.freshnessAt ?? null, nextExpectedAt: facts.nextExpectedAt ?? null}};
 }
 
+// ---- Canonical Producer (AIR-572): the EPG -> canonical Film/Person Producer, judged by DURABLE progress only. `facts.sinceAt` is the reference time of the
+// last evidence of life (the later of the last stored progress and the start of the current no-progress streak), computed by the Monitor from the run's own
+// counters. A publication, a takeover, a lease renewal or a heartbeat never moves it. `current` means exactly one thing: the run of the published generation is
+// `passed` and its applied generation equals the published one. The stream is never `healthy` merely because the EPG publication succeeded.
+const IDENTITY_STOP = /^producer_identity_/;
+export function evaluateCanonicalProducer(facts, now) {
+  if (!facts || facts.error || facts.readable === false) return unreadable('canonical_producer', 'canonical Producer');
+  const out = (state, status, issues, extra = {}) => ({stream: 'canonical_producer', state, issues,
+    facts: {status, held: !!facts.held, generation: facts.label ?? null, chain: facts.chain?.ownerState ?? null, run: facts.run?.passState ?? null, progressAt: facts.progressAt ?? null, ...extra}});
+  if (facts.held) {
+    // A deliberate delivery hold: honest and visible, never healthy and never a success. It is not an alert (the owner chose it).
+    return out('delayed', 'held_by_delivery', [issue('canonical_producer_held_by_delivery', 'delayed', 'canonical_producer', 'The canonical Producer is held by delivery: no Producer progress is expected until the hold is lifted')]);
+  }
+  if (!facts.label) return out('waiting', 'waiting', []);
+  const run = facts.run, chain = facts.chain;
+  if (run && run.passState === 'passed' && run.sourceGeneration === facts.label && run.appliedGeneration === facts.label) return out('healthy', 'current', []);
+  const stoppedBy = chain?.ownerState === 'stopped' ? (chain.stoppedBy || 'unclassified') : run?.passState === 'stopped' ? (run.stoppedBy || 'unclassified') : null;
+  if (stoppedBy) {
+    const hard = IDENTITY_STOP.test(stoppedBy) || ['terminal', 'fail_closed', 'exhausted'].includes(chain?.recoveryClass || 'fail_closed');
+    const severity = hard ? 'needs_owner' : 'degraded';
+    return out(severity, hard ? 'blocked' : 'failed', [issue('canonical_producer_failed', severity, 'canonical_producer', 'The canonical Producer stopped (' + String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60) + ')' + (hard ? '; it needs the owner' : '; automatic recovery is pending'))], {stoppedBy});
+  }
+  const since = time(facts.sinceAt), age = since === null ? null : Math.max(0, now - since);
+  if (age === null || age > THRESHOLDS.producerNoProgressMs) {
+    return out('degraded', 'stalled', [issue('canonical_producer_no_progress', 'degraded', 'canonical_producer', 'The canonical Producer has shown no durable progress for ' + (age === null ? 'an unknown time' : hours(age) + ' h') + ' (chain ' + (chain?.ownerState || 'absent') + ', run ' + (run?.passState || 'absent') + ')')], {noProgressHours: age === null ? null : hours(age)});
+  }
+  const published = time(facts.publishedAt);
+  return out('waiting', published !== null && now - published > THRESHOLDS.producerNoProgressMs ? 'lagging' : 'waiting', []);
+}
+
 // All four streams (plus catalog posters when its facts are supplied) and the overall state. A stream that is `delayed` or `waiting` is recorded but never alerts.
 export function evaluateAll(facts, previous, now, helpers) {
   const streams = [
@@ -179,6 +211,7 @@ export function evaluateAll(facts, previous, now, helpers) {
     evaluatePredictions(facts.predictions, previous?.predictions ?? null, now),
     ...(facts.catalogPosters === undefined ? [] : [evaluateCatalogPosters(facts.catalogPosters)]),
     ...(facts.letterboxd === undefined ? [] : [evaluateLetterboxd(facts.letterboxd, now)]),
+    ...(facts.canonicalProducer === undefined ? [] : [evaluateCanonicalProducer(facts.canonicalProducer, now)]),
   ];
   const issues = streams.flatMap(stream => stream.issues);
   const overall = streams.reduce((state, stream) => STATE_RANK[stream.state] > STATE_RANK[state] ? stream.state : state, 'healthy');

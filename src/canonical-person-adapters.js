@@ -93,7 +93,7 @@ const KINDS={
    const snapshot=await planCredits(env,input);
    if(snapshot.absent)throw failed('film_person_reference');
    if(snapshot.noop)return {id:input.id,revision:snapshot.revision,already:true};
-   return mutateFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,film:{contractVersion:snapshot.contractVersion},credits:{upsert:snapshot.missing},requireExisting:true,receiptMark:mark(ctx,clock)});
+   return mutateFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,film:{contractVersion:snapshot.contractVersion},...(Array.isArray(input.guards)&&input.guards.length?{guards:input.guards}:{}),credits:{upsert:snapshot.missing},requireExisting:true,receiptMark:mark(ctx,clock)});
   },
  },
 };
