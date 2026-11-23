@@ -43,7 +43,7 @@ The EPG run of a `d1` cutover carries `watchlistSnapshot` and skips the scan, re
 
 ## Membership projection (schema 37, ADR 0203)
 
-[ADR 0203](../adr/0203-watchlist-membership-letterboxd-single-writer-projection.md) is **Proposed**; everything here is dormant until its owner acceptance, and **this runbook authorizes no operation**. Every step below needs its own operation-specific owner GO.
+[ADR 0203](../adr/0203-watchlist-membership-letterboxd-single-writer-projection.md) is **Accepted** (contract A, [owner decision](https://trello.com/c/AdLQvzMe#comment-6b0482797e0ba3ff7c178da7)), but the code remains dormant until a separately authorized activation. **This runbook authorizes no operation.** Every step below needs its own operation-specific owner GO.
 
 **Read-only checks (`SELECT` only).**
 
