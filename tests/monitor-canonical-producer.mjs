@@ -1,0 +1,175 @@
+// AIR-572. The `canonical_producer` stream of the production Monitor, over the real Monitor and the real MonitorPolicy with stub D1 readers (no Worker,
+// no Cloudflare, no network). It proves: DURABLE progress is the only clock (a publication, takeover, lease renewal or heartbeat never extends it), 113
+// consecutive Workflow failures alert although the EPG is healthy, the delivery hold is visible and never healthy, a late but moving pass is not stalled,
+// a rollover of the published generation cannot postpone the verdict, stops alert at once, dedup/recovery use the existing outbox, and the read cost is bounded.
+import fs from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+import {scoped} from '../scripts/bundle-scope.mjs';
+import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,plain,g} from './ratings-harness.mjs';
+
+const H=3600000,MIN=60000,at=ms=>new Date(ms).toISOString();
+const T0=Date.parse('2026-11-23T10:00:00Z');
+function setup({hold=false}={}){
+ const {clock,FakeDate,crypto}=makeClock(T0),net=makeNetwork(),bucket=makeBucket();
+ const ctx=loadContext({net,clock,FakeDate,crypto});
+ vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scoped('src/domain/monitor-policy.js','MonitorPolicy')+'\n'+fs.readFileSync('src/monitor.js','utf8'),ctx);
+ const calls=[];let webhookOk=true;
+ ctx.fetch=async(url,options={})=>{calls.push({url:String(url),method:options.method||'GET',body:options.body?JSON.parse(options.body):null});return new Response('',{status:String(url).startsWith('https://hooks.example/')&&!webhookOk?503:200});};
+ ctx.RatingsOrchestration={async readModel(){return {mode:'cloudflare',health:'healthy',failure:null};}};
+ // The stub D1 readers answer from `world`; every read is counted and none writes.
+ const world={P:'run-p',generation:10,publishedAt:at(T0),chain:null,run:null,reads:0,unreadable:false};
+ const read=value=>{world.reads++;if(world.unreadable)throw new Error('d1 down');return value;};
+ ctx.CanonicalProducerWorkflow={PRODUCER_DELIVERY_HOLD:hold};
+ ctx.PublishedEpg={async readAuthority(){return read({ready:true,programmeRunId:world.P,generation:world.generation});},async currentGeneration(){return {programmeRunId:world.P};}};
+ ctx.ProducerFence={snapshotLabel:(P,gen)=>P+':'+gen};
+ ctx.FilmPersonAuthority={database:env=>env.DB,async one(){return read({publishedAt:world.publishedAt});}};
+ ctx.CanonicalProducerChain={async readChain(){return read(world.chain);}};
+ ctx.CanonicalProducerStore={async epgRunForGeneration(){return read(world.run);}};
+ const env=baseEnv(bucket,{MONITOR:'on',MONITOR_WEBHOOK_URL:'https://hooks.example/alert',DB:{}});
+ return {clock,bucket,ctx,env,calls,world,M:g(ctx,'Monitor'),setWebhook:ok=>{webhookOk=ok;}};
+}
+function epgHealthy(bucket,{runId='run-p',publishedAt=at(T0-3*H)}={}){
+ bucket.set('sync.json',{runId,stage:'complete',updatedAt:publishedAt,failures:[]});
+ bucket.set('epg/published-generation.json',{programmeRunId:runId,phase:'published'});
+ bucket.set('enrichment/prediction-queue.json',{pending:[],refreshedAt:publishedAt,lastBatch:null});
+}
+const posts=calls=>calls.filter(item=>item.method==='POST');
+const producer=async(M,env,now)=>plain((await M.status(env,now)).streams).find(stream=>stream.stream==='canonical_producer');
+const run=(over={})=>({pass_state:'passing',source_generation:'run-p:10',applied_generation:null,stopped_by:null,cursor_id:'film:tmdb:1',n_applied:0,n_noop:0,n_kept:0,n_failed:0,pass_no:1,updated_at:at(T0),...over});
+const chain=(over={})=>({owner_state:'active',stopped_by:null,recovery_class:null,...over});
+
+// 1. Delivery hold (the shipped default): visible, never healthy, no alert, and not a single D1 read.
+{
+ const {bucket,env,M,calls,world}=setup({hold:true});epgHealthy(bucket);
+ const r=plain(await M.run(env,{now:T0}));
+ assert.equal(r.ran,true);assert.equal(world.reads,0,'a held Producer is not read');
+ const s=await producer(M,env,T0);
+ assert.equal(s.facts.status,'held_by_delivery');assert.equal(s.state,'delayed');
+ assert.notEqual(plain(await M.status(env,T0)).overall,'healthy','a held Producer cannot make the monitor healthy');
+ assert.equal(posts(calls).length,0,'a deliberate hold is not an alert');
+}
+
+// 2. 113 consecutive Workflow failures: instances error, no run row, the chain keeps being taken over; the EPG is healthy; the monitor alerts about 2-3 h after publication.
+{
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ world.chain=chain({owner_state:'pending'});world.run=null;
+ let fired=null;
+ for(let hour=0;hour<=4;hour++){
+  const now=T0+hour*H;
+  world.chain=chain({owner_state:hour%2?'active':'pending',takeover_count:hour*28,updated_at:at(now)});   // takeovers/heartbeats move the chain row, never the clock
+  await M.run(env,{now});
+  if(!fired&&posts(calls).length)fired=hour;
+ }
+ assert.ok(fired>=2&&fired<=3,'actionable alert within 2-3 hourly ticks, got '+fired);
+ const s=await producer(M,env,T0+4*H);
+ assert.equal(s.facts.status,'stalled');assert.equal(s.state,'degraded');
+ const all=plain(await M.status(env,T0+4*H));
+ assert.equal(all.overall,'degraded','EPG healthy does not make the whole healthy');
+ assert.ok(all.openIssues.some(item=>item.key==='canonical_producer_no_progress'));
+ const sent=posts(calls).filter(item=>item.body.key==='canonical_producer_no_progress');
+ assert.equal(sent.length,1,'one alert, deduplicated by the outbox across the later ticks');
+ assert.equal(sent[0].body.stream,'canonical_producer');
+}
+
+// 3. A late but MOVING pass is not stalled; the same pass that stops moving is stalled 2 h after its last counter change.
+{
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ world.publishedAt=at(T0-5*H);world.chain=chain();
+ for(let tick=0;tick<6;tick++){
+  world.run=run({n_applied:tick*10,cursor_id:'film:tmdb:'+tick,updated_at:at(T0+tick*H)});
+  await M.run(env,{now:T0+tick*H});
+ }
+ const moving=await producer(M,env,T0+5*H);
+ assert.equal(moving.facts.status,'lagging');assert.equal(moving.state,'waiting');
+ assert.equal(posts(calls).length,0,'a moving pass raises nothing');
+ for(let tick=6;tick<=9;tick++)await M.run(env,{now:T0+tick*H});   // counters frozen from tick 5
+ assert.equal((await producer(M,env,T0+9*H)).facts.status,'stalled');
+ assert.equal(posts(calls).filter(item=>item.body.key==='canonical_producer_no_progress').length,1);
+}
+
+// 4. A rollover of the published generation without progress cannot postpone the verdict.
+{
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ world.chain=chain({owner_state:'pending'});
+ for(let hour=0;hour<=3;hour++){
+  world.generation=10+hour;world.publishedAt=at(T0+hour*H);
+  await M.run(env,{now:T0+hour*H});
+ }
+ assert.equal(posts(calls).filter(item=>item.body.key==='canonical_producer_no_progress').length,1,'four rollovers in four hours did not reset the streak');
+}
+
+// 5. Current means exactly one thing: the run of the published generation passed with the same applied generation. Zero eligible units is a pass.
+{
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ world.chain=chain({owner_state:'complete'});
+ world.run=run({pass_state:'passed',applied_generation:'run-p:10',n_applied:0,n_noop:0,n_kept:0});
+ await M.run(env,{now:T0+6*H});
+ const s=await producer(M,env,T0+6*H);
+ assert.equal(s.facts.status,'current');assert.equal(s.state,'healthy');assert.equal(posts(calls).length,0);
+ // A pass of ANOTHER generation, or one with a different applied generation, is not current.
+ world.run=run({pass_state:'passed',source_generation:'run-p:9',applied_generation:'run-p:9'});
+ await M.run(env,{now:T0+7*H});
+ assert.notEqual((await producer(M,env,T0+7*H)).facts.status,'current');
+ // Missing chain and missing run: waiting inside the window, then stalled.
+ world.run=null;world.chain=null;world.publishedAt=at(T0+7*H);
+ await M.run(env,{now:T0+8*H});assert.equal((await producer(M,env,T0+8*H)).facts.status,'waiting');
+}
+
+// 6. A stop alerts at once: an identity or terminal stop needs the owner, a recoverable stop is degraded; both on the first snapshot.
+{
+ const a=setup();epgHealthy(a.bucket);
+ a.world.chain=chain({owner_state:'stopped',stopped_by:'producer_identity_unresolved',recovery_class:'fail_closed'});
+ await a.M.run(a.env,{now:T0});
+ const hard=(await producer(a.M,a.env,T0));
+ assert.equal(hard.facts.status,'blocked');assert.equal(hard.state,'needs_owner');
+ assert.equal(posts(a.calls).filter(item=>item.body.key==='canonical_producer_failed'&&item.body.severity==='needs_owner').length,1);
+ const b=setup();epgHealthy(b.bucket);
+ b.world.chain=chain({owner_state:'stopped',stopped_by:'producer_transport',recovery_class:'transient'});
+ await b.M.run(b.env,{now:T0});
+ assert.equal((await producer(b.M,b.env,T0)).facts.status,'failed');
+ assert.equal(posts(b.calls).filter(item=>item.body.key==='canonical_producer_failed'&&item.body.severity==='degraded').length,1,'alert on the first snapshot');
+}
+
+// 7. Alert/recovery dedup through the existing outbox, and recovery once the exact generation passes.
+{
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ world.chain=chain({owner_state:'pending'});
+ for(let hour=0;hour<=5;hour++)await M.run(env,{now:T0+hour*H});
+ assert.equal(posts(calls).filter(item=>item.body.kind==='alert'&&item.body.key==='canonical_producer_no_progress').length,1);
+ world.chain=chain({owner_state:'complete'});world.run=run({pass_state:'passed',applied_generation:'run-p:10'});
+ await M.run(env,{now:T0+6*H});
+ assert.equal(posts(calls).filter(item=>item.body.kind==='recovery'&&item.body.key==='canonical_producer_no_progress').length,1);
+ assert.equal(plain(await M.status(env,T0+6*H)).openIssues.length,0);
+}
+
+// 8. An unreadable D1 is unreadable (never a pass), the streak survives it, and a failing transport keeps the message in the outbox for a retry.
+{
+ const {bucket,env,M,calls,world,setWebhook}=setup();epgHealthy(bucket);
+ world.chain=chain({owner_state:'pending'});
+ await M.run(env,{now:T0});
+ world.unreadable=true;
+ await M.run(env,{now:T0+1*H});
+ const s=await producer(M,env,T0+1*H);
+ assert.equal(s.state,'degraded');assert.deepEqual(s.issues.map(item=>item.key),['canonical_producer_unreadable']);
+ world.unreadable=false;setWebhook(false);
+ await M.run(env,{now:T0+3*H});    // the streak began at T0: 3 h of silence -> alert queued, delivery fails
+ const failed=plain(await M.status(env,T0+3*H));
+ assert.ok(failed.outbox>=1,'the undelivered alert stays queued');
+ setWebhook(true);
+ await M.run(env,{now:T0+4*H});
+ assert.ok(posts(calls).some(item=>item.body.key==='canonical_producer_no_progress'&&item.body.kind==='alert'),'the alert is delivered once the transport recovers');
+}
+
+// 9. Bounded and read-only: at most four reads per tick, no write outside the Monitor's own document, and the status read evaluates nothing.
+{
+ const {bucket,env,M,world}=setup();epgHealthy(bucket);
+ world.chain=chain();world.run=run();
+ await M.run(env,{now:T0});
+ assert.ok(world.reads<=4,'bounded D1 reads per tick, got '+world.reads);
+ const before=world.reads;
+ await M.status(env,T0+MIN);
+ assert.equal(world.reads,before,'GET /api/monitor/status reads only the stored document');
+ assert.deepEqual([...new Set(bucket.writes().map(item=>item.key))].filter(key=>key!=='monitor/state.json'),[]);
+}
+console.log('monitor canonical_producer stream: ok');

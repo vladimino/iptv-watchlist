@@ -98,10 +98,47 @@ const Monitor=(()=>{
   if(result.checkpointStatus==='absent'&&!next.seenAt&&!next.baselineAt)next.baselineAt=iso(now);
   return {...result,markers:next};
  });
+ // AIR-572. The canonical Producer, from bounded READ-ONLY D1: the published (P,g) (one row), the chain row of P (primary key) and the run row of
+ // that exact generation (indexed on origin, source_generation). No join, no scan, no write. Durable progress is a CHANGE of the run's own counters or
+ // cursor (`signature`); a publication, takeover, lease renewal or heartbeat leaves it unchanged. The streak start (`noProgressSince`) survives a
+ // rollover of the published generation and is cleared only by progress, so a stream of rollovers cannot postpone the verdict. While the delivery hold is
+ // on nothing is read and the clock is cleared, so lifting the hold gives the live Producer a full no-progress window (never an instant alert).
+ const producerClock=(previous,signature,publishedAt,now,runUpdatedAt=null)=>{
+  const prior=previous&&typeof previous==='object'?previous:{};
+  const stamp=value=>Number.isFinite(Date.parse(value||''))?Date.parse(value):null;
+  const live=stamp(prior.liveSince)??now;
+  const first=prior.signature===undefined||prior.signature===null;
+  // The first observation of a run is not itself progress; its own stored update time is the only evidence of life it carries.
+  const moved=signature!==null&&!first&&signature!==prior.signature;
+  const seeded=signature!==null&&first?stamp(runUpdatedAt):null;
+  const progress=moved?now:(seeded!==null?Math.min(seeded,now):stamp(prior.progressAt));
+  const published=stamp(publishedAt)??now;
+  const streak=moved?null:(stamp(prior.noProgressSince)??Math.max(published,live));
+  const since=moved?now:(Math.max(progress??0,streak??0)||null);
+  const at=value=>value===null||value===undefined?null:iso(value);
+  return {liveSince:iso(live),signature:signature??prior.signature??null,progressAt:at(progress),noProgressSince:at(streak),sinceAt:at(since)};
+ };
+ const canonicalProducerFacts=(env,now,previous)=>guarded(async()=>{
+  if(typeof CanonicalProducerWorkflow==='undefined'||typeof PublishedEpg==='undefined'||!env?.DB)return null;
+  if(CanonicalProducerWorkflow.PRODUCER_DELIVERY_HOLD===true)return {held:true,readable:true,clock:null};
+  const published=await PublishedEpg.readAuthority(env);
+  if(!published?.ready||!published.programmeRunId)return {held:false,readable:true,label:null,clock:producerClock(previous,null,null,now)};
+  const P=published.programmeRunId,label=ProducerFence.snapshotLabel(P,Number(published.generation));
+  const db=FilmPersonAuthority.database(env);
+  const [row,chain,run]=await Promise.all([
+   FilmPersonAuthority.one(db,'SELECT published_at AS publishedAt FROM published_epg_generation WHERE programme_run_id=?',[P]),
+   CanonicalProducerChain.readChain(env,P),
+   CanonicalProducerStore.epgRunForGeneration(env,{sourceGeneration:label})]);
+  const signature=run?[run.cursor_id??'',run.n_applied,run.n_noop,run.n_kept,run.n_failed,run.pass_no,run.pass_state].join('|'):null;
+  const clock=producerClock(previous,signature,row?.publishedAt||null,now,run?.updated_at||null);
+  return {held:false,readable:true,label,publishedAt:row?.publishedAt||null,sinceAt:clock.sinceAt,progressAt:clock.progressAt,clock,
+   chain:chain?{ownerState:chain.owner_state,stoppedBy:chain.stopped_by||null,recoveryClass:chain.recovery_class||null}:null,
+   run:run?{passState:run.pass_state,sourceGeneration:run.source_generation,appliedGeneration:run.applied_generation||null,stoppedBy:run.stopped_by||null}:null};
+ });
  async function collect(env,now,state){
   const epg=await epgFacts(env,now,state?.epgSeen||null);
-  const [discovery,ratings,predictions,catalogPosters,letterboxd]=await Promise.all([discoveryFacts(env,now,epg?.publishedRunId||null),ratingsFacts(env,now),predictionFacts(env,now,state?.predictions||null),catalogPosterFacts(env,now,state),letterboxdFacts(env,now)]);
-  return {epg,discovery,ratings,predictions,...(catalogPosters===null?{}:{catalogPosters}),...(letterboxd===null?{}:{letterboxd})};
+  const [discovery,ratings,predictions,catalogPosters,letterboxd,canonicalProducer]=await Promise.all([discoveryFacts(env,now,epg?.publishedRunId||null),ratingsFacts(env,now),predictionFacts(env,now,state?.predictions||null),catalogPosterFacts(env,now,state),letterboxdFacts(env,now),canonicalProducerFacts(env,now,state?.canonicalProducer||null)]);
+  return {epg,discovery,ratings,predictions,...(catalogPosters===null?{}:{catalogPosters}),...(letterboxd===null?{}:{letterboxd}),...(canonicalProducer===null?{}:{canonicalProducer})};
  }
 
  // ---- delivery: one transport chosen by deliberate configuration. `MONITOR_TRANSPORT` absent or `webhook` is the generic JSON webhook
@@ -202,6 +239,7 @@ const Monitor=(()=>{
    const next={schemaVersion:SCHEMA_VERSION,updatedAt:iso(now),heartbeatAt:iso(now),mode:current,overall:evaluation.overall,
     streams:evaluation.streams.map(stream=>({stream:stream.stream,state:stream.state,facts:stream.facts,issues:stream.issues.map(item=>({key:item.key,severity:item.severity}))})),
     alerts,outbox:queued,cancelledUndelivered:cancelled,holdUntil:doc?.holdUntil||null,lastDeliveryFailure:doc?.lastDeliveryFailure||null,predictions,
+    canonicalProducer:facts.canonicalProducer&&!facts.canonicalProducer.error?(facts.canonicalProducer.clock||null):doc?.canonicalProducer||null,
     epgSeen:publishedRunId&&doc?.epgSeen?.runId!==publishedRunId?{runId:publishedRunId,at:iso(now)}:doc?.epgSeen||null,lastTestAt:doc?.lastTestAt||null,
     catalogPostersBaselineAt:facts.catalogPosters?.markers?.baselineAt??doc?.catalogPostersBaselineAt??null,catalogPostersSeenAt:facts.catalogPosters?.markers?.seenAt??doc?.catalogPostersSeenAt??null};
    const claimed=await writeState(env,object,next);
