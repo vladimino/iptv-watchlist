@@ -2772,6 +2772,13 @@ function letterboxdPorts(env){
  };
  return {mirror:{reconcile:(e,arg)=>WatchlistMirror.reconcileMirror(e||env,{...arg,deps:{WatchlistD1,PublishedEpg}})},handover:e=>letterboxdHandover(e||env),handoverGuards:(e,handover)=>letterboxdHandoverGuards(e||env,handover),effects:e=>letterboxdEffectsState(e||env),ratings:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'diary'}),reconcile:LetterboxdSyncRatings.ratingsSlotPhase({ratings:LetterboxdRatings,fenceGuard,phase:'removal'}),watchlist:LetterboxdSyncWatchlist.watchlistPhase({repository,scanOpen:e=>LetterboxdSync.scanOpen(e),fetchPage:getHTML,parse:parseWatchlist,firstUrl:sources.watchlist,username:sources.letterboxdUsername,describe:describeFilms})};
 }
+// AIR-572 / ADR 0203: the owner-only operator of the membership baseline and the writer switch (MCP tool watchlist_membership_operator). The same ports as the `membership` effect (identity resolver, version-fenced
+// Film writer, Letterboxd Sync epoch fence), plus bounded reads of the Sync epoch and of the Producer's non-terminal chains. Nothing calls it but the owner's tool call.
+async function handleWatchlistMembershipOperatorTool(env,args){
+ const reads=WatchlistMembership.operatorReads({held:()=>CanonicalProducerWorkflow.PRODUCER_DELIVERY_HOLD});
+ return WatchlistMembership.membershipOperator({repository:WatchlistD1,resolve:(e,lids)=>CanonicalProducerWorkflow.resolveSourceIdentitiesEach(e,lids),setMembership:(e,input)=>CanonicalFilmWriters.setFilmMembership(e,input),
+  epochGuard:epoch=>[LetterboxdSync.FENCE_GUARD_SQL,[epoch]],fenceEnv:(e,epoch)=>LetterboxdSync.fencedEnv(e,epoch),...reads})(env,args);
+}
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {
 // AIR-308 (ADR 0155): the cron trigger does not call the D1 enrichment projector. D1_ENRICHMENT_WRITE is ignored.
