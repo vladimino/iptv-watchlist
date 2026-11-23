@@ -326,7 +326,7 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  const ctx={console,crypto,Date,Promise,Math,Object,Array,JSON,Number,String,Error,RegExp,Intl,Map,Set};
  const mods=vm.runInNewContext(code,ctx);
  const {RatingsOrchestration,LetterboxdSync}=mods;
- const f=fresh(),wf=workflow(),e={DB:f.db,BUCKET:bucket(),LETTERBOXD_WORKFLOW:wf,RATINGS_WORKFLOW:{create:async()=>{throw new Error('must not create');}}};
+ const f=fresh(),wf=workflow(),e={DB:f.db,BUCKET:bucket(),LETTERBOXD_WORKFLOW:wf};
  // Inert: with no Letterboxd mode row the legacy gate is exactly today's.
  assert.equal((await RatingsOrchestration.externalGate(e,'start')).reason,null);
  assert.equal((await RatingsOrchestration.externalGate(e,'step')).reason,null);
@@ -337,9 +337,10 @@ async function wholeRun({ratings,watchlist,reconcile=okPort('done'),now=T('2026-
  assert.equal((await RatingsOrchestration.externalGate(e,'status')).reason,null,'reads stay open');
  await sw(e,{action:'complete'},typeof GOOD==='undefined'?{}:GOOD);
  assert.equal((await RatingsOrchestration.externalGate(e,'step')).reason,'external_writer_fenced');
- // A stale ratings instance is refused while the Letterboxd mode is cloudflare, even if the ratings mode document says cloudflare (never two Diary writers). The old cron `ensure` is gone (AIR-580).
+ // The legacy gate stays fenced while the Letterboxd mode is cloudflare, even if the ratings mode document says cloudflare (never two Diary writers). The Ratings Workflow, its `admit` and the cron `ensure` are retired.
  ctx.__ratingsCloudflare=true;
- const stale=await RatingsOrchestration.admit(e,{runKey:'2026-11-21',series:0,epoch:1,id:'x'});assert.equal(stale.reason,'external_writer_fenced','a stale ratings instance is refused');
+ assert.equal((await RatingsOrchestration.externalGate(e,'start')).reason,'external_writer_fenced','fenced whatever the ratings mode document says');
+ assert.equal(typeof RatingsOrchestration.admit,'undefined','the Workflow admission is gone');
  ctx.__ratingsCloudflare=false;
  // Rollback: back to external re-opens exactly the legacy writer.
  await sw(e,{action:'close_admission',target:'external'},typeof GOOD==='undefined'?{}:GOOD);
