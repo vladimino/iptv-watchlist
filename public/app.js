@@ -2040,20 +2040,25 @@ function renderFinds(now=nowMs()){
  renderSimilar(now);
  return list;
 }
-async function fetchUserRead(url){
- let response=await fetch(url);
+// AIR-586: `signal` (the large read's turn) cancels the request, the Retry-After wait and the retry alike.
+async function fetchUserRead(url,{signal}={}){
+ const init=signal?{signal}:undefined;
+ let response=await fetch(url,init);
  const retry=response.status===503&&typeof response.headers?.get==='function'?response.headers.get('Retry-After'):null;
  if(retry==null)return response;
  const parsed=Number(retry),ms=Math.min(2000,Math.max(0,Number.isFinite(parsed)?parsed*1000:400));
- await new Promise(resolve=>setTimeout(resolve,ms));
- return fetch(url);
+ await new Promise((resolve,reject)=>{
+  const timer=setTimeout(resolve,ms);
+  if(signal&&typeof signal.addEventListener==='function')signal.addEventListener('abort',()=>{clearTimeout(timer);reject(new Error('aborted'));},{once:true});
+ });
+ return fetch(url,init);
 }
-function loadCatalog(){return heavyTurn('catalog',loadCatalogNow);}
-async function loadCatalogNow(){
+function loadCatalog(){return heavyTurn('catalog',signal=>loadCatalogNow(signal));}
+async function loadCatalogNow(signal){
  if(findsLoading)return 'busy';
  findsLoading=true;
  try{
-  const response=await fetchUserRead('/api/catalog/available');
+  const response=await fetchUserRead('/api/catalog/available',{signal});
   if(!response.ok)throw new Error();
   const data=await response.json();
   if(!data||!Array.isArray(data.films))throw new Error();
@@ -2421,12 +2426,13 @@ async function programmeFailureMessage(response){
  const status=Number.isInteger(response.status)?response.status:'ошибка';
  return `Не удалось загрузить программу (HTTP ${status}). Повторим автоматически.`;
 }
-function loadProgramme(options={}){return heavyTurn('programme',()=>loadProgrammeNow(options));}
-async function loadProgrammeNow({quiet}={}){
+function loadProgramme(options={}){return heavyTurn('programme',signal=>loadProgrammeNow({...options,signal}));}
+const PROGRAMME_TIMED_OUT='Программа не загрузилась вовремя. Повторим автоматически.';
+async function loadProgrammeNow({quiet,signal}={}){
  if(programmeLoading)return 'busy';
  programmeLoading=true;
  try{
-  const response=await fetch('/api/programme');
+  const response=await fetch('/api/programme',signal?{signal}:undefined);
   if(!response.ok)throw new Error(await programmeFailureMessage(response));
   const data=await response.json();
   if(!data||!Array.isArray(data.films))throw new Error(PROGRAMME_NOT_READY);
@@ -2457,6 +2463,7 @@ async function loadProgrammeNow({quiet}={}){
   renderFinds();
   return true;
  }catch(error){
+  if(signal?.aborted)error=new Error(PROGRAMME_TIMED_OUT);
   programmeRefreshError=true;
   if(programmeReady){
    // A failed refresh leaves the last authoritative result readable but read-only until a refresh succeeds (also without a usable saved copy).
@@ -2489,8 +2496,10 @@ function requestLiveRefresh(){
 // AIR-586: the four reads that each hold a large part of the catalog in the Worker (programme, view, Finds, footer) go one after the other, never together:
 // sent at once they land in one Worker isolate and their memory adds up past its limit, which fails all of them with 503. Every call of the four loaders,
 // wherever it comes from (the first load, a live refresh, the cold retry, a Finds mark, a retry button), takes one shared turn (`heavyTurn`), so at most one
-// of them is in flight at any time. A loader already waiting for its turn is shared, not queued twice (refreshes still coalesce). A turn that has not settled
-// within HEAVY_TURN_MAX_MS lets the next one go, so one hung read cannot stop the page; it is still the one read that may then overlap.
+// of them is in flight at any time. A loader already waiting for its turn is shared, not queued twice (refreshes still coalesce). A read still open after
+// HEAVY_TURN_MAX_MS is cancelled through the turn's AbortController (request, Retry-After wait, retry and body), and the next turn starts only after the
+// loader has settled, so one hung read cannot stop the page and the page never has two large requests open. The footer reader has its own 45 s abort
+// (FOOTER_READ_TIMEOUT_MS) and settles before this bound. A cancelled request ends the browser's side only: it does not prove the Worker stopped working on it.
 const HEAVY_TURN_MAX_MS=60000;
 let heavyChain=Promise.resolve(),heavyActive=0;
 const heavyWaiting=new Map();
@@ -2500,8 +2509,9 @@ function heavyTurn(key,load){
  const previous=heavyChain;heavyChain=turn;heavyActive++;
  const run=previous.then(()=>{
   heavyWaiting.delete(key);
-  const started=Promise.resolve().then(load);
-  const timer=typeof setTimeout==='function'?setTimeout(release,HEAVY_TURN_MAX_MS):null;
+  const controller=typeof AbortController==='function'?new AbortController():null;
+  const timer=controller&&typeof setTimeout==='function'?setTimeout(()=>controller.abort(),HEAVY_TURN_MAX_MS):null;
+  const started=Promise.resolve().then(()=>load(controller?controller.signal:undefined));
   const done=()=>{if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);heavyActive--;release();};
   started.then(done,done);
   return started;
@@ -2575,8 +2585,8 @@ async function init(){
 }
 const COLD_PROGRAMME_RETRY_MS=5000;
 
-function loadEnrichment(options={}){return heavyTurn('enrichment',()=>loadEnrichmentNow(options));}
-async function loadEnrichmentNow(options={}){if(enrichmentLoading)return 'busy';enrichmentLoading=true;try{const response=await fetchUserRead('/api/enrichment/view');if(!response.ok)throw new Error();const data=await response.json();if(!data||typeof data.films!=='object')throw new Error();const key=JSON.stringify(data);if(key===enrichmentKey)return true;enrichmentKey=key;enrichment=data;ratingsLoaded=true;enrichmentUnavailable=false;updateFacetOptions();renderPreservingScroll();return true;}catch{enrichmentUnavailable=true;if(!ratingsLoaded&&!options.quiet)render();return false;}finally{enrichmentLoading=false;}}
+function loadEnrichment(options={}){return heavyTurn('enrichment',signal=>loadEnrichmentNow({...options,signal}));}
+async function loadEnrichmentNow(options={}){if(enrichmentLoading)return 'busy';enrichmentLoading=true;try{const response=await fetchUserRead('/api/enrichment/view',{signal:options.signal});if(!response.ok)throw new Error();const data=await response.json();if(!data||typeof data.films!=='object')throw new Error();const key=JSON.stringify(data);if(key===enrichmentKey){if(enrichmentUnavailable){enrichmentUnavailable=false;renderPreservingScroll();}return true;}enrichmentKey=key;enrichment=data;ratingsLoaded=true;enrichmentUnavailable=false;updateFacetOptions();renderPreservingScroll();return true;}catch{enrichmentUnavailable=true;if(!ratingsLoaded&&!options.quiet)render();return false;}finally{enrichmentLoading=false;}}
  const FOOTER_RUN_STATUS={idle:'не запускался',running:'выполняется',completed:'завершён',blocked:'приостановлен',interrupted:'прерван'};
 const INTEGRATION_STATE={healthy:'работает',degraded:'требует внимания',failed:'сбой',stale:'давний успех',unknown:'нет данных',off:'выключено',running:'выполняется',waiting:'ожидает'};
 const INTEGRATION_CODE={ok:'',stale:'последний успех давно',no_data:'',running:'',ratings_blocked:'список оценок временно недоступен',ratings_incomplete:'список оценок прочитан не полностью',ratings_rate_limit:'слишком много запросов',ratings_failed:'оценки прочитать не удалось',ratings_pending:'чтение оценок не завершилось, причина неизвестна',watchlist_failed:'watchlist прочитать не удалось',watchlist_stuck:'синхронизация не завершилась',epg_http:'загрузка EPG не удалась',epg_window:'EPG не покрывает текущее окно',epg_parse:'разбор EPG не удался',epg_failed:'обновление EPG не завершилось',epg_unproven:'публикация этого поколения не подтверждена',resolver_waiting:'',resolver_backoff:'распознавание подождёт: слишком много запросов',resolver_unconfigured:'распознавание не настроено',resolver_failed:'распознавание остановилось',resolver_no_recent_progress:'нет подтверждённого выполнения · вероятна внешняя блокировка; проверь Usage',prediction_interrupted:'запуск прерван',prediction_blocked:'прогнозы приостановлены',prediction_runs_interrupted:'часть запусков прервалась',prediction_no_recent_progress:'нет подтверждённого прогресса прогнозов',poster_idle:'',poster_hydrated:'на прошлой неделе найдены новые постеры',poster_first_run:'первая проверка ещё впереди',poster_retry_scheduled:'повторная попытка запланирована',poster_overdue:'еженедельная проверка не выполнена вовремя',poster_stalled:'проверка зависла или отчёт не доставлен',poster_lost:'данные проверки постеров пропали',poster_failed:'проверка постеров не удалась',metadata_attention:'метаданные и локализация требуют внимания'};

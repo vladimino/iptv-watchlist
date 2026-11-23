@@ -19,7 +19,7 @@ const document={hidden:false,addEventListener(type,fn){add(listeners.document,ty
 const window={scrollY:0,scrollTo(){},addEventListener(type,fn){add(listeners.window,type,fn);},removeEventListener(){},location:{href:'https://iptv.example/'},history:{state:null,replaceState(_s,_t,url){window.location.href=new URL(url,window.location.href).href;}}};
 
 const HEAVY=new Set(['/api/programme','/api/enrichment/view','/api/catalog/available','/api/enrichment/footer/status']);
-const pending=[],calls=[],timers=[];
+const pending=[],calls=[],timers=[],aborted=[];
 let heavyInFlight=0,maxHeavyInFlight=0,programmeFailures=1;
 const programme={updatedAt:'2026-10-18T12:00:00Z',publishedAt:'2026-10-18T12:00:00Z',window:{from:Date.parse('2026-10-15T12:00:00Z'),to:Date.parse('2026-10-19T12:00:00Z')},films:[{id:'film-1',title:'Первый',original:'First',year:2020,runtime:100,genres:['Драма'],shows:[]}],people:{directors:[],actors:[]}};
 function payload(path){
@@ -33,19 +33,24 @@ function payload(path){
  return {};
 }
 const context=vm.createContext({
- Date,Intl,URL,URLSearchParams,Set,Map,Promise,JSON,console,document,window,
+ Date,Intl,URL,URLSearchParams,Set,Map,Promise,JSON,console,document,window,AbortController,
  setInterval(){return 1;},clearInterval(){},
  setTimeout(fn,ms){timers.push({fn,ms});return timers.length;},clearTimeout(){},
- fetch(url){
+ fetch(url,init){
   const path=String(url).split('?')[0];
   calls.push(path);
   const heavy=HEAVY.has(path);
   if(heavy){heavyInFlight++;maxHeavyInFlight=Math.max(maxHeavyInFlight,heavyInFlight);}
-  return new Promise(resolve=>pending.push({path,finish(){
+  // As a browser does: an aborted request rejects and is no longer open.
+  return new Promise((resolve,reject)=>{let open=true;const item={path,finish(){
+   if(!open)return;open=false;
    if(heavy)heavyInFlight--;
    const fail=path==='/api/programme'&&programmeFailures>0&&programmeFailures--;
    resolve({ok:!fail,status:fail?503:200,headers:{get(){return null;}},json:async()=>fail?{}:payload(path)});
-  }}));
+  }};
+  pending.push(item);
+  init?.signal?.addEventListener('abort',()=>{if(!open)return;open=false;if(heavy)heavyInFlight--;aborted.push(path);const at=pending.indexOf(item);if(at>=0)pending.splice(at,1);reject(Object.assign(new Error('aborted'),{name:'AbortError'}));},{once:true});
+  });
  },
 });
 vm.runInContext(scopedAvailability('src/domain/film-availability.js','FilmAvailability')+'\n'+fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
@@ -84,4 +89,31 @@ assert.equal(heavy[0],'/api/programme');
 assert.ok(heavy.filter(path=>path==='/api/programme').length>=2,'the failed first read and the retry');
 assert.ok(heavy.indexOf('/api/catalog/available')>heavy.indexOf('/api/enrichment/view'),'Finds after the view of the first load');
 assert.equal(run('heavyActive'),0);
-console.log('Heavy read turns: the first load, a focus/visibility refresh and the cold retry share one turn (never two large reads at once), waiting loaders are shared, and the page recovers passed');
+
+// A large read that hangs: after HEAVY_TURN_MAX_MS its turn cancels it (the request is aborted, not abandoned), and the next large read starts only after
+// the cancelled one has settled. The page then goes on and recovers on the next refresh.
+{
+ const before=calls.length;maxHeavyInFlight=0;
+ const turnTimers=()=>timers.filter(timer=>timer.ms===60000);
+ const armed=turnTimers().length;
+ const refresh=run('runLiveRefresh()');
+ for(let i=0;i<10;i++)await step(holdView);
+ const asked=()=>calls.slice(before).filter(path=>HEAVY.has(path));
+ assert.deepEqual(asked(),['/api/programme','/api/enrichment/view'],'the view hangs; Finds and the footer wait');
+ assert.ok(turnTimers().length>armed,'each turn arms its bound');
+ for(const timer of turnTimers().slice(armed))timer.fn();
+ await tickOver();
+ assert.deepEqual(aborted,['/api/enrichment/view'],'the hung read is cancelled');
+ for(let i=0;i<200&&(pending.length||run('heavyActive')>0||run('liveRunning')||run('livePending'));i++)await step();
+ await refresh;
+ assert.equal(maxHeavyInFlight,1,'the next large read starts only after the cancelled one settled');
+ assert.deepEqual(asked(),['/api/programme','/api/enrichment/view','/api/catalog/available','/api/enrichment/footer/status']);
+ assert.equal(run('enrichmentUnavailable'),true,'the cancelled view counts as a failed read');
+ assert.equal(run('films[0].title'),'Первый','the programme on screen is kept');
+ const recovered=run('runLiveRefresh()');
+ for(let i=0;i<200&&(pending.length||run('heavyActive')>0||run('liveRunning')||run('livePending'));i++)await step();
+ await recovered;
+ assert.equal(run('enrichmentUnavailable'),false,'the next refresh recovers the view');
+ assert.equal(maxHeavyInFlight,1);
+}
+console.log('Heavy read turns: the first load, a focus/visibility refresh and the cold retry share one turn (never two large reads at once), waiting loaders are shared, a hung read is cancelled before the next one starts, and the page recovers passed');
