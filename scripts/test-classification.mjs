@@ -1066,6 +1066,9 @@ export const FILES={
  "prediction-aux-bench-lib.mjs": {
   "suite": "core"
  },
+ "prediction-aux-p3-benchmark.mjs": {
+  "suite": "core"
+ },
  "r2-fake-bucket-lib.mjs": {
   "suite": "support",
   "note": "Fake S3-compatible R2 bucket over loopback HTTP (paged listing, conditional HEAD and GET, signature check, write refusal) shared by tests/r2-snapshot-export.mjs, tests/r2-snapshot-export-scoped.mjs and tests/prediction-aux-export-convert.mjs. Executing this file runs no check."
