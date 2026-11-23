@@ -266,6 +266,13 @@ export async function writeFilmFacts(env,input){
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
  if(input.requireExisting===true)statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?)'),[id]]);
+ // AIR-572: caller-supplied proof conditions (the Producer's Letterboxd claim / owner / redirect proof of this Film target), asserted INSIDE the same
+ // fenced batch, so a claim or redirect that changed after the plan fails the whole batch (receipt tail included) and nothing is written. Same shape and
+ // bound as mutateFilm: at most 12, internal code only. Not part of the content digest.
+ if(input.guards!==undefined){
+  if(!Array.isArray(input.guards)||input.guards.length>12||input.guards.some(guard=>!guard||typeof guard.sql!=='string'||!guard.sql||!Array.isArray(guard.params)||guard.params.some(value=>value===undefined)))throw failed('film_person_invalid');
+  for(const guard of input.guards)statements.push([fenced.assertSql(guard.sql),guard.params]);
+ }
  statements.push(...plan.statements);
  statements.push([fenced.BUMP,['film',id,at]]);
  await fenced.commit(env,gate,statements,entities,tail);
