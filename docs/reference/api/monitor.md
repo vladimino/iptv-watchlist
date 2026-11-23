@@ -12,7 +12,7 @@ A pure read of the stored monitor result: nothing is evaluated, written or sent.
 | `stored` | Whether a snapshot document exists |
 | `heartbeatAt`, `heartbeatAgeMs` | Time of the last saved snapshot and its age at read time. An external dead-man check can poll this |
 | `overall` | The worst stream state: `healthy`, `waiting`, `delayed`, `degraded` or `needs_owner` |
-| `streams[]` | `epg`, `discovery`, `ratings`, `predictions` and `catalog_posters` (see [Catalog poster stream](#catalog-poster-stream)), each with `state`, a few non-private `facts` and its issue keys |
+| `streams[]` | `epg`, `discovery`, `ratings`, `predictions`, `catalog_posters` (see [Catalog poster stream](#catalog-poster-stream)) and `canonical_producer` (see [Canonical Producer stream](#canonical-producer-stream)), each with `state`, a few non-private `facts` and its issue keys |
 | `openIssues[]` | Alertable issues with `key`, `severity`, `firstSeenAt`, `sendCount` |
 | `outbox`, `outboxOldestAt` | Number of undelivered notifications and the queue time of the oldest; a growing value means the channel is failing |
 | `cancelledUndelivered` | Alerts cancelled because their issue cleared before they were ever delivered |
@@ -33,7 +33,7 @@ A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-m
 
 ## Issue keys
 
-`epg_stale`, `epg_failed`, `epg_authority`, `epg_resource_limit`, `discovery_stalled`, `discovery_executor_stalled`, `discovery_generation_mismatch`, `discovery_quarantined`, `discovery_resource_limit`, `ratings_stalled`, `ratings_quarantined`, `ratings_failed_permanent`, `ratings_switch_open`, `ratings_resource_limit`, `predictions_no_progress`, `catalog_posters_unknown`, `catalog_posters_lost`, `catalog_posters_stalled`, `catalog_posters_overdue` (only once degraded), `catalog_posters_failed`, and `<stream>_unreadable` when a source cannot be read.
+`epg_stale`, `epg_failed`, `epg_authority`, `epg_resource_limit`, `discovery_stalled`, `discovery_executor_stalled`, `discovery_generation_mismatch`, `discovery_quarantined`, `discovery_resource_limit`, `ratings_stalled`, `ratings_quarantined`, `ratings_failed_permanent`, `ratings_switch_open`, `ratings_resource_limit`, `predictions_no_progress`, `catalog_posters_unknown`, `catalog_posters_lost`, `canonical_producer_no_progress`, `canonical_producer_failed`, `canonical_producer_held_by_delivery` (never alerts), `catalog_posters_stalled`, `catalog_posters_overdue` (only once degraded), `catalog_posters_failed`, and `<stream>_unreadable` when a source cannot be read.
 
 ## Thresholds
 
@@ -73,3 +73,28 @@ The status adds `holdUntil` and `lastDeliveryFailure` (`{at, reason}`) next to `
 Only `degraded` and `needs_owner` raise an issue (`catalog_posters_<state>`); `waiting`, `delayed`, `grace` and `healthy_idle` never alert. An empty due set, a no-poster verdict and a legitimate retry wait are not faults. The stream `facts` carry `state`, `detail`, `freshnessAt` (the newest of `lastScheduledAt`, `lastAttemptAt`, `lastCompletedAt`) and `nextExpectedAt`.
 
 **Detectability limit.** An idle daily firing writes nothing and is therefore not detectable. The Sunday sweep is monitored from its persisted weekly receipt, and daily firings only when an unfinished run was due. The constants (26 h grace, 2 h, 52 h, retry cap 6, outbox 8) live in the implementation and are measured on the first natural weeks, not proven. The stream is implemented and tested offline only; the cron it judges is not activated by this documentation.
+
+## Canonical Producer stream
+
+AIR-572. `canonical_producer` judges the EPG to canonical Film/Person Producer ([ADR 0141](../../adr/0141-producer-workflow-chain-protocol.md)) by **durable progress only**, so a Workflow that never starts can no longer hide behind a healthy EPG. It is evaluated by the same hourly `Monitor.run`, uses the same outbox, deduplication, cooldown, recovery and transport as the other streams, and adds no scheduler, secret or channel. The stream is absent only when the Producer module is not part of the running Worker.
+
+**Facts (bounded, read-only D1, at most four reads per tick, no join, no scan, no write):** the published `(P,g)` from `published_epg_authority`, its `published_at`, the `canonical_producer_chain` row of `P` (primary key) and the `canonical_producer_run` row of the exact generation `P:g` (indexed on `origin, source_generation`). `GET /api/monitor/status` reads only the stored document and evaluates nothing.
+
+**Progress clock.** Progress is a *change* of the run's own counters or cursor (`cursor_id`, `n_applied`, `n_noop`, `n_kept`, `n_failed`, `pass_no`, `pass_state`). An EPG publication, a takeover, a lease renewal, a heartbeat and a chain `updated_at` are never progress. The first observation of a run is not progress; the run's stored `updated_at` is its only evidence of life. The no-progress streak starts at the later of the publication and the first live tick, survives a rollover of the published generation and is cleared only by progress, so a stream of rollovers cannot postpone the verdict. State is kept in `canonicalProducer` of `monitor/state.json` (written only by `Monitor.run`).
+
+| `facts.status` | Stream state | Meaning | Alert |
+| --- | --- | --- | --- |
+| `current` | `healthy` | The run of the published generation is `passed` and its applied generation equals it (zero eligible units included). Nothing else is `current`. | no |
+| `waiting` | `waiting` | Inside the 2 h window, or no generation is published. | no |
+| `lagging` | `waiting` | Published more than 2 h ago, but the run is still moving. A late, moving pass is not stalled. | no |
+| `stalled` | `degraded` | No durable progress for more than 2 h (`producerNoProgressMs`), whatever the chain state (pending, active, expired takeover, missing chain or run). Key `canonical_producer_no_progress`. | first snapshot |
+| `failed` | `degraded` | The chain or run is `stopped` with a recoverable class (`transient`, `receipt`, `authority`). Key `canonical_producer_failed`. | first snapshot |
+| `blocked` | `needs_owner` | `stopped` with an identity code (`producer_identity_*`) or a `terminal`, `fail_closed` or `exhausted` class. Key `canonical_producer_failed`. | at once |
+| `held_by_delivery` | `delayed` | The static delivery hold is on (below). Visible, never `healthy`, never a success. | no (deliberate) |
+| `unreadable` | `degraded` | A read failed. The streak is kept. Key `canonical_producer_unreadable`. | two snapshots |
+
+With the hourly cron an actionable alert follows publication by about 2 to 3 hours (excluding an outage of the cron or the transport). While the hold is on nothing is read and the clock is cleared, so lifting the hold gives the live Producer a full window instead of an instant alert.
+
+**Delivery hold (AIR-572).** `PRODUCER_DELIVERY_HOLD` in `src/canonical-producer-workflow.js` is a static default-DENY constant. While `true`, `reconcileProducerChain` (hourly EPG) performs no I/O and creates no Workflow instance, and `runProducerWorkflow` (an instance that already exists) returns `held_by_delivery` before its nonce, claim or any D1 access. It depends on no flag, secret, environment or D1 state, and does not touch EPG publication or any other canonical writer. Lifting it is a separate owner-approved code change; the monitor reports it as `held_by_delivery`.
+
+The monitor never retries, resets a lease or repairs data. A synthetic test message needs its own approval.

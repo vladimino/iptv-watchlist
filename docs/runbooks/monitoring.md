@@ -153,3 +153,17 @@ Read-only checks; none of them authorizes a manual EPG or Discovery run, a lease
 - **Old-Worker signature.** Pointer published, pause row `clear`, `finalized_run_id` different from `programme_run_id`: a Worker without the certificate code lifted the pause at the pointer. Redeploy the current code; the repair certifies the run. Rollback to such a Worker is an owner decision.
 - **Busy telemetry.** `seal_busy` phase lines carry `busyKind`, `holderKind` (`epg`, `discovery`, `projector`), `holdExpiry`, `scheduledWaitMs`, `sealPhase`, so an EPG-held lease is told apart from a Discovery-held one. `scheduledWaitMs` is the planned retry delay, not the measured time spent blocked; do not read it as observed contention latency. `seal_certify` carries `outcome` (`certified`, `owed`, `absent`, `skipped`).
 - **`scanOutcome`** on the completed `sync.json` (`applied`, `facts_only`, `skipped_incomplete_watchlist`, `skipped_no_observation`) says whether the retention scan was applied; the certificate does not.
+
+## Canonical Producer: `canonical_producer_*` alerts (AIR-572, [ADR 0141](../adr/0141-producer-workflow-chain-protocol.md))
+
+Read `GET /api/monitor/status` first (stream `canonical_producer`, `facts.status`), then the Producer's own stored rows with a bounded read-only query of `canonical_producer_chain` (by `programme_run_id`) and `canonical_producer_run` (by `source_generation`). The monitor only reports; every action below needs its own owner approval.
+
+| Status / key | Meaning | Next step |
+| --- | --- | --- |
+| `held_by_delivery` | The static delivery hold is on. Expected until the owner lifts it in code. | None. Do not treat it as success: no canonical membership or facts are being written. |
+| `stalled` / `canonical_producer_no_progress` | No durable run progress for more than 2 h. A running Workflow whose instances all error (for example the former `RPC receiver does not implement the method "bind"`, `step_count` 0) shows exactly this: chain `pending` or `active`, takeovers growing, no run row. | Read the Workflow instance errors through the Cloudflare read path. Do not reset a lease or create an instance by hand. A code fix is a PR. |
+| `failed` | Recoverable stop (`transient`, `receipt`, `authority`); the hourly reconcile retries by its own backoff. | Wait for the next hourly ticks; escalate if the same code repeats. |
+| `blocked` / `canonical_producer_failed` | Identity code or `terminal` / `fail_closed` / `exhausted`. `producer_identity_unresolved` (a Letterboxd lid with neither a trusted claim nor an existing Film), `producer_identity_ambiguous` (an untrusted or competing claim), `producer_identity_redirect_chain`, `producer_identity_bounded` (more than 1000 lids), `producer_identity_unreadable`. | Owner decision. The fix is a trusted claim or an admission through the existing owner paths; the Producer never creates a Film from a spelling and never guesses from title or year. |
+| `canonical_producer_unreadable` | A bounded D1 read failed. | Check D1 health first; the streak is kept, not reset. |
+
+Recovery is automatic and uses the existing outbox (one recovery message per delivered alert). A held or stopped Producer does not stop EPG publication or any other canonical writer.
