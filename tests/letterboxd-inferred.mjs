@@ -326,7 +326,7 @@ const strange=path.join(scratch,'strange.json');
   const out=await (await post({BUCKET:raced},'commit',{origin:{...originBody,archiveSha256:'5'.repeat(64)},chunk:0,items:[{lid:'Rr1',tmdb:'333',facts:{watched:true},effectiveOn:{},identity:'inferred',admit:{title:'Race Movie',year:2012}}]})).json();
   assert.equal(out.conflicts,1);assert.equal(raced.records.get(admKey).films.tmdb_333.sourceCode,'Other1','an entry found, not created, stays');
  }
- // ADR 0184 wiring: the canonical Letterboxd claim is requested for a chunk's VERIFIED links only, after the chunk receipt is committed and the facts and the link are durable; never for an inferred link (it can be unlinked later),
+ // ADR 0184 wiring: the canonical Letterboxd claim is requested for a chunk's VERIFIED links only, after the chunk receipt is committed and the facts and the link are durable; never for an inferred link (a title/year match is not proof; the planner refuses it too),
  // never for a conflict, never when the receipt fails, never throws into the import, and is a no-op when the claim module is absent.
  {
   const calls=[];const stub={mode:'ok',ensureLetterboxdClaims:async(envArg,{pairs})=>{calls.push({pairs:JSON.parse(JSON.stringify(pairs)),durable:pairs.map(pair=>!!factRecord(held.BUCKET,'tmdb-'+pair.tmdb)),receipt:[...held.BUCKET.records.keys()].some(key=>/\.receipt\.json$/.test(key))});if(stub.mode==='throw')throw Object.assign(new Error('boom'),{code:'film_person_unavailable'});return {state:'complete'};}};
@@ -339,7 +339,7 @@ const strange=path.join(scratch,'strange.json');
   // a replay of the committed chunk re-offers it (the recovery of an interrupted claim), with no new facts
   const replay=await (await post(held,'commit',{origin,chunk:0,items:[item]})).json();
   assert.equal(replay.replay,true);assert.deepEqual(calls.at(-1).pairs,[{lid:'Qq1',tmdb:'131'}]);
-  // an INFERRED link is never offered: the existing unlink route can withdraw it later, and a claim must not outlive its evidence
+  // an INFERRED link is never offered: a unique title and year is not proof of the lid (AIR-559; the claim planner also refuses an inferred record, tests/canonical-letterboxd-claim.mjs)
   calls.length=0;
   assert.equal((await post(held,'commit',{origin:{...originBody,archiveSha256:'7'.repeat(64)},chunk:0,items:[{lid:'Qq5',tmdb:'135',facts:{watched:true,rating:3},effectiveOn:{},identity:'inferred',admit:{title:'Inferred Five',year:2011}}]})).status,200);
   assert.equal(calls.length,0,'an inferred link reaches no claim request');

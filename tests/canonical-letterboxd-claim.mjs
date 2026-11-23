@@ -318,6 +318,36 @@ await raced('the Film loses its trusted tmdb claim after the plan',file=>assert.
 await raced('the Film gains a second trusted tmdb value after the plan',file=>assert.equal(sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('"+FID(1)+"','tmdb','5',1,0,NULL)").status,0));
 await raced('the Film trusted tmdb claim is downgraded after the plan',file=>assert.equal(sqlite(file,"UPDATE film_external_id SET trusted=0 WHERE film_id='"+FID(1)+"' AND scheme='tmdb'").status,0));
 
+// 14. AIR-559: an INFERRED link (ADR 0104, a unique original title and year in a personal export) is not proof of the lid, whatever flow offers it. The fact record that first received the lid from that import carries
+// `identity`; the planner refuses it before any write and a Diary-first or verified key does not help. Any other recorded identity fails closed. An already stored claim on such a link is NOT `already` (no full proof).
+const INFERRED={kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:'a'.repeat(64)};
+await refusal('inferred link (title/year match)',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1,{record:{schemaVersion:1,factKey:'tmdb-1',links:{letterboxd:'AAA1',tmdb:'1'},identity:INFERRED,redirectTo:null,migrating:null}});},I,'not_proved','ratings_link_inferred');
+await refusal('inferred link on a Diary-first key',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1,{key:'lb-AAA1',record:{schemaVersion:1,factKey:'lb-AAA1',links:{letterboxd:'AAA1',tmdb:'1'},identity:INFERRED,redirectTo:null,migrating:null}});},I,'not_proved','ratings_link_inferred');
+await refusal('unknown recorded identity kind',file=>{seedFilm(file,1);seedRatings(file,'AAA1',1,{record:{schemaVersion:1,factKey:'tmdb-1',links:{letterboxd:'AAA1',tmdb:'1'},identity:{kind:'guessed'},redirectTo:null,migrating:null}});},I,'not_proved','ratings_link_unverified');
+{
+ const file=database();seedFilm(file,1,{ids:[['tmdb','1',1,0],['letterboxd','AAA1',1,0]]});
+ seedRatings(file,'AAA1',1,{record:{schemaVersion:1,factKey:'tmdb-1',links:{letterboxd:'AAA1',tmdb:'1'},identity:INFERRED,redirectTo:null,migrating:null}});
+ const env=envOf(file),before=dump(file);
+ const plan=await planLetterboxdClaim(env,I);
+ assert.deepEqual([plan.verdict,plan.reason],['not_proved','ratings_link_inferred'],'a stored claim on an inferred link is not declared already');
+ const out=await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:true,now:()=>T});
+ assert.deepEqual([out.state,out.written,out.already,out.refused],['incomplete',0,0,1]);assert.equal(out.results[0].reason,'ratings_link_inferred');
+ assert.equal(dump(file),before,'nothing is written, nothing removed: the stored claim is left for a case-by-case owner decision (ADR 0192)');
+}
+// The inferred mark is part of the fact record, covered by the ratings generation: one that APPEARS between the plan and the batch moves the generation and fails the whole fenced batch.
+await raced('the record becomes an inferred link after the plan',file=>{const record=getDoc(file,'letterboxd/facts/films/tmdb-1.json');record.identity=INFERRED;putDoc(file,'letterboxd/facts/films/tmdb-1.json',record);assert.equal(sqlite(file,"UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1").status,0);});
+// A verified link whose canonical Film arrives LATER (another writer admits it): `film_absent` first, then a later offer of the same flow (the Diary `claim_pending` retry, an owner replay of the chunk) passes once the Film owns the movie, and only then.
+{
+ const file=database();seedRatings(file,'AAA1',1);const env=envOf(file);
+ assert.deepEqual((({verdict,reason})=>[verdict,reason])(await planLetterboxdClaim(env,I)),['not_proved','film_absent']);
+ const early=await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:true,now:()=>T});
+ assert.deepEqual([early.written,early.refused],[0,1]);assert.equal(rows(file,"SELECT COUNT(*) AS c FROM film_external_id")[0].c,0,'no Film, no claim, nothing created');
+ seedFilm(file,1);
+ const later=await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:true,now:()=>T});
+ assert.deepEqual([later.state,later.written],['complete',1]);assert.deepEqual(pairs(file),['letterboxd:AAA1','tmdb:1']);
+ assert.equal(rows(file,"SELECT COUNT(*) AS c FROM film")[0].c,1,'the claim never creates a Film');
+}
+
 // 13. Producer wiring (ADR 0184 decision 5): the gate is off in code, `ensureLetterboxdClaims` writes nothing until it is on, never throws into a flow, is bounded and idempotent.
 assert.equal(LETTERBOXD_CLAIM_ACTIVATED,false,'the activation constant ships off');
 {
@@ -386,7 +416,8 @@ assert.equal(LETTERBOXD_CLAIM_ACTIVATED,false,'the activation constant ships off
  const out=await ensureLetterboxdClaims(envOf(file),{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:true,now:()=>T});
  assert.deepEqual([out.state,out.failed,out.written],['incomplete',1,0]);assert.equal(dump(file),before);
 }
-// Static: the three flows reach the claim only through the guarded global, after their durable steps, inside a try; the rated-candidate path is deliberately NOT wired (its rating link carries no `letterboxd:<code>` alias).
+// Static: the flows reach the claim only through the guarded global, after their durable steps, inside a try. The rated-candidate path is deliberately NOT wired: its rating link carries no `letterboxd:<code>`
+// alias, its short code is never a lid, and it refuses a movie that is already linked to a lid (`tmdb_already_imported`), so it never holds a provable pair (tests/letterboxd-rated-candidates.mjs, AIR-559).
 {
  const diary=fs.readFileSync(path.join(SRC,'letterboxd-diary-identity.js'),'utf8'),facts=fs.readFileSync(path.join(SRC,'letterboxd-facts.js'),'utf8'),rated=fs.readFileSync(path.join(SRC,'letterboxd-rated-candidates.js'),'utf8');
  for(const text of [diary,facts])assert.ok(/typeof CanonicalLetterboxdClaim[!=]=='undefined'/.test(text),'guarded by typeof');

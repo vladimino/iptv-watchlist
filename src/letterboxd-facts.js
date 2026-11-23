@@ -643,7 +643,7 @@ function recordRatingChange(record,incoming,effective){
   });
  }
 
- // ADR 0184: the canonical Letterboxd claim of the lids of a chunk whose Ratings link is durable AND COMMITTED (called after the chunk receipt) and whose movie id is the chunk's. Only verified entries can gain a claim: an INFERRED link is never offered, because a trusted canonical claim must not outlive the evidence it was proven from. Never throws into the import. Inactive until the
+ // ADR 0184: the canonical Letterboxd claim of the lids of a chunk whose Ratings link is durable AND COMMITTED (called after the chunk receipt) and whose movie id is the chunk's. Only verified entries are offered: an INFERRED link (ADR 0104) is a title/year match, not proof of the lid, so it is never offered, and the claim planner refuses any record that carries an inferred identity whichever flow offers it (since ADR 0192 no unlink can withdraw such a link; a mistaken one is repaired case by case). Never throws into the import. Inactive until the
  // claim module's activation line is turned on. A replay of a committed chunk offers it again: that is the recovery of an interrupted claim (the import is owner-driven, so a replay is its ordinary retry).
  async function ensureChunkClaims(env,items,films){
   if(typeof CanonicalLetterboxdClaim==='undefined')return;

@@ -4,7 +4,7 @@
 // WHAT. ONE targeted, fenced claim for an EXISTING Film, and nothing else: no Film is created, no alias, title, rating, membership or Started mark is touched, and no title/year/slug is ever used.
 // PROOF (all independent of the caller; every item must hold, otherwise the verdict is `conflict` or `not_proved` and NOTHING is written):
 //   1. both authorities are served: the Film/Person marker is `d1`/`open` and the ratings domain is `d1`/`open`, and neither generation moved between the first and the last read;
-//   2. the CURRENT, authoritative Ratings link is unambiguous: the facts link index maps `letterboxd:<lid>` and `tmdb:<n>` to the same key, no other alias carries it, and the fact record says the same (this lid, this movie, not redirected, not migrating); `ratings_view` is only a projection (it keeps an alias after an unlink) and can corroborate, never prove;
+//   2. the CURRENT, authoritative Ratings link is unambiguous: the facts link index maps `letterboxd:<lid>` and `tmdb:<n>` to the same key, no other alias carries it, and the fact record says the same (this lid, this movie, not redirected, not migrating, not an inferred title/year link); `ratings_view` is only a projection (it keeps an alias after an unlink) and can corroborate, never prove;
 //   3. canonical TMDB ownership: exactly one trusted, non-conflicting `tmdb` claim for <n> exists, its Film exists, is not a redirect source and its movie id is not retired (the reader's rule);
 //   4. no claim of the lid exists on another Film, no untrusted or conflicting claim of the lid or of the movie id exists anywhere, the Film has no other `letterboxd` claim and no untrusted or conflicting claim of either scheme, and its `canonical_identity` is null or exactly `tmdb:<n>`.
 // The proof that lives in this database is asserted AGAIN inside the fenced batch (write-time guards: ratings generation, retirement, competing claims, canonical identity); the link documents are covered by the ratings generation, which every ratings write bumps.
@@ -67,6 +67,9 @@ async function linkEvidence(env,lid,tmdb){
  if(record.factKey!==undefined&&record.factKey!==key)return {ok:false,verdict:'conflict',reason:'ratings_record_disagrees'};
  if(record.links?.letterboxd!==lid||String(record.links?.tmdb)!==tmdb)return {ok:false,verdict:'conflict',reason:'ratings_record_disagrees'};
  if(record.redirectTo||record.migrating)return {ok:false,verdict:'conflict',reason:'ratings_record_not_settled'};
+ // An INFERRED link (ADR 0104: one unique original title and year in a personal export) is a title/year match, not proof that this lid is this movie: it never yields a trusted claim, whichever flow offers it
+ // (ADR 0184 decision 2b asks for an authoritative link; the import marks such a record with `identity`, and only that import writes the field). Any recorded `identity` is refused, so an unknown future kind fails closed.
+ if(record.identity!=null)return {ok:false,verdict:'not_proved',reason:record.identity?.kind==='inferred'?'ratings_link_inferred':'ratings_link_unverified'};
  return {ok:true,factKey:key};
 }
 
