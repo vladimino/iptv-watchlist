@@ -13,7 +13,7 @@
 // Everything is injected: the Watchlist repository, the identity resolver and the Film writer. No import (the module is bundled in its own scope).
 export const MEMBERSHIP_LIDS_PER_CALL=60;
 export const MEMBERSHIP_EFFECT_MAX_ATTEMPTS=6;
-export const HANDOFF_STEP_LIMIT=8;
+export const HANDOFF_STEP_LIMIT=25;
 export const HANDOFF_MAX_ATTEMPTS=12;
 const HOUR=3600000;
 const BACKOFF_MS=[1*HOUR,3*HOUR,12*HOUR];
@@ -63,7 +63,7 @@ async function applyOne(deps,env,{lid,member,version,at,resolution}){
  return {kind:'transient',reason:'revision_conflict'};
 }
 
-// The `membership` effect writer (the same `(ctx, effect) -> receipt | {progress,more} | null` shape as the three legacy ones). `effect.attempts` counts the earlier failed calls of THIS effect.
+// The `membership` effect writer (the same `(ctx, effect) -> receipt | null` shape as the three legacy ones). `effect.attempts` counts the earlier failed calls of THIS effect.
 export function membershipEffect(deps){
  const {repository,fenceEnv=env=>env,epochGuard,slice=MEMBERSHIP_LIDS_PER_CALL,maxAttempts=MEMBERSHIP_EFFECT_MAX_ATTEMPTS}=deps;
  return async function membership(ctx,effect){
@@ -74,11 +74,12 @@ export function membershipEffect(deps){
   const snapshot=read.snapshot;
   const changes=await repository.readChanges(ctx.env,effect.snapshotId);
   if(!changes.ok)return null;
-  // Deterministic queue (added, then removed, each in the stored order): a resume point is an index into it. An unreadable or out of range point starts over (every unit is idempotent), it never skips ahead.
+  // Deterministic queue (added, then removed, in the stored order of the change rows). ONE call applies at most `slice` of them inline; every later change row of the version is handed to the durable ledger in ONE
+  // set-based statement (no resolution, no Film write), so the effect completes in a bounded number of calls however large a valid diff is and routine catch-up can never starve the next scan behind the strict
+  // drain-before-scan rule. The ledger is reconciled against the CURRENT snapshot, a few rows per slot (no id is lost, none is applied from a stale version).
   const queue=[...changes.added.map(item=>({lid:item.lid,member:true})),...changes.removed.map(item=>({lid:item.lid,member:false}))];
-  const resumed=/^membership-cursor:(\d{1,6})$/.exec(String(effect.progress??''));
-  const start=resumed&&Number(resumed[1])<=queue.length?Number(resumed[1]):0;
-  const part=queue.slice(start,start+slice);
+  const part=queue.slice(0,slice);
+  const deferred=queue.length-part.length;
   const writeEnv=fenceEnv(ctx.env,ctx.epoch);
   const at=new Date(ctx.now()).toISOString();
   const guards=typeof epochGuard==='function'&&Number.isInteger(ctx.epoch)?[epochGuard(ctx.epoch)]:null;
@@ -119,10 +120,13 @@ export function membershipEffect(deps){
       if(!out.ok)return null;
     }
   }
-  if(transient&&!exhausted)return start>0?{progress:'membership-cursor:'+start,more:false}:null;
-  const next=start+part.length;
-  if(next<queue.length)return {progress:'membership-cursor:'+next,more:true};
-  return ('membership:'+snapshot.scanId+':w'+written+':s'+(stale+skipped)+':h'+handoff.length).slice(0,200);
+  if(transient&&!exhausted)return null;
+  // The rest of the version is made durable BEFORE the effect can complete; if that cannot be recorded the effect is held (nothing is lost).
+  if(deferred>0){
+   const out=await repository.handoffVersionRemainder(ctx.env,{snapshotId:effect.snapshotId,version:snapshot.version,offset:part.length,reason:'remainder',now:ctx.now()},{guards});
+   if(!out.ok)return null;
+  }
+  return ('membership:'+snapshot.scanId+':w'+written+':s'+(stale+skipped)+':h'+handoff.length+':q'+deferred).slice(0,200);
  };
 }
 

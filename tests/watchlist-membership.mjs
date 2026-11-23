@@ -8,6 +8,7 @@ import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-se
 import * as Watchlist from '../src/watchlist-d1.js';
 import {setFilmMembership,writeFilmFacts,membershipMarker} from '../src/canonical-film-writers.js';
 import {resolveSourceIdentitiesEach,filmFactsOf} from '../src/canonical-producer-workflow.js';
+import {watchlistRepository} from '../src/letterboxd-sync-repository.js';import {watchlistPhase} from '../src/letterboxd-sync-watchlist.js';
 import {membershipEffect,membershipReconcile,membershipBaseline,planBaseline,resolveInChunks,RESOLVE_CHUNK,MEMBERSHIP_EFFECT_MAX_ATTEMPTS,HANDOFF_MAX_ATTEMPTS} from '../src/watchlist-membership.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-watchlist-membership-'));
@@ -179,7 +180,7 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
  const writer=membershipEffect(deps());
  await publish(made,list(1,2,3,4,9));
  const receipt=await drainOne(made,writer);
- assert.match(receipt,/^membership:scan-\d+:w4:s0:h1$/,'the receipt counts what was written and handed off');
+ assert.match(receipt,/^membership:scan-\d+:w4:s0:h1:q0$/,'the receipt counts what was written and handed off');
  assert.deepEqual(members(made.file),['film:lb1','film:lb2','film:lb3','film:tmdb:9'],'trusted lid-owned and TMDB-owned Films alike; lb4 has no Film');
  assert.equal(films(),before,'ZERO shadow Film: no Film was created');
  assert.deepEqual(handoff(made.file),[{lid:'lb4',state:'pending',attempts:0,first_version:1,reason:'unresolved'}],'the unresolved id has a durable handoff and did not hold the version');
@@ -232,7 +233,7 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
  }
  assert.equal(rows(made.file,"SELECT attempts FROM watchlist_effect WHERE effect='membership'")[0].attempts,MEMBERSHIP_EFFECT_MAX_ATTEMPTS);
  const bounded=await writer(ctxOf(made.env),{...first,attempts:MEMBERSHIP_EFFECT_MAX_ATTEMPTS});
- assert.equal(typeof bounded,'string','after the bound the effect completes');assert.match(bounded,/:h2$/,'both ids were handed off, none lost');
+ assert.equal(typeof bounded,'string','after the bound the effect completes');assert.match(bounded,/:h2:q0$/,'both ids were handed off, none lost');
  assert.deepEqual(handoff(made.file).map(row=>[row.lid,row.state,row.reason]),[['lb1','pending','deferred_unavailable'],['lb2','pending','deferred_unavailable']]);
  assert.equal((await Watchlist.completeEffect(made.env,{snapshotId:first.snapshotId,effect:'membership',receipt:bounded},{now:NOW,guards:[GUARD]})).drained,true);
  await publish(made,list(1,2,3));
@@ -256,7 +257,7 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
  const next=(await Watchlist.pendingEffects(made.env)).effects[0];
  const down=membershipEffect(deps({setMembership:async()=>{throw Object.assign(new Error('x'),{code:'film_person_unavailable'});}}));
  const receipt=await down(ctxOf(made.env),{...next,attempts:MEMBERSHIP_EFFECT_MAX_ATTEMPTS});
- assert.match(receipt,/:h1$/,'the removal that could not be applied is handed off, not lost');
+ assert.match(receipt,/:h1:q0$/,'the removal that could not be applied is handed off, not lost');
  assert.deepEqual(members(made.file),['film:lb1'],'still a member until the reconcile runs');
  assert.equal((await Watchlist.completeEffect(made.env,{snapshotId:next.snapshotId,effect:'membership',receipt},{now:NOW,guards:[GUARD]})).ok,true);
  assert.equal((await membershipReconcile(deps())(ctxOf(made.env),{now:NOW})).settled,1);
@@ -359,7 +360,7 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
  const next=(await Watchlist.pendingEffects(viaHandoff.env)).effects[0];
  const down=membershipEffect(deps({setMembership:async()=>{throw Object.assign(new Error('x'),{code:'film_person_unavailable'});}}));
  const receipt=await down(ctxOf(viaHandoff.env),{...next,attempts:MEMBERSHIP_EFFECT_MAX_ATTEMPTS});
- assert.match(receipt,/:h1$/);
+ assert.match(receipt,/:h1:q0$/);
  await Watchlist.completeEffect(viaHandoff.env,{snapshotId:next.snapshotId,effect:'membership',receipt},{now:NOW,guards:[GUARD]});
  assert.equal((await membershipReconcile(deps())(ctxOf(viaHandoff.env),{now:NOW})).settled,1);
  assert.deepEqual(members(viaHandoff.file),['film:shared'],'the reconcile keeps the Film: lb1 is still on the current list');
@@ -373,7 +374,7 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
  for(let attempt=0;attempt<MEMBERSHIP_EFFECT_MAX_ATTEMPTS;attempt++)assert.equal(await blind(ctxOf(lost.env),{...pend,attempts:attempt}),null,'held while the budget lasts');
  assert.deepEqual(handoff(lost.file).map(row=>row.lid),[],'nothing is recorded before the bound');
  const exhausted=await blind(ctxOf(lost.env),{...pend,attempts:MEMBERSHIP_EFFECT_MAX_ATTEMPTS});
- assert.match(exhausted,/:h2$/,'every unprocessed id (the addition lb3 and the removal lb1) is handed off');
+ assert.match(exhausted,/:h2:q0$/,'every unprocessed id (the addition lb3 and the removal lb1) is handed off');
  assert.deepEqual(handoff(lost.file).map(row=>[row.lid,row.state]),[['lb1','pending'],['lb3','pending']]);
  // a handoff that cannot be recorded holds the effect (never a successful receipt)
  const unrecordable=membershipEffect(deps({resolve:async()=>({ok:false}),repository:{...Watchlist,recordMembershipHandoff:async()=>({ok:false,reason:'unavailable'})}}));
@@ -436,7 +437,7 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
   await publish(made,list(...all.filter(i=>i!==1&&i!==3)));
   const writer=membershipEffect(deps());
   const receipt=await drainOne(made,writer);
-  assert.match(receipt,/:h0$/,n+' ids: nothing is handed off');
+  assert.match(receipt,/:h0:q0$/,n+' ids: nothing is handed off');
   const have=new Set(members(made.file));
   assert.equal(have.has('film:shared'),true,n+' ids: the shared Film stays');assert.equal(have.has('film:lb3'),false,n+' ids: a plain removal is applied');
   assert.deepEqual(handoff(made.file),[],n+' ids: no handoff');
@@ -452,6 +453,58 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
   const done=await base.apply(ctxOf(made.env));
   assert.deepEqual([done.decision,done.written,done.remaining],['baseline_not_recorded',2,0],n+' ids: apply completes (the proof needs the producer-mode marker, which a sync database no longer has)');
  }
+}
+
+// ===== 13. a large VALID diff through the real port and slot flow never starves the next 4/day scan (review of 7cdd63b, cross-stream P1) =====
+{
+ // the effect completes in ONE call whatever the size (supported maximum: 5000 removals); the rest of the version is handed off in one set-based statement
+ {
+  const calls={read:0,remainder:[],handoff:0};
+  const removed=Array.from({length:5000},(_,i)=>({lid:'r'+i,prevOrdinal:i}));
+  const fake={readMembershipAuthority:async()=>({ok:true,present:true,mode:'sync',generation:1}),readSnapshot:async()=>({ok:true,snapshot:{version:9,scanId:'s9',films:[]}}),readChanges:async()=>({ok:true,added:[],removed}),
+   handoffVersionRemainder:async(env,arg)=>{calls.remainder.push([arg.offset,arg.version]);return {ok:true};},recordMembershipHandoff:async()=>{calls.handoff++;return {ok:true};}};
+  const out=await membershipEffect(deps({repository:fake,resolve:async(env,lids)=>({ok:true,byId:new Map(lids.map(l=>[l,{refused:'producer_identity_unresolved'}]))}),setMembership:async()=>({written:false})}))(ctxOf({}),{snapshotId:'x',attempts:0});
+  assert.match(out,/:q4940$/,'5000 changes: 60 inline, 4940 deferred, ONE call');assert.deepEqual(calls.remainder,[[60,9]]);
+ }
+ // through watchlistRepository.drainEffects and watchlistPhase.run / afterRecorded, with real data: 1001 removals and 40 additions in one version, then the following natural scans
+ const made=open('sync');
+ const TOTAL=1200,KEEP=199;
+ addFilm(made.file,'lb1',{owner:'film:shared'});addFilm(made.file,'lb2',{owner:'film:shared'});
+ const bulk=[],claims=[];for(let i=3;i<=TOTAL+40;i++){bulk.push("('film:lb"+i+"',1,NULL,'T','"+T+"')");claims.push("('film:lb"+i+"','letterboxd','lb"+i+"',1,0)");}
+ sqlite(made.file,"INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES "+bulk.join(',')+";INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES "+claims.join(',')+";");
+ const all=Array.from({length:TOTAL},(_,i)=>i+1);
+ for(const upTo of [400,800,TOTAL]){
+  await publish(made,list(...all.filter(i=>i<=upTo)));
+  sqlite(made.file,"UPDATE watchlist_admission_pending SET state='resolved',resolved_by='t';");
+  for(;;){const todo=await Watchlist.pendingEffects(made.env);if(!todo.effects.length)break;const e=todo.effects[0];assert.equal((await Watchlist.completeEffect(made.env,{snapshotId:e.snapshotId,effect:e.effect,receipt:'seed'},{now:NOW,guards:[GUARD]})).ok,true);}
+ }
+ sqlite(made.file,"INSERT INTO watchlist_film (film_id,updated_at) SELECT id,'"+T+"' FROM film WHERE id='film:shared' OR id LIKE 'film:lb%';");
+ const executed=[];
+ const stub=name=>async()=>{executed.push(name);return name+':ok';};
+ const writer=membershipEffect(deps());
+ const repo=watchlistRepository(Watchlist,{epochGuard:()=>GUARD,effectWriters:{scan_facts:stub('scan_facts'),retention:stub('retention'),removal_enqueue:stub('removal_enqueue'),membership:async(ctx,effect)=>{executed.push('membership');return writer(ctx,effect);}},reconcileMembership:membershipReconcile(deps())});
+ let page={films:[],total:0,next:null};
+ const phase=watchlistPhase({repository:repo,fetchPage:async()=>page,parse:value=>value,firstUrl:'https://letterboxd.com/u/watchlist/page/1/',username:'u'});
+ const slot=(n)=>({env:made.env,epoch:1,now:()=>NOW+n*6*3600000,slotKey:'slot'+n,runId:'run'+n,deadline:NOW+n*6*3600000+60000});
+ const keep=[...all.filter(i=>i>TOTAL-KEEP),...Array.from({length:40},(_,i)=>TOTAL+1+i)];       // 1001 removed (lb1..lb1001), 40 added
+ page={films:keep.map(i=>({id:'lb'+i,title:'Film '+i,year:2000+(i%100),url:'https://letterboxd.com/film/film-'+i+'/'})),total:keep.length,next:null};
+ const first=await phase.run(slot(1));
+ assert.equal(first.outcome,'committed');assert.equal(first.removedCount,1001);assert.equal(first.addedCount,40);assert.equal(first.removed.length,1001,'the slot Event keeps every removed film');
+ executed.length=0;
+ const drained=await phase.afterRecorded(slot(1));
+ assert.deepEqual(drained,{drained:true},'the post-commit drain completes the whole version, zero faults');
+ assert.equal(executed.length,4,'one call per effect: the membership effect adds exactly one call per version to the eight-call allowance');
+ assert.equal(current(made.file).effects_drained_version,current(made.file).version);
+ // the NEXT natural slot is not starved: its pre-scan drain is complete, the scan runs and nothing changed
+ const second=await phase.run(slot(2));
+ assert.equal(second.outcome,'no_change','slot 2 scans (no error, no effects_backlog)');assert.equal(second.removedCount,0);assert.equal(second.addedCount,0);
+ const third=await phase.run(slot(3));assert.equal(third.outcome,'no_change');
+ // nothing is lost: every one of the 1001 removed lids is either already cleared or still owed in the durable ledger, and the ledger shrinks by the bounded step per slot
+ const owed=rows(made.file,"SELECT COUNT(*) AS n FROM watchlist_membership_handoff WHERE state='pending'")[0].n;
+ const stillMember=rows(made.file,"SELECT COUNT(*) AS n FROM watchlist_film WHERE film_id LIKE 'film:lb%' AND CAST(substr(film_id,8) AS INTEGER)<=1001 AND CAST(substr(film_id,8) AS INTEGER)>2")[0].n;
+ assert.equal(owed,1041-60-2*25,'981 changes were deferred after the inline 60 (40 additions and 20 removals); the bounded reconcile step of 25 in each of the two following slots leaves 931 owed');
+ assert.equal(stillMember,owed,'every removed film is either cleared or owed in the ledger: nothing is lost');
+ assert.equal(rows(made.file,"SELECT COUNT(*) AS n FROM watchlist_film WHERE film_id='film:shared'")[0].n,0,'the shared Film (lb1, lb2 both gone) is cleared');
 }
 
 // ===== 10. single writer, proven in the source =====
@@ -471,4 +524,5 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
  // the delivery hold is untouched by this change
  assert.match(pw,/export const PRODUCER_DELIVERY_HOLD=true;/);
 }
+fs.rmSync(root,{recursive:true,force:true});
 console.log('watchlist-membership: ok');

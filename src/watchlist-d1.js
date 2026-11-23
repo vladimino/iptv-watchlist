@@ -623,6 +623,22 @@ export async function recordMembershipHandoff(source,{lids,version,reason='unres
   ...lids.map(lid=>["INSERT INTO watchlist_membership_handoff (lid, first_version, state, attempts, next_retry_at, reason, updated_at) VALUES (?,?,'pending',0,NULL,?,?) ON CONFLICT(lid) DO UPDATE SET state='pending', first_version=excluded.first_version, attempts=0, next_retry_at=NULL, reason=excluded.reason, updated_at=excluded.updated_at WHERE state IN ('settled','terminal')",[lid,version,why,stamp]])]);
  return outcome==='ok'?{ok:true}:{ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
 }
+// Hands EVERY change row of a version beyond `offset` (in the stored order of `readChanges`: added, then removed) to the durable handoff ledger in ONE set-based statement, without reading, resolving or writing a Film.
+// This is what lets the `membership` effect complete in a bounded number of calls however large a valid version diff is (up to 500 additions, because of the admission ledger cap, and up to 5000 removals), so routine
+// catch-up never starves the next 4/day scan behind the strict drain-before-scan rule. A pending row keeps its state; a settled or terminal one is re-opened. -> {ok:true} | {ok:false,reason}
+export async function handoffVersionRemainder(source,{snapshotId,version,offset,reason='remainder',now=Date.now()},ctx={}){
+ const db=database(source);
+ if(!db)return {ok:false,reason:'unavailable'};
+ if(typeof snapshotId!=='string'||!snapshotId||!Number.isInteger(version)||version<1||!Number.isInteger(offset)||offset<0)return {ok:false,reason:'shape'};
+ const extra=callerGuards(ctx);
+ if(!extra)return {ok:false,reason:'shape'};
+ const gate=await readAuthority(db);
+ if(gate.state!=='d1')return {ok:false,reason:'closed'};
+ if(gate.writes!=='open')return {ok:false,reason:'writes_held'};
+ const outcome=await fenced(db,[authorityGuard(gate.generation),...extra,
+  ["INSERT INTO watchlist_membership_handoff (lid, first_version, state, attempts, next_retry_at, reason, updated_at) SELECT lid, ?, 'pending', 0, NULL, ?, ? FROM (SELECT lid FROM watchlist_change WHERE snapshot_id=? ORDER BY kind, COALESCE(ordinal, prev_ordinal) LIMIT -1 OFFSET ?) WHERE true ON CONFLICT(lid) DO UPDATE SET state='pending', first_version=excluded.first_version, attempts=0, next_retry_at=NULL, reason=excluded.reason, updated_at=excluded.updated_at WHERE state IN ('settled','terminal')",[version,String(reason).slice(0,60),iso(now),snapshotId,offset]]]);
+ return outcome==='ok'?{ok:true}:{ok:false,reason:outcome==='conflict'?'conflict':'unavailable'};
+}
 // The due pending rows, oldest first. Read only. -> {ok:true,rows:[{lid,firstVersion,attempts,reason}],pending,terminal} | {ok:false,reason}
 export async function dueMembershipHandoffs(source,{now=Date.now(),limit=8}={}){
  const db=database(source);
