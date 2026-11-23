@@ -4,6 +4,7 @@
 // Film/Person d1/open (11,352 films, 12,168 external ids, 10,865 localizations), predictions d1 (4,061 fingerprints, 3.1 MB; 4,061 pointers,
 // 3.2 MB; profile, queue and latest run in D1), ratings d1/open (4,487 ratings_view rows).
 //   node scripts/footer-memory-profile.mjs --build [--fixtures DIR]     build the fixtures once: R2 objects as files and the D1 database as sqlite
+//   (CATALOG=12255 sets the number of admitted catalog films, default 9,300: AIR-586 measures the production catalog of 23 November 2026)
 //   node [--max-old-space-size=MB] scripts/footer-memory-profile.mjs [--fixtures DIR] [--concurrent C] [--requests K] [--dump body.json] [--freeze]
 //   --sequential   with --paths: one route after the other (default: all at once).
 //   --path /api/admin/limbo?limit=25&attention=now | --paths /api/admin/limbo?...,/api/admin/identity-work?limit=25   measure another route, or two routes at once.
@@ -36,7 +37,7 @@ if (process.argv.includes('--build')) {
   const words = 'alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango'.split(' ');
   const text = n => {let s = ''; while (s.length < n) s += pick(words) + ' '; return s.slice(0, n);};
   const GENRES = ['Drama', 'Comedy', 'Thriller', 'Crime', 'Horror', 'Romance', 'Action', 'Documentary', 'Animation', 'Fantasy'];
-  const N_D1 = 11352, N_CATALOG = 9300, N_LID = 406, N_PRED = 4061, N_VIEW = 4487;
+  const N_D1 = 11352, N_CATALOG = Number(process.env.CATALOG ?? 9300), N_LID = 406, N_PRED = 4061, N_VIEW = 4487;
   const tmdbOf = i => String(10000 + i * 7), lidOf = i => 'film-' + i + '-' + (1950 + i % 70);
   const showsFor = () => {const k = 1 + Math.floor(rnd() * 6), out = []; for (let j = 0; j < k; j++) {const start = now + Math.round((rnd() * 240 - 120) * H); out.push({channelId: 'c' + Math.floor(rnd() * 120), channel: 'Channel ' + Math.floor(rnd() * 120), start, end: start + 2 * H, title: text(12)});} return out;};
   const filmBody = (id, tmdb) => ({id, tmdbId: tmdb, canonicalIdentity: 'tmdb:' + tmdb, title: text(20), original: text(18), year: 1950 + Math.floor(rnd() * 75), runtime: 80 + Math.floor(rnd() * 80), genres: [pick(GENRES), pick(GENRES)], poster: 'https://image.tmdb.org/t/p/w342/' + text(12).replace(/ /g, '') + '.jpg', url: 'https://www.themoviedb.org/movie/' + tmdb, directors: [text(14), text(14)], actors: [text(14), text(14), text(14), text(14), text(14)], overview: text(40)});
@@ -186,7 +187,10 @@ const timer = setInterval(sample, 1);
 const baseline = v8.getHeapStatistics().used_heap_size; peak = baseline;
 // --path (default: the footer) names the route measured; --paths a,b runs those routes together, one request each, as the owner page does.
 const PATHS = (arg('paths', null) || arg('path', '/api/enrichment/footer/status')).split(',');
-const one = async (_, index = 0) => {const r = await worker.fetch(new Request('https://iptv.vladimino.workers.dev' + PATHS[index % PATHS.length]), env, {waitUntil() {}}); const body = await r.text(); sample(); return {status: r.status, body};};
+// AIR-586: only the body of the first request is kept (for --dump and the summary). Keeping every body made a series of requests look like a Worker heap that
+// grows by the size of each answer (5 MB of JSON for the view), which is the harness, not the Worker.
+let firstAsked = false;
+const one = async (_, index = 0) => {const keep = !firstAsked; firstAsked = true; const r = await worker.fetch(new Request('https://iptv.vladimino.workers.dev' + PATHS[index % PATHS.length]), env, {waitUntil() {}}); const body = await r.text(); sample(); return {status: r.status, body: keep ? body : ''};};
 const cpu0 = process.cpuUsage(), t0 = performance.now();
 const results = [];
 for (let i = 0; i < REQUESTS; i++) if (process.argv.includes('--sequential') && arg('paths', null)) for (let index = 0; index < PATHS.length; index++) results.push(await one(null, index));   // one route after the other, as the owner page does after the change

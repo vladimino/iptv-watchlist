@@ -1714,6 +1714,10 @@ export const FILES={
  "url-state.mjs": {
   "suite": "core"
  },
+ "user-read-memory.mjs": {
+  "suite": "split",
+  "note": "AIR-586. Equivalence of the programme, view and Finds answers on the projected Discovery catalog (generated bundle) and the D1 projected read stay in core. The production-sized heap of the four user reads one after the other is scenario user-reads-memory-production-size."
+ },
  "view-index-seed-membership.mjs": {
   "suite": "core"
  },
