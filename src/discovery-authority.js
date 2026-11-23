@@ -1777,8 +1777,16 @@ export async function upsertAdmissions(env,films,context={}){
  }
  return {written,refused,batches,reads,remaining:entries.length-index,carried};
 }
+// AIR-579. One structured log line per whole-catalog read: the row count, the elapsed time and whether the caller asked for a projection, and NOTHING else (never a film id, a title, a payload or a key).
+// Workers Logs attach a line to the invocation that wrote it (a route, a cron tick, an MCP call, a Workflow step), so an aggregate of this event by `$metadata.trigger` attributes the whole-catalog reads
+// of a window to their callers without a per-request counter. Best-effort: it never throws into the read and changes no result.
+function logCatalogRead(rows,started,projected){
+ try{console.log(JSON.stringify({event:'discovery_catalog_read',rows,ms:Math.max(0,Date.now()-started),projected}));}catch{/* a log line is never part of the read */}
+}
 async function readCatalog(env,gate,options=null){
+ const started=Date.now();
  const rows=await many(database(env),'SELECT film_id, payload_json, canonical_identity, tmdb_id, media_kind FROM discovery_admission WHERE state=\'current\' ORDER BY film_id');
+ logCatalogRead(rows.length,started,typeof options?.project==='function');
  if(rows.length>READ_CAP)throw failed('discovery_bounded');
  const catalog={},project=typeof options?.project==='function'?options.project:null;
  for(const row of rows){

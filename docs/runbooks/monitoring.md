@@ -51,6 +51,15 @@ When `on`, one tick is a handful of small R2 reads, one conditional R2 write and
 
 A growing `outbox` with a `lastDeliveryFailure` means alerts are not reaching the owner even though the monitor is alive: the dead-man heartbeat will not show this. Telegram cannot deduplicate, so after a Worker crash the owner may see one message twice (same `Ref`). Switch back to the webhook by removing `MONITOR_TRANSPORT`.
 
+## Attributing D1 load to callers from the Worker logs (AIR-579)
+
+Two structured log lines let a read of the Worker logs attribute D1 load to its callers without a per-request counter. Both carry **no** argument, key, film id, title, payload, identity or header, and both are best-effort (they never throw into the work and change no result). Workers Logs attach a line to the invocation that wrote it, so an aggregate **by `$metadata.trigger`** (a route such as `GET /api/enrichment/view`, a cron expression, `POST /mcp`) names the caller.
+
+- `{"event":"mcp_tool_call","tool":"<registered name or unregistered>","outcome":"ok|tool_error|rejected|failed","ms":<n>}`: one line per authorized MCP `tools/call` ([MCP reference](../reference/api/mcp.md#call-log)).
+- `{"event":"discovery_catalog_read","rows":<n>,"ms":<n>,"projected":<bool>}`: one line per **whole-catalog read** of `discovery_admission` (`readCatalog`, the 12 k-row statement of the RCA); the bounded reads by id or by TMDB id write none. The count of these lines in a window, grouped by `$metadata.trigger`, is the number of whole-catalog reads per caller; `ms` and `rows` give the cost of each.
+
+Use them read-only through the Cloudflare Workers Observability aggregate (counts and the trigger; never raw events with identity), compare a window with the D1 analytics signature of the same statement, and remember a request is not a statement: one invocation may read the catalog several times, and a cron tick or a Workflow step shows as its own trigger.
+
 ## D1 projector grouped write path
 
 > **Historical (AIR-537 slice 3, 19 Nov 2026).** The D1 enrichment projector, its runner and its write arms were removed; this section describes fields and log lines that are no longer produced. Nothing here is an operating check.

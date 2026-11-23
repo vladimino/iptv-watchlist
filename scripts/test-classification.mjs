@@ -212,6 +212,9 @@ export const FILES={
  "canonical-film-external-ids-producer.mjs": {
   "suite": "core"
  },
+ "discovery-catalog-read-log.mjs": {
+  "suite": "core"
+ },
  "letterboxd-claim-backfill.mjs": {
   "suite": "core"
  },
