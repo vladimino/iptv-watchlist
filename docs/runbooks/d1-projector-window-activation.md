@@ -51,7 +51,6 @@ Only if the executor is rolled back to `external`. The contract bullet of [Produ
 | Consumer | Rule in the repository | Effect of `:15` |
 | --- | --- | --- |
 | EPG executor `ensure` | Due 17:00 Europe/Madrid (`EPG_SCHEDULE`), decided from the Madrid date; the Madrid offset is a whole hour, so an hourly UTC cron has a tick at the due time in CET and CEST | First tick after the due moves from 17:00 to 17:15 Madrid |
-| Ratings `ensure` | Due 17:00 Madrid in `RATINGS_SCHEDULE` (the code constant; ADR 0090's text still says 17:30) | First tick after the due moves to 17:15 Madrid |
 | Discovery reconcile | Not time-keyed; hourly fallback | 15 minutes later |
 | Projector | Hourly; 60 s write budget | The tick of the day moves from 16:00 to 16:15 UTC (15:15 in summer), which falls inside an EPG run that started at the due tick |
 | Monitor | Thresholds in hours: EPG delayed after 2 h, degraded after 5 h; Discovery waiting 90 min, degraded 3 h; Predictions delayed 3 h | A 15 minute shift crosses none of them; the monitor tick itself moves with the hook |

@@ -43,6 +43,10 @@ Two **disjoint sets of films**, selected by `shortlist=`:
 - The assistant tool `filter_watchlist_programme` accepts `period` `all`, `archive`, `soon` and `future` (an alias of `soon`); the state stores `soon`.
 - Finds follow the same period names: `period=soon` keeps finds whose state is `soon`.
 
+## «Моя оценка» (own rating threshold)
+
+The sidebar field under «Шанс 4.0+» (AIR-585) filters by the stored Letterboxd rating, not by the forecast: **Любая** (default, no constraint; films without a rating stay), **3.5+**, **4.0+**, **4.5+** (`rating=3.5|4|4.5`; «Любая» is not written; any other value reads as «Любая»). A threshold keeps only a film whose rating, read through the same identity resolution as «Пересмотр» (`filmEnrichmentItem`) and validated like the «МОЯ ОЦЕНКА» badge (`ratingValue`: 0.5 to 5 in half steps), is at or above it; a missing, invalid or merely «просмотрен» film does not pass. It combines with every other filter by AND and switches or clears nothing; «Новые» with a threshold is the ordinary empty state. Thresholds are disabled until the ratings load, and a restored threshold shows «Загружаем оценки и прогнозы…» instead of «Таких фильмов не найдено». Finds hold no rated film, so a threshold leaves that section empty. Presets keep `rating` (the server normalizer accepts the same three values) and the browser tool `filter_watchlist_programme` takes `minActualRating` (`null`, 3.5, 4, 4.5).
+
 ## Saved filter presets: API and storage contract
 
 A preset is a named, normalized main-page filter query. One document `{schemaVersion:1, presets:[{id,name,schemaVersion:1,query,createdAt,updatedAt}]}` holds at most 30 presets in creation order; `id` is a UUID, `name` is 1 to 80 characters without control characters, `query` is the normalized URL query (at most 4000 characters; unknown keys and values are dropped on write and on read). Implementation: `src/filter-presets.js` (route, validation, normalization), `src/filter-presets-d1.js` (D1 storage). Tests: `tests/filter-presets.mjs` (R2 path), `tests/filter-presets-d1.mjs` (D1 path, import, activation), `tests/filter-preset-ui.mjs`.

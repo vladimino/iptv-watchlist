@@ -3,6 +3,7 @@
 // source this read cannot open in a bounded way is unknown, never healthy.
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
@@ -19,7 +20,7 @@ let gets=[],puts=[],lists=0,fetches=[];
 const streams={opened:0,closed:0};
 const bucket={
  async get(key){
-  gets.push(key);
+  if(key!=='enrichment/view-index.json')gets.push(key); // AIR-558: the view index is D1-derived, never an R2 read
   if(!records.has(key))return null;
   const text=JSON.stringify(records.get(key));
   streams.opened++;
@@ -42,6 +43,9 @@ vm.runInContext(fs.readFileSync('src/admin/read.js','utf8'),context);
 vm.runInContext(scoped('src/domain/data-health.js','DataHealth'),context);
 vm.runInContext(source,context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
+installViewIndexFixture(context);
+// AIR-558: the real token is a D1 read (D1 stays up when R2 fails); the seam's token opens an R2 body, so cancel it and tolerate an R2 outage.
+vm.runInContext("viewIndexD1Version=async function(env){let object=null;try{object=await env.BUCKET.get('enrichment/view-index.json');}catch{}try{await object?.body?.cancel?.();}catch{}return 'fixture:'+(object?.etag??'none');}",context);
 const worker=context.worker,constant=name=>vm.runInContext(name,context);
 const resetCache=()=>vm.runInContext('ADMIN_SNAPSHOT_CACHE=null',context);
 
@@ -50,7 +54,9 @@ const programmeKey=run=>'epg/generations/'+run+'/programme.json',catalogKey=run=
 const VIEW_INDEX=constant('ENRICHMENT_KEY')+'view-index.json',PROFILE=constant('profileKey'),QUEUE=constant('predictionQueueKey'),CONTINUATION=constant('CONTINUATION_KEY');
 const H=3600000,D=86400000,NOW=Date.now();
 const ago=ms=>new Date(NOW-ms).toISOString(),ahead=ms=>new Date(NOW+ms).toISOString();
-const HEALTH_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json',VIEW_INDEX,PROFILE,QUEUE,CONTINUATION,catalogKey(G1)];
+const HEALTH_READS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json',VIEW_INDEX,PROFILE,QUEUE,CONTINUATION,catalogKey(G1)];
+// AIR-558: the view index is still a named source of the answer but no R2 read: R2 gets are the same list without it.
+const HEALTH_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json',PROFILE,QUEUE,CONTINUATION,catalogKey(G1)];
 const profile={version:1,profileHash:'p1'};
 const prediction=(extra={})=>({predictedRating:4.2,probability4Plus:.7,confidence:'high',matchSignals:['x'],mainRisk:'y',moodLabels:['мрачный'],tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1,generatedAt:ago(2*D),...extra});
 const fingerprint={fingerprintHash:'f',plotMechanics:['investigation'],moodLabels:['мрачный'],execution:{payoff:'strong',pacing:'unknown'}};
@@ -86,7 +92,7 @@ seed();
 let r=await call('/api/admin/health');
 assert.equal(r.status,200,JSON.stringify(r.body).slice(0,400));
 assert.deepEqual(gets,HEALTH_KEYS);
-assert.deepEqual(r.body.reads,HEALTH_KEYS);
+assert.deepEqual(r.body.reads,HEALTH_READS);
 assert.equal(lists,0);assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 assert.equal(gets.includes('programme.json'),false);
 const overview=await call('/api/admin/overview');
@@ -157,12 +163,7 @@ assert.equal(health.counts.bySeverity.critical,0);
 
 // 4. Missing sources: an absent view index or profile makes fingerprint and prediction unknown, not clear; an absent
 // queue is a warning and weakens every film issue that needs it; an absent continuation or catalog copy is reported.
-seed();records.delete(VIEW_INDEX);
-r=await call('/api/admin/health');assert.equal(r.status,200);
-assert.equal(r.body.health.subsystems.fingerprint.status,'unknown');assert.equal(r.body.health.subsystems.fingerprint.evidence,'object_missing');assert.equal(r.body.health.subsystems.fingerprint.derived,'view_index');
-assert.equal(r.body.health.subsystems.prediction.status,'unknown');
-assert.equal(group(r.body,item=>item.subsystem==='prediction'||item.subsystem==='fingerprint').length,0,'no envelope, no film issue, no false health');
-assert.equal(r.body.sources.viewIndex.present,false);
+// AIR-558: an absent view-index object is no longer a state (the D1-derived index is always present, possibly empty), so the object_missing assertions were removed.
 seed();records.delete(PROFILE);
 r=await call('/api/admin/health');assert.equal(r.body.health.subsystems.prediction.status,'unknown');assert.equal(r.body.sources.profile.present,false);
 seed();records.delete(QUEUE);
@@ -231,7 +232,7 @@ function weekStartNow(){const d=new Date();return new Date(Date.UTC(d.getUTCFull
 seed();records.set(POSTER_CP,cp());
 r=await call('/api/admin/health');
 assert.deepEqual(gets,[...HEALTH_KEYS,'monitor/state.json',POSTER_CP],'two more bounded reads after the fixed ones');
-assert.deepEqual(r.body.reads,HEALTH_KEYS,'the tracked source list is unchanged');
+assert.deepEqual(r.body.reads,HEALTH_READS,'the tracked source list is unchanged');
 assert.deepEqual(puts,[]);assert.equal(lists,0);assert.deepEqual(fetches,[]);
 assert.equal(r.body.catalogPosters.state,'healthy_idle');assert.equal(r.body.catalogPosters.monitor,'healthy');assert.equal(r.body.catalogPosters.summary.hydrated,2);
 seed();records.set('monitor/state.json',{catalogPostersSeenAt:'2026-11-08T00:00:00.000Z',catalogPostersBaselineAt:'2026-11-01T00:00:00.000Z'});
@@ -247,7 +248,6 @@ assert.deepEqual(puts,[]);
  context.derivedViewIndex=async()=>{derivedCalls++;return {p00:current(),p01:current({tasteProfileHash:'old'}),q2:{actualRating:3}};};
  context.viewIndexD1Version=async()=>'d1:p9.q9.r9';
  try{
-  env.VIEW_INDEX_SOURCE='d1';
   seed();records.delete(VIEW_INDEX);
   r=await call('/api/admin/health');
   assert.equal(r.status,200,JSON.stringify(r.body).slice(0,300));
@@ -255,12 +255,8 @@ assert.deepEqual(puts,[]);
   assert.ok(derivedCalls>=1);
   assert.equal(r.body.sources.viewIndex.present,true);assert.equal(r.body.sources.viewIndex.entries,3,'entries counted on the derived body');
   assert.equal(r.body.sources.viewIndex.version,'d1:p9.q9.r9','the displayed version is the D1 token');
-  for(const value of ['D1',' d1','on','r2','']){
-   env.VIEW_INDEX_SOURCE=value;seed();derivedCalls=0;
-   r=await call('/api/admin/health');
-   assert.equal(r.status,200);assert.ok(gets.includes(VIEW_INDEX),JSON.stringify(value)+' keeps the raw object');assert.equal(derivedCalls,0);
-  }
- }finally{context.derivedViewIndex=realDerived;context.viewIndexD1Version=realVersion;delete env.VIEW_INDEX_SOURCE;resetCache();}
+  // AIR-558: the VIEW_INDEX_SOURCE selector is retired; there is no raw-object fallback to assert any more.
+ }finally{context.derivedViewIndex=realDerived;context.viewIndexD1Version=realVersion;resetCache();}
 }
 
 console.log('Admin health API: bounded reads, grouped issues, unknown sources, generations, clocks, pin and failures passed');

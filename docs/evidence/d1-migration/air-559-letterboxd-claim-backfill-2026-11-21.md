@@ -58,10 +58,18 @@ An **additional read-only** `{mode:"dry_run"}` after execution returned HTTP 200
 
 ## Limits and remaining acceptance
 
+The bullets below describe the state **at execution time, 21 November 2026**. The next section records what changed afterwards.
+
 - These are the tool's live execution/readback results, not a separate raw SQL audit of all nine applied receipts and Film revisions. The fenced writer's receipt and CAS behavior was independently reviewed and covered by offline tests in PR #838.
-- `catalogStartedFilm` returned `found` for all nine, but **no real `POST /api/started` was sent**, and the owner's UI workflow was not exercised. [AIR-549](https://trello.com/c/BgwRv3uw) remains in `Верификация` for set/unset, reload, started-only filter, idempotent `lastEvent`, and Events verification.
+- `catalogStartedFilm` returned `found` for all nine, but **no real `POST /api/started` was sent**, and the owner's UI workflow was not exercised. At execution time [AIR-549](https://trello.com/c/BgwRv3uw) was in `Верификация` for set/unset, reload, started-only filter, idempotent `lastEvent`, and Events verification.
 - `LETTERBOXD_CLAIM_ACTIVATED=false` remains in the deployed implementation. This successful historical backfill does not prove that future Ratings aliases will automatically be claimed. AIR-559 is not declared fully Done against its original producer-activation acceptance criterion.
-- Inferred-import and its revocation edge cases remain explicitly deferred by the owner until after this backfill and the priority AIR-549 product acceptance. The accepted ADR's intended coverage has not been silently narrowed.
-- Code rollback cannot remove already stored claims. Any future incorrect claim must follow the approved owner-review/unlink recovery route; no raw deletes or speculative retries were performed.
+- Inferred-import and its revocation edge cases were explicitly deferred by the owner until after this backfill and the priority AIR-549 product acceptance. The accepted ADR's intended coverage has not been silently narrowed.
+- Code rollback cannot remove already stored claims. At execution time the report named an owner-review/unlink recovery route; [ADR 0192](../../adr/0192-retire-view-index-selector-and-raw-object.md) (accepted 21 November 2026) has since retired the baseline and inferred unlink, so a mistaken claim is now repaired case by case under a separate owner decision that names the film and the exact writes. No raw deletes or speculative retries were performed.
+
+## Subsequent state (23 November 2026)
+
+- **AIR-549.** On 21 November 2026 (Europe/Madrid) the owner accepted [AIR-549](https://trello.com/c/BgwRv3uw) in its original D1 user-state scope and moved it to Done ([owner disposition on AIR-559](https://trello.com/c/733sRAxu#comment-6b020c8252002c9c59def3bf)). That disposition is an owner decision, **not** a recorded UI retest: no `POST /api/started`, reload, filter or Events check after this backfill is evidenced here. AIR-549 is no longer a prerequisite of AIR-559.
+- **Fresh read-only preflight.** A production owner-only MCP `letterboxd_claim_backfill({mode:"dry_run"})` on 23 November 2026, reported on the [AIR-559 card](https://trello.com/c/733sRAxu), returned `decision:"already_current"`, `cohort:0`, `blockers:[]`, `sideEffects:"none"`, with Film/Person `open` generation 2, Ratings `d1/open` generation 4321, published EPG `d1/open` generation 518 and watchlist generation 21. The historical backfill stays complete; **no repeat apply is needed or authorized**.
+- **Still open.** The automatic producer (`LETTERBOXD_CLAIM_ACTIVATED`) is still `false`. Finishing the deferred inferred-import and rated-candidate coverage and any activation are separate AIR-559 work: an implementation PR with the gate off, then a separate owner GO. A zero cohort does not by itself prove an active future writer.
 
 **No additional production operations are authorized by this evidence report.**

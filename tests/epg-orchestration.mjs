@@ -30,7 +30,7 @@ let databases=0;
  assert.equal(Policy.EPG_SCHEDULE.hour,17);assert.equal(Policy.EPG_SCHEDULE.minute,0);
  assert.deepEqual(plain(Policy.EPG_SCHEDULE),plain(MonitorPolicyModule.EPG_SCHEDULE),'one EPG due time for the executor and the monitor');
  const wrangler=fs.readFileSync('wrangler.jsonc','utf8');
- assert.match(wrangler,/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*", "24 3 \* \* \*"\]/,'the hourly minute-0 expression (the owner-approved AIR-348 change; it was 37 * * * *), the Discovery-only fast cron of AIR-534 (ADR 0174) and the daily poster cron of AIR-543 (ADR 0179)');
+ assert.match(wrangler,/"crons": \["0 \* \* \* \*", "1-59\/2 \* \* \* \*", "24 3 \* \* \*", "30 \* \* \* \*"\]/,'the hourly minute-0 expression (the owner-approved AIR-348 change; it was 37 * * * *), the Discovery-only fast cron of AIR-534 (ADR 0174) and the daily poster cron of AIR-543 (ADR 0179)');
  assert.match(wrangler,/"binding": "EPG_WORKFLOW"[\s\S]*"class_name": "EpgWorkflow"/);
  const build=fs.readFileSync('build.mjs','utf8');
  assert.match(build,/src\/epg-orchestration\.js/);assert.match(build,/export class EpgWorkflow extends WorkflowEntrypoint/);assert.match(build,/runEpgWorkflow/);
@@ -818,7 +818,8 @@ for(const stage of ['epg','seal']){
  const worker=fs.readFileSync('src/worker.js','utf8');
  const handler=worker.slice(worker.indexOf('async scheduled('),worker.indexOf('async fetch('));
  assert.match(handler,/Promise\.allSettled\(\[/);
- for(const name of ['RatingsOrchestration.ensure','EpgOrchestration.ensure','reconcileDiscoveryWorkflow','Monitor.run'])assert.ok(handler.includes(name),name+' is in the tick');
+ for(const name of ['EpgOrchestration.ensure','reconcileDiscoveryWorkflow','Monitor.run'])assert.ok(handler.includes(name),name+' is in the tick');
+ assert.doesNotMatch(handler,/RatingsOrchestration/,'AIR-580: the legacy Ratings executor is not in the tick');
  assert.doesNotMatch(handler,/runD1EnrichmentProjection/,'the enrichment projector is not in the tick');
  const h=cloudflare();
  h.env.EPG_WORKFLOW.create=async()=>{throw new Error('platform down');};

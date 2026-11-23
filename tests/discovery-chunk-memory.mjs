@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 
 const source = fs.readFileSync('src/discovery.js', 'utf8');
 const chunk = source.slice(source.indexOf('async function resolveDiscoveryChunk('), source.indexOf('async function discoveryDigest('));
@@ -44,6 +45,7 @@ function harness(respond, {stream = false} = {}) {
   }};
   const live = vm.createContext({Response, Request, URL, URLSearchParams, AbortSignal, Date, Map, Set, JSON, TextEncoder, TextDecoder, ReadableStream, Uint8Array, crypto: webcrypto, console: {log() {}, error() {}, warn() {}}, setTimeout, structuredClone, fetch: async input => {calls++; return respond(String(input));}});
   for (const file of ['src/domain/scored-resolution.js', 'src/domain/resolution-acceptance.js', 'src/sources.js', 'src/discovery.js', 'src/domain/profile-impact.js', 'src/domain/prediction-compatibility.js', 'src/domain/fingerprint-compatibility.js', 'src/domain/prediction-confidence.js', 'src/enrichment.js', 'src/letterboxd-diary.js', 'src/worker.js']) vm.runInContext(fs.readFileSync(file, 'utf8').replace('export default', 'globalThis.worker='), live);
+  installViewIndexFixture(live);
   live.env = env;
   return {live, records, wholeParses: () => wholeParses, ledgerReads: () => ledgerReads, calls: () => calls, maxReading: () => maxReading, ledger: () => ledgerCopy};
 }

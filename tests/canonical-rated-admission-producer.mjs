@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import {pathToFileURL} from 'node:url';
 import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
 import {d1Standin} from './d1-standin.mjs';
@@ -286,8 +287,8 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
   await applyRatedAdmissionRetention(envOf(file),{event:'m:1',retentions:[unit(true,d('10'),'s1')],now:()=>d('10')});
   const before=st(file);
   assert.equal(sqlite(file,'DROP TABLE film_retention_scan').status,0);
-  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),30);
-  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'m:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')}),error=>error.code==='film_person_unavailable'&&/film_retention_scan_missing_at_schema_30/.test(String(error.cause?.message)));
+  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),37);
+  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'m:2',retentions:[unit(false,d('15'),'s2')],now:()=>d('19')}),error=>error.code==='film_person_unavailable'&&/film_retention_scan_missing_at_schema_37/.test(String(error.cause?.message)));
   assert.deepEqual(st(file),before,'nothing was written');
   await assert.rejects(()=>FA.readRetentionWatermark(envOf(file)),error=>error.code==='film_person_unavailable');
  }
@@ -355,7 +356,7 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
  const env=envOf(file);
  env.BUCKET=factsBucket();
  const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone});
- const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);viewIndexSeam(factsCtx);
  const listed=[];
  for(let i=0;i<10;i++){
   const lid='n'+String(i).padStart(2,'0'),tmdb=String(5000+i);
@@ -456,9 +457,12 @@ function seedFilm(file,id,tmdb,lid){
  sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ("+q(id)+",1,"+q(T)+");INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ("+q(id)+",'tmdb',"+q(tmdb)+",1,0,NULL)"+(lid?",("+q(id)+",'letterboxd',"+q(lid)+",1,0,NULL)":"")+";");
 }
 
+// AIR-558: no raw view index: the derived view is the fake-bucket fixture and a stub ratings domain owns the projection and mirrors it into that fixture (the D1 ratings_view overlay), as these contexts have no ratings D1.
+function viewIndexSeam(ctx){installViewIndexFixture(ctx);ctx.RatingsD1=new Proxy({ratingsMutableKey:()=>false,projectView:async(env,written)=>{const key='enrichment/view-index.json',got=await env.BUCKET.get(key),view=got?await got.json():{};for(const r of written)for(const id of [...(r.links.letterboxd?[String(r.links.letterboxd)]:[]),...(r.links.tmdb?['tmdb_'+r.links.tmdb]:[])]){const item={...(view[id]||{})};if(r.rating)item.actualRating=r.rating.value;if(r.watched)item.watched=r.watched.value;if(r.watchlist)item.watchlist=r.watchlist.value;view[id]=item;}await env.BUCKET.put(key,JSON.stringify(view));return {owned:true,changed:written.length};}},{get:(t,n)=>n in t?t[n]:async()=>({owned:false,handled:false,changed:0})});}
 function loadScanWorker(env,LetterboxdFacts){
  const workerCtx=vm.createContext({env,Response,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,console,CanonicalRatedAdmission:M,LetterboxdFacts,fetch:async()=>{throw new Error('unexpected fetch');}});
  vm.runInContext(scoped('src/metadata-cache.js','MetadataCache')+'\n'+fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8')+'\n'+fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),workerCtx);
+installViewIndexFixture(workerCtx);
  workerCtx.ratingsGate=async()=>({active:false,storage:'unsupported'});
  workerCtx.persistWatchlist=async()=>{};
  workerCtx.persistEvents=async()=>{};
@@ -473,7 +477,7 @@ async function putPayload(env,runId,report){
  const env=envOf(file);
  env.BUCKET=factsBucket();
  const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone});
- const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);viewIndexSeam(factsCtx);
  const listed=[];
  for(let i=0;i<61;i++){
   const lid='f'+String(i).padStart(2,'0'),tmdb=String(2000+i);
@@ -503,7 +507,7 @@ async function putPayload(env,runId,report){
  assert.equal(run.seal.phase,'queue');
  assert.equal(last.discovery.nextAction,'continue');
  assert.equal(scans,1);
- assert.equal(env.BUCKET.records.get('enrichment/view-index.json').gone.watchlist,false);
+ // AIR-558: no raw view-index watchlist projection any more; the D1 film_retention row below is the authority.
  assert.equal(one(file,"SELECT watchlist FROM film_retention WHERE film_id='film:tmdb:1999'"),0);
  assert.equal(one(file,'SELECT COUNT(*) FROM film_retention'),62);
  assert.equal(run.ratedAdmissionIntent,undefined);
@@ -515,7 +519,7 @@ async function putPayload(env,runId,report){
  const env=envOf(file);
  env.BUCKET=factsBucket();
  const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone});
- const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);viewIndexSeam(factsCtx);
  const listed=[];
  for(let i=0;i<26;i++){
   const lid='p'+String(i).padStart(2,'0');
@@ -542,7 +546,7 @@ async function putPayload(env,runId,report){
  const env=envOf(file);
  env.BUCKET=factsBucket();
  const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone,CanonicalRatedAdmission:M});
- const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);viewIndexSeam(factsCtx);
  const origin={archiveSha256:SHA,generatedAt:T,generatedAtSource:'archive_name'};
  const item={lid:'alien',tmdb:'348',identity:'inferred',admit:{title:'Alien',year:1979},facts:{watched:true,rating:4}};
  factsCtx.CanonicalRatedAdmission={
@@ -574,7 +578,7 @@ async function putPayload(env,runId,report){
    return M.applyRatedAdmissionRetention(...args);
   },
  }});
- const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);viewIndexSeam(factsCtx);
  const origin={archiveSha256:SHA,generatedAt:T,generatedAtSource:'archive_name'};
  const item={lid:'heat',tmdb:'949',identity:'inferred',admit:{title:'Heat',year:1995},facts:{watched:true,rating:4}};
  await assert.rejects(Facts.commitBaselineChunk({BUCKET:env.BUCKET,DB:env.DB},{origin,chunk:0,items:[item]}),e=>e.code==='rated_admission_incomplete');
@@ -589,7 +593,7 @@ async function putPayload(env,runId,report){
  const env=envOf(file);
  env.BUCKET=factsBucket();
  const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone,CanonicalRatedAdmission:M});
- const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);viewIndexSeam(factsCtx);
  await Facts.linkFilm({BUCKET:env.BUCKET},{letterboxd:'taken',tmdb:'1'});
  const origin={archiveSha256:SHA,generatedAt:T,generatedAtSource:'archive_name'};
  const item={lid:'taken',tmdb:'603',identity:'inferred',admit:{title:'Taken',year:2008},facts:{watched:true,rating:3}};
@@ -615,7 +619,7 @@ async function putPayload(env,runId,report){
   },
  };
  const ctx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,URL,URLSearchParams,structuredClone,fetch:async()=>{throw new Error('no fetch');},CanonicalRatedAdmission:wrap});
- vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8'),ctx);
+ vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8'),ctx);viewIndexSeam(ctx);
  vm.runInContext(scoped('src/letterboxd-match.js','LetterboxdMatch'),ctx);
  vm.runInContext(scoped('src/domain/letterboxd-rated-admission.js','LetterboxdRatedAdmission'),ctx);
  vm.runInContext(scopedReplacing('src/letterboxd-identity.js','LetterboxdIdentity','const normTitle=LetterboxdMatch.normTitle;\n'),ctx);

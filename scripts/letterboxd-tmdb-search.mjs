@@ -1,5 +1,5 @@
 // AIR-388 B2 (ADR 0105): bounded TMDB title search for the export films the live catalog does not know. Offline except for the search itself.
-// node scripts/letterboxd-tmdb-search.mjs --export <abs dir> --catalog-dir <abs dir> --output <abs dir> [--max-requests 1..1500] [--rps >0..4] [--dry-run]
+// node scripts/letterboxd-tmdb-search.mjs --export <abs dir> --catalog-dir <abs dir> --output <abs dir> --view-index-d1 <abs export file> [--max-requests 1..1500] [--rps >0..4] [--dry-run]
 // - Reads the four named CSVs of the extracted export and a catalog directory (see loadCatalogDir), matches with the inferred policy, and
 //   asks TMDB once per still-unmatched film (search/movie, page 1, one attempt, never a retry). The first 403 or 429 ends the run.
 // - Credential, one of two ways, never printed or written, and this tool creates none. Default: TMDB_READ_TOKEN (a read-only API read access
@@ -116,7 +116,7 @@ export async function main(argv=process.argv.slice(2),{env=process.env,fetchImpl
  for(let i=0;i<argv.length;i++){
   if(argv[i]==='--dry-run'){args.dry=true;continue;}
   const name={'--export':'exportDir','--catalog-dir':'catalogDir','--output':'outputDir','--max-requests':'maxRequests','--rps':'rps','--auth':'auth','--previous':'previous','--view-index-d1':'viewIndexFile'}[argv[i]];
-  if(!name||i+1>=argv.length)throw new ReconcileError('Usage: letterboxd-tmdb-search.mjs --export <abs> --catalog-dir <abs> --output <abs> [--max-requests n] [--rps n] [--auth token|proxy] [--view-index-d1 <abs export file>] [--dry-run]',2);
+  if(!name||i+1>=argv.length)throw new ReconcileError('Usage: letterboxd-tmdb-search.mjs --export <abs> --catalog-dir <abs> --output <abs> [--max-requests n] [--rps n] [--auth token|proxy] --view-index-d1 <abs export file> [--dry-run]',2);
   args[name]=argv[++i];
  }
  if(!args.exportDir||!args.catalogDir||!args.outputDir)throw new ReconcileError('--export, --catalog-dir and --output are required',2);

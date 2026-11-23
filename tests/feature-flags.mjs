@@ -52,7 +52,7 @@ async function tool(environment,name,args,{assertion=jwt,execution={waitUntil(){
  return {response,body};
 }
 
-const REGISTERED=['LIFECYCLE_LOCALIZATION','DISCOVERY_LEDGER_MODE','DISCOVERY_EXECUTOR','REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','D1_ENRICHMENT_WRITE','D1_ENRICHMENT_WINDOW','D1_ENRICHMENT_BULK','MONITOR','MONITOR_TRANSPORT','VIEW_INDEX_SOURCE','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
+const REGISTERED=['LIFECYCLE_LOCALIZATION','DISCOVERY_LEDGER_MODE','DISCOVERY_EXECUTOR','REMOVAL_RATING_LOOKUP','LETTERBOXD_DIARY_HISTORY','D1_ENRICHMENT_WRITE','D1_ENRICHMENT_WINDOW','D1_ENRICHMENT_BULK','MONITOR','EPG_CHANNEL_POLICY','MONITOR_TRANSPORT','VIEW_INDEX_SOURCE','RATINGS_PIPELINE','SCORED_RESOLUTION','RATINGS_REFRESH','FINDS_TITLE_EXCLUSION','FINDS_WATCHED_MARK','PREDICTION_PROFILE_COMPATIBILITY','PREDICTION_VERSION_OBJECTS','FINGERPRINT_VERSION_OBJECTS','PREDICTION_FINGERPRINT_COMPATIBILITY','CATALOG_POSTER_HYDRATION','PREDICTION_MATERIALIZATION','LETTERBOXD_BASELINE_IMPORT','LETTERBOXD_FACTS'];
 const SECRET='SECRET-CANARY-7f3a9c';
 // An env that refuses enumeration and storage, and records every name read.
 function guarded(values){
@@ -217,16 +217,19 @@ assert.doesNotMatch(fs.readFileSync('src/feature-flags.js','utf8'),/Object\.(key
 
 console.log('Feature flags (ADR 0039): feature_flags lists the registered flags absent and set, literal values only for known tokens, shape-only reports for secrets, near misses, objects and over-long values, retired tokens and selectors including the inert enrichment window and bulk selectors, unmet requirements, effective modes equal to every active consumer, registry parity with the reference and the checker, no storage, no env enumeration, arguments refused and the Access JWT required passed');
 
-// ADR 0183: the temporary view index read selector. Only exactly `d1` selects the D1 source; every other value, absent included, is the default `r2` (the dormant state).
+// AIR-558: the ADR 0183 view index read selector is retired. Whatever the binding holds, the flag reports retired with no effective mode; absence is the target state.
 {
  const selector=async value=>(await flags(value===undefined?{}:{VIEW_INDEX_SOURCE:value})).report.flags.find(item=>item.name==='VIEW_INDEX_SOURCE');
  const absent=await selector(undefined);
- assert.deepEqual([absent.state,absent.valid,absent.issue,absent.effective],['absent',true,null,'r2'],'absent is r2');
- const on=await selector('d1');
- assert.deepEqual([on.state,on.raw,on.valid,on.issue,on.effective],['set','d1',true,null,'d1'],'d1 selects the D1 source');
- const r2=await selector('r2');
- assert.deepEqual([r2.raw,r2.valid,r2.effective],['r2',true,'r2']);
- for(const bad of ['D1',' d1','on','d1,r2','']){const item=await selector(bad);assert.equal(item.effective,'r2',JSON.stringify(bad)+' stays on the raw object');assert.equal(item.valid,false,JSON.stringify(bad)+' is reported invalid');}
- const modes=(await selector(undefined)).modes??null;
- assert.ok(modes===null||(modes.includes('r2')&&modes.includes('d1')));
+ assert.deepEqual([absent.state,absent.valid,absent.issue,absent.effective],['absent',true,null,null],'absent is the target state and has no effective mode');
+ for(const value of ['d1','r2']){const item=await selector(value);assert.deepEqual([item.state,item.raw,item.valid,item.issue,item.effective],['set',value,false,'retired',null],value+' is retired and inert');}
+ for(const bad of ['D1',' d1','on','d1,r2','']){const item=await selector(bad);assert.equal(item.effective,null,JSON.stringify(bad)+' has no effective mode');}
+}
+
+// AIR-565: the Channel policy switch is retired: any value (or none) is inert, `on` and `off` alike, and the readback of an absent binding shows retired.
+{
+ const policy=async value=>(await flags(value===undefined?{}:{EPG_CHANNEL_POLICY:value})).report.flags.find(item=>item.name==='EPG_CHANNEL_POLICY');
+ const absent=await policy(undefined);
+ assert.deepEqual([absent.state,absent.valid,absent.issue,absent.effective,absent.retired],['absent',true,null,null,true],'absent reads back retired and inert');
+ for(const value of ['on','off']){const item=await policy(value);assert.deepEqual([item.state,item.raw,item.valid,item.issue,item.effective],['set',value,false,'retired',null],value+' is retired and inert');}
 }

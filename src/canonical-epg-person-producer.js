@@ -52,7 +52,7 @@ export function planEpgPersonUnits({runId,at,persons=[],credits=[],personRows=[]
   if(!plain(item)||typeof item.filmId!=='string'||!item.filmId.startsWith('film:')||!Array.isArray(item.credits)||!item.credits.length||films.has(item.filmId))throw failed('film_person_invalid');
   if(item.credits.length>CREDITS_PER_UNIT_MAX)throw failed('film_person_bounded');
   // The unit carries the validated, normalized credits (a malformed or duplicated credit refuses the whole plan before anything is read).
-  films.set(item.filmId,{kind:FILM_CREDITS_OPERATION,id:item.filmId,input:{id:item.filmId,at,credits:filmCreditsContent({id:item.filmId,credits:item.credits})}});
+  films.set(item.filmId,{kind:FILM_CREDITS_OPERATION,id:item.filmId,input:{id:item.filmId,at,credits:filmCreditsContent({id:item.filmId,credits:item.credits}),...(Array.isArray(item.guards)&&item.guards.length?{guards:item.guards}:{})}});
  }
  const units=[...[...rows.values()].sort(byId),...[...people.values()].sort(byId),...[...films.values()].sort(byId)];
  return {event,units};

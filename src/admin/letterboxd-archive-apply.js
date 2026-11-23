@@ -4,7 +4,6 @@
 // rating values. Fact writes go through LetterboxdFacts.commitBaselineChunk only after checkSubmission. Preview does
 // not call this. LETTERBOXD_FACTS and LETTERBOXD_BASELINE_IMPORT are not consulted.
 const LBA_APPLY_PREFIX='admin/actions/letterboxd_archive_apply/v1/';
-const LBA_ROLLBACK_PREFIX='admin/actions/letterboxd_archive_rollback/v1/';
 const LBA_RETRY_PREFIX='admin/actions/letterboxd_identity_retry/v1/';
 const LBA_CONFIRM_FIELDS={chunk:5,planHash:64,programmeRunId:80,scopeFingerprint:8,idempotencyKey:80,accepted:5};
 const LBA_COMMIT_FIELDS={confirmation:24000};
@@ -13,14 +12,7 @@ const LBA_APPLY_CAP=AdminActions.defineCapability({
  id:'letterboxd_archive_apply',version:1,title:'Apply one chunk of a previewed Letterboxd archive',
  subjectKinds:['letterboxd_archive_chunk'],healthActionCode:'letterboxd_archive_apply',
  budget:{maxRecords:50,maxWritesPerRecord:3,externalCallsPerRecord:0},retry:{maxAttempts:1,backoffMs:0},
- compensation:{kind:'restore_before_image',guidance:'Rollback is a separate owner confirmation of this chunk. A later observation is kept.'},
- confirmTtlMs:10*60000,
-});
-const LBA_ROLLBACK_CAP=AdminActions.defineCapability({
- id:'letterboxd_archive_rollback',version:1,title:'Roll back one committed Letterboxd archive chunk',
- subjectKinds:['letterboxd_archive_chunk'],healthActionCode:'letterboxd_archive_rollback',
- budget:{maxRecords:1,maxWritesPerRecord:3,externalCallsPerRecord:0},retry:{maxAttempts:1,backoffMs:0},
- compensation:{kind:'restore_before_image',guidance:'A second rollback of the same chunk is a replay. A later observation is kept.'},
+ compensation:{kind:'none',guidance:'There is no rollback (AIR-558, ADR 0192): a later correction is a separate forward operation.'},
  confirmTtlMs:10*60000,
 });
 const LBA_RETRY_CAP=AdminActions.defineCapability({
@@ -30,7 +22,7 @@ const LBA_RETRY_CAP=AdminActions.defineCapability({
  compensation:{kind:'none',guidance:'Retry only returns a needs_review row to pending. It does not admit a Film and does not roll back a later identity.'},
  confirmTtlMs:10*60000,
 });
-const LBA_APPLY_REGISTRY=AdminActions.createRegistry([LBA_APPLY_CAP,LBA_ROLLBACK_CAP,LBA_RETRY_CAP]);
+const LBA_APPLY_REGISTRY=AdminActions.createRegistry([LBA_APPLY_CAP,LBA_RETRY_CAP]);
 
 function lbaRefuse(refusal,status,extra={}){return json({error:refusal,refusal,...extra},status);}
 function lbaPrincipal(request,url){
@@ -187,19 +179,8 @@ function lbaBaselineView(result){
  if(result.kind==='candidates'){view.kind='candidates';view.fact='candidate';}
  return view;
 }
-async function lbaRollbackCandidates(env,sha,chunk,receipt){
- const key=lbaImportObject(sha,chunk,'candidates-rollback');
- const done=await lbaObject(env,key);
- if(done.value===undefined)throw new Error('storage_unavailable');
- if(done.value)return {replay:true,facts:{restored:done.value.removed||0,superseded:0}};
- const result=await LetterboxdRatedCandidates.rollbackCandidates(env,sha,receipt.codes||[]);
- const body={schemaVersion:1,removed:result.removed.length,at:new Date().toISOString()};
- const saved=await env.BUCKET.put(key,JSON.stringify(body),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
- if(saved===null){const again=await lbaObject(env,key);if(again.value)return {replay:true,facts:{restored:again.value.removed||0,superseded:0}};}
- return {replay:false,facts:{restored:result.removed.length,superseded:0}};
-}
 async function lbaIdentityStatus(request,env){
- const opened=await lbaRollbackBody(request);
+ const opened=await lbaJsonBody(request);
  if(opened.response)return opened.response;
  const sha=opened.body.archiveSha256;
  if(!LBA_HEX64.test(sha||''))return lbaRefuse('invalid_request',400);
@@ -209,7 +190,7 @@ async function lbaIdentityStatus(request,env){
  return json({mode:'identity_status',writes:false,documentEtag:doc.etag,...status});
 }
 async function lbaIdentityStep(request,env,url){
- const opened=await lbaRollbackBody(request);
+ const opened=await lbaJsonBody(request);
  if(opened.response)return opened.response;
  const body=opened.body;
  if(body.accepted!==true||!LBA_HEX64.test(body.archiveSha256||''))return lbaRefuse('invalid_request',400);
@@ -260,7 +241,7 @@ function lbaRetryObservation(doc,codes,pin,now){
  };
 }
 async function lbaRetryConfirm(request,env){
- const opened=await lbaRollbackBody(request);
+ const opened=await lbaJsonBody(request);
  if(opened.response)return opened.response;
  const body=opened.body;
  const fields=lbaRetryFields(body);
@@ -312,7 +293,7 @@ async function lbaRetryConfirm(request,env){
  finally{lbaFreeSlot(started);}
 }
 async function lbaRetry(request,env,url){
- const opened=await lbaRollbackBody(request);
+ const opened=await lbaJsonBody(request);
  if(opened.response)return opened.response;
  let confirmation=opened.body.confirmation;
  if(typeof confirmation==='string'){try{confirmation=JSON.parse(confirmation);}catch{return lbaRefuse('invalid_request',400);}}
@@ -496,11 +477,7 @@ async function lbaCommitCandidates(env,origin,chunk,plan){
 function lbaCandidateEntries(rows,added){
  return rows.map(row=>({lid:row.code,outcomes:[{fact:'candidate',outcome:added&&added.has(row.code)?'registered':'kept'}]}));
 }
-function lbaRollbackPreview(sha,chunk,pin,now){
- const subject={kind:'letterboxd_archive_chunk',id:sha+':rollback:'+chunk};
- return AdminActions.previewAction(LBA_APPLY_REGISTRY,{capability:LBA_ROLLBACK_CAP.id,version:LBA_ROLLBACK_CAP.version,subject,pin,ids:['chunk']},{pin,now,records:[{id:'chunk',version:pin}],issues:[LetterboxdArchiveApply.rollbackIssue()]});
-}
-async function lbaRollbackBody(request){
+async function lbaJsonBody(request){
  const type=(request.headers.get('Content-Type')||'').split(';')[0].trim().toLowerCase();
  if(type!=='application/json')return {response:adminError('unsupported_media_type',415)};
  let text;try{text=await request.text();}catch{return {response:lbaRefuse('invalid_request',400)};}
@@ -508,80 +485,6 @@ async function lbaRollbackBody(request){
  try{const body=JSON.parse(text);if(!body||typeof body!=='object'||Array.isArray(body))return {response:lbaRefuse('invalid_request',400)};return {body};}
  catch{return {response:lbaRefuse('invalid_request',400)};}
 }
-function lbaRollbackFields(body){
- const chunk=body.chunk;
- return LBA_HEX64.test(body.archiveSha256||'')&&Number.isInteger(chunk)&&chunk>=0&&chunk<=10000&&LBA_KEY.test(body.idempotencyKey||'')&&body.accepted===true;
-}
-
-async function lbaRollbackConfirm(request,env,url){
- const opened=await lbaRollbackBody(request);
- if(opened.response)return opened.response;
- const body=opened.body;
- if(body.accepted!==true)return lbaRefuse('confirmation_missing',400);
- if(!lbaRollbackFields(body))return lbaRefuse('invalid_request',400);
- const started=Date.now();
- if(!lbaTrySlot(started))return lbaRefuse('preview_busy',429);
- try{
-  const receipt=await lbaChunkReceipt(env,body.archiveSha256,body.chunk);
-  if(receipt.value===undefined)return lbaRefuse('invalid_request',503);
-  if(!receipt.value||typeof receipt.value.itemsHash!=='string'||!LBA_HEX64.test(receipt.value.itemsHash)||!receipt.value.origin)return lbaRefuse('not_eligible',409);
-  const now=new Date(started).toISOString();
-  const preview=lbaRollbackPreview(body.archiveSha256,body.chunk,receipt.value.itemsHash,now);
-  if(preview.status!=='eligible')return lbaRefuse('not_eligible',409,{reason:preview.reason});
-  const issued=AdminActions.confirmAction(preview,{now,idempotencyKey:body.idempotencyKey,accepted:true});
-  if(issued.error)return lbaRefuse(issued.error,409);
-  const existing=await lbaActionRead(env,LBA_ROLLBACK_PREFIX,body.idempotencyKey);
-  if(existing.record){
-   if(lbaSameIssued(existing.record.issued,issued))return json({mode:'rollback_confirm',writes:false,confirmation:existing.record.issued});
-   return lbaRefuse('idempotency_conflict',409);
-  }
-  const record={schemaVersion:1,kind:'letterboxd_archive_rollback',idempotencyKey:body.idempotencyKey,state:'approved',issued,createdAt:now,archiveSha256:body.archiveSha256,chunk:body.chunk,itemsHash:receipt.value.itemsHash,receipt:null};
-  const saved=await lbaActionWrite(env,LBA_ROLLBACK_PREFIX,body.idempotencyKey,record,null);
-  if(saved===null)return lbaRefuse('idempotency_conflict',409);
-  return json({mode:'rollback_confirm',writes:false,confirmation:issued});
- }catch{return lbaRefuse('invalid_request',500);}
- finally{lbaFreeSlot(started);}
-}
-
-async function lbaRollback(request,env,url){
- const opened=await lbaRollbackBody(request);
- if(opened.response)return opened.response;
- let confirmation=opened.body.confirmation;
- if(typeof confirmation==='string'){try{confirmation=JSON.parse(confirmation);}catch{return lbaRefuse('invalid_request',400);}}
- const submitted=AdminActions.validateConfirmation(confirmation);
- if(!submitted||submitted.capability!==LBA_ROLLBACK_CAP.id)return lbaRefuse('invalid_request',400);
- const started=Date.now();
- if(!lbaTrySlot(started))return lbaRefuse('preview_busy',429);
- try{
-  let stored=await lbaActionRead(env,LBA_ROLLBACK_PREFIX,submitted.idempotencyKey);
-  if(!stored.record||!stored.record.issued)return lbaRefuse('confirmation_missing',409);
-  if(stored.record.receipt)return json({mode:'rollback',writes:false,replayed:true,receipt:stored.record.receipt,state:stored.record.state});
-  const sha=stored.record.archiveSha256,chunk=stored.record.chunk;
-  if(submitted.subject.id!==sha+':rollback:'+chunk)return lbaRefuse('confirmation_mismatch',409);
-  const receipt=await lbaChunkReceipt(env,sha,chunk);
-  if(receipt.value===undefined)return lbaRefuse('invalid_request',503);
-  if(!receipt.value||receipt.value.itemsHash!==stored.record.itemsHash)return lbaRefuse('record_changed',409);
-  const now=new Date().toISOString();
-  const fresh={pin:receipt.value.itemsHash,now,records:[{id:'chunk',version:receipt.value.itemsHash}],issues:[LetterboxdArchiveApply.rollbackIssue()]};
-  const checked=AdminActions.checkSubmission(LBA_APPLY_REGISTRY,confirmation,fresh,{principal:lbaPrincipal(request,url),issued:stored.record.issued});
-  if(!checked.ok)return lbaRefuse(checked.refusal,checked.refusal==='confirmation_expired'||checked.refusal==='invalid_request'?400:409);
-  let result;
-  try{
-   result=receipt.value.kind==='candidates'
-    ?await lbaRollbackCandidates(env,sha,chunk,receipt.value)
-    :await LetterboxdFacts.rollbackBaselineChunk(env,{origin:receipt.value.origin,chunk});
-  }
-  catch(error){if(error instanceof LetterboxdFacts.FactsError&&error.code==='not_committed')return lbaRefuse('not_eligible',409);return lbaRefuse('invalid_request',500);}
-  const superseded=(result.facts&&result.facts.superseded)||0,restored=(result.facts&&result.facts.restored)||0;
-  const outcome=result.replay? 'already_applied':restored? 'written':superseded? 'skipped_changed':'already_applied';
-  const actionReceipt=AdminActions.receiptOf({confirmation,capability:LBA_ROLLBACK_CAP,startedAt:now,finishedAt:new Date().toISOString(),outcomes:[{id:'chunk',outcome}]});
-  const saved={...stored.record,state:actionReceipt.state,finishedAt:actionReceipt.finishedAt,receipt:actionReceipt,rollback:{replay:result.replay===true,restored,superseded}};
-  await lbaActionWrite(env,LBA_ROLLBACK_PREFIX,submitted.idempotencyKey,saved,stored.etag);
-  return json({mode:'rollback',writes:result.replay!==true,replayed:result.replay===true,receipt:actionReceipt,rollback:saved.rollback,state:actionReceipt.state});
- }catch{return lbaRefuse('invalid_request',500);}
- finally{lbaFreeSlot(started);}
-}
-
 async function lbaApplyRoute(request,env,url){
  if(request.method!=='POST')return adminError('method_not_allowed',405);
  if(!lbaPrincipal(request,url).owner)return lbaRefuse('access_denied',403);
@@ -591,8 +494,6 @@ async function lbaApplyRoute(request,env,url){
  if(path==='/api/admin/letterboxd-archive/identity-step')return lbaIdentityStep(request,env,url);
  if(path==='/api/admin/letterboxd-archive/identity-retry-confirm')return lbaRetryConfirm(request,env);
  if(path==='/api/admin/letterboxd-archive/identity-retry')return lbaRetry(request,env,url);
- if(path==='/api/admin/letterboxd-archive/rollback-confirm')return lbaRollbackConfirm(request,env,url);
- if(path==='/api/admin/letterboxd-archive/rollback')return lbaRollback(request,env,url);
  if(path==='/api/admin/letterboxd-archive/apply-confirm')return lbaApplyConfirm(request,env,url);
  if(path==='/api/admin/letterboxd-archive/apply')return lbaApplyCommit(request,env,url);
  return adminError('not_found',404);

@@ -14,6 +14,7 @@ import {scoped} from '../scripts/bundle-scope.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-discovery-authority-'));
 let databases=0;
@@ -142,7 +143,7 @@ await assert.rejects(()=>Authority.readAuthority({DB:missing}),error=>error.code
  const broken={prepare(){throw new Error('D1 binding reset');},async batch(){throw new Error('D1 binding reset');}};
  await assert.rejects(()=>Authority.readAuthority({DB:broken,...standin}),unavailable,'a D1 error is not a stand-in');
  assert.match(fs.readFileSync('wrangler.jsonc','utf8').replace(/\/\/.*$/gm,''),/^(?![\s\S]*DISCOVERY_DB_OPTIONAL)/,'wrangler.jsonc never opts in');
- assert.match(fs.readFileSync('scripts/local-dev.mjs','utf8'),/DISCOVERY_DB_OPTIONAL:'standin'/,'the local stack opts in');
+ assert.doesNotMatch(fs.readFileSync('scripts/local-dev.mjs','utf8'),/DISCOVERY_DB_OPTIONAL/,'AIR-576: the local stack runs a real D1 and opts into no stand-in');
 }
 
 const held=migrated();
@@ -694,6 +695,7 @@ vm.runInContext(scoped('src/domain/discovery-recovery.js','DiscoveryRecovery'),h
 vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js','utf8'),httpContext);
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),httpContext);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),httpContext);
+installViewIndexFixture(httpContext);
 const routeEnv={...httpEnv,BUCKET:guardedBucket};
 const origin='https://iptv.example';
 const call=async(path,init)=>{const response=await httpContext.worker.fetch(new Request(origin+path,init),routeEnv,{waitUntil(){}});return {status:response.status,body:await response.json()};};

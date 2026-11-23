@@ -23,7 +23,7 @@ for (const id of ['archive-form', 'archive-file', 'archive-generated-at', 'archi
 assert.ok(html.indexOf('id="archive-file"') < html.indexOf('id="archive-generated-at"') && html.indexOf('id="archive-generated-at"') < html.indexOf('id="archive-submit"'), 'file, time, then submit in tab order');
 assert.match(html, /accept="\.zip,application\/zip"/);
 assert.match(html, /<script src="\/admin-letterboxd\.js"><\/script>/);
-assert.match(html, /<a href="\/admin\/health" data-return-carry>Здоровье данных<\/a><a href="\/admin\/letterboxd" aria-current="page" data-return-carry>Архив Letterboxd<\/a><a href="\/admin\/limb" data-return-carry>Лимб<\/a><a href="\/admin\/identity" data-return-carry>Идентификация<\/a><a href="\/admin\/posters" data-return-carry>Постеры<\/a><\/nav>/);
+assert.match(html, /<a href="\/admin\/health" data-return-carry>Здоровье данных<\/a><a href="\/admin\/letterboxd" aria-current="page" data-return-carry>Архив Letterboxd<\/a><a href="\/admin\/limb" data-return-carry>Лимб<\/a><a href="\/admin\/identity" data-return-carry>Идентификация<\/a><a href="\/admin\/posters" data-return-carry>Постеры<\/a><a href="\/admin\/channels" data-return-carry>Каналы<\/a><\/nav>/);
 for (const file of ['public/admin.html', 'public/admin-limbo.html', 'public/admin-posters.html']) assert.match(fs.readFileSync(file, 'utf8'), /<a href="\/admin\/letterboxd"[^>]*>Архив Letterboxd<\/a><a href="\/admin\/limb"/, file + ' links to the archive page');
 assert.doesNotMatch(html, /\/api\/|fetch\(/);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through the client');
@@ -414,26 +414,10 @@ ctx.fetch = async (_url, init) => {
 };
 await run('onArchiveCommit(0)');
 assert.equal(cancelReplay, afterCancel);
-run('archiveLive.rollbackIssued[0] = {idempotencyKey:"lbrollback0123456789ab", chunk:0}; archiveLive.committed = {};');
-let rollbackPosts = 0;
-ctx.fetch = (_url, init) => new Promise((_resolve, reject) => {
-  rollbackPosts++;
-  if (init.signal) init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), {name: 'AbortError'})));
-});
-const hangingRollback = run('onArchiveRollback(0)');
-for (const item of windowListeners) if (item.type === 'keydown') item.fn({key: 'Escape', preventDefault() {}});
-await hangingRollback;
-assert.match(result.innerHTML, /Исход отката партии 1 неизвестен/);
-assert.doesNotMatch(result.innerHTML, /не начиналась/);
-assert.equal(rollbackPosts, 1);
-const rollbackFrozen = run('JSON.stringify(archiveLive.rollbackIssued[0])');
-let rollbackReplay = null;
-ctx.fetch = async (_url, init) => {
-  rollbackReplay = JSON.parse(String(init.body)).confirmation;
-  return new Response(JSON.stringify({mode: 'rollback', writes: false, replayed: true, state: 'succeeded'}), {status: 200, headers: {'Content-Type': 'application/json'}});
-};
-await run('onArchiveRollback(0)');
-assert.deepEqual(rollbackReplay, JSON.parse(rollbackFrozen));
+run('archiveLive.committed = {};');
+assert.equal(run('typeof onArchiveRollback'), 'undefined', 'AIR-558: the archive rollback handlers are gone');
+assert.equal(run('typeof onArchiveRollbackConfirm'), 'undefined');
+assert.equal(run('typeof postArchiveRollback'), 'undefined');
 
 // 10. Choosing another file or export time stale the open preview. An unknown command stays frozen to the old file.
 ctx.fetch = fakeFetch;
@@ -483,7 +467,7 @@ run('onArchiveResultClick({target: {getAttribute(name){return name === "data-arc
 assert.equal(run('archiveHasUnresolved()'), false);
 assert.match(error.textContent, /не откатывает/);
 
-// 11. A lost confirm and a lost rollback confirmation can be retried with the same key or forgotten, even beside an apply receipt.
+// 11. A lost confirm can be retried with the same key or forgotten, even beside an apply receipt.
 run(`(() => {
   const batches = archiveLive.answer.batches || (archiveLive.answer.batches = {});
   if (!batches.chunks || !batches.chunks.length) batches.chunks = [{chunk:0, films:1, planHash:'${'ab'.repeat(32)}', scopeFingerprint:'cdef1234', changes:{}, values:{}, confirmable:true}];
@@ -493,7 +477,6 @@ run(`(() => {
   archiveLive.keys = {};
   archiveLive.confirmUnknown = {};
   archiveLive.committed = {};
-  archiveLive.rollbackResult = {};
   archiveLive.stale = false;
 })()`);
 ctx.fetch = async () => {throw new Error('offline');};
@@ -520,25 +503,9 @@ run('onArchiveResultClick({target: {getAttribute(name){return name === "data-arc
 assert.equal(run('archiveHasUnresolved()'), false);
 assert.match(error.textContent, /не откатывает/);
 
-run('archiveLive.committed[0] = {state:"succeeded", replayed:false, counts:{written:1}}; archiveLive.rollbackResult = {}; archiveLive.rollbackIssued = {}; archiveLive.rollbackKeys = {}; archiveLive.rollbackConfirmUnknown = {}; archiveShow("ready", archiveLive.answer);');
-ctx.fetch = async () => {throw new Error('offline');};
-await run('onArchiveRollbackConfirm(0)');
+run('archiveLive.viewStep = 5; archiveLive.reached = 5; archiveLive.committed[0] = {state:"succeeded", replayed:false, counts:{written:1}}; archiveShow("ready", archiveLive.answer);');
 assert.match(result.innerHTML, /записана полностью/);
-assert.match(result.innerHTML, /Повторить то же подтверждение отката/);
-assert.match(result.innerHTML, /data-archive-abandon="0"/);
-assert.doesNotMatch(result.innerHTML, /Подтвердить откат партии/);
-assert.doesNotMatch(result.innerHTML, /не записана/);
-const rollbackKey = run('archiveLive.rollbackKeys[0]');
-let rollbackConfirmBody = null;
-ctx.fetch = async (_url, init) => {
-  rollbackConfirmBody = JSON.parse(String(init.body));
-  return new Response(JSON.stringify({mode: 'rollback_confirm', writes: false, confirmation: {idempotencyKey: rollbackKey, chunk: 0}}), {status: 200, headers: {'Content-Type': 'application/json'}});
-};
-await run('onArchiveRollbackConfirm(0)');
-assert.equal(rollbackConfirmBody.idempotencyKey, rollbackKey);
-assert.match(result.innerHTML, /записана полностью/);
-assert.match(result.innerHTML, /Откатить партию 1/);
-assert.equal(run('archiveHasUnresolved()'), false);
+assert.doesNotMatch(result.innerHTML, /data-archive-rollback|Откатить|Подтвердить откат/, 'the receipt offers no rollback control');
 
 // 12. HTTP 409 in_progress stays unknown and replays the same confirmation.
 ctx.fetch = async () => new Response(JSON.stringify({error: 'in_progress', refusal: 'in_progress'}), {status: 409, headers: {'Content-Type': 'application/json'}});
@@ -558,16 +525,9 @@ await run('onArchiveCommit(0)');
 assert.equal(progressPosted, progressFrozen);
 assert.match(result.innerHTML, /записана полностью/);
 
-// 13. A refused rollback does not rewrite the apply receipt as a write that never happened.
-run('archiveLive.rollbackIssued[0] = {idempotencyKey:"lbrollback0123456789ab", chunk:0};');
-ctx.fetch = async () => new Response(JSON.stringify({error: 'confirmation_expired', refusal: 'confirmation_expired'}), {status: 400, headers: {'Content-Type': 'application/json'}});
-await run('onArchiveRollback(0)');
-assert.match(result.innerHTML, /записана полностью/);
-assert.match(result.innerHTML, /Откат партии 1 отклонён/);
-assert.doesNotMatch(result.innerHTML, /не записана|Ничего не записано/);
-assert.doesNotMatch(error.textContent, /не записана|Ничего не записано/);
+// 13. The archive receipt of a written chunk has no rollback control and keeps its state.
 assert.equal(run('archiveLive.committed[0].state'), 'succeeded');
-assert.equal(run('archiveLive.rollbackResult[0].state'), 'refused');
+assert.doesNotMatch(result.innerHTML, /data-archive-rollback|Откат/);
 
 // 14. Back and Continue do not POST, and they do not drop a frozen command.
 const navPosts = requests.length;
@@ -581,7 +541,6 @@ run('onArchiveNav("5")');
 assert.equal(currentStep(), 5);
 assert.equal(requests.length, navPosts);
 assert.match(result.innerHTML, /записана полностью/);
-assert.match(result.innerHTML, /Откат партии 1 отклонён/);
 assert.doesNotMatch(result.innerHTML, /не записана|Ничего не записано/);
 ctx.fetch = (_url, init) => new Promise((_resolve, reject) => {
   if (init.signal) init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), {name: 'AbortError'})));
@@ -612,10 +571,8 @@ function prepareWritable() {
   })()`);
 }
 const waitKinds = [
-  ['confirm', `archiveLive.viewStep=4; archiveLive.reached=4; archiveLive.issued={}; archiveLive.keys={}; archiveLive.confirmUnknown={}; archiveLive.committed={}; archiveLive.rollbackResult={}; archiveLive.rollbackIssued={}; archiveLive.rollbackConfirmUnknown={};`, 'onArchiveConfirm(0)', 4, () => run('archiveLive.keys[0]')],
+  ['confirm', `archiveLive.viewStep=4; archiveLive.reached=4; archiveLive.issued={}; archiveLive.keys={}; archiveLive.confirmUnknown={}; archiveLive.committed={};`, 'onArchiveConfirm(0)', 4, () => run('archiveLive.keys[0]')],
   ['commit', `archiveLive.viewStep=4; archiveLive.reached=4; archiveLive.issued[0]={idempotencyKey:'lb0123456789abcdef',chunk:0}; archiveLive.committed={}; archiveLive.confirmUnknown={};`, 'onArchiveCommit(0)', 4, () => run('archiveLive.issued[0].idempotencyKey')],
-  ['rollback-confirm', `archiveLive.viewStep=5; archiveLive.reached=5; archiveLive.committed[0]={state:'succeeded',replayed:false,counts:{written:1}}; archiveLive.rollbackIssued={}; archiveLive.rollbackKeys={}; archiveLive.rollbackResult={}; archiveLive.rollbackConfirmUnknown={};`, 'onArchiveRollbackConfirm(0)', 5, () => run('archiveLive.rollbackKeys[0]')],
-  ['rollback', `archiveLive.viewStep=5; archiveLive.reached=5; archiveLive.rollbackIssued[0]={idempotencyKey:'lbrollback0123456789ab',chunk:0}; archiveLive.rollbackResult={};`, 'onArchiveRollback(0)', 5, () => run('archiveLive.rollbackIssued[0].idempotencyKey')],
 ];
 for (const [kind, setup, invoke, step, keyOf] of waitKinds) {
   let posts = 0;
@@ -644,7 +601,7 @@ for (const [kind, setup, invoke, step, keyOf] of waitKinds) {
 
 // 16. A rated film the matcher does not accept is named before any write. The identity button waits for a candidates receipt.
 ctx.fetch = fakeFetch;
-run('archiveLive.committed = {}; archiveLive.confirmUnknown = {}; archiveLive.rollbackConfirmUnknown = {}; archiveLive.rollbackResult = {}; archiveLive.issued = {}; archiveLive.rollbackIssued = {};');
+run('archiveLive.committed = {}; archiveLive.confirmUnknown = {}; archiveLive.issued = {};');
 requests = [];
 choose(exportArchive([{code: 'qq1', name: 'Quiet Quiz', year: 1991, watched: true, rating: 4}]), 'letterboxd-demo-user-2026-10-20-08-15-utc.zip');
 time.value = '';

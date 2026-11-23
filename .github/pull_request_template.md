@@ -24,3 +24,6 @@ A change that mentions a registered feature flag in src/ or wrangler.jsonc must 
 Documentation impact:
 Architecture impact:
 Research evidence:
+
+<!-- For PRs adding or modifying a numbered ADR or its register row: link the Product Owner's explicit decision on the ADR number and chosen option, and make both ADR and register say Accepted or Rejected before merge. Proposed ADR PRs remain open. For unrelated PRs write `none - no ADR affected`. A Rejected ADR may be archived only in a docs-only PR without rejected implementation. The policy is mandatory but is not yet CI-enforced. -->
+ADR owner decision:

@@ -58,6 +58,55 @@ function screenedNonfilmReason(candidate,decision){
  if(decision?.status==='verified'||candidate?.confirmedTmdbId)return null;
  return nonFilmEPGReason(candidate?.title);
 }
+// Serial-episode screen of the EPG scan only (not of the discovery cheap pass, so no stored decision depends on it). It adds four forms that carry
+// a structure a feature title does not, each with the guard that the audit measured; it never reads the description or a duration to PERMIT a
+// screen except in the same-scan repeat pass below, and a missing known-title index disables the ordinal form (fail safe).
+//  - a season-pipe-episode pair ("<Title> 2|5 <Name>");
+//  - an explicit trailing mini-series label ("<Title> (2026) мини-сериал", "<Title>: мини-сериал");
+//  - an ordinal episode "N-я серия" (or a range) whose number or upper bound is at least SERIAL_ORDINAL_MIN, whose stem has no year and is not the
+//    title of a known watchlist or catalog Film (the same index the scan matches against, keyed by the stem). Ordinals 1 to 6 stay candidates:
+//    multi-part films are aired in parts;
+//  - "<Title> S-EE" is decided after the stream by serialDashEpisodes: placeholder description, a valid duration of at most 80 minutes and the same
+//    stem in at least two distinct programmes of the same scan. A programme whose whole title is a known Film title never enters that pass.
+// A programme with one reliable watchlist or catalog Film match is never screened, and neither is one whose whole title is a known Film title that only the year or
+// duration refused (the caller applies both before this rule).
+const SERIAL_ORDINAL_MIN=7,SERIAL_DASH_MAX_MINUTES=80,SERIAL_DASH_REPEAT=2;
+const SERIAL_ORDINAL=/^(.*?)[.,:;]?\s*(\d{1,4})\s*[-‑]?\s*(?:я|ая|й)?\s*(?:-|–|и)?\s*(?:(\d{1,4})\s*[-‑]?\s*(?:я|ая|й)?\s*)?сери(?:я|и|й)(?![\p{L}])/iu;
+const SERIAL_PIPE=/^(.*?)(?:^|[\s(])\d{1,2}\|\d{1,3}(?:-\d{1,3})?(?:\)|\s|$)/u;
+// The label is a trailing descriptor: it ends the title and follows a closing parenthesis, a colon or a dash, so an inflected word or a title that merely contains it is not matched.
+const SERIAL_LABEL=/\p{L}[\s\S]*?(?:\)|[:–—-])\s*мини[\s\-–—]{0,2}сериал[\s.!?)»"]*$/iu;
+const SERIAL_DASH=/^(.*?)\s(\d{1,2})\s*-\s*(\d{1,3})\s*$/u;
+const SERIAL_YEAR=/(?:^|\s)(?:19|20)\d{2}(?:\s|$)/u;
+function serialEpisodeReason(title,knownTitles){
+ const value=String(title??'');
+ const pipe=SERIAL_PIPE.exec(value);
+ if(pipe&&/\p{L}{2}/u.test(pipe[1]))return 'season_pipe_episode';
+ if(SERIAL_LABEL.test(value))return 'mini_series_label';
+ const ordinal=SERIAL_ORDINAL.exec(value);
+ if(ordinal&&knownTitles&&typeof knownTitles.has==='function'){
+  const stem=norm(ordinal[1]),top=Math.max(Number(ordinal[2]),ordinal[3]?Number(ordinal[3]):0);
+  if(top>=SERIAL_ORDINAL_MIN&&/\p{L}/u.test(stem)&&!SERIAL_YEAR.test(stem)&&!knownTitles.has(stem))return 'ordinal_episode';
+ }
+ return null;
+}
+// The stem of an "<Title> S-EE" programme, or null. The decision itself needs the whole scan (serialDashEpisodes).
+function serialDashStem(title){
+ const match=SERIAL_DASH.exec(String(title??''));
+ const stem=match?norm(match[1]):'';
+ return /\p{L}/u.test(stem)?stem:null;
+}
+// info: Map(observation key -> {stem,maxMinutes}); candidates: Map(observation key -> discovery candidate). Returns the keys to drop.
+function serialDashEpisodes(info,candidates){
+ const eligible=[],byStem=new Map();
+ for(const [key,entry] of info){
+  const candidate=candidates.get(key);if(!candidate)continue;
+  const description=norm(candidate.description),placeholder=!description||description===norm(candidate.title)||(candidate.rawTitles||[]).some(raw=>description===norm(raw));
+  const unconfirmed=!candidate.confirmedTmdbId&&!(candidate.confirmedSlots?.length);
+  if(!placeholder||!unconfirmed||!Number.isFinite(entry.maxMinutes)||entry.maxMinutes<=0||entry.maxMinutes>SERIAL_DASH_MAX_MINUTES)continue;
+  eligible.push(key);byStem.set(entry.stem,(byStem.get(entry.stem)||0)+1);
+ }
+ return eligible.filter(key=>byStem.get(info.get(key).stem)>=SERIAL_DASH_REPEAT);
+}
 function discoveryCandidateKey(item){
  const parts=epgTitleParts(item?.title),year=item?.year||parts.year||null;
  return parts.normalizedTitle+'|'+(year||'');
@@ -348,27 +397,51 @@ function applySlotConfirmation(candidate,metas){
 // (its title, its original title or `movieTitles`, which a TMDB detail read records). An alias without that provenance still counts as a
 // competitor in `knownSlotDecision`, but it never confirms: the slot stays an ordinary discovery observation for the resolver.
 function movieTitleKeys(film){return new Set([film?.title,film?.original,...(film?.movieTitles||[])].map(value=>value?epgTitleParts(value).normalizedTitle:'').filter(Boolean));}
-async function scanEPG(stream,watchlist,now){
+// AIR-564 (ADR 0187 decision 5, ADR 0191): the scan has three modes. `legacy` (no `options.policies`, no `options.degraded`) is the earlier behaviour byte for byte.
+// `filtered`: `options.policies` is the in-memory Map<channelId,{policy,basis}> a consumer materialized once from ONE Channel snapshot. `degraded`: `options.degraded`
+// is true because that snapshot is unavailable, absent, empty or torn; every channel is then `known_only` (no unknown candidate, no silent discover, no applied revision).
+// `options.onDeclarations({channels})` is awaited once, at the boundary between the `<channel>` declarations and the first `<programme>` of the same single pass (best effort,
+// never fatal): the declared ids the pinned Map does not hold. Declarations after that boundary are only counted (`lateDeclared`). Each in-window programme does one Map lookup by its channel id, before Film matching
+// and before the discovery build: `deny_all` ignores the slot even for a known Film; `known_only` keeps only a reliably identified Film (a single watchlist
+// match, or a catalog Film the slot confirms by a movie title, ADR 0142/0158) and creates no unknown candidate, uncertain entry or TMDB lookup; `discover`
+// is the unchanged pipeline. An id the Map does not hold is `known_only`. The policy of a channel never depends on the title, so the same Film on another
+// allowed channel is untouched. `stats` keeps the raw input counters (`scanned`, `coverage`) and adds the post-filter policy counters.
+async function scanEPG(stream,watchlist,now,options={}){
+ const degraded=Boolean(options&&options.degraded);
+ const policies=degraded?new Map():options&&options.policies instanceof Map?options.policies:null;
+ const mode=degraded?'degraded':policies?'filtered':'legacy';
+ let boundaryDone=false,boundaryDeclared=null;
+ const UNKNOWN_POLICY={policy:'known_only',basis:'unknown'};
+ const policyCounts={inWindow:0,filteredDenyAll:0,skippedKnownOnly:0,discoveryEligible:0,unclassified:0};
  const index=new Map();for(const film of watchlist){for(const title of new Set([...(film.catalogOnly?[film.title,film.original]:[]),...(film.aliases||[film.original]),...(film.movieTitles||[])].map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}
- const rawDiscovery=new Set(),filteredNonMovies=new Set();const channels=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map(),slotOwners=new Map(),conflictedSlots=new Map(),showMeta=new WeakMap();let scanned=0,min=Infinity,max=-Infinity,kept=0,identityCollision=0,buffer='',complete=false,bytes=0;
+ // The ordinal form is only allowed against a catalog: an empty or unavailable catalog would make every stem look unknown and must not permit a screen.
+ const serialGuard=watchlist.some(film=>film?.catalogOnly)?index:null;
+ const rawDiscovery=new Set(),filteredNonMovies=new Set(),serialFiltered=new Map(),dashInfo=new Map();const channels=new Map(),declared=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map(),slotOwners=new Map(),conflictedSlots=new Map(),showMeta=new WeakMap();let scanned=0,min=Infinity,max=-Infinity,kept=0,identityCollision=0,buffer='',complete=false,bytes=0;
  const reader=stream.getReader(),decoder=new TextDecoder();
  // ADR 0142 decision 1: one owner per (channel, start). The same owner again is ignored; a second owner discards both records after the stream.
  const claimSlot=(channelId,startAt,owner,title,channel)=>{const slot=channelId+':'+startAt,held=slotOwners.get(slot);if(held===undefined){slotOwners.set(slot,owner);return 'new';}if(held===owner)return 'same';if(!conflictedSlots.has(slot))conflictedSlots.set(slot,{title,channel,start:startAt,reason:'duplicate_slot'});return 'conflict';};
  try{while(true){const {done,value}=await reader.read();if(done){buffer+=decoder.decode();break;}bytes+=value.length;if(bytes>400000000)throw new Error('EPG exceeds supported size');buffer+=decoder.decode(value,{stream:true});
  while(true){const start=buffer.search(/<(?:channel|programme)\s/);if(start<0){if(buffer.includes('</tv>'))complete=true;buffer=buffer.slice(-1000);break;}if(start>0)buffer=buffer.slice(start);const type=buffer.startsWith('<channel ')?'channel':'programme',end=buffer.indexOf('</'+type+'>');if(end<0){if(buffer.length>1000000)throw new Error('EPG record exceeds limit');break;}const xml=buffer.slice(0,end+type.length+3);buffer=buffer.slice(end+type.length+3);
- if(type==='channel'){channels.set(attr(xml,'id'),field(xml,'display-name'));continue;}
+ if(type==='channel'){channels.set(attr(xml,'id'),field(xml,'display-name'));declared.set(attr(xml,'id'),field(xml,'display-name'));continue;}
+ if(!boundaryDone){boundaryDone=true;boundaryDeclared=new Set(declared.keys());if(policies&&!degraded&&typeof options.onDeclarations==='function'){const absent=[...declared].filter(([id,name])=>typeof id==='string'&&id&&!/^[A-Z]{2}:/.test(name||'')&&!policies.has(id)).map(([channelId,name])=>({channelId,name:name||channelId}));try{await options.onDeclarations({channels:absent});}catch{/* best effort: registration never fails the scan */}}}
  scanned++;const startAt=xmlTime(attr(xml,'start')),endAt=xmlTime(attr(xml,'stop'));if(!Number.isFinite(startAt)||!Number.isFinite(endAt)||endAt<=startAt)continue;min=Math.min(min,startAt);max=Math.max(max,startAt);const channelId=attr(xml,'channel'),channel=channels.get(channelId)||channelId;if(/^[A-Z]{2}:/.test(channel))continue;const c=coverage.get(channelId)||{name:channel,min:startAt,max:endAt};c.min=Math.min(c.min,startAt);c.max=Math.max(c.max,endAt);coverage.set(channelId,c);
  // Retention/display horizon (7 days) is separate from the hot processing horizon (24 hours): days 2-7 keep only shows that match a
  // reliable non-catalog watchlist film. Discovery, uncertain matches and the raw candidate counts never see them.
  if(startAt<now-72*3600000||startAt>=now+EPG_RETAIN_FUTURE_MS)continue;
+ let channelPolicy='discover';
+ if(policies){policyCounts.inWindow++;const found=policies.get(channelId)||UNKNOWN_POLICY;channelPolicy=found.policy;if(!degraded&&(found.basis==='unknown'||found.basis==='unclassified'))policyCounts.unclassified++;if(channelPolicy==='deny_all'){policyCounts.filteredDenyAll++;continue;}if(channelPolicy==='discover')policyCounts.discoveryEligible++;}
  const title=field(xml,'title'),parts=epgTitleParts(title),titleYear=parts.year,key=parts.normalizedTitle,candidates=index.get(key)||[];const duration=(endAt-startAt)/60000;
  let decision=knownSlotDecision(candidates,titleYear,duration);
  if(decision.films.length===1&&decision.films[0].catalogOnly&&!movieTitleKeys(decision.films[0]).has(key))decision={films:[],reason:'alias_without_movie_provenance'};
  const valid=decision.films;
- if(startAt>=now+EPG_HOT_FUTURE_MS&&(valid.length!==1||valid[0]?.catalogOnly))continue;kept++;
+ if(startAt>=now+EPG_HOT_FUTURE_MS&&(valid.length!==1||valid[0]?.catalogOnly))continue;
+ // ADR 0142 decision 1 holds whatever the policy admits: a skipped record on a known_only channel still claims its slot for the owner the discover path would use (same non-film and shape rules),
+ // so a competing known Film on the same (channel, start) conflicts and both are discarded after the stream. The record itself never becomes a candidate.
+ if(channelPolicy==='known_only'&&valid.length!==1){policyCounts.skippedKnownOnly++;if(!nonFilmEPGReason(title,xml)&&(candidates.length||!serialEpisodeReason(title,serialGuard))&&duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160)claimSlot(channelId,startAt,'o:'+key+'|'+(titleYear||''),title,channel);continue;}
+ kept++;
  // A single reliable watchlist/catalog match is a known Film and is never screened out by its title.
- if(startAt<now+EPG_HOT_FUTURE_MS&&duration>=55&&duration<=300)rawDiscovery.add(key+'|'+(titleYear||''));if(valid.length!==1&&nonFilmEPGReason(title,xml)){if(duration>=55&&duration<=300)filteredNonMovies.add(key+'|'+(titleYear||''));continue;}
- if(valid.length!==1||valid[0]?.catalogOnly){if(candidates.length){if(decision.reason==='identity_collision')identityCollision++;uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:decision.reason||(valid.length>1?'ambiguous':'insufficient_year_or_duration')});}if(duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160){const discoveryKey=key+'|'+(titleYear||''),previous=discovery.get(discoveryKey),description=field(xml,'desc'),categories=xmltvCategories(xml);if(claimSlot(channelId,startAt,'o:'+discoveryKey,title,channel)!=='new')continue;const shown={channelId,channel,start:startAt,end:endAt,epgTitle:title};showMeta.set(shown,{title:parts.title,description:description&&description!=='Нет описания'?description.slice(0,700):null,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,categories});if(previous){previous.shows.push(shown);previous.airings++;previous.lastAiring=Math.max(previous.lastAiring,startAt);if(!previous.description&&description&&description!=='Нет описания')previous.description=description.slice(0,700);if(title!==previous.title&&!previous.rawTitles.includes(title)&&previous.rawTitles.length<8)previous.rawTitles.push(title);if(categories.length)previous.categories=[...new Set([...(previous.categories||[]),...categories])].slice(0,8);}else discovery.set(discoveryKey,{key:discoveryKey,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,title:parts.title,rawTitles:[title],normalizedTitle:key,year:titleYear,duration:Math.round(duration),description:description&&description!=='Нет описания'?description.slice(0,700):null,categories,firstAiring:startAt,lastAiring:startAt,airings:1,shows:[shown]});}continue;}
+ if(startAt<now+EPG_HOT_FUTURE_MS&&duration>=55&&duration<=300)rawDiscovery.add(key+'|'+(titleYear||''));const screenReason=valid.length!==1?nonFilmEPGReason(title,xml):null,serialReason=valid.length!==1&&!screenReason&&!candidates.length?serialEpisodeReason(title,serialGuard):null;if(screenReason||serialReason){if(duration>=55&&duration<=300){filteredNonMovies.add(key+'|'+(titleYear||''));if(serialReason){if(!serialFiltered.has(serialReason))serialFiltered.set(serialReason,new Set());serialFiltered.get(serialReason).add(key+'|'+(titleYear||''));}}continue;}
+ if(valid.length!==1||valid[0]?.catalogOnly){if(candidates.length){if(decision.reason==='identity_collision')identityCollision++;uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:decision.reason||(valid.length>1?'ambiguous':'insufficient_year_or_duration')});}if(duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160){const discoveryKey=key+'|'+(titleYear||''),previous=discovery.get(discoveryKey),description=field(xml,'desc'),categories=xmltvCategories(xml);if(claimSlot(channelId,startAt,'o:'+discoveryKey,title,channel)!=='new')continue;const dashStem=candidates.length?null:serialDashStem(title);if(dashStem)dashInfo.set(discoveryKey,{stem:dashStem,maxMinutes:Math.max(dashInfo.get(discoveryKey)?.maxMinutes??0,duration)});const shown={channelId,channel,start:startAt,end:endAt,epgTitle:title};showMeta.set(shown,{title:parts.title,description:description&&description!=='Нет описания'?description.slice(0,700):null,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,categories});if(previous){previous.shows.push(shown);previous.airings++;previous.lastAiring=Math.max(previous.lastAiring,startAt);if(!previous.description&&description&&description!=='Нет описания')previous.description=description.slice(0,700);if(title!==previous.title&&!previous.rawTitles.includes(title)&&previous.rawTitles.length<8)previous.rawTitles.push(title);if(categories.length)previous.categories=[...new Set([...(previous.categories||[]),...categories])].slice(0,8);}else discovery.set(discoveryKey,{key:discoveryKey,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,title:parts.title,rawTitles:[title],normalizedTitle:key,year:titleYear,duration:Math.round(duration),description:description&&description!=='Нет описания'?description.slice(0,700):null,categories,firstAiring:startAt,lastAiring:startAt,airings:1,shows:[shown]});}continue;}
  const f=valid[0];if(claimSlot(channelId,startAt,'f:'+f.id,title,channel)!=='new')continue;if(!matched.has(f.id))matched.set(f.id,{...f,title:/[а-яё]/i.test(title)?cleanTitle(title):f.original,shows:[]});if(!/[а-яё]/i.test(matched.get(f.id).title)&&/[а-яё]/i.test(title))matched.get(f.id).title=cleanTitle(title);const hint=showMatchBasis(titleYear,{key,title:parts.title,normalizedTitle:key,year:titleYear,duration:Math.round(duration),durations:[Math.round(duration)]},candidates.filter(film=>film?.tmdbId).map(film=>({tmdbId:film.tmdbId,title:film.title,original:film.original,aliases:film.aliases,year:film.year,runtime:film.runtime,trusted:film.canonicalIdentity==='tmdb:'+film.tmdbId})));matched.get(f.id).shows.push({channelId,channel,start:startAt,end:endAt,epgTitle:title,basis:hint.basis,matchReason:hint.hint?hint.reason:null});
  }
  }
@@ -385,9 +458,25 @@ async function scanEPG(stream,watchlist,now){
    candidate.categories=[...new Set(metas.flatMap(meta=>meta.categories||[]))].slice(0,8);}
   }
  for(const candidate of discovery.values())applySlotConfirmation(candidate,candidate.shows.map(show=>showMeta.get(show)));
- return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,identityCollision,duplicate_slot:conflictedSlots.size,discoveryCandidates:discovery.size,rawCandidates:rawDiscovery.size,filteredNonMovies:filteredNonMovies.size},uncertain:[...uncertain.values(),...conflictedSlots.values()].slice(0,100)};
+ // "<Title> S-EE": only a stem that repeats in this very scan, with a placeholder description and a short valid duration (serialDashEpisodes), leaves discovery.
+ for(const key of serialDashEpisodes(dashInfo,discovery)){discovery.delete(key);filteredNonMovies.add(key);if(!serialFiltered.has('dash_season_episode'))serialFiltered.set('dash_season_episode',new Set());serialFiltered.get('dash_season_episode').add(key);}
+ const policyChannels=policies?channelPolicyCounts(coverage,declared,policies,degraded,boundaryDeclared):{channels:null,newChannels:[],lateDeclared:0};
+ return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,identityCollision,duplicate_slot:conflictedSlots.size,discoveryCandidates:discovery.size,rawCandidates:rawDiscovery.size,filteredNonMovies:filteredNonMovies.size,serialFiltered:Object.fromEntries([...serialFiltered].map(([reason,keys])=>[reason,keys.size])),policyMode:mode,...(policies?{policy:{applied:true,mode,...policyCounts,lateDeclared:policyChannels.lateDeclared,channels:policyChannels.channels}}:{})},newChannels:policyChannels.newChannels,uncertain:[...uncertain.values(),...conflictedSlots.values()].slice(0,100)};
 }
 
+// Per-channel counters by effective policy over the channels the feed DECLARES (<channel>) plus any channel it schedules without a declaration. `new` = a declared id the pinned
+// snapshot does not hold (registered after the scan, by id, never by name); `undeclared` = a scheduled id no <channel> declares: it is classified like any unknown id (`known_only`) but is
+// not trusted for registration. `unclassified` = no category and no override. A declared channel whose display name is a country-prefixed feed label (`XX:`) is skipped, as its programmes are.
+function channelPolicyCounts(coverage,declared,policies,degraded,boundaryDeclared){
+ const counts={channels:{total:0,discover:0,denyAll:0,knownOnly:0,new:0,unclassified:0,undeclared:0},newChannels:[],lateDeclared:0};
+ const ids=new Map();
+ for(const [channelId,name] of declared){if(typeof channelId!=='string'||!channelId||/^[A-Z]{2}:/.test(name||''))continue;ids.set(channelId,{name:name||channelId,declared:true});}
+ for(const [channelId,item] of coverage)if(!ids.has(channelId))ids.set(channelId,{name:item.name,declared:false});
+ let lateDeclared=0;
+ for(const [channelId,item] of ids){const found=policies.get(channelId)||{policy:'known_only',basis:'unknown'};if(degraded){counts.channels.total++;counts.channels.knownOnly++;if(!item.declared)counts.channels.undeclared++;continue;}counts.channels.total++;if(found.policy==='discover')counts.channels.discover++;else if(found.policy==='deny_all')counts.channels.denyAll++;else counts.channels.knownOnly++;if(!item.declared)counts.channels.undeclared++;if(found.basis==='unknown'&&item.declared){counts.channels.new++;counts.newChannels.push({channelId,name:item.name});if(boundaryDeclared&&!boundaryDeclared.has(channelId))lateDeclared++;}if(found.basis==='unknown'||found.basis==='unclassified')counts.channels.unclassified++;}
+ counts.lateDeclared=lateDeclared;
+ return counts;
+}
 async function loadPeopleNameIndex(films){
  const ids=[...new Set(films.map(f=>f.tmdbId).filter(id=>/^\d+$/.test(id)))];
  if(!ids.length)return null;
@@ -465,9 +554,11 @@ function availabilityDeadline(film){
 }
 function withAvailability(film){return {...film,availableUntil:availabilityDeadline(film)};}
 function programmeWithWatchlist(report,watchlist){
- if(report.films.length===report.watchlistCount||!watchlist?.films){for(const film of report.films)film.availableUntil=availabilityDeadline(film);return withholdPolicyExcludedProgrammeFilms(report);}
+ // ADR 0186 (AIR-569): a composed document carries its snapshot; equal lengths are then never equal membership (a 1-for-1 replacement keeps the count).
+ if(!watchlist?.snapshot&&report.films.length===report.watchlistCount||!watchlist?.films){for(const film of report.films)film.availableUntil=availabilityDeadline(film);return withholdPolicyExcludedProgrammeFilms(report);}
  const scheduled=new Map(report.films.map(f=>[String(f.id),f]));
- const films=watchlist.films.map(f=>withAvailability({...f,...scheduled.get(String(f.id)),shows:scheduled.get(String(f.id))?.shows||[]}));
+ // ADR 0186 review: a composed member that is new to the programme keeps the shows its composition joined from a stored confirmed slot; they are not overwritten by an empty list.
+ const films=watchlist.films.map(f=>withAvailability({...f,...scheduled.get(String(f.id)),shows:scheduled.get(String(f.id))?.shows||f.shows||[]}));
  return withholdPolicyExcludedProgrammeFilms({...report,films,people:peopleCatalog(films)});
 }
 function withholdPolicyExcludedProgrammeFilms(report){
@@ -542,5 +633,9 @@ function assertEPGContinuity(result,previous,watchlistCount,now){
  const old=previous.stats,ratio=watchlistCount/(previous.watchlistCount||watchlistCount);
  if(old.scanned>10000&&result.stats.scanned<old.scanned*.65)throw new Error('EPG has too few programmes compared with the last good update');
  if(old.channels>100&&result.coverage.length<old.channels*.65)throw new Error('EPG has too few channels compared with the last good update');
- if(ratio>.8&&ratio<1.2&&old.broadcasts>100&&result.films.reduce((n,f)=>n+f.shows.length,0)<old.broadcasts*.35)throw new Error('EPG has too few matching broadcasts compared with the last good update');
+ // ADR 0191: every raw and horizon check above and below runs in every mode. The minimum-broadcasts check compares only generations of the SAME mode (legacy, filtered or
+ // degraded; a report without the field is legacy), so the expected shrinkage after a mode change is not a feed fault; a revision, category or override change inside one mode
+ // never exempts it, and there is no dynamic coefficient. The baseline is the last PUBLISHED generation, never a failed attempt.
+ const sameMode=(result.stats.policyMode||'legacy')===(old.policyMode||'legacy');
+ if(sameMode&&ratio>.8&&ratio<1.2&&old.broadcasts>100&&result.films.reduce((n,f)=>n+f.shows.length,0)<old.broadcasts*.35)throw new Error('EPG has too few matching broadcasts compared with the last good update');
 }

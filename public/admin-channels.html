@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Каналы</title>
+  <meta name="description" content="Страница владельца: каналы EPG, категории, M3U-импорт с предпросмотром и ручные политики.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d9f279'/%3E%3Cpath d='M11 8v16l13-8z' fill='%23171b17'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body class="admin-page">
+  <header class="masthead">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ каналы</span></div>
+  </header>
+  <main class="admin-shell">
+    <a class="return-home" data-return-home href="/">На главную</a>
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow" id="channels-eyebrow">ВЛАДЕЛЕЦ · СОСТОЯНИЕ ВКЛЮЧЕНИЯ ПОЛИТИКИ ЗАГРУЖАЕТСЯ</p>
+        <h1>Каналы</h1>
+        <p class="admin-intro">Категория канала и политика сканирования: <b>deny_all</b>, <b>discover</b> или <b>known_only</b>. Приоритет: ручная политика, затем категория владельца, затем категория провайдера, иначе known_only. Сохранение и импорт не запускают EPG, Discovery и TMDB: запись только меняет сохранённую политику, а момент её применения указан в состоянии ниже.</p>
+      </div>
+    </section>
+    <div class="admin-workspace">
+      <nav class="admin-views" aria-label="Разделы"><a href="/admin" data-return-carry>Каталог</a><a href="/admin/health" data-return-carry>Здоровье данных</a><a href="/admin/letterboxd" data-return-carry>Архив Letterboxd</a><a href="/admin/limb" data-return-carry>Лимб</a><a href="/admin/identity" data-return-carry>Идентификация</a><a href="/admin/posters" data-return-carry>Постеры</a><a href="/admin/channels" aria-current="page" data-return-carry>Каналы</a></nav>
+      <div class="admin-main">
+        <section id="channels-status" class="admin-card" aria-labelledby="channels-status-title" aria-live="polite">
+          <h2 id="channels-status-title">Состояние</h2>
+          <p id="channels-status-body" class="admin-state" role="status">Загрузка…</p>
+        </section>
+        <p id="channels-message" class="admin-state" role="status" tabindex="-1" hidden></p>
+
+        <section id="channels-import" class="admin-card" aria-labelledby="channels-import-title" hidden>
+          <h2 id="channels-import-title">Импорт M3U</h2>
+          <p class="muted">Файл разбирается в этом браузере. На сервер уходят только id канала, имя и группа: ссылки на потоки, токены и сам файл не отправляются и не логируются. Ничего не удаляется: канал, которого нет в новом файле, остаётся без категории провайдера, а ручные решения сохраняются.</p>
+          <label class="limbo-field">Файл плейлиста (.m3u, .m3u8)<input id="channels-file" type="file" accept=".m3u,.m3u8,audio/x-mpegurl,application/vnd.apple.mpegurl,text/plain"></label>
+          <div id="channels-parsed" hidden></div>
+          <div id="channels-preview" hidden></div>
+        </section>
+
+        <section id="channels-list-section" class="admin-card" aria-labelledby="channels-list-title" hidden>
+          <h2 id="channels-list-title">Список каналов</h2>
+          <form id="channels-filters" class="channels-filters" action="/admin/channels" novalidate>
+            <label class="limbo-field">Поиск (id, id провайдера, имя)<input id="channels-q" type="search" maxlength="100" autocomplete="off" spellcheck="false"></label>
+            <label class="limbo-field">Категория<select id="channels-category"></select></label>
+            <label class="limbo-field">Итоговая политика<select id="channels-policy"><option value="">любая</option><option value="discover">discover</option><option value="deny_all">deny_all</option><option value="known_only">known_only</option></select></label>
+            <label class="limbo-field">Источник<select id="channels-source"><option value="">любой</option><option value="m3u">M3U</option><option value="xmltv">только XMLTV</option><option value="unlisted">нет в последнем импорте</option></select></label>
+            <label class="channels-check"><input id="channels-queue" type="checkbox"> Только неклассифицированные</label>
+            <button type="submit" class="admin-refresh">Найти</button>
+          </form>
+          <p id="channels-count" class="muted" role="status"></p>
+          <ul id="channels-items" class="channels-items"></ul>
+          <button type="button" id="channels-more" class="admin-more" hidden>Показать ещё</button>
+        </section>
+      </div>
+    </div>
+  </main>
+  <script src="/return-home.js"></script>
+  <script src="/admin-channels.js"></script>
+  <script src="/status-footer.js"></script>
+</body>
+</html>

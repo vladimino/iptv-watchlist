@@ -26,8 +26,9 @@ const app = fs.readFileSync('public/app.js', 'utf8');
   const buttons = [...panel.matchAll(/<button type="button" data-event-type="([a-z_]+)" aria-pressed="(true|false)">([^<]+)<\/button>/g)].map(match => match.slice(1, 4));
   assert.deepEqual(buttons, [
     ['all', 'true', 'Все события'], ['watchlist', 'false', 'Watchlist и просмотр'], ['epg', 'false', 'Программа'], ['discovery', 'false', 'Находки'],
-    ['ratings', 'false', 'Оценки'], ['enrichment', 'false', 'Прогнозы'], ['skipped', 'false', 'Пропущенные'], ['taste_profile', 'false', 'Модель вкуса'], ['catalog_posters', 'false', 'Постеры'],
-  ], 'nine buttons, «Все события» pressed by default, «Пропущенные» right after «Прогнозы» (AIR-548)');
+    ['ratings', 'false', 'Оценки'], ['enrichment', 'false', 'Прогнозы'], ['taste_profile', 'false', 'Модель вкуса'], ['catalog_posters', 'false', 'Постеры'],
+  ], 'eight buttons, «Все события» pressed by default, kinds of event only: no «Пропущенные» (AIR-584)');
+  assert.doesNotMatch(html, /data-event-type="skipped"|Пропущенные/, 'AIR-584: the skipped presentation has no type button anywhere in the markup');
 }
 
 // 2. CSS: the grid is never replaced, so the sidebar keeps its width and position on every route.
@@ -58,13 +59,22 @@ const pureRun = code => vm.runInContext(code, pure);
     const matched = everything.filter(type => pureRun(`eventMatchesType({type:${JSON.stringify(type)}},${JSON.stringify(id)})`));
     assert.deepEqual(matched, expected, id);
   }
-  // AIR-548: «Пропущенные» is the `batch_v2_skipped` presentation of an enrichment Event; «Прогнозы» still shows it, and no other prediction card is «Пропущенные».
-  const skipped = {type: 'enrichment', presentation: 'batch_v2_skipped'}, terminal = {type: 'enrichment', presentation: 'batch_v2_terminal'}, legacy = {type: 'enrichment'};
+  // AIR-584: a skipped start (`batch_v2_skipped`, AIR-548 `already_running` and AIR-575 `catalog_held`) is a presentation of an enrichment Event, not a type:
+  // it is shown under «Прогнозы» and «Все события» and under no other type, and the removed `skipped` id is an unknown id like any other.
+  const skipped = {type: 'enrichment', presentation: 'batch_v2_skipped', reason: 'already_running'}, heldStart = {type: 'enrichment', presentation: 'batch_v2_skipped', reason: 'catalog_held', cause: 'discovery_fence'};
   const matches = (event, id) => pureRun(`eventMatchesType(${JSON.stringify(event)},${JSON.stringify(id)})`);
-  assert.equal(matches(skipped, 'skipped'), true);assert.equal(matches(skipped, 'enrichment'), true, 'the original «Прогнозы» section shows the skipped Event too');assert.equal(matches(skipped, 'all'), true);
-  assert.equal(matches(terminal, 'skipped'), false);assert.equal(matches(legacy, 'skipped'), false, 'historical v5 and v2 terminal Events are not «Пропущенные»');
-  assert.equal(matches({type: 'epg', presentation: 'batch_v2_skipped'}, 'skipped'), false, 'the presentation alone is not enough');assert.equal(matches(skipped, 'watchlist'), false);
-  assert.equal(pureRun("eventTypeFrom('?type=skipped')"), 'skipped');assert.equal(pureRun("withEventType('/events','skipped')"), '/events?type=skipped');
+  for (const event of [skipped, heldStart]) {
+    assert.equal(matches(event, 'enrichment'), true, event.reason + ': «Прогнозы» shows the skipped Event');
+    assert.equal(matches(event, 'all'), true, event.reason + ': «Все события» shows it');
+    for (const other of ['watchlist', 'epg', 'discovery', 'ratings', 'taste_profile', 'catalog_posters']) assert.equal(matches(event, other), false, event.reason + ' is not ' + other);
+  }
+  assert.equal(pureRun("EVENT_TYPE_FILTERS.map(item=>item.id).join()"), 'all,watchlist,epg,discovery,ratings,enrichment,taste_profile,catalog_posters', 'the order of the kinds is unchanged');
+  assert.equal(pureRun("EVENT_TYPE_FILTERS.some(item=>item.id==='skipped'||'presentation' in item)"), false, 'no filter is a presentation');
+  assert.equal(pureRun("eventTypeFrom('?type=skipped')"), 'all', 'the legacy `?type=skipped` falls back to «Все события»');
+  assert.equal(pureRun("eventTypeFrom('?type=skipped&type=epg')"), 'epg', 'and does not hide a valid type after it');
+  assert.equal(pureRun("withEventType('/events','skipped')"), '/events', 'the removed id is never written into a URL');
+  assert.equal(pureRun("withEventType('/events?type=skipped&result=warning&return=%2F','epg')"), '/events?result=warning&return=%2F&type=epg', 'a new choice replaces the legacy value and keeps the rest');
+  assert.equal(matches({type: 'epg'}, 'skipped'), true, 'the removed id, as an unknown filter id, never hides events');
   assert.equal(pureRun("eventMatchesType({type:'epg'},'nonsense')"), true, 'an unknown filter id never hides events');
   assert.equal(pureRun("eventMatchesType(null,'epg')"), false);
   assert.equal(pureRun("eventMatchesType({type:'taste_profile'},'enrichment')"), false, 'the taste profile is not a prediction run');
@@ -458,6 +468,37 @@ await onEvents('ratings');
 assert.equal(run('eventSearch.state'), 'stuck');
 assert.equal(status.textContent, 'Архив событий не продвигается дальше. Найдено среди загруженных: 0.', 'a repeated cursor after an empty first page is visible');
 assert.equal(more.textContent, 'Повторить');
+
+// 4.12 AIR-584: a legacy deep link `?type=skipped` (with the independent result axis and a return target) opens «Все события» with no invisible active type,
+// shows the skipped Events under the result filter, keeps every other parameter and leaves the search to the result axis alone.
+{
+  const skippedEv = (id, reason) => ({id, type: 'enrichment', presentation: 'batch_v2_skipped', stage: 'skipped', reason, at: at(++tick)});
+  await reset({first: {events: [skippedEv('k1', 'already_running'), ev('e1', 'epg'), skippedEv('k2', 'catalog_held'), ev('w1', 'watchlist')], cursor: null}});
+  const legacy = '/events?type=skipped&result=warning&return=' + encodeURIComponent('/?q=x');
+  win.history.replaceState(null, '', 'https://iptv.example' + legacy);
+  run('eventsScreen=false;applyEventsScreen(true)');
+  assert.equal(run('eventTypeFilterId'), 'all', 'the removed type is not active');
+  assert.deepEqual(pressed(), ['true', 'false', 'false', 'false', 'false', 'false', 'false'], '«Все события» is the pressed button');
+  assert.equal(run('eventResultFilterId'), 'warning', 'the result axis is kept');
+  await run('loadEvents(false)');
+  await settle();
+  assert.deepEqual(shownIds(), ['k1', 'k2'], 'the skipped Events are shown, as warnings');
+  assert.equal(run('eventSearch.state'), 'exhausted');
+  assert.equal(new URL(win.location.href).pathname + new URL(win.location.href).search, legacy, 'opening it rewrites nothing');
+  assert.equal(run('ReturnHome.fromSearch(new URL(window.location.href).search)'), '/?q=x', 'the return target still resolves');
+  run("selectEventResult('all')");
+  await settle();
+  assert.deepEqual(shownIds().sort(), ['e1', 'k1', 'k2', 'w1'], 'with both axes on «Все» every loaded event is shown');
+  run("selectEventType('enrichment')");
+  await settle();
+  assert.deepEqual(shownIds().sort(), ['k1', 'k2'], '«Прогнозы» shows both skipped Events');
+  assert.equal(new URL(win.location.href).searchParams.getAll('type').join(), 'enrichment', 'a new choice replaces the legacy value');
+  assert.equal(run('ReturnHome.fromSearch(new URL(window.location.href).search)'), '/?q=x');
+  run("selectEventType('skipped')");
+  assert.equal(run('eventTypeFilterId'), 'enrichment', 'the removed id is not selectable');
+  run("selectEventType('all')");
+  await settle();
+}
 
 // 5. The film page keeps its sidebar; the events frame is the same grid.
 {

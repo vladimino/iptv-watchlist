@@ -21,6 +21,7 @@ const table = [
   [terminal({stage: 'complete', delta: {failed: 2}}), 'warning', 'complete with per-film failures'],
   [terminal({stage: 'complete', failed: 1}), 'warning', 'failures on the event itself'],
   [{type: 'enrichment', presentation: 'batch_v2_skipped', stage: 'skipped', reason: 'already_running'}, 'warning', 'skipped start (AIR-548)'],
+  [{type: 'enrichment', presentation: 'batch_v2_skipped', stage: 'skipped', reason: 'catalog_held', cause: 'discovery_incomplete'}, 'warning', 'start refused for a held catalog (AIR-575): a warning, not an error or an interruption'],
   [terminal({stage: 'partial', stopReason: 'quota'}), 'warning', 'quota'],
   [terminal({stage: 'partial', stopReason: 'time_budget'}), 'warning', 'time budget'],
   [terminal({stage: 'partial', reason: 'api_error'}), 'error', 'api_error via reason'],
@@ -114,6 +115,13 @@ const table = [
   [{type: 'enrichment', presentation: 'batch_v2_terminal', stage: 'complete', outcome: 'failed'}, 'success', 'outcome of another type is ignored'],
   // Neutral and unknown
   [{type: 'epg', films: 1}, 'success', 'epg published'],
+  // ADR 0191: the two structured Channel policy warnings; everything else about an EPG event stays a successful publication.
+  [{type: 'epg', films: 1, warning: {code: 'channel_policy_degraded', reason: 'empty'}}, 'warning', 'degraded: the blacklist was not applied'],
+  [{type: 'epg', films: 1, warning: {code: 'channel_registration_failed', reason: 'conflict'}}, 'warning', 'registration failed'],
+  [{type: 'epg', films: 1, channels: {total: 5, unclassified: 2, new: 1}, policy: {mode: 'filtered', revision: 7}}, 'success', 'filtered with unclassified and new channels is not a warning'],
+  [{type: 'epg', films: 1, channels: {total: 5, knownOnly: 5}, policy: {mode: 'degraded'}}, 'success', 'the mode alone is not the warning: only the structured code is'],
+  [{type: 'epg', films: 1, warning: {code: 'something_else'}}, 'success', 'an unknown warning code stays a success'],
+  [{type: 'epg', films: 1, warning: 'channel_policy_degraded'}, 'success', 'a non-object warning is ignored'],
   // Recorded actions are successes even with nothing changed (owner return of AIR-557).
   [{type: 'watchlist', total: 3, baseline: false, added: [], removed: []}, 'success', 'watchlist commit with no diff'],
   [{type: 'watchlist', total: 3, baseline: true, added: [], removed: []}, 'success', 'watchlist baseline'],
@@ -130,23 +138,31 @@ for (const [event, expected, name] of table) assert.equal(status(event), expecte
 // The title text never decides: same fields, any wording.
 assert.equal(status({type: 'discovery', kind: 'hour', status: 'idle', checked: 1, added: 0, title: 'Ошибка прервано'}), 'success');
 
-// Filters: both axes combine; «Пропущенные» stays a type, `warning` a result.
+// Filters: both axes combine. A skipped start is an `enrichment` Event with the `warning` result; it has no type of its own (AIR-584).
 const events = [
   {type: 'enrichment', presentation: 'batch_v2_skipped'}, terminal({stage: 'complete', delta: {failed: 0}}), terminal({stage: 'partial', stopReason: 'api_error'}),
   {type: 'discovery', kind: 'report_failed'}, {type: 'watchlist'}, {type: 'epg'},
+  {type: 'epg', warning: {code: 'channel_policy_degraded', reason: 'empty'}}, {type: 'epg', warning: {code: 'channel_registration_failed'}},
 ];
 const count = (type, result) => events.filter(event => run(`eventMatchesFilters(${JSON.stringify(event)},'${type}','${result}')`)).length;
-assert.equal(count('all', 'all'), 6);
-assert.equal(count('all', 'warning'), 2);
+assert.equal(count('all', 'all'), 8);
+assert.equal(count('all', 'warning'), 4, 'both EPG warnings are in «Предупреждение»');
 assert.equal(count('all', 'success'), 3, 'a successful watchlist commit is in «Успех»');
-assert.equal(count('skipped', 'warning'), 1);
-assert.equal(count('skipped', 'success'), 0, 'zero results for a combination');
+assert.equal(count('enrichment', 'warning'), 1, 'the skipped start is the warning of «Прогнозы»');
+assert.equal(count('watchlist', 'warning'), 0, 'zero results for a combination');
 assert.equal(count('enrichment', 'error'), 1);
 assert.equal(count('enrichment', 'all'), 3);
 assert.equal(count('watchlist', 'all'), 1);
 assert.equal(count('watchlist', 'success'), 1, 'watchlist + success combine');
 assert.equal(count('watchlist', 'error'), 0);
-assert.equal(count('epg', 'success'), 1);
+assert.equal(count('epg', 'success'), 1, 'only the ordinary publication is a success');
+assert.equal(count('epg', 'warning'), 2);
+assert.equal(count('epg', 'all'), 3);
+const degradedBadge = run("eventStatusBadgeHTML({type:'epg',warning:{code:'channel_policy_degraded'}})");
+assert.match(degradedBadge, /event-status-warning/, 'the degraded EPG event has the warning badge');
+assert.doesNotMatch(degradedBadge, /event-status-success/);
+assert.match(run("eventStatusBadgeHTML({type:'epg',warning:{code:'channel_registration_failed'}})"), /event-status-warning/);
+assert.match(run("eventStatusBadgeHTML({type:'epg',films:1})"), /event-status-success/, 'an ordinary EPG event keeps the success badge');
 const runningHour = JSON.stringify({type: 'discovery', kind: 'hour', status: 'running', checked: 588, added: 39});
 assert.equal(run(`eventMatchesFilters(${runningHour},'discovery','success')`), true, 'result=success + «Находки» shows the running hour report');
 assert.equal(run(`eventMatchesFilters(${runningHour},'all','warning')`), false);
@@ -157,7 +173,7 @@ assert.equal(run("eventMatchesResult({type:'epg'},'nonsense')"), true, 'an unkno
 run("loadedEvents.clear();eventResultFilterId='error'");
 for (let i = 0; i < 10; i++) run(`loadedEvents.set('s${i}',{id:'s${i}',type:'enrichment',presentation:'batch_v2_skipped'})`);
 assert.equal(run("eventMatchCount('enrichment')"), 0, 'ten events of the type with the wrong result are no matches');
-assert.equal(run("eventMatchCount('skipped','warning')"), 10);
+assert.equal(run("eventMatchCount('enrichment','warning')"), 10);
 run("loadedEvents.set('t1',{id:'t1',type:'enrichment',presentation:'batch_v2_terminal',stage:'partial',stopReason:'api_error'})");
 assert.equal(run("eventMatchCount('enrichment')"), 1);
 assert.equal(run("eventMatchCount('all','all')"), 11, 'both axes «all» count everything and need no scan');
@@ -165,7 +181,7 @@ run("eventResultFilterId='all';loadedEvents.clear()");
 
 // URL: the two parameters are independent and every other parameter stays byte for byte.
 assert.equal(run("eventResultFrom('?result=warning&type=skipped')"), 'warning');
-assert.equal(run("eventTypeFrom('?result=warning&type=skipped')"), 'skipped');
+assert.equal(run("eventTypeFrom('?result=warning&type=skipped')"), 'all', 'AIR-584: the removed type falls back to «Все события», the result stays');
 assert.equal(run("eventResultFrom('?result=nonsense')"), 'all');
 assert.equal(run("eventResultFrom('')"), 'all');
 assert.equal(run("withEventResult('/events?type=skipped&return=%2F%3Fq%3Da','warning')"), '/events?type=skipped&return=%2F%3Fq%3Da&result=warning');

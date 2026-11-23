@@ -179,11 +179,24 @@ export async function readFilmAdmission(env,tmdbId){
 // 20 films must not fail because an unrelated Discovery chunk moved the generation between two statements. It fails closed like
 // `routeRead` for a held cutover or a catalog/decision load in progress; `{handled:false}` means "not D1 authority" (R2 serves).
 export const ADMISSION_IDS_PER_QUERY=80;
+// The close of a by-id read needs only the fields `closeReadFence` compares, so it is one statement (a full `readAuthority` is several round trips and a start reads by id more than once). It keeps the
+// ADR 0162 refusal of a marker that is not d1/open.
+async function readFenceState(env){
+ let row;
+ try{row=await one(database(env),'SELECT a.mode AS mode, a.cutover AS cutover, a.programme_run_id AS programmeRunId, t.state AS transfer, t.batches AS transferBatches FROM discovery_authority a JOIN discovery_transfer t ON t.id=1 WHERE a.id=1');}
+ catch(error){throw failed('discovery_unavailable',error);}
+ if(!row||row.mode!=='d1'||row.cutover!=='open'||!['idle','loading','committed'].includes(row.transfer))throw failed('discovery_unavailable');
+ return {ready:true,programmeRunId:row.programmeRunId??null,transfer:row.transfer,transferBatches:Number(row.transferBatches)};
+}
 export async function readAdmissionsById(env,ids){
  const wanted=[...new Set((ids||[]).map(String).filter(Boolean))];
  const opened=await readAuthority(env);
  if(!opened.ready)return {handled:false};
- if(opened.transfer==='loading'&&!await loadingIsLedgerSeal(env))throw failed('discovery_incomplete');
+ let sealing=false;
+ if(opened.transfer==='loading'){
+  if(!await loadingIsLedgerSeal(env))throw failed('discovery_incomplete');
+  sealing=true;
+ }
  const films=new Map();
  for(let at=0;at<wanted.length;at+=ADMISSION_IDS_PER_QUERY){
   const slice=wanted.slice(at,at+ADMISSION_IDS_PER_QUERY);
@@ -193,6 +206,12 @@ export async function readAdmissionsById(env,ids){
    films.set(String(row.film_id),film);
   }
  }
+ // AIR-574: the same bounded close as `routeRead` and `readFilmAdmission`. The slices are separate statements, so a catalog replacement (or an ABA through `loading` back to `committed`, which moves the
+ // transfer epoch) or a programme change between them must not return a transient absence as a genuine one: a caller settles an absent film out of the persisted queue. Generation-only progress
+ // (continuation, status, Workflow writes, seal batches) is not a fence here, and an ordinary seal stays open.
+ const closedGate=await readFenceState(env);
+ closeReadFence(opened,closedGate,{sealing,generationFence:false});
+ if(sealing&&!await loadingIsLedgerSeal(env))throw failed('discovery_fence');
  return {handled:true,films};
 }
 export function ownsKey(key){
@@ -418,7 +437,7 @@ function closeReadFence(opened,closed,{sealing=false,generationFence=true}={}){
 }
 // `loading` is a ledger seal, and not a catalog, decision or segment load in progress, only when the ledger is mid-handoff
 // (retiring rows, or a transfer for another programme) and no admission is pending.
-async function loadingIsLedgerSeal(env){
+export async function loadingIsLedgerSeal(env){
  if(!await ledgerSealLoading(env))return false;
  const pending=await one(database(env),"SELECT 1 AS n FROM discovery_admission WHERE state='pending' LIMIT 1");
  return !pending;
@@ -1037,6 +1056,64 @@ export async function selectActionableObservations(env,options={}){
  return {programmeRunId:opened.programmeRunId,items,touches,after:cursor,touchAfter:touchCursor,wrapped,touchWrapped,queries,remaining,waitingRetry,nextRetryAt,complete};
 }
 
+// AIR-503 (owner decision, 20 Nov 2026; handoff of 21 Nov 2026). The legacy alias revalidation must not depend on the replay page and the touch page of a chunk meeting by
+// chance: those are two independent cursors, a resting replay has no drifts at all, and a touch page holds 38 of thousands of verified keys. This is its own bounded, keyset-paged
+// read of the current-window verified rows whose decision came from an alias (`known_epg_alias`). For each row it computes, with the same rule the replay uses (`slotEligibility`
+// over `confirmedSlots` or the observation's confirmed id), the whole minutes of the slots that no rule makes eligible. `accept` is the caller's filter (it knows the Film
+// records); the read stops when `want` rows are accepted or the page budget is spent, and `after` is the last key it examined, so the next chunk resumes there and every key is
+// reached once per lap. It reads only, behind the same generation fence as the candidate walk.
+export const LEGACY_ALIAS_PAGE=40;
+export const LEGACY_ALIAS_QUERIES=2;
+const LEGACY_ALIAS_FROM=`${TOUCH_FROM}
+ AND json_extract(d.payload_json,'$.identitySource')='known_epg_alias'`;
+export const LEGACY_ALIAS_PAGE_SQL='SELECT o.observation_key, o.payload_json, o.confirmed_tmdb_id, d.payload_json AS decision_json '+LEGACY_ALIAS_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?';
+export async function selectLegacyAliasObservations(env,options={}){
+ const opened=await readAuthority(env);
+ if(!opened.ready)throw failed('discovery_not_authoritative');
+ if(opened.transfer==='loading')throw failed('discovery_incomplete');
+ const now=Number.isFinite(options.now)?options.now:Date.now();
+ const from=now-72*3600000,to=now+24*3600000;
+ const want=Math.max(1,Math.min(8,Number.isInteger(options.want)&&options.want>0?options.want:4));
+ const pageSize=Math.min(LEGACY_ALIAS_PAGE,Math.max(1,Number.isInteger(options.pageSize)&&options.pageSize>0?options.pageSize:LEGACY_ALIAS_PAGE));
+ const maxQueries=Math.max(1,Math.min(4,Number.isInteger(options.maxQueries)&&options.maxQueries>0?options.maxQueries:LEGACY_ALIAS_QUERIES));
+ const accept=typeof options.accept==='function'?options.accept:()=>true;
+ const startAfter=typeof options.after==='string'?options.after:'';
+ const db=database(env);
+ const accepted=[];
+ let cursor=startAfter,wrapped=false,lapComplete=false,queries=0,scanned=0,examined=0;
+ while(accepted.length<want&&queries<maxQueries){
+  if(options.shouldStop&&options.shouldStop())break;
+  if(options.beforeQuery)await options.beforeQuery({query:queries,after:cursor,phase:'legacy_alias'});
+  const rows=await many(db,LEGACY_ALIAS_PAGE_SQL,[from,to,cursor,pageSize]);
+  queries++;
+  if(!rows.length){
+   if(!cursor||wrapped){lapComplete=true;break;}
+   cursor='';wrapped=true;continue;
+  }
+  const shows=await loadPageShows(env,cursor,rows[rows.length-1].observation_key,pageKeySet(rows));
+  let stopped=false;
+  for(const row of rows){
+   // After the wrap the read has come back to where it started: the lap is complete, and a key that was accepted before the wrap is not accepted twice.
+   if(wrapped&&startAfter&&row.observation_key>startAfter){lapComplete=true;stopped=true;break;}
+   if(accepted.some(item=>item.candidate.key===row.observation_key))continue;
+   cursor=row.observation_key;scanned++;examined++;
+   const candidate=observationFromRow(row,shows.get(row.observation_key)||[]);
+   const decision=decisionFromRow({payload_json:row.decision_json});
+   const confirmation=Array.isArray(candidate.confirmedSlots)?candidate:{confirmedTmdbId:row.confirmed_tmdb_id};
+   const minutes=[...new Set(candidate.shows.map(show=>({show,slot:{start:show.start,end:show.end}})).filter(({show,slot})=>!slotEligibility(decision,slot,slotScanConfirmation(confirmation,{channelId:show.channelId,start:show.start})).eligible).map(({slot})=>slotMinutes(slot.start,slot.end)).filter(value=>Number.isFinite(value)))];
+   if(accept(candidate,decision,minutes)){accepted.push({candidate,decision,minutes});if(accepted.length>=want){stopped=true;break;}}
+  }
+  if(stopped)break;
+  if(rows.length<pageSize){
+   if(wrapped||!startAfter){lapComplete=true;break;}
+   cursor='';wrapped=true;
+  }
+ }
+ const closed=await readAuthority(env);
+ if(!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
+ return {programmeRunId:opened.programmeRunId,rows:accepted,after:lapComplete?'':cursor,wrapped,lapComplete,queries,scanned};
+}
+
 // ADR 0092. The ledger seal is a resumable job instead of one request. `discovery_seal` (schema 12) holds its identity
 // and cursor; every batch of observation rows moves the cursor in the SAME D1 batch (compare-and-set on `cursor_items`),
 // so a request that dies leaves the rows and the cursor agreeing. The batch itself is idempotent (an upsert and a
@@ -1348,6 +1425,18 @@ async function sealedMemberTmdb(db,run){
  sealedMembers={db,run,map};
  return map;
 }
+// AIR-579. The rows an observation key holds in the published run, read at ITS OWN slot coordinates. The caller only ever looks up its own slots
+// (`channel:start`), so selecting by `start_ms` over the existing `(programme_run_id, start_ms)` index returns every row it can use, while the former
+// `programme_run_id` + `basis` + `match_reason` statement had no usable index and walked every row of the run (about 20 k) per call, twice per observation.
+// The `basis` and `match_reason` predicates are kept, so the map holds exactly the rows of the former statement that lie at these start times.
+export async function heldSlotRows(db,run,key,slots){
+ const starts=[...new Set(slots.map(slot=>slot.startMs))],held=new Map();
+ for(let index=0;index<starts.length;index+=BIND_CAP-3){
+  const chunk=starts.slice(index,index+BIND_CAP-3);
+  for(const item of await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=? AND start_ms IN ("+marks(chunk.length)+")",[run,key,...chunk]))held.set(item.channel_id+':'+item.start_ms,item.film_id);
+ }
+ return held;
+}
 export async function assignObservationSlots(env,spec,context={}){
  const lease=context.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
@@ -1375,7 +1464,7 @@ export async function assignObservationSlots(env,spec,context={}){
  let payload=null;try{payload=observation.payload_json?JSON.parse(observation.payload_json):null;}catch{payload=null;}
  const confirmation=payload&&Array.isArray(payload.confirmedSlots)?payload:{confirmedTmdbId:observation.confirmed_tmdb_id};
  const slots=(await many(db,"SELECT channel_id, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key=? ORDER BY ordinal",[key])).map(item=>({channelId:item.channel_id,startMs:item.start_ms,endMs:item.end_ms}));
- const held=new Map((await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=?",[run,key])).map(item=>[item.channel_id+':'+item.start_ms,item.film_id]));
+ const held=await heldSlotRows(db,run,key,slots);
  const pending=[];
  for(const slot of slots){
   if(held.get(slot.channelId+':'+slot.startMs)===film){outcomes.present++;continue;}
@@ -1394,7 +1483,7 @@ export async function assignObservationSlots(env,spec,context={}){
   ]);
   gate={...gate,generation:gate.generation+1};
  }
- const after=new Map((await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=?",[run,key])).map(item=>[item.channel_id+':'+item.start_ms,item.film_id]));
+ const after=await heldSlotRows(db,run,key,pending);
  for(const slot of pending){
   if(after.get(slot.channelId+':'+slot.startMs)===film){outcomes.assigned++;result.assigned.push({channelId:slot.channelId,startMs:slot.startMs});continue;}
   const holder=await one(db,'SELECT film_id FROM published_epg_show WHERE programme_run_id=? AND channel_id=? AND start_ms=?',[run,slot.channelId,slot.startMs]);
@@ -1688,10 +1777,20 @@ export async function upsertAdmissions(env,films,context={}){
  }
  return {written,refused,batches,reads,remaining:entries.length-index,carried};
 }
+// AIR-579. One structured log line per whole-catalog read that RESOLVED: the rows returned, the application elapsed time awaiting the query, and whether the caller's projection was used (`null` when the read was
+// refused as over the cap, where the options are not looked at), and NOTHING else (never a film id, a title, a payload or a key). Workers Logs attach a line to the invocation that wrote it (a route, a cron
+// tick, an MCP call, a Workflow step), so an aggregate of this event by `$metadata.trigger` attributes the whole-catalog reads of a window to their callers without a per-request counter.
+// It is a best-effort sample of the executions, not a count of them: a failed D1 read, an interrupted invocation, a failing log sink or dropped telemetry leaves no line; `rows` is the rows RETURNED (not the
+// D1 billed rows_read) and `ms` the application wall time (not the SQL engine time). It never throws into the read, never inspects the caller's options and changes no result.
+function logCatalogRead(rows,started,projected){
+ try{console.log(JSON.stringify({event:'discovery_catalog_read',rows,ms:Math.max(0,Date.now()-started),projected}));}catch{/* a log line is never part of the read */}
+}
 async function readCatalog(env,gate,options=null){
+ const started=Date.now();
  const rows=await many(database(env),'SELECT film_id, payload_json, canonical_identity, tmdb_id, media_kind FROM discovery_admission WHERE state=\'current\' ORDER BY film_id');
- if(rows.length>READ_CAP)throw failed('discovery_bounded');
+ if(rows.length>READ_CAP){logCatalogRead(rows.length,started,null);throw failed('discovery_bounded');}
  const catalog={},project=typeof options?.project==='function'?options.project:null;
+ logCatalogRead(rows.length,started,project!==null);
  for(const row of rows){
   let film;try{film=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
   if(film.canonicalIdentity!==row.canonical_identity||String(film.tmdbId)!==row.tmdb_id)throw failed('discovery_unavailable');

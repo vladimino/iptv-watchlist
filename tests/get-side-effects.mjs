@@ -1,3 +1,4 @@
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -51,6 +52,7 @@ vm.runInContext(fs.readFileSync('src/admin/read.js','utf8'),context);vm.runInCon
 vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scoped('src/domain/monitor-policy.js','MonitorPolicy')+'\n'+fs.readFileSync('src/monitor.js','utf8'),context);
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),context);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),context);
+installViewIndexFixture(context); // AIR-558
 const constant=name=>vm.runInContext(name,context);
 const execution={waitUntil:()=>{background++;},exports:{DiscoveryContinuation:{fetch:async()=>{dispatches++;return new Response('{}');}}}};
 

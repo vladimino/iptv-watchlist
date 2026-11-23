@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import assert from 'node:assert/strict';
 import {createHash,webcrypto} from 'node:crypto';
 
@@ -36,8 +37,10 @@ function release(patch){
   const generated={...pickPrediction(prediction),filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:'seed',trigger:'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})};
   const stored={...generated,...(await writePredictionVersion(env,id,generated))},history=[...(state.predictions?.history||[])];if(old)history.push({...old,replacedAt:at});
   await saveJSON(env,filmKey(id)+'predictions.json',{current:stored,history});
-  await updateViewIndex(env,id,{prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});
+  // AIR-558: the raw view-index writer is gone; the fixture view index (read through the test seam) is updated directly.
+  {const index=(await loadJSON(env,'enrichment/view-index.json'))||{};index[id]={...(index[id]||{}),prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)};await saveJSON(env,'enrichment/view-index.json',index);}
   return old?'recalculated':'created';};`,ctx);
+ installViewIndexFixture(ctx);
  vm.runInContext('globalThis.T={seedFilm,loadPredictionDiagnosticSnapshot,predictionFilmDiagnostic,predictionQueueOverview,GENERAL_EXECUTION,EXECUTION};',ctx);
  const api=async(path,method='GET',body,flags={})=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),{...baseEnv,...flags});return {status:response.status,data:await response.json()};};
  const diagnostics=async(id,flags={})=>plain(ctx.T.predictionFilmDiagnostic(await ctx.T.loadPredictionDiagnosticSnapshot({...baseEnv,...flags},id),id,Date.now()));

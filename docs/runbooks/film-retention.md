@@ -4,7 +4,7 @@ A Film admitted by a Letterboxd watchlist boolean stays in the catalog after it 
 
 ## What a deploy does
 
-The reader and, until AIR-537 slice 3 removed it, the enrichment projector shared one admission rule. The projector read `enrichment/view-index.json` as an optional object; the lifecycle reader still applies the same rule. A missing object admits nobody. A present object contributes only a Letterboxd lid whose `watchlist` field is `true` or `false`.
+The reader and, until AIR-537 slice 3 removed it, the enrichment projector shared one admission rule. The projector read the raw `enrichment/view-index.json` as an optional object (retired since: [ADR 0192](../adr/0192-retire-view-index-selector-and-raw-object.md)); the lifecycle reader still applies the same rule. Absent facts admit nobody. Only a Letterboxd lid whose `watchlist` fact is `true` or `false` contributes.
 
 `D1_ENRICHMENT_WRITE` is already `on`. A deploy of this rule makes the next projector cron apply the wider view under the existing lease, batch and query budget. A Film the view newly contains is upserted. A Film the view no longer contains is marked absent, and `releaseFilm` removes watchlist membership only. One cron does not drain a large set; later crons continue. There is no new flag and no separate import command.
 
@@ -12,7 +12,7 @@ That deploy is not implied by accepting the ADR: merging to `main` also expands 
 
 An admitted lid that is on neither current list and has no usable metadata does not replace an existing Film. The write moves watchlist membership only. Credits, metadata, trusted external ids, identity and metadata dimensions, and sync clocks stay. A cache row whose id names another film is not used as the body, and the lid stays admitted. A Film row that does not exist yet is still inserted.
 
-The watchlist grid still reads the watchlist document. Finds hide a catalog row when its own view-index entry has either watchlist boolean, or when a Letterboxd lid with either boolean bridges to that row's TMDB id by one agreed stored id. Two stored ids, or none, do not bridge. Titles are not compared. Neither surface deletes the Film.
+The watchlist grid still reads the watchlist document. Finds hide a catalog row when its own derived view-index entry has either watchlist boolean, or when a Letterboxd lid with either boolean bridges to that row's TMDB id by one agreed stored id. Two stored ids, or none, do not bridge. Titles are not compared. Neither surface deletes the Film.
 
 ## What this delivery does not do
 

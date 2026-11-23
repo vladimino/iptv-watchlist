@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
+import {installProjectionStandin} from './ratings-harness.mjs';
 
 const records=new Map(),etags=new Map(),fetches=[];let revision=0;
 const bucket={
@@ -31,6 +33,7 @@ const ctx=vm.createContext({Response,Request,URL,Date,Map,Set,JSON,TextEncoder,U
 }});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+installViewIndexFixture(ctx);installProjectionStandin(ctx,records);// AIR-558: derived view index and D1-owned projection stand-ins over the fixture object
 const env={LETTERBOXD_USERNAME:'demo-user',EPG_XML_URL:'https://epg.test/guide.xml',BUCKET:bucket,LETTERBOXD_DIARY_HISTORY:'on'};
 ctx.env=env;
 // The Worker no longer carries the helper that applied a looked-up rating to the removal event of a run. It was a thin wrapper over withRemovalRatings and writeEvent, which are what this file keeps proving.

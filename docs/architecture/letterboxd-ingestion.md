@@ -34,7 +34,7 @@ The EPG commit does not read Diary and does not look up films ([ADR 0074](../adr
 
 Diary page 1 and the member-page lookups run on the separate ratings run ([scheduling](scheduling-and-orchestration.md#the-separate-ratings-pipeline), [contract](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline)). The Diary phase is the viewing history of [ADR 0049](../adr/0049-letterboxd-diary-viewing-history.md). On a run it always reads the first diary page only ([ADR 0067](../adr/0067-diary-recent-window.md)); `LETTERBOXD_DIARY_HISTORY` is retired and unread ([ADR 0075](../adr/0075-retire-letterboxd-diary-history-switch.md), Accepted 2026-11-01). Every film on that page becomes a watched fact, and a rating fact where the page shows a rating. The removal lookup of [ADR 0043](../adr/0043-removal-rating-lookup-queue.md) runs on that same run for films the Diary did not rate. A confirmed stored rating for a film the current Diary page did not list is not requested again, including after a new removal reference reopens the entry. A film that page lists without a rating is still looked up. A null or absent rating is not watched. `REMOVAL_RATING_LOOKUP` is retired and unread ([ADR 0077](../adr/0077-retire-removal-rating-lookup-switch.md), Proposed 2026-11-01). A rated legacy entry is linked to existing removal events of the same film id by that run, one page of `events/items/` per removal step ([ADR 0071](../adr/0071-legacy-removal-event-link.md), Accepted 2026-10-31). The EPG commit does not list those events. The 31-page public films list is not scanned.
 
-The owner-triggered `POST /api/enrichment/ratings/refresh` of AIR-64 is **retired** ([ADR 0040](../adr/0040-retire-ratings-only-refresh.md)): it answers `410 Gone` before it parses the body, so no value of `RATINGS_REFRESH` opens it, and it neither calls Letterboxd nor touches R2. Ratings reach the view index through the EPG commit shown above, the per-film lookup and the owner edit. The objects the refresh wrote under `enrichment/ratings/` stay in R2 untouched, and `GET /api/enrichment/ratings/status` still reads them; `enabled` is always `false`. Writers of `enrichment/view-index.json` keep their ETag retries.
+The owner-triggered `POST /api/enrichment/ratings/refresh` of AIR-64 is **retired** ([ADR 0040](../adr/0040-retire-ratings-only-refresh.md)): it answers `410 Gone` before it parses the body, so no value of `RATINGS_REFRESH` opens it, and it neither calls Letterboxd nor touches R2. Ratings reach the view index through the EPG commit shown above, the per-film lookup and the owner edit. The objects the refresh wrote under `enrichment/ratings/` stay in R2 untouched, and `GET /api/enrichment/ratings/status` still reads them; `enabled` is always `false`. The derived view index has no writer of its own; the projection is the `ratings_view` write of the ratings domain.
 
 ## Watched, rating and watchlist as separate facts
 
@@ -54,7 +54,7 @@ flowchart TD
     merge{"Greater than the stored<br/>observation (time, source, id)?"}
     facts[("R2 fact record per film:<br/>watched, rating, watchlist,<br/>provenance")]
     keep["Keep stored value"]
-    index[("view-index.json: actualRating, watched<br/>under lid and tmdb_n")]
+    index[("ratings_view in D1: actualRating, watched<br/>under lid and tmdb_n; view index derived")]
     finds["Finds: exclude watched or rated;<br/>actual rating over prediction"]
     builder["Offline builder: watched films<br/>without accepted identity,<br/>unique name and year"]
     list[("R2 display-exclusion list<br/>private, placed by the owner")]
@@ -113,7 +113,7 @@ The preview's baseline is always `unknown`: the import stores per-chunk receipts
 
 ## Confirmed archive apply
 
-**Accepted ([ADR 0068](../adr/0068-letterboxd-archive-confirmed-apply.md)).** This is not the preview path above. After the owner has read the proposal, two further requests can record one chunk of films the preview fully compared, at most 50. Each request uploads the ZIP again. The first stores only the issued confirmation. The second is the only one that calls the baseline commit. Rollback is the same two-step shape and sends no ZIP. The archive is still stored nowhere. A rating row is a watched and rated fact whether or not the diary lists that film. A newer stored fact is kept.
+**Accepted ([ADR 0068](../adr/0068-letterboxd-archive-confirmed-apply.md)).** This is not the preview path above. After the owner has read the proposal, two further requests can record one chunk of films the preview fully compared, at most 50. Each request uploads the ZIP again. The first stores only the issued confirmation. The second is the only one that calls the baseline commit. There is no rollback: the baseline rollback, the per-film unlink and the archive rollback capability are retired ([ADR 0192](../adr/0192-retire-view-index-selector-and-raw-object.md)), and a later correction is a separate forward operation. The archive is still stored nowhere. A rating row is a watched and rated fact whether or not the diary lists that film. A newer stored fact is kept.
 
 ```mermaid
 sequenceDiagram
@@ -123,7 +123,8 @@ sequenceDiagram
     participant Access as Cloudflare Access
     participant Worker as Worker apply routes
     participant R2 as Authoritative R2
-    Owner->>Page: After the preview, click «Подтвердить партию N»
+    participant D1 as Authoritative D1<br/>(ratings_view)
+    Owner->>Page: After the preview, click    Owner->>Page: After the preview, click «Подтвердить партию N»
     Page->>Access: POST apply-confirm, same ZIP, same origin, session cookie
     Access->>Worker: Owner request
     Worker->>Worker: Assertion present, Origin, action header,<br/>then the preview's ZIP limits
@@ -147,18 +148,21 @@ sequenceDiagram
         Note over Worker,R2: Own fact writes are not a new scope.<br/>A newer unrelated observation is kept
     else The fresh comparison still matches
         Worker->>R2: mark the action running
-        Worker->>R2: baseline commit of this chunk:<br/>intent, facts, view index, receipt
+        Worker->>R2: baseline commit of this chunk:<br/>intent, facts, receipt
+        Worker->>D1: project the facts into ratings_view<br/>(the derived view index reads these rows)
         Worker->>R2: put the action receipt beside it
         Worker-->>Page: written, already applied, or skipped because newer
     else The fresh comparison no longer matches
         Worker-->>Page: refusal, no fact write
     end
-    opt The owner later rolls this chunk back
-        Owner->>Page: «Подтвердить откат», then «Откатить»
-        Page->>Worker: JSON only, no ZIP
-        Worker->>R2: baseline rollback from the receipt's origin
-        Note over Worker,R2: A later observation stays
-    end
     Note over Worker,R2: The ZIP is not stored. Confirm never starts the commit.<br/>A running commit with no receipt resumes its own plan, not a fresh scope
     Note over Page: The preview request above is unchanged and still writes nothing
 ```
+
+## Accepted design (not implemented): one Letterboxd Sync ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
+
+The proposal replaces the daily Ratings run and the Watchlist fetch inside the EPG run by one Workflow that runs four Madrid slots a day (Diary and Ratings, then a complete Watchlist scan, then removal reconciliation). An incomplete scan publishes nothing and removes nothing; the last successful snapshot stays authoritative. Ratings and Watchlist keep separate outcomes and separate `lastSuccessAt`, and each run leaves one `ratings` and one `watchlist` Event. The current flows above are unchanged until a separate cutover.
+
+## Watchlist membership projection (AIR-582, [ADR 0203](../adr/0203-watchlist-membership-letterboxd-single-writer-projection.md), Accepted)
+
+Dormant until the owner switches the membership marker to `sync`. After that each published Watchlist version is applied to the canonical `watchlist_film` by the Letterboxd Sync itself: a fourth causal effect `membership` (in the existing effect drain, no new cron or Task) writes the added and removed ids of the version through a per-film version fence, only for a trusted canonical Film and never creating one. An id without a trusted Film goes to a durable handoff ledger and the version still drains, and so does every change beyond the first 60 of a version (one set-based statement), so a large valid diff never blocks the next scan; the next slot reconciles that ledger against the **current** snapshot. The EPG Producer no longer writes membership in that mode. The diagram is in [Film and Person lifecycle](film-person-lifecycle.md#canonical-watchlist-membership-projection-air-582-adr-0203-accepted).

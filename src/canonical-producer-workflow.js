@@ -1,6 +1,6 @@
 // AIR-497 / ADR 0141. Bounded Producer Workflow chain. Dormant unless the Film/Person marker is d1/open
 // AND env.PRODUCER_WORKFLOW exists. Launched ONLY from hourly reconcileProducerChain. No new cron, flag or Task.
-import {database,many,readAuthority} from './film-person-authority.js';
+import {database,many,one,readAuthority} from './film-person-authority.js';
 import {readDocument,readMembers,readAuthority as readPublished} from './published-epg.js';
 import {buildEpgPlan,runEpgProducerPass,retryEpgProducerResults,readCanonicalFreshness} from './canonical-producer-driver.js';
 import {reconcileEpgRun} from './canonical-epg-person-producer.js';
@@ -16,6 +16,13 @@ import {
 import {epgRunForGeneration} from './canonical-producer-store.js';
 
 const iso=ms=>new Date(ms).toISOString();
+// AIR-572 delivery hold: a static, default-DENY guard in code. While true, neither Producer entrypoint performs any I/O: the hourly
+// `reconcileProducerChain` reads nothing, writes nothing and creates no Workflow instance, and an already existing instance entering
+// `runProducerWorkflow` returns before its nonce, claim or any D1 access. It depends on no secret, env, D1 state or Cloudflare setting.
+// Production callers never pass `hold`, so the default applies. Lifting it is a separate owner-approved code change (a follow-up PR),
+// never a flag. It does not touch EPG publication or any other canonical writer.
+export const PRODUCER_DELIVERY_HOLD=true;
+export const HELD_BY_DELIVERY='held_by_delivery';
 function meterD1(db,meter){
  if(!db||typeof db.prepare!=='function')return db;
  return new Proxy(db,{get(target,prop){
@@ -35,9 +42,10 @@ function createError(error){
  return 'uncertain';
 }
 
-function canonicalFilmId(raw){
+function canonicalFilmId(raw,resolved){
  const s=String(raw||'');
  if(!s)return null;
+ if(resolved&&resolved.has(s))return resolved.get(s);
  if(s.startsWith('film:'))return s;
  if(s.startsWith('tmdb_'))return 'film:tmdb:'+s.slice(5);
  if(s.startsWith('tmdb:'))return 'film:'+s;
@@ -61,7 +69,8 @@ function sealedDimension(raw,name){
  };
 }
 export function filmFactsOf(film,watchlisted){
- const facts={watchlist:watchlisted,film:{contractVersion:1,canonicalIdentity:film?.canonicalIdentity||null,originalTitle:film?.original||film?.title||null}};
+ // ADR 0203: `watchlisted === undefined` plans NO membership at all (the key is absent, not false): the Producer then never sets or clears `watchlist_film`.
+ const facts={...(watchlisted===undefined?{}:{watchlist:watchlisted}),film:{contractVersion:1,canonicalIdentity:film?.canonicalIdentity||null,originalTitle:film?.original||film?.title||null}};
  const metadataAt=clockOf(film?.metadataAt);
  if(metadataAt)facts.metadata={schemaVersion:1,year:film.year??null,runtime:film.runtime??null,synopsis:film.synopsis??null,poster:film.poster??null,url:film.url??null,genres:Array.isArray(film.genres)?film.genres:[],peopleVersion:film.peopleVersion??null,payload:{},r2Key:null,contentSha256:null,updatedAt:metadataAt};
  const dimensions={};
@@ -74,9 +83,98 @@ export function filmFactsOf(film,watchlisted){
  if(sync.metadataAt||sync.synopsisFetchedAt||sync.peopleNamesVersion!=null||sync.peopleLocalizedAt)facts.sync=sync;
  return facts;
 }
-function idsOf(document,members){
- if(Array.isArray(members)&&members.length)return members.map(row=>canonicalFilmId(row.filmId)).filter(Boolean);
- return (Array.isArray(document?.films)?document.films:[]).map(film=>canonicalFilmId(film.id)).filter(Boolean);
+function sourceIdsOf(document,members){
+ if(Array.isArray(members)&&members.length)return members.map(row=>String(row.filmId||'')).filter(Boolean);
+ return (Array.isArray(document?.films)?document.films:[]).map(film=>String(film?.id||'')).filter(Boolean);
+}
+function idsOf(document,members,resolved){return sourceIdsOf(document,members).map(id=>canonicalFilmId(id,resolved)).filter(Boolean);}
+
+// AIR-572. Identity resolution of the source film ids BEFORE any target is formed. An id with a `film:`/`tmdb_`/`tmdb:` prefix names its
+// Film directly (a one-hop redirect is followed to the survivor). A bare Letterboxd lid is NEVER turned into `film:<lid>` by spelling: it is
+// resolved through the one trusted, non-conflicting `film_external_id` (scheme `letterboxd`) claim, else through an EXISTING Film `film:<lid>`.
+// A lid with a competing/untrusted claim, a redirect chain longer than one hop, or neither a claim nor an existing Film is refused by name:
+// the Producer never creates a second Film from a spelling and never guesses from title or year (a legitimate new Film is admitted by the
+// admission paths, not here). Reads are bounded: at most IDENTITY_LOOKUP_CAP distinct lids in IDENTITY_CHUNK-sized, read-only statements.
+export const IDENTITY_LOOKUP_CAP=1000;
+export const IDENTITY_CHUNK=200;
+const DIRECT=/^(film:|tmdb_|tmdb:)/;
+export function resolveIdentity(raw,{claims=[],films=new Set(),redirects=new Map()}={}){
+ // `via` is the provenance of the decision; `guardsOf` turns it into write-time proofs.
+ const follow=(id,via)=>{
+  if(!redirects.has(id))return {target:id,via,owner:id};
+  const next=redirects.get(id);
+  return redirects.has(next)?{refused:'producer_identity_redirect_chain'}:{target:next,via,owner:id,redirected:true};
+ };
+ if(DIRECT.test(raw))return follow(canonicalFilmId(raw),'direct');
+ const clean=claims.filter(row=>Number(row.trusted)===1&&Number(row.conflicting)===0);
+ const other=claims.length-clean.length;
+ const owners=[...new Set(clean.map(row=>row.film_id))];
+ if(owners.length>1||(owners.length===1&&other>0)||(owners.length===0&&other>0))return {refused:'producer_identity_ambiguous'};
+ if(owners.length===1)return follow(owners[0],'claim');
+ const own='film:'+raw;
+ if(films.has(own))return follow(own,'own');
+ return {refused:'producer_identity_unresolved'};
+}
+// AIR-572. The write-time proofs of one resolution, asserted INSIDE the fenced batch of every Film write to the target (film_facts and credits, replay
+// included), so a claim or redirect that changes after the plan fails the batch whole and writes nothing:
+//   claim: the owner still holds the lid as its one trusted, non-conflicting claim and no other Film claims the lid;
+//   own:   no other Film claims the lid (the Film is addressed by its own name, never because a claim says so);
+//   redirected: the redirect owner -> target still exists (the writer itself already asserts no redirect leaves the target).
+// A direct (prefixed) id carries only the redirect proof when one was followed.
+export function guardsOf(raw,decision){
+ const out=[];
+ if(!decision||!decision.target)return out;
+ if(decision.via==='claim')out.push({sql:"EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='letterboxd' AND value=? AND trusted=1 AND conflicting=0)",params:[decision.owner,raw]});
+ if(decision.via==='claim'||decision.via==='own')out.push({sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='letterboxd' AND value=? AND film_id<>? AND film_id<>?)",params:[raw,decision.owner,decision.target]});
+ if(decision.redirected)out.push({sql:'EXISTS (SELECT 1 FROM film_redirect WHERE from_id=? AND to_film_id=?)',params:[decision.owner,decision.target]});
+ return out;
+}
+export async function resolveSourceIdentities(env,rawIds){
+ const all=await resolveSourceIdentitiesEach(env,rawIds);
+ if(!all.ok)return all;
+ const {resolved,guards,refused}=all;
+ if(refused.length){
+  const code=refused.some(item=>item.code==='producer_identity_ambiguous')?'producer_identity_ambiguous':refused[0].code;
+  return {ok:false,code,refused:refused.slice(0,20),refusedCount:refused.length};
+ }
+ return {ok:true,resolved,guards};
+}
+// ADR 0203 (AIR-582): the same bounded, read-only resolution, but a refused id does NOT fail the rest: every id is answered on its own (`byId`: {target,guards} or {refused}). The membership projection needs this, because one
+// unresolvable Letterboxd id must never hold the other films of a version. Same reads, same decisions and the same write-time proofs as `resolveSourceIdentities`.
+export async function resolveSourceIdentitiesEach(env,rawIds){
+ const unique=[...new Set(rawIds.filter(Boolean))];
+ const lids=unique.filter(id=>!DIRECT.test(id));
+ if(lids.length>IDENTITY_LOOKUP_CAP)return {ok:false,code:'producer_identity_bounded'};
+ const claims=new Map(),films=new Set(),redirects=new Map();
+ const db=database(env);
+ try{
+  for(let i=0;i<lids.length;i+=IDENTITY_CHUNK){
+   const chunk=JSON.stringify(lids.slice(i,i+IDENTITY_CHUNK));
+   for(const row of await many(db,"SELECT film_id,value,trusted,conflicting FROM film_external_id WHERE scheme='letterboxd' AND value IN (SELECT value FROM json_each(?))",[chunk])){
+    if(!claims.has(row.value))claims.set(row.value,[]);
+    claims.get(row.value).push(row);
+   }
+   for(const row of await many(db,"SELECT id FROM film WHERE id IN (SELECT 'film:'||value FROM json_each(?))",[chunk]))films.add(row.id);
+  }
+  const targets=new Set();
+  for(const id of unique){
+   if(DIRECT.test(id))targets.add(canonicalFilmId(id));
+   else for(const row of claims.get(id)||[])targets.add(row.film_id);
+  }
+  for(const id of lids)targets.add('film:'+id);
+  const list=[...targets];
+  for(let i=0;i<list.length;i+=IDENTITY_CHUNK){
+   const chunk=JSON.stringify(list.slice(i,i+IDENTITY_CHUNK));
+   for(const row of await many(db,"SELECT from_id,to_film_id FROM film_redirect WHERE from_id IN (SELECT value FROM json_each(?))",[chunk]))redirects.set(row.from_id,row.to_film_id);
+  }
+ }catch{return {ok:false,code:'producer_identity_unreadable'};}
+ const resolved=new Map(),refused=[],guards=new Map(),byId=new Map();
+ for(const id of unique){
+  const out=resolveIdentity(id,{claims:claims.get(id)||[],films,redirects});
+  if(out.target){resolved.set(id,out.target);const g=guardsOf(id,out);byId.set(id,{target:out.target,guards:g});if(g.length){if(!guards.has(out.target))guards.set(out.target,[]);guards.get(out.target).push(...g);}}
+  else{refused.push({id,code:out.refused});byId.set(id,{refused:out.refused});}
+ }
+ return {ok:true,resolved,guards,refused,byId};
 }
 function peopleOf(film){
  const out=[];
@@ -90,21 +188,28 @@ function peopleOf(film){
  }
  return out;
 }
-function planFromSealed({programme,watchlist,watchMembers,previousIds=[]}){
- const listed=idsOf(watchlist,watchMembers);
+function uniqueGuards(list=[]){
+ const seen=new Set(),out=[];
+ for(const guard of list){const key=JSON.stringify(guard);if(!seen.has(key)){seen.add(key);out.push(guard);}}
+ return out;
+}
+function planFromSealed({programme,watchlist,watchMembers,previousIds=[],resolved,guards=new Map(),membershipOwned=false}){
+ const listed=idsOf(watchlist,watchMembers,resolved);
  const byFilm=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){
-  const id=canonicalFilmId(film?.id);
+  const id=canonicalFilmId(film?.id,resolved);
   if(id&&!byFilm.has(id))byFilm.set(id,film);
  }
  const seen=new Set(),films=[];
  for(const id of listed){
   if(seen.has(id))continue;
   seen.add(id);
-  films.push({id,facts:filmFactsOf(byFilm.get(id)||{id},true)});
+  const proofs=uniqueGuards(guards.get(id));
+  films.push({id,facts:{...filmFactsOf(byFilm.get(id)||{id},membershipOwned?undefined:true),...(proofs.length?{guards:proofs}:{})}});
  }
  const listedSet=new Set(listed);
- const departed=[...new Set(previousIds.map(canonicalFilmId).filter(id=>id&&!listedSet.has(id)))].sort();
+ // Under the Letterboxd Sync membership projection (ADR 0203) the Producer releases nothing: removal is the Sync's `membership` effect, never a diff of the EPG copy.
+ const departed=membershipOwned?[]:[...new Set(previousIds.map(id=>canonicalFilmId(id)).filter(id=>id&&!listedSet.has(id)))].sort();
  const personRows=[],persons=[],credits=[],personSeen=new Set();
  for(const item of films){
   const people=peopleOf(byFilm.get(item.id)||{});
@@ -118,11 +223,22 @@ function planFromSealed({programme,watchlist,watchMembers,previousIds=[]}){
    }
    unitCredits.push({personId:person.id,role:person.role});
   }
-  if(unitCredits.length)credits.push({filmId:item.id,credits:unitCredits});
+  if(unitCredits.length)credits.push({filmId:item.id,credits:unitCredits,...(item.facts.guards?{guards:item.facts.guards}:{})});
  }
  return {films,departed,persons,credits,personRows};
 }
 
+// The membership marker of schema 37: 'producer' (legacy, also when the table is absent) or 'sync'. Read only. Throws on a storage failure other than an absent table.
+export async function readMembershipMode(env){
+ try{
+  const row=await one(database(env),'SELECT mode FROM watchlist_membership_authority WHERE id=1');
+  if(!row||(row.mode!=='producer'&&row.mode!=='sync'))throw Object.assign(new Error('membership_marker_invalid'),{code:'membership_marker_invalid'});
+  return row.mode;
+ }catch(error){
+  if(/no such table/i.test(String(error?.cause?.message||error?.message||error)))return 'producer';
+  throw error;
+ }
+}
 export async function acquireSealedSnapshot(env,programmeRunId,{previousIds}={}){
  const before=await readPublished(env);
  if(!before?.ready||before.programmeRunId!==programmeRunId)return {ok:false,code:'producer_generation_superseded'};
@@ -130,14 +246,21 @@ export async function acquireSealedSnapshot(env,programmeRunId,{previousIds}={})
  const programme=await readDocument(env,programmeRunId,'programme');
  const watchlist=await readDocument(env,programmeRunId,'watchlist');
  const members=await readMembers(env,programmeRunId,'watchlist');
+ // ADR 0203: who owns membership is read ONCE per snapshot from the marker (schema 37). An absent table is the legacy state; any other read failure fails the snapshot closed, never "legacy".
+ let membershipOwned=false;
+ try{membershipOwned=(await readMembershipMode(env))==='sync';}catch{return {ok:false,code:'producer_membership_marker_unreadable'};}
  let prior=previousIds;
- if(!Array.isArray(prior)){
+ if(!membershipOwned&&!Array.isArray(prior)){
   try{prior=(await many(database(env),'SELECT film_id AS filmId FROM watchlist_film',[])).map(row=>row.filmId);}
   catch{return {ok:false,code:'producer_membership_unreadable'};}
  }
  const after=await readPublished(env);
  if(!after?.ready||after.programmeRunId!==programmeRunId||Number(after.generation)!==g0)return {ok:false,code:'producer_input_superseded'};
- const planned=planFromSealed({programme,watchlist,watchMembers:members,previousIds:prior});
+ // Identity is resolved for the LISTED ids only (programme-only films never become a target); a refusal fails the whole snapshot closed,
+ // so a refused id is never silently dropped and then mistaken for a departed Film.
+ const identity=await resolveSourceIdentities(env,[...new Set([...sourceIdsOf(watchlist,members)])]);
+ if(!identity.ok)return {ok:false,code:identity.code,refused:identity.refused,refusedCount:identity.refusedCount};
+ const planned=planFromSealed({programme,watchlist,watchMembers:members,previousIds:prior,resolved:identity.resolved,guards:identity.guards,membershipOwned});
  return {ok:true,generation:g0,programmeRunId,...planned,label:snapshotLabel(programmeRunId,g0),members,watchlist};
 }
 
@@ -153,7 +276,21 @@ async function createInstance(env,id,params){
  return {ok:false,reason:'create_uncertain'};
 }
 
-export async function reconcileProducerChain(env,{now=Date.now()}={}){
+// AIR-572. The Monitor's whole D1 read of the Producer: exactly THREE SQL statements (one authority row joined by primary key to its generation row,
+// the chain by primary key, the run of the exact generation by index), no table inventory, no schema read, no scan, no write. Unlike
+// `PublishedEpg.readAuthority` (three statements on its own) it does not validate the install; it only names the published (P,g) when the marker row says
+// `d1`/`open`. Any failure throws (the Monitor reports `unreadable`).
+export async function readProducerMonitorFacts(env){
+ const db=database(env);
+ const row=await one(db,'SELECT a.mode AS mode,a.cutover AS cutover,a.programme_run_id AS programmeRunId,a.generation AS generation,g.published_at AS publishedAt FROM published_epg_authority a LEFT JOIN published_epg_generation g ON g.programme_run_id=a.programme_run_id WHERE a.id=1',[]);
+ if(!row||row.mode!=='d1'||row.cutover!=='open'||!row.programmeRunId)return {ready:false};
+ const label=snapshotLabel(row.programmeRunId,Number(row.generation));
+ const [chain,run]=await Promise.all([readChain(env,row.programmeRunId),epgRunForGeneration(env,{sourceGeneration:label})]);
+ return {ready:true,programmeRunId:row.programmeRunId,generation:Number(row.generation),label,publishedAt:row.publishedAt||null,chain,run};
+}
+
+export async function reconcileProducerChain(env,{now=Date.now(),hold=PRODUCER_DELIVERY_HOLD}={}){
+ if(hold!==false)return {ran:false,reason:HELD_BY_DELIVERY};
  try{
   if(typeof env?.PRODUCER_WORKFLOW?.create!=='function')return {ran:false,reason:'workflow_unavailable'};
   let marker;
@@ -231,10 +368,13 @@ async function drainEpgReceipts(env,plan,fence){
  throw Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
 }
 
-export async function runProducerWorkflow(env,payload,step){
+export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVERY_HOLD}={}){
+ if(hold!==false)return {state:HELD_BY_DELIVERY};
  const P=payload?.programmeRunId,epoch=Number(payload?.epoch);
  if(typeof P!=='string'||!P||!Number.isInteger(epoch)||epoch<1)return {state:'invalid'};
- const doStep=typeof step?.do==='function'?step.do.bind(step):(name,fn)=>fn();
+ // AIR-572: `step` is a Cloudflare RPC stub. Its methods are callable but expose no `.bind`/`.call`/`.apply`, so the method is
+ // invoked directly on the stub (`step.do(...)`), never detached or bound. Without a step (an offline run) the callback runs inline.
+ const doStep=(name,fn)=>step&&step.do?step.do(name,fn):fn();
  const totals={calls:0,statements:0,invocations:0,maxCalls:0,maxStatements:0};
  const nonce=await doStep('nonce',async()=>crypto.randomUUID());
  let chain=await readChain(env,P);
@@ -260,7 +400,9 @@ export async function runProducerWorkflow(env,payload,step){
     if(rebased.state==='rebased'){fence=rebased.fence;rebases++;return work();}
     return {state:'stopped',code:'producer_input_superseded'};
    }
-   return {state:'stopped',code:snap.code};
+   // A named identity refusal stops the chain on the record (visible to the monitor) instead of leaving a lease to expire.
+   if(typeof snap.code==='string'&&snap.code.startsWith('producer_identity_'))await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:snap.code}).catch(()=>{});
+   return {state:'stopped',code:snap.code,...(snap.refused?{refused:snap.refused,refusedCount:snap.refusedCount}:{})};
   }
   fence.inputGeneration=snap.generation;
   if(!stored?.release_pin){

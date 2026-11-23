@@ -1,6 +1,6 @@
 // AIR-497 / ADR 0141. Typed producer fences: chain GATE, retry exclusion, dictionary marker-only.
 // Pure. A missing or unknown kind is refused before any statement. No imports: the Worker bundle scopes this first.
-export const FENCE_KINDS=Object.freeze(['chain','retry','dictionary']);
+export const FENCE_KINDS=Object.freeze(['chain','retry','dictionary','letterboxd']);
 export const CHAIN_LEASE_MS=5*60000;
 export const CHAIN_BOUNDARY_MARGIN_MS=15000;
 export const CHAIN_CLAIM_WINDOW_MS=5*60000;
@@ -30,6 +30,10 @@ export function requireFence(fence,kinds=FENCE_KINDS){
  if(fence.kind==='chain'){
   if(typeof fence.programmeRunId!=='string'||!fence.programmeRunId||!Number.isInteger(fence.inputGeneration)||fence.inputGeneration<0
    ||!Number.isInteger(fence.epoch)||fence.epoch<1||typeof fence.nonce!=='string'||!fence.nonce)missing();
+ }
+ // AIR-570 / ADR 0186: the Letterboxd Sync's own mode epoch. Every canonical commit of a Letterboxd step asserts, inside its fenced batch, that the executor mode is still `cloudflare` at this epoch.
+ if(fence.kind==='letterboxd'){
+  if(!Number.isInteger(fence.epoch)||fence.epoch<0)missing();
  }
  if(fence.kind==='retry'){
   if(typeof fence.programmeRunId!=='string'||!fence.programmeRunId||!Number.isInteger(fence.inputGeneration)||fence.inputGeneration<0)missing();
@@ -62,6 +66,10 @@ export function chainGateParams(fence){
  return [fence.programmeRunId,fence.inputGeneration,fence.inputGeneration,fence.epoch,fence.nonce];
 }
 
+export function letterboxdEpochSql(){
+ return assertSql("EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id=1 AND mode='cloudflare' AND epoch=?)");
+}
+
 export function retryGateSql(){
  return assertSql("EXISTS (SELECT 1 FROM published_epg_authority a WHERE a.id=1 AND a.mode='d1' AND a.cutover='open' AND a.programme_run_id=? AND a.generation=?) AND NOT EXISTS (SELECT 1 FROM canonical_producer_chain WHERE programme_run_id=? AND owner_state IN ('pending','active'))");
 }
@@ -79,6 +87,7 @@ export function ownerAssertParams(fence){
 export function fenceStatements(fence,{ownerOnly=false}={}){
  requireFence(fence);
  if(fence.kind==='dictionary')return [];
+ if(fence.kind==='letterboxd')return [[letterboxdEpochSql(),[fence.epoch]]];
  if(fence.kind==='retry')return [[retryGateSql(),retryGateParams(fence)]];
  if(ownerOnly)return [[ownerAssertSql(),ownerAssertParams(fence)]];
  return [[chainGateSql(),chainGateParams(fence)]];

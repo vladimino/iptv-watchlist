@@ -1,6 +1,7 @@
 // The Worker modules the archive preview route needs, in one vm context, over the caller's bucket, console and fetch.
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {installViewIndexFixture} from '../view-index-fixture.mjs';
 import {webcrypto} from 'node:crypto';
 import {scoped, scopedReplacing} from '../../scripts/bundle-scope.mjs';
 
@@ -21,5 +22,8 @@ vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-apply.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('src/worker.js', 'utf8').replace('export default', 'globalThis.worker='), context);
+  installViewIndexFixture(context);
+  // AIR-558: the facts pipeline projects into the D1-derived view only and refuses without an owning ratings domain; this offline context has no D1, so the projection is a counted no-op that owns it.
+  vm.runInContext('RatingsD1.projectView=async(env,records)=>({owned:true,changed:records.length})', context);
   return {context, worker: context.worker, facts: vm.runInContext('LetterboxdFacts', context), resetCache: () => vm.runInContext('ADMIN_SNAPSHOT_CACHE=null', context)};
 }

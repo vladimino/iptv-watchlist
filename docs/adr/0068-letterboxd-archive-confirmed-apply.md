@@ -6,7 +6,7 @@
 **Approval source:** [Owner explicitly accepted ADR 0068 and visually approved the apply Mermaid on 2026-10-31](https://trello.com/c/FFMUP4qm#comment-6ae60b9a1ccfc3a18b8d67a5), after independent PASS review of PR #287 at `6f6b1a146e4f1728a716f7ced16d154920a30405`  
 **Related work:** [AIR-285](https://trello.com/c/FFMUP4qm); [AIR-284](https://trello.com/c/Y9udReUR) / [ADR 0066](0066-ephemeral-letterboxd-archive-preview.md) (the preview this apply follows); [AIR-280](https://trello.com/c/ijIEPgm1) (guarded owner actions); [ADR 0053](0053-permanent-letterboxd-baseline-import-route.md); [ADR 0055](0055-retire-letterboxd-facts-switch.md); [ADR 0023](0023-letterboxd-user-facts.md)  
 **Supersedes:** None  
-**Superseded by:** None
+**Superseded by:** [ADR 0192](0192-retire-view-index-selector-and-raw-object.md) in part (2026-11-21): decision 7 and the rollback parts of the baseline commit, the `letterboxd_archive_rollback@1` capability, its routes and its Consequences; every other decision stays
 
 ## Context
 

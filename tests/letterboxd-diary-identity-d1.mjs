@@ -52,6 +52,8 @@ const ctx = vm.createContext({URL, Date, Map, Set, JSON, TextEncoder, TextDecode
 for (const file of ['src/domain/tmdb-tv-identity.js', 'src/sources.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), ctx);
 vm.runInContext(scoped('src/letterboxd-match.js', 'LetterboxdMatch') + '\n' + scopedReplacing('src/letterboxd-identity.js', 'LetterboxdIdentity', 'const normTitle=LetterboxdMatch.normTitle;\n') + '\n' + scoped('src/domain/letterboxd-rated-admission.js', 'LetterboxdRatedAdmission'), ctx);
 for (const file of ['src/letterboxd-facts.js', 'src/letterboxd-rated-candidates.js', process.env.DIARY_IDENTITY_SRC || 'src/letterboxd-diary-identity.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), ctx);
+// AIR-558: the facts reader takes the ratings-only view index from the Worker's derivedViewIndex; this context has no Worker, so the same two derivations are bound here (ratings_view aliases over the D1 stand-in, the D1 version token).
+vm.runInContext("globalThis.derivedViewIndex=async env=>RatingsD1.overlayView(env,{});globalThis.viewIndexD1Version=async env=>'d1:r'+(await RatingsD1.readRatingsAuthority(env?.DB??null,env)).generation;",ctx);
 const Facts = vm.runInContext('LetterboxdFacts', ctx), Identity = vm.runInContext('LetterboxdDiaryIdentity', ctx);
 const NOW = Date.parse('2026-11-17T22:00:00.000Z');
 const opts = (at = NOW) => ({clock: () => at, remaining: () => 120000, fetchImpl});

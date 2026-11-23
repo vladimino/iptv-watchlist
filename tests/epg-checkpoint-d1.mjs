@@ -56,14 +56,17 @@ const created=async(count=3,extra={},options={})=>{const made=open(options);cons
 // ===== 2. the authority states =====
 {
  const legacy=path.join(root,'legacy.sqlite');sqlite(legacy,chain('0029_started_authority.sql'));
- assert.deepEqual(await Checkpoint.readAuthority(d1Standin(legacy)),{state:'legacy'},'tables absent below version 30: the R2 objects serve');
+ // AIR-551 H6: the R2 arm is retired for production. Tables absent below version 30 is closed; only the explicit local stand-in serves R2.
+ assert.deepEqual(await Checkpoint.readAuthority(d1Standin(legacy)),{state:'closed'},'tables absent below version 30: closed, never R2');
+ assert.deepEqual(await Checkpoint.readAuthority({DB:d1Standin(legacy),EPG_CHECKPOINT_DB_OPTIONAL:'standin'}),{state:'legacy'},'the local stand-in serves the R2 objects');
  const noTables=path.join(root,'notables.sqlite');sqlite(noTables,chain('0029_started_authority.sql')+"UPDATE schema_contract SET version=30 WHERE id=1;");
  assert.deepEqual(await Checkpoint.readAuthority(d1Standin(noTables)),{state:'closed'},'version 30 without the tables is closed');
  assert.deepEqual(await Checkpoint.readAuthority({}),{state:'closed'},'a missing binding is closed');
  assert.deepEqual(await Checkpoint.readAuthority({EPG_CHECKPOINT_DB_OPTIONAL:'standin'}),{state:'legacy'},'the explicit local stand-in only');
  assert.deepEqual(await Checkpoint.readAuthority({EPG_CHECKPOINT_DB_OPTIONAL:'on',DB:d1Standin(noTables)}),{state:'closed'},'any other value of the selector is not a stand-in');
  const r2=open({},{marker:''});
- assert.deepEqual(await Checkpoint.readAuthority(r2.db),{state:'r2',writes:'open',generation:0});
+ assert.deepEqual(await Checkpoint.readAuthority(r2.db),{state:'closed'},'marker r2 is the retired arm: closed in production, never R2');
+ assert.deepEqual(await Checkpoint.readAuthority({DB:r2.db,EPG_CHECKPOINT_DB_OPTIONAL:'standin'}),{state:'r2',writes:'open',generation:0},'only the local stand-in keeps the r2 state');
  assert.deepEqual(await Checkpoint.readAuthority(open().db),{state:'d1',writes:'open',generation:1});
  const held=open({},{marker:"UPDATE epg_checkpoint_authority SET mode='d1',generation=2,writes='held' WHERE id=1;"});
  assert.deepEqual(await Checkpoint.readAuthority(held.db),{state:'d1',writes:'held',generation:2});

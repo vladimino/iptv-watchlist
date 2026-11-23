@@ -51,6 +51,17 @@ When `on`, one tick is a handful of small R2 reads, one conditional R2 write and
 
 A growing `outbox` with a `lastDeliveryFailure` means alerts are not reaching the owner even though the monitor is alive: the dead-man heartbeat will not show this. Telegram cannot deduplicate, so after a Worker crash the owner may see one message twice (same `Ref`). Switch back to the webhook by removing `MONITOR_TRANSPORT`.
 
+## Attributing D1 load to callers from the Worker logs (AIR-579)
+
+Two structured log lines let a read of the Worker logs attribute D1 load to its callers without a per-request counter. Both carry **no** argument, key, film id, title, payload, identity or header, and both are best-effort (they never throw into the work and change no result). Workers Logs attach a line to the invocation that wrote it, so an aggregate **by `$metadata.trigger`** (a route such as `GET /api/enrichment/view`, a cron expression, `POST /mcp`) names the caller.
+
+- `{"event":"mcp_tool_call","tool":"<registered name or unregistered>","outcome":"ok|tool_error|rejected|failed","ms":<n>}`: one line per authorized MCP `tools/call` ([MCP reference](../reference/api/mcp.md#call-log)).
+- `{"event":"discovery_catalog_read","rows":<n>,"ms":<n>,"projected":<bool or null>}`: one line per **resolved whole-catalog read** of `discovery_admission` (`readCatalog`, the 12 k-row statement of the RCA); the bounded reads by id or by TMDB id write none. `projected` is `null` when the read was refused as over the cap (`discovery_bounded`), where the caller's options are not looked at. The lines grouped by `$metadata.trigger` give the **observed** whole-catalog reads per caller in a window.
+
+**Limits of this signal (state them with any result).** The line is written only after the D1 read resolved and on a best-effort basis, so a failed D1 read, an interrupted invocation, a failing log sink or dropped or sampled telemetry leaves **no line**: the count of lines is a lower bound of the executions, not an exhaustive count. `rows` is the rows **returned**, not the D1 billed `rows_read`; `ms` is the application wall time awaiting the query, not the SQL engine time. **Reconcile the count with the D1 analytics count of the same statement for exactly the same window and report any gap** as missing attribution; never present the line count alone as the number of reads.
+
+Use them read-only through the Cloudflare Workers Observability aggregate (counts and the trigger; never raw events with identity), compare a window with the D1 analytics signature of the same statement, and remember a request is not a statement: one invocation may read the catalog several times, and a cron tick or a Workflow step shows as its own trigger.
+
 ## D1 projector grouped write path
 
 > **Historical (AIR-537 slice 3, 19 Nov 2026).** The D1 enrichment projector, its runner and its write arms were removed; this section describes fields and log lines that are no longer produced. Nothing here is an operating check.
@@ -153,3 +164,17 @@ Read-only checks; none of them authorizes a manual EPG or Discovery run, a lease
 - **Old-Worker signature.** Pointer published, pause row `clear`, `finalized_run_id` different from `programme_run_id`: a Worker without the certificate code lifted the pause at the pointer. Redeploy the current code; the repair certifies the run. Rollback to such a Worker is an owner decision.
 - **Busy telemetry.** `seal_busy` phase lines carry `busyKind`, `holderKind` (`epg`, `discovery`, `projector`), `holdExpiry`, `scheduledWaitMs`, `sealPhase`, so an EPG-held lease is told apart from a Discovery-held one. `scheduledWaitMs` is the planned retry delay, not the measured time spent blocked; do not read it as observed contention latency. `seal_certify` carries `outcome` (`certified`, `owed`, `absent`, `skipped`).
 - **`scanOutcome`** on the completed `sync.json` (`applied`, `facts_only`, `skipped_incomplete_watchlist`, `skipped_no_observation`) says whether the retention scan was applied; the certificate does not.
+
+## Canonical Producer: `canonical_producer_*` alerts (AIR-572, [ADR 0141](../adr/0141-producer-workflow-chain-protocol.md))
+
+Read `GET /api/monitor/status` first (stream `canonical_producer`, `facts.status`), then the Producer's own stored rows with a bounded read-only query of `canonical_producer_chain` (by `programme_run_id`) and `canonical_producer_run` (by `source_generation`). The monitor only reports; every action below needs its own owner approval.
+
+| Status / key | Meaning | Next step |
+| --- | --- | --- |
+| `held_by_delivery` | The static delivery hold is on. Expected until the owner lifts it in code. | None. Do not treat it as success: no canonical membership or facts are being written. |
+| `stalled` / `canonical_producer_no_progress` | No proven run progress (finished units or a moved cursor of the same pass) for more than 2 h; restarts, new passes and generation rollovers with zero finished units do not count. A running Workflow whose instances all error (for example the former `RPC receiver does not implement the method "bind"`, `step_count` 0) shows exactly this: chain `pending` or `active`, takeovers growing, no run row. | Read the Workflow instance errors through the Cloudflare read path. Do not reset a lease or create an instance by hand. A code fix is a PR. |
+| `failed` | Recoverable stop (`transient`, `receipt`, `authority`); the hourly reconcile retries by its own backoff. | Wait for the next hourly ticks; escalate if the same code repeats. |
+| `blocked` / `canonical_producer_failed` | Identity code or `terminal` / `fail_closed` / `exhausted`. `producer_identity_unresolved` (a Letterboxd lid with neither a trusted claim nor an existing Film), `producer_identity_ambiguous` (an untrusted or competing claim), `producer_identity_redirect_chain`, `producer_identity_bounded` (more than 1000 lids), `producer_identity_unreadable`. | Owner decision. The fix is a trusted claim or an admission through the existing owner paths; the Producer never creates a Film from a spelling and never guesses from title or year. |
+| `canonical_producer_unreadable` | A bounded D1 read failed. | Check D1 health first; the streak is kept, not reset. |
+
+Recovery is automatic and uses the existing outbox (one recovery message per delivered alert). A held or stopped Producer does not stop EPG publication or any other canonical writer.

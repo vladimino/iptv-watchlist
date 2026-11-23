@@ -31,7 +31,7 @@ Derived sets, by code: `watched`, `rated`, `watchedUnrated` (watched minus rated
 | `watchlist.json`, `programme.json` | Stored Letterboxd ids (`films[].id`, the `lid` of the watchlist page), titles, original titles, aliases, year, TMDB id when present |
 | `metadata.json` | The Letterboxd metadata cache keyed by the same id: titles, aliases, year and the TMDB id read from the film page |
 | `enrichment/ratings/published.json` → `enrichment/ratings/generations/<id>.json` | The Letterboxd ids of every film on the public films list with the rating seen there (`ratings: {id: rating or null}`), only when the pointer is projected |
-| `enrichment/view-index.json` | `actualRating` per stored id, for Letterboxd ids and catalog ids |
+| The D1-derived view index (`--view-index-d1 <file>` from `scripts/view-index-d1-export.mjs`; the raw `enrichment/view-index.json` of a snapshot is stale and is not an input) | `actualRating` per stored id, for Letterboxd ids and catalog ids |
 | `epg/discovered-films.json` | Catalog films. Only records whose `canonicalIdentity` is `tmdb:<tmdbId>` count; an observation key without a verified identity is not a film |
 
 ## Methods and statuses

@@ -111,10 +111,6 @@ assert.deepEqual([...first.added].sort(), ['Aa1', 'Bb2']);
 // a second archive adds a row and keeps the first
 await Candidates.registerCandidates(env, {sha: SHA_B, generatedAt: '2026-11-02T00:00:00.000Z', chunk: 0, rows: rows('Cc3')});
 assert.deepEqual(Object.keys(registry().archives).sort(), [SHA_A, SHA_B]);
-// rollback moves counts
-await Candidates.rollbackCandidates(env, SHA_A, ['Aa1']);
-assert.equal(registry().archives[SHA_A].counts.pending, 1); assert.equal(registry().archives[SHA_A].counts.removed, 1);
-assert.equal(registry().archives[SHA_A].documentEtag, records.get(docKey(SHA_A)).etag);
 // an unchanged document writes nothing, registry included
 {
   const before = registryPuts;
@@ -134,7 +130,7 @@ assert.equal(registry().archives[SHA_B].counts.pending, 3, 'the next writer of t
 // every committed candidate write raises the document's revision by one, and the row carries it
 {
   const stored = JSON.parse(records.get(docKey(SHA_A)).text);
-  assert.ok(Number.isInteger(stored.revision) && stored.revision >= 2, 'register then rollback: revision ' + stored.revision);
+  assert.ok(Number.isInteger(stored.revision) && stored.revision >= 1, 'register: revision ' + stored.revision);
   assert.equal(registry().archives[SHA_A].revision, stored.revision);
 }
 // a delayed response of an older write must not overwrite the newer write's row (equal-millisecond clocks included: the test clock is frozen)

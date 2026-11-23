@@ -1,11 +1,14 @@
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
-import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {flowWorld, sql,labelStarts} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
+labelStarts();// ADR 0195: the runs of this test are started as a standing Task starts them, with its label
 
 const TEAM='https://probe-team.cloudflareaccess.com';
 const AUD='a1'.repeat(32);
@@ -32,6 +35,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);vm.runInContext(scoped('src/metadata-cache.js','MetadataCache'),context);for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/ratings-seed.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/mcp.js','src/continuation.js','src/worker.js']){
  vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 }
+installViewIndexFixture(context);
 const encode=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
 async function accessJwt(){
  const now=Math.floor(Date.now()/1000);
@@ -172,18 +176,18 @@ for(const route of ['start','next','submit']){
 
 {
  const big=Array.from({length:10},(_,i)=>({filmId:'film-'+i,fingerprint:{strengths:Array.from({length:8},()=>'s'.repeat(380)),risks:Array.from({length:8},()=>'r'.repeat(380))},prediction:{}}));
- const environment=env(),refused=await tool(environment,'prediction_batch_submit',{runId:'run-1',epoch:1,items:big});
+ const environment=env(),refused=await tool(environment,'prediction_batch_submit',{taskId:'task00',runId:'run-1',epoch:1,items:big});
  assert.equal(refused.body.result.isError,true);assert.match(refused.body.result.content[0].text,/over the 57344 byte limit of one call/);assert.match(refused.body.result.content[0].text,/Nothing was submitted: split the group/);assert.equal(environment.BUCKET.objects.size,0,'nothing was read or written');
- const fits=await tool(env(),'prediction_batch_submit',{runId:'run-1',epoch:1,items:big.slice(0,3)});assert.ok(!/byte limit of one call/.test(JSON.stringify(fits.body.result.content)),'a smaller group passes the size check and reaches the Worker');
+ const fits=await tool(env(),'prediction_batch_submit',{taskId:'task00',runId:'run-1',epoch:1,items:big.slice(0,3)});assert.ok(!/byte limit of one call/.test(JSON.stringify(fits.body.result.content)),'a smaller group passes the size check and reaches the Worker');
 }
 const mismatch=await tool(env(),'epg_sync_step',{runId:'missing-run'});
 assert.deepEqual(domain(mismatch.body.result),{status:409,body:{error:'Run id mismatch'}});
 assert.equal(mismatch.body.result.isError,true);
-const unknown=await tool(env(),'prediction_complete',{runId:'missing-run'});
+const unknown=await tool(env(),'prediction_complete',{taskId:'task00',runId:'missing-run'});
 assert.equal(unknown.body.result.structuredContent.httpStatus,404);
 assert.equal(unknown.body.result.isError,true);
 // A batch start without the D1 prediction authority (this R2-only environment) refuses and writes nothing: v2 is the only runner (ADR 0167).
-{const environment=env(),started=await tool(environment,'prediction_batch_start',{trigger:'scheduled',capacity:{remainingPercent:40}});
+{const environment=env(),started=await tool(environment,'prediction_batch_start',{trigger:'scheduled',taskId:'task00',capacity:{remainingPercent:40}});
 assert.equal(started.body.result.isError,true);
 assert.equal(JSON.parse(started.body.result.content[0].text).httpStatus,409);
 assert.match(started.body.result.content[0].text,/batch_runner_requires_d1/);
@@ -214,6 +218,27 @@ for(const name of ['prediction_queue_overview','prediction_film_diagnostics','pr
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
 }
+// ADR 0195: the Task label is a closed enum of the four standing Tasks and is required by every run-scoped tool (a dry-run check, validation and the read-only status tools do not need it).
+for(const name of ['prediction_batch_manifest','prediction_batch_hold','prediction_batch_submit','prediction_heartbeat','prediction_complete']){
+ const schema=tools.find(item=>item.name===name).inputSchema;
+ assert.deepEqual(schema.properties.taskId.enum,['task00','task15','task30','task45'],name);assert.ok(schema.required.includes('taskId'),name+' requires taskId');
+}
+assert.deepEqual(tools.find(item=>item.name==='prediction_batch_start').inputSchema.properties.taskId.enum,['task00','task15','task30','task45']);
+assert.ok(!tools.find(item=>item.name==='prediction_batch_start').inputSchema.required.includes('taskId'),'a dry run or the keyed protocols need no label; a real scheduled start does (checked by the handler)');
+for(const name of ['prediction_batch_validate','enrichment_runner','enrichment_status','enrichment_queue'])assert.ok(!(tools.find(item=>item.name===name).inputSchema.required||[]).includes('taskId'),name+' does not require ownership');
+for(const [name,args] of [
+ ['prediction_batch_start',{trigger:'scheduled'}],
+ ['prediction_batch_start',{trigger:'scheduled',taskId:'task99'}],
+ ['prediction_batch_start',{trigger:'manual',taskId:'task00'}],
+ ['prediction_batch_manifest',{runId:'run-1'}],['prediction_heartbeat',{runId:'run-1'}],['prediction_complete',{runId:'run-1'}],
+ ['prediction_batch_hold',{runId:'run-1',epoch:1,items:[{filmId:'f1'}]}],['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'f1',prediction:{}}]}],
+ ['prediction_heartbeat',{taskId:'TASK00',runId:'run-1'}],['enrichment_runner',{taskId:'task99'}],
+]){
+ const environment=env(),refused=await tool(environment,name,args);
+ assert.equal(refused.body.result.isError,true,name+' '+JSON.stringify(args));assert.match(refused.body.result.content[0].text,/taskId/,name);
+ assert.equal(environment.BUCKET.objects.size,0,name+' refused before any storage access');
+}
+assert.ok(!(await tool(env(),'prediction_batch_start',{trigger:'scheduled',dryRun:true})).body.result.content[0].text.includes('"taskId" is required'),'a scheduled dry run needs no label');
 for(const name of ['epg_sync_start','epg_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','epg_workflow_rollover','letterboxd_claim_backfill']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,false,name);
 }
@@ -238,6 +263,8 @@ assert.equal((await tool(syncEnv,'epg_sync_start',{},{execution})).body.result.s
 const metadata=await tool(syncEnv,'epg_sync_step',{runId:syncRunId},{execution});
 assert.equal(metadata.body.result.isError,undefined,JSON.stringify(metadata.body));
 assert.equal(metadata.body.result.structuredContent.stage,'epg');
+// AIR-558: this world has no D1 ratings domain, and a Letterboxd projection into the view index now refuses unless RatingsD1 owns it; stand in a domain that owns nothing else and accepts the projection.
+vm.runInContext("globalThis.RatingsD1={ratingsMutableKey:()=>false,ratingsReady:async()=>false,readOwned:async()=>({owned:false}),casOwned:async()=>({owned:false}),projectView:async()=>({owned:true,changed:0}),putOwned:async()=>({owned:false}),routeRead:async()=>({handled:false}),ratingsGate:async()=>({ok:true}),readRatingsAuthority:async()=>({ready:false,mode:'r2'})}",context);
 const committed=await tool(syncEnv,'epg_sync_step',{runId:syncRunId},{execution});
 assert.equal(committed.body.result.isError,undefined,JSON.stringify(committed.body));
 assert.equal(committed.body.result.structuredContent.stage,'complete');
@@ -269,6 +296,7 @@ assert.equal(follow.body.result.structuredContent.discovery.reason,'delegated');
 assert.equal(follow.body.result.structuredContent.delegated,true);
 assert.equal(fetches.filter(href=>href.includes('letterboxd.com')).length,letterboxdCalls,'discovery does not retry Letterboxd');
 assert.equal(background.length,0);
+vm.runInContext('delete globalThis.RatingsD1',context);
 
 const predictionFields=Object.fromEntries(Object.entries(vm.runInContext('EXECUTION',context)).map(([key,values])=>[key,values.includes('unknown')?'unknown':values[0]]));
 const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['investigation'],execution:predictionFields,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']};
@@ -279,7 +307,7 @@ const dumpDb=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer
 async function mcpFlow(films){
  const w=await flowWorld({films});assert.equal((await w.api('queue/reconcile',{})).status,200);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- const call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);assert.equal(r.error,undefined,name);const res=r.result;return {isError:res.isError,data:JSON.parse(res.content[0].text)};};
+ const call=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);assert.equal(r.error,undefined,name);const res=r.result;return {isError:res.isError,data:JSON.parse(res.content[0].text)};};
  return {w,call};
 }
 const happyFlow=await mcpFlow(1);
@@ -310,7 +338,7 @@ const runnerTool=domain((await tool(env(),'enrichment_runner',{})).body.result).
 assert.equal(runnerTool.protocol,'batch_v2');assert.deepEqual(runnerTool.retiredProtocols,['v5']);assert.equal(runnerTool.batchRunner.start,'/api/enrichment/batch/start');
 assert.doesNotMatch(JSON.stringify(runnerTool),/enrichment\/(?:start|next|submit)\b|next\/submit|maxBatchFilms|modelBatching/,'no retired route or v5 field');
 const invalidFlow=await mcpFlow(1);
-const invalidStart=(await invalidFlow.call('prediction_batch_start',{trigger:'manual'})).data;
+const invalidStart=(await invalidFlow.call('prediction_batch_start',{trigger:'scheduled'})).data;
 const {moodLabels:_noMood,...fingerprintWithoutMood}=fingerprint;
 const badFingerprint={...fingerprintWithoutMood,execution:{...predictionFields,payoff:'medium'},strengths:['PAYLOAD-CANARY']};
 const rejected=await invalidFlow.call('prediction_batch_submit',{runId:invalidStart.runId,epoch:invalidStart.lease.epoch,items:[{filmId:invalidStart.films[0].filmId,fingerprint:badFingerprint,prediction}]});
@@ -348,10 +376,10 @@ assert.deepEqual(fetches.filter(url=>url!==TEAM+'/cdn-cgi/access/certs'),[]);
 
 // Overlap, an early completion and a lost lease, on batch v2.
 const conflictFlow=await mcpFlow(2);
-const conflictStart=(await conflictFlow.call('prediction_batch_start',{trigger:'manual'})).data;
+const conflictStart=(await conflictFlow.call('prediction_batch_start',{trigger:'scheduled'})).data;
 assert.equal(conflictStart.status,'running');
 const conflictRunId=conflictStart.runId;
-const adopted=await conflictFlow.call('prediction_batch_start',{trigger:'manual'});
+const adopted=await conflictFlow.call('prediction_batch_start',{trigger:'scheduled',taskId:'task15'});
 assert.equal(adopted.isError,undefined);
 assert.equal(adopted.data.httpStatus,200);
 assert.equal(adopted.data.status,'already_running');
@@ -365,7 +393,7 @@ const lost=await conflictFlow.call('prediction_heartbeat',{runId:conflictRunId})
 assert.equal(lost.isError,true);
 assert.equal(lost.data.httpStatus,409);
 assert.match(JSON.stringify(lost.data),/lease_lost/);
-const restarted=await conflictFlow.call('prediction_batch_start',{trigger:'manual'});
+const restarted=await conflictFlow.call('prediction_batch_start',{trigger:'scheduled'});
 assert.equal(restarted.data.status,'running',JSON.stringify(restarted.data).slice(0,300));
 assert.notEqual(restarted.data.runId,conflictRunId);assert.ok(restarted.data.lease.epoch>conflictStart.lease.epoch,'a takeover raises the epoch');
 {const expired=JSON.parse(sql(conflictFlow.w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+conflictRunId+"'")[0].d);
@@ -445,7 +473,7 @@ assert.ok(diagnosticGets.every(key=>/^(enrichment\/prediction-queue\.json|enrich
 const rejectedFault=await tool(env(),'prediction_complete',{runId:'run-1',fault:{url:'https://evil.example'}});
 assert.equal(rejectedFault.body.result.isError,true);
 const faultFlow=await mcpFlow(1);
-const faultStart=await faultFlow.call('prediction_batch_start',{trigger:'manual'});
+const faultStart=await faultFlow.call('prediction_batch_start',{trigger:'scheduled'});
 assert.equal(faultStart.isError,undefined,JSON.stringify(faultStart.data).slice(0,300));
 const faultRunId=faultStart.data.runId;
 const faultDone=await faultFlow.call('prediction_complete',{runId:faultRunId,reason:'api_error',fault:{origin:'model_provider',failedStep:'submit',providerErrorCode:'provider_timeout',httpStatus:503,receivedRequestId:faultStart.data.requestId}});

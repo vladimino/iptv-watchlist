@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {createHash,webcrypto} from 'node:crypto';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 
 // The fingerprint migration queue, immutable fingerprint storage and run binding (ADR-0035 sections 2, 6, 7). Two Worker
 // "releases" run over one bucket: release 1 is the live code (schema 1, empty registry); release 2 is the same code with
@@ -35,6 +36,7 @@ function release(patch){
  const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
  vm.runInContext(domain,ctx);
  for(const file of ['src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext((file==='src/enrichment.js'?patch(enrichmentSource):fs.readFileSync(file,'utf8')).replace('export default','globalThis.worker='),ctx);
+ installViewIndexFixture(ctx);
  vm.runInContext(`globalThis.seedFilm=async(env,id,input,prediction)=>{
   const state=await readFilmState(env,id),profile=await loadJSON(env,profileKey);let fingerprint=state.fingerprint;
   if(input)fingerprint=await writeFingerprint(env,id,input,fingerprint,'generated',undefined,FINGERPRINT_PROMPT_VERSION,false);
@@ -42,7 +44,7 @@ function release(patch){
   const generated={...pickPrediction(prediction),filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:'seed',trigger:'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})};
   const stored={...generated,...(await writePredictionVersion(env,id,generated))},history=[...(state.predictions?.history||[])];if(old)history.push({...old,replacedAt:at});
   await saveJSON(env,filmKey(id)+'predictions.json',{current:stored,history});
-  await updateViewIndex(env,id,{prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});
+  {const vk='enrichment/view-index.json',ix=(await loadJSON(env,vk))||{};ix[id]={...(ix[id]||{}),prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)};await saveJSON(env,vk,ix);}// AIR-558: the fixture stands in for the D1-derived index; no raw writer
   return old?'recalculated':'created';};`,ctx);
  vm.runInContext('globalThis.T={seedFilm,writeFingerprint,predictionFreshness,queueBatchIds,fingerprintSchemaVocabulary,FINGERPRINT_SCHEMA_BASE,FINGERPRINT_TRANSITIONS,FINGERPRINT_SCHEMA_VERSION,MECHANICS,EXECUTION,GENERAL_EXECUTION,PROFILE_GENRE_DOMAINS,PROFILE_GENRE_ALIASES};',ctx);
  const api=async(path,method='GET',body,flags={})=>{const response=await ctx.worker.fetch(new Request('https://site.example/api/'+path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),{...baseEnv,...flags});return {status:response.status,data:await response.json()};};
@@ -112,6 +114,7 @@ for(const binding of [SELECTIVE,STRICT,{PREDICTION_FINGERPRINT_COMPATIBILITY:' S
 {
  const before=pointer('C'),{filmId:_i,fingerprintHash:_h,generatedAt:_g,invalidatedAt:_n,fingerprintPromptVersion:_p,produced:_r,previous:_v,...content}=before;
  const after=await R1.T.writeFingerprint({...baseEnv,...OBJECTS},'C',content,before,'generated',undefined,2);
+ {const ix=read('enrichment/view-index.json');ix.C={...ix.C,impactFeatures:{...ix.C.impactFeatures,fingerprintPromptVersion:2}};write('enrichment/view-index.json',ix);}// AIR-558: the writer no longer touches the view index; the fixture follows the stored pointer
  assert.equal(after.fingerprintHash,before.fingerprintHash,'identical content keeps the hash');
  assert.deepEqual(plain([after.fingerprintPromptVersion,after.produced,after.previous]),[2,'generated',{fingerprintHash:before.fingerprintHash,fingerprintSchemaVersion:1,fingerprintPromptVersion:1}]);
  assert.equal(keysUnder('enrichment/films/C/fingerprints/').length,1,'one body');
@@ -145,6 +148,7 @@ assert.deepEqual(plain(queue.work.C),{class:'fingerprint_and_prediction',require
 {
  const {filmId:_i,fingerprintHash:_h,generatedAt:_g,invalidatedAt:_n,fingerprintPromptVersion:_p,produced:_r,previous:_v,...content}=pointer('C');
  await R1.T.writeFingerprint(baseEnv,'C',content,pointer('C'),'generated',undefined,1);
+ {const ix=read('enrichment/view-index.json');ix.C={...ix.C,impactFeatures:{...ix.C.impactFeatures,fingerprintPromptVersion:1}};write('enrichment/view-index.json',ix);}// AIR-558: the fixture follows the stored pointer
  assert.equal(pointer('C').fingerprintPromptVersion,1);assert.equal(keysUnder('enrichment/films/C/fingerprint-generations/').length,2,'the same body under prompt 1 adds no record');
 }
 

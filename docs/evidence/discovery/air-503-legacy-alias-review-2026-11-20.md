@@ -106,3 +106,7 @@ Columns: the observation key and Film; the Film's title and original; its runtim
 ## Limits
 
 The reading is one person's, from stored fields only; TMDB, XMLTV and R2 were not read. The 51 are the active observations of the latest run; the other 171 pairs have no active observation and are not in the table. Durations are the stored distinct values (at most twelve), not every airing.
+
+## Follow-up, 21 November 2026
+
+The owner's natural-run verification on the completed run `984821d8-397f-488b-883f-9be48a9a84c1` (reported on the card, not repeated here) found that PR #825 recovered 1 of the 51 active observations (`двадцать восемь панфиловцев`, anchor 130) and left 49 without `anchor`, `failedDurations` or `movieTitles`. Its root-cause analysis showed why: the priority pass depended on the replay page and the touch page meeting. The cohort now has its own read, cursor and diagnostics ([ADR 0158](../../adr/0158-epg-title-alias-provenance.md), second follow-up). The table above is unchanged and still awaits the owner's decisions; owner review of the remainder is for after the revalidation has actually run, not before.

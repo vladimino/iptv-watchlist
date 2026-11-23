@@ -186,8 +186,8 @@ export function Probe(bundle){
    const bucket=new AuditBucket(scenario.snapshot);
    const db=d1Standin(file,{onQuery:async text=>{const shape=d1Shape(text);if(shape){effects.d1.push(shape);effects.statements.push(normalizeSql(text));}},onBatch:async statements=>{for(const item of statements){const shape=d1Shape(item.text);if(shape){effects.d1.push(shape);effects.statements.push(normalizeSql(item.text));}}}});
    const stub={create:async()=>{effects.workflows++;return {id:'x'};},get:async()=>{effects.workflows++;return {status:async()=>({status:'running'})};}};
-   const env={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',EPG_XML_URL:'https://epg.test/guide.xml',LETTERBOXD_USERNAME:'tester',MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD,DISCOVERY_WORKFLOW:stub,RATINGS_WORKFLOW:stub,EPG_WORKFLOW:stub,PRODUCER_WORKFLOW:stub};
-   if(scenario.spec.d1)env.DB=db;
+   const env={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',EPG_XML_URL:'https://epg.test/guide.xml',LETTERBOXD_USERNAME:'tester',MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD,DISCOVERY_WORKFLOW:stub,EPG_WORKFLOW:stub,PRODUCER_WORKFLOW:stub};
+   if(scenario.spec.d1){env.DB=db;env.EPG_CHECKPOINT_DB_OPTIONAL='standin';}
    else Object.assign(env,standins());
    const execution={waitUntil:()=>{effects.background++;},exports:{DiscoveryContinuation:{fetch:async()=>{effects.dispatches++;return new Response('{}');}}}};
    current=effects;

@@ -89,9 +89,10 @@ for(const [file,text] of texts)for(const m of text.matchAll(/([A-Za-z_$][A-Za-z0
 const FILE_SITES={
  'src/admin/discovery-recovery.js':{r2:11,wrapper:0,dynamic:9},
  'src/admin/film-title-route.js':{r2:1,wrapper:0,dynamic:0},
- 'src/admin/letterboxd-archive-apply.js':{r2:3,wrapper:0,dynamic:1},
+ 'src/admin/letterboxd-archive-apply.js':{r2:2,wrapper:0,dynamic:1}, // AIR-558: -1 write, the candidates-rollback marker of the retired archive rollback
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
  'src/catalog-poster-weekly.js':{r2:2,wrapper:0,dynamic:1},   // ADR 0179 (AIR-543): the weekly poster checkpoint (epg/catalog-poster-weekly.json) and the immutable catalog_posters events (events/items/<reverse-timestamp>-<id>.json); neither is a projector input
+ 'src/letterboxd-sync.js':{r2:1,wrapper:0,dynamic:1},   // ADR 0186: the create-only put of a slot Event (events/items/..., not a projector input)
  'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0118: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)
  'src/discovery.js':{r2:8,wrapper:15,dynamic:3},
  // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
@@ -100,7 +101,7 @@ const FILE_SITES={
  // of the run's films) and the interrupted record of a recovered earlier run (`enrichment/runs/<runId>.json`). Neither is a projector input or on a Discovery, admin-recovery or publication path.
  // Batch runner v2 batch_submit: +1 r2 site, +1 wrapper site and +1 dynamic key, all of the shape the v5 runner already writes: `runnerLeaseEdit` puts the runner lease object (the same key `runnerLease` puts, in the object
  // mode) and the per-film `enrichment/films/<id>/predictions.json` bundle (the key the v5 submit writes). Neither is a projector input or on a Discovery, admin-recovery or publication path.
- 'src/enrichment.js':{r2:17,wrapper:42,dynamic:32}, // AIR-552: -2 wrapper, the per-film mood-facet.json puts of updateViewIndex and the mood backfill (no reader, not a projector input). AIR-452: -6 wrapper and -3 dynamic, the retired v5 start/next/submit, the v5 start Event and the request object scope only they created (ADR 0167); none was a projector input. AIR-510: batch-manifest persist plus transferable batch-stage drain/hold; not a projector input. AIR-79: -3 wrapper and -3 dynamic, the three mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,...) writes of the removed lookupRemovalRatings (the removal queue, not a projector input; the Ratings step keeps its own) AIR-548: +1 r2, the create-only park of a skipped-start Event under enrichment/stop-events/skipped-<requestId>.json (prediction Events outbox, not a projector input; ADR 0180). AIR-548 (index first, review of PR #805): +1 wrapper and +1 dynamic, clearEventOutbox, mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) removing a delivered skipped-start entry from the same Predictions Events outbox index (not a projector input). AIR-548 (idempotent fallback, round 2): +1 r2, the compensating `BUCKET.delete` of an unindexed skipped-start record whose delivery failed (never a projector input). AIR-548 (round 3): +1 wrapper, recordSkippedStart now calls saveJSON for the `delivered` marker and writeEvent for the journal item itself (separate steps so an existing item is never treated as lost); the same Predictions Events outbox, never a projector input.
+ 'src/enrichment.js':{r2:19,wrapper:39,dynamic:34}, // ADR 0196 (AIR-554): +2 r2 and +1 dynamic: the guarded bucket wrapper of the admission close forwards put and delete after the marker read (the same keys the callers chose, never a projector input); // AIR-553: +1 wrapper and +1 dynamic: the unchanged legacy manifest save now runs inside the timed `manifest_ready` stage (the same R2 write of the same key, not a projector input); the D1 branches add no R2 write, and the sources, stage, manifest and outbox keys stay classified as before, // // AIR-558: -1 r2 and -4 wrapper, the removed raw view-index writers (updateViewIndex CAS put and its mood-facet puts, ensureInitialRatings seed merge, the mood and fingerprint-view backfills); none a projector input, no other write changed. ADR 0193 / AIR-573: +1 r2, one create-only helper `writeCreateOnly` whose key is a parameter (the terminal outcome `enrichment/batch-start/<runId>.json` and the attempt marker `enrichment/batch-start/attempt/<runId>.json` of a deferred prediction start: Predictions run records, no reader among the projector inputs). AIR-552: -2 wrapper, the per-film mood-facet.json puts of updateViewIndex and the mood backfill (no reader, not a projector input). AIR-452: -6 wrapper and -3 dynamic, the retired v5 start/next/submit, the v5 start Event and the request object scope only they created (ADR 0167); none was a projector input. AIR-510: batch-manifest persist plus transferable batch-stage drain/hold; not a projector input. AIR-79: -3 wrapper and -3 dynamic, the three mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,...) writes of the removed lookupRemovalRatings (the removal queue, not a projector input; the Ratings step keeps its own) AIR-548: +1 r2, the create-only park of a skipped-start Event under enrichment/stop-events/skipped-<requestId>.json (prediction Events outbox, not a projector input; ADR 0180). AIR-548 (index first, review of PR #805): +1 wrapper and +1 dynamic, clearEventOutbox, mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) removing a delivered skipped-start entry from the same Predictions Events outbox index (not a projector input). AIR-548 (idempotent fallback, round 2): +1 r2, the compensating `BUCKET.delete` of an unindexed skipped-start record whose delivery failed (never a projector input). AIR-548 (round 3): +1 wrapper, recordSkippedStart now calls saveJSON for the `delivered` marker and writeEvent for the journal item itself (separate steps so an existing item is never treated as lost); the same Predictions Events outbox, never a projector input.
  'src/filter-presets.js':{r2:1,wrapper:0,dynamic:0},
  'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
  'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},
@@ -110,21 +111,24 @@ const FILE_SITES={
  'src/monitor.js':{r2:1,wrapper:0,dynamic:0},
  'src/owner-review-d1.js':{r2:1,wrapper:0,dynamic:0}, // ADR 0162: -1 r2, the env.BUCKET.put of the retired mode-r2 commit; only the mirror put after a d1 commit remains
  'src/prediction-d1.js':{r2:3,wrapper:0,dynamic:0}, // ADR 0162: -2 r2, the mirror put of the retired revert toolchain (putSent) and its repair write; the D1 mirror put and the stand-in queue and lease puts remain
- 'src/published-epg.js':{r2:2,wrapper:8,dynamic:8},
+ // AIR-571 (C3, M1 adds putStandaloneWatchlistRoot with one more direct conditional put: r2 5): the root `watchlist.json` mirror has one guarded writer, putWatchlistRoot (two direct conditional puts of the root key: the first write of an absent object and the compare-and-swap of an existing one);
+ // the two former putStable calls of that key (replacePart, writeMirrors) go through it, so wrapper and dynamic sites each lose one and the direct puts gain two.
+ 'src/published-epg.js':{r2:5,wrapper:7,dynamic:7},
  // AIR-410: +1 for writeDiscoveryEvent, the create-only put of one `discovery` Events Log entry (events/items/..., not a projector input).
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
  // ADR 0145: +1 r2 put of `epg/seal/<runId>/publication.json` in `stageSealedGeneration` and +1 dynamic delete of that key in `sealQueueStep`
  // (the leftover `payload.json` delete stays). Neither object is a projector input; both sit on the publication path that already takes the lease.
- 'src/worker.js':{r2:16,wrapper:57,dynamic:19}, // AIR-513: flushWatchlistEvent (including the failed-put mark) and the seal completion flush save sync.json, not a projector input. AIR-79: -1 wrapper, the saveJSON(env,'sync.json',run) of the removed ratingsPhase
+ 'src/worker.js':{r2:16,wrapper:58,dynamic:19}, // AIR-569: +1 wrapper, the run record sync.json saved when a Watchlist-pinned run replaces its events by the epg event alone, not a projector input. AIR-513: flushWatchlistEvent (including the failed-put mark) and the seal completion flush save sync.json, not a projector input. AIR-79: -1 wrapper, the saveJSON(env,'sync.json',run) of the removed ratingsPhase
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
 assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');
 // The complete list of sites that name a key of a projector input that is not Discovery's. Each belongs to a path of its own domain.
 const INPUT_WRITERS={
  "src/admin/film-title-route.js|env.BUCKET.put|OWNER_REVIEWS_KEY":{count:1,owner:'admin Film title route (owner review), its own route'},
- "src/enrichment.js|mergeStoredJSON|ENRICHMENT_KEY+'view-index.json'":{count:3,owner:'ratings and removal view-index maintenance, its own paths (AIR-452: -1, the retired v5 next index repair)'},
+ // AIR-558: the three view-index mergeStoredJSON sites (ratings and removal view-index maintenance) are removed with the raw writers; D1 owns the view index.
  "src/metadata-cache.js|bucket.put|MIRROR_KEY":{count:1,owner:'metadata cache R2 mirror, its own domain'},
  "src/owner-review-d1.js|bucket.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
+ "src/published-epg.js|bucket.put|WATCHLIST_KEY":{count:3,owner:'the guarded writers of the root watchlist.json mirror: putWatchlistRoot (EPG side, two puts, AIR-571 C3) and putStandaloneWatchlistRoot (Watchlist side, one put, AIR-571 M1); the Watchlist marker decides which of them may write'},
  "src/worker.js|saveCanonicalMirror|'people.json'":{count:2,owner:'metadata and EPG sync Persons, re-gated at put'},
  "src/worker.js|saveCanonicalMirror|'titles.json'":{count:2,owner:'metadata and EPG sync titles, re-gated at put'},
  "src/worker.js|saveJSON|'watchlist.json'":{count:3,owner:'EPG publication and watchlist persistence, under the publication lease'},
@@ -171,6 +175,7 @@ const classes={
  // Compatibility mirrors of D1-owned published documents: written by read-repair without the lease, never read by the projector under a
  // published D1 snapshot (section 3 below).
  'putStable@src/published-epg.js':'R2 compatibility mirror of a D1-owned published document',
+ 'putWatchlistRoot@src/published-epg.js':'R2 compatibility mirror of the root watchlist.json: read, marker check after the read, conditional put (AIR-571 C3); never read by the projector under a published D1 snapshot',
  // The publication and seal paths: each entry takes the Discovery lease before its first write (section 4 below).
  'sealStep@src/worker.js':'publication entry, lease first',
  'stageSealedGeneration@src/worker.js':'publication entry, lease first',
@@ -196,6 +201,7 @@ const classes={
  'catalogPosterNegativesSave@src/discovery.js':'the poster negative index epg/catalog-poster-negatives.json (not a projector input), by compare-and-swap: the route, the weekly sweep and the admission seed, which runs inside the chunk that holds the lease',
  'writeCheckpoint@src/catalog-poster-weekly.js':'the weekly poster checkpoint epg/catalog-poster-weekly.json (not a projector input), by compare-and-swap; the daily cron entry only',
  'deliver@src/catalog-poster-weekly.js':'immutable catalog_posters events under events/items/ (not a projector input) and the outbox mark; the daily cron entry only',
+ 'putEvent@src/letterboxd-sync.js':'immutable slot Events (ratings, watchlist) under events/items/ by a create-only put (not a projector input); reached only from the Letterboxd Sync delivery, never from Discovery or publication (the name is matched, the call graph is not)',
 };
 const reached=new Set([...writers(chunk),...writers(publication)]);
 for(const key of reached)assert.ok(classes[key],'unclassified R2 writer reachable from Discovery or publication: '+key+' (classify it against the projector inputs)');
@@ -212,7 +218,9 @@ for(const name of notDiscovery)assert.ok(inputs.has(name),'the projector reads '
 const naming=set=>[...set.keys()].filter(key=>notDiscovery.some(name=>set.get(key).d.body.includes("'"+name+"'"))).sort();
 const NAMING={
  'loadJSON@src/worker.js':'a read of published documents and other JSON; it does not write',
+ 'catalogMetadataRead@src/worker.js':'AIR-569: a READ of the canonical metadata (D1 reader in d1 mode, else the metadata.json mirror) for the identity of a new Watchlist member; it writes nothing',
  'putStoredJson@src/worker.js':'frozen titles.json/people.json put after epgStepGuard; other keys are ordinary R2 JSON',
+ 'saveJSON@src/worker.js':'generic writer: the root watchlist.json key is routed to the one guarded writer (PublishedEpg.putWatchlistRoot) through saveWatchlistRoot (AIR-571 C3); every other key as before',
  'writeMirrors@src/published-epg.js':'writes those mirrors from the D1 document, idempotently',
  'persistWatchlist@src/worker.js':'publication path, under the lease',
  'persistScan@src/worker.js':'publication scan path; reads view-index to plan watchlist false retention, writes no frozen mirror',

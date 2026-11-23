@@ -16,12 +16,14 @@ export const THRESHOLDS = Object.freeze({
   // Predictions have no threshold here: the one no-progress limit (60 minutes) lives in enrichment.js beside the Footer's use of it, and the monitor
   // passes its verdict in `facts.stall` (AIR-556), so the two surfaces cannot disagree.
   switchStuckMs: 2 * HOUR,            // a mode switch that stays open
+  producerNoProgressMs: 2 * HOUR,     // AIR-572: the canonical Producer has no DURABLE progress for this long after publication or its last progress
 });
 export const ALERT_POLICY = Object.freeze({
   confirmSnapshots: 2,                // degraded issues alert after this many consecutive snapshots; needs_owner at once
   // AIR-556: the prediction no-progress verdict is computed from stored run times, not from a transient read, so one snapshot confirms it. With
   // the 60-minute limit and the hourly Cron tick the alert follows the last confirmed progress by 60 to about 120 minutes (+ cron/Telegram latency).
-  confirmSnapshotsByKey: Object.freeze({predictions_no_progress: 1}),
+  // AIR-572: both Producer verdicts come from stored durable facts (run counters, chain state), so one snapshot confirms them.
+  confirmSnapshotsByKey: Object.freeze({predictions_no_progress: 1, canonical_producer_no_progress: 1, canonical_producer_failed: 1}),
   cooldownMs: Object.freeze({degraded: 6 * HOUR, needs_owner: 2 * HOUR}),
   maxPerIssuePerDay: 8,
 });
@@ -107,6 +109,32 @@ export function evaluateRatings(model, now) {
   return {stream: 'ratings', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {mode: model.mode ?? null, health: health ?? null}};
 }
 
+// ---- Letterboxd Sync (ADR 0186): the slot read model derives health; the stream exists only while the executor is `switching` or `cloudflare` (facts are supplied by the monitor then), so a dormant
+// executor adds nothing. A slot or Watchlist problem is actionable; a pending Event backlog is actionable only when it has grown past one day of slots.
+export function evaluateLetterboxd(model, now) {
+  if (!model || model.error) return unreadable('letterboxd', 'Letterboxd Sync');
+  const issues = [];
+  const health = model.health;
+  let state = 'healthy';
+  if (health === 'waiting' || health === 'switching') state = 'waiting';
+  else if (health === 'late') { state = 'degraded'; issues.push(issue('letterboxd_slot_late', 'degraded', 'letterboxd', 'A Letterboxd slot is due and no run was started')); }
+  else if (health === 'stalled') { state = 'degraded'; issues.push(issue('letterboxd_slot_stalled', 'degraded', 'letterboxd', 'A Letterboxd slot stayed open after its window ended')); }
+  else if (health === 'missed') { state = 'degraded'; issues.push(issue('letterboxd_slot_missed', 'degraded', 'letterboxd', 'A Letterboxd slot was missed and recorded without a run')); }
+  else if (health === 'failed') { state = 'degraded'; issues.push(issue('letterboxd_slots_failed', 'degraded', 'letterboxd', 'The last Letterboxd slot failed for both sources')); }
+  else if (health === 'quarantined') { state = 'needs_owner'; issues.push(issue('letterboxd_quarantined', 'needs_owner', 'letterboxd', 'Letterboxd Sync is quarantined' + (model.quarantine?.reason ? ' (' + model.quarantine.reason + ')' : ''))); }
+  else if (health === 'unreadable') { state = 'degraded'; issues.push(issue('letterboxd_unreadable', 'degraded', 'letterboxd', 'The Letterboxd Sync read model could not be read')); }
+  if (model.sources?.watchlist?.stale) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_watchlist_stale', 'degraded', 'letterboxd', model.sources.watchlist.warning === 'watchlist_never_succeeded' ? 'No complete Watchlist scan has succeeded since the executor started' : 'No complete Watchlist scan has succeeded for 24 hours')); }
+  // Each source has its own signal: one update can fail while the other succeeds (the approved contract), and neither outcome hides or rewrites the other's confirmed success. A rate limit is "not now" and never alerts.
+  const sourceIssue = (key, label, outcome) => {
+    if (['error', 'blocked', 'interrupted', 'unavailable', 'incomplete', 'disabled'].includes(outcome)) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue(key + '_failed', 'degraded', 'letterboxd', 'The last Letterboxd slot did not update ' + label + ' (' + outcome + ')')); }
+    else if (outcome === 'rate_limited') { if (STATE_RANK[state] < STATE_RANK.delayed) state = 'delayed'; issues.push(issue(key + '_rate_limited', 'delayed', 'letterboxd', label + ' was rate limited in the last Letterboxd slot')); }
+  };
+  if (health !== 'failed') { sourceIssue('letterboxd_ratings', 'Ratings', model.sources?.ratings?.lastOutcome); sourceIssue('letterboxd_watchlist', 'the Watchlist', model.sources?.watchlist?.lastOutcome); }
+  if (Number.isInteger(model.eventsPending) && model.eventsPending >= 8) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_events_backlog', 'degraded', 'letterboxd', 'Letterboxd slot Events are waiting for delivery')); }
+  const all = worst(issues);
+  return {stream: 'letterboxd', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {mode: model.mode ?? null, health: health ?? null, slot: model.slot?.key ?? null, eventsPending: model.eventsPending ?? null}};
+}
+
 // ---- Prediction queue (AIR-556): an empty or fully deferred queue is healthy or waiting; eligible work with no confirmed progress is not.
 // `facts.stall` is the verdict of the one shared assessment in enrichment.js (`predictionStallAssessment`): running | ok | idle | waiting | unknown | no_progress.
 // Confirmed progress is a productive batch or a drained run, never a heartbeat, `already_running`, a noop wake-up or a queue recount. The monitor does
@@ -124,12 +152,12 @@ export function evaluatePredictions(facts, previous, now) {
     if (stall.state === 'no_progress') {
       state = 'degraded';
       const last = time(facts.lastProgressAt);
-      issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why));
+      issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (stall.reason === 'repeated_orphan_starts' ? ', with ' + (Number.isInteger(stall.orphanStarts) ? stall.orphanStarts : 'repeated') + ' ownerless starts since (turned-away or abandoned without a film)' : '') + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why));
     } else if (stall.state === 'waiting') state = 'waiting';
     else if (stall.state === 'unknown') state = 'delayed'; // unreadable queue split or no progress evidence yet: visible, never healthy, never an alert by itself
   }
   const all = worst(issues);
-  return {stream: 'predictions', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {pendingCount: pending, eligibleNow: eligible, stall: stall.state, idleMs: stall.idleMs ?? null, lastProgressAt: facts.lastProgressAt ?? null}};
+  return {stream: 'predictions', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {pendingCount: pending, eligibleNow: eligible, stall: stall.state, stallReason: stall.reason ?? null, idleMs: stall.idleMs ?? null, lastProgressAt: facts.lastProgressAt ?? null}};
 }
 
 // ---- Catalog posters (AIR-543, ADR 0179): the weekly poster sweep, judged by the one projection of its R2 checkpoint (CatalogPosterWeekly.project).
@@ -144,6 +172,36 @@ export function evaluateCatalogPosters(facts) {
   return {stream: 'catalog_posters', state: facts.monitor, issues, facts: {state: facts.state, detail: facts.detail ?? null, freshnessAt: facts.freshnessAt ?? null, nextExpectedAt: facts.nextExpectedAt ?? null}};
 }
 
+// ---- Canonical Producer (AIR-572): the EPG -> canonical Film/Person Producer, judged by DURABLE progress only. `facts.sinceAt` is the reference time of the
+// last evidence of life (the later of the last stored progress and the start of the current no-progress streak), computed by the Monitor from the run's own
+// counters. A publication, a takeover, a lease renewal or a heartbeat never moves it. `current` means exactly one thing: the run of the published generation is
+// `passed` and its applied generation equals the published one. The stream is never `healthy` merely because the EPG publication succeeded.
+const IDENTITY_STOP = /^producer_identity_/;
+export function evaluateCanonicalProducer(facts, now) {
+  if (!facts || facts.error || facts.readable === false) return unreadable('canonical_producer', 'canonical Producer');
+  const out = (state, status, issues, extra = {}) => ({stream: 'canonical_producer', state, issues,
+    facts: {status, held: !!facts.held, generation: facts.label ?? null, chain: facts.chain?.ownerState ?? null, run: facts.run?.passState ?? null, progressAt: facts.progressAt ?? null, ...extra}});
+  if (facts.held) {
+    // A deliberate delivery hold: honest and visible, never healthy and never a success. It is not an alert (the owner chose it).
+    return out('delayed', 'held_by_delivery', [issue('canonical_producer_held_by_delivery', 'delayed', 'canonical_producer', 'The canonical Producer is held by delivery: no Producer progress is expected until the hold is lifted')]);
+  }
+  if (!facts.label) return out('waiting', 'waiting', []);
+  const run = facts.run, chain = facts.chain;
+  if (run && run.passState === 'passed' && run.sourceGeneration === facts.label && run.appliedGeneration === facts.label) return out('healthy', 'current', []);
+  const stoppedBy = chain?.ownerState === 'stopped' ? (chain.stoppedBy || 'unclassified') : run?.passState === 'stopped' ? (run.stoppedBy || 'unclassified') : null;
+  if (stoppedBy) {
+    const hard = IDENTITY_STOP.test(stoppedBy) || ['terminal', 'fail_closed', 'exhausted'].includes(chain?.recoveryClass || 'fail_closed');
+    const severity = hard ? 'needs_owner' : 'degraded';
+    return out(severity, hard ? 'blocked' : 'failed', [issue('canonical_producer_failed', severity, 'canonical_producer', 'The canonical Producer stopped (' + String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60) + ')' + (hard ? '; it needs the owner' : '; automatic recovery is pending'))], {stoppedBy});
+  }
+  const since = time(facts.sinceAt), age = since === null ? null : Math.max(0, now - since);
+  if (age === null || age > THRESHOLDS.producerNoProgressMs) {
+    return out('degraded', 'stalled', [issue('canonical_producer_no_progress', 'degraded', 'canonical_producer', 'The canonical Producer has shown no durable progress for ' + (age === null ? 'an unknown time' : hours(age) + ' h') + ' (chain ' + (chain?.ownerState || 'absent') + ', run ' + (run?.passState || 'absent') + ')')], {noProgressHours: age === null ? null : hours(age)});
+  }
+  const published = time(facts.publishedAt);
+  return out('waiting', published !== null && now - published > THRESHOLDS.producerNoProgressMs ? 'lagging' : 'waiting', []);
+}
+
 // All four streams (plus catalog posters when its facts are supplied) and the overall state. A stream that is `delayed` or `waiting` is recorded but never alerts.
 export function evaluateAll(facts, previous, now, helpers) {
   const streams = [
@@ -152,6 +210,8 @@ export function evaluateAll(facts, previous, now, helpers) {
     evaluateRatings(facts.ratings, now),
     evaluatePredictions(facts.predictions, previous?.predictions ?? null, now),
     ...(facts.catalogPosters === undefined ? [] : [evaluateCatalogPosters(facts.catalogPosters)]),
+    ...(facts.letterboxd === undefined ? [] : [evaluateLetterboxd(facts.letterboxd, now)]),
+    ...(facts.canonicalProducer === undefined ? [] : [evaluateCanonicalProducer(facts.canonicalProducer, now)]),
   ];
   const issues = streams.flatMap(stream => stream.issues);
   const overall = streams.reduce((state, stream) => STATE_RANK[stream.state] > STATE_RANK[state] ? stream.state : state, 'healthy');

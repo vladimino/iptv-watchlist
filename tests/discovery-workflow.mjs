@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 
 const records=new Map(),etags=new Map();let revision=0,puts=[];
 const bucket={
@@ -27,6 +28,7 @@ vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/continuation.js','src/discovery-workflow.js','src/worker.js']){
  vm.runInContext(fs.readFileSync(file,'utf8').replace(/export \{[^}]+\};/g,'').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 }
+installViewIndexFixture(context);
 const worker=context.worker,call=code=>vm.runInContext(code,context),realAdvance=context.advanceDiscovery;
 const execution={waitUntil(){}};
 const origin='https://iptv.example',headers={'Content-Type':'application/json'};
@@ -339,7 +341,7 @@ assert.equal(quarantined.reason,'recovery_exhausted');assert.equal(creates.lengt
 // 11. The production entry stays inert: no flag, no Workflow schedule, cron may reconcile but does not run a chunk.
 const wrangler=JSON.parse(fs.readFileSync('wrangler.jsonc','utf8'));
 assert.equal(wrangler.main,'dist/server/workflow-entry.js');
-assert.deepEqual(wrangler.triggers.crons,['0 * * * *','1-59/2 * * * *','24 3 * * *'],'the hourly cron, the AIR-534 Discovery-only fast cron and the AIR-543 daily poster cron (ADR 0179)');
+assert.deepEqual(wrangler.triggers.crons,['0 * * * *','1-59/2 * * * *','24 3 * * *','30 * * * *'],'the hourly cron, the AIR-534 Discovery-only fast cron, the AIR-543 daily poster cron (ADR 0179) and the AIR-571 Letterboxd Sync cron (ADR 0186)');
 assert.equal(wrangler.vars.DISCOVERY_EXECUTOR,undefined);
 assert.equal(JSON.stringify(wrangler).includes('schedules'),false);
 assert.equal(wrangler.workflows[0].binding,'DISCOVERY_WORKFLOW');
@@ -353,7 +355,7 @@ const indexWrite=build.slice(build.indexOf("writeAtomic('dist/server/index.js'")
 assert.match(indexWrite,/src\/discovery-workflow\.js/);
 assert.doesNotMatch(indexWrite,/cloudflare:workers/);
 assert.match(build,/import \{ WorkflowEntrypoint \} from 'cloudflare:workers'/);
-assert.match(build,/export \{ runDiscoveryWorkflow, reconcileDiscoveryWorkflow(, runRatingsWorkflow)?(, runEpgWorkflow)?(, runProducerWorkflow)? \}/);
+assert.match(build,/export \{ runDiscoveryWorkflow, reconcileDiscoveryWorkflow(, runEpgWorkflow)?(, runProducerWorkflow)?(, runLetterboxdWorkflow)?(, runPredictionStartWorkflow)? \}/);
 
 async function fireCron(environment=env){
  const pending=[];

@@ -39,8 +39,8 @@ function moodIdsFromUrl(value){const key=normalizeMood(value).replace(/ё/g,"е"
 let mechanics=[],moods=[];
 function defaultSearchScopes(){return {titles:true,people:false,plot:false};}
 const SEARCH_SCOPE_IDS=['titles','people','plot'];
-const state = { shortlistMode:'available', period: 'all', sort: 'personal', sortExplicit:false, viewing: 'any', minPrediction: null, minProbability: null, startedOnly: false, lastChanceOnly: false, includeUnscheduled: false, directors: '', actors: '', query: '', searchScopes:defaultSearchScopes(), genres: new Set(), mechanics:new Set(), moods:new Set(), channels:new Set(), execution:emptyExecution(), from: 1900, to: MAX_YEAR, maxRuntime: null };
-const APP_QUERY_KEYS = ['shortlist','view','period','q','searchIn','sort','genre','mechanic','mood','channel','execution','from','to','runtime','viewing','started','lastChance','director','actor','prediction','chance'];
+const state = { shortlistMode:'available', period: 'all', sort: 'personal', sortExplicit:false, viewing: 'any', minPrediction: null, minProbability: null, minActualRating: null, startedOnly: false, lastChanceOnly: false, includeUnscheduled: false, directors: '', actors: '', query: '', searchScopes:defaultSearchScopes(), genres: new Set(), mechanics:new Set(), moods:new Set(), channels:new Set(), execution:emptyExecution(), from: 1900, to: MAX_YEAR, maxRuntime: null };
+const APP_QUERY_KEYS = ['shortlist','view','period','q','searchIn','sort','genre','mechanic','mood','channel','execution','from','to','runtime','viewing','started','lastChance','director','actor','prediction','chance','rating'];
 let urlReady=false,urlRestoring=false,viewClock=null,programmeRefreshError=false;
 function nowMs(){return viewClock??Date.now();}
 function finiteTime(value){const n=typeof value==='number'?value:Date.parse(value);return Number.isFinite(n)?n:null;}
@@ -115,7 +115,7 @@ function syncSearchControls(){
  });
 }
 function readUrlState(url){
- const p=url.searchParams,defaults={shortlistMode:'available',period:'all',sort:'personal',sortExplicit:false,viewing:'any',minPrediction:null,minProbability:null,startedOnly:false,lastChanceOnly:false,includeUnscheduled:false,directors:'',actors:'',query:'',searchScopes:parseSearchScopes(p.get('searchIn')),genres:new Set(),mechanics:new Set(),moods:new Set(),channels:new Set(),execution:emptyExecution(),from:1900,to:MAX_YEAR,maxRuntime:null};
+ const p=url.searchParams,defaults={shortlistMode:'available',period:'all',sort:'personal',sortExplicit:false,viewing:'any',minPrediction:null,minProbability:null,minActualRating:null,startedOnly:false,lastChanceOnly:false,includeUnscheduled:false,directors:'',actors:'',query:'',searchScopes:parseSearchScopes(p.get('searchIn')),genres:new Set(),mechanics:new Set(),moods:new Set(),channels:new Set(),execution:emptyExecution(),from:1900,to:MAX_YEAR,maxRuntime:null};
  defaults.shortlistMode=normalizeShortlistMode(p.get('shortlist'));
  if(p.get('view')==='watchlist')defaults.includeUnscheduled=true;
  defaults.period=normalizePeriod(p.get('period'))||'all';
@@ -142,6 +142,8 @@ function readUrlState(url){
  const prediction=Number(p.get('prediction')),chance=Number(p.get('chance'));
  if([3.5,4,4.5].includes(prediction))defaults.minPrediction=prediction;
  if([0.5,0.7,0.85].includes(chance))defaults.minProbability=chance;
+ const rating=Number(p.get('rating'));
+ if(ACTUAL_RATING_THRESHOLDS.includes(rating))defaults.minActualRating=rating;
  return defaults;
 }
 function urlForState(current){
@@ -169,13 +171,14 @@ function urlForState(current){
  if(state.actors)add('actor',state.actors);
  if(state.minPrediction!==null)add('prediction',state.minPrediction);
  if(state.minProbability!==null)add('chance',state.minProbability);
+ if(state.minActualRating!==null)add('rating',state.minActualRating);
  return url;
 }
 function filterStateKey(snapshot=state){
  const execution={};
  for(const dimension of EXECUTION_FILTERS)execution[dimension.id]=[...(snapshot.execution?.[dimension.id]||[])].sort();
  const scopes=activeSearchScopes(snapshot.searchScopes);
- return JSON.stringify({shortlistMode:snapshot.shortlistMode,period:snapshot.period,sort:snapshot.sort,viewing:snapshot.viewing,minPrediction:snapshot.minPrediction,minProbability:snapshot.minProbability,startedOnly:!!snapshot.startedOnly,lastChanceOnly:!!snapshot.lastChanceOnly,includeUnscheduled:!!snapshot.includeUnscheduled,directors:snapshot.directors||'',actors:snapshot.actors||'',query:snapshot.query||'',searchScopes:{titles:scopes.titles,people:scopes.people,plot:scopes.plot},genres:[...(snapshot.genres||[])].sort(),mechanics:[...(snapshot.mechanics||[])].sort(),moods:[...(snapshot.moods||[])].sort(),channels:[...(snapshot.channels||[])].sort(),execution,from:snapshot.from,to:snapshot.to,maxRuntime:snapshot.maxRuntime});
+ return JSON.stringify({shortlistMode:snapshot.shortlistMode,period:snapshot.period,sort:snapshot.sort,viewing:snapshot.viewing,minPrediction:snapshot.minPrediction,minProbability:snapshot.minProbability,minActualRating:snapshot.minActualRating??null,startedOnly:!!snapshot.startedOnly,lastChanceOnly:!!snapshot.lastChanceOnly,includeUnscheduled:!!snapshot.includeUnscheduled,directors:snapshot.directors||'',actors:snapshot.actors||'',query:snapshot.query||'',searchScopes:{titles:scopes.titles,people:scopes.people,plot:scopes.plot},genres:[...(snapshot.genres||[])].sort(),mechanics:[...(snapshot.mechanics||[])].sort(),moods:[...(snapshot.moods||[])].sort(),channels:[...(snapshot.channels||[])].sort(),execution,from:snapshot.from,to:snapshot.to,maxRuntime:snapshot.maxRuntime});
 }
 function eventsRequested(href=window.location.href){const url=new URL(href);if(url.searchParams.get('screen')==='events')return true;const path=url.pathname.replace(/\/+$/,'')||'/';return path==='/events';}
 const FILM_ID=/^[A-Za-z0-9_-]{1,80}$/;
@@ -529,6 +532,8 @@ const eventPaging={error:null,stuck:false,seen:new Set(),run:0,paused:false};
 const EVENT_PREFETCH_LIMIT=3;let activityProgrammaticTop=null;
 // AIR-381: the events screen filters the loaded events by the type of event. Pure mapping: «Все события» shows every loaded event, known or not,
 // and the other buttons name the stored `type` values they stand for. A chosen type also searches older pages by itself (see startEventSearch).
+// AIR-584: the list names kinds of event only. A skipped prediction start (`batch_v2_skipped`) is a presentation of `enrichment`, shown under «Прогнозы» and
+// «Все события» with its `warning` result; it has no type button of its own, and the former `?type=skipped` falls back to «Все события» like any unknown id.
 const EVENT_TYPE_FILTERS=[
  {id:'all',label:'Все события',types:null},
  {id:'watchlist',label:'Watchlist и просмотр',types:['watchlist','started','unstarted']},
@@ -536,7 +541,6 @@ const EVENT_TYPE_FILTERS=[
  {id:'discovery',label:'Находки',types:['discovery']},
  {id:'ratings',label:'Оценки',types:['ratings']},
  {id:'enrichment',label:'Прогнозы',types:['enrichment']},
- {id:'skipped',label:'Пропущенные',types:['enrichment'],presentation:'batch_v2_skipped'},
  {id:'taste_profile',label:'Модель вкуса',types:['taste_profile']},
  {id:'catalog_posters',label:'Постеры',types:['catalog_posters']},
 ];
@@ -548,8 +552,7 @@ function eventTypeFrom(search){
 function eventMatchesType(event,id){
  const filter=EVENT_TYPE_FILTERS.find(item=>item.id===id);
  if(!filter||!filter.types)return true;
- // AIR-548: «Пропущенные» is a presentation of the `enrichment` type, not a type of its own.
- return filter.types.includes(event&&event.type)&&(!filter.presentation||event.presentation===filter.presentation);
+ return filter.types.includes(event&&event.type);
 }
 // Replaces only the `type` parameter of an href: every other parameter (the encoded `return` target included) and the fragment stay byte for byte.
 function withEventParam(href,name,id,allowed){
@@ -588,7 +591,13 @@ function eventPresentationStatus(event){
  switch(event.type){
   // A recorded user or publication action: the event exists only because the write committed. `success` is the success of that action, not a claim
   // about changed data: a watchlist with no diff or a baseline, and a taste profile of `scope=identity`, are still successful commits.
-  case 'epg':case 'watchlist':case 'started':case 'unstarted':case 'taste_profile':return 'success';
+  case 'epg':{
+   // A published generation is a successful publication, except when its structured warning says the Channel policy did not do its job: a degraded generation did not apply the
+   // blacklist, a failed registration left the declared channels unregistered (ADR 0191). Only these two codes; ordinary unknown or unclassified channels are never a warning.
+   const code=event.warning&&typeof event.warning==='object'?event.warning.code:null;
+   return code==='channel_policy_degraded'||code==='channel_registration_failed'?'warning':'success';
+  }
+  case 'watchlist':case 'started':case 'unstarted':case 'taste_profile':return 'success';
   case 'enrichment':{
    if(event.presentation==='batch_v2_skipped')return 'warning';
    const terminal=event.presentation==='batch_v2_terminal',stage=event.stage;
@@ -826,6 +835,11 @@ function filmEnrichmentItem(film){
  if(!(primary.watched===true||primary.watched===false)&&(secondary.watched===true||secondary.watched===false))item.watched=secondary.watched;
  return item;
 }
+// «Моя оценка» (AIR-585): the stored Letterboxd rating of the film, read through the same identity resolution as «Пересмотр»
+// (filmEnrichmentItem) and validated like the «МОЯ ОЦЕНКА» badge (ratingValue: 0.5..5 in half steps). «Любая» (null) is no constraint;
+// a threshold keeps only a known valid rating at or above it. A prediction never stands in for the rating, and «просмотрен» is not «оценён».
+const ACTUAL_RATING_THRESHOLDS=[3.5,4,4.5];
+function meetsActualRating(film){if(state.minActualRating===null)return true;if(!ratingsLoaded)return false;const rating=ratingValue(filmEnrichmentItem(film));return rating!==null&&rating>=state.minActualRating;}
 function hasActualRating(film){const rating=filmEnrichmentItem(film).actualRating;return rating!==null&&rating!==undefined;}
 function filmFacets(film){const item=filmEnrichmentItem(film),fingerprint=item.fingerprint||{},mechanics=(fingerprint.plotMechanics||[]).filter(m=>Object.hasOwn(MECHANIC_LABELS,m)),moods=(item.moodIds||fingerprint.moodIds||item.prediction?.moodIds||[]).filter(id=>Object.hasOwn(MOOD_LABELS,id));return {mechanics:new Set(mechanics),moods:new Set(moods)};}
 function filterMoodOptions(){const search=$('#mood-search'),count=$('#mood-option-count');if(!search||!count)return;const query=normalizeMood(search.value);let visible=0;document.querySelectorAll('#moods label').forEach(label=>{const show=!query||normalizeMood(moodLabel(label.querySelector('input').value)).replace(/ё/g,'е').includes(query.replace(/ё/g,'е'));label.hidden=!show;if(show)visible++;});count.textContent=query?`${visible} из ${moods.length} вариантов`:`${moods.length} вариантов · частые выше`;}
@@ -957,7 +971,7 @@ function updateExecutionOptions(){
  const empty=$('#execution-empty');if(empty)empty.hidden=sections.length>0;
  if(typeof box.querySelectorAll==='function')box.querySelectorAll('input').forEach(input=>{input.checked=!!state.execution[input.dataset.execution]?.has(input.value);});
 }
-function eligible(film) { const parsed=searchTokens(state.query); const matched=searchRank(film,parsed.normalized,parsed.tokens)!==null; const prediction=enrichment.films[String(film.id)]?.prediction,facets=filmFacets(film); return matched && (state.viewing==='any'||ratingsLoaded&&((state.viewing==='rewatch')===hasActualRating(film))) && (state.minPrediction===null||Number.isFinite(prediction?.predictedRating)&&prediction.predictedRating>=state.minPrediction) && (state.minProbability===null||Number.isFinite(prediction?.probability4Plus)&&prediction.probability4Plus>=state.minProbability) && (!state.startedOnly||startedIds.has(String(film.id))) && (!state.lastChanceOnly||isLastChance(film)) && ['directors','actors'].every(key=>!state[key]||(film[key]||[]).some(p=>p.id===state[key])) && ((film.year >= state.from && film.year <= state.to)||(!film.year&&state.from===1900&&state.to===MAX_YEAR)) && (state.maxRuntime===null||(Number(film.runtime)>0&&Number(film.runtime)<=state.maxRuntime)) && (!state.genres.size || film.genres.some(g => state.genres.has(g))) && (!state.mechanics.size||[...state.mechanics].some(m=>facets.mechanics.has(m))) && (!state.moods.size||[...state.moods].some(m=>facets.moods.has(m))) && matchesChannels(film) && matchesExecution(film); }
+function eligible(film) { const parsed=searchTokens(state.query); const matched=searchRank(film,parsed.normalized,parsed.tokens)!==null; const prediction=enrichment.films[String(film.id)]?.prediction,facets=filmFacets(film); return matched && (state.viewing==='any'||ratingsLoaded&&((state.viewing==='rewatch')===hasActualRating(film))) && (state.minPrediction===null||Number.isFinite(prediction?.predictedRating)&&prediction.predictedRating>=state.minPrediction) && (state.minProbability===null||Number.isFinite(prediction?.probability4Plus)&&prediction.probability4Plus>=state.minProbability) && meetsActualRating(film) && (!state.startedOnly||startedIds.has(String(film.id))) && (!state.lastChanceOnly||isLastChance(film)) && ['directors','actors'].every(key=>!state[key]||(film[key]||[]).some(p=>p.id===state[key])) && ((film.year >= state.from && film.year <= state.to)||(!film.year&&state.from===1900&&state.to===MAX_YEAR)) && (state.maxRuntime===null||(Number(film.runtime)>0&&Number(film.runtime)<=state.maxRuntime)) && (!state.genres.size || film.genres.some(g => state.genres.has(g))) && (!state.mechanics.size||[...state.mechanics].some(m=>facets.mechanics.has(m))) && (!state.moods.size||[...state.moods].some(m=>facets.moods.has(m))) && matchesChannels(film) && matchesExecution(film); }
 // The lifecycle of a film at the viewing clock over its shows inside the product windows and the loaded programme (`findsWindowShows` and the envelope: none in the black zone),
 // restricted to the SELECTED channels when there are any (as the Finds do): a recording on another channel is not an archive for a viewer who chose this channel, and a
 // repeat on the chosen channel is the only show there. `archive` holds the ready recordings, `ahead` the show on air and the shows that start inside the next 24 hours; the
@@ -1601,14 +1615,14 @@ function findsStrong(prediction){const confidence=effectiveConfidence(prediction
 // watchlist grid. Mechanics, moods and execution come only from the record's current fingerprint and prediction. The people search
 // scope is not evaluated on a catalog record. A selected director or actor is a hard constraint too, but only through the identity
 // GET: no confirmed cross-source catalog ids means no find. «Только начатые» and «Пересмотр» stay watchlist-only and still leave no
-// find. The record carries no synopsis or aliases, so the plot scope reads only genres and facets. The watchlist grid keeps matching
+// find; so does a «Моя оценка» threshold, since no find is rated. The record carries no synopsis or aliases, so the plot scope reads only genres and facets. The watchlist grid keeps matching
 // the stored role id and does not read this answer.
 function findsContext(){
  const validYear=Number.isInteger(state.from)&&Number.isInteger(state.to)&&state.from>=1900&&state.to<=MAX_YEAR&&state.from<=state.to,validRuntime=state.maxRuntime===null||(Number.isInteger(state.maxRuntime)&&state.maxRuntime>0);
  const person=!!(state.directors||state.actors);
- return {valid:validYear&&validRuntime,query:searchTokens(state.query),scopes:activeSearchScopes(state.searchScopes),genres:new Set(state.genres),genreKeys:findsGenreKeys(state.genres),mechanics:new Set(state.mechanics),moods:new Set(state.moods),execution:Object.fromEntries(EXECUTION_FILTERS.map(dimension=>[dimension.id,new Set(state.execution[dimension.id]||[])])),from:state.from,to:state.to,maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,viewing:state.viewing,startedOnly:state.startedOnly,lastChanceOnly:state.lastChanceOnly,person,people:person?findsPersonView():null};
+ return {valid:validYear&&validRuntime,query:searchTokens(state.query),scopes:activeSearchScopes(state.searchScopes),genres:new Set(state.genres),genreKeys:findsGenreKeys(state.genres),mechanics:new Set(state.mechanics),moods:new Set(state.moods),execution:Object.fromEntries(EXECUTION_FILTERS.map(dimension=>[dimension.id,new Set(state.execution[dimension.id]||[])])),from:state.from,to:state.to,maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,minActualRating:state.minActualRating,viewing:state.viewing,startedOnly:state.startedOnly,lastChanceOnly:state.lastChanceOnly,person,people:person?findsPersonView():null};
 }
-function findsContextActive(context){return !!context&&(context.query.tokens.length>0||context.genres.size>0||context.mechanics.size>0||context.moods.size>0||Object.values(context.execution).some(selected=>selected.size)||context.from!==1900||context.to!==MAX_YEAR||context.maxRuntime!==null||context.minPrediction!==null||context.minProbability!==null||context.lastChanceOnly||context.viewing!=='any'||context.startedOnly||context.person);}
+function findsContextActive(context){return !!context&&(context.query.tokens.length>0||context.genres.size>0||context.mechanics.size>0||context.moods.size>0||Object.values(context.execution).some(selected=>selected.size)||context.from!==1900||context.to!==MAX_YEAR||context.maxRuntime!==null||context.minPrediction!==null||context.minProbability!==null||context.minActualRating!==null||context.lastChanceOnly||context.viewing!=='any'||context.startedOnly||context.person);}
 // Genres are matched by canonical key, not by label: the watchlist carries the Letterboxd labels mapped by GENRE_MAP («Криминал»,
 // «Фантастика», «Исторический»), the catalog carries the TMDB ru-RU names («криминал», «фантастика», «история»). FINDS_GENRE_KEYS is a
 // copy of PROFILE_GENRE_ALIASES in src/domain/prediction-compatibility.js (a test keeps them equal); a name outside it matches only the
@@ -1637,7 +1651,7 @@ function findsSearchRank(film,context){
 function findsPersonHit(film,context){return !!context?.people?.ready&&context.people.ids.has(String(film.id));}
 function findsMatchesContext(film,context,now,scope){
  if(!context)return true;
- if(!context.valid||context.startedOnly||context.viewing==='rewatch')return false;
+ if(!context.valid||context.startedOnly||context.viewing==='rewatch'||context.minActualRating!==null)return false;
  if(context.person&&!findsPersonHit(film,context))return false;
  const p=film.prediction,facets=findsFacets(film),year=Number(film.year),runtime=Number(film.runtime);
  if(context.minPrediction!==null&&!(p.predictedRating>=context.minPrediction))return false;
@@ -2063,7 +2077,8 @@ function render(){
   document.querySelectorAll('[data-viewing]').forEach(b=>{b.setAttribute('aria-pressed',String(b.dataset.viewing===state.viewing));b.disabled=b.dataset.viewing!=='any'&&!ratingsLoaded;});
   document.querySelectorAll('[data-min-prediction]').forEach(b=>{b.setAttribute('aria-pressed',String(state.minPrediction===(b.dataset.minPrediction==='any'?null:Number(b.dataset.minPrediction))));b.disabled=b.dataset.minPrediction!=='any'&&!ratingsLoaded;});
   document.querySelectorAll('[data-min-probability]').forEach(b=>{b.setAttribute('aria-pressed',String(state.minProbability===(b.dataset.minProbability==='any'?null:Number(b.dataset.minProbability))));b.disabled=b.dataset.minProbability!=='any'&&!ratingsLoaded;});
-  $('#filter-summary').textContent = state.includeUnscheduled || state.startedOnly || state.lastChanceOnly || state.viewing!=='any' || state.minPrediction!==null || state.minProbability!==null || state.directors || state.actors || state.genres.size || state.mechanics.size || state.moods.size || state.channels.size || executionActive() || state.from!==1900 || state.to!==MAX_YEAR || state.maxRuntime!==null ? `${state.genres.size ? [...state.genres].join(', ') : 'Все жанры'} · ${state.from}–${state.to}${state.maxRuntime!==null?' · до '+state.maxRuntime+' мин':''}${state.mechanics.size?' · Механика: '+[...state.mechanics].map(m=>MECHANIC_LABELS[m]).join(', '):''}${state.moods.size?' · Настроение: '+[...state.moods].map(moodLabel).join(', '):''}${state.channels.size?' · Канал: '+[...state.channels].join(', '):''}${executionSummary()}${state.directors?' · Режиссёр':''}${state.actors?' · Актёр':''}${state.startedOnly?' · Начатые':''}${state.lastChanceOnly?' · Последний шанс':''}${state.viewing==='new'?' · Новые':state.viewing==='rewatch'?' · Пересмотр':''}${state.minPrediction!==null?' · Прогноз '+state.minPrediction.toFixed(1)+'+':''}${state.minProbability!==null?' · Шанс '+Math.round(state.minProbability*100)+'%+':''}${state.includeUnscheduled?' · Без показов тоже':''}` : 'Все фильмы';
+  document.querySelectorAll('[data-min-actual-rating]').forEach(b=>{b.setAttribute('aria-pressed',String(state.minActualRating===(b.dataset.minActualRating==='any'?null:Number(b.dataset.minActualRating))));b.disabled=b.dataset.minActualRating!=='any'&&!ratingsLoaded;});
+  $('#filter-summary').textContent = state.includeUnscheduled || state.startedOnly || state.lastChanceOnly || state.viewing!=='any' || state.minPrediction!==null || state.minProbability!==null || state.minActualRating!==null || state.directors || state.actors || state.genres.size || state.mechanics.size || state.moods.size || state.channels.size || executionActive() || state.from!==1900 || state.to!==MAX_YEAR || state.maxRuntime!==null ? `${state.genres.size ? [...state.genres].join(', ') : 'Все жанры'} · ${state.from}–${state.to}${state.maxRuntime!==null?' · до '+state.maxRuntime+' мин':''}${state.mechanics.size?' · Механика: '+[...state.mechanics].map(m=>MECHANIC_LABELS[m]).join(', '):''}${state.moods.size?' · Настроение: '+[...state.moods].map(moodLabel).join(', '):''}${state.channels.size?' · Канал: '+[...state.channels].join(', '):''}${executionSummary()}${state.directors?' · Режиссёр':''}${state.actors?' · Актёр':''}${state.startedOnly?' · Начатые':''}${state.lastChanceOnly?' · Последний шанс':''}${state.viewing==='new'?' · Новые':state.viewing==='rewatch'?' · Пересмотр':''}${state.minPrediction!==null?' · Прогноз '+state.minPrediction.toFixed(1)+'+':''}${state.minProbability!==null?' · Шанс '+Math.round(state.minProbability*100)+'%+':''}${state.minActualRating!==null?' · Моя оценка '+state.minActualRating.toFixed(1)+'+':''}${state.includeUnscheduled?' · Без показов тоже':''}` : 'Все фильмы';
  if(typeof syncFacetPickers==='function')syncFacetPickers();
   ['#year-from','#year-to'].forEach(s=>$(s).setAttribute('aria-invalid',String(!validYear)));
   $('#runtime-max').setAttribute('aria-invalid',String(!validRuntime));
@@ -2076,7 +2091,10 @@ function render(){
   resultsView={visible:visible.length,valid};
   renderFinds();
   armSoonTick();
-  const emptyCopy=$('#empty p');if(emptyCopy)emptyCopy.textContent=enrichmentUnavailable&&!ratingsLoaded?'Прогнозы сейчас недоступны. Это не пустая коллекция.':blackZone()&&state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет.':'Измени название, выбери другой жанр или расширь диапазон лет.';
+  // A rating-based filter restored before the ratings arrive is not an empty result: say they are loading (AIR-585).
+  const ratingsPending=!ratingsLoaded&&!enrichmentUnavailable&&(state.minActualRating!==null||state.viewing!=='any'||state.minPrediction!==null||state.minProbability!==null);
+  const emptyTitle=$('#empty h2');if(emptyTitle)emptyTitle.textContent=ratingsPending?'Загружаем оценки и прогнозы…':'Таких фильмов не найдено';
+  const emptyCopy=$('#empty p');if(emptyCopy)emptyCopy.textContent=ratingsPending?'Фильтр по оценкам применится, как только они загрузятся.':enrichmentUnavailable&&!ratingsLoaded?'Прогнозы сейчас недоступны. Это не пустая коллекция.':blackZone()&&state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет.':'Измени название, выбери другой жанр или расширь диапазон лет.';
   updateProgrammeStatus();
   const shows=visible.reduce((n,f)=>n+periodShows(f).length,0);
   $('#result-count').textContent=valid?`${visible.length} ${filmWord(visible.length)} · ${shows} ${showWord(shows)}`:!validYear?'Проверь диапазон лет':'Проверь длительность';
@@ -2085,9 +2103,9 @@ function render(){
   syncUrl();
   if(filmScreen)renderFilmShell();
   noteTimeView(valid?visible:[]);
-  return {period:state.period,query:state.query,genres:[...state.genres],mechanics:[...state.mechanics],moods:[...state.moods],years:[state.from,state.to],maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,films:visible.map(f=>({id:f.id,title:f.title,year:f.year,shows:periodShows(f)}))};
+  return {period:state.period,query:state.query,genres:[...state.genres],mechanics:[...state.mechanics],moods:[...state.moods],years:[state.from,state.to],maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,minActualRating:state.minActualRating,films:visible.map(f=>({id:f.id,title:f.title,year:f.year,shows:periodShows(f)}))};
 }
-function reset(){state.shortlistMode='available';state.viewing='any';state.minPrediction=null;state.minProbability=null;state.includeUnscheduled=false;$('#include-unscheduled').checked=false;state.startedOnly=false;$('#started-only').checked=false;state.lastChanceOnly=false;$('#last-chance-only').checked=false;for(const key of ['directors','actors']){state[key]='';$('#'+key+'-input').value='';$('#'+key+'-options').hidden=true;$('#'+key+'-input').setAttribute('aria-expanded','false');}state.period='all';state.sort='personal';state.sortExplicit=false;state.query='';state.searchScopes=defaultSearchScopes();state.genres.clear();state.mechanics.clear();state.moods.clear();state.channels.clear();for(const selected of Object.values(state.execution))selected.clear();closeFacet();state.from=1900;state.to=MAX_YEAR;state.maxRuntime=null;$('#year-from').value=1900;$('#year-to').value=MAX_YEAR;$('#runtime-max').value='';for(const selector of ['#genres input','#mechanics input','#moods input','#execution input'])document.querySelectorAll(selector).forEach(i=>i.checked=false);render();}
+function reset(){state.shortlistMode='available';state.viewing='any';state.minPrediction=null;state.minProbability=null;state.minActualRating=null;state.includeUnscheduled=false;$('#include-unscheduled').checked=false;state.startedOnly=false;$('#started-only').checked=false;state.lastChanceOnly=false;$('#last-chance-only').checked=false;for(const key of ['directors','actors']){state[key]='';$('#'+key+'-input').value='';$('#'+key+'-options').hidden=true;$('#'+key+'-input').setAttribute('aria-expanded','false');}state.period='all';state.sort='personal';state.sortExplicit=false;state.query='';state.searchScopes=defaultSearchScopes();state.genres.clear();state.mechanics.clear();state.moods.clear();state.channels.clear();for(const selected of Object.values(state.execution))selected.clear();closeFacet();state.from=1900;state.to=MAX_YEAR;state.maxRuntime=null;$('#year-from').value=1900;$('#year-to').value=MAX_YEAR;$('#runtime-max').value='';for(const selector of ['#genres input','#mechanics input','#moods input','#execution input'])document.querySelectorAll(selector).forEach(i=>i.checked=false);render();}
 function applyFilters(input){
  if(!input||typeof input!=='object'||Array.isArray(input))throw new Error('Expected a filters object');
  if(input.includeUnscheduled!==undefined&&typeof input.includeUnscheduled!=='boolean')throw new Error('Invalid watchlist scope');
@@ -2095,6 +2113,7 @@ function applyFilters(input){
  if(input.viewing!==undefined&&!['any','new','rewatch'].includes(input.viewing))throw new Error('Invalid viewing filter');
  if(input.minPrediction!==undefined&&![null,3.5,4,4.5].includes(input.minPrediction))throw new Error('Invalid prediction threshold');
  if(input.minProbability!==undefined&&![null,0.5,0.7,0.85].includes(input.minProbability))throw new Error('Invalid probability threshold');
+ if(input.minActualRating!==undefined&&![null,...ACTUAL_RATING_THRESHOLDS].includes(input.minActualRating))throw new Error('Invalid actual rating threshold');
  if(input.query!==undefined&&typeof input.query!=='string')throw new Error('Invalid search query');
  if(input.period!==undefined&&!normalizePeriod(input.period))throw new Error('Invalid period');
  if(input.genres!==undefined&&(!Array.isArray(input.genres)||input.genres.some(g=>!genres.includes(g))))throw new Error('Invalid genre');
@@ -2108,6 +2127,7 @@ function applyFilters(input){
  state.viewing=input.viewing??state.viewing;
  state.minPrediction=input.minPrediction===undefined?state.minPrediction:input.minPrediction;
  state.minProbability=input.minProbability===undefined?state.minProbability:input.minProbability;
+ state.minActualRating=input.minActualRating===undefined?state.minActualRating:input.minActualRating;
  state.query=input.query??state.query;
  state.period=input.period===undefined?state.period:normalizePeriod(input.period);state.genres=new Set(input.genres??state.genres);state.mechanics=new Set(input.mechanics??state.mechanics);state.moods=new Set(input.moods??state.moods);
  state.from=from;state.to=to;state.maxRuntime=maxRuntime;
@@ -2184,7 +2204,7 @@ function showProgrammeUnavailable(error){
  const badge=$('#connection-badge');if(badge){badge.textContent='Ошибка обновления';badge.title='Программу не удалось загрузить. Это не статус сохранённого окна.';badge.classList?.remove('is-ok','is-warning','is-critical');badge.classList?.add('is-error');}
 }
 async function registerModelTool(){
- if(document.modelContext?.registerTool){try{await document.modelContext.registerTool({name:'filter_watchlist_programme',title:'Фильтровать кинопрограмму',description:'Apply title search, genre, plot mechanics, mood, year, runtime, prediction, probability, last-chance and broadcast period filters. Values within each multi-select use OR; filter groups combine with AND. Returns the visible films and broadcasts.',inputSchema:{type:'object',properties:{includeUnscheduled:{type:'boolean',description:'Include watchlist films with no broadcasts in the saved EPG window'},lastChanceOnly:{type:'boolean',description:'Only films with less than eight hours before their last known showing leaves the 72-hour archive window'},viewing:{type:'string',enum:['any','new','rewatch'],description:'Filter by absence or presence of a personal Letterboxd rating'},minPrediction:{type:['number','null'],enum:[null,3.5,4,4.5],description:'Minimum saved predicted rating; null removes the filter'},minProbability:{type:['number','null'],enum:[null,0.5,0.7,0.85],description:'Minimum saved probability of a 4.0+ rating; null removes the filter'},query:{type:'string',description:'Text matched only against the search scopes currently selected on the page. Titles are the default.'},period:{type:'string',enum:['all','archive','soon','future'],description:'all: archive and soon together; archive: films with a ready recording; soon: films with no ready recording that are on air or start in the next 24 hours; future is the old name of soon'},genres:{type:'array',items:{type:'string',enum:genres}},mechanics:{type:'array',items:{type:'string',enum:Object.keys(MECHANIC_LABELS)}},moods:{type:'array',items:{type:'string'},description:'Canonical mood IDs currently offered by the page'},from:{type:'integer',minimum:1900,maximum:MAX_YEAR},to:{type:'integer',minimum:1900,maximum:MAX_YEAR},maxRuntime:{type:['integer','null'],minimum:1,description:'Maximum film runtime in minutes; null removes the runtime filter'}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute:applyFilters});}catch(e){console.info('Browser tools unavailable',e.message);}}
+ if(document.modelContext?.registerTool){try{await document.modelContext.registerTool({name:'filter_watchlist_programme',title:'Фильтровать кинопрограмму',description:'Apply title search, genre, plot mechanics, mood, year, runtime, prediction, probability, own Letterboxd rating, last-chance and broadcast period filters. Values within each multi-select use OR; filter groups combine with AND. Returns the visible films and broadcasts.',inputSchema:{type:'object',properties:{includeUnscheduled:{type:'boolean',description:'Include watchlist films with no broadcasts in the saved EPG window'},lastChanceOnly:{type:'boolean',description:'Only films with less than eight hours before their last known showing leaves the 72-hour archive window'},viewing:{type:'string',enum:['any','new','rewatch'],description:'Filter by absence or presence of a personal Letterboxd rating'},minPrediction:{type:['number','null'],enum:[null,3.5,4,4.5],description:'Minimum saved predicted rating; null removes the filter'},minProbability:{type:['number','null'],enum:[null,0.5,0.7,0.85],description:'Minimum saved probability of a 4.0+ rating; null removes the filter'},minActualRating:{type:['number','null'],enum:[null,3.5,4,4.5],description:'Minimum own Letterboxd rating; films without a known rating are excluded; null removes the filter'},query:{type:'string',description:'Text matched only against the search scopes currently selected on the page. Titles are the default.'},period:{type:'string',enum:['all','archive','soon','future'],description:'all: archive and soon together; archive: films with a ready recording; soon: films with no ready recording that are on air or start in the next 24 hours; future is the old name of soon'},genres:{type:'array',items:{type:'string',enum:genres}},mechanics:{type:'array',items:{type:'string',enum:Object.keys(MECHANIC_LABELS)}},moods:{type:'array',items:{type:'string'},description:'Canonical mood IDs currently offered by the page'},from:{type:'integer',minimum:1900,maximum:MAX_YEAR},to:{type:'integer',minimum:1900,maximum:MAX_YEAR},maxRuntime:{type:['integer','null'],minimum:1,description:'Maximum film runtime in minutes; null removes the runtime filter'}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute:applyFilters});}catch(e){console.info('Browser tools unavailable',e.message);}}
 }
 let presets=[],presetsEtag='"none"',presetEditor=null,presetPrompt=null,presetStatus='',presetSaving=false;
 function presetQuery(){return urlForState('https://iptv.example/').searchParams.toString();}
@@ -2302,7 +2322,8 @@ function bindControls(){
  $('#last-chance-only').addEventListener('change',e=>{state.lastChanceOnly=e.target.checked;render();});
  document.querySelectorAll('[data-viewing]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.viewing=b.dataset.viewing;render();}}));
  document.querySelectorAll('[data-min-prediction]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minPrediction=b.dataset.minPrediction==='any'?null:Number(b.dataset.minPrediction);render();}}));
- document.querySelectorAll('[data-min-probability]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minProbability=b.dataset.minProbability==='any'?null:Number(b.dataset.minProbability);render();}}));
+  document.querySelectorAll('[data-min-probability]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minProbability=b.dataset.minProbability==='any'?null:Number(b.dataset.minProbability);render();}}));
+ document.querySelectorAll('[data-min-actual-rating]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minActualRating=b.dataset.minActualRating==='any'?null:Number(b.dataset.minActualRating);render();}}));
  $('#progress-retry').addEventListener('click',()=>loadStarted());
  // AIR-541: the neutral film shell's retry asks for the same film again; it never turns "cannot read" into "absent".
  $('#film-screen-retry')?.addEventListener('click',()=>{const tmdb=filmScreen?routeTmdb(filmScreen):null;if(tmdb)ensureCatalogFilm(tmdb,{refresh:true});else loadProgramme({quiet:true});});
@@ -2693,6 +2714,14 @@ function predictionDetailsHTML(details){
 function skippedStartHTML(event){
  const safe=v=>typeof v==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(v)?v:null,ageMs=Number.isFinite(event.holderAgeMs)&&event.holderAgeMs>=0?event.holderAgeMs:null;
  const trigger=event.trigger==='scheduled'?'по расписанию':event.trigger==='manual'?'вручную':null,holder=safe(event.holderRunId),request=safe(event.requestId);
+ // AIR-575 (ADR 0190): a start refused because the catalog was held by an EPG publication. Fixed sentences chosen by two known codes; nothing else from the stored event is printed.
+ if(event.reason==='catalog_held'){
+  const cause=event.cause==='discovery_fence'||event.cause==='discovery_incomplete'?event.cause:null;
+  const why=cause==='discovery_fence'?'каталог временно закрыт для чтения':cause==='discovery_incomplete'?'каталог ещё загружается':'каталог временно недоступен';
+  const held=[`<p class="event-note">Попытка запуска${trigger?` (${trigger})`:''} отклонена: ${why}. Фильмы не обрабатывались.</p>`];
+  if(request)held.push(`<p class="event-note">Запрос: <code>${escapeHTML(request)}</code>. Код: <code>prediction_catalog_held</code>${cause?` · причина: <code>${cause}</code>`:''}.</p>`);
+  return `<p>Запуск прогнозов пропущен: каталог временно недоступен</p>${held.join('')}`;
+ }
  const lines=[`<p class="event-note">Попытка запуска${trigger?` (${trigger})`:''} отклонена: уже работает другой пакет. Фильмы не обрабатывались, очередь не менялась.</p>`];
  if(holder)lines.push(`<p class="event-note">Выполняется пакет <code>${escapeHTML(holder.slice(0,8))}</code>${ageMs!==null?` · работает ${Math.max(0,Math.round(ageMs/60000))} мин`:''}.</p>`);
  if(request)lines.push(`<p class="event-note">Запрос: <code>${escapeHTML(request)}</code>. Код: <code>already_running</code>.</p>`);
@@ -2728,9 +2757,26 @@ function eventFilmHTML(f){
  const href=tmdb?filmHref('tmdb_'+tmdb):(FILM_ID.test(id)&&!id.startsWith('tmdb_')?filmHref(id):null);
  return href?`<a href="${escapeHTML(href)}">${text}</a>`:text;
 }
+// AIR-564: the Channel policy block of an `epg` event. Events written before it carry no `channels` and render exactly as before (legacy); a stored event is never recomputed.
+// A degraded event says in words that the blacklist was NOT applied; a filtered one shows the counters and the applied revision.
+function epgPolicyDetails(event){
+ const channels=event.channels,programmes=event.programmes;
+ if(!channels||typeof channels!=='object')return '';
+ const n=value=>Number.isFinite(Number(value))?Number(value):0;
+ const row=(label,value)=>`<div><dt>${label}</dt><dd>${n(value)}</dd></div>`;
+ const policy=event.policy&&typeof event.policy==='object'?event.policy:{};
+ const degraded=policy.mode==='degraded';
+ // The target is event data written by the Worker; only a same-origin path is rendered as a link.
+ const href=typeof policy.href==='string'&&/^\/[A-Za-z0-9_\/-]{1,80}$/.test(policy.href)?policy.href:null;
+ const link=href?`: <a href="${escapeHTML(href)}">Admin Channels</a>`:'';
+ const warning=event.warning&&typeof event.warning==='object'?(event.warning.code==='channel_policy_degraded'?`<p>Внимание: политика каналов не применена (режим degraded${event.warning.reason?`, причина: ${escapeHTML(event.warning.reason)}`:''}); чёрный список не действовал, все каналы обработаны как known_only.</p>`:event.warning.code==='channel_registration_failed'?`<p>Внимание: регистрация новых каналов не удалась${event.warning.reason?` (${escapeHTML(event.warning.reason)})`:''}; повтор при следующем обновлении.</p>`:''):'';
+ const heading=degraded?'Политика каналов: не применена':`Политика каналов${policy.revision!=null?` (ревизия ${n(policy.revision)})`:''}`;
+ const classified=degraded?'':row('discover',channels.discover)+row('deny_all',channels.denyAll)+row('Новых каналов (найдено)',channels.new)+row('Новых каналов (зарегистрировано)',channels.registered)+row('Без категории',channels.unclassified);
+ return `${warning}<p>${heading}${link}</p><dl>${row('Каналов в эфире',channels.total)}${classified}${row('known_only',channels.knownOnly)}${programmes?(degraded?'':row('Показов отфильтровано (deny_all)',programmes.filteredDenyAll))+row('Показов пропущено (known_only)',programmes.skippedKnownOnly)+(degraded?'':row('Показов для Discovery',programmes.discoveryEligible)+row('Показов на каналах без категории',programmes.unclassified)):''}</dl>`;
+}
 function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(event.at));const film=eventFilmHTML;const removal=f=>{const rating=Number(f.rating),known=Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0;return `${film(f)}${known?` · ${rating.toFixed(1)} ★`:''}`;};let body='';
  if(event.type==='started'||event.type==='unstarted')body=`<p>${event.type==='started'?'Начал смотреть':'Снял отметку «Начал»'}: <strong>${film(event.film)}</strong></p>`;
- if(event.type==='epg')body=`<p>Обновлён EPG</p><dl><div><dt>Фильмов с показами</dt><dd>${event.films}</dd></div><div><dt>В архиве</dt><dd>${event.archive}</dd></div><div><dt>В следующие сутки</dt><dd>${event.future}</dd></div><div><dt>Всего показов</dt><dd>${event.broadcasts}</dd></div></dl>`;
+ if(event.type==='epg')body=`<p>Обновлён EPG</p><dl><div><dt>Фильмов с показами</dt><dd>${event.films}</dd></div><div><dt>В архиве</dt><dd>${event.archive}</dd></div><div><dt>В следующие сутки</dt><dd>${event.future}</dd></div><div><dt>Всего показов</dt><dd>${event.broadcasts}</dd></div></dl>${epgPolicyDetails(event)}`;
  if(event.type==='ratings'){const n=v=>Number.isInteger(v)&&v>=0?v:0,d=event.diary&&typeof event.diary==='object'?event.diary:null,r=event.removal&&typeof event.removal==='object'?event.removal:{},causes={blocked:'Letterboxd заблокировал запрос',rate_limited:'Letterboxd ограничил частоту запросов',failed:'Diary не удалось прочитать',interrupted:'Выполнение прервано',abandoned:'Выполнение прервано'},title=event.state==='finished'?'Рейтинги обновлены':event.state==='error'?'Проверка рейтингов завершена с ошибкой':'Проверка рейтингов прервана',why=event.state!=='finished'&&causes[event.cause]?`<p class="event-note">${causes[event.cause]}</p>`:'',rows=[];if(d){rows.push(['Diary: записей проверено',n(d.rows)],['Новых фактов',n(d.written)],['Без изменений',n(d.unchanged)+n(d.skipped)]);if(n(d.conflicts))rows.push(['Конфликтов',n(d.conflicts)]);}if(n(r.rated))rows.push(['Оценок удалённых фильмов найдено',n(r.rated)]);rows.push(['Удалений обработано',n(r.resolved)]);body=`<p>${title}</p>${why}<dl>${rows.map(([name,value])=>`<div><dt>${name}</dt><dd>${value}</dd></div>`).join('')}</dl>${ratingsDetailsHTML(event.details)}${event.coverage==='recent_window'?'<p class="event-note">Проверена последняя страница Diary, не вся история.</p>':''}`;}
  if(event.type==='watchlist'){const half=f=>{const rating=Number(f.rating);return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0;},group=(title,films,line)=>films.length?`<details class="event-group" open><summary><h3>${title} · ${films.length}</h3></summary><ul>${films.map(f=>`<li>${line(f)}</li>`).join('')}</ul></details>`:'';body=`<p>Обновлён watchlist · ${event.total} ${filmWord(event.total)}</p>`+group('Просмотрены',(event.removed||[]).filter(half),removal)+group('Остальные удаления',(event.removed||[]).filter(f=>!half(f)),film)+group('Добавлены фильмы',event.added||[],film);if(!event.added?.length&&!event.removed?.length)body+=`<p class="event-note">${event.baseline?'Исходный сохранённый список':'Состав без изменений'}</p>`;}
  if(event.type==='enrichment'&&event.presentation==='batch_v2_skipped')body=skippedStartHTML(event);

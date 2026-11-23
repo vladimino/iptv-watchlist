@@ -4,7 +4,7 @@
 // comparison of a numeric retryAt with the supplied clock.
 const PREDICTION_DIAGNOSTIC_PAGE_MAX=20;
 
-async function loadPredictionDiagnosticSnapshot(env,filmId){
+async function loadPredictionDiagnosticSnapshot(env,filmId,options=null){
  let pinned=env;
  try{pinned=await pinEpg(env);}catch{pinned=env;}
  const read=async key=>{
@@ -21,13 +21,35 @@ async function loadPredictionDiagnosticSnapshot(env,filmId){
  }
  // The same freshness rule (mode and profile snapshot) as the queue and the readers; strict unless switched.
  const freshness=await predictionFreshness(env,profile.value),catalogFilms=allEnrichmentFilms(programme.value?.films?programme.value:{films:[]},catalog.value);
+ // AIR-478 (ADR 0186, ADR 0201): the recovery preview admits against the membership the queue rebuild uses (the live D1 watchlist snapshot over the completed programme,
+ // ADR 0186), not the published programme: a film that left the watchlist stays in the published programme under its Letterboxd id and would hide its current
+ // catalogue key through the tmdb dedupe. Read only; an unreadable membership is thrown, never read as an empty one.
+ let admissionFilmsById=null;
+ if(options?.queueMembership){
+  const sync=await read('sync.json');
+  const source=programme.value&&Array.isArray(programme.value.films)?programme.value:{runId:programme.value?.runId||null,films:[]};
+  if(sync.status==='unavailable')throw Object.assign(new Error('prediction_admission_unavailable'),{code:'prediction_admission_unavailable'});
+  const authoritative=showsAuthoritative(sync.value,source);
+  const current=authoritative&&typeof watchlistQueueMembership==='function'?await watchlistQueueMembership(pinned,source):null;
+  admissionFilmsById=new Map(allEnrichmentFilms(authoritative?(current||source):source,catalog.value).map(film=>[String(film.id),film]));
+ }
  return {
-  freshness,filmsById:new Map(catalogFilms.map(film=>[String(film.id),film])),registryDigest:freshness.registryDigest??null,target:freshness.target??null,
+  freshness,filmsById:new Map(catalogFilms.map(film=>[String(film.id),film])),admissionFilmsById,registryDigest:freshness.registryDigest??null,target:freshness.target??null,
   queue:queue.value,queueStatus:queue.status,profile:profile.value,profileStatus:profile.status,index:index.value,indexStatus:index.status,
   programme:programme.value,programmeStatus:programme.status,catalog:catalog.value,catalogStatus:catalog.status,
   publishedGeneration:publishedGeneration.value,publishedGenerationStatus:publishedGeneration.status,films,
   completedOnly:pinned?.epgPin?.authority==='d1',
  };
+}
+// AIR-579. The stored queue and nothing else, for the one diagnostic that reads nothing else: `predictionPendingPage` takes only `queue` and `queueStatus` of a snapshot (every
+// helper it calls is a function of the queue and the clock). The full snapshot above also reads the profile, the view index, the programme, the whole Discovery catalog
+// (`readCatalog`, a 12 k-row read of every admission payload) and the published generation, none of which a pending page consumes. The queue is read the same way as in the full
+// snapshot (the same pin, the same key, the same `recorded` / `not_recorded` / `unavailable` status), so the page is identical for the same stored queue.
+async function loadPredictionQueueSnapshot(env){
+ let pinned=env;
+ try{pinned=await pinEpg(env);}catch{pinned=env;}
+ try{const value=await loadJSON(pinned,predictionQueueKey);return {queue:value,queueStatus:value==null?'not_recorded':'recorded'};}
+ catch{return {queue:null,queueStatus:'unavailable'};}
 }
 function predictionDiagnosticOutstanding(queue){
  if(!Array.isArray(queue?.hotPending)||!Array.isArray(queue?.coldPending))return null;

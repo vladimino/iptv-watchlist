@@ -2,6 +2,7 @@
 // between its read and its put, lets another writer commit, then releases it; the storage stub enforces R2 conditions.
 // The races of the retired v5 runner (its submit, completion and next-start retry heal in R2 mode) are gone with it (ADR 0167); batch runner v2 runs in
 // D1 mode only, where the queue fence is the D1 queue generation (ADR 0078): the last section races its retry write against a concurrent queue writer there.
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
 import {sql} from './prediction-d1-flow-lib.mjs';
 
@@ -28,6 +29,7 @@ const quickPause=(callback,milliseconds,...rest)=>setTimeout(callback,millisecon
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,setTimeout:quickPause});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);
 for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+installViewIndexFixture(ctx);
 ctx.env=env;
 const refresh=(report,trigger,options)=>ctx.refreshPredictionQueue(env,report,trigger,options);
 const mutate=(apply,trigger)=>ctx.mutatePredictionQueue(env,apply,trigger);

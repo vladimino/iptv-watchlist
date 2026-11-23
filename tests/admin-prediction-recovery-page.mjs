@@ -6,6 +6,7 @@
 // are the two separate discovery action POSTs.
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {bundleAdmin} from '../src/admin/bundle.js';
@@ -179,6 +180,7 @@ vm.runInContext(scoped('src/domain/discovery-identity-review.js', 'DiscoveryIden
 vm.runInContext(scoped('src/domain/discovery-recovery.js', 'DiscoveryRecovery'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js', 'utf8'), workerContext);
 vm.runInContext(fs.readFileSync('src/worker.js', 'utf8').replace('export default', 'globalThis.worker='), workerContext);
+installViewIndexFixture(workerContext);
 const G1 = '11111111-1111-4111-8111-111111111111';
 const QUEUE = 'enrichment/prediction-queue.json';
 function seed() {

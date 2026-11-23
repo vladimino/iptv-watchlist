@@ -57,17 +57,28 @@ const seedRun=async(env,id='run-1',stage='metadata')=>{
 
 // ===== 1. the façade at each marker state =====
 {
- // legacy: the tables do not exist and the schema is below 30 -> the R2 objects serve, byte for byte as before
- const {file,db}=database('',{from:legacyBase});const env={DB:db,BUCKET:bucket};reset();
+ // AIR-551 H6: the R2 arm is retired for production. Without the explicit local stand-in, tables absent below version 30 and the marker `r2` are closed.
+ // legacy (local stand-in only): the tables do not exist and the schema is below 30 -> the R2 objects serve, byte for byte as before
+ const {file,db}=database('',{from:legacyBase});const env={DB:db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();
  assert.equal(await load(env,'sync.json'),null);assert.deepEqual(gets,['sync.json']);
  await save(env,'sync.json',{runId:'r',stage:'epg'});await save(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:T});
  assert.deepEqual(puts,['sync.json','watchlist-ingest.json']);assert.deepEqual(await load(env,'sync.json'),{runId:'r',stage:'epg'});
  assert.equal(rows(file,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'epg_checkpoint%'")[0].n,0);
- // r2 marker: the same
- const r2=database('');const r2env={DB:r2.db,BUCKET:bucket};reset();
+ // the same legacy database WITHOUT the stand-in is closed and never touches R2
+ // (a fresh binding: the marker is cached for two seconds per binding)
+ const prodLegacy=database('',{from:legacyBase});reset();
+ assert.equal(await code(load({DB:prodLegacy.db,BUCKET:bucket},'sync.json')),'epg_checkpoint_unavailable','production does not serve the R2 objects below schema 30');
+ assert.equal(await code(save({DB:prodLegacy.db,BUCKET:bucket},'sync.json',{runId:'x'})),'epg_checkpoint_unavailable');assert.deepEqual(gets.concat(puts),[]);
+ // r2 marker, local stand-in: the same
+ const r2=database('');const r2env={DB:r2.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();
  await save(r2env,'sync.json',{runId:'r2',stage:'epg'});assert.deepEqual(puts,['sync.json']);assert.deepEqual(counts(r2.file),{run:0,film:0,ingest:0});
- // r2 marker with writes held (the import fence): reads serve, every write refuses and writes nothing
- const held=database("UPDATE epg_checkpoint_authority SET writes='held',generation=1 WHERE id=1;");const heldEnv={DB:held.db,BUCKET:bucket};reset();set:records.set('sync.json',{runId:'old',stage:'complete'});
+ // r2 marker, production: closed, reads and writes refused, R2 never touched
+ const prodR2=database('');reset();
+ assert.equal(await code(load({DB:prodR2.db,BUCKET:bucket},'sync.json')),'epg_checkpoint_unavailable','marker r2 is retired: closed');
+ assert.equal(await code(load({DB:prodR2.db,BUCKET:bucket},'watchlist-ingest.json')),'epg_checkpoint_unavailable');
+ assert.equal(await code(save({DB:prodR2.db,BUCKET:bucket},'sync.json',{runId:'x'})),'epg_checkpoint_unavailable');assert.deepEqual(gets.concat(puts),[]);
+ // r2 marker with writes held (the import fence, local stand-in): reads serve, every write refuses and writes nothing
+ const held=database("UPDATE epg_checkpoint_authority SET writes='held',generation=1 WHERE id=1;");const heldEnv={DB:held.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();set:records.set('sync.json',{runId:'old',stage:'complete'});
  assert.deepEqual(await load(heldEnv,'sync.json'),{runId:'old',stage:'complete'});
  assert.equal(await code(save(heldEnv,'sync.json',{runId:'x'})),'epg_checkpoint_writes_held');assert.equal(await code(save(heldEnv,'watchlist-ingest.json',{})),'epg_checkpoint_writes_held');assert.deepEqual(puts,[]);
  // closed: version 30 without the tables, a deleted marker row, no binding at all: refused, never R2
@@ -135,8 +146,8 @@ const seedRun=async(env,id='run-1',stage='metadata')=>{
  await assert.rejects(run('beginSync')(env),error=>error.code==='epg_checkpoint_unfenced');
  assert.equal(rows(file,'SELECT consecutive_failures FROM epg_ingest_status')[0].consecutive_failures,2);
  assert.equal(runRow(file).stage,'complete','the refused start created nothing');
- // r2 (today): the old two writes, in the old order, with the old shapes
- const old=database('');const oldEnv={DB:old.db,BUCKET:bucket};reset();sourceStubs();
+ // r2 (the local stand-in only, AIR-551 H6): the old two writes, in the old order, with the old shapes
+ const old=database('');const oldEnv={DB:old.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();sourceStubs();
  const oldStart=await run('beginSync')(oldEnv);
  assert.deepEqual(puts,['sync.json','watchlist-ingest.json']);
  assert.deepEqual(records.get('watchlist-ingest.json'),{schemaVersion:1,failedAt:null,lastSuccessAt:records.get('sync.json').startedAt});
@@ -183,8 +194,8 @@ const stubs=()=>{
  sqlite(third.file,"UPDATE epg_orchestration_document SET body=json_set(body,'$.holder','other') WHERE key='lease'");
  assert.equal(await code(run('finishSync')(env3,loaded3,{updatedAt:T,watchlistCount:2,stats:{}})),'epg_checkpoint_conflict');
  assert.equal(runRow(third.file).stage,'metadata');
- // r2 (today): complete is saved FIRST, the queue refresh follows, exactly the old order
- const old=database('');const oldEnv={DB:old.db,BUCKET:bucket};reset();
+ // r2 (the local stand-in only): complete is saved FIRST, the queue refresh follows, exactly the old order
+ const old=database('');const oldEnv={DB:old.db,BUCKET:bucket,EPG_CHECKPOINT_DB_OPTIONAL:'standin'};reset();
  const oldOrder=stubs();
  context.refreshPredictionQueue=async()=>{oldOrder.push('queue@'+(records.get('sync.json')?.stage||'none'));};
  await run('finishSync')(oldEnv,{runId:'r',stage:'epg',startedAt:T,updatedAt:T,watchlist:[{id:'a'}],pending:[]},{updatedAt:T,watchlistCount:1,stats:{}});

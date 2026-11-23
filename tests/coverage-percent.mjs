@@ -2,9 +2,11 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {MemoryBucket} from './memory-bucket.mjs';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto,console,encodeURIComponent,decodeURIComponent});
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+installViewIndexFixture(context);
 
 const examples=[[2257,2260,99.9],[1829,1832,99.8],[2234,2239,99.8],[9999,10000,99.9],[2260,2260,100]];
 for(const [current,total,expected] of examples){

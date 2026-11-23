@@ -5,6 +5,7 @@
 import {scoped} from '../scripts/bundle-scope.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 
@@ -20,6 +21,9 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),context);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
+installViewIndexFixture(context);
+// AIR-558: facts projection goes to the D1 ratings view only and refuses without an owning ratings domain; this context has no ratings D1, so a stub owns the projection and mirrors it into the fixture that IS the derived view (the D1 ratings_view overlay).
+context.RatingsD1=new Proxy({projectView:async(env,written)=>{const view=records.get(VIEW)||{};for(const r of written)for(const id of [...(r.links.letterboxd?[String(r.links.letterboxd)]:[]),...(r.links.tmdb?['tmdb_'+r.links.tmdb]:[])]){const item={...(view[id]||{})};if(r.rating)item.actualRating=r.rating.value;if(r.watched)item.watched=r.watched.value;if(r.watchlist)item.watchlist=r.watchlist.value;view[id]=item;}records.set(VIEW,view);return {owned:true,changed:written.length};}},{get:(t,n)=>n in t?t[n]:async()=>({owned:false,handled:false,changed:0})});
 const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',context);
 const worker=context.worker,constant=name=>vm.runInContext(name,context),VIEW=constant('ENRICHMENT_KEY')+'view-index.json';
 const get=async env=>{const response=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/available'),env,{waitUntil(){}});return {status:response.status,body:await response.json()};};

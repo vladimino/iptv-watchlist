@@ -55,7 +55,7 @@ Stored genre names are mapped case-insensitively, after trimming, by `PROFILE_GE
 
 Every queue refresh evaluates each queue film against the current profile:
 
-- **Inputs.** The fingerprint and features come from the film's `impactFeatures` in `enrichment/view-index.json`: `{fingerprintHash, fingerprintSchemaVersion, invalidatedAt, plotMechanics, execution}`. They are copied from the full fingerprint whenever the index receives it: on submit, on runner repair and by the fingerprint-view backfill. The display facet is never used as input. An entry whose `impactFeatures` is missing, or carries another fingerprint hash, has unknown features. The genres are the film's stored genres. Lineage approvals are re-checked with the SHA-256 of each link's declaration, computed once per refresh.
+- **Inputs.** The fingerprint and features come from the film's `impactFeatures` in the derived view index: `{fingerprintHash, fingerprintSchemaVersion, invalidatedAt, plotMechanics, execution}`. They are built from the `prediction_fingerprint` row at read, so no write or backfill keeps them current. The display facet is never used as input. An entry whose `impactFeatures` is missing, or carries another fingerprint hash, has unknown features. The genres are the film's stored genres. Lineage approvals are re-checked with the SHA-256 of each link's declaration, computed once per refresh.
 - **Decision.** A `current` or `compatible` prediction stays out of the queue and every other predicted film is queued again. The runner chooses the work per film: `prediction_only` while the fingerprint is current.
 - **Counters.** `enrichment/prediction-queue.json` and `GET /api/enrichment/queue/status` carry `compatibility`:
 
