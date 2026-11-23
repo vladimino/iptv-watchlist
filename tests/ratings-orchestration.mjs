@@ -527,8 +527,9 @@ async function started(w){await activate(w);return claim(w);}
   eq(plain(await w.R.handle(w.env,'migrate',{mode:'apply'})),{status:400,body:{error:'Unknown action'}});
   assert.equal(JSON.stringify(w.bucket.snapshot()),before,'a retired action writes nothing');
   const worker=fs.readFileSync('src/worker.js','utf8'),mcp=fs.readFileSync('src/mcp.js','utf8');
-  assert.match(worker,/\['\/api\/letterboxd\/ratings\/start','\/api\/letterboxd\/ratings\/step'\]\.includes\(url\.pathname\)/);assert.match(worker,/LetterboxdRatings\.handle\(env,/);
-  assert.match(mcp,/LetterboxdRatings\.handle\(env,params\.name==='ratings_sync_start'\?'start':'step',args\)/);
+  // The legacy writer entry points are gone: no HTTP route and no MCP tool reaches the Ratings `handle` adapter any more.
+  assert.doesNotMatch(worker,/letterboxd\/ratings\/(start|step)/);assert.doesNotMatch(worker+mcp,/LetterboxdRatings\.handle\(/);
+  assert.doesNotMatch(mcp,/ratings_sync_start|ratings_sync_step/);
   assert.doesNotMatch(worker+mcp,/ratings\/migrate|ratings_storage_migrate|LetterboxdRatings\.migrate\(/,'no entry path reaches a conversion');
  }
 }

@@ -2642,7 +2642,7 @@ async function letterboxdTmdbOf(env,lids){
  return map;
 }
 // The EVIDENCE the owner's mode switch needs before the Letterboxd writer is admitted (O5): read from the live state, never asserted. Ratings is closed (its own mode is neither `cloudflare` nor
-// `switching`) and drained (no step lease live, no instance live), the legacy `ratings_sync_start`/`ratings_sync_step` entry answers `external_writer_fenced` (that happens while the Letterboxd mode is
+// `switching`) and drained (no step lease live, no instance live), the legacy Ratings start/step gate (`externalGate`) answers `external_writer_fenced` (that happens while the Letterboxd mode is
 // `switching`, which `complete` requires), the Watchlist authority is an open `d1` and the three phase ports exist. Any unreadable piece is false.
 // AIR-571 D. The facts a handover proof rests on, read as ONE unit: the Watchlist marker (state, writes, generation), the Ratings domain authority (mode, cutover, generation: every authoritative Ratings commit bumps it)
 // and the stored etags (absence included) of the Ratings mode, control and run documents. null = any of them could not be read.
@@ -2662,7 +2662,7 @@ async function letterboxdHandoverFacts(env){
 }
 const sameFacts=(a,b)=>!!a&&!!b&&JSON.stringify(a)===JSON.stringify(b);
 // The EVIDENCE the owner's mode switch needs before the Letterboxd writer is admitted (O5): read from the live state, never asserted. Ratings is closed (its own mode is neither `cloudflare` nor
-// `switching`) and drained (no step lease live, no instance live), the legacy `ratings_sync_start`/`ratings_sync_step` entry answers `external_writer_fenced` (that happens while the Letterboxd mode is
+// `switching`) and drained (no step lease live, no instance live), the legacy Ratings start/step gate (`externalGate`) answers `external_writer_fenced` (that happens while the Letterboxd mode is
 // `switching`, which `complete` requires), the Watchlist authority is an open `d1` and the three phase ports exist. Any unreadable piece is false. The facts are read BEFORE and AFTER the proof and must be identical: a
 // fact that moved while the proof was read makes the whole proof false, and the identical facts are returned as `evidence`, the only thing the commit guards are built from.
 async function letterboxdHandover(env,now=Date.now()){
@@ -2773,7 +2773,6 @@ async fetch(request,env,execution){
   if(typeof LetterboxdSync!=='undefined'&&url.pathname==='/api/letterboxd/sync/mode'&&request.method==='GET')return json(await LetterboxdSync.modeStatus(env,letterboxdPorts(env)));
   if(typeof LetterboxdSync!=='undefined'&&url.pathname==='/api/letterboxd/sync/mode'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdSync.handle(env,body,letterboxdPorts(env));return json(reply.body,reply.status);}
   if(url.pathname==='/api/letterboxd/ratings/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await RatingsOrchestration.handle(env,body);return json(reply.body,reply.status);}
-  if(['/api/letterboxd/ratings/start','/api/letterboxd/ratings/step'].includes(url.pathname)&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdRatings.handle(env,url.pathname.slice('/api/letterboxd/ratings/'.length),body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/events'&&request.method==='GET'){const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){try{await bootstrapEvents(env);}catch(error){if(error instanceof StartedStorageError)return json({error:STARTED_UNAVAILABLE},503);throw error;}return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET'){try{return json({ids:await startedFilms(env)});}catch(error){if(error instanceof StartedStorageError)return json({error:STARTED_UNAVAILABLE},503);throw error;}}

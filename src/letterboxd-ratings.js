@@ -1,5 +1,5 @@
 // The Letterboxd ratings run (ADR 0060): Diary history and its rating facts, then the removal queue, in a run of its own
-// with a leased, checkpointed run record, driven by ratings_sync_start / ratings_sync_step. Only the run record is owned
+// with a leased, checkpointed run record, driven by the Letterboxd Sync Workflow (the former ratings_sync_start / ratings_sync_step entry points are gone). Only the run record is owned
 // (compare-and-swap while `lease.step` is the step's own id); the Diary cursor, history, facts, queue and events change
 // by their monotone merges, so a step that outlived its lease can add real progress and never move anything back.
 // The pipeline is permanently separate (ADR 0074). It works only on version 2 storage: the removal queue at schema version 2 and
@@ -180,7 +180,7 @@ const LetterboxdRatings=(()=>{
   return {written};
  }
 
- // ratings_sync_start. `busy` never hands out the running id; a stale record is closed first.
+ // The start of a run. `busy` never hands out the running id; a stale record is closed first.
  async function start(env,{trigger,clearIsolation=false,slotKey=null}={},now=Date.now()){
   const reply=(runId,created,nextAction,reason,extra={})=>({runId,created,nextAction,reason,...extra});
   const state=await storageState(env);
@@ -212,7 +212,7 @@ const LetterboxdRatings=(()=>{
   throw new Error('Ratings run changed during start');
  }
 
- // ratings_sync_step: one bounded step of the run named by runId. `clock` reads the time at each lease check (tests
+ // One bounded step of the run named by runId. `clock` reads the time at each lease check (tests
  // drive it); `now` is the time the step begins.
  async function step(env,{runId}={},{now=Date.now(),clock=()=>Date.now()}={}){
   const reply=(run,nextAction,reason,extra={})=>({runId:run?.runId??null,state:run?.state??null,phase:run?.phase??null,nextAction,reason,nextCatchUpAt:null,step:null,summary:null,...extra});
@@ -535,7 +535,7 @@ const LetterboxdRatings=(()=>{
   if(run.state==='error')return {...base,state:run.cause==='failed'?'failed':'degraded',code:run.cause==='blocked'?'ratings_blocked':run.cause==='rate_limited'?'ratings_rate_limit':'ratings_failed'};
   return {...base,state:'ok',code:'ok'};
  }
- // The request contract shared by the HTTP routes and the MCP tools: a JSON object with only the listed fields.
+ // The request contract of the `handle` adapter: a JSON object with only the listed fields. No HTTP route and no MCP tool reaches `handle` any more; it stays for the fence tests and the external-path gate.
  const FIELDS={start:{trigger:value=>value==='scheduled'||value==='manual',clearIsolation:value=>typeof value==='boolean'},step:{runId:value=>typeof value==='string'&&/^[A-Za-z0-9-]{1,80}$/.test(value)}};
  const REQUIRED={start:['trigger'],step:['runId']};
  function validate(action,body){
