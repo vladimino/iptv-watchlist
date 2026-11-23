@@ -20,12 +20,8 @@ function setup({hold=false}={}){
  // The stub D1 readers answer from `world`; every read is counted and none writes.
  const world={P:'run-p',generation:10,publishedAt:at(T0),chain:null,run:null,reads:0,unreadable:false};
  const read=value=>{world.reads++;if(world.unreadable)throw new Error('d1 down');return value;};
- ctx.CanonicalProducerWorkflow={PRODUCER_DELIVERY_HOLD:hold};
- ctx.PublishedEpg={async readAuthority(){return read({ready:true,programmeRunId:world.P,generation:world.generation});},async currentGeneration(){return {programmeRunId:world.P};}};
- ctx.ProducerFence={snapshotLabel:(P,gen)=>P+':'+gen};
- ctx.FilmPersonAuthority={database:env=>env.DB,async one(){return read({publishedAt:world.publishedAt});}};
- ctx.CanonicalProducerChain={async readChain(){return read(world.chain);}};
- ctx.CanonicalProducerStore={async epgRunForGeneration(){return read(world.run);}};
+ ctx.CanonicalProducerWorkflow={PRODUCER_DELIVERY_HOLD:hold,async readProducerMonitorFacts(){
+  return read({ready:true,programmeRunId:world.P,generation:world.generation,label:world.P+':'+world.generation,publishedAt:world.publishedAt,chain:world.chain,run:world.run});}};
  const env=baseEnv(bucket,{MONITOR:'on',MONITOR_WEBHOOK_URL:'https://hooks.example/alert',DB:{}});
  return {clock,bucket,ctx,env,calls,world,M:g(ctx,'Monitor'),setWebhook:ok=>{webhookOk=ok;}};
 }
@@ -36,7 +32,7 @@ function epgHealthy(bucket,{runId='run-p',publishedAt=at(T0-3*H)}={}){
 }
 const posts=calls=>calls.filter(item=>item.method==='POST');
 const producer=async(M,env,now)=>plain((await M.status(env,now)).streams).find(stream=>stream.stream==='canonical_producer');
-const run=(over={})=>({pass_state:'passing',source_generation:'run-p:10',applied_generation:null,stopped_by:null,cursor_id:'film:tmdb:1',n_applied:0,n_noop:0,n_kept:0,n_failed:0,pass_no:1,updated_at:at(T0),...over});
+const run=(over={})=>({run_key:'epg:run-p:10',pass_state:'passing',source_generation:'run-p:10',applied_generation:null,stopped_by:null,cursor_id:'film:tmdb:1',n_applied:0,n_noop:0,n_kept:0,n_failed:0,pass_no:1,updated_at:at(T0),...over});
 const chain=(over={})=>({owner_state:'active',stopped_by:null,recovery_class:null,...over});
 
 // 1. Delivery hold (the shipped default): visible, never healthy, no alert, and not a single D1 read.
@@ -97,6 +93,44 @@ const chain=(over={})=>({owner_state:'active',stopped_by:null,recovery_class:nul
   await M.run(env,{now:T0+hour*H});
  }
  assert.equal(posts(calls).filter(item=>item.body.key==='canonical_producer_no_progress').length,1,'four rollovers in four hours did not reset the streak');
+}
+
+// 4b. Review P1: churn is not progress. Non-null run rows whose pass number, pass state, run key or generation change while ZERO units finish never reset the
+// clock; a falling counter (a replay) and a growing failure count are not progress either; only finished units or a moved cursor of the SAME pass are.
+{
+ const {bucket,env,M,calls,world}=setup();epgHealthy(bucket);
+ world.chain=chain();
+ for(let hour=0;hour<=4;hour++){
+  world.generation=10+hour;world.publishedAt=at(T0+hour*H);
+  world.run=run({run_key:'epg:run-p:'+world.generation,source_generation:'run-p:'+world.generation,pass_no:hour+1,pass_state:hour%2?'stopped':'passing',stopped_by:hour%2?'producer_transport':null,cursor_id:null,n_failed:hour,updated_at:at(T0+hour*H)});
+  await M.run(env,{now:T0+hour*H});
+ }
+ const s=await producer(M,env,T0+4*H);
+ assert.equal(s.facts.status,'stalled','restarts, rollovers and failures with zero finished units cannot postpone the verdict');
+ assert.ok(posts(calls).some(item=>item.body.key==='canonical_producer_no_progress'));
+}
+{
+ // The first sighting of a pass that already finished units starts the window at the first live tick; a replay that restarts LOWER is not progress; only the
+ // growth of the same pass, or a moved cursor of it, is.
+ const {bucket,env,M,world}=setup();epgHealthy(bucket);
+ world.chain=chain();world.publishedAt=at(T0-5*H);
+ world.run=run({n_applied:50,updated_at:at(T0-4*H)});
+ await M.run(env,{now:T0});
+ assert.equal((await producer(M,env,T0)).facts.status,'lagging','the window starts at the first live tick');
+ world.run=run({n_applied:0,pass_no:2,cursor_id:null,updated_at:at(T0+H)});     // a restart (new pass) that has finished nothing yet
+ await M.run(env,{now:T0+H});
+ world.run=run({n_applied:0,pass_no:3,cursor_id:null,updated_at:at(T0+2*H)});   // and another one
+ await M.run(env,{now:T0+3*H});
+ assert.equal((await producer(M,env,T0+3*H)).facts.status,'stalled','restarts with zero finished units did not reset the clock');
+ world.run=run({n_applied:9,pass_no:3,updated_at:at(T0+4*H)});   // the pass then finished units (first sighting with units: evidence at its own update time)
+ await M.run(env,{now:T0+4*H});
+ assert.equal((await producer(M,env,T0+4*H)).facts.status,'lagging','a pass that finished units is progress');
+ world.run=run({n_applied:9,pass_no:3,updated_at:at(T0+4*H)});
+ await M.run(env,{now:T0+6*H+MIN});
+ assert.equal((await producer(M,env,T0+6*H+MIN)).facts.status,'stalled');
+ world.run=run({n_applied:9,pass_no:3,cursor_id:'film:tmdb:900',updated_at:at(T0+7*H)});   // cursor-only move
+ await M.run(env,{now:T0+7*H});
+ assert.equal((await producer(M,env,T0+7*H)).facts.status,'lagging','a moved cursor of the same pass is progress');
 }
 
 // 5. Current means exactly one thing: the run of the published generation passed with the same applied generation. Zero eligible units is a pass.
@@ -166,7 +200,7 @@ const chain=(over={})=>({owner_state:'active',stopped_by:null,recovery_class:nul
  const {bucket,env,M,world}=setup();epgHealthy(bucket);
  world.chain=chain();world.run=run();
  await M.run(env,{now:T0});
- assert.ok(world.reads<=4,'bounded D1 reads per tick, got '+world.reads);
+ assert.equal(world.reads,1,'one reader call per tick (its three SQL statements are counted against the real database in canonical-producer-chain.mjs)');
  const before=world.reads;
  await M.status(env,T0+MIN);
  assert.equal(world.reads,before,'GET /api/monitor/status reads only the stored document');

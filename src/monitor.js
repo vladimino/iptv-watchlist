@@ -98,40 +98,39 @@ const Monitor=(()=>{
   if(result.checkpointStatus==='absent'&&!next.seenAt&&!next.baselineAt)next.baselineAt=iso(now);
   return {...result,markers:next};
  });
- // AIR-572. The canonical Producer, from bounded READ-ONLY D1: the published (P,g) (one row), the chain row of P (primary key) and the run row of
- // that exact generation (indexed on origin, source_generation). No join, no scan, no write. Durable progress is a CHANGE of the run's own counters or
- // cursor (`signature`); a publication, takeover, lease renewal or heartbeat leaves it unchanged. The streak start (`noProgressSince`) survives a
- // rollover of the published generation and is cleared only by progress, so a stream of rollovers cannot postpone the verdict. While the delivery hold is
+ // AIR-572. The canonical Producer, from bounded READ-ONLY D1: ONE reader (`CanonicalProducerWorkflow.readProducerMonitorFacts`, exactly three SQL
+ // statements: the published (P,g) with its publication time, the chain by primary key, the run of that generation by index). No join over a catalog, no scan, no
+ // write. The streak start (`noProgressSince`) survives a rollover of the published generation and is cleared only by proven progress. While the delivery hold is
  // on nothing is read and the clock is cleared, so lifting the hold gives the live Producer a full no-progress window (never an instant alert).
- const producerClock=(previous,signature,publishedAt,now,runUpdatedAt=null)=>{
+ // PROVEN progress only: units finished in the SAME run row and the SAME pass (n_applied + n_noop + n_kept grew) or its cursor moved. A new pass number, a
+ // new pass state, a new run row or a new generation changes nothing by itself: restarts and rollovers with zero finished units never reset the clock, and a
+ // counter that falls (a replay) is never progress. The first sighting of a pass is evidence only if it already finished units or holds a cursor, and then
+ // only at its own stored update time. Failures (n_failed) and strikes are not progress.
+ const producerClock=(previous,run,publishedAt,now)=>{
   const prior=previous&&typeof previous==='object'?previous:{};
   const stamp=value=>Number.isFinite(Date.parse(value||''))?Date.parse(value):null;
   const live=stamp(prior.liveSince)??now;
-  const first=prior.signature===undefined||prior.signature===null;
-  // The first observation of a run is not itself progress; its own stored update time is the only evidence of life it carries.
-  const moved=signature!==null&&!first&&signature!==prior.signature;
-  const seeded=signature!==null&&first?stamp(runUpdatedAt):null;
+  const done=run?Number(run.n_applied||0)+Number(run.n_noop||0)+Number(run.n_kept||0):null;
+  const cursor=run?(run.cursor_id??null):null;
+  const samePass=!!run&&prior.runKey===run.run_key&&prior.passNo===run.pass_no;
+  const moved=samePass&&(done>Number(prior.done||0)||(cursor!==null&&cursor!==(prior.cursor??null)));
+  const seeded=!!run&&!samePass&&(done>0||cursor!==null)?stamp(run.updated_at):null;
   const progress=moved?now:(seeded!==null?Math.min(seeded,now):stamp(prior.progressAt));
   const published=stamp(publishedAt)??now;
   const streak=moved?null:(stamp(prior.noProgressSince)??Math.max(published,live));
   const since=moved?now:(Math.max(progress??0,streak??0)||null);
   const at=value=>value===null||value===undefined?null:iso(value);
-  return {liveSince:iso(live),signature:signature??prior.signature??null,progressAt:at(progress),noProgressSince:at(streak),sinceAt:at(since)};
+  return {liveSince:iso(live),runKey:run?run.run_key:(prior.runKey??null),passNo:run?run.pass_no:(prior.passNo??null),done:run?done:(prior.done??null),cursor:run?cursor:(prior.cursor??null),
+   progressAt:at(progress),noProgressSince:at(streak),sinceAt:at(since)};
  };
  const canonicalProducerFacts=(env,now,previous)=>guarded(async()=>{
-  if(typeof CanonicalProducerWorkflow==='undefined'||typeof PublishedEpg==='undefined'||!env?.DB)return null;
+  if(typeof CanonicalProducerWorkflow==='undefined'||!env?.DB)return null;
   if(CanonicalProducerWorkflow.PRODUCER_DELIVERY_HOLD===true)return {held:true,readable:true,clock:null};
-  const published=await PublishedEpg.readAuthority(env);
-  if(!published?.ready||!published.programmeRunId)return {held:false,readable:true,label:null,clock:producerClock(previous,null,null,now)};
-  const P=published.programmeRunId,label=ProducerFence.snapshotLabel(P,Number(published.generation));
-  const db=FilmPersonAuthority.database(env);
-  const [row,chain,run]=await Promise.all([
-   FilmPersonAuthority.one(db,'SELECT published_at AS publishedAt FROM published_epg_generation WHERE programme_run_id=?',[P]),
-   CanonicalProducerChain.readChain(env,P),
-   CanonicalProducerStore.epgRunForGeneration(env,{sourceGeneration:label})]);
-  const signature=run?[run.cursor_id??'',run.n_applied,run.n_noop,run.n_kept,run.n_failed,run.pass_no,run.pass_state].join('|'):null;
-  const clock=producerClock(previous,signature,row?.publishedAt||null,now,run?.updated_at||null);
-  return {held:false,readable:true,label,publishedAt:row?.publishedAt||null,sinceAt:clock.sinceAt,progressAt:clock.progressAt,clock,
+  const read=await CanonicalProducerWorkflow.readProducerMonitorFacts(env);
+  if(!read.ready)return {held:false,readable:true,label:null,clock:producerClock(previous,null,null,now)};
+  const clock=producerClock(previous,read.run,read.publishedAt,now);
+  const {run,chain}=read;
+  return {held:false,readable:true,label:read.label,publishedAt:read.publishedAt,sinceAt:clock.sinceAt,progressAt:clock.progressAt,clock,
    chain:chain?{ownerState:chain.owner_state,stoppedBy:chain.stopped_by||null,recoveryClass:chain.recovery_class||null}:null,
    run:run?{passState:run.pass_state,sourceGeneration:run.source_generation,appliedGeneration:run.applied_generation||null,stoppedBy:run.stopped_by||null}:null};
  });

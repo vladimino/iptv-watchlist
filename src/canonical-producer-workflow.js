@@ -1,6 +1,6 @@
 // AIR-497 / ADR 0141. Bounded Producer Workflow chain. Dormant unless the Film/Person marker is d1/open
 // AND env.PRODUCER_WORKFLOW exists. Launched ONLY from hourly reconcileProducerChain. No new cron, flag or Task.
-import {database,many,readAuthority} from './film-person-authority.js';
+import {database,many,one,readAuthority} from './film-person-authority.js';
 import {readDocument,readMembers,readAuthority as readPublished} from './published-epg.js';
 import {buildEpgPlan,runEpgProducerPass,retryEpgProducerResults,readCanonicalFreshness} from './canonical-producer-driver.js';
 import {reconcileEpgRun} from './canonical-epg-person-producer.js';
@@ -98,20 +98,35 @@ export const IDENTITY_LOOKUP_CAP=1000;
 export const IDENTITY_CHUNK=200;
 const DIRECT=/^(film:|tmdb_|tmdb:)/;
 export function resolveIdentity(raw,{claims=[],films=new Set(),redirects=new Map()}={}){
- const follow=id=>{
-  if(!redirects.has(id))return {target:id};
+ // `via` is the provenance of the decision; `guardsOf` turns it into write-time proofs.
+ const follow=(id,via)=>{
+  if(!redirects.has(id))return {target:id,via,owner:id};
   const next=redirects.get(id);
-  return redirects.has(next)?{refused:'producer_identity_redirect_chain'}:{target:next};
+  return redirects.has(next)?{refused:'producer_identity_redirect_chain'}:{target:next,via,owner:id,redirected:true};
  };
- if(DIRECT.test(raw))return follow(canonicalFilmId(raw));
+ if(DIRECT.test(raw))return follow(canonicalFilmId(raw),'direct');
  const clean=claims.filter(row=>Number(row.trusted)===1&&Number(row.conflicting)===0);
  const other=claims.length-clean.length;
  const owners=[...new Set(clean.map(row=>row.film_id))];
  if(owners.length>1||(owners.length===1&&other>0)||(owners.length===0&&other>0))return {refused:'producer_identity_ambiguous'};
- if(owners.length===1)return follow(owners[0]);
+ if(owners.length===1)return follow(owners[0],'claim');
  const own='film:'+raw;
- if(films.has(own))return follow(own);
+ if(films.has(own))return follow(own,'own');
  return {refused:'producer_identity_unresolved'};
+}
+// AIR-572. The write-time proofs of one resolution, asserted INSIDE the fenced batch of every Film write to the target (film_facts and credits, replay
+// included), so a claim or redirect that changes after the plan fails the batch whole and writes nothing:
+//   claim: the owner still holds the lid as its one trusted, non-conflicting claim and no other Film claims the lid;
+//   own:   no other Film claims the lid (the Film is addressed by its own name, never because a claim says so);
+//   redirected: the redirect owner -> target still exists (the writer itself already asserts no redirect leaves the target).
+// A direct (prefixed) id carries only the redirect proof when one was followed.
+export function guardsOf(raw,decision){
+ const out=[];
+ if(!decision||!decision.target)return out;
+ if(decision.via==='claim')out.push({sql:"EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='letterboxd' AND value=? AND trusted=1 AND conflicting=0)",params:[decision.owner,raw]});
+ if(decision.via==='claim'||decision.via==='own')out.push({sql:"NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='letterboxd' AND value=? AND film_id<>? AND film_id<>?)",params:[raw,decision.owner,decision.target]});
+ if(decision.redirected)out.push({sql:'EXISTS (SELECT 1 FROM film_redirect WHERE from_id=? AND to_film_id=?)',params:[decision.owner,decision.target]});
+ return out;
 }
 export async function resolveSourceIdentities(env,rawIds){
  const unique=[...new Set(rawIds.filter(Boolean))];
@@ -140,16 +155,17 @@ export async function resolveSourceIdentities(env,rawIds){
    for(const row of await many(db,"SELECT from_id,to_film_id FROM film_redirect WHERE from_id IN (SELECT value FROM json_each(?))",[chunk]))redirects.set(row.from_id,row.to_film_id);
   }
  }catch{return {ok:false,code:'producer_identity_unreadable'};}
- const resolved=new Map(),refused=[];
+ const resolved=new Map(),refused=[],guards=new Map();
  for(const id of unique){
   const out=resolveIdentity(id,{claims:claims.get(id)||[],films,redirects});
-  if(out.target)resolved.set(id,out.target);else refused.push({id,code:out.refused});
+  if(out.target){resolved.set(id,out.target);const g=guardsOf(id,out);if(g.length){if(!guards.has(out.target))guards.set(out.target,[]);guards.get(out.target).push(...g);}}
+  else refused.push({id,code:out.refused});
  }
  if(refused.length){
   const code=refused.some(item=>item.code==='producer_identity_ambiguous')?'producer_identity_ambiguous':refused[0].code;
   return {ok:false,code,refused:refused.slice(0,20),refusedCount:refused.length};
  }
- return {ok:true,resolved};
+ return {ok:true,resolved,guards};
 }
 function peopleOf(film){
  const out=[];
@@ -163,7 +179,12 @@ function peopleOf(film){
  }
  return out;
 }
-function planFromSealed({programme,watchlist,watchMembers,previousIds=[],resolved}){
+function uniqueGuards(list=[]){
+ const seen=new Set(),out=[];
+ for(const guard of list){const key=JSON.stringify(guard);if(!seen.has(key)){seen.add(key);out.push(guard);}}
+ return out;
+}
+function planFromSealed({programme,watchlist,watchMembers,previousIds=[],resolved,guards=new Map()}){
  const listed=idsOf(watchlist,watchMembers,resolved);
  const byFilm=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){
@@ -174,7 +195,8 @@ function planFromSealed({programme,watchlist,watchMembers,previousIds=[],resolve
  for(const id of listed){
   if(seen.has(id))continue;
   seen.add(id);
-  films.push({id,facts:filmFactsOf(byFilm.get(id)||{id},true)});
+  const proofs=uniqueGuards(guards.get(id));
+  films.push({id,facts:{...filmFactsOf(byFilm.get(id)||{id},true),...(proofs.length?{guards:proofs}:{})}});
  }
  const listedSet=new Set(listed);
  const departed=[...new Set(previousIds.map(id=>canonicalFilmId(id)).filter(id=>id&&!listedSet.has(id)))].sort();
@@ -191,7 +213,7 @@ function planFromSealed({programme,watchlist,watchMembers,previousIds=[],resolve
    }
    unitCredits.push({personId:person.id,role:person.role});
   }
-  if(unitCredits.length)credits.push({filmId:item.id,credits:unitCredits});
+  if(unitCredits.length)credits.push({filmId:item.id,credits:unitCredits,...(item.facts.guards?{guards:item.facts.guards}:{})});
  }
  return {films,departed,persons,credits,personRows};
 }
@@ -214,7 +236,7 @@ export async function acquireSealedSnapshot(env,programmeRunId,{previousIds}={})
  // so a refused id is never silently dropped and then mistaken for a departed Film.
  const identity=await resolveSourceIdentities(env,[...new Set([...sourceIdsOf(watchlist,members)])]);
  if(!identity.ok)return {ok:false,code:identity.code,refused:identity.refused,refusedCount:identity.refusedCount};
- const planned=planFromSealed({programme,watchlist,watchMembers:members,previousIds:prior,resolved:identity.resolved});
+ const planned=planFromSealed({programme,watchlist,watchMembers:members,previousIds:prior,resolved:identity.resolved,guards:identity.guards});
  return {ok:true,generation:g0,programmeRunId,...planned,label:snapshotLabel(programmeRunId,g0),members,watchlist};
 }
 
@@ -228,6 +250,19 @@ async function createInstance(env,id,params){
   }
  }
  return {ok:false,reason:'create_uncertain'};
+}
+
+// AIR-572. The Monitor's whole D1 read of the Producer: exactly THREE SQL statements (one authority row joined by primary key to its generation row,
+// the chain by primary key, the run of the exact generation by index), no table inventory, no schema read, no scan, no write. Unlike
+// `PublishedEpg.readAuthority` (three statements on its own) it does not validate the install; it only names the published (P,g) when the marker row says
+// `d1`/`open`. Any failure throws (the Monitor reports `unreadable`).
+export async function readProducerMonitorFacts(env){
+ const db=database(env);
+ const row=await one(db,'SELECT a.mode AS mode,a.cutover AS cutover,a.programme_run_id AS programmeRunId,a.generation AS generation,g.published_at AS publishedAt FROM published_epg_authority a LEFT JOIN published_epg_generation g ON g.programme_run_id=a.programme_run_id WHERE a.id=1',[]);
+ if(!row||row.mode!=='d1'||row.cutover!=='open'||!row.programmeRunId)return {ready:false};
+ const label=snapshotLabel(row.programmeRunId,Number(row.generation));
+ const [chain,run]=await Promise.all([readChain(env,row.programmeRunId),epgRunForGeneration(env,{sourceGeneration:label})]);
+ return {ready:true,programmeRunId:row.programmeRunId,generation:Number(row.generation),label,publishedAt:row.publishedAt||null,chain,run};
 }
 
 export async function reconcileProducerChain(env,{now=Date.now(),hold=PRODUCER_DELIVERY_HOLD}={}){

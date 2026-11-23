@@ -479,16 +479,16 @@ const addFilm=(file,id)=>sqlite(file,"INSERT INTO film (id,contract_version,orig
 const addClaim=(file,filmId,lid,trusted=1,conflicting=0)=>sqlite(file,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('"+filmId+"','letterboxd','"+lid+"',"+trusted+","+conflicting+")");
 
 // Pure decisions.
-assert.deepEqual(resolveIdentity('tmdb_5'),{target:'film:tmdb:5'});
-assert.deepEqual(resolveIdentity('film:x'),{target:'film:x'});
-assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}]}),{target:'film:tmdb:7'});
-assert.deepEqual(resolveIdentity('lid1',{films:new Set(['film:lid1'])}),{target:'film:lid1'});
+assert.equal(resolveIdentity('tmdb_5').target,'film:tmdb:5');
+assert.equal(resolveIdentity('film:x').target,'film:x');
+assert.equal(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}]}).target,'film:tmdb:7');
+assert.equal(resolveIdentity('lid1',{films:new Set(['film:lid1'])}).target,'film:lid1');
 assert.deepEqual(resolveIdentity('lid1',{}),{refused:'producer_identity_unresolved'},'no claim and no existing Film: never created from a spelling');
 assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:0,conflicting:0}]}),{refused:'producer_identity_ambiguous'});
 assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0},{film_id:'film:tmdb:8',trusted:0,conflicting:1}]}),{refused:'producer_identity_ambiguous'});
-assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}],redirects:new Map([['film:tmdb:7','film:tmdb:9']])}),{target:'film:tmdb:9'});
+assert.equal(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}],redirects:new Map([['film:tmdb:7','film:tmdb:9']])}).target,'film:tmdb:9');
 assert.deepEqual(resolveIdentity('lid1',{claims:[{film_id:'film:tmdb:7',trusted:1,conflicting:0}],redirects:new Map([['film:tmdb:7','film:tmdb:9'],['film:tmdb:9','film:tmdb:10']])}),{refused:'producer_identity_redirect_chain'});
-assert.deepEqual(resolveIdentity('tmdb_5',{redirects:new Map([['film:tmdb:5','film:tmdb:6']])}),{target:'film:tmdb:6'});
+assert.equal(resolveIdentity('tmdb_5',{redirects:new Map([['film:tmdb:5','film:tmdb:6']])}).target,'film:tmdb:6');
 
 // Historical mixed fixture (21.11): 386 canonical film:<lid> + 9 existing film:tmdb:<n> with trusted Letterboxd claims -> 395 unique existing owners, 0 shadow Films.
 {
@@ -579,4 +579,117 @@ for(const [label,setup,expected] of [
  assert.equal(one(file,'SELECT stopped_by FROM canonical_producer_chain'),'producer_identity_unresolved');
  assert.equal(one(file,'SELECT COUNT(*) FROM film'),0);
  assert.equal(one(file,'SELECT COUNT(*) FROM watchlist_film'),0);
+}
+
+// ---- AIR-572 review P1: the identity proof is asserted INSIDE the write batch (a second SELECT is not enough). The race is injected exactly between the plan
+// and the first write batch by changing the claim / redirect through a wrapped D1 `batch`.
+{
+ const empty='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
+ const seed=(file,sources,films)=>{
+  sqlite(file,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+AT+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+empty+"','"+empty+"','"+AT+"')");
+  films(file);
+  publish(file,sources,{films:sources.map(id=>({id,title:'T',directors:[{id:'p1',name:'Dir'}]}))});
+ };
+ async function race(label,{sources,films,change,trigger=/INSERT INTO (film \(|watchlist_film )/}){
+  const file=database();
+  seed(file,sources,films);
+  let raced=false;
+  const env={DB:d1Standin(file,{onBatch:async statements=>{
+   if(!raced&&statements.some(item=>trigger.test(item.text))){raced=true;change(file);}
+  }})};
+  const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+  const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('15151515-1515-1515-1515-151515151515'):fn()},{hold:false});
+  return {file,result,raced};
+ }
+ // 1. A competing (untrusted) claim for the lid appears after the plan: nothing is written to the owner.
+ {
+  const {file,result,raced}=await race('competing claim',{sources:['racel1'],
+   films:f=>{addFilm(f,'film:tmdb:70');addClaim(f,'film:tmdb:70','racel1');},
+   change:f=>{addFilm(f,'film:tmdb:71');addClaim(f,'film:tmdb:71','racel1',0,1);}});
+  assert.equal(raced,true,'the race ran between the plan and the first write batch');
+  assert.notEqual(result.state,'complete');
+  assert.equal(one(file,'SELECT COUNT(*) FROM watchlist_film'),0,'no membership written under a changed claim');
+ }
+ // 2. The owner's claim is removed after the plan.
+ {
+  const {file,result,raced}=await race('claim removed',{sources:['racel2'],
+   films:f=>{addFilm(f,'film:tmdb:72');addClaim(f,'film:tmdb:72','racel2');},
+   change:f=>sqlite(f,"DELETE FROM film_external_id WHERE value='racel2'")});
+  assert.equal(raced,true);assert.notEqual(result.state,'complete');
+  assert.equal(one(file,'SELECT COUNT(*) FROM watchlist_film'),0);
+ }
+ // 3. A Film addressed by its own name (no claim): another Film claims the lid after the plan.
+ {
+  const {file,result,raced}=await race('own then claimed',{sources:['racel3'],
+   films:f=>addFilm(f,'film:racel3'),
+   change:f=>{addFilm(f,'film:tmdb:73');addClaim(f,'film:tmdb:73','racel3');}});
+  assert.equal(raced,true);assert.notEqual(result.state,'complete');
+  assert.equal(one(file,'SELECT COUNT(*) FROM watchlist_film'),0,'the lid-named Film is not written once another Film owns the lid');
+ }
+ // 4. A followed redirect disappears after the plan.
+ {
+  const {file,result,raced}=await race('redirect removed',{sources:['racel4'],
+   films:f=>{addFilm(f,'film:tmdb:74');addFilm(f,'film:tmdb:75');addClaim(f,'film:tmdb:74','racel4');sqlite(f,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:74','film:tmdb:75','"+AT+"')");},
+   change:f=>sqlite(f,"DELETE FROM film_redirect")});
+  assert.equal(raced,true);assert.notEqual(result.state,'complete');
+  assert.equal(one(file,'SELECT COUNT(*) FROM watchlist_film'),0);
+ }
+ // 4b. The credits write (a later unit; film_facts already applied) carries the same proof: a claim that changes right before the credit batch blocks it.
+ {
+  const {file,result,raced}=await race('claim changes before credits',{sources:['racel6'],
+   films:f=>{addFilm(f,'film:tmdb:77');addClaim(f,'film:tmdb:77','racel6');},
+   trigger:/INSERT INTO film_person_credit /,
+   change:f=>{addFilm(f,'film:tmdb:78');addClaim(f,'film:tmdb:78','racel6',0,1);}});
+  assert.equal(raced,true,'the credit batch was reached');
+  assert.notEqual(result.state,'complete');
+  assert.equal(one(file,'SELECT COUNT(*) FROM film_person_credit'),0,'no credit written under a changed claim');
+ }
+ // 5. Control: with no change the same pass completes and writes the owner (so the guards above are what blocked it).
+ {
+  const {file,result}=await race('control',{sources:['racel5'],
+   films:f=>{addFilm(f,'film:tmdb:76');addClaim(f,'film:tmdb:76','racel5');},change:()=>{}});
+  assert.equal(result.state,'complete');
+  assert.equal(one(file,'SELECT film_id FROM watchlist_film'),'film:tmdb:76');
+  assert.equal(one(file,'SELECT COUNT(*) FROM film'),1);
+ }
+}
+
+// Receipt replay: the re-plan of a stored receipt returns the unit input WITH its proofs (so a replayed write asserts them again), and the proofs are not content (the digest is the same with or without them).
+{
+ const {planEpgUnits,epgReplan}=await import('../src/canonical-epg-producer.js');
+ const {filmFactsDigest}=await import('../src/canonical-producer-adapters.js');
+ const guard={sql:'EXISTS (SELECT 1 FROM film WHERE id=?)',params:['film:tmdb:1']};
+ const plan=planEpgUnits({runId:'run-r',at:AT,films:[{id:'film:tmdb:1',facts:{film:{contractVersion:1},watchlist:true,guards:[guard]}}]});
+ const input=plan.units[0].input;
+ const digest=await filmFactsDigest(input);
+ assert.equal(digest,await filmFactsDigest({...input,guards:undefined}),'guards are not content');
+ const requestId=await producerRequestId({origin:'epg',event:plan.event,target:{kind:'film',id:'film:tmdb:1'},digest});
+ const replanned=await epgReplan(plan)({target:{kind:'film',id:'film:tmdb:1'},contentDigest:digest,requestId});
+ assert.deepEqual(replanned.guards,[guard]);
+}
+
+// Review P2: the Monitor's D1 read of the Producer is exactly three SQL statements, all reads, counted on the prepared SQL against the real schema (no table inventory, no schema read, no write).
+{
+ const {readProducerMonitorFacts}=await import('../src/canonical-producer-workflow.js');
+ const file=database();
+ const seen=[];
+ const env={DB:d1Standin(file,{onQuery:async text=>{seen.push(text);}})};
+ publish(file,[]);
+ const idle=await readProducerMonitorFacts(env);
+ assert.equal(idle.ready,true);
+ assert.equal(seen.length,3,'authority row (with its generation), chain by primary key, run by index: three statements, got '+seen.length);
+ assert.ok(seen.every(text=>/^\s*SELECT/i.test(text)),'every statement is a read');
+ assert.ok(!seen.some(text=>/sqlite_master|schema_contract/i.test(text)),'no install inventory or schema read');
+ seen.length=0;
+ await Chain.launchChain(envOf(file),{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ const withChain=await readProducerMonitorFacts(env);
+ assert.equal(seen.length,3);
+ assert.equal(withChain.chain.owner_state,'pending');
+ assert.equal(withChain.label,'run-p:10');
+ // A dormant marker names nothing and reads one statement only.
+ const prepared=database('prepared');
+ const none=[];
+ const closed=await readProducerMonitorFacts({DB:d1Standin(prepared,{onQuery:async text=>{none.push(text);}})});
+ assert.equal(closed.ready,false);
+ assert.equal(none.length,1);
 }
