@@ -138,7 +138,7 @@ for (const [event, expected, name] of table) assert.equal(status(event), expecte
 // The title text never decides: same fields, any wording.
 assert.equal(status({type: 'discovery', kind: 'hour', status: 'idle', checked: 1, added: 0, title: 'Ошибка прервано'}), 'success');
 
-// Filters: both axes combine; «Пропущенные» stays a type, `warning` a result.
+// Filters: both axes combine. A skipped start is an `enrichment` Event with the `warning` result; it has no type of its own (AIR-584).
 const events = [
   {type: 'enrichment', presentation: 'batch_v2_skipped'}, terminal({stage: 'complete', delta: {failed: 0}}), terminal({stage: 'partial', stopReason: 'api_error'}),
   {type: 'discovery', kind: 'report_failed'}, {type: 'watchlist'}, {type: 'epg'},
@@ -148,8 +148,8 @@ const count = (type, result) => events.filter(event => run(`eventMatchesFilters(
 assert.equal(count('all', 'all'), 8);
 assert.equal(count('all', 'warning'), 4, 'both EPG warnings are in «Предупреждение»');
 assert.equal(count('all', 'success'), 3, 'a successful watchlist commit is in «Успех»');
-assert.equal(count('skipped', 'warning'), 1);
-assert.equal(count('skipped', 'success'), 0, 'zero results for a combination');
+assert.equal(count('enrichment', 'warning'), 1, 'the skipped start is the warning of «Прогнозы»');
+assert.equal(count('watchlist', 'warning'), 0, 'zero results for a combination');
 assert.equal(count('enrichment', 'error'), 1);
 assert.equal(count('enrichment', 'all'), 3);
 assert.equal(count('watchlist', 'all'), 1);
@@ -173,7 +173,7 @@ assert.equal(run("eventMatchesResult({type:'epg'},'nonsense')"), true, 'an unkno
 run("loadedEvents.clear();eventResultFilterId='error'");
 for (let i = 0; i < 10; i++) run(`loadedEvents.set('s${i}',{id:'s${i}',type:'enrichment',presentation:'batch_v2_skipped'})`);
 assert.equal(run("eventMatchCount('enrichment')"), 0, 'ten events of the type with the wrong result are no matches');
-assert.equal(run("eventMatchCount('skipped','warning')"), 10);
+assert.equal(run("eventMatchCount('enrichment','warning')"), 10);
 run("loadedEvents.set('t1',{id:'t1',type:'enrichment',presentation:'batch_v2_terminal',stage:'partial',stopReason:'api_error'})");
 assert.equal(run("eventMatchCount('enrichment')"), 1);
 assert.equal(run("eventMatchCount('all','all')"), 11, 'both axes «all» count everything and need no scan');
@@ -181,7 +181,7 @@ run("eventResultFilterId='all';loadedEvents.clear()");
 
 // URL: the two parameters are independent and every other parameter stays byte for byte.
 assert.equal(run("eventResultFrom('?result=warning&type=skipped')"), 'warning');
-assert.equal(run("eventTypeFrom('?result=warning&type=skipped')"), 'skipped');
+assert.equal(run("eventTypeFrom('?result=warning&type=skipped')"), 'all', 'AIR-584: the removed type falls back to «Все события», the result stays');
 assert.equal(run("eventResultFrom('?result=nonsense')"), 'all');
 assert.equal(run("eventResultFrom('')"), 'all');
 assert.equal(run("withEventResult('/events?type=skipped&return=%2F%3Fq%3Da','warning')"), '/events?type=skipped&return=%2F%3Fq%3Da&result=warning');

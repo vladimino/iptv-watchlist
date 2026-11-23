@@ -529,6 +529,8 @@ const eventPaging={error:null,stuck:false,seen:new Set(),run:0,paused:false};
 const EVENT_PREFETCH_LIMIT=3;let activityProgrammaticTop=null;
 // AIR-381: the events screen filters the loaded events by the type of event. Pure mapping: «Все события» shows every loaded event, known or not,
 // and the other buttons name the stored `type` values they stand for. A chosen type also searches older pages by itself (see startEventSearch).
+// AIR-584: the list names kinds of event only. A skipped prediction start (`batch_v2_skipped`) is a presentation of `enrichment`, shown under «Прогнозы» and
+// «Все события» with its `warning` result; it has no type button of its own, and the former `?type=skipped` falls back to «Все события» like any unknown id.
 const EVENT_TYPE_FILTERS=[
  {id:'all',label:'Все события',types:null},
  {id:'watchlist',label:'Watchlist и просмотр',types:['watchlist','started','unstarted']},
@@ -536,7 +538,6 @@ const EVENT_TYPE_FILTERS=[
  {id:'discovery',label:'Находки',types:['discovery']},
  {id:'ratings',label:'Оценки',types:['ratings']},
  {id:'enrichment',label:'Прогнозы',types:['enrichment']},
- {id:'skipped',label:'Пропущенные',types:['enrichment'],presentation:'batch_v2_skipped'},
  {id:'taste_profile',label:'Модель вкуса',types:['taste_profile']},
  {id:'catalog_posters',label:'Постеры',types:['catalog_posters']},
 ];
@@ -548,8 +549,7 @@ function eventTypeFrom(search){
 function eventMatchesType(event,id){
  const filter=EVENT_TYPE_FILTERS.find(item=>item.id===id);
  if(!filter||!filter.types)return true;
- // AIR-548: «Пропущенные» is a presentation of the `enrichment` type, not a type of its own.
- return filter.types.includes(event&&event.type)&&(!filter.presentation||event.presentation===filter.presentation);
+ return filter.types.includes(event&&event.type);
 }
 // Replaces only the `type` parameter of an href: every other parameter (the encoded `return` target included) and the fragment stay byte for byte.
 function withEventParam(href,name,id,allowed){
