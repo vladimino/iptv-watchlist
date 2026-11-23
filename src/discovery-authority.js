@@ -179,11 +179,24 @@ export async function readFilmAdmission(env,tmdbId){
 // 20 films must not fail because an unrelated Discovery chunk moved the generation between two statements. It fails closed like
 // `routeRead` for a held cutover or a catalog/decision load in progress; `{handled:false}` means "not D1 authority" (R2 serves).
 export const ADMISSION_IDS_PER_QUERY=80;
+// The close of a by-id read needs only the fields `closeReadFence` compares, so it is one statement (a full `readAuthority` is several round trips and a start reads by id more than once). It keeps the
+// ADR 0162 refusal of a marker that is not d1/open.
+async function readFenceState(env){
+ let row;
+ try{row=await one(database(env),'SELECT a.mode AS mode, a.cutover AS cutover, a.programme_run_id AS programmeRunId, t.state AS transfer, t.batches AS transferBatches FROM discovery_authority a JOIN discovery_transfer t ON t.id=1 WHERE a.id=1');}
+ catch(error){throw failed('discovery_unavailable',error);}
+ if(!row||row.mode!=='d1'||row.cutover!=='open'||!['idle','loading','committed'].includes(row.transfer))throw failed('discovery_unavailable');
+ return {ready:true,programmeRunId:row.programmeRunId??null,transfer:row.transfer,transferBatches:Number(row.transferBatches)};
+}
 export async function readAdmissionsById(env,ids){
  const wanted=[...new Set((ids||[]).map(String).filter(Boolean))];
  const opened=await readAuthority(env);
  if(!opened.ready)return {handled:false};
- if(opened.transfer==='loading'&&!await loadingIsLedgerSeal(env))throw failed('discovery_incomplete');
+ let sealing=false;
+ if(opened.transfer==='loading'){
+  if(!await loadingIsLedgerSeal(env))throw failed('discovery_incomplete');
+  sealing=true;
+ }
  const films=new Map();
  for(let at=0;at<wanted.length;at+=ADMISSION_IDS_PER_QUERY){
   const slice=wanted.slice(at,at+ADMISSION_IDS_PER_QUERY);
@@ -193,6 +206,12 @@ export async function readAdmissionsById(env,ids){
    films.set(String(row.film_id),film);
   }
  }
+ // AIR-574: the same bounded close as `routeRead` and `readFilmAdmission`. The slices are separate statements, so a catalog replacement (or an ABA through `loading` back to `committed`, which moves the
+ // transfer epoch) or a programme change between them must not return a transient absence as a genuine one: a caller settles an absent film out of the persisted queue. Generation-only progress
+ // (continuation, status, Workflow writes, seal batches) is not a fence here, and an ordinary seal stays open.
+ const closedGate=await readFenceState(env);
+ closeReadFence(opened,closedGate,{sealing,generationFence:false});
+ if(sealing&&!await loadingIsLedgerSeal(env))throw failed('discovery_fence');
  return {handled:true,films};
 }
 export function ownsKey(key){
@@ -418,7 +437,7 @@ function closeReadFence(opened,closed,{sealing=false,generationFence=true}={}){
 }
 // `loading` is a ledger seal, and not a catalog, decision or segment load in progress, only when the ledger is mid-handoff
 // (retiring rows, or a transfer for another programme) and no admission is pending.
-async function loadingIsLedgerSeal(env){
+export async function loadingIsLedgerSeal(env){
  if(!await ledgerSealLoading(env))return false;
  const pending=await one(database(env),"SELECT 1 AS n FROM discovery_admission WHERE state='pending' LIMIT 1");
  return !pending;
@@ -1406,6 +1425,18 @@ async function sealedMemberTmdb(db,run){
  sealedMembers={db,run,map};
  return map;
 }
+// AIR-579. The rows an observation key holds in the published run, read at ITS OWN slot coordinates. The caller only ever looks up its own slots
+// (`channel:start`), so selecting by `start_ms` over the existing `(programme_run_id, start_ms)` index returns every row it can use, while the former
+// `programme_run_id` + `basis` + `match_reason` statement had no usable index and walked every row of the run (about 20 k) per call, twice per observation.
+// The `basis` and `match_reason` predicates are kept, so the map holds exactly the rows of the former statement that lie at these start times.
+export async function heldSlotRows(db,run,key,slots){
+ const starts=[...new Set(slots.map(slot=>slot.startMs))],held=new Map();
+ for(let index=0;index<starts.length;index+=BIND_CAP-3){
+  const chunk=starts.slice(index,index+BIND_CAP-3);
+  for(const item of await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=? AND start_ms IN ("+marks(chunk.length)+")",[run,key,...chunk]))held.set(item.channel_id+':'+item.start_ms,item.film_id);
+ }
+ return held;
+}
 export async function assignObservationSlots(env,spec,context={}){
  const lease=context.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
@@ -1433,7 +1464,7 @@ export async function assignObservationSlots(env,spec,context={}){
  let payload=null;try{payload=observation.payload_json?JSON.parse(observation.payload_json):null;}catch{payload=null;}
  const confirmation=payload&&Array.isArray(payload.confirmedSlots)?payload:{confirmedTmdbId:observation.confirmed_tmdb_id};
  const slots=(await many(db,"SELECT channel_id, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key=? ORDER BY ordinal",[key])).map(item=>({channelId:item.channel_id,startMs:item.start_ms,endMs:item.end_ms}));
- const held=new Map((await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=?",[run,key])).map(item=>[item.channel_id+':'+item.start_ms,item.film_id]));
+ const held=await heldSlotRows(db,run,key,slots);
  const pending=[];
  for(const slot of slots){
   if(held.get(slot.channelId+':'+slot.startMs)===film){outcomes.present++;continue;}
@@ -1452,7 +1483,7 @@ export async function assignObservationSlots(env,spec,context={}){
   ]);
   gate={...gate,generation:gate.generation+1};
  }
- const after=new Map((await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=?",[run,key])).map(item=>[item.channel_id+':'+item.start_ms,item.film_id]));
+ const after=await heldSlotRows(db,run,key,pending);
  for(const slot of pending){
   if(after.get(slot.channelId+':'+slot.startMs)===film){outcomes.assigned++;result.assigned.push({channelId:slot.channelId,startMs:slot.startMs});continue;}
   const holder=await one(db,'SELECT film_id FROM published_epg_show WHERE programme_run_id=? AND channel_id=? AND start_ms=?',[run,slot.channelId,slot.startMs]);

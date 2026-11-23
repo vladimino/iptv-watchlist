@@ -50,6 +50,12 @@ const Monitor=(()=>{
   if(typeof RatingsOrchestration==='undefined')throw new Error('unavailable');
   return await RatingsOrchestration.readModel(env,now);
  });
+ // ADR 0186: the Letterboxd Sync slot read model, supplied only while the executor is switching or cloudflare, so a dormant executor adds no stream.
+ const letterboxdFacts=(env,now)=>guarded(async()=>{
+  if(typeof LetterboxdSync==='undefined'||!env?.DB)return null;
+  const model=await LetterboxdSync.readModel(env,{now});
+  return model.mode==='external'?null:model;
+ });
  // AIR-556. Prediction progress is confirmed work only, read through the same helpers as the Footer (enrichment.js: queue slices, retry budget, run
  // history, one 60-minute no-progress threshold). Progress is a productive batch, a drained run that proved an empty queue, or a moved processed counter.
  // A heartbeat, `already_running`, a noop wake-up, a queue recount and a lost monitor document are never progress, and an unknown time is never "now":
@@ -75,7 +81,7 @@ const Monitor=(()=>{
   // that becomes eligible is measured from the first tick that saw it, never from an earlier quiet tick.
   const observingEligible=lastProgressMs===null&&Number.isInteger(slices.eligibleNow)&&slices.eligibleNow>0;
   const unknownSince=observingEligible?(Number.isFinite(Date.parse(previous?.unknownSince||''))?previous.unknownSince:iso(now)):null;
-  const stall=predictionStallAssessment({now,sinceMs:lastProgressMs,eligibleNow:slices.eligibleNow,nextRetryAtMs:slices.nextRetryAt?Date.parse(slices.nextRetryAt):null,activeRun:shared.activeRun,activeStartedAtMs:shared.activeStartedAtMs,observedSinceMs:unknownSince?Date.parse(unknownSince):null});
+  const stall=predictionStallAssessment({now,sinceMs:lastProgressMs,eligibleNow:slices.eligibleNow,nextRetryAtMs:slices.nextRetryAt?Date.parse(slices.nextRetryAt):null,activeRun:shared.activeRun,activeStartedAtMs:shared.activeStartedAtMs,observedSinceMs:unknownSince?Date.parse(unknownSince):null,orphanStarts:shared.orphanStarts});
   return {present:true,pendingCount:Array.isArray(queue.pending)?queue.pending.length:0,processedTotal,lastProgressAt:lastProgressMs===null?null:iso(lastProgressMs),unknownSince,
    eligibleNow:slices.eligibleNow,outstanding:slices.outstanding,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,stall,
    blockedReason:queue.lastBatch?.stage==='blocked'?String(queue.lastBatch.reason||'').slice(0,40):null};
@@ -94,8 +100,8 @@ const Monitor=(()=>{
  });
  async function collect(env,now,state){
   const epg=await epgFacts(env,now,state?.epgSeen||null);
-  const [discovery,ratings,predictions,catalogPosters]=await Promise.all([discoveryFacts(env,now,epg?.publishedRunId||null),ratingsFacts(env,now),predictionFacts(env,now,state?.predictions||null),catalogPosterFacts(env,now,state)]);
-  return {epg,discovery,ratings,predictions,...(catalogPosters===null?{}:{catalogPosters})};
+  const [discovery,ratings,predictions,catalogPosters,letterboxd]=await Promise.all([discoveryFacts(env,now,epg?.publishedRunId||null),ratingsFacts(env,now),predictionFacts(env,now,state?.predictions||null),catalogPosterFacts(env,now,state),letterboxdFacts(env,now)]);
+  return {epg,discovery,ratings,predictions,...(catalogPosters===null?{}:{catalogPosters}),...(letterboxd===null?{}:{letterboxd})};
  }
 
  // ---- delivery: one transport chosen by deliberate configuration. `MONITOR_TRANSPORT` absent or `webhook` is the generic JSON webhook

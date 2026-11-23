@@ -229,13 +229,14 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   assert.equal(read(docKey).candidates.Zz9.state, 'verified');
   assert.equal(read(docKey).candidates.Rm1.state, 'needs_review');
 
-  const rollbackKey = 'rollback-key-0000a1';
-  const rollbackIssued = await send('/api/admin/letterboxd-archive/rollback-confirm', {json: {archiveSha256: seen.body.archive.sha256, chunk: chunk.chunk, idempotencyKey: rollbackKey, accepted: true}});
-  assert.equal(rollbackIssued.status, 200, JSON.stringify(rollbackIssued.body));
-  const rolled = await send('/api/admin/letterboxd-archive/rollback', {json: {confirmation: rollbackIssued.body.confirmation}});
-  assert.equal(rolled.status, 200, JSON.stringify(rolled.body));
-  assert.equal(read(docKey).candidates.Zz9.state, 'verified', 'rollback keeps a verified film');
-  assert.equal(read(docKey).candidates.Rm1.state, 'removed');
+  // AIR-558 (ADR 0192): the candidate rollback is retired with the archive rollback; its routes answer the ordinary 404 and change nothing.
+  const candidateDoc = JSON.stringify(read(docKey));
+  for (const retired of ['/api/admin/letterboxd-archive/rollback-confirm', '/api/admin/letterboxd-archive/rollback']) {
+    const gone = await send(retired, {json: {archiveSha256: seen.body.archive.sha256, chunk: chunk.chunk, idempotencyKey: 'rollback-key-0000a1', accepted: true}});
+    assert.equal(gone.status, 404, retired);
+  }
+  assert.equal(JSON.stringify(read(docKey)), candidateDoc);
+  assert.equal(read(docKey).candidates.Zz9.state, 'verified');
   assert.equal(read(Facts.recordKey(factKey)).rating.value, 4);
 }
 
@@ -496,8 +497,10 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
     const address = String(url);
     if (address === 'https://boxd.it/Ii1') return http(301, '', {location: 'https://letterboxd.com/film/pull-cut/'});
     if (address === 'https://letterboxd.com/film/pull-cut/') {
-      const removed = await ratedApi.rollbackCandidates(env, pulled, ['Ii1']);
-      if (!removed || removed.removed[0] !== 'Ii1') throw new Error('rollback did not remove the in-flight code');
+      // A historical `removed` state (no writer remains) set while the identity step is fetching: the step must keep it.
+      const removedDoc = read('letterboxd/imports/' + pulled + '/rated-candidates.json');
+      removedDoc.candidates.Ii1.state = 'removed';
+      put('letterboxd/imports/' + pulled + '/rated-candidates.json', removedDoc);
       return http(200, page({code: 'Ii1', title: 'Pull Cut', year: 2008, tmdb: '900015', slug: 'pull-cut'}));
     }
     if (address.startsWith('https://api.themoviedb.org/3/movie/900015')) return http(200, JSON.stringify({id: 900015, media_type: 'movie', title: 'Pull Cut', original_title: 'Pull Cut', release_date: '2008-01-01'}));
@@ -508,8 +511,8 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   assert.equal(step.body.verified, false, JSON.stringify(step.body));
   assert.equal(step.body.reason, 'removed', JSON.stringify(step.body));
   assert.equal(read('letterboxd/imports/' + pulled + '/rated-candidates.json').candidates.Ii1.state, 'removed');
-  assert.equal(read('letterboxd/admissions/verified-films.json'), undefined, 'a rollback during the fetch admits nothing');
-  assert.equal(read(Facts.recordKey('tmdb-900015')), undefined, 'a rollback during the fetch writes no rating');
+  assert.equal(read('letterboxd/admissions/verified-films.json'), undefined, 'a removal during the fetch admits nothing');
+  assert.equal(read(Facts.recordKey('tmdb-900015')), undefined, 'a removal during the fetch writes no rating');
 
   const race = await committed([{code: 'Jj1', name: 'Race Cut', year: 2010, rating: 4}], 'rated-key-jj1000001');
   env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';

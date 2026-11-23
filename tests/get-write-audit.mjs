@@ -48,8 +48,8 @@ for(const name of names){
   if(entry&&effects.length&&same(found,effects)&&same(statements,sql))consumed.add(entry.id+'@'+name);
   if(!same(found,effects))failures.push(key(method,route,name)+'\n   observed: '+JSON.stringify(found)+'\n   baseline: '+JSON.stringify(effects));
   else if(!same(statements,sql))failures.push(key(method,route,name)+' writes other SQL than the baseline lists\n   observed: '+JSON.stringify(statements)+'\n   baseline: '+JSON.stringify(sql));
-  // A GET never ends in a route error in the two healthy scenarios (a 503 is a storage that is not there, not an error); a HEAD never writes anything at all.
-  if(method==='GET'&&(name==='r2'||name==='d1')&&[500,502,599].includes(result.status))failures.push(key(method,route,name)+' ended in a route error ('+result.status+')');
+  // A GET never ends in a route error in the two healthy scenarios (a 503 is a storage that is not there, not an error); a HEAD never writes anything at all. AIR-558: these scenarios install no ratings domain, so the three D1-derived view-index reads answer a view_index_*/ratings_domain_not_authoritative refusal (502), not a route error.
+  if(method==='GET'&&(name==='r2'||name==='d1')&&[500,502,599].includes(result.status)&&!(result.status===502&&/view_index_|ratings_domain_not_authoritative/.test(String(result.body))))failures.push(key(method,route,name)+' ended in a route error ('+result.status+')');
   if(method==='HEAD'&&found.length)failures.push('HEAD '+route+' @ '+name+' has effects: '+found.join(', '));
  }
  // A route that accepts only POST must not do anything when it is asked with GET.
@@ -87,10 +87,9 @@ for(const name of names){
  }
  for(const registered of [...Object.keys(MCP_READ_TOOLS),...MCP_WRITE_TOOLS])if(!tools.some(tool=>tool.name===registered))failures.push('the registry names the MCP tool '+registered+', which tools/list no longer returns');
 }
-// GET /api/enrichment/view overlays the compiled seed in memory: missing and partial indexes, a concurrent pair of reads, and both R2
-// and D1 pending work must not persist the seed, dispatch work, or change the DTO between two equal probes.
+// AIR-558: GET /api/enrichment/view derives the view index from D1 only (no raw object, no in-memory seed overlay, nothing persisted). In these scenarios the ratings
+// domain is not installed, so the read answers a derivation refusal; whatever it answers, two equal concurrent probes agree, and neither dispatches work nor writes anything.
 {
- const dto=body=>{const data=JSON.parse(body);return {actualRating:data.films?.w1?.actualRating??null,watched:Object.hasOwn(data.films?.w1||{},'watched')?data.films.w1.watched:null,ids:Object.keys(data.films||{}).sort()};};
  const noPersist=result=>{
   assert.equal(result.dispatches,0);
   assert.equal(result.background,0);
@@ -99,21 +98,12 @@ for(const name of names){
  };
  const missing=scenarios['r2-pending'];
  const [first,second]=await Promise.all([probe.run(missing,['/api/enrichment/view',{method:'GET'}]),probe.run(missing,['/api/enrichment/view',{method:'GET'}])]);
- assert.equal(first.status,200);assert.equal(second.status,200);
+ assert.equal(first.status,second.status);assert.equal(first.body,second.body);
  noPersist(first);noPersist(second);
  assert.deepEqual(effectsOf(first),[]);assert.deepEqual(effectsOf(second),[]);
- assert.deepEqual(dto(first.body),{actualRating:4,watched:null,ids:['w1']});
- assert.deepEqual(dto(first.body),dto(second.body));
  assert.equal(JSON.parse(missing.snapshot.get('enrichment/view-index.json').text).w1,undefined);
- const partialSnapshot=new Map(missing.snapshot);
- partialSnapshot.set('enrichment/view-index.json',{text:JSON.stringify({kept:{actualRating:null,watched:true},w1:{fingerprintHash:'x'}}),customMetadata:{}});
- const partial=await probe.run({...missing,snapshot:partialSnapshot},['/api/enrichment/view',{method:'GET'}]);
- assert.equal(partial.status,200);noPersist(partial);assert.deepEqual(effectsOf(partial),[]);
- const partialFilms=JSON.parse(partial.body).films;
- assert.equal(partialFilms.kept.actualRating,null);assert.equal(partialFilms.kept.watched,true);assert.equal(partialFilms.w1.actualRating,4);
  const d1View=viewProbe['d1-pending'];
- assert.equal(d1View.status,200);noPersist(d1View);
- assert.equal(JSON.parse(d1View.body).films.w1.actualRating,4);
+ noPersist(d1View);assert.deepEqual(effectsOf(d1View),[]);
 }
 
 probe.restore();

@@ -588,7 +588,13 @@ function eventPresentationStatus(event){
  switch(event.type){
   // A recorded user or publication action: the event exists only because the write committed. `success` is the success of that action, not a claim
   // about changed data: a watchlist with no diff or a baseline, and a taste profile of `scope=identity`, are still successful commits.
-  case 'epg':case 'watchlist':case 'started':case 'unstarted':case 'taste_profile':return 'success';
+  case 'epg':{
+   // A published generation is a successful publication, except when its structured warning says the Channel policy did not do its job: a degraded generation did not apply the
+   // blacklist, a failed registration left the declared channels unregistered (ADR 0191). Only these two codes; ordinary unknown or unclassified channels are never a warning.
+   const code=event.warning&&typeof event.warning==='object'?event.warning.code:null;
+   return code==='channel_policy_degraded'||code==='channel_registration_failed'?'warning':'success';
+  }
+  case 'watchlist':case 'started':case 'unstarted':case 'taste_profile':return 'success';
   case 'enrichment':{
    if(event.presentation==='batch_v2_skipped')return 'warning';
    const terminal=event.presentation==='batch_v2_terminal',stage=event.stage;
@@ -2693,6 +2699,14 @@ function predictionDetailsHTML(details){
 function skippedStartHTML(event){
  const safe=v=>typeof v==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(v)?v:null,ageMs=Number.isFinite(event.holderAgeMs)&&event.holderAgeMs>=0?event.holderAgeMs:null;
  const trigger=event.trigger==='scheduled'?'по расписанию':event.trigger==='manual'?'вручную':null,holder=safe(event.holderRunId),request=safe(event.requestId);
+ // AIR-575 (ADR 0190): a start refused because the catalog was held by an EPG publication. Fixed sentences chosen by two known codes; nothing else from the stored event is printed.
+ if(event.reason==='catalog_held'){
+  const cause=event.cause==='discovery_fence'||event.cause==='discovery_incomplete'?event.cause:null;
+  const why=cause==='discovery_fence'?'каталог временно закрыт для чтения':cause==='discovery_incomplete'?'каталог ещё загружается':'каталог временно недоступен';
+  const held=[`<p class="event-note">Попытка запуска${trigger?` (${trigger})`:''} отклонена: ${why}. Фильмы не обрабатывались.</p>`];
+  if(request)held.push(`<p class="event-note">Запрос: <code>${escapeHTML(request)}</code>. Код: <code>prediction_catalog_held</code>${cause?` · причина: <code>${cause}</code>`:''}.</p>`);
+  return `<p>Запуск прогнозов пропущен: каталог временно недоступен</p>${held.join('')}`;
+ }
  const lines=[`<p class="event-note">Попытка запуска${trigger?` (${trigger})`:''} отклонена: уже работает другой пакет. Фильмы не обрабатывались, очередь не менялась.</p>`];
  if(holder)lines.push(`<p class="event-note">Выполняется пакет <code>${escapeHTML(holder.slice(0,8))}</code>${ageMs!==null?` · работает ${Math.max(0,Math.round(ageMs/60000))} мин`:''}.</p>`);
  if(request)lines.push(`<p class="event-note">Запрос: <code>${escapeHTML(request)}</code>. Код: <code>already_running</code>.</p>`);
@@ -2728,9 +2742,26 @@ function eventFilmHTML(f){
  const href=tmdb?filmHref('tmdb_'+tmdb):(FILM_ID.test(id)&&!id.startsWith('tmdb_')?filmHref(id):null);
  return href?`<a href="${escapeHTML(href)}">${text}</a>`:text;
 }
+// AIR-564: the Channel policy block of an `epg` event. Events written before it carry no `channels` and render exactly as before (legacy); a stored event is never recomputed.
+// A degraded event says in words that the blacklist was NOT applied; a filtered one shows the counters and the applied revision.
+function epgPolicyDetails(event){
+ const channels=event.channels,programmes=event.programmes;
+ if(!channels||typeof channels!=='object')return '';
+ const n=value=>Number.isFinite(Number(value))?Number(value):0;
+ const row=(label,value)=>`<div><dt>${label}</dt><dd>${n(value)}</dd></div>`;
+ const policy=event.policy&&typeof event.policy==='object'?event.policy:{};
+ const degraded=policy.mode==='degraded';
+ // The target is event data written by the Worker; only a same-origin path is rendered as a link.
+ const href=typeof policy.href==='string'&&/^\/[A-Za-z0-9_\/-]{1,80}$/.test(policy.href)?policy.href:null;
+ const link=href?`: <a href="${escapeHTML(href)}">Admin Channels</a>`:'';
+ const warning=event.warning&&typeof event.warning==='object'?(event.warning.code==='channel_policy_degraded'?`<p>Внимание: политика каналов не применена (режим degraded${event.warning.reason?`, причина: ${escapeHTML(event.warning.reason)}`:''}); чёрный список не действовал, все каналы обработаны как known_only.</p>`:event.warning.code==='channel_registration_failed'?`<p>Внимание: регистрация новых каналов не удалась${event.warning.reason?` (${escapeHTML(event.warning.reason)})`:''}; повтор при следующем обновлении.</p>`:''):'';
+ const heading=degraded?'Политика каналов: не применена':`Политика каналов${policy.revision!=null?` (ревизия ${n(policy.revision)})`:''}`;
+ const classified=degraded?'':row('discover',channels.discover)+row('deny_all',channels.denyAll)+row('Новых каналов (найдено)',channels.new)+row('Новых каналов (зарегистрировано)',channels.registered)+row('Без категории',channels.unclassified);
+ return `${warning}<p>${heading}${link}</p><dl>${row('Каналов в эфире',channels.total)}${classified}${row('known_only',channels.knownOnly)}${programmes?(degraded?'':row('Показов отфильтровано (deny_all)',programmes.filteredDenyAll))+row('Показов пропущено (known_only)',programmes.skippedKnownOnly)+(degraded?'':row('Показов для Discovery',programmes.discoveryEligible)+row('Показов на каналах без категории',programmes.unclassified)):''}</dl>`;
+}
 function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(event.at));const film=eventFilmHTML;const removal=f=>{const rating=Number(f.rating),known=Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0;return `${film(f)}${known?` · ${rating.toFixed(1)} ★`:''}`;};let body='';
  if(event.type==='started'||event.type==='unstarted')body=`<p>${event.type==='started'?'Начал смотреть':'Снял отметку «Начал»'}: <strong>${film(event.film)}</strong></p>`;
- if(event.type==='epg')body=`<p>Обновлён EPG</p><dl><div><dt>Фильмов с показами</dt><dd>${event.films}</dd></div><div><dt>В архиве</dt><dd>${event.archive}</dd></div><div><dt>В следующие сутки</dt><dd>${event.future}</dd></div><div><dt>Всего показов</dt><dd>${event.broadcasts}</dd></div></dl>`;
+ if(event.type==='epg')body=`<p>Обновлён EPG</p><dl><div><dt>Фильмов с показами</dt><dd>${event.films}</dd></div><div><dt>В архиве</dt><dd>${event.archive}</dd></div><div><dt>В следующие сутки</dt><dd>${event.future}</dd></div><div><dt>Всего показов</dt><dd>${event.broadcasts}</dd></div></dl>${epgPolicyDetails(event)}`;
  if(event.type==='ratings'){const n=v=>Number.isInteger(v)&&v>=0?v:0,d=event.diary&&typeof event.diary==='object'?event.diary:null,r=event.removal&&typeof event.removal==='object'?event.removal:{},causes={blocked:'Letterboxd заблокировал запрос',rate_limited:'Letterboxd ограничил частоту запросов',failed:'Diary не удалось прочитать',interrupted:'Выполнение прервано',abandoned:'Выполнение прервано'},title=event.state==='finished'?'Рейтинги обновлены':event.state==='error'?'Проверка рейтингов завершена с ошибкой':'Проверка рейтингов прервана',why=event.state!=='finished'&&causes[event.cause]?`<p class="event-note">${causes[event.cause]}</p>`:'',rows=[];if(d){rows.push(['Diary: записей проверено',n(d.rows)],['Новых фактов',n(d.written)],['Без изменений',n(d.unchanged)+n(d.skipped)]);if(n(d.conflicts))rows.push(['Конфликтов',n(d.conflicts)]);}if(n(r.rated))rows.push(['Оценок удалённых фильмов найдено',n(r.rated)]);rows.push(['Удалений обработано',n(r.resolved)]);body=`<p>${title}</p>${why}<dl>${rows.map(([name,value])=>`<div><dt>${name}</dt><dd>${value}</dd></div>`).join('')}</dl>${ratingsDetailsHTML(event.details)}${event.coverage==='recent_window'?'<p class="event-note">Проверена последняя страница Diary, не вся история.</p>':''}`;}
  if(event.type==='watchlist'){const half=f=>{const rating=Number(f.rating);return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0;},group=(title,films,line)=>films.length?`<details class="event-group" open><summary><h3>${title} · ${films.length}</h3></summary><ul>${films.map(f=>`<li>${line(f)}</li>`).join('')}</ul></details>`:'';body=`<p>Обновлён watchlist · ${event.total} ${filmWord(event.total)}</p>`+group('Просмотрены',(event.removed||[]).filter(half),removal)+group('Остальные удаления',(event.removed||[]).filter(f=>!half(f)),film)+group('Добавлены фильмы',event.added||[],film);if(!event.added?.length&&!event.removed?.length)body+=`<p class="event-note">${event.baseline?'Исходный сохранённый список':'Состав без изменений'}</p>`;}
  if(event.type==='enrichment'&&event.presentation==='batch_v2_skipped')body=skippedStartHTML(event);

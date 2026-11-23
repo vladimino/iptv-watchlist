@@ -12,6 +12,7 @@ import {pipeline} from 'node:stream/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {ExportError,manifestFor,verifySnapshot} from './migration-export.mjs';
+import {PREDICTION_AUX_SCOPE,SCOPE_NAMES,describeScope,inAuxScope,sameScope} from './prediction-aux-scope.mjs';
 
 export const DEFAULT_BUCKET='iptv';
 export const SOURCE_KIND='cloudflare-r2-s3';
@@ -99,7 +100,7 @@ export function createReadOnlyClient({credentials,fetchImpl=fetch,retries=4,slee
  }
  return {
   calls,
-  async list(cursor){calls.list++;const response=await send('GET',null,{'list-type':'2','max-keys':String(PAGE_SIZE),...(cursor?{'continuation-token':cursor}:{})});const page=parseListing(await response.text());return page;},
+  async list(cursor,prefix=null){calls.list++;const response=await send('GET',null,{'list-type':'2','max-keys':String(PAGE_SIZE),...(prefix?{prefix}:{}),...(cursor?{'continuation-token':cursor}:{})});const page=parseListing(await response.text());return page;},
   async head(key,{ifMatch}={}){calls.head++;const response=await send('HEAD',key,null,ifMatch?{'If-Match':quoteEtag(ifMatch)}:{});if(!response)return null;await response.body?.cancel();return headMetadata(key,response);},
   async get(key,{ifMatch}={}){calls.get++;const response=await send('GET',key,null,ifMatch?{'If-Match':quoteEtag(ifMatch)}:{});if(!response)return null;return {...headMetadata(key,response),body:response.body};},
  };
@@ -224,6 +225,40 @@ async function fence(client,opening){
  }
  return {ok:keys.every(item=>item.status==='unchanged'||item.status==='absent'),keys};
 }
+// ---- Scoped cut (AIR-554, `--scope prediction-aux`): an explicit mode that proves consistency over ONE domain only. The whole-bucket mode above is unchanged. ----
+// The inventory is the complete listing of each scope prefix plus a HEAD of each exact singleton key, taken once before the downloads and once after them; any added, removed or changed object of the scope is
+// `inventory_changed`. The fence is the scope's own coordination keys, read at the same two moments. Objects outside the scope are never listed past their prefix, never read and never compared, so an
+// unrelated writer cannot change the verdict. This is a proof about the scope's objects at two moments, not an atomic cut with D1 and not a proof about a PUT that lands after the closing listing.
+async function listScope(client,scope){
+ const objects=[];let pages=0;
+ for(const prefix of scope.prefixes){
+  const records=[];let cursor=null;
+  do{const page=await client.list(cursor,prefix);records.push({requestCursor:cursor,page});collectPages(records);cursor=page.nextCursor;}while(cursor);
+  pages+=records.length;
+  for(const object of collectPages(records).objects){
+   if(!object.key.startsWith(prefix))throw new ExportError('protocol','Listing returned a key outside the requested prefix');
+   objects.push(object);
+  }
+ }
+ for(const key of scope.singletons){const head=await client.head(key);if(head)objects.push(head);}
+ return {objects:objects.sort((a,b)=>Buffer.compare(Buffer.from(a.key),Buffer.from(b.key))),pages};
+}
+async function headEtags(client,keys){const result=new Map();for(const key of keys){const head=await client.head(key);result.set(key,head?head.etag:null);}return result;}
+async function fenceAgainst(client,keys,before){
+ const out=[];
+ for(const key of keys){
+  const open=before.get(key)??null,after=await client.head(key),close=after?after.etag:null;
+  const status=!open&&!close?'absent':!open&&close?'created':open&&!close?'missing_after':open===close?'unchanged':'changed';
+  out.push({key,openingEtag:open,closingEtag:close,status});
+ }
+ return {ok:out.every(item=>item.status==='unchanged'||item.status==='absent'),keys:out};
+}
+function resolveScope(value){
+ if(value==null)return null;
+ const named=typeof value==='string'?SCOPE_NAMES[value]:value;
+ if(!named||!describeScope(named)||describeScope(named).kind==='full_bucket')throw new ExportError('configuration','Unknown export scope; supported: '+Object.keys(SCOPE_NAMES).join(', '));
+ return named;
+}
 async function baselineIdentity(directory,entries){
  const byKey=new Map(entries.map(entry=>[entry.key,entry]));
  const read=async key=>{const entry=byKey.get(key);if(!entry)return null;try{return JSON.parse(await readFile(path.join(directory,entry.file),'utf8'));}catch{return null;}};
@@ -257,34 +292,39 @@ export async function eachWithConcurrency(items,concurrency,work){
  if(failure!==null)throw failure;
  return results;
 }
-export async function exportProductionSnapshot({directory,credentials,fetchImpl=fetch,now=()=>new Date(),sleep=defaultSleep,concurrency=1}){
+export async function exportProductionSnapshot({directory,credentials,fetchImpl=fetch,now=()=>new Date(),sleep=defaultSleep,concurrency=1,scope=null}){
  const absolute=outsideRepository(directory);
+ const scoped=resolveScope(scope),scopeInfo=describeScope(scoped);
  await mkdir(absolute,{recursive:true,mode:0o700});await mkdir(path.join(absolute,'objects'),{recursive:true,mode:0o700});await mkdir(path.join(absolute,'entries'),{recursive:true,mode:0o700});
  const client=createReadOnlyClient({credentials,fetchImpl,now,sleep});
  const source=sourceIdentity(credentials);
- const startedAt=(await jsonIfPresent(path.join(absolute,'run.json')))?.startedAt||now().toISOString();
- await atomicJson(path.join(absolute,'run.json'),{schemaVersion:1,startedAt,source});
+ const previous=await jsonIfPresent(path.join(absolute,'run.json'));
+ // An output directory that belongs to another scope is never mixed with this one (a resume would reuse the wrong opening).
+ if(previous&&!sameScope(previous.scope?{kind:previous.scope.kind,digest:previous.scope.digest}:describeScope(null),scopeInfo))throw new ExportError('configuration','Output directory belongs to another export scope');
+ const startedAt=previous?.startedAt||now().toISOString();
+ await atomicJson(path.join(absolute,'run.json'),{schemaVersion:1,startedAt,source,...(scoped?{scope:scopeInfo}:{})});
  const report=extra=>atomicJson(path.join(absolute,'report.json'),{source,startedAt,finishedAt:now().toISOString(),calls:client.calls,...extra});
  // A NO-GO ends the attempt: its opening listing is discarded so the next attempt lists afresh; verified object checkpoints stay reusable.
  const discardAttempt=async()=>{await rm(path.join(absolute,'pages'),{recursive:true,force:true});await rm(path.join(absolute,'run.json'),{force:true});};
  try{
-  const {objects,pages}=await openingListing(absolute,client);
+  const {objects,pages}=scoped?await listScope(client,scoped):await openingListing(absolute,client);
+  const fenceBefore=scoped?await headEtags(client,scoped.fenceKeys):null;
   const entries=[];let resumed=0;
   const downloaded=await eachWithConcurrency(objects,parseConcurrency(concurrency),object=>downloadObject(absolute,client,object));
   for(const entry of downloaded){if(entry.resumed)resumed++;entries.push({key:entry.key,file:entry.file,size:entry.size,sha256:entry.sha256,metadata:entry.metadata});}
-  const closing=await closingListing(client);
+  const closing=scoped?(await listScope(client,scoped)).objects:await closingListing(client);
   const changes=inventoryDelta(objects,closing);
-  const fenced=await fence(client,objects);
-  const identity=await baselineIdentity(absolute,entries);
+  const fenced=scoped?await fenceAgainst(client,scoped.fenceKeys,fenceBefore):await fence(client,objects);
+  const identity=scoped?null:await baselineIdentity(absolute,entries);
   const reasons=[];
   if(changes.length)reasons.push('inventory_changed');
   if(changes.some(change=>change.reason==='missing_after'))reasons.push('deletion_observed');
   if(!fenced.ok)reasons.push('fence_changed');
   const status=reasons.length?STATUS_NO_GO:STATUS_CONSISTENT;
-  const manifest={...manifestFor(entries,pages,startedAt,now().toISOString(),changes),sourceSiteId:null,sourceOrigin:null,source,status,noGoReasons:reasons,consistencyNote:'Paged R2 listings are not an atomic snapshot. This manifest is a verified cut only when every object is the listed version, the closing listing equals the opening listing, and the fence objects kept their ETags; otherwise it is an explicit NO-GO and must not be imported.',fence:fenced,baselineIdentity:identity};
+  const manifest={...manifestFor(entries,pages,startedAt,now().toISOString(),changes),sourceSiteId:null,sourceOrigin:null,source,status,noGoReasons:reasons,consistencyNote:scoped?'Scoped cut of the Predictions auxiliary state: a verified cut only when every object of the scope is the listed version, the closing inventory of the scope equals the opening one, and the scope fence keys kept their ETags; objects outside the scope are not part of the proof. Not an atomic cut with D1 and not a proof about a write that lands after the closing inventory.':'Paged R2 listings are not an atomic snapshot. This manifest is a verified cut only when every object is the listed version, the closing listing equals the opening listing, and the fence objects kept their ETags; otherwise it is an explicit NO-GO and must not be imported.',fence:fenced,baselineIdentity:identity,...(scoped?{scope:scoped}:{})};
   await atomicJson(path.join(absolute,'manifest.json'),manifest);
   const verified=await verifySnapshot(absolute);
-  const result={status,noGoReasons:reasons,objects:verified.objects,bytes:verified.bytes,aggregateSha256:verified.aggregateSha256,resumed,changes,fence:fenced,baselineIdentity:identity,source};
+  const result={status,noGoReasons:reasons,objects:verified.objects,bytes:verified.bytes,aggregateSha256:verified.aggregateSha256,resumed,changes,fence:fenced,baselineIdentity:identity,source,...(scoped?{scope:scopeInfo}:{})};
   await report(result);
   if(status===STATUS_NO_GO){await discardAttempt();throw new NoGo(reasons,{changes,fence:fenced});}
   return result;
@@ -303,25 +343,39 @@ export async function verifyProductionSnapshot(directory){
  const manifest=await jsonIfPresent(path.join(absolute,'manifest.json'));
  if(manifest?.source?.kind!==SOURCE_KIND||manifest.sourceSiteId!==null)throw new ExportError('integrity','Manifest is not a production R2 snapshot');
  if(![STATUS_CONSISTENT,STATUS_NO_GO].includes(manifest.status)||!manifest.fence||!Array.isArray(manifest.fence.keys)||!Array.isArray(manifest.noGoReasons))throw new ExportError('integrity','Manifest lacks the consistency record');
+ const scope=describeScope(manifest.scope);
+ if(!scope)throw new ExportError('integrity','Manifest names an unsupported export scope');
+ if(scope.kind==='prediction_aux'){
+  // A scoped manifest holds nothing outside its scope and records exactly the scope's own fence keys.
+  if(manifest.objects.some(entry=>!inAuxScope(entry.key)))throw new ExportError('integrity','Scoped manifest holds an object outside its scope');
+  const recorded=manifest.fence.keys.map(item=>item.key).sort().join('|'),expected=[...PREDICTION_AUX_SCOPE.fenceKeys].sort().join('|');
+  if(recorded!==expected)throw new ExportError('integrity','Scoped manifest fence keys differ from the scope');
+ }
  const consistent=manifest.status===STATUS_CONSISTENT&&manifest.noGoReasons.length===0&&manifest.changes.length===0&&manifest.fence.ok===true;
- return {...verified,status:consistent?STATUS_CONSISTENT:STATUS_NO_GO,noGoReasons:manifest.noGoReasons,fence:{ok:manifest.fence.ok},baselineIdentity:manifest.baselineIdentity??null,source:manifest.source};
+ return {...verified,status:consistent?STATUS_CONSISTENT:STATUS_NO_GO,noGoReasons:manifest.noGoReasons,fence:{ok:manifest.fence.ok},baselineIdentity:manifest.baselineIdentity??null,source:manifest.source,scope};
 }
 
 // A plan needs no credential and sends nothing: it shows what an approved run would request and where it would write.
-export function plan({directory,env=process.env}={}){
+export function plan({directory,env=process.env,scope=null}={}){
+ const scoped=resolveScope(scope);
  const accountId=/^[0-9a-f]{32}$/.test(String(env.R2_SNAPSHOT_ACCOUNT_ID||''))?String(env.R2_SNAPSHOT_ACCOUNT_ID):null;
  const bucket=String(env.R2_SNAPSHOT_BUCKET||DEFAULT_BUCKET);
  let endpoint=null;try{endpoint=new URL(endpointFor(accountId||'0'.repeat(32),env.R2_SNAPSHOT_ENDPOINT)).host;}catch{endpoint=null;}
- return {mode:'plan',network:false,credentialsRead:false,source:{kind:SOURCE_KIND,bucket,accountId:accountId?'present':'missing',endpoint:accountId||env.R2_SNAPSHOT_ENDPOINT?endpoint:'<account>.r2.cloudflarestorage.com'},requests:['ListObjectsV2 paged (opening listing, checkpointed)','HeadObject If-Match before each GetObject','GetObject If-Match with ETag and length check','HeadObject If-Match after each object','ListObjectsV2 paged (closing listing)','HeadObject on each fence key'],fenceKeys:[...FENCE_KEYS],identityKeys:{...IDENTITY_KEYS},writes:'none to the bucket; manifest, entries, pages, run and report files in the output directory only',output:directory?path.resolve(directory):null,outputOutsideRepository:directory?(()=>{try{outsideRepository(directory);return true;}catch{return false;}})():null,exitCodes:{0:STATUS_CONSISTENT,3:STATUS_NO_GO,1:'error',2:'usage or configuration'}};
+ return {mode:'plan',network:false,credentialsRead:false,source:{kind:SOURCE_KIND,bucket,accountId:accountId?'present':'missing',endpoint:accountId||env.R2_SNAPSHOT_ENDPOINT?endpoint:'<account>.r2.cloudflarestorage.com'},requests:scoped?['ListObjectsV2 paged per scope prefix (opening inventory)','HeadObject on each scope singleton and each scope fence key (opening)','HeadObject If-Match before each GetObject','GetObject If-Match with ETag and length check','HeadObject If-Match after each object','ListObjectsV2 paged per scope prefix (closing inventory)','HeadObject on each scope singleton and each scope fence key (closing)']:['ListObjectsV2 paged (opening listing, checkpointed)','HeadObject If-Match before each GetObject','GetObject If-Match with ETag and length check','HeadObject If-Match after each object','ListObjectsV2 paged (closing listing)','HeadObject on each fence key'],scope:scoped?{kind:describeScope(scoped).kind,digest:describeScope(scoped).digest,prefixes:[...scoped.prefixes],singletons:[...scoped.singletons]}:{kind:'full_bucket'},fenceKeys:scoped?[...scoped.fenceKeys]:[...FENCE_KEYS],identityKeys:scoped?{}:{...IDENTITY_KEYS},writes:'none to the bucket; manifest, entries, pages, run and report files in the output directory only',output:directory?path.resolve(directory):null,outputOutsideRepository:directory?(()=>{try{outsideRepository(directory);return true;}catch{return false;}})():null,exitCodes:{0:STATUS_CONSISTENT,3:STATUS_NO_GO,1:'error',2:'usage or configuration'}};
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  const args=process.argv.slice(2),value=flag=>{const index=args.indexOf(flag);return index<0?null:args[index+1];};
  const directory=value('--output');
- if(args.includes('--plan')){console.log(JSON.stringify(plan({directory})));process.exitCode=0;}
- else if(!directory||!path.isAbsolute(directory)){console.error('Usage: node scripts/r2-snapshot-export.mjs --output /absolute/private/directory [--verify|--plan] [--concurrency 1..16]');process.exitCode=2;}
+ if(args.includes('--plan')){console.log(JSON.stringify(plan({directory,scope:value('--scope')})));process.exitCode=0;}
+ else if(!directory||!path.isAbsolute(directory)){console.error('Usage: node scripts/r2-snapshot-export.mjs --output /absolute/private/directory [--verify|--plan] [--concurrency 1..16] [--scope prediction-aux]');process.exitCode=2;}
  else try{
-  const result=args.includes('--verify')?await verifyProductionSnapshot(directory):await exportProductionSnapshot({directory,credentials:readCredentials(process.env),concurrency:parseConcurrency(value('--concurrency'))});
+  const requested=value('--scope');
+  let result;
+  if(args.includes('--verify')){
+   result=await verifyProductionSnapshot(directory);
+   if(requested&&!sameScope(describeScope(resolveScope(requested)),result.scope))throw new ExportError('configuration','The snapshot was not taken with the requested scope');
+  }else result=await exportProductionSnapshot({directory,credentials:readCredentials(process.env),concurrency:parseConcurrency(value('--concurrency')),scope:requested});
   console.log(JSON.stringify(result));
   process.exitCode=result.status===STATUS_NO_GO?3:0;
  }catch(error){

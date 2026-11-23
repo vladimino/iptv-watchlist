@@ -17,6 +17,7 @@ const RatingsOrchestration=(()=>{
  const STEP_CAP=200,SLEEP_FLOOR_MS=1000,PAUSE_MS=6*3600000,DRAIN_MARGIN_MS=3*60000,CONTROL_ATTEMPTS=4,ALIVE=['running','waiting','queued','paused'],ENDED=['complete','errored','terminated','absent'];
  const iso=ms=>new Date(ms).toISOString();
  const policy=()=>OrchestrationPolicy;
+ // Absent module or schema means the Letterboxd Sync is inert, never a fence.
  const ratings=()=>LetterboxdRatings;
  const instanceId=(runKey,series)=>'ratings_'+String(runKey).replace(/-/g,'')+'_'+series;
  const emptyControl=()=>({schemaVersion:1,runKey:null,series:0,instanceId:null,epoch:null,phase:'idle',runId:null,checkpoint:null,budget:policy().emptyBudget(),cooldownUntil:null,quarantine:null,failure:null,lastDurableProgressAt:null,nextWakeAt:null,lastStep:null,doneAt:null,updatedAt:null});
@@ -33,7 +34,9 @@ const RatingsOrchestration=(()=>{
   const ok=typeof value==='object'&&!Array.isArray(value)&&value.schemaVersion===1&&value.budget&&Number.isInteger(value.budget.consecutive)&&Number.isInteger(value.budget.total);
   return {record:ok?value:null,etag:object?.etag??null,stored:true,malformed:!ok};
  }
- const fencedEnv=(env,etag)=>({...env,ratingsFence:{key:MODE_KEY,etag,hard:true}});
+ const fencedEnv=(env,etag,letterboxdRevision=null,watchlistGuard=false)=>({...env,ratingsFence:{key:MODE_KEY,etag,hard:true,...(Number.isInteger(letterboxdRevision)?{letterboxdRevision,...(watchlistGuard?{watchlistGuard:true}:{})}:{})}});
+ // AIR-571 D: the Letterboxd mode revision an admission saw (null while the Letterboxd schema is absent). An unreadable row is `undefined`: the caller refuses.
+ const letterboxdAdmission=async env=>typeof LetterboxdSync==='undefined'?{fenced:false,revision:null}:LetterboxdSync.legacyAdmission(env).catch(()=>({fenced:true,reason:'evidence_unreadable',revision:null}));
  async function authorityState(env){
   if(typeof RatingsD1==='undefined')return {ready:false,error:false};
   const gate=await RatingsD1.ratingsGate(env);
@@ -166,7 +169,12 @@ const RatingsOrchestration=(()=>{
   if(mode.malformed)return {reason:'evidence_unreadable',fence:null};
   if(mode.record.mode==='switching')return {reason:'switch_in_progress',fence:null};
   if(mode.record.mode==='cloudflare')return {reason:'external_writer_fenced',fence:null};
-  return {reason:null,fence:{key:MODE_KEY,etag:mode.etag??null}};
+  // AIR-570 / ADR 0186 O5: `external` is not a sufficient fence. While the Letterboxd Sync owns (or is taking over) the Diary, the legacy entry points are refused.
+  // ONE read decides the fence and returns the revision the commit will pin (a second read could see a newer owner's row).
+  const letterboxd=await letterboxdAdmission(env);
+  if(letterboxd.fenced)return {reason:'external_writer_fenced',fence:null};
+  // AIR-571 D: an admitted legacy request must not commit after the Letterboxd mode moved. The revision of THE read above is asserted, with mode `external`, in the batch of every authoritative commit (ratings-d1 epochFence).
+  return {reason:null,fence:{key:MODE_KEY,etag:mode.etag??null,...(Number.isInteger(letterboxd.revision)?{letterboxdRevision:letterboxd.revision,...(letterboxd.watchlistGuard?{watchlistGuard:true}:{})}:{})}};
  }
 
  // ---- admission and one executor action ---------------------------------------------------------------------
@@ -177,13 +185,15 @@ const RatingsOrchestration=(()=>{
   if(mode.record.mode==='switching')return {ok:false,reason:'switch_in_progress'};
   if(mode.record.mode!=='cloudflare')return {ok:false,reason:'not_cloudflare'};
   if(mode.record.epoch!==epoch)return {ok:false,reason:'epoch_mismatch'};
+  const letterboxd=await letterboxdAdmission(env);
+  if(letterboxd.fenced)return {ok:false,reason:'external_writer_fenced',unsafe:true};
   const authority=await authorityState(env);
   if(authority.error)return {ok:false,reason:'d1_unavailable',transient:true};
   if(!authority.ready)return {ok:false,reason:'authority_held',unsafe:true};
   const control=await readControl(env);
   if(control.malformed)return {ok:false,reason:'checkpoint_malformed',unsafe:true};
   if(control.record.instanceId!==id||control.record.series!==series||control.record.runKey!==runKey)return {ok:false,reason:'not_owner'};
-  return {ok:true,modeEtag:mode.etag,control:control.record,controlEtag:control.etag,controlStored:control.stored};
+  return {ok:true,modeEtag:mode.etag,letterboxdRevision:letterboxd.revision,watchlistGuard:letterboxd.watchlistGuard===true,control:control.record,controlEtag:control.etag,controlStored:control.stored};
  }
  const checkpointKey=run=>run?[run.state,run.phase,run.checkpoint?.diaryPagesRead??0,run.checkpoint?.diaryNextPage??null,run.checkpoint?.removalChecked??0,run.checkpoint?.legacyPagesLinked??0].join('|'):null;
  // Durable progress is a counter that moved forward in the same run, never a restart or a changed run state.
@@ -230,7 +240,7 @@ const RatingsOrchestration=(()=>{
  }
 
  async function writeControl(env,adm,next,attemptsLeft=CONTROL_ATTEMPTS){
-  const fe=fencedEnv(env,adm.modeEtag);
+  const fe=fencedEnv(env,adm.modeEtag,adm.letterboxdRevision,adm.watchlistGuard);
   const saved=await ratings().writeDocument(fe,CONTROL_KEY,adm.controlStored?{etag:adm.controlEtag}:null,next);
   return saved!==null;
  }
@@ -248,7 +258,7 @@ const RatingsOrchestration=(()=>{
   if(dayOf(now)!==runKey)return {kind:'stop',reason:'day_rolled'};
   const cooling=Date.parse(control.cooldownUntil||'');
   if(Number.isFinite(cooling)&&cooling>now)return {kind:'sleep',until:cooling,reason:'cooldown'};
-  const fe=fencedEnv(env,adm.modeEtag);
+  const fe=fencedEnv(env,adm.modeEtag,adm.letterboxdRevision,adm.watchlistGuard);
   const began=clock();
   let outcome;
   try{outcome=await drive(fe,control,{now,clock});}
@@ -329,11 +339,15 @@ const RatingsOrchestration=(()=>{
   if(mode.record.mode==='switching')return {started:false,reason:'switch_in_progress'};
   if(mode.record.mode!=='cloudflare')return {started:false,reason:'external'};
   if(typeof env?.RATINGS_WORKFLOW?.create!=='function')return {started:false,reason:'workflow_unavailable'};
+  // AIR-571 D2: the same single admission read as the step admission supplies the pin of every authoritative write of this tick (the hourly Event reconcile and the control record claims).
+  const lbAdmission=await letterboxdAdmission(env);
+  if(lbAdmission.fenced)return {started:false,reason:'letterboxd_sync_active'};
+  const fenceOf=()=>fencedEnv(env,mode.etag,lbAdmission.revision,lbAdmission.watchlistGuard);
   const authority=await authorityState(env);
   if(authority.error)return {started:false,reason:'d1_unavailable'};
   if(!authority.ready)return {started:false,reason:'authority_held'};
   // AIR-361: the hourly tick also delivers a Ratings result event that an earlier terminal commit could not put (idempotent, bounded).
-  await ratings().reconcileEvent(fencedEnv(env,mode.etag),now).catch(()=>null);
+  await ratings().reconcileEvent(fenceOf(),now).catch(()=>null);
   const {dayKey,due,dueAt}=policy().dailyDue(now);
   if(!due)return {started:false,reason:'not_due',dueAt:iso(dueAt)};
   const stored=await readControl(env);
@@ -355,7 +369,7 @@ const RatingsOrchestration=(()=>{
     const code=status==='errored'?'instance_errored':status==='absent'?'create_uncertain':'instance_terminated';
     const applied=policy().applyFailure(control.budget,{code},{now,phase:control.checkpoint?.phase??null,checkpoint:control.checkpoint?.key??null,random});
     control={...control,budget:applied.budget,cooldownUntil:applied.cooldownUntil,failure:{class:'transient',code},quarantine:applied.quarantine?{...applied.quarantine,at:iso(now)}:null,phase:'stopped',stopReason:code,updatedAt:iso(now)};
-    const fe=fencedEnv(env,mode.etag);
+    const fe=fenceOf();
     if(await ratings().writeDocument(fe,CONTROL_KEY,stored.stored?{etag:stored.etag}:null,control)===null)return {started:false,reason:'write_conflict'};
     if(applied.quarantine)return {started:false,reason:'quarantined',scope:'run'};
     return {started:false,reason:'cooldown',until:applied.cooldownUntil,recorded:code};
@@ -365,7 +379,7 @@ const RatingsOrchestration=(()=>{
   }
   const id=instanceId(dayKey,series);
   const next={...emptyControl(),...carry,schemaVersion:1,runKey:dayKey,series,instanceId:id,epoch:mode.record.epoch,phase:'starting',budget,updatedAt:iso(now)};
-  const fe=fencedEnv(env,mode.etag);
+  const fe=fenceOf();
   // The receipt of the claim is the control record naming this run key, series and epoch.
   if(await ratings().writeDocument(fe,CONTROL_KEY,stored.stored?{etag:stored.etag}:null,next)===null)return {started:false,reason:'write_conflict'};
   try{

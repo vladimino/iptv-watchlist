@@ -103,8 +103,11 @@ const LetterboxdRatings=(()=>{
  // to a day). Only when more than EVENT_PENDING_MAX outcomes are owed at once (two months of daily runs with the Events Log
  // unreachable) is the oldest discarded, and `eventsDropped` on the run record counts it, so the loss is visible.
  const EVENT_PENDING_MAX=60,EVENT_RETRY_BASE_MS=15*MIN_MS,EVENT_RETRY_MAX_MS=24*60*MIN_MS;
- function ratingsEventOf(run){
+ function ratingsEventOf(run,{slotOwned=false}={}){
   if(!run?.runId||!EVENT_STATES.includes(run.state))return null;
+  // AIR-570 / ADR 0186: a run started by a Letterboxd Sync slot reports through the slot's own `ratings` Event (the slot outbox), never through this pipeline: one Event source, no duplicate.
+  // The Sync itself asks for the same AIR-361 contract with `slotOwned` and freezes it into its outbox row.
+  if(run.slotKey&&!slotOwned)return null;
   const ended=Date.parse(run.finishedAt||run.closedAt||'');if(!Number.isFinite(ended))return null;
   const n=value=>Number.isInteger(value)&&value>=0?value:0,diary=run.diary||null,counts=diary?.counts||{},facts=diary?.facts||{},lookup=run.removal?.lookup||{};
   const cause=EVENT_CAUSES.includes(run.cause)?run.cause:null;
@@ -178,16 +181,17 @@ const LetterboxdRatings=(()=>{
  }
 
  // ratings_sync_start. `busy` never hands out the running id; a stale record is closed first.
- async function start(env,{trigger,clearIsolation=false}={},now=Date.now()){
+ async function start(env,{trigger,clearIsolation=false,slotKey=null}={},now=Date.now()){
   const reply=(runId,created,nextAction,reason,extra={})=>({runId,created,nextAction,reason,...extra});
   const state=await storageState(env);
   if(!state.supported)return reply(null,false,'stop','storage_unsupported',{storage:storageOf(state)});
   let pointer=null;
-  if(typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.currentGeneration==='function'){
+  // AIR-570 / ADR 0186 decision 2: a run of a Letterboxd Sync slot reads no EPG state (the pin below is only recorded, never used); an unreadable EPG authority cannot fail it.
+  if(!slotKey&&typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.currentGeneration==='function'){
    const live=await PublishedEpg.currentGeneration(env);
    if(live)pointer={phase:live.phase,programmeRunId:live.programmeRunId};
   }
-  if(!pointer)pointer=(await read(env,EPG_GENERATION_KEY)).value;
+  if(!pointer&&!slotKey)pointer=(await read(env,EPG_GENERATION_KEY)).value;
   const pinned={programmeRunId:pointer?.phase==='published'&&pointer.programmeRunId?pointer.programmeRunId:null,removalPending:Object.values(state.queue?.films||{}).filter(entry=>entry.state==='pending').length};
   for(let attempt=0;attempt<5;attempt++){
    const {object,value:stored}=await read(env,KEYS.run);
@@ -197,7 +201,7 @@ const LetterboxdRatings=(()=>{
    const at=iso(now);
    const carried=reason==='started'?carryOwed(base):null;
    const next=reason==='started'?{schemaVersion:RUN_SCHEMA_VERSION,runId:crypto.randomUUID(),trigger,state:'running',phase:'diary',lease:{step:null,expiresAt:null},
-    startedAt:at,updatedAt:at,lastStepAt:null,finishedAt:null,closedAt:null,checkpoint:{diaryPagesRead:0,diaryNextPage:1,diaryMode:'incremental',removalChecked:0,legacyPagesLinked:0},pinned,
+    ...(slotKey?{slotKey}:{}),startedAt:at,updatedAt:at,lastStepAt:null,finishedAt:null,closedAt:null,checkpoint:{diaryPagesRead:0,diaryNextPage:1,diaryMode:'incremental',removalChecked:0,legacyPagesLinked:0},pinned,
     outcome:null,cause:null,interruptedPhase:null,diary:null,removal:null,isolation:base?.isolation||null,...(base?.isolationClearedAt?{isolationClearedAt:base.isolationClearedAt}:{}),lastStartAt:at,recent:base?.recent||[],...(carried.pendingEvents.length?{pendingEvents:carried.pendingEvents}:{}),...(carried.eventsDropped?{eventsDropped:carried.eventsDropped}:{})}:base!==stored?base:null;
    if(next&&await put(env,KEYS.run,object,next)===null)continue;
    // Only the committed record is reconciled: an event is never delivered for a close that this start has not committed.
@@ -508,7 +512,12 @@ const LetterboxdRatings=(()=>{
    removal:{schemaVersion:queue?.schemaVersion??null,lookupEnabled:true,entries:entries.length,pending:entries.filter(entry=>entry.state==='pending').length,unresolved:entries.reduce((n,entry)=>n+removalUnresolvedRefs(entry),0),unresolvedEntries:entries.filter(entry=>removalUnresolvedRefs(entry)>0).length,
     refIssues:Object.fromEntries(REMOVAL_REF_ISSUES.map(issue=>[issue,entries.reduce((n,entry)=>n+(entry.refs||[]).filter(ref=>ref.resolved!==true&&ref.issue===issue).length,0)])),
     legacy:entries.filter(entry=>entry.legacy===true).length,expired:entries.filter(entry=>entry.state==='expired').length,droppedRefs:queue?.droppedRefs||0,pausedUntil:queue?.pausedUntil&&Date.parse(queue.pausedUntil)>now?queue.pausedUntil:null},
-   freshness:freshnessOf(run),orchestration:await orchestrationOf(env,now),readAt:iso(now),sideEffects:'none'};
+   freshness:freshnessOf(run),orchestration:await orchestrationOf(env,now),letterboxdSync:await letterboxdSyncOf(env,now),readAt:iso(now),sideEffects:'none'};
+ }
+ // ADR 0186: the Letterboxd Sync slot model next to the Ratings one: null while the executor is dormant (no mode row), so today's status is unchanged. Read only; a failed read is reported, never thrown.
+ async function letterboxdSyncOf(env,now){
+  if(typeof LetterboxdSync==='undefined'||!env?.DB)return null;
+  try{const model=await LetterboxdSync.readModel(env,{now});return model.mode==='external'&&model.health==='external'?null:model;}catch{return {mode:null,health:'unreadable',sideEffects:'none'};}
  }
  // The executor read model (ADR 0089 decision 7). A failed read is reported, never thrown into the status.
  async function orchestrationOf(env,now){

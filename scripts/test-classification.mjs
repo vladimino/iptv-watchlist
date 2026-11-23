@@ -59,6 +59,15 @@ export const FILES={
  "admin-limbo-page.mjs": {
   "suite": "core"
  },
+ "admin-channels-api.mjs": {
+  "suite": "core"
+ },
+ "admin-channels-domain.mjs": {
+  "suite": "core"
+ },
+ "admin-channels-page.mjs": {
+  "suite": "core"
+ },
  "admin-posters-api.mjs": {
   "suite": "core"
  },
@@ -91,6 +100,12 @@ export const FILES={
   "suite": "core"
  },
  "air-376-small-fixes.mjs": {
+  "suite": "core"
+ },
+ "air-566-residual-nonfilm-audit.mjs": {
+  "suite": "core"
+ },
+ "air-566-serial-rule-replay.mjs": {
   "suite": "core"
  },
  "air-86-replay.mjs": {
@@ -430,6 +445,15 @@ export const FILES={
  "admin-identity-group-page.mjs": {
   "suite": "core"
  },
+ "discovery-catalog-read-census.mjs": {
+  "suite": "core"
+ },
+ "discovery-chunk-catalog-read-census.mjs": {
+  "suite": "core"
+ },
+ "discovery-held-slot-read.mjs": {
+  "suite": "core"
+ },
  "discovery-identity-group.mjs": {
   "suite": "core"
  },
@@ -580,6 +604,27 @@ export const FILES={
  "enrichment.mjs": {
   "suite": "core"
  },
+ "letterboxd-view-double.mjs": {
+  "suite": "core"
+ },
+ "view-index-d1-input.mjs": {
+  "suite": "core"
+ },
+ "view-index-fixture.mjs": {
+  "suite": "core"
+ },
+ "watchlist-composition.mjs": {
+  "suite": "core"
+ },
+ "watchlist-d1.mjs": {
+  "suite": "core"
+ },
+ "watchlist-routes.mjs": {
+  "suite": "core"
+ },
+ "watchlist-worker.mjs": {
+  "suite": "core"
+ },
  "epg-checkpoint-worker.mjs": {
   "suite": "core"
  },
@@ -589,7 +634,46 @@ export const FILES={
  "epg-checkpoint-d1.mjs": {
   "suite": "core"
  },
+ "epg-channel-d1.mjs": {
+  "suite": "core"
+ },
+ "epg-channel-policy.mjs": {
+  "suite": "core"
+ },
+ "epg-channel-policy-dry-run.mjs": {
+  "suite": "core"
+ },
  "epg-checkpoint-production.mjs": {
+  "suite": "core"
+ },
+ "watchlist-authority-production.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-control-production.mjs": {
+  "suite": "core"
+ },
+ "migration-index-docs.mjs": {
+  "suite": "core"
+ },
+ "watchlist-bootstrap.mjs": {
+  "suite": "core"
+ },
+ "watchlist-cutover.mjs": {
+  "suite": "core"
+ },
+ "watchlist-root-fence.mjs": {
+  "suite": "core"
+ },
+ "watchlist-mirror.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-qa-matrix.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-film-admission-race.mjs": {
+  "suite": "core"
+ },
+ "migration-statements.mjs": {
   "suite": "core"
  },
  "epg-commit-durable-enqueue.mjs": {
@@ -958,6 +1042,37 @@ export const FILES={
  "prediction-skipped-event.mjs": {
   "suite": "core"
  },
+ "prediction-aux-closed.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-cutover-production.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-export-convert.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-d1.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-worker.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-import.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-budget.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-bench-lib.mjs": {
+  "suite": "core"
+ },
+ "r2-fake-bucket-lib.mjs": {
+  "suite": "support",
+  "note": "Fake S3-compatible R2 bucket over loopback HTTP (paged listing, conditional HEAD and GET, signature check, write refusal) shared by tests/r2-snapshot-export.mjs, tests/r2-snapshot-export-scoped.mjs and tests/prediction-aux-export-convert.mjs. Executing this file runs no check."
+ },
+ "prediction-catalog-held-event.mjs": {
+  "suite": "core"
+ },
  "ratings-diary-identity.mjs": {
   "suite": "core"
  },
@@ -1020,6 +1135,9 @@ export const FILES={
   "suite": "core"
  },
  "match-hint.mjs": {
+  "suite": "core"
+ },
+ "mcp-tool-call-log.mjs": {
   "suite": "core"
  },
  "mcp-tools.mjs": {
@@ -1131,6 +1249,23 @@ export const FILES={
  "prediction-batch-start-parity.mjs": {
   "suite": "core"
  },
+ "prediction-orphan-start-signal.mjs": {
+  "suite": "core"
+ },
+ "prediction-batch-start-deferred.mjs": {
+  "suite": "core"
+ },
+ "prediction-task-id-lib.mjs": {
+  "suite": "core"
+ },
+ "prediction-task-id.mjs": {
+  "suite": "split",
+  "note": "Owner-label, join, fencing and refusal semantics stay in core. The runner-clock bound of the join wait is scenario prediction-task-id-join-bound."
+ },
+ "prediction-batch-start-keyed.mjs": {
+  "suite": "split",
+  "note": "Join, claim fencing, pending and refusal semantics stay in core. The runner-clock bound of the join wait is scenario prediction-batch-start-keyed-join-bound."
+ },
  "prediction-batch-start.mjs": {
   "suite": "core"
  },
@@ -1158,6 +1293,9 @@ export const FILES={
   "suite": "core"
  },
  "prediction-diagnostics.mjs": {
+  "suite": "core"
+ },
+ "prediction-pending-queue-only.mjs": {
   "suite": "core"
  },
  "prediction-domain-production.mjs": {
@@ -1229,6 +1367,9 @@ export const FILES={
  "prediction-recovery-intent.mjs": {
   "suite": "core"
  },
+ "prediction-recovery-slots.mjs": {
+  "suite": "core"
+ },
  "prediction-footer-health.mjs": {
   "suite": "core"
  },
@@ -1239,6 +1380,9 @@ export const FILES={
   "suite": "core"
  },
  "prediction-start-diagnostics.mjs": {
+  "suite": "core"
+ },
+ "prediction-start-ledger-seal.mjs": {
   "suite": "core"
  },
  "prediction-step-timing.mjs": {
@@ -1311,6 +1455,9 @@ export const FILES={
  "r2-snapshot-export.mjs": {
   "suite": "core"
  },
+ "r2-snapshot-export-scoped.mjs": {
+  "suite": "core"
+ },
  "rating-history.mjs": {
   "suite": "core"
  },
@@ -1347,6 +1494,33 @@ export const FILES={
  "ratings-orchestration.mjs": {
   "suite": "core"
  },
+ "letterboxd-sync.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-watchlist.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-repository.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-effects.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-bundle.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-ratings.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-monitor.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-admission.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-sync-fence.mjs": {
+  "suite": "core"
+ },
  "ratings-queue-v2.mjs": {
   "suite": "core"
  },
@@ -1380,6 +1554,10 @@ export const FILES={
  "run-tests-runner.mjs": {
   "suite": "core"
  },
+ "scheduled-task-s7-taskid-candidates.mjs": {
+  "suite": "core",
+  "note": "Offline exact candidate prompt integrity: SHA-256, fixed task ownership, and a three-occurrence S5-to-S7 change. No runtime, throughput or latency measurement."
+ },
  "scheduled-task-prompt-v2.mjs": {
   "suite": "core"
  },
@@ -1393,6 +1571,9 @@ export const FILES={
   "suite": "core"
  },
  "scored-resolution.mjs": {
+  "suite": "core"
+ },
+ "serial-episode-screening.mjs": {
   "suite": "core"
  },
  "search-scopes-ui.mjs": {

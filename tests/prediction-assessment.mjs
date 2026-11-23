@@ -4,12 +4,13 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const w=await flowWorld({films:6});
 sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','A crew plans a robbery and a detective closes in.','$.genres',json('[\"Crime\",\"Thriller\"]'),'$.runtime',120,'$.directors',json('[\"A Director\"]'),'$.actors',json('[\"An Actor\"]'))");
 assert.equal((await w.api('queue/reconcile',{})).status,200);
 vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
-const call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.structuredContent||null,text:res.content?.[0]?.text||''};};
+const call=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.structuredContent||null,text:res.content?.[0]?.text||''};};
 const metadata={synopsis:'A crew plans a robbery and a detective closes in.',genres:['Crime'],runtime:120,directors:['A Director']};
 const SECRET='SYNTHETIC-ASSESSMENT-TEXT';
 const base=()=>({assessmentVersion:1,ratingBasis:SECRET+' premise and payoff',probability4PlusBasis:'Good fit, uncertain payoff',

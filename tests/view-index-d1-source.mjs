@@ -1,5 +1,5 @@
-// ADR 0183: the D1 read source of the view index (VIEW_INDEX_SOURCE=d1), on a real sqlite D1 stand-in with every migration applied and the production authorities
-// (prediction d1, ratings d1 and open). Nothing here calls Cloudflare, TMDB or production. The default `r2` is the dormant state and keeps the raw object.
+// ADR 0183 / AIR-558: the D1-derived view index (the only view index since the selector was retired), on a real sqlite D1 stand-in with every migration applied and the production authorities
+// (prediction d1, ratings d1 and open). Nothing here calls Cloudflare, TMDB or production. The raw object is put in the bucket where useful, only to prove it is never read or written.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -78,24 +78,22 @@ const envFor=({db,bucket},extra={})=>({DB:db,BUCKET:bucket,PREDICTION_DB_REQUIRE
 
 {
  const w=buildWorld();const {gets,writes,bucket}=bucketFor(w.store);const {run}=worldFor();
- const loadJSON=run('loadJSON'),derivedViewIndex=run('derivedViewIndex'),viewIndexSource=run('viewIndexSource');
+ const loadJSON=run('loadJSON'),derivedViewIndex=run('derivedViewIndex');
 
- // The selector: only exactly 'd1' selects the D1 source.
- assert.deepEqual([undefined,'','r2','d1','D1',' d1','on',1,null,'d1,r2'].map(value=>viewIndexSource({VIEW_INDEX_SOURCE:value})),['r2','r2','r2','d1','r2','r2','r2','r2','r2','r2']);
- assert.equal(viewIndexSource(undefined),'r2');assert.equal(viewIndexSource({}),'r2');
+ // AIR-558: no selector and no raw writers exist any more; whatever binding is present changes nothing.
+ for(const name of ['viewIndexSource','viewIndexIsD1','updateViewIndex','ensureInitialRatings','moodBackfill','backfillFingerprintView'])assert.equal(run('typeof '+name),'undefined',name+' is gone');
 
- // r2 (the default): the raw object is read and the D1 overlays are laid over it.
- const rawRead=await loadJSON(envFor({db:w.db,bucket}),KEY);
- assert.ok(gets.includes(KEY),'r2 reads the raw object');
- gets.length=0;w.seen.length=0;
- const viaD1=await loadJSON(envFor({db:w.db,bucket},{VIEW_INDEX_SOURCE:'d1'}),KEY);
- assert.equal(gets.includes(KEY),false,'d1 never reads the raw object');
+ const viaD1=await loadJSON(envFor({db:w.db,bucket}),KEY);
+ assert.equal(gets.includes(KEY),false,'the view index never reads the raw object, even when one is stored');
  assert.deepEqual(gets,[],'and reads nothing else of R2');
  assert.ok(w.seen.length>0&&readsOnly(w.seen),'only reads reached D1: '+w.seen.filter(text=>!/^\s*(SELECT|WITH|PRAGMA)\b/i.test(text)).join(' | '));
  assert.deepEqual(writes,[],'no R2 write');
- // Parity: raw key set == D1 key set, so the two sources serve the same index, field for field (the stale raw facts are replaced in both).
+ for(const value of ['d1','r2','D1',' d1','on','',undefined]){
+  const same=await loadJSON(envFor({db:w.db,bucket},value===undefined?{}:{VIEW_INDEX_SOURCE:value}),KEY);
+  assert.deepEqual(same,viaD1,JSON.stringify(value)+': a leftover VIEW_INDEX_SOURCE binding is inert');
+ }
+ assert.equal(gets.includes(KEY),false);
  assert.deepEqual(sortKeys(viaD1),[...D1_IDS].sort(),'the key set is the union of the three tables');
- assert.deepEqual(viaD1,rawRead,'identical index while the raw key set equals the D1 key set');
  // Fields come from D1: pointer -> prediction, fingerprint -> fingerprint/hash/impact features, either -> mood facet; ratings -> watched, rating, watchlist.
  assert.ok(viaD1.tmdb_101.prediction&&viaD1.tmdb_101.fingerprint&&viaD1.tmdb_101.impactFeatures&&viaD1.tmdb_101.moodFacet,'both rows');
  assert.ok(viaD1.tmdb_103.prediction&&!viaD1.tmdb_103.fingerprint&&!viaD1.tmdb_103.fingerprintHash,'pointer only: a forecast, no features');
@@ -105,13 +103,6 @@ const envFor=({db,bucket},extra={})=>({DB:db,BUCKET:bucket,PREDICTION_DB_REQUIRE
  assert.equal(Object.hasOwn(viaD1.tmdb_106,'actualRating'),false,'an unknown rating stays absent');assert.equal(viaD1.tmdb_106.watchlist,true);
  assert.equal(viaD1.L_r1.actualRating,3,'a lid alias keeps its own spelling');assert.equal(Object.hasOwn(viaD1.L_r1,'prediction'),false);
  assert.equal(JSON.stringify(viaD1).includes('stale'),false,'no raw fact is ever served');
-
- // Any other selector value keeps the raw object (the dormant state).
- for(const value of ['D1',' d1','on','r2','',undefined]){
-  gets.length=0;
-  const kept=await loadJSON(envFor({db:w.db,bucket},value===undefined?{}:{VIEW_INDEX_SOURCE:value}),KEY);
-  assert.ok(gets.includes(KEY),JSON.stringify(value)+' reads the raw object');assert.deepEqual(kept,rawRead);
- }
 
  // The token changes whenever either domain commits.
  const version=run('viewIndexD1Version');
@@ -131,34 +122,29 @@ const envFor=({db,bucket},extra={})=>({DB:db,BUCKET:bucket,PREDICTION_DB_REQUIRE
  assert.equal(w.seen.some(text=>/prediction_pointer|prediction_fingerprint/.test(text)),false,'the ratings-only reader reads no prediction table');
 }
 
-// ---- 2. Differences from the raw object, as the audit classifies them: a raw-only key disappears, a pointer or fingerprint id outside the raw object appears.
+// ---- 2. The membership classifier (an offline operator tool, ADR 0183) still agrees with the derived key set; the raw object is only its input, never read by the Worker.
 {
  const w=buildWorld();
- // 'tmdb_900' is a raw key with no D1 row; 'tmdb_103' and 'tmdb_104' are D1 ids the raw object lacks.
- const store=new Map([[KEY,{tmdb_101:{},tmdb_102:{},tmdb_105:{},tmdb_106:{},L_r1:{},tmdb_900:{actualRating:5}}]]);
- const {bucket}=bucketFor(store);const {run}=worldFor();const loadJSON=run('loadJSON');
- const rawView=await loadJSON(envFor({db:w.db,bucket}),KEY);
- const d1View=await loadJSON(envFor({db:w.db,bucket},{VIEW_INDEX_SOURCE:'d1'}),KEY);
- const report=compareMembership({raw:store.get(KEY),predictionPointerIds:['tmdb_101','tmdb_102','tmdb_103'],predictionFingerprintIds:['tmdb_101','tmdb_102','tmdb_104'],ratingsRows:[{alias_id:'tmdb_101',rating_known:1,actual_rating:4},{alias_id:'L_r1',rating_known:1,actual_rating:3},{alias_id:'tmdb_105',rating_known:1,actual_rating:null},{alias_id:'tmdb_106',rating_known:0,actual_rating:null}],seed:{}});
+ // 'tmdb_900' would be a raw key with no D1 row; 'tmdb_103' and 'tmdb_104' are D1 ids that raw object lacks.
+ const raw={tmdb_101:{},tmdb_102:{},tmdb_105:{},tmdb_106:{},L_r1:{},tmdb_900:{actualRating:5}};
+ const store=new Map([[KEY,raw]]);
+ const {gets,bucket}=bucketFor(store);const {run}=worldFor();const loadJSON=run('loadJSON');
+ const d1View=await loadJSON(envFor({db:w.db,bucket}),KEY);
+ const report=compareMembership({raw,predictionPointerIds:['tmdb_101','tmdb_102','tmdb_103'],predictionFingerprintIds:['tmdb_101','tmdb_102','tmdb_104'],ratingsRows:[{alias_id:'tmdb_101',rating_known:1,actual_rating:4},{alias_id:'L_r1',rating_known:1,actual_rating:3},{alias_id:'tmdb_105',rating_known:1,actual_rating:null},{alias_id:'tmdb_106',rating_known:0,actual_rating:null}],seed:{}});
  assert.deepEqual(report.removedKeys,['tmdb_900']);assert.deepEqual(report.newKeys,['tmdb_103','tmdb_104']);
- assert.deepEqual(sortKeys(rawView).filter(key=>!sortKeys(d1View).includes(key)),report.removedKeys,'the classifier predicts the keys the raw source has and d1 does not');
- assert.deepEqual(sortKeys(d1View).filter(key=>!sortKeys(rawView).includes(key)),report.newKeys,'and the keys d1 has and the raw source does not');
- // The forecast gain and the feature gain are different outcomes: tmdb_103 has a pointer row only, tmdb_104 a fingerprint row only. The raw source shows neither.
- assert.equal(Object.hasOwn(rawView,'tmdb_103'),false);assert.equal(Object.hasOwn(rawView,'tmdb_104'),false);
+ assert.equal(Object.hasOwn(d1View,'tmdb_900'),false,'a raw-only key is not a key');
+ assert.deepEqual(sortKeys(d1View).filter(key=>!Object.hasOwn(raw,key)),report.newKeys,'the classifier predicts the keys the derived index has and the raw object lacks');
+ assert.equal(gets.includes(KEY),false,'the raw object is not read');
  assert.ok(d1View.tmdb_103.prediction&&!d1View.tmdb_103.fingerprint,'forecast gain: a forecast and no features');
  assert.ok(d1View.tmdb_104.fingerprint&&!d1View.tmdb_104.prediction,'feature gain: features and no forecast');
- // Facts that both sources share are identical.
- for(const id of ['tmdb_101','tmdb_102','tmdb_105','tmdb_106','L_r1'])assert.deepEqual(d1View[id],rawView[id],id);
 }
 
-// ---- 3. The compiled seed is a separate layer applied after the facts, with the same rule under both sources.
+// ---- 3. The compiled seed is a separate layer applied after the facts.
 {
  const seed={tmdb_105:5,tmdb_106:2,tmdb_101:1,seedOnly:4};
  const w=buildWorld();const {bucket}=bucketFor(w.store);const {run}=worldFor({seed});
  const readViewIndex=run('readViewIndex');
- const viaR2=await readViewIndex(envFor({db:w.db,bucket}));
- const viaD1=await readViewIndex(envFor({db:w.db,bucket},{VIEW_INDEX_SOURCE:'d1'}));
- assert.deepEqual(viaD1,viaR2,'the seed layer gives the same view under both sources');
+ const viaD1=await readViewIndex(envFor({db:w.db,bucket}));
  assert.equal(viaD1.tmdb_105.actualRating,null,'an own null wins over the seed');
  assert.equal(viaD1.tmdb_106.actualRating,2,'an unknown rating takes the seed');
  assert.equal(viaD1.tmdb_101.actualRating,4,'a ratings_view rating wins over the seed');
@@ -168,30 +154,30 @@ const envFor=({db,bucket},extra={})=>({DB:db,BUCKET:bucket,PREDICTION_DB_REQUIRE
  assert.deepEqual(report.seed.nullWins,['tmdb_105']);assert.deepEqual(report.seed.ratingsWin,['tmdb_101']);assert.deepEqual(report.seed.fills,['seedOnly','tmdb_106']);assert.deepEqual(report.seed.onlyKeys,['seedOnly']);
 }
 
-// ---- 4. The footer reader: the same projection from either source, with no raw read under d1.
+// ---- 4. The footer reader: the derived projection, with no raw read.
 {
  const w=buildWorld();const {gets,writes,bucket}=bucketFor(w.store);const {run}=worldFor({seed:{seedOnly:4,tmdb_106:2}});
  const footerViewIndex=run('footerViewIndex');
- const viaR2=await footerViewIndex(envFor({db:w.db,bucket}));
- gets.length=0;w.seen.length=0;
- const viaD1=await footerViewIndex(envFor({db:w.db,bucket},{VIEW_INDEX_SOURCE:'d1'}));
- assert.equal(gets.includes(KEY),false,'the footer does not read the raw object under d1');assert.deepEqual(writes,[]);
+ w.seen.length=0;
+ const viaD1=await footerViewIndex(envFor({db:w.db,bucket}));
+ assert.equal(gets.includes(KEY),false,'the footer does not read the raw object');assert.deepEqual(writes,[]);
  assert.ok(readsOnly(w.seen));
- assert.deepEqual(viaD1,viaR2,'the footer projection is identical while the key sets are equal');
+ assert.deepEqual(sortKeys(viaD1),[...D1_IDS].sort());
  assert.equal(JSON.stringify(viaD1).includes('moodFacet'),false,'the footer keeps only what its blocks read');
+ assert.equal(JSON.stringify(viaD1).includes('stale'),false);
  // An authority that moved before the footer's read is a refusal, never a silent raw fallback.
  w.db.sql("UPDATE ratings_domain_authority SET cutover='held' WHERE id=1");
  gets.length=0;
- await assert.rejects(footerViewIndex(envFor({db:w.db,bucket},{VIEW_INDEX_SOURCE:'d1'})),error=>error.code==='ratings_domain_not_authoritative');
+ await assert.rejects(footerViewIndex(envFor({db:w.db,bucket})),error=>error.code==='ratings_domain_not_authoritative');
  assert.equal(gets.includes(KEY),false,'a refusal does not read the raw object either');
 }
 
 // ---- 5. Fail closed: no silent fallback to the raw object.
 {
  const w=buildWorld();const {gets,bucket}=bucketFor(w.store);const {run}=worldFor();const loadJSON=run('loadJSON');
- const d1=extra=>({...envFor({db:w.db,bucket},{VIEW_INDEX_SOURCE:'d1'}),...extra});
+ const d1=extra=>({...envFor({db:w.db,bucket}),...extra});
  // No D1 binding: the prediction domain is not authoritative.
- await assert.rejects(loadJSON({BUCKET:bucket,VIEW_INDEX_SOURCE:'d1'},KEY),error=>/^(ratings|prediction)_domain_/.test(error.code));
+ await assert.rejects(loadJSON({BUCKET:bucket},KEY),error=>/^(ratings|prediction)_domain_/.test(error.code));
  // A ratings cutover that is held, or a prediction marker that is not d1, refuses.
  w.db.sql("UPDATE ratings_domain_authority SET cutover='held' WHERE id=1");
  await assert.rejects(loadJSON(d1(),KEY),error=>error.code==='ratings_domain_not_authoritative');
@@ -234,33 +220,33 @@ const envFor=({db,bucket},extra={})=>({DB:db,BUCKET:bucket,PREDICTION_DB_REQUIRE
  assert.deepEqual(bigGets,[],'the budget refusal reads no raw object');
 }
 
-// ---- 7. The writers are not behind the selector: they keep writing the raw object, so setting r2 again is the rollback.
+// ---- 7. The raw writers are gone: a prediction/fingerprint write leaves the raw object alone (it is not written, not even created).
 {
- const w=buildWorld();const {gets,writes,bucket}=bucketFor(w.store);const {run}=worldFor();
- const updateViewIndex=run('updateViewIndex');
- const env=envFor({db:w.db,bucket},{VIEW_INDEX_SOURCE:'d1'});
- await updateViewIndex(env,'tmdb_103',{fingerprintHash:'fp-new',fingerprint:{moodLabels:['tense'],plotMechanics:[],execution:{}}});
- assert.deepEqual(writes,['put:'+KEY],'the raw object is still written under d1');
- assert.ok(w.store.get(KEY).tmdb_103&&w.store.get(KEY).tmdb_103.fingerprintHash==='fp-new','the raw object carries the new entry, so r2 stays current');
- assert.ok(gets.includes(KEY),'the writer reads the raw object for its compare-and-swap');
+ const w=buildWorld();const {writes,bucket}=bucketFor(w.store);const {run}=worldFor();
+ assert.equal(run('typeof updateViewIndex'),'undefined');assert.equal(run('typeof ensureInitialRatings'),'undefined');
+ const before=JSON.stringify(w.store.get(KEY));
+ // A Letterboxd projection that the ratings domain does not own refuses; it never writes the raw object.
+ w.db.sql("UPDATE ratings_domain_authority SET cutover='held' WHERE id=1");
+ const facts=run('LetterboxdFacts');
+ // A held cutover is refused by the ratings domain itself (as before AIR-558); neither outcome writes the raw object.
+ await facts.projectRecords(envFor({db:w.db,bucket}),[{links:{letterboxd:'L_new',tmdb:null},rating:{value:4}}]).then(projected=>assert.equal(projected.changed,0),error=>assert.match(error.code,/^ratings_domain_/));
+ assert.deepEqual(writes,[],'no R2 write');assert.equal(JSON.stringify(w.store.get(KEY)),before,'the raw object is unchanged');
 }
 
-// ---- 8. The Letterboxd facts reader: the ratings overlay only, never the raw object under d1, and its answers match the raw source's.
+// ---- 8. The Letterboxd facts reader: the ratings overlay only, never the raw object.
 {
  const w=buildWorld();const {gets,bucket}=bucketFor(w.store);const {run}=worldFor();
  const facts=run('LetterboxdFacts');
  const groups={added:[{id:'L_r1'},{id:'tmdb_106'}],updated:[{id:'tmdb_101',rating:4},{id:'L_r1',rating:2}]};
- const viaR2=await facts.confirmDiaryEffects(envFor({db:w.db,bucket}),groups);
- gets.length=0;w.seen.length=0;
- const viaD1=await facts.confirmDiaryEffects(envFor({db:w.db,bucket},{VIEW_INDEX_SOURCE:'d1'}),groups);
- assert.equal(gets.includes(KEY),false,'the facts reader does not read the raw object under d1');
+ w.seen.length=0;
+ const viaD1=await facts.confirmDiaryEffects(envFor({db:w.db,bucket}),groups);
+ assert.equal(gets.includes(KEY),false,'the facts reader does not read the raw object');
  assert.equal(w.seen.some(text=>/prediction_pointer|prediction_fingerprint/.test(text)),false,'and never the prediction tables');
- assert.deepEqual(JSON.parse(JSON.stringify(viaD1)),JSON.parse(JSON.stringify(viaR2)),'the same confirmation from either source');
  assert.deepEqual(JSON.parse(JSON.stringify(viaD1)),{added:[{id:'L_r1'}],updated:[{id:'tmdb_101',rating:4}]});
  // Held ratings refuse rather than answering from the raw object.
  w.db.sql("UPDATE ratings_domain_authority SET cutover='held' WHERE id=1");gets.length=0;
- await assert.rejects(facts.confirmDiaryEffects(envFor({db:w.db,bucket},{VIEW_INDEX_SOURCE:'d1'}),groups),error=>error.code==='ratings_domain_not_authoritative');
+ await assert.rejects(facts.confirmDiaryEffects(envFor({db:w.db,bucket}),groups),error=>error.code==='ratings_domain_not_authoritative');
  assert.equal(gets.includes(KEY),false);
 }
 
-console.log('View index D1 source: selector, parity, typed gains, seed layer, footer, fail-closed refusals, bounded keyset pages and the unchanged raw writers passed');
+console.log('View index D1 source: single D1 path, inert leftover binding, classifier agreement, seed layer, footer, fail-closed refusals, bounded keyset pages, retired raw writers and the facts reader passed');

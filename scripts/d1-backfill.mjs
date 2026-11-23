@@ -129,6 +129,19 @@ export function createD1Adapter({target,databaseId,fetchImpl=fetch,retries=4,sle
    if(!Number.isFinite(rowsWritten)||rowsWritten!==0)throw new D1Error('statement','A read changed rows');
    return {rows:item.results||[],rowsRead:Number(item.meta?.rows_read??0),rowsWritten,bookmark:typeof item.meta?.bookmark==='string'?item.meta.bookmark:null};
   },
+  // A read-only batch: every statement must be a SELECT, sent as one {batch} body, and the response must prove it wrote nothing.
+  // Returns one row array per statement, in order. A read follows the read retry policy.
+  async readBatch(statements){
+   if(state.buffer)throw new Error('Read inside the import transaction');
+   const rendered=statements.map(sql=>{const text=String(sql).trim().replace(/;+$/,'');if(!/^select\b/i.test(text)||text.includes(';'))throw new D1Error('statement','readBatch accepts SELECT statements only');return {sql:text+';'};});
+   if(!rendered.length)return [];
+   stats.reads++;
+   const payload=await request('POST',base+'/query',{batch:rendered});
+   const results=Array.isArray(payload?.result)?payload.result:[];
+   if(results.length!==rendered.length||results.some(item=>!item||item.success!==true))throw new D1Error('statement','A read batch response did not prove every statement');
+   if(results.some(item=>Number(item.meta?.rows_written??0)!==0))throw new D1Error('statement','A read changed rows');
+   return results.map(item=>Array.isArray(item.results)?item.results:[]);
+  },
   async transaction(fn){
    if(state.buffer)return fn();
    state.buffer=[];

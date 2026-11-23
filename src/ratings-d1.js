@@ -196,9 +196,21 @@ function writeStatements(key,text,etag,now,previousEtag,mode){
 function epochFence(env){
  const fence=env?.ratingsFence;
  if(!fence)return [];
+ // AIR-570 / ADR 0186: the Letterboxd Sync fences its Diary writes with its own mode epoch: a caller-supplied guard statement (a [sql, params] pair that trips a CHECK when the epoch no longer holds) rides in the same batch.
+ if(fence.guard!==undefined){
+  if(!Array.isArray(fence.guard)||typeof fence.guard[0]!=='string'||!Array.isArray(fence.guard[1]))throw failed('ratings_domain_fence');
+  return [fence.guard];
+ }
  if(typeof fence.key!=='string'||!(fence.etag===null||(typeof fence.etag==='string'&&fence.etag)))throw failed('ratings_domain_fence');
  // `etag: null` asserts that the mode document does not exist yet (the default external mode). ok=0 trips the CHECK (ok >= 1).
- return [["UPDATE ratings_domain_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM ratings_document WHERE key=? AND part=0 AND (? IS NULL OR etag=?))=? THEN 1 ELSE 0 END WHERE id=1",[fence.key,fence.etag,fence.etag,fence.etag===null?0:1]]];
+ const statements=[["UPDATE ratings_domain_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM ratings_document WHERE key=? AND part=0 AND (? IS NULL OR etag=?))=? THEN 1 ELSE 0 END WHERE id=1",[fence.key,fence.etag,fence.etag,fence.etag===null?0:1]]];
+ // AIR-571 D: the Letterboxd mode revision the admission saw. A close, completion or abort of the Letterboxd mode after the admission rejects this commit, so an already admitted legacy request cannot write over the new owner.
+ if(fence.letterboxdRevision!==undefined){
+  if(!Number.isInteger(fence.letterboxdRevision))throw failed('ratings_domain_fence');
+  // Both the revision AND the mode: the row is still the `external` one that was read (an absent row only for the initial default, revision 0).
+  statements.push(["UPDATE ratings_domain_cas SET ok=CASE WHEN COALESCE((SELECT revision FROM letterboxd_sync_mode WHERE id=1),0)=? AND (NOT EXISTS (SELECT 1 FROM letterboxd_sync_mode WHERE id=1) OR (SELECT mode FROM letterboxd_sync_mode WHERE id=1)='external')"+(fence.watchlistGuard===true?" AND (COALESCE((SELECT epoch FROM letterboxd_sync_mode WHERE id=1),0)=0 OR (SELECT COUNT(*) FROM watchlist_authority WHERE id=1 AND mode='epg' AND writes='open')=1)":"")+" THEN 1 ELSE 0 END WHERE id=1",[fence.letterboxdRevision]]);
+ }
+ return statements;
 }
 
 export async function putOwned(env,key,previousEtag,value,{extra=[]}={}){

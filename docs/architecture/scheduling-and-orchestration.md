@@ -24,7 +24,8 @@ sequenceDiagram
         Daily->>MCP: epg_sync_step
         MCP->>EPG: Advance one bounded step
         EPG->>D1: Read or publish fenced generation
-        EPG->>R2: Store checkpoint and mirrors
+        EPG->>D1: Save the checkpoint (fenced batch)
+        EPG->>R2: Store mirrors
         MCP-->>Daily: stage and nextAction
     end
     alt External Discovery executor
@@ -55,6 +56,9 @@ The producer of personal predictions is the external batch v2 Scheduled Tasks de
 Migration `0007` is applied and the prediction marker is `d1`, so the runner writes D1 mutable state with immutable R2 bodies ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)). The batch runner refuses to start while the marker is `r2` (`batch_runner_requires_d1`); D1 stays the prediction authority and no rollback to `r2` is planned. A new `fingerprint_and_prediction` item carries `fingerprint.evidence`, and the film's metadata is passed to `prediction_batch_validate` when an item cites a metadata token. Worker fingerprint versions stay at 1.
 
 ### Four independent hourly Predictions v2 Tasks
+
+**Target protocol ([ADR 0193](../adr/0193-deferred-batch-start-with-server-issued-key.md), Proposed; dormant until the prompts use it).** Each execution asks for a server-issued key, starts with `deferred: true` and receives a receipt within seconds, polls `prediction_batch_manifest` until the manifest is ready or a typed final outcome arrives, and heartbeats at once. The heavy preparation runs in the Workflow `iptv-prediction-start` (one instance per run id, one non-retried step), so it no longer depends on the lifetime of the MCP request or on the Task's patience. The Task prompt change and the move of all four Tasks together are the Controller's, after delivery; the minimal prompt delta is [a reference note](../reference/scheduled-task-prompts/hourly-predictions-batch-v2-deferred-start-delta.md).
+
 
 **Live producer.** Four batch v2 Tasks are enabled following the owner's separate GOs for the scale-out; a fifth registry entry exists but is disabled. The live registry, not this page, is the authority for their state. Nothing here creates, edits, enables or runs a Task ([authorization](../process/authorization-and-escalation.md#chatgpt-scheduled-task-authorization)). The contract is [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md), [ADR 0136](../adr/0136-prediction-batch-manifest-size-and-spent-complete.md) and [ADR 0167](../adr/0167-retire-prediction-runner-v5.md).
 
@@ -219,14 +223,14 @@ sequenceDiagram
     D1-->>Disc: stale_generation, no lease
     Disc->>D1: Published programme id acquire
     D1-->>Disc: epg_priority, awaiting_complete
-    Note over EPG: finalize, queue attempted, then sync.json stage complete in R2
-    EPG->>D1: Certify batch: mode revision and step lease fence, CAS on run and day, pause clear
+    Note over EPG: finalize, queue attempted, then one completion batch
+    EPG->>D1: Complete and certify batch: mode revision and step lease fence, checkpoint complete, CAS on run and day, pause clear
     Disc->>D1: Published programme id acquire
     D1-->>Disc: admitted
     Note over EPG,D1: Hourly ensure certifies a complete but uncertified run. No Workflow, no control or sync.json write.
 ```
 
-**Accepted design (dormant, [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md)):** if the run checkpoint moves to D1 and its marker is `d1`, the two steps "sync.json stage complete in R2" and "Certify batch" in the diagram above become one fenced batch (the certificate stays conditional and non-aborting), and the crash window between them no longer exists for runs completed in that mode. The single-call completion route would use the same operation and attempt the queue refresh before it. The diagram above is unchanged because it describes current behavior; the hourly repair `certifyComplete` stays for runs completed before an activation.
+**Current (D1-authoritative since 21 Nov 2026, [ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md), [ADR 0199](../adr/0199-retire-the-epg-checkpoint-r2-arm.md)):** the run checkpoint is in D1 and its marker is `d1`, so the two steps "sync.json stage complete in R2" and "Certify batch" in the diagram above are one fenced batch (the certificate stays conditional and non-aborting), and the crash window between them no longer exists for runs completed in this mode. The single-call completion route uses the same operation and attempts the queue refresh before it. The diagram above draws that single batch; the hourly repair `certifyComplete` stays for a certificate that did not match.
 
 ### Seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), implemented by AIR-484; production acceptance awaits a natural run)
 
@@ -239,7 +243,7 @@ sequenceDiagram
     participant C as D1 control document
     participant S as Successor instance
     participant H as Hourly ensure
-    P->>R2: Store publication.json and save sync.json at stage seal
+    P->>R2: Store publication.json (the D1 checkpoint is saved at stage seal)
     P->>C: CAS claim, next series, no failure recorded
     P->>S: create() with the next series id
     Note over P: Ends normally. Takes no more step leases.
@@ -501,7 +505,7 @@ The canary flow (route, Workflow, diagnostic D1 and R2) is gone: [ADR 0159](../a
 
 ## Daily catalog-poster retry cron
 
-The Worker has a third cron trigger, `24 3 * * *` UTC, beside the hourly `0 * * * *` and the Discovery-only `1-59/2 * * * *` ([ADR 0179](../adr/0179-weekly-automatic-catalog-poster-retry.md), Accepted; implemented and tested offline, **not activated**: the live schedule gains the entry only when a deploy carries it, and the owner's separate activation decision is still required). `src/worker.js` dispatches on the exact `controller.cron`: the other two expressions are routed exactly as before, asserted by test, and the poster branch runs only `CatalogPosterWeekly.run`, none of EPG, Ratings, Monitor or Discovery recovery.
+The Worker has a third cron trigger, `24 3 * * *` UTC, beside the hourly `0 * * * *` and the Discovery-only `1-59/2 * * * *` ([ADR 0179](../adr/0179-weekly-automatic-catalog-poster-retry.md), Accepted; **live in production**: the read-only preflight of 22 Nov 2026 reads exactly these three expressions). A fourth trigger, `30 * * * *` UTC (AIR-571, [ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md)), is configured by the E activation change and takes effect only when the owner-approved deployment of that commit carries it; the Worker dispatches it only to the Letterboxd `ensure`. `src/worker.js` dispatches on the exact `controller.cron`: the other two expressions are routed exactly as before, asserted by test, and the poster branch runs only `CatalogPosterWeekly.run`, none of EPG, Ratings, Monitor or Discovery recovery.
 
 A firing starts a sweep on the first firing of a new week (weeks start Sunday 00:00 UTC) whose `weekStart` is newer than the checkpoint's, normally the Sunday one; a missed Sunday is caught up by the next firing, and an absent checkpoint bootstraps a sweep on any day. Otherwise it is **pending-only**: it resumes only a run that is `pending` with `nextRetryAt` reached (or `running` past its 2 h budget). A firing with nothing pending, nothing owed and the week's report present is **idle**: one R2 read, no TMDB call, no write, no event. A firing with an undelivered event replays it first and is not idle.
 
@@ -533,9 +537,9 @@ flowchart TD
 
 The unfinished-run backoff is 30 minutes by default (`Retry-After` is honoured), the retry cap is six attempts, and a busy resolver lease or EPG priority is recorded as `deferredBusy` and resumed on a later firing without holding the lease. A checkpoint write that loses its compare-and-swap leaves the guarded D1 hydration idempotent; the next firing re-reads D1 and the negative index. The R2 checkpoint is one object with version-aware compare-and-swap and needs no D1 migration. Rollback removes the cron entry and its dispatch by pull request; stored posters and index entries stay.
 
-## Accepted design (not implemented): one Letterboxd Sync Workflow with four daily slots ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted; not implemented)
+## Accepted design, staged activation: one Letterboxd Sync Workflow with four daily slots ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md), Accepted)
 
-Today the Ratings run is one daily Workflow at 17:00 Europe/Madrid and the Watchlist is fetched inside the EPG run (the sections above). The proposal separates the two user sources from the EPG and Discovery. The diagram is the **future** flow; the shaded nodes do not exist in production, no cron or binding is changed by the proposal, and with the Watchlist marker `epg` or absent the current flows above are the only path.
+**Activation status (22 Nov 2026).** The code is delivered and dormant in `main`; the staged production activation is under way and each step is its own owner GO ([activation runbook](../runbooks/letterboxd-activation.md)). Done: the Watchlist is its own authority, `d1`/`open` at generation 3 (bootstrap B and the switch C1 and C2), so it is served from the D1 snapshot and, by the code, the EPG run reads that snapshot instead of fetching Letterboxd (the first natural EPG run after the switch, 23 Nov 2026 17:00 Europe/Madrid, is the verification); the Ratings Cloudflare executor is closed (D1, mode `external`, epoch 2); the Letterboxd Sync mode is `cloudflare` at epoch 1 with the canary hold `2026-11-23T1030` (D2). Not yet done: the cron `30 * * * *` and the `iptv-letterboxd` Workflow registration (E, configured by a reviewed change and not deployed), the canary slot itself (F1) and the open schedule (F2). Until E is deployed nothing claims a slot; the daily Ratings run at 17:00 Europe/Madrid, which this design replaces, does not run while the Ratings executor is `external`. The diagram is the target flow; its nodes become live only with the E deployment, the canary hold admits exactly one slot until `open_schedule`, and the flows of the sections above remain the path only for a Watchlist marker `epg` or absent.
 
 ```mermaid
 flowchart TD
@@ -558,3 +562,19 @@ flowchart TD
 ```
 
 The four wall times are never inside the Madrid DST gap or fold, so a day has exactly four slots on every date; the spacing is 5 or 7 real hours across a changeover. A slot is eligible from its due instant until the next slot's due instant, and no retry crosses that boundary. Diary and Watchlist outcomes are independent (a Diary outage does not stop the scan, a Watchlist outage does not unconfirm Ratings). The mode document, epoch fence and three-step switch of [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md) apply, and the Ratings writer is closed, drained and fenced (the legacy start and step entry points included, not only the `external` mode) before the Letterboxd one is opened, so two Diary writers never coexist; the old 17:00 contract is retired only in a later cleanup, and the shared hourly cron stays. Neither the EPG, Discovery nor the EPG-priority pause gates a Letterboxd step, and the Letterboxd cron does not call them.
+
+### Dormant executor (delivered; not active)
+
+The code of the Letterboxd Sync is in the repository and **inert**: no Worker binding, no cron and no Task names it, the mode table is empty (read as `external`), and nothing in the hourly tick calls it. What exists:
+
+- **Slots** (`src/domain/letterboxd-slots.js`): four Madrid slots, their keys, due instants, the window to the next slot, the instance id `lbsync_<YYYYMMDD>_<HHMM>_<series>` and the two Event keys `lbsync-<YYYYMMDDTHHMM>-ratings|watchlist`.
+- **Control plane** (`src/letterboxd-sync.js`): the owner's three-step mode switch with the epoch fence; `ensure` claiming the latest due slot by primary key and creating one instance, recording a wholly missed slot as `skipped_missed` without an instance; the instance loop through three phase ports with a deadline that never crosses the next slot; the slot close that writes both outbox rows in one batch; delivery by `ensure`, by each run and in slot order; the read model.
+- **Phase ports** (assembled by `letterboxdPorts` in the Worker): `ratings` (the Diary part of one ratings-pipeline run) and `reconcile` (the removal part of the same run) over `LetterboxdRatings` (`src/letterboxd-sync-ratings.js`); `watchlist` (`src/letterboxd-sync-watchlist.js`), the complete-scan rule and one call into the Watchlist authority repository through `src/letterboxd-sync-repository.js`. A phase whose port is missing fails closed.
+- **Causal effects** (`src/letterboxd-sync-effects.js`): `scan_facts`, `retention` and `removal_enqueue`, applied oldest version first from the durable snapshot and change rows, each idempotent and returning a receipt; a failure holds the drain and the scan. Every authoritative write of an effect, of the admission identity check and of the ratings pipeline step goes through an env fenced by the Letterboxd mode epoch (`ratingsFence.guard` for the Ratings documents and the `letterboxd` producer fence for the canonical writers), so a step whose mode moved mid-flight commits nothing. Removal is membership only: the writers delete no Film, show or rating and infer no watched state. `removal_enqueue` hands the removed films to the Ratings lookup queue with a reference to the slot's own `watchlist` Event, whose key is deterministic (the slot Event key and the Watchlist phase time recorded on the slot), so it can run between the scan and the reconciliation: a removal is reconciled by phase 3 of the same run, before the Event object is stored at the slot close (the queue tolerates that as `event_missing`).
+- **Admission** (`src/letterboxd-sync-admission.js`): at most three due ledger rows per step through the existing same-run identity check; resolved, still pending with a backoff, or terminal after the bounded attempts. A transport stop or a deferral uses no attempt; an id removed before it resolved becomes `superseded`. A row becomes terminal after the bounded attempts or, whatever its attempts, 14 days (or 8 snapshot versions when the first-seen snapshot is already pruned) after the snapshot that first listed the id; it then waits for an owner decision and is listed in the owner's identity work inventory as a `watchlist_admission` row needing review.
+- **No pipeline Event.** A ratings-pipeline run started by a slot carries the slot key and writes no `ratings` Event of its own; the slot outbox is the only source, so there is no duplicate. Such a run reads no EPG state. Every pipeline write rides in a batch with the Letterboxd mode-epoch guard.
+- **Handover proof.** The mode switch refuses `cloudflare` unless `letterboxdHandover` reads live evidence: the Ratings executor is closed and drained, the legacy `ratings_sync_start`/`ratings_sync_step` entry is fenced (it is, while the Letterboxd mode is `switching`), the Watchlist authority is an open `d1`, and all three phase ports exist. There is no HTTP route for the switch yet; its operation belongs to the cutover plan.
+- **Status and monitor.** `status().letterboxdSync` and a `letterboxd` monitor stream carry the slot read model while the executor is `switching` or `cloudflare`, with a signal per source (a failed Diary and a failed or incomplete Watchlist alert separately; a rate limit is recorded as delayed and never alerts); with no mode row both are absent, so today's status and monitor are unchanged.
+- **Legacy writer fence.** While the Letterboxd mode is `switching` or `cloudflare`, `RatingsOrchestration.externalGate` refuses `start` and `step` (`external_writer_fenced`), `ensure` creates nothing (`letterboxd_sync_active`) and an old instance's `admit` is refused, so the two Diary writers can never both be admitted. Setting the Ratings mode to `external` alone is not that fence.
+
+Operating the slots is described in the [Letterboxd Sync runbook](../runbooks/letterboxd-sync.md); the numeric budgets are in the [orchestration reliability reference](../reference/orchestration-reliability.md#letterboxd-sync-slots).

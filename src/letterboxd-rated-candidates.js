@@ -79,25 +79,6 @@ const LetterboxdRatedCandidates = (() => {
     return {added, kept, document: result.value, changed: result.changed};
   }
 
-  async function rollbackCandidates(env, sha, codes) {
-    const key = CANDIDATES(sha);
-    const removed = [];
-    const result = await casDoc(env, key, emptyDoc(sha, null), current => {
-      if (!current || current.archiveSha256 !== sha) return null;
-      let changed = false;
-      for (const code of codes) {
-        const item = current.candidates[code];
-        if (!item || item.state === 'verified' || item.state === 'removed' || item.state === 'admitting') continue;
-        item.state = 'removed';
-        item.removedAt = new Date().toISOString();
-        removed.push(code);
-        changed = true;
-      }
-      return changed ? current : null;
-    });
-    return {removed, document: result.value};
-  }
-
   function titleKey(name, year) {
     const norm = typeof LetterboxdMatch !== 'undefined' && LetterboxdMatch.normTitle ? LetterboxdMatch.normTitle(name) : String(name || '').normalize('NFKC').toLowerCase().trim();
     return norm + '|' + (year ?? '');
@@ -693,5 +674,5 @@ const LetterboxdRatedCandidates = (() => {
     return {present: true, pending: counts.pending, admitting: counts.admitting, verified: counts.verified, needsReview: counts.needs_review, enrichmentPending, stopped: view.stopped, next: view.next, phase: view.phase, retryable, requeued};
   }
 
-  return {CANDIDATES, ADMISSIONS, registerCandidates, rollbackCandidates, retryCandidates, identityStep, readDoc, statusOf, PAGE_BYTES, DETAIL_BYTES, follow, movieDetail};
+  return {CANDIDATES, ADMISSIONS, registerCandidates, retryCandidates, identityStep, readDoc, statusOf, PAGE_BYTES, DETAIL_BYTES, follow, movieDetail};
 })();

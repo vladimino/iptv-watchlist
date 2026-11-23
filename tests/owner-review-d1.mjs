@@ -310,7 +310,7 @@ async function activated(){
  // ADR 0162: the published EPG is served only at d1 / open, so every scene publishes through the D1 publisher.
  for(const epgMode of ['d1'])for(const reviewMode of ['d1']){
   const {db,tracked,puts}=await scene(epgMode,reviewMode);
-  const env={DB:db,BUCKET:tracked,FILM_PERSON_DB_OPTIONAL:'standin'};
+  const env={DB:db,BUCKET:tracked,FILM_PERSON_DB_OPTIONAL:'standin',EPG_CHECKPOINT_DB_OPTIONAL:'standin'};
   const response=await worker.fetch(new Request('http://127.0.0.1/api/programme'),env,ctx);
   const body=await response.json();
   assert.equal(response.status,200,epgMode+'/'+reviewMode+' '+JSON.stringify(body));
@@ -330,7 +330,7 @@ async function activated(){
   const {db,bucket,tracked,puts}=await scene(epgMode,'d1');
   if(breakIt==='drop')db.sql('DROP TABLE owner_review_entry');
   else db.sql("UPDATE owner_review_authority SET mode='r2' WHERE id=1");
-  const env={DB:db,BUCKET:tracked,FILM_PERSON_DB_OPTIONAL:'standin'};
+  const env={DB:db,BUCKET:tracked,FILM_PERSON_DB_OPTIONAL:'standin',EPG_CHECKPOINT_DB_OPTIONAL:'standin'};
   const response=await worker.fetch(new Request('http://127.0.0.1/api/programme'),env,ctx);
   const body=await response.json();
   assert.equal(response.status,503);
@@ -352,7 +352,7 @@ async function activated(){
   raced.db.sql('UPDATE owner_review_entry SET generation=generation+1');
   raced.db.sql("UPDATE owner_review_entry SET payload_json='"+next+"' WHERE kind='film' AND source_key='heat'");
  }});
- const env={DB:wrapped,BUCKET:raced.tracked,FILM_PERSON_DB_OPTIONAL:'standin'};
+ const env={DB:wrapped,BUCKET:raced.tracked,FILM_PERSON_DB_OPTIONAL:'standin',EPG_CHECKPOINT_DB_OPTIONAL:'standin'};
  const response=await worker.fetch(new Request('http://127.0.0.1/api/programme'),env,ctx);
  const body=await response.json();
  assert.equal(response.status,200,JSON.stringify(body));

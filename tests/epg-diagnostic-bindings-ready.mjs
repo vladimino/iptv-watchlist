@@ -9,9 +9,9 @@ const config=JSON.parse(raw.replace(/^\s*\/\/.*$/gm,''));
 assert.doesNotMatch(raw,/EPG_DIAGNOSTIC|EpgDiagnosticWorkflow|iptv-epg-diagnostic|38033d5e-9460-4d24-95d1-ff4a0af56b20/,'wrangler.jsonc names no diagnostic resource');
 assert.deepEqual(config.d1_databases.map(item=>item.binding),['DB'],'only the production D1 binding');
 assert.deepEqual(config.r2_buckets.map(item=>item.binding),['BUCKET'],'only the production R2 binding');
-assert.deepEqual(config.workflows.map(item=>item.binding),['DISCOVERY_WORKFLOW','RATINGS_WORKFLOW','EPG_WORKFLOW','PRODUCER_WORKFLOW'],'production Workflows unchanged');
+assert.deepEqual(config.workflows.map(item=>item.binding),['DISCOVERY_WORKFLOW','RATINGS_WORKFLOW','EPG_WORKFLOW','PRODUCER_WORKFLOW','LETTERBOXD_WORKFLOW','PREDICTION_START_WORKFLOW'],'production Workflows are the known set (ADR 0193 adds PREDICTION_START_WORKFLOW, ADR 0186 adds LETTERBOXD_WORKFLOW)');
 assert.equal(config.d1_databases[0].database_id,'3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb','production D1 id unchanged');
-assert.deepEqual(config.triggers.crons,['0 * * * *','1-59/2 * * * *','24 3 * * *'],'hourly cron unchanged, plus the AIR-534 Discovery-only fast cron (ADR 0174) and the AIR-543 daily poster cron (ADR 0179)');
+assert.deepEqual(config.triggers.crons,['0 * * * *','1-59/2 * * * *','24 3 * * *','30 * * * *'],'hourly cron unchanged, plus the AIR-534 Discovery-only fast cron (ADR 0174), the AIR-543 daily poster cron (ADR 0179) and the AIR-571 Letterboxd Sync cron (ADR 0186)');
 assert.equal(config.keep_vars,true,'keep_vars unchanged');
 const worker=fs.readFileSync('src/worker.js','utf8'),build=fs.readFileSync('build.mjs','utf8');
 assert.doesNotMatch(worker,/api\/epg\/diagnostic|EpgDiagnosticRun\.route/,'the Worker does not route the diagnostic API');
@@ -20,7 +20,7 @@ assert.doesNotMatch(build,/export class EpgDiagnosticWorkflow/,'the bundle entry
 for(const gone of ['src/epg-diagnostic.js','src/epg-diagnostic-run.js','src/epg-replay.js','scripts/epg-diagnostic-provision.mjs','diagnostic-migrations'])assert.equal(fs.existsSync(gone),false,gone+' is retired and must not return');
 assert.doesNotMatch(build,/epg-diagnostic|epg-replay|runEpgDiagnosticWorkflow/,'build.mjs concatenates and exports no canary module');
 const entry=build.slice(build.indexOf("writeAtomic('dist/server/workflow-entry.js'"));
-assert.deepEqual([...entry.matchAll(/export class (\w+)/g)].map(match=>match[1]),['DiscoveryWorkflow','RatingsWorkflow','EpgWorkflow','ProducerWorkflow'],'only the production Workflow classes are exported');
+assert.deepEqual([...entry.matchAll(/export class (\w+)/g)].map(match=>match[1]),['DiscoveryWorkflow','RatingsWorkflow','EpgWorkflow','ProducerWorkflow','LetterboxdWorkflow','PredictionStartWorkflow'],'only the production Workflow classes are exported (ADR 0193 adds PredictionStartWorkflow)');
 // (scripts/test-classification.mjs legitimately names this guard file, so it is the one exclusion.) The marker the canary used to share is now an offline-fixture-only name; no source may mention the canary identifiers again.
 const CANARY=/EpgDiagnostic|EpgReplay|epgDiagnostic|epg-diagnostic|EPG_DIAGNOSTIC|iptv-epg-diagnostic|epg_diagnostic/;
 for(const dir of ['src','scripts','public'])for(const file of fs.readdirSync(dir,{recursive:true,withFileTypes:true}))if(file.isFile()&&/\.(m?js|json|sql)$/.test(file.name)&&file.name!=='test-classification.mjs'){

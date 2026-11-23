@@ -109,8 +109,8 @@ After the page's history commit, the films on that page become facts. `Letterbox
   - `ratingHistory` gets `first_observed` or `changed` only when the effective rating changes. A later read that returns to a rating already in the list appends another `changed`. An identical reread of the value that is already current, a compare-and-swap retry of the transition just written, and a late write of an earlier read append nothing.
 - **Batch writer.** `LetterboxdFacts.applyDiaryEvidence` writes one batch per page:
   - one links compare-and-swap;
-  - one record compare-and-swap per film whose view index does not already show the same watched and rating;
-  - one view-index projection.
+  - one record compare-and-swap per film whose derived view index does not already show the same watched and rating;
+  - one `ratings_view` projection through the ratings domain.
 - **Failure.** A failed write stops the run (`stopReason: after_page:<message>_page_1`), so the next run reads page 1 again.
 - **Removal events.** They get the proved ratings first, as the film's effective rating. The removal lookup then runs only for removed films without one. A stored rating without diary proof does not spare the lookup.
 

@@ -77,7 +77,7 @@ const LetterboxdFacts=(()=>{
 // value existed before the observation, so it says nothing about when it was given). Idempotency is the transition at the
 // tail, not the observation id: `ingestedAt` is outside that id, so a later read can return to a value already in the list
 // and that return is a new `changed`. A compare-and-swap retry of the transition just written is already the tail and adds
-// nothing. A rollback still lets the same observation be applied again.
+// nothing. Historical `rolled_back` entries (written before AIR-558) are read and merged, never written.
 function recordRatingChange(record,incoming,effective){
  if(effective&&JSON.stringify(effective.value)===JSON.stringify(incoming.value))return;
  const history=Array.isArray(record.ratingHistory)?record.ratingHistory:[];
@@ -85,21 +85,6 @@ function recordRatingChange(record,incoming,effective){
  if(tail&&tail.kind!=='rolled_back'&&tail.observationId===incoming.observationId&&(tail.previous?.observationId??null)===previousId)return;
  record.ratingHistory=[...history,{kind:effective?'changed':'first_observed',recordedAt:new Date().toISOString(),value:incoming.value,observedAt:incoming.observedAt,source:incoming.source,sourceRef:incoming.sourceRef??null,observationId:incoming.observationId,previous:effective?{value:effective.value,observedAt:effective.observedAt,source:effective.source,observationId:effective.observationId}:null}];
 }
- // A rollback restores a before-image; the history keeps the rolled-back entry and records the reversal after it.
- function recordRatingRollback(record,observationId,at){
-  const history=Array.isArray(record.ratingHistory)?record.ratingHistory:[];
-  const last=history.filter(entry=>entry.observationId===observationId).at(-1);
-  if(!last||last.kind==='rolled_back')return;
-  const restored=record.rating||null;
-  record.ratingHistory=[...history,{kind:'rolled_back',recordedAt:at,observationId,at,restored:restored?{value:restored.value,observedAt:restored.observedAt,source:restored.source,observationId:restored.observationId}:null}];
- }
- // Restores the before-image of one export's observation, only while that observation is still current.
- function rollbackFact(record,fact,observationId){
-  const current=record[fact];
-  if(!current||current.observationId!==observationId)return 'superseded';
-  if(current.replaced)record[fact]={...current.replaced,replaced:null};else delete record[fact];
-  return 'restored';
- }
  // Reads during a convergence see source and target merged by the same order (contract, "Reads during a migration").
  function overlay(source,target){
   const merged=clone(target||source);
@@ -109,7 +94,7 @@ function recordRatingChange(record,incoming,effective){
   return merged;
  }
  // An entry's identity within its record: the observation it is about, whether it applied or reversed it, and how many times
- // that observation was applied or reversed before (a rollback followed by a re-application is two distinct events).
+ // that observation was applied or reversed before (historical rolled_back entries are distinct events).
  function ratingHistoryIdentities(list){
   const seen=new Map();
   return (Array.isArray(list)?list:[]).map(entry=>{const key=(entry.kind==='rolled_back'?'r':'a')+'|'+entry.observationId,n=seen.get(key)||0;seen.set(key,n+1);return {id:key+'|'+n,entry};});
@@ -137,17 +122,16 @@ function recordRatingChange(record,incoming,effective){
 
  // ---- Storage. While the ratings marker is r2, every write is an R2 compare-and-swap.
  // Once it is d1 and cutover open, the same keys are D1 documents and do not fall back (ADR 0084).
- // The stored object as it is, for the compare-and-swap writers: they must read and write the raw object whatever the view index read selector says.
+ // The stored object as it is, for the compare-and-swap writers (the view index is not one of them: AIR-558).
  async function readRawJSON(env,key){
   if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {value:owned.value,etag:owned.etag};}
   const object=await env.BUCKET.get(key);let value=object?await object.json():null;
-  if(key===FACTS_KEYS.viewIndex&&typeof RatingsD1!=='undefined')value=await RatingsD1.overlayView(env,value);
   return {value,etag:object?.etag??null};
  }
- // The reader of the scans and the Diary projection. ADR 0183: with the D1 source selected the view index is the ratings_view aliases only (this path has only ever
+ // The reader of the scans and the Diary projection. ADR 0183 / AIR-558: the view index is the ratings_view aliases only (this path has only ever
  // applied the ratings overlay, never the prediction one) and the raw object is not read; the version is the D1 token. Writers do not use this: see casJSON.
  async function readJSON(env,key){
-  if(key===FACTS_KEYS.viewIndex&&typeof viewIndexIsD1==='function'&&viewIndexIsD1(env))return {value:await derivedViewIndex(env,{ratingsOnly:true}),etag:await viewIndexD1Version(env)};
+  if(key===FACTS_KEYS.viewIndex)return {value:await derivedViewIndex(env,{ratingsOnly:true}),etag:await viewIndexD1Version(env)};
   return readRawJSON(env,key);
  }
  async function casJSON(env,key,empty,apply){
@@ -155,6 +139,7 @@ function recordRatingChange(record,incoming,effective){
    try{const owned=await RatingsD1.casOwned(env,key,empty,apply);if(owned.owned)return owned.result;}
    catch(error){if(error.code==='write_contention')throw new FactsError('write_contention','Stored JSON changed during write: '+key);throw error;}
   }
+  if(key===FACTS_KEYS.viewIndex)throw new FactsError('view_index_not_owned','The view index has no raw store; it is written only through the D1 ratings domain');
   for(let attempt=0;attempt<5;attempt++){
    const {value,etag}=await readRawJSON(env,key),current=value??clone(empty),next=await apply(clone(current),etag);
    if(next==null)return {value:current,changed:false};
@@ -233,20 +218,9 @@ function recordRatingChange(record,incoming,effective){
  // The view index is a projection of records under every id of the film; it is never the source of a fact.
  async function projectRecords(env,records){
   if(typeof RatingsD1!=='undefined'){const projected=await RatingsD1.projectView(env,records);if(projected.owned)return {changed:projected.changed};}
-  if(!records.length)return {changed:0};
-  let changed=0;
-  await casJSON(env,FACTS_KEYS.viewIndex,{},index=>{
-   changed=0;
-   for(const record of records)for(const id of projectionIds(record.links)){
-    const item={...(index[id]||{})};
-    if(record.rating)item.actualRating=record.rating.value;
-    if(record.watched)item.watched=record.watched.value;
-    if(record.watchlist)item.watchlist=record.watchlist.value;
-    if(JSON.stringify(item)!==JSON.stringify(index[id]||{})){index[id]=item;changed++;}
-   }
-   return changed?index:null;
-  });
-  return {changed};
+  // AIR-558: the view index has no raw object any more, so a ratings domain that does not own the projection (marker not d1 and open) projects nothing. The
+  // facts stay the source of truth and the callers keep their gates (a held domain is reported as blocked); the former raw projection was invisible there.
+  return {changed:0};
  }
 
  // Stores a complete scan summary only if it is newer than the stored one. Returns the summary it replaced.
@@ -669,8 +643,7 @@ function recordRatingChange(record,incoming,effective){
   });
  }
 
- // ADR 0184: the canonical Letterboxd claim of the lids of a chunk whose Ratings link is durable AND COMMITTED (called after the chunk receipt) and whose movie id is the chunk's. An INFERRED link is never offered: `unlinkBaselineFilm` and
- // `unlinkInferred` can withdraw it later, and a trusted canonical claim must not outlive the evidence it was proven from, so only verified entries (which those routes refuse to unlink) can gain a claim. Never throws into the import. Inactive until the
+ // ADR 0184: the canonical Letterboxd claim of the lids of a chunk whose Ratings link is durable AND COMMITTED (called after the chunk receipt) and whose movie id is the chunk's. Only verified entries can gain a claim: an INFERRED link is never offered, because a trusted canonical claim must not outlive the evidence it was proven from. Never throws into the import. Inactive until the
  // claim module's activation line is turned on. A replay of a committed chunk offers it again: that is the recovery of an interrupted claim (the import is owner-driven, so a replay is its ordinary retry).
  async function ensureChunkClaims(env,items,films){
   if(typeof CanonicalLetterboxdClaim==='undefined')return;
@@ -745,108 +718,7 @@ function recordRatingChange(record,incoming,effective){
   return {...next,replay:false};
  }
 
- // Removes the Letterboxd link an inferred import made, for each listed film, and only while the record still carries that import's
- // inferred identity. The alias goes first and the record second, so an interrupted run converges when it is repeated. It never
- // touches the TMDB alias, a record's facts, or a link an earlier or verified writer made.
- async function unlinkInferred(env,sha,entries){
-  let unlinked=0;
-  for(const {lid,factKey} of entries){
-   const ours=record=>record?.identity?.kind==='inferred'&&record.identity.sourceRef===sha&&record.links?.letterboxd===lid;
-   const {value:record}=await readJSON(env,recordKey(factKey));
-   if(!ours(record))continue;
-   await casJSON(env,FACTS_KEYS.links,{},index=>{const alias='letterboxd:'+lid;if(index[alias]!==factKey)return null;delete index[alias];return index;});
-   await casJSON(env,recordKey(factKey),null,current=>{if(!ours(current))return null;delete current.identity;current.links.letterboxd=null;return current;});
-   unlinked++;
-  }
-  return {unlinked};
- }
-
- // Corrects one inferred film of a committed chunk without touching the rest of it: its facts are reversed under the rollback rules
- // (a later observation is kept as superseded), then the Letterboxd link and the `identity` that import made are removed. The film
- // can then be linked again by a later export or an owner step. Repeating it is safe; a verified or conflicting entry is refused.
- async function unlinkBaselineFilm(env,body){
-  const {origin,chunk}=validateBaselineRequest(body,{needItems:false}),sha=origin.archiveSha256;
-  const lid=String(body?.lid??'');if(!LID.test(lid))throw new FactsError('invalid_request','Invalid Letterboxd id');
-  const {value:receipt}=await readJSON(env,importKey(sha,chunk,'receipt'));
-  if(!receipt)throw new FactsError('not_committed','This chunk has no receipt');
-  const entry=receipt.entries.find(item=>item.lid===lid&&!item.conflict&&item.identity==='inferred');
-  if(!entry)throw new FactsError('not_inferred','This film is not an inferred import of this chunk');
-  const {counts}=await reverseFacts(env,entry.observations.map(({fact,observationId})=>({factKey:entry.factKey,fact,observationId})),receipt.viewBefore||{});
-  const {unlinked}=await unlinkInferred(env,sha,[{lid,factKey:entry.factKey}]);
-  return {schemaVersion:1,archiveSha256:sha,chunk,lid,facts:counts,unlinked:unlinked>0};
- }
-
- // Reverses the given fact observations of one or more films (shared by a chunk rollback and a per-film unlink): a fact whose
- // observation is still current returns to its before-image, one a later writer replaced is superseded and kept.
- async function reverseFacts(env,facts,viewBefore){
-  const counts={restored:0,superseded:0},records=new Map(),removed=[];
-  for(const factKey of [...new Set(facts.map(item=>item.factKey))]){
-   const items=facts.filter(item=>item.factKey===factKey),outcome=new Map();
-   const {value:record}=await casJSON(env,recordKey(factKey),null,current=>{
-    if(!current)return null;
-    outcome.clear();let changed=false;
-    for(const {fact,observationId} of items){
-     const now=current[fact];
-     if(now?.observationId===observationId){
-      // Roll back now, and leave a marker so a repeated attempt recognizes this fact as already rolled back.
-      rollbackFact(current,fact,observationId);changed=true;
-      if(fact==='rating')recordRatingRollback(current,observationId,new Date().toISOString());
-      if(current[fact]){current[fact].rolledBackFrom=observationId;outcome.set(fact,'restored');}
-      else{current.rolledBack={...(current.rolledBack||{}),[fact]:observationId};outcome.set(fact,'removed');}
-     }
-     else if(now&&now.rolledBackFrom===observationId)outcome.set(fact,'restored');
-     else if(!now&&current.rolledBack?.[fact]===observationId)outcome.set(fact,'removed');
-     else outcome.set(fact,'superseded');
-    }
-    return changed?current:null;
-   });
-   if(!record)continue;
-   records.set(factKey,record);
-   for(const [fact,result] of outcome){if(result==='superseded')counts.superseded++;else{counts.restored++;if(result==='removed')removed.push({factKey,fact,links:record.links});}}
-  }
-  await projectRecords(env,[...records.values()]);
-  if(removed.length)await casJSON(env,FACTS_KEYS.viewIndex,{},view=>{
-   let changed=false;
-   for(const {factKey,fact,links} of removed){
-    if(records.get(factKey)?.[fact])continue;
-    for(const id of projectionIds(links)){
-     const field=VIEW_FIELDS[fact],prior=viewBefore?.[id]||{},item={...(view[id]||{})};
-     if(Object.hasOwn(prior,field))item[field]=prior[field];else delete item[field];
-     if(JSON.stringify(item)!==JSON.stringify(view[id]||{})){view[id]=item;changed=true;}
-    }
-   }
-   return changed?view:null;
-  });
-  return {counts,records};
- }
-
-
- // Rollback of one committed chunk, crash-recoverable: a create-only rollback intent first fixes the plan, per fact, from the
- // receipt (the export's observation and the view fields it projected). Each step then converges to that plan and is safe to
- // repeat: a fact whose export observation is still current is restored to its before-image (or removed when the import created
- // it); one already restored by an earlier attempt counts as restored; one a later writer replaced is superseded and kept.
- // View fields of a removed fact return to the commit's before-image unless the record holds that fact again.
- async function rollbackBaselineChunk(env,body){
-  const {origin,chunk}=validateBaselineRequest(body,{needItems:false}),sha=origin.archiveSha256;
-  const {value:done}=await readJSON(env,importKey(sha,chunk,'rollback'));if(done)return {...done,replay:true};
-  const {value:receipt}=await readJSON(env,importKey(sha,chunk,'receipt'));
-  if(!receipt)throw new FactsError('not_committed','This chunk has no receipt');
-  let plan=null;
-  await casJSON(env,importKey(sha,chunk,'rollback-intent'),null,current=>{
-   if(current){plan=current;return null;}
-   plan={schemaVersion:1,archiveSha256:sha,chunk,openedAt:new Date().toISOString(),viewBefore:receipt.viewBefore||{},
-    facts:receipt.entries.filter(entry=>!entry.conflict).flatMap(entry=>entry.observations.map(({fact,observationId})=>({factKey:entry.factKey,fact,observationId}))),
-    inferred:receipt.entries.filter(entry=>!entry.conflict&&entry.identity==='inferred').map(entry=>({lid:entry.lid,factKey:entry.factKey}))};
-   return plan;
-  });
-  const {counts}=await reverseFacts(env,plan.facts,plan.viewBefore);
-  await unlinkInferred(env,sha,plan.inferred||[]);
-  const result={schemaVersion:1,archiveSha256:sha,chunk,rolledBackAt:new Date().toISOString(),facts:counts};
-  await casJSON(env,importKey(sha,chunk,'rollback'),null,current=>current?null:result);
-  return {...result,replay:false};
- }
-
- // Owner-only route (the whole Worker is behind Cloudflare Access); every production commit or rollback is a separate owner-approved operation.
+ // Owner-only route (the whole Worker is behind Cloudflare Access); every production commit is a separate owner-approved operation.
  async function handleBaselineRequest(request,env,pathname){
   const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
   if(request.method!=='POST')return json({error:'Method not allowed'},405);
@@ -856,13 +728,11 @@ function recordRatingChange(record,incoming,effective){
   try{
    if(action==='validate')return json(await previewBaselineChunk(env,body));
    if(action==='commit')return json(await commitBaselineChunk(env,body));
-   if(action==='rollback')return json(await rollbackBaselineChunk(env,body));
-   if(action==='unlink')return json(await unlinkBaselineFilm(env,body));
    return json({error:'Not found'},404);
   }catch(error){
    if(error instanceof FactsError){const status={invalid_request:400,invalid_observation:400,invalid_identity:400,chunk_conflict:409,not_committed:409,not_inferred:409}[error.code]||500;return json({error:error.message,code:error.code},status);}
    throw error;
   }
  }
- return {FACTS_KEYS,DIARY_IDENTITY_KEY,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,DIARY_IDENTITY_KEY,reprojectDiaryFilm,diaryLinks,tmdbForLids,bridgeDiaryFilm,admitDiaryFilm,readAdmissionReceipts,readDiaryIdentity,updateDiaryIdentity,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();

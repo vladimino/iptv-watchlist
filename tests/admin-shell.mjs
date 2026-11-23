@@ -3,6 +3,7 @@
 // view, pagination, and the three distinct states the owner must tell apart: empty, error, stale snapshot.
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {bundleAdmin} from '../src/admin/bundle.js';
@@ -77,7 +78,7 @@ const limboHtml = fs.readFileSync('public/admin-limbo.html', 'utf8');
 const letterboxdHtml = fs.readFileSync('public/admin-letterboxd.html', 'utf8');
 const postersHtml = fs.readFileSync('public/admin-posters.html', 'utf8');
 const identityHtml = fs.readFileSync('public/admin-identity.html', 'utf8');
-const expectedNav = [['/admin', 'Каталог'], ['/admin/health', 'Здоровье данных'], ['/admin/letterboxd', 'Архив Letterboxd'], ['/admin/limb', 'Лимб'], ['/admin/identity', 'Идентификация'], ['/admin/posters', 'Постеры']];
+const expectedNav = [['/admin', 'Каталог'], ['/admin/health', 'Здоровье данных'], ['/admin/letterboxd', 'Архив Letterboxd'], ['/admin/limb', 'Лимб'], ['/admin/identity', 'Идентификация'], ['/admin/posters', 'Постеры'], ['/admin/channels', 'Каналы']];
 for (const [name, source] of [['admin', html], ['letterboxd', letterboxdHtml], ['limb', limboHtml], ['identity', identityHtml], ['posters', postersHtml]]) {
   const nav = source.match(/<nav class="admin-views"[^>]*>[\s\S]*?<\/nav>/);
   assert.ok(nav, name);
@@ -132,6 +133,7 @@ vm.runInContext(fs.readFileSync('src/admin/read.js', 'utf8'), workerContext);
 vm.runInContext(scoped('src/domain/data-health.js', 'DataHealth'), workerContext);
 vm.runInContext(fs.readFileSync('src/admin/health.js', 'utf8'), workerContext);
 vm.runInContext(worker.replace('export default', 'globalThis.worker='), workerContext);
+installViewIndexFixture(workerContext);
 
 workerContext.ASSETS['/admin'] = {body: html, type: 'text/html'};
 workerContext.ASSETS['/admin/health'] = workerContext.ASSETS['/admin'];

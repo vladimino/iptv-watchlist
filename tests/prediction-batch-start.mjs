@@ -5,8 +5,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
-import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
+import {flowWorld, sql,labelStarts} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const dump=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const sha=async text=>[...new Uint8Array(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,'0')).join('');
@@ -510,7 +511,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const pad='x'.repeat(7000);
  for(let n=1;n<=5;n++)sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+pad+"') WHERE film_id='tmdb_"+n+"'");
  await reconcile(w);
- const r=await batch(w,{manifestSize:5});assert.equal(r.status,200);
+ const r=await batch(w,{manifestSize:5,taskId:'task00'});assert.equal(r.status,200);
  const text=JSON.stringify(r.data);assert.ok(text.length>=40000,'persisted start is a realistic ~42 KiB payload, got '+text.length);
  const sliceAt=Math.min(text.length-1,24000);
  const fromText=w.ctx.parseBatchStartToolText(text.slice(0,sliceAt));
@@ -518,7 +519,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const stored=w.records.get('enrichment/batch-manifest/'+r.data.runId+'.json');
  assert.ok(stored);assert.ok(JSON.stringify(stored).length>=40000);assert.equal(stored.manifestHash,r.data.manifestHash);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- const call=async(args)=>{w.ctx.__a={name:'prediction_batch_manifest',args};w.ctx.__env=w.env;const res=(await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;assert.equal(res.isError,undefined,JSON.stringify(res).slice(0,200));assert.equal(res.structuredContent,undefined);const body=JSON.parse(res.content[0].text);assert.ok(res.content[0].text.length<24000,'part stays under the observed truncation cut, '+body.kind+'='+res.content[0].text.length);return body;};
+ const call=async(args)=>{w.ctx.__a={name:'prediction_batch_manifest',args:withTaskId('prediction_batch_manifest',args)};w.ctx.__env=w.env;const res=(await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;assert.equal(res.isError,undefined,JSON.stringify(res).slice(0,200));assert.equal(res.structuredContent,undefined);const body=JSON.parse(res.content[0].text);assert.ok(res.content[0].text.length<24000,'part stays under the observed truncation cut, '+body.kind+'='+res.content[0].text.length);return body;};
  const envelope=await call({runId:r.data.runId});assert.equal(envelope.kind,'envelope');assert.equal(w.ctx.usableBatchManifest(envelope),false);
  const profile=await call({runId:r.data.runId,part:'profile'});
  const contract=await call({runId:r.data.runId,part:'contract'});
@@ -551,7 +552,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
 // commits those five without A's runId and selects five new films. Ten unique predictions.
 {
  const w=await ready(12);await reconcile(w);
- const a=await batch(w,{manifestSize:5});assert.equal(a.status,200);
+ const a=await batch(w,{manifestSize:5,taskId:'task00'});assert.equal(a.status,200);
  const items=a.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
  w.ctx.__env=w.env;w.ctx.__items=items;
@@ -571,7 +572,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const conflictPred={...w.prediction,predictedRating:w.prediction.predictedRating===3.5?4:3.5};
  const conflict=await w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items:[{...left[0],prediction:conflictPred}]});
  assert.equal(conflict.status,409);assert.equal(conflict.data.code,'hold_conflict');
- w.ctx.__a={name:'prediction_batch_manifest',args:{runId:a.data.runId,part:'hold'}};
+ w.ctx.__a={name:'prediction_batch_manifest',args:withTaskId('prediction_batch_manifest',{runId:a.data.runId,part:'hold'})};
  const holdPart=JSON.parse((await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result.content[0].text);
  assert.equal(holdPart.kind,'hold');assert.equal(holdPart.filmIds.length,5);
  const lost=await w.api('complete',{runId:a.data.runId,reason:'external_termination'});
@@ -639,7 +640,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const w=await ready(12);
  setCold(w,['tmdb_6','tmdb_7','tmdb_8','tmdb_9','tmdb_10','tmdb_11','tmdb_12']);
  await reconcile(w);
- const a=await batch(w,{manifestSize:5});assert.equal(a.status,200);
+ const a=await batch(w,{manifestSize:5,taskId:'task00'});assert.equal(a.status,200);
  assert.ok(a.data.films.every(f=>f.lane==='hot'));
  const items=a.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
  assert.equal((await w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items})).status,200);

@@ -141,9 +141,9 @@ async function readInstalled(db){
 // The intent read joins its cohort, so the one read batch touches all three 0024 tables: a missing table of any of them fails the
 // statement and is then classified by readInstalled (none: dormant; some: recovery_schema_partial). An intent counts only while its
 // cohort is active too.
-const OVERLAY_SQL="SELECT i.film_id AS filmId, i.mode AS mode, i.prediction_token AS predictionToken, i.fingerprint_token AS fingerprintToken FROM prediction_recovery_intent i JOIN prediction_recovery_cohort c ON c.cohort_id=i.cohort_id AND c.state='active' WHERE i.state='active' AND i.expires_at>? AND EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id=1 AND mode='d1') LIMIT ?";
-const validOverlayRow=row=>typeof row?.filmId==='string'&&FILM_ID.test(row.filmId)&&RECOVERY_MODES.includes(row.mode)&&typeof row.predictionToken==='string'&&row.predictionToken.length>=3&&(row.fingerprintToken==null||typeof row.fingerprintToken==='string'&&row.fingerprintToken.length>=2);
-const EMPTY_OVERLAY=Object.freeze({ready:false,revision:null,size:0,deniesPrediction:()=>false,deniesFingerprint:()=>false,modeOf:()=>null});
+const OVERLAY_SQL="SELECT i.film_id AS filmId, i.mode AS mode, i.prediction_token AS predictionToken, i.fingerprint_token AS fingerprintToken, c.created_at AS confirmedAt FROM prediction_recovery_intent i JOIN prediction_recovery_cohort c ON c.cohort_id=i.cohort_id AND c.state='active' WHERE i.state='active' AND i.expires_at>? AND EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id=1 AND mode='d1') LIMIT ?";
+const validOverlayRow=row=>typeof row?.filmId==='string'&&FILM_ID.test(row.filmId)&&RECOVERY_MODES.includes(row.mode)&&typeof row.predictionToken==='string'&&row.predictionToken.length>=3&&(row.fingerprintToken==null||typeof row.fingerprintToken==='string'&&row.fingerprintToken.length>=2)&&(row.confirmedAt==null||typeof row.confirmedAt==='string');
+const EMPTY_OVERLAY=Object.freeze({ready:false,revision:null,size:0,deniesPrediction:()=>false,deniesFingerprint:()=>false,modeOf:()=>null,activeIds:()=>[],confirmedAtOf:()=>null});
 export const emptyOverlay=()=>EMPTY_OVERLAY;
 // The active, unexpired intents and the revision, in one read. Only while the prediction domain marker is d1: the tokens name D1 pointers.
 // `deniesPrediction(filmId, prediction)` is true only for that film's exact denied version; an id-less call never matches.
@@ -169,12 +169,33 @@ export async function readOverlay(env,nowMs=Date.now()){
  }
  if(revision==null||!Number.isInteger(Number(revision)))throw failed('recovery_unavailable');
  if(rows.length>RECOVERY_LIMITS.maxActive||!rows.every(validOverlayRow))throw failed('recovery_unavailable');
- const predictions=new Map(),fingerprints=new Map(),modes=new Map();
- for(const row of rows){predictions.set(row.filmId,row.predictionToken);modes.set(row.filmId,row.mode);if(row.fingerprintToken)fingerprints.set(row.filmId,row.fingerprintToken);}
+ const predictions=new Map(),fingerprints=new Map(),modes=new Map(),confirmed=new Map();
+ for(const row of rows){predictions.set(row.filmId,row.predictionToken);modes.set(row.filmId,row.mode);confirmed.set(row.filmId,row.confirmedAt??null);if(row.fingerprintToken)fingerprints.set(row.filmId,row.fingerprintToken);}
  return Object.freeze({ready:true,revision:Number(revision),size:rows.length,
   deniesPrediction:(filmId,prediction)=>typeof filmId==='string'&&predictions.has(filmId)&&predictions.get(filmId)===predictionToken(prediction),
   deniesFingerprint:(filmId,fingerprint)=>typeof filmId==='string'&&fingerprints.has(filmId)&&fingerprints.get(filmId)===fingerprintToken(fingerprint),
-  modeOf:filmId=>modes.get(filmId)??null});
+  modeOf:filmId=>modes.get(filmId)??null,
+  // The film ids with an active, unexpired intent, and the time the owner confirmed the cohort of each (the recovery slots of a batch order by it).
+  activeIds:()=>[...modes.keys()],confirmedAtOf:filmId=>confirmed.get(filmId)??null});
+}
+
+// ADR 0201. The stored ids of every film an owner cohort ever named (active, settled or cancelled): such a film keeps its stored key in the queue
+// after the intent ends, so a satisfied or expired intent never turns it back into a second `tmdb_<n>` film. Bounded and explicit: over the cap, or a
+// store that cannot be read, throws; an absent migration (the dormant store) is none.
+export const RECOVERED_IDS_LIMIT=1000;
+export async function readRecoveredIds(env){
+ const db=database(env);
+ if(!db||typeof db.prepare!=='function')return [];
+ let rows;
+ try{rows=(await db.prepare('SELECT DISTINCT film_id AS filmId FROM prediction_recovery_intent ORDER BY film_id LIMIT ?').bind(RECOVERED_IDS_LIMIT+1).all()).results||[];}
+ catch(error){
+  let installed;
+  try{installed=await readInstalled(db);}catch(inner){throw inner?.code?inner:failed('recovery_unavailable',inner);}
+  if(!installed)return [];
+  throw failed('recovery_unavailable',error);
+ }
+ if(rows.length>RECOVERED_IDS_LIMIT||!rows.every(row=>typeof row?.filmId==='string'&&FILM_ID.test(row.filmId)))throw failed('recovery_unavailable');
+ return rows.map(row=>row.filmId);
 }
 
 // Read only. For the requested ids: the D1 pointer and fingerprint tokens, each film's active intent and the recovery revision.

@@ -4,6 +4,7 @@
 // (original header) AIR-323 / ADR 0083: the Discovery Workflow is inert unless DISCOVERY_EXECUTOR=workflow.
 // Absent mode keeps one explicit chunk. Workflow mode does not run that chunk in the request, renews a spent
 // series without the hourly gate, and fences a second writer. No production binding is read or written.
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -30,6 +31,7 @@ vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/continuation.js','src/discovery-workflow.js','src/worker.js']){
  vm.runInContext(fs.readFileSync(file,'utf8').replace(/export \{[^}]+\};/g,'').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
 }
+installViewIndexFixture(context);
 const worker=context.worker,call=code=>vm.runInContext(code,context),realAdvance=context.advanceDiscovery;
 const execution={waitUntil(){}};
 const origin='https://iptv.example',headers={'Content-Type':'application/json'};

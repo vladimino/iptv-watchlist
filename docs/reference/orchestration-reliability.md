@@ -148,9 +148,9 @@ The diagnostic fields are the reason, the owed date, the lease owner kind (`disc
 - **Telemetry (no Film data, SQL or payload).** The EPG busy answer and the `seal_busy` phase line carry `busyKind`, `holderKind` (`epg`, `discovery`, `projector`), `holdExpiry`, `scheduledWaitMs` (the planned retry delay, not measured contention) and `sealPhase`; `seal_certify` carries `outcome`.
 - **Mixed versions.** A Worker without this code ignores the columns, lifts the pause at the pointer and never certifies: the invariant is lost, with no data risk. The signature (pointer published, pause row `clear`, `finalized_run_id` not equal to the pointer) is in the [monitoring runbook](../runbooks/monitoring.md). Rolling forward certifies a run left uncertified by the old Worker through the repair.
 
-## EPG checkpoint ownership ([ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md), Accepted; dormant)
+## EPG checkpoint ownership ([ADR 0185](../adr/0185-epg-checkpoint-d1-authority.md) and [ADR 0199](../adr/0199-retire-the-epg-checkpoint-r2-arm.md), Accepted; D1-authoritative)
 
-**Accepted and delivered dormant.** Today the run checkpoint `sync.json` and the ingest status `watchlist-ingest.json` are unconditional R2 writes guarded by a separate step-lease read; everything above describes that current behavior. The repository (`src/epg-checkpoint-d1.js`) and the Worker's routing are delivered; once the schema is applied and the marker is separately activated, the following contract applies **only while the `epg_checkpoint_authority` marker is `d1`**; with the marker `r2` or absent nothing below applies. Schema: [D1 schema](data/d1-schema.md#epg-checkpoint-authority-schema-v30-dormant-not-applied).
+**D1-authoritative since 21 Nov 2026** (marker `d1` / `open` / generation 2; [cutover](../evidence/d1-migration/air-551-checkpoint-cutover-2026-11-21.md), [first natural run](../evidence/d1-migration/air-551-h5-natural-run-2026-11-22.md)). The run checkpoint `sync.json` and the ingest status `watchlist-ingest.json` are D1 rows; the R2 objects are a frozen image, unread and unwritten, and the R2 arm is retired for production (marker `r2`, tables absent or an unreadable state is closed, never R2; only the local stand-in `EPG_CHECKPOINT_DB_OPTIONAL` serves R2). The repository is `src/epg-checkpoint-d1.js`; the contract below applies while the `epg_checkpoint_authority` marker is `d1`, which is the only state production serves. Schema: [D1 schema](data/d1-schema.md#epg-checkpoint-authority-schema-v30-d1-authoritative).
 
 - **Fenced save.** Every checkpoint save is one D1 batch (each guard is an upsert of the singleton fence row, so a missing row can never let a stale write pass; a missing row is also a closed state): authority fence, in-batch EPG step fence (mode revision and live step lease), compare-and-swap on the single run row `(run_id, revision)`, then the body and the changed film rows. A save with no step is refused; a stage or seal-phase regression, a change of `completed_at` and a stale run, revision, generation or lease are refused and write nothing. The writer re-reads and decides; no blind retry.
 - **Stages.** `metadata`, `epg`, `seal` (`ledger`, `catalog`, `publish`, `finalize`, `queue`), `complete`; forward only within a run. `error` is a field on a stage. A new run replaces the row in one batch that also records ingest success, after its film rows were staged and read back. The run row states the watchlist (present or absent, count, aggregate digest) and a reader fails closed on any missing, extra, duplicated or reordered row; completion removes the film rows, so a completed run has no watchlist.
@@ -174,6 +174,23 @@ The diagnostic fields are the reason, the owed date, the lease owner kind (`disc
 ## Discovery intent after an EPG publication
 
 The published D1 pointer is the source of truth for whether Discovery owes work. Admission reads that pointer from `PublishedEpg.currentGeneration()` and requires the Discovery `published_programme_run_id` to match it; a missing pointer, a null pin, or an A→B lag is a bounded wait (`generation_unpublished` / `generation_handoff`) and does not reconstruct from `programme_run_id` or R2. After that match, `ensure Discovery` compares the published `programmeRunId` with the Discovery control record and, when the record does not name it and the generation has no terminal outcome, creates the intent by one CAS (run key `programmeRunId` + series 0, generation pin, Discovery authority fence). The receipt is the control record read back naming `programmeRunId` with the owner epoch. A held or `loading` marker writes nothing (`unsafe`). The EPG publication's own queue write is a fast path using the same CAS; its failure never fails or unpublishes the EPG run. The worst-case delay of a missing intent is one cron period. While Discovery is not activated, the existing generation handoff applies.
+
+## Letterboxd Sync slots
+
+Contract of the dormant executor ([ADR 0186](../adr/0186-letterboxd-sync-and-independent-watchlist-authority.md)); values live in `src/letterboxd-sync.js` `LIMITS` and `src/domain/orchestration-policy.js`.
+
+| Element | Value |
+| --- | --- |
+| Slots | 04:30, 10:30, 16:30, 22:30 Europe/Madrid; key `YYYY-MM-DDTHHMM`; a slot is eligible from its due instant to the next slot's due instant |
+| Retry budget per slot | the shared policy: transient failures count toward 5 consecutive and 12 total, cooldowns 1, 5, 15 and 60 minutes with jitter; the cap closes the slot as `interrupted` |
+| Deadline | a phase stops `deadlineMarginMs` = 5 minutes before the next slot's due instant; no retry or sleep crosses it |
+| Missed slots | `ensure` records at most 4 slots back, only those due after the mode last changed, once each, with two Events and no instance; never run late |
+| Step cap | 200 actions per phase per instance |
+| Event delivery | at most 4 pending rows per call, oldest slot first; a failed put backs off on the shared cooldowns; a pending Event never gates a scan or the next slot |
+| Late slot | health `late` when a due slot is unclaimed 15 minutes after its due instant; `stalled` when a slot is unclosed past its window |
+| Watchlist freshness | `watchlist_stale` warning above 24 hours since the last successful complete scan |
+
+Health values of the read model: `external`, `switching`, `waiting`, `healthy`, `late`, `stalled`, `failed`, `missed`, `quarantined`, `unreadable`. A Watchlist or Ratings outcome never rewrites the other's `lastSuccessAt`.
 
 ## Time rules
 

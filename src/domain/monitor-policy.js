@@ -107,6 +107,32 @@ export function evaluateRatings(model, now) {
   return {stream: 'ratings', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {mode: model.mode ?? null, health: health ?? null}};
 }
 
+// ---- Letterboxd Sync (ADR 0186): the slot read model derives health; the stream exists only while the executor is `switching` or `cloudflare` (facts are supplied by the monitor then), so a dormant
+// executor adds nothing. A slot or Watchlist problem is actionable; a pending Event backlog is actionable only when it has grown past one day of slots.
+export function evaluateLetterboxd(model, now) {
+  if (!model || model.error) return unreadable('letterboxd', 'Letterboxd Sync');
+  const issues = [];
+  const health = model.health;
+  let state = 'healthy';
+  if (health === 'waiting' || health === 'switching') state = 'waiting';
+  else if (health === 'late') { state = 'degraded'; issues.push(issue('letterboxd_slot_late', 'degraded', 'letterboxd', 'A Letterboxd slot is due and no run was started')); }
+  else if (health === 'stalled') { state = 'degraded'; issues.push(issue('letterboxd_slot_stalled', 'degraded', 'letterboxd', 'A Letterboxd slot stayed open after its window ended')); }
+  else if (health === 'missed') { state = 'degraded'; issues.push(issue('letterboxd_slot_missed', 'degraded', 'letterboxd', 'A Letterboxd slot was missed and recorded without a run')); }
+  else if (health === 'failed') { state = 'degraded'; issues.push(issue('letterboxd_slots_failed', 'degraded', 'letterboxd', 'The last Letterboxd slot failed for both sources')); }
+  else if (health === 'quarantined') { state = 'needs_owner'; issues.push(issue('letterboxd_quarantined', 'needs_owner', 'letterboxd', 'Letterboxd Sync is quarantined' + (model.quarantine?.reason ? ' (' + model.quarantine.reason + ')' : ''))); }
+  else if (health === 'unreadable') { state = 'degraded'; issues.push(issue('letterboxd_unreadable', 'degraded', 'letterboxd', 'The Letterboxd Sync read model could not be read')); }
+  if (model.sources?.watchlist?.stale) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_watchlist_stale', 'degraded', 'letterboxd', model.sources.watchlist.warning === 'watchlist_never_succeeded' ? 'No complete Watchlist scan has succeeded since the executor started' : 'No complete Watchlist scan has succeeded for 24 hours')); }
+  // Each source has its own signal: one update can fail while the other succeeds (the approved contract), and neither outcome hides or rewrites the other's confirmed success. A rate limit is "not now" and never alerts.
+  const sourceIssue = (key, label, outcome) => {
+    if (['error', 'blocked', 'interrupted', 'unavailable', 'incomplete', 'disabled'].includes(outcome)) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue(key + '_failed', 'degraded', 'letterboxd', 'The last Letterboxd slot did not update ' + label + ' (' + outcome + ')')); }
+    else if (outcome === 'rate_limited') { if (STATE_RANK[state] < STATE_RANK.delayed) state = 'delayed'; issues.push(issue(key + '_rate_limited', 'delayed', 'letterboxd', label + ' was rate limited in the last Letterboxd slot')); }
+  };
+  if (health !== 'failed') { sourceIssue('letterboxd_ratings', 'Ratings', model.sources?.ratings?.lastOutcome); sourceIssue('letterboxd_watchlist', 'the Watchlist', model.sources?.watchlist?.lastOutcome); }
+  if (Number.isInteger(model.eventsPending) && model.eventsPending >= 8) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_events_backlog', 'degraded', 'letterboxd', 'Letterboxd slot Events are waiting for delivery')); }
+  const all = worst(issues);
+  return {stream: 'letterboxd', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {mode: model.mode ?? null, health: health ?? null, slot: model.slot?.key ?? null, eventsPending: model.eventsPending ?? null}};
+}
+
 // ---- Prediction queue (AIR-556): an empty or fully deferred queue is healthy or waiting; eligible work with no confirmed progress is not.
 // `facts.stall` is the verdict of the one shared assessment in enrichment.js (`predictionStallAssessment`): running | ok | idle | waiting | unknown | no_progress.
 // Confirmed progress is a productive batch or a drained run, never a heartbeat, `already_running`, a noop wake-up or a queue recount. The monitor does
@@ -124,12 +150,12 @@ export function evaluatePredictions(facts, previous, now) {
     if (stall.state === 'no_progress') {
       state = 'degraded';
       const last = time(facts.lastProgressAt);
-      issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why));
+      issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (stall.reason === 'repeated_orphan_starts' ? ', with ' + (Number.isInteger(stall.orphanStarts) ? stall.orphanStarts : 'repeated') + ' ownerless starts since (turned-away or abandoned without a film)' : '') + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why));
     } else if (stall.state === 'waiting') state = 'waiting';
     else if (stall.state === 'unknown') state = 'delayed'; // unreadable queue split or no progress evidence yet: visible, never healthy, never an alert by itself
   }
   const all = worst(issues);
-  return {stream: 'predictions', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {pendingCount: pending, eligibleNow: eligible, stall: stall.state, idleMs: stall.idleMs ?? null, lastProgressAt: facts.lastProgressAt ?? null}};
+  return {stream: 'predictions', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {pendingCount: pending, eligibleNow: eligible, stall: stall.state, stallReason: stall.reason ?? null, idleMs: stall.idleMs ?? null, lastProgressAt: facts.lastProgressAt ?? null}};
 }
 
 // ---- Catalog posters (AIR-543, ADR 0179): the weekly poster sweep, judged by the one projection of its R2 checkpoint (CatalogPosterWeekly.project).
@@ -152,6 +178,7 @@ export function evaluateAll(facts, previous, now, helpers) {
     evaluateRatings(facts.ratings, now),
     evaluatePredictions(facts.predictions, previous?.predictions ?? null, now),
     ...(facts.catalogPosters === undefined ? [] : [evaluateCatalogPosters(facts.catalogPosters)]),
+    ...(facts.letterboxd === undefined ? [] : [evaluateLetterboxd(facts.letterboxd, now)]),
   ];
   const issues = streams.flatMap(stream => stream.issues);
   const overall = streams.reduce((state, stream) => STATE_RANK[stream.state] > STATE_RANK[state] ? stream.state : state, 'healthy');

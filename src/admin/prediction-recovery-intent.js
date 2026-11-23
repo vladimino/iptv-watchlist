@@ -39,7 +39,8 @@ function pricLane(queue,id){
 async function predictionRecoveryIntentPreview(env,request){
  const nowMs=Date.now();
  const {env:readEnv}=recoveryReadOnlyEnv(env);
- const snapshot=await loadPredictionDiagnosticSnapshot(readEnv,null);
+ const snapshot=await loadPredictionDiagnosticSnapshot(readEnv,null,{queueMembership:true});
+ const admitted=snapshot.admissionFilmsById||snapshot.filmsById;
  const [authority,rows,lease,states,identities]=await Promise.all([
   typeof PredictionD1==='undefined'?Promise.resolve({mode:'r2',writes:null,generation:null,queueGeneration:null}):PredictionD1.readPredictionAuthority(env.DB,env),
   PredictionRecoveryIntent.readFilmRows(env,request.films),
@@ -50,7 +51,8 @@ async function predictionRecoveryIntentPreview(env,request){
  let filmPerson;try{const gate=await FilmPersonAuthority.readAuthority(env);filmPerson={state:gate.state,generation:gate.generation};}catch(error){filmPerson={state:'unavailable',code:error?.code??null};}
  const queue=snapshot.queueStatus==='recorded'?snapshot.queue:null;
  const films=request.films.map((filmId,i)=>{
-  const film=snapshot.filmsById.get(filmId)||null,state=states[i],row=rows.films.get(filmId);
+  // ADR 0201: a stored Letterboxd id is admitted through the catalog film of the same trusted canonical Film (the bridge result already read), never by title or year.
+  const identity=identities[i],film=admitted.get(filmId)||(identity?.state==='ok'&&identity.lid===filmId&&identity.tmdb?admitted.get('tmdb_'+identity.tmdb):null)||null,state=states[i],row=rows.films.get(filmId);
   // The ordinary rule (no film id: an intent never colours its own preview).
   const current=state.status==='recorded'&&!!snapshot.profile&&!!state.prediction&&!!snapshot.freshness.state(state.prediction,state.fingerprint,film?.genres);
   const outcome=PredictionRecoveryIntent.classifyRecoveryFilm({filmId,profile:!!snapshot.profile,admitted:!!film,identity:identities[i],state,current,d1:row,retryExhausted:retryBudgetExhausted(queue?.retries?.[filmId]),activeIntent:row?.activeIntent??null},request.mode,nowMs);

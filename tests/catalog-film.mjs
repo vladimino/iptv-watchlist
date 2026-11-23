@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 import {webcrypto,createHash} from 'node:crypto';
 import * as Authority from '../src/discovery-authority.js';
 import {d1Standin} from './d1-standin.mjs';
@@ -83,6 +84,7 @@ vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ctx
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),ctx);
 vm.runInContext(scoped('src/prediction-d1.js','PredictionD1'),ctx);vm.runInContext(scoped('src/ratings-d1.js','RatingsD1'),ctx);
 for(const file of ['src/domain/prediction-versions.js','src/domain/film-history.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/letterboxd-facts.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/filter-presets.js',process.env.CATALOG_WORKER_FILE||'src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+installViewIndexFixture(ctx);
 const worker=ctx.worker,constant=name=>vm.runInContext(name,ctx);
 const envW={BUCKET:bucket,FILM_PERSON_DB_OPTIONAL:'standin'};
 const get=async id=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/'+id),envW,{waitUntil(){}});return {status:r.status,body:await r.json()};};

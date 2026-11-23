@@ -16,6 +16,8 @@ const SCENARIOS={
  'footer-resilience-hung-freshness':{file:'footer-resilience.mjs',marker:'Date.now()-started<3000'},
  'footer-resilience-silent-source':{file:'footer-resilience.mjs',marker:'took<3000'},
  'owner-limbo-memory-production-size':{file:'footer-memory.mjs',marker:'result.d1Queries<=400'},
+ 'prediction-batch-start-keyed-join-bound':{file:'prediction-batch-start-keyed.mjs',marker:'waited>=9000'},
+ 'prediction-task-id-join-bound':{file:'prediction-task-id.mjs',marker:'waited>=9000'},
  'prediction-batch-submit-wall':{file:'prediction-batch-submit.mjs',marker:'ms<15000'},
  'prediction-batch-validate-p95':{file:'prediction-batch-validate.mjs',marker:'p95<100'},
  'prediction-step-timing-overhead':{file:'prediction-step-timing.mjs',marker:'timed-base<0.25'},

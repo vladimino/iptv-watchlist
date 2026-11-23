@@ -66,7 +66,7 @@ export async function build({zip,plan,snapshot,output,viewIndexFile=null,now=Dat
 
 function parseArgs(argv){
  const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--plan':'plan','--snapshot':'snapshot','--output':'output','--view-index-d1':'viewIndexFile'};
- for(let i=0;i<rest.length;i++){const name=names[rest[i]];if(!name||i+1>=rest.length)throw new ImportError('Usage: letterboxd-display-exclusion.mjs build --zip <abs> --plan <abs plan dir> --snapshot <abs> --output <abs file>',2);args[name]=rest[++i];}
+ for(let i=0;i<rest.length;i++){const name=names[rest[i]];if(!name||i+1>=rest.length)throw new ImportError('Usage: letterboxd-display-exclusion.mjs build --zip <abs> --plan <abs plan dir> --snapshot <abs> --view-index-d1 <abs export file> --output <abs file>',2);args[name]=rest[++i];}
  if(mode!=='build'||!args.zip||!args.plan||!args.snapshot||!args.output)throw new ImportError('build needs --zip, --plan, --snapshot and --output',2);
  return args;
 }

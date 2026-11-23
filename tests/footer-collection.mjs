@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {installViewIndexFixture} from './view-index-fixture.mjs';
 
 const records=new Map(),writes=[];
 const env={BUCKET:{
@@ -16,6 +17,7 @@ const context=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 
+installViewIndexFixture(context);
 const pred=(id,rating,{probability=.8,confidence='high',version=7,profileHash='profile-7',extra={}}={})=>({fingerprintHash:'fp-'+id,impactFeatures:{fingerprintHash:'fp-'+id,fingerprintSchemaVersion:1,fingerprintPromptVersion:1},prediction:{predictedRating:rating,probability4Plus:probability,confidence,tasteProfileVersion:version,tasteProfileHash:profileHash,fingerprintHash:'fp-'+id,fingerprintSchemaVersion:1,predictionPromptVersion:1,...extra}});
 const film=(id,tmdbId,extra={})=>({id,tmdbId:tmdbId==null?undefined:String(tmdbId),title:id,original:id,year:2020,genres:[],actors:[],directors:[],shows:[],...extra});
 const verified=(id,tmdbId,extra={})=>({...film(id,tmdbId,extra),canonicalIdentity:'tmdb:'+tmdbId});
@@ -83,8 +85,9 @@ data=await read();
 assert.deepEqual(data.collection,{state:'unknown',total:null,watched:null,rated:null,watchlist:null},'no watchlist object: unknown');
 seed({watchlistObject:{films:'nope'}});
 data=await read();assert.equal(data.collection.state,'unknown');
-seed({});records.delete('enrichment/view-index.json');
-data=await read();assert.equal(data.collection.state,'unknown','no view index: unknown');assert.equal(data.recommendations.newUnseen.state,'unknown');
+// AIR-558: an unavailable D1-derived view index (the derivation throws) is what 'no view index' means now; the fixture seam is swapped for a throwing reader and put back.
+seed({});vm.runInContext("footerViewIndex=async()=>{throw Object.assign(new Error('view_index_d1_unavailable'),{code:'view_index_d1_unavailable'});}",context);
+data=await read();assert.equal(data.collection.state,'unknown','no view index: unknown');assert.equal(data.recommendations.newUnseen.state,'unknown');installViewIndexFixture(context);
 
 // Ratings are numbers. null, '', false and strings are not ratings, in the index and in the compiled seed, and a cleared rating never excludes a candidate.
 seed({seedRatings:{'lid-null':null,'lid-empty':'','lid-false':false,'lid-string':'4','lid-nan':NaN,'lid-ok':3.5,'lid-zero':0},index:{'lid-idx-null':{actualRating:null},'lid-idx-empty':{actualRating:''},'lid-idx-false':{actualRating:false},'lid-idx-ok':{actualRating:5}}});

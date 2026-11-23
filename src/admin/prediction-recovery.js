@@ -48,8 +48,8 @@ async function adminPredictionRecoveryRoute(request,env,url){
  try{
   snapshot=await loadPredictionDiagnosticSnapshot(readEnv,filmId);
   [lease,run]=await Promise.all([recoveryRead(readEnv,RUNNER_LEASE_KEY),recoveryRead(readEnv,RECOVERY_LATEST_RUN_KEY)]);
-  // ADR 0183: with the D1 source selected the raw index is never read, so its ETag is absent from the pin; the D1 token (both domains' generations) stands in for it.
-  if(typeof viewIndexIsD1==='function'&&viewIndexIsD1(readEnv))versions.set(RECOVERY_VIEW_INDEX_KEY,await viewIndexD1Version(readEnv));
+  // ADR 0183 / AIR-558: the index has no raw ETag; the D1 token (both domains' generations) stands in for it in the pin.
+  versions.set(RECOVERY_VIEW_INDEX_KEY,await viewIndexD1Version(readEnv));
   if(typeof PredictionD1!=='undefined'){const authority=await PredictionD1.readPredictionAuthority(readEnv.DB);versions.set('prediction-domain',authority.version+':'+authority.mode+':'+authority.generation+':'+authority.queueGeneration+':'+authority.profileGeneration);}
  }catch{return adminError('storage_unavailable',503);}
  const current=await recoveryPin(versions);

@@ -10,6 +10,7 @@ import {sqliteSync} from './sqlite-session.mjs';
 import {check} from './json-schema-lite.mjs';
 import * as PredictionD1 from '../src/prediction-d1.js';
 import {buildReport} from '../scripts/prediction-ab-report.mjs';
+import {withTaskId,labelledApi} from './prediction-task-id-lib.mjs';
 
 const file='docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2.md';
 const doc=fs.readFileSync(file,'utf8');
@@ -196,7 +197,7 @@ const validSample=x=>check(schema.$defs.sample,x),validResult=x=>check(schema.$d
 async function world(films){
  const w=await flowWorld({films});assert.equal((await w.api('queue/reconcile',{})).status,200);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- w.call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text),structured:res.structuredContent,textBytes:new TextEncoder().encode(res.content[0].text).length};};
+ w.call=async(name,args)=>{w.ctx.__a={name,args:withTaskId(name,args)};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text),structured:res.structuredContent,textBytes:new TextEncoder().encode(res.content[0].text).length};};
  return w;
 }
 const hex=h=>/^[0-9a-f]{8,64}$/.test(String(h))?String(h):sha(String(h)).slice(0,16); // the flow world's stand-in profile hash is 'p'; production hashes are hex
@@ -262,7 +263,7 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  assert.ok(startText.indexOf('"films":')<startText.indexOf('"contract":'),'films are retained if the tool text is cut from the end');
  assert.ok(start.textBytes<48*1024,'a five-film manifest text stays inside the client-visible budget');
  const runId=manifest.runId;let epoch=manifest.lease.epoch;
- assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5})).data.status,'already_running','a second start never adopts the run');
+ assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5,taskId:'task15'})).data.status,'already_running','a second start of another Task never adopts the run');
  const ids=manifest.films.map(f=>f.filmId),badParse=ids[1],badContent=ids[3];
  const itemFor=id=>id===badParse?{filmId:id,failure:{kind:'parse_error',reason:'json_unparseable'}}:id===badContent?{filmId:id,fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}}:{filmId:id,fingerprint:w.fingerprint,prediction:w.prediction};
  const generationSize=1,submitBatchSize=5,seen={};let flushes=0,preflights=0,flagged=[],buffer=[],submitItems=null;
@@ -331,4 +332,24 @@ console.log('scheduled-task-prompt-v2 ok');
  assert.equal(s10,prompt.split('manifestSize=5').join('manifestSize=10'),'S10 differs from S5 only by manifestSize');
  assert.ok(s10.includes('generationSize=1')&&s10.includes('submitBatchSize=5')&&!s10.includes('manifestSize=5'),'other batch params unchanged');
  assert.ok(s10doc.includes(sha(prompt)),'S5 rollback hash recorded');
+}
+
+
+// AIR-560 iteration 2: S7 is a one-variable manifest-size candidate, not a live Task change.
+{
+ const docS7=fs.readFileSync('docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2-s7-candidate.md','utf8');
+ const match=docS7.match(/---BEGIN PROMPT S7---\n([\s\S]*?)\n---END PROMPT S7---/);
+ assert.ok(match,'S7 executable candidate block exists');
+ const s7=match[1],hdr=docS7.match(/\*\*Text below:\*\* (\d+) characters, (\d+) UTF-8 bytes, SHA-256 `([0-9a-f]{64})`/);
+ assert.ok(hdr,'S7 candidate includes recorded integrity metadata');
+ assert.equal(prompt.split('manifestSize=5').length-1,3,'S5 has three manifest references');
+ assert.equal(s7,prompt.replaceAll('manifestSize=5','manifestSize=7'),'only the three manifest-size references differ');
+ assert.equal(s7.split('manifestSize=7').length-1,3,'S7 candidate updates all three occurrences');
+ assert.ok(!s7.includes('manifestSize=5'),'S7 contains no stale S5 manifest value');
+ assert.equal(s7.length,Number(hdr[1]),'S7 character length');
+ assert.equal(Buffer.byteLength(s7,'utf8'),Number(hdr[2]),'S7 UTF-8 byte length');
+ assert.equal(sha(s7),hdr[3],'S7 candidate SHA-256');
+ assert.equal(sha(s7),'e91956a14b23a0fff1eec404b11e6f5f1fbcc3bf897f81c3f5293d381def6bcd','reviewed AIR-560 S7 candidate hash');
+ for(const unchanged of ['generationSize=1','submitBatchSize=5','3б. RESEARCH QUALITY GATE','3в. RESEARCH AUDIT','3г. SOURCE SELECTION GATE','6а. EVIDENCE-AWARE SCORING','prediction_batch_hold({runId,epoch,items})'])assert.ok(s7.includes(unchanged),'S7 retains contract: '+unchanged);
+ assert.ok(docS7.includes(sha(prompt)),'original S5 SHA-256 recorded for rollback');
 }
