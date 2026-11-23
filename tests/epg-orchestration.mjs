@@ -818,7 +818,8 @@ for(const stage of ['epg','seal']){
  const worker=fs.readFileSync('src/worker.js','utf8');
  const handler=worker.slice(worker.indexOf('async scheduled('),worker.indexOf('async fetch('));
  assert.match(handler,/Promise\.allSettled\(\[/);
- for(const name of ['RatingsOrchestration.ensure','EpgOrchestration.ensure','reconcileDiscoveryWorkflow','Monitor.run'])assert.ok(handler.includes(name),name+' is in the tick');
+ for(const name of ['EpgOrchestration.ensure','reconcileDiscoveryWorkflow','Monitor.run'])assert.ok(handler.includes(name),name+' is in the tick');
+ assert.doesNotMatch(handler,/RatingsOrchestration/,'AIR-580: the legacy Ratings executor is not in the tick');
  assert.doesNotMatch(handler,/runD1EnrichmentProjection/,'the enrichment projector is not in the tick');
  const h=cloudflare();
  h.env.EPG_WORKFLOW.create=async()=>{throw new Error('platform down');};

@@ -129,14 +129,11 @@ sequenceDiagram
 sequenceDiagram
     participant Cron as Worker cron
     participant Discovery as Discovery reconcile
-    participant Ratings as Ratings ensure
     participant Epg as EPG ensure
     participant Monitor as Monitor
     Cron->>Discovery: Scheduled event at minute 0, first
     Note over Cron,Discovery: No enrichment projector. D1_ENRICHMENT_WRITE is ignored
     par After reconcile settles or the 45 s head start
-        Cron->>Ratings: ensure
-    and
         Cron->>Epg: ensure
     and
         Cron->>Monitor: run
@@ -145,7 +142,7 @@ sequenceDiagram
 
 The diagram above is the live tick. The historical R2-to-D1 projector sequence (ADR 0056, ADR 0103, ADR 0106) is no longer started by this cron.
 
-The cron expression is `0 * * * *` (it was `37 * * * *` until AIR-348; Madrid is a whole-hour offset, so an hourly UTC cron has a tick at Madrid 17:00 in CET and CEST, and each daily `ensure` decides due itself from the Madrid date). Since AIR-482, as a best-effort mitigation only (not an isolation guarantee, the OOM allocator is unproven), the tick starts `reconcileDiscoveryWorkflow` (which closes the hourly Discovery report) first and starts Ratings `ensure`, EPG `ensure` and the monitor together when that reconcile settles or after a 45 s head start. A reconcile or report close still pending at 45 s overlaps the other members in the same invocation and stays exposed to the same memory kill. A rejected reconcile never blocks the other members. The ratings `ensure` creates one Workflow instance per Madrid date once the daily run is due. The EPG `ensure` creates the daily Workflow instance once the run is due. The Discovery reconcile acts on a missing intent or a dead instance. Each reconcile attempt is a Workers Log `discovery_workflow_reconcile`; a green cron is not a Discovery recovery. The enrichment projector is not a member of this tick ([ADR 0155](../adr/0155-retire-enrichment-projector-cron.md)). `D1_ENRICHMENT_WRITE` does not start a run. A `projector_window` row that is already held still refuses Discovery admission until it expires; this retirement does not ignore that fence.
+The cron expression is `0 * * * *` (it was `37 * * * *` until AIR-348; Madrid is a whole-hour offset, so an hourly UTC cron has a tick at Madrid 17:00 in CET and CEST, and each daily `ensure` decides due itself from the Madrid date). Since AIR-482, as a best-effort mitigation only (not an isolation guarantee, the OOM allocator is unproven), the tick starts `reconcileDiscoveryWorkflow` (which closes the hourly Discovery report) first and starts EPG `ensure` and the monitor together when that reconcile settles or after a 45 s head start. A reconcile or report close still pending at 45 s overlaps the other members in the same invocation and stays exposed to the same memory kill. A rejected reconcile never blocks the other members. The tick does not call the legacy Ratings executor: no code creates an `iptv-ratings` Workflow instance, and the Ratings phase runs only inside the Letterboxd Sync (cron `30 * * * *`). The EPG `ensure` creates the daily Workflow instance once the run is due. The Discovery reconcile acts on a missing intent or a dead instance. Each reconcile attempt is a Workers Log `discovery_workflow_reconcile`; a green cron is not a Discovery recovery. The enrichment projector is not a member of this tick ([ADR 0155](../adr/0155-retire-enrichment-projector-cron.md)). `D1_ENRICHMENT_WRITE` does not start a run. A `projector_window` row that is already held still refuses Discovery admission until it expires; this retirement does not ignore that fence.
 
 **Discovery fast recovery tick (AIR-534, [ADR 0174](../adr/0174-discovery-only-fast-recovery-cron.md), Accepted).** The Worker has a second cron trigger, `1-59/2 * * * *` (every two minutes on odd minutes, never minute 0). It calls only `reconcileDiscoveryRecovery`: no chunk, no TMDB, no EPG, Ratings or Monitor, and no hourly report. It is a fallback for a killed, completed or errored instance, a lost or uncertain wake, an overdue recovery and a missed EPG handoff (no record, or a record of an older generation than the published one); the EPG-publication fast start and the durable `step.sleepUntil` of a live instance ([ADR 0098](../adr/0098-discovery-workflow-step-failure-recovery.md)) stay primary.
 
@@ -396,7 +393,7 @@ The timetable and enabled status belong to the external automation registry. The
 
 ## Ratings executor implementation (AIR-347)
 
-The hourly cron calls `RatingsOrchestration.ensure` in the same `allSettled` as the EPG ensure and the monitor. It is inert unless the D1-owned mode document says `cloudflare`; then it claims the Madrid date by CAS and creates one `RatingsWorkflow` instance. The instance loops `start`/`step` with `sleepUntil` between actions and commits through the etag epoch fence. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md).
+The hourly cron no longer calls `RatingsOrchestration.ensure`; nothing creates a `RatingsWorkflow` instance. The `RatingsWorkflow` class, its `RATINGS_WORKFLOW` binding and the owner mode route stay as the inert legacy executor and its reverse-handover fence. A `RatingsWorkflow` instance, were one created, loops `start`/`step` with `sleepUntil` between actions and commits through the etag epoch fence. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md).
 
 ## Discovery Workflow handover ([ADR 0094](../adr/0094-discovery-workflow-invocation-budget.md), Accepted)
 
@@ -575,6 +572,6 @@ The code of the Letterboxd Sync is in the repository and **inert**: no Worker bi
 - **No pipeline Event.** A ratings-pipeline run started by a slot carries the slot key and writes no `ratings` Event of its own; the slot outbox is the only source, so there is no duplicate. Such a run reads no EPG state. Every pipeline write rides in a batch with the Letterboxd mode-epoch guard.
 - **Handover proof.** The mode switch refuses `cloudflare` unless `letterboxdHandover` reads live evidence: the Ratings executor is closed and drained, the legacy `ratings_sync_start`/`ratings_sync_step` entry is fenced (it is, while the Letterboxd mode is `switching`), the Watchlist authority is an open `d1`, and all three phase ports exist. There is no HTTP route for the switch yet; its operation belongs to the cutover plan.
 - **Status and monitor.** `status().letterboxdSync` and a `letterboxd` monitor stream carry the slot read model while the executor is `switching` or `cloudflare`, with a signal per source (a failed Diary and a failed or incomplete Watchlist alert separately; a rate limit is recorded as delayed and never alerts); with no mode row both are absent, so today's status and monitor are unchanged.
-- **Legacy writer fence.** While the Letterboxd mode is `switching` or `cloudflare`, `RatingsOrchestration.externalGate` refuses `start` and `step` (`external_writer_fenced`), `ensure` creates nothing (`letterboxd_sync_active`) and an old instance's `admit` is refused, so the two Diary writers can never both be admitted. Setting the Ratings mode to `external` alone is not that fence.
+- **Legacy writer fence.** While the Letterboxd mode is `switching` or `cloudflare`, `RatingsOrchestration.externalGate` refuses `start` and `step` (`external_writer_fenced`), an old instance's `admit` is refused, so the two Diary writers can never both be admitted. Setting the Ratings mode to `external` alone is not that fence.
 
 Operating the slots is described in the [Letterboxd Sync runbook](../runbooks/letterboxd-sync.md); the numeric budgets are in the [orchestration reliability reference](../reference/orchestration-reliability.md#letterboxd-sync-slots).

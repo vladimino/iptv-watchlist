@@ -2729,7 +2729,7 @@ function letterboxdPorts(env){
 const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {
 // AIR-308 (ADR 0155): the cron trigger does not call the D1 enrichment projector. D1_ENRICHMENT_WRITE is ignored.
-// AIR-347 (ADR 0090): the firing calls the ratings executor's `ensure`; with the executor mode external it reads one document and returns.
+// AIR-580: the firing no longer calls the legacy Ratings executor's `ensure` (the Letterboxd Sync owns the Ratings phase, cron `:30`); the Workflow body and its binding stay until the owner-approved L3 slice.
 // AIR-324 (ADR 0093): the same firing also calls reconcileDiscoveryWorkflow; it creates instances only while the admission gate passes.
 async scheduled(controller,env,execution){const at=controller.scheduledTime||Date.now();
 // AIR-534 (ADR 0174): the Discovery-only fast cron reconciles the Workflow and nothing else: no hourly report, no EPG, Ratings or Monitor.
@@ -2737,7 +2737,7 @@ if(typeof CatalogPosterWeekly!=='undefined'&&controller.cron===CatalogPosterWeek
 // AIR-571 E: the Letterboxd Sync cron (dormant: the trigger is added by the activation step, never by a deploy). It runs `ensure` only: nothing of the hourly EPG, Ratings, Discovery or Monitor work.
 if(typeof LetterboxdSync!=='undefined'&&controller.cron===LetterboxdSync.CRON){execution.waitUntil(Promise.resolve().then(()=>LetterboxdSync.ensure(env,{now:at,ports:letterboxdPorts(env)})).catch(()=>{}));return;}
 if(typeof DISCOVERY_FAST_CRON==='string'&&controller.cron===DISCOVERY_FAST_CRON){execution.waitUntil(Promise.resolve().then(()=>typeof reconcileDiscoveryRecovery==='function'?reconcileDiscoveryRecovery(env,{now:at}):undefined).catch(()=>{}));return;}
-const reconcile=Promise.resolve().then(()=>typeof reconcileDiscoveryWorkflow==='function'?reconcileDiscoveryWorkflow(env,{scheduled:true,now:at}):undefined);const settled=reconcile.then(()=>{},()=>{});const head=new Promise(resolve=>{const timer=setTimeout(resolve,SCHEDULED_RECONCILE_HEAD_MS);settled.then(()=>{clearTimeout(timer);resolve();});});execution.waitUntil((async()=>{await head;await Promise.allSettled([reconcile,typeof RatingsOrchestration==='undefined'?Promise.resolve():RatingsOrchestration.ensure(env,{now:Date.now()}),typeof EpgOrchestration==='undefined'?Promise.resolve():EpgOrchestration.ensure(env,{now:Date.now()}),typeof Monitor==='undefined'?Promise.resolve():Monitor.run(env,{now:controller.scheduledTime||Date.now()})]);})());},
+const reconcile=Promise.resolve().then(()=>typeof reconcileDiscoveryWorkflow==='function'?reconcileDiscoveryWorkflow(env,{scheduled:true,now:at}):undefined);const settled=reconcile.then(()=>{},()=>{});const head=new Promise(resolve=>{const timer=setTimeout(resolve,SCHEDULED_RECONCILE_HEAD_MS);settled.then(()=>{clearTimeout(timer);resolve();});});execution.waitUntil((async()=>{await head;await Promise.allSettled([reconcile,typeof EpgOrchestration==='undefined'?Promise.resolve():EpgOrchestration.ensure(env,{now:Date.now()}),typeof Monitor==='undefined'?Promise.resolve():Monitor.run(env,{now:controller.scheduledTime||Date.now()})]);})());},
 async fetch(request,env,execution){
  const url=new URL(request.url);
  try{

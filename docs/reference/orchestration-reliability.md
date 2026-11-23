@@ -314,4 +314,4 @@ The canary modules, routes, receipt table and replay datasets described here bef
 
 ## Ratings implementation status (AIR-347)
 
-Implemented and **inert**: `src/domain/orchestration-policy.js` (pure policy), `src/ratings-orchestration.js` (`RATINGS_WORKFLOW`, `RatingsOrchestration.ensure`, owner route `POST /api/letterboxd/ratings/executor`), the D1 epoch fence in `src/ratings-d1.js`, the external-writer gate in `src/letterboxd-ratings.js` and the `orchestration` object of `ratings_sync_status`. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md). Nothing runs until the owner switches the mode.
+Implemented and **inert**: `src/domain/orchestration-policy.js` (pure policy), `src/ratings-orchestration.js` (`RATINGS_WORKFLOW`, the Workflow body, the mode and fence functions, owner route `POST /api/letterboxd/ratings/executor`), the D1 epoch fence in `src/ratings-d1.js`, the external-writer gate in `src/letterboxd-ratings.js` and the `orchestration` object of `ratings_sync_status`. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md). The hourly cron does not call it and no code creates an instance.

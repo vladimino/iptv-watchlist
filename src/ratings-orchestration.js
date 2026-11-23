@@ -6,10 +6,9 @@
 //    quarantine, last durable progress). Only the executor and the owner's quarantine clear write it.
 // Every commit an executor step makes carries `ratingsFence` (the executor document and the etag it had at admission), so
 // RatingsD1 refuses it in the same D1 batch once the owner has closed admission (decision 2a). Removal events are written in
-// R2 by the existing pipeline, idempotent by event key. The cron `ensure` creates one Workflow instance per Madrid day and
-// series; the instance drives the existing LetterboxdRatings start and step and never repeats a write blind.
-// The binding creates nothing by itself and nothing here is scheduled: with the mode external, `ensure` reads one document and
-// returns. Read model: status().orchestration. Contract: docs/reference/orchestration-reliability.md.
+// R2 by the existing pipeline, idempotent by event key. The Workflow instance (one per Madrid day and series, created by the
+// removed cron `ensure`, AIR-580) drives the existing LetterboxdRatings start and step and never repeats a write blind.
+// The binding creates nothing by itself and nothing here is scheduled: since AIR-580 no code creates an instance. Read model: status().orchestration. Contract: docs/reference/orchestration-reliability.md.
 // Concatenated into the Worker like the other server modules: one global.
 const RatingsOrchestration=(()=>{
  const MODE_KEY='letterboxd/ratings/executor.json',CONTROL_KEY='letterboxd/ratings/orchestration.json';
@@ -52,7 +51,6 @@ const RatingsOrchestration=(()=>{
    return typeof name==='string'?name:'unknown';
   }catch(e){return /not found|does not exist|unknown instance/i.test(String(e?.message||''))?'absent':'unknown';}
  }
- const createError=error=>/already exists|already_exists|duplicate/i.test(String(error?.name||'')+' '+String(error?.message||''))?'exists':'uncertain';
  // An error thrown by a step, by class only: its message is never copied into a record.
  function classifyThrown(error){
   const code=String(error?.code||'');
@@ -329,75 +327,6 @@ const RatingsOrchestration=(()=>{
   }catch{return {recorded:false,reason};}
  }
 
- // ---- the cron `ensure` -------------------------------------------------------------------------------------
- // At most a few reads, at most one create. Safe under duplicate and overlapping firings: the control record is claimed by
- // compare-and-swap on the run key and series before the create, and a second create attaches to the same instance id.
- async function ensure(env,{now=Date.now(),random=Math.random}={}){
-  let mode;
-  try{mode=await readMode(env);}catch{return {started:false,reason:'mode_unreadable'};}
-  if(mode.malformed)return {started:false,reason:'evidence_unreadable'};
-  if(mode.record.mode==='switching')return {started:false,reason:'switch_in_progress'};
-  if(mode.record.mode!=='cloudflare')return {started:false,reason:'external'};
-  if(typeof env?.RATINGS_WORKFLOW?.create!=='function')return {started:false,reason:'workflow_unavailable'};
-  // AIR-571 D2: the same single admission read as the step admission supplies the pin of every authoritative write of this tick (the hourly Event reconcile and the control record claims).
-  const lbAdmission=await letterboxdAdmission(env);
-  if(lbAdmission.fenced)return {started:false,reason:'letterboxd_sync_active'};
-  const fenceOf=()=>fencedEnv(env,mode.etag,lbAdmission.revision,lbAdmission.watchlistGuard);
-  const authority=await authorityState(env);
-  if(authority.error)return {started:false,reason:'d1_unavailable'};
-  if(!authority.ready)return {started:false,reason:'authority_held'};
-  // AIR-361: the hourly tick also delivers a Ratings result event that an earlier terminal commit could not put (idempotent, bounded).
-  await ratings().reconcileEvent(fenceOf(),now).catch(()=>null);
-  const {dayKey,due,dueAt}=policy().dailyDue(now);
-  if(!due)return {started:false,reason:'not_due',dueAt:iso(dueAt)};
-  const stored=await readControl(env);
-  if(stored.malformed)return {started:false,reason:'checkpoint_malformed'};
-  let control=stored.record;
-  const domainQuarantine=control.quarantine?.scope==='domain'?control.quarantine:null;
-  if(domainQuarantine)return {started:false,reason:'quarantined',scope:'domain'};
-  let series=0,budget=policy().emptyBudget(),carry={};
-  if(control.runKey===dayKey){
-   if(control.doneAt)return {started:false,reason:'complete'};
-   if(control.quarantine)return {started:false,reason:'quarantined',scope:'run'};
-   if(control.phase==='stopped'&&control.stopReason==='blocked_until_next_date')return {started:false,reason:'blocked_until_next_date'};
-   const cooling=Date.parse(control.cooldownUntil||'');
-   if(control.instanceId&&['starting','running','waiting'].includes(control.phase)){
-    const status=await instanceStatus(env.RATINGS_WORKFLOW,control.instanceId);
-    if(ALIVE.includes(status))return {started:false,reason:'in_progress',instanceId:control.instanceId};
-    if(status==='unknown')return {started:false,reason:'status_unknown',instanceId:control.instanceId};
-    // The instance ended with the run unfinished: a counted transient failure, then a successor under the same day key.
-    const code=status==='errored'?'instance_errored':status==='absent'?'create_uncertain':'instance_terminated';
-    const applied=policy().applyFailure(control.budget,{code},{now,phase:control.checkpoint?.phase??null,checkpoint:control.checkpoint?.key??null,random});
-    control={...control,budget:applied.budget,cooldownUntil:applied.cooldownUntil,failure:{class:'transient',code},quarantine:applied.quarantine?{...applied.quarantine,at:iso(now)}:null,phase:'stopped',stopReason:code,updatedAt:iso(now)};
-    const fe=fenceOf();
-    if(await ratings().writeDocument(fe,CONTROL_KEY,stored.stored?{etag:stored.etag}:null,control)===null)return {started:false,reason:'write_conflict'};
-    if(applied.quarantine)return {started:false,reason:'quarantined',scope:'run'};
-    return {started:false,reason:'cooldown',until:applied.cooldownUntil,recorded:code};
-   }
-   if(Number.isFinite(cooling)&&cooling>now)return {started:false,reason:'cooldown',until:control.cooldownUntil};
-   series=(control.series??0)+1;budget=control.budget;carry={failure:control.failure,lastDurableProgressAt:control.lastDurableProgressAt,runId:control.runId,checkpoint:control.checkpoint};
-  }
-  const id=instanceId(dayKey,series);
-  const next={...emptyControl(),...carry,schemaVersion:1,runKey:dayKey,series,instanceId:id,epoch:mode.record.epoch,phase:'starting',budget,updatedAt:iso(now)};
-  const fe=fenceOf();
-  // The receipt of the claim is the control record naming this run key, series and epoch.
-  if(await ratings().writeDocument(fe,CONTROL_KEY,stored.stored?{etag:stored.etag}:null,next)===null)return {started:false,reason:'write_conflict'};
-  try{
-   await env.RATINGS_WORKFLOW.create({id,params:{runKey:dayKey,series,epoch:mode.record.epoch}});
-   return {started:true,attached:false,instanceId:id,runKey:dayKey,series};
-  }catch(error){
-   if(createError(error)==='exists')return {started:true,attached:true,instanceId:id,runKey:dayKey,series};
-   // A lost create response: read the platform before anything else; the instance may exist.
-   const status=await instanceStatus(env.RATINGS_WORKFLOW,id);
-   if(ALIVE.includes(status)||status==='complete')return {started:true,attached:true,instanceId:id,runKey:dayKey,series};
-   const applied=policy().applyFailure(budget,{code:'create_uncertain'},{now,random});
-   const failed={...next,phase:'stopped',stopReason:'create_uncertain',budget:applied.budget,cooldownUntil:applied.cooldownUntil,failure:{class:'transient',code:'create_uncertain'},quarantine:applied.quarantine?{...applied.quarantine,at:iso(now)}:null};
-   const reread=await readControl(env);
-   if(reread.record?.instanceId===id)await ratings().writeDocument(fe,CONTROL_KEY,{etag:reread.etag},failed);
-   return {started:false,reason:'create_uncertain',instanceId:id};
-  }
- }
-
  // ---- the read model (decision 7). Reads only; never creates or repairs. -------------------------------------------
  async function readModel(env,now=Date.now()){
   const mode=await readMode(env);
@@ -421,6 +350,6 @@ const RatingsOrchestration=(()=>{
    failure:{class:c.failure?.class??null,code:c.failure?.code??null,fingerprint:c.budget?.fingerprint??null,consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,caps:policy().BUDGET_CAPS},
    cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,health,sideEffects:'none'};
  }
- return {MODE_KEY,CONTROL_KEY,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,readModel,drainState,classifyThrown};
+ return {MODE_KEY,CONTROL_KEY,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,readModel,drainState,classifyThrown};
 })();
 async function runRatingsWorkflow(env,payload,step){return RatingsOrchestration.run(env,payload,step);}
