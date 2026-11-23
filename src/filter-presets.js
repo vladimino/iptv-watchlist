@@ -57,6 +57,7 @@ function normalizePresetQuery(input){
  for(const [key,param] of [['director','director'],['actor','actor']]){const id=params.get(param);if(id&&id.length<=200&&!/[\s#&?]/.test(id))add(key,id);}
  if(['3.5','4','4.5'].includes(params.get('prediction')))add('prediction',params.get('prediction'));
  if(['0.5','0.7','0.85'].includes(params.get('chance')))add('chance',params.get('chance'));
+ if(['3.5','4','4.5'].includes(params.get('rating')))add('rating',params.get('rating'));
  return url.searchParams.toString();
 }
 function presetRecord(item){

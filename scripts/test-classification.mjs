@@ -8,6 +8,9 @@ import path from 'node:path';
 // A name containing budget, memory or mutation is not itself the classification.
 export const CORE_REASON='Result, contract, integrity, CAS/fence/replay, boundedness, call or SQL counts, timeout semantics, or a resource hard cap a safe deploy needs. No runner wall-clock, percentile latency, throughput, heap profile, or mutant-kill check.';
 export const FILES={
+ "actual-rating-filter.mjs": {
+  "suite": "core"
+ },
  "activity-ui.mjs": {
   "suite": "core"
  },
