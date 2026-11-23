@@ -237,10 +237,11 @@ export async function stopChain(env,{fence:f,revision,at,stoppedBy,recoveryClass
  return {state:'stopped',chain:await readChain(env,f.programmeRunId)};
 }
 
-export async function supersedeChain(env,{chain,at}={}){
+// `guards` (optional, default none) are extra [sql, params] assertions placed after the marker fence in the SAME batch; the hourly reconcile passes none, so its batch is unchanged.
+export async function supersedeChain(env,{chain,at,guards=[]}={}){
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
- await commit(env,gate,[fence(gate),
+ await commit(env,gate,[fence(gate),...guards,
   ["UPDATE canonical_producer_chain SET owner_state='superseded',revision=revision+1,updated_at=? WHERE programme_run_id=? AND revision=? AND owner_state NOT IN ('superseded')",[at,chain.programme_run_id,chain.revision]],changesOne()]);
  return {state:'superseded',chain:await readChain(env,chain.programme_run_id)};
 }
@@ -318,14 +319,46 @@ export function producerChainOperator({held,now=()=>Date.now(),supersede=superse
   if(Number(chain.revision)!==args.expectedRevision&&chain.owner_state!=='superseded')return reply(409,{ok:false,mode,reason:'revision_moved',writes:0,revision:Number(chain.revision)});
   const blocked=chainBlocker(chain,s.published,s.nowMs);
   if(blocked)return reply(409,{ok:false,mode,reason:blocked,writes:0});
+  const pins={expectedProgrammeRunId:args.expectedProgrammeRunId,expectedRevision:args.expectedRevision};
+  const P=s.published.programmeRunId,g=s.published.generation;
   let out;
-  try{out=await supersede(env,{chain,at:new Date(s.nowMs).toISOString()});}
-  catch(error){return reply(409,{ok:false,mode,reason:error?.code||'producer_transport',writes:0});}
+  try{out=await supersede(env,{chain,at:new Date(s.nowMs).toISOString(),guards:publishedGuards(P,g,chain.programme_run_id)});}
+  catch(error){
+   const code=error?.code||'producer_transport';
+   // Refused before the batch, or a statement of the batch failed and D1 rolled it back: proven zero writes. Name a publication that moved under the read.
+   if(PROVEN_NO_WRITE.has(code)){
+    if(code==='producer_cas_lost'){
+     const now=await one(database(env),'SELECT programme_run_id AS programmeRunId,generation FROM published_epg_authority WHERE id=1',[]).catch(()=>null);
+     if(!now||now.programmeRunId!==P||Number(now.generation)!==g)return reply(409,{ok:false,mode,reason:'published_moved',writes:0});
+    }
+    return reply(409,{ok:false,mode,reason:code,writes:0});
+   }
+   // Anything else (a lost response, a failed readback after the batch) may have committed: never claim zero writes, never retry. One read-only reconciliation of the target row.
+   return reconcileAfter(env,chain,pins,code==='producer_run_unreadable'?'readback_unproven':'write_uncertain');
+  }
   if(out?.state!=='superseded')return reply(409,{ok:false,mode,reason:out?.reason||'film_person_not_open',writes:0});
-  const after=out.chain;
-  return reply(200,{ok:true,mode,superseded:true,writes:1,chain:after?{programmeRunId:after.programme_run_id,ownerState:after.owner_state,revision:Number(after.revision)}:null,
-   nonTerminalChains:await openCount(env).catch(()=>null)});
+  return confirmed(env,out.chain,false);
  };
+ async function confirmed(env,after,reconciled){
+  return reply(200,{ok:true,mode:'supersede',superseded:true,writes:1,...(reconciled?{reconciled:true}:{}),chain:after?{programmeRunId:after.programme_run_id,ownerState:after.owner_state,revision:Number(after.revision)}:null,
+   nonTerminalChains:await openCount(env).catch(()=>null)});
+ }
+ // The outcome of a batch whose result is unknown: proven only when the target row reads `superseded` at exactly the pinned revision + 1 (nothing else supersedes while the hold is on).
+ // Otherwise HTTP 202 with `writes: null` (not proven either way), the observed row and the original pins. A repeat with fresh pins from `status` is safe: the revision CAS admits at most one transition.
+ async function reconcileAfter(env,chain,pins,reason){
+  let row;
+  try{row=await readChain(env,chain.programme_run_id);}catch{row=undefined;}
+  if(row&&row.owner_state==='superseded'&&Number(row.revision)===Number(chain.revision)+1)return confirmed(env,row,true);
+  return reply(202,{ok:false,mode:'supersede',reason:row===undefined?'readback_unproven':reason,writes:null,expect:pins,
+   observed:row?{ownerState:row.owner_state,revision:Number(row.revision)}:(row===null?{missing:true}:null)});
+ }
+}
+// The failures that prove nothing was written: the route refused before any batch (film_person_held / film_person_unavailable from `writerRoute`), or a statement of the batch failed
+// (the marker fence, the revision CAS or a guard, a missing table), so D1 rolled the whole batch back.
+const PROVEN_NO_WRITE=new Set(['film_person_held','film_person_unavailable','producer_cas_lost','film_person_fence','producer_store_missing','producer_marker_unreadable']);
+// The write-time published-authority fence of the owner path: the published (P, g) the operator read is still the published one, and it is not the target chain's run.
+function publishedGuards(P,g,target){
+ return [authorityPin(P,g),[assertSql("NOT EXISTS (SELECT 1 FROM published_epg_authority WHERE id=1 AND programme_run_id=?)"),[target]]];
 }
 
 export function parseReleasePin(value){

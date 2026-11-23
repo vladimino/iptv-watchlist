@@ -1,8 +1,9 @@
 // AIR-572: the owner-only terminalization of a stale canonical Producer chain (MCP tool producer_chain_operator). Offline only: the sqlite D1 stand-in with the REAL migration chain and the
 // REAL `supersedeChain`; no production database, Workflow or Cloudflare is opened. Covers: no write without a call, status (read-only, bounded, eligibility, expect pins),
 // every refusal with zero writes (confirm, pins, hold, marker, published authority, current run, live lease, terminal or missing chain, revision moved), the happy path (exactly one row moves to
-// `superseded`, nothing else in the database changes, no Workflow instance), idempotent repeat, races between the read and the write (revision, marker), the open-chain predicate agreeing with
-// the membership switch gate, and why the hourly reconcile cannot do this while the hold is on.
+// `superseded`, nothing else in the database changes, no Workflow instance), idempotent repeat, races inside the write (publication, target published, marker, revision: each rolls the batch back),
+// the published guards on the owner batch only (the reconcile's batch unchanged), ambiguous outcomes (commit then lost response, failed readback, lost request) never reported as zero writes and
+// never retried, the open-chain predicate agreeing with the membership switch gate, and why the hourly reconcile cannot do this while the hold is on.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -33,8 +34,10 @@ let copies=0;
 function world({publishNew=true,takeovers=3}={}){
  const file=path.join(root,'w-'+(copies++)+'.sqlite');fs.copyFileSync(template,file);
  const queries=[];
- const env={DB:d1Standin(file,{onQuery:text=>{queries.push(text);}})};
- return {file,env,queries,publishNew,takeovers};
+ const made={file,queries,publishNew,takeovers,beforeBatch:null,batchSizes:[]};
+ // `beforeBatch` (one shot) runs right before the next batch is applied: a concurrent writer between the operator's read and its write.
+ made.env={DB:d1Standin(file,{onQuery:text=>{queries.push(text);},onBatch:async statements=>{made.batchSizes.push(statements.length);const hook=made.beforeBatch;made.beforeBatch=null;if(hook)await hook(statements);}})};
+ return made;
 }
 const publish=(file,p,g)=>sqlite(file,"UPDATE published_epg_authority SET mode='d1',cutover='open',programme_run_id='"+p+"',generation="+g+" WHERE id=1");
 async function seed(made){
@@ -205,26 +208,110 @@ const operatorOf=({held=true,now=NOW,...rest}={})=>producerChainOperator({held:(
  assert.equal(after.owner_state,'pending','the chain is not superseded');assert.equal(Number(after.revision),Number(before.revision)+1,'only the concurrent change landed');
 }
 {
- // the Film/Person marker leaves `open` after the read: the marker fence refuses the whole batch
+ // the Film/Person marker leaves `open` before supersedeChain reads the route: refused before any batch
  const made=await seed(world());
  const pins={expectedProgrammeRunId:OLD,expectedRevision:Number(chainRow(made.file,OLD).revision)};
  const racing=async(env,input)=>{sqlite(made.file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");return Chain.supersedeChain(env,input);};
- const before=chainRow(made.file,OLD);
+ const before=chainRow(made.file,OLD),batches=made.env.DB.calls.batches;
  const out=await operatorOf({supersede:racing})(made.env,{mode:'supersede',confirmGo:true,...pins});
- assert.equal(out.status,409);assert.equal(out.body.ok,false);assert.equal(out.body.writes,0);
+ assert.equal(out.status,409);assert.equal(out.body.reason,'film_person_held');assert.equal(out.body.writes,0);
+ assert.equal(made.env.DB.calls.batches,batches,'no batch was sent');
  assert.deepEqual(chainRow(made.file,OLD),before,'the chain is unchanged');
 }
+// Races INSIDE the write: the concurrent change lands after every read of the operator and of supersedeChain, right before the batch applies. Each must roll the whole batch back.
 {
- // the marker generation moves while staying open (the route is read again inside supersedeChain, so this one passes the fence at the new generation)
- // and a transport failure of the batch is reported as such
+ const race=async(sql,reason)=>{
+  const made=await seed(world());
+  const pins={expectedProgrammeRunId:OLD,expectedRevision:Number(chainRow(made.file,OLD).revision)};
+  made.beforeBatch=()=>sqlite(made.file,sql);
+  const before=chainRow(made.file,OLD);
+  const out=await operatorOf()(made.env,{mode:'supersede',confirmGo:true,...pins});
+  assert.equal(out.status,409,JSON.stringify(out));assert.equal(out.body.reason,reason);assert.equal(out.body.writes,0);
+  const after=chainRow(made.file,OLD);
+  assert.equal(after.owner_state,before.owner_state,'the chain is not superseded ('+reason+')');
+  return {made,before,after};
+ };
+ // a newer run is published: the published-authority pin fails
+ const newer=await race("UPDATE published_epg_authority SET programme_run_id='run-newer',generation=519 WHERE id=1",'published_moved');
+ assert.deepEqual(newer.after,newer.before);
+ // the published generation moves on the same run
+ await race("UPDATE published_epg_authority SET generation=519 WHERE id=1",'published_moved');
+ // the target chain's own run becomes the published one: both published guards fail
+ await race("UPDATE published_epg_authority SET programme_run_id='"+OLD+"',generation=519 WHERE id=1",'published_moved');
+ // the Film/Person marker leaves `open`: the marker fence fails
+ await race("UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1",'film_person_fence');
+ // a takeover bumps the chain's revision: the revision CAS fails
+ const moved=await race("UPDATE canonical_producer_chain SET takeover_count=takeover_count+1,revision=revision+1 WHERE programme_run_id='"+OLD+"'",'producer_cas_lost');
+ assert.equal(Number(moved.after.revision),Number(moved.before.revision)+1,'only the concurrent change landed');
+}
+// The owner batch carries the published guards; the hourly reconcile's batch is unchanged (marker fence, update, changes() only).
+{
  const made=await seed(world());
  const pins={expectedProgrammeRunId:OLD,expectedRevision:Number(chainRow(made.file,OLD).revision)};
- const failing=async()=>{const error=new Error('producer_transport');error.code='producer_transport';throw error;};
- const out=await operatorOf({supersede:failing})(made.env,{mode:'supersede',confirmGo:true,...pins});
- assert.equal(out.body.reason,'producer_transport');assert.equal(out.body.writes,0);
- const skipped=await operatorOf({supersede:async()=>({state:'skipped',reason:'film_person_route_not_open'})})(made.env,{mode:'supersede',confirmGo:true,...pins});
- assert.equal(skipped.body.reason,'film_person_route_not_open');assert.equal(skipped.body.writes,0);
- assert.equal(chainRow(made.file,OLD).owner_state,'pending');
+ let texts=null;made.beforeBatch=statements=>{texts=statements.map(item=>item.text);};
+ assert.equal((await operatorOf()(made.env,{mode:'supersede',confirmGo:true,...pins})).status,200);
+ assert.equal(texts.length,5,'fence, two published guards, update, changes()');
+ assert.match(texts[1],/published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id='run-new' AND generation=518/);
+ assert.match(texts[2],/NOT EXISTS \(SELECT 1 FROM published_epg_authority WHERE id=1 AND programme_run_id='run-old'\)/);
+ const plain=await seed(world());
+ plain.env.PRODUCER_WORKFLOW={create:async()=>({})};
+ plain.batchSizes.length=0;
+ const out=await reconcileProducerChain(plain.env,{now:NOW,hold:false});
+ assert.equal(out.supersede,1,JSON.stringify(out));assert.equal(chainRow(plain.file,OLD).owner_state,'superseded');
+ assert.equal(plain.batchSizes[0],3,'the reconcile supersedes with the marker fence, the update and changes() only');
+}
+// Ambiguous outcomes are never reported as zero writes and never retried.
+{
+ const wrap=(made,{after,before})=>{const real=made.env.DB;made.env.DB={calls:real.calls,prepare:(...a)=>real.prepare(...a),batch:async statements=>{if(before?.())throw new Error('D1_ERROR: Network connection lost.');const r=await real.batch(statements);if(after?.())throw new Error('D1_ERROR: Network connection lost.');return r;}};return real;};
+ // the batch commits and then its response is lost: the read-only reconciliation proves the transition
+ {
+  const made=await seed(world());const pins={expectedProgrammeRunId:OLD,expectedRevision:Number(chainRow(made.file,OLD).revision)};
+  let once=true;const real=wrap(made,{after:()=>{const fire=once;once=false;return fire;}});
+  const batches=real.calls.batches;
+  const out=await operatorOf()(made.env,{mode:'supersede',confirmGo:true,...pins});
+  assert.equal(out.status,200,JSON.stringify(out));
+  assert.deepEqual(out.body,{ok:true,mode:'supersede',superseded:true,writes:1,reconciled:true,chain:{programmeRunId:OLD,ownerState:'superseded',revision:pins.expectedRevision+1},nonTerminalChains:0});
+  assert.equal(real.calls.batches,batches+1,'one batch only, no retry');
+ }
+ // the batch commits and every read after it fails: the outcome is not proven either way
+ {
+  const made=await seed(world());const pins={expectedProgrammeRunId:OLD,expectedRevision:Number(chainRow(made.file,OLD).revision)};
+  const real=made.env.DB;let broken=false;
+  made.env.DB={calls:real.calls,prepare:(...a)=>{if(broken)throw new Error('D1_ERROR: Network connection lost.');return real.prepare(...a);},batch:async statements=>{const r=await real.batch(statements);broken=true;return r;}};
+  const batches=real.calls.batches;
+  const out=await operatorOf()(made.env,{mode:'supersede',confirmGo:true,...pins});
+  assert.equal(out.status,202,JSON.stringify(out));
+  assert.deepEqual(out.body,{ok:false,mode:'supersede',reason:'readback_unproven',writes:null,expect:pins,observed:null});
+  assert.equal(real.calls.batches,batches+1,'no retry');
+  assert.equal(chainRow(made.file,OLD).owner_state,'superseded','the batch did commit: claiming zero writes would have been false');
+  // once reads work again, status lists nothing and a repeat is refused without writing
+  broken=false;
+  assert.deepEqual((await operatorOf()(made.env,{})).body.chains,{items:[],truncated:false});
+  assert.equal((await operatorOf()(made.env,{mode:'supersede',confirmGo:true,...pins})).body.reason,'already_superseded');
+  assert.equal(real.calls.batches,batches+1);
+ }
+ // the transport fails and the batch did not apply: still not proven (it could land later), the observed row is reported, no retry; a repeat with the same pins is safe
+ {
+  const made=await seed(world());const pins={expectedProgrammeRunId:OLD,expectedRevision:Number(chainRow(made.file,OLD).revision)};
+  let once=true;const real=wrap(made,{before:()=>{const fire=once;once=false;return fire;}});
+  const before=dump(made.file),batches=real.calls.batches;
+  const out=await operatorOf()(made.env,{mode:'supersede',confirmGo:true,...pins});
+  assert.equal(out.status,202,JSON.stringify(out));
+  assert.deepEqual(out.body,{ok:false,mode:'supersede',reason:'write_uncertain',writes:null,expect:pins,observed:{ownerState:'pending',revision:pins.expectedRevision}});
+  assert.equal(real.calls.batches,batches,'the failed batch never reached the database and nothing retried it');
+  sameExcept(before,dump(made.file));
+  const again=await operatorOf()(made.env,{mode:'supersede',confirmGo:true,...pins});
+  assert.equal(again.status,200);assert.equal(again.body.writes,1);assert.equal(again.body.reconciled,undefined);
+ }
+ // an injected failure with no code, and a route that is skipped, are handled the same ways
+ {
+  const made=await seed(world());const pins={expectedProgrammeRunId:OLD,expectedRevision:Number(chainRow(made.file,OLD).revision)};
+  const out=await operatorOf({supersede:async()=>{throw new Error('boom');}})(made.env,{mode:'supersede',confirmGo:true,...pins});
+  assert.equal(out.status,202);assert.equal(out.body.reason,'write_uncertain');assert.equal(out.body.writes,null);
+  const skipped=await operatorOf({supersede:async()=>({state:'skipped',reason:'film_person_route_not_open'})})(made.env,{mode:'supersede',confirmGo:true,...pins});
+  assert.equal(skipped.body.reason,'film_person_route_not_open');assert.equal(skipped.body.writes,0);
+  assert.equal(chainRow(made.file,OLD).owner_state,'pending');
+ }
 }
 
 // ===== 5. the open-chain predicate is the membership switch gate's =====
