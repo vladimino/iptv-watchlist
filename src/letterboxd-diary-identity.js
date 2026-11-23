@@ -128,9 +128,10 @@ const LetterboxdDiaryIdentity=(()=>{
    // Already linked: nothing to check. A pending entry on a linked id is a bridge that failed after the alias and the record link were committed (review of PR #720):
    // the committed projection is repaired (no outbound request, no admission, no new fact) and the entry is cleared only when that succeeded.
    if(own.tmdb){
-    // ADR 0184: a lid the Ratings link index already ties to a movie is offered for its canonical claim (the claim step re-proves it from the authoritative link; `already` is free).
-    // A pending claim obeys its backoff and its attempt bound whether the id is on Diary page 1 or not: it is offered only when due; an id without a pending entry is offered every step (a proved claim is free).
-    if(TMDB.test(String(own.tmdb))&&(!prior||prior.reason!==CLAIM_REASON||claimDue(prior)))claimPairs.push({lid,tmdb:String(own.tmdb)});
+    // ADR 0184, AIR-559: a link that this step did NOT verify itself is never offered: the link index alone does not say how the pair was made (an inferred title/year import before AIR-559 left some
+    // pairs unmarked). Only a `claim_pending` entry is served here, and only one this step created from its own verified bridge, an existing trusted bridge or a confirmed `link_failed` repair, for the
+    // same movie the link still names; it obeys its backoff and its attempt bound whether the id is on Diary page 1 or not.
+    if(TMDB.test(String(own.tmdb))&&prior&&prior.reason===CLAIM_REASON&&claimDue(prior)&&String(prior.tmdb)===String(own.tmdb))claimPairs.push({lid,tmdb:String(own.tmdb)});
     if(!prior){clear.push(lid);continue;}
     if(prior.reason===CLAIM_REASON)continue; // served by the claim step below, not a link repair
     try{const repaired=await LetterboxdFacts.reprojectDiaryFilm(env,lid);if(repaired.state==='projected'){counts.repaired++;clear.push(lid);}else{counts.skipped++;}}catch{counts.skipped++;}

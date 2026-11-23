@@ -150,7 +150,8 @@ function recordRatingChange(record,incoming,effective){
  }
 
  // Links a film's trusted aliases to one record key; an alias already pointing elsewhere is an alias_conflict for review.
- async function linkFilm(env,links){
+ // `expectKey` (AIR-559): the record key an inferred import has already marked; a key that moved meanwhile is refused as an alias_conflict, so an inferred alias never lands on an unmarked record.
+ async function linkFilm(env,links,{expectKey=null}={}){
   // Writers always know the Letterboxd id, so no record exists without one and two records of one film can only meet as an
   // alias_conflict; joining them is the convergence migration, which is not implemented in this phase.
   if(!links?.letterboxd||!LID.test(String(links.letterboxd)))throw new FactsError('invalid_identity','A fact record needs a Letterboxd id');
@@ -160,6 +161,7 @@ function recordRatingChange(record,incoming,effective){
    const keys=[...new Set(aliases.map(alias=>index[alias]).filter(Boolean))];
    if(keys.length>1)throw new FactsError('alias_conflict','Aliases point at different records');
    factKey=keys[0]||factKeyFor(links);
+   if(expectKey&&factKey!==expectKey)throw new FactsError('alias_conflict','The record key moved since the inferred pair was marked');
    // A record holds one Letterboxd id and one TMDB id: another id of the same kind on it is a conflict, never a merge.
    for(const [alias,key] of Object.entries(index))if(key===factKey&&!aliases.includes(alias)&&aliases.some(mine=>mine.split(':')[0]===alias.split(':')[0]))throw new FactsError('alias_conflict','Record already has another '+alias.split(':')[0]+' id');
    let changed=false;for(const alias of aliases)if(index[alias]!==factKey){index[alias]=factKey;changed=true;}
@@ -189,6 +191,19 @@ function recordRatingChange(record,incoming,effective){
   return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0?rating:null;
  }
 
+ // AIR-559: the durable provenance of an inferred Letterboxd-to-TMDB pair on its fact record. The claim planner refuses a pair that equals it (a title/year match is not proof of the lid).
+ const inferredPair=(identity,links)=>({kind:identity.kind,basis:identity.basis,sourceRef:identity.sourceRef,letterboxd:String(links.letterboxd),tmdb:String(links.tmdb)});
+ // Marks the record an inferred pair is about to be linked to, BEFORE the alias exists, so no reader can ever see that alias on an unmarked record (a crash between the alias and the facts, or another writer
+ // completing the record's ids from the index, cannot launder it). Skipped when the record already states exactly this pair (independently linked before). Idempotent; a pair that then conflicts leaves a mark
+ // that names its own ids, so it never blocks another pair.
+ async function markInferredPair(env,key,links,identity){
+  await casJSON(env,recordKey(key),emptyRecord(key,{}),current=>{
+   if(current.redirectTo||current.migrating)throw new FactsError('write_contention','Record started a migration during write');
+   if(current.pairIdentity)return null;
+   if(current.links?.letterboxd===String(links.letterboxd)&&current.links?.tmdb===String(links.tmdb))return null;
+   current.pairIdentity=inferredPair(identity,links);return current;
+  });
+ }
  // Writes observations into one record. A redirected record is followed once; a fenced one sends the write to its target.
  async function recordObservations(env,factKey,links,observations,{floors={},identity=null}={}){
   let key=factKey;
@@ -207,6 +222,10 @@ function recordRatingChange(record,incoming,effective){
    // existing one that had no Letterboxd id. A record that already holds facts and a Letterboxd id keeps whatever it had, so a
    // verified record is never relabelled, and a replay (the identity is already there) changes nothing.
    const untouched=!current.watched&&!current.rating&&!current.watchlist,letterboxdMissing=current.links.letterboxd==null;
+   // AIR-559: the PAIR an inferred write completes (it fills the record's Letterboxd or TMDB id) is marked in the same compare-and-swap (`pairIdentity`), also on a record that already held facts and a
+   // Letterboxd id (a Diary-first record gaining an inferred TMDB id). A record that already stated both ids keeps no mark: that pair was linked independently before.
+   const fillsPair=Object.entries(links||{}).some(([k,v])=>v!=null&&current.links[k]==null);
+   if(identity&&fillsPair&&!current.pairIdentity&&links?.letterboxd!=null&&links?.tmdb!=null){current.pairIdentity=inferredPair(identity,links);changed=true;}
    for(const [k,v] of Object.entries(links||{}))if(v!=null&&current.links[k]==null){current.links[k]=String(v);changed=true;}
    if(identity&&!current.identity&&(untouched||letterboxdMissing)){current.identity={kind:identity.kind,basis:identity.basis,sourceRef:identity.sourceRef};changed=true;}
    for(const {fact,observation:incoming} of observations){const result=applyObservation(current,fact,incoming,{floor:floors[fact]||null});outcomes.push({fact,...result});if(result.outcome==='new'||result.outcome==='replaces')changed=true;}
@@ -260,8 +279,8 @@ function recordRatingChange(record,incoming,effective){
   const id=aliasesOf(links).join(' '),now=new Date().toISOString();
   await casJSON(env,FACTS_KEYS.conflicts,{},current=>{const prior=current[id];current[id]={links:{letterboxd:links?.letterboxd??null,tmdb:links?.tmdb??null},reason,firstSeenAt:prior?.firstSeenAt||now,lastSeenAt:now,count:(prior?.count||0)+1};return current;});
  }
- async function linkOrNote(env,links){
-  try{return await linkFilm(env,links);}
+ async function linkOrNote(env,links,options){
+  try{return await linkFilm(env,links,options);}
   catch(error){if(error.code!=='alias_conflict')throw error;await noteConflict(env,links,'alias_conflict');return null;}
  }
 
@@ -643,7 +662,7 @@ function recordRatingChange(record,incoming,effective){
   });
  }
 
- // ADR 0184: the canonical Letterboxd claim of the lids of a chunk whose Ratings link is durable AND COMMITTED (called after the chunk receipt) and whose movie id is the chunk's. Only verified entries are offered: an INFERRED link (ADR 0104) is a title/year match, not proof of the lid, so it is never offered, and the claim planner refuses any record that carries an inferred identity whichever flow offers it (since ADR 0192 no unlink can withdraw such a link; a mistaken one is repaired case by case). Never throws into the import. Inactive until the
+ // ADR 0184: the canonical Letterboxd claim of the lids of a chunk whose Ratings link is durable AND COMMITTED (called after the chunk receipt) and whose movie id is the chunk's. Only verified entries are offered: an INFERRED link (ADR 0104) is a title/year match, not proof of the lid, so it is never offered, and the claim planner refuses a pair the import marked as inferred (`identity`, or `pairIdentity` written before the alias) whichever flow offers it (since ADR 0192 no unlink can withdraw such a link; a mistaken one is repaired case by case). Never throws into the import. Inactive until the
  // claim module's activation line is turned on. A replay of a committed chunk offers it again: that is the recovery of an interrupted claim (the import is owner-driven, so a replay is its ordinary retry).
  async function ensureChunkClaims(env,items,films){
   if(typeof CanonicalLetterboxdClaim==='undefined')return;
@@ -681,7 +700,15 @@ function recordRatingChange(record,incoming,effective){
     admitted=await admitInferredFilm(env,item,origin);
     if(admitted==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
    }
-   const factKey=await linkOrNote(env,links);
+   // AIR-559: an inferred pair is marked on its record first, and linked only to that same record.
+   const inferredIdentity=item.identity==='inferred'?{kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:origin.archiveSha256}:null;
+   let markedKey=null;
+   if(inferredIdentity){
+    const {value:linkIndex}=await readJSON(env,FACTS_KEYS.links);
+    markedKey=plannedKey(linkIndex||{},links);
+    if(markedKey)await markInferredPair(env,markedKey,links,inferredIdentity);
+   }
+   const factKey=inferredIdentity&&!markedKey?(await noteConflict(env,links,'alias_conflict'),null):await linkOrNote(env,links,inferredIdentity?{expectKey:markedKey}:undefined);
    if(!factKey){
     // A writer linked the code between the check and the link: the entry this commit just created is withdrawn, never one it found.
     if(admitted==='admitted')await withdrawInferredAdmission(env,item,origin);
@@ -696,7 +723,7 @@ function recordRatingChange(record,incoming,effective){
      CanonicalRatedAdmission.assertRatedAdmissionAccepted(canonical);
     }
    }
-   const observations=await exportObservations(factKey,item,origin),result=await recordObservations(env,factKey,links,observations,{floors:await floorsFor(env,item.lid,factKey),identity:item.identity==='inferred'?{kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:origin.archiveSha256}:null});
+   const observations=await exportObservations(factKey,item,origin),result=await recordObservations(env,factKey,links,observations,{floors:await floorsFor(env,item.lid,factKey),identity:inferredIdentity});
    tally(counts,result.outcomes);records.push(result.record);
    films.push({lid:item.lid,factKey:result.factKey,...(item.identity==='inferred'?{identity:'inferred'}:{}),...(admitted?{admitted}:{}),observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});
   }
