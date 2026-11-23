@@ -20,7 +20,7 @@ const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const template=path.join(root,'t.sqlite');
 assert.equal(sqlite(template,chainFiles.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
-assert.equal(Number(one(template,'SELECT version FROM schema_contract WHERE id=1')),34,'the whole chain: 0023, 0024 (dormant prediction recovery intent), 0025 (retention scan watermark), 0026 (EPG run certificate), 0027 (identity revoke intent kind) then 0028 (dormant Filter presets authority) then 0029 (dormant Started marks authority) then 0030 (dormant EPG checkpoint authority) then 0031 (dormant Watchlist authority) then 0032 (dormant EPG Channel authority)');
+assert.equal(Number(one(template,'SELECT version FROM schema_contract WHERE id=1')),35,'the whole chain: 0023, 0024 (dormant prediction recovery intent), 0025 (retention scan watermark), 0026 (EPG run certificate), 0027 (identity revoke intent kind) then 0028 (dormant Filter presets authority) then 0029 (dormant Started marks authority) then 0030 (dormant EPG checkpoint authority) then 0031 (dormant Watchlist authority) then 0032 (dormant EPG Channel authority), 0035 (dormant import receipts)');
 assert.equal(Number(one(template,'SELECT COUNT(*) FROM canonical_producer_chain')),0);
 const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
 let n=0;
@@ -35,6 +35,9 @@ function database(stage='open'){
 }
 const envOf=file=>({DB:d1Standin(file)});
 const AT='2026-11-16T10:00:00.000Z';
+// The stuck receipt of the stop test must be a LIVE pending one: the driver abandons a receipt older than `RETRY_POLICY.abandonAfterMs` (7 days) by the REAL clock, so a receipt stamped with the fixed `AT`
+// stopped being live at 2026-11-23T10:00Z (AT + 7 days) and the chain completed instead of stopping. It is stamped one hour before the run, so the test no longer depends on the date it runs on.
+const STUCK=new Date(Date.now()-3600000).toISOString();
 const P='run-p';
 
 {
@@ -327,7 +330,7 @@ assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
   "INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');"+
   "INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}'),('run-p','watchlist',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}');"+
   "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1');"+
-  "INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('epg:stuck','film_facts','epg','film','film:tmdb:stuck','"+'b'.repeat(64)+"',0,2,'pending',1,'2020-01-01T00:00:00.000Z','"+AT+"','"+AT+"')");
+  "INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('epg:stuck','film_facts','epg','film','film:tmdb:stuck','"+'b'.repeat(64)+"',0,2,'pending',1,'2020-01-01T00:00:00.000Z','"+STUCK+"','"+STUCK+"')");
  const env=envOf(file);
  const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
  const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('99999999-9999-9999-9999-999999999999'):fn()});
@@ -388,12 +391,12 @@ assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
  const file=database();
  const sha='4'.repeat(64);
  const empty='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
- const tomorrow='2026-11-17T12:00:00.000Z';
+ const tomorrow=new Date(Date.now()+24*60*60*1000).toISOString(); // a TRUE future due time by the real clock the driver uses (a fixed date went into the past and stopped covering the future-due branch)
  sqlite(file,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+AT+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+empty+"','"+empty+"','"+AT+"');"+
   "INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');"+
   "INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}'),('run-p','watchlist',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}');"+
   "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1');"+
-  "INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('epg:future','film_facts','epg','film','film:tmdb:stuck','"+'c'.repeat(64)+"',0,2,'pending',1,'"+tomorrow+"','"+AT+"','"+AT+"')");
+  "INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('epg:future','film_facts','epg','film','film:tmdb:stuck','"+'c'.repeat(64)+"',0,2,'pending',1,'"+tomorrow+"','"+STUCK+"','"+STUCK+"')");
  const env=envOf(file);
  const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
  const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('dddddddd-dddd-dddd-dddd-dddddddddddd'):fn()});

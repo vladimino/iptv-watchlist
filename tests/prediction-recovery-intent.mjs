@@ -190,6 +190,37 @@ async function lidWorld(){
  w.ctx.CanonicalCatalogReader={...w.ctx.CanonicalCatalogReader,catalogFilmIdentityBridge:original};
 }
 
+// 2a''. AIR-478 / ADR 0186: the preview admits against the membership the queue uses (the live D1 watchlist snapshot), not the published programme. The
+// published programme still holds a film that left the watchlist under its Letterboxd id (LIDP, tmdb 4); the live membership no longer does.
+{
+ const w=await scoredWorld(6);
+ const programme={runId:'p1',films:[{id:'LIDP',title:'LIDP',original:'LIDP',year:2020,tmdbId:'4',canonicalIdentity:'tmdb:4',genres:[],actors:[],directors:[],shows:[{start:Date.now()}]}]};
+ w.records.set('programme.json',programme);
+ // Before the correction's premise: with the live membership still holding LIDP, the catalogue key is hidden by the dedupe (and the queue agrees).
+ w.ctx.watchlistQueueMembership=async()=>({films:programme.films});
+ const held=await w.admin('preview?films=tmdb_4&mode=prediction_only');
+ assert.deepEqual([held.data.films[0].outcome,held.data.films[0].reason],['blocked','not_admitted'],'a live watchlist member keeps its Letterboxd key: the catalogue key is not admitted (no second storage key)');
+ // The live membership no longer holds it: the catalogue key is admitted, as the queue admits it.
+ w.ctx.watchlistQueueMembership=async()=>({films:[]});
+ const r=await w.admin('preview?films=tmdb_4&mode=prediction_only');
+ assert.equal(r.status,200,JSON.stringify(r.data));
+ assert.deepEqual([r.data.films[0].outcome,r.data.films[0].reason],['eligible','eligible'],'the published programme no longer hides the current catalogue film');
+ const ok=await w.admin('confirm',{method:'POST',body:{films:['tmdb_4'],mode:'prediction_only',ttlHours:72,scopeHash:r.data.scopeHash,idempotencyKey:key(9)}});
+ assert.equal(ok.status,201,JSON.stringify(ok.data));
+ const lineageBefore=history(w).length;
+ const m=await start(w);
+ assert.deepEqual(m.films.map(f=>f.filmId),['tmdb_4'],'the manifest names the catalogue key and nothing else');
+ const s=await submitAll(w,m,{...w.prediction,predictedRating:4});
+ assert.deepEqual(s.results.map(x=>[x.filmId,x.status]),[['tmdb_4','recalculated']]);
+ await complete(w,m);
+ assert.equal(history(w).length,lineageBefore+1,'the replaced version is kept in the lineage');
+ assert.equal(sql(w.file,"SELECT count(*) n FROM prediction_pointer WHERE film_id='LIDP'")[0].n,0,'no second prediction under the Letterboxd key');
+ // A membership that cannot be read is not an empty one.
+ w.ctx.watchlistQueueMembership=async()=>{throw Object.assign(new Error('watchlist_unavailable'),{code:'watchlist_unavailable'});};
+ const broken=await w.admin('preview?films=tmdb_4&mode=prediction_only');
+ assert.notEqual(broken.status,200,'an unreadable live membership fails the preview closed');
+}
+
 // 2b. Confirm, replay, conflict; the ordinary runner re-scores exactly the cohort; the intent is satisfied; nothing loops.
 {
  const w=await scoredWorld(6);

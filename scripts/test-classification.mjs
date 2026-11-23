@@ -108,6 +108,9 @@ export const FILES={
  "air-566-serial-rule-replay.mjs": {
   "suite": "core"
  },
+ "air-579-index-candidates-offline.mjs": {
+  "suite": "core"
+ },
  "air-86-replay.mjs": {
   "suite": "core"
  },
@@ -1064,6 +1067,9 @@ export const FILES={
   "suite": "core"
  },
  "prediction-aux-bench-lib.mjs": {
+  "suite": "core"
+ },
+ "prediction-aux-p3-benchmark.mjs": {
   "suite": "core"
  },
  "r2-fake-bucket-lib.mjs": {
