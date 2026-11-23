@@ -8,18 +8,20 @@ VM steps are the SQLite instruction count of a statement, a proxy for the rows v
 
 `DELETE FROM published_epg_show WHERE programme_run_id=(...) AND basis='discovery' AND match_reason=?` runs when a decision write changes the assigned identity of an observation, **and for every first decision of a key** (`assignedRowsDelete` returns the statement when `previous` is null). The only index besides the primary key is `(programme_run_id, start_ms)`, so each execution walks the whole run.
 
-Synthetic: a published run of 20,000 shows (a quarter assigned by Discovery) plus a 10,000-row historical run that must stay.
+Synthetic: a published run of 20,000 shows (a quarter assigned by Discovery) plus a 10,000-row historical run that must stay. Each Discovery-assigned row names the **one** film of its key (`obs<k>` names `film<k>`), the invariant below. The measured key `obs5` is populated: **four rows in the published run and two in the historical run**. The statement measured is the deployed `ASSIGNED_ROWS_DELETE` read from the source (the run comes from `published_epg_authority`, which the fixture points at the published run, and the bound key is substituted), not a literal approximation; every variant is checked to delete exactly the four rows, leave the two historical rows and every other row, and keep survivor parity with today's statement.
 
-| Variant | Plan | VM steps | Extra index entries (each is a D1 `rows_written`) | Rows deleted |
+| Variant | Plan | VM steps (four rows deleted) | Extra index entries (each is a D1 `rows_written`) | Rows deleted |
 | --- | --- | --- | --- | --- |
-| Today | search by run, filter the rest | 110,011 | 0 | reference |
-| A1: index `(programme_run_id, basis, match_reason)` | `SEARCH ... (programme_run_id=? AND basis=? AND match_reason=?)` | 11 | 30,000 (one per show row of every run) | identical |
-| **A2: partial index `(programme_run_id, match_reason) WHERE basis='discovery'`** | `SEARCH ... (programme_run_id=? AND match_reason=?)` | **10** | **7,500** (Discovery-assigned rows only, at the synthetic quarter) | identical |
-| B: film-scoped delete (`... AND film_id=?`) | primary-key prefix `(programme_run_id, film_id)` | 37 | 0 | identical under an invariant, see below |
+| Today | search by run, filter the rest | 110,089 | 0 | 4 (reference) |
+| A1: index `(programme_run_id, basis, match_reason)` | covering `SEARCH ... (programme_run_id=? AND basis=? AND match_reason=?)` | 110 | 30,000 (one per show row of every run) | identical |
+| **A2: partial index `(programme_run_id, match_reason) WHERE basis='discovery'`** | covering `SEARCH ... (programme_run_id=? AND match_reason=?)` | **118** | **7,500** (Discovery-assigned rows only, at the synthetic quarter) | identical |
+| B: film-scoped delete (`... AND film_id=?`) | primary-key prefix `(programme_run_id, film_id)` | 119 | 0 | identical under the invariant, see below |
 
-A1 and A2 execute the **same statement text** as today, so the rows deleted are identical by construction; the test checks the surviving rows are identical in a historical run that must stay untouched. Their cost is the write amplification: A1 adds one entry per show row on every EPG publication; A2 adds one only per Discovery-assigned row, here a quarter of A1's.
+The step counts include deleting the four rows and, for A1 and A2, maintaining the new index; they are about a thousand times below today's walk.
 
-B needs no schema change, but it is exact only while every row of a key names the film of its stored verified decision (the invariant [ADR 0142](../../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 4 describes and the existing "skip when the identity is unchanged" branch also relies on). The test shows the difference: with an orphan row of another film under the same key the current statement removes it and B leaves it. Decisions are never deleted in the code (no `DELETE FROM discovery_decision`), so the invariant holds for rows written by the D1-era code; **it is not proven for rows that predate it or came from an import**, and a production check of it (a read-only join of assigned rows against the stored decisions) was not run and needs the owner's decision on a D1 read.
+A1 and A2 execute the **same statement text** as today, so the rows deleted are identical by construction; the test asserts it on the populated key (four rows deleted, the two historical rows and every unrelated row survive, survivor sets identical across today, A1 and A2). Their cost is the write amplification: A1 adds one entry per show row on every EPG publication; A2 adds one only per Discovery-assigned row, here a quarter of A1's.
+
+B needs no schema change, but it is exact only while every row of a key names the film of its stored verified decision (the invariant [ADR 0142](../../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 4 describes and the existing "skip when the identity is unchanged" branch also relies on). On a populated key with one film per key, B deletes the same four rows as today (asserted). The test then injects an orphan row of another film under the same key: the current statement removes it and B leaves it. Decisions are never deleted in the code (no `DELETE FROM discovery_decision`), so the invariant holds for rows written by the D1-era code; **it is not proven for rows that predate it or came from an import**, and a production check of it (a read-only join of assigned rows against the stored decisions) was not run and needs the owner's decision on a D1 read.
 
 ## 2. The three `film_external_id` lookups by `(scheme, value)`
 
@@ -27,22 +29,28 @@ Synthetic: 14,280 rows, three schemes, 10 % untrusted and about 2 % conflicting 
 
 | Statement | Plan before | Plan after | VM steps before | after |
 | --- | --- | --- | --- | --- |
-| `scheme='tmdb' AND value=?` | `SCAN` | `SEARCH ... (scheme=? AND value=?)` | 57,088 | 9 |
-| `(scheme='tmdb' AND value=?) OR (scheme='letterboxd' AND value=?)` | `SCAN` | `MULTI-INDEX OR` over the new index | 93,815 | 29 |
-| `scheme IN (...) AND value IN (SELECT value FROM json_each(?))` (eight values) | `SCAN` | `SEARCH ... (scheme=? AND value=?)` | 117,283 | 243 |
+| `scheme='tmdb' AND value=?`, a hit (`v10-3`, one row) | `SCAN` | `SEARCH ... (scheme=? AND value=?)` | 57,092 | 16 |
+| the same, a miss (`v10-8` is a Letterboxd value) | `SCAN` | `SEARCH ... (scheme=? AND value=?)` | 57,088 | 9 |
+| `(scheme='tmdb' AND value=?) OR (scheme='letterboxd' AND value=?)`, a TMDB hit | `SCAN` | `MULTI-INDEX OR` over the new index | 93,813 | 29 |
+| the same, a Letterboxd hit | `SCAN` | `MULTI-INDEX OR` over the new index | 93,815 | 29 |
+| `scheme IN (...) AND value IN (SELECT value FROM json_each(?))` (nine values, hits and a miss) | `SCAN` | `SEARCH ... (scheme=? AND value=?)` | 117,293 | 271 |
 | `scheme IN (...) AND film_id IN (SELECT value FROM json_each(?))` (control) | primary-key `SEARCH` | unchanged | 120 | 120 |
 
-The test compares the returned rows with and without the index for eight values and for a conflicting and an untrusted value: identical. Write cost: one extra index entry per `film_external_id` row written (the table changes rarely: enrichment and admission writers), 14 k entries once to build.
+The test asserts the returned rows: the TMDB hit returns one row and the miss none before the index, and with and without the index the rows are identical for nine values and for a conflicting and an untrusted value. Write cost: one extra index entry per `film_external_id` row written (the table changes rarely: enrichment and admission writers), 14 k entries once to build.
 
 ## Decision request (the choice is the owner's; nothing here is applied)
 
 | Option | Gain (offline) | Cost and risk |
 | --- | --- | --- |
-| **D1. One additive migration with A2 and the `film_external_id` index** | both hotspots from a run-wide or table-wide walk to a handful of steps, semantics unchanged by construction | a schema change: production is at schema 33 with `0034` and `0035` (AIR-554) in `main` and not applied, so the next free number is `0036` and the strict chain needs both first, or a separate owner-approved idempotent `CREATE INDEX IF NOT EXISTS` operation that leaves `schema_contract` unchanged and is later folded into a migration. Each needs an operator plan, an explicit owner GO and a rollback (`DROP INDEX`). Write cost: 1 entry per Discovery-assigned show row, 1 per external-id row |
-| D2. Code-only B for the delete, no index on `film_external_id` | the delete only (110,011 to 37 steps); no schema | exact only under the invariant; an orphan row survives; needs the owner to accept the invariant or a read-only check of production first |
+| **D1. One additive migration with A2 and the `film_external_id` index** | both hotspots from a run-wide or table-wide walk to about a hundred steps or fewer, semantics unchanged by construction | a schema change: production is at schema 33 with `0034` and `0035` (AIR-554) in `main` and not applied, so the next free number is `0036` and the strict chain needs both first, or a separate owner-approved idempotent `CREATE INDEX IF NOT EXISTS` operation that leaves `schema_contract` unchanged and is later folded into a migration. Each needs an operator plan, an explicit owner GO and a rollback (`DROP INDEX`). Write cost: 1 entry per Discovery-assigned show row, 1 per external-id row |
+| D2. Code-only B for the delete, no index on `film_external_id` | the delete only (110,089 to 119 steps); no schema | exact only under the invariant; an orphan row survives; needs the owner to accept the invariant or a read-only check of production first |
 | D3. A1 instead of A2 | same read gain | four times the write cost of A2 at the synthetic share, on every EPG publication |
 
 Recommendation: **D1 with A2**, because it keeps today's delete semantics and has the smallest write cost, and bundle the `film_external_id` index with it so one operation covers both. D2 is the only option that needs no schema change; take it only with the owner's acceptance of the invariant. Expected production effect is not claimed: the rows saved per execution follow the real table sizes and the number of executions on the next natural EPG/Discovery run.
+
+## Correction
+
+The first version of this page (PR #932 at `b4a7498`) measured a key that no Discovery row carried (`obs5` was absent from the generated data) and a TMDB lookup that missed, so its DELETE figures described a no-op and its D2 invariant was not modelled. The independent review found it; the fixture now has one film per key, a populated key, the deployed statement shape with the authority pointer, and hit and miss lookups, and every number above is from that corrected run.
 
 ## Not measured
 
