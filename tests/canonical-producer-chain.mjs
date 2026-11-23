@@ -7,7 +7,7 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as Fence from '../src/canonical-producer-fence.js';
 import * as Chain from '../src/canonical-producer-chain.js';
-import {reconcileProducerChain,acquireSealedSnapshot,runProducerWorkflow} from '../src/canonical-producer-workflow.js';
+import {reconcileProducerChain,acquireSealedSnapshot,runProducerWorkflow,PRODUCER_DELIVERY_HOLD,HELD_BY_DELIVERY} from '../src/canonical-producer-workflow.js';
 import {producerRequestId} from '../src/canonical-producer-adapters.js';
 import {runEpgProducerPass} from '../src/canonical-producer-driver.js';
 import * as Store from '../src/canonical-producer-store.js';
@@ -112,10 +112,10 @@ const P='run-p';
 
 {
  const created=[];
- const dormant=await reconcileProducerChain({...envOf(database('prepared')),PRODUCER_WORKFLOW:{create:async({id})=>{created.push(id);}}},{now:Date.parse(AT)});
+ const dormant=await reconcileProducerChain({...envOf(database('prepared')),PRODUCER_WORKFLOW:{create:async({id})=>{created.push(id);}}},{now:Date.parse(AT),hold:false});
  assert.equal(dormant.reason,'marker_unreadable');
  assert.equal(created.length,0);
- const noBind=await reconcileProducerChain(envOf(database()),{now:Date.parse(AT)});
+ const noBind=await reconcileProducerChain(envOf(database()),{now:Date.parse(AT),hold:false});
  assert.equal(noBind.reason,'workflow_unavailable');
 }
 
@@ -190,7 +190,7 @@ assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
   "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1')");
  const env=envOf(file);
  const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
- const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('33333333-3333-3333-3333-333333333333'):fn()});
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('33333333-3333-3333-3333-333333333333'):fn()},{hold:false});
  assert.equal(result.state,'complete');
  assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'complete');
  const run=rows(file,"SELECT run_key,source_generation,pass_state FROM canonical_producer_run WHERE origin='epg'")[0];
@@ -256,10 +256,37 @@ assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
  assert.equal(prior.state,'complete');
  assert.equal(one(file,"SELECT pass_state FROM canonical_producer_run WHERE origin='epg'"),'passed');
  assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'pending','a pass without the chain GATE does not complete the owner');
- const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('66666666-6666-6666-6666-666666666666'):fn()});
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('66666666-6666-6666-6666-666666666666'):fn()},{hold:false});
  assert.equal(result.state,'complete');
  assert.equal(result.pass.state,'already_complete');
  assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'complete');
+}
+
+// AIR-572 delivery hold: default-DENY on both Producer entrypoints, zero I/O, no effect on anything else.
+{
+ assert.equal(PRODUCER_DELIVERY_HOLD,true,'the code ships held');
+ const touched=[];
+ const trap=new Proxy({},{get:(_t,prop)=>{touched.push(String(prop));throw new Error('held entrypoint touched env.'+String(prop));}});
+ const cron=await reconcileProducerChain(trap,{now:Date.parse(AT)});
+ assert.deepEqual(cron,{ran:false,reason:HELD_BY_DELIVERY});
+ const instance=await runProducerWorkflow(trap,{programmeRunId:P,epoch:1},{do:()=>{touched.push('step');throw new Error('step used');}});
+ assert.deepEqual(instance,{state:HELD_BY_DELIVERY});
+ assert.deepEqual(touched,[],'no env property, D1 statement, Workflow create or step is reached while held');
+ // Only an explicit hold:false lifts it; truthy or unknown values keep it closed.
+ for(const value of [undefined,true,1,'false',null]){
+  const out=await reconcileProducerChain(trap,{now:Date.parse(AT),hold:value});
+  assert.equal(out.reason,value===undefined||value===true||value===1||value==='false'||value===null?HELD_BY_DELIVERY:out.reason);
+ }
+ // A held cron tick on a real open database changes no row and creates no instance (the deployed code, as the hourly EPG path calls it).
+ const file=database();
+ const created=[];
+ const before=one(file,'SELECT COUNT(*) FROM canonical_producer_chain')+':'+one(file,'SELECT COUNT(*) FROM canonical_producer_run');
+ const held=await reconcileProducerChain({...envOf(file),PRODUCER_WORKFLOW:{create:async({id})=>{created.push(id);}}},{now:Date.parse(AT)});
+ assert.equal(held.reason,HELD_BY_DELIVERY);
+ assert.equal(created.length,0);
+ assert.equal(one(file,'SELECT COUNT(*) FROM canonical_producer_chain')+':'+one(file,'SELECT COUNT(*) FROM canonical_producer_run'),before);
+ // The hourly EPG caller passes no `hold`, so the default applies.
+ assert.doesNotMatch(fs.readFileSync('src/epg-orchestration.js','utf8'),/hold\s*:/,'the cron path cannot lift the hold');
 }
 
 // AIR-572: a Cloudflare Workflow `step` is an RPC stub whose methods have no `.bind`. The stub below is function-shaped but refuses
@@ -274,7 +301,9 @@ function rpcStep(){
  const {stub}=rpcStep();
  assert.equal(typeof stub.do,'function');
  assert.throws(()=>stub.do.bind(stub),TypeError,'the stub must not expose bind, so the old code path is reproduced');
- assert.match(fs.readFileSync('src/canonical-producer-workflow.js','utf8').replace(/\/\/.*$/gm,''),/^(?![\s\S]*step\.do\.bind)/,'no detached or bound RPC method remains in the workflow');
+ // The legacy expression of the Workflow, run against the same stub, fails with the production TypeError (no step ran).
+ const legacyDoStep=step=>typeof step?.do==='function'?step.do.bind(step):(name,fn)=>fn();
+ assert.throws(()=>legacyDoStep(stub),TypeError);
 }
 {
  const file=database();
@@ -287,7 +316,7 @@ function rpcStep(){
  const env=envOf(file);
  const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
  const {stub,seen}=rpcStep();
- const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},stub);
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},stub,{hold:false});
  assert.equal(result.state,'complete','the Workflow runs through an RPC-shaped step');
  assert.deepEqual(seen.slice(0,2),['nonce','claim'],'the first steps are the nonce and the claim, in order');
  assert.equal(seen.at(-1),'work');
@@ -318,7 +347,7 @@ function rpcStep(){
   "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1')");
  const env=envOf(file);
  const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
- const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('77777777-7777-7777-7777-777777777777'):fn()});
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('77777777-7777-7777-7777-777777777777'):fn()},{hold:false});
  assert.equal(result.state,'complete');
  assert.equal(one(file,'SELECT release_pin FROM canonical_producer_chain'),'film:tmdb:3');
  sqlite(file,"DELETE FROM watchlist_film");
@@ -346,7 +375,7 @@ function rpcStep(){
  assert.equal(sqlite(file,inserts.join(';')).status,0);
  const env=envOf(file);
  const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
- const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('88888888-8888-8888-8888-888888888888'):fn()});
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('88888888-8888-8888-8888-888888888888'):fn()},{hold:false});
  assert.equal(result.state,'complete','a backlog larger than one inline page is drained before claim');
  assert.equal(Number(one(file,"SELECT COUNT(*) FROM canonical_write_receipt WHERE state='abandoned'")),21);
 }
@@ -362,7 +391,7 @@ function rpcStep(){
   "INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('epg:stuck','film_facts','epg','film','film:tmdb:stuck','"+'b'.repeat(64)+"',0,2,'pending',1,'2020-01-01T00:00:00.000Z','"+AT+"','"+AT+"')");
  const env=envOf(file);
  const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
- const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('99999999-9999-9999-9999-999999999999'):fn()});
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('99999999-9999-9999-9999-999999999999'):fn()},{hold:false});
  assert.equal(result.state,'stopped');
  assert.equal(result.code,'receipt_state_conflict');
  assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'stopped');
@@ -380,7 +409,7 @@ function rpcStep(){
   "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1')");
  const env=envOf(file);
  const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
- const first=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'):fn()});
+ const first=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'):fn()},{hold:false});
  assert.equal(first.state,'complete');
  assert.equal(one(file,'SELECT release_pin FROM canonical_producer_chain'),'film:tmdb:3');
  assert.equal(sqlite(file,"UPDATE published_epg_authority SET generation=11 WHERE id=1").status,0);
@@ -406,7 +435,7 @@ function rpcStep(){
   "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1')");
  const env=envOf(file);
  const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
- const first=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('cccccccc-cccc-cccc-cccc-cccccccccccc'):fn()});
+ const first=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('cccccccc-cccc-cccc-cccc-cccccccccccc'):fn()},{hold:false});
  assert.equal(first.state,'complete');
  assert.equal(one(file,'SELECT release_pin FROM canonical_producer_chain'),'empty');
  sqlite(file,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:tmdb:9',1,'Later','"+AT+"');INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:tmdb:9','"+AT+"')");
@@ -428,7 +457,7 @@ function rpcStep(){
   "INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('epg:future','film_facts','epg','film','film:tmdb:stuck','"+'c'.repeat(64)+"',0,2,'pending',1,'"+tomorrow+"','"+AT+"','"+AT+"')");
  const env=envOf(file);
  const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
- const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('dddddddd-dddd-dddd-dddd-dddddddddddd'):fn()});
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('dddddddd-dddd-dddd-dddd-dddddddddddd'):fn()},{hold:false});
  assert.equal(result.state,'stopped');
  assert.equal(result.code,'receipt_state_conflict','a future-due epg receipt still blocks current');
 }

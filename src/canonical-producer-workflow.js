@@ -16,6 +16,13 @@ import {
 import {epgRunForGeneration} from './canonical-producer-store.js';
 
 const iso=ms=>new Date(ms).toISOString();
+// AIR-572 delivery hold: a static, default-DENY guard in code. While true, neither Producer entrypoint performs any I/O: the hourly
+// `reconcileProducerChain` reads nothing, writes nothing and creates no Workflow instance, and an already existing instance entering
+// `runProducerWorkflow` returns before its nonce, claim or any D1 access. It depends on no secret, env, D1 state or Cloudflare setting.
+// Production callers never pass `hold`, so the default applies. Lifting it is a separate owner-approved code change (a follow-up PR),
+// never a flag. It does not touch EPG publication or any other canonical writer.
+export const PRODUCER_DELIVERY_HOLD=true;
+export const HELD_BY_DELIVERY='held_by_delivery';
 function meterD1(db,meter){
  if(!db||typeof db.prepare!=='function')return db;
  return new Proxy(db,{get(target,prop){
@@ -153,7 +160,8 @@ async function createInstance(env,id,params){
  return {ok:false,reason:'create_uncertain'};
 }
 
-export async function reconcileProducerChain(env,{now=Date.now()}={}){
+export async function reconcileProducerChain(env,{now=Date.now(),hold=PRODUCER_DELIVERY_HOLD}={}){
+ if(hold!==false)return {ran:false,reason:HELD_BY_DELIVERY};
  try{
   if(typeof env?.PRODUCER_WORKFLOW?.create!=='function')return {ran:false,reason:'workflow_unavailable'};
   let marker;
@@ -231,7 +239,8 @@ async function drainEpgReceipts(env,plan,fence){
  throw Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
 }
 
-export async function runProducerWorkflow(env,payload,step){
+export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVERY_HOLD}={}){
+ if(hold!==false)return {state:HELD_BY_DELIVERY};
  const P=payload?.programmeRunId,epoch=Number(payload?.epoch);
  if(typeof P!=='string'||!P||!Number.isInteger(epoch)||epoch<1)return {state:'invalid'};
  // AIR-572: `step` is a Cloudflare RPC stub. Its methods are callable but expose no `.bind`/`.call`/`.apply`, so the method is
