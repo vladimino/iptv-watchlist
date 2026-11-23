@@ -20,10 +20,24 @@ const BACKOFF_MS=[1*HOUR,3*HOUR,12*HOUR];
 const SOFT=new Set(['film_person_precondition','film_person_redirect','film_person_reference','identity_collision']);
 const TRANSIENT=new Set(['film_person_unavailable','film_person_held','film_person_fence','film_person_revision_conflict','film_person_membership_closed','film_person_bounded']);
 const codeOf=error=>String(error?.code||'');
+// The identity resolver is bounded (1000 distinct lids per call) while a valid Watchlist may hold up to 5000: a whole list is resolved in chunks of at most RESOLVE_CHUNK and the per-id answers are merged. A chunk that fails
+// fails the whole answer (`ok:false`, never a partial "not referenced"). Trust, proofs and guards are exactly those of the resolver, chunk by chunk.
+export const RESOLVE_CHUNK=1000;
+export async function resolveInChunks(resolve,env,lids,size=RESOLVE_CHUNK){
+ const unique=[...new Set(lids)];
+ if(unique.length<=size)return resolve(env,unique);
+ const byId=new Map();
+ for(let from=0;from<unique.length;from+=size){
+  const out=await resolve(env,unique.slice(from,from+size));
+  if(!out||!out.ok)return out&&out.ok===false?out:{ok:false};
+  for(const [lid,item] of out.byId)byId.set(lid,item);
+ }
+ return {ok:true,byId};
+}
 // The Films referenced by a list of Letterboxd ids (their resolved targets). Several lids may name ONE Film (`film_external_id` is keyed by film, scheme and value), so a Film leaves the Watchlist only when NO lid of the
 // list still resolves to it. null when the identity reads fail (the caller treats that as a system fault, never as "not referenced").
 async function referencedFilms(deps,env,lids){
- const out=await deps.resolve(env,lids);
+ const out=await resolveInChunks(deps.resolve,env,lids);
  if(!out.ok)return null;
  const films=new Set();
  for(const item of out.byId.values())if(item&&item.target)films.add(item.target);
@@ -190,7 +204,7 @@ export function membershipBaseline(deps){
   if(current.effectsDrainedVersion<current.version)return {ok:false,reason:'effects_pending',version:current.version};
   const stored=await deps.readStored(ctx.env).catch(()=>null);
   if(!stored)return {ok:false,reason:'stored_unreadable'};
-  const resolved=await deps.resolve(ctx.env,[...current.lids]);
+  const resolved=await resolveInChunks(deps.resolve,ctx.env,[...current.lids]);
   if(!resolved.ok)return {ok:false,reason:'identity_unreadable'};
   return {ok:true,version:current.version,plan:planBaseline({current:[...current.lids],stored,byId:resolved.byId})};
  };

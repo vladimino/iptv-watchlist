@@ -8,7 +8,7 @@ import {d1Standin} from './d1-standin.mjs';import {sqliteSync} from './sqlite-se
 import * as Watchlist from '../src/watchlist-d1.js';
 import {setFilmMembership,writeFilmFacts,membershipMarker} from '../src/canonical-film-writers.js';
 import {resolveSourceIdentitiesEach,filmFactsOf} from '../src/canonical-producer-workflow.js';
-import {membershipEffect,membershipReconcile,membershipBaseline,planBaseline,MEMBERSHIP_EFFECT_MAX_ATTEMPTS,HANDOFF_MAX_ATTEMPTS} from '../src/watchlist-membership.js';
+import {membershipEffect,membershipReconcile,membershipBaseline,planBaseline,resolveInChunks,RESOLVE_CHUNK,MEMBERSHIP_EFFECT_MAX_ATTEMPTS,HANDOFF_MAX_ATTEMPTS} from '../src/watchlist-membership.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-watchlist-membership-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -23,7 +23,7 @@ const NOW=Date.parse('2026-11-23T10:00:00.000Z');const T=new Date(NOW).toISOStri
 let copies=0;
 const open=(mode='producer',options={})=>{const file=path.join(root,'db-'+(copies++)+'.sqlite');fs.copyFileSync(full,file);if(mode==='sync')sqlite(file,"UPDATE watchlist_membership_authority SET mode='sync',generation=1 WHERE id=1;");return {file,env:{DB:d1Standin(file,options)}};};
 const GUARD=[Watchlist.guardOf('1'),[]];
-const film=(i,extra={})=>({id:'lb'+i,title:'Film '+i,year:2000+i,url:'https://letterboxd.com/film/film-'+i+'/',...extra});
+const film=(i,extra={})=>({id:'lb'+i,title:'Film '+i,year:2000+(i%100),url:'https://letterboxd.com/film/film-'+i+'/',...extra});
 const list=(...ids)=>ids.map(i=>film(i));
 let scans=0;
 const publish=async(made,films)=>{const id='scan-'+(scans++);const out=await Watchlist.publishSnapshot(made.env,films,{scanId:id,observedAt:T,runId:'run-'+id,slotKey:'20261123-1030'},{now:NOW});assert.equal(out.ok,true,JSON.stringify(out));return out;};
@@ -405,6 +405,53 @@ const drainOne=async(made,writer)=>{const {next,receipt}=await runMembership(mad
  await Watchlist.completeEffect(blindRows.env,{snapshotId:f2.snapshotId,effect:'membership',receipt:h2},{now:NOW,guards:[GUARD]});
  await membershipReconcile(deps({resolve:async()=>({ok:false})}))(ctxOf(blindRows.env),{now:NOW});
  assert.equal(handoff(blindRows.file)[0].attempts,1,'a whole-step identity failure is counted too');
+}
+
+// ===== 12. a valid Watchlist is larger than the resolver cap (1000 lids per call; the contract allows 5000) =====
+{
+ // the chunker is bounded and exact at the boundaries, and a failing chunk fails the whole answer
+ for(const n of [1000,1001,2000,5000]){
+  const calls=[];
+  const out=await resolveInChunks(async(env,lids)=>{calls.push(lids.length);return {ok:true,byId:new Map(lids.map(lid=>[lid,{target:'film:'+lid,guards:[]}]))};},{}, Array.from({length:n},(_,i)=>'l'+i));
+  assert.equal(out.ok,true);assert.equal(out.byId.size,n);assert.ok(calls.every(size=>size<=RESOLVE_CHUNK),'no call above the cap: '+n);assert.equal(calls.length,Math.ceil(n/RESOLVE_CHUNK));
+ }
+ assert.deepEqual(await resolveInChunks(async(env,lids)=>lids[0]==='l1000'?{ok:false}:{ok:true,byId:new Map(lids.map(l=>[l,{target:'film:'+l}]))},{},Array.from({length:1500},(_,i)=>'l'+i)),{ok:false});
+ // real data at 1000 and 1001 ids: effect (removal with two lids -> one Film), reconcile list and baseline dry-run/apply
+ for(const n of [1000,1001]){
+  const made=open('sync');
+  addFilm(made.file,'lb1',{owner:'film:shared'});addFilm(made.file,'lb2',{owner:'film:shared'});
+  const bulk=[];for(let i=3;i<=n;i++)bulk.push("('film:lb"+i+"',1,NULL,'T','"+T+"')");
+  const claims=[];for(let i=3;i<=n;i++)claims.push("('film:lb"+i+"','letterboxd','lb"+i+"',1,0)");
+  sqlite(made.file,"INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES "+bulk.join(',')+";INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES "+claims.join(',')+";");
+  const all=Array.from({length:n},(_,i)=>i+1);
+  // the admission ledger caps one promotion at 500 new ids, so the list grows in steps; every earlier effect is completed with a plain receipt (the writer under test runs on the last version only)
+  for(const upTo of [400,800,n]){
+   if(upTo>n)continue;
+   await publish(made,list(...all.filter(i=>i<=upTo)));
+   sqlite(made.file,"UPDATE watchlist_admission_pending SET state='resolved',resolved_by='t';");
+   for(;;){const todo=await Watchlist.pendingEffects(made.env);if(!todo.effects.length)break;const e=todo.effects[0];assert.equal((await Watchlist.completeEffect(made.env,{snapshotId:e.snapshotId,effect:e.effect,receipt:'seed'},{now:NOW,guards:[GUARD]})).ok,true);}
+  }
+  sqlite(made.file,"INSERT INTO watchlist_film (film_id,updated_at) SELECT id,'"+T+"' FROM film WHERE id IN ('film:shared') OR id LIKE 'film:lb%';");
+  // v2 removes lb1 (the other lid lb2 keeps the shared Film) and lb3 (a plain removal)
+  await publish(made,list(...all.filter(i=>i!==1&&i!==3)));
+  const writer=membershipEffect(deps());
+  const receipt=await drainOne(made,writer);
+  assert.match(receipt,/:h0$/,n+' ids: nothing is handed off');
+  const have=new Set(members(made.file));
+  assert.equal(have.has('film:shared'),true,n+' ids: the shared Film stays');assert.equal(have.has('film:lb3'),false,n+' ids: a plain removal is applied');
+  assert.deepEqual(handoff(made.file),[],n+' ids: no handoff');
+  // the reconcile list of a handed-off removal resolves the whole current snapshot too
+  sqlite(made.file,"INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:lb3','"+T+"');INSERT INTO watchlist_membership_handoff (lid,first_version,state,attempts,next_retry_at,reason,updated_at) VALUES ('lb3',2,'pending',0,NULL,'x','"+T+"');");
+  assert.equal((await membershipReconcile(deps())(ctxOf(made.env),{now:NOW})).settled,1,n+' ids: the reconcile applies against the current snapshot');
+  assert.equal(new Set(members(made.file)).has('film:lb3'),false);
+  // baseline over the whole list: one extra stale Film and one missing Film are found and fixed within the bounded apply
+  sqlite(made.file,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:old',1,'o','"+T+"');INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:old','"+T+"');DELETE FROM watchlist_film WHERE film_id='film:lb4';");
+  const base=membershipBaseline(deps({readStored:async env=>(await env.DB.prepare('SELECT film_id FROM watchlist_film').all()).results.map(row=>row.film_id),limit:10}));
+  const dry=await base.dryRun(ctxOf(made.env));
+  assert.deepEqual([dry.ok,dry.decision,dry.counts.add,dry.counts.remove,dry.counts.unresolved],[true,'drift',1,1,0],n+' ids: the dry run resolves the whole list');
+  const done=await base.apply(ctxOf(made.env));
+  assert.deepEqual([done.decision,done.written,done.remaining],['baseline_not_recorded',2,0],n+' ids: apply completes (the proof needs the producer-mode marker, which a sync database no longer has)');
+ }
 }
 
 // ===== 10. single writer, proven in the source =====
