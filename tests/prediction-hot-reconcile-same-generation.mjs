@@ -73,18 +73,26 @@ mode='ok';
 {const r=await realStart();assert.equal(r.status,200);assert.equal(queue().showsSignature,'s1');assert.equal(queue().programmeRunId,'p1');
  assert.ok(hot()+queue().hotPredicted>=3100-100,'3,100 cold films promoted to hot: '+hot());}
 
-// Incremental Discovery chunks: each moves the signature, each next start rebuilds once and none is lost.
+// AIR-588 (ADR 0204): incremental Discovery chunks are ordering drift of the same generation. The start delivers from the stored queue without rebuilding it (the accepted lag), and the
+// hourly ordering writer rebuilds once per chunk; none is lost.
+const ordering=async()=>{release();const r=await ctx.reconcilePredictionOrdering(w.env,{sleep:async()=>{}});await reload();return r;};
 {let sig=1;const before=hot();
- for(const n of [3150,3200]){assign(n,'s'+(++sig+1));const r=await realStart();assert.equal(r.status,200);assert.equal(queue().showsSignature,signature,'rebuilt on the chunk '+n);assert.equal(queue().programmeRunId,'p1');}
+ for(const n of [3150,3200]){
+  assign(n,'s'+(++sig+1));const built=queue().refreshedAt;
+  const r=await realStart();assert.equal(r.status,200);assert.equal(queue().refreshedAt,built,'the start does not rebuild for ordering drift (chunk '+n+')');assert.notEqual(queue().showsSignature,signature);
+  const o=await ordering();assert.equal(o.outcome,'rebuilt',JSON.stringify(o));assert.equal(o.cause,'shows_signature_changed');
+  assert.equal(queue().showsSignature,signature,'the writer rebuilt on the chunk '+n);assert.equal(queue().programmeRunId,'p1');
+  assert.equal((await ordering()).outcome,'current','a second tick finds nothing to do');
+ }
  assert.ok(hot()+queue().hotPredicted>=before,'no hot work was lost across chunks');}
 
-// A concurrent writer: an assignment lands between the signature the rebuild read and its write. The queue is ranked on the older signature, so the next start rebuilds again.
-{assign(3200,'racing-old');let first=true;
+// A concurrent writer: an assignment lands between the signature the writer's rebuild read and its write. The queue is ranked on the older signature, so the next tick rebuilds again.
+{assign(3200,'racing-old');let calls=0;
  const original=ctx.PublishedEpg.assignedShowsSignature;
- ctx.PublishedEpg.assignedShowsSignature=async(...args)=>{const value=await original(...args);if(first){first=false;signature='racing-new';}return value;};
- const r=await realStart();assert.equal(r.status,200,'AIR-542: a priority-only race never refuses the start: '+JSON.stringify(r.data).slice(0,200));
+ ctx.PublishedEpg.assignedShowsSignature=async(...args)=>{const value=await original(...args);if(++calls===2)signature='racing-new';return value;};
+ const o=await ordering();assert.equal(o.outcome,'rebuilt');assert.equal(queue().showsSignature,'racing-old','ranked on what the rebuild read');
  ctx.PublishedEpg.assignedShowsSignature=original;
- const again=await realStart();assert.equal(again.status,200);assert.equal(queue().showsSignature,'racing-new','the next natural start ranks on the signature that landed during the rebuild');}
+ const again=await ordering();assert.equal(again.outcome,'rebuilt');assert.equal(queue().showsSignature,'racing-new','the next tick ranks on the signature that landed during the rebuild');}
 
 // Another run id is the existing rollover path (`priorityRefreshDue`): the same-generation check stays silent about it.
 {records.set('programme.json',{runId:'p2',films:[],catalogFilms:[]});const d=await dry();assert.ok(!String(d.data.priorityCause||'').startsWith('shows_signature'),'rollover is not a shows-signature cause');}
@@ -162,7 +170,11 @@ mode='ok';
   // At the end of the cap: due; the start reconciles both directions before it selects.
   clock=R+CAP-1;assert.equal((await cdry()).priorityCause,undefined,'one millisecond before the cap ends');
   clock=R+CAP;{const d=await cdry();assert.equal(d.priorityCause,'window_transition');assert.equal(d.hotBasis.status,'degraded');}
-  assert.equal((await start()).status,200);q=await read();
+  // AIR-588 (ADR 0204): the start delivers from the stored queue (a queue rebuilt 15 minutes ago is inside the 90-minute lag bound); the ordering writer reconciles both directions.
+  const ordering=async()=>{release();return c.ctx.reconcilePredictionOrdering(c.env,{sleep:async()=>{}});};
+  {const before=(await read()).refreshedAt;assert.equal((await start()).status,200);assert.equal((await read()).refreshedAt,before,'the start defers the window transition');}
+  {const o=await ordering();assert.equal(o.outcome,'rebuilt');assert.equal(o.cause,'window_transition');}
+  q=await read();
   assert.deepEqual(hotOf(q),['tmdb_1'],'cold to hot and hot to cold, once the cap ended');assert.ok(q.coldPending.includes('tmdb_2'));assert.equal(q.programmeRunId,'p1');
   assert.equal(q.priorityNextChangeAt,iso(S3-24*HOUR+1),'the next edge is the third film');
   // The third film becomes hot one millisecond past its edge: deferred while inside the cap of the rebuild at R+CAP, reflected after it.
@@ -170,15 +182,16 @@ mode='ok';
   clock=S3-24*HOUR;assert.equal((await cdry()).hotBasis,undefined,'at the edge itself: nothing');
   clock=S3-24*HOUR+1;{const d=await cdry();assert.equal(d.priorityCause,undefined);assert.equal(d.hotBasis.cause,'window_transition_deferred');}
   assert.equal((await start()).status,200);assert.equal((await read()).refreshedAt,builtCap,'inside the cap');
-  clock=R+2*CAP;assert.equal((await cdry()).priorityCause,'window_transition');assert.equal((await start()).status,200);q=await read();
-  assert.deepEqual(hotOf(q),['tmdb_1','tmdb_3'],'the film that became hot is reflected by the first start after the cap');
+  clock=R+2*CAP;assert.equal((await cdry()).priorityCause,'window_transition');assert.equal((await ordering()).outcome,'rebuilt');q=await read();
+  assert.deepEqual(hotOf(q),['tmdb_1','tmdb_3'],'the film that became hot is reflected by the first ordering tick after the cap');
   // No loop: with no edge reached since the rebuild, the next start rebuilds nothing.
   const again=q.refreshedAt;clock+=60000;assert.equal((await start()).status,200);assert.equal((await read()).refreshedAt,again,'no rebuild without a reached edge');
   // Hot to cold when the shows pass 72 h: exactly at start+72h still hot, 1 ms later cold (the cap has long passed).
   clock=S1+72*HOUR;assert.equal((await cdry()).priorityCause,undefined,'exactly at start+72h the film is still hot');
   clock=S1+72*HOUR+1;assert.equal((await cdry()).priorityCause,'window_transition');
+  // The last rebuild is days old: past the 90-minute lag bound the start rebuilds itself, as before AIR-588.
   assert.equal((await start()).status,200);q=await read();assert.ok(!q.hotPending.includes('tmdb_1'),'hot to cold 1 ms past start+72h');
-  clock=S3+72*HOUR+1;assert.equal((await start()).status,200);q=await read();assert.equal(q.hotPending.length,0);assert.equal(q.priorityNextChangeAt,null);
+  clock=S3+72*HOUR+1;assert.equal((await ordering()).outcome,'rebuilt');q=await read();assert.equal(q.hotPending.length,0);assert.equal(q.priorityNextChangeAt,null);
  }finally{globalThis.Date=RealDate;}
 }
 
