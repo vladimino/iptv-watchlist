@@ -13,11 +13,12 @@ const KEY='monitor/state.json';
 const TOKEN='123456789:AAFixtureTokenFixtureTokenFixtureToken_1',CHAT='-1001234567890';
 const SEND_URL='https://api.telegram.org/bot'+TOKEN+'/sendMessage';
 
-function setup(extraEnv={}){
- const {clock,FakeDate,crypto}=makeClock(T0),net=makeNetwork(),bucket=makeBucket();
+// `code` replays another policy/runtime pair over the same bucket (AIR-592 rollback: the pre-ADR-0206 sources kept as fixtures).
+function setup(extraEnv={},{bucket=makeBucket(),policyFile='src/domain/monitor-policy.js',monitorFile='src/monitor.js'}={}){
+ const {clock,FakeDate,crypto}=makeClock(T0),net=makeNetwork();
  const ctx=loadContext({net,clock,FakeDate,crypto});
  const logs=[];ctx.console={log:line=>logs.push(String(line)),warn:line=>logs.push(String(line)),error:line=>logs.push(String(line))};
- vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scoped('src/domain/monitor-policy.js','MonitorPolicy')+'\n'+fs.readFileSync('src/monitor.js','utf8'),ctx);
+ vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scoped(policyFile,'MonitorPolicy')+'\n'+fs.readFileSync(monitorFile,'utf8'),ctx);
  const calls=[];let script=()=>({status:200,body:{ok:true,result:{message_id:1}}});
  ctx.fetch=async(url,options={})=>{
   const entry={url:String(url),method:options.method||'GET',body:options.body?JSON.parse(options.body):null};calls.push(entry);
@@ -210,7 +211,7 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
 }
 
 // 13. ADR 0206 rollout over a state document written before it: the stored `needs_owner` is read as degraded and critical, the undelivered message keeps its id
-// and is delivered once, the history and the last send time are kept, the next reminder comes 6 h after the last delivery and one recovery follows.
+// and is delivered once, the history is kept, the delivery time becomes the last send, the next reminder comes 6 h after it and one recovery follows.
 {
  const t=setup();healthy(t.bucket);owner(t);
  const day=at(T0).slice(0,10),issue='ratings_quarantined',pendingId=issue+'|reminder|'+at(T0-H);
@@ -228,13 +229,79 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  const lines=sent[0].body.text.split('\n');assert.equal(lines[0],'IPTV monitor: REMINDER (degraded, critical)');assert.equal(lines.at(-1),'Ref: '+pendingId,'the receiver can still drop a repeat by its id');
  const doc=t.bucket.value(KEY);assert.doesNotMatch(JSON.stringify(doc),/needs_owner/,'the next write carries no needs_owner');
  assert.deepEqual(doc.outbox,[]);assert.equal(doc.overall,'degraded');
- assert.deepEqual(doc.alerts.issues[issue],{severity:'degraded',critical:true,firstSeenAt:at(T0-3*H),seen:4,lastSentAt:at(T0-H),sendCount:2,sendDay:day,sendsToday:2},'history kept, accounting moved by the delivery');
- for(const hour of [1,2,3,4])await t.M.run(t.env,{now:T0+hour*H});
- assert.equal(tg(t.calls).length,1,'no reminder before 6 h after the last delivery');
- await t.M.run(t.env,{now:T0+5*H});assert.deepEqual(tg(t.calls).slice(1).map(item=>item.body.text.split('\n')[0]),['IPTV monitor: REMINDER (degraded, critical)'],'the reminder 6 h after the last delivery');
+ assert.deepEqual(doc.alerts.issues[issue],{severity:'degraded',critical:true,firstSeenAt:at(T0-3*H),seen:4,lastSentAt:at(T0),sendCount:2,sendDay:day,sendsToday:2},'history kept; the delivery at T0 (not the queue time T0-1h) is the last send');
+ for(const hour of [1,2,3,4,5])await t.M.run(t.env,{now:T0+hour*H});
+ assert.equal(tg(t.calls).length,1,'no reminder before 6 h after the successful delivery');
+ await t.M.run(t.env,{now:T0+6*H});assert.deepEqual(tg(t.calls).slice(1).map(item=>item.body.text.split('\n')[0]),['IPTV monitor: REMINDER (degraded, critical)'],'the reminder 6 h after the last delivery');
  t.ctx.model={mode:'cloudflare',health:'healthy',failure:null};
- await t.M.run(t.env,{now:T0+6*H});await t.M.run(t.env,{now:T0+7*H});
+ await t.M.run(t.env,{now:T0+7*H});await t.M.run(t.env,{now:T0+8*H});
  assert.deepEqual(tg(t.calls).slice(2).map(item=>item.body.text.split('\n')[0]),['IPTV monitor: RECOVERED (healthy)'],'one recovery');
 }
 
-console.log('Monitor Telegram: fixed endpoint and plain text, ok:false/401/403/429/timeout/malformed/network never count as delivered, retry_after hold without sleeping, fail-closed configuration, no leak, transport choice, off no-op (the retired dry token included), AIR-349 outbox budget and CAS over Telegram, ADR 0206 rollout over a needs_owner state passed');
+// 14. ADR 0206 settlement: a delayed delivery counts from its successful send, on the UTC day it was sent, never from the time it was queued.
+{
+ const first=lines=>lines.map(item=>item.body.text.split('\n')[0]);
+ const issueSends=t=>tg(t.calls).filter(item=>item.body.text.includes('\nIssue: ratings_quarantined\n'));
+ // (a) A pending escalation that the planner does not re-plan (inside the interval) is delivered after UTC midnight: the send belongs to the new day.
+ const a=setup();healthy(a.bucket);owner(a);
+ a.bucket.set(KEY,{schemaVersion:1,updatedAt:at(T0-30*MIN),heartbeatAt:at(T0-30*MIN),mode:'on',overall:'degraded',streams:[],
+  alerts:{issues:{ratings_quarantined:{severity:'degraded',critical:true,firstSeenAt:at(T0-2*H),seen:2,lastSentAt:at(T0-H),sendCount:1,sendDay:'2026-11-06',sendsToday:5}}},
+  outbox:[{kind:'escalation',key:'ratings_quarantined',severity:'degraded',critical:true,stream:'ratings',message:'q',firstSeenAt:at(T0-2*H),id:'ratings_quarantined|escalation|'+at(T0-30*MIN),queuedAt:at(T0-30*MIN),after:{lastSentAt:at(T0-30*MIN),sendCount:2,sendDay:'2026-11-06',sendsToday:6}}],
+  cancelledUndelivered:0,holdUntil:null,lastDeliveryFailure:null,predictions:null,epgSeen:null,lastTestAt:null});
+ a.answer(()=>({status:500,raw:''}));await a.M.run(a.env,{now:T0+H});await a.M.run(a.env,{now:T0+2*H});
+ assert.equal(a.bucket.value(KEY).outbox.length,1,'kept over the outage, across midnight');
+ a.answer(()=>({status:200,body:{ok:true,result:{}}}));await a.M.run(a.env,{now:T0+3*H});
+ assert.deepEqual(first(issueSends(a).slice(-1)),['IPTV monitor: ESCALATION (degraded, critical)']);
+ const settledA=a.bucket.value(KEY).alerts.issues.ratings_quarantined;
+ assert.deepEqual([settledA.lastSentAt,settledA.sendDay,settledA.sendsToday,settledA.sendCount],[at(T0+3*H),'2026-11-07',1,2],'settled at the delivery (01:00Z) on 7 Nov, not at the queue time (21:30Z) on 6 Nov');
+ const delivered=issueSends(a).length;
+ for(const hour of [4,5,6,7,8])await a.M.run(a.env,{now:T0+hour*H});
+ assert.equal(issueSends(a).length,delivered,'no reminder before 6 h after the successful delivery (it would have come at 03:30Z from the queue time)');
+ await a.M.run(a.env,{now:T0+9*H});assert.deepEqual(first(issueSends(a).slice(delivered)),['IPTV monitor: REMINDER (degraded, critical)'],'the reminder at 07:00Z, 6 h after the delivery');
+ // (b) An outage longer than six hours, starting with a Telegram 429 hold and crossing midnight: the late reminder resets the interval at its delivery.
+ const b=setup();healthy(b.bucket);owner(b);await b.M.run(b.env,{now:T0});assert.equal(issueSends(b).length,1,'the critical alert at 22:00Z');
+ b.answer(()=>({status:429,body:{ok:false,parameters:{retry_after:3600}}}));await b.M.run(b.env,{now:T0+6*H});
+ assert.equal(b.bucket.value(KEY).holdUntil,at(T0+7*H),'a one-hour hold');
+ b.answer(()=>({status:500,raw:''}));for(let hour=7;hour<=13;hour++)await b.M.run(b.env,{now:T0+hour*H});
+ let entry=b.bucket.value(KEY).alerts.issues.ratings_quarantined;
+ assert.deepEqual([entry.lastSentAt,entry.sendCount,b.bucket.value(KEY).outbox.length],[at(T0),1,1],'nothing counted during the outage, one pending reminder');
+ b.answer(()=>({status:200,body:{ok:true,result:{}}}));const before=issueSends(b).length;await b.M.run(b.env,{now:T0+14*H});
+ assert.deepEqual(first(issueSends(b).slice(before).filter((item,index,all)=>index===all.length-1)),['IPTV monitor: REMINDER (degraded, critical)']);
+ entry=b.bucket.value(KEY).alerts.issues.ratings_quarantined;
+ assert.deepEqual([entry.lastSentAt,entry.sendDay,entry.sendsToday,entry.sendCount],[at(T0+14*H),'2026-11-07',1,2],'the reminder delivered 8 h late is settled at 12:00Z on 7 Nov');
+ const afterLate=issueSends(b).length;
+ for(let hour=15;hour<=19;hour++)await b.M.run(b.env,{now:T0+hour*H});
+ assert.equal(issueSends(b).length,afterLate,'no reminder before 6 h after the late delivery');
+ await b.M.run(b.env,{now:T0+20*H});assert.equal(issueSends(b).length,afterLate+1,'the next reminder 6 h after the late delivery');
+}
+
+// 15. Rollback replay (ADR 0206, recovery boundary): the previous policy and runtime, kept verbatim as fixtures, run over a document written by the new code
+// with an open critical issue and a pending message. History and keys are kept, nothing recovers, the pending message is sent once under its own id, and the one
+// bounded difference is visible: the old code sends one ESCALATION (needs_owner) for the open critical issue, then reminds every 2 h.
+{
+ const fresh=setup();healthy(fresh.bucket);owner(fresh);await fresh.M.run(fresh.env,{now:T0});
+ fresh.answer(()=>({status:500,raw:''}));await fresh.M.run(fresh.env,{now:T0+6*H});
+ const written=fresh.bucket.value(KEY);const pending=written.outbox[0];
+ assert.deepEqual([written.outbox.length,pending.kind,pending.severity,pending.critical],[1,'reminder','degraded',true],'the new code left one pending critical reminder');
+ assert.deepEqual([written.alerts.issues.ratings_quarantined.severity,written.alerts.issues.ratings_quarantined.critical,written.alerts.issues.ratings_quarantined.sendCount],['degraded',true,1]);
+ const old=setup({},{bucket:fresh.bucket,policyFile:'tests/fixtures/monitor-policy-pre-air-592.js',monitorFile:'tests/fixtures/monitor-pre-air-592.js'});old.ctx.model=fresh.ctx.model;
+ const read=plain(await old.M.status(old.env,T0+6*H+MIN));assert.deepEqual(read.openIssues.map(item=>[item.key,item.severity,item.sendCount]),[['ratings_quarantined','degraded',1]],'the old status reads the new document');
+ await old.M.run(old.env,{now:T0+7*H});
+ const sent=tg(old.calls);assert.equal(sent.length,1,'one message, no duplicate of the pending one and no recovery');
+ const lines=sent[0].body.text.split('\n');
+ assert.equal(lines[0],'IPTV monitor: ESCALATION (needs_owner)','the stated bounded rollback difference: one escalation for the open critical issue');
+ assert.equal(lines.at(-1),'Ref: '+pending.id,'sent under the id of the pending message, so a receiver keeps one');
+ const doc=old.bucket.value(KEY),kept=doc.alerts.issues.ratings_quarantined;
+ assert.deepEqual([kept.firstSeenAt,kept.sendCount,kept.severity,doc.outbox.length],[written.alerts.issues.ratings_quarantined.firstSeenAt,2,'needs_owner',0],'history kept, the key is the same issue');
+ await old.M.run(old.env,{now:T0+8*H});assert.equal(tg(old.calls).length,1,'no further escalation');
+ await old.M.run(old.env,{now:T0+9*H});assert.deepEqual(tg(old.calls).slice(1).map(item=>item.body.text.split('\n')[0]),['IPTV monitor: REMINDER (needs_owner)'],'then the old 2 h reminder');
+ // Roll forward again: the new code reads the old document as critical, without a new alert, escalation or recovery.
+ const again=setup({},{bucket:old.bucket});again.ctx.model=old.ctx.model;await again.M.run(again.env,{now:T0+10*H});
+ assert.equal(tg(again.calls).length,0,'roll-forward sends nothing because of the format');
+ assert.deepEqual([again.bucket.value(KEY).alerts.issues.ratings_quarantined.critical,again.bucket.value(KEY).alerts.issues.ratings_quarantined.sendCount],[true,3]);
+ // The issue clears under the old code: one recovery, as for any delivered issue.
+ old.ctx.model={mode:'cloudflare',health:'healthy',failure:null};await old.M.run(old.env,{now:T0+11*H});
+ assert.deepEqual(tg(old.calls).slice(2).map(item=>item.body.text.split('\n')[0]),['IPTV monitor: RECOVERED (healthy)']);
+}
+
+console.log('Monitor Telegram: fixed endpoint and plain text, ok:false/401/403/429/timeout/malformed/network never count as delivered, retry_after hold without sleeping, fail-closed configuration, no leak, transport choice, off no-op (the retired dry token included), AIR-349 outbox budget and CAS over Telegram, ADR 0206 rollout over a needs_owner state, delivery-time settlement across midnight and long outages, rollback replay on the previous code passed');

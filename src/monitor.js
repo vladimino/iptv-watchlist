@@ -262,7 +262,13 @@ const Monitor=(()=>{
    let saved=true;
    if(attempts){
     const settled=JSON.parse(JSON.stringify(next.alerts));
-    for(const item of queued){if(!delivered.has(item.id)||!item.after)continue;const entry=settled.issues[item.key];if(!entry)continue;entry.lastSentAt=item.after.lastSentAt;entry.sendCount=Math.max(entry.sendCount,item.after.sendCount);entry.sendDay=item.after.sendDay;entry.sendsToday=item.after.sendsToday;}
+    // ADR 0206: a delivered alert-type message settles at its successful delivery, not at the time it was queued: the reminder interval counts from
+    // `now`, and the send is charged to the UTC day of delivery. `after` stays on the message only for a reader of the previous code (rollback).
+    for(const item of queued){
+     if(!delivered.has(item.id)||item.kind==='recovery')continue;const entry=settled.issues[item.key];if(!entry)continue;
+     const sentToday=entry.sendDay===day?entry.sendsToday||0:0;
+     entry.lastSentAt=iso(now);entry.sendCount=(entry.sendCount||0)+1;entry.sendDay=day;entry.sendsToday=sentToday+1;
+    }
     const remaining=queued.filter(item=>!delivered.has(item.id)),reordered=[...remaining.filter(item=>!failedIds.has(item.id)),...remaining.filter(item=>failedIds.has(item.id))];
     saved=!!await writeState(env,claimed,{...next,alerts:settled,outbox:reordered,holdUntil:Number.isFinite(holdUntil)&&holdUntil>now?iso(holdUntil):null,lastDeliveryFailure:succeeded&&!failedIds.size?null:lastFailure});
    }

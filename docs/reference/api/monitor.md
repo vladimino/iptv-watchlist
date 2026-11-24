@@ -46,7 +46,7 @@ EPG: delayed 2 hours and degraded 5 hours after the Madrid 17:00 due time withou
 - Only `degraded` issues alert; `waiting` and `delayed` never do.
 - A **critical** issue (`critical: true`) is a proven hard failure: `epg_authority`, `discovery_quarantined`, `ratings_quarantined`, `ratings_failed_permanent`, `letterboxd_quarantined`, `catalog_posters_failed` and a `blocked` `canonical_producer_failed`. It alerts on its first snapshot.
 - An ordinary issue alerts after two consecutive snapshots, or one for `predictions_no_progress`, `canonical_producer_no_progress` and `canonical_producer_failed`.
-- Every open issue sends at most one `REMINDER` per 6 hours after its last delivered message, critical or not.
+- Every open issue sends at most one `REMINDER` per 6 hours after its last delivered message, critical or not. A message delivered late (failing channel, 429 hold) is settled at the tick that delivered it: `lastSentAt` is that tick and the send counts on that tick's UTC day, not on the day it was queued.
 - An issue that turns from ordinary to critical sends one `ESCALATION` inside that interval; critical to ordinary sends nothing.
 - At most eight messages per issue per UTC day; one `RECOVERED` for an issue whose alert was delivered, none for one that never was.
 - A stored entry or outbox message with the retired `needs_owner` (written before ADR 0206) is read as `degraded`, critical: its key, history, counters and message id are kept, it does not escalate or recover because of the rename, and its next reminder is due 6 hours after its last delivery.

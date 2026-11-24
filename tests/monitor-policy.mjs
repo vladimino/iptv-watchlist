@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import * as P from '../src/domain/monitor-policy.js';
+import * as Old from './fixtures/monitor-policy-pre-air-592.js'; // the policy before ADR 0206, verbatim, for the rollback replay
 import {dailyDue} from '../src/domain/orchestration-policy.js';
 
 assert.doesNotMatch(fs.readFileSync('src/domain/monitor-policy.js','utf8'),/\b(fetch|BUCKET|import |require|Date\.now|new Date\(\)|Math\.random|crypto)\b/,'the policy has no I/O, clock or randomness');
@@ -201,5 +202,21 @@ const keys=result=>result.issues.map(item=>item.key);
  const current=P.evaluateCatalogPosters({state:'failed',monitor:'degraded',critical:true,detail:'run_failed'});
  assert.deepEqual([current.state,current.issues[0].critical],['degraded',true]);
  assert.equal(P.evaluateCatalogPosters({state:'stalled',monitor:'degraded',detail:'run_stuck'}).issues[0].critical,undefined,'a stalled poster week is ordinary');
+}
+
+// 8. Rollback replay of the planner: the previous policy over alert state written by the new one. Keys and history are kept; an ordinary entry
+// behaves as before (no message inside its 6 h interval, a reminder after it); a cleared issue recovers once; the only difference is one escalation
+// per issue that is open and critical at the rollback, because the old evaluation calls it needs_owner against a stored degraded entry.
+{
+ const t0=T('2026-11-24T10:00:00Z');
+ const written={issues:{
+  epg_stale:{severity:'degraded',critical:false,firstSeenAt:at(t0-5*H),seen:5,lastSentAt:at(t0-3*H),sendCount:1,sendDay:'2026-11-24',sendsToday:1},
+  ratings_quarantined:{severity:'degraded',critical:true,firstSeenAt:at(t0-4*H),seen:4,lastSentAt:at(t0-H),sendCount:1,sendDay:'2026-11-24',sendsToday:1},
+  discovery_quarantined:{severity:'degraded',critical:true,firstSeenAt:at(t0-4*H),seen:4,lastSentAt:at(t0-H),sendCount:1,sendDay:'2026-11-24',sendsToday:1}}};
+ const oldIssues=[{key:'epg_stale',severity:'degraded',stream:'epg',message:'s'},{key:'ratings_quarantined',severity:'needs_owner',stream:'ratings',message:'q'}];
+ const replay=Old.planAlerts(oldIssues,written,t0);
+ assert.deepEqual(replay.sends.map(item=>[item.kind,item.key,item.severity]),[['escalation','ratings_quarantined','needs_owner'],['recovery','discovery_quarantined','healthy']],'one bounded escalation, one recovery of the issue that cleared, nothing for the ordinary one');
+ assert.deepEqual([replay.state.issues.epg_stale.firstSeenAt,replay.state.issues.epg_stale.sendCount,replay.state.issues.ratings_quarantined.firstSeenAt],[at(t0-5*H),1,at(t0-4*H)],'history kept');
+ assert.deepEqual(Old.planAlerts(oldIssues.slice(0,1),{issues:{epg_stale:written.issues.epg_stale}},t0+3*H).sends.map(item=>item.kind),['reminder'],'the ordinary issue reminds 6 h after its last send, as before');
 }
 console.log('Monitor policy: EPG across DST and delayed triggers, Discovery backoff versus stalled, Ratings health and switch, empty versus stale prediction queue, overall state, alert planning, one reminder interval and the legacy needs_owner state passed');
