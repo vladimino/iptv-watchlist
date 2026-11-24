@@ -1,8 +1,8 @@
-# ADR 0214: The full identity evidence model: each domain step writes its own evidence under its own fence, bare sightings stay in their domains, and history is mapped record by record
+# ADR 0215: The full identity evidence model: each domain step writes its own evidence under its own fence, bare sightings stay in their domains, and history is mapped record by record
 
 **Status:** Proposed  
-**Original decision date:** not decided (owner choices 0214-1 to 0214-7 are open)  
-**Recorded at:** 2026-11-24  
+**Original decision date:** not decided (owner choices 0215-1 to 0215-7 are open)  
+**Recorded at:** 2026-11-24. Renumbered from 0214 the same day, because [PR #988](https://github.com/vladimino/iptv-watchlist/pull/988) took that number first.  
 **Approval source:** not yet decided. The owner approved the roadmap card on 24 Nov 2026 ([AIR-616](https://trello.com/c/DZNk9uMJ)); that is not an architecture decision.  
 **Related work:**
 - [AIR-616](https://trello.com/c/DZNk9uMJ), card EP of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) decision 7, requested by owner choice 0213-4 = A ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124)). It is not a prerequisite of [AIR-275](https://trello.com/c/4x7hH0gI).
@@ -11,7 +11,7 @@
 
 **Supersedes:** None. If accepted, it amends [ADR 0213](0213-film-identity-evidence-ledger.md) in two places only:
 - decision 4 gains a second write path (decision 1 below);
-- decision 6 step 3 imports through a dedicated path instead of the `identity_evidence` operation (decision 7 below, choice 0214-6).
+- decision 6 step 3 imports through a dedicated path instead of the `identity_evidence` operation (decision 7 below, choice 0215-6).
 
 Every other decision of ADR 0213 applies unchanged.  
 **Superseded by:** None
@@ -81,7 +81,7 @@ Aggregate `SELECT` statements only, on the production D1 database. Every query r
 
 ## Decision
 
-### 1. Two write paths, chosen by where the step's own effect lives (choice 0214-1)
+### 1. Two write paths, chosen by where the step's own effect lives (choice 0215-1)
 
 **Canonical path, unchanged from ADR 0213 decision 4.** A row that accompanies a canonical effect (an admission, a claim, a retirement applied to a Film) is written in the same fenced batch as that effect, with its canonical receipt. A genuine Film-bound check without an effect uses the receipted `identity_evidence` operation.
 
@@ -99,7 +99,7 @@ Aggregate `SELECT` statements only, on the production D1 database. Every query r
 
 **Why not a canonical receipt for these rows.** A decision about an observation is not a Film mutation. Receipting it would need a rebuilt receipt table with a new target kind and a revision for something that has none. Discovery wrote between 208 and 964 verified decision rows a day from 14 to 24 Nov 2026 and holds some 16,400 historical pairs, so tying each to a Film revision would also make every other producer's compare-and-swap on that Film fail and replan for no reason.
 
-### 2. Bare sightings stay in their domains (choice 0214-2)
+### 2. Bare sightings stay in their domains (choice 0215-2)
 
 - **No writer in this record writes `exists` rows.** The relation stays in the vocabulary, reserved and unused.
 - **Why.** Every sighting already has a durable home: the fact record's Watchlist observation, the never-deleted Diary history and admission ledger, the slot events, the Discovery observations. A ledger copy would duplicate them. A root per Watchlist snapshot would mean up to 5,000 rows per changed version (`maxFilms` 5,000, up to four slots a day). The archive candidates have no D1 batch at all.
@@ -116,7 +116,7 @@ Aggregate `SELECT` statements only, on the production D1 database. Every query r
 - Readers never require a row for a minting id.
 - An id added to a Film that was **not** minted from it does need evidence: a lid on a `film:tmdb:` Film (the claim unit), a `tmdb_tv` after a retirement, a TMDB id on a `film:<lid>` Film.
 
-### 4. Each new writer is activated on its own, with a recorded coverage boundary (choice 0214-4)
+### 4. Each new writer is activated on its own, with a recorded coverage boundary (choice 0215-4)
 
 - **One durable control row per writer** in a new D1 table, `identity_evidence_writer`: `writer` (primary key), `mode` (`off` or `on`), `generation`, `coverage_from`, `updated_at`. An append-only `identity_evidence_writer_change` keeps every transition. An absent row means `off`.
 - **Writers:** `discovery_decision` (E2a), `discovery_owner` (E2c), `claim_alias_bridge` (E2b) and `tmdb_retirement` (E2d). The key is the writer, not the route, because one route (`owner_action`) has two writers.
@@ -133,8 +133,8 @@ Vocabulary as in ADR 0213 decisions 1-3. Under the recommended options, no new r
 | Writer (card) | Step | Row | Polarity | Route | Method | `source_root` | Path and batch | Observation time |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `discovery_decision` (E2a) | A decision becomes `verified` with `identitySource: 'tmdb_detail'`, including the revalidation that turns a known alias into a detail check | `candidate_for(discovery_observation:<observation key>, tmdb_movie:<tmdbId>)` (`tmdb_tv` if the media kind is TV) | `asserts` | `discovery_scan` | `tmdb_detail_check` | the observation key | domain; the decision write's batch | `checkedAt` |
-| `discovery_decision` (E2a) | `verified` with `known_epg_alias` | the same proposition | `asserts` | `discovery_scan` | `title_only` (choice 0214-3) | the observation key | domain | `checkedAt` |
-| `discovery_decision` (E2a) | `verified` with `known_alias_year_runtime` | the same proposition | `asserts` | `discovery_scan` | `title_year` (choice 0214-3) | the observation key | domain | `checkedAt` |
+| `discovery_decision` (E2a) | `verified` with `known_epg_alias` | the same proposition | `asserts` | `discovery_scan` | `title_only` (choice 0215-3) | the observation key | domain | `checkedAt` |
+| `discovery_decision` (E2a) | `verified` with `known_alias_year_runtime` | the same proposition | `asserts` | `discovery_scan` | `title_year` (choice 0215-3) | the observation key | domain | `checkedAt` |
 | `discovery_decision` (E2a) | any other status, a deferral, a policy exclusion, the admission and its minting claim | no row | — | — | — | — | — | — |
 | `discovery_owner` (E2c) | an owner intent with an assign effect (confirm, correct, each child of a group assign) | `candidate_for(discovery_observation, tmdb_movie)` | `asserts` | `owner_action` | `owner_statement` | the intent's idempotency key (`ownerIdentity.requestId`) | domain; `commitOwnerWrite` batch | `ownerIdentity.at` |
 | `discovery_owner` (E2c) | `identity_reject` | `candidate_for(discovery_observation, tmdb_movie)` for the rejected id | `refutes` | `owner_action` | `owner_statement` | the intent key | domain | the intent's `confirmedAt` |
@@ -151,7 +151,7 @@ Vocabulary as in ADR 0213 decisions 1-3. Under the recommended options, no new r
 - **A derived bridge is never independent of what it derives from.** The claim unit concludes from a verified Ratings link plus canonical TMDB ownership. Its root is the root of the page check behind that link. When that check has no row (links made before ADR 0207's A2 flip), the root is null, and a null root is never independent.
 - **Rejections that are not identity statements write nothing.** A detail check that does not accept a candidate is not a refutation (ADR 0213 decision 3 lets only an owner or a verified page contradiction refute). Neither is a catalog policy exclusion: it says that a movie is not wanted in the catalog, not that an observation is not that movie.
 - **E2d is parked.** No live retirement writer exists: `recordRetirementDecision` is not bundled and nothing calls it. E2d can be implemented only together with, or after, an approved live retirement writer, which is a separate product decision not made here. The four existing decisions are covered by reconstruction (decision 7, c4).
-- **The claim side of an owner revoke (choice 0214-5).** E2c records the scoped withdrawal only, and the canonical claim stays as it is today: an ADR 0178 revoke changes the Discovery decision and its assigned rows, never `film_external_id`. A Discovery claim cannot be attributed to one assign: it carries no observation key, and `discovery_admission.observation_key` is null on every row. Changing a claim on a revoke would be a decision of its own, with its own writer and readers.
+- **The claim side of an owner revoke (choice 0215-5).** E2c records the scoped withdrawal only, and the canonical claim stays as it is today: an ADR 0178 revoke changes the Discovery decision and its assigned rows, never `film_external_id`. A Discovery claim cannot be attributed to one assign: it carries no observation key, and `discovery_admission.observation_key` is null on every row. Changing a claim on a revoke would be a decision of its own, with its own writer and readers.
 - **Merges write nothing** (ADR 0213 decision 1). Readers resolve Film subjects through `film_redirect`.
 
 ### 6. Conflicts, withdrawal and supersession
@@ -165,7 +165,7 @@ Vocabulary as in ADR 0213 decisions 1-3. Under the recommended options, no new r
   - a reinstatement is a new `asserts` row from a new owner intent, so it has a new root.
 - **Supersession** (`supersedes_key`) stays as ADR 0213 decision 5 defines it: the same proposition, route and scope with a new root. Discovery and owner rows have stable roots, so they never supersede.
 
-### 7. Historical reconstruction: families (b) and (c), and the import path (choice 0214-6)
+### 7. Historical reconstruction: families (b) and (c), and the import path (choice 0215-6)
 
 The rules of ADR 0213 decision 6 apply unchanged: nothing is invented, unknowns stay unknown, reconstruction provenance on every row, polarity copied and never upgraded, no proof inferred from historical or inferred data, and a live row counts as coverage only with the same proposition, polarity, method, scope and a known, equal root. A reconstructed row uses the same mapping as its live writer (Table 3), so live and reconstructed rows of the same fact get the same key whenever the root is known.
 
@@ -174,7 +174,7 @@ The rules of ADR 0213 decision 6 apply unchanged: nothing is invented, unknowns 
 | # | Source record | Row | Unknowns and limits | Size (L0) |
 | --- | --- | --- | --- | --- |
 | b1 | `verified` decisions and history rows with `identitySource: 'tmdb_detail'` | as E2a; time from the payload `checkedAt`, never from `written_at` | the TMDB response, the matched TMDB title and the durations compared are not stored, and the row needs none of them | 11,708 distinct pairs |
-| b2 | `verified` with `known_epg_alias` or `known_alias_year_runtime` | as E2a (choice 0214-3) | which slot and alias confirmed the match; decisions that rested on an alias key other than the Film's title or original title (222 of 3,790 on 17 Nov 2026, ADR 0158) cannot be told apart from the rest, so all get the same weak method | 4,701 + 11 pairs |
+| b2 | `verified` with `known_epg_alias` or `known_alias_year_runtime` | as E2a (choice 0215-3) | which slot and alias confirmed the match; decisions that rested on an alias key other than the Film's title or original title (222 of 3,790 on 17 Nov 2026, ADR 0158) cannot be told apart from the rest, so all get the same weak method | 4,701 + 11 pairs |
 | b3 | `verified` with no `identitySource` (the R2-era decisions loaded on 4 Nov 2026) | **no row**: method not recorded | reported by count | 1,866 pairs |
 | b4 | owner history rows (`discovery_identity_correct`, `discovery_identity_revoke`) and intent receipts | as E2c; root is the intent key, so the history row and the intent receipt of one action give one row | none expected: both carry the key | 2 (rejects) |
 | b5 | owner actions from before the D1 activation: R2 `admin/actions/discovery_identity_correct/v1/` | as E2c, only when the object states the effect, the movie, the observation and its key; otherwise no row | the count is unknown until the dry run lists the prefix (an L0 R2 list) | unknown |
@@ -197,7 +197,7 @@ The rules of ADR 0213 decision 6 apply unchanged: nothing is invented, unknowns 
 
 Family (a), the 714 admissions, keeps the mapping of ADR 0213 decision 6 (card E3a). Only its import path changes, below.
 
-**Import path (choice 0214-6 = A, recommended).** Every family imports through one dedicated, run-fenced, chunk-receipted path, family (a) included:
+**Import path (choice 0215-6 = A, recommended).** Every family imports through one dedicated, run-fenced, chunk-receipted path, family (a) included:
 - one reconstruction run row per family import: the family, the digest of the reviewed dry-run report, the state and a lease;
 - each chunk is one D1 batch that:
   - asserts that the run is live and holds its lease;
@@ -224,7 +224,7 @@ Nothing reads the ledger to decide anything until that reader's own amendment is
 7. **A reconstructed row counts as proof only if the reader's own amendment says so.**
 8. **Reads are bounded and indexed, and a GET or MCP read never writes** ([ADR 0107](0107-get-head-read-side-effect-boundary.md)).
 
-### 9. Delivery graph (choice 0214-7)
+### 9. Delivery graph (choice 0215-7)
 
 Each card is one atomic outcome. **Dormant** means that merging and the automatic deploy activate nothing. None of these cards is an AIR-275 prerequisite.
 
@@ -251,13 +251,13 @@ Each card is one atomic outcome. **Dormant** means that merging and the automati
 
 ## Alternatives considered
 
-- **0214-1 B. One canonical receipt for every row, with a new target kind.** It needs a rebuilt `canonical_write_receipt` (SQLite cannot alter a CHECK) and a revision for things that have none, and it moves Film revisions for Discovery's decisions. Not recommended.
-- **0214-1 C. Film-bound rows only.** No row for an observation that never becomes a Film and no owner rejection. It drops exactly the evidence before a Film exists that the owner asked to plan. Not recommended.
-- **0214-2 B. First-sighting `exists` rows** for Watchlist and Diary lids, written in the promotion batch and the fact batch. It needs a new route (`watchlist_scan`) and a new method (`listing`), duplicates durable domain records, and still cannot cover the archive candidates. A reasonable later step if a reader needs it; not recommended now.
-- **0214-3 B. A new method `known_alias`.** More precise than `title_only`, but it extends the closed method list for the same strength tier. **C. No row** for a known alias: it loses the fact that 4,700 decisions rest on title matches alone.
-- **0214-4 B. A Worker environment flag per writer.** It needs a removal card per flag, is not visible in D1, and records no coverage boundary. **C. Active from deploy.** It contradicts the dormant-then-activate shape of the E2 cards and gives no clean coverage start.
-- **0214-5 B. A revoke also removes the claim.** The Discovery claim carries no observation key and every admission's `observation_key` is null, so a revoke cannot know whether a claim rests on the revoked assign. It would also make an evidence writer a canonical writer. Not recommended.
-- **0214-6 B. The dedicated path only for families without a Film;** family (a) keeps the `identity_evidence` operation. Two import mechanisms, and 714 revision moves for history.
+- **0215-1 B. One canonical receipt for every row, with a new target kind.** It needs a rebuilt `canonical_write_receipt` (SQLite cannot alter a CHECK) and a revision for things that have none, and it moves Film revisions for Discovery's decisions. Not recommended.
+- **0215-1 C. Film-bound rows only.** No row for an observation that never becomes a Film and no owner rejection. It drops exactly the evidence before a Film exists that the owner asked to plan. Not recommended.
+- **0215-2 B. First-sighting `exists` rows** for Watchlist and Diary lids, written in the promotion batch and the fact batch. It needs a new route (`watchlist_scan`) and a new method (`listing`), duplicates durable domain records, and still cannot cover the archive candidates. A reasonable later step if a reader needs it; not recommended now.
+- **0215-3 B. A new method `known_alias`.** More precise than `title_only`, but it extends the closed method list for the same strength tier. **C. No row** for a known alias: it loses the fact that 4,700 decisions rest on title matches alone.
+- **0215-4 B. A Worker environment flag per writer.** It needs a removal card per flag, is not visible in D1, and records no coverage boundary. **C. Active from deploy.** It contradicts the dormant-then-activate shape of the E2 cards and gives no clean coverage start.
+- **0215-5 B. A revoke also removes the claim.** The Discovery claim carries no observation key and every admission's `observation_key` is null, so a revoke cannot know whether a claim rests on the revoked assign. It would also make an evidence writer a canonical writer. Not recommended.
+- **0215-6 B. The dedicated path only for families without a Film;** family (a) keeps the `identity_evidence` operation. Two import mechanisms, and 714 revision moves for history.
 
 ## Consequences
 
@@ -288,13 +288,13 @@ Each card is one atomic outcome. **Dormant** means that merging and the automati
 
 | # | Choice | Options | Recommendation |
 | --- | --- | --- | --- |
-| 0214-1 | Write path for evidence of a domain step | **A** domain path under the domain's fence; **B** canonical receipt with a new target kind; **C** Film-bound rows only | **A** |
-| 0214-2 | Bare sightings (`exists`) | **A** not stored now, relation reserved, revisit trigger stated; **B** first-sighting rows for Watchlist and Diary lids | **A** |
-| 0214-3 | Discovery known-alias decisions | **A** existing weak methods (`title_only`, `title_year`), never proof; **B** new method `known_alias`; **C** no row | **A** |
-| 0214-4 | Activation of each new writer | **A** a D1 control row per writer with a coverage boundary; **B** Worker flags; **C** active from deploy | **A** |
-| 0214-5 | Claim side of an owner revoke | **A** evidence only, the canonical claim unchanged; **B** the revoke also removes the claim | **A** |
-| 0214-6 | Reconstruction import path | **A** one dedicated path for every family; **B** dedicated path only for families without a Film | **A** |
-| 0214-7 | Delivery graph | **A** as Table 6: new EC, ECM, ER and E3c; E3b narrowed; E2d parked | **A** |
+| 0215-1 | Write path for evidence of a domain step | **A** domain path under the domain's fence; **B** canonical receipt with a new target kind; **C** Film-bound rows only | **A** |
+| 0215-2 | Bare sightings (`exists`) | **A** not stored now, relation reserved, revisit trigger stated; **B** first-sighting rows for Watchlist and Diary lids | **A** |
+| 0215-3 | Discovery known-alias decisions | **A** existing weak methods (`title_only`, `title_year`), never proof; **B** new method `known_alias`; **C** no row | **A** |
+| 0215-4 | Activation of each new writer | **A** a D1 control row per writer with a coverage boundary; **B** Worker flags; **C** active from deploy | **A** |
+| 0215-5 | Claim side of an owner revoke | **A** evidence only, the canonical claim unchanged; **B** the revoke also removes the claim | **A** |
+| 0215-6 | Reconstruction import path | **A** one dedicated path for every family; **B** dedicated path only for families without a Film | **A** |
+| 0215-7 | Delivery graph | **A** as Table 6: new EC, ECM, ER and E3c; E3b narrowed; E2d parked | **A** |
 
 ## Follow-ups
 
