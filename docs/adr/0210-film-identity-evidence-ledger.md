@@ -1,196 +1,203 @@
-# ADR 0210: Canonical Film identity keeps a source-aware evidence ledger beside its claims
+# ADR 0210: Identity evidence is a ledger of typed, source-aware propositions beside the canonical claims
 
-**Status:** Proposed (no owner decision on this record; every choice below awaits review and an explicit, ADR-specific Product Owner decision)  
+**Status:** Proposed (no owner decision on this record; each choice below is separate and awaits an explicit, ADR-specific Product Owner decision)  
 **Original decision date:** not decided  
-**Recorded at:** 2026-11-24  
-**Approval source:** not decided. Requested as the companion of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) by the owner's disposition 5C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347): "источник источнику рознь, нужно отличать доказательства для записи в программе с названием без года от фильма с полноценным LID (из архива, оценок или watchlist)". That disposition chose the direction (a separate evidence model); it does not accept this design.  
-**Related work:**
-- [AIR-555](https://trello.com/c/JPgjoBzK), under [AIR-275](https://trello.com/c/4x7hH0gI).
-- [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) (Proposed) depends on this record for the provenance of new admissions.
-
-**Supersedes:** None. It amends nothing by itself: decision 6 lists the optional amendments, each one a separate owner choice.  
+**Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220).  
+**Approval source:** not decided. Requested as the companion of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) by the owner's disposition 5C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347): "источник источнику рознь, нужно отличать доказательства для записи в программе с названием без года от фильма с полноценным LID (из архива, оценок или watchlist)". That chose the direction; it does not accept this design.  
+**Related work:** [AIR-555](https://trello.com/c/JPgjoBzK), under [AIR-275](https://trello.com/c/4x7hH0gI). [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) (Proposed) uses the initial slice (decision 7).  
+**Supersedes:** None. It amends nothing by itself. Every reader change is a separate later decision (decision 8).  
 **Superseded by:** None
 
 ## Context
 
-### What exists (main, 24 Nov 2026)
+### What exists (main `26cfd115`, 24 Nov 2026)
 
-Identity evidence for canonical Films is spread over about eight D1 tables, JSON payloads and documents. There is no shared model.
+- **The canonical identity decision** is the trusted, non-conflicting `film_external_id` row: one per `(scheme, value)`, enforced by a unique index. Its `provenance_json` is free-form and null on some legacy rows. `film.canonical_identity` and the `identity` row of `film_dimension` repeat it.
+- **Discovery keeps its own evidence**, linked from the canonical side only through `discovery_admission.observation_key`. It has:
+  - observations: normalized title, nullable year, evidence key, `confirmed_tmdb_id`;
+  - decisions with an append-only history: `identitySource` of `tmdb_detail`, `known_epg_alias` or `owner`, and `provenance`, `scoring` and `anchor` payloads;
+  - owner intents (`identity_assign`, `identity_reject`, `identity_revoke`) with their commands and receipts.
+- **What the canonical claim does not record.** Every Discovery admission reaches the canonical claim as the same `{source:'discovery', verified:true}`. An `identity_revoke` or a policy exclusion changes the Discovery decision and the published shows, but never the canonical claim.
+- **Letterboxd routes:**
+  - The inferred import marks the pair on the Ratings record (`identity`, `inferredPairs`). The ADR 0184 planner reads that as "never a proof".
+  - The Diary and Watchlist admission paths share one page check (ADR 0166, generalized by ADR 0186 decision 5).
+  - The rated archive is checked by ADR 0087 and 0090.
+  - In D1 all three end up as `film_rated_admission` rows without a kind, plus a trusted `tmdb` claim.
+- **ADR 0170** proves a verified archive candidate by an exact `archive_sha256` + `source_code` join on `film_rated_admission`. Keep-first (ADR 0207) means a second archive that verifies the same pair cannot be proved this way.
+- **Merges.** `mergeFilms` deletes the retired `film` row and writes a `film_redirect` row. Several Film-id columns elsewhere have no foreign key (Discovery, predictions, publication). `mergeFilms` has no runtime caller today.
+- **Unused tables.** The 0001 offline tables `identity_assertion`, `identity_application` and `identity_rule_version` have no runtime writer.
 
-**The canonical decision.** It is the trusted, non-conflicting `film_external_id` row (unique per `(scheme, value)`). Its `provenance_json` is free-form, and on some legacy rows it is null.
+### What the owner's distinction requires
 
-**Duplicated identity state.**
-- **Copies of the identity.** `film.canonical_identity` and the `identity` row of `film_dimension` repeat the claim.
-- **Four records of one rated admission.** `film_rated_admission`, the `letterboxd_short_code` alias, the claim provenance (`letterboxd_rated_admission`), and the R2 `verified-films.json`.
+A source can identify **different things**, and a row about one of them must not be read as a row about another:
+- A title-only programme row identifies nothing.
+- A Letterboxd id (lid) or a short code identifies **a Letterboxd entity**, not a TMDB movie.
+- A title and year search links a lid to a movie **as a guess**.
+- A page check proves that **a lid or short code and a TMDB movie are the same work**.
+- A canonical Film holding a TMDB id is a **canonical decision**, which evidence may justify but is not.
 
-**Discovery evidence.** It lives in the Discovery domain:
-- observations (`discovery_observation`, nullable `year`, `confirmed_tmdb_id`);
-- decisions (`discovery_decision`, `identitySource` in its payload: `tmdb_detail`, `owner`, `known_epg_alias`);
-- admissions;
-- owner intents.
-
-Every Discovery admission reaches the canonical claim as the same `{source:'discovery', verified:true}`.
-
-**Inferred LID→TMDB links (ADR 0104, 0105).** They are marked only on the Ratings fact records (`identity`, `inferredPairs`), which the ADR 0184 planner reads as negative proof. In D1 the resulting admission is a trusted `tmdb` claim that looks the same as a verified one.
-
-**Diary and Watchlist LIDs.** Both use the same page check (ADR 0166, generalized by ADR 0186 decision 5). They write the same `diary_page` receipt, and nothing tells them apart in D1.
-
-**Rated archive proof.** ADR 0170's inventory uses an exact `archive_sha256` + `source_code` join on `film_rated_admission`.
-
-**Not persisted anywhere:**
-- the reason behind a claim (observation, decision or proof route);
-- ADR 0184 verdicts (`not_proved`, `conflict`);
-- removals and trust changes of external ids;
-- a reconcile of a canonical claim after an ADR 0178 `identity_revoke`.
-
-**The unused 0001 owner-assertion tables.** `identity_assertion`, `identity_application` and `identity_rule_version` exist only offline; no runtime writer uses them.
-
-### Why the source matters
-
-The sources of identity evidence differ in strength and in what they identify:
-
-| Source | What it identifies | Strength for `tmdb:movie` |
-| --- | --- | --- |
-| (a) EPG programme title without year | nothing by itself | a hint; never admits or proves |
-| (b) EPG title with year, runtime and movie provenance, or a known EPG alias | a candidate movie | candidate; Discovery verification still needed |
-| (b′) Discovery `tmdb_detail` verification | a movie | verified movie identity (ADR 0010) |
-| (c) Rated archive short code | a Letterboxd entity (short code, not a lid) | none until the page check verifies it (ADR 0087, 0090) |
-| (d) Ratings or Diary LID | a Letterboxd entity | none by itself |
-| (e) Watchlist LID | a Letterboxd entity | none by itself |
-| (f) Inferred LID→TMDB link (title and year search) | a guess | **negative**: never a proof (ADR 0184) |
-| (g) Page-verified pair (page, single `data-tmdb-id`, TMDB title and year agree) | the pair | verified pair (ADR 0166, 0087, 0090) |
-| (h) Ratings alias bridge claim (ADR 0184) | the pair | proved claim |
-| (i) Owner assignment, correction or revoke | the pair or its negation | owner authority |
-
-The owner's point: a LID identifies a Letterboxd entity. It is not automatically a verified TMDB match, and it must not be weighed like a title-only programme row.
+Each of these is a different proposition, and a source may support one without saying anything about the others.
 
 ## Decision (proposed)
 
-### 1. One append-only evidence ledger in the Film/Person domain
+### 1. Evidence records typed propositions about typed subjects, not rows about a Film
 
-- **The table.** A new D1 table `film_identity_evidence`, owned by the Film/Person authority (the same marker and fence as `film_external_id`), records **why** a canonical identity statement was made.
-- **What it is not.** It is **not** a second canonical Film, claim or admission table:
-  - the canonical decision stays the trusted `film_external_id` row;
-  - admission stays `film_rated_admission` (ADR 0207);
-  - Discovery keeps its observation and decision tables as its own domain evidence (ADR 0085).
+An evidence row states one **proposition** about a **subject** and, for relations, an **object**:
 
-Minimum schema:
-
-| Column | Meaning |
+| Field | Values |
 | --- | --- |
-| `id` | integer key |
-| `film_id` | the Film the evidence is about. A redirect is followed at write time; rows keep the id they were written for |
-| `scheme`, `value` | the external id the evidence speaks about (`tmdb`, `letterboxd`, `letterboxd_short_code`, `tmdb_tv`) |
-| `stance` | `supports` or `refutes` |
-| `strength` | one of `hint`, `candidate`, `verified`, `proved`, `owner`, `negative` (decision 2) |
-| `source_kind` | one of `epg_title`, `epg_title_year`, `discovery_detail`, `archive_short_code`, `ratings_lid`, `watchlist_lid`, `inferred_link`, `page_verified`, `ratings_alias_bridge`, `owner` |
-| `source_ref` | the stable reference of the source: an archive digest, an evidence digest, a Discovery observation key, a scan id or a receipt request id. Never a payload, never a private value beyond the ids already in the canonical tables |
-| `observed_at` | when the source said it |
-| `recorded_at`, `request_id` | the write and its receipt |
-| `supersedes_id` | the row this one replaces, if any |
+| `subject_kind`, `subject_value` | `letterboxd_lid`, `letterboxd_short_code`, `tmdb_movie`, `tmdb_tv`, `discovery_observation`, `film` |
+| `relation` | `same_work` (two source entities are the same work), `film_has_id` (a canonical Film holds an external id), `candidate_for` (an observation is a candidate for a movie), `exists` (a source entity was observed) |
+| `object_kind`, `object_value` | as for the subject; empty for `exists` |
 
-**Append-only.** A trigger refuses UPDATE and DELETE. The current view per `(film_id, scheme, value)` is the latest non-superseded row of each `source_kind`.
+- **Evidence can exist before a Film does.** A lid observed on a Watchlist (`letterboxd_lid … exists`) or a short code in an archive needs no Film and no canonical id. Storing it never creates, admits or merges a Film.
+- **Discovery observations are referenced, not copied.** They stay in the Discovery domain (ADR 0085). The ledger refers to them by `observation_key` only when a canonical route uses them.
+- **A Film is a subject only for `film_has_id`.** It is referenced by id with no foreign key, like the Discovery and prediction tables. A merged Film's rows keep the id they were written for, and readers resolve them through `film_redirect` to the surviving Film.
+- **A merge is not a refutation of anything.** A merge writes no evidence; the redirect is its record.
 
-**Writers.** Evidence rows are written **in the same fenced batch** as the canonical effect they justify. An evidence row without its canonical effect, or the reverse, cannot exist.
+### 2. Route and method are separate fields
 
-### 2. Strength vocabulary and how it combines
+- **`route`** says where the evidence came from:
+  - `epg_programme`, `discovery_scan`;
+  - `letterboxd_export_import`, `letterboxd_rated_archive`;
+  - `ratings_diary`, `watchlist_admission`;
+  - `ratings_alias_bridge`;
+  - `owner_action`.
+- **`method`** says how it was established:
+  - `title_only`, `title_year`, `title_year_search`;
+  - `tmdb_detail_check`, `page_check`, `alias_bridge`;
+  - `owner_statement`.
+- **`source_ref`** is the route's own stable reference: an archive digest, a page-check evidence digest, a Discovery observation key, a Watchlist snapshot id or an owner intent key.
+- **`source_scope`** is the part of that reference a reader filters on: for example the archive digest, so that **per-archive proof** is a direct query, not a dependency on the first admission's digest.
 
-- **`hint`** (`epg_title`): never admits, never proves, never corroborates a `verified`.
-- **`candidate`** (`epg_title_year`, `archive_short_code`, `ratings_lid`, `watchlist_lid`).
-  - A Letterboxd id, a short code or a titled programme row with a year is a candidate for its own scheme only.
-  - A LID **identifies a Letterboxd entity**. It is never a candidate for `tmdb`.
-- **`verified`** (`discovery_detail`, `page_verified`): one independent verification is enough to admit a Film by that movie id.
-- **`proved`** (`ratings_alias_bridge`): the ADR 0184 claim proof for the `letterboxd` scheme.
-- **`owner`**: an owner assignment (`supports`) or a correction or revoke (`refutes`). It outranks every automatic row.
-- **`negative`** (`inferred_link`, stance `supports` but negative strength): records that the pair was linked by a title and year guess.
-  - It **never** counts as proof.
-  - While it is the only support of a `letterboxd` pair, it blocks a claim, as ADR 0184 already does from the Ratings marks.
+`page_check` from the Diary, from the Watchlist admission and from the rated archive is one method with three routes. The routes are no longer collapsed.
 
-**Corroboration.** Rows of **independent source kinds** can corroborate each other for review and ranking. Corroboration never raises a `hint` or a `negative` to `verified`. A verification needs its own `verified` row.
+### 3. Three polarities, not "negative support"
 
-**Supersession and revocation.**
-- A newer row of the same `source_kind` supersedes the older one.
-- An owner `refutes` row, a retirement or a merge records the refutation.
-- Nothing is deleted; history stays readable.
+- **`asserts`**: the method supports the proposition.
+- **`restricts`**: the proposition is recorded as **unverified and not usable as proof**. It is not a refutation.
+  - The inferred import writes `restricts` on `same_work(lid, tmdb_movie)`, route `letterboxd_export_import`, method `title_year_search`.
+  - This is the ledger's form of the ADR 0184 rule. The Ratings marks stay the authority that the claim planner reads.
+- **`refutes`**: the proposition is false.
+  - Only `owner_action` and a verified contradiction (a `page_check` naming another movie) refute.
+  - A refutation may be scoped to a single earlier row (`scope_evidence_key`), for example the revoke of one owner assignment, or to the proposition as a whole.
 
-### 3. Which writers record evidence
+The ledger stores no strength column. A reader derives strength from `method` with a fixed ranking:
+- `owner_statement` first;
+- then `page_check`, `tmdb_detail_check` and `alias_bridge`;
+- then `title_year`;
+- then `title_only`.
 
-**Mandatory for AIR-275**, with [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md), at its mode `d1`:
-- each new-path admission writes its row in the admission batch:
-  - inferred import: `inferred_link`, `negative`;
-  - Diary: `page_verified`, with a `ratings_lid` candidate;
-  - Watchlist admission: `page_verified`, with a `watchlist_lid` candidate;
-  - rated archive: `page_verified`, with an `archive_short_code` candidate.
-- This replaces the `d1:<kind>` `receipt_key` marker that ADR 0207 had proposed, so the kind is recorded once, not in two models.
+### 4. Identity, idempotence and the evidence-only operation
 
-**Longer-term catalog work**, separate cards and not required for AIR-275:
-- Discovery admission (`discovery_detail`, or `epg_title_year`/`epg_title` hints from observations);
-- the ADR 0184 claim unit (`ratings_alias_bridge`);
-- owner identity actions (`owner`, including the claim side of an ADR 0178 revoke);
-- retirement and merge (`refutes` and supersession).
+- **Evidence key.** `evidence_key = sha256(subject, relation, object, polarity, route, method, source_ref, scope_evidence_key)`. It is `UNIQUE`, so an insert of an existing key is a no-op. A replay or a second caller writing the same proposition from the same source writes nothing new.
+- **Atomic with a canonical effect.** When evidence accompanies a canonical effect (an admission or a claim), it is written in **the same fenced batch** as that effect. Neither exists without the other.
+- **Evidence without a canonical effect.** A genuine new verification may have no canonical effect: the pair is already admitted (keep-first), or a second archive verifies the same pair. It is recorded by a new receipted canonical operation `identity_evidence`:
+  - it runs under the Film/Person fence (marker generation);
+  - its request id derives from the evidence key;
+  - it is a no-op on an existing key.
 
-### 4. Readers
+  This lets a later archive's proof be recorded without rewriting the original admission.
+- **No verification, no evidence.** A retry that answers `present` from the admission row without fetching the source writes **no** evidence. A row may come only from a step that actually performed its method.
 
-- **Nothing changes its decision when this ledger appears.**
-  - ADR 0184 keeps reading the Ratings marks.
-  - ADR 0170 keeps its exact archive-and-code join.
-  - The catalog and Discovery keep their reads.
-- **A later reader switch is its own card**, after the writers of decision 3 have produced a complete history (decision 6). Examples: the claim planner reading `negative` rows, the inventory joining on per-archive `page_verified` rows.
+### 5. Lifecycle, ordering and precedence
 
-### 5. Backfill
+- **Append-only.** Triggers refuse UPDATE and DELETE. A monotonic `seq` orders rows causally.
+- **No "latest row" rule.** Rows from different `source_ref` values are all kept. Two archives give two rows, and two conflicting assertions coexist until a reader or an owner decides.
+- **Supersession is explicit.** A row may name `supersedes_key` only for the same proposition, route and `source_scope`, for example a re-check of the same page with new content.
+- **Revocation and reinstatement** are new owner rows: a scoped `refutes`, then a later `asserts`. The higher `seq` wins within the owner tier.
+- **Precedence for readers.**
+  - Owner rows outrank all others.
+  - A `restricts` row blocks the proof use of its proposition unless an owner or a verified method asserts it.
+  - **Independence** counts distinct `source_ref` roots, not routes or methods. Rows derived from the same page digest are one source, even when the Diary and the Watchlist check both wrote them.
+- **No completeness claim.** The ledger is observational first. It holds the evidence of the writers that exist. It is complete only for a route whose writer exists and, for earlier history, only after a backfill (decision 6). Until then it records evidence and decides nothing.
 
-- **(i) No backfill (recommended for AIR-275).** Evidence exists from the activation of each writer. Rows admitted before it have no evidence row, and readers treat that as "legacy, unknown source".
-- **(ii) Bounded backfill of the 714 existing admissions**, a separate owner L3 decision.
-  - The source kind comes from the frozen R2 object and the Ratings marks: 703 `inferred_link`/`negative`, 6 `page_verified` (Diary or Watchlist, not separable), 5 `page_verified` from the rated archive.
-  - It is a fenced, receipted import with a dry run.
-  - It gives the global catalog a clean start, but it is not needed to retire the R2 coordination.
-- **(iii) Backfill of the 415 claims and of Discovery admissions:** not proposed. It needs reconstruction from Discovery decision payloads and is left to a later decision.
+### 6. Backfill
 
-### 6. Optional amendments (each a separate owner choice, not decided here)
+- **(i) None for AIR-275 (recommended).** Rows exist from each writer's activation onward. Earlier admissions have no rows, and readers treat that as "legacy, unknown".
+- **(ii) Bounded backfill of the 714 admissions**, a separate owner L3 decision. It would reconstruct:
+  - 703 `restricts` from the Ratings marks and the frozen R2 object;
+  - 6 `page_check` rows, Diary or Watchlist, whose route is **not** recoverable from the stored receipt, so it is recorded as unknown;
+  - 5 `page_check` rows from the rated archive, route `letterboxd_rated_archive`.
+- **(iii) Discovery and claim history** is not proposed. It would be a reconstruction from Discovery decision history, left to the later Discovery writer.
 
-- **ADR 0170:** the inventory may join on a `page_verified` row with the candidate's archive digest. That resolves the keep-first corner case of ADR 0207 (a later archive that verifies the same pair) without weakening the exact proof.
-- **ADR 0184:** the claim planner may read `negative` rows in addition to the Ratings marks. The Ratings marks stay authoritative until the owner decides otherwise.
-- **The unused 0001 owner-assertion tables:** retire them (a cleanup decision) instead of reviving them, so there is one evidence model.
+### 7. Initial slice (AIR-275) versus the future catalog model
+
+**Initial slice.** These are the only writers required by ADR 0207:
+- the table, its triggers, the `identity_evidence` operation and the writer helper;
+- the admission routes at ADR 0207 mode `d1`:
+  - `restricts` from the inferred import;
+  - `asserts same_work` by `page_check` with route `ratings_diary`, `watchlist_admission` or `letterboxd_rated_archive`, written in the admission batch, or through `identity_evidence` when keep-first makes the admission a no-op;
+  - `exists` for the lid or short code.
+
+**Future catalog model.** Each is a separate card and decision:
+- Discovery admission rows (`candidate_for` and `tmdb_detail_check`, referencing observation keys);
+- the ADR 0184 claim unit (`alias_bridge`);
+- owner identity actions, including the claim side of an ADR 0178 revoke, which today touches no canonical claim;
+- retirement.
+
+### 8. Readers and amendments (each a separate later decision)
+
+- **Nothing reads the ledger to decide anything when it is introduced.** ADR 0184 keeps the Ratings marks, ADR 0170 its exact join, and the catalog and Discovery their reads.
+- **Optional amendments:**
+  - ADR 0170: the inventory may accept an `asserts same_work` `page_check` row whose `source_scope` is the candidate's archive.
+  - ADR 0184: the claim planner may also read `restricts` rows.
+  - The unused 0001 assertion tables may be retired.
+- Accepting this record accepts none of them.
+
+### 9. Acceptance scenarios (for the implementation card)
+
+1. A Watchlist lid observed before any Film exists: one `exists` row; no Film, admission or claim.
+2. An inferred import: `restricts same_work`. The claim planner still answers `not_proved`.
+3. A Diary page check that admits: `asserts same_work` (`ratings_diary`, `page_check`) in the admission batch.
+4. The same page later checked by the Watchlist caller, with the same digest: no new row.
+5. A pair admitted by the inferred import and later verified by a page: no-op admission plus one `identity_evidence` row; the `restricts` row stays, the proof now exists.
+6. A second archive verifying an admitted pair: one new row with that archive's `source_scope`; the admission is unchanged.
+7. A retry answering `present` without fetching: no row.
+8. Two concurrent verifications of the same pair: one row.
+9. An owner revoke of one assignment, then a reinstatement: scoped `refutes`, then `asserts`, in `seq` order.
+10. A merge: no evidence row; reads through the redirect find the survivor.
+11. A replay of any of the above: no new row.
 
 ## Alternatives considered
 
-- **No ledger; extend `provenance_json` on `film_external_id`.**
-  - For: no new table.
-  - Against: one mutable JSON per claim cannot hold several sources, refutations or history, and it is overwritten by merges.
-- **Identity-kind column on `film_rated_admission`** (ADR 0207 option B′).
-  - For: small.
-  - Against: it covers admissions only. Discovery, claims and owner actions would need their own fields, which is the duplication this record avoids.
-- **Revive the offline 0001 `identity_assertion` tables.**
-  - For: tables that already exist.
-  - Against: they were designed for the offline EPG repository, have no runtime writer, and model owner rules rather than source evidence.
-- **Store evidence in the Discovery domain.**
-  - For: Discovery already has observations.
-  - Against: Letterboxd sources are not Discovery observations, and the Film/Person domain owns the canonical claim the evidence justifies.
+- **The previous revision: Film-scoped rows with a strength column.**
+  - Against: it cannot hold evidence before a Film exists, cannot encode a relation between two source entities, collapses routes into one kind, and treated "unverified" as a negative strength.
+- **Extend `provenance_json` on `film_external_id`.**
+  - Against: one mutable value per claim, no history, and overwritten by merges.
+- **An identity-kind column on `film_rated_admission` (ADR 0207 option B′).**
+  - Against: it covers one route only.
+- **Revive the 0001 assertion tables.**
+  - Against: they model owner rules for the offline EPG repository and have no runtime writer.
+- **Copy Discovery observations into the ledger.**
+  - Against: it duplicates the Discovery domain's evidence. A reference is enough.
 
 ## Consequences
 
-- One place that answers "why does this Film carry this id, from which source, how strong". It is reusable by every catalog entry route, and the global catalog can build on it.
-- An additive migration (one table, its triggers and indexes) and a writer helper used inside existing fenced batches. Each batch gains one or two statements.
-- No reader changes its behaviour until a separately approved switch. The new table cannot break a current decision.
-- Growth: one to three rows per admission or claim event. It is append-only like the receipt table. Retention is a later owner decision, as for receipts.
+- One model that keeps the owner's distinctions apart: subject, relation and object; route and method; polarity.
+- An additive migration (one table, its triggers and indexes on `evidence_key`, the subject, the object and `source_scope`), one new canonical operation kind, and one or two statements per admission batch.
+- No reader changes. The ledger cannot alter a current decision.
+- Growth: about one to three rows per admission or verification. It is append-only like the receipts. Retention is a later owner decision.
 
 ## Recovery and migration boundary
 
 - Before any writer uses it, the table can be dropped by a forward migration.
-- Once writers append to it, rows are history and are never deleted. A wrong row is refuted by a newer row.
-- Backfill (5 ii) and reader switches (6) are separate owner decisions.
+- After that, rows are history and are never deleted. A wrong row is answered by a scoped `refutes`.
+- Backfill and reader amendments are separate owner decisions.
 - This ADR, even when Accepted, authorizes no migration apply, write or backfill.
 
 ## Evidence
 
-- The AIR-555 audit (PR #972) and its review.
-- The survey of existing identity evidence made for this record (24 Nov 2026), whose findings are summarized in the Context.
-- Production L0 read, 24 Nov 2026 12:21 UTC: 714 admissions, no identity-kind column. Inferred provenance is on the Ratings records (703/703).
+- The AIR-555 audit (PR #972) and its reviews.
+- Code surveys made for this record (24 Nov 2026), summarized in the Context.
+- Production L0 read, 24 Nov 2026 12:21 UTC.
 
-## Follow-ups
+## Owner choices in this record
 
-On acceptance: the cards listed in the ADR 0207 delivery graph:
-- the evidence core, a prerequisite of the admission coordination;
-- the longer-term writers;
-- the optional backfill;
-- each reader amendment.
+| # | Choice | Recommended |
+| --- | --- | --- |
+| 0210-1 | The typed proposition model of decisions 1-3 (subjects, relation, object, route and method, three polarities) | yes |
+| 0210-2 | The `identity_evidence` operation for verification without a canonical effect (decision 4) | yes |
+| 0210-3 | Backfill (decision 6) | (i) none for AIR-275 |
+| 0210-4 | The initial slice as the AIR-275 part (decision 7) | yes |
+| 0210-5 | Each reader amendment and the 0001 cleanup (decision 8) | separate, later |
