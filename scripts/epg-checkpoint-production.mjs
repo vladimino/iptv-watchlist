@@ -24,6 +24,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createD1Adapter,renderSql} from './d1-backfill.mjs';
 import {createS3Store,InstallError,readInstallCredentials} from './r2-s3-store.mjs';
 import {readCredentials} from './r2-snapshot-export.mjs';
+import {isolatedGitEnv} from './git-env.mjs';
 import {BATCH_BYTES,BATCH_STATEMENTS,createPublishedBinding,migrationStatements,normalize,OperatorStop,PRODUCTION_ACCOUNT_ID,PRODUCTION_DATABASE_ID,PRODUCTION_DATABASE_NAME,productionTarget,readBookmark,trackProductionWrites} from './published-epg-production.mjs';
 import * as Checkpoint from '../src/epg-checkpoint-d1.js';
 import {EPG_SCHEDULE,nextDailyDue} from '../src/domain/orchestration-policy.js';
@@ -103,7 +104,8 @@ export const WORKFLOW_STATUSES=Object.freeze(['paused','queued','rollingBack','r
 // Local git proof, never an answer from the operator: `commit` exists here and `ancestor` is an ancestor of it (or equal). Anything unknown or ambiguous is `ok:false`.
 export function commitContains(commit,ancestor=ROUTING_COMMIT,cwd=ROOT){
  if(!/^[0-9a-f]{40}$/.test(String(commit||'')))return {ok:false,reason:'commit_invalid'};
- const git=args=>spawnSync('git',args,{cwd,encoding:'utf8'});
+ // An inherited GIT_DIR (a hook run from a worktree) would make git ignore `cwd`: the proof is computed in `cwd` only.
+ const git=args=>spawnSync('git',args,{cwd,encoding:'utf8',env:isolatedGitEnv()});
  if(git(['cat-file','-e',commit+'^{commit}']).status!==0)return {ok:false,reason:'commit_unknown_locally'};
  if(git(['cat-file','-e',ancestor+'^{commit}']).status!==0)return {ok:false,reason:'routing_commit_unknown_locally'};
  const result=git(['merge-base','--is-ancestor',ancestor,commit]);

@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
+import {isolatedGitEnv} from '../scripts/git-env.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
 const target=process.env.PREFLIGHT_MODULE?pathToFileURL(path.resolve(process.env.PREFLIGHT_MODULE)).href:new URL('../scripts/film-person-0020-preflight.mjs',import.meta.url).href;
@@ -20,7 +21,7 @@ const MARKER='prepared/open/1';
 
 // ---------- identity: recomputed from the file, equal to git and to the runbook ----------
 const id=K.identityOf(text);
-assert.equal(id.gitBlob,execFileSync('git',['hash-object',FILE],{encoding:'utf8'}).trim());
+assert.equal(id.gitBlob,execFileSync('git',['hash-object',FILE],{encoding:'utf8',env:isolatedGitEnv()}).trim());
 assert.equal(id.sha256,execFileSync('sha256sum',[FILE],{encoding:'utf8'}).split(' ')[0]);
 assert.equal(id.bytes,fs.statSync(FILE).size);
 assert.equal(id.statements,34);
