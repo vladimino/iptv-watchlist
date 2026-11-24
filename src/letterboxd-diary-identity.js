@@ -122,6 +122,17 @@ const LetterboxdDiaryIdentity=(()=>{
    const value={reason:'linking',slug:item.slug||null,tmdb:String(tmdb),attempts,lastAttemptAt:iso(now),nextAttemptAt:iso(now)};
    try{await LetterboxdFacts.updateDiaryIdentity(env,{set:{[item.lid]:value}});stored.films[item.lid]=value;return true;}catch{counts.persistFailed=1;return false;}
   };
+  // AIR-559 (review of PR #966): the bridge-to-claim HANDOFF. While the claim module is active, a pair this step just verified and linked does not lose its durable
+  // intent: in the same compare-and-swap that removes the link intent, it becomes a `claim_pending` entry for that exact pair (attempts 0, due now), and that
+  // entry is removed only after the claim step proved the claim (written or already). A kill or a lost write anywhere between the bridge and the claim
+  // therefore leaves either the link intent (repaired below into the same handoff) or the pending claim, never nothing. Inactive: the entry is cleared as before
+  // and nothing about claims is stored.
+  const claimLive=typeof CanonicalLetterboxdClaim!=='undefined'&&CanonicalLetterboxdClaim.LETTERBOXD_CLAIM_ACTIVATED===true;
+  const handoff=(lid,tmdb)=>{
+   claimPairs.push({lid,tmdb:String(tmdb)});
+   if(claimLive)set[lid]={reason:CLAIM_REASON,slug:null,tmdb:String(tmdb),attempts:0,lastAttemptAt:iso(now),nextAttemptAt:iso(now)};
+   else clear.push(lid);
+  };
   for(const item of wanted){
    const lid=item.lid,own=links.get(lid)||{};
    const prior=stored.films[lid]||null,attempts=Number(prior?.attempts)||0;
@@ -134,7 +145,11 @@ const LetterboxdDiaryIdentity=(()=>{
     if(TMDB.test(String(own.tmdb))&&prior&&prior.reason===CLAIM_REASON&&claimDue(prior)&&String(prior.tmdb)===String(own.tmdb))claimPairs.push({lid,tmdb:String(own.tmdb)});
     if(!prior){clear.push(lid);continue;}
     if(prior.reason===CLAIM_REASON)continue; // served by the claim step below, not a link repair
-    try{const repaired=await LetterboxdFacts.reprojectDiaryFilm(env,lid);if(repaired.state==='projected'){counts.repaired++;clear.push(lid);}else{counts.skipped++;}}catch{counts.skipped++;}
+    // A link intent of THIS step for the same movie (`linking` after a verified page or trusted bridge, `link_failed` after a confirmed admission) whose alias and
+    // record committed before the step was cut off: the repaired pair is handed off to the claim like a fresh bridge. Any other prior reason, or another movie,
+    // is cleared as before and never offered (the link was not proved by this step).
+    const ownIntent=LINK_REASONS.has(prior.reason)&&TMDB.test(String(prior.tmdb||''))&&String(prior.tmdb)===String(own.tmdb);
+    try{const repaired=await LetterboxdFacts.reprojectDiaryFilm(env,lid);if(repaired.state==='projected'){counts.repaired++;if(ownIntent)handoff(lid,own.tmdb);else clear.push(lid);}else{counts.skipped++;}}catch{counts.skipped++;}
     continue;
    }
    if(prior&&prior.reason===CLAIM_REASON){clear.push(lid);continue;} // the Ratings link is gone: nothing to claim
@@ -144,7 +159,7 @@ const LetterboxdDiaryIdentity=(()=>{
    if(prior&&prior.reason==='link_failed'&&TMDB.test(String(prior.tmdb||''))){
     try{
      const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:String(prior.tmdb)});
-     if(linked.state==='linked'){counts.repaired++;clear.push(lid);claimPairs.push({lid,tmdb:String(prior.tmdb)});}
+     if(linked.state==='linked'){counts.repaired++;handoff(lid,prior.tmdb);}
      else{set[lid]={...prior,reason:'link_conflict',nextAttemptAt:iso(now+delayMs('link_conflict',attempts))};counts.pending++;}
     }catch{counts.skipped++;}
     continue;
@@ -160,7 +175,7 @@ const LetterboxdDiaryIdentity=(()=>{
     if(!(await intend(item,bridge.tmdb,attempts))){counts.deferred++;continue;}
     try{
      const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:bridge.tmdb});
-     if(linked.state==='linked'){counts.bridged++;clear.push(lid);claimPairs.push({lid,tmdb:String(bridge.tmdb)});const known=await CanonicalCatalogReader.catalogTitlesFromD1(env,[{id:'tmdb_'+bridge.tmdb,tmdbId:bridge.tmdb}],gate).catch(()=>({}));const title=known['tmdb_'+bridge.tmdb]?.title||null;labels.set(lid,{title,year:null,tmdb:bridge.tmdb});continue;}
+     if(linked.state==='linked'){counts.bridged++;handoff(lid,bridge.tmdb);const known=await CanonicalCatalogReader.catalogTitlesFromD1(env,[{id:'tmdb_'+bridge.tmdb,tmdbId:bridge.tmdb}],gate).catch(()=>({}));const title=known['tmdb_'+bridge.tmdb]?.title||null;labels.set(lid,{title,year:null,tmdb:bridge.tmdb});continue;}
      set[lid]=entry(item,'link_conflict',attempts+1,now+delayMs('link_conflict',attempts+1));counts.pending++;continue;
     }catch{defer(item,prior);continue;}
    }
@@ -193,7 +208,7 @@ const LetterboxdDiaryIdentity=(()=>{
     }catch(error){outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':error?.code||'admission_failed'};}
     if(confirmed){
      const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:outcome.verdict.tmdb}).catch(()=>({state:'error'}));
-     if(linked.state==='linked'){counts.verified++;clear.push(lid);claimPairs.push({lid,tmdb:String(outcome.verdict.tmdb)});labels.set(lid,label(outcome.verdict));continue;}
+     if(linked.state==='linked'){counts.verified++;handoff(lid,outcome.verdict.tmdb);labels.set(lid,label(outcome.verdict));continue;}
      outcome={state:'pending',reason:linked.state==='conflict'?'link_conflict':'link_failed',...(linked.state==='conflict'?{}:{tmdb:outcome.verdict.tmdb})};
     }
    }
@@ -216,7 +231,8 @@ const LetterboxdDiaryIdentity=(()=>{
     const claimSet={},claimClear=[];
     for(const pair of claimPairs){
      const prior=stored.films[pair.lid]&&stored.films[pair.lid].reason===CLAIM_REASON?stored.films[pair.lid]:null;
-     if(proved.has(pair.lid)){if(prior)claimClear.push(pair.lid);continue;}
+     // a proved claim removes the pending entry, also the one the handoff created in this same step (not in the snapshot read at its start); a missing entry is a no-op
+     if(proved.has(pair.lid)){claimClear.push(pair.lid);continue;}
      // an id the call did not try keeps its attempts and is due again at once; a tried and unproved one backs off like a review
      const attemptsNow=(Number(prior?.attempts)||0)+(tried.has(pair.lid)?1:0);
      claimSet[pair.lid]={reason:CLAIM_REASON,slug:null,tmdb:pair.tmdb,attempts:attemptsNow,lastAttemptAt:iso(now),nextAttemptAt:iso(tried.has(pair.lid)?now+delayMs('review',Math.max(attemptsNow,1)):now)};

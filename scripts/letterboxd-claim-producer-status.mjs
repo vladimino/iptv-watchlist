@@ -5,7 +5,8 @@
 // still answer `pass`/`already`) and the canonical Started reader (`catalogStartedFilm` must answer `found`). Output: counts and reasons only, never a lid,
 // a movie id or a Film id. It sends no batch: the production binding it builds refuses every write before a request.
 //
-// Use: the activation preflight (baseline, without `--since`) and the readback after a natural producer pass (`--since <activation time, ISO UTC>`).
+// Use: the activation preflight (`--baseline`) and the readback after a natural producer pass (`--since <T>`, T = the START of the activation deploy window, ISO UTC,
+// so an early active write cannot fall before it). One of the two is required. With `--since`, `acceptance` states the plan's criteria and `accepted`.
 // The backfill of 21 Nov 2026 used the same origin; it is not repeated, so receipts created after the activation time are the producer's.
 import {fileURLToPath} from 'node:url';
 import {readOwned, readRatingsAuthority} from '../src/ratings-d1.js';
@@ -79,21 +80,39 @@ export async function claimProducerStatus(env,{since=null,now=Date.now()}={}){
  const bySource={};
  let trusted=0;
  for(const row of claims){bump(bySource,source(row.provenance_json)??'(none)');if(Number(row.trusted)===1&&Number(row.conflicting)===0)trusted++;}
+ const receiptsSince=since?await receiptStates(env,since):null;
+ const writes=since?await producerWrites(env,since,now):null;
+ const pendingQueue=await claimPending(env,now);
+ const authoritiesOpen=ratings.ready===true&&filmPerson.state==='open';
+ // The plan's acceptance of a natural pass: open authorities, a settled writer (every receipt since T applied), at least one natural write, every write re-proved
+ // and found by the Started reader with no problem, and no pending claim at its attempt bound. Anything short of that is not an acceptance.
+ const acceptance=since?{
+  authoritiesOpen,
+  settled:receiptsSince.pending===0&&receiptsSince.failed===0&&receiptsSince.unknown===0&&receiptsSince.abandoned===0,
+  natural:writes.films>=1,
+  allProved:writes.films>=1&&writes.claimed===writes.films&&writes.proofHolds===writes.films&&writes.startedFound===writes.films&&Object.keys(writes.problems).length===0,
+  pendingAtBoundZero:pendingQueue.atAttemptBound===0,
+ }:null;
+ if(acceptance)acceptance.accepted=Object.values(acceptance).every(Boolean);
  return {
   checkoutGate:LETTERBOXD_CLAIM_ACTIVATED,
   authorities:{ratings:{mode:ratings.mode,cutover:ratings.cutover,generation:ratings.generation},filmPerson:{state:filmPerson.state,generation:filmPerson.generation??null}},
-  receipts:{all:await receiptStates(env,null),since:since?await receiptStates(env,since):null},
+  receipts:{all:await receiptStates(env,null),since:receiptsSince},
   claims:{letterboxd:claims.length,trusted,bySource},
-  producerWritesSince:since?await producerWrites(env,since,now):null,
-  claimPending:await claimPending(env,now),
+  producerWritesSince:writes,
+  claimPending:pendingQueue,
+  acceptance,
   since,
  };
 }
 
 function parseArgs(argv){
  const args=argv.slice(2);
- for(const arg of args)if(arg.startsWith('--')&&arg!=='--since')throw new StatusStop('unknown_option');
- const at=args.indexOf('--since');
+ for(const arg of args)if(arg.startsWith('--')&&arg!=='--since'&&arg!=='--baseline')throw new StatusStop('unknown_option');
+ const at=args.indexOf('--since'),baseline=args.includes('--baseline');
+ // One mode must be named: a readback without T would silently report a baseline, and a baseline with T is ambiguous.
+ if(at<0&&!baseline)throw new StatusStop('mode_required');
+ if(at>=0&&baseline)throw new StatusStop('mode_ambiguous');
  return {since:at>=0?args[at+1]:null};
 }
 
@@ -105,17 +124,20 @@ async function openReadOnlyBinding(env,fetchImpl){
  const described=await adapter.describe();
  if(described.uuid!==PRODUCTION_DATABASE_ID||described.name!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_identity_mismatch',3);
  const refuse=()=>{throw new StatusStop('write_refused');};
- const readOnly={get:(sql,params)=>adapter.get(sql,params),all:(sql,params)=>adapter.all(sql,params),readBatch:statements=>adapter.readBatch(statements),run:refuse,executeRendered:refuse,describe:()=>adapter.describe(),stats:adapter.stats};
+ // Every read is checked at this boundary too: a statement that is not a single SELECT is refused before a request.
+ const selectOnly=sql=>{const text=String(sql).trim();if(!/^select\b/i.test(text)||/;\s*\S/.test(text))refuse();return sql;};
+ const readOnly={get:(sql,params)=>adapter.get(selectOnly(sql),params),all:(sql,params)=>adapter.all(selectOnly(sql),params),readBatch:statements=>adapter.readBatch(statements),run:refuse,executeRendered:refuse,describe:()=>adapter.describe(),stats:adapter.stats};
  const binding=createPublishedBinding(readOnly);
  const batch=binding.batch.bind(binding);
  binding.batch=async statements=>{if(!statements.every(item=>/^\s*select\b/i.test(String(item?.text||''))))refuse();return batch(statements);};
  return binding;
 }
 
+export {openReadOnlyBinding};
 export async function main({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,print=text=>process.stdout.write(text+'\n'),openBinding=openReadOnlyBinding}={}){
  try{
   const {since}=parseArgs(argv);
-  if(since!=null&&!ISO.test(since))throw new StatusStop('invalid_since');
+  if(since!=null&&(typeof since!=='string'||!ISO.test(since)))throw new StatusStop('invalid_since');
   const binding=await openBinding(env,fetchImpl);
   print(JSON.stringify({mode:'status',sideEffects:'none',...await claimProducerStatus({DB:binding},{since})},null,1));
   return 0;

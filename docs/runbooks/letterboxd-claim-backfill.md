@@ -18,19 +18,21 @@ A zero cohort in the backfill `dry_run` does not by itself show that the produce
    - verified items of an owner-driven archive baseline commit.
 
    A lid that the link index alone ties to a movie is not offered. An inferred link is never offered and is refused by the planner (`identity` or `inferredPairs`). The rated-candidate step is not wired. No backfill is part of the activation.
-2. **The change.** In one reviewed PR:
-   - the constant line, `export const LETTERBOXD_CLAIM_ACTIVATED=true;`;
-   - the matching assertion of `tests/canonical-letterboxd-claim.mjs` ("the activation constant ships off").
+2. **The change.** Exactly three lines in one reviewed PR, each marked `ACTIVATION DIFF` where it is a test:
+   - `src/canonical-letterboxd-claim.js`: `export const LETTERBOXD_CLAIM_ACTIVATED=true;`;
+   - `tests/canonical-letterboxd-claim.mjs`: the "ships off" assertion becomes `true` / "ships on";
+   - `tests/canonical-film-external-ids-producer.mjs`: the literal check becomes `=true;` / "the activation gate is on".
 
-   `tests/letterboxd-claim-activation-rehearsal.mjs` already runs the whole producer with the gate on, from a private copy of `src/`, so it needs no change. The PR is merged only after the owner's GO; the ordinary deploy then activates it.
+   Everything else follows the constant or passes `enabled` explicitly, so the explicit disabled coverage stays. `tests/letterboxd-claim-activation-rehearsal.mjs` already runs the whole producer with the gate on, from a private copy of `src/`. The full suite and the build were also run on the exact gate-on candidate (these three lines on top of this plan's commit): core and non-functional all passed, build passed. The activation PR repeats that on its own HEAD. It is merged only after the owner's GO; the ordinary deploy then activates it.
 3. **Preflight, read-only, immediately before the GO:**
    - `feature_flags` (no flag gates this producer; it is the constant);
    - `ratings_sync_status`: Letterboxd Sync mode `cloudflare` and healthy, the next slot due;
    - the backfill `dry_run`: `already_current`, no blockers;
-   - `node scripts/letterboxd-claim-producer-status.mjs`, the baseline. It reports both authorities, the claim unit's receipts by state, the `letterboxd` claims by provenance and the `claim_pending` queue. Record the activation time `T`, the deploy time of the merge, in UTC.
+   - `node scripts/letterboxd-claim-producer-status.mjs --baseline`. It reports both authorities, the claim unit's receipts by state, the `letterboxd` claims by provenance and the `claim_pending` queue. The tool requires `--baseline` or `--since`; it never silently reports a baseline for a readback.
+   - Record `T` as the **start** of the activation deploy window, in UTC (the merge time, at the latest the start of the `Deploy to Cloudflare` job), so that an early active write cannot fall before it.
 4. **Natural producer pass (no artificial trigger).** The first natural event is either a new Letterboxd id that the Watchlist admission step verifies, or a Diary id without a Ratings TMDB link that the Diary step verifies. Each needs a Film the admission creates. The Sync runs four slots a day.
 5. **Independent authoritative readback**, measured on the claim writer alone and not through the Ratings workflow: `node scripts/letterboxd-claim-producer-status.mjs --since T`.
-   - **Accept** when `receipts.since` shows only `applied`; `producerWritesSince` has `films ≥ 1` and `claimed = proofHolds = startedFound = films` with no `problems`; `claimPending.atAttemptBound` is 0; and `claims.bySource.ratings_alias_bridge` grew by exactly `films`.
+   - **Accept** only on a settled natural pass with open authorities: the tool's `acceptance.accepted` is `true`. That requires `authoritiesOpen`, `settled` (every receipt since T `applied`), `natural` (`films ≥ 1`), `allProved` (`claimed = proofHolds = startedFound = films`, no `problems`) and `pendingAtBoundZero`. In addition, `claims.bySource.ratings_alias_bridge` must have grown by exactly `films` against the baseline.
    - Then run the backfill `dry_run` again and confirm it is still `already_current`.
    - The tool re-proves each claim with the planner and resolves it with `catalogStartedFilm`. It prints no identifier and sends no write.
    - **No natural event within the observation window** is not a failure and not an acceptance. The card goes to `Верификация` with this criterion and the readback command.

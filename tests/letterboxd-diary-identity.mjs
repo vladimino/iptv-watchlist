@@ -309,7 +309,7 @@ reset(); claimCalls.length = 0; claimStub.mode = 'complete'; await seed('vMEO', 
 out = await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts());
 assert.equal(out.counts.verified, 1); assert.equal(out.counts.claim, 'complete');
 assert.equal(claimCalls.length, 1); assert.deepEqual(claimCalls[0].pairs, [{lid: 'vMEO', tmdb: '900001'}]);
-assert.deepEqual(claimCalls[0].linked, ['900001'], 'the Ratings link is durable before the claim is requested'); assert.deepEqual(claimCalls[0].pendingKeys, [], 'the pending document is settled first');
+assert.deepEqual(claimCalls[0].linked, ['900001'], 'the Ratings link is durable before the claim is requested'); assert.deepEqual(claimCalls[0].pendingKeys, ['vMEO'], 'the verified pair is handed off: its durable claim_pending entry exists BEFORE the claim is requested (AIR-559, review of #966)');
 assert.deepEqual(Object.keys(pending()), [], 'a proved claim leaves no pending state');
 // AIR-559: the next ordinary run does NOT re-offer an already-linked id without its own pending claim: the link index alone does not say how the pair was made (an inferred
 // title/year import may have left it unmarked), so only a pair this step verified, bridged or repaired, and still unproved, is served again (as `claim_pending`).
@@ -370,8 +370,9 @@ claimCalls.length = 0; await Identity.resolve(env, items(), opts({clock: () => N
 await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {Gone1: {reason: 'claim_pending', slug: null, tmdb: '900077', attempts: 1, lastAttemptAt: new Date(NOW).toISOString(), nextAttemptAt: new Date(NOW).toISOString()}}}), {});
 await Identity.resolve(env, items(), opts({clock: () => NOW + 3600000})); assert.equal(pending().Gone1, undefined);
 // INACTIVE: nothing is stored (no production document changes while the gate is off)
-reset(); claimCalls.length = 0; claimStub.mode = 'inactive'; await seed('vMEO', 3.5); add('vMEO', 'fixture-alpha-2023', '900001', 'Fixture Alpha', 2023);
+reset(); claimCalls.length = 0; claimStub.mode = 'inactive'; claimStub.LETTERBOXD_CLAIM_ACTIVATED = false; await seed('vMEO', 3.5); add('vMEO', 'fixture-alpha-2023', '900001', 'Fixture Alpha', 2023);
 out = await Identity.resolve(env, items(['vMEO', 'fixture-alpha-2023']), opts()); assert.equal(out.counts.verified, 1); assert.deepEqual(Object.keys(pending()), []); assert.equal(out.counts.claim, undefined);
+claimStub.LETTERBOXD_CLAIM_ACTIVATED = true;
 // a short lease skips the claim step (the rating and the Event never wait for it) and keeps the id due; an absent claim module is a no-op
 reset(); claimCalls.length = 0; claimStub.mode = 'complete'; await seed('Brg1', 3); canonical.bridge.Brg1 = {state: 'ok', filmId: 'film:tmdb:900020', tmdb: '900020', lid: 'Brg1'};
 out = await Identity.resolve(env, items(['Brg1', 'fixture-brg-2019']), opts({remaining: () => 1000})); assert.equal(claimCalls.length, 0); assert.equal(pending().Brg1.reason, 'claim_pending'); assert.equal(pending().Brg1.attempts, 0);

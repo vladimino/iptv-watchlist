@@ -356,6 +356,7 @@ for(const stage of ['legacy','r2','prepared']){
  for(const file of fs.readdirSync('src').filter(name=>name.endsWith('.js')&&name!=='canonical-film-external-ids-producer.js'&&name!=='canonical-letterboxd-claim.js'))assert.ok(!fs.readFileSync('src/'+file,'utf8').includes('canonical-film-external-ids-producer'),file+' does not import the unit');
  // The unit is bundled ONLY as the dependency of the gated Letterboxd claim module (ADR 0184): that module's activation constant is false, so no Worker path calls it (tests/canonical-letterboxd-claim.mjs).
  assert.ok(fs.readFileSync('build.mjs','utf8').includes('canonical-letterboxd-claim.js'),'bundled with its gated caller');
+ // ACTIVATION DIFF (runbook activation plan): the activation PR changes this literal together with the constant and tests/canonical-letterboxd-claim.mjs.
  assert.ok(/export const LETTERBOXD_CLAIM_ACTIVATED=false;/.test(fs.readFileSync('src/canonical-letterboxd-claim.js','utf8')),'the activation gate is off');
  assert.ok(!PRODUCER_OPERATIONS.has('film_external_ids'));
  assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
