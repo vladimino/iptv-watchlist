@@ -62,6 +62,15 @@ The first review of [vladimino/iptv-watchlist#977](https://github.com/vladimino/
 - **No promise of resumption.** The pause card said Discovery would continue after the programme update, also beside an exhausted or stalled chain. It now says only when the gate lifts (the update published and certified complete), and an independent failure keeps its sentence and error badge.
 - **Rollback without loss.** The Worker before this change drops every ledger tuple it cannot decode when it writes its ledger back, so a reason index 5 in `events/discovery-report-faults.json` would be lost on a rollback. Notices it cannot rebuild now go to a second object, `events/discovery-report-faults-v2.json`, which that Worker never reads or writes; the old object holds only tuples it decodes. Covered offline with the older reader's decode rule copied verbatim into `tests/discovery-events.mjs` 18c.
 
+## Second review follow-up (24 Nov 2026)
+
+The re-review accepted the first follow-up and found two regressions of the ADR 0118 recovery bounds in the two-object ledger, both fixed in the same PR:
+
+- **Drain bound refunded on an exception.** The per-object drain answered `attempted: 0` when its cleanup threw after the journal puts, so the second object could spend another 64. The firing now merges both objects, fixes one batch of at most 64 before the first put, and cleans each object afterwards; no failure path can add puts.
+- **Capacity and order changed per object.** The admission now counts both objects against the one 8,760 bound and refuses a second entry for an hour queued in either; the drain orders both by hour, oldest first. The only remaining difference is the rollback window, documented in the reference: the older Worker bounds only its own object.
+
+Covered by `tests/discovery-events.mjs` 18d (oldest-first across both, both objects beyond one drain, a thrown cleanup put, a refused compare-and-swap followed by a thrown read, idempotent recovery, the logical bound from either side, one entry per hour across both).
+
 ## Tests (offline)
 
 - `tests/discovery-events.mjs` 17: the drained series of 22:00 (empty with real counters, also with the period's own chunks) and every negative (another hop, another generation, each queue part non-zero or unknown, an owed chunk, other pause reasons, a stale or non-terminal stop, a running reconcile, an unreadable status).

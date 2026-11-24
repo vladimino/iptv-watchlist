@@ -251,7 +251,8 @@ const DISCOVERY_REPORT_CLOSE_REASONS=new Set(['no_record','state_unreadable','ou
 const DISCOVERY_REPORT_FAULT_KEY='events/discovery-report-faults.json';
 // The ledger never evicts: it holds one compact tuple per undelivered hour, up to a year of hours (about 40 bytes each, well under 1 MB). Past that bound the NEWEST
 // notice is refused and logged as `lost`; an older one is never dropped to make room. A drain delivers at most `DISCOVERY_REPORT_FAULT_DRAIN` entries per firing,
-// oldest first, so one invocation's R2 work stays bounded however long the outage was.
+// oldest first, so one invocation's R2 work stays bounded however long the outage was. Since AIR-595 the ledger is stored in two objects (see below); the bound,
+// the one-entry-per-hour identity, the per-firing drain bound and the oldest-first order apply to both together.
 const DISCOVERY_REPORT_FAULT_LIMIT=8760;
 const DISCOVERY_REPORT_FAULT_DRAIN=64;
 const DISCOVERY_REPORT_FAULT_ATTEMPTS=3;
@@ -317,10 +318,12 @@ async function deliverDiscoveryReportFailure(env,event){
  const tuple=encodeDiscoveryReportFault(event);
  if(!tuple)return 'lost';
  try{
+  const key=discoveryReportFaultKey(tuple),otherKey=key===DISCOVERY_REPORT_FAULT_KEY?DISCOVERY_REPORT_FAULT_KEY_V2:DISCOVERY_REPORT_FAULT_KEY;
   for(let attempt=0;attempt<DISCOVERY_REPORT_FAULT_ATTEMPTS;attempt++){
-   const state=await readDiscoveryReportFaults(env,discoveryReportFaultKey(tuple));
-   if(state.faults.some(entry=>sameFault(entry,tuple)))return 'queued';
-   if(state.faults.length>=DISCOVERY_REPORT_FAULT_LIMIT)return 'lost';
+   // One logical ledger over the two objects (ADR 0118): one entry per hour across both, and the 8,760 bound counts both.
+   const state=await readDiscoveryReportFaults(env,key),other=await readDiscoveryReportFaults(env,otherKey);
+   if(state.faults.some(entry=>sameFault(entry,tuple))||other.faults.some(entry=>sameFault(entry,tuple)))return 'queued';
+   if(state.faults.length+other.faults.length>=DISCOVERY_REPORT_FAULT_LIMIT)return 'lost';
    if(await writeDiscoveryReportFaults(env,state,[...state.faults,tuple]))return 'queued';
   }
  }catch{}
@@ -329,34 +332,40 @@ async function deliverDiscoveryReportFailure(env,event){
 // Drains the ledger: the oldest entries first, at most DISCOVERY_REPORT_FAULT_DRAIN a firing, each put create-only; an entry leaves the ledger only after a confirmed
 // put (written, or the key already holds the notice or the report of that hour). Never throws.
 async function deliverDiscoveryReportFaults(env){
- let delivered=0,pending=0,budget=DISCOVERY_REPORT_FAULT_DRAIN,failed=false;
- // Both ledgers, the older first, under one per-firing bound.
- for(const key of [DISCOVERY_REPORT_FAULT_KEY,DISCOVERY_REPORT_FAULT_KEY_V2]){
-  const result=await drainDiscoveryReportFaults(env,key,budget);
-  if(result.pending===null)failed=true;else pending+=result.pending;
-  delivered+=result.delivered;budget=Math.max(0,budget-result.attempted);
+ // One logical ledger over the two objects (ADR 0118, AIR-595 review): the entries of both are merged and drained oldest hour first, at most
+ // DISCOVERY_REPORT_FAULT_DRAIN journal puts a firing in total, whatever fails afterwards (the batch is fixed before the first put). Each object is then
+ // cleaned with its own compare-and-swap; an entry leaves only after a confirmed put. An uncertain cleanup answers `pending: null` and the next firing
+ // finds the delivered entries `exists` and removes them.
+ let states;
+ try{states=[await readDiscoveryReportFaults(env,DISCOVERY_REPORT_FAULT_KEY),await readDiscoveryReportFaults(env,DISCOVERY_REPORT_FAULT_KEY_V2)];}
+ catch{return {delivered:0,pending:null,attempted:0};}
+ const all=states.flatMap((state,ledger)=>state.faults.map((tuple,order)=>({tuple,ledger,order})));
+ if(!all.length)return {delivered:0,pending:0,attempted:0};
+ all.sort((a,b)=>a.tuple[1]<b.tuple[1]?-1:a.tuple[1]>b.tuple[1]?1:(a.ledger-b.ledger)||(a.order-b.order));
+ const batch=all.slice(0,DISCOVERY_REPORT_FAULT_DRAIN),done=[[],[]];
+ for(const item of batch){
+  const event=decodeDiscoveryReportFault(item.tuple);
+  const written=event?await putDiscoveryEvent(env,event):'written';
+  if(written==='written'||written==='exists')done[item.ledger].push(item.tuple);
  }
- return {delivered,pending:failed?null:pending};
+ let delivered=0,pending=0,uncertain=false;
+ for(const ledger of [0,1]){
+  if(!done[ledger].length){pending+=states[ledger].faults.length;continue;}
+  const left=await cleanDiscoveryReportFaults(env,states[ledger],done[ledger]);
+  if(left===null)uncertain=true;else{pending+=left;delivered+=done[ledger].length;}
+ }
+ return {delivered,pending:uncertain?null:pending,attempted:batch.length};
 }
-async function drainDiscoveryReportFaults(env,key,budget){
+// Removes delivered entries from one ledger object under its compare-and-swap. Answers the entries left, or null when it could not be confirmed. Never throws.
+async function cleanDiscoveryReportFaults(env,first,done){
  try{
-  const first=await readDiscoveryReportFaults(env,key);
-  if(!first.faults.length||budget<=0)return {delivered:0,pending:first.faults.length,attempted:0};
-  const done=[],batch=first.faults.slice(0,budget);
-  for(const tuple of batch){
-   const event=decodeDiscoveryReportFault(tuple);
-   const written=event?await putDiscoveryEvent(env,event):'written';
-   if(written==='written'||written==='exists')done.push(tuple);
-  }
-  if(!done.length)return {delivered:0,pending:first.faults.length,attempted:batch.length};
   for(let attempt=0;attempt<DISCOVERY_REPORT_FAULT_ATTEMPTS;attempt++){
-   const state=attempt===0?first:await readDiscoveryReportFaults(env,key);
+   const state=attempt===0?first:await readDiscoveryReportFaults(env,first.key);
    const left=state.faults.filter(entry=>!done.some(item=>sameFault(item,entry)));
-   if(await writeDiscoveryReportFaults(env,state,left))return {delivered:done.length,pending:left.length,attempted:batch.length};
+   if(await writeDiscoveryReportFaults(env,state,left))return left.length;
   }
-  return {delivered:0,pending:null,attempted:batch.length};
  }catch{}
- return {delivered:0,pending:null,attempted:0};
+ return null;
 }
 // Counts the statements prepared through env.DB. Statements and batches are passed through untouched, because a
 // native D1 batch only accepts native prepared statements.

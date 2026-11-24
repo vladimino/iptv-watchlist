@@ -955,6 +955,80 @@ resetAll();seed({count:3});elect();
  assert.equal(notices().find(event=>event.at.slice(11,13)==='12').status,'failed');
 }
 
+// 18d. AIR-595 re-review: the two ledger objects are ONE logical ledger under ADR 0118. Oldest hour first across both, at most 64 journal puts a firing in total even
+// when the cleanup of one object throws (a thrown put, or a thrown read after a refused compare-and-swap), the 8,760 bound counts both, one entry per hour across both,
+// and an uncertain cleanup recovers idempotently.
+{
+ const gen=GENERATION.replace(/-/g,'').slice(0,12),drain=call('DISCOVERY_REPORT_FAULT_DRAIN'),limit=call('DISCOVERY_REPORT_FAULT_LIMIT');
+ const hourKey=n=>new Date(Date.UTC(2026,9,1,0)+n*HOUR).toISOString().replace(/[-:]/g,'').slice(0,11);
+ const v1=n=>[gen,hourKey(n),4,0],v2=n=>[gen,hourKey(n),5,0,0];
+ const realBucketPut=bucket.put,realBucketGet=bucket.get;
+ let eventAttempts=0;
+ const counting=async(key,...rest)=>{if(key.startsWith('events/items/'))eventAttempts++;return realBucketPut(key,...rest);};
+ const deliver=()=>call('deliverDiscoveryReportFaults')(env);
+ // (a) oldest first across the objects: v2 holds the older hours (a rollback, then a newer outage of the older reasons)
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:[v1(10),v1(11)]});set(FAULT_KEY_V2,{schemaVersion:2,faults:[v2(1),v2(2),v2(12)]});
+ const ordered=[];bucket.put=async(key,value,...rest)=>{if(key.startsWith('events/items/'))ordered.push(JSON.parse(value).at.slice(5,13));return realBucketPut(key,value,...rest);};
+ assert.deepEqual(JSON.parse(JSON.stringify(await deliver())),{delivered:5,pending:0,attempted:5});
+ bucket.put=realBucketPut;
+ assert.deepEqual(ordered,[1,2,10,11,12].map(n=>new Date(Date.UTC(2026,9,1,0)+n*HOUR).toISOString().slice(5,13)),'one oldest-first order across both objects');
+ // (b) both objects full beyond one drain: one firing makes exactly the drain bound of journal puts, the oldest across both
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v1(2*i+1))});set(FAULT_KEY_V2,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v2(2*i))});
+ eventAttempts=0;bucket.put=counting;
+ const both=await deliver();
+ assert.equal(eventAttempts,drain,'one firing, one bound');assert.equal(both.attempted,drain);assert.equal(both.pending,drain);
+ assert.equal(ledger().length,drain/2);assert.equal(ledgerV2().length,drain/2,'the oldest half of each was delivered');
+ // (c) the cleanup put of the old object throws after the journal puts: the bound is not refunded to the other object, the answer is uncertain
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v1(i))});set(FAULT_KEY_V2,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v2(drain+i))});
+ eventAttempts=0;
+ bucket.put=async(key,...rest)=>{if(key===FAULT_KEY)throw new Error('ledger put failed');return counting(key,...rest);};
+ const thrown=await deliver();
+ assert.equal(eventAttempts,drain,'a thrown cleanup put does not let the other object spend another bound');
+ assert.equal(thrown.pending,null,'uncertain');assert.equal(ledger().length,drain,'the old object kept its entries');assert.equal(ledgerV2().length,drain,'the v2 entries were not attempted');
+ // recovery: the next firing finds the delivered hours `exists`, removes them and spends no more than the bound
+ bucket.put=counting;eventAttempts=0;
+ const recovered=await deliver();
+ assert.equal(eventAttempts,drain);assert.equal(recovered.pending,drain);assert.deepEqual(ledger(),[]);assert.equal(ledgerV2().length,drain);
+ await deliver();assert.deepEqual(ledgerV2(),[]);
+ assert.equal(notices().length,2*drain,'every hour delivered exactly once');assert.equal(new Set(notices().map(event=>event.id)).size,2*drain);
+ // (d) a refused compare-and-swap followed by a thrown read: the same bound, uncertain, then idempotent recovery
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v1(i))});set(FAULT_KEY_V2,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v2(drain+i))});
+ eventAttempts=0;let refusedOnce=false,reads=0;
+ bucket.put=async(key,...rest)=>{if(key===FAULT_KEY&&!refusedOnce){refusedOnce=true;return null;}return counting(key,...rest);};
+ bucket.get=async(key,...rest)=>{if(key===FAULT_KEY&&refusedOnce&&reads++>=0)throw new Error('ledger read failed');return realBucketGet(key,...rest);};
+ const reread=await deliver();
+ bucket.get=realBucketGet;
+ assert.equal(eventAttempts,drain);assert.equal(reread.pending,null);assert.equal(ledgerV2().length,drain);
+ bucket.put=counting;eventAttempts=0;
+ await deliver();await deliver();
+ assert.deepEqual(ledger(),[]);assert.deepEqual(ledgerV2(),[]);assert.equal(new Set(notices().map(event=>event.id)).size,2*drain);
+ bucket.put=realBucketPut;
+ // (e) the 8,760 bound counts both objects
+ const fill=(oldCount,newCount)=>{resetAll();seed({count:3});elect();
+  set(FAULT_KEY,{schemaVersion:2,faults:Array.from({length:oldCount},(_,i)=>v1(i))});set(FAULT_KEY_V2,{schemaVersion:2,faults:Array.from({length:newCount},(_,i)=>v2(oldCount+i))});};
+ const pausedWrite=async()=>{const error=new Error('priority');error.code='discovery_epg_priority';error.priority={nextCatchUpAt:new Date(Date.now()+60000).toISOString()};throw error;};
+ const realWrite=context.DiscoveryAuthority.writeWorkflow;
+ for(const [label,writer] of [['a pause notice (v2)',pausedWrite],['an older reason (old object)',async()=>({handled:true,saved:false})]]){
+  fill(limit-1,1);context.DiscoveryAuthority.writeWorkflow=writer;failEventPuts=true;
+  const full=await call('deliverDiscoveryReportFailure')(env,call('discoveryReportFailedEvent')({at:'2028-11-11T10:00:00.000Z',hourKey:'20281111T10',generation:GENERATION,reason:writer===pausedWrite?'epg_priority':'write_conflict',status:null}));
+  assert.equal(full,'lost',label+': at the logical bound the newest is refused');assert.equal(ledger().length+ledgerV2().length,limit,'nothing evicted');
+  fill(limit-2,1);context.DiscoveryAuthority.writeWorkflow=writer;failEventPuts=true;
+  const room=await call('deliverDiscoveryReportFailure')(env,call('discoveryReportFailedEvent')({at:'2028-11-11T10:00:00.000Z',hourKey:'20281111T10',generation:GENERATION,reason:writer===pausedWrite?'epg_priority':'write_conflict',status:null}));
+  assert.equal(room,'queued',label+': below the logical bound it is queued');assert.equal(ledger().length+ledgerV2().length,limit);
+  failEventPuts=false;
+ }
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ // (f) one entry per hour across both objects: a pause notice of an hour already queued with an older reason is not queued twice
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:[[gen,'20261111T10',4,0]]});failEventPuts=true;
+ assert.equal(await call('deliverDiscoveryReportFailure')(env,call('discoveryReportFailedEvent')({at:new Date(BASE).toISOString(),hourKey:'20261111T10',generation:GENERATION,reason:'epg_priority',status:null})),'queued');
+ failEventPuts=false;assert.equal(ledger().length,1);assert.deepEqual(ledgerV2(),[],'no second entry for the hour');
+}
+
 // 19. AIR-595: a new generation started by the reconcile carries the accumulator, the outbox and the last closed hour of the previous record (the 17:00 UTC report
 // of 23 Nov 2026 had `from: null` because they were dropped). Nothing is lost or reported twice across the change.
 resetAll();
