@@ -656,6 +656,8 @@ function eventStatusBadgeHTML(event){
  return badge?`<span class="event-status event-status-${status}"><span class="event-status-icon" aria-hidden="true">${badge.icon}</span>${badge.label}</span>`:'';
 }
 const EVENT_SEARCH_TARGET=10;
+// AIR-595: the one sentence of the EPG-priority pause, for the hourly report and for the notice of an hour whose close the pause refused.
+const DISCOVERY_EPG_PAUSE_TITLE='Discovery приостановлен на время обновления программы';
 let eventTypeFilterId='all',eventResultFilterId='all',activityNote='Загружаем события…',eventsReady=false;
 const eventSearch={token:0,state:'idle',controller:null};
 function eventMatchCount(id,result=eventResultFilterId){let count=0;for(const event of loadedEvents.values())if(eventMatchesFilters(event,id,result))count++;return count;}
@@ -2861,6 +2863,7 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
    :status==='failed'?'Discovery остановлен после повторных ошибок'
    :status==='stalled'?'Discovery остановлен: восстановление просрочено, очередь не разобрана'
    :status==='waiting'?'Discovery ждёт повтора'
+   :status==='blocked'&&event.reason==='epg_priority'?DISCOVERY_EPG_PAUSE_TITLE
    :status==='blocked'?'Discovery не запустился: временный отказ'
    :status==='empty'||empty?'Очередь Discovery пуста'
    :status==='idle'?'Discovery не работает: запуска не требовалось'
@@ -2877,7 +2880,13 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
   // ADR 0118: the REPORT of an hour could not be completed. No counters and no queue facts are drawn (none were read), and Discovery is named only when the
   // reconcile of that firing confirmed a state that needs attention; every sentence is fixed text chosen by `status`.
   const state=event.status==='failed'?'Discovery остановлен после повторных ошибок':event.status==='stalled'?'Discovery остановлен: восстановление просрочено':event.status==='waiting'?'Discovery ждёт повтора':event.status==='blocked'?'Discovery не запустился: временный отказ':null;
-  body=`<p>Отчёт за час не удалось сформировать</p><p class="event-note">Если за этот период что-то было найдено, оно войдёт в следующий успешный отчёт.</p>${state?`<p class="event-note">${state}.</p>`:''}`;
+  // AIR-595: the close was refused by the EPG-priority pause (ADR 0135), the planned wait for the programme update, not a fault of the report. It names the pause and
+  // says nothing about results: deltas of the period, if any, are still in the open accumulator. It promises no resumption (a failed or stalled chain does not resume by
+  // itself); it says only when the gate lifts. An independent confirmed state and an independent queue read failure (`fault`) are still named beside it.
+  const fault=event.fault==='queue_unreadable'?'<p class="event-note">Кроме того, состояние очереди Discovery в этот час прочитать не удалось.</p>':'';
+  body=event.reason==='epg_priority'
+   ?`<p>${DISCOVERY_EPG_PAUSE_TITLE}</p><p class="event-note">Пауза снимается, когда обновление программы опубликовано и подтверждено как завершённое. Если за этот период что-то было найдено, оно войдёт в следующий отчёт.</p>${fault}${state?`<p class="event-note">${state}.</p>`:''}`
+   :`<p>Отчёт за час не удалось сформировать</p><p class="event-note">Если за этот период что-то было найдено, оно войдёт в следующий успешный отчёт.</p>${state?`<p class="event-note">${state}.</p>`:''}`;
  }
  else if(event.type==='discovery'){
   const n=v=>Number.isInteger(v)&&v>=0?v:0,known=Number.isInteger(event.remaining)&&event.remaining>=0,empty=event.queueEmpty===true,added=n(event.added),checked=n(event.checked);
