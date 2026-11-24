@@ -144,7 +144,7 @@ For a Letterboxd-only Film, a TMDB id on the page is recorded as an identity hin
 - The producer never resolves identity, and never applies metadata across an unverified or contradicted mapping.
 
 **Which checks finish before which writes.**
-- `core` and `credits` writes from any source need a recorded agreement for the Film's **current** anchors whenever the Film holds a Letterboxd anchor. The one exception is the fallback below.
+- `core` and `credits` writes from any source need a recorded agreement for the Film's **current** anchors whenever the Film holds a Letterboxd anchor. There are two exceptions: a Letterboxd source that is `failed` (`needs_attention`), and the fallback below. In both, the fields that TMDB fills are also listed as `unconfirmed_agreement`.
 - A source's own localization row needs only that source's anchor, because one source's row never replaces another's.
 - Wikidata needs only the TMDB anchor.
 
@@ -200,7 +200,7 @@ Both are listed in the state and reported (decision 5). Neither ever changes a c
 - **The Film already has credits in one namespace** (for example, Letterboxd credits from the EPG chain). The credit source is that namespace's source, if it is applicable, and only missing credits are added. If that source is not applicable, no credits are written.
 - **The Film has credits in both namespaces.** No credits are written, and the part records `credits_other_namespace` (`complete_with_gaps`) for owner review.
 - **The Film has no credits.** The source is `letterboxd` if anchored, otherwise `tmdb`.
-- The credit source is fixed when `credits` is first planned and is never reopened for another source.
+- The credit source is fixed when `credits` is first planned and is never reopened for another source. The one exception is an identity correction (decision 3b), which holds `credits` for the owner.
 - No person is merged on name, and no credit is deleted.
 
 **Persons.**
@@ -226,11 +226,14 @@ Enrichment has three independent **parts**:
 - `expected_json`, `gaps_json`, `conflicts_json`, `hints_json`;
 - `updated_at`.
 
-**The Film row.** A row with `part = 'film'` holds the Film-level state:
-- the applicable source set;
-- `anchor_digest`, `agreed_anchor_digest` and `anchor_checked_at`;
-- the disagreement;
-- the lists `fallback_fill`, `unconfirmed_agreement` and `written_under_superseded_anchor`.
+**The Film row.** A row with `part = 'film'` and `source = '*'` holds the Film-level state.
+- Its `status` is `active` or `identity_disagreement`.
+- One more column, `film_json`, holds:
+  - the applicable source set;
+  - `anchor_digest`, `agreed_anchor_digest` and `anchor_checked_at`;
+  - the disagreement;
+  - the lists `fallback_fill`, `unconfirmed_agreement` and `written_under_superseded_anchor`.
+- No guard reads `film_json`. Commit guards check the exact anchors in canonical tables.
 
 **Completion comes from canonical state plus the state rows.**
 - **`core` is complete** when every field is non-blank, or when every applicable source is settled (`absent`, `failed` or `not_applicable` for the missing fields): `complete_with_gaps` lists the fields that no applicable source had.
@@ -290,7 +293,7 @@ A changed anchor therefore fails the batch, and the planner replans (decision 3b
 
 That makes 11 in all.
 
-**Person units** carry the exact anchor guards of the credit source, the lease and the control generation, so no Person is written for an invalidated plan.
+**Person units** carry the same exact anchor guards as the Film units of their plan (every anchor the plan used or checked), the lease and the control generation, so no Person is written for an invalidated plan.
 
 - **Cross-origin correlation.** A Person or credit may already exist from another origin, such as the EPG chain. The person unit inserts only absent Persons, and the credits unit adds only what is missing. With the credits rule of decision 2, this never adds a second namespace.
 - **Sequencing and partial recovery.** `credits` runs its person unit first, then its credits unit. A credit whose Person is missing is refused (`film_person_reference`), so the database enforces the order. A retry recomputes the missing persons and credits from canonical state against the stored expected set.
@@ -298,7 +301,7 @@ That makes 11 in all.
 
 ### 3b. Identity changes and recovery
 
-**Anchor check before filtering due work.** Before it selects due work, each tick recomputes the anchor digest for every Film it is about to plan. It also does so for up to **20** further in-scope Films with the oldest `anchor_checked_at`, whatever their status, including `complete`, `needs_attention` and `identity_disagreement`. The digest is SHA-256 of the sorted anchors `(scheme, value, trusted, conflicting, retired)`, and computing it is a bounded read of `film_external_id` and `tmdb_retirement_decision`.
+**Anchor check before filtering due work.** Before it selects due work, each tick recomputes the anchor digest for every Film it is about to plan. It also does so for up to **20** further in-scope Films with the oldest `anchor_checked_at`, whatever their status, including `complete`, `needs_attention` and `identity_disagreement`. The digest is SHA-256 of the sorted anchors `(scheme, value, trusted, conflicting, retired, holds)`, where `holds` says whether the anchor still satisfies its whole rule, including **no other owner** of that value. So a change on another Film that takes or releases the same value is detected too. Computing it is a bounded read of `film_external_id` and `tmdb_retirement_decision`.
 
 **On a change:**
 - **The source set grew:** the new source's gaps reopen (decision 2).
@@ -307,8 +310,9 @@ That makes 11 in all.
   - Every state row of the Film is invalidated. Its status becomes `due`, with failures and streak at 0 and `expected_json` cleared. `refresh_epoch` rises by 1, `agreed_anchor_digest` is cleared, and `identity_disagreement` is lifted.
   - Unresolved receipts of the old plan are abandoned by the reconcile protocol (same key, different digest) before any new reservation, so no stale unit lands.
   - **Values written under the old anchor are neither overwritten nor deleted**, because the producer is fill-only and credits are add-only. They are listed as `written_under_superseded_anchor`, each field or credit with its old anchor. They are visible in `/admin/settings` and to the Monitor, for correction through the existing owner routes or card PF.
+  - **`credits` is held** with `needs_attention` and the reason `superseded_credits` whenever this producer added credits under the old anchor. That stops the new identity's cast from being mixed into the old one in the same namespace. The owner releases it with `retry`, after correcting or accepting the listed credits.
 
-**Unchanged anchors: an explicit owner retry.** A Film blocked by `identity_disagreement`, or a part in `needs_attention`, whose anchors did not change, is retried only by an owner action. The request is `POST /api/admin/settings/catalog-enrichment` with `{action: 'retry', filmId, part?, source?, expectedRevision, requestId}`, and it has the same authentication and readback as decision 6.
+**Unchanged anchors: an explicit owner retry.** A Film blocked by `identity_disagreement`, or a part in `needs_attention`, whose anchors did not change, is retried only by an owner action. The request is `POST /api/admin/settings/catalog-enrichment` with `{action: 'retry', filmId, part?, source?, expectedRows, requestId}`, and it has the same authentication and readback as decision 6. `expectedRows` gives, for each selected state row, the `status` and `updated_at` that the owner saw. That is the retry's own compare-and-swap. A retry never changes the control row's revision, so it does not race with pause or resume.
 - It resets the selected rows to `due`, clears failures and the disagreement, and raises `refresh_epoch`.
 - It keeps `due_since`.
 - It writes no metadata itself.
@@ -349,6 +353,7 @@ That makes 11 in all.
   - both completion orders of Letterboxd and TMDB give the same writes;
   - a Letterboxd transport failure makes TMDB fields wait, then fill when Letterboxd answers;
   - the 72 h fallback, listed as `fallback_fill`;
+  - a Letterboxd source at `needs_attention` lets TMDB fill, listed as `unconfirmed_agreement`;
   - the deadline falling between two sources;
   - a value conflict and a stored difference, both listed;
   - a page disagreement stops every source;
@@ -361,6 +366,9 @@ That makes 11 in all.
   - a retirement;
   - a lid replacement L → L′;
   - a correction while a part is mid-recovery;
+  - `credits` held as `superseded_credits` after a correction, then released by an owner retry;
+  - another Film taking or releasing the same anchor value, detected by the `holds` bit;
+  - a retry with stale `expectedRows`;
   - a correction during a pause;
   - a blocked Film recovering after its claim fix;
   - an owner retry with unchanged anchors;
@@ -507,7 +515,7 @@ Every write batch of the producer asserts `state = 'active'` and its generation 
   - the Films in `identity_disagreement` or `needs_attention`, with their lists `fallback_fill`, `unconfirmed_agreement` and `written_under_superseded_anchor`, each with a retry action.
 
   It is a pure read and registered in the GET write baseline.
-- **Write route.** `POST /api/admin/settings/catalog-enrichment` with `{action: 'pause'|'resume'|'retry', expectedRevision, requestId}`; `retry` also takes `filmId` and optionally `part` and `source` (decision 3b). It is registered as POST-only in the read-side-effect audit. It requires:
+- **Write route.** `POST /api/admin/settings/catalog-enrichment` with `{action: 'pause'|'resume', expectedRevision, requestId}`, where `expectedRevision` is the control row's. The same route takes `{action: 'retry', filmId, part?, source?, expectedRows, requestId}`, which uses the state rows' own compare-and-swap (decision 3b). It is registered as POST-only in the read-side-effect audit. It requires:
   - an Access JWT **verified in the Worker**: signature against the team JWKS, issuer, audience and expiry, through the verifier that `/mcp` already uses (`mcpVerifyAccess`);
   - an owner identity check against a configured owner subject;
   - the existing admin conditions: the Worker's own `Origin`, the action header `X-IPTV-Admin-Action` and a JSON content type.
@@ -563,7 +571,7 @@ Every write batch of the producer asserts `state = 'active'` and its generation 
 
 ## Recovery and migration boundary
 
-- Additive tables, applied in card CM:
+- Additive tables, applied by card CM, or earlier by M1 when they are lower-numbered (ADR 0207 decision 7, migration apply order):
   - `catalog_enrichment_state`;
   - `catalog_enrichment_tick`;
   - `catalog_enrichment_control`;
