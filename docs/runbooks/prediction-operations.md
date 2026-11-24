@@ -28,6 +28,8 @@ When original full text is unavailable, verify a meaningful alternate-title/auth
 
 ## Proportionate triage
 
+For persistent loss of durable progress, repeated owned-run failures or premature Scheduled Task completion, follow the dedicated [Prediction incident response runbook](prediction-incident-response.md). It defines the last-good/first-bad RCA, controlled read-only diagnostic ladder, evidence requirements, stop conditions and owner-gated recovery canary.
+
 For a single deferred film, ordinary backoff or an interrupted but recoverable run, prefer the next Scheduled Task and its built-in retry/resume. Do **not** require a complete queue audit, full R2 snapshot, new model batch, manual lease reset or per-item diagnostic inspection just to establish that one retryable failure occurred. Read the queue/runner summary first; use film diagnostics only for persistent, identity-sensitive or unexplained failures, and broad parity only for a demonstrated cross-film inconsistency. Keep owner gates for manual producer calls and hard ownership/lease fences: retrying a non-idempotent model submission blindly can duplicate work or corrupt run state. [Risk-proportional policy](../process/agent-workflow.md#risk-proportional-operational-safeguards).
 
 ## Hourly discovery preflight and orphaned checkpoints
