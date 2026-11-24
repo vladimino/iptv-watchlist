@@ -75,7 +75,7 @@ mode='ok';
 
 // AIR-588 (ADR 0204): incremental Discovery chunks are ordering drift of the same generation. The start delivers from the stored queue without rebuilding it (the accepted lag), and the
 // hourly ordering writer rebuilds once per chunk; none is lost.
-const ordering=async()=>{release();const r=await ctx.reconcilePredictionOrdering(w.env,{sleep:async()=>{}});await reload();return r;};
+const ordering=async(options={})=>{release();const r=await ctx.reconcilePredictionOrdering(w.env,{sleep:async()=>{},...options});await reload();return r;};
 {let sig=1;const before=hot();
  for(const n of [3150,3200]){
   assign(n,'s'+(++sig+1));const built=queue().refreshedAt;
@@ -87,10 +87,11 @@ const ordering=async()=>{release();const r=await ctx.reconcilePredictionOrdering
  assert.ok(hot()+queue().hotPredicted>=before,'no hot work was lost across chunks');}
 
 // A concurrent writer: an assignment lands between the signature the writer's rebuild read and its write. The queue is ranked on the older signature, so the next tick rebuilds again.
-{assign(3200,'racing-old');let calls=0;
+{assign(3200,'racing-old');let armed=false;
  const original=ctx.PublishedEpg.assignedShowsSignature;
- ctx.PublishedEpg.assignedShowsSignature=async(...args)=>{const value=await original(...args);if(++calls===2)signature='racing-new';return value;};
- const o=await ordering();assert.equal(o.outcome,'rebuilt');assert.equal(queue().showsSignature,'racing-old','ranked on what the rebuild read');
+ // the assignment lands right after the build's own signature read (armed by the writer's beforeBuild hook)
+ ctx.PublishedEpg.assignedShowsSignature=async(...args)=>{const value=await original(...args);if(armed){armed=false;signature='racing-new';}return value;};
+ const o=await ordering({hooks:{beforeBuild:()=>{armed=true;}}});assert.equal(o.outcome,'rebuilt');assert.equal(queue().showsSignature,'racing-old','ranked on what the rebuild read');
  ctx.PublishedEpg.assignedShowsSignature=original;
  const again=await ordering();assert.equal(again.outcome,'rebuilt');assert.equal(queue().showsSignature,'racing-new','the next tick ranks on the signature that landed during the rebuild');}
 
