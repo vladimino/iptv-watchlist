@@ -63,7 +63,7 @@ The status adds `holdUntil` and `lastDeliveryFailure` (`{at, reason}`) next to `
 
 ## Telegram text
 
-ADR 0206 decision 9 (Accepted) sets the content and the semantic and safety rules; per [ADR 0212](../../adr/0212-monitor-telegram-text-in-short-blocks.md) (Proposed) the exact wording, spacing and line arrangement are maintained here and judged by the owner's visual acceptance of natural messages (samples are illustrative). Rendered by the pure `MonitorMessage.telegramText` (`src/domain/monitor-message.js`) from the message's own fields. Plain text, no markup mode. Blocks are separated by exactly one empty line, and an empty block is left out. Samples and the offline bubble QA: [rendered samples](../../evidence/monitoring/telegram-layout-air-592-2026-11-24.md).
+ADR 0206 decision 9 (Accepted) sets the content and the semantic and safety rules; per [ADR 0212](../../adr/0212-monitor-telegram-text-in-short-blocks.md) (Accepted) the exact wording, spacing and line arrangement are maintained here and judged by the owner's visual acceptance of natural messages (samples are illustrative). Rendered by the pure `MonitorMessage.telegramText` (`src/domain/monitor-message.js`) from the message's own fields. Plain text, no markup mode. Blocks are separated by exactly one empty line, and an empty block is left out. Samples and the offline bubble QA: [rendered samples](../../evidence/monitoring/telegram-layout-air-592-2026-11-24.md).
 
 | Block | Lines |
 | --- | --- |

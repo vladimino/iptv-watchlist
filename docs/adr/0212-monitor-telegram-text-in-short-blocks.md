@@ -1,9 +1,9 @@
 # ADR 0212: The exact layout of the monitor's Telegram text is maintained in the monitor reference, not in ADR 0206
 
-**Status:** Proposed  
-**Original decision date:** 2026-11-24 (the owner rejected the visual result of the first production message and returned AIR-592 for a new layout)  
+**Status:** Accepted  
+**Original decision date:** 2026-11-24 (the owner rejected the visual result of the first production message and returned AIR-592 for a new layout; the owner accepted this ADR the same day)  
 **Recorded at:** 2026-11-24  
-**Approval source:** not yet decided. The owner's [visual acceptance FAIL and handoff of 24 Nov 2026](https://trello.com/c/c0d7VD4P#comment-6b05997439ebd35630d770b2) asks for the follow-up and proposes a layout "as a proposal, not an approved mock-up"; it is not acceptance of this ADR. The [independent review of PR #983](https://github.com/vladimino/iptv-watchlist/pull/983#pullrequestreview-6041472920) recommends this short, one-time clarification.  
+**Approval source:** [Product Owner decision of 24 Nov 2026 (Europe/Madrid)](https://trello.com/c/c0d7VD4P#comment-6b05b02166a2ae4af4751e50): «принимаю», for this ADR as of PR #983 HEAD `e227ec2f`, without further changes. It approves the one-time delegation of exact wording, spacing and layout to the monitor reference and to the visual acceptance of natural messages, with the semantic and safety requirements unchanged. HTML `parse_mode` is not approved. Technical review: [PASS](https://github.com/vladimino/iptv-watchlist/pull/983#pullrequestreview-6042428658).  
 **Related work:** [AIR-592](https://trello.com/c/c0d7VD4P); [ADR 0206](0206-monitor-four-states-one-reminder-interval.md) decision 9; [ADR 0210](0210-prediction-no-progress-verdict-survives-live-runs.md); [PR #974](https://github.com/vladimino/iptv-watchlist/pull/974), [PR #983](https://github.com/vladimino/iptv-watchlist/pull/983)  
 **Supersedes:** [ADR 0206](0206-monitor-four-states-one-reminder-interval.md) decision 9 in part: only the concrete line layout it prescribes (the `• label: value` statistics, the one-line `⏱ …` / `🕒 Инцидент открыт … · идёт …` / `📨 Отправлено с задержкой` forms, the severity wording, `🌐 В целом …` and `Время: … · Мадрид (Europe/Madrid)`).  
 **Superseded by:** None
@@ -53,7 +53,7 @@ Code-only. A revert restores the previous text, from the same message fields. No
 
 ## Evidence
 
-- **Original decision:** [owner visual FAIL and handoff](https://trello.com/c/c0d7VD4P#comment-6b05997439ebd35630d770b2); ADR decision pending
+- **Original decision:** [owner visual FAIL and handoff](https://trello.com/c/c0d7VD4P#comment-6b05997439ebd35630d770b2); [owner acceptance of this ADR](https://trello.com/c/c0d7VD4P#comment-6b05b02166a2ae4af4751e50), 24 Nov 2026
 - **Implementation:** [PR #983](https://github.com/vladimino/iptv-watchlist/pull/983)
 - **Dated verification:** [rendered samples and offline bubble QA](../evidence/monitoring/telegram-layout-air-592-2026-11-24.md). This is a simulation, not Telegram; acceptance is the owner's look at a natural production message after deploy.
 - **Uncertainty:** the real Telegram rendering is observed only after deploy.
