@@ -2833,6 +2833,8 @@ function epgPolicyDetails(event){
  const classified=degraded?'':row('discover',channels.discover)+row('deny_all',channels.denyAll)+row('Новых каналов (найдено)',channels.new)+row('Новых каналов (зарегистрировано)',channels.registered)+row('Без категории',channels.unclassified);
  return `${warning}<p>${heading}${link}</p><dl>${row('Каналов в эфире',channels.total)}${classified}${row('known_only',channels.knownOnly)}${programmes?(degraded?'':row('Показов отфильтровано (deny_all)',programmes.filteredDenyAll))+row('Показов пропущено (known_only)',programmes.skippedKnownOnly)+(degraded?'':row('Показов для Discovery',programmes.discoveryEligible)+row('Показов на каналах без категории',programmes.unclassified)):''}</dl>`;
 }
+// AIR-595: the one sentence of the EPG-priority pause, for the hourly report and for the notice of an hour whose close the pause refused.
+const DISCOVERY_EPG_PAUSE_TITLE='Discovery приостановлен на время обновления программы';
 function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(event.at));const film=eventFilmHTML;const removal=f=>{const rating=Number(f.rating),known=Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0;return `${film(f)}${known?` · ${rating.toFixed(1)} ★`:''}`;};let body='';
  if(event.type==='started'||event.type==='unstarted')body=`<p>${event.type==='started'?'Начал смотреть':'Снял отметку «Начал»'}: <strong>${film(event.film)}</strong></p>`;
  if(event.type==='epg')body=`<p>Обновлён EPG</p><dl><div><dt>Фильмов с показами</dt><dd>${event.films}</dd></div><div><dt>В архиве</dt><dd>${event.archive}</dd></div><div><dt>В следующие сутки</dt><dd>${event.future}</dd></div><div><dt>Всего показов</dt><dd>${event.broadcasts}</dd></div></dl>${epgPolicyDetails(event)}`;
@@ -2855,6 +2857,7 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
    :status==='failed'?'Discovery остановлен после повторных ошибок'
    :status==='stalled'?'Discovery остановлен: восстановление просрочено, очередь не разобрана'
    :status==='waiting'?'Discovery ждёт повтора'
+   :status==='blocked'&&event.reason==='epg_priority'?DISCOVERY_EPG_PAUSE_TITLE
    :status==='blocked'?'Discovery не запустился: временный отказ'
    :status==='empty'||empty?'Очередь Discovery пуста'
    :status==='idle'?'Discovery не работает: запуска не требовалось'
@@ -2871,7 +2874,11 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
   // ADR 0118: the REPORT of an hour could not be completed. No counters and no queue facts are drawn (none were read), and Discovery is named only when the
   // reconcile of that firing confirmed a state that needs attention; every sentence is fixed text chosen by `status`.
   const state=event.status==='failed'?'Discovery остановлен после повторных ошибок':event.status==='stalled'?'Discovery остановлен: восстановление просрочено':event.status==='waiting'?'Discovery ждёт повтора':event.status==='blocked'?'Discovery не запустился: временный отказ':null;
-  body=`<p>Отчёт за час не удалось сформировать</p><p class="event-note">Если за этот период что-то было найдено, оно войдёт в следующий успешный отчёт.</p>${state?`<p class="event-note">${state}.</p>`:''}`;
+  // AIR-595: the close was refused by the EPG-priority pause (ADR 0135), the planned wait for the programme update, not a fault of the report. It names the pause and
+  // says nothing about results: deltas of the period, if any, are still in the open accumulator. An independent confirmed state is still named beside it.
+  body=event.reason==='epg_priority'
+   ?`<p>${DISCOVERY_EPG_PAUSE_TITLE}</p><p class="event-note">Discovery продолжит после завершения обновления программы. Если за этот период что-то было найдено, оно войдёт в следующий отчёт.</p>${state?`<p class="event-note">${state}.</p>`:''}`
+   :`<p>Отчёт за час не удалось сформировать</p><p class="event-note">Если за этот период что-то было найдено, оно войдёт в следующий успешный отчёт.</p>${state?`<p class="event-note">${state}.</p>`:''}`;
  }
  else if(event.type==='discovery'){
   const n=v=>Number.isInteger(v)&&v>=0?v:0,known=Number.isInteger(event.remaining)&&event.remaining>=0,empty=event.queueEmpty===true,added=n(event.added),checked=n(event.checked);

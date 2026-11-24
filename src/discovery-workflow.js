@@ -110,21 +110,44 @@ async function putDiscoveryEvent(env,event){
 }
 // What the period can say about the queue. The chunks of the period are the freshest committed reading; without one, the last saved status of
 // the published generation. An empty queue needs the continuation to say complete for that generation too. An unreadable source is `incomplete`.
-async function discoveryReportQueue(env,report,programmeRunId){
+// AIR-595: a series can also drain without a `complete` continuation. When its last chunk leaves no backlog but the legacy alias sweep of ADR 0158 is still open,
+// the continuation pauses on `chunk_budget` and the executor stops for good with `backlog_empty` (`renewDiscoverySeries`), so nothing runs again for that generation.
+// That is proven empty only on the full evidence of ONE chunk of the same generation: the executor record stopped on `backlog_empty`, the continuation paused on
+// `chunk_budget` with no chunk left, and the status file written by that very chunk (the same `hopId`) with remaining, cheap-pass, deferred and waiting-retry all
+// numeric zero and no error. The open sweep re-checks aliases of films already decided; it is not part of the queue. Anything less is not empty.
+async function discoveryReportQueue(env,report,programmeRunId,record=null){
  const unreadable={remaining:null,cheapRemaining:null,error:null,empty:false,incomplete:true,reason:'queue_unreadable'};
- let remaining=null,cheapRemaining=null,error=null,waitingRetry=null;
+ let remaining=null,cheapRemaining=null,error=null,waitingRetry=null,last;
+ const readStatus=async()=>{if(last===undefined)last=programmeRunId?await loadJSON(env,'epg/discovery-status.json'):null;return last;};
  try{
   // The queue values of the accumulator belong to the generation of the chunk that wrote them. Deltas carry across a generation change, the queue
   // reading does not: another generation's backlog or empty state is unknown for this one, never reused.
   if(report.chunks>0&&report.queueGeneration&&report.queueGeneration===programmeRunId){remaining=report.remaining;cheapRemaining=report.cheapRemaining;error=report.error;waitingRetry=discoveryCount(report.waitingRetry);}
   else if(programmeRunId){
-   const last=await loadJSON(env,'epg/discovery-status.json');
-   if(last&&last.programmeRunId===programmeRunId){remaining=discoveryCount(last.remaining);cheapRemaining=discoveryCount(last.cheapRemaining);waitingRetry=discoveryCount(last.waitingRetry);error=last.error?(typeof diagnosticErrorCode==='function'?diagnosticErrorCode({message:String(last.error)}):'other'):null;}
+   const status=await readStatus();
+   if(status&&status.programmeRunId===programmeRunId){remaining=discoveryCount(status.remaining);cheapRemaining=discoveryCount(status.cheapRemaining);waitingRetry=discoveryCount(status.waitingRetry);error=status.error?(typeof diagnosticErrorCode==='function'?diagnosticErrorCode({message:String(status.error)}):'other'):null;}
   }
  }catch{return unreadable;}
- let complete=false;
- try{const stored=programmeRunId?await readContinuation(env):null;complete=!!stored?.record&&stored.record.programmeRunId===programmeRunId&&stored.record.stage==='complete';}catch{return unreadable;}
- return {remaining,cheapRemaining,error,empty:complete&&discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry),incomplete:false,reason:null};
+ let stored=null;
+ try{stored=programmeRunId?await readContinuation(env):null;}catch{return unreadable;}
+ const continuation=stored?.record&&stored.record.programmeRunId===programmeRunId?stored.record:null;
+ if(continuation?.stage==='complete')return {remaining,cheapRemaining,error,empty:discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry),incomplete:false,reason:null};
+ if(continuation&&discoveryDrainedSeries(record,continuation,programmeRunId)){
+  let status;
+  try{status=await readStatus();}catch{return unreadable;}
+  if(discoveryDrainedStatus(status,continuation,programmeRunId))return {remaining:0,cheapRemaining:0,error:null,empty:true,incomplete:false,reason:null};
+ }
+ return {remaining,cheapRemaining,error,empty:false,incomplete:false,reason:null};
+}
+// Pure. The executor stopped for good on an empty backlog and the continuation of the same generation has no chunk left to run.
+function discoveryDrainedSeries(record,continuation,programmeRunId){
+ return typeof programmeRunId==='string'&&!!programmeRunId&&record?.phase==='stopped'&&record.reason==='backlog_empty'&&record.programmeRunId===programmeRunId
+  &&continuation?.programmeRunId===programmeRunId&&continuation.stage==='paused'&&continuation.reason==='chunk_budget'&&continuation.remainingChunks===0&&typeof continuation.hopId==='string'&&!!continuation.hopId;
+}
+// Pure. The status file is the reading of that last chunk (same generation, same hop) and every part of the queue is a proven numeric zero.
+function discoveryDrainedStatus(status,continuation,programmeRunId){
+ if(!status||status.programmeRunId!==programmeRunId||status.hopId!==continuation.hopId||status.error)return false;
+ return ['remaining','cheapRemaining','deferred','waitingRetry'].every(name=>status[name]===0);
 }
 // Delivers every pending report: the events of the outbox and a legacy per-chain tick that was settled and not yet delivered. An entry leaves
 // the record only after its create-only put is confirmed. The record is written back with its `updatedAt` untouched, so delivery never hides a
@@ -173,7 +196,7 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
     if(typeof report.lastClosedHour==='string'&&hourKey<=report.lastClosedHour){await deliverDiscoveryOutbox(env);return {closed:false,reason:hourKey===report.lastClosedHour?'already_closed':'stale_hour',hourKey};}
     const pending=(Array.isArray(record.outbox)?record.outbox.length:0);
     if(pending>=DISCOVERY_REPORT_OUTBOX_LIMIT){await deliverDiscoveryOutbox(env);incompleteReason='outbox_full';break;}
-    const queue=await discoveryReportQueue(env,report,generationOf(record));
+    const queue=await discoveryReportQueue(env,report,generationOf(record),record);
     const {status,reason}=discoveryReportState(outcome,record,queue.empty,options.now);
     const event=discoveryHourEvent({at,hourKey,generation:generationOf(record),status,reason,report,queue});
     const {tick,...rest}=record;
@@ -181,6 +204,9 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
     const written=await writeWorkflowStateSoft(env,next,state.etag);
     if(written.saved){const delivery=await deliverDiscoveryOutbox(env);return {closed:true,hourKey,status,delivered:delivery.delivered};}
     if(written.windowBusy){incompleteReason='projector_window';held={window:written.window,record,report,queue,state:{status,reason}};break;}
+    // AIR-595: the EPG-priority pause (ADR 0135) refuses this lease-free write by design until the programme update is certified complete. That is the pause, not a
+    // lost compare-and-swap: it is not retried here (it does not lift within a firing) and it is named as `epg_priority`.
+    if(written.priorityBusy){incompleteReason='epg_priority';break;}
     incompleteReason='write_conflict';
    }
   }catch{incompleteReason='state_unreadable';}
@@ -207,14 +233,18 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
  // straight into the journal under a stable id per generation and hour, and when the journal refuses it, it waits in a small separate ledger (its own
  // compare-and-swap) that every later scheduled firing drains.
  const generation=generationOf(record);
- const notice=discoveryReportFailedEvent({at,hourKey,generation,reason:incompleteReason,status:discoveryReportState(outcome,record,false,options.now).status});
+ // AIR-595: when the close was refused by the EPG-priority pause and the reconcile of the same firing was refused by that same pause, the pause is the only fact
+ // and the notice names no other Discovery state. A different confirmed state (a failure, a wait, another refusal) is still named beside it.
+ const confirmed=discoveryReportState(outcome,record,false,options.now);
+ const samePause=incompleteReason==='epg_priority'&&confirmed.status==='blocked'&&confirmed.reason==='epg_priority';
+ const notice=discoveryReportFailedEvent({at,hourKey,generation,reason:incompleteReason,status:samePause?null:confirmed.status});
  const delivery=await deliverDiscoveryReportFailure(env,notice);
  logDiscoveryReportClose({hourKey,reason:incompleteReason,generation,delivery});
  return {closed:false,reason:incompleteReason,hourKey,notice:delivery};
 }
 const DISCOVERY_REPORT_WINDOW_TRIES=3;
 function discoveryReportIsZero(report){return report.chunks===0&&DISCOVERY_REPORT_COUNTERS.every(name=>report[name]===0);}
-const DISCOVERY_REPORT_CLOSE_REASONS=new Set(['no_record','state_unreadable','outbox_full','projector_window','write_conflict']);
+const DISCOVERY_REPORT_CLOSE_REASONS=new Set(['no_record','state_unreadable','outbox_full','projector_window','write_conflict','epg_priority']);
 const DISCOVERY_REPORT_FAULT_KEY='events/discovery-report-faults.json';
 // The ledger never evicts: it holds one compact tuple per undelivered hour, up to a year of hours (about 40 bytes each, well under 1 MB). Past that bound the NEWEST
 // notice is refused and logged as `lost`; an older one is never dropped to make room. A drain delivers at most `DISCOVERY_REPORT_FAULT_DRAIN` entries per firing,
@@ -223,7 +253,8 @@ const DISCOVERY_REPORT_FAULT_LIMIT=8760;
 const DISCOVERY_REPORT_FAULT_DRAIN=64;
 const DISCOVERY_REPORT_FAULT_ATTEMPTS=3;
 const DISCOVERY_REPORT_FAULT_STATUSES=[null,'failed','waiting','blocked','stalled'];
-const DISCOVERY_REPORT_REASON_LIST=['no_record','state_unreadable','outbox_full','projector_window','write_conflict'];
+// Append only: a ledger tuple stores the index. `epg_priority` (AIR-595) is last so the tuples written before it decode unchanged.
+const DISCOVERY_REPORT_REASON_LIST=['no_record','state_unreadable','outbox_full','projector_window','write_conflict','epg_priority'];
 function logDiscoveryReportClose({hourKey,reason,generation,delivery}){
  try{console.warn(JSON.stringify({event:'discovery_hour_close_failed',hourKey:String(hourKey||'').slice(0,12),reason:DISCOVERY_REPORT_CLOSE_REASONS.has(reason)?reason:'other',generation:String(generation||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||null,notice:['delivered','queued','lost'].includes(delivery)?delivery:'lost'}));}catch{}
 }
@@ -651,7 +682,9 @@ async function ensureDiscoveryWorkflow(env){
    return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,current.recovery||null,current);
   }
   const series=0;
-  return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,null);
+  // AIR-595: the record of the previous generation is passed so its open accumulator, outbox and rollover receipt are carried (see `createWorkflowInstance`).
+  // Without it the first series of a new generation started from an empty report: `lastClosedHour` and any undelivered report or uncounted delta were dropped.
+  return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,null,current);
  }catch(error){return {started:false,reason:workflowAdmissionError(error),...(error?.code==='discovery_window'?{windowUntil:error.window?.expiresAt??null}:error?.code==='discovery_epg_priority'?{windowUntil:priorityWindow(error).expiresAt}:{})};}
 }
 async function reconcileDiscoveryWorkflowAttempt(env,options={}){

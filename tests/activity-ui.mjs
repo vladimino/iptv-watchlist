@@ -46,6 +46,25 @@ assert.match(vm.runInContext('eventHTML(partial,older)',context),/Пакет п�
  assert.doesNotMatch(failed,/Discovery (остановлен|ждёт|не запустился)/,'reporting failed, not Discovery: nothing about Discovery is implied');
  assert.match(card({...notice,status:'failed'}),/Discovery остановлен после повторных ошибок/);assert.match(card({...notice,status:'waiting'}),/Discovery ждёт повтора/);assert.match(card({...notice,status:'blocked'}),/Discovery не запустился: временный отказ/);
  assert.doesNotMatch(card({...notice,status:'running'}),/Discovery (остановлен|ждёт|не запустился)/,'a running chain is not shown as a problem');
+ // AIR-595: the EPG-priority pause. The notice of a close the pause refused names the pause, not a failed report, has a warning badge and no numbers; an independent
+ // confirmed failure is still named and still an error. The hourly report of a firing the pause refused keeps its proven counters under the same sentence.
+ const pause=card({...notice,reason:'epg_priority'});
+ assert.match(pause,/Discovery приостановлен на время обновления программы/);assert.match(pause,/Discovery продолжит после завершения обновления программы/);
+ assert.doesNotMatch(pause,/Отчёт за час не удалось сформировать|не удалось|ошиб|epg_priority|<dl>|<dd>/,'no report-failure or error text, no reason code, no numbers');
+ assert.doesNotMatch(pause,/Новых результатов|Новых фильмов не найдено|Очередь Discovery пуста/,'the pause never claims that nothing was found');
+ assert.match(pause,/event-status-warning/,'a warning, not an error');
+ const pauseFailed=card({...notice,reason:'epg_priority',status:'failed'});
+ assert.match(pauseFailed,/Discovery приостановлен на время обновления программы/);assert.match(pauseFailed,/Discovery остановлен после повторных ошибок/);assert.match(pauseFailed,/event-status-error/,'an independent failure is not hidden by the pause');
+ assert.match(card({...notice,reason:'epg_priority',status:'blocked'}),/Discovery не запустился: временный отказ/,'another confirmed refusal is still named');
+ assert.match(card({...notice,reason:'write_conflict'}),/Отчёт за час не удалось сформировать/,'a genuine write conflict keeps its notice');
+ const pausedHour=card({...hour,status:'blocked',reason:'epg_priority',added:2,checked:9,remaining:12});
+ assert.match(pausedHour,/Discovery приостановлен на время обновления программы/);assert.doesNotMatch(pausedHour,/временный отказ/);
+ assert.match(pausedHour,/<dt>Новых фильмов<\/dt><dd>2<\/dd>/);assert.match(pausedHour,/<dt>Осталось в очереди<\/dt><dd>12<\/dd>/);assert.match(pausedHour,/event-status-warning/);
+ // AIR-595: the drained series of 23 Nov 2026 22:00 UTC is now written as the proven empty queue: the card of screen 1 with a success badge.
+ const drained=card({...hour,status:'empty',reason:'queue_empty',queueEmpty:true,remaining:0,chunks:0,checked:0,added:0,reused:0,screenedOut:0,touched:0,tmdbCalls:0});
+ assert.match(drained,/Очередь Discovery пуста/);assert.match(drained,/<dt>Осталось в очереди<\/dt><dd>пуста<\/dd>/);assert.match(drained,/event-status-success/);
+ const realIdle=card({...hour,status:'idle',reason:'backlog_empty',queueEmpty:false,remaining:0,chunks:0,checked:0,added:0});
+ assert.match(realIdle,/запуска не требовалось/,'an idle report that did not prove the queue empty stays idle');assert.doesNotMatch(realIdle,/Очередь Discovery пуста/);
  const hostileNotice=card({...notice,id:'discovery-hour-<b>',status:'<svg onload=1>',reason:'<script>',added:'<img src=x onerror=alert(1)>'});
  assert.doesNotMatch(hostileNotice,/<img|<script|<svg|onerror|onload/,'hostile fields never become markup');
  const hostile=card({...hour,id:'discovery-hour-<b>',added:'<img src=x onerror=alert(1)>',checked:'<script>alert(1)</script>',reused:{toString(){return '<i>';}},screenedOut:-5,tmdbCalls:1.5,remaining:'<u>',status:'<svg onload=1>',from:'<s>',error:'<script>'});
