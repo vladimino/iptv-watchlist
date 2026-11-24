@@ -71,9 +71,9 @@ The re-review accepted the first follow-up and found two regressions of the ADR 
 
 Covered by `tests/discovery-events.mjs` 18d (oldest-first across both, both objects beyond one drain, a thrown cleanup put, a refused compare-and-swap followed by a thrown read, idempotent recovery, the logical bound from either side, one entry per hour across both).
 
-## Third review: owner disposition pending (24 Nov 2026)
+## Third review and owner decision (24 Nov 2026)
 
-The third review accepted the drain fix and qualified the admission: the two objects have independent compare-and-swaps, so two simultaneous writers to different objects can each add one entry above 8,760, and a simultaneous repeat of one hour with two reason classes can queue two tuples (one visible journal event). `tests/discovery-events.mjs` 18e reproduces both deterministically and shows that the next admission is refused and the drain bound holds; the reference states the exact, best-effort guarantee. Whether this bounded exception to the ADR 0118 emergency limit is accepted, or a strict global admission mechanism is required, is an open Product Owner decision; it was asked on 24 Nov 2026 and not yet answered. The PR is not mergeable until it is.
+The third review accepted the drain fix and qualified the admission: the two objects have independent compare-and-swaps, so two simultaneous writers to different objects can each add one entry above 8,760, and a simultaneous repeat of one hour with two reason classes can queue two tuples (one visible journal event). `tests/discovery-events.mjs` 18e reproduces both deterministically and shows that the next admission is refused and the drain bound holds; the reference states the exact, best-effort guarantee. The Product Owner selected option A on 24 Nov 2026 ([decision](https://trello.com/c/dPjrNIbQ#comment-6b056ce779079110d0ef3bb5), [PR comment](https://github.com/vladimino/iptv-watchlist/pull/977#issuecomment-7129406215)): the bounded best-effort exception is accepted and no new lock, migration or coordination mechanism is introduced. It is recorded as [ADR 0208](../../adr/0208-discovery-report-fault-ledger-in-two-objects.md), which partially supersedes ADR 0118.
 
 ## Tests (offline)
 
