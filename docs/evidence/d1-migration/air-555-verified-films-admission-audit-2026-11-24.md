@@ -26,11 +26,10 @@
    - Each writer passes the stored first entry to the D1 writer, never a new one. An existing movie entry is kept, and a code bound to another movie is refused before the Ratings link.
    - D1 alone does not give the same result. `admitRatedFilm` would overwrite `archive_sha256`, `title` and `year` for the same code and movie when given a different archive (G4). `planAdmission` refuses a second code for an admitted Film where the inferred writer today keeps the entry and still links.
 5. **One latent defect was reproduced offline (G1).** A replay of the committed chunk offers the D1 admission writer an inferred entry that an interrupted withdrawal left behind. The chunk receipt marks that item as a conflict, and the replay ignores the mark. No instance was observed in production (2 above).
-6. **Recommendation: option B, with conditions.**
+6. **Recommendation at the time of the audit: option B, with conditions.**
    - Freeze the object as retained historical evidence and make D1 the only admission coordinator.
-   - B is possible without a schema change only if F1 first preserves pinning and conflict semantics in D1 and persists each writer's exact proof payload. Those guarantees do not exist today.
-   - After the first D1-only admission, the only recovery is roll-forward.
-   - G3 (rated enrichment) stays open until F3 is decided.
+   - The conditions and the follow-up scopes below are this audit's dated analysis. They are **superseded proposals**, not an accepted or operational contract.
+   - The current design is still Proposed and under owner review in [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975) (ADR 0207 with ADR 0210 and 0211). This report does not adopt its decisions.
    - This report decides nothing and authorizes no write.
 
 ## Method and evidence boundary
@@ -131,7 +130,7 @@ None of them reads R2.
 
 ## Field and transition ownership
 
-| Field (R2 entry) | D1 equivalent | Written by | Changes after creation | Current authority / role | Target owner (option B) |
+| Field (R2 entry) | D1 equivalent | Written by | Changes after creation | Current authority / role | Target owner proposed at the audit (superseded; see PR #975) |
 | --- | --- | --- | --- | --- | --- |
 | key `tmdb_<n>`, `tmdb` | `receipt_film_key`, `tmdb` (unique) | W1, W3, W4 | R2: never, but W2 may delete the entry. D1: moved by a merge | D1 row is canonical; the R2 key is the writers' uniqueness and replay index | D1 only |
 | `sourceCode` | `source_code` (unique) | W1, W3, W4 | never | D1 canonical. R2 enforces code-to-movie uniqueness a second time, with rules that differ per writer (table below) | D1, with the per-writer outcomes preserved (F1) |
@@ -224,7 +223,7 @@ Corrected in this change (statements about this object and its D1 form only):
 
 Left to others:
 
-- **Source comments, for follow-up F1 (code, not docs-only):** `src/film-admission.js:1-10` ("immutable evidence and receipt", "compare-only (inactive)") and the commit-route comment at `src/letterboxd-facts.js:570-574` (projector upserts the Film).
+- **Source comments, for the future admission implementation card (code, not docs-only):** `src/film-admission.js:1-10` ("immutable evidence and receipt", "compare-only (inactive)") and the commit-route comment at `src/letterboxd-facts.js:570-574` (projector upserts the Film).
 - **Handed to [AIR-547](https://trello.com/c/99faXisC):** the dated status column of `migrations/README.md` row 15, and the other stale schema-section bullets of `docs/reference/data/d1-schema.md` outside the admission tables.
 
 `docs/architecture/persistence-and-migration.md` mentions the object only in a paragraph already marked historical. `docs/runbooks/letterboxd-claim-backfill.md` and `docs/reference/integrations/letterboxd-ratings.md` describe the claim and Diary steps correctly. They need no change here.
@@ -234,11 +233,19 @@ Left to others:
 | Option | What changes | Consequences |
 | --- | --- | --- |
 | **A. Retain as live R2 coordination** | Keep W1-W6. Fix G1 (a replay offers only items whose receipt entry is a non-conflict `admitted`/`present`). Decide F3. The owner accepts the object as an explicit mutable R2 exception | Least code; keeps first-admission pinning (G4) where it works today. Keeps a second, R2-side uniqueness and replay authority in front of the D1 writer, with per-writer rules and cross-store partial commits (G2). AIR-275 cannot honestly report "no mutable R2 authority" for admissions |
-| **B. Freeze as historical evidence; D1 is the only admission coordinator (recommended, conditional)** | Writers stop writing the object and call `applyRatedAdmissionRetention` directly, under the F1 requirements below. The object is retained read-only at its last ETag. Any deletion is a later, separate owner decision | One admission authority. G1 and G2 disappear with the R2 step; G4 must be closed by F1 before the switch; G3 stays until F3. No data migration: parity is already observed (to be re-proven at the freeze gate), and the inferred mark is on the Ratings records (703/703). Likely no schema change, if the existing documents can carry the payloads (an F1 finding, not a given). Needs a new ADR that supersedes ADR 0087 decision 4 (the object as entry point), ADR 0105 decision 5 (the receipt written before the facts) and the receipt step of ADR 0166, and updates the ADR 0170 inventory row. **Recovery after the first D1-only admission is roll-forward only** (see the requirements below) |
+| **B. Freeze as historical evidence; D1 is the only admission coordinator (recommended, conditional)** | Writers stop writing the object and call `applyRatedAdmissionRetention` directly, under the F1 requirements below. The object is retained read-only at its last ETag. Any deletion is a later, separate owner decision | One admission authority. G1 and G2 disappear with the R2 step; G4 must be closed by F1 before the switch; G3 stays until F3. No data migration: parity is already observed (to be re-proven at the freeze gate), and the inferred mark is on the Ratings records (703/703). Likely no schema change, if the existing documents can carry the payloads (an F1 finding, not a given). Needs a new ADR that supersedes ADR 0087 decision 4 (the object as entry point), ADR 0105 decision 5 (the receipt written before the facts) and the receipt step of ADR 0166, and updates the ADR 0170 inventory row. Recovery must become roll-forward only at a boundary that precedes every incompatible effect (see requirement 6) |
 | B′. B plus an additive `identity_kind` column on `film_rated_admission` | B, and a migration that stores `inferred` / `diary_page` / `rated_archive` on the D1 row, backfilled from the frozen object | Makes the distinction queryable on the admission row, for example to harden the ADR 0170 inventory join on archive and code. Costs a schema step and an L3 backfill. Today no reader needs it: the claim planner uses the Ratings marks |
 | C. Migrate the whole object into a new normalized D1 table | New table for every R2 field (kind, path, evidence, enrichment), import, parity, cutover; R2 frozen | Highest fidelity and highest cost. Most columns have no consumer, and it risks a second admission record beside `film_rated_admission` |
 
-### Requirements that option B must meet (F1 acceptance)
+### Requirements that option B must meet (as analysed at the audit; superseded proposal)
+
+> **Status of this section.** This is the audit's analysis as of 24 Nov 2026, kept as history. It is **not** an accepted contract and not a delivery plan. After the owner's disposition the design is under review as Proposed ADR 0207, with ADR 0210 and 0211 ([PR #975](https://github.com/vladimino/iptv-watchlist/pull/975)), and some requirements below were not chosen:
+> - requirement 3 (persisting payloads) was replaced by the owner's choice to reacquire the source;
+> - requirement 6 is corrected below;
+> - the follow-up scopes were replaced by that PR's delivery graph.
+>
+> Nothing here is imported into maintained references until an ADR is accepted.
+
 
 1. **Per-writer existing-row outcomes.** The outcome table above must hold with D1 as the only coordinator:
    - a code bound to another movie is refused **before** the Ratings link (W1) or before any link (W3, W4);
@@ -248,7 +255,7 @@ Left to others:
    - A D1 read before the link is not a cross-domain transaction. F1 must define the durable settlement when the D1 admission is refused after the Ratings link committed (today: the chunk stops before its receipt, fail closed, with the link in place).
    - It must also define how that state is recorded, retried and surfaced without a blind retry.
    - The ADR 0184 negative proof must stay: an inferred pair is never a claim proof, whatever admits it.
-3. **Stable proof payload persisted before the first effect.** The D1 content digest covers title, year, archive or evidence digest and `verifiedAt`. Each writer must persist the exact payload before its first non-atomic effect and reuse it, without another source fetch or a fresh timestamp. This must hold for lost responses, proof changes, and expired or evicted pending work (the Diary document is bounded to 200 entries). None of the current records does this:
+3. **Stable proof payload persisted before the first effect** (not chosen: the owner chose to reacquire the source instead; kept as the audit's analysis). The D1 content digest covers title, year, archive or evidence digest and `verifiedAt`. Each writer must persist the exact payload before its first non-atomic effect and reuse it, without another source fetch or a fresh timestamp. This must hold for lost responses, proof changes, and expired or evicted pending work (the Diary document is bounded to 200 entries). None of the current records does this:
    - Inferred: the request body carries movie id, code and admitted title and year, and the archive is the origin. `verifiedAt` has no durable copy before the R2 entry; the create-only chunk intent's `openedAt` is a candidate.
    - Diary: `intend` stores reason, slug, movie id, attempts and times only, and is replaced on retry. It must also store title, year, path, evidence digest and `verifiedAt`.
    - Rated: the `admitting` candidate row stores `intendedTmdb` and `filmPath` only. It must also store title, year and `verifiedAt`.
@@ -260,15 +267,15 @@ Left to others:
    - old pending intents, `linking` entries or `admitting` candidates created by the old code at the freeze. The freeze gate requires none, or reconstructs them from the frozen object as a documented read-only reconciliation input.
 5. **Freeze and writer handover fence.** The switch is not one instant:
    - Old Worker requests that are already running may still CAS the object after the deploy.
-   - The natural Diary writer runs on its own schedule inside the Ratings run.
-   - F1 defines the fence: for example, a quiet window with no Letterboxd Sync or archive step in flight, verified from run state, followed by an ETag pin. It also defines how a late old-code write is detected.
-6. **Rollback boundary.**
-   - Before the first D1-only admission, a code revert is an ordinary rollback: the object is still complete.
-   - After it, a code revert is **prohibited as routine**. The frozen object lacks the new admission, so the old writers would again consult an incomplete uniqueness and replay index, including the old enrichment checkpoint.
-   - Recovery is roll-forward. Restoring legacy R2 coordination needs its own owner-approved reconciliation plan (R2 rebuilt from D1 under a fence), never an implicit rebuild.
+   - The automatic Diary admission check (W3) runs on its own schedule from **both** of its callers: the Ratings Diary phase, and the Watchlist admission step of the Letterboxd Sync. The fence and the drain must cover both.
+   - F1 defines the fence: for example, a quiet window with no Ratings run, no Letterboxd Sync (Watchlist admission included) and no archive step in flight, verified from run state, followed by an ETag pin. It also defines how a late old-code write is detected.
+6. **Rollback boundary** (corrected after review).
+   - The first D1-only admission row is **not** a safe boundary. New payloads, refused-after-link receipts, pending canonical receipts and retired enrichment state can all be durable before any such row, and the legacy code would not understand them.
+   - The boundary must be a durable, monotonic activation that precedes every incompatible effect. Before it, an ordinary revert is possible. After it, there is **no** ordinary code revert. The current Proposed design uses the one-way flip of an activation marker for this.
+   - After the boundary, recovery is roll-forward. Restoring legacy R2 coordination needs its own owner-approved reconciliation plan (R2 rebuilt from D1 under a fence), never an implicit rebuild.
 7. **Sequencing with F3.** F3 is a required disposition. If the rated enrichment phase is kept, its new target must exist before the R2 writes stop. Otherwise the phase is retired in the same change. B does not remove G3 by itself.
 
-**Recommendation: B, subject to requirements 1-7.** It is the smallest option that leaves one admission authority. The only proven-independent function of the R2 object that remains is historical evidence, which needs no writer. Compatibility:
+**Recommendation at the time of the audit: B, subject to requirements 1-7** (see the status note above). It is the smallest option that leaves one admission authority. The only proven-independent function of the R2 object that remains is historical evidence, which needs no writer. Compatibility:
 
 - **AIR-559 / ADR 0184.** The claim planner reads the Ratings marks; requirement 2 keeps the negative proof.
 - **ADR 0170.** The candidate and registry documents stay R2 archive work; only the inventory row's wording changes.
@@ -277,7 +284,10 @@ Left to others:
 
 There is no dual authority at any point: D1 already makes the canonical decision, and B removes the R2 pre-step once D1 carries the guarantees that step provides today. If F1 shows that the payloads cannot live in the existing documents, the owner chooses between a schema change (B′ or a payload column) and option A.
 
-## Follow-up scopes (proposed; cards only after the owner's disposition)
+## Follow-up scopes (audit proposal, superseded)
+
+> These were proposed before the owner's disposition. They are superseded by the delivery graph of the still-Proposed ADR 0207 in [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975). No card is created from this list.
+
 
 - **F1 (option B): ADR and implementation, offline.**
   - A new ADR, Proposed until the owner decides.
