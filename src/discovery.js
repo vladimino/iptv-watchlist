@@ -2032,34 +2032,37 @@ async function presentContinuationDiscovery(env){
 // Monitor and the operational readout, a stale gate plus a ledger count was "no confirmed progress" to the footer, and only the Events report could prove a drained
 // queue), so the same facts read as "empty" in one place and as an incident in another. Now there is one bounded reader (`readDiscoveryEvidence`) and one pure
 // classification (`discoveryQueueState`); every consumer maps the classification to its own presentation or confirmation policy and never re-derives the facts.
-// The queue is empty only when every part of it is a proven numeric zero: the remaining count AND the cheap-pass remainder. A missing, null,
-// negative, fractional or non-numeric part is unknown and never a zero (a chunk that does not report the cheap-pass remainder confirms nothing).
-function discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry){return remaining===0&&cheapRemaining===0&&!error&&!(waitingRetry>0);}
 // Pure (AIR-595). The executor stopped for good on an empty backlog and the continuation of the same generation has no chunk left to run.
 function discoveryDrainedSeries(record,continuation,programmeRunId){
  return typeof programmeRunId==='string'&&!!programmeRunId&&record?.phase==='stopped'&&record.reason==='backlog_empty'&&record.programmeRunId===programmeRunId
   &&continuation?.programmeRunId===programmeRunId&&continuation.stage==='paused'&&continuation.reason==='chunk_budget'&&continuation.remainingChunks===0&&typeof continuation.hopId==='string'&&!!continuation.hopId;
 }
-// Pure (AIR-595). The status file is the reading of that last chunk (same generation, same hop) and every part of the queue is a proven numeric zero.
-function discoveryDrainedStatus(status,continuation,programmeRunId){
- if(!status||status.programmeRunId!==programmeRunId||status.hopId!==continuation.hopId||status.error)return false;
+// Pure. The status file is the reading of the continuation's own last chunk (same generation, same non-empty `hopId`), with no error and every part of the queue
+// (remaining, cheap-pass, deferred, waiting-retry) the number 0. A missing, null, negative, fractional or non-numeric part is unknown and never a zero.
+function discoveryZeroStatus(status,continuation,programmeRunId){
+ if(!status||typeof status!=='object'||status.programmeRunId!==programmeRunId||typeof continuation?.hopId!=='string'||!continuation.hopId||status.hopId!==continuation.hopId||status.error)return false;
  return ['remaining','cheapRemaining','deferred','waitingRetry'].every(name=>status[name]===0);
 }
-// Pure. The one proof that the queue of `programmeRunId` is empty, shared by the Events report (whose `reading` may be the period's own chunks) and the
-// classification (whose `reading` is the status of that generation):
-// - `complete`: the continuation of that generation says complete and the reading has every part of the queue a numeric zero and no error;
-// - `drained` (AIR-595): the executor record stopped on `backlog_empty`, the continuation paused on `chunk_budget` with no chunk left, and the status written by
-//   that very chunk (same generation, same `hopId`) with remaining, cheap-pass, deferred and waiting-retry all numeric zero and no error. The legacy alias sweep
+// A live lease is a Discovery writer at work unless the lease names the EPG publication as its holder (ADR 0135: `holderKind` `epg`). A lease without a known holder
+// is a Discovery writer: it is never ignored.
+function discoveryLeaseLive(lease,now){return !!lease&&typeof lease==='object'&&Number(lease.expiresAt)>now;}
+function discoveryWriterLive(lease,now){return discoveryLeaseLive(lease,now)&&lease.holderKind!=='epg';}
+function discoveryQuarantined(workflow){return !!workflow&&(workflow.recovery?.quarantined===true||workflow.reason==='recovery_exhausted');}
+// Pure. The ONE proof that the queue of `programmeRunId` is empty, used by the classification and by the hourly Events report alike. Both proofs need the status
+// written by the continuation's own last chunk with all four parts a numeric zero and no error (`discoveryZeroStatus`), and nothing that contradicts them: no
+// quarantined executor record of that generation and no live Discovery writer (`lease` is the lease as read; the EPG publication's lease does not count).
+// - `complete`: the continuation of that generation says complete;
+// - `drained` (AIR-595): the executor record stopped on `backlog_empty` and the continuation paused on `chunk_budget` with no chunk left. The legacy alias sweep
 //   (ADR 0158) that kept the series from saying complete re-checks films already decided; it is not part of the queue.
 // No timestamp takes part: a proof of the same generation does not expire, and a stale gate never turns it into a backlog.
-function discoveryQueueProof({programmeRunId,continuation,workflow,status,reading}={}){
- if(typeof programmeRunId!=='string'||!programmeRunId||!continuation||continuation.programmeRunId!==programmeRunId)return {empty:false,proof:null};
- if(continuation.stage==='complete'){
-  const value=reading||{};
-  return discoveryQueueEmpty(value.remaining,value.cheapRemaining,value.error,value.waitingRetry)?{empty:true,proof:'complete'}:{empty:false,proof:null};
- }
- if(discoveryDrainedSeries(workflow,continuation,programmeRunId)&&discoveryDrainedStatus(status,continuation,programmeRunId))return {empty:true,proof:'drained'};
- return {empty:false,proof:null};
+function discoveryQueueProof({programmeRunId,continuation,workflow,status,lease=null,now=Date.now()}={}){
+ const none={empty:false,proof:null};
+ if(typeof programmeRunId!=='string'||!programmeRunId||!continuation||continuation.programmeRunId!==programmeRunId)return none;
+ const sameWorkflow=workflow?.programmeRunId===programmeRunId?workflow:null;
+ if(discoveryQuarantined(sameWorkflow)||discoveryWriterLive(lease,now)||!discoveryZeroStatus(status,continuation,programmeRunId))return none;
+ if(continuation.stage==='complete')return {empty:true,proof:'complete'};
+ if(discoveryDrainedSeries(sameWorkflow,continuation,programmeRunId))return {empty:true,proof:'drained'};
+ return none;
 }
 const DISCOVERY_QUEUE_STATES=['empty','running','backlog','paused','failed','blocked','unknown'];
 const discoveryQueueCount=value=>Number.isInteger(value)&&value>=0?value:null;
@@ -2070,19 +2073,33 @@ function discoveryQueueReading(status,programmeRunId){
  return {remaining:discoveryQueueCount(status.remaining),cheapRemaining:discoveryQueueCount(status.cheapRemaining),deferred:discoveryQueueCount(status.deferred),
   waitingRetry:discoveryQueueCount(status.waitingRetry),error:status.error?true:null,hopId:typeof status.hopId==='string'&&status.hopId?status.hopId:null,finishedAt:discoveryQueueTime(status.finishedAt)};
 }
+// The admission gate as one observation: `none` (no gate was read: outside D1 authority, where nothing pauses Discovery), `inert` (the pause table is absent),
+// `clear`, `paused`, `unreadable` (the gate answered unknown or unreadable, or could not be read: it fails closed) or `moved` (the gate read named another published
+// generation than the snapshot: a publication between the two reads).
+function discoveryAdmission(pause,published){
+ if(!pause)return 'none';
+ if(typeof pause.publishedProgrammeRunId==='string'&&pause.publishedProgrammeRunId&&pause.publishedProgrammeRunId!==published)return 'moved';
+ if(pause.present===false)return 'inert';
+ if(pause.paused===true)return 'paused';
+ if(pause.paused===false&&pause.unreadable!==true&&pause.present===true)return 'clear';
+ return 'unreadable';
+}
 // Pure. What the evidence of `readDiscoveryEvidence` (or the same fields from a caller's own consistent read) says about the queue of the published generation.
 // `state`:
 // - `empty`: proven by `discoveryQueueProof` (`reason` `complete` or `drained`); `owed` false.
-// - `running`: a live writer holds the lease (or the lease was not read: `lease_unread`).
-// - `backlog`: work is owed (a chunk budget, or a non-zero part of the reading of this generation); `eligible` says whether the policy allows progress now
-//   (a future gate or backoff waits; a `chunk_budget` with a known remaining count is renewed by the Workflow at once).
+// - `running`: a live Discovery writer holds the lease (or the lease was not read: `lease_unread`).
+// - `backlog`: work is owed (a chunk budget, or a non-zero part of the reading of this generation) and admission is confirmed; `eligible` says whether the policy
+//   allows progress now (a future gate or backoff waits; a `chunk_budget` with a known remaining count is renewed by the Workflow at once).
 // - `paused`: the EPG-priority pause (ADR 0135) holds new admission and the queue is not proven empty (`awaiting_certificate` while the published run is not yet
 //   certified complete, ADR 0175). Not a fault and not empty.
 // - `failed`: the continuation recorded an error; it is retried by policy, work stays owed.
 // - `blocked`: needs the owner (`quarantined`, `interrupted`, `missing_secret`).
-// - `unknown`: anything that proves neither work nor its absence: an unreadable or loading authority, no publication or continuation, a continuation of another
-//   generation or a handoff, a missing or foreign status, partial counts, or an all-zero reading whose proof is incomplete (`drain_unconfirmed`).
-// The counts and times are the stored facts of the judged generation, never computed and never filled from another generation; `observedAt` is the read time.
+// - `unknown`: anything that proves neither work nor its absence, or owed work whose admission cannot be confirmed: an unreadable or loading authority, no
+//   publication or continuation, a continuation of another generation or a handoff, a missing or foreign status, partial counts, an all-zero reading whose proof is
+//   incomplete (`drain_unconfirmed`), an unreadable admission gate (`admission_unreadable`) or a gate read of another generation (`gate_generation_moved`).
+// The counts and times are the stored facts of the judged generation, never computed and never filled from another generation. `allowedAt` is when the policy
+// allows the next step for owed work: the passed gate, the checkpoint when the Workflow renews a known budget at once, a future gate while it waits, or null.
+// `observedAt` is the read time.
 function discoveryQueueState(evidence,now=Date.now()){
  const e=evidence&&typeof evidence==='object'?evidence:{};
  const records=e.records&&typeof e.records==='object'?e.records:{};
@@ -2093,9 +2110,10 @@ function discoveryQueueState(evidence,now=Date.now()){
  const reading=same?discoveryQueueReading(records.status,published):null;
  const workflow=same&&records.workflow?.programmeRunId===published?records.workflow:null;
  const pauseIn=e.pause&&typeof e.pause==='object'?e.pause:null;
- const pause=pauseIn?{present:pauseIn.present??null,paused:typeof pauseIn.paused==='boolean'?pauseIn.paused:null,reason:typeof pauseIn.reason==='string'?pauseIn.reason:null,detail:typeof pauseIn.detail==='string'?pauseIn.detail:null,nextCatchUpAt:discoveryQueueTime(pauseIn.nextCatchUpAt)}:null;
+ const pause=pauseIn?{present:typeof pauseIn.present==='boolean'?pauseIn.present:null,paused:typeof pauseIn.paused==='boolean'?pauseIn.paused:null,reason:typeof pauseIn.reason==='string'?pauseIn.reason:null,detail:typeof pauseIn.detail==='string'?pauseIn.detail:null,unreadable:pauseIn.unreadable===true,nextCatchUpAt:discoveryQueueTime(pauseIn.nextCatchUpAt),publishedProgrammeRunId:typeof pauseIn.publishedProgrammeRunId==='string'?pauseIn.publishedProgrammeRunId:null}:null;
+ const admission=discoveryAdmission(pause,published);
  const gateAt=same?discoveryQueueTime(c.retryAt)||discoveryQueueTime(c.nextCatchUpAt):null;
- const base={schemaVersion:1,state:'unknown',reason:null,owed:null,eligible:null,proof:null,provenAt:null,programmeRunId:published,
+ const base={schemaVersion:1,state:'unknown',reason:null,owed:null,eligible:null,proof:null,provenAt:null,allowedAt:null,admission,programmeRunId:published,
   continuationProgrammeRunId:c&&typeof c.programmeRunId==='string'?c.programmeRunId:null,hopId:same&&typeof c.hopId==='string'&&c.hopId?c.hopId:null,
   stage:c&&typeof c.stage==='string'?c.stage:null,continuationReason:c&&typeof c.reason==='string'?c.reason:null,
   remainingChunks:same?discoveryQueueCount(c.remainingChunks):null,remaining:reading?.remaining??null,cheapRemaining:reading?.cheapRemaining??null,deferred:reading?.deferred??null,waitingRetry:reading?.waitingRetry??null,
@@ -2108,42 +2126,61 @@ function discoveryQueueState(evidence,now=Date.now()){
  if(!c)return out('unknown','no_continuation');
  if(!same)return out('unknown','generation_mismatch');
  if(c.reason==='programme_changed')return out('unknown','generation_handoff');
+ const leaseUnread=unavailable.includes('lease')||records.lease===undefined;
  if(c.stage==='running'){
-  const lease=records.lease;
-  if(unavailable.includes('lease')||lease===undefined)return out('running','lease_unread',{owed:true,eligible:false});
-  if(lease&&Number(lease.expiresAt)>now)return out('running','live_lease',{owed:true,eligible:false});
-  return out('backlog','orphaned',{owed:true,eligible:true});
+  if(leaseUnread)return out('running','lease_unread',{owed:true,eligible:false});
+  if(discoveryLeaseLive(records.lease,now))return out('running','live_lease',{owed:true,eligible:false});
+  return out('backlog','orphaned',{owed:true,eligible:true,allowedAt:null});
  }
- const proof=discoveryQueueProof({programmeRunId:published,continuation:c,workflow,status:records.status,reading});
- if(proof.empty)return out('empty',proof.proof,{owed:false,eligible:false,proof:proof.proof,provenAt:proof.proof==='drained'?reading?.finishedAt??null:base.checkpointAt});
+ const proof=discoveryQueueProof({programmeRunId:published,continuation:c,workflow,status:records.status,lease:leaseUnread?null:records.lease,now});
+ if(proof.empty&&!leaseUnread)return out('empty',proof.proof,{owed:false,eligible:false,proof:proof.proof,provenAt:reading?.finishedAt??null});
  const parts=reading?[reading.remaining,reading.cheapRemaining,reading.deferred,reading.waitingRetry]:[];
  const owed=base.remainingChunks>0||parts.some(value=>value>0);
- // A live lease is a writer at work (a hop between its admission and its `running` checkpoint); it never outweighs a proof of emptiness.
- if(records.lease&&Number(records.lease.expiresAt)>now)return out('running','live_lease',{owed:owed?true:null,eligible:false});
  const known=owed?true:null;
- if(workflow&&(workflow.recovery?.quarantined===true||workflow.reason==='recovery_exhausted'))return out('blocked','quarantined',{owed:known,eligible:false});
+ // A live Discovery writer (a hop between its admission and its `running` checkpoint) is work in progress; a proof is never taken while one holds the lease.
+ if(leaseUnread)return out('running','lease_unread',{owed:known,eligible:false});
+ if(discoveryWriterLive(records.lease,now))return out('running','live_lease',{owed:known,eligible:false});
+ if(discoveryQuarantined(workflow))return out('blocked','quarantined',{owed:known,eligible:false});
  if(c.reason==='interrupted')return out('blocked','interrupted',{owed:known,eligible:false});
  if(c.reason==='missing_secret')return out('blocked','missing_secret',{owed:known,eligible:false});
  const gateMs=gateAt?Date.parse(gateAt):null,gated=gateMs!==null&&gateMs>now;
- if(c.stage==='error')return out('failed',typeof c.reason==='string'&&c.reason?c.reason:'error',{owed:true,eligible:!gated});
+ if(c.stage==='error')return out('failed',typeof c.reason==='string'&&c.reason?c.reason:'error',{owed:true,eligible:!gated,allowedAt:gateAt});
  if(c.reason==='idle')return out('unknown','awaiting_epg_discovery');
- const pauseHolds=pause?.paused===true;
+ const pauseReason=pause?.detail==='awaiting_complete'?'awaiting_certificate':'epg_priority';
  if(owed){
-  if(pauseHolds)return out('paused',pause.detail==='awaiting_complete'?'awaiting_certificate':'epg_priority',{owed:true,eligible:false});
+  // Owed work is eligible only under a confirmed admission: a held pause waits, an unreadable gate or a gate read of another generation proves nothing.
+  if(admission==='paused')return out('paused',pauseReason,{owed:true,eligible:false,allowedAt:null});
+  if(admission==='unreadable')return out('unknown','admission_unreadable',{owed:true,eligible:null});
+  if(admission==='moved')return out('unknown','gate_generation_moved',{owed:true,eligible:null});
   const renewed=c.reason==='chunk_budget'&&reading?.remaining>0;
   const reason=c.reason==='backoff'||c.retryAt?'backoff':c.reason==='chunk_budget'?'chunk_budget':'pending';
-  return out('backlog',reason,{owed:true,eligible:renewed||!gated});
+  const eligible=renewed||!gated;
+  // `allowedAt`: a passed gate, the checkpoint when a known budget is renewed at once under a future gate, no time without a gate, the future gate while it waits.
+  return out('backlog',reason,{owed:true,eligible,allowedAt:eligible?(gateAt?(gated?base.checkpointAt:gateAt):null):gateAt});
  }
- if(pauseHolds)return out('paused',pause.detail==='awaiting_complete'?'awaiting_certificate':'epg_priority',{owed:null,eligible:false});
+ if(admission==='paused')return out('paused',pauseReason,{owed:null,eligible:false});
  if(!reading)return out('unknown',records.status&&records.status.programmeRunId!==published?'status_foreign':'no_status');
  if(parts.some(value=>value===null))return out('unknown','partial_counts');
  return out('unknown','drain_unconfirmed');
 }
+// The lease as stored, read the way a Discovery hop reads it: the D1 row at D1 authority (`DiscoveryAuthority.readLease`, which stays readable while a ledger seal
+// is loading), otherwise the R2 object. Read only.
+async function readDiscoveryLeaseValue(env){
+ if(typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.readLease==='function'){const routed=await DiscoveryAuthority.readLease(env);if(routed.handled)return routed.lease??null;}
+ const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY);return object?await object.json():null;
+}
 // AIR-598. The bounded reader behind `discoveryQueueState`: the small Discovery records of one consistent snapshot (one D1 batch of single-row SELECTs under
-// D1 authority: authority, transfer, status, continuation, Workflow record, lease, projector window; the same small R2 objects, each read on its own, outside it)
-// and, under D1 authority, the EPG-priority pause as the writers would judge it now (`readDiscoveryGates`, read only). Never the ledger, the decisions, the
-// catalog or TMDB, never a write. A record that cannot be read is named in `unavailable`; it is never filled from another source.
+// D1 authority: authority, transfer, status, continuation, Workflow record, lease with its holder kind, projector window; the same small R2 objects, each read on
+// its own, outside it) and, under D1 authority, the EPG-priority pause as the writers would judge it now (`readDiscoveryGates`, read only), kept whole with the
+// published generation that read saw, so a publication between the two reads is detected. Never the ledger, the decisions, the catalog or TMDB, never a write.
+// A record that cannot be read is named in `unavailable`; it is never filled from another source. A gate that cannot be read is unreadable, never clear.
 const DISCOVERY_EVIDENCE_NONE=()=>({status:null,continuation:null,workflow:null,lease:null,window:null});
+const DISCOVERY_GATE_UNREADABLE=()=>({present:null,paused:null,reason:'unknown',nextCatchUpAt:null,unreadable:true});
+async function readDiscoveryGatePause(env,now){
+ if(typeof DiscoveryAuthority?.readDiscoveryGates!=='function')return DISCOVERY_GATE_UNREADABLE();
+ try{const gates=await DiscoveryAuthority.readDiscoveryGates(env,now);return gates?.priority&&typeof gates.priority==='object'?{...gates.priority,publishedProgrammeRunId:gates.publishedProgrammeRunId??null}:DISCOVERY_GATE_UNREADABLE();}
+ catch{return DISCOVERY_GATE_UNREADABLE();}
+}
 async function readDiscoveryEvidence(env,options={}){
  const now=Number.isFinite(options.now)?options.now:Date.now(),unavailable=[];
  let snapshot=null,records,authority,source;
@@ -2164,11 +2201,7 @@ async function readDiscoveryEvidence(env,options={}){
   records={status,continuation,workflow,lease,window:null};
   authority.publishedProgrammeRunId=generation?.phase==='published'?generation.programmeRunId||null:null;
  }
- let pause=null;
- if(source==='d1_snapshot'&&typeof DiscoveryAuthority?.readDiscoveryGates==='function'){
-  try{pause=(await DiscoveryAuthority.readDiscoveryGates(env,now)).priority||null;}
-  catch{pause={present:null,paused:null,reason:'unknown',nextCatchUpAt:null};}
- }
+ const pause=source==='d1_snapshot'?await readDiscoveryGatePause(env,now):null;
  return {observedAt:new Date(now).toISOString(),source,authority,published:authority.publishedProgrammeRunId||null,records,unavailable:[...new Set(unavailable)],pause};
 }
 // The classification of the current generation, read once. Never throws: an evidence read that fails is the unknown state of an unreadable authority.
@@ -2311,8 +2344,7 @@ async function discoveryPipelineStatus(env){
  // EPG-priority pause read on their own; it adds no snapshot batch of its own.
  let workflowRecord=null;const unavailable=[];
  if(typeof readWorkflowState==='function'){try{workflowRecord=(await readWorkflowState(env)).record;}catch{workflowRecord={phase:'unknown'};unavailable.push('workflow');}}
- let pause=null;
- if(authority?.ready&&typeof DiscoveryAuthority.readDiscoveryGates==='function'){try{pause=(await DiscoveryAuthority.readDiscoveryGates(env)).priority||null;}catch{pause={present:null,paused:null,reason:'unknown',nextCatchUpAt:null};}}
+ const pause=authority?.ready?await readDiscoveryGatePause(env,Date.now()):null;
  const evidence={observedAt:new Date().toISOString(),source:authority?.ready?'d1_detailed':'r2_objects',authority:{state:authority?.ready?(authority.transfer==='loading'?'loading':'ready'):'r2'},
   published:(authority?.ready?authority.publishedProgrammeRunId:pinned.epgPin?.programmeRunId)||null,records:{status:last,continuation,workflow:unavailable.length?null:workflowRecord,lease,window:null},unavailable,pause};
  const queueState=discoveryQueueState(evidence);

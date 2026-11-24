@@ -25,8 +25,8 @@ function seedHealthySources(){
  records.set('sync.json',{runId:'programme-1',stage:'complete',updatedAt:'2026-11-16T11:00:00Z',ratingObservedAt:'2026-11-16T11:00:00Z',completedAt:'2026-11-16T11:00:00Z'});
  // AIR-598: the footer row reads the shared Discovery classification: the published generation (the pointer) and a complete series proven by its zero reading.
  records.set('epg/published-generation.json',{programmeRunId:'programme-1',phase:'published'});
- records.set('epg/discovery-status.json',{stage:'complete',programmeRunId:'programme-1',finishedAt:'2026-11-16T11:00:00Z',error:null,remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0});
- records.set('epg/resolver-continuation.json',{stage:'complete',programmeRunId:'programme-1',at:'2026-11-16T11:00:00Z',reason:null});
+ records.set('epg/discovery-status.json',{stage:'complete',hopId:'hop-c',programmeRunId:'programme-1',finishedAt:'2026-11-16T11:00:00Z',error:null,remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0});
+ records.set('epg/resolver-continuation.json',{stage:'complete',hopId:'hop-c',programmeRunId:'programme-1',at:'2026-11-16T11:00:00Z',reason:null});
  records.set('epg/discovery-resolution.json',{});
 }
 function eligibleQueue(){

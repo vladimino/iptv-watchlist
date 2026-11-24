@@ -29,6 +29,9 @@ function epgHealthy(bucket,{runId='run-p',publishedAt=at(T0-3*H)}={}){
  bucket.set('sync.json',{runId,stage:'complete',updatedAt:publishedAt,failures:[]});
  bucket.set('epg/published-generation.json',{programmeRunId:runId,phase:'published'});
  bucket.set('enrichment/prediction-queue.json',{pending:[],refreshedAt:publishedAt,lastBatch:null});
+ // AIR-598: a finished Discovery series of that generation, proven empty by its own last chunk (the Monitor judges Discovery from the shared classification).
+ bucket.set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:publishedAt,hopId:'hop-a',remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:runId});
+ bucket.set('epg/discovery-status.json',{stage:'complete',programmeRunId:runId,hopId:'hop-a',finishedAt:publishedAt,remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0,error:null});
 }
 const posts=calls=>calls.filter(item=>item.method==='POST');
 const producer=async(M,env,now)=>plain((await M.status(env,now)).streams).find(stream=>stream.stream==='canonical_producer');

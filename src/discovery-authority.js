@@ -476,7 +476,7 @@ async function readKey(env,key,gate,options=null){
  if(key==='epg/discovery-status.json')return readPayload(env,'discovery_status');
  if(key==='epg/discovery-score-preview.json')return readScores(env,gate);
  if(key==='epg/resolver-continuation.json')return (await readContinuation(env)).record;
- if(key==='epg/resolver-lease.json')return readLeaseValue(env);
+ if(key==='epg/resolver-lease.json')return readLeaseValue(env,gate);
  if(key==='epg/discovery-workflow.json')return (await readWorkflow(env)).record;
  return null;
 }
@@ -2007,15 +2007,18 @@ export async function releaseLease(env,lease){
  if(env?.discoveryLease?.id===lease.id)env.discoveryLease=null;
  return {handled:true};
 }
-async function readLeaseValue(env){
- const row=await one(database(env),'SELECT lease_id, expires_at FROM discovery_lease WHERE id=1');
+// The lease as stored. With the EPG-priority table (migration 0022) the row also names its holder kind (`epg` for the publication), so a reader can tell the
+// publication's lease from a Discovery writer; without it the holder is not known and the field is absent.
+async function readLeaseValue(env,gate=null){
+ const holder=gate?.priorityTable===true;
+ const row=await one(database(env),'SELECT lease_id, expires_at'+(holder?', holder_kind':'')+' FROM discovery_lease WHERE id=1');
  if(!row?.lease_id)return null;
- return {id:row.lease_id,expiresAt:Number(row.expires_at)};
+ return {id:row.lease_id,expiresAt:Number(row.expires_at),...(holder&&typeof row.holder_kind==='string'?{holderKind:row.holder_kind}:{})};
 }
 export async function readLease(env){
  const gate=await readAuthority(env);
  if(!gate.ready)return {handled:false,lease:null};
- return {handled:true,lease:await readLeaseValue(env)};
+ return {handled:true,lease:await readLeaseValue(env,gate)};
 }
 
 export async function readContinuation(env){
@@ -2069,7 +2072,7 @@ export async function readOperationalSnapshot(env){
   ['status','SELECT payload_json FROM discovery_status WHERE id=1'],
   ['continuation','SELECT revision, payload_json FROM discovery_continuation WHERE id=1'],
   ['workflow','SELECT revision, payload_json FROM discovery_workflow WHERE id=1'],
-  ['lease','SELECT lease_id, expires_at FROM discovery_lease WHERE id=1'],
+  ['lease','SELECT lease_id, expires_at'+(opened.priorityTable?', holder_kind':'')+' FROM discovery_lease WHERE id=1'],
  ];
  if(opened.windowTable)wanted.push(['window','SELECT state, owner, requested_at AS requestedAt, expires_at AS expiresAt FROM projector_window WHERE id=1']);
  let results;
@@ -2084,7 +2087,7 @@ export async function readOperationalSnapshot(env){
  if(gate.mode!=='d1'||gate.cutover!=='open')throw failed('discovery_unavailable');
  return {handled:true,authority:publicGate(gate),statements:wanted.length,unreadable,records:{
   status:parse('status',rows.status),continuation:parse('continuation',rows.continuation),workflow:parse('workflow',rows.workflow),
-  lease:rows.lease?.lease_id?{id:rows.lease.lease_id,expiresAt:Number(rows.lease.expires_at)}:null,
+  lease:rows.lease?.lease_id?{id:rows.lease.lease_id,expiresAt:Number(rows.lease.expires_at),...(typeof rows.lease.holder_kind==='string'?{holderKind:rows.lease.holder_kind}:{})}:null,
   window:rows.window?{state:rows.window.state,owner:rows.window.owner,requestedAt:rows.window.requestedAt==null?null:Number(rows.window.requestedAt),expiresAt:rows.window.expiresAt==null?null:Number(rows.window.expiresAt)}:null,
  }};
 }

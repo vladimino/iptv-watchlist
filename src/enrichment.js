@@ -2504,7 +2504,7 @@ function integrationHealth({posters,producer,sync,ratings,enabled,report,continu
    if(q.reason==='chunk_budget')return {...chunkBudgetRecognition(),queueState:q.state,queueReason:q.reason};
    return {...resolverProgress(),queueState:q.state,queueReason:q.reason};
   }
-  if(['authority_loading','generation_mismatch','generation_handoff'].includes(q.reason))return resolverEntry('waiting','resolver_handoff',priorResolverSuccess,null);
+  if(['authority_loading','generation_mismatch','generation_handoff','gate_generation_moved'].includes(q.reason))return resolverEntry('waiting','resolver_handoff',priorResolverSuccess,null);
   return resolverEntry('unknown','resolver_unconfirmed',priorResolverSuccess,null);
  })();
  const predictions=predictionCapabilityHealth({run,live,now,recentRuns,queue,clock:predictionClock});

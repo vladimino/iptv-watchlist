@@ -69,15 +69,26 @@ const SCENARIOS=[
  {name:'a live writer (running checkpoint, live lease)',records:base=>({continuation:{...base.continuation,stage:'running',reason:null,at:at(T0-MIN),hopId:'hop-live',remainingChunks:4,nextCatchUpAt:null},lease:{id:'hop-live',expiresAt:T0+60000}}),
   expect:{state:'running',reason:'live_lease',owed:true,eligible:false},footer:{state:'running',code:'running'},monitor:'healthy',eventsEmpty:false,health:'clear',executor:{pending:true,eligible:false}},
  {name:'all zeros but the status names another hop (the proof is incomplete)',records:base=>({status:{...base.status,hopId:'another-hop'}}),
-  expect:{state:'unknown',reason:'drain_unconfirmed',owed:null,eligible:null},footer:{state:'unknown',code:'resolver_unconfirmed'},monitor:'degraded',monitorIssue:'discovery_unconfirmed',eventsEmpty:false,health:'attention',executor:{pending:true,eligible:false}},
+  expect:{state:'unknown',reason:'drain_unconfirmed',owed:null,eligible:null},footer:{state:'unknown',code:'resolver_unconfirmed'},monitor:'delayed',eventsEmpty:false,health:'attention',executor:{pending:true,eligible:false}},
  {name:'a continuation of the previous generation after a publication',records:()=>({published:G2}),
-  expect:{state:'unknown',reason:'generation_mismatch',owed:null,eligible:null},footer:{state:'waiting',code:'resolver_handoff'},monitor:'degraded',monitorIssue:'discovery_unconfirmed',eventsEmpty:false,executor:{pending:true,eligible:false}},
+  expect:{state:'unknown',reason:'generation_mismatch',owed:null,eligible:null},footer:{state:'waiting',code:'resolver_handoff'},monitor:'waiting',eventsEmpty:false,executor:{pending:true,eligible:false}},
  {name:'legacy records without a generation pin or hop',records:base=>({continuation:{...base.continuation,programmeRunId:undefined,hopId:undefined},status:{...base.status,programmeRunId:undefined,hopId:undefined}}),
   expect:{state:'unknown',reason:'generation_mismatch',owed:null,eligible:null},footer:{state:'waiting',code:'resolver_handoff'},eventsEmpty:false,executor:{pending:true,eligible:false}},
  {name:'partial counts (the cheap-pass remainder is not a number)',records:base=>({status:{...base.status,cheapRemaining:null}}),
   expect:{state:'unknown',reason:'partial_counts',owed:null,eligible:null},footer:{state:'unknown',code:'resolver_unconfirmed'},eventsEmpty:false,health:'attention',executor:{pending:true,eligible:false}},
  {name:'a recorded chunk error',records:base=>({continuation:{...base.continuation,stage:'error',reason:'tmdb_unavailable',remainingChunks:12,at:at(T0-20*MIN),nextCatchUpAt:at(T0+40*MIN)},workflow:{...base.workflow,phase:'waiting',reason:null,waitingUntil:at(T0+40*MIN),updatedAt:at(T0-20*MIN)}}),
   expect:{state:'failed',reason:'tmdb_unavailable',owed:true,eligible:false},footer:{state:'failed',code:'resolver_failed'},monitor:'waiting',eventsEmpty:false,executor:{pending:true,eligible:false}},
+ // Review of the first version: a `complete` continuation is proven only by the strict reading of its own hop, and nothing may contradict a proof.
+ {name:'complete, but the status of its hop leaves the waiting-retry count unknown',records:base=>({continuation:{...base.continuation,stage:'complete',reason:null},workflow:{...base.workflow,reason:'complete'},status:{...base.status,waitingRetry:null}}),
+  expect:{state:'unknown',reason:'partial_counts',owed:null,eligible:null},footer:{state:'unknown',code:'resolver_unconfirmed'},monitor:'delayed',eventsEmpty:false,health:'attention',executor:{pending:true,eligible:false}},
+ {name:'complete, but the status still holds 7 deferred films',records:base=>({continuation:{...base.continuation,stage:'complete',reason:null},workflow:{...base.workflow,reason:'complete'},status:{...base.status,deferred:7}}),
+  expect:{state:'backlog',reason:'pending',owed:true,eligible:true},eventsEmpty:false,executor:{pending:true,eligible:true},footer:{state:'running',code:'running'}},
+ {name:'complete, with all zeros from another hop',records:base=>({continuation:{...base.continuation,stage:'complete',reason:null},workflow:{...base.workflow,reason:'complete'},status:{...base.status,hopId:'another-hop'}}),
+  expect:{state:'unknown',reason:'drain_unconfirmed',owed:null,eligible:null},footer:{state:'unknown',code:'resolver_unconfirmed'},monitor:'delayed',eventsEmpty:false,executor:{pending:true,eligible:false}},
+ {name:'drained records while a Discovery writer holds the lease',records:()=>({lease:{id:'hop-new',expiresAt:T0+60000,holderKind:'discovery'}}),
+  expect:{state:'running',reason:'live_lease',owed:null,eligible:false},footer:{state:'running',code:'running'},eventsEmpty:false,executor:{pending:true,eligible:false}},
+ {name:'drained records while the EPG publication holds the lease',records:()=>({lease:{id:'epg-pub',expiresAt:T0+60000,holderKind:'epg'}}),
+  expect:{state:'empty',reason:'drained',owed:false,eligible:false},footer:{state:'healthy',code:'queue_empty'},monitor:'healthy',eventsEmpty:true,executor:{pending:false,eligible:false}},
  {name:'a quarantined executor',records:base=>({status:{...base.status,remaining:7},workflow:{...base.workflow,reason:'recovery_exhausted',recovery:{attempts:5,reason:'recovery_exhausted',quarantined:true}}}),
   expect:{state:'blocked',reason:'quarantined',owed:true,eligible:false},footer:{state:'failed',code:'resolver_failed'},monitor:'degraded',monitorIssue:'discovery_quarantined',eventsEmpty:false,executor:{pending:true,eligible:false}},
 ];
@@ -155,8 +166,37 @@ for(const scenario of SCENARIOS){
  gates={priority:{present:true,paused:false,reason:'published',nextCatchUpAt:null}};
  queue=await classify();
  assert.deepEqual([queue.state,queue.reason],['backlog','chunk_budget'],'the pause lifted after the certificate: the same backlog is eligible again');
+ // Review of the first version: the admission gate fails closed. A gate that answers unknown, reports itself unreadable or cannot be read, or that names another
+ // published generation than the snapshot (a publication between the two reads), never makes owed work eligible; the detailed status reads it the same way.
+ const owedSnapshot=snapshot({records:{...snapshot().records,status:{...records.status,remaining:15,legacyPending:false}}});current=owedSnapshot;
+ for(const [label,gate,reason] of [
+  ['paused unknown',async()=>({publishedProgrammeRunId:G1,priority:{present:true,paused:null,reason:'unknown',nextCatchUpAt:null}}),'admission_unreadable'],
+  ['unreadable evidence',async()=>({publishedProgrammeRunId:G1,priority:{present:true,paused:false,reason:'evidence_unreadable',unreadable:true,nextCatchUpAt:null}}),'admission_unreadable'],
+  ['gate read throws',async()=>{throw new Error('d1 down');},'admission_unreadable'],
+  ['gate of another generation',async()=>({publishedProgrammeRunId:G2,priority:{present:true,paused:false,reason:'clear',nextCatchUpAt:null}}),'gate_generation_moved'],
+ ]){
+  W.ctx.DiscoveryAuthority.readDiscoveryGates=gate;
+  queue=await classify();
+  assert.deepEqual([queue.state,queue.reason,queue.owed,queue.eligible],['unknown',reason,true,null],label);
+  const read=await response('/api/enrichment/pipeline/status?view=operational');
+  assert.deepEqual([read.queue.state,read.queue.reason,read.executor.eligible],['unknown',reason,false],label+': operational');
+  const footerRow=(await response('/api/enrichment/footer/status')).integrations.sources.find(item=>item.id==='resolver');
+  assert.equal(footerRow.queueReason,reason,label+': footer');assert.notEqual(footerRow.state,'healthy',label+': footer');
+  assert.equal(W.call('discoveryAdmission')(await W.call('readDiscoveryGatePause')(env,T0),G1),reason==='gate_generation_moved'?'moved':'unreadable',label+': the gate read the detailed status uses');
+ }
+ delete W.ctx.DiscoveryAuthority.readDiscoveryGates;
+ assert.equal((await classify()).reason,'admission_unreadable','a D1 reader without the gate read is not a clear gate');
+ W.ctx.DiscoveryAuthority.readDiscoveryGates=async()=>({publishedProgrammeRunId:G1,priority:{present:false,paused:false,reason:'inert',nextCatchUpAt:null}});
+ assert.deepEqual([(await classify()).state,(await classify()).eligible],['backlog',true],'an absent pause table (verified) admits as before');
+ W.ctx.DiscoveryAuthority.readDiscoveryGates=async()=>({publishedProgrammeRunId:G1,priority:{present:true,paused:null,reason:'unknown',nextCatchUpAt:null}});
+ current=snapshot();
+ assert.equal((await classify()).state,'empty','an unreadable gate does not touch a proven empty queue');
  current=snapshot({authority:{...snapshot().authority,state:'loading',transfer:'loading'}});
  assert.deepEqual([(await classify()).state,(await classify()).reason],['unknown','authority_loading'],'a loading authority is never an empty queue');
+ // The Events proof reads the lease the way a Discovery hop does (`readLease`, readable while a ledger seal is loading), never through the routed key read that a
+ // loading transfer closes, so a clean EPG-priority pause at the publication hour gets no false read fault.
+ W.ctx.DiscoveryAuthority={readLease:async()=>({handled:true,lease:{id:'epg-pub',expiresAt:T0+60000,holderKind:'epg'}}),ownsKey:()=>true,routeRead:async()=>{throw Object.assign(new Error('loading'),{code:'discovery_incomplete'});}};
+ assert.deepEqual(plain(await W.call('readDiscoveryLeaseValue')(env)),{id:'epg-pub',expiresAt:T0+60000,holderKind:'epg'});
  W.ctx.DiscoveryAuthority={readOperationalSnapshot:async()=>{throw Object.assign(new Error('d1 down'),{code:'discovery_unavailable'});},ownsKey:()=>false};
  assert.deepEqual([(await classify()).state,(await classify()).reason],['unknown','authority_unavailable'],'an unreadable authority is unknown, never empty');
  delete W.ctx.DiscoveryAuthority;
@@ -195,7 +235,7 @@ for(const scenario of SCENARIOS){
 {
  const state=W.call('discoveryQueueState');
  const evidence=(records,extra={})=>({published:G1,authority:{state:'r2'},records,unavailable:[],pause:null,...extra});
- const base=drainedRecords();
+ const base={...drainedRecords(),lease:null};
  assert.equal(state(evidence(base),T0+30*24*H).state,'empty','a month later the same proof is still empty');
  assert.equal(state(evidence({...base,workflow:{...base.workflow,programmeRunId:G2}}),T0).reason,'drain_unconfirmed','an executor record of another generation proves nothing');
  assert.equal(state(evidence({...base,status:undefined}),T0).reason,'no_status');
@@ -208,11 +248,65 @@ for(const scenario of SCENARIOS){
  assert.equal(state(evidence(base,{published:null}),T0).reason,'no_publication');
  assert.equal(state(evidence({...base,continuation:{...base.continuation,stage:'complete',reason:null}}),T0).proof,'complete','a complete continuation with a zero reading of its generation');
  assert.equal(state(evidence({...base,continuation:{...base.continuation,stage:'complete',reason:null},status:{...base.status,remaining:null}}),T0).state,'unknown','a complete continuation without a zero reading is unconfirmed');
- assert.equal(state(evidence({...base,continuation:{...base.continuation,stage:'running'}}),T0).reason,'lease_unread','a running record whose lease was not read');
+ assert.equal(state(evidence({...base,continuation:{...base.continuation,stage:'running'},lease:undefined}),T0).reason,'lease_unread','a running record whose lease was not read');
+ assert.equal(state(evidence({...base,lease:undefined}),T0).state,'running','no proof is taken while the lease could not be read');
  assert.equal(state(evidence({...base,continuation:{...base.continuation,stage:'running'},lease:{id:'x',expiresAt:T0-1}}),T0).reason,'orphaned');
- assert.equal(state(evidence({...base,lease:{id:'x',expiresAt:T0+1000}}),T0).state,'empty','a live lease (the EPG publication may hold it) never outweighs the proof');
+ assert.equal(state(evidence({...base,lease:{id:'x',expiresAt:T0+1000,holderKind:'epg'}}),T0).state,'empty','the EPG publication\'s lease does not contradict the proof');
+ assert.equal(state(evidence({...base,lease:{id:'x',expiresAt:T0+1000}}),T0).state,'running','a live lease of an unknown holder is a Discovery writer, never ignored');
+ assert.equal(state(evidence({...base,workflow:{...base.workflow,recovery:{quarantined:true}}}),T0).state,'blocked','a quarantined executor contradicts the proof');
+ for(const [label,patch] of [['deferred',{deferred:7}],['waiting retry null',{waitingRetry:null}],['waiting retry negative',{waitingRetry:-1}],['waiting retry missing',{waitingRetry:undefined}]])
+  assert.notEqual(state(evidence({...base,continuation:{...base.continuation,stage:'complete',reason:null},status:{...base.status,...patch}}),T0).state,'empty','complete: '+label);
+ // `allowedAt` is the effective gate the Monitor measures from: a known budget renewed at once is allowed from its checkpoint, whatever future gate it carries.
+ const renewed=state(evidence({...base,continuation:{...base.continuation,nextCatchUpAt:at(T0+30*MIN),at:at(T0-5*H)},status:{...base.status,remaining:40}}),T0);
+ assert.deepEqual([renewed.state,renewed.eligible,renewed.allowedAt],['backlog',true,at(T0-5*H)]);
+ const gated=state(evidence({...base,continuation:{...base.continuation,reason:'backoff',retryAt:at(T0+30*MIN),remainingChunks:3}}),T0);
+ assert.deepEqual([gated.state,gated.eligible,gated.allowedAt],['backlog',false,at(T0+30*MIN)]);
  assert.equal(state(evidence({...base,continuation:{...base.continuation,reason:'missing_secret'}}),T0).reason,'missing_secret');
  assert.ok(W.call('DISCOVERY_QUEUE_STATES').includes(state(evidence(base),T0).state));
+}
+
+// 10. Review of the first version, the Monitor: an open incident is never recovered by a missing or unconfirmed state (it is held, then confirmed on its own clock);
+// repeated unknown snapshots reach `discovery_unconfirmed` after 3 hours of their own clock; only a valid disposition recovers it, once. Times are the published
+// generation's only: a recent batch of another generation does not hide a stall, and a future leftover gate does not wait a renewed backlog.
+{
+ const stalledRecords=base=>({status:{...base.status,remaining:40,legacyPending:false,finishedAt:at(T0-6*H)},continuation:{...base.continuation,at:at(T0-6*H),nextCatchUpAt:at(T0-5*H)},workflow:{...base.workflow,reason:'no_progress'}});
+ const discoveryPosts=()=>W.posts.filter(item=>String(item.key||'').startsWith('discovery_'));
+ const stream=()=>bucket.records.get('monitor/state.json').streams.find(item=>item.stream==='discovery');
+ W.posts.length=0;put('monitor/state.json',undefined);clock.now=T0;arrange({records:stalledRecords});
+ await W.M.run(env,{now:T0});await W.M.run(env,{now:T0+H});
+ assert.equal(discoveryPosts().filter(item=>item.key==='discovery_stalled'&&item.kind==='alert').length,1,'the stall alerted');
+ // The continuation disappears: the open incident is held, never recovered.
+ put('epg/resolver-continuation.json',undefined);
+ const held=[];
+ for(let tick=2;tick<=5;tick++){clock.now=T0+tick*H;await W.M.run(env,{now:clock.now});
+  assert.deepEqual([stream().state,stream().facts.queueReason,stream().issues.map(item=>item.key)],['degraded','no_continuation',['discovery_stalled']],'tick '+tick+': the open key stays');
+  const stored=bucket.records.get('monitor/state.json').alerts.issues.discovery_stalled.metrics;held.push(stored.held??stored.transition);}
+ assert.deepEqual(held,['queue_unconfirmed','queue_unconfirmed','queue_unconfirmed','discovery_unconfirmed'],'held with the last measured stall, then, once its own clock reaches 3 hours, the diagnosis changes under the same key');
+ assert.equal(discoveryPosts().filter(item=>item.kind==='recovery').length,0,'no recovery without a valid disposition');
+ // Unreadable records hold it too.
+ const realGet=bucket.get;bucket.get=async(key,...rest)=>{if(key==='epg/discovery-status.json')throw new Error('r2 down');return realGet(key,...rest);};
+ clock.now=T0+6*H;await W.M.run(env,{now:clock.now});bucket.get=realGet;
+ assert.ok(stream().issues.some(item=>item.key==='discovery_stalled'),'an unreadable tick holds the incident');assert.equal(discoveryPosts().filter(item=>item.kind==='recovery').length,0);
+ // A valid disposition (the next series proves the queue empty) recovers it once.
+ const drained=drainedRecords();
+ arrange({records:()=>({status:{...drained.status,finishedAt:at(T0+7*H)},continuation:{...drained.continuation,at:at(T0+7*H)},workflow:{...drained.workflow,updatedAt:at(T0+7*H)}})});
+ clock.now=T0+7*H;await W.M.run(env,{now:clock.now});clock.now=T0+8*H;await W.M.run(env,{now:clock.now});
+ const recovered=discoveryPosts().filter(item=>item.kind==='recovery');assert.equal(recovered.length,1);assert.match(recovered[0].message,/proven empty/);
+ // Repeated unknown snapshots without an open incident: delayed, then discovery_unconfirmed once the state's own clock reaches 3 hours.
+ W.posts.length=0;put('monitor/state.json',undefined);arrange({records:base=>({status:{...base.status,hopId:'another-hop'}})});
+ const states=[];for(let tick=0;tick<=4;tick++){clock.now=T0+tick*H;await W.M.run(env,{now:clock.now});states.push(stream().state);}
+ assert.deepEqual(states,['delayed','delayed','delayed','degraded','degraded'],'bounded by its own clock, never healthy');
+ assert.equal(discoveryPosts().filter(item=>item.key==='discovery_unconfirmed'&&item.kind==='alert').length,1);
+ assert.equal(bucket.records.get('monitor/state.json').discovery.unknownSince,at(T0),'the clock is the first tick that saw it');
+ // Timing from the published generation only.
+ W.posts.length=0;put('monitor/state.json',undefined);
+ arrange({records:base=>({continuation:{...base.continuation,reason:'backoff',retryAt:at(T0-5*H),nextCatchUpAt:at(T0-5*H),remainingChunks:5,at:at(T0-6*H)},status:{...base.status,programmeRunId:G2,finishedAt:at(T0-MIN),remaining:3}})});
+ clock.now=T0;await W.M.run(env,{now:T0});
+ assert.deepEqual([stream().state,stream().issues.map(item=>item.key)],['degraded',['discovery_stalled']],'a recent batch of another generation does not hide the stall');
+ put('monitor/state.json',undefined);
+ arrange({records:base=>({continuation:{...base.continuation,at:at(T0-5*H),nextCatchUpAt:at(T0+30*MIN)},status:{...base.status,remaining:40,legacyPending:false,finishedAt:at(T0-5*H)},workflow:{...base.workflow,reason:'no_progress'}})});
+ await W.M.run(env,{now:T0});
+ assert.deepEqual([stream().state,stream().issues.map(item=>item.key)],['degraded',['discovery_stalled']],'a future leftover gate does not wait a backlog the Workflow renews at once');
 }
 
 console.log('Discovery queue state (AIR-598): one classification across the classifier, footer, operational status, admin data health, Monitor and Events; the 23-24 Nov drained series is empty everywhere, the new generation, a real stall, waits, a live writer, the EPG pause, unconfirmed, legacy and unreadable states stay distinct; reads write nothing; one recovery');

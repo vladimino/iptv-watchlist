@@ -48,7 +48,8 @@ const Monitor=(()=>{
   let readout=null;
   if(executor==='workflow'&&typeof discoveryExecutorReadout==='function')readout=await discoveryExecutorReadout(env,continuation,{workflow,queue}).catch(()=>null);
   const reason=String(readout?.recovery?.reason||readout?.reason||'');
-  return {executor,continuation:continuation||null,queue,health,lastChunkFinishedAt:last?.finishedAt||null,publishedRunId:pubRunId,
+  // Times of the published generation only: the policy reads them from `queue` (lastChunkAt, checkpointAt, allowedAt), never from another generation's record.
+  return {executor,continuation:continuation||null,queue,health,lastChunkFinishedAt:queue.lastChunkAt,publishedRunId:pubRunId,
    readout:readout?{stalled:!!readout.stalled,quarantined:!!(readout.recovery?.quarantined||readout.quarantined)}:null,resourceLimit:/1102|memory/i.test(reason)};
  });
  const ratingsFacts=(env,now)=>guarded(async()=>{
@@ -192,7 +193,12 @@ const Monitor=(()=>{
    // AIR-596: an open predictions_no_progress incident (its alert entry) is passed to the policy, which keeps it open while the verdict cannot be read
    // and recovers it only on confirmed progress or proven absence of eligible work.
    const openPrediction=doc?.alerts?.issues?.predictions_no_progress||null;
-   const evaluation=policy().evaluateAll(facts,{predictions:{...(doc?.predictions||{}),noProgressOpenSince:openPrediction?.firstSeenAt||null,openMetrics:openPrediction?.metrics||null,openMetricsAt:openPrediction?.metricsAt||null}},now,{dailyDue:OrchestrationPolicy.dailyDue});
+   // AIR-598: the open Discovery incident (either key) and the clock of an unconfirmed queue state are passed the same way: an unreadable or unconfirmed tick
+   // keeps the incident open instead of recovering it, and an unconfirmed state is measured from the first tick that observed it.
+   const discoveryKey=['discovery_stalled','discovery_unconfirmed'].find(key=>doc?.alerts?.issues?.[key])||null;
+   const openDiscovery=discoveryKey?{key:discoveryKey,...doc.alerts.issues[discoveryKey]}:null;
+   const evaluation=policy().evaluateAll(facts,{predictions:{...(doc?.predictions||{}),noProgressOpenSince:openPrediction?.firstSeenAt||null,openMetrics:openPrediction?.metrics||null,openMetricsAt:openPrediction?.metricsAt||null},
+    discovery:{open:openDiscovery,unknownSince:doc?.discovery?.unknownSince||null}},now,{dailyDue:OrchestrationPolicy.dailyDue});
    const plan=policy().planAlerts(evaluation.issues,doc?.alerts||{issues:{}},now);
    // Claim before delivery. The planned messages are committed to `monitor/state.json` (as the plan's alert state and an outbox with stable
    // ids) with a compare-and-swap first; only the tick that wins that commit sends them, so ticks reading the same snapshot never both
@@ -235,6 +241,7 @@ const Monitor=(()=>{
    const next={schemaVersion:SCHEMA_VERSION,updatedAt:iso(now),heartbeatAt:iso(now),mode:current,overall:evaluation.overall,
     streams:evaluation.streams.map(stream=>({stream:stream.stream,state:stream.state,facts:stream.facts,issues:stream.issues.map(item=>({key:item.key,severity:item.severity,critical:item.critical===true}))})),
     alerts,outbox:queued,cancelledUndelivered:cancelled,holdUntil:doc?.holdUntil||null,lastDeliveryFailure:doc?.lastDeliveryFailure||null,predictions,
+    discovery:{unknownSince:evaluation.streams.find(stream=>stream.stream==='discovery')?.facts?.unknownSince??null},
     canonicalProducer:facts.canonicalProducer&&!facts.canonicalProducer.error?(facts.canonicalProducer.clock||null):doc?.canonicalProducer||null,
     epgSeen:publishedRunId&&doc?.epgSeen?.runId!==publishedRunId?{runId:publishedRunId,at:iso(now)}:doc?.epgSeen||null,lastTestAt:doc?.lastTestAt||null,
     catalogPostersBaselineAt:facts.catalogPosters?.markers?.baselineAt??doc?.catalogPostersBaselineAt??null,catalogPostersSeenAt:facts.catalogPosters?.markers?.seenAt??doc?.catalogPostersSeenAt??null};

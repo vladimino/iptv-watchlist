@@ -78,44 +78,86 @@ export function evaluateEpg(facts, now, {dailyDue}) {
 }
 
 // ---- Discovery: a backlog needs progress that is allowed by its own backoff; waiting by design is not an incident.
-// AIR-598: whether work is owed comes only from `facts.queue`, the shared classification (src/discovery.js `discoveryQueueState`) the footer, the Events
-// report and the operational status use too. A proven empty queue is healthy whatever gate time the drained continuation still carries; the EPG-priority
-// pause is waiting by design; owed work (a backlog, a running or failed continuation, an owner-gated stop) follows the time policy below as before; an
-// unconfirmed state (neither work nor its absence proven) follows the same time policy but is named `discovery_unconfirmed`, never a backlog. Facts without
-// a classification are unconfirmed too: this policy never re-derives a backlog from the raw continuation reason.
+// AIR-598: whether work is owed, and every time the rule below uses, come only from `facts.queue`, the shared classification (src/discovery.js
+// `discoveryQueueState`) the footer, the Events report and the operational status use too: `allowedAt` (the effective gate: a `chunk_budget` the Workflow renews
+// at once is allowed from its checkpoint, whatever gate time it still carries), `checkpointAt` and `lastChunkAt` of the published generation only, never a raw
+// record of another generation.
+// - A proven empty queue is healthy; the EPG-priority pause waits by design.
+// - Owed work (a backlog, a running or failed continuation, an owner-gated stop) follows the time rule as before: `discovery_stalled`.
+// - An unconfirmed state (`unknown`: neither work nor its absence proven, or owed work whose admission is not confirmed) has no trustworthy record time, so it is
+//   measured by its own clock, `unknownSince`, the first tick that observed it (stored in monitor/state.json by the runtime, reset once the state is known): an
+//   expected handoff (authority loading, a generation or gate rollover) waits, anything else is `delayed`, and after the same 3 hours it is `discovery_unconfirmed`.
+// - An open Discovery incident (`previous.open`: `discovery_stalled` or `discovery_unconfirmed`) is never recovered by an unreadable or unconfirmed tick: it stays
+//   open under its own key with its last measured metrics and a typed `held` reason, and a change of diagnosis while open keeps the open key (a diagnostic
+//   transition, not a recovery plus a new alert). It recovers only on a valid disposition, named in `facts.recovery`: `queue_empty`, `epg_priority`, or
+//   `within_policy` (owed work whose allowed progress is inside the time rule again).
+// Facts without a classification are unconfirmed: this policy never re-derives a backlog from the raw continuation reason.
 const DISCOVERY_OWED = new Set(['backlog', 'running', 'failed', 'blocked']);
-export function evaluateDiscovery(facts, now) {
-  if (!facts || facts.error) return unreadable('discovery', 'Discovery');
+const DISCOVERY_INCIDENTS = ['discovery_stalled', 'discovery_unconfirmed'];
+const DISCOVERY_HANDOFF = new Set(['authority_loading', 'generation_mismatch', 'generation_handoff', 'gate_generation_moved']);
+const DISCOVERY_HELD_WHY = {records_unreadable: 'the Discovery records could not be read', queue_unconfirmed: 'the queue state is not confirmed'};
+const discoveryOpen = previous => {
+  const open = previous?.open && typeof previous.open === 'object' && DISCOVERY_INCIDENTS.includes(previous.open.key) && time(previous.open.firstSeenAt) !== null ? previous.open : null;
+  return open;
+};
+const discoveryHold = (open, held, queue) => {
+  const measured = open.metrics && typeof open.metrics === 'object' ? Object.fromEntries(Object.entries(open.metrics).filter(([name]) => !['held', 'queueState', 'queueReason'].includes(name))) : {};
+  const measuredAt = time(open.metricsAt);
+  return issue(open.key, 'degraded', 'discovery', 'The Discovery incident open since ' + iso(time(open.firstSeenAt)) + ' cannot be confirmed or cleared now (' + DISCOVERY_HELD_WHY[held] + (queue?.reason ? ': ' + queue.reason : '') + '); it stays open until the queue is proven empty, paused by design or its allowed progress is within the rule again',
+    {metrics: {...measured, held, queueState: queue?.state ?? null, queueReason: queue?.reason ?? null}, ...(measuredAt !== null && Object.keys(measured).length ? {metricsAt: iso(measuredAt)} : {})});
+};
+export function evaluateDiscovery(facts, now, previous = null) {
+  const open = discoveryOpen(previous);
+  if (!facts || facts.error) {
+    const out = unreadable('discovery', 'Discovery');
+    if (open) out.issues.push(discoveryHold(open, 'records_unreadable', null));
+    out.facts = {readable: false, unknownSince: time(previous?.unknownSince) === null ? null : iso(time(previous.unknownSince)), recovery: null};
+    return out;
+  }
   const issues = [];
   if (facts.readout?.quarantined) issues.push(critical('discovery_quarantined', 'discovery', 'The Discovery executor retry budget is exhausted and the run is quarantined', metrics({executor: facts.executor ?? null})));
   const record = facts.continuation || null;
   const queue = facts.queue && typeof facts.queue === 'object' ? facts.queue : {state: 'unknown', reason: 'not_classified'};
   const quiet = queue.state === 'empty' || queue.state === 'paused';
-  const backlog = !!record && !quiet && DISCOVERY_OWED.has(queue.state);
-  const unconfirmed = !!record && !quiet && !backlog;
+  const backlog = !quiet && DISCOVERY_OWED.has(queue.state);
+  const unconfirmed = !quiet && !backlog;
   const queueMetrics = {queueState: queue.state ?? null, queueReason: queue.reason ?? null};
-  let state = queue.state === 'paused' ? 'waiting' : 'healthy';
-  if (backlog || unconfirmed) {
-    const allowedAt = Math.max(time(record.nextCatchUpAt) ?? 0, time(record.retryAt) ?? 0);
-    const lastProgress = Math.max(time(facts.lastChunkFinishedAt) ?? 0, time(record.at) ?? 0);
-    const overdue = allowedAt ? now - allowedAt : 0;
+  let state = queue.state === 'paused' ? 'waiting' : 'healthy', stall = null, unknownSince = null;
+  const lastChunk = time(queue.lastChunkAt), checkpoint = time(queue.checkpointAt);
+  if (backlog) {
+    const allowedAt = time(queue.allowedAt) ?? 0;
+    const lastProgress = Math.max(lastChunk ?? 0, checkpoint ?? 0);
+    const overdue = allowedAt && allowedAt <= now ? now - allowedAt : 0;
     const idle = lastProgress ? now - lastProgress : null;
     if (allowedAt && allowedAt > now) state = 'waiting';
     else if (overdue < THRESHOLDS.discoveryWaitingMs && (idle === null || idle < THRESHOLDS.discoveryDegradedMs)) state = overdue > 0 ? 'waiting' : 'healthy';
     else if (overdue < THRESHOLDS.discoveryDegradedMs && (idle === null || idle < THRESHOLDS.discoveryDegradedMs)) state = 'delayed';
-    else {
-      state = 'degraded';
-      const stalledMs = Math.max(overdue, idle ?? 0);
-      if (backlog) issues.push(issue('discovery_stalled', 'degraded', 'discovery', 'Discovery backlog (' + (record.remainingChunks ?? '?') + ' chunks) has had no allowed progress for ' + hours(stalledMs) + ' hours', metrics({remainingChunks: record.remainingChunks ?? null, stalledMs, allowedAt: allowedAt ? iso(allowedAt) : null, lastChunkAt: iso(time(facts.lastChunkFinishedAt)), executor: facts.executor ?? null, ...queueMetrics})));
-      else issues.push(issue('discovery_unconfirmed', 'degraded', 'discovery', 'The Discovery queue state (' + (queue.reason ?? 'unknown') + ') has stayed unconfirmed with no progress for ' + hours(stalledMs) + ' hours', metrics({stalledMs, allowedAt: allowedAt ? iso(allowedAt) : null, lastChunkAt: iso(time(facts.lastChunkFinishedAt)), executor: facts.executor ?? null, ...queueMetrics})));
-    }
-    if (facts.health === 'orphaned' && state !== 'degraded' && idle !== null && idle >= THRESHOLDS.discoveryWaitingMs) state = 'delayed';
-    if (facts.readout?.stalled && state !== 'degraded') { state = 'degraded'; issues.push(issue('discovery_executor_stalled', 'degraded', 'discovery', 'The Discovery Workflow instance is stalled', metrics({remainingChunks: record.remainingChunks ?? null, lastChunkAt: iso(time(facts.lastChunkFinishedAt)), executor: facts.executor ?? null}))); }
-    if (facts.publishedRunId && record.programmeRunId && facts.publishedRunId !== record.programmeRunId && state === 'degraded') issues.push(issue('discovery_generation_mismatch', 'degraded', 'discovery', 'The continuation belongs to another generation than the published one'));
+    else stall = {key: 'discovery_stalled', stalledMs: Math.max(overdue, idle ?? 0), allowedAt: allowedAt ? iso(allowedAt) : null};
+    if (!stall && facts.health === 'orphaned' && idle !== null && idle >= THRESHOLDS.discoveryWaitingMs) state = 'delayed';
+  } else if (unconfirmed) {
+    unknownSince = time(previous?.unknownSince) ?? now;
+    const span = Math.max(0, now - unknownSince);
+    if (span >= THRESHOLDS.discoveryDegradedMs) stall = {key: 'discovery_unconfirmed', stalledMs: span, allowedAt: null};
+    else state = span < THRESHOLDS.discoveryWaitingMs && DISCOVERY_HANDOFF.has(queue.reason) ? 'waiting' : 'delayed';
   }
+  if (stall) {
+    state = 'degraded';
+    // While an incident is open its key stays: a change of diagnosis is shown in the metrics, never as a recovery followed by a new alert.
+    const key = open ? open.key : stall.key, transition = open && open.key !== stall.key ? stall.key : null;
+    const shared = {stalledMs: stall.stalledMs, allowedAt: stall.allowedAt, lastChunkAt: iso(lastChunk), executor: facts.executor ?? null, ...queueMetrics, ...(transition ? {transition} : {})};
+    if (stall.key === 'discovery_stalled') issues.push(issue(key, 'degraded', 'discovery', 'Discovery backlog (' + (queue.remainingChunks ?? record?.remainingChunks ?? '?') + ' chunks) has had no allowed progress for ' + hours(stall.stalledMs) + ' hours', metrics({remainingChunks: queue.remainingChunks ?? null, ...shared})));
+    else issues.push(issue(key, 'degraded', 'discovery', 'The Discovery queue state (' + (queue.reason ?? 'unknown') + ') has stayed unconfirmed for ' + hours(stall.stalledMs) + ' hours', metrics(shared)));
+  } else if (open && unconfirmed) {
+    state = 'degraded';
+    issues.push(discoveryHold(open, 'queue_unconfirmed', queue));
+  }
+  if (!quiet && facts.readout?.stalled && state !== 'degraded') { state = 'degraded'; issues.push(issue('discovery_executor_stalled', 'degraded', 'discovery', 'The Discovery Workflow instance is stalled', metrics({remainingChunks: queue.remainingChunks ?? null, lastChunkAt: iso(lastChunk), executor: facts.executor ?? null}))); }
+  if (state === 'degraded' && facts.publishedRunId && record?.programmeRunId && facts.publishedRunId !== record.programmeRunId) issues.push(issue('discovery_generation_mismatch', 'degraded', 'discovery', 'The continuation belongs to another generation than the published one'));
   if (facts.resourceLimit) issues.push(issue('discovery_resource_limit', 'degraded', 'discovery', 'Discovery recorded a Worker resource limit'));
+  const stillOpen = open && issues.some(item => item.key === open.key);
+  const recovery = open && !stillOpen ? (queue.state === 'empty' ? 'queue_empty' : queue.state === 'paused' ? 'epg_priority' : 'within_policy') : null;
   const all = worst(issues);
-  return {stream: 'discovery', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {executor: facts.executor ?? null, backlog, remainingChunks: record?.remainingChunks ?? null, queueState: queue.state ?? null, queueReason: queue.reason ?? null}};
+  return {stream: 'discovery', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {executor: facts.executor ?? null, backlog, remainingChunks: queue.remainingChunks ?? null, queueState: queue.state ?? null, queueReason: queue.reason ?? null, unknownSince: unknownSince === null ? null : iso(unknownSince), recovery}};
 }
 
 // ---- Ratings: the orchestration read model already derives health from the run record and the Madrid 17:00 schedule.
@@ -240,8 +282,9 @@ export function predictionRecoveryMessage(facts) {
 // AIR-598: the text and the reason of a Discovery recovery, from the stream facts of the tick that recovered it. A queue proven empty by the shared
 // classification and the EPG-priority pause are different recoveries, and neither is worded as progress.
 export function discoveryRecovery(facts) {
-  if (facts?.queueState === 'empty') return {reason: 'queue_empty', message: 'Recovered: the Discovery queue is proven empty (' + (facts.queueReason || 'proof') + '); this is not new progress'};
-  if (facts?.queueState === 'paused') return {reason: 'epg_priority', message: 'Recovered: Discovery is paused for the EPG update; this is not new progress'};
+  if (facts?.recovery === 'queue_empty') return {reason: 'queue_empty', message: 'Recovered: the Discovery queue is proven empty (' + (facts.queueReason || 'proof') + '); this is not new progress'};
+  if (facts?.recovery === 'epg_priority') return {reason: 'epg_priority', message: 'Recovered: Discovery is paused for the EPG update; this is not new progress'};
+  if (facts?.recovery === 'within_policy') return {reason: 'within_policy', message: 'Recovered: the allowed progress of the Discovery work is within the rule again'};
   return {reason: null, message: 'Recovered'};
 }
 
@@ -363,7 +406,7 @@ export function evaluateCanonicalProducer(facts, now) {
 export function evaluateAll(facts, previous, now, helpers) {
   const streams = [
     evaluateEpg(facts.epg, now, helpers),
-    evaluateDiscovery(facts.discovery, now),
+    evaluateDiscovery(facts.discovery, now, previous?.discovery ?? null),
     evaluateRatings(facts.ratings, now),
     evaluatePredictions(facts.predictions, previous?.predictions ?? null, now),
     ...(facts.catalogPosters === undefined ? [] : [evaluateCatalogPosters(facts.catalogPosters)]),
