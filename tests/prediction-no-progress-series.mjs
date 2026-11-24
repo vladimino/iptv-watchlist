@@ -173,12 +173,77 @@ function bucket(w){return w.bucket;}
 {
  // The Telegram text (ADR 0206 renderer): the alert counts the ownerless starts, the recovery says why it recovered.
  const w=await openIncident(true);
- assert.match(w.texts[0],/Запусков без фильма с последнего прогресса: \d+/,w.texts[0]);
+ assert.match(w.texts[0],/Запусков без фильма с последнего прогресса \(за последние 2 ч\): \d+/,w.texts[0]);
  assert.ok(w.bucket.value(STATE).alerts.issues.predictions_no_progress.metrics.orphanStarts>0);
  w.bucket.set(QUEUE,{...queueDoc(),hotPending:[],coldPending:[],pending:[],priorityCount:0,coldRemaining:0});await w.tick(P+3*H);
  assert.match(w.texts[1],/Причина: сейчас нечего прогнозировать .*это не подтверждённый прогресс/,w.texts[1]);
  const v=await openIncident(true);const run=await v.start('good',P+2*H+5*MIN);await v.commit(run,P+2*H+9*MIN,{created:1});await v.tick(P+3*H);
  assert.match(v.texts[1],/Причина: прогресс снова подтверждён \(последний подтверждённый прогресс/,v.texts[1]);
+}
+
+// ---- 2b. AIR-596 review: an unreadable split is unknown on both surfaces, never healthy or running; proven zero work stays healthy ----
+{
+ const broken=q=>({...q,hotPending:undefined,coldPending:undefined});
+ // No prior incident, a fresh success and a young live run: Footer unknown (the run line still runs), Monitor delayed, no alert.
+ const w=world();w.bucket.set(QUEUE,broken(queueDoc()));
+ await w.start('young',P+10*MIN);
+ const {stream}=await w.tick(P+15*MIN);assert.equal(stream.state,'delayed',JSON.stringify(stream));assert.equal(w.posts.filter(item=>item.key==='predictions_no_progress').length,0);
+ let view=await w.footer(P+16*MIN);assert.deepEqual([view.source.state,view.source.code,view.source.lastSuccessAt,view.run.status],['unknown','no_data',iso(P),'running'],JSON.stringify(view));
+ // An old success and no live run: still unknown, not «нет подтверждённого прогресса» (nothing is proven) and not healthy.
+ view=await w.footer(P+5*H);assert.deepEqual([view.source.state,view.source.code],['unknown','no_data']);
+ // No history at all.
+ const empty=world();empty.bucket.set(QUEUE,broken(queueDoc({lastBatch:null})));view=await empty.footer(P);assert.deepEqual([view.source.state,view.source.code],['unknown','no_data']);
+ // Genuinely zero eligible work: an empty pending list without lanes is proven, healthy on both surfaces.
+ const zero=world();zero.bucket.set(QUEUE,{...broken(queueDoc()),pending:[]});
+ const z=await zero.tick(P+5*H);assert.equal(z.stream.state,'healthy',JSON.stringify(z.stream));view=await zero.footer(P+20*MIN);assert.equal(view.source.state,'healthy');
+}
+{
+ // One observation basis: with no progress time anywhere, the Footer reads the Monitor's persisted unknownSince (70 minutes) before its own oldest attempt (42 minutes).
+ const w=world();w.bucket.set(QUEUE,queueDoc({lastBatch:null}));
+ w.bucket.set(STATE,{schemaVersion:1,streams:[],alerts:{issues:{}},outbox:[],predictions:{pendingCount:6969,processedTotal:0,progressAt:null,progressBasis:'evidence',unknownSince:iso(P+2*H-70*MIN)}});
+ await w.start('lonely',P+2*H-42*MIN);
+ let view=await w.footer(P+2*H);assert.deepEqual([view.source.state,view.source.code],['degraded','prediction_no_recent_progress'],JSON.stringify(view.source));
+ const {stream}=await w.tick(P+2*H+MIN);assert.equal(stream.state,'degraded','the Monitor measures from the same unknownSince');
+ const alone=world();alone.bucket.set(QUEUE,queueDoc({lastBatch:null}));await alone.start('lonely',P+2*H-42*MIN);
+ view=await alone.footer(P+2*H);assert.equal(view.source.state,'unknown','without the Monitor clock the Footer falls back to its oldest attempt (42 minutes: nothing proven)');
+}
+{
+ // Progress-time provenance. An old productive run that expired without firstSubmitAt is dated by its start (70 min), never by the expiry the projection fills in (58 min).
+ const w=world();w.bucket.set(QUEUE,queueDoc({lastBatch:null}));const t=P+3*H;
+ w.bucket.set('enrichment/run-diagnostics/'+String(9999999999999-(t-70*MIN)).padStart(13,'0')+'-legacy.json',{runId:'legacy',trigger:'scheduled',startedAt:iso(t-70*MIN),endedAt:null,state:'running',startResult:'running',leaseAcquiredAt:iso(t-70*MIN),leaseExpiredAt:iso(t-58*MIN),added:2,updated:0,failed:0});
+ const view=await w.footer(t);assert.deepEqual([view.source.state,view.source.lastSuccessAt],['degraded',iso(t-70*MIN)],JSON.stringify(view.source));
+ const {doc}=await w.tick(t);assert.equal(doc.predictions.progressAt,iso(t-70*MIN));
+ // The run order (by end) differs from the progress order: the latest progress time wins, not the first progress row.
+ const now=P+5*H,rows=[{runId:'A',status:'complete',stopReason:'manifest_spent',added:3,updated:0,failed:0,startedAt:iso(now-60*MIN),endedAt:iso(now-50*MIN)},
+  {runId:'B',status:'interrupted',stopReason:'lease_expired',added:1,updated:0,failed:0,startedAt:iso(now-58*MIN),firstSubmitAt:iso(now-55*MIN),endedAt:iso(now-40*MIN)}];
+ assert.equal(w.ctx.predictionRunEvidence({run:null,recentRuns:rows,now}).lastProgressAt,iso(now-50*MIN));
+ // A future time is not progress.
+ assert.equal(w.ctx.predictionRunEvidence({run:null,recentRuns:[{...rows[0],endedAt:iso(now+H)}],now}).lastProgressAt,null);
+}
+{
+ // Recovery needs a new progress observation: the same (or an older) time the open incident already knew holds it.
+ const policy=await import('../src/domain/monitor-policy.js'),now=P+6*H;
+ const open={noProgressOpenSince:iso(P+2*H),progressAt:iso(P),openMetrics:{eligible:9,idleMs:2*H},openMetricsAt:iso(P+2*H)};
+ const facts=last=>({present:true,pendingCount:9,eligibleNow:9,lastProgressAt:iso(last),stall:{state:'ok',idleMs:now-last,sinceKnown:true}});
+ const stale=policy.evaluatePredictions(facts(P),open,now);assert.equal(stale.state,'degraded');assert.equal(stale.facts.held,'progress_unconfirmed');assert.equal(stale.issues[0].metricsAt,iso(P+2*H));
+ const fresh=policy.evaluatePredictions(facts(now-10*MIN),open,now);assert.deepEqual([fresh.state,fresh.facts.recovery,fresh.issues.length],['healthy','progress',0]);
+}
+{
+ // A reminder that falls due while the verdict cannot be read, then a genuine recovery: the original measurement time, the incident history, the current
+ // uncertainty and the recovery reason all reach the Telegram text.
+ const w=await openIncident(true),alertAt=iso(P+2*H);
+ assert.equal(w.bucket.value(STATE).alerts.issues.predictions_no_progress.metricsAt,alertAt);
+ const q=w.bucket.value(QUEUE);w.bucket.set(QUEUE,{...q,hotPending:undefined,coldPending:undefined});
+ for(let h=3;h<=8;h++){const {stream}=await w.tick(P+h*H);assert.equal(stream.state,'degraded');}
+ const entry=w.bucket.value(STATE).alerts.issues.predictions_no_progress;
+ assert.deepEqual([entry.firstSeenAt,entry.metricsAt,entry.metrics.held,entry.sendCount],[alertAt,alertAt,'split_unknown',2],JSON.stringify(entry));
+ assert.equal(w.texts.length,2);const reminder=w.texts[1];
+ assert.match(reminder,/Напоминание/);assert.match(reminder,/Сейчас: нельзя прочитать, сколько фильмов доступно к прогнозу; инцидент остаётся открытым/);
+ assert.match(reminder,/было не меньше 2 ч \(на последнем наблюдении 23\.11 23:28\)/,reminder);assert.doesNotMatch(reminder,/Доступно к прогнозу сейчас/,'no stale count shown as current');
+ w.bucket.set(QUEUE,q);const run=await w.start('back',P+9*H-20*MIN);await w.commit(run,P+9*H-15*MIN,{created:2});
+ await w.tick(P+9*H);assert.equal(w.texts.length,3);const recovery=w.texts[2];
+ assert.match(recovery,/Проблема снята/);assert.match(recovery,/Причина: прогресс снова подтверждён/);assert.match(recovery,/на последнем наблюдении 23\.11 23:28/,recovery);
+ assert.match(recovery,/Длительность инцидента по наблюдениям монитора: 7 ч/,recovery);
 }
 
 // ---- 3. Rollout over the persisted production state of 24 Nov 2026 11:00 Madrid: alert history and the open incident are kept, nothing is resent ----

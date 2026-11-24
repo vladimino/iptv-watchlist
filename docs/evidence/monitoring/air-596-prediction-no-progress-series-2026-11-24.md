@@ -25,6 +25,14 @@
 - Recovery: a run commits 2 films and fails 1 at 12:24Z and is still working at 13:00:23: stream healthy, `progressAt` 12:24:00 (its first commit, not its start or its later lease expiry), exactly one recovery «progress is confirmed again (last confirmed progress 2026-11-24T12:24:00.000Z)».
 - Other cases in the same file: recovery worded as «waits for its retry time» or «no prediction is eligible», never as progress; an absent queue holds the incident; a start, a heartbeat and a failed-only batch are not progress; an ordinary overlap with progress 25 minutes earlier stays `running`; a drained check in `lastBatch` dates progress, a retry-backoff wake-up does not; rollout over the persisted state of 24 Nov 11:00 Madrid keeps `firstSeenAt` 07:00:23Z and `sendCount` 1 and sends nothing inside the cooldown; real batch start, three submits and `complete(manifest_spent)` over the D1 stand-in with `prediction_aux_authority=d1`, then a new live run 90 minutes later: Footer and Monitor facts give `no_progress` with the completion time, and the reads write no D1 batch.
 
+## Review fixtures (AIR-596 review of 24 Nov 2026)
+
+- Unreadable lanes, no incident: Footer `unknown`/`no_data` with `lastSuccessAt` kept and the run line `running` (young live lease), also with an old success and with no history; Monitor `delayed`, no alert. An empty `pending` list without lanes is proven zero work: healthy on both.
+- One observation basis: with no progress time the Footer measures from the Monitor's stored `unknownSince` (70 min: degraded, as the Monitor); without it, from its oldest attempt (42 min: unknown).
+- An old productive run that expired without `firstSubmitAt` is dated by its start (70 min), not its projected end (58 min); the latest valid progress time wins over run order; a future time is ignored.
+- Recovery with a progress time equal to the one the open incident knew is held (`progress_unconfirmed`, original `metricsAt`); a newer one recovers.
+- A reminder due while the split is unreadable: «Сейчас: нельзя прочитать, сколько фильмов доступно к прогнозу; инцидент остаётся открытым», «было не меньше 2 ч (на последнем наблюдении 23.11 23:28)», no current counts; the alert entry keeps `firstSeenAt` and `metricsAt` of the alert. The genuine recovery then shows «Причина: прогресс снова подтверждён», the same last observation and «Длительность инцидента … 7 ч».
+
 ## Commands
 
 - AIR-596 branch: `node tests/prediction-no-progress-series.mjs` → `prediction-no-progress-series: ok`; `npm test` → 534 of 534 core files passed.

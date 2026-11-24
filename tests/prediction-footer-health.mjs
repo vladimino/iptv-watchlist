@@ -87,7 +87,8 @@ putRun({runId:'run-1404c',status:'partial',reason:'external_termination',started
 // AIR-596 (ADR 0210): three runs abandoned without a film 20 minutes after the last progress are the proven orphan chain, worded like the Monitor's verdict.
 const thrice=await footer();
 assert.equal(sourceOf(thrice,'predictions').code,'prediction_no_recent_progress');
-assert.equal(sourceOf(thrice,'predictions').lastSuccessAt,'2026-11-16T12:50:00.000Z');
+// The productive time_budget run has no firstSubmitAt in this fixture: it is dated by its start (a lower bound), never by its end.
+assert.equal(sourceOf(thrice,'predictions').lastSuccessAt,'2026-11-16T12:34:00.000Z');
 records.delete(diagKey('run-1404','2026-11-16T13:04:00Z'));
 const twice=await footer();
 assert.equal(sourceOf(twice,'predictions').code,'prediction_runs_interrupted');
@@ -180,7 +181,8 @@ unreadQueue();
 putRun({runId:'run-ok4',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T12:12:00Z',endedAt:'2026-11-16T12:20:00Z',added:3});
 putRun({runId:'run-unread-kill',status:'partial',reason:'external_termination',startedAt:'2026-11-16T13:04:00Z',endedAt:'2026-11-16T13:04:00Z',added:0,latest:true});
 const unread=await footer();
-assert.equal(sourceOf(unread,'predictions').state,'healthy','an unreadable queue does not invent eligible work');
+// AIR-596 review (ADR 0182 decision 4): an unreadable split neither invents eligible work (no outage) nor is healthy: it is unknown, with the last success kept.
+assert.deepEqual([sourceOf(unread,'predictions').state,sourceOf(unread,'predictions').code,sourceOf(unread,'predictions').lastSuccessAt],['unknown','no_data','2026-11-16T12:20:00.000Z'],'an unreadable queue does not invent eligible work and is not healthy');
 assert.notEqual(sourceOf(unread,'predictions').code,'prediction_blocked');
 
 clearRuns();

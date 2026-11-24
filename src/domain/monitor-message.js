@@ -81,13 +81,19 @@ export function duration(ms, {floor = false} = {}) {
   return Math.floor(hours / 24) + ' д' + (hours % 24 ? ' ' + (hours % 24) + ' ч' : '');
 }
 
+// AIR-596: why an open prediction incident is held instead of confirmed or recovered.
+const HELD = {queue_unreadable: 'очередь прогнозов не читается', queue_absent: 'очередь прогнозов отсутствует', split_unknown: 'нельзя прочитать, сколько фильмов доступно к прогнозу',
+  progress_unknown: 'время подтверждённого прогресса неизвестно', progress_unconfirmed: 'нового подтверждённого прогресса нет'};
 // Typed metrics of one issue as compact statistic lines. Unknown or malformed values are left out, never shown as 0.
 function stats(key, m) {
   const out = [], add = (label, value) => { if (value !== null && value !== '' && value !== undefined) out.push('• ' + label + ': ' + value); };
   if (!m || typeof m !== 'object') return out;
   if (key === 'predictions_no_progress') {
+    // AIR-596: a held incident (the verdict cannot be read or confirmed now) shows why, never the last counts as if they were current.
+    if (HELD[m.held]) { out.push('• Сейчас: ' + HELD[m.held] + '; инцидент остаётся открытым'); return out; }
     add('Доступно к прогнозу сейчас', count(m.eligible)); add('В очереди всего', count(m.pending));
-    add('Запусков без фильма с последнего прогресса', count(m.orphanStarts));
+    add('Запусков без фильма с последнего прогресса (за последние 2 ч)', count(m.orphanStarts));
+    if (m.activeRun === true) out.push('• Сейчас lease держит запуск, но это не прогресс');
     if (m.quota === true) out.push('• Последний пакет упёрся в квоту модели');
   } else if (key.startsWith('discovery_')) {
     add('Осталось чанков', count(m.remainingChunks)); add('Исполнитель', code(m.executor));
@@ -178,7 +184,9 @@ export function telegramText(message, {overall = null, now = null} = {}) {
     const ended = recovered ? stamp(message?.endedAt ?? message?.queuedAt ?? null) : null;
     const opened = stamp(message?.firstSeenAt ?? null);
     const late = lateLine(key, message?.metrics); if (late && !recovered) lines.push(late);
-    const idle = recovered ? lastStallLine(key, message?.metrics, message?.metricsAt) : stallLine(key, message?.metrics, observed); if (idle) lines.push(idle);
+    // A held prediction incident has no current measurement: its stall is the last one measured, under its own time, as for a recovery.
+    const heldNow = !recovered && key === 'predictions_no_progress' && !!HELD[message?.metrics?.held];
+    const idle = recovered || heldNow ? lastStallLine(key, message?.metrics, message?.metricsAt) : stallLine(key, message?.metrics, observed); if (idle) lines.push(idle);
     // AIR-596 (ADR 0210): a prediction recovery says why it recovered; confirmed progress and an absence of eligible work never read alike.
     if (recovered && key === 'predictions_no_progress') {
       const why = recoveryLine(message?.recoveryReason, message?.recoveryProgressAt); if (why) lines.push(why);

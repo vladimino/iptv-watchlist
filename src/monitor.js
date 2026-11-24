@@ -70,22 +70,21 @@ const Monitor=(()=>{
    loadJSON(env,RUNNER_LEASE_KEY).catch(()=>null)]);
   const shared=predictionProgressFacts({queue,runs,latestRun:latest,lease,now});
   const slices=shared.slices;
-  const productiveAt=Date.parse(latest?.completedAt||''),productive=Number.isFinite(productiveAt)&&((latest?.counts?.created||0)+(latest?.counts?.recalculated||0))>0?productiveAt:null;
   const evidenceAt=shared.lastProgressAt?Date.parse(shared.lastProgressAt):null;
   const processedTotal=Number.isInteger(queue.metrics?.hotProcessedTotal)?queue.metrics.hotProcessedTotal:null;
   // Only a stored progress time that came from evidence is carried over: an earlier build stamped `now` when it had none.
   const known=Date.parse(predictionStoredClockAt(previous,now)||'');
-  const candidates=[productive,evidenceAt,Number.isFinite(known)?known:null].filter(value=>Number.isFinite(value)&&value<=now+300000);
+  const candidates=[evidenceAt,Number.isFinite(known)?known:null].filter(value=>Number.isFinite(value)&&value<=now+300000);
   const lastProgressMs=candidates.length?Math.max(...candidates):null;
   // The unknown-age clock runs only across ticks that observed eligible work with no progress evidence: idle, deferred and unreadable ticks reset it, so work
   // that becomes eligible is measured from the first tick that saw it, never from an earlier quiet tick.
-  const observingEligible=lastProgressMs===null&&Number.isInteger(slices.eligibleNow)&&slices.eligibleNow>0;
+  const observingEligible=lastProgressMs===null&&Number.isInteger(shared.eligibleNow)&&shared.eligibleNow>0;
   const unknownSince=observingEligible?(Number.isFinite(Date.parse(previous?.unknownSince||''))?previous.unknownSince:iso(now)):null;
   // The orphan chain is counted after the progress time actually used, so a carried clock does not re-count starts that an evicted success preceded.
   const orphanStarts=predictionOrphansAfter(predictionRunEvidence({run:latest,recentRuns:runs,now}),lastProgressMs??-Infinity,now);
-  const stall=predictionStallAssessment({now,sinceMs:lastProgressMs,eligibleNow:slices.eligibleNow,nextRetryAtMs:slices.nextRetryAt?Date.parse(slices.nextRetryAt):null,activeRun:shared.activeRun,activeStartedAtMs:shared.activeStartedAtMs,observedSinceMs:unknownSince?Date.parse(unknownSince):null,orphanStarts});
-  return {present:true,pendingCount:Array.isArray(queue.pending)?queue.pending.length:0,processedTotal,lastProgressAt:lastProgressMs===null?null:iso(lastProgressMs),unknownSince,
-   eligibleNow:slices.eligibleNow,outstanding:slices.outstanding,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,stall,activeRun:shared.activeRun,
+  const stall=predictionStallAssessment({now,sinceMs:lastProgressMs,eligibleNow:shared.eligibleNow,nextRetryAtMs:slices.nextRetryAt?Date.parse(slices.nextRetryAt):null,activeRun:shared.activeRun,activeStartedAtMs:shared.activeStartedAtMs,observedSinceMs:unknownSince?Date.parse(unknownSince):null,orphanStarts});
+  return {present:true,pendingCount:Array.isArray(queue.pending)?queue.pending.length:null,processedTotal,lastProgressAt:lastProgressMs===null?null:iso(lastProgressMs),unknownSince,
+   eligibleNow:shared.eligibleNow,outstanding:slices.outstanding,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,stall,activeRun:shared.activeRun,
    blockedReason:queue.lastBatch?.stage==='blocked'?String(queue.lastBatch.reason||'').slice(0,40):null};
  });
  // AIR-543 / ADR 0179: one bounded read of the poster checkpoint plus the Monitor's two write-once markers. The markers are written only by this
@@ -188,7 +187,7 @@ const Monitor=(()=>{
    // AIR-596: an open predictions_no_progress incident (its alert entry) is passed to the policy, which keeps it open while the verdict cannot be read
    // and recovers it only on confirmed progress or proven absence of eligible work.
    const openPrediction=doc?.alerts?.issues?.predictions_no_progress||null;
-   const evaluation=policy().evaluateAll(facts,{predictions:{...(doc?.predictions||{}),noProgressOpenSince:openPrediction?.firstSeenAt||null}},now,{dailyDue:OrchestrationPolicy.dailyDue});
+   const evaluation=policy().evaluateAll(facts,{predictions:{...(doc?.predictions||{}),noProgressOpenSince:openPrediction?.firstSeenAt||null,openMetrics:openPrediction?.metrics||null,openMetricsAt:openPrediction?.metricsAt||null}},now,{dailyDue:OrchestrationPolicy.dailyDue});
    const plan=policy().planAlerts(evaluation.issues,doc?.alerts||{issues:{}},now);
    // Claim before delivery. The planned messages are committed to `monitor/state.json` (as the plan's alert state and an outbox with stable
    // ids) with a compare-and-swap first; only the tick that wins that commit sends them, so ticks reading the same snapshot never both
@@ -221,7 +220,7 @@ const Monitor=(()=>{
     entry.lastSentAt=before?.lastSentAt||null;entry.sendCount=before?.sendCount||0;entry.sendsToday=before?.sendDay===day?before.sendsToday||0:0;
     const pending=outbox.find(item=>item.key===message.key&&item.kind!=='recovery');
     // `observedAt` is the tick this content describes (ADR 0206 decision 9); the id and queue time of a pending message stay as they were.
-    if(pending){pending.severity=message.severity;pending.critical=message.critical===true;pending.message=message.message;pending.after=after;pending.observedAt=iso(now);if(message.metrics)pending.metrics=message.metrics;else delete pending.metrics;if(pending.kind!=='alert')pending.kind=message.kind;}
+    if(pending){pending.severity=message.severity;pending.critical=message.critical===true;pending.message=message.message;pending.after=after;pending.observedAt=iso(now);if(message.metrics)pending.metrics=message.metrics;else delete pending.metrics;if(message.metricsAt)pending.metricsAt=message.metricsAt;else delete pending.metricsAt;if(pending.kind!=='alert')pending.kind=message.kind;}
     else outbox.push({...message,id:message.key+'|'+message.kind+'|'+iso(now),queuedAt:iso(now),observedAt:iso(now),after});
    }
    const queued=outbox;
