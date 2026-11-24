@@ -1,12 +1,12 @@
 # ADR 0095: An inert Cloudflare-native monitor diagnoses the four production streams and alerts through an owner-approved webhook
 
-**Status:** Accepted  
+**Status:** Accepted; the `needs_owner` state of decision 4 and the per-severity confirmation and cooldown of decision 5 are superseded by [ADR 0206](0206-monitor-four-states-one-reminder-interval.md); the rest stands  
 **Original decision date:** 2026-11-06 (owner-approved architecture during AIR-349 PR review)  
 **Recorded at:** 2026-11-06  
 **Approval source:** explicit Product Owner acceptance on 2026-11-06 in the AIR-349 PR #392 review conversation; acceptance applies to ADR 0095 architecture only, not production activation  
 **Related work:** [AIR-349](https://trello.com/c/VUyampoh); [ADR 0089](0089-shared-orchestration-reliability-contract.md); [ADR 0090](0090-ratings-cloudflare-workflow-executor.md); [AIR-344](https://trello.com/c/8TV5soDb)  
 **Supersedes:** None  
-**Superseded by:** None
+**Superseded by:** [ADR 0206](0206-monitor-four-states-one-reminder-interval.md) (in part: four states, a `critical` property instead of `needs_owner`, one 6-hour reminder interval)
 
 ## Context
 

@@ -18,7 +18,7 @@ import {fenced} from './canonical-mutations.js';
 import {writerRoute} from './canonical-writer-route.js';
 import {LIVE_STATES,NO_STRIKE,ORIGINS,PRODUCER_PLAN_VERSION,TERMINAL_STATES,canTransition,keyOfRow,mintDictionaryVersion,resumeDecision} from './canonical-producer-run.js';
 import {fenceStatements} from './canonical-producer-fence.js';
-import {completeChainStatements,leaseRenewStatements,readChain} from './canonical-producer-chain.js';
+import {completeChainStatements,leaseRenewStatements,passedOutcomeStatements,readChain} from './canonical-producer-chain.js';
 
 export const SLICE_STATEMENT_CAP=48;
 export const DUE_LIMIT_MAX=50;
@@ -266,7 +266,9 @@ export async function commitPassComplete(env,{run,openAtCompletion,at}={}){
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
  await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at,renew:true,complete:true}),casRun(run),
-  ["UPDATE canonical_producer_run SET pass_state='passed',applied_generation=source_generation,open_at_completion=?,completed_at=?,stopped_by=NULL,revision=revision+1,updated_at=? WHERE origin=? AND run_key=? AND revision=?",[openAtCompletion,at,at,run.origin,run.run_key,run.revision]],changesOne()],'slice',run);
+  ["UPDATE canonical_producer_run SET pass_state='passed',applied_generation=source_generation,open_at_completion=?,completed_at=?,stopped_by=NULL,revision=revision+1,updated_at=? WHERE origin=? AND run_key=? AND revision=?",[openAtCompletion,at,at,run.origin,run.run_key,run.revision]],changesOne(),
+  // ADR 0208: the `passed` outcome row LAST, after the chain completion (producerExtras) and this run update with their assertions, so it reads both as written.
+  ...(env?.producerFence?.kind==='chain'?passedOutcomeStatements(env.producerFence,at):[])],'slice',run);
  return {state:'committed',run:await readRun(env,{origin:run.origin,runKey:run.run_key})};
 }
 

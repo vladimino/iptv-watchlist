@@ -112,6 +112,18 @@ const table = [
   [{type: 'catalog_posters', final: false}, 'warning', 'deferred by final=false'],
   [{type: 'catalog_posters', outcome: 'failed'}, 'error', 'failed'],
   [{type: 'catalog_posters'}, null, 'no outcome'],
+  // AIR-594: Canonical Producer («Обогащение каталога»)
+  [{type: 'canonical_producer', outcome: 'passed', failed: 0, openResults: 0}, 'success', 'producer pass, nothing failed or open'],
+  [{type: 'canonical_producer', outcome: 'passed', failed: 1, openResults: 0}, 'warning', 'producer pass with a failed unit'],
+  [{type: 'canonical_producer', outcome: 'passed', failed: 0, openResults: 2}, 'warning', 'producer pass with unclosed results: all visited is not current'],
+  [{type: 'canonical_producer', outcome: 'passed'}, 'warning', 'producer pass with unknown counts is not a success'],
+  [{type: 'canonical_producer', outcome: 'stopped', recovery: 'eligible'}, 'interrupted', 'producer stop eligible for the automatic retry (eligibility, not a promise)'],
+  [{type: 'canonical_producer', outcome: 'stopped', recovery: 'automatic'}, 'warning', 'an unknown recovery value is not read as eligible'],
+  [{type: 'canonical_producer', outcome: 'held', recovery: 'owner'}, 'error', 'producer automatic recovery held: needs the owner'],
+  [{type: 'canonical_producer', outcome: 'stopped', recovery: 'owner'}, 'error', 'producer stop that needs the owner'],
+  [{type: 'canonical_producer', outcome: 'stopped'}, 'warning', 'producer stop with unknown recovery'],
+  [{type: 'canonical_producer', outcome: 'superseded'}, 'interrupted', 'producer pass cut by a newer publication'],
+  [{type: 'canonical_producer'}, null, 'producer record without an outcome'],
   [{type: 'enrichment', presentation: 'batch_v2_terminal', stage: 'complete', outcome: 'failed'}, 'success', 'outcome of another type is ignored'],
   // Neutral and unknown
   [{type: 'epg', films: 1}, 'success', 'epg published'],

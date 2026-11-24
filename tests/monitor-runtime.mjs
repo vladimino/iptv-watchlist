@@ -65,7 +65,8 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  r=plain(await M.run(env,{now:T0+H}));assert.equal(r.sent,1);
  assert.equal(posts(calls).length,1);const message=posts(calls)[0].body;
  assert.deepEqual([message.source,message.kind,message.key,message.severity,message.stream],['iptv-monitor','alert','epg_stale','degraded','epg']);
- assert.deepEqual(Object.keys(message).sort(),['at','id','key','kind','message','overall','severity','source','stream']);
+ assert.deepEqual(Object.keys(message).sort(),['at','critical','id','key','kind','message','overall','severity','source','stream']);
+ assert.equal(message.critical,false,'an ordinary degraded issue is not critical (ADR 0206)');
  await M.run(env,{now:T0+2*H});await M.run(env,{now:T0+3*H});assert.equal(posts(calls).length,1,'repeats inside the cooldown send nothing');
  assert.equal(plain(await M.status(env,T0+3*H)).openIssues[0].key,'epg_stale');
  // The generation is published: a recovery message once, then silence.

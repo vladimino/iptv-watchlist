@@ -22,7 +22,7 @@ Maintained source-verified domain contracts, distinct from dated rollout evidenc
 - [EPG Channel contract](epg-channel.md) — Channel, provider category and per-category policy; the effective policy is owner policy override > owner category > provider category > `known_only`, a missing authority is never `discover` ([ADR 0187](../../adr/0187-epg-channel-authority.md), Accepted design, dormant implementation)
 - [Film availability lifecycle](film-availability.md) — `available` / `soon` / `unavailable` per film: an archive outranks live and future, `soon` is ready at the END of the show, a missing end is never guessed ([ADR 0114](../../adr/0114-film-availability-lifecycle.md))
 - [EPG horizons](epg-horizons.md) — 7-day retention and display versus the 24-hour hot processing horizon, the report fields and the reader freshness states
-- [Events log](events.md) — the `events/items/` objects, including one `taste_profile` event per committed taste-profile version
+- [Events log](events.md) — the `events/items/` objects, including one `taste_profile` event per committed taste-profile version and one `canonical_producer` event per Canonical Producer outcome
 - [View index read model](view-index-read-model.md) — the D1-derived view index: field-by-field authority, the key set from D1 rows, the compiled seed layer, the readers, and the retired raw object `enrichment/view-index.json`
 
 Current rollout status belongs in Trello and production observations. See [the main documentation map](../../README.md) and [historical evidence](../../evidence/README.md).

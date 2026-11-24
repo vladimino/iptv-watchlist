@@ -298,6 +298,9 @@ export const FILES={
  "canonical-producer-driver.mjs": {
   "suite": "core"
  },
+ "canonical-producer-events.mjs": {
+  "suite": "core"
+ },
  "canonical-producer-run-mutation.mjs": {
   "suite": "non-functional",
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
@@ -1235,6 +1238,9 @@ export const FILES={
   "suite": "core"
  },
  "monitor-policy.mjs": {
+  "suite": "core"
+ },
+ "monitor-message.mjs": {
   "suite": "core"
  },
  "monitor-canonical-producer.mjs": {

@@ -20,13 +20,15 @@ const hot=Array.from({length:3171},(_,i)=>'h'+i),cold=Array.from({length:3798},(
 const queueDoc=extra=>({schemaVersion:3,hotPending:hot,coldPending:cold,pending:[...hot,...cold],priorityCount:hot.length,coldRemaining:cold.length,retries:{},refreshedAt:iso(P),metrics:{hotAddedTotal:9000,hotProcessedTotal:812},
  lastBatch:{runId:'ffae2f94',trigger:'scheduled',startedAt:iso(P-9*MIN),finishedAt:iso(P),stage:'complete',batchSize:7,hotProcessed:7,coldProcessed:0,checked:7,added:5,updated:2,failed:0,remaining:hot.length+cold.length,hotRemaining:hot.length,coldRemaining:cold.length,reason:'manifest_spent'},...extra});
 
-function world(){
+function world({telegram=false}={}){
  const {clock,FakeDate,crypto}=makeClock(P-20*MIN),net=makeNetwork(),bucket=makeBucket();
  const ctx=loadContext({net,clock,FakeDate,crypto});
- vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scoped('src/domain/monitor-policy.js','MonitorPolicy')+'\n'+fs.readFileSync('src/monitor.js','utf8'),ctx);
+ vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scoped('src/domain/monitor-policy.js','MonitorPolicy')+'\n'+scoped('src/domain/monitor-message.js','MonitorMessage')+'\n'+fs.readFileSync('src/monitor.js','utf8'),ctx);
  const posts=[];
- ctx.fetch=async(url,options={})=>{if(String(url).startsWith('https://hooks.example/')){posts.push(JSON.parse(options.body));return new Response('',{status:200});}throw new Error('unexpected network '+url);};
- const env=baseEnv(bucket,{MONITOR:'on',MONITOR_WEBHOOK_URL:'https://hooks.example/alert'});
+ const texts=[];
+ ctx.fetch=async(url,options={})=>{if(String(url).startsWith('https://hooks.example/')){posts.push(JSON.parse(options.body));return new Response('',{status:200});}
+  if(String(url).startsWith('https://api.telegram.org/')){const text=JSON.parse(options.body).text;if(/· Прогнозы/.test(text))texts.push(text);return new Response(JSON.stringify({ok:true}),{status:200});}throw new Error('unexpected network '+url);};
+ const env=baseEnv(bucket,{MONITOR:'on',MONITOR_WEBHOOK_URL:'https://hooks.example/alert',...(telegram?{MONITOR_TRANSPORT:'telegram',MONITOR_TELEGRAM_BOT_TOKEN:'123456:'+'A'.repeat(35),MONITOR_TELEGRAM_CHAT_ID:'12345'}:{})});
  const M=g(ctx,'Monitor');
  const at=ms=>{clock.now=ms;};
  // A run as the Worker starts it: the lease first (the real acquire), then the run record, latest-run.json and its diagnostic checkpoint (the real savePredictionRun).
@@ -39,7 +41,7 @@ function world(){
  const footer=async ms=>{at(ms);const response=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/footer/status'),env);assert.equal(response.status,200);
   const body=await response.json();return {source:body.integrations.sources.find(item=>item.id==='predictions'),run:body.lastRun};};
  const tick=async ms=>{at(ms);const result=await M.run(env,{now:ms});assert.equal(result.saved,true);const doc=bucket.value(STATE);return {doc,stream:doc.streams.find(item=>item.stream==='predictions')};};
- return {clock,bucket,ctx,env,M,posts,at,start,commit,footer,tick};
+ return {clock,bucket,ctx,env,M,posts,texts,at,start,commit,footer,tick};
 }
 
 // ---- 1. 13 hours of 15-minute starts with a 12-minute lease and zero commits; a run holds the lease at every hourly tick ----
@@ -117,10 +119,10 @@ function world(){
 }
 
 // ---- 2. Recovery names its reason, and only a proven reason recovers ----
-async function openIncident(){
- const w=world();bucket(w).set(QUEUE,queueDoc());
+async function openIncident(telegram=false){
+ const w=world({telegram});bucket(w).set(QUEUE,queueDoc());
  for(let k=0;k<6;k++)await w.start('o'+k,P+(15+15*k)*MIN);
- await w.tick(P+2*H);assert.equal(w.posts.filter(item=>item.kind==='alert').length,1,'the incident is open');
+ await w.tick(P+2*H);assert.equal(telegram?w.texts.length:w.posts.filter(item=>item.kind==='alert').length,1,'the incident is open');
  return w;
 }
 function bucket(w){return w.bucket;}
@@ -166,6 +168,17 @@ function bucket(w){return w.bucket;}
  w.bucket.set(QUEUE,q);const {doc}=await w.tick(P+30*MIN);assert.equal(doc.predictions.progressAt,iso(P));
  // A retry-backoff wake-up (`runId: null`, stage blocked) is not.
  const v=world();v.bucket.set(QUEUE,queueDoc({lastBatch:{...q.lastBatch,stage:'blocked',reason:'retry_backoff',remaining:5}}));const blocked=await v.tick(P+30*MIN);assert.equal(blocked.doc.predictions.progressAt,null);
+}
+
+{
+ // The Telegram text (ADR 0206 renderer): the alert counts the ownerless starts, the recovery says why it recovered.
+ const w=await openIncident(true);
+ assert.match(w.texts[0],/Запусков без фильма с последнего прогресса: \d+/,w.texts[0]);
+ assert.ok(w.bucket.value(STATE).alerts.issues.predictions_no_progress.metrics.orphanStarts>0);
+ w.bucket.set(QUEUE,{...queueDoc(),hotPending:[],coldPending:[],pending:[],priorityCount:0,coldRemaining:0});await w.tick(P+3*H);
+ assert.match(w.texts[1],/Причина: сейчас нечего прогнозировать .*это не подтверждённый прогресс/,w.texts[1]);
+ const v=await openIncident(true);const run=await v.start('good',P+2*H+5*MIN);await v.commit(run,P+2*H+9*MIN,{created:1});await v.tick(P+3*H);
+ assert.match(v.texts[1],/Причина: прогресс снова подтверждён \(последний подтверждённый прогресс/,v.texts[1]);
 }
 
 // ---- 3. Rollout over the persisted production state of 24 Nov 2026 11:00 Madrid: alert history and the open incident are kept, nothing is resent ----
