@@ -143,6 +143,8 @@ const reports=()=>discoveryEvents().filter(event=>event.kind!=='report_failed').
 const notices=()=>discoveryEvents().filter(event=>event.kind==='report_failed').sort((a,b)=>a.at<b.at?-1:1);
 const FAULT_KEY='epg/discovery-report-faults.json'.replace('epg/','events/');
 const ledger=()=>records.get(FAULT_KEY)?.faults||[];
+const FAULT_KEY_V2='events/discovery-report-faults-v2.json';
+const ledgerV2=()=>records.get(FAULT_KEY_V2)?.faults||[];
 const outbox=()=>workflowRecord()?.outbox||[];
 const hourId=(generation,n)=>'discovery-hour-'+generation.replace(/-/g,'').slice(0,12)+'-'+new Date(BASE+n*HOUR).toISOString().replace(/[-:]/g,'').slice(0,11);
 const ZERO={checked:0,added:0,reused:0,screenedOut:0,touched:0,tmdbCalls:0};
@@ -754,6 +756,340 @@ resetAll();seed({count:3});elect();
  assert.equal(waiting.status,'waiting');assert.equal(waiting.reason,'recovery_waiting');
  const terminal=await stoppedHour(22,{reason:'stale_generation',dueAt:new Date(BASE+22*HOUR-60000).toISOString()});
  assert.equal(terminal.status,'idle','a terminal stop is not an overdue recovery');
+}
+
+// 17. AIR-595: a series that drains with the legacy alias sweep still open (23 Nov 2026 22:00 UTC): the last chunk leaves no backlog, the continuation pauses on
+// `chunk_budget` (the sweep keeps it from `complete`), the executor stops for good on `backlog_empty`. The full evidence of that one chunk proves the queue empty;
+// anything missing, unknown, of another hop or of another generation does not, and a real idle stays idle.
+{
+ const HOP='c554872a-2b18-4b45-95c1-85b4630ffc6b';
+ const drained=({record={},continuation={},status={},deleteStatus=false}={})=>{
+  resetAll();seed({stage:'complete',remaining:0,reason:'chunk_budget',count:3});
+  set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:27,instanceId:INSTANCE,phase:'stopped',reason:'backlog_empty',updatedAt:iso,waitingUntil:null,recovery:null,...record});
+  set('epg/resolver-continuation.json',{stage:'paused',reason:'chunk_budget',at:iso,hopId:HOP,remainingChunks:0,nextCatchUpAt:new Date(now+HOUR).toISOString(),retryAt:null,programmeRunId:GENERATION,...continuation});
+  set('epg/discovery-status.json',{schemaVersion:2,stage:'partial',programmeRunId:GENERATION,hopId:HOP,checked:0,added:0,remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0,error:null,legacyPending:true,at:iso,...status});
+  if(deleteStatus)records.delete('epg/discovery-status.json');
+ };
+ const hourOf=async(n=0)=>{await closed({started:false,reason:'stopped',programmeRunId:GENERATION},n);const list=reports();assert.equal(list.length,1);return list[0];};
+ drained();
+ const empty=await hourOf();
+ assert.deepEqual([empty.status,empty.reason,empty.queueEmpty,empty.remaining,empty.queueUnreadable],['empty','queue_empty',true,0,false],'the drained series is the proven empty queue');
+ for(const name of Object.keys(ZERO))assert.equal(empty[name],0,'real counters: '+name);
+ // The 20:00 UTC case: the chunks that drained the queue are in the same period. Their counters are kept as they are and the queue is still proven empty.
+ drained();
+ await call('settleWorkflowIfOwner')(env,INSTANCE,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:459,added:20,reused:10,screenedOut:0,touched:7,tmdbCalls:704,remaining:0,cheapRemaining:0,error:null},INSTANCE+':50',GENERATION)}));
+ const busy=await hourOf();
+ assert.deepEqual([busy.status,busy.queueEmpty,busy.remaining,busy.added,busy.checked,busy.tmdbCalls,busy.chunks],['empty',true,0,20,459,704,1],'the drained period keeps its real deltas');
+ const idle=(label,setup)=>async()=>{setup();const event=await hourOf();assert.equal(event.queueEmpty,false,label);assert.equal(event.status,'idle',label);return event;};
+ for(const [label,patch] of [['remaining unknown',{remaining:null}],['remaining left',{remaining:3}],['cheap pass left',{cheapRemaining:2}],['cheap unknown',{cheapRemaining:null}],['deferred left',{deferred:1}],['deferred unknown',{deferred:undefined}],['waiting retry',{waitingRetry:4}],['waiting retry unknown',{waitingRetry:null}],['status error',{error:'tmdb_unavailable'}],['another hop',{hopId:'other-hop'}],['no hop',{hopId:undefined}],['another generation',{programmeRunId:OTHER}]])
+  await idle('status: '+label,()=>drained({status:patch}))();
+ await idle('no status',()=>drained({deleteStatus:true}))();
+ for(const [label,patch] of [['a chunk is still owed',{remainingChunks:1}],['plain pause',{reason:null}],['backoff',{reason:'backoff'}],['another generation',{programmeRunId:OTHER}],['no hop',{hopId:null}]])
+  await idle('continuation: '+label,()=>drained({continuation:patch}))();
+ // A terminal stop for another reason is a real idle with whatever backlog it read; the executor record of another generation proves nothing for this one.
+ const stale=await idle('record: stale_generation',()=>drained({record:{reason:'stale_generation'}}))();assert.equal(stale.reason,'stale_generation');
+ await idle('record: another generation',()=>drained({record:{programmeRunId:OTHER}}))();
+ // A non-terminal stop with a recovery due is not idle and never empty.
+ drained({record:{reason:'step_failure',recovery:{attempts:1,reason:'step_failure',at:iso,dueAt:new Date(BASE-60000).toISOString(),quarantined:false}}});
+ const overdue=await hourOf();assert.equal(overdue.status,'stalled');assert.equal(overdue.queueEmpty,false);
+ // Only a reconcile that confirmed the stop makes it empty: a running or refused firing keeps its own status.
+ drained();await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);assert.equal(reports()[0].status,'running');
+ // An unreadable status on this path is the unreadable queue, never a zero.
+ drained();const realGet=bucket.get;
+ bucket.get=async(key,...rest)=>{if(key==='epg/discovery-status.json')throw new Error('d1 down');return realGet(key,...rest);};
+ const unread=await hourOf();bucket.get=realGet;
+ assert.deepEqual([unread.queueEmpty,unread.queueUnreadable,unread.remaining],[false,true,null]);
+ // The pure predicates.
+ const series=call('discoveryDrainedSeries'),statusOk=call('discoveryDrainedStatus');
+ const cont={programmeRunId:GENERATION,stage:'paused',reason:'chunk_budget',remainingChunks:0,hopId:HOP};
+ assert.equal(series({phase:'stopped',reason:'backlog_empty',programmeRunId:GENERATION},cont,GENERATION),true);
+ assert.equal(series({phase:'stopped',reason:'backlog_empty',programmeRunId:GENERATION},cont,null),false,'no generation proves nothing');
+ assert.equal(series({phase:'running',reason:'backlog_empty',programmeRunId:GENERATION},cont,GENERATION),false);
+ assert.equal(series(null,cont,GENERATION),false);
+ assert.equal(statusOk({programmeRunId:GENERATION,hopId:HOP,remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0,error:null},cont,GENERATION),true);
+ for(const bad of ['0',-0.5,null,undefined,1])assert.equal(statusOk({programmeRunId:GENERATION,hopId:HOP,remaining:bad,cheapRemaining:0,deferred:0,waitingRetry:0,error:null},cont,GENERATION),false,'not a proven zero: '+String(bad));
+ assert.equal(statusOk(null,cont,GENERATION),false);
+}
+
+// 18. AIR-595: the EPG-priority pause (ADR 0135) refuses the close (23 Nov 2026 16:00 UTC). It is named `epg_priority`, never `write_conflict`, it is not retried inside
+// the firing, the accumulator is untouched, and a genuine lost compare-and-swap is still `write_conflict`. When the pause lifts the next report carries every delta once.
+resetAll();seed({count:3});const own18=elect();
+{
+ const realWrite=context.DiscoveryAuthority.writeWorkflow;
+ let refusals=0;
+ const paused=async()=>{refusals++;const error=new Error('priority');error.code='discovery_epg_priority';error.priority={kind:'epg_priority',nextCatchUpAt:new Date(Date.now()+60000).toISOString(),ownerKind:'none',owedDayKey:'2026-11-23'};throw error;};
+ const add=(n,added)=>call('settleWorkflowIfOwner')(env,own18,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:4,added,reused:0,screenedOut:0,touched:0,tmdbCalls:2,remaining:9,cheapRemaining:0,error:null},own18+':'+n,GENERATION)}));
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
+ await add(1,3);   // an in-flight chunk that held the lease committed before the pause
+ context.DiscoveryAuthority.writeWorkflow=paused;
+ const stopped=await closed({started:false,reason:'stopped',programmeRunId:GENERATION},1);
+ assert.equal(stopped.closed,false);assert.equal(stopped.reason,'epg_priority');assert.equal(stopped.notice,'delivered');
+ assert.equal(refusals,1,'the pause is not retried as a lost compare-and-swap inside the firing');
+ const [n1]=notices();
+ assert.deepEqual([n1.kind,n1.reason,n1.status],['report_failed','epg_priority',null],'the pause is the reason; an idle chain names no state');
+ assert.equal(n1.id,hourId(GENERATION,1),'the canonical identity of the hour');
+ for(const name of ['checked','added','reused','screenedOut','touched','tmdbCalls','chunks','remaining','queueEmpty'])assert.equal(Object.hasOwn(n1,name),false,'no counter is invented: '+name);
+ assert.equal(workflowRecord().report.added,3,'the deltas wait in the accumulator');
+ assert.equal(warnings.some(entry=>entry.event==='discovery_hour_close_failed'&&entry.reason==='epg_priority'),true,'the log names the pause');
+ // The reconcile of the same firing refused by the same pause: still no other state is named. A different confirmed state is named beside the pause.
+ await closed({started:false,reason:'epg_priority',programmeRunId:GENERATION},2);
+ await closed({started:false,reason:'recovery_exhausted',programmeRunId:GENERATION},3);
+ await closed({started:false,reason:'authority_held',programmeRunId:GENERATION},4);
+ assert.deepEqual(notices().map(event=>[event.reason,event.status]),[['epg_priority',null],['epg_priority',null],['epg_priority','failed'],['epg_priority','blocked']]);
+ // A repeat of a paused hour keeps one notice.
+ await closed({started:false,reason:'stopped',programmeRunId:GENERATION},4);assert.equal(notices().length,4);
+ // The journal refuses the notice: it is queued in the v2 ledger (an older Worker cannot decode it), never in the old one, and delivered unchanged later.
+ failEventPuts=true;assert.equal((await closed({started:false,reason:'stopped',programmeRunId:GENERATION},5)).notice,'queued');failEventPuts=false;
+ assert.deepEqual(ledger(),[],'nothing an older Worker cannot decode goes to the old ledger');
+ assert.deepEqual(ledgerV2()[0].slice(2),[5,0,0],'the appended reason index, no fault');
+ assert.deepEqual(JSON.parse(JSON.stringify(call('decodeDiscoveryReportFault')(ledgerV2()[0]))),{id:hourId(GENERATION,5),type:'discovery',kind:'report_failed',at:new Date(BASE+5*HOUR).toISOString(),generation:GENERATION.replace(/-/g,'').slice(0,8),reason:'epg_priority',status:null});
+ assert.deepEqual(call('decodeDiscoveryReportFault')([GENERATION.replace(/-/g,'').slice(0,12),'20261111T10',4,0]).reason,'write_conflict','older tuples decode unchanged');
+ // The pause lifts (the publication is certified): the next firing drains the ledger, closes its hour and reports the held deltas once.
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ await add(2,2);
+ const released=await closed({started:false,reason:'stopped',programmeRunId:GENERATION},6);
+ assert.equal(released.closed,true);assert.deepEqual(ledgerV2(),[]);assert.equal(notices().find(event=>event.id===hourId(GENERATION,5)).reason,'epg_priority','the queued pause notice was delivered as it was');
+ const after=reports().filter(event=>event.at===new Date(BASE+6*HOUR).toISOString());
+ assert.equal(after.length,1);assert.equal(after[0].added,5,'held and new deltas, once');assert.equal(after[0].from,new Date(BASE).toISOString(),'the report reaches back to the last closed hour');
+ assert.equal(sumOf(reports(),'added'),5,'nothing doubled or lost');assert.equal(workflowRecord().report.added,0);
+ // A genuine lost compare-and-swap is still `write_conflict`, retried within the firing as before.
+ let conflicts=0;context.DiscoveryAuthority.writeWorkflow=async()=>{conflicts++;return {handled:true,saved:false};};
+ assert.equal((await closed({started:false,reason:'stopped',programmeRunId:GENERATION},7)).reason,'write_conflict');
+ assert.equal(conflicts,call('DISCOVERY_REPORT_CLOSE_ATTEMPTS'));
+ assert.deepEqual(notices().at(-1).reason,'write_conflict');
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ // A close that the gate admits during the pause, with the reconcile refused by it: a real report with proven counters, status blocked, reason epg_priority.
+ await closed({started:false,reason:'epg_priority',programmeRunId:GENERATION},8);
+ const blocked=reports().find(event=>event.at===new Date(BASE+8*HOUR).toISOString());
+ assert.deepEqual([blocked.kind,blocked.status,blocked.reason,blocked.added],['hour','blocked','epg_priority',0]);
+}
+
+// 18b. AIR-595 review P1: an independent queue read failure in the same close is never hidden behind the planned pause. The notice keeps the pause AND the read
+// fault (`fault: 'queue_unreadable'`), through the v2 ledger and its replay, with no counter; the clean pause stays as it was; after the release the deltas come once.
+resetAll();seed({count:3});const own18b=elect();
+{
+ const realWrite=context.DiscoveryAuthority.writeWorkflow,realCont=context.readContinuation;
+ const paused=async()=>{const error=new Error('priority');error.code='discovery_epg_priority';error.priority={kind:'epg_priority',nextCatchUpAt:new Date(Date.now()+60000).toISOString(),ownerKind:'none',owedDayKey:'2026-11-23'};throw error;};
+ const add=(n,added)=>call('settleWorkflowIfOwner')(env,own18b,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:5,added,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:7,cheapRemaining:0,error:null},own18b+':'+n,GENERATION)}));
+ await add(1,4);
+ context.DiscoveryAuthority.writeWorkflow=paused;
+ // the clean pause, for comparison
+ await closed({started:false,reason:'stopped',programmeRunId:GENERATION},0);
+ assert.equal(Object.hasOwn(notices()[0],'fault'),false,'a clean pause carries no fault');
+ // the continuation read throws in the same close: the pause and the read failure are both stated
+ context.readContinuation=async()=>{throw new Error('continuation down');};
+ const both=await closed({started:false,reason:'stopped',programmeRunId:GENERATION},1);
+ assert.equal(both.reason,'epg_priority');
+ const [,n1]=notices();
+ assert.deepEqual([n1.kind,n1.reason,n1.status,n1.fault],['report_failed','epg_priority',null,'queue_unreadable']);
+ for(const name of ['checked','added','remaining','queueEmpty','queueUnreadable'])assert.equal(Object.hasOwn(n1,name),false,'no counter or queue number: '+name);
+ assert.equal(warnings.filter(entry=>entry.event==='discovery_hour_close_failed').at(-1).fault,'queue_unreadable','the log names the read failure too');
+ // the journal refuses: the combined notice waits in the v2 ledger with its fault index, and a replay rebuilds exactly the same notice
+ failEventPuts=true;
+ assert.equal((await closed({started:false,reason:'stopped',programmeRunId:GENERATION},3)).notice,'queued');
+ failEventPuts=false;
+ assert.deepEqual(ledger(),[]);assert.deepEqual(ledgerV2()[0].slice(2),[5,0,1]);
+ const rebuilt=JSON.parse(JSON.stringify(call('decodeDiscoveryReportFault')(ledgerV2()[0])));
+ assert.deepEqual([rebuilt.reason,rebuilt.status,rebuilt.fault],['epg_priority',null,'queue_unreadable'],'the fault survives the ledger');
+ // a clean pause queued beside it keeps no fault
+ failEventPuts=true;context.readContinuation=realCont;await closed({started:false,reason:'stopped',programmeRunId:GENERATION},4);failEventPuts=false;
+ assert.deepEqual(ledgerV2().map(tuple=>tuple[4]),[1,0]);
+ assert.equal(workflowRecord().report.added,4,'the accumulator is untouched through every refusal');
+ // release: the next firing drains both, replays the notices unchanged and reports the held deltas once
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ await add(2,1);
+ const released=await closed({started:false,reason:'stopped',programmeRunId:GENERATION},5);
+ assert.equal(released.closed,true);assert.deepEqual(ledgerV2(),[]);
+ const replayed=notices().filter(event=>[3,4].some(n=>event.id===hourId(GENERATION,n)));
+ assert.deepEqual(replayed.map(event=>event.fault??null),['queue_unreadable',null],'a replay keeps a combined fault distinct from a clean pause');
+ const report=reports().find(event=>event.at===new Date(BASE+5*HOUR).toISOString());
+ assert.equal(report.added,5);assert.equal(sumOf(reports(),'added'),5,'exactly once');
+ // a fault index or tuple shape the reader does not know is refused, never guessed
+ assert.equal(call('decodeDiscoveryReportFault')([GENERATION.replace(/-/g,'').slice(0,12),'20261111T10',5,0,2]),null);
+ assert.equal(call('decodeDiscoveryReportFault')([GENERATION.replace(/-/g,'').slice(0,12),'20261111T10',5,0]),null,'a four-element tuple never carries a reason an older Worker cannot decode');
+}
+
+// 18b'. The status read (the path without chunks in the period) that throws beside the pause is the same independent fault.
+resetAll();seed({count:3});elect();
+{
+ const realWrite=context.DiscoveryAuthority.writeWorkflow,realGet=bucket.get;
+ context.DiscoveryAuthority.writeWorkflow=async()=>{const error=new Error('priority');error.code='discovery_epg_priority';error.priority={nextCatchUpAt:new Date(Date.now()+60000).toISOString()};throw error;};
+ bucket.get=async(key,...rest)=>{if(key==='epg/discovery-status.json')throw new Error('status down');return realGet(key,...rest);};
+ await closed({started:false,reason:'stopped',programmeRunId:GENERATION},0);
+ bucket.get=realGet;context.DiscoveryAuthority.writeWorkflow=realWrite;
+ assert.deepEqual([notices()[0].reason,notices()[0].fault],['epg_priority','queue_unreadable']);
+}
+
+// 18c. AIR-595 review: rollback. The ledger reader of the Worker before AIR-595, verbatim (its five reasons, five statuses, four-element tuples). It drops any tuple it
+// cannot decode when it writes the ledger back, so the old ledger must only ever hold tuples it decodes; the v2 ledger is a key it never reads or writes.
+{
+ const OLD_REASONS=['no_record','state_unreadable','outbox_full','projector_window','write_conflict'],OLD_STATUSES=[null,'failed','waiting','blocked','stalled'];
+ const oldDecode=tuple=>{
+  if(!Array.isArray(tuple)||tuple.length!==4)return null;
+  const [generation,hourKey,reason,status]=tuple;
+  if(typeof generation!=='string'||!/^[0-9A-Za-z]{1,12}$/.test(generation)||typeof hourKey!=='string'||!/^\d{8}T\d{2}$/.test(hourKey))return null;
+  if(!Number.isInteger(reason)||reason<0||reason>=OLD_REASONS.length||!Number.isInteger(status)||status<0||status>=OLD_STATUSES.length)return null;
+  return {reason:OLD_REASONS[reason],status:OLD_STATUSES[status]};
+ };
+ resetAll();seed({count:3});elect();
+ const realWrite=context.DiscoveryAuthority.writeWorkflow;
+ const paused=async()=>{const error=new Error('priority');error.code='discovery_epg_priority';error.priority={nextCatchUpAt:new Date(Date.now()+60000).toISOString()};throw error;};
+ failEventPuts=true;
+ context.DiscoveryAuthority.writeWorkflow=async()=>({handled:true,saved:false});await closed({started:false,reason:'recovery_exhausted',programmeRunId:GENERATION},0);
+ context.DiscoveryAuthority.writeWorkflow=paused;await closed({started:false,reason:'stopped',programmeRunId:GENERATION},1);
+ context.DiscoveryAuthority.writeWorkflow=paused;await closed({started:false,reason:'recovery_exhausted',programmeRunId:GENERATION},2);
+ failEventPuts=false;context.DiscoveryAuthority.writeWorkflow=realWrite;
+ assert.equal(ledger().length,1);assert.equal(ledgerV2().length,2);
+ assert.equal(ledger().every(tuple=>oldDecode(tuple)!==null),true,'every tuple of the old ledger is readable by the older Worker');
+ assert.deepEqual(oldDecode(ledger()[0]),{reason:'write_conflict',status:'failed'});
+ assert.equal(ledgerV2().every(tuple=>oldDecode(tuple)===null),true,'the v2 tuples are exactly the ones it could not read, so they are kept out of its ledger');
+ // The older Worker runs (rollback): it rewrites its own ledger with what it decodes and adds a notice; the v2 object is never touched.
+ const v2Before=JSON.stringify(records.get(FAULT_KEY_V2));
+ const oldFaults=ledger().filter(tuple=>oldDecode(tuple)!==null);
+ set(FAULT_KEY,{schemaVersion:2,faults:[...oldFaults,[GENERATION.replace(/-/g,'').slice(0,12),'20261111T13',3,0]]});
+ assert.equal(JSON.stringify(records.get(FAULT_KEY_V2)),v2Before,'nothing pending in v2 is evicted by the older Worker');
+ // Roll forward: the next firing delivers all of them, each once.
+ await closed({started:false,reason:'stopped',programmeRunId:GENERATION},4);
+ assert.deepEqual(ledger(),[]);assert.deepEqual(ledgerV2(),[]);
+ assert.deepEqual(notices().map(event=>[event.at.slice(11,13),event.reason]),[['10','write_conflict'],['11','epg_priority'],['12','epg_priority'],['13','projector_window']]);
+ assert.equal(notices().find(event=>event.at.slice(11,13)==='12').status,'failed');
+}
+
+// 18d. AIR-595 re-review: the two ledger objects are ONE logical ledger under ADR 0118. Oldest hour first across both, at most 64 journal puts a firing in total even
+// when the cleanup of one object throws (a thrown put, or a thrown read after a refused compare-and-swap), the 8,760 bound counts both, one entry per hour across both,
+// and an uncertain cleanup recovers idempotently.
+{
+ const gen=GENERATION.replace(/-/g,'').slice(0,12),drain=call('DISCOVERY_REPORT_FAULT_DRAIN'),limit=call('DISCOVERY_REPORT_FAULT_LIMIT');
+ const hourKey=n=>new Date(Date.UTC(2026,9,1,0)+n*HOUR).toISOString().replace(/[-:]/g,'').slice(0,11);
+ const v1=n=>[gen,hourKey(n),4,0],v2=n=>[gen,hourKey(n),5,0,0];
+ const realBucketPut=bucket.put,realBucketGet=bucket.get;
+ let eventAttempts=0;
+ const counting=async(key,...rest)=>{if(key.startsWith('events/items/'))eventAttempts++;return realBucketPut(key,...rest);};
+ const deliver=()=>call('deliverDiscoveryReportFaults')(env);
+ // (a) oldest first across the objects: v2 holds the older hours (a rollback, then a newer outage of the older reasons)
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:[v1(10),v1(11)]});set(FAULT_KEY_V2,{schemaVersion:2,faults:[v2(1),v2(2),v2(12)]});
+ const ordered=[];bucket.put=async(key,value,...rest)=>{if(key.startsWith('events/items/'))ordered.push(JSON.parse(value).at.slice(5,13));return realBucketPut(key,value,...rest);};
+ assert.deepEqual(JSON.parse(JSON.stringify(await deliver())),{delivered:5,pending:0,attempted:5});
+ bucket.put=realBucketPut;
+ assert.deepEqual(ordered,[1,2,10,11,12].map(n=>new Date(Date.UTC(2026,9,1,0)+n*HOUR).toISOString().slice(5,13)),'one oldest-first order across both objects');
+ // (b) both objects full beyond one drain: one firing makes exactly the drain bound of journal puts, the oldest across both
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v1(2*i+1))});set(FAULT_KEY_V2,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v2(2*i))});
+ eventAttempts=0;bucket.put=counting;
+ const both=await deliver();
+ assert.equal(eventAttempts,drain,'one firing, one bound');assert.equal(both.attempted,drain);assert.equal(both.pending,drain);
+ assert.equal(ledger().length,drain/2);assert.equal(ledgerV2().length,drain/2,'the oldest half of each was delivered');
+ // (c) the cleanup put of the old object throws after the journal puts: the bound is not refunded to the other object, the answer is uncertain
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v1(i))});set(FAULT_KEY_V2,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v2(drain+i))});
+ eventAttempts=0;
+ bucket.put=async(key,...rest)=>{if(key===FAULT_KEY)throw new Error('ledger put failed');return counting(key,...rest);};
+ const thrown=await deliver();
+ assert.equal(eventAttempts,drain,'a thrown cleanup put does not let the other object spend another bound');
+ assert.equal(thrown.pending,null,'uncertain');assert.equal(ledger().length,drain,'the old object kept its entries');assert.equal(ledgerV2().length,drain,'the v2 entries were not attempted');
+ // recovery: the next firing finds the delivered hours `exists`, removes them and spends no more than the bound
+ bucket.put=counting;eventAttempts=0;
+ const recovered=await deliver();
+ assert.equal(eventAttempts,drain);assert.equal(recovered.pending,drain);assert.deepEqual(ledger(),[]);assert.equal(ledgerV2().length,drain);
+ await deliver();assert.deepEqual(ledgerV2(),[]);
+ assert.equal(notices().length,2*drain,'every hour delivered exactly once');assert.equal(new Set(notices().map(event=>event.id)).size,2*drain);
+ // (d) a refused compare-and-swap followed by a thrown read: the same bound, uncertain, then idempotent recovery
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v1(i))});set(FAULT_KEY_V2,{schemaVersion:2,faults:Array.from({length:drain},(_,i)=>v2(drain+i))});
+ eventAttempts=0;let refusedOnce=false,reads=0;
+ bucket.put=async(key,...rest)=>{if(key===FAULT_KEY&&!refusedOnce){refusedOnce=true;return null;}return counting(key,...rest);};
+ bucket.get=async(key,...rest)=>{if(key===FAULT_KEY&&refusedOnce&&reads++>=0)throw new Error('ledger read failed');return realBucketGet(key,...rest);};
+ const reread=await deliver();
+ bucket.get=realBucketGet;
+ assert.equal(eventAttempts,drain);assert.equal(reread.pending,null);assert.equal(ledgerV2().length,drain);
+ bucket.put=counting;eventAttempts=0;
+ await deliver();await deliver();
+ assert.deepEqual(ledger(),[]);assert.deepEqual(ledgerV2(),[]);assert.equal(new Set(notices().map(event=>event.id)).size,2*drain);
+ bucket.put=realBucketPut;
+ // (e) the 8,760 bound counts both objects
+ const fill=(oldCount,newCount)=>{resetAll();seed({count:3});elect();
+  set(FAULT_KEY,{schemaVersion:2,faults:Array.from({length:oldCount},(_,i)=>v1(i))});set(FAULT_KEY_V2,{schemaVersion:2,faults:Array.from({length:newCount},(_,i)=>v2(oldCount+i))});};
+ const pausedWrite=async()=>{const error=new Error('priority');error.code='discovery_epg_priority';error.priority={nextCatchUpAt:new Date(Date.now()+60000).toISOString()};throw error;};
+ const realWrite=context.DiscoveryAuthority.writeWorkflow;
+ for(const [label,writer] of [['a pause notice (v2)',pausedWrite],['an older reason (old object)',async()=>({handled:true,saved:false})]]){
+  fill(limit-1,1);context.DiscoveryAuthority.writeWorkflow=writer;failEventPuts=true;
+  const full=await call('deliverDiscoveryReportFailure')(env,call('discoveryReportFailedEvent')({at:'2028-11-11T10:00:00.000Z',hourKey:'20281111T10',generation:GENERATION,reason:writer===pausedWrite?'epg_priority':'write_conflict',status:null}));
+  assert.equal(full,'lost',label+': at the logical bound the newest is refused');assert.equal(ledger().length+ledgerV2().length,limit,'nothing evicted');
+  fill(limit-2,1);context.DiscoveryAuthority.writeWorkflow=writer;failEventPuts=true;
+  const room=await call('deliverDiscoveryReportFailure')(env,call('discoveryReportFailedEvent')({at:'2028-11-11T10:00:00.000Z',hourKey:'20281111T10',generation:GENERATION,reason:writer===pausedWrite?'epg_priority':'write_conflict',status:null}));
+  assert.equal(room,'queued',label+': below the logical bound it is queued');assert.equal(ledger().length+ledgerV2().length,limit);
+  failEventPuts=false;
+ }
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ // (f) one entry per hour across both objects: a pause notice of an hour already queued with an older reason is not queued twice
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:[[gen,'20261111T10',4,0]]});failEventPuts=true;
+ assert.equal(await call('deliverDiscoveryReportFailure')(env,call('discoveryReportFailedEvent')({at:new Date(BASE).toISOString(),hourKey:'20261111T10',generation:GENERATION,reason:'epg_priority',status:null})),'queued');
+ failEventPuts=false;assert.equal(ledger().length,1);assert.deepEqual(ledgerV2(),[],'no second entry for the hour');
+}
+
+// 18e. AIR-595 re-review: what two SIMULTANEOUS admissions to DIFFERENT objects can do (deterministic interleaving). Each object has its own compare-and-swap, so
+// the combined check is best effort: two writers that read the same 8,759 can each add one entry (8,761). The next admission sees the bound and is refused, nothing is
+// evicted, the drain stays at 64 a firing. A concurrent repeat of one hour with two reason classes can queue two tuples, and the journal still shows one event.
+{
+ const gen=GENERATION.replace(/-/g,'').slice(0,12),limit=call('DISCOVERY_REPORT_FAULT_LIMIT'),drain=call('DISCOVERY_REPORT_FAULT_DRAIN');
+ const hourKey=n=>new Date(Date.UTC(2026,9,1,0)+n*HOUR).toISOString().replace(/[-:]/g,'').slice(0,11);
+ const realBucketGet=bucket.get;
+ const notice=(reason,hour='20281111T10',at='2028-11-11T10:00:00.000Z')=>call('discoveryReportFailedEvent')({at,hourKey:hour,generation:GENERATION,reason,status:null});
+ // The first writer has read both objects; the second runs completely in between; the first then writes from its stale view.
+ const interleave=async(first,second)=>{
+  let armed=true,inner=null;
+  bucket.get=async(key,...rest)=>{
+   const object=await realBucketGet(key,...rest);
+   if(armed&&key===FAULT_KEY_V2){armed=false;inner=await call('deliverDiscoveryReportFailure')(env,second);}
+   return object;
+  };
+  try{return [await call('deliverDiscoveryReportFailure')(env,first),inner];}finally{bucket.get=realBucketGet;}
+ };
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:Array.from({length:limit-1},(_,i)=>[gen,hourKey(i),4,0])});
+ failEventPuts=true;
+ const [a,b]=await interleave(notice('write_conflict'),notice('epg_priority','20281111T11','2028-11-11T11:00:00.000Z'));
+ assert.deepEqual([a,b],['queued','queued'],'two simultaneous writers on different objects both pass the combined check');
+ assert.equal(ledger().length+ledgerV2().length,limit+1,'the bound can be exceeded by the simultaneous writers, one entry each');
+ assert.equal(await call('deliverDiscoveryReportFailure')(env,notice('write_conflict','20281111T12','2028-11-11T12:00:00.000Z')),'lost','the next admission sees the bound and is refused');
+ assert.equal(ledger().length+ledgerV2().length,limit+1,'nothing evicted');
+ failEventPuts=false;
+ let puts=0;const realBucketPut=bucket.put;bucket.put=async(key,...rest)=>{if(key.startsWith('events/items/'))puts++;return realBucketPut(key,...rest);};
+ await call('deliverDiscoveryReportFaults')(env);bucket.put=realBucketPut;
+ assert.equal(puts,drain,'the drain bound holds');
+ // the same hour, two reason classes, simultaneously: two tuples, one visible event
+ resetAll();failEventPuts=true;
+ const [c,d]=await interleave(notice('write_conflict'),notice('epg_priority'));
+ assert.deepEqual([c,d],['queued','queued']);assert.equal(ledger().length,1);assert.equal(ledgerV2().length,1);
+ failEventPuts=false;
+ await call('deliverDiscoveryReportFaults')(env);
+ assert.deepEqual(ledger(),[]);assert.deepEqual(ledgerV2(),[]);
+ assert.equal(notices().length,1,'one hour, one visible event');
+}
+
+// 19. AIR-595: a new generation started by the reconcile carries the accumulator, the outbox and the last closed hour of the previous record (the 17:00 UTC report
+// of 23 Nov 2026 had `from: null` because they were dropped). Nothing is lost or reported twice across the change.
+resetAll();
+{
+ seed({count:3,programmeRunId:OTHER,published:OTHER,remaining:12,reason:'epg_committed'});
+ armWorkflowAdmission(OTHER);
+ const pending=call('discoveryHourEvent')({at:new Date(BASE).toISOString(),hourKey:'20261111T10',generation:GENERATION,status:'idle',reason:null,report:call('newDiscoveryReport')(null),queue:{remaining:0,empty:false}});
+ const report={...call('addChunkToDiscoveryReport')(call('newDiscoveryReport')(new Date(BASE).toISOString()),{checked:6,added:2,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:0,cheapRemaining:0,error:null},INSTANCE+':9',GENERATION),lastClosedHour:'20261111T10'};
+ set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:27,instanceId:INSTANCE,phase:'stopped',reason:'backlog_empty',updatedAt:iso,waitingUntil:null,recovery:null,report,outbox:[pending],rollover:{requestId:'r-1'}});
+ const started=await call('ensureDiscoveryWorkflow')(env);
+ assert.equal(started.started,true);assert.equal(started.series,0);
+ const record=workflowRecord();
+ assert.equal(record.programmeRunId,OTHER);
+ assert.equal(record.report.added,2,'the open deltas are carried');assert.equal(record.report.lastClosedHour,'20261111T10','the last closed hour is carried');assert.equal(record.report.since,new Date(BASE).toISOString());
+ assert.equal(record.outbox.length,1,'the undelivered report is carried');assert.deepEqual(JSON.parse(JSON.stringify(record.rollover)),{requestId:'r-1'});
+ assert.equal(record.recovery,null,'the recovery of the old series is not carried');
+ await closed({started:true,reason:'started',programmeRunId:OTHER},1);
+ const next=reports().find(event=>event.at===new Date(BASE+HOUR).toISOString());
+ assert.equal(next.added,2);assert.equal(next.from,new Date(BASE).toISOString(),'the period reaches back to the last closed hour, not null');
+ assert.equal(reports().length,2,'the carried report and the new hour, once each');
+ armWorkflowAdmission();
 }
 
 bucket.put=realPut;
