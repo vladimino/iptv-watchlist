@@ -1,9 +1,9 @@
 # ADR 0210: A proven prediction no-progress verdict is not hidden by a live run, and its clock is the last durable commit
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-24 (scope set by the Product Owner on [AIR-596](https://trello.com/c/t9Tx7Yy0))  
 **Recorded at:** 2026-11-24  
-**Approval source:** not yet decided. The card scope requires an explicit, ADR-specific Product Owner decision before merge; the card itself is not that decision.  
+**Approval source:** [Product Owner decision on AIR-596, 24 Nov 2026 15:10 Europe/Madrid](https://trello.com/c/t9Tx7Yy0#comment-6b059ad7fc48bbdfb1ab2391): ADR 0210 accepted with option A (the shared verdict before the live lease, unknown never healthy, the clock from existing history / `queue.lastBatch` / Monitor evidence, the held incident with recovery on the incident baseline or proven zero eligible work, typed Telegram evidence), including the documented bounded-history and conservative legacy limitations. Options B (a new writer field), C (a counter proxy) and D (a D1 scan) were not chosen. Not a GO for any production operation.  
 **Related work:** [AIR-596](https://trello.com/c/t9Tx7Yy0); incident [AIR-588](https://trello.com/c/vyxbU1l0) and its [health RCA comment](https://trello.com/c/vyxbU1l0#comment-6b0560f01036576bc55fcc50); [AIR-556](https://trello.com/c/ZjqzW7EB) ([ADR 0182](0182-prediction-progress-policy-shared-by-footer-and-monitor.md)); [AIR-573](https://trello.com/c/4pD66DLd) ([ADR 0193](0193-deferred-batch-start-with-server-issued-key.md) decision 9); parallel monitor work [AIR-592](https://trello.com/c/c0d7VD4P) (not touched)  
 **Supersedes:** In part [ADR 0182](0182-prediction-progress-policy-shared-by-footer-and-monitor.md): decision 5 (a live run counts as running before any verdict) and, in decision 3, the moved processed counter as a progress time. Extends [ADR 0193](0193-deferred-batch-start-with-server-issued-key.md) decision 9 (the orphan-start reason) with its priority over a live lease. Every other decision of both ADRs stays in force.  
 **Superseded by:** None
@@ -38,9 +38,12 @@ Not decided and not changed: the 60-minute and orphan thresholds, the hourly Cro
 
 ## Alternatives considered
 
-- **Stamp a new durable field (`metrics.lastProductiveAt`) in the submit and completion writes.** It would also date productive runs that are abandoned before their completion without the history. Rejected for this card: it changes the prediction writers that AIR-588 is changing at the same time and adds a field to the batch commit path; the history (`firstSubmitAt`), `queue.lastBatch` and the stored Monitor clock already cover the incident without a writer change.
-- **Read `max(prediction_pointer.updated_at)` in D1.** Rejected: it is a full scan without an index, and pointer rows are also rewritten by imports and migrations, which must not count as commits.
-- **Keep the moved counter, dated by the previous tick.** Rejected: it adds no fact that the history (20 runs, about 5 hours) and `queue.lastBatch` do not already give with an exact time, and an import of an older queue could move it without a commit.
+The owner decision names the chosen design option A (this record) and the rejected ones B, C and D below.
+
+
+- **B: stamp a new durable field (`metrics.lastProductiveAt`) in the submit and completion writes.** It would also date productive runs that are abandoned before their completion without the history. Rejected for this card: it changes the prediction writers that AIR-588 is changing at the same time and adds a field to the batch commit path; the history (`firstSubmitAt`), `queue.lastBatch` and the stored Monitor clock already cover the incident without a writer change.
+- **D: read `max(prediction_pointer.updated_at)` in D1.** Rejected: it is a full scan without an index, and pointer rows are also rewritten by imports and migrations, which must not count as commits.
+- **C: keep the moved counter, dated by the previous tick.** Rejected: it adds no fact that the history (20 runs, about 5 hours) and `queue.lastBatch` do not already give with an exact time, and an import of an older queue could move it without a commit.
 
 ## Consequences
 
@@ -56,7 +59,7 @@ Code only; no data migration, no new persisted field, no flag. Rollback is a rev
 
 ## Evidence
 
-- **Original decision:** [AIR-596](https://trello.com/c/t9Tx7Yy0)
+- **Original decision:** [AIR-596](https://trello.com/c/t9Tx7Yy0); [owner acceptance, 24 Nov 2026](https://trello.com/c/t9Tx7Yy0#comment-6b059ad7fc48bbdfb1ab2391)
 - **Implementation:** the AIR-596 pull request
 - **Dated verification:** offline, deterministic: `tests/prediction-no-progress-series.mjs` (13 hours of 15-minute starts with a 12-minute lease and zero commits through the real Footer route and `Monitor.run`; recovery reasons; rollout over the persisted state of 24 Nov 11:00 Madrid; real batch start, submit and complete over the D1 stand-in with the auxiliary state in D1), with the updated `tests/prediction-orphan-start-signal.mjs`, `tests/monitor-runtime.mjs`, `tests/prediction-footer-health.mjs`. Production readback is recorded on the card after deploy.
 - **Uncertainty:** why the Tasks abandon their runs is not observable in the Worker (AIR-588). A productive run abandoned before completion and evicted from the history before any Monitor tick saw it would not be remembered; at four starts per hour the Monitor's 20-run history spans about five hourly ticks.

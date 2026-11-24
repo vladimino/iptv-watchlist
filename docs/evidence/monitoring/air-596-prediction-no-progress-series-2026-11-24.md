@@ -1,6 +1,6 @@
 # AIR-596: prediction no-progress verdict across a series of ownerless runs (offline, 24 November 2026)
 
-**Scope.** Offline, deterministic replay of the AIR-588 pattern against the code of the AIR-596 pull request and against `main` at `79a36c5`. No production read or write, no Task, no model, no Cloudflare call. Decision record: [ADR 0210](../../adr/0210-prediction-no-progress-verdict-survives-live-runs.md) (Proposed).
+**Scope.** Offline, deterministic replay of the AIR-588 pattern against the code of the AIR-596 pull request and against `main` at `79a36c5`. No production read or write, no Task, no model, no Cloudflare call. Decision record: [ADR 0210](../../adr/0210-prediction-no-progress-verdict-survives-live-runs.md) (Proposed when this replay was recorded; accepted by the owner the same day, after the review fixtures below).
 
 **Test.** `tests/prediction-no-progress-series.mjs` (core suite). One in-memory bucket and an injected clock; runs and leases are written by the Worker's own `runnerLease` and `savePredictionRun` (run record, `latest-run.json`, diagnostic checkpoint), the Footer is the real route `GET /api/enrichment/footer/status`, the Monitor is `Monitor.run` with its real policy, outbox and a fake webhook.
 
