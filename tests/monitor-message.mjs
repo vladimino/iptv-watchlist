@@ -91,10 +91,10 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
 }
 
 // 2. The owner's Discovery example (12 Nov 2026): the executor stalled alert at 04:00:42 UTC, its recovery at 05:00:42 UTC while the site stays degraded.
-// Only a finished chunk (`lastChunkFinishedAt`) is progress; the continuation record's update time is not.
+// Only a finished chunk (the classification's `lastChunkAt`, AIR-598) is progress; the continuation record's update time is not.
 {
  const now=T('2026-11-12T04:00:42Z');
- const evaluated=P.evaluateDiscovery({executor:'workflow',health:'settled',publishedRunId:'r1',lastChunkFinishedAt:'2026-11-12T03:20:00.000Z',readout:{stalled:true,quarantined:false},continuation:{stage:'paused',reason:'chunk_budget',remainingChunks:12,at:'2026-11-12T03:50:00.000Z',programmeRunId:'r1',nextCatchUpAt:'2026-11-12T03:30:00.000Z'}},now);
+ const evaluated=P.evaluateDiscovery({executor:'workflow',health:'settled',publishedRunId:'r1',readout:{stalled:true,quarantined:false},queue:{state:'backlog',reason:'chunk_budget',owed:true,eligible:true,remainingChunks:12,allowedAt:'2026-11-12T03:30:00.000Z',checkpointAt:'2026-11-12T03:50:00.000Z',lastChunkAt:'2026-11-12T03:20:00.000Z'},continuation:{stage:'paused',reason:'chunk_budget',remainingChunks:12,at:'2026-11-12T03:50:00.000Z',programmeRunId:'r1',nextCatchUpAt:'2026-11-12T03:30:00.000Z'}},now);
  const item=evaluated.issues.find(entry=>entry.key==='discovery_executor_stalled');
  assert.deepEqual(item.metrics,{remainingChunks:12,lastChunkAt:'2026-11-12T03:20:00.000Z',executor:'workflow'},'the record time 03:50 is not taken as progress');
  const first=P.planAlerts([item],{issues:{}},T('2026-11-12T03:00:42Z'));
@@ -113,11 +113,30 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
  assert.ok(!text.some(line=>/всё в порядке/.test(line)));
  // discovery_stalled keeps the threshold's own diagnostic: no ALLOWED progress for max(overdue, idle) (the policy's idle still counts the record time), with
  // the allowed time and, separately, the last finished chunk.
- const stalled=P.evaluateDiscovery({executor:'workflow',health:'settled',publishedRunId:'r1',lastChunkFinishedAt:'2026-11-12T00:00:00.000Z',readout:null,continuation:{stage:'paused',reason:'chunk_budget',remainingChunks:7,at:'2026-11-12T03:00:00.000Z',programmeRunId:'r1',nextCatchUpAt:'2026-11-12T00:30:00.000Z'}},now).issues.find(entry=>entry.key==='discovery_stalled');
- assert.deepEqual(stalled.metrics,{remainingChunks:7,stalledMs:T('2026-11-12T04:00:42Z')-T('2026-11-12T00:30:00Z'),allowedAt:'2026-11-12T00:30:00.000Z',lastChunkAt:'2026-11-12T00:00:00.000Z',executor:'workflow'});
+ const stalled=P.evaluateDiscovery({executor:'workflow',health:'settled',publishedRunId:'r1',lastChunkFinishedAt:'2026-11-12T00:00:00.000Z',readout:null,queue:{state:'backlog',reason:'chunk_budget',owed:true,eligible:true,remainingChunks:7,allowedAt:'2026-11-12T00:30:00.000Z',checkpointAt:'2026-11-12T03:00:00.000Z',lastChunkAt:'2026-11-12T00:00:00.000Z'},continuation:{stage:'paused',reason:'chunk_budget',remainingChunks:7,at:'2026-11-12T03:00:00.000Z',programmeRunId:'r1',nextCatchUpAt:'2026-11-12T00:30:00.000Z'}},now).issues.find(entry=>entry.key==='discovery_stalled');
+ assert.deepEqual(stalled.metrics,{remainingChunks:7,stalledMs:T('2026-11-12T04:00:42Z')-T('2026-11-12T00:30:00Z'),allowedAt:'2026-11-12T00:30:00.000Z',lastChunkAt:'2026-11-12T00:00:00.000Z',executor:'workflow',queueState:'backlog',queueReason:'chunk_budget'});
  const stalledText=sample('Discovery stalled (no allowed progress)',render({...stalled,kind:'alert',firstSeenAt:'2026-11-12T03:00:42.000Z',observedAt:'2026-11-12T04:00:42.000Z',id:'discovery_stalled|alert|x'},'degraded','2026-11-12T04:00:50Z')).split('\n');
  assert.ok(stalledText.includes('⏱ Без разрешённого прогресса: 3 ч 31 мин')&&stalledText.includes('Шаг разрешён с: 12.11 01:30'));
  assert.ok(stalledText.includes('Последний чанк: 12.11 01:00'));
+}
+
+// AIR-598: a held Discovery incident says why it cannot be confirmed or cleared now and stays open, with its last measured stall under its own time; a diagnosis
+// that changed while the incident stayed open is named; a recovery says which valid disposition ended it.
+{
+ const heldMessage={key:'discovery_stalled',stream:'discovery',severity:'degraded',kind:'reminder',firstSeenAt:'2026-11-12T03:00:42.000Z',observedAt:'2026-11-12T10:00:42.000Z',metricsAt:'2026-11-12T08:00:42.000Z',
+  metrics:{stalledMs:5*H,allowedAt:'2026-11-12T03:00:00.000Z',lastChunkAt:'2026-11-12T02:00:00.000Z',held:'queue_unconfirmed',queueState:'unknown',queueReason:'no_continuation'},id:'discovery_stalled|reminder|x'};
+ const held=sample('Discovery incident held (queue unconfirmed)',render(heldMessage,'degraded','2026-11-12T10:00:50Z')).split('\n');
+ assert.ok(held.includes('Сейчас: состояние очереди не подтверждено')&&held.includes('Состояние очереди: no_continuation')&&held.includes('Инцидент остаётся открытым'),held.join('\n'));
+ assert.ok(held.includes('Не меньше: 5 ч')&&held.includes('Последнее наблюдение: 12.11 09:00'),'the last measured stall under its own time');
+ assert.ok(!held.some(line=>/Осталось чанков/.test(line)),'no count shown as current');
+ const moved=render({...heldMessage,kind:'alert',metrics:{stalledMs:3*H,lastChunkAt:'2026-11-12T02:00:00.000Z',queueState:'unknown',queueReason:'generation_mismatch',transition:'discovery_unconfirmed'}},'degraded','2026-11-12T10:00:50Z').split('\n');
+ assert.ok(moved.includes('Не подтверждено: generation_mismatch')&&moved.includes('Сейчас: состояние очереди не подтверждено'),moved.join('\n'));
+ const unconfirmed=render({key:'discovery_unconfirmed',stream:'discovery',severity:'degraded',kind:'alert',firstSeenAt:'2026-11-12T07:00:42.000Z',observedAt:'2026-11-12T10:00:42.000Z',metrics:{stalledMs:3*H,queueState:'unknown',queueReason:'admission_unreadable'},id:'discovery_unconfirmed|alert|x'},'degraded','2026-11-12T10:00:50Z').split('\n');
+ assert.equal(unconfirmed[1],'Состояние очереди Находок не подтверждено');assert.ok(unconfirmed.includes('Не подтверждено: admission_unreadable')&&unconfirmed.includes('⏱ Без подтверждения: 3 ч'),unconfirmed.join('\n'));
+ for(const [reason,line] of [['queue_empty','Причина: очередь пуста, это доказано записями той же программы'],['epg_priority','Причина: пауза на время обновления программы'],['within_policy','Причина: разрешённый прогресс снова в пределах правила']]){
+  const text=render({key:'discovery_stalled',stream:'discovery',severity:'healthy',kind:'recovery',firstSeenAt:'2026-11-12T03:00:42.000Z',endedAt:'2026-11-12T10:00:42.000Z',queuedAt:'2026-11-12T10:00:42.000Z',recoveryReason:reason,metrics:{stalledMs:4*H},metricsAt:'2026-11-12T09:00:42.000Z',id:'discovery_stalled|recovery|x'},'healthy','2026-11-12T10:00:50Z').split('\n');
+  assert.ok(text.includes(line),reason+': '+text.join('\n'));
+ }
 }
 
 // 3. Every kind has its own marker; critical has its own alert marker; reminder, escalation and test are labelled.

@@ -1,8 +1,9 @@
 // Owner-only data health read: GET /api/admin/health. One request builds the health snapshot the pure evaluator
 // (DataHealth, src/domain/data-health.js) expects from bounded single-object reads and returns the evaluation,
 // aggregated into groups the health page can list. It reads the pinned admin snapshot (pointer, generation
-// programme, dictionaries), the view index, the taste profile, the prediction queue, the resolver continuation
-// record and the generation copy of the catalog. It never lists the bucket, never reads a lease or the resolution
+// programme, dictionaries), the view index, the taste profile, the prediction queue, the small Discovery records through
+// the shared reader (AIR-598: one consistent snapshot of status, continuation, Workflow record and lease row, read only)
+// and the generation copy of the catalog. It never lists the bucket, never takes a lease, never reads the resolution
 // ledger, never writes, never starts work and never calls another service; a source it cannot read in a bounded
 // way is passed as "not supplied" so the evaluator reports it as unknown instead of healthy.
 const ADMIN_HEALTH_SAMPLE=10;
@@ -36,9 +37,12 @@ function adminHealthQueue(raw,recordIdOf,observedAt){
  for(const [id,entry] of Object.entries(raw.retries&&typeof raw.retries==='object'?raw.retries:{}))retries[recordIdOf(String(id))]=entry;
  return {programmeRunId:typeof raw.programmeRunId==='string'?raw.programmeRunId:null,hotPending:map(raw.hotPending),coldPending:map(raw.coldPending),pending:map(raw.pending),retries,lastCheckAt:raw.lastCheckAt??null,lastBatch:raw.lastBatch??null,refreshedAt:raw.refreshedAt??null,observedAt};
 }
-function adminHealthDiscovery(raw,observedAt){
+// AIR-598: the continuation of the shared Discovery read (the authoritative record, D1 at its authority) with that read's one classification attached, so the
+// health model judges owed work and emptiness exactly as the footer, the Monitor, the Events report and the operational status do.
+function adminHealthDiscovery(raw,observedAt,queue=null){
  if(!raw||typeof raw!=='object')return raw===null?null:undefined;
- return {stage:raw.stage??null,reason:raw.reason??null,at:raw.at??null,retryAt:raw.retryAt??null,nextCatchUpAt:raw.nextCatchUpAt??null,remainingChunks:raw.remainingChunks??null,programmeRunId:raw.programmeRunId??null,hopId:raw.hopId??null,observedAt};
+ const compact=queue&&typeof queue==='object'?{state:queue.state??null,reason:queue.reason??null,owed:queue.owed??null,eligible:queue.eligible??null,proof:queue.proof??null,provenAt:queue.provenAt??null}:null;
+ return {stage:raw.stage??null,reason:raw.reason??null,at:raw.at??null,retryAt:raw.retryAt??null,nextCatchUpAt:raw.nextCatchUpAt??null,remainingChunks:raw.remainingChunks??null,programmeRunId:raw.programmeRunId??null,hopId:raw.hopId??null,observedAt,...(compact?{queue:compact}:{})};
 }
 function adminHealthPosters(catalog,run,observedAt){
  if(!catalog||typeof catalog!=='object')return catalog===null?null:undefined;
@@ -115,7 +119,10 @@ async function adminHealthRoute(request,env,url){
   return adminReadObject(bucket,key,null);
  };
  // Every read settles before the answer, so a failed read never leaves another one half-open in the background.
- const settled=await Promise.allSettled([read(ENRICHMENT_KEY+'view-index.json'),read(profileKey),read(predictionQueueKey),read(CONTINUATION_KEY),read(epgGenerationKey(run,'discovered-films.json'))]);
+ // AIR-598: the Discovery continuation comes from the shared bounded reader (`readDiscoveryQueue`: one consistent snapshot of the small Discovery records, D1 at its
+ // authority, never the ledger), not from the R2 object, which is frozen once Discovery is D1-authoritative. It never throws; an unreadable source is unknown.
+ const readDiscovery=async()=>{reads.push('discovery_records');const result=await readDiscoveryQueue(env);const body=result.evidence?.records?.continuation??null;return {present:!!body,body,queue:result.queue,source:result.evidence?.source??null};};
+ const settled=await Promise.allSettled([read(ENRICHMENT_KEY+'view-index.json'),read(profileKey),read(predictionQueueKey),readDiscovery(),read(epgGenerationKey(run,'discovered-films.json'))]);
  if(settled.some(item=>item.status==='rejected'))return adminError('storage_unavailable',503);
  const [viewIndex,profile,queue,continuation,catalog]=settled.map(item=>item.value);
  const nowMs=Date.now(),now=adminHealthIso(nowMs);
@@ -139,7 +146,7 @@ async function adminHealthRoute(request,env,url){
  const input={
   now,pin:{programmeRunId:run},coverage:{films:'complete'},published,films,
   predictionQueue:adminHealthQueue(queue.present?queue.body:null,recordIdOf,now),
-  discovery:adminHealthDiscovery(continuation.present?continuation.body:null,now),
+  discovery:adminHealthDiscovery(continuation.present?continuation.body:null,now,continuation.queue),
   posters:adminHealthPosters(catalog.present?catalog.body:null,run,now),
  };
  const result=DataHealth.evaluateDataHealth(input);
@@ -160,7 +167,7 @@ async function adminHealthRoute(request,env,url){
    viewIndex:{key:ENRICHMENT_KEY+'view-index.json',evidence:index?'observed':'object_missing',present:!!index,entries:index?Object.keys(index).length:0,version:viewIndex.version,observedAt:now},
    profile:{key:profileKey,evidence:profileBody?'observed':'object_missing',present:!!profileBody,version:profileBody?.version??null,observedAt:now},
    predictionQueue:{key:predictionQueueKey,evidence:queue.present?'observed':'object_missing',present:queue.present,refreshedAt:queue.present?queue.body?.refreshedAt??null:null,observedAt:now},
-   discovery:{key:CONTINUATION_KEY,evidence:continuation.present?'observed':'object_missing',present:continuation.present,observedAt:now},
+   discovery:{key:'discovery_records',source:continuation.source,evidence:continuation.present?'observed':'object_missing',present:continuation.present,queue:continuation.queue?{state:continuation.queue.state,reason:continuation.queue.reason}:null,observedAt:now},
    posters:{key:epgGenerationKey(run,'discovered-films.json'),evidence:catalog.present?'observed':'object_missing',present:catalog.present,catalogRecords:input.posters?.catalogRecords??null,observedAt:now},
    observations:{evidence:'not_supplied',reason:ADMIN_HEALTH_UNBOUNDED.observations},
    letterboxd:{evidence:'not_supplied',reason:ADMIN_HEALTH_UNBOUNDED.letterboxd},

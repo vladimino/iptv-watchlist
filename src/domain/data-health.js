@@ -599,6 +599,9 @@ function queueIssues(context) {
 
 // The discovery continuation record: a paused record whose gate has passed, an error without a retry, or a
 // running record older than its lease are not advancing.
+// AIR-598: `discovery.queue` is the shared classification of the same read (src/discovery.js `discoveryQueueState`, as the footer, the Monitor, the Events
+// report and the operational status use it). A queue proven empty and the EPG-priority pause raise nothing; owed work follows the gate and progress rules below;
+// a state that proves neither work nor its absence is incomplete evidence. A paused record with no chunk left is never read as "nothing to do" by itself.
 function discoveryIssues(context) {
   const {clock, thresholds, published, discovery} = context;
   if (!isObject(discovery)) return [];
@@ -615,6 +618,8 @@ function discoveryIssues(context) {
       action: action('wait', 'reread_snapshot', false, 'generation_changed'),
     })];
   }
+  const queue = isObject(discovery.queue) ? discovery.queue : null;
+  if (queue && (queue.state === 'empty' || queue.state === 'paused')) return [];
   if (discovery.stage === 'running') {
     const freshness = freshnessOf(at, thresholds.continuationRunningStaleMs);
     if (freshness.status === 'fresh') return [];
@@ -628,8 +633,19 @@ function discoveryIssues(context) {
     })];
   }
   const remaining = Number.isInteger(discovery.remainingChunks) ? discovery.remainingChunks : null;
+  if (queue && queue.owed !== true && queue.state === 'unknown') {
+    return [issue({
+      subsystem: 'discovery', category: 'incomplete', severity: 'info', reason: 'progress_unknown',
+      subject, evidence: evidenceOf('partial', 'discovery', {missing: [...evidence.missing], anomalies: evidence.anomalies}),
+      observedAt: iso(observed.ms), lastProgressAt: iso(at.ms),
+      progress: {status: 'unknown', reason: 'progress_unknown', retryAt: null, sinceProgressMs: null, attempts: null, thresholdMs: null},
+      threshold: null, provenance: provenance('discovery.queue'),
+      action: action('investigate', 'supply_evidence', null, 'evidence_incomplete'),
+    })];
+  }
   if (discovery.stage !== 'paused' && discovery.stage !== 'error') return [];
-  if (discovery.stage === 'paused' && remaining === 0 && !discovery.retryAt) return [];
+  // Without a classification (a caller of the pure model that supplies only the record) the older shortcut stands; with one, owed work is judged below.
+  if (discovery.stage === 'paused' && remaining === 0 && !discovery.retryAt && queue?.owed !== true) return [];
   const gate = discovery.retryAt ?? discovery.nextCatchUpAt ?? null;
   const progress = progressOf({retryAt: gate, updatedAt: discovery.at ?? null}, clock, thresholds, thresholds.discoveryMaxBackoffMs);
   const affected = {count: remaining ?? 1, sample: ['discovery']};

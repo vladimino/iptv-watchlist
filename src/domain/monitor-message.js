@@ -27,7 +27,7 @@ const TITLE = Object.freeze({
   epg_authority: 'Источник опубликованной программы удержан или не читается', epg_resource_limit: 'Публикация программы упёрлась в лимит Worker',
   discovery_stalled: 'Очередь Находок стоит', discovery_executor_stalled: 'Исполнитель (Workflow) остановился',
   discovery_generation_mismatch: 'Очередь Находок относится к другой программе', discovery_quarantined: 'Находки в карантине: попытки исчерпаны',
-  discovery_resource_limit: 'Находки упёрлись в лимит Worker',
+  discovery_resource_limit: 'Находки упёрлись в лимит Worker', discovery_unconfirmed: 'Состояние очереди Находок не подтверждено',
   ratings_stalled: 'Нет завершённого дня (срок + 2 ч)', ratings_quarantined: 'Оценки в карантине', ratings_failed_permanent: 'Оценки: постоянная ошибка',
   ratings_switch_open: 'Переключение режима Оценок не завершилось', ratings_resource_limit: 'Оценки повторно упёрлись в лимит Worker',
   letterboxd_slot_late: 'Слот Letterboxd не запустился вовремя', letterboxd_slot_stalled: 'Слот Letterboxd завис после окна',
@@ -103,7 +103,13 @@ function stats(key, m) {
     if (m.activeRun === true) out.push('Lease держит запуск, это не прогресс');
     if (m.quota === true) out.push('Последний пакет упёрся в квоту модели');
   } else if (key.startsWith('discovery_')) {
+    // AIR-598: a held Discovery incident (the queue cannot be read or confirmed now) says why and stays open; it never shows the last counts as current.
+    if (DISCOVERY_HELD[m.held]) { out.push('Сейчас: ' + DISCOVERY_HELD[m.held], ...(m.queueReason ? ['Состояние очереди: ' + code(m.queueReason)] : []), 'Инцидент остаётся открытым'); return out; }
     add('Осталось чанков', number(m.remainingChunks)); add('Исполнитель', code(m.executor));
+    // The shared classification's reason, so an unconfirmed state says what was not proven (never shown as a backlog count), and a diagnosis that changed
+    // while the incident stayed open under its first key.
+    if (m.queueState === 'unknown') add('Не подтверждено', code(m.queueReason));
+    if (DISCOVERY_TRANSITION[m.transition]) out.push('Сейчас: ' + DISCOVERY_TRANSITION[m.transition]);
   } else if (key === 'epg_stale' || key === 'epg_failed') {
     if (m.runError === true) out.push('Последний запуск записал ошибку');
   } else if (key === 'epg_authority') {
@@ -127,6 +133,9 @@ function stats(key, m) {
 // publication beside the confirmed progress (Producer), the due time (EPG).
 // The predictions and Producer stall is always about CONFIRMED progress: a run may be working without having committed anything yet.
 const CONFIRMED = '⏱ Прогресс не подтверждён';
+const DISCOVERY_STALL = Object.freeze({discovery_stalled: '⏱ Без разрешённого прогресса', discovery_unconfirmed: '⏱ Без подтверждения'});
+const DISCOVERY_HELD = Object.freeze({records_unreadable: 'записи Находок не читаются', queue_unconfirmed: 'состояние очереди не подтверждено'});
+const DISCOVERY_TRANSITION = Object.freeze({discovery_stalled: 'очередь стоит', discovery_unconfirmed: 'состояние очереди не подтверждено'});
 function stallBlock(key, m, observedMs) {
   if (!m || typeof m !== 'object') return [];
   const idle = finite(m.idleMs), at = value => madrid(stamp(value ?? null));
@@ -137,11 +146,11 @@ function stallBlock(key, m, observedMs) {
     if (m.publishedAt) out.push('Последняя публикация: ' + at(m.publishedAt));
     return out;
   }
-  if (key === 'discovery_stalled') {
+  if (key === 'discovery_stalled' || key === 'discovery_unconfirmed') {
     // A known date stays shown even when the duration is unknown (a partial or legacy metric).
     const span = finite(m.stalledMs);
     if (span === null && !m.allowedAt && !m.lastChunkAt) return [];
-    return ['⏱ Без разрешённого прогресса: ' + (span === null ? 'неизвестно' : duration(span)), ...(m.allowedAt ? ['Шаг разрешён с: ' + at(m.allowedAt)] : []), 'Последний чанк: ' + at(m.lastChunkAt)];
+    return [DISCOVERY_STALL[key] + ': ' + (span === null ? 'неизвестно' : duration(span)), ...(m.allowedAt ? ['Шаг разрешён с: ' + at(m.allowedAt)] : []), 'Последний чанк: ' + at(m.lastChunkAt)];
   }
   if (key === 'discovery_executor_stalled') {
     // Only a finished chunk is progress here; the continuation record's own update time is not.
@@ -161,9 +170,16 @@ function stallBlock(key, m, observedMs) {
 function lastStallBlock(key, m, metricsAt) {
   if (!m || typeof m !== 'object') return [];
   const when = stamp(metricsAt ?? null);
-  const span = key === 'discovery_stalled' ? finite(m.stalledMs) : finite(m.idleMs);
+  const span = DISCOVERY_STALL[key] ? finite(m.stalledMs) : finite(m.idleMs);
   if (span === null || when === null) return [];
-  return [key === 'discovery_stalled' ? '⏱ Без разрешённого прогресса' : CONFIRMED, 'Не меньше: ' + duration(span, {floor: true}), 'Последнее наблюдение: ' + madrid(when)];
+  return [DISCOVERY_STALL[key] || CONFIRMED, 'Не меньше: ' + duration(span, {floor: true}), 'Последнее наблюдение: ' + madrid(when)];
+}
+// AIR-598: a Discovery recovery says why it recovered, from the shared queue classification of the tick that recovered it. A queue proven empty is not new progress.
+function discoveryRecoveryBlock(reason) {
+  if (reason === 'queue_empty') return ['Причина: очередь пуста, это доказано записями той же программы', 'Это не новый прогресс'];
+  if (reason === 'epg_priority') return ['Причина: пауза на время обновления программы', 'Это не новый прогресс'];
+  if (reason === 'within_policy') return ['Причина: разрешённый прогресс снова в пределах правила'];
+  return [];
 }
 // AIR-596 (ADR 0210): a prediction recovery says why it recovered; confirmed progress and an absence of eligible work never read alike.
 function recoveryBlock(reason, progressAt) {
@@ -200,9 +216,9 @@ export function telegramText(message, {overall = null, now = null} = {}) {
     const ended = recovered ? stamp(message?.endedAt ?? message?.queuedAt ?? null) : null;
     const opened = stamp(message?.firstSeenAt ?? null);
     // A held prediction incident has no current measurement: its stall is the last one measured, under its own time, as for a recovery.
-    const heldNow = !recovered && key === 'predictions_no_progress' && !!HELD[message?.metrics?.held];
+    const heldNow = !recovered && ((key === 'predictions_no_progress' && !!HELD[message?.metrics?.held]) || (!!DISCOVERY_STALL[key] && !!DISCOVERY_HELD[message?.metrics?.held]));
     const stall = recovered || heldNow ? lastStallBlock(key, message?.metrics, message?.metricsAt) : stallBlock(key, message?.metrics, observed);
-    const why = recovered && key === 'predictions_no_progress' ? recoveryBlock(message?.recoveryReason, message?.recoveryProgressAt) : [];
+    const why = !recovered ? [] : key === 'predictions_no_progress' ? recoveryBlock(message?.recoveryReason, message?.recoveryProgressAt) : DISCOVERY_STALL[key] ? discoveryRecoveryBlock(message?.recoveryReason) : [];
     if (why.length) blocks.push(why);
     // Without typed metrics (a message written before ADR 0206 decision 9) the stored detail is the only diagnosis: bounded ASCII.
     if (!statLines.length && !stall.length && message?.message && !/^Recovered$/.test(String(message.message))) statLines.push('Детали: ' + ascii(message.message, 200));

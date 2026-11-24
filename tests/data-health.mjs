@@ -455,6 +455,15 @@ const runningStale = one(checkResult(evaluate(continuation({stage: 'running', re
 assert.deepEqual([runningStale.severity, runningStale.reason, runningStale.freshness.status, runningStale.threshold.code, runningStale.action.code], ['warning', 'continuation_running_stale', 'stale', 'continuationRunningStaleMs', 'manual_review']);
 for (const stage of ['complete', 'idle']) assert.equal(only(evaluate(continuation({stage, reason: null, retryAt: null, nextCatchUpAt: null, remainingChunks: 0})), 'discovery').length, 0, stage);
 assert.equal(only(evaluate(continuation({reason: 'programme_changed', retryAt: null, nextCatchUpAt: null, remainingChunks: 0})), 'discovery').length, 0, 'a paused record with nothing left is clear');
+// AIR-598: with the shared queue classification attached, the drained series (chunk_budget, no chunk left, gate long past) is clear because the queue is proven
+// empty, not because no chunk is left; the same record with owed work is judged by the gate; an unconfirmed classification is incomplete evidence, never clear.
+const drainedRecord = {reason: 'chunk_budget', retryAt: null, nextCatchUpAt: at(-16 * H), at: at(-17 * H), remainingChunks: 0};
+assert.equal(only(evaluate(continuation({...drainedRecord, queue: {state: 'empty', reason: 'drained', owed: false, eligible: false}})), 'discovery').length, 0, 'a proven empty queue is clear');
+assert.equal(only(evaluate(continuation({...drainedRecord, queue: {state: 'paused', reason: 'epg_priority', owed: true, eligible: false}})), 'discovery').length, 0, 'the EPG-priority pause is not a fault');
+const owedBacklog = one(checkResult(evaluate(continuation({...drainedRecord, queue: {state: 'backlog', reason: 'chunk_budget', owed: true, eligible: true}}))), 'discovery/stuck/continuation:discovery');
+assert.deepEqual([owedBacklog.reason, owedBacklog.progress.status], ['continuation_not_advanced', 'overdue'], 'owed work behind a passed gate is not advancing, whatever remainingChunks says');
+const unconfirmedQueue = one(checkResult(evaluate(continuation({...drainedRecord, queue: {state: 'unknown', reason: 'drain_unconfirmed', owed: null, eligible: null}}))), 'discovery/incomplete/continuation:discovery');
+assert.deepEqual([unconfirmedQueue.severity, unconfirmedQueue.reason, unconfirmedQueue.action.code, unconfirmedQueue.action.reason], ['info', 'progress_unknown', 'supply_evidence', 'evidence_incomplete']);
 
 // Posters: a film without a poster is a missing asset, eligible for hydration only with a trusted TMDB identity;
 // the catalog summary aggregates and counts without listing the bucket.

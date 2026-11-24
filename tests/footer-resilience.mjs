@@ -19,7 +19,8 @@ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(nam
 const G='22222222-2222-4222-8222-222222222222',now=Date.now(),hour=3600000;
 let databases=0;
 const mkdb=()=>{
- const seen=[];const db=d1Standin(path.join(root,'f'+(databases++)+'.sqlite'),{onQuery:async text=>{seen.push(text);}});
+ // AIR-598: the footer reads the small Discovery records as one consistent D1 snapshot, a batch of single-row SELECTs; a batch is checked to be reads only.
+ const seen=[];const db=d1Standin(path.join(root,'f'+(databases++)+'.sqlite'),{onQuery:async text=>{seen.push(text);},onBatch:async statements=>{for(const item of statements)seen.push(item.text);}});
  for(const migration of names)db.sql(fs.readFileSync('migrations/'+migration+'.sql','utf8'));
  db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
  db.sql("UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
@@ -68,7 +69,7 @@ for(const mirrors of ['missing','stale']){
  assert.equal(r.status,200,mirrors+' mirrors: '+JSON.stringify(r.body));
  for(const key of LEGACY)assert.ok(Object.hasOwn(r.body,key),'legacy field kept: '+key);
  assert.deepEqual(writes,[],mirrors+' mirrors: no R2 put or delete in a GET (no repairMirrors, not twice in parallel)');
- assert.equal(db.calls.batches,before.batches,'no D1 batch');assert.equal(db.calls.statements,before.statements,'no D1 statement written');
+ assert.equal(db.calls.batches,before.batches+1,'one D1 batch: the Discovery records snapshot');assert.ok(db.calls.statements-before.statements<=8,'the snapshot is bounded');
  assert.ok(seen.length>0&&seen.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1: '+seen.filter(text=>!/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)).join(' | '));
  assert.deepEqual(fetches,[],'no provider request');
  assert.equal(Object.hasOwn(r.body,'degraded'),false,'a healthy footer names no degraded source');
@@ -95,7 +96,10 @@ for(const variant of ['ledger seal','pending admission','held cutover']){ // the
   assert.equal(r.body.collection.state,'unknown',variant+': the collection is unknown without the catalog');assert.equal(r.body.recommendations.newUnseen.state,'unknown');
  }
  assert.deepEqual(writes,[],variant+': still no write');
- assert.equal(r.body.integrations.sources.find(source=>source.id==='resolver')?.state,'unknown',variant+': the resolver is unknown, not healthy and not an error');
+ // AIR-598: the shared Discovery classification of a loading transfer is `unknown` / `authority_loading`; the row presents it as the publication handoff wait
+ // («смена программы»): not healthy, not empty, not an error.
+ const resolver=r.body.integrations.sources.find(source=>source.id==='resolver');
+ assert.deepEqual([resolver?.state,resolver?.code,resolver?.queueState,resolver?.queueReason],['waiting','resolver_handoff','unknown','authority_loading'],variant+': the resolver waits on the handoff, not healthy, not empty and not an error');
 }
 db.sql("UPDATE discovery_authority SET cutover='open' WHERE id=1");
 

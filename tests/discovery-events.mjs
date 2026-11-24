@@ -124,8 +124,9 @@ function chunkStub(plan){
   const spec=plan[Math.min(context.chunks,plan.length-1)];context.chunks++;
   const last=context.chunks>=plan.length,at=new Date().toISOString();
   const cheap=Object.hasOwn(spec,'cheap')?spec.cheap:0;
-  set('epg/discovery-status.json',{schemaVersion:2,stage:last?'complete':'partial',programmeRunId:GENERATION,remaining:spec.remaining,cheapRemaining:cheap,checked:spec.checked,error:spec.error||null,at});
-  set('epg/resolver-continuation.json',last?{stage:'complete',reason:null,at,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION}:{stage:'paused',reason:null,at,hopId:'hop-'+context.chunks,remainingChunks:plan.length-context.chunks,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+  // AIR-598: production shapes: the chunk's status and its continuation checkpoint name the same hop, and the status carries all four queue parts.
+  set('epg/discovery-status.json',{schemaVersion:2,stage:last?'complete':'partial',programmeRunId:GENERATION,hopId:'hop-'+context.chunks,remaining:spec.remaining,cheapRemaining:cheap,deferred:0,waitingRetry:0,checked:spec.checked,error:spec.error||null,at});
+  set('epg/resolver-continuation.json',last?{stage:'complete',reason:null,at,hopId:'hop-'+context.chunks,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION}:{stage:'paused',reason:null,at,hopId:'hop-'+context.chunks,remainingChunks:plan.length-context.chunks,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
   return {stage:last?'complete':'partial',checked:spec.checked,added:spec.added,reused:spec.reused,screenedOut:spec.screenedOut,touched:0,tmdbCalls:spec.tmdbCalls,remaining:spec.remaining,cheapRemaining:cheap,error:spec.error||null,programmeRunId:GENERATION,diagnostic:{saved:{owned:true}},discovery:{reason:null,nextCatchUpAt:null}};
  };
 }
@@ -263,14 +264,16 @@ for(const [label,outcome,status,reason] of [
  assert.equal(event.status,status,label);assert.equal(event.reason,reason,label);assert.equal(event.queueEmpty,false,label);
 }
 
-// 5. Empty queue is claimed only when proven: both remainders are numeric zero, no error, the continuation complete for the generation.
+// 5. Empty queue is claimed only when proven: the continuation complete for the generation and the status written by its own last chunk (same hop) with
+// remaining, cheap-pass, deferred and waiting-retry all numeric zero and no error; no quarantined executor and no live Discovery writer (AIR-598: the strict
+// shared proof; the EPG publication's lease does not count).
 {
  const hour=BASE;
  const confirmed=(label,mutate,expectEmpty)=>async()=>{
   resetAll();seed({stage:'complete',remaining:0,reason:null,count:3});
   set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:0,instanceId:INSTANCE,phase:'stopped',reason:'complete',updatedAt:iso,waitingUntil:null,recovery:null});
-  set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:0,checked:0,error:null,at:iso});
-  set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+  set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,hopId:'hop-c',remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0,checked:0,error:null,at:iso});
+  set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:'hop-c',remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
   mutate();
   await closed({started:false,reason:'stopped',programmeRunId:GENERATION},0);
   const [event]=reports();assert.equal(reports().length,1,label);
@@ -279,12 +282,21 @@ for(const [label,outcome,status,reason] of [
  };
  const empty=await confirmed('proven empty',()=>{},true)();
  assert.equal(empty.reason,'queue_empty');assert.equal(empty.remaining,0);for(const name of Object.keys(ZERO))assert.equal(empty[name],0);
- const status=patch=>()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:0,error:null,at:iso,...patch});
+ const status=patch=>()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,hopId:'hop-c',remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0,error:null,at:iso,...patch});
  await confirmed('remaining unknown',status({remaining:null}),false)();
  await confirmed('remaining not zero',status({remaining:4}),false)();
  await confirmed('cheap pass pending',status({cheapRemaining:3}),false)();
  for(const [label,value] of [['cheap missing',undefined],['cheap null',null],['cheap string','0'],['cheap negative',-1],['cheap fractional',0.5]])
-  await confirmed(label,()=>{const value_={schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,error:null,at:iso};if(value!==undefined)value_.cheapRemaining=value;set('epg/discovery-status.json',value_);},false)();
+  await confirmed(label,()=>{const value_={schemaVersion:2,stage:'complete',programmeRunId:GENERATION,hopId:'hop-c',remaining:0,deferred:0,waitingRetry:0,error:null,at:iso};if(value!==undefined)value_.cheapRemaining=value;set('epg/discovery-status.json',value_);},false)();
+ // AIR-598 review: a complete continuation is proven only by the strict reading of its own hop: deferred and waiting-retry must be numeric zero too.
+ for(const [label,patch] of [['deferred left',{deferred:7}],['deferred missing',{deferred:undefined}],['waiting retry null',{waitingRetry:null}],['waiting retry missing',{waitingRetry:undefined}],['waiting retry negative',{waitingRetry:-1}],['waiting retry string',{waitingRetry:'0'}],['another hop',{hopId:'hop-other'}],['no hop',{hopId:undefined}]])
+  await confirmed('complete: '+label,status(patch),false)();
+ await confirmed('complete: continuation without a hop',()=>set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION}),false)();
+ await confirmed('complete: a live Discovery writer',()=>set('epg/resolver-lease.json',{id:'hop-live',expiresAt:Date.now()+60000}),false)();
+ await confirmed('complete: a live writer of unknown kind',()=>set('epg/resolver-lease.json',{id:'hop-live',expiresAt:Date.now()+60000,holderKind:'discovery'}),false)();
+ await confirmed('complete: the EPG publication holds the lease',()=>set('epg/resolver-lease.json',{id:'epg-pub',expiresAt:Date.now()+60000,holderKind:'epg'}),true)();
+ await confirmed('complete: an expired lease',()=>set('epg/resolver-lease.json',{id:'hop-old',expiresAt:Date.now()-1000}),true)();
+ await confirmed('complete: a quarantined executor record',()=>set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:0,instanceId:INSTANCE,phase:'stopped',reason:'complete',updatedAt:iso,waitingUntil:null,recovery:{attempts:5,reason:'recovery_exhausted',quarantined:true}}),false)();
  await confirmed('status error',status({error:'boom'}),false)();
  await confirmed('status of another generation',status({programmeRunId:OTHER}),false)();
  await confirmed('no status',()=>records.delete('epg/discovery-status.json'),false)();
@@ -293,7 +305,8 @@ for(const [label,outcome,status,reason] of [
  void hour;
 }
 
-// 5b. A period's own chunks are the freshest reading: a last chunk without a proven cheap remainder is never an empty queue.
+// 5b. A last chunk without a proven cheap remainder is never an empty queue: the proof reads the status that very chunk wrote (AIR-598: the period's accumulated
+// reading is shown, never a proof).
 for(const [label,spec,expected] of [
  ['both proven zero',{checked:4,added:0,reused:0,screenedOut:0,tmdbCalls:1,remaining:0,cheap:0},true],
  ['cheap remainder not reported',{checked:4,added:0,reused:0,screenedOut:0,tmdbCalls:1,remaining:0,cheap:undefined},false],
@@ -578,8 +591,8 @@ resetAll();seed({count:3});const own10e=elect();
  const settle=(generation=GENERATION)=>{
   resetAll();seed({stage:'complete',remaining:0,reason:null,count:3});
   set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:0,instanceId:INSTANCE,phase:'stopped',reason:'complete',updatedAt:iso,waitingUntil:null,recovery:null});
-  set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:generation,remaining:0,cheapRemaining:0,checked:0,error:null,at:iso});
-  set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:generation});
+  set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:generation,hopId:'hop-c',remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0,checked:0,error:null,at:iso});
+  set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:'hop-c',remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:generation});
  };
  const realWrite=context.DiscoveryAuthority.writeWorkflow;
  const windowBusy=async()=>{const error=new Error('window');error.code='discovery_window';error.window={expiresAt:Date.now()+1000,state:'held'};throw error;};
@@ -691,21 +704,22 @@ resetAll();seed({count:3});const own12=elect(0);
  assert.equal(workflowRecord().outbox.length,1);
  // The deltas cross the change, the queue reading of the old generation does not: A's last chunk proved remaining 0 and cheapRemaining 0, and the
  // continuation of B says complete, yet B has no reading of its own, so B's report keeps A's counters and says its queue is unknown.
- set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OTHER});
+ set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:'hop-c',remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OTHER});
  records.delete('epg/discovery-status.json');
  await call('closeHourlyDiscoveryReport')(env,{started:false,reason:'stopped',programmeRunId:OTHER},cron(1));
  assert.equal(reports().length,2);
  const b=reports().find(event=>event.id.includes(OTHER.replace(/-/g,'').slice(0,12)));
  assert.equal(b.added,5,'the committed deltas of the old generation are kept');assert.equal(b.checked,8);
  assert.equal(b.remaining,null,'the backlog of generation A is not generation B\'s');assert.equal(b.queueEmpty,false,'and neither is its empty state');assert.notEqual(b.status,'empty');
- // B's own chunk then speaks for B.
+ // B's own chunk then speaks for B: it saves its status (the reading the proof needs, AIR-598) and its checkpoint, and adds its summary to the report.
+ set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:OTHER,hopId:'hop-c',remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0,checked:2,error:null,at:iso});
  await call('settleWorkflowIfOwner')(env,`discovery_${OTHER.replace(/-/g,'')}_0`,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:2,added:1,reused:0,screenedOut:0,touched:0,tmdbCalls:0,remaining:0,cheapRemaining:0,error:null},'b:1',OTHER)}));
  await call('closeHourlyDiscoveryReport')(env,{started:false,reason:'stopped',programmeRunId:OTHER},cron(2));
  const c=reports().find(event=>event.at===new Date(BASE+2*HOUR).toISOString());assert.equal(c.remaining,0);assert.equal(c.queueEmpty,true);assert.equal(c.status,'empty');
  // A status file of another generation is not B's reading either.
  resetAll();seed({count:3});elect(0,OTHER);
- set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:0,checked:0,error:null,at:iso});
- set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OTHER});
+ set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,hopId:'hop-c',remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0,checked:0,error:null,at:iso});
+ set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:'hop-c',remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OTHER});
  await call('closeHourlyDiscoveryReport')(env,{started:false,reason:'stopped',programmeRunId:OTHER},cron(1));
  assert.equal(reports()[0].queueEmpty,false);assert.equal(reports()[0].remaining,null);
 }
@@ -734,11 +748,17 @@ resetAll();seed({count:3});elect();
  assert.equal(puts.length,putsBefore,'listing events writes nothing');
 }
 
-// 15. The pure helpers.
+// 15. The pure helpers. The legacy per-chain predicate keeps its historical rule for the events of that model only (AIR-598: never a live proof); the strict
+// zero reading of a hop needs all four parts a numeric zero.
 {
- for(const unknown of [null,undefined,-1,0.5,'0',NaN])assert.equal(call('discoveryQueueEmpty')(0,unknown,null),false,'an unproven cheap remainder is not a zero: '+String(unknown));
- for(const unknown of [null,undefined,-1,'0'])assert.equal(call('discoveryQueueEmpty')(unknown,0,null),false);
- assert.equal(call('discoveryQueueEmpty')(0,0,null),true);assert.equal(call('discoveryQueueEmpty')(0,2,null),false);assert.equal(call('discoveryQueueEmpty')(0,0,'x'),false);assert.equal(call('discoveryQueueEmpty')(0,0,null,1),false);
+ for(const unknown of [null,undefined,-1,0.5,'0',NaN])assert.equal(call('legacyTickQueueEmpty')(0,unknown,null),false,'an unproven cheap remainder is not a zero: '+String(unknown));
+ for(const unknown of [null,undefined,-1,'0'])assert.equal(call('legacyTickQueueEmpty')(unknown,0,null),false);
+ assert.equal(call('legacyTickQueueEmpty')(0,0,null),true);assert.equal(call('legacyTickQueueEmpty')(0,2,null),false);assert.equal(call('legacyTickQueueEmpty')(0,0,'x'),false);assert.equal(call('legacyTickQueueEmpty')(0,0,null,1),false);
+ const zero=call('discoveryZeroStatus'),hop={hopId:'h'},full={programmeRunId:GENERATION,hopId:'h',remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0,error:null};
+ assert.equal(zero(full,hop,GENERATION),true);
+ for(const [name,value] of [['deferred',7],['deferred',undefined],['waitingRetry',null],['waitingRetry',undefined],['waitingRetry',-1],['remaining','0'],['hopId','other'],['error','x'],['programmeRunId',OTHER]])
+  assert.equal(zero({...full,[name]:value},hop,GENERATION),false,name+'='+String(value));
+ assert.equal(zero(full,{hopId:null},GENERATION),false,'a continuation without a hop proves nothing');
  assert.equal(call('discoveryHourStamp')(Date.UTC(2026,10,11,10,59,59)),'20261111T10');
 }
 
@@ -800,7 +820,7 @@ resetAll();seed({count:3});elect();
  const unread=await hourOf();bucket.get=realGet;
  assert.deepEqual([unread.queueEmpty,unread.queueUnreadable,unread.remaining],[false,true,null]);
  // The pure predicates.
- const series=call('discoveryDrainedSeries'),statusOk=call('discoveryDrainedStatus');
+ const series=call('discoveryDrainedSeries'),statusOk=call('discoveryZeroStatus');
  const cont={programmeRunId:GENERATION,stage:'paused',reason:'chunk_budget',remainingChunks:0,hopId:HOP};
  assert.equal(series({phase:'stopped',reason:'backlog_empty',programmeRunId:GENERATION},cont,GENERATION),true);
  assert.equal(series({phase:'stopped',reason:'backlog_empty',programmeRunId:GENERATION},cont,null),false,'no generation proves nothing');
