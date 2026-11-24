@@ -257,7 +257,7 @@ function bucket(w){return w.bucket;}
  assert.deepEqual([entry.firstSeenAt,entry.metricsAt,entry.metrics.held,entry.sendCount],[alertAt,alertAt,'split_unknown',2],JSON.stringify(entry));
  assert.equal(w.texts.length,2);const reminder=w.texts[1];
  assert.match(reminder,/Напоминание/);assert.match(reminder,/\nСейчас: число доступных не читается\nИнцидент остаётся открытым\n/);
- assert.match(reminder,/⏱ Без прогресса: не меньше 2 ч\nПоследнее наблюдение: 23\.11 23:28/,reminder);assert.doesNotMatch(reminder,/Доступно:/,'no stale count shown as current');
+ assert.match(reminder,/⏱ Прогресс не подтверждён\nНе меньше: 2 ч\nПоследнее наблюдение: 23\.11 23:28/,reminder);assert.doesNotMatch(reminder,/Доступно:/,'no stale count shown as current');
  w.bucket.set(QUEUE,q);const run=await w.start('back',P+9*H-20*MIN);await w.commit(run,P+9*H-15*MIN,{created:2});
  await w.tick(P+9*H);assert.equal(w.texts.length,3);const recovery=w.texts[2];
  assert.match(recovery,/Проблема снята/);assert.match(recovery,/Причина: прогресс снова подтверждён/);assert.match(recovery,/Последнее наблюдение: 23\.11 23:28/,recovery);

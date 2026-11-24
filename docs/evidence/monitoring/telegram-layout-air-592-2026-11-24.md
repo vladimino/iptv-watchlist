@@ -1,6 +1,6 @@
 # Monitor Telegram text in short blocks: rendered samples and offline bubble QA (AIR-592 follow-up)
 
-Captured 2026-11-24 (UTC) from the repository only, for [ADR 0206](../../adr/0206-monitor-four-states-one-reminder-interval.md) decision 9, laid out per [ADR 0212](../../adr/0212-monitor-telegram-text-in-short-blocks.md) (Proposed at capture). **No production read or write, no Telegram call, no test alert and no network call was made.** The trigger is the [owner's visual FAIL](https://trello.com/c/c0d7VD4P#comment-6b05997439ebd35630d770b2) of the first natural production message (24 Nov 2026, 14:00:23 Madrid). That message is reproduced below in the new layout from its stated facts. The owner's screenshot is not stored anywhere.
+Captured 2026-11-24 (UTC) from the repository only, for [ADR 0206](../../adr/0206-monitor-four-states-one-reminder-interval.md) decision 9 and the layout kept in the monitor reference per [ADR 0212](../../adr/0212-monitor-telegram-text-in-short-blocks.md) (Proposed at capture). The samples illustrate the layout; they are not ADR constraints. **No production read or write, no Telegram call, no test alert and no network call was made.** The trigger is the [owner's visual FAIL](https://trello.com/c/c0d7VD4P#comment-6b05997439ebd35630d770b2) of the first natural production message (24 Nov 2026, 14:00:23 Madrid). That message is reproduced below in the new layout from its stated facts. The owner's screenshot is not stored anywhere.
 
 ## Method
 
@@ -26,7 +26,7 @@ Columns: configuration; samples; horizontal overflow; samples whose `Ref` wraps;
 
 | Configuration | Samples | Overflow | `Ref` wraps | Wrapped content lines | Owner message | Wrapped lines |
 | --- | --- | --- | --- | --- | --- | --- |
-| mobile 320 | 25 | 0 | 22 | 26 | 19 rows, 386 px | `Predictions recovery: Последнее наблюдение: 22.11 13:00`<br>`Recovery without evidence of progress: Последнее наблюдение: 22.11 13:00`<br>`Discovery alert: Исполнитель (Workflow) остановился`<br>`Discovery recovery while another issue is still open: Исполнитель (Workflow) остановился`<br>`Discovery stalled: ⏱ Без разрешённого прогресса: 3 ч 31 мин`<br>`Canonical Producer critical alert: Причина: producer_budget_infeasible`<br>`Canonical Producer escalation: ⛔ Ухудшение · Обогащение каталога`<br>`Canonical Producer escalation: Причина: producer_budget_infeasible`<br>`Test: Проверочное сообщение, инцидента нет`<br>`EPG stale: Программа не опубликована вовремя`<br>`Catalog posters failed: Недельный повтор завершился сбоем`<br>`Letterboxd events backlog: События слотов Letterboxd ждут доставки`<br>`Delayed escalation across UTC midnight: ⛔ Ухудшение · Обогащение каталога`<br>`Delayed escalation across UTC midnight: Причина: producer_identity_unresolved`<br>`Legacy pending needs_owner reminder: Детали: The Ratings run is quarantined (budget_exhaus`<br>`Canonical Producer without confirmed progress: ⚠️ Проблема · Обогащение каталога`<br>`Canonical Producer without confirmed progress: Последний прогресс: не было в этом окне`<br>`Letterboxd Watchlist stale for 24 h: Подробно: нет полного скана больше 24 ч`<br>`Ratings stalled: Подробно: ни дня, ни прогресса к 19:00 (срок 17:00)`<br>`Held prediction reminder: Сейчас: число доступных не читается`<br>`Held prediction reminder: Последнее наблюдение: 23.11 23:28`<br>`Prediction alert with a live lease and ownerless starts: Lease держит запуск, это не прогр`<br>`Prediction recovery by confirmed progress: Причина: прогресс снова подтверждён`<br>`Prediction recovery by confirmed progress: Последнее наблюдение: 23.11 23:28`<br>`Prediction recovery without eligible work: Очередь пуста или повторы исчерпаны`<br>`Prediction recovery without eligible work: Последнее наблюдение: 23.11 23:28` |
+| mobile 320 | 25 | 0 | 22 | 28 | 19 rows, 386 px | `Predictions recovery: Последнее наблюдение: 22.11 13:00`<br>`Recovery without evidence of progress: Последнее наблюдение: 22.11 13:00`<br>`Discovery alert: Исполнитель (Workflow) остановился`<br>`Discovery recovery while another issue is still open: Исполнитель (Workflow) остановился`<br>`Discovery stalled: ⏱ Без разрешённого прогресса: 3 ч 31 мин`<br>`Canonical Producer critical alert: Причина: producer_budget_infeasible`<br>`Canonical Producer escalation: ⛔ Ухудшение · Обогащение каталога`<br>`Canonical Producer escalation: Причина: producer_budget_infeasible`<br>`Test: Проверочное сообщение, инцидента нет`<br>`EPG stale: Программа не опубликована вовремя`<br>`Catalog posters failed: Недельный повтор завершился сбоем`<br>`Letterboxd events backlog: События слотов Letterboxd ждут доставки`<br>`Delayed escalation across UTC midnight: ⛔ Ухудшение · Обогащение каталога`<br>`Delayed escalation across UTC midnight: Причина: producer_identity_unresolved`<br>`Legacy pending needs_owner reminder: Детали: The Ratings run is quarantined (budget_exhaus`<br>`Canonical Producer without confirmed progress: ⚠️ Проблема · Обогащение каталога`<br>`Canonical Producer without confirmed progress: ⏱ Прогресс не подтверждён: 3 ч 30 мин`<br>`Canonical Producer without confirmed progress: Последний прогресс: не было в этом окне`<br>`Letterboxd Watchlist stale for 24 h: Подробно: нет полного скана больше 24 ч`<br>`Ratings stalled: Подробно: ни дня, ни прогресса к 19:00 (срок 17:00)`<br>`Held prediction reminder: Сейчас: число доступных не читается`<br>`Held prediction reminder: Последнее наблюдение: 23.11 23:28`<br>`Prediction alert with a live lease and ownerless starts: Lease держит запуск, это не прогр`<br>`Prediction alert with a live lease and ownerless starts: ⏱ Прогресс не подтверждён: 1 ч 1 `<br>`Prediction recovery by confirmed progress: Причина: прогресс снова подтверждён`<br>`Prediction recovery by confirmed progress: Последнее наблюдение: 23.11 23:28`<br>`Prediction recovery without eligible work: Очередь пуста или повторы исчерпаны`<br>`Prediction recovery without eligible work: Последнее наблюдение: 23.11 23:28` |
 | mobile 390 | 25 | 0 | 18 | 3 | 19 rows, 386 px | `Discovery stalled: ⏱ Без разрешённого прогресса: 3 ч 31 мин`<br>`Legacy pending needs_owner reminder: Детали: The Ratings run is quarantined (budget_exhaus`<br>`Ratings stalled: Подробно: ни дня, ни прогресса к 19:00 (срок 17:00)` |
 | desktop | 25 | 0 | 1 | 0 | 17 rows, 324 px | none |
 
@@ -50,7 +50,7 @@ The full `Ref` (about 60 characters) wraps on phones because it is one unbroken 
 В очереди: 3 600
 Запусков без фильма (за 2 ч): 11
 
-⏱ Без прогресса: 15 ч
+⏱ Прогресс не подтверждён: 15 ч
 Последний прогресс: 21.11 18:00
 
 🕒 Инцидент: меньше минуты
@@ -69,7 +69,8 @@ Ref: predictions_no_progress|alert|2026-11-22T08:00:23.000Z
 Нет подтверждённого прогресса
 Больше не наблюдается
 
-⏱ Без прогресса: не меньше 19 ч
+⏱ Прогресс не подтверждён
+Не меньше: 19 ч
 Последнее наблюдение: 22.11 13:00
 
 🕒 Инцидент: 5 ч
@@ -89,7 +90,8 @@ Ref: predictions_no_progress|recovery|2026-11-22T13:00:23.000Z
 Нет подтверждённого прогресса
 Больше не наблюдается
 
-⏱ Без прогресса: не меньше 19 ч
+⏱ Прогресс не подтверждён
+Не меньше: 19 ч
 Последнее наблюдение: 22.11 13:00
 
 🕒 Инцидент: 5 ч
@@ -304,7 +306,7 @@ Ref: letterboxd_events_backlog|alert|x
 
 🌐 В целом: есть проблемы
 
-📨 Доставлено с задержкой
+📨 Отправлено с задержкой
 Обнаружено: 07.11 00:30
 07.11 02:00:00 · Мадрид
 Ref: canonical_producer_failed|escalation|2026-11-06T23:30:00.000Z
@@ -340,7 +342,7 @@ Ref: predictions_no_progress|alert|x
 
 🌐 В целом: есть проблемы
 
-📨 Доставлено с задержкой
+📨 Отправлено с задержкой
 Обнаружено: 24.11 08:00
 24.11 09:00:00 · Мадрид
 Ref: ratings_quarantined|reminder|2026-11-24T07:00:00.000Z
@@ -375,7 +377,7 @@ Ref: id|qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
 Цепочка: active
 Проход: active
 
-⏱ Без прогресса: 3 ч 30 мин
+⏱ Прогресс не подтверждён: 3 ч 30 мин
 Отсчёт с: 24.11 07:30
 Последний прогресс: не было в этом окне
 
@@ -434,7 +436,8 @@ Ref: ratings_stalled|alert|x
 Сейчас: число доступных не читается
 Инцидент остаётся открытым
 
-⏱ Без прогресса: не меньше 2 ч
+⏱ Прогресс не подтверждён
+Не меньше: 2 ч
 Последнее наблюдение: 23.11 23:28
 
 🕒 Инцидент: 6 ч
@@ -458,7 +461,7 @@ Ref: predictions_no_progress|reminder|2026-11-24T04:28:00.000Z
 Запусков без фильма (за 2 ч): 8
 Lease держит запуск, это не прогресс
 
-⏱ Без прогресса: 1 ч 1 мин
+⏱ Прогресс не подтверждён: 1 ч 1 мин
 Последний прогресс: 23.11 22:27
 
 🕒 Инцидент: меньше минуты
@@ -480,7 +483,8 @@ Ref: predictions_no_progress|alert|2026-11-23T22:28:00.000Z
 Причина: прогресс снова подтверждён
 Последний прогресс: 24.11 06:13
 
-⏱ Без прогресса: не меньше 2 ч
+⏱ Прогресс не подтверждён
+Не меньше: 2 ч
 Последнее наблюдение: 23.11 23:28
 
 🕒 Инцидент: 7 ч
@@ -504,7 +508,8 @@ Ref: predictions_no_progress|recovery|2026-11-24T05:28:00.000Z
 Очередь пуста или повторы исчерпаны
 Это не подтверждённый прогресс
 
-⏱ Без прогресса: не меньше 2 ч
+⏱ Прогресс не подтверждён
+Не меньше: 2 ч
 Последнее наблюдение: 23.11 23:28
 
 🕒 Инцидент: 7 ч
@@ -527,7 +532,7 @@ Ref: predictions_no_progress|recovery|2026-11-24T05:28:00.000Z
 Доступно: 3 078
 В очереди: 3 083
 
-⏱ Без прогресса: 16 ч
+⏱ Прогресс не подтверждён: 16 ч
 Последний прогресс: 23.11 22:00
 
 🕒 Инцидент: 6 ч

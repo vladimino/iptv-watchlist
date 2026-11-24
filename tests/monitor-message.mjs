@@ -35,7 +35,7 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
   'В очереди: 3\u00a0600',
   'Запусков без фильма (за 2 ч): 11',
   '',
-  '⏱ Без прогресса: 15 ч',
+  '⏱ Прогресс не подтверждён: 15 ч',
   'Последний прогресс: 21.11 18:00',
   '',
   '🕒 Инцидент: меньше минуты',
@@ -61,7 +61,8 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
   'Нет подтверждённого прогресса',
   'Больше не наблюдается',
   '',
-  '⏱ Без прогресса: не меньше 19 ч',
+  '⏱ Прогресс не подтверждён',
+  'Не меньше: 19 ч',
   'Последнее наблюдение: 22.11 13:00',
   '',
   '🕒 Инцидент: 5 ч',
@@ -76,7 +77,7 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
  // Frozen: the same recovery delivered six hours later after an outage reports the same durations and says it was late.
  const late=render(message,'healthy','2026-11-22T19:30:00Z').split('\n');
  assert.ok(late.includes('🕒 Инцидент: 5 ч')&&late.includes('Снят: 22.11 14:00'),'a late delivery does not lengthen the incident');
- assert.ok(late.includes('📨 Доставлено с задержкой')&&late.includes('Обнаружено: 22.11 14:00')&&late.includes('22.11 20:30:00 · Мадрид'));
+ assert.ok(late.includes('📨 Отправлено с задержкой')&&late.includes('Обнаружено: 22.11 14:00')&&late.includes('22.11 20:30:00 · Мадрид'));
  // An issue that disappears without any evidence of progress (the queue split became unreadable: delayed, never an alert) still reads only as "no
  // longer seen": the stall line stays the last measured lower bound and nothing claims that predictions recovered.
  const unreadable=P.evaluatePredictions(predictionFacts(null,{stall:{state:'unknown',reason:'queue_unreadable',idleMs:null}}),null,T('2026-11-22T13:00:23Z'));
@@ -84,7 +85,7 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
  const gone=P.planAlerts(unreadable.issues,state,T('2026-11-22T13:00:23Z')).sends[0];
  const goneText=sample('Recovery without evidence of progress (the issue only disappeared)',render({...gone,id:'predictions_no_progress|recovery|x',queuedAt:gone.endedAt},'delayed','2026-11-22T13:00:30Z')).split('\n');
  assert.deepEqual(goneText.slice(1,3),['Нет подтверждённого прогресса','Больше не наблюдается']);
- assert.ok(goneText.includes('⏱ Без прогресса: не меньше 19 ч')&&goneText.includes('Последнее наблюдение: 22.11 13:00'));
+ assert.ok(goneText.includes('⏱ Прогресс не подтверждён')&&goneText.includes('Не меньше: 19 ч')&&goneText.includes('Последнее наблюдение: 22.11 13:00'));
  assert.ok(goneText.includes('🌐 В целом: есть задержки'));
  assert.ok(!goneText.some(line=>/восстановлен|Восстановлено/.test(line)),'a missing issue is not presented as a physical recovery');
 }
@@ -155,7 +156,7 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
  const message={kind:'escalation',key:'canonical_producer_failed',stream:'canonical_producer',severity:'degraded',critical:true,firstSeenAt:'2026-11-06T21:30:00.000Z',observedAt:'2026-11-06T23:30:00.000Z',queuedAt:'2026-11-06T23:30:00.000Z',metrics:{stoppedBy:'producer_identity_unresolved',hard:true},id:'canonical_producer_failed|escalation|2026-11-06T23:30:00.000Z'};
  const text=sample('Delayed escalation across UTC midnight',render(message,'degraded','2026-11-07T01:00:00Z')).split('\n');
  assert.ok(text.includes('🕒 Инцидент: 2 ч')&&text.includes('Открыт: 06.11 22:30'),'measured at the observation, not at the late send');
- assert.ok(text.includes('📨 Доставлено с задержкой')&&text.includes('Обнаружено: 07.11 00:30')&&text.includes('07.11 02:00:00 · Мадрид'));
+ assert.ok(text.includes('📨 Отправлено с задержкой')&&text.includes('Обнаружено: 07.11 00:30')&&text.includes('07.11 02:00:00 · Мадрид'));
  assert.ok(!render(message,'degraded','2026-11-06T23:40:00Z').includes('📨'),'no delay note for a normal delivery');
 }
 
@@ -210,11 +211,11 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
 
 // 11. A lower bound is rounded down: 19 h 40 min measured is "не меньше 19 ч", never 20 h; plain durations still round to the nearest.
 {
- const recovery=idleMs=>R.telegramText({kind:'recovery',key:'predictions_no_progress',stream:'predictions',severity:'healthy',firstSeenAt:'2026-11-22T08:00:00.000Z',endedAt:'2026-11-22T13:00:00.000Z',metrics:{idleMs},metricsAt:'2026-11-22T12:00:00.000Z',id:'x'},{overall:'healthy',now:T('2026-11-22T13:00:10Z')}).split('\n')[4];
- assert.equal(recovery(19*H+40*MIN),'⏱ Без прогресса: не меньше 19 ч');
- assert.equal(recovery(9*H+59*MIN+50000),'⏱ Без прогресса: не меньше 9 ч 59 мин');
- assert.equal(recovery(59*MIN+59000),'⏱ Без прогресса: не меньше 59 мин');
- assert.equal(recovery(49*H+50*MIN),'⏱ Без прогресса: не меньше 2 д 1 ч');
+ const recovery=idleMs=>R.telegramText({kind:'recovery',key:'predictions_no_progress',stream:'predictions',severity:'healthy',firstSeenAt:'2026-11-22T08:00:00.000Z',endedAt:'2026-11-22T13:00:00.000Z',metrics:{idleMs},metricsAt:'2026-11-22T12:00:00.000Z',id:'x'},{overall:'healthy',now:T('2026-11-22T13:00:10Z')}).split('\n')[5];
+ assert.equal(recovery(19*H+40*MIN),'Не меньше: 19 ч');
+ assert.equal(recovery(9*H+59*MIN+50000),'Не меньше: 9 ч 59 мин');
+ assert.equal(recovery(59*MIN+59000),'Не меньше: 59 мин');
+ assert.equal(recovery(49*H+50*MIN),'Не меньше: 2 д 1 ч');
  assert.deepEqual([R.duration(19*H+40*MIN),R.duration(19*H+40*MIN,{floor:true}),R.duration(90*MIN+40000,{floor:true})],['20 ч','19 ч','1 ч 30 мин']);
 }
 
@@ -226,7 +227,7 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
  assert.equal(baseline.key,'canonical_producer_no_progress');
  assert.deepEqual(baseline.metrics,{idleMs:3.5*H,sinceAt:'2026-11-24T06:30:00.000Z',chain:'active',run:'active',generation:'r9:3'},'no progressAt: nothing confirmed');
  const baselineText=sample('Canonical Producer without confirmed progress (window counted from the publication)',render({...baseline,kind:'alert',firstSeenAt:'2026-11-24T10:00:00.000Z',observedAt:'2026-11-24T10:00:00.000Z',id:'canonical_producer_no_progress|alert|x'},'degraded','2026-11-24T10:00:05Z')).split('\n');
- assert.ok(baselineText.includes('⏱ Без прогресса: 3 ч 30 мин')&&baselineText.includes('Отсчёт с: 24.11 07:30'));
+ assert.ok(baselineText.includes('⏱ Прогресс не подтверждён: 3 ч 30 мин')&&baselineText.includes('Отсчёт с: 24.11 07:30'));
  assert.ok(baselineText.includes('Последний прогресс: не было в этом окне'));
  assert.ok(!baselineText.some(line=>/Последний прогресс: 24\.11 07:30/.test(line)),'the reference is never called progress');
  const confirmed=P.evaluateCanonicalProducer({readable:true,held:false,label:'r9:3',publishedAt:'2026-11-24T05:00:00.000Z',sinceAt:'2026-11-24T07:00:00.000Z',progressAt:'2026-11-24T07:00:00.000Z',run:{passState:'active'},chain:{ownerState:'active'}},now).issues[0];
@@ -257,7 +258,7 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
  const base={key:'predictions_no_progress',stream:'predictions',severity:'degraded',critical:false,firstSeenAt:'2026-11-23T22:28:00.000Z',observedAt:'2026-11-24T04:28:00.000Z',id:'predictions_no_progress|reminder|2026-11-24T04:28:00.000Z'};
  const held=sample('Held prediction reminder (AIR-596)',render({...base,kind:'reminder',metrics:{held:'split_unknown',eligible:5,idleMs:2*H},metricsAt:'2026-11-23T22:28:00.000Z'},'degraded','2026-11-24T04:28:05Z')).split('\n');
  assert.deepEqual(held.slice(4,6),['Сейчас: число доступных не читается','Инцидент остаётся открытым']);
- assert.ok(held.includes('⏱ Без прогресса: не меньше 2 ч')&&held.includes('Последнее наблюдение: 23.11 23:28'));
+ assert.ok(held.includes('⏱ Прогресс не подтверждён')&&held.includes('Не меньше: 2 ч')&&held.includes('Последнее наблюдение: 23.11 23:28'));
  assert.ok(!held.some(line=>line.startsWith('Доступно')),'no stale count shown as current');
  const lease=sample('Prediction alert with a live lease and ownerless starts (AIR-596)',render({...base,kind:'alert',observedAt:'2026-11-23T22:28:00.000Z',metrics:{eligible:6969,pending:7000,orphanStarts:8,activeRun:true,idleMs:61*MIN,lastProgressAt:'2026-11-23T21:27:00.000Z'},id:'predictions_no_progress|alert|2026-11-23T22:28:00.000Z'},'degraded','2026-11-23T22:28:05Z')).split('\n');
  assert.ok(lease.includes('Запусков без фильма (за 2 ч): 8')&&lease.includes('Lease держит запуск, это не прогресс')&&lease.includes('Доступно: 6 969'));
@@ -269,13 +270,25 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
  assert.ok(!recovery('unknown_reason').includes('Причина'));
 }
 
+// 15. Known dates stay visible when the duration is unknown (partial or legacy typed metrics); the unknown duration reads «неизвестно», never 0.
+{
+ const at='2026-11-24T10:00:00Z',base={kind:'alert',severity:'degraded',firstSeenAt:'2026-11-24T09:00:00.000Z',observedAt:'2026-11-24T10:00:00.000Z',id:'x'};
+ const p=render({...base,key:'predictions_no_progress',stream:'predictions',metrics:{lastProgressAt:'2026-11-24T06:00:00.000Z'}},'degraded',at).split('\n');
+ assert.ok(p.includes('⏱ Прогресс не подтверждён: неизвестно')&&p.includes('Последний прогресс: 24.11 07:00'));
+ const d=render({...base,key:'discovery_stalled',stream:'discovery',metrics:{allowedAt:'2026-11-24T08:00:00.000Z',lastChunkAt:'2026-11-24T07:30:00.000Z'}},'degraded',at).split('\n');
+ assert.ok(d.includes('⏱ Без разрешённого прогресса: неизвестно')&&d.includes('Шаг разрешён с: 24.11 09:00')&&d.includes('Последний чанк: 24.11 08:30'));
+ const c=render({...base,key:'canonical_producer_no_progress',stream:'canonical_producer',metrics:{sinceAt:'2026-11-24T07:00:00.000Z'}},'degraded',at).split('\n');
+ assert.ok(c.includes('⏱ Прогресс не подтверждён: неизвестно')&&c.includes('Отсчёт с: 24.11 08:00')&&c.includes('Последний прогресс: не было в этом окне'));
+ assert.ok(!render({...base,key:'predictions_no_progress',stream:'predictions',metrics:{}},'degraded',at).includes('⏱'),'nothing known: no stall block at all');
+}
+
 // 12. The owner's production message of 24 Nov 2026, 14:00:23 Madrid (Ref predictions_no_progress|reminder|2026-11-24T13:00:23.490Z: 3078 eligible,
 // 3083 queued, 16 h without progress, last progress 23.11 22:00, opened 24.11 08:00, 6 h of incident, overall degraded), in the reviewed layout.
 {
  const text=sample('Owner production reminder of 24 Nov 2026 in the new layout',render({kind:'reminder',key:'predictions_no_progress',stream:'predictions',severity:'degraded',critical:false,firstSeenAt:'2026-11-24T07:00:23.000Z',observedAt:'2026-11-24T13:00:23.490Z',queuedAt:'2026-11-24T13:00:23.490Z',metrics:{eligible:3078,pending:3083,idleMs:16*H,lastProgressAt:'2026-11-23T21:00:00.000Z'},id:'predictions_no_progress|reminder|2026-11-24T13:00:23.490Z'},'degraded','2026-11-24T13:00:23.490Z'));
  assert.equal(text,['🔁 Напоминание · Прогнозы','Нет подтверждённого прогресса','🟠 Подтверждённая деградация','',
   'Доступно: 3 078','В очереди: 3 083','',
-  '⏱ Без прогресса: 16 ч','Последний прогресс: 23.11 22:00','',
+  '⏱ Прогресс не подтверждён: 16 ч','Последний прогресс: 23.11 22:00','',
   '🕒 Инцидент: 6 ч','Открыт: 24.11 08:00','',
   '🌐 В целом: есть проблемы','',
   '24.11 14:00:23 · Мадрид','Ref: predictions_no_progress|reminder|2026-11-24T13:00:23.490Z'].join('\n'));

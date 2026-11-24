@@ -38,7 +38,7 @@ Read `GET /api/monitor/status` first (a pure read), then the domain's own status
 
 Since [ADR 0206](../adr/0206-monitor-four-states-one-reminder-interval.md) (AIR-592) every alert is `degraded`; there is no `needs_owner`. A message marked `critical` (Telegram `🚨 Сбой` or `🔴 Критичный сбой`, webhook `critical: true`) is a proven hard failure (a quarantine, a held authority, a failed poster run, a `blocked` Producer stop) and arrived on the first snapshot; an ordinary one was confirmed first. Both remind at most every 6 hours after the last delivered message, and an ordinary issue that turns critical sends one `ESCALATION`. A `needs_owner` still shown in an old Telegram history or a status read before the first tick after deployment means the same as critical `degraded`. Acknowledgement and snooze do not exist; the owner fixes the cause and the issue recovers on its own.
 
-Reading a Telegram message (ADR 0206 decision 9, layout per ADR 0212). The message is a few short blocks separated by empty lines:
+Reading a Telegram message (content per ADR 0206 decision 9; the exact layout is kept in the reference, ADR 0212). The message is a few short blocks separated by empty lines:
 - **Header:** the kind, the subsystem, the problem and its severity.
 - **Statistics.**
 - **The domain's stall:** `⏱ Без …`, with what it is counted from on the next line (the last confirmed progress, the allowed step, or for the Producer a reference that may be the publication).
@@ -46,7 +46,7 @@ Reading a Telegram message (ADR 0206 decision 9, layout per ADR 0212). The messa
 - **The overall state.**
 - **A technical footer:** the time and `Ref`.
 
-The stall and the incident differ on purpose: the monitor may notice a stall hours after the last progress. `✅ Проблема снята` means the monitor no longer sees that issue, not that the domain is proven healthy. Its stall line is the last measured value (`не меньше`). A recovery with `Остаются другие проблемы` resolves only that issue: read `GET /api/monitor/status` for the rest. `📨 Доставлено с задержкой` means the channel was down or held; the durations still describe the moment of detection. `Ref` is the id to quote when comparing with the webhook or the stored outbox. Block-by-block table: [monitor reference](../reference/api/monitor.md#telegram-text).
+The stall and the incident differ on purpose: the monitor may notice a stall hours after the last progress. `✅ Проблема снята` means the monitor no longer sees that issue, not that the domain is proven healthy. Its stall lines are the last measured value (`Не меньше: …`, `Последнее наблюдение`), not proof that no progress happened since. A recovery with `Остаются другие проблемы` resolves only that issue: read `GET /api/monitor/status` for the rest. `📨 Отправлено с задержкой` means the channel was down or held; the durations still describe the moment of detection. `Ref` is the id to quote when comparing with the webhook or the stored outbox. Block-by-block table: [monitor reference](../reference/api/monitor.md#telegram-text).
 
 ## Cost, retention and privacy
 

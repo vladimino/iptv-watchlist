@@ -125,6 +125,8 @@ function stats(key, m) {
 // The domain's own stall at the observation the message describes: the duration on one line, what it is counted from on the next. Each stream says
 // what it measures: confirmed progress (predictions), allowed progress and the last finished chunk (Discovery), a reference that may be the
 // publication beside the confirmed progress (Producer), the due time (EPG).
+// The predictions and Producer stall is always about CONFIRMED progress: a run may be working without having committed anything yet.
+const CONFIRMED = '⏱ Прогресс не подтверждён';
 function stallBlock(key, m, observedMs) {
   if (!m || typeof m !== 'object') return [];
   const idle = finite(m.idleMs), at = value => madrid(stamp(value ?? null));
@@ -136,8 +138,10 @@ function stallBlock(key, m, observedMs) {
     return out;
   }
   if (key === 'discovery_stalled') {
-    const span = finite(m.stalledMs); if (span === null) return [];
-    return ['⏱ Без разрешённого прогресса: ' + duration(span), ...(m.allowedAt ? ['Шаг разрешён с: ' + at(m.allowedAt)] : []), 'Последний чанк: ' + at(m.lastChunkAt)];
+    // A known date stays shown even when the duration is unknown (a partial or legacy metric).
+    const span = finite(m.stalledMs);
+    if (span === null && !m.allowedAt && !m.lastChunkAt) return [];
+    return ['⏱ Без разрешённого прогресса: ' + (span === null ? 'неизвестно' : duration(span)), ...(m.allowedAt ? ['Шаг разрешён с: ' + at(m.allowedAt)] : []), 'Последний чанк: ' + at(m.lastChunkAt)];
   }
   if (key === 'discovery_executor_stalled') {
     // Only a finished chunk is progress here; the continuation record's own update time is not.
@@ -146,20 +150,20 @@ function stallBlock(key, m, observedMs) {
   }
   if (key === 'canonical_producer_no_progress') {
     // `sinceAt` is the reference of the window (it may be the publication or the first observation); only `progressAt` is confirmed progress.
-    if (idle === null) return [];
-    return ['⏱ Без прогресса: ' + duration(idle), ...(m.sinceAt ? ['Отсчёт с: ' + at(m.sinceAt)] : []), 'Последний прогресс: ' + (m.progressAt ? at(m.progressAt) : 'не было в этом окне')];
+    if (idle === null && !m.sinceAt && !m.progressAt) return [];
+    return [CONFIRMED + ': ' + (idle === null ? 'неизвестно' : duration(idle)), ...(m.sinceAt ? ['Отсчёт с: ' + at(m.sinceAt)] : []), 'Последний прогресс: ' + (m.progressAt ? at(m.progressAt) : 'не было в этом окне')];
   }
-  if (idle === null) return [];
-  return ['⏱ Без прогресса: ' + duration(idle), 'Последний прогресс: ' + (m.lastProgressAt ? at(m.lastProgressAt) : 'неизвестно')];
+  if (idle === null && !m.lastProgressAt) return [];
+  return [CONFIRMED + ': ' + (idle === null ? 'неизвестно' : duration(idle)), 'Последний прогресс: ' + (m.lastProgressAt ? at(m.lastProgressAt) : 'неизвестно')];
 }
-// A recovery only knows that the issue is no longer seen. What it can say about the domain is the last measured stall, at the last observation that
-// still showed the issue: a proven lower bound (rounded down), never the gap up to the tick that noticed the recovery.
+// A recovery (and a held reminder) only knows the last measured stall, at the last observation that still showed the issue: a proven lower bound
+// (rounded down), never the gap up to the tick that noticed the change. It never claims that no progress at all happened since then.
 function lastStallBlock(key, m, metricsAt) {
   if (!m || typeof m !== 'object') return [];
   const when = stamp(metricsAt ?? null);
   const span = key === 'discovery_stalled' ? finite(m.stalledMs) : finite(m.idleMs);
   if (span === null || when === null) return [];
-  return ['⏱ ' + (key === 'discovery_stalled' ? 'Без разрешённого прогресса' : 'Без прогресса') + ': не меньше ' + duration(span, {floor: true}), 'Последнее наблюдение: ' + madrid(when)];
+  return [key === 'discovery_stalled' ? '⏱ Без разрешённого прогресса' : CONFIRMED, 'Не меньше: ' + duration(span, {floor: true}), 'Последнее наблюдение: ' + madrid(when)];
 }
 // AIR-596 (ADR 0210): a prediction recovery says why it recovered; confirmed progress and an absence of eligible work never read alike.
 function recoveryBlock(reason, progressAt) {
@@ -212,8 +216,8 @@ export function telegramText(message, {overall = null, now = null} = {}) {
     // A recovery is about one issue: while the site is still degraded it says so instead of implying that everything is healthy.
     blocks.push(['🌐 ' + (recovered && level === 'degraded' ? 'Остаются другие проблемы' : 'В целом: ' + (OVERALL_LINE[level] || 'неизвестно'))]);
   }
-  // Technical footer: the send time in Madrid, a late-delivery note, and the full stable id.
-  const footer = [...(delayed !== null ? ['📨 Доставлено с задержкой', 'Обнаружено: ' + madrid(delayed)] : []), madrid(nowMs, true) + ' · Мадрид'];
+  // Technical footer: a late-send note (the body is built before the Bot API answers, so it says sent, not delivered), the send time in Madrid, the full id.
+  const footer = [...(delayed !== null ? ['📨 Отправлено с задержкой', 'Обнаружено: ' + madrid(delayed)] : []), madrid(nowMs, true) + ' · Мадрид'];
   const ref = line('Ref: ' + ascii(message?.id, 200));
   const body = [...blocks, footer].map(block => block.map(line).join('\n')).join('\n\n');
   // The bound never cuts the Ref line: the stable id stays the last line whatever the body holds.
