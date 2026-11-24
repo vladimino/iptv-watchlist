@@ -71,6 +71,10 @@ The re-review accepted the first follow-up and found two regressions of the ADR 
 
 Covered by `tests/discovery-events.mjs` 18d (oldest-first across both, both objects beyond one drain, a thrown cleanup put, a refused compare-and-swap followed by a thrown read, idempotent recovery, the logical bound from either side, one entry per hour across both).
 
+## Third review: owner disposition pending (24 Nov 2026)
+
+The third review accepted the drain fix and qualified the admission: the two objects have independent compare-and-swaps, so two simultaneous writers to different objects can each add one entry above 8,760, and a simultaneous repeat of one hour with two reason classes can queue two tuples (one visible journal event). `tests/discovery-events.mjs` 18e reproduces both deterministically and shows that the next admission is refused and the drain bound holds; the reference states the exact, best-effort guarantee. Whether this bounded exception to the ADR 0118 emergency limit is accepted, or a strict global admission mechanism is required, is an open Product Owner decision; it was asked on 24 Nov 2026 and not yet answered. The PR is not mergeable until it is.
+
 ## Tests (offline)
 
 - `tests/discovery-events.mjs` 17: the drained series of 22:00 (empty with real counters, also with the period's own chunks) and every negative (another hop, another generation, each queue part non-zero or unknown, an owed chunk, other pause reasons, a stale or non-terminal stop, a running reconcile, an unreadable status).

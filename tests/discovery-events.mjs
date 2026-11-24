@@ -1029,6 +1029,46 @@ resetAll();seed({count:3});elect();
  failEventPuts=false;assert.equal(ledger().length,1);assert.deepEqual(ledgerV2(),[],'no second entry for the hour');
 }
 
+// 18e. AIR-595 re-review: what two SIMULTANEOUS admissions to DIFFERENT objects can do (deterministic interleaving). Each object has its own compare-and-swap, so
+// the combined check is best effort: two writers that read the same 8,759 can each add one entry (8,761). The next admission sees the bound and is refused, nothing is
+// evicted, the drain stays at 64 a firing. A concurrent repeat of one hour with two reason classes can queue two tuples, and the journal still shows one event.
+{
+ const gen=GENERATION.replace(/-/g,'').slice(0,12),limit=call('DISCOVERY_REPORT_FAULT_LIMIT'),drain=call('DISCOVERY_REPORT_FAULT_DRAIN');
+ const hourKey=n=>new Date(Date.UTC(2026,9,1,0)+n*HOUR).toISOString().replace(/[-:]/g,'').slice(0,11);
+ const realBucketGet=bucket.get;
+ const notice=(reason,hour='20281111T10',at='2028-11-11T10:00:00.000Z')=>call('discoveryReportFailedEvent')({at,hourKey:hour,generation:GENERATION,reason,status:null});
+ // The first writer has read both objects; the second runs completely in between; the first then writes from its stale view.
+ const interleave=async(first,second)=>{
+  let armed=true,inner=null;
+  bucket.get=async(key,...rest)=>{
+   const object=await realBucketGet(key,...rest);
+   if(armed&&key===FAULT_KEY_V2){armed=false;inner=await call('deliverDiscoveryReportFailure')(env,second);}
+   return object;
+  };
+  try{return [await call('deliverDiscoveryReportFailure')(env,first),inner];}finally{bucket.get=realBucketGet;}
+ };
+ resetAll();
+ set(FAULT_KEY,{schemaVersion:2,faults:Array.from({length:limit-1},(_,i)=>[gen,hourKey(i),4,0])});
+ failEventPuts=true;
+ const [a,b]=await interleave(notice('write_conflict'),notice('epg_priority','20281111T11','2028-11-11T11:00:00.000Z'));
+ assert.deepEqual([a,b],['queued','queued'],'two simultaneous writers on different objects both pass the combined check');
+ assert.equal(ledger().length+ledgerV2().length,limit+1,'the bound can be exceeded by the simultaneous writers, one entry each');
+ assert.equal(await call('deliverDiscoveryReportFailure')(env,notice('write_conflict','20281111T12','2028-11-11T12:00:00.000Z')),'lost','the next admission sees the bound and is refused');
+ assert.equal(ledger().length+ledgerV2().length,limit+1,'nothing evicted');
+ failEventPuts=false;
+ let puts=0;const realBucketPut=bucket.put;bucket.put=async(key,...rest)=>{if(key.startsWith('events/items/'))puts++;return realBucketPut(key,...rest);};
+ await call('deliverDiscoveryReportFaults')(env);bucket.put=realBucketPut;
+ assert.equal(puts,drain,'the drain bound holds');
+ // the same hour, two reason classes, simultaneously: two tuples, one visible event
+ resetAll();failEventPuts=true;
+ const [c,d]=await interleave(notice('write_conflict'),notice('epg_priority'));
+ assert.deepEqual([c,d],['queued','queued']);assert.equal(ledger().length,1);assert.equal(ledgerV2().length,1);
+ failEventPuts=false;
+ await call('deliverDiscoveryReportFaults')(env);
+ assert.deepEqual(ledger(),[]);assert.deepEqual(ledgerV2(),[]);
+ assert.equal(notices().length,1,'one hour, one visible event');
+}
+
 // 19. AIR-595: a new generation started by the reconcile carries the accumulator, the outbox and the last closed hour of the previous record (the 17:00 UTC report
 // of 23 Nov 2026 had `from: null` because they were dropped). Nothing is lost or reported twice across the change.
 resetAll();
