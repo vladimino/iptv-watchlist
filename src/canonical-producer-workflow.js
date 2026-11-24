@@ -6,15 +6,15 @@ import {buildEpgPlan,runEpgProducerPass,retryEpgProducerResults,readCanonicalFre
 import {reconcileEpgRun} from './canonical-epg-person-producer.js';
 import {
  CHAIN_BOUNDARY_MARGIN_MS,CHAIN_CREATE_ATTEMPTS,CHAIN_FLOOR_D1_CALLS,CHAIN_FLOOR_D1_STATEMENTS,CHAIN_LEASE_MS,
- CHAIN_MAX_SLICES,CHAIN_QUIET_MS,CHAIN_REBASE_CAP,CHAIN_RECOVERY_ATTEMPT_CAP,CHAIN_RECOVERY_WINDOW_MS,CHAIN_SLICE_DEADLINE_MS,CHAIN_SLICE_SIZE,successorDecision,operationCost,admitOperation,
+ CHAIN_MAX_SLICES,CHAIN_QUIET_MS,CHAIN_REBASE_CAP,CHAIN_SLICE_DEADLINE_MS,CHAIN_SLICE_SIZE,successorDecision,operationCost,admitOperation,
  snapshotLabel,generationOrder,producerInstanceId,requireFence,
 } from './canonical-producer-fence.js';
 import {
  claimChain,completeChain,handoffChain,launchChain,listNonterminalChains,markWorkEntered,parseReleasePin,pinChainReleases,
- readChain,rebaseChain,recoverChain,relaunchChain,reopenChain,stopChain,supersedeChain,takeoverChain,yieldChain,
+ readChain,rebaseChain,recordHeldOutcome,recoverChain,relaunchChain,reopenChain,stopChain,supersedeChain,takeoverChain,yieldChain,
 } from './canonical-producer-chain.js';
 import {epgRunForGeneration} from './canonical-producer-store.js';
-import {chainOutcome,producerEvent,producerEventSession} from './canonical-producer-events.js';
+import {drainOutcomes,readOutcomeSchema} from './canonical-producer-events.js';
 
 const iso=ms=>new Date(ms).toISOString();
 // AIR-572 delivery hold: a static guard in code. While true, neither Producer entrypoint performs any I/O: the hourly
@@ -291,30 +291,15 @@ export async function readProducerMonitorFacts(env){
  return {ready:true,programmeRunId:row.programmeRunId,generation:Number(row.generation),label,publishedAt:row.publishedAt||null,chain,run};
 }
 
-// AIR-594: the Events Log reporter of Producer outcomes (src/canonical-producer-events.js). Every chain this tick reads is offered BEFORE the reconcile moves
-// it (a recovery, a reopen or a supersede ends the evidence of a stop or a pass), and a chain the tick itself supersedes in flight is reported after that
-// commit. It only reads the run row of an outcome that still needs its event, writes R2 only (the journal and its outbox) and never changes a decision below.
-const PRODUCER_EVENT_CAPS={attempts:CHAIN_RECOVERY_ATTEMPT_CAP,windowMs:CHAIN_RECOVERY_WINDOW_MS};
+// AIR-594 / ADR 0208 (Accepted, option B). The outcome rows are written by the terminal batches themselves (stop, completion, and here the in-flight supersede and the
+// fenced `held`). The reconcile probes the schema ONCE per tick: `absent` (proven) is today's behaviour; an unreadable or inconsistent schema never falls back to writing
+// no outcome: the tick then supersedes no in-flight chain, records no `held` and drains nothing (it reports `outcomes` with the code), and the next tick tries again.
+// The drain of pending rows to the R2 Events Log runs last; R2 never blocks or fails the Producer.
 const producerEventLog=line=>{try{console.log(JSON.stringify(line));}catch{/* a log line is never part of the reconcile */}};
-async function reportOutcome(env,events,chain){
- try{
-  const outcome=chainOutcome(chain);
-  if(!outcome||!(await events.wanted(chain,outcome)))return;
-  const run=await epgRunForGeneration(env,{sourceGeneration:snapshotLabel(chain.programme_run_id,Number(chain.input_generation))}).catch(()=>null);
-  await events.record(producerEvent({chain,run,outcome,caps:PRODUCER_EVENT_CAPS}));
- }catch{/* reporting never fails the reconcile */}
-}
-async function reportSuperseded(env,events,before,after){
- try{
-  if(!['pending','active','released'].includes(before?.owner_state)||after?.owner_state!=='superseded')return;
-  const run=await epgRunForGeneration(env,{sourceGeneration:snapshotLabel(after.programme_run_id,Number(after.input_generation))}).catch(()=>null);
-  await events.record(producerEvent({chain:after,run,outcome:'superseded',priorState:before.owner_state,caps:PRODUCER_EVENT_CAPS}));
- }catch{/* reporting never fails the reconcile */}
-}
 
 export async function reconcileProducerChain(env,{now=Date.now(),hold=PRODUCER_DELIVERY_HOLD}={}){
  if(hold!==false)return {ran:false,reason:HELD_BY_DELIVERY};
- let events=null;
+ let outcomes=null,drained=null;
  try{
   if(typeof env?.PRODUCER_WORKFLOW?.create!=='function')return {ran:false,reason:'workflow_unavailable'};
   let marker;
@@ -328,28 +313,33 @@ export async function reconcileProducerChain(env,{now=Date.now(),hold=PRODUCER_D
   const chain=await readChain(env,P).catch(()=>null);
   const passed=await epgRunForGeneration(env,{sourceGeneration:snapshotLabel(P,g)}).catch(()=>null);
   const rows=await listNonterminalChains(env).catch(()=>[]);
-  events=producerEventSession(env,{nowMs:now,log:producerEventLog});
-  for(const row of [...(chain?[chain]:[]),...rows.filter(row=>row.programme_run_id!==P)])await reportOutcome(env,events,row);
+  try{outcomes=await readOutcomeSchema(env);}catch(error){outcomes=error?.code||'producer_outcome_schema_unreadable';}
+  const active=outcomes==='active',known=outcomes==='active'||outcomes==='absent';
   for(const row of rows){
    if(row.programme_run_id===P)continue;
-   try{
-    const out=await supersedeChain(env,{chain:row,at});counts.supersede++;
-    await reportSuperseded(env,events,row,out?.chain);
-   }catch{counts.skipped++;}
+   // An in-flight chain's supersede must carry its outcome row; without a proven schema it waits for a tick that can write it.
+   if(!known&&['pending','active','released'].includes(row.owner_state)){counts.skipped++;continue;}
+   try{await supersedeChain(env,{chain:row,at,outcome:active});counts.supersede++;}catch{counts.skipped++;}
   }
+  // ADR 0208 decision 3: the reconcile held an eligible stop at the current revision; the row is fenced and written once.
+  const held=async row=>{
+   if(!active)return;
+   try{const out=await recordHeldOutcome(env,{chain:row,at});if(out.state==='recorded')counts.held=(counts.held||0)+1;}
+   catch(error){producerEventLog({event:'canonical_producer_held_failed',code:String(error?.code||'error').slice(0,60)});}
+  };
   const start=async(result)=>{
    if(!result||result.state==='skipped'||result.state==='skip'||result.state==='live'||result.state==='wait'||result.state==='held')return;
    const id=result.instanceId||producerInstanceId(P,result.epoch);
    await createInstance(env,id,{programmeRunId:P,epoch:result.epoch});
   };
   if(!chain){
-   if(passed?.pass_state==='passed')return {ran:true,reason:'already_current',...counts};
+   if(passed?.pass_state==='passed')return {ran:true,reason:'already_current',...counts,outcomes};
    const launched=await launchChain(env,{programmeRunId:P,generation:g,at,nowMs:now});
    if(launched.state==='launched'||launched.state==='exists'){
     counts.launched++;
     await createInstance(env,launched.instanceId||producerInstanceId(P,launched.chain?.owner_epoch||1),{programmeRunId:P,epoch:launched.epoch||launched.chain?.owner_epoch||1});
    }
-   return {ran:true,reason:'launch',...counts};
+   return {ran:true,reason:'launch',...counts,outcomes};
   }
   const expired=Date.parse(chain.lease_expires_at)+CHAIN_BOUNDARY_MARGIN_MS<now;
   if((chain.owner_state==='pending'||chain.owner_state==='active')&&expired){
@@ -360,16 +350,21 @@ export async function reconcileProducerChain(env,{now=Date.now(),hold=PRODUCER_D
    const quiet=chain.updated_at&&(now-Date.parse(chain.updated_at)>=CHAIN_QUIET_MS);
    if(chain.owner_state==='stopped'&&(chain.recovery_class==='transient'||chain.recovery_class==='receipt'||chain.recovery_class==='authority')){
     const t=await recoverChain(env,{chain,generation:g,at,nowMs:now});if(t.state==='pending'){counts.recover++;await start(t);}
+    if(t.state==='held')await held(chain);
    }else{
     const t=await reopenChain(env,{chain,generation:g,at,nowMs:now,quiet});if(t.state==='pending'){counts.reopen++;await start(t);}
+    if(t.state==='held'&&chain.owner_state==='stopped')await held(chain);
    }
   }
-  return {ran:true,reason:'reconciled',...counts};
+  return {ran:true,reason:'reconciled',...counts,outcomes};
  }catch(error){
   return {ran:false,reason:error?.code||'error'};
  }finally{
-  // The outbox drain and the ledger save, after every decision of the tick (a stop or pass that needed it is already durable by now).
-  if(events)await events.finish().catch(()=>null);
+  // After every decision of the tick: deliver at most OUTCOME_DRAIN_MAX pending outcome rows to the Events Log. A failure here changes nothing above.
+  if(outcomes==='active'){
+   try{drained=await drainOutcomes(env,{nowMs:now});}catch(error){drained={failed:true,code:String(error?.code||'error').slice(0,60)};}
+   if(drained&&(drained.taken||drained.failed===true))producerEventLog({event:'canonical_producer_outcomes',...drained});
+  }else if(outcomes&&outcomes!=='absent')producerEventLog({event:'canonical_producer_outcomes',schema:String(outcomes).slice(0,60)});
  }
 }
 
@@ -437,7 +432,17 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
  const claimed=await doStep('claim',async()=>claimChain(ienv,{programmeRunId:P,epoch,instanceId:producerInstanceId(P,epoch),nonce,generation:Number(published.generation),revision:chain.revision,at:new Date().toISOString(),nowMs:Date.now()}));
  if(claimed.state!=='owned')return {state:'not_owner'};
  chain=claimed.chain;
- let fence={kind:'chain',programmeRunId:P,epoch,nonce,inputGeneration:Number(chain.input_generation),revision:chain.revision};
+ // ADR 0208 (AIR-594): ONE schema probe per invocation, metered like every other read, before any work. `active` makes every terminal batch of this instance append its
+ // outcome row; a proven `absent` schema writes none (today's batches). An unreadable probe writes nothing at all and returns: the claimed lease lapses and the hourly
+ // reconcile takes the chain over (the fenced recovery of any failed terminal batch). An inconsistent schema stops the chain on the record (fail_closed), without an outcome row.
+ let outcomes;
+ try{outcomes=await readOutcomeSchema(ienv);}catch(error){outcomes=error?.code||'producer_outcome_schema_unreadable';}
+ let fence={kind:'chain',programmeRunId:P,epoch,nonce,inputGeneration:Number(chain.input_generation),revision:chain.revision,outcomes:outcomes==='active'};
+ if(outcomes==='producer_outcome_schema_unreadable')return {state:'error',code:outcomes};
+ if(outcomes!=='active'&&outcomes!=='absent'){
+  await stopChain({...ienv,producerFence:fence},{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:'producer_outcome_schema_invalid'}).catch(()=>{});
+  return {state:'stopped',code:'producer_outcome_schema_invalid'};
+ }
  let rebases=0;
  // Replay safety (ADR 0141 D5, AIR-572). The meter lives in this execution only, so a `work` step that runs a SECOND time for the same epoch (a step retry, or an instance
  // replayed with the cached nonce and claim and fresh memory) cannot know what the failed attempt spent or which revision it reached. Such a re-entry never runs the expensive

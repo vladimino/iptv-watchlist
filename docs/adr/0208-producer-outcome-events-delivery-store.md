@@ -1,9 +1,9 @@
 # ADR 0208: Where the durable evidence of a Canonical Producer outcome lives until its Events Log entry is delivered
 
-**Status:** Proposed  
-**Original decision date:** pending (owner decision required)  
+**Status:** Accepted (option B)  
+**Original decision date:** 2026-11-24  
 **Recorded at:** 2026-11-24  
-**Approval source:** not documented (pending)  
+**Approval source:** [Product Owner decision of 2026-11-24, recorded by the coordinator](https://github.com/vladimino/iptv-watchlist/pull/976#issuecomment-7128839612) (the owner approved the revised ADR at `658590ab` as presented, «в таком виде утверждаю»: option B, indefinite retention, the fenced `held` outcome, the scoped read-only Monitor fact)  
 **Related work:** [AIR-594](https://trello.com/c/iPaLDfzP), [PR #976](https://github.com/vladimino/iptv-watchlist/pull/976), [independent review of `d1ca719c`](https://github.com/vladimino/iptv-watchlist/pull/976#pullrequestreview-6037146819)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -22,9 +22,9 @@ The first implementation at `d1ca719c` (PR #976) read the chain in the hourly re
 
 These are not corner cases of one implementation: any design that keeps the outcome only on a mutable row and copies it out afterwards has a window between the transition and the copy. Paid Workers is the cost baseline (AGENTS.md); write counts here are a few rows a day and are not a decision driver.
 
-## Decision (proposed; option B is recommended)
+## Decision (Accepted: option B)
 
-**Option B — a D1 outcome outbox written in the same batch as the transition.** Pending the owner's choice between A and B below. The [design review of `05304216`](https://github.com/vladimino/iptv-watchlist/pull/976#issuecomment-7128375975) recommends B with a distinct `held` outcome; its [revision](https://github.com/vladimino/iptv-watchlist/pull/976#issuecomment-7128509290), after the owner challenged the 30-day cleanup, replaces that retention with keeping every row. Both are reviewer recommendations, not the owner's decision.
+**Option B — a D1 outcome outbox written in the same batch as the transition.** Selected by the Product Owner on 2026-11-24 ([decision record](https://github.com/vladimino/iptv-watchlist/pull/976#issuecomment-7128839612)), with indefinite retention, the distinct `held` outcome and the scoped read-only Monitor fact, and no alert or Telegram policy change. The [design review of `05304216`](https://github.com/vladimino/iptv-watchlist/pull/976#issuecomment-7128375975) recommends B with a distinct `held` outcome; its [revision](https://github.com/vladimino/iptv-watchlist/pull/976#issuecomment-7128509290), after the owner challenged the 30-day cleanup, replaces that retention with keeping every row. Both were reviewer recommendations; the owner's decision is the record above.
 
 1. **One additive table** (migration `0038`, the number provisional until checked against live `main` at implementation; the file is inert until applied, and applying it is a separate owner GO): `canonical_producer_outcome`, primary key the event id (`canonical_producer-<P>-g<g>-passed`, `-e<epoch>-stopped`, `-e<epoch>-superseded`, `-e<epoch>-held`), with the outcome, `at`, the programme run id and generation, the counters snapshot and the chain counts as typed, nullable columns (no free text), and delivery columns `state` (`pending`, `delivered`), `attempts`, `next_attempt_at`, `delivered_at`. Writable only while the Film/Person marker is `d1`/`open` (the trigger pattern of 0020 and 0023). Rows are inserted and moved `pending` → `delivered`; they are **never deleted** (6). The trigger pattern forbids deletion and any change of the identity and payload columns: only the delivery columns move.
 2. **Atomic payload and ordering inside the batch.** The outcome row is a plain `INSERT … SELECT` (never `INSERT OR IGNORE`) placed **last** in the batch that makes the outcome, after the run and chain updates and their compare-and-swap assertions, followed by a `changes()=1` assertion, so it reads the state those updates just wrote and a missing or conflicting row fails the whole batch instead of committing the transition without its outcome. A transition happens once by its own compare-and-swap, so an identical replay of the batch is already refused by that CAS before the insert; a primary-key conflict is therefore an invariant failure, never a silent no-op.
@@ -42,7 +42,7 @@ These are not corner cases of one implementation: any design that keeps the outc
 7. **Visibility, scoped.** The Monitor stream `canonical_producer` gains one read-only fact, `outcomeDelivery: {pending, oldestPendingAt, readable}`, shown in the Monitor status and the runbook. It is not a Producer health input: a healthy Producer with pending deliveries stays healthy, and no new alert, reminder or Telegram policy is added by this ADR.
 8. **Budget and ordering.** Inside a Workflow instance each terminal batch gains the insert and its assertion (two statements) and each invocation the probe; both are charged to the existing ceilings (`CHAIN_COST.entry`, `CHAIN_COST.complete`, `CHAIN_COST.end`) and `tests/canonical-producer-budget*.mjs` must keep proving every admitted operation within its ceiling on the measured ADR 0141 budget. The reconcile's reads and writes are outside the instance budget. Order: (1) the implementation is merged and deployed, inert because the probe proves the table absent; (2) a separate owner GO applies the migration, with its own evidence; (3) the next invocation and tick find the table and start writing. The R2 ledger of `d1ca719c` is not shipped. The Mermaid flow on the observability page, the events and driver references, the D1 schema reference and the runbook are updated with the implementation, with rendered Mermaid QA.
 
-**Option A — keep the R2 ledger and close the windows inside it** (not recommended): write a supersede **intent** to the ledger before the supersede and confirm it from the chain revision afterwards; distinguish absent, invalid and unreadable ledgers (an invalid one is preserved under a quarantine key and stops reporting, visible in the Monitor, never replaced); when the ledger is unreadable, still put the event create-only and accept the residual loss when both the journal and the ledger are unreachable at the moment of a transition; compute the recovery wording at the reconcile tick that decides.
+**Option A — keep the R2 ledger and close the windows inside it** (not selected): write a supersede **intent** to the ledger before the supersede and confirm it from the chain revision afterwards; distinguish absent, invalid and unreadable ledgers (an invalid one is preserved under a quarantine key and stops reporting, visible in the Monitor, never replaced); when the ledger is unreadable, still put the event create-only and accept the residual loss when both the journal and the ledger are unreachable at the moment of a transition; compute the recovery wording at the reconcile tick that decides.
 
 **Not decided here:** the event fields and display (events reference), any change to the Producer protocol of ADR 0141 beyond the extra statement in the terminal batches, any production apply, activation, backfill or manual run.
 
@@ -76,7 +76,7 @@ This ADR authorizes nothing in production. Under B, applying `0038` is a separat
 
 ## Evidence
 
-- **Original decision:** pending.
+- **Original decision:** [Product Owner decision of 2026-11-24](https://github.com/vladimino/iptv-watchlist/pull/976#issuecomment-7128839612) (option B as revised at `658590ab`).
 - **Implementation:** [PR #976](https://github.com/vladimino/iptv-watchlist/pull/976) at `d1ca719c` implements the R2 ledger that this ADR replaces with option A or B.
 - **Dated verification:** not recorded (offline design; nothing applied).
 - **Design review:** [coordinator review of `05304216`](https://github.com/vladimino/iptv-watchlist/pull/976#issuecomment-7128375975) (recommends B and `held`; not an owner decision); [retention revision](https://github.com/vladimino/iptv-watchlist/pull/976#issuecomment-7128509290) (keep every row indefinitely; supersedes the 30-day retention of that review).
@@ -84,7 +84,7 @@ This ADR authorizes nothing in production. Under B, applying `0038` is a separat
 
 ## Follow-ups
 
-- Owner decision on A or B (and, under B, on indefinite retention of every row, the `held` report and the scoped Monitor fact).
+- Owner decision: taken 2026-11-24, option B with indefinite retention, the `held` report and the scoped Monitor fact (see Approval source).
 - Implementation of the chosen option in PR #976 (B: migration file, inert until applied; writers; drain; Monitor fact; tests), then a separate owner GO to apply `0038` under B.
 - Acceptance of the implementation under B: the asserted insert last in every terminal batch on the real batch order (pass, both complete paths, stops with and without a run row, supersede only from an in-flight state); a proven-absent schema writes nothing and an unreadable or inconsistent one fails closed; the fenced `held` row once per `(P, epoch)`; a fair, bounded drain with no eviction and no duplicate journal item on replay; no delete statement anywhere and a schema trigger that refuses deletion and payload changes; the budget proofs within the ADR 0141 ceilings.
 - Natural-run acceptance of AIR-594 after activation.

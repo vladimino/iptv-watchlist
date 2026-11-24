@@ -4,6 +4,7 @@
 import {database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
 import {writerRoute} from './canonical-writer-route.js';
+import {IN_FLIGHT_STATES,outcomeId,outcomeInsert,stopRecovery} from './canonical-producer-events.js';
 import {
  CHAIN_BOUNDARY_MARGIN_MS,CHAIN_CLAIM_WINDOW_MS,CHAIN_EPOCH_CAP,CHAIN_LEASE_MS,CHAIN_PROGRESS_RELAUNCH_CAP,
  CHAIN_QUIET_MS,CHAIN_REBASE_CAP,CHAIN_RECOVERY_ATTEMPT_CAP,CHAIN_RECOVERY_WINDOW_MS,
@@ -11,6 +12,7 @@ import {
 } from './canonical-producer-fence.js';
 
 const {assertSql,FENCE}=fenced;
+const RECOVERY_CAPS=Object.freeze({attempts:CHAIN_RECOVERY_ATTEMPT_CAP,windowMs:CHAIN_RECOVERY_WINDOW_MS});
 const COLUMNS='programme_run_id,input_generation,run_key,release_pin,owner_epoch,owner_instance,claim_nonce,owner_state,lease_expires_at,handoff_count,takeover_count,rebase_count,relaunch_count,reopen_count,stopped_by,recovery_class,recovery_attempts,streak_started_at,next_attempt_at,progress_relaunches,revision,created_at,updated_at';
 const SKIPPED=Object.freeze({state:'skipped',reason:'film_person_route_not_open'});
 const iso=ms=>new Date(ms).toISOString();
@@ -202,7 +204,7 @@ export async function completeChain(env,{fence:f,revision,at}={}){
  requireFence(f,['chain']);
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
- await commit(env,gate,[fence(gate),...fenceStatements(f),...completeChainStatements(f,at,revision)]);
+ await commit(env,gate,[fence(gate),...fenceStatements(f),...completeChainStatements(f,at,revision),...passedOutcomeStatements(f,at)]);
  const chain=await readChain(env,f.programmeRunId);
  if(Number.isInteger(Number(chain?.revision)))f.revision=Number(chain.revision);
  return {state:'complete',chain};
@@ -212,6 +214,19 @@ export function completeChainStatements(fence,at,revision){
  requireFence(fence,['chain']);
  return [["UPDATE canonical_producer_chain SET owner_state='complete',revision=revision+1,updated_at=? WHERE programme_run_id=? AND owner_epoch=? AND claim_nonce=? AND owner_state='active' AND input_generation=? AND revision=?",
   [at,fence.programmeRunId,fence.epoch,fence.nonce,fence.inputGeneration,revision]],changesOne()];
+}
+
+// ADR 0208 (AIR-594): the outcome row of a terminal chain transition, appended LAST to the transition's own batch and asserted (`changes()=1`), only when the
+// Workflow's schema probe proved the outcome table active (`fence.outcomes === true`). The probe of an absent schema leaves the flag false: no row, today's batch.
+export function passedOutcomeStatements(fence,at){
+ if(fence?.outcomes!==true)return [];
+ const id=outcomeId(fence.programmeRunId,'passed',fence.inputGeneration);
+ return [outcomeInsert({id,outcome:'passed',at,programmeRunId:fence.programmeRunId,epoch:fence.epoch,state:'complete'}),changesOne()];
+}
+export function stoppedOutcomeStatements(fence,at,recovery){
+ if(fence?.outcomes!==true)return [];
+ const id=outcomeId(fence.programmeRunId,'stopped',fence.epoch);
+ return [outcomeInsert({id,outcome:'stopped',at,recovery,programmeRunId:fence.programmeRunId,epoch:fence.epoch,state:'stopped'}),changesOne()];
 }
 
 export function leaseRenewStatements(fence,at,nowMs,revision){
@@ -232,7 +247,7 @@ export async function markWorkEntered(env,{fence:f,at,nowMs}={}){
  return {state:'entered'};
 }
 
-export async function stopChain(env,{fence:f,revision,at,stoppedBy,recoveryClass,nowMs}={}){
+export async function stopChain(env,{fence:f,revision,at,stoppedBy,recoveryClass,nowMs,caps=RECOVERY_CAPS}={}){
  requireFence(f,['chain']);
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
@@ -244,17 +259,42 @@ export async function stopChain(env,{fence:f,revision,at,stoppedBy,recoveryClass
  const next=klass==='transient'||klass==='receipt'?iso(now+recoveryBackoffMs(attempts)):null;
  await commit(env,gate,[fence(gate),...fenceStatements(f,{ownerOnly:true}),
   ["UPDATE canonical_producer_chain SET owner_state='stopped',stopped_by=?,recovery_class=?,streak_started_at=COALESCE(streak_started_at,?),next_attempt_at=?,revision=revision+1,updated_at=? WHERE programme_run_id=? AND owner_epoch=? AND claim_nonce=? AND owner_state='active' AND input_generation=? AND revision=?",
-   [stoppedBy,klass,at,next,at,f.programmeRunId,f.epoch,f.nonce,f.inputGeneration,revision]],changesOne()]);
+   [stoppedBy,klass,at,next,at,f.programmeRunId,f.epoch,f.nonce,f.inputGeneration,revision]],changesOne(),
+  ...stoppedOutcomeStatements(f,at,stopRecovery({recoveryClass:klass,attempts:stored?.recovery_attempts||0,streakStartedAt:stored?.streak_started_at||null,at,caps}))]);
  return {state:'stopped',chain:await readChain(env,f.programmeRunId)};
 }
 
 // `guards` (optional, default none) are extra [sql, params] assertions placed after the marker fence in the SAME batch; the hourly reconcile passes none, so its batch is unchanged.
-export async function supersedeChain(env,{chain,at,guards=[]}={}){
+// `outcome` (ADR 0208, the hourly reconcile only, when its schema probe proved the outcome table active): a chain read in flight (pending, active, released) gets its
+// `superseded` row LAST in the same batch, read from the row the update just wrote at exactly the guarded revision + 1, with the pre-state of the caller's guarded read.
+// A complete or stopped chain adds no row. The owner path (`producer_chain_operator`) never passes it.
+export async function supersedeChain(env,{chain,at,guards=[],outcome=false}={}){
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
+ const inFlight=outcome===true&&IN_FLIGHT_STATES.includes(chain.owner_state);
  await commit(env,gate,[fence(gate),...guards,
-  ["UPDATE canonical_producer_chain SET owner_state='superseded',revision=revision+1,updated_at=? WHERE programme_run_id=? AND revision=? AND owner_state NOT IN ('superseded')",[at,chain.programme_run_id,chain.revision]],changesOne()]);
+  ["UPDATE canonical_producer_chain SET owner_state='superseded',revision=revision+1,updated_at=? WHERE programme_run_id=? AND revision=? AND owner_state NOT IN ('superseded')",[at,chain.programme_run_id,chain.revision]],changesOne(),
+  ...(inFlight?[outcomeInsert({id:outcomeId(chain.programme_run_id,'superseded',Number(chain.owner_epoch)),outcome:'superseded',at,recovery:'none',priorState:chain.owner_state,
+   programmeRunId:chain.programme_run_id,epoch:Number(chain.owner_epoch),state:'superseded',revision:Number(chain.revision)+1}),changesOne()]:[])]);
  return {state:'superseded',chain:await readChain(env,chain.programme_run_id)};
+}
+
+// ADR 0208 decision 3 (AIR-594): the `held` outcome, written by the hourly reconcile only, in the tick where `recoverChain` or `reopenChain` answered `held` for this
+// stopped chain. One batch: the marker fence, then the insert guarded by the chain's CURRENT epoch, state `stopped` and revision, and by the `stopped` row of the same
+// (P, epoch) saying `eligible`; then `changes()=1`. The caller reads both rows first: an existing `held` row (a repeated tick) or a stop row that is absent (an outcome
+// of before activation) or not eligible means no write. Returns {state:'recorded'|'exists'|'not_eligible'|'skipped'}.
+export async function recordHeldOutcome(env,{chain,at}={}){
+ if(!chain||chain.owner_state!=='stopped')return {state:'not_eligible'};
+ const gate=await routeOf(env);
+ if(!gate.open)return SKIPPED;
+ const epoch=Number(chain.owner_epoch),P=chain.programme_run_id;
+ const heldId=outcomeId(P,'held',epoch),stopId=outcomeId(P,'stopped',epoch);
+ const rows=await many(database(env),'SELECT id,recovery FROM canonical_producer_outcome WHERE id IN (?,?)',[heldId,stopId]);
+ if(rows.some(row=>row.id===heldId))return {state:'exists'};
+ if(!rows.some(row=>row.id===stopId&&row.recovery==='eligible'))return {state:'not_eligible'};
+ await commit(env,gate,[fence(gate),outcomeInsert({id:heldId,outcome:'held',at,recovery:'owner',programmeRunId:P,epoch,state:'stopped',revision:Number(chain.revision),
+  extra:{sql:"EXISTS (SELECT 1 FROM canonical_producer_outcome s WHERE s.id=? AND s.recovery='eligible')",params:[stopId]}}),changesOne()]);
+ return {state:'recorded'};
 }
 
 // ---- AIR-572: the owner-only terminalization of a STALE Producer chain (MCP tool producer_chain_operator) ------------------------------------------------------------

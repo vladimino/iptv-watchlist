@@ -108,7 +108,18 @@ The Producer was invisible for a week because no monitor stream judged it: 113 o
 
 ## Canonical Producer outcomes in the user Events Log (AIR-594)
 
-Beside the Monitor stream, the user-facing «События» journal carries one `canonical_producer` event per Producer outcome: a completed pass `P:g`, a recorded stop `(P, epoch)`, or an in-flight pass superseded by a newer publication. It is a product view of the durable chain and run rows, separate from alerting. The hourly `reconcileProducerChain` offers each chain it reads before it moves it, puts the event create-only into `events/items/`, and queues a refused put in the bounded R2 outbox `events/canonical-producer-outbox.json` that later ticks drain; the Workflow instances write nothing, the reporter writes no D1 row and never changes a reconcile decision, and outcomes older than the outbox baseline are never reported. See the [events reference](../reference/domain/events.md#canonical-producer-outcome-report-canonical_producer).
+Beside the Monitor stream, the user-facing «События» journal carries one `canonical_producer` event per Producer outcome: a completed pass `P:g`, a recorded stop `(P, epoch)`, an in-flight pass superseded by a newer publication, or a held automatic retry ([ADR 0208](../adr/0208-producer-outcome-events-delivery-store.md), Accepted, option B). The outcome is a D1 row of `canonical_producer_outcome`, inserted last and asserted in the same batch as the transition, so a transition is never committed without its outcome. The hourly reconcile delivers pending rows create-only to the R2 journal after all its decisions; a refused put leaves the row pending and never blocks the Producer. Rows are kept indefinitely. Until migration `0038` is applied (a separate owner GO) the schema probe proves the table absent and nothing is reported. See the [events reference](../reference/domain/events.md#canonical-producer-outcome-report-canonical_producer).
+
+```mermaid
+flowchart LR
+    wf["Producer Workflow instance"] -->|"pass completion or stop:<br/>one D1 batch, outcome row last"| d1[("D1 canonical_producer_outcome<br/>pending, kept indefinitely")]
+    rec["Hourly reconcile"] -->|"in-flight supersede or held:<br/>one guarded D1 batch"| d1
+    d1 -->|"at most 8 due rows a tick"| drain["Drain in the hourly reconcile"]
+    drain -->|"create-only put"| journal["R2 events/items/<br/>type canonical_producer"]
+    drain -->|"CAS: delivered, or retry in 1 h"| d1
+    d1 -.->|"read-only fact, no alert"| mon["Monitor stream canonical_producer<br/>outcomeDelivery"]
+    journal --> api["GET /api/events<br/>read-only"]
+```
 
 ## Catalog poster weekly retry: one fact source, three surfaces
 

@@ -91,7 +91,7 @@ const FILE_SITES={
  'src/admin/film-title-route.js':{r2:1,wrapper:0,dynamic:0},
  'src/admin/letterboxd-archive-apply.js':{r2:2,wrapper:0,dynamic:1}, // AIR-558: -1 write, the candidates-rollback marker of the retired archive rollback
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
- 'src/canonical-producer-events.js':{r2:2,wrapper:0,dynamic:1},   // AIR-594: the Producer outcome outbox (events/canonical-producer-outbox.json, compare-and-swap) and the immutable canonical_producer events (events/items/<reverse-timestamp>-<id>.json, create-only); neither is a projector input; the hourly Producer reconcile only
+ 'src/canonical-producer-events.js':{r2:1,wrapper:0,dynamic:1},   // AIR-594 / ADR 0208: the immutable canonical_producer events (events/items/<reverse-timestamp>-<id>.json, create-only) put by the hourly drain from the D1 outcome rows; not a projector input; the hourly Producer reconcile only
  'src/catalog-poster-weekly.js':{r2:2,wrapper:0,dynamic:1},   // ADR 0179 (AIR-543): the weekly poster checkpoint (epg/catalog-poster-weekly.json) and the immutable catalog_posters events (events/items/<reverse-timestamp>-<id>.json); neither is a projector input
  'src/letterboxd-sync.js':{r2:1,wrapper:0,dynamic:1},   // ADR 0186: the create-only put of a slot Event (events/items/..., not a projector input)
  'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0118: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)

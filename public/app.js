@@ -639,11 +639,13 @@ function eventPresentationStatus(event){
    if(event.state==='error')return 'error';
    return null;
   }
-  // AIR-594: one logical Producer pass (P:g) or one recorded stop. `passed` is a success only with zero failed units AND zero unclosed results; a stop the
-  // hourly reconcile resumes by itself is an interruption, a stop that needs the owner an error, a pass cut by a newer publication an interruption.
+  // AIR-594 / ADR 0208: one logical Producer pass (P:g), one recorded stop, one in-flight pass cut by a newer publication, or one held automatic recovery.
+  // `passed` is a success only with zero failed units AND zero unclosed results; a stop eligible for the automatic retry is an interruption (eligibility, not a
+  // promise), a stop or a held recovery that needs the owner an error, a superseded pass an interruption.
   case 'canonical_producer':
    if(event.outcome==='passed')return event.failed===0&&event.openResults===0?'success':'warning';
-   if(event.outcome==='stopped')return event.recovery==='automatic'?'interrupted':event.recovery==='owner'?'error':'warning';
+   if(event.outcome==='stopped')return event.recovery==='eligible'?'interrupted':event.recovery==='owner'?'error':'warning';
+   if(event.outcome==='held')return 'error';
    if(event.outcome==='superseded')return 'interrupted';
    return null;
   case 'catalog_posters':
@@ -2855,7 +2857,8 @@ function canonicalProducerEventHTML(event){
  const int=v=>Number.isInteger(v)&&v>=0,num=v=>int(v)?String(v):'неизвестно',code=v=>typeof v==='string'&&/^[a-z][a-z_0-9]{0,79}$/.test(v)?v:null;
  const outcome=event.outcome,failed=int(event.failed)?event.failed:null,open=int(event.openResults)?event.openResults:null;
  const title=outcome==='passed'?(failed===0&&open===0?'Обогащение каталога завершено':failed>0?'Обогащение каталога завершено с ошибками':open>0?'Обогащение каталога завершено, остались незакрытые результаты':'Обогащение каталога завершено, итог не подтверждён')
-  :outcome==='stopped'?(event.recovery==='automatic'?'Обогащение каталога остановлено, продолжится автоматически':event.recovery==='owner'?'Обогащение каталога остановлено, нужно решение владельца':'Обогащение каталога остановлено')
+  :outcome==='stopped'?(event.recovery==='eligible'?'Обогащение каталога остановлено, допускает автоматический повтор':event.recovery==='owner'?'Обогащение каталога остановлено, нужно решение владельца':'Обогащение каталога остановлено')
+  :outcome==='held'?'Автоматический повтор обогащения каталога не состоялся, нужно решение владельца'
   :outcome==='superseded'?'Обогащение каталога прервано: вышла новая программа':'Отчёт обогащения каталога';
  const rows=[['Единиц в плане',num(event.unitCount)],['Обработано',num(event.processed)],['Применено',num(event.applied)],['Без изменений',num(event.noop)],['Оставлено как есть',num(event.kept)],['Ошибки',num(event.failed)],['Осталось',num(event.remaining)]];
  if(outcome==='passed')rows.push(['Незакрытых результатов',num(event.openResults)]);
@@ -2868,7 +2871,10 @@ function canonicalProducerEventHTML(event){
  const tech=[];
  if(outcome==='stopped'){
   tech.push(`<p class="event-note">Код остановки: ${reason?`<code>${reason}</code>`:'не указан'}${klass?` · класс: <code>${klass}</code>`:''}.</p>`);
-  tech.push(`<p class="event-note">${event.recovery==='automatic'?'Штатное восстановление: часовой запуск продолжит с сохранённого места.':event.recovery==='owner'?'Автоматически не продолжится: нужно решение владельца.':'Возможность восстановления не определена.'}</p>`);
+  tech.push(`<p class="event-note">${event.recovery==='eligible'?'На момент остановки допускала автоматический повтор: часовой запуск повторяет её с сохранённого места, пока не исчерпаны попытки. Если повтор не состоится, появится отдельное событие.':event.recovery==='owner'?'Автоматически не продолжится: нужно решение владельца.':'Возможность восстановления не определена.'}</p>`);
+ }
+ if(outcome==='held'){
+  tech.push(`<p class="event-note">Остановка ${reason?`<code>${reason}</code> `:''}больше не повторяется автоматически: лимит попыток или окно повторов исчерпаны.${klass?` Класс: <code>${klass}</code>.`:''}</p>`);
  }
  if(outcome==='superseded')tech.push('<p class="event-note">Цепочка этой программы закрыта; работу продолжит цепочка новой программы.</p>');
  tech.push(`<p class="event-note">Эпоха: ${num(chain.epoch)} · передачи: ${num(chain.handoffs)} · перехваты: ${num(chain.takeovers)} · перезапуски: ${num(chain.relaunches)} · переоткрытия: ${num(chain.reopens)} · попытки восстановления: ${num(chain.recoveryAttempts)}.</p>`);
