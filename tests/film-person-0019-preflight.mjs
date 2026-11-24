@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
+import {isolatedGitEnv} from '../scripts/git-env.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
 const target=process.env.PREFLIGHT_MODULE?pathToFileURL(path.resolve(process.env.PREFLIGHT_MODULE)).href:new URL('../scripts/film-person-0019-preflight.mjs',import.meta.url).href;
@@ -19,7 +20,7 @@ const REF='cutover_accepted/v2:'+'ab'.repeat(32);
 
 // ---------- identity: recomputed from the file, equal to git and to the runbook ----------
 const id=K.identityOf(text);
-assert.equal(id.gitBlob,execFileSync('git',['hash-object','migrations/0019_canonical_write_receipt.sql'],{encoding:'utf8'}).trim());
+assert.equal(id.gitBlob,execFileSync('git',['hash-object','migrations/0019_canonical_write_receipt.sql'],{encoding:'utf8',env:isolatedGitEnv()}).trim());
 assert.equal(id.sha256,execFileSync('sha256sum',['migrations/0019_canonical_write_receipt.sql'],{encoding:'utf8'}).split(' ')[0]);
 assert.equal(id.bytes,fs.statSync('migrations/0019_canonical_write_receipt.sql').size);
 assert.equal(id.statements,28);
