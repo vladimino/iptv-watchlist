@@ -42,29 +42,79 @@ const keys=result=>result.issues.map(item=>item.key);
 }
 
 // 2. Discovery: a backlog follows its own backoff; the commit without a finished discovery is a state, not an alarm.
+// AIR-598: owed work and every time the rule uses come from the shared classification (src/discovery.js `discoveryQueueState`): `allowedAt` (the effective gate),
+// `checkpointAt` and `lastChunkAt` of the published generation only. The raw continuation and `lastChunkFinishedAt` are never read for timing.
 {
  const now=T('2026-11-06T18:00:00Z');
- const base={executor:'external',health:'settled',publishedRunId:'r1',lastChunkFinishedAt:at(now-20*MIN),readout:null};
+ const q=(extra={})=>({state:'backlog',reason:'chunk_budget',owed:true,eligible:true,remainingChunks:10,allowedAt:null,checkpointAt:at(now-30*MIN),lastChunkAt:at(now-20*MIN),...extra});
+ const base={executor:'external',health:'settled',publishedRunId:'r1',readout:null};
  const rec=extra=>({stage:'paused',reason:'chunk_budget',remainingChunks:10,at:at(now-30*MIN),programmeRunId:'r1',...extra});
- assert.equal(P.evaluateDiscovery({...base,continuation:null},now).state,'healthy','no backlog');
- assert.equal(P.evaluateDiscovery({...base,continuation:rec({nextCatchUpAt:at(now+40*MIN)})},now).state,'waiting','the next allowed progress is in the future: waiting by design');
- assert.equal(P.evaluateDiscovery({...base,continuation:rec({nextCatchUpAt:at(now-20*MIN)})},now).state,'waiting','just past the allowed time');
- assert.equal(P.evaluateDiscovery({...base,lastChunkFinishedAt:at(now-2*H),continuation:rec({at:at(now-2*H),nextCatchUpAt:at(now-2*H)})},now).state,'delayed');
- const stalled=P.evaluateDiscovery({...base,lastChunkFinishedAt:at(now-5*H),continuation:rec({at:at(now-5*H),nextCatchUpAt:at(now-4*H)})},now);
+ const ev=(queue,extra={},previous=null)=>P.evaluateDiscovery({...base,continuation:rec(),queue,...extra},now,previous);
+ assert.equal(ev(q({allowedAt:at(now+40*MIN),eligible:false})).state,'waiting','the next allowed progress is in the future: waiting by design');
+ assert.equal(ev(q({allowedAt:at(now-20*MIN)})).state,'waiting','just past the allowed time');
+ assert.equal(ev(q({allowedAt:at(now-2*H),checkpointAt:at(now-2*H),lastChunkAt:at(now-2*H)})).state,'delayed');
+ const stalled=ev(q({allowedAt:at(now-4*H),checkpointAt:at(now-5*H),lastChunkAt:at(now-5*H)}));
  assert.equal(stalled.state,'degraded');assert.deepEqual(keys(stalled),['discovery_stalled']);
  // The EPG just committed and discovery has not started: a fresh backlog with a due time of now is healthy.
- assert.equal(P.evaluateDiscovery({...base,lastChunkFinishedAt:null,continuation:rec({at:at(now-5*MIN),nextCatchUpAt:at(now-5*MIN)})},now).state,'waiting');
- // Retry backoff in the future (retryAt) is waiting even with an old last chunk.
- assert.equal(P.evaluateDiscovery({...base,lastChunkFinishedAt:at(now-8*H),continuation:rec({at:at(now-8*H),retryAt:at(now+30*MIN)})},now).state,'waiting');
+ assert.equal(ev(q({reason:'pending',allowedAt:null,checkpointAt:at(now-5*MIN),lastChunkAt:null})).state,'healthy');
+ // Retry backoff in the future is waiting even with an old last chunk.
+ assert.equal(ev(q({reason:'backoff',eligible:false,allowedAt:at(now+30*MIN),checkpointAt:at(now-8*H),lastChunkAt:at(now-8*H)})).state,'waiting');
+ // A known budget the Workflow renews at once is allowed from its checkpoint, whatever future gate it still carries (the classifier's `allowedAt`): no waiting
+ // hides a stall of renewed work.
+ assert.equal(ev(q({allowedAt:at(now-5*H),checkpointAt:at(now-5*H),lastChunkAt:at(now-5*H)}),{continuation:rec({nextCatchUpAt:at(now+40*MIN)})}).state,'degraded','a future leftover gate does not wait a renewed backlog');
+ // A foreign record's times are not this generation's: the raw continuation and lastChunkFinishedAt are ignored.
+ assert.equal(ev(q({allowedAt:at(now-4*H),checkpointAt:at(now-5*H),lastChunkAt:at(now-5*H)}),{lastChunkFinishedAt:at(now-MIN),continuation:rec({at:at(now-MIN)})}).state,'degraded','a recent batch of another generation does not hide the stall');
  // Owner conditions and the Workflow instance.
- const quarantined=P.evaluateDiscovery({...base,executor:'workflow',readout:{stalled:false,quarantined:true},continuation:rec({nextCatchUpAt:at(now+10*MIN)})},now);
+ const quarantined=ev(q({allowedAt:at(now+10*MIN),eligible:false}),{executor:'workflow',readout:{stalled:false,quarantined:true}});
  assert.equal(quarantined.state,'degraded');assert.deepEqual(keys(quarantined),['discovery_quarantined']);assert.equal(quarantined.issues[0].critical,true);
- const wfStalled=P.evaluateDiscovery({...base,executor:'workflow',readout:{stalled:true,quarantined:false},continuation:rec({nextCatchUpAt:at(now-20*MIN)})},now);
+ const wfStalled=ev(q({allowedAt:at(now-20*MIN)}),{executor:'workflow',readout:{stalled:true,quarantined:false}});
  assert.equal(wfStalled.state,'degraded');assert.ok(keys(wfStalled).includes('discovery_executor_stalled'));
- // A stale continuation of another generation is named when it is stalled.
- const mismatch=P.evaluateDiscovery({...base,publishedRunId:'r2',lastChunkFinishedAt:at(now-5*H),continuation:rec({at:at(now-5*H),nextCatchUpAt:at(now-4*H)})},now);
- assert.ok(keys(mismatch).includes('discovery_generation_mismatch'));
- assert.ok(keys(P.evaluateDiscovery({...base,continuation:null,resourceLimit:true},now)).includes('discovery_resource_limit'));
+ // An unconfirmed state has no trustworthy record time: it runs on its own clock from the first tick that observed it (`unknownSince`), whatever the records say.
+ const unknown=reason=>({state:'unknown',reason,owed:null,eligible:null,remainingChunks:null,allowedAt:null,checkpointAt:null,lastChunkAt:null});
+ const first=ev(unknown('generation_mismatch'),{publishedRunId:'r2',continuation:rec({at:at(now-5*H),nextCatchUpAt:at(now-4*H)})});
+ assert.equal(first.state,'waiting','a fresh handoff waits, and a foreign gate is not an overdue gate');assert.deepEqual(keys(first),[]);assert.equal(first.facts.unknownSince,at(now));
+ const mismatch=ev(unknown('generation_mismatch'),{publishedRunId:'r2',continuation:rec({at:at(now-5*H),nextCatchUpAt:at(now-4*H)})},{unknownSince:at(now-3*H)});
+ assert.ok(keys(mismatch).includes('discovery_unconfirmed'),'a continuation of another generation unconfirmed for 3 hours');assert.ok(keys(mismatch).includes('discovery_generation_mismatch'));
+ assert.ok(!keys(mismatch).includes('discovery_stalled'));assert.equal(mismatch.facts.unknownSince,at(now-3*H),'the clock is kept, not restarted');
+ for(const reason of ['no_continuation','no_status','partial_counts','drain_unconfirmed','admission_unreadable','records_unreadable']){
+  const fresh=ev(unknown(reason),{continuation:null});
+  assert.equal(fresh.state,'delayed',reason+': missing proof is never healthy');assert.deepEqual(keys(fresh),[],reason);
+  assert.deepEqual(keys(ev(unknown(reason),{continuation:null},{unknownSince:at(now-3*H)})),['discovery_unconfirmed'],reason+': bounded by its own clock');
+ }
+ assert.equal(ev(q()).facts.unknownSince,null,'a known state resets the clock');
+ // The drained series of 23 Nov is proven empty: healthy, no stall from the old gate.
+ const drained=rec({remainingChunks:0,at:at(now-21*H),nextCatchUpAt:at(now-20*H),hopId:'hop-27'});
+ const empty=ev({state:'empty',reason:'drained',owed:false,eligible:false,proof:'drained',lastChunkAt:at(now-21*H)},{continuation:drained});
+ assert.equal(empty.state,'healthy');assert.deepEqual(keys(empty),[]);assert.equal(empty.facts.queueState,'empty');assert.equal(empty.facts.backlog,false);
+ const paused=ev({state:'paused',reason:'epg_priority',owed:true,eligible:false,checkpointAt:at(now-6*H),lastChunkAt:at(now-6*H)});
+ assert.equal(paused.state,'waiting');assert.deepEqual(keys(paused),[]);
+ const unclassified=ev(undefined,{continuation:rec({at:at(now-5*H),nextCatchUpAt:at(now-4*H)})},{unknownSince:at(now-4*H)});
+ assert.deepEqual(keys(unclassified),['discovery_unconfirmed'],'facts without the shared classification are never a backlog');
+ // An open incident is never recovered by an unreadable or unconfirmed tick: it is held under its own key with its last measured metrics; a change of
+ // diagnosis keeps the open key; only a valid disposition recovers it, and says which.
+ const open={key:'discovery_stalled',firstSeenAt:at(now-4*H),metrics:{stalledMs:4*H,allowedAt:at(now-8*H),lastChunkAt:at(now-8*H),queueState:'backlog',queueReason:'chunk_budget'},metricsAt:at(now-H)};
+ const heldMissing=ev(unknown('no_continuation'),{continuation:null},{open});
+ assert.deepEqual(keys(heldMissing),['discovery_stalled']);assert.equal(heldMissing.state,'degraded');assert.equal(heldMissing.issues[0].metrics.held,'queue_unconfirmed');
+ assert.equal(heldMissing.issues[0].metrics.stalledMs,4*H,'the last measured stall is kept');assert.equal(heldMissing.issues[0].metricsAt,at(now-H),'under its own time');assert.equal(heldMissing.facts.recovery,null);
+ const heldUnreadable=P.evaluateDiscovery({error:true},now,{open});
+ assert.deepEqual(keys(heldUnreadable).sort(),['discovery_stalled','discovery_unreadable']);assert.equal(heldUnreadable.issues.find(item=>item.key==='discovery_stalled').metrics.held,'records_unreadable');
+ const transition=ev(unknown('generation_mismatch'),{publishedRunId:'r2'},{open,unknownSince:at(now-3*H)});
+ assert.deepEqual(keys(transition).filter(key=>key!=='discovery_generation_mismatch'),['discovery_stalled'],'the open key stays');assert.equal(transition.issues[0].metrics.transition,'discovery_unconfirmed');
+ for(const [label,queue,reason] of [['proven empty',{state:'empty',reason:'drained',owed:false,eligible:false},'queue_empty'],['EPG pause',{state:'paused',reason:'epg_priority',owed:true,eligible:false},'epg_priority'],['progress within the rule',q({lastChunkAt:at(now-10*MIN),checkpointAt:at(now-10*MIN)}),'within_policy']]){
+  const recovered=ev(queue,{},{open});
+  assert.deepEqual(keys(recovered),[],label);assert.equal(recovered.facts.recovery,reason,label);assert.equal(P.discoveryRecovery(recovered.facts).reason,reason,label);
+ }
+ // Re-review: owed work without any usable time of this generation is unconfirmed, never healthy and never a recovery `within_policy`.
+ const untimed=q({allowedAt:null,checkpointAt:null,lastChunkAt:null});
+ const untimedFresh=ev(untimed);
+ assert.deepEqual([untimedFresh.state,untimedFresh.issues.length,untimedFresh.issues[0]?.key],['delayed',0,undefined]);assert.equal(untimedFresh.facts.unknownSince,at(now));
+ const untimedHeld=ev(untimed,{},{open});
+ assert.deepEqual(keys(untimedHeld),['discovery_stalled']);assert.equal(untimedHeld.issues[0].metrics.held,'queue_unconfirmed');assert.equal(untimedHeld.facts.recovery,null);
+ assert.deepEqual(keys(ev(untimed,{},{unknownSince:at(now-3*H)})),['discovery_unconfirmed'],'bounded by its own clock');
+ const unreadLease=ev({state:'unknown',reason:'lease_unread',owed:true,eligible:null,checkpointAt:at(now-10*MIN),lastChunkAt:at(now-10*MIN)},{},{open});
+ assert.deepEqual(keys(unreadLease),['discovery_stalled'],'an unread lease is no progress: the incident is held');assert.equal(unreadLease.facts.recovery,null);
+ assert.deepEqual(P.discoveryRecovery({recovery:'queue_empty',queueReason:'drained'}),{reason:'queue_empty',message:'Recovered: the Discovery queue is proven empty (drained); this is not new progress'});
+ assert.ok(keys(ev(q(),{continuation:null,resourceLimit:true})).includes('discovery_resource_limit'));
  assert.deepEqual(keys(P.evaluateDiscovery({error:true},now)),['discovery_unreadable']);
 }
 
@@ -120,7 +170,7 @@ const keys=result=>result.issues.map(item=>item.key);
 // 5. Overall state: the worst stream; delayed and waiting never produce an alertable issue.
 {
  const now=T('2026-11-06T18:00:00Z');
- const facts={epg:{authority:'d1',publishedAt:at(T('2026-11-06T16:10:00Z'))},discovery:{executor:'external',continuation:null},ratings:{mode:'cloudflare',health:'waiting'},predictions:{present:true,pendingCount:0}};
+ const facts={epg:{authority:'d1',publishedAt:at(T('2026-11-06T16:10:00Z'))},discovery:{executor:'external',continuation:null,queue:{state:'empty',reason:'complete',owed:false,eligible:false}},ratings:{mode:'cloudflare',health:'waiting'},predictions:{present:true,pendingCount:0}};
  const all=P.evaluateAll(facts,null,now,helpers);
  assert.equal(all.overall,'waiting');assert.equal(all.streams.length,4);assert.deepEqual(all.issues,[]);
  const bad=P.evaluateAll({...facts,ratings:{mode:'cloudflare',health:'quarantined'}},null,now,helpers);

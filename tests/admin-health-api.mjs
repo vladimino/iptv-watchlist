@@ -54,9 +54,12 @@ const programmeKey=run=>'epg/generations/'+run+'/programme.json',catalogKey=run=
 const VIEW_INDEX=constant('ENRICHMENT_KEY')+'view-index.json',PROFILE=constant('profileKey'),QUEUE=constant('predictionQueueKey'),CONTINUATION=constant('CONTINUATION_KEY');
 const H=3600000,D=86400000,NOW=Date.now();
 const ago=ms=>new Date(NOW-ms).toISOString(),ahead=ms=>new Date(NOW+ms).toISOString();
-const HEALTH_READS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json',VIEW_INDEX,PROFILE,QUEUE,CONTINUATION,catalogKey(G1)];
+// AIR-598: the Discovery continuation is read through the shared Discovery reader (one snapshot of the small records; outside D1 authority the five small R2
+// objects below), named `discovery_records` in the answer, never the frozen R2 continuation alone.
+const DISCOVERY_STATUS='epg/discovery-status.json',WORKFLOW='epg/discovery-workflow.json',LEASE='epg/resolver-lease.json';
+const HEALTH_READS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json',VIEW_INDEX,PROFILE,QUEUE,'discovery_records',catalogKey(G1)];
 // AIR-558: the view index is still a named source of the answer but no R2 read: R2 gets are the same list without it.
-const HEALTH_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json',PROFILE,QUEUE,CONTINUATION,catalogKey(G1)];
+const HEALTH_KEYS=[POINTER,programmeKey(G1),POINTER,'titles.json','people.json','admin/owner-reviews.json',PROFILE,QUEUE,DISCOVERY_STATUS,CONTINUATION,WORKFLOW,LEASE,POINTER,catalogKey(G1)];
 const profile={version:1,profileHash:'p1'};
 const prediction=(extra={})=>({predictedRating:4.2,probability4Plus:.7,confidence:'high',matchSignals:['x'],mainRisk:'y',moodLabels:['мрачный'],tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'f',fingerprintSchemaVersion:1,predictionPromptVersion:1,generatedAt:ago(2*D),...extra});
 const fingerprint={fingerprintHash:'f',plotMechanics:['investigation'],moodLabels:['мрачный'],execution:{payoff:'strong',pacing:'unknown'}};
@@ -212,7 +215,8 @@ bucket.get=realGet;
 // 7. An empty programme: no film issue, the observed whole-object subsystems clear, the unread ones unknown.
 seed();records.set(programmeKey(G1),{runId:G1,updatedAt:ago(5*H),watchlistCount:0,films:[],people:{directors:[],actors:[]},stats:{}});
 records.set(QUEUE,{schemaVersion:3,programmeRunId:G1,hotPending:[],coldPending:[],pending:[],retries:{},lastCheckAt:ago(H),lastBatch:{finishedAt:ago(H),stage:'noop'},refreshedAt:ago(H)});
-records.set(CONTINUATION,{stage:'complete',reason:null,at:ago(H),remainingChunks:0,programmeRunId:G1});
+records.set(CONTINUATION,{stage:'complete',reason:null,at:ago(H),remainingChunks:0,programmeRunId:G1,hopId:'hop-9'});
+records.set(DISCOVERY_STATUS,{stage:'complete',programmeRunId:G1,hopId:'hop-9',finishedAt:ago(H),remaining:0,cheapRemaining:0,deferred:0,waitingRetry:0,error:null});
 records.set(catalogKey(G1),{tmdb_2:{id:'tmdb_2',tmdbId:'2',canonicalIdentity:'tmdb:2',poster:'https://image.example/2.jpg'}});
 r=await call('/api/admin/health');assert.equal(r.status,200);
 assert.deepEqual(r.body.health.groups.map(item=>item.reason),['evidence_not_supplied'],'only the unread archive remains, as unknown');

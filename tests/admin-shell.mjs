@@ -197,7 +197,9 @@ function seed() {
   records.set('titles.json', {quiet: {tmdbId: '900002', title: 'Тихая гавань', status: 'provisional', sources: ['https://www.wikidata.org/wiki/Q2']}}); etags.set('titles.json', 'titles-1');
   records.set('people.json', {'actor/mira-sol': {name: 'Мира Соль', original: 'Mira Sol'}}); etags.set('people.json', 'people-1');
   records.set('enrichment/prediction-queue.json', {schemaVersion: 3, programmeRunId: G1, hotPending: ['quiet'], coldPending: [], pending: ['quiet'], retries: {}, lastCheckAt: new Date(Date.now() - 3600000).toISOString(), lastBatch: {finishedAt: new Date(Date.now() - 3600000).toISOString(), stage: 'complete'}}); etags.set('enrichment/prediction-queue.json', 'queue-1');
-  records.set('epg/resolver-continuation.json', {stage: 'complete', reason: null, at: new Date(Date.now() - 3600000).toISOString(), remainingChunks: 0, programmeRunId: G1}); etags.set('epg/resolver-continuation.json', 'cont-1');
+  records.set('epg/resolver-continuation.json', {stage: 'complete', reason: null, at: new Date(Date.now() - 3600000).toISOString(), remainingChunks: 0, programmeRunId: G1, hopId: 'hop-1'}); etags.set('epg/resolver-continuation.json', 'cont-1');
+  // AIR-598: the health view classifies the queue with the shared Discovery rule: a complete series is proven empty by the zero reading of its own generation.
+  records.set('epg/discovery-status.json', {stage: 'complete', programmeRunId: G1, hopId: 'hop-1', finishedAt: new Date(Date.now() - 3600000).toISOString(), remaining: 0, cheapRemaining: 0, deferred: 0, waitingRetry: 0, error: null}); etags.set('epg/discovery-status.json', 'status-1');
 }
 seed();
 vm.runInContext('ADMIN_SNAPSHOT_CACHE=null', workerContext);

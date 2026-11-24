@@ -613,6 +613,10 @@ Date.now=realNow;
   readContinuation:async()=>({record:null,etag:null}),
   writeDiscoveryEvent:async(_env,event)=>{journal.push(JSON.parse(JSON.stringify(event)));return 'written';},
  });
+ // AIR-598: the queue proof the close uses is the shared one in src/discovery.js, concatenated before this module in the bundle. Its own readers are then
+ // replaced again by this test's stand-ins.
+ vm.runInContext(fs.readFileSync('src/discovery.js','utf8'),context);
+ context.loadJSON=async()=>null;context.readContinuation=async()=>({record:null,etag:null});
  vm.runInContext(fs.readFileSync('src/discovery-workflow.js','utf8').replace(/export \{[^}]+\};/g,''),context);
  const close=(outcome,nowMs)=>vm.runInContext('closeHourlyDiscoveryReport',context)(env,outcome,{scheduled:true,now:nowMs});
  const add=vm.runInContext('addChunkToDiscoveryReport',context),fresh=vm.runInContext('newDiscoveryReport',context);

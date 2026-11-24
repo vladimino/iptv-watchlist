@@ -38,9 +38,10 @@ const DISCOVERY_REPORT_BLOCKED=new Set(['authority_held','authority_loading','au
 const DISCOVERY_TICK_STATUS={complete:'finished',backlog_empty:'finished',stale_generation:'superseded',recovery_exhausted:'failed',executor_not_workflow:'stopped'};
 function discoveryHourStamp(ms){return new Date(ms).toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z').slice(0,11);}
 function discoveryCount(value){return Number.isInteger(value)&&value>=0?value:null;}
-// The queue is empty only when every part of it is a proven numeric zero: the remaining count AND the cheap-pass remainder. A missing, null,
-// negative, fractional or non-numeric part is unknown and never a zero (a chunk that does not report the cheap-pass remainder confirms nothing).
-function discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry){return remaining===0&&cheapRemaining===0&&!error&&!(waitingRetry>0);}
+// Legacy per-chain events only (written before the hourly reports): their `queueEmpty` keeps the historical rule of that model (remaining and the cheap-pass
+// remainder zero, no error, no waiting retry). It is never a live proof: an hourly report and every live reader use `discoveryQueueProof` (src/discovery.js,
+// AIR-598), which needs the continuation's own last status with all four parts a numeric zero.
+function legacyTickQueueEmpty(remaining,cheapRemaining,error,waitingRetry){return remaining===0&&cheapRemaining===0&&!error&&!(waitingRetry>0);}
 function newDiscoveryReport(since,seen=[]){
  const report={since:since||null,chunks:0,remaining:null,cheapRemaining:null,error:null,queueGeneration:null,seen,lastClosedHour:null};
  for(const name of DISCOVERY_REPORT_COUNTERS)report[name]=0;
@@ -100,7 +101,7 @@ function discoveryHourEvent({at,hourKey,generation,status,reason,report,queue}){
 // The legacy per-chain event of the model before the hourly reports. Used only to deliver an entry that was still pending at the change.
 function discoveryTickEvent(tick){
  const reason=tick.settled?.reason||null;
- const event={id:'discovery-'+tick.id,type:'discovery',kind:'run',at:tick.settled.at,startedAt:tick.startedAt,status:DISCOVERY_TICK_STATUS[reason]||'stopped',reason,chunks:tick.chunks||0,queueEmpty:discoveryQueueEmpty(discoveryCount(tick.remaining),discoveryCount(tick.cheapRemaining),tick.error,discoveryCount(tick.waitingRetry)),remaining:Number.isInteger(tick.remaining)?tick.remaining:null,error:tick.error||null};
+ const event={id:'discovery-'+tick.id,type:'discovery',kind:'run',at:tick.settled.at,startedAt:tick.startedAt,status:DISCOVERY_TICK_STATUS[reason]||'stopped',reason,chunks:tick.chunks||0,queueEmpty:legacyTickQueueEmpty(discoveryCount(tick.remaining),discoveryCount(tick.cheapRemaining),tick.error,discoveryCount(tick.waitingRetry)),remaining:Number.isInteger(tick.remaining)?tick.remaining:null,error:tick.error||null};
  for(const name of DISCOVERY_REPORT_COUNTERS)event[name]=tick[name]||0;
  return event;
 }
@@ -131,23 +132,16 @@ async function discoveryReportQueue(env,report,programmeRunId,record=null){
  let stored=null;
  try{stored=programmeRunId?await readContinuation(env):null;}catch{return unreadable;}
  const continuation=stored?.record&&stored.record.programmeRunId===programmeRunId?stored.record:null;
- if(continuation?.stage==='complete')return {remaining,cheapRemaining,error,empty:discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry),incomplete:false,reason:null};
- if(continuation&&discoveryDrainedSeries(record,continuation,programmeRunId)){
-  let status;
-  try{status=await readStatus();}catch{return unreadable;}
-  if(discoveryDrainedStatus(status,continuation,programmeRunId))return {remaining:0,cheapRemaining:0,error:null,empty:true,incomplete:false,reason:null};
- }
+ // AIR-598: the proof is the shared, strict `discoveryQueueProof` (src/discovery.js), the same rule the footer, the Monitor and the operational status classify
+ // with: the status written by the continuation's own last chunk (all four parts a numeric zero, no error), no quarantined executor record and no live Discovery
+ // writer. The period's accumulated reading is shown as the report's numbers but never proves an empty queue. The status and the lease are read only when the
+ // continuation is complete or the series has the drained shape, so they are the deciding facts.
+ if(!continuation||!(continuation.stage==='complete'||discoveryDrainedSeries(record,continuation,programmeRunId)))return {remaining,cheapRemaining,error,empty:false,incomplete:false,reason:null};
+ let status=null,lease=null;
+ try{[status,lease]=await Promise.all([readStatus(),readDiscoveryLeaseValue(env)]);}catch{return unreadable;}
+ const proof=discoveryQueueProof({programmeRunId,continuation,workflow:record,status,lease,now:Date.now()});
+ if(proof.empty)return {remaining:0,cheapRemaining:0,error:null,empty:true,incomplete:false,reason:null};
  return {remaining,cheapRemaining,error,empty:false,incomplete:false,reason:null};
-}
-// Pure. The executor stopped for good on an empty backlog and the continuation of the same generation has no chunk left to run.
-function discoveryDrainedSeries(record,continuation,programmeRunId){
- return typeof programmeRunId==='string'&&!!programmeRunId&&record?.phase==='stopped'&&record.reason==='backlog_empty'&&record.programmeRunId===programmeRunId
-  &&continuation?.programmeRunId===programmeRunId&&continuation.stage==='paused'&&continuation.reason==='chunk_budget'&&continuation.remainingChunks===0&&typeof continuation.hopId==='string'&&!!continuation.hopId;
-}
-// Pure. The status file is the reading of that last chunk (same generation, same hop) and every part of the queue is a proven numeric zero.
-function discoveryDrainedStatus(status,continuation,programmeRunId){
- if(!status||status.programmeRunId!==programmeRunId||status.hopId!==continuation.hopId||status.error)return false;
- return ['remaining','cheapRemaining','deferred','waitingRetry'].every(name=>status[name]===0);
 }
 // Delivers every pending report: the events of the outbox and a legacy per-chain tick that was settled and not yet delivered. An entry leaves
 // the record only after its create-only put is confirmed. The record is written back with its `updatedAt` untouched, so delivery never hides a
