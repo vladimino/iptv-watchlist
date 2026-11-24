@@ -132,13 +132,9 @@ const Monitor=(()=>{
  const TELEGRAM_TOKEN=/^\d{5,15}:[A-Za-z0-9_-]{30,60}$/,TELEGRAM_CHAT=/^(-?\d{1,20}|@[A-Za-z][A-Za-z0-9_]{4,31})$/;
  const telegramConfig=env=>{const token=typeof env?.MONITOR_TELEGRAM_BOT_TOKEN==='string'?env.MONITOR_TELEGRAM_BOT_TOKEN.trim():'',chat=typeof env?.MONITOR_TELEGRAM_CHAT_ID==='string'?env.MONITOR_TELEGRAM_CHAT_ID.trim():'';return TELEGRAM_TOKEN.test(token)&&TELEGRAM_CHAT.test(chat)?{token,chat}:null;};
  const channelReady=env=>{const name=transportName(env);return name==='telegram'?!!telegramConfig(env):name==='webhook'?!!httpsUrl(env?.MONITOR_WEBHOOK_URL):false;};
- const TELEGRAM_KIND={alert:'ALERT',reminder:'REMINDER',escalation:'ESCALATION',recovery:'RECOVERED',test:'TEST'};
- const plain=(value,max)=>String(value??'').replace(/[^\x20-\x7E]+/g,' ').replace(/\s+/g,' ').trim().slice(0,max);
- // Plain text only (no markup mode is requested), so nothing is interpreted; fields are ASCII-limited and bounded well under Telegram's 4096 characters.
- const telegramText=(message,overall,now)=>[
-  'IPTV monitor: '+(TELEGRAM_KIND[message.kind]||'MESSAGE')+' ('+plain(message.severity,16)+')',
-  'Stream: '+plain(message.stream,32),'Issue: '+plain(message.key,64),plain(message.message,300),
-  'Overall: '+plain(overall||'unknown',16),'At: '+iso(now),'Ref: '+plain(message.id,120)].join('\n');
+ // Plain text only (no markup mode is requested), so nothing is interpreted. The human-facing text (ADR 0206 decision 9) is rendered by the pure
+ // MonitorMessage from the message's own fields: fixed Russian labels and emoji, typed metrics, Madrid times, the stable id as the last line.
+ const telegramText=(message,overall,now)=>MonitorMessage.telegramText(message,{overall,now});
  const HOLD_MAX_MS=3600000,HOLD_DEFAULT_MS=60000;
  async function sendTelegram(env,message,overall,now){
   const config=telegramConfig(env);
@@ -163,7 +159,7 @@ const Monitor=(()=>{
   if(!url)return {ok:false,reason:'config_invalid'};
   try{
    const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},signal:AbortSignal.timeout(SEND_TIMEOUT_MS),
-    body:JSON.stringify({source:'iptv-monitor',id:message.id||null,at:iso(now),kind:message.kind,severity:message.severity,stream:message.stream,key:message.key,message:message.message,overall})});
+    body:JSON.stringify({source:'iptv-monitor',id:message.id||null,at:iso(now),kind:message.kind,severity:message.severity,critical:message.critical===true,stream:message.stream,key:message.key,message:message.message,overall})});
    return response.ok?{ok:true,reason:null}:{ok:false,reason:'http_'+response.status};
   }catch(error){return {ok:false,reason:error?.name==='TimeoutError'||error?.name==='AbortError'?'timeout':'network'};}
  }
@@ -198,7 +194,8 @@ const Monitor=(()=>{
    // Alert accounting (lastSentAt, sendCount, sendsToday) moves only when delivery succeeds, so a failed send never spends the cooldown or the
    // daily quota, and an alert that was never delivered raises no recovery: if its issue clears first it is cancelled and counted.
    const alerts=plan.state,prior=doc?.alerts?.issues||{},day=iso(now).slice(0,10);
-   const outbox=(doc?.outbox||[]).map(item=>({...item}));
+   // ADR 0206: a message queued before the retirement of `needs_owner` keeps its id (the receiver still drops a repeat) and is delivered as `degraded`, critical.
+   const outbox=(doc?.outbox||[]).map(item=>({...policy().normalizeMessage(item)}));
    let cancelled=doc?.cancelledUndelivered||0;
    // Reconcile the queue with the current issues: a pending alert of a cleared issue is cancelled (counted), and a pending recovery of an issue
    // that is active again is superseded (the new alert replaces it), so an obsolete "Recovered" is never sent.
@@ -213,13 +210,14 @@ const Monitor=(()=>{
     const after={lastSentAt:entry.lastSentAt,sendCount:entry.sendCount,sendDay:entry.sendDay,sendsToday:entry.sendsToday};
     entry.lastSentAt=before?.lastSentAt||null;entry.sendCount=before?.sendCount||0;entry.sendsToday=before?.sendDay===day?before.sendsToday||0:0;
     const pending=outbox.find(item=>item.key===message.key&&item.kind!=='recovery');
-    if(pending){pending.severity=message.severity;pending.message=message.message;pending.after=after;if(pending.kind!=='alert')pending.kind=message.kind;}
-    else outbox.push({...message,id:message.key+'|'+message.kind+'|'+iso(now),queuedAt:iso(now),after});
+    // `observedAt` is the tick this content describes (ADR 0206 decision 9); the id and queue time of a pending message stay as they were.
+    if(pending){pending.severity=message.severity;pending.critical=message.critical===true;pending.message=message.message;pending.after=after;pending.observedAt=iso(now);if(message.metrics)pending.metrics=message.metrics;else delete pending.metrics;if(pending.kind!=='alert')pending.kind=message.kind;}
+    else outbox.push({...message,id:message.key+'|'+message.kind+'|'+iso(now),queuedAt:iso(now),observedAt:iso(now),after});
    }
    const queued=outbox;
    const publishedRunId=facts.epg?.publishedRunId||null,predictions=facts.predictions?.present?{pendingCount:facts.predictions.pendingCount,processedTotal:facts.predictions.processedTotal,progressAt:facts.predictions.lastProgressAt,progressBasis:'evidence',unknownSince:facts.predictions.unknownSince}:doc?.predictions||null;
    const next={schemaVersion:SCHEMA_VERSION,updatedAt:iso(now),heartbeatAt:iso(now),mode:current,overall:evaluation.overall,
-    streams:evaluation.streams.map(stream=>({stream:stream.stream,state:stream.state,facts:stream.facts,issues:stream.issues.map(item=>({key:item.key,severity:item.severity}))})),
+    streams:evaluation.streams.map(stream=>({stream:stream.stream,state:stream.state,facts:stream.facts,issues:stream.issues.map(item=>({key:item.key,severity:item.severity,critical:item.critical===true}))})),
     alerts,outbox:queued,cancelledUndelivered:cancelled,holdUntil:doc?.holdUntil||null,lastDeliveryFailure:doc?.lastDeliveryFailure||null,predictions,
     canonicalProducer:facts.canonicalProducer&&!facts.canonicalProducer.error?(facts.canonicalProducer.clock||null):doc?.canonicalProducer||null,
     epgSeen:publishedRunId&&doc?.epgSeen?.runId!==publishedRunId?{runId:publishedRunId,at:iso(now)}:doc?.epgSeen||null,lastTestAt:doc?.lastTestAt||null,
@@ -244,7 +242,13 @@ const Monitor=(()=>{
    let saved=true;
    if(attempts){
     const settled=JSON.parse(JSON.stringify(next.alerts));
-    for(const item of queued){if(!delivered.has(item.id)||!item.after)continue;const entry=settled.issues[item.key];if(!entry)continue;entry.lastSentAt=item.after.lastSentAt;entry.sendCount=Math.max(entry.sendCount,item.after.sendCount);entry.sendDay=item.after.sendDay;entry.sendsToday=item.after.sendsToday;}
+    // ADR 0206: a delivered alert-type message settles at its successful delivery, not at the time it was queued: the reminder interval counts from
+    // `now`, and the send is charged to the UTC day of delivery. `after` stays on the message only for a reader of the previous code (rollback).
+    for(const item of queued){
+     if(!delivered.has(item.id)||item.kind==='recovery')continue;const entry=settled.issues[item.key];if(!entry)continue;
+     const sentToday=entry.sendDay===day?entry.sendsToday||0:0;
+     entry.lastSentAt=iso(now);entry.sendCount=(entry.sendCount||0)+1;entry.sendDay=day;entry.sendsToday=sentToday+1;
+    }
     const remaining=queued.filter(item=>!delivered.has(item.id)),reordered=[...remaining.filter(item=>!failedIds.has(item.id)),...remaining.filter(item=>failedIds.has(item.id))];
     saved=!!await writeState(env,claimed,{...next,alerts:settled,outbox:reordered,holdUntil:Number.isFinite(holdUntil)&&holdUntil>now?iso(holdUntil):null,lastDeliveryFailure:succeeded&&!failedIds.size?null:lastFailure});
    }
@@ -259,9 +263,13 @@ const Monitor=(()=>{
   const current=mode(env);
   let doc=null;
   try{doc=(await readState(env)).doc;}catch{doc=null;}
+  // A document written before ADR 0206 may still say `needs_owner` until the next tick rewrites it; the read shows it as `degraded` (critical) and writes nothing.
+  const sev=value=>policy().normalizeSeverity(value);
   const heartbeatAt=Date.parse(doc?.heartbeatAt||'');
   return {mode:current,readAt:iso(now),stored:!!doc,heartbeatAt:Number.isFinite(heartbeatAt)?iso(heartbeatAt):null,heartbeatAgeMs:Number.isFinite(heartbeatAt)?Math.max(0,now-heartbeatAt):null,
-   outbox:Array.isArray(doc?.outbox)?doc.outbox.length:0,outboxOldestAt:(doc?.outbox||[]).map(item=>item.queuedAt).sort()[0]||null,cancelledUndelivered:doc?.cancelledUndelivered||0,overall:doc?.overall??null,streams:doc?.streams??[],openIssues:Object.entries(doc?.alerts?.issues||{}).map(([key,entry])=>({key,severity:entry.severity,firstSeenAt:entry.firstSeenAt,sendCount:entry.sendCount})),
+   outbox:Array.isArray(doc?.outbox)?doc.outbox.length:0,outboxOldestAt:(doc?.outbox||[]).map(item=>item.queuedAt).sort()[0]||null,cancelledUndelivered:doc?.cancelledUndelivered||0,overall:doc?.overall==null?null:sev(doc.overall),
+   streams:Array.isArray(doc?.streams)?doc.streams.map(stream=>({...stream,state:sev(stream?.state),issues:Array.isArray(stream?.issues)?stream.issues.map(item=>({...item,severity:sev(item?.severity),critical:policy().isCritical(item)})):stream?.issues})):[],
+   openIssues:Object.entries(doc?.alerts?.issues||{}).map(([key,entry])=>({key,severity:sev(entry.severity),critical:policy().isCritical(entry),firstSeenAt:entry.firstSeenAt,sendCount:entry.sendCount})),
    transport:transportName(env),alerting:channelReady(env),holdUntil:doc?.holdUntil||null,lastDeliveryFailure:doc?.lastDeliveryFailure||null,deadman:!!httpsUrl(env?.MONITOR_HEARTBEAT_URL),sideEffects:'none'};
  }
 

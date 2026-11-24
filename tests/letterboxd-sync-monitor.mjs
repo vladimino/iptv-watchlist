@@ -15,7 +15,7 @@ for(const health of ['waiting','switching'])assert.equal(Policy.evaluateLetterbo
 for(const [health,key] of [['late','letterboxd_slot_late'],['stalled','letterboxd_slot_stalled'],['missed','letterboxd_slot_missed'],['failed','letterboxd_slots_failed'],['unreadable','letterboxd_unreadable']]){
  const r=Policy.evaluateLetterboxd(model({health}),NOW);assert.equal(r.state,'degraded',health);assert.deepEqual(keys(r),[key]);assert.equal(r.stream,'letterboxd');
 }
-{const r=Policy.evaluateLetterboxd(model({health:'quarantined',quarantine:{reason:'epoch'}}),NOW);assert.equal(r.state,'needs_owner');assert.match(r.issues[0].message,/epoch/);}
+{const r=Policy.evaluateLetterboxd(model({health:'quarantined',quarantine:{reason:'epoch'}}),NOW);assert.equal(r.state,'degraded');assert.equal(r.issues[0].critical,true);assert.match(r.issues[0].message,/epoch/);}
 // 2. Source staleness: 24 h since the last Watchlist success, and a Watchlist that never succeeded, are actionable on their own; a healthy slot does not hide them.
 {
  let r=Policy.evaluateLetterboxd(model({sources:{watchlist:{stale:true,warning:'watchlist_stale'}}}),NOW);assert.deepEqual([r.state,keys(r)],['degraded',['letterboxd_watchlist_stale']]);assert.match(r.issues[0].message,/24 hours/);
