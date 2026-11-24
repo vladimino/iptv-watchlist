@@ -1,6 +1,6 @@
 # ADR 0211: Admitted Films are enriched by a canonical catalog-enrichment producer from Letterboxd, TMDB and Wikidata, independent of EPG airing
 
-**Status:** Proposed. The owner selected the direction of each choice on 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124)): 1 = A (fill-only, with per-field provenance planned as a follow-up), 2 = extended B (Letterboxd a first-class source, independent of a TMDB claim), 3 = A, 4 = A, 5 = C (shared upstream coordination across all relevant producers in one delivery scope), 6 = extended A (durable control plus an `/admin/settings` checkbox). This revision implements those selections and awaits independent review and an explicit, ADR-specific final disposition. It is not Accepted.  
+**Status:** Proposed. The owner selected the direction of each choice on 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124), and [0211-7 = B](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141202861) on the transport-only fallback): 1 = A (fill-only, with per-field provenance planned as a follow-up), 2 = extended B (Letterboxd a first-class source, independent of a TMDB claim), 3 = A, 4 = A, 5 = C (shared upstream coordination across all relevant producers in one delivery scope), 6 = extended A (durable control plus an `/admin/settings` checkbox). This revision implements those selections and awaits independent review and an explicit, ADR-specific final disposition. It is not Accepted.  
 **Original decision date:** not decided  
 **Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516), the [second re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040703398) and the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124).  
 **Approval source:** not decided. Requested as the companion of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) by the owner's disposition 6C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347): "не вижу смысла упускать возможность сразу начать подготовку к глобальному каталогу, даже если миграция из-за этого займет больше времени". The consolidated choices select options; they are not an acceptance of unseen text, an implementation GO or a production GO.  
@@ -146,9 +146,8 @@ For a Letterboxd-only Film, a TMDB id on the page is recorded as an identity hin
 **Which checks finish before which writes.**
 - `core` and `credits` writes from any source need a recorded agreement for the Film's **current** anchors whenever the Film holds a Letterboxd anchor. A **known disagreement always blocks**.
 - **Unresolved agreement work stays open, whatever the fields.** While the Film holds a Letterboxd anchor and no agreement is recorded for its current anchors, the Letterboxd agreement check stays due. That holds even when every field is already filled, and even after a fallback filled the last blank field, until the agreement is confirmed, a disagreement is found, or the owner resolves it.
-- **Open owner choice 0211-7, raised by the [targeted re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6045305740).** Two exceptions were proposed: a Letterboxd source that is `failed` (`needs_attention`), and the 72 h fallback below. In both, TMDB would fill a field without a confirmed agreement, and the field would be listed as `unconfirmed_agreement`. Under fill-only that is a permanent lower-priority fill, and a trusted TMDB anchor is not the same as confirmed agreement with the Letterboxd anchor.
-  - This was not among the owner's earlier selections, so neither exception is part of the design submitted for acceptance until the owner decides.
-  - The alternative is that a pending or failed Letterboxd source keeps `core` and `credits` waiting indefinitely: visible, and released only by the owner.
+- **The only exception is the transport-only fallback below (owner choice [0211-7 = B](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141202861), 2026-11-24).** Without a confirmed agreement, a field may be filled only by that fallback, and it is then listed as `unconfirmed_agreement`.
+  - A Letterboxd source that is `failed` (`needs_attention`) grants **no** exception. Neither does a 404 or an invalid or non-film page. `core` and `credits` then wait, visibly, until the owner resolves the Film (retry or an identity correction).
 - A source's own localization row needs only that source's anchor, because one source's row never replaces another's.
 - Wikidata needs only the TMDB anchor.
 
@@ -165,16 +164,23 @@ For a Letterboxd-only Film, a TMDB id on the page is recorded as an identity hin
 **Per field, each applicable source is in one of five states:**
 - `value`: it answered with a value;
 - `absent`: it answered completely without one;
-- `pending`: due, transport, cooldown, or stopped by the deadline;
-- `failed`: `needs_attention`;
+- `pending`: due, upstream transport, cooldown, or stopped by this tick's own deadline;
+- `failed`: definite failures, up to `needs_attention`;
 - `not_applicable`.
 
-**The rule.** A blank field is written from source S only if S has `value` and every source before S in the order is `absent`, `failed` or `not_applicable`.
+**The rule.** A blank field is written from source S only if S has `value` and every source before S in the order is `absent` or `not_applicable`.
+- `absent` means a confirmed absence in a successful, valid response, so the normal precedence applies at once.
+- A `failed` earlier source makes the field wait for the owner.
 - If an earlier source is `pending`, the field **waits**, and S's state stays `due` with reason `waiting_for_precedence` and the earlier source's `retry_at`.
 - Nothing is stored as a candidate. When the field becomes decidable, S is fetched again. There are no proof snapshots, and fill-only is unchanged.
 - **Both completion orders give the same writes.** Letterboxd first: Letterboxd fills. TMDB first: TMDB waits, Letterboxd later fills, and TMDB is refetched only for the fields Letterboxd lacked.
 
-**Bounded fallback (proposed, pending owner choice 0211-7).** If the earlier source stays `pending` through transport for **72 h** continuously for that Film (`pending_since` on its state row), it counts as unavailable for the waiting fields, and the next source fills them.
+**Transport-only fallback (owner choice [0211-7 = B](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141202861)).** If the earlier source has been **unavailable through upstream transport for 72 h continuously** for that Film, it counts as unavailable for the waiting fields. The next source then fills them, but only through its own reliable anchor.
+- **What counts toward the 72 h.** Only upstream transport outcomes count: a 403, a challenge, a 429, a 5xx, a timeout of a request that was sent, a network error, or an active shared cooldown.
+  - `pending_since` is set by the first such outcome and cleared by any successful, valid response from that source for the Film.
+  - **This tick's own deadline or unit budget never counts.** A source stopped or never reached because of scheduling leaves `pending_since` unchanged, so a scheduling shortage cannot masquerade as 72 h of upstream unavailability.
+  - A definite failure (a 404, an invalid or non-film page, a parse failure) clears `pending_since` and never leads to the fallback.
+- **A known identity disagreement always blocks**, before or after the 72 h.
 - Each such field is listed as `fallback_fill`, with the source that filled it and the source that was waited for. If the Film's agreement was not yet confirmed, the field is also listed as `unconfirmed_agreement`.
 - A later answer from the earlier source never overwrites it, because the producer is fill-only. A different value is recorded as `stored_differs`. If a later disagreement is found, every `unconfirmed_agreement` field is listed for owner review.
 - Card PF decides any later replacement.
@@ -240,7 +246,7 @@ Enrichment has three independent **parts**:
 - No guard reads `film_json`. Commit guards check the exact anchors in canonical tables.
 
 **Completion comes from canonical state plus the state rows.**
-- **`core` is complete** when every field is non-blank, or when every applicable source is settled (`absent`, `failed` or `not_applicable` for the missing fields): `complete_with_gaps` lists the fields that no applicable source had.
+- **`core` is complete** when every field is non-blank, or when every applicable source is settled (`absent` or `not_applicable` for the missing fields): `complete_with_gaps` lists the fields that no applicable source had. A `failed` source leaves `core` waiting, visibly, for the owner.
 - **`credits` is complete** when every credit of the **expected set** exists. The expected set comes from the credit source's complete response:
   - at most **10 actors** and at most **20 directors**, in source order;
   - so at most 30 credits, within the unit cap of 50.
@@ -261,9 +267,9 @@ Enrichment has three independent **parts**:
 **Retry semantics, consistent with ADR 0207 decision 4b:**
 - **Transport.** A 403, a Cloudflare challenge, a 429, a timeout, a network error, a 5xx, an active shared cooldown (decision 5) or the tick deadline **does not consume a failure**.
   - The state row keeps its `due_since`, so the Film keeps its place in the queue.
-  - `transport_streak` grows, and `pending_since` is set if it was empty.
+  - `transport_streak` grows. `pending_since` is set only by an upstream transport outcome, never by this tick's deadline or budget.
   - `retry_at` is the later of the transport backoff and the shared cooldown. The backoff is the same as in ADR 0207 decision 4b: 15 min · 2^min(streak − 1, 5), so at most 8 h.
-  - There is no cap on transport retries. A long streak is visible (decision 5), and, only if owner choice 0211-7 adopts it, precedence falls back after 72 h (decision 2).
+  - There is no cap on transport retries. A long streak is visible (decision 5), and after 72 h of upstream transport the transport-only fallback applies (decision 2).
 - **Definite.** A 404 of the anchored entity, a 200 that does not parse, a missing required section of a complete response, or a check that throws **consumes one failure**. After **6** failures the row is `needs_attention`, visible, and no longer retried automatically. A 404 of a trusted TMDB id is reported as an identity hint, never as a retirement.
 - **Identity disagreement** stops the Film (decision 2) without consuming failures.
 - A part or source that succeeded is never retried because another one failed. The only exception is a field waiting for precedence, which is refetched when it becomes decidable.
@@ -371,7 +377,13 @@ That makes 11 in all.
 - **Sources and precedence:**
   - both completion orders of Letterboxd and TMDB give the same writes;
   - a Letterboxd transport failure makes TMDB fields wait, then fill when Letterboxd answers;
-  - depending on owner choice 0211-7: either the 72 h fallback and the failed-Letterboxd exception, listed as `fallback_fill` and `unconfirmed_agreement`, or `core` and `credits` waiting until the owner releases them;
+  - **the transport-only fallback (0211-7 = B):**
+    - after 72 h of upstream transport, TMDB fills the waiting fields, listed as `fallback_fill` and, without agreement, as `unconfirmed_agreement`;
+    - 72 h made only of this tick's deadline or budget shortages grants no fallback;
+  - a definite-error cap (`needs_attention`), a 404 or a non-film page of Letterboxd grants **no** fallback: `core` and `credits` wait for the owner;
+  - a successful response missing a field (`absent`) lets the next source fill it at once;
+  - a source that recovers before 72 h fills first. A source that recovers after a fallback overwrites nothing, records `stored_differs` and confirms or refutes the agreement;
+  - a known disagreement blocks every automatic write, before and after 72 h;
   - the deadline falling between two sources;
   - a value conflict and a stored difference, both listed;
   - a page disagreement stops every source;
@@ -631,4 +643,4 @@ The owner selected these on 2026-11-24 ([consolidated owner choices](https://git
 | 0211-4 | Scope | **A**: new admissions after the cutoff only; C3a and C3b separate | decision 4 |
 | 0211-5 | Cross-producer upstream coordination | **C**: shared, adopted by all relevant producers in one delivery scope | decision 5, cards UC1-UC3 |
 | 0211-6 | Activation and control | **extended A**: the durable control plus an `/admin/settings` checkbox using the same control | decision 6, card CU |
-| 0211-7 | **Open, raised by the [targeted re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6045305740):** may a lower-priority source fill a field permanently, without confirmed cross-source agreement, after a 72 h transport wait or a failed Letterboxd source? Or do `core` and `credits` wait until the owner releases them? | **not decided**; the Coordinator presents it | decision 2 |
+| 0211-7 | Fallback when a higher-priority source is unavailable (raised by the [targeted re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6045305740)) | **[B](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7141202861)**: transport-only fallback after 72 h of continuous upstream unavailability, with `fallback_fill` and `unconfirmed_agreement`. No fallback for a definite-error cap, a 404 or an invalid page. A known disagreement always blocks | decision 2 |
