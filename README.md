@@ -48,7 +48,7 @@ Letterboxd ratings refresh is a distinct, gated operation. HTTP 403 must not be 
 
 ## Local development
 
-Requires Node.js 20 or later. `npm test` additionally needs the `sqlite3` command-line tool, because the D1 schema and repository tests shell out to it; `npm run dev` does not. GitHub Actions' Ubuntu runner ships it, and Claude Code cloud sessions install it through `.claude/hooks/session-start.sh`. Local development uses fixture data in a local R2 bucket and a local D1 database (both Miniflare, never remote); a private production snapshot is not needed.
+Requires Node.js 20 or later. `npm test` additionally needs the `sqlite3` command-line tool, because the D1 schema and repository tests shell out to it; `npm run dev` does not. GitHub Actions' Ubuntu runner ships it, and Claude Code cloud sessions install it through `.claude/hooks/session-start.sh`. The runner checks the shell before the first test and, on macOS, prefers Homebrew's `sqlite` (`brew install sqlite`) over the one Apple ships, which fails the check; see [the sqlite3 shell of the test suite](docs/runbooks/local-setup.md#the-sqlite3-shell-of-the-test-suite). The non-functional suite (`npm run test:nonfunctional`, also run by the pre-push hook) needs Node 22.5 or later for its production-size memory scenarios. Local development uses fixture data in a local R2 bucket and a local D1 database (both Miniflare, never remote); a private production snapshot is not needed.
 
 ```bash
 npm ci

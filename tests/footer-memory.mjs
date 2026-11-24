@@ -17,7 +17,7 @@ import {installViewIndexFixture} from './view-index-fixture.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {scoped,scopedReplacing,scopedEpgPriority,scopedDiscoveryAuthority} from '../scripts/bundle-scope.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
-import {nonFunctional} from './suite-gate.mjs';
+import {nodeSqliteOrSkip,nonFunctional} from './suite-gate.mjs';
 
 const IMPORT='const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-footer-memory-'));
@@ -274,6 +274,7 @@ assert.equal(counted.body.lastRun.added,2);assert.equal(counted.body.lastRun.fai
 
 // ---- 4. production-sized reproduction (environment-dependent: nightly only) ----
 nonFunctional('footer-memory-production-size',()=>{
+ if(!nodeSqliteOrSkip('footer-memory-production-size'))return;
  // The deployed bundle answers (the code workerd runs), on production-shaped fixtures with every authority in D1.
  const built=spawnSync(process.execPath,['build.mjs'],{encoding:'utf8'});
  assert.equal(built.status,0,built.stderr);
@@ -298,6 +299,7 @@ nonFunctional('footer-memory-production-size',()=>{
 // (docs/evidence/owner-limbo-memory-air-528-2026-11-18.md). The shows are now read in chunks (117 statements) and the page serialises the two reads, so the isolate
 // never holds two loads for the page's sake. 66 MB leaves the sequential pair about 8 MB of room and fails the concurrent pair.
 nonFunctional('owner-limbo-memory-production-size',()=>{
+ if(!nodeSqliteOrSkip('owner-limbo-memory-production-size'))return;
  const built=spawnSync(process.execPath,['build.mjs'],{encoding:'utf8'});
  assert.equal(built.status,0,built.stderr);
  const script=path.resolve('scripts/footer-memory-profile.mjs'),fixtures=path.join(root,'limbo-fixtures');

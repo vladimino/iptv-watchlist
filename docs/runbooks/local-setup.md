@@ -90,6 +90,14 @@ Local Node 20 uses Wrangler 4.86 and compatibility date `2026-05-03` for this pr
 
 Local rollback is deleting the store directory (or `npm run dev -- --refresh`): that removes only the selected local R2 and D1.
 
+### The sqlite3 shell of the test suite
+
+The database tests run SQL through the `sqlite3` command-line shell (`tests/sqlite-session.mjs`, the D1 stand-in). `npm test` checks the shell once per run (`scripts/sqlite-cli.mjs`): it must execute its standard input and stop at the statement that fails under `-bail`. The `sqlite3` of `PATH` is tried first, then Homebrew's keg-only sqlite (`/opt/homebrew/opt/sqlite/bin/sqlite3`, `/usr/local/opt/sqlite/bin/sqlite3`); the first shell that passes is put first in `PATH` for every test file and named in `IPTV_SQLITE3_VERIFIED`. Without a passing shell the run stops with the reasons instead of failing every database test one by one. A test file run on its own makes the same check on its first call.
+
+On macOS the shell Apple ships does not qualify (24 Nov 2026: `/usr/bin/sqlite3` 3.54.0 keeps running the rest of an input line after a statement fails under `-bail`, so a refused write could leave rows behind; and sqlite3 3.54 of either origin reads no input at all when `-cmd` and `-bail` are both given). Install Homebrew's: `brew install sqlite`; `npm test` finds it on its own, or put `$(brew --prefix sqlite)/bin` first in `PATH` to run single files. Every call of the harness is framed by a start and an end marker that must come back, so a shell that executes nothing can never pass a test. Ubuntu's sqlite3 on GitHub Actions passes the check as it is.
+
+`npm run test:nonfunctional` (and the pre-push hook, which runs `npm run test:all`) needs Node 22.5 or later for the production-size memory scenarios, which run the built Worker over `node:sqlite`; the nightly workflow pins Node 22. On an older local Node those scenarios print that they were skipped; the rest of both files still runs. On CI an older Node fails them as before.
+
 The tests of this tooling:
 
 | Test | What it proves |
