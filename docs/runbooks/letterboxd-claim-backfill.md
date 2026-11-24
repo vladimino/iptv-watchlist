@@ -4,7 +4,46 @@ Applies to the dormant module `src/canonical-letterboxd-claim.js` ([ADR 0184](..
 
 ## Activation of the producer path
 
-The Ratings flows already offer their durable links to the claim module, which stays inactive until the constant `LETTERBOXD_CLAIM_ACTIVATED` in `src/canonical-letterboxd-claim.js` is changed to `true` in a reviewed change. That change is a production activation: it needs the owner's explicit GO, after the backfill preflight and after the matching tests pass, and it is separate from the backfill. Reverting that line stops new claims; claims already written stay (see Rollback). While inactive, the flows write nothing for claims and store nothing. While active, an unproved id keeps a bounded `claim_pending` entry in the Diary identity document (six attempts, then it stays visible and is no longer served); the baseline import offers verified entries only and a replay of a committed chunk re-offers it. The natural producers after activation are the Diary identity step of the Letterboxd Sync Workflow's ratings and Watchlist admission steps (only pairs that step verified itself: a verified page check, an existing trusted bridge or a confirmed `link_failed` repair, and their `claim_pending` retries) and an owner-driven archive baseline commit (verified items only); the rated-candidate identity step is deliberately not wired, and a marked inferred pair is refused by the planner whichever flow offers it. A zero cohort in the backfill `dry_run` does not by itself show that the producer path is active.
+The Ratings flows already offer their durable links to the claim module. The module stays inactive until the constant `LETTERBOXD_CLAIM_ACTIVATED` in `src/canonical-letterboxd-claim.js` is `true`. While inactive, the flows write nothing for claims and store nothing. While active:
+- an unproved id keeps a bounded `claim_pending` entry in the Diary identity document; after six attempts it stays visible and is no longer served;
+- the baseline import offers verified entries only, and a replay of a committed chunk re-offers it;
+- reverting the line stops new claims, but claims already written stay (see Rollback).
+
+A zero cohort in the backfill `dry_run` does not by itself show that the producer path is active.
+
+### Activation plan (owner GO required; the gate stays `false` until then)
+
+1. **Scope.** The producer claims **verified pairs only**:
+   - a pair the Diary identity step verified itself (Letterboxd page and TMDB check), an existing trusted bridge, or a confirmed `link_failed` repair, plus their `claim_pending` retries for the same movie. The step runs from the Letterboxd Sync Workflow's ratings (Diary) phase and its Watchlist admission step, inside the Sync's epoch fence;
+   - verified items of an owner-driven archive baseline commit.
+
+   A lid that the link index alone ties to a movie is not offered. An inferred link is never offered and is refused by the planner (`identity` or `inferredPairs`). The rated-candidate step is not wired. No backfill is part of the activation.
+2. **The change.** In one reviewed PR:
+   - the constant line, `export const LETTERBOXD_CLAIM_ACTIVATED=true;`;
+   - the matching assertion of `tests/canonical-letterboxd-claim.mjs` ("the activation constant ships off").
+
+   `tests/letterboxd-claim-activation-rehearsal.mjs` already runs the whole producer with the gate on, from a private copy of `src/`, so it needs no change. The PR is merged only after the owner's GO; the ordinary deploy then activates it.
+3. **Preflight, read-only, immediately before the GO:**
+   - `feature_flags` (no flag gates this producer; it is the constant);
+   - `ratings_sync_status`: Letterboxd Sync mode `cloudflare` and healthy, the next slot due;
+   - the backfill `dry_run`: `already_current`, no blockers;
+   - `node scripts/letterboxd-claim-producer-status.mjs`, the baseline. It reports both authorities, the claim unit's receipts by state, the `letterboxd` claims by provenance and the `claim_pending` queue. Record the activation time `T`, the deploy time of the merge, in UTC.
+4. **Natural producer pass (no artificial trigger).** The first natural event is either a new Letterboxd id that the Watchlist admission step verifies, or a Diary id without a Ratings TMDB link that the Diary step verifies. Each needs a Film the admission creates. The Sync runs four slots a day.
+5. **Independent authoritative readback**, measured on the claim writer alone and not through the Ratings workflow: `node scripts/letterboxd-claim-producer-status.mjs --since T`.
+   - **Accept** when `receipts.since` shows only `applied`; `producerWritesSince` has `films ≥ 1` and `claimed = proofHolds = startedFound = films` with no `problems`; `claimPending.atAttemptBound` is 0; and `claims.bySource.ratings_alias_bridge` grew by exactly `films`.
+   - Then run the backfill `dry_run` again and confirm it is still `already_current`.
+   - The tool re-proves each claim with the planner and resolves it with `catalogStartedFilm`. It prints no identifier and sends no write.
+   - **No natural event within the observation window** is not a failure and not an acceptance. The card goes to `Верификация` with this criterion and the readback command.
+6. **Stop and rollback.** Revert the constant in a reviewed PR and deploy if any of these appears:
+   - a receipt in `failed`, `unknown` or `abandoned` state;
+   - any `producerWritesSince.problems` entry, a claim that does not re-prove, or a lid the Started reader does not find;
+   - growth of `claim_pending` at the attempt bound;
+   - a claim on a pair outside the verified scope.
+
+   The revert stops new offers. Written claims stay and are repaired case by case after a separate owner decision ([ADR 0192](../adr/0192-retire-view-index-selector-and-raw-object.md)). No Started mark, Event, alias or Film is written by the producer, so none needs rollback.
+7. **Limits carried into activation.**
+   - The legacy audit is a reconstruction of the current state under the historical writer invariant, not a replay of the deleted import receipts. Its one detected pair is marked and refused.
+   - An undetected legacy inferred pair would pass the planner, but no producer offers it, because index-only pairs are not offered. It can gain a claim only after a verified flow proves the same pair independently.
 
 **Legacy inferred pairs (owner decision before activation and before any further backfill).** The production import of 8 to 9 November 2026 ([AIR-388 evidence](../evidence/letterboxd/air-388-full-import-2026-11-10.md)) linked `inferred` pairs before the pair mark existed. A pair it linked on a Diary-first record (facts and lid, no TMDB id) carries no mark, and the planner cannot tell it from a verified pair. The import's chunk receipts were deleted by the AIR-528 cleanup, so the [read-only audit of 23 November 2026](../evidence/d1-migration/air-559-legacy-inferred-pair-audit-2026-11-23.md) reconstructed the current cohort from the fact records, the mutable `letterboxd/admissions/verified-films.json` (`identity: "inferred"` per retained admission), D1 `film_rated_admission` and the canonical claims, under the historical writer invariant. It detected **one** such pair and no claim on it or on any inferred-marked record; this is not a replay of the deleted receipts. The owner chose on 24 November 2026 to mark that one record with the one-record repair below, and it was [applied and read back the same day](../evidence/d1-migration/air-559-inferred-pair-repair-apply-2026-11-24.md): the planner now refuses that pair. A pair's presence in the link index or on its record is still not evidence that it was verified. Activation and any further backfill keep their own plan and owner GO.
 
