@@ -1,4 +1,4 @@
-# ADR 0206: Letterboxd Film admissions are coordinated in D1 only; `verified-films.json` is frozen as historical evidence
+# ADR 0207: Letterboxd Film admissions are coordinated in D1 only; `verified-films.json` is frozen as historical evidence
 
 **Status:** Proposed (no owner decision on this record; the recommended option and every sub-choice below await review and an explicit, ADR-specific Product Owner decision)  
 **Original decision date:** not decided  
@@ -197,4 +197,4 @@ No step is authorized by this record. Each production step keeps its own gate.
 
 ## Follow-ups
 
-On acceptance: F1, F2 and F3 as atomic cards, linked as bare URLs in the native Prerequisites checklist of AIR-275. ADR 0087, 0105 and 0166 get "Superseded in part by ADR 0206", and the registry rows are updated. On rejection: the record is kept as `Rejected` (docs-only), and the owner chooses A, B′ or C.
+On acceptance: F1, F2 and F3 as atomic cards, linked as bare URLs in the native Prerequisites checklist of AIR-275. ADR 0087, 0105 and 0166 get "Superseded in part by ADR 0207", and the registry rows are updated. On rejection: the record is kept as `Rejected` (docs-only), and the owner chooses A, B′ or C.
