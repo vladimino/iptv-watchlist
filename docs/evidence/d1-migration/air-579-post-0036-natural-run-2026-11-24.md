@@ -39,7 +39,7 @@ For the whole-catalog read the weighted execution estimate (`sum(sampleInterval)
 - The assigned-rows delete reads about one row per execution instead of about 19.8 k, and takes 0.23 ms instead of 33.2 ms.
 - The single `(scheme, value)` lookup reads 1.69 rows per execution instead of about 13.7 k.
 - The batch `(scheme, value)` lookup reads about two thirds fewer rows (15.3 k → 4.9 k) and is about a third faster.
-- The whole-catalog read costs the same per execution (12.4 k rows, 409 ms; the small rise is consistent with a slightly larger catalog, which was not measured). Fewer samples and a lower weighted execution estimate were seen on 24 Nov.
+- The whole-catalog read costs about the same per execution, slightly more (12.2 k → 12.4 k rows, 381 → 409 ms). The rise is consistent with a slightly larger catalog, which was not measured. Fewer samples and a lower weighted execution estimate were seen on 24 Nov.
 - The dual lookup has **no sample** on 24 Nov.
 
 **Inferred** (from the plans read back after the 0036 apply, not from a production plan of 24 Nov):
@@ -49,7 +49,7 @@ For the whole-catalog read the weighted execution estimate (`sum(sampleInterval)
 **Not established:**
 
 - Why the batch lookup still reads about 4.9 k rows per execution (the size of the lists per call, a plan chosen per execution, or another statement grouped under the same signature).
-- The effect of the index on the dual lookup in production, because it did not run in the window. The offline evidence for it is in the [0036 offline page](air-579-0036-lookup-indexes-offline-2026-11-23.md).
+- The effect of the index on the dual lookup in production. No matching sampled record was returned for 24 Nov, so its live performance effect cannot be established; the lookup may have executed without being sampled. The offline evidence for it is in the [0036 offline page](air-579-0036-lookup-indexes-offline-2026-11-23.md).
 - Any causal statement about throughput or the number of executions. The workload of the two days differs (see below), so fewer samples of the whole-catalog read do not prove that a change removed reads.
 - The `ledgerArchive` count and the `sqlite_master` introspection (RCA hotspots 3 and 6) were not part of this observation.
 
@@ -67,7 +67,7 @@ For the whole-catalog read the weighted execution estimate (`sum(sampleInterval)
   - The record states no separate window for this aggregate.
   - The line count is a lower bound of executions ([log line limits](air-579-post-925-l0-observation-2026-11-23.md#limits-of-the-signal)).
   - A projected read still executes the full catalog SQL. Projection lowers what the Worker keeps in memory. It does not remove the D1 read.
-- **Result:** the expensive whole-catalog SQL remains. It is the known residual of this card, not a regression of it.
+- **Result:** the expensive whole-catalog SQL remains, and it is the known residual of this card. The comparison neither establishes nor rules out a regression of it: the workloads differ, and the per-execution means rose slightly.
 
 ## Comparability limits
 
