@@ -48,9 +48,11 @@ export function producerEventKey(event){return 'events/items/'+String(9999999999
 
 // Eligibility for an automatic restart AT THE STOP (ADR 0208 decision 3): the class `recoverChain` restarts, within its attempt cap and its streak window as they
 // stand at the stop. It is a property of the stop, never a promise: when the reconcile later holds it, a separate `held` outcome says so.
-export function stopRecovery({recoveryClass,attempts=0,streakStartedAt=null,at,caps={}}={}){
+export function stopRecovery({recoveryClass,attempts=0,streakStartedAt=null,at,epoch=null,caps={}}={}){
  if(typeof recoveryClass!=='string'||!recoveryClass)return null;
  if(!PRODUCER_AUTOMATIC_RECOVERY.includes(recoveryClass))return 'owner';
+ // Every restart opens the next epoch; a stop in the last epoch the cap allows can never be restarted (`restart` answers producer_chain_epoch_cap).
+ if(Number.isInteger(caps.epochCap)&&Number.isInteger(epoch)&&epoch+1>caps.epochCap)return 'owner';
  if(recoveryClass==='authority')return 'eligible';
  if(Number.isInteger(caps.attempts)&&(count(attempts)??0)>=caps.attempts)return 'owner';
  const streak=isTime(streakStartedAt)?streakStartedAt:at;
@@ -63,32 +65,53 @@ const COLUMNS='id,programme_run_id,input_generation,outcome,owner_epoch,at,run_r
 // The run of the chain's own (P, g), chosen as `epgRunForGeneration` chooses it (passed, passing, stopped, superseded; then the higher revision; then the run key).
 // A LEFT JOIN: a stop before any run row keeps a row with NULL counters, never zeros.
 const RUN_OF_CHAIN="LEFT JOIN canonical_producer_run r ON r.rowid=(SELECT x.rowid FROM canonical_producer_run x WHERE x.origin='epg' AND x.source_generation=c.programme_run_id||':'||c.input_generation ORDER BY CASE x.pass_state WHEN 'passed' THEN 3 WHEN 'passing' THEN 2 WHEN 'stopped' THEN 1 ELSE 0 END DESC,x.revision DESC,x.run_key ASC LIMIT 1)";
-const SELECT_PART="SELECT ?,c.programme_run_id,c.input_generation,?,c.owner_epoch,?,CASE WHEN r.run_key IS NULL THEN 0 ELSE 1 END,r.pass_no,r.unit_count,r.n_applied,r.n_noop,r.n_kept,r.n_failed,"
+// `at` of a pass is the run's own completion (`completed_at` of the passed run, written by commitPassComplete); every other outcome is the batch time. The batch time
+// is also the enqueue time (`created_at`) and the first delivery time (`next_attempt_at`) of every row.
+const SELECT_PART="SELECT ?,c.programme_run_id,c.input_generation,?,c.owner_epoch,CASE WHEN ?='passed' THEN r.completed_at ELSE ? END,CASE WHEN r.run_key IS NULL THEN 0 ELSE 1 END,r.pass_no,r.unit_count,r.n_applied,r.n_noop,r.n_kept,r.n_failed,"
  +"CASE WHEN ?='passed' THEN r.open_at_completion ELSE NULL END,r.created_at,"
  +"CASE WHEN ? IN ('stopped','held') THEN c.stopped_by ELSE NULL END,CASE WHEN ? IN ('stopped','held') THEN c.recovery_class ELSE NULL END,?,?,"
  +"c.handoff_count,c.takeover_count,c.relaunch_count,c.reopen_count,c.rebase_count,c.recovery_attempts,'pending',0,?,? FROM canonical_producer_chain c "+RUN_OF_CHAIN;
 // `where` names the chain row the outcome is read from, AFTER the batch's own update of it: its state (and, for supersede and held, its exact revision).
 // `extra` is an optional SQL condition and its parameters (the held guard).
+// A `passed` row also REQUIRES the passed run of that (P, g) (pass state `passed`, its applied claim equal to its source generation, a completion time): without
+// it the insert selects no row and the batch's `changes()=1` fails it. The LEFT JOIN with NULL counters is for stops, never a proof of a pass.
+const PASSED_RUN="r.pass_state='passed' AND r.applied_generation=r.source_generation AND r.completed_at IS NOT NULL";
 export function outcomeInsert({id,outcome,at,recovery=null,priorState=null,programmeRunId,epoch,state,revision=null,extra=null}){
  if(!id||!PRODUCER_EVENT_OUTCOMES.includes(outcome)||!isTime(at))throw outcomeError('film_person_invalid');
- const where=' WHERE c.programme_run_id=? AND c.owner_epoch=? AND c.owner_state=?'+(revision===null?'':' AND c.revision=?')+(extra?' AND '+extra.sql:'');
+ const where=' WHERE c.programme_run_id=? AND c.owner_epoch=? AND c.owner_state=?'+(revision===null?'':' AND c.revision=?')+(outcome==='passed'?' AND '+PASSED_RUN:'')+(extra?' AND '+extra.sql:'');
  return ['INSERT INTO canonical_producer_outcome ('+COLUMNS+') '+SELECT_PART+where,
-  [id,outcome,at,outcome,outcome,outcome,recovery,priorState,at,at,programmeRunId,epoch,state,...(revision===null?[]:[revision]),...(extra?extra.params:[])]];
+  [id,outcome,outcome,at,outcome,outcome,outcome,recovery,priorState,at,at,programmeRunId,epoch,state,...(revision===null?[]:[revision]),...(extra?extra.params:[])]];
 }
 
 // ---- the schema probe ---------------------------------------------------------------------------------------------------------
-// ONE statement. `active`: version >= 38 and the table exists. `absent`: version < 38 and no table, proven. Anything else throws `producer_outcome_schema_invalid`
-// (inconsistent); a failed read throws `producer_outcome_schema_unreadable`. Neither is ever read as "absent".
+// ONE statement. The schema contract version must be a real integer (a missing contract row, a NULL or a non-integer is never read as an old version).
+// `absent`: version below 38 and no object of the outbox at all, proven. `active`: version 38 or later and the whole outbox as 0038 creates it: the STRICT table with
+// every column, the pending index and the six triggers (marker fences, birth shape, no delete, immutable payload, one-way delivery). Anything else throws
+// `producer_outcome_schema_invalid` (inconsistent or malformed); a failed read throws `producer_outcome_schema_unreadable`. Neither is ever read as "absent".
+export const OUTCOME_TRIGGERS=Object.freeze(['canonical_producer_outcome_insert_open','canonical_producer_outcome_update_open','canonical_producer_outcome_insert_shape',
+ 'canonical_producer_outcome_no_delete','canonical_producer_outcome_immutable','canonical_producer_outcome_delivery']);
+export const OUTCOME_COLUMNS=Object.freeze([...'id,programme_run_id,input_generation,outcome,owner_epoch,at,run_recorded,pass_no,unit_count,n_applied,n_noop,n_kept,n_failed,open_at_completion,run_created_at,stopped_by,recovery_class,recovery,prior_state,handoff_count,takeover_count,relaunch_count,reopen_count,rebase_count,recovery_attempts,state,attempts,next_attempt_at,delivered_at,created_at'.split(',')]);
+const PROBE_SQL="SELECT (SELECT version FROM schema_contract WHERE id=1) AS version,(SELECT typeof(version) FROM schema_contract WHERE id=1) AS version_type,"
+ +"(SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'canonical_producer_outcome%') AS objects,"
+ +"(SELECT sql FROM sqlite_master WHERE type='table' AND name='canonical_producer_outcome') AS table_sql,"
+ +"(SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='canonical_producer_outcome_pending' AND tbl_name='canonical_producer_outcome') AS indexes,"
+ +"(SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='canonical_producer_outcome' AND name IN ("+OUTCOME_TRIGGERS.map(name=>"'"+name+"'").join(',')+")) AS triggers";
+export function outcomeSchemaVerdict(row){
+ if(!row||typeof row!=='object')return 'invalid';
+ if(row.version_type!=='integer'||!Number.isInteger(Number(row.version))||row.version===null)return 'invalid';
+ const version=Number(row.version),objects=Number(row.objects);
+ if(!Number.isInteger(objects))return 'invalid';
+ if(version<OUTCOME_SCHEMA_VERSION)return objects===0?'absent':'invalid';
+ const sql=typeof row.table_sql==='string'?row.table_sql:'';
+ const whole=/\)\s*STRICT\s*$/i.test(sql)&&OUTCOME_COLUMNS.every(column=>new RegExp('(^|[\\s,(])'+column+'\\s+(TEXT|INTEGER)\\b').test(sql));
+ return whole&&Number(row.indexes)===1&&Number(row.triggers)===OUTCOME_TRIGGERS.length&&objects===1+1+OUTCOME_TRIGGERS.length?'active':'invalid';
+}
 export async function readOutcomeSchema(env){
  let row;
- try{
-  row=await env.DB.prepare("SELECT (SELECT version FROM schema_contract WHERE id=1) AS version,(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='canonical_producer_outcome') AS tables").first();
- }catch{throw outcomeError('producer_outcome_schema_unreadable');}
- const version=Number(row?.version),tables=Number(row?.tables);
- if(!Number.isInteger(version)||!Number.isInteger(tables))throw outcomeError('producer_outcome_schema_unreadable');
- if(version>=OUTCOME_SCHEMA_VERSION&&tables===1)return 'active';
- if(version<OUTCOME_SCHEMA_VERSION&&tables===0)return 'absent';
- throw outcomeError('producer_outcome_schema_invalid');
+ try{row=await env.DB.prepare(PROBE_SQL).first();}catch{throw outcomeError('producer_outcome_schema_unreadable');}
+ const verdict=outcomeSchemaVerdict(row);
+ if(verdict==='invalid')throw outcomeError('producer_outcome_schema_invalid');
+ return verdict;
 }
 
 // ---- the event of one row (frozen: built only from the immutable columns) ------------------------------------------------------

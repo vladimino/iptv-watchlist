@@ -12,7 +12,7 @@ import {
 } from './canonical-producer-fence.js';
 
 const {assertSql,FENCE}=fenced;
-const RECOVERY_CAPS=Object.freeze({attempts:CHAIN_RECOVERY_ATTEMPT_CAP,windowMs:CHAIN_RECOVERY_WINDOW_MS});
+const RECOVERY_CAPS=Object.freeze({attempts:CHAIN_RECOVERY_ATTEMPT_CAP,windowMs:CHAIN_RECOVERY_WINDOW_MS,epochCap:CHAIN_EPOCH_CAP});
 const COLUMNS='programme_run_id,input_generation,run_key,release_pin,owner_epoch,owner_instance,claim_nonce,owner_state,lease_expires_at,handoff_count,takeover_count,rebase_count,relaunch_count,reopen_count,stopped_by,recovery_class,recovery_attempts,streak_started_at,next_attempt_at,progress_relaunches,revision,created_at,updated_at';
 const SKIPPED=Object.freeze({state:'skipped',reason:'film_person_route_not_open'});
 const iso=ms=>new Date(ms).toISOString();
@@ -260,7 +260,7 @@ export async function stopChain(env,{fence:f,revision,at,stoppedBy,recoveryClass
  await commit(env,gate,[fence(gate),...fenceStatements(f,{ownerOnly:true}),
   ["UPDATE canonical_producer_chain SET owner_state='stopped',stopped_by=?,recovery_class=?,streak_started_at=COALESCE(streak_started_at,?),next_attempt_at=?,revision=revision+1,updated_at=? WHERE programme_run_id=? AND owner_epoch=? AND claim_nonce=? AND owner_state='active' AND input_generation=? AND revision=?",
    [stoppedBy,klass,at,next,at,f.programmeRunId,f.epoch,f.nonce,f.inputGeneration,revision]],changesOne(),
-  ...stoppedOutcomeStatements(f,at,stopRecovery({recoveryClass:klass,attempts:stored?.recovery_attempts||0,streakStartedAt:stored?.streak_started_at||null,at,caps}))]);
+  ...stoppedOutcomeStatements(f,at,stopRecovery({recoveryClass:klass,attempts:stored?.recovery_attempts||0,streakStartedAt:stored?.streak_started_at||null,at,epoch:f.epoch,caps}))]);
  return {state:'stopped',chain:await readChain(env,f.programmeRunId)};
 }
 

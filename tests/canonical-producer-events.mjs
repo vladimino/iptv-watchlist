@@ -96,6 +96,27 @@ async function claimed(env,{nonce='bbbbbbbb-0000-0000-0000-000000000000',generat
  const odd=database(T37);sqlite(odd,'CREATE TABLE canonical_producer_outcome (id TEXT)');
  await assert.rejects(()=>Events.readOutcomeSchema({DB:d1Standin(odd)}),error=>error.code==='producer_outcome_schema_invalid','a table without its version is inconsistent, never absent');
  await assert.rejects(()=>Events.readOutcomeSchema({DB:{prepare:()=>{throw new Error('d1 down');}}}),error=>error.code==='producer_outcome_schema_unreadable','a failed read is never absent');
+ // Review of 076c24d5, P1: a missing schema contract row is NOT an old version (SQLite answers NULL and Number(null) would be 0).
+ const noContract=database(T37);sqlite(noContract,'DELETE FROM schema_contract');
+ await assert.rejects(()=>Events.readOutcomeSchema({DB:d1Standin(noContract)}),error=>error.code==='producer_outcome_schema_invalid','no contract row is invalid, never absent');
+ const noContract38=database();sqlite(noContract38,'DELETE FROM schema_contract');
+ await assert.rejects(()=>Events.readOutcomeSchema({DB:d1Standin(noContract38)}),error=>error.code==='producer_outcome_schema_invalid');
+ // Pure verdicts: a NULL or text version, a non-integer, an old version with a stray index or trigger.
+ for(const row of [null,{version:null,version_type:'null',objects:0},{version:'37',version_type:'text',objects:0},{version:37.5,version_type:'real',objects:0},{version:37,version_type:'integer',objects:1}])
+  assert.equal(Events.outcomeSchemaVerdict(row),'invalid',JSON.stringify(row));
+ assert.equal(Events.outcomeSchemaVerdict({version:37,version_type:'integer',objects:0}),'absent');
+ // A version-38 schema with a malformed outbox (a missing trigger, a missing index, a table without its columns) follows the fault path, never normal work.
+ for(const damage of ['DROP TRIGGER canonical_producer_outcome_no_delete','DROP TRIGGER canonical_producer_outcome_immutable','DROP INDEX canonical_producer_outcome_pending']){
+  const bad=database();sqlite(bad,damage);
+  await assert.rejects(()=>Events.readOutcomeSchema({DB:d1Standin(bad)}),error=>error.code==='producer_outcome_schema_invalid',damage);
+ }
+ const thin=database(T37);sqlite(thin,"CREATE TABLE canonical_producer_outcome (id TEXT PRIMARY KEY) STRICT;UPDATE schema_contract SET version=38 WHERE id=1");
+ await assert.rejects(()=>Events.readOutcomeSchema({DB:d1Standin(thin)}),error=>error.code==='producer_outcome_schema_invalid','a version-38 table without its columns, index and triggers is malformed');
+ // Eligibility at the stop includes the epoch cap: a stop in the last epoch can never be restarted (restart answers producer_chain_epoch_cap, never held).
+ const caps={attempts:5,windowMs:24*H,epochCap:64};
+ assert.equal(Events.stopRecovery({recoveryClass:'transient',attempts:0,at:AT,epoch:63,caps}),'eligible');
+ assert.equal(Events.stopRecovery({recoveryClass:'transient',attempts:0,at:AT,epoch:64,caps}),'owner','no epoch left: needs the owner, no promise');
+ assert.equal(Events.stopRecovery({recoveryClass:'authority',attempts:0,at:AT,epoch:64,caps}),'owner');
 }
 
 // ---- 3. The real Workflow: passed (last in the completion batch) and a stop before any run row ---------------------------------
@@ -201,16 +222,18 @@ async function claimed(env,{nonce='bbbbbbbb-0000-0000-0000-000000000000',generat
   assert.equal(chainOf(file).owner_state,'superseded');
   assert.equal(outcomes(file).length,0,'complete: no superseded row');
  }
- // A stopped chain of an older run: no superseded and no held row. (Pre-existing, unchanged here: the chain table's CHECK `stopped_by IS NULL OR owner_state =
- // 'stopped'` refuses the hourly supersede of a stopped chain, so it stays stopped; the outcome path adds nothing either way.)
+ // A stopped chain of an older run is NOT superseded today: a PRE-EXISTING defect outside this change (the chain table's CHECK `stopped_by IS NULL OR
+ // owner_state = 'stopped'` refuses the hourly supersede, which does not clear `stopped_by`; a separate scoped fix is proposed). Pinned here only to show that
+ // the outcome path adds no superseded and no held row for it; this is not a successful supersession.
  {
   const file=database(),env=envOf(file);
   await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:T0});
   setChain(file,"owner_state='stopped',stopped_by='producer_transport',recovery_class='transient'");
   publish(file,'run-q',11);
   const out=await reconcileProducerChain(env,{now:T0+H,hold:false});
-  assert.equal(out.skipped,1);
-  assert.equal(outcomes(file).length,0,'stopped: no superseded and no held row');
+  assert.equal(out.skipped,1,'the supersede failed (pre-existing CHECK), counted as skipped');
+  assert.equal(chainOf(file).owner_state,'stopped','the chain stays stopped: not superseded');
+  assert.equal(outcomes(file).length,0,'and no superseded or held row');
  }
 }
 {
@@ -246,6 +269,50 @@ async function claimed(env,{nonce='bbbbbbbb-0000-0000-0000-000000000000',generat
  assert.equal(chainOf(file).owner_state,'active');
 }
 
+// ---- 5b. Review of 076c24d5, P2: `passed` takes the passed run's own completion time on both completion paths, and requires a passed run ------------------
+{
+ const file=database(),env=envOf(file);
+ const fence=await claimed(env);
+ env.producerFence=fence;
+ const opened=await Store.openEpgRun(env,{runKey:'epg:run-p:10',sourceGeneration:'run-p:10',fingerprint:SHA,units:[{kind:'film_facts',id:'film:tmdb:1'}],at:AT});
+ await Store.commitSlice(env,{run:opened.run,next:{cursor_kind:'film_facts',cursor_id:'film:tmdb:1'},counts:{applied:1},at:AT});
+ // The completion path itself, at a clock T+7 min: the row's `at` is the run's completed_at (the same batch writes both).
+ const run=rows(file,"SELECT * FROM canonical_producer_run WHERE run_key='epg:run-p:10'")[0];
+ const closeAt=iso(T0+7*60000);
+ await Store.commitPassComplete(env,{run,openAtCompletion:0,at:closeAt});
+ let [row]=outcomes(file);
+ assert.equal(row.at,closeAt);assert.equal(row.at,rows(file,"SELECT completed_at FROM canonical_producer_run")[0].completed_at);
+}
+{
+ // The already_complete path: the run passed earlier (T+5 min, here written by a batch without the chain completion), the chain closes later (T+40 min).
+ // The report is dated by the run's completion, never by the chain closure; the closure is only its enqueue time.
+ const file=database(),env=envOf(file);
+ const fence=await claimed(env);
+ env.producerFence={...fence,outcomes:false};
+ const opened=await Store.openEpgRun(env,{runKey:'epg:run-p:10',sourceGeneration:'run-p:10',fingerprint:SHA,units:[],at:AT});
+ const passedAt=iso(T0+5*60000);
+ sqlite(file,"UPDATE canonical_producer_run SET pass_state='passed',applied_generation=source_generation,open_at_completion=0,completed_at='"+passedAt+"',updated_at='"+passedAt+"',revision=revision+1 WHERE run_key='epg:run-p:10'");
+ fence.revision=chainOf(file).revision;
+ const closeAt=iso(T0+40*60000);
+ await Chain.completeChain(env,{fence,revision:fence.revision,at:closeAt});
+ const [row]=outcomes(file);
+ assert.equal(row.at,passedAt,'dated by the passed run, not by the chain closure');
+ assert.equal(row.created_at,closeAt,'enqueued at the closure');
+ assert.equal(Events.outcomeEvent(row).durationMs,5*60000,'the duration is the run\'s own');
+ void opened;
+}
+{
+ // A completion whose run is NOT passed: the passed insert selects nothing, `changes()=1` fails the batch, and the chain is not completed.
+ const file=database(),env=envOf(file);
+ const fence=await claimed(env);
+ env.producerFence=fence;
+ await Store.openEpgRun(env,{runKey:'epg:run-p:10',sourceGeneration:'run-p:10',fingerprint:SHA,units:[],at:AT});
+ fence.revision=chainOf(file).revision;
+ await assert.rejects(()=>Chain.completeChain(env,{fence,revision:fence.revision,at:iso(T0+H)}));
+ assert.equal(chainOf(file).owner_state,'active','a pass is never reported or committed without its passed run');
+ assert.equal(outcomes(file).length,0);
+}
+
 // ---- 6. Activation boundaries: absent schema (today), inconsistent and unreadable probes -------------------------------------
 {
  const file=database(T37);seedPass(file);
@@ -264,6 +331,26 @@ async function claimed(env,{nonce='bbbbbbbb-0000-0000-0000-000000000000',generat
  assert.deepEqual([result.state,result.code],['stopped','producer_outcome_schema_invalid'],'an inconsistent schema stops the chain on the record');
  assert.equal(chainOf(file).recovery_class,'fail_closed');
  assert.equal(rows(file,"SELECT COUNT(*) AS n FROM canonical_producer_run")[0].n,0,'no work ran');
+}
+{
+ // A version-38 database whose outbox lost a trigger: the Workflow stops the chain on the record (fail_closed) before any work; the reconcile supersedes no in-flight
+ // chain and drains nothing. (A missing schema contract row is refused even earlier: the Film/Person marker read fails closed before any launch, claim or batch;
+ // the probe itself reads it as invalid, section 2.)
+ for(const damage of ['DROP TRIGGER canonical_producer_outcome_no_delete','DROP INDEX canonical_producer_outcome_pending']){
+  const file=database();seedPass(file);sqlite(file,damage);
+  const env=envOf(file);
+  await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:T0});
+  const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:1},step('88888888-8888-8888-8888-888888888888'),{hold:false});
+  assert.deepEqual([result.state,result.code],['stopped','producer_outcome_schema_invalid'],damage);
+  assert.equal(rows(file,'SELECT COUNT(*) AS n FROM canonical_producer_run')[0].n,0,damage+': no work ran');
+  const file2=database();sqlite(file2,damage);
+  const env2=envOf(file2);
+  await Chain.launchChain(env2,{programmeRunId:P,generation:10,at:AT,nowMs:T0});
+  publish(file2,'run-q',11);
+  const out=await reconcileProducerChain(env2,{now:T0+H,hold:false});
+  assert.equal(out.outcomes,'producer_outcome_schema_invalid',damage);assert.equal(out.supersede,0);assert.equal(chainOf(file2).owner_state,'pending',damage+': not superseded without its outcome');
+ } const noContract=database();sqlite(noContract,'DELETE FROM schema_contract');
+ await assert.rejects(()=>Chain.launchChain(envOf(noContract),{programmeRunId:P,generation:10,at:AT,nowMs:T0}),error=>error.code==='film_person_unavailable','no contract row: the marker refuses first');
 }
 {
  const file=database();seedPass(file);
@@ -352,7 +439,7 @@ async function claimed(env,{nonce='bbbbbbbb-0000-0000-0000-000000000000',generat
  let h=card(base);
  assert.match(h,/Обогащение каталога завершено</);assert.match(h,/<dt>Обработано<\/dt><dd>10<\/dd>/);assert.match(h,/Поколение программы: 10 · проход 1/);assert.match(h,/Длительность: 1 ч 45 мин/);assert.doesNotMatch(h,/фильм/i);
  h=card(stop);
- assert.match(h,/допускает автоматический повтор/);assert.doesNotMatch(h,/продолжится автоматически/,'eligibility, never a promise');assert.match(h,/Если повтор не состоится, появится отдельное событие/);
+ assert.match(h,/допускает автоматический повтор/);assert.doesNotMatch(h,/продолжится автоматически/,'eligibility, never a promise');assert.doesNotMatch(h,/Если повтор не состоится, появится отдельное событие/,'no unconditional promise of a future event');assert.match(h,/Это не обещание/);assert.match(h,/вытесненная новой публикацией, не повторяется и отдельного события не получает/);
  assert.match(h,/<dt>Обработано<\/dt><dd>неизвестно<\/dd>/);assert.match(h,/<code>producer_cas_lost<\/code>/);
  h=card({...stop,outcome:'held',recovery:'owner'});assert.match(h,/Автоматический повтор обогащения каталога не состоялся/);assert.match(h,/event-status-error/);
  h=card({...stop,reason:'<img src=x onerror=1>',recoveryClass:'<script>',chain:{epoch:'<b>'},unitCount:'7'});
