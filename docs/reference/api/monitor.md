@@ -63,23 +63,18 @@ The status adds `holdUntil` and `lastDeliveryFailure` (`{at, reason}`) next to `
 
 ## Telegram text
 
-ADR 0206 decision 9 (Accepted); rendered by the pure `MonitorMessage.telegramText` (`src/domain/monitor-message.js`) from the message's own fields. Samples: [rendered offline samples](../../evidence/monitoring/telegram-format-air-592-2026-11-24.md).
+ADR 0206 decision 9 (Accepted), laid out per [ADR 0212](../../adr/0212-monitor-telegram-text-in-short-blocks.md) (Proposed). Rendered by the pure `MonitorMessage.telegramText` (`src/domain/monitor-message.js`) from the message's own fields. Plain text, no markup mode. Blocks are separated by exactly one empty line, and an empty block is left out. Samples and the offline bubble QA: [rendered samples](../../evidence/monitoring/telegram-layout-air-592-2026-11-24.md).
 
-| Line | Content |
+| Block | Lines |
 | --- | --- |
-| Header | Marker, kind and subsystem: `🚨 Сбой` (critical alert), `⚠️ Проблема` (ordinary alert), `🔁 Напоминание`, `⛔ Ухудшение`, `✅ Проблема снята`, `🧪 Тест`, then `·` and the subsystem (`Программа`, `Находки`, `Оценки`, `Прогнозы`, `Постеры`, `Letterboxd Sync`, `Обогащение каталога`, `Монитор`) |
-| Problem | A fixed Russian title per issue key (`Больше не наблюдается: …` on a recovery); an unknown key shows its sanitized code. A legacy recovery with the stream `canonical` or `catalog` is named by its issue key |
-| Severity | `🔴 критично` or `🟠 деградация`; on a recovery `Была критичной` when it was |
-| Statistics | `• label: value` lines from the issue's typed `metrics` (for example eligible and queued predictions, ownerless starts, remaining Discovery chunks, the EPG due time and last publication, the quarantine or stop reason, the poster detail, the Letterboxd backlog). Left out when unknown; never on a recovery |
-| `⏱ Без …` | The domain's own stall at the observation, labelled by what it measures: Predictions without confirmed progress (with the last confirmed progress); Discovery without allowed progress (`max(overdue, idle)`, with the allowed time) and, as a statistic, the last finished chunk; the Producer without confirmed progress counted from its reference (`отсчёт с`, possibly the publication) beside the last confirmed progress or `не было в этом окне`. `⏱ Опоздание` for EPG |
-| `🕒 Инцидент открыт` | The monitor's observed lifetime: from `firstSeenAt` (first snapshot, possibly before the confirmation) to the observation that planned the message (`observedAt`, else the queue time) |
-| `🕒 Длительность инцидента по наблюдениям монитора` | Recovery only: `firstSeenAt` to the detection (`endedAt`, frozen when planned; legacy: queue time). A late delivery never lengthens it. About the domain a recovery repeats only the last measured stall as `было не меньше X (на последнем наблюдении …)`; it never claims the domain recovered at the noticing tick |
-| `📨 Отправлено с задержкой` | Only when the send is more than 15 minutes after the observation or detection |
-| `🌐 В целом` | The overall state at the send. On a recovery while the site is still degraded: `остаются другие проблемы (восстановлена только эта)` |
-| `Время` | The send time in Europe/Madrid, labelled; all times in the text are Madrid |
-| `Ref` | Always the last line: the stable outbox id (UTC inside), the key to drop a repeat |
+| Header | 1. Marker, kind and subsystem: `🚨 Сбой` (critical alert), `⚠️ Проблема` (ordinary alert), `🔁 Напоминание`, `⛔ Ухудшение`, `✅ Проблема снята`, `🧪 Тест`, then `·` and the subsystem (`Программа`, `Находки`, `Оценки`, `Прогнозы`, `Постеры`, `Letterboxd Sync`, `Обогащение каталога`, `Монитор`); a legacy recovery with the stream `canonical` or `catalog` is named by its issue key. 2. A short Russian problem title that does not repeat the subsystem (an unknown key shows its sanitized code). 3. `🔴 Критичный сбой` or `🟠 Подтверждённая деградация`; on a recovery `Больше не наблюдается` (`· была критичной` when it was) |
+| Statistics | `Метка: значение`, one per line, no bullet, from the issue's typed `metrics`. Examples: `Доступно`, `В очереди`, `Запусков без фильма`, `Осталось чанков`, `Исполнитель`, `Причина`, `Подробно`, `Поколение`, `Цепочка`, `Проход`, `Событий ждёт доставки`. Counts use a non-breaking thousands separator. Unknown values are left out, and the block is never shown on a recovery. Without metrics (a legacy message), `Детали:` holds the bounded English detail |
+| Domain stall | The duration line, then what it is counted from, each on its own line. Predictions: `⏱ Без прогресса` / `Последний прогресс`. Discovery: `⏱ Без разрешённого прогресса` (`max(overdue, idle)`) / `Шаг разрешён с` / `Последний чанк`, or `⏱ Без нового чанка` for a stalled executor. Producer: `⏱ Без прогресса` / `Отсчёт с` (a reference, possibly the publication) / `Последний прогресс` or `не было в этом окне`. EPG: `⏱ Опоздание` / `Ожидалась` / `Последняя публикация`. A recovery shows only `⏱ Без прогресса: не меньше X` (rounded down) / `Последнее наблюдение` |
+| Incident | `🕒 Инцидент: X`, the monitor's observed lifetime from `firstSeenAt` to the observation (`observedAt`, else the queue time), or to the detection on a recovery (`endedAt`, frozen; legacy: the queue time). Then `Открыт: …`, and `Снят: …` on a recovery. A late delivery never lengthens it |
+| Overall | `🌐 В целом: есть проблемы` / `всё в порядке` / `есть задержки` / `ожидание по расписанию`; a recovery while the site is still degraded: `🌐 Остаются другие проблемы` |
+| Technical footer | `📨 Доставлено с задержкой` / `Обнаружено: …` only when the send is more than 15 minutes after the observation or detection; the send time `dd.mm HH:MM:SS · Мадрид`; always last, `Ref: <stable id>` (UTC inside, whole, never cut by the length bound) |
 
-Unknown or malformed times read `неизвестно`, never 0. Dynamic values are numbers, times or printable ASCII; control, zero-width and direction characters are removed; no markup mode is sent; the text is at most 1800 characters. A message written before ADR 0206 (no `metrics`, no `observedAt`, `severity: needs_owner`) renders as critical with its bounded English detail.
+All times are Europe/Madrid. Unknown or malformed times read `неизвестно`, never 0, and never reach `Intl`. Dynamic values are numbers, times or printable ASCII. Control, zero-width and direction characters are removed. The text is at most 1800 characters.
 
 ## Catalog poster stream
 

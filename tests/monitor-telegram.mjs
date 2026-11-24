@@ -53,9 +53,9 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  assert.deepEqual(Object.keys(sent[0].body).sort(),['chat_id','disable_web_page_preview','text'],'no parse_mode: plain text');
  assert.equal(sent[0].body.chat_id,CHAT);assert.equal(sent[0].body.disable_web_page_preview,true);
  const lines=sent[0].body.text.split('\n');
- assert.equal(lines[0],'🚨 Сбой · Оценки');assert.equal(lines[1],'Оценки в карантине');assert.ok(lines.includes('• Причина: budget_exhausted'),'typed metric, not the English sentence');
- assert.ok(lines.some(line=>line.startsWith('Серьёзность: 🔴 критично')));assert.ok(lines.some(line=>line.startsWith('🌐 В целом: ')));
- assert.ok(lines.includes('Время: 06.11 23:00:00 · Мадрид (Europe/Madrid)'),'Madrid time, labelled');assert.ok(lines.at(-1).startsWith('Ref: ratings_quarantined|alert|'),'the stable id is the last line');
+ assert.equal(lines[0],'🚨 Сбой · Оценки');assert.equal(lines[1],'Оценки в карантине');assert.ok(lines.includes('Причина: budget_exhausted'),'typed metric, not the English sentence');
+ assert.equal(lines[2],'🔴 Критичный сбой');assert.ok(lines.includes('🌐 В целом: есть проблемы'));assert.equal(lines[3],'','blocks are separated by real empty lines');
+ assert.ok(lines.includes('06.11 23:00:00 · Мадрид'),'Madrid time, labelled');assert.ok(lines.at(-1).startsWith('Ref: ratings_quarantined|alert|'),'the stable id is the last line');
  const doc=t.bucket.value(KEY);assert.deepEqual(doc.outbox,[]);assert.equal(doc.alerts.issues.ratings_quarantined.sendCount,1);assert.equal(doc.lastDeliveryFailure,null);
  assert.equal(t.calls.filter(item=>item.method==='GET').length,1,'the heartbeat ping is unchanged');
 }
@@ -73,12 +73,12 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
 {
  const t=setup();
  const body=t.M.internals.telegramText({kind:'alert',severity:'degraded',stream:'epg\n<b>',key:'k_<i>*[x](y)',message:'<b>bold</b> *a* _b_ `c` [l](http://x) é\u0007\u202e\n\nline'+'z'.repeat(2000),metrics:{reason:'r\n\u202ex'},id:'id\n'+'q'.repeat(500)},'degraded',T0);
- const fixed=new Set([...fs.readFileSync('src/domain/monitor-message.js','utf8')].filter(ch=>ch.codePointAt(0)>0x7e));
+ const fixed=new Set([...fs.readFileSync('src/domain/monitor-message.js','utf8')].filter(ch=>ch.codePointAt(0)>0x7e));fixed.add('\u00a0'); // the non-breaking thousands separator
  assert.ok([...body].every(ch=>ch==='\n'||(ch.codePointAt(0)>=0x20&&ch.codePointAt(0)<=0x7e)||fixed.has(ch)),'non-ASCII only from the fixed labels');
  assert.doesNotMatch(body,/[\u0000-\u0009\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]|é/,'no control, direction or foreign character');
  assert.ok(body.length<=1800,'far below the 4096-character Telegram limit');
  const lines=body.split('\n');assert.equal(lines[0],'⚠️ Проблема · epgb','an unknown stream is shown as its sanitized code');assert.ok(lines.find(line=>line.startsWith('Детали: ')).length<=210,'the legacy detail is bounded');
- assert.equal(lines.filter(line=>line.startsWith('Ref: ')).length,1);assert.ok(lines.at(-1).length<=126);
+ assert.equal(lines.filter(line=>line.startsWith('Ref: ')).length,1);assert.ok(lines.at(-1).length<=205,'the id is kept whole up to 200 characters, never more');
 }
 
 // 4. A failed Telegram answer is never a delivery: the message stays queued, nothing is counted and the reason is a fixed code.
@@ -201,7 +201,7 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
 {
  const t=setup();healthy(t.bucket);await t.M.run(t.env,{now:T0});
  const sent=plain(await t.M.test(t.env,T0+MIN));assert.equal(sent.sent,true);
- const message=tg(t.calls).at(-1);assert.equal(message.body.text.split('\n')[0],'🧪 Тест · Монитор');assert.match(message.body.text,/Инцидента нет/);
+ const message=tg(t.calls).at(-1);assert.equal(message.body.text.split('\n')[0],'🧪 Тест · Монитор');assert.match(message.body.text,/инцидента нет/);
  assert.equal(t.bucket.value(KEY).lastTestAt,at(T0+MIN));assert.equal(plain(await t.M.test(t.env,T0+2*MIN)).reason,'recent');
  const f=setup();healthy(f.bucket);await f.M.run(f.env,{now:T0});f.answer(()=>({status:401,body:{ok:false}}));
  assert.deepEqual([plain(await f.M.test(f.env,T0+MIN)).sent,f.bucket.value(KEY).lastTestAt],[false,null],'a failed test does not spend the cooldown');

@@ -25,29 +25,28 @@ export const STREAM = Object.freeze({
 const TITLE = Object.freeze({
   epg_stale: 'Программа не опубликована вовремя', epg_failed: 'Публикация программы завершилась ошибкой',
   epg_authority: 'Источник опубликованной программы удержан или не читается', epg_resource_limit: 'Публикация программы упёрлась в лимит Worker',
-  discovery_stalled: 'Находки стоят: очередь без разрешённого прогресса', discovery_executor_stalled: 'Исполнитель Находок (Workflow) остановился',
+  discovery_stalled: 'Очередь Находок стоит', discovery_executor_stalled: 'Исполнитель (Workflow) остановился',
   discovery_generation_mismatch: 'Очередь Находок относится к другой программе', discovery_quarantined: 'Находки в карантине: попытки исчерпаны',
   discovery_resource_limit: 'Находки упёрлись в лимит Worker',
-  ratings_stalled: 'Оценки: нет завершённого дня и прогресса через 2 ч после срока', ratings_quarantined: 'Оценки в карантине', ratings_failed_permanent: 'Оценки: постоянная ошибка',
+  ratings_stalled: 'Нет завершённого дня (срок + 2 ч)', ratings_quarantined: 'Оценки в карантине', ratings_failed_permanent: 'Оценки: постоянная ошибка',
   ratings_switch_open: 'Переключение режима Оценок не завершилось', ratings_resource_limit: 'Оценки повторно упёрлись в лимит Worker',
   letterboxd_slot_late: 'Слот Letterboxd не запустился вовремя', letterboxd_slot_stalled: 'Слот Letterboxd завис после окна',
   letterboxd_slot_missed: 'Слот Letterboxd пропущен', letterboxd_slots_failed: 'Последний слот Letterboxd не обновил ни один источник',
-  letterboxd_quarantined: 'Letterboxd Sync в карантине', letterboxd_watchlist_stale: 'Watchlist давно не сканировался полностью',
+  letterboxd_quarantined: 'Letterboxd Sync в карантине', letterboxd_watchlist_stale: 'Watchlist давно не сканировался',
   letterboxd_ratings_failed: 'Слот Letterboxd не обновил оценки', letterboxd_watchlist_failed: 'Слот Letterboxd не обновил Watchlist',
   letterboxd_events_backlog: 'События слотов Letterboxd ждут доставки',
-  predictions_no_progress: 'Нет подтверждённого прогресса прогнозов',
+  predictions_no_progress: 'Нет подтверждённого прогресса',
   catalog_posters_unknown: 'Состояние недельного повтора постеров не читается', catalog_posters_lost: 'Пропал checkpoint недельного повтора постеров',
-  catalog_posters_failed: 'Недельный повтор постеров завершился сбоем', catalog_posters_stalled: 'Недельный повтор постеров завис',
+  catalog_posters_failed: 'Недельный повтор завершился сбоем', catalog_posters_stalled: 'Недельный повтор постеров завис',
   catalog_posters_overdue: 'Недельный повтор постеров не запустился',
-  canonical_producer_no_progress: 'Нет подтверждённого прогресса обогащения каталога', canonical_producer_failed: 'Обогащение каталога остановлено',
+  canonical_producer_no_progress: 'Нет подтверждённого прогресса', canonical_producer_failed: 'Остановлено',
 });
 // Fixed Russian wording of the diagnostic `detail` codes the policy attaches (the English messages are never parsed).
 const DETAIL = Object.freeze({
-  no_day_two_hours_after_due: 'нет завершённого дня и подтверждённого прогресса через 2 ч после срока (17:00 Мадрид)',
-  watchlist_never_succeeded: 'ни одного полного скана Watchlist с запуска исполнителя',
-  watchlist_stale_24h: 'нет успешного полного скана Watchlist больше 24 ч',
+  no_day_two_hours_after_due: 'ни дня, ни прогресса к 19:00 (срок 17:00)',
+  watchlist_never_succeeded: 'ни одного полного скана с запуска',
+  watchlist_stale_24h: 'нет полного скана больше 24 ч',
 });
-const OVERALL = Object.freeze({healthy: '✅ всё в порядке', waiting: '⏳ ожидание по расписанию', delayed: '🕓 есть задержки', degraded: '⚠️ есть проблемы'});
 
 const finite = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
 const count = value => Number.isInteger(value) && value >= 0 ? value : null;
@@ -81,71 +80,81 @@ export function duration(ms, {floor = false} = {}) {
   return Math.floor(hours / 24) + ' д' + (hours % 24 ? ' ' + (hours % 24) + ' ч' : '');
 }
 
-// Typed metrics of one issue as compact statistic lines. Unknown or malformed values are left out, never shown as 0.
+// AIR-592 follow-up (owner's visual review of the first production message): the text is a few short blocks separated by empty lines, one
+// `Метка: значение` per line without a pseudo-list, every duration on its own line with its date on the next one, and the stable id in a technical
+// footer. Plain text as before: no markup mode, so Telegram shows exactly these lines and wraps only what is longer than the bubble.
+
+// A count with a non-breaking thousands separator (3 078), so a number never wraps inside itself.
+const number = value => { const n = count(value); return n === null ? null : String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' '); };
+
+// Typed metrics of one issue as `label: value` lines. Unknown or malformed values are left out, never shown as 0.
 function stats(key, m) {
-  const out = [], add = (label, value) => { if (value !== null && value !== '' && value !== undefined) out.push('• ' + label + ': ' + value); };
+  const out = [], add = (label, value) => { if (value !== null && value !== '' && value !== undefined) out.push(label + ': ' + value); };
   if (!m || typeof m !== 'object') return out;
   if (key === 'predictions_no_progress') {
-    add('Доступно к прогнозу сейчас', count(m.eligible)); add('В очереди всего', count(m.pending));
-    add('Запусков без фильма с последнего прогресса', count(m.orphanStarts));
-    if (m.quota === true) out.push('• Последний пакет упёрся в квоту модели');
+    add('Доступно', number(m.eligible)); add('В очереди', number(m.pending));
+    add('Запусков без фильма', number(m.orphanStarts));
+    if (m.quota === true) out.push('Последний пакет упёрся в квоту модели');
   } else if (key.startsWith('discovery_')) {
-    add('Осталось чанков', count(m.remainingChunks)); add('Исполнитель', code(m.executor));
-    // Only a finished chunk is progress here; the continuation record's own update time is not.
-    if (key === 'discovery_stalled' || key === 'discovery_executor_stalled') add('Последний завершённый чанк', madrid(stamp(m.lastChunkAt ?? null)));
+    add('Осталось чанков', number(m.remainingChunks)); add('Исполнитель', code(m.executor));
   } else if (key === 'epg_stale' || key === 'epg_failed') {
-    add('Ожидалась к', m.dueAt ? madrid(stamp(m.dueAt)) : null); add('Последняя публикация', m.publishedAt ? madrid(stamp(m.publishedAt)) : null);
-    if (m.runError === true) out.push('• Последний запуск записал ошибку');
+    if (m.runError === true) out.push('Последний запуск записал ошибку');
   } else if (key === 'epg_authority') {
-    add('Состояние источника', code(m.authority));
+    add('Источник', code(m.authority));
   } else if (key.startsWith('ratings_') || key.startsWith('letterboxd_')) {
-    add('Подробно', DETAIL[m.detail] || null); add('Причина', code(m.reason)); add('Слот', code(m.slot)); add('Источник', code(m.outcome)); add('Событий ждёт доставки', count(m.eventsPending));
+    add('Подробно', DETAIL[m.detail] || null); add('Причина', code(m.reason)); add('Слот', code(m.slot)); add('Источник', code(m.outcome)); add('Событий ждёт доставки', number(m.eventsPending));
   } else if (key.startsWith('catalog_posters_')) {
     add('Причина', code(m.detail)); add('Последняя активность', m.freshnessAt ? madrid(stamp(m.freshnessAt)) : null);
     add('Следующая попытка', m.nextExpectedAt ? madrid(stamp(m.nextExpectedAt)) : null);
   } else if (key.startsWith('canonical_producer_')) {
     add('Поколение', code(m.generation)); add('Цепочка', code(m.chain)); add('Проход', code(m.run));
-    // `sinceAt` is the reference of the no-progress window (it may be the publication or the first observation); only `progressAt` is confirmed progress.
-    if (key === 'canonical_producer_no_progress') add('Последний подтверждённый прогресс', m.progressAt ? madrid(stamp(m.progressAt)) : 'не было в этом окне');
-    add('Причина остановки', code(m.stoppedBy));
-    if (m.hard === true) out.push('• Автоматически не возобновится');
-    else if (m.hard === false) out.push('• Ожидается автоматический повтор');
+    add('Причина', code(m.stoppedBy));
+    if (m.hard === true) out.push('Автоматически не возобновится');
+    else if (m.hard === false) out.push('Ожидается автоматический повтор');
   }
   return out;
 }
 
-// The domain's own stall as its facts measured it at the observation the message describes, with what the period is counted from. Each stream
-// says what it measures: confirmed progress (predictions), allowed progress (Discovery), a reference that may be the publication (Producer).
-function stallLine(key, m, observedMs) {
-  if (!m || typeof m !== 'object') return null;
+// The domain's own stall at the observation the message describes: the duration on one line, what it is counted from on the next. Each stream says
+// what it measures: confirmed progress (predictions), allowed progress and the last finished chunk (Discovery), a reference that may be the
+// publication beside the confirmed progress (Producer), the due time (EPG).
+function stallBlock(key, m, observedMs) {
+  if (!m || typeof m !== 'object') return [];
   const idle = finite(m.idleMs), at = value => madrid(stamp(value ?? null));
+  if (key === 'epg_stale' || key === 'epg_failed') {
+    const out = [];
+    if (finite(m.lateMs) !== null) out.push('⏱ Опоздание: ' + duration(m.lateMs));
+    if (m.dueAt) out.push('Ожидалась: ' + at(m.dueAt));
+    if (m.publishedAt) out.push('Последняя публикация: ' + at(m.publishedAt));
+    return out;
+  }
   if (key === 'discovery_stalled') {
-    const span = finite(m.stalledMs); if (span === null) return null;
-    return '⏱ Без разрешённого прогресса: ' + duration(span) + (m.allowedAt ? ' (следующий шаг был разрешён с ' + at(m.allowedAt) + ')' : '');
+    const span = finite(m.stalledMs); if (span === null) return [];
+    return ['⏱ Без разрешённого прогресса: ' + duration(span), ...(m.allowedAt ? ['Шаг разрешён с: ' + at(m.allowedAt)] : []), 'Последний чанк: ' + at(m.lastChunkAt)];
   }
   if (key === 'discovery_executor_stalled') {
+    // Only a finished chunk is progress here; the continuation record's own update time is not.
     const chunk = stamp(m.lastChunkAt ?? null);
-    return chunk !== null && observedMs !== null && observedMs >= chunk ? '⏱ С последнего завершённого чанка: ' + duration(observedMs - chunk) : null;
+    return [...(chunk !== null && observedMs !== null && observedMs >= chunk ? ['⏱ Без нового чанка: ' + duration(observedMs - chunk)] : []), 'Последний чанк: ' + madrid(chunk)];
   }
   if (key === 'canonical_producer_no_progress') {
-    return idle === null ? null : '⏱ Без подтверждённого прогресса: ' + duration(idle) + (m.sinceAt ? ' (отсчёт с ' + at(m.sinceAt) + ')' : '');
+    // `sinceAt` is the reference of the window (it may be the publication or the first observation); only `progressAt` is confirmed progress.
+    if (idle === null) return [];
+    return ['⏱ Без прогресса: ' + duration(idle), ...(m.sinceAt ? ['Отсчёт с: ' + at(m.sinceAt)] : []), 'Последний прогресс: ' + (m.progressAt ? at(m.progressAt) : 'не было в этом окне')];
   }
-  if (idle === null) return null;
-  return '⏱ Без подтверждённого прогресса: ' + duration(idle) + (m.lastProgressAt ? ' (последний подтверждённый прогресс ' + at(m.lastProgressAt) + ')' : ' (подтверждённый прогресс неизвестен)');
+  if (idle === null) return [];
+  return ['⏱ Без прогресса: ' + duration(idle), 'Последний прогресс: ' + (m.lastProgressAt ? at(m.lastProgressAt) : 'неизвестно')];
 }
 // A recovery only knows that the issue is no longer seen. What it can say about the domain is the last measured stall, at the last observation that
-// still showed the issue: a proven lower bound, never the gap up to the tick that noticed the recovery.
-function lastStallLine(key, m, metricsAt) {
-  if (!m || typeof m !== 'object') return null;
+// still showed the issue: a proven lower bound (rounded down), never the gap up to the tick that noticed the recovery.
+function lastStallBlock(key, m, metricsAt) {
+  if (!m || typeof m !== 'object') return [];
   const when = stamp(metricsAt ?? null);
   const span = key === 'discovery_stalled' ? finite(m.stalledMs) : finite(m.idleMs);
-  if (span === null || when === null) return null;
-  return '⏱ ' + (key === 'discovery_stalled' ? 'Без разрешённого прогресса' : 'Без подтверждённого прогресса') + ' было не меньше ' + duration(span, {floor: true}) + ' (на последнем наблюдении ' + madrid(when) + ')';
+  if (span === null || when === null) return [];
+  return ['⏱ ' + (key === 'discovery_stalled' ? 'Без разрешённого прогресса' : 'Без прогресса') + ': не меньше ' + duration(span, {floor: true}), 'Последнее наблюдение: ' + madrid(when)];
 }
-function lateLine(key, m) {
-  if ((key === 'epg_stale' || key === 'epg_failed') && finite(m?.lateMs) !== null) return '⏱ Опоздание: ' + duration(m.lateMs);
-  return null;
-}
+const OVERALL_LINE = Object.freeze({healthy: 'всё в порядке', waiting: 'ожидание по расписанию', delayed: 'есть задержки', degraded: 'есть проблемы'});
 
 export function telegramText(message, {overall = null, now = null} = {}) {
   const kind = typeof message?.kind === 'string' ? message.kind : 'alert';
@@ -156,38 +165,39 @@ export function telegramText(message, {overall = null, now = null} = {}) {
   const look = kind === 'alert' && critical ? KIND.alertCritical : KIND[kind] || {emoji: 'ℹ️', label: 'Сообщение'};
   // A recovery stored before ADR 0206 names its stream by the key prefix (`canonical`, `catalog`): the issue key still identifies the real stream.
   const streamKey = STREAM[streamName] ? streamName : Object.keys(STREAM).find(name => streamName && name.startsWith(streamName + '_') && key.startsWith(name + '_')) || streamName;
-  const lines = [look.emoji + ' ' + look.label + ' · ' + (STREAM[streamKey] || streamKey || 'Монитор')];
+  const head = [look.emoji + ' ' + look.label + ' · ' + (STREAM[streamKey] || streamKey || 'Монитор')];
+  const blocks = [head];
+  const nowMs = finite(now);
+  let delayed = null;
   if (kind === 'test') {
-    lines.push('Проверочное сообщение монитора. Инцидента нет.');
+    head.push('Проверочное сообщение, инцидента нет');
   } else {
-    const title = TITLE[key];
-    lines.push(recovered ? 'Больше не наблюдается: ' + (title || 'проблема ' + key) : title || 'Проблема ' + key);
-    if (!recovered) lines.push(critical ? 'Серьёзность: 🔴 критично (доказанный сбой, без ожидания подтверждения)' : 'Серьёзность: 🟠 деградация (подтверждена)');
-    else if (message?.wasCritical === true) lines.push('Была критичной');
+    head.push(TITLE[key] || 'Проблема ' + key);
+    if (recovered) head.push('Больше не наблюдается' + (message?.wasCritical === true ? ' · была критичной' : ''));
+    else head.push(critical ? '🔴 Критичный сбой' : '🟠 Подтверждённая деградация');
     // A recovery does not repeat the counts of the last alert: they describe a moment that is over and would read as current.
     const statLines = recovered ? [] : stats(key, message?.metrics);
-    lines.push(...statLines);
     // Frozen times: an alert-type message describes the tick that planned it (`observedAt`, else its queue time); a recovery ends when it was detected.
     const observed = stamp(message?.observedAt ?? message?.queuedAt ?? null);
     const ended = recovered ? stamp(message?.endedAt ?? message?.queuedAt ?? null) : null;
     const opened = stamp(message?.firstSeenAt ?? null);
-    const late = lateLine(key, message?.metrics); if (late && !recovered) lines.push(late);
-    const idle = recovered ? lastStallLine(key, message?.metrics, message?.metricsAt) : stallLine(key, message?.metrics, observed); if (idle) lines.push(idle);
-    if (recovered) {
-      lines.push('🕒 Длительность инцидента по наблюдениям монитора: ' + (opened !== null && ended !== null && ended >= opened ? duration(ended - opened) + ' (' + madrid(opened) + ' → ' + madrid(ended) + ')' : 'неизвестно'));
-    } else {
-      lines.push('🕒 Инцидент открыт: ' + (opened !== null ? madrid(opened) + (observed !== null && observed >= opened ? ' · идёт ' + duration(observed - opened) : '') : 'неизвестно'));
-    }
-    if (!statLines.length && !idle && !late && message?.message && !/^Recovered$/.test(String(message.message))) lines.push('Детали: ' + ascii(message.message, 200));
-    const nowMs = finite(now), at = recovered ? ended : observed;
-    if (nowMs !== null && at !== null && nowMs - at > DELAY_NOTE_MS) lines.push('📨 Отправлено с задержкой: обнаружено ' + madrid(at) + ', отправлено ' + madrid(nowMs));
+    const stall = recovered ? lastStallBlock(key, message?.metrics, message?.metricsAt) : stallBlock(key, message?.metrics, observed);
+    // Without typed metrics (a message written before ADR 0206 decision 9) the stored detail is the only diagnosis: bounded ASCII.
+    if (!statLines.length && !stall.length && message?.message && !/^Recovered$/.test(String(message.message))) statLines.push('Детали: ' + ascii(message.message, 200));
+    if (statLines.length) blocks.push(statLines);
+    if (stall.length) blocks.push(stall);
+    // The monitor's own observation of the issue, separate from the domain stall above.
+    const end = recovered ? ended : observed;
+    blocks.push(['🕒 Инцидент: ' + (opened !== null && end !== null && end >= opened ? duration(end - opened) : 'неизвестно'), 'Открыт: ' + madrid(opened), ...(recovered ? ['Снят: ' + madrid(ended)] : [])]);
+    if (nowMs !== null && end !== null && nowMs - end > DELAY_NOTE_MS) delayed = end;
+    const level = overall === 'needs_owner' ? 'degraded' : overall;
+    // A recovery is about one issue: while the site is still degraded it says so instead of implying that everything is healthy.
+    blocks.push(['🌐 ' + (recovered && level === 'degraded' ? 'Остаются другие проблемы' : 'В целом: ' + (OVERALL_LINE[level] || 'неизвестно'))]);
   }
-  const level = overall === 'needs_owner' ? 'degraded' : overall, state = OVERALL[level];
-  // A recovery is about one issue: while the site is still degraded it says so instead of implying that everything is healthy.
-  if (kind !== 'test') lines.push('🌐 ' + (recovered ? 'В целом сейчас: ' + (level === 'degraded' ? '⚠️ остаются другие проблемы (восстановлена только эта)' : state || 'неизвестно') : 'В целом: ' + (state || 'неизвестно')));
-  lines.push('Время: ' + madrid(finite(now), true) + ' · Мадрид (Europe/Madrid)');
-  const ref = line('Ref: ' + ascii(message?.id, 120));
-  const body = lines.map(line).join('\n');
+  // Technical footer: the send time in Madrid, a late-delivery note, and the full stable id.
+  const footer = [...(delayed !== null ? ['📨 Доставлено с задержкой', 'Обнаружено: ' + madrid(delayed)] : []), madrid(nowMs, true) + ' · Мадрид'];
+  const ref = line('Ref: ' + ascii(message?.id, 200));
+  const body = [...blocks, footer].map(block => block.map(line).join('\n')).join('\n\n');
   // The bound never cuts the Ref line: the stable id stays the last line whatever the body holds.
   return (body.length + 1 + ref.length <= MAX_TEXT ? body : body.slice(0, MAX_TEXT - ref.length - 2) + '…') + '\n' + ref;
 }
