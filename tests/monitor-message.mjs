@@ -33,7 +33,7 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
   '',
   'Доступно: 3\u00a0533',
   'В очереди: 3\u00a0600',
-  'Запусков без фильма: 11',
+  'Запусков без фильма (за 2 ч): 11',
   '',
   '⏱ Без прогресса: 15 ч',
   'Последний прогресс: 21.11 18:00',
@@ -249,6 +249,24 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
  const unknownPending=P.evaluatePredictions({present:true,eligibleNow:5,lastProgressAt:null,stall:{state:'no_progress',reason:'no_progress',idleMs:2*H}},null,now).issues[0];
  assert.equal('pending' in unknownPending.metrics,false,'a missing pendingCount is not coerced to 0 in the metrics');
  assert.ok(!render({...unknownPending,kind:'alert',id:'x'},'degraded','2026-11-24T10:00:05Z').includes('В очереди'));
+}
+
+// 14. AIR-596 (ADR 0210) lines in the block layout: a held reminder (reason in the statistics, the last measured stall with its own observation,
+// no stale count), a live lease that is not progress, the 2-hour orphan bound, and each recovery reason as its own block right after the header.
+{
+ const base={key:'predictions_no_progress',stream:'predictions',severity:'degraded',critical:false,firstSeenAt:'2026-11-23T22:28:00.000Z',observedAt:'2026-11-24T04:28:00.000Z',id:'predictions_no_progress|reminder|2026-11-24T04:28:00.000Z'};
+ const held=sample('Held prediction reminder (AIR-596)',render({...base,kind:'reminder',metrics:{held:'split_unknown',eligible:5,idleMs:2*H},metricsAt:'2026-11-23T22:28:00.000Z'},'degraded','2026-11-24T04:28:05Z')).split('\n');
+ assert.deepEqual(held.slice(4,6),['Сейчас: число доступных не читается','Инцидент остаётся открытым']);
+ assert.ok(held.includes('⏱ Без прогресса: не меньше 2 ч')&&held.includes('Последнее наблюдение: 23.11 23:28'));
+ assert.ok(!held.some(line=>line.startsWith('Доступно')),'no stale count shown as current');
+ const lease=sample('Prediction alert with a live lease and ownerless starts (AIR-596)',render({...base,kind:'alert',observedAt:'2026-11-23T22:28:00.000Z',metrics:{eligible:6969,pending:7000,orphanStarts:8,activeRun:true,idleMs:61*MIN,lastProgressAt:'2026-11-23T21:27:00.000Z'},id:'predictions_no_progress|alert|2026-11-23T22:28:00.000Z'},'degraded','2026-11-23T22:28:05Z')).split('\n');
+ assert.ok(lease.includes('Запусков без фильма (за 2 ч): 8')&&lease.includes('Lease держит запуск, это не прогресс')&&lease.includes('Доступно: 6 969'));
+ const recovery=reason=>render({...base,kind:'recovery',severity:'healthy',endedAt:'2026-11-24T05:28:00.000Z',metrics:{idleMs:2*H},metricsAt:'2026-11-23T22:28:00.000Z',recoveryReason:reason,recoveryProgressAt:'2026-11-24T05:13:00.000Z',id:'predictions_no_progress|recovery|2026-11-24T05:28:00.000Z'},'healthy','2026-11-24T05:28:05Z');
+ assert.deepEqual(sample('Prediction recovery by confirmed progress (AIR-596)',recovery('progress')).split('\n').slice(3,7),['','Причина: прогресс снова подтверждён','Последний прогресс: 24.11 06:13','']);
+ assert.deepEqual(sample('Prediction recovery without eligible work (AIR-596)',recovery('no_eligible_work')).split('\n').slice(3,8),['','Причина: нечего прогнозировать','Очередь пуста или повторы исчерпаны','Это не подтверждённый прогресс','']);
+ assert.deepEqual(recovery('retry_wait').split('\n').slice(3,7),['','Причина: все фильмы ждут повторной попытки','Это не подтверждённый прогресс','']);
+ assert.equal(recovery('unknown_reason').split('\n')[3],'','an unknown reason adds no block');
+ assert.ok(!recovery('unknown_reason').includes('Причина'));
 }
 
 // 12. The owner's production message of 24 Nov 2026, 14:00:23 Madrid (Ref predictions_no_progress|reminder|2026-11-24T13:00:23.490Z: 3078 eligible,

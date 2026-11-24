@@ -87,13 +87,20 @@ export function duration(ms, {floor = false} = {}) {
 // A count with a non-breaking thousands separator (3 078), so a number never wraps inside itself.
 const number = value => { const n = count(value); return n === null ? null : String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' '); };
 
+// AIR-596 (ADR 0210): why an open prediction incident is held instead of confirmed or recovered.
+const HELD = {queue_unreadable: 'очередь прогнозов не читается', queue_absent: 'очередь прогнозов отсутствует', split_unknown: 'число доступных не читается',
+  progress_unknown: 'время прогресса неизвестно', progress_unconfirmed: 'нового прогресса нет'};
+
 // Typed metrics of one issue as `label: value` lines. Unknown or malformed values are left out, never shown as 0.
 function stats(key, m) {
   const out = [], add = (label, value) => { if (value !== null && value !== '' && value !== undefined) out.push(label + ': ' + value); };
   if (!m || typeof m !== 'object') return out;
   if (key === 'predictions_no_progress') {
+    // AIR-596: a held incident (the verdict cannot be read or confirmed now) shows why, never the last counts as if they were current.
+    if (HELD[m.held]) { out.push('Сейчас: ' + HELD[m.held], 'Инцидент остаётся открытым'); return out; }
     add('Доступно', number(m.eligible)); add('В очереди', number(m.pending));
-    add('Запусков без фильма', number(m.orphanStarts));
+    add('Запусков без фильма (за 2 ч)', number(m.orphanStarts));
+    if (m.activeRun === true) out.push('Lease держит запуск, это не прогресс');
     if (m.quota === true) out.push('Последний пакет упёрся в квоту модели');
   } else if (key.startsWith('discovery_')) {
     add('Осталось чанков', number(m.remainingChunks)); add('Исполнитель', code(m.executor));
@@ -154,6 +161,13 @@ function lastStallBlock(key, m, metricsAt) {
   if (span === null || when === null) return [];
   return ['⏱ ' + (key === 'discovery_stalled' ? 'Без разрешённого прогресса' : 'Без прогресса') + ': не меньше ' + duration(span, {floor: true}), 'Последнее наблюдение: ' + madrid(when)];
 }
+// AIR-596 (ADR 0210): a prediction recovery says why it recovered; confirmed progress and an absence of eligible work never read alike.
+function recoveryBlock(reason, progressAt) {
+  if (reason === 'progress') { const at = stamp(progressAt ?? null); return ['Причина: прогресс снова подтверждён', ...(at !== null ? ['Последний прогресс: ' + madrid(at)] : [])]; }
+  if (reason === 'no_eligible_work') return ['Причина: нечего прогнозировать', 'Очередь пуста или повторы исчерпаны', 'Это не подтверждённый прогресс'];
+  if (reason === 'retry_wait') return ['Причина: все фильмы ждут повторной попытки', 'Это не подтверждённый прогресс'];
+  return [];
+}
 const OVERALL_LINE = Object.freeze({healthy: 'всё в порядке', waiting: 'ожидание по расписанию', delayed: 'есть задержки', degraded: 'есть проблемы'});
 
 export function telegramText(message, {overall = null, now = null} = {}) {
@@ -181,7 +195,11 @@ export function telegramText(message, {overall = null, now = null} = {}) {
     const observed = stamp(message?.observedAt ?? message?.queuedAt ?? null);
     const ended = recovered ? stamp(message?.endedAt ?? message?.queuedAt ?? null) : null;
     const opened = stamp(message?.firstSeenAt ?? null);
-    const stall = recovered ? lastStallBlock(key, message?.metrics, message?.metricsAt) : stallBlock(key, message?.metrics, observed);
+    // A held prediction incident has no current measurement: its stall is the last one measured, under its own time, as for a recovery.
+    const heldNow = !recovered && key === 'predictions_no_progress' && !!HELD[message?.metrics?.held];
+    const stall = recovered || heldNow ? lastStallBlock(key, message?.metrics, message?.metricsAt) : stallBlock(key, message?.metrics, observed);
+    const why = recovered && key === 'predictions_no_progress' ? recoveryBlock(message?.recoveryReason, message?.recoveryProgressAt) : [];
+    if (why.length) blocks.push(why);
     // Without typed metrics (a message written before ADR 0206 decision 9) the stored detail is the only diagnosis: bounded ASCII.
     if (!statLines.length && !stall.length && message?.message && !/^Recovered$/.test(String(message.message))) statLines.push('Детали: ' + ascii(message.message, 200));
     if (statLines.length) blocks.push(statLines);

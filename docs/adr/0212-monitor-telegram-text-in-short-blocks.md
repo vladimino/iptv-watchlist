@@ -21,7 +21,7 @@ The causes are in the layout, not in the facts:
 
 ## Decision
 
-1. **Blocks.** The text is a few blocks separated by exactly one empty line, in this order. Empty blocks are left out.
+1. **Blocks.** The text is a few blocks separated by exactly one empty line, in this order. Empty blocks are left out. A prediction recovery's reason (ADR 0210) is its own block right after the header.
    1. Header: marker, kind and subsystem; the problem title; then either the severity (`🔴 Критичный сбой` or `🟠 Подтверждённая деградация`) or, on a recovery, `Больше не наблюдается` (with `· была критичной` when it was).
    2. Statistics.
    3. Domain stall.
@@ -62,7 +62,12 @@ Not decided here: an HTML `parse_mode` for a bold header or a monospace `Ref`. T
   - the full `Ref`;
   - the bounded legacy detail;
   - one Discovery diagnostic, `⏱ Без разрешённого прогресса: …`.
-- **Coordination with AIR-596.** AIR-596 ([PR #979](https://github.com/vladimino/iptv-watchlist/pull/979)) adds held, recovery-reason, lease and orphan lines to the same renderer. Whichever of the two PRs merges second maps those lines into the matching block: statistics, stall or footer. No metric is lost.
+- **AIR-596 lines.** AIR-596 ([PR #979](https://github.com/vladimino/iptv-watchlist/pull/979), merged first) added held, recovery-reason, lease and orphan lines to the same renderer. In this layout:
+  - the held reason (`Сейчас: …`, `Инцидент остаётся открытым`), the lease note and the 2-hour orphan bound are statistics lines;
+  - a held reminder's stall is the last measured one, as in a recovery;
+  - a prediction recovery's reason is its own block right after the header.
+
+  No metric is lost.
 
 ## Recovery and migration boundary
 

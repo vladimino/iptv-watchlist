@@ -25,7 +25,9 @@ const verdict=(rows,extra={})=>{const e=evidence(rows);return ctx.predictionStal
  assert.equal(verdict([progress(40),turnedAway(24,1),turnedAway(10,2)]).state,'ok','two attempts are an overlap, not a chain');
  assert.equal(verdict([progress(5),turnedAway(4,1),turnedAway(3,2),turnedAway(2,3)]).state,'ok','progress five minutes ago resets the chain');
  assert.equal(evidence([progress(40),turnedAway(24,1),turnedAway(23,2),turnedAway(22,3)],{runId:'live',status:'running',createdAt:at(1),added:0}).orphanStarts,3,'a running run is not counted as abandoned');
- const running=ctx.predictionStallAssessment({now,sinceMs:now-40*min,eligibleNow:9,orphanStarts:5,activeRun:true,activeStartedAtMs:now-2*min});assert.equal(running.state,'running','a run with a live young lease still counts as working');
+ // AIR-596 (ADR 0210): a live young lease no longer hides a proven chain; it is running only while nothing is proven.
+ const running=ctx.predictionStallAssessment({now,sinceMs:now-40*min,eligibleNow:9,orphanStarts:5,activeRun:true,activeStartedAtMs:now-2*min});assert.equal(running.state,'no_progress','a young live run does not hide five ownerless starts after 40 minutes');assert.equal(running.reason,'repeated_orphan_starts');assert.equal(running.activeRun,true);
+ assert.equal(ctx.predictionStallAssessment({now,sinceMs:now-40*min,eligibleNow:9,orphanStarts:2,activeRun:true,activeStartedAtMs:now-2*min}).state,'running','an overlap with a young live run is still running');
  assert.equal(ctx.predictionStallAssessment({now,sinceMs:now-10*min,eligibleNow:9,orphanStarts:5}).state,'ok','under 20 minutes of silence nothing is raised');
  assert.equal(ctx.predictionStallAssessment({now,sinceMs:now-40*min,eligibleNow:0,orphanStarts:5}).state,'idle','no eligible work, no alert');
 }

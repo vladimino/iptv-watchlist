@@ -157,26 +157,72 @@ export function evaluateLetterboxd(model, now) {
 // `facts.stall` is the verdict of the one shared assessment in enrichment.js (`predictionStallAssessment`): running | ok | idle | waiting | unknown | no_progress.
 // Confirmed progress is a productive batch or a drained run, never a heartbeat, `already_running`, a noop wake-up or a queue recount. The monitor does
 // not know why a Task did not reach the Worker, so no message names api_error, an expired authorization or a number of missed Tasks.
+// AIR-596 (ADR 0210): `previous.noProgressOpenSince` is the first-seen time of an open `predictions_no_progress` incident, `previous.openMetrics` and
+// `previous.openMetricsAt` its last measured metrics and when they were measured, `previous.progressAt` the progress time the previous tick knew. While the
+// incident is open, a tick that cannot read or decide the verdict keeps it open with the last measured metrics under their original time and a typed `held`
+// reason; it recovers only on a progress time newer than the one its last proven stalled observation measured, or on proven zero eligible work, and `facts.recovery` names which. Without an
+// open incident an undecidable tick is `delayed` (visible, never healthy, never an alert by itself; ADR 0182 decision 4).
+const HELD_WHY = {queue_unreadable: 'the prediction queue could not be read', queue_absent: 'the prediction queue is absent', split_unknown: 'the eligible work cannot be read',
+  progress_unknown: 'no progress time is known', progress_unconfirmed: 'no new confirmed progress since the previous check'};
+const predictionHold = (openSince, held, previous) => {
+  const measured = previous?.openMetrics && typeof previous.openMetrics === 'object' ? Object.fromEntries(Object.entries(previous.openMetrics).filter(([name]) => name !== 'held')) : {};
+  const measuredAt = time(previous?.openMetricsAt), last = time(previous?.progressAt);
+  return issue('predictions_no_progress', 'degraded', 'predictions', 'The prediction no-progress incident open since ' + new Date(openSince).toISOString() + ' cannot be confirmed or cleared now (' + HELD_WHY[held] + '); it stays open until confirmed progress or no eligible work is proven' + (last === null ? '' : ' (last confirmed progress ' + new Date(last).toISOString() + ')'),
+    {metrics: {...measured, held}, ...(measuredAt !== null && Object.keys(measured).length ? {metricsAt: iso(measuredAt)} : {})});
+};
 export function evaluatePredictions(facts, previous, now) {
-  if (!facts || facts.error) return unreadable('predictions', 'prediction queue');
-  if (!facts.present) return {stream: 'predictions', state: 'waiting', issues: [], facts: {present: false}};
+  const openSince = time(previous?.noProgressOpenSince);
+  if (!facts || facts.error) {
+    const out = unreadable('predictions', 'prediction queue');
+    if (openSince !== null) out.issues.push(predictionHold(openSince, 'queue_unreadable', previous));
+    return out;
+  }
+  if (!facts.present) {
+    if (openSince !== null) return {stream: 'predictions', state: 'degraded', issues: [predictionHold(openSince, 'queue_absent', previous)], facts: {present: false, held: 'queue_absent'}};
+    return {stream: 'predictions', state: 'waiting', issues: [], facts: {present: false}};
+  }
   const issues = [];
-  const pending = Number.isInteger(facts.pendingCount) ? facts.pendingCount : 0;
-  const eligible = Number.isInteger(facts.eligibleNow) ? facts.eligibleNow : null;
+  const pending = Number.isInteger(facts.pendingCount) && facts.pendingCount >= 0 ? facts.pendingCount : null;
+  // An empty pending list is proven zero work even without readable lanes (the same rule as `predictionEligibleNow`).
+  const eligible = Number.isInteger(facts.eligibleNow) && facts.eligibleNow >= 0 ? facts.eligibleNow : pending === 0 ? 0 : null;
   const stall = facts.stall && typeof facts.stall === 'object' ? facts.stall : {state: 'unknown', reason: 'queue_unreadable', idleMs: null};
   const why = facts.blockedReason === 'quota' ? ' (the last batch reported a quota limit)' : '';
-  let state = 'healthy';
-  if (pending > 0 || eligible > 0) {
-    if (stall.state === 'no_progress') {
-      state = 'degraded';
-      const last = time(facts.lastProgressAt);
-      issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (stall.reason === 'repeated_orphan_starts' ? ', with ' + (Number.isInteger(stall.orphanStarts) ? stall.orphanStarts : 'repeated') + ' ownerless starts since (turned-away or abandoned without a film)' : '') + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why,
-        metrics({eligible, pending: Number.isInteger(facts.pendingCount) && facts.pendingCount >= 0 ? facts.pendingCount : null, idleMs: Number.isFinite(stall.idleMs) ? stall.idleMs : null, orphanStarts: stall.reason === 'repeated_orphan_starts' && Number.isInteger(stall.orphanStarts) ? stall.orphanStarts : null, lastProgressAt: iso(last), quota: facts.blockedReason === 'quota' ? true : null})));
-    } else if (stall.state === 'waiting') state = 'waiting';
-    else if (stall.state === 'unknown') state = 'delayed'; // unreadable queue split or no progress evidence yet: visible, never healthy, never an alert by itself
+  const last = time(facts.lastProgressAt), prior = time(previous?.progressAt);
+  let state = 'healthy', recovery = null, held = null;
+  if (eligible === null) held = 'split_unknown';
+  else if (eligible === 0) { if (stall.state === 'waiting') { state = 'waiting'; recovery = 'retry_wait'; } else recovery = 'no_eligible_work'; }
+  else if (stall.state === 'no_progress') {
+    state = 'degraded';
+    const orphans = Number.isInteger(stall.orphanStarts) && stall.orphanStarts > 0 ? stall.orphanStarts : null;
+    issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (stall.reason === 'repeated_orphan_starts' ? ', with ' + (orphans ?? 'repeated') + ' ownerless starts since (turned-away or abandoned without a film, last 2 hours)' : orphans !== null ? ', ' + orphans + ' ownerless starts in the last 2 hours' : '') + (stall.activeRun ? '; a run holds the lease now, which is not progress' : '') + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why,
+      metrics({eligible, pending, idleMs: Number.isFinite(stall.idleMs) ? stall.idleMs : null, orphanStarts: orphans, lastProgressAt: iso(last), activeRun: stall.activeRun === true ? true : null, quota: facts.blockedReason === 'quota' ? true : null})));
+  } else if (stall.state === 'ok' || (stall.state === 'running' && stall.sinceKnown === true)) {
+    // A recovery needs progress newer than the incident's own baseline: the last progress time its last proven stalled observation measured
+    // (`openMetrics.lastProgressAt`, kept unchanged through held ticks), never the memo clock, which an undecidable tick may already have moved past a
+    // genuine commit. An entry without typed metrics (written before ADR 0206) falls back to the previous tick's clock: it can only hold longer.
+    // Only a real measurement counts: an entry that holds nothing but a `held` reason (a legacy entry first seen held) keeps the conservative fallback
+    // through any number of held ticks; a measured stall with an unknown progress time has a null baseline.
+    const measured = previous?.openMetrics && typeof previous.openMetrics === 'object' && Object.keys(previous.openMetrics).some(name => name !== 'held') ? previous.openMetrics : null;
+    const baseline = measured ? time(measured.lastProgressAt) : prior;
+    if (openSince === null || (last !== null && (baseline === null || last > baseline))) recovery = 'progress'; else held = 'progress_unconfirmed';
+  } else if (stall.state === 'running') { if (openSince !== null) held = 'progress_unconfirmed'; }
+  else held = stall.reason === 'queue_unreadable' ? 'split_unknown' : 'progress_unknown';
+  if (held !== null) {
+    if (openSince !== null) { state = 'degraded'; issues.push(predictionHold(openSince, held, previous)); }
+    else state = 'delayed'; // unreadable queue split or no progress evidence yet: visible, never healthy, never an alert by itself
   }
   const all = worst(issues);
-  return {stream: 'predictions', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {pendingCount: pending, eligibleNow: eligible, stall: stall.state, stallReason: stall.reason ?? null, idleMs: stall.idleMs ?? null, lastProgressAt: facts.lastProgressAt ?? null}};
+  return {stream: 'predictions', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {pendingCount: pending, eligibleNow: eligible, stall: stall.state, stallReason: stall.reason ?? null, idleMs: stall.idleMs ?? null, lastProgressAt: facts.lastProgressAt ?? null,
+    orphanStarts: Number.isInteger(stall.orphanStarts) ? stall.orphanStarts : null, held, recovery: issues.length || held !== null ? null : recovery}};
+}
+// AIR-596: the text of the one recovery of `predictions_no_progress`, from the stream facts of the tick that recovered it. Confirmed progress and an absence of
+// eligible work are different recoveries and are never worded alike.
+export function predictionRecoveryMessage(facts) {
+  const last = time(facts?.lastProgressAt);
+  if (facts?.recovery === 'progress') return 'Recovered: prediction progress is confirmed again' + (last === null ? '' : ' (last confirmed progress ' + new Date(last).toISOString() + ')');
+  if (facts?.recovery === 'no_eligible_work') return 'Recovered: no prediction is eligible now (the queue is drained or holds only retry-exhausted work); this is not confirmed progress';
+  if (facts?.recovery === 'retry_wait') return 'Recovered: every remaining prediction waits for its retry time; this is not confirmed progress';
+  return 'Recovered';
 }
 
 // ---- Catalog posters (AIR-543, ADR 0179): the weekly poster sweep, judged by the one projection of its R2 checkpoint (CatalogPosterWeekly.project).
@@ -327,13 +373,13 @@ export function planAlerts(issues, state, now) {
       // ADR 0206 decision 9: what the recovery message needs later (the issue's stream and its last typed metrics); a reader of the previous code ignores both.
       // `metricsAt` dates them: the last observation the open issue was seen with, which is all a recovery can say about the domain (the issue's absence
       // alone does not prove when or how the domain recovered).
-      stream: item.stream, ...(item.metrics ? {metrics: item.metrics, metricsAt: new Date(now).toISOString()} : {})};
+      stream: item.stream, ...(item.metrics ? {metrics: item.metrics, metricsAt: (typeof item.metricsAt === 'string' && time(item.metricsAt) !== null ? item.metricsAt : null) || new Date(now).toISOString()} : {})};
     const escalated = !!old && hard && !isCritical(old);
     const confirmed = hard || entry.seen >= (ALERT_POLICY.confirmSnapshotsByKey[item.key] ?? ALERT_POLICY.confirmSnapshots);
     const lastSent = time(entry.lastSentAt);
     const cooled = lastSent === null || now - lastSent >= ALERT_POLICY.reminderMs;
     if (confirmed && (cooled || escalated) && entry.sendsToday < ALERT_POLICY.maxPerIssuePerDay) {
-      sends.push({kind: entry.sendCount ? (escalated ? 'escalation' : 'reminder') : 'alert', key: item.key, severity: 'degraded', critical: hard, stream: item.stream, message: item.message, firstSeenAt: entry.firstSeenAt, ...(item.metrics ? {metrics: item.metrics} : {})});
+      sends.push({kind: entry.sendCount ? (escalated ? 'escalation' : 'reminder') : 'alert', key: item.key, severity: 'degraded', critical: hard, stream: item.stream, message: item.message, firstSeenAt: entry.firstSeenAt, ...(item.metrics ? {metrics: item.metrics, ...(typeof item.metricsAt === 'string' ? {metricsAt: item.metricsAt} : {})} : {})});
       entry.lastSentAt = new Date(now).toISOString();entry.sendCount++;entry.sendsToday++;
     }
     next[item.key] = entry;

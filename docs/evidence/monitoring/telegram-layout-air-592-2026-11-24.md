@@ -20,15 +20,15 @@ Captured 2026-11-24 (UTC) from the repository only, for [ADR 0206](../../adr/020
 
   This is a simulation, not Telegram. The headless font has no colour emoji, the widths approximate the Telegram iOS, Android and desktop bubbles, and the real client may use another font size. The final acceptance is the owner's look at a natural production message.
 
-## Bubble QA result (21 samples)
+## Bubble QA result (25 samples)
 
 Columns: configuration; samples; horizontal overflow; samples whose `Ref` wraps; wrapped content lines, excluding `Ref` and the deliberately unsafe sample; the owner's production message; which content lines wrap.
 
 | Configuration | Samples | Overflow | `Ref` wraps | Wrapped content lines | Owner message | Wrapped lines |
 | --- | --- | --- | --- | --- | --- | --- |
-| mobile 320 | 21 | 0 | 18 | 19 | 19 rows, 386 px | `Predictions recovery: Последнее наблюдение: 22.11 13:00`<br>`Recovery without evidence of progress: Последнее наблюдение: 22.11 13:00`<br>`Discovery alert: Исполнитель (Workflow) остановился`<br>`Discovery recovery while another issue is still open: Исполнитель (Workflow) остановился`<br>`Discovery stalled: ⏱ Без разрешённого прогресса: 3 ч 31 мин`<br>`Canonical Producer critical alert: Причина: producer_budget_infeasible`<br>`Canonical Producer escalation: ⛔ Ухудшение · Обогащение каталога`<br>`Canonical Producer escalation: Причина: producer_budget_infeasible`<br>`Test: Проверочное сообщение, инцидента нет`<br>`EPG stale: Программа не опубликована вовремя`<br>`Catalog posters failed: Недельный повтор завершился сбоем`<br>`Letterboxd events backlog: События слотов Letterboxd ждут доставки`<br>`Delayed escalation across UTC midnight: ⛔ Ухудшение · Обогащение каталога`<br>`Delayed escalation across UTC midnight: Причина: producer_identity_unresolved`<br>`Legacy pending needs_owner reminder: Детали: The Ratings run is quarantined (budget_exhaus`<br>`Canonical Producer without confirmed progress: ⚠️ Проблема · Обогащение каталога`<br>`Canonical Producer without confirmed progress: Последний прогресс: не было в этом окне`<br>`Letterboxd Watchlist stale for 24 h: Подробно: нет полного скана больше 24 ч`<br>`Ratings stalled: Подробно: ни дня, ни прогресса к 19:00 (срок 17:00)` |
-| mobile 390 | 21 | 0 | 14 | 3 | 19 rows, 386 px | `Discovery stalled: ⏱ Без разрешённого прогресса: 3 ч 31 мин`<br>`Legacy pending needs_owner reminder: Детали: The Ratings run is quarantined (budget_exhaus`<br>`Ratings stalled: Подробно: ни дня, ни прогресса к 19:00 (срок 17:00)` |
-| desktop | 21 | 0 | 1 | 0 | 17 rows, 324 px | none |
+| mobile 320 | 25 | 0 | 22 | 26 | 19 rows, 386 px | `Predictions recovery: Последнее наблюдение: 22.11 13:00`<br>`Recovery without evidence of progress: Последнее наблюдение: 22.11 13:00`<br>`Discovery alert: Исполнитель (Workflow) остановился`<br>`Discovery recovery while another issue is still open: Исполнитель (Workflow) остановился`<br>`Discovery stalled: ⏱ Без разрешённого прогресса: 3 ч 31 мин`<br>`Canonical Producer critical alert: Причина: producer_budget_infeasible`<br>`Canonical Producer escalation: ⛔ Ухудшение · Обогащение каталога`<br>`Canonical Producer escalation: Причина: producer_budget_infeasible`<br>`Test: Проверочное сообщение, инцидента нет`<br>`EPG stale: Программа не опубликована вовремя`<br>`Catalog posters failed: Недельный повтор завершился сбоем`<br>`Letterboxd events backlog: События слотов Letterboxd ждут доставки`<br>`Delayed escalation across UTC midnight: ⛔ Ухудшение · Обогащение каталога`<br>`Delayed escalation across UTC midnight: Причина: producer_identity_unresolved`<br>`Legacy pending needs_owner reminder: Детали: The Ratings run is quarantined (budget_exhaus`<br>`Canonical Producer without confirmed progress: ⚠️ Проблема · Обогащение каталога`<br>`Canonical Producer without confirmed progress: Последний прогресс: не было в этом окне`<br>`Letterboxd Watchlist stale for 24 h: Подробно: нет полного скана больше 24 ч`<br>`Ratings stalled: Подробно: ни дня, ни прогресса к 19:00 (срок 17:00)`<br>`Held prediction reminder: Сейчас: число доступных не читается`<br>`Held prediction reminder: Последнее наблюдение: 23.11 23:28`<br>`Prediction alert with a live lease and ownerless starts: Lease держит запуск, это не прогр`<br>`Prediction recovery by confirmed progress: Причина: прогресс снова подтверждён`<br>`Prediction recovery by confirmed progress: Последнее наблюдение: 23.11 23:28`<br>`Prediction recovery without eligible work: Очередь пуста или повторы исчерпаны`<br>`Prediction recovery without eligible work: Последнее наблюдение: 23.11 23:28` |
+| mobile 390 | 25 | 0 | 18 | 3 | 19 rows, 386 px | `Discovery stalled: ⏱ Без разрешённого прогресса: 3 ч 31 мин`<br>`Legacy pending needs_owner reminder: Детали: The Ratings run is quarantined (budget_exhaus`<br>`Ratings stalled: Подробно: ни дня, ни прогресса к 19:00 (срок 17:00)` |
+| desktop | 25 | 0 | 1 | 0 | 17 rows, 324 px | none |
 
 **Reading.** At 390 px, every content line of every real kind fits on one row except three:
 - the Discovery `⏱ Без разрешённого прогресса: …` diagnostic, kept for precision;
@@ -48,7 +48,7 @@ The full `Ref` (about 60 characters) wraps on phones because it is one unbroken 
 
 Доступно: 3 533
 В очереди: 3 600
-Запусков без фильма: 11
+Запусков без фильма (за 2 ч): 11
 
 ⏱ Без прогресса: 15 ч
 Последний прогресс: 21.11 18:00
@@ -424,6 +424,99 @@ Ref: letterboxd_watchlist_stale|alert|x
 Ref: ratings_stalled|alert|x
 ```
 
+### Held prediction reminder (AIR-596)
+
+```text
+🔁 Напоминание · Прогнозы
+Нет подтверждённого прогресса
+🟠 Подтверждённая деградация
+
+Сейчас: число доступных не читается
+Инцидент остаётся открытым
+
+⏱ Без прогресса: не меньше 2 ч
+Последнее наблюдение: 23.11 23:28
+
+🕒 Инцидент: 6 ч
+Открыт: 23.11 23:28
+
+🌐 В целом: есть проблемы
+
+24.11 05:28:05 · Мадрид
+Ref: predictions_no_progress|reminder|2026-11-24T04:28:00.000Z
+```
+
+### Prediction alert with a live lease and ownerless starts (AIR-596)
+
+```text
+⚠️ Проблема · Прогнозы
+Нет подтверждённого прогресса
+🟠 Подтверждённая деградация
+
+Доступно: 6 969
+В очереди: 7 000
+Запусков без фильма (за 2 ч): 8
+Lease держит запуск, это не прогресс
+
+⏱ Без прогресса: 1 ч 1 мин
+Последний прогресс: 23.11 22:27
+
+🕒 Инцидент: меньше минуты
+Открыт: 23.11 23:28
+
+🌐 В целом: есть проблемы
+
+23.11 23:28:05 · Мадрид
+Ref: predictions_no_progress|alert|2026-11-23T22:28:00.000Z
+```
+
+### Prediction recovery by confirmed progress (AIR-596)
+
+```text
+✅ Проблема снята · Прогнозы
+Нет подтверждённого прогресса
+Больше не наблюдается
+
+Причина: прогресс снова подтверждён
+Последний прогресс: 24.11 06:13
+
+⏱ Без прогресса: не меньше 2 ч
+Последнее наблюдение: 23.11 23:28
+
+🕒 Инцидент: 7 ч
+Открыт: 23.11 23:28
+Снят: 24.11 06:28
+
+🌐 В целом: всё в порядке
+
+24.11 06:28:05 · Мадрид
+Ref: predictions_no_progress|recovery|2026-11-24T05:28:00.000Z
+```
+
+### Prediction recovery without eligible work (AIR-596)
+
+```text
+✅ Проблема снята · Прогнозы
+Нет подтверждённого прогресса
+Больше не наблюдается
+
+Причина: нечего прогнозировать
+Очередь пуста или повторы исчерпаны
+Это не подтверждённый прогресс
+
+⏱ Без прогресса: не меньше 2 ч
+Последнее наблюдение: 23.11 23:28
+
+🕒 Инцидент: 7 ч
+Открыт: 23.11 23:28
+Снят: 24.11 06:28
+
+🌐 В целом: всё в порядке
+
+24.11 06:28:05 · Мадрид
+Ref: predictions_no_progress|recovery|2026-11-24T05:28:00.000Z
+```
+
 ### Owner production reminder of 24 Nov 2026 in the new layout
 
 ```text
@@ -450,4 +543,4 @@ Ref: predictions_no_progress|reminder|2026-11-24T13:00:23.490Z
 
 - The bubble is a simulation; Telegram's real font, emoji widths and bubble width are not observed.
 - No production message was sent for this evidence. Acceptance is the owner's visual check of the next natural message after deploy.
-- AIR-596 ([PR #979](https://github.com/vladimino/iptv-watchlist/pull/979)) adds held, recovery-reason, lease and orphan lines to the same renderer; they are not in these samples.
+- The AIR-596 lines ([PR #979](https://github.com/vladimino/iptv-watchlist/pull/979), merged into `main` first) are included above: a held reminder, a live lease with the 2-hour orphan bound, and the recovery reasons.
