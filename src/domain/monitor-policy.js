@@ -200,7 +200,9 @@ export function evaluatePredictions(facts, previous, now) {
     // A recovery needs progress newer than the incident's own baseline: the last progress time its last proven stalled observation measured
     // (`openMetrics.lastProgressAt`, kept unchanged through held ticks), never the memo clock, which an undecidable tick may already have moved past a
     // genuine commit. An entry without typed metrics (written before ADR 0206) falls back to the previous tick's clock: it can only hold longer.
-    const measured = previous?.openMetrics && typeof previous.openMetrics === 'object' ? previous.openMetrics : null;
+    // Only a real measurement counts: an entry that holds nothing but a `held` reason (a legacy entry first seen held) keeps the conservative fallback
+    // through any number of held ticks; a measured stall with an unknown progress time has a null baseline.
+    const measured = previous?.openMetrics && typeof previous.openMetrics === 'object' && Object.keys(previous.openMetrics).some(name => name !== 'held') ? previous.openMetrics : null;
     const baseline = measured ? time(measured.lastProgressAt) : prior;
     if (openSince === null || (last !== null && (baseline === null || last > baseline))) recovery = 'progress'; else held = 'progress_unconfirmed';
   } else if (stall.state === 'running') { if (openSince !== null) held = 'progress_unconfirmed'; }

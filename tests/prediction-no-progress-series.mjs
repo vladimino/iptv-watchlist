@@ -233,6 +233,18 @@ function bucket(w){return w.bucket;}
  const legacy={noProgressOpenSince:iso(P+2*H),progressAt:iso(now-10*MIN)};
  assert.equal(policy.evaluatePredictions(facts(now-10*MIN),legacy,now).facts.held,'progress_unconfirmed');
  assert.equal(policy.evaluatePredictions(facts(now-5*MIN),legacy,now).facts.recovery,'progress');
+ // Chained through the planner: a legacy entry (no metrics) held on an unreadable split gets `{held}` only; it is not a measurement, so the legacy fallback
+ // to the previous clock survives any number of held ticks.
+ const plan=(issues,state,at)=>policy.planAlerts(issues,state,at).state;
+ let alerts={issues:{predictions_no_progress:{severity:'degraded',firstSeenAt:iso(P+2*H),seen:3,lastSentAt:iso(P+2*H),sendCount:1,sendDay:iso(P+2*H).slice(0,10),sendsToday:1}}};
+ const memo=iso(now-10*MIN),prev=()=>({progressAt:memo,noProgressOpenSince:alerts.issues.predictions_no_progress.firstSeenAt,openMetrics:alerts.issues.predictions_no_progress.metrics||null,openMetricsAt:alerts.issues.predictions_no_progress.metricsAt||null});
+ for(const at of [now-2*H,now-H]){const out=policy.evaluatePredictions({present:true,pendingCount:9,eligibleNow:null,lastProgressAt:memo,stall:{state:'unknown',reason:'queue_unreadable'}},prev(),at);assert.equal(out.facts.held,'split_unknown');alerts=plan(out.issues,alerts,at);}
+ assert.deepEqual(alerts.issues.predictions_no_progress.metrics,{held:'split_unknown'},'held-only, nothing measured');
+ assert.equal(policy.evaluatePredictions(facts(now-10*MIN),prev(),now).facts.held,'progress_unconfirmed','equal progress still holds after held ticks');
+ assert.equal(policy.evaluatePredictions(facts(now-5*MIN),prev(),now).facts.recovery,'progress','newer evidence recovers');
+ assert.equal(policy.evaluatePredictions({present:true,pendingCount:0,eligibleNow:0,lastProgressAt:memo,stall:{state:'idle',reason:'no_eligible_work'}},prev(),now).facts.recovery,'no_eligible_work','proven zero recovers');
+ // A measured stall whose progress time was unknown keeps its own null baseline: any valid progress recovers.
+ assert.equal(policy.evaluatePredictions(facts(now-10*MIN),{...prev(),openMetrics:{eligible:9,idleMs:2*H,held:'split_unknown'}},now).facts.recovery,'progress');
 }
 {
  // A reminder that falls due while the verdict cannot be read, then a genuine recovery: the original measurement time, the incident history, the current

@@ -35,7 +35,7 @@
 
 ## Re-review fixture (24 Nov 2026)
 
-- A commit at 12:59:55-equivalent lands while the lanes are unreadable: the held tick advances the stored clock to it but keeps the incident baseline (`metrics.lastProgressAt` = the pre-incident success). The next readable tick 59 minutes after the commit, with no second commit, recovers exactly once and the Footer is healthy; one alert, no extra reminder. With the baseline replaced by the stored clock the fixture fails. A legacy entry without typed metrics falls back to the previous clock: equal holds, newer recovers.
+- A commit at 12:59:55-equivalent lands while the lanes are unreadable: the held tick advances the stored clock to it but keeps the incident baseline (`metrics.lastProgressAt` = the pre-incident success). The next readable tick 59 minutes after the commit, with no second commit, recovers exactly once and the Footer is healthy; one alert, no extra reminder. With the baseline replaced by the stored clock the fixture fails. A legacy entry without typed metrics falls back to the previous clock: equal holds, newer recovers. Chained through `planAlerts`: a legacy entry held twice on an unreadable split stores only `{held}`, still falls back (equal holds, newer or proven zero recovers); without the fix the equal time recovered.
 
 ## Commands
 
