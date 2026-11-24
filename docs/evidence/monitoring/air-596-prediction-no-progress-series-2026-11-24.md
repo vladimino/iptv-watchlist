@@ -33,6 +33,10 @@
 - Recovery with a progress time equal to the one the open incident knew is held (`progress_unconfirmed`, original `metricsAt`); a newer one recovers.
 - A reminder due while the split is unreadable: «Сейчас: нельзя прочитать, сколько фильмов доступно к прогнозу; инцидент остаётся открытым», «было не меньше 2 ч (на последнем наблюдении 23.11 23:28)», no current counts; the alert entry keeps `firstSeenAt` and `metricsAt` of the alert. The genuine recovery then shows «Причина: прогресс снова подтверждён», the same last observation and «Длительность инцидента … 7 ч».
 
+## Re-review fixture (24 Nov 2026)
+
+- A commit at 12:59:55-equivalent lands while the lanes are unreadable: the held tick advances the stored clock to it but keeps the incident baseline (`metrics.lastProgressAt` = the pre-incident success). The next readable tick 59 minutes after the commit, with no second commit, recovers exactly once and the Footer is healthy; one alert, no extra reminder. With the baseline replaced by the stored clock the fixture fails. A legacy entry without typed metrics falls back to the previous clock: equal holds, newer recovers.
+
 ## Commands
 
 - AIR-596 branch: `node tests/prediction-no-progress-series.mjs` → `prediction-no-progress-series: ok`; `npm test` → 534 of 534 core files passed.

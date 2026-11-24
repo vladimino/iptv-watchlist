@@ -160,7 +160,7 @@ export function evaluateLetterboxd(model, now) {
 // AIR-596 (ADR 0210): `previous.noProgressOpenSince` is the first-seen time of an open `predictions_no_progress` incident, `previous.openMetrics` and
 // `previous.openMetricsAt` its last measured metrics and when they were measured, `previous.progressAt` the progress time the previous tick knew. While the
 // incident is open, a tick that cannot read or decide the verdict keeps it open with the last measured metrics under their original time and a typed `held`
-// reason; it recovers only on a progress time newer than the previous tick's or on proven zero eligible work, and `facts.recovery` names which. Without an
+// reason; it recovers only on a progress time newer than the one its last proven stalled observation measured, or on proven zero eligible work, and `facts.recovery` names which. Without an
 // open incident an undecidable tick is `delayed` (visible, never healthy, never an alert by itself; ADR 0182 decision 4).
 const HELD_WHY = {queue_unreadable: 'the prediction queue could not be read', queue_absent: 'the prediction queue is absent', split_unknown: 'the eligible work cannot be read',
   progress_unknown: 'no progress time is known', progress_unconfirmed: 'no new confirmed progress since the previous check'};
@@ -197,8 +197,12 @@ export function evaluatePredictions(facts, previous, now) {
     issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (stall.reason === 'repeated_orphan_starts' ? ', with ' + (orphans ?? 'repeated') + ' ownerless starts since (turned-away or abandoned without a film, last 2 hours)' : orphans !== null ? ', ' + orphans + ' ownerless starts in the last 2 hours' : '') + (stall.activeRun ? '; a run holds the lease now, which is not progress' : '') + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why,
       metrics({eligible, pending, idleMs: Number.isFinite(stall.idleMs) ? stall.idleMs : null, orphanStarts: orphans, lastProgressAt: iso(last), activeRun: stall.activeRun === true ? true : null, quota: facts.blockedReason === 'quota' ? true : null})));
   } else if (stall.state === 'ok' || (stall.state === 'running' && stall.sinceKnown === true)) {
-    // A recovery needs a genuinely new progress observation, never the same (or an older) time the open incident already knew.
-    if (openSince === null || (last !== null && (prior === null || last > prior))) recovery = 'progress'; else held = 'progress_unconfirmed';
+    // A recovery needs progress newer than the incident's own baseline: the last progress time its last proven stalled observation measured
+    // (`openMetrics.lastProgressAt`, kept unchanged through held ticks), never the memo clock, which an undecidable tick may already have moved past a
+    // genuine commit. An entry without typed metrics (written before ADR 0206) falls back to the previous tick's clock: it can only hold longer.
+    const measured = previous?.openMetrics && typeof previous.openMetrics === 'object' ? previous.openMetrics : null;
+    const baseline = measured ? time(measured.lastProgressAt) : prior;
+    if (openSince === null || (last !== null && (baseline === null || last > baseline))) recovery = 'progress'; else held = 'progress_unconfirmed';
   } else if (stall.state === 'running') { if (openSince !== null) held = 'progress_unconfirmed'; }
   else held = stall.reason === 'queue_unreadable' ? 'split_unknown' : 'progress_unknown';
   if (held !== null) {

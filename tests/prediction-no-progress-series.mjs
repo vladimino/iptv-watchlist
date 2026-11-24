@@ -223,10 +223,16 @@ function bucket(w){return w.bucket;}
 {
  // Recovery needs a new progress observation: the same (or an older) time the open incident already knew holds it.
  const policy=await import('../src/domain/monitor-policy.js'),now=P+6*H;
- const open={noProgressOpenSince:iso(P+2*H),progressAt:iso(P),openMetrics:{eligible:9,idleMs:2*H},openMetricsAt:iso(P+2*H)};
+ const open={noProgressOpenSince:iso(P+2*H),progressAt:iso(P),openMetrics:{eligible:9,idleMs:2*H,lastProgressAt:iso(P)},openMetricsAt:iso(P+2*H)};
  const facts=last=>({present:true,pendingCount:9,eligibleNow:9,lastProgressAt:iso(last),stall:{state:'ok',idleMs:now-last,sinceKnown:true}});
  const stale=policy.evaluatePredictions(facts(P),open,now);assert.equal(stale.state,'degraded');assert.equal(stale.facts.held,'progress_unconfirmed');assert.equal(stale.issues[0].metricsAt,iso(P+2*H));
  const fresh=policy.evaluatePredictions(facts(now-10*MIN),open,now);assert.deepEqual([fresh.state,fresh.facts.recovery,fresh.issues.length],['healthy','progress',0]);
+ // The baseline is the incident's own measurement, not the memo clock a held tick moved: progressAt already equal to the new commit still recovers.
+ const moved=policy.evaluatePredictions(facts(now-10*MIN),{...open,progressAt:iso(now-10*MIN)},now);assert.deepEqual([moved.state,moved.facts.recovery],['healthy','progress']);
+ // An entry without typed metrics (before ADR 0206) falls back to the previous tick's clock: equal holds, newer recovers.
+ const legacy={noProgressOpenSince:iso(P+2*H),progressAt:iso(now-10*MIN)};
+ assert.equal(policy.evaluatePredictions(facts(now-10*MIN),legacy,now).facts.held,'progress_unconfirmed');
+ assert.equal(policy.evaluatePredictions(facts(now-5*MIN),legacy,now).facts.recovery,'progress');
 }
 {
  // A reminder that falls due while the verdict cannot be read, then a genuine recovery: the original measurement time, the incident history, the current
@@ -244,6 +250,23 @@ function bucket(w){return w.bucket;}
  await w.tick(P+9*H);assert.equal(w.texts.length,3);const recovery=w.texts[2];
  assert.match(recovery,/Проблема снята/);assert.match(recovery,/Причина: прогресс снова подтверждён/);assert.match(recovery,/на последнем наблюдении 23\.11 23:28/,recovery);
  assert.match(recovery,/Длительность инцидента по наблюдениям монитора: 7 ч/,recovery);
+}
+
+{
+ // AIR-596 re-review: a commit lands while the lanes cannot be read; the held tick already reads the new progress from the history. The next readable tick,
+ // under 60 minutes after that commit and with no second commit, recovers exactly once (Footer healthy too); history and cooldown are untouched.
+ const w=await openIncident(),q=w.bucket.value(QUEUE);
+ const run=await w.start('during',P+3*H-10*MIN);await w.commit(run,P+3*H-5000,{created:1});
+ w.bucket.set(QUEUE,{...q,hotPending:undefined,coldPending:undefined});
+ let r=await w.tick(P+3*H);assert.equal(r.stream.state,'degraded');assert.equal(r.doc.alerts.issues.predictions_no_progress.metrics.held,'split_unknown');
+ assert.equal(r.doc.predictions.progressAt,iso(P+3*H-5000),'the held tick advanced the memo clock');
+ assert.equal(r.doc.alerts.issues.predictions_no_progress.metrics.lastProgressAt,iso(P),'the incident baseline is unchanged');
+ w.bucket.set(QUEUE,q);
+ r=await w.tick(P+3*H+59*MIN);assert.equal(r.stream.state,'healthy',JSON.stringify(r.stream));
+ const recoveries=w.posts.filter(item=>item.kind==='recovery'&&item.key==='predictions_no_progress');assert.equal(recoveries.length,1);
+ assert.match(recoveries[0].message,/progress is confirmed again \(last confirmed progress /);
+ assert.equal(w.posts.filter(item=>item.key==='predictions_no_progress'&&item.kind!=='recovery').length,1,'one alert, no extra reminder');
+ assert.equal((await w.footer(P+3*H+59*MIN)).source.state,'healthy');
 }
 
 // ---- 3. Rollout over the persisted production state of 24 Nov 2026 11:00 Madrid: alert history and the open incident are kept, nothing is resent ----
