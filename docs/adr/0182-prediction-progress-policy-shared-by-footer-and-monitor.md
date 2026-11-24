@@ -6,7 +6,7 @@
 **Approval source:** [AIR-556, explicit Product Owner approval of ADR 0182, its 60-minute threshold, single-snapshot Monitor alert, Footer wording and expected per-film failure behavior, 20 November 2026 (Europe/Madrid)](https://trello.com/c/ZjqzW7EB)  
 **Related work:** [AIR-556](https://trello.com/c/ZjqzW7EB); [AIR-349](https://trello.com/c/VUyampoh); [AIR-389](https://trello.com/c/DKDuJnkk); [AIR-548](https://trello.com/c/lv04pDu2); [ADR 0095](0095-cloudflare-native-production-monitor.md)  
 **Supersedes:** None. It **amends** [ADR 0095](0095-cloudflare-native-production-monitor.md) decisions 4 and 5 for the `predictions` stream only (the 3-hour delayed and 6-hour degraded limits, and two-snapshot confirmation for that one issue key). ADR 0095 stays Accepted for every other stream.  
-**Superseded by:** None
+**Superseded by:** In part [ADR 0210](0210-prediction-no-progress-verdict-survives-live-runs.md) (**Proposed**, [AIR-596](https://trello.com/c/t9Tx7Yy0)): decision 5 (a live run before any verdict) and the moved processed counter of decision 3; the other decisions stay in force
 
 ## Context
 

@@ -140,25 +140,52 @@ export function evaluateLetterboxd(model, now) {
 // `facts.stall` is the verdict of the one shared assessment in enrichment.js (`predictionStallAssessment`): running | ok | idle | waiting | unknown | no_progress.
 // Confirmed progress is a productive batch or a drained run, never a heartbeat, `already_running`, a noop wake-up or a queue recount. The monitor does
 // not know why a Task did not reach the Worker, so no message names api_error, an expired authorization or a number of missed Tasks.
+// AIR-596 (ADR 0210): `previous.noProgressOpenSince` is the first-seen time of an open `predictions_no_progress` incident. While it is open, a tick that cannot
+// read or decide the verdict (unreadable or absent queue, unknown split, a run with no progress evidence) keeps the incident open instead of recovering it; it
+// recovers only on confirmed progress or a proven absence of eligible work, and `facts.recovery` names which.
+const predictionHold = (openSince, why, last) => issue('predictions_no_progress', 'degraded', 'predictions', 'The prediction no-progress incident open since ' + new Date(openSince).toISOString() + ' cannot be confirmed or cleared now (' + why + '); it stays open until confirmed progress or no eligible work is proven' + (last === null ? '' : ' (last confirmed progress ' + new Date(last).toISOString() + ')'));
 export function evaluatePredictions(facts, previous, now) {
-  if (!facts || facts.error) return unreadable('predictions', 'prediction queue');
-  if (!facts.present) return {stream: 'predictions', state: 'waiting', issues: [], facts: {present: false}};
+  const openSince = time(previous?.noProgressOpenSince);
+  if (!facts || facts.error) {
+    const out = unreadable('predictions', 'prediction queue');
+    if (openSince !== null) out.issues.push(predictionHold(openSince, 'the prediction queue could not be read', time(previous?.progressAt)));
+    return out;
+  }
+  if (!facts.present) {
+    if (openSince !== null) return {stream: 'predictions', state: 'degraded', issues: [predictionHold(openSince, 'the prediction queue is absent', time(previous?.progressAt))], facts: {present: false, held: true}};
+    return {stream: 'predictions', state: 'waiting', issues: [], facts: {present: false}};
+  }
   const issues = [];
   const pending = Number.isInteger(facts.pendingCount) ? facts.pendingCount : 0;
   const eligible = Number.isInteger(facts.eligibleNow) ? facts.eligibleNow : null;
   const stall = facts.stall && typeof facts.stall === 'object' ? facts.stall : {state: 'unknown', reason: 'queue_unreadable', idleMs: null};
   const why = facts.blockedReason === 'quota' ? ' (the last batch reported a quota limit)' : '';
-  let state = 'healthy';
+  const last = time(facts.lastProgressAt);
+  let state = 'healthy', recovery = null;
   if (pending > 0 || eligible > 0) {
     if (stall.state === 'no_progress') {
       state = 'degraded';
-      const last = time(facts.lastProgressAt);
-      issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (stall.reason === 'repeated_orphan_starts' ? ', with ' + (Number.isInteger(stall.orphanStarts) ? stall.orphanStarts : 'repeated') + ' ownerless starts since (turned-away or abandoned without a film)' : '') + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why));
-    } else if (stall.state === 'waiting') state = 'waiting';
-    else if (stall.state === 'unknown') state = 'delayed'; // unreadable queue split or no progress evidence yet: visible, never healthy, never an alert by itself
-  }
+      const orphans = Number.isInteger(stall.orphanStarts) && stall.orphanStarts > 0 ? stall.orphanStarts : null;
+      issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (stall.reason === 'repeated_orphan_starts' ? ', with ' + (orphans ?? 'repeated') + ' ownerless starts since (turned-away or abandoned without a film)' : orphans !== null ? ', ' + orphans + ' ownerless starts in the last 2 hours' : '') + (stall.activeRun ? '; a run holds the lease now, which is not progress' : '') + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why));
+    } else if (stall.state === 'waiting') { state = 'waiting'; recovery = 'retry_wait'; }
+    else if (stall.state === 'idle') recovery = 'no_eligible_work';
+    else if (stall.state === 'ok' || (stall.state === 'running' && stall.sinceKnown === true)) recovery = 'progress';
+    else if (openSince !== null) { state = 'degraded'; issues.push(predictionHold(openSince, stall.state === 'running' ? 'a run is working but no progress is confirmed yet' : 'the eligible work or the progress time cannot be read', last)); }
+    else if (stall.state !== 'running') state = 'delayed'; // unreadable queue split or no progress evidence yet: visible, never healthy, never an alert by itself
+  } else if (eligible === null && openSince !== null) { state = 'degraded'; issues.push(predictionHold(openSince, 'the eligible work cannot be read', last)); }
+  else recovery = 'no_eligible_work';
   const all = worst(issues);
-  return {stream: 'predictions', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {pendingCount: pending, eligibleNow: eligible, stall: stall.state, stallReason: stall.reason ?? null, idleMs: stall.idleMs ?? null, lastProgressAt: facts.lastProgressAt ?? null}};
+  return {stream: 'predictions', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {pendingCount: pending, eligibleNow: eligible, stall: stall.state, stallReason: stall.reason ?? null, idleMs: stall.idleMs ?? null, lastProgressAt: facts.lastProgressAt ?? null,
+    orphanStarts: Number.isInteger(stall.orphanStarts) ? stall.orphanStarts : null, recovery: issues.length ? null : recovery}};
+}
+// AIR-596: the text of the one recovery of `predictions_no_progress`, from the stream facts of the tick that recovered it. Confirmed progress and an absence of
+// eligible work are different recoveries and are never worded alike.
+export function predictionRecoveryMessage(facts) {
+  const last = time(facts?.lastProgressAt);
+  if (facts?.recovery === 'progress') return 'Recovered: prediction progress is confirmed again' + (last === null ? '' : ' (last confirmed progress ' + new Date(last).toISOString() + ')');
+  if (facts?.recovery === 'no_eligible_work') return 'Recovered: no prediction is eligible now (the queue is drained or holds only retry-exhausted work); this is not confirmed progress';
+  if (facts?.recovery === 'retry_wait') return 'Recovered: every remaining prediction waits for its retry time; this is not confirmed progress';
+  return 'Recovered';
 }
 
 // ---- Catalog posters (AIR-543, ADR 0179): the weekly poster sweep, judged by the one projection of its R2 checkpoint (CatalogPosterWeekly.project).

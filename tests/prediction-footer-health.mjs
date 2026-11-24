@@ -84,6 +84,11 @@ assert.equal(quota.integrations.aggregate,'attention');
 records.delete(diagKey('run-quota','2026-11-16T13:08:00Z'));
 putRun({runId:'run-1404b',status:'partial',reason:'external_termination',startedAt:'2026-11-16T13:02:00Z',endedAt:'2026-11-16T13:02:00Z',added:0});
 putRun({runId:'run-1404c',status:'partial',reason:'external_termination',startedAt:'2026-11-16T13:06:00Z',endedAt:'2026-11-16T13:06:00Z',added:0,latest:true});
+// AIR-596 (ADR 0210): three runs abandoned without a film 20 minutes after the last progress are the proven orphan chain, worded like the Monitor's verdict.
+const thrice=await footer();
+assert.equal(sourceOf(thrice,'predictions').code,'prediction_no_recent_progress');
+assert.equal(sourceOf(thrice,'predictions').lastSuccessAt,'2026-11-16T12:50:00.000Z');
+records.delete(diagKey('run-1404','2026-11-16T13:04:00Z'));
 const twice=await footer();
 assert.equal(sourceOf(twice,'predictions').code,'prediction_runs_interrupted');
 assert.notEqual(sourceOf(twice,'predictions').code,'prediction_blocked');
@@ -221,7 +226,8 @@ const setNow=value=>{now=Date.parse(value);};
  now=savedNow;
 }
 
-// AIR-556: a live run younger than the 60-minute limit is running; an older live lease is not evidence of progress.
+// AIR-556: a live run younger than the 60-minute limit is running only while nothing is proven; an older live lease is not evidence of progress.
+// AIR-596 (ADR 0210): five hours after the last progress a young live run no longer hides the silence.
 {
  const savedNow=now;
  clearRuns();bigQueue(200);
@@ -229,7 +235,10 @@ const setNow=value=>{now=Date.parse(value);};
  const live=(startedAt)=>{records.set('enrichment/latest-run.json',{runId:'run-live',status:'running',createdAt:startedAt,trigger:'scheduled',selectedIds:[],results:{},failures:{}});records.set('enrichment/runner-lease.json',{runId:'run-live',expiresAt:now+10*60000,heartbeatAt:new Date(now).toISOString()});};
  setNow('2026-11-16T09:46:00Z');
  live('2026-11-16T09:30:00Z');
- assert.equal(sourceOf(await footer(),'predictions').state,'running','a 16-minute live run is running');
+ {const source=sourceOf(await footer(),'predictions');assert.equal(source.state,'degraded','a 16-minute live run does not hide five hours without progress');assert.equal(source.code,'prediction_no_recent_progress');assert.equal(source.lastSuccessAt,'2026-11-16T04:54:00.000Z','the last confirmed success stays visible');}
+ putRun({runId:'run-recent',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T09:12:00Z',endedAt:'2026-11-16T09:20:00Z',added:2});
+ assert.equal(sourceOf(await footer(),'predictions').state,'running','a 16-minute live run 26 minutes after progress is running');
+ records.delete(diagKey('run-recent','2026-11-16T09:12:00Z'));
  live('2026-11-16T08:00:00Z');
  assert.equal(sourceOf(await footer(),'predictions').state,'degraded','a lease held for 106 minutes without a finished batch does not hide the missing progress');
  records.delete('enrichment/runner-lease.json');
