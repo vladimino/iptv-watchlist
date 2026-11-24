@@ -1,4 +1,4 @@
-# ADR 0208: The Discovery report-fault ledger is kept in two R2 objects with a best-effort combined admission bound
+# ADR 0209: The Discovery report-fault ledger is kept in two R2 objects with a best-effort combined admission bound
 
 **Status:** Accepted (Product Owner selected option A on 24 November 2026)  
 **Original decision date:** 2026-11-24  

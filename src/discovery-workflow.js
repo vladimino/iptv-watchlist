@@ -251,7 +251,7 @@ const DISCOVERY_REPORT_CLOSE_REASONS=new Set(['no_record','state_unreadable','ou
 const DISCOVERY_REPORT_FAULT_KEY='events/discovery-report-faults.json';
 // The ledger never evicts: it holds one compact tuple per undelivered hour, up to a year of hours (about 40 bytes each, well under 1 MB). Past that bound the NEWEST
 // notice is refused and logged as `lost`; an older one is never dropped to make room. A drain delivers at most `DISCOVERY_REPORT_FAULT_DRAIN` entries per firing,
-// oldest first, so one invocation's R2 work stays bounded however long the outage was. Since AIR-595 the ledger is stored in two objects (see below, ADR 0208):
+// oldest first, so one invocation's R2 work stays bounded however long the outage was. Since AIR-595 the ledger is stored in two objects (see below, ADR 0209):
 // the per-firing drain bound, the oldest-first order of the set read, no eviction and one visible journal event per hour are strict across both; the 8,760 bound and
 // one entry per hour are checked against both but are best effort under simultaneous writers to different objects and during a rollback.
 const DISCOVERY_REPORT_FAULT_LIMIT=8760;
@@ -321,8 +321,8 @@ async function deliverDiscoveryReportFailure(env,event){
  try{
   const key=discoveryReportFaultKey(tuple),otherKey=key===DISCOVERY_REPORT_FAULT_KEY?DISCOVERY_REPORT_FAULT_KEY_V2:DISCOVERY_REPORT_FAULT_KEY;
   for(let attempt=0;attempt<DISCOVERY_REPORT_FAULT_ATTEMPTS;attempt++){
-   // One logical ledger over the two objects (ADR 0208): one entry per hour across both, and the 8,760 bound counts both, as this writer observes them. Each object has
-   // its own compare-and-swap, so a simultaneous writer to the other object can add its own entry too: best effort, accepted by ADR 0208; the journal identity still
+   // One logical ledger over the two objects (ADR 0209): one entry per hour across both, and the 8,760 bound counts both, as this writer observes them. Each object has
+   // its own compare-and-swap, so a simultaneous writer to the other object can add its own entry too: best effort, accepted by ADR 0209; the journal identity still
    // shows one event per hour.
    const state=await readDiscoveryReportFaults(env,key),other=await readDiscoveryReportFaults(env,otherKey);
    if(state.faults.some(entry=>sameFault(entry,tuple))||other.faults.some(entry=>sameFault(entry,tuple)))return 'queued';
@@ -335,7 +335,7 @@ async function deliverDiscoveryReportFailure(env,event){
 // Drains the ledger: the oldest entries first, at most DISCOVERY_REPORT_FAULT_DRAIN a firing, each put create-only; an entry leaves the ledger only after a confirmed
 // put (written, or the key already holds the notice or the report of that hour). Never throws.
 async function deliverDiscoveryReportFaults(env){
- // One logical ledger over the two objects (ADR 0118, ADR 0208): the entries of both are merged and drained oldest hour first, at most
+ // One logical ledger over the two objects (ADR 0118, ADR 0209): the entries of both are merged and drained oldest hour first, at most
  // DISCOVERY_REPORT_FAULT_DRAIN journal puts a firing in total, whatever fails afterwards (the batch is fixed before the first put). Each object is then
  // cleaned with its own compare-and-swap; an entry leaves only after a confirmed put. An uncertain cleanup answers `pending: null` and the next firing
  // finds the delivered entries `exists` and removes them.
