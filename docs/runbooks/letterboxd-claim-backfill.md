@@ -1,10 +1,10 @@
 # Letterboxd claim backfill: read-only preflight, L3 plan and readback (owner approval required)
 
-Applies to the dormant module `src/canonical-letterboxd-claim.js` ([ADR 0184](../adr/0184-ratings-confirmed-letterboxd-claim-on-existing-film.md), Accepted). Nothing here authorizes a production write: the backfill is an L3 operation under [authorization and escalation](../process/authorization-and-escalation.md) and needs an owner-approved plan before it runs, even for a handful of rows.
+Applies to the module `src/canonical-letterboxd-claim.js`, whose producer is active from the AIR-559 activation PR on ([ADR 0184](../adr/0184-ratings-confirmed-letterboxd-claim-on-existing-film.md), Accepted). Nothing here authorizes a production write: the backfill is an L3 operation under [authorization and escalation](../process/authorization-and-escalation.md) and needs an owner-approved plan before it runs, even for a handful of rows.
 
 ## Activation of the producer path
 
-The Ratings flows already offer their durable links to the claim module. The module stays inactive until the constant `LETTERBOXD_CLAIM_ACTIVATED` in `src/canonical-letterboxd-claim.js` is `true`. While inactive, the flows write nothing for claims and store nothing. While active:
+The Ratings flows offer their durable links to the claim module. The module acts only while the constant `LETTERBOXD_CLAIM_ACTIVATED` in `src/canonical-letterboxd-claim.js` is `true`; the activation PR sets it to `true`. While inactive, the flows write nothing for claims and store nothing. While active:
 - an unproved id keeps a bounded `claim_pending` entry in the Diary identity document; after six attempts it stays visible and is no longer served;
 - the baseline import offers verified entries only, and a replay of a committed chunk re-offers it;
 - reverting the line stops new claims, but claims already written stay (see Rollback).
@@ -23,7 +23,7 @@ A zero cohort in the backfill `dry_run` does not by itself show that the produce
    - `tests/canonical-letterboxd-claim.mjs`: the "ships off" assertion becomes `true` / "ships on";
    - `tests/canonical-film-external-ids-producer.mjs`: the literal check becomes `=true;` / "the activation gate is on".
 
-   Everything else follows the constant or passes `enabled` explicitly, so the explicit disabled coverage stays. `tests/letterboxd-claim-activation-rehearsal.mjs` already runs the whole producer with the gate on, from a private copy of `src/`. The full suite and the build were also run on the exact gate-on candidate (these three lines on top of this plan's commit): core and non-functional all passed, build passed. The activation PR repeats that on its own HEAD. It is merged only after the owner's GO; the ordinary deploy then activates it.
+   Everything else follows the constant or passes `enabled` explicitly, so the explicit disabled coverage stays. The activation PR also carries one small fix of the read-only status tool: a bare, empty or malformed `--since` (missing value, an option in its place, a non-calendar date such as 2026-02-30) is refused before any connection instead of degrading to a baseline. `tests/letterboxd-claim-activation-rehearsal.mjs` already runs the whole producer with the gate on, from a private copy of `src/`. The full suite and the build were also run on the exact gate-on candidate (these three lines on top of this plan's commit): core and non-functional all passed, build passed. The activation PR repeats that on its own HEAD. It is merged only after the owner's GO; the ordinary deploy then activates it.
 3. **Preflight, read-only, immediately before the GO:**
    - `feature_flags` (no flag gates this producer; it is the constant);
    - `ratings_sync_status`: Letterboxd Sync mode `cloudflare` and healthy, the next slot due;

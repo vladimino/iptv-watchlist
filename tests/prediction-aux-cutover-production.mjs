@@ -732,5 +732,34 @@ const GATE={d1:{statements:2000,bytes:8*1048576,statementBytes:100*1024}};
  assert.equal(marker(e.file).mode,'closed','the marker moves only at the flip');
  console.log('real-size database run: '+imp.appliedNow.length+' chunks, '+ver.appliedNow.length+' slices in '+(Date.now()-started)+' ms (sqlite stand-in, not D1)');
 }
+// ===== 8. the REAL REST binding: a data text with a question mark (24 Nov 2026: "Missing SQL parameter" on the first real chunk, nothing sent) =====
+{
+ const {createPublishedBinding}=await import('../scripts/published-epg-production.mjs');
+ const e=scratch();
+ // An adapter over the stand-in with the shape createPublishedBinding needs; its binding renders `?` exactly like the REST client does.
+ const adapter={
+  async get(text,params=[]){return ((await e.db.prepare(text).bind(...params).all()).results||[])[0]??null;},
+  async all(text,params=[]){return (await e.db.prepare(text).bind(...params).all()).results||[];},
+  async run(text,params=[]){await e.db.prepare(text).bind(...params).run();},
+  async readBatch(texts){return (await e.db.batch(texts.map(t=>e.db.prepare(t).bind()))).map(r=>r.results||[]);},
+  async executeRendered(texts){await e.db.batch(texts.map(t=>e.db.prepare(t).bind()));},
+ };
+ // The defect itself: the published binding refuses a final statement that has a `?` inside a string literal.
+ assert.throws(()=>createPublishedBinding(adapter).prepare("INSERT INTO t (a) VALUES ('what? why?')").bind(),/Missing SQL parameter/);
+ const binding=Op.restBinding(adapter);
+ const objectsQ=synthetic(12,30000);
+ for(const key of Object.keys(objectsQ))if(key.startsWith('enrichment/sources/')){const run=Object.values(objectsQ[key])[0];run.title='Why? Who? "What?" it\'s a ? question';run.modelMetadata.note='?'+run.modelMetadata.note+'?';}
+ const planQ=await buildPlan(objectsQ);assert.deepEqual(planQ.blockers,[]);
+ assert.ok(planSql(planQ,1).includes('Why? Who?'),'the dataset really carries question marks inside its literals');
+ const convQ={directory:'synthetic',capture:{identity:[],identitySha256:'x',report:{}},plan:planQ,report:await planReport(planQ),planSha256:planSha256(planQ)};
+ const exec=(command,params,limits=SMALL)=>Op.execute(command,{binding,now:NOW,ctx:ctxOf(),params,limits});
+ await exec('apply',{migrationSha256:Op.migrationSha256()});await exec('close',{generation:0});
+ const imp=await exec('import',{generation:1,converted:convQ,planSha256:convQ.planSha256});
+ assert.equal(imp.complete,true);assert.equal(count(e.file,'prediction_run_source_head'),12);
+ const stored=sql(e.file,"SELECT text FROM prediction_run_source_piece WHERE text LIKE '%Why? Who?%' LIMIT 1");assert.equal(stored.length,1,'a question mark inside a literal arrives as it is');
+ assert.equal((await exec('seal',{generation:1,converted:convQ,planSha256:convQ.planSha256})).writeState,'committed');
+ const ver=await exec('verify',{generation:1,converted:convQ,planSha256:convQ.planSha256});assert.equal(ver.complete,true);
+ assert.equal(marker(e.file).mode,'closed');
+}
 await opened.bucket.stop();
 console.log('prediction aux cutover production: ok');
