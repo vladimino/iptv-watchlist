@@ -1492,6 +1492,9 @@ export const FILES={
  "programme-display-window.mjs": {
   "suite": "core"
  },
+ "producer-outcome-0038-production.mjs": {
+  "suite": "core"
+ },
  "producer-chain-operator.mjs": {
   "suite": "core"
  },
