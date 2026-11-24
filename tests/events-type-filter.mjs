@@ -27,7 +27,8 @@ const app = fs.readFileSync('public/app.js', 'utf8');
   assert.deepEqual(buttons, [
     ['all', 'true', 'Все события'], ['watchlist', 'false', 'Watchlist и просмотр'], ['epg', 'false', 'Программа'], ['discovery', 'false', 'Находки'],
     ['ratings', 'false', 'Оценки'], ['enrichment', 'false', 'Прогнозы'], ['taste_profile', 'false', 'Модель вкуса'], ['catalog_posters', 'false', 'Постеры'],
-  ], 'eight buttons, «Все события» pressed by default, kinds of event only: no «Пропущенные» (AIR-584)');
+    ['canonical_producer', 'false', 'Обогащение каталога'],
+  ], 'nine buttons (AIR-594 adds «Обогащение каталога» last), «Все события» pressed by default, kinds of event only: no «Пропущенные» (AIR-584)');
   assert.doesNotMatch(html, /data-event-type="skipped"|Пропущенные/, 'AIR-584: the skipped presentation has no type button anywhere in the markup');
 }
 
@@ -51,7 +52,8 @@ vm.runInContext(fs.readFileSync('public/return-home.js', 'utf8') + '\n' + app.re
 const pureRun = code => vm.runInContext(code, pure);
 {
   const mapping = {
-    all: ['watchlist', 'started', 'unstarted', 'epg', 'discovery', 'ratings', 'enrichment', 'taste_profile', 'diary_viewing', 'some_future_type', undefined, ''],
+    all: ['watchlist', 'started', 'unstarted', 'epg', 'discovery', 'ratings', 'enrichment', 'taste_profile', 'canonical_producer', 'diary_viewing', 'some_future_type', undefined, ''],
+    canonical_producer: ['canonical_producer'],
     watchlist: ['watchlist', 'started', 'unstarted'], epg: ['epg'], discovery: ['discovery'], ratings: ['ratings'], enrichment: ['enrichment'], taste_profile: ['taste_profile'],
   };
   const everything = mapping.all;
@@ -66,9 +68,9 @@ const pureRun = code => vm.runInContext(code, pure);
   for (const event of [skipped, heldStart]) {
     assert.equal(matches(event, 'enrichment'), true, event.reason + ': «Прогнозы» shows the skipped Event');
     assert.equal(matches(event, 'all'), true, event.reason + ': «Все события» shows it');
-    for (const other of ['watchlist', 'epg', 'discovery', 'ratings', 'taste_profile', 'catalog_posters']) assert.equal(matches(event, other), false, event.reason + ' is not ' + other);
+    for (const other of ['watchlist', 'epg', 'discovery', 'ratings', 'taste_profile', 'catalog_posters', 'canonical_producer']) assert.equal(matches(event, other), false, event.reason + ' is not ' + other);
   }
-  assert.equal(pureRun("EVENT_TYPE_FILTERS.map(item=>item.id).join()"), 'all,watchlist,epg,discovery,ratings,enrichment,taste_profile,catalog_posters', 'the order of the kinds is unchanged');
+  assert.equal(pureRun("EVENT_TYPE_FILTERS.map(item=>item.id).join()"), 'all,watchlist,epg,discovery,ratings,enrichment,taste_profile,catalog_posters,canonical_producer', 'the order of the earlier kinds is unchanged; AIR-594 appends the Producer');
   assert.equal(pureRun("EVENT_TYPE_FILTERS.some(item=>item.id==='skipped'||'presentation' in item)"), false, 'no filter is a presentation');
   assert.equal(pureRun("eventTypeFrom('?type=skipped')"), 'all', 'the legacy `?type=skipped` falls back to «Все события»');
   assert.equal(pureRun("eventTypeFrom('?type=skipped&type=epg')"), 'epg', 'and does not hide a valid type after it');

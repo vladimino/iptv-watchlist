@@ -528,7 +528,8 @@ if(on(9)){
 if(on(10)){
  const grep=(dir,needle)=>{const hits=[];for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,entry.name);if(entry.isDirectory())hits.push(...grep(file,needle));else if(/\.(js|mjs|json|jsonc|yml)$/.test(entry.name)&&fs.readFileSync(file,'utf8').includes(needle))hits.push(file);}return hits;};
  // AIR-374 S4-3: the dormant store (src/canonical-producer-store.js, tests/canonical-producer-store.mjs proves it is unimported and unbundled) is the only other module that names the tables.
- const named=needle=>grep('src',needle).filter(file=>file!=='src/canonical-producer-run.js'&&file!=='src/canonical-producer-store.js');
+ // ADR 0208 (AIR-594): the outcome module reads the run row of a chain INSIDE the outcome insert of a terminal batch (read-only, never a write to the run table).
+ const named=needle=>grep('src',needle).filter(file=>file!=='src/canonical-producer-run.js'&&file!=='src/canonical-producer-store.js'&&file!=='src/canonical-producer-events.js');
  // the dormant pure module names the tables in comments only; it is imported by tests alone (tests/canonical-receipts.mjs keeps the importer list)
  assert.deepEqual(named('canonical_producer_run'),[],'no Worker code names the run table');
  assert.deepEqual(named('canonical_producer_unit_result'),[],'no Worker code names the result table');

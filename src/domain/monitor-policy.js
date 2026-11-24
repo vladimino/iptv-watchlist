@@ -268,7 +268,9 @@ export function evaluateCanonicalProducerReader(facts, now) {
 export function evaluateCanonicalProducer(facts, now) {
   if (!facts || facts.error || facts.readable === false) return unreadable('canonical_producer', 'canonical Producer');
   const out = (state, status, issues, extra = {}) => ({stream: 'canonical_producer', state, issues,
-    facts: {status, held: !!facts.held, generation: facts.label ?? null, chain: facts.chain?.ownerState ?? null, run: facts.run?.passState ?? null, progressAt: facts.progressAt ?? null, ...extra}});
+    facts: {status, held: !!facts.held, generation: facts.label ?? null, chain: facts.chain?.ownerState ?? null, run: facts.run?.passState ?? null, progressAt: facts.progressAt ?? null, ...extra,
+      // ADR 0208 decision 7: shown, never judged. The verdict above does not read it.
+      ...(facts.outcomeDelivery && typeof facts.outcomeDelivery === 'object' ? {outcomeDelivery: facts.outcomeDelivery} : {})}});
   if (facts.held) {
     // A deliberate delivery hold: honest and visible, never healthy and never a success. It is not an alert (the owner chose it).
     return out('delayed', 'held_by_delivery', [issue('canonical_producer_held_by_delivery', 'delayed', 'canonical_producer', 'The canonical Producer is held by delivery: no Producer progress is expected until the hold is lifted')]);
