@@ -361,13 +361,21 @@ await raced('the record becomes an inferred link after the plan',file=>{const re
 }
 
 // 13. Producer wiring (ADR 0184 decision 5): the gate is off in code, `ensureLetterboxdClaims` writes nothing until it is on, never throws into a flow, is bounded and idempotent.
+// ACTIVATION DIFF (runbook activation plan): the activation PR changes this one assertion together with the constant and the literal check in
+// tests/canonical-film-external-ids-producer.mjs. Everything else in this file follows the constant or passes `enabled` explicitly.
 assert.equal(LETTERBOXD_CLAIM_ACTIVATED,false,'the activation constant ships off');
 {
+ // The default gate follows the shipped constant: off, the default call writes nothing; on, the default call is the active producer (covered with `enabled:true`
+ // below and end to end in tests/letterboxd-claim-activation-rehearsal.mjs). The explicit `enabled:false` stays inactive whatever the constant says.
+ const gateFile=proved(),gateEnv=envOf(gateFile),gateBefore=dump(gateFile);
+ const byDefault=await ensureLetterboxdClaims(gateEnv,{pairs:[{lid:'AAA1',tmdb:'1'}],now:()=>T});
+ if(LETTERBOXD_CLAIM_ACTIVATED){assert.deepEqual([byDefault.state,byDefault.written],['complete',1],'gate on: the default call claims');}
+ else{assert.equal(byDefault.state,'inactive');assert.equal(dump(gateFile),gateBefore,'gate off: the default call writes not one statement');}
+}
+{
  const file=proved(),env=envOf(file),before=dump(file);
- const off=await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'}]});
- assert.equal(off.state,'inactive');assert.equal(dump(file),before,'inactive: not one statement writes');
  const offExplicit=await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'}],enabled:false});assert.equal(offExplicit.state,'inactive');
- assert.equal(dump(file),before);
+ assert.equal(dump(file),before,'explicitly disabled: not one statement writes');
  const on=await ensureLetterboxdClaims(env,{pairs:[{lid:'AAA1',tmdb:'1'},{lid:'AAA1',tmdb:'1'},{lid:'tmdb_1',tmdb:'1'},{lid:'bad id',tmdb:'1'},{lid:'ZZZ',tmdb:'x'},null],enabled:true,now:()=>T});
  assert.deepEqual([on.state,on.requested,on.written,on.already,on.refused],['complete',1,1,0,0],'duplicates and malformed pairs are dropped');
  assert.deepEqual(pairs(file),['letterboxd:AAA1','tmdb:1']);

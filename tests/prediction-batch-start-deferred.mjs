@@ -108,7 +108,7 @@ const world=async(n=6,{workflow=true}={})=>{
  const replay=await w.start(key);assert.equal(replay.data.status,'accepted');assert.equal(replay.data.phase,'ready');assert.equal(replay.data.runId,r.data.runId);assert.equal(w.instances.length,1);
  const run=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+r.data.runId+"'")[0].d);assert.equal(run.status,'running');assert.equal(run.keyHash,lease.keyHash);
  const beat=await w.api('heartbeat',{runId:r.data.runId});assert.equal(beat.status,200,JSON.stringify(beat.data).slice(0,200));
- const renewed=leaseDoc(w);assert.ok(renewed.expiresAt>Date.now()+14*60000,'the heartbeat extends to the full 15 minutes');assert.equal(renewed.keyHash,lease.keyHash);assert.equal(renewed.phase,'run');assert.ok(renewed.clientAckAt);
+ const renewed=leaseDoc(w);assert.ok(renewed.expiresAt>Date.now()+11*60000,'the heartbeat extends to the full 12-minute runner lease');assert.equal(renewed.keyHash,lease.keyHash);assert.equal(renewed.phase,'run');assert.ok(renewed.clientAckAt);
  const before=dump(w.file);const second=await w.prepare(w.instances[0]);assert.equal(second.phase,'failed');assert.equal(second.code,'start_claim_lost');assert.equal(dump(w.file),before,'a replayed instance changes no run or lease');assert.equal(w.records.get(outcomeKey(r.data.runId)).phase,'ready','and never overwrites the terminal outcome');
 }
 

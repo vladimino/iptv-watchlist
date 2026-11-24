@@ -218,6 +218,9 @@ export const FILES={
  "discovery-catalog-read-log.mjs": {
   "suite": "core"
  },
+ "letterboxd-claim-activation-rehearsal.mjs": {
+  "suite": "core"
+ },
  "letterboxd-claim-backfill.mjs": {
   "suite": "core"
  },
@@ -1317,6 +1320,9 @@ export const FILES={
   "suite": "core"
  },
  "prediction-air-588-envelope.mjs": {
+  "suite": "core"
+ },
+ "prediction-air-588-lease-ttl.mjs": {
   "suite": "core"
  },
  "prediction-task-id.mjs": {

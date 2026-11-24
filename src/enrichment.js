@@ -879,7 +879,19 @@ function safePredictionReason(value){
  const text=String(value||'');if(['external_termination','retry_backoff','format_error_storm','model_unavailable','api_error','lease_lost','client_state_lost','manifest_unusable'].includes(text))return text;if(/quota|usage|limit/i.test(text))return 'quota';if(/time|deadline/i.test(text))return 'time_budget';if(/parse|json/i.test(text))return 'parse_error';if(/profile/i.test(text))return 'profile_changed';if(/lease|interrupt/i.test(text))return 'lease_expired';if(/storage|persist|checkpoint/i.test(text))return 'storage_error';if(/supersed|priority/i.test(text))return 'priority_changed';return text?'model_error':null;
 }
 const RUNNER_LEASE_KEY=ENRICHMENT_KEY+'runner-lease.json';
-const RUNNER_LEASE_TTL=15*60000;
+// AIR-588 (owner containment of 24 Nov 2026): 12 minutes, so a run that stops renewing after its start frees the runner before the next quarter-hour slot of the four Tasks
+// (AIR-544 used the same value with five Tasks and was restored to 15 with them). A live lease is never re-dated: every expiry decision reads the stored `expiresAt`, so a lease
+// written under 15 minutes keeps its expiry until its next write, which gives it 12.
+const RUNNER_LEASE_TTL=12*60000;
+// The answer of a refused acquire as it always was: without the holder's `heartbeatAt`, which the Worker keeps for its own age notes.
+const leaseRefusalAnswer=answer=>{if(!answer||typeof answer!=='object')return answer;const {heartbeatAt,...rest}=answer;void heartbeatAt;return rest;};
+// The age of a lease since its last write. Every acquire, renewal, gate and heartbeat write stamps `heartbeatAt`, which is exact whatever TTL wrote the lease (15 minutes before
+// AIR-588's change, a 180 s claim or ready lease); a holder that carries only its expiry falls back to the expiry minus the current runner TTL.
+function leaseAgeMs(holder,at=Date.now()){
+ const beat=Date.parse(holder?.heartbeatAt||'');
+ if(Number.isFinite(beat))return Math.round(at-beat);
+ return Number.isFinite(holder?.expiresAt)?Math.round(at-(holder.expiresAt-RUNNER_LEASE_TTL)):NaN;
+}
 // ADR 0188: a keyed real start claims the runner lease before its heavy preflights. The claim is short and renewed at every stage boundary; it becomes the run's lease (same epoch) before the first persist side effect.
 const START_CLAIM_TTL_MS=180000;
 // ADR 0188: how long a same-key repeat waits for the owner request's stored start answer before it answers `start_pending`. Unproven by the traces; natural runs are the proof.
@@ -935,7 +947,8 @@ async function runnerLease(env,runId,operation='renew',claim=null,expectEpoch=nu
  let epochSeen=null;
  for(let attempt=1;;attempt++){
   const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,RUNNER_LEASE_KEY),object=head?head.object:await env.BUCKET.get(RUNNER_LEASE_KEY),old=head?head.value:(object?await object.json():null),now=Date.now();
-  if(operation==='acquire'&&old?.expiresAt>now)return {status:'already_running',runId:old.runId,expiresAt:old.expiresAt};
+  // `heartbeatAt` (the holder's last write) is carried for the refusal's own age note only (leaseAgeMs) and stripped from every answer (leaseRefusalAnswer).
+  if(operation==='acquire'&&old?.expiresAt>now)return {status:'already_running',runId:old.runId,expiresAt:old.expiresAt,...(typeof old.heartbeatAt==='string'?{heartbeatAt:old.heartbeatAt}:{})};
   if(operation!=='acquire'&&(!old||old.runId!==runId||old.expiresAt<=now))return {status:'lease_lost',runId:old?.runId||null};
   // A release that names its epoch never touches the lease of another epoch of the same run id (a deferred run id is derived from its key).
   if(operation==='release'&&expectEpoch!==null&&previousEpochOf(old)!==expectEpoch)return {status:'lease_lost',runId:old?.runId||null,reason:'epoch'};
@@ -1235,7 +1248,7 @@ function skippedStartEvent({requestId,body,holder,at,reason='already_running',ca
  if(body?.trigger==='scheduled'||body?.trigger==='manual')event.trigger=body.trigger;
  if(held)return event;
  if(isText(holder?.runId,100)&&SAFE_LOG_ID.test(holder.runId))event.holderRunId=holder.runId;
- if(Number.isFinite(holder?.expiresAt)){const age=Math.round(Date.parse(at)-(holder.expiresAt-RUNNER_LEASE_TTL));if(Number.isFinite(age)&&age>=0&&age<=7*86400000)event.holderAgeMs=age;}
+ if(holder){const age=leaseAgeMs(holder,Date.parse(at));if(Number.isFinite(age)&&age>=0&&age<=7*86400000)event.holderAgeMs=age;}
  return event;
 }
 // Removes one delivered entry from the outbox index at once (best effort: an entry that stays is removed by the next sweep, which finds its record delivered).
@@ -3076,7 +3089,7 @@ async function batchRefreshQueue(env,body,pre,tally=null){
 async function batchTurnedAway(env,body,tally=null,requestId=null,extra={}){
  const live=await loadJSON(env,RUNNER_LEASE_KEY);
  if(!(live?.runId&&live.expiresAt>Date.now()))return null;
- if(tally){tally.leaseRefused=1;tally.liveLeaseAgeMs=Math.max(0,Math.round(Date.now()-(live.expiresAt-RUNNER_LEASE_TTL)));}
+ if(tally){tally.leaseRefused=1;const age=leaseAgeMs(live);if(Number.isFinite(age))tally.liveLeaseAgeMs=Math.max(0,age);}
  const turned={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'completed',selectedIds:[],results:{},failures:{}};
  turned.diagnosticStartedAt=turned.createdAt;turned.completedAt=turned.createdAt;
  await diagnosticCheckpoint(env,turned,{startResult:'already_running'});
@@ -3277,7 +3290,7 @@ async function deferredStart(env,clean,requestId,tally,{keyHash,argsHash}){
  if(taken.status!=='owned'){
   const holder=await loadJSON(env,RUNNER_LEASE_KEY);
   if(holder?.runId===runId&&Number(holder.expiresAt)>Date.now()&&holder.keyHash===keyHash&&holder.argsHash===argsHash&&!holder.clientSubmitAt)return batchReceiptFor(env,holder,tally,async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId}));
-  return (await batchTurnedAway(env,clean,tally,requestId))||json(taken);
+  return (await batchTurnedAway(env,clean,tally,requestId))||json(leaseRefusalAnswer(taken));
  }
  tally.keyed=1;
  const releaseMine=()=>runnerLease(env,runId,'release',null,taken.epoch).catch(()=>null);
@@ -3355,7 +3368,7 @@ async function taskStart(env,clean,requestId,tally){
    if(live.argsHash!==argsHash){tally.keyArgsMismatch=1;return json({status:'blocked',reason:'task_args_mismatch',code:'task_args_mismatch',runId:live.runId,epoch:live.epoch??null,...scheduledRunFields()},409);}
    return batchJoin(env,live,tally,{keyHash,argsHash,taskId},async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId:live.runId}),clean.answer==='envelope');
   }
-  return (await batchTurnedAway(env,clean,tally,requestId))||json(taken);
+  return (await batchTurnedAway(env,clean,tally,requestId))||json(leaseRefusalAnswer(taken));
  }
  tally.keyed=1;
  const claim={runId,epoch:taken.epoch,keyHash,argsHash,lease:taken,converted:false};
@@ -3385,7 +3398,7 @@ async function batchStartWork(env,body,requestId,tally){
    if(live.argsHash!==argsHash){tally.keyArgsMismatch=1;const refused=await batchTurnedAway(env,clean,tally,requestId,{reason:'key_args_mismatch'});if(refused)return refused;}
    else if(!live.clientSubmitAt)return batchJoin(env,live,tally,{keyHash,argsHash},async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId:live.runId}),clean.answer==='envelope');
   }
-  return (await batchTurnedAway(env,clean,tally,requestId))||json(taken);
+  return (await batchTurnedAway(env,clean,tally,requestId))||json(leaseRefusalAnswer(taken));
  }
  tally.keyed=1;
  const claim={runId,epoch:taken.epoch,keyHash,argsHash,lease:taken,converted:false};
@@ -3460,12 +3473,12 @@ async function batchStartCore(env,body,requestId,tally,claim){
  let lease=claim?claim.lease:await timedStage(env,'runner_lease',()=>atStage('runner_lease',()=>runnerLease(env,runId,'acquire')));
  if(lease.status!=='owned'){
   // Not a refusal of the manifest: the attempt is recorded as every start attempt is. A competing start that won the lease after the early check is counted like the early refusal; the holder's age is known only when the answer carries its expiry (a lost compare-and-swap does not).
-  if(lease.status==='already_running'){tally.leaseRefused=1;tally.leaseRefusedAtAcquire=1;if(Number.isFinite(lease.expiresAt))tally.liveLeaseAgeMs=Math.max(0,Math.round(Date.now()-(lease.expiresAt-RUNNER_LEASE_TTL)));}
+  if(lease.status==='already_running'){tally.leaseRefused=1;tally.leaseRefusedAtAcquire=1;{const age=leaseAgeMs(lease);if(Number.isFinite(age))tally.liveLeaseAgeMs=Math.max(0,age);}}
   attempt.status='completed';attempt.completedAt=new Date().toISOString();attempt.stopReason=lease.status==='already_running'?null:lease.status;
   await diagnosticCheckpoint(env,attempt,{startResult:'already_running'});
   // Only a refusal the lease itself answers `already_running` is a skipped start; any other lease status keeps its own answer and writes no Event.
   if(lease.status==='already_running')await recordSkippedStart(env,{requestId,body,holder:lease});
-  return json(lease);
+  return json(leaseRefusalAnswer(lease));
  }
  // Revalidation, before a run, an Event or a diagnostics row exists: the queue's own generation must be the baseline's, and the selection and the manifest the same. Only the lease
  // acquire and release may have happened if it does not hold.
@@ -3482,7 +3495,7 @@ async function batchStartCore(env,body,requestId,tally,claim){
   if(unsafe){await runnerLease(env,runId,'release',null,claim?claim.epoch:null);return batchBlocked('queue_changed',{cause:unsafe==='queue'||(unsafe==='manifest'&&again.revision!==pre.revision)?'revision':unsafe,...(queueRefreshed?{queueRefreshed:true}:{})});}
   if(again.priorityDue)tally.priorityLagAccepted=1;
   if(moved)tally.priorityRebased=1;
-  // The claim becomes the run's lease under the same epoch here, so the frozen answer, its size check and the stored copy all carry the real 15 minute expiry (ADR 0188). A claim that was taken over ends the start with nothing written.
+  // The claim becomes the run's lease under the same epoch here, so the frozen answer, its size check and the stored copy all carry the real runner-lease expiry (RUNNER_LEASE_TTL, ADR 0188). A claim that was taken over ends the start with nothing written.
   if(claim){
    let converted=null;
    for(let attempt=1;attempt<=3;attempt++){converted=await timedStage(env,'claim_convert',()=>claimConverted(env,claim));if(converted.status!=='busy')break;}
@@ -4046,7 +4059,7 @@ async function savePredictionRun(env,run){await saveJSON(env,runKey(run.runId),r
 function enrichmentSchemaDocument(){return {profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:GENERAL_EXECUTION,moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS},strengths:'short string array',risks:'short string array',confidence:CONFIDENCE,sourceBasis:SOURCE_BASIS,sourceRefs:'URL or model_knowledge',evidence:'optional; see contract.fingerprint.evidence. Omitting the key keeps a legacy fingerprint'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:CONFIDENCE,matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS}},contract:schemaContract(),rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film','Check the fingerprint and prediction against contract before prediction_batch_submit: every required execution dimension present, every enum value from its list (payoff and ending_quality use weak, mixed, strong, unknown, not medium; hero_vulnerability uses low, mixed, high, unknown), moodLabels 2–4 labels. A rejected item returns results[].validation.issues with the field path and code.']};}
 // GET /api/enrichment/runner (and the enrichment_runner MCP tool): the live runner contract. Since ADR 0167 batch runner v2 is the only protocol; the one-film
 // v5 start/next/submit routes and tools are retired. pipelineVersion stays the stored run format of the shared run records, unchanged by the retirement.
-function predictionRunnerContract(){return {pipelineVersion:5,protocol:BATCH_PROTOCOL,retiredProtocols:['v5'],leaseTtlMs:RUNNER_LEASE_TTL,heartbeat:'/api/enrichment/heartbeat',complete:'/api/enrichment/complete',read:'/api/enrichment/runner',itemFailures:{reportVia:'batch submit items[].failure {kind, reason}',allowedKinds:['parse_error','validation_error'],retryable:true,retryBaseMs:3600000,validation:{preflight:'prediction_batch_validate (read-only) or GET /api/enrichment/schema contract',reportedVia:'batch submit results[].validation {stage, reportedBy, issues[{path, code}]}',issueCodes:ISSUE_CODES}},batchRunner:{version:BATCH_RUNNER.version,protocol:BATCH_PROTOCOL,start:'/api/enrichment/batch/start',submit:'/api/enrichment/batch/submit',hold:'/api/enrichment/batch/hold',manifestFormat:BATCH_MANIFEST_FORMAT,...batchLimits(),requires:{predictionAuthority:'d1'}},instructions:['Batch start returns already_running: exit immediately, do not adopt its runId.','One batch start returns the whole manifest with the profile, schema and metadata (a deferred start returns a receipt instead and the manifest is read with prediction_batch_manifest once ready, ADR 0193); generate, validate, hold and submit its films in groups of at most 10 with the runId and lease epoch.','Lease TTL is 15 minutes. Heartbeat before model calls and at least every 5 minutes during long calls; every start, hold and submit also renews it.','Malformed or invalid per-film output: submit {filmId,failure:{kind,reason}} and continue. Never complete for one item failure.','Complete with reason manifest_spent once every manifest film is settled while ready films remain in the queue; omit reason when the queue is empty; otherwise pass the real systemic stop reason.','A formed response does not prove the client received it. Send or read X-Request-Id. On an external or systemic stop, complete may include fault {origin, failedStep, providerErrorCode, httpStatus, receivedRequestId}. Omit fault when the cause is unknown. A fault on a normal completion is rejected.']};}
+function predictionRunnerContract(){return {pipelineVersion:5,protocol:BATCH_PROTOCOL,retiredProtocols:['v5'],leaseTtlMs:RUNNER_LEASE_TTL,heartbeat:'/api/enrichment/heartbeat',complete:'/api/enrichment/complete',read:'/api/enrichment/runner',itemFailures:{reportVia:'batch submit items[].failure {kind, reason}',allowedKinds:['parse_error','validation_error'],retryable:true,retryBaseMs:3600000,validation:{preflight:'prediction_batch_validate (read-only) or GET /api/enrichment/schema contract',reportedVia:'batch submit results[].validation {stage, reportedBy, issues[{path, code}]}',issueCodes:ISSUE_CODES}},batchRunner:{version:BATCH_RUNNER.version,protocol:BATCH_PROTOCOL,start:'/api/enrichment/batch/start',submit:'/api/enrichment/batch/submit',hold:'/api/enrichment/batch/hold',manifestFormat:BATCH_MANIFEST_FORMAT,...batchLimits(),requires:{predictionAuthority:'d1'}},instructions:['Batch start returns already_running: exit immediately, do not adopt its runId.','One batch start returns the whole manifest with the profile, schema and metadata (a deferred start returns a receipt instead and the manifest is read with prediction_batch_manifest once ready, ADR 0193); generate, validate, hold and submit its films in groups of at most 10 with the runId and lease epoch.','Lease TTL is 12 minutes. Heartbeat before model calls and at least every 5 minutes during long calls; every start, hold and submit also renews it.','Malformed or invalid per-film output: submit {filmId,failure:{kind,reason}} and continue. Never complete for one item failure.','Complete with reason manifest_spent once every manifest film is settled while ready films remain in the queue; omit reason when the queue is empty; otherwise pass the real systemic stop reason.','A formed response does not prove the client received it. Send or read X-Request-Id. On an external or systemic stop, complete may include fault {origin, failedStep, providerErrorCode, httpStatus, receivedRequestId}. Omit fault when the cause is unknown. A fault on a normal completion is rejected.']};}
 function runSummary(r){return {runId:r.runId,processed:Object.values(r.results||{}).filter(x=>x!=='failed').length,batchCount:r.batchCount||1,lastHeartbeatAt:r.lastHeartbeatAt||null,hotRemaining:r.hotRemaining??null,coldRemaining:r.coldRemaining??null,stopReason:r.stopReason||null,sourceProgrammeRunId:r.sourceProgrammeRunId,tasteProfileVersion:r.tasteProfileVersion,tasteProfileHash:r.tasteProfileHash,fingerprintSchemaVersion:r.fingerprintSchemaVersion,predictionPromptVersion:r.predictionPromptVersion,eligibleCount:r.eligibleCount,selectedCount:r.selectedIds.length,batchSize:r.batchSize??r.selectedIds.length,adaptivePlan:r.adaptivePlan||null,deadlineAt:r.deadlineAt||null,status:r.status,trigger:r.trigger||'manual',startedAt:r.createdAt,finishedAt:r.completedAt||null,checked:Object.keys(r.results||{}).length,added:Object.values(r.results||{}).filter(x=>x==='created').length,updated:Object.values(r.results||{}).filter(x=>x==='recalculated').length,failed:Object.keys(r.failures||{}).length,hotProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='hot').length,coldProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='cold').length};}
 async function checkedRun(env,id){if(!isText(id,100))return null;return loadJSON(env,runKey(id));}
 // AIR-510: a truncated MCP start text is not a usable manifest. The already-owned run keeps the exact start answer; this read returns it without a second prediction_batch_start.
