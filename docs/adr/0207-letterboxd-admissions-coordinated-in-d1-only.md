@@ -1,9 +1,9 @@
 # ADR 0207: Letterboxd Film admissions are coordinated in D1 only; `verified-films.json` is frozen as historical evidence
 
-**Status:** Proposed. The owner's disposition of 2026-11-24 kept B, 1C, 2B and 3C and asked for 4-7 to be reworked; this revision awaits a new, explicit, ADR-specific Product Owner decision. It is not Accepted.  
+**Status:** Proposed. The owner's disposition of 2026-11-24 kept B, 1C, 2B and 3C and asked for 4-7 to be reworked. The [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124) of the same day then selected U1 = K2, U2 = accept, U3 = B (one retry policy for both callers), U4 = A and U5 = A. This revision implements those selections and awaits independent review and an explicit, ADR-specific final disposition. It is not Accepted.  
 **Original decision date:** not decided  
-**Recorded at:** 2026-11-24. Revised the same day after two design reviews, after the [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347), after the [review of the revised package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), after its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516) and after the [second re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040703398).  
-**Approval source:** not decided. The record was requested in the owner's handoff on [PR #972](https://github.com/vladimino/iptv-watchlist/pull/972#issuecomment-7127786410). The [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347) chose directions; it accepts no design and grants no implementation or activation GO.  
+**Recorded at:** 2026-11-24. Revised the same day after two design reviews, after the [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347), after the [review of the revised package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), after its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516) after the [second re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040703398) and after the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124).  
+**Approval source:** not decided. The record was requested in the owner's handoff on [PR #972](https://github.com/vladimino/iptv-watchlist/pull/972#issuecomment-7127786410). The [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347) chose directions, and the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124) selected options. Neither accepts unseen text or grants an implementation or activation GO.  
 **Related work:**
 - [AIR-555](https://trello.com/c/JPgjoBzK) (audit and decision), under [AIR-546](https://trello.com/c/1dRSJEbp) and [AIR-275](https://trello.com/c/4x7hH0gI); related [AIR-559](https://trello.com/c/733sRAxu) and [AIR-547](https://trello.com/c/99faXisC).
 - The read-only audit [`air-555-verified-films-admission-audit-2026-11-24.md`](../evidence/d1-migration/air-555-verified-films-admission-audit-2026-11-24.md) ([PR #972](https://github.com/vladimino/iptv-watchlist/pull/972), merged at `b9616ff3`). This record uses the audit's call-site labels (W1-W6, R1-R7) and gaps (G1-G4).
@@ -32,6 +32,19 @@
 | 5 | **5C**, separate evidence model: "источник источнику рознь…" | reworked: companion [ADR 0213](0213-film-identity-evidence-ledger.md) |
 | 6 | **6C**, redirect rated enrichment to the canonical D1 writer: "…начать подготовку к глобальному каталогу…" | reworked: companion [ADR 0211](0211-catalog-enrichment-producer.md) |
 | 7 | **7C**, more atomic cards | reworked (decision 7): a delivery graph |
+
+## Owner choices of 2026-11-24 (on HEAD `b4807c68`)
+
+Recorded in the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124). They select options; the final disposition of this record follows the independent review of this revision.
+
+| Choice | Owner selection | In this revision |
+| --- | --- | --- |
+| 0207-U1 | **K2**, a shared receipt `operation_key` | decision 3 uses K2 only; R1 is a mandatory shared foundation (decision 7) |
+| 0207-U2 | **Accept** the deterministic digest without clocks and the outcomes `source_changed` and `source_unavailable` | decisions 3 and 4 |
+| 0207-U3 | **B**, one retry policy for both callers: "временные транспортные ошибки не считаются попытками, нужен автоматический retry через сохранение места в очереди. если страница фильма выдает 404, это считаем" | decision 4b |
+| 0207-U4 | **A**, D0 on its own ahead of A1, including the unified retry policy on today's paths, tested through both callers | decision 7, card D0 |
+| 0207-U5 | **A**, enrichment active before A2; new admissions are eligible from day one, not instantly enriched | decision 7 |
+| ADR 0211-5 | **C**, shared upstream coordination across all relevant producers in one delivery scope | decision 7, cards U1-U3 |
 
 ## Context
 
@@ -166,12 +179,14 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
 
 "No admission row" and "no pending receipt inside its window" therefore do **not** prove that no earlier attempt can still land. A same-pair row proves that the pair is admitted, not that this writer verified it or that its earlier receipt settled.
 
-**Correlation: how a retry finds every earlier attempt of the same item.** This is the owner choice 0207-U1:
-
-| Option | What is stored | Finds earlier attempts after | Cost |
-| --- | --- | --- | --- |
-| **K1 pointer** | the `requestId` (the receipt row carries its target) in the writer's own record: one field in the Diary `linking` intent and in the `admitting` row; the inferred commit has no mutable per-item record, so it needs one more store | the record survives. It fails when the record is lost or evicted, and a second attempt overwrites the pointer to the first unless a list is kept | three writer records change; the inferred commit gains a store |
-| **K2 operation key (recommended)** | an additive, nullable column `operation_key` on `canonical_write_receipt`, set to `admission:<kind>:<code>` (kind `inferred_import`, `lid` or `short_code`). It comes with a **partial unique index** on `(origin, operation_key) WHERE state IN ('pending','failed','unknown')`: at most one unresolved attempt per key, enforced by the database | any loss of the writer record (the key derives from the code the source presents again), a redirect (the key has no target), a changed digest (same key, new request) and concurrent attempts (all rows share the key) | one additive column and index on the shared receipt table (an ADR 0119 amendment). Other origins leave it null |
+**Correlation: how a retry finds every earlier attempt of the same item (0207-U1 = K2).** An additive, nullable column `operation_key` on `canonical_write_receipt` is set to `admission:<kind>:<code>`, where `kind` is `inferred_import`, `lid` or `short_code`.
+- It comes with a **partial unique index** on `(origin, operation_key) WHERE state IN ('pending','failed','unknown')`. At most one unresolved attempt per key is allowed, and the database enforces it.
+- It finds earlier attempts after:
+  - any loss of the writer record, because the key derives from the code that the source presents again;
+  - a redirect, because the key has no target;
+  - a changed digest: same key, new request;
+  - concurrent attempts, because all of their rows share the key.
+- Cost: one additive column and index on the shared receipt table, an ADR 0119 amendment. Other origins leave it null. It is delivered by card R1, which ADR 0211 uses too.
 
 - **Uniqueness of K2.** A code is unique per admission (D1 `film_rated_admission.source_code` is unique), and `kind` separates Letterboxd ids from short codes.
 - **Different codes for the same target** have different keys; the fenced batch decides between them (decision 3 table).
@@ -198,8 +213,6 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
    - The fingerprint assertion is the per-item fence. The column and the index alone would not be.
    - **Race closed.** A reads an empty history, fetches movie B, and meanwhile another caller reserves and commits an admission of movie A. A's `source_changed` write then fails its fingerprint assertion, and A replans.
    - **Genuinely new checks are not suppressed.** A different route with the same `source_root`, or another `source_scope` (ADR 0213 scenario 4, a second archive), performs its own check and records its evidence row through the evidence-only operation. A recovery that finds a settled admission and fetches nothing still writes nothing.
-
-With K1 the same protocol runs over the pointer: the pointer plus an attempt counter is the history fingerprint, and step 5 becomes a compare-and-swap of it in the writer's record. The inferred commit, which has no mutable per-item record, needs one more store for it. That is part of K1's cost.
 
 **The evidence-only operation (ADR 0213) follows the same protocol** under its own key `evidence:<evidence_key>`. A lost response is answered by reading that key: an `applied` receipt means the row exists, and the unique `evidence_key` makes a replay a no-op.
 
@@ -230,7 +243,7 @@ There are **no proof snapshots and no journals**. A retry follows decision 3: it
 | Writer | Source kind | Reacquisition | What makes a reacquired input "the same request" |
 | --- | --- | --- | --- |
 | Inferred commit | **Immutable archive input**: the owner's export and plan, re-sent in the request | the owner re-sends the chunk; the Worker never fetches | the chunk intent's `itemsHash` (a different item is `chunk_conflict`); the digest is then identical |
-| Diary and Watchlist check | **Live page fetch**: `boxd.it/<lid>`, the film page, the TMDB movie | a new bounded check (ADR 0166 limits) | the same movie id as the `linking` intent, **and** the same deterministic evidence digest. Same movie with a new digest (a title edit on the page): a new request with a new digest; every earlier receipt of the key is first settled by decision 3 step 3 |
+| Diary and Watchlist check | **Live page fetch**: `boxd.it/<lid>`, the film page, the TMDB movie | a new bounded check (ADR 0166 limits) | the same movie id as the `linking` intent, **and** the same deterministic evidence digest. Same movie with a new digest (a title edit on the page): a new request with a new digest; every earlier receipt of the key is first settled by step 2 of the decision 3 protocol |
 | Rated step | Immutable archive rows (code, name, year in the candidate document) plus a **live page fetch** and the TMDB movie | a new bounded check (ADR 0087, 0090 limits) | the same movie id and path as the `admitting` row; the digest rule as for the Diary |
 
 **What cannot be silently treated as the same request:**
@@ -240,23 +253,23 @@ There are **no proof snapshots and no journals**. A retry follows decision 3: it
 - a changed target after a merge or redirect is found through the admission row by code and the receipt's readback, which follows the redirect;
 - an ambiguous receipt (in flight) is non-terminal.
 
-**The minimal durable correlation 3C needs** is K2's operation key, or K1's pointer, plus the writer's existing record of code and intended movie and the receipt table. No proof payload is stored.
+**The minimal durable correlation 3C needs** is K2's operation key, plus the writer's existing record of code and intended movie and the receipt table. No proof payload is stored.
 
 **4A with K2: failure cases.**
 - **Writer record lost or evicted:** the key derives from the code when the source presents it again. Earlier attempts are found and settled first.
 - **Lost response, then a redirect:** the applied receipt is found by key (its target is the old Film), and the readback follows the redirect.
 - **Concurrent different code for the same movie:** separate keys. The batch answers `other_code_on_film` for the loser (decision 3 table).
-- **Changed digest:** the old receipt is abandoned at step 3 before the new request.
-- **`unknown` or expired `pending`:** abandoned at step 3, unless it is applied.
+- **Changed digest:** the old receipt is abandoned at step 2 of the protocol before the new request.
+- **`unknown` or expired `pending`:** abandoned at step 2 of the protocol, unless it is applied.
 
-**4A without K1 or K2 does not meet 3C.** Concrete failure:
+**4A without a correlation key does not meet 3C.** Concrete failure:
 1. A Diary attempt verifies lid → movie A. Its admission batch is in flight when the invocation is cut.
 2. The page changes to movie B.
 3. A retry sees no row and no receipt inside its window. It reacquires, gets B, compares with the `linking` intent (A) and records `source_changed`: no admission, owner review.
 4. The first batch then lands A. Its tail does not check the window, and the Film revision it planned is still current, so the revision fence does not stop it.
 5. The next retry finds the row (code → A) and links A, contradicting both the newer source and the review it reported.
 
-The outcome depends on timing. (The revision fence does prevent two admissions of the same Film; it does not prevent this.) With K1 or K2, step 3 first abandons the old receipt, so A can never land, and the outcome is deterministically `source_changed`. K1 or K2 is therefore required, and the choice between them belongs to the owner. Neither stores a proof payload.
+The outcome depends on timing. (The revision fence does prevent two admissions of the same Film; it does not prevent this.) With K2, step 2 of the protocol first abandons the old receipt, so A can never land, and the outcome is deterministically `source_changed`. That is why the owner chose K2 (0207-U1). It stores no proof payload.
 
 **Pre-activation chunks.** A chunk committed before activation gets no admission on replay; its admissions are legacy and were proven present at the parity pin. Facts and claims only.
 
@@ -396,7 +409,8 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 - **4B. Persist the exact proof payload before the first effect.** This was the previous revision.
   - For: replay never needs the source.
   - Against: new fields in three documents, an eviction exemption for payloads, and payload revalidation rules, for a guarantee that atomic receipts and deterministic digests already give. Not chosen (owner 4A: "Не надо усложнять").
-- **No correlation (the previous revision's "admission row plus attempt window").** Rejected: it does not meet 3C (decision 3, the failure example). The pointer K1 and the key K2 are both kept as owner options.
+- **No correlation (the previous revision's "admission row plus attempt window").** Rejected: it does not meet 3C (decision 3, the failure example).
+- **K1, a pointer in each writer record.** Not chosen (0207-U1 = K2). It fails when the record is lost or evicted, a second attempt overwrites the pointer to the first unless a list is kept, and the inferred commit would need one more store.
 - **G3 retirement accepting thin metadata.** The previous revision; rejected by owner 6C, and replaced by ADR 0211.
 - **Sub-choices kept from the reviewed revision:**
   - detection-only handover: rejected;

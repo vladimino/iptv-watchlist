@@ -1,9 +1,9 @@
 # ADR 0213: Identity evidence is a ledger of typed, source-aware propositions beside the canonical claims
 
-**Status:** Proposed (no owner decision on this record; each choice below is separate and awaits an explicit, ADR-specific Product Owner decision)  
+**Status:** Proposed. The owner selected the direction of each choice on 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124): 1 = A, 2 = A, 3 = iii, 4 = A with a separate planning card for the full model, 5 = A). This revision implements those selections and awaits independent review and an explicit, ADR-specific final disposition. It is not Accepted.  
 **Original decision date:** not decided  
-**Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516) and the [second re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040703398).  
-**Approval source:** not decided. Requested as the companion of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) by the owner's disposition 5C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347): "источник источнику рознь, нужно отличать доказательства для записи в программе с названием без года от фильма с полноценным LID (из архива, оценок или watchlist)". That chose the direction; it does not accept this design.  
+**Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516) and the [second re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040703398). Renumbered from 0210 (#979 took that number first). Revised again after the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124).  
+**Approval source:** not decided. Requested as the companion of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) by the owner's disposition 5C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347): "источник источнику рознь, нужно отличать доказательства для записи в программе с названием без года от фильма с полноценным LID (из архива, оценок или watchlist)". That chose the direction; it does not accept this design. The consolidated choices select options; they are not an acceptance of unseen text, an implementation GO or a production GO.  
 **Related work:** [AIR-555](https://trello.com/c/JPgjoBzK), under [AIR-275](https://trello.com/c/4x7hH0gI). [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) (Proposed) uses the initial slice (decision 7).  
 **Supersedes:** None. It amends nothing by itself. Every reader change is a separate later decision (decision 8).  
 **Superseded by:** None
@@ -62,7 +62,8 @@ An evidence row states one **proposition** about a **subject** and, for relation
   - `letterboxd_export_import`, `letterboxd_rated_archive`;
   - `ratings_diary`, `watchlist_admission`;
   - `ratings_alias_bridge`;
-  - `owner_action`.
+  - `owner_action`;
+  - `unknown`, only on reconstructed rows (decision 6).
 - **`method`** says how it was established:
   - `title_only`, `title_year`, `title_year_search`;
   - `tmdb_detail_check`, `page_check`, `alias_bridge`;
@@ -117,18 +118,46 @@ The ledger stores no strength column. A reader derives strength from `method` wi
   - Owner rows outrank all others.
   - A `restricts` row blocks the proof use of its proposition unless an owner or a verified method asserts it.
   - **Independence** counts distinct `source_root` values, not routes or methods. Rows derived from the same page digest are one source, even when the Diary and the Watchlist check both wrote them.
-- **No completeness claim.** The ledger is observational first. It holds the evidence of the writers that exist. It is complete only for a route whose writer exists and, for earlier history, only after a backfill (decision 6). Until then it records evidence and decides nothing.
+- **No completeness claim.** The ledger is observational first. It holds the evidence of the writers that exist. It is complete only for a route whose writer exists and, for earlier history, only as far as the reconstruction of decision 6 reports coverage. Until then it records evidence and decides nothing.
 
-### 6. Backfill
+### 6. Historical reconstruction (owner choice 3 = iii), planned outside AIR-275
 
-- **(i) None for AIR-275 (recommended).** Rows exist from each writer's activation onward. Earlier admissions have no rows, and readers treat that as "legacy, unknown".
-- **(ii) Bounded backfill of the 714 admissions**, a separate owner L3 decision. It would reconstruct:
-  - 703 `restricts` from the Ratings marks and the frozen R2 object;
-  - 6 `page_check` rows, Diary or Watchlist, whose route is **not** recoverable from the stored receipt, so it is recorded as unknown;
-  - 5 `page_check` rows from the rated archive, route `letterboxd_rated_archive`.
-- **(iii) Discovery and claim history** is not proposed. It would be a reconstruction from Discovery decision history, left to the later Discovery writer.
+The owner chose the broad direction: earlier identity history is reconstructed **explicitly and visibly**, not left as an unexplained gap and not silently folded into the admission activation. It is planned and gated on its own, off the AIR-275 critical path (cards EP, E3a and E3b of ADR 0207 decision 7). The choice is a direction, not an import GO.
 
-### 7. Initial slice (AIR-275) versus the future catalog model
+**Source families.**
+- **(a) The 714 legacy admissions:** 703 inferred pairs from the Ratings marks and the frozen R2 object; 6 Diary or Watchlist page checks; 5 rated-archive page checks.
+- **(b) Discovery history:** observations, the append-only decision history (`identitySource` `tmdb_detail`, `known_epg_alias`, `owner`), and the owner intents with their commands and receipts.
+- **(c) Canonical claim history:** `film_external_id` rows and their `provenance_json`, the ADR 0184 claim units and receipts, and the TMDB retirement decisions.
+
+**Rules. Nothing is invented.**
+- **A row is reconstructed only from a durable source record** that states its proposition, polarity and method. A mapping that the source does not support (for example a Discovery decision whose evidence payload is missing) produces **no row**; it is counted in the coverage report with its reason.
+- **Unknowns stay explicit.**
+  - A route that the record does not carry is stored as `unknown`. Example: the 6 Diary or Watchlist checks, whose caller the receipt does not keep. `unknown` is allowed only on reconstructed rows.
+  - An observation time that is not recorded stays null. `seq` then orders the load, not the history.
+  - A missing `source_root` stays null. A row without a root is **never** counted as independent of any other row.
+- **Reconstruction provenance on every row.** Three nullable columns, present from the E1 schema so no later table change is needed:
+  - `origin`: `live` or `reconstruction`;
+  - `reconstruction_run`: the run that wrote it;
+  - `reconstructed_from`: the exact source record, such as the R2 key with its ETag, or the D1 table, row key and receipt id.
+- **Polarity is copied, never upgraded.**
+  - An inferred pair becomes `restricts`, never `asserts`.
+  - No reconstructed row is a proof by itself. A later reader amendment (decision 8) decides separately whether, and how, a reconstructed row may count. **No proof is inferred from historical or inferred data.**
+- **No duplicate of a live row.** If a live row already holds the same proposition and `source_root`, reconstruction writes nothing for it and reports it as covered.
+
+**Procedure for each family.**
+1. **Dry run.** A read-only reconstruction writes nothing. It produces a dated coverage report under `docs/evidence/`:
+   - rows that can be reconstructed, by proposition, polarity and method;
+   - rows with an unknown route, time or root;
+   - source records that cannot be reconstructed, with the reason;
+   - conflicts with existing rows.
+2. **Owner review of the report.**
+3. **Import.** One fenced, receipted import per family through the `identity_evidence` operation, with `origin = reconstruction`. It is idempotent by `evidence_key`, so a replay writes nothing. Each import needs its own owner decision and production GO (L3).
+
+**Ordering.**
+- Family (a) follows the A2 activation, when the frozen object and the D1 rows no longer change through R2.
+- Families (b) and (c) follow the planning card EP. EP defines the live Discovery, claim, owner and retirement writers, so reconstructed and live rows use one proposition mapping.
+
+### 7. Initial slice (AIR-275, owner choice 4 = A) versus the full model (a separate planning card)
 
 **Initial slice.** These are the only writers required by ADR 0207. Every row is **Film-bound**: its receipted target is the admitted or existing Film.
 - the table, its triggers, the `identity_evidence` operation (receipted, with the Film as target) and the writer helper;
@@ -138,16 +167,21 @@ The ledger stores no strength column. A reader derives strength from `method` wi
 
 `exists` rows and every other unbound observation are **not** in the initial slice (decision 1).
 
-**Future catalog model.** Each is a separate card and decision:
-- Discovery admission rows (`candidate_for` and `tmdb_detail_check`, referencing observation keys);
-- the ADR 0184 claim unit (`alias_bridge`);
-- owner identity actions, including the claim side of an ADR 0178 revoke, which today touches no canonical claim;
-- retirement.
+**The full model (option C) is planned on its own roadmap card, EP**, as the owner asked. It is outside the AIR-275 critical path and is not silently included in A2. EP plans:
+- **Unbound observations before a Film exists:** a Watchlist lid (`exists`), a short code in an archive, and a Discovery observation. It covers their receipted write path, their target (they have no Film or Person) and their fence.
+- **Future writers,** each a separate card and decision:
+  - Discovery admission rows (`candidate_for` and `tmdb_detail_check`, referencing observation keys);
+  - the ADR 0184 claim unit (`alias_bridge`);
+  - owner identity actions, including the claim side of an ADR 0178 revoke, which today touches no canonical claim;
+  - retirement.
+- **Historical reconstruction** (decision 6): the proposition mapping for families (b) and (c), and the order of the dry runs and imports.
+- **Readers** (decision 8), as separate amendments.
 
 ### 8. Readers and amendments (each a separate later decision)
 
 - **Nothing reads the ledger to decide anything when it is introduced.** ADR 0184 keeps the Ratings marks, ADR 0170 its exact join, and the catalog and Discovery their reads.
-- **Optional amendments:**
+- **Owner choice 5 = A: readers and the 0001 cleanup are separate, later decisions.** The initial slice switches no decision-making reader.
+- **Possible amendments:**
   - ADR 0170: the inventory may accept an `asserts same_work` `page_check` row whose `source_scope` is the candidate's archive.
   - ADR 0184: the claim planner may also read `restricts` rows.
   - The unused 0001 assertion tables may be retired.
@@ -155,7 +189,7 @@ The ledger stores no strength column. A reader derives strength from `method` wi
 
 ### 9. Acceptance scenarios
 
-Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenarios 9, 10 and 12 test the **future** owner, merge and supersession writers (cards E2c-d); they are listed here so that the schema already admits them.
+Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenarios 9, 10 and 12 test the **future** owner, merge and supersession writers (cards E2c-d). Scenarios 13-15 test the **reconstruction** (cards E3a-b). They are listed here so that the schema already admits them.
 
 1. A Watchlist lid observed before any Film exists: no ledger row in the initial slice. The observation stays in the Watchlist domain, and no Film, admission or claim appears.
 2. An inferred import: `restricts same_work`. The claim planner still answers `not_proved`.
@@ -169,6 +203,9 @@ Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenarios 9, 1
 10. *(future)* A merge: no evidence row; reads through the redirect find the survivor.
 11. A replay of any of the above, including a lost response of `identity_evidence` (settled through ADR 0207 decision 3 under the key `evidence:<evidence_key>`): no new row.
 12. *(future)* A supersession: the new row names its predecessor; a second supersession of the same predecessor is refused.
+13. *(reconstruction)* An inferred legacy pair: one `restricts` row with `origin = reconstruction` and its `reconstructed_from`; never `asserts`.
+14. *(reconstruction)* A legacy Diary or Watchlist page check: `asserts same_work` with route `unknown` and a null time. Its `source_root` is set only if the stored record keeps the page-check digest; otherwise it is null and never counted as independent. No reader treats it as proof without an amendment.
+15. *(reconstruction)* A dry run writes nothing and reports coverage. A repeated import writes no new row, and a live row of the same proposition and root is reported as covered.
 
 ## Alternatives considered
 
@@ -186,7 +223,8 @@ Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenarios 9, 1
 ## Consequences
 
 - One model that keeps the owner's distinctions apart: subject, relation and object; route and method; polarity.
-- An additive migration (one table, its triggers and indexes on `evidence_key`, the subject, the object and `source_scope`), one new canonical operation kind, and one or two statements per admission batch.
+- An additive migration (one table, its triggers and indexes on `evidence_key`, the subject, the object and `source_scope`, with the nullable reconstruction columns), one new canonical operation kind, and one or two statements per admission batch.
+- History becomes explicit over time: the reconstruction reports say what is known, unknown and missing, instead of a silent "legacy" gap.
 - No reader changes. The ledger cannot alter a current decision.
 - Growth: about one to three rows per admission or verification. It is append-only like the receipts. Retention is a later owner decision.
 
@@ -194,8 +232,8 @@ Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenarios 9, 1
 
 - Before any writer uses it, the table can be dropped by a forward migration.
 - After that, rows are history and are never deleted. A wrong row is answered by a scoped `refutes`.
-- Backfill and reader amendments are separate owner decisions.
-- This ADR, even when Accepted, authorizes no migration apply, write or backfill.
+- Each reconstruction import and each reader amendment is a separate owner decision.
+- This ADR, even when Accepted, authorizes no migration apply, write, dry run against production, or import.
 
 ## Evidence
 
@@ -205,10 +243,12 @@ Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenarios 9, 1
 
 ## Owner choices in this record
 
-| # | Choice | Recommended |
+The owner selected these on 2026-11-24 ([consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124)). The final disposition of this record follows the independent review of this revision.
+
+| # | Choice | Owner selection |
 | --- | --- | --- |
-| 0213-1 | The typed proposition model of decisions 1-3 (subjects, relation, object, route and method, three polarities) | yes |
-| 0213-2 | The `identity_evidence` operation for verification without a canonical effect (decision 4) | yes |
-| 0213-3 | Backfill (decision 6) | (i) none for AIR-275 |
-| 0213-4 | The initial slice as the AIR-275 part (decision 7) | yes |
-| 0213-5 | Each reader amendment and the 0001 cleanup (decision 8) | separate, later |
+| 0213-1 | The typed proposition model of decisions 1-3: subjects, relation and object, route and method, three polarities, append-only | **A**, adopted |
+| 0213-2 | The receipted `identity_evidence` operation for a genuine check without a canonical effect (decision 4) | **A**, adopted |
+| 0213-3 | History (decision 6) | **iii**: broad historical reconstruction, planned explicitly with dry runs and coverage reports; no import GO |
+| 0213-4 | Scope (decision 7) | **A**: the Letterboxd initial slice for AIR-275, plus a separate planning card EP for the full model (option C) |
+| 0213-5 | Readers and the 0001 cleanup (decision 8) | **A**: separate, later; no decision-making reader switch in the initial slice |
