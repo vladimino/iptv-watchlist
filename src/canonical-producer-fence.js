@@ -98,6 +98,14 @@ export function bindProducerFence(env,gate){
  return gate;
 }
 
+// ADR 0141 D5 inside one invocation: room for one more slice of the measured size (the largest slice so far) plus the hand-off reserve, for every metered resource, in the
+// headroom of this instance. `spent*` is everything this instance spent so far, the current invocation included.
+export function sliceBudgetOpen({spentCalls,spentStatements,sliceCalls,sliceStatements,limitCalls=CHAIN_SUBREQUEST_LIMIT,headroom=CHAIN_HEADROOM,reserveCalls=CHAIN_HANDOFF_RESERVE_CALLS}={}){
+ if(![spentCalls,spentStatements,sliceCalls,sliceStatements].every(Number.isFinite))return false;
+ const cap=headroom*limitCalls;
+ return spentCalls+sliceCalls+reserveCalls<=cap&&spentStatements+sliceStatements+reserveCalls<=cap;
+}
+
 export function recoveryClassOf(code){
  const transient=new Set(['film_person_unavailable','producer_transport','producer_timeout','producer_storage','producer_marker_unreadable','producer_run_unreadable','producer_slice_commit_failed','producer_strike_commit_failed','producer_cas_lost']);
  const authority=new Set(['film_person_held','film_person_not_open','film_person_not_projector','film_person_transition','film_person_baseline_not_verified','film_person_fence']);
@@ -115,12 +123,17 @@ export function recoveryBackoffMs(attempts){
  return ticks[n]*3600000;
 }
 
-export function successorDecision({spentCalls=0,spentStatements=0,estimateCalls,estimateStatements,limitCalls=CHAIN_SUBREQUEST_LIMIT,headroom=CHAIN_HEADROOM,floorCalls=CHAIN_FLOOR_D1_CALLS,floorStatements=CHAIN_FLOOR_D1_STATEMENTS,reserveCalls=CHAIN_HANDOFF_RESERVE_CALLS}={}){
+// ADR 0141 D5. `estimate*` is the largest invocation this instance measured: it decides continue or hand-off. Infeasibility is decided by the INDIVISIBLE cost only (`indivisible*`:
+// the largest measured cost of the fixed part of an invocation plus its first slice, never below the floor; the floor alone when nothing was measured). A large but divisible
+// invocation is not infeasible: the next instance starts with spent 0 and the slice loop bounds itself by `sliceBudgetOpen` (AIR-572, production 24 Nov 2026).
+export function successorDecision({spentCalls=0,spentStatements=0,estimateCalls,estimateStatements,indivisibleCalls,indivisibleStatements,limitCalls=CHAIN_SUBREQUEST_LIMIT,headroom=CHAIN_HEADROOM,floorCalls=CHAIN_FLOOR_D1_CALLS,floorStatements=CHAIN_FLOOR_D1_STATEMENTS,reserveCalls=CHAIN_HANDOFF_RESERVE_CALLS}={}){
  const eCalls=Math.max(Number(estimateCalls)||0,floorCalls);
  const eStmt=Math.max(Number(estimateStatements)||0,floorStatements);
+ const iCalls=Math.max(Number(indivisibleCalls)||0,floorCalls);
+ const iStmt=Math.max(Number(indivisibleStatements)||0,floorStatements);
  if(!Number.isFinite(spentCalls)||!Number.isFinite(spentStatements))return {continue:false,reason:'unmeasured'};
  const capCalls=headroom*limitCalls;
- if(eCalls+reserveCalls>capCalls||eStmt+reserveCalls>capCalls)return {continue:false,reason:'producer_budget_infeasible'};
+ if(iCalls+reserveCalls>capCalls||iStmt+reserveCalls>capCalls)return {continue:false,reason:'producer_budget_infeasible'};
  if(spentCalls+eCalls+reserveCalls<=capCalls&&spentStatements+eStmt+reserveCalls<=capCalls)return {continue:true};
  return {continue:false,reason:'handoff'};
 }

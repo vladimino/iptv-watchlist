@@ -232,7 +232,10 @@ async function runSlices(env,ctx){
  const {params,entries}=ctx,clock=clockOf(params),now=nowOf(params);
  const t0=clock();
  const expired=()=>clock()-t0>=params.sliceDeadlineMs;
- let run=ctx.run,index=ctx.startIndex,slices=0,deadlineHit=false,commitFailed=false;
+ // Optional budget gate (ADR 0141 D5, AIR-572): `params.sliceBudget()` answers false when the caller's metered spend leaves no room for one more slice. It is asked only BEFORE a slice
+ // that is not the first of this step (the first always runs: progress guarantee) and before the completion sweep, so a step ends `partial` with reason `budget` at a slice boundary.
+ const budgetLeft=()=>typeof params.sliceBudget!=='function'||params.sliceBudget()!==false;
+ let run=ctx.run,index=ctx.startIndex,slices=0,deadlineHit=false,budgetHit=false,commitFailed=false;
  let folded=runFields(run);
  const total=emptyCounts();
  let pending={writes:[],cost:SLICE_BASE_STATEMENTS,counts:emptyCounts(),last:null};
@@ -278,6 +281,7 @@ async function runSlices(env,ctx){
    pending.writes.push(write);pending.cost+=cost;
   };
   while(index<entries.length&&slices<params.maxSlicesPerRun&&!deadlineHit){
+   if(slices>0&&!budgetLeft()){budgetHit=true;break;}
    let inSlice=0;
    while(index<entries.length&&inSlice<params.sliceSize){
     if(expired()){deadlineHit=true;break;}
@@ -317,11 +321,12 @@ async function runSlices(env,ctx){
    slices++;
   }
   await flush();
-  if(index<entries.length)return {...base(),state:'partial',reason:deadlineHit?'deadline':'max_slices'};
+  if(index<entries.length)return {...base(),state:'partial',reason:budgetHit?'budget':deadlineHit?'deadline':'max_slices'};
   if(ctx.origin==='epg'){
    // Every unit of THIS plan now has a durable outcome. The live results that an EARLIER run left for a unit this plan covers are superseded `newer_run` (the history stays; this run owns the unit now), BEFORE the claim counts what is still open. An earlier live
    // result of a unit this plan does not cover stays live: it keeps blocking `current` and is never discarded silently (bounded: a sweep that cannot finish does not claim).
    // The remaining deadline holds through the whole sweep and before the claim: no write and no claim after it; the next step resumes (the cursor is already past the last unit).
+   if(slices>0&&!budgetLeft())return {...base(),state:'partial',reason:'budget'};
    if(expired())return {...base(),state:'partial',reason:'deadline'};
    const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),ownPage:sameRunPageBound(params.sameRunPage),maxPages:supersedeBound(params.supersedeMaxPages)});
    if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending',detail:sweep.reason,supersededEarlier:sweep.superseded,leftPlan:sweep.leftPlan};

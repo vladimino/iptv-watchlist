@@ -6,7 +6,7 @@ import {buildEpgPlan,runEpgProducerPass,retryEpgProducerResults,readCanonicalFre
 import {reconcileEpgRun} from './canonical-epg-person-producer.js';
 import {
  CHAIN_BOUNDARY_MARGIN_MS,CHAIN_CREATE_ATTEMPTS,CHAIN_FLOOR_D1_CALLS,CHAIN_FLOOR_D1_STATEMENTS,CHAIN_LEASE_MS,
- CHAIN_MAX_SLICES,CHAIN_QUIET_MS,CHAIN_REBASE_CAP,CHAIN_SLICE_DEADLINE_MS,CHAIN_SLICE_SIZE,successorDecision,
+ CHAIN_MAX_SLICES,CHAIN_QUIET_MS,CHAIN_REBASE_CAP,CHAIN_SLICE_DEADLINE_MS,CHAIN_SLICE_SIZE,successorDecision,sliceBudgetOpen,
  snapshotLabel,generationOrder,producerInstanceId,requireFence,
 } from './canonical-producer-fence.js';
 import {
@@ -376,7 +376,7 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
  // AIR-572: `step` is a Cloudflare RPC stub. Its methods are callable but expose no `.bind`/`.call`/`.apply`, so the method is
  // invoked directly on the stub (`step.do(...)`), never detached or bound. Without a step (an offline run) the callback runs inline.
  const doStep=(name,fn)=>step&&step.do?step.do(name,fn):fn();
- const totals={calls:0,statements:0,invocations:0,maxCalls:0,maxStatements:0};
+ const totals={calls:0,statements:0,invocations:0,maxCalls:0,maxStatements:0,indivisibleCalls:0,indivisibleStatements:0};
  const nonce=await doStep('nonce',async()=>crypto.randomUUID());
  let chain=await readChain(env,P);
  if(!chain||chain.owner_epoch!==epoch)return {state:'not_owner'};
@@ -407,11 +407,10 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
   }
   fence.inputGeneration=snap.generation;
   if(!stored?.release_pin){
+   // `pinChainReleases` advances `fence.revision` IN PLACE. The fence must stay the SAME object that `scoped.producerFence` holds: every slice commit renews the lease through that object
+   // and moves its revision, so a copy made here would fall behind and the later stop or hand-off would lose its revision CAS (production 24 Nov 2026, epoch 1: `producer_cas_lost`).
    const pinnedAt=await pinChainReleases(scoped,{fence,revision:fence.revision,departed:snap.departed,at:new Date().toISOString()});
-   if(pinnedAt.chain){
-    chain=pinnedAt.chain;
-    fence={...fence,revision:Number(pinnedAt.chain.revision)};
-   }
+   if(pinnedAt.chain)chain=pinnedAt.chain;
   }
   const at=new Date().toISOString();
   const passParams={
@@ -427,14 +426,28 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
    await stopChain(scoped,{fence,revision:fence.revision,at,stoppedBy:code}).catch(()=>{});
    return {state:'stopped',code};
   }
+  // The slice gate: the cost of the previous slice is the meter's delta since the last ask; the indivisible cost of this invocation is its spend up to the end of the first slice.
+  const gauge={asks:0,last:null,sliceCalls:0,sliceStatements:0};
+  const sliceBudget=()=>{
+   const now={calls:meter.calls,statements:meter.statements};
+   // At the first ask the whole spend of this invocation (fixed part plus the first slice) stands for one slice: conservative, never smaller than a real slice.
+   const prev=gauge.last||{calls:0,statements:0};
+   gauge.sliceCalls=Math.max(gauge.sliceCalls,now.calls-prev.calls);gauge.sliceStatements=Math.max(gauge.sliceStatements,now.statements-prev.statements);
+   if(gauge.asks===0){totals.indivisibleCalls=Math.max(totals.indivisibleCalls,now.calls);totals.indivisibleStatements=Math.max(totals.indivisibleStatements,now.statements);}
+   gauge.asks++;gauge.last=now;
+   return sliceBudgetOpen({spentCalls:totals.calls+now.calls,spentStatements:totals.statements+now.statements,sliceCalls:gauge.sliceCalls,sliceStatements:gauge.sliceStatements});
+  };
   const pass=await runEpgProducerPass(scoped,{
    ...passParams,
+   sliceBudget,
    beforePassComplete:async()=>{
     await drainEpgReceipts(scoped,plan,fence);
    },
   });
   totals.invocations++;totals.calls+=meter.calls;totals.statements+=meter.statements;
   totals.maxCalls=Math.max(totals.maxCalls,meter.calls);totals.maxStatements=Math.max(totals.maxStatements,meter.statements);
+  // An invocation that never asked (it ended inside its first slice) is indivisible as a whole.
+  if(gauge.asks===0){totals.indivisibleCalls=Math.max(totals.indivisibleCalls,meter.calls);totals.indivisibleStatements=Math.max(totals.indivisibleStatements,meter.statements);}
   if(pass.state==='already_complete'){
    const row=await readChain(scoped,P);
    if(row?.owner_state==='complete')return {state:'complete',pass};
@@ -452,7 +465,8 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
    await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:pass.code||'unclassified'}).catch(()=>{});
    return {state:'stopped',code:pass.code,pass};
   }
-  const decision=successorDecision({spentCalls:totals.calls,spentStatements:totals.statements,estimateCalls:totals.maxCalls||CHAIN_FLOOR_D1_CALLS,estimateStatements:totals.maxStatements||CHAIN_FLOOR_D1_STATEMENTS});
+  const decision=successorDecision({spentCalls:totals.calls,spentStatements:totals.statements,estimateCalls:totals.maxCalls||CHAIN_FLOOR_D1_CALLS,estimateStatements:totals.maxStatements||CHAIN_FLOOR_D1_STATEMENTS,
+   indivisibleCalls:totals.indivisibleCalls,indivisibleStatements:totals.indivisibleStatements});
   if(decision.reason==='producer_budget_infeasible'){
    await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:'producer_budget_infeasible'});
    return {state:'stopped',code:'producer_budget_infeasible'};

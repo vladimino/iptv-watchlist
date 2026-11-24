@@ -148,8 +148,18 @@ const P='run-p';
  assert.equal(d.continue,true);
  const h=Fence.successorDecision({spentCalls:9000,spentStatements:9000,estimateCalls:2000,estimateStatements:2000});
  assert.equal(h.continue,false);
- const inf=Fence.successorDecision({spentCalls:0,spentStatements:0,estimateCalls:9000,estimateStatements:9000});
- assert.equal(inf.reason,'producer_budget_infeasible');
+ // AIR-572 (production 24 Nov 2026): a LARGE but divisible invocation is not infeasible; it hands over (ADR 0141 D5: infeasibility is the indivisible cost against the headroom).
+ const big=Fence.successorDecision({spentCalls:37000,spentStatements:37000,estimateCalls:37000,estimateStatements:37000,indivisibleCalls:2000,indivisibleStatements:2000});
+ assert.deepEqual(big,{continue:false,reason:'handoff'});
+ assert.equal(Fence.successorDecision({spentCalls:0,spentStatements:0,estimateCalls:9000,estimateStatements:9000}).reason,'handoff','no indivisible measurement: the floor decides feasibility');
+ const inf=Fence.successorDecision({spentCalls:0,spentStatements:0,estimateCalls:9000,estimateStatements:9000,indivisibleCalls:200,indivisibleStatements:4997});
+ assert.equal(inf.reason,'producer_budget_infeasible','the fixed part plus one slice does not fit the headroom with the reserve');
+ assert.notEqual(Fence.successorDecision({indivisibleCalls:4996,indivisibleStatements:4996}).reason,'producer_budget_infeasible','exactly at the headroom with the reserve is feasible');
+ // The slice gate: one more slice of the measured size plus the reserve must fit, for calls AND statements; an unmeasured input closes the gate.
+ assert.equal(Fence.sliceBudgetOpen({spentCalls:3000,spentStatements:3000,sliceCalls:1996,sliceStatements:1996}),true);
+ assert.equal(Fence.sliceBudgetOpen({spentCalls:3000,spentStatements:3001,sliceCalls:1996,sliceStatements:1996}),false);
+ assert.equal(Fence.sliceBudgetOpen({spentCalls:3001,spentStatements:0,sliceCalls:1996,sliceStatements:0}),false);
+ assert.equal(Fence.sliceBudgetOpen({spentCalls:0,spentStatements:0,sliceCalls:NaN,sliceStatements:0}),false);
 }
 
 assert.equal(Fence.recoveryClassOf('producer_cas_lost'),'transient');
@@ -263,6 +273,51 @@ assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
  assert.equal(result.state,'complete');
  assert.equal(result.pass.state,'already_complete');
  assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'complete');
+}
+
+// AIR-572 RCA (production 24 Nov 2026, P518, 4042 units): the first instance spent one full 20-slice invocation, then (a) its stop/hand-off lost the revision CAS because the fence was COPIED
+// after the release pin while the slice commits renewed the lease through the original object (`producer_cas_lost`), and (b) the next one stopped `producer_budget_infeasible` because the
+// largest measured INVOCATION (about 37 statements per unit, far above the 5,000 headroom) was taken as indivisible. Production-shaped fixture on the REAL code path: the release pin is written
+// in the first invocation, every invocation stays inside the metered headroom, each instance hands over, and the chain completes with every unit durable.
+{
+ const file=database();
+ const empty='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
+ const films=[];
+ for(let i=1;i<=50;i++)films.push({id:'tmdb_'+i,title:'Film '+i,directors:[{id:'director/d'+(i%25),name:'Director'}],actors:Array.from({length:6},(_,c)=>({id:'actor/a'+(i*10+c),name:'Actor'}))});
+ const doc=JSON.stringify({films}).replace(/'/g,"''");
+ assert.equal(sqlite(file,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+AT+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+empty+"','"+empty+"','"+AT+"');"+
+  "INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:tmdb:999',1,'Gone','"+AT+"');INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:tmdb:999','"+AT+"');"+
+  "INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+'7'.repeat(64)+"','"+AT+"');"+
+  "INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[]}'),('run-p','watchlist',0,'"+doc+"');"+
+  "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES "+films.map((f,i)=>"('run-p','watchlist',"+i+",'"+f.id+"')").join(',')).status,0);
+ const meter={calls:0,statements:0};
+ const base=envOf(file);
+ const counted=new Proxy(base.DB,{get(db,prop){if(prop==='prepare')return sql=>{meter.calls++;meter.statements++;return db.prepare(sql);};if(prop==='batch')return list=>{meter.calls++;return db.batch(list);};const v=Reflect.get(db,prop,db);return typeof v==='function'?v.bind(db):v;}});
+ const created=[];
+ const env={DB:counted,PRODUCER_WORKFLOW:{create:async({id,params})=>{created.push({id,params});}}};
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ let epoch=launched.epoch||1,last,invocations=0;
+ const cap=Fence.CHAIN_HEADROOM*Fence.CHAIN_SUBREQUEST_LIMIT;
+ for(let k=0;k<20;k++){
+  const before={...meter};
+  last=await runProducerWorkflow(env,{programmeRunId:P,epoch},{do:(name,fn)=>name==='nonce'?Promise.resolve(crypto.randomUUID()):fn()},{hold:false});
+  invocations++;
+  assert.ok(meter.statements-before.statements<=cap&&meter.calls-before.calls<=cap,'invocation '+k+' stays inside the metered headroom ('+(meter.statements-before.statements)+' statements)');
+  if(k===0){
+   assert.equal(last.state,'handoff','a large divisible plan hands over, it is not producer_budget_infeasible (and the hand-off wins its CAS after the release pin)');
+   assert.equal(one(file,'SELECT release_pin FROM canonical_producer_chain'),'film:tmdb:999','the first invocation pinned the releases');
+   assert.ok(Number(one(file,'SELECT n_applied+n_noop+n_kept+n_failed FROM canonical_producer_run'))>=Fence.CHAIN_SLICE_SIZE,'the first slice always runs');
+  }
+  if(last.state!=='handoff')break;
+  assert.equal(last.epoch,epoch+1);epoch=last.epoch;
+  assert.equal(created.at(-1).params.epoch,epoch,'the successor instance is created for the new epoch');
+ }
+ assert.equal(last.state,'complete',JSON.stringify(last));
+ assert.ok(invocations>2,'the plan needed several instances');
+ assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'complete');
+ assert.equal(one(file,'SELECT pass_state FROM canonical_producer_run'),'passed');
+ assert.equal(Number(one(file,'SELECT unit_count FROM canonical_producer_run')),Number(one(file,'SELECT n_applied+n_noop+n_kept+n_failed FROM canonical_producer_run')),'every unit has a durable outcome');
+ assert.equal(Number(one(file,"SELECT COUNT(*) FROM film WHERE id LIKE 'film:%' AND id NOT LIKE 'film:tmdb:%'")),0,'no shadow Film');
 }
 
 // AIR-572 delivery hold: when on, both Producer entrypoints do zero I/O and affect nothing else. The shipped default is now lifted
