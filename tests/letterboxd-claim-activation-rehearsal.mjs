@@ -238,6 +238,12 @@ page('Ra1', 'rehearsal-alpha-2001', '910001', 'Rehearsal Alpha', 2001);
   assert.equal(await main({argv: ['node', 'x'], print: text => printed.push(text), openBinding}), 2, 'a mode is required (no silent baseline)');
   assert.equal(JSON.parse(printed.at(-1)).error, 'mode_required');
   assert.equal(await main({argv: ['node', 'x', '--baseline', '--since', SINCE], print: text => printed.push(text), openBinding}), 2, 'an ambiguous mode is refused');
+  // A bare, empty or malformed `--since` is refused before any connection; it never degrades to a baseline (activation PR, handoff of 24 Nov 2026).
+  for (const argv of [['--since'], ['--since', ''], ['--since', '--baseline'], ['--since', '2026-02-30T00:00:00Z'], ['--since', '2026-11-24T25:00:00Z'], ['--since', '2026-11-24'], ['--since', SINCE, '--since', SINCE]]) {
+    const code = await main({argv: ['node', 'x', ...argv], print: text => printed.push(text), openBinding});
+    assert.equal(code, 2, JSON.stringify(argv)); assert.match(JSON.parse(printed.at(-1)).error, /^(invalid_since|mode_ambiguous)$/, JSON.stringify(argv));
+  }
+  assert.equal(opened, 0, 'no refused --since opened a connection');
   assert.equal(opened, 0, 'no connection for invalid input');
   assert.equal(await main({argv: ['node', 'x', '--since', SINCE], print: text => printed.push(text), openBinding}), 0);
   const report = JSON.parse(printed.at(-1));

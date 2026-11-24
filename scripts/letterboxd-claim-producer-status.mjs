@@ -73,7 +73,7 @@ async function claimPending(env,now){
 }
 
 export async function claimProducerStatus(env,{since=null,now=Date.now()}={}){
- if(since!=null&&(typeof since!=='string'||!ISO.test(since)||Number.isNaN(Date.parse(since))))throw new StatusStop('invalid_since');
+ if(since!=null&&!validSince(since))throw new StatusStop('invalid_since');
  const ratings=await readRatingsAuthority(db(env),env);
  const filmPerson=await readAuthority(env).catch(error=>({state:'unreadable',reason:error?.code||'error'}));
  const claims=await all(env,"SELECT provenance_json, trusted, conflicting FROM film_external_id WHERE scheme='letterboxd'");
@@ -106,6 +106,12 @@ export async function claimProducerStatus(env,{since=null,now=Date.now()}={}){
  };
 }
 
+// A real UTC instant in ISO form: the shape, a parse, and a round trip of the calendar fields (so 2026-02-30 or hour 25 is refused, not normalized).
+export function validSince(value){
+ if(typeof value!=='string'||!ISO.test(value))return false;
+ const ms=Date.parse(value);
+ return !Number.isNaN(ms)&&new Date(ms).toISOString().slice(0,19)===value.slice(0,19);
+}
 function parseArgs(argv){
  const args=argv.slice(2);
  for(const arg of args)if(arg.startsWith('--')&&arg!=='--since'&&arg!=='--baseline')throw new StatusStop('unknown_option');
@@ -113,7 +119,11 @@ function parseArgs(argv){
  // One mode must be named: a readback without T would silently report a baseline, and a baseline with T is ambiguous.
  if(at<0&&!baseline)throw new StatusStop('mode_required');
  if(at>=0&&baseline)throw new StatusStop('mode_ambiguous');
- return {since:at>=0?args[at+1]:null};
+ if(args.filter(arg=>arg==='--since').length>1)throw new StatusStop('mode_ambiguous');
+ // A bare or empty `--since` (no value, an empty value, or the next option in its place) is refused here, before any connection: it never degrades to a baseline.
+ const since=at>=0?args[at+1]:null;
+ if(at>=0&&!validSince(since))throw new StatusStop('invalid_since');
+ return {since};
 }
 
 // The production binding with every write refused before a request (this tool only reads).
@@ -137,7 +147,6 @@ export {openReadOnlyBinding};
 export async function main({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,print=text=>process.stdout.write(text+'\n'),openBinding=openReadOnlyBinding}={}){
  try{
   const {since}=parseArgs(argv);
-  if(since!=null&&(typeof since!=='string'||!ISO.test(since)))throw new StatusStop('invalid_since');
   const binding=await openBinding(env,fetchImpl);
   print(JSON.stringify({mode:'status',sideEffects:'none',...await claimProducerStatus({DB:binding},{since})},null,1));
   return 0;
