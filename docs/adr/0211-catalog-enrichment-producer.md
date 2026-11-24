@@ -112,18 +112,22 @@ The producer calls `writeFilmFacts` with **only** `metadata`, `sync` and `locali
 
 | Source | Anchor (all asserted in the write batch) | Not an anchor |
 | --- | --- | --- |
-| `letterboxd` | **Reliable ownership of a Letterboxd entity by this Film:** either a trusted, non-conflicting `film_external_id(scheme='letterboxd')` row (a lid), or the short code alias of an admission whose identity is proven by a page check (an `asserts same_work` `page_check` row of ADR 0213). No other Film may own the same lid. | a `letterboxd_slug` row, a known URL alone, an inferred pair (`restricts`, method `title_year_search`), an unverified alias |
+| `letterboxd` | **Reliable ownership of a Letterboxd entity by this Film:** a trusted, non-conflicting `film_external_id(scheme='letterboxd')` row (a lid), with no other owner of that lid | a `letterboxd_slug` row, a known URL alone, a short code alias alone, an inferred pair (`restricts`, method `title_year_search`) |
 | `tmdb` | a trusted, non-conflicting `film_external_id(scheme='tmdb')` row, no other trusted owner of that id, and the id not retired | an untrusted or conflicting row; a retired id |
 | `wikidata` | the `tmdb` anchor; the Wikidata item must name exactly that TMDB id (P4947) | anything without a TMDB anchor in this record. A lookup by Letterboxd film id is a possible later extension, not designed here |
 
 **Letterboxd needs no TMDB claim.** A Film with a reliable Letterboxd anchor is eligible for Letterboxd metadata whether or not it holds a TMDB claim. The producer neither requires nor manufactures a TMDB match.
 
 **Reliable ownership is distinct from an inferred cross-provider relation.**
-- The Letterboxd anchor says that this Film owns this Letterboxd entity. It exists before the fetch, through one of two routes:
-  - a trusted lid claim;
-  - a page check that verified the short code against the Film's admitted TMDB movie (`asserts same_work`, method `page_check`).
-- An **inferred** `same_work` (`restricts`, method `title_year_search`) never creates an anchor, whatever the pair's admission says.
+- The Letterboxd anchor says that this Film owns this Letterboxd entity. It exists before the fetch, as a trusted lid claim.
+  - Such claims come from two places:
+    - the ADR 0184 claim unit (`canonical-letterboxd-claim.js`), which writes one only from a current, unambiguous Ratings link that is **not** an inferred title-and-year link;
+    - the own lid of a legacy Watchlist Film `film:<lid>`.
+  - The Diary and Watchlist checks request that claim after a verified page check (`ensureLetterboxdClaims`).
+- An **inferred** `same_work` (`restricts`, method `title_year_search`) never creates an anchor.
+- A short code alias alone is not an anchor.
 - A page fetched by the producer can only **confirm** an existing anchor. It never creates one.
+- **The anchor is a canonical claim, not an evidence row.** This producer never reads the ADR 0213 ledger to decide anything, consistent with that record's choice 5.
 
 **Page agreement at fetch time.** The fetched page must confirm the anchor: its lid, or its short code, equals the anchor's.
 - If the Film also holds a TMDB anchor and the page carries a `data-tmdb-id`, the two must agree.
@@ -157,7 +161,8 @@ Both are listed in the state and reported (decision 5). Neither ever changes a c
 **Metadata informs identity work but never proves it.** A year conflict, a page naming another TMDB id, or a runtime far apart is recorded as an **identity hint** on the Film's state. A later identity reader (ADR 0213 decision 8) may read hints. A hint is never proof, never evidence of `same_work`, and never modifies a claim.
 
 **Later source availability reopens only what it can fill.** The state records the applicable source set it last planned with.
-- When that set grows (for example, a trusted Letterboxd claim appears later, or a TMDB claim is added to a Letterboxd-only Film), only the parts with gaps (`complete_with_gaps`, missing localization from the new source, unfilled fields) become due again, and only for the new source.
+- When that set grows (for example, a trusted Letterboxd claim appears later, or a TMDB claim is added to a Letterboxd-only Film), only the parts with gaps become due again, and only for the new source: unfilled `core` fields, and the new source's localization row.
+- **`credits` is never reopened for another source.** The credit source is fixed when `credits` is first planned and recorded on its state row, so the same people are never written twice under two ids. A later change of credit source is part of the separate refresh decision.
 - Filled fields are not refetched under fill-only.
 - A shrinking set (a claim untrusted, retired or conflicted) stops that source at once, because its anchor guard fails at commit.
 
@@ -207,7 +212,7 @@ A Film-level summary (applicable source set, disagreement) is a row with `part =
 **Retry semantics, consistent with ADR 0207 decision 4b:**
 - **Transport.** A 403, a Cloudflare challenge, a 429, a timeout, a network error, a 5xx, or an active shared cooldown (decision 5) **does not consume a failure**.
   - The state row keeps its `due_since`, so the Film keeps its place in the queue.
-  - `transport_streak` grows, and `retry_at` follows the transport backoff or the shared cooldown, whichever is later.
+  - `transport_streak` grows, and `retry_at` is the later of the transport backoff and the shared cooldown. The backoff is the same as in ADR 0207 decision 4b: 15 min · 2^min(streak − 1, 5), so at most 8 h.
   - There is no cap on transport retries. A long streak is visible (decision 5).
 - **Definite.** A 404 of the anchored entity, a 200 that does not parse, a missing required section of a complete response, or a check that throws **consumes one failure**. After **6** failures the row is `needs_attention`, visible, and no longer retried automatically. A 404 of a trusted TMDB id is reported as an identity hint, never as a retirement.
 - **Identity disagreement** stops the Film (decision 2) without consuming failures.
@@ -249,7 +254,8 @@ The no-retirement predicate is folded into the `tmdb` anchor guard.
 
 **The initial scope is honest about what it reaches.**
 - Every new admission carries a trusted TMDB claim, because admission requires a TMDB id (Context). So the initial scope always has the `tmdb` and `wikidata` anchors.
-- It has the `letterboxd` anchor only for page-checked admissions: the Diary, Watchlist and rated-archive checks. An inferred import admission has no Letterboxd anchor.
+- It has the `letterboxd` anchor once a trusted lid claim exists. That is normally the case after a Diary or Watchlist check, which requests the claim.
+- A rated-archive admission that holds only a short code, and an inferred import admission, have no Letterboxd anchor. Letterboxd becomes applicable for them only when a trusted lid claim appears later, and then reopens only their gaps.
 - **Letterboxd-only Films** (a trusted lid, no TMDB claim, such as the legacy `film:<lid>` Watchlist Films) are **designed and tested** in this record. Card C1's tests run such a Film through Letterboxd-only enrichment. They are **not in the initial production scope**: they enter only through scope C3b (Watchlist members) or a future Letterboxd-only admission path.
 - **Scope widening is a separate decision each:**
   - C3a: the 714 existing admitted Films;
@@ -265,13 +271,13 @@ The no-retirement predicate is folded into the `tmdb` anchor guard.
 
 **Per-tick bounds.** At most **2 Films**, serially.
 - Each Film makes at most one request per applicable source:
-  - Letterboxd: the film page, with at most 2 redirect hops through `boxd.it`;
+  - Letterboxd: `boxd.it/<lid>` with at most one redirect to the film page, so at most 2 requests;
   - TMDB: `movie/<id>?append_to_response=credits,translations`;
   - Wikidata: one SPARQL query.
-- So a tick makes at most **8 upstream subrequests**, plus a small fixed number of D1 statements.
+- So a Film makes at most 4 upstream requests, and a tick at most **8 upstream subrequests**, plus a small fixed number of D1 statements.
 - The bound of 2 Films is a starting value. It is raised only by an owner decision after measurement: each tick records its wall time, its fetch times per source and its D1 statements. At 2 per hour, the 714 legacy Films (if C3a is chosen) would take at least 15 days. That is a minimum, not an ETA.
 
-**Shared upstream coordination.** One durable cooldown per upstream scope, adopted by **all** relevant producers **in the same delivery scope** (cards U1-U3 of ADR 0207 decision 7), not by this producer alone.
+**Shared upstream coordination.** One durable cooldown per upstream scope, adopted by **all** relevant producers **in the same delivery scope** (cards UC1-UC3 of ADR 0207 decision 7), not by this producer alone.
 
 - **Scopes.** A scope is a credential or rate-limit domain, never a producer:
   - `tmdb`, the one bearer;
@@ -311,15 +317,21 @@ The no-retirement predicate is folded into the `tmdb` anchor guard.
   - metadata sync and EPG localization: they skip the remaining requests of that scope in the step and record the skip;
   - the poster cron: no `retryAttempts` increment;
   - this producer: transport (decision 3).
-- **What it is not.** A shared cooldown is **not a global request-rate limiter**. No token bucket or shared request spacing is designed here. Each caller keeps its own spacing (for example, Discovery's 200 ms). Other existing places where a transport failure consumes a finite budget are not changed, except that a cooldown skip never counts.
+- **What it is not.** A shared cooldown is **not a global request-rate limiter**. No token bucket or shared request spacing is designed here. Each caller keeps its own spacing (for example, Discovery's 200 ms).
+- **Other producers' own failure budgets are out of scope.** Some existing budgets are consumed by a transport failure that a caller actually receives:
+  - the removal queue's three attempts;
+  - the poster cron's `retryAttempts`;
+  - the orchestration quarantine caps.
+
+  They are other producers' policies, not part of this producer or of the owner's selections. This record changes them only in one way: a **cooldown skip** never counts against them. Changing their own transport rules is a separate decision, listed as a candidate follow-up.
 - **Fail-safe.** If the table or the mode row (below) is absent or unreadable, the caller behaves exactly as today with its local policy. A coordination failure never blocks production work and never makes a caller more aggressive than today. A failed cooldown write is logged, and the caller's local backoff still applies.
 - **Rollout and rollback.** One durable mode row `upstream_coordination(mode, revision, updated_at)`, with three modes:
   - `off`: today's behaviour, and the delivered default;
   - `observe`: callers write cooldowns and record each "would have skipped" decision, but skip nothing;
   - `enforce`: callers skip.
 
-  Each mode change is an owner production operation. Rollback is `off`, which needs no code revert. The adoption ships in **one** card (U1) for all callers, dormant at `off`.
-- **Tests (U1 acceptance):**
+  Each mode change is an owner production operation. Rollback is `off`, which needs no code revert. The adoption ships in **one** card (UC1) for all callers, dormant at `off`.
+- **Tests (UC1 acceptance):**
   - per caller: a 429 with and without `Retry-After`, a challenge, a 403, a 404 (no cooldown) and a 5xx (no cooldown);
   - two concurrent writers (the longer cooldown wins);
   - expiry;
@@ -464,5 +476,5 @@ The owner selected these on 2026-11-24 ([consolidated owner choices](https://git
 | 0211-2 | Sources | **extended B**: Letterboxd first-class, independent of a TMDB claim; TMDB and Wikidata kept | decision 2 |
 | 0211-3 | Independent parts, state and receipted units | **A**; consistent transport retry semantics | decision 3 |
 | 0211-4 | Scope | **A**: new admissions after the cutoff only; C3a and C3b separate | decision 4 |
-| 0211-5 | Cross-producer upstream coordination | **C**: shared, adopted by all relevant producers in one delivery scope | decision 5, cards U1-U3 |
+| 0211-5 | Cross-producer upstream coordination | **C**: shared, adopted by all relevant producers in one delivery scope | decision 5, cards UC1-UC3 |
 | 0211-6 | Activation and control | **extended A**: the durable control plus an `/admin/settings` checkbox using the same control | decision 6, card CU |

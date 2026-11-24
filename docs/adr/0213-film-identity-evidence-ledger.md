@@ -189,7 +189,7 @@ The owner chose the broad direction: earlier identity history is reconstructed *
 
 ### 9. Acceptance scenarios
 
-Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenarios 9, 10 and 12 test the **future** owner, merge and supersession writers (cards E2c-d). Scenarios 13-15 test the **reconstruction** (cards E3a-b). They are listed here so that the schema already admits them.
+Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenario 9 tests the future owner writer (card E2c). Scenarios 10 and 12 test reads through a merge and a supersession by future writers that card EP plans; no card writes them yet. Scenarios 13-15 test the **reconstruction** (cards E3a-b). They are listed here so that the schema already admits them.
 
 1. A Watchlist lid observed before any Film exists: no ledger row in the initial slice. The observation stays in the Watchlist domain, and no Film, admission or claim appears.
 2. An inferred import: `restricts same_work`. The claim planner still answers `not_proved`.

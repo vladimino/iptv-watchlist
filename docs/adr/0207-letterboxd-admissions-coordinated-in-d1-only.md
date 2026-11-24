@@ -1,6 +1,6 @@
 # ADR 0207: Letterboxd Film admissions are coordinated in D1 only; `verified-films.json` is frozen as historical evidence
 
-**Status:** Proposed. The owner's disposition of 2026-11-24 kept B, 1C, 2B and 3C and asked for 4-7 to be reworked. The [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124) of the same day then selected U1 = K2, U2 = accept, U3 = B (one retry policy for both callers), U4 = A and U5 = A. This revision implements those selections and awaits independent review and an explicit, ADR-specific final disposition. It is not Accepted.  
+**Status:** Proposed. The owner's disposition of 2026-11-24 kept B, 1C, 2B and 3C and asked for 4-7 to be reworked. The [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124) of the same day then selected UC1 = K2, UC2 = accept, UC3 = B (one retry policy for both callers), U4 = A and U5 = A. This revision implements those selections and awaits independent review and an explicit, ADR-specific final disposition. It is not Accepted.  
 **Original decision date:** not decided  
 **Recorded at:** 2026-11-24. Revised the same day after two design reviews, after the [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347), after the [review of the revised package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), after its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516) after the [second re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040703398) and after the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124).  
 **Approval source:** not decided. The record was requested in the owner's handoff on [PR #972](https://github.com/vladimino/iptv-watchlist/pull/972#issuecomment-7127786410). The [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347) chose directions, and the [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124) selected options. Neither accepts unseen text or grants an implementation or activation GO.  
@@ -44,7 +44,7 @@ Recorded in the [consolidated owner choices](https://github.com/vladimino/iptv-w
 | 0207-U3 | **B**, one retry policy for both callers: "временные транспортные ошибки не считаются попытками, нужен автоматический retry через сохранение места в очереди. если страница фильма выдает 404, это считаем" | decision 4b |
 | 0207-U4 | **A**, D0 on its own ahead of A1, including the unified retry policy on today's paths, tested through both callers | decision 7, card D0 |
 | 0207-U5 | **A**, enrichment active before A2; new admissions are eligible from day one, not instantly enriched | decision 7 |
-| ADR 0211-5 | **C**, shared upstream coordination across all relevant producers in one delivery scope | decision 7, cards U1-U3 |
+| ADR 0211-5 | **C**, shared upstream coordination across all relevant producers in one delivery scope | decision 7, cards UC1-UC3 |
 
 ## Context
 
@@ -113,19 +113,19 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
   - a **fresh** read proves that the marker migration is not installed (schema version below it and table absent);
   - the installed marker row proves `r2`.
 
-  An unavailable D1, a partial schema, a missing row at or above the migration's version, or an invalid mode fails closed (`letterboxd_admission_unavailable`). None of them ever defaults to `r2`. This covers the F1 deployment, which runs before the migration exists.
+  An unavailable D1, a partial schema, a missing row at or above the migration's version, or an invalid mode fails closed (`letterboxd_admission_unavailable`). None of them ever defaults to `r2`. This covers the deployment of card A1, which runs before the migration exists.
 - **The full chain is enforced by a trigger.** `r2 → closed`, `closed → r2` (reopen, only before an activation) and `closed → d1` are the only transitions. `r2` cannot skip `closed`, `d1` is terminal, the row is never deleted, and every change of mode raises the generation.
 - **Guard at the write.** Every `put` or `delete` of `letterboxd/admissions/verified-films.json` is wrapped once per request or Workflow step:
   - Before each one it reads the marker **fresh**, never from the request scope, so a request that read `r2` or "not installed" at its start still refuses at its own write.
   - It refuses unless the marker proves `r2` or proves the migration absent.
   - The guard is the last awaited step before the PUT.
 - **Fence on the legacy D1 batch.** The legacy path's `admitRatedFilm` batch asserts the same proof (mode `r2`, or migration absent) inside its fenced batch, so a legacy admission cannot land under `closed` or `d1`. Retention units (`film_retention`) are not fenced by this marker and keep running.
-- **Residual risk.** A PUT that passed its guard before the close cannot be recalled. F2 handles it as ADR 0196 does: compare the object's identity (ETag and size) and full row parity at the close, after the drain, and **immediately before the flip**. Any difference refuses the flip, and a late write is handled by reopening and draining again, never by a delta. Any residual risk that cannot be excluded is either accepted by the owner before the flip or makes the activation No-GO.
+- **Residual risk.** A PUT that passed its guard before the close cannot be recalled. The A2 activation handles it as ADR 0196 does: compare the object's identity (ETag and size) and full row parity at the close, after the drain, and **immediately before the flip**. Any difference refuses the flip, and a late write is handled by reopening and draining again, never by a delta. Any residual risk that cannot be excluded is either accepted by the owner before the flip or makes the activation No-GO.
 
 **The sequence.** Each step from 2 onward is a separate owner-authorized operation under an L3 plan; this ADR authorizes none of them.
-1. **Dormant delivery (F1).** F1 merges and auto-deploys with the marker at `r2`, so the deploy is safe whatever is in flight.
-2. **Drain of old code.** Before `closed`, prove with evidence that all invocations of versions older than F1, and their outstanding effects, have finished. An elapsed interval alone is not assumed to be a bound. The evidence covers:
-   - the F1 version serving 100% of traffic;
+1. **Dormant delivery (card A1).** A1 merges and auto-deploys with the marker at `r2`, so the deploy is safe whatever is in flight.
+2. **Drain of old code.** Before `closed`, prove with evidence that all invocations of versions older than A1, and their outstanding effects, have finished. An elapsed interval alone is not assumed to be a bound. The evidence covers:
+   - the A1 version (or later) serving 100% of traffic;
    - no Letterboxd Sync or Ratings Workflow instance or step of an older version still running;
    - no owner HTTP request to the baseline or archive routes in flight.
 
@@ -292,7 +292,7 @@ The owner's rule (0207-U3 = B): "временные транспортные о�
 
 | Class | Reasons | Attempt | Retry |
 | --- | --- | --- | --- |
-| **transport** | `forbidden` (403), `challenge`, `rate_limited` (429), `timeout`, `network_error`, `upstream_5xx` (Letterboxd or TMDB), `tmdb_unavailable` (no token), `upstream_cooldown` (ADR 0211 decision 5) | **none** | the item is **kept in place**; `transport_streak + 1`; `retryAt = max(15 min · 2^min(streak − 1, 5), active cooldown)`, so at most 8 h; the step stops for that source after the first transport stop, as today |
+| **transport** | `forbidden` (403), `challenge`, `rate_limited` (429), `timeout`, `network_error`, `upstream_5xx` (Letterboxd or TMDB), `tmdb_unavailable` (no token), `upstream_cooldown` (ADR 0211 decision 5) | **none** | the item is **kept in place**; `transport_streak + 1`, kept in the shared Diary entry (so neither caller needs a new column); `retryAt = max(15 min · 2^min(streak − 1, 5), active cooldown)`, so at most 8 h; the step stops for that source after the first transport stop, as today |
 | **not now** | `deferred` (step cap, lease, budget), `unavailable` (read gate), `admission_closed`, `admission_unavailable`, `in_flight`, `admission_skipped`, `admission_held` | **none** | due again at the next run, or when the hold is resolved; the place is kept |
 | **gone** | `not_found`: a 404 or 410 of `boxd.it/<lid>`, of the film page, or of the TMDB movie | **+1** | review backoff, 12 h · 2^(n − 1), capped at 48 h |
 | **definite** | a 200 that disagrees (`slug_mismatch`, `tmdb_*`, `detail_*`, …), `unparsable_page`, `not_film_page`, `blocked_redirect`, `too_many_hops`, `oversized`, `check_failed`, `source_changed`, `admission_conflict`, `other_code` | **+1** | review backoff; owner review at the cap |
@@ -310,9 +310,10 @@ The owner's rule (0207-U3 = B): "временные транспортные о�
   - it reaches the attempt cap.
 
   A row pending longer than 14 days is **reported** (visibility below), not terminated. The closed-time accounting of the previous revision is therefore unnecessary and is withdrawn: no extra clock and no extra column.
-- **The Diary cap never evicts a non-terminal entry.** Its bound stays 200. Eviction may remove only settled entries (oldest `lastAttemptAt` first), and then terminal entries already listed for owner review (oldest first).
+- **The Diary cap evicts only settled entries.** Its bound stays 200. Eviction removes settled entries only, oldest `lastAttemptAt` first.
   - It never evicts `linking`, `link_failed` or `claim_pending` entries.
   - It never evicts transport-retained, not-now or below-cap entries.
+  - It never evicts an entry at the attempt cap: that entry stays in the `diary_identity` lane until the owner resolves it.
 - **If the cap is full of entries it may not evict**, the step starts **no new check** for an id without an entry. That id is counted as `cap_refused` in the run's identity counts and reported. It is never recorded and then dropped.
 - **The Watchlist ledger cap is unchanged.** Above 500 rows, the promotion is refused with `admission_ledger_full`. That is already visible, and nothing is evicted.
 
@@ -353,9 +354,15 @@ Watchlist ledger rows may stay `pending`: they hold no intent.
   - the stable queue order;
   - the removal of the age termination;
   - the Diary eviction rule and `cap_refused`;
+  - the transport streak stored in the shared Diary entry (no migration);
   - the counts, the admin lanes and the Monitor reader;
   - the producer fence on the admission batch.
-- **A1 keeps the policy** and adds the new-path outcomes of decision 3 (`in_flight`, `source_changed`, `source_unavailable`) to the same table.
+- **A1 keeps the policy.** The reasons that exist only on the new path come with A1:
+  - `admission_closed`, `admission_unavailable` and `in_flight` are not now;
+  - `source_changed` is definite;
+  - `source_unavailable` is transport when its cause is a transport failure, and gone when it is a 404.
+
+  D0 classifies today's reasons only.
 
 **Tests on the real caller paths (D0, then again in A1):**
 - the Ratings Diary phase through `letterboxd-ratings.js` with the Sync env;
@@ -403,12 +410,13 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 | **E1** | ADR 0213 initial slice: table (with its nullable reconstruction columns), triggers, `identity_evidence` operation, writer helper | ADR 0213 accepted | dormant (no writer calls it) | implementation GO | required | required |
 | **A1** | Admission coordination behind the marker (decisions 1-6), using R1 and E1 at `d1` | D0, R1, E1 | dormant (`r2` legacy byte-identical; migrations absent is safe) | implementation GO | required | required |
 | **M1** | Apply the R1, E1 and A1 migrations; marker at `r2` | A1 merged and deployed | no behaviour change at `r2` | production GO (owner L2/L3) | required | required |
-| **U1** | Shared upstream coordination (ADR 0211 decision 5), **one scope for all relevant producers**: the `upstream_cooldown` and `upstream_coordination` migration files, one shared client, and its adoption by every TMDB, Letterboxd and Wikidata caller of the inventory, with each skip mapped to its caller's not-now path | ADR 0211 accepted | dormant (mode `off` = today's behaviour; absent tables = today's behaviour) | implementation GO | required (C1 uses it) | required |
-| **C1** | ADR 0211 producer, dormant: writer contract, anchors and precedence (Letterboxd, TMDB, Wikidata), state, units, lease, deadline, outbox, Monitor reader, the control function and its authenticated `/api/admin/settings` routes, the offline cost harness, and the Letterboxd-only test path | ADR 0211 accepted; R1; U1 | dormant (no control row) | implementation GO | required | required |
-| **CM** | Apply the C1 and U1 tables (state, tick outbox, control, `upstream_cooldown`, `upstream_coordination` at `off`). C2 refuses to activate unless every required table is present (fail closed) | C1 and U1 merged and deployed | no behaviour change (mode `off`, no control row) | production GO | required | required |
-| **C2** | Activate enrichment for Films admitted after the cutoff, at the measured bound. The cutoff is no later than the A2 flip, so new admissions are **eligible from day one** and enriched at the following ticks, not instantly (0207-U5 = A) | CM | durable control; pause stops new work | production GO | required | required |
-| **U2** | Upstream mode `off → observe`, then a dated report of would-be skips per scope and caller | CM | writes cooldowns, skips nothing | production GO | — | — |
-| **U3** | Upstream mode `observe → enforce` after the U2 report; rollback is `off` | U2 report reviewed | callers skip during a cooldown | production GO | — | — |
+| **A2** | Activation: decision 1 steps 2-5, then natural acceptance in `Верификация` | M1, C2 | **irreversibility boundary** at the flip | production GO (owner L3); residual risk accepted or No-GO | required | — |
+| **UC1** | Shared upstream coordination (ADR 0211 decision 5), **one scope for all relevant producers**: the `upstream_cooldown` and `upstream_coordination` migration files, one shared client, and its adoption by every TMDB, Letterboxd and Wikidata caller of the inventory, with each skip mapped to its caller's not-now path | ADR 0211 accepted; D0 (its no-charge classifier) | dormant (mode `off` = today's behaviour; absent tables = today's behaviour) | implementation GO | required (C1 uses it) | required |
+| **C1** | ADR 0211 producer, dormant: writer contract, anchors and precedence (Letterboxd, TMDB, Wikidata), state, units, lease, deadline, outbox, Monitor reader, the control function and its authenticated `/api/admin/settings` routes, the offline cost harness, and the Letterboxd-only test path | ADR 0211 accepted; R1; UC1 | dormant (no control row) | implementation GO | required | required |
+| **CM** | Apply the C1 and UC1 tables (state, tick outbox, control, `upstream_cooldown`, `upstream_coordination` at `off`). C2 refuses to activate unless every required table is present (fail closed) | C1 and UC1 merged and deployed | no behaviour change (mode `off`, no control row) | production GO | required | required |
+| **C2** | Activate enrichment for Films admitted after the cutoff, at the measured bound. The cutoff is no later than the A2 flip, so new admissions are **eligible from day one** and enriched at the following ticks, not instantly (0207-U5 = A) | CM; M1 (R1's `operation_key` applied) | durable control; pause stops new work | production GO | required | required |
+| **UC2** | Upstream mode `off → observe`, then a dated report of would-be skips per scope and caller | CM | writes cooldowns, skips nothing | production GO | — | — |
+| **UC3** | Upstream mode `observe → enforce` after the UC2 report; rollback is `off` | UC2 report reviewed | callers skip during a cooldown | production GO | — | — |
 | **CU** | `/admin/settings` page: the enrichment checkbox on the same control, effective state, drain display, cooldowns; independent visual QA | C1 (control contract) | UI only; no new control | implementation GO; owner visual check | — | — |
 | **C3a** | Widen enrichment to the 714 existing admitted Films | C2 results reviewed | scope change | owner decision + production GO | no | no |
 | **C3b** | Widen enrichment to Watchlist members (the pinned-run gap), including Letterboxd-only Films | C2; its own decision | changes the Watchlist metadata path | owner decision (possibly its own ADR) + production GO | no | no |
@@ -424,12 +432,12 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 | **E4b** | ADR 0184 planner also reads `restricts` rows | as above | reader switch | owner decision (ADR amendment) | no | no |
 | **E5** | Retire the unused 0001 assertion tables | — | schema cleanup | owner decision | no | no |
 
-- **Mandatory for AIR-275:** D0, R1, E1, A1, M1, U1, C1, CM, C2 and A2. After A2's acceptance no mutable R2 authority remains for admissions, and new admissions are enriched from the start.
-- **Mandatory before the A2 flip:** D0, R1, E1, A1, M1, U1, C1, CM and C2. A2 also verifies that every migration it depends on is applied and that the enrichment control is `active`.
-- **One coherent upstream scope (ADR 0211 choice 5 = C).** U1 adopts the shared cooldown in every relevant producer at once. U2 and U3 move the single mode. There are no per-producer adoption cards. U2 and U3 are not prerequisites of A2: enrichment runs safely at mode `off`, with its local transport rule.
+- **Mandatory for AIR-275:** D0, R1, E1, A1, M1, UC1, C1, CM, C2 and A2. After A2's acceptance no mutable R2 authority remains for admissions, and new admissions are enriched from the start.
+- **Mandatory before the A2 flip:** D0, R1, E1, A1, M1, UC1, C1, CM and C2. A2 also verifies that every migration it depends on is applied and that the enrichment control is `active`.
+- **One coherent upstream scope (ADR 0211 choice 5 = C).** UC1 adopts the shared cooldown in every relevant producer at once. UC2 and UC3 move the single mode. There are no per-producer adoption cards. UC2 and UC3 are not prerequisites of A2: enrichment runs safely at mode `off`, with its local transport rule.
 - **Part of the selected design, but not a blocker:** CU. It needs only C1's control contract and does not gate C2 or A2.
 - **Planned follow-ups, each with its own decision:** PF, EP, C3a, C3b, E2a-d, E3a-b, E4a-b and E5.
-- **No dual writer at any point.** R2 coordination ends only at the A2 flip. The D1 writer was already canonical. Every C and E card adds a writer under existing authorities. U1 changes only when callers wait, never what they write.
+- **No dual writer at any point.** R2 coordination ends only at the A2 flip. The D1 writer was already canonical. Every C and E card adds a writer under existing authorities. UC1 changes only when callers wait, never what they write.
 
 **Tests (A1 acceptance):**
 - the reconcile protocol of decision 3:
@@ -546,3 +554,5 @@ The owner's selections of 2026-11-24 are listed at the top of this record ("Owne
 **On rejection.** The record is kept as `Rejected` (docs-only), and the owner chooses A or C.
 
 **Observed, not changed here.** The admin write routes other than the new settings control check only that the Access header is present, not its signature or the owner identity (ADR 0211 Context). Hardening them is outside this record.
+
+**Candidate follow-up, not selected.** Other producers' own transport rules still consume finite budgets: the removal queue, the poster cron and the orchestration quarantine caps (ADR 0211 decision 5). Changing them would be a separate decision.
