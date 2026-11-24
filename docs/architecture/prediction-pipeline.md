@@ -42,7 +42,7 @@ sequenceDiagram
         else Queue current and the answer is over the byte limit
             MCP-->>Client: manifest_too_large, zero writes, nothing shortened
         else Fits, or the queue needs a refresh
-            opt Stale queue, or films already current or without admission
+            opt Stale queue, or films already current or without admission (ordering drift of the same generation waits for the hourly writer, ADR 0204)
                 MCP->>Queue: Refresh and settle, the named effects of batch_start
                 MCP->>Queue: Second read-only preflight, the new baseline
                 alt Still over the byte limit
@@ -56,7 +56,12 @@ sequenceDiagram
                 MCP-->>Client: queue_changed or manifest_too_large, acquire and release only
             else Unchanged
                 MCP->>Store: Drain transferable stage onto this run (commit fresh, drop stale)
-                MCP-->>Client: Manifest of new films, drained counts, profile, contract, epoch
+                MCP-->>Client: Manifest of new films, drained counts, profile, contract, epoch, or with answer envelope its compact ready envelope (ADR 0205)
+                opt The start was called with answer envelope (ADR 0205)
+                    Client->>MCP: prediction_batch_manifest for the profile, the contract and every film part
+                    MCP-->>Client: The stored parts, each with the same runId and manifestHash
+                    Note over Client: Check every part against the envelope and assemble the whole manifest before any research or submit
+                end
                 loop Until every selected manifest film is settled
                     opt Model call may be long
                         Client->>MCP: prediction_heartbeat, before the call and at least every 5 minutes
@@ -110,7 +115,9 @@ The optional per-film assessment ([ADR 0132](../adr/0132-prediction-assessment-a
 
 ### Multi-Task use of batch v2
 
-**Keyed start and early claim (ADR 0188, additive, not drawn above).** A `prediction_batch_start` that carries an `invocationKey` takes the runner lease as a short `claim` (180 s, renewed at each stage boundary) right after the cheap guards, converts it to the run's lease under the same epoch immediately before the first persist side effect, and releases it on every exit that creates no run. A repeat of the same invocation (same key hash and argument hash, live holder, no client `batch_submit` yet) joins: it returns the stored manifest, or `start_pending` within 10 s, and never writes. The persist of a claimed start holds one internal gate token: every D1-routed authoritative write (previous-run recovery, run record, `latest-run`, queue and progress, staged drain) carries the commit guard, so a handler that lost the lease commits nothing and answers `start_claim_lost` without a stop Event or step; the R2 objects keyed by its runId (diagnostics row, sources, manifest) are written only after a held-gate check and are inert if the lease changes in the unavoidable window after that check. The frozen answer carries the converted 15 minute lease expiry. Everything else, and every start without a key, behaves as drawn. The behaviour is dormant until the Task prompts send a deterministic key.
+**Keyed start and early claim (ADR 0188, additive, not drawn above).** A `prediction_batch_start` that carries an `invocationKey` takes the runner lease as a short `claim` (180 s, checked at each stage boundary: by a lease read while its last write is younger than 30 s, renewed otherwise, AIR-588) right after the cheap guards, converts it to the run's lease under the same epoch immediately before the first persist side effect, and releases it on every exit that creates no run. A repeat of the same invocation (same key hash and argument hash, live holder, no client `batch_submit` yet) joins: it returns the stored manifest, or `start_pending` within 10 s, and never writes. The persist of a claimed start holds one internal gate token: every D1-routed authoritative write (previous-run recovery, run record, `latest-run`, queue and progress, staged drain) carries the commit guard, so a handler that lost the lease commits nothing and answers `start_claim_lost` without a stop Event or step; the R2 objects keyed by its runId (diagnostics row, sources, manifest) are written only after a held-gate check and are inert if the lease changes in the unavoidable window after that check. The frozen answer carries the converted 15 minute lease expiry. Everything else, and every start without a key, behaves as drawn. The behaviour is dormant until the Task prompts send a deterministic key.
+
+**Start latency (AIR-588, [ADR 0204](../adr/0204-prediction-ordering-drift-leaves-the-start.md) and [ADR 0205](../adr/0205-batch-start-compact-ready-envelope.md), both Accepted).** Three measures shorten and lighten the synchronous start without changing its fences. A1: inside one request scope the schema-shape probes (`sqlite_master`, `schema_contract`) are read once per fenced stage, and a young claim or persist gate is checked by a lease read instead of a lease write (and its R2 mirror). A2: ordering drift of the same completed generation (a changed assigned-shows signature or a reached window edge) is no longer rebuilt inside the start while the stored queue has work and is younger than 90 minutes; the writer `reconcilePredictionOrdering` on the hourly cron tick rebuilds it when no start or commit holds the runner lease, and the start itself rebuilds a queue past the bound. A2 does not cover a stale queue, an unreadable or missing signature, a new or carried generation or an idle queue. C: a start that sends `answer: envelope` gets the compact ready envelope of its stored manifest (run id, epoch, hash, limits, part list) and reads profile, contract and film parts with `prediction_batch_manifest`; the run and its manifest are unchanged, and without `answer` the whole manifest is answered as before. No installed Task prompt uses C until a separate owner-approved prompt change.
 
 The diagram above is one invocation. Four independent hourly Tasks run it (`:00`, `:15`, `:30`, `:45` Europe/Madrid) with `manifestSize=5`, `generationSize=1`, `submitBatchSize=5`; the flow, overlap and `already_running` handling are in [scheduling and orchestration](scheduling-and-orchestration.md#four-independent-hourly-predictions-v2-tasks). The live Task registry, not this page, is the authority for which Tasks are enabled; the per-film research, `assessment` and validation rules are the same in every Task. Selection stays queue-ordered: each short run takes the next five eligible films, and films left unsubmitted stay queued for a later start.
 

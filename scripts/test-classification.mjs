@@ -1297,6 +1297,15 @@ export const FILES={
  "prediction-air-588-abandoned-start.mjs": {
   "suite": "core"
  },
+ "prediction-air-588-request-reuse.mjs": {
+  "suite": "core"
+ },
+ "prediction-air-588-ordering.mjs": {
+  "suite": "core"
+ },
+ "prediction-air-588-envelope.mjs": {
+  "suite": "core"
+ },
  "prediction-task-id.mjs": {
   "suite": "split",
   "note": "Owner-label, join, fencing and refusal semantics stay in core. The runner-clock bound of the join wait is scenario prediction-task-id-join-bound."
@@ -1603,6 +1612,9 @@ export const FILES={
  "scheduled-task-s10-taskid-candidates.mjs": {
   "suite": "core",
   "note": "Offline exact candidate prompt integrity: S7 source and S10 SHA-256, fixed task ownership, and a three-occurrence S7-to-S10 change. No runtime, throughput or latency measurement."
+ },
+ "scheduled-task-air-588-envelope-candidates.mjs": {
+  "suite": "core"
  },
  "scheduled-task-s7-taskid-candidates.mjs": {
   "suite": "core",

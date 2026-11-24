@@ -131,16 +131,21 @@ sequenceDiagram
     participant Discovery as Discovery reconcile
     participant Epg as EPG ensure
     participant Monitor as Monitor
+    participant Ordering as Prediction ordering writer
     Cron->>Discovery: Scheduled event at minute 0, first
     Note over Cron,Discovery: No enrichment projector. D1_ENRICHMENT_WRITE is ignored
     par After reconcile settles or the 45 s head start
         Cron->>Epg: ensure
     and
         Cron->>Monitor: run
+    and
+        Cron->>Ordering: reconcile ordering drift of the queue (ADR 0204)
     end
 ```
 
 The diagram above is the live tick. The historical R2-to-D1 projector sequence (ADR 0056, ADR 0103, ADR 0106) is no longer started by this cron.
+
+**Prediction ordering writer (AIR-588, [ADR 0204](../adr/0204-prediction-ordering-drift-leaves-the-start.md), Accepted).** The same hourly tick calls `reconcilePredictionOrdering` beside the EPG ensure and the Monitor. It rebuilds the Prediction queue only for ordering drift of its own completed generation (a changed assigned-shows signature, or a window edge past its 15-minute cap), only for a queue that passes the advance gate with a verified signature, and only while no start claim or commit gate holds the runner lease (it waits up to 5 minutes, then gives the tick up). Each rebuild attempt decides its admission again on the queue head and inputs it builds from, refuses a candidate that is not a verified ranking of the same generation and checks the lease again just before its write. It writes through the ordinary queue refresh and logs one `prediction_ordering_reconcile` line. A Task start no longer pays that rebuild; a queue older than 90 minutes is still rebuilt by the start. No cron trigger was added, and the Discovery fast tick does not run it.
 
 The cron expression is `0 * * * *` (it was `37 * * * *` until AIR-348; Madrid is a whole-hour offset, so an hourly UTC cron has a tick at Madrid 17:00 in CET and CEST, and each daily `ensure` decides due itself from the Madrid date). Since AIR-482, as a best-effort mitigation only (not an isolation guarantee, the OOM allocator is unproven), the tick starts `reconcileDiscoveryWorkflow` (which closes the hourly Discovery report) first and starts EPG `ensure` and the monitor together when that reconcile settles or after a 45 s head start. A reconcile or report close still pending at 45 s overlaps the other members in the same invocation and stays exposed to the same memory kill. A rejected reconcile never blocks the other members. The tick does not call the legacy Ratings executor: no code creates an `iptv-ratings` Workflow instance, and the Ratings phase runs only inside the Letterboxd Sync (cron `30 * * * *`). The EPG `ensure` creates the daily Workflow instance once the run is due. The Discovery reconcile acts on a missing intent or a dead instance. Each reconcile attempt is a Workers Log `discovery_workflow_reconcile`; a green cron is not a Discovery recovery. The enrichment projector is not a member of this tick ([ADR 0155](../adr/0155-retire-enrichment-projector-cron.md)). `D1_ENRICHMENT_WRITE` does not start a run. A `projector_window` row that is already held still refuses Discovery admission until it expires; this retirement does not ignore that fence.
 

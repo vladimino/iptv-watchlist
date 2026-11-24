@@ -1370,7 +1370,7 @@ function logPredictionFailure(boundary,error,requestId,runId){
 // parallel are not summed as if sequential: `busyMs` is the union of their intervals, `overlapMs` what the sum exceeds it by, and
 // `unattributedMs` the rest of the wall time (compute, scheduling, the awaits between calls). A failure of any of this is swallowed.
 const STEP_TIMER=Symbol('predictionStepTimer');
-const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','leaseRefusedAtAcquire','liveLeaseAgeMs','drainedCommitted','drainedDropped','priorityLagAccepted','priorityRebased','keyed','joined','startPending','keyArgsMismatch','claimRenewals','claimLost','deferredAccepted','deferredReplay','deferredUnavailable'];
+const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','leaseRefusedAtAcquire','liveLeaseAgeMs','drainedCommitted','drainedDropped','priorityLagAccepted','priorityRebased','keyed','joined','startPending','keyArgsMismatch','claimRenewals','claimLost','deferredAccepted','deferredReplay','deferredUnavailable','claimChecks','orderingDeferred','orderingDeferredWindow','answerBytes','envelopeAnswer'];
 const STEP_STAGES=['preflight','turned_away','idle','settle_previous','catalog_gate','queue_refresh','preflight_refreshed','runner_lease','preflight_lease','persist','event_delivery','terminal_event','manifest_ready'],STEP_STAGE_CAP=16;
 const STEP_OPS_CAP=4000,STEP_CLASS_CAP=40;
 const STEP_TABLE=/\b(?:from|into|update|join)\s+["`]?([a-z_][a-z0-9_]{0,59})["`]?/i;
@@ -2808,6 +2808,10 @@ function validateBatchStartBody(body){
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
  if(body.invocationKey!==undefined&&(typeof body.invocationKey!=='string'||!INVOCATION_KEY_PATTERN.test(body.invocationKey)))return json({error:'Invalid invocationKey'},400);
  if(body.deferred!==undefined&&typeof body.deferred!=='boolean')return json({error:'Invalid deferred'},400);
+ // AIR-588 (C, ADR 0205): the shape of a real start's answer. `full` (the default, every caller before this) is the whole manifest; `envelope` is the compact ready envelope of the SAME stored
+ // manifest, whose parts the caller reads with prediction_batch_manifest. A dry run stores nothing to read back and a deferred start answers a receipt, so neither takes it.
+ if(body.answer!==undefined&&body.answer!=='full'&&body.answer!=='envelope')return json({error:'Invalid answer',code:'invalid_answer'},400);
+ if(body.answer==='envelope'&&(body.dryRun===true||body.deferred===true))return json({error:'answer envelope needs a real, synchronous start whose manifest is stored',code:'envelope_needs_stored_manifest'},400);
  if(body.taskId!==undefined){
   // ADR 0195: a Task label belongs to a scheduled start only, never to a manual one. With the keyed protocols of ADR 0188 / 0193 it is only a correlation (the key still decides the join).
   if(!isTaskId(body.taskId))return json({error:'Invalid taskId',code:'invalid_task_id'},400);
@@ -2925,6 +2929,15 @@ const batchPlaceholderExtras=(selection,dryRun)=>({manifestSize:selection.manife
 const batchRealExtras=(selection,queue,{queueRefreshed,queueSettled,dryRun})=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:selection.items.length,queueRefreshed,...(queueSettled?{queueSettled}:{}),eligible:selection.eligible,skipped:{missingAdmission:selection.skipped.missingAdmission.length,alreadyCurrent:selection.skipped.alreadyCurrent.length},pendingCount:queue.pending.length,hotRemaining:queue.priorityCount??null,coldRemaining:queue.coldRemaining??null,...(selection.recovery?{recovery:selection.recovery}:{}),...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
 // Read-only. Reads the profile, the programme, the stored queue (and its own generation, the revision a later step compares) and the films; heals, rebuilds, settles and takes nothing.
 // A queue that fails the advance gate is reported `stale`. `bytes` is the size of the whole answer with placeholder values for the fields only the real start knows.
+// AIR-529, factored out by AIR-588 for the ordering writer: the cause a queue ranked on THIS completed generation is due for a re-rank, or null. `shows_signature_changed` and
+// `window_transition` are ordering drift (ORDERING_DRIFT_CAUSES); `shows_signature_unreadable` is not (the basis cannot be verified at all).
+async function sameGenerationPriority(env,stored,programme,now=Date.now()){
+ const pinned=await queuePin(env,programme);
+ const cause=showsSignatureCause(stored,programme,await currentShowsSignature(pinned,programme));
+ if(cause)return {cause,deferred:false};
+ const edge=windowTransitionState(stored,programme,now);
+ return {cause:edge.cause,deferred:edge.deferred};
+}
 async function batchPreflight(env,body,tally=null){
  if(tally)tally.preflights++;
  const dryRun=body.dryRun===true,manifestSize=resolveManifestSize(body).size,[profile,report]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json')]);
@@ -2936,9 +2949,7 @@ async function batchPreflight(env,body,tally=null){
  let priorityDue=priorityOpen&&priorityRefreshDue(stored,programme,sync),priorityCause=priorityDue?'programme':null,priorityDeferred=false;
  // AIR-529: the same generation with new Discovery assignments. One read of the run's assigned rows per preflight, only on a queue ranked on this generation; no catalog scan.
  if(!why&&stored&&!priorityDue&&!priorityOpen&&stored.priorityBasis==='completed'&&stored.programmeRunId===programme.runId){
-  const pinned=await queuePin(env,programme);
-  priorityCause=showsSignatureCause(stored,programme,await currentShowsSignature(pinned,programme));
-  if(!priorityCause){const edge=windowTransitionState(stored,programme);priorityCause=edge.cause;priorityDeferred=edge.deferred;}
+  const drift=await sameGenerationPriority(env,stored,programme);priorityCause=drift.cause;priorityDeferred=drift.deferred;
   priorityDue=!!priorityCause;
  }
  if(why)return {profile,report:programme,stale:why,priorityDue:false,revision,manifestSize};
@@ -2959,6 +2970,93 @@ const batchOverflowOf=(pre,extra={})=>batchOverflow({...pre.manifest,bytes:pre.b
 // The queue refresh and the settlement that D7-A names as effects of batch_start: a queue that fails the advance gate is refreshed (not rebuilt on every start), and the films the
 // preflight found already current or without an admission leave the queue in one guarded settlement. The caller reads the result again as a fresh preflight, its new baseline.
 // The settlement looks at the films the manifest would be built from (the client-requested size), not at a default 100: a film behind that window leaves the queue when it is reached.
+// ---- AIR-588 (A2, ADR 0204): ordering drift leaves the synchronous start; one named, bounded writer rebuilds it. ----
+// Ordering drift is a re-rank the stored queue owes to its OWN completed generation: a changed assigned-shows signature (Discovery assigned shows inside the generation) or a reached
+// window edge past its 15-minute rate cap. It never covers an unreadable signature, a new or carried generation or a queue that fails the advance gate.
+const ORDERING_DRIFT_CAUSES=new Set(['shows_signature_changed','window_transition']);
+// The start defers a drift only while the stored queue was rebuilt less than this long ago; an older queue is refreshed by the start as before, so a writer that never runs (a failed
+// tick, a lease that is never free) cannot leave the ranking stale for longer than this.
+const ORDERING_MAX_LAG_MS=90*60000;
+// The writer waits at most this long for a moment without a start or a submit in flight, checking every ORDERING_POLL_MS; then it gives the tick up (the next tick or the start's lag bound repairs).
+const ORDERING_WAIT_MS=5*60000,ORDERING_POLL_MS=15000;
+function orderingDeferrable(pre,now=Date.now()){
+ if(!ORDERING_DRIFT_CAUSES.has(pre?.priorityCause))return false;
+ // A queue ranked while the signature could not be read stores none: its basis was never verified, so it is not a proven drift and the start rebuilds it as before.
+ if(typeof pre.queue?.showsSignature!=='string'||!pre.queue.showsSignature)return false;
+ if(!(pre.selection?.items?.length>0))return false;
+ const built=Date.parse(pre.queue?.refreshedAt||'');
+ return Number.isFinite(built)&&now-built<ORDERING_MAX_LAG_MS;
+}
+// A start (its claim) or a commit (the persist or submit gate) holds the runner lease: the writer does not rebuild under it, so it never moves the queue between a start's preflight and
+// its revalidation, nor under a gated commit. A run in its research phase (lease live, no gate) does not block it: its submits settle through the guarded settlement on whatever queue is stored.
+async function predictionRunnerBusy(env,now=Date.now()){
+ const lease=await loadJSON(env,RUNNER_LEASE_KEY);
+ if(!(lease?.runId&&Number(lease.expiresAt)>now))return false;
+ return lease.phase==='claim'||(!!lease.submitGate&&Number(lease.submitGate.expiresAt)>now);
+}
+// The admission of the ordering writer, decided on ONE snapshot: the stored queue head and the profile and programme read for it. Null when admitted (with the drift cause in `out`), otherwise
+// the outcome and reason to report. Only a queue that passes the advance gate, is ranked on this completed generation with a verified signature and owes ordering drift is admitted.
+async function orderingAdmission(env,stored,programme,profile,now){
+ if(!profile||!programme?.runId)return {outcome:'skipped',reason:'inputs'};
+ if(!stored)return {outcome:'skipped',reason:'no_queue'};
+ // A queue that fails the advance gate, or one not ranked on this completed generation, is the start's to refresh (or refuse): never this writer's.
+ if(queueAdvanceGate(stored,programme,profile,(await fingerprintRegistryDigests()).registry,(await predictionRecoveryOverlay(env)).revision))return {outcome:'skipped',reason:'not_current'};
+ if(stored.priorityBasis!=='completed'||stored.programmeRunId!==programme.runId)return {outcome:'skipped',reason:'not_same_generation'};
+ if(typeof stored.showsSignature!=='string'||!stored.showsSignature)return {outcome:'skipped',reason:'unverified_basis'};
+ const drift=await sameGenerationPriority(env,stored,programme,now);
+ if(!drift.cause)return {outcome:'current',...(drift.deferred?{deferred:true}:{})};
+ if(!ORDERING_DRIFT_CAUSES.has(drift.cause))return {outcome:'skipped',reason:drift.cause};
+ return {admitted:true,cause:drift.cause};
+}
+// A rebuilt candidate is written only when it is again a current, verified ranking of the SAME completed generation as the head it replaces: a build whose signature read failed (stored
+// `showsSignature: null`) or whose basis or generation moved is refused, never published.
+function orderingCandidateRefusal(candidate,stored,programme,profile,registry,recoveryRevision){
+ if(!candidate)return 'no_candidate';
+ if(queueAdvanceGate(candidate,programme,profile,registry,recoveryRevision))return 'candidate_not_current';
+ if(candidate.priorityBasis!=='completed'||candidate.programmeRunId!==programme.runId||candidate.programmeRunId!==stored.programmeRunId)return 'candidate_basis_changed';
+ if(typeof candidate.showsSignature!=='string'||!candidate.showsSignature)return 'candidate_unverified';
+ return null;
+}
+// The writer, called once per hourly tick. Writes nothing unless the stored queue is current for its generation and owes an ordering re-rank. Every attempt (the first and each retry after a lost
+// compare-and-swap) reads the queue head, the profile and the programme afresh and decides the admission on that snapshot, builds from the same inputs, refuses a candidate that is not a verified
+// ranking of the same generation, re-checks the runner lease and only then writes against that head. A repair by another writer in the meantime ends the tick as `current`. One sanitized log line.
+async function reconcilePredictionOrdering(env,{now=Date.now(),waitMs=ORDERING_WAIT_MS,pollMs=ORDERING_POLL_MS,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),hooks=null}={}){
+ const started=Date.now();
+ const done=(outcome,extra={})=>{const line={event:'prediction_ordering_reconcile',outcome,...extra,ms:Date.now()-started};try{console.log(JSON.stringify(line));}catch{/* a log line never changes the outcome */}return line;};
+ try{
+  const authority=typeof PredictionD1==='undefined'?null:await PredictionD1.readPredictionAuthority(env?.DB??null,env);
+  if(authority?.mode!=='d1')return done('skipped',{reason:'authority'});
+  const snapshot=async()=>{
+   const head=await PredictionD1.openQueue(env);
+   const [profile,report]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json')]);
+   return {head,stored:head?.queue??null,profile,programme:report&&Array.isArray(report.films)?report:null};
+  };
+  // A first admission before any wait: a tick with nothing to do ends here.
+  {const first=await snapshot(),admission=await orderingAdmission(env,first.stored,first.programme,first.profile,now);if(!admission.admitted){const {outcome,...rest}=admission;return done(outcome,rest);}}
+  for(let waited=0;;waited+=pollMs){
+   if(!await predictionRunnerBusy(env))break;
+   if(waited+pollMs>waitMs)return done('skipped',{reason:'busy'});
+   await sleep(pollMs);
+  }
+  for(let attempt=0;attempt<PREDICTION_QUEUE_ATTEMPTS;attempt++){
+   await predictionQueuePause(attempt);
+   const {head,stored,profile,programme}=await snapshot();
+   const admission=await orderingAdmission(env,stored,programme,profile,Date.now());
+   if(!admission.admitted){const {outcome,...rest}=admission;return done(outcome,{...rest,...(attempt?{attempts:attempt+1}:{})});}
+   if(hooks?.beforeBuild)await hooks.beforeBuild(attempt);
+   const candidate=await buildPredictionQueue(env,programme,'ordering_reconcile',stored);
+   const refused=orderingCandidateRefusal(candidate,stored,programme,profile,(await fingerprintRegistryDigests()).registry,(await predictionRecoveryOverlay(env)).revision);
+   if(refused)return done('skipped',{reason:refused,cause:admission.cause});
+   if(await predictionRunnerBusy(env))return done('skipped',{reason:'busy_at_write',cause:admission.cause});
+   if(hooks?.beforeWrite)await hooks.beforeWrite(attempt);
+   if(await PredictionD1.writeQueue(env,head,candidate)!==null)return done('rebuilt',{cause:admission.cause,...(attempt?{attempts:attempt+1}:{})});
+  }
+  return done('skipped',{reason:'contended'});
+ }catch(error){
+  const code=typeof error?.code==='string'&&/^[a-z][a-z0-9_]{1,63}$/.test(error.code)?error.code:'error';
+  return done('failed',{code});
+ }
+}
 async function batchRefreshQueue(env,body,pre,tally=null){
  let queue=pre.queue,settled=0;const limit=resolveManifestSize(body).size;
  if(pre.stale||pre.priorityDue)queue=await currentPredictionQueue(env,pre.report,pre.profile,body.trigger==='scheduled'?'scheduled':'manual',{force:!pre.stale&&!!pre.priorityDue,fallback:true});
@@ -3070,6 +3168,9 @@ async function recordCatalogHeldStart(env,{body,requestId,response}){
 // start. A start without a key, and every dry run, takes the unchanged path. The key is reduced to a hash here and never travels further: no log, row or diagnostic carries it.
 const startArgsOf=body=>({scope:body.scope,mode:body.mode||'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',manifestSize:resolveManifestSize(body).size,capacity:body.capacity||null});
 const claimRenewed=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>old.phase==='claim'?{value:{...old,heartbeatAt:new Date(now).toISOString(),expiresAt:now+START_CLAIM_TTL_MS}}:{refuse:{status:'owned'}});
+// AIR-588 (A1): the read-only check of a young claim. It writes nothing: the lease is still this run's and epoch's and alive (runnerLeaseEdit refuses otherwise), whatever its phase, exactly the cases claimRenewed accepts.
+const claimHeld=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,()=>({refuse:{status:'owned'}}));
+const CLAIM_READ_WINDOW_MS=30000;
 const claimConverted=(env,claim)=>runnerLeaseEdit(env,claim.runId,claim.epoch,(old,now)=>old.phase==='claim'?{value:{...old,phase:'run',heartbeatAt:new Date(now).toISOString(),expiresAt:now+(claim.deferred?READY_LEASE_TTL_MS:RUNNER_LEASE_TTL)}}:{refuse:{status:'owned'}});
 // The readiness boundary of a deferred run (ADR 0193): ONE owner-fenced lease edit removes the persist gate and the preparation mark and keeps the short expiry unless the client already renewed
 // (an acknowledged renewal is never shortened). The manifest is not served before this edit has happened (`ownedBatchManifest` answers pending while `prep` is set).
@@ -3098,12 +3199,12 @@ async function auxStartReadyWithManifest(env,aux,claim,token,answer){
 }
 // A same-key repeat of the live run: the stored start answer if it exists, else a bounded wait and then `start_pending`. It writes nothing and never extends a TTL. The holder is read again
 // immediately before anything is returned: the current lease must still be live, still carry this key and argument hash, and no client submit may have closed the window (ADR 0188).
-async function batchJoin(env,live,tally,ids,refuse){
+async function batchJoin(env,live,tally,ids,refuse,envelope=false){
  const joinable=async()=>{const current=await loadJSON(env,RUNNER_LEASE_KEY);return current?.runId===live.runId&&Number(current.expiresAt)>Date.now()&&current.keyHash===ids.keyHash&&current.argsHash===ids.argsHash&&(ids.taskId?current.taskId===ids.taskId&&current.epoch===live.epoch:!current.clientSubmitAt);};
  const until=Date.now()+JOIN_WAIT_MS,key=ENRICHMENT_KEY+'batch-manifest/'+live.runId+'.json';
  for(;;){
   const stored=await loadJSON(env,key);
-  if(usableBatchManifest(stored)){if(!await joinable())return refuse();tally.joined=1;return json(stored);}
+  if(usableBatchManifest(stored)){if(!await joinable())return refuse();tally.joined=1;if(envelope){tally.envelopeAnswer=1;return json(batchStartEnvelope(stored));}return json(stored);}
   if(Date.now()>=until)break;
   await new Promise(resolve=>setTimeout(resolve,1000));
   if(!await joinable())return refuse();
@@ -3252,7 +3353,7 @@ async function taskStart(env,clean,requestId,tally){
   if(live?.runId&&Number(live.expiresAt)>Date.now()&&live.taskId===taskId){
    tally.taskRepeat=1;
    if(live.argsHash!==argsHash){tally.keyArgsMismatch=1;return json({status:'blocked',reason:'task_args_mismatch',code:'task_args_mismatch',runId:live.runId,epoch:live.epoch??null,...scheduledRunFields()},409);}
-   return batchJoin(env,live,tally,{keyHash,argsHash,taskId},async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId:live.runId}));
+   return batchJoin(env,live,tally,{keyHash,argsHash,taskId},async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId:live.runId}),clean.answer==='envelope');
   }
   return (await batchTurnedAway(env,clean,tally,requestId))||json(taken);
  }
@@ -3282,7 +3383,7 @@ async function batchStartWork(env,body,requestId,tally){
   const live=await loadJSON(env,RUNNER_LEASE_KEY);
   if(live?.runId&&live.expiresAt>Date.now()&&live.keyHash===keyHash){
    if(live.argsHash!==argsHash){tally.keyArgsMismatch=1;const refused=await batchTurnedAway(env,clean,tally,requestId,{reason:'key_args_mismatch'});if(refused)return refused;}
-   else if(!live.clientSubmitAt)return batchJoin(env,live,tally,{keyHash,argsHash},async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId:live.runId}));
+   else if(!live.clientSubmitAt)return batchJoin(env,live,tally,{keyHash,argsHash},async()=>(await batchTurnedAway(env,clean,tally,requestId))||batchBlocked('start_owner_lost',{runId:live.runId}),clean.answer==='envelope');
   }
   return (await batchTurnedAway(env,clean,tally,requestId))||json(taken);
  }
@@ -3294,8 +3395,15 @@ async function batchStartWork(env,body,requestId,tally){
  finally{if(!claim.converted)await runnerLease(env,runId,'release').catch(()=>null);}
 }
 async function batchStartCore(env,body,requestId,tally,claim){
- // The claim's renewal at a stage boundary: a lost claim ends the start before any side effect.
- const renewClaim=async()=>{if(!claim)return null;tally.claimRenewals=(tally.claimRenewals||0)+1;const renewed=await claimRenewed(env,claim);if(renewed.status==='owned'||renewed.status==='busy')return null;tally.claimLost=1;return batchBlocked('start_claim_lost');};
+ // The claim's check at a stage boundary: a lost claim ends the start before any side effect. AIR-588 (A1): a claim renewed less than CLAIM_READ_WINDOW_MS ago is checked by a read of the
+ // lease (same owner, epoch and claim phase, not expired), not renewed; an older one is renewed as before. The claim lives START_CLAIM_TTL_MS (180 s), so a read leaves at least 150 s.
+ // The window counts from the lease's own last write (the acquire, for a fresh claim); a claim whose last write is unknown (a deferred preparation picking up a receipt) is renewed at its first boundary, as before.
+ if(claim&&!Number.isFinite(claim.renewedAt)){const at=Date.parse(claim.lease?.heartbeatAt||'');claim.renewedAt=Number.isFinite(at)?at:0;}
+ const renewClaim=async()=>{
+  if(!claim)return null;
+  if(Date.now()-claim.renewedAt<CLAIM_READ_WINDOW_MS){tally.claimChecks=(tally.claimChecks||0)+1;const seen=await claimHeld(env,claim);if(seen.status==='owned'||seen.status==='busy')return null;tally.claimLost=1;return batchBlocked('start_claim_lost');}
+  tally.claimRenewals=(tally.claimRenewals||0)+1;const renewed=await claimRenewed(env,claim);if(renewed.status==='owned'||renewed.status==='busy'){if(renewed.status==='owned')claim.renewedAt=Date.now();return null;}tally.claimLost=1;return batchBlocked('start_claim_lost');
+ };
  const dryRun=body.dryRun===true;let pre=await timedStage(env,'preflight',()=>batchPreflight(env,body,tally));if(pre.response)return pre.response;
  {const lost=await renewClaim();if(lost)return lost;}
  if(dryRun){
@@ -3311,11 +3419,18 @@ async function batchStartCore(env,body,requestId,tally,claim){
  // the films. It is recorded as a start attempt, like every start attempt.
  // A keyed start already holds the lease as its own claim, so the live-lease check would refuse it against itself.
  const turned=claim?null:await timedStage(env,'turned_away',()=>batchTurnedAway(env,body,tally,requestId));if(turned)return turned;
+ // AIR-588 (A2, ADR 0204): proven ordering drift of the SAME completed generation (a changed assigned-shows signature or a reached window edge) no longer rebuilds the queue inside the start
+ // while the stored queue has films to deliver and its last rebuild is younger than ORDERING_MAX_LAG_MS: the start delivers from the stored queue (the accepted lag of AIR-542) and the named
+ // writer `reconcilePredictionOrdering` rebuilds it off the Task's path. Everything else is unchanged: a stale queue (advance gate), an unreadable signature, a new or carried generation,
+ // films found already current or without an admission, an idle queue and an overdue queue still refresh here, or fail closed, exactly as before.
+ const orderingDeferred=!pre.stale&&pre.priorityDue&&orderingDeferrable(pre);
+ if(orderingDeferred){tally.orderingDeferred=1;if(pre.priorityCause==='window_transition')tally.orderingDeferredWindow=1;}
+ const priorityDue=pre.priorityDue&&!orderingDeferred;
  // Nothing to deliver, or no capacity, on a current queue: the idle outcome of a start (before the size refusal, so `remainingPercent: 0` is `quota`, not a size error).
  forgetAuthority(env);
  // AIR-529: a known priority-due queue is reconciled before it can be idle (an empty or exhausted queue plus a new assignment in the same generation would otherwise answer `noop` on every start). A zero-quota start stays the
  // quota outcome and writes nothing; the next start with capacity reconciles.
- if(!pre.stale&&!(pre.priorityDue&&!capacityExhausted(body.capacity))){const idle=await timedStage(env,'idle',()=>batchIdle(env,body,pre));if(idle)return idle;}
+ if(!pre.stale&&!(priorityDue&&!capacityExhausted(body.capacity))){const idle=await timedStage(env,'idle',()=>batchIdle(env,body,pre));if(idle)return idle;}
  // Zero writes while the manifest does not fit and the stored queue is current: no lease, run, queue, Event, diagnostics row or film write.
  if(pre.manifest&&pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre);
  // The guards a start runs before it takes the lease (as the retired v5 start did): the previous run's retries, and a held catalog.
@@ -3323,9 +3438,10 @@ async function batchStartCore(env,body,requestId,tally,claim){
  const unsettled=await timedStage(env,'settle_previous',()=>atStage('settle_previous',()=>settlePreviousRun(env,claim?claim.lease.recoveredRunId||null:null)));if(unsettled)return unsettled;
  const held=await timedStage(env,'catalog_gate',()=>atStage('catalog_gate',()=>catalogHeldCause(env)));if(held)return catalogHeldResponse(held);
  let queueRefreshed=false,queueSettled=0;
- if(pre.stale||pre.priorityDue||pre.selection.skipped.missingAdmission.length||pre.selection.skipped.alreadyCurrent.length){
+ if(pre.stale||priorityDue||pre.selection.skipped.missingAdmission.length||pre.selection.skipped.alreadyCurrent.length){
   forgetAuthority(env);
-  try{const refreshed=await timedStage(env,'queue_refresh',()=>atStage('queue_refresh',()=>batchRefreshQueue(env,body,pre,tally)));queueRefreshed=true;queueSettled=refreshed.settled;}
+  // A deferred ordering drift is not forced into the rebuild here: only the settlement of the films the preflight found current or without an admission runs.
+  try{const refreshed=await timedStage(env,'queue_refresh',()=>atStage('queue_refresh',()=>batchRefreshQueue(env,body,{...pre,priorityDue},tally)));queueRefreshed=true;queueSettled=refreshed.settled;}
   catch(error){if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
   // The preflight is repeated on the refreshed queue and is the baseline from here on. An overflow now has the refresh as its only effect.
   pre=await timedStage(env,'preflight_refreshed',()=>batchPreflight(env,body,tally));if(pre.response)return pre.response;
@@ -3411,12 +3527,13 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
  const fence=work=>claimed?batchGuardedCommit(env,gateCtx,work):work();
  const renewGate=async()=>{if(claimed){const renewed=await batchGateRenew(env,runId,lease.epoch,token);return renewed.status==='owned'||renewed.status==='busy';}return true;};
  // Every check is also a renewal of the 60 s gate (and the lease), so a long persist never loses its own gate by the clock; a gate that is gone or held by another token is a loss.
- // A deferred preparation (only) checks with a cheap read of the gate while it is young (the gate lives 60 s) and renews once it is older than 20 s, so it does not pay a lease write per check; the
- // synchronous keyed start renews at every check.
+ // A claimed start (deferred preparation and, since AIR-588, the synchronous labelled or keyed start) checks with a cheap read of the gate while it is young (the gate lives 60 s) and renews once it
+ // is older than GATE_READ_WINDOW_MS (20 s), so it does not pay a lease write per check.
  let gateRenewedAt=Date.now();
  const held=async()=>{
   if(!claimed)return true;
-  if(claim?.deferred&&Date.now()-gateRenewedAt<20000){const state=await batchGateHeld(env,gateCtx);if(state==='held')return true;if(state!=='gate_lost')return false;}
+  // AIR-588 (A1): the synchronous claimed start (a Task's labelled or keyed start) checks a young gate the same way, so a persist no longer pays a lease write and its R2 mirror per check.
+  if(Date.now()-gateRenewedAt<GATE_READ_WINDOW_MS){const state=await batchGateHeld(env,gateCtx);if(state==='held')return true;if(state!=='gate_lost')return false;}
   const ok=await renewGate();if(ok)gateRenewedAt=Date.now();return ok;
  };
  const clearGate=async()=>{if(claimed){try{await batchGateClear(env,runId,lease.epoch,token);}catch{/* the gate expires by itself */}}};
@@ -3483,8 +3600,9 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
      if(ready.status!=='owned')return ready.status==='lease_lost'||ready.status==='gate_lost'?superseded():storageError();
     }else await clearGate();
     }
-    noteStep(env,()=>({manifestFilms:manifest.films,manifestBytes:batchBytes(startAnswer),drainedCommitted:drained.committed.length,drainedDropped:drained.dropped.length}));
-    return json(startAnswer);
+    const delivered=body.answer==='envelope'?batchStartEnvelope(startAnswer):startAnswer;
+    noteStep(env,()=>({manifestFilms:manifest.films,manifestBytes:batchBytes(startAnswer),answerBytes:batchBytes(delivered),...(delivered!==startAnswer?{envelopeAnswer:1}:{}),drainedCommitted:drained.committed.length,drainedDropped:drained.dropped.length}));
+    return json(delivered);
    }));
    if(result.status>=400)await runnerLease(env,runId,'release',null,claimed?lease.epoch:null);
    return result;
@@ -3506,6 +3624,8 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
 }
 // ---- Batch runner v2: batch_submit (ADR 0122). One call settles 1 to 10 films of a run's manifest; the validation is made once, here, per film. ----
 const BATCH_GATE_TTL_MS=60000;
+// AIR-588 (A1): how long after its last renewal a held persist gate is checked by a read instead of renewed (the gate lives BATCH_GATE_TTL_MS, so a check leaves at least 40 s).
+const GATE_READ_WINDOW_MS=20000;
 const BATCH_COMMIT_GUARD=Symbol.for('iptv.prediction.commitGuard');
 const COMMIT_EXTRA_KEY=Symbol.for('iptv.prediction.commitExtra');
 const BATCH_MODEL_FIELDS=['predictedRating','probability4Plus','confidence','matchSignals','mainRisk','moodLabels'];
@@ -3949,6 +4069,12 @@ function parseBatchStartToolText(text){
 function batchManifestEnvelope(stored){
  const {films,profile,contract,...rest}=stored;
  return {kind:'envelope',...rest,parts:[{kind:'profile'},{kind:'contract'},...films.map((film,index)=>({kind:'film',index,filmId:film.filmId}))]};
+}
+// AIR-588 (C, ADR 0205): the compact answer of a start that asked for `answer: envelope`. It is the readback envelope of the stored manifest (the same fields, `runId`, `lease` with its epoch,
+// `manifestHash`, `limits`, the part list), served only after that manifest was stored, plus `answer` and where to read the parts. The full manifest, its hash and the run are unchanged:
+// the caller assembles profile, contract and every film part, checks them against `manifestHash`, and submits under the same runId and epoch as with a full answer.
+function batchStartEnvelope(stored){
+ return {...batchManifestEnvelope(stored),answer:'envelope',read:{tool:'prediction_batch_manifest',parts:['profile','contract','film']}};
 }
 function batchManifestPartBody(stored,part,filmId){
  if(part==='envelope')return batchManifestEnvelope(stored);

@@ -194,24 +194,54 @@ const REQUEST_SCOPE_KEY=Symbol.for('iptv.requestScope');
 // (with RETURNING it can be run through first() or all()), a PRAGMA can set as well as read, and a comment can hide either; every other shape, and every statement the
 // scope did not prepare itself, is treated as a write and drops the held answer.
 const READ_ONLY_SQL=/^select\b[^;]*;?\s*$/i;
+// AIR-588 (A1). A schema-shape probe: a plain read whose every table source is the schema catalogue (`sqlite_master`) or the migration contract row (`schema_contract`).
+// Each domain module asks it before its own marker, so one start repeated it about a hundred times. Inside one request scope its answer is reused until the next
+// authority boundary (`forgetRequestAuthority`), an `exec`, a DDL statement or a batch the scope cannot classify; the schema changes only by an owner-run migration,
+// never by a request's own reads and writes. It never covers a domain marker row: every authority marker (this domain's through `scope.read`, every other domain's
+// own) is read as before, and every fenced write still carries the generation it read.
+// Recognition is positive and conservative, not a SQL parser: after string literals are blanked, the text must hold no comment, no quoted or bracketed identifier and
+// no comma-joined FROM list, and EVERY `FROM`/`JOIN` must be followed directly by the bare name `sqlite_master` or `schema_contract` (not qualified, not called). Anything
+// else, a quoted, schema-qualified or table-valued source included, is not a probe and is read every time.
+const SCHEMA_PROBE_SOURCE=/\b(?:from|join)\s+(?:sqlite_master|schema_contract)\b(?!\s*[.(])/gi;
+const DDL_SQL=/^\s*(?:create|drop|alter)\b/i;
+function schemaProbe(sql){
+ if(typeof sql!=='string'||!READ_ONLY_SQL.test(sql.trimStart()))return false;
+ const bare=sql.replace(/'(?:[^']|'')*'/g,"''");
+ if(/--|\/\*|["`\[\]]/.test(bare))return false;
+ if(/\b(?:from|join)\s+[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:as\s+)?[A-Za-z_][A-Za-z0-9_]*)?\s*,/i.test(bare))return false;
+ const sources=(bare.match(/\b(?:from|join)\b/gi)||[]).length;
+ return sources>0&&(bare.match(SCHEMA_PROBE_SOURCE)||[]).length===sources;
+}
 function scopedDatabase(database,scope){
  const statements=new WeakMap();
  // `scope.aux` (AIR-553) is NOT dropped here: the auxiliary marker changes only by an owner flip, never inside a request, and every auxiliary write asserts the generation it read inside its own batch, so a stale read fails closed.
  const forget=()=>{scope.read=null;};
- const statementOf=(statement,sql)=>{
-  const reads=typeof sql==='string'&&READ_ONLY_SQL.test(sql.trimStart());
+ const forgetSchema=()=>{scope.probes=new Map();};
+ if(!(scope.probes instanceof Map))forgetSchema();
+ const statementOf=(statement,sql,args=[])=>{
+  const reads=typeof sql==='string'&&READ_ONLY_SQL.test(sql.trimStart()),probe=reads&&schemaProbe(sql),ddl=typeof sql==='string'&&DDL_SQL.test(sql);
   const proxy=new Proxy(statement,{get(target,prop){
    const value=Reflect.get(target,prop,target);
    if(typeof value!=='function')return value;
-   if(prop==='bind')return(...args)=>statementOf(value.apply(target,args),sql);
-   if(prop==='first'||prop==='all'||prop==='raw'||prop==='run')return async(...args)=>{
+   if(prop==='bind')return(...bound)=>statementOf(value.apply(target,bound),sql,bound);
+   if(probe&&(prop==='first'||prop==='all'||prop==='raw'))return async(...rest)=>{
+    let key;
+    try{key=prop+'\n'+sql+'\n'+JSON.stringify(args)+'\n'+JSON.stringify(rest);}catch{key=null;}
+    if(key===null)return value.apply(target,rest);
+    let held=scope.probes.get(key);
+    if(!held){held=value.apply(target,rest);scope.probes.set(key,held);held.catch(()=>{if(scope.probes.get(key)===held)scope.probes.set(key,null);});}
+    const answer=await held;
+    return answer==null?answer:structuredClone(answer);
+   };
+   if(prop==='first'||prop==='all'||prop==='raw'||prop==='run')return async(...rest)=>{
     const changes=prop==='run'||!reads;
     if(changes)forget();
-    try{return await value.apply(target,args);}finally{if(changes)forget();}
+    if(ddl)forgetSchema();
+    try{return await value.apply(target,rest);}finally{if(changes)forget();if(ddl)forgetSchema();}
    };
    return value.bind(target);
   }});
-  statements.set(proxy,{target:statement,reads});
+  statements.set(proxy,{target:statement,reads,ddl});
   return proxy;
  };
  const proxy=new Proxy(database,{get(target,prop){
@@ -223,10 +253,13 @@ function scopedDatabase(database,scope){
   if(prop==='batch')return async(list,...rest)=>{
    const known=Array.isArray(list)?list.map(item=>statements.get(item)):[];
    const reads=known.length>0&&known.every(item=>item&&item.reads);
+   // A batch the scope cannot classify item by item may hold anything, DDL included.
+   const schema=!(known.length>0&&known.every(item=>item&&!item.ddl));
    if(!reads)forget();
-   try{return await value.call(target,Array.isArray(list)?list.map((item,index)=>known[index]?known[index].target:item):list,...rest);}finally{if(!reads)forget();}
+   if(schema)forgetSchema();
+   try{return await value.call(target,Array.isArray(list)?list.map((item,index)=>known[index]?known[index].target:item):list,...rest);}finally{if(!reads)forget();if(schema)forgetSchema();}
   };
-  if(prop==='exec')return async(...args)=>{forget();try{return await value.apply(target,args);}finally{forget();}};
+  if(prop==='exec')return async(...args)=>{forget();forgetSchema();try{return await value.apply(target,args);}finally{forget();forgetSchema();}};
   if(prop==='withSession')return(...args)=>{const session=scopedDatabase(value.apply(target,args),scope);return session;};
   return value.bind(target);
  }});
@@ -236,10 +269,11 @@ function scopedDatabase(database,scope){
 export function scopeRequest(env){
  const database=env?.DB;
  if(!database||typeof database!=='object'||typeof database.prepare!=='function')return env;
- return {...env,DB:scopedDatabase(database,{read:null})};
+ return {...env,DB:scopedDatabase(database,{read:null,probes:new Map()})};
 }
 // A request that is about to write (or to take the lease) asks for the marker afresh, so the generation its fenced write carries is the current one, not the one an earlier read of the request saw.
-export function forgetRequestAuthority(env){const scope=REQUEST_SCOPES.get(env?.DB);if(scope){scope.read=null;scope.aux=null;}}
+// AIR-588: the boundary also drops the reused schema probes (A1), so every fenced stage of a start begins with a fresh schema read as well as a fresh marker.
+export function forgetRequestAuthority(env){const scope=REQUEST_SCOPES.get(env?.DB);if(scope){scope.read=null;scope.aux=null;scope.probes=new Map();}}
 export async function readPredictionAuthority(db,env){
  const scope=REQUEST_SCOPES.get(db);
  if(!scope)return readAuthorityNow(db,env);
