@@ -43,7 +43,10 @@ const run=code=>vm.runInContext(code,ctx);
 let paints=0;
 const render=ctx.render;
 ctx.render=function(...args){paints++;return render.apply(this,args);};
-run(`state.query='нолан';state.sort='relevance';state.sortExplicit=false`);
+// AIR-626: the home entry is an old link with the retired `sort=relevance`; it loads as the implicit default «Для меня», so returning to it
+// is the same list and rebuilds nothing, and the retired parameter stays in that entry until the next URL normalization.
+run(`Object.assign(state,readUrlState(new URL(window.location.href)))`);
+assert.deepEqual([run('state.query'),run('state.sort'),run('state.sortExplicit')],['нолан','personal',false]);
 run('openEventsScreen(document.querySelector("#activity-expand"))');
 assert.equal(stack.length,2);
 assert.equal(index,1);

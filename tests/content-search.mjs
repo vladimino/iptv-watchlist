@@ -26,10 +26,11 @@ run(`CUTOFF=1000000000000;WINDOW_START=CUTOFF-72*3600000;WINDOW_END=CUTOFF+24*36
 const ids=()=>JSON.parse(run('JSON.stringify(visibleFilms().map(film=>film.id))'));
 assert.equal(run('normalizeSearch("  Café,  ёжик! ")'),'cafe ежик');
 assert.equal(run('JSON.stringify(state.searchScopes)'),JSON.stringify({titles:true,people:false,plot:false}));
-run('state.sort="relevance";state.query="побег"');
+// AIR-626: the query decides which films are listed; the sort (here «Название · А–Я») only orders them.
+run('state.sort="title";state.sortExplicit=true;state.query="побег"');
 assert.deepEqual(ids(),['exact','prefix'],'titles are the default and a synopsis mention stays out');
 run('state.searchScopes={titles:true,people:false,plot:true}');
-assert.deepEqual(ids(),['exact','prefix','blurb'],'plot adds the synopsis after exact and prefix titles');
+assert.deepEqual(ids(),['blurb','exact','prefix'],'plot adds the synopsis match');
 run('state.searchScopes={titles:false,people:false,plot:true}');
 assert.deepEqual(ids(),['blurb'],'titles off ignores an exact title');
 assert.equal(run('searchRank(films.find(film=>film.id==="exact"),"побег",["побег"])'),null);
@@ -65,7 +66,7 @@ run('enrichment={films:{bare:{fingerprint:{moodIds:["light"]}}}}');
 run('state.searchScopes={titles:false,people:false,plot:true};state.query="лёгк"');
 assert.deepEqual(ids(),['bare'],'replacing enrichment makes the new mood searchable');
 assert.notEqual(run('searchCache'),first);
-run('state.searchScopes={titles:true,people:false,plot:false};state.query="28";state.sort="relevance"');
+run('state.searchScopes={titles:true,people:false,plot:false};state.query="28";state.sort="title"');
 assert.deepEqual(ids(),['days','years','weeks'],'28 matches the titled series and not a year hidden in a synopsis');
 assert.equal(ids().includes('robocop'),false);
 run('state.searchScopes={titles:true,people:false,plot:true}');
@@ -78,34 +79,42 @@ run('state.searchScopes={titles:false,people:true,plot:false};state.query="бо�
 assert.deepEqual(ids(),['days']);
 run('state.query="28 спустя";state.searchScopes={titles:true,people:true,plot:true}');
 assert.deepEqual(ids().sort(),['days','weeks','years']);
+// AIR-626: typing, changing and clearing the query keep the sort, the implicit default included.
 run('state.query="";state.sort="personal";state.sortExplicit=false');
 run('applySearchInput("нолан")');
-assert.equal(run('state.sort'),'relevance');
+assert.equal(run('state.sort'),'personal');
 assert.equal(run('state.sortExplicit'),false);
+run('applySearchInput("нолан и")');
+assert.equal(run('state.sort'),'personal');
 run('applySearchInput("")');
 assert.equal(run('state.sort'),'personal');
 run('state.sort="personal";state.sortExplicit=true;applySearchInput("нолан")');
 assert.equal(run('state.sort'),'personal');
 run('state.sort="title";state.sortExplicit=true;state.query="";applySearchInput("нолан")');
 assert.equal(run('state.sort'),'title');
-run('state.query="нолан";state.sort="relevance";state.sortExplicit=false');
+run('state.query="нолан";state.sort="personal";state.sortExplicit=false');
 run('state.searchScopes={titles:true,people:false,plot:false}');
 const linked=run('urlForState("https://iptv.example/?campaign=save").search');
 assert.match(linked,/q=/);
-assert.match(linked,/sort=relevance/);
+assert.doesNotMatch(linked,/sort=/,'a query with the implicit default writes no sort');
 assert.match(linked,/campaign=save/);
 assert.doesNotMatch(linked,/searchIn=/);
 run('state.sort="title";state.sortExplicit=true');
 assert.match(run('urlForState("https://iptv.example/").search'),/sort=title/);
+// An old link with the retired `sort=relevance` and a query: the default sort, the query kept, the parameter dropped on the next write.
 const restored=run('readUrlState(new URL("https://iptv.example/?q=нолан&sort=relevance"))');
-assert.equal(restored.sort,'relevance');
+assert.equal(restored.sort,'personal');
 assert.equal(restored.sortExplicit,false);
+assert.equal(restored.query,'нолан');
+run('Object.assign(state,readUrlState(new URL("https://iptv.example/?q=нолан&sort=relevance&searchIn=people&genre=Драма&campaign=save")))');
+assert.equal(run('urlForState("https://iptv.example/?q=нолан&sort=relevance&searchIn=people&genre=Драма&campaign=save").search'),'?campaign=save&q=%D0%BD%D0%BE%D0%BB%D0%B0%D0%BD&searchIn=people&genre=%D0%94%D1%80%D0%B0%D0%BC%D0%B0','the retired sort is dropped; the query, scopes, genre and a foreign parameter stay');
+run('state.genres=new Set()');
 const alphabetical=run('readUrlState(new URL("https://iptv.example/?q=нолан&sort=title"))');
 assert.equal(alphabetical.sort,'title');
 assert.equal(alphabetical.sortExplicit,true);
 const saved=new URLSearchParams(run('normalizePresetQuery("q=нолан&sort=relevance&campaign=save")'));
 assert.equal(saved.get('q'),'нолан');
-assert.equal(saved.get('sort'),'relevance');
+assert.equal(saved.get('sort'),null,'a saved preset with the retired sort opens with the default');
 assert.equal(saved.get('campaign'),null);
 assert.equal(saved.get('searchIn'),null);
 const peoplePreset=new URLSearchParams(run('normalizePresetQuery("q=28&searchIn=people,people,bogus&sort=relevance")'));
@@ -113,14 +122,15 @@ assert.equal(peoplePreset.get('searchIn'),'people');
 const combinedPreset=new URLSearchParams(run('normalizePresetQuery("searchIn=plot,titles&q=28")'));
 assert.equal(combinedPreset.get('searchIn'),'titles,plot');
 assert.equal(new URLSearchParams(run('normalizePresetQuery("q=28&searchIn=titles")')).get('searchIn'),null);
-run('state.query="28";state.sort="relevance";state.sortExplicit=false;state.searchScopes={titles:false,people:true,plot:false}');
-assert.equal(run('presetQuery()'),'q=28&searchIn=people&sort=relevance');
+assert.equal(peoplePreset.get('sort'),null);
+run('state.query="28";state.sort="personal";state.sortExplicit=false;state.searchScopes={titles:false,people:true,plot:false}');
+assert.equal(run('presetQuery()'),'q=28&searchIn=people','a new preset with a query does not record a sort');
 const titlesOnly=run('readUrlState(new URL("https://iptv.example/?q=28"))');
 assert.equal(JSON.stringify(titlesOnly.searchScopes),JSON.stringify({titles:true,people:false,plot:false}));
-assert.equal(titlesOnly.sort,'relevance');
+assert.equal(titlesOnly.sort,'personal','a query alone keeps the default sort');
 run('Object.assign(state,readUrlState(new URL("https://iptv.example/?q=28&searchIn=people,plot")))');
 assert.equal(run('JSON.stringify(state.searchScopes)'),JSON.stringify({titles:false,people:true,plot:true}));
-assert.equal(run('urlForState("https://iptv.example/").search'),'?q=28&searchIn=people%2Cplot&sort=relevance');
+assert.equal(run('urlForState("https://iptv.example/").search'),'?q=28&searchIn=people%2Cplot');
 const titlesKey=run('filterStateKey(readUrlState(new URL("https://iptv.example/?q=28")))');
 const plotKey=run('filterStateKey(readUrlState(new URL("https://iptv.example/?q=28&searchIn=titles,plot")))');
 assert.notEqual(titlesKey,plotKey);
@@ -130,4 +140,24 @@ assert.equal(run('setSearchScope("people",false)'),false);
 assert.equal(run('JSON.stringify(state.searchScopes)'),JSON.stringify({titles:false,people:true,plot:false}));
 run('state.query="28";state.searchScopes={titles:false,people:true,plot:true};state.sort="personal";state.sortExplicit=true');
 assert.equal(run('state.sort'),'personal');
-console.log('Content search: folded text, same-film words, relevance order, explicit sort and preset query passed');
+
+// AIR-626: each of the three sorts lists exactly the films the query matches, in its own order; the search never reorders by match quality.
+// Titles: Аврора < Бета < Вега. «Для меня»: Бета 4.5 predicted, Вега 4 own rating, Аврора 3. «Сначала исчезающие»: Вега leaves the
+// archive first (aired 70 h ago), then Аврора (40 h), then Бета (10 h). «Гамма» does not match the query.
+run(`viewClock=CUTOFF;const aired=hours=>({channel:'Первый',start:CUTOFF-hours*3600000,end:CUTOFF-hours*3600000+2*3600000});const film=(id,title,hours)=>({id,title,original:title,aliases:[],year:2001,runtime:90,genres:['Драма'],directors:[],actors:[],synopsis:'',shows:[aired(hours)]});films=[
+ film('a','Аврора 28',40),film('b','Бета 28',10),film('c','Вега 28',70),film('g','Гамма',50),
+];enrichment={films:{a:{prediction:{predictedRating:3,probability4Plus:0.3}},b:{prediction:{predictedRating:4.5,probability4Plus:0.9}},c:{actualRating:4}}};
+state.genres=new Set();state.channels=new Set();state.mechanics=new Set();state.moods=new Set();state.includeUnscheduled=false;state.period='all';state.searchScopes=defaultSearchScopes();state.query=''`);
+const orders={title:['a','b','c'],personal:['b','c','a'],expiring:['c','a','b']};
+for(const [sort,order] of Object.entries(orders)){
+ run(`state.sort=${JSON.stringify(sort)};state.sortExplicit=${sort!=='personal'};state.query=''`);
+ const all=ids();
+ assert.deepEqual([...all].sort(),['a','b','c','g'],sort+': no query lists every film');
+ run('applySearchInput("28")');
+ assert.equal(run('state.sort'),sort,sort+': typing a query keeps the sort');
+ assert.deepEqual(ids(),order,sort+': the matches in the order of the chosen sort');
+ run('applySearchInput("")');
+ assert.equal(run('state.sort'),sort,sort+': clearing the query keeps the sort');
+ assert.deepEqual(ids(),all,sort+': clearing restores the same list');
+}
+console.log('Content search: folded text, same-film words, membership with each of the three sorts, query keeps the sort, retired relevance links and presets passed');
