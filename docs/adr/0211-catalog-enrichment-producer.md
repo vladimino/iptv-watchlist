@@ -2,7 +2,7 @@
 
 **Status:** Proposed (no owner decision on this record; each choice below is separate and awaits an explicit, ADR-specific Product Owner decision)  
 **Original decision date:** not decided  
-**Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220) and its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516).  
+**Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516) and the [second re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040703398).  
 **Approval source:** not decided. Requested as the companion of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) by the owner's disposition 6C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347): "не вижу смысла упускать возможность сразу начать подготовку к глобальному каталогу, даже если миграция из-за этого займет больше времени". That chose the direction; it does not accept this design.  
 **Related work:**
 - [AIR-555](https://trello.com/c/JPgjoBzK), under [AIR-275](https://trello.com/c/4x7hH0gI).
@@ -61,7 +61,16 @@ Two commit guards are added to the batch:
 - **trusted TMDB ownership** `EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND value=? AND trusted=1 AND conflicting=0)`, together with no other trusted owner of that id;
 - **no current retirement** of that movie id, the same predicate the catalog reader uses.
 
-**Fill-only metadata.** Because `film_metadata` has no per-field source or owner guard, the producer writes a field **only when the stored value is blank**. It is re-asserted in the batch: one guard per written field, within the 12-guard cap, so the core fields are written in at most two units. It never overwrites a value that the EPG producers, an owner edit or an earlier run wrote. Per-field provenance, which would let a newer automatic value replace an older one, is option 0211-1b and needs a schema change.
+**Fill-only metadata.** Because `film_metadata` has no per-field source or owner guard, the producer writes a field **only when the stored value is blank**. This is re-asserted in the batch with one guard per written field.
+
+The `core` part is **one** `writeFilmFacts` batch. Its required fields are `runtime`, `genres`, `poster` and `year`; `url` is optional. The guards stay within the cap of 12:
+- at most 5 per-field guards;
+- trusted ownership;
+- no retirement;
+- the lease;
+- the activation generation.
+
+It never overwrites a value that the EPG producers, an owner edit or an earlier run wrote. Per-field provenance, which would let a newer automatic value replace an older one, is option 0211-1b and needs a schema change.
 
 **Localization** goes only into `film_localization_source` with the automatic sources `tmdb` and `wikidata`. The existing resolver keeps owner and reviewed values on top.
 
@@ -85,7 +94,12 @@ Enrichment has three independent **parts**:
 - `localization`.
 
 **Part state lives in its own minimal store**, an additive table `catalog_enrichment_part(film_id, part, status, source_version, refresh_epoch, attempts, retry_at, last_error, updated_at)`, primary key `(film_id, part)`. No other writer touches it. It is not kept in the `metadata` dimension's `provenance_json`, which the EPG producers overwrite.
-- **Completion comes from the canonical fields.** Whether a part is complete is derived from the stored canonical fields: for `core`, every required field is non-blank. The state row only records attempts, backoff, the source version and the outcome.
+- **Completion comes from canonical state plus one small work list.**
+  - **`core` is complete** when its four required fields are non-blank.
+  - **`localization` is complete** when a `film_localization_source` row of source `tmdb` or `wikidata` exists for the Film.
+  - **`credits` is complete** when every credit of the part's **expected set** exists. The expected set is the TMDB person ids and roles, at most 10 actors and 5 directors, taken from the complete response; it is stored on the state row when the part is planned. It is a work list, not a proof payload, and a hash alone is not used to judge completeness.
+  - **A source answer that is complete but empty** (no cast, no Russian title, no poster) is recorded on the state row as `complete_with_gaps`, listing the fields or sets that the source did not have. It counts as done.
+- **The state row records the outcome.** Besides the expected set and the gaps, it records attempts, backoff and the source version. A lost state update causes at most one redundant fetch, never a wrong write.
 - **A lost state update** therefore causes at most one redundant fetch, never a wrong write.
 
 **Fill-only and freshness.** Because writes are fill-only, a part whose required fields are all filled is `complete` and is **not** fetched again by a 30-day staleness rule.
@@ -93,25 +107,27 @@ Enrichment has three independent **parts**:
 - `film_sync_state.metadata_at` is set only when, after the write, every required `core` field is non-blank. It is not set after a skipped guard or an absent field.
 - A later legitimate refresh is an explicit, separately decided action. It raises the part's `refresh_epoch`, and that is part of the request identity.
 
-**Receipt identity.**
-- The event is `enrich:<film>:<part>:<refresh_epoch>`.
-- `sourceVersion` is the SHA-256 of the canonical JSON of the source fields used, with no clocks.
-- The request id derives from both. The same source and epoch give the same request.
-- Receipts carry `operation_key = enrich:<film>:<part>` and follow the same **reconcile-then-reserve** protocol as ADR 0207 decision 3:
-  - unresolved receipts of the key are settled (waited for, or abandoned in a fenced transition) before a changed-source retry;
-  - the new attempt is reserved atomically through the partial unique index.
+**Unit identities.** Every canonical write is one receipted unit with a deterministic identity. The event carries the part's `refresh_epoch`, and the digest carries the `sourceVersion`: SHA-256 of the canonical JSON of the source fields used, with no clocks.
 
-  Without K2 (ADR 0207-U1), the pointer is the part state row.
+| Part | Unit | Target | `operation_key` | Bound |
+| --- | --- | --- | --- | --- |
+| core | one `film_metadata`/`film_sync_state` write | the Film | `enrich:<film>:core` | one batch, ≤ 12 guards |
+| localization | one `localization_source` write per source | the Film | `enrich:<film>:localization:<source>` | ≤ 10 sources (existing cap) |
+| credits | one `person_mutation` per missing person | the Person | `enrich:person:<tmdb_role>/<id>` | ≤ 40 persons per unit (existing cap) |
+| credits | one add-only `film_credits` unit | the Film | `enrich:<film>:credits` | ≤ 50 credits per unit; this part uses ≤ 15 |
 
-**Multi-unit parts.**
-- `credits`:
-  1. idempotent `person_mutation` units (insert-if-absent);
-  2. one add-only `film_credits` unit.
-
-  If it is interrupted between them, the part is still incomplete by derivation. The retry finds the persons present (no-op) and writes the credits.
-- `core` is one `writeFilmFacts` batch.
-
-No part is ever marked complete while its canonical effect is missing.
+- **Cross-origin correlation.** A Person or credit may already exist from another origin (the EPG chain). The person unit is insert-if-absent, so it is a no-op and opens no receipt. The credits unit adds only what is missing, so the outcome does not depend on which origin wrote first.
+- **Sequencing and partial recovery.** `credits` runs its person units first, then its credits unit. A credit whose Person is missing is refused (`film_person_reference`), so the order is enforced by the database. If some units applied before an interruption, the retry recomputes the missing persons and credits from canonical state against the stored expected set and writes only those.
+- **Receipts per unit** follow the **reconcile-then-reserve** protocol of ADR 0207 decision 3: history fingerprint, settle unresolved receipts, reserve atomically, and a loser replans. A changed source therefore never races an unknown or stale receipt of the same unit.
+- **Tests (C1 acceptance):**
+  - a lost response of each unit kind;
+  - a partially applied `core` or `credits` part (persons applied, credits not);
+  - a changed source with an unresolved receipt of the same unit;
+  - a stale lease writing nothing;
+  - person units already written by the EPG origin;
+  - complete-but-empty source answers;
+  - a pause between the check and the request (residual request, no write).
+- **0211 depends on the receipt `operation_key` (card R1) regardless of 0207-U1.** Its units have no writer record that could hold a K1 pointer. If 0207 chooses K1, R1 is still delivered, as a prerequisite of C1.
 
 **A failed part** changes only its own state row: attempts plus 1, a doubling backoff, and after 6 attempts `needs_attention`. Parts that succeeded are never retried because another part failed.
 
@@ -158,11 +174,11 @@ No part is ever marked complete while its canonical effect is missing.
 - **Dormant delivery.** The implementation is delivered dormant: no activation row, so every tick reads "not active" and writes nothing.
 - **Activation.** Durable D1 activation state `{state, cutoff_at, scope}`, written by an owner-authorized operation. It lives either in the same `projection_run` row's `summary_json`, asserted with `json_extract`, or in one small additive single-row table. The implementation card chooses; the requirement is durability plus an in-batch assertion. New-only eligibility uses `cutoff_at`, never the deploy date.
 - **Pause.** An owner operation sets `state = paused` and raises the activation generation.
-  - The tick re-reads the state fresh **before every upstream request** and before every write.
-  - Every write batch asserts the activation generation and the lease (guards).
-  - After a pause no new request starts and no write lands.
-  - The residual: a request already in flight when the pause lands completes but cannot write. The drain is waiting the longest fetch timeout (25 s).
-  - A code revert stops future ticks but does not cancel a running one. The pause is the stop control.
+  - **No new request after a pause.** The tick re-reads the state fresh before every upstream request and before every write.
+  - **Residual.** A request already authorized by the last successful check (read, then request) may still be sent, and requests already in flight complete. This is a bounded residual of at most one request per source, and the drain is waiting the longest fetch timeout (25 s).
+  - **Every durable effect is fenced.** Every write asserts the activation generation and the lease: Film units, Person units, the part state row and the outbox. After a pause, nothing a residual request returns is written.
+  - **Reporting after a pause.** The only write permitted is the tick's terminal outbox entry (`stopped`, with the reason `paused`). It is reporting only and asserts the lease, not the activation state.
+  - **A code revert** stops future ticks but does not cancel a running one. The pause is the stop control.
 - **Rollback of data.** None: metadata already written is valid canonical data under fill-only and precedence. A wrong value is corrected by owner and review routes.
 
 ## Alternatives considered

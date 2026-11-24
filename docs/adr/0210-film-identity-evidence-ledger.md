@@ -2,7 +2,7 @@
 
 **Status:** Proposed (no owner decision on this record; each choice below is separate and awaits an explicit, ADR-specific Product Owner decision)  
 **Original decision date:** not decided  
-**Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220) and its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516).  
+**Recorded at:** 2026-11-24. Revised the same day after the [design review of the package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), its [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516) and the [second re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040703398).  
 **Approval source:** not decided. Requested as the companion of [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) by the owner's disposition 5C on [PR #975](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347): "источник источнику рознь, нужно отличать доказательства для записи в программе с названием без года от фильма с полноценным LID (из архива, оценок или watchlist)". That chose the direction; it does not accept this design.  
 **Related work:** [AIR-555](https://trello.com/c/JPgjoBzK), under [AIR-275](https://trello.com/c/4x7hH0gI). [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) (Proposed) uses the initial slice (decision 7).  
 **Supersedes:** None. It amends nothing by itself. Every reader change is a separate later decision (decision 8).  
@@ -87,6 +87,7 @@ The ledger stores no strength column. A reader derives strength from `method` wi
 - `owner_statement` first;
 - then `page_check`, `tmdb_detail_check` and `alias_bridge`;
 - then `title_year`;
+- `title_year_search` is never proof: it appears only in `restricts` rows;
 - then `title_only`.
 
 ### 4. Identity, idempotence and the evidence-only operation
@@ -115,7 +116,7 @@ The ledger stores no strength column. A reader derives strength from `method` wi
 - **Precedence for readers.**
   - Owner rows outrank all others.
   - A `restricts` row blocks the proof use of its proposition unless an owner or a verified method asserts it.
-  - **Independence** counts distinct `source_ref` roots, not routes or methods. Rows derived from the same page digest are one source, even when the Diary and the Watchlist check both wrote them.
+  - **Independence** counts distinct `source_root` values, not routes or methods. Rows derived from the same page digest are one source, even when the Diary and the Watchlist check both wrote them.
 - **No completeness claim.** The ledger is observational first. It holds the evidence of the writers that exist. It is complete only for a route whose writer exists and, for earlier history, only after a backfill (decision 6). Until then it records evidence and decides nothing.
 
 ### 6. Backfill
@@ -152,7 +153,9 @@ The ledger stores no strength column. A reader derives strength from `method` wi
   - The unused 0001 assertion tables may be retired.
 - Accepting this record accepts none of them.
 
-### 9. Acceptance scenarios (for the implementation card)
+### 9. Acceptance scenarios
+
+Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenarios 9, 10 and 12 test the **future** owner, merge and supersession writers (cards E2c-d); they are listed here so that the schema already admits them.
 
 1. A Watchlist lid observed before any Film exists: no ledger row in the initial slice. The observation stays in the Watchlist domain, and no Film, admission or claim appears.
 2. An inferred import: `restricts same_work`. The claim planner still answers `not_proved`.
@@ -162,10 +165,10 @@ The ledger stores no strength column. A reader derives strength from `method` wi
 6. A second archive verifying an admitted pair: one new row with that archive's `source_scope`; the admission is unchanged.
 7. A retry answering `present` without fetching: no row.
 8. Two concurrent verifications of the same pair from the same route and root: one row. From different archives: two rows with different `source_scope`. Symmetric order: one row.
-9. An owner revoke of one assignment, then a reinstatement: scoped `refutes`, then `asserts`, in `seq` order.
-10. A merge: no evidence row; reads through the redirect find the survivor.
+9. *(future)* An owner revoke of one assignment, then a reinstatement: scoped `refutes`, then `asserts`, in `seq` order.
+10. *(future)* A merge: no evidence row; reads through the redirect find the survivor.
 11. A replay of any of the above, including a lost response of `identity_evidence` (settled through ADR 0207 decision 3 under the key `evidence:<evidence_key>`): no new row.
-12. A supersession: the new row names its predecessor; a second supersession of the same predecessor is refused.
+12. *(future)* A supersession: the new row names its predecessor; a second supersession of the same predecessor is refused.
 
 ## Alternatives considered
 
