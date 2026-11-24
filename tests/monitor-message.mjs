@@ -192,6 +192,16 @@ const predictionFacts=(idleMs,extra={})=>({present:true,pendingCount:3600,eligib
  assert.equal(legacyRecovery.stream,'canonical','an entry stored before ADR 0206 has no stream: the previous key-prefix fallback stays');
 }
 
+// 11. A lower bound is rounded down: 19 h 40 min measured is "не меньше 19 ч", never 20 h; plain durations still round to the nearest.
+{
+ const recovery=idleMs=>R.telegramText({kind:'recovery',key:'predictions_no_progress',stream:'predictions',severity:'healthy',firstSeenAt:'2026-11-22T08:00:00.000Z',endedAt:'2026-11-22T13:00:00.000Z',metrics:{idleMs},metricsAt:'2026-11-22T12:00:00.000Z',id:'x'},{overall:'healthy',now:T('2026-11-22T13:00:10Z')}).split('\n')[2];
+ assert.equal(recovery(19*H+40*MIN),'⏱ Без подтверждённого прогресса было не меньше 19 ч (на последнем наблюдении 22.11 13:00)');
+ assert.equal(recovery(9*H+59*MIN+50000),'⏱ Без подтверждённого прогресса было не меньше 9 ч 59 мин (на последнем наблюдении 22.11 13:00)');
+ assert.equal(recovery(59*MIN+59000),'⏱ Без подтверждённого прогресса было не меньше 59 мин (на последнем наблюдении 22.11 13:00)');
+ assert.equal(recovery(49*H+50*MIN),'⏱ Без подтверждённого прогресса было не меньше 2 д 1 ч (на последнем наблюдении 22.11 13:00)');
+ assert.deepEqual([R.duration(19*H+40*MIN),R.duration(19*H+40*MIN,{floor:true}),R.duration(90*MIN+40000,{floor:true})],['20 ч','19 ч','1 ч 30 мин']);
+}
+
 // 10. Review fixtures: baseline versus confirmed progress, diagnostic details kept, out-of-range times, no manufactured counts.
 {
  const now=T('2026-11-24T10:00:00Z');

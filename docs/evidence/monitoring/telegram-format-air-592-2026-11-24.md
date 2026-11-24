@@ -1,6 +1,6 @@
 # Monitor Telegram text: rendered offline samples (AIR-592)
 
-Captured 2026-11-24 (UTC), regenerated after the presentation review of the same day, from the repository only, for decision 9 of [ADR 0206](../../adr/0206-monitor-four-states-one-reminder-interval.md) (proposed; the owner's review is pending). **No production read or write, no Telegram call and no network call was made.** Every sample below is the exact output of the real renderer `src/domain/monitor-message.js`, produced by `IPTV_PRINT_SAMPLES=1 node tests/monitor-message.mjs`; the same test asserts these texts or their key lines. Where a sample says "owner example", the issue and its metrics come from the real `MonitorPolicy` over the facts of the owner's example, not from a hand-written message.
+Captured 2026-11-24 (UTC), regenerated after the presentation review of the same day, from the repository only, for decision 9 of [ADR 0206](../../adr/0206-monitor-four-states-one-reminder-interval.md) (proposed at capture; accepted by the owner with the review corrections on 24 Nov 2026, [final owner decision](https://trello.com/c/c0d7VD4P#comment-6b0583165bcfc1aa8a1abfc4)). **No production read or write, no Telegram call and no network call was made.** Every sample below is the exact output of the real renderer `src/domain/monitor-message.js`, produced by `IPTV_PRINT_SAMPLES=1 node tests/monitor-message.mjs`; the same test asserts these texts or their key lines. Where a sample says "owner example", the issue and its metrics come from the real `MonitorPolicy` over the facts of the owner's example, not from a hand-written message.
 
 What the samples show:
 
@@ -291,4 +291,4 @@ Ref: letterboxd_watchlist_stale|alert|x
 Ref: ratings_stalled|alert|x
 ```
 
-Limitations: the real Telegram client rendering of the emoji and line wrapping on the owner's phone is not observed here. No production test message is sent (out of scope; a test message needs its own approval). The 15-minute threshold for the delay note and the Russian wording are proposals for the owner's review.
+Limitations: the real Telegram client rendering of the emoji and line wrapping on the owner's phone is not observed here. No production test message is sent (out of scope; a test message needs its own approval). The 15-minute threshold for the delay note and the Russian wording were accepted with decision 9.

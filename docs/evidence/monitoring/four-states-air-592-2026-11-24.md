@@ -1,6 +1,6 @@
 # Monitor four states and one reminder interval: offline evidence (AIR-592)
 
-Captured 2026-11-24 (UTC) from the repository only, for [ADR 0206](../../adr/0206-monitor-four-states-one-reminder-interval.md) (Proposed). **No production read or write, no Cloudflare setting, no Telegram or webhook call and no network call was made.** The Telegram token and chat id in the tests are fixtures.
+Captured 2026-11-24 (UTC) from the repository only, for [ADR 0206](../../adr/0206-monitor-four-states-one-reminder-interval.md) (Proposed at capture; accepted in full on 24 Nov 2026, [final owner decision](https://trello.com/c/c0d7VD4P#comment-6b0583165bcfc1aa8a1abfc4)). **No production read or write, no Cloudflare setting, no Telegram or webhook call and no network call was made.** The Telegram token and chat id in the tests are fixtures.
 
 | Scenario | Test | Result |
 | --- | --- | --- |

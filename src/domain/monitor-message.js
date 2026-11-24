@@ -68,14 +68,16 @@ function madrid(ms, withSeconds = false) {
   try { part = Object.fromEntries(PARTS.get(key).formatToParts(ms).map(item => [item.type, item.value])); } catch { return 'неизвестно'; }
   return part.day + '.' + part.month + ' ' + part.hour + ':' + part.minute + (withSeconds ? ':' + part.second : '');
 }
-export function duration(ms) {
+// `floor` rounds down: a lower bound ("не меньше") must never be shown larger than what was measured (19 h 40 min is "не меньше 19 ч", not 20 h).
+export function duration(ms, {floor = false} = {}) {
   if (finite(ms) === null || ms < 0) return 'неизвестно';
   if (ms < MIN) return 'меньше минуты';
-  const minutes = Math.round(ms / MIN);
+  const round = floor ? Math.floor : Math.round;
+  const minutes = round(ms / MIN);
   if (minutes < 60) return minutes + ' мин';
   if (ms < 10 * HOUR) { const h = Math.floor(minutes / 60), m = minutes % 60; return h + ' ч' + (m ? ' ' + m + ' мин' : ''); }
-  if (ms < 2 * DAY) return Math.round(ms / HOUR) + ' ч';
-  const hours = Math.round(ms / HOUR);
+  if (ms < 2 * DAY) return round(ms / HOUR) + ' ч';
+  const hours = round(ms / HOUR);
   return Math.floor(hours / 24) + ' д' + (hours % 24 ? ' ' + (hours % 24) + ' ч' : '');
 }
 
@@ -138,7 +140,7 @@ function lastStallLine(key, m, metricsAt) {
   const when = stamp(metricsAt ?? null);
   const span = key === 'discovery_stalled' ? finite(m.stalledMs) : finite(m.idleMs);
   if (span === null || when === null) return null;
-  return '⏱ ' + (key === 'discovery_stalled' ? 'Без разрешённого прогресса' : 'Без подтверждённого прогресса') + ' было не меньше ' + duration(span) + ' (на последнем наблюдении ' + madrid(when) + ')';
+  return '⏱ ' + (key === 'discovery_stalled' ? 'Без разрешённого прогресса' : 'Без подтверждённого прогресса') + ' было не меньше ' + duration(span, {floor: true}) + ' (на последнем наблюдении ' + madrid(when) + ')';
 }
 function lateLine(key, m) {
   if ((key === 'epg_stale' || key === 'epg_failed') && finite(m?.lateMs) !== null) return '⏱ Опоздание: ' + duration(m.lateMs);
