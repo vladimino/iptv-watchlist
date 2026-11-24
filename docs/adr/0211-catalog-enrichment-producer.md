@@ -7,7 +7,7 @@
 **Related work:**
 - [AIR-555](https://trello.com/c/JPgjoBzK), under [AIR-275](https://trello.com/c/4x7hH0gI).
 - [ADR 0207](0207-letterboxd-admissions-coordinated-in-d1-only.md) retires the R2 rated enrichment.
-- [ADR 0210](0210-film-identity-evidence-ledger.md), a sibling record.
+- [ADR 0213](0213-film-identity-evidence-ledger.md), a sibling record.
 
 **Supersedes (only on acceptance):** In part [ADR 0087](0087-rated-archive-film-admission.md) decision 4: metadata written onto the R2 admission entry.  
 **Superseded by:** None
@@ -83,7 +83,7 @@ It never overwrites a value that the EPG producers, an owner edit or an earlier 
   - the trusted `letterboxd` claim, or the verified short code, names the page;
   - the page carries exactly that `data-tmdb-id`.
 
-  A known URL alone is not identity. An inferred admission (ADR 0210 `restricts`) is never enriched from a Letterboxd page.
+  A known URL alone is not identity. An inferred admission (ADR 0213 `restricts`) is never enriched from a Letterboxd page.
 - **Wikidata** (Russian titles) uses the existing localizer as an automatic source.
 
 ### 3. Parts, partial success and receipts

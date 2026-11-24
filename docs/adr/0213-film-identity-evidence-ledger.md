@@ -1,4 +1,4 @@
-# ADR 0210: Identity evidence is a ledger of typed, source-aware propositions beside the canonical claims
+# ADR 0213: Identity evidence is a ledger of typed, source-aware propositions beside the canonical claims
 
 **Status:** Proposed (no owner decision on this record; each choice below is separate and awaits an explicit, ADR-specific Product Owner decision)  
 **Original decision date:** not decided  
@@ -207,8 +207,8 @@ Scenarios 1-8 and 11 are the **initial slice** (cards E1 and A1). Scenarios 9, 1
 
 | # | Choice | Recommended |
 | --- | --- | --- |
-| 0210-1 | The typed proposition model of decisions 1-3 (subjects, relation, object, route and method, three polarities) | yes |
-| 0210-2 | The `identity_evidence` operation for verification without a canonical effect (decision 4) | yes |
-| 0210-3 | Backfill (decision 6) | (i) none for AIR-275 |
-| 0210-4 | The initial slice as the AIR-275 part (decision 7) | yes |
-| 0210-5 | Each reader amendment and the 0001 cleanup (decision 8) | separate, later |
+| 0213-1 | The typed proposition model of decisions 1-3 (subjects, relation, object, route and method, three polarities) | yes |
+| 0213-2 | The `identity_evidence` operation for verification without a canonical effect (decision 4) | yes |
+| 0213-3 | Backfill (decision 6) | (i) none for AIR-275 |
+| 0213-4 | The initial slice as the AIR-275 part (decision 7) | yes |
+| 0213-5 | Each reader amendment and the 0001 cleanup (decision 8) | separate, later |

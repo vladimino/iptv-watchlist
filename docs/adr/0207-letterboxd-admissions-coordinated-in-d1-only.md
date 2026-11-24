@@ -8,7 +8,7 @@
 - [AIR-555](https://trello.com/c/JPgjoBzK) (audit and decision), under [AIR-546](https://trello.com/c/1dRSJEbp) and [AIR-275](https://trello.com/c/4x7hH0gI); related [AIR-559](https://trello.com/c/733sRAxu) and [AIR-547](https://trello.com/c/99faXisC).
 - The read-only audit [`air-555-verified-films-admission-audit-2026-11-24.md`](../evidence/d1-migration/air-555-verified-films-admission-audit-2026-11-24.md) ([PR #972](https://github.com/vladimino/iptv-watchlist/pull/972), merged at `b9616ff3`). This record uses the audit's call-site labels (W1-W6, R1-R7) and gaps (G1-G4).
 - **Companion records, both Proposed:**
-  - [ADR 0210](0210-film-identity-evidence-ledger.md), the source-aware identity evidence ledger (disposition 5C);
+  - [ADR 0213](0213-film-identity-evidence-ledger.md), the source-aware identity evidence ledger (disposition 5C);
   - [ADR 0211](0211-catalog-enrichment-producer.md), the catalog-enrichment producer (disposition 6C).
 
   This record depends on both: decisions 2, 5 and 6 below.
@@ -29,7 +29,7 @@
 | 2 | **2B**, keep-first | kept (decision 2) |
 | 3 | **3C**, deterministic recovery, fail closed | kept (decision 3) |
 | 4 | **4A**, reacquire source data: "Не надо усложнять" | reworked (decision 4): no proof snapshots |
-| 5 | **5C**, separate evidence model: "источник источнику рознь…" | reworked: companion [ADR 0210](0210-film-identity-evidence-ledger.md) |
+| 5 | **5C**, separate evidence model: "источник источнику рознь…" | reworked: companion [ADR 0213](0213-film-identity-evidence-ledger.md) |
 | 6 | **6C**, redirect rated enrichment to the canonical D1 writer: "…начать подготовку к глобальному каталогу…" | reworked: companion [ADR 0211](0211-catalog-enrichment-producer.md) |
 | 7 | **7C**, more atomic cards | reworked (decision 7): a delivery graph |
 
@@ -126,12 +126,12 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
 
    Pending legacy state found under `closed` is a **No-GO**; `closed` never permits a write to finish it. The activation waits until that state is either drained (reopen to `r2`, let the legacy writer finish, close again, pin again), or separately reconciled under its own owner-approved plan and verified.
 5. **Activation.** Re-pin the ETag and the full parity **immediately before** the flip, and abort (no flip; stay `closed` or reopen) on any change. Then flip `closed → d1` in one fenced statement that asserts the closure generation. This is the **irreversibility boundary**. It is durable and monotonic, and it precedes every incompatible effect, because at `r2` and `closed` the new code writes nothing the legacy code would not write.
-6. **Natural acceptance.** The first natural Diary or Watchlist admission (or an owner-run archive step) produces a D1 row with its evidence row (ADR 0210) and no R2 change.
+6. **Natural acceptance.** The first natural Diary or Watchlist admission (or an owner-run archive step) produces a D1 row with its evidence row (ADR 0213) and no R2 change.
 
 **Abort and rollback.**
 - **Before the flip.** Abort is `closed → r2` (reopen), and a code revert is an ordinary rollback. Reopen first: code that does not read the marker would otherwise reopen the legacy writers silently.
 - **After the flip.** A revert to any version that does not honour the marker is **prohibited**. Recovery is roll-forward on code that honours the marker. Restoring R2 coordination needs its own owner-approved reconciliation plan, never an implicit rebuild.
-- **The evidence rows are not the boundary.** The evidence rows of decision 2 (ADR 0210) are provenance and diagnostics only. The boundary is the marker flip.
+- **The evidence rows are not the boundary.** The evidence rows of decision 2 (ADR 0213) are provenance and diagnostics only. The boundary is the marker flip.
 
 
 ### 2. One admission record, with first admission pinned in D1 (2B)
@@ -140,7 +140,7 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
 - **Keep-first, at mode `d1`.** For an existing row with the same movie id and code, `admitRatedFilm` and `planAdmission` answer **no-op** whatever the archive, title or year of the new input. The `ON CONFLICT … DO UPDATE` of those columns no longer applies on the new path. This closes G4 inside the fenced batch. `verified_at` is the time of the first admitting batch.
 - **Typed conflicts.** A row with another code for the same Film, or a code held by another Film, stays `admission_conflict`. The error carries `other_code_on_film` or `code_on_other_film`.
 - **Provenance through the evidence ledger, not a second marker.**
-  - Each new-path admission writes its evidence row (ADR 0210 decision 3) in the same batch:
+  - Each new-path admission writes its evidence row (ADR 0213 decision 3) in the same batch:
     - `restricts same_work` (method `title_year_search`) for the inferred import;
     - `asserts same_work` (method `page_check`, route `ratings_diary` or `watchlist_admission`) for the Diary and Watchlist check;
     - `asserts same_work` (method `page_check`, route `letterboxd_rated_archive`) for the rated archive.
@@ -179,7 +179,7 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
 
 **Matching scope: which earlier attempts belong to this work.** The key identifies the **item** (a code). The **logical work** of one attempt is narrower: the key, the intended movie (from the writer's durable record), and the source scope of this check (an archive digest, or the page-check evidence root). Three sets follow:
 - **Unresolved across the key** (`pending`, `failed`, `unknown`): every one of them is settled before anything else, whatever its movie or source. Any of them could still land and change the admission.
-- **Applied, same key and the same intended movie:** the admission is settled (`present`, or `admitted` when it is this work's own receipt). The writer proceeds **without reacquiring for the admission**. If this work is a new verification of another source scope (a second archive, a later page check), the writer still performs its own check, and records it through the evidence-only operation (ADR 0210 decision 4).
+- **Applied, same key and the same intended movie:** the admission is settled (`present`, or `admitted` when it is this work's own receipt). The writer proceeds **without reacquiring for the admission**. If this work is a new verification of another source scope (a second archive, a later page check), the writer still performs its own check, and records it through the evidence-only operation (ADR 0213 decision 4).
 - **Applied, another movie, or applied before an identity correction:** historical. The writer never links or admits on the strength of an applied receipt alone. It validates current state first: the admission row by code, the trusted claims, redirect and retirement. Then it follows the decision 3 table (`code_on_other_film` → conflict).
 
 **Reconcile, then reserve.**
@@ -197,11 +197,11 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
    - **A failed assertion** means another caller reserved or settled meanwhile. This attempt is the **loser**: it writes nothing and restarts at step 1 with the new history. It does not report an outcome computed from the old history.
    - The fingerprint assertion is the per-item fence. The column and the index alone would not be.
    - **Race closed.** A reads an empty history, fetches movie B, and meanwhile another caller reserves and commits an admission of movie A. A's `source_changed` write then fails its fingerprint assertion, and A replans.
-   - **Genuinely new checks are not suppressed.** A different route with the same `source_root`, or another `source_scope` (ADR 0210 scenario 4, a second archive), performs its own check and records its evidence row through the evidence-only operation. A recovery that finds a settled admission and fetches nothing still writes nothing.
+   - **Genuinely new checks are not suppressed.** A different route with the same `source_root`, or another `source_scope` (ADR 0213 scenario 4, a second archive), performs its own check and records its evidence row through the evidence-only operation. A recovery that finds a settled admission and fetches nothing still writes nothing.
 
 With K1 the same protocol runs over the pointer: the pointer plus an attempt counter is the history fingerprint, and step 5 becomes a compare-and-swap of it in the writer's record. The inferred commit, which has no mutable per-item record, needs one more store for it. That is part of K1's cost.
 
-**The evidence-only operation (ADR 0210) follows the same protocol** under its own key `evidence:<evidence_key>`. A lost response is answered by reading that key: an `applied` receipt means the row exists, and the unique `evidence_key` makes a replay a no-op.
+**The evidence-only operation (ADR 0213) follows the same protocol** under its own key `evidence:<evidence_key>`. A lost response is answered by reading that key: an `applied` receipt means the row exists, and the unique `evidence_key` makes a replay a no-op.
 
 **Outcome rule (unchanged from the reviewed revision).** The outcome of an item is a function of durable state: the monotonic keep-first admission rows, plus whether this item's Ratings link is already committed. The same pair always ends the same way after a crash:
 
@@ -220,7 +220,7 @@ With K1 the same protocol runs over the pointer: the pointer plus an attempt cou
 - **Recording.** A terminal outcome is recorded per item in the chunk receipt (`admission: admitted | present | present_other_code | conflict | refused_after_link`) or in the writer's pending state.
 - **Ambiguous results.** A non-terminal result is never settled terminally.
 - **Replay.** A replay offers the admission again only for items recorded as `admitted` or `present`. Nothing is offered for an item merely because its receipt entry is not a conflict.
-- **Refused items.** They write no fact, no claim and no `asserts` evidence row (ADR 0210).
+- **Refused items.** They write no fact, no claim and no `asserts` evidence row (ADR 0213).
 - **Durable state retention.** The writer's existing record (the `linking` intent, the `admitting` row, the chunk intent) stays until the item is terminally settled. The Diary cap never evicts a `linking` or `link_failed` entry: if the cap would need one, the step starts no new source check.
 
 ### 4. Reacquire the source; keep only what already exists (4A)
@@ -271,7 +271,7 @@ Both read and write the one shared Diary document, so a `linking` intent left by
 **Fence.** On the new path the admission batch and its receipt transitions bind the Letterboxd producer fence (`bindProducerFence`: kind `letterboxd`, the Sync epoch) whenever the call arrives through the Sync's fenced env, so a stale Sync epoch cannot admit. Today they do not: `admitRatedFilm` and the receipt writes use only the Film/Person marker. This contradicts `letterboxd-sync.js:53-54` and is a pre-existing defect (card D0).
 
 **Route.** `resolve` receives its caller's route (`ratings_diary` or `watchlist_admission`) explicitly.
-- The evidence row (ADR 0210) records the route of the caller whose step performed the page check that the batch used.
+- The evidence row (ADR 0213) records the route of the caller whose step performed the page check that the batch used.
 - A shared intent resumed by the other caller is re-verified by that caller (4A), so it carries the resumer's route.
 - A repair that only re-projects an already admitted pair performs no check and writes no evidence.
 
@@ -313,8 +313,8 @@ Watchlist ledger rows may stay `pending`: they hold no intent.
 - **ADR 0170 inventory.**
   - The exact archive-and-code proof is kept; it is not weakened.
   - Keep-first can leave a candidate of a later archive `verified` while the D1 row names the first archive. That candidate stays `needs_owner_review` / `admission_unconfirmed`.
-  - ADR 0210 decision 6 offers an evidence-based join as a separate owner choice.
-- **No positive proof from an inferred admission.** It is never positive Letterboxd identity proof. It carries a `negative` evidence row (ADR 0210), and the Ratings marks stay authoritative for ADR 0184.
+  - ADR 0213 decision 6 offers an evidence-based join as a separate owner choice.
+- **No positive proof from an inferred admission.** It is never positive Letterboxd identity proof. It carries a `negative` evidence row (ADR 0213), and the Ratings marks stay authoritative for ADR 0184.
 
 ### 6. Rated enrichment (G3): retired from R2, replaced by the canonical producer (6C)
 
@@ -333,7 +333,7 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 | --- | --- | --- | --- | --- | --- | --- |
 | **D0** | Fix the pre-existing defects of decision 4b in today's code: Letterboxd producer fence on the admission batch and receipt writes; ledger attempts charged only for explicit checks; no eviction of link intents | — (**independent of accepting this ADR**: it corrects current production behaviour) | active fix of today's paths; no new path | its own implementation GO, which can be authorized on its own (or folded into A1 if the owner prefers) | required | required |
 | **R1** | **Only if 0207-U1 = K2:** receipt `operation_key` with its partial unique index (an additive migration file), writer support, lookup and the reconcile-and-reserve protocol of decision 3; unused until A1. With K1 the pointer work moves into A1 and R1 does not exist | ADR 0207 accepted | dormant | implementation GO | required if K2 | required if K2 |
-| **E1** | ADR 0210 initial slice: table, triggers, `identity_evidence` operation, writer helper | ADR 0210 accepted | dormant (no writer calls it) | implementation GO | required | required |
+| **E1** | ADR 0213 initial slice: table, triggers, `identity_evidence` operation, writer helper | ADR 0213 accepted | dormant (no writer calls it) | implementation GO | required | required |
 | **A1** | Admission coordination behind the marker (decisions 1-6), using R1 and E1 at `d1` | D0, R1, E1 | dormant (`r2` legacy byte-identical; migrations absent is safe) | implementation GO | required | required |
 | **M1** | Apply the R1, E1 and A1 migrations; marker at `r2` | A1 merged and deployed | no behaviour change at `r2` | production GO (owner L2/L3) | required | required |
 | **A2** | Activation: decision 1 steps 2-5, then natural acceptance in `Верификация` | M1; plus C2 if 0207-U5 = (a) | **irreversibility boundary** at the flip | production GO (owner L3); residual risk accepted or No-GO | required | — |
@@ -346,7 +346,7 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 | **E2b** | Evidence from the ADR 0184 claim unit | E1, M1 | as above | as above | no | no |
 | **E2c** | Evidence from owner identity actions, including the claim side of a revoke | E1, M1 | as above | as above | no | no |
 | **E2d** | Evidence from TMDB retirement | E1, M1 | as above | as above | no | no |
-| **E3** | Legacy evidence backfill of the 714 admissions (0210-3) | E1, M1, A2 | one fenced, receipted import with a dry run | owner decision + production GO (L3) | no | no |
+| **E3** | Legacy evidence backfill of the 714 admissions (0213-3) | E1, M1, A2 | one fenced, receipted import with a dry run | owner decision + production GO (L3) | no | no |
 | **E4a** | ADR 0170 inventory reads per-archive evidence | E1 writers active; its own decision | reader switch | owner decision (ADR amendment) | no | no |
 | **E4b** | ADR 0184 planner also reads `restricts` rows | as above | reader switch | owner decision (ADR amendment) | no | no |
 | **E5** | Retire the unused 0001 assertion tables | — | schema cleanup | owner decision | no | no |
@@ -391,7 +391,7 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 - **A. Retain the object as live R2 coordination.** Keep W1-W6, fix G1, and accept the object as an explicit mutable R2 exception.
   - For: least code and no activation.
   - Against: two admission authorities in sequence, cross-store partial commits (G2), per-writer rules; AIR-275 keeps a mutable R2 authority.
-- **B′. B plus an `identity_kind` column** on `film_rated_admission`. Superseded by ADR 0210: the kind of every identity route belongs in one evidence model, not in a column of one route's table.
+- **B′. B plus an `identity_kind` column** on `film_rated_admission`. Superseded by ADR 0213: the kind of every identity route belongs in one evidence model, not in a column of one route's table.
 - **C. A new normalized D1 table** for every R2 field. Highest cost, and a second admission record.
 - **4B. Persist the exact proof payload before the first effect.** This was the previous revision.
   - For: replay never needs the source.
@@ -413,7 +413,7 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
   - A digest without clocks and stable events.
   - Per-item admission outcomes in the chunk receipt.
   - The Diary no-eviction rule for `linking` and `link_failed`.
-  - Evidence rows of ADR 0210 for new admissions.
+  - Evidence rows of ADR 0213 for new admissions.
 - **Behaviour changes.**
   - Under `closed`, admissions pause: Diary and Watchlist ids defer, and archive and baseline admit steps answer 409.
   - After activation, rated-only Films get no metadata from the rated route until ADR 0211 is active.
