@@ -158,14 +158,17 @@ async function stampFor(env,ctx,entry,code){
 // Only a run PROVEN earlier is touched: `order(earlierGeneration, laterGeneration)` is the caller's authoritative ordering of published generations (-1 earlier, 1 later); a row of a later run (a delayed older pass) is left alone, and a COVERED row whose order
 // cannot be proven (no ordering, a throw, an equal or unordered answer) fails the sweep closed (no claim); an uncovered one is simply not settled. One keyset page at a time, one terminal settle per row (compare-and-set on state and attempts), at most `maxPages`
 // pages, and the remaining deadline is checked before EVERY read and EVERY write. The same-run left-plan cleanup (the live rows an earlier pass of THIS run left for a unit the new plan no longer holds) runs last, once provenance holds.
-async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expired,provenance,ownPage}){
+async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expired,provenance,ownPage,admit}){
  const covered=new Set(entries.map(keyOf));
+ // ADR 0141 D5 (AIR-572): `admit(op)` false = the caller's instance budget has no room for this read or write; the sweep ends resumable (`budget`), nothing claimed.
+ const out=op=>typeof admit==='function'&&admit(op)===false;
  let after=null,superseded=0,leftPlan=0,unproven=false,finished=false;
  const settle=async(row,settledBy)=>{
   const answer=await settleResult(env,{row,state:'superseded',settledBy,at:now()});
   if(answer.state==='skipped')throw fail('film_person_not_open');
  };
  for(let page=0;page<maxPages&&!finished;page++){
+  if(out('sweep_read'))return {complete:false,superseded,leftPlan,reason:'budget'};
   if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};
   const rows=await earlierLiveResults(env,{runKey:run.run_key,after,limit:SUPERSEDE_PAGE});
   for(const row of rows){
@@ -175,6 +178,7 @@ async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expir
    try{verdict=typeof order==='function'?await order(row.run_source_generation,run.source_generation):null;}catch{verdict=null;}
    if(verdict===1)continue;
    if(verdict!==-1){if(isCovered)unproven=true;continue;}
+   if(out('sweep_settle'))return {complete:false,superseded,leftPlan,reason:'budget'};
    if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};
    await settle(row,isCovered?'newer_run':'left_plan');
    if(isCovered)superseded++;else leftPlan++;
@@ -190,11 +194,13 @@ async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expir
   // `max_pages`, no claim, and the next call resumes (the settled rows are no longer live, so it makes progress as long as the unsettleable rows fit in one call's budget).
   let afterOwn=null;
   for(let page=0;;page++){
+   if(out('sweep_read'))return {complete:false,superseded,leftPlan,reason:'budget'};
    if(page>=maxPages)return {complete:false,superseded,leftPlan,reason:'max_pages'};
    if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};
    const own=await liveRunResults(env,{origin:'epg',runKey:run.run_key,after:afterOwn,limit:ownPage});
    for(const row of own){
     if(row.retry_owner!=='unit'||covered.has(keyOf({kind:row.kind,id:row.unit_id})))continue;
+    if(out('sweep_settle'))return {complete:false,superseded,leftPlan,reason:'budget'};
     if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};
     await settle(row,'left_plan');
     leftPlan++;
@@ -228,13 +234,21 @@ const strikeColumns=folded=>({strike_kind:folded.strike_kind,strike_id:folded.st
 const writeCost=write=>(write.supersede?2:0)+(write.insert?1:0)+(write.update?2:0);
 const emptyCounts=()=>({applied:0,noop:0,kept:0,failed:0});
 
+// The a-priori size of a unit for the caller's budget ceiling: its kind and the number of credits in its input (bounded by CREDITS_PER_UNIT_MAX at plan time).
+function unitCostInput(ctx,entry){
+ const unit=ctx.byKey?.get(keyOf(entry));
+ const credits=Array.isArray(unit?.input?.credits)?unit.input.credits.length:0;
+ return {kind:entry.kind,credits,refusal:entry.refusal!==undefined};
+}
+
 async function runSlices(env,ctx){
  const {params,entries}=ctx,clock=clockOf(params),now=nowOf(params);
  const t0=clock();
  const expired=()=>clock()-t0>=params.sliceDeadlineMs;
- // Optional budget gate (ADR 0141 D5, AIR-572): `params.sliceBudget()` answers false when the caller's metered spend leaves no room for one more slice. It is asked only BEFORE a slice
- // that is not the first of this step (the first always runs: progress guarantee) and before the completion sweep, so a step ends `partial` with reason `budget` at a slice boundary.
- const budgetLeft=()=>typeof params.sliceBudget!=='function'||params.sliceBudget()!==false;
+ // Optional instance budget (ADR 0141 D5, AIR-572): `params.admit(op, detail)` answers false when the caller's metered spend has no room for the next operation at its a-priori
+ // ceiling (a unit by its kind and input size, a sweep read or settle, the completion). Asked BEFORE every unit, every sweep read and write and the completion; a refusal ends the
+ // step `partial` with reason `budget` at a durable boundary (the slice prefix is committed first, nothing is claimed), and the next step resumes from the cursor.
+ const admitted=(op,detail)=>typeof params.admit!=='function'||params.admit(op,detail)!==false;
  let run=ctx.run,index=ctx.startIndex,slices=0,deadlineHit=false,budgetHit=false,commitFailed=false;
  let folded=runFields(run);
  const total=emptyCounts();
@@ -281,11 +295,11 @@ async function runSlices(env,ctx){
    pending.writes.push(write);pending.cost+=cost;
   };
   while(index<entries.length&&slices<params.maxSlicesPerRun&&!deadlineHit){
-   if(slices>0&&!budgetLeft()){budgetHit=true;break;}
    let inSlice=0;
    while(index<entries.length&&inSlice<params.sliceSize){
-    if(expired()){deadlineHit=true;break;}
     const entry=entries[index];
+    if(!admitted('unit',unitCostInput(ctx,entry))){budgetHit=true;break;}
+    if(expired()){deadlineHit=true;break;}
     const unit={kind:entry.kind,id:entry.id};
     const verdict=await evaluate(env,ctx,entry);
     if(verdict.type==='stop'){await flush();return await stop(verdict.code);}
@@ -319,25 +333,30 @@ async function runSlices(env,ctx){
    }
    await flush();
    slices++;
+   if(budgetHit)break;
   }
   await flush();
   if(index<entries.length)return {...base(),state:'partial',reason:budgetHit?'budget':deadlineHit?'deadline':'max_slices'};
+  if(budgetHit)return {...base(),state:'partial',reason:'budget'};
   if(ctx.origin==='epg'){
    // Every unit of THIS plan now has a durable outcome. The live results that an EARLIER run left for a unit this plan covers are superseded `newer_run` (the history stays; this run owns the unit now), BEFORE the claim counts what is still open. An earlier live
    // result of a unit this plan does not cover stays live: it keeps blocking `current` and is never discarded silently (bounded: a sweep that cannot finish does not claim).
    // The remaining deadline holds through the whole sweep and before the claim: no write and no claim after it; the next step resumes (the cursor is already past the last unit).
-   if(slices>0&&!budgetLeft())return {...base(),state:'partial',reason:'budget'};
    if(expired())return {...base(),state:'partial',reason:'deadline'};
-   const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),ownPage:sameRunPageBound(params.sameRunPage),maxPages:supersedeBound(params.supersedeMaxPages)});
+   const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,admit:op=>admitted(op),provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),ownPage:sameRunPageBound(params.sameRunPage),maxPages:supersedeBound(params.supersedeMaxPages)});
    if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending',detail:sweep.reason,supersededEarlier:sweep.superseded,leftPlan:sweep.leftPlan};
    if(expired())return {...base(),state:'partial',reason:'deadline',supersededEarlier:sweep.superseded};
+   if(!admitted('complete'))return {...base(),state:'partial',reason:'budget',supersededEarlier:sweep.superseded};
    const open=await liveMembershipCount(env);
    if(typeof params.beforePassComplete==='function'){
     let gate;
     try{gate=await params.beforePassComplete({run,openAtCompletion:open});}
     catch(error){return await stop(codeOf(error)||'receipt_state_conflict');}
     if(gate&&gate.stop===true)return await stop(gate.code||'receipt_state_conflict');
+    // The caller's receipt reconcile ran out of budget before it finished: no claim, the next step resumes at the cursor (past the last unit).
+    if(gate&&gate.yield===true)return {...base(),state:'partial',reason:'budget',supersededEarlier:sweep.superseded};
    }
+   if(!admitted('complete'))return {...base(),state:'partial',reason:'budget',supersededEarlier:sweep.superseded};
    const answer=await commitPassComplete(env,{run,openAtCompletion:open,at:now()});
    if(answer.state==='skipped')throw fail('film_person_not_open');
    run=answer.run;

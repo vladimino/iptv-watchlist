@@ -32,14 +32,31 @@ The driver composes and decides nothing itself. The decisions are the pure modul
 
 ## Instance budget inside the Workflow chain (ADR 0141 D5, AIR-572)
 
-The chain meters every D1 binding call and every prepared statement of an invocation (`meterD1`) against the headroom `CHAIN_HEADROOM × CHAIN_SUBREQUEST_LIMIT` (5,000) with the hand-off reserve `CHAIN_HANDOFF_RESERVE_CALLS`, as T-6 of ADR 0141 decided. Two places apply it:
+The chain meters every D1 binding call and every prepared statement (`meterD1`) of the WHOLE instance on one meter: the claim, every invocation and the end path. The cap is the headroom `CHAIN_HEADROOM × CHAIN_SUBREQUEST_LIMIT` (5,000), as T-6 of ADR 0141 decided; the T-6 meter itself is unchanged.
 
-- **Inside an invocation.** `runEpgProducerPass` takes an optional `sliceBudget()`; the Workflow passes one built on `sliceBudgetOpen` (`src/canonical-producer-fence.js`). It is asked before every slice except the first of the step (the first always runs: progress guarantee) and before the completion sweep. It answers false when the spend of the instance so far plus one more slice of the largest measured size plus the reserve would leave the headroom; the step then ends `partial` with reason `budget` at a slice boundary. At its first ask the whole spend of the invocation stands for one slice (conservative).
-- **At the invocation boundary.** `successorDecision` continues only while spent + the largest measured invocation + reserve fits; otherwise it hands over to a successor instance. `producer_budget_infeasible` means the **indivisible** cost (the fixed part of an invocation plus its first slice, the largest measured, never below the floor) plus the reserve does not fit the headroom: a successor could not progress either. A large but divisible invocation is a hand-off, not infeasible.
+**Admission, not estimation.** Every Producer operation is admitted BEFORE it runs, at an a-priori ceiling of its cost (`CHAIN_COST`, `operationCost`, `admitOperation` in `src/canonical-producer-fence.js`). Admission requires spent + ceiling + the end reserve (`CHAIN_COST.end`) within the cap, for calls and statements. The ceilings are:
 
-Measured on a production-shaped offline fixture (24 Nov 2026, [evidence](../../evidence/d1-migration/air-572-producer-budget-rca-2026-11-24.md)): about 37 statements per applied unit, so an instance holds about two slices (100 units) and a 4,200-unit plan completes in 43 instances, inside `CHAIN_EPOCH_CAP` (64). Before this change the first instance ran a whole 20-slice invocation (about 37,000 statements) and the chain stopped `producer_budget_infeasible`.
+- **The start of an invocation:** snapshot, release pin, plan, open run.
+- **A unit, by its kind and input:**
+  - two applies, for the replan retry of `evaluate`;
+  - plus three per credit, where credits are bounded by `CREDITS_PER_UNIT_MAX` at plan time;
+  - plus the slice commit that may follow it.
+- **A sweep read and a sweep settle** of `supersedeEarlierResults`.
+- **The completion:** the live count and `commitPassComplete`.
+- **A receipt of the reconcile** (ADR 0141 T-10). The drain cuts each page to what the budget holds and is asked before every page, both at the start and before the completion.
 
-The fence is ONE object for the whole invocation: `pinChainReleases` and every slice commit (lease renewal) advance `fence.revision` in place, and the stop, hand-off and completion use that same object. A copy made after the release pin fell behind and lost the revision CAS (`producer_cas_lost`, production epoch 1 of 24 Nov 2026).
+A refusal ends the step at a durable boundary: the slice prefix is committed, the sweep and the drain stop resumable, nothing is claimed. The step answers `partial` with reason `budget` (or `supersession_pending` with detail `budget`). The instance then hands over, and the successor resumes at the cursor, also when the cursor is already past the last unit.
+
+**Why the bound holds.** Every admitted operation costs at most its ceiling. `tests/canonical-producer-budget*.mjs` assert this for every admitted operation on the real path, including cheap no-op units followed by expensive credit changes, a planner refusal, a backlog of earlier results, lost receipt responses and narrow limits. So after any admitted operation the end reserve is still free. The end reserve covers the stop or hand-off, or the completion, of the chain.
+
+**Infeasible and caps.**
+- `producer_budget_infeasible` (fail_closed) means an instance made NO durable progress: no unit, sweep settle, completion or reconciled receipt. Its fixed part plus one operation and the reserve do not fit, so no successor could progress either.
+- At an invocation boundary, `successorDecision` continues in the same instance only while spent + the largest measured invocation + reserve fits. Its own infeasibility test is the floor plus the reserve, as ADR 0141 D5 words it.
+- A hand-off that `CHAIN_EPOCH_CAP` refuses now STOPS the chain (`producer_chain_epoch_cap`, fail_closed, visible to the monitor). Before this change it answered a hand-off without a successor and left the chain active.
+
+**Measured.** About 37 statements per applied unit and about 10 per no-op unit (offline, 24 Nov 2026, [evidence](../../evidence/d1-migration/air-572-producer-budget-rca-2026-11-24.md)). An instance therefore holds roughly 130 applied or 300 to 450 no-op units. Epochs count per programme run, and a re-publication of the same run (REOPEN) continues the count; every new publication starts at epoch 1.
+
+**One fence object.** The fence is ONE object for the whole invocation. `pinChainReleases` and every slice commit (lease renewal) advance `fence.revision` in place, and the stop, hand-off and completion use that same object. A copy made after the release pin fell behind and lost the revision CAS (`producer_cas_lost`, production epoch 1 of 24 Nov 2026).
 
 ## Source boundary and delivery hold (AIR-572)
 

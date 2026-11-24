@@ -40,28 +40,72 @@ The run made real progress before the stop.
 
 `run_key` NULL on the chain is not a cause: the monitor and the run are keyed by `source_generation`.
 
-## Offline reproduction and fix (production-shaped fixture)
+## Offline reproduction (production-shaped fixture)
 
 The fixture has 400 watchlist films, each with one director and eight distinct actors, giving 4,200 units, and one departed Film so a release pin is written. It runs on the real `runProducerWorkflow` path over the sqlite D1 stand-in, metered like `meterD1`. No private identifiers were used.
 
-| Code | Result |
-| --- | --- |
-| Before (`main` `fa9607c`) | First invocation: 1,000 units, 39,307 calls / 37,283 statements (28,352 executed D1 calls). The stop then throws `producer_cas_lost` (cause 2). With cause 2 fixed alone, the chain stops `producer_budget_infeasible` (cause 1), as epoch 2 did. |
-| After | Every invocation stays at or below 4,890 calls / 4,684 statements and hands over after two slices (100 units). The chain completes in 43 instances (`passed`, `complete`, 4,200 / 4,200 durable outcomes, no shadow Film). |
+- **Before (`main` `fa9607c`).** The first invocation handled 1,000 units with 39,307 calls and 37,283 statements (28,352 executed D1 calls). Its stop then threw `producer_cas_lost` (cause 2). With cause 2 fixed alone, the chain stopped `producer_budget_infeasible` (cause 1), as epoch 2 did.
+- **Unit cost by kind and input.** Statements, measured offline at the input caps:
 
-The regression test in `tests/canonical-producer-chain.mjs` uses a smaller fixture of the same shape (50 films, 300 actors, a release pin) on the real path. It asserts all of the following:
+  | Kind | Applied | No-op |
+  | --- | --- | --- |
+  | `film_facts` | 45 | 15 |
+  | `person_mutation` | 30 | 10 |
+  | `film_credits` | 37 + about 1 per credit (79 at 43 credits) | 10 |
 
-- the first invocation hands over instead of stopping;
-- the release pin is written;
-- the first slice always runs;
-- every invocation stays inside the metered headroom;
-- every successor is created for the next epoch;
-- the chain completes with every unit durable and no shadow Film.
+  Credits are bounded by `CREDITS_PER_UNIT_MAX` = 50 at plan time.
 
-Each of the three changes, reverted alone, fails that test: the fence copy, the old infeasibility rule and the slice gate.
+## Fix: admission at a-priori ceilings (first version reviewed, then reworked)
+
+The first version (`3ff3645`) gated each slice on the largest slice measured so far. Independent [review](https://github.com/vladimino/iptv-watchlist/pull/967) found two P1 problems:
+
+- A historical maximum is not an admission bound. A cheap slice followed by an expensive one could cross the headroom, and the first slice of every invocation was unconditional.
+- The completion sweep and the receipt reconcile of ADR 0141 T-10 were outside the budget.
+
+The reworked fix:
+
+- **One meter for the whole instance:** the claim, every invocation and the end path.
+- **Every operation admitted before it runs**, at an a-priori ceiling with the end reserve kept: the invocation start, each unit (by kind and credits, with two applies and the following slice commit), each sweep read and settle, the completion, and each receipt page (cut to what the budget holds). See the [driver reference](../../reference/data/producer-driver.md#instance-budget-inside-the-workflow-chain-adr-0141-d5-air-572).
+- **A refusal ends at a durable boundary** and hands over. The successor resumes at the cursor, also past the last unit.
+- **Infeasible** means an instance made no durable progress.
+- **Epoch cap:** a hand-off the cap refuses now stops the chain on the record instead of returning a hand-off without a successor. This was a pre-existing defect found while testing.
+- **Fence:** one object.
+
+## Tests (real Workflow path, membership marker `sync`/1 as deployed)
+
+`tests/canonical-producer-budget.mjs`:
+
+- **Two generations.** A heterogeneous plan (0 to 12 actors, 1 to 3 directors, Films over the credit cap as planner refusals) completes at the default limit. So does the next publication (a new programme run): cheap no-ops first, then changed credits on the last Films, superseding the live refusals of the earlier generation.
+- **Lost receipt responses.** Three receipt batches commit and then lose their response. The chain stops transient, is recovered as the hourly reconcile does, and the drain settles the open receipts. This runs at the default limit and at a narrow one.
+- **Infeasible.** A limit too small for one operation stops `producer_budget_infeasible` without a successor or a run row.
+
+`tests/canonical-producer-budget-boundaries.mjs`:
+
+- **Boundaries.** The next publication with a backlog of more than 100 earlier live results, at two narrow limits. Instances end inside the sweep, at the completion, and as a successor whose cursor is already past the last unit.
+- **Epoch cap.** A re-published programme run at a narrow limit reaches `CHAIN_EPOCH_CAP` and stops `producer_chain_epoch_cap` / `fail_closed`.
+
+Asserted every time:
+
+- each instance's total metered calls and statements, claim and end path included, stay within the headroom;
+- every admitted operation's real cost stays at or below its ceiling;
+- every unit is durable and no shadow Film is created;
+- `watchlist_film` is untouched (`sync`/1).
+
+**Mutation check by hand.** Each of these guards, removed alone, fails at least one of the two files:
+
+- the fence copy;
+- the unit, sweep-settle, receipt and completion admissions;
+- the no-progress infeasibility rule;
+- the epoch-cap stop.
 
 ## Limits and open points
 
-- **Instances per plan.** About 100 units per instance means about 41 instances for the current 4,042 units, inside `CHAIN_EPOCH_CAP` 64. A plan above about 6,000 units would reach the cap (`producer_chain_epoch_cap`). Noop units are probably cheaper; this was not measured here.
-- **V-3 of ADR 0141 is still open.** It concerns how Cloudflare counts D1 statements toward the instance limit. Production executed one invocation of hundreds of units, about 20,000 or more metered statements in one step, without a platform error. The meter counts every `prepare`, but only executions reach D1. Settling V-3, and with it the headroom, is an owner decision under T-6; this fix keeps the conservative meter unchanged.
-- **The chain of `d8dc6ec8-…`/518 stays `stopped` `fail_closed`.** The reconcile does not relaunch it. The next published EPG run starts a new chain naturally, and the reconcile supersedes the old one. No reset or reopen is part of this change.
+- **Epoch cap per programme run.** One programme run has at most `CHAIN_EPOCH_CAP` (64) instances, and a re-publication of the same run counts on.
+  - An instance holds roughly 130 applied or 300 to 450 no-op units, so the current plan (about 4,000 units, mostly no-ops at steady state) needs about 10 to 30 instances.
+  - The first full pass after a long hold is mostly applied units and can need about 30.
+  - A much larger plan would reach the cap and stop `fail_closed` on the record.
+- **V-3 of ADR 0141 is still open.** It concerns how Cloudflare counts D1 statements toward the instance limit.
+  - Production executed one invocation of hundreds of units, about 20,000 or more metered statements in one step, without a platform error.
+  - The meter counts every `prepare`; only executions reach D1.
+  - Settling V-3, and with it the headroom, is an owner decision under T-6. This fix keeps the conservative meter unchanged.
+- **The P518 chain is untouched.** The chain of `d8dc6ec8-…`/518 stays `stopped` `fail_closed`, and the reconcile does not relaunch it. The next published EPG run starts a new chain naturally, and the reconcile supersedes the old one. No reset or reopen is part of this change.

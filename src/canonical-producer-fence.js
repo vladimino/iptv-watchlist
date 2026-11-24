@@ -98,12 +98,40 @@ export function bindProducerFence(env,gate){
  return gate;
 }
 
-// ADR 0141 D5 inside one invocation: room for one more slice of the measured size (the largest slice so far) plus the hand-off reserve, for every metered resource, in the
-// headroom of this instance. `spent*` is everything this instance spent so far, the current invocation included.
-export function sliceBudgetOpen({spentCalls,spentStatements,sliceCalls,sliceStatements,limitCalls=CHAIN_SUBREQUEST_LIMIT,headroom=CHAIN_HEADROOM,reserveCalls=CHAIN_HANDOFF_RESERVE_CALLS}={}){
- if(![spentCalls,spentStatements,sliceCalls,sliceStatements].every(Number.isFinite))return false;
+// ADR 0141 D5 inside one instance (AIR-572): every Producer operation is ADMITTED before it runs at an a-priori ceiling of its metered D1 cost (binding calls, which are at least the
+// statements). A unit's ceiling follows from its kind and its input (credits are bounded by CREDITS_PER_UNIT_MAX at plan time) and covers the replan retry of `evaluate` (two applies)
+// plus the slice commit that may follow it. The end path (stop, hand-off or completion of the chain) is reserved on every admission, so an admitted operation can never leave the
+// instance without room to end. The ceilings are measured upper bounds at the input caps with margin; `tests/canonical-producer-chain.mjs` asserts the real cost of each kind below them.
+export const CHAIN_COST={
+ unit:{film_facts:50,person_mutation:35,film_credits:45,refusal:30,other:200,perCredit:3,applies:2},
+ flush:100,
+ sweepRead:10,
+ sweepSettle:30,
+ complete:60,
+ receipt:330,
+ invocation:150,
+ end:80,
+};
+export function operationCost(op,detail={}){
+ const c=CHAIN_COST;
+ if(op==='unit'){
+  if(detail.refusal)return c.unit.refusal+c.flush;
+  const base=c.unit[detail.kind]??c.unit.other;
+  const credits=Number.isInteger(detail.credits)&&detail.credits>0?detail.credits:0;
+  return c.unit.applies*(base+c.unit.perCredit*credits)+c.flush;
+ }
+ if(op==='sweep_read')return c.sweepRead;
+ if(op==='sweep_settle')return c.sweepSettle;
+ if(op==='complete')return c.complete;
+ if(op==='receipt')return c.receipt;
+ if(op==='invocation')return c.invocation;
+ return Infinity;
+}
+// Room for `cost` plus the end reserve in the instance headroom, for calls AND statements. An unmeasured spend or an unknown operation is never admitted.
+export function admitOperation({spentCalls,spentStatements,cost,reserve=CHAIN_COST.end,limitCalls=CHAIN_SUBREQUEST_LIMIT,headroom=CHAIN_HEADROOM}={}){
+ if(![spentCalls,spentStatements,cost,reserve].every(Number.isFinite))return false;
  const cap=headroom*limitCalls;
- return spentCalls+sliceCalls+reserveCalls<=cap&&spentStatements+sliceStatements+reserveCalls<=cap;
+ return spentCalls+cost+reserve<=cap&&spentStatements+cost+reserve<=cap;
 }
 
 export function recoveryClassOf(code){
@@ -123,17 +151,14 @@ export function recoveryBackoffMs(attempts){
  return ticks[n]*3600000;
 }
 
-// ADR 0141 D5. `estimate*` is the largest invocation this instance measured: it decides continue or hand-off. Infeasibility is decided by the INDIVISIBLE cost only (`indivisible*`:
-// the largest measured cost of the fixed part of an invocation plus its first slice, never below the floor; the floor alone when nothing was measured). A large but divisible
-// invocation is not infeasible: the next instance starts with spent 0 and the slice loop bounds itself by `sliceBudgetOpen` (AIR-572, production 24 Nov 2026).
-export function successorDecision({spentCalls=0,spentStatements=0,estimateCalls,estimateStatements,indivisibleCalls,indivisibleStatements,limitCalls=CHAIN_SUBREQUEST_LIMIT,headroom=CHAIN_HEADROOM,floorCalls=CHAIN_FLOOR_D1_CALLS,floorStatements=CHAIN_FLOOR_D1_STATEMENTS,reserveCalls=CHAIN_HANDOFF_RESERVE_CALLS}={}){
+// ADR 0141 D5 at an invocation boundary: continue in this instance only while spent + the largest measured invocation + reserve fits; otherwise hand over. The configuration is
+// infeasible only when the FLOOR plus the reserve exceeds the headroom (the ADR rule); an instance that cannot admit even its first operation is judged by the workflow.
+export function successorDecision({spentCalls=0,spentStatements=0,estimateCalls,estimateStatements,limitCalls=CHAIN_SUBREQUEST_LIMIT,headroom=CHAIN_HEADROOM,floorCalls=CHAIN_FLOOR_D1_CALLS,floorStatements=CHAIN_FLOOR_D1_STATEMENTS,reserveCalls=CHAIN_COST.end}={}){
  const eCalls=Math.max(Number(estimateCalls)||0,floorCalls);
  const eStmt=Math.max(Number(estimateStatements)||0,floorStatements);
- const iCalls=Math.max(Number(indivisibleCalls)||0,floorCalls);
- const iStmt=Math.max(Number(indivisibleStatements)||0,floorStatements);
  if(!Number.isFinite(spentCalls)||!Number.isFinite(spentStatements))return {continue:false,reason:'unmeasured'};
  const capCalls=headroom*limitCalls;
- if(iCalls+reserveCalls>capCalls||iStmt+reserveCalls>capCalls)return {continue:false,reason:'producer_budget_infeasible'};
+ if(floorCalls+reserveCalls>capCalls||floorStatements+reserveCalls>capCalls)return {continue:false,reason:'producer_budget_infeasible'};
  if(spentCalls+eCalls+reserveCalls<=capCalls&&spentStatements+eStmt+reserveCalls<=capCalls)return {continue:true};
  return {continue:false,reason:'handoff'};
 }
