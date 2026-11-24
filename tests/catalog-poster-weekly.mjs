@@ -40,7 +40,7 @@ assert.equal(W.plan(pending,T('2026-11-16T03:24:00Z')),'resume');
 assert.equal(W.plan(ok({...pending,nextRetryAt:'2026-11-16T12:00:00.000Z'}),T('2026-11-16T03:24:00Z')),'idle','pending but not due: idle');
 assert.equal(W.plan(ok({status:'failed',lastAttemptAt:'2026-11-15T03:24:00.000Z'}),T('2026-11-17T03:24:00Z')),'idle','a failed week is not retried until the next week');
 
-// projection: first true predicate wins; Monitor vocabulary is healthy|waiting|delayed|degraded|needs_owner
+// projection: first true predicate wins; Monitor vocabulary is healthy|waiting|delayed|degraded (ADR 0206: a failed run is degraded and critical)
 const P=(read,markers,nowMs,monitorOn=true)=>W.project({read,markers,nowMs,monitorOn});
 const absent={status:'absent',checkpoint:null},valid=cp=>({status:'ok',checkpoint:cp});
 const NOW=T('2026-11-17T10:00:00Z');
@@ -54,7 +54,7 @@ assert.equal(P(absent,{baselineAt:'2026-11-17T08:00:00Z'},T('2026-11-19T05:23:00
 let o=P(absent,{baselineAt:'2026-11-17T08:00:00Z'},T('2026-11-19T06:00:00Z'));assert.deepEqual([o.state,o.monitor],['overdue','delayed'],'absence cannot grant indefinite grace');
 o=P(absent,{baselineAt:'2026-11-17T08:00:00Z'},T('2026-11-19T09:00:00Z'));assert.equal(o.monitor,'degraded','delayed first, then degraded');
 let r=P(valid(ok()),{},NOW);assert.deepEqual([r.state,r.monitor],['healthy_idle','healthy']);
-r=P(valid(ok({status:'failed'})),{},NOW);assert.deepEqual([r.state,r.monitor],['failed','needs_owner']);
+r=P(valid(ok({status:'failed'})),{},NOW);assert.deepEqual([r.state,r.monitor,r.critical],['failed','degraded',true]);
 r=P(valid(ok({retryAttempts:6,status:'pending',nextRetryAt:'2026-11-17T09:00:00.000Z'})),{},NOW);assert.equal(r.state,'failed','retry exhaustion');
 r=P(valid(ok({rateLimitStreak:2})),{},NOW);assert.equal(r.state,'failed','persistent 429');
 r=P(valid(ok({status:'pending',nextRetryAt:'2026-11-18T03:00:00.000Z',lastAttemptAt:'2026-11-17T03:24:00.000Z'})),{},NOW);assert.deepEqual([r.state,r.monitor],['waiting','waiting'],'a legitimate backoff is not a fault');
@@ -195,11 +195,11 @@ tmdb[4]={id:4,poster_path:'/four.jpg'};
 await daily('2026-11-16T03:24:00Z');
 assert.equal(cp().status,'completed');assert.equal(records.get(LIVE).tmdb_4.poster,POSTER+'/four.jpg');
 
-// 9. Retry exhaustion: after the cap the run is failed (needs_owner) and a failed week is not retried until the next week.
+// 9. Retry exhaustion: after the cap the run is failed (degraded, critical) and a failed week is not retried until the next week.
 seed({...catalog(),tmdb_4:film('tmdb_4',4)});tmdb=TMDB();
 for(let day=15;day<22;day++){await daily('2026-11-'+day+'T03:24:00Z');if(cp().status==='failed')break;}
 assert.equal(cp().status,'failed');assert.equal(cp().retryAttempts,W.RETRY_CAP);
-assert.equal(W.project({read:{status:'ok',checkpoint:W.parseCheckpoint(cp())},nowMs:Date.parse('2026-11-21T10:00:00Z')}).monitor,'needs_owner');
+assert.equal(W.project({read:{status:'ok',checkpoint:W.parseCheckpoint(cp())},nowMs:Date.parse('2026-11-21T10:00:00Z')}).monitor,'degraded');
 assert.ok(eventKeys().some(k=>records.get(k).outcome==='failed'),'a failed week reports a failed event');
 
 // 10. A lost event put leaves the entry owed; the next firing replays the SAME key and payload without TMDB (frozen `at`).
