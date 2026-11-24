@@ -597,5 +597,58 @@ Date.now=realNow;
  // A routine write passes no option, so its statement carries no pin and is byte-for-byte the earlier one (covered by every other block here).
 }
 
+// AIR-595: the hourly Discovery report close against the REAL pause statement. The executor script runs in a vm with the real D1 authority module; only the journal
+// put, the status read and the continuation read are stand-ins. During the pause the close is refused with the typed `discovery_epg_priority` answer and the hour gets one
+// `epg_priority` notice (not `write_conflict`, not retried); nothing is written to D1; once the publication is handed off the next close reports the held deltas once.
+{
+ Date.now=()=>clock;
+ const vm=await import('node:vm');
+ const {db}=armed();
+ const env=envFor(db);
+ const journal=[],warns=[];
+ const context=vm.createContext({Date,Intl,Map,Set,JSON,Number,String,Array,Object,Math,Promise,Error,
+  console:{log(){},error(){},warn(line){try{warns.push(JSON.parse(line));}catch{}}},
+  DiscoveryAuthority:Authority,
+  loadJSON:async()=>null,
+  readContinuation:async()=>({record:null,etag:null}),
+  writeDiscoveryEvent:async(_env,event)=>{journal.push(JSON.parse(JSON.stringify(event)));return 'written';},
+ });
+ vm.runInContext(fs.readFileSync('src/discovery-workflow.js','utf8').replace(/export \{[^}]+\};/g,''),context);
+ const close=(outcome,nowMs)=>vm.runInContext('closeHourlyDiscoveryReport',context)(env,outcome,{scheduled:true,now:nowMs});
+ const add=vm.runInContext('addChunkToDiscoveryReport',context),fresh=vm.runInContext('newDiscoveryReport',context);
+ at(D2,10,0);
+ const report={...add(fresh(new Date(madridInstant(D2,9,0)).toISOString()),{checked:4,added:3,reused:0,screenedOut:0,touched:0,tmdbCalls:2,remaining:0,cheapRemaining:0,error:null},'i-1:1','run-1'),lastClosedHour:null};
+ assert.equal((await Authority.writeWorkflow(env,{schemaVersion:1,instanceId:'i-1',programmeRunId:'run-1',series:0,phase:'stopped',reason:'backlog_empty',report,outbox:[]},undefined)).saved,true);
+ const before=db.sql('SELECT revision, payload_json FROM discovery_workflow WHERE id=1')[0],generationBefore=generation(db);
+ // 16:56 Madrid, the pause armed, and the continuation read throws in the same close: the pause and the independent read failure are both stated.
+ at(D2,16,56);
+ context.readContinuation=async()=>{throw new Error('continuation down');};
+ const unread=await close({started:false,reason:'stopped',programmeRunId:'run-1'},clock);
+ context.readContinuation=async()=>({record:null,etag:null});
+ assert.equal(unread.reason,'epg_priority');
+ assert.deepEqual(journal.map(event=>[event.kind,event.reason,event.status,event.fault]),[['report_failed','epg_priority',null,'queue_unreadable']]);
+ journal.length=0;warns.length=0;
+ at(D2,17,0);
+ const refused=await close({started:false,reason:'stopped',programmeRunId:'run-1'},clock);
+ assert.equal(refused.closed,false);assert.equal(refused.reason,'epg_priority','the real pause statement is named as the pause');
+ assert.deepEqual(journal.map(event=>[event.kind,event.reason,event.status,event.fault??null]),[['report_failed','epg_priority',null,null]],'the clean pause carries no fault');
+ assert.deepEqual(db.sql('SELECT revision, payload_json FROM discovery_workflow WHERE id=1')[0],before,'the accumulator in D1 is untouched');
+ assert.equal(generation(db),generationBefore,'no generation move');
+ assert.equal(warns.filter(entry=>entry.event==='discovery_hour_close_failed').map(entry=>entry.reason).join(),'epg_priority');
+ // The publication of D2 is handed off (no certificate column at schema 22): the pause lifts and the next firing closes with the held deltas, once.
+ // The reconcile of the next firing replaces the record for the new generation and carries the accumulator (`createWorkflowInstance`); the close follows it.
+ setPointer(db,'run-2',D2);
+ at(D2,18,0);
+ const carried=JSON.parse(before.payload_json);
+ assert.equal((await Authority.writeWorkflow(env,{...carried,instanceId:'i-2',programmeRunId:'run-2',series:0,phase:'running',reason:'started'},'d1:workflow:'+before.revision)).saved,true,'the new generation is admitted once handed off');
+ const released=await close({started:true,reason:'started',programmeRunId:'run-2'},clock);
+ assert.equal(released.closed,true,'the close is admitted once the pause has lifted');
+ const hour=journal.find(event=>event.kind==='hour');
+ assert.equal(hour.added,3);assert.equal(hour.checked,4);assert.equal(hour.chunks,1);
+ const after=JSON.parse(db.sql('SELECT payload_json FROM discovery_workflow WHERE id=1')[0].payload_json);
+ assert.equal(after.report.added,0,'a new period starts');assert.equal(after.report.lastClosedHour,hour.id.slice(-11));
+ Date.now=()=>clock;
+}
+
 Date.now=realNow;
 console.log('epg priority gate ok');
