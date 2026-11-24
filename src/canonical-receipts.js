@@ -242,6 +242,58 @@ export async function receiptsStatus(env){
  }catch{return 'no_schema';}
 }
 export async function receiptsAvailable(env){return (await receiptsStatus(env))!=='no_schema';}
+
+// ---- the operation key (AIR-600 R1; ADR 0207 decision 3, owner choice 0207-U1 = K2; schema 39, migrations/0039_receipt_operation_key.sql) ----
+// An optional, nullable `operation_key` names the ITEM an attempt works on (`admission:<kind>:<code>`, `evidence:<evidence_key>`), so a retry finds every earlier attempt of that item whatever its
+// request id, target or digest. The protocol that reads, settles and reserves under a key is src/receipt-operation-key.js; this module only writes the key with the receipt it inserts, under an
+// assertion of the key's observed history. A receipt written WITHOUT a key is exactly what it was before schema 39 (no statement, column or check of a keyed write applies to it).
+export const OPERATION_KEY_MIN_VERSION=39;
+// A lowercase namespace, a colon, then the request id alphabet; at most 200. An identifier, never a payload (the SQL CHECK is the same rule, the namespace length aside).
+const OPERATION_KEY=/^[a-z][a-z0-9_]{0,31}:[A-Za-z0-9:._/=+@-]+$/;
+export function normalizeOperationKey(value){
+ if(typeof value!=='string'||value.length<3||value.length>200||!OPERATION_KEY.test(value))throw failed('film_person_invalid');
+ return value;
+}
+// The HISTORY FINGERPRINT of a key: how many receipts it has and how many of them are `applied`. Receipts are append-only and never deleted, so it changes whenever any caller reserves or applies
+// under the key; an abandon or a retry changes neither number, which is why every keyed assertion also requires that no unresolved receipt exists (see operationHistoryCondition).
+export function normalizeFingerprint(value){
+ const count=value?.count,applied=value?.applied;
+ if(!Number.isInteger(count)||!Number.isInteger(applied)||count<0||applied<0||applied>count)throw failed('film_person_invalid');
+ return {count,applied};
+}
+// `ready` (schema 39 or later with the column, its unique index and its trigger), `absent` (below 39 with none of them: today's schema; legacy receipts work, keyed ones are refused) or `invalid`
+// (anything in between: a partial apply). An unreadable probe throws `film_person_unavailable`; a keyed caller writes nothing unless this answers `ready`.
+export async function operationKeyStatus(env){
+ const db=database(env);
+ if(!db)throw failed('film_person_unavailable');
+ let row;
+ try{
+  row=await one(db,"SELECT (SELECT version FROM schema_contract WHERE id=1) AS version,(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='canonical_write_receipt' AND sql LIKE '%operation_key%') AS col,(SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('canonical_write_receipt_operation_unresolved','canonical_write_receipt_operation_history')) AS idx,(SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='canonical_write_receipt_operation_key_immutable') AS trg");
+ }catch(error){throw failed('film_person_unavailable',error);}
+ const version=Number(row?.version),objects=Number(row?.col)+Number(row?.idx)+Number(row?.trg);
+ if(version>=OPERATION_KEY_MIN_VERSION&&objects===4)return 'ready';
+ if(Number.isFinite(version)&&version<OPERATION_KEY_MIN_VERSION&&objects===0)return 'absent';
+ return 'invalid';
+}
+export async function assertOperationKeyReady(env){
+ const status=await operationKeyStatus(env);
+ if(status==='absent')throw failed('receipt_operation_key_missing');
+ if(status!=='ready')throw failed('receipt_operation_key_invalid');
+}
+// ONE SQL boolean over this database: the key's history still has the observed fingerprint AND no unresolved receipt exists under it. A keyed reservation asserts it in the same batch as its
+// insert; a writer that finalizes a terminal outcome without reserving asserts it inside its OWN batch (each domain wraps it in its own assertion statement), so the loser of a race writes nothing.
+export function operationHistoryCondition({origin,operationKey,fingerprint}){
+ if(!IDENT.test(origin||''))throw failed('film_person_invalid');
+ const key=normalizeOperationKey(operationKey),seen=normalizeFingerprint(fingerprint);
+ return {
+  sql:"(SELECT COUNT(*) FROM canonical_write_receipt WHERE origin=? AND operation_key=?)=? AND (SELECT COUNT(*) FROM canonical_write_receipt WHERE origin=? AND operation_key=? AND state='applied')=? AND NOT EXISTS (SELECT 1 FROM canonical_write_receipt WHERE origin=? AND operation_key=? AND state IN ('pending','failed','unknown'))",
+  params:[origin,key,seen.count,origin,key,seen.applied,origin,key],
+ };
+}
+function keyedOf(input){
+ if(input?.operationKey===undefined&&input?.history===undefined)return null;
+ return {operationKey:normalizeOperationKey(input.operationKey),history:normalizeFingerprint(input.history)};
+}
 // A producer must refuse to write canonical while this throws: without a receipt table the absence of a record proves nothing.
 export async function assertReceiptsAvailable(env){if((await receiptsStatus(env))==='no_schema')throw failed('receipt_schema_missing');}
 // ... and while the activation baseline is not recorded: no receipt may exist before it, and no change could be told from a pre-receipt one.
@@ -324,6 +376,8 @@ export async function listAttention(env,{limit=100}={}){
 }
 
 const INSERT='INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?)';
+// The keyed insert (schema 39): the same row plus its operation key. Used only by a caller that passes `operationKey`; the plain INSERT above stays the statement of every other receipt.
+const INSERT_KEYED='INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at,operation_key) VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?)';
 const CHANGED=fenced.assertSql('changes()>=1');
 const FROM='WHERE request_id=? AND state=? AND attempts=?';
 
@@ -341,6 +395,8 @@ async function writeBatch(env,gate,statements){
  catch(error){
   const message=String(error?.message||error);
   if(/UNIQUE constraint failed: canonical_receipt_watermark/i.test(message))throw failed('receipt_baseline_exists',error);
+  // The partial unique index of schema 39 (one unresolved receipt per origin and operation key) names its columns, the primary key names request_id.
+  if(/UNIQUE constraint failed: canonical_write_receipt\.origin/i.test(message))throw failed('operation_key_in_flight',error);
   if(/UNIQUE constraint failed: canonical_write_receipt/i.test(message))throw failed('receipt_exists',error);
   const trigger=/canonical_receipt_([a-z_]+)/.exec(message);
   if(trigger)throw failed('canonical_receipt_'+trigger[1],error);
@@ -464,6 +520,8 @@ async function applyAction(env,gate,row,action,{revalidate,observed,clock,policy
 // operation, target or content under an id is `receipt_conflict`. A run error is rethrown after the receipt is marked. Needs the schema AND the activation baseline.
 export async function receiptedWrite(env,input,hooks){
  const request=normalizeRequest(input);
+ // AIR-600 R1: an operation key and its observed history are validated with the request, before anything is read (see the reservation below).
+ const keyed=keyedOf(input);
  // Atomic mode is the only mode unless the hooks carry an approved named exception (see APPROVED_EXCEPTIONS); this is checked before anything is read or written.
  const atomic=hooks?.atomic===true;
  if(!atomic)exceptionOf({exception:hooks?.exception},hooks?.approvedExceptions||APPROVED_EXCEPTIONS);
@@ -472,19 +530,31 @@ export async function receiptedWrite(env,input,hooks){
  if(status==='no_schema')throw failed('receipt_schema_missing');
  const gate=assertWritable(await readAuthority(env));
  if(status==='no_baseline')throw failed('receipt_baseline_missing');
+ // AIR-600 R1: with `operationKey` and `history` the receipt is RESERVED under its key: the insert carries the key and, in the same batch, asserts that the key's history still has the fingerprint
+ // the caller observed and holds no unresolved receipt. Any other outcome (the history moved, another attempt is unresolved, this id already exists) is `operation_key_moved` or
+ // `operation_key_in_flight` before the writer runs: the caller replans from the history (src/receipt-operation-key.js). A keyed receipt is never replayed under its id; it is abandoned and reserved anew.
+ if(keyed)await assertOperationKeyReady(env);
  let row=await readReceipt(env,request.requestId),created=false;
  if(!row){
   const now=clock();
+  const values=[request.requestId,request.operation,request.origin,request.target.kind,request.target.id,request.digest,request.expectedRevision,gate.generation,'pending',plus(now,policy.attemptWindowMs),now,now];
   try{
-   await writeBatch(env,gate,[[INSERT,[request.requestId,request.operation,request.origin,request.target.kind,request.target.id,request.digest,request.expectedRevision,gate.generation,'pending',plus(now,policy.attemptWindowMs),now,now]]]);
+   if(keyed){
+    const guard=operationHistoryCondition({origin:request.origin,operationKey:keyed.operationKey,fingerprint:keyed.history});
+    await writeBatch(env,gate,[[fenced.assertSql(guard.sql),guard.params],[INSERT_KEYED,[...values,keyed.operationKey]]]);
+   }else await writeBatch(env,gate,[[INSERT,values]]);
    created=true;
-   row={requestId:request.requestId,operation:request.operation,origin:request.origin,target:request.target,contentDigest:request.digest,plannedRevision:request.expectedRevision,appliedRevision:null,markerGeneration:gate.generation,state:'pending',attempts:1,nextAttemptAt:plus(now,policy.attemptWindowMs),errorClass:null,createdAt:now,updatedAt:now,settledAt:null};
+   row={requestId:request.requestId,operation:request.operation,origin:request.origin,target:request.target,contentDigest:request.digest,plannedRevision:request.expectedRevision,appliedRevision:null,markerGeneration:gate.generation,state:'pending',attempts:1,nextAttemptAt:plus(now,policy.attemptWindowMs),errorClass:null,createdAt:now,updatedAt:now,settledAt:null,...(keyed?{operationKey:keyed.operationKey}:{})};
   }catch(error){
+   // A keyed batch refused with the marker unchanged failed its history assertion: another caller reserved or settled under the key meanwhile.
+   if(keyed&&error.code==='receipt_state_conflict')throw failed('operation_key_moved',error);
    if(error.code!=='receipt_exists')throw error;
    row=await readReceipt(env,request.requestId);
    if(!row)throw failed('film_person_unavailable');
   }
  }
+ // Under a key an id that already exists is another caller's reservation of the same content at the same history: this attempt is the loser.
+ if(keyed&&!created)throw failed('operation_key_moved');
  if(!sameRequest(row,request))throw failed('receipt_conflict');
  if(row.state==='applied')return {ran:false,state:'applied',already:true,receipt:row};
  if(row.state==='abandoned')return {ran:false,state:'abandoned',receipt:row};
