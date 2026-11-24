@@ -57,7 +57,7 @@ const note=(name,line)=>{assert.ok(line.d1.n<BEFORE[name].d1,name+': fewer D1 ca
  const second=await batch(w,{manifestSize:5});
  assert.equal(second.data.status,'already_running');assert.equal(second.data.runId,first.data.runId,'the live holder is named, never adopted');assert.ok(!('films' in second.data),'no manifest');
  const line=last(w);note('already_running',line);
- assert.equal(line.notes.leaseRefused,1);assert.ok(Number.isSafeInteger(line.notes.liveLeaseAgeMs)&&line.notes.liveLeaseAgeMs>=0&&line.notes.liveLeaseAgeMs<15*60000);
+ assert.equal(line.notes.leaseRefused,1);assert.ok(Number.isSafeInteger(line.notes.liveLeaseAgeMs)&&line.notes.liveLeaseAgeMs>=0&&line.notes.liveLeaseAgeMs<12*60000);
  // AIR-548 (ADR 0180): the refusal also records its neutral skipped Event, index entry first (read+write of the outbox index, the record, the journal item, delivered flag, then the index removal): +8 R2 calls over the former 12-call cap's baseline of 9; D1 is untouched.
  assert.ok(line.r2.n<=18&&line.d1.n<=25,'refusal cost '+line.r2.n+' R2, '+line.d1.n+' D1');
  assert.notEqual(timing(w)[0].requestId,line.requestId,'each start has its own request id');
@@ -131,9 +131,9 @@ const note=(name,line)=>{assert.ok(line.d1.n<BEFORE[name].d1,name+': fewer D1 ca
  const again=await batch(w,{manifestSize:5});assert.equal(again.status,200,'the next start works');
 }
 
-// 8. A competing start that wins the lease between the early check and the acquire is counted too, with the holder's age only when the answer carries its expiry.
+// 8. A competing start that wins the lease between the early check and the acquire is counted too, with the holder's age only when the refusal knows the holder (AIR-588: from its last write, `heartbeatAt`, here one minute ago under the 12-minute TTL).
 for(const [name,hook,aged] of [
- ['live holder seen at acquire',(w,original)=>({openLease:async(...a)=>{if(!w.fired){w.fired=true;const doc=JSON.stringify({owner:'rival',runId:'11111111-1111-4111-8111-111111111111',heartbeatAt:new Date().toISOString(),expiresAt:Date.now()+14*60000,epoch:7}).replace(/'/g,"''");sql(w.file,"UPDATE prediction_lease SET document_json='"+doc+"' WHERE name='runner'");}return original.openLease(...a);}}),true],
+ ['live holder seen at acquire',(w,original)=>({openLease:async(...a)=>{if(!w.fired){w.fired=true;const doc=JSON.stringify({owner:'rival',runId:'11111111-1111-4111-8111-111111111111',heartbeatAt:new Date(Date.now()-60000).toISOString(),expiresAt:Date.now()+11*60000,epoch:7}).replace(/'/g,"''");sql(w.file,"UPDATE prediction_lease SET document_json='"+doc+"' WHERE name='runner'");}return original.openLease(...a);}}),true],
  ['lost compare-and-swap at acquire',(w,original)=>({writeLease:async(...a)=>{if(!w.fired&&a[2]?.expiresAt>0){w.fired=true;sql(w.file,"UPDATE prediction_domain_authority SET generation=generation+1 WHERE id=1");}return original.writeLease(...a);}}),false],
 ]){
  const w=await flowWorld({films:30});await reconcile(w);
@@ -141,7 +141,7 @@ for(const [name,hook,aged] of [
  const original=w.ctx.PredictionD1;w.fired=false;w.ctx.PredictionD1={...original,...hook(w,original)};
  const runs=()=>sql(w.file,'SELECT COUNT(*) AS n FROM prediction_run')[0].n,before=runs();
  const r=await batch(w,{manifestSize:5});
- assert.equal(r.data.status,'already_running',name+': '+JSON.stringify(r.data).slice(0,200));assert.ok(!('films' in r.data),'no manifest, no adoption');
+ assert.equal(r.data.status,'already_running',name+': '+JSON.stringify(r.data).slice(0,200));assert.ok(!('films' in r.data),'no manifest, no adoption');assert.ok(!('heartbeatAt' in r.data),'the holder\'s last write stays inside the Worker (AIR-588)');
  assert.equal(runs(),before,'no run row');
  const line=last(w);
  assert.equal(line.notes.leaseRefused,1,name);assert.equal(line.notes.leaseRefusedAtAcquire,1,name);

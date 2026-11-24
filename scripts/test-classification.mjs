@@ -1309,6 +1309,9 @@ export const FILES={
  "prediction-air-588-envelope.mjs": {
   "suite": "core"
  },
+ "prediction-air-588-lease-ttl.mjs": {
+  "suite": "core"
+ },
  "prediction-task-id.mjs": {
   "suite": "split",
   "note": "Owner-label, join, fencing and refusal semantics stay in core. The runner-clock bound of the join wait is scenario prediction-task-id-join-bound."

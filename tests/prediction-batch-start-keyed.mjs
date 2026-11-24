@@ -26,7 +26,7 @@ const manifestKey=id=>'enrichment/batch-manifest/'+id+'.json';
  assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.status,'running');assert.equal(r.data.lease.epoch,1);
  const lease=leaseDoc(w);
  assert.equal(lease.phase,'run','the claim became the run lease');assert.equal(lease.runId,r.data.runId);assert.equal(lease.epoch,1,'conversion keeps the epoch');
- assert.match(lease.keyHash,/^[0-9a-f]{64}$/);assert.match(lease.argsHash,/^[0-9a-f]{64}$/);assert.ok(lease.expiresAt>Date.now()+14*60000,'normal 15 minute TTL after conversion');
+ assert.match(lease.keyHash,/^[0-9a-f]{64}$/);assert.match(lease.argsHash,/^[0-9a-f]{64}$/);assert.ok(lease.expiresAt>Date.now()+11*60000,'normal 12-minute runner TTL after conversion');
  assert.ok(!dump(w.file).includes(KEY),'the key is in no D1 row');assert.ok(!JSON.stringify([...w.records.entries()]).includes(KEY),'the key is in no R2 record');
  // heartbeat and a gated write keep the correlation fields
  const beat=await w.api('heartbeat',{runId:r.data.runId});assert.equal(beat.status,200,JSON.stringify(beat.data).slice(0,200));
@@ -208,7 +208,7 @@ const manifestKey=id=>'enrichment/batch-manifest/'+id+'.json';
  });
 }
 
-// 10e. Failures AFTER the claim became the 15 minute run lease but BEFORE observedPrediction owns the cleanup (ADR 0188): the persist gate cannot be set (a thrown error, bounded CAS contention) and
+// 10e. Failures AFTER the claim became the 12-minute run lease but BEFORE observedPrediction owns the cleanup (ADR 0188): the persist gate cannot be set (a thrown error, bounded CAS contention) and
 // the very first fence/renew throws. A still-owned failure releases its own lease and answers a bounded recoverable `start_storage_error`; a superseded handler leaves the foreign holder untouched
 // and answers `start_claim_lost`. Neither writes a run, diagnostics row, stop Event, manifest or `latest-run`.
 {
@@ -260,15 +260,15 @@ const manifestKey=id=>'enrichment/batch-manifest/'+id+'.json';
  assert.equal(res.status,200);assert.ok(!text.includes('stale-mirror-run'),'status reads the D1 run, not the R2 mirror object');assert.ok(text.includes(first.data.runId),'status names the D1 latest run');
 }
 
-// 10b. The frozen answer, the stored copy and a joined answer all carry the converted 15 minute expiry, consistent with the lease in D1.
+// 10b. The frozen answer, the stored copy and a joined answer all carry the converted 12-minute expiry, consistent with the lease in D1.
 {
  const w=await world();
  const first=await batch(w,{invocationKey:KEY});assert.equal(first.data.status,'running');
  const lease=leaseDoc(w),stored=w.records.get(manifestKey(first.data.runId)),joined=await batch(w,{invocationKey:KEY});
- assert.ok(first.data.lease.expiresAt>Date.now()+14*60000,'the original answer carries the run expiry, not the 180 s claim expiry');
+ assert.ok(first.data.lease.expiresAt>Date.now()+11*60000,'the original answer carries the run expiry, not the 180 s claim expiry');
  assert.equal(stored.lease.expiresAt,first.data.lease.expiresAt,'the stored answer is the one the owner returned');assert.equal(joined.data.lease.expiresAt,first.data.lease.expiresAt,'a joined answer carries the same expiry');
  assert.ok(Math.abs(lease.expiresAt-first.data.lease.expiresAt)<60000,'consistent with the authoritative lease in D1 (later gate and heartbeat renewals only extend it)');
- assert.equal(first.data.lease.ttlMs,15*60000);
+ assert.equal(first.data.lease.ttlMs,12*60000);
  const run=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+first.data.runId+"'")[0].d);
  assert.equal(run.keyHash,lease.keyHash,'the run carries the key hash (ADR 0188)');assert.equal(run.argsHash,lease.argsHash,'the run carries the argument hash');
  assert.equal(lease.submitGate,undefined,'the persist gate was cleared');
