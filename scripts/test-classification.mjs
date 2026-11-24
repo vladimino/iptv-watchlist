@@ -218,6 +218,9 @@ export const FILES={
  "discovery-catalog-read-log.mjs": {
   "suite": "core"
  },
+ "letterboxd-claim-activation-rehearsal.mjs": {
+  "suite": "core"
+ },
  "letterboxd-claim-backfill.mjs": {
   "suite": "core"
  },
