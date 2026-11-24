@@ -41,6 +41,14 @@ const FAMILY_TABLES=['prediction_batch_stage','prediction_run_source_head','pred
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 async function one(binding,sql,...params){return (await binding.prepare(sql).bind(...params).first())??null;}
 async function many(binding,sql,...params){return (await binding.prepare(sql).bind(...params).all()).results||[];}
+// A statement whose text is final (every value is an inline literal) must reach D1 verbatim. The published REST binding renders `?` as a placeholder ANYWHERE in the text, a string literal of the data included,
+// so the first real chunk (a source text with a question mark in it) failed with "Missing SQL parameter" on 24 Nov 2026 before anything was sent. `verbatim` hands such a statement over as it is; a binding without it
+// (the test stand-in) keeps `prepare(sql).bind()`.
+const verbatim=(binding,sql)=>typeof binding.verbatim==='function'?binding.verbatim(sql):binding.prepare(sql).bind();
+export function restBinding(adapter){
+ const published=createPublishedBinding(adapter);
+ return {prepare:sql=>published.prepare(sql),batch:statements=>published.batch(statements),verbatim:sql=>({text:String(sql)})};
+}
 
 export const migrationText=()=>fs.readFileSync(MIGRATION_PATH,'utf8');
 export const receiptsMigrationText=()=>fs.readFileSync(RECEIPTS_MIGRATION_PATH,'utf8');
@@ -308,7 +316,7 @@ async function sendReceipted(binding,item,{generation,no,sha,field,list,ctx,atte
  const countOf=state=>list(receiptsOf(state,generation)).length;
  for(let attempt=1;;attempt++){
   try{
-   await write(binding,item.sql.map(sql=>binding.prepare(sql).bind()),{ctx,untouched:after=>countOf(after)===no-1});
+   await write(binding,item.sql.map(sql=>verbatim(binding,sql)),{ctx,untouched:after=>countOf(after)===no-1});
    return {applied:'this_attempt',attempts:attempt};
   }catch(error){
    if(!(error instanceof OperatorStop)||!['write_uncertain','statement_failed'].includes(error.reason))throw error;
@@ -363,7 +371,7 @@ export async function execute(command,{binding,now,ctx={},params={},limits={}}){
   const decision=applyDecision(state);if(decision!=='apply')throw new OperatorStop(decision,3);
   const parts=state.installed?['0035']:['0034','0035'];
   const startVersion=state.installed?34:33;
-  await write(binding,migrationSql(parts).map(sql=>binding.prepare(sql).bind()),{ctx:track,untouched:after=>after.schemaVersion===startVersion&&after.tables===(state.installed?AUX_TABLES.length:0)&&after.receiptTables===0});
+  await write(binding,migrationSql(parts).map(sql=>verbatim(binding,sql)),{ctx:track,untouched:after=>after.schemaVersion===startVersion&&after.tables===(state.installed?AUX_TABLES.length:0)&&after.receiptTables===0});
   const after=await readback(binding,track),problems=[];
   if(after.schemaVersion!==35)problems.push('schema_version');
   if(!markerIs(after,'r2',0))problems.push('marker');
@@ -432,7 +440,7 @@ export async function execute(command,{binding,now,ctx={},params={},limits={}}){
   if(decision!=='seal')throw new OperatorStop(decision,3);
   const statements=sealStatements(params.converted.plan,{generation,chunkCount:plans.chunking.chunkCount,sliceCount:plans.slicing.sliceCount});
   checkBatch('seal',statements,plans.budget);
-  await write(binding,statements.map(sql=>binding.prepare(sql).bind()),{ctx:track,untouched:after=>!receiptsOf(after,generation).seal});
+  await write(binding,statements.map(sql=>verbatim(binding,sql)),{ctx:track,untouched:after=>!receiptsOf(after,generation).seal});
   const after=await readback(binding,track),problems=[];
   const seal=receiptsOf(after,generation).seal;
   if(!markerIs(after,'closed',generation))problems.push('marker');
@@ -454,7 +462,7 @@ export async function execute(command,{binding,now,ctx={},params={},limits={}}){
   const statements=flipStatements(converted.plan,{generation,chunkCount:plans.chunking.chunkCount,sliceCount:plans.slicing.sliceCount,activatedAt});
   checkBatch('flip',statements,plans.budget);
   // ONE small atomic batch: the guard (marker, seal, receipts 1 to K and slices 1 to M of the one plan digest, totals, outbox states) and the marker move to d1.
-  await write(binding,statements.map(sql=>binding.prepare(sql).bind()),{ctx:track,untouched:after=>markerIs(after,'closed',generation)});
+  await write(binding,statements.map(sql=>verbatim(binding,sql)),{ctx:track,untouched:after=>markerIs(after,'closed',generation)});
   const after=await readback(binding,track),problems=[];
   const want=expectedCounts(converted.report);
   if(!markerIs(after,'d1',generation+1)||after.marker.activatedAt!==activatedAt)problems.push('marker');
@@ -552,7 +560,7 @@ export async function runPredictionAuxCutoverProduction({argv=process.argv,env=p
    const adapter=trackProductionWrites(createD1Adapter({target:adapterTarget,databaseId:PRODUCTION_DATABASE_ID,fetchImpl}),{writeState:'none'});
    const described=await adapter.describe();
    if(described.uuid!==PRODUCTION_DATABASE_ID||described.name!==PRODUCTION_DATABASE_NAME)throw new OperatorStop('target_identity_mismatch',3);
-   binding=createPublishedBinding(adapter);
+   binding=restBinding(adapter);
    if(parsed.command!=='status')ctx.bookmark=await readBookmark(adapterTarget,fetchImpl);
   }
   const result=await execute(parsed.command,{binding,now,ctx:{track},params,limits});
