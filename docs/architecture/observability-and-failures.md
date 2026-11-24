@@ -88,7 +88,7 @@ The user-facing «События» journal carries one `ratings` event per termi
 
 ## Discovery hourly report in the user Events Log (AIR-410)
 
-The user-facing «События» journal carries one `discovery` event per **scheduled hourly firing**, with the deltas since the previous report, whatever the Workflow is doing ([ADR 0111](../adr/0111-discovery-hourly-reports.md), which replaces the per-chain tick model of the first AIR-410 delivery). It is a product view of the executor record, separate from monitoring and alerting, and it changes no Discovery step, schedule, lease or authority. Chunk checkpoints add their summary to one accumulator in the executor record (deduplicated by chunk key); the hourly cron closes the period in one compare-and-swap into a capped `outbox`, and the event is written create-only under the generation and UTC hour after that. A lost put is delivered by the next firing without repeating a chunk or a TMDB request; a close that cannot be persisted writes one compact `report_failed` notice without numbers, logs one typed line (`discovery_hour_close_failed`, with `notice` delivered, queued or lost) and leaves the deltas for the next report ([ADR 0118](../adr/0118-discovery-report-failure-notice.md)); a missed hour is not backfilled. See the [events reference](../reference/domain/events.md#discovery-hourly-report-discovery).
+The user-facing «События» journal carries one `discovery` event per **scheduled hourly firing**, with the deltas since the previous report, whatever the Workflow is doing ([ADR 0111](../adr/0111-discovery-hourly-reports.md), which replaces the per-chain tick model of the first AIR-410 delivery). It is a product view of the executor record, separate from monitoring and alerting, and it changes no Discovery step, schedule, lease or authority. Chunk checkpoints add their summary to one accumulator in the executor record (deduplicated by chunk key); the hourly cron closes the period in one compare-and-swap into a capped `outbox`, and the event is written create-only under the generation and UTC hour after that. A lost put is delivered by the next firing without repeating a chunk or a TMDB request; a close that cannot be persisted writes one compact `report_failed` notice without numbers, logs one typed line (`discovery_hour_close_failed`, with `notice` delivered, queued or lost) and leaves the deltas for the next report ([ADR 0118](../adr/0118-discovery-report-failure-notice.md)); a missed hour is not backfilled. A close refused by the EPG-priority pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md)) is that notice with the reason `epg_priority`, shown as «Discovery приостановлен на время обновления программы» with a warning badge, not as a failed report; a genuine lost compare-and-swap stays `write_conflict` ([AIR-595](https://trello.com/c/dPjrNIbQ)). See the [events reference](../reference/domain/events.md#discovery-hourly-report-discovery).
 
 ## Deferred prediction start and repeated orphan starts (ADR 0193)
 
@@ -105,6 +105,21 @@ An inert monitor reads the stored status of EPG, Discovery, Ratings and the pred
 ## Canonical Producer stream (AIR-572)
 
 The Producer was invisible for a week because no monitor stream judged it: 113 of 113 Workflow instances `errored` with zero steps while the EPG stayed healthy. `canonical_producer` now sits beside the other streams in the same hourly `Monitor.run`. It reads at most four bounded D1 rows (published `P:g`, its chain by primary key, its run by indexed generation), treats only a change of the run's own counters or cursor as progress (never a publication, takeover, lease renewal or heartbeat), alerts after 2 hours without it and at once on a stop, and reports a deliberate delivery hold as `held_by_delivery`, never healthy. Details and the state table: [monitor reference](../reference/api/monitor.md#canonical-producer-stream) and [runbook](../runbooks/monitoring.md#canonical-producer-canonical_producer_-alerts-air-572-adr-0141).
+
+## Canonical Producer outcomes in the user Events Log (AIR-594)
+
+Beside the Monitor stream, the user-facing «События» journal carries one `canonical_producer` event per Producer outcome: a completed pass `P:g`, a recorded stop `(P, epoch)`, an in-flight pass superseded by a newer publication, or a held automatic retry ([ADR 0208](../adr/0208-producer-outcome-events-delivery-store.md), Accepted, option B). The outcome is a D1 row of `canonical_producer_outcome`, inserted last and asserted in the same batch as the transition, so a transition is never committed without its outcome. The hourly reconcile delivers pending rows create-only to the R2 journal after all its decisions; a refused put leaves the row pending and never blocks the Producer. Rows are kept indefinitely. Until migration `0038` is applied (a separate owner GO) the schema probe proves the table absent and nothing is reported. See the [events reference](../reference/domain/events.md#canonical-producer-outcome-report-canonical_producer).
+
+```mermaid
+flowchart LR
+    wf["Producer Workflow instance"] -->|"pass completion or stop:<br/>one D1 batch, outcome row last"| d1[("D1 canonical_producer_outcome<br/>pending, kept indefinitely")]
+    rec["Hourly reconcile"] -->|"in-flight supersede or held:<br/>one guarded D1 batch"| d1
+    d1 -->|"at most 8 due rows a tick"| drain["Drain in the hourly reconcile"]
+    drain -->|"create-only put"| journal["R2 events/items/<br/>type canonical_producer"]
+    drain -->|"CAS: delivered, or retry in 1 h"| d1
+    d1 -.->|"read-only fact, no alert"| mon["Monitor stream canonical_producer<br/>outcomeDelivery"]
+    journal --> api["GET /api/events<br/>read-only"]
+```
 
 ## Catalog poster weekly retry: one fact source, three surfaces
 
