@@ -126,13 +126,9 @@ const Monitor=(()=>{
  const TELEGRAM_TOKEN=/^\d{5,15}:[A-Za-z0-9_-]{30,60}$/,TELEGRAM_CHAT=/^(-?\d{1,20}|@[A-Za-z][A-Za-z0-9_]{4,31})$/;
  const telegramConfig=env=>{const token=typeof env?.MONITOR_TELEGRAM_BOT_TOKEN==='string'?env.MONITOR_TELEGRAM_BOT_TOKEN.trim():'',chat=typeof env?.MONITOR_TELEGRAM_CHAT_ID==='string'?env.MONITOR_TELEGRAM_CHAT_ID.trim():'';return TELEGRAM_TOKEN.test(token)&&TELEGRAM_CHAT.test(chat)?{token,chat}:null;};
  const channelReady=env=>{const name=transportName(env);return name==='telegram'?!!telegramConfig(env):name==='webhook'?!!httpsUrl(env?.MONITOR_WEBHOOK_URL):false;};
- const TELEGRAM_KIND={alert:'ALERT',reminder:'REMINDER',escalation:'ESCALATION',recovery:'RECOVERED',test:'TEST'};
- const plain=(value,max)=>String(value??'').replace(/[^\x20-\x7E]+/g,' ').replace(/\s+/g,' ').trim().slice(0,max);
- // Plain text only (no markup mode is requested), so nothing is interpreted; fields are ASCII-limited and bounded well under Telegram's 4096 characters.
- const telegramText=(message,overall,now)=>[
-  'IPTV monitor: '+(TELEGRAM_KIND[message.kind]||'MESSAGE')+' ('+plain(message.severity,16)+(message.critical===true?', critical':'')+')',
-  'Stream: '+plain(message.stream,32),'Issue: '+plain(message.key,64),plain(message.message,300),
-  'Overall: '+plain(overall||'unknown',16),'At: '+iso(now),'Ref: '+plain(message.id,120)].join('\n');
+ // Plain text only (no markup mode is requested), so nothing is interpreted. The human-facing text (ADR 0206 decision 6) is rendered by the pure
+ // MonitorMessage from the message's own fields: fixed Russian labels and emoji, typed metrics, Madrid times, the stable id as the last line.
+ const telegramText=(message,overall,now)=>MonitorMessage.telegramText(message,{overall,now});
  const HOLD_MAX_MS=3600000,HOLD_DEFAULT_MS=60000;
  async function sendTelegram(env,message,overall,now){
   const config=telegramConfig(env);
@@ -208,8 +204,9 @@ const Monitor=(()=>{
     const after={lastSentAt:entry.lastSentAt,sendCount:entry.sendCount,sendDay:entry.sendDay,sendsToday:entry.sendsToday};
     entry.lastSentAt=before?.lastSentAt||null;entry.sendCount=before?.sendCount||0;entry.sendsToday=before?.sendDay===day?before.sendsToday||0:0;
     const pending=outbox.find(item=>item.key===message.key&&item.kind!=='recovery');
-    if(pending){pending.severity=message.severity;pending.critical=message.critical===true;pending.message=message.message;pending.after=after;if(pending.kind!=='alert')pending.kind=message.kind;}
-    else outbox.push({...message,id:message.key+'|'+message.kind+'|'+iso(now),queuedAt:iso(now),after});
+    // `observedAt` is the tick this content describes (ADR 0206 decision 6); the id and queue time of a pending message stay as they were.
+    if(pending){pending.severity=message.severity;pending.critical=message.critical===true;pending.message=message.message;pending.after=after;pending.observedAt=iso(now);if(message.metrics)pending.metrics=message.metrics;else delete pending.metrics;if(pending.kind!=='alert')pending.kind=message.kind;}
+    else outbox.push({...message,id:message.key+'|'+message.kind+'|'+iso(now),queuedAt:iso(now),observedAt:iso(now),after});
    }
    const queued=outbox;
    const publishedRunId=facts.epg?.publishedRunId||null,predictions=facts.predictions?.present?{pendingCount:facts.predictions.pendingCount,processedTotal:facts.predictions.processedTotal,progressAt:facts.predictions.lastProgressAt,progressBasis:'evidence',unknownSince:facts.predictions.unknownSince}:doc?.predictions||null;

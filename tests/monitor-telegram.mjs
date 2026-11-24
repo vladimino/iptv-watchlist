@@ -18,7 +18,7 @@ function setup(extraEnv={},{bucket=makeBucket(),policyFile='src/domain/monitor-p
  const {clock,FakeDate,crypto}=makeClock(T0),net=makeNetwork();
  const ctx=loadContext({net,clock,FakeDate,crypto});
  const logs=[];ctx.console={log:line=>logs.push(String(line)),warn:line=>logs.push(String(line)),error:line=>logs.push(String(line))};
- vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scoped(policyFile,'MonitorPolicy')+'\n'+fs.readFileSync(monitorFile,'utf8'),ctx);
+ vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scoped(policyFile,'MonitorPolicy')+'\n'+scoped('src/domain/monitor-message.js','MonitorMessage')+'\n'+fs.readFileSync(monitorFile,'utf8'),ctx);
  const calls=[];let script=()=>({status:200,body:{ok:true,result:{message_id:1}}});
  ctx.fetch=async(url,options={})=>{
   const entry={url:String(url),method:options.method||'GET',body:options.body?JSON.parse(options.body):null};calls.push(entry);
@@ -53,8 +53,9 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  assert.deepEqual(Object.keys(sent[0].body).sort(),['chat_id','disable_web_page_preview','text'],'no parse_mode: plain text');
  assert.equal(sent[0].body.chat_id,CHAT);assert.equal(sent[0].body.disable_web_page_preview,true);
  const lines=sent[0].body.text.split('\n');
- assert.equal(lines[0],'IPTV monitor: ALERT (degraded, critical)');assert.ok(lines.includes('Stream: ratings'));assert.ok(lines.includes('Issue: ratings_quarantined'));
- assert.ok(lines.some(line=>line.startsWith('Overall: ')));assert.ok(lines.includes('At: '+at(T0)));assert.ok(lines.some(line=>line.startsWith('Ref: ratings_quarantined|alert|')));
+ assert.equal(lines[0],'🚨 Сбой · Оценки');assert.equal(lines[1],'Оценки в карантине');assert.ok(lines.includes('• Причина: budget_exhausted'),'typed metric, not the English sentence');
+ assert.ok(lines.some(line=>line.startsWith('Серьёзность: 🔴 критично')));assert.ok(lines.some(line=>line.startsWith('🌐 В целом: ')));
+ assert.ok(lines.includes('Время: 06.11 23:00:00 · Мадрид (Europe/Madrid)'),'Madrid time, labelled');assert.ok(lines.at(-1).startsWith('Ref: ratings_quarantined|alert|'),'the stable id is the last line');
  const doc=t.bucket.value(KEY);assert.deepEqual(doc.outbox,[]);assert.equal(doc.alerts.issues.ratings_quarantined.sendCount,1);assert.equal(doc.lastDeliveryFailure,null);
  assert.equal(t.calls.filter(item=>item.method==='GET').length,1,'the heartbeat ping is unchanged');
 }
@@ -63,15 +64,21 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
 {
  const t=setup();
  const text=kind=>(t.M.internals.telegramText({kind,severity:'degraded',stream:'epg',key:'epg_stale',message:'No generation published',id:'x'},'degraded',T0)).split('\n')[0];
- assert.deepEqual(['alert','reminder','escalation','recovery','test'].map(text),['IPTV monitor: ALERT (degraded)','IPTV monitor: REMINDER (degraded)','IPTV monitor: ESCALATION (degraded)','IPTV monitor: RECOVERED (degraded)','IPTV monitor: TEST (degraded)']);
+ assert.deepEqual(['alert','reminder','escalation','recovery','test'].map(text),['⚠️ Проблема · Программа','🔁 Напоминание · Программа','⛔ Ухудшение · Программа','✅ Восстановлено · Программа','🧪 Тест · Программа']);
+ assert.equal(t.M.internals.telegramText({kind:'alert',severity:'degraded',critical:true,stream:'epg',key:'epg_authority',id:'x'},'degraded',T0).split('\n')[0],'🚨 Сбой · Программа','a critical alert has its own marker');
 }
 
-// 3. Plain-text encoding: markup, control characters and non-ASCII are neutralized and every field is bounded.
+// 3. Plain-text encoding: every dynamic value is reduced to printable ASCII (codes, the legacy English detail, the id) and bounded; only the fixed
+// Russian labels and emoji of the renderer are non-ASCII. Markup, control and direction characters cannot get in and a newline cannot add lines.
 {
  const t=setup();
- const body=t.M.internals.telegramText({kind:'alert',severity:'degraded',stream:'epg\n<b>',key:'k_<i>*[x](y)',message:'<b>bold</b> *a* _b_ `c` [l](http://x) é\u0007\n\nline'+'z'.repeat(2000),id:'id'+'q'.repeat(500)},'degraded',T0);
- assert.doesNotMatch(body,/[^\x20-\x7E\n]/,'only printable ASCII and the field separators remain');
- assert.ok(body.length<1000,'far below the 4096-character Telegram limit');assert.equal(body.split('\n').length,7,'a newline in a field cannot add lines');
+ const body=t.M.internals.telegramText({kind:'alert',severity:'degraded',stream:'epg\n<b>',key:'k_<i>*[x](y)',message:'<b>bold</b> *a* _b_ `c` [l](http://x) é\u0007\u202e\n\nline'+'z'.repeat(2000),metrics:{reason:'r\n\u202ex'},id:'id\n'+'q'.repeat(500)},'degraded',T0);
+ const fixed=new Set([...fs.readFileSync('src/domain/monitor-message.js','utf8')].filter(ch=>ch.codePointAt(0)>0x7e));
+ assert.ok([...body].every(ch=>ch==='\n'||(ch.codePointAt(0)>=0x20&&ch.codePointAt(0)<=0x7e)||fixed.has(ch)),'non-ASCII only from the fixed labels');
+ assert.doesNotMatch(body,/[\u0000-\u0009\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]|é/,'no control, direction or foreign character');
+ assert.ok(body.length<=1800,'far below the 4096-character Telegram limit');
+ const lines=body.split('\n');assert.equal(lines[0],'⚠️ Проблема · epgb','an unknown stream is shown as its sanitized code');assert.ok(lines.find(line=>line.startsWith('Детали: ')).length<=210,'the legacy detail is bounded');
+ assert.equal(lines.filter(line=>line.startsWith('Ref: ')).length,1);assert.ok(lines.at(-1).length<=126);
 }
 
 // 4. A failed Telegram answer is never a delivery: the message stays queued, nothing is counted and the reason is a fixed code.
@@ -172,7 +179,7 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  assert.deepEqual(t.bucket.value(KEY).outbox.slice(0,3).map(item=>item.id.slice(0,2)),['se','se','se']);assert.deepEqual(t.bucket.value(KEY).outbox.slice(-2).map(item=>item.id),['seed_0|recovery|x','seed_1|recovery|x'],'failed heads moved to the tail');
  t.answer(()=>({status:200,body:{ok:true,result:{}}}));let hour=2;
  for(;t.bucket.value(KEY).outbox.length&&hour<20;hour++)await t.M.run(t.env,{now:T0+hour*H});
- assert.equal(hour,8,'drained at five per tick');assert.equal(new Set(tg(t.calls).filter(item=>item.body.text.startsWith('IPTV monitor: RECOVERED')).map(item=>item.body.text.split('\n').find(line=>line.startsWith('Ref: ')))).size,30,'all thirty Refs were delivered');
+ assert.equal(hour,8,'drained at five per tick');assert.equal(new Set(tg(t.calls).filter(item=>item.body.text.startsWith('✅ Восстановлено')).map(item=>item.body.text.split('\n').find(line=>line.startsWith('Ref: ')))).size,30,'all thirty Refs were delivered');
 }
 
 // 10. Concurrent ticks send once over Telegram; a recovery superseded by a reoccurrence is never sent.
@@ -181,7 +188,7 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  t.answer(()=>({status:500,raw:''}));await t.M.run(t.env,{now:T0+H});
  assert.deepEqual(t.bucket.value(KEY).outbox.map(item=>item.kind),['recovery']);owner(t);
  t.answer(()=>({status:200,body:{ok:true,result:{}}}));const before=tg(t.calls).length;await t.M.run(t.env,{now:T0+2*H});
- const fresh=tg(t.calls).slice(before);assert.deepEqual(fresh.map(item=>item.body.text.split('\n')[0]),['IPTV monitor: ALERT (degraded, critical)'],'only the new alert is sent: the pending recovery was superseded');
+ const fresh=tg(t.calls).slice(before);assert.deepEqual(fresh.map(item=>item.body.text.split('\n')[0]),['🚨 Сбой · Оценки'],'only the new alert is sent: the pending recovery was superseded');
  assert.deepEqual(t.bucket.value(KEY).outbox,[]);
 }
 {
@@ -194,7 +201,7 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
 {
  const t=setup();healthy(t.bucket);await t.M.run(t.env,{now:T0});
  const sent=plain(await t.M.test(t.env,T0+MIN));assert.equal(sent.sent,true);
- const message=tg(t.calls).at(-1);assert.equal(message.body.text.split('\n')[0],'IPTV monitor: TEST (test)');assert.match(message.body.text,/No incident/);
+ const message=tg(t.calls).at(-1);assert.equal(message.body.text.split('\n')[0],'🧪 Тест · Монитор');assert.match(message.body.text,/Инцидента нет/);
  assert.equal(t.bucket.value(KEY).lastTestAt,at(T0+MIN));assert.equal(plain(await t.M.test(t.env,T0+2*MIN)).reason,'recent');
  const f=setup();healthy(f.bucket);await f.M.run(f.env,{now:T0});f.answer(()=>({status:401,body:{ok:false}}));
  assert.deepEqual([plain(await f.M.test(f.env,T0+MIN)).sent,f.bucket.value(KEY).lastTestAt],[false,null],'a failed test does not spend the cooldown');
@@ -226,22 +233,22 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  assert.equal(t.bucket.value(KEY).overall,'needs_owner','the status read writes nothing');
  await t.M.run(t.env,{now:T0});
  const sent=tg(t.calls);assert.equal(sent.length,1,'only the undelivered message: no new alert, escalation or recovery because the enum changed');
- const lines=sent[0].body.text.split('\n');assert.equal(lines[0],'IPTV monitor: REMINDER (degraded, critical)');assert.equal(lines.at(-1),'Ref: '+pendingId,'the receiver can still drop a repeat by its id');
+ const lines=sent[0].body.text.split('\n');assert.equal(lines[0],'🔁 Напоминание · Оценки');assert.equal(lines.at(-1),'Ref: '+pendingId,'the receiver can still drop a repeat by its id');
  const doc=t.bucket.value(KEY);assert.doesNotMatch(JSON.stringify(doc),/needs_owner/,'the next write carries no needs_owner');
  assert.deepEqual(doc.outbox,[]);assert.equal(doc.overall,'degraded');
- assert.deepEqual(doc.alerts.issues[issue],{severity:'degraded',critical:true,firstSeenAt:at(T0-3*H),seen:4,lastSentAt:at(T0),sendCount:2,sendDay:day,sendsToday:2},'history kept; the delivery at T0 (not the queue time T0-1h) is the last send');
+ assert.deepEqual(doc.alerts.issues[issue],{severity:'degraded',critical:true,firstSeenAt:at(T0-3*H),seen:4,lastSentAt:at(T0),sendCount:2,sendDay:day,sendsToday:2,stream:'ratings',metrics:{reason:'budget_exhausted'}},'history kept; the delivery at T0 (not the queue time T0-1h) is the last send');
  for(const hour of [1,2,3,4,5])await t.M.run(t.env,{now:T0+hour*H});
  assert.equal(tg(t.calls).length,1,'no reminder before 6 h after the successful delivery');
- await t.M.run(t.env,{now:T0+6*H});assert.deepEqual(tg(t.calls).slice(1).map(item=>item.body.text.split('\n')[0]),['IPTV monitor: REMINDER (degraded, critical)'],'the reminder 6 h after the last delivery');
+ await t.M.run(t.env,{now:T0+6*H});assert.deepEqual(tg(t.calls).slice(1).map(item=>item.body.text.split('\n')[0]),['🔁 Напоминание · Оценки'],'the reminder 6 h after the last delivery');
  t.ctx.model={mode:'cloudflare',health:'healthy',failure:null};
  await t.M.run(t.env,{now:T0+7*H});await t.M.run(t.env,{now:T0+8*H});
- assert.deepEqual(tg(t.calls).slice(2).map(item=>item.body.text.split('\n')[0]),['IPTV monitor: RECOVERED (healthy)'],'one recovery');
+ assert.deepEqual(tg(t.calls).slice(2).map(item=>item.body.text.split('\n')[0]),['✅ Восстановлено · Оценки'],'one recovery');
 }
 
 // 14. ADR 0206 settlement: a delayed delivery counts from its successful send, on the UTC day it was sent, never from the time it was queued.
 {
  const first=lines=>lines.map(item=>item.body.text.split('\n')[0]);
- const issueSends=t=>tg(t.calls).filter(item=>item.body.text.includes('\nIssue: ratings_quarantined\n'));
+ const issueSends=t=>tg(t.calls).filter(item=>item.body.text.includes('\nRef: ratings_quarantined|'));
  // (a) A pending escalation that the planner does not re-plan (inside the interval) is delivered after UTC midnight: the send belongs to the new day.
  const a=setup();healthy(a.bucket);owner(a);
  a.bucket.set(KEY,{schemaVersion:1,updatedAt:at(T0-30*MIN),heartbeatAt:at(T0-30*MIN),mode:'on',overall:'degraded',streams:[],
@@ -251,13 +258,13 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  a.answer(()=>({status:500,raw:''}));await a.M.run(a.env,{now:T0+H});await a.M.run(a.env,{now:T0+2*H});
  assert.equal(a.bucket.value(KEY).outbox.length,1,'kept over the outage, across midnight');
  a.answer(()=>({status:200,body:{ok:true,result:{}}}));await a.M.run(a.env,{now:T0+3*H});
- assert.deepEqual(first(issueSends(a).slice(-1)),['IPTV monitor: ESCALATION (degraded, critical)']);
+ assert.deepEqual(first(issueSends(a).slice(-1)),['⛔ Ухудшение · Оценки']);
  const settledA=a.bucket.value(KEY).alerts.issues.ratings_quarantined;
  assert.deepEqual([settledA.lastSentAt,settledA.sendDay,settledA.sendsToday,settledA.sendCount],[at(T0+3*H),'2026-11-07',1,2],'settled at the delivery (01:00Z) on 7 Nov, not at the queue time (21:30Z) on 6 Nov');
  const delivered=issueSends(a).length;
  for(const hour of [4,5,6,7,8])await a.M.run(a.env,{now:T0+hour*H});
  assert.equal(issueSends(a).length,delivered,'no reminder before 6 h after the successful delivery (it would have come at 03:30Z from the queue time)');
- await a.M.run(a.env,{now:T0+9*H});assert.deepEqual(first(issueSends(a).slice(delivered)),['IPTV monitor: REMINDER (degraded, critical)'],'the reminder at 07:00Z, 6 h after the delivery');
+ await a.M.run(a.env,{now:T0+9*H});assert.deepEqual(first(issueSends(a).slice(delivered)),['🔁 Напоминание · Оценки'],'the reminder at 07:00Z, 6 h after the delivery');
  // (b) An outage longer than six hours, starting with a Telegram 429 hold and crossing midnight: the late reminder resets the interval at its delivery.
  const b=setup();healthy(b.bucket);owner(b);await b.M.run(b.env,{now:T0});assert.equal(issueSends(b).length,1,'the critical alert at 22:00Z');
  b.answer(()=>({status:429,body:{ok:false,parameters:{retry_after:3600}}}));await b.M.run(b.env,{now:T0+6*H});
@@ -266,7 +273,7 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  let entry=b.bucket.value(KEY).alerts.issues.ratings_quarantined;
  assert.deepEqual([entry.lastSentAt,entry.sendCount,b.bucket.value(KEY).outbox.length],[at(T0),1,1],'nothing counted during the outage, one pending reminder');
  b.answer(()=>({status:200,body:{ok:true,result:{}}}));const before=issueSends(b).length;await b.M.run(b.env,{now:T0+14*H});
- assert.deepEqual(first(issueSends(b).slice(before).filter((item,index,all)=>index===all.length-1)),['IPTV monitor: REMINDER (degraded, critical)']);
+ assert.deepEqual(first(issueSends(b).slice(before).filter((item,index,all)=>index===all.length-1)),['🔁 Напоминание · Оценки']);
  entry=b.bucket.value(KEY).alerts.issues.ratings_quarantined;
  assert.deepEqual([entry.lastSentAt,entry.sendDay,entry.sendsToday,entry.sendCount],[at(T0+14*H),'2026-11-07',1,2],'the reminder delivered 8 h late is settled at 12:00Z on 7 Nov');
  const afterLate=issueSends(b).length;

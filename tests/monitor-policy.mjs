@@ -179,7 +179,7 @@ const keys=result=>result.issues.map(item=>item.key);
  const legacy={issues:{ratings_quarantined:{severity:'needs_owner',firstSeenAt:at(t0-30*H),seen:30,lastSentAt:at(t0-3*H),sendCount:5,sendDay:'2026-11-24',sendsToday:2}}};
  const kept=P.planAlerts(hard,legacy,t0);
  assert.deepEqual(kept.sends,[],'no new alert, reminder or escalation only because the enum changed');
- assert.deepEqual(kept.state.issues.ratings_quarantined,{severity:'degraded',critical:true,firstSeenAt:at(t0-30*H),seen:31,lastSentAt:at(t0-3*H),sendCount:5,sendDay:'2026-11-24',sendsToday:2});
+ assert.deepEqual(kept.state.issues.ratings_quarantined,{severity:'degraded',critical:true,firstSeenAt:at(t0-30*H),seen:31,lastSentAt:at(t0-3*H),sendCount:5,sendDay:'2026-11-24',sendsToday:2,stream:'ratings'});
  assert.deepEqual(P.planAlerts(hard,legacy,t0+3*H).sends.map(item=>[item.kind,item.severity,item.critical]),[['reminder','degraded',true]]);
  // A legacy needs_owner issue that is now reported as a fresh critical issue under the same key is the same issue; one that cleared recovers once.
  assert.deepEqual(P.planAlerts([],legacy,t0).sends.map(item=>[item.kind,item.key,item.severity]),[['recovery','ratings_quarantined','healthy']]);

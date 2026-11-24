@@ -29,7 +29,7 @@ Sends one synthetic message (`kind: test`, key `monitor_test`) through the confi
 
 ## Alert message (webhook transport)
 
-A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-monitor`), `id` (a stable idempotency id, repeated on a retry of the same message), `at`, `kind` (`alert`, `reminder`, `escalation`, `recovery`, `test`), `severity` (`degraded`, `healthy` for a recovery, `test`), `critical` (boolean, ADR 0206), `stream`, `key`, `message`, `overall`. No titles, ratings, credentials or private records.
+A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-monitor`), `id` (a stable idempotency id, repeated on a retry of the same message), `at`, `kind` (`alert`, `reminder`, `escalation`, `recovery`, `test`), `severity` (`degraded`, `healthy` for a recovery, `test`), `critical` (boolean, ADR 0206), `stream`, `key`, `message`, `overall`. A recovery names the stream stored with its issue (since ADR 0206; an issue stored before it keeps the key prefix, for example `canonical`). The webhook carries no presentation field: `metrics`, the Russian text and the durations are Telegram-only. No titles, ratings, credentials or private records.
 
 ## Issue keys
 
@@ -55,11 +55,31 @@ Delivery is at-least-once. Webhook receivers should drop a message whose `id` th
 
 ## Telegram transport (`MONITOR_TRANSPORT=telegram`)
 
-Configured only through the Worker bindings `MONITOR_TELEGRAM_BOT_TOKEN` (a Worker secret) and `MONITOR_TELEGRAM_CHAT_ID` (a plain Worker variable that identifies the destination; the code reads both as environment strings; see [ADR 0097](../../adr/0097-monitor-telegram-bot-api-transport.md) decision 3); a missing or malformed value makes `alerting` false and nothing is sent (the outbox is kept). Each message is one `POST https://api.telegram.org/bot<token>/sendMessage` (a fixed endpoint, 10 second timeout) with `chat_id`, `text` and `disable_web_page_preview: true`; no `parse_mode`, so the text is plain. The text is, in order: `IPTV monitor: <ALERT|REMINDER|ESCALATION|RECOVERED|TEST> (<severity>)` (`(degraded, critical)` for a critical issue), `Stream: <stream>`, `Issue: <key>`, the short diagnostic, `Overall: <state>`, `At: <UTC time>` and `Ref: <outbox id>`. Fields are limited to printable ASCII and a fixed length. No title, rating, personal datum or secret is sent.
+Configured only through the Worker bindings `MONITOR_TELEGRAM_BOT_TOKEN` (a Worker secret) and `MONITOR_TELEGRAM_CHAT_ID` (a plain Worker variable that identifies the destination; the code reads both as environment strings; see [ADR 0097](../../adr/0097-monitor-telegram-bot-api-transport.md) decision 3); a missing or malformed value makes `alerting` false and nothing is sent (the outbox is kept). Each message is one `POST https://api.telegram.org/bot<token>/sendMessage` (a fixed endpoint, 10 second timeout) with `chat_id`, `text` and `disable_web_page_preview: true`; no `parse_mode`, so the text is plain. The text is the human-facing rendering of [ADR 0206](../../adr/0206-monitor-four-states-one-reminder-interval.md) decision 9 (proposed), described under [Telegram text](#telegram-text). No title, rating, personal datum or secret is sent.
 
 A delivery counts only when the HTTP status is successful **and** the body says `ok: true`. Every other answer leaves the message queued and uncounted, with a fixed reason in `lastDeliveryFailure` (`telegram_not_ok`, `http_<status>`, `malformed_response`, `timeout`, `network`, `rate_limited`, `config_invalid`, `transport_invalid`); the AIR-349 budget (five attempts per tick, stop after two consecutive failures, rotation to the tail) is unchanged. On a 429 the answer's `retry_after` (or the `Retry-After` header; one minute when absent; capped at one hour) is stored as `holdUntil`: ticks before it make no attempt, `POST /api/monitor/test` answers `rate_limited`, and nothing sleeps. Telegram has no idempotency key, so `Ref` helps a reader but cannot deduplicate; a crash after Telegram accepted a message and before the state commit can repeat it. Exactly-once is not claimed.
 
 The status adds `holdUntil` and `lastDeliveryFailure` (`{at, reason}`) next to `outbox`, `outboxOldestAt` and `cancelledUndelivered`.
+
+## Telegram text
+
+ADR 0206 decision 9 (proposed, owner review pending); rendered by the pure `MonitorMessage.telegramText` (`src/domain/monitor-message.js`) from the message's own fields. Samples: [rendered offline samples](../../evidence/monitoring/telegram-format-air-592-2026-11-24.md).
+
+| Line | Content |
+| --- | --- |
+| Header | Marker, kind and subsystem: `🚨 Сбой` (critical alert), `⚠️ Проблема` (ordinary alert), `🔁 Напоминание`, `⛔ Ухудшение`, `✅ Восстановлено`, `🧪 Тест`, then `·` and the subsystem (`Программа`, `Находки`, `Оценки`, `Прогнозы`, `Постеры`, `Letterboxd Sync`, `Обогащение каталога`, `Монитор`) |
+| Problem | A fixed Russian title per issue key (`Решено: …` on a recovery); an unknown key shows its sanitized code |
+| Severity | `🔴 критично` or `🟠 деградация`; on a recovery `Была критичной` when it was |
+| Statistics | `• label: value` lines from the issue's typed `metrics` (for example eligible and queued predictions, ownerless starts, remaining Discovery chunks, the EPG due time and last publication, the quarantine or stop reason, the poster detail, the Letterboxd backlog). Left out when unknown; never on a recovery |
+| `⏱ Без прогресса` | The domain's own no-progress period and its onset (last confirmed progress), when the facts carry it; `⏱ Опоздание` for EPG |
+| `🕒 Инцидент открыт` | The monitor's observed lifetime: from `firstSeenAt` (first snapshot, possibly before the confirmation) to the observation that planned the message (`observedAt`, else the queue time) |
+| `🕒 Длительность инцидента` | Recovery only: `firstSeenAt` to the detection (`endedAt`, frozen when planned; legacy: queue time). A late delivery never lengthens it |
+| `📨 Отправлено с задержкой` | Only when the send is more than 15 minutes after the observation or detection |
+| `🌐 В целом` | The overall state at the send. On a recovery while the site is still degraded: `остаются другие проблемы (восстановлена только эта)` |
+| `Время` | The send time in Europe/Madrid, labelled; all times in the text are Madrid |
+| `Ref` | Always the last line: the stable outbox id (UTC inside), the key to drop a repeat |
+
+Unknown or malformed times read `неизвестно`, never 0. Dynamic values are numbers, times or printable ASCII; control, zero-width and direction characters are removed; no markup mode is sent; the text is at most 1800 characters. A message written before ADR 0206 (no `metrics`, no `observedAt`, `severity: needs_owner`) renders as critical with its bounded English detail.
 
 ## Catalog poster stream
 

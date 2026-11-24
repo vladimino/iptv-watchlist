@@ -44,6 +44,10 @@ const RESOURCE_CODES = ['exceeded_memory', 'exceeded_cpu', 'worker_1102'];
 
 const issue = (key, severity, stream, message, extra = {}) => ({key, severity, stream, message, ...extra});
 const critical = (key, stream, message, extra = {}) => issue(key, 'degraded', stream, message, {critical: true, ...extra});
+// AIR-592 (ADR 0206, decision 6): typed `metrics` of an issue, taken only from the facts this evaluation already read, so the human-facing text
+// never parses the English `message`. Small values: counts, durations in ms, ISO times and short codes; absent values are left out.
+const iso = ms => ms === null || ms === undefined || !Number.isFinite(ms) ? null : new Date(ms).toISOString();
+const metrics = fields => ({metrics: Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== null && value !== undefined && value !== ''))});
 const worst = issues => issues.reduce((state, item) => STATE_RANK[item.severity] > STATE_RANK[state] ? item.severity : state, 'healthy');
 const time = value => { const ms = typeof value === 'number' ? value : Date.parse(value || ''); return Number.isFinite(ms) ? ms : null; };
 const hours = ms => Math.max(0, Math.round(ms / HOUR * 10) / 10);
@@ -53,7 +57,7 @@ const unreadable = (stream, key) => ({stream, state: 'degraded', issues: [issue(
 export function evaluateEpg(facts, now, {dailyDue}) {
   if (!facts || facts.error) return unreadable('epg', 'EPG');
   const issues = [];
-  if (facts.authority === 'held' || facts.authority === 'unreadable') issues.push(critical('epg_authority', 'epg', 'The published EPG authority is ' + facts.authority));
+  if (facts.authority === 'held' || facts.authority === 'unreadable') issues.push(critical('epg_authority', 'epg', 'The published EPG authority is ' + facts.authority, metrics({authority: facts.authority})));
   const today = dailyDue(now, EPG_SCHEDULE);
   const latest = today.due ? today : dailyDue(today.dueAt - 24 * HOUR, EPG_SCHEDULE); // 24 h back stays on the previous Madrid date across DST
   const publishedAt = time(facts.publishedAt);
@@ -65,7 +69,7 @@ export function evaluateEpg(facts, now, {dailyDue}) {
     else if (late < THRESHOLDS.epgDegradedAfterMs) state = 'delayed';
     else {
       state = 'degraded';
-      issues.push(issue(facts.runError ? 'epg_failed' : 'epg_stale', 'degraded', 'epg', 'No EPG generation published since ' + hours(late) + ' hours after the Madrid due time' + (facts.runError ? '; the last run recorded an error' : '')));
+      issues.push(issue(facts.runError ? 'epg_failed' : 'epg_stale', 'degraded', 'epg', 'No EPG generation published since ' + hours(late) + ' hours after the Madrid due time' + (facts.runError ? '; the last run recorded an error' : ''), metrics({lateMs: late, dueAt: iso(latest.dueAt), publishedAt: iso(publishedAt), runError: facts.runError ? true : null})));
     }
     if (state === 'delayed') issues.push(issue('epg_delayed', 'delayed', 'epg', 'EPG is ' + hours(late) + ' hours past its due time'));
   }
@@ -77,7 +81,7 @@ export function evaluateEpg(facts, now, {dailyDue}) {
 export function evaluateDiscovery(facts, now) {
   if (!facts || facts.error) return unreadable('discovery', 'Discovery');
   const issues = [];
-  if (facts.readout?.quarantined) issues.push(critical('discovery_quarantined', 'discovery', 'The Discovery executor retry budget is exhausted and the run is quarantined'));
+  if (facts.readout?.quarantined) issues.push(critical('discovery_quarantined', 'discovery', 'The Discovery executor retry budget is exhausted and the run is quarantined', metrics({executor: facts.executor ?? null})));
   const record = facts.continuation || null;
   const backlog = !!record && (record.remainingChunks > 0 || record.stage === 'running' || record.reason === 'chunk_budget');
   let state = 'healthy';
@@ -91,10 +95,10 @@ export function evaluateDiscovery(facts, now) {
     else if (overdue < THRESHOLDS.discoveryDegradedMs && (idle === null || idle < THRESHOLDS.discoveryDegradedMs)) state = 'delayed';
     else {
       state = 'degraded';
-      issues.push(issue('discovery_stalled', 'degraded', 'discovery', 'Discovery backlog (' + (record.remainingChunks ?? '?') + ' chunks) has had no allowed progress for ' + hours(Math.max(overdue, idle ?? 0)) + ' hours'));
+      issues.push(issue('discovery_stalled', 'degraded', 'discovery', 'Discovery backlog (' + (record.remainingChunks ?? '?') + ' chunks) has had no allowed progress for ' + hours(Math.max(overdue, idle ?? 0)) + ' hours', metrics({remainingChunks: record.remainingChunks ?? null, idleMs: idle ?? overdue, lastProgressAt: lastProgress ? iso(lastProgress) : null, executor: facts.executor ?? null})));
     }
     if (facts.health === 'orphaned' && state !== 'degraded' && idle !== null && idle >= THRESHOLDS.discoveryWaitingMs) state = 'delayed';
-    if (facts.readout?.stalled && state !== 'degraded') { state = 'degraded'; issues.push(issue('discovery_executor_stalled', 'degraded', 'discovery', 'The Discovery Workflow instance is stalled')); }
+    if (facts.readout?.stalled && state !== 'degraded') { state = 'degraded'; issues.push(issue('discovery_executor_stalled', 'degraded', 'discovery', 'The Discovery Workflow instance is stalled', metrics({remainingChunks: record.remainingChunks ?? null, lastProgressAt: lastProgress ? iso(lastProgress) : null, executor: facts.executor ?? null}))); }
     if (facts.publishedRunId && record.programmeRunId && facts.publishedRunId !== record.programmeRunId && state === 'degraded') issues.push(issue('discovery_generation_mismatch', 'degraded', 'discovery', 'The continuation belongs to another generation than the published one'));
   }
   if (facts.resourceLimit) issues.push(issue('discovery_resource_limit', 'degraded', 'discovery', 'Discovery recorded a Worker resource limit'));
@@ -110,7 +114,7 @@ export function evaluateRatings(model, now) {
   let state = 'healthy';
   if (health === 'waiting' || health === 'cooldown') state = 'waiting';
   else if (health === 'stalled') { state = 'degraded'; issues.push(issue('ratings_stalled', 'degraded', 'ratings', 'No completed Ratings day and no durable progress since two hours after the due time')); }
-  else if (health === 'quarantined') { state = 'degraded'; issues.push(critical('ratings_quarantined', 'ratings', 'The Ratings run is quarantined' + (model.quarantine?.reason ? ' (' + model.quarantine.reason + ')' : ''))); }
+  else if (health === 'quarantined') { state = 'degraded'; issues.push(critical('ratings_quarantined', 'ratings', 'The Ratings run is quarantined' + (model.quarantine?.reason ? ' (' + model.quarantine.reason + ')' : ''), metrics({reason: model.quarantine?.reason ?? null}))); }
   else if (health === 'failed_permanent') { state = 'degraded'; issues.push(critical('ratings_failed_permanent', 'ratings', 'The Ratings run failed with a permanent error')); }
   else if (health === 'unknown') { state = 'degraded'; issues.push(issue('ratings_unreadable', 'degraded', 'ratings', 'The Ratings read model could not be read')); }
   if (model.mode === 'switching') {
@@ -131,20 +135,20 @@ export function evaluateLetterboxd(model, now) {
   const health = model.health;
   let state = 'healthy';
   if (health === 'waiting' || health === 'switching') state = 'waiting';
-  else if (health === 'late') { state = 'degraded'; issues.push(issue('letterboxd_slot_late', 'degraded', 'letterboxd', 'A Letterboxd slot is due and no run was started')); }
-  else if (health === 'stalled') { state = 'degraded'; issues.push(issue('letterboxd_slot_stalled', 'degraded', 'letterboxd', 'A Letterboxd slot stayed open after its window ended')); }
-  else if (health === 'missed') { state = 'degraded'; issues.push(issue('letterboxd_slot_missed', 'degraded', 'letterboxd', 'A Letterboxd slot was missed and recorded without a run')); }
-  else if (health === 'failed') { state = 'degraded'; issues.push(issue('letterboxd_slots_failed', 'degraded', 'letterboxd', 'The last Letterboxd slot failed for both sources')); }
-  else if (health === 'quarantined') { state = 'degraded'; issues.push(critical('letterboxd_quarantined', 'letterboxd', 'Letterboxd Sync is quarantined' + (model.quarantine?.reason ? ' (' + model.quarantine.reason + ')' : ''))); }
+  else if (health === 'late') { state = 'degraded'; issues.push(issue('letterboxd_slot_late', 'degraded', 'letterboxd', 'A Letterboxd slot is due and no run was started', metrics({slot: model.slot?.key ?? null}))); }
+  else if (health === 'stalled') { state = 'degraded'; issues.push(issue('letterboxd_slot_stalled', 'degraded', 'letterboxd', 'A Letterboxd slot stayed open after its window ended', metrics({slot: model.slot?.key ?? null}))); }
+  else if (health === 'missed') { state = 'degraded'; issues.push(issue('letterboxd_slot_missed', 'degraded', 'letterboxd', 'A Letterboxd slot was missed and recorded without a run', metrics({slot: model.slot?.key ?? null}))); }
+  else if (health === 'failed') { state = 'degraded'; issues.push(issue('letterboxd_slots_failed', 'degraded', 'letterboxd', 'The last Letterboxd slot failed for both sources', metrics({slot: model.slot?.key ?? null}))); }
+  else if (health === 'quarantined') { state = 'degraded'; issues.push(critical('letterboxd_quarantined', 'letterboxd', 'Letterboxd Sync is quarantined' + (model.quarantine?.reason ? ' (' + model.quarantine.reason + ')' : ''), metrics({reason: model.quarantine?.reason ?? null}))); }
   else if (health === 'unreadable') { state = 'degraded'; issues.push(issue('letterboxd_unreadable', 'degraded', 'letterboxd', 'The Letterboxd Sync read model could not be read')); }
   if (model.sources?.watchlist?.stale) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_watchlist_stale', 'degraded', 'letterboxd', model.sources.watchlist.warning === 'watchlist_never_succeeded' ? 'No complete Watchlist scan has succeeded since the executor started' : 'No complete Watchlist scan has succeeded for 24 hours')); }
   // Each source has its own signal: one update can fail while the other succeeds (the approved contract), and neither outcome hides or rewrites the other's confirmed success. A rate limit is "not now" and never alerts.
   const sourceIssue = (key, label, outcome) => {
-    if (['error', 'blocked', 'interrupted', 'unavailable', 'incomplete', 'disabled'].includes(outcome)) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue(key + '_failed', 'degraded', 'letterboxd', 'The last Letterboxd slot did not update ' + label + ' (' + outcome + ')')); }
+    if (['error', 'blocked', 'interrupted', 'unavailable', 'incomplete', 'disabled'].includes(outcome)) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue(key + '_failed', 'degraded', 'letterboxd', 'The last Letterboxd slot did not update ' + label + ' (' + outcome + ')', metrics({outcome, slot: model.slot?.key ?? null}))); }
     else if (outcome === 'rate_limited') { if (STATE_RANK[state] < STATE_RANK.delayed) state = 'delayed'; issues.push(issue(key + '_rate_limited', 'delayed', 'letterboxd', label + ' was rate limited in the last Letterboxd slot')); }
   };
   if (health !== 'failed') { sourceIssue('letterboxd_ratings', 'Ratings', model.sources?.ratings?.lastOutcome); sourceIssue('letterboxd_watchlist', 'the Watchlist', model.sources?.watchlist?.lastOutcome); }
-  if (Number.isInteger(model.eventsPending) && model.eventsPending >= 8) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_events_backlog', 'degraded', 'letterboxd', 'Letterboxd slot Events are waiting for delivery')); }
+  if (Number.isInteger(model.eventsPending) && model.eventsPending >= 8) { if (STATE_RANK[state] < STATE_RANK.degraded) state = 'degraded'; issues.push(issue('letterboxd_events_backlog', 'degraded', 'letterboxd', 'Letterboxd slot Events are waiting for delivery', metrics({eventsPending: model.eventsPending}))); }
   const all = worst(issues);
   return {stream: 'letterboxd', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {mode: model.mode ?? null, health: health ?? null, slot: model.slot?.key ?? null, eventsPending: model.eventsPending ?? null}};
 }
@@ -166,7 +170,8 @@ export function evaluatePredictions(facts, previous, now) {
     if (stall.state === 'no_progress') {
       state = 'degraded';
       const last = time(facts.lastProgressAt);
-      issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (stall.reason === 'repeated_orphan_starts' ? ', with ' + (Number.isInteger(stall.orphanStarts) ? stall.orphanStarts : 'repeated') + ' ownerless starts since (turned-away or abandoned without a film)' : '') + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why));
+      issues.push(issue('predictions_no_progress', 'degraded', 'predictions', eligible + ' predictions are eligible and there is no confirmed progress for ' + hours(stall.idleMs ?? 0) + ' hours' + (stall.reason === 'repeated_orphan_starts' ? ', with ' + (Number.isInteger(stall.orphanStarts) ? stall.orphanStarts : 'repeated') + ' ownerless starts since (turned-away or abandoned without a film)' : '') + (last === null ? ' (no earlier progress is known)' : ' (last confirmed progress ' + new Date(last).toISOString() + ')') + why,
+        metrics({eligible, pending, idleMs: Number.isFinite(stall.idleMs) ? stall.idleMs : null, orphanStarts: stall.reason === 'repeated_orphan_starts' && Number.isInteger(stall.orphanStarts) ? stall.orphanStarts : null, lastProgressAt: iso(last), quota: facts.blockedReason === 'quota' ? true : null})));
     } else if (stall.state === 'waiting') state = 'waiting';
     else if (stall.state === 'unknown') state = 'delayed'; // unreadable queue split or no progress evidence yet: visible, never healthy, never an alert by itself
   }
@@ -182,7 +187,7 @@ export function evaluateCatalogPosters(facts) {
   if (!facts || facts.error || !STATES.includes(monitor)) return unreadable('catalog_posters', 'catalog poster');
   const issues = [];
   if (monitor === 'degraded') {
-    issues.push(issue('catalog_posters_' + facts.state, 'degraded', 'catalog_posters', 'Catalog poster retry is ' + facts.state + (facts.detail ? ' (' + facts.detail + ')' : ''), isCritical({critical: facts.critical, severity: facts.monitor}) ? {critical: true} : {}));
+    issues.push(issue('catalog_posters_' + facts.state, 'degraded', 'catalog_posters', 'Catalog poster retry is ' + facts.state + (facts.detail ? ' (' + facts.detail + ')' : ''), {...(isCritical({critical: facts.critical, severity: facts.monitor}) ? {critical: true} : {}), ...metrics({detail: facts.detail ?? null, freshnessAt: facts.freshnessAt ?? null, nextExpectedAt: facts.nextExpectedAt ?? null})}));
   }
   return {stream: 'catalog_posters', state: monitor, issues, facts: {state: facts.state, detail: facts.detail ?? null, freshnessAt: facts.freshnessAt ?? null, nextExpectedAt: facts.nextExpectedAt ?? null}};
 }
@@ -276,11 +281,11 @@ export function evaluateCanonicalProducer(facts, now) {
     // A hard stop (an identity code, or a terminal, fail_closed or exhausted class) is critical: it alerts at once and an earlier recoverable stop of the
     // same issue escalates. A recoverable stop is an ordinary degraded issue. Both keep `status` (blocked / failed) and the stop reason as diagnosis.
     const hard = IDENTITY_STOP.test(stoppedBy) || ['terminal', 'fail_closed', 'exhausted'].includes(chain?.recoveryClass || 'fail_closed');
-    return out('degraded', hard ? 'blocked' : 'failed', [issue('canonical_producer_failed', 'degraded', 'canonical_producer', 'The canonical Producer stopped (' + String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60) + ')' + (hard ? '; automatic recovery will not resume it' : '; automatic recovery is pending'), hard ? {critical: true} : {})], {stoppedBy});
+    return out('degraded', hard ? 'blocked' : 'failed', [issue('canonical_producer_failed', 'degraded', 'canonical_producer', 'The canonical Producer stopped (' + String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60) + ')' + (hard ? '; automatic recovery will not resume it' : '; automatic recovery is pending'), {...(hard ? {critical: true} : {}), ...metrics({stoppedBy: String(stoppedBy).replace(/[^a-z_0-9]/g, '').slice(0, 60), hard, generation: facts.label ?? null})})], {stoppedBy});
   }
   const since = time(facts.sinceAt), age = since === null ? null : Math.max(0, now - since);
   if (age === null || age > THRESHOLDS.producerNoProgressMs) {
-    return out('degraded', 'stalled', [issue('canonical_producer_no_progress', 'degraded', 'canonical_producer', 'The canonical Producer has shown no durable progress for ' + (age === null ? 'an unknown time' : hours(age) + ' h') + ' (chain ' + (chain?.ownerState || 'absent') + ', run ' + (run?.passState || 'absent') + ')')], {noProgressHours: age === null ? null : hours(age)});
+    return out('degraded', 'stalled', [issue('canonical_producer_no_progress', 'degraded', 'canonical_producer', 'The canonical Producer has shown no durable progress for ' + (age === null ? 'an unknown time' : hours(age) + ' h') + ' (chain ' + (chain?.ownerState || 'absent') + ', run ' + (run?.passState || 'absent') + ')', metrics({idleMs: age, sinceAt: iso(since), chain: chain?.ownerState || 'absent', run: run?.passState || 'absent', generation: facts.label ?? null}))], {noProgressHours: age === null ? null : hours(age)});
   }
   const published = time(facts.publishedAt);
   return out('waiting', published !== null && now - published > THRESHOLDS.producerNoProgressMs ? 'lagging' : 'waiting', []);
@@ -316,20 +321,24 @@ export function planAlerts(issues, state, now) {
   for (const item of actionable) {
     const old = previous[item.key] || null;
     const hard = isCritical(item);
-    const entry = {severity: 'degraded', critical: hard, firstSeenAt: old?.firstSeenAt || new Date(now).toISOString(), seen: (old?.seen || 0) + 1, lastSentAt: old?.lastSentAt || null, sendCount: old?.sendCount || 0, sendDay: day, sendsToday: old?.sendDay === day ? old.sendsToday || 0 : 0};
+    const entry = {severity: 'degraded', critical: hard, firstSeenAt: old?.firstSeenAt || new Date(now).toISOString(), seen: (old?.seen || 0) + 1, lastSentAt: old?.lastSentAt || null, sendCount: old?.sendCount || 0, sendDay: day, sendsToday: old?.sendDay === day ? old.sendsToday || 0 : 0,
+      // ADR 0206 decision 6: what the recovery message needs later (the issue's stream and its last typed metrics); a reader of the previous code ignores both.
+      stream: item.stream, ...(item.metrics ? {metrics: item.metrics} : {})};
     const escalated = !!old && hard && !isCritical(old);
     const confirmed = hard || entry.seen >= (ALERT_POLICY.confirmSnapshotsByKey[item.key] ?? ALERT_POLICY.confirmSnapshots);
     const lastSent = time(entry.lastSentAt);
     const cooled = lastSent === null || now - lastSent >= ALERT_POLICY.reminderMs;
     if (confirmed && (cooled || escalated) && entry.sendsToday < ALERT_POLICY.maxPerIssuePerDay) {
-      sends.push({kind: entry.sendCount ? (escalated ? 'escalation' : 'reminder') : 'alert', key: item.key, severity: 'degraded', critical: hard, stream: item.stream, message: item.message, firstSeenAt: entry.firstSeenAt});
+      sends.push({kind: entry.sendCount ? (escalated ? 'escalation' : 'reminder') : 'alert', key: item.key, severity: 'degraded', critical: hard, stream: item.stream, message: item.message, firstSeenAt: entry.firstSeenAt, ...(item.metrics ? {metrics: item.metrics} : {})});
       entry.lastSentAt = new Date(now).toISOString();entry.sendCount++;entry.sendsToday++;
     }
     next[item.key] = entry;
   }
   for (const [key, old] of Object.entries(previous)) {
     if (next[key]) continue;
-    if (old.sendCount > 0) sends.push({kind: 'recovery', key, severity: 'healthy', stream: key.split('_')[0], message: 'Recovered', firstSeenAt: old.firstSeenAt});
+    // The recovery is frozen at its detection (`endedAt`): a late delivery never lengthens the incident it reports. The stream comes from the entry (an
+    // entry stored before ADR 0206 has none, so the key prefix stays the fallback), and the last metrics give the recovery its domain onset.
+    if (old.sendCount > 0) sends.push({kind: 'recovery', key, severity: 'healthy', stream: typeof old.stream === 'string' && old.stream ? old.stream : key.split('_')[0], message: 'Recovered', firstSeenAt: old.firstSeenAt, endedAt: new Date(now).toISOString(), ...(isCritical(old) ? {wasCritical: true} : {}), ...(old.metrics ? {metrics: old.metrics} : {})});
   }
   return {sends, state: {issues: next}};
 }
