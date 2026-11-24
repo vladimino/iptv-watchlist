@@ -50,16 +50,25 @@ Mechanism (code): when the reconcile starts the first series of a NEW generation
 ## Fix
 
 - `discoveryReportQueue` proves an empty queue from the full evidence of the drained series (record stopped on `backlog_empty`, continuation paused on `chunk_budget` with no chunk left and a hop id, status of that hop and generation with every queue part the number 0 and no error). Anything missing or unknown keeps `idle`; an unreadable status is the unreadable queue.
-- `closeHourlyDiscoveryReport` names a pause refusal `epg_priority` (not retried, accumulator untouched, appended ledger reason index 5). The notice names no other state when the reconcile was refused by the same pause; an independent confirmed state is still named. A genuine lost compare-and-swap stays `write_conflict`.
+- `closeHourlyDiscoveryReport` names a pause refusal `epg_priority` (not retried, accumulator untouched, appended ledger reason index 5 in the separate v2 ledger), keeping an independent queue read failure of the same close as `fault=queue_unreadable`. The notice names no other state when the reconcile was refused by the same pause; an independent confirmed state is still named. A genuine lost compare-and-swap stays `write_conflict`.
 - `ensureDiscoveryWorkflow` passes the previous record to `createWorkflowInstance`, so the report, outbox and last closed hour cross a generation change.
 - The card of a `report_failed` notice with `reason=epg_priority`, and of an hourly report with `status=blocked`, `reason=epg_priority`, reads «Discovery приостановлен на время обновления программы» with a warning badge and no report-failure text.
+
+## Independent review follow-up (24 Nov 2026)
+
+The first review of [vladimino/iptv-watchlist#977](https://github.com/vladimino/iptv-watchlist/pull/977) asked for three changes, all made in the same PR:
+
+- **An independent queue read failure beside the pause.** A close whose queue read failed (`queue_unreadable`) and whose record write the pause refused produced the same notice as a clean pause. The notice now keeps both: `reason=epg_priority` and `fault=queue_unreadable` (no counters), through the ledger and its replay; the log line carries `fault` too.
+- **No promise of resumption.** The pause card said Discovery would continue after the programme update, also beside an exhausted or stalled chain. It now says only when the gate lifts (the update published and certified complete), and an independent failure keeps its sentence and error badge.
+- **Rollback without loss.** The Worker before this change drops every ledger tuple it cannot decode when it writes its ledger back, so a reason index 5 in `events/discovery-report-faults.json` would be lost on a rollback. Notices it cannot rebuild now go to a second object, `events/discovery-report-faults-v2.json`, which that Worker never reads or writes; the old object holds only tuples it decodes. Covered offline with the older reader's decode rule copied verbatim into `tests/discovery-events.mjs` 18c.
 
 ## Tests (offline)
 
 - `tests/discovery-events.mjs` 17: the drained series of 22:00 (empty with real counters, also with the period's own chunks) and every negative (another hop, another generation, each queue part non-zero or unknown, an owed chunk, other pause reasons, a stale or non-terminal stop, a running reconcile, an unreadable status).
 - `tests/discovery-events.mjs` 18: the pause refusal (one attempt, `epg_priority` notice, no counters, accumulator kept, log reason), repeat of the hour, other confirmed states beside the pause, ledger encode/decode and older tuples, pause release with the held deltas once, a genuine `write_conflict`, a report admitted during the pause.
+- `tests/discovery-events.mjs` 18b / 18b' / 18c: a continuation or status read that throws beside the pause (notice with `fault`, v2 ledger, replay unchanged, clean pause without `fault`, release with deltas once); the rollback reader of the old ledger and the untouched v2 object.
 - `tests/discovery-events.mjs` 19: a new generation through `ensureDiscoveryWorkflow` carries report, outbox, rollover and `lastClosedHour`; the next report's `from` is the last closed hour.
-- `tests/epg-priority-gate.mjs`: the close against the real pause statement on a sqlite D1 stand-in: refused as `epg_priority` with no D1 write and no generation move, then admitted after the handoff with the held deltas once.
+- `tests/epg-priority-gate.mjs`: the close against the real pause statement on a sqlite D1 stand-in: refused as `epg_priority` (with `fault=queue_unreadable` when the continuation read throws, without it otherwise) with no D1 write and no generation move, then admitted after the handoff with the held deltas once.
 - `tests/activity-ui.mjs`: the pause cards, the independent failure beside the pause, the drained empty card and a real idle card.
 
 ## Acceptance still open

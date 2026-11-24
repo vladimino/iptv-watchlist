@@ -49,12 +49,18 @@ assert.match(vm.runInContext('eventHTML(partial,older)',context),/Пакет п�
  // AIR-595: the EPG-priority pause. The notice of a close the pause refused names the pause, not a failed report, has a warning badge and no numbers; an independent
  // confirmed failure is still named and still an error. The hourly report of a firing the pause refused keeps its proven counters under the same sentence.
  const pause=card({...notice,reason:'epg_priority'});
- assert.match(pause,/Discovery приостановлен на время обновления программы/);assert.match(pause,/Discovery продолжит после завершения обновления программы/);
+ assert.match(pause,/Discovery приостановлен на время обновления программы/);assert.match(pause,/Пауза снимается, когда обновление программы опубликовано и подтверждено как завершённое/);
+ assert.doesNotMatch(pause,/продолжит|возобнов/,'no promise that Discovery resumes');assert.doesNotMatch(pause,/прочитать не удалось/,'a clean pause names no read failure');
  assert.doesNotMatch(pause,/Отчёт за час не удалось сформировать|не удалось|ошиб|epg_priority|<dl>|<dd>/,'no report-failure or error text, no reason code, no numbers');
  assert.doesNotMatch(pause,/Новых результатов|Новых фильмов не найдено|Очередь Discovery пуста/,'the pause never claims that nothing was found');
  assert.match(pause,/event-status-warning/,'a warning, not an error');
  const pauseFailed=card({...notice,reason:'epg_priority',status:'failed'});
  assert.match(pauseFailed,/Discovery приостановлен на время обновления программы/);assert.match(pauseFailed,/Discovery остановлен после повторных ошибок/);assert.match(pauseFailed,/event-status-error/,'an independent failure is not hidden by the pause');
+ assert.doesNotMatch(pauseFailed,/продолжит|возобнов/,'an exhausted chain is not promised to resume');
+ const pauseUnread=card({...notice,reason:'epg_priority',fault:'queue_unreadable'});
+ assert.match(pauseUnread,/Discovery приостановлен на время обновления программы/);assert.match(pauseUnread,/состояние очереди Discovery в этот час прочитать не удалось/,'the independent read failure stays visible');
+ assert.doesNotMatch(pauseUnread,/<dl>|<dd>|неизвестно|queue_unreadable/,'no numbers and no code');
+ assert.doesNotMatch(card({...notice,reason:'epg_priority',fault:'<img src=x onerror=1>'}),/<img|onerror|прочитать не удалось/,'only the known fault is drawn');
  assert.match(card({...notice,reason:'epg_priority',status:'blocked'}),/Discovery не запустился: временный отказ/,'another confirmed refusal is still named');
  assert.match(card({...notice,reason:'write_conflict'}),/Отчёт за час не удалось сформировать/,'a genuine write conflict keeps its notice');
  const pausedHour=card({...hour,status:'blocked',reason:'epg_priority',added:2,checked:9,remaining:12});

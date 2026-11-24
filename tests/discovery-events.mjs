@@ -143,6 +143,8 @@ const reports=()=>discoveryEvents().filter(event=>event.kind!=='report_failed').
 const notices=()=>discoveryEvents().filter(event=>event.kind==='report_failed').sort((a,b)=>a.at<b.at?-1:1);
 const FAULT_KEY='epg/discovery-report-faults.json'.replace('epg/','events/');
 const ledger=()=>records.get(FAULT_KEY)?.faults||[];
+const FAULT_KEY_V2='events/discovery-report-faults-v2.json';
+const ledgerV2=()=>records.get(FAULT_KEY_V2)?.faults||[];
 const outbox=()=>workflowRecord()?.outbox||[];
 const hourId=(generation,n)=>'discovery-hour-'+generation.replace(/-/g,'').slice(0,12)+'-'+new Date(BASE+n*HOUR).toISOString().replace(/[-:]/g,'').slice(0,11);
 const ZERO={checked:0,added:0,reused:0,screenedOut:0,touched:0,tmdbCalls:0};
@@ -836,16 +838,17 @@ resetAll();seed({count:3});const own18=elect();
  assert.deepEqual(notices().map(event=>[event.reason,event.status]),[['epg_priority',null],['epg_priority',null],['epg_priority','failed'],['epg_priority','blocked']]);
  // A repeat of a paused hour keeps one notice.
  await closed({started:false,reason:'stopped',programmeRunId:GENERATION},4);assert.equal(notices().length,4);
- // The journal refuses the notice: it is queued in the ledger with its reason, and delivered unchanged later.
+ // The journal refuses the notice: it is queued in the v2 ledger (an older Worker cannot decode it), never in the old one, and delivered unchanged later.
  failEventPuts=true;assert.equal((await closed({started:false,reason:'stopped',programmeRunId:GENERATION},5)).notice,'queued');failEventPuts=false;
- assert.deepEqual(ledger()[0].slice(2),[5,0],'the appended reason index');
- assert.deepEqual(JSON.parse(JSON.stringify(call('decodeDiscoveryReportFault')(ledger()[0]))),{id:hourId(GENERATION,5),type:'discovery',kind:'report_failed',at:new Date(BASE+5*HOUR).toISOString(),generation:GENERATION.replace(/-/g,'').slice(0,8),reason:'epg_priority',status:null});
+ assert.deepEqual(ledger(),[],'nothing an older Worker cannot decode goes to the old ledger');
+ assert.deepEqual(ledgerV2()[0].slice(2),[5,0,0],'the appended reason index, no fault');
+ assert.deepEqual(JSON.parse(JSON.stringify(call('decodeDiscoveryReportFault')(ledgerV2()[0]))),{id:hourId(GENERATION,5),type:'discovery',kind:'report_failed',at:new Date(BASE+5*HOUR).toISOString(),generation:GENERATION.replace(/-/g,'').slice(0,8),reason:'epg_priority',status:null});
  assert.deepEqual(call('decodeDiscoveryReportFault')([GENERATION.replace(/-/g,'').slice(0,12),'20261111T10',4,0]).reason,'write_conflict','older tuples decode unchanged');
  // The pause lifts (the publication is certified): the next firing drains the ledger, closes its hour and reports the held deltas once.
  context.DiscoveryAuthority.writeWorkflow=realWrite;
  await add(2,2);
  const released=await closed({started:false,reason:'stopped',programmeRunId:GENERATION},6);
- assert.equal(released.closed,true);assert.deepEqual(ledger(),[]);
+ assert.equal(released.closed,true);assert.deepEqual(ledgerV2(),[]);assert.equal(notices().find(event=>event.id===hourId(GENERATION,5)).reason,'epg_priority','the queued pause notice was delivered as it was');
  const after=reports().filter(event=>event.at===new Date(BASE+6*HOUR).toISOString());
  assert.equal(after.length,1);assert.equal(after[0].added,5,'held and new deltas, once');assert.equal(after[0].from,new Date(BASE).toISOString(),'the report reaches back to the last closed hour');
  assert.equal(sumOf(reports(),'added'),5,'nothing doubled or lost');assert.equal(workflowRecord().report.added,0);
@@ -859,6 +862,97 @@ resetAll();seed({count:3});const own18=elect();
  await closed({started:false,reason:'epg_priority',programmeRunId:GENERATION},8);
  const blocked=reports().find(event=>event.at===new Date(BASE+8*HOUR).toISOString());
  assert.deepEqual([blocked.kind,blocked.status,blocked.reason,blocked.added],['hour','blocked','epg_priority',0]);
+}
+
+// 18b. AIR-595 review P1: an independent queue read failure in the same close is never hidden behind the planned pause. The notice keeps the pause AND the read
+// fault (`fault: 'queue_unreadable'`), through the v2 ledger and its replay, with no counter; the clean pause stays as it was; after the release the deltas come once.
+resetAll();seed({count:3});const own18b=elect();
+{
+ const realWrite=context.DiscoveryAuthority.writeWorkflow,realCont=context.readContinuation;
+ const paused=async()=>{const error=new Error('priority');error.code='discovery_epg_priority';error.priority={kind:'epg_priority',nextCatchUpAt:new Date(Date.now()+60000).toISOString(),ownerKind:'none',owedDayKey:'2026-11-23'};throw error;};
+ const add=(n,added)=>call('settleWorkflowIfOwner')(env,own18b,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:5,added,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:7,cheapRemaining:0,error:null},own18b+':'+n,GENERATION)}));
+ await add(1,4);
+ context.DiscoveryAuthority.writeWorkflow=paused;
+ // the clean pause, for comparison
+ await closed({started:false,reason:'stopped',programmeRunId:GENERATION},0);
+ assert.equal(Object.hasOwn(notices()[0],'fault'),false,'a clean pause carries no fault');
+ // the continuation read throws in the same close: the pause and the read failure are both stated
+ context.readContinuation=async()=>{throw new Error('continuation down');};
+ const both=await closed({started:false,reason:'stopped',programmeRunId:GENERATION},1);
+ assert.equal(both.reason,'epg_priority');
+ const [,n1]=notices();
+ assert.deepEqual([n1.kind,n1.reason,n1.status,n1.fault],['report_failed','epg_priority',null,'queue_unreadable']);
+ for(const name of ['checked','added','remaining','queueEmpty','queueUnreadable'])assert.equal(Object.hasOwn(n1,name),false,'no counter or queue number: '+name);
+ assert.equal(warnings.filter(entry=>entry.event==='discovery_hour_close_failed').at(-1).fault,'queue_unreadable','the log names the read failure too');
+ // the journal refuses: the combined notice waits in the v2 ledger with its fault index, and a replay rebuilds exactly the same notice
+ failEventPuts=true;
+ assert.equal((await closed({started:false,reason:'stopped',programmeRunId:GENERATION},3)).notice,'queued');
+ failEventPuts=false;
+ assert.deepEqual(ledger(),[]);assert.deepEqual(ledgerV2()[0].slice(2),[5,0,1]);
+ const rebuilt=JSON.parse(JSON.stringify(call('decodeDiscoveryReportFault')(ledgerV2()[0])));
+ assert.deepEqual([rebuilt.reason,rebuilt.status,rebuilt.fault],['epg_priority',null,'queue_unreadable'],'the fault survives the ledger');
+ // a clean pause queued beside it keeps no fault
+ failEventPuts=true;context.readContinuation=realCont;await closed({started:false,reason:'stopped',programmeRunId:GENERATION},4);failEventPuts=false;
+ assert.deepEqual(ledgerV2().map(tuple=>tuple[4]),[1,0]);
+ assert.equal(workflowRecord().report.added,4,'the accumulator is untouched through every refusal');
+ // release: the next firing drains both, replays the notices unchanged and reports the held deltas once
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ await add(2,1);
+ const released=await closed({started:false,reason:'stopped',programmeRunId:GENERATION},5);
+ assert.equal(released.closed,true);assert.deepEqual(ledgerV2(),[]);
+ const replayed=notices().filter(event=>[3,4].some(n=>event.id===hourId(GENERATION,n)));
+ assert.deepEqual(replayed.map(event=>event.fault??null),['queue_unreadable',null],'a replay keeps a combined fault distinct from a clean pause');
+ const report=reports().find(event=>event.at===new Date(BASE+5*HOUR).toISOString());
+ assert.equal(report.added,5);assert.equal(sumOf(reports(),'added'),5,'exactly once');
+ // a fault index or tuple shape the reader does not know is refused, never guessed
+ assert.equal(call('decodeDiscoveryReportFault')([GENERATION.replace(/-/g,'').slice(0,12),'20261111T10',5,0,2]),null);
+ assert.equal(call('decodeDiscoveryReportFault')([GENERATION.replace(/-/g,'').slice(0,12),'20261111T10',5,0]),null,'a four-element tuple never carries a reason an older Worker cannot decode');
+}
+
+// 18b'. The status read (the path without chunks in the period) that throws beside the pause is the same independent fault.
+resetAll();seed({count:3});elect();
+{
+ const realWrite=context.DiscoveryAuthority.writeWorkflow,realGet=bucket.get;
+ context.DiscoveryAuthority.writeWorkflow=async()=>{const error=new Error('priority');error.code='discovery_epg_priority';error.priority={nextCatchUpAt:new Date(Date.now()+60000).toISOString()};throw error;};
+ bucket.get=async(key,...rest)=>{if(key==='epg/discovery-status.json')throw new Error('status down');return realGet(key,...rest);};
+ await closed({started:false,reason:'stopped',programmeRunId:GENERATION},0);
+ bucket.get=realGet;context.DiscoveryAuthority.writeWorkflow=realWrite;
+ assert.deepEqual([notices()[0].reason,notices()[0].fault],['epg_priority','queue_unreadable']);
+}
+
+// 18c. AIR-595 review: rollback. The ledger reader of the Worker before AIR-595, verbatim (its five reasons, five statuses, four-element tuples). It drops any tuple it
+// cannot decode when it writes the ledger back, so the old ledger must only ever hold tuples it decodes; the v2 ledger is a key it never reads or writes.
+{
+ const OLD_REASONS=['no_record','state_unreadable','outbox_full','projector_window','write_conflict'],OLD_STATUSES=[null,'failed','waiting','blocked','stalled'];
+ const oldDecode=tuple=>{
+  if(!Array.isArray(tuple)||tuple.length!==4)return null;
+  const [generation,hourKey,reason,status]=tuple;
+  if(typeof generation!=='string'||!/^[0-9A-Za-z]{1,12}$/.test(generation)||typeof hourKey!=='string'||!/^\d{8}T\d{2}$/.test(hourKey))return null;
+  if(!Number.isInteger(reason)||reason<0||reason>=OLD_REASONS.length||!Number.isInteger(status)||status<0||status>=OLD_STATUSES.length)return null;
+  return {reason:OLD_REASONS[reason],status:OLD_STATUSES[status]};
+ };
+ resetAll();seed({count:3});elect();
+ const realWrite=context.DiscoveryAuthority.writeWorkflow;
+ const paused=async()=>{const error=new Error('priority');error.code='discovery_epg_priority';error.priority={nextCatchUpAt:new Date(Date.now()+60000).toISOString()};throw error;};
+ failEventPuts=true;
+ context.DiscoveryAuthority.writeWorkflow=async()=>({handled:true,saved:false});await closed({started:false,reason:'recovery_exhausted',programmeRunId:GENERATION},0);
+ context.DiscoveryAuthority.writeWorkflow=paused;await closed({started:false,reason:'stopped',programmeRunId:GENERATION},1);
+ context.DiscoveryAuthority.writeWorkflow=paused;await closed({started:false,reason:'recovery_exhausted',programmeRunId:GENERATION},2);
+ failEventPuts=false;context.DiscoveryAuthority.writeWorkflow=realWrite;
+ assert.equal(ledger().length,1);assert.equal(ledgerV2().length,2);
+ assert.equal(ledger().every(tuple=>oldDecode(tuple)!==null),true,'every tuple of the old ledger is readable by the older Worker');
+ assert.deepEqual(oldDecode(ledger()[0]),{reason:'write_conflict',status:'failed'});
+ assert.equal(ledgerV2().every(tuple=>oldDecode(tuple)===null),true,'the v2 tuples are exactly the ones it could not read, so they are kept out of its ledger');
+ // The older Worker runs (rollback): it rewrites its own ledger with what it decodes and adds a notice; the v2 object is never touched.
+ const v2Before=JSON.stringify(records.get(FAULT_KEY_V2));
+ const oldFaults=ledger().filter(tuple=>oldDecode(tuple)!==null);
+ set(FAULT_KEY,{schemaVersion:2,faults:[...oldFaults,[GENERATION.replace(/-/g,'').slice(0,12),'20261111T13',3,0]]});
+ assert.equal(JSON.stringify(records.get(FAULT_KEY_V2)),v2Before,'nothing pending in v2 is evicted by the older Worker');
+ // Roll forward: the next firing delivers all of them, each once.
+ await closed({started:false,reason:'stopped',programmeRunId:GENERATION},4);
+ assert.deepEqual(ledger(),[]);assert.deepEqual(ledgerV2(),[]);
+ assert.deepEqual(notices().map(event=>[event.at.slice(11,13),event.reason]),[['10','write_conflict'],['11','epg_priority'],['12','epg_priority'],['13','projector_window']]);
+ assert.equal(notices().find(event=>event.at.slice(11,13)==='12').status,'failed');
 }
 
 // 19. AIR-595: a new generation started by the reconcile carries the accumulator, the outbox and the last closed hour of the previous record (the 17:00 UTC report
