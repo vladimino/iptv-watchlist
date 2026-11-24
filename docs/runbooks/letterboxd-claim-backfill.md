@@ -26,20 +26,24 @@ Credentials: the D1 API token variables of the [credential conventions](../../.c
    - It re-reads everything and refuses with zero writes (`not_attempted`) on any pin difference or on any decision other than `eligible`.
    - It then makes ONE RatingsD1 `putOwned` call. It never uses `casOwned`, so there is no automatic rebase or retry.
    - That call is one atomic D1 batch. It carries the existing fences (the record etag compare-and-swap with the `changes()` fence, the marker `d1/open`, the generation bump) and four guards asserted **inside** the batch: the exact ratings generation, the link-index etag, the admission row (lid, movie, archive) and the absence of any canonical `letterboxd` claim of the lid.
-4. **Outcomes:**
-   - `applied`: the batch committed and the readback proves it.
-   - `refused_in_batch`: a fence or guard no longer held; the whole batch rolled back and nothing changed.
-   - `unknown`: the response did not prove the commit. **Never repeat apply after `unknown`**; run the dry run, which reports `already_marked` if the batch committed, and ask for a new GO if it did not.
-5. **Readback** (part of the apply answer; exit code 4 when any check fails):
-   - the stored record equals the plan and only `inferredPairs` grew, by this one entry with the archive as `sourceRef`;
+4. **Outcomes** (the exit code in brackets; every apply answer also carries the connection's tracked `writeState`: `none`, `unknown` while a write is in flight or after it failed, `committed` once a write was proved):
+   - `applied` (0): the batch committed, the record reads back as planned and every readback check passed.
+   - `not_attempted` (3): a pin or the decision did not hold at the re-read; nothing was sent.
+   - `refused_in_batch` (3): a fence or guard of the batch did not hold (RatingsD1 reports `refused`); the whole batch rolled back and nothing was written.
+   - `committed_unverified` (4): the batch **committed** (one write), but a later write replaced the record before the read-back (RatingsD1 reports `committed`), the read-back threw, or a readback check failed. It is never reported as zero writes. Run the dry run, compare, and bring the result to the owner.
+   - `unknown` (5): the batch failed or its response was lost after it was sent. Run the dry run, which answers `already_marked` if the batch committed.
+   - **Never repeat apply** after any outcome other than `applied`; a new apply needs fresh pins and a new GO.
+5. **Readback** (part of the apply answer):
+   - the stored record equals the plan, and only `inferredPairs` grew, by this one entry with the archive as `sourceRef`;
    - the ratings generation moved by exactly one;
    - the link index, the two `ratings_view` rows and the lid's canonical claims are unchanged;
    - the planner answers `not_proved / ratings_link_inferred`.
-   - After the apply, run a fresh dry run (`already_marked`) as the independent read-only check.
+
+   After the apply, run a fresh dry run (`already_marked`) as the independent read-only check.
 
 **Expected change:** one `ratings_document` record rewritten with one appended list entry, and the ratings generation +1. No fact, link, view row, admission, Film or claim changes.
 
-**Stop rules:** stop on any `refused` or `not_attempted`, on `refused_in_batch`, on `unknown` and on a failed readback check. Each needs a fresh dry run and a new owner decision; there is no automatic retry.
+**Stop rules:** stop on any `refused` or `not_attempted`, on `refused_in_batch`, on `committed_unverified` and on `unknown`. Each needs a fresh dry run and a new owner decision; there is no automatic retry.
 
 **Rollback limits:** the entry is append-only by design, and a code rollback does not remove it. Removing it would be a separate, case-specific owner decision and its own compare-and-swap. The repair does not activate the producer or write any claim.
 

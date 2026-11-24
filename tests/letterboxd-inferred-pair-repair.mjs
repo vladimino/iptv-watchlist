@@ -42,7 +42,7 @@ const baseRecord = (over = {}) => ({schemaVersion: 1, factKey: KEY, links: {lett
   rating: {value: 4, effectiveOn: null, observedAt: '2026-11-01T00:00:00.000Z', source: 'letterboxd_diary', sourceRef: 'diary:1', observationId: 'o2'}, ...over});
 let n = 0;
 // One provable legacy case: a Diary-first record stating the pair, the link index, the view rows, the canonical Film with its trusted tmdb claim and the admission row.
-function setup({record = baseRecord(), links = {['letterboxd:' + LID]: KEY, ['tmdb:' + TMDB]: KEY}, admission = A, lidClaim = false, onBatch = null, text} = {}) {
+function setup({record = baseRecord(), links = {['letterboxd:' + LID]: KEY, ['tmdb:' + TMDB]: KEY}, admission = A, lidClaim = false, onBatch = null, afterBatch = null, text} = {}) {
   const file = path.join(root, 'r' + (n++) + '.sqlite');
   fs.copyFileSync(template, file);
   const film = 'film:tmdb:' + TMDB;
@@ -53,8 +53,10 @@ function setup({record = baseRecord(), links = {['letterboxd:' + LID]: KEY, ['tm
     + "INSERT INTO ratings_view (alias_id,fact_key,watched,actual_rating,watchlist,rating_known,updated_at) VALUES ('" + LID + "','" + KEY + "',1,4,NULL,1,'" + U + "'),('tmdb_" + TMDB + "','" + KEY + "',1,4,NULL,1,'" + U + "');").status, 0);
   putDoc(file, LINKS, links);
   putDoc(file, RECORD_KEY, record, text ? {text} : {});
-  const calls = {batches: 0};
-  const DB = d1Standin(file, {onBatch: async statements => {calls.batches++; if (onBatch) await onBatch(file, statements, calls.batches);}});
+  const calls = {batches: 0, afterBatch: 0};
+  // `afterBatch(file, text, n)` sees every statement that runs AFTER the (first) batch committed, in order: the place for a real post-commit race.
+  const DB = d1Standin(file, {onBatch: async statements => {calls.batches++; if (onBatch) await onBatch(file, statements, calls.batches);},
+    onQuery: async sqlText => {if (calls.batches > 0 && afterBatch) await afterBatch(file, sqlText, ++calls.afterBatch);}});
   return {file, env: {DB}, calls};
 }
 const TABLES = ['film', 'film_external_id', 'film_alias', 'film_rated_admission', 'ratings_view', 'ratings_document', 'ratings_domain_authority', 'canonical_write_receipt', 'canonical_revision'];
@@ -163,7 +165,7 @@ await raced('record changed by another writer', db => putDoc(db, RECORD_KEY, bas
 await raced('admission row removed', db => assert.equal(sqlite(db, 'DELETE FROM film_rated_admission').status, 0));
 await raced('a lid claim appeared', db => assert.equal(sqlite(db, "INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:tmdb:" + TMDB + "','letterboxd','" + LID + "',1,0,NULL)").status, 0));
 
-// 7. An aborted batch, an unprovable commit and a lost response are `unknown`: one attempt, never retried, never reported as applied.
+// 7. An aborted batch and a lost response are `unknown`; a committed batch whose own read-back throws is `committed_unverified`. One attempt, never retried, never reported as applied.
 {
   // a statement of the batch fails with an error that is not a guard (the admission table vanished under the guard's SELECT): the transaction aborts, nothing of it remains
   let armed = false;
@@ -177,15 +179,15 @@ await raced('a lid claim appeared', db => assert.equal(sqlite(db, "INSERT INTO f
   assert.equal(generation(file), 3, 'no generation bump from the aborted batch');
 }
 {
-  // the batch commits but the readback cannot prove it (a racer planted a stray part row): the outcome is `unknown`, never `applied`, and nothing is retried
+  // the batch commits but putOwned's own read-back throws (a racer planted a stray part row): a write happened, so the outcome is `committed_unverified` with writes 1
   let armed = false;
   const {file, env, calls} = setup({onBatch: async (db, _s, count) => {if (armed && count === 1) assert.equal(sqlite(db, 'INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES (' + q(RECORD_KEY) + ",1,'x','other','" + U + "')").status, 0);}});
   const pins = (await dryRun(env, INPUT)).expect;
   armed = true;
   const out = await applyRepair(env, INPUT, GO(pins));
-  assert.equal(out.outcome, 'unknown', JSON.stringify(out)); assert.equal(calls.batches, 1, 'never retried');
+  assert.deepEqual([out.outcome, out.writes], ['committed_unverified', 1], JSON.stringify(out)); assert.match(out.reason, /^putowned_readback_failed:/); assert.equal(calls.batches, 1, 'never retried');
   await assert.rejects(() => dryRun(env, INPUT), 'the next dry_run refuses an unreadable record instead of guessing');
-  assert.equal(generation(file), 4, 'the batch did commit: only a readback can tell, which is why `unknown` is never treated as success or failure');
+  assert.equal(generation(file), 4, 'the batch did commit');
 }
 {
   let armed = false;
@@ -197,6 +199,85 @@ await raced('a lid claim appeared', db => assert.equal(sqlite(db, "INSERT INTO f
   assert.equal(dump(file), before);
 }
 
+// 7b. Real post-commit races (review of #963): the batch COMMITS, then something changes before or during the readback. The answer is never `applied` and never
+// zero writes: it is `committed_unverified`, with the failed check named, and nothing is retried.
+const postCommit = async (name, afterBatch, check) => {
+  const {file, env, calls} = setup({afterBatch});
+  const pins = (await dryRun(env, INPUT)).expect;
+  const out = await applyRepair(env, INPUT, GO(pins));
+  assert.deepEqual([out.outcome, out.writes], ['committed_unverified', 1], name + ': ' + JSON.stringify(out));
+  assert.equal(calls.batches, 1, name + ': one batch, no retry');
+  check(out, file);
+};
+// A valid concurrent writer replaces the record right after our batch committed, before putOwned's own read-back: `saved:null` with `committed:true`, not a rollback.
+await postCommit('record replaced before putOwned read-back', (db, sqlText, n) => {
+  if (n === 1 && sqlText.includes('FROM ratings_document WHERE key=' + q(RECORD_KEY))) {
+    const current = getDoc(db, RECORD_KEY);
+    assert.ok(Array.isArray(current.inferredPairs), 'our batch had committed');
+    putDoc(db, RECORD_KEY, {...current, watchlist: {value: true, effectiveOn: null, observedAt: U, source: 'letterboxd_diary', sourceRef: null, observationId: 'o9'}});
+  }
+}, out => assert.equal(out.reason, 'record_replaced_after_commit'));
+let seen = 0;
+await postCommit('generation moved before the readback', (db, sqlText) => {
+  if (sqlText.includes('schema_contract') && ++seen === 1) assert.equal(sqlite(db, 'UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1').status, 0);
+}, out => {assert.equal(out.reason, 'readback_check_failed'); assert.equal(out.readback.checks.generationPlusOne, false);});
+await postCommit('view row changed before the readback', (db, sqlText) => {
+  if (sqlText.includes('FROM ratings_view WHERE alias_id=')) assert.equal(sqlite(db, "UPDATE ratings_view SET watched=0 WHERE alias_id='" + LID + "'").status, 0);
+}, out => assert.equal(out.readback.checks.viewUnchanged, false));
+await postCommit('planner cannot confirm (Film/Person held after the commit)', (db, sqlText) => {
+  if (sqlText.includes('film_person_authority')) assert.equal(sqlite(db, "UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status, 0);
+}, out => {assert.equal(out.readback.checks.plannerRefuses, false); assert.equal(out.readback.planner.verdict, 'error');});
+let reads = 0;
+await postCommit('readback throws', (db, sqlText) => {
+  if (sqlText.includes('FROM ratings_document WHERE key=' + q(RECORD_KEY)) && ++reads === 2) assert.equal(sqlite(db, 'INSERT INTO ratings_document (key,part,body,etag,updated_at) VALUES (' + q(RECORD_KEY) + ",1,'x','other','" + U + "')").status, 0);
+}, out => assert.match(out.reason, /^readback_failed:/));
+
+// 7c. The CLI keeps the outcome and the tracked write state on every path (a tracked binding over the stand-in models the production adapter's writeState).
+{
+  const tracked = env => {
+    const ctx = {writeState: 'none'}, inner = env.DB;
+    return {ctx, binding: {prepare: (...a) => inner.prepare(...a), async batch(statements) {ctx.writeState = 'unknown'; await inner.batch(statements); ctx.writeState = 'committed';}}};
+  };
+  const cli = async (env, extra) => {
+    const printed = [];
+    const code = await main({argv: ['node', 'x', '--lid', LID, '--tmdb', TMDB, '--archive', A, ...extra], env: {}, print: text => printed.push(text), openBinding: async () => tracked(env)});
+    return {code, out: JSON.parse(printed.at(-1))};
+  };
+  const pinArgs = pins => ['--expected-generation', String(pins.generation), '--expected-record-etag', pins.recordEtag, '--expected-links-etag', pins.linksEtag, '--expected-plan-digest', pins.planDigest];
+  const goArgs = pins => ['--apply', '--confirm-go', '--request-id', 'AIR559_repair_cli_01', ...pinArgs(pins)];
+  {
+    const {env} = setup();
+    const dry = await cli(env, []);
+    assert.equal(dry.code, 0); assert.equal(dry.out.decision, 'eligible');
+    const applied = await cli(env, goArgs(dry.out.expect));
+    assert.deepEqual([applied.code, applied.out.outcome, applied.out.writeState], [0, 'applied', 'committed']);
+    const missing = await cli(env, ['--apply', '--request-id', 'AIR559_repair_cli_01', ...pinArgs(dry.out.expect)]);
+    assert.deepEqual([missing.code, missing.out.error, missing.out.writeState], [2, 'confirm_go_required', 'none']);
+  }
+  {
+    const {env} = setup({afterBatch: (db, sqlText, n) => {if (n === 1) putDoc(db, RECORD_KEY, {...getDoc(db, RECORD_KEY), watchlist: {value: true, effectiveOn: null, observedAt: U, source: 'letterboxd_diary', sourceRef: null, observationId: 'o9'}});}});
+    const dry = await cli(env, []);
+    const raced = await cli(env, goArgs(dry.out.expect));
+    assert.deepEqual([raced.code, raced.out.outcome, raced.out.writes, raced.out.writeState], [4, 'committed_unverified', 1, 'committed']);
+  }
+  {
+    let armed = false;
+    const {env} = setup({onBatch: async () => {if (armed) throw new Error('connection reset after send');}});
+    const dry = await cli(env, []);
+    armed = true;
+    const lost = await cli(env, goArgs(dry.out.expect));
+    assert.deepEqual([lost.code, lost.out.outcome, lost.out.writeState], [5, 'unknown', 'unknown']);
+  }
+  {
+    let armed = false;
+    const {env} = setup({onBatch: async (db, _s, count) => {if (armed && count === 1) assert.equal(sqlite(db, 'UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1').status, 0);}});
+    const dry = await cli(env, []);
+    armed = true;
+    const refused = await cli(env, goArgs(dry.out.expect));
+    assert.deepEqual([refused.code, refused.out.outcome, refused.out.writes], [3, 'refused_in_batch', 0], 'a guard refusal is reported as no write whatever the transport state');
+  }
+}
+
 // 8. The CLI: unknown options and invalid ids stop before any request; it never builds a production connection without valid input.
 {
   const printed = [];
@@ -204,7 +285,8 @@ await raced('a lid claim appeared', db => assert.equal(sqlite(db, "INSERT INTO f
   const fetchImpl = async () => {fetched++; throw new Error('no network in tests');};
   const run = argv => main({argv: ['node', 'x', ...argv], env: {}, fetchImpl, print: text => printed.push(text)});
   assert.equal(await run(['--bogus']), 2); assert.equal(await run(['--lid', 'a b', '--tmdb', '1', '--archive', A]), 2); assert.equal(await run(['--lid', LID, '--tmdb', TMDB]), 2);
-  assert.equal(await run(['--lid', LID, '--tmdb', TMDB, '--archive', A]), 3, 'missing credentials stop as configuration before any request');
+  assert.equal(await run(['--lid', LID, '--tmdb', TMDB, '--archive', A]), 2, 'missing credentials stop as configuration before any request');
+  assert.ok(printed.at(-1).includes('"writeState":"none"'), 'a stop before any write says so');
   assert.equal(fetched, 0, 'no request was made');
   assert.ok(printed.every(text => !text.includes(LID)), 'errors carry no identifier');
 }

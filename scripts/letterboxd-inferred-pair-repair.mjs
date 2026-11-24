@@ -15,7 +15,9 @@
 // makes ONE RatingsD1 `putOwned` call (never `casOwned`: no automatic rebase or retry). That one atomic D1 batch carries the existing fences (record etag CAS,
 // `changes()` fence, marker `d1/open`, generation bump) and four extra guards asserted INSIDE the batch: the exact ratings generation, the link-index etag,
 // the admission row with this lid, movie and archive, and the absence of any canonical `letterboxd` claim of the lid. A guard that no longer holds rolls the
-// whole batch back (`refused_in_batch`). A response that does not prove the commit is `unknown`: it is never retried; run dry_run to read back.
+// whole batch back (`refused_in_batch`, writes 0). Outcomes are exact: `applied` only when the batch committed AND every readback check passed;
+// `committed_unverified` (writes 1) when the batch committed but a check failed, a later write replaced the record or the readback threw; `unknown`
+// (writes unknown) when the batch failed or its response was lost after it was sent. Nothing is ever retried; run dry_run to read back.
 // A merge of this script is not a GO: the owner's separate explicit GO on the dry_run pins is the authority for the single apply.
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
@@ -126,10 +128,21 @@ export async function applyRepair(env,input,{expected,confirmGo,requestId}={}){
  ];
  let saved;
  try{saved=await putOwned(env,recordKey(result.plan.key),expected.recordEtag,result.plan.next,{extra});}
- catch(error){return {mode:'apply',requestId,outcome:'unknown',writes:null,reason:error?.code||'unclassified',next:'run dry_run to read back; never repeat apply'};}
+ catch(error){
+  // A read-back that threw after a committed batch is a write, not an unknown: never report it as zero writes.
+  if(error?.ratingsCommitted===true)return {mode:'apply',requestId,outcome:'committed_unverified',writes:1,reason:'putowned_readback_failed:'+(error.code||'unclassified'),next:'run dry_run to read back; never repeat apply'};
+  return {mode:'apply',requestId,outcome:'unknown',writes:null,reason:error?.code||'unclassified',next:'run dry_run to read back; never repeat apply'};
+ }
  if(!saved?.owned)return {mode:'apply',requestId,outcome:'unknown',writes:null,reason:'ratings_not_owned',next:'run dry_run to read back; never repeat apply'};
- if(!saved.saved)return {mode:'apply',requestId,outcome:'refused_in_batch',writes:0,reason:'fence_or_guard',next:'run dry_run; a new apply needs new pins and a new GO'};
- return {mode:'apply',requestId,outcome:'applied',writes:1,readback:await readback(env,{lid,tmdb,archive,result,viewBefore})};
+ if(saved.refused===true)return {mode:'apply',requestId,outcome:'refused_in_batch',writes:0,reason:'fence_or_guard',next:'run dry_run; a new apply needs new pins and a new GO'};
+ if(saved.committed===true)return {mode:'apply',requestId,outcome:'committed_unverified',writes:1,reason:'record_replaced_after_commit',next:'run dry_run to read back; never repeat apply'};
+ if(!saved.saved)return {mode:'apply',requestId,outcome:'unknown',writes:null,reason:'unclassified_save_result',next:'run dry_run to read back; never repeat apply'};
+ // The batch committed and the record reads back as planned; `applied` is reported only after every acceptance check holds.
+ let checked;
+ try{checked=await readback(env,{lid,tmdb,archive,result,viewBefore});}
+ catch(error){return {mode:'apply',requestId,outcome:'committed_unverified',writes:1,reason:'readback_failed:'+(error?.code||'unclassified'),next:'run dry_run to read back; never repeat apply'};}
+ if(!checked.ok)return {mode:'apply',requestId,outcome:'committed_unverified',writes:1,reason:'readback_check_failed',readback:checked,next:'run dry_run to read back; never repeat apply'};
+ return {mode:'apply',requestId,outcome:'applied',writes:1,readback:checked};
 }
 
 // Authoritative readback after an applied batch: the stored record equals the plan (only `inferredPairs` grew by this entry), the generation moved by one,
@@ -178,23 +191,31 @@ async function openProductionBinding(env,fetchImpl){
  return {binding:createPublishedBinding(adapter),ctx};
 }
 
-export async function main({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,print=text=>process.stdout.write(text+'\n')}={}){
- let exit=0;
+// Exit codes: 0 dry run or `applied`; 2 invalid input; 3 nothing written (`not_attempted`, `refused_in_batch`); 4 `committed_unverified`; 5 `unknown`;
+// 1 any other failure. Every apply answer, and every error after the connection was opened, carries the adapter's tracked `writeState`
+// (`none`, `unknown` while a write is in flight or after it failed, `committed` once a write was proved).
+export const EXIT={ok:0,input:2,notWritten:3,committedUnverified:4,unknown:5,failed:1};
+export async function main({argv=process.argv,env=process.env,fetchImpl=globalThis.fetch,print=text=>process.stdout.write(text+'\n'),openBinding=openProductionBinding}={}){
+ let options,ctx=null;
+ try{options=parseArgs(argv);validateInput(options.input);}
+ catch(error){print(JSON.stringify({error:error?.reason||'invalid_input'}));return EXIT.input;}
  try{
-  const options=parseArgs(argv);
-  validateInput(options.input);
-  const {binding,ctx}=await openProductionBinding(env,fetchImpl);
-  const target={DB:binding};
+  const opened=await openBinding(env,fetchImpl);
+  ctx=opened.ctx;
+  const target={DB:opened.binding};
   const out=options.apply?await applyRepair(target,options.input,options):await dryRun(target,options.input);
-  if(options.apply)out.writeState=ctx.writeState;
+  if(options.apply)out.writeState=ctx?.writeState??null;
   print(JSON.stringify(out,null,1));
-  if(out.mode==='apply'&&out.outcome!=='applied')exit=3;
-  if(out.mode==='apply'&&out.outcome==='applied'&&!out.readback.ok)exit=4;
+  if(out.mode!=='apply'||out.outcome==='applied')return EXIT.ok;
+  if(out.outcome==='committed_unverified')return EXIT.committedUnverified;
+  if(out.outcome==='unknown')return EXIT.unknown;
+  return EXIT.notWritten;
  }catch(error){
-  print(JSON.stringify({error:error?.reason||error?.code||'failed'}));
-  exit=error instanceof RepairStop?2:3;
+  const state=ctx?.writeState??'none';
+  print(JSON.stringify({error:error?.reason||error?.code||'failed',writeState:state,next:state==='none'?null:'run dry_run to read back; never repeat apply'}));
+  if(state==='none')return error instanceof RepairStop?EXIT.input:Number.isInteger(error?.exit)?error.exit:EXIT.failed;
+  return state==='committed'?EXIT.committedUnverified:state==='unknown'?EXIT.unknown:EXIT.failed;
  }
- return exit;
 }
 
 if(process.argv[1]===fileURLToPath(import.meta.url))main().then(code=>{process.exitCode=code;});
