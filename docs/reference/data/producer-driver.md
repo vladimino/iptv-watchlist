@@ -56,6 +56,15 @@ A refusal ends the step at a durable boundary: the slice prefix is committed, th
 
 **Measured.** About 37 statements per applied unit and about 10 per no-op unit (offline, 24 Nov 2026, [evidence](../../evidence/d1-migration/air-572-producer-budget-rca-2026-11-24.md)). An instance therefore holds roughly 130 applied or 300 to 450 no-op units. Epochs count per programme run, and a re-publication of the same run (REOPEN) continues the count; every new publication starts at epoch 1.
 
+**Replay safety.**
+- **The problem.** The meter lives in one execution only. A `work` step that runs a second time for the same epoch cannot know what the failed attempt spent or which chain revision it reached. That happens on a step retry by the runtime, or on an instance replayed with the cached `nonce` and `claim` steps and fresh memory.
+- **The entry marker.** The first write of every `work` step renews the owner's lease under the full owner fence (`markWorkEntered`, revision + 1).
+- **Re-entry.** A re-entry finds the chain revision past the one its claim returned. It then runs no work: it re-reads the chain, refreshes the fence only under the exact owner proof (epoch, nonce, active), and stops the chain `producer_work_replayed`. That code is in the `transient` recovery class, so the existing hourly `recoverChain` relaunches the chain into a new epoch, with a fresh budget, after its backoff. Units and receipts resume from the durable cursor; nothing is redone or lost.
+- **Bound across attempts.** The failed attempt stayed inside its admissions, so the end reserve was still free when it failed. The re-entry spends at most that reserve. An attempt that failed before its marker can only have spent the entry reads, and every first entry pre-charges them (`CHAIN_COST.entry`).
+- **Progress.** Durable progress is acknowledged progress, never an admission. It counts:
+  - a committed slice, settle or completion, reported by the driver through `onDurable` after the commit succeeded;
+  - a reconcile page that settled a receipt.
+
 **One fence object.** The fence is ONE object for the whole invocation. `pinChainReleases` and every slice commit (lease renewal) advance `fence.revision` in place, and the stop, hand-off and completion use that same object. A copy made after the release pin fell behind and lost the revision CAS (`producer_cas_lost`, production epoch 1 of 24 Nov 2026).
 
 ## Source boundary and delivery hold (AIR-572)

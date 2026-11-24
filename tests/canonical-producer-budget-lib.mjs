@@ -60,11 +60,14 @@ export function producerWorld({loseReceiptResponses=0}={}){
  // `loseReceiptResponses`: the first N batches that write a receipt COMMIT and then lose their response (a D1 transport failure after the commit), which leaves real open receipts
  // for the reconcile of ADR 0141 T-10 to settle.
  const lost={left:loseReceiptResponses,count:0};
+ // `world.failBatch(list)`: a one-shot predicate; the first batch it matches throws BEFORE it runs (nothing committed), as a D1 transport failure would.
+ const world={failBatch:null};
  const counted=new Proxy(base.DB,{get(db,prop){if(prop==='prepare')return sql=>{meter.calls++;meter.statements++;return db.prepare(sql);};
-  if(prop==='batch')return async list=>{meter.calls++;const out=await db.batch(list);if(lost.left>0&&list.some(item=>/INSERT INTO canonical_write_receipt/.test(item?.text||''))){lost.left--;lost.count++;throw new Error('Network connection lost.');}return out;};
+  if(prop==='batch')return async list=>{meter.calls++;if(typeof world.failBatch==='function'&&world.failBatch(list)){world.failBatch=null;throw new Error('Network connection lost.');}const out=await db.batch(list);if(lost.left>0&&list.some(item=>/INSERT INTO canonical_write_receipt/.test(item?.text||''))){lost.left--;lost.count++;throw new Error('Network connection lost.');}return out;};
   const v=Reflect.get(db,prop,db);return typeof v==='function'?v.bind(db):v;}});
  const created=[];
- return {file,meter,created,lost,env:{DB:counted,PRODUCER_WORKFLOW:{create:async({id,params})=>{created.push({id,params});}}}};
+ Object.assign(world,{file,meter,created,lost});
+ return Object.assign(world,{env:{DB:counted,PRODUCER_WORKFLOW:{create:async({id,params})=>{created.push({id,params});}}}});
 }
 // Runs one chain to its end; checks every instance against the headroom of `limitCalls` and every admitted operation against its ceiling.
 export async function driveChain(world,{generation,limitCalls,maxInstances=400,programmeRunId=P,recover=false}={}){

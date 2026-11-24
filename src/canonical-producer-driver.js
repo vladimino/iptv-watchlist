@@ -158,7 +158,7 @@ async function stampFor(env,ctx,entry,code){
 // Only a run PROVEN earlier is touched: `order(earlierGeneration, laterGeneration)` is the caller's authoritative ordering of published generations (-1 earlier, 1 later); a row of a later run (a delayed older pass) is left alone, and a COVERED row whose order
 // cannot be proven (no ordering, a throw, an equal or unordered answer) fails the sweep closed (no claim); an uncovered one is simply not settled. One keyset page at a time, one terminal settle per row (compare-and-set on state and attempts), at most `maxPages`
 // pages, and the remaining deadline is checked before EVERY read and EVERY write. The same-run left-plan cleanup (the live rows an earlier pass of THIS run left for a unit the new plan no longer holds) runs last, once provenance holds.
-async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expired,provenance,ownPage,admit}){
+async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expired,provenance,ownPage,admit,settled}){
  const covered=new Set(entries.map(keyOf));
  // ADR 0141 D5 (AIR-572): `admit(op)` false = the caller's instance budget has no room for this read or write; the sweep ends resumable (`budget`), nothing claimed.
  const out=op=>typeof admit==='function'&&admit(op)===false;
@@ -166,6 +166,7 @@ async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expir
  const settle=async(row,settledBy)=>{
   const answer=await settleResult(env,{row,state:'superseded',settledBy,at:now()});
   if(answer.state==='skipped')throw fail('film_person_not_open');
+  if(typeof settled==='function')settled();
  };
  for(let page=0;page<maxPages&&!finished;page++){
   if(out('sweep_read'))return {complete:false,superseded,leftPlan,reason:'budget'};
@@ -249,6 +250,8 @@ async function runSlices(env,ctx){
  // ceiling (a unit by its kind and input size, a sweep read or settle, the completion). Asked BEFORE every unit, every sweep read and write and the completion; a refusal ends the
  // step `partial` with reason `budget` at a durable boundary (the slice prefix is committed first, nothing is claimed), and the next step resumes from the cursor.
  const admitted=(op,detail)=>typeof params.admit!=='function'||params.admit(op,detail)!==false;
+ // `params.onDurable()` (optional) is told after every commit that succeeded: a slice, a sweep settle, the completion.
+ const durable=()=>{if(typeof params.onDurable==='function')params.onDurable();};
  let run=ctx.run,index=ctx.startIndex,slices=0,deadlineHit=false,budgetHit=false,commitFailed=false;
  let folded=runFields(run);
  const total=emptyCounts();
@@ -265,6 +268,7 @@ async function runSlices(env,ctx){
   run=answer.run;
   for(const key of Object.keys(total))total[key]+=pending.counts[key];
   reset();
+  durable();
  };
  const stop=async code=>{
   let recorded=false;
@@ -343,7 +347,7 @@ async function runSlices(env,ctx){
    // result of a unit this plan does not cover stays live: it keeps blocking `current` and is never discarded silently (bounded: a sweep that cannot finish does not claim).
    // The remaining deadline holds through the whole sweep and before the claim: no write and no claim after it; the next step resumes (the cursor is already past the last unit).
    if(expired())return {...base(),state:'partial',reason:'deadline'};
-   const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,admit:op=>admitted(op),provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),ownPage:sameRunPageBound(params.sameRunPage),maxPages:supersedeBound(params.supersedeMaxPages)});
+   const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,admit:op=>admitted(op),settled:durable,provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),ownPage:sameRunPageBound(params.sameRunPage),maxPages:supersedeBound(params.supersedeMaxPages)});
    if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending',detail:sweep.reason,supersededEarlier:sweep.superseded,leftPlan:sweep.leftPlan};
    if(expired())return {...base(),state:'partial',reason:'deadline',supersededEarlier:sweep.superseded};
    if(!admitted('complete'))return {...base(),state:'partial',reason:'budget',supersededEarlier:sweep.superseded};
@@ -360,6 +364,7 @@ async function runSlices(env,ctx){
    const answer=await commitPassComplete(env,{run,openAtCompletion:open,at:now()});
    if(answer.state==='skipped')throw fail('film_person_not_open');
    run=answer.run;
+   durable();
    return {...base(),state:'complete',openAtCompletion:open,appliedGeneration:run.applied_generation,supersededEarlier:sweep.superseded,leftPlan:sweep.leftPlan};
   }
   return {...base(),state:'complete'};

@@ -80,7 +80,7 @@ const MUTANTS=[
  ["the retry selection is not limited to its origin", DRIVER, "limit:params.limit,origin:'epg'});", "limit:params.limit});"],
  ["the origin filter is dropped in SQL", STORE, "(origin?' AND origin=?':'')+\" AND state IN ('open','refused_recoverable')", "''+\" AND state IN ('open','refused_recoverable')"],
  ["an unknown origin is accepted by the selection", STORE, "||(origin!==undefined&&!ORIGINS.includes(origin)))throw invalid();", ")throw invalid();"],
- ["an earlier generation is never superseded", DRIVER, "const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,admit:op=>admitted(op),provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),ownPage:sameRunPageBound(params.sameRunPage),maxPages:supersedeBound(params.supersedeMaxPages)});", "const sweep={complete:true,superseded:0,leftPlan:0};"],
+ ["an earlier generation is never superseded", DRIVER, "const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,admit:op=>admitted(op),settled:durable,provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),ownPage:sameRunPageBound(params.sameRunPage),maxPages:supersedeBound(params.supersedeMaxPages)});", "const sweep={complete:true,superseded:0,leftPlan:0};"],
  ["an uncovered earlier result is superseded", DRIVER, "if(!isCovered&&!provenance)continue;", ""],
  ["the supersession is not named newer_run", DRIVER, "await settle(row,isCovered?'newer_run':'left_plan');", "await settle(row,'applied');"],
  ["an unfinished sweep claims completion", DRIVER, "if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending'", "if(false)return {...base(),state:'partial',reason:'supersession_pending'"],

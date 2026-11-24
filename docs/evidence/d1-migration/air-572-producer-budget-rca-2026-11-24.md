@@ -71,6 +71,15 @@ The reworked fix:
 - **Epoch cap:** a hand-off the cap refuses now stops the chain on the record instead of returning a hand-off without a successor. This was a pre-existing defect found while testing.
 - **Fence:** one object.
 
+## Replay safety (second review)
+
+The [second review](https://github.com/vladimino/iptv-watchlist/pull/967#pullrequestreview-6035333728) found a remaining P1. The instance meter and the fence revision lived only in memory, so a `work` step retried, or replayed with a cached claim, would run with an uncharged budget and a stale revision. Production did retry `work-1` of epoch 1 after durable writes.
+
+Fix:
+- **Entry marker.** The first write of every work step renews the lease (`markWorkEntered`).
+- **Re-entry.** A re-entry is recognised by the chain revision being past the claim's. It runs no work: it refreshes the fence under the owner proof and stops `producer_work_replayed` (transient), and the existing hourly `recoverChain` relaunches the chain into a new epoch.
+- **Progress.** Durable progress is acknowledged progress (`onDurable` after each committed slice, settle and completion), not an admission.
+
 ## Tests (real Workflow path, membership marker `sync`/1 as deployed)
 
 `tests/canonical-producer-budget.mjs`:
@@ -78,6 +87,11 @@ The reworked fix:
 - **Two generations.** A heterogeneous plan (0 to 12 actors, 1 to 3 directors, Films over the credit cap as planner refusals) completes at the default limit. So does the next publication (a new programme run): cheap no-ops first, then changed credits on the last Films, superseding the live refusals of the earlier generation.
 - **Lost receipt responses.** Three receipt batches commit and then lose their response. The chain stops transient, is recovered as the hourly reconcile does, and the drain settles the open receipts. This runs at the default limit and at a narrow one.
 - **Infeasible.** A limit too small for one operation stops `producer_budget_infeasible` without a successor or a run row.
+- **Replay.** The first attempt commits durable slices and then fails, with its hand-off batch lost. Two continuations are tested:
+  - **Fresh memory:** a replay with the cached nonce and claim.
+  - **Same memory:** a retry of the step.
+
+  In both, the re-entry stops `producer_work_replayed`, spends at most the end reserve, writes no unit outcome, cursor or counter, and loses no CAS. After `recoverChain` the chain completes in a later epoch with every unit counted exactly once and one live result per unit.
 
 `tests/canonical-producer-budget-boundaries.mjs`:
 
@@ -96,6 +110,8 @@ Asserted every time:
 - the fence copy;
 - the unit, sweep-settle, receipt and completion admissions;
 - the no-progress infeasibility rule;
+- the durable re-entry check and the fence refresh of the re-entry;
+- the acknowledgement of durable progress;
 - the epoch-cap stop.
 
 ## Limits and open points

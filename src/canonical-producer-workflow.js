@@ -10,7 +10,7 @@ import {
  snapshotLabel,generationOrder,producerInstanceId,requireFence,
 } from './canonical-producer-fence.js';
 import {
- claimChain,completeChain,handoffChain,launchChain,listNonterminalChains,parseReleasePin,pinChainReleases,
+ claimChain,completeChain,handoffChain,launchChain,listNonterminalChains,markWorkEntered,parseReleasePin,pinChainReleases,
  readChain,rebaseChain,recoverChain,relaunchChain,reopenChain,stopChain,supersedeChain,takeoverChain,yieldChain,
 } from './canonical-producer-chain.js';
 import {epgRunForGeneration} from './canonical-producer-store.js';
@@ -362,6 +362,7 @@ async function drainEpgReceipts(env,plan,fence,admit=()=>true,progress=()=>{}){
    const error=Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
    throw error;
   }
+  // Acknowledged progress: the reconcile answered and settled at least one receipt.
   if((summary.considered||0)>0)progress();
   if((summary.considered||0)<limit){
    let open=[];
@@ -393,8 +394,6 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
   const ok=admitOperation({spentCalls:instance.calls,spentStatements:instance.statements,cost,...(Number.isFinite(limitCalls)?{limitCalls}:{})});
   if(ok){
    totals.admitted++;
-   // Durable progress: a unit, a sweep settle or the completion. A receipt page counts only when it reconciled something (see the drain), a read or the invocation start never.
-   if(op==='unit'||op==='sweep_settle'||op==='complete')totals.progressed=true;
    if(typeof observe==='function')observe(op,detail,{calls:instance.calls,statements:instance.statements});
   }
   return ok;
@@ -409,6 +408,28 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
  chain=claimed.chain;
  let fence={kind:'chain',programmeRunId:P,epoch,nonce,inputGeneration:Number(chain.input_generation),revision:chain.revision};
  let rebases=0;
+ // Replay safety (ADR 0141 D5, AIR-572). The meter lives in this execution only, so a `work` step that runs a SECOND time for the same epoch (a step retry, or an instance
+ // replayed with the cached nonce and claim and fresh memory) cannot know what the failed attempt spent or which revision it reached. Such a re-entry never runs the expensive
+ // work: it re-reads the chain, refreshes the fence ONLY under the exact owner proof (epoch, nonce, active, same programme run) and stops the chain `producer_work_replayed`
+ // (transient), so the existing hourly `recoverChain` relaunches it into a NEW epoch with a fresh budget after its backoff. A re-entry is recognised by the entry marker,
+ // in fresh or in the same memory: the first write of every work step renews the lease (`markWorkEntered`), so a chain revision past the claim's proves an earlier attempt. Without that write a failed attempt can only have spent the entry reads, which the first entry charges up front (`CHAIN_COST.entry`). Total per instance: the
+ // failed attempt stayed inside its admissions (spent + ceiling + end reserve within the cap), and the re-entry spends at most the end reserve.
+ const claimRevision=Number(chain.revision);
+ const replayed=async scoped=>{
+  const row=await readChain(scoped,P);
+  if(!row||row.owner_epoch!==epoch||row.claim_nonce!==nonce||row.owner_state!=='active')return {state:'not_owner',replayed:true};
+  fence.revision=Number(row.revision);fence.inputGeneration=Number(row.input_generation);
+  await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:'producer_work_replayed'});
+  return {state:'stopped',code:'producer_work_replayed'};
+ };
+ const enter=async()=>{
+  const scoped={...ienv,producerFence:fence};
+  const row=await readChain(scoped,P);
+  if(row&&row.owner_epoch===epoch&&row.claim_nonce===nonce&&Number(row.revision)!==claimRevision)return replayed(scoped);
+  instance.calls+=operationCost('entry');instance.statements+=operationCost('entry');
+  await markWorkEntered(scoped,{fence,at:new Date().toISOString()});
+  return null;
+ };
  // The budget ran out at a durable boundary. An instance that made NO durable progress (no unit, sweep settle, completion or reconciled receipt) cannot progress in any instance:
  // its fixed part plus one operation and the end reserve exceed the headroom. That is `producer_budget_infeasible` (fail_closed). Otherwise the successor resumes at the cursor.
  // A hand-off the epoch cap refuses writes nothing in `handoffChain`; the chain is then STOPPED on the record (`producer_chain_epoch_cap`, fail_closed, visible to the monitor)
@@ -478,6 +499,8 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
   const pass=await runEpgProducerPass(scoped,{
    ...passParams,
    admit,
+   // Durable progress is ACKNOWLEDGED progress: a committed slice, a committed settle, a committed completion (the driver calls this after each commit succeeded).
+   onDurable:reconciled,
    beforePassComplete:async()=>{
     const done=await drainEpgReceipts(scoped,plan,fence,admit,reconciled);
     return done?.yield===true?{yield:true}:undefined;
@@ -511,7 +534,7 @@ export async function runProducerWorkflow(env,payload,step,{hold=PRODUCER_DELIVE
   if(!decision.continue)return handOver(scoped);
   return work();
  };
- const result=await doStep('work',work);
+ const result=await doStep('work',async()=>(await enter())||work());
  if(typeof observe==='function')observe('end',null,{calls:instance.calls,statements:instance.statements});
  return result;
 }

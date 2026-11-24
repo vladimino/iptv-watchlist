@@ -110,6 +110,7 @@ export const CHAIN_COST={
  complete:60,
  receipt:330,
  invocation:150,
+ entry:20,
  end:80,
 };
 export function operationCost(op,detail={}){
@@ -125,6 +126,7 @@ export function operationCost(op,detail={}){
  if(op==='complete')return c.complete;
  if(op==='receipt')return c.receipt;
  if(op==='invocation')return c.invocation;
+ if(op==='entry')return c.entry;
  return Infinity;
 }
 // Room for `cost` plus the end reserve in the instance headroom, for calls AND statements. An unmeasured spend or an unknown operation is never admitted.
@@ -135,7 +137,7 @@ export function admitOperation({spentCalls,spentStatements,cost,reserve=CHAIN_CO
 }
 
 export function recoveryClassOf(code){
- const transient=new Set(['film_person_unavailable','producer_transport','producer_timeout','producer_storage','producer_marker_unreadable','producer_run_unreadable','producer_slice_commit_failed','producer_strike_commit_failed','producer_cas_lost']);
+ const transient=new Set(['film_person_unavailable','producer_transport','producer_timeout','producer_storage','producer_marker_unreadable','producer_run_unreadable','producer_slice_commit_failed','producer_strike_commit_failed','producer_cas_lost','producer_work_replayed']);
  const authority=new Set(['film_person_held','film_person_not_open','film_person_not_projector','film_person_transition','film_person_baseline_not_verified','film_person_fence']);
  const terminal=new Set(['producer_store_missing','producer_source_generation_mismatch','canonical_producer_invalid','receipt_schema_missing','receipt_baseline_missing','receipt_baseline_exists','receipt_atomic_required','receipt_conflict','receipt_exists','receipt_readback_required','baseline_over_capacity','film_person_run_mismatch','producer_replan_unavailable']);
  if(code==='receipt_state_conflict')return 'receipt';
