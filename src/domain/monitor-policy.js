@@ -177,6 +177,47 @@ export function evaluateCatalogPosters(facts) {
 // counters. A publication, a takeover, a lease renewal or a heartbeat never moves it. `current` means exactly one thing: the run of the published generation is
 // `passed` and its applied generation equals the published one. The stream is never `healthy` merely because the EPG publication succeeded.
 const IDENTITY_STOP = /^producer_identity_/;
+// AIR-572 / AIR-593. The durable progress clock, shared by the Monitor (which persists it in `monitor/state.json`) and the Footer (which only reads the
+// stored clock and never writes it). PROVEN progress only: units finished in the SAME run row and the SAME pass (n_applied + n_noop + n_kept grew) or its
+// cursor moved. A new pass number, a new pass state, a new run row or a new generation changes nothing by itself, and a counter that falls (a replay) is
+// never progress. The first sighting of a pass is evidence only if it already finished units or holds a cursor, and then only at its own stored update time.
+export function canonicalProducerClock(previous, run, publishedAt, now) {
+  const prior = previous && typeof previous === 'object' ? previous : {};
+  const stamp = value => Number.isFinite(Date.parse(value || '')) ? Date.parse(value) : null;
+  const live = stamp(prior.liveSince) ?? now;
+  const done = run ? Number(run.n_applied || 0) + Number(run.n_noop || 0) + Number(run.n_kept || 0) : null;
+  const cursor = run ? (run.cursor_id ?? null) : null;
+  const samePass = !!run && prior.runKey === run.run_key && prior.passNo === run.pass_no;
+  const moved = samePass && (done > Number(prior.done || 0) || (cursor !== null && cursor !== (prior.cursor ?? null)));
+  const seeded = !!run && !samePass && (done > 0 || cursor !== null) ? stamp(run.updated_at) : null;
+  const progress = moved ? now : (seeded !== null ? Math.min(seeded, now) : stamp(prior.progressAt));
+  const published = stamp(publishedAt) ?? now;
+  const streak = moved ? null : (stamp(prior.noProgressSince) ?? Math.max(published, live));
+  const since = moved ? now : (Math.max(progress ?? 0, streak ?? 0) || null);
+  const at = value => value === null || value === undefined ? null : new Date(value).toISOString();
+  return {liveSince: at(live), runKey: run ? run.run_key : (prior.runKey ?? null), passNo: run ? run.pass_no : (prior.passNo ?? null), done: run ? done : (prior.done ?? null), cursor: run ? cursor : (prior.cursor ?? null),
+    progressAt: at(progress), noProgressSince: at(streak), sinceAt: at(since)};
+}
+// The facts of the `canonical_producer` stream from ONE bounded read (`readProducerMonitorFacts`) and the previous clock. `held` is the static delivery hold
+// (nothing is read). The run counters are cumulative over the passes of one run row, while `unit_count` is the current pass only, so `processed` is known
+// only on the first pass and never above the total; otherwise it is null (unknown), never a guessed number. No identifier of the run, cursor or programme
+// run is part of the facts the Footer shows.
+// `startAtPublication` (Footer only, when no Monitor clock is kept): with no previous clock the streak starts at the publication, not at this read, so a
+// Footer without a running Monitor never shows a permanent first-tick grace.
+export function canonicalProducerFacts({held = false, read = null, previous = null, now, startAtPublication = false}) {
+  if (held) return {held: true, readable: true, clock: null};
+  if (!read || !read.ready) return {held: false, readable: true, label: null, clock: canonicalProducerClock(previous, null, null, now)};
+  const prior = previous ?? (startAtPublication && read.publishedAt ? {liveSince: read.publishedAt} : null);
+  const clock = canonicalProducerClock(prior, read.run, read.publishedAt, now);
+  const {run, chain} = read;
+  const count = value => Number.isInteger(Number(value)) && Number(value) >= 0 ? Number(value) : null;
+  const total = run ? count(run.unit_count) : null, done = run ? count(Number(run.n_applied || 0) + Number(run.n_noop || 0) + Number(run.n_kept || 0)) : null;
+  const processed = run && Number(run.pass_no) === 1 && done !== null && total !== null && done <= total ? done : null;
+  return {held: false, readable: true, label: read.label, generation: Number.isInteger(read.generation) ? read.generation : null, publishedAt: read.publishedAt, sinceAt: clock.sinceAt, progressAt: clock.progressAt, clock,
+    chain: chain ? {ownerState: chain.owner_state, stoppedBy: chain.stopped_by || null, recoveryClass: chain.recovery_class || null, nextAttemptAt: chain.next_attempt_at || null} : null,
+    run: run ? {passState: run.pass_state, sourceGeneration: run.source_generation, appliedGeneration: run.applied_generation || null, stoppedBy: run.stopped_by || null,
+      passNo: count(run.pass_no), unitCount: total, processed, failed: count(run.n_failed), completedAt: run.completed_at || null} : null};
+}
 export function evaluateCanonicalProducer(facts, now) {
   if (!facts || facts.error || facts.readable === false) return unreadable('canonical_producer', 'canonical Producer');
   const out = (state, status, issues, extra = {}) => ({stream: 'canonical_producer', state, issues,

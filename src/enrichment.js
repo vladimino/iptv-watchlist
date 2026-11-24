@@ -2304,7 +2304,45 @@ function posterIntegration(projection){
  const failedAt=state==='failed'?freshness:null;
  return {...integrationEntry('posters','source',mapped[0],code,completed?freshness:null,failedAt),freshnessAt:freshness,lastWeek:summary?{weekStart:projection.lastOutcome?.weekStart??null,checked:count(summary.checked),hydrated:count(summary.hydrated),noPoster:count(summary.noPoster),pending:count(summary.pending)}:null,nextAttemptAt:integrationTime(projection.nextExpectedAt)};
 }
-function integrationHealth({posters,sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null,recentRuns=null,queue=null}){
+// AIR-593. The canonical Producer («Обогащение каталога»): the Monitor's own verdict (MonitorPolicy.evaluateCanonicalProducer) over the facts of the shared
+// bounded reader, mapped to the footer vocabulary. `view` is {facts, verdict} or null (the read could not be made). Nothing here decides health on its own:
+// `status` is the Monitor's `facts.status` (or `unreadable`), so the Footer and the Monitor cannot disagree on the same facts. No programme run id, run key,
+// cursor or raw stop code leaves this function; a stop is reported by its recovery class only. Counts are processing units of the Producer, not films.
+const PRODUCER_STOP_REASONS=['identity','transient','receipt','authority','terminal','fail_closed','exhausted'];
+function producerIntegration(view){
+ const facts=view?.facts,verdict=view?.verdict;
+ const status=!facts||facts.error||facts.readable===false||!verdict?'unreadable':verdict.facts?.status||'unreadable';
+ const count=value=>Number.isInteger(value)&&value>=0?value:null;
+ const run=facts&&!facts.error?facts.run:null,chain=facts&&!facts.error?facts.chain:null;
+ const stopCode=chain?.ownerState==='stopped'?chain.stoppedBy:run?.passState==='stopped'?run.stoppedBy:null;
+ const reasonOf=()=>{
+  if(!stopCode&&!['failed','blocked'].includes(status))return null;
+  if(/^producer_identity_/.test(String(stopCode||'')))return 'identity';
+  const klass=chain?.ownerState==='stopped'?chain.recoveryClass:null;
+  return PRODUCER_STOP_REASONS.includes(klass)?klass:'fail_closed';
+ };
+ const passing=run?.passState==='passing';
+ const mapped={current:['healthy','producer_current'],waiting:[passing?'running':'waiting',facts?.label?(passing?'producer_running':'producer_waiting'):'producer_no_publication'],
+  lagging:[passing?'running':'waiting','producer_lagging'],stalled:['degraded','producer_stalled'],failed:['failed','producer_failed'],blocked:['failed','producer_blocked'],
+  held_by_delivery:['degraded','producer_held'],unreadable:['unknown','producer_unreadable']}[status]||['unknown','producer_unreadable'];
+ const readable=status!=='unreadable'&&status!=='held_by_delivery';
+ const lastSuccessAt=status==='current'?integrationTime(run?.completedAt):null;
+ const reason=readable?reasonOf():null;
+ return {...integrationEntry('canonical_producer','capability',mapped[0],mapped[1],lastSuccessAt,null),status,
+  generation:readable&&Number.isInteger(facts?.generation)?facts.generation:null,publishedAt:readable?integrationTime(facts?.publishedAt):null,
+  progressAt:readable?integrationTime(facts?.progressAt):null,processed:readable?count(run?.processed):null,unitCount:readable?count(run?.unitCount):null,failedUnits:readable?count(run?.failed):null,
+  reason,nextAttemptAt:reason&&status==='failed'?integrationTime(chain?.nextAttemptAt):null,noProgressHours:status==='stalled'&&Number.isFinite(verdict?.facts?.noProgressHours)?verdict.facts.noProgressHours:null};
+}
+// The footer's one Producer read: the shared Monitor reader (three indexed D1 statements, nothing while the delivery hold is on) with the clock the Monitor
+// stored in monitor/state.json. The clock is only read, never written. Without a stored clock and without a running Monitor the streak starts at the
+// publication. Answers undefined where the Producer, the Monitor or D1 is not part of this Worker (the row is then absent, as for posters).
+async function footerProducerView(env,readMonitorState,now){
+ const stored=await Promise.resolve().then(readMonitorState).then(state=>state?.canonicalProducer&&typeof state.canonicalProducer==='object'?state.canonicalProducer:null,()=>null);
+ const facts=await Monitor.canonicalProducerFacts(env,now,stored,{startAtPublication:env?.MONITOR!=='on'});
+ if(facts===null)return undefined;
+ return {facts,verdict:facts.error?null:MonitorPolicy.evaluateCanonicalProducer(facts,now)};
+}
+function integrationHealth({posters,producer,sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null,recentRuns=null,queue=null}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
  const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
  const watchlistSuccess=[sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):null,integrationTime(report?.watchlistUpdatedAt),integrationTime(watchlistIngest?.lastSuccessAt)].filter(Boolean).sort((a,b)=>Date.parse(a)-Date.parse(b)).at(-1)||null;
@@ -2393,7 +2431,7 @@ function integrationHealth({posters,sync,ratings,enabled,report,continuation,dis
  })();
  const predictions=predictionCapabilityHealth({run,live,now,recentRuns,queue});
  const films=report?.watchlistCount||report?.films?.length||0,missing=(report?.stats?.metadataMissing||0)+(report?.stats?.titleMissing||0)+(report?.stats?.titleProvisional||0);
- const sources=[watchlist,ratingsSource,epg,resolver,predictions];
+ const sources=[watchlist,ratingsSource,epg,resolver,...(producer===undefined?[]:[producerIntegration(producer)]),predictions];
  // `posters` is undefined only where the module is not bundled; a failed or timed-out read is null and shows as unknown, never healthy.
  if(posters!==undefined)sources.push(posterIntegration(posters));
  if(films>=10&&missing/films>=.2)sources.push(integrationEntry('metadata','source','degraded','metadata_attention',null,null));
@@ -2552,8 +2590,13 @@ async function footerStatus(env){
  let metadata=metadataR2;
  if(filmPersonGate?.mode==='d1')metadata=footerMetadataProjection(await CanonicalCatalogReader.catalogMetadataFromD1(env,canonicalIdentityIds([report,catalog,watchlist,index]),filmPersonGate,{identityOnly:true}));
  const freshness=await guard('freshness',()=>predictionFreshness(env,profile));
- // One extra read of monitor/state.json (the write-once markers) and one of the B1 checkpoint; no write, no TMDB.
- const posters=typeof CatalogPosterWeekly==='undefined'?undefined:await guard('posters',async()=>{const state=await loadJSON(env,'monitor/state.json');return CatalogPosterWeekly.readStatus(env,{markers:{baselineAt:state?.catalogPostersBaselineAt??null,seenAt:state?.catalogPostersSeenAt??null},monitorOn:env?.MONITOR==='on',nowMs:Date.now()});});
+ // One read of monitor/state.json, shared by the poster markers and the Producer clock (AIR-593), one of the B1 checkpoint; no write, no TMDB.
+ let monitorStateRead=null;
+ const readMonitorState=()=>monitorStateRead||(monitorStateRead=loadJSON(env,'monitor/state.json'));
+ const posters=typeof CatalogPosterWeekly==='undefined'?undefined:await guard('posters',async()=>{const state=await readMonitorState();return CatalogPosterWeekly.readStatus(env,{markers:{baselineAt:state?.catalogPostersBaselineAt??null,seenAt:state?.catalogPostersSeenAt??null},monitorOn:env?.MONITOR==='on',nowMs:Date.now()});});
+ // AIR-593: the canonical Producer, three indexed D1 statements through the Monitor's own reader; a failed read is unknown, never healthy.
+ const producerBundled=typeof CanonicalProducerWorkflow!=='undefined'&&typeof Monitor!=='undefined'&&typeof MonitorPolicy!=='undefined'&&!!env?.DB;
+ const producer=producerBundled?await guard('canonical_producer',()=>footerProducerView(env,readMonitorState,Date.now())):undefined;
  if(filmPersonGate)await CanonicalCatalogReader.catalogReaderStill(env,filmPersonGate);
  // Coverage needs the programme, the catalog, the view index and the freshness rule. If any of them could not be read the numbers are unknown, not zero or 100%.
  // A programme or catalog object that is simply absent (the read answered null) is as unreadable as one that failed: it is not an empty collection with 100% coverage.
@@ -2575,7 +2618,7 @@ async function footerStatus(env){
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?footerCompute(degraded,'run',()=>runSummary(run),null):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageKnown?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?summary.added:null,failed:summary?summary.failed:null}:null,integrations:footerCompute(degraded,'integrations',()=>integrationHealth({posters,sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease,recentRuns:predictionRuns,queue:storedQueue}),{aggregate:'unknown',attentionCount:null,failedCount:null,sources:[]}),...(degraded.length?{degraded:[...degraded]}:{})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageKnown?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?summary.added:null,failed:summary?summary.failed:null}:null,integrations:footerCompute(degraded,'integrations',()=>integrationHealth({posters,producer,sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease,recentRuns:predictionRuns,queue:storedQueue}),{aggregate:'unknown',attentionCount:null,failedCount:null,sources:[]}),...(degraded.length?{degraded:[...degraded]}:{})};
 }
 function queueLaneIds(queue,exclude=new Set()){
  const skip=id=>exclude.has(id)||retryBudgetExhausted(queue.retries?.[id]);

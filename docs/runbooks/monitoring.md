@@ -182,3 +182,5 @@ Read `GET /api/monitor/status` first (stream `canonical_producer`, `facts.status
 | `canonical_producer_unreadable` | A bounded D1 read failed. | Check D1 health first; the streak is kept, not reset. |
 
 Recovery is automatic and uses the existing outbox (one recovery message per delivered alert). A held or stopped Producer does not stop EPG publication or any other canonical writer.
+
+The status footer row «Обогащение каталога» (AIR-593) shows the same `facts.status` on the same facts, computed at the moment of the page read from the clock the last Monitor tick stored: a footer `сбой` is `failed` or `blocked`, «нет подтверждённого прогресса» is `stalled`, «приостановлено при поставке» is the hold, «статус не прочитан» is `unreadable`. Between two ticks the footer can already show progress that the Monitor will record at its next tick; it never shows an older verdict than the Monitor. The counts are Producer units, not films. The footer is a read; nothing it shows starts, resets or retries the Producer.
