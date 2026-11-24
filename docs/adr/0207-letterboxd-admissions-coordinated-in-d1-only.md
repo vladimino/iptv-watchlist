@@ -226,7 +226,7 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
 | `code_on_other_film` seen before the link | `conflict`: no link, no fact | pending `admission_conflict`, no link | `needs_review` `historical_alias_conflict` |
 | `code_on_other_film` seen only by the batch after the link | `refused_after_link`: terminal; **no fact and no claim**; the inferred-marked link stays (never a claim proof, ADR 0184); an `admission_conflict` entry for owner repair | not reachable (admits before linking) | not reachable (admits before rating) |
 | Reacquired source names another movie than the writer's durable record | the request item cannot change: not reachable | pending `source_changed`, no admission, no link; owner review | `needs_review` `source_changed` |
-| Source missing or not reacquirable now | the owner cannot re-send the chunk: the intent stays without a receipt, and nothing is synthesized | pending `source_unavailable`, the existing backoff and six-attempt cap; then visible, no admission | stays `admitting`, retried; `needs_review` at the cap |
+| Source missing or not reacquirable now | the owner cannot re-send the chunk: the intent stays without a receipt, and nothing is synthesized | pending `source_unavailable`: a transport failure keeps its place and costs no attempt, a 404 costs one (decision 4b); at the six-attempt cap visible, no admission | stays `admitting`, retried; `needs_review` at the cap |
 | `admission_identity_held`, redirect (classified by `planAdmission` / `resolveAdmissionFilm`) | **non-terminal**: the chunk stops before its receipt; resume after the owner resolves | pending `admission_held`, retried | stays `admitting`, retried |
 | Unavailable, `skipped`, `closed`, generation moved, `failed`, `unknown`, `deferred`, refused preflight, in-flight receipt | **non-terminal**: the chunk stops before its receipt; resume repeats the same identity | pending `deferred`, retried | stays `admitting`, retried |
 
@@ -234,7 +234,7 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
 - **Ambiguous results.** A non-terminal result is never settled terminally.
 - **Replay.** A replay offers the admission again only for items recorded as `admitted` or `present`. Nothing is offered for an item merely because its receipt entry is not a conflict.
 - **Refused items.** They write no fact, no claim and no `asserts` evidence row (ADR 0213).
-- **Durable state retention.** The writer's existing record (the `linking` intent, the `admitting` row, the chunk intent) stays until the item is terminally settled. The Diary cap never evicts a `linking` or `link_failed` entry: if the cap would need one, the step starts no new source check.
+- **Durable state retention.** The writer's existing record (the `linking` intent, the `admitting` row, the chunk intent) stays until the item is terminally settled. The Diary cap never evicts a non-terminal entry (decision 4b): if the cap would need one, the step starts no new source check.
 
 ### 4. Reacquire the source; keep only what already exists (4A)
 
@@ -273,36 +273,71 @@ The outcome depends on timing. (The revision fence does prevent two admissions o
 
 **Pre-activation chunks.** A chunk committed before activation gets no admission on replay; its admissions are legacy and were proven present at the parity pin. Facts and claims only.
 
-### 4b. Both callers of the Diary check: fences, attempts and the Watchlist ledger
+### 4b. Both callers of the Diary check: one retry policy, fences and visibility (0207-U3 = B)
 
-The Diary admission check (W3) has two automatic callers:
-- **the Ratings Diary phase** (`letterboxd-ratings.js:374`, with the Sync's fenced env from `letterboxd-sync-ratings.js`);
-- **the Letterboxd Sync Watchlist admission step** (`letterboxd-sync-admission.js:50`, through `LetterboxdSync.fencedEnv`). It has its own ledger `watchlist_admission_pending`, with attempt and age caps and a `NOT_NOW` set of reasons that do not consume an attempt.
+The Diary admission check (W3) has two automatic callers. Both go through `LetterboxdDiaryIdentity.resolve` and share one per-id document, `diary-identity.json`, so a `linking` intent left by one caller is served by whichever runs next.
+- **The Ratings Diary phase** (`letterboxd-ratings.js:371-376`, with the Sync's fenced env from `letterboxd-sync-ratings.js`). It runs for Diary page 1, once per run, with at most 3 fetches per step.
+- **The Letterboxd Sync Watchlist admission step** (`letterboxd-sync-admission.js`, through `LetterboxdSync.fencedEnv`). It keeps its own D1 ledger `watchlist_admission_pending` and takes at most 3 due rows per slot.
 
-Both read and write the one shared Diary document, so a `linking` intent left by one is served by whichever runs next.
+**What the code does today (main `c5ecc1bd`), and why the owner chose one policy.**
+- **Transport failures are charged in the Diary.** A 403, a challenge, a 429 or a timeout counts `attempts + 1` there (`letterboxd-diary-identity.js:216`), and after 6 the id is never checked again. The Watchlist treats the same failures as `NOT_NOW`.
+- **A 404, a 5xx and a network error share one code**, `fetch_failed` (`letterboxd-rated-candidates.js:208`). So the Watchlist never charges a 404, and a 5xx does not stop the step.
+- **Stale entries cause phantom charges.** The Watchlist charges from the shared entry (`max(row + 1, entry.attempts)`), so an old reason can be charged again. An entry spent by Diary transport attempts can also block a ledger row for good.
+- **Rows age out during outages.** The Watchlist ages rows out after 14 days of wall-clock time from first sighting, even while scans fail on 403 or 429.
+- **The Diary cap evicts link intents.** Above 200 entries it evicts the oldest first, including `linking`, `link_failed` and `claim_pending` entries (`letterboxd-facts.js:681`).
 
-**Fence.** On the new path the admission batch and its receipt transitions bind the Letterboxd producer fence (`bindProducerFence`: kind `letterboxd`, the Sync epoch) whenever the call arrives through the Sync's fenced env, so a stale Sync epoch cannot admit. Today they do not: `admitRatedFilm` and the receipt writes use only the Film/Person marker. This contradicts `letterboxd-sync.js:53-54` and is a pre-existing defect (card D0).
+The owner's rule (0207-U3 = B): "временные транспортные ошибки не считаются попытками, нужен автоматический retry через сохранение места в очереди. если страница фильма выдает 404, это считаем".
+
+**One classifier for both callers.** `resolve` returns an explicit per-id outcome `{checked, class, reason, retryAt}` for every id it was asked about. Both callers charge only from that outcome, never from the stored entry or from timestamps. Reasons are split, so `fetch_failed` no longer mixes a 404 with a 5xx.
+
+| Class | Reasons | Attempt | Retry |
+| --- | --- | --- | --- |
+| **transport** | `forbidden` (403), `challenge`, `rate_limited` (429), `timeout`, `network_error`, `upstream_5xx` (Letterboxd or TMDB), `tmdb_unavailable` (no token), `upstream_cooldown` (ADR 0211 decision 5) | **none** | the item is **kept in place**; `transport_streak + 1`; `retryAt = max(15 min · 2^min(streak − 1, 5), active cooldown)`, so at most 8 h; the step stops for that source after the first transport stop, as today |
+| **not now** | `deferred` (step cap, lease, budget), `unavailable` (read gate), `admission_closed`, `admission_unavailable`, `in_flight`, `admission_skipped`, `admission_held` | **none** | due again at the next run, or when the hold is resolved; the place is kept |
+| **gone** | `not_found`: a 404 or 410 of `boxd.it/<lid>`, of the film page, or of the TMDB movie | **+1** | review backoff, 12 h · 2^(n − 1), capped at 48 h |
+| **definite** | a 200 that disagrees (`slug_mismatch`, `tmdb_*`, `detail_*`, …), `unparsable_page`, `not_film_page`, `blocked_redirect`, `too_many_hops`, `oversized`, `check_failed`, `source_changed`, `admission_conflict`, `other_code` | **+1** | review backoff; owner review at the cap |
+| **settled** | `verified` then `admitted` / `present`, or a terminal outcome of decision 3 | — | done |
+
+**Cap semantics.**
+- **The attempt cap is 6 and counts only `gone` and `definite` outcomes.** At the cap an entry or row is **terminal and visible** (`needs_owner_review`). It is never dropped silently.
+- **Transport and not-now outcomes have no cap.** A long transport streak is visible instead (below).
+- **A real check resets the streak.** Any `gone`, `definite` or settled outcome sets `transport_streak` back to 0.
+
+**Retention: nothing defeats a retained item.**
+- **The Watchlist age bound no longer ends a row.** `age_exceeded` is removed as a terminal reason. A row ends only in one of three ways:
+  - it is resolved;
+  - it is superseded, because the id left the Watchlist;
+  - it reaches the attempt cap.
+
+  A row pending longer than 14 days is **reported** (visibility below), not terminated. The closed-time accounting of the previous revision is therefore unnecessary and is withdrawn: no extra clock and no extra column.
+- **The Diary cap never evicts a non-terminal entry.** Its bound stays 200. Eviction may remove only settled entries (oldest `lastAttemptAt` first), and then terminal entries already listed for owner review (oldest first).
+  - It never evicts `linking`, `link_failed` or `claim_pending` entries.
+  - It never evicts transport-retained, not-now or below-cap entries.
+- **If the cap is full of entries it may not evict**, the step starts **no new check** for an id without an entry. That id is counted as `cap_refused` in the run's identity counts and reported. It is never recorded and then dropped.
+- **The Watchlist ledger cap is unchanged.** Above 500 rows, the promotion is refused with `admission_ledger_full`. That is already visible, and nothing is evicted.
+
+**Fairness and queue order.** Both callers take due ids in one stable order:
+1. link repairs and `claim_pending` first, as today;
+2. then due entries by their **queue position**: the time they first entered the queue (`queued_at` in the Diary entry, `first_seen_version` in the ledger), oldest first.
+
+A transport retry keeps its queue position, so when it is due again it runs ahead of newer ids, and a stream of new Diary page ids cannot starve older retained ones. Today, page ids always run first and off-page entries go by `nextAttemptAt`. Both are replaced by this order.
+
+**Visibility.**
+- **Run records.** The Diary run record and the Watchlist slot record carry per-class counts: checked, transport-retained, not now, gone, definite, at the cap and `cap_refused`. Today the slot record drops the admission result (`letterboxd-sync.js:163-181`).
+- **Admin.** The identity-work lane `watchlist_admission` shows each row's class, streak and next retry. A read-only `diary_identity` lane lists the Diary entries, which no surface shows today.
+- **Monitor.** One fact reader reports three conditions:
+  - no successful check by either caller for 24 h while due ids exist;
+  - a ledger row pending for more than 14 days;
+  - any `cap_refused`.
+
+**Fence.** The admission batch and its receipt transitions bind the Letterboxd producer fence (`bindProducerFence`: kind `letterboxd`, the Sync epoch) whenever the call arrives through the Sync's fenced env, so a stale Sync epoch cannot admit. Today they do not: `admitRatedFilm` and the receipt writes use only the Film/Person marker. This contradicts `letterboxd-sync.js:53-54` and is a pre-existing defect (card D0).
 
 **Route.** `resolve` receives its caller's route (`ratings_diary` or `watchlist_admission`) explicitly.
 - The evidence row (ADR 0213) records the route of the caller whose step performed the page check that the batch used.
 - A shared intent resumed by the other caller is re-verified by that caller (4A), so it carries the resumer's route.
 - A repair that only re-projects an already admitted pair performs no check and writes no evidence.
 
-**Outcome mapping in both stores:**
-
-| Reason | Diary document | Watchlist ledger |
-| --- | --- | --- |
-| `admission_closed` (marker `closed`) | defer: no attempt, entry unchanged, due again | in `NOT_NOW`: no attempt |
-| `admission_unavailable` (marker unreadable, partial schema, missing row) | defer: no attempt | in `NOT_NOW` |
-| `in_flight` (a `pending` receipt of the key inside its window) | defer: no attempt | in `NOT_NOW` |
-| `source_unavailable`, transport (403, 429, challenge, timeout) | attempt + 1, transport backoff, as today | in `NOT_NOW`, as today |
-| `source_unavailable`, gone (404 page or movie) | attempt + 1, review backoff | consumes an attempt |
-| `source_changed` | attempt + 1, review backoff; owner review at the cap | consumes an attempt; terminal at the cap |
-| `admission_conflict`, `other_code` | as today | consumes an attempt |
-
-- **Attempts are charged only for real checks.** `resolve` returns an explicit per-id outcome `{checked: true|false, reason}`. The ledger charges an attempt only when `checked` is true **and** the reason is not in `NOT_NOW`, so transport reasons stay free, as today. It does not infer the check from the stored entry or from timestamps.
-- **No ageing under `closed`.** The marker row keeps a monotonic **closed clock**: the total closed milliseconds so far, plus the start of the current closure if it is `closed` now. Each ledger row records the closed clock's value at its birth, in an additive column of the A1 migration. A row's age is its elapsed time minus `(closed clock now − closed clock at birth)`. That is exact across any number of closures, including for rows born between closures, so a closure neither ages a row out while it lasts nor makes it age out at once afterwards.
-- **No eviction of link intents.** The Diary cap never evicts a `linking` or `link_failed` entry. Today it can (`letterboxd-facts.js:674-684`); this is a pre-existing defect (card D0).
+**Under `closed`** (decision 1), both callers defer with `admission_closed`. That is not-now: no attempt and no ageing, because age no longer ends a row.
 
 **Drain and parity (decision 1 steps 2-4) cover both callers:**
 - no Ratings run and no Letterboxd Sync slot in flight;
@@ -311,12 +346,31 @@ Both read and write the one shared Diary document, so a `linking` intent left by
 
 Watchlist ledger rows may stay `pending`: they hold no intent.
 
-**Tests on the real caller paths:**
+**Where it is delivered (0207-U4 = A).**
+- **D0 delivers the unified policy on today's paths**, ahead of A1 and on its own. It has no migration:
+  - the classifier split and the explicit per-id outcome;
+  - the no-charge transport rule in both callers;
+  - the stable queue order;
+  - the removal of the age termination;
+  - the Diary eviction rule and `cap_refused`;
+  - the counts, the admin lanes and the Monitor reader;
+  - the producer fence on the admission batch.
+- **A1 keeps the policy** and adds the new-path outcomes of decision 3 (`in_flight`, `source_changed`, `source_unavailable`) to the same table.
+
+**Tests on the real caller paths (D0, then again in A1):**
 - the Ratings Diary phase through `letterboxd-ratings.js` with the Sync env;
 - the Watchlist admission through `letterboxd-sync-admission.js` with `fencedEnv`;
-- an intent written by one caller and resumed by the other;
-- a closure that consumes no attempt and ages no row;
-- a stale Sync epoch refused at the admission batch.
+- per caller:
+  - a 403, a challenge, a 429, a timeout and a 5xx consume no attempt, keep the queue position and are retried after the backoff;
+  - a 404 consumes one;
+  - six 404s give a visible terminal entry;
+- a stale shared entry is never charged again;
+- an intent written by one caller is resumed by the other;
+- a row older than 14 days under a transport outage is not terminated, and is reported;
+- the Diary cap at 200 evicts no `linking`, `link_failed`, `claim_pending` or retained entry, and reports `cap_refused`;
+- new page ids do not overtake an older retained id;
+- a stale Sync epoch is refused at the admission batch;
+- under `closed`: no attempt and no termination.
 
 ### 5. Readers and the proof contract
 
@@ -326,14 +380,14 @@ Watchlist ledger rows may stay `pending`: they hold no intent.
 - **ADR 0170 inventory.**
   - The exact archive-and-code proof is kept; it is not weakened.
   - Keep-first can leave a candidate of a later archive `verified` while the D1 row names the first archive. That candidate stays `needs_owner_review` / `admission_unconfirmed`.
-  - ADR 0213 decision 6 offers an evidence-based join as a separate owner choice.
-- **No positive proof from an inferred admission.** It is never positive Letterboxd identity proof. It carries a `negative` evidence row (ADR 0213), and the Ratings marks stay authoritative for ADR 0184.
+  - ADR 0213 decision 8 lists an evidence-based join as a separate, later decision (card E4a).
+- **No positive proof from an inferred admission.** It is never positive Letterboxd identity proof. It carries a `restricts` evidence row (ADR 0213), and the Ratings marks stay authoritative for ADR 0184.
 
 ### 6. Rated enrichment (G3): retired from R2, replaced by the canonical producer (6C)
 
 - At mode `d1` the rated identity step ends at the verified admission and the tmdb-only rating. W5 and W6 no longer write the R2 entry. At `r2` they run as today.
 - Admitted Films are enriched by the canonical catalog-enrichment producer of [ADR 0211](0211-catalog-enrichment-producer.md), independent of EPG airing.
-- **Whether a thin interval is allowed between the A2 flip and the ADR 0211 activation is the owner choice 0207-U5** (decision 7). Today the R2 enrichment is idle, no entry carries enrichment, and all 714 admitted Films are already thin. An interval therefore loses nothing that exists, but newly admitted rated Films would stay thin until ADR 0211 is active.
+- **The owner chose no thin interval for new admissions (0207-U5 = A).** The enrichment producer is active (card C2) before the A2 flip, with its cutoff no later than the flip. New admissions are therefore **eligible from day one**, and they are enriched at the following ticks, not instantly. The 714 legacy Films stay scope C3a, a separate decision.
 
 ### 7. Delivery graph (7C)
 
@@ -344,31 +398,38 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 
 | Card | Outcome | Depends on | Boundary | Gate | AIR-275 closure | A2 activation |
 | --- | --- | --- | --- | --- | --- | --- |
-| **D0** | Fix the pre-existing defects of decision 4b in today's code: Letterboxd producer fence on the admission batch and receipt writes; ledger attempts charged only for explicit checks; no eviction of link intents | — (**independent of accepting this ADR**: it corrects current production behaviour) | active fix of today's paths; no new path | its own implementation GO, which can be authorized on its own (or folded into A1 if the owner prefers) | required | required |
-| **R1** | **Only if 0207-U1 = K2:** receipt `operation_key` with its partial unique index (an additive migration file), writer support, lookup and the reconcile-and-reserve protocol of decision 3; unused until A1. With K1 the pointer work moves into A1 and R1 does not exist | ADR 0207 accepted | dormant | implementation GO | required if K2 | required if K2 |
-| **E1** | ADR 0213 initial slice: table, triggers, `identity_evidence` operation, writer helper | ADR 0213 accepted | dormant (no writer calls it) | implementation GO | required | required |
+| **D0** | Today's paths, per decision 4b: the unified retry policy in both callers (classifier split, explicit per-id outcome, no-charge transport, stable queue order, no age termination, Diary eviction rule, counts, admin lanes, Monitor reader) and the Letterboxd producer fence on the admission batch | — (**independent of accepting this ADR**: it corrects current production behaviour, 0207-U4 = A) | active change of today's paths; no migration | its own implementation GO | required | required |
+| **R1** | Receipt `operation_key` with its partial unique index (an additive migration file), writer support, lookup and the reconcile-and-reserve protocol of decision 3. A **mandatory shared foundation** of A1 and C1 (0207-U1 = K2) | ADR 0207 accepted | dormant | implementation GO | required | required |
+| **E1** | ADR 0213 initial slice: table (with its nullable reconstruction columns), triggers, `identity_evidence` operation, writer helper | ADR 0213 accepted | dormant (no writer calls it) | implementation GO | required | required |
 | **A1** | Admission coordination behind the marker (decisions 1-6), using R1 and E1 at `d1` | D0, R1, E1 | dormant (`r2` legacy byte-identical; migrations absent is safe) | implementation GO | required | required |
 | **M1** | Apply the R1, E1 and A1 migrations; marker at `r2` | A1 merged and deployed | no behaviour change at `r2` | production GO (owner L2/L3) | required | required |
-| **A2** | Activation: decision 1 steps 2-5, then natural acceptance in `Верификация` | M1; plus C2 if 0207-U5 = (a) | **irreversibility boundary** at the flip | production GO (owner L3); residual risk accepted or No-GO | required | — |
-| **C1** | ADR 0211 producer, dormant: writer contract, parts, lease, deadline, outcome and Monitor reader, offline cost harness | ADR 0211 accepted; R1 | dormant (no activation state) | implementation GO | per 0207-U5 | per 0207-U5 |
-| **CM** | Apply whichever additive schema C1 actually requires (its part-state table, its outcome outbox, the activation state if a table, the shared `upstream_backoff` only if 0211-5 = (b)); not needed if C1 requires none. C2 refuses to activate unless every required table is present (fail closed) | C1 merged and deployed | no behaviour change | production GO | per 0207-U5 | per 0207-U5 |
-| **C2** | Activate enrichment for Films admitted after the cutoff, at the measured bound. With 0207-U5 = (a) the cutoff is no later than the A2 flip: new admissions are **eligible from day one**, and are enriched at the next ticks, not instantly | CM | durable activation, pause stops new work | production GO | per 0207-U5 | per 0207-U5 |
-| **C3a** | Widen enrichment to the 714 existing admitted Films | C2 results reviewed | eligibility change | owner decision + production GO | no | no |
-| **C3b** | Widen enrichment to Watchlist members (the pinned-run gap) | C2; its own decision | changes the Watchlist metadata path | owner decision (possibly its own ADR) + production GO | no | no |
-| **E2a** | Evidence from Discovery admission (`candidate_for`, `tmdb_detail_check`) | E1, M1 | dormant until its own activation | implementation GO, then production GO | no | no |
-| **E2b** | Evidence from the ADR 0184 claim unit | E1, M1 | as above | as above | no | no |
-| **E2c** | Evidence from owner identity actions, including the claim side of a revoke | E1, M1 | as above | as above | no | no |
-| **E2d** | Evidence from TMDB retirement | E1, M1 | as above | as above | no | no |
-| **E3** | Legacy evidence backfill of the 714 admissions (0213-3) | E1, M1, A2 | one fenced, receipted import with a dry run | owner decision + production GO (L3) | no | no |
+| **U1** | Shared upstream coordination (ADR 0211 decision 5), **one scope for all relevant producers**: the `upstream_cooldown` and `upstream_coordination` migration files, one shared client, and its adoption by every TMDB, Letterboxd and Wikidata caller of the inventory, with each skip mapped to its caller's not-now path | ADR 0211 accepted | dormant (mode `off` = today's behaviour; absent tables = today's behaviour) | implementation GO | required (C1 uses it) | required |
+| **C1** | ADR 0211 producer, dormant: writer contract, anchors and precedence (Letterboxd, TMDB, Wikidata), state, units, lease, deadline, outbox, Monitor reader, the control function and its authenticated `/api/admin/settings` routes, the offline cost harness, and the Letterboxd-only test path | ADR 0211 accepted; R1; U1 | dormant (no control row) | implementation GO | required | required |
+| **CM** | Apply the C1 and U1 tables (state, tick outbox, control, `upstream_cooldown`, `upstream_coordination` at `off`). C2 refuses to activate unless every required table is present (fail closed) | C1 and U1 merged and deployed | no behaviour change (mode `off`, no control row) | production GO | required | required |
+| **C2** | Activate enrichment for Films admitted after the cutoff, at the measured bound. The cutoff is no later than the A2 flip, so new admissions are **eligible from day one** and enriched at the following ticks, not instantly (0207-U5 = A) | CM | durable control; pause stops new work | production GO | required | required |
+| **U2** | Upstream mode `off → observe`, then a dated report of would-be skips per scope and caller | CM | writes cooldowns, skips nothing | production GO | — | — |
+| **U3** | Upstream mode `observe → enforce` after the U2 report; rollback is `off` | U2 report reviewed | callers skip during a cooldown | production GO | — | — |
+| **CU** | `/admin/settings` page: the enrichment checkbox on the same control, effective state, drain display, cooldowns; independent visual QA | C1 (control contract) | UI only; no new control | implementation GO; owner visual check | — | — |
+| **C3a** | Widen enrichment to the 714 existing admitted Films | C2 results reviewed | scope change | owner decision + production GO | no | no |
+| **C3b** | Widen enrichment to Watchlist members (the pinned-run gap), including Letterboxd-only Films | C2; its own decision | changes the Watchlist metadata path | owner decision (possibly its own ADR) + production GO | no | no |
+| **PF** | Plan per-field provenance and a safe refresh and overwrite rule for `film_metadata` (ADR 0211 choice 1 = B), as its own record | ADR 0211 accepted | planning; then its own cards | owner decision | no | no |
+| **EP** | Plan the full evidence model (ADR 0213 option C): unbound observations before a Film exists, the future writers, the historical reconstruction mapping, readers | ADR 0213 accepted | planning roadmap card | owner decision | no | no |
+| **E2a** | Evidence from Discovery admission (`candidate_for`, `tmdb_detail_check`) | E1, M1, EP | dormant until its own activation | implementation GO, then production GO | no | no |
+| **E2b** | Evidence from the ADR 0184 claim unit | E1, M1, EP | as above | as above | no | no |
+| **E2c** | Evidence from owner identity actions, including the claim side of a revoke | E1, M1, EP | as above | as above | no | no |
+| **E2d** | Evidence from TMDB retirement | E1, M1, EP | as above | as above | no | no |
+| **E3a** | Historical reconstruction, family (a): the 714 legacy admissions (ADR 0213 decision 6). A dry run with a dated coverage report, then a separate import | E1, M1, A2 | dry run writes nothing; the import is one fenced, receipted, idempotent operation | dry run: production read approval; import: owner decision + production GO (L3) | no | no |
+| **E3b** | Historical reconstruction, families (b) Discovery and (c) claim history, by the EP mapping; dry run, report, then import | E1, M1, EP, and the matching E2 writer | as E3a | as E3a | no | no |
 | **E4a** | ADR 0170 inventory reads per-archive evidence | E1 writers active; its own decision | reader switch | owner decision (ADR amendment) | no | no |
 | **E4b** | ADR 0184 planner also reads `restricts` rows | as above | reader switch | owner decision (ADR amendment) | no | no |
 | **E5** | Retire the unused 0001 assertion tables | — | schema cleanup | owner decision | no | no |
 
-- **Mandatory for AIR-275:** D0, R1 (if K2), E1, A1, M1 and A2; after A2's acceptance no mutable R2 authority remains for admissions. C1, CM and C2 are added if 0207-U5 = (a).
-- **R1 and C1.** R1 is also a prerequisite of C1, **whatever 0207-U1 decides** (ADR 0211 decision 3).
-- **Mandatory before the A2 flip:** D0, R1 (if K2), E1, A1 and M1, and C2 if 0207-U5 = (a). A2 also verifies that every migration it depends on is applied.
-- **Longer-term catalog work, each card its own decision:** C3a, C3b, E2a-d, E3, E4a-b and E5.
-- **No dual writer at any point.** R2 coordination ends only at the A2 flip; the D1 writer was already canonical; every C and E card adds a writer under existing authorities.
+- **Mandatory for AIR-275:** D0, R1, E1, A1, M1, U1, C1, CM, C2 and A2. After A2's acceptance no mutable R2 authority remains for admissions, and new admissions are enriched from the start.
+- **Mandatory before the A2 flip:** D0, R1, E1, A1, M1, U1, C1, CM and C2. A2 also verifies that every migration it depends on is applied and that the enrichment control is `active`.
+- **One coherent upstream scope (ADR 0211 choice 5 = C).** U1 adopts the shared cooldown in every relevant producer at once. U2 and U3 move the single mode. There are no per-producer adoption cards. U2 and U3 are not prerequisites of A2: enrichment runs safely at mode `off`, with its local transport rule.
+- **Part of the selected design, but not a blocker:** CU. It needs only C1's control contract and does not gate C2 or A2.
+- **Planned follow-ups, each with its own decision:** PF, EP, C3a, C3b, E2a-d, E3a-b, E4a-b and E5.
+- **No dual writer at any point.** R2 coordination ends only at the A2 flip. The D1 writer was already canonical. Every C and E card adds a writer under existing authorities. U1 changes only when callers wait, never what they write.
 
 **Tests (A1 acceptance):**
 - the reconcile protocol of decision 3:
@@ -381,8 +442,8 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
   - an identity correction after an applied receipt (the stale receipt is not used to link);
   - a lost response followed by a redirect;
   - a lost response of the evidence-only operation;
-- the both-callers tests of decision 4b;
-- the legacy byte-identity at `r2` and the refusals at `closed`;
+- the both-callers tests of decision 4b, on the new path;
+- the legacy byte-identity at `r2` (after D0) and the refusals at `closed`;
 - the marker invariants:
   - a request paused between its guard and its PUT;
   - a request that read "migration absent", paused across the apply and the close;
@@ -393,7 +454,6 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 - G1, G4 and every row of the outcome table, including `source_changed` and `source_unavailable`;
 - a lost response followed by a merge or redirect, a same-pair row won by another request, and a retry after a terminal writer-state change;
 - determinism: the same source gives the same digest and request id; a title edit gives a new request and abandons the old one visibly;
-- the Diary cap never evicting a `linking` or `link_failed` entry;
 - historical replay of a pre-activation chunk (no admission offered);
 - the inventory proof rule;
 - evidence rows written in the admission batch or through the evidence-only operation, never without an actual check;
@@ -426,11 +486,12 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
   - Keep-first and typed conflicts at mode `d1`.
   - A digest without clocks and stable events.
   - Per-item admission outcomes in the chunk receipt.
-  - The Diary no-eviction rule for `linking` and `link_failed`.
+  - One retry policy for both Diary check callers (decision 4b).
   - Evidence rows of ADR 0213 for new admissions.
 - **Behaviour changes.**
   - Under `closed`, admissions pause: Diary and Watchlist ids defer, and archive and baseline admit steps answer 409.
-  - After activation, rated-only Films get no metadata from the rated route until ADR 0211 is active.
+  - From D0 on, transport failures never consume a Diary or Watchlist attempt, a 404 does, and no row ends by age.
+  - After activation, rated-only Films get no metadata from the rated route; ADR 0211 is already active by then (0207-U5 = A).
   - A retry may fetch the source again (bounded by the existing step limits) instead of reading a stored payload.
 - **Compatibility.**
   - ADR 0184: claims unchanged; the negative proof is kept.
@@ -445,9 +506,11 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
 
 - No data migration: the existing 714 rows are already the canonical admissions, and the object is frozen as read.
 - Additive migrations, all applied together in M1:
-  - the marker, with its closed clock, and the ledger's closed-clock column (A1);
+  - the marker (A1);
   - the evidence table (E1);
-  - the receipt `operation_key` with its partial unique index (R1, only with K2).
+  - the receipt `operation_key` with its partial unique index (R1).
+
+  The ADR 0211 tables, including the shared upstream tables, are applied separately in CM.
 - The irreversibility boundary is the `closed → d1` flip. Before it, recovery is reopen plus an ordinary revert. After it, recovery is roll-forward only, or a separately approved reconciliation plan.
 - Retention of the frozen object is indefinite. Deleting it is a later, separate owner decision.
 - This ADR, even when Accepted, authorizes no deploy of an active writer, no migration apply, marker change, write, import, backfill, flag, Task or cleanup.
@@ -462,28 +525,24 @@ Each card is one atomic outcome. **Dormant** means that merging, and the automat
   - [design review passed](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6037247874).
 - The [owner disposition](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7131137347).
 - The [review of the revised package](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6039232220), whose findings decisions 3, 4, 4b and 7 address.
-- The [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516): the matching scope and atomic reservation of decision 3, the explicit check outcome and closed-time accounting of decision 4b, and the conditional R1 and CM cards.
+- The [re-review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6040005516): the matching scope and atomic reservation of decision 3, and the explicit check outcome of decision 4b.
+- The [consolidated owner choices](https://github.com/vladimino/iptv-watchlist/pull/975#issuecomment-7140090124): K2, the unified retry policy, D0 on its own, enrichment before A2, the shared upstream scope.
+- Code checks of 24 Nov 2026 (`main` `c5ecc1bd`): the classifier and charging rules of both callers, the Watchlist age bound, the Diary cap eviction, and the upstream caller inventory (ADR 0211 Context).
 - Code checks of 24 Nov 2026 (`main` `26cfd115`): the receipt tail, the lookup by request id only, the missing Letterboxd producer fence on the admission batch, the Watchlist ledger attempt rule and the Diary cap.
 - Production L0 read, 24 Nov 2026 12:21 UTC: Watchlist marker `d1` generation 3; 714 of 714 admitted Films without `film_metadata`.
 
-## Owner choices in this record (each separate; the companion records list their own)
+## Owner choices in this record
 
-| # | Choice | Options | Recommended |
-| --- | --- | --- | --- |
-| 0207-U1 | Correlation of attempts (decision 3) | K1 pointer in the writer records; K2 receipt `operation_key` | K2 |
-| 0207-U2 | Digest without clocks (`verified_at` = first admitting batch) and the outcomes `source_changed` and `source_unavailable` | accept; or keep the clock in the digest (incompatible with 4A) | accept |
-| 0207-U3 | Both-callers contract (decision 4b): fence, mapping, attempt charging, no ageing under `closed`, no eviction of link intents | accept; or a different mapping per reason | accept |
-| 0207-U4 | Fix the pre-existing defects as D0 ahead of A1, or inside A1 | D0 first; or inside A1 | D0 first (they affect production today) |
-| 0207-U5 | Canonical enrichment relative to the flip, **for newly admitted Films only** (the 714 legacy Films are scope C3a, decided separately) | (a) C1, CM and C2 before A2, so no thin interval for new admissions and a longer AIR-275; (b) in parallel, A2 may flip first with an explicit thin interval for new admissions | (a), following the owner's 6C remark that a longer migration is acceptable |
-
-Decisions B, 1C, 2B and 3C were made by the owner on 2026-11-24 and are not reopened. 4A, 5C, 6C and 7C are the owner's directions. This record proposes how to meet them, and each choice above can be decided on its own.
+The owner's selections of 2026-11-24 are listed at the top of this record ("Owner choices of 2026-11-24"). Decisions B, 1C, 2B and 3C, and the directions 4A, 5C, 6C and 7C, are not reopened. No materially different choice remains open in this record. The final disposition follows the independent review of this revision.
 
 ## Follow-ups
 
 **On acceptance.**
-- Create the cards of decision 7 that the owner's choices select, and only those.
+- Create the cards of decision 7, including the planned follow-ups (PF, EP, C3a, C3b, E2a-d, E3a-b, E4a-b, E5) as roadmap cards, each with its own decision.
 - Link the AIR-275-mandatory cards as bare URLs in AIR-275's native Prerequisites checklist.
 - Mark ADR 0087, 0105 and 0166 "Superseded in part by ADR 0207", and update the registry rows.
 - Accepting this record is an architecture decision only. Each card keeps its implementation GO and each operation its production GO.
 
 **On rejection.** The record is kept as `Rejected` (docs-only), and the owner chooses A or C.
+
+**Observed, not changed here.** The admin write routes other than the new settings control check only that the Access header is present, not its signature or the owner identity (ADR 0211 Context). Hardening them is outside this record.
