@@ -68,13 +68,28 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
   Reads are unchanged. `closed → r2` (reopen) is allowed.
 - `d1`: the new path of decisions 2-6. A trigger refuses `d1 → r2`, `d1 → closed`, deleting the row and a lower generation. Every new-path batch asserts mode `d1` and the generation inside its own fenced batch.
 
+**Safety invariants (adopted from ADR 0196).** These are part of the contract, not only the state names:
+- **Legacy routing needs positive proof.** A writer may take the legacy path only when one of two things is true:
+  - a **fresh** read proves that the marker migration is not installed (schema version below it and table absent);
+  - the installed marker row proves `r2`.
+
+  An unavailable D1, a partial schema, a missing row at or above the migration's version, or an invalid mode fails closed (`letterboxd_admission_unavailable`). None of them ever defaults to `r2`. This covers the F1 deployment, which runs before the migration exists.
+- **The full chain is enforced by a trigger.** `r2 → closed`, `closed → r2` (reopen, only before an activation) and `closed → d1` are the only transitions. `r2` cannot skip `closed`, `d1` is terminal, the row is never deleted, and every change of mode raises the generation.
+- **Guard at the write.** Every `put` or `delete` of `letterboxd/admissions/verified-films.json` is wrapped once per request or Workflow step:
+  - Before each one it reads the marker **fresh**, never from the request scope, so a request that read `r2` or "not installed" at its start still refuses at its own write.
+  - It refuses unless the marker proves `r2` or proves the migration absent.
+  - The guard is the last awaited step before the PUT.
+- **Fence on the legacy D1 batch.** The legacy path's `admitRatedFilm` batch asserts the same proof (mode `r2`, or migration absent) inside its fenced batch, so a legacy admission cannot land under `closed` or `d1`. Retention units (`film_retention`) are not fenced by this marker and keep running.
+- **Residual risk.** A PUT that passed its guard before the close cannot be recalled. F2 handles it as ADR 0196 does: compare the object's identity (ETag and size) and full row parity at the close, after the drain, and **immediately before the flip**. Any difference refuses the flip, and a late write is handled by reopening and draining again, never by a delta. Any residual risk that cannot be excluded is either accepted by the owner before the flip or makes the activation No-GO.
+
 **The sequence.** Each step from 2 onward is a separate owner-authorized operation under an L3 plan; this ADR authorizes none of them.
 1. **Dormant delivery (F1).** F1 merges and auto-deploys with the marker at `r2`, so the deploy is safe whatever is in flight.
-2. **Drain of old code.** Before `closed`, verify (L0) that:
-   - the F1 version has served 100% of traffic for longer than the longest request and Workflow step bound;
-   - no Letterboxd Sync or Ratings Workflow instance started on an older version is still running.
+2. **Drain of old code.** Before `closed`, prove with evidence that all invocations of versions older than F1, and their outstanding effects, have finished. An elapsed interval alone is not assumed to be a bound. The evidence covers:
+   - the F1 version serving 100% of traffic;
+   - no Letterboxd Sync or Ratings Workflow instance or step of an older version still running;
+   - no owner HTTP request to the baseline or archive routes in flight.
 
-   From then on, every running writer reads the marker.
+   It comes from Worker version and invocation logs and the Workflow instance listing. From then on, every running writer reads the marker.
 3. **Close.** Set `closed`, then wait for the step bound.
 4. **Parity pin, under `closed`.**
    - Full row fingerprints of the R2 entries and the D1 rows, and the audit predicates P1-P7.
@@ -82,8 +97,8 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
    - 0 pending writer state: no chunk intent without a receipt, no `linking`/`link_failed` Diary entry, no `admitting` candidate.
    - The object's ETag is pinned.
 
-   Any pending legacy state is either reopened and drained under `r2`, or reconciled into the new payload from the frozen object, as a documented read-only input.
-5. **Activation.** Flip `closed → d1` in one fenced statement. This is the **irreversibility boundary**. It is durable and monotonic, and it precedes every incompatible effect, because at `r2` and `closed` the new code writes nothing the legacy code would not write.
+   Pending legacy state found under `closed` is a **No-GO**; `closed` never permits a write to finish it. The activation waits until that state is either drained (reopen to `r2`, let the legacy writer finish, close again, pin again), or separately reconciled under its own owner-approved plan and verified.
+5. **Activation.** Re-pin the ETag and the full parity **immediately before** the flip, and abort (no flip; stay `closed` or reopen) on any change. Then flip `closed → d1` in one fenced statement that asserts the closure generation. This is the **irreversibility boundary**. It is durable and monotonic, and it precedes every incompatible effect, because at `r2` and `closed` the new code writes nothing the legacy code would not write.
 6. **Natural acceptance.** The first natural Diary admission (or an owner-run archive step) produces a D1 row and no R2 change.
 
 **Abort and rollback.**
@@ -106,7 +121,18 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
 
 ### 3. Deterministic per-item outcome, from durable state
 
-**Stable request id.** Every unit's event is `admission:<kind>:<archive or evidence digest>:<code>`, the same at the first commit, any resume and any replay. With the stable payload of decision 4, the request id is stable too. A lost response is answered by the receipt's own reconcile or readback (`applied`), never by a new request id.
+**Stable request id.** Every unit's event is `admission:<kind>:<archive or evidence digest>:<code>`, the same at the first commit, any resume and any replay. The producer's request id also covers the target Film id (`producerRequestId`: origin, operation, event, target, digest), so a stable event is not enough after a merge or a redirect.
+
+**Request identity and receipt settlement.**
+- **Persist the request id.** When a unit is first planned, the writer stores its **request id and target** beside the payload of decision 4.
+- **Reconcile first.** Every retry first reconciles that stored receipt by its request id, through the receipt's own readback, which follows a redirect of the original target. It does so before any preflight, keep-first no-op or replan. A new request id is planned only after the stored one is settled.
+- **A same-pair row proves admission, not that this request applied it.**
+  - The receipt was applied by its own batch: outcome `admitted`.
+  - The same pair landed through another request: the receipt is settled as superseded and the outcome is `present`.
+  - A different admission won (another code, or the code on another Film): the receipt is settled as superseded and the outcome is the matching row of the table.
+  - The readback cannot tell: the result stays non-terminal and is retried.
+
+  A lost response is answered by this reconcile, never by a new request id.
 
 **Outcome rule.** The outcome of an item is a function of durable state: the monotonic keep-first admission rows, plus whether this item's Ratings link is already committed. The same pair always ends the same way after a crash:
 
@@ -124,6 +150,7 @@ The handover reuses the one-way marker pattern of ADR 0194 and ADR 0196.
 - **Ambiguous results.** A non-terminal result is never settled terminally.
 - **Replay.** A replay offers the admission again only for items recorded as `admitted` or `present`. Nothing is offered for an item merely because its receipt entry is not a conflict.
 - **Refused items.** They write no fact and no claim.
+- **Payload retention.** The proof payload and the stored request id stay until the item's receipt is finally settled. That includes the Diary `link_interrupted` state and an abandon (decision 4): an abandoned proof writes nothing new, but its outstanding receipt is still reconciled and never left pending.
 
 ### 4. Each writer persists its exact proof payload before its first effect
 
@@ -158,7 +185,18 @@ A source change after persistence does not change the payload: it is admitted as
 - **F1 is the dormant implementation (one card, one code PR).** Its merge auto-deploys, which is safe only because everything new is behind mode `d1`. It contains:
   - the marker migration file and its writers' marker checks;
   - decisions 2-6 behind mode `d1`, including the G3 retirement, which is therefore not a separate card;
-  - the legacy byte-identity tests at `r2`, the refusal tests at `closed`, and regression tests for G1, G4, every row of decision 3's table, lost responses, payload persistence and eviction, abandon rules, historical replay (an old R2 `verifiedAt` versus the intent's `openedAt`, another archive, another code, an existing row and receipt digest) and the inventory proof rule;
+  - the legacy byte-identity tests at `r2` and the refusal tests at `closed`;
+  - the marker invariant tests:
+    - a request paused between its guard and its PUT;
+    - a request that read "migration absent" and is paused across the migration apply and the close, then refused at its write;
+    - an unreadable marker, a partial schema and a missing row (all refuse);
+    - every illegal transition (refused by the trigger);
+    - the legacy D1 batch refused under `closed` while retention still runs;
+  - regression tests for G1, G4 and every row of decision 3's table;
+  - receipt tests: lost responses, a lost response followed by a merge or redirect, a same-pair row won by another request, and a retry after a terminal writer-state change (candidate removed, link moved);
+  - payload persistence, eviction and abandon rules;
+  - historical replay: an old R2 `verifiedAt` versus the intent's `openedAt`, another archive, another code, an existing row and receipt digest;
+  - the inventory proof rule;
   - source comments, maintained docs and diagrams.
 
   Applying the migration is part of F2, not F1.
@@ -218,8 +256,10 @@ No step is authorized by this record. Each production step keeps its own gate.
 ## Evidence
 
 - The audit ledger: [`air-555-verified-films-admission-audit-2026-11-24.md`](../evidence/d1-migration/air-555-verified-films-admission-audit-2026-11-24.md). It resolves once #972 has merged. It contains the call-path inventory, the field and transition ownership, the per-writer outcome table, G1-G4 and the runnable G1 fixture.
-- The review of the audit: [PR #972 review](https://github.com/vladimino/iptv-watchlist/pull/972#pullrequestreview-6037101145).
-- The design review of this record: [PR #975 review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6037101145). Its P1 findings are what decisions 1 and 3 resolve.
+- The review of the audit: [PR #972 review](https://github.com/vladimino/iptv-watchlist/pull/972#pullrequestreview-6036874290).
+- The design reviews of this record:
+  - [first review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6037101145), whose findings decisions 1 and 3 resolve;
+  - [second review](https://github.com/vladimino/iptv-watchlist/pull/975#pullrequestreview-6037183852), which added the ADR 0196 invariants and the request identity and receipt settlement.
 
 ## Follow-ups
 
