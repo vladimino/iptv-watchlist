@@ -2087,7 +2087,7 @@ function discoveryAdmission(pause,published){
 // Pure. What the evidence of `readDiscoveryEvidence` (or the same fields from a caller's own consistent read) says about the queue of the published generation.
 // `state`:
 // - `empty`: proven by `discoveryQueueProof` (`reason` `complete` or `drained`); `owed` false.
-// - `running`: a live Discovery writer holds the lease (or the lease was not read: `lease_unread`).
+// - `running`: a live Discovery writer holds the lease (a lease that could not be read is `unknown` / `lease_unread`, never a writer).
 // - `backlog`: work is owed (a chunk budget, or a non-zero part of the reading of this generation) and admission is confirmed; `eligible` says whether the policy
 //   allows progress now (a future gate or backoff waits; a `chunk_budget` with a known remaining count is renewed by the Workflow at once).
 // - `paused`: the EPG-priority pause (ADR 0135) holds new admission and the queue is not proven empty (`awaiting_certificate` while the published run is not yet
@@ -2113,7 +2113,7 @@ function discoveryQueueState(evidence,now=Date.now()){
  const pause=pauseIn?{present:typeof pauseIn.present==='boolean'?pauseIn.present:null,paused:typeof pauseIn.paused==='boolean'?pauseIn.paused:null,reason:typeof pauseIn.reason==='string'?pauseIn.reason:null,detail:typeof pauseIn.detail==='string'?pauseIn.detail:null,unreadable:pauseIn.unreadable===true,nextCatchUpAt:discoveryQueueTime(pauseIn.nextCatchUpAt),publishedProgrammeRunId:typeof pauseIn.publishedProgrammeRunId==='string'?pauseIn.publishedProgrammeRunId:null}:null;
  const admission=discoveryAdmission(pause,published);
  const gateAt=same?discoveryQueueTime(c.retryAt)||discoveryQueueTime(c.nextCatchUpAt):null;
- const base={schemaVersion:1,state:'unknown',reason:null,owed:null,eligible:null,proof:null,provenAt:null,allowedAt:null,admission,programmeRunId:published,
+ const base={schemaVersion:1,state:'unknown',reason:null,owed:null,eligible:null,proof:null,provenAt:null,allowedAt:null,admission,diagnosis:null,programmeRunId:published,
   continuationProgrammeRunId:c&&typeof c.programmeRunId==='string'?c.programmeRunId:null,hopId:same&&typeof c.hopId==='string'&&c.hopId?c.hopId:null,
   stage:c&&typeof c.stage==='string'?c.stage:null,continuationReason:c&&typeof c.reason==='string'?c.reason:null,
   remainingChunks:same?discoveryQueueCount(c.remainingChunks):null,remaining:reading?.remaining??null,cheapRemaining:reading?.cheapRemaining??null,deferred:reading?.deferred??null,waitingRetry:reading?.waitingRetry??null,
@@ -2127,10 +2127,19 @@ function discoveryQueueState(evidence,now=Date.now()){
  if(!same)return out('unknown','generation_mismatch');
  if(c.reason==='programme_changed')return out('unknown','generation_handoff');
  const leaseUnread=unavailable.includes('lease')||records.lease===undefined;
+ const pauseReason=pause?.detail==='awaiting_complete'?'awaiting_certificate':'epg_priority';
+ // Every path that needs a NEW Discovery writer (resuming an orphaned `running` record, retrying a recorded error, running owed work) is admitted only under a
+ // confirmed admission: a held pause waits (`paused`), an unreadable gate or a gate read of another generation proves nothing (`unknown`). The underlying
+ // diagnosis is kept in `diagnosis`; nothing claims allowed progress during a refusal.
+ const refused=(owedValue,diagnosis)=>admission==='paused'?out('paused',pauseReason,{owed:owedValue,eligible:false,allowedAt:null,diagnosis})
+  :admission==='unreadable'?out('unknown','admission_unreadable',{owed:owedValue,eligible:null,allowedAt:null,diagnosis})
+  :admission==='moved'?out('unknown','gate_generation_moved',{owed:owedValue,eligible:null,allowedAt:null,diagnosis}):null;
+ // A lease that could not be read is uncertainty, never a writer and never progress.
  if(c.stage==='running'){
-  if(leaseUnread)return out('running','lease_unread',{owed:true,eligible:false});
-  if(discoveryLeaseLive(records.lease,now))return out('running','live_lease',{owed:true,eligible:false});
-  return out('backlog','orphaned',{owed:true,eligible:true,allowedAt:null});
+  if(leaseUnread)return out('unknown','lease_unread',{owed:true,eligible:null,diagnosis:{state:'running',reason:'lease_unread'}});
+  if(discoveryWriterLive(records.lease,now))return out('running','live_lease',{owed:true,eligible:false});
+  // No Discovery writer holds the lease (none, expired, or the EPG publication's): the record is an orphan whose resumption needs admission.
+  return refused(true,{state:'backlog',reason:'orphaned'})||out('backlog','orphaned',{owed:true,eligible:true,allowedAt:null});
  }
  const proof=discoveryQueueProof({programmeRunId:published,continuation:c,workflow,status:records.status,lease:leaseUnread?null:records.lease,now});
  if(proof.empty&&!leaseUnread)return out('empty',proof.proof,{owed:false,eligible:false,proof:proof.proof,provenAt:reading?.finishedAt??null});
@@ -2138,27 +2147,27 @@ function discoveryQueueState(evidence,now=Date.now()){
  const owed=base.remainingChunks>0||parts.some(value=>value>0);
  const known=owed?true:null;
  // A live Discovery writer (a hop between its admission and its `running` checkpoint) is work in progress; a proof is never taken while one holds the lease.
- if(leaseUnread)return out('running','lease_unread',{owed:known,eligible:false});
+ if(leaseUnread)return out('unknown','lease_unread',{owed:known,eligible:null});
  if(discoveryWriterLive(records.lease,now))return out('running','live_lease',{owed:known,eligible:false});
  if(discoveryQuarantined(workflow))return out('blocked','quarantined',{owed:known,eligible:false});
  if(c.reason==='interrupted')return out('blocked','interrupted',{owed:known,eligible:false});
  if(c.reason==='missing_secret')return out('blocked','missing_secret',{owed:known,eligible:false});
  const gateMs=gateAt?Date.parse(gateAt):null,gated=gateMs!==null&&gateMs>now;
- if(c.stage==='error')return out('failed',typeof c.reason==='string'&&c.reason?c.reason:'error',{owed:true,eligible:!gated,allowedAt:gateAt});
+ if(c.stage==='error'){
+  const failure=typeof c.reason==='string'&&c.reason?c.reason:'error';
+  return refused(true,{state:'failed',reason:failure})||out('failed',failure,{owed:true,eligible:!gated,allowedAt:gateAt});
+ }
  if(c.reason==='idle')return out('unknown','awaiting_epg_discovery');
- const pauseReason=pause?.detail==='awaiting_complete'?'awaiting_certificate':'epg_priority';
  if(owed){
-  // Owed work is eligible only under a confirmed admission: a held pause waits, an unreadable gate or a gate read of another generation proves nothing.
-  if(admission==='paused')return out('paused',pauseReason,{owed:true,eligible:false,allowedAt:null});
-  if(admission==='unreadable')return out('unknown','admission_unreadable',{owed:true,eligible:null});
-  if(admission==='moved')return out('unknown','gate_generation_moved',{owed:true,eligible:null});
+  const refusal=refused(true,null);
+  if(refusal)return refusal;
   const renewed=c.reason==='chunk_budget'&&reading?.remaining>0;
   const reason=c.reason==='backoff'||c.retryAt?'backoff':c.reason==='chunk_budget'?'chunk_budget':'pending';
   const eligible=renewed||!gated;
   // `allowedAt`: a passed gate, the checkpoint when a known budget is renewed at once under a future gate, no time without a gate, the future gate while it waits.
   return out('backlog',reason,{owed:true,eligible,allowedAt:eligible?(gateAt?(gated?base.checkpointAt:gateAt):null):gateAt});
  }
- if(admission==='paused')return out('paused',pauseReason,{owed:null,eligible:false});
+ if(admission==='paused')return out('paused',pauseReason,{owed:null,eligible:false,allowedAt:null});
  if(!reading)return out('unknown',records.status&&records.status.programmeRunId!==published?'status_foreign':'no_status');
  if(parts.some(value=>value===null))return out('unknown','partial_counts');
  return out('unknown','drain_unconfirmed');

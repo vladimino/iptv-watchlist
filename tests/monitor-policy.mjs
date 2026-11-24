@@ -104,6 +104,15 @@ const keys=result=>result.issues.map(item=>item.key);
   const recovered=ev(queue,{},{open});
   assert.deepEqual(keys(recovered),[],label);assert.equal(recovered.facts.recovery,reason,label);assert.equal(P.discoveryRecovery(recovered.facts).reason,reason,label);
  }
+ // Re-review: owed work without any usable time of this generation is unconfirmed, never healthy and never a recovery `within_policy`.
+ const untimed=q({allowedAt:null,checkpointAt:null,lastChunkAt:null});
+ const untimedFresh=ev(untimed);
+ assert.deepEqual([untimedFresh.state,untimedFresh.issues.length,untimedFresh.issues[0]?.key],['delayed',0,undefined]);assert.equal(untimedFresh.facts.unknownSince,at(now));
+ const untimedHeld=ev(untimed,{},{open});
+ assert.deepEqual(keys(untimedHeld),['discovery_stalled']);assert.equal(untimedHeld.issues[0].metrics.held,'queue_unconfirmed');assert.equal(untimedHeld.facts.recovery,null);
+ assert.deepEqual(keys(ev(untimed,{},{unknownSince:at(now-3*H)})),['discovery_unconfirmed'],'bounded by its own clock');
+ const unreadLease=ev({state:'unknown',reason:'lease_unread',owed:true,eligible:null,checkpointAt:at(now-10*MIN),lastChunkAt:at(now-10*MIN)},{},{open});
+ assert.deepEqual(keys(unreadLease),['discovery_stalled'],'an unread lease is no progress: the incident is held');assert.equal(unreadLease.facts.recovery,null);
  assert.deepEqual(P.discoveryRecovery({recovery:'queue_empty',queueReason:'drained'}),{reason:'queue_empty',message:'Recovered: the Discovery queue is proven empty (drained); this is not new progress'});
  assert.ok(keys(ev(q(),{continuation:null,resourceLimit:true})).includes('discovery_resource_limit'));
  assert.deepEqual(keys(P.evaluateDiscovery({error:true},now)),['discovery_unreadable']);

@@ -119,11 +119,14 @@ export function evaluateDiscovery(facts, now, previous = null) {
   const record = facts.continuation || null;
   const queue = facts.queue && typeof facts.queue === 'object' ? facts.queue : {state: 'unknown', reason: 'not_classified'};
   const quiet = queue.state === 'empty' || queue.state === 'paused';
-  const backlog = !quiet && DISCOVERY_OWED.has(queue.state);
-  const unconfirmed = !quiet && !backlog;
-  const queueMetrics = {queueState: queue.state ?? null, queueReason: queue.reason ?? null};
-  let state = queue.state === 'paused' ? 'waiting' : 'healthy', stall = null, unknownSince = null;
   const lastChunk = time(queue.lastChunkAt), checkpoint = time(queue.checkpointAt);
+  // Owed work is judged by its time rule only when some usable time of this generation exists; without any (no allowed time, no checkpoint, no finished chunk)
+  // it is as unconfirmed as an unknown state: absent timing is never taken as progress within the rule.
+  const timed = time(queue.allowedAt) !== null || lastChunk !== null || checkpoint !== null;
+  const backlog = !quiet && DISCOVERY_OWED.has(queue.state) && timed;
+  const unconfirmed = !quiet && !backlog;
+  const queueMetrics = {queueState: queue.state ?? null, queueReason: queue.reason ?? null, ...(DISCOVERY_OWED.has(queue.state) && !timed ? {timing: 'unknown'} : {})};
+  let state = queue.state === 'paused' ? 'waiting' : 'healthy', stall = null, unknownSince = null;
   if (backlog) {
     const allowedAt = time(queue.allowedAt) ?? 0;
     const lastProgress = Math.max(lastChunk ?? 0, checkpoint ?? 0);
@@ -155,7 +158,8 @@ export function evaluateDiscovery(facts, now, previous = null) {
   if (state === 'degraded' && facts.publishedRunId && record?.programmeRunId && facts.publishedRunId !== record.programmeRunId) issues.push(issue('discovery_generation_mismatch', 'degraded', 'discovery', 'The continuation belongs to another generation than the published one'));
   if (facts.resourceLimit) issues.push(issue('discovery_resource_limit', 'degraded', 'discovery', 'Discovery recorded a Worker resource limit'));
   const stillOpen = open && issues.some(item => item.key === open.key);
-  const recovery = open && !stillOpen ? (queue.state === 'empty' ? 'queue_empty' : queue.state === 'paused' ? 'epg_priority' : 'within_policy') : null;
+  // Only a confirmed disposition ends an open incident: a proven empty queue, the pause, or owed work measured with real times inside the rule.
+  const recovery = open && !stillOpen ? (queue.state === 'empty' ? 'queue_empty' : queue.state === 'paused' ? 'epg_priority' : backlog ? 'within_policy' : null) : null;
   const all = worst(issues);
   return {stream: 'discovery', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {executor: facts.executor ?? null, backlog, remainingChunks: queue.remainingChunks ?? null, queueState: queue.state ?? null, queueReason: queue.reason ?? null, unknownSince: unknownSince === null ? null : iso(unknownSince), recovery}};
 }

@@ -184,6 +184,18 @@ for(const scenario of SCENARIOS){
   assert.equal(footerRow.queueReason,reason,label+': footer');assert.notEqual(footerRow.state,'healthy',label+': footer');
   assert.equal(W.call('discoveryAdmission')(await W.call('readDiscoveryGatePause')(env,T0),G1),reason==='gate_generation_moved'?'moved':'unreadable',label+': the gate read the detailed status uses');
  }
+ // An orphaned running record and a recorded error under a refused gate: no consumer claims allowed progress.
+ for(const [label,continuation] of [['orphan',{...records.continuation,stage:'running',reason:null,remainingChunks:4,at:at(T0-H)}],['error',{...records.continuation,stage:'error',reason:'tmdb_unavailable',remainingChunks:12,nextCatchUpAt:at(T0-10*MIN)}]]){
+  current=snapshot({records:{...snapshot().records,continuation}});
+  for(const [kind,gate] of [['unreadable',async()=>({publishedProgrammeRunId:G1,priority:{present:true,paused:null,reason:'unknown',nextCatchUpAt:null}})],['paused',async()=>({publishedProgrammeRunId:G1,priority:{present:true,paused:true,reason:'epg_priority',nextCatchUpAt:at(T0+MIN)}})]]){
+   W.ctx.DiscoveryAuthority.readDiscoveryGates=gate;
+   const read=await response('/api/enrichment/pipeline/status?view=operational');
+   assert.equal(read.executor.eligible,false,label+' '+kind+': operational');assert.ok(['unknown','paused'].includes(read.queue.state),label+' '+kind);
+   const row=(await response('/api/enrichment/footer/status')).integrations.sources.find(item=>item.id==='resolver');
+   assert.ok(!['running','healthy'].includes(row.state),label+' '+kind+': footer '+row.state);
+  }
+ }
+ current=owedSnapshot;
  delete W.ctx.DiscoveryAuthority.readDiscoveryGates;
  assert.equal((await classify()).reason,'admission_unreadable','a D1 reader without the gate read is not a clear gate');
  W.ctx.DiscoveryAuthority.readDiscoveryGates=async()=>({publishedProgrammeRunId:G1,priority:{present:false,paused:false,reason:'inert',nextCatchUpAt:null}});
@@ -249,7 +261,25 @@ for(const scenario of SCENARIOS){
  assert.equal(state(evidence({...base,continuation:{...base.continuation,stage:'complete',reason:null}}),T0).proof,'complete','a complete continuation with a zero reading of its generation');
  assert.equal(state(evidence({...base,continuation:{...base.continuation,stage:'complete',reason:null},status:{...base.status,remaining:null}}),T0).state,'unknown','a complete continuation without a zero reading is unconfirmed');
  assert.equal(state(evidence({...base,continuation:{...base.continuation,stage:'running'},lease:undefined}),T0).reason,'lease_unread','a running record whose lease was not read');
- assert.equal(state(evidence({...base,lease:undefined}),T0).state,'running','no proof is taken while the lease could not be read');
+ assert.deepEqual([state(evidence({...base,lease:undefined}),T0).state,state(evidence({...base,lease:undefined}),T0).reason],['unknown','lease_unread'],'no proof is taken while the lease could not be read, and an unread lease is no writer');
+ assert.deepEqual([state(evidence({...base,continuation:{...base.continuation,stage:'running'},lease:undefined}),T0).state,state(evidence({...base,continuation:{...base.continuation,stage:'running'},lease:undefined}),T0).eligible],['unknown',null]);
+ // Re-review: every path that needs a NEW Discovery writer goes through admission, an orphaned `running` record and a recorded error included; the EPG
+ // publication's lease is no Discovery writer. The underlying diagnosis is kept; nothing is eligible during a refusal.
+ const gate=(kind)=>({none:null,clear:{present:true,paused:false,reason:'clear',publishedProgrammeRunId:G1},paused:{present:true,paused:true,reason:'epg_priority',publishedProgrammeRunId:G1},
+  unreadable:{present:true,paused:null,reason:'unknown',publishedProgrammeRunId:G1},moved:{present:true,paused:false,reason:'clear',publishedProgrammeRunId:G2}})[kind];
+ const orphan={...base,continuation:{...base.continuation,stage:'running',remainingChunks:4,at:at(T0-H)},lease:null};
+ const epgHeld={...orphan,lease:{id:'epg-pub',expiresAt:T0+60000,holderKind:'epg'}};
+ const failing={...base,continuation:{...base.continuation,stage:'error',reason:'tmdb_unavailable',remainingChunks:12,nextCatchUpAt:at(T0-10*MIN)}};
+ const expected={none:null,clear:null,paused:['paused','epg_priority',false],unreadable:['unknown','admission_unreadable',null],moved:['unknown','gate_generation_moved',null]};
+ for(const [label,records,plainState] of [['orphaned running record',orphan,['backlog','orphaned',true]],['running record under the EPG lease',epgHeld,['backlog','orphaned',true]],['recorded error, retry due',failing,['failed','tmdb_unavailable',true]]]){
+  for(const kind of ['none','clear','paused','unreadable','moved']){
+   const got=state(evidence(records,{pause:gate(kind)}),T0);
+   assert.deepEqual([got.state,got.reason,got.eligible],expected[kind]||plainState,label+' under '+kind);
+   if(expected[kind])assert.deepEqual(plain(got.diagnosis),{state:plainState[0],reason:plainState[1]},label+' under '+kind+': the diagnosis is kept');
+   if(expected[kind])assert.equal(got.allowedAt,null,label+' under '+kind+': no allowed time during a refusal');
+  }
+ }
+ assert.deepEqual([state(evidence({...orphan,lease:{id:'hop-live',expiresAt:T0+60000,holderKind:'discovery'}}),T0).state],['running'],'a live Discovery writer is running');
  assert.equal(state(evidence({...base,continuation:{...base.continuation,stage:'running'},lease:{id:'x',expiresAt:T0-1}}),T0).reason,'orphaned');
  assert.equal(state(evidence({...base,lease:{id:'x',expiresAt:T0+1000,holderKind:'epg'}}),T0).state,'empty','the EPG publication\'s lease does not contradict the proof');
  assert.equal(state(evidence({...base,lease:{id:'x',expiresAt:T0+1000}}),T0).state,'running','a live lease of an unknown holder is a Discovery writer, never ignored');
@@ -292,6 +322,23 @@ for(const scenario of SCENARIOS){
  arrange({records:()=>({status:{...drained.status,finishedAt:at(T0+7*H)},continuation:{...drained.continuation,at:at(T0+7*H)},workflow:{...drained.workflow,updatedAt:at(T0+7*H)}})});
  clock.now=T0+7*H;await W.M.run(env,{now:clock.now});clock.now=T0+8*H;await W.M.run(env,{now:clock.now});
  const recovered=discoveryPosts().filter(item=>item.kind==='recovery');assert.equal(recovered.length,1);assert.match(recovered[0].message,/proven empty/);
+ // Re-review: an unread lease and owed work without any usable time are uncertainty, never progress within the rule: a sent incident is held through several
+ // such ticks and recovers only on a confirmed disposition.
+ W.posts.length=0;put('monitor/state.json',undefined);clock.now=T0;arrange({records:stalledRecords});
+ await W.M.run(env,{now:T0});await W.M.run(env,{now:T0+H});
+ assert.equal(discoveryPosts().filter(item=>item.key==='discovery_stalled'&&item.kind==='alert').length,1);
+ const leaseDown=bucket.get;bucket.get=async(key,...rest)=>{if(key==='epg/resolver-lease.json')throw new Error('r2 down');return leaseDown(key,...rest);};
+ for(let tick=2;tick<=3;tick++){clock.now=T0+tick*H;await W.M.run(env,{now:clock.now});
+  assert.deepEqual([stream().facts.queueReason,stream().issues.map(item=>item.key)],['lease_unread',['discovery_stalled']],'tick '+tick+': an unread lease holds the incident');}
+ bucket.get=leaseDown;
+ arrange({records:base=>({continuation:{...base.continuation,reason:null,remainingChunks:5,at:undefined,nextCatchUpAt:null},status:{...base.status,remaining:40,finishedAt:undefined,legacyPending:false},workflow:{...base.workflow,reason:'no_progress'}})});
+ for(let tick=4;tick<=5;tick++){clock.now=T0+tick*H;await W.M.run(env,{now:clock.now});
+  assert.deepEqual([stream().facts.queueState,stream().issues.map(item=>item.key)],['backlog',['discovery_stalled']],'tick '+tick+': owed work without any time holds the incident');
+  assert.equal(stream().facts.recovery,null);}
+ assert.equal(discoveryPosts().filter(item=>item.kind==='recovery').length,0,'no recovery from an unread lease or absent timing');
+ arrange({records:base=>({continuation:{...base.continuation,reason:null,remainingChunks:5,at:at(T0+6*H-5*MIN),nextCatchUpAt:null},status:{...base.status,remaining:30,finishedAt:at(T0+6*H-5*MIN),legacyPending:false},workflow:{...base.workflow,reason:'no_progress'}})});
+ clock.now=T0+6*H;await W.M.run(env,{now:clock.now});clock.now=T0+6*H+MIN;await W.M.run(env,{now:clock.now});
+ const supported=discoveryPosts().filter(item=>item.kind==='recovery');assert.equal(supported.length,1,'then one recovery on measured progress');assert.match(supported[0].message,/within the rule/);
  // Repeated unknown snapshots without an open incident: delayed, then discovery_unconfirmed once the state's own clock reaches 3 hours.
  W.posts.length=0;put('monitor/state.json',undefined);arrange({records:base=>({status:{...base.status,hopId:'another-hop'}})});
  const states=[];for(let tick=0;tick<=4;tick++){clock.now=T0+tick*H;await W.M.run(env,{now:clock.now});states.push(stream().state);}
